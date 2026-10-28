@@ -16,7 +16,7 @@ func TestMixedAddressSimulatorReportsTheRefusal9524(t *testing.T) {
 		return `security { address-book { global { ` + book + ` } } zones { security-zone trust; security-zone untrust; } policies { default-policy { permit-all; } from-zone trust to-zone untrust { policy d1 { match { source-address mixed; destination-address any; application any; } then { deny; } } } } }`
 	}
 	q := func(src string) Query {
-		return Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP(src), DstIP: net.ParseIP("10.0.2.5"), Protocol: "tcp", SrcPort: 40000, DstPort: 80}
+		return Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP(src), DstIP: net.ParseIP("10.0.2.5"), Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(80)}
 	}
 	mixed := lenientHier9571(t, text(`address mixed { 10.10.0.0/24; range-address 192.0.2.1 { to { 192.0.2.9; } } }`))
 	if res := Match(mixed, q("192.0.2.5")); !res.ContentRejected || res.Matched {

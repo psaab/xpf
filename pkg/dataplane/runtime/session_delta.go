@@ -25,8 +25,8 @@ type SessionIdentity struct {
 	DstPort       uint16
 	IngressZone   string
 	EgressZone    string
-	IngressZoneID uint16
-	EgressZoneID  uint16
+	IngressZoneID uint32
+	EgressZoneID  uint32
 }
 
 type SessionState struct {

@@ -118,12 +118,14 @@ func deletedPolicyRuntimeIDs(oldCfg, newCfg *config.Config) map[uint32]struct{} 
 //     Unbound prepublish rows are excluded because their positional scalar has
 //     no stable identity for safe matching.
 //
-// The clear reuses the same companion-aware delete the GC and cluster-stale
-// reconcile use (SessionStore.DeleteBatchKnownV4/V6 removes the forward entry,
+// The clear reuses the same companion-aware delete the cluster-stale
+// reconcile uses (SessionStore.DeleteBatchKnownV4/V6 removes the forward entry,
 // its reverse companion, and any dynamic DNAT/NAT64 companion), and propagates
-// each deletion to the HA peer through the identical delete-sync channel the GC
-// delete callback uses (#2468 QueueDeleteV4/V6) — so a session dropped on the
-// owner is dropped on the standby too and cannot resurrect on failover.
+// each deletion to the HA peer through the same #2468 delete-sync channel the
+// helper session-delta close path uses (daemon_ha_userspace_stream.go: scoped
+// QueueDeleteScopedV4/V6 when the close carries a domain + RT_FLOW id, else
+// QueueDeleteV4/V6) — so a session dropped on the owner is dropped on the
+// standby too and cannot resurrect on failover.
 //
 // Handles both zone-pair and global (junos-global) policies uniformly: the
 // stable key already encodes each policy's scope, so a deleted policy in either
@@ -564,9 +566,11 @@ func (d *Daemon) clearSessionsForPolicyIDs(ids map[uint32]struct{}, reason datap
 //
 // The delete reuses the companion-aware DeleteBatchKnownExactV4/V6 (forward
 // entry + reverse companion + any dynamic DNAT/NAT64 companion) and propagates
-// deletion to the HA peer through the same #2468 delete-sync channel the GC
-// delete callback uses, so a session dropped on the owner is dropped on the
-// standby too and cannot resurrect on failover.
+// deletion to the HA peer through the same #2468 delete-sync channel the
+// helper session-delta close path uses (scoped QueueDeleteScopedV4/V6 on the
+// helper-matched path below, QueueDeleteV4/V6 on the store path), so a session
+// dropped on the owner is dropped on the standby too and cannot resurrect on
+// failover.
 //
 // Returns a non-nil error when a batch delete failed — MATCHED sessions stay
 // INSTALLED, which is the #5578 stale-authorization gap the caller must surface
@@ -586,10 +590,11 @@ func (d *Daemon) deleteInvalidatedSessionsBucket(c *capturedSessions, reason dat
 	if rt == nil {
 		return nil
 	}
-	// Whether to propagate the local deletes to the HA peer. Mirrors the GC
-	// delete callback (daemon_run.go): only a node that is primary for some RG
-	// owns the authoritative session and syncs its deletes; the peer ignores
-	// deletes for sessions it does not hold.
+	// Whether to propagate the local deletes to the HA peer. Mirrors the
+	// helper session-delta delete gate (daemon_ha_userspace_stream.go /
+	// daemon_run.go's sessionSync wiring): only a node that is primary for
+	// some RG owns the authoritative session and syncs its deletes; the peer
+	// ignores deletes for sessions it does not hold.
 	ss := d.getSessionSync()
 	syncPeer := d.cluster != nil && d.cluster.IsLocalPrimaryAny() && ss != nil
 	if invalidator, ok := rt.(interface {

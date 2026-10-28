@@ -62,7 +62,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 			FromZone:         "trust",
 			ToZone:           "untrust",
 			Protocol:         "tcp",
-			DstPort:          80,
+			DstPort:          PortPtr(80),
 			PolicyInactiveFn: inactiveFnFor(map[string]bool{"after-hours": false}),
 		}
 		res := Match(cfg, q)
@@ -97,7 +97,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 			FromZone:         "trust",
 			ToZone:           "untrust",
 			Protocol:         "tcp",
-			DstPort:          80,
+			DstPort:          PortPtr(80),
 			PolicyInactiveFn: inactiveFnFor(map[string]bool{"business-hours": false}),
 		}
 		res := Match(cfg, q)
@@ -123,7 +123,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 				FromZone:         "trust",
 				ToZone:           "untrust",
 				Protocol:         "tcp",
-				DstPort:          443,
+				DstPort:          PortPtr(443),
 				PolicyInactiveFn: inactiveFnFor(map[string]bool{"maint": active}),
 			}
 		}
@@ -149,7 +149,7 @@ func TestSchedulerInactiveSkipsLikeRuntime(t *testing.T) {
 					permit("plain-allow", config.PolicyMatch{Applications: []string{"any"}})),
 			},
 		}, config.ApplicationsConfig{}), "after-hours", "business-hours", "maint")
-		q := Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80}
+		q := Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)}
 
 		// No PolicyInactiveFn (offline surface / pre-#3104 behavior).
 		baseline := Match(cfg, q)
@@ -207,7 +207,7 @@ func TestSchedulerUnavailableStateFailsClosed(t *testing.T) {
 		FromZone:         "trust",
 		ToZone:           "untrust",
 		Protocol:         "tcp",
-		DstPort:          80,
+		DstPort:          PortPtr(80),
 		PolicyInactiveFn: inactiveFnFor(nil),
 	}
 	res := Match(cfg, q)

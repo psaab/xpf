@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1957,13 +1958,11 @@ func syslogArchiveKnobs(n *Node) []string {
 // loginClassAdvisoryWarnings emits one accept-with-advisory warning per custom
 // `system login class <name>` (#4304 S-2). The class is RECOGNIZED (a valid
 // vSRX RBAC config commits instead of being hard-rejected), but xpf's coarse
-// permission model cannot faithfully represent every Junos permission or the
-// per-command ADDITIVE regexes (allow-commands / allow-configuration), so the
-// advisory states exactly what maps and what is recognized-but-not-enforced.
-// It says nothing about the RESTRICTIVE regexes: #5831 moved deny-commands /
-// deny-configuration out of advisory territory entirely — strict rejects the
-// commit, and the tolerant path folds the class and emits its own warning
-// (compiler_login_deny.go). Deterministic order for stable output.
+// permission model cannot faithfully represent every Junos permission, so the
+// advisory states exactly what maps. It says nothing about the regex leaves:
+// #7172 enforces allow-*/deny-* as allowlists/blacklists on both dispatch
+// surfaces (compiler_login_deny.go), and #7172 cut 6 retired the former #5831
+// reject-and-fold gate. Deterministic order for stable output.
 func loginClassAdvisoryWarnings(cfg *Config) []string {
 	if cfg == nil || cfg.System.Login == nil || len(cfg.System.Login.Classes) == 0 {
 		return nil
@@ -1982,11 +1981,10 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		}
 		_, widened := mapJunosPermissions(lc.Permissions)
 		// Report the EFFECTIVE set (lc.MappedPermissions), not a fresh
-		// mapJunosPermissions call (#5831). The two are identical for every
-		// class the tolerant #5831 fold did not touch, so this changes no
-		// existing output; for a folded class the fresh call would report the
-		// pre-fold buckets and tell the operator the class still holds
-		// permissions it no longer has.
+		// mapJunosPermissions call (#5831). Since #7172 cut 6 retired the
+		// fold, MappedPermissions is exactly the authored mapping on every
+		// path; reporting the effective set keeps this advisory truthful if
+		// a future transform ever adjusts it.
 		names := make([]string, 0, len(lc.MappedPermissions))
 		for _, p := range lc.MappedPermissions {
 			names = append(names, p.String())
@@ -2041,27 +2039,17 @@ func loginClassAdvisoryWarnings(cfg *Config) []string {
 		if len(inert) > 0 {
 			msg += fmt.Sprintf("; %s accepted but NOT enforced by xpf's coarse RBAC", strings.Join(inert, "/"))
 		}
-		// SECURITY: deny-commands / deny-configuration are BLACKLISTS, and the
-		// #4304 "accepted but MORE PERMISSIVE" advisory that used to be
-		// appended here is GONE (#5831) rather than reworded. Two reasons it
-		// could not stay:
-		//
-		//  1. It is no longer reachable on the strict path at all —
-		//     validateLoginClassDenyStrict rejects the commit outright.
-		//  2. On the tolerant path it would now be misleading. That path folds
-		//     the class to the repair floor before this runs, dropping every
-		//     operational-verb bucket, so the class is MORE restrictive than
-		//     the Junos config on the half deny-commands targets; repeating
-		//     the old text would tell the operator the opposite of what
-		//     happened. (Configuration is the one half where the restriction
-		//     genuinely does not bind — the fold keeps `configure` so the
-		//     statement can be deleted — and the fold's own warning says so
-		//     precisely, which a blanket "MORE PERMISSIVE" cannot.)
-		//
-		// foldLoginClassDenyToRepairableFloor emits the accurate per-class
-		// warning on that path, so this advisory stays out of the
-		// restrictive-regex business entirely and describes only the
-		// permission mapping.
+		// SECURITY (history): deny-commands / deny-configuration are
+		// BLACKLISTS, and the #4304 "accepted but MORE PERMISSIVE" advisory
+		// that used to be appended here is GONE (#5831) rather than reworded.
+		// Between #5831/#6838 and #7172 the strict path hard-rejected such a
+		// class and the tolerant path folded it to a repair floor, because
+		// the regexes were unenforced; #7172 implemented enforcement and
+		// cut 6 retired both the rejection and the fold. The regexes are
+		// now enforced on both dispatch surfaces, so this advisory stays
+		// out of the regex business entirely and describes only the
+		// permission mapping; the per-surface deny advisory below covers
+		// whether a deny pattern can ever fire.
 		warnings = append(warnings, msg)
 		// #8189: and, as a SEPARATE advisory, whether the class's deny pattern
 		// can ever fire on a registered dispatch surface. Separate rather than
@@ -2263,9 +2251,6 @@ func readSharedUMEMPhase0ArtifactForAudit(path string) (map[string]interface{}, 
 	if artifact == nil {
 		return nil, fmt.Errorf("decode shared-umem artifact %s: top-level value must be a JSON object", path)
 	}
-	if err := normalizeSharedUMEMArtifactInterfaces(artifact); err != nil {
-		return nil, fmt.Errorf("decode shared-umem artifact %s: %w", path, err)
-	}
 	return artifact, nil
 }
 
@@ -2279,12 +2264,291 @@ func readSharedUMEMPhase0ArtifactForAudit(path string) (map[string]interface{}, 
 //
 //   - unavailable / unreadable / non-regular / oversized / malformed -> one
 //     commit WARNING (visible but non-blocking); the commit still succeeds.
-//   - a machine-readable artifact whose "passed" field is explicitly false ->
-//     a WARNING surfacing that recorded result.
+//   - a machine-readable artifact that did not pass (no explicit
+//     `passed == true` / pass status, #17134 unified predicate), or whose
+//     recorded environment (kernel/PCI/driver/MTU/queue topology) no
+//     longer matches this host -> a WARNING surfacing the mismatch.
 //
 // Because it only appends to cfg.Warnings (a host-local diagnostic) and never
 // touches cfg.System.UserspaceDataplane.SharedUMEM, the same committed tree
 // still compiles to the identical typed config on a peer / after restart.
+
+// sharedUMEMLiveEnv is the live environment the Phase 0 audit compares
+// the artifact against (#17134). Seamed so tests can inject a synthetic
+// environment instead of reading the test host's sysfs/proc.
+type sharedUMEMLiveEnv struct {
+	kernelRelease string
+	pciIDs        map[string]struct{} // live PCI ids, keyed by interface
+	drivers       map[string]string   // per-interface driver name
+	mtus          map[string]int      // per-interface MTU
+	rxQueues      map[string]int      // per-interface RX queue count
+}
+
+var sharedUMEMLiveEnvFn = readSharedUMEMLiveEnv
+
+func readSharedUMEMLiveEnv(interfaces []string) (*sharedUMEMLiveEnv, error) {
+	kernel, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return nil, fmt.Errorf("read kernel release: %w", err)
+	}
+	env := &sharedUMEMLiveEnv{
+		kernelRelease: strings.TrimSpace(string(kernel)),
+		pciIDs:        map[string]struct{}{},
+		drivers:       map[string]string{},
+		mtus:          map[string]int{},
+		rxQueues:      map[string]int{},
+	}
+	for _, ifname := range interfaces {
+		device, err := filepath.EvalSymlinks(filepath.Join("/sys/class/net", ifname, "device"))
+		if err != nil {
+			return nil, fmt.Errorf("resolve device for %s: %w", ifname, err)
+		}
+		env.pciIDs[filepath.Base(device)] = struct{}{}
+		driverLink, err := os.Readlink(filepath.Join(device, "driver"))
+		if err != nil {
+			return nil, fmt.Errorf("read driver for %s: %w", ifname, err)
+		}
+		env.drivers[ifname] = filepath.Base(driverLink)
+		mtuRaw, err := os.ReadFile(filepath.Join("/sys/class/net", ifname, "mtu"))
+		if err != nil {
+			return nil, fmt.Errorf("read MTU for %s: %w", ifname, err)
+		}
+		mtu, err := strconv.Atoi(strings.TrimSpace(string(mtuRaw)))
+		if err != nil {
+			return nil, fmt.Errorf("parse MTU for %s: %w", ifname, err)
+		}
+		env.mtus[ifname] = mtu
+		queues, err := os.ReadDir(filepath.Join("/sys/class/net", ifname, "queues"))
+		if err != nil {
+			return nil, fmt.Errorf("read queues for %s: %w", ifname, err)
+		}
+		count := 0
+		for _, e := range queues {
+			if strings.HasPrefix(e.Name(), "rx-") {
+				count++
+			}
+		}
+		env.rxQueues[ifname] = count
+	}
+	return env, nil
+}
+
+func sharedUMEMArtifactInterfaces(artifact map[string]interface{}) []string {
+	for _, key := range []string{"selected_interfaces", "interfaces"} {
+		raw, ok := artifact[key].([]interface{})
+		if !ok {
+			continue
+		}
+		var out []string
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				out = append(out, LinuxIfName(s))
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func sharedUMEMArtifactStringSet(artifact map[string]interface{}, keys ...string) map[string]struct{} {
+	for _, key := range keys {
+		raw, ok := artifact[key].([]interface{})
+		if !ok {
+			continue
+		}
+		out := map[string]struct{}{}
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				out[s] = struct{}{}
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return nil
+}
+
+func sharedUMEMArtifactString(v interface{}) (string, bool) {
+	s, ok := v.(string)
+	return s, ok && s != ""
+}
+
+func sharedUMEMArtifactU32(v interface{}) (float64, bool) {
+	f, ok := v.(float64)
+	return f, ok
+}
+
+// sharedUMEMArtifactPerInterface expands a scalar-or-per-interface-map
+// artifact field over interfaces. Keys are LinuxIfName-normalised first,
+// mirroring the Rust audit this replaces (#17134).
+func sharedUMEMArtifactPerInterface(artifact map[string]interface{}, keys []string, interfaces []string) (map[string]interface{}, bool) {
+	var raw interface{}
+	found := false
+	for _, key := range keys {
+		if v, ok := artifact[key]; ok {
+			raw, found = v, true
+			break
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	if _, isMap := raw.(map[string]interface{}); !isMap {
+		out := make(map[string]interface{}, len(interfaces))
+		for _, ifname := range interfaces {
+			out[ifname] = raw
+		}
+		return out, true
+	}
+	m := raw.(map[string]interface{})
+	normalized := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		normalized[LinuxIfName(k)] = v
+	}
+	out := make(map[string]interface{}, len(interfaces))
+	for _, ifname := range interfaces {
+		v, ok := normalized[ifname]
+		if !ok {
+			return nil, false
+		}
+		out[ifname] = v
+	}
+	return out, true
+}
+
+func sharedUMEMSetsEqual(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func sortedSharedUMEMKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sharedUMEMStringSlicesEqualAsSets(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		set[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := set[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// sharedUMEMArtifactEnvironmentMismatch is the #17134 Go port of the
+// environment comparison the Rust helper used to run against a
+// `phase0_artifact` object no Go build emitted (dead since #5300). It
+// compares kernel, selected interfaces, PCI IDs / device set, driver,
+// MTU and queue topology against the live host, in that order, and
+// returns the first mismatch ("" when the artifact matches).
+//
+// The interface set under audit is the CONFIGURED `shared-umem
+// interface` list when the operator declared one (#17134 fold F3):
+// the old Rust audit compared the artifact's selected interfaces
+// against exactly that configured set (falling back to the artifact's
+// own list only when no interfaces were configured). Deriving the
+// list from the artifact alone would let an artifact recorded for
+// entirely different NICs pass silently as long as it matched its own
+// NICs' live data.
+func sharedUMEMArtifactEnvironmentMismatch(artifact map[string]interface{}, configuredInterfaces []string) string {
+	artifactKernel, _ := sharedUMEMArtifactString(artifact["kernel_release"])
+	if artifactKernel == "" {
+		return "Phase 0 artifact missing kernel_release"
+	}
+	artifactInterfaces := sharedUMEMArtifactInterfaces(artifact)
+	if len(artifactInterfaces) == 0 {
+		return "Phase 0 artifact missing selected_interfaces"
+	}
+	interfaces := artifactInterfaces
+	if len(configuredInterfaces) > 0 {
+		configured := make([]string, 0, len(configuredInterfaces))
+		for _, ifname := range configuredInterfaces {
+			if ifname != "" {
+				configured = append(configured, LinuxIfName(ifname))
+			}
+		}
+		if len(configured) > 0 {
+			if !sharedUMEMStringSlicesEqualAsSets(artifactInterfaces, configured) {
+				return "Phase 0 artifact selected interfaces do not match configured shared-umem interfaces"
+			}
+			interfaces = configured
+		}
+	}
+	env, err := sharedUMEMLiveEnvFn(interfaces)
+	if err != nil {
+		return fmt.Sprintf("unable to read current environment for shared UMEM audit (%v)", err)
+	}
+	if artifactKernel != env.kernelRelease {
+		return fmt.Sprintf("Phase 0 artifact kernel_release %s != current %s", artifactKernel, env.kernelRelease)
+	}
+	artifactPCI := sharedUMEMArtifactStringSet(artifact, "selected_nic_pci_ids", "pci_ids")
+	if artifactPCI == nil {
+		return "Phase 0 artifact missing selected_nic_pci_ids"
+	}
+	if !sharedUMEMSetsEqual(artifactPCI, env.pciIDs) {
+		return fmt.Sprintf("Phase 0 artifact PCI IDs %v != current %v", sortedSharedUMEMKeys(artifactPCI), sortedSharedUMEMKeys(env.pciIDs))
+	}
+	deviceSet := sharedUMEMArtifactStringSet(artifact, "selected_device_set", "selected_devices", "selected_device_pair")
+	if deviceSet == nil {
+		return "Phase 0 artifact missing selected_device_set/selected_device_pair"
+	}
+	if !sharedUMEMSetsEqual(deviceSet, env.pciIDs) {
+		return fmt.Sprintf("Phase 0 artifact selected device set %v != current %v", sortedSharedUMEMKeys(deviceSet), sortedSharedUMEMKeys(env.pciIDs))
+	}
+	driverByIface, ok := sharedUMEMArtifactPerInterface(artifact, []string{"driver", "driver_name"}, interfaces)
+	if !ok {
+		return "Phase 0 artifact missing driver"
+	}
+	for _, ifname := range interfaces {
+		want, _ := sharedUMEMArtifactString(driverByIface[ifname])
+		if want == "" || want != env.drivers[ifname] {
+			return fmt.Sprintf("Phase 0 artifact driver %v != current %v", driverByIface, env.drivers)
+		}
+	}
+	mtuByIface, ok := sharedUMEMArtifactPerInterface(artifact, []string{"mtu"}, interfaces)
+	if !ok {
+		return "Phase 0 artifact missing mtu"
+	}
+	for _, ifname := range interfaces {
+		want, ok := sharedUMEMArtifactU32(mtuByIface[ifname])
+		if !ok || int(want) != env.mtus[ifname] {
+			return fmt.Sprintf("Phase 0 artifact MTU %v != current %v", mtuByIface, env.mtus)
+		}
+	}
+	queueByIface, ok := sharedUMEMArtifactPerInterface(artifact, []string{"queue_topology"}, interfaces)
+	if !ok {
+		return "Phase 0 artifact missing queue_topology"
+	}
+	for _, ifname := range interfaces {
+		want, ok := sharedUMEMArtifactU32(queueByIface[ifname])
+		if !ok || int(want) != env.rxQueues[ifname] {
+			return fmt.Sprintf("Phase 0 artifact queue_topology %v != current %v", queueByIface, env.rxQueues)
+		}
+	}
+	return ""
+}
+
 func sharedUMEMAuditWarnings(cfg *Config) []string {
 	if cfg == nil || cfg.System.UserspaceDataplane == nil ||
 		cfg.System.UserspaceDataplane.SharedUMEM == nil {
@@ -2299,72 +2563,31 @@ func sharedUMEMAuditWarnings(cfg *Config) []string {
 		return []string{fmt.Sprintf(
 			"system dataplane shared-umem phase0-artifact-file %s: audit artifact unavailable (%v); non-blocking, does not gate the commit or change the compiled config", path, err)}
 	}
-	if passed, ok := artifact["passed"].(bool); ok && !passed {
+	if !sharedUMEMArtifactPassed(artifact) {
 		return []string{fmt.Sprintf(
-			"system dataplane shared-umem phase0-artifact-file %s: audit artifact records passed=false; shared-UMEM selection is decided at runtime by live bind validation, not this artifact", path)}
+			"system dataplane shared-umem phase0-artifact-file %s: audit artifact did not pass; shared-UMEM selection is decided at runtime by live bind validation, not this artifact", path)}
+	}
+	if reason := sharedUMEMArtifactEnvironmentMismatch(artifact, cfg.System.UserspaceDataplane.SharedUMEM.Interfaces); reason != "" {
+		return []string{fmt.Sprintf(
+			"system dataplane shared-umem phase0-artifact-file %s: %s; non-blocking, does not gate the commit or change the compiled config", path, reason)}
 	}
 	return nil
 }
 
-func normalizeSharedUMEMArtifactInterfaces(artifact map[string]interface{}) error {
-	for _, key := range []string{"selected_interfaces", "interfaces"} {
-		if err := normalizeSharedUMEMArtifactInterfaceArray(artifact, key); err != nil {
-			return err
-		}
+// sharedUMEMArtifactPassed unifies the passed predicate (#17134): the Go
+// audit previously warned only on an explicit `passed == false` while
+// the (dead) Rust audit passed only on `passed == true` or a pass
+// status. The Go owner now uses the strict form: pass requires an
+// explicit true / pass status.
+func sharedUMEMArtifactPassed(artifact map[string]interface{}) bool {
+	if passed, ok := artifact["passed"].(bool); ok && passed {
+		return true
 	}
-	for _, key := range []string{
-		"driver",
-		"driver_name",
-		"driver_version",
-		"firmware",
-		"firmware_version",
-		"mtu",
-		"nic_firmware_versions",
-		"queue_topology",
-	} {
-		if err := normalizeSharedUMEMArtifactInterfaceMap(artifact, key); err != nil {
-			return err
-		}
+	switch artifact["status"] {
+	case "pass", "passed", "PASS":
+		return true
 	}
-	return nil
-}
-
-func normalizeSharedUMEMArtifactInterfaceArray(artifact map[string]interface{}, key string) error {
-	values, ok := artifact[key].([]interface{})
-	if !ok {
-		return nil
-	}
-	seen := make(map[string]struct{}, len(values))
-	for i, value := range values {
-		name, ok := value.(string)
-		if !ok {
-			continue
-		}
-		linuxName := LinuxIfName(name)
-		if _, exists := seen[linuxName]; exists {
-			return fmt.Errorf("duplicate %s entry after Linux interface-name normalization: %s", key, linuxName)
-		}
-		seen[linuxName] = struct{}{}
-		values[i] = linuxName
-	}
-	return nil
-}
-
-func normalizeSharedUMEMArtifactInterfaceMap(artifact map[string]interface{}, key string) error {
-	values, ok := artifact[key].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	normalized := make(map[string]interface{}, len(values))
-	for ifname, value := range values {
-		linuxName := LinuxIfName(ifname)
-		if _, exists := normalized[linuxName]; exists {
-			return fmt.Errorf("duplicate %s key after Linux interface-name normalization: %s", key, linuxName)
-		}
-		normalized[linuxName] = value
-	}
-	artifact[key] = normalized
-	return nil
+	return false
 }
 
 func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {

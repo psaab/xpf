@@ -1,9 +1,24 @@
-//! Per-`WorkerCommand`-variant handlers. The dispatcher in
-//! `session_glue/mod.rs` matches on `WorkerCommand` and delegates the
-//! five non-trivial variants here; the three trivial variants
-//! (`UpsertLocal`, `EnqueueShapedLocal`, `VacateAllSharedExactSlots`)
-//! stay inline in the dispatcher because lifting 1-3 lines to a
-//! sibling file is negative value (per #1346 plan v2).
+//! Per-`WorkerCommand`-variant handlers delegated from the dispatcher
+//! in `session_glue/worker_commands.rs` (`apply_worker_commands`),
+//! which matches on `WorkerCommand`. The dispatcher is not in
+//! `session_glue/mod.rs` (that is only the module root).
+//!
+//! Delegated here: `DemoteOwnerRGS`, `RefreshOwnerRGS`,
+//! `ExportOwnerRGSessions`, `UpsertSynced`, `DeleteSynced`,
+//! `DeleteLocalControl`, `DeleteSyncedConditional`, and
+//! `ProbePolicyBatch`, plus the per-item teardown inside
+//! `DeletePolicyBatch` (`handle_remove_policy_item` in
+//! `delete_synced.rs`).
+//!
+//! The remaining variants stay inline in `apply_worker_commands`.
+//! Some are one-line pushes, flag sets, or PPTP table calls
+//! (`EnqueueShapedLocal`, `VacateAllSharedExactSlots`, the
+//! `ForgetPptp*` arms); others are larger arms with no `commands/`
+//! handler today (`QuerySessionCounters`, `ListSessionsByPolicy`,
+//! `UpsertLocal`, the `DeletePolicyBatch` abort-fence/batch logic,
+//! `DeleteSyncedIfTableUnknown`'s purge predicate, and the PPTP
+//! install arms). Do not assume an inline arm is 1-3 lines; measure
+//! `worker_commands.rs` before citing a size.
 //!
 //! Files intentionally omit the `apply_` prefix: the directory path
 //! (`session_glue/commands/<variant>.rs`) already encodes the

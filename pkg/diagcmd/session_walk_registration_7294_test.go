@@ -69,8 +69,8 @@ import (
 //     console contributes at most ONE concurrent walk. The decision is
 //     already recorded at `pkg/cli/cli_show_nat.go:544-546`. The remote
 //     `cli` binary reaches the daemon over gRPC and is bounded there.
-//   - The daemon-internal background walkers — `conntrack.(*GC).sweep`,
-//     `cluster` bulk/conn sweeps, `warmNeighborCache`, the policy
+//   - The daemon-internal background walkers — `cluster`
+//     bulk/conn sweeps, `warmNeighborCache`, the policy
 //     invalidation walks, `ReconcileClusterBulk`. These are not
 //     request-driven, so a REQUEST admission budget is the wrong
 //     instrument for them.

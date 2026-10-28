@@ -96,8 +96,8 @@ func TestAppSrcAndDstPortRangesBothMustMatch(t *testing.T) {
 				FromZone: "trust",
 				ToZone:   "untrust",
 				Protocol: "tcp",
-				SrcPort:  tc.srcPort,
-				DstPort:  tc.dstPort,
+				SrcPort:  PortPtr(uint16(tc.srcPort)),
+				DstPort:  PortPtr(uint16(tc.dstPort)),
 			})
 			if res.Matched != tc.wantMatched {
 				t.Fatalf("src=%d dst=%d: Matched = %v, want %v (res %+v)",

@@ -2,11 +2,11 @@ package vrrp
 
 import (
 	"log/slog"
-	"net"
 	"time"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/psaab/xpf/pkg/linkstate"
 	"github.com/vishvananda/netlink"
 )
 
@@ -43,21 +43,11 @@ func (vi *vrrpInstance) getPriority() int {
 	if pending {
 		vi.mu.RLock()
 		p := vi.cfg.Priority
-		trackDown := vi.trackDown && vi.cfg.TrackInterface != ""
+		trackDown := vi.trackDown
+		trackIface := vi.cfg.TrackInterface
 		cost := vi.cfg.TrackPriorityCost
 		vi.mu.RUnlock()
-		if p == 0 || p == addressOwnerPriority {
-			return p
-		}
-		if trackDown {
-			p -= cost
-			if p < 1 {
-				p = 1
-			} else if p > 254 {
-				p = 254
-			}
-		}
-		return p
+		return effectivePriority(p, cost, trackDown, trackIface)
 	}
 	_, effective, _ := vi.prioritySnapshot()
 	return effective
@@ -72,20 +62,12 @@ func (vi *vrrpInstance) prioritySnapshot() (configured, effective int, trackDown
 	vi.mu.RLock()
 	defer vi.mu.RUnlock()
 	configured = vi.cfg.Priority
-	effective = configured
-	if effective == 0 || effective == addressOwnerPriority {
-		return configured, effective, false
-	}
-	if vi.trackDown && vi.cfg.TrackInterface != "" {
-		effective -= vi.cfg.TrackPriorityCost
-		if effective < 1 {
-			effective = 1
-		} else if effective > 254 {
-			effective = 254
-		}
-		return configured, effective, true
-	}
-	return configured, effective, false
+	effective = effectivePriority(configured, vi.cfg.TrackPriorityCost, vi.trackDown, vi.cfg.TrackInterface)
+	// trackDown names an ACTIVE demotion branch exactly as before
+	// (#17145 pure refactor): 0/255 pass through and a zero cost with
+	// the link down still reports the branch, not a value change.
+	trackDown = configured != 0 && configured != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != ""
+	return configured, effective, trackDown
 }
 
 // setTrackDown records the tracked interface's link state. Logs only on
@@ -367,16 +349,6 @@ func netlinkLinkState(name string) (bool, error) {
 	return linkAttrsUp(link.Attrs()), nil
 }
 
-// linkAttrsUp interprets link operational state. OperUnknown is common
-// on virtual devices that report no carrier state — fall back to the
-// IFF_UP admin flag there.
-func linkAttrsUp(attrs *netlink.LinkAttrs) bool {
-	switch attrs.OperState {
-	case netlink.OperUp:
-		return true
-	case netlink.OperUnknown:
-		return attrs.Flags&net.FlagUp != 0
-	default:
-		return false
-	}
-}
+// linkAttrsUp is an alias of linkstate.Up (#17132: one predicate repo-wide;
+// see pkg/linkstate for the carrier rule, #2070).
+func linkAttrsUp(attrs *netlink.LinkAttrs) bool { return linkstate.Up(attrs) }

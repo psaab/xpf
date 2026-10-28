@@ -352,137 +352,187 @@ pub(crate) fn reply_matches_forward_session(
         || reverse_canonical_key(forward_key, nat) == *reply_key
 }
 
+/// #17088: direction of a [`nat_applied_key`] transform relative to the
+/// key it is applied to. `Same` keeps `(src, dst)` order; `Reversed`
+/// swaps the two ends (addresses and ports together).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dir {
+    Same,
+    Reversed,
+}
+
+/// #17088: tunnel-discriminator handling of a [`nat_applied_key`]
+/// transform. `Keep` carries the input discriminator unchanged
+/// (SAME-direction keys, #8103); `Reverse` derives it through the
+/// exhaustive `reverse_direction_discriminator` helper so a new
+/// discriminator class must decide its reverse form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Disc {
+    Keep,
+    Reverse,
+}
+
+/// #17088: routing-domain handling of a [`nat_applied_key`] transform.
+/// `Keep` preserves the input key's domain; `Zero` builds a
+/// domain-agnostic REVERSE-MATCH key (#7160/#11298 — see the
+/// `routing_domain` field doc).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Domain {
+    Keep,
+    Zero,
+}
+
+/// #17088: the one NAT64 address-family / ICMP-protocol remap. The AF is
+/// taken from the (already NAT-rewritten) source address; an ICMP flow
+/// crossing families also crosses ICMP <-> ICMPv6. Returns
+/// `(addr_family, protocol)`.
+#[inline]
+fn nat64_family_protocol(
+    nat64: bool,
+    wire_src: IpAddr,
+    protocol: u8,
+    fallback_family: u8,
+) -> (u8, u8) {
+    if !nat64 {
+        return (fallback_family, protocol);
+    }
+    let af = match wire_src {
+        IpAddr::V4(_) => libc::AF_INET as u8,
+        IpAddr::V6(_) => libc::AF_INET6 as u8,
+    };
+    let proto = if af == libc::AF_INET as u8 && protocol == PROTO_ICMPV6 {
+        PROTO_ICMP
+    } else if af == libc::AF_INET6 as u8 && protocol == PROTO_ICMP {
+        PROTO_ICMPV6
+    } else {
+        protocol
+    };
+    (af, proto)
+}
+
+/// #17088: the single NAT key transform behind `forward_wire_key`,
+/// `translated_session_key`, `reverse_wire_key` and
+/// `reverse_session_key`. The four public names are one-line wrappers
+/// over this helper; they MUST NOT grow their own copies of the
+/// port/family logic again (the pre-#17088 copies drifted: the
+/// translated alias kept the translated ICMP id under a reverse SNAT
+/// decision and never applied the NAT64 remap, so the alias index held
+/// mixed-family keys no packet carries).
+///
+/// Port/address selection, per direction:
+///   * `Same`: src end takes `rewrite_src*`, dst end takes
+///     `rewrite_dst*` (each falling back to the key's own value).
+///   * `Reversed`: src end takes `rewrite_dst*` (fallback: key dst),
+///     dst end takes `rewrite_src*` (fallback: key src).
+///
+/// ICMP/ICMPv6: the Query Identifier lives in `src_port` (`dst_port`
+/// is always 0) and is a single symmetric field (#4074), so it is
+/// never swapped. Its translated value is direction-agnostic:
+/// `rewrite_src_port.or(rewrite_dst_port)` — a forward decision
+/// carries it in `rewrite_src_port`, while `NatDecision::reverse`
+/// moved it into `rewrite_dst_port`. At most one of the two is ever
+/// set for an ICMP flow (forward SNAT sets only `rewrite_src_port`;
+/// its `.reverse()` sets only `rewrite_dst_port`; ICMP DNAT is gated
+/// to no L4 port), so `.or()` picks the right id in each direction.
+/// TCP/UDP under `Reversed` swap the port pair; under `Same` they do
+/// not.
+///
+/// Discriminator/domain, independently: `Same` keys keep both;
+/// `reverse_wire_key` reverses the discriminator and zeroes the
+/// domain; `reverse_session_key` reverses the discriminator but keeps
+/// the domain (it names the companion entry itself).
+#[inline]
+fn nat_applied_key(
+    key: &SessionKey,
+    nat: NatDecision,
+    dir: Dir,
+    disc: Disc,
+    domain: Domain,
+) -> SessionKey {
+    let is_icmp = matches!(key.protocol, PROTO_ICMP | PROTO_ICMPV6);
+    let (src_port, dst_port) = if is_icmp {
+        (
+            nat.rewrite_src_port
+                .or(nat.rewrite_dst_port)
+                .unwrap_or(key.src_port),
+            key.dst_port,
+        )
+    } else {
+        match dir {
+            Dir::Same => (
+                nat.rewrite_src_port.unwrap_or(key.src_port),
+                nat.rewrite_dst_port.unwrap_or(key.dst_port),
+            ),
+            Dir::Reversed => (
+                nat.rewrite_dst_port.unwrap_or(key.dst_port),
+                nat.rewrite_src_port.unwrap_or(key.src_port),
+            ),
+        }
+    };
+    let (wire_src, wire_dst) = match dir {
+        Dir::Same => (
+            nat.rewrite_src.unwrap_or(key.src_ip),
+            nat.rewrite_dst.unwrap_or(key.dst_ip),
+        ),
+        Dir::Reversed => (
+            nat.rewrite_dst.unwrap_or(key.dst_ip),
+            nat.rewrite_src.unwrap_or(key.src_ip),
+        ),
+    };
+    let (addr_family, protocol) =
+        nat64_family_protocol(nat.nat64, wire_src, key.protocol, key.addr_family);
+    SessionKey {
+        addr_family,
+        protocol,
+        src_ip: wire_src,
+        dst_ip: wire_dst,
+        src_port,
+        dst_port,
+        discriminator: match disc {
+            // #8103: SAME-direction key — carry the tunnel discriminator
+            // through. Provably a no-op for every non-GRE session, whose
+            // discriminator is already `None`.
+            Disc::Keep => key.discriminator,
+            // #8103: REVERSE-direction key — derive the discriminator
+            // through the exhaustive helper, so a new class must decide
+            // rather than defaulting.
+            Disc::Reverse => reverse_direction_discriminator(key.discriminator),
+        },
+        routing_domain: match domain {
+            Domain::Keep => key.routing_domain,
+            // #7160/#11298: REVERSE-MATCH key — deliberately
+            // domain-agnostic; see the `routing_domain` field doc.
+            Domain::Zero => 0,
+        },
+    }
+}
+
+/// The post-NAT forward (wire) tuple of `forward_key` under `nat`:
+/// same direction, NAT rewrites applied, tunnel discriminator and
+/// routing domain preserved (#8103/#7160).
 pub(crate) fn forward_wire_key(forward_key: &SessionKey, nat: NatDecision) -> SessionKey {
-    let (src_port, dst_port) = if matches!(forward_key.protocol, PROTO_ICMP | PROTO_ICMPV6) {
-        // #4074: the ICMP Query Identifier lives in `src_port` (`dst_port` is
-        // always 0) and is a single symmetric field carried at the same offset
-        // in both directions. Pool SNAT translates it (RFC 5508 §3.1), so the
-        // forward wire key carries the translated id when the decision set one;
-        // absent a translation this is `forward_key.src_port` — unchanged.
-        (
-            nat.rewrite_src_port.unwrap_or(forward_key.src_port),
-            forward_key.dst_port,
-        )
-    } else {
-        (
-            nat.rewrite_src_port.unwrap_or(forward_key.src_port),
-            nat.rewrite_dst_port.unwrap_or(forward_key.dst_port),
-        )
-    };
-    let wire_src = nat.rewrite_src.unwrap_or(forward_key.src_ip);
-    let wire_dst = nat.rewrite_dst.unwrap_or(forward_key.dst_ip);
-    let (addr_family, protocol) = if nat.nat64 {
-        let af = match wire_src {
-            std::net::IpAddr::V4(_) => libc::AF_INET as u8,
-            std::net::IpAddr::V6(_) => libc::AF_INET6 as u8,
-        };
-        let proto = if af == libc::AF_INET as u8 && forward_key.protocol == PROTO_ICMPV6 {
-            PROTO_ICMP
-        } else if af == libc::AF_INET6 as u8 && forward_key.protocol == PROTO_ICMP {
-            PROTO_ICMPV6
-        } else {
-            forward_key.protocol
-        };
-        (af, proto)
-    } else {
-        (forward_key.addr_family, forward_key.protocol)
-    };
-    SessionKey {
-        addr_family,
-        protocol,
-        src_ip: wire_src,
-        dst_ip: wire_dst,
-        src_port,
-        dst_port,
-        // #8103: SAME-direction key — carry the tunnel discriminator through.
-        // Provably a no-op for every non-GRE session, whose discriminator is
-        // already `None`; it changes behaviour only for keyed GRE.
-        discriminator: forward_key.discriminator,
-        routing_domain: forward_key.routing_domain,
-    }
+    nat_applied_key(forward_key, nat, Dir::Same, Disc::Keep, Domain::Keep)
 }
 
+/// A reverse entry's translated alias (#17088: also called with
+/// REVERSE decisions — `NatDecision::reverse` moved the forward
+/// `rewrite_src_port` into `rewrite_dst_port`, and the shared
+/// direction-agnostic ICMP-id rule in `nat_applied_key` recovers the
+/// original id; the NAT64 remap keeps the alias as the
+/// pre-translation tuple in the forward family, NOT the family the
+/// post-translation reply carries — see the twin matrix).
 pub(crate) fn translated_session_key(key: &SessionKey, nat: NatDecision) -> SessionKey {
-    let (src_port, dst_port) = if matches!(key.protocol, PROTO_ICMP | PROTO_ICMPV6) {
-        // #4074: translate the ICMP Query Identifier (in `src_port`) like a
-        // port; `dst_port` stays 0. No translation => `key.src_port` unchanged.
-        (nat.rewrite_src_port.unwrap_or(key.src_port), key.dst_port)
-    } else {
-        (
-            nat.rewrite_src_port.unwrap_or(key.src_port),
-            nat.rewrite_dst_port.unwrap_or(key.dst_port),
-        )
-    };
-    SessionKey {
-        addr_family: key.addr_family,
-        protocol: key.protocol,
-        src_ip: nat.rewrite_src.unwrap_or(key.src_ip),
-        dst_ip: nat.rewrite_dst.unwrap_or(key.dst_ip),
-        src_port,
-        dst_port,
-        // #8103: SAME-direction key — carry the tunnel discriminator through.
-        // Provably a no-op for every non-GRE session, whose discriminator is
-        // already `None`; it changes behaviour only for keyed GRE.
-        discriminator: key.discriminator,
-        routing_domain: key.routing_domain,
-    }
+    nat_applied_key(key, nat, Dir::Same, Disc::Keep, Domain::Keep)
 }
 
+/// The reverse (reply) wire tuple of `forward_key` under `nat`: ends
+/// swapped, NAT rewrites applied to the swapped ends, NAT64 family /
+/// ICMP-protocol remapped, and the routing domain deliberately zeroed
+/// — this is a REVERSE-MATCH key (#7160/#11298; `find_forward_nat_match`
+/// compares the arriving reply's domain with each forward decision's
+/// egress-interface domain after probing this bucket).
 pub(super) fn reverse_wire_key(forward_key: &SessionKey, nat: NatDecision) -> SessionKey {
-    let (src_port, dst_port) = if matches!(forward_key.protocol, PROTO_ICMP | PROTO_ICMPV6) {
-        // #4074: the reply carries the SAME (translated) ICMP identifier at the
-        // same offset, which the parser lifts into the reply's `src_port`. So
-        // the reverse wire key's `src_port` is the translated id (not swapped
-        // with `dst_port` the way a TCP/UDP port pair is), and `dst_port` stays
-        // 0. This is what makes two hosts sharing a pool address + original id
-        // demux — their translated ids differ, so their reverse keys differ.
-        (
-            nat.rewrite_src_port.unwrap_or(forward_key.src_port),
-            forward_key.dst_port,
-        )
-    } else {
-        (
-            nat.rewrite_dst_port.unwrap_or(forward_key.dst_port),
-            nat.rewrite_src_port.unwrap_or(forward_key.src_port),
-        )
-    };
-    let wire_src = nat.rewrite_dst.unwrap_or(forward_key.dst_ip);
-    let wire_dst = nat.rewrite_src.unwrap_or(forward_key.src_ip);
-    // NAT64: the reverse (reply) packet is a different address family.
-    // Determine the AF from the NAT-rewritten addresses.
-    let (addr_family, protocol) = if nat.nat64 {
-        let af = match wire_src {
-            std::net::IpAddr::V4(_) => libc::AF_INET as u8,
-            std::net::IpAddr::V6(_) => libc::AF_INET6 as u8,
-        };
-        // ICMPv6 ↔ ICMP protocol mapping.
-        let proto = if af == libc::AF_INET as u8 && forward_key.protocol == PROTO_ICMPV6 {
-            PROTO_ICMP
-        } else if af == libc::AF_INET6 as u8 && forward_key.protocol == PROTO_ICMP {
-            PROTO_ICMPV6
-        } else {
-            forward_key.protocol
-        };
-        (af, proto)
-    } else {
-        (forward_key.addr_family, forward_key.protocol)
-    };
-    SessionKey {
-        addr_family,
-        protocol,
-        src_ip: wire_src,
-        dst_ip: wire_dst,
-        src_port,
-        dst_port,
-        // #8103: REVERSE-direction key — derive the discriminator through the
-        // exhaustive helper, so a new class must decide rather than defaulting.
-        discriminator: reverse_direction_discriminator(forward_key.discriminator),
-        // #7160/#11298: REVERSE-MATCH key — deliberately domain-agnostic.
-        // `find_forward_nat_match` compares the arriving reply's domain with
-        // each forward decision's egress-interface domain after probing this
-        // bucket; the ingress/key domain is not the reverse admission identity.
-        routing_domain: 0,
-    }
+    nat_applied_key(forward_key, nat, Dir::Reversed, Disc::Reverse, Domain::Zero)
 }
 
 pub(crate) fn reverse_canonical_key(forward_key: &SessionKey, _nat: NatDecision) -> SessionKey {
@@ -540,69 +590,21 @@ pub(crate) fn reverse_match_key(key: &SessionKey) -> SessionKey {
 // lives in afxdp/types (46 references inside afxdp/ — moving it
 // would be a much larger refactor). Left in session_glue for now.
 
+/// The companion key in the opposite direction of `key` under `nat`.
+/// Called in BOTH directions (#4074): forward→reverse (build the
+/// reverse companion from the FORWARD entry + its FORWARD decision —
+/// the translated ICMP id lives in `rewrite_src_port`) and
+/// reverse→forward (recover the FORWARD entry from the REVERSE entry +
+/// its REVERSE decision — `NatDecision::reverse` moved the original id
+/// into `rewrite_dst_port`). The direction-agnostic
+/// `rewrite_src_port.or(rewrite_dst_port)` ICMP rule in
+/// `nat_applied_key` picks the right id in each direction. Unlike
+/// `reverse_wire_key` this PRESERVES the routing domain (it names the
+/// companion entry itself, not a domain-agnostic match bucket), while
+/// the discriminator goes through the same exhaustive
+/// `reverse_direction_discriminator` helper (`Disc::Reverse`).
 pub(crate) fn reverse_session_key(key: &SessionKey, nat: NatDecision) -> SessionKey {
-    let (src_port, dst_port) = if matches!(key.protocol, PROTO_ICMP | PROTO_ICMPV6) {
-        // #4074: the ICMP Query Identifier is a symmetric field, and this
-        // function is called in BOTH directions:
-        //   - forward→reverse (build the reverse companion key from the FORWARD
-        //     entry + its FORWARD decision): the translated id lives in
-        //     `rewrite_src_port` (= Y), so the companion is keyed on Y and the
-        //     reply (which carries Y) demuxes to it.
-        //   - reverse→forward (`account_packet` recovers the FORWARD entry key
-        //     from the REVERSE entry + its REVERSE decision, session/mod.rs):
-        //     `NatDecision::reverse` moved the ORIGINAL id into
-        //     `rewrite_dst_port` (= X) and left `rewrite_src_port` None, so we
-        //     must read `rewrite_dst_port` to recover X and hit the forward
-        //     entry — reading only `rewrite_src_port` (=None → falls back to the
-        //     reverse key's Y) misses it and mis-accounts the reply volume onto
-        //     the reverse entry.
-        // At most one of the two port fields is ever set for an ICMP flow (SNAT
-        // sets only `rewrite_src_port` forward; its `.reverse()` sets only
-        // `rewrite_dst_port`; ICMP DNAT is gated to no L4 port), so `.or()`
-        // picks the right id in each direction. No translation => `key.src_port`
-        // unchanged; `dst_port` stays 0.
-        (
-            nat.rewrite_src_port
-                .or(nat.rewrite_dst_port)
-                .unwrap_or(key.src_port),
-            key.dst_port,
-        )
-    } else {
-        (
-            nat.rewrite_dst_port.unwrap_or(key.dst_port),
-            nat.rewrite_src_port.unwrap_or(key.src_port),
-        )
-    };
-    let wire_src = nat.rewrite_dst.unwrap_or(key.dst_ip);
-    let wire_dst = nat.rewrite_src.unwrap_or(key.src_ip);
-    let (addr_family, protocol) = if nat.nat64 {
-        let af = match wire_src {
-            IpAddr::V4(_) => libc::AF_INET as u8,
-            IpAddr::V6(_) => libc::AF_INET6 as u8,
-        };
-        let proto = if af == libc::AF_INET as u8 && key.protocol == PROTO_ICMPV6 {
-            PROTO_ICMP
-        } else if af == libc::AF_INET6 as u8 && key.protocol == PROTO_ICMP {
-            PROTO_ICMPV6
-        } else {
-            key.protocol
-        };
-        (af, proto)
-    } else {
-        (key.addr_family, key.protocol)
-    };
-    SessionKey {
-        addr_family,
-        protocol,
-        src_ip: wire_src,
-        dst_ip: wire_dst,
-        src_port,
-        dst_port,
-        // #8103: REVERSE-direction key — derive the discriminator through the
-        // exhaustive helper, so a new class must decide rather than defaulting.
-        discriminator: reverse_direction_discriminator(key.discriminator),
-        routing_domain: key.routing_domain,
-    }
+    nat_applied_key(key, nat, Dir::Reversed, Disc::Reverse, Domain::Keep)
 }
 /// #10674: the shim's non-first-fragment protocol sentinel, mirrored here.
 /// `userspace-xdp` substitutes `PROTO_FRAGMENT_NO_L4` (255) for a native

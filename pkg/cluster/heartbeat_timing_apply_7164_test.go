@@ -96,7 +96,9 @@ func TestCommittedHeartbeatTimingIsAppliedToARunningHeartbeat7164(t *testing.T) 
 			// predicate DECIDED to restart, which is exactly the #7164 property
 			// — the restart mechanism itself is already covered by the
 			// VRF-rebind path's own tests.
+			m.mu.RLock()
 			restarted := m.heartbeatTimingDivergedLocked()
+			m.mu.RUnlock()
 			if restarted != tc.expectRestartAttempt {
 				t.Errorf("timing-diverged = %v, want %v — %s",
 					restarted, tc.expectRestartAttempt, tc.why)

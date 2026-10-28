@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -129,55 +128,13 @@ func TestRecycleScanWireKeysLockstepWithRust9392(t *testing.T) {
 	}
 }
 
-// rustSourceNATPoolRename9392 reads the serde rename off `pub <field>:` in
-// userspace-dp/src/protocol/nat.rs. Resolved by FIELD across the protocol
-// directory, not by a hardcoded file, for the #7160 reason: a struct that
-// crosses the modularity floor gets moved and a path-keyed guard silently stops
-// finding it.
+// #17142: rustSourceNATPoolRename9392 was the seventh divergent copy
+// (directory field search, file-wide first rename match once the field
+// was located). It is now the shared struct-scoped parser
+// (rustwire_test.go) over SourceNatPoolStatus; name kept as an adapter.
 func rustSourceNATPoolRename9392(t *testing.T, rustField string) string {
 	t.Helper()
-	dir := filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("read %s: %v (the Go/Rust wire-key lockstep guard cannot run)", dir, err)
-	}
-	decl := regexp.MustCompile(`(?m)^\s*pub ` + regexp.QuoteMeta(rustField) + `:`)
-	re := regexp.MustCompile(`#\[serde\([^)]*rename\s*=\s*"([A-Za-z0-9_]+)"[^)]*\)\]\s*pub\s+` +
-		regexp.QuoteMeta(rustField) + `\s*:`)
-	var found []string
-	var key string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".rs") {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
-		src, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if !decl.Match(src) {
-			continue
-		}
-		found = append(found, e.Name())
-		m := re.FindSubmatch(src)
-		if m == nil {
-			t.Fatalf("no `#[serde(rename = ...)]` on `pub %s` in %s. UPDATE this guard "+
-				"rather than deleting it — without it nothing pins the Go decoder's key "+
-				"to the key the Rust encoder writes, and a mismatch is silent on both "+
-				"planes", rustField, path)
-		}
-		key = string(m[1])
-	}
-	switch len(found) {
-	case 0:
-		t.Fatalf("no `pub %s` found under %s. If it was renamed or removed, UPDATE this "+
-			"lockstep guard rather than deleting it", rustField, dir)
-	case 1:
-	default:
-		t.Fatalf("`pub %s` is declared in %d files under %s (%v). Two declarations of one "+
-			"wire key is the drift this guard exists to catch", rustField, len(found), dir, found)
-	}
-	return key
+	return rustWireKeyInProtocolStruct(t, "SourceNatPoolStatus", rustField, false)
 }
 
 func itoa9392(v uint64) string {

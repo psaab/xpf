@@ -21,7 +21,7 @@ import (
 func vrfTopologyLinks15067() (vrf *netlink.Vrf, xfrmi *netlink.Xfrmi, outlet *netlink.Tuntap) {
 	vrf = &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-blue", Index: 22}}
 	xfrmi = &netlink.Xfrmi{LinkAttrs: netlink.LinkAttrs{Name: "st0.0", Index: 11, MasterIndex: 22}}
-	outlet = &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 33}}
+	outlet = &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: xnft.HostInboundDelegatedIfname, Index: 33}}
 	return vrf, xfrmi, outlet
 }
 
@@ -76,7 +76,7 @@ func TestIpsecTopologyCensusVRFEnslavedSafe15067(t *testing.T) {
 func TestIpsecTopologyCensusBridgeEnslavedUnsafe15067(t *testing.T) {
 	br := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: "br0", Index: 22}}
 	xfrmi := &netlink.Xfrmi{LinkAttrs: netlink.LinkAttrs{Name: "st0.0", Index: 11, MasterIndex: 22}}
-	outlet := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 33}}
+	outlet := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: xnft.HostInboundDelegatedIfname, Index: 33}}
 	stubTopology15067(t, []netlink.Link{xfrmi, br, outlet}, map[int]netlink.Link{22: br})
 	s := newIpsecSupervisor()
 	d := &Daemon{ipsecS4: s}
@@ -91,7 +91,7 @@ func TestIpsecTopologyCensusBridgeEnslavedUnsafe15067(t *testing.T) {
 func TestIpsecTopologyCensusNonVRFMasterUnsafe15067(t *testing.T) {
 	dummy := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "dummy0", Index: 22}}
 	xfrmi := &netlink.Xfrmi{LinkAttrs: netlink.LinkAttrs{Name: "st0.0", Index: 11, MasterIndex: 22}}
-	outlet := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 33}}
+	outlet := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: xnft.HostInboundDelegatedIfname, Index: 33}}
 	stubTopology15067(t, []netlink.Link{xfrmi, dummy, outlet}, map[int]netlink.Link{22: dummy})
 	s := newIpsecSupervisor()
 	d := &Daemon{ipsecS4: s}

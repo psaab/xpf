@@ -55,6 +55,12 @@ frame flood cannot exhaust memory (#4044).
   refuses it (warn + no service) and `ValidateConfig` warns at commit.
 - `Neighbors()` — `lldp.go`. Snapshot consumed by `show lldp
   neighbors`.
+- `EffectiveTiming(cfg)` / `RenderSummary(w, cfg, neighbours)` —
+  `lldp.go` (#17130). The single source of truth for the effective
+  interval × hold formula (defaults 30s/4, TTL clamped to 65535 as
+  `encodeTTL` does) and the sole `show lldp` summary renderer;
+  `txLoop`, `pkg/cli` and `pkg/grpcapi` all consume them so display
+  cannot diverge from the advertised TTL.
 
 ## Callers
 
