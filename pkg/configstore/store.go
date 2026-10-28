@@ -580,13 +580,14 @@ type Store struct {
 	// among SaveRescueConfig writers themselves (#14722 D18-05). It is
 	// acquired AFTER rescueWriteBarrier, so a test holding a writer at
 	// the barrier never blocks a concurrent writer or deleter from
-	// superseding it. DeleteRescueConfig also holds rescueMu across
-	// its applied-generation bump, unlink and dir fsync (#16783), so a
-	// save claiming a later generation cannot complete its write and
-	// report success between the delete's bump and its unlink and
-	// then be unlinked by that delete. A writer held at the barrier
-	// has not yet taken rescueMu, so a delete issued during such an
-	// in-flight save still succeeds without waiting for it.
+	// superseding it. DeleteRescueConfig holds rescueMu across its
+	// applied-generation update, unlink and dir fsync (#16783), and
+	// skips its unlink and returns ErrRescueDeleteSuperseded if a newer
+	// operation already applied (#17825). Thus whichever operation applies
+	// first stays: a delete cannot unlink a save that already succeeded, and
+	// A save after a completed delete can recreate rescue.conf.
+	// A writer held at rescueWriteBarrier has not yet taken rescueMu, so a
+	// delete still succeeds promptly during an in-flight save.
 	rescueMu sync.Mutex
 
 	// rescueSeq is the monotonic generation source for rescue.conf

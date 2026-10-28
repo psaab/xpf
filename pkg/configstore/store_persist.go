@@ -2291,6 +2291,16 @@ var ErrRescueSaveNoCommittedConfig = errors.New("no non-empty committed configur
 // than reporting a save that never landed as a server failure.
 var ErrRescueSaveSuperseded = errors.New("rescue configuration save superseded by a newer rescue operation")
 
+// ErrRescueDeleteSuperseded reports that a newer rescue operation applied
+// before DeleteRescueConfig could unlink the file.
+var ErrRescueDeleteSuperseded = errors.New("rescue configuration deletion superseded by a newer rescue operation")
+
+// rescueDeleteClaimBarrier is a test seam invoked by DeleteRescueConfig
+// after claiming its generation under s.mu and before taking rescueMu.
+// Production is a no-op. It exposes the claim-to-lock window (#17825)
+// that rescueWriteBarrier cannot exercise.
+var rescueDeleteClaimBarrier = func() {}
+
 // rescueWriteBarrier is a test seam invoked by SaveRescueConfig after it has
 // registered in rescueWG and before its durable write. Production is a no-op.
 var rescueWriteBarrier = func() {}
@@ -2675,12 +2685,10 @@ func (s *Store) rescuePath() string {
 // save must not resurrect a deleted rescue.conf) or a newer save has
 // already claimed/written (stale snapshot must not overwrite it). A
 // superseded save reports ErrRescueSaveSuperseded; it never writes.
-// A save STARTED after the delete claims a later generation than the
-// delete's and legitimately recreates rescue.conf (#16783: the delete
-// holds rescueMu across its unlink, so such a save's write cannot
-// complete and report success and then be unlinked by the delete —
-// it either lands before the delete's critical section and is
-// removed, or runs after the delete has finished).
+// A save started after the delete claims a later generation and
+// legitimately recreates rescue.conf if it applies after the delete.
+// If it applies first, DeleteRescueConfig observes its newer applied
+// generation and skips its unlink (#17825).
 func (s *Store) SaveRescueConfig() error {
 	s.mu.RLock()
 	if s.rescueFenced.Load() {
@@ -2741,8 +2749,10 @@ func (s *Store) SaveRescueConfig() error {
 	return nil
 }
 
-// DeleteRescueConfig removes the rescue configuration.
-//
+// DeleteRescueConfig removes the rescue configuration unless a newer rescue
+// operation has already applied, in which case it returns
+// ErrRescueDeleteSuperseded and leaves the newer state intact.
+
 // The removal is a DURABLE transition (#5197 A4-b1-F10). SaveRescueConfig
 // persists rescue.conf through fsatomic.WriteFileDurable (temp + fsync +
 // rename + parent-dir fsync), so the delete must match that dir-sync
@@ -2764,46 +2774,47 @@ func (s *Store) SaveRescueConfig() error {
 // such a save's durable write, so the delete succeeds promptly even
 // during an in-flight save.
 //
-// #16783: the claim, unlink AND dir fsync all run while holding
-// rescueMu. The unlink must be inside that critical section: before,
-// rescueMu was released after the generation bump, so a save that
-// claimed a LATER generation could take rescueMu, write durably,
-// set rescueAppliedGen and report success — and only then did this
-// delete unlink, removing the newer save's file. Holding rescueMu
-// across the unlink orders the two effects: such a later save either
-// completes before the delete's critical section (and is then
-// legitimately removed by it) or starts its write only after the
-// delete has finished (and legitimately recreates rescue.conf).
-// This does not deadlock against a save held at rescueWriteBarrier:
-// that writer has not yet taken rescueMu, so the delete still
-// succeeds promptly; the writer is superseded when it later checks
-// the applied generation. The cost is that a delete now waits for a
-// save already inside its critical section to finish its write —
-// the same serialization saves already have among themselves.
+// #16783: rescueMu covers the applied-generation update, unlink and
+// dir fsync. If a later-generation save applies before this delete
+// gets rescueMu, #17825's generation check skips the unlink; if the
+// delete gets the lock first, it applies before that later save writes.
+// Thus a save cannot report success and then be removed by an older
+// delete. This does not deadlock against a save held at
+// rescueWriteBarrier: that writer has not yet taken rescueMu, so the
+// delete still succeeds promptly; the writer is superseded when it
+// later checks the applied generation. The cost is that a delete now
+// waits for a save already inside its critical section to finish its
+// write — the same serialization saves already have among themselves.
 func (s *Store) DeleteRescueConfig() error {
 	path := s.rescuePath()
 	// #14722 D18-05: claim the delete's generation under s.mu BEFORE
-	// unlinking. Every save that claimed an earlier generation and is
-	// still in flight observes rescueAppliedGen >= its own generation
-	// when it later takes rescueMu and therefore refuses to recreate
-	// the file; a save started after the delete claims a later
-	// generation and legitimately recreates it. rescueAppliedGen is
-	// bumped under rescueMu (not s.mu) so this claim is ordered
-	// against a writer currently inside its critical section: if that
-	// writer's WriteFileDurable is mid-rename, the bump waits for it
-	// to finish before the unlink removes whatever it landed — the
-	// bump does not deadlock against a writer held at
-	// rescueWriteBarrier because such a writer has not yet taken
-	// rescueMu. #16783: rescueMu is held across the unlink and dir
-	// fsync (not released after the bump) so a save claiming a later
-	// generation cannot interleave its durable write between the
-	// bump and the unlink and then be unlinked by this delete.
+	// unlinking. A save that claimed an earlier generation and is still
+	// in flight observes rescueAppliedGen >= its generation under
+	// rescueMu and refuses to recreate the file. A save claiming a later
+	// generation recreates rescue.conf if it applies after this delete;
+	// if it applies first, the higher applied generation makes this
+	// delete skip its unlink (#17825). rescueAppliedGen is updated under
+	// rescueMu (not s.mu), ordering the delete against a writer already
+	// inside its critical section: the delete waits for its durable write
+	// to finish, then removes it unless a still-newer operation applied.
+	// It does not wait on a writer held at rescueWriteBarrier because
+	// that writer has not yet taken rescueMu. #16783: rescueMu remains
+	// held across the unlink and dir fsync.
 	s.mu.Lock()
 	s.rescueSeq++
 	myGen := s.rescueSeq
 	s.mu.Unlock()
+	rescueDeleteClaimBarrier()
 	s.rescueMu.Lock()
 	defer s.rescueMu.Unlock()
+	if myGen < s.rescueAppliedGen {
+		// A newer rescue operation applied while this delete was between
+		// claiming its generation and taking rescueMu. Do not remove state
+		// that was saved successfully after this delete began (#17825).
+		slog.Info("rescue configuration deletion superseded",
+			"path", path, "generation", myGen, "applied_generation", s.rescueAppliedGen)
+		return fmt.Errorf("delete rescue config: %w", ErrRescueDeleteSuperseded)
+	}
 	if myGen > s.rescueAppliedGen {
 		s.rescueAppliedGen = myGen
 	}

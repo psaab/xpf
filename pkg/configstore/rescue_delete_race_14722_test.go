@@ -266,3 +266,74 @@ func TestDeleteRescueConfigDoesNotUnlinkLaterSave_16783(t *testing.T) {
 		t.Fatalf("rescue.conf = %q, want the later save's content", got)
 	}
 }
+
+// TestDeleteRescueConfigSkipsNewerSave_17825 covers the claim-to-lock
+// interleaving missed by #16783: the delete claims generation N, a save
+// claims and applies N+1 while the delete is paused before rescueMu, then
+// the delete must not unlink the newer rescue.conf.
+func TestDeleteRescueConfigSkipsNewerSave_17825(t *testing.T) {
+	restoreRollbackSeams(t)
+	s := newTestStore(t)
+	if _, err := s.SyncApply("system { host-name before-delete-17825; }", nil); err != nil {
+		t.Fatalf("SyncApply before-delete: %v", err)
+	}
+	if err := s.SaveRescueConfig(); err != nil {
+		t.Fatalf("initial SaveRescueConfig: %v", err)
+	}
+	rescuePath := s.rescuePath()
+	if _, err := os.Stat(rescuePath); err != nil {
+		t.Fatalf("rescue.conf must exist after initial save: %v", err)
+	}
+
+	claimEntered := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	var claimOnce, releaseOnce sync.Once
+	releaseDelete := func() { releaseOnce.Do(func() { close(releaseClaim) }) }
+	oldBarrier := rescueDeleteClaimBarrier
+	t.Cleanup(func() { rescueDeleteClaimBarrier = oldBarrier })
+	rescueDeleteClaimBarrier = func() {
+		claimOnce.Do(func() { close(claimEntered) })
+		<-releaseClaim
+	}
+	defer releaseDelete()
+
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- s.DeleteRescueConfig() }()
+	select {
+	case <-claimEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete did not pause after claiming its generation")
+	}
+
+	if _, err := s.SyncApply("system { host-name newer-save-17825; }", nil); err != nil {
+		t.Fatalf("SyncApply newer save: %v", err)
+	}
+	if err := s.SaveRescueConfig(); err != nil {
+		t.Fatalf("newer SaveRescueConfig: %v", err)
+	}
+	data, err := os.ReadFile(rescuePath)
+	if err != nil {
+		t.Fatalf("read rescue.conf after newer save: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "newer-save-17825") {
+		t.Fatalf("newer save content missing before delete resumes: %q", got)
+	}
+
+	releaseDelete()
+	var deleteErr error
+	select {
+	case deleteErr = <-deleteDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("DeleteRescueConfig did not finish after releasing claim barrier")
+	}
+	data, err = os.ReadFile(rescuePath)
+	if err != nil {
+		t.Fatalf("rescue.conf missing after stale delete resumed: %v", err)
+	}
+	if got := string(data); !strings.Contains(got, "newer-save-17825") {
+		t.Fatalf("stale delete replaced newer rescue.conf: %q", got)
+	}
+	if !errors.Is(deleteErr, ErrRescueDeleteSuperseded) {
+		t.Fatalf("DeleteRescueConfig error = %v, want ErrRescueDeleteSuperseded", deleteErr)
+	}
+}
