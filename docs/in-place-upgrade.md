@@ -1161,8 +1161,8 @@ worst the drain times out and the local node is restored to forwarding.
 The LANE-1 in-place rolling path had **no session-sync version check at all**
 until #7990, and the gap was structural rather than an oversight: there was no
 channel. `SessionSyncWireVersion` was advertised only in the image manifest
-(`xpfd protocol-versions`) and consumed only by `GateMixedBaseSwap` — the
-LANE-2 image-replace gate. The heartbeat carries `HAProtocolVersion` and nothing
+(`xpfd protocol-versions`) and consumed only by the LANE-2 image-replace
+gate (`_gate_mixed_base`, the Python executor of `GateProtocolCompat`). The heartbeat carries `HAProtocolVersion` and nothing
 about the sync wire, and the session-sync frame header has no on-wire version
 field.
 
@@ -2464,7 +2464,8 @@ node from a new baked image ONE AT A TIME (built on the existing per-node
    `xpf-<ver>.manifest` (the `ha-protocol-version` /
    `ha-protocol-min-compat` / `session-sync-protocol-version` fields the
    bake records from `xpfd protocol-versions`) and the running peer's live
-   `xpfd protocol-versions`, and applies `upgrade.GateMixedBaseSwap`
+   `xpfd protocol-versions`, and applies `_gate_mixed_base` (the Python
+executor of `upgrade.GateProtocolCompat`, RefuseUnknownWire; #17091)
 
    **Signed gate input (#5042).** The `xpf-<ver>.manifest` sidecar is
    included in the signed `xpf-<ver>.SHA256SUMS` set at bake time, and

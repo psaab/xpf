@@ -139,9 +139,9 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// every value at commit; ValueString (not a new ValueType) because
 		// the accepted form is the OpenSSH public-key grammar the shared
 		// validator defines, and the placeholder stays "<key>".
-		"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
-		"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
-		"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
+		"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
+		"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
+		"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
 	}},
 	"archival": {desc: "Configuration archival", children: map[string]*schemaNode{
 		"configuration": {desc: "Configuration archival", children: map[string]*schemaNode{
@@ -425,9 +425,9 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 					"plain-text-password":       plainTextPasswordLeaf15053("plain-text-password"),
 					"plain-text-password-value": plainTextPasswordLeaf15053("plain-text-password-value"),
 					// #16740: same commit-time key gate as root-authentication.
-					"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
-					"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
-					"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
+					"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
+					"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
+					"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
 				}},
 			}},
 	}},

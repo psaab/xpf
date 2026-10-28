@@ -98,3 +98,31 @@ func TestCLIShowNATDeterministicErrors(t *testing.T) {
 		t.Fatalf("expected error for out-of-range port")
 	}
 }
+
+// #17225: the local copy used to accept `pool`, `bogus`, `poo web` and
+// `pool web extra` and silently drop the selector (the remote copy was
+// made strict by #13199). Both now use cliterm.ParseNATPoolSelector.
+func TestCLIShowNATDeterministicRejectsMalformedPool17225(t *testing.T) {
+	c := &CLI{dp: &appliedViewCLIDP{Manager: dataplane.New(), view: deterministicV4CLIView(1)}}
+	for _, args := range [][]string{
+		{"internal-host", "100.64.0.5", "pool"},
+		{"internal-host", "100.64.0.5", "bogus"},
+		{"internal-host", "100.64.0.5", "poo", "web"},
+		{"internal-host", "100.64.0.5", "pool", "web", "extra"},
+		{"nat-ip", "203.0.113.1", "nat-port", "3900", "pool"},
+		{"nat-ip", "203.0.113.1", "nat-port", "3900", "pool", "web", "extra"},
+	} {
+		if err := c.showNATDeterministic(args); err == nil {
+			t.Errorf("showNATDeterministic(%v): expected usage error for malformed pool suffix", args)
+		}
+	}
+	// Control: a well-formed selector still resolves.
+	out := captureStdout(t, func() {
+		if err := c.showNATDeterministic([]string{"internal-host", "100.64.0.5", "pool", "cgn-pool"}); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+	if !strings.Contains(out, "203.0.113.1") {
+		t.Fatalf("expected mapped address in output:\n%s", out)
+	}
+}

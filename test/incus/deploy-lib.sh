@@ -30,9 +30,11 @@
 # r() remote prefix vs setup.sh INSTANCE_NAME). They depend on info()/warn()/die()
 # being defined by the sourcing script (both define them identically).
 
-# deploy_managed_bins is the set of binaries the deploy paths push into
-# /usr/local/sbin and that the #1917 upgrade machinery links/pins. Keep in
-# sync with pkg/upgrade manifest.Names() (xpfd, cli, xpf-userspace-dp).
+# deploy_managed_bins is the push set: the binaries the raw deploy paths
+# push into /usr/local/sbin. It is deliberately manifest.Names() minus
+# xpf-day0-config, which raw deploy never pushes (it ships only inside
+# the .deb) — this is an intentional subset, pinned by
+# TestManagedBinaryDriftCanary (#17101), not a stale copy of the SSOT.
 deploy_managed_bins=(xpfd cli xpf-userspace-dp)
 
 # Resolve the LAN target for liveness priming using the same remote-qualified

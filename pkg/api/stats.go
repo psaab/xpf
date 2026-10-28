@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"net"
 	"net/http"
 	"sort"
@@ -74,61 +73,72 @@ func (s *Server) globalStatsHandler(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 
-	// #3345: real read failures remain fatal; an explicitly unsupported
-	// counter is reported as unavailable while the other stats stay useful.
-	var readErr error
-	readCounter := func(idx uint32) uint64 {
-		v, err := s.dp.ReadGlobalCounter(idx)
-		if err == nil {
-			return v
+	// #17193: one shared snapshot classifies every global counter once.
+	// #3345: real read failures remain fatal; #13274: an explicitly
+	// unsupported counter is reported in unavailable_counters while the
+	// other stats stay useful (its numeric field is not authoritative).
+	snap := dataplane.ReadGlobalCounters(s.dp,
+		dataplane.GlobalCtrRxPackets, dataplane.GlobalCtrTxPackets,
+		dataplane.GlobalCtrDrops, dataplane.GlobalCtrUnknownVLANDrops,
+		dataplane.GlobalCtrDstMACDrops, dataplane.GlobalCtrSessionsNew,
+		dataplane.GlobalCtrSessionsClosed, dataplane.GlobalCtrScreenDrops,
+		dataplane.GlobalCtrPolicyDeny, dataplane.GlobalCtrNATAllocFail,
+		dataplane.GlobalCtrHostInboundDeny, dataplane.GlobalCtrHostInbound,
+		dataplane.GlobalCtrNAT64Xlate, dataplane.GlobalCtrTCEgressPackets,
+		dataplane.GlobalCtrFabricRedirect, dataplane.GlobalCtrFabricFwdDrop,
+		dataplane.GlobalCtrFlowCacheHit, dataplane.GlobalCtrFlowCacheMiss,
+		dataplane.GlobalCtrFlowCacheFlush, dataplane.GlobalCtrFlowCacheInvalidate)
+	value := func(idx uint32) uint64 {
+		v, _ := snap.Value(idx)
+		return v
+	}
+	stats.RxPackets = value(dataplane.GlobalCtrRxPackets)
+	stats.TxPackets = value(dataplane.GlobalCtrTxPackets)
+	stats.Drops = value(dataplane.GlobalCtrDrops)
+	stats.UnknownVLANDrops = value(dataplane.GlobalCtrUnknownVLANDrops)
+	stats.DstMACDrops = value(dataplane.GlobalCtrDstMACDrops)
+	stats.SessionsCreated = value(dataplane.GlobalCtrSessionsNew)
+	stats.SessionsClosed = value(dataplane.GlobalCtrSessionsClosed)
+	stats.ScreenDrops = value(dataplane.GlobalCtrScreenDrops)
+	stats.PolicyDenies = value(dataplane.GlobalCtrPolicyDeny)
+	stats.NATAllocFails = value(dataplane.GlobalCtrNATAllocFail)
+	stats.HostInboundDeny = value(dataplane.GlobalCtrHostInboundDeny)
+	stats.HostInboundAllowed = value(dataplane.GlobalCtrHostInbound)
+	stats.NAT64Translations = value(dataplane.GlobalCtrNAT64Xlate)
+	stats.TCEgressPackets = value(dataplane.GlobalCtrTCEgressPackets)
+	stats.FabricRedirects = value(dataplane.GlobalCtrFabricRedirect)
+	stats.FabricFwdDrops = value(dataplane.GlobalCtrFabricFwdDrop)
+	stats.FlowCacheHits = value(dataplane.GlobalCtrFlowCacheHit)
+	stats.FlowCacheMisses = value(dataplane.GlobalCtrFlowCacheMiss)
+	stats.FlowCacheFlushes = value(dataplane.GlobalCtrFlowCacheFlush)
+	stats.FlowCacheInvalidates = value(dataplane.GlobalCtrFlowCacheInvalidate)
+	// #13274 read order, preserved: the unavailable list is built in the
+	// historic append order (tc, fabric, flush, invalidate as first
+	// encountered by the old readCounter sequence). The snapshot
+	// preserves request order, which for the four unsourced indexes
+	// differs, so project explicitly.
+	for _, idx := range []uint32{
+		dataplane.GlobalCtrTCEgressPackets, dataplane.GlobalCtrFabricRedirect,
+		dataplane.GlobalCtrFlowCacheFlush, dataplane.GlobalCtrFlowCacheInvalidate,
+	} {
+		if snap.IsUnavailable(idx) {
+			stats.UnavailableCounters = append(stats.UnavailableCounters, dataplane.GlobalCounterName(idx))
 		}
-		if errors.Is(err, dataplane.ErrCounterNotPopulated) {
-			switch idx {
-			case dataplane.GlobalCtrFlowCacheFlush:
-				stats.UnavailableCounters = append(stats.UnavailableCounters, "flow_cache_flushes")
-			case dataplane.GlobalCtrFlowCacheInvalidate:
-				stats.UnavailableCounters = append(stats.UnavailableCounters, "flow_cache_invalidations")
-			case dataplane.GlobalCtrTCEgressPackets:
-				stats.UnavailableCounters = append(stats.UnavailableCounters, "tc_egress_packets")
-			case dataplane.GlobalCtrFabricRedirect:
-				stats.UnavailableCounters = append(stats.UnavailableCounters, "fabric_redirects")
-			default:
-				if readErr == nil {
-					readErr = err
-				}
-			}
-			return 0
+	}
+	// Any other unavailable index (future reclassification) is named too,
+	// after the historic four, instead of being silently dropped.
+	for _, idx := range snap.Unavailable {
+		switch idx {
+		case dataplane.GlobalCtrTCEgressPackets, dataplane.GlobalCtrFabricRedirect,
+			dataplane.GlobalCtrFlowCacheFlush, dataplane.GlobalCtrFlowCacheInvalidate:
+		default:
+			stats.UnavailableCounters = append(stats.UnavailableCounters, dataplane.GlobalCounterName(idx))
 		}
-		if readErr == nil {
-			readErr = err
-		}
-		return 0
 	}
 
-	stats.RxPackets = readCounter(dataplane.GlobalCtrRxPackets)
-	stats.TxPackets = readCounter(dataplane.GlobalCtrTxPackets)
-	stats.Drops = readCounter(dataplane.GlobalCtrDrops)
-	stats.UnknownVLANDrops = readCounter(dataplane.GlobalCtrUnknownVLANDrops)
-	stats.DstMACDrops = readCounter(dataplane.GlobalCtrDstMACDrops)
-	stats.SessionsCreated = readCounter(dataplane.GlobalCtrSessionsNew)
-	stats.SessionsClosed = readCounter(dataplane.GlobalCtrSessionsClosed)
-	stats.ScreenDrops = readCounter(dataplane.GlobalCtrScreenDrops)
-	stats.PolicyDenies = readCounter(dataplane.GlobalCtrPolicyDeny)
-	stats.NATAllocFails = readCounter(dataplane.GlobalCtrNATAllocFail)
-	stats.HostInboundDeny = readCounter(dataplane.GlobalCtrHostInboundDeny)
-	stats.HostInboundAllowed = readCounter(dataplane.GlobalCtrHostInbound)
-	stats.NAT64Translations = readCounter(dataplane.GlobalCtrNAT64Xlate)
-	stats.TCEgressPackets = readCounter(dataplane.GlobalCtrTCEgressPackets)
-	stats.FabricRedirects = readCounter(dataplane.GlobalCtrFabricRedirect)
-	stats.FabricFwdDrops = readCounter(dataplane.GlobalCtrFabricFwdDrop)
-	stats.FlowCacheHits = readCounter(dataplane.GlobalCtrFlowCacheHit)
-	stats.FlowCacheMisses = readCounter(dataplane.GlobalCtrFlowCacheMiss)
-	stats.FlowCacheFlushes = readCounter(dataplane.GlobalCtrFlowCacheFlush)
-	stats.FlowCacheInvalidates = readCounter(dataplane.GlobalCtrFlowCacheInvalidate)
-
-	if readErr != nil {
+	if snap.Err != nil {
 		writeError(w, http.StatusInternalServerError,
-			"global counter read failed: "+readErr.Error())
+			"global counter read failed: "+snap.Err.Error())
 		return
 	}
 

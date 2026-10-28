@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -48,7 +49,7 @@ func (c *ctl) handleShow(args []string) error {
 						}
 						return c.showCommand("show chassis cluster " + args[2])
 					case "control-plane", "data-plane", "ip-monitoring", "fabric":
-						topic, filter, err := clusterSubsystemView(args[2], args[3:])
+						topic, filter, err := cliterm.ClusterSubsystemView(args[2], args[3:])
 						if err != nil {
 							return err
 						}
@@ -155,10 +156,10 @@ func (c *ctl) handleShow(args []string) error {
 		// table/instance/protocol selector, an unknown subcommand, and any
 		// unrecognised trailing token must error instead of widening to
 		// showRoutes() (route-all, the full table) or silently dropping the
-		// trailing token. The usage string is duplicated verbatim from
-		// pkg/cli (showRouteUsage); the two binaries cannot share the const
-		// without an import cycle through the CLI package.
-		const showRouteUsage = "usage: show route [<destination> [exact|longer|orlonger]] | show route [terse|detail|summary|fib] | show route table <name> | show route instance <name> | show route protocol <name>"
+		// trailing token. The usage string is cliterm.ShowRouteUsage
+		// (#17230), shared with pkg/cli via the dependency-light package
+		// both binaries already import.
+		showRouteUsage := cliterm.ShowRouteUsage
 		if len(args) == 1 {
 			return c.showRoutes()
 		}
@@ -473,61 +474,6 @@ func parseShowDisplay(pipe []string, allowJSON, allowXML, allowInheritance bool)
 		}
 	}
 	return 0, fmt.Errorf("unknown display format %q", pipe[1])
-}
-
-// clusterSubsystemView maps a `show chassis cluster <sub> [arg ...]` request to
-// the text-proxy topic (and optional filter) to render. sub is the subsystem
-// token (args[2]); rest is everything after it (args[3:]).
-//
-// #5459 (typo suppression): historically each subsystem case fell back to its
-// default view for ANY value of rest[0], so an operator typo like
-// `show chassis cluster control-plane foobaz` rendered control-plane statistics
-// and exited 0. This mirrors the strict #1827 `show services ip-monitoring`
-// handler instead: a bare subsystem (len(rest)==0) keeps its historical default
-// view, but a present-but-unrecognized token returns a usage error naming the
-// valid subcommands. The recognized paths render exactly the same topic/filter
-// as before. An empty filter is equivalent to showText (showText delegates to
-// showTextFiltered with "").
-func clusterSubsystemView(sub string, rest []string) (topic, filter string, err error) {
-	switch sub {
-	case "control-plane":
-		if len(rest) > 0 && rest[0] != "statistics" {
-			return "", "", fmt.Errorf("unknown control-plane target: %s (expected `statistics`)", rest[0])
-		}
-		return "chassis-cluster-control-plane-statistics", "", nil
-	case "data-plane":
-		if len(rest) > 0 {
-			switch rest[0] {
-			case "statistics":
-				return "chassis-cluster-data-plane-statistics", "", nil
-			case "interfaces":
-				return "chassis-cluster-data-plane-interfaces", "", nil
-			case "fairness":
-				return "chassis-cluster-data-plane-fairness", "", nil
-			case "flows":
-				return "chassis-cluster-data-plane-flows", strings.Join(rest[1:], " "), nil
-			default:
-				return "", "", fmt.Errorf("unknown data-plane target: %s (expected `statistics`, `interfaces`, `fairness`, or `flows`)", rest[0])
-			}
-		}
-		return "chassis-cluster-data-plane-statistics", "", nil
-	case "ip-monitoring":
-		if len(rest) > 0 && rest[0] != "status" {
-			return "", "", fmt.Errorf("unknown ip-monitoring target: %s (expected `status`)", rest[0])
-		}
-		return "chassis-cluster-ip-monitoring-status", "", nil
-	case "fabric":
-		if len(rest) > 0 && rest[0] != "statistics" {
-			return "", "", fmt.Errorf("unknown fabric target: %s (expected `statistics`)", rest[0])
-		}
-		return "chassis-cluster-fabric-statistics", "", nil
-	case "fence-status":
-		if len(rest) > 0 {
-			return "", "", fmt.Errorf("unknown fence-status target: %s", strings.Join(rest, " "))
-		}
-		return "chassis-cluster-fence-status", "", nil
-	}
-	return "", "", fmt.Errorf("unknown cluster subsystem: %s", sub)
 }
 
 // showCommand sends the ShowText topic that a canonical operational command
