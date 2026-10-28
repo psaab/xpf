@@ -280,30 +280,31 @@ func (s *Server) showChassisClusterFabricStatistics(buf *strings.Builder) {
 		fmt.Fprintln(buf, "Dataplane not loaded")
 		return
 	}
-	// #3345: surface a counter-read failure rather than emitting clean zeros
-	// that hide a degraded counter bridge.
-	var readErr error
-	readCtr := func(idx uint32) uint64 {
-		v, err := s.dp.ReadGlobalCounter(idx)
-		if err != nil && readErr == nil {
-			readErr = err
+	// #17193: shared snapshot classification. #3345: a genuine failure
+	// still warns; #13274: GlobalCtrFabricRedirect is known-unsourced on
+	// userspace, so it renders "unavailable" with no warning and no
+	// fabricated 0.
+	snap := dataplane.ReadGlobalCounters(s.dp,
+		dataplane.GlobalCtrFabricRedirect, dataplane.GlobalCtrFabricRedirectFab0,
+		dataplane.GlobalCtrFabricRedirectFab1, dataplane.GlobalCtrFabricRedirectZone,
+		dataplane.GlobalCtrFabricFwdDrop)
+	line := func(label string, idx uint32) {
+		if snap.IsUnavailable(idx) {
+			fmt.Fprintf(buf, "    %-26s %s\n", label, "unavailable")
+			return
 		}
-		return v
+		v, _ := snap.Value(idx)
+		fmt.Fprintf(buf, "    %-26s %d\n", label, v)
 	}
-	total := readCtr(dataplane.GlobalCtrFabricRedirect)
-	fab0 := readCtr(dataplane.GlobalCtrFabricRedirectFab0)
-	fab1 := readCtr(dataplane.GlobalCtrFabricRedirectFab1)
-	zone := readCtr(dataplane.GlobalCtrFabricRedirectZone)
-	drops := readCtr(dataplane.GlobalCtrFabricFwdDrop)
 	fmt.Fprintln(buf, "Fabric redirect statistics:")
-	if readErr != nil {
-		fmt.Fprintf(buf, "warning: fabric counter read failed (statistics may be incomplete): %v\n", readErr)
+	if snap.Err != nil {
+		fmt.Fprintf(buf, "warning: fabric counter read failed (statistics may be incomplete): %v\n", snap.Err)
 	}
-	fmt.Fprintf(buf, "    Total redirects:          %d\n", total)
-	fmt.Fprintf(buf, "    fab0 redirects:           %d\n", fab0)
-	fmt.Fprintf(buf, "    fab1 redirects:           %d\n", fab1)
-	fmt.Fprintf(buf, "    Zone-encoded redirects:   %d\n", zone)
-	fmt.Fprintf(buf, "    Redirect drops:           %d\n", drops)
+	line("Total redirects:", dataplane.GlobalCtrFabricRedirect)
+	line("fab0 redirects:", dataplane.GlobalCtrFabricRedirectFab0)
+	line("fab1 redirects:", dataplane.GlobalCtrFabricRedirectFab1)
+	line("Zone-encoded redirects:", dataplane.GlobalCtrFabricRedirectZone)
+	line("Redirect drops:", dataplane.GlobalCtrFabricFwdDrop)
 	fmt.Fprintln(buf)
 	fmt.Fprintln(buf, "Note: XDP-redirected packets bypass AF_PACKET (tcpdump).")
 	fmt.Fprintln(buf, "Use these counters or 'monitor interface <fab>' for fabric telemetry.")
