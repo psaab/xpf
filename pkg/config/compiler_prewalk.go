@@ -959,15 +959,13 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) (preWalkResult, error) 
 		return preWalkResult{}, err
 	}
 
-	// #16672: a redundancy-group `node` statement that is not exactly
-	// `node <id> priority <value>` — above all the fused
-	// `node 1 priority 100 node 0 priority 200` a missing `;` makes,
-	// which the #8437 gate exempts as a same-keyword repeat and the
-	// compiler then wrote onto the first node, inverting RG primary
-	// placement. Strict at commit; warn on tolerant load, where the
-	// compiler keeps the first node's own priority.
-	rgNodePriorityWarnings16672, err := validateRGNodePriorityShapeAST(
-		tree.Children, opts.lenientRGNodePriorityShape16672)
+	// #16672 rejects fused RG node statements; #17820 requires every RG node
+	// statement to include an explicit priority. Both are strict at commit and
+	// warnings on tolerant loads so persisted configs keep booting (#1960).
+	// This AST walk covers nested, packed, and flat-set spellings before the
+	// compiler can drop a missing priority or misassign one from fused tokens.
+	rgNodePriorityWarnings, err := validateRGNodePriorityShapeAST(
+		tree.Children, opts.lenientRGNodePriorityShape)
 	if err != nil {
 		return preWalkResult{}, err
 	}
@@ -1073,7 +1071,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) (preWalkResult, error) 
 	warnings = append(warnings, monitorWeightWarnings...)
 	warnings = append(warnings, rgArityWarnings...)
 	warnings = append(warnings, clusterUnknownWarnings16456...)
-	warnings = append(warnings, rgNodePriorityWarnings16672...)
+	warnings = append(warnings, rgNodePriorityWarnings...)
 	warnings = append(warnings, garpCountWarnings...)
 	warnings = append(warnings, bareLeafWarnings...)
 	warnings = append(warnings, staticRouteQNHWarnings...)

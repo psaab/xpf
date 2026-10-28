@@ -642,7 +642,7 @@ it was withdrawn. That is a fail-OPEN, the exact defect #3767 H5 closed for
   (an equal pair equality-matches only the CURRENT published pair, whose cache
   entries are already valid), and refusing it would break the #4036
   "timeout-but-landed" IDEMPOTENT RETRY: the partial-republish Go paths
-  (`UpdatePolicyScheduleState`, `PublishRouteOverlaySnapshot`,
+  (`UpdatePolicyScheduleStateWithLatch`, `PublishRouteOverlaySnapshot`,
   `retryDeferredWorkerArmLocked`; an earlier revision listed `Compile`, which
   bumps the generation inline and never reuses one, #9520)
   commit `m.generation` only on Go-observed success and do not consult

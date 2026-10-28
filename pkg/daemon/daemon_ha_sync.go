@@ -967,15 +967,16 @@ func (d *Daemon) getClusterCommsCtx() context.Context {
 	return ctx
 }
 
-// snapshotFabricRefreshChans returns the current fabric refresh channels under
-// clusterCommsMu (#4958). The populateFabricFwd loops receive their channel by
-// value at launch; only the sender (triggerFabricRefresh) reads the live fields,
-// so this snapshot is the single synchronized read point.
-func (d *Daemon) snapshotFabricRefreshChans() (chan struct{}, chan struct{}) {
+// snapshotFabricRefreshChans returns the current fabric refresh channels
+// under clusterCommsMu (#4958), indexed by fabric slot. The
+// populateFabricFwdSlot loops receive their channel by value at launch;
+// only the sender (triggerFabricRefresh) reads the live slot fields, so
+// this snapshot is the single synchronized read point.
+func (d *Daemon) snapshotFabricRefreshChans() [2]chan struct{} {
 	d.clusterCommsMu.Lock()
-	ch0, ch1 := d.fabricRefreshCh, d.fabricRefreshCh1
+	chans := [2]chan struct{}{d.fabricSlots[0].refreshCh, d.fabricSlots[1].refreshCh}
 	d.clusterCommsMu.Unlock()
-	return ch0, ch1
+	return chans
 }
 
 // beginClusterCommsEpoch opens a new cluster-comms epoch (#4958): it bumps
@@ -1059,7 +1060,7 @@ func genGuardCapacityForRuntime(rt dataplane.RuntimeDataPlane) (uint64, bool) {
 // gen still matches the current epoch (#4958), mirroring
 // publishSessionSyncIfCurrent so a superseded constructor does not replace a
 // newer epoch's channels.
-func (d *Daemon) publishFabricRefreshChansIfCurrent(gen uint64, ch0, ch1 chan struct{}) bool {
+func (d *Daemon) publishFabricRefreshChansIfCurrent(gen uint64, chans [2]chan struct{}) bool {
 	d.clusterCommsMu.Lock()
 	defer d.clusterCommsMu.Unlock()
 	if gen != d.clusterCommsGen {
@@ -1067,8 +1068,9 @@ func (d *Daemon) publishFabricRefreshChansIfCurrent(gen uint64, ch0, ch1 chan st
 			"publish_gen", gen, "current_gen", d.clusterCommsGen)
 		return false
 	}
-	d.fabricRefreshCh = ch0
-	d.fabricRefreshCh1 = ch1
+	for slot := range chans {
+		d.fabricSlots[slot].refreshCh = chans[slot]
+	}
 	return true
 }
 
@@ -1319,7 +1321,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				// #15687: do NOT return here without launching the loops
 				// below. startClusterSyncAuxLoops' loops are commsCtx-scoped
 				// and no-op until a peer/session exists, and
-				// populateFabricFwd resolves neighbours independently of a
+				// populateFabricFwdSlot resolves neighbours independently of a
 				// session-sync socket. Returning skipped them for the life
 				// of this comms epoch, so a node whose sync address arrived
 				// after the poll window lost config/DHCP/IPsec/NAT aux sync
@@ -1333,10 +1335,9 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 					"starting aux/fabric loops and marking comms for restart on next apply",
 					"interface", syncIface)
 				d.startClusterSyncAuxLoops(commsCtx, cc)
-				fabRefreshCh := make(chan struct{}, 1)
-				fabRefreshCh1 := make(chan struct{}, 1)
-				if d.publishFabricRefreshChansIfCurrent(commsGen, fabRefreshCh, fabRefreshCh1) {
-					d.startFabricForwardingLoops(commsCtx, cc, fabRefreshCh, fabRefreshCh1)
+				fabRefreshChans := [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}
+				if d.publishFabricRefreshChansIfCurrent(commsGen, fabRefreshChans) {
+					d.startFabricForwardingLoops(commsCtx, cc, fabRefreshChans)
 				}
 				d.markClusterCommsAddressDebt(commsGen)
 				return
@@ -1568,19 +1569,18 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			// single netlink-triggered refresh wakes both the fab0 and
 			// fab1 loops rather than only whichever won a shared-channel
 			// receive (#4038). #4958: build them locally, hand each loop its
-			// OWN channel by value, and publish the shared fields only if this
+			// OWN channel by value, and publish the slot fields only if this
 			// epoch is still current — so a superseded constructor neither
 			// replaces a newer epoch's channels nor lets its loops receive on
 			// a stale field. The loops read the value they were launched with,
-			// never d.fabricRefreshCh, so the sender-side field swap on restart
-			// cannot race them.
-			fabRefreshCh := make(chan struct{}, 1)
-			fabRefreshCh1 := make(chan struct{}, 1)
-			if !d.publishFabricRefreshChansIfCurrent(commsGen, fabRefreshCh, fabRefreshCh1) {
+			// never the published slot channel, so the sender-side field swap
+			// on restart cannot race them.
+			fabRefreshChans := [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}
+			if !d.publishFabricRefreshChansIfCurrent(commsGen, fabRefreshChans) {
 				return
 			}
 
-			d.startFabricForwardingLoops(commsCtx, cc, fabRefreshCh, fabRefreshCh1)
+			d.startFabricForwardingLoops(commsCtx, cc, fabRefreshChans)
 		}()
 	}
 }
@@ -1812,13 +1812,11 @@ func (d *Daemon) stopClusterComms() {
 	d.clusterCommsMu.Lock()
 	ss := d.sessionSync
 	d.sessionSync = nil
-	d.fabricRefreshCh = nil
-	d.fabricRefreshCh1 = nil
-	// #17060: fabric slot state is epoch-scoped like the channels above.
-	// Zero it here — under clusterCommsMu, after the cancel+join above —
-	// so no removed fabric can be probed/refreshed by a later event and
-	// reconcileRGState's fabric gate cannot read a stale populated latch
-	// (see clearFabricSlots).
+	for slot := range d.fabricSlots {
+		d.fabricSlots[slot].refreshCh = nil
+	}
+	// The populate loops are joined above, so clearing epoch state is the
+	// final slot-state write for this comms epoch.
 	d.clearFabricSlots()
 	// #7072: activeClusterTransport is DELIBERATELY NOT cleared here, and the
 	// issue that asked for it is refuted by measurement rather than argument.

@@ -453,73 +453,54 @@ func (c *CLI) handleShowSecurity(args []string) error {
 			// Brief tabular summary
 			fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
 				"From", "To", "Name", "Action", "Hits")
-			passes := 1
-			if fromZone != "" || toZone != "" {
-				passes = 3
-			}
+			// #17075: tier order + applicability from the shared stream.
 			pairFilter := policymatch.NewZonePairPolicyFilter(cfg, fromZone, toZone)
-			for tier := range passes {
-				for setIdx, zpp := range cfg.Security.Policies {
-					// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
-					if zpp == nil {
-						continue
-					}
-					if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
-						continue
-					}
-					policySetID := uint32(setIdx)
-					if passes > 1 && policymatch.ZonePairPolicyFilterTier(zpp.FromZone, zpp.ToZone) != tier {
-						continue
-					}
-					for i, pol := range zpp.Policies {
-						// #3476: skip a nil rule like the runtime walker does.
-						if pol == nil {
-							continue
-						}
-						action := "permit"
-						switch pol.Action {
-						case 1:
-							action = "deny"
-						case 2:
-							action = "reject"
-						}
-						// #12901: a quarantined endpoint scrubs the whole
-						// zone-pair rule; its counter is never coming, so the
-						// read below (and its "not yet published" bookkeeping)
-						// must not run for it.
-						ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
-						ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
-						// Default to "0" (consistent with the hit-count table
-						// and the gRPC/REST surfaces, which render 0 whenever
-						// the counter is unavailable or the knob is off);
-						// overwrite only on a successful gated read.
-						hits := "0"
-						if ruleQuarantined {
-							hits = config.ZoneQuarantineLiveCountersUnavailable
-						} else if (statsEnabled || pol.Count) && readPolicy != nil {
-							counters, err := readPolicy(ruleID)
-							switch {
-							case err == nil:
-								hits = fmt.Sprintf("%d", counters.Packets)
-							case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
-								hits = "n/a" // #7016
-								unpublished++
-							default:
-								if readErr == nil {
-									readErr = err
-								}
-							}
-						} else if !statsEnabled && !pol.Count {
-							// #8177: the "0" above was never read. Explicit rather
-							// than an `else`, because the other way into this branch
-							// is readPolicy == nil (dataplane not loaded), which is
-							// a different fact and must not be counted here.
-							statsDisabled++
-						}
-						fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
-							qualifyZone(zpp.FromZone), qualifyZone(zpp.ToZone), pol.Name, action, hits)
-					}
+			for ref := range policymatch.ZonePairStreamForFilter(policymatch.ConfigZonePairStanzas(cfg), pairFilter) {
+				policySetID := uint32(ref.SetIdx)
+				i, pol := ref.SliceIdx, ref.Policy
+
+				action := "permit"
+				switch pol.Action {
+				case 1:
+					action = "deny"
+				case 2:
+					action = "reject"
 				}
+				// #12901: a quarantined endpoint scrubs the whole
+				// zone-pair rule; its counter is never coming, so the
+				// read below (and its "not yet published" bookkeeping)
+				// must not run for it.
+				ruleQuarantined := isQuarantined(ref.From) || isQuarantined(ref.To)
+				ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
+				// Default to "0" (consistent with the hit-count table
+				// and the gRPC/REST surfaces, which render 0 whenever
+				// the counter is unavailable or the knob is off);
+				// overwrite only on a successful gated read.
+				hits := "0"
+				if ruleQuarantined {
+					hits = config.ZoneQuarantineLiveCountersUnavailable
+				} else if (statsEnabled || pol.Count) && readPolicy != nil {
+					counters, err := readPolicy(ruleID)
+					switch {
+					case err == nil:
+						hits = fmt.Sprintf("%d", counters.Packets)
+					case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
+						hits = "n/a" // #7016
+						unpublished++
+					default:
+						if readErr == nil {
+							readErr = err
+						}
+					}
+				} else if !statsEnabled && !pol.Count {
+					// #8177: the "0" above was never read. Explicit rather
+					// than an `else`, because the other way into this branch
+					// is readPolicy == nil (dataplane not loaded), which is
+					// a different fact and must not be counted here.
+					statsDisabled++
+				}
+				fmt.Printf("%-12s %-12s %-20s %-8s %s\n",
+					qualifyZone(ref.From), qualifyZone(ref.To), pol.Name, action, hits)
 			}
 			policySetID := uint32(len(cfg.Security.Policies))
 			// Global policies in brief view. #3357: a from/to-zone filter no
@@ -638,68 +619,50 @@ func (c *CLI) handleShowSecurity(args []string) error {
 		runtimeIDs := dpuserspace.RuntimePolicyIDs(cfg)
 		policySetID := uint32(len(cfg.Security.Policies))
 		if !globalOnly {
-			passes := 1
-			if fromZone != "" || toZone != "" {
-				passes = 3
-			}
+			// #17075: tier order + applicability from the shared stream (grouped form).
 			pairFilter := policymatch.NewZonePairPolicyFilter(cfg, fromZone, toZone)
-			for tier := range passes {
-				for setIdx, zpp := range cfg.Security.Policies {
-					// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
-					if zpp == nil {
-						continue
+			for stanza := range policymatch.ZonePairStanzasOrdered(policymatch.ConfigZonePairStanzas(cfg), pairFilter) {
+				policySetID := uint32(stanza.SetIdx)
+				// Junos format: "From zone: X, To zone: Y" header
+				fmt.Printf("From zone: %s, To zone: %s\n", qualifyZone(stanza.From), qualifyZone(stanza.To))
+				for _, ref := range stanza.Rules {
+					i, pol := ref.SliceIdx, ref.Policy
+					action := "permit"
+					switch pol.Action {
+					case 1:
+						action = "deny"
+					case 2:
+						action = "reject"
 					}
-					if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
-						continue
+					ruleID := runtimePolicyIndex(runtimeIDs, policySetID, uint32(i))
+					// Junos: Policy: <name>, State: enabled, Index: <N>, Scope Policy: 0, Sequence number: <N>
+					// #3062: a scheduler-inactive policy reports State: inactive.
+					state := policyDetailState(pol.SchedulerName, schedActive, haveSched)
+					fmt.Printf("  Policy: %s, State: %s, Index: %d, Scope Policy: 0, Sequence number: %d\n",
+						pol.Name, state, ruleID, i+1)
+					if pol.Description != "" {
+						fmt.Printf("    Description: %s\n", pol.Description)
 					}
-					policySetID := uint32(setIdx)
-					if passes > 1 && policymatch.ZonePairPolicyFilterTier(zpp.FromZone, zpp.ToZone) != tier {
-						continue
+					fmt.Printf("    Source addresses: %s\n",
+						flatMatchAddresses(pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded))
+					fmt.Printf("    Destination addresses: %s\n",
+						flatMatchAddresses(pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded))
+					fmt.Printf("    Applications: %s\n",
+						strings.Join(pol.Match.Applications, ", "))
+					actionStr := action
+					// #12901: an EMPTY log block (a leniently-loaded bare
+					// `then log`, #3060 — the strict commit path rejects it)
+					// emits no session records and must not read as
+					// logging. SessionLogModes is the SSOT the detail
+					// renderers already gate on, so the standard view
+					// cannot drift from them.
+					if len(pol.Log.SessionLogModes()) > 0 {
+						actionStr += ", log"
 					}
-					// Junos format: "From zone: X, To zone: Y" header
-					fmt.Printf("From zone: %s, To zone: %s\n", qualifyZone(zpp.FromZone), qualifyZone(zpp.ToZone))
-					for i, pol := range zpp.Policies {
-						// #3476: skip a nil rule like the runtime walker does.
-						if pol == nil {
-							continue
-						}
-						action := "permit"
-						switch pol.Action {
-						case 1:
-							action = "deny"
-						case 2:
-							action = "reject"
-						}
-						ruleID := runtimePolicyIndex(runtimeIDs, policySetID, uint32(i))
-						// Junos: Policy: <name>, State: enabled, Index: <N>, Scope Policy: 0, Sequence number: <N>
-						// #3062: a scheduler-inactive policy reports State: inactive.
-						state := policyDetailState(pol.SchedulerName, schedActive, haveSched)
-						fmt.Printf("  Policy: %s, State: %s, Index: %d, Scope Policy: 0, Sequence number: %d\n",
-							pol.Name, state, ruleID, i+1)
-						if pol.Description != "" {
-							fmt.Printf("    Description: %s\n", pol.Description)
-						}
-						fmt.Printf("    Source addresses: %s\n",
-							flatMatchAddresses(pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded))
-						fmt.Printf("    Destination addresses: %s\n",
-							flatMatchAddresses(pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded))
-						fmt.Printf("    Applications: %s\n",
-							strings.Join(pol.Match.Applications, ", "))
-						actionStr := action
-						// #12901: an EMPTY log block (a leniently-loaded bare
-						// `then log`, #3060 — the strict commit path rejects it)
-						// emits no session records and must not read as
-						// logging. SessionLogModes is the SSOT the detail
-						// renderers already gate on, so the standard view
-						// cannot drift from them.
-						if len(pol.Log.SessionLogModes()) > 0 {
-							actionStr += ", log"
-						}
-						if pol.Count {
-							actionStr += ", count"
-						}
-						fmt.Printf("    Action: %s\n", actionStr)
+					if pol.Count {
+						actionStr += ", count"
 					}
+					fmt.Printf("    Action: %s\n", actionStr)
 				}
 			}
 		}

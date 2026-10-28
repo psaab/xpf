@@ -862,12 +862,15 @@ func (c *CLI) refreshPrompt() {
 		c.hostname = h
 	}
 	if c.rl != nil {
-		if c.store.InConfigMode() {
-			c.rl.SetPrompt(c.configPrompt())
-		} else {
-			c.rl.SetPrompt(c.operationalPrompt())
-		}
+		c.rl.SetPrompt(c.promptForCurrentMode())
 	}
+}
+
+func (c *CLI) promptForCurrentMode() string {
+	if c.configOwnedNow() && c.store.InConfigModeForSession(localConfigSessionID) {
+		return c.configPrompt()
+	}
+	return c.operationalPrompt()
 }
 
 func (c *CLI) clusterPrefix() string {

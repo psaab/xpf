@@ -15,13 +15,10 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// #17060 — fabric slot state is epoch-scoped. Pre-fix, stopClusterComms
-// nilled only the refresh channels: both slots' iface/peer/populated state
-// (and the helper identity constraints) survived teardown, RefreshFabricFwd
-// re-probed/refreshed the dead slots from three fire-and-forget
-// `go d.RefreshFabricFwd()` sites with context.Background(), and
-// reconcileRGState's fabric gate read the stale populated latches (masked
-// only by the #15918 helper conjunct).
+// #17060 — fabric slot state is epoch-scoped. Before the fix, stopClusterComms
+// nilled only the refresh channels: iface/peer/populated state and helper
+// identity constraints survived teardown, and reconcileRGState could observe a
+// stale populated latch (masked only by the #15918 helper conjunct).
 
 // seedFabricSlots17060 installs both slots as a populate epoch would:
 // addressed, identity-remembered, populated, with a queued probe pending,
@@ -41,50 +38,45 @@ func seedFabricSlots17060(t *testing.T, d *Daemon) (ch0, ch1 chan struct{}) {
 	ch0 = make(chan struct{}, 1)
 	ch1 = make(chan struct{}, 1)
 	d.clusterCommsMu.Lock()
-	d.fabricRefreshCh = ch0
-	d.fabricRefreshCh1 = ch1
+	d.fabricSlots[0].refreshCh = ch0
+	d.fabricSlots[1].refreshCh = ch1
 	d.clusterCommsMu.Unlock()
 
 	d.fabricMu.Lock()
-	d.fabricIface, d.fabricOverlay = "ge-0-0-0", "fab0"
-	d.fabricPeerIP = net.ParseIP(peer0)
-	d.fabricPeerMAC = mac
-	d.fabricPopulated = true
-	d.fabricIface1, d.fabricOverlay1 = "ge-0-0-5", "fab1"
-	d.fabricPeerIP1 = net.ParseIP(peer1)
-	d.fabricPeerMAC1 = mac
-	d.fabric1Populated = true
-	d.lastFabricProbe = time.Now()
-	d.lastFabricProbe1 = time.Now()
-	d.fabricProbePending = true
-	d.fabricProbePending1 = true
+	d.fabricSlots[0].iface, d.fabricSlots[0].overlay = "ge-0-0-0", "fab0"
+	d.fabricSlots[0].peerIP = net.ParseIP(peer0)
+	d.fabricSlots[0].peerMAC = mac
+	d.fabricSlots[0].populated = true
+	d.fabricSlots[1].iface, d.fabricSlots[1].overlay = "ge-0-0-5", "fab1"
+	d.fabricSlots[1].peerIP = net.ParseIP(peer1)
+	d.fabricSlots[1].peerMAC = mac
+	d.fabricSlots[1].populated = true
+	for slot := range d.fabricSlots {
+		d.fabricSlots[slot].lastProbe = time.Now()
+		d.fabricSlots[slot].probePending = true
+	}
 	d.fabricMu.Unlock()
 	return ch0, ch1
 }
 
 func assertFabricSlotsZeroed17060(t *testing.T, d *Daemon) {
 	t.Helper()
+	chans := d.snapshotFabricRefreshChans()
+	if chans[0] != nil || chans[1] != nil {
+		t.Fatalf("refresh channels survived teardown: %v %v", chans[0], chans[1])
+	}
 	d.fabricMu.RLock()
 	defer d.fabricMu.RUnlock()
-	if d.fabricIface != "" || d.fabricOverlay != "" || d.fabricPeerIP != nil ||
-		len(d.fabricPeerMAC) != 0 || d.fabricPopulated {
-		t.Fatalf("fab0 slot survived teardown: iface=%q overlay=%q peer=%v mac=%v populated=%v (#17060)",
-			d.fabricIface, d.fabricOverlay, d.fabricPeerIP, d.fabricPeerMAC, d.fabricPopulated)
-	}
-	if d.fabricIface1 != "" || d.fabricOverlay1 != "" || d.fabricPeerIP1 != nil ||
-		len(d.fabricPeerMAC1) != 0 || d.fabric1Populated {
-		t.Fatalf("fab1 slot survived teardown: iface=%q overlay=%q peer=%v mac=%v populated=%v (#17060)",
-			d.fabricIface1, d.fabricOverlay1, d.fabricPeerIP1, d.fabricPeerMAC1, d.fabric1Populated)
-	}
-	if !d.lastFabricProbe.IsZero() || !d.lastFabricProbe1.IsZero() ||
-		d.fabricProbePending || d.fabricProbePending1 {
-		t.Fatal("probe rate-limit/pending state survived teardown (#17060)")
-	}
-	if !d.lastFabricLog0.IsZero() || !d.lastFabricLog1.IsZero() {
-		t.Fatal("fabric refresh failure log rate limits survived teardown (#17060)")
-	}
-	if got0, got1 := d.snapshotFabricRefreshChans(); got0 != nil || got1 != nil {
-		t.Fatalf("refresh channels survived teardown: %v %v", got0, got1)
+	for slot := range d.fabricSlots {
+		s := &d.fabricSlots[slot]
+		if s.iface != "" || s.overlay != "" || s.peerIP != nil ||
+			len(s.peerMAC) != 0 || s.populated {
+			t.Fatalf("fabric slot %d survived teardown: iface=%q overlay=%q peer=%v mac=%v populated=%v (#17060)",
+				slot, s.iface, s.overlay, s.peerIP, s.peerMAC, s.populated)
+		}
+		if !s.lastProbe.IsZero() || s.probePending || !s.lastLog.IsZero() {
+			t.Fatalf("fabric slot %d probe/log state survived teardown (#17060)", slot)
+		}
 	}
 }
 
@@ -96,10 +88,9 @@ func TestStopClusterCommsClearsFabricSlots17060(t *testing.T) {
 	d := &Daemon{}
 	seedFabricSlots17060(t, d)
 	d.fabricMu.Lock()
-	d.lastFabricLog0 = time.Now()
-	d.lastFabricLog1 = time.Now()
+	d.fabricSlots[0].lastLog = time.Now()
+	d.fabricSlots[1].lastLog = time.Now()
 	d.fabricMu.Unlock()
-
 	d.stopClusterComms()
 
 	assertFabricSlotsZeroed17060(t, d)
@@ -146,10 +137,10 @@ func TestStopClusterCommsClearsFabricSlots17060(t *testing.T) {
 	}
 	ctx, gen, _ := d.beginClusterCommsEpoch(context.Background())
 	ch0, ch1 := make(chan struct{}, 1), make(chan struct{}, 1)
-	if !d.publishFabricRefreshChansIfCurrent(gen, ch0, ch1) {
+	if !d.publishFabricRefreshChansIfCurrent(gen, [2]chan struct{}{ch0, ch1}) {
 		t.Fatal("could not publish restarted fabric channels (#17060)")
 	}
-	d.startFabricForwardingLoops(ctx, cc, ch0, ch1)
+	d.startFabricForwardingLoops(ctx, cc, [2]chan struct{}{ch0, ch1})
 	t.Cleanup(func() {
 		release()
 		d.stopClusterComms()
@@ -165,15 +156,15 @@ func TestStopClusterCommsClearsFabricSlots17060(t *testing.T) {
 		}
 	}
 	d.fabricMu.RLock()
-	restarted := d.fabricIface == wantIface0 &&
-		d.fabricOverlay == wantOverlay0 && d.fabricPeerIP.Equal(net.ParseIP(cc.FabricPeerAddress)) &&
-		d.fabricIface1 == wantIface1 && d.fabricOverlay1 == wantOverlay1 &&
-		d.fabricPeerIP1.Equal(net.ParseIP(cc.Fabric1PeerAddress))
+	restarted := d.fabricSlots[0].iface == wantIface0 &&
+		d.fabricSlots[0].overlay == wantOverlay0 && d.fabricSlots[0].peerIP.Equal(net.ParseIP(cc.FabricPeerAddress)) &&
+		d.fabricSlots[1].iface == wantIface1 && d.fabricSlots[1].overlay == wantOverlay1 &&
+		d.fabricSlots[1].peerIP.Equal(net.ParseIP(cc.Fabric1PeerAddress))
 	d.fabricMu.RUnlock()
 	if !entered[wantIface0] || !entered[wantIface1] || !restarted {
 		d.fabricMu.RLock()
-		gotIface0, gotOverlay0, gotPeer0 := d.fabricIface, d.fabricOverlay, d.fabricPeerIP.String()
-		gotIface1, gotOverlay1, gotPeer1 := d.fabricIface1, d.fabricOverlay1, d.fabricPeerIP1.String()
+		gotIface0, gotOverlay0, gotPeer0 := d.fabricSlots[0].iface, d.fabricSlots[0].overlay, d.fabricSlots[0].peerIP.String()
+		gotIface1, gotOverlay1, gotPeer1 := d.fabricSlots[1].iface, d.fabricSlots[1].overlay, d.fabricSlots[1].peerIP.String()
 		d.fabricMu.RUnlock()
 		t.Fatalf("new epoch did not republish both fabric slot configs: entered=%v restarted=%v got=(%q,%q,%s)/(%q,%q,%s) want=(%q,%q,%s)/(%q,%q,%s) (#17060)",
 			entered, restarted, gotIface0, gotOverlay0, gotPeer0, gotIface1, gotOverlay1, gotPeer1,
@@ -195,12 +186,14 @@ func TestFabricConstraintClearedOnStop17060(t *testing.T) {
 		fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 	})
 	// Arm the identity as an earlier address-matched resolution would.
+	d.fabricMu.Lock()
+	d.fabricSlots[0].peerIP = net.ParseIP("10.99.13.2")
+	d.fabricMu.Unlock()
 	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
 	// Seed the slot state stop must clear.
 	d.fabricMu.Lock()
-	d.fabricIface, d.fabricOverlay = "ge-0-0-0", "fab0"
-	d.fabricPeerIP = net.ParseIP("10.99.13.2")
-	d.fabricPopulated = true
+	d.fabricSlots[0].iface, d.fabricSlots[0].overlay = "ge-0-0-0", "fab0"
+	d.fabricSlots[0].populated = true
 	d.fabricMu.Unlock()
 
 	d.stopClusterComms()
@@ -220,11 +213,7 @@ func TestFabricConstraintClearedOnStop17060(t *testing.T) {
 // (slot-selected bool under fabricMu); see refreshFabricPeer.
 func refreshFabricPeerChained17060(d *Daemon, slot int, ok bool) {
 	// Caller holds fabricMu.
-	if slot == 1 {
-		d.fabric1Populated = ok
-	} else {
-		d.fabricPopulated = ok
-	}
+	d.fabricSlots[slot].populated = ok
 }
 
 // TestRefreshFabricFwdRaceWithPopulateLatch17060 runs RefreshFabricFwd
@@ -265,9 +254,9 @@ func TestRefreshFabricFwdRaceWithPopulateLatch17060(t *testing.T) {
 	// Drain any coalesced pokes so no sender remains; then the latch must
 	// equal each writer's final write (RefreshFabricFwd never writes it).
 	d.fabricMu.RLock()
-	got := []bool{d.fabricPopulated, d.fabric1Populated}
+	got := []bool{d.fabricSlots[0].populated, d.fabricSlots[1].populated}
 	d.fabricMu.RUnlock()
-	for slot := 0; slot < 2; slot++ {
+	for slot := range 2 {
 		if got[slot] != last[slot] {
 			t.Fatalf("slot %d populated=%v, want last write %v — RefreshFabricFwd raced the latch (#17060)",
 				slot, got[slot], last[slot])
@@ -305,10 +294,10 @@ func TestRefreshFabricFwdWakesEpochLoops17060(t *testing.T) {
 	ch0, ch1 := seedFabricSlots17060(t, d)
 	// Reset probe timestamps so queueFabricProbe queues fresh probes.
 	d.fabricMu.Lock()
-	d.lastFabricProbe = time.Time{}
-	d.lastFabricProbe1 = time.Time{}
-	d.fabricProbePending = false
-	d.fabricProbePending1 = false
+	d.fabricSlots[0].lastProbe = time.Time{}
+	d.fabricSlots[1].lastProbe = time.Time{}
+	d.fabricSlots[0].probePending = false
+	d.fabricSlots[1].probePending = false
 	d.fabricMu.Unlock()
 	d.linkByNameFn = func(string) (netlink.Link, error) {
 		return nil, errors.New("no link in hermetic cell")
@@ -324,7 +313,7 @@ func TestRefreshFabricFwdWakesEpochLoops17060(t *testing.T) {
 		}
 	}
 	d.fabricMu.RLock()
-	p0, p1 := d.fabricProbePending, d.fabricProbePending1
+	p0, p1 := d.fabricSlots[0].probePending, d.fabricSlots[1].probePending
 	d.fabricMu.RUnlock()
 	if !p0 || !p1 {
 		t.Fatalf("queued probes = (%v,%v), want both queued for the epoch loops (#17060)", p0, p1)
@@ -415,7 +404,7 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 			peer: "10.99.20.2", parentIdx: 111, overlayIdx: 112,
 			run: func(d *Daemon, ctx context.Context, ch chan struct{}) {
 				d.fabricPopulateWG.Add(1)
-				d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", "10.99.20.2", ch)
+				d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", "10.99.20.2", ch)
 			},
 		},
 		{
@@ -423,7 +412,7 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 			peer: "10.99.21.2", parentIdx: 121, overlayIdx: 122,
 			run: func(d *Daemon, ctx context.Context, ch chan struct{}) {
 				d.fabricPopulateWG.Add(1)
-				d.populateFabricFwd1(ctx, "ge-0-0-5", "fab1", "10.99.21.2", ch)
+				d.populateFabricFwdSlot(ctx, 1, "ge-0-0-5", "fab1", "10.99.21.2", ch)
 			},
 		},
 	} {
@@ -482,11 +471,11 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 				mu.Unlock()
 
 				d.fabricMu.Lock()
+				slot := 0
 				if tc.name == "fab1" {
-					d.fabricProbePending1 = true
-				} else {
-					d.fabricProbePending = true
+					slot = 1
 				}
+				d.fabricSlots[slot].probePending = true
 				d.fabricMu.Unlock()
 				ch <- struct{}{}
 				cancel()
@@ -580,14 +569,14 @@ func TestPopulateLoopJoinedBeforeSlotClear17060(t *testing.T) {
 	d.clusterCommsCancel = cancel
 	ch0 := make(chan struct{}, 1)
 	ch1 := make(chan struct{}, 1)
-	d.fabricRefreshCh = ch0
-	d.fabricRefreshCh1 = ch1
+	d.fabricSlots[0].refreshCh = ch0
+	d.fabricSlots[1].refreshCh = ch1
 	d.clusterCommsMu.Unlock()
 
 	d.fabricPopulateWG.Add(1)
-	go d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", sharedPeer, ch0)
+	go d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", sharedPeer, ch0)
 	d.fabricPopulateWG.Add(1)
-	go d.populateFabricFwd1(ctx, "ge-0-0-5", "fab1", sharedPeer, ch1)
+	go d.populateFabricFwdSlot(ctx, 1, "ge-0-0-5", "fab1", sharedPeer, ch1)
 
 	// Wait until a loop is parked inside the blocking resolver: it has
 	// already stored its config and (via the address-matched neighbour)

@@ -239,13 +239,13 @@ func (d *Daemon) fabricPeerAddrs() []string {
 	var addrs []string
 	if d.syncPeerAddr != "" {
 		addrs = append(addrs, d.syncPeerAddr)
-	} else if d.fabricPeerIP != nil {
-		addrs = append(addrs, d.fabricPeerIP.String())
+	} else if d.fabricSlots[0].peerIP != nil {
+		addrs = append(addrs, d.fabricSlots[0].peerIP.String())
 	}
 	if d.syncPeerAddr1 != "" {
 		addrs = append(addrs, d.syncPeerAddr1)
-	} else if !d.syncPeerAddr1Disabled && d.fabricPeerIP1 != nil {
-		addrs = append(addrs, d.fabricPeerIP1.String())
+	} else if !d.syncPeerAddr1Disabled && d.fabricSlots[1].peerIP != nil {
+		addrs = append(addrs, d.fabricSlots[1].peerIP.String())
 	}
 	return addrs
 }
@@ -771,7 +771,7 @@ func (d *Daemon) startClusterSyncAuxLoops(commsCtx context.Context, cc *config.C
 //
 // Order contract: called only after publishFabricRefreshChansIfCurrent
 // succeeded, and each loop is handed its OWN channel by value (#4038/#4958).
-func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config.ClusterConfig, fabRefreshCh, fabRefreshCh1 chan struct{}) {
+func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config.ClusterConfig, fabRefreshChans [2]chan struct{}) {
 	// Resolve the fabric peer for cross-chassis redirect,
 	// then periodically refresh to correct neighbor drift.
 	// Resolve to physical parent (ge-0-0-0) — BPF runs on
@@ -782,14 +782,10 @@ func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config
 	if fabOverlay == fabParent {
 		fabOverlay = "" // no overlay — legacy mode
 	}
-	// #17060 fold: register each populate loop on fabricPopulateWG on THIS
-	// stack, never inside the goroutine, so stopClusterComms cannot Wait()
-	// past a loop that has not been scheduled yet. (monitorFabricState is
-	// deliberately untracked: it only pokes the refresh channels via
-	// triggerFabricRefresh and never writes slot state, so the clear does
-	// not need to join it.)
+	// Register each loop before its goroutine starts so stop cannot join
+	// before a not-yet-scheduled loop has become visible to the WaitGroup.
 	d.fabricPopulateWG.Add(1)
-	go d.populateFabricFwd(commsCtx, fabParent, fabOverlay, cc.FabricPeerAddress, fabRefreshCh)
+	go d.populateFabricFwdSlot(commsCtx, 0, fabParent, fabOverlay, cc.FabricPeerAddress, fabRefreshChans[0])
 
 	// Resolve the secondary fabric peer if fab1 configured.
 	if cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != "" {
@@ -799,7 +795,7 @@ func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config
 			fab1Overlay = "" // no overlay
 		}
 		d.fabricPopulateWG.Add(1)
-		go d.populateFabricFwd1(commsCtx, fab1Parent, fab1Overlay, cc.Fabric1PeerAddress, fabRefreshCh1)
+		go d.populateFabricFwdSlot(commsCtx, 1, fab1Parent, fab1Overlay, cc.Fabric1PeerAddress, fabRefreshChans[1])
 	}
 
 	// Monitor fabric link/neighbor state via netlink (#124).

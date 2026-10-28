@@ -123,4 +123,9 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"WireGuard uncovered-forward queue lock poison recoveries (#10597).",
 		nil, nil,
 	)
+	c.userspaceTupleGatePoison = prometheus.NewDesc(
+		"xpf_tuple_gate_poison_recoveries_total",
+		"TupleGate lock poison recoveries (#17201).",
+		nil, nil,
+	)
 }

@@ -1091,13 +1091,9 @@ func (m *Manager) ForceRGMaster(rgID int) {
 		return
 	}
 	for _, vi := range m.instances {
-		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid && vi.getState() != StateMaster {
+		if isRethInstance(vi.cfg) && vi.cfg.GroupID == vrid && vi.forceMasterOnce() {
 			slog.Info("vrrp: forcing MASTER (cluster authoritative)",
 				"key", vi.key())
-			vi.mu.Lock()
-			vi.forcePreemptOnce = true
-			vi.mu.Unlock()
-			vi.triggerPreemptNow()
 		}
 	}
 }

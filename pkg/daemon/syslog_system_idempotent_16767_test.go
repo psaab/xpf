@@ -294,3 +294,222 @@ func TestSystemSyslogPerHostFingerprintRebuildsOnlyChanged16767(t *testing.T) {
 		t.Fatal("deduped config must not arm debt")
 	}
 }
+
+// #17828: successful A -> failed B at the same endpoint -> revert A must
+// not resurrect the closed A client. The failed-B apply retires A via the
+// preserving install; the cache must evict that retired entry before any
+// revert reuses it. Control: unchanged A apply after the revert is
+// zero-dial again.
+func TestApplySystemSyslogFailedChangeThenRevertDoesNotReuseClosedClient(t *testing.T) {
+	fake := withSystemSyslogFake16767(t)
+	d := newSystemSyslogDaemon16767(t)
+	host := func(sev string) *config.SyslogHostConfig {
+		return &config.SyslogHostConfig{Address: "collector.example", Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: sev}}}
+	}
+	cfgA := systemSyslogCfg16767(host("info"))
+	cfgB := systemSyslogCfg16767(host("warning"))
+
+	// A succeeds: one dial, one installed client, latched, no debt.
+	d.applySystemSyslog(cfgA)
+	if got := fake.dials.Load(); got != 1 {
+		t.Fatalf("premise: first apply dials=%d want 1", got)
+	}
+	first := d.slogHandler.Clients()
+	if len(first) != 1 {
+		t.Fatalf("premise: first apply installed %d, want 1", len(first))
+	}
+	if d.systemSyslogRetryOwed() {
+		t.Fatal("premise: successful A apply must not arm retry debt")
+	}
+
+	// B (same endpoint, severity change) fails to construct. The install
+	// retires/closes A and the apply arms retry debt.
+	fake.setFail(map[string]bool{"collector.example": true})
+	d.applySystemSyslog(cfgB)
+	if got := fake.dials.Load(); got != 2 {
+		t.Fatalf("premise: failed B apply dials=%d want 2", got)
+	}
+	if got := len(d.slogHandler.Clients()); got != 0 {
+		t.Fatalf("premise: failed B apply installed %d, want 0 (A retired)", got)
+	}
+	if !d.systemSyslogRetryOwed() {
+		t.Fatal("premise: failed B apply must arm retry debt")
+	}
+	if err := first[0].Send(6, "after-failed-change"); err == nil {
+		t.Fatal("premise: retired A client must be closed by the failed-B install")
+	}
+
+	// Revert to A with the constructor healthy again: the closed A
+	// pointer must not be served from the cache.
+	fake.setFail(nil)
+	d.applySystemSyslog(cfgA)
+	if got := fake.dials.Load(); got != 3 {
+		t.Fatalf("#17828: revert to A must re-dial the retired endpoint (dials=%d, want 3); a cache hit here resurrects a closed client", got)
+	}
+	reverted := d.slogHandler.Clients()
+	if len(reverted) != 1 {
+		t.Fatalf("revert installed %d, want 1", len(reverted))
+	}
+	if reverted[0] == first[0] {
+		t.Fatal("#17828: revert reused the closed A client pointer")
+	}
+	if d.systemSyslogRetryOwed() {
+		t.Fatal("successful revert must discharge retry debt")
+	}
+	if err := reverted[0].Send(6, "after-revert"); err != nil {
+		t.Fatalf("#17828: reverted client must send: %v", err)
+	}
+
+	// Control: unchanged A apply after the revert is zero-dial.
+	d.applySystemSyslog(cfgA)
+	if got := fake.dials.Load(); got != 3 {
+		t.Fatalf("control: unchanged apply after revert dialed (dials=%d, want still 3)", got)
+	}
+}
+
+// If an external SetClients call retires a cached system client, the next
+// apply must not recover that closed pointer from the daemon's per-host
+// cache. This is the cache-identity drift control for #17828.
+func TestApplySystemSyslogDoesNotReuseExternallyRetiredClient(t *testing.T) {
+	fake := withSystemSyslogFake16767(t)
+	d := newSystemSyslogDaemon16767(t)
+	cfg := systemSyslogCfg16767(&config.SyslogHostConfig{
+		Address:    "collector.example",
+		Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: "info"}},
+	})
+
+	d.applySystemSyslog(cfg)
+	if got := fake.dials.Load(); got != 1 {
+		t.Fatalf("premise: first apply dials=%d want 1", got)
+	}
+	first := d.slogHandler.Clients()
+	if len(first) != 1 {
+		t.Fatalf("premise: first apply installed %d, want 1", len(first))
+	}
+
+	// A foreign handler swap retires and closes the client's identity while
+	// leaving the daemon's per-host cache untouched.
+	d.slogHandler.SetClients(nil)
+	if err := first[0].Send(6, "after-external-retirement"); err == nil {
+		t.Fatal("premise: foreign SetClients(nil) must close the old client")
+	}
+
+	d.applySystemSyslog(cfg)
+	if got := fake.dials.Load(); got != 2 {
+		t.Fatalf("#17828: apply after external retirement must redial (dials=%d, want 2)", got)
+	}
+	reinstalled := d.slogHandler.Clients()
+	if len(reinstalled) != 1 {
+		t.Fatalf("apply after external retirement installed %d, want 1", len(reinstalled))
+	}
+	if reinstalled[0] == first[0] {
+		t.Fatal("#17828: apply reused the externally retired client")
+	}
+	if err := reinstalled[0].Send(6, "after-rebuild"); err != nil {
+		t.Fatalf("#17828: rebuilt client must send: %v", err)
+	}
+
+	// Control: the rebuilt identical configuration is again zero-dial.
+	d.applySystemSyslog(cfg)
+	if got := fake.dials.Load(); got != 2 {
+		t.Fatalf("control: unchanged apply after rebuild dialed (dials=%d, want still 2)", got)
+	}
+}
+
+// #17828: SetClients closes every former client, including pointers included
+// in the replacement slice. The closed cache entry must defeat the
+// single-host fingerprint gate and be redialed on the unchanged apply.
+func TestApplySystemSyslogSameIdentitySetClientsRedialsClosedClient17828(t *testing.T) {
+	fake := withSystemSyslogFake16767(t)
+	d := newSystemSyslogDaemon16767(t)
+	port, sink := udpSink16767(t)
+	cfg := systemSyslogCfg16767(&config.SyslogHostConfig{
+		Address: "collector.example", Port: port,
+		Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: "info"}},
+	})
+
+	d.applySystemSyslog(cfg)
+	first := d.slogHandler.Clients()
+	if len(first) != 1 || fake.dials.Load() != 1 {
+		t.Fatalf("premise: installed %d clients after %d dials, want 1", len(first), fake.dials.Load())
+	}
+
+	d.slogHandler.SetClients(d.slogHandler.Clients())
+	if !first[0].Closed() {
+		t.Fatal("premise: SetClients(Clients()) must close the reinstalled client")
+	}
+
+	d.applySystemSyslog(cfg)
+	current := d.slogHandler.Clients()
+	if got := fake.dials.Load(); got != 2 {
+		t.Fatalf("#17828: unchanged apply after same-identity SetClients must redial (dials=%d, want 2)", got)
+	}
+	if len(current) != 1 || current[0] == first[0] || current[0].Closed() {
+		t.Fatalf("#17828: unchanged apply did not install a fresh live client: %v", current)
+	}
+	if err := current[0].Send(6, "after-same-identity-setclients"); err != nil {
+		t.Fatalf("#17828: rebuilt client send failed: %v", err)
+	}
+	buf := make([]byte, 2048)
+	_ = sink.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := sink.ReadFromUDP(buf)
+	if err != nil || !strings.Contains(string(buf[:n]), "after-same-identity-setclients") {
+		t.Fatalf("#17828: rebuilt client did not deliver a record: n=%d err=%v data=%q", n, err, buf[:n])
+	}
+}
+
+// #17828: reordered same-identity clients are still terminally closed by
+// SetClients. The reordered handler list must not make the unchanged
+// configuration reuse those closed per-host cache pointers.
+func TestApplySystemSyslogReorderedSetClientsRedialsClosedClients17828(t *testing.T) {
+	fake := withSystemSyslogFake16767(t)
+	d := newSystemSyslogDaemon16767(t)
+	portA, sinkA := udpSink16767(t)
+	portB, sinkB := udpSink16767(t)
+	cfg := systemSyslogCfg16767(
+		&config.SyslogHostConfig{Address: "a.example", Port: portA, Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: "info"}}},
+		&config.SyslogHostConfig{Address: "b.example", Port: portB, Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: "info"}}},
+	)
+
+	d.applySystemSyslog(cfg)
+	first := d.slogHandler.Clients()
+	if len(first) != 2 || fake.dials.Load() != 2 {
+		t.Fatalf("premise: installed %d clients after %d dials, want 2", len(first), fake.dials.Load())
+	}
+
+	d.slogHandler.SetClients([]*logging.SyslogClient{first[1], first[0]})
+	if !first[0].Closed() || !first[1].Closed() {
+		t.Fatal("premise: reordered SetClients must close both former clients")
+	}
+
+	d.applySystemSyslog(cfg)
+	current := d.slogHandler.Clients()
+	if got := fake.dials.Load(); got != 4 {
+		t.Fatalf("#17828: unchanged apply after reordered SetClients must redial both clients (dials=%d, want 4)", got)
+	}
+	if len(current) != 2 || current[0] == first[0] || current[1] == first[1] ||
+		current[0].Closed() || current[1].Closed() {
+		t.Fatalf("#17828: unchanged apply did not install fresh live clients: %v", current)
+	}
+	for i, client := range current {
+		message := []string{"after-reordered-setclients-a", "after-reordered-setclients-b"}[i]
+		if err := client.Send(6, message); err != nil {
+			t.Fatalf("#17828: rebuilt client %d send failed: %v", i, err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		sink *net.UDPConn
+		want string
+	}{
+		{name: "a", sink: sinkA, want: "after-reordered-setclients-a"},
+		{name: "b", sink: sinkB, want: "after-reordered-setclients-b"},
+	} {
+		buf := make([]byte, 2048)
+		_ = tc.sink.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := tc.sink.ReadFromUDP(buf)
+		if err != nil || !strings.Contains(string(buf[:n]), tc.want) {
+			t.Fatalf("#17828: rebuilt client %s did not deliver a record: n=%d err=%v data=%q", tc.name, n, err, buf[:n])
+		}
+	}
+}
