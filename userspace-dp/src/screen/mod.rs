@@ -199,7 +199,7 @@ pub(crate) use unresolved::UnresolvedProfileRef;
 // from `extract_screen_info`, so the crate-wide re-export is test-only
 // (#2189 removed the last non-test consumer in `afxdp/mod.rs`).
 #[cfg(test)]
-pub(crate) use packet::ScreenParseError;
+pub(crate) use packet::{FragView, ScreenParseError};
 pub(crate) use syncookie::{
     SYN_COOKIE_MSS_VALUES, SynCookieAckVerdict, SynCookieChallenge, SynCookieCodec,
     SynCookieClientKey, SynCookieKeyRing, SynCookieTuple, SynCookieValidation,
