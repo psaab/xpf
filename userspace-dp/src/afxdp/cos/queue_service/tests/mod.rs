@@ -207,16 +207,55 @@ fn cos_scheduler_constants_not_in_tx_17173() {
         "fixture sanity: tx/ scan must cover production sources, got {scanned}"
     );
     // (b) Single definition site: exactly one `const NAME` per name
-    // in settle.rs, and no other queue_service production file
-    // defines one (uses via `use super::*` are not definitions).
+    // across all production .rs under src/afxdp/cos/queue_service/
+    // (recursive; the tests/ subtree is test code, not production).
+    // Counting only settle.rs would let a file-local shadow const in
+    // e.g. waterfill.rs shadow the settle.rs definition within that
+    // file (via `use super::*`) and silently retune that file's
+    // scheduler behaviour; counting every production file makes any
+    // such shadow the second definition and fails here. Uses via
+    // `use super::*` are not definitions and do not match
+    // `const NAME`.
     let qs_dir = manifest.join("src/afxdp/cos/queue_service");
-    let settle = std::fs::read_to_string(qs_dir.join("settle.rs"))
-        .expect("read cos/queue_service/settle.rs");
-    for name in NAMES {
+    let mut prod_stack = vec![qs_dir.clone()];
+    let mut prod_scanned = 0usize;
+    let mut def_counts = [0usize; 4];
+    while let Some(dir) = prod_stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()))
+        {
+            let path = entry.expect("queue_service dir entry").path();
+            if path.is_dir() {
+                // tests/ holds test code (this guard included), which
+                // legitimately names the constants; production files
+                // are everything else under queue_service/.
+                if path.file_name().is_some_and(|n| n == "tests") {
+                    continue;
+                }
+                prod_stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                prod_scanned += 1;
+                let src = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+                for (idx, name) in NAMES.iter().enumerate() {
+                    def_counts[idx] += src.matches(&format!("const {name}")).count();
+                }
+            }
+        }
+    }
+    assert!(
+        prod_scanned >= 8,
+        "fixture sanity: queue_service production scan must cover the \
+         production .rs files, got {prod_scanned}"
+    );
+    for (idx, name) in NAMES.iter().enumerate() {
         assert_eq!(
-            settle.matches(&format!("const {name}")).count(),
-            1,
-            "{name} must be defined exactly once in settle.rs (#17173)"
+            def_counts[idx], 1,
+            "{name} must be defined exactly once across production .rs \
+             under src/afxdp/cos/queue_service/ (in settle.rs, #17173); \
+             found {} definition(s) — a shadow const in another \
+             production file (e.g. waterfill.rs) is a second definition",
+            def_counts[idx]
         );
     }
     // (c) The queue_service tx back-edge import must not carry the
