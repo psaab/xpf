@@ -393,6 +393,7 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 		PID:              pid,
 		At:               now,
 		Restarts:         m.helperCrash.Restarts,
+		LastRestartAttempt: m.helperCrash.LastRestartAttempt,
 		// #7250: the generation this retry is fenced on, so
 		// HelperCrashState() can tell an armed restart from an orphaned one.
 		restartGen: g.gen,
