@@ -32,6 +32,9 @@ const rgFused16672 = `chassis {
         cluster-id 1;
         node 0;
         authentication-key test-cluster-psk-16672;
+        control-interface fxp0;
+        peer-address 192.0.2.1;
+        no-private-rg-election;
         redundancy-group 1 {
             %s
         }
@@ -166,5 +169,73 @@ func TestRGFusedNodePriorityLenientWarnsAndKeepsFirst16672(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #17820: unlike the cluster-level node identity, every RG node must declare
+// its own election priority. A missing map entry is clamped to priority 1 at
+// runtime, so strict commits must reject it; tolerant loads retain the existing
+// #1960 warn-and-boot behavior.
+// FAIL-ON-REVERT: restore the bare-node early return and strict compile/commit
+// cells accept these missing priorities.
+func TestRGBareNodePriorityRequired17820(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"bare node 0", `node 0;`},
+		{"bare node 1", `node 1;`},
+		{"bare beside explicit statement", `node 1; node 0 priority 200;`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := hierTree(t, fmt.Sprintf(rgFused16672, tc.body))
+			if _, err := CompileConfig(tree); err == nil {
+				t.Fatalf("bare RG node statement %q committed clean; want #17820 rejection", tc.body)
+			} else if !strings.Contains(err.Error(), "#17820") ||
+				!strings.Contains(err.Error(), "missing required `priority`") {
+				t.Fatalf("bare RG node rejection must name missing priority and #17820: %v", err)
+			}
+		})
+	}
+	t.Run("flat set bare statement", func(t *testing.T) {
+		tree := flatTreeFromSets(t,
+			"set chassis cluster cluster-id 1",
+			"set chassis cluster node 0",
+			"set chassis cluster authentication-key test-cluster-psk-17820",
+			"set chassis cluster redundancy-group 1 node 1")
+		if _, err := CompileConfig(tree); err == nil ||
+			!strings.Contains(err.Error(), "#17820") ||
+			!strings.Contains(err.Error(), "missing required `priority`") {
+			t.Fatalf("flat-set bare RG node must be rejected for missing priority (#17820), got: %v", err)
+		}
+	})
+	t.Run("packed RG line bare statement", func(t *testing.T) {
+		tree := hierTree(t, `chassis {
+    cluster {
+        cluster-id 1;
+        node 0;
+        authentication-key test-cluster-psk-17820;
+        redundancy-group 1 node 1;
+    }
+}`)
+		if _, err := CompileConfig(tree); err == nil ||
+			!strings.Contains(err.Error(), "#17820") ||
+			!strings.Contains(err.Error(), "missing required `priority`") {
+			t.Fatalf("packed bare RG node must be rejected for missing priority (#17820), got: %v", err)
+		}
+	})
+}
+
+func TestRGBareNodePriorityLenientWarns17820(t *testing.T) {
+	tree := hierTree(t, fmt.Sprintf(rgFused16672, `node 1;`))
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient load must boot (#1960): %v", err)
+	}
+	assertWarns(t, cfg.Warnings, "#17820")
+	assertWarns(t, cfg.Warnings, "missing required `priority`")
+	rg := findRG16672(t, cfg)
+	if len(rg.NodePriorities) != 0 {
+		t.Fatalf("bare node must not invent an election priority: %v", rg.NodePriorities)
 	}
 }
