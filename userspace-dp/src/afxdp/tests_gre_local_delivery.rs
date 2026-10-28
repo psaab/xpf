@@ -1540,6 +1540,7 @@ fn gre_decap_does_not_match_wireguard_row_with_same_outer_tuple() {
     let id = 824u16;
     if let Some(ep) = forwarding.tunnel_endpoints.get_mut(&id) {
         ep.mode = "wireguard".to_string();
+        ep.kind = TunnelKind::WireGuard;
     }
     forwarding.gre_decap_index.clear();
 
@@ -1564,6 +1565,7 @@ fn gre_decap_rejects_non_gre_candidate_even_if_indexed() {
     let id = 824u16;
     if let Some(ep) = forwarding.tunnel_endpoints.get_mut(&id) {
         ep.mode = "wireguard".to_string();
+        ep.kind = TunnelKind::WireGuard;
     }
     // Index intentionally left pointing at the now-WireGuard endpoint to
     // exercise the per-candidate kind re-check.

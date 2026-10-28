@@ -26,16 +26,14 @@ use super::*;
 /// any heartbeat-gating logic that checks
 /// `now_ns - bind_time_ns < grace_period`.
 pub(crate) struct WorkerBindMeta {
-    /// Reserved for heartbeat-gating logic (matches the
-    /// `#[allow(dead_code)]` allowance on the original
-    /// `BindingWorker::bind_time_ns` field — preserved here so
-    /// extraction doesn't regress warning hygiene).
-    #[allow(dead_code)]
+    /// Reserved for heartbeat-gating logic (matches the expiring
+    /// expectation on the original `BindingWorker::bind_time_ns`
+    /// field — preserved here so extraction doesn't regress warning hygiene).
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(crate) bind_time_ns: u64,
-    /// Reserved for heartbeat-gating logic (matches the
-    /// `#[allow(dead_code)]` allowance on the original
-    /// `BindingWorker::bind_mode` field).
-    #[allow(dead_code)]
+    /// Reserved for heartbeat-gating logic (matches the expiring
+    /// expectation on the original `BindingWorker::bind_mode` field).
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(crate) bind_mode: XskBindMode,
     pub(crate) xsk_rx_confirmed: bool,
 }

@@ -651,7 +651,6 @@ impl ScreenState {
     /// the cookie epoch is based on Unix wall-clock seconds, so HA peers use
     /// the same epoch/MAC material across failover when clocks are in sync.
     /// `None` still clears the codec and validated-client cache fail-closed.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn update_syn_cookie_master_key(&mut self, master_key: Option<[u8; 16]>) {
         if let Some(master_key) = master_key {
             let codec = SynCookieCodec::new(master_key);
@@ -824,7 +823,7 @@ impl ScreenState {
     /// Run all screen checks for a packet arriving on the given zone.
     /// Returns `ScreenVerdict::Pass` if the packet is clean, or
     /// `ScreenVerdict::Drop(reason)` if it should be dropped.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn check_packet(
         &mut self,
         zone: &str,
@@ -1737,7 +1736,7 @@ impl ScreenState {
     }
 
     /// Returns true if any zone has session limits, port scan, or IP sweep enabled.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub fn has_advanced_features(&self) -> bool {
         self.zones.values().any(|z| {
             z.profile.session_limit_src > 0

@@ -1649,22 +1649,19 @@ type SessionSync struct {
 	// the active authoritative bulk. They are separate from the received-key
 	// set because a failed transport write must not make that snapshot complete;
 	// semantic helper refusals deliberately do not enter these sets.
-	bulkInstallFailedV4        map[dataplane.SessionKey]struct{}
-	bulkInstallFailedV6        map[dataplane.SessionKeyV6]struct{}
-	bulkZoneSnapshot           *zoneOwnershipSnapshot
-	barrierSeq                 atomic.Uint64
-	barrierAckSeq              atomic.Uint64
-	barrierWaitMu              sync.Mutex
-	barrierWaiters             map[uint64]*barrierWaiter
-	fence                      barrierFence // #9508 (sync_barrier_fence_9508.go)
-	failoverWaitMu             sync.Mutex
-	failoverWaiters            map[int]failoverWaiter
-	failoverCommitWaiters      map[int]failoverWaiter
-	failoverBatchWaiters       map[string]failoverWaiter
-	failoverBatchCommitWaiters map[string]failoverWaiter
-	failoverSeq                atomic.Uint64
-	sessionMirrorWarnedV4      atomic.Bool
-	sessionMirrorWarnedV6      atomic.Bool
+	bulkInstallFailedV4   map[dataplane.SessionKey]struct{}
+	bulkInstallFailedV6   map[dataplane.SessionKeyV6]struct{}
+	bulkZoneSnapshot      *zoneOwnershipSnapshot
+	barrierSeq            atomic.Uint64
+	barrierAckSeq         atomic.Uint64
+	barrierWaitMu         sync.Mutex
+	barrierWaiters        map[uint64]*barrierWaiter
+	fence                 barrierFence // #9508 (sync_barrier_fence_9508.go)
+	failoverWaitMu        sync.Mutex
+	failoverWaiters       failoverWaiterRegistry
+	failoverSeq           atomic.Uint64
+	sessionMirrorWarnedV4 atomic.Bool
+	sessionMirrorWarnedV6 atomic.Bool
 
 	// Generation-guard domain (#2170/#9915/#10512): see sessionGenState
 	// in sync_gen_state_16159.go and the lock-order graph above.
@@ -2118,16 +2115,13 @@ const deleteJournalDefaultCap = 10000
 // same adaptation internally.
 func NewSessionSync(localAddr, peerAddr string, rt clusterRuntime) *SessionSync {
 	s := &SessionSync{
-		localAddr:                  localAddr,
-		peerAddr:                   peerAddr,
-		sendCh:                     make(chan []byte, 4096),
-		sweepWakeCh:                make(chan struct{}, 1),
-		deleteJournal:              boundedFrameJournal{cap: deleteJournalDefaultCap},
-		scopedDeleteJournal:        boundedFrameJournal{cap: deleteJournalDefaultCap},
-		failoverWaiters:            make(map[int]failoverWaiter),
-		failoverCommitWaiters:      make(map[int]failoverWaiter),
-		failoverBatchWaiters:       make(map[string]failoverWaiter),
-		failoverBatchCommitWaiters: make(map[string]failoverWaiter),
+		localAddr:           localAddr,
+		peerAddr:            peerAddr,
+		sendCh:              make(chan []byte, 4096),
+		sweepWakeCh:         make(chan struct{}, 1),
+		deleteJournal:       boundedFrameJournal{cap: deleteJournalDefaultCap},
+		scopedDeleteJournal: boundedFrameJournal{cap: deleteJournalDefaultCap},
+		failoverWaiters:     newFailoverWaiterRegistry(),
 	}
 	s.initGenState()
 	s.refreshPeerIPs()
@@ -2227,18 +2221,15 @@ func (s *SessionSync) initGenState() {
 // NewSessionSync for the runtime parameter contract.
 func NewDualSessionSync(local, peer, local1, peer1 string, rt clusterRuntime) *SessionSync {
 	s := &SessionSync{
-		localAddr:                  local,
-		peerAddr:                   peer,
-		localAddr1:                 local1,
-		peerAddr1:                  peer1,
-		sendCh:                     make(chan []byte, 4096),
-		sweepWakeCh:                make(chan struct{}, 1),
-		deleteJournal:              boundedFrameJournal{cap: deleteJournalDefaultCap},
-		scopedDeleteJournal:        boundedFrameJournal{cap: deleteJournalDefaultCap},
-		failoverWaiters:            make(map[int]failoverWaiter),
-		failoverCommitWaiters:      make(map[int]failoverWaiter),
-		failoverBatchWaiters:       make(map[string]failoverWaiter),
-		failoverBatchCommitWaiters: make(map[string]failoverWaiter),
+		localAddr:           local,
+		peerAddr:            peer,
+		localAddr1:          local1,
+		peerAddr1:           peer1,
+		sendCh:              make(chan []byte, 4096),
+		sweepWakeCh:         make(chan struct{}, 1),
+		deleteJournal:       boundedFrameJournal{cap: deleteJournalDefaultCap},
+		scopedDeleteJournal: boundedFrameJournal{cap: deleteJournalDefaultCap},
+		failoverWaiters:     newFailoverWaiterRegistry(),
 	}
 	s.initGenState()
 	s.refreshPeerIPs()

@@ -17,6 +17,15 @@ import (
 // the dependency-light home both surfaces already import (see
 // pipefilter.go), so the grammar lives here once.
 
+// ShowRouteUsage is the one `show route` grammar both dispatchers
+// (local in pkg/cli, remote in cmd/cli) reject against (#17230).
+// It lives here, not in pkg/cli: cmd/cli is package main's client and
+// cannot import pkg/cli without pulling the daemon-local console
+// (and its managers) into the remote binary — and nothing imports
+// package main, so no import cycle was ever the blocker. Keep the
+// spellings in sync with the cmdtree `show route` children.
+const ShowRouteUsage = "usage: show route [<destination> [exact|longer|orlonger]] | show route [terse|detail|summary|fib] | show route table <name> | show route instance <name> | show route protocol <name>"
+
 // ParseNATPoolSelector parses the optional trailing `pool <name>`
 // selector of `show security nat source deterministic-nat ...`
 // (#13199's strict form). Empty rest means no selector. Anything else

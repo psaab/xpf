@@ -2272,6 +2272,33 @@ pub(crate) struct SessionTable {
     tombstone_drops: u64,
 }
 
+/// #17083: the caller-specific half of an in-place refresh, handed to
+/// [`Self::refresh_in_place`]. `Update` applies the collision gate and
+/// the TCP/timeout rewrite; `HaTransition` always applies and preserves
+/// the existing origin, TCP state, and expiry.
+enum RefreshPolicy {
+    Update {
+        /// Reject peer data over a peer-synced or local row.
+        collision_rules: bool,
+        /// Origin to store once accepted.
+        origin: SessionOrigin,
+        protocol: u8,
+        tcp_flags: u8,
+        ack: Option<u32>,
+    },
+    HaTransition,
+}
+
+/// #17083: shared tail inputs of an accepted in-place refresh — the
+/// OLD counted/zone snapshot plus the NEW counted flag (which depends
+/// on the origin the caller stores).
+struct RefreshTail {
+    old_counted: bool,
+    old_ingress_zone: u32,
+    new_counted: bool,
+    new_ingress_zone: u32,
+}
+
 impl SessionTable {
     /// #7699: the PPTP call associations this worker can resolve.
     pub(crate) fn pptp(&self) -> &crate::session::pptp::PptpAssociations {
@@ -3145,7 +3172,7 @@ impl SessionTable {
     /// #10507: production answers through `policy_revalidation_gate`
     /// (freshness and authority in one probe); this accessor is retained for
     /// test assertions.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn policy_revalidation_target(&self, key: &SessionKey) -> PolicyRevalidationTarget {
         let Some(record) = self.revalidation_record(key) else {
             return PolicyRevalidationTarget::NoLocalEntry;
@@ -5676,7 +5703,7 @@ impl SessionTable {
     /// keyed by `key`, or `None` if no live entry exists. Cold path
     /// (BPF-conntrack-map refresh on the ~1s GC cadence); a single lookup +
     /// a `Copy` of the four-`u64` snapshot.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn session_counters(&self, key: &SessionKey) -> Option<SessionCounters> {
         self.entry_by_key(key).map(|e| e.counters)
     }
@@ -5691,7 +5718,7 @@ impl SessionTable {
     /// caller that wants to bind them at their SOURCE to drive GC and drain the
     /// delta ring first — enough machinery that #6997's call site went unbound
     /// rather than under-asserted.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn observed_close_fields(&self, key: &SessionKey) -> Option<(u8, u8)> {
         self.entry_by_key(key)
             .map(|e| (e.observed_tcp_flags, e.observed_tos))
@@ -5701,7 +5728,7 @@ impl SessionTable {
     /// entry exists. Same idiom and same reason as `observed_close_fields`:
     /// `touch_if_stale`'s only externally visible effect is this field moving,
     /// so a caller binding that call site has to be able to read it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn last_seen_ns(&self, key: &SessionKey) -> Option<u64> {
         self.entry_by_key(key).map(|e| e.last_seen_ns)
     }
@@ -5727,6 +5754,41 @@ impl SessionTable {
             tcp_flags,
             ack,
         } = req;
+        self.refresh_in_place(
+            key,
+            decision,
+            &metadata,
+            now_ns,
+            RefreshPolicy::Update {
+                collision_rules: !ha_activation,
+                origin,
+                protocol,
+                tcp_flags,
+                ack,
+            },
+            "update_session",
+        )
+    }
+
+    /// #17083 (residual of the #1752 plan §5): the single in-place refresh
+    /// behind `update_session` and `refresh_for_ha_transition`. Owns the
+    /// handle/primary-key guard, the old-state snapshot, the reply-alias
+    /// preflight, the secondary-index removes, the entry rewrite (including
+    /// the #11373 forwarding-generation stamp), the secondary-index
+    /// re-assert, wheel scheduling, and the session-limit bookkeeping.
+    /// `policy` selects the caller-specific gate and rewrite details; the
+    /// two callers otherwise share byte-identical refresh semantics.
+    /// `caller` names the public entry point in the #1855 stale-handle
+    /// debug asserts so each caller's panic text stays distinct.
+    fn refresh_in_place(
+        &mut self,
+        key: &SessionKey,
+        decision: SessionDecision,
+        metadata: &SessionMetadata,
+        now_ns: u64,
+        policy: RefreshPolicy,
+        caller: &'static str,
+    ) -> bool {
         // #1752 Path E: in-place refresh. The prior implementation did
         // `remove_entry` + mutate + `restore_entry`, which tore down and rebuilt
         // every index (key_to_handle map, slab slot with a NEW handle, all four
@@ -5753,13 +5815,13 @@ impl SessionTable {
         let Some(record) = self.entries.get(handle as usize) else {
             debug_assert!(
                 false,
-                "update_session: key_to_handle had stale handle {} for {:?}",
-                handle, key
+                "{}: key_to_handle had stale handle {} for {:?}",
+                caller, handle, key
             );
             return false;
         };
         if record.key != *key {
-            debug_assert!(false, "update_session: stale key_to_handle for {:?}", key);
+            debug_assert!(false, "{}: stale key_to_handle for {:?}", caller, key);
             return false;
         }
         // Snapshot the OLD index-relevant + collision-relevant state (all Copy).
@@ -5772,7 +5834,13 @@ impl SessionTable {
         // #10310: a WorkerLocalImport replica is not counted, but a promote
         // to a local origin becomes one logical limit-session unit.
         let old_counted = !old_is_reverse && install::session_limit_origin_counted(old_origin);
-        if !ha_activation {
+        let was_peer_synced = old_origin.is_peer_synced();
+        if let RefreshPolicy::Update {
+            collision_rules: true,
+            origin,
+            ..
+        } = policy
+        {
             let new_peer = origin.is_peer_synced();
             // Reject: both peer-synced (refresh_local on a synced entry) OR peer
             // data trying to overwrite a local entry. The prior code reached this
@@ -5791,9 +5859,8 @@ impl SessionTable {
                 );
                 return false;
             }
-            // Else: peer→local promote, or local→local refresh — fall through.
+            // Else: peer-to-local promote, or local-to-local refresh — fall through.
         }
-        let was_peer_synced = old_origin.is_peer_synced();
 
         // Reindex only when a secondary-index input changed (§2 of the plan:
         // indices depend only on key + nat + is_reverse + owner_rg_id, and key +
@@ -5812,30 +5879,14 @@ impl SessionTable {
             remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg, handle);
         }
 
-        // #3527: resolve the per-zone half-open override before borrowing the
-        // record mutably (the timeout selection below cannot re-borrow self).
-        let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
-        // #10507 A1: live policy generation for the Fresh-only reset below.
-        let live_policy_gen = self.policy_revalidation_gen;
-        let reverse_syn_ack;
-        let handshake_completed;
-        // #16489: set inside the borrow block when this update is the
-        // pair's first transition into CLOSING.
-        let mut update_became_closing = false;
-        // #15947 (H29-04): pre-mutation wire state for the HA Update.
-        let close_class_before = self
-            .entries
-            .get(handle as usize)
-            .map(|record| record.entry.tcp_close_class_wire())
-            .unwrap_or(0);
-        let handshake_state_before = self
-            .entries
-            .get(handle as usize)
-            .map(|record| record.entry.tcp_handshake_state_wire(protocol))
-            .unwrap_or(0);
-        // #16042 fold: expected ack only for pending pairs (see
-        // `handshake_expected_ack`); established refreshes skip the probe.
-        let ack_valid = Self::handshake_ack_valid(self.handshake_expected_ack(key), ack);
+        // Common identity rewrite (#17083): both callers replace the
+        // decision and metadata, clear the source-NAT revalidation, keep
+        // the static provenance only when NAT is unchanged, stamp the
+        // #11373 forwarding generation, and leave the held world. The HA
+        // scan resolved `decision` against the current FIB, so its stamp
+        // must be the live pair — the hand copy omitted it and the next
+        // hit re-resolved. Origin, the #10507 policy-kind reset, and the
+        // TCP/timeout rewrite stay caller-specific below.
         {
             let record = self
                 .entries
@@ -5850,211 +5901,259 @@ impl SessionTable {
             };
             record.entry.forwarding_generation = self.forwarding_revalidation_gen;
             record.entry.metadata = metadata.clone();
-            record.entry.origin = origin;
-            // #10507 A1 (Main-approved deviation from §4.5 unconditional —
-            // Option A, Stale retains its fence): a peer-to-local promotion
-            // revokes provenance only when Fresh. A Fresh Recorded Permit
-            // must not coast into local forwarding — reset to Unvalidated
-            // so the next local packet cold-judges. A Stale row already
-            // re-judges via the Stale arm; resetting Stale Recorded to
-            // Unvalidated would launder a fenced recorded authorization
-            // into the never-validated carve-out (Decline instead of
-            // fail-closed on type-armed ICMP / unidentified arrival).
-            // Preserving the Stale kind keeps the Recorded fence through
-            // the transition. Fresh behavior is bit-identical to
-            // unconditional; packet-time fencing stays authoritative.
-            if was_peer_synced
-                && !origin.is_peer_synced()
-                && record.entry.policy_revalidated_gen == live_policy_gen
-            {
-                record.entry.policy_revalidation_kind =
-                    PolicyRevalidationKind::Unvalidated;
-            }
             // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
             record.entry.last_seen_ns = now_ns;
-            // #3046: RST is sticky — once observed it keeps the entry on the
-            // short RST timeout even if a later (reordered) segment lacks RST.
-            // Set it BEFORE selecting the timeout so the expires decision below
-            // consults the sticky flag (mirrors lookup.rs). Otherwise a
-            // peer-synced entry that already had reset=true, promoted via a
-            // non-RST FIN trigger, would wrongly revert to the 30s FIN window.
-            record.entry.reset |= matches!(protocol, PROTO_TCP) && has_rst(tcp_flags);
-            // #3489: `closing` is sticky, exactly like `reset` (#3046) and
-            // `established` (#3152) and the read-path in lookup.rs. Once a FIN
-            // or RST has moved the session into the short close window, a later
-            // non-closing segment (e.g. a reordered data-ACK, flags=0x10) on
-            // the HA shared-promote path must NOT revert it to the 300s
-            // established window. A plain assignment here let that happen,
-            // leaving a FIN'd session lingering 10× too long (#3489).
-            // #16489: capture the pre-stamp closing state so the caller
-            // can seed the counter baseline only on the transition into
-            // CLOSING (mirrors the `was_closing` snapshot the lookup path
-            // uses before `stamp_tcp_close`).
-            let was_closing_update = record.entry.closing;
-            record.entry.closing |= matches!(protocol, PROTO_TCP) && is_closing(tcp_flags);
-            update_became_closing = !was_closing_update && record.entry.closing;
-            // #7342: sticky like `closing`/`reset`. The peer bit is not
-            // knowable here — this path promotes a peer-synced entry from one
-            // node's view, and the FIN-direction pair is node-local derived
-            // state that does not cross the HA wire — so a promoted half-closed
-            // session reaps on CLOSING until this node observes the other
-            // direction's FIN itself. That is the shorter window of the two by
-            // Junos default, so the failure direction is a session reaped early
-            // rather than one held past its close.
-            record.entry.fin_own |= matches!(protocol, PROTO_TCP) && has_fin(tcp_flags);
-            // #3152/#4109: TCP promotes on a genuine reverse SYN-ACK. #10889:
-            // a non-TCP app-managed session promotes on a genuine reverse
-            // packet; a forward-only refresh cannot open the long idle window.
-            // #13677: a stray reverse SYN-ACK must not re-pend a completed handshake.
-            // #14630: `closing`/`reset` were just stamped sticky above, so
-            // gating on `record.entry.closing` here also refuses completion
-            // when THIS segment is the RST/FIN (its flags already fail
-            // `!is_closing`, but the entry-state gate covers the crossing
-            // bare ACK that follows a RST stamped by an earlier segment).
-            reverse_syn_ack = !record.entry.closing
-                && ack_valid
-                && matches!(protocol, PROTO_TCP)
-                && is_syn_ack(tcp_flags)
-                && metadata.is_reverse
-                && (!record.entry.established || record.entry.handshake_pending);
-            // #13678 (D12-03): mirror lookup.rs's handshake completion: a
-            // SYN-ACK-first entry completes only on a reverse non-SYN ACK;
-            // a SYN-first entry completes only on a valid forward ACK.
-            // Retransmitted SYNs and closing ACKs leave the gate pending.
-            // #16042: a known-but-wrong ack leaves the gate pending too.
-            handshake_completed = !record.entry.closing
-                && ack_valid
-                && if record.entry.syn_ack_first {
-                matches!(protocol, PROTO_TCP)
-                    && record.entry.handshake_pending
-                    && metadata.is_reverse
-                    && has_ack(tcp_flags)
-                    && !has_syn(tcp_flags)
-                    && !is_closing(tcp_flags)
-            } else {
-                matches!(protocol, PROTO_TCP)
-                    && record.entry.handshake_pending
-                    && !metadata.is_reverse
-                    && has_ack(tcp_flags)
-                    && !has_syn(tcp_flags)
-                    && !is_closing(tcp_flags)
-            };
-            // #3152/#4109: TCP promotes on a genuine reverse SYN-ACK. #10889:
-            // a non-TCP app-managed session promotes on a genuine reverse
-            // packet; a forward-only refresh cannot open the long idle window.
-            record.entry.established |=
-                reverse_syn_ack
-                    || (!matches!(protocol, PROTO_TCP)
-                        && metadata.is_reverse
-                        && metadata.inactivity_timeout_ns.is_some());
-            // #13678/#6752: a reverse SYN-ACK on an OPENING entry opens the
-            // handshake gap exactly as lookup.rs does — `established` above
-            // must NOT grant the established window before the completing ACK.
-            if reverse_syn_ack && !record.entry.syn_ack_first {
-                record.entry.handshake_pending = true;
-            }
-            if handshake_completed {
-                record.entry.established = true;
-                record.entry.handshake_pending = false;
-                record.entry.syn_ack_first = false;
-            }
-            record.entry.expires_after_ns = if record.entry.closing {
-                tcp_close_window_for_entry(&record.entry, &self.timeouts)
-            } else {
-                // #3227: a real-traffic refresh re-stamps the idle window from
-                // the (possibly updated) metadata's per-app override.
-                // #3152/#10888: imported TCP handshakes remain on the opening
-                // window until the carried pending state is cleared.
-                session_timeout_ns(
-                    protocol,
-                    tcp_flags,
-                    record.entry.established && !record.entry.handshake_pending,
-                    &self.timeouts,
-                    metadata.inactivity_timeout_ns,
-                    opening_override_ns,
-                )
-            };
-            // wheel_tick deliberately preserved (parity with restore_entry).
-            // #2120: a real-traffic refresh (or a peer→local promote) means
-            // this entry now genuinely lives on this node — it leaves the
-            // held world. Clear the hold clock so the stale-synced ceiling
-            // restarts cleanly if it is ever held again, and reset the
-            // self-healed-epoch to the never-self-healed default (a later
-            // SELF-HEAL, if this node forwards the RG, records the live
-            // epoch; the HOLD branch never writes seen_rg_epoch).
             record.entry.first_held_ns = 0;
             record.entry.seen_rg_epoch = 0;
         }
-        // #16489: this update first moved the pair into CLOSING — seed
-        // the counter baseline at the pre-close total so the FIN packet
-        // and all earlier traffic do not read as post-close activity.
-        if update_became_closing {
-            self.seed_closing_counters_baseline(key, decision.nat);
-        }
-        if reverse_syn_ack || handshake_completed {
-            self.propagate_tcp_state_to_companion(
-                key,
-                now_ns,
-                TcpStatePropagation {
-                    nat: decision.nat,
-                    close: false,
-                    reset: false,
-                    fin: false,
-                    established: reverse_syn_ack,
-                    handshake_completed,
-                },
-            );
-            // #15947 (H29-04): HA Update on completion/promotion, as in
-            // the lookup path — emit_session_state_update is
-            // transition-only, so a non-transition emits nothing.
-            self.emit_session_state_update(key, close_class_before, handshake_state_before);
-        }
-        {
-            if !metadata.is_reverse {
-                let remains_unreplied = self
-                    .entry_by_key(key)
-                    .is_some_and(|entry| Self::is_pressure_shed_unreplied(key, entry, false));
-                if remains_unreplied {
-                    self.pressure_shed_unreplied.insert(key.clone(), ());
-                } else {
-                    self.pressure_shed_unreplied.remove(key);
+
+        // Branch on the caller policy: `origin`/`protocol`/`tcp_flags`/`ack`
+        // are the update-only extras; the HA transition preserves origin and
+        // skips the TCP/timeout rewrite entirely.
+        let (tail, promote_origin) = match policy {
+            RefreshPolicy::Update {
+                origin,
+                protocol,
+                tcp_flags,
+                ack,
+                ..
+            } => {
+                // #3527: resolve the per-zone half-open override before borrowing the
+                // record mutably (the timeout selection below cannot re-borrow self).
+                let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
+                // #10507 A1: live policy generation for the Fresh-only reset below.
+                let live_policy_gen = self.policy_revalidation_gen;
+                let reverse_syn_ack;
+                let handshake_completed;
+                // #16489: set inside the borrow block when this update is the
+                // pair's first transition into CLOSING.
+                let mut update_became_closing = false;
+                // #15947 (H29-04): pre-mutation wire state for the HA Update.
+                let close_class_before = self
+                    .entries
+                    .get(handle as usize)
+                    .map(|record| record.entry.tcp_close_class_wire())
+                    .unwrap_or(0);
+                let handshake_state_before = self
+                    .entries
+                    .get(handle as usize)
+                    .map(|record| record.entry.tcp_handshake_state_wire(protocol))
+                    .unwrap_or(0);
+                // #16042 fold: expected ack only for pending pairs (see
+                // `handshake_expected_ack`); established refreshes skip the probe.
+                let ack_valid = Self::handshake_ack_valid(self.handshake_expected_ack(key), ack);
+                {
+                    let record = self
+                        .entries
+                        .get_mut(handle as usize)
+                        .expect("handle validated above");
+                    record.entry.origin = origin;
+                    // #10507 A1 (Main-approved deviation from §4.5 unconditional —
+                    // Option A, Stale retains its fence): a peer-to-local promotion
+                    // revokes provenance only when Fresh. A Fresh Recorded Permit
+                    // must not coast into local forwarding — reset to Unvalidated
+                    // so the next local packet cold-judges. A Stale row already
+                    // re-judges via the Stale arm; resetting Stale Recorded to
+                    // Unvalidated would launder a fenced recorded authorization
+                    // into the never-validated carve-out (Decline instead of
+                    // fail-closed on type-armed ICMP / unidentified arrival).
+                    // Preserving the Stale kind keeps the Recorded fence through
+                    // the transition. Fresh behavior is bit-identical to
+                    // unconditional; packet-time fencing stays authoritative.
+                    if was_peer_synced
+                        && !origin.is_peer_synced()
+                        && record.entry.policy_revalidated_gen == live_policy_gen
+                    {
+                        record.entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
+                    }
+                    // #3046: RST is sticky — once observed it keeps the entry on the
+                    // short RST timeout even if a later (reordered) segment lacks RST.
+                    // Set it BEFORE selecting the timeout so the expires decision below
+                    // consults the sticky flag (mirrors lookup.rs). Otherwise a
+                    // peer-synced entry that already had reset=true, promoted via a
+                    // non-RST FIN trigger, would wrongly revert to the 30s FIN window.
+                    record.entry.reset |= matches!(protocol, PROTO_TCP) && has_rst(tcp_flags);
+                    // #3489: `closing` is sticky, exactly like `reset` (#3046) and
+                    // `established` (#3152) and the read-path in lookup.rs. Once a FIN
+                    // or RST has moved the session into the short close window, a later
+                    // non-closing segment (e.g. a reordered data-ACK, flags=0x10) on
+                    // the HA shared-promote path must NOT revert it to the 300s
+                    // established window. A plain assignment here let that happen,
+                    // leaving a FIN'd session lingering 10× too long (#3489).
+                    // #16489: capture the pre-stamp closing state so the caller
+                    // can seed the counter baseline only on the transition into
+                    // CLOSING (mirrors the `was_closing` snapshot the lookup path
+                    // uses before `stamp_tcp_close`).
+                    let was_closing_update = record.entry.closing;
+                    record.entry.closing |= matches!(protocol, PROTO_TCP) && is_closing(tcp_flags);
+                    update_became_closing = !was_closing_update && record.entry.closing;
+                    // #7342: sticky like `closing`/`reset`. The peer bit is not
+                    // knowable here — this path promotes a peer-synced entry from one
+                    // node's view, and the FIN-direction pair is node-local derived
+                    // state that does not cross the HA wire — so a promoted half-closed
+                    // session reaps on CLOSING until this node observes the other
+                    // direction's FIN itself. That is the shorter window of the two by
+                    // Junos default, so the failure direction is a session reaped early
+                    // rather than one held past its close.
+                    record.entry.fin_own |= matches!(protocol, PROTO_TCP) && has_fin(tcp_flags);
+                    // #3152/#4109: TCP promotes on a genuine reverse SYN-ACK. #10889:
+                    // a non-TCP app-managed session promotes on a genuine reverse
+                    // packet; a forward-only refresh cannot open the long idle window.
+                    // #13677: a stray reverse SYN-ACK must not re-pend a completed handshake.
+                    // #14630: `closing`/`reset` were just stamped sticky above, so
+                    // gating on `record.entry.closing` here also refuses completion
+                    // when THIS segment is the RST/FIN (its flags already fail
+                    // `!is_closing`, but the entry-state gate covers the crossing
+                    // bare ACK that follows a RST stamped by an earlier segment).
+                    reverse_syn_ack = !record.entry.closing
+                        && ack_valid
+                        && matches!(protocol, PROTO_TCP)
+                        && is_syn_ack(tcp_flags)
+                        && metadata.is_reverse
+                        && (!record.entry.established || record.entry.handshake_pending);
+                    // #13678 (D12-03): mirror lookup.rs's handshake completion: a
+                    // SYN-ACK-first entry completes only on a reverse non-SYN ACK;
+                    // a SYN-first entry completes only on a valid forward ACK.
+                    // Retransmitted SYNs and closing ACKs leave the gate pending.
+                    // #16042: a known-but-wrong ack leaves the gate pending too.
+                    handshake_completed = !record.entry.closing
+                        && ack_valid
+                        && if record.entry.syn_ack_first {
+                            matches!(protocol, PROTO_TCP)
+                                && record.entry.handshake_pending
+                                && metadata.is_reverse
+                                && has_ack(tcp_flags)
+                                && !has_syn(tcp_flags)
+                                && !is_closing(tcp_flags)
+                        } else {
+                            matches!(protocol, PROTO_TCP)
+                                && record.entry.handshake_pending
+                                && !metadata.is_reverse
+                                && has_ack(tcp_flags)
+                                && !has_syn(tcp_flags)
+                                && !is_closing(tcp_flags)
+                        };
+                    // #3152/#4109: TCP promotes on a genuine reverse SYN-ACK. #10889:
+                    // a non-TCP app-managed session promotes on a genuine reverse
+                    // packet; a forward-only refresh cannot open the long idle window.
+                    record.entry.established |= reverse_syn_ack
+                        || (!matches!(protocol, PROTO_TCP)
+                            && metadata.is_reverse
+                            && metadata.inactivity_timeout_ns.is_some());
+                    // #13678/#6752: a reverse SYN-ACK on an OPENING entry opens the
+                    // handshake gap exactly as lookup.rs does — `established` above
+                    // must NOT grant the established window before the completing ACK.
+                    if reverse_syn_ack && !record.entry.syn_ack_first {
+                        record.entry.handshake_pending = true;
+                    }
+                    if handshake_completed {
+                        record.entry.established = true;
+                        record.entry.handshake_pending = false;
+                        record.entry.syn_ack_first = false;
+                    }
+                    record.entry.expires_after_ns = if record.entry.closing {
+                        tcp_close_window_for_entry(&record.entry, &self.timeouts)
+                    } else {
+                        // #3227: a real-traffic refresh re-stamps the idle window from
+                        // the (possibly updated) metadata's per-app override.
+                        // #3152/#10888: imported TCP handshakes remain on the opening
+                        // window until the carried pending state is cleared.
+                        session_timeout_ns(
+                            protocol,
+                            tcp_flags,
+                            record.entry.established && !record.entry.handshake_pending,
+                            &self.timeouts,
+                            metadata.inactivity_timeout_ns,
+                            opening_override_ns,
+                        )
+                    };
+                    // wheel_tick deliberately preserved (parity with restore_entry).
                 }
-            } else if protocol == PROTO_TCP && handshake_completed {
-                // The pressure-shed index is keyed by the forward half even
-                // when the completing ACK updated its reverse companion.
-                self.pressure_shed_unreplied.remove(key);
-                let forward_key = reverse_session_key(key, decision.nat);
-                self.pressure_shed_unreplied.remove(&forward_key);
+                // #16489: this update first moved the pair into CLOSING — seed
+                // the counter baseline at the pre-close total so the FIN packet
+                // and all earlier traffic do not read as post-close activity.
+                if update_became_closing {
+                    self.seed_closing_counters_baseline(key, decision.nat);
+                }
+                if reverse_syn_ack || handshake_completed {
+                    self.propagate_tcp_state_to_companion(
+                        key,
+                        now_ns,
+                        TcpStatePropagation {
+                            nat: decision.nat,
+                            close: false,
+                            reset: false,
+                            fin: false,
+                            established: reverse_syn_ack,
+                            handshake_completed,
+                        },
+                    );
+                    // #15947 (H29-04): HA Update on completion/promotion, as in
+                    // the lookup path — emit_session_state_update is
+                    // transition-only, so a non-transition emits nothing.
+                    self.emit_session_state_update(key, close_class_before, handshake_state_before);
+                }
+                {
+                    if !metadata.is_reverse {
+                        let remains_unreplied = self.entry_by_key(key).is_some_and(|entry| {
+                            Self::is_pressure_shed_unreplied(key, entry, false)
+                        });
+                        if remains_unreplied {
+                            self.pressure_shed_unreplied.insert(key.clone(), ());
+                        } else {
+                            self.pressure_shed_unreplied.remove(key);
+                        }
+                    } else if protocol == PROTO_TCP && handshake_completed {
+                        // The pressure-shed index is keyed by the forward half even
+                        // when the completing ACK updated its reverse companion.
+                        self.pressure_shed_unreplied.remove(key);
+                        let forward_key = reverse_session_key(key, decision.nat);
+                        self.pressure_shed_unreplied.remove(&forward_key);
+                    }
+                }
+                (
+                    RefreshTail {
+                        old_counted,
+                        old_ingress_zone,
+                        new_counted: !metadata.is_reverse
+                            && install::session_limit_origin_counted(origin),
+                        new_ingress_zone: metadata.ingress_zone,
+                    },
+                    (was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse)
+                        .then_some(origin),
+                )
             }
-        }
-        // #10310/#10985: keep zone-keyed counts balanced across in-place
-        // origin and ingress-zone transitions.
-        let new_counted = !metadata.is_reverse && install::session_limit_origin_counted(origin);
-        let new_ingress_zone = metadata.ingress_zone;
-        if old_counted && (!new_counted || old_ingress_zone != new_ingress_zone) {
-            self.session_limit_dec(old_ingress_zone, key.src_ip, key.dst_ip);
-        }
-        if new_counted && (!old_counted || old_ingress_zone != new_ingress_zone) {
-            self.session_limit_inc(new_ingress_zone, key.src_ip, key.dst_ip);
-        }
-        // Always re-assert the secondary ADDS — byte-identical to restore_entry's
-        // unconditional index_forward_nat_key. For the no-reindex case this
-        // re-inserts the same keys→handle (idempotent when unique, re-wins on a
-        // collision); for the reindex case it installs the NEW keys after the
-        // removes above.
-        self.index_forward_nat_key_parts(
-            key,
-            handle,
-            decision.nat,
-            metadata.is_reverse,
-            metadata.owner_rg_id,
-        );
-        // #965: schedule the refreshed entry. Last_seen / expires_after were
-        // rewritten above; push_to_wheel is throttled and will only emit a new
-        // wheel entry if the canonical tick changed.
-        self.push_to_wheel(key, now_ns);
+            RefreshPolicy::HaTransition => {
+                // #10507 A2: live policy generation for the Fresh-only reset below.
+                let live_policy_gen = self.policy_revalidation_gen;
+                {
+                    let record = self
+                        .entries
+                        .get_mut(handle as usize)
+                        .expect("handle validated above");
+                    // Origin deliberately preserved (no store).
+                    // #10507 A2 (Main-approved deviation, Option A — see A1): Fresh-only.
+                    // Stale retains its Recorded fence; Fresh resets to force cold.
+                    // Packet-time fencing remains authoritative if delayed/skipped.
+                    if record.entry.policy_revalidated_gen == live_policy_gen {
+                        record.entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
+                    }
+                }
+                (
+                    RefreshTail {
+                        old_counted,
+                        old_ingress_zone,
+                        new_counted: !metadata.is_reverse
+                            && install::session_limit_origin_counted(old_origin),
+                        new_ingress_zone: metadata.ingress_zone,
+                    },
+                    None,
+                )
+            }
+        };
+        self.finish_refresh_in_place(key, handle, decision, metadata, now_ns, tail);
         // Emit open delta when promoting a peer-synced entry to local
-        if was_peer_synced && !origin.is_peer_synced() && !metadata.is_reverse {
+        if let Some(origin) = promote_origin {
             // #3122/#10310: a counted peer import -> local promote is
             // COUNT-NEUTRAL because the slot was charged at import. A
             // WorkerLocalImport -> local promote was uncounted and the
@@ -6092,7 +6191,10 @@ impl SessionTable {
             let tcp_close_class = self.close_class_wire_for(key);
             let tcp_handshake_state = self.handshake_state_wire_for(key);
             let pptp_call_ids = self.pptp_call_ids_wire_for(key);
-            let policy_generation = self.entry_by_key(key).map(|e| e.policy_generation).unwrap_or(0);
+            let policy_generation = self
+                .entry_by_key(key)
+                .map(|e| e.policy_generation)
+                .unwrap_or(0);
             let source_nat_static = self.source_nat_static_for(key);
             self.push_delta(SessionDelta {
                 provenance: crate::session::ExportProvenance::Incremental,
@@ -6102,7 +6204,7 @@ impl SessionTable {
                 kind: SessionDeltaKind::Open,
                 key: key.clone(),
                 decision,
-                metadata,
+                metadata: metadata.clone(),
                 origin,
                 policy_generation,
                 fabric_redirect_sync: false,
@@ -6118,7 +6220,54 @@ impl SessionTable {
                 source_nat_static,
             });
         }
+
         true
+    }
+
+    /// #17083: shared tail of [`Self::refresh_in_place`] — session-limit
+    /// bookkeeping, secondary-index re-assert, and wheel scheduling, in
+    /// the order both callers ran them (limits, re-assert, wheel; the
+    /// update path's promote Open delta follows in the caller, matching
+    /// its prior position after `push_to_wheel`).
+    fn finish_refresh_in_place(
+        &mut self,
+        key: &SessionKey,
+        handle: u32,
+        decision: SessionDecision,
+        metadata: &SessionMetadata,
+        now_ns: u64,
+        tail: RefreshTail,
+    ) {
+        let RefreshTail {
+            old_counted,
+            old_ingress_zone,
+            new_counted,
+            new_ingress_zone,
+        } = tail;
+        // #10310/#10985: keep zone-keyed counts balanced across in-place
+        // origin and ingress-zone transitions.
+        if old_counted && (!new_counted || old_ingress_zone != new_ingress_zone) {
+            self.session_limit_dec(old_ingress_zone, key.src_ip, key.dst_ip);
+        }
+        if new_counted && (!old_counted || old_ingress_zone != new_ingress_zone) {
+            self.session_limit_inc(new_ingress_zone, key.src_ip, key.dst_ip);
+        }
+        // Always re-assert the secondary ADDS — byte-identical to restore_entry's
+        // unconditional index_forward_nat_key. For the no-reindex case this
+        // re-inserts the same keys→handle (idempotent when unique, re-wins on a
+        // collision); for the reindex case it installs the NEW keys after the
+        // removes above.
+        self.index_forward_nat_key_parts(
+            key,
+            handle,
+            decision.nat,
+            metadata.is_reverse,
+            metadata.owner_rg_id,
+        );
+        // #965: schedule the refreshed entry. Last_seen / expires_after were
+        // rewritten above; push_to_wheel is throttled and will only emit a new
+        // wheel entry if the canonical tick changed.
+        self.push_to_wheel(key, now_ns);
     }
 
     /// Rebind both halves of a retained policy session to the new rule
@@ -6296,7 +6445,7 @@ impl SessionTable {
 
     /// Thin wrapper for local-only refresh (non-HA-activation path).
     /// Keeps the existing origin; skips peer-synced entries.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn refresh_local(
         &mut self,
         key: &SessionKey,
@@ -6327,7 +6476,7 @@ impl SessionTable {
 
     /// Convenience: refresh for HA activation (always updates regardless
     /// of origin). Preserves existing origin.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn refresh_for_ha_activation(
         &mut self,
         key: &SessionKey,
@@ -6357,7 +6506,12 @@ impl SessionTable {
     }
 
     /// Refresh an existing session for an HA path transition while
-    /// preserving its origin and current liveness state.
+    /// preserving its origin and current liveness state. Routes through
+    /// `refresh_in_place` (#17083): the shared rewrite stamps the live
+    /// forwarding generation, so a decision this scan just resolved
+    /// against the current FIB is not re-resolved on the next hit. No
+    /// collision gate and no expires_after_ns / closing rewrite,
+    /// matching the prior behavior.
     pub fn refresh_for_ha_transition(
         &mut self,
         key: &SessionKey,
@@ -6365,104 +6519,14 @@ impl SessionTable {
         metadata: SessionMetadata,
         now_ns: u64,
     ) -> bool {
-        // #1752 Path E: in-place (mirrors update_session, minus collision rules
-        // — this path always applies). No expires_after_ns / closing rewrite,
-        // matching the prior behavior.
-        let Some(&handle) = self.key_to_handle.get(key) else {
-            return false;
-        };
-        // #1855 contract (same as update_session's guards): impossible state
-        // by construction — debug asserts, release tolerates + returns false.
-        let Some(record) = self.entries.get(handle as usize) else {
-            debug_assert!(
-                false,
-                "refresh_for_ha_transition: stale handle {} for {:?}",
-                handle, key
-            );
-            return false;
-        };
-        if record.key != *key {
-            debug_assert!(
-                false,
-                "refresh_for_ha_transition: stale key_to_handle for {:?}",
-                key
-            );
-            return false;
-        }
-        let old_nat = record.entry.decision.nat;
-        let old_source_nat_static = record.entry.source_nat_static;
-        let old_is_reverse = record.entry.metadata.is_reverse;
-        let old_owner_rg = record.entry.metadata.owner_rg_id;
-        let old_origin = record.entry.origin;
-        let old_ingress_zone = record.entry.metadata.ingress_zone;
-        let old_counted = !old_is_reverse && install::session_limit_origin_counted(old_origin);
-        // Capture the new index parts before `metadata` is moved into the record.
-        let new_nat = decision.nat;
-        let new_is_reverse = metadata.is_reverse;
-        let new_owner_rg = metadata.owner_rg_id;
-        let new_ingress_zone = metadata.ingress_zone;
-        let new_counted = !new_is_reverse && install::session_limit_origin_counted(old_origin);
-
-        let reindex =
-            old_nat != new_nat || old_is_reverse != new_is_reverse || old_owner_rg != new_owner_rg;
-        let reply_alias_reindex = old_nat != new_nat || old_is_reverse != new_is_reverse;
-        if (reply_alias_reindex || matches!(key.discriminator, TunnelDiscriminator::Ipsec(0)))
-            && !self.can_index_reply_alias(key, new_nat, new_is_reverse, Some(handle))
-        {
-            return false;
-        }
-        if reindex {
-            self.remove_forward_nat_index_parts(key, handle, old_nat, old_is_reverse);
-            remove_owner_rg_index_entry(&mut self.owner_rg_sessions, old_owner_rg, handle);
-        }
-        // #10507 A2: live policy generation for the Fresh-only reset below.
-        let live_policy_gen = self.policy_revalidation_gen;
-
-        {
-            let record = self
-                .entries
-                .get_mut(handle as usize)
-                .expect("handle validated above");
-            record.entry.decision = decision;
-            record.entry.source_nat_revalidated = None;
-            record.entry.source_nat_static = if old_nat == new_nat {
-                old_source_nat_static
-            } else {
-                None
-            };
-            record.entry.metadata = metadata;
-            // #10507 A2 (Main-approved deviation, Option A — see A1): Fresh-only.
-            // Stale retains its Recorded fence; Fresh resets to force cold.
-            // Packet-time fencing remains authoritative if delayed/skipped.
-            if record.entry.policy_revalidated_gen == live_policy_gen {
-                record.entry.policy_revalidation_kind = PolicyRevalidationKind::Unvalidated;
-            }
-            // #9856: install_epoch is write-once per incarnation — a refresh must not move it.
-            record.entry.last_seen_ns = now_ns;
-            // #2120: promotion refresh re-stamps `last_seen_ns` (the entry
-            // now ages from a full timeout on the promoted node), so it
-            // leaves the held world. Clear the hold clock and reset the
-            // observed epoch (§6.4 write-site contract). NOTE: the
-            // edge-triggered self-heal in the expire pass leaves
-            // `first_held_ns` UNTOUCHED — only a genuine departure from the
-            // held state (here, real-traffic refresh, or re-import) clears
-            // it, so a flapping RG cannot reset the leak ceiling.
-            record.entry.first_held_ns = 0;
-            record.entry.seen_rg_epoch = 0;
-        }
-        self.index_forward_nat_key_parts(key, handle, new_nat, new_is_reverse, new_owner_rg);
-        // #965: schedule the refreshed entry for expiration check.
-        self.push_to_wheel(key, now_ns);
-        // #10985: this refresh also replaces the entry metadata; keep its
-        // counted zone/IP pair synchronized if the ingress zone or direction
-        // changed.
-        if old_counted && (!new_counted || old_ingress_zone != new_ingress_zone) {
-            self.session_limit_dec(old_ingress_zone, key.src_ip, key.dst_ip);
-        }
-        if new_counted && (!old_counted || old_ingress_zone != new_ingress_zone) {
-            self.session_limit_inc(new_ingress_zone, key.src_ip, key.dst_ip);
-        }
-        true
+        self.refresh_in_place(
+            key,
+            decision,
+            &metadata,
+            now_ns,
+            RefreshPolicy::HaTransition,
+            "refresh_for_ha_transition",
+        )
     }
 
     /// Promote a peer-synced session to local ownership.
@@ -6786,7 +6850,7 @@ impl SessionTable {
     /// reference half of the remove+restore round-trip the differential tests
     /// compare against, so in release builds it is retained as dead-code-allowed
     /// test reference logic (not conditionally compiled out).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     fn restore_entry(&mut self, key: SessionKey, entry: SessionEntry) -> Option<SessionEntry> {
         debug_assert!(self.can_index_reply_alias(
             &key,
@@ -7503,6 +7567,10 @@ mod strict_syn_16479_tests;
 #[path = "synced_entry_17058_tests.rs"]
 mod synced_entry_17058_tests;
 
+// #17083: HA transition refresh stamps the live forwarding generation.
+#[cfg(test)]
+#[path = "ha_transition_17083_tests.rs"]
+mod ha_transition_17083_tests;
 // #17088: the translated-alias twin matrix — key equality across
 // {TCP, UDP, ICMP, ICMPv6} x {none, SNAT-PAT, DNAT, NAT64} against
 // independently written post-translation reply tuples, plus the

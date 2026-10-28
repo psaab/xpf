@@ -1345,7 +1345,21 @@ func (m *SurfaceAManager) reconcileScopeLocked(ctx context.Context, sc SurfaceAS
 	// the scope refresh-due regardless of the change-detection / forced-refresh
 	// floor, so the owner re-asserts the wire record now.
 	refreshDue := force || pendingRecovery || rt.lastPublished.IsZero() || now.Sub(rt.lastPublished) >= forced
-	if owned && !changed && !refreshDue {
+	// Endpoint change (#17233): an in-place provider edit (update-server /
+	// zone / ...) with an unchanged address must also force a republish, so
+	// the record reaches the NEW endpoint and publishLocked raises the
+	// #3735 in-place orphan alarm on the FIRST pass — not only at the
+	// forced-refresh floor (24h). This is the Surface A port of the #5814
+	// endpoint term through the single shared predicate needsRepublish;
+	// both fingerprints must be non-empty to prove a mismatch (an unknown /
+	// pre-#3735 record stays settled, no false alarm). A fixed test backend
+	// (m.backend != nil) is a single endpoint, so it is never endpoint-changed
+	// — mirroring classifyOwnedBackend, which reports ownedBackendOK there.
+	endpointChanged := false
+	if owned && m.backend == nil {
+		endpointChanged = needsRepublish(ownedRec, true, ownedRec.BackendFingerprint, backendFingerprint(sc.Provider))
+	}
+	if owned && !changed && !refreshDue && !endpointChanged {
 		m.skipped++
 		slog.Debug("ddns surface-a: address unchanged and forced-refresh not due; skipping",
 			"fqdn", sc.FQDN, "addr", addr.String())

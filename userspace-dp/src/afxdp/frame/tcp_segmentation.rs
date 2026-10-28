@@ -255,7 +255,7 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit_and_
         let kind = forwarding
             .tunnel_endpoints
             .get(&decision.resolution.tunnel_endpoint_id)
-            .map(|e| tunnel_mode_kind(&e.mode));
+            .map(|e| e.kind);
         let inner_mtu = match kind {
             Some(TunnelKind::Gre) => native_gre_inner_mtu(forwarding, decision),
             Some(TunnelKind::WireGuard) => {
@@ -532,7 +532,7 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit_and_
     Some(out)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn segment_forwarded_tcp_frames(
     area: &MmapArea,
     desc: XdpDesc,
@@ -744,7 +744,7 @@ fn encap_tunnel_segment(
     let kind = forwarding
         .tunnel_endpoints
         .get(&decision.resolution.tunnel_endpoint_id)
-        .map(|e| tunnel_mode_kind(&e.mode));
+        .map(|e| e.kind);
     match kind {
         Some(TunnelKind::Gre) => {
             encapsulate_native_gre_frame(frame_out, meta, decision, forwarding)
@@ -889,6 +889,7 @@ mod mode_aware_segmentation_tests {
             interface: "wg0.0".to_string(),
             redundancy_group: 0,
             mode: "wireguard".to_string(),
+            kind: TunnelKind::WireGuard,
             outer_family,
             source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
             destination: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
@@ -905,6 +906,7 @@ mod mode_aware_segmentation_tests {
     fn gre_endpoint(outer_family: i32) -> TunnelEndpoint {
         TunnelEndpoint {
             mode: "gre".to_string(),
+            kind: TunnelKind::Gre,
             ..wg_endpoint(outer_family)
         }
     }
@@ -1256,6 +1258,7 @@ mod mode_aware_segmentation_tests {
         state.egress.insert(EGRESS_IFINDEX, egress_iface(1500));
         let mut ep = wg_endpoint(libc::AF_INET);
         ep.mode = "l2tp".to_string();
+        ep.kind = TunnelKind::Unknown;
         state.tunnel_endpoints.insert(TUN_ID, ep);
         let decision = SessionDecision {
             resolution: tunnel_resolution(),

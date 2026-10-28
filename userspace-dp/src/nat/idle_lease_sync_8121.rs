@@ -53,7 +53,6 @@
 //!    and `permit_any_remote` covers every remote. Every address-only import
 //!    also counts against the shared `max_tracked_flows` lease-table cap.
 
-#![allow(dead_code)]
 
 use super::allocator::{
     DeterministicV4, DeterministicV6, MAX_PERSISTENT_PERMITTED_REMOTES, PersistentLease,

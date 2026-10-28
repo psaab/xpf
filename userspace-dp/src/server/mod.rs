@@ -12,10 +12,11 @@ mod handlers;
 pub(crate) mod helpers;
 pub(crate) mod lifecycle;
 // #6979: pub(crate) so the coordinator test can build a ServerState and drive
-// refresh_status, binding the retirement CALL SITE rather than the function.
+// project_status, binding the retirement CALL SITE rather than the function.
 pub(crate) mod state;
 
 #[cfg(test)]
+#[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
 mod tests;
 
 pub(crate) use handlers::{handle_stream, SocketMode};
