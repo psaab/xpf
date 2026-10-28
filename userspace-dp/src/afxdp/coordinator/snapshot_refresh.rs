@@ -370,12 +370,11 @@ impl super::Coordinator {
                 Some((neigh.ifindex, ip))
             })
             .collect::<FastSet<_>>();
-        let old_manager_keys = if let Ok(mut manager_keys) = self.neighbors.manager_keys.lock() {
+        let old_manager_keys = {
+            let mut manager_keys = crate::sync_util::lock_tolerant(&self.neighbors.manager_keys);
             let old = manager_keys.iter().copied().collect::<Vec<_>>();
             *manager_keys = next_manager_keys;
             old
-        } else {
-            Vec::new()
         };
         self.neighbors.set_monitored_ifindexes(
             &snapshot.interfaces,
@@ -421,7 +420,8 @@ impl super::Coordinator {
                     .iter()
                     .map(|((ifindex, ip), entry)| (*ifindex, *ip, entry.mac))
                     .collect();
-                if let Ok(keys) = self.neighbors.manager_keys.lock() {
+                {
+                    let keys = crate::sync_util::lock_tolerant(&self.neighbors.manager_keys);
                     for key in keys.iter() {
                         if let Some(entry) = dynamic.get(key) {
                             set.push((key.0, key.1, entry.mac));

@@ -429,52 +429,35 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	if hasRenameApply {
 		renameApplyPtr = &renameApply
 	}
-	// #6948: arm the commit-time session-invalidation plan BEFORE the apply.
-	// Only this caller holds the pre-commit active config — the store promoted
-	// the new one upstream — and the invalidation's candidate set has to be READ
-	// while the live rows still carry the OLD policy numbering it is derived
-	// from. applyConfigLocked takes that capture at the publication boundary;
-	// without the plan it falls back to the pre-#6948 post-apply scan, which
-	// sweeps the sessions of whichever policy inherited a deleted policy's id.
-	// #16687: resolve DNS into a private clone BEFORE arming the
-	// invalidation plan, so the plan, the debt checks below, and the
-	// apply all key on the same (cloned) pointer the dataplane will
-	// publish. Arming with the pre-resolve pointer and applying the
-	// clone would make capturePolicyInvalidationLocked drop the plan
-	// as stale (plan.newCfg != cfg).
-	compiled = d.resolveDNSBeforeApply(compiled)
-	d.armPolicyInvalidationPlanWithRename(oldActive, compiled, renameApplyPtr)
-	// #9841: the committing wrapper, not the bare apply — it returns the
-	// response object projecting this attempt's unconverged-MTU records
-	// (a copy carrying the lines, or the applied pointer itself when there
-	// is nothing to warn about). The only call site by construction (pinned
-	// structurally); every other applyConfigLocked caller is a
-	// background/sync/rollback path with no response to carry warnings.
-	// The pipeline below keeps running on the applied pointer; only the
-	// RETURN carries the response object.
-	// #10752 round 4: same funnel carries the transition-aware tightening
-	// warning. Clear this attempt's kept-suspicious evidence before the
-	// apply; the flush sweep inside repopulates it, and the projection
-	// below reads it alongside the old-vs-new full-admit comparison.
+	// #9841/#10752: clear this attempt's kept-suspicious evidence
+	// before the apply; the flush sweep inside repopulates it, and
+	// the projection below reads it alongside the old-vs-new
+	// full-admit comparison. (The arm/apply/surface/classify/
+	// discharge/push/stamp sequence itself is
+	// finalizePromotedApplyLocked — see apply_finalize.go, #17025.)
 	d.clearKeptSuspicious10752()
-	respCfg, applyErr := d.applyConfigLockedForCommit(d.applyCancelCtx(), compiled)
-	if applyErr != nil && !d.policyInvalidationPublishLanded {
-		if debt := d.policyInvalidationDebt; debt != nil &&
-			debt.newCfg == compiled && debt.capture != nil {
-			// An unpublished attempt still must surface its incomplete capture
-			// once; the debt survives for a later complete scan, but settled
-			// retries must not replay the error.
-			applyErr = errors.Join(applyErr, debt.capture.enumerateErr())
-		}
-	}
-	if applyErrSkipsPeerSync(applyErr) {
+	out := d.finalizePromotedApplyLocked(promotedApply{
+		kind:             promotedApplyCommit,
+		oldActive:        oldActive,
+		newCfg:           compiled,
+		armKind:          promotedArmWithRename,
+		renameApply:      renameApplyPtr,
+		applyCtx:         d.applyCancelCtx(),
+		commitOnly:       true,
+		syncPeer:         syncPeer,
+		peerSnapshotAuth: peerSnapshotAuth,
+		pushPeer:         true,
+	})
+	compiled = out.newCfg
+	respCfg := out.respCfg
+	applyErr := out.applyErr
+	if out.fatal {
 		// Fatal (required-protocol-gate: dataplane disarmed/fail-closed), a
 		// daemon-stop context abort (#2926 boundary), or a policy READ
-		// authority refusal that blocked local publication: do NOT push —
-		// the peer stays on its prior snapshot. The shutdown case converges
-		// on next boot + reverse-sync. Skip deletion-clear too: either the
-		// dataplane is disarmed/tearing down or no safe session candidate
-		// set was captured.
+		// authority refusal that blocked local publication: the finalize
+		// step did NOT push and did NOT discharge — the peer stays on its
+		// prior snapshot. The shutdown case converges on next boot +
+		// reverse-sync.
 		// #16828: the store has ALREADY promoted+persisted this config
 		// (see the function doc), so returning (nil, applyErr) here made
 		// the #5742/#15281 classifiers report a persisted config as a
@@ -489,56 +472,14 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 		// warning projection and carries no committed-state meaning here.
 		return compiled, fmt.Errorf("%w: %w", configstore.ErrCommittedNotApplied, applyErr)
 	}
-	// #4234 Junos-default deletion-clear + modified-policy re-eval + #4342
-	// default-policy re-eval: the config is committed + active and the dataplane
-	// armed, so any session admitted by a now-deleted/tightened/default-changed
-	// policy must stop forwarding immediately (and be dropped on the standby too)
-	// rather than linger until idle timeout. Runs under d.applySem (the caller
-	// holds it), after the dataplane apply so the new policy set is already live.
-	//
-	// #5578: a PARTIAL invalidation (enumerate/delete failure) is a stale-
-	// authorization gap — traffic the new policy should DENY may keep forwarding
-	// on old session state. Join it into the returned error alongside the non-
-	// fatal apply error (mark-and-continue: the config stays committed + active
-	// and still syncs to the peer, but the operator sees the failure and can
-	// re-commit). Matches how applyErr's non-fatal best-effort subsystem errors
-	// are surfaced here rather than aborting the commit.
-	// #5858/#7212: the ONE commit-time entry point for "authorization the
-	// operator just changed, versus sessions already established". It is the
-	// policy clear alone since #7212 moved the interface-input-filter half into
-	// the dataplane (lazy per-tuple revalidation on the session-hit path); the
-	// commit-time advisory that stood in for it is deleted.
-	var clearErr error
-	if d.policyInvalidationPublishLanded {
-		clearErr = d.dischargePolicyInvalidationDebtLocked(oldActive, compiled)
-	}
-	// Committed + active locally with the dataplane armed. A non-fatal
-	// best-effort subsystem error must NOT skip the peer sync (#4034): the
-	// standby has to receive the committed config or the nodes diverge.
-	//
-	// #5962: the policy is RESOLVED HERE, not at the entry point. The commit
-	// has succeeded and the store's writability check (ensureWritableLocked,
-	// itself tied to RG0 ownership via applyRG0OwnershipTransition) has already
-	// run, so this reads the same ownership the commit was allowed under. The
-	// pre-#5962 code resolved rg0ConfigSyncAuthority in commitAndApplyOperator
-	// instead — before Commit — so a promotion landing between the two checks
-	// produced a successful commit with the push silently skipped.
-	var peerPushErr error
-	if syncPeer.wantsPush(d.cluster) {
-		peerPushErr = d.pushCommittedConfigToPeer(peerSnapshotAuth)
-	}
-	localErr := errors.Join(applyErr, clearErr)
-	joined := errors.Join(localErr, peerPushErr)
-	// The store-side candidate lineage was already retired at bind time in
-	// commitWithGenBinding, which transferred ownership to the daemon-side
-	// descriptor copy keyed by activeGen. That copy is retained here in every
-	// outcome for peer retry/reconnect and pruned by the next commit's bind.
-	// #4957: a fully-successful local commit apply (no fatal apply error,
-	// partial session-invalidation, or apply error) means the committed active
-	// config has converged on the dataplane. A peer push failure is independent:
-	// it must not erase the local applied proof, though it remains in the return
-	// error for reconnect/reconciliation.
-	d.stampActiveAppliedIfConvergedUnderSem(localErr)
+	// The finalize step has discharged (when publication landed),
+	// pushed (per syncPeer) and stamped (gated on the local outcome).
+	// The store-side candidate lineage was already retired at bind
+	// time in commitWithGenBinding, which transferred ownership to
+	// the daemon-side descriptor copy keyed by activeGen. That copy
+	// is retained here in every outcome for peer retry/reconnect and
+	// pruned by the next commit's bind.
+	joined := out.joined
 	resp := compiled
 	if respCfg != nil {
 		resp = respCfg
@@ -871,6 +812,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	appliedDigest := d.store.ActiveDigest()
 
 	var armedActive bool
+	var finalizeOut promotedApplyOutcome
 	defer func() {
 		if !armedActive {
 			return
@@ -883,34 +825,16 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		// #5858/#7212: the ONE commit-time entry point (see the commit path
 		// above). Policy clear only since #7212 moved the interface-input-filter
 		// half into the dataplane.
-		var clearErr error
-		if d.policyInvalidationPublishLanded {
-			clearErr = d.dischargePolicyInvalidationDebtLocked(oldActive, compiled)
-		}
-		// #1956 V-1 passive-node device-map admission gate (OQ-15.1 option
-		// (a): passive gate + loud health alarm). The active node's strict
-		// commit can only validate ITS OWN hardware (R-8), so a synced
-		// config whose LOCAL device-map section would strand THIS node's
-		// management on next boot must be surfaced loudly here. We do NOT
-		// strip/modify the synced delta (that creates the config-divergence
-		// overwrite loop AGY flagged); the stores stay identical and the
-		// #1922 lifeline keeps mgmt reachable at runtime. The alarm is the
-		// operator's signal that the peer-pushed map needs fixing before a
-		// reboot. (Option (b), distributed pre-commit validation, is the
-		// documented end-state follow-up.)
-		d.deviceMapPassiveAdmissionAlarm(compiled)
+		// #17025: the discharge + device-map alarm + captured-digest
+		// stamp live in dischargeAndStampSyncLocked (apply_finalize.go);
+		// the stamp still gates on the JOINED (apply + discharge)
+		// outcome, keyed to the digest captured above (#6296), and
+		// still runs here — inside syncAndApplyWithAncestry while
+		// applySem is held (this defer runs before the applySem.Release
+		// defer registered above).
+		clearErr := d.dischargeAndStampSyncLocked(oldActive, finalizeOut.newCfg, appliedDigest, retErr)
+		finalizeOut.clearErr = clearErr
 		retErr = errors.Join(retErr, clearErr)
-		// #6296: stamp the applied marker HERE — inside syncAndApplyWithAncestry while
-		// applySem is still held (this defer runs before the applySem.Release
-		// defer registered above), keyed to the digest captured above from the
-		// tree SyncApply promoted. Stamp only on FULL success (retErr == nil after
-		// the clearErr join: no fatal or non-fatal apply error AND no partial
-		// session-invalidation), matching the prior handleConfigSync gate which
-		// stamped MarkActiveApplied only when syncAndApplyWithAncestry returned nil. A no-op
-		// on empty digest (nil-active defensive path) or a non-nil retErr leaves
-		// the prior digest, so a config whose apply did not fully converge is never
-		// marked applied — the #4957 invariant handleConfigSync's shortcut relies on.
-		d.stampDigestIfConvergedUnderSem(retErr, appliedDigest)
 	}()
 
 	// #5564: capture the apply error instead of returning early on ANY error.
@@ -924,34 +848,45 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// the config active + the snapshot armed, so the invalidators still run and
 	// the tail error is surfaced (joined with any partial-invalidation error),
 	// not swallowed.
-	// #6948: arm the commit-time session-invalidation plan BEFORE the apply.
-	// Only this caller holds the pre-commit active config — the store promoted
-	// the new one upstream — and the invalidation's candidate set has to be READ
-	// while the live rows still carry the OLD policy numbering it is derived
-	// from. applyConfigLocked takes that capture at the publication boundary;
-	// without the plan it falls back to the pre-#6948 post-apply scan, which
-	// sweeps the sessions of whichever policy inherited a deleted policy's id.
-	// #16687: resolve first, arm second — same pointer discipline as
-	// the commit path (see applyAndSyncCommittedWithPeerSnapshotAuthorization).
-	compiled = d.resolveDNSBeforeApply(compiled)
+	// #17025: arm/apply/surface/classify is finalizePromotedApplyLocked
+	// (apply_finalize.go) — the #6948 arm comment lives there, once.
+	armKind := promotedArmPlain
+	var renameApply *pendingRenameApply
 	if len(ancestry) > 0 {
-		d.armPolicyInvalidationPlanWithRename(oldActive, compiled, &pendingRenameApply{
+		armKind = promotedArmWithRename
+		renameApply = &pendingRenameApply{
 			descriptors: append([]configstore.RenameDescriptor(nil), ancestry...),
-		})
-	} else {
-		d.armPolicyInvalidationPlan(oldActive, compiled)
+		}
 	}
-	applyErr := d.applyConfigLocked(d.applyCancelCtx(), compiled)
-	if applyErrSkipsPeerSync(applyErr) {
+	finalizeOut = d.finalizePromotedApplyLocked(promotedApply{
+		kind:          promotedApplySync,
+		oldActive:     oldActive,
+		newCfg:        compiled,
+		armKind:       armKind,
+		renameApply:   renameApply,
+		applyCtx:      d.applyCancelCtx(),
+		appliedDigest: appliedDigest,
+	})
+	compiled = finalizeOut.newCfg
+	applyErr := finalizeOut.applyErr
+	if finalizeOut.fatal {
 		return nil, applyErr
 	}
+	if finalizeOut.deferredNoCompletion {
+		// #1956: pre-consolidation armedActive was set BEFORE the
+		// no-completion check, so this return still ran the deferred
+		// discharge+stamp block — whose device-map passive-admission
+		// alarm is documented never-silent. Arm here too: publication
+		// did not land, so the discharge itself is a no-op
+		// (dischargePromotedLocked gates on PublishLanded) and the
+		// stamp still gates on the joined (non-nil) error, but the
+		// alarm fires.
+		armedActive = true
+		return compiled, applyErr
+	}
 	armedActive = true
-	if applyErr == nil && !d.policyInvalidationPublishLanded {
-		completion := d.deferredSnapshotCompletionForConfig(compiled)
-		if completion == nil {
-			return compiled, errors.New("deferred config snapshot has no publication completion")
-		}
-		return compiled, &cluster.ConfigApplyPendingError{Completion: completion}
+	if finalizeOut.deferredPending {
+		return compiled, &cluster.ConfigApplyPendingError{Completion: finalizeOut.deferredCompletion}
 	}
 	return compiled, applyErr
 }
@@ -1350,42 +1285,44 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// lands after promotion is joined by the shutdown drain like any other
 	// in-flight unconditional apply, and the #9811 debt owner (now gated by
 	// beginBackgroundApply + applyCancelCtx) owns any retry.
-	// #6948: arm the commit-time session-invalidation plan BEFORE the apply.
-	// Only this caller holds the pre-commit active config — the store promoted
-	// the new one upstream — and the invalidation's candidate set has to be READ
-	// while the live rows still carry the OLD policy numbering it is derived
-	// from. applyConfigLocked takes that capture at the publication boundary;
-	// without the plan it falls back to the pre-#6948 post-apply scan, which
-	// sweeps the sessions of whichever policy inherited a deleted policy's id.
-	// #16687: resolve first, arm second — same pointer discipline as
-	// the commit path. prevCfg here is the store's promoted rollback
-	// target (ActiveConfig()/confirmPrevCfg), a published pointer that
-	// must never be written through.
-	prevCfg = d.resolveDNSBeforeApply(prevCfg)
-	d.armPolicyInvalidationRollbackPlan(oldActive, prevCfg)
-	// #9811: latch the outcome. The log alone left the node ENFORCING the
-	// abandoned config C2 while the store, `show configuration`, the peer
-	// resync and /health all reported C1, with nothing to retry it — this is a
-	// timer callback with no caller to report to, unlike the commit path where
-	// the operator sees the error and re-commits. noteConfigApplyResult also
-	// DISCHARGES on success, so an apply that works needs no separate site.
-	applyErr := d.applyConfigLocked(context.Background(), prevCfg)
-	d.noteConfigApplyResult(applyErr)
-	if applyErr != nil {
-		slog.Error("commit confirmed auto-rollback dataplane apply failed", "err", applyErr)
-	}
-	// #5578: this is a background timer callback with no return path, so mirror
-	// the applyConfigLocked handling above — a PARTIAL session invalidation
-	// (enumerate/delete failure) is surfaced via a loud slog.Error rather than
-	// being lost. The helper now RETURNS the error so the two returning call
-	// sites (commit + peer-sync) join it into their result; here the log is the
-	// only available surface.
-	if d.policyInvalidationPublishLanded {
-		if err := d.dischargePolicyInvalidationDebtLocked(oldActive, prevCfg); err != nil {
-			slog.Error("commit confirmed auto-rollback: policy session invalidation was PARTIAL; "+
-				"some rolled-back-policy sessions may keep forwarding under stale authorization", "err", err)
-		}
-	}
+	// #17025: arm/apply/surface/classify/discharge is
+	// finalizePromotedApplyLocked (apply_finalize.go) — the #6948 arm
+	// comment lives there, once. Two rollback specifics stay explicit
+	// here:
+	//
+	//  (1) The apply runs with context.Background() (non-cancellable,
+	//      #2926): the store has already been promoted to the rollback
+	//      target, so the dataplane MUST be brought into agreement
+	//      unconditionally. #15054 fences this path BEFORE promotion
+	//      (see the applyFenced check at entry), so a shutdown that
+	//      has already fenced never reaches here.
+	//
+	//  (2) RESYNC DECISION (#17025, explicit): the resync below does
+	//      NOT honour applyErrSkipsPeerSync — it runs even when the
+	//      local re-apply was fatal. Rationale: the store has already
+	//      promoted C1 on THIS node; withholding the push would leave
+	//      the standby permanently on the abandoned C2 (the #3868
+	//      divergence) with only the reverse-sync-on-reconnect as a
+	//      backstop, while pushing C1 lets the peer converge its
+	//      STORE on C1 and re-attempt its own apply (its #4957 marker
+	//      stays unstamped until that apply lands, and its
+	//      handleConfigSync re-push fast path stays closed). The
+	//      commit driver's fatal-skip rationale does not transfer: a
+	//      commit can be re-issued by the operator who sees the
+	//      error, but this timer callback has no caller, and the
+	//      config being pushed is the previously-confirmed rollback
+	//      target, not a new candidate whose dataplane effect is
+	//      untested on either node. Pinned by
+	//      TestPromotedApplyDrivers17025/rollback_fatalApply_stillResyncs.
+	out := d.finalizePromotedApplyLocked(promotedApply{
+		kind:            promotedApplyRollback,
+		oldActive:       oldActive,
+		newCfg:          prevCfg,
+		armKind:         promotedArmRollback,
+		applyCtx:        context.Background(),
+		logDischargeErr: true,
+	})
+	_ = out.newCfg // the store already holds the promoted target; nothing to re-read
 	// #3868: RE-SYNC the rolled-back config (C1) to the cluster peer. The
 	// standby already received the unconfirmed config (C2) via config-sync
 	// SyncApply, which arms NO confirm timer, so it holds C2 as its PERMANENT
@@ -1398,6 +1335,7 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// active TCP conn all no-op); the existing reverse-sync-on-reconnect
 	// retries when the peer comes back. Runs under d.applySem (held above),
 	// after PromoteRollback, so the pushed text is always the rollback target.
+	// Runs UNCONDITIONALLY on the local apply outcome — see decision (2) above.
 	d.resyncRolledBackConfigToPeer()
 	slog.Warn("commit confirmed timed out, configuration rolled back")
 }
