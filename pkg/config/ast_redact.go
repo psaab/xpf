@@ -486,12 +486,23 @@ func RedactEmbeddedChangeConfigCommand(cmd string) string {
 // compare mode, so two different unjudgeable credentials still diff as
 // changed). Empty and whitespace-only commands alone stay unchanged.
 func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
-	tokens, _, lexOK := lexConfigMutationLineStrict15167(cmd)
+	tokens, quoted, lexOK := lexConfigMutationLineStrict15167(cmd)
 	if len(tokens) == 0 {
 		if strings.TrimSpace(cmd) == "" {
 			return cmd, false
 		}
 		return wholePayloadMask16726(cmd, fingerprint)
+	}
+	// The outer config lexer unwraps a quoted commands value as one opaque
+	// token. If its contents start with a comment, lex those contents as an
+	// embedded command too; otherwise a quoted `"# set ..."` looks like one
+	// harmless token and its credential survives.
+	if len(tokens) == 1 && quoted[0] {
+		inner := strings.TrimSpace(tokens[0])
+		if strings.HasPrefix(inner, "#") || strings.HasPrefix(inner, "/*") ||
+			strings.HasPrefix(inner, "//") {
+			return redactEmbeddedCommand(tokens[0], fingerprint)
+		}
 	}
 	changed := redactEmbeddedTokens(tokens, fingerprint)
 	if !lexOK && !changed {
@@ -501,7 +512,8 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 	for i, tok := range tokens {
 		parts[i] = quoteKey(tok)
 	}
-	return strings.Join(parts, " "), changed
+	rendered := strings.Join(parts, " ")
+	return rendered, changed || rendered != cmd
 }
 
 func wholePayloadMask16726(cmd string, fingerprint bool) (string, bool) {

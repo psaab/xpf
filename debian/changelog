@@ -1,9 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
   * Config: fail closed for nonempty embedded change-configuration
-    payloads that lex to no tokens, including comment-only commands. Keep the
-    whole-payload redaction placeholder through joined and block AST rewrites
-    and compare fingerprints (#17813).
+    payloads that lex to no tokens or lose content to comments; recursively
+    mask quoted comment-shaped command payloads and preserve the whole-payload
+    placeholder through joined and block AST rewrites and compare fingerprints
+    (#17813).
   * Daemon: add already-MASTER sync-hold reconcile coverage with an
     authoritative VRRP manager instance retained through held, release-only,
     and steady-state passes (#17821).
