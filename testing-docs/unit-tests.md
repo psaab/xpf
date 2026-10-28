@@ -19,7 +19,6 @@ make test
 | `pkg/dataplane/userspace` | ~50 | Userspace snapshot compilation, forwarding state, session map keys |
 | `pkg/cluster` | ~100 | State machine (election, weight, failover), session sync protocol |
 | `pkg/vrrp` | ~40 | VRRPv3 state machine, advertisement encoding, preempt logic |
-| `pkg/conntrack` | ~30 | Session GC, timeout, sweep, HA delete callbacks |
 | `pkg/frr` | ~20 | FRR config generation, managed sections |
 | `pkg/routing` | ~30 | VRF, GRE tunnels, XFRM, rib-group leaking, ip rules |
 | `pkg/networkd` | ~20 | .link/.network file generation, stale cleanup |

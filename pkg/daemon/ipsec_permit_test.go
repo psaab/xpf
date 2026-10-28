@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	xnft "github.com/psaab/xpf/pkg/nftables"
 	"github.com/vishvananda/netlink"
 )
 
@@ -192,7 +193,7 @@ func TestIpsecTopologyCensusVRFMasterSafe9506(t *testing.T) {
 	})
 	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: "vrf-blue", Index: 22}}
 	xfrmi := &netlink.Xfrmi{LinkAttrs: netlink.LinkAttrs{Name: "st0", Index: 11, MasterIndex: 22}}
-	outlet := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 33}}
+	outlet := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: xnft.HostInboundDelegatedIfname, Index: 33}}
 	ipsecTopologyLinkList = func() ([]netlink.Link, error) {
 		return []netlink.Link{xfrmi, vrf, outlet}, nil
 	}
@@ -228,7 +229,7 @@ func TestIpsecTopologyCensusRejectsEnslavedOutlet9506(t *testing.T) {
 		ipsecTopologyLinkList, ipsecFenceLinkByIndex = oldList, oldByIndex
 	})
 	xfrmi := &netlink.Xfrmi{LinkAttrs: netlink.LinkAttrs{Name: "st0", Index: 11}}
-	outlet := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 33, MasterIndex: 44}}
+	outlet := &netlink.Tuntap{LinkAttrs: netlink.LinkAttrs{Name: xnft.HostInboundDelegatedIfname, Index: 33, MasterIndex: 44}}
 	ipsecTopologyLinkList = func() ([]netlink.Link, error) {
 		return []netlink.Link{xfrmi, outlet}, nil
 	}

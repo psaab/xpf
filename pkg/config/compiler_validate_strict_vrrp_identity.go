@@ -68,7 +68,7 @@ func validateVRRPInstanceIdentityStrict(cfg *Config) error {
 	}
 
 	rethVRRPActive := true
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		rethVRRPActive = false
 	}
 	var rgOwners map[string]int

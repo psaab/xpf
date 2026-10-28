@@ -11,8 +11,8 @@ import (
 // leaf -- the three differ:
 //
 //	SchemaValidate          the schema gate; Store.Commit runs it FIRST
-//	CompileConfig           STRICT compiler gates (compileOpts{} zero value),
-//	                        reached only via compileTreeStrict -- no schema gate
+//	CompileConfig           STRICT compiler gates (strictCompileOpts(),
+//	                        #17148), reached only via compileTreeStrict -- no schema gate
 //	CompileConfigLenient    tolerant compiler gates; backs Store.Load and HA
 //	                        SyncApply (via compileTreeLenient, which schema-
 //	                        validates and DOWNGRADES to slog.Warn)
