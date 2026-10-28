@@ -147,6 +147,20 @@ var showTextRegistry = build(showTextEntries)
 // callers must price it at the strict default, never at view.
 func LookupShowText(topic string) (Entry, bool) { return showTextRegistry.lookup(topic) }
 
+// ShowTextCommand resolves a ShowText topic to its canonical command:
+// exact match first, then the longest matching prefix rule — the same
+// resolution LookupShowText prices by, so a topic can never be priced by
+// one rule and command-matched by another (#17108). ok=false means
+// unregistered: callers must treat an unmapped topic as deny for a
+// restricted class, never as no-match/allow.
+func ShowTextCommand(topic string) (string, bool) {
+	e, ok := LookupShowText(topic)
+	if !ok {
+		return "", false
+	}
+	return e.Command, true
+}
+
 // ShowTextEntries returns every registered ShowText topic/verb-key entry,
 // sorted by key. The slice is a copy; mutating it does not affect lookups.
 func ShowTextEntries() []Entry { return append([]Entry(nil), showTextRegistry.all...) }

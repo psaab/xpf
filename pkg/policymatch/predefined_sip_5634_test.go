@@ -26,7 +26,7 @@ func TestPredefinedSipPolicyMatchesTCP_5634(t *testing.T) {
 	}, config.ApplicationsConfig{})
 
 	// TCP/5060 SIP — the #5634 parity fix. Must match the permit, not default-deny.
-	resTCP := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 5060})
+	resTCP := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(5060)})
 	if resTCP.ContentRejected {
 		t.Fatalf("ContentRejected=true for junos-sip tcp/5060; reasons=%v", resTCP.ContentRejectionReasons)
 	}
@@ -36,14 +36,14 @@ func TestPredefinedSipPolicyMatchesTCP_5634(t *testing.T) {
 	}
 
 	// UDP/5060 SIP — the historical match must be preserved.
-	resUDP := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DstPort: 5060})
+	resUDP := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DstPort: PortPtr(5060)})
 	if !resUDP.Matched || resUDP.Action != config.PolicyPermit {
 		t.Fatalf("junos-sip udp/5060 did not match: Matched=%v Action=%v", resUDP.Matched, resUDP.Action)
 	}
 
 	// A non-member (tcp/5061, the SIP-TLS port Junos has NO predefined app for)
 	// must NOT match — the bundle is narrow, not match-any.
-	resNo := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 5061})
+	resNo := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(5061)})
 	if resNo.Matched {
 		t.Fatalf("tcp/5061 wrongly matched junos-sip (should be default-deny): Action=%v", resNo.Action)
 	}

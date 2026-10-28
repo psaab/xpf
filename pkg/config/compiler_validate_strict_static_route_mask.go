@@ -33,18 +33,7 @@ func staticRouteHelperRefusedMaskSpellings(cfg *Config) []string {
 			if sr == nil {
 				continue
 			}
-			for i, spelling := range append([]string{sr.Destination}, sr.destinationAliases...) {
-				if !CIDRMaskHelperRefusesPadding(spelling) {
-					continue
-				}
-				merged := ""
-				if i > 0 {
-					merged = fmt.Sprintf(" (merged into %q)", sr.Destination)
-				}
-				out = append(out, fmt.Sprintf(
-					"%s %q%s has redundant leading-zero CIDR mask digits the userspace helper cannot parse; write it as %q (#12507)",
-					scope, spelling, merged, normalizeCIDRMaskPadding(spelling)))
-			}
+			out = append(out, helperRefusedMaskSpellings(scope, "#12507", sr.Destination, sr.destinationAliases)...)
 		}
 	}
 	check("routing-options static route", cfg.RoutingOptions.StaticRoutes)

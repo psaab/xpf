@@ -17,7 +17,10 @@ func TestFixRethLinkFileRefusesGlobKernelName_10089(t *testing.T) {
 		{"class", "ge[0-9]", "["},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fixRethLinkFile("ge-0-0-3", tc.kernelName)
+			// #17042: a refusal is now a returned error, not a Warn-only skip.
+			if err := fixRethLinkFile("ge-0-0-3", tc.kernelName); err == nil {
+				t.Fatalf("#10089: fixRethLinkFile(%q) = nil, want refusal error", tc.kernelName)
+			}
 			entries, err := os.ReadDir(dir)
 			if err != nil {
 				t.Fatal(err)
@@ -31,7 +34,9 @@ func TestFixRethLinkFileRefusesGlobKernelName_10089(t *testing.T) {
 
 func TestFixRethLinkFileWritesCleanKernelName_10089(t *testing.T) {
 	dir := withTempLinkDir(t)
-	fixRethLinkFile("ge-0-0-3", "enp9s0")
+	if err := fixRethLinkFile("ge-0-0-3", "enp9s0"); err != nil {
+		t.Fatalf("fixRethLinkFile(clean): %v", err)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, linkPrefix+"ge-0-0-3.link"))
 	if err != nil {
 		t.Fatal(err)

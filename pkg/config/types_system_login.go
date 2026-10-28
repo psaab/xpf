@@ -1,6 +1,9 @@
 package config
 
-import "sort"
+import (
+	"fmt"
+	"sort"
+)
 
 // types_system_login.go holds the `system login` typed model: the coarse
 // permission enum, the class and user records, and the Junos-permission fold.
@@ -30,6 +33,35 @@ const (
 	PermMaint
 	PermAll // super-user: everything (subsumes every permission incl. PermMaint)
 )
+
+// String renders a coarse permission in the Junos vocabulary an operator
+// sees in `system login class ... permissions` (#17121). This is the ONLY
+// rendering table for LoginClassPermission: the commit advisory
+// (loginClassAdvisoryWarnings) and the authorization
+// denial (authz.PermissionName, which delegates here) both consume it, so
+// the word named at commit time is the word named at denial time. PermAll
+// is "all" — the Junos permission token — not "super-user", which names a
+// predefined CLASS, not a permission. An out-of-range value renders
+// "permission(<n>)" so a corrupt value stays diagnosable instead of
+// collapsing into the same word as a missing one.
+func (p LoginClassPermission) String() string {
+	switch p {
+	case PermView:
+		return "view"
+	case PermClear:
+		return "clear"
+	case PermControl:
+		return "control"
+	case PermConfig:
+		return "configure"
+	case PermMaint:
+		return "maintenance"
+	case PermAll:
+		return "all"
+	default:
+		return fmt.Sprintf("permission(%d)", int(p))
+	}
+}
 
 // LoginClassPermissions maps class names to their allowed permissions.
 //

@@ -47,7 +47,7 @@ func undefinedZoneCfg() *config.Config {
 func TestUndefinedFromZoneNoWildcardMatch(t *testing.T) {
 	cfg := undefinedZoneCfg()
 
-	res := Match(cfg, Query{FromZone: "bogus", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "bogus", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if res.Matched {
 		t.Fatalf("undefined from-zone matched a wildcard/global rule (#3355); res = %+v", res)
 	}
@@ -69,7 +69,7 @@ func TestUndefinedFromZoneNoWildcardMatch(t *testing.T) {
 func TestUndefinedToZoneNoMatch(t *testing.T) {
 	cfg := undefinedZoneCfg()
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "nowhere", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "nowhere", Protocol: "tcp", DstPort: PortPtr(80)})
 	if res.Matched {
 		t.Fatalf("undefined to-zone matched (#3355); res = %+v", res)
 	}
@@ -84,7 +84,7 @@ func TestUndefinedToZoneNoMatch(t *testing.T) {
 func TestDefinedZoneStillMatchesWildcard(t *testing.T) {
 	cfg := undefinedZoneCfg()
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("defined zone over-blocked by the #3355 guard; res = %+v", res)
 	}
@@ -147,7 +147,7 @@ func TestNoZonesDefinedNoTransitMatch(t *testing.T) {
 		Applications: config.ApplicationsConfig{},
 	}
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if res.Matched {
 		t.Fatalf("no-zones config matched a transit rule the runtime would never evaluate (#3355 drift); res = %+v", res)
 	}
@@ -213,7 +213,7 @@ func TestNoZonesDefinedNoTransitMatchZoneGate(t *testing.T) {
 	// POSITIVE CONTROL: the content gate must be SILENT on this fixture, or the
 	// assertions below would pass for the wrong reason and this cell would be a
 	// duplicate of the one above rather than the zone-gate isolation it claims.
-	if res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80}); res.ContentRejected {
+	if res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)}); res.ContentRejected {
 		t.Fatalf("POSITIVE CONTROL: the #9410 content gate fired on a fixture whose policy "+
 			"zones are all DEFINED (%v); this cell can no longer isolate zoneKnown",
 			res.ContentRejectionReasons)
@@ -222,7 +222,7 @@ func TestNoZonesDefinedNoTransitMatchZoneGate(t *testing.T) {
 	}
 
 	// The property: an UNKNOWN ingress zone matches nothing in the transit tiers.
-	res := Match(cfg, Query{FromZone: "nosuchzone", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "nosuchzone", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if res.Matched {
 		t.Fatalf("an unknown ingress zone matched a transit rule the runtime would never "+
 			"evaluate (#3355 drift); res = %+v", res)
@@ -260,7 +260,7 @@ func TestUndefinedFromZoneJunosHostFromAny(t *testing.T) {
 		Applications: config.ApplicationsConfig{},
 	}
 
-	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: 22})
+	res := Match(cfg, Query{FromZone: "bogus", ToZone: JunosHostZone, Protocol: "tcp", DstPort: PortPtr(22)})
 	if !res.Matched || res.Action != config.PolicyPermit || res.PolicyName != "host-permit" {
 		t.Fatalf("undefined ingress must reach the from-any junos-host rule (#10644); res = %+v", res)
 	}

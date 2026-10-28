@@ -97,15 +97,20 @@ fn nat64_mint(
 ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
     state.nat64.allocate_source_for_worker(
         0,
-        6,
-        src_v6.parse::<Ipv6Addr>().expect("v6 src"),
+        &crate::session::SessionKey {
+            addr_family: libc::AF_INET6 as u8,
+            protocol: 6,
+            src_ip: IpAddr::V6(src_v6.parse::<Ipv6Addr>().expect("v6 src")),
+            dst_ip: IpAddr::V6("64:ff9b::0808:0808".parse().expect("v6 dst")),
+            src_port: 40000,
+            dst_port: 443,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        },
         "8.8.8.8".parse::<Ipv4Addr>().expect("v4 dst"),
-        40000,
-        443,
         0,
         0,
         &[],
-        0,
         None,
     )
 }

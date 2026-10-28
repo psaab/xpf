@@ -229,7 +229,7 @@ impl Nptv6State {
 ///
 /// `adjustment = ones_complement_sum(internal_prefix) - ones_complement_sum(external_prefix)`
 ///
-/// This matches the BPF implementation in `xpf_nat.h`.
+/// This matches the retired BPF implementation formerly in `bpf/headers/xpf_nat.h` (deleted in #17146; see that commit).
 fn compute_adjustment(internal: &[u16], external: &[u16], prefix_words: usize) -> u16 {
     let mut isum: u32 = 0;
     let mut esum: u32 = 0;

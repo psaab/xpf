@@ -71,10 +71,12 @@ func resolveDerivedConfig(cfg *Config, opts compileOpts) {
 	// cc.NodeID.
 	//
 	// Guards (all load-bearing):
-	//   - opts.nodeAware && stampNodeID >= 0: only the node-aware entry
-	//     (compileTree node branch) sets these. The standalone
-	//     CompileConfig path leaves nodeAware false, so single-node compiles
-	//     are unchanged; a negative node-id (defensive) never stamps.
+	//   - opts.nodeID != nil && *opts.nodeID >= 0 (#4329/#17157): only the
+	//     node-aware entry (compileTree node branch) sets opts.nodeID — it
+	//     IS compileTree's *int selector, so presence and value cannot
+	//     disagree. The standalone CompileConfig path leaves it nil, so
+	//     single-node compiles are unchanged; a negative node-id
+	//     (defensive) never stamps.
 	//   - Cluster != nil: never fabricate a cluster stanza. A config-less HA
 	//     node (node-id present but empty/no-cluster config — the EMPTY-config
 	//     takeover in pkg/daemon/daemon.go) must keep Cluster == nil so the
@@ -86,9 +88,9 @@ func resolveDerivedConfig(cfg *Config, opts compileOpts) {
 	//     (pkg/configstore) already rejects a leaf that disagrees with the
 	//     runtime node-id, and the GROUPS form (groups node0/node1 each carry
 	//     an explicit `node` leaf) is left bit-identical.
-	if opts.nodeAware && opts.stampNodeID >= 0 &&
+	if opts.nodeID != nil && *opts.nodeID >= 0 &&
 		cfg.Chassis.Cluster != nil && !cfg.Chassis.Cluster.NodeIDSet {
-		cfg.Chassis.Cluster.NodeID = opts.stampNodeID
+		cfg.Chassis.Cluster.NodeID = *opts.nodeID
 	}
 
 	// #3870: resolve the BGP local-AS from `routing-options

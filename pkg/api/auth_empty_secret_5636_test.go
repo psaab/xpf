@@ -26,7 +26,7 @@ func TestEmptyConfiguredBasicPasswordRejected(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := authMiddleware(cfg, false, ok)
+	handler := productionAuthHandlerOnly(t, cfg, false, ok)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 	req.Header.Set("Authorization", basicAuth("admin", "")) // username:, empty password
@@ -66,7 +66,7 @@ func TestEmptyConfiguredAPIKeyRejected(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := authMiddleware(cfg, false, ok)
+	handler := productionAuthHandlerOnly(t, cfg, false, ok)
 
 	// Bearer with an empty token routes through constantTimeAPIKeyMatch.
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
