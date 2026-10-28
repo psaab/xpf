@@ -277,7 +277,7 @@ pub(in crate::afxdp) fn wg_uncovered_flow_hash(inner: &[u8]) -> u64 {
                     }
                     44 if inner.len() >= off + 8 => {
                         proto = inner[off];
-                        fragmented = (u16::from_be_bytes([inner[off + 2], inner[off + 3]]) >> 3) & 0x1fff != 0 || inner[off + 3] & 1 != 0;
+                        fragmented = true;
                         off += 8;
                         break;
                     }

@@ -560,13 +560,6 @@ test-race-dp:
 DEBUG_LOG_CELLS_16439 := afxdp::worker::loop_body::debug_report::policy_revoked_sessions_fold_tests::accumulate_carries_policy_revoked_sessions_10021 afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_tuple_mismatch_recycles_frame_exactly_once afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_pat_translation_is_not_a_tuple_mismatch_9782 afxdp::tx::dispatch::tests::segmentation::segmentation_pat_translation_survives_expected_ports_9782
 test-rust: lint-rust-baseline check-userspace-dt-needed
 
-# #17190: rustc warning ratchet — fail on any new/increased (lint,file) warning
-# vs userspace-dp/lint-baseline.tsv. Mechanical lints are also #![deny] in
-# src/main.rs and src/bin/fairness-eval.rs.
-.PHONY: lint-rust-baseline
-lint-rust-baseline:
-	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp CARGO=$(CARGO) python3 scripts/rust-lint-baseline.py
-
 	# Leg 0: compile bench invariants only; benches are never executed.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
 	# Leg 1: full release suite; overflow checks remain off by design.
@@ -602,6 +595,15 @@ lint-rust-baseline:
 clippy-rust:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D unfulfilled_lint_expectations
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -A clippy::duplicate_mod
+# #17190: rustc warning ratchet — fail on any new/increased (lint,file) warning
+# vs userspace-dp/lint-baseline.tsv. Mechanical lints are also #![deny] in
+# src/main.rs and src/bin/fairness-eval.rs. Runs the pinned toolchain via
+# RUSTUP_TOOLCHAIN (the census script invokes cargo in argv form, so a
+# `cargo +<pinned>` string would not survive as an executable name).
+.PHONY: lint-rust-baseline
+lint-rust-baseline:
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp CARGO=$(CARGO) RUSTUP_TOOLCHAIN=$$pinned python3 scripts/rust-lint-baseline.py
+
 
 # #10204: prove the release helper's static snapshot provenance and dynamic
 # dependency boundary on every Rust gate. The map must come from a fresh

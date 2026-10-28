@@ -781,7 +781,17 @@ pub(super) fn rollback_recorded_persistent_inbound_hold(
         now_ns,
     );
 }
-
+// #17190 fold (B3): `admission_to_zone = to_zone_id` below is restored
+// loop-visible state, NOT the burn-down's inert `let _ = &to_zone_id`.
+// On this path the finalized-resolution store overwrites it before any
+// read, so the dead-store deny fires — but `admission_to_zone` is only
+// ever read under `== 0` guards across descriptor iterations, and the
+// store keeps the routed pair's value in place for any early-read path.
+// Restructuring it away (deleting the store, or a read-back alias) would
+// reintroduce the stale-zone bug; the reviewers' agreed resolution is to
+// keep the store and exempt exactly this one assignment. The exemption
+// is fn-scoped: every other store in this fn stays under the deny.
+#[allow(unused_assignments)]
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
     binding_index: usize,
@@ -5287,9 +5297,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         );
                         // #7770 authorization is on the real routed pair,
                         // before any HA fabric redirect changes the egress.
+                        // #17190 fold (B3): this store is restored, not the
+                        // burn-down's `let _ = &to_zone_id` read-back. The
+                        // finalized-resolution store below
+                        // (`admission_to_zone = if final_resolution...`)
+                        // overwrites it on this path, but the store is
+                        // loop-visible state: later descriptor iterations
+                        // read `admission_to_zone` under `== 0` guards, and
+                        // any future early-read path must see the routed
+                        // pair's value, never a stale one.
                         let route_from_zone_id = from_zone_id;
                         let route_to_zone_id = to_zone_id;
-                        let _ = &to_zone_id;
+                        admission_to_zone = to_zone_id;
                         // Borrow zone names as &str for string-typed downstream
                         // callers (static_nat, match_source_nat_for_flow, debug
                         // log). No clone — the borrow lives only inside this
@@ -5570,13 +5589,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     telemetry.dbg.local += 1;
                                     telemetry.dbg.policy_deny += 1;
                                     telemetry.counters.touched = true;
-                                    if persistent_lease_hold_outer.is_some() {
+                                    if let Some(hold_key) = persistent_lease_hold_outer.take() {
                                         rollback_persistent_inbound_hold(
                                             worker_ctx.forwarding,
-                                            persistent_lease_hold_outer,
+                                            Some(hold_key),
+
                                             now_ns,
                                         );
-                                        let _ = &persistent_lease_hold_outer;
                                     }
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
@@ -6575,13 +6594,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 );
                             } else {
                                 sessions.note_admission_refused();
-                                if persistent_lease_hold_outer.is_some() {
+                                if let Some(hold_key) = persistent_lease_hold_outer.take() {
                                     rollback_persistent_inbound_hold(
                                         worker_ctx.forwarding,
-                                        persistent_lease_hold_outer,
+                                        Some(hold_key),
+
                                         now_ns,
                                     );
-                                    let _ = &persistent_lease_hold_outer;
                                 }
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
@@ -12505,13 +12524,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 worker_id,
                                             );
                                         }
-                                        if persistent_lease_hold_outer.is_some() {
+                                        if let Some(hold_key) =
+                                            persistent_lease_hold_outer.take()
+                                        {
                                             rollback_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
-                                                persistent_lease_hold_outer,
+                                                Some(hold_key),
                                                 now_ns,
                                             );
-                                            let _ = &persistent_lease_hold_outer;
                                         }
                                         telemetry.dbg.policy_deny += 1;
                                         telemetry.counters.record_transit_ipsec_fence_drop();
@@ -12931,13 +12951,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // and drop the frame instead of
                                         // buffering it for replay.
                                         seed_install_refused = true;
-                                        if persistent_lease_hold_outer.is_some() {
+                                        if let Some(hold_key) =
+                                            persistent_lease_hold_outer.take()
+                                        {
                                             rollback_persistent_inbound_hold(
                                                 worker_ctx.forwarding,
-                                                persistent_lease_hold_outer,
+                                                Some(hold_key),
                                                 now_ns,
                                             );
-                                            let _ = &persistent_lease_hold_outer;
                                         }
                                         rollback_source_nat_allocation_for_worker(
                                             &worker_ctx.forwarding.iface_nat_allocators,
