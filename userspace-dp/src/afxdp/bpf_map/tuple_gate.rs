@@ -3,12 +3,20 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
+
+use crate::sync_util::{lock_tolerant_counted, wait_timeout_tolerant_counted};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const SHARD_COUNT: usize = 256;
 const SHARD_CAP: usize = 1024;
 const ACQUIRE_BUDGET: Duration = Duration::from_millis(100);
+
+/// #17201: TupleGate mutex poison recoveries (shard, entry and admission
+/// locks, including the admission Condvar wait). A counter bump on the
+/// poisoned arm only — no journald line per acquisition (worker install,
+/// GC-teardown, HA-import and BPF-publish paths).
+pub(crate) static TUPLE_GATE_POISON_RECOVERIES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GateState {
@@ -105,10 +113,8 @@ impl TupleGate {
         mode: GateClaim,
     ) -> Result<(usize, Arc<Mutex<GateEntry>>, u64), &'static str> {
         let index = Self::shard_index(key);
-        let mut entries = self.shards[index]
-            .entries
-            .lock()
-            .expect("tuple gate shard poisoned");
+        let mut entries =
+            lock_tolerant_counted(&self.shards[index].entries, Some(&TUPLE_GATE_POISON_RECOVERIES));
         let entry = if let Some(entry) = entries.get(key) {
             Arc::clone(entry)
         } else {
@@ -119,7 +125,7 @@ impl TupleGate {
             entries.insert(key.clone(), Arc::clone(&entry));
             entry
         };
-        let mut state = entry.lock().expect("tuple gate entry poisoned");
+        let mut state = lock_tolerant_counted(&entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
         let allowed = match mode {
             GateClaim::Publish | GateClaim::Install => state.state == GateState::Idle,
             GateClaim::Lease => {
@@ -150,7 +156,7 @@ impl TupleGate {
     }
 
     fn admit_tuple(self: &Arc<Self>) -> Result<Arc<TupleAdmission>, &'static str> {
-        let mut admission = self.admission.lock().expect("tuple gate admission poisoned");
+        let mut admission = lock_tolerant_counted(&self.admission, Some(&TUPLE_GATE_POISON_RECOVERIES));
         if admission.clear_pending || admission.clear_active {
             return Err("clear_in_progress");
         }
@@ -161,10 +167,8 @@ impl TupleGate {
     }
 
     fn remove_if_idle(&self, index: usize, key: &SessionKey, entry: &Arc<Mutex<GateEntry>>) {
-        let mut shard = self.shards[index]
-            .entries
-            .lock()
-            .expect("tuple gate shard poisoned");
+        let mut shard =
+            lock_tolerant_counted(&self.shards[index].entries, Some(&TUPLE_GATE_POISON_RECOVERIES));
         if !shard
             .get(key)
             .is_some_and(|current| Arc::ptr_eq(current, entry))
@@ -174,7 +178,7 @@ impl TupleGate {
         // Keep the shard lock while re-checking the entry. No caller can
         // remove-and-reinsert this tuple between the check and the removal,
         // which closes the permit/ABA window.
-        let state = entry.lock().expect("tuple gate entry poisoned");
+        let state = lock_tolerant_counted(&entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
         if state.state == GateState::Idle && state.publishers == 0 && state.installs == 0 {
             drop(state);
             shard.remove(key);
@@ -182,7 +186,7 @@ impl TupleGate {
     }
 
     fn rollback_claim(entry: &Arc<Mutex<GateEntry>>) {
-        let mut state = entry.lock().expect("tuple gate entry poisoned");
+        let mut state = lock_tolerant_counted(&entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
         if state.state == GateState::Draining {
             state.state = if state.publishers == 0 && state.installs == 0 {
                 GateState::Idle
@@ -193,7 +197,7 @@ impl TupleGate {
     }
 
     fn release_admission(&self) {
-        let mut admission = self.admission.lock().expect("tuple gate admission poisoned");
+        let mut admission = lock_tolerant_counted(&self.admission, Some(&TUPLE_GATE_POISON_RECOVERIES));
         admission.active = admission.active.saturating_sub(1);
         self.admission_changed.notify_all();
     }
@@ -319,12 +323,12 @@ impl TupleGate {
             }
             loop {
                 let drained = claimed.iter().all(|(_, _, entry, _)| {
-                    let state = entry.lock().expect("tuple gate entry poisoned");
+                    let state = lock_tolerant_counted(&entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
                     state.publishers == 0 && state.installs == 0
                 });
                 if drained {
                     for (_, _, entry, _) in &claimed {
-                        entry.lock().expect("tuple gate entry poisoned").state = GateState::Held;
+                        lock_tolerant_counted(&entry, Some(&TUPLE_GATE_POISON_RECOVERIES)).state = GateState::Held;
                     }
                     return Ok(GateLease {
                         gate: Arc::clone(self),
@@ -344,13 +348,15 @@ impl TupleGate {
         }
     }
     pub(crate) fn begin_clear(self: &Arc<Self>) -> Result<ClearFence, &'static str> {
-        let mut admission = self.admission.lock().expect("tuple gate admission poisoned");
+        let mut admission = lock_tolerant_counted(&self.admission, Some(&TUPLE_GATE_POISON_RECOVERIES));
         admission.clear_pending = true;
         while admission.active != 0 || admission.clear_active {
-            let (next, timeout) = self
-                .admission_changed
-                .wait_timeout(admission, Duration::from_millis(50))
-                .expect("tuple gate admission poisoned");
+            let (next, timeout) = wait_timeout_tolerant_counted(
+                &self.admission_changed,
+                admission,
+                Duration::from_millis(50),
+                Some(&TUPLE_GATE_POISON_RECOVERIES),
+            );
             admission = next;
             if timeout.timed_out() && admission.active != 0 {
                 admission.clear_pending = false;
@@ -412,7 +418,7 @@ impl GateLease {
     /// Transition the lease to Finalizing before the final survivor probe.
     pub(crate) fn begin_finalizing(&self) -> Result<(), &'static str> {
         for (_, _, entry, _) in &self.entries {
-            let mut state = entry.lock().expect("tuple gate entry poisoned");
+            let mut state = lock_tolerant_counted(&entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
             if state.state != GateState::Held || state.publishers != 0 || state.installs != 0 {
                 return Err("gate_busy");
             }
@@ -425,7 +431,7 @@ impl GateLease {
 impl Drop for GateLease {
     fn drop(&mut self) {
         for (index, key, entry, _) in self.entries.drain(..) {
-            let mut state = entry.lock().expect("tuple gate entry poisoned");
+            let mut state = lock_tolerant_counted(&entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
             state.state = GateState::Idle;
             drop(state);
             self.gate.remove_if_idle(index, &key, &entry);
@@ -443,7 +449,7 @@ pub(crate) struct PublishPermit {
 
 impl Drop for PublishPermit {
     fn drop(&mut self) {
-        let mut state = self.entry.lock().expect("tuple gate entry poisoned");
+        let mut state = lock_tolerant_counted(&self.entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
         state.publishers = state.publishers.saturating_sub(1);
         // A lease may already have moved Publishing -> Draining. Preserve
         // Draining after the last publisher exits so the lease can atomically
@@ -469,7 +475,7 @@ pub(crate) struct InstallPermit {
 
 impl Drop for InstallPermit {
     fn drop(&mut self) {
-        let mut state = self.entry.lock().expect("tuple gate entry poisoned");
+        let mut state = lock_tolerant_counted(&self.entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
         state.installs = state.installs.saturating_sub(1);
         if state.publishers == 0
             && state.installs == 0
@@ -488,7 +494,7 @@ pub(crate) struct ClearFence {
 
 impl Drop for ClearFence {
     fn drop(&mut self) {
-        let mut admission = self.gate.admission.lock().expect("tuple gate admission poisoned");
+        let mut admission = lock_tolerant_counted(&self.gate.admission, Some(&TUPLE_GATE_POISON_RECOVERIES));
         admission.clear_active = false;
         self.gate.admission_changed.notify_all();
     }
@@ -657,5 +663,49 @@ mod tests {
         release_tx.send(()).unwrap();
         worker.join().unwrap();
         drop(clear.join().unwrap());
+    }
+
+    #[test]
+    fn a_poisoned_tuple_gate_shard_does_not_panic_installs() {
+        // #17201 twin of steering_owners' a_poisoned_shard_is_still_usable_9560.
+        let gate = Arc::new(TupleGate::new());
+        let k = key(1000, 7);
+        let index = TupleGate::shard_index(&TupleGate::canonical(&k));
+        let permit = gate.try_acquire_install(&k).unwrap();
+        let entry = {
+            let shard = crate::sync_util::lock_tolerant(&gate.shards[index].entries);
+            Arc::clone(shard.get(&TupleGate::canonical(&k)).unwrap())
+        };
+        drop(permit);
+        for mutex_is_entry in [false, true] {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if mutex_is_entry {
+                    let _guard = entry.lock().unwrap();
+                    panic!("17201 tuple-gate probe panic");
+                } else {
+                    let _guard = gate.shards[index].entries.lock().unwrap();
+                    panic!("17201 tuple-gate probe panic");
+                }
+            }));
+            assert!(caught.is_err());
+        }
+        {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = gate.admission.lock().unwrap();
+                panic!("17201 tuple-gate admission probe panic");
+            }));
+            assert!(caught.is_err());
+        }
+        let before = TUPLE_GATE_POISON_RECOVERIES.load(Ordering::Relaxed);
+        drop(gate.try_acquire_install(&k).expect("poisoned shard must not panic installs"));
+        gate.with_publish(&k, || ()).expect("poisoned shard must not panic publishes");
+        let lease = gate.acquire_lease([k]).expect("poisoned shard must not panic leases");
+        drop(lease);
+        let fence = gate.begin_clear().expect("poisoned admission must not panic clears");
+        drop(fence);
+        assert!(
+            TUPLE_GATE_POISON_RECOVERIES.load(Ordering::Relaxed) > before,
+            "poisoned acquisitions must be counted, not silently skipped"
+        );
     }
 }

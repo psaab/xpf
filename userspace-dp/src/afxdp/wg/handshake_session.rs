@@ -85,17 +85,17 @@ pub(in crate::afxdp::wg) static WG_HANDSHAKE_LOCK_POISON_RECOVERIES: std::sync::
 /// here; only the poison policy is shared.
 #[inline]
 fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    match m.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            m.clear_poison();
-            WG_HANDSHAKE_LOCK_POISON_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            eprintln!(
-                "xpf-wg: handshake-session mutex poisoned by a prior panic; recovering and clearing poison"
-            );
-            poisoned.into_inner()
-        }
+    // #17201: folded onto the crate-level tolerant helper; this wrapper
+    // keeps the WG-specific counter + journald line and `clear_poison`,
+    // stamped on the poisoned arm only (checked before acquisition).
+    if m.is_poisoned() {
+        m.clear_poison();
+        WG_HANDSHAKE_LOCK_POISON_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "xpf-wg: handshake-session mutex poisoned by a prior panic; recovering and clearing poison"
+        );
     }
+    crate::sync_util::lock_tolerant(m)
 }
 
 /// A handshake in progress: the snow `HandshakeState` plus the metadata
@@ -298,7 +298,7 @@ impl WgEngine {
     /// diagnostic accessor.
     #[cfg(test)]
     pub(crate) fn pending_count(&self) -> usize {
-        self.pending.read().unwrap().len()
+        crate::sync_util::read_tolerant(&self.pending).len()
     }
 
     /// Build a framed WG type-1 initiation toward `peer_pubkey`.

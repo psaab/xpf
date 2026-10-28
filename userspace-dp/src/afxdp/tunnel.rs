@@ -1143,7 +1143,5 @@ pub(super) fn record_local_tunnel_exception(
     tunnel_name: &str,
     reason: String,
 ) {
-    if let Ok(mut recent) = recent_exceptions.lock() {
-        push_recent_exception(&mut recent, control_notice_event(tunnel_name, reason));
-    }
+    push_recent_exception(&mut crate::sync_util::lock_tolerant(recent_exceptions), control_notice_event(tunnel_name, reason));
 }

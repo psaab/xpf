@@ -2215,7 +2215,7 @@ impl SessionTable {
         // iteration order never decides the answer.
         let established = crate::session::TcpHandshakeState::Established.to_wire();
         for map in [shared_sessions, shared_forward_wire_sessions] {
-            let Ok(guard) = map.lock() else { continue };
+            let guard = crate::sync_util::lock_tolerant(map);
             // Direct: a row stored under the wire tuple itself.
             let direct = guard.get(wire_key);
             if let Some(entry) = direct

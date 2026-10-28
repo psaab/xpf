@@ -23,6 +23,9 @@ mod screen;
 mod session;
 mod slowpath;
 mod slowpath_reinject_9506;
+mod sync_util;
+#[cfg(test)]
+mod sync_util_scan_tests;
 #[cfg(test)]
 mod test_zone_ids;
 #[cfg(test)]

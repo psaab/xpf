@@ -1155,15 +1155,11 @@ impl super::Coordinator {
     pub fn recent_exceptions(&self) -> Vec<ExceptionStatus> {
         let anchor = MonoWallAnchor::capture();
         let mut events: Vec<ExceptionEvent> = Vec::new();
-        if let Ok(ring) = self.recent_exceptions.lock() {
-            events.extend(ring.iter().cloned());
-        }
+        events.extend(crate::sync_util::lock_tolerant(&self.recent_exceptions).iter().cloned());
         // #6242: drain each worker's exception ring off its runtime record
         // (was the standalone `worker_exception_rings` map).
         for rec in self.workers.records().values() {
-            if let Ok(ring) = rec.exception_ring.lock() {
-                events.extend(ring.iter().cloned());
-            }
+            events.extend(crate::sync_util::lock_tolerant(&rec.exception_ring).iter().cloned());
         }
         events.sort_by_key(|e| e.mono);
         let start = events.len().saturating_sub(EXCEPTION_RING_CAPACITY);
@@ -1174,10 +1170,7 @@ impl super::Coordinator {
     }
 
     pub fn recent_session_deltas(&self) -> Vec<SessionDeltaInfo> {
-        self.recent_session_deltas
-            .lock()
-            .map(|recent| recent.iter().cloned().collect())
-            .unwrap_or_default()
+        crate::sync_util::lock_tolerant(&self.recent_session_deltas).iter().cloned().collect()
     }
 
     /// #5289: the most-recent forwarding resolution across the control-thread
@@ -1192,15 +1185,11 @@ impl super::Coordinator {
                 newest = Some(ev);
             }
         };
-        if let Ok(last) = self.last_resolution.lock() {
-            consider(last.clone());
-        }
+        consider(crate::sync_util::lock_tolerant(&self.last_resolution).clone());
         // #6242: pick the newest across each worker's last-resolution slot off
         // its runtime record (was the standalone `worker_last_resolution` map).
         for rec in self.workers.records().values() {
-            if let Ok(last) = rec.last_resolution.lock() {
-                consider(last.clone());
-            }
+            consider(crate::sync_util::lock_tolerant(&rec.last_resolution).clone());
         }
         newest.map(|ev| ev.to_resolution(&self.forwarding))
     }

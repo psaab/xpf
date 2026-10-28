@@ -132,13 +132,11 @@ impl WgUncoveredIngressQueue {
     }
 
     fn lock_recover(&self) -> std::sync::MutexGuard<'_, VecDeque<WgUncoveredDescriptor>> {
-        match self.pending.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                WG_UNCOVERED_QUEUE_POISON_RECOVERIES.fetch_add(1, Ordering::Relaxed);
-                poisoned.into_inner()
-            }
-        }
+        // #17201: crate-level tolerant helper with this queue's counter hook.
+        crate::sync_util::lock_tolerant_counted(
+            &self.pending,
+            Some(&WG_UNCOVERED_QUEUE_POISON_RECOVERIES),
+        )
     }
 
     /// Enqueue without blocking. `Err(descriptor)` hands the descriptor back

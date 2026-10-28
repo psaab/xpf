@@ -63,6 +63,8 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::sync_util::lock_tolerant;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::protocol::ZoneFloodCounterStatus;
@@ -351,7 +353,7 @@ impl FloodCounterStore {
     /// Get-or-create the shared atomic block for a stable zone id, under the map
     /// mutex. Config-apply path only; NOT the hot path.
     fn zone_totals(&self, zone_id: u32) -> Arc<FloodTotalsAtomic> {
-        let mut totals = self.totals.lock().expect("flood counter store poisoned");
+        let mut totals = lock_tolerant(&self.totals);
         Arc::clone(totals.entry(zone_id).or_default())
     }
 
@@ -376,7 +378,7 @@ impl FloodCounterStore {
     /// follow-up that gives the flood surface the same cause-naming treatment
     /// #7907 gave the zone half.
     pub(in crate::afxdp) fn snapshot(&self) -> Vec<ZoneFloodCounterStatus> {
-        let totals = self.totals.lock().expect("flood counter store poisoned");
+        let totals = lock_tolerant(&self.totals);
         let mut out: Vec<ZoneFloodCounterStatus> = totals
             .iter()
             .filter_map(|(&zone_id, t)| {
@@ -408,7 +410,7 @@ impl FloodCounterStore {
     /// slot map caches each zone's `Arc`; dropping the map entry would leave
     /// workers folding into an orphaned block the snapshot no longer sees.
     pub(in crate::afxdp) fn clear(&self) {
-        let totals = self.totals.lock().expect("flood counter store poisoned");
+        let totals = lock_tolerant(&self.totals);
         for block in totals.values() {
             block.reset();
         }
@@ -418,9 +420,7 @@ impl FloodCounterStore {
     /// hygiene). A `configured` zone's `Arc` is retained, so a slot map rebuilt
     /// in the same apply resolves the SAME block (no reset/double).
     pub(in crate::afxdp) fn reconcile(&self, configured: &FxHashSet<u32>) {
-        self.totals
-            .lock()
-            .expect("flood counter store poisoned")
+        lock_tolerant(&self.totals)
             .retain(|zone_id, _| configured.contains(zone_id));
     }
 

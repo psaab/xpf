@@ -1142,12 +1142,7 @@ fn spawn_workers(
                 // is nothing to unwind. The record's `Arc` locals simply drop
                 // at end of this loop iteration. #14130: the already-launched
                 // workers ARE stopped by the shell's `stop_inner(false)`.
-                if let Ok(mut recent) = coord.recent_exceptions.lock() {
-                    // #6244: the control notice still carries the byte-identical
-                    // legacy stage string (rendered from the typed stage), so
-                    // the operator-facing notice is unchanged.
-                    push_recent_exception(&mut recent, control_notice_event("", stage.to_string()));
-                }
+                push_recent_exception(&mut crate::sync_util::lock_tolerant(&coord.recent_exceptions), control_notice_event("", stage.to_string()));
                 // #4952: a spawn failed on the POST-TEARDOWN destructive
                 // path — the old workers are gone, so this queue set now has
                 // NO XSK-bound worker (silent forwarding outage). ABORT the

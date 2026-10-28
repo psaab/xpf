@@ -1123,12 +1123,11 @@ impl Coordinator {
             })
             .collect();
         let neighbors = accepted.as_slice();
-        let prior_manager_keys: Vec<(i32, IpAddr)> = self
-            .neighbors
-            .manager_keys
-            .lock()
-            .map(|manager_keys| manager_keys.iter().copied().collect())
-            .unwrap_or_default();
+        let prior_manager_keys: Vec<(i32, IpAddr)> =
+            crate::sync_util::lock_tolerant(&self.neighbors.manager_keys)
+                .iter()
+                .copied()
+                .collect();
         // for the change test at publish time. Captured BEFORE the
         // mutations below (manager_keys still names the old set here):
         // an additive push leaves `old ∪ accepted`, a replace leaves
@@ -1164,15 +1163,12 @@ impl Coordinator {
         };
 
         let old_manager_keys = if replace {
-            self.neighbors
-                .manager_keys
-                .lock()
-                .map(|manager_keys| manager_keys.iter().copied().collect::<Vec<_>>())
-                .unwrap_or_default()
+            crate::sync_util::lock_tolerant(&self.neighbors.manager_keys).iter().copied().collect::<Vec<_>>()
         } else {
             Vec::new()
         };
-        if let Ok(mut manager_keys) = self.neighbors.manager_keys.lock() {
+        {
+            let mut manager_keys = crate::sync_util::lock_tolerant(&self.neighbors.manager_keys);
             if replace {
                 manager_keys.clear();
             }
@@ -1468,18 +1464,14 @@ impl Coordinator {
                 shard.clear();
             }
         });
-        if let Ok(mut manager_keys) = self.neighbors.manager_keys.lock() {
-            manager_keys.clear();
-        }
+        crate::sync_util::lock_tolerant(&self.neighbors.manager_keys).clear();
         self.neighbors
             .monitored_ifindexes
             .store(Arc::new(FastSet::default()));
         // #1636: reset warmer rate-limit + telemetry so a re-bind starts
         // clean. The worker thread itself is torn down above; a fresh one
         // is spawned on the next bring-up.
-        if let Ok(mut probed) = self.neighbors.last_probed_at.lock() {
-            probed.clear();
-        }
+        crate::sync_util::lock_tolerant(&self.neighbors.last_probed_at).clear();
         self.neighbors
             .last_warm_sweep_ns
             .store(0, Ordering::Relaxed);
@@ -1498,9 +1490,7 @@ impl Coordinator {
             lock_shared_recover(&self.sessions.forward_wire).clear();
             self.sessions.owner_rg_indexes.clear(&self.sessions.synced);
         }
-        if let Ok(mut recent) = self.recent_exceptions.lock() {
-            recent.clear();
-        }
+        crate::sync_util::lock_tolerant(&self.recent_exceptions).clear();
         // #6242: the pre-#6242 layout ALSO ran two per-worker content-clear
         // loops here (`worker_exception_rings` / `worker_last_resolution`
         // `.lock().clear()`), but `stop_and_clear` above already emptied the
@@ -1510,12 +1500,8 @@ impl Coordinator {
         // `clear_records`) frees the underlying storage; there
         // is nothing left to content-clear. The loops are removed, not
         // duplicated onto `records`.
-        if let Ok(mut recent) = self.recent_session_deltas.lock() {
-            recent.clear();
-        }
-        if let Ok(mut last) = self.last_resolution.lock() {
-            *last = None;
-        }
+        crate::sync_util::lock_tolerant(&self.recent_session_deltas).clear();
+        *crate::sync_util::lock_tolerant(&self.last_resolution) = None;
         // #6592: `self.validation` is defaulted ABOVE, immediately before the
         // `publish_runtime_view` teardown store, so the published pair is
         // coherent. It used to be reset here.
@@ -1957,9 +1943,7 @@ impl Coordinator {
     /// down state are not locked out for 5s) and triggers an immediate
     /// forced warm pass for the newly-active RG's next-hops.
     pub(in crate::afxdp) fn on_rg_promote_active(&self) {
-        if let Ok(mut map) = self.neighbors.last_probed_at.lock() {
-            map.clear();
-        }
+        crate::sync_util::lock_tolerant(&self.neighbors.last_probed_at).clear();
         self.queue_warm_pass(true);
     }
 

@@ -50,6 +50,8 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::sync_util::lock_tolerant;
+
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::protocol::ZoneTrafficCounterStatus;
@@ -311,14 +313,14 @@ impl ZoneCounterStore {
     /// to cache the `Arc` per slot); NOT the hot path. A surviving zone gets the
     /// SAME `Arc` back across applies, so its totals never reset or double.
     fn zone_totals(&self, zone_id: u32) -> Arc<ZoneTotalsAtomic> {
-        let mut totals = self.totals.lock().expect("zone counter store poisoned");
+        let mut totals = lock_tolerant(&self.totals);
         Arc::clone(totals.entry(zone_id).or_default())
     }
 
     /// Sparse snapshot for the status wire: one row per zone with any traffic.
     /// Deterministic order (sorted by zone id) for a stable wire.
     pub(in crate::afxdp) fn snapshot(&self) -> Vec<ZoneTrafficCounterStatus> {
-        let totals = self.totals.lock().expect("zone counter store poisoned");
+        let totals = lock_tolerant(&self.totals);
         let mut out: Vec<ZoneTrafficCounterStatus> = totals
             .iter()
             .filter_map(|(&zone_id, t)| {
@@ -356,7 +358,7 @@ impl ZoneCounterStore {
     /// leave workers folding into an orphaned block the snapshot no longer sees
     /// (traffic would appear to stop counting until the next config apply).
     pub(in crate::afxdp) fn clear(&self) {
-        let totals = self.totals.lock().expect("zone counter store poisoned");
+        let totals = lock_tolerant(&self.totals);
         for block in totals.values() {
             block.reset();
         }
@@ -368,9 +370,7 @@ impl ZoneCounterStore {
     /// live zone set. A `configured` zone's `Arc` is retained, so a slot map
     /// rebuilt in the same apply resolves the SAME block (no reset/double).
     pub(in crate::afxdp) fn reconcile(&self, configured: &FxHashSet<u32>) {
-        self.totals
-            .lock()
-            .expect("zone counter store poisoned")
+        lock_tolerant(&self.totals)
             .retain(|zone_id, _| configured.contains(zone_id));
     }
 

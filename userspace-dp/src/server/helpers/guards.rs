@@ -51,6 +51,9 @@ pub(crate) static SERVER_HANDLER_PANICS: AtomicU64 = AtomicU64::new(0);
 /// paths refuse + shut down. `clear_poison` restores lockability so the
 /// quarantine flag itself remains readable and the shutdown path can still
 /// tear down workers.
+/// #17201: retained as the subsystem-specific helper (not folded into
+/// `crate::sync_util::lock_tolerant`) because recovery here must also set
+/// `quarantined_after_panic` on the recovered guard.
 #[inline]
 pub(crate) fn lock_server_state_recover(m: &Mutex<ServerState>) -> MutexGuard<'_, ServerState> {
     match m.lock() {

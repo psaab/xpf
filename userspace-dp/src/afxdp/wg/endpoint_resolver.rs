@@ -321,7 +321,8 @@ fn apply_resolution(
                         .counters
                         .resolve_ok
                         .fetch_add(1, Ordering::Relaxed);
-                    if let Ok(mut map) = shared.resolved.lock() {
+                    {
+                        let mut map = crate::sync_util::lock_tolerant(&shared.resolved);
                         let prior = map.insert(*pubkey, addr);
                         if prior != Some(addr) {
                             shared
@@ -455,9 +456,7 @@ where
 }
 
 fn set_last_error(shared: &ResolverShared, msg: String) {
-    if let Ok(mut slot) = shared.telemetry.last_error.lock() {
-        *slot = Some(msg);
-    }
+    *crate::sync_util::lock_tolerant(&shared.telemetry.last_error) = Some(msg);
 }
 
 fn resolver_thread(

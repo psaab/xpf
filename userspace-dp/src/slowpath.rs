@@ -627,21 +627,15 @@ impl SharedStatus {
     }
 
     fn set_mode(&self, mode: &str) {
-        if let Ok(mut value) = self.mode.lock() {
-            *value = mode.to_string();
-        }
+        *crate::sync_util::lock_tolerant(&self.mode) = mode.to_string();
     }
 
     fn set_device_name(&self, name: &str) {
-        if let Ok(mut value) = self.device_name.lock() {
-            *value = name.to_string();
-        }
+        *crate::sync_util::lock_tolerant(&self.device_name) = name.to_string();
     }
 
     fn set_last_error(&self, err: String) {
-        if let Ok(mut value) = self.last_error.lock() {
-            *value = err;
-        }
+        *crate::sync_util::lock_tolerant(&self.last_error) = err;
     }
 
     fn snapshot(&self) -> SlowPathStatus {
@@ -649,17 +643,9 @@ impl SharedStatus {
             active: self.active.load(Ordering::Relaxed),
             degraded: self.degraded.load(Ordering::Relaxed),
             live_mtu: self.live_mtu.load(Ordering::Relaxed) as i32,
-            device_name: self
-                .device_name
-                .lock()
-                .map(|v| v.clone())
-                .unwrap_or_default(),
-            mode: self.mode.lock().map(|v| v.clone()).unwrap_or_default(),
-            last_error: self
-                .last_error
-                .lock()
-                .map(|v| v.clone())
-                .unwrap_or_default(),
+            device_name: crate::sync_util::lock_tolerant(&self.device_name).clone(),
+            mode: crate::sync_util::lock_tolerant(&self.mode).clone(),
+            last_error: crate::sync_util::lock_tolerant(&self.last_error).clone(),
             queued_packets: self.queued_packets.load(Ordering::Relaxed),
             injected_packets: self.injected_packets.load(Ordering::Relaxed),
             injected_bytes: self.injected_bytes.load(Ordering::Relaxed),
@@ -1201,11 +1187,7 @@ impl SlowPathReinjector {
         desired_mtu: i32,
         programmer: &mut impl FnMut(&str, i32) -> Result<(), String>,
     ) -> i32 {
-        let name = status
-            .device_name
-            .lock()
-            .map(|v| v.clone())
-            .unwrap_or_default();
+        let name = crate::sync_util::lock_tolerant(&status.device_name).clone();
         status.reprogram_mtu_status(&name, desired_mtu, programmer)
     }
 
@@ -1379,9 +1361,7 @@ impl SlowPathReinjector {
                 Ok(EnqueueOutcome::Accepted)
             }
             Err(TrySendError::Full(req)) => {
-                if let Ok(mut limiter) = limiter.lock() {
-                    limiter.refund(req.bytes.len());
-                }
+                crate::sync_util::lock_tolerant(&limiter).refund(req.bytes.len());
                 status.queued_packets.fetch_sub(1, Ordering::Relaxed);
                 status.dropped_packets.fetch_add(1, Ordering::Relaxed);
                 status
@@ -1398,9 +1378,7 @@ impl SlowPathReinjector {
                 Ok(EnqueueOutcome::QueueFull)
             }
             Err(TrySendError::Disconnected(req)) => {
-                if let Ok(mut limiter) = limiter.lock() {
-                    limiter.refund(req.bytes.len());
-                }
+                crate::sync_util::lock_tolerant(&limiter).refund(req.bytes.len());
                 status.queued_packets.fetch_sub(1, Ordering::Relaxed);
                 status.dropped_packets.fetch_add(1, Ordering::Relaxed);
                 status
@@ -1441,10 +1419,8 @@ impl SlowPathReinjector {
                 decision.admitted = false;
                 decision.reason = ADMIT_BAD_LEASE;
             } else {
-                let allowed = self.limiters[rate_limiter_index(PacketQueue::Adjudicated)]
-                    .lock()
-                    .map(|limiter| limiter.would_allow(frame.bytes.len()))
-                    .unwrap_or(false);
+                let allowed = crate::sync_util::lock_tolerant(&self.limiters[rate_limiter_index(PacketQueue::Adjudicated)])
+                    .would_allow(frame.bytes.len());
                 if !allowed {
                     decision.admitted = false;
                     decision.reason = ADMIT_BAD_LEASE;
@@ -1578,10 +1554,7 @@ impl SlowPathReinjector {
         }
         let adjudicated_limiter =
             &self.limiters[rate_limiter_index(PacketQueue::Adjudicated)];
-        let allowed = match adjudicated_limiter.lock() {
-            Ok(mut limiter) => limiter.allow(frame.bytes.len()),
-            Err(_) => false,
-        };
+        let allowed = crate::sync_util::lock_tolerant(adjudicated_limiter).allow(frame.bytes.len());
         if !allowed {
             self.reinject_core
                 .refuse_queued_for(connection_id, &frame.lease, "rate limited".to_string());
@@ -1614,9 +1587,7 @@ impl SlowPathReinjector {
         match self.tx_delegated.try_send(request) {
             Ok(()) => decision,
             Err(TrySendError::Full(req)) => {
-                if let Ok(mut limiter) = adjudicated_limiter.lock() {
-                    limiter.refund(req.bytes.len());
-                }
+                crate::sync_util::lock_tolerant(adjudicated_limiter).refund(req.bytes.len());
                 self.status_delegated
                     .queued_packets
                     .fetch_sub(1, Ordering::Relaxed);
@@ -1638,9 +1609,7 @@ impl SlowPathReinjector {
                 decision
             }
             Err(TrySendError::Disconnected(req)) => {
-                if let Ok(mut limiter) = adjudicated_limiter.lock() {
-                    limiter.refund(req.bytes.len());
-                }
+                crate::sync_util::lock_tolerant(adjudicated_limiter).refund(req.bytes.len());
                 self.status_delegated
                     .queued_packets
                     .fetch_sub(1, Ordering::Relaxed);

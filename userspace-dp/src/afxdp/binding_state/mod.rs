@@ -1351,14 +1351,12 @@ impl BindingLiveState {
         socket_role: String,
         disabled_reason: String,
     ) {
-        if let Ok(mut status) = self.shared_umem_status.lock() {
-            *status = SharedUmemLiveStatus {
-                mode,
-                group,
-                socket_role,
-                disabled_reason,
-            };
-        }
+        *crate::sync_util::lock_tolerant(&self.shared_umem_status) = SharedUmemLiveStatus {
+            mode,
+            group,
+            socket_role,
+            disabled_reason,
+        };
     }
 
     pub(super) fn set_xsk_registered(&self, value: bool) {
@@ -1430,18 +1428,14 @@ impl BindingLiveState {
     }
 
     pub(super) fn clear_error(&self) {
-        if let Ok(mut err) = self.last_error.lock() {
-            err.clear();
-        }
+        crate::sync_util::lock_tolerant(&self.last_error).clear();
         // #4971: also reset the lock-free retry status so a rebind /
         // successful reconcile clears the surfaced backpressure reason.
         self.last_tx_retry_status.store(0, Ordering::Relaxed);
     }
 
     pub(super) fn set_error(&self, msg: String) {
-        if let Ok(mut err) = self.last_error.lock() {
-            *err = msg;
-        }
+        *crate::sync_util::lock_tolerant(&self.last_error) = msg;
     }
 
     /// #4971: record an expected-TX-backpressure retry reason without
