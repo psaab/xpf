@@ -25,7 +25,8 @@ const nlWatchBackoffDefault = 2 * time.Second
 // Run owns: the update/done channels, logging every subscribe failure
 // and every receive error under Name (wrapping OnReceiveError), calling
 // OnGap after every successful (re)subscribe, and the stoppable backoff
-// timer between lifetimes. It returns only on ctx cancellation.
+// timer between lifetimes. It returns only on ctx cancellation or
+// owner stop (OwnerDone closed, or Watch reporting a clean stop).
 //
 // Per-owner semantics stay with the owner via the callbacks:
 //   - OnEvent handles one streamed update.

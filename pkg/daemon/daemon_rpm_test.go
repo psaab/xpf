@@ -729,10 +729,10 @@ func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *te
 // the live link AND address subscription helpers must exit and their
 // netlink sockets must close. The contexts here are never cancelled
 // before the assertions, so helper/socket teardown can only come from
-// the owner's own exit. RED on the folded head: the runSocket helpers
-// pass the generation ctx (not their private done channel) to
-// nlWatch.runOne, so deferred stopLink/stopAddr cannot interrupt a
-// live subscription and the fake sockets' done channels stay open.
+// the owner's own exit. On the current head the runSocket helpers
+// pass their private done channel as nlWatch OwnerDone, so the
+// deferred stopLink/stopAddr calls interrupt live subscriptions, and
+// this cell asserts that both fake sockets' done channels close.
 func TestProbePinRetryLoopNaturalExitStopsLiveSubscriptions17064(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
