@@ -35,6 +35,7 @@ func ingressDomainSnapshot14842() *ConfigSnapshot {
 func TestBuildUserspaceIngressDomainEntriesPerVLAN14842(t *testing.T) {
 	entries := buildUserspaceIngressDomainEntries(ingressDomainSnapshot14842())
 	want := map[userspaceIngressDomainKey]uint32{
+		{Ifindex: 10, VLANID: 0}:                                    0, // tagged-only priority-tagged VID 0 resolves in the parent domain
 		{Ifindex: 10, VLANID: 50}:                                   ingressDomain14842VID50,
 		{Ifindex: 10, VLANID: 80}:                                   ingressDomain14842VID80,
 		{Ifindex: 10, VLANID: userspaceIngressDomainUntaggedVLANID}: 0,
@@ -71,11 +72,18 @@ func TestBuildUserspaceIngressDomainEntriesNativeVLANOwnsUntagged14842(t *testin
 	snap := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
 		{Name: "ge-0/0/1", LinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 10, NativeVLANID: 50, RoutingDomain: 7},
 		{Name: "ge-0/0/1.50", LinuxName: "ge-0-0-1.50", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 11, ParentIfindex: 10, VLANID: 50, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
+		{Name: "ge-0/0/2", LinuxName: "ge-0-0-2", Zone: "trust", Ifindex: 20, RoutingDomain: 8},
 	}}
 	entries := buildUserspaceIngressDomainEntries(snap)
 	key := userspaceIngressDomainKey{Ifindex: 10, VLANID: userspaceIngressDomainUntaggedVLANID}
 	if got := entries[key]; got != ingressDomain14842VID50 {
 		t.Fatalf("native-VLAN untagged entry = %d, want the native unit's domain %d (entries: %v)", got, ingressDomain14842VID50, entries)
+	}
+	for _, ifindex := range []uint32{10, 20} {
+		key := userspaceIngressDomainKey{Ifindex: ifindex, VLANID: 0}
+		if _, ok := entries[key]; ok {
+			t.Fatalf("non-tagged-only ifindex %d unexpectedly got a VID-0 alias: %v", ifindex, entries)
+		}
 	}
 }
 

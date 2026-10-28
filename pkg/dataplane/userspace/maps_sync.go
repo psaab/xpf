@@ -232,6 +232,16 @@ func buildUserspaceIngressDomainEntries(snapshot *ConfigSnapshot) map[userspaceI
 			}
 		}
 	}
+	// #18322: priority-tagged VID 0 stays a distinct wire key in the shim,
+	// but a tagged-only parent has no VID-0 unit from which to publish it.
+	// Alias that key to the parent domain used for untagged ingress so the
+	// shim's tagged-only local-destination guard can recognize its owner.
+	for ifindex := range buildUserspaceTaggedOnlyIngressIfindexes(snapshot) {
+		untaggedKey := userspaceIngressDomainKey{Ifindex: ifindex, VLANID: userspaceIngressDomainUntaggedVLANID}
+		if domain, ok := entries[untaggedKey]; ok {
+			put(userspaceIngressDomainKey{Ifindex: ifindex, VLANID: 0}, domain)
+		}
+	}
 	return entries
 }
 
