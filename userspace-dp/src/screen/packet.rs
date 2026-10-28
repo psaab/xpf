@@ -41,8 +41,9 @@ pub(crate) struct FragView {
 /// the offset field (0x1FFF) counts 8-byte units. IPv6 (RFC 8200 §4.5):
 /// Fragment-header word, the offset field (0xFFF8) already IS the byte
 /// offset (upper 13 bits in 8-byte units, low 3 bits masked off) and M is
-/// the low bit 0x1. Every decode of either layout goes through
-/// `frag_view_v4` / `frag_view_v6`; no other site names these masks.
+/// the low bit 0x1. Every SCREEN decode of either layout goes through
+/// `frag_view_v4` / `frag_view_v6`; in the SCREEN path no other site names
+/// these masks.
 pub(crate) mod ip_frag {
     pub(crate) const IPV4_MF: u16 = 0x2000;
     pub(crate) const IPV4_OFFSET_MASK: u16 = 0x1FFF;
