@@ -57,19 +57,18 @@ pub(crate) struct Nat64Prefix {
     pub(crate) name: String,
     /// First 96 bits of the NAT64 prefix (e.g. 64:ff9b::).
     pub(crate) prefix_bytes: [u8; 12],
-    /// #15678: optional ingress scoping. Empty = unscoped on that axis.
+    /// #15678: optional ingress scoping, resolved once at build by
+    /// `union_scope` (the singular pre-#15932/#16049 wire spellings are
+    /// folded into these lists, so no singular copy survives on the
+    /// built prefix). Empty list = unscoped on that axis.
     /// `source_prefixes` empty = match any IPv6 source; a rule that AUTHORED
     /// source entries but every one failed to parse sets
     /// `source_constrained` with an empty vec and matches NOTHING (never
     /// silently widened to any-source).
-    pub(crate) from_zone: String,
-    /// #15932: every authored zone for this prefix (the union). Empty
-    /// means fall back to `from_zone` (singular, pre-#15932 snapshots).
+    /// #15932: every authored zone for this prefix (the union).
     pub(crate) from_zones: Vec<String>,
-    pub(crate) from_routing_instance: String,
     /// #16049: every authored routing-instance for this prefix (the
-    /// union). Empty means fall back to `from_routing_instance`
-    /// (singular, pre-#16049 snapshots).
+    /// union).
     pub(crate) from_routing_instances: Vec<String>,
     pub(crate) source_prefixes: Vec<PrefixV6>,
     pub(crate) source_constrained: bool,
@@ -175,9 +174,7 @@ impl Nat64Prefix {
         Self {
             name: String::new(),
             prefix_bytes,
-            from_zone: String::new(),
             from_zones: Vec::new(),
-            from_routing_instance: String::new(),
             from_routing_instances: Vec::new(),
             source_prefixes: Vec::new(),
             source_constrained: false,
@@ -203,9 +200,7 @@ impl Clone for Nat64Prefix {
         Self {
             name: self.name.clone(),
             prefix_bytes: self.prefix_bytes,
-            from_zone: self.from_zone.clone(),
             from_zones: self.from_zones.clone(),
-            from_routing_instance: self.from_routing_instance.clone(),
             from_routing_instances: self.from_routing_instances.clone(),
             source_prefixes: self.source_prefixes.clone(),
             source_constrained: self.source_constrained,
@@ -289,13 +284,10 @@ pub(crate) struct Nat64ReverseInfo {
 /// family (#2124/#2142/#2173/#2175).
 impl Nat64Prefix {
     /// #16045: is this prefix constrained on an ingress-scope axis
-    /// (zone / routing-instance, singular or union form)? Source-address
-    /// constraints are tuple selectors, not ingress-identity scope.
-    fn ingress_scope_constrained(&self) -> bool {
-        !self.from_zone.is_empty()
-            || !self.from_zones.is_empty()
-            || !self.from_routing_instance.is_empty()
-            || !self.from_routing_instances.is_empty()
+    /// (zone / routing-instance)? Source-address constraints are tuple
+    /// selectors, not ingress-identity scope.
+    pub(super) fn ingress_scope_constrained(&self) -> bool {
+        !self.from_zones.is_empty() || !self.from_routing_instances.is_empty()
     }
 }
 
@@ -583,23 +575,18 @@ pub(crate) struct Nat64ScopeKey {
 
 impl Nat64ScopeKey {
     pub(crate) fn of_prefix(prefix: &Nat64Prefix) -> Self {
+        // #17076: the built prefix stores only the resolved plural
+        // unions (singular folded in at build by `union_scope`), so
+        // read them back directly — no singular copy survives.
         Self {
-            from_zones: {
-                let mut v = prefix.from_zones.clone();
-                if v.is_empty() && !prefix.from_zone.is_empty() {
-                    v.push(prefix.from_zone.clone());
-                }
-                v
-            },
-            from_routing_instances: {
-                let mut raw = prefix.from_routing_instances.clone();
-                if raw.is_empty() && !prefix.from_routing_instance.is_empty() {
-                    raw.push(prefix.from_routing_instance.clone());
-                }
-                raw.iter()
-                    .map(|ri| crate::nat::nat_ri_key(ri).to_string())
-                    .collect()
-            },
+            from_zones: prefix.from_zones.clone(),
+            // #16604/#17677: preserve the explicit-master token separately
+            // from a named routing-instance literally called `default`.
+            from_routing_instances: prefix
+                .from_routing_instances
+                .iter()
+                .map(|ri| crate::nat::nat_ri_key(ri).to_string())
+                .collect(),
             source_prefixes: prefix
                 .source_prefixes
                 .iter()
@@ -656,6 +643,21 @@ impl Nat64ScopeKey {
     }
 }
 
+/// #17076: resolve one ingress-scope axis to its single stored form:
+/// the plural list when authored, else the singular pre-#15932/#16049
+/// wire spelling as a one-element list, else empty (unscoped). The
+/// union is resolved HERE, at snapshot read, so `Nat64Prefix` stores
+/// only the plural lists and no reader re-checks a singular copy.
+pub(super) fn union_scope(list: &[String], single: &str) -> Vec<String> {
+    if !list.is_empty() {
+        list.to_vec()
+    } else if single.is_empty() {
+        Vec::new()
+    } else {
+        vec![single.to_string()]
+    }
+}
+
 /// #16484: normalize a snapshot's scope exactly as the build loop
 /// installs it on the prefix: plural unions with the singular folded
 /// in, and source prefixes parsed with the same wildcard
@@ -663,24 +665,9 @@ impl Nat64ScopeKey {
 /// here exactly as there; the installed prefix carries the same
 /// result, so the keys stay comparable.
 pub(super) fn nat64_snapshot_scope(snap: &NAT64RuleSnapshot) -> Nat64ScopeKey {
-    let from_zones = if snap.from_zones.is_empty() {
-        if snap.from_zone.is_empty() {
-            Vec::new()
-        } else {
-            vec![snap.from_zone.clone()]
-        }
-    } else {
-        snap.from_zones.clone()
-    };
-    let from_routing_instances = if snap.from_routing_instances.is_empty() {
-        if snap.from_routing_instance.is_empty() {
-            Vec::new()
-        } else {
-            vec![snap.from_routing_instance.clone()]
-        }
-    } else {
-        snap.from_routing_instances.clone()
-    };
+    let from_zones = union_scope(&snap.from_zones, &snap.from_zone);
+    let from_routing_instances =
+        union_scope(&snap.from_routing_instances, &snap.from_routing_instance);
     // Mirror the build loop's source normalisation verbatim in
     // effect: `any` spellings clear the constraint, parseable nets
     // are kept, unparseable entries are dropped.
@@ -1343,9 +1330,7 @@ impl Nat64State {
             prefixes.push(Nat64Prefix {
                 name: snap.name.clone(),
                 prefix_bytes,
-                from_zone: snap.from_zone.clone(),
                 from_zones: scope_key.from_zones.clone(),
-                from_routing_instance: snap.from_routing_instance.clone(),
                 from_routing_instances: scope_key.from_routing_instances.clone(),
                 source_prefixes,
                 source_constrained,
@@ -1699,7 +1684,7 @@ impl Nat64State {
     }
 
     /// Returns true if any NAT64 prefixes are configured.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn is_active(&self) -> bool {
         !self.prefixes.is_empty()
     }
@@ -1744,26 +1729,23 @@ impl Nat64State {
         from_zone: &str,
         routing_instance: &str,
     ) -> bool {
-        // #15932: zone list is a union — any authored zone admits.
-        if !prefix.from_zones.is_empty() {
-            if !prefix.from_zones.iter().any(|z| z == from_zone) {
-                return false;
-            }
-        } else if !prefix.from_zone.is_empty() && prefix.from_zone != from_zone {
+        // #15932/#17076: zone list is the resolved union — empty is
+        // unscoped, otherwise any authored zone admits.
+        if !prefix.from_zones.is_empty()
+            && !prefix.from_zones.iter().any(|z| z == from_zone)
+        {
             return false;
         }
-        // #16049: routing-instance list is a union — any authored RI admits.
+        // #16049/#17076: routing-instance list is the resolved union —
+        // empty is unscoped, otherwise any authored RI admits.
         // #16604/#17677: the explicit-master token matches main only; the
         // literal `default` matches only the declared named instance.
-        if !prefix.from_routing_instances.is_empty() {
-            if !prefix
+        if !prefix.from_routing_instances.is_empty()
+            && !prefix
                 .from_routing_instances
                 .iter()
                 .any(|ri| crate::nat::nat_ri_matches(ri, routing_instance))
-            {
-                return false;
-            }
-        } else if !crate::nat::nat_ri_matches(&prefix.from_routing_instance, routing_instance) {
+        {
             return false;
         }
         if !prefix.source_constrained {

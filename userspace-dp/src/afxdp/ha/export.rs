@@ -388,66 +388,22 @@ impl crate::afxdp::Coordinator {
                 continue;
             }
 
-            deltas.push(crate::session::SessionDelta {
-                provenance: crate::session::ExportProvenance::Incremental,
-                kind: crate::session::SessionDeltaKind::Open,
-                key: entry.key.clone(),
-                decision: entry.decision,
-                metadata: entry.metadata.clone(),
-                source_nat_static: entry.source_nat_static,
-                policy_generation: 0,
-                origin: entry.origin,
-                // #14960: derive the flag from the row's own disposition,
-                // exactly as both encoder legs compute it from
-                // `fabric_redirect_sync || disposition == FabricRedirect`.
-                // The pre-fix unconditional `true` encoded
-                // FLAG_FABRIC_REDIRECT on EVERY exported row, routing
-                // plain sessions through the peer's fabric-redirect
-                // ownership branch (and its forward-wire alias).
-                fabric_redirect_sync: entry.decision.resolution.disposition
-                    == ForwardingDisposition::FabricRedirect,
-                // #2465: Open delta from the HA bulk export — the synced entry
-                // carries no creation instant. The SESSION_CREATE frame reports
-                // no duration, so 0/unknown is correct here.
-                created_ns: 0,
-                last_seen_ns: 0,
-                // #16217: carry the shared row's snapshotted live
-                // counts (monotonic at publish/restamp) so the peer's
-                // scoped evidence gate sees actual service; a row that
-                // never served stays zero (no evidence, fail-closed).
-                counters: crate::session::SessionCounters {
-                    fwd_packets: entry.fwd_packets,
-                    fwd_bytes: 0,
-                    rev_packets: entry.rev_packets,
-                    rev_bytes: 0,
-                },
-                // #2749: HA bulk-export Open delta; no observed ToS / TCP
-                // flags (and not routed through the RT_FLOW close exporter).
-                observed_tos: 0,
-                observed_tcp_flags: 0,
-                // #14960: carry the shared entry's stable session id (the
-                // #5212 wire-adopted id a peer import threaded onto it), so
-                // the receiving node adopts the originating node's id
-                // instead of minting a divergent local one. Still 0 for
-                // local-origin publishes that never stamped it — the
-                // documented unknown/alloc-fallback sentinel.
-                session_id: entry.session_id,
-                bulk_resync: false,
-                is_admission: false,
-                tcp_close_class: entry.tcp_close_class,
-                // #16217 (export stamp): Established when node-wide
-                // completion evidence holds for this tuple over the
-                // shared maps; otherwise the row's own wire.
-                tcp_handshake_state: if evidence_for(&entry.key, entry.decision.nat)
-                    .served_and_completed()
-                {
-                    crate::session::TcpHandshakeState::Established.to_wire()
-                } else {
-                    entry.tcp_handshake_state
-                },
-                pptp_call_ids: entry.pptp_call_ids,
-                purge_retirement: false,
-            });
+            // #17122: the entry->delta mapping lives once in
+            // `SessionDelta::from_shared`; the only site-local stamp is
+            // the #16217 handshake restamp below.
+            let mut delta = crate::session::SessionDelta::from_shared(
+                entry,
+                crate::session::SessionDeltaKind::Open,
+            );
+            // #16217 (export stamp): Established when node-wide
+            // completion evidence holds for this tuple over the
+            // shared maps; otherwise the row's own wire (already on
+            // the delta from `from_shared`).
+            if evidence_for(&entry.key, entry.decision.nat).served_and_completed() {
+                delta.tcp_handshake_state =
+                    crate::session::TcpHandshakeState::Established.to_wire();
+            }
+            deltas.push(delta);
         }
         drop(wire_sessions);
         drop(sessions);

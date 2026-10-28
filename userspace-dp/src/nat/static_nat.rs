@@ -638,6 +638,10 @@ fn parse_nat_prefix(s: &str) -> Option<NatPrefix> {
     Some(NatPrefix { base, len })
 }
 
+/// Returns whether the parser ACCEPTS the literal, not the parsed value: the
+/// differential compares verdicts, and `NatPrefix` is private to this module.
+/// Widening it to make a test compile is the trade this accessor exists to
+/// avoid.
 /// #7481: expose `parse_nat_prefix` to the corpus differential.
 ///
 /// A `for_test` accessor rather than widening the function's visibility: the
@@ -645,10 +649,6 @@ fn parse_nat_prefix(s: &str) -> Option<NatPrefix> {
 /// surface. Same trade as `Nat64Prefix::for_test` — loosening production
 /// visibility to make a test possible is how an invariant stops being one.
 #[cfg(test)]
-/// Returns whether the parser ACCEPTS the literal, not the parsed value: the
-/// differential compares verdicts, and `NatPrefix` is private to this module.
-/// Widening it to make a test compile is the trade this accessor exists to
-/// avoid.
 pub(super) fn parse_nat_prefix_accepts_for_test(s: &str) -> bool {
     parse_nat_prefix(s).is_some()
 }
@@ -1432,7 +1432,6 @@ impl StaticNatTable {
     }
 
     /// Returns true if the table has any entries.
-    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.dnat.is_empty() && self.blocks.is_empty()
     }

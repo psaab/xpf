@@ -108,10 +108,10 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 			}
 			if restShowFormat(format) == "inheritance" {
 				return snaps, config.AuthorizeExpandedConfigShowPathRendered(priceCfg, class, path,
-					config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees...)
+					config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees)
 			}
 			return snaps, config.AuthorizeConfigShowPathRendered(priceCfg, class, path,
-				config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
+				config.ConfigShowDisplaySuffix(restShowFormat(format)), trees)
 		}
 		// Fold 5: whole-tree show is refused for restricted classes
 		// (AuthorizeConfigShowWhole), but an UNRESTRICTED class's
@@ -137,26 +137,26 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 				snaps.Primary = tree
 			}
 			return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class,
-				config.ConfigShowDisplaySuffix(restShowFormat(format)), snaps.Primary)
+				config.ConfigShowDisplaySuffix(restShowFormat(format)), []*config.ConfigTree{snaps.Primary})
 		}
 	case "GET /api/v1/config":
 		// Typed compiled-config render; whole tree, no display format.
 		// The handler renders ActiveConfig regardless of ?target=, so
 		// always price the ACTIVE tree (#15994 fold 4).
 		snaps, priceCfg := s.activeWholeSnap15994(cfg)
-		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", snaps.Primary)
+		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", []*config.ConfigTree{snaps.Primary})
 	case "GET /api/v1/config/export":
 		if format == "" {
 			format = "set" // configExportHandler's default
 		}
 		snaps, priceCfg := s.activeWholeSnap15994(cfg)
 		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class,
-			config.ConfigShowDisplaySuffix(restShowFormat(format)), snaps.Primary)
+			config.ConfigShowDisplaySuffix(restShowFormat(format)), []*config.ConfigTree{snaps.Primary})
 	case "GET /api/v1/config/search":
 		// Line search over the whole active render (active only,
 		// regardless of ?target= — see /config above).
 		snaps, priceCfg := s.activeWholeSnap15994(cfg)
-		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", snaps.Primary)
+		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", []*config.ConfigTree{snaps.Primary})
 	case "GET /api/v1/config/compare":
 		// REST compare: ?rollback?N selects the rollback baseline
 		// (configCompareHandler): rollback>0 diffs slot vs candidate,
@@ -240,11 +240,11 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		if restShowFormat(format) == "inheritance" {
 			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(priceCfg, class,
 				strings.Fields(r.URL.Query().Get("path")),
-				config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees...)
+				config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees)
 		}
 		return snaps, config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, class,
 			strings.Fields(r.URL.Query().Get("path")),
-			config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
+			config.ConfigShowDisplaySuffix(restShowFormat(format)), trees)
 	}
 	return restConfigReadSnapshots{}, nil
 }

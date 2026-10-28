@@ -92,16 +92,16 @@ func TestNATDefaultStaticAndNAT64Lower16604(t *testing.T) {
 		t.Fatalf("nat64 default flag not set: %+v", nrs)
 	}
 	found := false
-	for _, ri := range nat64EffectiveRoutingInstances(ncfg, nrs) {
+	for _, ri := range NAT64EffectiveRoutingInstances(ncfg, nrs) {
 		if ri == NATDefaultRoutingInstanceWire {
 			found = true
 		}
 		if ri == "" {
-			t.Fatalf("effective RI still carries lowered empty: %v", nat64EffectiveRoutingInstances(ncfg, nrs))
+			t.Fatalf("effective RI still carries lowered empty: %v", NAT64EffectiveRoutingInstances(ncfg, nrs))
 		}
 	}
 	if !found {
-		t.Fatalf("effective RI = %v, want wire token", nat64EffectiveRoutingInstances(ncfg, nrs))
+		t.Fatalf("effective RI = %v, want wire token", NAT64EffectiveRoutingInstances(ncfg, nrs))
 	}
 }
 func TestNATDefaultDeclaredNAT64ScopeKeepsNamedInstance17677(t *testing.T) {
@@ -117,7 +117,7 @@ func TestNATDefaultDeclaredNAT64ScopeKeepsNamedInstance17677(t *testing.T) {
 		len(rs.FromRoutingInstances) != 1 || rs.FromRoutingInstances[0] != "default" {
 		t.Fatalf("NAT64 scope = %+v, want literal default in singular/list without alias flag", rs)
 	}
-	effective := nat64EffectiveRoutingInstances(cfg, rs)
+	effective := NAT64EffectiveRoutingInstances(cfg, rs)
 	if len(effective) != 1 || effective[0] != "default" {
 		t.Fatalf("effective NAT64 scopes = %v, want [default]", effective)
 	}

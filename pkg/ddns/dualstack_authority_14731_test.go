@@ -35,11 +35,17 @@ func cfg14731(server4, server6 string) *config.DHCPServerConfig {
 	return &config.DHCPServerConfig{
 		DynamicDNS: &config.DHCPDynamicDNSConfig{
 			Enabled: true, Domain: "example.com", TTLSeconds: 300,
-			Backend: "rfc2136", UpdateServer: server4,
+			Backend: "rfc2136",
+			RFC2136Endpoint: config.RFC2136Endpoint{
+				UpdateServer: server4,
+			},
 		},
 		DynamicDNSv6: &config.DHCPDynamicDNSConfig{
 			Enabled: true, Domain: "example.com", TTLSeconds: 300,
-			Backend: "rfc2136", UpdateServer: server6,
+			Backend: "rfc2136",
+			RFC2136Endpoint: config.RFC2136Endpoint{
+				UpdateServer: server6,
+			},
 		},
 	}
 }
@@ -223,10 +229,16 @@ func TestDualStackDistinctAuthorityNotSuppressed14731(t *testing.T) {
 // in the #5814 namespace and never equals a Surface A authority.
 func TestLeaseAuthorityForRecordPerFamily14731(t *testing.T) {
 	pol4 := policyFromConfig(&config.DHCPDynamicDNSConfig{
-		Enabled: true, Backend: "rfc2136", UpdateServer: "ns4.example.net:53", Domain: "example.com",
+		Enabled: true, Backend: "rfc2136", Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns4.example.net:53",
+		},
 	})
 	pol6 := policyFromConfig(&config.DHCPDynamicDNSConfig{
-		Enabled: true, Backend: "rfc2136", UpdateServer: "ns6.example.net:53", Domain: "example.com",
+		Enabled: true, Backend: "rfc2136", Domain: "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns6.example.net:53",
+		},
 	})
 	m := &Manager{}
 	m.lastPolicies.Store(&[2]ddnsPolicy{pol4, pol6})

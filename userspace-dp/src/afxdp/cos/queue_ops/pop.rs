@@ -11,7 +11,7 @@ use super::*;
 /// scan-then-pop wrapper is retained as the canonical single-pop API
 /// for tests (it is also the double-scan REFERENCE oracle the
 /// fused-vs-reference differential test drives, fused_diff_tests.rs).
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[inline]
 pub(in crate::afxdp) fn cos_queue_pop_front(
     queue: &mut CoSQueueRuntime,
@@ -55,7 +55,7 @@ fn cos_queue_pop_front_inner(
 /// `cos_queue_peek_min_bucket` + `cos_queue_pop_known_bucket`; this
 /// scan-then-pop cap-aware wrapper is retained as the reference oracle
 /// for the differential test and for direct single-pop test use.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn cos_queue_pop_front_with_cap(
     queue: &mut CoSQueueRuntime,
     target_bps: u64,

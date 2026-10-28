@@ -60,15 +60,17 @@ func TestURLLeafIndicesGatesGenericKeywords_6703(t *testing.T) {
 // so this marshaller is the whole fix for that route.
 func TestDDNSProviderMarshalJSONRedactsURLs_6703(t *testing.T) {
 	p := &DDNSProvider{
-		Name:         "p1",
-		Backend:      "generic",
-		UpdateServer: "ns1.example.com:53",
-		Server:       "https://user:SUPERSECRET@dyn.example/upd",
-		URLTemplate:  "https://tmpl.example/upd?token=TOKENSECRET&host=%h",
-		CheckIPURL:   "https://checkip.example/plain",
-		Username:     "operator",
-		Password:     NewSecret("PASSWORDSECRET"),
-		OKResponse:   "good",
+		Name:        "p1",
+		Backend:     "generic",
+		Server:      "https://user:SUPERSECRET@dyn.example/upd",
+		URLTemplate: "https://tmpl.example/upd?token=TOKENSECRET&host=%h",
+		CheckIPURL:  "https://checkip.example/plain",
+		Username:    "operator",
+		Password:    NewSecret("PASSWORDSECRET"),
+		OKResponse:  "good",
+		RFC2136Endpoint: RFC2136Endpoint{
+			UpdateServer: "ns1.example.com:53",
+		},
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
