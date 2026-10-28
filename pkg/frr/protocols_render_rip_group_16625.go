@@ -275,7 +275,111 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 		seenText[text] = true
 		entries = append(entries, entry{text, is6})
 	}
-	for _, name := range chain {
+	hasLaterAccept := func(policyIdx, termIdx int, boundary string) bool {
+		boundaryBase, boundaryLen := parseRouteFilterPrefix16762(strings.TrimPrefix(boundary, "boundary\x00"))
+		if boundaryBase == nil {
+			// The boundary came from a validated route-filter, so this
+			// is unreachable. If its host cannot be parsed, stay closed.
+			return true
+		}
+		termCanMatchBoundary := func(term *config.PolicyTerm) bool {
+			if term == nil {
+				return false
+			}
+			if len(term.PrefixList) > 0 && len(term.RouteFilters) > 0 {
+				return true
+			}
+			if len(term.PrefixList) > 0 {
+				for _, name := range term.PrefixList {
+					pl, found := po.PrefixLists[name]
+					if !found || pl == nil {
+						return true
+					}
+					for _, prefix := range pl.Prefixes {
+						normalized, ok := config.NormalizePrefixListEntry(prefix)
+						if !ok {
+							return true
+						}
+						base, _ := parseRouteFilterPrefix16762(normalized)
+						if sameRouteFilterBase16762(base, boundaryBase) {
+							return true
+						}
+					}
+				}
+				return false
+			}
+			if len(term.RouteFilters) == 0 {
+				// No destination match means the term can match any
+				// route, including this host.
+				return true
+			}
+			mostSpecificBaseLen := -1
+			matchesMostSpecific := false
+			for _, rf := range term.RouteFilters {
+				if rf == nil {
+					continue
+				}
+				base, baseLen := parseRouteFilterPrefix16762(rf.Prefix)
+				if base == nil {
+					return true
+				}
+				if !routeFilterContains16762(base, boundaryBase.IP, boundaryLen) || baseLen < mostSpecificBaseLen {
+					continue
+				}
+				matches := false
+				switch rf.MatchType {
+				case "exact":
+					matches = sameRouteFilterBase16762(base, boundaryBase)
+				case "", "orlonger":
+					matches = true
+				case "longer":
+					matches = baseLen < boundaryLen
+				case "upto":
+					matches = baseLen <= boundaryLen && rf.UptoLen >= boundaryLen
+				case "prefix-length-range":
+					matches = rf.RangeLow > baseLen && rf.RangeLow <= boundaryLen && rf.RangeHigh >= boundaryLen
+				default:
+					// An unsupported shape may still match the host;
+					// do not weaken the existing fail-closed behavior.
+					return true
+				}
+				if baseLen > mostSpecificBaseLen {
+					mostSpecificBaseLen = baseLen
+					matchesMostSpecific = matches
+				} else if matches {
+					matchesMostSpecific = true
+				}
+			}
+			return matchesMostSpecific
+		}
+		for i := policyIdx; i < len(chain); i++ {
+			later, defined := po.PolicyStatements[chain[i]]
+			if !defined || later == nil {
+				continue
+			}
+			start := 0
+			if i == policyIdx {
+				start = termIdx + 1
+			}
+			for _, laterTerm := range later.Terms[start:] {
+				if laterTerm != nil && (laterTerm.Action == "accept" || laterTerm.NextPolicy) && termCanMatchBoundary(laterTerm) {
+					return true
+				}
+			}
+			if later.DefaultAction == "accept" {
+				return true
+			}
+			if later.DefaultAction == "reject" {
+				// Explicit reject default terminates the chain
+				// (same rule as the statement default below):
+				// policies after this one are unreachable, so
+				// their accepts cannot override the boundary.
+				return false
+			}
+		}
+		return false
+	}
+	for chainIdx, name := range chain {
 		if name == "" {
 			continue
 		}
@@ -298,7 +402,7 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 		// A `next policy` term anywhere in the statement makes
 		// the default unreachable for matched candidates, in
 		// which case fall-through is correct.
-		for _, term := range ps.Terms {
+		for termIdx, term := range ps.Terms {
 			if term == nil {
 				continue
 			}
@@ -370,6 +474,24 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 				return ripSplitEntries16625(entries)
 			}
 			for _, e := range termEntries {
+				// This marker means the term has no matching route:
+				// continue evaluating the policy chain.
+				if strings.HasPrefix(e.text, "nomatch\x00") {
+					continue
+				}
+				// An empty max-length `longer` boundary is a
+				// representable exact-host exclusion from a
+				// sibling broader permit in this accept term.
+				// Keep it as a deny before that permit; other
+				// longest-match stops still require term fallthrough
+				// that this destination-only list cannot express.
+				if strings.HasPrefix(e.text, "boundary\x00") {
+					if !isAccept || hasLaterAccept(chainIdx, termIdx, e.text) {
+						return nil, nil, false
+					}
+					add("deny\x00"+strings.TrimPrefix(e.text, "boundary\x00"), e.v6)
+					continue
+				}
 				// Entries arrive pre-tagged: "deny\x00" marks a
 				// longest-match stop or a reject term's set.
 				if isAccept && !strings.HasPrefix(e.text, "deny\x00") {
@@ -441,8 +563,10 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 // term closed. Route-filters of one term are lowered with
 // Junos longest-match semantics (#16762): permits sort by
 // descending base length, and after each distinct base that a
-// broader renderable filter contains, a `deny <base> le <max>`
-// stop is emitted (pre-tagged "deny\x00").
+// broader renderable filter contains, a deny stop is emitted.
+// Ordinary stops are pre-tagged "deny\x00"; empty max-length
+// `longer` boundaries use a distinct marker so an accepting
+// sibling broader permit can retain a bare exact-host exclusion.
 func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig) (entries []struct {
 	text string
 	v6   bool
@@ -470,11 +594,13 @@ func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig
 	// Route-filters: collect renderable permits with bases.
 	type rfEntry struct {
 		text  string
+		base  string
 		v6    bool
 		ipnet *net.IPNet
 		plen  int
 	}
 	var rfs []rfEntry
+	emptyBoundary := false
 	for _, rf := range term.RouteFilters {
 		if rf == nil {
 			continue
@@ -483,13 +609,18 @@ func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig
 		if !rendered {
 			return nil, false
 		}
+		if text == "" {
+			emptyBoundary = true
+		}
 		ipnet, plen := parseRouteFilterPrefix16762(rf.Prefix)
-		rfs = append(rfs, rfEntry{text, is6, ipnet, plen})
+		rfs = append(rfs, rfEntry{text: text, base: rf.Prefix, v6: is6, ipnet: ipnet, plen: plen})
 	}
 	// Longest-match order: descending base length, stable.
 	sort.SliceStable(rfs, func(i, j int) bool { return rfs[i].plen > rfs[j].plen })
 	for i, e := range rfs {
-		entries = append(entries, entry{e.text, e.v6})
+		if e.text != "" {
+			entries = append(entries, entry{e.text, e.v6})
+		}
 		if e.ipnet == nil || e.plen <= 0 {
 			continue
 		}
@@ -497,6 +628,9 @@ func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig
 		// could otherwise catch a failed candidate.
 		canStillMatch := false
 		for _, o := range rfs {
+			if o.text == "" {
+				continue
+			}
 			if o.ipnet == nil {
 				canStillMatch = true
 				break
@@ -525,11 +659,25 @@ func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig
 		}
 		// The stop body names the BASE prefix (authored text
 		// before any ge/le), mirroring #16762's layout.
-		base := e.text
-		if idx := strings.Index(base, " "); idx >= 0 {
-			base = base[:idx]
+		if e.plen == maxLen {
+			// A bare deny is exactly the host prefix and avoids
+			// FRR-invalid `le` equal to the base length.
+			stopPrefix := "deny\x00"
+			if e.text == "" {
+				// Unlike a normal longest-match stop, this empty
+				// boundary can be represented as an exact host
+				// exclusion before its sibling broader permit.
+				stopPrefix = "boundary\x00"
+			}
+			entries = append(entries, entry{stopPrefix + sanitizeFRRValue(e.base), e.v6})
+		} else {
+			entries = append(entries, entry{"deny\x00" + fmt.Sprintf("%s le %d", sanitizeFRRValue(e.base), maxLen), e.v6})
 		}
-		entries = append(entries, entry{"deny\x00" + fmt.Sprintf("%s le %d", base, maxLen), e.v6})
+	}
+	if len(entries) == 0 && emptyBoundary {
+		// A lone valid empty boundary matches no route; preserve that
+		// fact so the caller can continue to a later policy term.
+		entries = append(entries, entry{"nomatch\x00", false})
 	}
 	return entries, true
 }
@@ -602,7 +750,11 @@ func ripRouteFilterEntryText16625(rf *config.RouteFilter) (string, bool, bool) {
 		return fmt.Sprintf("%s le %d", rf.Prefix, maxLen), is6, true
 	case "longer":
 		if baseLen+1 > maxLen {
-			return "", is6, false
+			// A max-length `longer` is a valid empty set, but its
+			// base remains a longest-match boundary. The caller
+			// emits a bare exact-host deny only if a broader permit
+			// could otherwise accept that host route.
+			return "", is6, true
 		}
 		return fmt.Sprintf("%s ge %d le %d", rf.Prefix, baseLen+1, maxLen), is6, true
 	case "upto":

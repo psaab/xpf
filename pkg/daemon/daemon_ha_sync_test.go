@@ -65,19 +65,19 @@ func TestStartClusterCommsLaunchesFabricForwardingWhenPrimarySyncUnaddressed(t *
 	waitVRFCommsConstructor12168(t, d)
 
 	// Fabric forwarding loops started: their refresh channels were
-	// published for this epoch and populateFabricFwd recorded the pair.
-	ch0, ch1 := d.snapshotFabricRefreshChans()
-	if ch0 == nil || ch1 == nil {
+	// published for this epoch and populateFabricFwdSlot recorded the pair.
+	chans := d.snapshotFabricRefreshChans()
+	if chans[0] == nil || chans[1] == nil {
 		t.Fatal("fabric refresh channels not published: startFabricForwardingLoops " +
 			"was skipped when the primary sync address was unavailable (#15687)")
 	}
-	// populateFabricFwd runs on its own goroutine; wait for it to record
+	// populateFabricFwdSlot runs on its own goroutine; wait for it to record
 	// the fabric pair rather than racing its first instruction.
 	deadline := time.Now().Add(5 * time.Second)
 	var fabPeerSet bool
 	for time.Now().Before(deadline) {
 		d.fabricMu.RLock()
-		fabPeerSet = d.fabricPeerIP != nil
+		fabPeerSet = d.fabricSlots[0].peerIP != nil
 		d.fabricMu.RUnlock()
 		if fabPeerSet {
 			break
@@ -85,7 +85,7 @@ func TestStartClusterCommsLaunchesFabricForwardingWhenPrimarySyncUnaddressed(t *
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !fabPeerSet {
-		t.Fatal("populateFabricFwd did not run: fabricPeerIP unset (#15687)")
+		t.Fatal("populateFabricFwdSlot did not run: slot 0 peerIP unset (#15687)")
 	}
 	// Aux loops started: the IPsec SA loop (the startClusterSyncAuxLoops
 	// member observable without a dataplane) is registered.

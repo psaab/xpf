@@ -810,7 +810,7 @@ func (r *Runner) gc(j *Journal) error {
 		if ierr != nil {
 			continue
 		}
-		stamp, record := r.readCommittedStamp(n)
+		stamp, record, _ := r.readCommittedStamp(n)
 		versions = append(versions, vdir{name: n, mod: info.ModTime().UnixNano(), stamp: stamp, record: record})
 	}
 	// Committed history is authoritative; mutable directory mtime is only a

@@ -15,16 +15,8 @@ impl BindingLiveState {
     pub(in crate::afxdp) fn snapshot(&self) -> BindingLiveSnapshot {
         let now_wall = Utc::now();
         let now_mono = monotonic_nanos();
-        let session_delta_pending = self
-            .pending_session_deltas
-            .lock()
-            .map(|pending| pending.len() as u64)
-            .unwrap_or(0);
-        let shared_umem_status = self
-            .shared_umem_status
-            .lock()
-            .map(|status| status.clone())
-            .unwrap_or_default();
+        let session_delta_pending = crate::sync_util::lock_tolerant(&self.pending_session_deltas).len() as u64;
+        let shared_umem_status = crate::sync_util::lock_tolerant(&self.shared_umem_status).clone();
         // #6898 (A1-b5-F1): ONE load, both fields derived from it. These two
         // fields are two spellings of the same value -- the mode's name and
         // whether that mode is zero-copy -- so reading the atomic twice lets a
@@ -401,11 +393,7 @@ impl BindingLiveState {
             // AFTER the clear then renders normally. Pinned by
             // `tx_status_drop_error_outranks_retry_hint_until_rebind_6145`.
             last_error: {
-                let err = self
-                    .last_error
-                    .lock()
-                    .map(|v| v.clone())
-                    .unwrap_or_default();
+                let err = crate::sync_util::lock_tolerant(&self.last_error).clone();
                 if err.is_empty() {
                     crate::afxdp::tx::TxRetryReason::from_u8(
                         self.last_tx_retry_status.load(Ordering::Relaxed),

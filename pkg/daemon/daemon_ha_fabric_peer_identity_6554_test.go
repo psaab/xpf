@@ -24,9 +24,9 @@ import (
 // pre-fix fallback then took the FIRST non-self link-local entry it found. On a
 // shared fabric segment that is an unrelated adjacent host: the refresh
 // resolves a stranger's MAC as the cross-chassis peer, reports success, and
-// latches fabricPopulated (which feeds the RG takeover-readiness gate).
+// latches the slot populated (which feeds the RG takeover-readiness gate).
 //
-// These tests drive the real refreshFabricFwd end-to-end against a synthetic
+// These tests drive the real refreshFabricFwdSlot end-to-end against a synthetic
 // link + neighbour table and assert on the peer MAC the live resolver
 // (pkg/dataplane/userspace.ResolveFabricPeer, #17044) returns for the slot
 // — the value readiness latches on — not on an intermediate. The daemon
@@ -143,7 +143,7 @@ func fabPeerNeigh(t *testing.T, ip, mac string) netlink.Neigh {
 // deliberately EMPTY and no parent IPv4 entry exists for the peer address, so
 // resolution falls through to the link-local NDP fallback under test.
 //
-// TxQLen is pre-set at the 10000 threshold so refreshFabricFwd never issues a
+// TxQLen is pre-set at the 10000 threshold so refreshFabricFwdSlot never issues a
 // real netlink LinkSetTxQLen against the fake link.
 func fabPeerTestDaemon(t *testing.T, parentV6 []netlink.Neigh) (*Daemon, *fabricProgramRecorder) {
 	t.Helper()
@@ -180,7 +180,7 @@ func fabPeerTestDaemon(t *testing.T, parentV6 []netlink.Neigh) (*Daemon, *fabric
 	}
 	rec.neighFn = neighFn
 	d := &Daemon{
-		fabricPeerIP: net.ParseIP("10.99.13.2"),
+		fabricSlots: [2]fabricSlot{{name: "fabric", peerIP: net.ParseIP("10.99.13.2")}, {name: "fabric1"}},
 		linkByNameFn: mockLinkByName(map[string]*testLink{
 			"ge-0-0-0": parent,
 			"fab0":     overlay,
@@ -193,7 +193,7 @@ func fabPeerTestDaemon(t *testing.T, parentV6 []netlink.Neigh) (*Daemon, *fabric
 
 func fabPeerRefresh(t *testing.T, d *Daemon) bool {
 	t.Helper()
-	return d.refreshFabricFwd(context.Background(), "ge-0-0-0", "fab0",
+	return d.refreshFabricFwdSlot(context.Background(), 0, "ge-0-0-0", "fab0",
 		net.ParseIP("10.99.13.2"), false)
 }
 
@@ -212,7 +212,7 @@ func TestFabricPeerNDPFallbackRejectsDecoyWithKnownPeerMAC(t *testing.T) {
 	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
 
 	if !fabPeerRefresh(t, d) {
-		t.Fatal("refreshFabricFwd returned false; expected the real peer to resolve")
+		t.Fatal("refreshFabricFwdSlot returned false; expected the real peer to resolve")
 	}
 
 	got := rec.programmedPeerMACs()
@@ -223,7 +223,7 @@ func TestFabricPeerNDPFallbackRejectsDecoyWithKnownPeerMAC(t *testing.T) {
 		// #15918 update: the live resolver now shares this selection, so a
 		// decoy accepted here WOULD become the helper's PeerMAC as well.
 		t.Fatalf("DECOY MAC %s was programmed as the fabric peer — the node would "+
-			"latch fabricPopulated, end the fast-retry probe loop early, and log an "+
+			"latch slot populated, end the fast-retry probe loop early, and log an "+
 			"unrelated host's MAC as the fabric peer during an HA incident (#6554)",
 			fabPeerTestDecoyMAC)
 	}
@@ -245,7 +245,7 @@ func TestFabricPeerNDPFallbackRefusesAmbiguousSegment(t *testing.T) {
 	// No rememberFabricPeerMAC — the peer address has never resolved.
 
 	if fabPeerRefresh(t, d) {
-		t.Fatal("refreshFabricFwd reported success on an ambiguous fabric segment; " +
+		t.Fatal("refreshFabricFwdSlot reported success on an ambiguous fabric segment; " +
 			"expected a fail-closed refusal (#6554)")
 	}
 	if got := rec.programmedPeerMACs(); len(got) != 0 {
@@ -253,7 +253,7 @@ func TestFabricPeerNDPFallbackRefusesAmbiguousSegment(t *testing.T) {
 			"(decoy=%s, peer=%s) (#6554)", got, fabPeerTestDecoyMAC, fabPeerTestPeerMAC)
 	}
 	if d.fabricEntryPopulated(0) {
-		t.Fatal("fabricPopulated latched on a refused resolution — the RG " +
+		t.Fatal("slot 0 populated latched on a refused resolution — the RG " +
 			"takeover-readiness gate would read a fabric that never resolved")
 	}
 }
@@ -268,14 +268,14 @@ func TestFabricPeerNDPFallbackResolvesSolePeer(t *testing.T) {
 	})
 
 	if !fabPeerRefresh(t, d) {
-		t.Fatal("refreshFabricFwd returned false on a healthy point-to-point fabric")
+		t.Fatal("refreshFabricFwdSlot returned false on a healthy point-to-point fabric")
 	}
 	got := rec.programmedPeerMACs()
 	if len(got) != 1 || got[0] != fabPeerTestPeerMAC {
 		t.Fatalf("programmed peer MACs = %v, want exactly [%s]", got, fabPeerTestPeerMAC)
 	}
 	if !d.fabricEntryPopulated(0) {
-		t.Fatal("fabricPopulated not set after a successful sole-peer resolution")
+		t.Fatal("slot 0 populated not set after a successful sole-peer resolution")
 	}
 }
 
@@ -289,7 +289,7 @@ func TestFabricPeerNDPFallbackSolePeerMatchesKnownIdentity(t *testing.T) {
 	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
 
 	if !fabPeerRefresh(t, d) {
-		t.Fatal("refreshFabricFwd returned false for the known peer")
+		t.Fatal("refreshFabricFwdSlot returned false for the known peer")
 	}
 	got := rec.programmedPeerMACs()
 	if len(got) != 1 || got[0] != fabPeerTestPeerMAC {
@@ -308,7 +308,7 @@ func TestFabricPeerNDPFallbackRefusesLoneDecoyWhenPeerKnown(t *testing.T) {
 	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
 
 	if fabPeerRefresh(t, d) {
-		t.Fatal("refreshFabricFwd accepted a lone non-peer neighbour")
+		t.Fatal("refreshFabricFwdSlot accepted a lone non-peer neighbour")
 	}
 	if got := rec.programmedPeerMACs(); len(got) != 0 {
 		t.Fatalf("programmed peer MACs = %v, want none", got)
@@ -333,7 +333,7 @@ func TestFabricPeerAddressMatchRecordsIdentity(t *testing.T) {
 		}
 		rec.neighFn = d.neighListFn
 		if !fabPeerRefresh(t, d) {
-			t.Fatal("refreshFabricFwd returned false on an address-matched resolution")
+			t.Fatal("refreshFabricFwdSlot returned false on an address-matched resolution")
 		}
 		hint := d.fabricPeerMACHint(0)
 		if hint.String() != fabPeerTestPeerMAC {
@@ -346,7 +346,7 @@ func TestFabricPeerAddressMatchRecordsIdentity(t *testing.T) {
 			fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 		})
 		if !fabPeerRefresh(t, d) {
-			t.Fatal("refreshFabricFwd returned false on a sole-peer segment")
+			t.Fatal("refreshFabricFwdSlot returned false on a sole-peer segment")
 		}
 		if hint := d.fabricPeerMACHint(0); hint != nil {
 			t.Fatalf("link-local fallback promoted its own result to the peer "+
@@ -361,7 +361,7 @@ func TestFabricPeerAddressMatchRecordsIdentity(t *testing.T) {
 // the old one would refuse the new peer forever.
 func TestFabricPeerIdentityClearedOnPeerChange(t *testing.T) {
 	d := &Daemon{}
-	// Hermetic by construction (#6595). populateFabricFwd now checks ctx before
+	// Hermetic by construction (#6595). populateFabricFwdSlot now checks ctx before
 	// the first probe, so a cancelled context returns without touching netlink —
 	// but do not let this test's SAFETY depend on that check surviving. Pin the
 	// netlink seams to hard errors so a regression in the cancellation guard
@@ -374,26 +374,26 @@ func TestFabricPeerIdentityClearedOnPeerChange(t *testing.T) {
 	d.neighListFn = func(int, int) ([]netlink.Neigh, error) {
 		return nil, errors.New("hermetic test: netlink disabled")
 	}
-	d.fabricPeerIP = net.ParseIP("10.99.13.2")
+	d.fabricSlots[0].peerIP = net.ParseIP("10.99.13.2")
 	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
-	d.fabricPeerIP1 = net.ParseIP("10.99.14.2")
+	d.fabricSlots[1].peerIP = net.ParseIP("10.99.14.2")
 	d.rememberFabricPeerMAC(1, mustMAC(t, fabPeerTestPeerMAC))
 
 	// Same peer — identity survives.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", "10.99.13.2", nil)
+	d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", "10.99.13.2", nil)
 	if d.fabricPeerMACHint(0) == nil {
 		t.Fatal("peer identity cleared even though the peer address is unchanged")
 	}
 
 	// Different peer — identity must be dropped.
-	d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", "10.99.13.3", nil)
+	d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", "10.99.13.3", nil)
 	if hint := d.fabricPeerMACHint(0); hint != nil {
 		t.Fatalf("stale peer identity %v retained across a fabric peer change", hint)
 	}
 
-	d.populateFabricFwd1(ctx, "ge-0-0-0", "fab1", "10.99.14.3", nil)
+	d.populateFabricFwdSlot(ctx, 1, "ge-0-0-0", "fab1", "10.99.14.3", nil)
 	if hint := d.fabricPeerMACHint(1); hint != nil {
 		t.Fatalf("stale fab1 peer identity %v retained across a peer change", hint)
 	}
@@ -408,7 +408,7 @@ func TestFabricPeerIdentityClearedOnPeerChange(t *testing.T) {
 // wire and read nothing from netlink.
 //
 // The assertion is a netlink-touch count rather than a packet capture: both
-// populateFabricFwd's probe and its refreshFabricFwd call reach the kernel
+// populateFabricFwdSlot's probe and its refreshFabricFwdSlot call reach the kernel
 // through fabricLinkByName, so ZERO calls is the only state in which neither
 // can have run. Reverting the guard makes this count non-zero.
 func TestPopulateFabricFwdHonoursCancelledContextBeforeFirstProbe(t *testing.T) {
@@ -417,10 +417,10 @@ func TestPopulateFabricFwdHonoursCancelledContextBeforeFirstProbe(t *testing.T) 
 		run  func(d *Daemon, ctx context.Context)
 	}{
 		{"fab0", func(d *Daemon, ctx context.Context) {
-			d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", "10.99.13.2", nil)
+			d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", "10.99.13.2", nil)
 		}},
 		{"fab1", func(d *Daemon, ctx context.Context) {
-			d.populateFabricFwd1(ctx, "ge-0-0-0", "fab1", "10.99.14.2", nil)
+			d.populateFabricFwdSlot(ctx, 1, "ge-0-0-0", "fab1", "10.99.14.2", nil)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -617,7 +617,7 @@ func fab1PeerTestDaemon(t *testing.T, parentNeighs map[[2]int][]netlink.Neigh) (
 	}
 	rec.neighFn = neighFn
 	d := &Daemon{
-		fabricPeerIP1: net.ParseIP("10.99.14.2"),
+		fabricSlots: [2]fabricSlot{{name: "fabric"}, {name: "fabric1", peerIP: net.ParseIP("10.99.14.2")}},
 		linkByNameFn: mockLinkByName(map[string]*testLink{
 			"ge-0-0-1": parent,
 			"fab1":     overlay,
@@ -631,7 +631,7 @@ func fab1PeerTestDaemon(t *testing.T, parentNeighs map[[2]int][]netlink.Neigh) (
 // TestRefreshFabricFwd1ParentARPAndLinkLocalFallback is the #15683 regression
 // gate. The fab1 overlay table is empty; (a) an address-matched neighbour on
 // the physical parent and (b) a sole fe80::/10 neighbour on the parent must
-// each populate fab1. Pre-fix refreshFabricFwd1 had neither fallback leg and
+// each populate fab1. Pre-fix the fab1 copy had neither fallback leg and
 // returned false in both cases.
 func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 	const parentIdx = 21
@@ -643,14 +643,14 @@ func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 				fabPeerNeigh(t, peerIP.String(), fabPeerTestPeerMAC),
 			},
 		})
-		if !d.refreshFabricFwd1(context.Background(), "ge-0-0-1", "fab1", peerIP, false) {
-			t.Fatal("refreshFabricFwd1 returned false; expected parent ARP fallback to resolve the peer (#15683)")
+		if !d.refreshFabricFwdSlot(context.Background(), 1, "ge-0-0-1", "fab1", peerIP, false) {
+			t.Fatal("refreshFabricFwdSlot(1) returned false; expected parent ARP fallback to resolve the peer (#15683)")
 		}
 		if !d.fabricEntryPopulated(1) {
-			t.Fatal("fabric1Populated not set after parent ARP fallback resolution")
+			t.Fatal("slot 1 populated not set after parent ARP fallback resolution")
 		}
-		if d.fabric1Populated != true {
-			t.Fatal("d.fabric1Populated = false, want true")
+		if d.fabricSlots[1].populated != true {
+			t.Fatal("fabricSlots[1].populated = false, want true")
 		}
 		ids := rec.programmedIDs()
 		if len(ids) != 1 || ids[0] != 1 {
@@ -670,11 +670,11 @@ func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 			},
 		})
-		if !d.refreshFabricFwd1(context.Background(), "ge-0-0-1", "fab1", peerIP, false) {
-			t.Fatal("refreshFabricFwd1 returned false; expected parent IPv6 link-local fallback to resolve the sole peer (#15683)")
+		if !d.refreshFabricFwdSlot(context.Background(), 1, "ge-0-0-1", "fab1", peerIP, false) {
+			t.Fatal("refreshFabricFwdSlot(1) returned false; expected parent IPv6 link-local fallback to resolve the sole peer (#15683)")
 		}
 		if !d.fabricEntryPopulated(1) {
-			t.Fatal("fabric1Populated not set after link-local fallback resolution")
+			t.Fatal("slot 1 populated not set after link-local fallback resolution")
 		}
 		ids := rec.programmedIDs()
 		if len(ids) != 1 || ids[0] != 1 {
@@ -696,14 +696,14 @@ func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 			},
 		})
-		if d.refreshFabricFwd1(context.Background(), "ge-0-0-1", "fab1", peerIP, false) {
-			t.Fatal("refreshFabricFwd1 reported success on an ambiguous segment; expected fail-closed refusal (#6554/#15683)")
+		if d.refreshFabricFwdSlot(context.Background(), 1, "ge-0-0-1", "fab1", peerIP, false) {
+			t.Fatal("refreshFabricFwdSlot(1) reported success on an ambiguous segment; expected fail-closed refusal (#6554/#15683)")
 		}
 		if got := rec.programmedPeerMACs(); len(got) != 0 {
 			t.Fatalf("a peer MAC was programmed from an unidentifiable segment: %v", got)
 		}
 		if d.fabricEntryPopulated(1) {
-			t.Fatal("fabric1Populated latched on a refused resolution")
+			t.Fatal("slot 1 populated latched on a refused resolution")
 		}
 	})
 }
@@ -742,8 +742,8 @@ func TestReconcileRGStateFabricReadyWithFab1Only(t *testing.T) {
 
 	// fab1 only.
 	d.fabricMu.Lock()
-	d.fabricPopulated = false
-	d.fabric1Populated = true
+	d.fabricSlots[0].populated = false
+	d.fabricSlots[1].populated = true
 	d.fabricMu.Unlock()
 
 	ready, reasons := rgReadiness(t, d)
@@ -759,7 +759,7 @@ func TestReconcileRGStateFabricReadyWithFab1Only(t *testing.T) {
 	// Control: neither fabric populated must stay not-ready, proving the
 	// gate above was live and not vacuous.
 	d.fabricMu.Lock()
-	d.fabric1Populated = false
+	d.fabricSlots[1].populated = false
 	d.fabricMu.Unlock()
 	ready, reasons = rgReadiness(t, d)
 	if ready {
@@ -777,7 +777,7 @@ func TestReconcileRGStateFabricReadyWithFab1Only(t *testing.T) {
 
 	// fab0-only also stays ready (no regression for single-fabric).
 	d.fabricMu.Lock()
-	d.fabricPopulated = true
+	d.fabricSlots[0].populated = true
 	d.fabricMu.Unlock()
 	if ready, reasons := rgReadiness(t, d); !ready {
 		t.Fatalf("fab0-only must remain takeover-ready: %v", reasons)
@@ -785,10 +785,10 @@ func TestReconcileRGStateFabricReadyWithFab1Only(t *testing.T) {
 }
 
 // TestRefreshFabricFwd1LinkLocalSyncsHelper15918 is the #15918 consumer gate:
-// the fab1 link-local fallback must not only latch fabric1Populated and
+// the fab1 link-local fallback must not only latch slot 1 populated and
 // resolve, it must also push SyncFabricState so the userspace
 // helper receives the resolved fabric (its buildFabricPeerMAC now resolves
-// the same sole link-local neighbour). Pre-fix refreshFabricFwd1 never
+// the same sole link-local neighbour). Pre-fix the fab1 copy never
 // called SyncFabricState on its success path (fab0 did).
 func TestRefreshFabricFwd1LinkLocalSyncsHelper15918(t *testing.T) {
 	const parentIdx = 21
@@ -798,26 +798,115 @@ func TestRefreshFabricFwd1LinkLocalSyncsHelper15918(t *testing.T) {
 			fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 		},
 	})
-	if !d.refreshFabricFwd1(context.Background(), "ge-0-0-1", "fab1", peerIP, false) {
-		t.Fatal("refreshFabricFwd1 returned false on sole link-local peer")
+	if !d.refreshFabricFwdSlot(context.Background(), 1, "ge-0-0-1", "fab1", peerIP, false) {
+		t.Fatal("refreshFabricFwdSlot(1) returned false on sole link-local peer")
 	}
 	rec.mu.Lock()
 	syncs := rec.syncs
 	rec.mu.Unlock()
 	if syncs == 0 {
-		t.Fatal("refreshFabricFwd1 link-local success did not call SyncFabricState — helper never learns fab1 PeerMAC (#15918)")
+		t.Fatal("refreshFabricFwdSlot(1) link-local success did not call SyncFabricState — helper never learns fab1 PeerMAC (#15918)")
 	}
 	// fab0 sole-peer path already syncs; assert it stays (control).
 	d0, rec0 := fabPeerTestDaemon(t, []netlink.Neigh{
 		fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 	})
 	if !fabPeerRefresh(t, d0) {
-		t.Fatal("refreshFabricFwd returned false on sole link-local peer")
+		t.Fatal("refreshFabricFwdSlot returned false on sole link-local peer")
 	}
 	rec0.mu.Lock()
 	s0 := rec0.syncs
 	rec0.mu.Unlock()
 	if s0 == 0 {
-		t.Fatal("refreshFabricFwd lost its SyncFabricState call")
+		t.Fatal("refreshFabricFwdSlot lost its SyncFabricState call")
+	}
+}
+
+// TestFabricSlotParity17040 is the #17040 parameterization gate: both slots
+// must behave identically through the single populate/refresh/clear
+// implementation, and one slot's state must never leak into the other.
+// Before #17040 fab0/fab1 were hand-mirrored copies and fab1 drifted into
+// the #15683/#15918 defects; a slot-specific regression in the shared path
+// (e.g. re-branching on slot 1) fails the slot-1 subtests here while the
+// slot-0 control stays green.
+func TestFabricSlotParity17040(t *testing.T) {
+	for _, tc := range []struct {
+		slot int
+		name string
+	}{
+		{slot: 0, name: "fabric"},
+		{slot: 1, name: "fabric1"},
+	} {
+		slot := tc.slot
+		t.Run(tc.name, func(t *testing.T) {
+			peerAddr := "10.99.13.2"
+			if slot == 1 {
+				peerAddr = "10.99.14.2"
+			}
+			peerIP := net.ParseIP(peerAddr)
+			dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
+			t.Cleanup(func() { dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil) })
+
+			d, rec := fabPeerTestDaemon(t, []netlink.Neigh{
+				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
+			})
+			if got := d.fabricSlotLabel(slot); got != tc.name {
+				t.Fatalf("slot %d label = %q, want stored name %q", slot, got, tc.name)
+			}
+			// fabPeerTestDaemon seeds slot 0's peer; re-point to this slot.
+			d.fabricMu.Lock()
+			d.fabricSlots[0].peerIP = nil
+			d.fabricSlots[slot].peerIP = peerIP
+			d.fabricMu.Unlock()
+			if !d.refreshFabricFwdSlot(context.Background(), slot, "ge-0-0-0", "fab0", peerIP, false) {
+				t.Fatalf("slot %d: refresh returned false on sole link-local peer", slot)
+			}
+			if !d.fabricEntryPopulated(slot) {
+				t.Fatalf("slot %d: populated latch not set after resolution", slot)
+			}
+			if d.fabricEntryPopulated(1 - slot) {
+				t.Fatalf("slot %d resolution leaked into slot %d populated latch", slot, 1-slot)
+			}
+			if ids := rec.programmedIDs(); len(ids) != 1 || ids[0] != slot {
+				t.Fatalf("resolved slots = %v, want exactly [%d]", ids, slot)
+			}
+			rec.mu.Lock()
+			syncs := rec.syncs
+			rec.mu.Unlock()
+			if syncs == 0 {
+				t.Fatalf("slot %d: refresh success did not call SyncFabricState (#15918 parity)", slot)
+			}
+			// Link-local fallback must not promote itself into identity.
+			if hint := d.fabricPeerMACHint(slot); hint != nil {
+				t.Fatalf("slot %d: link-local fallback promoted itself to identity (%v)", slot, hint)
+			}
+
+			// Peer change through the shared populate path clears only
+			// this slot's cached identity (cancelled ctx: hermetic).
+			d.rememberFabricPeerMAC(slot, mustMAC(t, fabPeerTestPeerMAC))
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			newAddr := "10.99.13.9"
+			if slot == 1 {
+				newAddr = "10.99.14.9"
+			}
+			d.populateFabricFwdSlot(ctx, slot, "ge-0-0-0", "fab0", newAddr, nil)
+			if hint := d.fabricPeerMACHint(slot); hint != nil {
+				t.Fatalf("slot %d: stale identity %v retained across peer change", slot, hint)
+			}
+
+			// Clear through the shared path drops only this slot.
+			d.fabricMu.Lock()
+			d.fabricSlots[slot].populated = true
+			d.fabricSlots[1-slot].populated = true
+			d.fabricMu.Unlock()
+			d.clearFabricFwdSlot(context.Background(), slot)
+			if d.fabricEntryPopulated(slot) {
+				t.Fatalf("slot %d: populated latch survived clearFabricFwdSlot", slot)
+			}
+			if !d.fabricEntryPopulated(1 - slot) {
+				t.Fatalf("clearing slot %d also cleared slot %d", slot, 1-slot)
+			}
+		})
 	}
 }

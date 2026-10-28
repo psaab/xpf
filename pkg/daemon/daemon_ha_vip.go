@@ -495,112 +495,252 @@ func (d *Daemon) warnGARPClampOnce(rgID int) bool {
 	return true
 }
 
-// directSendGARPs sends gratuitous ARP/IPv6 NA bursts for all VIPs in the
-// given RG. Reads per-RG GratuitousARPCount (default 3).
+// directSender returns the shared announce sender wired to this
+// package's test seams (#17052).
+func (d *Daemon) directSender() cluster.AnnounceSender {
+	return cluster.AnnounceSender{
+		GARP:    directGARPBurstFn,
+		NA:      directNABurstFn,
+		ProxyNA: directProxyNABurstFn,
+		Probe:   directARPProbeFn,
+	}
+}
+
+// announceTargetsFor builds the full ordered announce set for rgID,
+// filling gateway probes via the single derivation in pkg/vrrp (#3922).
+func announceTargetsFor(cfg *config.Config, rgID int) []cluster.AnnounceTarget {
+	return cluster.AnnounceTargets(cfg, rgID, vrrp.GatewayProbeTarget)
+}
+
+// directSendGARPs sends the full failover announcement for rgID in
+// direct mode via the shared engine (#17052): VIP GARP/NA bursts +
+// gateway probes, per-unit router-LL NAs, and the pool announce. The
+// frame sequence, the single #5695 clamp and the #8405 64-address
+// bound live in pkg/cluster (SendAnnounceTargets); this wrapper keeps
+// the #2898 ownership fence and the per-RG clamp warn-once.
 func (d *Daemon) directSendGARPs(rgID int) {
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
 		return
 	}
-	// #2898: capture the announce sequence at burst start and gate every 50ms
-	// follow-up frame on continued direct-mode ownership of this RG's VIPs. The
-	// first (immediate) frame in each cluster burst is sent unconditionally;
-	// only the follow-ups are gated (mirrors the VRRP path in #2867/#2894).
 	d.directAnnounceMu.Lock()
 	seq := d.directAnnounceSeq[rgID]
 	d.directAnnounceMu.Unlock()
 	stillValid := d.directBurstStillValid(rgID, seq)
-	// Read per-RG GARP count.
-	garpCount := 3
-	if cc := cfg.Chassis.Cluster; cc != nil {
-		for _, rg := range cc.RedundancyGroups {
-			if rg.ID == rgID && rg.GratuitousARPCount > 0 {
-				garpCount = rg.GratuitousARPCount
-			}
-		}
+	_, configured, clamped := cluster.AnnounceBurstCount(cfg, rgID)
+	if clamped && d.warnGARPClampOnce(rgID) {
+		slog.Warn("directSendGARPs: gratuitous-arp-count clamped to runtime safety maximum",
+			"rg", rgID, "configured", configured,
+			"clamped", clusterClampedCount(cfg, rgID),
+			"max", config.GratuitousARPBurstClamp)
 	}
-	// #5695 (codex-182 M16): clamp the configured count to the runtime safety
-	// maximum before it drives per-VIP raw-socket bursts. Without the clamp an
-	// unbounded count would fan (count-1) 50ms follow-up frames per VIP on
-	// every direct-mode failover — a self-inflicted CPU/socket-exhaustion
-	// vector. Warn at most ONCE per RG (directSendGARPs runs on the
-	// per-failover path — never Warn per send).
-	if clamped, was := config.ClampGratuitousARPCount(garpCount); was {
-		if d.warnGARPClampOnce(rgID) {
-			slog.Warn("directSendGARPs: gratuitous-arp-count clamped to runtime safety maximum",
-				"rg", rgID, "configured", garpCount, "clamped", clamped,
-				"max", config.GratuitousARPBurstClamp)
-		}
-		garpCount = clamped
+	res := cluster.SendAnnounceTargets(announceTargetsFor(cfg, rgID), stillValid, d.directSender())
+	if res.PoolTruncated && d.warnPoolTruncOnce(rgID) {
+		slog.Warn("directSendGARPs: pool proxy-ARP/NDP announce truncated",
+			"rg", rgID, "attempted", res.PoolAttempted,
+			"max", cluster.PoolAnnounceMaxAddresses,
+			"consequence", "the remaining pool addresses rely on upstream neighbor-discovery ageing")
 	}
+}
 
-	vipMap := vrrp.RethVIPsForRG(cfg, rgID)
-	for ifName, addrs := range vipMap {
-		for _, cidr := range addrs {
-			ip, _, err := net.ParseCIDR(cidr)
-			if err != nil {
-				continue
-			}
-			if ip.To4() != nil {
-				if err := directGARPBurstFn(ifName, ip, garpCount, stillValid); err != nil {
-					slog.Warn("directSendGARPs: GARP failed", "iface", ifName, "ip", ip, "err", err)
-				}
-				// Send a directed ARP probe to the subnet's first usable host
-				// (network address + 1, the most common gateway) so a router
-				// that ignores broadcast gratuitous ARP still re-binds the VIP
-				// to our MAC. The target derivation is the single source of
-				// truth vrrp.GatewayProbeTarget: it respects the actual prefix
-				// length and returns ok=false on /31 (RFC 3021) and /32 where
-				// no in-subnet gateway host exists. Pre-#3922 this site forced
-				// the network address's last octet to .1, which lands OUTSIDE
-				// the subnet on /25+ or a non-.0 network (e.g. 10.0.61.18/28 →
-				// 10.0.61.1, outside .16-.31) → the probe went to a foreign
-				// address and the real gateway's ARP cache was never updated →
-				// post-failover blackhole. #2377 fixed the analogous forced-.1
-				// in vrrp.sendGARP but missed this direct-mode site.
-				_, ipNet, _ := net.ParseCIDR(cidr)
-				if ipNet != nil {
-					if gw, ok := vrrp.GatewayProbeTarget(ipNet); ok && !gw.Equal(ip.To4()) {
-						// Skip when network+1 is the VIP itself — otherwise we
-						// would probe ourselves. Use the VIP as the ARP sender
-						// so the gateway re-binds VIP -> our MAC, not the
-						// primary IP -> MAC (#2152).
-						if err := directARPProbeFn(ifName, ip.To4(), gw); err != nil {
-							slog.Warn("directSendGARPs: ARP probe failed", "iface", ifName, "gw", gw, "err", err)
-						}
-					}
-				}
-			} else {
-				if err := directNABurstFn(ifName, ip, garpCount, stillValid); err != nil {
-					slog.Warn("directSendGARPs: IPv6 NA failed", "iface", ifName, "ip", ip, "err", err)
-				}
-			}
-		}
-	}
+func clusterClampedCount(cfg *config.Config, rgID int) int {
+	c, _, _ := cluster.AnnounceBurstCount(cfg, rgID)
+	return c
+}
 
-	// Per-unit router link-local NA (#15684, #16686, #17049): each unit
-	// announces its own configured link-local if present, otherwise the
-	// stable LL, on the netdev selected by unit.VlanID > 0. The set is the
-	// single placement definition in pkg/config
-	// (Config.RouterLinkLocalPlacements).
-	for _, p := range cfg.RouterLinkLocalPlacements(rgID) {
-		if err := directNABurstFn(p.Netdev, p.Addr, garpCount, stillValid); err != nil {
-			slog.Warn("directSendGARPs: router link-local NA failed",
-				"iface", p.Netdev, "ip", p.Addr, "err", err)
-		}
+// legacyNonVIPAnnouncePending reports whether the legacy-VRRP non-VIP
+// announce (#17052) is still owed for rgID at the current activation.
+// It is a pure read (no marker mutation): the announce is owed while
+// the RG is active at an activation generation not yet claimed. The
+// generation is the rg-state machine's activationSeq — it increments
+// ONLY on inactive->active transitions, never on no-change inputs —
+// so a reconcile tick at the same activation never re-owes it. The
+// marker is cleared on real deactivation and after a total send failure
+// (Sent == 0 && FirstErr != nil), not as a side effect of this check.
+// Partial delivery remains claimed to avoid duplicating successful targets.
+func (d *Daemon) legacyNonVIPAnnouncePending(rgID int) bool {
+	if d.isNoRethVRRP() {
+		return false
 	}
+	d.rgStatesMu.RLock()
+	s := d.rgStates[rgID]
+	d.rgStatesMu.RUnlock()
+	if s == nil {
+		return false
+	}
+	active, generation := s.CurrentActivation()
+	if !active {
+		return false
+	}
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	claimed, ok := d.nonVIPAnnounced[rgID]
+	return !ok || claimed < generation
+}
 
-	// #8405: announce the POOL addresses too, not just the VIPs.
-	//
-	// #8297 stopped the standby ANSWERING proxy-ARP for a pool address on an RG
-	// it does not own. That is necessary and not sufficient: removing a
-	// responder does not invalidate a binding already cached upstream. Measured
-	// on the cluster -- the seven misdelivered SYN-ACKs carried the STANDBY's
-	// MAC (`02:bf:72:16:01:01`) on a non-promiscuous NIC, so they were
-	// addressed to it, so the upstream had the pool address bound to the
-	// standby. The new owner has to ANNOUNCE rather than wait for the upstream
-	// to re-resolve on its own schedule.
-	d.announceProxyARPPoolAddresses(cfg, rgID, stillValid)
+// clearLegacyNonVIPAnnounce drops claims no newer than the deactivated
+// generation. A late deactivation cleanup must not erase a new claim
+// created by a concurrent reactivation (#17052).
+func (d *Daemon) clearLegacyNonVIPAnnounce(rgID int, generation uint64) {
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	if claimed, ok := d.nonVIPAnnounced[rgID]; ok && claimed <= generation {
+		delete(d.nonVIPAnnounced, rgID)
+	}
+}
+
+// claimLegacyNonVIPAnnounce records generation only when it does not
+// regress an existing claim. The map membership check distinguishes a
+// missing claim from a stored generation zero.
+func (d *Daemon) claimLegacyNonVIPAnnounce(rgID int, generation uint64) bool {
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	if d.nonVIPAnnounced == nil {
+		d.nonVIPAnnounced = make(map[int]uint64)
+	}
+	if claimed, ok := d.nonVIPAnnounced[rgID]; ok && claimed >= generation {
+		return false
+	}
+	d.nonVIPAnnounced[rgID] = generation
+	return true
+}
+
+// convergeLegacyNonVIPAnnounce attempts the non-VIP announce for the
+// current activation generation (#17052, the #16696 level-triggered
+// pattern applied to announcements). Every producer that observes an
+// activation -- cluster-primary, VRRP MASTER, and periodic reconcile --
+// funnels through here, so cluster-first ordering (the default userspace /
+// non-strict case, where SetCluster consumes the edge and ForceRGMaster
+// then reports Changed=false to the VRRP handler) cannot swallow it.
+//
+// The claim is atomic: the (active, generation) pair is read in ONE
+// rg-state lock hold (CurrentActivation) and the observed generation is
+// claimed under nonVIPAnnounceMu BEFORE any frame is sent, preventing
+// concurrent producers from double-sending it. Claims are monotonic
+// under that mutex: an existing claim at or beyond the observed
+// generation is never overwritten by an older observation (a producer
+// that read generation 2 before a reactivation claimed 3 must not
+// regress the marker to 2 and so re-admit generation 3 -- or re-send
+// generation 2 -- on a later pass). Absence (entry deleted by the
+// deactivation clear or the all-failed release) is distinguished from
+// a stored value so a missing entry is always claimable.
+//
+// The send is bound to the claim: sendVRRPModeNonVIPAnnounce rechecks,
+// immediately before the first frame and as the stillValid gate for
+// every follow-up/pool frame, that the RG is still active at exactly
+// this generation and that this generation is still the claimed one.
+// A claimant delayed past a deactivate/reactivate cycle therefore emits
+// nothing for its stale generation; the new activation's own producer
+// claims and sends the new generation. This predicate form is smaller
+// than holding nonVIPAnnounceMu through the send: the mutex stays a
+// short claim lock (pending checks and deactivation clears are never
+// blocked behind frame I/O), and the same predicate already gates
+// pool/follow-up frames via SendAnnounceTargets.
+//
+// If every non-VIP send fails (Sent == 0 && FirstErr != nil), only this
+// generation's claim is released so the next producer/reconcile pass
+// can retry; partial success stays claimed to avoid duplicating
+// delivered targets. Keyed to the activation generation, NOT
+// CurrentDesired's epoch: epoch bumps on every reconcileLocked input
+// (every 2s reconcile pass), which would re-send the full burst forever.
+func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
+	if d.isNoRethVRRP() {
+		return
+	}
+	d.rgStatesMu.RLock()
+	s := d.rgStates[rgID]
+	d.rgStatesMu.RUnlock()
+	if s == nil {
+		return
+	}
+	active, generation := s.CurrentActivation()
+	if !active {
+		return
+	}
+	if !d.claimLegacyNonVIPAnnounce(rgID, generation) {
+		return
+	}
+	res := d.sendVRRPModeNonVIPAnnounce(rgID, generation)
+	if res.Sent == 0 && res.FirstErr != nil {
+		// No non-VIP target accepted a frame. Release only this
+		// activation's claim so the next producer/reconcile pass can
+		// retry; a partial success remains at-most-once to avoid
+		// duplicating already-delivered targets.
+		slog.Warn("vrrp-mode announce: all non-VIP targets failed; retrying on next producer/reconcile pass",
+			"rg", rgID, "err", res.FirstErr)
+		d.nonVIPAnnounceMu.Lock()
+		if claimed, ok := d.nonVIPAnnounced[rgID]; ok && claimed == generation {
+			delete(d.nonVIPAnnounced, rgID)
+		}
+		d.nonVIPAnnounceMu.Unlock()
+	}
+}
+
+// nonVIPAnnounceClaimCurrent reports whether generation is still the
+// claimed generation for rgID AND the RG is still active at exactly
+// that generation (#17052). It is the generation-bound validity
+// predicate for a claimed send: deactivation (inactive), reactivation
+// (a newer generation), a newer claim, or the all-failed release of
+// this claim each make a delayed claimant's send a no-op.
+func (d *Daemon) nonVIPAnnounceClaimCurrent(rgID int, generation uint64) bool {
+	d.rgStatesMu.RLock()
+	s := d.rgStates[rgID]
+	d.rgStatesMu.RUnlock()
+	if s == nil {
+		return false
+	}
+	// Sample activation only after acquiring the claim mutex so this
+	// predicate cannot pair an old activation read with a current claim.
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	claimed, ok := d.nonVIPAnnounced[rgID]
+	if !ok || claimed != generation {
+		return false
+	}
+	active, current := s.CurrentActivation()
+	return active && current == generation
+}
+
+// sendVRRPModeNonVIPAnnounce sends, in legacy VRRP mode, the non-VIP
+// half of the shared target set on RG activation (#17052): the router
+// link-local NAs and the pool GARPs/NAs that pkg/vrrp never sends (it
+// owns only the VIPs). It is bound to the caller's activation claim:
+// the RG must still be active at exactly this generation, with this
+// generation still claimed, before the first frame and (via stillValid)
+// before every follow-up/pool frame.
+func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int, generation uint64) cluster.AnnounceResult {
+	if d.isNoRethVRRP() {
+		return cluster.AnnounceResult{}
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil {
+		return cluster.AnnounceResult{}
+	}
+	stillValid := func() bool {
+		return d.nonVIPAnnounceClaimCurrent(rgID, generation)
+	}
+	if !stillValid() {
+		return cluster.AnnounceResult{}
+	}
+	_, configured, clamped := cluster.AnnounceBurstCount(cfg, rgID)
+	if clamped && d.warnGARPClampOnce(rgID) {
+		slog.Warn("vrrp-mode announce: gratuitous-arp-count clamped to runtime safety maximum",
+			"rg", rgID, "configured", configured,
+			"clamped", clusterClampedCount(cfg, rgID),
+			"max", config.GratuitousARPBurstClamp)
+	}
+	targets := cluster.NonVIPAnnounceTargets(cfg, rgID)
+	if !stillValid() {
+		return cluster.AnnounceResult{}
+	}
+	res := cluster.SendAnnounceTargets(targets, stillValid, d.directSender())
+	if res.PoolTruncated && d.warnPoolTruncOnce(rgID) {
+		slog.Warn("vrrp-mode announce: pool proxy-ARP/NDP announce truncated",
+			"rg", rgID, "attempted", res.PoolAttempted,
+			"max", cluster.PoolAnnounceMaxAddresses,
+			"consequence", "the remaining pool addresses rely on upstream neighbor-discovery ageing")
+	}
+	return res
 }
 
 // resetVIPWarnings drops the VIP warning-suppression set so a new config gets
@@ -639,52 +779,33 @@ func (d *Daemon) clearVIPWarning(ifName string) {
 	delete(d.vipWarnedIfaces, ifName)
 }
 
-// proxyARPAnnounceMaxAddresses bounds how many pool addresses one RG's
-// ownership change announces.
-//
-// #8405. A proxy-arp statement expands to at most proxyARPMaxExpandedHosts
-// (256) addresses and an interface may carry several, so an unbounded announce
-// would fan hundreds of raw-socket sends per failover — recreating the
-// self-inflicted CPU/socket-exhaustion vector that GratuitousARPBurstClamp
-// exists to prevent, arriving through a different door.
-//
-// 64 is chosen against the shape of the fault rather than as a round number: a
-// pool address needs announcing only if an upstream has it CACHED, which
-// requires it to have been used for translation, and a deployment translating
-// through more than 64 distinct pool addresses in the lifetime of one upstream
-// neighbor entry is not the one this fix is for. Exceeding it warns once per RG
-// and announces the first 64 in configured order — deterministic, so the same
-// addresses are announced on every failover rather than an arbitrary subset.
-const proxyARPAnnounceMaxAddresses = 64
+// proxyARPAnnounceMaxAddresses is retained as the daemon spelling of
+// the shared bound (#17052: the constant now lives in pkg/cluster).
+const proxyARPAnnounceMaxAddresses = cluster.PoolAnnounceMaxAddresses
 
-// announceProxyARPPoolAddresses sends ONE gratuitous ARP for each IPv4
-// proxy-ARP pool address and ONE unsolicited NA for each IPv6 proxy-NDP pool
-// address on the interfaces belonging to rgID.
-//
-// ONE, not a burst. The burst exists to survive loss when a single VIP must be
-// re-bound; here the job is breadth — invalidating one upstream binding per
-// address — and depth × breadth is what turns this into a storm. A missed
-// announce is recovered by the upstream's own neighbor-discovery ageing, which
-// was the pre-#8405 behavior for every address.
-//
-// #8621: that recovery sentence is TRUE ONLY NOW. It assumes the upstream's
-// re-ARP gets an answer, and until #8621 nothing answered for a pool address
-// inside its own egress interface's connected subnet -- every arm of the
-// kernel's proxy branch is gated on the route egressing a DIFFERENT device than
-// the request arrived on, so the NTF_PROXY entry and the `proxy_arp` sysctl the
-// daemon installs were both inert there. This announce was therefore the ONLY
-// thing that ever bound the address upstream, and the "recovery" was an ageing
-// timer into a blackhole. The #8621 userspace responder covers IPv4 ARP
-// only; IPv6 proxy-NDP replies come from the kernel when proxy_ndp and FIB
-// conditions match. Forwarded unicast NUD probes with all.proxy_ndp unset
-// are a separate recovery gap tracked in #12611.
-//
-// The RG filter is `proxyARPRedundancyGroupFor`, the SAME predicate #8297's
-// suppression uses. That is deliberate: this announces exactly the set the
-// standby stops answering for, so the two cannot disagree about which
-// addresses belong to which RG. A divergence there would announce an address
-// this node does not own — telling the upstream to send us traffic for an RG
-// the peer is primary for, which is worse than the stale binding being fixed.
+// warnPoolTruncOnce mirrors warnGARPClampOnce for the pool-truncation
+// warning: at most once per RG (never per failover).
+func (d *Daemon) warnPoolTruncOnce(rgID int) bool {
+	d.garpClampWarnMu.Lock()
+	defer d.garpClampWarnMu.Unlock()
+	if d.poolTruncWarned == nil {
+		d.poolTruncWarned = make(map[int]bool)
+	}
+	if d.poolTruncWarned[rgID] {
+		return false
+	}
+	d.poolTruncWarned[rgID] = true
+	return true
+}
+
+// announceProxyARPPoolAddresses sends ONE gratuitous ARP per IPv4 pool
+// address and ONE unsolicited NA per IPv6 pool address for rgID, via
+// the shared announce engine (#17052). Kept as a named entry point for
+// the #8405/#12172 tests; production failover announce goes through
+// directSendGARPs / sendVRRPModeNonVIPAnnounce, which include these
+// targets in the full set. stillValid is REQUIRED (#17158): a nil
+// predicate is refused up front, once, rather than failing per address
+// inside the gated senders.
 func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, stillValid cluster.BurstStillValid) {
 	if cfg == nil || rgID <= 0 {
 		return
@@ -697,61 +818,15 @@ func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, sti
 			"rg", rgID)
 		return
 	}
-	sent := 0
-	attempted := 0
-	truncated := false
-	for _, entry := range cfg.Security.NAT.ProxyARP {
-		if proxyARPRedundancyGroupFor(cfg, entry.Interface) != rgID {
-			continue
-		}
-		ifName := cfg.ResolveKernelIfName(entry.Interface)
-		if ifName == "" {
-			continue
-		}
-		for _, cidr := range entry.Addresses {
-			if !stillValid() {
-				return // ownership moved again mid-announce; stop rather than lie
-			}
-			ip, _, err := net.ParseCIDR(cidr)
-			if err != nil {
-				if ip = net.ParseIP(cidr); ip == nil {
-					continue
-				}
-			}
-			if attempted >= proxyARPAnnounceMaxAddresses {
-				truncated = true
-				break
-			}
-			// Bound attempted sends, not only successful announcements: a
-			// failed raw-socket send must not reopen the per-failover budget.
-			attempted++
-			if ip.To4() != nil {
-				if err := directGARPBurstFn(ifName, ip, 1, stillValid); err != nil {
-					slog.Warn("directSendGARPs: pool proxy-ARP announce failed",
-						"iface", ifName, "ip", ip, "rg", rgID, "err", err)
-					continue
-				}
-			} else {
-				if err := directProxyNABurstFn(ifName, ip, 1, stillValid); err != nil {
-					slog.Warn("directSendGARPs: pool proxy-NDP announce failed",
-						"iface", ifName, "ip", ip, "rg", rgID, "err", err)
-					continue
-				}
-			}
-			sent++
-		}
-		if truncated {
-			break
-		}
-	}
-	if truncated && d.warnGARPClampOnce(rgID) {
+	res := cluster.SendAnnounceTargets(cluster.PoolAnnounceTargets(cfg, rgID), stillValid, d.directSender())
+	if res.PoolTruncated && d.warnPoolTruncOnce(rgID) {
 		slog.Warn("directSendGARPs: pool proxy-ARP/NDP announce truncated",
-			"rg", rgID, "announced", sent, "attempted", attempted,
-			"max", proxyARPAnnounceMaxAddresses,
+			"rg", rgID, "attempted", res.PoolAttempted,
+			"max", cluster.PoolAnnounceMaxAddresses,
 			"consequence", "the remaining pool addresses rely on upstream neighbor-discovery ageing")
 	}
-	if sent > 0 {
+	if res.Sent > 0 {
 		slog.Info("directSendGARPs: announced pool proxy-ARP/NDP addresses",
-			"rg", rgID, "count", sent)
+			"rg", rgID, "count", res.Sent)
 	}
 }

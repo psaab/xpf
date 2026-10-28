@@ -1922,10 +1922,10 @@ type SessionSync struct {
 	// final chunk lands; a newer committed set discards it.
 	dhcpChunkState4 dhcpChunkState
 	dhcpChunkState6 dhcpChunkState
-	// #16758: pending IPsec SA chunk assembly, guarded by ipsecApplyMu
-	// (touched only by the IPsec chunk handler's commit section and the
-	// legacy arm's supersede). A pending assembly never commits until its
-	// final chunk lands; a newer committed set discards it.
+	// #16758: pending IPsec SA chunk assemblies and per-incarnation committed
+	// generations, guarded by ipsecApplyMu. The chunk handler checks the
+	// generation fence before replacing the held set; a newer legacy commit
+	// discards all pending assemblies.
 	ipsecChunkState ipsecSAChunkState
 	// recvEpoch fences full-set DHCP commits against receiver resets
 	// (fold-2 HIGH-2): bumped under recvSeqMu by resetRecvGen alongside

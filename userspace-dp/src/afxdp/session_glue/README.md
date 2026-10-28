@@ -18,13 +18,13 @@ sees the same sessions the userspace path is processing.
 | `resolution.rs` | Cached FIB/table resolution and the helpers that compare/rebuild it. |
 | `resolve.rs` | Per-packet flow/session resolution (`resolve_flow_session_decision*`). |
 | `forward_commit.rs` | Single source of truth for forward-session metadata, NAT composition, TCP epilogue, and shared-entry construction (#17021). |
-| `worker_commands.rs` | Worker-command dispatcher (`apply_worker_commands`), replication enqueueing, and delete-drop repair. Large arms (`ListSessionsByPolicy`, `DeletePolicyBatch`, `QuerySessionCounters`, `UpsertLocal`, `DeleteSyncedIfTableUnknown`) stay inline there; delegated handlers live under `commands/`. |
+| `worker_commands.rs` | Worker-command tick (`apply_worker_commands`), replication enqueueing, and delete-drop repair. The public entry point stays below 200 lines; the ordered match lives in `commands/worker_command_dispatch.rs`. |
 | `revalidation.rs` | Policy/zone/SNAT session revalidation, purge sweeps, and BPF session-map mirror writers. |
 | `tx_cancel.rs` | TCP-RST queue cancellation and pending-frame recycling. |
 | `promote.rs` | Synced-session hit handling: `maybe_promote_synced_session` (promote a peer-synced hit to locally-owned) and `purge_translated_synced_hit` (drop + NAT-release a transient alias-owned hit). |
 | `delete_drop_sweep.rs` | Resumable, budgeted delete-drop reconcile (`DeleteDropSweep`, #9327). |
 | `install_table_purge.rs` | Flag-driven paced purge of sessions whose installing table is unresolvable (#9752). |
-| `commands/` | Worker-command handlers delegated from `worker_commands.rs` (`handle_upsert_synced`, `handle_delete_synced` and its twins, owner-RG refresh/demote/export, `handle_remove_policy_item`). |
+| `commands/` | Worker-command handlers and drain/dispatch helpers delegated from `worker_commands.rs`. The five #18144 long arms live in `query_session_counters.rs`, `list_sessions_by_policy.rs`, `upsert_local.rs`, `delete_policy_batch.rs`, and `delete_synced_if_table_unknown.rs`; wrapper handlers and bounded drain/dispatch helpers are split into files below 200 lines. |
 | `tests.rs` and `*_tests.rs` | Co-located unit tests for cache validation, mirror semantics, and per-issue behavioural cells (loaded via `#[path]` from `mod.rs`). |
 
 ## Where it sits
