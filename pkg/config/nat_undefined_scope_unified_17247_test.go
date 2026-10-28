@@ -71,10 +71,48 @@ func TestNATUndefinedScopeUnifiedProjections17247(t *testing.T) {
 	if (strictErr != nil) != (len(offenders) > 0) || strictErr == nil || strictErr.Error() != want[0] {
 		t.Fatalf("strict error = %v, want first offender %q for %v", strictErr, want[0], offenders)
 	}
-	clean := &Config{}
-	if cleanErr := validateNATUndefinedScopeStrict(clean); cleanErr != nil ||
-		len(natUndefinedScopeOffenders(clean)) != 0 {
-		t.Fatalf("clean config projection disagrees: strict error=%v offenders=%v",
-			cleanErr, natUndefinedScopeOffenders(clean))
+	fullyDefined := &Config{
+		Interfaces: InterfacesConfig{Interfaces: map[string]*InterfaceConfig{
+			"ge-0/0/1": {Units: map[int]*InterfaceUnit{0: {Number: 0}}},
+		}},
+		RoutingInstances: []*RoutingInstanceConfig{{Name: "blue"}},
+		Security: SecurityConfig{NAT: NATConfig{
+			Source: []*NATRuleSet{{
+				Name:                "source-ok",
+				FromInterface:       "ge-0/0/1.0",
+				ToInterface:         "ge-0/0/1.0",
+				FromRoutingInstance: "blue",
+				ToRoutingInstance:   "default",
+			}},
+			Destination: &DestinationNATConfig{RuleSets: []*NATRuleSet{{
+				Name:                "destination-ok",
+				FromInterface:       "ge-0/0/1.0",
+				FromRoutingInstance: "blue",
+			}}},
+			Static: []*StaticNATRuleSet{{
+				Name:                "static-ok",
+				FromInterface:       "ge-0/0/1.0",
+				FromRoutingInstance: "blue",
+			}},
+		}},
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  *Config
+	}{
+		{name: "nil", cfg: nil},
+		{name: "empty", cfg: &Config{}},
+		{name: "fully defined", cfg: fullyDefined},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			offenders := natUndefinedScopeOffenders(tc.cfg)
+			err := validateNATUndefinedScopeStrict(tc.cfg)
+			if (err != nil) != (len(offenders) > 0) {
+				t.Fatalf("strict/offender disagreement: strict error=%v offenders=%v", err, offenders)
+			}
+			if err != nil || len(offenders) != 0 {
+				t.Fatalf("defined config must have no findings: strict error=%v offenders=%v", err, offenders)
+			}
+		})
 	}
 }

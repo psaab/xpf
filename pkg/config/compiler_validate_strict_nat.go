@@ -168,9 +168,10 @@ func NATUndefinedZoneRuleSets(cfg *Config) map[NATRuleSetRef]bool {
 // #15278 (D02-02): NAT rule-set from/to interface and routing-instance
 // scopes naming an undefined logical unit or routing-instance. Unlike the
 // zone axis (#15001), the dataplane does not abort — it silently never
-// matches — so strict rejects and tolerant warns + records for any future
-// skip. Interface check mirrors validateZoneInterfaceDefinedStrict's
-// generosity: configured unit, lo0.0, materialized st0, implicit tunnel 0.
+// matches — so strict rejects and tolerant warns while preserving the
+// unresolved scope in the snapshot; no runtime skip record is needed.
+// Interface checks mirror validateZoneInterfaceDefinedStrict's generosity:
+// configured unit, lo0.0, materialized st0, implicit tunnel 0.
 func natInterfaceDefined15278(cfg *Config, ref string) bool {
 	if cfg == nil || ref == "" {
 		return true

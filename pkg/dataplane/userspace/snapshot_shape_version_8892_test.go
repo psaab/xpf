@@ -609,15 +609,15 @@ const (
 	// no new wire field, so the golden below is unchanged in shape but
 	// the version pin moves with ProtocolVersion.
 	// v70 STANDS (#16077): Config.UnimplementedAAALeaves is compile-time
-	// only (`json:"-"`). ConfigSnapshot embeds Config, so this reflection
-	// walk sees the field, but it is absent from ConfigSnapshot JSON and
-	// Rust keeps `config` as an opaque serde_json.Value with no consumer.
-	// #17247 removes the write-only Config.LenientNATUndefinedScopeRuleSets
-	// field too. Its removal changes the Go reflection digest, not serialized
-	// snapshot JSON, so re-pin this golden without bumping ProtocolVersion.
+	// only (`json:"-"`). ConfigSnapshot embeds Config, so this reflection walk
+	// sees the field, but it is absent from ConfigSnapshot JSON and Rust
+	// keeps `config` as an opaque serde_json.Value with no consumer.
+	// No helper of any vintage can observe the change, so ProtocolVersion
+	// stays and only this golden moves.
 	// The pre-change master digest was already drifted (base 29de2603… at
-	// ProtocolVersion 70 while this pin still said 68/cf98a6a5…); this entry
-	// folds that drift together with the field removal into the v70 golden.
+	// ProtocolVersion 70 while this pin still said 68/cf98a6a8…); this entry
+	// folds that pre-existing drift with #16077's field into the
+	// v70 golden.
 	// v70 STANDS (#16141): CoS LossPriority fields (six CoS entries plus
 	// FirewallFilterTerm), CoSScheduler.Priority (SchedulerPriority),
 	// and TunnelConfig.Mode (TunnelMode) were retyped from string to
@@ -641,7 +641,9 @@ const (
 	// control wire but not the snapshot shape; the protocol pin still moves.
 	// v76 (#17684) changes RulePriority semantics only; the shape is stable.
 	// v77 (#17099) adds typed pool identity to lease records; the protocol
-	// pin moves, while this field removal is also compile-time-only.
+	// pin moves. #17247 removes `Config.LenientNATUndefinedScopeRuleSets`,
+	// a compile-time-only `json:"-"` field. That changes this Go reflection
+	// digest but not wire shape, so re-pin the golden without another bump.
 	snapshotShapeVersion8892 = 77
 )
 
