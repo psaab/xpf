@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // writeStaged builds a staged tree with one file per managed binary, each
@@ -223,7 +225,7 @@ func TestCrashBeforeCurrentGenRepoint(t *testing.T) {
 	// Simulate a crashed second publish: a complete-but-unreferenced gen dir
 	// exists, but current-gen still names g1.
 	orphan := filepath.Join(c.Dir, GenID())
-	if err := copyTreeFsync(staged, orphan); err != nil {
+	if err := fsatomic.CopyTreeDurable(staged, orphan, fsatomic.CopyTreeOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	// current-gen must still resolve to g1 (prior generation valid).

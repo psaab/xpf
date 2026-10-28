@@ -1,6 +1,4 @@
-// #1345: per-verb handler for sync_session. Body byte-identical to
-// handlers.rs lines 309-342 (preserves the nested match on
-// sync_req.operation).
+// #1345: per-verb handler for sync_session, split out of handlers.rs in #1345.
 
 use super::super::helpers::{
     SyncedKeyIntent, SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX, build_synced_session_entry,
@@ -15,7 +13,7 @@ use crate::{ControlResponse, SessionSyncRequest};
 
 /// #7209: served from the SESSION-DOMAIN HANDLE, not from `&mut ServerState`.
 ///
-/// This verb arrives on its own socket and its own thread (#452) but dispatched
+/// This verb arrives on its own socket and its own thread (#452) but used to dispatch
 /// through the same `Arc<Mutex<ServerState>>` as `apply_snapshot`, which holds
 /// that mutex across a 10 s worker-readiness barrier, a 500 ms mlx5 teardown
 /// quiesce, worker `join()`s and BPF map-pin opens. Go budgets 3 s for a session

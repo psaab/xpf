@@ -13,6 +13,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sync/semaphore"
+	"golang.org/x/sys/unix"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
@@ -185,6 +186,9 @@ func TestFabricReassertGateIsQuietWhenOverlayIsUp_6791(t *testing.T) {
 			Flags: net.FlagUp,
 		}}, nil
 	}}
+	installFabricAddrFake17221(t, func(netlink.Link) ([]netlink.Addr, error) {
+		return []netlink.Addr{fabricTestAddr17221(t, "10.99.0.1/24")}, nil
+	}, nil)
 	if got := d.missingFabricOverlays(fabricCfg6791()); len(got) != 0 {
 		t.Errorf("gate reported %v as needing re-assert while fab0 is present "+
 			"and UP; the loop must be free on a healthy node", got)
@@ -200,6 +204,28 @@ func TestFabricReassertGateFiresWhenOverlayIsDown_6791(t *testing.T) {
 	}}
 	if got := d.missingFabricOverlays(fabricCfg6791()); len(got) != 1 {
 		t.Errorf("gate did not fire for a fab0 that exists but is DOWN; got %v", got)
+	}
+}
+
+// TestFabricReassertGateFiresWhenAddressAbsent_17221 is the #17221 gate cell:
+// fab0 UP but without its configured address must be reported missing so the
+// 30s owner re-drives it, instead of the gate calling the overlay healthy
+// while session sync has no source address.
+//
+// RED on the pre-fix tree: the gate checked only presence and admin-up.
+func TestFabricReassertGateFiresWhenAddressAbsent_17221(t *testing.T) {
+	d := &Daemon{linkByNameFn: func(name string) (netlink.Link, error) {
+		return &fakeFabricLink{attrs: netlink.LinkAttrs{
+			Name:  name,
+			Flags: net.FlagUp,
+		}}, nil
+	}}
+	installFabricAddrFake17221(t, func(netlink.Link) ([]netlink.Addr, error) {
+		return nil, nil // up, but carrying no address
+	}, nil)
+	if got := d.missingFabricOverlays(fabricCfg6791()); len(got) != 1 {
+		t.Errorf("gate did not fire for a fab0 that is UP but missing its "+
+			"configured address 10.99.0.1/24; got %v", got)
 	}
 }
 
@@ -450,4 +476,184 @@ func fabricFuncBody6791(src, name string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// --- #17221: fail-closed fabric addresses ---------------------------------
+
+func fabricTestAddr17221(t *testing.T, cidr string) netlink.Addr {
+	t.Helper()
+	addr, err := netlink.ParseAddr(cidr)
+	if err != nil {
+		t.Fatalf("ParseAddr(%q): %v", cidr, err)
+	}
+	return *addr
+}
+
+// installFabricAddrFake17221 swaps the #17221 address seams for a test.
+// A nil replace installs one returning unix.EACCES for every call.
+func installFabricAddrFake17221(t *testing.T,
+	list func(netlink.Link) ([]netlink.Addr, error),
+	replace func(netlink.Link, *netlink.Addr) error,
+) {
+	t.Helper()
+	oldList, oldReplace := fabricAddrList17221, fabricAddrReplace17221
+	fabricAddrList17221 = list
+	if replace != nil {
+		fabricAddrReplace17221 = replace
+	} else {
+		fabricAddrReplace17221 = func(netlink.Link, *netlink.Addr) error {
+			return unix.EACCES
+		}
+	}
+	t.Cleanup(func() { fabricAddrList17221, fabricAddrReplace17221 = oldList, oldReplace })
+}
+
+// TestApplyFabricIPVLANAddrReplaceFailureReachesApplyTail_17221 is the
+// #17221 acceptance cell: with AddrReplace returning EACCES, the error from
+// the REAL ensureFabricIPVLAN must propagate through applyFabricIPVLAN (the
+// apply tail's producing half) instead of the commit reporting success on a
+// fabric overlay with no session-sync address.
+//
+// Only the address/link seams are faked; ensureFabricIPVLAN itself, the
+// MTU reconcile, and applyFabricIPVLAN's retry/join are the production code.
+func TestApplyFabricIPVLANAddrReplaceFailureReachesApplyTail_17221(t *testing.T) {
+	prevDelay := fabricIPVLANRetryDelay
+	fabricIPVLANRetryDelay = time.Millisecond
+	t.Cleanup(func() { fabricIPVLANRetryDelay = prevDelay })
+
+	parent := &fakeFabricLink{attrs: netlink.LinkAttrs{Name: "ge-0-0-0", Index: 2}}
+	overlay := &fakeFabricLink{attrs: netlink.LinkAttrs{
+		Name: "fab0", Index: 3, ParentIndex: 2, MTU: 9000, Flags: net.FlagUp,
+	}}
+	installFabricLinkFakes17221(t, map[string]netlink.Link{
+		"ge-0-0-0": parent, "fab0": overlay,
+	})
+	installFabricAddrFake17221(t, func(netlink.Link) ([]netlink.Addr, error) {
+		return nil, nil
+	}, nil) // AddrReplace -> EACCES
+	if err := ensureFabricIPVLAN("ge-0-0-0", "fab0", []string{"10.99.0.1/24"}, 0); err == nil {
+		t.Fatal("ensureFabricIPVLAN returned nil with AddrReplace failing (EACCES); " +
+			"the address failure is warn-only again (#17221)")
+	} else if !errors.Is(err, unix.EACCES) {
+		t.Fatalf("ensureFabricIPVLAN error %v does not wrap EACCES", err)
+	}
+
+	// Now through the real apply path: fabricEnsureFn is the production
+	// ensureFabricIPVLAN here, so the retries exhaust and the joined error
+	// must reach the apply tail.
+	prevEnsure := fabricEnsureFn
+	fabricEnsureFn = ensureFabricIPVLAN
+	t.Cleanup(func() { fabricEnsureFn = prevEnsure })
+	d := &Daemon{}
+	err := d.applyFabricIPVLAN(fabricCfg6791())
+	if err == nil {
+		t.Fatal("applyFabricIPVLAN returned nil with AddrReplace failing (EACCES); " +
+			"the commit would report success with no session-sync address (#17221)")
+	}
+	if !errors.Is(err, unix.EACCES) {
+		t.Fatalf("applyFabricIPVLAN error %v does not wrap EACCES; the failure must reach the apply tail", err)
+	}
+	if !strings.Contains(err.Error(), "fab0") {
+		t.Errorf("applyFabricIPVLAN error %v does not name fab0", err)
+	}
+}
+
+// TestEnsureFabricIPVLANCreateBranchAddrReplaceFailure_17221 is the
+// create-branch counterpart of TestApplyFabricIPVLANAddrReplaceFailureReachesApplyTail_17221:
+// when fab0 does NOT already exist on the parent, the create path
+// (daemon_ha_fabric.go's LinkAdd branch) must also fail closed on an
+// AddrReplace error instead of reporting a healthy address-less overlay.
+//
+// The link table starts WITHOUT fab0; the process-wide fabricLinkAdd17221
+// fake installed by installFabricLinkFakes17221 then makes it appear — with
+// the desired MTU, because the create branch reconciles MTU before the
+// address write — so execution reaches the create-branch AddrReplace (not
+// an earlier MTU/lookup failure) and must return its EACCES.
+func TestEnsureFabricIPVLANCreateBranchAddrReplaceFailure_17221(t *testing.T) {
+	parent := &fakeFabricLink{attrs: netlink.LinkAttrs{Name: "ge-0-0-0", Index: 2, MTU: 9000}}
+	links := map[string]netlink.Link{"ge-0-0-0": parent}
+	installFabricLinkFakes17221(t, links)
+	origAdd := fabricLinkAdd17221
+	fabricLinkAdd17221 = func(netlink.Link) error {
+		links["fab0"] = &fakeFabricLink{attrs: netlink.LinkAttrs{
+			Name: "fab0", Index: 3, ParentIndex: 2, MTU: 9000,
+		}}
+		return nil
+	}
+	t.Cleanup(func() { fabricLinkAdd17221 = origAdd })
+	installFabricAddrFake17221(t, func(netlink.Link) ([]netlink.Addr, error) {
+		return nil, nil
+	}, nil) // AddrReplace -> EACCES
+	err := ensureFabricIPVLAN("ge-0-0-0", "fab0", []string{"10.99.0.1/24"}, 0)
+	if err == nil {
+		t.Fatal("ensureFabricIPVLAN returned nil on the create branch with " +
+			"AddrReplace failing (EACCES); the address failure is warn-only again (#17221)")
+	}
+	if !errors.Is(err, unix.EACCES) {
+		t.Fatalf("ensureFabricIPVLAN error %v does not wrap EACCES", err)
+	}
+	if !strings.Contains(err.Error(), "fab0") {
+		t.Errorf("ensureFabricIPVLAN error %v does not name fab0", err)
+	}
+}
+
+// installFabricLinkFakes17221 swaps the #17221 link seams (and the #10216
+// MTU lookup seam, which reads the same fake table) for a test.
+func installFabricLinkFakes17221(t *testing.T, links map[string]netlink.Link) {
+	t.Helper()
+	oldByName, oldAdd := fabricLinkByName17221, fabricLinkAdd17221
+	oldSetUp := fabricLinkSetUp17221
+	oldMTULookup, oldMTUSet := fabricLinkByName10216, fabricLinkSetMTU10216
+	lookup := func(name string) (netlink.Link, error) {
+		link, ok := links[name]
+		if !ok {
+			return nil, errors.New("no such device")
+		}
+		return link, nil
+	}
+	fabricLinkByName17221 = lookup
+	fabricLinkByName10216 = lookup
+	fabricLinkSetMTU10216 = func(link netlink.Link, mtu int) error {
+		link.Attrs().MTU = mtu
+		return nil
+	}
+	fabricLinkAdd17221 = func(netlink.Link) error { return nil }
+	fabricLinkSetUp17221 = func(link netlink.Link) error {
+		link.Attrs().Flags |= net.FlagUp
+		return nil
+	}
+	t.Cleanup(func() {
+		fabricLinkByName17221, fabricLinkAdd17221 = oldByName, oldAdd
+		fabricLinkSetUp17221 = oldSetUp
+		fabricLinkByName10216, fabricLinkSetMTU10216 = oldMTULookup, oldMTUSet
+	})
+}
+
+// TestFabricOverlayReady_17221 pins the shared predicate directly: up, at
+// MTU, and carrying every configured address — each property independently
+// sufficient to fail ready.
+func TestFabricOverlayReady_17221(t *testing.T) {
+	mk := func(flags net.Flags, mtu int) *fakeFabricLink {
+		return &fakeFabricLink{attrs: netlink.LinkAttrs{
+			Name: "fab0", Flags: flags, MTU: mtu,
+		}}
+	}
+	installFabricAddrFake17221(t, func(netlink.Link) ([]netlink.Addr, error) {
+		return []netlink.Addr{fabricTestAddr17221(t, "10.99.0.1/24")}, nil
+	}, func(netlink.Link, *netlink.Addr) error { return nil })
+	if err := fabricOverlayReady(mk(net.FlagUp, 9000), []string{"10.99.0.1/24"}, 9000); err != nil {
+		t.Errorf("ready overlay rejected: %v", err)
+	}
+	if err := fabricOverlayReady(mk(0, 9000), []string{"10.99.0.1/24"}, 9000); err == nil {
+		t.Error("down overlay reported ready")
+	}
+	if err := fabricOverlayReady(mk(net.FlagUp, 1500), []string{"10.99.0.1/24"}, 9000); err == nil {
+		t.Error("wrong-MTU overlay reported ready")
+	}
+	installFabricAddrFake17221(t, func(netlink.Link) ([]netlink.Addr, error) {
+		return nil, nil
+	}, func(netlink.Link, *netlink.Addr) error { return nil })
+	if err := fabricOverlayReady(mk(net.FlagUp, 9000), []string{"10.99.0.1/24"}, 9000); err == nil {
+		t.Error("address-less overlay reported ready")
+	}
 }

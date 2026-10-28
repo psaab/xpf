@@ -1005,6 +1005,32 @@ func wipeClearDir(dir string) error {
 // retry succeed over bytes a sibling still holds.
 func wipeRemovePath(path string) error {
 	info, err := os.Lstat(path)
+	if err == nil && info.Mode().IsRegular() {
+		// Single regular file: the shared primitive (#17171) owns the
+		// inspect -> refuse symlink -> refuse hardlink -> remove
+		// sequence. Only the seal leg's parent-sync barrier stays here.
+		// Historic seal spellings preserved verbatim (#17171 fold),
+		// mapped from the typed/sentinel classes.
+		if err := configstore.EraseFileForReset(path); err != nil {
+			var linkErr *configstore.FactoryResetHardlinkError
+			switch {
+			case errors.As(err, &linkErr):
+				return fmt.Errorf("zeroize: refusing to erase hard-linked %s: %w", path, linkErr)
+			case errors.Is(err, configstore.ErrEraseInspectLinks):
+				return fmt.Errorf("zeroize: inspect hard links for %s: %w", path, err)
+			case errors.Is(err, configstore.ErrEraseInspect):
+				return fmt.Errorf("zeroize: inspect %s: %w", path, err)
+			case errors.Is(err, configstore.ErrEraseRemove):
+				return fmt.Errorf("zeroize: remove %s: %w", path, err)
+			default:
+				return fmt.Errorf("zeroize: %w", err)
+			}
+		}
+		if err := wipeSyncDurable(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("zeroize: sync parent of %s: %w", path, err)
+		}
+		return nil
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		// Retry durability: the unlink may have landed on an attempt whose
 		// barrier failed. Syncing the nearest surviving ancestor retires

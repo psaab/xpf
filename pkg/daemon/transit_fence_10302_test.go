@@ -35,7 +35,7 @@ func TestArmedForwardFenceDropsUnownedTransit10302(t *testing.T) {
 				Mode:      netlink.TUNTAP_MODE_TUN,
 			},
 			&netlink.Tuntap{
-				LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 105},
+				LinkAttrs: netlink.LinkAttrs{Name: xnft.HostInboundDelegatedIfname, Index: 105},
 				Mode:      netlink.TUNTAP_MODE_TUN,
 			},
 		}, nil
@@ -62,14 +62,14 @@ func TestArmedForwardFenceDropsUnownedTransit10302(t *testing.T) {
 		t.Fatalf("armed marked pinholes = %v, want one xpf-usp1 mark conjunction", got.AllowedMarks)
 	}
 	marked := got.AllowedMarks[0]
-	if marked.Ifname != armedTransitReinjectIfname ||
+	if marked.Ifname != xnft.HostInboundDelegatedIfname ||
 		marked.Mark != xnft.AdjudicatedTransitMark ||
 		marked.Mask != xnft.AdjudicatedTransitMarkMask {
 		t.Fatalf("armed marked pinhole = %+v, want xpf-usp1 mark %#x/%#x",
 			marked, xnft.AdjudicatedTransitMark, xnft.AdjudicatedTransitMarkMask)
 	}
 	for _, name := range got.AllowedIfnames {
-		if name == "leave-alone0" || name == "unmanaged0" || name == "xfrm1" || name == "xpf-usp0" || name == armedTransitReinjectIfname {
+		if name == "leave-alone0" || name == "unmanaged0" || name == "xfrm1" || name == "xpf-usp0" || name == xnft.HostInboundDelegatedIfname {
 			t.Fatalf("unowned/unadjudicated or LocalDelivery fixture %q must not be an unmarked forward pinhole: %v", name, got.AllowedIfnames)
 		}
 	}
@@ -100,7 +100,7 @@ func TestArmedForwardFenceAllTrackedIfindexesUnresolvedKeepsGateClosed10302(t *t
 	transitFenceLinkList = func() ([]netlink.Link, error) {
 		return []netlink.Link{
 			&netlink.Tuntap{
-				LinkAttrs: netlink.LinkAttrs{Name: armedTransitReinjectIfname, Index: 105},
+				LinkAttrs: netlink.LinkAttrs{Name: xnft.HostInboundDelegatedIfname, Index: 105},
 				Mode:      netlink.TUNTAP_MODE_TUN,
 			},
 		}, nil

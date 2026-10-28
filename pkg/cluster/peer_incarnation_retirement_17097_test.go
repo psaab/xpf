@@ -21,7 +21,7 @@ import (
 // peerIncarnationState is covered automatically (reflection enumerates it);
 // a field added OUTSIDE the struct is NOT caught automatically — the
 // structural pin in TestIncarnationScopedFieldsLiveInPeerIncarnationState17097
-// checks only the hardcoded 16-name list below, so a newly named
+// checks only the hardcoded 17-name list below, so a newly named
 // incarnation-scoped field placed directly on SessionSync (or in another
 // sub-struct) would escape it and must be added to that list by hand.
 //
@@ -317,6 +317,7 @@ func TestIncarnationScopedFieldsLiveInPeerIncarnationState17097(t *testing.T) {
 		"lastSentConfigAckCapable16756", "peerConfigNackedGen16756",
 		"deleteSuppressionWarned", "purgeRetirementSuppressionWarned",
 		"scopedPolicySuppressionWarned", "installTableSuppressionWarned",
+		"ipsecDiscriminatorSuppressionWarned",
 		"bulkFencedForPeer", "bulkFencedForIpsecPeer", "pbrAnnouncedForFence",
 		"installTableSuppressDebt", "ipsecDiscriminatorSuppressDebt",
 	}

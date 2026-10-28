@@ -5434,17 +5434,20 @@ fn wg5291_per_peer_outer_mtu_resolves_distinct_underlays() {
 }
 
 // ---------------------------------------------------------------------
-// #14675 — WG control loop / resolver stale peer capture.
+// #15950 / #17094 — WG peer commits rebuild the engine.
 //
-// `wg_peers_eq` does not compare `endpoint_host`, so a hostname-only
-// change (or a hostname peer added alongside an unchanged literal
-// peer, or a responder-only peer added) reuses the engine Arc. Before
-// the fix the control thread kept its spawn-time peer set and the
-// resolver kept its spawn-time `endpoint_hosts` forever.
+// `wg_peers_eq` compares `endpoint_host` (#15950), so ANY peer commit
+// — hostname-only included — rebuilds the engine; the coordinator
+// restarts the control thread via `engine_changed` and the respawned
+// resolver captures the fresh `endpoint_hosts`. #17094 retired the
+// #14675 same-engine machinery (coordinator arm +
+// in-thread refresh) that guarded the pre-#15950 reuse path
+// production can no longer reach. These cells pin the live route:
+// they red if `endpoint_host` drops out of `wg_peers_eq`.
 // ---------------------------------------------------------------------
 
-/// #14675 helper: decode a hex pubkey constant to bytes.
-fn wg14675_pubkey(hex: &str) -> [u8; 32] {
+/// #15950 helper: decode a hex pubkey constant to bytes.
+fn wg15950_pubkey(hex: &str) -> [u8; 32] {
     let mut pk = [0u8; 32];
     for (i, byte) in pk.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
@@ -5452,10 +5455,10 @@ fn wg14675_pubkey(hex: &str) -> [u8; 32] {
     pk
 }
 
-/// #14675 helper: a WG snapshot with configurable peer endpoints.
+/// #15950 helper: a WG snapshot with configurable peer endpoints.
 /// `peers` is (pubkey_hex, endpoint, allowed) — endpoint is a literal
 /// `IP:port`, a `host:port` hostname, or empty (responder-only).
-fn wg14675_snapshot(
+fn wg15950_snapshot(
     id: u16,
     ifindex: i32,
     name: &str,
@@ -5495,18 +5498,20 @@ fn wg14675_snapshot(
     }
 }
 
-const WG14675_PUBKEY_B: &str = "d04040404040404040404040404040404040404040404040404040404040404d";
+const WG15950_PUBKEY_B: &str = "d04040404040404040404040404040404040404040404040404040404040404d";
 
-/// #14675 regression: adding a DNS-hostname peer must restart the
-/// control thread and recapture the spawn-time peer config.
+/// #15950 regression: adding a DNS-hostname peer rebuilds the engine
+/// and restarts the control thread, so the respawned resolver captures
+/// the new hostname. Reds if `endpoint_host` leaves `wg_peers_eq`
+/// (engine Arc would be reused and `engine_changed` would not fire).
 #[test]
-fn wg14675_hostname_peer_added_restarts_control_thread() {
+fn wg15950_hostname_peer_added_rebuilds_engine_and_restarts_thread() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
-    let snap1 = wg14675_snapshot(
+    let snap1 = wg15950_snapshot(
         1,
         4675,
-        "wgt14675a",
+        "wgt15950a",
         port,
         &[(WG1866_PUBKEY, "127.0.0.1:9", "10.77.0.0/24")],
     );
@@ -5514,65 +5519,71 @@ fn wg14675_hostname_peer_added_restarts_control_thread() {
         .refresh_runtime_snapshot(&snap1)
         .expect("first apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
-    assert_eq!(entry.spawned_peer_config.len(), 1);
-    assert_eq!(entry.spawned_peer_config[0].endpoint_host, None);
+    let engine_ptr_before = entry.engine_ptr;
     let t0 = monotonic_nanos();
     coordinator
         .wg_control_threads
         .get_mut(&1)
         .expect("entry")
         .last_spawn_attempt_ns = t0;
-    let snap2 = wg14675_snapshot(
+    let snap2 = wg15950_snapshot(
         1,
         4675,
-        "wgt14675a",
+        "wgt15950a",
         port,
         &[
             (WG1866_PUBKEY, "127.0.0.1:9", "10.77.0.0/24"),
-            (WG14675_PUBKEY_B, "peer-b.example.com:51820", "10.78.0.0/24"),
+            (WG15950_PUBKEY_B, "peer-b.example.com:51820", "10.78.0.0/24"),
         ],
     );
     coordinator
         .refresh_runtime_snapshot(&snap2)
         .expect("second apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry after");
-    assert_eq!(
-        entry.spawned_peer_config.len(),
-        2,
-        "spawned capture must include the added hostname peer"
+    assert_ne!(
+        entry.engine_ptr, engine_ptr_before,
+        "adding a peer must REBUILD the engine (#15950)"
     );
-    let host_peer = entry
-        .spawned_peer_config
-        .iter()
-        .find(|p| p.pubkey == wg14675_pubkey(WG14675_PUBKEY_B))
-        .expect("hostname peer in capture");
-    assert_eq!(
-        host_peer.endpoint_host.as_deref(),
-        Some("peer-b.example.com:51820"),
-        "resolver hostname must be captured at spawn"
-    );
-    assert_eq!(host_peer.endpoint, None);
     assert_ne!(
         entry.last_spawn_attempt_ns, t0,
         "peer addition must restart the control thread (new spawn stamp)"
     );
+    let peers = &coordinator
+        .forwarding
+        .tunnel_endpoints
+        .get(&1)
+        .expect("endpoint after")
+        .wg_peers;
+    assert_eq!(peers.len(), 2, "forwarding must carry the added peer");
+    let host_peer = peers
+        .iter()
+        .find(|p| p.pubkey == wg15950_pubkey(WG15950_PUBKEY_B))
+        .expect("hostname peer in forwarding");
+    assert_eq!(
+        host_peer.endpoint_host.as_deref(),
+        Some("peer-b.example.com:51820"),
+        "resolver hostname must be in the rebuilt engine's forwarding state"
+    );
+    assert_eq!(host_peer.endpoint, None);
 }
 
-/// #14675 as amended by #15950 (H37-01): changing ONLY an existing
+/// #15950 (H37-01) / #17094 kept cell: changing ONLY an existing
 /// peer's endpoint from one hostname to another — same pubkey, same
 /// allowed-ips, endpoint None in the engine table on both sides —
-/// REBUILDS the engine, because `wg_peers_eq` now compares
-/// `endpoint_host` (a rename must not carry the old name's live
-/// endpoint). The control thread must still restart and recapture
-/// endpoint_hosts; Arc reuse remains only for unchanged identity.
+/// REBUILDS the engine, because `wg_peers_eq` compares `endpoint_host`
+/// (a rename must not carry the old name's live endpoint). The control
+/// thread restarts via `engine_changed` and recaptures endpoint_hosts;
+/// Arc reuse remains only for unchanged identity. This is the cell
+/// acceptance (i) for #17094 requires to red when `endpoint_host` is
+/// removed from `wg_peers_eq`.
 #[test]
-fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
+fn wg15950_hostname_only_commit_rebuilds_engine_and_restarts_thread() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
-    let snap1 = wg14675_snapshot(
+    let snap1 = wg15950_snapshot(
         1,
         4676,
-        "wgt14675b",
+        "wgt15950b",
         port,
         &[(WG1866_PUBKEY, "old.example.com:51820", "10.77.0.0/24")],
     );
@@ -5581,7 +5592,14 @@ fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
         .expect("first apply");
     let entry = coordinator.wg_control_threads.get(&1).expect("entry");
     assert_eq!(
-        entry.spawned_peer_config[0].endpoint_host.as_deref(),
+        coordinator
+            .forwarding
+            .tunnel_endpoints
+            .get(&1)
+            .expect("endpoint")
+            .wg_peers[0]
+            .endpoint_host
+            .as_deref(),
         Some("old.example.com:51820")
     );
     let engine_ptr_before = entry.engine_ptr;
@@ -5591,10 +5609,10 @@ fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
         .get_mut(&1)
         .expect("entry")
         .last_spawn_attempt_ns = t0;
-    let snap2 = wg14675_snapshot(
+    let snap2 = wg15950_snapshot(
         1,
         4676,
-        "wgt14675b",
+        "wgt15950b",
         port,
         &[(WG1866_PUBKEY, "new.example.com:51820", "10.77.0.0/24")],
     );
@@ -5607,7 +5625,14 @@ fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
         "hostname-only change must REBUILD the engine (#15950 H37-01)"
     );
     assert_eq!(
-        entry.spawned_peer_config[0].endpoint_host.as_deref(),
+        coordinator
+            .forwarding
+            .tunnel_endpoints
+            .get(&1)
+            .expect("endpoint after")
+            .wg_peers[0]
+            .endpoint_host
+            .as_deref(),
         Some("new.example.com:51820"),
         "hostname rename must restart and recapture endpoint_hosts"
     );
@@ -5617,16 +5642,16 @@ fn wg14675_hostname_rename_on_same_engine_restarts_control_thread() {
     );
 }
 
-/// #14675 regression: a literal endpoint change must still track in
-/// the capture, and a responder-only peer addition must restart.
+/// #15950: a literal endpoint change rebuilds the engine, and a
+/// responder-only peer addition must restart the control thread.
 #[test]
-fn wg14675_literal_change_and_responder_add_restart() {
+fn wg15950_literal_change_and_responder_add_restart() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
-    let snap1 = wg14675_snapshot(
+    let snap1 = wg15950_snapshot(
         1,
         4677,
-        "wgt14675c",
+        "wgt15950c",
         port,
         &[(WG1866_PUBKEY, "127.0.0.1:9", "10.77.0.0/24")],
     );
@@ -5639,10 +5664,10 @@ fn wg14675_literal_change_and_responder_add_restart() {
         .get_mut(&1)
         .expect("entry")
         .last_spawn_attempt_ns = t0;
-    let snap2 = wg14675_snapshot(
+    let snap2 = wg15950_snapshot(
         1,
         4677,
-        "wgt14675c",
+        "wgt15950c",
         port,
         &[(WG1866_PUBKEY, "127.0.0.1:10", "10.77.0.0/24")],
     );
@@ -5654,12 +5679,17 @@ fn wg14675_literal_change_and_responder_add_restart() {
         .get(&1)
         .expect("entry after literal");
     assert_eq!(
-        entry.spawned_peer_config[0]
+        coordinator
+            .forwarding
+            .tunnel_endpoints
+            .get(&1)
+            .expect("endpoint after literal")
+            .wg_peers[0]
             .endpoint
             .map(|e| e.to_string())
             .as_deref(),
         Some("127.0.0.1:10"),
-        "literal endpoint change must be recaptured"
+        "literal endpoint change must rebuild and be recaptured"
     );
     assert_ne!(entry.last_spawn_attempt_ns, t0, "literal change restarts");
     let t1 = monotonic_nanos();
@@ -5668,14 +5698,14 @@ fn wg14675_literal_change_and_responder_add_restart() {
         .get_mut(&1)
         .expect("entry")
         .last_spawn_attempt_ns = t1;
-    let snap3 = wg14675_snapshot(
+    let snap3 = wg15950_snapshot(
         1,
         4677,
-        "wgt14675c",
+        "wgt15950c",
         port,
         &[
             (WG1866_PUBKEY, "127.0.0.1:10", "10.77.0.0/24"),
-            (WG14675_PUBKEY_B, "", "10.78.0.0/24"),
+            (WG15950_PUBKEY_B, "", "10.78.0.0/24"),
         ],
     );
     coordinator
@@ -5685,15 +5715,16 @@ fn wg14675_literal_change_and_responder_add_restart() {
         .wg_control_threads
         .get(&1)
         .expect("entry after responder");
-    assert_eq!(
-        entry.spawned_peer_config.len(),
-        2,
-        "responder peer captured"
-    );
-    let resp = entry
-        .spawned_peer_config
+    let peers = &coordinator
+        .forwarding
+        .tunnel_endpoints
+        .get(&1)
+        .expect("endpoint after responder")
+        .wg_peers;
+    assert_eq!(peers.len(), 2, "responder peer in forwarding");
+    let resp = peers
         .iter()
-        .find(|p| p.pubkey == wg14675_pubkey(WG14675_PUBKEY_B))
+        .find(|p| p.pubkey == wg15950_pubkey(WG15950_PUBKEY_B))
         .expect("responder peer");
     assert_eq!(resp.endpoint, None);
     assert_eq!(resp.endpoint_host, None);
@@ -5703,16 +5734,16 @@ fn wg14675_literal_change_and_responder_add_restart() {
     );
 }
 
-/// #14675 control: an unchanged peer config must NOT restart the
+/// #15950 control: an unchanged peer config must NOT restart the
 /// control thread — no churn on the common no-op refresh.
 #[test]
-fn wg14675_unchanged_peer_config_keeps_control_thread() {
+fn wg15950_unchanged_peer_config_keeps_control_thread() {
     let mut coordinator = Coordinator::new();
     let port = crate::test_ports::reserve_ephemeral_udp_port();
-    let snap = wg14675_snapshot(
+    let snap = wg15950_snapshot(
         1,
         4678,
-        "wgt14675d",
+        "wgt15950d",
         port,
         &[(WG1866_PUBKEY, "peer.example.com:51820", "10.77.0.0/24")],
     );
@@ -6037,7 +6068,7 @@ fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
     // Post-#10409 contract: live WG entries publish too — the flip
     // leaves exactly the WG delivery; the GRE sender was unpublished
     // before the live thread was joined (Store #1 excludes the stale
-    // id; stop_remove_local_tunnel_entry joins synchronously).
+    // id; the registry bulk stop_remove joins synchronously).
     let deliveries = coordinator.local_tunnel_deliveries.load();
     assert_eq!(
         deliveries.len(),
@@ -6120,6 +6151,149 @@ fn gre1881_defer_prune_removes_only_stale_entries() {
     coordinator.prune_local_tunnel_sources_for_snapshot(&ConfigSnapshot::default());
     assert!(coordinator.tunnel_sources.is_empty());
     assert!(coordinator.local_tunnel_deliveries.load().is_empty());
+}
+
+/// #17084 parity: a same-id moved-attachment (and, for WG, a changed
+/// crypto identity that stays hydratable) snapshot on the defer-workers
+/// path must prune BOTH families. Pre-fix the WG prune kept the entry
+/// because it only checked hydratable presence.
+#[test]
+fn tunnel17084_defer_prune_parity_moved_attachment_and_identity() {
+    // GRE side: same-id moved attachment prunes.
+    let mut gre = gre1881_coordinator_with_worker();
+    let gre_snap = gre1881_snapshot(1, 36289, "gre1881h", "198.51.100.7");
+    gre.refresh_runtime_snapshot(&gre_snap)
+        .expect("GRE refresh must succeed");
+    assert!(gre.tunnel_sources.contains_key(&1));
+    let gre_moved = gre1881_snapshot(1, 46289, "gre1881h", "198.51.100.7");
+    gre.prune_local_tunnel_sources_for_snapshot(&gre_moved);
+    assert!(
+        gre.tunnel_sources.is_empty(),
+        "GRE defer prune must remove same-id moved attachment"
+    );
+
+    // WG side: same-id moved attachment prunes (fails pre-fix).
+    let mut wg = Coordinator::new();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let wg_snap = wg1866_snapshot(1, 4242, "wgt17084a", port, WG1866_PRIVKEY_A);
+    wg.refresh_runtime_snapshot(&wg_snap)
+        .expect("WG refresh must succeed");
+    assert!(wg.wg_control_threads.contains_key(&1));
+    let wg_moved = wg1866_snapshot(1, 4243, "wgt17084a", port, WG1866_PRIVKEY_A);
+    wg.prune_wg_control_threads_for_snapshot(&wg_moved);
+    assert!(
+        wg.wg_control_threads.is_empty(),
+        "WG defer prune must remove same-id moved attachment (parity with GRE)"
+    );
+
+    // WG side: same-id changed crypto identity (still hydratable) prunes.
+    let mut wg2 = Coordinator::new();
+    let port2 = crate::test_ports::reserve_ephemeral_udp_port();
+    wg2.refresh_runtime_snapshot(&wg1866_snapshot(1, 4242, "wgt17084b", port2, WG1866_PRIVKEY_A))
+        .expect("WG refresh must succeed");
+    assert!(wg2.wg_control_threads.contains_key(&1));
+    wg2.prune_wg_control_threads_for_snapshot(&wg1866_snapshot(
+        1,
+        4242,
+        "wgt17084b",
+        port2,
+        WG1866_PRIVKEY_B,
+    ));
+    assert!(
+        wg2.wg_control_threads.is_empty(),
+        "WG defer prune must remove same-id changed crypto identity"
+    );
+
+    // Unchanged snapshot keeps both entries.
+    let mut gre_keep = gre1881_coordinator_with_worker();
+    gre_keep
+        .refresh_runtime_snapshot(&gre_snap)
+        .expect("GRE refresh must succeed");
+    gre_keep.prune_local_tunnel_sources_for_snapshot(&gre_snap);
+    assert!(gre_keep.tunnel_sources.contains_key(&1));
+    let mut wg_keep = Coordinator::new();
+    let port3 = crate::test_ports::reserve_ephemeral_udp_port();
+    let keep_snap = wg1866_snapshot(1, 4242, "wgt17084c", port3, WG1866_PRIVKEY_A);
+    wg_keep
+        .refresh_runtime_snapshot(&keep_snap)
+        .expect("WG refresh must succeed");
+    wg_keep.prune_wg_control_threads_for_snapshot(&keep_snap);
+    assert!(wg_keep.wg_control_threads.contains_key(&1));
+}
+
+/// #17084 fold (Rev18138): the WG stop-all on the disarmed refresh leg
+/// must unpublish the WG delivery BEFORE joining its thread, while
+/// preserving any live GRE delivery — the pre-consolidation helper
+/// published excluding the WG batch; the consolidated `stop_all`
+/// initially published nothing, leaving a dead WG sender in
+/// `local_tunnel_deliveries` indefinitely while disarmed.
+///
+/// Both entries are driven live together (one joint snapshot, TUN
+/// stand-ins so neither thread exits on `open_tun`), then
+/// `stop_all_wg_control_threads` — the exact helper the disarmed leg
+/// calls first — runs: the WG entry is gone and its ifindex is
+/// unpublished, while the live GRE entry and its delivery survive
+/// (the leg's later GRE stop-all is what eventually empties the map).
+/// Reverting the publish (plain `stop_all`) leaves the WG sender
+/// published and this cell goes RED; publishing the empty map
+/// instead would withdraw the GRE sender and also go RED.
+#[test]
+fn wg1866_stop_all_unpublishes_wg_delivery_and_preserves_gre() {
+    use crate::afxdp::tunnel::register_tun_standin_10553;
+    // Keep both spawned threads live: without stand-ins they exit on
+    // open_tun, tombstone, and their deliveries are unpublished by
+    // the sweep — the joint precondition below could not hold.
+    let _gre_tun = register_tun_standin_10553("gre1866wg");
+    let _wg_tun = super::wg_control::register_tun_standin_9521("wgt1866wg");
+    let mut coordinator = gre1881_coordinator_with_worker();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let gre_snap = gre1881_snapshot(1, 36291, "gre1866wg", "198.51.100.7");
+    let wg_snap = wg1866_snapshot(2, 4244, "wgt1866wg", port, WG1866_PRIVKEY_A);
+    let mut both = gre_snap;
+    both.interfaces.extend(wg_snap.interfaces.iter().cloned());
+    both.tunnel_endpoints
+        .extend(wg_snap.tunnel_endpoints.iter().cloned());
+    coordinator
+        .refresh_runtime_snapshot(&both)
+        .expect("joint refresh must succeed");
+    assert!(
+        coordinator.tunnel_sources.contains_key(&1),
+        "precondition: GRE entry live"
+    );
+    assert!(
+        coordinator.wg_control_threads.contains_key(&2),
+        "precondition: WG entry live"
+    );
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert!(
+        deliveries.contains_key(&36291),
+        "precondition: GRE delivery published"
+    );
+    assert!(
+        deliveries.contains_key(&4244),
+        "precondition: WG delivery published"
+    );
+    drop(deliveries);
+
+    coordinator.stop_all_wg_control_threads("disarmed");
+
+    assert!(
+        coordinator.wg_control_threads.is_empty(),
+        "stop-all must stop+join+remove every WG entry"
+    );
+    assert!(
+        coordinator.tunnel_sources.contains_key(&1),
+        "WG stop-all must not touch the GRE registry"
+    );
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert!(
+        !deliveries.contains_key(&4244),
+        "WG delivery must be unpublished before/by the stop-all join"
+    );
+    assert!(
+        deliveries.contains_key(&36291),
+        "live GRE delivery must survive the WG stop-all publish"
+    );
 }
 
 /// #1881 F6: a thread that exits (open_tun failure here) is
@@ -13839,7 +14013,7 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
     live_export_ack.store(u64::MAX, Ordering::Release);
 
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 100, false)
+        .kick_owner_rg_export_unpaged(&[1], 100)
         .expect("kick");
     let t0 = Instant::now();
     let err = wait.wait_and_collect().expect_err("shed export must fail");
@@ -13862,7 +14036,7 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
         .store(u64::MAX, Ordering::Release);
     coordinator.workers.register(6, live_rec, None);
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 100, false)
+        .kick_owner_rg_export_unpaged(&[1], 100)
         .expect("kick");
     let (deltas, more) = wait.wait_and_collect().expect("live export must succeed");
     assert!(deltas.is_empty());

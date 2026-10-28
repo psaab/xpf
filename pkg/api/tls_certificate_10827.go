@@ -359,7 +359,7 @@ func bindHostsForCertGen(s *Server, bindHost string) []string {
 	if s != nil {
 		// Live legs (requested srv.Addr) — covers reconciles that have
 		// already installed/queued a leg for a new host before its cert
-		// is (re)built, and SetTLSCertDirForTest reloads.
+		// is (re)built.
 		for _, leg := range s.httpsLegs {
 			if leg != nil && leg.srv != nil {
 				if h, _, err := net.SplitHostPort(leg.srv.Addr); err == nil {

@@ -36,11 +36,11 @@ func classifyCfg9821() *config.Config {
 // missing onto the zone set (ntp).
 func TestClassifyPaddedDeclaredUnitResolves9821(t *testing.T) {
 	cfg := classifyCfg9821()
-	got := ClassifyHostInboundForInterface(cfg, "z", "p.0.01", hi5579TCP, true, 22, nil, "ip")
+	got := ClassifyHostInboundForInterface(cfg, "z", "p.0.01", hi5579TCP, true, 22, true, nil, "ip")
 	if got.Status != HostInboundTokenAdmit || got.Token != "ssh" {
 		t.Fatalf("padded query status = (%v,%q) — want ssh token-admit via the canonical override", got.Status, got.Token)
 	}
-	canon := ClassifyHostInboundForInterface(cfg, "z", "p.0.1", hi5579TCP, true, 22, nil, "ip")
+	canon := ClassifyHostInboundForInterface(cfg, "z", "p.0.1", hi5579TCP, true, 22, true, nil, "ip")
 	if canon.Status != got.Status || canon.Token != got.Token {
 		t.Errorf("canonical query (%v,%q) disagrees with padded (%v,%q) — spellings must agree",
 			canon.Status, canon.Token, got.Status, got.Token)
