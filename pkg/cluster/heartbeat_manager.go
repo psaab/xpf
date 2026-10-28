@@ -442,7 +442,7 @@ var heartbeatRestartRetryDelay = time.Second
 //     failed bind retry. The daemon wires it to
 //     SessionSync.SendLivenessKeepalive, which refreshes the peer's
 //     LastPeerReceiveAge — the signal its heartbeat-timeout suppression
-//     guard (shouldSuppressPeerHeartbeatTimeout, 2s recency window) checks
+//     guard (syncSuppressesPeerTimeoutLocked, 2s recency window, #17056) checks
 //     before fencing/electing. Suppression on the peer is bounded by its
 //     existing 5s continuous-suppression cap. Each admitted heartbeat clears
 //     that stamp so a later distinct gap re-arms; if the peer dies mid-restart
@@ -762,9 +762,10 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.peerConfirmedAbsent = false
 	// #16751: a heard peer retires the Manager-owned never-seen clock.
 	m.disarmNeverSeenClockLocked()
-	if m.peerHeartbeatRecoveredFn != nil {
-		m.peerHeartbeatRecoveredFn()
-	}
+	// #12165/#17056: admission ends the continuous-suppression window in
+	// this same critical section, so a later heartbeat-only gap re-arms
+	// its own 5s cap.
+	m.notePeerHeartbeatRecoveredLocked()
 	// A returning peer ends the reported peer-loss degradation; this marker
 	// describes the last takeover only while the partition remains unresolved.
 	m.clearFenceUnconfirmedLocked()
@@ -887,44 +888,27 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 // handlePeerTimeout is called when the peer heartbeat timeout expires.
 func (m *Manager) handlePeerTimeout() {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if !m.peerAlive {
-		m.mu.Unlock()
 		return // already marked lost
 	}
 	if suppress, reason := m.suppressPeerTimeoutForTransferCommitLocked(time.Now()); suppress {
-		m.mu.Unlock()
 		slog.Debug("cluster: suppressing peer heartbeat timeout", "reason", reason)
 		return
 	}
-	guard := m.peerTimeoutGuardFn
-	m.mu.Unlock()
-
-	guardSuppress := false
-	guardReason := ""
-	if guard != nil {
-		guardSuppress, guardReason = guard()
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if !m.peerAlive {
-		return // already marked lost while guard ran
-	}
-	// Re-check heartbeat STALENESS even when the external guard suppresses.
-	// The guard runs outside m.mu; a heartbeat may be admitted and clear its
-	// stamp while the guard is still running, after which the guard can store a
-	// new stamp. Re-checking under m.mu and clearing again when fresh makes
-	// recovery win that race. When the guard declines suppression this also
-	// preserves the existing #2080 post-guard freshness behavior.
+	// #17056: the sync-recency suppression decision is made here, under
+	// m.mu, from the published sync source — no unlock/relock and no
+	// external guard. Heartbeat admission clears the cap stamp in this
+	// same lock (handlePeerHeartbeat), so the #12165 late-stamp race the
+	// old unlocked guard created cannot occur; the #2080 freshness
+	// re-check below still aborts when a heartbeat is fresh.
 	if m.peerHeartbeatFreshLocked() {
-		if m.peerHeartbeatRecoveredFn != nil {
-			m.peerHeartbeatRecoveredFn()
-		}
-		slog.Debug("cluster: aborting peer heartbeat timeout, fresh heartbeat arrived during guard window")
+		m.notePeerHeartbeatRecoveredLocked()
+		slog.Debug("cluster: aborting peer heartbeat timeout, peer heartbeat is fresh")
 		return
 	}
-	if guardSuppress {
-		slog.Debug("cluster: suppressing peer heartbeat timeout", "reason", guardReason)
+	if suppress, reason := m.syncSuppressesPeerTimeoutLocked(MonotonicNanos()); suppress {
+		logSyncSuppressedTimeout(reason)
 		return
 	}
 	if suppress, reason := m.suppressPeerTimeoutForTransferCommitLocked(time.Now()); suppress {
@@ -1174,7 +1158,7 @@ func (m *Manager) handlePeerNeverSeen() {
 	if m.peerEverSeen || m.peerConfirmedAbsent {
 		return // a heartbeat arrived or absence was already confirmed
 	}
-	if m.peerNeverSeenSyncFreshFn != nil && m.peerNeverSeenSyncFreshFn() {
+	if m.peerSyncFreshLocked() {
 		slog.Debug("cluster: suppressing never-seen peer confirmation while session-sync proof is fresh")
 		return
 	}
@@ -1259,7 +1243,7 @@ func (m *Manager) confirmNeverSeenIfDue(gen uint64) {
 	// This callback is the live timer firing: clear the handle before any
 	// re-arm so armNeverSeenClockLocked can schedule the sync-proof recheck.
 	m.neverSeenTimer = nil
-	if m.peerNeverSeenSyncFreshFn != nil && m.peerNeverSeenSyncFreshFn() {
+	if m.peerSyncFreshLocked() {
 		slog.Debug("cluster: suppressing never-seen peer confirmation while session-sync proof is fresh")
 		m.neverSeenTimer = time.AfterFunc(neverSeenRecheckInterval, func() {
 			m.confirmNeverSeenIfDue(gen)

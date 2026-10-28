@@ -198,12 +198,11 @@ impl Drop for WgSession {
 impl WgSession {
     /// Create a session in initiator role — confirmed at install
     /// (the initiator is the side that sends first per the WG spec).
-    /// Existing callers used `WgSession::new`; that constructor maps
-    /// to this initiator behavior to preserve backward compatibility
-    /// for the in-tree tests that drive both sides through the
-    /// engine's slow path. Callers that handle a responder session
-    /// (after reading the initiator's first handshake message) MUST
-    /// use `new_with_role(SessionRole::Responder, ...)`.
+    /// Test-only constructor (#17212): production uses
+    /// `new_with_role` with an explicit role. Callers that handle a
+    /// responder session (after reading the initiator's first handshake
+    /// message) MUST use `new_with_role(SessionRole::Responder, ...)`.
+    #[cfg(test)]
     pub(crate) fn new(
         transport: StatelessTransportState,
         local_index: u32,
