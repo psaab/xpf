@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -243,17 +242,18 @@ func TestSyncedImportWorkerRepairIsNotAppliedOrHealthFailure11360(t *testing.T) 
 	}
 	outcomes := []struct {
 		name    string
-		fixture string
+		variant string
 		err     error
 	}{
-		{"pending", "pending", dataplane.ErrSyncedImportRepairPending},
-		{"overflow", "overflow", dataplane.ErrSyncedImportRepairOverflow},
+		{"pending", "AppliedRepairPending", dataplane.ErrSyncedImportRepairPending},
+		{"overflow", "AppliedRepairOverflow", dataplane.ErrSyncedImportRepairOverflow},
 	}
 	for _, operation := range operations {
 		for _, outcome := range outcomes {
 			operation, outcome := operation, outcome
 			t.Run(operation.name+"/"+outcome.name, func(t *testing.T) {
-				response := readRepairWireFixture11360(t, outcome.fixture)
+				row := syncedImportWireRow17116ByVariant(t, outcome.variant)
+				response := ControlResponse{OK: row.OK, Error: row.Error}
 				if response.OK {
 					t.Fatal("repair wire fixture must be non-success")
 				}
@@ -315,30 +315,64 @@ func TestSyncedImportWorkerRepairIsNotAppliedOrHealthFailure11360(t *testing.T) 
 	}
 }
 
+// syncedImportWireRow17116 is one row of the shared Go/Rust wire
+// fixture: the Rust `variant` name, the exact `ControlResponse` bytes it
+// must encode to, and the class Go's classifier must assign it.
+type syncedImportWireRow17116 struct {
+	Variant string `json:"variant"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error"`
+	GoClass string `json:"go_class"`
+}
+
+func readSyncedImportWireRows17116(t *testing.T) []syncedImportWireRow17116 {
+	t.Helper()
+	data, err := os.ReadFile("testdata/synced_import_wire.json")
+	if err != nil {
+		t.Fatalf("read shared Rust/Go synced-import wire fixture: %v", err)
+	}
+	var rows []syncedImportWireRow17116
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatalf("decode shared synced-import wire fixture: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("shared synced-import wire fixture has no rows")
+	}
+	return rows
+}
+
+func syncedImportWireRow17116ByVariant(t *testing.T, variant string) syncedImportWireRow17116 {
+	t.Helper()
+	for _, row := range readSyncedImportWireRows17116(t) {
+		if row.Variant == variant {
+			return row
+		}
+	}
+	t.Fatalf("synced-import wire fixture has no row for variant %q", variant)
+	return syncedImportWireRow17116{}
+}
+
 func readRepairWireFixture11360(t *testing.T, name string) ControlResponse {
 	t.Helper()
-	data, err := os.ReadFile("testdata/synced_import_repair_11360.json")
-	if err != nil {
-		t.Fatalf("read shared Rust/Go repair wire fixture: %v", err)
-	}
-	var fixtures map[string]ControlResponse
-	if err := json.Unmarshal(data, &fixtures); err != nil {
-		t.Fatalf("decode shared repair wire fixtures: %v", err)
-	}
-	response, ok := fixtures[name]
-	if !ok {
+	variant := map[string]string{
+		"pending":  "AppliedRepairPending",
+		"overflow": "AppliedRepairOverflow",
+	}[name]
+	if variant == "" {
 		t.Fatalf("repair wire fixture %q is missing", name)
 	}
-	return response
+	row := syncedImportWireRow17116ByVariant(t, variant)
+	return ControlResponse{OK: row.OK, Error: row.Error}
 }
 
 // A pre-change reader does not recognize the dedicated repair prefix, so it
 // takes the generic unknown-response path. That must fail closed on helper
 // health, but it must never look like the rollback-class semantic refusal.
 func TestLegacyReaderRepairWireFailsClosedWithoutRefusalClassification11360(t *testing.T) {
-	for _, name := range []string{"pending", "overflow"} {
-		t.Run(name, func(t *testing.T) {
-			response := readRepairWireFixture11360(t, name)
+	for _, variant := range []string{"AppliedRepairPending", "AppliedRepairOverflow"} {
+		t.Run(variant, func(t *testing.T) {
+			row := syncedImportWireRow17116ByVariant(t, variant)
+			response := ControlResponse{OK: row.OK, Error: row.Error}
 			if response.OK || strings.HasPrefix(response.Error, syncedImportRefusedPrefix) {
 				t.Fatalf("repair fixture is not a distinct non-success response: %+v", response)
 			}
@@ -853,39 +887,63 @@ func TestExhaustedGateBusyKeepsTakeoverLatched10788(t *testing.T) {
 	}
 }
 
-func TestMirrorWriteFailedWireAgreement10788(t *testing.T) {
-	stripLineComments := func(source string) string {
-		var stripped strings.Builder
-		for _, line := range strings.Split(source, "\n") {
-			if strings.HasPrefix(strings.TrimSpace(line), "//") {
-				stripped.WriteByte('\n')
-				continue
+// TestSyncedImportWireClassifierMatchesRustEncoder17116 drives Go's
+// session-sync classifier over EVERY row of the shared fixture the Rust
+// encoder test pins (`SyncedImportOutcome::wire_error`). The fixture
+// carries the exact Rust wire bytes per variant, so renaming
+// SYNCED_IMPORT_REFUSED_PREFIX or the `gate-busy` reason in Rust (and
+// updating the fixture to the new encoder output, as that test forces)
+// reds this test instead of silently reverting the #10788 gate-busy
+// retry or sending every refusal down the transport-failure path.
+// `Applied` (ok=true) returns before the classifier and is asserted as a
+// nil error; every other row must land in its recorded `go_class`.
+func TestSyncedImportWireClassifierMatchesRustEncoder17116(t *testing.T) {
+	for _, row := range readSyncedImportWireRows17116(t) {
+		row := row
+		t.Run(row.Variant, func(t *testing.T) {
+			m, _ := newScriptedSessionManager10788(t, []ControlResponse{{OK: row.OK, Error: row.Error}})
+			_, err := m.requestSessionSyncResponse(ControlRequest{
+				Type:           "sync_session",
+				SuppressStatus: true,
+				SessionSync:    &SessionSyncRequest{Operation: "upsert"},
+			})
+			switch row.GoClass {
+			case "ok":
+				if !row.OK || err != nil {
+					t.Fatalf("Applied row: ok=%v err=%v, want ok with nil error", row.OK, err)
+				}
+			case "refused":
+				if !errors.Is(err, dataplane.ErrSyncedImportRefused) || errors.Is(err, errSyncedImportGateBusy) {
+					t.Fatalf("row %s error %q classified as %v, want terminal refusal", row.Variant, row.Error, err)
+				}
+			case "gate-busy":
+				if !errors.Is(err, errSyncedImportGateBusy) || errors.Is(err, dataplane.ErrSyncedImportRefused) {
+					t.Fatalf("row %s error %q classified as %v, want retryable gate-busy", row.Variant, row.Error, err)
+				}
+			case "repair-pending":
+				if !errors.Is(err, errSyncedImportRepairPending) {
+					t.Fatalf("row %s error %q classified as %v, want repair-pending", row.Variant, row.Error, err)
+				}
+			case "repair-overflow":
+				if !errors.Is(err, errSyncedImportRepairOverflow) {
+					t.Fatalf("row %s error %q classified as %v, want repair-overflow", row.Variant, row.Error, err)
+				}
+			case "bare":
+				// The bare mirror-write-failed token is deliberately NOT
+				// a known class: it must stay a plain retryable error so
+				// mirror health latches on it, never a refusal/repair.
+				if err == nil || errors.Is(err, dataplane.ErrSyncedImportRefused) ||
+					errors.Is(err, errSyncedImportGateBusy) ||
+					errors.Is(err, errSyncedImportRepairPending) ||
+					errors.Is(err, errSyncedImportRepairOverflow) ||
+					errors.Is(err, dataplane.ErrSyncedImportRejected) ||
+					!strings.Contains(err.Error(), row.Error) {
+					t.Fatalf("row %s error %q classified as %v, want plain retryable error", row.Variant, row.Error, err)
+				}
+			default:
+				t.Fatalf("row %s has unknown go_class %q", row.Variant, row.GoClass)
 			}
-			stripped.WriteString(line)
-			stripped.WriteByte('\n')
-		}
-		return stripped.String()
-	}
-	rustImport, err := os.ReadFile("../../../userspace-dp/src/afxdp/ha/session_import.rs")
-	if err != nil {
-		t.Fatalf("read Rust refusal outcome source: %v", err)
-	}
-	outcome := regexp.MustCompile(
-		`(?m)SyncedImportOutcome::RejectedMirrorPublish\s*=>\s*Some\("([^"]+)"\)`,
-	).FindStringSubmatch(stripLineComments(string(rustImport)))
-	if len(outcome) != 2 || outcome[1] != "mirror-write-failed" {
-		t.Fatalf("Rust refusal outcome = %v, want bare mirror-write-failed", outcome)
-	}
-
-	rustHandler, err := os.ReadFile("../../../userspace-dp/src/server/handlers/sync_session.rs")
-	if err != nil {
-		t.Fatalf("read Rust refusal response handler: %v", err)
-	}
-	bareResponse := regexp.MustCompile(
-		`response\.error\s*=\s*if\s+reason\s*==\s*"mirror-write-failed"\s*\{\s*reason\.to_string\(\)\s*\}\s*else\s*\{\s*format!\("\{SYNCED_IMPORT_REFUSED_PREFIX\}\{reason\}"\)\s*\}`,
-	)
-	if !bareResponse.MatchString(stripLineComments(string(rustHandler))) {
-		t.Fatal("Rust sync handler no longer sends mirror-write-failed bare while prefixing semantic refusals")
+		})
 	}
 }
 

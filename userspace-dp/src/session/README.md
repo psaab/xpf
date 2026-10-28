@@ -1578,7 +1578,7 @@ active node.
 
 #2785 carries the selection across the full sync path:
 
-1. **Open frame** (`event_stream/codec.rs`): `FLAG_LOG_SESSION_INIT` (1<<3) /
+1. **Open frame** (`event_stream/codec/session_sync.rs` `encode_session_record`): `FLAG_LOG_SESSION_INIT` (1<<3) /
    `FLAG_LOG_SESSION_CLOSE` (1<<4) on the existing flags byte, encoded from
    `metadata.log_session_init/close`.
 2. **Go control plane**: decoded into `SessionDeltaInfo`, stamped onto
@@ -2121,8 +2121,8 @@ The ID is consumed at three surfaces:
 1. **Live-session rows** (`afxdp/bpf_map/publish_conntrack`): the v4/v6
    BPF-compat conntrack value's `policy_id` slot, which the Go `show security
    flow session` / REST / gRPC surfaces read as `val.PolicyID`.
-2. **RT_FLOW SESSION_CREATE** (`event_stream/codec.rs`
-   `encode_session_create_rt_flow`): the [44:48] policy_id wire slot, which the
+2. **RT_FLOW SESSION_CREATE** (`event_stream/codec/rt_flow.rs`
+   `EventFrame::encode_session_create_rt_flow`): the [44:48] policy_id wire slot, which the
    Go decoder reads as `PolicyID` for every non-close frame.
 3. **RT_FLOW SESSION_CLOSE** (`encode_session_close_rt_flow`): the *trailing*
    [136:140] slot — NOT [44:48], which #2853 repurposed on a close for the

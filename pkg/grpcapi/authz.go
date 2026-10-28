@@ -240,9 +240,14 @@ const grpcDenialRemedy = " — grant the account the permission with " +
 // authz.Authorize. The alternative — an early return for the unidentified
 // caller — would render a second denial sentence for the same state, which is
 // how the two surfaces start disagreeing about what a denial means.
-// authorizeRPC is the compatibility wrapper used by direct gate tests and
-// stream re-authorization. Unary dispatch uses authorizeRPCContext so the
-// exact admitted principal reaches the handler.
+// authorizeRPC is the compatibility wrapper used by direct gate tests.
+// Unary dispatch and stream first-message dispatch use
+// authorizeRPCContext so the exact admitted principal reaches the
+// handler. Production stream paths never call this with a nil request
+// for a request-dependent method (#17175): the open-time price is
+// authorizeStreamOpenContext, the first-message price is
+// authzRecvStream.RecvMsg, and the #9051 tick re-prices the retained
+// decoded message.
 func (s *Server) authorizeRPC(ctx context.Context, fullMethod string, req any) error {
 	_, err := s.authorizeRPCContext(ctx, fullMethod, req)
 	return err
@@ -374,18 +379,75 @@ func (s *Server) principalUnaryInterceptor(ctx context.Context, req any, info *g
 	return handler(authorizedCtx, req)
 }
 
+// authorizeStreamOpenContext prices a streaming RPC at open, before any
+// message exists (#17175).
+//
+// It runs ONLY the checks that do not need the decoded request: the
+// coarse methodPermission floor (methodPermission(fullMethod, nil) —
+// every streaming method is priced PermView at its table floor) and the
+// identity verdict authz.Authorize. The request-dependent gates
+// (config-target price, command regexes, config regexes, config-read
+// snapshots) are NOT run here for a request-dependent method: with a
+// nil request rpcArgumentForms cannot name Ping/Traceroute/
+// MonitorInterface, so running them denied every regex-bearing class
+// at open — the #17175 regression. They run on the first RecvMsg
+// (authzRecvStream) with the decoded message instead.
+//
+// For a request-independent stream (streamNeedsRequest17175 false,
+// today MonitorPacketDrop) the full decision IS request-independent,
+// so this runs the whole authorizeRPCContext at open with the typed
+// empty request the generated handler will decode — preserving the
+// pre-#17175 open-time verdict exactly.
+func (s *Server) authorizeStreamOpenContext(ctx context.Context, fullMethod string) (context.Context, error) {
+	if !streamNeedsRequest17175(fullMethod) {
+		if req := emptyStreamRequest17175(fullMethod); req != nil {
+			return s.authorizeRPCContext(ctx, fullMethod, req)
+		}
+		// No typed empty request registered: fall through to the
+		// coarse-only price rather than inventing a message.
+	}
+	required, mapped := methodPermission(fullMethod, nil)
+	if !mapped {
+		slog.Error("gRPC method has no authorization mapping; requiring the strictest permission (#5278)",
+			"method", fullMethod, "required", authz.PermissionName(required))
+	}
+	cfg := s.activeConfig()
+	p := principalFromContext(ctx, cfg)
+	if err := authz.Authorize(cfg, p, required); err != nil {
+		return nil, denyRPC(fullMethod, required, p, err)
+	}
+	return context.WithValue(ctx, authorizedPrincipalKey{}, p), nil
+}
+
+// emptyStreamRequest17175 returns the typed empty request for a
+// request-independent streaming method, matching what its generated
+// handler decodes. Only MonitorPacketDrop qualifies today.
+func emptyStreamRequest17175(fullMethod string) any {
+	switch fullMethod {
+	case pb.BpfrxService_MonitorPacketDrop_FullMethodName:
+		return &pb.MonitorPacketDropRequest{}
+	}
+	return nil
+}
+
 // principalStreamInterceptor authorizes a streaming RPC on the primary
-// listener. No message has been received when it runs, so it passes a nil
-// request; the only method whose permission depends on its request is the unary
-// SystemAction, and methodPermission prices a request-less lookup of it at the
-// destructive floor regardless.
+// listener (#17175).
+//
+// No message has been received when it runs. It prices the coarse
+// floor at open (authorizeStreamOpenContext); for a request-dependent
+// method (streamRequestSpec17175) the request-dependent gates run on
+// the first RecvMsg via authzRecvStream, which retains the decoded
+// message for the #9051 re-auth tick. Server-streaming handlers call
+// RecvMsg exactly once (the generated wrapper) before the body, so
+// the full verdict lands before any handler logic runs.
 func (s *Server) principalStreamInterceptor(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-	if err := s.authorizeRPC(ss.Context(), info.FullMethod, nil); err != nil {
+	authorizedCtx, err := s.authorizeStreamOpenContext(ss.Context(), info.FullMethod)
+	if err != nil {
 		return err
 	}
 	// #9051: a stream outlives its verdict. Keep re-checking while it runs, or
 	// a principal demoted mid-stream keeps its feed until it disconnects.
-	return s.authorizeStreamContinuously(srv, ss, info.FullMethod, handler)
+	return s.authorizeStreamContinuously(srv, ss, info.FullMethod, handler, authorizedCtx)
 }
 
 // splitFullMethod splits a gRPC "/service/method" into its two halves.

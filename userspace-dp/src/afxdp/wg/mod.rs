@@ -3,10 +3,14 @@
 //! and the explicit list of architectural choices that diverge from
 //! the prior attempt in PR #1492.
 //!
-//! Scope of this PR: engine, framing, allowed-IPs LPM, helpers,
-//! and unit tests. Hot-path activation in `tx/dispatch.rs` and
-//! `poll_descriptor.rs` is intentionally deferred — see the plan
-//! doc for the rationale.
+//! The engine, framing, allowed-IPs LPM, helpers, and unit tests in
+//! this module are wired into production: the worker decap stage
+//! (`afxdp/poll_stages.rs::stage_wg_decap`) drives
+//! `wg::decap::try_wg_decap_from_frame_with_input_filter`, the transit
+//! encap path lives in `afxdp/frame/wg.rs`, and the per-tunnel control
+//! thread (`afxdp/coordinator/wg_control/`) owns handshake, timer, and
+//! TUN egress via `WgEngine::timer_pass_for_peer` and
+//! `try_encap_capped`. See those call sites for the live gates.
 //!
 //! ### Why this module exists in isolation
 //!
@@ -15,8 +19,8 @@
 //! Keeping the engine free of `pub(in crate::afxdp)` types from the
 //! rest of `afxdp/` means we can unit-test it end-to-end and audit
 //! its security-critical paths without dragging in the dataplane's
-//! global type web. The integration PR will add a thin adapter
-//! layer that bridges the engine API to the dispatch/poll types.
+//! global type web. A thin adapter layer bridges the engine API to
+//! the dispatch/poll types at the call sites named above.
 //!
 //! ### Lock poison policy (#6422)
 //!
@@ -59,19 +63,9 @@
 //! lock is EVIDENCE of a panic that the test should surface rather than
 //! paper over.
 
-// TODO(#1499 r4 / integration PR): tighten this to per-item
-// expectations once tx/dispatch.rs and poll_descriptor.rs consume the
-// engine API. The module-wide expectation exists because the engine
-// surface is intentionally complete-but-unused in this PR; the
-// integration PR will exercise most of it and the remaining dead
-// symbols (e.g. cookie-message helpers) can be listed individually.
-//
-// Re-verified under #1826: removing this suppression still surfaces
-// dead-code warnings (engine surface remains partially unwired even
-// after the coordinator/wg_control/ integration). #17195 converts the
-// module-wide allow to an expiring expectation: it fires if the module
-// ever becomes fully wired.
-#![expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // Most of this module is not yet wired into the hot path.
+// #17212: no module-wide `dead_code` blanket. Production consumes the
+// engine API above, so each remaining test-only or unused item carries
+// its own `#[cfg(test)]` gate or per-item allowance with a reason.
 
 pub(crate) mod allowed_ips;
 // #1865: operator-visible telemetry counters — one `WgCounters` per

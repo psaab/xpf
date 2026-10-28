@@ -1,4 +1,3 @@
-#![expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // status surfaces still consume only part of the producer API
 
 use super::codec::{DataplaneEventKind, DataplaneEventPayload};
 use super::{EventFrame, EventStreamSendError, EventStreamWorkerHandle};
@@ -87,9 +86,6 @@ impl Default for DataplaneEventRateLimitConfig {
 }
 
 impl DataplaneEventRateLimitConfig {
-    fn unlimited(self) -> bool {
-        self.events_per_second == 0
-    }
 
     fn runtime_for(events_per_second: u64, burst: u64) -> DataplaneEventRateLimit {
         if events_per_second == 0 {
@@ -469,7 +465,9 @@ impl EventStreamWorkerHandle {
         }
     }
 
-    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // surfaced through EventStreamSender::stats for now
+    // Surfaced through EventStreamSender::stats for the status path;
+    // this worker-handle accessor itself is test-only (#17212).
+    #[cfg(test)]
     pub(crate) fn dataplane_event_stats(&self) -> DataplaneEventStats {
         self.shared.dataplane_event_counters.snapshot()
     }

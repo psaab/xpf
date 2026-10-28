@@ -1,9 +1,9 @@
-//! Drop-in replacement for xdpilone using libxdp's XSK helpers via C bridge.
+//! AF_XDP socket layer over libxdp's XSK helpers via the C bridge in
+//! `csrc/xsk_bridge.c`.
 //!
-//! Provides the same type names and API surface as xdpilone so that the
-//! rest of the codebase needs minimal changes:
+//! Types consumed by the dataplane:
 //!   - `Umem`, `UmemConfig`, `UmemChunk`, `BufIdx`
-//!   - `IfInfo`, `Socket`, `SocketConfig`, `User`
+//!   - `IfInfo`, `SocketConfig`, `User`
 //!   - `DeviceQueue`, `RingRx`, `RingTx`
 //!   - `ReadRx`, `WriteTx`, `WriteFill`, `ReadComplete`
 //!   - `XdpDesc` (re-export from `xdp` submodule)
@@ -129,6 +129,7 @@ unsafe extern "C" {
     ) -> c_int;
 
     fn bridge_xsk_umem_delete(umem: *mut XskUmemOpaque) -> c_int;
+    #[allow(dead_code)] // test-only bridge accessor via Umem::fd under cfg(test) (#17212)
     fn bridge_xsk_umem_fd(umem: *const XskUmemOpaque) -> c_int;
 
     fn bridge_xsk_socket_create_private(
@@ -175,12 +176,16 @@ unsafe extern "C" {
 
     fn bridge_xsk_socket_delete(xsk: *mut XskSocketOpaque);
     fn bridge_xsk_socket_fd(xsk: *const XskSocketOpaque) -> c_int;
+    #[allow(dead_code)] // test-only bridge seam exercised by xsk_ffi_tests (#17212)
     fn bridge_xsk_libxdp_inhibit_prog_load_flag() -> c_int;
     // #9726: the test-only seam in csrc/xsk_bridge.c; production never calls it.
+    #[allow(dead_code)] // test-only bridge seam exercised by xsk_ffi_tests (#17212)
     fn bridge_xsk_capture_socket_create_for_test(enable: c_int);
+    #[allow(dead_code)] // test-only bridge seam exercised by xsk_ffi_tests (#17212)
     fn bridge_xsk_captured_libxdp_flags() -> u32;
     // #15088: 1 when the last captured shared create received NULL
     // fill/comp (the owner contract), 0 when it received ring structs.
+    #[allow(dead_code)] // test-only bridge seam exercised by xsk_ffi_tests (#17212)
     fn bridge_xsk_captured_shared_fill_is_null() -> c_int;
 
     fn bridge_xsk_ring_prod_reserve(ring: *mut XskRingProd, nb: u32, idx_out: *mut u32) -> u32;
@@ -192,6 +197,7 @@ unsafe extern "C" {
 
     fn bridge_xsk_ring_cons_peek(ring: *mut XskRingCons, nb: u32, idx_out: *mut u32) -> u32;
     fn bridge_xsk_ring_cons_release(ring: *mut XskRingCons, nb: u32);
+    #[allow(dead_code)]
     fn bridge_xsk_ring_cons_cancel(ring: *mut XskRingCons, nb: u32);
     fn bridge_xsk_rx_desc_get(
         rx: *const XskRingCons,
@@ -238,7 +244,7 @@ pub use xdp::XdpDesc;
 
 // ── Error type ───────────────────────────────────────────────────────
 
-/// Error wrapper matching the xdpilone `Errno` interface.
+/// Error wrapper for the libxdp bridge calls.
 pub struct Errno(pub c_int);
 
 impl Errno {
@@ -246,6 +252,7 @@ impl Errno {
         Errno(unsafe { *libc::__errno_location() })
     }
 
+    #[expect(dead_code, reason = "test-only errno accessor (#17212)")]
     pub fn get_raw(&self) -> c_int {
         self.0
     }
@@ -267,7 +274,7 @@ impl core::fmt::Debug for Errno {
 
 // ── BufIdx ───────────────────────────────────────────────────────────
 
-/// Buffer index — transparent wrapper around u32, same as xdpilone.
+/// Buffer index — transparent wrapper around u32.
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone)]
 pub struct BufIdx(pub u32);
@@ -299,6 +306,7 @@ impl Default for UmemConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub struct UmemChunk {
+    #[expect(dead_code, reason = "frame address retained for test assertions (#17212)")]
     pub addr: NonNull<[u8]>,
     pub offset: u64,
 }
@@ -307,8 +315,11 @@ pub struct UmemChunk {
 
 #[derive(Debug, Default, Clone)]
 pub struct SocketConfig {
+    #[expect(dead_code, reason = "xdpilone-era field; bind flags are passed directly to the bridge (#17212)")]
     pub rx_size: Option<core::num::NonZeroU32>,
+    #[expect(dead_code, reason = "xdpilone-era field; bind flags are passed directly to the bridge (#17212)")]
     pub tx_size: Option<core::num::NonZeroU32>,
+    #[expect(dead_code, reason = "xdpilone-era field; bind flags are passed directly to the bridge (#17212)")]
     pub bind_flags: u16,
 }
 
@@ -391,6 +402,7 @@ impl IfInfo {
         self.ifindex
     }
 
+    #[expect(dead_code, reason = "test-only queue accessor (#17212)")]
     pub fn queue_id(&self) -> u32 {
         self.queue_id
     }
@@ -480,6 +492,7 @@ impl Umem {
     }
 
     /// Count frames.
+    #[cfg(test)]
     pub fn len_frames(&self) -> u32 {
         let area_len = self.umem_area.len() as u64;
         let count = area_len / u64::from(self.config.frame_size);
@@ -487,6 +500,7 @@ impl Umem {
     }
 
     /// Get raw FD of the UMEM socket.
+    #[cfg(test)]
     pub fn fd(&self) -> c_int {
         unsafe { bridge_xsk_umem_fd(self.inner) }
     }
@@ -578,29 +592,11 @@ fn test_cons_ring<T: Default + Clone>(capacity: u32) -> Box<XskRingCons> {
     })
 }
 
-// ── Socket (placeholder for API compat) ──────────────────────────────
+// ── User ─────────────────────────────────────────────────────────────
 
-/// In xdpilone, Socket was a raw XDP socket FD with interface info.
-/// With libxdp, socket creation and binding happen in one call
-/// (`xsk_socket__create_shared`), so this is now just a marker.
-pub struct Socket;
-
-impl Socket {
-    /// Unused — provided for API compatibility only.
-    pub fn with_shared(_info: &IfInfo, _umem: &Umem) -> Result<Self, Errno> {
-        Ok(Socket)
-    }
-
-    pub fn new(_info: &IfInfo) -> Result<Self, Errno> {
-        Ok(Socket)
-    }
-}
-
-// ── User (placeholder for API compat) ────────────────────────────────
-
-/// In xdpilone, User owned the rx/tx ring configuration on a socket FD.
-/// With libxdp, `xsk_socket__create_shared` does everything, so User
-/// just holds the resulting socket FD for XSK map registration.
+/// Socket FD holder for XSK map registration. With libxdp,
+/// `xsk_socket__create_shared` does socket creation and binding, so
+/// `User` just holds the resulting socket FD.
 pub struct User {
     fd: c_int,
 }
@@ -832,11 +828,6 @@ impl DeviceQueue {
         Ok(stats)
     }
 
-    /// Bind a User's socket to this device queue.
-    /// With libxdp this is a no-op since binding happened at socket creation.
-    pub fn bind(&self, _interface: &User) -> Result<(), Errno> {
-        Ok(())
-    }
 }
 
 impl Drop for DeviceQueue {
@@ -870,6 +861,7 @@ pub struct XdpStatisticsV2 {
 /// Receive ring backed by libxdp's consumer ring.
 pub struct RingRx {
     ring: Box<XskRingCons>,
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17212: read only under debug-log"))]
     fd: c_int,
 }
 
@@ -932,6 +924,7 @@ impl RingRx {
 
     /// Relaxed read of raw kernel producer/consumer pointers.
     /// Use for diagnostics only — does NOT touch cached ring state.
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17212: read only under debug-log"))]
     pub fn available_relaxed(&self) -> u32 {
         let prod = unsafe { bridge_xsk_ring_cons_producer(&*self.ring) };
         let cons = unsafe { bridge_xsk_ring_cons_consumer(&*self.ring) };
@@ -939,6 +932,7 @@ impl RingRx {
     }
 
     /// Query needs_wakeup on the RX ring (uses the flags field).
+    #[expect(dead_code, reason = "diagnostic read only under the debug-log feature (#17212)")]
     pub fn needs_wakeup(&self) -> bool {
         // RX is a consumer ring; the flags field indicates kernel needs wakeup.
         let flags_ptr = self.ring.flags;
@@ -948,6 +942,7 @@ impl RingRx {
         (unsafe { *flags_ptr } & 1) != 0
     }
 
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17212: read only under debug-log"))]
     pub fn as_raw_fd(&self) -> c_int {
         self.fd
     }
@@ -1287,17 +1282,11 @@ impl Drop for ReadComplete<'_> {
     }
 }
 
-// ── Unified creation: create_xsk_binding ─────────────────────────────
+// ── Unified creation ─────────────────────────────────────────────────
 //
-// This replaces the multi-step xdpilone flow:
-//   1. Socket::with_shared(info, umem)
-//   2. umem.fq_cq(&sock)
-//   3. umem.rx_tx(&sock, &config)
-//   4. user.map_rx() / user.map_tx()
-//   5. umem.bind(&user)
-//
-// With libxdp, xsk_socket__create or xsk_socket__create_shared does all of
-// this in one call. The private and shared entry points stay explicit because
+// With libxdp, xsk_socket__create or xsk_socket__create_shared does
+// socket creation, UMEM registration, ring setup, and bind in one
+// call. The private and shared entry points stay explicit because
 // their fill/completion ring ownership differs.
 
 /// Create an XSK socket bound to `ifname:queue_id`, returning all ring
@@ -1395,20 +1384,7 @@ pub(crate) unsafe fn create_xsk_binding_shared_owner(
     )
 }
 
-/// Backward-compatible private-UMEM constructor.
-///
-/// # Safety
-/// The returned `DeviceQueue` must be dropped before `umem`; see
-/// [`create_xsk_binding_private`].
-#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
-pub(crate) unsafe fn create_xsk_binding(
-    umem: &mut Umem,
-    info: &IfInfo,
-    ring_entries: u32,
-    bind_flags: u16,
-) -> Result<(User, RingRx, RingTx, DeviceQueue), Errno> {
-    unsafe { create_xsk_binding_private(umem, info, ring_entries, bind_flags) }
-}
+
 
 fn create_xsk_binding_impl(
     mut umem: Option<&mut Umem>,

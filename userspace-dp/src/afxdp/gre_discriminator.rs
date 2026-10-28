@@ -23,9 +23,7 @@
 //! calls this yet"; that has not been true since `stage_parse_flow_and_learn`
 //! grew `None if worker_ctx.forwarding.gre_acceleration =>
 //! gre_keyed_session_flow(..)` (`afxdp/poll_stages.rs`), which is the read this
-//! module was staged for. The `#![expect(dead_code, reason = "#17195: …")]`
-//! (#17195) stays because the module still carries classification helpers
-//! the single call site does not reach; it fires when that stops being true.
+//! module was staged for.
 //!
 //! What this classification now feeds, beyond the local key: the discriminator
 //! rides the HA session-sync wire (#7188, `session/discriminator.rs`
@@ -33,7 +31,6 @@
 //! identity error — it is the identity a peer imports after a failover. See
 //! `docs/session-sync-architecture.md`, "Tunnel Session-Identity
 //! Discriminator".
-#![expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 
 use super::gre::{GRE_FLAG_CHECKSUM, GRE_FLAG_KEY, GRE_UNSUPPORTED_LEGACY_FLAGS};
 use super::types::{SessionFlow, UserspaceDpMeta};
@@ -926,6 +923,7 @@ pub(in crate::afxdp) fn pptp_call_id(
 /// counter is what makes the condition visible instead of silent; it is
 /// documented as expected non-zero during startup and after restart, and until
 /// this function existed it read zero forever because nothing called it.
+#[cfg(test)]
 pub(in crate::afxdp) fn pptp_data_session_flow(
     frame: &[u8],
     meta: UserspaceDpMeta,

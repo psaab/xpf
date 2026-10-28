@@ -92,3 +92,6 @@ impl EventFrame {
 #[cfg(test)]
 #[path = "codec_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod goldens;

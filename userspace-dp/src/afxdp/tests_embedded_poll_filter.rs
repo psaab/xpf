@@ -15156,15 +15156,16 @@ fn session_miss_syn_ack_flood_alarm_without_drop_tallies_zone_alarm_12873() {
     flush_recorded_flood_counters(
         &forwarding.flood_counter_store,
         &forwarding.flood_counter_slot_map,
+        &forwarding.flood_counter_caches,
     );
     assert_eq!(
-        forwarding.flood_counter_store.alarm_zones_for_test(),
+        crate::afxdp::flood_counters::flood_alarm_zones_for_test(&forwarding.flood_counter_store),
         vec![(TEST_LAN_ZONE_ID, (1, 0, 0))],
         "audit-mode session-miss SYN-flood must tally exactly one per-zone \
          syn_flood ALARM for the ingress zone (#12873)"
     );
     assert!(
-        forwarding.flood_counter_store.snapshot().is_empty(),
+        crate::afxdp::flood_counters::flood_counter_snapshot(&forwarding.flood_counter_store).is_empty(),
         "an alarmed (permitted) packet must not be counted as a flood DROP"
     );
 }
