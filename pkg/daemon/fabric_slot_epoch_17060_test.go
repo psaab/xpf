@@ -106,11 +106,11 @@ func TestStopClusterCommsClearsFabricSlots17060(t *testing.T) {
 	// The constraint map has no exported getter; a cleared constraint is
 	// proven behaviourally by TestFabricConstraintClearedOnStop17060.
 
-	// Restart the real epoch-owned populate loops after stop. Hold each loop
-	// in its first refresh after it publishes its configuration, so this
-	// assertion observes state freshly written by the new epoch rather than
-	// state left over from teardown. The link seam errors before any netlink
-	// access or probe transmission.
+	// Restart through the real fabric-forwarding start helper. The populate
+	// loops publish slot configuration before their initial probe; hold that
+	// probe lookup so the assertion sees state freshly written by this epoch.
+	// The hermetic link seam fails before netlink access or probe transmission,
+	// so this cell asserts config repopulation, not the populated readiness latch.
 	refreshEntered := make(chan string, 2)
 	releaseRefresh := make(chan struct{})
 	var releaseOnce sync.Once
@@ -175,7 +175,7 @@ func TestStopClusterCommsClearsFabricSlots17060(t *testing.T) {
 		gotIface0, gotOverlay0, gotPeer0 := d.fabricIface, d.fabricOverlay, d.fabricPeerIP.String()
 		gotIface1, gotOverlay1, gotPeer1 := d.fabricIface1, d.fabricOverlay1, d.fabricPeerIP1.String()
 		d.fabricMu.RUnlock()
-		t.Fatalf("new epoch did not repopulate both fabric slots: entered=%v restarted=%v got=(%q,%q,%s)/(%q,%q,%s) want=(%q,%q,%s)/(%q,%q,%s) (#17060)",
+		t.Fatalf("new epoch did not republish both fabric slot configs: entered=%v restarted=%v got=(%q,%q,%s)/(%q,%q,%s) want=(%q,%q,%s)/(%q,%q,%s) (#17060)",
 			entered, restarted, gotIface0, gotOverlay0, gotPeer0, gotIface1, gotOverlay1, gotPeer1,
 			wantIface0, wantOverlay0, cc.FabricPeerAddress, wantIface1, wantOverlay1, cc.Fabric1PeerAddress)
 	}
