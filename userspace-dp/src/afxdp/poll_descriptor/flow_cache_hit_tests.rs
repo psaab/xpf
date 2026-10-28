@@ -516,8 +516,8 @@ fn nat_translated_entry() -> FlowCacheEntry {
     entry.decision.nat = nat;
     entry.descriptor.rewrite_src_ip = nat.rewrite_src;
     entry.descriptor.rewrite_dst_ip = nat.rewrite_dst;
-    entry.descriptor.ip_csum_delta = crate::afxdp::checksum::compute_ip_csum_delta(&flow, &nat);
-    entry.descriptor.l4_csum_delta = crate::afxdp::checksum::compute_l4_csum_delta(&flow, &nat);
+    entry.descriptor.ip_csum_delta = crate::afxdp::frame::compute_ip_csum_delta(&flow, &nat);
+    entry.descriptor.l4_csum_delta = crate::afxdp::frame::compute_l4_csum_delta(&flow, &nat);
     entry
 }
 

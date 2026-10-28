@@ -44,11 +44,10 @@ use crate::afxdp::{MmapArea, RewriteDescriptor, UserspaceDpMeta, XdpDesc};
 /// ACK-only TCP + UDP). Does NOT handle: ICMP identifier repair,
 /// NAT64 (header-size change — always falls back to the generic frame
 /// builder). NPTv6 IS handled (#2652): it is a same-family IPv6 address
-/// byte-rewrite that is checksum-neutral by RFC 6296, so the IPv6 arm
-/// reproduces the slow path exactly — it writes the new address(es) and,
-/// because the descriptor's `l4_csum_delta` is 0 for NPTv6
-/// (`compute_l4_csum_delta` short-circuits on `nat.nptv6`), it leaves the
-/// L4 checksum untouched, matching `apply_nat_ipv6`'s `skip_l4_csum`.
+/// rewrite whose checksum rule is shared with the descriptor-delta builder.
+/// A pure single-sided NPTv6 rewrite leaves the L4 checksum untouched;
+/// when it composes with DNAT and both address slots are present, the
+/// DNAT-side delta is folded instead of being blanket-skipped.
 #[inline]
 pub(in crate::afxdp) fn apply_rewrite_descriptor(
     area: &MmapArea,
