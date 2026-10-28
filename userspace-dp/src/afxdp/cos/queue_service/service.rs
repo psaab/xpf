@@ -35,9 +35,27 @@ pub(super) fn service_exact_local_queue_direct(
         );
     }
     if binding.tx_pipeline.free_tx_frames.is_empty() {
-        let _ = reap_tx_completions(binding, shared_recycles);
+        let _ = reap_tx_completions_fields(
+            binding.slot,
+            binding.ifindex,
+            binding.queue_id,
+            (binding.umem.total_frames() as u64) * (crate::afxdp::UMEM_FRAME_SIZE as u64),
+            &mut binding.xsk,
+            &mut binding.telemetry,
+            &mut binding.scratch,
+            &mut binding.tx_pipeline,
+            &binding.live,
+            shared_recycles,
+            &mut binding.timers,
+        );
     }
-    let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
+    let queue_dscp_rewrite = cos_queue_dscp_rewrite(
+        binding
+            .cos
+            .cos_interfaces
+            .get(&root_ifindex)
+            .and_then(|root| root.queues.get(queue_idx)),
+    );
     binding.scratch.scratch_exact_local_tx.clear();
     let root_budget = binding
         .cos
@@ -76,9 +94,14 @@ pub(super) fn service_exact_local_queue_direct(
                 &mut binding.scratch.scratch_exact_local_tx,
             );
             if dropped_bytes > 0 {
-                subtract_direct_cos_queue_bytes(binding, root_ifindex, queue_idx, dropped_bytes);
+                subtract_direct_cos_queue_bytes(
+                    &mut binding.cos.cos_interfaces,
+                    root_ifindex,
+                    queue_idx,
+                    dropped_bytes,
+                );
             } else {
-                refresh_cos_interface_activity(binding, root_ifindex);
+                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: the scratch-build fell through `ExactCoSScratchBuild::Drop`
@@ -93,9 +116,14 @@ pub(super) fn service_exact_local_queue_direct(
         }
         ExactCoSScratchBuild::MirrorTxFrameReserve { dropped_bytes } => {
             if dropped_bytes > 0 {
-                subtract_direct_cos_queue_bytes(binding, root_ifindex, queue_idx, dropped_bytes);
+                subtract_direct_cos_queue_bytes(
+                    &mut binding.cos.cos_interfaces,
+                    root_ifindex,
+                    queue_idx,
+                    dropped_bytes,
+                );
             } else {
-                refresh_cos_interface_activity(binding, root_ifindex);
+                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
             binding
                 .live
@@ -105,7 +133,15 @@ pub(super) fn service_exact_local_queue_direct(
         }
     }
     if binding.scratch.scratch_exact_local_tx.is_empty() {
-        maybe_wake_tx(binding, true, now_ns);
+        maybe_wake_tx_fields(
+            &binding.live,
+            &binding.xsk,
+            &mut binding.timers,
+            &mut binding.telemetry,
+            &mut binding.tx_pipeline,
+            true,
+            now_ns,
+        );
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -154,18 +190,31 @@ pub(super) fn service_exact_local_queue_direct(
         ts_submit,
     );
     // #16242: descriptors-per-commit sample for this ring commit.
-    crate::afxdp::tx::record_tx_commit(binding, inserted);
+    crate::afxdp::tx::record_tx_commit_fields(&binding.live, &mut binding.tx_pipeline, inserted);
 
     if inserted == 0 {
         let dropped = binding.scratch.scratch_exact_local_tx.len() as u64;
         binding.telemetry.dbg_tx_ring_full += 1;
-        count_tx_ring_full_submit_stall(binding, root_ifindex, queue_idx, dropped);
-        maybe_wake_tx(binding, true, now_ns);
+        count_tx_ring_full_submit_stall_on_interfaces(
+            &mut binding.cos.cos_interfaces,
+            root_ifindex,
+            queue_idx,
+            dropped,
+        );
+        maybe_wake_tx_fields(
+            &binding.live,
+            &binding.xsk,
+            &mut binding.timers,
+            &mut binding.telemetry,
+            &mut binding.tx_pipeline,
+            true,
+            now_ns,
+        );
         release_exact_local_scratch_frames(
             &mut binding.tx_pipeline.free_tx_frames,
             &mut binding.scratch.scratch_exact_local_tx,
         );
-        refresh_cos_interface_activity(binding, root_ifindex);
+        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -176,12 +225,22 @@ pub(super) fn service_exact_local_queue_direct(
     binding.tx_pipeline.outstanding_tx =
         binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
+    let Some(queue) = binding
+        .cos
+        .cos_interfaces
+        .get_mut(&root_ifindex)
+        .and_then(|root| root.queues.get_mut(queue_idx))
+    else {
+        // #17186: queue resolved at build above; disappearance here is
+        // unreachable (single &mut BindingWorker per pass). The kernel
+        // already owns the `inserted` prefix, so roll the gauge back
+        // rather than leak it, and leave the scratch for the next pass.
+        binding.tx_pipeline.outstanding_tx =
+            binding.tx_pipeline.outstanding_tx.saturating_sub(inserted);
+        return ExactServiceOutcome::NoProgress;
+    };
     let (sent_packets, sent_bytes) = settle_exact_local_fifo_submission(
-        binding
-            .cos
-            .cos_interfaces
-            .get_mut(&root_ifindex)
-            .and_then(|root| root.queues.get_mut(queue_idx)),
+        queue,
         &mut binding.tx_pipeline.free_tx_frames,
         &mut binding.scratch.scratch_exact_local_tx,
         &mut binding.tx_pipeline.in_flight_untracked_tx,
@@ -197,8 +256,23 @@ pub(super) fn service_exact_local_queue_direct(
             .get(&root_ifindex)
             .and_then(|root| root.queues.get(queue_idx)),
     );
-    apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
-    maybe_wake_tx(binding, true, now_ns);
+    apply_direct_exact_send_result_fields(
+        &binding.live,
+        &mut binding.cos,
+        root_ifindex,
+        queue_idx,
+        sent_packets,
+        sent_bytes,
+    );
+    maybe_wake_tx_fields(
+        &binding.live,
+        &binding.xsk,
+        &mut binding.timers,
+        &mut binding.telemetry,
+        &mut binding.tx_pipeline,
+        true,
+        now_ns,
+    );
     (sent_packets > 0 || sent_bytes > 0).into()
 }
 
@@ -212,9 +286,27 @@ fn service_exact_local_queue_direct_flow_fair(
     shared_recycles: &mut Vec<(u32, u64)>,
 ) -> ExactServiceOutcome {
     if binding.tx_pipeline.free_tx_frames.is_empty() {
-        let _ = reap_tx_completions(binding, shared_recycles);
+        let _ = reap_tx_completions_fields(
+            binding.slot,
+            binding.ifindex,
+            binding.queue_id,
+            (binding.umem.total_frames() as u64) * (crate::afxdp::UMEM_FRAME_SIZE as u64),
+            &mut binding.xsk,
+            &mut binding.telemetry,
+            &mut binding.scratch,
+            &mut binding.tx_pipeline,
+            &binding.live,
+            shared_recycles,
+            &mut binding.timers,
+        );
     }
-    let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
+    let queue_dscp_rewrite = cos_queue_dscp_rewrite(
+        binding
+            .cos
+            .cos_interfaces
+            .get(&root_ifindex)
+            .and_then(|root| root.queues.get(queue_idx)),
+    );
     binding.scratch.scratch_local_tx.clear();
     let root_budget = binding
         .cos
@@ -248,19 +340,28 @@ fn service_exact_local_queue_direct_flow_fair(
             error,
             dropped_bytes,
         } => {
+            let Some(queue) = binding
+                .cos
+                .cos_interfaces
+                .get_mut(&root_ifindex)
+                .and_then(|root| root.queues.get_mut(queue_idx))
+            else {
+                return ExactServiceOutcome::NoProgress;
+            };
             restore_exact_local_scratch_to_queue_head_flow_fair(
-                binding
-                    .cos
-                    .cos_interfaces
-                    .get_mut(&root_ifindex)
-                    .and_then(|root| root.queues.get_mut(queue_idx)),
+                queue,
                 &mut binding.tx_pipeline.free_tx_frames,
                 &mut binding.scratch.scratch_local_tx,
             );
             if dropped_bytes > 0 {
-                subtract_direct_cos_queue_bytes(binding, root_ifindex, queue_idx, dropped_bytes);
+                subtract_direct_cos_queue_bytes(
+                    &mut binding.cos.cos_interfaces,
+                    root_ifindex,
+                    queue_idx,
+                    dropped_bytes,
+                );
             } else {
-                refresh_cos_interface_activity(binding, root_ifindex);
+                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: the scratch-build fell through `ExactCoSScratchBuild::Drop`
@@ -275,9 +376,14 @@ fn service_exact_local_queue_direct_flow_fair(
         }
         ExactCoSScratchBuild::MirrorTxFrameReserve { dropped_bytes } => {
             if dropped_bytes > 0 {
-                subtract_direct_cos_queue_bytes(binding, root_ifindex, queue_idx, dropped_bytes);
+                subtract_direct_cos_queue_bytes(
+                    &mut binding.cos.cos_interfaces,
+                    root_ifindex,
+                    queue_idx,
+                    dropped_bytes,
+                );
             } else {
-                refresh_cos_interface_activity(binding, root_ifindex);
+                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
             binding
                 .live
@@ -287,7 +393,15 @@ fn service_exact_local_queue_direct_flow_fair(
         }
     }
     if binding.scratch.scratch_local_tx.is_empty() {
-        maybe_wake_tx(binding, true, now_ns);
+        maybe_wake_tx_fields(
+            &binding.live,
+            &binding.xsk,
+            &mut binding.timers,
+            &mut binding.telemetry,
+            &mut binding.tx_pipeline,
+            true,
+            now_ns,
+        );
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -329,23 +443,40 @@ fn service_exact_local_queue_direct_flow_fair(
         ts_submit,
     );
     // #16242: descriptors-per-commit sample for this ring commit.
-    crate::afxdp::tx::record_tx_commit(binding, inserted);
+    crate::afxdp::tx::record_tx_commit_fields(&binding.live, &mut binding.tx_pipeline, inserted);
 
     if inserted == 0 {
         let dropped = binding.scratch.scratch_local_tx.len() as u64;
         binding.telemetry.dbg_tx_ring_full += 1;
-        count_tx_ring_full_submit_stall(binding, root_ifindex, queue_idx, dropped);
-        maybe_wake_tx(binding, true, now_ns);
+        count_tx_ring_full_submit_stall_on_interfaces(
+            &mut binding.cos.cos_interfaces,
+            root_ifindex,
+            queue_idx,
+            dropped,
+        );
+        maybe_wake_tx_fields(
+            &binding.live,
+            &binding.xsk,
+            &mut binding.timers,
+            &mut binding.telemetry,
+            &mut binding.tx_pipeline,
+            true,
+            now_ns,
+        );
+        let Some(queue) = binding
+            .cos
+            .cos_interfaces
+            .get_mut(&root_ifindex)
+            .and_then(|root| root.queues.get_mut(queue_idx))
+        else {
+            return ExactServiceOutcome::NoProgress;
+        };
         restore_exact_local_scratch_to_queue_head_flow_fair(
-            binding
-                .cos
-                .cos_interfaces
-                .get_mut(&root_ifindex)
-                .and_then(|root| root.queues.get_mut(queue_idx)),
+            queue,
             &mut binding.tx_pipeline.free_tx_frames,
             &mut binding.scratch.scratch_local_tx,
         );
-        refresh_cos_interface_activity(binding, root_ifindex);
+        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -356,12 +487,19 @@ fn service_exact_local_queue_direct_flow_fair(
     binding.tx_pipeline.outstanding_tx =
         binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
+    let Some(queue) = binding
+        .cos
+        .cos_interfaces
+        .get_mut(&root_ifindex)
+        .and_then(|root| root.queues.get_mut(queue_idx))
+    else {
+        // #17186: unreachable queue disappearance (see FIFO settle above).
+        binding.tx_pipeline.outstanding_tx =
+            binding.tx_pipeline.outstanding_tx.saturating_sub(inserted);
+        return ExactServiceOutcome::NoProgress;
+    };
     let (sent_packets, sent_bytes) = settle_exact_local_scratch_submission_flow_fair(
-        binding
-            .cos
-            .cos_interfaces
-            .get_mut(&root_ifindex)
-            .and_then(|root| root.queues.get_mut(queue_idx)),
+        queue,
         &mut binding.tx_pipeline.free_tx_frames,
         &mut binding.scratch.scratch_local_tx,
         &mut binding.tx_pipeline.in_flight_untracked_tx,
@@ -379,8 +517,23 @@ fn service_exact_local_queue_direct_flow_fair(
             .get(&root_ifindex)
             .and_then(|root| root.queues.get(queue_idx)),
     );
-    apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
-    maybe_wake_tx(binding, true, now_ns);
+    apply_direct_exact_send_result_fields(
+        &binding.live,
+        &mut binding.cos,
+        root_ifindex,
+        queue_idx,
+        sent_packets,
+        sent_bytes,
+    );
+    maybe_wake_tx_fields(
+        &binding.live,
+        &binding.xsk,
+        &mut binding.timers,
+        &mut binding.telemetry,
+        &mut binding.tx_pipeline,
+        true,
+        now_ns,
+    );
     (sent_packets > 0 || sent_bytes > 0).into()
 }
 
@@ -410,7 +563,13 @@ pub(super) fn service_exact_prepared_queue_direct(
             shared_recycles,
         );
     }
-    let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
+    let queue_dscp_rewrite = cos_queue_dscp_rewrite(
+        binding
+            .cos
+            .cos_interfaces
+            .get(&root_ifindex)
+            .and_then(|root| root.queues.get(queue_idx)),
+    );
     binding.scratch.scratch_exact_prepared_tx.clear();
     let root_budget = binding
         .cos
@@ -449,9 +608,14 @@ pub(super) fn service_exact_prepared_queue_direct(
         } => {
             release_exact_prepared_scratch(&mut binding.scratch.scratch_exact_prepared_tx);
             if dropped_bytes > 0 {
-                subtract_direct_cos_queue_bytes(binding, root_ifindex, queue_idx, dropped_bytes);
+                subtract_direct_cos_queue_bytes(
+                    &mut binding.cos.cos_interfaces,
+                    root_ifindex,
+                    queue_idx,
+                    dropped_bytes,
+                );
             } else {
-                refresh_cos_interface_activity(binding, root_ifindex);
+                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: the scratch-build fell through `ExactCoSScratchBuild::Drop`
@@ -521,15 +685,28 @@ pub(super) fn service_exact_prepared_queue_direct(
         ts_submit,
     );
     // #16242: descriptors-per-commit sample for this ring commit.
-    crate::afxdp::tx::record_tx_commit(binding, inserted);
+    crate::afxdp::tx::record_tx_commit_fields(&binding.live, &mut binding.tx_pipeline, inserted);
 
     if inserted == 0 {
         let dropped = binding.scratch.scratch_exact_prepared_tx.len() as u64;
         binding.telemetry.dbg_tx_ring_full += 1;
-        count_tx_ring_full_submit_stall(binding, root_ifindex, queue_idx, dropped);
-        maybe_wake_tx(binding, true, now_ns);
+        count_tx_ring_full_submit_stall_on_interfaces(
+            &mut binding.cos.cos_interfaces,
+            root_ifindex,
+            queue_idx,
+            dropped,
+        );
+        maybe_wake_tx_fields(
+            &binding.live,
+            &binding.xsk,
+            &mut binding.timers,
+            &mut binding.telemetry,
+            &mut binding.tx_pipeline,
+            true,
+            now_ns,
+        );
         release_exact_prepared_scratch(&mut binding.scratch.scratch_exact_prepared_tx);
-        refresh_cos_interface_activity(binding, root_ifindex);
+        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -540,12 +717,19 @@ pub(super) fn service_exact_prepared_queue_direct(
     binding.tx_pipeline.outstanding_tx =
         binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
+    let Some(queue) = binding
+        .cos
+        .cos_interfaces
+        .get_mut(&root_ifindex)
+        .and_then(|root| root.queues.get_mut(queue_idx))
+    else {
+        // #17186: unreachable queue disappearance (see FIFO settle above).
+        binding.tx_pipeline.outstanding_tx =
+            binding.tx_pipeline.outstanding_tx.saturating_sub(inserted);
+        return ExactServiceOutcome::NoProgress;
+    };
     let (sent_packets, sent_bytes) = settle_exact_prepared_fifo_submission(
-        binding
-            .cos
-            .cos_interfaces
-            .get_mut(&root_ifindex)
-            .and_then(|root| root.queues.get_mut(queue_idx)),
+        queue,
         &mut binding.scratch.scratch_exact_prepared_tx,
         &mut binding.tx_pipeline.in_flight_prepared_recycles,
         &mut binding.tx_pipeline.in_flight_untracked_tx,
@@ -560,8 +744,23 @@ pub(super) fn service_exact_prepared_queue_direct(
             .get(&root_ifindex)
             .and_then(|root| root.queues.get(queue_idx)),
     );
-    apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
-    maybe_wake_tx(binding, true, now_ns);
+    apply_direct_exact_send_result_fields(
+        &binding.live,
+        &mut binding.cos,
+        root_ifindex,
+        queue_idx,
+        sent_packets,
+        sent_bytes,
+    );
+    maybe_wake_tx_fields(
+        &binding.live,
+        &binding.xsk,
+        &mut binding.timers,
+        &mut binding.telemetry,
+        &mut binding.tx_pipeline,
+        true,
+        now_ns,
+    );
     (sent_packets > 0 || sent_bytes > 0).into()
 }
 
@@ -574,7 +773,13 @@ fn service_exact_prepared_queue_direct_flow_fair(
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
 ) -> ExactServiceOutcome {
-    let queue_dscp_rewrite = cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx);
+    let queue_dscp_rewrite = cos_queue_dscp_rewrite(
+        binding
+            .cos
+            .cos_interfaces
+            .get(&root_ifindex)
+            .and_then(|root| root.queues.get(queue_idx)),
+    );
     binding.scratch.scratch_prepared_tx.clear();
     let root_budget = binding
         .cos
@@ -611,18 +816,27 @@ fn service_exact_prepared_queue_direct_flow_fair(
             error,
             dropped_bytes,
         } => {
+            let Some(queue) = binding
+                .cos
+                .cos_interfaces
+                .get_mut(&root_ifindex)
+                .and_then(|root| root.queues.get_mut(queue_idx))
+            else {
+                return ExactServiceOutcome::NoProgress;
+            };
             restore_exact_prepared_scratch_to_queue_head_flow_fair(
-                binding
-                    .cos
-                    .cos_interfaces
-                    .get_mut(&root_ifindex)
-                    .and_then(|root| root.queues.get_mut(queue_idx)),
+                queue,
                 &mut binding.scratch.scratch_prepared_tx,
             );
             if dropped_bytes > 0 {
-                subtract_direct_cos_queue_bytes(binding, root_ifindex, queue_idx, dropped_bytes);
+                subtract_direct_cos_queue_bytes(
+                    &mut binding.cos.cos_interfaces,
+                    root_ifindex,
+                    queue_idx,
+                    dropped_bytes,
+                );
             } else {
-                refresh_cos_interface_activity(binding, root_ifindex);
+                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: the scratch-build fell through `ExactCoSScratchBuild::Drop`
@@ -690,22 +904,39 @@ fn service_exact_prepared_queue_direct_flow_fair(
         ts_submit,
     );
     // #16242: descriptors-per-commit sample for this ring commit.
-    crate::afxdp::tx::record_tx_commit(binding, inserted);
+    crate::afxdp::tx::record_tx_commit_fields(&binding.live, &mut binding.tx_pipeline, inserted);
 
     if inserted == 0 {
         let dropped = binding.scratch.scratch_prepared_tx.len() as u64;
         binding.telemetry.dbg_tx_ring_full += 1;
-        count_tx_ring_full_submit_stall(binding, root_ifindex, queue_idx, dropped);
-        maybe_wake_tx(binding, true, now_ns);
+        count_tx_ring_full_submit_stall_on_interfaces(
+            &mut binding.cos.cos_interfaces,
+            root_ifindex,
+            queue_idx,
+            dropped,
+        );
+        maybe_wake_tx_fields(
+            &binding.live,
+            &binding.xsk,
+            &mut binding.timers,
+            &mut binding.telemetry,
+            &mut binding.tx_pipeline,
+            true,
+            now_ns,
+        );
+        let Some(queue) = binding
+            .cos
+            .cos_interfaces
+            .get_mut(&root_ifindex)
+            .and_then(|root| root.queues.get_mut(queue_idx))
+        else {
+            return ExactServiceOutcome::NoProgress;
+        };
         restore_exact_prepared_scratch_to_queue_head_flow_fair(
-            binding
-                .cos
-                .cos_interfaces
-                .get_mut(&root_ifindex)
-                .and_then(|root| root.queues.get_mut(queue_idx)),
+            queue,
             &mut binding.scratch.scratch_prepared_tx,
         );
-        refresh_cos_interface_activity(binding, root_ifindex);
+        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -716,12 +947,19 @@ fn service_exact_prepared_queue_direct_flow_fair(
     binding.tx_pipeline.outstanding_tx =
         binding.tx_pipeline.outstanding_tx.saturating_add(inserted);
 
+    let Some(queue) = binding
+        .cos
+        .cos_interfaces
+        .get_mut(&root_ifindex)
+        .and_then(|root| root.queues.get_mut(queue_idx))
+    else {
+        // #17186: unreachable queue disappearance (see FIFO settle above).
+        binding.tx_pipeline.outstanding_tx =
+            binding.tx_pipeline.outstanding_tx.saturating_sub(inserted);
+        return ExactServiceOutcome::NoProgress;
+    };
     let (sent_packets, sent_bytes) = settle_exact_prepared_scratch_submission_flow_fair(
-        binding
-            .cos
-            .cos_interfaces
-            .get_mut(&root_ifindex)
-            .and_then(|root| root.queues.get_mut(queue_idx)),
+        queue,
         &mut binding.scratch.scratch_prepared_tx,
         &mut binding.tx_pipeline.in_flight_prepared_recycles,
         &mut binding.tx_pipeline.in_flight_untracked_tx,
@@ -738,7 +976,22 @@ fn service_exact_prepared_queue_direct_flow_fair(
             .get(&root_ifindex)
             .and_then(|root| root.queues.get(queue_idx)),
     );
-    apply_direct_exact_send_result(binding, root_ifindex, queue_idx, sent_packets, sent_bytes);
-    maybe_wake_tx(binding, true, now_ns);
+    apply_direct_exact_send_result_fields(
+        &binding.live,
+        &mut binding.cos,
+        root_ifindex,
+        queue_idx,
+        sent_packets,
+        sent_bytes,
+    );
+    maybe_wake_tx_fields(
+        &binding.live,
+        &binding.xsk,
+        &mut binding.timers,
+        &mut binding.telemetry,
+        &mut binding.tx_pipeline,
+        true,
+        now_ns,
+    );
     (sent_packets > 0 || sent_bytes > 0).into()
 }

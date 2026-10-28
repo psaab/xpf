@@ -17,22 +17,10 @@ pub(in crate::afxdp) fn release_exact_local_scratch_frames(
 }
 
 pub(super) fn restore_exact_local_scratch_to_queue_head_flow_fair(
-    queue: Option<&mut CoSQueueRuntime>,
+    queue: &mut CoSQueueRuntime,
     free_tx_frames: &mut VecDeque<u64>,
     scratch_local_tx: &mut Vec<(u64, TxRequest)>,
 ) {
-    let Some(queue) = queue else {
-        // #hb166 T-7: the queue was torn down mid-drain, but each scratch
-        // entry still owns a `free_tx_frames` UMEM offset popped at
-        // scratch-build time. Recycle them before dropping — the pre-fix
-        // bare `.clear()` leaked every offset (an uncounted UMEM-frame
-        // leak), unlike the FIFO sibling `settle_exact_local_fifo_submission`
-        // (via `release_exact_local_scratch_frames`).
-        while let Some((offset, _req)) = scratch_local_tx.pop() {
-            free_tx_frames.push_front(offset);
-        }
-        return;
-    };
     while let Some((offset, req)) = scratch_local_tx.pop() {
         free_tx_frames.push_front(offset);
         cos_queue_push_front(queue, CoSPendingTxItem::Local(req));
@@ -46,29 +34,21 @@ pub(in crate::afxdp) fn release_exact_prepared_scratch(
 }
 
 pub(super) fn restore_exact_prepared_scratch_to_queue_head_flow_fair(
-    queue: Option<&mut CoSQueueRuntime>,
+    queue: &mut CoSQueueRuntime,
     scratch_prepared_tx: &mut Vec<PreparedTxRequest>,
 ) {
-    let Some(queue) = queue else {
-        scratch_prepared_tx.clear();
-        return;
-    };
     while let Some(req) = scratch_prepared_tx.pop() {
         cos_queue_push_front(queue, CoSPendingTxItem::Prepared(req));
     }
 }
 
 pub(in crate::afxdp) fn settle_exact_local_fifo_submission(
-    queue: Option<&mut CoSQueueRuntime>,
+    queue: &mut CoSQueueRuntime,
     free_tx_frames: &mut VecDeque<u64>,
     scratch_local_tx: &mut Vec<ExactLocalScratchTxRequest>,
     in_flight_untracked_tx: &mut FastSet<u64>,
     inserted: usize,
 ) -> (u64, u64) {
-    let Some(queue) = queue else {
-        release_exact_local_scratch_frames(free_tx_frames, scratch_local_tx);
-        return (0, 0);
-    };
     let sent = inserted.min(scratch_local_tx.len());
     let mut sent_packets = 0u64;
     let mut sent_bytes = 0u64;
@@ -110,23 +90,13 @@ pub(in crate::afxdp) fn settle_exact_local_fifo_submission(
 }
 
 pub(in crate::afxdp) fn settle_exact_local_scratch_submission_flow_fair(
-    queue: Option<&mut CoSQueueRuntime>,
+    queue: &mut CoSQueueRuntime,
     free_tx_frames: &mut VecDeque<u64>,
     scratch_local_tx: &mut Vec<(u64, TxRequest)>,
     in_flight_untracked_tx: &mut FastSet<u64>,
     inserted: usize,
     now_ns: u64,
 ) -> (u64, u64) {
-    let Some(queue) = queue else {
-        // #hb166 T-7: recycle the UMEM offsets before dropping the scratch
-        // (queue torn down mid-drain) — the pre-fix `.clear()` leaked them,
-        // uncounted. Mirrors the FIFO `settle_exact_local_fifo_submission`
-        // None arm and `restore_exact_local_scratch_to_queue_head_flow_fair`.
-        while let Some((offset, _req)) = scratch_local_tx.pop() {
-            free_tx_frames.push_front(offset);
-        }
-        return (0, 0);
-    };
     // #1229 v7: per-bucket TX rate accounting. Capture the
     // FlowFair seed once; we'll need it to map each committed
     // packet's flow_key to its bucket.
@@ -180,16 +150,12 @@ pub(in crate::afxdp) fn settle_exact_local_scratch_submission_flow_fair(
 }
 
 pub(in crate::afxdp) fn settle_exact_prepared_fifo_submission(
-    queue: Option<&mut CoSQueueRuntime>,
+    queue: &mut CoSQueueRuntime,
     scratch_prepared_tx: &mut Vec<ExactPreparedScratchTxRequest>,
     in_flight_prepared_recycles: &mut FastMap<u64, PreparedTxRecycle>,
     in_flight_untracked_tx: &mut FastSet<u64>,
     inserted: usize,
 ) -> (u64, u64) {
-    let Some(queue) = queue else {
-        scratch_prepared_tx.clear();
-        return (0, 0);
-    };
     let sent = inserted.min(scratch_prepared_tx.len());
     let mut sent_packets = 0u64;
     let mut sent_bytes = 0u64;
@@ -222,17 +188,13 @@ pub(in crate::afxdp) fn settle_exact_prepared_fifo_submission(
 }
 
 pub(super) fn settle_exact_prepared_scratch_submission_flow_fair(
-    queue: Option<&mut CoSQueueRuntime>,
+    queue: &mut CoSQueueRuntime,
     scratch_prepared_tx: &mut Vec<PreparedTxRequest>,
     in_flight_prepared_recycles: &mut FastMap<u64, PreparedTxRecycle>,
     in_flight_untracked_tx: &mut FastSet<u64>,
     inserted: usize,
     now_ns: u64,
 ) -> (u64, u64) {
-    let Some(queue) = queue else {
-        scratch_prepared_tx.clear();
-        return (0, 0);
-    };
     // #1229 v7: per-bucket TX rate accounting on the prepared-peer
     // commit path (same shape as the local exact path above).
     let flow_hash_seed = queue
@@ -268,21 +230,19 @@ pub(super) fn settle_exact_prepared_scratch_submission_flow_fair(
 
 #[inline]
 pub(super) fn subtract_direct_cos_queue_bytes(
-    binding: &mut BindingWorker,
+    cos_interfaces: &mut crate::afxdp::FastMap<i32, crate::afxdp::types::CoSInterfaceRuntime>,
     root_ifindex: i32,
     queue_idx: usize,
     dropped_bytes: u64,
 ) {
     if dropped_bytes == 0 {
-        refresh_cos_interface_activity(binding, root_ifindex);
         return;
     }
-    if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
+    if let Some(root) = cos_interfaces.get_mut(&root_ifindex) {
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             queue.hot.queued_bytes = queue.hot.queued_bytes.saturating_sub(dropped_bytes);
         }
     }
-    refresh_cos_interface_activity(binding, root_ifindex);
 }
 
 #[inline]

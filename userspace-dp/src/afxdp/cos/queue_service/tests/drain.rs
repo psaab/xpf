@@ -106,7 +106,7 @@ fn equal_flow_cap_reaches_drain_shaped_tx_entry_path() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     root.tokens = 100_000;
@@ -430,7 +430,7 @@ fn drain_exact_local_fifo_items_to_scratch_keeps_queue_until_commit() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     root.queues[0]
@@ -530,7 +530,7 @@ fn drain_exact_local_fifo_drops_mirror_clone_before_tx_reserve() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     cos_queue_push_back(
@@ -592,7 +592,7 @@ fn release_exact_local_scratch_frames_preserves_queue_after_failed_submit() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     root.queues[0]
@@ -672,7 +672,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     let tracker = crate::fragment_overlap::OverlapTracker::new();
@@ -739,7 +739,7 @@ fn settle_exact_local_fifo_submission_pops_only_committed_prefix() {
 
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, sent_bytes) = settle_exact_local_fifo_submission(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut free_tx_frames,
         &mut scratch_local_tx,
         &mut in_flight_untracked_tx,
@@ -794,7 +794,7 @@ fn release_exact_prepared_scratch_preserves_queue_after_failed_submit() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     root.queues[0]
@@ -861,7 +861,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
             surplus_weight: 1,
             buffer_bytes: COS_MIN_BURST_BYTES,
             dscp_rewrite: None,
-        codel_target_ns: 0,
+            codel_target_ns: 0,
         }],
     );
     let tracker = crate::fragment_overlap::OverlapTracker::new();
@@ -934,7 +934,7 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
     let mut in_flight_untracked_tx = FastSet::default();
 
     let (sent_packets, sent_bytes) = settle_exact_prepared_fifo_submission(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut scratch_prepared_tx,
         &mut in_flight_prepared_recycles,
         &mut in_flight_untracked_tx,
@@ -975,4 +975,3 @@ fn settle_exact_prepared_fifo_submission_pops_only_committed_prefix() {
         CoSPendingTxItem::Local(_) => panic!("unexpected local restored item"),
     }
 }
-

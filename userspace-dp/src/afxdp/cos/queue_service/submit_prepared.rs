@@ -16,7 +16,13 @@ pub(super) fn submit_prepared(
 ) -> bool {
     assign_prepared_dscp_rewrite(
         &mut items,
-        cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx),
+        cos_queue_dscp_rewrite(
+            binding
+                .cos
+                .cos_interfaces
+                .get(&root_ifindex)
+                .and_then(|root| root.queues.get(queue_idx)),
+        ),
     );
     // #1229 v7: pre-transmit sidecar (same shape as Local
     // path — transmit_prepared_queue consumes the successful

@@ -53,7 +53,7 @@ mod tx_inbox;
 pub(in crate::afxdp) use debug_state::{
     DEBUG_STATE_PUBLISH_MASK, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
     advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
-    update_binding_debug_state, update_binding_idle_debug_state,
+    skip_binding_debug_state, update_binding_debug_state, update_binding_idle_debug_state,
 };
 pub(in crate::afxdp) use latency::{
     bucket_index_for_ns, tx_batch_bucket, DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS,

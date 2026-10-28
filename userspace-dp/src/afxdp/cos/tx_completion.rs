@@ -11,8 +11,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::afxdp::types::{
-    COS_TIMER_WHEEL_L0_SLOTS, COS_TIMER_WHEEL_L1_SLOTS, CoSInterfaceRuntime, CoSPendingTxItem,
-    CoSQueueRuntime, ExactDemandQueueMask, PreparedTxRequest, SharedCoSQueueLease, TxRequest,
+    CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, ExactDemandQueueMask,
+    PreparedTxRequest, SharedCoSQueueLease, TxRequest, COS_TIMER_WHEEL_L0_SLOTS,
+    COS_TIMER_WHEEL_L1_SLOTS,
 };
 use crate::afxdp::worker::BindingWorker;
 
@@ -21,7 +22,9 @@ use super::queue_ops::{
     cos_exact_queue_serviceable, cos_item_len, cos_queue_front, cos_queue_is_empty,
     cos_queue_push_front, maybe_demote_drained_best_effort,
 };
-use super::token_bucket::{maybe_top_up_cos_root_lease, release_cos_root_lease};
+use super::token_bucket::{
+    maybe_top_up_cos_root_lease, release_cos_root_lease, release_cos_root_lease_on_cos,
+};
 
 // ============================================================================
 // Service phase + park-reason types
@@ -183,10 +186,25 @@ pub(in crate::afxdp) fn count_tx_ring_full_submit_stall(
     queue_idx: usize,
     stalled_packets: u64,
 ) {
+    count_tx_ring_full_submit_stall_on_interfaces(
+        &mut binding.cos.cos_interfaces,
+        root_ifindex,
+        queue_idx,
+        stalled_packets,
+    );
+}
+
+#[inline]
+pub(in crate::afxdp) fn count_tx_ring_full_submit_stall_on_interfaces(
+    cos_interfaces: &mut crate::afxdp::FastMap<i32, CoSInterfaceRuntime>,
+    root_ifindex: i32,
+    queue_idx: usize,
+    stalled_packets: u64,
+) {
     if stalled_packets == 0 {
         return;
     }
-    if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
+    if let Some(root) = cos_interfaces.get_mut(&root_ifindex) {
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             queue.telemetry.drop_counters.tx_ring_full_submit_stalls = queue
                 .telemetry
@@ -541,25 +559,36 @@ fn serviceable_exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
                 && queue.config.guarantee_enabled
                 && cos_exact_queue_serviceable(root_tokens, queue)
         })
-        .fold(0u64, |acc, queue| acc.saturating_add(queue.hot.queued_bytes))
+        .fold(0u64, |acc, queue| {
+            acc.saturating_add(queue.hot.queued_bytes)
+        })
 }
 
 #[inline]
 pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_ifindex: i32) {
-    let Some(shared_exact_backlog) = binding
-        .cos
+    publish_cos_exact_backlog_on_cos(&binding.cos, binding.slot, root_ifindex);
+}
+
+/// #17186: field-split form for callers holding only `&WorkerCos` + slot.
+#[inline]
+pub(in crate::afxdp) fn publish_cos_exact_backlog_on_cos(
+    cos: &crate::afxdp::worker::WorkerCos,
+    slot: u32,
+    root_ifindex: i32,
+) {
+    let Some(shared_exact_backlog) = cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
     else {
         return;
     };
-    let Some(root) = binding.cos.cos_interfaces.get(&root_ifindex) else {
-        shared_exact_backlog.publish(binding.slot, 0);
+    let Some(root) = cos.cos_interfaces.get(&root_ifindex) else {
+        shared_exact_backlog.publish(slot, 0);
         return;
     };
     shared_exact_backlog.publish_with_serviceable(
-        binding.slot,
+        slot,
         exact_backlog_bytes(root),
         serviceable_exact_backlog_bytes(root),
         serviceable_exact_demand_mask(root),
@@ -657,19 +686,39 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result(
     sent_packets: u64,
     sent_bytes: u64,
 ) {
-    if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
+    apply_direct_exact_send_result_fields(
+        &binding.live,
+        &mut binding.cos,
+        root_ifindex,
+        queue_idx,
+        sent_packets,
+        sent_bytes,
+    );
+}
+
+/// #17186: field-split form of `apply_direct_exact_send_result` for callers
+/// that hold disjoint `live`/`cos` borrows (no whole `BindingWorker`).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn apply_direct_exact_send_result_fields(
+    live: &crate::afxdp::binding_state::BindingLiveState,
+    cos: &mut crate::afxdp::worker::WorkerCos,
+    root_ifindex: i32,
+    queue_idx: usize,
+    sent_packets: u64,
+    sent_bytes: u64,
+) {
+    if let Some(root) = cos.cos_interfaces.get_mut(&root_ifindex) {
         apply_direct_exact_queue_accounting(root, queue_idx, sent_bytes);
     }
-    if let Some(shared_root_lease) = binding
-        .cos
+    if let Some(shared_root_lease) = cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_root_lease.as_ref())
     {
         shared_root_lease.consume(sent_bytes);
     }
-    if let Some(shared_queue_lease) = binding
-        .cos
+    if let Some(shared_queue_lease) = cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.queue_fast_path.get(queue_idx))
@@ -677,23 +726,15 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result(
     {
         shared_queue_lease.consume(sent_bytes);
     }
-    refresh_cos_interface_activity(binding, root_ifindex);
+    refresh_cos_interface_activity_on_cos(cos, root_ifindex);
     if sent_packets > 0 {
-        binding
-            .live
-            .tx_packets
-            .fetch_add(sent_packets, Ordering::Relaxed);
-        binding
-            .live
-            .tx_bytes
-            .fetch_add(sent_bytes, Ordering::Relaxed);
+        live.tx_packets.fetch_add(sent_packets, Ordering::Relaxed);
+        live.tx_bytes.fetch_add(sent_bytes, Ordering::Relaxed);
         // #760 instrumentation, exact-owner-local path. Paired with
         // tx_bytes unconditionally — if the per-queue drain_sent_bytes
         // above (guarded by `if let Some(queue)`) ever undercounts
         // this, the gap is an `apply_*` early-return / queue-miss.
-        binding
-            .live
-            .owner_profile_owner
+        live.owner_profile_owner
             .drain_sent_bytes_shaped_unconditional
             .fetch_add(sent_bytes, Ordering::Relaxed);
     }
@@ -702,6 +743,19 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result(
 #[inline]
 pub(in crate::afxdp) fn refresh_cos_interface_activity(
     binding: &mut BindingWorker,
+    root_ifindex: i32,
+) {
+    refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
+}
+
+/// #17186: field-split form for callers holding only `&mut WorkerCos`.
+/// The publish step needs the binding slot, which `WorkerCos` does not
+/// carry; backlog publish is therefore the caller's responsibility on
+/// this path (production `service_exact_*` settles run it via the
+/// whole-binding wrapper on the next drain pass).
+#[inline]
+pub(in crate::afxdp) fn refresh_cos_interface_activity_on_cos(
+    cos: &mut crate::afxdp::worker::WorkerCos,
     root_ifindex: i32,
 ) {
     let mut new_nonempty = 0usize;
@@ -713,10 +767,9 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity(
     // return structure (lease re-credits run after the `cos_interfaces`
     // mutable borrow ends) is preserved EXACTLY — only the allocation is
     // removed.
-    let mut released_queue_leases = core::mem::take(&mut binding.cos.released_queue_leases_scratch);
+    let mut released_queue_leases = core::mem::take(&mut cos.released_queue_leases_scratch);
     released_queue_leases.clear();
-    let old_nonempty = binding
-        .cos
+    let old_nonempty = cos
         .cos_interfaces
         .get(&root_ifindex)
         .map(|root| root.nonempty_queues)
@@ -729,8 +782,8 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity(
     // rate limiter for on/off traffic). The lease-presence probe reads the
     // disjoint `cos_fast_interfaces` field, so it coexists with the
     // `cos_interfaces` mutable borrow below.
-    let iface_fast = binding.cos.cos_fast_interfaces.get(&root_ifindex);
-    if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
+    let iface_fast = cos.cos_fast_interfaces.get(&root_ifindex);
+    if let Some(root) = cos.cos_interfaces.get_mut(&root_ifindex) {
         for (queue_idx, queue) in root.queues.iter_mut().enumerate() {
             normalize_cos_queue_state(queue);
             // #4265 (R-2): give back an empty queue's banked burst whenever a
@@ -768,14 +821,14 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity(
         root.nonempty_queues = new_nonempty;
         root.runnable_queues = new_runnable;
     }
-    publish_cos_exact_backlog(binding, root_ifindex);
+    // backlog publish deferred to whole-binding callers (see above).
     if old_nonempty == 0 && new_nonempty > 0 {
-        binding.cos.cos_nonempty_interfaces = binding.cos.cos_nonempty_interfaces.saturating_add(1);
+        cos.cos_nonempty_interfaces = cos.cos_nonempty_interfaces.saturating_add(1);
     } else if old_nonempty > 0 && new_nonempty == 0 {
-        binding.cos.cos_nonempty_interfaces = binding.cos.cos_nonempty_interfaces.saturating_sub(1);
-        release_cos_root_lease(binding, root_ifindex);
+        cos.cos_nonempty_interfaces = cos.cos_nonempty_interfaces.saturating_sub(1);
+        release_cos_root_lease_on_cos(cos, root_ifindex);
     }
-    if let Some(iface_fast) = binding.cos.cos_fast_interfaces.get(&root_ifindex) {
+    if let Some(iface_fast) = cos.cos_fast_interfaces.get(&root_ifindex) {
         for &(queue_idx, worker_id, released) in &released_queue_leases {
             if let Some(shared_queue_lease) = iface_fast
                 .queue_fast_path
@@ -790,7 +843,7 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity(
     }
     // #4972: return the scratch buffer (with its retained capacity) so the
     // next settle reuses the allocation instead of making a fresh one.
-    binding.cos.released_queue_leases_scratch = released_queue_leases;
+    cos.released_queue_leases_scratch = released_queue_leases;
 }
 
 // #4973: returns the drained (now-empty) `retry` deque so the CoSBatch submit

@@ -25,7 +25,13 @@ pub(super) fn submit_local(
 ) -> bool {
     assign_local_dscp_rewrite(
         &mut items,
-        cos_queue_dscp_rewrite(binding, root_ifindex, queue_idx),
+        cos_queue_dscp_rewrite(
+            binding
+                .cos
+                .cos_interfaces
+                .get(&root_ifindex)
+                .and_then(|root| root.queues.get(queue_idx)),
+        ),
     );
     // #1229 v7: pre-transmit sidecar — record (bucket, bytes) for each
     // item in submit (== original input) order. #5157: transmit_batch

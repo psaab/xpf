@@ -1,80 +1,7 @@
 //! queue_service submit tests: submit_local/submit_prepared owner
-//! tx-counter bumps and flow-fair local-scratch offset recycling.
+//! tx-counter bumps.
 
 use super::*;
-
-// #hb166 T-7: the flow-fair local scratch None arms (queue torn down
-// mid-drain) must recycle the popped `free_tx_frames` UMEM offsets, not
-// leak them. Pre-fix they bare-`.clear()`ed the scratch, unlike the FIFO
-// sibling `settle_exact_local_fifo_submission`. RED-on-revert: the
-// recycled offsets stay absent from `free_tx_frames`.
-fn t7_local_scratch_entry(offset: u64, len: usize) -> (u64, TxRequest) {
-    (
-        offset,
-        TxRequest {
-            bytes: vec![0u8; len].into(),
-            expected_ports: None,
-            expected_addr_family: libc::AF_INET as u8,
-            expected_protocol: PROTO_TCP,
-            flow_key: None,
-            egress_ifindex: 80,
-            cos_queue_id: Some(5),
-            dscp_rewrite: None,
-            mirror_clone: false,
-            overlap_admissions: None,
-            enqueue_ns: 0,
-        },
-    )
-}
-
-#[test]
-fn settle_local_scratch_flow_fair_recycles_offsets_when_queue_gone() {
-    let mut free_tx_frames: VecDeque<u64> = VecDeque::new();
-    let mut scratch_local_tx: Vec<(u64, TxRequest)> = vec![
-        t7_local_scratch_entry(64, 4),
-        t7_local_scratch_entry(128, 4),
-    ];
-    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
-    let (packets, bytes) = settle_exact_local_scratch_submission_flow_fair(
-        None,
-        &mut free_tx_frames,
-        &mut scratch_local_tx,
-        &mut in_flight_untracked_tx,
-        0,
-        0,
-    );
-    assert_eq!((packets, bytes), (0, 0));
-    assert!(scratch_local_tx.is_empty(), "scratch must be drained");
-    let mut recycled: Vec<u64> = free_tx_frames.into_iter().collect();
-    recycled.sort_unstable();
-    assert_eq!(
-        recycled,
-        vec![64, 128],
-        "both UMEM offsets must be recycled to free_tx_frames, not leaked"
-    );
-}
-
-#[test]
-fn restore_local_scratch_flow_fair_recycles_offsets_when_queue_gone() {
-    let mut free_tx_frames: VecDeque<u64> = VecDeque::new();
-    let mut scratch_local_tx: Vec<(u64, TxRequest)> = vec![
-        t7_local_scratch_entry(64, 4),
-        t7_local_scratch_entry(128, 4),
-    ];
-    restore_exact_local_scratch_to_queue_head_flow_fair(
-        None,
-        &mut free_tx_frames,
-        &mut scratch_local_tx,
-    );
-    assert!(scratch_local_tx.is_empty(), "scratch must be drained");
-    let mut recycled: Vec<u64> = free_tx_frames.into_iter().collect();
-    recycled.sort_unstable();
-    assert_eq!(
-        recycled,
-        vec![64, 128],
-        "both UMEM offsets must be recycled to free_tx_frames, not leaked"
-    );
-}
 
 // #4282 part (a): owner-lifecycle TX accounting lock on the CoS submit
 // paths. A CoS-forwarded packet MUST bump the owner binding's
@@ -318,7 +245,7 @@ fn apply_direct_exact_send_result_bumps_owner_tx_packets_and_bytes() {
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
 
-    crate::afxdp::cos::tx_completion::apply_direct_exact_send_result(&mut binding, 42, 0, 4, 6_000);
+    crate::afxdp::cos::tx_completion::apply_direct_exact_send_result(&mut binding, 42, 0, 4, 6_000); // unchanged whole-binding funnel
 
     assert_eq!(
         binding
@@ -1216,7 +1143,10 @@ fn submit_local_records_tx_batch_histogram() {
     assert_eq!(snap.tx_batch_descriptors, 3);
     assert_eq!(snap.tx_batch_hist[2], 1, "size-3 commit lands in bucket 2");
     assert_eq!(snap.tx_batch_hist.iter().sum::<u64>(), 1);
-    assert_eq!(snap.tx_kick_batch_kicks, 1, "the post-commit kick must be recorded");
+    assert_eq!(
+        snap.tx_kick_batch_kicks, 1,
+        "the post-commit kick must be recorded"
+    );
     assert_eq!(snap.tx_kick_batch_descriptors, 3);
     assert_eq!(snap.tx_kick_batch_hist[2], 1);
 }
@@ -1227,18 +1157,45 @@ fn remove_dropped_prepared_snapshots_sorts_phase_order_15949() {
     // at positions 2 and 0 (descending after sort), leaving survivor at 1.
     let mut root = crate::afxdp::tx::test_support::test_cos_runtime_with_queues(
         1_000_000,
-        vec![crate::afxdp::types::CoSQueueConfig { queue_id: 0, forwarding_class: "be".into(), priority: 5, transmit_rate_bytes: 500_000, guarantee_enabled: true, exact: true, surplus_sharing: false, equal_flow_enforcement: false, equal_flow_target_policy: crate::afxdp::types::EqualFlowTargetPolicy::Slowest, surplus_weight: 1, buffer_bytes: 128_000, dscp_rewrite: None, codel_target_ns: 0 }],
+        vec![crate::afxdp::types::CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "be".into(),
+            priority: 5,
+            transmit_rate_bytes: 500_000,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: crate::afxdp::types::EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: 128_000,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
     );
     let queue = &mut root.queues[0];
     crate::afxdp::tx::test_support::enable_test_flow_fair(queue);
     {
         let ff = queue.flow_fair_state.as_mut().unwrap();
         for bucket in [10u16, 20, 30] {
-            ff.pop_snapshot_stack.push(crate::afxdp::types::CoSQueuePopSnapshot { bucket, pre_pop_head_finish: 0, pre_pop_tail_finish: 0, pre_pop_queue_vtime: 0 });
+            ff.pop_snapshot_stack
+                .push(crate::afxdp::types::CoSQueuePopSnapshot {
+                    bucket,
+                    pre_pop_head_finish: 0,
+                    pre_pop_tail_finish: 0,
+                    pre_pop_queue_vtime: 0,
+                });
         }
     }
     super::submit_prepared::remove_dropped_prepared_snapshots(queue, &[2, 0], 1);
     let ff = queue.flow_fair_state.as_ref().unwrap();
-    assert_eq!(ff.pop_snapshot_stack.len(), 1, "exactly two dropped snapshots removed");
-    assert_eq!(ff.pop_snapshot_stack[0].bucket, 20, "survivor snapshot (orig pos 1) must remain; unsorted removal would delete it");
+    assert_eq!(
+        ff.pop_snapshot_stack.len(),
+        1,
+        "exactly two dropped snapshots removed"
+    );
+    assert_eq!(
+        ff.pop_snapshot_stack[0].bucket, 20,
+        "survivor snapshot (orig pos 1) must remain; unsorted removal would delete it"
+    );
 }

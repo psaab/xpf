@@ -50,6 +50,12 @@ pub(in crate::afxdp) fn update_binding_debug_state(binding: &mut BindingWorker) 
     publish_binding_debug_state(binding);
 }
 
+/// #17186: field-split reap path has no whole binding to publish; it only
+/// advances the cadence counter so the publish epoch is not stalled.
+pub(in crate::afxdp) fn skip_binding_debug_state(timers: &mut WorkerTimers) {
+    let _ = advance_debug_state_publish_counter(timers);
+}
+
 pub(in crate::afxdp) fn update_binding_idle_debug_state(binding: &mut BindingWorker, now_ns: u64) {
     // #1294: the hot-path counter's ~65ms assumption only holds while a
     // binding is polling hot. In interrupt/idle loops, 65536 empty polls can
