@@ -227,8 +227,27 @@ func (d *Daemon) syslogForgetCached15231(keep map[string]bool) []*logging.Syslog
 }
 
 func (d *Daemon) syslogClearCache15231() {
+	// Teardown (event mode / zero streams): displaced OPEN cached
+	// clients are not installed, so ReplaceSyslogClients cannot close
+	// them; close them here after the forget releases syslogBuiltMu.
+	var closeAfterUnlock []*logging.SyslogClient
 	for _, c := range d.syslogForgetCached15231(nil) {
-		_ = c
+		if c == nil || c.Closed() {
+			continue
+		}
+		duplicate := false
+		for _, queued := range closeAfterUnlock {
+			if queued == c {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			closeAfterUnlock = append(closeAfterUnlock, c)
+		}
+	}
+	for _, c := range closeAfterUnlock {
+		_ = c.Close()
 	}
 }
 
