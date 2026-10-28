@@ -342,7 +342,7 @@ fn classify_system_service(token: &str, hi: &mut ZoneHostInbound) {
         // udp 500/4500 per zone. On the SECONDARY AF_XDP path
         // (`stage_ipsec_passthrough_check`, #4323 Option B) the same udp-500/4500
         // admit is consulted for a NEW inbound IKE initiation (an ISAKMP header
-        // with an all-zero Responder SPI) via `host_inbound_admits_iface`: a zone
+        // with an all-zero Responder SPI) via `host_inbound_admits_iface_for_destination`: a zone
         // omitting `ike`/`ipsec` drops it before it reaches the local IKE daemon.
         // Raw ESP/AH stays EXEMPT on that path (ratified #3616 Option A) — the
         // SA is the authorization; established/reply IKE is exempt only while a
@@ -741,6 +741,159 @@ fn is_ndp_type(protocol: u8, is_v6: bool, icmp_type: u8) -> bool {
     protocol == 58 && is_v6 && (133..=136).contains(&icmp_type)
 }
 
+/// #17192: the packet fields every host-inbound entry point judges, bundled
+/// so the single decision body below is written (and tested) once instead
+/// of being restated per entry point. `dst_ip: None` is the destination-less
+/// (test-seam) shape: no catalog-multicast guard applies to it, matching
+/// the pre-consolidation destination-less iface entry point's unicast behaviour.
+#[derive(Clone, Copy)]
+struct HostInboundPkt {
+    protocol: u8,
+    dst_port: u16,
+    is_v6: bool,
+    icmp_type: u8,
+    dst_ip: Option<IpAddr>,
+}
+
+/// #17192: which admission view [`host_inbound_decide`] judges. The two
+/// kinds differ ONLY in how a missing view (`None`) and a non-ND packet to
+/// a catalog multicast group are treated for an unknown view — never in
+/// the ND or set logic, which is shared verbatim. Before #17192 the zone
+/// and interface-override arms restated that logic in four hand-copied
+/// bodies and had already diverged on ND to a catalog group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewKind {
+    /// Zone view: a missing view is the genuinely unknown / global zone
+    /// (#3405 `None => true`), EXCEPT that a known catalog destination is
+    /// fail-closed even for an unknown zone.
+    Zone,
+    /// Interface-override view: selected only when an override exists, so
+    /// the missing case never reaches the decision body.
+    Override,
+}
+
+/// #17192: the SINGLE host-inbound admission decision, written once.
+/// `view` is the selected admission set (`None` = no zone entry); `kind`
+/// records whether it was selected as the zone view or as an ingress
+/// interface override. Order: global ICMP error/PMTUD accept (#3171),
+/// then ND (#15671/#15931), then the catalog-multicast guard, then the
+/// set. ND to a catalog multicast group requires an explicit ND positive
+/// (or `any-service`) in BOTH view kinds — the pre-#17192 zone arm
+/// admitted it on the bare ND default while the override arm (and the
+/// kernel catalog guards, which precede the ND accepts in both nft
+/// renderers) denied it; the catalog rule is the one pinned here. See
+/// `ndp_zone_override_catalog_parity_17192`.
+fn host_inbound_decide(
+    view: Option<&ZoneHostInbound>,
+    kind: ViewKind,
+    pkt: &HostInboundPkt,
+) -> bool {
+    if is_icmp_host_inbound_global_accept(pkt.protocol, pkt.is_v6, pkt.icmp_type) {
+        return true;
+    }
+    if is_ndp_type(pkt.protocol, pkt.is_v6, pkt.icmp_type) {
+        return match view {
+            None => match pkt.dst_ip {
+                Some(dst) if is_host_inbound_multicast_group(dst) => false,
+                _ => true,
+            },
+            Some(hi) => {
+                if hi.ndp_excluded {
+                    return false;
+                }
+                match pkt.dst_ip {
+                    Some(dst) if is_host_inbound_multicast_group(dst) => hi.ndp_admits_multicast(),
+                    _ => true,
+                }
+            }
+        };
+    }
+    match view {
+        Some(hi) => match pkt.dst_ip {
+            Some(dst) => {
+                hi.admits_destination(pkt.protocol, pkt.dst_port, pkt.is_v6, pkt.icmp_type, dst)
+            }
+            None => hi.admits(pkt.protocol, pkt.dst_port, pkt.is_v6, pkt.icmp_type),
+        },
+        None => {
+            // #3405: every configured security zone is in the table (the Go control
+            // plane marks them all `host_inbound_configured`), so `None` is now only
+            // a genuinely unknown / global ingress zone (e.g. id 0, no resolved
+            // security zone). Such traffic keeps the admit default — narrowing it is
+            // out of scope for the configured-zone default-deny fix and risks
+            // breaking ND / control delivery on the global context.
+            //
+            // #5659: an ADDRESSED interface with an EMPTY security-zone also resolves
+            // to id 0 here, but its host-inbound is denied WITHOUT touching this
+            // global admit arm — `populate_interfaces` inserts an empty
+            // `ZoneHostInbound` sentinel into `ifindex_host_inbound` keyed by that
+            // interface's ifindex, so the ingress-interface-keyed
+            // `host_inbound_admits_iface_for_destination` denies it while this zone-only path (and a
+            // legitimately-zoneless NON-addressed control interface) keeps admit.
+            //
+            // #6873: WHAT THIS ARM DOES NOT SETTLE. The two citations above narrow
+            // WHICH ingress contexts reach `None`; neither says anything about the
+            // table being EMPTY, and an empty table sends EVERY zone id here. That
+            // is a real fail-open — `cold_forwarding_state_admits_every_host_inbound
+            // _service_6873` demonstrates a default `ForwardingState` admitting ssh,
+            // https, v6 DNS and raw GRE — so the question "can a reader observe the
+            // empty table?" is load-bearing and is answered here rather than left to
+            // the next audit to re-derive.
+            //
+            // It cannot, and the reason is worker LIFECYCLE ORDERING, not a flag:
+            //
+            //   - `bring_up_workers` is the only worker spawn path (README:133
+            //     forbids a bare `std::thread::spawn` for a worker), and reconcile
+            //     runs `tear_down` -> `apply_snapshot` (publishes a snapshot-derived
+            //     forwarding state) -> `bring_up_workers`. A worker is spawned only
+            //     after a real state is published.
+            //   - `reconcile(None, ..)` takes its early exit AFTER `tear_down`
+            //     (coordinator/reconcile/mod.rs), so "no snapshot" means "no
+            //     workers", never "workers on an empty table".
+            //   - `stop_inner` JOINS every worker via `workers.stop_and_clear(..)`
+            //     BEFORE `self.forwarding = ForwardingState::default()` (#6592), so
+            //     the reset is never visible to a live reader.
+            //
+            // A `snapshot_installed` check here would therefore be dead code: it
+            // would gate a state no reader can reach, and bury the invariant that
+            // actually protects this arm one layer deeper. The invariant is pinned
+            // instead, by `no_snapshot_reconcile_leaves_no_reader_for_the_empty
+            // _table_6873` (coordinator/tests.rs) — an ordering invariant with no
+            // test is one refactor from being false.
+            //
+            // TWO SURFACES, TWO DIFFERENT ANSWERS — and the difference is why this
+            // arm keeps getting re-audited. host-inbound is enforced BOTH here and
+            // by the kernel nft chain, and the cold-boot question resolves
+            // oppositely on each:
+            //
+            //   - KERNEL nft chain: the window IS reachable. A boot apply can fail
+            //     with no prior table to retain, leaving the host path with no
+            //     chain at all, so it needs a real gate — `installHostInboundCold
+            //     BootFence` (#5644, and its lo0 analogue #6476), guarded by
+            //     `TestColdBootHostInboundInstallFailureInstallsFence`.
+            //   - HERE (userspace AF_XDP classifier): unreachable, by the worker
+            //     lifecycle above. There is no failed-apply equivalent, because a
+            //     worker only exists once a state has been published.
+            //
+            // So "the host-inbound cold-boot fail-open was closed in #5644" is true
+            // of the kernel surface and says nothing about this one. Reading that
+            // sentence next to this arm is what makes an auditor expect a fence
+            // here and file the absence of one — twice so far.
+            //
+            // So, precisely: this arm is settled for CONFIGURED zones (#3405) and
+            // for addressed empty-zone interfaces (#5659); it deliberately keeps
+            // admit for a legitimately zoneless NON-addressed control interface; and
+            // the empty-table case is unreachable by the ordering above rather than
+            // by anything this function does.
+            debug_assert_eq!(kind, ViewKind::Zone);
+            match pkt.dst_ip {
+                Some(dst) if is_host_inbound_multicast_group(dst) => false,
+                _ => true,
+            }
+        }
+    }
+}
+
 /// Per-packet host-inbound admit check for a host-bound (local-delivery)
 /// packet ingressing `ingress_zone_id`. Returns true (admit) when the packet is
 /// an ICMP/ICMPv6 error/PMTUD control message (#3171 — always exempt, mirroring
@@ -759,97 +912,20 @@ pub(in crate::afxdp) fn host_inbound_admits(
     is_v6: bool,
     icmp_type: u8,
 ) -> bool {
-    // #3171/#3201/#3240: error/PMTUD control messages AND the IPv6 ND set are
-    // admitted before the zone lookup so PMTUD / unreachable / traceroute-to-self
-    // and v6 RS/RA work on a configured zone that omits `ping` / scopes
-    // router-discovery, matching the kernel host-inbound chain's global accepts.
-    // Echo-request and IPv4 router-advert/solicit are NOT in this set, so they
-    // stay gated on the `ping` / `router-discovery` tokens below.
-    if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
-        return true;
-    }
-    // #15671: ND default — admitted unless the zone excluded ndp.
-    if is_ndp_type(protocol, is_v6, icmp_type) {
-        return match state.zone_host_inbound.get(&ingress_zone_id) {
-            None => true,
-            Some(hi) => !hi.ndp_excluded,
-        };
-    }
-    match state.zone_host_inbound.get(&ingress_zone_id) {
-        // #3405: every configured security zone is in the table (the Go control
-        // plane marks them all `host_inbound_configured`), so `None` is now only
-        // a genuinely unknown / global ingress zone (e.g. id 0, no resolved
-        // security zone). Such traffic keeps the admit default — narrowing it is
-        // out of scope for the configured-zone default-deny fix and risks
-        // breaking ND / control delivery on the global context.
-        //
-        // #5659: an ADDRESSED interface with an EMPTY security-zone also resolves
-        // to id 0 here, but its host-inbound is denied WITHOUT touching this
-        // global admit arm — `populate_interfaces` inserts an empty
-        // `ZoneHostInbound` sentinel into `ifindex_host_inbound` keyed by that
-        // interface's ifindex, so the ingress-interface-keyed
-        // `host_inbound_admits_iface` denies it while this zone-only path (and a
-        // legitimately-zoneless NON-addressed control interface) keeps admit.
-        //
-        // #6873: WHAT THIS ARM DOES NOT SETTLE. The two citations above narrow
-        // WHICH ingress contexts reach `None`; neither says anything about the
-        // table being EMPTY, and an empty table sends EVERY zone id here. That
-        // is a real fail-open — `cold_forwarding_state_admits_every_host_inbound
-        // _service_6873` demonstrates a default `ForwardingState` admitting ssh,
-        // https, v6 DNS and raw GRE — so the question "can a reader observe the
-        // empty table?" is load-bearing and is answered here rather than left to
-        // the next audit to re-derive.
-        //
-        // It cannot, and the reason is worker LIFECYCLE ORDERING, not a flag:
-        //
-        //   - `bring_up_workers` is the only worker spawn path (README:133
-        //     forbids a bare `std::thread::spawn` for a worker), and reconcile
-        //     runs `tear_down` -> `apply_snapshot` (publishes a snapshot-derived
-        //     forwarding state) -> `bring_up_workers`. A worker is spawned only
-        //     after a real state is published.
-        //   - `reconcile(None, ..)` takes its early exit AFTER `tear_down`
-        //     (coordinator/reconcile/mod.rs), so "no snapshot" means "no
-        //     workers", never "workers on an empty table".
-        //   - `stop_inner` JOINS every worker via `workers.stop_and_clear(..)`
-        //     BEFORE `self.forwarding = ForwardingState::default()` (#6592), so
-        //     the reset is never visible to a live reader.
-        //
-        // A `snapshot_installed` check here would therefore be dead code: it
-        // would gate a state no reader can reach, and bury the invariant that
-        // actually protects this arm one layer deeper. The invariant is pinned
-        // instead, by `no_snapshot_reconcile_leaves_no_reader_for_the_empty
-        // _table_6873` (coordinator/tests.rs) — an ordering invariant with no
-        // test is one refactor from being false.
-        //
-        // TWO SURFACES, TWO DIFFERENT ANSWERS — and the difference is why this
-        // arm keeps getting re-audited. host-inbound is enforced BOTH here and
-        // by the kernel nft chain, and the cold-boot question resolves
-        // oppositely on each:
-        //
-        //   - KERNEL nft chain: the window IS reachable. A boot apply can fail
-        //     with no prior table to retain, leaving the host path with no
-        //     chain at all, so it needs a real gate — `installHostInboundCold
-        //     BootFence` (#5644, and its lo0 analogue #6476), guarded by
-        //     `TestColdBootHostInboundInstallFailureInstallsFence`.
-        //   - HERE (userspace AF_XDP classifier): unreachable, by the worker
-        //     lifecycle above. There is no failed-apply equivalent, because a
-        //     worker only exists once a state has been published.
-        //
-        // So "the host-inbound cold-boot fail-open was closed in #5644" is true
-        // of the kernel surface and says nothing about this one. Reading that
-        // sentence next to this arm is what makes an auditor expect a fence
-        // here and file the absence of one — twice so far.
-        //
-        // So, precisely: this arm is settled for CONFIGURED zones (#3405) and
-        // for addressed empty-zone interfaces (#5659); it deliberately keeps
-        // admit for a legitimately zoneless NON-addressed control interface; and
-        // the empty-table case is unreachable by the ordering above rather than
-        // by anything this function does.
-        None => true,
-        // A configured zone — including one with no `host-inbound-traffic` stanza
-        // (empty set) — denies anything its set does not admit (#3405).
-        Some(hi) => hi.admits(protocol, dst_port, is_v6, icmp_type),
-    }
+    // #17192: the decision body lives once in `host_inbound_decide`; this
+    // entry point only selects the zone view. The long #3405/#5659/#6873
+    // rationale for the `None => true` arm is preserved on that arm there.
+    host_inbound_decide(
+        state.zone_host_inbound.get(&ingress_zone_id),
+        ViewKind::Zone,
+        &HostInboundPkt {
+            protocol,
+            dst_port,
+            is_v6,
+            icmp_type,
+            dst_ip: None,
+        },
+    )
 }
 
 /// Destination-aware admission used by real packet paths. Catalog group
@@ -866,23 +942,19 @@ pub(in crate::afxdp) fn host_inbound_admits_for_destination(
     icmp_type: u8,
     dst_ip: IpAddr,
 ) -> bool {
-    if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
-        return true;
-    }
-    // #15671: ND default unless the zone excluded ndp.
-    if is_ndp_type(protocol, is_v6, icmp_type) {
-        return match state.zone_host_inbound.get(&ingress_zone_id) {
-            None if is_host_inbound_multicast_group(dst_ip) => false,
-            None => true,
-            Some(hi) => !hi.ndp_excluded,
-        };
-    }
-
-    match state.zone_host_inbound.get(&ingress_zone_id) {
-        Some(hi) => hi.admits_destination(protocol, dst_port, is_v6, icmp_type, dst_ip),
-        None if is_host_inbound_multicast_group(dst_ip) => false,
-        None => host_inbound_admits(state, ingress_zone_id, protocol, dst_port, is_v6, icmp_type),
-    }
+    // #17192: single decision body; this entry point only selects the
+    // zone view and carries the real destination.
+    host_inbound_decide(
+        state.zone_host_inbound.get(&ingress_zone_id),
+        ViewKind::Zone,
+        &HostInboundPkt {
+            protocol,
+            dst_port,
+            is_v6,
+            icmp_type,
+            dst_ip: Some(dst_ip),
+        },
+    )
 }
 
 /// Ingress-interface-aware, destination-aware entry point for packet paths.
@@ -899,46 +971,37 @@ pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
     icmp_type: u8,
     dst_ip: IpAddr,
 ) -> bool {
-    if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
-        return true;
-    }
-    if let Some(hi) = state.ifindex_host_inbound.get(&ingress_ifindex) {
-        // #15931: ND default applies to an interface override exactly as
-        // to its zone: withdrawn only on `ndp except`; an explicit ndp
-        // token admits via admits_destination; otherwise the default
-        // admits even though the positive set has no ND token.
-        if is_ndp_type(protocol, is_v6, icmp_type) {
-            if hi.ndp_excluded {
-                return false;
-            }
-            if is_host_inbound_multicast_group(dst_ip) {
-                return hi.ndp_admits_multicast();
-            }
-            return true;
-        }
-        return hi.admits_destination(protocol, dst_port, is_v6, icmp_type, dst_ip);
-    }
-    host_inbound_admits_for_destination(
-        state,
-        ingress_zone_id,
+    // #17192: the production local-delivery entry point. It selects the
+    // view — the per-interface override when present (#3362, the interface
+    // stanza REPLACES the zone one, #6515), else the zone view — and the
+    // shared `host_inbound_decide` body judges it, so an override and its
+    // zone with the same token set can no longer diverge (#15931 parity).
+    let pkt = HostInboundPkt {
         protocol,
         dst_port,
         is_v6,
         icmp_type,
-        dst_ip,
+        dst_ip: Some(dst_ip),
+    };
+    if let Some(hi) = state.ifindex_host_inbound.get(&ingress_ifindex) {
+        return host_inbound_decide(Some(hi), ViewKind::Override, &pkt);
+    }
+    host_inbound_decide(
+        state.zone_host_inbound.get(&ingress_zone_id),
+        ViewKind::Zone,
+        &pkt,
     )
 }
 
-/// #3362: per-packet host-inbound admit keyed by INGRESS INTERFACE first. When
-/// the ingress interface carries a per-interface host-inbound OVERRIDE
-/// (`state.ifindex_host_inbound`), the packet is matched against that interface's
-/// EFFECTIVE admission set (resolved in Go: the interface stanza REPLACES the
-/// zone one, #6515); otherwise it
-/// falls back to the zone-keyed [`host_inbound_admits`]. The global
-/// ICMP/PMTUD/ND accept (#3171) is applied first in BOTH branches so error / ND
-/// delivery is never broken by a scoped override. This is the entry point the
-/// local-delivery poll path uses; `host_inbound_admits` stays the zone-only
-/// primitive (and the direct test target).
+/// #17192: destination-less test seam for the pre-consolidation call
+/// shape. It has NO production caller (production uses
+/// [`host_inbound_admits_iface_for_destination`]); it exists only so the
+/// destination-less test cells keep exercising the production decision.
+/// It delegates to that entry point with an explicit unicast destination
+/// (`2001:db8::1` for v6, `192.0.2.1` for v4 — neither is a catalog
+/// group), so its verdicts are the production verdicts, never a fourth
+/// hand-copied body.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn host_inbound_admits_iface(
     state: &ForwardingState,
@@ -949,21 +1012,21 @@ pub(in crate::afxdp) fn host_inbound_admits_iface(
     is_v6: bool,
     icmp_type: u8,
 ) -> bool {
-    if let Some(hi) = state.ifindex_host_inbound.get(&ingress_ifindex) {
-        if is_icmp_host_inbound_global_accept(protocol, is_v6, icmp_type) {
-            return true;
-        }
-        // #15931: ND default applies to an interface override exactly
-        // as to its zone: withdrawn only on `ndp except`; otherwise
-        // admitted (an explicit ndp token also admits, via the default
-        // arm). An override WITHOUT ndp still gets the default unless
-        // excluded — the positive set need not name ND.
-        if is_ndp_type(protocol, is_v6, icmp_type) {
-            return !hi.ndp_excluded;
-        }
-        return hi.admits(protocol, dst_port, is_v6, icmp_type);
-    }
-    host_inbound_admits(state, ingress_zone_id, protocol, dst_port, is_v6, icmp_type)
+    let dst_ip: IpAddr = if is_v6 {
+        "2001:db8::1".parse().expect("static v6 unicast literal")
+    } else {
+        "192.0.2.1".parse().expect("static v4 unicast literal")
+    };
+    host_inbound_admits_iface_for_destination(
+        state,
+        ingress_ifindex,
+        ingress_zone_id,
+        protocol,
+        dst_port,
+        is_v6,
+        icmp_type,
+        dst_ip,
+    )
 }
 
 #[cfg(test)]
