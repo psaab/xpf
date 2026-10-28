@@ -293,6 +293,13 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 			if later.DefaultAction == "accept" {
 				return true
 			}
+			if later.DefaultAction == "reject" {
+				// Explicit reject default terminates the chain
+				// (same rule as the statement default below):
+				// policies after this one are unreachable, so
+				// their accepts cannot override the boundary.
+				return false
+			}
 		}
 		return false
 	}

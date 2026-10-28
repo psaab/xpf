@@ -299,3 +299,43 @@ func TestRIPPerGroupBoundaryWithLaterAcceptFailsClosed16625(t *testing.T) {
 		t.Errorf("unrepresentable fallthrough must remain fail-closed:\n%s", got)
 	}
 }
+
+func TestRIPPerGroupBoundaryBeforeRejectDefaultPreservesSibling16625(t *testing.T) {
+	// An explicit reject default terminates P before Q can accept
+	// the exact host. The empty /32 longer boundary must therefore
+	// remain representable alongside P's broader permit.
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", DefaultAction: "reject", Terms: []*config.PolicyTerm{
+				{Name: "empty-boundary", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+			"Q": {Name: "Q", Terms: []*config.PolicyTerm{
+				{Name: "later-host-accept", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "exact"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P", "Q"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P", "Q"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	if permits := listPermits16625(got, list); len(permits) != 1 || permits[0] != "10.0.0.0/8 le 32" {
+		t.Errorf("later unreachable accept must not erase P's broader permit, permits=%v:\n%s", permits, got)
+	}
+	hostDeny := "ip prefix-list " + list + " seq 5 deny 10.0.0.1/32\n"
+	siblingPermit := "ip prefix-list " + list + " seq 10 permit 10.0.0.0/8 le 32\n"
+	if denyIdx, permitIdx := strings.Index(got, hostDeny), strings.Index(got, siblingPermit); denyIdx < 0 || permitIdx < 0 || denyIdx > permitIdx {
+		t.Errorf("boundary host deny must precede the sibling broader permit (deny@%d permit@%d):\n%s", denyIdx, permitIdx, got)
+	}
+	if strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("unreachable later accept must not deny-all the group:\n%s", got)
+	}
+}
