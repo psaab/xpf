@@ -434,8 +434,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							}
 						}
 					case "bfd-liveness-detection":
-						bfd := parseBFDLiveness17182(prop)
-						iface.BFD, iface.BFDInterval, iface.BFDMultiplier = bfd.enabled, bfd.interval, bfd.multiplier
+						parseBFDLiveness17182(prop).apply(&iface.BFD, &iface.BFDInterval, &iface.BFDMultiplier)
 					}
 				}
 				if appendIface {
@@ -843,8 +842,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							groupAuthKey = v
 						}
 					case "bfd-liveness-detection":
-						bfd := parseBFDLiveness17182(child)
-						groupBFD, groupBFDInterval, groupBFDMultiplier = bfd.enabled, bfd.interval, bfd.multiplier
+						parseBFDLiveness17182(child).apply(&groupBFD, &groupBFDInterval, &groupBFDMultiplier)
 					case "neighbor":
 						nAddr := nodeVal(child)
 						if nAddr != "" {
@@ -1082,8 +1080,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							}
 						}
 					case "bfd-liveness-detection":
-						bfd := parseBFDLiveness17182(prop)
-						iface.BFD, iface.BFDInterval, iface.BFDMultiplier = bfd.enabled, bfd.interval, bfd.multiplier
+						parseBFDLiveness17182(prop).apply(&iface.BFD, &iface.BFDInterval, &iface.BFDMultiplier)
 					}
 				}
 				if appendIface {
@@ -1384,8 +1381,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						case "authentication-type":
 							iface.AuthType = nodeVal(prop)
 						case "bfd-liveness-detection":
-							bfd := parseBFDLiveness17182(prop)
-							iface.BFD, iface.BFDInterval, iface.BFDMultiplier = bfd.enabled, bfd.interval, bfd.multiplier
+							parseBFDLiveness17182(prop).apply(&iface.BFD, &iface.BFDInterval, &iface.BFDMultiplier)
 						}
 					}
 					// Check keys for "level N" and "passive" shorthand

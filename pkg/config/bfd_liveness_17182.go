@@ -21,7 +21,11 @@ import "strconv"
 //     packedBodyChildren/expandFlatRun before this is invoked, exactly
 //     as the five former inline readers were reached) and returns the
 //     (enabled, interval, multiplier) triplet the four model types
-//     carry as BFD/BFDInterval/BFDMultiplier.
+//     carry as BFD/BFDInterval/BFDMultiplier, PLUS a presence flag per
+//     numeric leaf: callers merge field-wise through apply, so a node
+//     naming only one leaf never wipes the value the target already
+//     carries (BGP group->neighbor inheritance, find-or-create
+//     fragment merging).
 //
 // The per-daemon FRR renderer arms are deliberately NOT consolidated:
 // ospfd/isisd need a bare enable line before the profile, ospf6d emits
@@ -46,10 +50,37 @@ func bfdLivenessSchema17182() *schemaNode {
 // fields) by OSPFInterface, OSPFv3Interface, ISISInterface and
 // BGPNeighbor. The model types keep their flat fields for renderer
 // compatibility; this struct is only the reader's return value.
+//
+// intervalSet/multiplierSet report per-field presence: the leaf was
+// present AND parsed. They are what make the merge field-wise — the
+// reader zero-starts its struct, so without them a caller assigning
+// the triplet wholesale cannot tell "leaf absent/unparseable" from
+// "leaf set to 0" and wipes the inherited/fragment value (Rev18229
+// B1). An unparseable present leaf leaves its flag clear, so the
+// tolerant path keeps the inherited value exactly as the former
+// inline readers did.
 type bfdLiveness17182 struct {
-	enabled    bool
-	interval   int
-	multiplier int
+	enabled       bool
+	interval      int
+	multiplier    int
+	intervalSet   bool
+	multiplierSet bool
+}
+
+// apply merges b onto one target's flat BFD fields field-wise:
+// presence of the node enables BFD, and each numeric field is
+// assigned only when its leaf was actually present and parsed.
+func (b bfdLiveness17182) apply(enabled *bool, interval, multiplier *int) {
+	if !b.enabled {
+		return
+	}
+	*enabled = true
+	if b.intervalSet {
+		*interval = b.interval
+	}
+	if b.multiplierSet {
+		*multiplier = b.multiplier
+	}
 }
 
 // parseBFDLiveness17182 reads one `bfd-liveness-detection` node.
@@ -64,10 +95,13 @@ type bfdLiveness17182 struct {
 // former inline copies had.
 //
 // enabled is true whenever the node is present (the statement itself
-// enables BFD); interval/multiplier are 0 when unset or unparseable,
-// matching the former readers: a non-numeric value leaves the field
-// at its default rather than failing the compile (the strict schema
-// gate rejects it before compile; the tolerant path drops it).
+// enables BFD). A numeric leaf sets its value and presence flag only
+// when present and parseable; unset or unparseable leaves the flag
+// clear so apply keeps the target's existing value, matching the
+// former readers: a non-numeric value leaves the field at its prior
+// (inherited/fragment) value rather than failing the compile (the
+// strict schema gate rejects it before compile; the tolerant path
+// drops it).
 func parseBFDLiveness17182(prop *Node) bfdLiveness17182 {
 	if prop == nil {
 		return bfdLiveness17182{}
@@ -78,13 +112,13 @@ func parseBFDLiveness17182(prop *Node) bfdLiveness17182 {
 		case "minimum-interval":
 			if v := nodeVal(bc); v != "" {
 				if n, err := strconv.Atoi(v); err == nil {
-					out.interval = n
+					out.interval, out.intervalSet = n, true
 				}
 			}
 		case "multiplier":
 			if v := nodeVal(bc); v != "" {
 				if n, err := strconv.Atoi(v); err == nil {
-					out.multiplier = n
+					out.multiplier, out.multiplierSet = n, true
 				}
 			}
 		}
