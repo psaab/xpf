@@ -3374,10 +3374,19 @@ def _u16(s):
 
 
 def _gate_mixed_base(new_img, peer):
-    """EXACT Python mirror of upgrade.GateMixedBaseSwap (unit-tested in Go).
-    Returns (sessions_survive: bool, reason: str). Fail-closed on any missing or
-    out-of-range field, an unknown peer HA, an out-of-window peer, or an unknown
-    / mismatched peer session-sync."""
+    """LANE-2 executor of the mixed-base gate (#17091). Returns
+    (sessions_survive: bool, reason: str); fail-closed on any missing or
+    out-of-range field, an unknown peer HA, an out-of-window peer, or an
+    unknown / mismatched peer session-sync.
+
+    This is the Python mirror of the single Go rule
+    upgrade.GateProtocolCompat (pkg/upgrade/imageversions.go) under
+    RefuseUnknownWire: an unknown peer wire refuses here, whereas the
+    LANE-1 adapter (targetWireVerdict) permits it. Both bodies are
+    pinned by mixed_base_gate_fixture.json in this directory, consumed
+    by MixedBaseFixture17091Tests below and by
+    TestMixedBaseGateFixture17091 in Go — edit the fixture and both
+    executors together; do not retype vectors."""
     required = ["ha-protocol-version", "ha-protocol-min-compat",
                 "session-sync-protocol-version"]
     for k in required:

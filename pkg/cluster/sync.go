@@ -38,7 +38,7 @@ var syncMagic = [4]byte{'B', 'P', 'S', 'Y'}
 // leaves heartbeat/failover semantics alone.
 //
 // The split matters because the mixed-base gate checks the two DIFFERENTLY
-// (upgrade.GateMixedBaseSwap, mirrored in scripts/deploy/xpf-deploy.py):
+// (upgrade.GateProtocolCompat, executed for LANE-2 by _gate_mixed_base in scripts/deploy/xpf-deploy.py):
 // the HA protocol is accepted over a WINDOW [MinCompatHAProtocolVersion,
 // CurrentHAProtocolVersion], while the session-sync version must match EXACTLY.
 // Welded together, a session-wire-only change was forced to push the HA version
@@ -57,7 +57,7 @@ var syncMagic = [4]byte{'B', 'P', 'S', 'Y'}
 // upgrade.
 //
 // The bump is deliberately on THIS counter and not on
-// CurrentHAProtocolVersion. GateMixedBaseSwap treats them differently:
+// CurrentHAProtocolVersion. GateProtocolCompat treats them differently:
 // session-sync must match EXACTLY, so bumping here is what makes the mixed-base
 // swap refuse up front instead of letting an operator discover a fabric that
 // will not come up. The HA protocol is accepted over a window
@@ -1302,6 +1302,26 @@ type SessionSync struct {
 	OnBulkSyncAckReceived func()
 	// OnPeerConnected fires when a peer sync connection is established.
 	OnPeerConnected func()
+	// OnPeerReconnected fires on every per-connection dispatch of
+	// OnPeerConnected at the moved-policy layer (#17056): handleNewConnection
+	// (sync_conn.go, only when shouldColdPrime) and the BulkStart reboot
+	// switch (sync_bulkstart_recv.go, only when it announces a reboot the
+	// install did not). The daemon's OnPeerConnected consumer is not
+	// idempotent, so those callers keep their once-per-incarnation gating;
+	// this hook is invoked at exactly those dispatch points so a reconnect
+	// on the SAME SessionSync object resets the heartbeat-suppression cap
+	// stamp on the Manager, restoring the pre-move per-connect reset that
+	// publishing alone (once per comms epoch) cannot provide. Nil when no
+	// Manager is bound (test doubles, embedders without a heartbeat).
+	OnPeerReconnected func()
+	// peerReconnectOwner is the Manager that installed OnPeerReconnected
+	// via SetPeerSyncSource (#17056), or nil. It exists because func values
+	// are not comparable: unpublish/republish must clear only the binding
+	// the clearing Manager itself installed, never a successor's. Written
+	// only under that Manager's mu at publish/unpublish, before the
+	// connection goroutines that read OnPeerReconnected can dispatch for a
+	// newly published source (wiring precedes Start).
+	peerReconnectOwner *Manager
 	// OnPeerDisconnected fires when all fabric connections are lost.
 	OnPeerDisconnected func()
 	IsPrimaryFn        func() bool

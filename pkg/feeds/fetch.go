@@ -265,11 +265,11 @@ func joinFeedURL(baseURL, rawPath string) string {
 	if err != nil {
 		return baseURL
 	}
-	ref, err := url.Parse(rawPath)
-	if err != nil {
+	if config.FeedEntryPathError(rawPath) != "" {
 		return ""
 	}
-	if ref.Scheme != "" || ref.Opaque != "" || ref.Host != "" || ref.User != nil {
+	ref, err := url.Parse(rawPath)
+	if err != nil {
 		return ""
 	}
 	joined := *base
@@ -294,45 +294,18 @@ func joinFeedURL(baseURL, rawPath string) string {
 	return joined.String()
 }
 
-// resolveBaseURL returns the base URL for a feed server.
-// Prefers explicit URL; falls back to https://hostname.
-//
-// Trailing "/" is trimmed from the URL *path* only (#14723): trimming
-// the raw string cut a query or fragment token that itself ends in "/"
-// (https://h/base/?token=abc/ lost the token's slash; a query-free
-// https://h/base#frag/ lost the fragment's). An unparseable URL is
-// returned unchanged so readFeed / the strict gate report it as-is.
+// resolveBaseURL delegates to the shared config.FeedServerBaseURL
+// (#17180) so the runtime and the strict commit gate resolve the same
+// endpoint from the same code.
 func resolveBaseURL(fsCfg *config.FeedServer) string {
-	raw := fsCfg.URL
-	if raw == "" && fsCfg.Hostname != "" {
-		raw = "https://" + fsCfg.Hostname
-	}
-	if raw == "" {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" {
-		// No path component to trim (or unparseable): preserve the
-		// historical slash-trim so slash-only URLs still resolve to "".
-		return strings.TrimRight(raw, "/")
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	if u.Path == "" {
-		u.RawPath = ""
-	} else if u.RawPath != "" {
-		u.RawPath = strings.TrimRight(u.RawPath, "/")
-	}
-	return u.String()
+	return config.FeedServerBaseURL(fsCfg)
 }
 
-// isPlaintextFeedURL reports whether url is a plaintext-http feed URL.
-// Such a feed has no transport integrity and this package has no per-feed
-// signature / pinned-hash verification, so a substituted body would install
-// as enforced policy (#14385, DR5-H13; the #3934 warning alone never fixed
-// the substitution). Manager.Apply refuses to register plaintext-http feeds
-// and the strict compiler gate rejects them at commit.
+// isPlaintextFeedURL delegates to the shared config.IsPlaintextFeedURL
+// (#17180, #14385) so the runtime refusal and the strict commit gate
+// test the same predicate.
 func isPlaintextFeedURL(url string) bool {
-	return strings.HasPrefix(strings.ToLower(url), "http://")
+	return config.IsPlaintextFeedURL(url)
 }
 
 // fetchFeed performs a single GET, parses + canonicalizes the body, and applies

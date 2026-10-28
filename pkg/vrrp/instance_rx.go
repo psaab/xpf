@@ -21,7 +21,7 @@ const maxLearnedMasterAdverInterval = 40950 * time.Millisecond
 
 // advertSourceFamily reports whether pkt carries a usable source of the
 // given family and returns that source. A 4-byte source is IPv4 even
-// though To16 would also succeed, mirroring warnUnknownMasterAdvert.
+// though To16 would also succeed, mirroring the #10719 detector in admitAndRecord.
 func advertSourceFamily(pkt *VRRPPacket, ipv4 bool) (net.IP, bool) {
 	if ipv4 {
 		if src4 := pkt.SrcIP.To4(); src4 != nil {
@@ -82,25 +82,13 @@ func (vi *vrrpInstance) learnMasterSourceLocked(pkt *VRRPPacket, staleBefore boo
 
 // observedMasterStaleLocked reports whether the retained master record
 // is stale under the interval learned from that same master. Caller
-// holds vi.mu; the effective priority is recomputed from cfg/tracking
-// fields (never via an RLock-taking accessor) mirroring
-// shouldPreemptObservedMaster.
+// holds vi.mu; the horizon comes from masterDownLocked (#17145), never
+// an RLock-taking accessor (#6230).
 func (vi *vrrpInstance) observedMasterStaleLocked(now time.Time) bool {
 	if vi.lastMasterSeen.IsZero() {
 		return true
 	}
-	effective := vi.cfg.Priority
-	if effective != 0 && effective != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
-		effective -= vi.cfg.TrackPriorityCost
-		if effective < 1 {
-			effective = 1
-		} else if effective > 254 {
-			effective = 254
-		}
-	}
-	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
-	skew := time.Duration(256-effective) * advert / 256
-	return now.Sub(vi.lastMasterSeen) > 3*advert+skew
+	return now.Sub(vi.lastMasterSeen) > vi.masterDownLocked()
 }
 
 // admitAndRecord decides, under a single vi.mu hold, both halves of the
@@ -235,28 +223,14 @@ func (vi *vrrpInstance) admitAndRecord(pkt *VRRPPacket) (drop bool) {
 	return drop
 }
 
-// recordMasterAdvert is the record-only seam for tests and direct callers
-// that have no drop decision to make (nonzero-priority adverts, or an
-// advert the handler has already admitted). It applies the same atomic
-// admission+record as admitAndRecord; priority-0 adverts are not recorded.
-func (vi *vrrpInstance) recordMasterAdvert(pkt *VRRPPacket) {
-	vi.admitAndRecord(pkt)
-}
-
-// warnUnknownMasterAdvert retains the #10719 detection entry point for
-// tests that only need counting/warning; production handlers use
-// admitAndRecord so the counter, the gate, and the record cannot drift.
-func (vi *vrrpInstance) warnUnknownMasterAdvert(pkt *VRRPPacket) {
-	vi.admitAndRecord(pkt)
-}
-
 // masterAdverFloor is the minimum interval a learned Master_Adver_Interval may
 // take (#4548). It is the node's own configured advertise interval
-// (cfg.AdvertiseInterval, defaulting to 1000 ms when unset — see advertInterval)
-// with an absolute minLearnedMasterAdverInterval backstop. Its sole caller,
-// recordMasterAdvert, already holds vi.mu.Lock, so it reads the interval via
-// advertIntervalLocked — calling the RLock-taking advertInterval here would
-// self-deadlock against the held write lock (#6230).
+// (cfg.AdvertiseInterval, defaulting to 1000 ms when unset — see
+// advertIntervalFromMS) with an absolute minLearnedMasterAdverInterval
+// backstop. Its production caller, admitAndRecord, already holds vi.mu.Lock,
+// so it reads the interval via advertIntervalLocked — calling an
+// RLock-taking accessor here would self-deadlock against the held write
+// lock (#6230).
 func (vi *vrrpInstance) masterAdverFloor() time.Duration {
 	floor := vi.advertIntervalLocked()
 	if floor < minLearnedMasterAdverInterval {
@@ -273,7 +247,7 @@ func (vi *vrrpInstance) masterAdverFloor() time.Duration {
 // live master, the second because there is no longer a lower-priority master
 // to preempt. A persisting lower-priority master leaves an armed hold running
 // (this path intentionally does not reset masterDownTimer on a lower advert).
-// recordMasterAdvert refreshes lastMasterSeen only from an accepted advert
+// admitAndRecord refreshes lastMasterSeen only from an accepted advert
 // (#14706), which is what keeps the #4584 masterDownTimer liveness watchdog
 // (armed by armPreemptHold) reading the held master as alive; if the accepted
 // adverts stop, the watchdog observes the staleness and takes over.
@@ -306,7 +280,7 @@ func (vi *vrrpInstance) handleBackupRx(pkt *VRRPPacket, masterDownTimer, preempt
 		// a one-shot bypass so the imminent masterDownTimer expiry
 		// promotes immediately instead of re-arming the hold (#2850).
 		// The last-seen master record is intentionally left untouched —
-		// the #2082 recordMasterAdvert contract owns it.
+		// the #2082 admitAndRecord contract owns it.
 		reth := isRethInstance(vi.cfg)
 		if reth {
 			slog.Info("vrrp: peer resigned (priority 0), immediate takeover",

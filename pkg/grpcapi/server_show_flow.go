@@ -117,58 +117,64 @@ func (s *Server) showFlowStatistics(ctx context.Context, buf *strings.Builder) e
 			"session scan concurrency limit reached; retry shortly")
 	}
 	defer release()
-	// #3345: surface a counter-read failure rather than emitting clean zeros
-	// that hide a degraded counter bridge.
-	var readErr error
-	readCtr := func(idx uint32) uint64 {
-		v, err := s.dp.ReadGlobalCounter(idx)
-		if err != nil && readErr == nil {
-			readErr = err
-		}
-		return v
-	}
-	sessNew := readCtr(dataplane.GlobalCtrSessionsNew)
-	sessClosed := readCtr(dataplane.GlobalCtrSessionsClosed)
+	// #17193: one shared snapshot classifies every global counter once.
+	// #3345: a genuine failure still warns below; #13274: unavailable
+	// counters render "unavailable", never a fabricated 0, and never
+	// trigger the read-failed warning.
+	snap := dataplane.ReadGlobalCounters(s.dp, dataplane.AllGlobalCounterIndexes()...)
 	// #15236 (A52-05): Current sessions = table occupancy (SessionCount),
 	// not create-minus-expire of locally created sessions.
 	v4Cur, v6Cur, err := backendSessionCountContext(walkCtx, s.dp)
 	if err != nil {
 		return sessionCountStatus(walkCtx, err)
 	}
+	value := func(idx uint32) uint64 {
+		v, _ := snap.Value(idx)
+		return v
+	}
+	line := func(label string, idx uint32) {
+		if snap.IsUnavailable(idx) {
+			fmt.Fprintf(buf, "  %-30s %s\n", label, "unavailable")
+			return
+		}
+		fmt.Fprintf(buf, "  %-30s %d\n", label, value(idx))
+	}
+	sessNew := value(dataplane.GlobalCtrSessionsNew)
+	sessClosed := value(dataplane.GlobalCtrSessionsClosed)
 	buf.WriteString("Flow statistics:\n")
 	fmt.Fprintf(buf, "  %-30s %d\n", "Current sessions:", v4Cur+v6Cur)
 	fmt.Fprintf(buf, "  %-30s %d\n", "Local forwarding sessions (created-closed):", dataplane.CurrentSessions(sessNew, sessClosed))
-	fmt.Fprintf(buf, "  %-30s %d\n", "Sessions created:", sessNew)
-	fmt.Fprintf(buf, "  %-30s %d\n", "Sessions closed:", sessClosed)
+	line("Sessions created:", dataplane.GlobalCtrSessionsNew)
+	line("Sessions closed:", dataplane.GlobalCtrSessionsClosed)
 	buf.WriteString("\n")
-	fmt.Fprintf(buf, "  %-30s %d\n", "Packets received:", readCtr(dataplane.GlobalCtrRxPackets))
-	fmt.Fprintf(buf, "  %-30s %d\n", "Packets transmitted:", readCtr(dataplane.GlobalCtrTxPackets))
-	fmt.Fprintf(buf, "  %-30s %d\n", "Packets dropped:", readCtr(dataplane.GlobalCtrDrops))
-	fmt.Fprintf(buf, "  %-30s %d\n", "TC egress packets:", readCtr(dataplane.GlobalCtrTCEgressPackets))
+	line("Packets received:", dataplane.GlobalCtrRxPackets)
+	line("Packets transmitted:", dataplane.GlobalCtrTxPackets)
+	line("Packets dropped:", dataplane.GlobalCtrDrops)
+	line("TC egress packets:", dataplane.GlobalCtrTCEgressPackets)
 	buf.WriteString("\n")
-	fmt.Fprintf(buf, "  %-30s %d\n", "Policy deny:", readCtr(dataplane.GlobalCtrPolicyDeny))
-	fmt.Fprintf(buf, "  %-30s %d\n", "NAT allocation failures:", readCtr(dataplane.GlobalCtrNATAllocFail))
-	fmt.Fprintf(buf, "  %-30s %d\n", "Screen drops:", readCtr(dataplane.GlobalCtrScreenDrops))
-	fmt.Fprintf(buf, "  %-30s %d\n", "Host-inbound denies:", readCtr(dataplane.GlobalCtrHostInboundDeny))
-	fmt.Fprintf(buf, "  %-30s %d\n", "Unknown VLAN drops:", readCtr(dataplane.GlobalCtrUnknownVLANDrops))
-	fmt.Fprintf(buf, "  %-30s %d\n", "Destination MAC drops:", readCtr(dataplane.GlobalCtrDstMACDrops))
-	fmt.Fprintf(buf, "  %-30s %d\n", "Host-inbound allowed:", readCtr(dataplane.GlobalCtrHostInbound))
-	fmt.Fprintf(buf, "  %-30s %d\n", "NAT64 translations:", readCtr(dataplane.GlobalCtrNAT64Xlate))
-	cacheHit := readCtr(dataplane.GlobalCtrFlowCacheHit)
-	cacheMiss := readCtr(dataplane.GlobalCtrFlowCacheMiss)
-	if cacheHit > 0 || cacheMiss > 0 {
+	line("Policy deny:", dataplane.GlobalCtrPolicyDeny)
+	line("NAT allocation failures:", dataplane.GlobalCtrNATAllocFail)
+	line("Screen drops:", dataplane.GlobalCtrScreenDrops)
+	line("Host-inbound denies:", dataplane.GlobalCtrHostInboundDeny)
+	line("Unknown VLAN drops:", dataplane.GlobalCtrUnknownVLANDrops)
+	line("Destination MAC drops:", dataplane.GlobalCtrDstMACDrops)
+	line("Host-inbound allowed:", dataplane.GlobalCtrHostInbound)
+	line("NAT64 translations:", dataplane.GlobalCtrNAT64Xlate)
+	cacheHit, cacheHitOK := snap.Value(dataplane.GlobalCtrFlowCacheHit)
+	cacheMiss, cacheMissOK := snap.Value(dataplane.GlobalCtrFlowCacheMiss)
+	if (cacheHitOK && cacheHit > 0) || (cacheMissOK && cacheMiss > 0) {
 		buf.WriteString("\n")
-		fmt.Fprintf(buf, "  %-30s %d\n", "Flow cache hits:", cacheHit)
-		fmt.Fprintf(buf, "  %-30s %d\n", "Flow cache misses:", cacheMiss)
-		fmt.Fprintf(buf, "  %-30s %d\n", "Flow cache flushes:", readCtr(dataplane.GlobalCtrFlowCacheFlush))
-		fmt.Fprintf(buf, "  %-30s %d\n", "Flow cache invalidations:", readCtr(dataplane.GlobalCtrFlowCacheInvalidate))
+		line("Flow cache hits:", dataplane.GlobalCtrFlowCacheHit)
+		line("Flow cache misses:", dataplane.GlobalCtrFlowCacheMiss)
+		line("Flow cache flushes:", dataplane.GlobalCtrFlowCacheFlush)
+		line("Flow cache invalidations:", dataplane.GlobalCtrFlowCacheInvalidate)
 		if cacheHit+cacheMiss > 0 {
 			hitRate := float64(cacheHit) / float64(cacheHit+cacheMiss) * 100
 			fmt.Fprintf(buf, "  %-30s %.1f%%\n", "Flow cache hit rate:", hitRate)
 		}
 	}
-	if readErr != nil {
-		fmt.Fprintf(buf, "warning: global counter read failed (statistics may be incomplete): %v\n", readErr)
+	if snap.Err != nil {
+		fmt.Fprintf(buf, "warning: global counter read failed (statistics may be incomplete): %v\n", snap.Err)
 	}
 	return nil
 }

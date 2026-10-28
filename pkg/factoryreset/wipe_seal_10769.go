@@ -25,7 +25,10 @@ import (
 )
 
 // The system-path seams mirror the image's SYSPREP_ENABLE_OPS and
-// SYSPREP_PURGE_PATHS. Tests point them at a disposable tree; production values
+// SYSPREP_PURGE_PATHS. wipeSealMapping below binds every member of those
+// tuples to its zeroize leg or survivor reason, and seal_parity_test.go
+// parses the tuples from scripts/image/bake.py so drift reds (#17085).
+// Tests point them at a disposable tree; production values
 // remain the image paths whose previous-tenant state must not survive reset.
 var (
 	wipeMachineIDPath         = "/etc/machine-id"
@@ -35,6 +38,7 @@ var (
 	wipeRootBashHistory       = "/root/.bash_history"
 	wipeSNMPEngineIDPath      = "/var/lib/xpf/snmp-engine-id"
 	wipeSNMPEngineBootsPath   = "/var/lib/xpf/snmp-engineboots"
+	wipeUEFIStatePath         = "/var/lib/xpf/uefi-bootorder-front"
 	wipeFeedShrinkHistoryPath = configstore.FeedShrinkHistoryPath
 	wipeSystemdRandomSeed     = "/var/lib/systemd/random-seed"
 	wipeAptListsDir           = "/var/lib/apt/lists"
@@ -81,6 +85,78 @@ var (
 	errWipeIPsecOwnership = errors.New("zeroize refused to erase config while IPsec teardown is unresolved")
 	errWipeKeaStop        = errors.New("zeroize could not stop Kea before lease-file erasure")
 )
+
+// wipeSealDisposition is the zeroize disposition of one image-seal member:
+// exactly one of leg (the member is erased by the production wipe the parity
+// test drives end-to-end) or survivor (a reason the member deliberately
+// survives the wipe legs, with its narrowing).
+// The leg field is an honest marker, not a callable: production posture
+// gates (appliance-only legs, #16448) and the configured config root live
+// inside performWipe / wipeImageSealResidue, so no per-member closure here
+// could be production-identical without re-implementing them. The parity
+// test therefore drives PerformZeroizeWipe once against the redirected
+// tree and asserts every leg member's planted path is gone.
+type wipeSealDisposition struct {
+	leg      bool
+	survivor string
+}
+
+// wipeSealMapping binds every member of bake.py's SYSPREP_ENABLE_OPS and
+// SYSPREP_PURGE_PATHS (#17085, R4-Q46-01) to its zeroize disposition. It is
+// the single source the parity test (seal_parity_test.go) checks: the test
+// parses both tuples from scripts/image/bake.py, so a new seal member with
+// no row here — or a deleted row — reds there. Keys are the tuple members
+// verbatim (virt-sysprep op names for ENABLE, absolute paths for PURGE).
+// A leg:true row asserts the production wipe (performWipe, driven by the
+// parity test via PerformZeroizeWipe) erases the member under its real
+// posture gates; it does not name a function to call.
+var wipeSealMapping = map[string]wipeSealDisposition{
+	// SYSPREP_ENABLE_OPS.
+	// machine-id: rotated (fresh random bytes) by the appliance-only leg in
+	// wipeImageSealResidue; on a foreign host the operator host keeps its id.
+	"machine-id": {leg: true},
+	// ssh-hostkeys: erased by wipeEraseSSHHostKeys, appliance-only.
+	"ssh-hostkeys": {leg: true},
+	// ssh-userdir: root's .ssh, erased appliance-only (foreign-host root
+	// material is owned by the marker-aware login teardown, #16448).
+	"ssh-userdir": {leg: true},
+	// logfiles: /var/log cleared appliance-only; on a foreign host only the
+	// xpf-owned firewall logs are erased (wipeFirewallLogs).
+	"logfiles": {leg: true},
+	// tmp-files: /tmp and /var/tmp cleared appliance-only.
+	"tmp-files": {leg: true},
+	// bash-history: root's .bash_history, erased appliance-only.
+	"bash-history": {leg: true},
+	// package-manager-cache: apt lists/archives cleared appliance-only.
+	"package-manager-cache": {leg: true},
+	// backup-files: editor backups swept on every host, stem-gated to
+	// backups of reset-owned files (wipeSweepOwnedEtcBackups and
+	// wipeServiceBackupSweepTargets), never a bare suffix sweep.
+	"backup-files": {leg: true},
+	// passwd-backups: wipeEraseAccountBackups, run after the login-account
+	// teardown that recreates them (every host).
+	"passwd-backups": {leg: true},
+	// utmp: /run/utmp removed appliance-only.
+	"utmp": {leg: true},
+	// SYSPREP_PURGE_PATHS.
+	// .configdb and xpf.conf: erased by wipeConfigDir against the
+	// CONFIGURED config root handed to PerformZeroizeWipe (wipe.go: the
+	// configured root, not the hardcoded /etc/xpf default), every host.
+	"/etc/xpf/.configdb": {leg: true},
+	"/etc/xpf/xpf.conf":  {leg: true},
+	"/etc/xpf/.day0-config-applied": {
+		survivor: "overwritten by beginZeroize with the prefixed zeroize-pending record (a metadata record holding ConfigDir/ConfigBase/ArchiveDir and log-file basenames, not tenant secrets), preserved by the config leg while the pending prefix is present, and removed only by completeZeroize after every wipe leg and final verification succeed; on failure it stays as the fail-closed loader gate",
+	},
+	"/etc/xpf/.day0-config-rejected":    {leg: true},
+	"/etc/xpf/.root-grown":              {leg: true},
+	"/var/lib/xpf/snmp-engine-id":       {leg: true},
+	"/var/lib/xpf/snmp-engineboots":     {leg: true},
+	"/var/lib/xpf/uefi-bootorder-front": {leg: true},
+	// random-seed: removed appliance-only (host state on a foreign host).
+	"/var/lib/systemd/random-seed": {leg: true},
+	// apt lists glob: the lists dir is cleared appliance-only.
+	"/var/lib/apt/lists/*": {leg: true},
+}
 
 const wipeManagedHostKeysHeader = "# Managed by xpfd — do not edit\n"
 
@@ -183,6 +259,7 @@ func wipeImageSealResidue() error {
 	for _, path := range []string{
 		wipeSNMPEngineIDPath,
 		wipeSNMPEngineBootsPath,
+		wipeUEFIStatePath,
 		wipeFeedShrinkHistoryPath,
 		wipeDay0RejectedPath,
 		wipeRootGrownPath,
@@ -1005,6 +1082,32 @@ func wipeClearDir(dir string) error {
 // retry succeed over bytes a sibling still holds.
 func wipeRemovePath(path string) error {
 	info, err := os.Lstat(path)
+	if err == nil && info.Mode().IsRegular() {
+		// Single regular file: the shared primitive (#17171) owns the
+		// inspect -> refuse symlink -> refuse hardlink -> remove
+		// sequence. Only the seal leg's parent-sync barrier stays here.
+		// Historic seal spellings preserved verbatim (#17171 fold),
+		// mapped from the typed/sentinel classes.
+		if err := configstore.EraseFileForReset(path); err != nil {
+			var linkErr *configstore.FactoryResetHardlinkError
+			switch {
+			case errors.As(err, &linkErr):
+				return fmt.Errorf("zeroize: refusing to erase hard-linked %s: %w", path, linkErr)
+			case errors.Is(err, configstore.ErrEraseInspectLinks):
+				return fmt.Errorf("zeroize: inspect hard links for %s: %w", path, err)
+			case errors.Is(err, configstore.ErrEraseInspect):
+				return fmt.Errorf("zeroize: inspect %s: %w", path, err)
+			case errors.Is(err, configstore.ErrEraseRemove):
+				return fmt.Errorf("zeroize: remove %s: %w", path, err)
+			default:
+				return fmt.Errorf("zeroize: %w", err)
+			}
+		}
+		if err := wipeSyncDurable(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("zeroize: sync parent of %s: %w", path, err)
+		}
+		return nil
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		// Retry durability: the unlink may have landed on an attempt whose
 		// barrier failed. Syncing the nearest surviving ancestor retires

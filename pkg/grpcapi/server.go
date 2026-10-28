@@ -27,7 +27,6 @@ import (
 	"github.com/psaab/xpf/pkg/clusterfailover"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	ddnspkg "github.com/psaab/xpf/pkg/ddns"
 	"github.com/psaab/xpf/pkg/denyaudit"
@@ -95,7 +94,6 @@ type Config struct {
 	Store    *configstore.Store
 	DP       grpcRuntime
 	EventBuf *logging.EventBuffer
-	GC       *conntrack.GC
 	Routing  *routing.Manager
 	FRR      *frr.Manager
 	IPsec    *ipsec.Manager
@@ -240,7 +238,6 @@ type Server struct {
 	store                   *configstore.Store
 	dp                      grpcRuntime
 	eventBuf                *logging.EventBuffer
-	gc                      *conntrack.GC
 	routing                 *routing.Manager
 	frr                     *frr.Manager
 	ipsec                   *ipsec.Manager
@@ -425,7 +422,6 @@ func NewServer(addr string, cfg Config) *Server {
 		store:                       cfg.Store,
 		dp:                          cfg.DP,
 		eventBuf:                    cfg.EventBuf,
-		gc:                          cfg.GC,
 		routing:                     cfg.Routing,
 		frr:                         cfg.FRR,
 		ipsec:                       cfg.IPsec,

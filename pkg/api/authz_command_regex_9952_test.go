@@ -9,6 +9,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/optopic"
 )
 
 // #9952 behavioural cells. The census beside this file proves every route is
@@ -288,5 +289,43 @@ func TestTheMUTATION_PathConsultsTheCommandGate9952(t *testing.T) {
 	if code := post("/api/v1/security/counters/clear", `{}`); code == 403 {
 		t.Fatal("POST /api/v1/security/counters/clear -> 403: a command the regex does not match " +
 			"was refused, which is over-denial rather than enforcement")
+	}
+}
+
+// #17108: REST show-text and the registry agree over every key.
+// RED-on-revert: restoring the exact-only REST lookup makes every packed
+// topic below (and every prefix key+"x") resolve ("",false) on REST while
+// optopic resolves it — the #16067 over-deny, reintroduced.
+func TestRESTShowTextMatchesRegistry17108(t *testing.T) {
+	entries := optopic.ShowTextEntries()
+	if len(entries) < 100 {
+		t.Fatalf("only %d registry entries; a pass would certify nothing", len(entries))
+	}
+	prefixes := 0
+	for _, e := range entries {
+		probes := []string{e.Key}
+		if e.IsPrefix() {
+			prefixes++
+			probes = append(probes, e.Key+"x", e.Key+"probe-value")
+		}
+		for _, topic := range probes {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/show-text?topic="+topic, nil)
+			gotCmd, gotOK := restRequestCommand9952("GET /api/v1/show-text", req, "")
+			wantCmd, wantOK := optopic.ShowTextCommand(topic)
+			if gotCmd != wantCmd || gotOK != wantOK {
+				t.Errorf("REST topic %q = (%q,%v), registry = (%q,%v)", topic, gotCmd, gotOK, wantCmd, wantOK)
+			}
+			if wantCmd != e.Command || !wantOK {
+				t.Errorf("registry topic %q = (%q,%v), want (%q,true)", topic, wantCmd, wantOK, e.Command)
+			}
+		}
+	}
+	if prefixes == 0 {
+		t.Fatal("no prefix entries; the packed-topic arm is vacuous")
+	}
+	// Unmapped topic stays unmapped on REST.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/show-text?topic=zzbogus-topic-17108", nil)
+	if cmd, ok := restRequestCommand9952("GET /api/v1/show-text", req, ""); ok || cmd != "" {
+		t.Errorf("REST unknown topic = (%q,%v), want (\"\",false)", cmd, ok)
 	}
 }

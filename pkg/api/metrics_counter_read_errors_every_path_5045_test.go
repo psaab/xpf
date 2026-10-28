@@ -7,7 +7,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	xnft "github.com/psaab/xpf/pkg/nftables"
 )
@@ -160,7 +159,6 @@ func TestCounterReadErrorsEmittedExactlyOnceOnLoadedPath(t *testing.T) {
 	store := newDescriptorCoverageStore(t)
 	srv := &Server{
 		store:     store,
-		gc:        conntrack.NewGC(nil, time.Minute),
 		startTime: time.Now(),
 	}
 	srv.dp = &descriptorCoverageDP{
