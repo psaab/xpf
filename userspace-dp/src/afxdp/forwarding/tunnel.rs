@@ -154,4 +154,3 @@ pub(in crate::afxdp) fn lookup_neighbor_entry(
     // by the helper's own netlink dump+subscribe path.
     None
 }
-
