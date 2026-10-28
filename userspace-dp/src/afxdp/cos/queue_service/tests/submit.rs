@@ -1,80 +1,7 @@
 //! queue_service submit tests: submit_local/submit_prepared owner
-//! tx-counter bumps and flow-fair local-scratch offset recycling.
+//! tx-counter bumps.
 
 use super::*;
-
-// #hb166 T-7: the flow-fair local scratch None arms (queue torn down
-// mid-drain) must recycle the popped `free_tx_frames` UMEM offsets, not
-// leak them. Pre-fix they bare-`.clear()`ed the scratch, unlike the FIFO
-// sibling `settle_exact_local_fifo_submission`. RED-on-revert: the
-// recycled offsets stay absent from `free_tx_frames`.
-fn t7_local_scratch_entry(offset: u64, len: usize) -> (u64, TxRequest) {
-    (
-        offset,
-        TxRequest {
-            bytes: vec![0u8; len].into(),
-            expected_ports: None,
-            expected_addr_family: libc::AF_INET as u8,
-            expected_protocol: PROTO_TCP,
-            flow_key: None,
-            egress_ifindex: 80,
-            cos_queue_id: Some(5),
-            dscp_rewrite: None,
-            mirror_clone: false,
-            overlap_admissions: None,
-            enqueue_ns: 0,
-        },
-    )
-}
-
-#[test]
-fn settle_local_scratch_flow_fair_recycles_offsets_when_queue_gone() {
-    let mut free_tx_frames: VecDeque<u64> = VecDeque::new();
-    let mut scratch_local_tx: Vec<(u64, TxRequest)> = vec![
-        t7_local_scratch_entry(64, 4),
-        t7_local_scratch_entry(128, 4),
-    ];
-    let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
-    let (packets, bytes) = settle_exact_local_scratch_submission_flow_fair(
-        None,
-        &mut free_tx_frames,
-        &mut scratch_local_tx,
-        &mut in_flight_untracked_tx,
-        0,
-        0,
-    );
-    assert_eq!((packets, bytes), (0, 0));
-    assert!(scratch_local_tx.is_empty(), "scratch must be drained");
-    let mut recycled: Vec<u64> = free_tx_frames.into_iter().collect();
-    recycled.sort_unstable();
-    assert_eq!(
-        recycled,
-        vec![64, 128],
-        "both UMEM offsets must be recycled to free_tx_frames, not leaked"
-    );
-}
-
-#[test]
-fn restore_local_scratch_flow_fair_recycles_offsets_when_queue_gone() {
-    let mut free_tx_frames: VecDeque<u64> = VecDeque::new();
-    let mut scratch_local_tx: Vec<(u64, TxRequest)> = vec![
-        t7_local_scratch_entry(64, 4),
-        t7_local_scratch_entry(128, 4),
-    ];
-    restore_exact_local_scratch_to_queue_head_flow_fair(
-        None,
-        &mut free_tx_frames,
-        &mut scratch_local_tx,
-    );
-    assert!(scratch_local_tx.is_empty(), "scratch must be drained");
-    let mut recycled: Vec<u64> = free_tx_frames.into_iter().collect();
-    recycled.sort_unstable();
-    assert_eq!(
-        recycled,
-        vec![64, 128],
-        "both UMEM offsets must be recycled to free_tx_frames, not leaked"
-    );
-}
 
 // #4282 part (a): owner-lifecycle TX accounting lock on the CoS submit
 // paths. A CoS-forwarded packet MUST bump the owner binding's
@@ -318,7 +245,7 @@ fn apply_direct_exact_send_result_bumps_owner_tx_packets_and_bytes() {
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
 
-    crate::afxdp::cos::tx_completion::apply_direct_exact_send_result(&mut binding, 42, 0, 4, 6_000);
+    crate::afxdp::cos::tx_completion::apply_direct_exact_send_result(&mut binding, 42, 0, 4, 6_000); // unchanged whole-binding funnel
 
     assert_eq!(
         binding
@@ -1216,7 +1143,10 @@ fn submit_local_records_tx_batch_histogram() {
     assert_eq!(snap.tx_batch_descriptors, 3);
     assert_eq!(snap.tx_batch_hist[2], 1, "size-3 commit lands in bucket 2");
     assert_eq!(snap.tx_batch_hist.iter().sum::<u64>(), 1);
-    assert_eq!(snap.tx_kick_batch_kicks, 1, "the post-commit kick must be recorded");
+    assert_eq!(
+        snap.tx_kick_batch_kicks, 1,
+        "the post-commit kick must be recorded"
+    );
     assert_eq!(snap.tx_kick_batch_descriptors, 3);
     assert_eq!(snap.tx_kick_batch_hist[2], 1);
 }
@@ -1227,20 +1157,149 @@ fn remove_dropped_prepared_snapshots_sorts_phase_order_15949() {
     // at positions 2 and 0 (descending after sort), leaving survivor at 1.
     let mut root = crate::afxdp::tx::test_support::test_cos_runtime_with_queues(
         1_000_000,
-        vec![crate::afxdp::types::CoSQueueConfig { queue_id: 0, forwarding_class: "be".into(), priority: 5, transmit_rate_bytes: 500_000, guarantee_enabled: true, exact: true, surplus_sharing: false, equal_flow_enforcement: false, equal_flow_target_policy: crate::afxdp::types::EqualFlowTargetPolicy::Slowest, surplus_weight: 1, buffer_bytes: 128_000, dscp_rewrite: None, codel_target_ns: 0 }],
+        vec![crate::afxdp::types::CoSQueueConfig {
+            queue_id: 0,
+            forwarding_class: "be".into(),
+            priority: 5,
+            transmit_rate_bytes: 500_000,
+            guarantee_enabled: true,
+            exact: true,
+            surplus_sharing: false,
+            equal_flow_enforcement: false,
+            equal_flow_target_policy: crate::afxdp::types::EqualFlowTargetPolicy::Slowest,
+            surplus_weight: 1,
+            buffer_bytes: 128_000,
+            dscp_rewrite: None,
+            codel_target_ns: 0,
+        }],
     );
     let queue = &mut root.queues[0];
     crate::afxdp::tx::test_support::enable_test_flow_fair(queue);
     {
         let ff = queue.flow_fair_state.as_mut().unwrap();
         for bucket in [10u16, 20, 30] {
-            ff.pop_snapshot_stack.push(crate::afxdp::types::CoSQueuePopSnapshot { bucket, pre_pop_head_finish: 0, pre_pop_tail_finish: 0, pre_pop_queue_vtime: 0 });
+            ff.pop_snapshot_stack
+                .push(crate::afxdp::types::CoSQueuePopSnapshot {
+                    bucket,
+                    pre_pop_head_finish: 0,
+                    pre_pop_tail_finish: 0,
+                    pre_pop_queue_vtime: 0,
+                });
         }
     }
     super::submit_prepared::remove_dropped_prepared_snapshots(queue, &[2, 0], 1);
     let ff = queue.flow_fair_state.as_ref().unwrap();
-    assert_eq!(ff.pop_snapshot_stack.len(), 1, "exactly two dropped snapshots removed");
-    assert_eq!(ff.pop_snapshot_stack[0].bucket, 20, "survivor snapshot (orig pos 1) must remain; unsorted removal would delete it");
+    assert_eq!(
+        ff.pop_snapshot_stack.len(),
+        1,
+        "exactly two dropped snapshots removed"
+    );
+    assert_eq!(
+        ff.pop_snapshot_stack[0].bucket, 20,
+        "survivor snapshot (orig pos 1) must remain; unsorted removal would delete it"
+    );
+}
+
+// ===== #17186 settle-miss ownership (queue gone after kernel commit) =====
+// These construct the miss directly (the production arms are unreachable
+// with a live &mut BindingWorker, so the helpers they delegate to are the
+// testable surface). FAIL-ON-REVERT: restoring the old subtract-back /
+// scratch-leaving arms makes the tracker/suffix/gauge assertions RED.
+
+#[test]
+fn settle_miss_local_fifo_records_prefix_no_suffix_recycle_17186() {
+    let mut scratch = vec![
+        ExactLocalScratchTxRequest { offset: 64, len: 10 },
+        ExactLocalScratchTxRequest { offset: 128, len: 10 },
+        ExactLocalScratchTxRequest { offset: 192, len: 10 },
+    ];
+    let mut untracked = crate::afxdp::FastSet::default();
+    let mut free_frames: VecDeque<u64> = VecDeque::new();
+    settle_exact_local_fifo_submission_queue_gone(&mut scratch, &mut untracked, 1);
+    assert!(scratch.is_empty(), "miss must clear the scratch");
+    assert!(untracked.contains(&64), "kernel-owned prefix must be tracked");
+    assert!(!untracked.contains(&128) && !untracked.contains(&192));
+    assert!(free_frames.is_empty(), "FIFO suffix copies are not recycled here");
+    // Gauge invariant is caller-side: outstanding stays at inserted (1),
+    // drained later by reap; no subtract happens in the helper.
+}
+
+#[test]
+fn settle_miss_local_flow_fair_records_prefix_recycles_suffix_17186() {
+    let mk = |b: u8| TxRequest {
+        bytes: vec![b].into(),
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: Some(0),
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: 0,
+    };
+    let mut scratch = vec![(64u64, mk(1)), (128, mk(2)), (192, mk(3))];
+    let mut free_frames: VecDeque<u64> = VecDeque::new();
+    let mut untracked = crate::afxdp::FastSet::default();
+    settle_exact_local_scratch_submission_flow_fair_queue_gone(
+        &mut free_frames,
+        &mut scratch,
+        &mut untracked,
+        1,
+    );
+    assert!(scratch.is_empty());
+    assert!(untracked.contains(&64), "inserted prefix recorded");
+    assert!(!untracked.contains(&128) && !untracked.contains(&192));
+    assert_eq!(free_frames, VecDeque::from([128, 192]), "suffix offsets recycled, no leak");
+}
+
+#[test]
+fn settle_miss_prepared_fifo_clears_scratch_17186() {
+    let mut scratch = vec![
+        ExactPreparedScratchTxRequest { offset: 64, len: 10 },
+        ExactPreparedScratchTxRequest { offset: 128, len: 10 },
+    ];
+    settle_exact_prepared_fifo_submission_queue_gone(&mut scratch, 1);
+    assert!(scratch.is_empty(), "miss must not leave the scratch for the next pass");
+}
+
+#[test]
+fn settle_miss_prepared_flow_fair_remembers_prefix_only_17186() {
+    let mk = |offset: u64, recycle: PreparedTxRecycle| PreparedTxRequest {
+        offset,
+        len: 10,
+        recycle,
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: Some(0),
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: 0,
+    };
+    // Prefix (inserted=1): FillOnSlot recycle must be remembered.
+    // Suffix: FreeTxFrame must NOT enter untracked.
+    let mut scratch = vec![
+        mk(64, PreparedTxRecycle::FillOnSlot(7)),
+        mk(128, PreparedTxRecycle::FreeTxFrame),
+        mk(192, PreparedTxRecycle::FreeTxFrame),
+    ];
+    let mut recycles: crate::afxdp::FastMap<u64, PreparedTxRecycle> = Default::default();
+    let mut untracked = crate::afxdp::FastSet::default();
+    settle_exact_prepared_scratch_submission_flow_fair_queue_gone(
+        &mut scratch,
+        &mut recycles,
+        &mut untracked,
+        1,
+    );
+    assert!(scratch.is_empty());
+    assert_eq!(recycles.get(&64), Some(&PreparedTxRecycle::FillOnSlot(7)), "prefix recycle remembered");
+    assert!(!untracked.contains(&128) && !untracked.contains(&192), "suffix must not be remembered");
+    assert!(recycles.get(&128).is_none() && recycles.get(&192).is_none());
 }
 
 // #17159: the non-exact CoS submit handlers must count a ring-full

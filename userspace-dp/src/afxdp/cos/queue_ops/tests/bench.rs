@@ -169,7 +169,7 @@ fn cos_exact_drain_throughput_micro_bench() {
         assert!(matches!(build, ExactCoSScratchBuild::Ready));
         let inserted = scratch.len();
         settle_exact_local_fifo_submission(
-            Some(&mut root.queues[0]),
+            &mut root.queues[0],
             &mut free_frames,
             &mut scratch,
             &mut in_flight_untracked_tx,
@@ -206,7 +206,7 @@ fn cos_exact_drain_throughput_micro_bench() {
         );
         let inserted = scratch.len();
         let (sent_pkts, sent_bytes) = settle_exact_local_fifo_submission(
-            Some(&mut root.queues[0]),
+            &mut root.queues[0],
             &mut free_frames,
             &mut scratch,
             &mut in_flight_untracked_tx,
@@ -375,7 +375,7 @@ fn bench_pop_commit_settle_publish() {
         );
         let inserted = scratch.len();
         settle_exact_local_scratch_submission_flow_fair(
-            Some(&mut root.queues[0]),
+            &mut root.queues[0],
             &mut free_frames,
             &mut scratch,
             &mut in_flight_untracked_tx,
@@ -405,7 +405,7 @@ fn bench_pop_commit_settle_publish() {
         );
         let inserted = scratch.len();
         settle_exact_local_scratch_submission_flow_fair(
-            Some(&mut root.queues[0]),
+            &mut root.queues[0],
             &mut free_frames,
             &mut scratch,
             &mut in_flight_untracked_tx,

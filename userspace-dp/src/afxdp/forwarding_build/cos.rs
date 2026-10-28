@@ -65,60 +65,55 @@ fn materialized_queue_or_default(
 /// ingest has no table to index, so it compares against this constant.
 const COS_MAX_DSCP_CODE_POINT: u8 = 63;
 
-fn build_cos_dscp_queue_table(
+/// #17228: the single table-building body behind all six CoS
+/// code-point → queue / loss-priority builders. The DSCP (64-entry) and
+/// 802.1p / IP-precedence (8-entry) families used to be six copy-pasted
+/// bodies, and they had already diverged once: before #2447 the DSCP
+/// copy masked out-of-range code-points (`dscp & 0x3f`, 110 → 46)
+/// while the PCP copy clamped (`pcp.min(7)`, 9 → 7); #11679 then had to
+/// rewrite all six copies in lockstep. Keeping exactly one body makes
+/// that divergence unrepresentable: the empty-name early return, the
+/// missing-classifier all-`u8::MAX` result, and the fail-CLOSED
+/// `invalid` error happen once, and a new code-point family becomes one
+/// thin wrapper below, not a seventh copy. Per-family behaviour enters
+/// only through the two closures — `invalid` reports the first retained
+/// out-of-range code-point (or `None`), and `fill_code_points` writes
+/// the classified entries into `table`.
+fn build_code_point_table<const N: usize, C>(
     classifier_name: &str,
-    classifiers: &FastMap<String, CoSDSCPClassifierConfig>,
-    materialized_queues: &[u8],
-    default_queue: u8,
-) -> Result<[u8; 64], crate::policy::SnapshotIntegrityError> {
-    let mut table = [u8::MAX; 64];
+    classifiers: &FastMap<String, C>,
+    invalid: impl Fn(&C) -> Option<crate::policy::SnapshotIntegrityError>,
+    fill_code_points: impl Fn(&C, &mut [u8; N]),
+) -> Result<[u8; N], crate::policy::SnapshotIntegrityError> {
+    let mut table = [u8::MAX; N];
     if classifier_name.is_empty() {
         return Ok(table);
     }
     if let Some(classifier) = classifiers.get(classifier_name) {
-        if let Some(dscp) = classifier.invalid_dscp {
-            return Err(crate::policy::SnapshotIntegrityError::CosDscpCodePointOutOfRange {
-                classifier: classifier_name.to_string(),
-                dscp,
-            });
+        if let Some(error) = invalid(classifier) {
+            return Err(error);
         }
-        for (dscp, queue_id) in classifier.queue_by_dscp.iter().enumerate() {
-            if let Some(queue_id) = queue_id {
-                table[dscp] =
-                    materialized_queue_or_default(*queue_id, materialized_queues, default_queue);
-            }
-        }
+        fill_code_points(classifier, &mut table);
     }
     Ok(table)
 }
 
-fn build_cos_ieee8021_queue_table(
-    classifier_name: &str,
-    classifiers: &FastMap<String, CoSIEEE8021ClassifierConfig>,
+/// #17228: queue fill shared by the three code-point → queue tables:
+/// copy each classified code-point into the table, substituting the
+/// interface default queue when the mapped queue is not materialized
+/// on the interface (#hb166 T-4, see [`materialized_queue_or_default`]).
+fn fill_queue_table<const N: usize>(
+    queue_by_code_point: &[Option<u8>; N],
     materialized_queues: &[u8],
     default_queue: u8,
-) -> Result<[u8; 8], crate::policy::SnapshotIntegrityError> {
-    let mut table = [u8::MAX; 8];
-    if classifier_name.is_empty() {
-        return Ok(table);
-    }
-    if let Some(classifier) = classifiers.get(classifier_name) {
-        if let Some(pcp) = classifier.invalid_pcp {
-            return Err(
-                crate::policy::SnapshotIntegrityError::CosIeee8021CodePointOutOfRange {
-                    classifier: classifier_name.to_string(),
-                    pcp,
-                },
-            );
-        }
-        for (pcp, queue_id) in classifier.queue_by_pcp.iter().enumerate() {
-            if let Some(queue_id) = queue_id {
-                table[pcp] =
-                    materialized_queue_or_default(*queue_id, materialized_queues, default_queue);
-            }
+    table: &mut [u8; N],
+) {
+    for (code_point, queue_id) in queue_by_code_point.iter().enumerate() {
+        if let Some(queue_id) = queue_id {
+            table[code_point] =
+                materialized_queue_or_default(*queue_id, materialized_queues, default_queue);
         }
     }
-    Ok(table)
 }
 
 /// #3995: map a Junos loss-priority string to an internal index
@@ -135,6 +130,74 @@ pub(super) fn cos_loss_priority_index(value: &str) -> Option<u8> {
     }
 }
 
+/// #17228: loss-priority fill shared by the three code-point → LP
+/// tables: copy each classified code-point, leaving `u8::MAX` for
+/// unclassified code-points (resolved to the default LOW loss-priority
+/// at classification time).
+fn fill_lp_table<const N: usize>(lp_by_code_point: &[u8; N], table: &mut [u8; N]) {
+    for (code_point, &lp) in lp_by_code_point.iter().enumerate() {
+        if lp != u8::MAX {
+            table[code_point] = lp;
+        }
+    }
+}
+
+fn build_cos_dscp_queue_table(
+    classifier_name: &str,
+    classifiers: &FastMap<String, CoSDSCPClassifierConfig>,
+    materialized_queues: &[u8],
+    default_queue: u8,
+) -> Result<[u8; 64], crate::policy::SnapshotIntegrityError> {
+    build_code_point_table(
+        classifier_name,
+        classifiers,
+        |classifier| {
+            classifier.invalid_dscp.map(|dscp| {
+                crate::policy::SnapshotIntegrityError::CosDscpCodePointOutOfRange {
+                    classifier: classifier_name.to_string(),
+                    dscp,
+                }
+            })
+        },
+        |classifier, table| {
+            fill_queue_table(
+                &classifier.queue_by_dscp,
+                materialized_queues,
+                default_queue,
+                table,
+            )
+        },
+    )
+}
+
+fn build_cos_ieee8021_queue_table(
+    classifier_name: &str,
+    classifiers: &FastMap<String, CoSIEEE8021ClassifierConfig>,
+    materialized_queues: &[u8],
+    default_queue: u8,
+) -> Result<[u8; 8], crate::policy::SnapshotIntegrityError> {
+    build_code_point_table(
+        classifier_name,
+        classifiers,
+        |classifier| {
+            classifier.invalid_pcp.map(|pcp| {
+                crate::policy::SnapshotIntegrityError::CosIeee8021CodePointOutOfRange {
+                    classifier: classifier_name.to_string(),
+                    pcp,
+                }
+            })
+        },
+        |classifier, table| {
+            fill_queue_table(
+                &classifier.queue_by_pcp,
+                materialized_queues,
+                default_queue,
+                table,
+            )
+        },
+    )
+}
+
 /// #3995: flatten a DSCP classifier's `lp_by_dscp` into a fixed 64-entry table.
 /// `u8::MAX` marks an unclassified code-point (resolves to the default LOW
 /// loss-priority at classification time). Out-of-range values fail only when
@@ -143,58 +206,53 @@ fn build_cos_dscp_lp_table(
     classifier_name: &str,
     classifiers: &FastMap<String, CoSDSCPClassifierConfig>,
 ) -> Result<[u8; 64], crate::policy::SnapshotIntegrityError> {
-    let mut table = [u8::MAX; 64];
-    if classifier_name.is_empty() {
-        return Ok(table);
-    }
-    if let Some(classifier) = classifiers.get(classifier_name) {
-        if let Some(dscp) = classifier.invalid_dscp {
-            return Err(crate::policy::SnapshotIntegrityError::CosDscpCodePointOutOfRange {
-                classifier: classifier_name.to_string(),
-                dscp,
-            });
-        }
-        for (dscp, &lp) in classifier.lp_by_dscp.iter().enumerate() {
-            if lp != u8::MAX {
-                table[dscp] = lp;
-            }
-        }
-    }
-    Ok(table)
+    build_code_point_table(
+        classifier_name,
+        classifiers,
+        |classifier| {
+            classifier.invalid_dscp.map(|dscp| {
+                crate::policy::SnapshotIntegrityError::CosDscpCodePointOutOfRange {
+                    classifier: classifier_name.to_string(),
+                    dscp,
+                }
+            })
+        },
+        |classifier, table| fill_lp_table(&classifier.lp_by_dscp, table),
+    )
 }
 
 /// #6847: build the per-interface IP-precedence code-point → queue table.
-/// Mirrors [`build_cos_ieee8021_queue_table`] (same 3-bit code-point domain,
-/// same fail-CLOSED on an out-of-range code-point, same #hb166 T-4
-/// materialized-queue fallback), but the code-point comes from the DS field
-/// rather than the 802.1Q tag.
+/// Same 3-bit code-point domain, same fail-CLOSED on an out-of-range
+/// code-point, and same #hb166 T-4 materialized-queue fallback as the
+/// 802.1p table, but the code-point comes from the DS field rather than
+/// the 802.1Q tag. All three are thin wrappers over
+/// [`build_code_point_table`] (#17228).
 fn build_cos_inet_precedence_queue_table(
     classifier_name: &str,
     classifiers: &FastMap<String, CoSINetPrecedenceClassifierConfig>,
     materialized_queues: &[u8],
     default_queue: u8,
 ) -> Result<[u8; 8], crate::policy::SnapshotIntegrityError> {
-    let mut table = [u8::MAX; 8];
-    if classifier_name.is_empty() {
-        return Ok(table);
-    }
-    if let Some(classifier) = classifiers.get(classifier_name) {
-        if let Some(precedence) = classifier.invalid_precedence {
-            return Err(
+    build_code_point_table(
+        classifier_name,
+        classifiers,
+        |classifier| {
+            classifier.invalid_precedence.map(|precedence| {
                 crate::policy::SnapshotIntegrityError::CosInetPrecedenceCodePointOutOfRange {
                     classifier: classifier_name.to_string(),
                     precedence,
-                },
-            );
-        }
-        for (precedence, queue_id) in classifier.queue_by_prec.iter().enumerate() {
-            if let Some(queue_id) = queue_id {
-                table[precedence] =
-                    materialized_queue_or_default(*queue_id, materialized_queues, default_queue);
-            }
-        }
-    }
-    Ok(table)
+                }
+            })
+        },
+        |classifier, table| {
+            fill_queue_table(
+                &classifier.queue_by_prec,
+                materialized_queues,
+                default_queue,
+                table,
+            )
+        },
+    )
 }
 
 /// #6847: flatten the IP-precedence loss priority into an 8-entry table.
@@ -203,26 +261,19 @@ fn build_cos_inet_precedence_lp_table(
     classifier_name: &str,
     classifiers: &FastMap<String, CoSINetPrecedenceClassifierConfig>,
 ) -> Result<[u8; 8], crate::policy::SnapshotIntegrityError> {
-    let mut table = [u8::MAX; 8];
-    if classifier_name.is_empty() {
-        return Ok(table);
-    }
-    if let Some(classifier) = classifiers.get(classifier_name) {
-        if let Some(precedence) = classifier.invalid_precedence {
-            return Err(
+    build_code_point_table(
+        classifier_name,
+        classifiers,
+        |classifier| {
+            classifier.invalid_precedence.map(|precedence| {
                 crate::policy::SnapshotIntegrityError::CosInetPrecedenceCodePointOutOfRange {
                     classifier: classifier_name.to_string(),
                     precedence,
-                },
-            );
-        }
-        for (precedence, &lp) in classifier.lp_by_prec.iter().enumerate() {
-            if lp != u8::MAX {
-                table[precedence] = lp;
-            }
-        }
-    }
-    Ok(table)
+                }
+            })
+        },
+        |classifier, table| fill_lp_table(&classifier.lp_by_prec, table),
+    )
 }
 
 /// #3995: flatten an 802.1p classifier's loss-priority into an 8-entry table.
@@ -231,28 +282,20 @@ fn build_cos_ieee8021_lp_table(
     classifier_name: &str,
     classifiers: &FastMap<String, CoSIEEE8021ClassifierConfig>,
 ) -> Result<[u8; 8], crate::policy::SnapshotIntegrityError> {
-    let mut table = [u8::MAX; 8];
-    if classifier_name.is_empty() {
-        return Ok(table);
-    }
-    if let Some(classifier) = classifiers.get(classifier_name) {
-        if let Some(pcp) = classifier.invalid_pcp {
-            return Err(
+    build_code_point_table(
+        classifier_name,
+        classifiers,
+        |classifier| {
+            classifier.invalid_pcp.map(|pcp| {
                 crate::policy::SnapshotIntegrityError::CosIeee8021CodePointOutOfRange {
                     classifier: classifier_name.to_string(),
                     pcp,
-                },
-            );
-        }
-        for (pcp, &lp) in classifier.lp_by_pcp.iter().enumerate() {
-            if lp != u8::MAX {
-                table[pcp] = lp;
-            }
-        }
-    }
-    Ok(table)
+                }
+            })
+        },
+        |classifier, table| fill_lp_table(&classifier.lp_by_pcp, table),
+    )
 }
-
 
 /// #3995: the loss-priority-INDEPENDENT rewrite for a forwarding-class, or
 /// `None`. `Some(v)` only when EVERY loss-priority maps to the same code-point
@@ -1430,7 +1473,9 @@ pub(super) fn build_cos_state(
             continue;
         }
         let ingress_bindings = CoSIngressClassifierBindings {
-            dscp: dscp_classifier_indexes.get(&iface.cos_dscp_classifier).copied(),
+            dscp: dscp_classifier_indexes
+                .get(&iface.cos_dscp_classifier)
+                .copied(),
             inet_precedence: inet_precedence_classifier_indexes
                 .get(&iface.cos_inet_precedence_classifier)
                 .copied(),
@@ -1483,10 +1528,8 @@ pub(super) fn build_cos_state(
                     true
                 }
                 None => {
-                    first_unit_by_ifindex.insert(
-                        iface.ifindex,
-                        (iface, built.is_some(), ingress_bindings),
-                    );
+                    first_unit_by_ifindex
+                        .insert(iface.ifindex, (iface, built.is_some(), ingress_bindings));
                     false
                 }
             }
@@ -1510,8 +1553,7 @@ pub(super) fn build_cos_state(
             // guard above); it must never overwrite — or block — the logical
             // unit's runtime state for the shared ifindex, in either order.
             if !duplicate_unit
-                && (iface.is_unit != Some(false)
-                    || !state.interfaces.contains_key(&iface.ifindex))
+                && (iface.is_unit != Some(false) || !state.interfaces.contains_key(&iface.ifindex))
             {
                 state.lp_rewrite.insert(iface.ifindex, lp_rewrite);
                 state.interfaces.insert(iface.ifindex, cfg);
@@ -1530,13 +1572,16 @@ pub(super) fn build_cos_state(
 mod remainder_temporal_tests_6846;
 
 #[cfg(test)]
+#[path = "cos_base_overwrite_14663.rs"]
+mod cos_base_overwrite_14663;
+#[cfg(test)]
+#[path = "cos_code_point_table_parity_17228.rs"]
+mod cos_code_point_table_parity_17228;
+#[cfg(test)]
 #[path = "cos_duplicate_ifindex_11429.rs"]
 mod cos_duplicate_ifindex_11429;
-#[cfg(test)]
-mod dangling_refs_7337;
 #[cfg(test)]
 #[path = "cos_ingress_domains_11679.rs"]
 mod cos_ingress_domains_11679;
 #[cfg(test)]
-#[path = "cos_base_overwrite_14663.rs"]
-mod cos_base_overwrite_14663;
+mod dangling_refs_7337;

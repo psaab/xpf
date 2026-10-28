@@ -51,9 +51,10 @@ mod tx_inbox;
 // `profile::Owner|Peer` precedent and to avoid E0364 (documented in
 // `userspace-dp/src/afxdp/tx/mod.rs:38`).
 pub(in crate::afxdp) use debug_state::{
-    DEBUG_STATE_PUBLISH_MASK, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
     advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
-    update_binding_debug_state, update_binding_idle_debug_state,
+    publish_binding_debug_state_fields, update_binding_debug_state,
+    update_binding_idle_debug_state, DEBUG_STATE_PUBLISH_MASK,
+    IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
 };
 pub(in crate::afxdp) use latency::{
     DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS, TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,

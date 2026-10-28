@@ -3,6 +3,7 @@ package userspace
 import (
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,11 +24,32 @@ import (
 // success does. That reset is what spares a helper under RECOVERING pressure,
 // because any poll that gets through starts the count over.
 //
+// #18293: an answered-but-undecodable status is also an answer. The helper
+// wrote bytes and Go failed to decode them (wire drift, a partial status, or
+// our own response cap). That proves the accept loop is alive, so it must NOT
+// advance the wedge count — otherwise a healthy, answering helper is SIGKILLed
+// for a Go/Rust wire mismatch. It surfaces instead as a decode error: the
+// statusLoop Warn names it, and StatusPollDecodeErrors (exported as
+// xpf_status_poll_decode_errors_total) counts it for alerting. Unlike a
+// successful decode or an in-band refusal, it does NOT reset an in-progress
+// silence count either: it is neither silence nor a usable answer, so the
+// prior genuine-silence streak stays exactly as it was.
+//
 // When the count and a minimum wall-clock span are both reached, the helper is
 // killed, and the supervisor's unexpected-exit path does the rest: disarm the
 // shim, record the crash, restart with backoff. Nothing here restarts anything
 // itself. The kill is deferred briefly after an RG activation, so a failover's
 // own control-socket load cannot turn into a restart in the middle of it.
+
+// statusPollDecodeErrors counts status polls the helper ANSWERED but Go
+// could not decode (#18293), process-lifetime. Per-manager counts live on
+// helperLiveness.decodeErrors; this atomic is the Prometheus source, in the
+// BindingWedgeGiveups shape.
+var statusPollDecodeErrors atomic.Uint64
+
+// StatusPollDecodeErrors reports answered-but-undecodable status polls.
+func StatusPollDecodeErrors() uint64 { return statusPollDecodeErrors.Load() }
+
 const (
 	// helperWedgeFailedPolls is how many consecutive unanswered status polls
 	// (1/s) make a helper wedged.
@@ -45,15 +67,27 @@ type helperLiveness struct {
 	failures     int
 	firstFailure time.Time
 	kills        uint64
+	// decodeErrors counts answered-but-undecodable status polls (#18293).
+	// Guarded by m.mu like the rest of this struct; the process-lifetime
+	// Prometheus counter is statusPollDecodeErrors (this file).
+	decodeErrors uint64
 }
 
 // noteStatusPollResultLocked records one status poll and reports whether the
 // helper should now be killed as wedged. err is the poll's error: nil for an
-// answer, a helper rejection for an in-band refusal (also an answer).
+// answer, a helper rejection for an in-band refusal (also an answer), and a
+// status-decode error for an answered-but-undecodable reply (#18293: also an
+// answer for wedge purposes — counted separately, never a kill, and it
+// neither advances nor resets the silence streak).
 func (m *Manager) noteStatusPollResultLocked(err error, now time.Time) bool {
 	if err == nil || errors.Is(err, errHelperRejected) {
 		m.liveness.failures = 0
 		m.liveness.firstFailure = time.Time{}
+		return false
+	}
+	if errors.Is(err, errStatusDecode) {
+		m.liveness.decodeErrors++
+		statusPollDecodeErrors.Add(1)
 		return false
 	}
 	if m.liveness.failures == 0 {
