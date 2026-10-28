@@ -509,9 +509,12 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 	// text back into the outer token would needlessly re-encode nested
 	// quotes, and the placeholder the inner render produces is exactly
 	// what the outer quotes framed.
-	if len(tokens) == 1 && quoted[0] && lexOK && !comments {
+	if len(tokens) == 1 && quoted[0] && lexOK {
 		if innerRendered, innerChanged := redactEmbeddedCommand(tokens[0], fingerprint); innerChanged {
 			return innerRendered, true
+		}
+		if comments {
+			return wholePayloadMask16726(cmd, fingerprint)
 		}
 		return cmd, false
 	}
@@ -531,6 +534,16 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 		// rendered safely token-wise (the quoted sentence stays one
 		// opaque token), so fail closed.
 		return wholePayloadMask16726(cmd, fingerprint)
+	}
+	// A quoted credential sentence at ANY token position (not just
+	// first) is one opaque token to the judge below; recurse into it
+	// and fail closed when its content masks.
+	for i, tok := range tokens {
+		if i < len(quoted) && quoted[i] {
+			if _, innerChanged := redactEmbeddedCommand(tok, fingerprint); innerChanged {
+				return wholePayloadMask16726(cmd, fingerprint)
+			}
+		}
 	}
 	changed := redactEmbeddedTokens(tokens, fingerprint)
 	if !lexOK && !changed {

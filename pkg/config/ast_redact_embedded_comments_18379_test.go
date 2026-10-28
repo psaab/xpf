@@ -57,9 +57,9 @@ func TestRedactEmbeddedCommentPayloads18379(t *testing.T) {
 			keepOrdinary: true,
 		},
 		{
-			name:         "quoted prefix with comment tail credential",
-			command:      strconv.Quote("set system host-name preserved") + " # " + credential,
-			keepOrdinary: true,
+			name:            "quoted prefix with comment tail credential",
+			command:         strconv.Quote("set system host-name preserved") + " # " + credential,
+			wantPlaceholder: true,
 		},
 		{
 			name:            "quoted prefix with junk tail credential",
@@ -133,5 +133,18 @@ func TestRedactQuotedPrefixWithTail18379(t *testing.T) {
 		if strings.Contains(out, commentPayloadSecret18379) {
 			t.Errorf("quoted prefix with tail leaked credential: %q -> %q", cmd, out)
 		}
+	}
+}
+
+func TestRedactQuotedSentenceAtLaterPosition18379(t *testing.T) {
+	cmd := "run harmless " + strconv.Quote("set security ike policy p1 pre-shared-key ascii-text "+commentPayloadSecret18379)
+	out, _ := redactEmbeddedCommand(cmd, true)
+	if strings.Contains(out, commentPayloadSecret18379) {
+		t.Errorf("quoted credential sentence at later position leaked: %q", out)
+	}
+	credQuote := strconv.Quote("set security ike policy p1 pre-shared-key ascii-text " + commentPayloadSecret18379)
+	out2, _ := redactEmbeddedCommand(credQuote+" # harmless", true)
+	if strings.Contains(out2, commentPayloadSecret18379) {
+		t.Errorf("quoted credential with outer comment leaked: %q", out2)
 	}
 }
