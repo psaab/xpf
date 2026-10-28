@@ -905,13 +905,313 @@ func gateCompileSet(cmds []string) (string, error) {
 	return gateMarshal(cfg)
 }
 
-var gateSpellingsMulti = []string{"A-hier-bracket", "B-hier-block", "C-hier-repeat", "D-set-bracket", "E-set-repeat", "F-hier-mixed"}
+// gateSpellingForm is ONE row of the single spelling table (#17191): the
+// name both gates cite, the two-value differential author
+// (zero/one/two compiled-output probes, used by spellingVerdicts), and
+// the slot-escape commit author (used by slotEscapeForms). Before #17191
+// the differential kept gateSpellingsMulti/gateSpellingsScalar plus a
+// forms map in spellingVerdicts, while TestSlotEscapeSweep rebuilt the
+// same A–E spellings in its own path convention — every new spelling was
+// a two-place edit and F-hier-mixed was already missing from the
+// slot-escape gate. There is now exactly one table; adding a spelling
+// is one row here, and TestGateSpellingFormsShared17191 proves both
+// gates enumerate it.
+//
+// repeated: the repeated spellings (C/E) legitimately REPLACE on a
+// scalar (multi:false) leaf (last write wins), so the differential
+// compares only non-repeated spellings there — comparing C/E would
+// manufacture a finding at every scalar leaf. slotEscapeOnly marks
+// forms the differential deliberately does not score as compiled-output
+// spellings (G is refused at the walker for gated leaves; see
+// schema_slot_escape_gate_test.go) but the slot-escape sweep still
+// probes; differentialOnly is the converse (none today).
+// mixedModifierExempt marks F: at sites in mixedChildIsAModifierBlock
+// its verdict carries no information and is dropped from comparison.
+type gateSpellingForm struct {
+	name string
+	// verdict authors the zero-, one- and two-value compiled outputs.
+	// Nil when slotEscapeOnly.
+	verdict func(g gateLeaf, vals []string) [3]func() (string, error)
+	// escape commits vals through the operator commit path (strict
+	// schema walk + CompileConfig). Nil when differentialOnly.
+	escape           func(g gateLeaf, vals []string) error
+	repeated         bool
+	slotEscapeOnly   bool
+	differentialOnly bool
+	// scalarExempt: this form is scored only on multi:true leaves.
+	// F is the scalar-exempt form: on a scalar leaf `leaf v1 { v2; }`
+	// does not author a two-element list the way A/B/D do — v2 rides
+	// a modifier block (see mixedChildIsAModifierBlock) — so the
+	// pre-#17191 scalar set {A,B,D} excluded it. (C/E are excluded
+	// from scalar sets via repeated instead.)
+	scalarExempt bool
+	// mixedChildExempt: the mixed spelling's child slot is a modifier
+	// position, not a second value, at this site, so its slot-escape
+	// probe is bucketed with the differential's modifier sites.
+	mixedModifierExempt bool
+	// slotEscapeExemptSites names sites where this form's shape is
+	// not a two-element value list at all, so the slot-escape sweep
+	// must not probe it there. Today only F at the
+	// mixedChildIsAModifierBlock sites: `archive-sites a { bad; }`
+	// authors ONE site `a` with a modifier child, so a "rejected"
+	// second token commits clean BY DESIGN (an unrecognised
+	// modifier is ignored — the same fact that makes its
+	// differential verdict meaningless). Bucketing this site for F
+	// keeps every OTHER site probed in the mixed shape.
+	slotEscapeExemptSites map[string]bool
+}
 
-// gateSpellingsScalar omits the REPEATED spellings. For a leaf the schema marks
-// multi: false, a repeated statement legitimately REPLACES (last write wins), so
-// comparing C and E against the bracket forms would manufacture a finding at
-// every scalar leaf in the schema.
-var gateSpellingsScalar = []string{"A-hier-bracket", "B-hier-block", "D-set-bracket"}
+// gateSpellingForms is the single spelling table consumed by
+// spellingVerdicts (differential) and slotEscapeForms (slot-escape).
+// Order is presentation order in failure output.
+func gateSpellingForms() []gateSpellingForm {
+	return []gateSpellingForm{
+		{
+			name: "A-hier-bracket",
+			verdict: func(g gateLeaf, vals []string) [3]func() (string, error) {
+				v1, v2 := vals[0], vals[1]
+				return [3]func() (string, error){
+					func() (string, error) { return spellingBrace(g, g.leaf+";") },
+					func() (string, error) {
+						return spellingBrace(g, fmt.Sprintf("%s [ %s ];", g.leaf, v1))
+					},
+					func() (string, error) {
+						return spellingBrace(g, fmt.Sprintf("%s [ %s %s ];", g.leaf, v1, v2))
+					},
+				}
+			},
+			escape: func(g gateLeaf, vals []string) error {
+				return slotEscapeCommitBrace(gateBraceConfig(g.path,
+					fmt.Sprintf("%s [ %s ];", g.leaf, strings.Join(vals, " "))))
+			},
+		},
+		{
+			name: "B-hier-block",
+			verdict: func(g gateLeaf, vals []string) [3]func() (string, error) {
+				v1, v2 := vals[0], vals[1]
+				return [3]func() (string, error){
+					func() (string, error) { return spellingBrace(g, g.leaf+" { }") },
+					func() (string, error) {
+						return spellingBrace(g, fmt.Sprintf("%s { %s; }", g.leaf, v1))
+					},
+					func() (string, error) {
+						return spellingBrace(g, fmt.Sprintf("%s { %s; %s; }", g.leaf, v1, v2))
+					},
+				}
+			},
+			escape: func(g gateLeaf, vals []string) error {
+				var b strings.Builder
+				for _, v := range vals {
+					b.WriteString(v)
+					b.WriteString("; ")
+				}
+				return slotEscapeCommitBrace(gateBraceConfig(g.path,
+					fmt.Sprintf("%s { %s}", g.leaf, b.String())))
+			},
+		},
+		{
+			name:     "C-hier-repeat",
+			repeated: true,
+			verdict: func(g gateLeaf, vals []string) [3]func() (string, error) {
+				v1, v2 := vals[0], vals[1]
+				return [3]func() (string, error){
+					func() (string, error) { return spellingBrace(g, g.leaf+";") },
+					func() (string, error) {
+						return spellingBrace(g, fmt.Sprintf("%s %s;", g.leaf, v1))
+					},
+					func() (string, error) {
+						return spellingBrace(g, fmt.Sprintf("%s %s; %s %s;", g.leaf, v1, g.leaf, v2))
+					},
+				}
+			},
+			escape: func(g gateLeaf, vals []string) error {
+				var b strings.Builder
+				for _, v := range vals {
+					b.WriteString(g.leaf)
+					b.WriteString(" ")
+					b.WriteString(v)
+					b.WriteString("; ")
+				}
+				return slotEscapeCommitBrace(gateBraceConfig(g.path, b.String()))
+			},
+		},
+		{
+			name: "D-set-bracket",
+			verdict: func(g gateLeaf, vals []string) [3]func() (string, error) {
+				v1, v2 := vals[0], vals[1]
+				return [3]func() (string, error){
+					func() (string, error) { return spellingSets(g) },
+					func() (string, error) { return spellingSets(g, fmt.Sprintf("%s [ %s ]", spellingFlat(g), v1)) },
+					func() (string, error) { return spellingSets(g, fmt.Sprintf("%s [ %s %s ]", spellingFlat(g), v1, v2)) },
+				}
+			},
+			escape: func(g gateLeaf, vals []string) error {
+				if len(vals) == 1 {
+					return slotEscapeCommitSet([]string{slotEscapeFlatPrefix(g) + " " + vals[0]})
+				}
+				return slotEscapeCommitSet([]string{slotEscapeFlatPrefix(g) + " [ " + strings.Join(vals, " ") + " ]"})
+			},
+		},
+		{
+			name:     "E-set-repeat",
+			repeated: true,
+			verdict: func(g gateLeaf, vals []string) [3]func() (string, error) {
+				v1, v2 := vals[0], vals[1]
+				return [3]func() (string, error){
+					func() (string, error) { return spellingSets(g) },
+					func() (string, error) { return spellingSets(g, spellingFlat(g)+" "+v1) },
+					func() (string, error) { return spellingSets(g, spellingFlat(g)+" "+v1, spellingFlat(g)+" "+v2) },
+				}
+			},
+			escape: func(g gateLeaf, vals []string) error {
+				var cmds []string
+				for _, v := range vals {
+					cmds = append(cmds, slotEscapeFlatPrefix(g)+" "+v)
+				}
+				return slotEscapeCommitSet(cmds)
+			},
+		},
+		{
+			// #6693: a value in the IDENTIFIER slot beside a block. It is
+			// the only spelling that puts values in BOTH AST slots of
+			// one node — Keys[1:] AND Children — so an either/or reader
+			// agrees with itself across A–E and drops the tail here.
+			// The zero-value form has no mixed spelling, so it reuses
+			// the block form's empty body (inert check only).
+			name:                "F-hier-mixed",
+			scalarExempt:        true,
+			mixedModifierExempt: true,
+			slotEscapeExemptSites: map[string]bool{
+				"system archival configuration archive-sites": true,
+			},
+			verdict: func(g gateLeaf, vals []string) [3]func() (string, error) {
+				v1, v2 := vals[0], vals[1]
+				return [3]func() (string, error){
+					func() (string, error) { return spellingBrace(g, g.leaf+" { }") },
+					func() (string, error) {
+						return spellingBrace(g, fmt.Sprintf("%s %s;", g.leaf, v1))
+					},
+					func() (string, error) {
+						return spellingBrace(g, fmt.Sprintf("%s %s { %s; }", g.leaf, v1, v2))
+					},
+				}
+			},
+			escape: func(g gateLeaf, vals []string) error {
+				// Slot-escape authors the same shape the differential
+				// scores: one token in the identifier slot, the rest
+				// one-per-statement inside the block. A single value
+				// rides the identifier slot alone (`leaf v1;`).
+				if len(vals) == 1 {
+					return slotEscapeCommitBrace(gateBraceConfig(g.path,
+						fmt.Sprintf("%s %s;", g.leaf, vals[0])))
+				}
+				var b strings.Builder
+				for _, v := range vals[1:] {
+					b.WriteString(v)
+					b.WriteString("; ")
+				}
+				return slotEscapeCommitBrace(gateBraceConfig(g.path,
+					fmt.Sprintf("%s %s { %s}", g.leaf, vals[0], b.String())))
+			},
+		},
+		{
+			// #16535: BOTH tokens on ONE statement inside the block
+			// (`leaf { v1 v2; }`), a single AST child with
+			// Keys=[v1 v2]. Distinct from B-hier-block (one value per
+			// statement). Slot-escape only: the differential
+			// deliberately does not score it as a compiled-output
+			// form (30 legitimate one-key-per-child readers would
+			// false-fire; see the header) — the walker REFUSES it
+			// at gated leaves instead.
+			name:           "G-hier-one-child-multi-token",
+			slotEscapeOnly: true,
+			escape: func(g gateLeaf, vals []string) error {
+				return slotEscapeCommitBrace(gateBraceConfig(g.path,
+					fmt.Sprintf("%s { %s; }", g.leaf, strings.Join(vals, " "))))
+			},
+		},
+	}
+}
+
+// gateSpellingNames returns the shared table's names in order.
+func gateSpellingNames() []string {
+	forms := gateSpellingForms()
+	out := make([]string, len(forms))
+	for i, f := range forms {
+		out[i] = f.name
+	}
+	return out
+}
+
+// gateComparisonSpellings returns the differential's comparison set for
+// g: every non-slotEscapeOnly form, minus the repeated forms for a
+// scalar leaf, minus F at mixedChildIsAModifierBlock sites.
+func gateComparisonSpellings(g gateLeaf) []string {
+	var out []string
+	_, modifier := mixedChildIsAModifierBlock[g.siteKey()]
+	for _, f := range gateSpellingForms() {
+		if f.slotEscapeOnly {
+			continue
+		}
+		if !g.multi && (f.repeated || f.scalarExempt) {
+			continue
+		}
+		if modifier && f.mixedModifierExempt {
+			continue
+		}
+		out = append(out, f.name)
+	}
+	return out
+}
+
+// gateSlotEscapeSpellings returns the slot-escape sweep's forms for g:
+// every non-differentialOnly form, minus a form's exempt sites (today
+// only F at the mixedChildIsAModifierBlock sites, whose child slot is
+// a modifier position — see gateSpellingForm.slotEscapeExemptSites).
+func gateSlotEscapeSpellings(g gateLeaf) []gateSpellingForm {
+	var out []gateSpellingForm
+	for _, f := range gateSpellingForms() {
+		if f.differentialOnly || f.escape == nil {
+			continue
+		}
+		if f.slotEscapeExemptSites[g.siteKey()] {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// slotEscapeFlatPrefix is the flat-set prefix for g on its authored
+// path (g.path). The differential's set spellings use spellingFlat,
+// which is built on the EFFECTIVE path instead — the two conventions
+// are per-gate and stay explicit here.
+func slotEscapeFlatPrefix(g gateLeaf) string {
+	return "set " + strings.Join(append(append([]string{}, g.path...), g.leaf), " ")
+}
+
+// spellingBrace/spellingSets/spellingFlat are the differential's compile
+// context for g: effective path plus parent/root prerequisites (#7492),
+// identical in every form so they cancel out of the comparison.
+func spellingBrace(g gateLeaf, stmt string) (string, error) {
+	preBody, _ := gateLeafPrereq(g)
+	rootBody, _ := gateRootPrereq(g)
+	if preBody != "" {
+		stmt = preBody + " " + stmt
+	}
+	return gateCompileBrace(rootBody + gateBraceConfig(gateEffectivePath(g), stmt))
+}
+
+func spellingSets(g gateLeaf, cmds ...string) (string, error) {
+	_, preSets := gateLeafPrereq(g)
+	_, rootSets := gateRootPrereq(g)
+	all := append(append([]string{}, rootSets...), preSets...)
+	return gateCompileSet(append(all, cmds...))
+}
+
+func spellingFlat(g gateLeaf) string {
+	return "set " + strings.Join(append(append([]string{}, gateEffectivePath(g)...), g.leaf), " ")
+}
 
 // spellingVerdicts returns, per spelling, one of:
 //
@@ -1124,87 +1424,69 @@ func gateLeafPrereq(g gateLeaf) (string, []string) {
 	return body, sets
 }
 
+// spellingVerdictKey identifies one (leaf, value-pair) verdict map.
+type spellingVerdictKey struct {
+	site, v1, v2 string
+}
+
+var spellingVerdictCacheMu sync.Mutex
+var spellingVerdictCache = map[spellingVerdictKey]map[string]string{}
+var spellingVerdictComputations int
+
+// spellingVerdicts is memoised (#17191): TestSchemaSpellingDifferentialGate,
+// gateLeafCompared (coverage + members census) and the classifier all ask
+// for the same (leaf, pair) verdicts in one package run, and before the
+// cache each call recomputed the whole matrix (6 spellings x 4 compiles).
+// The returned map is shared — callers MUST NOT mutate it.
 func spellingVerdicts(g gateLeaf, v1, v2 string) map[string]string {
-	epath := gateEffectivePath(g)
-	flat := "set " + strings.Join(append(append([]string{}, epath...), g.leaf), " ")
-	// #7492: prepend the parent prerequisite, identically in every form, so it
-	// cancels out of the comparison and only decides whether a comparison exists.
-	preBody, preSets := gateLeafPrereq(g)
-	rootBody, rootSets := gateRootPrereq(g)
-	brace := func(stmt string) (string, error) {
-		if preBody != "" {
-			stmt = preBody + " " + stmt
+	key := spellingVerdictKey{site: g.siteKey(), v1: v1, v2: v2}
+	spellingVerdictCacheMu.Lock()
+	if cached, ok := spellingVerdictCache[key]; ok {
+		spellingVerdictCacheMu.Unlock()
+		return cached
+	}
+	spellingVerdictCacheMu.Unlock()
+
+	state := computeSpellingVerdicts(g, v1, v2)
+
+	spellingVerdictCacheMu.Lock()
+	if cached, ok := spellingVerdictCache[key]; ok {
+		spellingVerdictCacheMu.Unlock()
+		return cached
+	}
+	spellingVerdictCache[key] = state
+	spellingVerdictComputations++
+	spellingVerdictCacheMu.Unlock()
+	return state
+}
+
+// spellingVerdictComputationCount reports how many distinct (leaf, pair)
+// verdict maps were actually computed in this process — the counter the
+// #17191 acceptance criterion asserts on (once per (leaf, pair)).
+func spellingVerdictComputationCount() int {
+	spellingVerdictCacheMu.Lock()
+	defer spellingVerdictCacheMu.Unlock()
+	return spellingVerdictComputations
+}
+
+// resetSpellingVerdictCacheForTest drops the memoised verdicts and the
+// computation counter. Used by the #17191 self-test so it can measure a
+// clean window regardless of what ran before it in the package.
+func resetSpellingVerdictCacheForTest() {
+	spellingVerdictCacheMu.Lock()
+	defer spellingVerdictCacheMu.Unlock()
+	spellingVerdictCache = map[spellingVerdictKey]map[string]string{}
+	spellingVerdictComputations = 0
+}
+
+func computeSpellingVerdicts(g gateLeaf, v1, v2 string) map[string]string {
+	vals := []string{v1, v2}
+	var forms []gateSpellingForm
+	for _, f := range gateSpellingForms() {
+		if f.slotEscapeOnly || f.verdict == nil {
+			continue
 		}
-		return gateCompileBrace(rootBody + gateBraceConfig(epath, stmt))
-	}
-	sets := func(cmds ...string) (string, error) {
-		all := append(append([]string{}, rootSets...), preSets...)
-		return gateCompileSet(append(all, cmds...))
-	}
-	forms := map[string][3]func() (string, error){
-		"A-hier-bracket": {
-			func() (string, error) { return brace(g.leaf + ";") },
-			func() (string, error) {
-				return brace(fmt.Sprintf("%s [ %s ];", g.leaf, v1))
-			},
-			func() (string, error) {
-				return brace(fmt.Sprintf("%s [ %s %s ];", g.leaf, v1, v2))
-			},
-		},
-		"B-hier-block": {
-			func() (string, error) { return brace(g.leaf + " { }") },
-			func() (string, error) {
-				return brace(fmt.Sprintf("%s { %s; }", g.leaf, v1))
-			},
-			func() (string, error) {
-				return brace(fmt.Sprintf("%s { %s; %s; }", g.leaf, v1, v2))
-			},
-		},
-		"C-hier-repeat": {
-			func() (string, error) { return brace(g.leaf + ";") },
-			func() (string, error) {
-				return brace(fmt.Sprintf("%s %s;", g.leaf, v1))
-			},
-			func() (string, error) {
-				return brace(fmt.Sprintf("%s %s; %s %s;", g.leaf, v1, g.leaf, v2))
-			},
-		},
-		"D-set-bracket": {
-			func() (string, error) { return sets(flat) },
-			func() (string, error) { return sets(fmt.Sprintf("%s [ %s ]", flat, v1)) },
-			func() (string, error) { return sets(fmt.Sprintf("%s [ %s %s ]", flat, v1, v2)) },
-		},
-		"E-set-repeat": {
-			func() (string, error) { return sets(flat) },
-			func() (string, error) { return sets(flat + " " + v1) },
-			func() (string, error) { return sets(flat+" "+v1, flat+" "+v2) },
-		},
-		// #6693: a value in the IDENTIFIER slot beside a block. It is the only
-		// spelling that puts values in BOTH AST slots of one node — Keys[1:]
-		// AND Children — and every spelling above puts them in exactly one, so
-		// an either/or reader (`Keys` OR children, never both) agrees with
-		// itself across A-E and drops the tail here.
-		//
-		// That gap is why #6693 survived this gate. A previous investigation
-		// enumerated A-E, found perfect agreement, and recorded that the mixed
-		// shape "is not reachable from any config spelling I can author" — a
-		// conclusion consistent with its own enumeration and wrong about the
-		// grammar. Adding the spelling is the durable half of that fix: the
-		// class is otherwise invisible to the one gate designed to find it.
-		//
-		// The zero-value form has no mixed spelling (there is nothing to put in
-		// the identifier slot), so it reuses the block form's empty body. That
-		// only feeds the inert-leaf check, which asks whether the FIRST value
-		// changed anything.
-		"F-hier-mixed": {
-			func() (string, error) { return brace(g.leaf + " { }") },
-			func() (string, error) {
-				return brace(fmt.Sprintf("%s %s;", g.leaf, v1))
-			},
-			func() (string, error) {
-				return brace(fmt.Sprintf("%s %s { %s; }", g.leaf, v1, v2))
-			},
-		},
+		forms = append(forms, f)
 	}
 	type verdict struct {
 		name           string
@@ -1212,18 +1494,18 @@ func spellingVerdicts(g gateLeaf, v1, v2 string) map[string]string {
 		err            bool
 		unstable       bool
 	}
-	results := make([]verdict, len(gateSpellingsMulti))
+	results := make([]verdict, len(forms))
 	var wg sync.WaitGroup
-	for i, name := range gateSpellingsMulti {
-		i, name := i, name
+	for i, form := range forms {
+		i, form := i, form
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			f := forms[name]
+			f := form.verdict(g, vals)
 			zero, e0 := f[0]()
 			one, e1 := f[1]()
 			two, e2 := f[2]()
-			result := verdict{name: name, zero: zero, one: one, two: two, err: e0 != nil || e1 != nil || e2 != nil}
+			result := verdict{name: form.name, zero: zero, one: one, two: two, err: e0 != nil || e1 != nil || e2 != nil}
 			if !result.err {
 				// Determinism self-check: a compiler that builds a slice by ranging a
 				// Go map can emit a different order for identical input, which would
@@ -1271,23 +1553,10 @@ func TestSchemaSpellingDifferentialGate(t *testing.T) {
 		leafCompared := false
 		for _, vp := range gateValuePairsForLeaf(g) {
 			state := spellingVerdicts(g, vp.v1, vp.v2)
-			cmpSet := gateSpellingsScalar
-			if g.multi {
-				cmpSet = gateSpellingsMulti
-			}
-			// #6693: a leaf whose CHILD slot is a modifier position rather than
-			// another value has no meaningful mixed-spelling verdict — see
-			// mixedChildIsAModifierBlock. Drop F rather than allowlisting the
-			// site, because an allowlist row asserts a DEFECT and there is none.
-			if _, modifier := mixedChildIsAModifierBlock[g.siteKey()]; modifier {
-				var without []string
-				for _, n := range cmpSet {
-					if n != "F-hier-mixed" {
-						without = append(without, n)
-					}
-				}
-				cmpSet = without
-			}
+			// #6693's modifier-block exclusion and the scalar repeated
+			// exclusion are parameters of the shared table (#17191):
+			// gateComparisonSpellings applies both.
+			cmpSet := gateComparisonSpellings(g)
 			var flags []bool
 			inert := 0
 			for _, name := range cmpSet {
@@ -1378,7 +1647,10 @@ func TestSchemaSpellingDifferentialGate(t *testing.T) {
 			continue
 		}
 		var parts []string
-		for _, n := range gateSpellingsMulti {
+		for _, n := range gateSpellingNames() {
+			if _, ok := h.state[n]; !ok {
+				continue // slotEscapeOnly form (G) carries no verdict
+			}
 			parts = append(parts, n[:1]+"="+h.state[n])
 		}
 		// Class C is a different complaint from A/B and needs a different
