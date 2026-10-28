@@ -41,6 +41,9 @@
 /// Build the outer IPv4 TOS / IPv6 Traffic Class byte from a
 /// 6-bit DSCP value. ECN bits are cleared (use
 /// `gre::inner_tos_byte` when an inner ECN must propagate, #2303).
+///
+/// Test-only (#17212): production encap copies the full inner TOS byte.
+#[cfg(test)]
 #[inline]
 pub(crate) fn tos_from_dscp(dscp: u8) -> u8 {
     // Defensive mask: callers should pass 6-bit values, but a

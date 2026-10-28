@@ -1,5 +1,19 @@
 use crate::afxdp::coordinator::SessionManager;
 use crate::afxdp::*;
+/// #17127: how a kick relates to an export window. Replaces the legacy
+/// bool-continuation + optional-token inner signature, which let a
+/// caller express a continuation WITHOUT a token and thereby skip the
+/// #9856 token check entirely. `ExportKick` makes that shape
+/// unrepresentable: a continuation MUST carry the preceding page's token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExportKick {
+    /// Open a new window (fresh kick; also the only shape an unpaged
+    /// caller needs).
+    Fresh,
+    /// Drain the remainder of the open window whose preceding page
+    /// was stamped `(incarnation, sequence)`.
+    Continue { incarnation: u64, sequence: u64 },
+}
 
 impl crate::afxdp::Coordinator {
     /// Phase 1 of the owner-RG session export (#2962): enqueue the export
@@ -32,22 +46,33 @@ impl crate::afxdp::Coordinator {
     /// #9856: fallible — a fresh kick while a non-idle window is open gets
     /// BUSY (no sequence consumed); a continuation with no open window gets
     /// a re-kick error. Both fail the FullResync un-ACKed for retry.
-    /// Legacy/internal entry point retained for direct Rust callers. The
-    /// control-socket handler uses `kick_owner_rg_export_v2`, which validates
-    /// the request marker and opaque continuation token before reaching this
-    /// implementation.
-    pub fn kick_owner_rg_export(
+    /// #17127: unpaged entry point for direct Rust callers. This is the
+    /// only shape a caller that does not page needs — a fresh kick. The
+    /// control-socket handler uses `kick_owner_rg_export_v2` for paged
+    /// requests, which validates the request marker and opaque
+    /// continuation token before reaching the same implementation.
+    /// The legacy `kick_owner_rg_export(.., continuation: bool)` shape
+    /// was removed: it let a caller express a continuation WITHOUT a
+    /// token, skipping the #9856 token check entirely. Production never
+    /// sent that shape (the handler passes literal `false` here), so
+    /// the only tokenless-continuation callers were two paging test
+    /// cells, now routed through `kick_owner_rg_export_v2` with page
+    /// 1's token. `ExportKick` makes the shape unrepresentable.
+    pub fn kick_owner_rg_export_unpaged(
         &self,
         owner_rgs: &[i32],
         max: usize,
-        continuation: bool,
     ) -> Result<OwnerRgExportWait, String> {
-        self.kick_owner_rg_export_inner(owner_rgs, max, continuation, None)
+        self.kick_owner_rg_export_inner(owner_rgs, max, ExportKick::Fresh)
     }
 
     /// #9856: v2 control-socket entry point. Every request carries the
     /// protocol marker; continuations additionally carry the helper
-    /// incarnation and sequence from the preceding page.
+    /// incarnation and sequence from the preceding page. #17127: the
+    /// five refusal arms here and in `_inner` (bad version, zero-token
+    /// continuation, page-1-with-token, no-open-window continuation,
+    /// token mismatch) are each asserted by a named test in
+    /// `ha_tests.rs` (`owner_rg_export_v2_refuses_*`).
     pub fn kick_owner_rg_export_v2(
         &self,
         owner_rgs: &[i32],
@@ -63,37 +88,43 @@ impl crate::afxdp::Coordinator {
                 crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION
             ));
         }
-        let token = if continuation {
+        let kick = if continuation {
             if continuation_incarnation == 0 || continuation_sequence == 0 {
                 return Err(
                     "owner-RG export continuation requires nonzero incarnation and sequence"
                         .to_string(),
                 );
             }
-            Some((continuation_incarnation, continuation_sequence))
+            ExportKick::Continue {
+                incarnation: continuation_incarnation,
+                sequence: continuation_sequence,
+            }
         } else {
             if continuation_incarnation != 0 || continuation_sequence != 0 {
                 return Err(
-                    "owner-RG export page 1 must not carry a continuation token".to_string(),
+                    "owner-RG export page 1 must not carry a continuation token".to_string()
                 );
             }
-            None
+            ExportKick::Fresh
         };
-        self.kick_owner_rg_export_inner(owner_rgs, max, continuation, token)
+        self.kick_owner_rg_export_inner(owner_rgs, max, kick)
     }
 
     fn kick_owner_rg_export_inner(
         &self,
         owner_rgs: &[i32],
         max: usize,
-        continuation: bool,
-        expected_token: Option<(u64, u64)>,
+        kick: ExportKick,
     ) -> Result<OwnerRgExportWait, String> {
         // Per-worker export buffers (same Arcs the workers produce into).
         // Worker-keyed, not binding-keyed: binding-less workers still
         // export (W-F10).
         let now_ns = crate::afxdp::neighbor::monotonic_nanos();
-        if continuation {
+        if let ExportKick::Continue {
+            incarnation: expected_incarnation,
+            sequence: expected_sequence,
+        } = kick
+        {
             // Bind to THE open window: adopt its sequence + token + buffers +
             // acks atomically. No open window (expired/abandoned) fails:
             // resuming blind would mix instants.
@@ -111,12 +142,10 @@ impl crate::afxdp::Coordinator {
                     (expired or never kicked); re-kick fresh"
                     .to_string());
             };
-            if let Some((expected_incarnation, expected_sequence)) = expected_token {
-                if incarnation != expected_incarnation || sequence != expected_sequence {
-                    return Err(format!(
-                        "owner-RG export continuation token mismatch: got ({expected_incarnation},{expected_sequence}), current ({incarnation},{sequence})"
-                    ));
-                }
+            if incarnation != expected_incarnation || sequence != expected_sequence {
+                return Err(format!(
+                    "owner-RG export continuation token mismatch: got ({expected_incarnation},{expected_sequence}), current ({incarnation},{sequence})"
+                ));
             }
             return Ok(OwnerRgExportWait {
                 sequence,
@@ -359,64 +388,22 @@ impl crate::afxdp::Coordinator {
                 continue;
             }
 
-            deltas.push(crate::session::SessionDelta {
-                provenance: crate::session::ExportProvenance::Incremental,
-                kind: crate::session::SessionDeltaKind::Open,
-                key: entry.key.clone(),
-                decision: entry.decision,
-                metadata: entry.metadata.clone(),
-                source_nat_static: entry.source_nat_static,
-                policy_generation: 0,
-                origin: entry.origin,
-                // #14960: derive the flag from the row's own disposition,
-                // exactly as both encoder legs compute it from
-                // `fabric_redirect_sync || disposition == FabricRedirect`.
-                // The pre-fix unconditional `true` encoded
-                // FLAG_FABRIC_REDIRECT on EVERY exported row, routing
-                // plain sessions through the peer's fabric-redirect
-                // ownership branch (and its forward-wire alias).
-                fabric_redirect_sync: entry.decision.resolution.disposition
-                    == ForwardingDisposition::FabricRedirect,
-                // #2465: Open delta from the HA bulk export — the synced entry
-                // carries no creation instant. The SESSION_CREATE frame reports
-                // no duration, so 0/unknown is correct here.
-                created_ns: 0,
-                last_seen_ns: 0,
-                // #16217: carry the shared row's snapshotted live
-                // counts (monotonic at publish/restamp) so the peer's
-                // scoped evidence gate sees actual service; a row that
-                // never served stays zero (no evidence, fail-closed).
-                counters: crate::session::SessionCounters {
-                    fwd_packets: entry.fwd_packets,
-                    fwd_bytes: 0,
-                    rev_packets: entry.rev_packets,
-                    rev_bytes: 0,
-                },
-                // #2749: HA bulk-export Open delta; no observed ToS / TCP
-                // flags (and not routed through the RT_FLOW close exporter).
-                observed_tos: 0,
-                observed_tcp_flags: 0,
-                // #14960: carry the shared entry's stable session id (the
-                // #5212 wire-adopted id a peer import threaded onto it), so
-                // the receiving node adopts the originating node's id
-                // instead of minting a divergent local one. Still 0 for
-                // local-origin publishes that never stamped it — the
-                // documented unknown/alloc-fallback sentinel.
-                session_id: entry.session_id,
-                bulk_resync: false,
-                is_admission: false,
-                tcp_close_class: entry.tcp_close_class,
-                // #16217 (export stamp): Established when node-wide
-                // completion evidence holds for this tuple over the
-                // shared maps; otherwise the row's own wire.
-                tcp_handshake_state: if evidence_for(&entry.key, entry.decision.nat).served_and_completed() {
-                    crate::session::TcpHandshakeState::Established.to_wire()
-                } else {
-                    entry.tcp_handshake_state
-                },
-                pptp_call_ids: entry.pptp_call_ids,
-                purge_retirement: false,
-            });
+            // #17122: the entry->delta mapping lives once in
+            // `SessionDelta::from_shared`; the only site-local stamp is
+            // the #16217 handshake restamp below.
+            let mut delta = crate::session::SessionDelta::from_shared(
+                entry,
+                crate::session::SessionDeltaKind::Open,
+            );
+            // #16217 (export stamp): Established when node-wide
+            // completion evidence holds for this tuple over the
+            // shared maps; otherwise the row's own wire (already on
+            // the delta from `from_shared`).
+            if evidence_for(&entry.key, entry.decision.nat).served_and_completed() {
+                delta.tcp_handshake_state =
+                    crate::session::TcpHandshakeState::Established.to_wire();
+            }
+            deltas.push(delta);
         }
         drop(wire_sessions);
         drop(sessions);
@@ -466,7 +453,7 @@ impl AllSessionsExport {
     }
 }
 
-/// Lock-free handle returned by [`Coordinator::kick_owner_rg_export`] so
+/// Lock-free handle returned by [`Coordinator::kick_owner_rg_export_unpaged`] so
 /// the control-socket dispatcher can release the global `ServerState`
 /// mutex BEFORE blocking on the per-worker export ack-wait (#2962).
 ///
@@ -563,8 +550,11 @@ impl OwnerRgExportWait {
     pub fn wait_and_collect_attributed(
         &self,
     ) -> Result<(Vec<SessionDeltaInfo>, bool, Vec<u32>), String> {
-        let drained_before: Vec<u64> =
-            self.export_buffers.iter().map(|b| b.export_drained()).collect();
+        let drained_before: Vec<u64> = self
+            .export_buffers
+            .iter()
+            .map(|b| b.export_drained())
+            .collect();
         let (deltas, more) = self.wait_and_collect_inner()?;
         let contributed: Vec<u32> = self
             .export_buffers

@@ -20,6 +20,8 @@
 // the one place a new managed binary is declared, and the canary enforces it.
 package manifest
 
+//go:generate go run gen_bins.go
+
 import "strings"
 
 // Binary describes one managed upgrade binary.

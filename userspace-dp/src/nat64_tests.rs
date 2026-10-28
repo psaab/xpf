@@ -8464,15 +8464,20 @@ fn nat64_7094_rollback_for_worker_frees_only_that_holder() {
     let after_first = state
         .allocate_source_for_worker(
             0,
-            crate::ip_proto::PROTO_TCP,
-            "2001:db8::77".parse().unwrap(),
+            &crate::session::SessionKey {
+                addr_family: libc::AF_INET6 as u8,
+                protocol: crate::ip_proto::PROTO_TCP,
+                src_ip: IpAddr::V6("2001:db8::77".parse().unwrap()),
+                dst_ip: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
+                src_port: 6000,
+                dst_port: 443,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
             dst_v4,
-            6000,
-            443,
             3,
             0,
             &[],
-            0,
             None,
         )
         .expect("a fresh flow still allocates");
@@ -8508,15 +8513,20 @@ fn nat64_7094_rollback_is_a_noop_on_the_reverse_entry() {
     let (snat, pa) = state
         .allocate_source_for_worker(
             0,
-            crate::ip_proto::PROTO_TCP,
-            c,
+            &crate::session::SessionKey {
+                addr_family: libc::AF_INET6 as u8,
+                protocol: crate::ip_proto::PROTO_TCP,
+                src_ip: IpAddr::V6(c),
+                dst_ip: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
+                src_port: 6000,
+                dst_port: 443,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
             dst_v4,
-            6000,
-            443,
             1,
             0,
             &[],
-            0,
             None,
         )
         .unwrap();
@@ -8541,15 +8551,20 @@ fn nat64_7094_rollback_is_a_noop_on_the_reverse_entry() {
     let again = state
         .allocate_source_for_worker(
             0,
-            crate::ip_proto::PROTO_TCP,
-            c,
+            &crate::session::SessionKey {
+                addr_family: libc::AF_INET6 as u8,
+                protocol: crate::ip_proto::PROTO_TCP,
+                src_ip: IpAddr::V6(c),
+                dst_ip: IpAddr::V6("64:ff9b::0808:0808".parse().unwrap()),
+                src_port: 6000,
+                dst_port: 443,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
             dst_v4,
-            6000,
-            443,
             3,
             0,
             &[],
-            0,
             None,
         )
         .unwrap();
@@ -9069,18 +9084,23 @@ fn nat64_domain_key_9680(domain: u32) -> crate::session::SessionKey {
 }
 
 fn nat64_alloc_in_domain_9680(state: &Nat64State, now_ns: u64, domain: u32) -> (Ipv4Addr, u16) {
+    nat64_alloc_in_domain_for_worker_9680(state, now_ns, domain, 0)
+}
+
+fn nat64_alloc_in_domain_for_worker_9680(
+    state: &Nat64State,
+    now_ns: u64,
+    domain: u32,
+    worker_id: u32,
+) -> (Ipv4Addr, u16) {
     state
         .allocate_source_for_worker(
             0,
-            crate::ip_proto::PROTO_TCP,
-            "2001:db8::1".parse().unwrap(),
+            &nat64_domain_key_9680(domain),
             Ipv4Addr::new(8, 8, 8, 8),
-            6000,
-            443,
             now_ns,
-            0,
+            worker_id,
             &[],
-            domain,
             None,
         )
         .expect("NAT64 allocation")
@@ -9192,45 +9212,57 @@ fn nat64_synced_reserve_is_keyed_by_routing_domain_9680() {
     );
 }
 
-// #9680: bind the WIRING. The cells above drive `allocate_source_for_worker`
-// directly, so they pass whatever the poll path hands it; a poll path that kept
-// passing 0 would still share one binding between tenants in production. There
-// is exactly one production caller, and its routing-scope argument must be the
-// flow's own routing domain.
+// #17072: the BIB key has ONE builder. Pin its bytes directly: the
+// translated destination wins over the key's synthetic v6 destination,
+// and the scope is the key's routing domain verbatim.
 #[test]
-fn nat64_poll_path_passes_the_flow_routing_domain_9680() {
-    let src = include_str!("afxdp/poll_descriptor/mod.rs");
-    let name = "allocate_source_for_worker(";
-    let calls: Vec<usize> = src.match_indices(name).map(|(i, _)| i).collect();
+fn nat64_bib_flow_key_bytes_17072() {
+    let key = nat64_domain_key_9680(TENANT_B_9680);
+    let flow = nat64_bib_flow_key(&key, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
     assert_eq!(
-        calls.len(),
-        1,
-        "expected exactly one production NAT64 allocate call in poll_descriptor"
+        flow,
+        SourceNatFlowKey {
+            protocol: crate::ip_proto::PROTO_TCP,
+            src_ip: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+            src_port: 6000,
+            dst_port: 443,
+            routing_scope: TENANT_B_9680,
+        },
+        "#17072: nat64_bib_flow_key must copy the SessionKey tuple and routing_domain verbatim"
     );
-    let open = calls[0] + name.len() - 1;
-    let mut depth = 0usize;
-    let mut close = open;
-    for (i, ch) in src[open..].char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = open + i;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let args = &src[open + 1..close];
-    assert!(
-        args.contains("flow.forward_key.routing_domain,"),
-        "the poll path's NAT64 allocation must key the BIB by the flow's routing domain"
+    let v6_dst = nat64_bib_flow_key(&key, key.dst_ip);
+    assert_eq!(v6_dst.dst_ip, key.dst_ip);
+    assert_eq!(v6_dst.routing_scope, TENANT_B_9680);
+}
+
+// #17072 (replaces the #9680 text scan): behaviourally, two routing
+// domains whose numeric values differ from the allocating worker_id
+// must still get distinct BIB bindings. Before the fix the poll path
+// passed worker_id and routing_scope as adjacent bare `u32`s; swapping
+// them keyed every binding by worker_id instead of routing domain, so
+// tenant A on worker 7 and tenant B on worker 7 would share one
+// binding — and tenant A on two workers would split. This cell drives
+// allocate_source_for_worker with worker_id != routing_domain for both
+// tenants and asserts the domain, not the worker, separates them.
+#[test]
+fn nat64_alloc_keys_bib_by_routing_domain_not_worker_17072() {
+    let state = Nat64State::from_snapshots(&[single_addr_prefix()]);
+    let a = nat64_alloc_in_domain_for_worker_9680(&state, 1, TENANT_A_9680, 7);
+    let b = nat64_alloc_in_domain_for_worker_9680(&state, 2, TENANT_B_9680, 7);
+    assert_ne!(
+        a, b,
+        "#17072: identical tuples on one worker in two routing domains share one binding {a:?}"
     );
-    assert!(
-        args.contains("iface_nat_allocators"),
-        "#14367: poll path must thread the interface registry to the NAT64 mint"
+    assert_eq!(
+        nat64_alloc_in_domain_for_worker_9680(&state, 3, TENANT_A_9680, 9),
+        a,
+        "#17072: tenant A's binding changed when a different worker allocated it"
+    );
+    assert_eq!(
+        nat64_alloc_in_domain_for_worker_9680(&state, 4, TENANT_B_9680, 9),
+        b,
+        "#17072: tenant B's binding changed when a different worker allocated it"
     );
 }
 
@@ -10750,4 +10782,54 @@ fn nat64_default_routing_instance_distinguishes_named_and_master_17677() {
             "NAT64 routing-instance={routing_instance:?} named-default scope"
         );
     }
+}
+
+// #17076: the built prefix stores ONLY the resolved plural unions — a
+// singular-only (pre-#15932/#16049) snapshot is folded into a
+// one-element list at build, and a plural list is stored as authored.
+// Pins the collapse so restoring the singular fields (and their
+// matcher arms) cannot silently return.
+#[test]
+fn nat64_17076_built_prefix_stores_only_plural_scope() {
+    // Singular-only: folded to one-element lists.
+    let state = Nat64State::from_snapshots(&[scoped_snap("trust", "blue", vec![])]);
+    assert_eq!(state.prefixes.len(), 1);
+    assert_eq!(state.prefixes[0].from_zones, vec!["trust".to_string()]);
+    assert_eq!(
+        state.prefixes[0].from_routing_instances,
+        vec!["blue".to_string()]
+    );
+    assert!(
+        state.prefixes[0].ingress_scope_constrained(),
+        "a singular-scoped prefix must read as ingress-constrained"
+    );
+    // Plural: stored as authored, not merged with the singular.
+    let mut snap = scoped_snap("trust", "blue", vec![]);
+    snap.from_zones = vec!["trust".to_string(), "untrust".to_string()];
+    snap.from_routing_instances = vec!["blue".to_string(), "red".to_string()];
+    let state = Nat64State::from_snapshots(&[snap]);
+    assert_eq!(
+        state.prefixes[0].from_zones,
+        vec!["trust".to_string(), "untrust".to_string()]
+    );
+    assert_eq!(
+        state.prefixes[0].from_routing_instances,
+        vec!["blue".to_string(), "red".to_string()]
+    );
+    // Unscoped: both lists empty, not constrained.
+    let state = Nat64State::from_snapshots(&[scoped_snap("", "", vec![])]);
+    assert!(state.prefixes[0].from_zones.is_empty());
+    assert!(state.prefixes[0].from_routing_instances.is_empty());
+    assert!(!state.prefixes[0].ingress_scope_constrained());
+    // `union_scope` resolves each axis once: plural wins, else the
+    // singular folds in, else empty.
+    assert_eq!(
+        crate::nat64::state::union_scope(&["a".to_string()], "b"),
+        vec!["a".to_string()]
+    );
+    assert_eq!(
+        crate::nat64::state::union_scope(&[], "b"),
+        vec!["b".to_string()]
+    );
+    assert!(crate::nat64::state::union_scope(&[], "").is_empty());
 }

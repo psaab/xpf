@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -16,10 +17,12 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// showRouteUsage is the one grammar both `show route` dispatchers (local
-// here, remote in cmd/cli) reject against. Keep the spellings in sync with
-// the cmdtree `show route` children.
-const showRouteUsage = "usage: show route [<destination> [exact|longer|orlonger]] | show route [terse|detail|summary|fib] | show route table <name> | show route instance <name> | show route protocol <name>"
+// showRouteUsage is cliterm.ShowRouteUsage: the one grammar both
+// `show route` dispatchers (local here, remote in cmd/cli) reject
+// against (#17230). It lives in pkg/cliterm, which both binaries
+// already import; cmd/cli cannot import this package without
+// pulling the daemon-local console into the remote binary.
+const showRouteUsage = cliterm.ShowRouteUsage
 
 // handleShowRoute dispatches `show route ...` invocations to the
 // per-flavor presenters defined later in this file.

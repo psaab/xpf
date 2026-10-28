@@ -1,37 +1,44 @@
 // Status projection helpers (#6234 split out of the former monolithic
 // `server/helpers.rs`).
 //
-// `refresh_status` is the single cold-path orchestration that projects
-// worker, neighbor, session, NAT, CoS, tunnel, HA, queue, exception, and
-// debug state onto the mutable `ProcessStatus`. It runs on control
-// responses and state snapshots, never per packet. Ordering + side-effect
-// cadence are preserved exactly: the WG/GRE liveness self-heal stays gated
-// on `should_run_afxdp`, the high-cardinality per-key dynamic-neighbor
-// dump stays gated on `XPF_DEBUG_NEIGHBOR_KEYS`, bindings are refreshed
-// before the queue/per-binding projections, and worker snapshots are read
-// before the aggregates derived from them. No added coordinator
-// traversal, status clone, or allocation. Bodies byte-for-byte identical
-// to the pre-split source.
+// `project_status` is the pure cold-path projection that copies worker,
+// neighbor, session, NAT, CoS, tunnel, HA, queue, exception, and debug
+// state onto the mutable `ProcessStatus`. `supervise_tunnels` is the
+// separate side-effecting self-heal (WG/GRE liveness sweeps, thread
+// joins/respawns, delivery-map publishes). The dispatcher supervises
+// once per locked request and every other caller only projects. Both run
+// on control responses and state snapshots, never per packet. The
+// WG/GRE self-heal stays gated on `should_run_afxdp`, the
+// high-cardinality per-key dynamic-neighbor dump stays gated on
+// `XPF_DEBUG_NEIGHBOR_KEYS`, bindings are refreshed before the
+// queue/per-binding projections, and worker snapshots are read before
+// the aggregates derived from them.
 
 use super::summarize_queues;
 use crate::afxdp;
-use crate::protocol::{BindingCountersSnapshot, ProcessStatus, UserspaceCapabilities};
+use crate::protocol::{
+    BindingCountersSnapshot, ControlResponse, ProcessStatus, UserspaceCapabilities,
+};
 use crate::server::ServerState;
 use chrono::Utc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
-pub(crate) fn refresh_status(state: &mut ServerState) {
+/// #17141: tunnel-thread supervision, split out of the status
+/// projection. Joins finished WG/GRE threads, may respawn one per
+/// family, and republishes the worker-visible delivery map only on
+/// change. Gated on `should_run_afxdp` so a disarmed/stopped helper
+/// never re-binds WG ports (the stop-gate — Claude SMR r1 F1, #1866).
+/// The per-id 3s backoff and the ≤1-spawn-per-invocation bound keep
+/// the cadence trivial. The dispatcher calls this once per request;
+/// `project_status` never calls it.
+pub(crate) fn supervise_tunnels(state: &mut ServerState) {
+    // Bindings must be current before the gate reads them (the pre-split
+    // `refresh_status` refreshed them ahead of this check).
     state.afxdp.refresh_bindings(&mut state.status.bindings);
-    // HARDENING (#15742 follow-up): project the sticky mismatch counter
-    // (owned by ServerState so this rebuild cannot zero it).
-    state.status.snapshot_policy_mismatch_total = state.snapshot_policy_mismatch_total;
-    // #1866 Change 2: WG control-thread self-heal. Tombstone-only +
-    // snapshot-coherent (see Coordinator::reconcile_wg_control_liveness)
-    // and gated on should_run_afxdp so a disarmed/stopped helper never
-    // re-binds WG ports (the stop-gate — Claude SMR r1 F1). Runs on
-    // every non-suppressed control response; the per-id 3s backoff and
-    // the ≤1-spawn-per-invocation bound keep the cadence trivial.
     if should_run_afxdp(&state.status) {
+        // #1866 Change 2: WG control-thread self-heal. Tombstone-only +
+        // snapshot-coherent (see Coordinator::reconcile_wg_control_liveness).
         state
             .afxdp
             .reconcile_wg_control_liveness(state.snapshot.as_ref());
@@ -42,6 +49,15 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
             .afxdp
             .reconcile_local_tunnel_liveness(state.snapshot.as_ref());
     }
+}
+
+/// Pure status projection: no `reconcile_*_liveness` call, no thread
+/// join/respawn, no delivery-map publish (#17141).
+pub(crate) fn project_status(state: &mut ServerState) {
+    state.afxdp.refresh_bindings(&mut state.status.bindings);
+    // HARDENING (#15742 follow-up): project the sticky mismatch counter
+    // (owned by ServerState so this rebuild cannot zero it).
+    state.status.snapshot_policy_mismatch_total = state.snapshot_policy_mismatch_total;
     let writer_status = state.state_writer.status();
     state.status.io_uring_active = writer_status.active;
     state.status.io_uring_mode = writer_status.mode;
@@ -890,6 +906,55 @@ pub(crate) fn restore_binding_arm_state(status: &mut ProcessStatus, prior: Bindi
     }
 }
 
+/// #17126: the shared commit-requested-state / reconcile / roll-back-on-error
+/// tail for the three binding verbs that commit requested arm/registration
+/// bits into `guard.status` before reconciling (`set_forwarding_state`,
+/// `set_binding_state`, `set_queue_state`). #6750 unified only the
+/// capture/restore step (`BindingArmSnapshot`); the error/settle/persist tail
+/// stayed open-coded in three copies, so a fourth reconcile verb or a fifth
+/// outcome rule would repeat the lockstep edit. This helper owns that tail —
+/// the same principle b4465fc7d3 stated for the restore step: a divergence
+/// between the copies could only ever be a bug, never a policy difference.
+///
+/// `settle` is whether a successful reconcile owes the 2 s binding-settle
+/// wait: forwarding settles only when arming, binding/queue settle whenever
+/// the registration changed (their callers only reach here in that case).
+///
+/// On `Err`: `ok=false` with `"<verb> reconcile failed: {err}"` (#5621/#6135),
+/// the prior snapshot captured before the commit is restored (#6750),
+/// status is refreshed, and neither settle nor persist is set — the caller
+/// returns without persisting a success it did not achieve. On success:
+/// settle (if owed), refresh, persist.
+///
+/// Excluded by design: `rebind` commits no requested state (it clears
+/// runtime bits that `project_status` re-derives), and
+/// reconcile — neither shares this tail.
+pub(crate) fn finish_binding_reconcile(
+    guard: &mut ServerState,
+    response: &mut ControlResponse,
+    verb: &str,
+    prior: BindingArmSnapshot,
+    settle: bool,
+    persist_state: &mut bool,
+    deferred: &mut Option<crate::server::handlers::Deferred>,
+) {
+    if let Err(err) = reconcile_status_bindings(guard) {
+        response.ok = false;
+        response.error = format!("{verb} reconcile failed: {err}");
+        // #6750: roll the requested state back BEFORE refreshing, so the
+        // refreshed status describes what the sockets are actually doing
+        // and Go's 1 Hz poll sees the mismatch that drives a retry.
+        restore_binding_arm_state(&mut guard.status, prior);
+        project_status(guard);
+        return;
+    }
+    if settle {
+        *deferred = Some(crate::server::handlers::Deferred::Settle(Duration::from_secs(2)));
+    }
+    project_status(guard);
+    *persist_state = true;
+}
+
 pub(crate) fn set_bindings_forwarding_armed(status: &mut ProcessStatus, armed: bool) {
     for binding in &mut status.bindings {
         binding.armed = armed && binding.registered;
@@ -937,7 +1002,9 @@ mod status_wiring_tests {
         std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {}", p.display(), e))
     }
 
-    /// Strip comment lines before scanning.
+    use crate::test_support::source_scan::blank_comments_and_strings;
+
+    /// Blank comments and strings before scanning (#17152).
     ///
     /// Load-bearing, and found the hard way: the doc comment on THIS test
     /// quotes the very assignment the scan looks for, so with comments
@@ -945,11 +1012,16 @@ mod status_wiring_tests {
     /// `state.status.shared_session_poison_recoveries = ...` line was deleted
     /// — the documentation satisfied the check on the code's behalf. Any
     /// source-scanning gate that can be quoted in prose has this failure mode.
+    ///
+    /// The previous whole-line-only `code_only` dropped only lines that
+    /// START with `//`, so a trailing `// state.afxdp.x()` note or a
+    /// `/* state.afxdp.x() */` block kept the gate green after the real
+    /// assignment was deleted. The shared #12270 blanker
+    /// (`test_support::source_scan`) blanks line tails, nested blocks,
+    /// string bodies and char literals, so only real code can satisfy
+    /// the scan.
     fn code_only(src: &str) -> String {
-        src.lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        blank_comments_and_strings(src)
     }
 
     /// #6751: drop ALL whitespace before matching.
@@ -1142,6 +1214,75 @@ mod status_wiring_tests {
                 && proto.contains("pub ike_exchange_entries: u64"),
             "#13290: ProcessStatus must carry ike_exchange_evictions_total \
              and ike_exchange_entries wire fields"
+        );
+    }
+
+    #[test]
+    fn project_status_contains_no_tunnel_supervision_17141() {
+        let helper = code_only(&read("src/server/helpers/status.rs"));
+        let start = helper
+            .find("pub(crate) fn project_status")
+            .expect("project_status not found");
+        let end = helper[start..]
+            .find("pub(crate) fn project_event_stream_producer_stats")
+            .map(|off| start + off)
+            .expect("project_status end boundary not found");
+        let body = &helper[start..end];
+        assert!(
+            !body.contains("reconcile_wg_control_liveness")
+                && !body.contains("reconcile_local_tunnel_liveness")
+                && !body.contains("supervise_tunnels"),
+            "#17141: project_status must be a pure projection — tunnel \
+             supervision (thread joins/respawns, delivery publishes) belongs \
+             only in supervise_tunnels"
+        );
+        // Vacuity guard: the supervision calls must exist in the file,
+        // inside supervise_tunnels, or the scan above passes trivially.
+        let sup_start = helper
+            .find("pub(crate) fn supervise_tunnels")
+            .expect("supervise_tunnels not found");
+        let sup_end = helper[sup_start..]
+            .find("pub(crate) fn project_status")
+            .map(|off| sup_start + off)
+            .expect("supervise_tunnels end boundary not found");
+        let sup = &helper[sup_start..sup_end];
+        assert!(
+            sup.contains("reconcile_wg_control_liveness")
+                && sup.contains("reconcile_local_tunnel_liveness"),
+            "#17141: supervise_tunnels must own both liveness reconciles"
+        );
+    }
+
+    /// #17152 fixture control: the blanker behind `code_only` must not
+    /// let a trailing or block comment quote the accessor the
+    /// `every_counter_accessor_is_wired_into_process_status` gate scans
+    /// for. The old whole-line-only `code_only` kept both shapes, so
+    /// deleting the real assignment while leaving either comment stayed
+    /// green. Pinning the blanker directly means a regression here reds
+    /// even if the gate's needle changes.
+    #[test]
+    fn status_scan_blanker_ignores_trailing_and_block_comments_17152() {
+        let needle = "state.afxdp.shared_session_poison_recoveries_total()";
+        let trailing = format!("let x = 0; // was {needle}");
+        let block = format!("let x = 0; /* was {needle} */");
+        let whole_line = format!("// {needle}");
+        let real = format!("state.status.x = {needle};");
+        assert!(
+            !squeeze(&code_only(&trailing)).contains(&squeeze(needle)),
+            "#17152: a trailing // comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            !squeeze(&code_only(&block)).contains(&squeeze(needle)),
+            "#17152: a /* */ block comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            !squeeze(&code_only(&whole_line)).contains(&squeeze(needle)),
+            "#17152: a whole-line // comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            squeeze(&code_only(&real)).contains(&squeeze(needle)),
+            "#17152: real code calling the accessor must still satisfy the scan \
+             (a blanker that blanks everything would pass the three rows above vacuously)"
         );
     }
 }

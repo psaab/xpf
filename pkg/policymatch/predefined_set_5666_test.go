@@ -32,7 +32,7 @@ func TestPredefinedApplicationSetPolicyMatches_5666(t *testing.T) {
 	}, config.ApplicationsConfig{})
 
 	// junos-ms-rpc expands to junos-ms-rpc-tcp (tcp/135) + junos-ms-rpc-udp (udp/135).
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 135})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(135)})
 	if res.ContentRejected {
 		t.Fatalf("ContentRejected=true for a well-formed predefined bundle; reasons=%v", res.ContentRejectionReasons)
 	}
@@ -42,13 +42,13 @@ func TestPredefinedApplicationSetPolicyMatches_5666(t *testing.T) {
 	}
 
 	// udp/135 also matches (junos-ms-rpc-udp).
-	resUDP := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DstPort: 135})
+	resUDP := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DstPort: PortPtr(135)})
 	if !resUDP.Matched || resUDP.Action != config.PolicyPermit {
 		t.Fatalf("junos-ms-rpc udp/135 did not match: Matched=%v Action=%v", resUDP.Matched, resUDP.Action)
 	}
 
 	// A non-member (tcp/80) must NOT match — the bundle is narrow, not match-any.
-	resNo := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	resNo := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if resNo.Matched {
 		t.Fatalf("tcp/80 wrongly matched junos-ms-rpc (should be default-deny): Action=%v", resNo.Action)
 	}
@@ -72,11 +72,11 @@ func TestUserAppShadowsPredefinedSetName_5666(t *testing.T) {
 	})
 
 	// The user app matches tcp/9999, NOT tcp/135 (the predefined bundle's port).
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 9999})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(9999)})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("user app junos-ms-rpc tcp/9999 did not match (app-first precedence broken): Matched=%v Action=%v", res.Matched, res.Action)
 	}
-	res135 := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 135})
+	res135 := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(135)})
 	if res135.Matched {
 		t.Fatalf("tcp/135 matched — a user app shadowing junos-ms-rpc must NOT expand as the predefined bundle: Action=%v", res135.Action)
 	}

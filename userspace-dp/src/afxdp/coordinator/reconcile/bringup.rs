@@ -201,42 +201,16 @@ pub(super) fn bring_up_workers(
     // not merely a background best-effort task. A generation-zero store
     // remains defense-in-depth on every worker, but it must not report a
     // ready dataplane before the monitor has established its baseline.
-    #[cfg(test)]
-    let ipsec_sa_ready = if coord.force_ipsec_sa_not_ready {
-        // #14130: forced not-ready so the unwinding below is verifiable
-        // without a privileged monitor. Production retains the gate.
-        false
-    } else if coord.force_ipsec_sa_ready {
-        // #10694: explicit empty baseline pin for worker bring-up seam tests.
-        // Production retains the mandatory monitor gate below.
-        coord
-            .neighbors
-            .ipsec_sa_monitor
-            .store
-            .reset_for_monitor_start();
-        coord
-            .neighbors
-            .ipsec_sa_monitor
-            .store
-            .publish_empty_dump_for_test();
-        true
-    } else {
+    // #17111: the SA gate is written ONCE here; `test_sa_ready_override`
+    // only pre-empts it under `cfg(test)` force flags (`None` in release).
+    let ipsec_sa_ready = super::test_seams::test_sa_ready_override(coord).unwrap_or_else(|| {
         ensure_ipsec_sa_monitor(coord);
         coord
             .neighbors
             .ipsec_sa_monitor
             .store
             .wait_ready(Duration::from_secs(5))
-    };
-    #[cfg(not(test))]
-    let ipsec_sa_ready = {
-        ensure_ipsec_sa_monitor(coord);
-        coord
-            .neighbors
-            .ipsec_sa_monitor
-            .store
-            .wait_ready(Duration::from_secs(5))
-    };
+    });
     if !ipsec_sa_ready {
         // #14130/#15950: unwind the plan/publish/replay phases. Workers
         // are stopped/joined and sizing counters cleared so status cannot
@@ -878,8 +852,10 @@ pub(in crate::afxdp) fn ensure_resolver(coord: &mut Coordinator) -> Option<Arc<N
 }
 
 /// #6240 phase: SPAWN. The per-worker spawn loop — build the five typed #6241
-/// launch bundles, spawn the worker thread (with the #925 panic slot + the
-/// `#[cfg(test)]` force-failure seams), and on success register ONE #6242
+/// launch bundles, spawn the worker thread (with the #925 panic slot; the
+/// `#[cfg(test)]` force-failure seams live in `reconcile/test_seams.rs` and
+/// only pre-empt the single `spawn_supervised_worker` call below), and on
+/// success register ONE #6242
 /// post-spawn `WorkerRuntimeRecord` plus the worker's #14130 live/identity
 /// slots. Returns a typed [`LaunchOutcome`]:
 /// `SpawnFailed` on the FIRST spawn failure (its stage already recorded on
@@ -934,22 +910,17 @@ fn spawn_workers(
                 )
             })
             .collect();
-        // #8388: the per-slot `BindingLiveState` handles dispatched to this
-        // worker, captured here because `binding_plans` is moved into the
-        // launch plan below. Used ONLY by the `#[cfg(test)]` stub arms, which
-        // publish `set_bound` through them for every slot they REPORT as bound
-        // — the same publish a real `worker_loop` makes from
-        // `BindingWorker::create`. Without it a "healthy" stub is healthy only
-        // in its startup report: `refresh_bindings` reads the (never-published)
-        // live state and every slot comes back `bound = false`, so the
-        // operator- and Go-visible binding surface is IDENTICAL whether the
-        // fail-close stopped the healthy siblings or not, and any cell over
-        // that surface is mutation-insensitive by construction.
-        #[cfg(test)]
-        let stub_lives: BTreeMap<u32, Arc<BindingLiveState>> = binding_plans
-            .iter()
-            .map(|plan| (plan.status.slot, plan.live.clone()))
-            .collect();
+        // #8388/#17111: the stub arms in `test_seams.rs` publish
+        // `set_bound` through the per-slot `BindingLiveState` handles for
+        // every slot they REPORT as bound — the same publish a real
+        // `worker_loop` makes from `BindingWorker::create`. The seam
+        // derives them from `spawn_slots` above. Without it a "healthy"
+        // stub is healthy only in its startup report: `refresh_bindings`
+        // reads the (never-published) live state and every slot comes
+        // back `bound = false`, so the operator- and Go-visible binding
+        // surface is IDENTICAL whether the fail-close stopped the healthy
+        // siblings or not, and any cell over that surface is
+        // mutation-insensitive by construction.
         let stop = Arc::new(AtomicBool::new(false));
         let heartbeat = Arc::new(AtomicU64::new(monotonic_nanos()));
         let session_export_ack = Arc::new(AtomicU64::new(0));
@@ -1076,169 +1047,33 @@ fn spawn_workers(
                 published_telemetry,
             );
         };
-        // #4952 test seam: force the fallible worker spawn to fail so the
-        // post-teardown fail-closed propagation is unit-verifiable without a
-        // real (unprovokable) pthread_create EAGAIN/ENOMEM. Declines the real
-        // spawn, drops the worker body unspawned, and synthesizes the same
-        // `std::io::Error` a resource-exhausted spawn returns. Always 0 in
-        // release builds (`force_worker_spawn_fail` is `#[cfg(test)]`).
-        //
-        // #5143 test seam: force a SPAWNED worker to report an INCOMPLETE
-        // startup bound-slot set (a worker whose in-thread XSK/UMEM bind failed
-        // for one or more planned bindings but keeps heartbeating). A real
-        // `worker_loop` cannot bind a real XSK in-process, so instead spawn a
-        // joinable STUB thread that reports a bound set MISSING one planned
-        // slot, then heartbeats until stopped — exercising the readiness
-        // barrier's fail-close + stop/join end to end. Checked BEFORE the
-        // spawn-fail seam so the two are mutually exclusive per worker.
-        #[cfg(test)]
-        let join = if coord.force_worker_bind_incomplete > 0 {
-            coord.force_worker_bind_incomplete -= 1;
-            drop(body);
-            // Report every planned slot EXCEPT one (`skip(1)`), so with a
-            // single planned binding the reported set is empty and with N it
-            // is short by one — either way bound != planned -> barrier fails
-            // closed.
-            let incomplete_bound: Vec<u32> = planned_slots.iter().copied().skip(1).collect();
-            // #8388: publish the bound live state for the slots this stub
-            // reports bound. Synchronous (before the spawn) rather than inside
-            // the stub body so the surface is race-free: the `SpawnFailed` arm
-            // returns without ever reaching the readiness barrier, so a
-            // stub-thread publish would not be ordered against the reconcile's
-            // closing `refresh_bindings`.
-            for slot in &incomplete_bound {
-                if let Some(live) = stub_lives.get(slot) {
-                    live.set_bound(-1);
-                }
+        // #17111: the supervised spawn is written ONCE below and every
+        // build — test included — executes it on the fall-through.
+        // `test_spawn_override` (in `reconcile/test_seams.rs`) pre-empts
+        // it only under `cfg(test)` force flags, handing the untouched
+        // `body` back otherwise; in release it is an inline no-op. The
+        // stub bodies live in the seam, not inline here.
+        let spawn_ctx = super::test_seams::test_spawn_ctx(
+            &spawn_slots,
+            &planned_slots,
+            &startup_gate,
+            &stop,
+            &heartbeat,
+            startup_report_tx,
+        );
+        let join = match super::test_seams::test_spawn_override(
+            coord,
+            spawn_ctx,
+            worker_id,
+            runtime_atomics.clone(),
+            panic_slot.clone(),
+            body,
+        ) {
+            super::test_seams::TestSpawnOutcome::Override(join) => join,
+            super::test_seams::TestSpawnOutcome::FallThrough(body) => {
+                spawn_supervised_worker(worker_id, runtime_atomics.clone(), panic_slot, body)
             }
-            // #6245: the omitted slot is the SMALLEST planned slot (`skip(1)`
-            // drops the first of the sorted BTreeSet). Report it as an EXPLICIT
-            // per-slot failure so the barrier surfaces the cause, exercising the
-            // #6245 explicit-failure contract end-to-end (a real `worker_loop`
-            // cannot bind an XSK in-process). Empty when no slots are planned.
-            let stub_failures: Vec<BindingSetupFailure> = planned_slots
-                .iter()
-                .copied()
-                .next()
-                .map(|slot| BindingSetupFailure {
-                    slot,
-                    interface: "ge-0-0-1".to_string(),
-                    queue_id: slot,
-                    phase: BindingSetupPhase::Private,
-                    // #8558: shaped like the real `bind.rs` failure text so the
-                    // cause a cell reads back is the cause production
-                    // publishes — including the "Device or resource busy"
-                    // substring `hasBusyBindingsWedgeLocked` keys on. The
-                    // original seam wording is retained verbatim inside it, so
-                    // the #6245 stage-rendering cell that pins that phrase is
-                    // unaffected.
-                    reason: "libxdp private bind(flags=0x0004): Device or resource \
-busy — forced private bind failure (test seam #6245)"
-                        .to_string(),
-                })
-                .into_iter()
-                .collect();
-            // #8558: mirror `worker_loop_setup`'s `live.set_error(reason)` on
-            // the slot whose bind failed. The stub is the only in-process stand
-            // -in for a real bind failure, and a stub that reports the shortfall
-            // without publishing the cause into its `BindingLiveState` would let
-            // a fix that reads the cause from `live` (rather than from the
-            // fail-closed stage) look correct here while doing nothing in
-            // production — `stop_inner` drops `live` before anything reads it.
-            for failure in &stub_failures {
-                if let Some(live) = stub_lives.get(&failure.slot) {
-                    live.set_error(failure.reason.clone());
-                }
-            }
-            let startup_gate_for_stub = Arc::clone(&startup_gate);
-            let stub_stop = stop.clone();
-            let stub_heartbeat = heartbeat.clone();
-            let stub_tx = startup_report_tx.clone();
-            let stub_worker_id = worker_id;
-            spawn_supervised_worker(
-                worker_id,
-                runtime_atomics.clone(),
-                panic_slot,
-                move || {
-                    startup_gate_for_stub.wait();
-                    let _ = stub_tx.send(WorkerStartupReport {
-                        worker_id: stub_worker_id,
-                        bound_slots: incomplete_bound,
-                        binding_failures: stub_failures,
-                        recovered_fallbacks: Vec::new(),
-                    });
-                    // Heartbeat while "live-but-unbound" until the barrier
-                    // stops us — bounded so a REVERTED (barrier removed) build
-                    // does not leak a thread forever.
-                    let mut ticks = 0u32;
-                    while !stub_stop.load(std::sync::atomic::Ordering::Relaxed) && ticks < 5_000 {
-                        stub_heartbeat.store(monotonic_nanos(), std::sync::atomic::Ordering::Relaxed);
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                        ticks += 1;
-                    }
-                },
-            )
-        } else if coord.force_worker_spawn_fail > 0 && coord.force_worker_spawn_fail_skip == 0 {
-            // #4952 / #6242: the forced spawn failure fires once the skip credit
-            // is exhausted. With `force_worker_spawn_fail_skip == 0` (the #4952
-            // default) this fails the FIRST planned worker; with a positive skip
-            // it fails the `(skip+1)`th, after the first `skip` workers launched
-            // (as healthy stubs, below) — exercising PARTIAL-success rollback.
-            coord.force_worker_spawn_fail -= 1;
-            drop(body);
-            Err(std::io::Error::new(
-                std::io::ErrorKind::WouldBlock,
-                "forced worker spawn failure (test seam #4952/#6242)",
-            ))
-        } else if coord.force_worker_healthy_stub {
-            // #6242: benign HEALTHY stub — reports the FULL planned bound set so
-            // the readiness barrier passes, then heartbeats until stopped. Used
-            // to launch the workers that PRECEDE a fail-at-K spawn failure (or
-            // that coexist with a single bind-incomplete worker) WITHOUT running
-            // the real `worker_loop`, which cannot bind a real XSK in-process.
-            // When skipping toward a forced failure, consume one skip credit so
-            // the failure fires on the intended Kth worker.
-            if coord.force_worker_spawn_fail > 0 && coord.force_worker_spawn_fail_skip > 0 {
-                coord.force_worker_spawn_fail_skip -= 1;
-            }
-            drop(body);
-            let full_bound: Vec<u32> = planned_slots.iter().copied().collect();
-            // #8388: see the sibling publish in the bind-incomplete arm. A
-            // HEALTHY stub reports its full planned set, so it publishes bound
-            // live state for all of it — that is what makes "the fail-close
-            // stopped the healthy siblings too" observable on the binding
-            // surface instead of only in `workers.records`.
-            for slot in &full_bound {
-                if let Some(live) = stub_lives.get(slot) {
-                    live.set_bound(-1);
-                }
-            }
-            let startup_gate_for_stub = Arc::clone(&startup_gate);
-            let stub_stop = stop.clone();
-            let stub_heartbeat = heartbeat.clone();
-            let stub_tx = startup_report_tx.clone();
-            let stub_worker_id = worker_id;
-            spawn_supervised_worker(worker_id, runtime_atomics.clone(), panic_slot, move || {
-                startup_gate_for_stub.wait();
-                let _ = stub_tx.send(WorkerStartupReport {
-                    worker_id: stub_worker_id,
-                    bound_slots: full_bound,
-                    binding_failures: Vec::new(),
-                    recovered_fallbacks: Vec::new(),
-                });
-                let mut ticks = 0u32;
-                while !stub_stop.load(std::sync::atomic::Ordering::Relaxed) && ticks < 5_000 {
-                    stub_heartbeat
-                        .store(monotonic_nanos(), std::sync::atomic::Ordering::Relaxed);
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    ticks += 1;
-                }
-            })
-        } else {
-            spawn_supervised_worker(worker_id, runtime_atomics.clone(), panic_slot, body)
         };
-        #[cfg(not(test))]
-        let join = spawn_supervised_worker(worker_id, runtime_atomics.clone(), panic_slot, body);
         match join {
             Ok(join) => {
                 eprintln!(
@@ -1581,3 +1416,7 @@ pub(in crate::afxdp) fn planned_worker_slots<V>(workers: &BTreeMap<u32, V>) -> u
 #[cfg(test)]
 #[path = "bringup_dead_worker_12192_tests.rs"]
 mod dead_worker_wiring_tests;
+
+#[cfg(test)]
+#[path = "bringup_test_seams_17111_tests.rs"]
+mod test_seams_parity_tests;

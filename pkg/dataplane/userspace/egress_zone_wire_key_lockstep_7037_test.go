@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -90,41 +89,7 @@ func jsonKeyOf(t *testing.T, typ reflect.Type, field string) string {
 	return strings.Split(tag, ",")[0]
 }
 
-// rustStructBody returns the body of a named Rust struct: from its declaration
-// to the first closing brace in column 0. Scoping matters — `egress_zone` also
-// appears in control.rs and binding.rs on different structs, and a file-wide
-// regex would bind whichever happened to come first.
-func rustStructBody(t *testing.T, src, name string) string {
-	t.Helper()
-	decl := regexp.MustCompile(`(?m)^(?:pub|pub\(crate\)) struct ` + regexp.QuoteMeta(name) + `\s*\{`)
-	loc := decl.FindStringIndex(src)
-	if loc == nil {
-		t.Fatalf("Rust struct %q not found — if it was renamed or moved, update this guard "+
-			"rather than deleting it", name)
-	}
-	rest := src[loc[1]:]
-	end := regexp.MustCompile(`(?m)^\}`).FindStringIndex(rest)
-	if end == nil {
-		t.Fatalf("Rust struct %q has no closing brace in column 0; the parse cannot be "+
-			"scoped and a file-wide match would bind the wrong struct", name)
-	}
-	return rest[:end[0]]
-}
-
-// rustSerdeRenameOf returns the serde wire name of a Rust field. It requires the
-// rename attribute: relying on serde's default (the field's own identifier)
-// would make this guard pass on a struct that had lost the attribute entirely,
-// which is one of the two ways the spellings can drift apart.
-func rustSerdeRenameOf(t *testing.T, structBody, field string) string {
-	t.Helper()
-	re := regexp.MustCompile(`#\[serde\(\s*rename = "([^"]+)"[^\]]*\)\]\s*pub ` +
-		regexp.QuoteMeta(field) + `\s*:`)
-	m := re.FindStringSubmatch(structBody)
-	if m == nil {
-		t.Fatalf("no #[serde(rename = ...)] found on Rust field %q. Either the field is gone "+
-			"— in which case the Go emitter is writing a key nothing reads — or it now relies "+
-			"on serde's default naming, which this guard deliberately does not accept: the "+
-			"whole point is that the wire spelling is stated on both sides", field)
-	}
-	return m[1]
-}
+// rustStructBody / rustSerdeRenameOf live in rustwire_test.go (#17142):
+// the shared struct-scoped parser. The copies that used to be defined
+// here (first column-0 `}` struct end, `pub`-only field match) diverged
+// from the sibling copies in exactly the ways that file now prevents.

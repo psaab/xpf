@@ -669,6 +669,13 @@ func (f *fakeCrashDP) HelperCrashState() (userspace.HelperCrashRecord, bool) {
 	return f.rec, f.known
 }
 
+// HelperCrashHistory completes the CrashReporter pair (#17128): the
+// pre-#8397 shape this fake models has no completed-episode ring, so
+// it answers empty — Build must still consult the state half.
+func (f *fakeCrashDP) HelperCrashHistory() ([]userspace.HelperCrashEpisode, int) {
+	return nil, 0
+}
+
 // crashBuild runs Build against a helper whose Status() errors, which is the
 // real post-crash shape: the supervisor clears the cached status, so a crash
 // and a "helper never started" look identical to every other surface.

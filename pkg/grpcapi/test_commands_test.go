@@ -94,7 +94,7 @@ security {
 			wantSubstr: []string{"Policy match:", "Policy:    allow-http", "Action:    permit"},
 			notSubstr:  []string{"Default", "global"},
 			query: policymatch.Query{
-				FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80,
+				FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: policymatch.PortPtr(80),
 			},
 			wantAction: config.PolicyPermit,
 		},
@@ -125,7 +125,7 @@ security {
 			wantSubstr: []string{"Policy match (global):", "Policy:    global-allow", "Action:    permit"},
 			notSubstr:  []string{"Default"},
 			query: policymatch.Query{
-				FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80,
+				FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: policymatch.PortPtr(80),
 			},
 			wantAction: config.PolicyPermit,
 		},
@@ -149,7 +149,7 @@ security {
 			wantSubstr: []string{"Default permit"},
 			notSubstr:  []string{"Default deny", "Policy match"},
 			query: policymatch.Query{
-				FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80,
+				FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: policymatch.PortPtr(80),
 			},
 			wantAction: config.PolicyPermit,
 		},

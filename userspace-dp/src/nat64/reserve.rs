@@ -62,15 +62,8 @@ pub(super) fn release_nat64_allocation_with_mode(
     let Some(port) = nat.rewrite_src_port else {
         return false;
     };
-    let flow = SourceNatFlowKey {
-        protocol: key.protocol,
-        src_ip: key.src_ip,
-        dst_ip: nat.rewrite_dst.unwrap_or(key.dst_ip),
-        src_port: key.src_port,
-        dst_port: key.dst_port,
-        // #9680: the scope the allocation keyed (see allocate_source_with_holder).
-        routing_scope: key.routing_domain,
-    };
+    // #17072: ONE builder for the BIB key (see nat64_bib_flow_key).
+    let flow = nat64_bib_flow_key(key, nat.rewrite_dst.unwrap_or(key.dst_ip));
     let mut freed = false;
     // #6876: no first-hit `break` — see the doc comment above. A flow can be
     // held in more than one prefix's allocator, and a prefix that does not hold
@@ -534,15 +527,8 @@ fn reserve_synced_nat64_allocation_with_holder(
     let Some(port) = nat.rewrite_src_port else {
         return true;
     };
-    let flow = SourceNatFlowKey {
-        protocol: key.protocol,
-        src_ip: key.src_ip,
-        dst_ip: nat.rewrite_dst.unwrap_or(key.dst_ip),
-        src_port: key.src_port,
-        dst_port: key.dst_port,
-        // #9680: the scope the allocation keyed (see allocate_source_with_holder).
-        routing_scope: key.routing_domain,
-    };
+    // #17072: ONE builder for the BIB key (see nat64_bib_flow_key).
+    let flow = nat64_bib_flow_key(key, nat.rewrite_dst.unwrap_or(key.dst_ip));
     // #6892: narrow to the prefix the ACTIVE node would have used, by the SAME
     // discriminator it uses, BEFORE falling back to the pool scan below.
     //

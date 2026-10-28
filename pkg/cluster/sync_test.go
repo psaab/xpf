@@ -266,13 +266,31 @@ func TestQueueWithoutConnection(t *testing.T) {
 	}
 }
 
-func TestFormatStats(t *testing.T) {
-	ss := NewSessionSync(":4785", "10.0.0.2:4785", nil)
-	ss.stats.SessionsSent.Store(100)
-	ss.stats.SessionsReceived.Store(50)
-	out := ss.FormatStats()
-	if out == "" {
-		t.Fatal("format stats should produce output")
+// #17107: FormatStats is deleted (it was a test-only fourth renderer
+// reading s.stats directly). Its rendering decision now lives in
+// syncStatFields; the operator surface is Manager.FormatStatistics /
+// FormatDataPlaneStatistics / FormatInformation, whose conditional rows
+// come from renderSyncStatRows17107 (status.go). This cell pins that
+// REAL surface — not a test-only renderer — produces the nonzero rows
+// for a populated snapshot.
+func TestSyncStatsDescriptorRender17107(t *testing.T) {
+	snap := &SyncStatsSnapshot{SessionsSent: 100, SessionsReceived: 50, DeletesDropped: 7}
+	out := renderSyncStatRows17107(snap, "  ")
+	for _, want := range []string{"Deletes dropped: 7"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderSyncStatRows17107 missing %q:\n%s", want, out)
+		}
+	}
+	// SessionsSent/SessionsReceived are RenderAlways service-table rows,
+	// not conditional descriptor rows: they must NOT appear here (the
+	// statistics tables render them separately).
+	for _, unwanted := range []string{"Sessions sent", "Sessions received"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("renderSyncStatRows17107 must not render RenderAlways row %q:\n%s", unwanted, out)
+		}
+	}
+	if zero := renderSyncStatRows17107(&SyncStatsSnapshot{}, "  "); zero != "" {
+		t.Errorf("renderSyncStatRows17107(zero snapshot) = %q, want empty", zero)
 	}
 }
 
@@ -4279,7 +4297,7 @@ func TestSendFailoverIgnoresStaleAckForEarlierRequest(t *testing.T) {
 	firstReqID := binary.LittleEndian.Uint64(payload[1:9])
 
 	ss.failoverWaitMu.Lock()
-	delete(ss.failoverWaiters, 9)
+	delete(ss.failoverWaiters, failoverWaitKey{partition: failoverWaitRequest, key: "9", single: true})
 	ss.failoverWaitMu.Unlock()
 
 	done2 := make(chan error, 1)

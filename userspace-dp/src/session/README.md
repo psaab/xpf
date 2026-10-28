@@ -1118,7 +1118,7 @@ but the per-slice cost stays hard-bounded at `CT_REFRESH_SLICE_BUDGET` — no
 single loop tick ever walks the whole table again. Because a session installed
 into an already-passed slot mid-cycle isn't re-visited until the next cycle,
 freshness is best-effort diagnostic (the entry already gets `last_seen` stamped
-at install via `publish_bpf_conntrack_entry`; the Go GC has `SkipSweep` set, so
+at install via `publish_bpf_conntrack_entry`; the helper owns expiry (the Go conntrack GC is retired, #17155), so
 a stale `last_seen` never causes premature expiry).
 
 ## Standby retention (#2120)

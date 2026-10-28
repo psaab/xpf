@@ -338,7 +338,7 @@ pub(crate) struct PolicyEvaluationResult {
     pub(crate) log_session_close: bool,
     /// #3227: the matched application term's per-application inactivity (idle)
     /// timeout in SECONDS, carried so the session-install path can stamp it so
-    /// the conntrack GC ages the session out on the app's value instead of the
+    /// the helper's expiry ages the session out on the app's value instead of the
     /// global per-protocol timeout. `None` means "use the global timeout"
     /// (the default-action path and any non-app-timeout match), which is
     /// byte-identical to pre-#3227 behavior.
@@ -1196,7 +1196,7 @@ pub(crate) struct ApplicationMatch {
     /// `Some(t)` (t > 0) overrides the global per-protocol session timeout for a
     /// flow admitted by this term; `None` (or 0) leaves the global timeout in
     /// effect (back-compat). Carried from the matched term into the session at
-    /// install so the conntrack GC ages the session out on the app's value.
+    /// install so the helper's expiry ages the session out on the app's value.
     pub(crate) inactivity_timeout: Option<u32>,
 }
 
@@ -2159,8 +2159,14 @@ impl PolicyState {
 
     pub(crate) fn rule_binding_by_stable_id(&self, rule_id: &str) -> Option<(u32, &PolicyRule)> {
         let index = *self.rule_id_to_index.get(rule_id)?;
-        let counter_idx = u32::try_from(index + 1).ok()?;
-        Some((counter_idx, self.rules.get(index)?))
+        // `index` is a live rule-table position: `rule_id_to_index` is built
+        // by enumerating `self.rules` at snapshot build, so
+        // `counter_handle(index)` cannot saturate onto the reserved
+        // default-policy handle here (that would need ~4.29e9 live rules;
+        // see `DEFAULT_POLICY_COUNTER_IDX`). The previous independent
+        // fallible `index + 1` conversion's failure arm was therefore
+        // unreachable for a live rule.
+        Some((counter_handle(index), self.rules.get(index)?))
     }
     /// Resolve a stable rule ID to the CURRENT snapshot's counter and index.
     /// Unknown identities never fall back to a positional index.
@@ -3293,72 +3299,92 @@ pub(crate) fn parse_policy_state_with_counters_and_functional(
     Ok(state)
 }
 
-/// #2008 H11: parse the legacy (non-v3-shaped) `source_addresses` /
-/// `destination_addresses` field with family-safe wildcard handling.
+/// #17114: single classification for every policy address token, mirroring
+/// the Go single source `PolicyAddressWildcardFamilies`
+/// (`pkg/config/policy_address_keyword_literal_9574.go`): `any` covers both
+/// families, `any-ipv4`/`any4` IPv4 only, `any-ipv6`/`any6` IPv6 only. Every
+/// Rust surface (legacy set, v3 literal set, address-book prefix) MUST ask
+/// this classifier so a keyword cannot be recognised on one surface and not
+/// another. The shapes differ only in empty-set semantics and, for the book,
+/// in the declared-family check — parameters of the set builder / caller,
+/// not of token classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddrToken {
+    Any,
+    AnyV4,
+    AnyV6,
+    Prefix(IpNet),
+    Malformed,
+}
+
+/// Classify one address token. `""` and any non-keyword token that is
+/// neither an IP/CIDR nor a bare IP are `Malformed`; callers fail the
+/// snapshot closed on it (#3367/#3711/#13702).
+fn classify_addr_token(tok: &str) -> AddrToken {
+    match tok {
+        "any" => AddrToken::Any,
+        "any4" | "any-ipv4" => AddrToken::AnyV4,
+        "any6" | "any-ipv6" => AddrToken::AnyV6,
+        "" => AddrToken::Malformed,
+        s => match s.parse::<IpNet>() {
+            Ok(net) => AddrToken::Prefix(net),
+            Err(_) => {
+                if let Ok(ip) = s.parse::<Ipv4Addr>() {
+                    AddrToken::Prefix(IpNet::V4(
+                        ipnet::Ipv4Net::new(ip, 32).expect("v4 /32"),
+                    ))
+                } else if let Ok(ip) = s.parse::<Ipv6Addr>() {
+                    AddrToken::Prefix(IpNet::V6(
+                        ipnet::Ipv6Net::new(ip, 128).expect("v6 /128"),
+                    ))
+                } else {
+                    AddrToken::Malformed
+                }
+            }
+        },
+    }
+}
+
+/// #17114: what an empty (no-prefix, no-wildcard) token list collapses to.
+/// Legacy sides keep "empty = no constraint = MatchAny"; v3 sides use
+/// "empty = MatchNone" (#1606).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyMeans {
+    MatchAny,
+    MatchNone,
+}
+
+/// #17114: build one literal side from its tokens via `classify_addr_token`.
+/// Returns the per-family sets plus the FIRST malformed token (`Some("")`
+/// for an empty element), on which the caller fails the snapshot closed.
 ///
-/// The legacy convention is "empty input = no address constraint =
-/// MatchAny" (preserved via `PrefixSetV4::from_prefixes`). But a
-/// FAMILY-SCOPED wildcard (`any-ipv4` / `any-ipv6`) is a constraint:
-/// it must match all of ITS family and NONE of the opposite family.
-/// The naive `from_prefixes(v4), from_prefixes(v6)` pair leaks
-/// cross-family, because once `any-ipv4` populates v4 the v6 Vec is
-/// still empty and `from_prefixes(empty)` returns MatchAny — so the
-/// rule would still match v6 (and the reverse for `any-ipv6`).
-///
-/// Fix: track per-family wildcards exactly like `parse_v3_literal_set`.
-/// If a family-scoped wildcard is present anywhere in the token list,
-/// the OPPOSITE family that received no prefixes is MatchNone (the
-/// family is explicitly excluded), NOT MatchAny. Only when NO
-/// family-scoped wildcard appears does the legacy "empty = MatchAny"
-/// convention apply (via `from_prefixes`), preserving back-compat for
-/// the unconstrained / all-malformed cases.
-///
-/// #3947: a bare `any` token now sets BOTH per-family any-flags
-/// (mirroring `parse_v3_literal_set`) instead of being a no-op that
-/// relied on the empty→MatchAny convention. The old no-op arm only
-/// yielded MatchAny when the list was otherwise empty; a list mixing
-/// `any` with a literal (`[ any 10.0.0.0/8 ]`) dropped the `any` and
-/// NARROWED to the literal — a fail-OPEN for a deny term. An `any`
-/// anywhere in the list is match-all for both families regardless of
-/// any accompanying literals or family-scoped wildcards.
-///
-/// #3367/#13702: the returned `Option<String>` carries the FIRST token that
-/// was empty, non-`any`, non-family-wildcard and unparseable as an IP/CIDR.
-/// The caller fails the whole snapshot closed when this is `Some`.
-fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
+/// A bare `any` is match-all for both families regardless of accompanying
+/// literals (#3947). A family-scoped wildcard (`any4`/`any-ipv4`,
+/// `any6`/`any-ipv6`) is match-all for its family and, under
+/// `EmptyMeans::MatchAny`, MatchNone for the unnamed opposite family
+/// (#2008 H11) instead of leaking via the legacy empty->MatchAny rule.
+fn build_literal_side(
+    tokens: &[String],
+    empty: EmptyMeans,
+) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
     let mut any_v4 = false;
     let mut any_v6 = false;
     let mut v4: Vec<PrefixV4> = Vec::new();
     let mut v6: Vec<PrefixV6> = Vec::new();
     let mut malformed: Option<String> = None;
-    for tok in addresses {
-        match tok.as_str() {
-            // #3947: a bare `any` is the both-families match-all wildcard.
-            // Mirror `parse_v3_literal_set` EXACTLY — set BOTH per-family
-            // any-flags. The pre-fix no-op arm leaned on the legacy
-            // empty→MatchAny convention below, which only holds when the list
-            // is otherwise EMPTY: a list MIXING `any` with a literal (e.g.
-            // `[ any 10.0.0.0/8 ]`) then DROPPED the `any` and NARROWED the
-            // match to just the literal — a fail-OPEN for a deny term (the
-            // deny that should match every source matched only the listed
-            // one). Setting the flags here keeps the set match-all regardless
-            // of any accompanying literals.
-            "any" => {
+    for tok in tokens {
+        match classify_addr_token(tok) {
+            AddrToken::Any => {
                 any_v4 = true;
                 any_v6 = true;
             }
-            // Empty elements are not a supported wildcard or literal. The
-            // producer strips them; treat one as corrupt snapshot input.
-            "" => {
+            AddrToken::AnyV4 => any_v4 = true,
+            AddrToken::AnyV6 => any_v6 = true,
+            AddrToken::Prefix(IpNet::V4(net)) => v4.push(PrefixV4::from_net(net)),
+            AddrToken::Prefix(IpNet::V6(net)) => v6.push(PrefixV6::from_net(net)),
+            AddrToken::Malformed => {
                 if malformed.is_none() {
-                    malformed = Some(String::new());
-                }
-            }
-            "any-ipv4" => any_v4 = true,
-            "any-ipv6" => any_v6 = true,
-            s => {
-                if !parse_address(s, &mut v4, &mut v6) && malformed.is_none() {
-                    malformed = Some(s.to_string());
+                    malformed = Some(tok.clone());
                 }
             }
         }
@@ -3366,19 +3392,14 @@ fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, 
     let any_family_scoped = any_v4 || any_v6;
     let v4_set = if any_v4 {
         PrefixSetV4::MatchAny
-    } else if any_family_scoped {
-        // A same-family-only wildcard excludes this family. An empty
-        // v4 here means "v4 was deliberately not named" → MatchNone,
-        // NOT the legacy empty→MatchAny.
+    } else if any_family_scoped || empty == EmptyMeans::MatchNone {
         PrefixSetV4::from_v3_literals(v4)
     } else {
-        // No family-scoped wildcard anywhere → legacy convention:
-        // empty = no constraint = MatchAny.
         PrefixSetV4::from_prefixes(v4)
     };
     let v6_set = if any_v6 {
         PrefixSetV6::MatchAny
-    } else if any_family_scoped {
+    } else if any_family_scoped || empty == EmptyMeans::MatchNone {
         PrefixSetV6::from_v3_literals(v6)
     } else {
         PrefixSetV6::from_prefixes(v6)
@@ -3386,142 +3407,60 @@ fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, 
     (v4_set, v6_set, malformed)
 }
 
-/// #1606: parse the v3 `source_literals` / `destination_literals`
-/// field. "any" token forces MatchAny on BOTH families (Codex r5
-/// F-r5-1 fix); empty input or no-any → MatchNone (via
-/// `from_v3_literals`).
-///
-/// #3711/#13702: the returned `Option<String>` carries the FIRST token that
-/// was empty, non-`any`/`any4`/`any6`/`any-ipv4`/`any-ipv6`, or unparseable
-/// as an IP/CIDR. Without this reporting, an all-dropped side collapsed to
-/// MatchNone and a deny could fall through to default-permit. The caller fails
-/// the whole snapshot closed when this is `Some`. Mirrors the legacy path,
-/// reusing `parse_address` for valid non-empty tokens. The
-/// `__unsupported_address__` sentinel is caught earlier.
+/// #2008 H11: parse the legacy (non-v3-shaped) `source_addresses` /
+/// `destination_addresses` field. Empty input = MatchAny; a family-scoped
+/// wildcard excludes the unnamed opposite family. #3367/#3947/#13702:
+/// malformed tokens are reported so the caller fails the snapshot closed.
+fn parse_legacy_address_set(addresses: &[String]) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
+    build_literal_side(addresses, EmptyMeans::MatchAny)
+}
+
+/// #1606: parse the v3 `source_literals` / `destination_literals` field.
+/// Empty input = MatchNone. #3711/#13702: malformed tokens are reported so
+/// the caller fails the snapshot closed. The `__unsupported_address__`
+/// sentinel is caught earlier.
 fn parse_v3_literal_set(literals: &[String]) -> (PrefixSetV4, PrefixSetV6, Option<String>) {
-    let mut any_v4 = false;
-    let mut any_v6 = false;
-    let mut v4: Vec<PrefixV4> = Vec::new();
-    let mut v6: Vec<PrefixV6> = Vec::new();
-    let mut malformed: Option<String> = None;
-    for tok in literals {
-        match tok.as_str() {
-            "any" => {
-                any_v4 = true;
-                any_v6 = true;
-            }
-            // `any4`/`any6` are the internal short forms; `any-ipv4`/
-            // `any-ipv6` are the Junos config keywords. The Go
-            // compiler normalizes the latter to `0.0.0.0/0`/`::/0`,
-            // but accept them here too so any path that bypasses that
-            // normalization still matches (#2008 H11).
-            "any4" | "any-ipv4" => any_v4 = true,
-            "any6" | "any-ipv6" => any_v6 = true,
-            "" => {
-                if malformed.is_none() {
-                    malformed = Some(String::new());
-                }
-            }
-            s => {
-                if !parse_address(s, &mut v4, &mut v6) && malformed.is_none() {
-                    malformed = Some(s.to_string());
-                }
-            }
-        }
-    }
-    let v4_set = if any_v4 {
-        PrefixSetV4::MatchAny
-    } else {
-        PrefixSetV4::from_v3_literals(v4)
-    };
-    let v6_set = if any_v6 {
-        PrefixSetV6::MatchAny
-    } else {
-        PrefixSetV6::from_v3_literals(v6)
-    };
-    (v4_set, v6_set, malformed)
+    build_literal_side(literals, EmptyMeans::MatchNone)
 }
 
 /// #3711: parse an address-book prefix token that MUST belong to the declared
 /// family (`expect_v4` selects the `prefixes_v4` vs `prefixes_v6` array).
-/// Returns `true` if the token parsed into the EXPECTED family or is a
-/// same-family wildcard; `false` if it is empty, malformed, family-ambiguous,
-/// OR belongs to the WRONG family (M02: an IPv6 token in `prefixes_v4` is
-/// rejected, not silently routed into the v6 set — and vice versa). This is
-/// the reporting, family-enforcing replacement for the pre-fix
-/// family-agnostic parser: the book builder fails the whole snapshot CLOSED
-/// on `false` rather than dropping the token (which collapsed a book-backed
-/// deny to match-none — a fail-OPEN). The Go side emits only concrete
-/// family-split CIDRs, so an empty token or bare `any` is a wire-contract
-/// violation.
+/// Returns `true` iff the token is a same-family wildcard or a prefix of the
+/// EXPECTED family; `false` if it is empty, malformed, family-ambiguous
+/// (bare `any`), a wrong-family wildcard, OR belongs to the WRONG family
+/// (M02). The book builder fails the whole snapshot CLOSED on `false`. The
+/// Go side emits only concrete family-split CIDRs, so an empty token or bare
+/// `any` is a wire-contract violation.
 fn parse_book_prefix_into(
     prefix: &str,
     expect_v4: bool,
     out_v4: &mut Vec<PrefixV4>,
     out_v6: &mut Vec<PrefixV6>,
 ) -> bool {
-    // The Go side emits concrete family-split CIDRs and never empty strings
-    // or a family-ambiguous bare `any` in these arrays.
-    if prefix.is_empty() || prefix == "any" {
-        return false;
-    }
-    // #2008 H11: the Junos family-scoped wildcards expand to the concrete
-    // all-addresses prefix of their family. Only the wildcard MATCHING the
-    // declared array is accepted (family enforcement — M02).
-    if prefix == "any-ipv4" {
-        if !expect_v4 {
-            return false;
+    match classify_addr_token(prefix) {
+        // #2008 H11: family-scoped wildcards expand to the concrete
+        // all-addresses prefix of their family, only in the matching array.
+        AddrToken::AnyV4 if expect_v4 => {
+            out_v4.push(PrefixV4::from_net(
+                ipnet::Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("v4 /0"),
+            ));
+            true
         }
-        out_v4.push(PrefixV4::from_net(
-            ipnet::Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("v4 /0"),
-        ));
-        return true;
-    }
-    if prefix == "any-ipv6" {
-        if expect_v4 {
-            return false;
+        AddrToken::AnyV6 if !expect_v4 => {
+            out_v6.push(PrefixV6::from_net(
+                ipnet::Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).expect("v6 /0"),
+            ));
+            true
         }
-        out_v6.push(PrefixV6::from_net(
-            ipnet::Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).expect("v6 /0"),
-        ));
-        return true;
-    }
-    match prefix.parse::<IpNet>() {
-        Ok(IpNet::V4(net)) => {
-            if !expect_v4 {
-                return false;
-            }
+        AddrToken::Prefix(IpNet::V4(net)) if expect_v4 => {
             out_v4.push(PrefixV4::from_net(net));
             true
         }
-        Ok(IpNet::V6(net)) => {
-            if expect_v4 {
-                return false;
-            }
+        AddrToken::Prefix(IpNet::V6(net)) if !expect_v4 => {
             out_v6.push(PrefixV6::from_net(net));
             true
         }
-        Err(_) => {
-            if let Ok(ip) = prefix.parse::<Ipv4Addr>() {
-                if !expect_v4 {
-                    return false;
-                }
-                out_v4.push(PrefixV4::from_net(
-                    ipnet::Ipv4Net::new(ip, 32).expect("v4 /32"),
-                ));
-                true
-            } else if let Ok(ip) = prefix.parse::<Ipv6Addr>() {
-                if expect_v4 {
-                    return false;
-                }
-                out_v6.push(PrefixV6::from_net(
-                    ipnet::Ipv6Net::new(ip, 128).expect("v6 /128"),
-                ));
-                true
-            } else {
-                false
-            }
-        }
+        _ => false,
     }
 }
 
@@ -4025,6 +3964,90 @@ pub(crate) fn count_policy_evaluation_result(
     result
 }
 
+/// #3073/#17100: the 1-based hit-counter handle for the rule at `idx`,
+/// paired with the decoder in `PolicyState::hit_counter_by_idx` (which
+/// resolves `handle - 1` back into `rules`). `0` stays reserved for "no
+/// counter", so rule index 0 carries handle 1. This is the ONLY site that
+/// encodes the handle: every tier of both policy walkers stamps it through
+/// `TierWalk::step`, `note_skipped_frag_deny` records it through here, and
+/// the stable-ID rebinding path (`rule_binding_by_stable_id`, used by HA
+/// session import and worker reconcile) resolves it through here, so a
+/// per-rule semantic change lands in exactly one place.
+#[inline]
+fn counter_handle(idx: usize) -> u32 {
+    (idx as u32).saturating_add(1)
+}
+
+/// #17100: the shared per-rule tier step for both policy walkers
+/// (`evaluate_policy_result_counted` and
+/// `evaluate_junos_host_policy_l3_aware_at_with_hit_count`). The tiers
+/// themselves still differ per walker — the index source (exact pair,
+/// NoRoute deny-only, the from-any/to-any merge, both-any, global with its
+/// scope pre-filter, and the host walker's exact/from-any/host-scoped
+/// global tiers) and each walker's post-walk default posture stay at the
+/// call sites — but the per-rule body is ONE semantics: try the match,
+/// stamp the 1-based counter handle, apply the #4569 frag-deny override
+/// and count (#12226 count-after-override), or note a skipped frag-deny.
+/// Before this extraction that body was copy-pasted at 8 sites and every
+/// per-rule change was an 8-site lockstep edit; the #4569 fix landing in
+/// the transit walker only (host walker fail-open until #6465) is the
+/// defect that structure shipped.
+struct TierWalk<'a> {
+    state: &'a PolicyState,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    protocol: u8,
+    src_port: u16,
+    dst_port: u16,
+    packet_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    l4_present: bool,
+    hit_count: PolicyHitCount,
+    scheduler_expired: bool,
+    /// The first port-bearing DENY skipped only for `l4_present == false`,
+    /// carried across tiers in precedence order (#4569/#6465). Read by the
+    /// walker's post-walk fall-through once the tiers are exhausted.
+    skipped_frag_deny: Option<SkippedFragDeny>,
+}
+
+impl TierWalk<'_> {
+    /// One rule of a tier walk: `Some(result)` decides the flow (the caller
+    /// returns it, wrapping in `Some(..)` on the host walker); `None`
+    /// continues to the next rule/tier.
+    #[inline(always)]
+    fn step(&mut self, idx: usize) -> Option<PolicyEvaluationResult> {
+        let rule = &self.state.rules[idx];
+        match try_match_rule(
+            rule,
+            self.state,
+            self.src_ip,
+            self.dst_ip,
+            self.protocol,
+            self.src_port,
+            self.dst_port,
+            self.packet_icmp,
+            self.l4_present,
+            self.scheduler_expired,
+            !self.l4_present && self.skipped_frag_deny.is_none(),
+        ) {
+            RuleMatchOutcome::Matched(mut result) => {
+                result.policy_counter_idx = counter_handle(idx);
+                Some(apply_frag_deny_override_and_count(
+                    result,
+                    self.skipped_frag_deny,
+                    rule,
+                    self.packet_len,
+                    self.hit_count,
+                ))
+            }
+            RuleMatchOutcome::Miss(reason) => {
+                note_skipped_frag_deny(&mut self.skipped_frag_deny, rule, idx, reason);
+                None
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn evaluate_policy_result_counted(
     state: &PolicyState,
@@ -4104,7 +4127,20 @@ fn evaluate_policy_result_counted(
     // (src, dst, frag-id) that remembers the first-fragment's exact verdict is
     // the deferred principled fix (#4569). On the NoRoute path the same
     // association applies within the eligible tiers above.
-    let mut skipped_frag_deny: Option<SkippedFragDeny> = None;
+    let mut walk = TierWalk {
+        state,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        hit_count,
+        scheduler_expired,
+        skipped_frag_deny: None,
+    };
     // #16021: `to_id == 0` with an unresolved egress is the NoRoute shape;
     // every other `to_id == 0` caller is a resolved unzoned egress, denied
     // below without a walk.
@@ -4135,39 +4171,8 @@ fn evaluate_policy_result_counted(
             let key = zone_pair_key(from_id, to_id);
             if let Some(indices) = state.zone_pair_index.get(&key) {
                 for &idx in indices {
-                    match try_match_rule(
-                        &state.rules[idx],
-                        state,
-                        src_ip,
-                        dst_ip,
-                        protocol,
-                        src_port,
-                        dst_port,
-                        packet_icmp,
-                        l4_present,
-                        scheduler_expired,
-                        !l4_present && skipped_frag_deny.is_none(),
-                    ) {
-                        RuleMatchOutcome::Matched(mut result) => {
-                            // #3073: 1-based handle so the fast path can re-count
-                            // every packet of this flow against the same counter.
-                            result.policy_counter_idx = (idx as u32).saturating_add(1);
-                            return apply_frag_deny_override_and_count(
-                                result,
-                                skipped_frag_deny,
-                                &state.rules[idx],
-                                packet_len,
-                                hit_count,
-                            );
-                        }
-                        RuleMatchOutcome::Miss(reason) => {
-                            note_skipped_frag_deny(
-                                &mut skipped_frag_deny,
-                                &state.rules[idx],
-                                idx,
-                                reason,
-                            );
-                        }
+                    if let Some(result) = walk.step(idx) {
+                        return result;
                     }
                 }
             }
@@ -4181,37 +4186,8 @@ fn evaluate_policy_result_counted(
             // adjudicated), and the walk continues past them.
             if let Some(indices) = state.exact_pair_deny_by_from.get(&from_id) {
                 for &idx in indices {
-                    match try_match_rule(
-                        &state.rules[idx],
-                        state,
-                        src_ip,
-                        dst_ip,
-                        protocol,
-                        src_port,
-                        dst_port,
-                        packet_icmp,
-                        l4_present,
-                        scheduler_expired,
-                        !l4_present && skipped_frag_deny.is_none(),
-                    ) {
-                        RuleMatchOutcome::Matched(mut result) => {
-                            result.policy_counter_idx = (idx as u32).saturating_add(1);
-                            return apply_frag_deny_override_and_count(
-                                result,
-                                skipped_frag_deny,
-                                &state.rules[idx],
-                                packet_len,
-                                hit_count,
-                            );
-                        }
-                        RuleMatchOutcome::Miss(reason) => {
-                            note_skipped_frag_deny(
-                                &mut skipped_frag_deny,
-                                &state.rules[idx],
-                                idx,
-                                reason,
-                            );
-                        }
+                    if let Some(result) = walk.step(idx) {
+                        return result;
                     }
                 }
             }
@@ -4266,61 +4242,13 @@ fn evaluate_policy_result_counted(
                 j += 1;
                 v
             };
-            match try_match_rule(
-                &state.rules[idx],
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        &state.rules[idx],
-                        packet_len,
-                        hit_count,
-                    );
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return result;
             }
         }
         for &idx in &state.both_any_indices {
-            match try_match_rule(
-                &state.rules[idx],
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        &state.rules[idx],
-                        packet_len,
-                        hit_count,
-                    );
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return result;
             }
         }
         for &idx in &state.global_indices {
@@ -4350,33 +4278,8 @@ fn evaluate_policy_result_counted(
             if !rule.global_from_zone.matches(from_id) || !to_ok {
                 continue;
             }
-            match try_match_rule(
-                rule,
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    // #3073: 1-based handle (see zone-pair branch above).
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        rule,
-                        packet_len,
-                        hit_count,
-                    );
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, rule, idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return result;
             }
         }
     }
@@ -4434,7 +4337,7 @@ fn evaluate_policy_result_counted(
     // default-DENY/REJECT already drops, so the override only matters for
     // default-permit; when no deny was skipped this is inert (the L4 path never
     // records one).
-    if let Some(deny) = skipped_frag_deny
+    if let Some(deny) = walk.skipped_frag_deny
         && matches!(state.default_action, PolicyAction::Permit)
     {
         return frag_associated_deny_result(deny);
@@ -4773,8 +4676,21 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
         return None;
     }
     // #6465: fragment-association fail-closed, mirroring
-    // `evaluate_policy_result_l3_aware` (#4569) — inert on the L4 path.
-    let mut skipped_frag_deny: Option<SkippedFragDeny> = None;
+    // `evaluate_policy_result_counted` (#4569) — inert on the L4 path.
+    let mut walk = TierWalk {
+        state,
+        src_ip,
+        dst_ip,
+        protocol,
+        src_port,
+        dst_port,
+        packet_icmp,
+        packet_len,
+        l4_present,
+        hit_count,
+        scheduler_expired,
+        skipped_frag_deny: None,
+    };
     // Most-specific first: an exact `from-zone <ingress> to-zone junos-host`
     // pair before the `from-zone any to-zone junos-host` wildcard. The
     // `from_id != 0` conjunct is the remainder of the old entry guard: zone
@@ -4786,32 +4702,8 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
         && let Some(indices) = state.zone_pair_index.get(&key)
     {
         for &idx in indices {
-            match try_match_rule(
-                &state.rules[idx],
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return Some(apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        &state.rules[idx],
-                        packet_len,
-                        hit_count,
-                    ));
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return Some(result);
             }
         }
     }
@@ -4827,32 +4719,8 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
     // management lifeline.
     if let Some(indices) = state.from_any_index.get(&JUNOS_HOST_ZONE_ID) {
         for &idx in indices {
-            match try_match_rule(
-                &state.rules[idx],
-                state,
-                src_ip,
-                dst_ip,
-                protocol,
-                src_port,
-                dst_port,
-                packet_icmp,
-                l4_present,
-                scheduler_expired,
-                !l4_present && skipped_frag_deny.is_none(),
-            ) {
-                RuleMatchOutcome::Matched(mut result) => {
-                    result.policy_counter_idx = (idx as u32).saturating_add(1);
-                    return Some(apply_frag_deny_override_and_count(
-                        result,
-                        skipped_frag_deny,
-                        &state.rules[idx],
-                        packet_len,
-                        hit_count,
-                    ));
-                }
-                RuleMatchOutcome::Miss(reason) => {
-                    note_skipped_frag_deny(&mut skipped_frag_deny, &state.rules[idx], idx, reason);
-                }
+            if let Some(result) = walk.step(idx) {
+                return Some(result);
             }
         }
     }
@@ -4875,32 +4743,8 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
         if !rule.global_to_zone.is_host_scope() || !rule.global_from_zone.matches(from_id) {
             continue;
         }
-        match try_match_rule(
-            rule,
-            state,
-            src_ip,
-            dst_ip,
-            protocol,
-            src_port,
-            dst_port,
-            packet_icmp,
-            l4_present,
-            scheduler_expired,
-            !l4_present && skipped_frag_deny.is_none(),
-        ) {
-            RuleMatchOutcome::Matched(mut result) => {
-                result.policy_counter_idx = (idx as u32).saturating_add(1);
-                return Some(apply_frag_deny_override_and_count(
-                    result,
-                    skipped_frag_deny,
-                    rule,
-                    packet_len,
-                    hit_count,
-                ));
-            }
-            RuleMatchOutcome::Miss(reason) => {
-                note_skipped_frag_deny(&mut skipped_frag_deny, rule, idx, reason);
-            }
+        if let Some(result) = walk.step(idx) {
+            return Some(result);
         }
     }
     // #6465: the junos-host fall-through is "no implicit default-deny" — an
@@ -4911,7 +4755,7 @@ fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
     // fragment-associated DROP (attributed to the skipped DENY) instead of
     // None. When no deny was skipped this is inert — and the L4 path never
     // records one, so the lifeline is byte-identical there.
-    if let Some(deny) = skipped_frag_deny {
+    if let Some(deny) = walk.skipped_frag_deny {
         return Some(frag_associated_deny_result(deny));
     }
     None
@@ -5145,7 +4989,7 @@ fn note_skipped_frag_deny(
             policy_id: rule.policy_id,
             log_session_init: rule.log_session_init,
             log_session_close: rule.log_session_close,
-            policy_counter_idx: (idx as u32).saturating_add(1),
+            policy_counter_idx: counter_handle(idx),
         });
     }
 }
@@ -5295,58 +5139,6 @@ fn parse_action(action: &str) -> Option<PolicyAction> {
     }
 }
 
-/// Parse one legacy address literal into the per-family prefix vectors. Returns
-/// `true` when the token was represented (a placeholder `any`/empty, a
-/// family-scoped wildcard, or a successfully-parsed IP/CIDR literal) and `false`
-/// when a NON-placeholder token failed to parse as an IP or CIDR. #3367: the
-/// caller (`parse_legacy_address_set`) propagates a `false` up so the policy
-/// builder can fail the snapshot closed rather than silently dropping the token
-/// (which on the empty->match-any legacy path widens a deny rule to match-any).
-fn parse_address(prefix: &str, out_v4: &mut Vec<PrefixV4>, out_v6: &mut Vec<PrefixV6>) -> bool {
-    if prefix.is_empty() || prefix == "any" {
-        return true;
-    }
-    // #2008 H11: family-scoped wildcards (see parse_book_prefix_into).
-    if prefix == "any-ipv4" {
-        out_v4.push(PrefixV4::from_net(
-            ipnet::Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).expect("v4 /0"),
-        ));
-        return true;
-    }
-    if prefix == "any-ipv6" {
-        out_v6.push(PrefixV6::from_net(
-            ipnet::Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).expect("v6 /0"),
-        ));
-        return true;
-    }
-    match prefix.parse::<IpNet>() {
-        Ok(IpNet::V4(net)) => {
-            out_v4.push(PrefixV4::from_net(net));
-            true
-        }
-        Ok(IpNet::V6(net)) => {
-            out_v6.push(PrefixV6::from_net(net));
-            true
-        }
-        Err(_) => {
-            if let Ok(ip) = prefix.parse::<Ipv4Addr>() {
-                out_v4.push(PrefixV4::from_net(
-                    ipnet::Ipv4Net::new(ip, 32).expect("v4 /32"),
-                ));
-                true
-            } else if let Ok(ip) = prefix.parse::<Ipv6Addr>() {
-                out_v6.push(PrefixV6::from_net(
-                    ipnet::Ipv6Net::new(ip, 128).expect("v6 /128"),
-                ));
-                true
-            } else {
-                // #3367: a non-empty, non-placeholder token that is neither an IP
-                // nor a CIDR. Signal the malformed literal to the caller.
-                false
-            }
-        }
-    }
-}
 
 /// #2124: outcome of parsing a rule's application terms. `dropped_any` records
 /// whether at least one configured term failed to parse (unparseable protocol

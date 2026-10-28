@@ -33,7 +33,7 @@ func TestScopedGlobalMultiZoneMatch(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			res := Match(cfg, Query{FromZone: tc.from, ToZone: tc.to, Protocol: "tcp", DstPort: 80})
+			res := Match(cfg, Query{FromZone: tc.from, ToZone: tc.to, Protocol: "tcp", DstPort: PortPtr(80)})
 			gotDeny := res.Matched && res.Global && res.Action == config.PolicyDeny
 			if gotDeny != tc.wantMatched {
 				t.Fatalf("Match(%s->%s): matched-deny=%v, want %v (action=%v matched=%v global=%v)",

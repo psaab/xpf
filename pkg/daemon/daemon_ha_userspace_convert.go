@@ -553,18 +553,19 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	key.DstPort = userspaceHostToNetwork16(delta.DstPort)
 	key.Protocol = delta.Protocol
 
-	// #919/#922: prefer the u16 zone IDs from the binary event-stream
-	// payload (decoded by eventstream.go; #3075 widened that wire field to
-	// u16); fall back to legacy name-string lookup for older helpers that
-	// emit JSON deltas only.
-	ingressZone := delta.IngressZoneID
+	// #919/#922/#18148: prefer the zone IDs carried on the delta. The JSON
+	// leg now carries the full u32 (#18148); the binary leg is genuinely
+	// u16 (see SessionDeltaInfo) and zero-extends. The BPF SessionValue
+	// below is u16 (frozen #16557 ABI), so the stored value is the low
+	// 16 bits; fall back to legacy name-string lookup when the ID is 0.
+	ingressZone := uint16(delta.IngressZoneID)
 	if ingressZone == 0 {
 		// #16557: session records carry the low 16 bits of the u32 id.
 		if zid, ok := zoneIDs[delta.IngressZone]; ok && zid != 0 {
 			ingressZone = uint16(zid)
 		}
 	}
-	egressZone := delta.EgressZoneID
+	egressZone := uint16(delta.EgressZoneID)
 	if egressZone == 0 {
 		if zid, ok := zoneIDs[delta.EgressZone]; ok && zid != 0 {
 			egressZone = uint16(zid)
@@ -750,16 +751,18 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	key.DstPort = userspaceHostToNetwork16(delta.DstPort)
 	key.Protocol = delta.Protocol
 
-	// #919/#922: prefer the u16 zone IDs from the binary event-stream
-	// payload; fall back to legacy name-string lookup for JSON deltas.
-	ingressZone := delta.IngressZoneID
+	// #919/#922/#18148: prefer the zone IDs carried on the delta (full u32
+	// on the JSON leg, u16 zero-extended on the binary leg); the BPF
+	// SessionValueV6 stores the low 16 bits (frozen #16557 ABI). Fall back
+	// to legacy name-string lookup when the ID is 0.
+	ingressZone := uint16(delta.IngressZoneID)
 	if ingressZone == 0 {
 		// #16557: session records carry the low 16 bits of the u32 id.
 		if zid, ok := zoneIDs[delta.IngressZone]; ok && zid != 0 {
 			ingressZone = uint16(zid)
 		}
 	}
-	egressZone := delta.EgressZoneID
+	egressZone := uint16(delta.EgressZoneID)
 	if egressZone == 0 {
 		if zid, ok := zoneIDs[delta.EgressZone]; ok && zid != 0 {
 			egressZone = uint16(zid)

@@ -1751,7 +1751,7 @@ fn kick_owner_rg_export_empty_set_is_noop_and_consumes_no_sequence() {
     let coordinator = Coordinator::new();
     let before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
     let wait = coordinator
-        .kick_owner_rg_export(&[], 0, false)
+        .kick_owner_rg_export_unpaged(&[], 0)
         .expect("kick");
     assert_eq!(
         coordinator.sessions.export_seq.load(Ordering::Relaxed),
@@ -1779,7 +1779,7 @@ fn kick_owner_rg_export_enqueues_command_then_wait_completes_on_ack() {
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
 
     let wait = coordinator
-        .kick_owner_rg_export(&[1, 2], 0, false)
+        .kick_owner_rg_export_unpaged(&[1, 2], 0)
         .expect("kick");
 
     {
@@ -2286,6 +2286,281 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
              must stay out of the bulk export"
         );
     }
+}
+
+/// #17122 (R4-Q05-02): the shared-entry -> `SessionDelta` mapping is
+/// written ONCE (`SessionDelta::from_shared`); the HA bulk export
+/// (Open) and the tunnel-remap purge (Close) both go through it. This
+/// cell builds a `SyncedSessionEntry` with every carried field
+/// non-default (tunnel id 7, non-zero counters, `Some(true)` SNAT,
+/// FabricRedirect disposition) and asserts both production paths
+/// carry each value — the regression shape of #14303
+/// (`pptp_call_ids: 0` in both hand-written literals) and #14960
+/// (`fabric_redirect_sync: true` + `session_id: 0` in the bulk
+/// literal), which a per-site literal could silently reintroduce.
+///
+/// The purge Close encodes ONLY key/owner RG/close_flags/zones/
+/// purge_retirement/ingress identity on the wire (`encode_delta_frame`
+/// Close branch) — counters, session_id, pptp_call_ids and
+/// source_nat_static are not serialized there — so the purge leg
+/// pins the delta-level fields at the production push seam
+/// (`push_purge_close_deltas` input) and the Close frame bytes at the
+/// channel receiver. Asserting only the wire bytes would miss exactly
+/// the hand-literal revert this cell exists to catch.
+///
+/// FAIL-ON-REVERT: restore either hand-written literal (or zero any
+/// carried field in `from_shared`) and the matching assertion below
+/// goes RED. The purge's two deliberate overrides
+/// (`source_nat_static: None`, `fabric_redirect_sync: false`) are
+/// pinned as the ONLY divergences between the two deltas.
+#[test]
+fn from_shared_carries_every_shared_field_on_bulk_open_and_purge_close_17122() {
+    const SESSION_ID: u64 = 0x17122;
+    const PPTP_PAIR: u64 = 0x1111_2222_3333_4444;
+    let close_class = crate::session::TcpCloseClass::Closing.to_wire();
+    let handshake = crate::session::TcpHandshakeState::HandshakePending.to_wire();
+
+    let mut entry = SyncedSessionEntry {
+        key: test_key(),
+        decision: test_decision(),
+        metadata: test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: 0x10,
+        generation: 0,
+        session_id: SESSION_ID,
+        tcp_close_class: close_class,
+        tcp_handshake_state: handshake,
+        rev_packets: 7,
+        fwd_packets: 11,
+        pptp_call_ids: PPTP_PAIR,
+        persistent_lease_hold: None,
+        source_nat_static: Some(true),
+    };
+    entry.metadata.owner_rg_id = 1;
+    entry.metadata.fabric_ingress = false;
+    entry.decision.resolution.disposition = ForwardingDisposition::FabricRedirect;
+    entry.decision.resolution.tunnel_endpoint_id = 7;
+
+    // (a) Bulk-export Open, through the production snapshot path.
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("activate RG 1");
+    let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(true, 16);
+    coordinator.event_stream = Some(sender);
+    let export = coordinator
+        .snapshot_all_sessions_export()
+        .expect("bulk export");
+    let open = export
+        .deltas_for_test()
+        .first()
+        .expect("the FabricRedirect forward row must be bulk-exported")
+        .clone();
+    // (b) Purge Close, through the production purge. A fresh
+    // coordinator is seeded with the SAME non-default entry (tunnel
+    // id 7, counters 11/7, `Some(true)` SNAT, FabricRedirect) and
+    // `purge_remapped_tunnel_sessions(&[7], ..)` drives it. The purge
+    // Close builder is not separately observable: the wire frame
+    // encodes only key/owner RG/flags/zones/retirement/ingress (see
+    // the doc comment), so the delta handed to the lossless push is
+    // captured thread-locally at `push_purge_close_deltas` and the
+    // encoded Close frame is read from the channel receiver. Both
+    // must carry every non-wire field the hand-written literal used
+    // to zero (counters, session_id, pptp_call_ids) plus the two
+    // deliberate overrides; the frame pins the wire-visible subset.
+    let mut purge_coordinator = Coordinator::new();
+    purge_coordinator.set_forwarding_for_test(ForwardingState::default());
+    publish_shared_session(
+        &purge_coordinator.sessions.synced,
+        &purge_coordinator.sessions.nat,
+        &purge_coordinator.sessions.forward_wire,
+        &purge_coordinator.sessions.owner_rg_indexes,
+        &entry,
+    );
+    let (purge_sender, purge_rx) =
+        crate::event_stream::EventStreamSender::test_sender(true, 16);
+    purge_coordinator.event_stream = Some(purge_sender);
+    let capture = super::ha::tunnel_purge::PurgeCloseDeltaCaptureForTest::start();
+    let purged =
+        purge_coordinator.purge_remapped_tunnel_sessions(&[7], &ForwardingState::default());
+    let captured = capture.take();
+    assert_eq!(purged, 1, "purge must remove the tunnel-id-7 row");
+    assert!(
+        purge_coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced")
+            .get(&entry.key)
+            .is_none(),
+        "purge must delete the shared row locally"
+    );
+    let close = captured
+        .first()
+        .expect("purge must hand exactly one Close delta to the lossless push")
+        .clone();
+    assert_eq!(
+        captured.len(),
+        1,
+        "purge must hand exactly one Close delta to the lossless push"
+    );
+    // The Close frame on the channel: type-2, carrying the entry key,
+    // owner RG and FLAG_FABRIC_REDIRECT (close_flags ORs the
+    // FabricRedirect disposition even though the delta's
+    // fabric_redirect_sync override is false at the struct level).
+    let frame = purge_rx
+        .try_recv()
+        .expect("purge Close frame must reach the connected consumer");
+    let bytes = frame.as_bytes();
+    assert_eq!(bytes[4], 2, "purge frame must be MSG_SESSION_CLOSE (2)");
+    assert_eq!(bytes[16], 4, "close payload: AddrFamily v4");
+    assert_eq!(bytes[17], entry.key.protocol, "close payload: protocol");
+    assert_eq!(
+        u16::from_le_bytes([bytes[18], bytes[19]]),
+        entry.key.src_port,
+        "close payload: src port"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[20], bytes[21]]),
+        entry.key.dst_port,
+        "close payload: dst port"
+    );
+    assert_eq!(
+        &bytes[22..26],
+        &[10, 0, 61, 102],
+        "close payload: src ip (test_key)"
+    );
+    assert_eq!(
+        &bytes[26..30],
+        &[172, 16, 80, 200],
+        "close payload: dst ip (test_key)"
+    );
+    assert_eq!(
+        i32::from_le_bytes(bytes[30..34].try_into().unwrap()),
+        entry.metadata.owner_rg_id as i32,
+        "close payload: owner RG"
+    );
+    assert_eq!(
+        bytes[34] & 1,
+        1,
+        "close flags: FLAG_FABRIC_REDIRECT (disposition OR, so the \
+         struct-level false override does not clear it on the wire)"
+    );
+    assert_eq!(bytes[34] & 2, 0, "close flags: fabric_ingress false");
+    assert_eq!(
+        u16::from_le_bytes([bytes[35], bytes[36]]),
+        entry.metadata.ingress_zone as u16,
+        "close payload: ingress zone"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[37], bytes[38]]),
+        entry.metadata.egress_zone as u16,
+        "close payload: egress zone"
+    );
+    assert_eq!(
+        bytes[51], 0,
+        "close payload: purge_retirement marker must stay 0"
+    );
+    assert_eq!(
+        u32::from_le_bytes(bytes[52..56].try_into().unwrap()),
+        entry.metadata.ingress_ifindex,
+        "close payload: ingress ifindex"
+    );
+    assert_eq!(
+        u16::from_le_bytes([bytes[56], bytes[57]]),
+        entry.metadata.ingress_vlan_id,
+        "close payload: ingress VLAN"
+    );
+
+    // Every field the shared entry owns, on BOTH deltas.
+    for (name, delta) in [("open", &open), ("close", &close)] {
+        assert_eq!(delta.key, entry.key, "{name}: key");
+        assert_eq!(delta.decision, entry.decision, "{name}: decision");
+        assert_eq!(delta.metadata, entry.metadata, "{name}: metadata");
+        assert_eq!(delta.origin, entry.origin, "{name}: origin");
+        assert_eq!(
+            delta.session_id, SESSION_ID,
+            "{name}: session_id (#14960 regression shape)"
+        );
+        assert_eq!(
+            delta.pptp_call_ids, PPTP_PAIR,
+            "{name}: pptp_call_ids (#14303 regression shape)"
+        );
+        assert_eq!(delta.tcp_close_class, close_class, "{name}: tcp_close_class");
+        // tcp_handshake_state is asserted per-delta below: the bulk
+        // Open restamps it from node-wide completion evidence (#16217)
+        // — publish_shared_session synthesizes a reverse companion
+        // carrying this row's snapshotted rev_packets (7 > 0), so the
+        // Open reads Established while the purge Close keeps the
+        // entry's own wire.
+        assert_eq!(delta.counters.fwd_packets, 11, "{name}: fwd_packets");
+        assert_eq!(delta.counters.rev_packets, 7, "{name}: rev_packets");
+        assert_eq!(delta.counters.fwd_bytes, 0, "{name}: fwd_bytes (not snapshotted)");
+        assert_eq!(delta.counters.rev_bytes, 0, "{name}: rev_bytes (not snapshotted)");
+        // No-local-snapshot defaults, set once in `from_shared`.
+        assert_eq!(
+            delta.provenance,
+            crate::session::ExportProvenance::Incremental,
+            "{name}: provenance"
+        );
+        assert!(!delta.bulk_resync, "{name}: bulk_resync");
+        assert!(!delta.is_admission, "{name}: is_admission");
+        assert_eq!(delta.policy_generation, 0, "{name}: policy_generation");
+        assert!(!delta.purge_retirement, "{name}: purge_retirement");
+        assert_eq!(delta.created_ns, 0, "{name}: created_ns");
+        assert_eq!(delta.last_seen_ns, 0, "{name}: last_seen_ns");
+        assert_eq!(delta.observed_tos, 0, "{name}: observed_tos");
+        assert_eq!(delta.observed_tcp_flags, 0, "{name}: observed_tcp_flags");
+    }
+    assert_eq!(open.kind, crate::session::SessionDeltaKind::Open);
+    assert_eq!(close.kind, crate::session::SessionDeltaKind::Close);
+    assert_eq!(
+        close.tcp_handshake_state, handshake,
+        "purge Close must carry the entry's own handshake wire"
+    );
+    assert_eq!(
+        open.tcp_handshake_state,
+        crate::session::TcpHandshakeState::Established.to_wire(),
+        "bulk Open restamps Established on the synthesized companion's \
+         snapshotted rev_packets (#16217)"
+    );
+
+    // The disposition-derived flag: true on the Open (FabricRedirect
+    // row), and the purge's deliberate override forces it false on the
+    // Close even for the same row.
+    assert!(
+        open.fabric_redirect_sync,
+        "FabricRedirect disposition must derive fabric_redirect_sync on the Open (#14960)"
+    );
+    assert!(
+        !close.fabric_redirect_sync,
+        "purge Close must keep its deliberate fabric_redirect_sync: false override"
+    );
+    // source_nat_static: carried on the Open, deliberately dropped on
+    // the purge Close.
+    assert_eq!(
+        open.source_nat_static,
+        Some(true),
+        "bulk Open must carry the entry's source-NAT provenance"
+    );
+    assert_eq!(
+        close.source_nat_static, None,
+        "purge Close must keep its deliberate source_nat_static: None override"
+    );
 }
 
 #[test]
@@ -6086,8 +6361,17 @@ fn owner_rg_export_pages_a_capped_window_without_rekicking_the_workers() {
     // PAGE 1: an ordinary capped export. Kicks phase 1, waits for the ack.
     // (#9856: the 5 deltas ride the worker's dedicated export buffer tagged
     // with the kicked sequence — the window the collect path drains.)
+    // #17127: page 1 enters through the v2 entry (as production does),
+    // so its token is the one the continuation below must carry.
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 3, false)
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            false,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            0,
+        )
         .expect("kick page 1");
     assert_eq!(
         commands.lock().expect("commands").len(),
@@ -6117,10 +6401,20 @@ fn owner_rg_export_pages_a_capped_window_without_rekicking_the_workers() {
          a truncated one, which is why max=0 was the only safe request"
     );
 
-    // PAGE 2: a CONTINUATION. It must kick nothing, consume no sequence, and
-    // not block on an ack that will never come.
+    // PAGE 2: a CONTINUATION carrying page 1's token (`wait.token()`).
+    // It must kick nothing, consume no sequence, and not block on an
+    // ack that will never come. Pre-#17127 this cell used the legacy
+    // tokenless continuation (`continuation=true, token=None`), a
+    // shape production never sends and which skipped the token check.
     let wait2 = coordinator
-        .kick_owner_rg_export(&[1], 3, true)
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            wait.token().0,
+            wait.token().1,
+        )
         .expect("continuation kick");
     assert_eq!(
         commands.lock().expect("commands").len(),
@@ -6174,7 +6468,7 @@ fn owner_rg_export_uncapped_drains_everything_and_reports_no_more() {
     // (#9856: deltas ride the worker's dedicated export buffer tagged with
     // the kicked sequence.)
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 0, false)
+        .kick_owner_rg_export_unpaged(&[1], 0)
         .expect("kick");
     let uncapped_seq = coordinator.sessions.export_seq.load(Ordering::Relaxed);
     let uncapped_buffer = coordinator
@@ -6224,7 +6518,7 @@ fn owner_rg_export_exact_fit_reports_no_more() {
     // (#9856: deltas ride the worker's dedicated export buffer tagged with
     // the kicked sequence.)
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 4, false)
+        .kick_owner_rg_export_unpaged(&[1], 4)
         .expect("kick");
     let exact_seq = coordinator.sessions.export_seq.load(Ordering::Relaxed);
     let exact_buffer = coordinator
@@ -6265,7 +6559,7 @@ fn owner_rg_export_exact_cap_with_lagging_ack_reports_more() {
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
 
     let wait = coordinator
-        .kick_owner_rg_export(&[1], EXPORT_BUFFER_CAP_ENTRIES, false)
+        .kick_owner_rg_export_unpaged(&[1], EXPORT_BUFFER_CAP_ENTRIES)
         .expect("kick");
     let sequence = coordinator.sessions.export_seq.load(Ordering::Relaxed);
     let export_buffer = coordinator
@@ -6294,12 +6588,267 @@ fn owner_rg_export_exact_cap_with_lagging_ack_reports_more() {
     );
 
     ack.store(sequence, Ordering::Release);
+    // #17127: the terminal probe is a v2 continuation carrying page 1's
+    // token, not the legacy tokenless continuation.
     let wait2 = coordinator
-        .kick_owner_rg_export(&[1], EXPORT_BUFFER_CAP_ENTRIES, true)
+        .kick_owner_rg_export_v2(
+            &[1],
+            EXPORT_BUFFER_CAP_ENTRIES,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            wait.token().0,
+            wait.token().1,
+        )
         .expect("terminal probe");
     let (page2, more2) = wait2.wait_and_collect().expect("terminal page");
     assert!(page2.is_empty(), "the first page drained the full window");
     assert!(!more2, "the probe observes the now-published ACK");
+}
+
+// ---------------------------------------------------------------------------
+// #17127: the five #9856 v2 refusal arms. Before this change none had a
+// test: the only token-carrying continuation cell was the happy path
+// (`server/tests.rs`), and the Rust paging cells entered through the
+// legacy tokenless continuation, which skipped the token check. Each
+// cell below asserts `Err` (with the arm's message), `export_seq`
+// unchanged, and the open window untouched — a refused kick must
+// neither consume a sequence nor disturb a window a later valid
+// continuation still drains.
+// ---------------------------------------------------------------------------
+
+/// Open a capped window on `coordinator` (worker 0 registered by the
+/// caller) and collect page 1, leaving the remainder buffered. Returns
+/// the page-1 wait (its `token()` is the window's token) and the
+/// export buffer holding the remainder.
+fn open_capped_window_17127(
+    coordinator: &Coordinator,
+    commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+) -> (
+    crate::afxdp::OwnerRgExportWait,
+    Arc<crate::afxdp::binding_state::ExportBufferState>,
+) {
+    let wait = coordinator
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            false,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            0,
+        )
+        .expect("kick page 1");
+    assert_eq!(
+        commands.lock().expect("commands").len(),
+        1,
+        "fixture: page 1 must kick the workers"
+    );
+    let seq = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let export_buffer = coordinator
+        .workers
+        .records()
+        .get(&0)
+        .expect("worker 0")
+        .export_buffer
+        .clone();
+    for _ in 0..5 {
+        export_buffer
+            .push_export_open(seq, SessionDeltaInfo::default())
+            .expect("fixture fits");
+    }
+    coordinator
+        .workers
+        .records()
+        .get(&0)
+        .expect("worker 0")
+        .handle
+        .session_export_ack
+        .store(seq, Ordering::Release);
+    let (page1, more1) = wait.wait_and_collect().expect("page 1");
+    assert_eq!(page1.len(), 3, "fixture: page 1 returns exactly the cap");
+    assert!(more1, "fixture: the window must be incomplete after page 1");
+    (wait, export_buffer)
+}
+
+/// Assert a refused v2 kick left `export_seq` and the open window
+/// untouched: a valid continuation carrying `token` still drains the
+/// 2-entry remainder and reports the window complete.
+fn assert_window_untouched_17127(
+    coordinator: &Coordinator,
+    seq_before: u64,
+    token: (u64, u64),
+    export_buffer: &crate::afxdp::binding_state::ExportBufferState,
+) {
+    assert_eq!(
+        coordinator.sessions.export_seq.load(Ordering::Relaxed),
+        seq_before,
+        "a refused kick must not consume an export sequence"
+    );
+    let wait = coordinator
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            token.0,
+            token.1,
+        )
+        .expect("valid continuation after refusal");
+    let (page, more) = wait.wait_and_collect().expect("continuation page");
+    assert_eq!(
+        page.len(),
+        2,
+        "the open window must still hold the remainder after a refused kick"
+    );
+    assert!(!more, "the remainder drains the window to completion");
+    assert!(
+        export_buffer.drain_export(usize::MAX).is_empty(),
+        "nothing may be left behind once the caller has seen more=false"
+    );
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_unsupported_protocol_version_17127() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+
+    let err = coordinator
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION + 1,
+            wait.token().0,
+            wait.token().1,
+        )
+        .err()
+        .expect("unsupported version must be refused");
+    assert!(err.contains("is unsupported"), "{err}");
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_zero_token_continuation_17127() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+
+    for (incarnation, sequence) in [(0, wait.token().1), (wait.token().0, 0), (0, 0)] {
+        let err = coordinator
+            .kick_owner_rg_export_v2(
+                &[1],
+                3,
+                true,
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                incarnation,
+                sequence,
+            )
+            .err()
+            .expect("zero-token continuation must be refused");
+        assert!(err.contains("requires nonzero"), "{err}");
+    }
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_page1_with_token_17127() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+
+    for (incarnation, sequence) in [(wait.token().0, 0), (0, wait.token().1), wait.token()] {
+        let err = coordinator
+            .kick_owner_rg_export_v2(
+                &[1],
+                3,
+                false,
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                incarnation,
+                sequence,
+            )
+            .err()
+            .expect("page 1 carrying a token must be refused");
+        // A fresh kick over an open window would say BUSY; the token arm
+        // must fire first, so the message pins the arm, not the BUSY arm.
+        assert!(err.contains("must not carry a continuation token"), "{err}");
+    }
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_continuation_with_no_open_window_17127() {
+    let coordinator = Coordinator::new();
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    // No kick ever happened, so no window is open. The token is
+    // well-formed (nonzero) so the refusal is the no-window arm, not
+    // the zero-token arm.
+    let err = coordinator
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            1,
+            1,
+        )
+        .err()
+        .expect("continuation with no open window must be refused");
+    assert!(err.contains("no open window"), "{err}");
+    assert_eq!(
+        coordinator.sessions.export_seq.load(Ordering::Relaxed),
+        seq_before,
+        "a refused continuation must not consume an export sequence"
+    );
+    // The refusal opened nothing: a fresh kick still proceeds.
+    let _wait = coordinator
+        .kick_owner_rg_export_unpaged(&[], 0)
+        .expect("fresh kick after refusal must proceed");
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_token_mismatch_17127() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let (incarnation, sequence) = wait.token();
+
+    for (bad_incarnation, bad_sequence) in
+        [(incarnation + 1, sequence), (incarnation, sequence + 1)]
+    {
+        let err = coordinator
+            .kick_owner_rg_export_v2(
+                &[1],
+                3,
+                true,
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                bad_incarnation,
+                bad_sequence,
+            )
+            .err()
+            .expect("mismatched continuation token must be refused");
+        assert!(err.contains("token mismatch"), "{err}");
+    }
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
 }
 
 // ---------------------------------------------------------------------------
@@ -7001,17 +7550,16 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
     );
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
     // an outcome-first order hides every state property behind it from the matrix.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "a peer delete of a live LOCAL session whose owner RG is UNRESOLVED was applied: \
              owner 0 is unknown-not-absent, and the install guard already refuses it (#9714 F4)"
@@ -7060,14 +7608,14 @@ fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9
     );
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "owner 0 was treated as protected with NO group forwarding-active: the guard must key on \
          whether this node is actually forwarding, not on the owner being unknown (#9714 F4)"
     );
@@ -7428,11 +7976,10 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // PREMISES fail fast (a broken fixture makes the cell meaningless); PROPERTIES are
@@ -7446,7 +7993,7 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     // under-lock predicate as the sole defence) reds this cell on "got ok=true" and
     // never reaches "were the shared rows kept?", which was the entire question.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "the refusal must be reported, or the handler answers ok and the Go side deletes its \
              mirror and DNAT rows for a flow the helper kept (#9714)"
@@ -7528,15 +8075,15 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     let fixture = fixture_9714(false);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
          for a session the helper removed (#9714)"
     );
@@ -7563,15 +8110,15 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
          for a session the helper removed (#9714)"
     );
@@ -7599,17 +8146,16 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     let holds_before = fixture.dnat_holds();
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.reverse_key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.reverse_key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
     // an outcome-first order hides every state property behind it from the matrix.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "a peer delete of the reverse key of a live local session must be refused and say so \
              (#9714)"
@@ -7827,12 +8373,11 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
         fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
         "FIXTURE: forward and reverse must be in the shared maps"
     );
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), true)
-        .is_refused_local_owned();
-    assert!(!refused, "forward-only delete must apply");
+        .delete_peer_synced_session(fixture.forward.key.clone(), true);
+    assert_eq!(outcome, SyncedDeleteOutcome::Applied, "forward-only delete must apply");
     assert!(
         !fixture.shared_has(&fixture.forward.key),
         "forward-only delete must remove the named key"
@@ -7855,12 +8400,11 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
 #[test]
 fn ordinary_peer_delete_retires_both_halves_9752() {
     let fixture = fixture_9714_with_origin(false, SessionOrigin::SyncImport);
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
-    assert!(!refused, "ordinary delete must apply");
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+    assert_eq!(outcome, SyncedDeleteOutcome::Applied, "ordinary delete must apply");
     assert!(
         !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
         "ordinary delete must remove both halves"
@@ -12636,16 +13180,97 @@ fn kick_export_refused_worker_fails_fast_15950() {
     {
         let mut q = commands.lock().unwrap();
         for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
-            assert!(crate::afxdp::worker_queue::push_bounded(&mut q, WorkerCommand::DeleteSynced(test_key())));
+            assert!(crate::afxdp::worker_queue::push_bounded(
+                &mut q,
+                WorkerCommand::DeleteSynced(test_key())
+            ));
         }
     }
     let handle = test_worker_handle(commands.clone());
-    coordinator.workers.register(0, WorkerRuntimeRecord::for_test(handle), None);
-    let err = coordinator.kick_owner_rg_export(&[1], 0, false).err().expect("full queue must fail fast, not open a 15s window");
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let err = coordinator
+        .kick_owner_rg_export_unpaged(&[1], 0)
+        .err()
+        .expect("full queue must fail fast, not open a 15s window");
     assert!(err.contains("refused"), "{err}");
     // no window opened: a fresh kick with drained queue would work — assert busy check is not stuck by checking error is refused not busy on retry after drain
     commands.lock().unwrap().clear();
-    let wait = coordinator.kick_owner_rg_export(&[1], 0, false).expect("retry after drain must kick");
+    let wait = coordinator
+        .kick_owner_rg_export_unpaged(&[1], 0)
+        .expect("retry after drain must kick");
     // ack it
     let _ = wait;
+}
+
+/// #17138: the `SyncedDeleteOutcome` contract table is the single source of
+/// truth for (shared removed / Go keeps rows / mirror delete failed) per
+/// variant. This guard enumerates `SyncedDeleteOutcome::ALL`, so adding a
+/// variant without a table row — or flipping a predicate without updating
+/// the row — fails here instead of silently diverging from the doc table
+/// in `session_import.rs` and from the handler's wire mapping.
+#[test]
+fn synced_delete_outcome_contract_table_17138() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    // (variant, shared_removed, keeps_caller_rows, mirror_delete_failed)
+    let expected: [(SyncedDeleteOutcome, bool, bool, bool); 9] = [
+        (SyncedDeleteOutcome::Applied, true, false, false),
+        (SyncedDeleteOutcome::RefusedLocalOwned, false, true, false),
+        (
+            SyncedDeleteOutcome::RefusedConcurrentLocalOwned,
+            false,
+            true,
+            false,
+        ),
+        (
+            SyncedDeleteOutcome::RefusedStaleGeneration,
+            false,
+            false,
+            false,
+        ),
+        (SyncedDeleteOutcome::RefusedGateBusy, false, true, false),
+        (SyncedDeleteOutcome::RefusedMirrorDelete, true, true, true),
+        (SyncedDeleteOutcome::RefusedIdentity, false, true, false),
+        (SyncedDeleteOutcome::StaleForward, false, false, false),
+        (SyncedDeleteOutcome::PartialCompanion, true, false, false),
+    ];
+    assert_eq!(
+        SyncedDeleteOutcome::ALL.len(),
+        expected.len(),
+        "a SyncedDeleteOutcome variant was added without a contract-table row (#17138)"
+    );
+    for (variant, shared_removed, keeps_rows, mirror_failed) in expected {
+        assert!(
+            SyncedDeleteOutcome::ALL.contains(&variant),
+            "{variant:?} missing from SyncedDeleteOutcome::ALL (#17138)"
+        );
+        assert_eq!(
+            variant.shared_removed(),
+            shared_removed,
+            "{variant:?}: shared_removed disagrees with the contract table (#17138)"
+        );
+        assert_eq!(
+            variant.keeps_caller_rows(),
+            keeps_rows,
+            "{variant:?}: keeps_caller_rows disagrees with the contract table (#17138)"
+        );
+        assert_eq!(
+            variant.mirror_delete_failed(),
+            mirror_failed,
+            "{variant:?}: mirror_delete_failed disagrees with the contract table (#17138)"
+        );
+    }
+    // Reverse direction: every element of ALL must have an expected row.
+    // The length + membership checks above cannot catch a variant that is
+    // added to ALL (bumping its length in step) without a contract row —
+    // the two hand-maintained lists would grow together and stay equal —
+    // nor a duplicate row masking a missing one.
+    for variant in SyncedDeleteOutcome::ALL {
+        assert!(
+            expected.iter().any(|(row, ..)| *row == variant),
+            "{variant:?} is in SyncedDeleteOutcome::ALL without a contract-table row (#17138)"
+        );
+    }
 }

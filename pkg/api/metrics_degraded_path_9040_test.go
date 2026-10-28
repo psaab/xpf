@@ -7,7 +7,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -25,7 +24,7 @@ const degradedPathMetric9040 = "xpf_dataplane_degraded_path_total"
 func collectDegraded9040(t *testing.T, counters map[string]uint64) map[string]float64 {
 	t.Helper()
 	store := newDescriptorCoverageStore(t)
-	srv := &Server{store: store, gc: conntrack.NewGC(nil, time.Minute), startTime: time.Now()}
+	srv := &Server{store: store, startTime: time.Now()}
 	srv.dp = &descriptorCoverageDP{
 		Manager: dataplane.New(),
 		status:  dpuserspace.ProcessStatus{DegradedPathCounters: counters},

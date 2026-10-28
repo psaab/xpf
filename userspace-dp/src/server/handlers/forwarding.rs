@@ -1,25 +1,24 @@
-// #1345: per-verb handler for set_forwarding_state. Body byte-identical
-// to handlers.rs lines 132-155.
+// #1345: per-verb handler for set_forwarding_state, split out of handlers.rs in #1345.
 
 use super::super::helpers::{
-    capture_binding_arm_state, forwarding_unsupported_error, reconcile_status_bindings,
-    refresh_status, restore_binding_arm_state, set_bindings_forwarding_armed,
+    capture_binding_arm_state, finish_binding_reconcile, forwarding_unsupported_error,
+    set_bindings_forwarding_armed,
 };
 use super::super::ServerState;
 use crate::{ControlResponse, ForwardingControlRequest};
-use std::time::Duration;
 
 pub(super) fn set(
     guard: &mut ServerState,
     forwarding: Option<ForwardingControlRequest>,
     response: &mut ControlResponse,
     persist_state: &mut bool,
-    // #5862: where the caller records that a binding-settle wait is owed. The
-    // wait itself runs in handlers::handle_request AFTER the global ServerState
-    // lock is dropped — the same locked-kick / unlocked-wait split #2962 and
+    // #5862/#17135: where the caller records that a binding-settle wait is
+    // owed, as `Deferred::Settle`. The wait itself runs in
+    // handlers::handle_stream AFTER the global ServerState lock is
+    // dropped — the same locked-kick / unlocked-wait split #2962 and
     // #4054 use. Holding the lock across a 2 s settle stalled every HA
-    // `sync_session` on the "dedicated" session socket, which shares this mutex.
-    settle_wait: &mut Option<Duration>,
+    // `sync_session` before #7209 moved that verb off this mutex.
+    deferred: &mut Option<super::Deferred>,
 ) {
     let Some(forwarding_req) = forwarding else {
         response.ok = false;
@@ -44,30 +43,18 @@ pub(super) fn set(
     // snapshot (a forwarding-state toggle, not a new config), so a build
     // reject cannot introduce a rejected snapshot here.
     //
-    // #6135 (4th site of #5621): the reconcile itself can still FAIL — the
-    // mandatory-pin preflight can fault, or the forwarding build can hit a
-    // non-policy integrity error on the already-accepted snapshot. Discarding
-    // that Err made this handler ack ok=true while the AF_XDP sockets were NOT
-    // actually reconciled to the new forwarding state, so the control-socket
-    // caller believed the reconcile succeeded when it did not. Surface the
-    // failure: report ok=false + the error, refresh status so `show` reflects
-    // the real per-binding state, and do NOT persist a success we didn't
-    // achieve (return BEFORE wait_for_binding_settle / persist_state=true).
-    if let Err(err) = reconcile_status_bindings(guard) {
-        response.ok = false;
-        response.error = format!("forwarding reconcile failed: {err}");
-        // #6750: roll the requested state back BEFORE refreshing, so the
-        // refreshed status describes what the sockets are actually doing. Go's
-        // 1 Hz poll then sees the real state, its
-        // `lastStatus.ForwardingArmed == desired` short-circuit fails, and the
-        // next tick retries by itself.
-        restore_binding_arm_state(&mut guard.status, prior);
-        refresh_status(guard);
-        return;
-    }
-    if forwarding_req.armed {
-        *settle_wait = Some(Duration::from_secs(2));
-    }
-    refresh_status(guard);
-    *persist_state = true;
+    // #17126: the reconcile / roll-back-on-error / settle / persist tail is
+    // shared with set_binding_state and set_queue_state via
+    // `finish_binding_reconcile` (#5621/#6135 honest failure, #6750 restore).
+    // This handler keeps only its commit (above) and its settle rule:
+    // settle only when arming.
+    finish_binding_reconcile(
+        guard,
+        response,
+        "forwarding",
+        prior,
+        forwarding_req.armed,
+        persist_state,
+        deferred,
+    );
 }

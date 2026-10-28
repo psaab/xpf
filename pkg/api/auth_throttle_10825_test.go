@@ -14,7 +14,7 @@ import (
 
 func TestRESTAuthFailureBudgetLocksAccountAndCountsEveryFailure10825(t *testing.T) {
 	before := denyaudit.Total(denyaudit.SurfaceRESTAPIAuthFail)
-	h := authMiddleware(AuthConfig{Users: map[string]string{"operator": "correct-password"}}, true,
+	h := productionAuthHandlerOnly(t, AuthConfig{Users: map[string]string{"operator": "correct-password"}}, true,
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	for n := range authThrottleAccountFailures {
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
@@ -43,7 +43,7 @@ func TestRESTAuthFailureBudgetLocksAccountAndCountsEveryFailure10825(t *testing.
 }
 
 func TestRESTAuthSourceBudgetStopsUsernameRotation10825(t *testing.T) {
-	h := authMiddleware(AuthConfig{Users: map[string]string{"operator": "correct-password"}}, true,
+	h := productionAuthHandlerOnly(t, AuthConfig{Users: map[string]string{"operator": "correct-password"}}, true,
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	for n := range authThrottleSourceFailures {
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
@@ -78,21 +78,17 @@ func TestRESTAuthSourceBudgetStopsUsernameRotation10825(t *testing.T) {
 func TestAuthFailureTrackerSuccessResetAndEscalatingLockout10825(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	tracker := newAuthFailureTracker(func() time.Time { return now })
-	for range authThrottleAccountFailures {
-		tracker.recordFailure("192.0.2.1", "operator")
-	}
-	if locked, wait := tracker.locked("192.0.2.1", "operator"); !locked || wait != authThrottleBaseLockout {
+	chargeFailures(t, tracker, "192.0.2.1", "operator", authThrottleAccountFailures)
+	if locked, wait := probePairLocked(tracker, "192.0.2.1", "operator"); !locked || wait != authThrottleBaseLockout {
 		t.Fatalf("first lockout = (%v, %v), want (true, %v)", locked, wait, authThrottleBaseLockout)
 	}
 	now = now.Add(authThrottleBaseLockout)
-	for range authThrottleAccountFailures {
-		tracker.recordFailure("192.0.2.1", "operator")
-	}
-	if locked, wait := tracker.locked("192.0.2.1", "operator"); !locked || wait != 2*authThrottleBaseLockout {
+	chargeFailures(t, tracker, "192.0.2.1", "operator", authThrottleAccountFailures)
+	if locked, wait := probePairLocked(tracker, "192.0.2.1", "operator"); !locked || wait != 2*authThrottleBaseLockout {
 		t.Fatalf("repeated lockout = (%v, %v), want (true, %v)", locked, wait, 2*authThrottleBaseLockout)
 	}
-	tracker.recordSuccess("192.0.2.1", "other-account")
-	if locked, _ := tracker.locked("192.0.2.1", "operator"); !locked {
+	clearPairSuccess(t, tracker, "192.0.2.1", "other-account")
+	if locked, _ := probePairLocked(tracker, "192.0.2.1", "operator"); !locked {
 		t.Fatal("success for another account cleared the operator lockout")
 	}
 }
@@ -216,8 +212,8 @@ func TestInvalidAuthorizationFallsBackToValidAPIKeyIdentity10825(t *testing.T) {
 			r.Header.Set("Authorization", tc.authorization)
 			r.Header.Set("X-API-Key", apiKey)
 
-			if !authCheck(cfg, true, r) {
-				t.Fatal("authCheck rejected the valid X-API-Key fallback")
+			if authorized, _, _ := authCheckCredential(cfg, true, r); !authorized {
+				t.Fatal("authCheckCredential rejected the valid X-API-Key fallback")
 			}
 			if authorized, verified, authorizationFailed := authCheckCredential(cfg, true, r); !authorized || verified != "api-key" || !authorizationFailed {
 				t.Fatalf("fallback result = (%v, %q, %v), want (true, api-key, failed Authorization)", authorized, verified, authorizationFailed)
@@ -247,9 +243,7 @@ func TestAuthFallbackChargesClaimedAndSourceAndClearsVerifiedBucket10825(t *test
 	}
 	tracker := newAuthFailureTracker(nil)
 	for _, account := range []string{"basic:claimed-user", "api-key", "unrelated"} {
-		for range 2 {
-			tracker.recordFailure(source, account)
-		}
+		seedTwoPreThresholdFailures(t, tracker, source, account)
 	}
 
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
@@ -312,7 +306,7 @@ func TestRESTAuthWrongBasicGuessesWithValidAPIKeyFallbackStillLockOut10825(t *te
 		source = "198.51.100.54"
 		apiKey = "deployment-secret-key"
 	)
-	h := authMiddleware(AuthConfig{
+	h := productionAuthHandlerOnly(t, AuthConfig{
 		Users:   map[string]string{"administrator": "correct-password"},
 		APIKeys: map[string]bool{apiKey: true},
 	}, true, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -366,7 +360,7 @@ func TestRESTAuthInvalidAuthorizationDoesNotLockValidAPIKeyBucket10825(t *testin
 		{name: "unknown scheme with valid key fallback", scheme: "Token", validFallback: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := authMiddleware(AuthConfig{APIKeys: map[string]bool{apiKey: true}}, true,
+			h := productionAuthHandlerOnly(t, AuthConfig{APIKeys: map[string]bool{apiKey: true}}, true,
 				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 			server := httptest.NewServer(h)
 			defer server.Close()
@@ -444,9 +438,7 @@ func TestAuthFailureEscalationCapAndPostLockoutQuietReset10825(t *testing.T) {
 		authThrottleMaxLockout,
 	}
 	for i, want := range lockouts {
-		for range authThrottleAccountFailures {
-			tracker.recordFailure(source, account)
-		}
+		chargeFailures(t, tracker, source, account, authThrottleAccountFailures)
 		bucket := tracker.accounts[accountKey]
 		if bucket == nil || bucket.lockedUntil.Sub(now) != want {
 			t.Fatalf("lockout %d = %+v, want duration %v", i+1, bucket, want)
@@ -455,9 +447,7 @@ func TestAuthFailureEscalationCapAndPostLockoutQuietReset10825(t *testing.T) {
 	}
 
 	// Immediate post-expiry attempts keep escalating at the advertised cap.
-	for range authThrottleAccountFailures {
-		tracker.recordFailure(source, account)
-	}
+	chargeFailures(t, tracker, source, account, authThrottleAccountFailures)
 	bucket := tracker.accounts[accountKey]
 	if bucket == nil || bucket.lockedUntil.Sub(now) != authThrottleMaxLockout {
 		t.Fatalf("lockout after reaching cap = %+v, want duration %v", bucket, authThrottleMaxLockout)
@@ -467,11 +457,9 @@ func TestAuthFailureEscalationCapAndPostLockoutQuietReset10825(t *testing.T) {
 	// A failure shortly before the ten-minute quiet interval ends restarts the
 	// quiet clock. Crossing the original expiry+window boundary is insufficient.
 	now = now.Add(authThrottleWindow - time.Minute)
-	tracker.recordFailure(source, account)
+	chargeFailures(t, tracker, source, account, 1)
 	now = now.Add(2 * time.Minute)
-	for range authThrottleAccountFailures - 1 {
-		tracker.recordFailure(source, account)
-	}
+	chargeFailures(t, tracker, source, account, authThrottleAccountFailures-1)
 	bucket = tracker.accounts[accountKey]
 	if bucket == nil || bucket.lockedUntil.Sub(now) != authThrottleMaxLockout {
 		t.Fatalf("lockout after interrupted quiet period = %+v, want capped duration %v", bucket, authThrottleMaxLockout)
@@ -479,9 +467,7 @@ func TestAuthFailureEscalationCapAndPostLockoutQuietReset10825(t *testing.T) {
 
 	// Only a full quiet interval after this lockout expires forgives escalation.
 	now = bucket.lockedUntil.Add(authThrottleWindow + time.Second)
-	for range authThrottleAccountFailures {
-		tracker.recordFailure(source, account)
-	}
+	chargeFailures(t, tracker, source, account, authThrottleAccountFailures)
 	bucket = tracker.accounts[accountKey]
 	if bucket == nil || bucket.lockedUntil.Sub(now) != authThrottleBaseLockout {
 		t.Fatalf("lockout after genuine quiet interval = %+v, want base duration %v", bucket, authThrottleBaseLockout)
@@ -513,9 +499,7 @@ func TestAuthThrottleAdmissionResetsExpiredFailuresPreservingInflight10825(t *te
 	now := time.Unix(1_800_100_000, 0)
 	tracker := newAuthFailureTracker(func() time.Time { return now })
 	const source, account = "192.0.2.100", "operator"
-	for range authThrottleAccountFailures - 1 {
-		tracker.recordFailure(source, account)
-	}
+	chargeFailures(t, tracker, source, account, authThrottleAccountFailures-1)
 
 	first, retry := tracker.reserve(source, account, false)
 	if retry != 0 {
@@ -571,7 +555,7 @@ func TestBasicUsernameCannotCollideWithAPIKeyThrottleBucket10825(t *testing.T) {
 		}
 	}
 
-	if locked, _ := tracker.locked(source, authThrottleBasicAccountPrefix+"api-key"); !locked {
+	if locked, _ := probePairLocked(tracker, source, authThrottleBasicAccountPrefix+"api-key"); !locked {
 		t.Fatal("Basic user api-key did not fill its namespaced account bucket")
 	}
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
@@ -580,7 +564,7 @@ func TestBasicUsernameCannotCollideWithAPIKeyThrottleBucket10825(t *testing.T) {
 	if authorized, retry := throttledAuthCheck(tracker, cfg, true, r); !authorized || retry != 0 {
 		t.Fatalf("valid API-key principal was affected by Basic user lockout: (%v, %v)", authorized, retry)
 	}
-	if locked, _ := tracker.locked(source, authThrottleAPIKeyAccount); locked {
+	if locked, _ := probePairLocked(tracker, source, authThrottleAPIKeyAccount); locked {
 		t.Fatal("successful API-key principal unexpectedly has an account lockout")
 	}
 
@@ -612,7 +596,7 @@ func TestBasicUsernameCannotCollideWithAPIKeyThrottleBucket10825(t *testing.T) {
 }
 
 func TestRESTAuthGlobalBasicAccountBudgetAcrossSources11492(t *testing.T) {
-	h := authMiddleware(AuthConfig{
+	h := productionAuthHandlerOnly(t, AuthConfig{
 		Users: map[string]string{
 			"operator": "correct-password",
 			"observer": "observer-password",
@@ -660,10 +644,12 @@ func TestRESTAuthGlobalBasicProbeWrongPasswordKeepsLockout16068(t *testing.T) {
 	tracker := newAuthFailureTracker(nil)
 	source := "203.0.113.9"
 	account := authThrottleBasicAccountPrefix + "operator"
-	for range authThrottleGlobalBasicFailures {
-		tracker.recordFailure(source, account)
+	// Lock the GLOBAL bucket exactly as the surgery intends: a spray from
+	// distinct sources, so the probe's own source keeps no pair lockout.
+	for i := range authThrottleGlobalBasicFailures {
+		chargeFailures(t, tracker, fmt.Sprintf("198.51.100.%d", i+10), account, 1)
 	}
-	before, waitBefore := tracker.locked(source, account)
+	before, waitBefore := probePairLocked(tracker, source, account)
 	if !before {
 		t.Fatal("global bucket not locked after spray")
 	}
@@ -675,7 +661,7 @@ func TestRESTAuthGlobalBasicProbeWrongPasswordKeepsLockout16068(t *testing.T) {
 		t.Fatal("admitted request during global lockout not marked as probe")
 	}
 	tracker.complete(&reservation, false, "", false)
-	after, waitAfter := tracker.locked(source, account)
+	after, waitAfter := probePairLocked(tracker, source, account)
 	if !after {
 		t.Fatal("wrong-password probe cleared the global lockout")
 	}
@@ -695,11 +681,9 @@ func TestRESTAuthGlobalBasicProbeCapAndPairLockout16068(t *testing.T) {
 	// Lock the global bucket via spray from distinct sources, then lock one
 	// pair bucket directly so that source's correct password cannot probe.
 	for i := range authThrottleGlobalBasicFailures {
-		tracker.recordFailure(fmt.Sprintf("198.51.100.%d", i+10), account)
+		chargeFailures(t, tracker, fmt.Sprintf("198.51.100.%d", i+10), account, 1)
 	}
-	for range authThrottleAccountFailures {
-		tracker.recordFailure(victim, account)
-	}
+	chargeFailures(t, tracker, victim, account, authThrottleAccountFailures)
 	ran := 0
 	check := func(AuthConfig, bool, *http.Request) (bool, string, bool) {
 		ran++
@@ -724,13 +708,13 @@ func TestRESTAuthGlobalBasicProbeCapAndPairLockout16068(t *testing.T) {
 		t.Fatalf("second concurrent probe retry = %v, want %v", retry, time.Second)
 	}
 	tracker.complete(&first, true, account, false)
-	if locked, _ := tracker.locked("203.0.113.1", account); locked {
+	if locked, _ := probePairLocked(tracker, "203.0.113.1", account); locked {
 		t.Fatal("successful probe did not clear the global bucket")
 	}
 }
 
 func TestRESTAuthIPv6SourceBudgetAggregatesBy64Prefix11492(t *testing.T) {
-	h := authMiddleware(AuthConfig{Users: map[string]string{"operator": "correct-password"}}, true,
+	h := productionAuthHandlerOnly(t, AuthConfig{Users: map[string]string{"operator": "correct-password"}}, true,
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(http.StatusNoContent)
 		}))

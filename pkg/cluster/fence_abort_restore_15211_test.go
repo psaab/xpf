@@ -42,6 +42,7 @@ func setupFenceAbort15211(t *testing.T, preempt bool) *Manager {
 	_ = drainEvents9640(m)
 	// Arm peer transfer-out override (+ snapshot) and aborted marker.
 	m.mu.Lock()
+	m.peerGroups[0] = PeerGroupState{GroupID: 0, Priority: 111, Weight: 255, State: StateSecondary}
 	m.applyPeerTransferOutOverrideLocked(0, 77)
 	m.abortedPeerTransferReqID[0] = 77
 	m.mu.Unlock()
@@ -85,8 +86,8 @@ func TestFenceAbortRestoresOperatorIntent15211(t *testing.T) {
 			rg := m.groups[0]
 			manual, at, weight := rg.ManualFailover, rg.ManualFailoverAt, rg.Weight
 			state := rg.State
-			_, overrideArmed := m.transferOverrides[0]
-			_, abortedArmed := m.abortedPeerTransferReqID[0]
+			override, overrideArmed := m.transferOverrides[0]
+			abortedReqID, abortedArmed := m.abortedPeerTransferReqID[0]
 			m.mu.RUnlock()
 			if !manual {
 				t.Errorf("preempt=%v: ManualFailover cleared and not restored on fence abort (state=%v)", preempt, state)
@@ -103,8 +104,27 @@ func TestFenceAbortRestoresOperatorIntent15211(t *testing.T) {
 			if !overrideArmed {
 				t.Errorf("preempt=%v: transferOverrides cleared and not restored on fence abort", preempt)
 			}
+			// #17117-fold (F1): the WHOLE transferOverride must come
+			// back — reqID plus the pre-override peer snapshot. A
+			// restore writing only transferOverride{reqID: ...}
+			// (zeroed previous) passes the presence checks above,
+			// but a later reqID-matched abort
+			// (restorePeerTransferOutOverrideLocked) would then find
+			// previous.present=false and DELETE the peer view
+			// instead of restoring it. Fixture: setupFenceAbort15211
+			// seeds the pre-override peer view ({111, secondary})
+			// before arming, so previous is present=true; the
+			// fence-window heartbeat then delivered the live peer
+			// as PRIMARY — a previous re-derived after the wait
+			// would be present=true/PRIMARY(100), not the snapshot.
+			if overrideArmed && override.reqID != 77 {
+				t.Errorf("preempt=%v: restored transferOverride reqID=%d, want 77", preempt, override.reqID)
+			}
 			if !abortedArmed {
 				t.Errorf("preempt=%v: abortedPeerTransferReqID cleared and not restored on fence abort", preempt)
+			}
+			if abortedArmed && abortedReqID != 77 {
+				t.Errorf("preempt=%v: restored abortedPeerTransferReqID=%d, want 77", preempt, abortedReqID)
 			}
 			// The restored override must again force our view of the
 			// peer to secondary-hold (that is what feeds election and
@@ -115,6 +135,38 @@ func TestFenceAbortRestoresOperatorIntent15211(t *testing.T) {
 			}
 			if peerGroups[0].State != StateSecondaryHold {
 				t.Errorf("preempt=%v: peer view state=%v, want secondary-hold (restored override re-applied)", preempt, peerGroups[0].State)
+			}
+			// #17117-fold (F1): the reqID-matched abort must restore
+			// the snapshotted previous peer view: seeded above as
+			// {Priority:111, State:Secondary, present:true} before
+			// the override armed. The zeroed-previous mutant
+			// (transferOverride{reqID: ...}) makes this abort find
+			// present=false and DELETE the peer view instead; a
+			// re-derived previous would bring back the PRIMARY
+			// view (Priority 100) delivered during the fence wait.
+			if overrideArmed {
+				if !override.previous.present {
+					t.Errorf("preempt=%v: restored transferOverride lost previous.present; the snapshotted previous peer view ({111, secondary}) must survive the fence restore", preempt)
+				}
+				if override.previous.state.State != StateSecondary || override.previous.state.Priority != 111 {
+					t.Errorf("preempt=%v: restored transferOverride previous=(state %v, priority %d), want (secondary, 111)", preempt, override.previous.state.State, override.previous.state.Priority)
+				}
+			}
+			m.mu.Lock()
+			aborted := m.restorePeerTransferOutOverrideLocked(0, 77)
+			restoredPeer, peerOK := m.peerGroups[0]
+			peerPriority := m.groups[0].PeerPriority
+			m.mu.Unlock()
+			if !aborted {
+				t.Errorf("preempt=%v: reqID-matched abort did not match the restored transferOverride (reqID must be 77)", preempt)
+			}
+			if !peerOK {
+				t.Errorf("preempt=%v: reqID-matched abort deleted the peer view; the snapshotted previous (111, secondary) must be restored, not deleted", preempt)
+			} else if restoredPeer.State != StateSecondary || restoredPeer.Priority != 111 {
+				t.Errorf("preempt=%v: peer view after reqID-matched abort=(state %v, priority %d), want restored snapshot (secondary, 111)", preempt, restoredPeer.State, restoredPeer.Priority)
+			}
+			if peerPriority != 111 {
+				t.Errorf("preempt=%v: PeerPriority=%d after reqID-matched abort, want 111 (restored snapshot priority)", preempt, peerPriority)
 			}
 		})
 	}
@@ -237,7 +289,7 @@ func TestNeverSeenTakeoverMarkedDegraded15211(t *testing.T) {
 // Control: sync-fresh suppression must NOT mark degraded (no takeover happened).
 func TestNeverSeenSyncFreshDoesNotMarkDegraded15211(t *testing.T) {
 	m := coldBootManager(t)
-	m.SetPeerNeverSeenSyncFreshFunc(func() bool { return true })
+	m.SetFakePeerSyncSourceForTesting(true, 100*time.Millisecond, true, true)
 	m.SetRGReady(0, true, nil)
 	m.handlePeerNeverSeen()
 	if peerConfirmedAbsent(m) {

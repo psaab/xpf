@@ -3497,7 +3497,7 @@ fn reconcile_with_none_snapshot_reaches_no_snapshot_early_exit() {
         coordinator.slow_path.is_none(),
         "slow_path should be None after teardown of an unbound coordinator"
     );
-    // Reset phase zeroed counter / ready / bound flags.
+    // Refresh phase (zero_unbound_slot) zeroed counter / ready / bound flags.
     assert!(!bindings[0].ready);
     assert!(!bindings[0].bound);
     assert!(!bindings[0].xsk_registered);
@@ -3508,17 +3508,17 @@ fn reconcile_with_none_snapshot_reaches_no_snapshot_early_exit() {
 /// `refresh_bindings` so every now-workerless slot is routed through
 /// `zero_unbound_slot` AND the CoS owner->worker map is rebuilt empty.
 ///
-/// `reset_binding_counters` (the phase that always runs before the
-/// `no_snapshot` early-return) ONLY zeroes the counter scalars plus
-/// `bound`/`xsk_registered`/`socket_fd`. It deliberately does NOT touch
-/// `xsk_bind_mode`, `socket_ifindex`/`queue_id`/`bind_flags`,
-/// `zero_copy`, `flow_cache_capacity`, or `active_flow_count` — those
-/// are cleared only by `zero_unbound_slot` inside `refresh_bindings`.
-/// So this test pre-populates exactly those reset-survivor fields and a
-/// stale CoS owner-map entry, runs `reconcile(None, ...)`, and asserts
-/// they are cleared. Reverting the `self.refresh_bindings(bindings)`
-/// call added in the `no_snapshot` arm leaves every one of these stale
-/// → the asserts go RED.
+/// #17105 deleted the pre-refresh `reset_binding_counters` zero-pass:
+/// the fields this test pre-populates (`xsk_bind_mode`,
+/// `socket_ifindex`/`queue_id`/`bind_flags`, `zero_copy`,
+/// `flow_cache_capacity`, `active_flow_count`) were its survivors —
+/// it never touched them, and the counters it did zero are rewritten
+/// by `refresh_bindings` on every reconcile exit. So this test
+/// pre-populates exactly those survivor fields and a stale CoS
+/// owner-map entry, runs `reconcile(None, ...)`, and asserts they are
+/// cleared. Reverting the `self.refresh_bindings(bindings)` call in
+/// the `no_snapshot` arm leaves every one of these stale → the
+/// asserts go RED.
 #[test]
 fn reconcile_none_snapshot_refreshes_bindings_clearing_reset_survivor_fields() {
     let mut coordinator = Coordinator::new();
@@ -3540,8 +3540,8 @@ fn reconcile_none_snapshot_refreshes_bindings_clearing_reset_survivor_fields() {
         bound: true,
         xsk_registered: true,
         ready: true,
-        // Fields the reset pass leaves UNTOUCHED — only
-        // `zero_unbound_slot` (via refresh_bindings) clears them.
+        // Survivor fields only `zero_unbound_slot` (via
+        // refresh_bindings) clears.
         xsk_bind_mode: "ZEROCOPY".into(),
         zero_copy: true,
         socket_ifindex: 10,
@@ -6068,7 +6068,7 @@ fn gre1881_mode_flip_to_wireguard_prunes_gre_entry() {
     // Post-#10409 contract: live WG entries publish too — the flip
     // leaves exactly the WG delivery; the GRE sender was unpublished
     // before the live thread was joined (Store #1 excludes the stale
-    // id; stop_remove_local_tunnel_entry joins synchronously).
+    // id; the registry bulk stop_remove joins synchronously).
     let deliveries = coordinator.local_tunnel_deliveries.load();
     assert_eq!(
         deliveries.len(),
@@ -6151,6 +6151,149 @@ fn gre1881_defer_prune_removes_only_stale_entries() {
     coordinator.prune_local_tunnel_sources_for_snapshot(&ConfigSnapshot::default());
     assert!(coordinator.tunnel_sources.is_empty());
     assert!(coordinator.local_tunnel_deliveries.load().is_empty());
+}
+
+/// #17084 parity: a same-id moved-attachment (and, for WG, a changed
+/// crypto identity that stays hydratable) snapshot on the defer-workers
+/// path must prune BOTH families. Pre-fix the WG prune kept the entry
+/// because it only checked hydratable presence.
+#[test]
+fn tunnel17084_defer_prune_parity_moved_attachment_and_identity() {
+    // GRE side: same-id moved attachment prunes.
+    let mut gre = gre1881_coordinator_with_worker();
+    let gre_snap = gre1881_snapshot(1, 36289, "gre1881h", "198.51.100.7");
+    gre.refresh_runtime_snapshot(&gre_snap)
+        .expect("GRE refresh must succeed");
+    assert!(gre.tunnel_sources.contains_key(&1));
+    let gre_moved = gre1881_snapshot(1, 46289, "gre1881h", "198.51.100.7");
+    gre.prune_local_tunnel_sources_for_snapshot(&gre_moved);
+    assert!(
+        gre.tunnel_sources.is_empty(),
+        "GRE defer prune must remove same-id moved attachment"
+    );
+
+    // WG side: same-id moved attachment prunes (fails pre-fix).
+    let mut wg = Coordinator::new();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let wg_snap = wg1866_snapshot(1, 4242, "wgt17084a", port, WG1866_PRIVKEY_A);
+    wg.refresh_runtime_snapshot(&wg_snap)
+        .expect("WG refresh must succeed");
+    assert!(wg.wg_control_threads.contains_key(&1));
+    let wg_moved = wg1866_snapshot(1, 4243, "wgt17084a", port, WG1866_PRIVKEY_A);
+    wg.prune_wg_control_threads_for_snapshot(&wg_moved);
+    assert!(
+        wg.wg_control_threads.is_empty(),
+        "WG defer prune must remove same-id moved attachment (parity with GRE)"
+    );
+
+    // WG side: same-id changed crypto identity (still hydratable) prunes.
+    let mut wg2 = Coordinator::new();
+    let port2 = crate::test_ports::reserve_ephemeral_udp_port();
+    wg2.refresh_runtime_snapshot(&wg1866_snapshot(1, 4242, "wgt17084b", port2, WG1866_PRIVKEY_A))
+        .expect("WG refresh must succeed");
+    assert!(wg2.wg_control_threads.contains_key(&1));
+    wg2.prune_wg_control_threads_for_snapshot(&wg1866_snapshot(
+        1,
+        4242,
+        "wgt17084b",
+        port2,
+        WG1866_PRIVKEY_B,
+    ));
+    assert!(
+        wg2.wg_control_threads.is_empty(),
+        "WG defer prune must remove same-id changed crypto identity"
+    );
+
+    // Unchanged snapshot keeps both entries.
+    let mut gre_keep = gre1881_coordinator_with_worker();
+    gre_keep
+        .refresh_runtime_snapshot(&gre_snap)
+        .expect("GRE refresh must succeed");
+    gre_keep.prune_local_tunnel_sources_for_snapshot(&gre_snap);
+    assert!(gre_keep.tunnel_sources.contains_key(&1));
+    let mut wg_keep = Coordinator::new();
+    let port3 = crate::test_ports::reserve_ephemeral_udp_port();
+    let keep_snap = wg1866_snapshot(1, 4242, "wgt17084c", port3, WG1866_PRIVKEY_A);
+    wg_keep
+        .refresh_runtime_snapshot(&keep_snap)
+        .expect("WG refresh must succeed");
+    wg_keep.prune_wg_control_threads_for_snapshot(&keep_snap);
+    assert!(wg_keep.wg_control_threads.contains_key(&1));
+}
+
+/// #17084 fold (Rev18138): the WG stop-all on the disarmed refresh leg
+/// must unpublish the WG delivery BEFORE joining its thread, while
+/// preserving any live GRE delivery — the pre-consolidation helper
+/// published excluding the WG batch; the consolidated `stop_all`
+/// initially published nothing, leaving a dead WG sender in
+/// `local_tunnel_deliveries` indefinitely while disarmed.
+///
+/// Both entries are driven live together (one joint snapshot, TUN
+/// stand-ins so neither thread exits on `open_tun`), then
+/// `stop_all_wg_control_threads` — the exact helper the disarmed leg
+/// calls first — runs: the WG entry is gone and its ifindex is
+/// unpublished, while the live GRE entry and its delivery survive
+/// (the leg's later GRE stop-all is what eventually empties the map).
+/// Reverting the publish (plain `stop_all`) leaves the WG sender
+/// published and this cell goes RED; publishing the empty map
+/// instead would withdraw the GRE sender and also go RED.
+#[test]
+fn wg1866_stop_all_unpublishes_wg_delivery_and_preserves_gre() {
+    use crate::afxdp::tunnel::register_tun_standin_10553;
+    // Keep both spawned threads live: without stand-ins they exit on
+    // open_tun, tombstone, and their deliveries are unpublished by
+    // the sweep — the joint precondition below could not hold.
+    let _gre_tun = register_tun_standin_10553("gre1866wg");
+    let _wg_tun = super::wg_control::register_tun_standin_9521("wgt1866wg");
+    let mut coordinator = gre1881_coordinator_with_worker();
+    let port = crate::test_ports::reserve_ephemeral_udp_port();
+    let gre_snap = gre1881_snapshot(1, 36291, "gre1866wg", "198.51.100.7");
+    let wg_snap = wg1866_snapshot(2, 4244, "wgt1866wg", port, WG1866_PRIVKEY_A);
+    let mut both = gre_snap;
+    both.interfaces.extend(wg_snap.interfaces.iter().cloned());
+    both.tunnel_endpoints
+        .extend(wg_snap.tunnel_endpoints.iter().cloned());
+    coordinator
+        .refresh_runtime_snapshot(&both)
+        .expect("joint refresh must succeed");
+    assert!(
+        coordinator.tunnel_sources.contains_key(&1),
+        "precondition: GRE entry live"
+    );
+    assert!(
+        coordinator.wg_control_threads.contains_key(&2),
+        "precondition: WG entry live"
+    );
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert!(
+        deliveries.contains_key(&36291),
+        "precondition: GRE delivery published"
+    );
+    assert!(
+        deliveries.contains_key(&4244),
+        "precondition: WG delivery published"
+    );
+    drop(deliveries);
+
+    coordinator.stop_all_wg_control_threads("disarmed");
+
+    assert!(
+        coordinator.wg_control_threads.is_empty(),
+        "stop-all must stop+join+remove every WG entry"
+    );
+    assert!(
+        coordinator.tunnel_sources.contains_key(&1),
+        "WG stop-all must not touch the GRE registry"
+    );
+    let deliveries = coordinator.local_tunnel_deliveries.load();
+    assert!(
+        !deliveries.contains_key(&4244),
+        "WG delivery must be unpublished before/by the stop-all join"
+    );
+    assert!(
+        deliveries.contains_key(&36291),
+        "live GRE delivery must survive the WG stop-all publish"
+    );
 }
 
 /// #1881 F6: a thread that exits (open_tun failure here) is
@@ -7724,8 +7867,9 @@ fn validate_snapshot_buildable_matches_reconcile_5171() {
 #[test]
 fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     use crate::afxdp::zone_counters::{
-        ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
+        flush_recorded_zone_counters, record_zone_traffic,
     };
+    use crate::afxdp::zone_slot_counters::ZoneSlotMap;
     const ZONE_A: u32 = 100;
     const ZONE_B: u32 = 200;
 
@@ -7735,15 +7879,16 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     // #5163: build the seed map FROM the live store so its cached per-zone
     // atomics are the coordinator's — the lock-free fold then lands directly in
     // `coord.forwarding.zone_counter_store`.
-    let seed_map =
-        ZoneCounterSlotMap::build(&[ZONE_A, ZONE_B], &coord.forwarding.zone_counter_store);
+    let (seed_map, seed_caches) = ZoneSlotMap::build(
+        &[ZONE_A, ZONE_B],
+        &coord.forwarding.zone_counter_store,
+        &coord.forwarding.flood_counter_store,
+    );
     record_zone_traffic(&seed_map, ZONE_A, ZONE_B, 1000);
     record_zone_traffic(&seed_map, ZONE_B, ZONE_A, 500);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &seed_map);
-    let before: std::collections::HashSet<u32> = coord
-        .forwarding
-        .zone_counter_store
-        .snapshot()
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &seed_map, &seed_caches);
+    let before: std::collections::HashSet<u32> =
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
         .into_iter()
         .map(|r| r.zone_id)
         .collect();
@@ -7777,10 +7922,8 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
 
     // The live store must be UNTOUCHED — zone B's totals survive even though
     // the candidate does not configure zone B.
-    let after: std::collections::HashSet<u32> = coord
-        .forwarding
-        .zone_counter_store
-        .snapshot()
+    let after: std::collections::HashSet<u32> =
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
         .into_iter()
         .map(|r| r.zone_id)
         .collect();
@@ -7837,6 +7980,7 @@ fn zone_counter_live_coordinator(coord: &mut Coordinator) {
     flush_recorded_zone_counters(
         &coord.forwarding.zone_counter_store,
         &coord.forwarding.zone_counter_slot_map,
+        &coord.forwarding.zone_counter_caches,
     );
     assert_eq!(
         zone_counter_rows(coord),
@@ -7911,7 +8055,7 @@ fn rejected_apply_does_not_prune_live_zone_counters_6832() {
         "fixture: this apply must be rejected by the worker SPAWN arm — the arm \
          that leaves the candidate state published — got {result:?}"
     );
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8258,7 +8402,7 @@ fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
         "fixture: this apply must COMMIT (workers up) — got {result:?}"
     );
 
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8266,8 +8410,7 @@ fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
         "a COMMITTED reconcile must still drop the removed zone's totals; \
          deferring the prune past worker bring-up must not delete it"
     );
-    let survivor = live_store
-        .snapshot()
+    let survivor = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store)
         .into_iter()
         .find(|r| r.zone_id == 100)
         .expect("zone 100 is configured by both generations");
@@ -8295,7 +8438,7 @@ fn committed_refresh_prunes_zone_counters_for_removed_zones_6832() {
         .refresh_runtime_snapshot(&candidate)
         .expect("fixture: the candidate must refresh cleanly");
 
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8313,17 +8456,17 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
     // calls it, so reverting this accessor to its old inline
     // "configured-only" body left them all green. This test binds the wiring.
     use crate::afxdp::zone_counters::{
-        ZONE_COUNTER_ASSIGNABLE_SLOTS, ZoneCounterSlotMap, flush_recorded_zone_counters,
-        record_zone_traffic,
+        flush_recorded_zone_counters, record_zone_traffic,
     };
+    use crate::afxdp::zone_slot_counters::{ZoneSlotMap, ZONE_SLOT_ASSIGNABLE_SLOTS};
     const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let mut coord = Coordinator::new();
 
     // Apply 1: Z alone, holding a slot, moving traffic.
-    let map1 = ZoneCounterSlotMap::build(&[Z], &coord.forwarding.zone_counter_store);
+    let (map1, caches1) = ZoneSlotMap::build(&[Z], &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_traffic(&map1, Z, 0, 1500);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &map1);
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &map1, &caches1);
     coord.forwarding.zone_counter_slot_map = std::sync::Arc::new(map1);
     coord
         .forwarding
@@ -8338,7 +8481,7 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
 
     // Apply 2: enough lower ids to exhaust capacity. Z stays CONFIGURED and
     // keeps its retained totals, but loses its slot.
-    let mut ids: Vec<u32> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
+    let mut ids: Vec<u32> = (1..=(ZONE_SLOT_ASSIGNABLE_SLOTS as u32)).collect();
     ids.push(Z);
     for id in &ids {
         coord
@@ -8346,17 +8489,14 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
             .zone_id_to_name
             .insert(*id, format!("z{id}"));
     }
-    let map2 = ZoneCounterSlotMap::build(&ids, &coord.forwarding.zone_counter_store);
+    let (map2, _caches2) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     assert_eq!(map2.slot_of(Z), 0, "Z must lose its slot in apply 2");
     coord.forwarding.zone_counter_slot_map = std::sync::Arc::new(map2);
 
     // The store still retains Z's totals -- assert it, so this test cannot
     // pass because the data vanished for an unrelated reason.
     assert!(
-        coord
-            .forwarding
-            .zone_counter_store
-            .snapshot()
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
             .iter()
             .any(|r| r.zone_id == Z),
         "precondition: the store must still retain Z's totals"
@@ -8365,9 +8505,9 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
     // Move traffic on a zone that KEPT its slot in apply 2, so the assertions
     // below constrain both directions.
     const SURVIVOR: u32 = 1;
-    let survivor_map = ZoneCounterSlotMap::build(&ids, &coord.forwarding.zone_counter_store);
+    let (survivor_map, survivor_caches) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_traffic(&survivor_map, SURVIVOR, 0, 64);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &survivor_map);
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &survivor_map, &survivor_caches);
 
     let published = coord.zone_traffic_counters();
     assert!(
@@ -8424,7 +8564,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     //      at >=64 configured zones the ENTIRE per-zone flood surface vanishes
     //      and `show security screen ids-option statistics` reports
     //      "not available" for every zone.
-    //   3. passing `FloodCounterSlotMap::default()` instead of the live map
+    //   3. passing a default/empty slot map instead of the live map
     //      (publishes nothing).
     //
     // This is the exact asymmetry #6843 closed on the traffic half: the Go
@@ -8432,17 +8572,17 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // the Rust one was not. Mirrors
     // `zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843` above.
     use crate::afxdp::flood_counters::{
-        FLOOD_COUNTER_ASSIGNABLE_SLOTS, FloodCounterSlotMap, flush_recorded_flood_counters,
-        record_zone_flood_drop,
+        flush_recorded_flood_counters, record_zone_flood_drop,
     };
+    use crate::afxdp::zone_slot_counters::{ZoneSlotMap, ZONE_SLOT_ASSIGNABLE_SLOTS};
     const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let mut coord = Coordinator::new();
 
     // Apply 1: Z alone, holding a slot, tripping a flood check.
-    let map1 = FloodCounterSlotMap::build(&[Z], &coord.forwarding.flood_counter_store);
+    let (map1, caches1) = ZoneSlotMap::build(&[Z], &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_flood_drop(&map1, Z, "syn-flood");
-    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &map1);
+    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &map1, &caches1);
     coord.forwarding.flood_counter_slot_map = std::sync::Arc::new(map1);
     coord
         .forwarding
@@ -8458,7 +8598,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
 
     // Apply 2: enough lower ids to exhaust capacity. Z stays CONFIGURED and
     // keeps its retained counts, but loses its slot.
-    let mut ids: Vec<u32> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
+    let mut ids: Vec<u32> = (1..=(ZONE_SLOT_ASSIGNABLE_SLOTS as u32)).collect();
     ids.push(Z);
     for id in &ids {
         coord
@@ -8466,7 +8606,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
             .zone_id_to_name
             .insert(*id, format!("z{id}"));
     }
-    let map2 = FloodCounterSlotMap::build(&ids, &coord.forwarding.flood_counter_store);
+    let (map2, _caches2) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     assert_eq!(map2.slot_of(Z), 0, "Z must lose its slot in apply 2");
     assert!(map2.overflow_active, "apply 2 must set overflow_active");
     coord.forwarding.flood_counter_slot_map = std::sync::Arc::new(map2);
@@ -8474,10 +8614,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // The store still retains Z's counts -- assert it, so this test cannot pass
     // because the data vanished for an unrelated reason.
     assert!(
-        coord
-            .forwarding
-            .flood_counter_store
-            .snapshot()
+        crate::afxdp::flood_counters::flood_counter_snapshot(&coord.forwarding.flood_counter_store)
             .iter()
             .any(|r| r.zone_id == Z),
         "precondition: the store must still retain Z's flood counts"
@@ -8486,9 +8623,9 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // Trip a flood check on a zone that KEPT its slot in apply 2, so the
     // assertions below constrain both directions.
     const SURVIVOR: u32 = 1;
-    let survivor_map = FloodCounterSlotMap::build(&ids, &coord.forwarding.flood_counter_store);
+    let (survivor_map, survivor_caches) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_flood_drop(&survivor_map, SURVIVOR, "udp-flood");
-    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &survivor_map);
+    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &survivor_map, &survivor_caches);
 
     let published = coord.zone_flood_counters();
     assert!(
@@ -10539,7 +10676,7 @@ fn refresh_status_reclaims_dead_worker_holders_6979() {
         quarantined_after_panic: false,
         snapshot_policy_mismatch_total: 0,
     };
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     assert!(
         !alloc.debug_is_port_occupied(0, 30000),
@@ -12409,7 +12546,7 @@ fn refresh_status_vacates_a_dead_workers_v_min_slot_9367() {
     };
 
     // TICK 1 — the production path builds the floor.
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
     let floor = state
         .afxdp
         .cos
@@ -12443,7 +12580,7 @@ fn refresh_status_vacates_a_dead_workers_v_min_slot_9367() {
     dead_atomics.dead.store(true, Ordering::Relaxed);
 
     // TICK 2 — the real 1 Hz status path.
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     let after = state
         .afxdp
@@ -13870,7 +14007,7 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
     live_export_ack.store(u64::MAX, Ordering::Release);
 
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 100, false)
+        .kick_owner_rg_export_unpaged(&[1], 100)
         .expect("kick");
     let t0 = Instant::now();
     let err = wait.wait_and_collect().expect_err("shed export must fail");
@@ -13893,7 +14030,7 @@ fn owner_rg_export_with_shed_worker_fails_incomplete_9900() {
         .store(u64::MAX, Ordering::Release);
     coordinator.workers.register(6, live_rec, None);
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 100, false)
+        .kick_owner_rg_export_unpaged(&[1], 100)
         .expect("kick");
     let (deltas, more) = wait.wait_and_collect().expect("live export must succeed");
     assert!(deltas.is_empty());

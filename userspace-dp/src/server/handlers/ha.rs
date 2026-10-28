@@ -1,7 +1,6 @@
-// #1345: per-verb handler for update_ha_state. Body byte-identical to
-// handlers.rs lines 156-179.
+// #1345: per-verb handler for update_ha_state, split out of handlers.rs in #1345.
 
-use super::super::helpers::refresh_status;
+use super::super::helpers::project_status;
 use super::super::ServerState;
 use crate::{ControlResponse, HAStateUpdateRequest};
 
@@ -28,7 +27,7 @@ pub(super) fn update(
     // RG state as though it took effect.
     //
     // The Err arm must therefore re-derive status from the coordinator, which
-    // is the authoritative source: `refresh_status` -> helpers/status.rs does
+    // is the authoritative source: `project_status` -> helpers/status.rs does
     // `state.status.ha_groups = state.afxdp.ha_groups()`, so it is a genuine
     // revert to what was actually applied rather than a hand-rolled restore of
     // the previous value (which would be wrong if the apply partially landed).
@@ -40,13 +39,13 @@ pub(super) fn update(
     guard.status.ha_groups = ha_req.groups.clone();
     match guard.afxdp.update_ha_state(&ha_req.groups) {
         Ok(()) => {
-            refresh_status(guard);
+            project_status(guard);
             *persist_state = true;
         }
         Err(err) => {
             response.ok = false;
             response.error = err;
-            refresh_status(guard);
+            project_status(guard);
         }
     }
 }

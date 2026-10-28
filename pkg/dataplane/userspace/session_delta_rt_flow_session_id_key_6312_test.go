@@ -27,9 +27,7 @@ import (
 // spelling reds this.
 func TestSessionDeltaRTFlowSessionIDWireKeyLockstepWithRust6312(t *testing.T) {
 	// Test cwd is pkg/dataplane/userspace.
-	rustKey := rustSerdeRenameIn(t,
-		filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "binding.rs"),
-		"rt_flow_session_id")
+	rustKey := rustWireKeyInStruct(t, filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "binding.rs"), "SessionDeltaInfo", "rt_flow_session_id", false)
 
 	const want = uint64(7)<<48 | 0x1234_5678
 	doc := fmt.Sprintf(`{"event":"open","addr_family":2,"protocol":6,`+

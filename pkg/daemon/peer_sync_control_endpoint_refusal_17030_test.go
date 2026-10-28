@@ -99,7 +99,7 @@ func TestPeerSyncControlEndpointRefusalNamesControlLink17030(t *testing.T) {
 		mgmtAuthConfigFor("ge-0/0/0", newSecret)+peerSyncClusterLines17030(moved))
 
 	logs, restore := captureSlog(t)
-	_, err := e.d.syncAndApply(context.Background(), peerText, nil)
+	_, err := e.d.syncAndApplyForTest(context.Background(), peerText, nil)
 	restore()
 	if err == nil {
 		t.Fatal("setup: the control-endpoint backstop must reject a peer-synced control-link " +
@@ -178,7 +178,7 @@ func TestPeerSyncIdentityRefusalKeepsIdentityText17030(t *testing.T) {
 		mgmtAuthConfigFor("ge-0/0/0", newSecret)+clusterLines(2))
 
 	logs, restore := captureSlog(t)
-	_, err := e.d.syncAndApply(context.Background(), peerText, nil)
+	_, err := e.d.syncAndApplyForTest(context.Background(), peerText, nil)
 	restore()
 	if err == nil {
 		t.Fatal("setup: the identity backstop must reject a peer-synced cluster-id change")
