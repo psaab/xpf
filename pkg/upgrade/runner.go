@@ -6,10 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -660,154 +658,19 @@ func dirSize(dir string) (uint64, error) {
 // sorted (relpath, content) stream for an integrity check.
 func copyTree(src, dst string) (string, error) {
 	h := sha256.New()
-	// Collect entries first for a deterministic checksum order.
-	type ent struct {
-		rel  string
-		info os.FileInfo
-		path string
-	}
-	var ents []ent
-	err := filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, rerr := filepath.Rel(src, p)
-		if rerr != nil {
-			return rerr
-		}
-		ents = append(ents, ent{rel: rel, info: info, path: p})
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	sort.Slice(ents, func(i, j int) bool { return ents[i].rel < ents[j].rel })
-
-	var createdDirs []string
-	for _, e := range ents {
-		target := filepath.Join(dst, e.rel)
-		switch {
-		case e.info.IsDir():
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return "", fmt.Errorf("mkdir %s: %w", target, err)
-			}
-			// Preserve the SOURCE dir's permissions (MkdirAll applies the
-			// umask and won't chmod an existing dir) so versions/<ver>/ is
-			// not silently restricted to 0700 under a tight operator umask,
-			// which would break non-root execution of cli/etc. via the sbin
-			// links (AGY review-011 r2; parity with pkg/upgrade/runtime).
-			if err := os.Chmod(target, preservedMode(e.info.Mode())); err != nil {
-				return "", fmt.Errorf("chmod %s: %w", target, err)
-			}
-			createdDirs = append(createdDirs, target)
-		case e.info.Mode().IsRegular():
-			if err := copyFileFsync(e.path, target, e.info.Mode()); err != nil {
-				return "", err
-			}
-			f, oerr := os.Open(target)
-			if oerr != nil {
-				return "", oerr
-			}
-			io.WriteString(h, e.rel+"\x00")
-			if _, cerr := io.Copy(h, f); cerr != nil {
-				f.Close()
-				return "", cerr
-			}
-			f.Close()
-		default:
-			return "", fmt.Errorf("copyTree: unsupported file type for %s", e.path)
-		}
-	}
-	// Fsync every copied directory. copyFileFsync commits file *contents*, but
-	// a newly-created directory entry (a file or a nested subdir) is durable
-	// only once its parent directory fd is fsynced. Callers fsync only the
-	// top-level copy root (SyncDir(partial)/SyncDir(snapPartial)); nested dirs
-	// are NOT covered there, so a power loss after the atomic rename could
-	// orphan nested entries and a later rollback would restore a corrupt
-	// snapshot. Latent today (.configdb and staged are both flat — AGY
-	// review-011 Part I) but this makes copyTree durable for any future
-	// nesting.
-	if err := fsyncDirsDeepestFirst(createdDirs); err != nil {
+	if err := fsatomic.CopyTreeDurable(src, dst, fsatomic.CopyTreeOptions{Hash: h, SyncDir: copyTreeSyncDir}); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// copyTreeSyncDir is the directory-fsync primitive used by
-// fsyncDirsDeepestFirst. It is a package var so tests can substitute a
+// copyTreeSyncDir is the directory-fsync primitive copyTree passes to
+// fsatomic.CopyTreeDurable. It is a package var so tests can substitute a
 // recorder and prove copyTree actually fsyncs each copied directory (and in
-// deepest-first order, and that an error propagates) — otherwise deleting the
-// fsync loop would not fail any test (Codex/Copilot r1).
+// deepest-first order, and that an error propagates) — the durability
+// regression otherwise fails no test (#17176; the fsync loop itself now
+// lives, and is pinned, in pkg/fsatomic).
 var copyTreeSyncDir = fsatomic.SyncDir
-
-// fsyncDirsDeepestFirst fsyncs each directory deepest-first (by path-component
-// depth, NOT string length — a deeper path can be shorter, Copilot r1) so a
-// child dir's entries are committed before the parent dir entry that
-// references it. Correctness does not depend on order (every dir is fsynced,
-// so every dentry becomes durable); the ordering only tightens the crash
-// window.
-func fsyncDirsDeepestFirst(dirs []string) error {
-	ordered := append([]string(nil), dirs...)
-	sort.Slice(ordered, func(i, j int) bool {
-		di := strings.Count(ordered[i], string(os.PathSeparator))
-		dj := strings.Count(ordered[j], string(os.PathSeparator))
-		if di != dj {
-			return di > dj
-		}
-		return ordered[i] > ordered[j]
-	})
-	for _, d := range ordered {
-		if err := copyTreeSyncDir(d); err != nil {
-			return fmt.Errorf("fsync copied dir %s: %w", d, err)
-		}
-	}
-	return nil
-}
-
-// preservedMode returns the chmod-applicable mode bits of m: the rwx
-// permission bits PLUS the setuid/setgid/sticky special bits. m.Perm() alone
-// masks the special bits off (Copilot), so a setgid staged dir or setuid
-// staged binary would lose those bits in versions/<ver>/. (Staged content is
-// 0755 today, so this is forward-looking exactness, not a current bug.)
-func preservedMode(m os.FileMode) os.FileMode {
-	return m.Perm() | (m & (os.ModeSetuid | os.ModeSetgid | os.ModeSticky))
-}
-
-// copyFileFsync copies src -> dst with mode, fsyncing dst before close.
-func copyFileFsync(src, dst string, mode os.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", src, err)
-	}
-	defer in.Close()
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dst, err)
-	}
-	// OpenFile applies the umask to the create mode; chmod to the exact
-	// source mode (incl. setuid/setgid/sticky) so the staged binaries stay
-	// 0755-executable through versions/<ver>/ regardless of the operator's
-	// umask (AGY review-011 r2; preservedMode keeps special bits, Copilot).
-	if err := out.Chmod(preservedMode(mode)); err != nil {
-		out.Close()
-		return fmt.Errorf("chmod %s: %w", dst, err)
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		return fmt.Errorf("fsync %s: %w", dst, err)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", dst, err)
-	}
-	return nil
-}
 
 // removeAllPartials sweeps any leftover .partial dirs (safe on re-run).
 //

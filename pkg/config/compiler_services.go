@@ -2048,8 +2048,12 @@ func compileFlowMonitoring(node *Node, svc *ServicesConfig) error {
 
 }
 
+// compileForwardingOptions compiles one forwarding-options stanza on the
+// strict policy (strictCompileOpts, #17148). It is a test seam for the
+// #8797 family-mode cells; production dispatch goes through
+// compileForwardingOptionsWithOpts with the caller's opts.
 func compileForwardingOptions(node *Node, fo *ForwardingOptionsConfig) error {
-	return compileForwardingOptionsWithOpts(node, fo, compileOpts{}, nil)
+	return compileForwardingOptionsWithOpts(node, fo, strictCompileOpts(), nil)
 }
 
 func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, opts compileOpts, warnings *[]string) error {

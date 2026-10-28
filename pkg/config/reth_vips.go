@@ -103,7 +103,7 @@ func (c *Config) RethVIPsByRG() map[int]map[string][]string {
 	// that can land on the same sub-interface.
 	for _, rgMap := range result {
 		for subIface, vips := range rgMap {
-			rgMap[subIface] = dedupeVRRPVIPs(vips)
+			rgMap[subIface] = DedupeVRRPVIPs(vips)
 		}
 	}
 	return result

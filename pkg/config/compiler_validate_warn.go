@@ -646,7 +646,7 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	}
 
 	// Validate strict-vip-ownership requires VRRP (incompatible with no-reth-vrrp / private-rg-election)
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		for _, rg := range cc.RedundancyGroups {
 			if rg == nil { // #3494: tolerant/HA-sync path may carry a nil redundancy-group
 				continue
@@ -659,7 +659,7 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	}
 
 	// Warn if no-reth-vrrp set explicitly — redundant since private-rg-election is now default
-	if cc := cfg.Chassis.Cluster; cc != nil && cc.PrivateRGElection && cc.NoRethVRRP {
+	if cc := cfg.Chassis.Cluster; cc != nil && cc.RethOwnershipMode() == RethPrivateRG && cc.NoRethVRRP {
 		warnings = append(warnings, "chassis cluster: no-reth-vrrp is redundant (private-rg-election is the default)")
 	}
 
@@ -2195,10 +2195,16 @@ func schedulerEqualTimeWindowForm(s *SchedulerConfig) (string, bool) {
 }
 
 // schedulerTimeOfDayEqual reports whether two scheduler time-of-day bounds
-// denote the same clock time. It uses the same parser as schema validation,
-// so HH:MM and HH:MM:SS values compare as equal when they represent the same
-// instant. Bounds parse RAW, with no whitespace trim, exactly like the runtime:
-// padded or otherwise unparseable bounds fail closed there.
+// denote the same clock time. It uses the same parser as schema validation
+// and the runtime evaluator (ParseSchedulerTimeOfDay, #17187), so HH:MM
+// and HH:MM:SS values compare as equal when they represent the same
+// instant. Bounds parse RAW, with no whitespace trim: a padded or
+// otherwise unparseable bound makes this comparison false (no
+// equal-window warning is derived from it), and at runtime the same
+// unparseable bound makes the scheduler INACTIVE. That is fail-closed
+// only for a scheduled permit; for a scheduled DENY it means the deny
+// never engages, so the padded form must be rejected at commit by the
+// untrimmed validator rather than relied on to "fail closed" (#17187).
 func schedulerTimeOfDayEqual(start, stop string) bool {
 	s, err := parseSchedulerTimeOfDay(start)
 	if err != nil {
