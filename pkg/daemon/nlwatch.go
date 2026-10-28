@@ -141,7 +141,11 @@ func (w nlWatch[U]) runOne(ctx context.Context) bool {
 	updates := make(chan U, buf)
 	done := make(chan struct{})
 	onErr := func(err error) {
-		slog.Warn("netlink receive error, resubscribing", "watcher", w.Name, "err", err)
+		// ErrorCallback also fires on non-terminal paths (NLM_F_DUMP_INTR,
+		// NLMSG_ERROR, wrong portid) where the library keeps receiving and
+		// this lifetime does not resubscribe; only a channel close (the
+		// terminal Receive()-error path) resubscribes, logged at the close.
+		slog.Warn("netlink receive error", "watcher", w.Name, "err", err)
 		if w.OnReceiveError != nil {
 			w.OnReceiveError(err)
 		}
@@ -177,6 +181,7 @@ func (w nlWatch[U]) runOne(ctx context.Context) bool {
 			}
 		case update, ok := <-updates:
 			if !ok {
+				slog.Warn("netlink subscription closed, resubscribing", "watcher", w.Name)
 				if w.OnChannelClosed != nil {
 					w.OnChannelClosed()
 				}
@@ -257,7 +262,7 @@ func runPairNL[A, B any](ctx context.Context, a nlWatch[A], b nlWatch[B], onGap 
 	aUpdates := make(chan A, bufOr(a.Buf))
 	aDone := make(chan struct{})
 	aOnErr := func(err error) {
-		slog.Warn("netlink receive error, resubscribing", "watcher", a.Name, "err", err)
+		slog.Warn("netlink receive error", "watcher", a.Name, "err", err)
 		if a.OnReceiveError != nil {
 			a.OnReceiveError(err)
 		}
@@ -275,7 +280,7 @@ func runPairNL[A, B any](ctx context.Context, a nlWatch[A], b nlWatch[B], onGap 
 	bUpdates := make(chan B, bufOr(b.Buf))
 	bDone := make(chan struct{})
 	bOnErr := func(err error) {
-		slog.Warn("netlink receive error, resubscribing", "watcher", b.Name, "err", err)
+		slog.Warn("netlink receive error", "watcher", b.Name, "err", err)
 		if b.OnReceiveError != nil {
 			b.OnReceiveError(err)
 		}
@@ -299,6 +304,7 @@ func runPairNL[A, B any](ctx context.Context, a nlWatch[A], b nlWatch[B], onGap 
 			return false
 		case update, ok := <-aUpdates:
 			if !ok {
+				slog.Warn("netlink subscription closed, resubscribing", "watcher", a.Name)
 				return true
 			}
 			if a.OnEvent != nil {
@@ -306,6 +312,7 @@ func runPairNL[A, B any](ctx context.Context, a nlWatch[A], b nlWatch[B], onGap 
 			}
 		case update, ok := <-bUpdates:
 			if !ok {
+				slog.Warn("netlink subscription closed, resubscribing", "watcher", b.Name)
 				return true
 			}
 			if b.OnEvent != nil {
