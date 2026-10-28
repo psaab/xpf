@@ -1006,8 +1006,12 @@ impl Coordinator {
     }
 
     /// See [`Coordinator::upsert_synced_session`].
-    pub fn delete_synced_session(&self, key: crate::session::SessionKey, forward_only: bool) {
-        self.session_domain.delete_synced_session(key, forward_only);
+    pub fn delete_synced_session(
+        &self,
+        key: crate::session::SessionKey,
+        forward_only: bool,
+    ) -> crate::afxdp::SyncedDeleteOutcome {
+        self.session_domain.delete_synced_session(key, forward_only)
     }
 
     /// See [`Coordinator::upsert_synced_session`].
@@ -1016,7 +1020,7 @@ impl Coordinator {
         key: crate::session::SessionKey,
         delete_gen: u64,
         forward_only: bool,
-    ) {
+    ) -> crate::afxdp::SyncedDeleteOutcome {
         self.session_domain
             .delete_synced_session_gen(key, delete_gen, forward_only)
     }
@@ -2643,6 +2647,7 @@ mod routing_domain;
 mod ipsec_inner_dead_worker_15149_tests;
 
 #[cfg(test)]
+#[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
 #[path = "tests.rs"]
 mod tests;
 

@@ -44,16 +44,15 @@ impl crate::afxdp::Coordinator {
         if purge_ids.is_empty() {
             return 0;
         }
-        let mut keys = Vec::new();
-        let mut deltas = Vec::new();
-        // #8138: the FORWARD entries whose import-time reservation this purge
-        // must release. Reverse entries are excluded at the source: the release
-        // returns immediately on `is_reverse`, so collecting them would call a
-        // function that does nothing and count a repair that did not happen —
-        // the same error #6979 F4 records having measured (counter read 2 for
-        // one stranded reservation).
-        let mut reservations: Vec<(crate::session::SessionKey, crate::nat::NatDecision)> =
-            Vec::new();
+        // #17144: candidates carry their Close delta / reservation alongside
+        // the key, so a refused delete can drop both without a second lookup.
+        // `delta`/`reservation` are Some only for forward entries.
+        struct PurgeCandidate {
+            key: crate::session::SessionKey,
+            delta: Option<crate::session::SessionDelta>,
+            reservation: Option<crate::nat::NatDecision>,
+        }
+        let mut candidates: Vec<PurgeCandidate> = Vec::new();
         {
             // #6653 sweep: RECOVERING lock. `let Ok(..) else { return 0 }`
             // made the #1873 R-D purge SILENTLY DO NOTHING on a poisoned
@@ -79,10 +78,16 @@ impl crate::afxdp::Coordinator {
                 // emitted for FORWARD entries only (matching
                 // emit_close_delta_with_origin's is_reverse skip — the
                 // Go shadow keys off the forward delta).
-                keys.push(entry.key.clone());
-                if !entry.metadata.is_reverse {
-                    reservations.push((entry.key.clone(), entry.decision.nat));
-                    deltas.push(crate::session::SessionDelta { provenance: crate::session::ExportProvenance::Incremental, bulk_resync: false, is_admission: false, session_id: entry.session_id, kind: crate::session::SessionDeltaKind::Close, key: entry.key.clone(),
+                let is_forward = !entry.metadata.is_reverse;
+                candidates.push(PurgeCandidate {
+                    key: entry.key.clone(),
+                    delta: None,
+                    reservation: None,
+                });
+                if is_forward {
+                    let cand = candidates.last_mut().expect("candidate just pushed");
+                    cand.reservation = Some(entry.decision.nat);
+                    cand.delta = Some(crate::session::SessionDelta { provenance: crate::session::ExportProvenance::Incremental, bulk_resync: false, is_admission: false, session_id: entry.session_id, kind: crate::session::SessionDeltaKind::Close, key: entry.key.clone(),
                     decision: entry.decision,
                     metadata: entry.metadata.clone(),
                     source_nat_static: None,
@@ -112,8 +117,39 @@ impl crate::afxdp::Coordinator {
                 }
             }
         }
-        for key in &keys {
-            self.session_domain.delete_synced_session(key.clone(), false);
+        // #17144: only Applied | PartialCompanion removed the shared entry.
+        // Every other outcome is a refusal: keep the session, emit no Close,
+        // release no reservation and do not count it as purged. It will be
+        // retried by the next purge or reaped by GC.
+        let mut deltas: Vec<crate::session::SessionDelta> = Vec::new();
+        let mut reservations: Vec<(crate::session::SessionKey, crate::nat::NatDecision)> =
+            Vec::new();
+        let mut purged = 0usize;
+        let mut refused = 0usize;
+        for cand in candidates {
+            let outcome = self
+                .session_domain
+                .delete_synced_session(cand.key.clone(), false);
+            if matches!(
+                outcome,
+                crate::afxdp::SyncedDeleteOutcome::Applied
+                    | crate::afxdp::SyncedDeleteOutcome::PartialCompanion
+            ) {
+                purged += 1;
+                if let Some(delta) = cand.delta {
+                    deltas.push(delta);
+                }
+                if let Some(nat) = cand.reservation {
+                    reservations.push((cand.key, nat));
+                }
+            } else {
+                refused += 1;
+            }
+        }
+        if refused > 0 {
+            self.sessions
+                .tunnel_purge_delete_refused
+                .fetch_add(refused as u64, std::sync::atomic::Ordering::Relaxed);
         }
         // #8138: release the coordinator's import-time reservation.
         //
@@ -193,14 +229,21 @@ impl crate::afxdp::Coordinator {
             // log, not to drive a heavy resync.
             let _dropped = self.push_purge_close_deltas(&handle, &deltas);
         }
-        if !keys.is_empty() {
+        if purged > 0 {
             eprintln!(
                 "xpf-userspace-dp: purged {} session(s) on tunnel-endpoint id remap (ids {:?}) (#1873)",
-                keys.len(),
+                purged,
                 purge_ids
             );
         }
-        keys.len()
+        if refused > 0 {
+            eprintln!(
+                "xpf-userspace-dp: tunnel purge refused {} session delete(s) on id remap (ids {:?}); sessions retained for next purge (#17144)",
+                refused,
+                purge_ids
+            );
+        }
+        purged
     }
 
     /// #2880: push the tunnel-remap purge Close deltas through the LOSSLESS

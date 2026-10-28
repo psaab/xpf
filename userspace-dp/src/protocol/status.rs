@@ -826,6 +826,11 @@ pub(crate) struct ProcessStatus {
     /// `xpf_userspace_tunnel_purge_reservations_released_total`.
     #[serde(rename = "tunnel_purge_reservations_released", default)]
     pub tunnel_purge_reservations_released: u64,
+    /// #17144: tunnel-remap purge deletes refused (e.g. gate busy); the session
+    /// survived, no Close was emitted and no reservation was released for it.
+    /// Surfaced as `xpf_userspace_tunnel_purge_delete_refused_total`.
+    #[serde(rename = "tunnel_purge_delete_refused", default)]
+    pub tunnel_purge_delete_refused: u64,
     /// #6600/#7398: peer-synced imports refused because this node could not
     /// reserve the translated NAT port the session names. Sustained growth
     /// means the standby cannot hold the primary's translations, so those

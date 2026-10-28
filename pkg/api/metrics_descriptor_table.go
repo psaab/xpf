@@ -581,6 +581,7 @@ var collectorDescUserspaceStatus13280 = []int{
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteRefusedIdentity"),
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteDroppedReleased"),
 	xpfCollectorDescFieldIndex("userspaceTunnelPurgeReservationsReleased"),
+	xpfCollectorDescFieldIndex("userspaceTunnelPurgeDeleteRefused"),
 	xpfCollectorDescFieldIndex("userspaceSyncedReverseRederived"),
 	xpfCollectorDescFieldIndex("userspacePeerDeleteRefusedLocalOwned"),
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteReplicaDropped"),
