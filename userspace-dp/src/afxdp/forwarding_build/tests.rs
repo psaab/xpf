@@ -7866,6 +7866,247 @@ fn interface_vlan_id_in_range_builds_exactly() {
     assert_eq!(state.egress.get(&31).expect("egress 31").vlan_id, 0);
 }
 
+/// #17206: every builder site shares the VlanId decoder verdict.
+/// fail-on-revert: restoring the mirror `unwrap_or(0)`, the native
+/// 4094 cap, or a raw ambiguity/prune comparison makes a cell below
+/// build (or count apart) instead of failing/counting as decoded.
+#[test]
+fn vlan_decode_once_parity_17206() {
+    use crate::MirrorConfigSnapshot;
+    // Mirror 4097 and native 4095-vs-4097 parity: same decoder verdict.
+    for (label, snap) in [
+        (
+            "mirror 4097",
+            ConfigSnapshot {
+                mirror_configs: vec![MirrorConfigSnapshot {
+                    ingress_ifindex: 11,
+                    output_ifindex: 22,
+                    ingress_vlan_id: 4097,
+                    unit_scoped: true,
+                    ingress_unit: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ),
+        (
+            "mirror -1 scoped is untagged, not an error",
+            ConfigSnapshot {
+                mirror_configs: vec![MirrorConfigSnapshot {
+                    ingress_ifindex: 11,
+                    output_ifindex: 22,
+                    ingress_vlan_id: -1,
+                    unit_scoped: true,
+                    ingress_unit: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ),
+    ] {
+        let res = try_build_forwarding_state_with_policy_counters(
+            &snap,
+            &crate::policy::PolicyCounterStore::default(),
+        );
+        if label == "mirror 4097" {
+            match res.expect_err("mirror 4097 must fail closed") {
+                crate::policy::SnapshotIntegrityError::InterfaceVlanOutOfRange {
+                    vlan_id, ..
+                } => assert_eq!(vlan_id, 4097),
+                other => panic!("mirror 4097: expected InterfaceVlanOutOfRange, got {other:?}"),
+            }
+        } else {
+            let st = res.expect("mirror -1 decodes to untagged 0");
+            assert!(
+                st.mirror_configs_scoped.contains_key(&(11, 0, 0)),
+                "mirror -1 must key the untagged scope, got {:?}",
+                st.mirror_configs_scoped.keys().collect::<Vec<_>>()
+            );
+        }
+    }
+    // Native 4095 accepted (wire-representable, same as vlan_id);
+    // native 4097 rejected with the raw value in the error.
+    let native_ok = ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "trust".into(),
+            id: 11,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/1".into(),
+                ifindex: 10,
+                native_vlan_id: 4095,
+                is_unit: Some(false),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/1.4095".into(),
+                zone: "trust".into(),
+                ifindex: 14095,
+                parent_ifindex: 10,
+                vlan_id: 4095,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    try_build_forwarding_state_with_policy_counters(
+        &native_ok,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("native 4095 is wire-representable and must build like vlan_id 4095");
+    let native_bad = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/1".into(),
+            ifindex: 10,
+            native_vlan_id: 4097,
+            is_unit: Some(false),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    match try_build_forwarding_state_with_policy_counters(
+        &native_bad,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect_err("native 4097 must fail closed")
+    {
+        crate::policy::SnapshotIntegrityError::InterfaceVlanOutOfRange {
+            interface,
+            vlan_id,
+        } => {
+            assert_eq!(interface, "ge-0/0/1");
+            assert_eq!(vlan_id, 4097);
+        }
+        other => panic!("native 4097: expected InterfaceVlanOutOfRange, got {other:?}"),
+    }
+    // Negative native decodes to None (no native), not an error.
+    let native_neg = ConfigSnapshot {
+        interfaces: vec![InterfaceSnapshot {
+            name: "ge-0/0/1".into(),
+            ifindex: 10,
+            native_vlan_id: -1,
+            is_unit: Some(false),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    try_build_forwarding_state_with_policy_counters(
+        &native_neg,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("native -1 decodes to untagged/None and must build");
+    // Ambiguity count: -1 and 0 are the same decoded VLAN, so two
+    // unit rows on one bind with those raw values are ambiguous and
+    // neither is admitted to ingress_unit_by_logical.
+    let amb = ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "wg0.0".into(),
+                ifindex: 100,
+                parent_ifindex: 10,
+                vlan_id: -1,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "wg0.1".into(),
+                ifindex: 101,
+                parent_ifindex: 10,
+                vlan_id: 0,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let st = build_forwarding_state(&amb);
+    assert!(
+        !st.ingress_unit_by_logical.contains_key(&100)
+            && !st.ingress_unit_by_logical.contains_key(&101),
+        "-1 and 0 decode to the same VLAN and must count as ambiguous, got {:?}",
+        st.ingress_unit_by_logical
+    );
+    // Control: distinct decoded VIDs are unambiguous.
+    let distinct = ConfigSnapshot {
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/1.0".into(),
+                ifindex: 100,
+                parent_ifindex: 10,
+                vlan_id: 0,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/1.100".into(),
+                ifindex: 101,
+                parent_ifindex: 10,
+                vlan_id: 100,
+                is_unit: Some(true),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let st = build_forwarding_state(&distinct);
+    assert_eq!(st.ingress_unit_by_logical.get(&100), Some(&0));
+    assert_eq!(st.ingress_unit_by_logical.get(&101), Some(&100));
+    // VID-0 prune: a disabled/unzoned unit-0 row with vlan_id -1 owns
+    // (bind,0) via the decoded 0 in the main loop; only the decoded
+    // prune comparison (row_vlan == 0) removes it. Raw `vlan_id == 0`
+    // would leave the key. Tagged sibling nominates the bind as
+    // tagged-only. Assert the key is PRUNED from the resolved map.
+    let prune = ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "trust".into(),
+            id: 11,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/9.100".into(),
+                zone: "trust".into(),
+                ifindex: 110,
+                parent_ifindex: 10,
+                vlan_id: 100,
+                is_unit: Some(true),
+                hardware_addr: "02:00:00:00:00:6e".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/9.0".into(),
+                zone: String::new(),
+                ifindex: 100,
+                parent_ifindex: 10,
+                vlan_id: -1,
+                is_unit: Some(true),
+                hardware_addr: "02:00:00:00:00:64".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let st = try_build_forwarding_state_with_policy_counters(
+        &prune,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("VID-0 prune fixture must build");
+    assert!(
+        !st.ingress_logical_ifindex.contains_key(&(10, 0)),
+        "decoded VID-0 prune must remove (10,0) owned by the disabled/unzoned \
+         unit-0 row with vlan_id -1, got {:?}",
+        st.ingress_logical_ifindex
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::resolve_ingress_logical_ifindex(&st, 10, 0),
+        None,
+        "pruned (10,0) must not resolve"
+    );
+}
+
 /// #2706: a NEGATIVE interface MTU fails the snapshot CLOSED via
 /// `InterfaceMtuInvalid`. fail-on-revert: restoring `iface.mtu.max(0) as
 /// usize` silently collapses -1 → 0, the egress MTU guard then treats 0 as

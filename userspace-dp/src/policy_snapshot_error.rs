@@ -568,13 +568,14 @@ pub(crate) enum SnapshotIntegrityError {
         interface: String,
         zone: String,
     },
-    /// #2410: an interface snapshot's `vlan_id` is outside the 0..=65535 range
-    /// representable on the 802.1Q wire (and in the `EgressInterface.vlan_id` /
-    /// `ingress_logical_ifindex` key u16). The pre-fix code narrowed it with an
-    /// unchecked `iface.vlan_id.max(0) as u16`, so a value > 65535 WRAPPED to a
+    /// #2410/#8597: an interface snapshot's `vlan_id` is outside the
+    /// 0..=4095 range representable in the 12-bit 802.1Q VID field.
+    /// The pre-fix code narrowed it with an unchecked
+    /// `iface.vlan_id.max(0) as u16`, so a value > 65535 WRAPPED to a
     /// different VLAN id — silently building a DIFFERENT L2 broadcast domain than
     /// the operator configured (a value of 65537 becomes VLAN 1, a value of
-    /// 65536 becomes VLAN 0/untagged). That is a security-relevant
+    /// 65536 becomes VLAN 0/untagged), and 4096..=65535 was masked by the
+    /// emitter to a different VID. That is a security-relevant
     /// misconfiguration: the interface's ingress demux and egress tag would key
     /// off the wrong VLAN. The Go commit-time validation is the primary gate;
     /// this is the helper-boundary backstop, consistent with the
@@ -1285,7 +1286,7 @@ impl std::fmt::Display for SnapshotIntegrityError {
             ),
             Self::InterfaceVlanOutOfRange { interface, vlan_id } => write!(
                 f,
-                "interface {:?} has vlan_id {} outside the 0..=65535 802.1Q range — refusing to narrow it with an unchecked cast that would wrap to a different VLAN (a different L2 domain)",
+                "interface {:?} has vlan_id {} outside the 0..=4095 802.1Q range — refusing to narrow it with an unchecked cast that would wrap to a different VLAN (a different L2 domain)",
                 interface, vlan_id
             ),
             Self::InterfaceDuplicateIngressKey {
