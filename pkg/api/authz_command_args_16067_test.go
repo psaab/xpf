@@ -43,9 +43,14 @@ func TestArgumentScopedDenyFiresOnREST16067(t *testing.T) {
 		name, pattern, method, path, body string
 		wantDeny                          bool
 	}{
-		{"show-text route table denied", `^show route table secret-vrf$`, "GET", "/api/v1/show-text?topic=route-table:secret-vrf", "", true},
-		{"show-text route table allowed", `^show route table secret-vrf$`, "GET", "/api/v1/show-text?topic=route-table:public-vrf", "", false},
-		{"show-text log denied", `^show log .*`, "GET", "/api/v1/show-text?topic=log:messages", "", true},
+		// #17179: packed show-text topics (route-table:, log:) are
+		// UNSERVED on REST — showTextHandler 400s them — so they are
+		// unnameable and deny for a restricted class under ANY pattern;
+		// the gRPC packed-spelling verdicts live in pkg/grpcapi's
+		// TestArgumentScopedDenyFiresOnGRPC16067. See
+		// TestRestShowTextUnservedTopicsDeny17179 for the full cells.
+		{"show-text served topic denied by charge", `^show security applications$`, "GET", "/api/v1/show-text?topic=applications", "", true},
+		{"show-text served topic allowed", `^show security applications$`, "GET", "/api/v1/show-text?topic=alg", "", false},
 		{"ping target denied", `^ping 10\.99\.`, "POST", "/api/v1/diagnostics/ping", `{"target":"10.99.1.1"}`, true},
 		{"ping target allowed", `^ping 10\.99\.`, "POST", "/api/v1/diagnostics/ping", `{"target":"10.98.1.1"}`, false},
 		{"traceroute denied", `^traceroute 10\.99\.`, "POST", "/api/v1/diagnostics/traceroute", `{"target":"10.99.1.1"}`, true},

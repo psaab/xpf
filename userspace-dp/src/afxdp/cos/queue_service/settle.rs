@@ -547,6 +547,18 @@ pub(in crate::afxdp) fn cos_batch_tx_made_progress(result: Result<(u64, u64), Tx
     matches!(result, Ok((packets, bytes)) if packets > 0 || bytes > 0)
 }
 
+/// #17173: CoS scheduler tuning knobs, co-located with the quantum
+/// helpers that consume them. Previously defined in tx/drain and
+/// imported back through crate::afxdp::tx, even though no tx code
+/// reads them - a back-edge outside the ring / binding /
+/// prepared-frame primitives the queue_service back-edge comment
+/// allows. Guard: cos_scheduler_constants_not_in_tx_17173
+/// (tests/mod.rs).
+pub(in crate::afxdp) const COS_GUARANTEE_VISIT_NS: u64 = 200_000;
+pub(in crate::afxdp) const COS_GUARANTEE_QUANTUM_MIN_BYTES: u64 = 1500;
+pub(in crate::afxdp) const COS_GUARANTEE_QUANTUM_MAX_BYTES: u64 = 512 * 1024;
+pub(in crate::afxdp) const COS_SURPLUS_ROUND_QUANTUM_BYTES: u64 = 1500;
+
 #[inline]
 pub(in crate::afxdp) fn cos_surplus_quantum_bytes(queue: &CoSQueueRuntime) -> u64 {
     COS_SURPLUS_ROUND_QUANTUM_BYTES.saturating_mul(u64::from(queue.config.surplus_weight.max(1)))

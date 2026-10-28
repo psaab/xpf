@@ -43,6 +43,40 @@ pub(crate) struct DnatValue {
     pub new_dst_port: u16,
 }
 
+impl DnatValue {
+    /// #4074: gate the destination-port translation on the protocol actually
+    /// carrying an L4 port. A port-less protocol (ICMP/ICMPv6/GRE/...) keeps
+    /// `None` — address-only DNAT — so a pooled-port DNAT rule can never
+    /// smuggle a spurious L4 port onto an ICMP flow (which would otherwise
+    /// drive the ICMP-identifier rewriter to corrupt the Query Identifier).
+    /// `protocol` is the original u8 (not the widened u16 key) so
+    /// `has_l4_ports` is evaluated against the real protocol.
+    #[inline]
+    pub(crate) fn rewritten_dst_port(&self, protocol: u8, dst_port: u16) -> Option<u16> {
+        if crate::ip_proto::has_l4_ports(protocol)
+            && self.new_dst_port != 0
+            && self.new_dst_port != dst_port
+        {
+            Some(self.new_dst_port)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub(crate) fn decision(&self, protocol: u8, dst_port: u16) -> NatDecision {
+        NatDecision {
+            rewrite_src: None,
+            rewrite_dst: Some(self.new_dst_ip),
+            rewrite_src_port: None,
+            rewrite_dst_port: self.rewritten_dst_port(protocol, dst_port),
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+        }
+    }
+}
+
 /// #14947: tri-state DNAT lookup result. `Poisoned` means a poisoned rule
 /// claimed the flow: the caller must drop it (fail closed) rather than
 /// forwarding it untranslated. `NoMatch` (including a healthy `off`
@@ -1164,17 +1198,9 @@ impl DnatTable {
         ingress_routing_instance: &str,
         packet_icmp: Option<(u8, u8)>,
     ) -> Option<(NatDecision, Option<Arc<NatRuleCounter>>)> {
-        // #4074: whether the inbound protocol carries a rewritable 16-bit L4
-        // port (TCP/UDP). A port-less protocol (ICMP/ICMPv6/GRE/...) has no L4
-        // port, so a DNAT rule must NEVER attach a translated destination port
-        // to it — captured here before `protocol` is widened to the u16 key
-        // space below. Without this, an UNSCOPED pool DNAT rule (no `match
-        // destination-port`) whose pool carries a `port` would set
-        // `rewrite_dst_port = Some(pool_port)` for an ICMP echo, and the SNAT
-        // ICMP-identifier rewriter (`apply_nat_icmp_identifier_rewrite`) would
-        // then corrupt the ICMP Query Identifier to the pool port. ICMP DNAT
-        // must stay address-only (the pre-#4074 behaviour).
-        let protocol_has_l4_ports = crate::ip_proto::has_l4_ports(protocol);
+        // #4074 gate lives in `DnatValue::rewritten_dst_port`; keep the
+        // original u8 so it is evaluated before widening to the u16 key.
+        let protocol_u8 = protocol;
         // The inbound packet protocol is a real IANA byte; widen it to the
         // u16 key space. The wildcard sentinel (PROTO_ANY = 256) is OUTSIDE
         // this range, so a real packet — even one carrying protocol 0 (HOPOPT)
@@ -1269,30 +1295,7 @@ impl DnatTable {
             }) => (value, counter),
             Some(DnatOutcome::Exempt) | Some(DnatOutcome::Poisoned(_)) | None => return None,
         };
-        // #4074: gate the destination-port translation on the protocol actually
-        // carrying an L4 port. A port-less protocol (ICMP/ICMPv6/GRE/...) keeps
-        // `rewrite_dst_port = None` — address-only DNAT — so a pooled-port DNAT
-        // rule can never smuggle a spurious L4 port onto an ICMP flow (which
-        // would otherwise drive the ICMP-identifier rewriter to corrupt the
-        // Query Identifier).
-        let rewrite_dst_port =
-            if protocol_has_l4_ports && value.new_dst_port != 0 && value.new_dst_port != dst_port {
-                Some(value.new_dst_port)
-            } else {
-                None
-            };
-        Some((
-            NatDecision {
-                rewrite_src: None,
-                rewrite_dst: Some(value.new_dst_ip),
-                rewrite_src_port: None,
-                rewrite_dst_port,
-                source_nat_icmp: None,
-                nat64: false,
-                nptv6: false,
-            },
-            hit_counter,
-        ))
+        Some((value.decision(protocol_u8, dst_port), hit_counter))
     }
 
     /// #15934: the selector-RELAXED tier-walk outcome for revalidation:
@@ -1319,7 +1322,6 @@ impl DnatTable {
         want_dst: IpAddr,
         want_dst_port: Option<u16>,
     ) -> Option<bool> {
-        let protocol_has_l4_ports = crate::ip_proto::has_l4_ports(protocol);
         let protocol_key = u16::from(protocol);
         // The deciding tier is chosen by the NORMAL (selector-applied)
         // winner per key: relaxation lets typed rules compete, it does
@@ -1328,15 +1330,8 @@ impl DnatTable {
         // decides geometry. Two keys are distinct tiers only across
         // proto/port buckets; entries sharing a key are co-deciders.
         let reproduces = |entry: &DnatEntry| {
-            let rewrite_dst_port = if protocol_has_l4_ports
-                && entry.value.new_dst_port != 0
-                && entry.value.new_dst_port != dst_port
-            {
-                Some(entry.value.new_dst_port)
-            } else {
-                None
-            };
-            entry.value.new_dst_ip == want_dst && rewrite_dst_port == want_dst_port
+            entry.value.new_dst_ip == want_dst
+                && entry.value.rewritten_dst_port(protocol, dst_port) == want_dst_port
         };
         let eligible = |entry: &DnatEntry| {
             (entry.from_zone.is_empty() || entry.from_zone.as_ref() == ingress_zone)
@@ -1404,7 +1399,7 @@ impl DnatTable {
             ingress_routing_instance,
             want_dst,
             want_dst_port,
-            protocol_has_l4_ports,
+            protocol,
         )
     }
 
@@ -1413,7 +1408,7 @@ impl DnatTable {
     #[allow(clippy::too_many_arguments)]
     fn match_prefix_lpm_tier_walk(
         &self,
-        protocol: u16,
+        protocol_key: u16,
         src_ip: IpAddr,
         dst_ip: IpAddr,
         src_port: u16,
@@ -1423,11 +1418,11 @@ impl DnatTable {
         ingress_routing_instance: &str,
         want_dst: IpAddr,
         want_dst_port: Option<u16>,
-        protocol_has_l4_ports: bool,
+        protocol: u8,
     ) -> Option<bool> {
         for slots in [
-            self.prefix_entries.get(&DnatProtoPortKey { protocol, dst_port }),
-            self.prefix_entries.get(&DnatProtoPortKey { protocol, dst_port: 0 }),
+            self.prefix_entries.get(&DnatProtoPortKey { protocol: protocol_key, dst_port }),
+            self.prefix_entries.get(&DnatProtoPortKey { protocol: protocol_key, dst_port: 0 }),
             self.prefix_entries.get(&DnatProtoPortKey { protocol: PROTO_ANY, dst_port: 0 }),
         ] {
             let Some(slots) = slots else { continue };
@@ -1461,15 +1456,10 @@ impl DnatTable {
                 }
                 match slot.entry.to_outcome() {
                     DnatOutcome::Translate { .. } => {
-                        let rewrite_dst_port = if protocol_has_l4_ports
-                            && slot.entry.value.new_dst_port != 0
-                            && slot.entry.value.new_dst_port != dst_port
+                        if slot.entry.value.new_dst_ip == want_dst
+                            && slot.entry.value.rewritten_dst_port(protocol, dst_port)
+                                == want_dst_port
                         {
-                            Some(slot.entry.value.new_dst_port)
-                        } else {
-                            None
-                        };
-                        if slot.entry.value.new_dst_ip == want_dst && rewrite_dst_port == want_dst_port {
                             any_translate_reproduces = true;
                         }
                     }
@@ -1593,28 +1583,7 @@ impl DnatTable {
                 value,
                 counter,
                 ..
-            }) => {
-                let rewrite_dst_port = if crate::ip_proto::has_l4_ports(protocol)
-                    && value.new_dst_port != 0
-                    && value.new_dst_port != dst_port
-                {
-                    Some(value.new_dst_port)
-                } else {
-                    None
-                };
-                (
-                    DnatLookup::Matched(NatDecision {
-                        rewrite_src: None,
-                        rewrite_dst: Some(value.new_dst_ip),
-                        rewrite_src_port: None,
-                        rewrite_dst_port,
-                        source_nat_icmp: None,
-                        nat64: false,
-                        nptv6: false,
-                    }),
-                    counter,
-                )
-            }
+            }) => (DnatLookup::Matched(value.decision(protocol, dst_port)), counter),
             Some(DnatOutcome::Poisoned(counter)) => (DnatLookup::Poisoned, counter),
             Some(DnatOutcome::Exempt) | None => (DnatLookup::NoMatch, None),
         }
@@ -1668,28 +1637,7 @@ impl DnatTable {
                 value,
                 counter,
                 ..
-            }) => {
-                let rewrite_dst_port = if crate::ip_proto::has_l4_ports(protocol)
-                    && value.new_dst_port != 0
-                    && value.new_dst_port != dst_port
-                {
-                    Some(value.new_dst_port)
-                } else {
-                    None
-                };
-                (
-                    DnatLookup::Matched(NatDecision {
-                        rewrite_src: None,
-                        rewrite_dst: Some(value.new_dst_ip),
-                        rewrite_src_port: None,
-                        rewrite_dst_port,
-                        source_nat_icmp: None,
-                        nat64: false,
-                        nptv6: false,
-                    }),
-                    counter,
-                )
-            }
+            }) => (DnatLookup::Matched(value.decision(protocol, dst_port)), counter),
             Some(DnatOutcome::Poisoned(counter)) => (DnatLookup::Poisoned, counter),
             Some(DnatOutcome::Exempt) | None => (DnatLookup::NoMatch, None),
         }

@@ -29,17 +29,17 @@ out of the cell.
 now?"; it does not bound how long a handle someone already took stays
 usable. Two consequences the code makes explicit:
 
-- **Escaping consumers.** Six things outlive a single call. The three
+- **Escaping consumers.** Five things outlive a single call. The three
   OPERATOR-FACING management servers — gRPC, REST, and the console CLI —
   do NOT receive the backend handle: they receive `liveDataPlane`
   (`daemon_dp_live.go`), a daemon-owned indirection that re-reads the cell
   on every method, so a later `setDataplane(nil)` is immediately visible
-  to them. TWO of the three DATA-PATH consumers are deliberate
-  capture-once wiring, and are documented as such rather than claimed
-  converted: conntrack GC and cluster `SessionSync` take the DECOMPOSED
+  to them. ONE of the two DATA-PATH consumers is deliberate
+  capture-once wiring, and is documented as such rather than claimed
+  converted: cluster `SessionSync` takes the DECOMPOSED
   `dataplane.SessionStore` / `dataplane.Telemetry` domains (a live
   indirection would put an atomic load + interface assertion +
-  `SessionStoreOf` allocation on every per-session step). The THIRD — the
+  `SessionStoreOf` allocation on every per-session step). The OTHER — the
   userspace event-stream loop — is NOT capture-once: it re-resolves the
   provider, the stream instance AND the session-delta drainer from the
   cell on every poll tick (#6743 r6-F4 for the first two — it used to
@@ -1144,8 +1144,8 @@ Three properties carry the mechanism:
   warning text (a text assertion there passes with the retry deleted); the
   `startHTTPServer` one on the kernel-name read, which sits past the
   nil-reconciler guard, because that call site cannot be handed a serving HTTPS
-  leg in-process — it constructs the `api.Server` itself and the cert-dir test
-  seam exists only afterwards.
+  leg in-process — it constructs the `api.Server` itself from a committed
+  config that names no HTTPS leg in that cell.
 - **The name is read from the kernel at DELIVERY**, never stored at rename time,
   so a deferred diagnosis is never the replay of a name captured at some earlier
   commit. It IS the kernel's current name for every rename the daemon performs

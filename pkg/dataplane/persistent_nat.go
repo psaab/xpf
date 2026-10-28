@@ -300,9 +300,9 @@ func (t *PersistentNATTable) GC() int {
 //     stamps LastSeen = time.Now(), which would reset every binding's remaining
 //     lifetime to the full timeout on every refresh and make the SHOW column
 //     count down from a value it never had.
-//   - GC would be wrong on the way out, and is unreachable anyway: it is called
-//     from the conntrack sweep, which daemon_run.go disables outright on this
-//     path (`gc.SkipSweep = func() bool { return true }`). A binding the helper
+//   - GC would be wrong on the way out, and is unreachable anyway: its only
+//     caller was the retired Go conntrack sweep (`pkg/conntrack`, deleted in
+//     #17155), which never ran on the userspace path. A binding the helper
 //     has released must disappear because it is ABSENT from the next snapshot,
 //     not because a local timer expired it.
 //

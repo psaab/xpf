@@ -8,7 +8,7 @@ import (
 )
 
 // TestHealthHandler_RedactsRawErrorDetail is the #5031 fail-on-revert guard.
-// /health is unconditionally unauthenticated (authMiddleware exempts it), so a
+// /health is unconditionally unauthenticated (the auth gate exempts it), so a
 // raw compile/bootstrap error string — which can quote a submitted secret
 // (e.g. a `system login` password echoed by a schema validator), a file path,
 // or topology — must never appear verbatim in the response body. Each subtest

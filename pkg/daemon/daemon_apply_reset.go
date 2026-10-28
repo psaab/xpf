@@ -342,36 +342,43 @@ func eraseStateTempsForReset() error {
 // with no boot gate left to force another pass. Hardlinked lease files are
 // refused before unlinking (FactoryResetHardlinkError with the inode
 // scan), so a retry cannot succeed over rows a sibling holds. A symlink
-// is refused like the primary seal leg (zeroizeRemovePath): unlinking
+// is refused like the primary seal leg (wipeRemovePath): unlinking
 // the link would pass verification while the target rows survive.
 func eraseKeaLeasesForReset() error {
 	var errs []error
 	synced := make(map[string]bool)
 	for _, current := range resetKeaLeaseCurrents {
 		for _, path := range dhcpserver.KeaLeaseWipePaths(current) {
-			if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
-				errs = append(errs, fmt.Errorf("factory reset: refusing to re-erase symlinked Kea lease file %s: link target is out of erase scope", path))
-				continue
-			} else if lerr != nil && !os.IsNotExist(lerr) {
-				errs = append(errs, fmt.Errorf("factory reset: inspect Kea lease file %s: %w", path, lerr))
-				continue
-			}
-			hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
-			if herr != nil {
-				errs = append(errs, fmt.Errorf("factory reset: inspect hard links for Kea lease file %s: %w", path, herr))
-				continue
-			}
-			if len(hardlinks) != 0 {
-				errs = append(errs, fmt.Errorf("factory reset: refusing to erase hard-linked Kea lease file %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
-				continue
-			}
-			if err := os.Remove(path); err != nil {
-				if !os.IsNotExist(err) {
+			_, statErr := os.Lstat(path)
+			if err := configstore.EraseFileForReset(path); err != nil {
+				// Historic Kea spellings preserved verbatim (#17171
+				// fold), mapped from the primitive's typed/sentinel
+				// classes like the helper canonical. The old code
+				// had no non-regular arm (it lumped the class into
+				// its remove error); the primitive's refusal is
+				// already Kea-scoped here, so it takes "factory
+				// reset: %w" without inventing a historic string.
+				var symErr *configstore.FactoryResetSymlinkError
+				var linkErr *configstore.FactoryResetHardlinkError
+				switch {
+				case errors.As(err, &symErr):
+					errs = append(errs, fmt.Errorf("factory reset: refusing to re-erase symlinked Kea lease file %s: link target is out of erase scope", path))
+				case errors.As(err, &linkErr):
+					errs = append(errs, fmt.Errorf("factory reset: refusing to erase hard-linked Kea lease file %s: %w", path, linkErr))
+				case errors.Is(err, configstore.ErrEraseInspect):
+					errs = append(errs, fmt.Errorf("factory reset: inspect Kea lease file %s: %w", path, err))
+				case errors.Is(err, configstore.ErrEraseInspectLinks):
+					errs = append(errs, fmt.Errorf("factory reset: inspect hard links for Kea lease file %s: %w", path, err))
+				case errors.Is(err, configstore.ErrEraseRemove):
 					errs = append(errs, fmt.Errorf("factory reset: re-erase Kea lease file %s: %w", path, err))
+				default:
+					errs = append(errs, fmt.Errorf("factory reset: %w", err))
 				}
 				continue
 			}
-			synced[filepath.Dir(path)] = true
+			if statErr == nil {
+				synced[filepath.Dir(path)] = true
+			}
 		}
 	}
 	for dir := range synced {

@@ -1,8 +1,5 @@
-// #1345: per-verb handlers for apply_snapshot and bump_fib_generation.
-// Both verbs pivot on request.snapshot. Bodies are byte-identical
-// to handlers.rs lines 53-131 (apply_snapshot) and 209-225
-// (bump_fib_generation) modulo the per-handler parameter-passing
-// substitution described in docs/pr/1345-server-handlers-split/plan.md.
+// #1345: per-verb handlers for apply_snapshot and bump_fib_generation,
+// split out of handlers.rs in #1345. Both verbs pivot on request.snapshot.
 
 use super::super::helpers::{
     reconcile_status_bindings_with_policy_state, refresh_status, replan_queues,

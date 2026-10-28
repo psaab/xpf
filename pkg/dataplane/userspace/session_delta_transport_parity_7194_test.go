@@ -1,10 +1,7 @@
 package userspace
 
 import (
-	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/wireschema"
@@ -54,83 +51,17 @@ func goWireNames7194(t *testing.T) map[string]string {
 	return out
 }
 
-var (
-	rustFieldRE7194  = regexp.MustCompile(`^\s*(?:pub(?:\([a-z]+\))?\s+)?([a-z_0-9]+)\s*:`)
-	rustRenameRE7194 = regexp.MustCompile(`rename\s*=\s*"([^"]+)"`)
-	rustSkipRE7194   = regexp.MustCompile(`serde\s*\(\s*(?:[^)]*\bskip\b)`)
-	rustStructRE7194 = regexp.MustCompile(`\bstruct\s+SessionDeltaInfo\s*\{`)
-)
-
-// The wire names of the Rust JSON producer's SessionDeltaInfo.
-//
-// Braces are counted to find the struct's real end rather than reading a fixed
-// number of lines. That is not fussiness: my first pass at this used a fixed
-// range, truncated the 139-line struct at line 88, and produced a six-field
-// "gap" that does not exist. A truncated extraction and a real divergence are
-// indistinguishable in the output.
+// #17142: rustWireNames7194 used to be its own brace-counted extractor —
+// the best of the seven divergent copies (it fixed fixed-range truncation
+// and SessionDeltaInfoV2 prefix-matching in its own copy, and those fixes
+// never propagated to the #6949/#7037 copies). It is now the shared
+// struct-scoped parser in rustwire_test.go; the name is kept only as this
+// thin adapter so the #7194/#8043 cells below read unchanged.
 func rustWireNames7194(t *testing.T) map[string]bool {
 	t.Helper()
-	path := filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "binding.rs")
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	lines := strings.Split(string(b), "\n")
-
-	// EXACT declaration, not a substring. `strings.Contains(l, "struct
-	// SessionDeltaInfo")` also matches `struct SessionDeltaInfoV2` and
-	// `struct SessionDeltaInfoRenamed` — my own mutation matrix caught that:
-	// renaming the struct left this test GREEN because the renamed type still
-	// contained the old name as a prefix. A neighbouring struct declared
-	// earlier in the file would have been parsed instead of this one, and the
-	// parity result would have described the wrong type entirely.
-	start := -1
-	for i, l := range lines {
-		if rustStructRE7194.MatchString(l) {
-			start = i
-			break
-		}
-	}
-	if start < 0 {
-		t.Fatalf("%s no longer declares `struct SessionDeltaInfo`. This test cannot "+
-			"compare what it cannot find, and a rename here would otherwise make it "+
-			"pass over an empty set", path)
-	}
-
-	out := map[string]bool{}
-	pendingRename := ""
-	pendingSkip := false
-	depth := 0
-	for i := start; i < len(lines); i++ {
-		l := lines[i]
-		depth += strings.Count(l, "{") - strings.Count(l, "}")
-		trimmed := strings.TrimSpace(l)
-		if strings.HasPrefix(trimmed, "#[") {
-			if m := rustRenameRE7194.FindStringSubmatch(trimmed); m != nil {
-				pendingRename = m[1]
-			}
-			if rustSkipRE7194.MatchString(trimmed) {
-				pendingSkip = true
-			}
-			continue
-		}
-		if i > start {
-			if m := rustFieldRE7194.FindStringSubmatch(l); m != nil {
-				name := m[1]
-				if pendingRename != "" {
-					name = pendingRename
-				}
-				if !pendingSkip {
-					out[name] = true
-				}
-			}
-			pendingRename, pendingSkip = "", false
-		}
-		if depth == 0 && i > start {
-			break
-		}
-	}
-	return out
+	return rustWireKeysInStruct(t,
+		filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "binding.rs"),
+		"SessionDeltaInfo")
 }
 
 // Neither transport may carry a session-open field the other does not.
