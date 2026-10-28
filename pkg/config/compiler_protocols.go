@@ -434,23 +434,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							}
 						}
 					case "bfd-liveness-detection":
-						iface.BFD = true
-						for _, bc := range prop.Children {
-							switch bc.Name() {
-							case "minimum-interval":
-								if v := nodeVal(bc); v != "" {
-									if n, err := strconv.Atoi(v); err == nil {
-										iface.BFDInterval = n
-									}
-								}
-							case "multiplier":
-								if v := nodeVal(bc); v != "" {
-									if n, err := strconv.Atoi(v); err == nil {
-										iface.BFDMultiplier = n
-									}
-								}
-							}
-						}
+						parseBFDLiveness17182(prop).apply(&iface.BFD, &iface.BFDInterval, &iface.BFDMultiplier)
 					}
 				}
 				if appendIface {
@@ -858,23 +842,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							groupAuthKey = v
 						}
 					case "bfd-liveness-detection":
-						groupBFD = true
-						for _, bc := range child.Children {
-							switch bc.Name() {
-							case "minimum-interval":
-								if v := nodeVal(bc); v != "" {
-									if n, err := strconv.Atoi(v); err == nil {
-										groupBFDInterval = n
-									}
-								}
-							case "multiplier":
-								if v := nodeVal(bc); v != "" {
-									if n, err := strconv.Atoi(v); err == nil {
-										groupBFDMultiplier = n
-									}
-								}
-							}
-						}
+						parseBFDLiveness17182(child).apply(&groupBFD, &groupBFDInterval, &groupBFDMultiplier)
 					case "neighbor":
 						nAddr := nodeVal(child)
 						if nAddr != "" {
@@ -1112,23 +1080,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 							}
 						}
 					case "bfd-liveness-detection":
-						iface.BFD = true
-						for _, bc := range prop.Children {
-							switch bc.Name() {
-							case "minimum-interval":
-								if v := nodeVal(bc); v != "" {
-									if n, err := strconv.Atoi(v); err == nil {
-										iface.BFDInterval = n
-									}
-								}
-							case "multiplier":
-								if v := nodeVal(bc); v != "" {
-									if n, err := strconv.Atoi(v); err == nil {
-										iface.BFDMultiplier = n
-									}
-								}
-							}
-						}
+						parseBFDLiveness17182(prop).apply(&iface.BFD, &iface.BFDInterval, &iface.BFDMultiplier)
 					}
 				}
 				if appendIface {
@@ -1429,23 +1381,7 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 						case "authentication-type":
 							iface.AuthType = nodeVal(prop)
 						case "bfd-liveness-detection":
-							iface.BFD = true
-							for _, bc := range prop.Children {
-								switch bc.Name() {
-								case "minimum-interval":
-									if v := nodeVal(bc); v != "" {
-										if n, err := strconv.Atoi(v); err == nil {
-											iface.BFDInterval = n
-										}
-									}
-								case "multiplier":
-									if v := nodeVal(bc); v != "" {
-										if n, err := strconv.Atoi(v); err == nil {
-											iface.BFDMultiplier = n
-										}
-									}
-								}
-							}
+							parseBFDLiveness17182(prop).apply(&iface.BFD, &iface.BFDInterval, &iface.BFDMultiplier)
 						}
 					}
 					// Check keys for "level N" and "passive" shorthand

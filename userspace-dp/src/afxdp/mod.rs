@@ -660,7 +660,9 @@ pub(crate) use coordinator::neigh_monitor_test_serial;
 #[cfg(test)]
 pub(crate) use coordinator::{ListTestWorker, register_list_test_worker};
 // #8121 part 2: idle persistent-NAT lease sync records.
-pub(crate) use coordinator::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
+pub(crate) use coordinator::{
+    IdleLeaseImportCounts, LeasePoolId, LeasePoolMode, PoolDisplayLease, PoolIdleLease,
+};
 // afxdp/tests.rs (14k-LOC catch-all) was split into cohesive per-subsystem
 // sibling test modules plus a shared support module in #4840. Pure test
 // code-motion; each file carries the union use-block and reaches production
@@ -851,10 +853,10 @@ mod worker;
 // #1807: shared poison-recovery helpers (lock_recover /
 // try_lock_recover) for every Mutex<VecDeque<WorkerCommand>> access.
 #[path = "worker_queue.rs"]
-// #7053: `pub(crate)` so the shared source-scan helpers in its test module
-// (blank_comments_and_strings / afxdp_rs_files / is_fixture) reach the
-// routing-instance pairing guard in filter/tests.rs. Widening the module,
-// not copying the helpers.
+// #17152: `pub(crate)` kept for the production queue helpers reached
+// crate-wide (`lock_recover`, `push_bounded`, counters); the test-only
+// source-scan helpers formerly shared through `worker_queue::tests`
+// now live in `crate::test_support::source_scan`.
 pub(crate) mod worker_queue;
 #[path = "worker_runtime.rs"]
 mod worker_runtime;

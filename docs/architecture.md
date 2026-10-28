@@ -88,7 +88,9 @@ It is no longer a selectable backend.
 
 ## Key design patterns
 
-- **Go control plane** handles config compilation, session GC, management
+- **Go control plane** handles config compilation, session management
+  (expiry itself is owned by the Rust helper's per-worker expiry; the
+  retired Go conntrack GC was deleted in #17155), management
   APIs, HA cluster, and routing.
 - **Rust AF_XDP userspace dataplane** owns the only packet-forwarding path.
 - **Retained eBPF surface** is the userspace XDP shim (`userspace-xdp/`)
@@ -446,7 +448,7 @@ editing cmdtree.
 
 | Path | Description |
 |------|-------------|
-| `bpf/headers/*.h` | Shared C structs/constants consumed by the retained Rust AF_XDP shim build and userspace-dp parity tests. The legacy `bpf/xdp/*.c` and `bpf/tc/*.c` source were deleted in #1476 |
+| `bpf/headers/*.h` | Retained C ABI mirror (common/conntrack/maps only; helpers/nat/trace deleted in #17146) read by the shim build (`MAX_INTERFACES`) and Go/Rust parity tests; not compiled. The legacy `bpf/xdp/*.c` and `bpf/tc/*.c` source were deleted in #1476 |
 | `pkg/config/` | Junos parser, AST, typed config, compiler |
 | `pkg/cmdtree/` | Single source of truth for the operational CLI command tree |
 | `pkg/configstore/` | Candidate/active/commit/rollback, atomic DB persistence, JSONL audit journal |
@@ -459,7 +461,6 @@ editing cmdtree.
 | `pkg/vrrp/` | Native VRRPv3 state machine; 30ms default RETH advertisements only in legacy VRRP-backed mode (`no-private-rg-election`, unless `no-reth-vrrp`); the compiler-default private-RG mode suppresses RETH VRRP (`pkg/config/compiler_system.go:3132-3137`, `pkg/vrrp/vrrp.go:153-166`) |
 | `pkg/ra/` | Embedded RA sender (replaces radvd) |
 | `pkg/cli/` | Interactive Junos-style CLI |
-| `pkg/conntrack/` | Session garbage collection (with HA delete sync) |
 | `pkg/logging/` | Ring buffer reader, event buffer, syslog client |
 | `pkg/dhcp/` | DHCPv4/DHCPv6 clients |
 | `pkg/frr/` | FRR config generation + managed section in frr.conf |

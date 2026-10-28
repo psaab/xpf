@@ -2,46 +2,24 @@ package daemon
 
 import (
 	"log/slog"
-	"reflect"
-	"strings"
 	"sync"
 
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/wireschema"
 )
 
-// sessionDeltaWireNames returns the JSON wire names of
-// dpuserspace.SessionDeltaInfo.
-//
-// It lives HERE rather than beside the struct because the #1476
-// retirement-boundary canary (TestUserspaceManagerDoesNotImportReflectOrUnsafe)
-// forbids `reflect` in pkg/dataplane/userspace production code — reflection is
-// precisely how an entry-program canary would be bypassed. pkg/daemon already
-// uses reflect and is not covered by that canary. The canonicalisation and hash
-// stay next to the wire types; only the extraction moved.
-//
-// It reads json TAGS, not Go field names: a tag drift breaks the wire while
-// leaving both field names untouched, which is the divergence class #7194 is
-// about.
-func sessionDeltaWireNames() []string {
-	t := reflect.TypeOf(dpuserspace.SessionDeltaInfo{})
-	names := make([]string, 0, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		if f.PkgPath != "" {
-			continue // unexported: never on the wire
-		}
-		tag := f.Tag.Get("json")
-		if tag == "-" {
-			continue
-		}
-		name := strings.Split(tag, ",")[0]
-		if name == "" {
-			name = f.Name
-		}
-		names = append(names, name)
-	}
-	return names
-}
+// The wire-name extraction itself is the single production extractor
+// wireschema.WireNamesOf applied to dpuserspace.SessionDeltaInfo
+// (#17137). It cannot live beside the struct in
+// pkg/dataplane/userspace because the #1476 retirement-boundary
+// canary (TestUserspaceManagerDoesNotImportReflectOrUnsafe) forbids
+// `reflect` anywhere under that package (the walk is recursive);
+// pkg/wireschema is outside that tree and reflect-allowed. Until #17137 a
+// second copy lived here in pkg/daemon and no test compared it with
+// anything, so a one-token drift would have flipped the fail-closed
+// gate below to MISMATCH against every helper while every pkg/daemon
+// test stayed green. The canonicalisation and hash stay next to the
+// wire types; only the extraction moved, and now it is shared.
 
 var (
 	localDeltaSchemaOnce sync.Once
@@ -52,7 +30,7 @@ var (
 // identity. Computed once: the shape cannot change at runtime.
 func localSessionDeltaSchemaFingerprint() uint64 {
 	localDeltaSchemaOnce.Do(func() {
-		localDeltaSchemaFP = dpuserspace.SessionDeltaSchemaFingerprintOf(sessionDeltaWireNames())
+		localDeltaSchemaFP = dpuserspace.SessionDeltaSchemaFingerprintOf(wireschema.WireNamesOf(dpuserspace.SessionDeltaInfo{}))
 	})
 	return localDeltaSchemaFP
 }
@@ -118,7 +96,7 @@ func (d *Daemon) userspaceDeltaSchemaAdmits(batchLen int) bool {
 			"helper_fingerprint", advertised,
 			"daemon_fingerprint", localSessionDeltaSchemaFingerprint(),
 			"deltas_withheld_in_batch", batchLen,
-			"daemon_schema", dpuserspace.SessionDeltaSchemaCanonicalOf(sessionDeltaWireNames()))
+			"daemon_schema", dpuserspace.SessionDeltaSchemaCanonicalOf(wireschema.WireNamesOf(dpuserspace.SessionDeltaInfo{})))
 	}
 	return false
 }

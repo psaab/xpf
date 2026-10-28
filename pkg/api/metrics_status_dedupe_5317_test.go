@@ -9,7 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -47,7 +46,7 @@ func (d *statusCountingDP) Status() (dpuserspace.ProcessStatus, error) {
 func newStatusCountingScrape(t *testing.T, status dpuserspace.ProcessStatus, statusErr error) (*xpfCollector, *statusCountingDP) {
 	t.Helper()
 	store := newDescriptorCoverageStore(t)
-	srv := &Server{store: store, gc: conntrack.NewGC(nil, time.Minute), startTime: time.Now()}
+	srv := &Server{store: store, startTime: time.Now()}
 	dp := &statusCountingDP{
 		descriptorCoverageDP: &descriptorCoverageDP{
 			Manager: dataplane.New(),

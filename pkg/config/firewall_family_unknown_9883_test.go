@@ -382,7 +382,7 @@ func TestMultiKeyFamilyChildCannotSplitGateAndCompiler9883(t *testing.T) {
 // nothing to fold and the gate stays silent.
 func TestEmptyPermittedSetFailsLoud9883(t *testing.T) {
 	// The quarantine helper declines to judge on empty (documented fold).
-	m := firewallFamilyMember{AfNode: &Node{Keys: []string{"inett"}}, Af: "inett"}
+	m := familyMember{AfNode: &Node{Keys: []string{"inett"}}, Af: "inett"}
 	if firewallFamilyQuarantined9883(m, map[string]bool{}) {
 		t.Fatal("empty permitted set must decline to judge (return false), not quarantine everything into an outage")
 	}

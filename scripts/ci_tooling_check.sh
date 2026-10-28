@@ -154,6 +154,8 @@ scripts/go-skip-census.sh
 test/incus/go-skip-census-selftest.sh
 scripts/go-buildtag-census.sh
 test/incus/go-buildtag-census-selftest.sh
+scripts/go-deadcode-gate.sh
+scripts/go-deadcode-gate-selftest.sh
 scripts/selftest-census.sh
 test/incus/selftest-census-selftest.sh
 scripts/miri-census.sh
