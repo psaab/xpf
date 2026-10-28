@@ -82,7 +82,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 	// as DNS names so a space/control/malformed value cannot inject an extra
 	// resolver directive token.
 	"domain-name":   {desc: "Domain name", args: 1, valueType: ValueHostname, valueDesc: "DNS domain name", valueExamples: []string{"example.net"}, validator: ValidateDNSDomain, placeholder: "<domain>", children: nil},
-	"domain-search": {desc: "Domain search list", args: 1, multi: true, valueType: ValueHostname, valueDesc: "DNS domain name", valueExamples: []string{"example.net", "corp.example.net"}, validator: ValidateDNSDomain, placeholder: "<domain>", children: nil, allChildKeysAreValues: true},
+	"domain-search": {desc: "Domain search list", args: 1, multi: true, valueType: ValueHostname, valueDesc: "DNS domain name", valueExamples: []string{"example.net", "corp.example.net"}, validator: ValidateDNSDomain, placeholder: "<domain>", children: nil, allChildKeysAreValues: true, refuseNonLeafBlockChildren: true},
 	// #5011: time-zone is rendered into the /etc/localtime symlink target
 	// (/usr/share/zoneinfo/<value>). Type it as a zoneinfo name so a `..`
 	// component / absolute path / space cannot turn the symlink target into a
@@ -109,6 +109,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// block child (`1.1.1.1 source-address 10.0.0.2;`) would commit
 		// clean and compile the modifier's IP in as an extra resolver.
 		allChildKeysAreValues: true,
+		refuseNonLeafBlockChildren: true,
 	},
 	"backup-router": {desc: "Backup router", args: 1, placeholder: "<address>", closedWorld: true, children: map[string]*schemaNode{
 		// #15780: Junos allows a LIST of destination prefixes
@@ -118,7 +119,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// hierarchical block children) with ValidateRouteDestination,
 		// and SetPath keeps repeated leaves as siblings instead of
 		// replacing the previous one.
-		"destination": {desc: "Destination network", args: 1, multi: true, placeholder: "<network>", valueType: ValueCIDR, valueDesc: "Destination prefix (CIDR, e.g. 0.0.0.0/0 or 2001:db8::/32)", valueExamples: []string{"0.0.0.0/0", "10.0.0.0/8", "::/0"}, validator: ValidateRouteDestination, children: nil, allChildKeysAreValues: true},
+		"destination": {desc: "Destination network", args: 1, multi: true, placeholder: "<network>", valueType: ValueCIDR, valueDesc: "Destination prefix (CIDR, e.g. 0.0.0.0/0 or 2001:db8::/32)", valueExamples: []string{"0.0.0.0/0", "10.0.0.0/8", "::/0"}, validator: ValidateRouteDestination, children: nil, allChildKeysAreValues: true, refuseNonLeafBlockChildren: true},
 	}},
 	// packedStatements (issue 8858): SSHKeys is a []string, so a packed
 	// `root-authentication ssh-ed25519 <k1> ssh-ed25519 <k2>` run must split
@@ -265,7 +266,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				"routing-instance": {desc: "Routing instance to reach this peer in", args: 1, placeholder: "<instance>", children: nil},
 				"source-address":   {desc: "Source address for this peer", args: 1, placeholder: "<ip>", valueType: ValueIPAddress, validator: ValidateIPAddress, children: nil},
 			}},
-		"trusted-key": {desc: "Trusted authentication key id", args: 1, multi: true, placeholder: "<key-id>", valueType: ValueInteger, validator: ValidateIntegerMin(1), children: nil},
+		"trusted-key": {desc: "Trusted authentication key id", args: 1, multi: true, placeholder: "<key-id>", valueType: ValueInteger, validator: ValidateIntegerMin(1), refuseNonLeafBlockChildren: true, children: nil},
 		"authentication-key": {desc: "NTP authentication key", args: 1, placeholder: "<key-id>", children: map[string]*schemaNode{
 			"type":  {desc: "Key type", args: 1, placeholder: "<type>", children: nil},
 			"value": {desc: "Key value", args: 1, placeholder: "<value>", children: nil},
@@ -376,7 +377,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// record its presence (an empty regex differs from an absent one)
 		// rather than report an opaque "unknown statement".
 		"class": {desc: "Login class definition", args: 1, placeholder: "<class-name>", closedWorld: true, children: map[string]*schemaNode{
-			"permissions":         {desc: "Permission bits granted to the class", args: 1, multi: true, placeholder: "<permission>", valueType: ValueEnumOf, valueExamples: LoginPermissionFlags(), validator: ValidateLoginPermission, children: nil},
+			"permissions":         {desc: "Permission bits granted to the class", args: 1, multi: true, placeholder: "<permission>", valueType: ValueEnumOf, valueExamples: LoginPermissionFlags(), validator: ValidateLoginPermission, refuseNonLeafBlockChildren: true, children: nil},
 			"idle-timeout":        {desc: "Idle timeout (minutes)", args: 1, placeholder: "<minutes>", valueType: ValueInteger, validator: ValidateInteger(0, 4294967295), children: nil},
 			"allow-commands":      {desc: "Regex of operational commands to allow", args: 1, scalar: true, allowEmptyValue: true, placeholder: "<regex>", children: nil},
 			"deny-commands":       {desc: "Regex of operational commands to deny", args: 1, scalar: true, allowEmptyValue: true, placeholder: "<regex>", children: nil},
@@ -519,7 +520,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				validator:     ValidateEnum([]string{"auto", "off", "same-device-debug", "cross-nic"}),
 				children:      nil,
 			},
-			"interface":            {args: 1, multi: true, desc: "Optional participating Linux interface filter", children: nil},
+			"interface":            {args: 1, multi: true, desc: "Optional participating Linux interface filter", refuseNonLeafBlockChildren: true, children: nil},
 			"phase0-artifact-file": {args: 1, desc: "Optional machine-readable Phase 0 audit artifact", children: nil},
 			"artifact-file":        {args: 1, desc: "Alias for phase0-artifact-file", children: nil},
 		}},
@@ -642,7 +643,7 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				valueType:     ValueIdentifier,
 				valueDesc:     "OpenSSH key-exchange algorithm name; QUOTE a name containing @ — the lexer rejects a bare @",
 				valueExamples: []string{"curve25519-sha256", "diffie-hellman-group-exchange-sha256"},
-				validator:     ValidateSSHAlgorithm,
+				validator:     ValidateSSHAlgorithm, refuseNonLeafBlockChildren: true,
 				children:      nil,
 			},
 			// #4305 S-4: sshd hardening knobs rendered into the xpf drop-in.
@@ -652,11 +653,11 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			"ciphers": {desc: "SSH ciphers (sshd Ciphers)", args: 1, multi: true,
 				valueType: ValueIdentifier, valueDesc: "OpenSSH cipher name; QUOTE a name containing @ — the lexer rejects a bare @",
 				valueExamples: []string{`"aes256-gcm@openssh.com"`, `"chacha20-poly1305@openssh.com"`},
-				validator:     ValidateSSHAlgorithm, placeholder: "<cipher>", children: nil},
+				validator:     ValidateSSHAlgorithm, placeholder: "<cipher>", refuseNonLeafBlockChildren: true, children: nil},
 			"macs": {desc: "SSH message-authentication codes (sshd MACs)", args: 1, multi: true,
 				valueType: ValueIdentifier, valueDesc: "OpenSSH MAC name; QUOTE a name containing @ — the lexer rejects a bare @",
 				valueExamples: []string{`"hmac-sha2-256-etm@openssh.com"`, "hmac-sha2-512"},
-				validator:     ValidateSSHAlgorithm, placeholder: "<mac>", children: nil},
+				validator:     ValidateSSHAlgorithm, placeholder: "<mac>", refuseNonLeafBlockChildren: true, children: nil},
 			"connection-limit": {desc: "Maximum concurrent SSH connections (sshd MaxStartups)", args: 1, placeholder: "<limit>",
 				valueType: ValueInteger, valueDesc: "1-250", validator: ValidateInteger(1, 250), children: nil},
 			"rate-limit": {desc: "SSH connection attempts per minute", args: 1, placeholder: "<limit>",
@@ -1453,7 +1454,7 @@ func dhcpLocalServerGroupSchema(fam string) *schemaNode {
 					valueType:     ValueIPAddress,
 					valueDesc:     "Resolver IP address",
 					valueExamples: []string{"192.0.2.53", "2001:db8::53"},
-					validator:     ValidateIPAddress,
+					validator:     ValidateIPAddress, refuseNonLeafBlockChildren: true,
 					children:      nil,
 				},
 				"lease-time": {
@@ -1585,6 +1586,7 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 			args:        1,
 			multi:       true,
 			placeholder: "<target>",
+			refuseNonLeafBlockChildren: true,
 			children:    nil,
 		},
 		"version": {
@@ -1601,7 +1603,7 @@ var schemaSNMP = &schemaNode{desc: "SNMP configuration", children: map[string]*s
 		// a typo (`linkk`) must not commit clean. xpf emits only `link`
 		// today — valid-but-unemitted categories compile with an advisory
 		// from compileSNMP (zero-trap group warning).
-		"categories": {desc: "Trap categories to send to this group", args: 1, multi: true, placeholder: "<category>", valueType: ValueEnumOf, valueDesc: "Trap category (Junos vocabulary)", valueExamples: []string{"link", "authentication", "chassis", "configuration", "routing"}, validator: ValidateEnum([]string{"authentication", "chassis", "chassis-cluster", "configuration", "link", "otn-alarms", "remote-operations", "rmon-alarm", "routing", "services", "sonet-alarms", "startup", "timing-events", "vrrp-events"}), children: nil, allChildKeysAreValues: true},
+		"categories": {desc: "Trap categories to send to this group", args: 1, multi: true, placeholder: "<category>", valueType: ValueEnumOf, valueDesc: "Trap category (Junos vocabulary)", valueExamples: []string{"link", "authentication", "chassis", "configuration", "routing"}, validator: ValidateEnum([]string{"authentication", "chassis", "chassis-cluster", "configuration", "link", "otn-alarms", "remote-operations", "rmon-alarm", "routing", "services", "startup", "timing-events", "vrrp-events"}), children: nil, allChildKeysAreValues: true, refuseNonLeafBlockChildren: true},
 	}},
 	"v3": {desc: "SNMPv3", children: map[string]*schemaNode{
 		"usm": {desc: "USM", children: map[string]*schemaNode{

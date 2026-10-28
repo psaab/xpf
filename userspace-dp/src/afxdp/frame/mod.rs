@@ -71,7 +71,8 @@ pub(in crate::afxdp) use checksum::{
     adjust_ipv4_header_checksum, adjust_l4_checksum_ipv4, adjust_l4_checksum_ipv4_dst,
     adjust_l4_checksum_ipv4_src, adjust_l4_checksum_ipv4_words, adjust_l4_checksum_ipv6_words,
     checksum16, checksum16_add_bytes, checksum16_adjust, checksum16_finish, checksum16_ipv4,
-    checksum16_ipv6, ipv6_words_from_octets, ipv6_words_from_slice, recompute_l4_checksum_ipv4,
+    checksum16_ipv6, compute_ip_csum_delta, compute_l4_csum_delta, ipv6_words_from_octets,
+    ipv6_words_from_slice, nat_folds_l4_checksum, recompute_l4_checksum_ipv4,
     recompute_l4_checksum_ipv6, saturate_len16,
 };
 
@@ -2045,13 +2046,11 @@ pub(super) fn apply_nat_ipv6(
         _ => None,
     });
 
-    // NPTv6 (RFC 6296): prefix translation is checksum-neutral by design --
-    // the adjustment word preserves the ones-complement sum of the full address.
-    // Skip L4 checksum updates entirely for NPTv6 rewrites.
-    // #1852: a non-first fragment has no L4 checksum at `rel_l4` (those
-    // bytes are payload), so skip the address-change L4-checksum adjust
-    // too. The IP address byte writes below still run.
-    let skip_l4_csum = nat.nptv6 || non_first_fragment;
+    // The shared rule preserves checksum neutrality for a pure, single-sided
+    // NPTv6 address rewrite, but allows an NPTv6+DNAT compose to fold its
+    // non-neutral address delta. Non-first fragments still have no L4
+    // checksum field at `rel_l4`, so they skip address adjustments too.
+    let skip_l4_csum = !nat_folds_l4_checksum(&nat) || non_first_fragment;
     if new_src.is_some() && new_dst.is_none() {
         let new_src = new_src?;
         let old_src: [u8; 16] = packet.get(8..24)?.try_into().ok()?;
@@ -2079,14 +2078,9 @@ pub(super) fn apply_nat_ipv6(
             )?;
         }
     } else if new_src.is_some() || new_dst.is_some() {
-        // BOTH src and dst are rewritten -- a composed translation
-        // (#3121: NPTv6 source + DNAT destination, or SNAT + DNAT). Unlike
-        // the single-sided arms above, do NOT blanket-skip the L4 checksum
-        // on `nat.nptv6` here: the NPTv6 side is checksum-neutral (its
-        // incremental word adjustment nets zero by RFC 6296, in either
-        // direction), but the composed DNAT side is NOT neutral and its
-        // address change MUST be folded into the L4 checksum. Only a
-        // non-first fragment (no L4 header at `rel_l4`) skips the adjust.
+        // The shared NAT fold rule leaves pure single-sided NPTv6 neutral,
+        // while the both-address compose folds the non-neutral DNAT side.
+        // `skip_l4_csum` also preserves the non-first-fragment guard.
         let old_src_words = ipv6_words_from_slice(packet.get(8..24)?)?;
         let old_dst_words = ipv6_words_from_slice(packet.get(24..40)?)?;
         if let Some(ip) = new_src {
@@ -2095,7 +2089,7 @@ pub(super) fn apply_nat_ipv6(
         if let Some(ip) = new_dst {
             write_ipv6_dst(packet, 0, ip);
         }
-        if !non_first_fragment {
+        if !skip_l4_csum {
             let new_src_words = new_src
                 .map(|a| ipv6_words_from_octets(a.octets()))
                 .unwrap_or(old_src_words);

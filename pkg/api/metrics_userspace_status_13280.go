@@ -73,6 +73,8 @@ func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, sta
 	}
 	c.emitConstMetric(ch, c.userspaceWGUncoveredQueuePoison,
 		prometheus.CounterValue, float64(status.WgUncoveredQueuePoisonRecoveries))
+	c.emitConstMetric(ch, c.userspaceTupleGatePoison,
+		prometheus.CounterValue, float64(status.TupleGatePoisonRecoveries))
 	if status.S5Reinject != nil {
 		c.emitConstMetric(ch, c.userspaceS5Reinject, prometheus.CounterValue,
 			float64(status.S5Reinject.Reinjected))

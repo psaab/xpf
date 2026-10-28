@@ -603,19 +603,19 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 				"interface-specific": {desc: "Instantiate per-interface counter/policer instances (accepted; xpf keeps a single shared counter — advisory at commit)", children: nil},
 				"term": {desc: "Filter term", args: 1, placeholder: "<term-name>", children: map[string]*schemaNode{
 					"from": {desc: "Match conditions", children: map[string]*schemaNode{
-						"source-address":          {desc: "Match source address", args: 1, multi: true, placeholder: "<address>", children: nil},
-						"destination-address":     {desc: "Match destination address", args: 1, multi: true, placeholder: "<address>", children: nil},
+						"source-address":          {desc: "Match source address", args: 1, multi: true, placeholder: "<address>", children: nil, refuseNonLeafBlockChildren: true},
+						"destination-address":     {desc: "Match destination address", args: 1, multi: true, placeholder: "<address>", children: nil, refuseNonLeafBlockChildren: true},
 						"source-prefix-list":      {desc: "Match source addresses from a prefix list", args: 1, multi: true, placeholder: "<prefix-list>", children: nil},
 						"destination-prefix-list": {desc: "Match destination addresses from a prefix list", args: 1, multi: true, placeholder: "<prefix-list>", children: nil},
-						"protocol":                {desc: "Match IP protocol", args: 1, multi: true, placeholder: "<protocol>", children: nil},
+						"protocol":                {desc: "Match IP protocol", args: 1, multi: true, placeholder: "<protocol>", children: nil, refuseNonLeafBlockChildren: true},
 						// #8781: the IPv6 spelling of `protocol`. Declared for the same
 						// reason `traffic-class` is declared here (#8773) — the compiler
 						// has handled it since #3307, and the PACKED spelling is read
 						// through this schema, so without the declaration
 						// `from next-header tcp;` was dropped SILENTLY while the braced
 						// spelling applied it. Advisory at commit.
-						"next-header": {desc: "Match IPv6 next header (IPv6 spelling of protocol; accepted in family inet — advisory at commit)", args: 1, multi: true, placeholder: "<next-header>", children: nil},
-						"dscp":        {desc: "Match DSCP value (name or number)", args: 1, multi: true, placeholder: "<dscp>", children: nil},
+						"next-header": {desc: "Match IPv6 next header (IPv6 spelling of protocol; accepted in family inet — advisory at commit)", args: 1, multi: true, placeholder: "<next-header>", children: nil, refuseNonLeafBlockChildren: true},
+						"dscp":        {desc: "Match DSCP value (name or number)", args: 1, multi: true, placeholder: "<dscp>", children: nil, refuseNonLeafBlockChildren: true},
 						// #8773: Junos spells this field `dscp` for IPv4; `traffic-class`
 						// is the IPv6 spelling of the same six bits. It is declared here
 						// because the compiler already ACCEPTS it in a braced `from`
@@ -625,14 +625,14 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 						// criterion silently. Accepted with a commit advisory rather than
 						// refused, because refusing would break configurations that
 						// commit today for a pure parity gain.
-						"traffic-class":           {desc: "Match traffic class (IPv6 spelling of dscp; accepted in family inet — advisory at commit)", args: 1, multi: true, placeholder: "<traffic-class>", children: nil},
-						"destination-port":        {desc: "Match destination port", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"source-port":             {desc: "Match source port", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"destination-port-except": {desc: "Match all destination ports EXCEPT these", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"source-port-except":      {desc: "Match all source ports EXCEPT these", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"icmp-type":               {desc: "Match ICMP type (numeric)", args: 1, multi: true, placeholder: "<type>", children: nil},
-						"icmp-code":               {desc: "Match ICMP code (numeric)", args: 1, multi: true, placeholder: "<code>", children: nil},
-						"tcp-flags":               {desc: "Match TCP flags", args: 1, multi: true, placeholder: "<flags>", children: nil},
+						"traffic-class":           {desc: "Match traffic class (IPv6 spelling of dscp; accepted in family inet — advisory at commit)", args: 1, multi: true, placeholder: "<traffic-class>", children: nil, refuseNonLeafBlockChildren: true},
+						"destination-port":        {desc: "Match destination port", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil, refuseNonLeafBlockChildren: true},
+						"source-port":             {desc: "Match source port", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil, refuseNonLeafBlockChildren: true},
+						"destination-port-except": {desc: "Match all destination ports EXCEPT these", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil, refuseNonLeafBlockChildren: true},
+						"source-port-except":      {desc: "Match all source ports EXCEPT these", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil, refuseNonLeafBlockChildren: true},
+						"icmp-type":               {desc: "Match ICMP type (numeric)", args: 1, multi: true, placeholder: "<type>", children: nil, refuseNonLeafBlockChildren: true},
+						"icmp-code":               {desc: "Match ICMP code (numeric)", args: 1, multi: true, placeholder: "<code>", children: nil, refuseNonLeafBlockChildren: true},
+						"tcp-flags":               {desc: "Match TCP flags", args: 1, multi: true, placeholder: "<flags>", children: nil, refuseNonLeafBlockChildren: true},
 						"is-fragment":             {desc: "Match fragmented packets", children: nil},
 						"flexible-match-range": {desc: "Flexible packet field match", children: map[string]*schemaNode{
 							"range": {desc: "Named flexible match range", args: 1, placeholder: "<name>", children: map[string]*schemaNode{
@@ -728,29 +728,29 @@ var schemaFirewall = &schemaNode{desc: "Firewall filters and policers", children
 				"interface-specific": {desc: "Instantiate per-interface counter/policer instances (accepted; xpf keeps a single shared counter — advisory at commit)", children: nil},
 				"term": {desc: "Filter term", args: 1, placeholder: "<term-name>", children: map[string]*schemaNode{
 					"from": {desc: "Match conditions", children: map[string]*schemaNode{
-						"source-address":          {desc: "Match source address", args: 1, multi: true, placeholder: "<address>", children: nil},
-						"destination-address":     {desc: "Match destination address", args: 1, multi: true, placeholder: "<address>", children: nil},
+						"source-address":          {desc: "Match source address", args: 1, multi: true, placeholder: "<address>", children: nil, refuseNonLeafBlockChildren: true},
+						"destination-address":     {desc: "Match destination address", args: 1, multi: true, placeholder: "<address>", children: nil, refuseNonLeafBlockChildren: true},
 						"source-prefix-list":      {desc: "Match source addresses from a prefix list", args: 1, multi: true, placeholder: "<prefix-list>", children: nil},
 						"destination-prefix-list": {desc: "Match destination addresses from a prefix list", args: 1, multi: true, placeholder: "<prefix-list>", children: nil},
-						"protocol":                {desc: "Match IP protocol (IPv4 spelling of next-header; accepted in family inet6 — advisory at commit)", args: 1, multi: true, placeholder: "<protocol>", children: nil},
+						"protocol":                {desc: "Match IP protocol (IPv4 spelling of next-header; accepted in family inet6 — advisory at commit)", args: 1, multi: true, placeholder: "<protocol>", children: nil, refuseNonLeafBlockChildren: true},
 						// #8781: the Junos spelling for IPv6, and the one that was
 						// SILENTLY DROPPED in the packed form — a correctly-authored
 						// IPv6 term lost its protocol match and therefore matched every
 						// protocol. This is the defect #8781 exists for; the family-inet
 						// declaration above is its cross-family counterpart.
-						"next-header":   {desc: "Match IPv6 next header", args: 1, multi: true, placeholder: "<next-header>", children: nil},
-						"traffic-class": {desc: "Match traffic class (DSCP name or number)", args: 1, multi: true, placeholder: "<traffic-class>", children: nil},
+						"next-header":   {desc: "Match IPv6 next header", args: 1, multi: true, placeholder: "<next-header>", children: nil, refuseNonLeafBlockChildren: true},
+						"traffic-class": {desc: "Match traffic class (DSCP name or number)", args: 1, multi: true, placeholder: "<traffic-class>", children: nil, refuseNonLeafBlockChildren: true},
 						// #8773: the IPv4 spelling of the same six bits, declared for the
 						// same reason `traffic-class` is declared under family inet --
 						// see the note there. Accepted with a commit advisory.
-						"dscp":                    {desc: "Match DSCP value (IPv4 spelling of traffic-class; accepted in family inet6 — advisory at commit)", args: 1, multi: true, placeholder: "<dscp>", children: nil},
-						"destination-port":        {desc: "Match destination port", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"source-port":             {desc: "Match source port", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"destination-port-except": {desc: "Match all destination ports EXCEPT these", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"source-port-except":      {desc: "Match all source ports EXCEPT these", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"icmp-type":               {desc: "Match ICMP type (numeric)", args: 1, multi: true, placeholder: "<type>", children: nil},
-						"icmp-code":               {desc: "Match ICMP code (numeric)", args: 1, multi: true, placeholder: "<code>", children: nil},
-						"tcp-flags":               {desc: "Match TCP flags", args: 1, multi: true, placeholder: "<flags>", children: nil},
+						"dscp":                    {desc: "Match DSCP value (IPv4 spelling of traffic-class; accepted in family inet6 — advisory at commit)", args: 1, multi: true, placeholder: "<dscp>", children: nil, refuseNonLeafBlockChildren: true},
+						"destination-port":        {desc: "Match destination port", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil, refuseNonLeafBlockChildren: true},
+						"source-port":             {desc: "Match source port", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil, refuseNonLeafBlockChildren: true},
+						"destination-port-except": {desc: "Match all destination ports EXCEPT these", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil, refuseNonLeafBlockChildren: true},
+						"source-port-except":      {desc: "Match all source ports EXCEPT these", args: 1, multi: true, placeholder: "<port>", children: nil, refuseNonLeafBlockChildren: true},
+						"icmp-type":               {desc: "Match ICMP type (numeric)", args: 1, multi: true, placeholder: "<type>", children: nil, refuseNonLeafBlockChildren: true},
+						"icmp-code":               {desc: "Match ICMP code (numeric)", args: 1, multi: true, placeholder: "<code>", children: nil, refuseNonLeafBlockChildren: true},
+						"tcp-flags":               {desc: "Match TCP flags", args: 1, multi: true, placeholder: "<flags>", children: nil, refuseNonLeafBlockChildren: true},
 						"is-fragment":             {desc: "Match fragmented packets", children: nil},
 						"flexible-match-range": {desc: "Flexible packet field match", children: map[string]*schemaNode{
 							"range": {desc: "Named flexible match range", args: 1, placeholder: "<name>", children: map[string]*schemaNode{
