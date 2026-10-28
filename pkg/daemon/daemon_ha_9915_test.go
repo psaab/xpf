@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -73,7 +72,7 @@ func TestGenGuardCapacityForRuntime_9915(t *testing.T) {
 	if got, ok := genGuardCapacityForRuntime(&capacityProbeDP9915{maxSessions: 0}); ok || got != 0 {
 		t.Fatalf("unknown helper = (%d, %v), want (0, false)", got, ok)
 	}
-	if got, ok := genGuardCapacityForRuntime(&kernelLikeRT9915{}); !ok || got != conntrack.MaxSessions/2 {
-		t.Fatalf("kernel runtime = (%d, %v), want (%d, true)", got, ok, conntrack.MaxSessions/2)
+	if got, ok := genGuardCapacityForRuntime(&kernelLikeRT9915{}); !ok || got != dataplane.MaxSessions/2 {
+		t.Fatalf("kernel runtime = (%d, %v), want (%d, true)", got, ok, dataplane.MaxSessions/2)
 	}
 }

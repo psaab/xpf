@@ -25,11 +25,15 @@ import (
 // is computed from the struct, so adding, removing or renaming a wire field
 // changes it whether or not anyone remembers.
 
-// NOTE ON PACKAGE PLACEMENT. The wire-name EXTRACTION lives in pkg/daemon, not
-// here, because it needs `reflect` and the #1476 retirement-boundary canary
-// (TestUserspaceManagerDoesNotImportReflectOrUnsafe) forbids reflection in this
-// package's production code — reflection is exactly how an entry-program canary
-// would be bypassed. The canonicalisation and hashing below are pure functions
+// NOTE ON PACKAGE PLACEMENT. The wire-name EXTRACTION
+// (wireschema.WireNamesOf, #17137) lives in the
+// pkg/wireschema package, not here, because it
+// needs `reflect` and the #1476 retirement-boundary canary
+// (TestUserspaceManagerDoesNotImportReflectOrUnsafe) forbids reflection
+// anywhere under this package (the walk is recursive) — reflection is
+// exactly how an entry-program canary would be bypassed. pkg/wireschema
+// is outside that tree, reflect-allowed, and holds the ONLY production Go
+// extractor. The canonicalisation and hashing below are pure functions
 // over a name list, so they stay next to the wire types they describe.
 
 // SessionDeltaSchemaCanonicalOf is the exact string the fingerprint is taken

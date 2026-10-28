@@ -368,91 +368,42 @@ var wipeStopKeaAndEraseLeases = func() error {
 	return nil
 }
 
-// wipeEraseHelperState removes the helper state file at path plus
-// dead-writer temp siblings (legacy pre-#2957 orphans included), syncs the
-// parent, and verifies absence. UNGATED WIPES ONLY (mirrors daemon
-// sweepHelperStateVerified, which cannot be shared: daemon imports
-// grpcapi): no daemon post-verify follows on this path, and the helper is
-// not running in the offline contexts that take it. Live writers' temps,
-// removal/durability failures, or anything still present afterwards is an
-// error. A canonical aliasing reserved reset-gate/identity state is never
-// unlinked (unlinking it would delete a gate or identity file, the
-// original bypass), but the sweep FAILS CLOSED: exact-shape temps beside
-// it are still swept, then an error naming the reserved alias fails the
-// wipe. Recovery is operator-side and UNGATED-SPECIFIC: this failure
-// returns before completeZeroize, so factory-reset pending markers
-// remain with NO handoff flag written (do not delete one — none
-// exists). Verify the reserved file holds its correct contents with no
-// helper temps beside it, restart xpfd if it is running (a stale
-// server Store would re-resolve the smuggled path), then rerun zeroize:
-// the wiped config resolves the default helper path on retry, clearing
-// the markers on success. (Authoring a clean config via commit-confirmed
-// first also converges, for operators who want a non-default helper
-// path; the daemon restart/author/rerun leg proves that shape.)
-// Symlinked or hardlinked canonicals fail closed before unlinking,
-// retry-persistent. Callers pass a non-empty path only.
+// wipeEraseHelperState is the ungated-wipe spelling of the shared
+// helper-state sweep (SweepHelperState, #17087): no daemon post-verify
+// follows on this path, and the helper is not running in the offline
+// contexts that take it. The reserved-alias recovery is UNGATED-SPECIFIC:
+// this failure returns before completeZeroize, so factory-reset pending
+// markers remain with NO handoff flag written (do not delete one — none
+// exists). (Authoring a clean config via commit-confirmed first also
+// converges, for operators who want a non-default helper path; the
+// daemon restart/author/rerun leg proves that shape.) Callers pass a
+// non-empty path only.
 func wipeEraseHelperState(path string) error {
-	// Reserved alias FIRST (mirrors the daemon sweep): the
-	// missing-parent fast path below must not report clean over a
-	// smuggled gate/identity alias, even when there is no directory
-	// to sweep beside it. Never unlink the reserved file.
-	skipCanonical := config.HelperStatePathTouchesReserved(path)
-	if skipCanonical {
-		slog.Warn("zeroize: helper path aliases reserved state; skipping canonical removal, sweeping temps only", "path", path)
-	}
+	return SweepHelperState(path, SweepOpts{
+		ErrPrefix:        "zeroize: ",
+		ReservedRecovery: "verify that file holds its correct contents with no helper temps beside it, restart xpfd if it is running, then rerun zeroize - this offline failure left factory-reset pending markers with no handoff flag, and the wiped config resolves the default helper path on retry, clearing the markers on success",
+		SyncDir:          wipeSyncDir,
+	})
+}
+
+// verifyHelperStateAtFinalVerification is VerifyHelperStateErased with
+// the final-verification wording: a surviving canonical or temp set is
+// reported as present AT FINAL VERIFICATION, while the reserved-alias
+// failure keeps the shared cannot-be-verified sentence and the ungated
+// recovery. It removes nothing.
+func verifyHelperStateAtFinalVerification(path string) error {
 	var errs []error
-	if skipCanonical {
-		errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state and was NOT erased (the reserved file was left untouched); recovery: verify that file holds its correct contents with no helper temps beside it, restart xpfd if it is running, then rerun zeroize - this offline failure left factory-reset pending markers with no handoff flag, and the wiped config resolves the default helper path on retry, clearing the markers on success", path))
+	if config.HelperStatePathTouchesReserved(path) {
+		errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); recovery: verify that file holds its correct contents with no helper temps beside it, restart xpfd if it is running, then rerun zeroize - this offline failure left factory-reset pending markers with no handoff flag, and the wiped config resolves the default helper path on retry, clearing the markers on success", path))
+	} else if _, err := os.Lstat(path); err == nil {
+		errs = append(errs, fmt.Errorf("zeroize: helper state %s present at final verification", path))
+	} else if !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", path, err))
 	}
-	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, os.ErrNotExist) {
-		return errors.Join(errs...)
-	}
-	var canonicalErr error
-	if !skipCanonical {
-		info, lerr := os.Lstat(path)
-		switch {
-		case lerr == nil && info.Mode()&os.ModeSymlink != 0:
-			canonicalErr = fmt.Errorf("zeroize: refusing to sweep symlinked helper state %s: link target is out of erase scope", path)
-		case lerr != nil && !os.IsNotExist(lerr):
-			canonicalErr = fmt.Errorf("zeroize: inspect helper state %s: %w", path, lerr)
-		case lerr == nil:
-			hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
-			switch {
-			case herr != nil:
-				canonicalErr = fmt.Errorf("zeroize: inspect hard links for helper state %s: %w", path, herr)
-			case len(hardlinks) != 0:
-				canonicalErr = fmt.Errorf("zeroize: refusing to erase hard-linked helper state %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
-			default:
-				if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
-					canonicalErr = fmt.Errorf("zeroize: remove helper state file %s: %w", path, rerr)
-				}
-			}
-		}
-		if canonicalErr != nil {
-			errs = append(errs, canonicalErr)
-		}
-	}
-	live, serr := dpuserspace.SweepStaleStateTempsIncludingLegacy(path)
-	if serr != nil {
-		errs = append(errs, serr)
-	}
-	if len(live) != 0 {
-		errs = append(errs, fmt.Errorf("zeroize: live helper writer temps present for %s: %v", path, live))
-	}
-	if err := wipeSyncDir(filepath.Dir(path)); err != nil {
-		errs = append(errs, fmt.Errorf("zeroize: sync helper state directory %s: %w", filepath.Dir(path), err))
-	}
-	if !skipCanonical && canonicalErr == nil {
-		if _, err := os.Lstat(path); err == nil {
-			errs = append(errs, fmt.Errorf("zeroize: helper state %s still present after sweep", path))
-		} else if !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", path, err))
-		}
-	}
-	if dead, live, verr := dpuserspace.ListStaleStateTempsIncludingLegacy(path); verr != nil {
-		errs = append(errs, verr)
+	if dead, live, err := dpuserspace.ListStaleStateTempsIncludingLegacy(path); err != nil {
+		errs = append(errs, err)
 	} else if len(dead) != 0 || len(live) != 0 {
-		errs = append(errs, fmt.Errorf("zeroize: helper state temps remain for %s: dead=%v live=%v", path, dead, live))
+		errs = append(errs, fmt.Errorf("zeroize: helper state temps present at final verification for %s: dead=%v live=%v", path, dead, live))
 	}
 	return errors.Join(errs...)
 }
@@ -514,21 +465,11 @@ func wipeFinalEraseVerification(completion Completion) error {
 		errs = append(errs, fmt.Errorf("zeroize: IPsec crash temps present at final verification: %v", temps))
 	}
 	if !completion.pending && completion.helperPath != "" {
-		helperPath := completion.helperPath
-		// A reserved canonical FAILS: the sweep never unlinks gates or
-		// identity, so helper-state erasure is unprovable from this
-		// path. Temp siblings are still checked below.
-		if config.HelperStatePathTouchesReserved(helperPath) {
-			errs = append(errs, fmt.Errorf("zeroize: helper state path %s aliases reserved reset-gate/identity state: helper-state erasure cannot be verified (the reserved file is never unlinked); recovery: verify that file holds its correct contents with no helper temps beside it, restart xpfd if it is running, then rerun zeroize - this offline failure left factory-reset pending markers with no handoff flag, and the wiped config resolves the default helper path on retry, clearing the markers on success", helperPath))
-		} else if _, err := os.Lstat(helperPath); err == nil {
-			errs = append(errs, fmt.Errorf("zeroize: helper state %s present at final verification", helperPath))
-		} else if !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("zeroize: inspect helper state %s: %w", helperPath, err))
-		}
-		if dead, live, err := dpuserspace.ListStaleStateTempsIncludingLegacy(helperPath); err != nil {
+		// A reserved canonical FAILS via the shared verify: the sweep
+		// never unlinks gates or identity, so helper-state erasure is
+		// unprovable from this path. Temp siblings are still checked.
+		if err := verifyHelperStateAtFinalVerification(completion.helperPath); err != nil {
 			errs = append(errs, err)
-		} else if len(dead) != 0 || len(live) != 0 {
-			errs = append(errs, fmt.Errorf("zeroize: helper state temps present at final verification for %s: dead=%v live=%v", helperPath, dead, live))
 		}
 	}
 	if !completion.pending {
@@ -1064,6 +1005,32 @@ func wipeClearDir(dir string) error {
 // retry succeed over bytes a sibling still holds.
 func wipeRemovePath(path string) error {
 	info, err := os.Lstat(path)
+	if err == nil && info.Mode().IsRegular() {
+		// Single regular file: the shared primitive (#17171) owns the
+		// inspect -> refuse symlink -> refuse hardlink -> remove
+		// sequence. Only the seal leg's parent-sync barrier stays here.
+		// Historic seal spellings preserved verbatim (#17171 fold),
+		// mapped from the typed/sentinel classes.
+		if err := configstore.EraseFileForReset(path); err != nil {
+			var linkErr *configstore.FactoryResetHardlinkError
+			switch {
+			case errors.As(err, &linkErr):
+				return fmt.Errorf("zeroize: refusing to erase hard-linked %s: %w", path, linkErr)
+			case errors.Is(err, configstore.ErrEraseInspectLinks):
+				return fmt.Errorf("zeroize: inspect hard links for %s: %w", path, err)
+			case errors.Is(err, configstore.ErrEraseInspect):
+				return fmt.Errorf("zeroize: inspect %s: %w", path, err)
+			case errors.Is(err, configstore.ErrEraseRemove):
+				return fmt.Errorf("zeroize: remove %s: %w", path, err)
+			default:
+				return fmt.Errorf("zeroize: %w", err)
+			}
+		}
+		if err := wipeSyncDurable(filepath.Dir(path)); err != nil {
+			return fmt.Errorf("zeroize: sync parent of %s: %w", path, err)
+		}
+		return nil
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		// Retry durability: the unlink may have landed on an attempt whose
 		// barrier failed. Syncing the nearest surviving ancestor retires

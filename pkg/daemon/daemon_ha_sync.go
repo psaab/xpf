@@ -14,7 +14,6 @@ import (
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -1089,7 +1088,7 @@ func (d *Daemon) publishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSync
 // genGuardCapacityForRuntime resolves provisioned session capacity for sync
 // guard sizing (#9915 F-044): helper-backed runtimes report aggregate logical
 // sessions via cached status; anything else is a kernel/legacy backend whose
-// BPF tables are addressed to conntrack.MaxSessions (forward sessions = half).
+// BPF tables are addressed to dataplane.MaxSessions (forward sessions = half).
 // Second return is false only when neither applies (nil or unknown status).
 func genGuardCapacityForRuntime(rt dataplane.RuntimeDataPlane) (uint64, bool) {
 	if rt == nil {
@@ -1101,7 +1100,7 @@ func genGuardCapacityForRuntime(rt dataplane.RuntimeDataPlane) (uint64, bool) {
 		}
 		return 0, false
 	}
-	return conntrack.MaxSessions / 2, true
+	return dataplane.MaxSessions / 2, true
 }
 
 // publishFabricRefreshChansIfCurrent installs the fabric refresh channels iff

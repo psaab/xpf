@@ -50,7 +50,7 @@ func reauthConfig12879(
 }
 
 // reauthCandidate12879 builds a tcp v4 helper candidate from trust.
-func reauthCandidate12879(dstPort uint16, egress uint16) dpuserspace.SessionPolicyMatch {
+func reauthCandidate12879(dstPort uint16, egress uint32) dpuserspace.SessionPolicyMatch {
 	return dpuserspace.SessionPolicyMatch{
 		AddrFamily: 4,
 		Tuple: dpuserspace.SessionPolicyTuple{
@@ -58,7 +58,7 @@ func reauthCandidate12879(dstPort uint16, egress uint16) dpuserspace.SessionPoli
 			SrcPort: 2077, DstPort: dstPort,
 		},
 		ExpectedRTFlowSessionID: 77,
-		IngressZoneID:           uint16(config.StableZoneID("trust")),
+		IngressZoneID:           config.StableZoneID("trust"),
 		EgressZoneID:            egress,
 	}
 }
@@ -72,7 +72,7 @@ func reauthCandidate12879(dstPort uint16, egress uint16) dpuserspace.SessionPoli
 // identity itself still discharges.
 func TestReauthorizeRequiresCapturedIdentityPermit12879(t *testing.T) {
 	untrust := config.StableZoneID("untrust")
-	hostEgress := uint16(config.StableZoneID("junos-host"))
+	hostEgress := config.StableZoneID("junos-host")
 	transit := &config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
 		reauthRule12879("narrow", config.PolicyPermit, "junos-ssh"),
 		reauthRule12879("wide", config.PolicyPermit, "junos-http"),
@@ -85,7 +85,7 @@ func TestReauthorizeRequiresCapturedIdentityPermit12879(t *testing.T) {
 		cfg           *config.Config
 		key           string
 		dstPort       uint16
-		egress        uint16
+		egress        uint32
 		wantPermitted bool
 	}{
 		{
@@ -94,7 +94,7 @@ func TestReauthorizeRequiresCapturedIdentityPermit12879(t *testing.T) {
 			// Another rule's permit is not authorization under "narrow".
 			name: "cross_rule_permit_keeps_candidate",
 			cfg:  reauthConfig12879(config.PolicyDeny, []string{"trust", "untrust"}, transit),
-			key:  "trust->untrust/narrow", dstPort: 80, egress: uint16(untrust),
+			key:  "trust->untrust/narrow", dstPort: 80, egress: untrust,
 		},
 		{
 			// No rule matches tcp/80; a default-policy permit is the
@@ -104,7 +104,7 @@ func TestReauthorizeRequiresCapturedIdentityPermit12879(t *testing.T) {
 				&config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
 					reauthRule12879("narrow", config.PolicyPermit, "junos-ssh"),
 				}}),
-			key: "trust->untrust/narrow", dstPort: 80, egress: uint16(untrust),
+			key: "trust->untrust/narrow", dstPort: 80, egress: untrust,
 		},
 		{
 			// Host-bound fall-through: Matched=false, DefaultUsed=false and
@@ -121,12 +121,12 @@ func TestReauthorizeRequiresCapturedIdentityPermit12879(t *testing.T) {
 			// rule that now matches the tuple.
 			name: "default_key_cross_rule_keeps_candidate",
 			cfg:  reauthConfig12879(config.PolicyDeny, []string{"trust", "untrust"}, transit),
-			key:  dataplane.DefaultPolicyName, dstPort: 80, egress: uint16(untrust),
+			key:  dataplane.DefaultPolicyName, dstPort: 80, egress: untrust,
 		},
 		{
 			name: "captured_rule_identity_permits",
 			cfg:  reauthConfig12879(config.PolicyDeny, []string{"trust", "untrust"}, transit),
-			key:  "trust->untrust/narrow", dstPort: 22, egress: uint16(untrust),
+			key:  "trust->untrust/narrow", dstPort: 22, egress: untrust,
 			wantPermitted: true,
 		},
 		{
@@ -135,7 +135,7 @@ func TestReauthorizeRequiresCapturedIdentityPermit12879(t *testing.T) {
 				&config.ZonePairPolicies{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
 					reauthRule12879("narrow", config.PolicyPermit, "junos-ssh"),
 				}}),
-			key: dataplane.DefaultPolicyName, dstPort: 80, egress: uint16(untrust),
+			key: dataplane.DefaultPolicyName, dstPort: 80, egress: untrust,
 			wantPermitted: true,
 		},
 		{
@@ -192,7 +192,7 @@ func TestReauthorizeHostUnmatchedActionIsMeaningless12879(t *testing.T) {
 	result := policymatch.Match(cfg, policymatch.Query{
 		FromZone: "trust", ToZone: "junos-host",
 		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("10.0.0.2"),
-		Protocol: "tcp", SrcPort: 2077, DstPort: 80, SrcFamily: "v4", DstFamily: "v4",
+		Protocol: "tcp", SrcPort: policymatch.PortPtr(2077), DstPort: policymatch.PortPtr(80), SrcFamily: "v4", DstFamily: "v4",
 	})
 	if !result.HostInboundUnmatched || result.Matched || result.DefaultUsed {
 		t.Fatalf("premise: unmatched host query returned %+v", result)
@@ -232,8 +232,8 @@ func TestReauthorizeFailsClosedOnICMPAndGRE14697(t *testing.T) {
 				SrcPort: 0x1234, DstPort: 0x1234,
 			},
 			ExpectedRTFlowSessionID: 97,
-			IngressZoneID:           uint16(config.StableZoneID("trust")),
-			EgressZoneID:            uint16(config.StableZoneID("untrust")),
+			IngressZoneID:           config.StableZoneID("trust"),
+			EgressZoneID:            config.StableZoneID("untrust"),
 		}
 		capture := &policyInvalidationCapture{
 			candidateRuleIDs: map[policyInvalidationMatchIdentity]string{
@@ -268,8 +268,8 @@ func TestReauthorizeFailsClosedOnICMPAndGRE14697(t *testing.T) {
 			SrcPort: 2077, DstPort: 22,
 		},
 		ExpectedRTFlowSessionID: 98,
-		IngressZoneID:           uint16(config.StableZoneID("trust")),
-		EgressZoneID:            uint16(config.StableZoneID("untrust")),
+		IngressZoneID:           config.StableZoneID("trust"),
+		EgressZoneID:            config.StableZoneID("untrust"),
 	}
 	tcpCapture := &policyInvalidationCapture{
 		candidateRuleIDs: map[policyInvalidationMatchIdentity]string{
@@ -329,8 +329,8 @@ func TestPolicyInvalidationRollbackCrossRulePermitDoesNotDischarge12879(t *testi
 				SrcPort: uint16(2000 + session.id), DstPort: session.port,
 			},
 			PolicyID: narrowID, ExpectedRTFlowSessionID: session.id,
-			IngressZoneID: uint16(config.StableZoneID("trust")),
-			EgressZoneID:  uint16(config.StableZoneID("untrust")),
+			IngressZoneID: config.StableZoneID("trust"),
+			EgressZoneID:  config.StableZoneID("untrust"),
 		})
 		r.dp.ruleBySession[session.id] = "trust->untrust/narrow"
 	}
@@ -390,8 +390,8 @@ func TestPolicyInvalidationRollbackDefaultPermitDoesNotDischarge12879(t *testing
 				SrcPort: uint16(2000 + session.id), DstPort: session.port,
 			},
 			PolicyID: narrowID, ExpectedRTFlowSessionID: session.id,
-			IngressZoneID: uint16(config.StableZoneID("trust")),
-			EgressZoneID:  uint16(config.StableZoneID("untrust")),
+			IngressZoneID: config.StableZoneID("trust"),
+			EgressZoneID:  config.StableZoneID("untrust"),
 		})
 		r.dp.ruleBySession[session.id] = "trust->untrust/narrow"
 	}
@@ -445,8 +445,8 @@ func newLandedVariantRollbackRun12879(t *testing.T) (*convergenceRun12072, *conf
 		row := &r.dp.rows[i]
 		rule := r.dp.ruleBySession[row.ExpectedRTFlowSessionID]
 		row.PolicyID = ids[rule]
-		row.IngressZoneID = uint16(config.StableZoneID("trust"))
-		row.EgressZoneID = uint16(config.StableZoneID("untrust"))
+		row.IngressZoneID = config.StableZoneID("trust")
+		row.EgressZoneID = config.StableZoneID("untrust")
 		row.Tuple.DstPort = variantDestinationPort12686(rule)
 	}
 	r.h.d.store.MarkActiveApplied()
@@ -475,7 +475,7 @@ func publishLandedVariantConfig12879(
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(old, next, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(old, next, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
 	return next, applyErr

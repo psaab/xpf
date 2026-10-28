@@ -862,10 +862,18 @@ func dhcpLeaseScopeAuthorities(cfg *config.Config, family int, generation uint64
 	return scopes
 }
 
-func dhcpLeaseRGForInterface(_ *config.Config, iface string, owners map[string]int) (int, bool) {
-	base := strings.SplitN(iface, ".", 2)[0]
-	rg, ok := owners[base]
-	return rg, ok && rg > 0
+// dhcpLeaseRGForInterface answers the ref→RG question against a
+// caller-built RethRGOwners map (#17086): the shared chain walk in
+// pkg/config (RefRGFromOwners), so a member ref resolves through its
+// RedundantParent chain to the owning RETH and a stray group owns
+// nothing — identical answers to InterfaceRefRG without rebuilding
+// the owners map per interface. The bool reports a positive group.
+func dhcpLeaseRGForInterface(cfg *config.Config, iface string, owners map[string]int) (int, bool) {
+	if cfg == nil {
+		return 0, false
+	}
+	rg, owned := cfg.RefRGFromOwners(iface, owners)
+	return rg, owned && rg > 0
 }
 func (d *Daemon) nextDHCPLeaseApplyAuthority(cfg *config.Config, masterState ...map[int]bool) dhcpserver.LeaseApplyAuthority {
 	d.dhcpLeaseSync.authorityMu.Lock()

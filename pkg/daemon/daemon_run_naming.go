@@ -296,8 +296,8 @@ func (d *Daemon) runBootstrapExitStartup(cfg *config.Config) error {
 // re-reads the cell — which, since #6743 r4, includes gRPC, REST and the
 // console CLI (they hold liveDataPlane, so the clear makes their
 // dataplane surface report unavailable immediately). It is NOT a claim
-// that every consumer is severed: the conntrack GC and cluster
-// SessionSync were wired from DECOMPOSED domain handles taken before this
+// that every consumer is severed: cluster
+// SessionSync was wired from DECOMPOSED domain handles taken before this
 // point and keep them (daemon_dp_live.go documents why), so their loops
 // run until their own contexts end. Codex PR #6743 r7: the userspace
 // event-stream loop is NO LONGER in that list — it re-resolves the

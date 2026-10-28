@@ -31,7 +31,7 @@ func lenientPolicy9525(t *testing.T, apps, action, def string) *config.Config {
 func icmpQuery9525(icmpType uint8, ident int) Query {
 	return Query{FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-		Protocol: "icmp", SrcPort: ident, ICMPType: &icmpType}
+		Protocol: "icmp", SrcPort: PortPtr(uint16(ident)), ICMPType: &icmpType}
 }
 
 func TestTolerantApplicationDropIsReportedAsRefused9525(t *testing.T) {
@@ -71,7 +71,7 @@ func TestTolerantApplicationControlsKeepTheirVerdicts9525(t *testing.T) {
 	}
 	timeout := lenientPolicy9525(t, `application a { protocol tcp; destination-port 22; inactivity-timeout thirty; }`, "permit", "deny-all")
 	q := Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-		Protocol: "tcp", SrcPort: 40000, DstPort: 22}
+		Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(22)}
 	if res := Match(timeout, q); res.ContentRejected || !res.Matched || res.DefaultUsed || res.Action != config.PolicyPermit {
 		t.Fatalf("settings-only control: tcp/22 must still match the permit; got %+v", res)
 	}

@@ -72,7 +72,7 @@ func TestBootIDSwitchClearsCapabilitiesWhenPrimingConnNeverAdvertised14161(t *te
 		t.Fatal("the new boot inherited the old boot's learned snapshot version " +
 			"although its priming connection never advertised one")
 	}
-	if got := ss.peerCapabilityFlags.Load(); got != 0 {
+	if got := ss.peerIncarnationState().peerCapabilityFlags.Load(); got != 0 {
 		t.Fatalf("the new boot inherited the old boot's capability flags %#x; gates "+
 			"would release stamped installs and deletes to a peer that never advertised them", got)
 	}
@@ -128,7 +128,7 @@ func TestBootIDSwitchRestoresPrimingConnCapabilities14161(t *testing.T) {
 	if got := ss.PeerSnapshotProtocolVersion(); got != 3 {
 		t.Fatalf("snapshot version = %d, want the priming connection's 3", got)
 	}
-	if got := ss.peerCapabilityFlags.Load(); got != uint32(newFlags) {
+	if got := ss.peerIncarnationState().peerCapabilityFlags.Load(); got != uint32(newFlags) {
 		t.Fatalf("capability flags = %#x, want the priming connection's %#x (not the retired %#x)",
 			got, newFlags, oldFlags)
 	}

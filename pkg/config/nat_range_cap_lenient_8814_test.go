@@ -268,7 +268,7 @@ func TestFlatSetSpellingHitsTheSameRangeCap8814(t *testing.T) {
 					"reach the same record-and-gate path as the hierarchical one, or the strict gate "+
 					"guards only configs that arrive from a file", got, tc.wantRecord)
 			}
-			_, serr := compileTree(flat(t, tc.line), compileOpts{}, nil)
+			_, serr := compileTree(flat(t, tc.line), strictCompileOpts(), nil)
 			if tc.wantStrict {
 				if serr == nil {
 					t.Error("flat set: strict CompileConfig ACCEPTED an oversized range — an operator can " +
@@ -308,7 +308,7 @@ func TestFlatSetSpellingHitsTheSameRangeCap8814(t *testing.T) {
 	if recorded != 1 {
 		t.Errorf("flat set proxy-arp: %d recorded oversized range(s), want 1", recorded)
 	}
-	if _, serr := compileTree(flat(t, line), compileOpts{}, nil); serr == nil {
+	if _, serr := compileTree(flat(t, line), strictCompileOpts(), nil); serr == nil {
 		t.Error("flat set proxy-arp: strict CompileConfig accepted an oversized range (#8814)")
 	} else if !strings.Contains(serr.Error(), proxyARPCapPhrase8822) {
 		// #8822: the proxy-arp leg had the same `err != nil` proxy.

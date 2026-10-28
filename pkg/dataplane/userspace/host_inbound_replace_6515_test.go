@@ -99,18 +99,18 @@ func TestClassifyHostInboundForInterfaceReplaces_6515(t *testing.T) {
 	// ssh (tcp/22) on the OVERRIDDEN interface: the override lists only https,
 	// so the zone's ssh no longer reaches it.
 	if a := ClassifyHostInboundForInterface(cfg, "trust", "ge-0/0/0.0",
-		config.HostInboundProtoTCP, true, 22, nil, "ip"); a.Status != HostInboundDenied {
+		config.HostInboundProtoTCP, true, 22, true, nil, "ip"); a.Status != HostInboundDenied {
 		t.Fatalf("ssh on the overridden interface = %+v, want denied: the interface stanza "+
 			"lists only https, replacing the zone's ssh (#6515)", a)
 	}
 	// https (tcp/443) on the same interface is admitted by its own stanza.
 	if a := ClassifyHostInboundForInterface(cfg, "trust", "ge-0/0/0.0",
-		config.HostInboundProtoTCP, true, 443, nil, "ip"); a.Status != HostInboundTokenAdmit {
+		config.HostInboundProtoTCP, true, 443, true, nil, "ip"); a.Status != HostInboundTokenAdmit {
 		t.Fatalf("https on the overridden interface = %+v, want token-admit via its own stanza", a)
 	}
 	// ssh on the NON-overridden sibling is still admitted by the zone stanza.
 	if a := ClassifyHostInboundForInterface(cfg, "trust", "ge-0/0/1.0",
-		config.HostInboundProtoTCP, true, 22, nil, "ip"); a.Status != HostInboundTokenAdmit {
+		config.HostInboundProtoTCP, true, 22, true, nil, "ip"); a.Status != HostInboundTokenAdmit {
 		t.Fatalf("ssh on the non-overridden sibling = %+v, want token-admit: the zone stanza "+
 			"still governs interfaces that declare none", a)
 	}

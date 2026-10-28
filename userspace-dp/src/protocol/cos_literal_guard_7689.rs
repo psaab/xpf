@@ -24,7 +24,7 @@
 //! time, but it also blocks exhaustive construction outside the defining crate
 //! and changes the type's public contract to solve a test-hygiene problem.
 
-use crate::afxdp::worker_queue::tests::{afxdp_rs_files, blank_comments_and_strings};
+use crate::test_support::source_scan::{afxdp_rs_files, blank_comments_and_strings};
 
 /// Split a struct-literal body on its DEPTH-0 commas.
 ///
@@ -88,10 +88,10 @@ fn cos_scheduler_snapshot_literals_carry_an_update_tail_7689() {
         // that segment as starting with `//` and reports a guarded literal as
         // exhaustive. Measured on this tree — it produced a false positive at
         // forwarding_build/tests.rs before blanking was added. The shared
-        // helper is reused rather than re-implemented for exactly the reason
-        // `afxdp/worker_queue.rs` gives where it widens the visibility: "a
-        // second copy of comment-blanking is exactly where a source-scanning
-        // gate quietly stops seeing what it is meant to."
+        // helper (`crate::test_support::source_scan`, #17152) is reused
+        // rather than re-implemented: a second copy of comment-blanking
+        // is exactly where a source-scanning gate quietly stops seeing
+        // what it is meant to.
         let src = blank_comments_and_strings(&raw);
 
         let mut from = 0usize;

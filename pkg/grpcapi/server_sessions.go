@@ -699,7 +699,7 @@ func (f *sessionFilter) matchV4(key dataplane.SessionKey, val dataplane.SessionV
 	}
 	if f.snatPool != "" {
 		if val.Flags&dataplane.SessFlagSNAT == 0 ||
-			!config.IPInNets(uint32ToIP(val.NATSrcIP), f.snatPoolNets) {
+			!config.IPInNets(val.NATSrcAddr(), f.snatPoolNets) {
 			return false
 		}
 	}
@@ -2087,14 +2087,14 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 	var natParts []string
 	if val.Flags&dataplane.SessFlagSNAT != 0 {
 		port := effectiveNATSrcPort(val.Flags, ntohs(val.NATSrcPort), ntohs(key.SrcPort))
-		natParts = append(natParts, fmt.Sprintf("SNAT %s:%d", uint32ToIP(val.NATSrcIP), port))
-		se.NatSrcAddr = uint32ToIP(val.NATSrcIP).String()
+		natParts = append(natParts, fmt.Sprintf("SNAT %s:%d", val.NATSrcAddr(), port))
+		se.NatSrcAddr = val.NATSrcAddr().String()
 		se.NatSrcPort = uint32(port)
 	}
 	if val.Flags&dataplane.SessFlagDNAT != 0 {
 		port := effectiveNATDstPort(val.Flags, ntohs(val.NATDstPort), ntohs(key.DstPort))
-		natParts = append(natParts, fmt.Sprintf("DNAT %s:%d", uint32ToIP(val.NATDstIP), port))
-		se.NatDstAddr = uint32ToIP(val.NATDstIP).String()
+		natParts = append(natParts, fmt.Sprintf("DNAT %s:%d", val.NATDstAddr(), port))
+		se.NatDstAddr = val.NATDstAddr().String()
 		se.NatDstPort = uint32(port)
 	}
 	se.Nat = strings.Join(natParts, "; ")

@@ -59,7 +59,7 @@ func TestSessionDeltaPolicyAttributionWireKeysLockstepWithRust6949(t *testing.T)
 				"one (#3227/#3301)"},
 	}
 	for _, c := range numeric {
-		rustKey := rustSerdeRenameIn(t, binding, c.rustField)
+		rustKey := rustWireKeyInStruct(t, binding, "SessionDeltaInfo", c.rustField, false)
 		doc := fmt.Sprintf(`{"event":"open","addr_family":2,"protocol":6,`+
 			`"src_ip":"10.0.61.102","dst_ip":"172.16.80.200","src_port":12345,"dst_port":5201,`+
 			`%q:%d}`, rustKey, c.want)
@@ -83,8 +83,8 @@ func TestSessionDeltaPolicyAttributionWireKeysLockstepWithRust6949(t *testing.T)
 	// nat64 is a bool and nat64_snat_v4 a string; both are asserted on their
 	// TRUE / non-empty value for the same reason — false and "" are what an
 	// absent key decodes to.
-	nat64Key := rustSerdeRenameIn(t, binding, "nat64")
-	snatKey := rustSerdeRenameIn(t, binding, "nat64_snat_v4")
+	nat64Key := rustWireKeyInStruct(t, binding, "SessionDeltaInfo", "nat64", false)
+	snatKey := rustWireKeyInStruct(t, binding, "SessionDeltaInfo", "nat64_snat_v4", false)
 	doc := fmt.Sprintf(`{"event":"open","src_port":12345,%q:true,%q:"203.0.113.5"}`,
 		nat64Key, snatKey)
 	var info SessionDeltaInfo
@@ -116,11 +116,19 @@ func TestSessionDeltaPolicyAttributionWireKeysLockstepWithRust6949(t *testing.T)
 	}
 }
 
+// #17142: the keys below are resolved on SessionDeltaInfo ITSELF via the
+// shared struct-scoped helper (rustwire_test.go). The previous file-wide
+// first-match lookup read ExceptionStatus's `ingress_ifindex` — declared
+// earlier in binding.rs — so swapping SessionDeltaInfo's ingress and
+// NAT-scope renames passed this cell (issue mutant C) even though the
+// key set, and therefore every set cell, is blind to a swap. See
+// TestSessionDeltaPopulatedSpecimenValues17142 for the value-level cell
+// that catches a swap without reading Rust source at all.
 func TestSessionDeltaIngressAndPolicyRuleIdentityKeys11070(t *testing.T) {
 	binding := filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "binding.rs")
-	ingressKey := rustSerdeRenameIn(t, binding, "ingress_ifindex")
-	vlanKey := rustSerdeRenameIn(t, binding, "ingress_vlan_id")
-	ruleKey := rustSerdeRenameIn(t, binding, "policy_rule_id")
+	ingressKey := rustWireKeyInStruct(t, binding, "SessionDeltaInfo", "ingress_ifindex", false)
+	vlanKey := rustWireKeyInStruct(t, binding, "SessionDeltaInfo", "ingress_vlan_id", false)
+	ruleKey := rustWireKeyInStruct(t, binding, "SessionDeltaInfo", "policy_rule_id", false)
 	doc := fmt.Sprintf(`{"event":"open","addr_family":2,"protocol":6,%q:42,%q:51,%q:"lan->wan/allow-web"}`,
 		ingressKey, vlanKey, ruleKey)
 	var delta SessionDeltaInfo
@@ -152,9 +160,9 @@ func TestSessionDeltaPolicyAttributionCommentIsNotFalse6949(t *testing.T) {
 	for _, f := range []string{
 		"policy_id", "policy_counter_idx", "app_timeout", "nat64", "nat64_snat_v4",
 	} {
-		// rustSerdeRenameIn t.Fatalf's when the field (or its explicit rename)
-		// is gone, which is the RED this test exists for.
-		key := rustSerdeRenameIn(t, binding, f)
+		// rustWireKeyInStruct Fatalf's when the field (or its struct) is
+		// gone, which is the RED this test exists for.
+		key := rustWireKeyInStruct(t, binding, "SessionDeltaInfo", f, false)
 		if strings.TrimSpace(key) == "" {
 			t.Fatalf("empty serde rename for %s", f)
 		}
@@ -186,7 +194,7 @@ func TestSessionDeltaPolicyAttributionCommentIsNotFalse6949(t *testing.T) {
 func TestSessionDeltaInfoKeySetsAreInParityWithRust6949(t *testing.T) {
 	goKeys := goJSONTagsInStruct(t,
 		filepath.Join("protocol_ha.go"), "SessionDeltaInfo")
-	rustKeys := rustSerdeKeysInStruct(t,
+	rustKeys := rustWireKeysInStruct(t,
 		filepath.Join("..", "..", "..", "userspace-dp", "src", "protocol", "binding.rs"),
 		"SessionDeltaInfo")
 
@@ -216,72 +224,32 @@ func TestSessionDeltaInfoKeySetsAreInParityWithRust6949(t *testing.T) {
 	}
 }
 
-// goJSONTagsInStruct returns the set of `json:"..."` tag names declared by the
-// named Go struct in the given file.
+// goJSONTagsInStruct returns the set of `json:"..."` tag names declared by
+// the named Go struct in the given file. (Go-side only; the Rust side is
+// the shared parser in rustwire_test.go — #17142 deleted the per-issue
+// Rust copies that lived here, including the visibility-blind field regex
+// behind mutant B.)
 func goJSONTagsInStruct(t *testing.T, path, name string) map[string]bool {
-	t.Helper()
-	body := structBody(t, path, "type "+name+" struct {")
-	re := regexp.MustCompile("`json:\"([A-Za-z0-9_]+)")
-	out := map[string]bool{}
-	for _, m := range re.FindAllStringSubmatch(body, -1) {
-		out[m[1]] = true
-	}
-	return out
-}
-
-// rustSerdeKeysInStruct returns the set of JSON keys the named Rust struct
-// serializes: the `#[serde(rename = "...")]` when the field carries one, and
-// the field's own identifier otherwise (which is what serde emits then).
-func rustSerdeKeysInStruct(t *testing.T, path, name string) map[string]bool {
-	t.Helper()
-	body := structBody(t, path, "pub(crate) struct "+name+" {")
-	renameRe := regexp.MustCompile(`#\[serde\([^)]*rename\s*=\s*"([A-Za-z0-9_]+)"`)
-	fieldRe := regexp.MustCompile(`^\s*pub ([a-z0-9_]+)\s*:`)
-	out := map[string]bool{}
-	pending := ""
-	for _, line := range strings.Split(body, "\n") {
-		if m := renameRe.FindStringSubmatch(line); m != nil {
-			pending = m[1]
-			continue
-		}
-		if m := fieldRe.FindStringSubmatch(line); m != nil {
-			if pending != "" {
-				out[pending] = true
-			} else {
-				out[m[1]] = true
-			}
-			pending = ""
-			continue
-		}
-		// An attribute line with no rename (e.g. a bare `#[serde(default)]`)
-		// means this field serializes under its own name; anything else
-		// (doc comment, blank) leaves a pending rename alone only if it
-		// belongs to the field still ahead of us, which the `continue` above
-		// already handled.
-		if strings.HasPrefix(strings.TrimSpace(line), "#[serde(") {
-			pending = ""
-		}
-	}
-	return out
-}
-
-func structBody(t *testing.T, path, opener string) string {
 	t.Helper()
 	src, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v (the #6949 key-set parity guard cannot run)", path, err)
 	}
-	_, after, ok := strings.Cut(string(src), opener)
-	if !ok {
-		t.Fatalf("no %q in %s. If the struct was renamed or moved, UPDATE this guard rather "+
-			"than deleting it — without it nothing stops the two ends of the session-delta "+
-			"wire from drifting apart field by field, which is #6949", opener, path)
+	start := strings.Index(string(src), "type "+name+" struct {")
+	if start < 0 {
+		t.Fatalf("no Go struct %q in %s — update this guard rather than deleting it (#6949/#17142)", name, path)
 	}
-	body, _, ok := strings.Cut(after, "\n}")
-	if !ok {
-		t.Fatalf("unterminated struct %q in %s", opener, path)
+	rest := string(src)[start:]
+	end := strings.Index(rest, "\n}")
+	if end < 0 {
+		t.Fatalf("unterminated Go struct %q in %s", name, path)
 	}
-	return body
+	re := regexp.MustCompile("`json:\"([A-Za-z0-9_]+)")
+	out := map[string]bool{}
+	for _, m := range re.FindAllStringSubmatch(rest[:end], -1) {
+		out[m[1]] = true
+	}
+	return out
 }
 
 func TestSessionDeltaSourceNatProvenanceJSON12187(t *testing.T) {

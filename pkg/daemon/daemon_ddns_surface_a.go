@@ -221,6 +221,19 @@ func (d *Daemon) reconcileSurfaceAOnce(ctx context.Context) {
 // The returned scope slice is sorted by a deterministic key (#4423 M12) so the
 // reconcile order — and any behavior that depends on it, e.g. two scopes that
 // target the same FQDN — is reproducible rather than Go-map-iteration-random.
+// surfaceARGScopeOwner attributes a Surface A binding on ifName to its
+// owning redundancy group (#17086 SSOT, InterfaceRefRG): a member's
+// binding is owned by its RETH's group, a stray group on a non-RETH
+// owns nothing, and an owned group 0 stays 0. Unowned reports 0, the
+// same value the raw field gave a plain interface.
+func surfaceARGScopeOwner(cfg *config.Config, ifName string) int {
+	if cfg == nil {
+		return 0
+	}
+	rg, _ := cfg.InterfaceRefRG(ifName)
+	return rg
+}
+
 func (d *Daemon) buildSurfaceAScopes(cfg *config.Config) ([]ddns.SurfaceAScope, []ddns.SurfaceAStatusView) {
 	if cfg == nil || cfg.Interfaces.Interfaces == nil {
 		return nil, nil
@@ -313,7 +326,7 @@ func (d *Daemon) buildSurfaceAScopes(cfg *config.Config) ([]ddns.SurfaceAScope, 
 			Interface:       ifName,
 			Unit:            un,
 			RoutingInstance: prov.RoutingInstance,
-			RGOwner:         ifc.RedundancyGroup,
+			RGOwner:         surfaceARGScopeOwner(cfg, ifName),
 			PolicyID:        b.Provider,
 			// The published NAME is part of the Surface A scope identity (#2903):
 			// changing the configured hostname is a NEW scope (old name withdrawn,

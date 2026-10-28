@@ -186,7 +186,7 @@ func syncOpen17815(srcPort uint16, trust, untrust uint32) dpuserspace.SessionDel
 	return dpuserspace.SessionDeltaInfo{
 		Event: "open", AddrFamily: dataplane.AFInet, Protocol: 6,
 		SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: srcPort, DstPort: 443,
-		IngressZoneID: uint16(trust), EgressZoneID: uint16(untrust),
+		IngressZoneID: trust, EgressZoneID: untrust,
 		IngressIfindex: 11, EgressIfindex: 12,
 	}
 }
