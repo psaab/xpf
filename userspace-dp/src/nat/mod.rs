@@ -698,9 +698,7 @@ impl NatCounterStore {
     /// so the residue reached the operator status surface. The builder captures
     /// this set before it starts and restores it via `reconcile_ids` on `Err`.
     pub(crate) fn tracked_ids(&self) -> Vec<u32> {
-        let Ok(counters) = self.counters.lock() else {
-            return Vec::new();
-        };
+        let counters = crate::sync_util::lock_tolerant(&self.counters);
         let mut ids: Vec<u32> = counters.keys().copied().collect();
         ids.sort_unstable();
         ids
@@ -717,18 +715,14 @@ impl NatCounterStore {
     pub(crate) fn reconcile_ids(&self, active_ids: &[u32]) {
         let active: rustc_hash::FxHashSet<u32> =
             active_ids.iter().copied().filter(|&id| id != 0).collect();
-        if let Ok(mut counters) = self.counters.lock() {
-            counters.retain(|id, _| active.contains(id));
-        }
+        crate::sync_util::lock_tolerant(&self.counters).retain(|id, _| active.contains(id));
     }
 
     /// Reset every stored counter to zero (operator `clear` of NAT hit
     /// counters). Mirrors `PolicyCounterStore::clear`.
     pub(crate) fn clear(&self) {
-        if let Ok(counters) = self.counters.lock() {
-            for counter in counters.values() {
-                counter.reset();
-            }
+        for counter in crate::sync_util::lock_tolerant(&self.counters).values() {
+            counter.reset();
         }
     }
 
@@ -738,9 +732,7 @@ impl NatCounterStore {
     /// `rule_counter`), so it never appears as a row. Matches
     /// `PolicyState::counter_snapshots`, which emits one row per rule.
     pub(crate) fn snapshots(&self) -> Vec<NatRuleCounterStatus> {
-        let Ok(counters) = self.counters.lock() else {
-            return Vec::new();
-        };
+        let counters = crate::sync_util::lock_tolerant(&self.counters);
         counters
             .iter()
             .map(|(&id, counter)| counter.snapshot(id))
