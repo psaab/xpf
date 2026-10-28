@@ -970,6 +970,36 @@ change to either implementation that the corpus disagrees with reds that half,
 and changing an expectation to match one implementation reds the other half until
 it agrees.
 
+### Grammar dimensions (#17077)
+
+The row grammar grew optional trailing tokens so the dimensions where the
+mirror historically drifted are expressible in the shared file: `icmp=T[/C]`
+(ICMP type/code), `-` for an omitted protocol or port selector — Go nil/`""`; for ports the
+Rust side evaluates a present port 0 (never combined with a 0-covering term
+in one case — Go's nil fails closed there), and for an
+omitted protocol it asserts the underspecified classification, no
+app-constrained rule firing for an unknown protocol, while Go asserts the
+default verdict — one row, each surface asserting what it can vouch for, a zone name absent from the snapshot (Rust id 0, Go's
+unknown-zone arms), `feed <name>=<cidr>,...` overlay lines baked into the
+generated snapshot, a `lenient` case flag (lenient compile, post-quarantine
+snapshot) and a `content-rejected` expected verdict (Go `ContentRejected`,
+Rust snapshot refusal). Cases: `transit-fragment-reject-13705`,
+`unknown-zone-egress-11067`, `unknown-zone-ingress-8318`,
+`unknown-zone-junos-host-global-11369` (from-any precedence),
+`unknown-zone-junos-host-global-only-11369` (global tier alone),
+`icmp-type-code`, `omitted-selectors`, `feed-overlay-12965`,
+`lenient-quarantine-5649`, `content-rejected-3727`; both halves pin them by
+name (`TestPolicyVerdictCorpusPins17077Cases` /
+`policy_verdict_corpus_pins_17077_cases`), so deleting one reds both sides.
+Measured: reverting the Rust `egress_resolved && to_id == 0` deny arm reds the
+Rust half on `unknown-zone-egress-11067` while the Go half stays green, and
+reverting the Go `UnzonedEgress` arm reds the Go half on the same row while
+the Rust half stays green. Still inexpressible: wire-level packet facts with
+no row field (flow label, DSCP, TCP flags, TTL, IP options), session state
+and scheduler wall-clock, NAT hairpin identity, and ingress-interface
+host-inbound scoping — those remain in the per-language cells that name them
+(see the corpus header).
+
 ### The wiring is bound from the Go side
 
 The Rust half is a `#[path]` test module declared in `policy.rs`. Delete that

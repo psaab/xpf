@@ -633,6 +633,11 @@ pub(crate) struct ProcessStatus {
     pub wg_uncovered_queue_orphan_total: u64,
     #[serde(rename = "wg_uncovered_queue_poison_recoveries", default)]
     pub wg_uncovered_queue_poison_recoveries: u64,
+    /// #17201: TupleGate mutex poison recoveries (shard, entry and
+    /// admission locks). Additive / defaulted for compatibility with
+    /// older helpers. Surfaced as `xpf_tuple_gate_poison_recoveries_total`.
+    #[serde(rename = "tuple_gate_poison_recoveries", default)]
+    pub tuple_gate_poison_recoveries: u64,
     /// #9506 counter slice: IPsec-inner (D11/D13/D14) deny-cause + queue
     /// counters, projected from one
     /// `crate::afxdp::ipsec_inner::ipsec_inner_counters_snapshot()` call.

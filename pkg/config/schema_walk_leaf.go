@@ -485,6 +485,18 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
+		// A block child that itself has Children (or is a non-leaf block such
+		// as `a { }`) carries nested content the list reader never reads.
+		// firewallMatchValues consumes only the child's Keys, so any deeper
+		// statement would be silently dropped. Use the dedicated hard-error
+		// class also used by the existing #17241 refused leaves.
+		if leafSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
+			err := nestedListContentErrorf(path, leafName, c.Keys[0])
+			if vc.recordTypedLeaf(err) {
+				continue
+			}
+			return err
+		}
 		if len(c.Keys) > 1 && !leafSchema.allChildKeysAreValues {
 			err := typedLeafErrorf(path, "only one value per statement inside a value block; write %q as separate statements (%s { %s; %s; }) or a bracket list (%s [ %s %s ])", strings.Join(c.Keys, " "), leafName, c.Keys[0], c.Keys[1], leafName, c.Keys[0], c.Keys[1])
 			if vc.recordTypedLeaf(err) {

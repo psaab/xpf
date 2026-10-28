@@ -41,7 +41,7 @@ func TestRerunAlreadyLiveCommittedIsNoOp15186(t *testing.T) {
 	if string(beforeSnap) == "live-mutated" {
 		t.Fatal("precondition")
 	}
-	beforeStamp, present := r.readCommittedStamp("2.0.0")
+	beforeStamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || beforeStamp == nil || !beforeStamp.Committed || beforeStamp.Predecessor != "1.0.0" {
 		t.Fatalf("precondition stamp = %+v present=%v", beforeStamp, present)
 	}
@@ -57,7 +57,7 @@ func TestRerunAlreadyLiveCommittedIsNoOp15186(t *testing.T) {
 	if got := dbsnapBytes15186(t, cfg, "2.0.0"); string(got) != string(beforeSnap) {
 		t.Fatalf(".2.0.0.dbsnap changed on re-run: got %q want %q", got, beforeSnap)
 	}
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || !stamp.Committed || stamp.Predecessor != "1.0.0" {
 		t.Fatalf("stamp after re-run = %+v present=%v; want committed predecessor 1.0.0", stamp, present)
 	}
@@ -97,7 +97,7 @@ func TestRerunAlreadyLiveDifferentGenerationRefuses15186(t *testing.T) {
 	if got := dbsnapBytes15186(t, cfg, "2.0.0"); string(got) != string(beforeSnap) {
 		t.Fatal(".2.0.0.dbsnap changed on refused re-run")
 	}
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || !stamp.Committed || stamp.Predecessor != "1.0.0" {
 		t.Fatalf("stamp after refusal = %+v present=%v", stamp, present)
 	}
@@ -124,7 +124,7 @@ func TestRerunAlreadyLiveVerifyFailureKeepsSnapshot15186(t *testing.T) {
 	if _, err := os.Stat(r.versionDir("2.0.0")); err != nil {
 		t.Fatalf("cleanup removed live version dir: %v", err)
 	}
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || !stamp.Committed || stamp.Predecessor != "1.0.0" {
 		t.Fatalf("stamp after cleanup = %+v present=%v", stamp, present)
 	}
@@ -153,7 +153,7 @@ func TestStampNeverWritesSelfPredecessor15186(t *testing.T) {
 	if err := r.stampCommittedVersion(j); err != nil {
 		t.Fatalf("stampCommittedVersion: %v", err)
 	}
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil {
 		t.Fatal("stamp missing after self-predecessor stamp")
 	}

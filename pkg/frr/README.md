@@ -387,6 +387,16 @@ accepts exactly that set.
 | `vtysh.go` | `frrExecutor` interface (Vtysh / FrrReloadPy / VtyshLoad / **VtyshLoadDaemon** / **VtyshDaemon** / **VtyshStream**), `realExecutor` (production exec.Command implementation), `ExecVtysh`, and all raw-output Get* shells (`GetBFDPeers`, `GetRouteMapList`, `GetISIS*Detail`/`Database`/`Routes`, `GetOSPF*Detail`/`Database`/`Interface`/`Routes`, `GetBGPNeighbor*`). **`VtyshStream(ctx, command)` returns stdout as an `io.ReadCloser` + a `finish()` reaper** so a caller can scan a huge table incrementally instead of buffering it whole (`Vtysh`); `exec.CommandContext` kills vtysh when `ctx` is cancelled, which is how `StreamBGPRoutes` stops a full-RIB dump on client disconnect / write failure (#5056). `VtyshLoadDaemon` applies a temporary config to one routing daemon; `VtyshDaemon` reads back one daemon's VTY state for no-op detection. |
 | `status_parse.go` | Parsed Get* methods + their public types (`RIPRouteEntry`, `ISISAdjacency`, `OSPFNeighbor`, `BGPPeerSummary`, `BGPRoute`, `FRRRouteDetail`, `FRRNextHop`) + `parseRouteJSON`, `parseBGPSummaryJSON`, `parseBGPRouteLine`, `FormatRouteDetail`. **`GetBGPSummary` parses `show bgp summary json`** (structured JSON, `parseBGPSummaryJSON`), NOT the text table — see the #3942 note below. **`GetBGPRoutes` buffers the whole `show bgp ipv4 unicast` table** (vtysh stdout string + parsed `[]BGPRoute`) for CLI show paths. **`StreamBGPRoutes(ctx, limit, fn)` is the bounded-memory variant** (#5056): it scans vtysh stdout one line at a time via `VtyshStream`, hands each parsed route to `fn`, stops after `limit` routes (reporting `truncated`), and cancels vtysh on `ctx` cancellation or an `fn` error. Both share `parseBGPRouteLine` so they interpret the table identically. REST and gRPC `type=routes` handlers use `StreamBGPRoutes`; gRPC additionally applies route and rendered-byte ceilings before returning its unary response. **`GetRouteDetailJSON` per-family error contract (#5125):** it runs `show ip route json` and `show ipv6 route json` independently and, on a per-command vtysh or JSON-parse failure, `errors.Join`s the failure (tagged with the failing command) into the returned error INSTEAD of the pre-#5125 `continue`-and-return-`nil` swallow, while still returning the family that succeeded. A non-nil error alongside a non-empty slice therefore means "partial" — the `show route detail` callers (`pkg/cli/cli_show_routing.go`, `pkg/grpcapi/server_show_routes_text.go`) render the partial and emit a non-fatal `warning: partial route display ...` line rather than dropping the whole view. This mirrors the read-side contract documented in `pkg/routing/README.md` ("Route-display read error contract"). |
 
+**#17824 correction to the route-filter layout summary above:** the
+summary's sorting and dense re-sequencing apply only to groups with strict
+base containment, which need longest-match stops. Groups without
+containment preserve authored order and original term-index slots
+(including skipped-entry gaps), so single, disjoint, and same-base lists
+retain historical bytes. The table's original-index-across-family-split
+statement also applies only to non-containing groups; containing groups
+use dense sorted slots. The initial unconditional #16762 sort changed
+bytes for disjoint lists with unequal prefix lengths.
+
 ## Every operational vtysh shell-out is bounded and cancellable (#9143)
 
 `Manager.vtysh(ctx, command)` is the SINGLE funnel every **buffered** operational
@@ -1300,6 +1310,24 @@ step. Both are required — neither sees the other's case:
   `redistribute_chain_16868_test.go`. Composed-chain QNH metric
   overlay is not applied (single-policy and bare static entries keep
   their metric maps).
+  **Single chain composer (#17026).** Both chain renderers — the BGP
+  composer (#5277) and this redistribute composer (#15156) — are thin
+  adapters over `composeChainRouteMap` in `route_map_chain.go`; there
+  is one render loop and one overflow belt. The belt consults
+  `config.ComposedChainSequenceCount` over the exact statements that
+  will render (authored statements for BGP, per-source/variant
+  filtered statements for redistribute), so it truncates at a
+  terminating member and saturates exactly as the SSOT does.
+  Redistribute chains are **render-belt-only**: unlike BGP composed
+  chains (`validateBGPComposedChainSequenceBoundStrict`), no strict
+  commit gate bounds them, because the rendered count depends on the
+  per-source and per-variant filtered statements, which the
+  config-side gate cannot reproduce without duplicating the
+  renderer's filtering. The belt is the fail-closed backstop on the
+  tolerant load / peer-sync path: an oversized redistribute chain
+  renders the bounded quarantine deny under its composed name
+  instead of an expansion past the FRR sequence ceiling. Parity and
+  regression cells: `route_map_chain_17026_test.go`.
   Both `route-map out` emit sites (ipv4 + ipv6 AF) are guarded by
   `isDefinedPolicyStatement` (#2539, sibling of the #2490 inbound guard):
   `globalExport` is already restricted to defined policy-statements, but a

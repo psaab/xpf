@@ -691,17 +691,12 @@ type compileOpts struct {
 	// lenientChassisRGStatementArity.
 	lenientChassisClusterUnknown16456 bool
 
-	// lenientRGNodePriorityShape16672 (#16672) downgrades the
-	// redundancy-group `node` statement-shape gate
-	// (validateRGNodePriorityShapeAST) from a hard compile error to a
-	// cfg.Warnings entry on the tolerant load / peer-sync paths. A
-	// fused `node 1 priority 100 node 0 priority 200` (missing `;`)
-	// otherwise writes the second priority onto the first node and
-	// can invert RG primary placement. Commit / commit-check stay
-	// strict; an already-persisted config still BOOTS (#1960) with
-	// the first node's own priority kept. Same doctrine as
-	// lenientChassisClusterUnknown16456.
-	lenientRGNodePriorityShape16672 bool
+	// lenientRGNodePriorityShape downgrades the RG `node` statement-shape
+	// gate (validateRGNodePriorityShapeAST) from a hard compile error to a
+	// cfg.Warnings entry on tolerant load / peer-sync paths. Fused, malformed,
+	// and priority-less node statements are warned on boot rather than blocking
+	// persisted configs (#1960); commit and commit-check remain strict.
+	lenientRGNodePriorityShape bool
 
 	// lenientLoginPackedStatements (#6662) downgrades the `system login`
 	// packed-body gate (validateLoginPackedStatementsAST) from a hard compile
@@ -4040,7 +4035,7 @@ func lenientCompileOpts() (o compileOpts) {
 	o.lenientChassisMonitorWeight = true
 	o.lenientChassisRGStatementArity = true
 	o.lenientChassisClusterUnknown16456 = true
-	o.lenientRGNodePriorityShape16672 = true
+	o.lenientRGNodePriorityShape = true
 	o.lenientLoginPackedStatements = true
 	o.lenientLoginClassShadowsBuiltin = true
 	o.lenientLoginClassRegex15712 = true

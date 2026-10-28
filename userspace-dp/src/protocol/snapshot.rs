@@ -1706,3 +1706,14 @@ mod ipsec_main_route_identity_tests {
         assert_eq!(wire["table"], 254);
     }
 }
+#[cfg(test)]
+mod config_snapshot_config_opaque_17244 {
+    use super::*;
+
+    #[test]
+    fn config_snapshot_config_stays_opaque_to_helper17244() {
+        // The Go shape-digest exemption is valid only while Rust treats this
+        // subtree as an opaque JSON value rather than reading typed fields.
+        let _: serde_json::Value = ConfigSnapshot::default().config;
+    }
+}
