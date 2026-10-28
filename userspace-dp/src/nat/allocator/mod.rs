@@ -6482,7 +6482,7 @@ impl PortAllocator {
             Self::complete_persistent_lease_locked(&mut live, existing, now_ns);
         }
         // A synced persistent flow joins its existing source lease when present.
-        if let Some((persistent_key, _timeout_ns)) = persistent {
+        if let Some((persistent_key, timeout_ns)) = persistent {
             if let Some(lease) = live.persistent_by_source.get(&persistent_key).copied() {
                 // #8132/#17028: the shared 0->1 join re-arms the
                 // activation-rollback snapshot exactly as the local

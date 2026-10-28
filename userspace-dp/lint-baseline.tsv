@@ -33,7 +33,7 @@ release	dead_code	src/afxdp/forwarding/fabric.rs	1
 release	dead_code	src/afxdp/forwarding/fib.rs	2
 release	dead_code	src/afxdp/forwarding/ha.rs	3
 release	dead_code	src/afxdp/forwarding/host_inbound.rs	4
-release	dead_code	src/afxdp/forwarding/mod.rs	3
+release	dead_code	src/afxdp/forwarding/mod.rs	2
 release	dead_code	src/afxdp/forwarding_build/fib.rs	3
 release	dead_code	src/afxdp/frame/addr_class.rs	3
 release	dead_code	src/afxdp/frame/headers.rs	2
