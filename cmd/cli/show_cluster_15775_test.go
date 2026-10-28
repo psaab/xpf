@@ -1,23 +1,27 @@
 package main
 
-import "testing"
+import (
+	"testing"
 
-// #15775 remote: `fence-status` must resolve to its own topic, unknown
+	"github.com/psaab/xpf/pkg/cliterm"
+)
+
+// #15775 remote: `fence-status` is a leaf of `show chassis cluster`
+// itself (handled in handleShow before the subsystem dispatch), unknown
 // cluster subsystems / trailing tokens must error (not fall through to
 // `show chassis cluster`), and extra tokens after leaf views must error.
+// The subsystem grammar lives in cliterm (#17225).
 
 func TestClusterSubsystemViewFenceStatus15775(t *testing.T) {
-	topic, filter, err := clusterSubsystemView("fence-status", nil)
-	if err != nil {
-		t.Fatalf("fence-status: %v", err)
+	// fence-status is not a subsystem: the shared view rejects it, and
+	// handleShow's dedicated leaf arm (arity-checked there) owns it.
+	if _, _, err := cliterm.ClusterSubsystemView("fence-status", nil); err == nil {
+		t.Error("fence-status as subsystem: expected error")
 	}
-	if topic != "chassis-cluster-fence-status" || filter != "" {
-		t.Errorf("fence-status = (%q,%q), want (chassis-cluster-fence-status,\"\")", topic, filter)
-	}
-	if _, _, err := clusterSubsystemView("fence-status", []string{"extra"}); err == nil {
+	if _, _, err := cliterm.ClusterSubsystemView("fence-status", []string{"extra"}); err == nil {
 		t.Error("fence-status with trailing token: expected error")
 	}
-	if _, _, err := clusterSubsystemView("bogus", nil); err == nil {
+	if _, _, err := cliterm.ClusterSubsystemView("bogus", nil); err == nil {
 		t.Error("unknown subsystem: expected error")
 	}
 }

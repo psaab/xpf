@@ -3,6 +3,7 @@ package vrrp
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -1370,6 +1371,28 @@ var bindSocketToDevice = func(fd int, ifName string) error {
 	return unix.SetsockoptString(fd, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, ifName)
 }
 
+// rawConnJoinGroup joins a multicast group on the IPv4 raw conn. Package var
+// so tests can stub a join failure and observe the Warn without a real socket
+// (#17217).
+var rawConnJoinGroup = func(rawConn *ipv4.RawConn, ifi *net.Interface, group *net.IPAddr) error {
+	return rawConn.JoinGroup(ifi, group)
+}
+
+// v6JoinGroup performs the IPV6_JOIN_GROUP setsockopt. Package var so tests
+// can stub a join failure (e.g. ENOBUFS) and observe the Warn without a real
+// socket (#17217).
+var v6JoinGroup = func(fd int, mreq *unix.IPv6Mreq) error {
+	return unix.SetsockoptIPv6Mreq(fd, unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq)
+}
+
+// packetAddAllmultiMembership performs the PACKET_ADD_MEMBERSHIP (ALLMULTI)
+// setsockopt. Package var so tests can stub a failure and observe the Warn
+// without CAP_NET_RAW (#17217).
+var packetAddAllmultiMembership = func(fd int, mreq *unix.PacketMreq) error {
+	const level, opt = unix.SOL_PACKET, unix.PACKET_ADD_MEMBERSHIP
+	return unix.SetsockoptPacketMreq(fd, level, opt, mreq)
+}
+
 // maybeBindToDevice applies SO_BINDTODEVICE to fd ONLY when ifName is a plain
 // (non-VLAN) interface. On a VLAN sub-interface it is a no-op: generic-XDP
 // VLAN tag handling makes the kernel's interface association unpredictable, so
@@ -1437,10 +1460,12 @@ func openPerInterfaceSocket(ifName string, iface *net.Interface, isVLAN bool) (*
 		slog.Debug("vrrp: disable ipv4 multicast loopback failed", "interface", ifName, "err", err)
 	}
 
-	// Join VRRP multicast group on this interface.
+	// Join VRRP multicast group on this interface. One-time setup: if the
+	// join fails this socket may never receive peer adverts, so this is a
+	// Warn (visible at the default level), not Debug (#17217).
 	group := net.IPv4(224, 0, 0, 18)
-	if err := rawConn.JoinGroup(iface, &net.IPAddr{IP: group}); err != nil {
-		slog.Debug("vrrp: join multicast failed", "interface", ifName, "err", err)
+	if err := rawConnJoinGroup(rawConn, iface, &net.IPAddr{IP: group}); err != nil {
+		slog.Warn("vrrp: join multicast failed, VRRP adverts may not be received", "interface", ifName, "err", err)
 	}
 
 	return rawConn, conn, nil
@@ -1650,8 +1675,8 @@ func openAfPacketReceiver(ifIndex int) (int, error) {
 	// split-brain. ALLMULTI is the conservative correct choice. See
 	// docs/vrrp-afpacket-receiver.md.
 	mreq := buildAfPacketMembership(ifIndex)
-	if err := unix.SetsockoptPacketMreq(fd, unix.SOL_PACKET, unix.PACKET_ADD_MEMBERSHIP, &mreq); err != nil {
-		slog.Debug("vrrp: failed to set allmulti", "err", err)
+	if err := packetAddAllmultiMembership(fd, &mreq); err != nil {
+		slog.Warn("vrrp: failed to set allmulti, VRRP adverts may not be received", "ifindex", ifIndex, "err", err)
 	}
 
 	// Request PACKET_AUXDATA so recvmsg also delivers the VLAN TCI the
@@ -1745,9 +1770,13 @@ func openIPv6Socket(ifName string, iface *net.Interface, isVLAN bool) (net.Packe
 		Interface: uint32(iface.Index),
 	}
 	copy(mreq.Multiaddr[:], net.ParseIP("ff02::12").To16())
+	// This socket was created above in this function, so it cannot already
+	// have joined ff02::12; only EADDRINUSE is treated as success, any other
+	// errno is a real one-time setup failure and warns (#17217).
 	if err := sc.Control(func(rawfd uintptr) {
-		// Ignore error — may fail if group already joined.
-		_ = unix.SetsockoptIPv6Mreq(int(rawfd), unix.IPPROTO_IPV6, unix.IPV6_JOIN_GROUP, mreq)
+		if err := v6JoinGroup(int(rawfd), mreq); err != nil && !errors.Is(err, unix.EADDRINUSE) {
+			slog.Warn("vrrp: ipv6 join multicast failed, VRRP adverts may not be received", "interface", ifName, "err", err)
+		}
 		// Do not loop our own adverts back to local sockets (#6560) — the v6
 		// twin of the IP_MULTICAST_LOOP disable on the IPv4 raw conn. Same
 		// reasoning: this socket sends AND joins ff02::12, so the default
@@ -1756,7 +1785,7 @@ func openIPv6Socket(ifName string, iface *net.Interface, isVLAN bool) (net.Packe
 			slog.Debug("vrrp: disable ipv6 multicast loopback failed", "interface", ifName, "err", err)
 		}
 	}); err != nil {
-		slog.Debug("vrrp: ipv6 join multicast failed", "interface", ifName, "err", err)
+		slog.Warn("vrrp: ipv6 join multicast failed, VRRP adverts may not be received", "interface", ifName, "err", err)
 	}
 
 	return conn, fd, nil

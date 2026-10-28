@@ -578,17 +578,21 @@ func multiLeafAuthoredValues(n *Node) []string {
 //   - flat-set bracket        `set … leaf [ a b ]`
 //     → Keys=["leaf"], ONE child whose Keys hold EVERY value
 //
-// THE LAST SHAPE IS WHY firewallMatchValues IS NOT ENOUGH, and it is the whole
-// of #7126: firewallMatchValues reads Keys[1:] AND Children — exactly what
-// CLAUDE.md and docs/config-schema.md prescribe — yet still keeps only the
-// first value here, because it takes Keys[0] of each child. Reading Children is
-// not the same as reading every KEY of each child. The shape is produced by
-// SetPath for any leaf setSchema does NOT mark `multi: true`: a multi leaf
-// absorbs the bracket tail onto the node's own Keys (which is why
-// multiLeafAuthoredValues suffices there), a non-multi leaf files it under one
-// child. The hierarchical parser never produces it, which is why these sites
-// survive every brace-authored test and bite only the `set` / `load set` / CLI
-// path.
+// WHY firewallMatchValues IS NOT ENOUGH HERE, and it is the whole of #7126:
+// since #6714 firewallMatchValues reads every KEY of each DIRECT child
+// (plus Keys[1:] of the node), so the flat-set bracket shape itself no
+// longer discriminates the two readers — both keep every value on a direct
+// child's Keys. The real difference is DESCENT: firewallMatchValues reads
+// direct children only and never descends, while this reader walks the
+// whole subtree, so a value nested below a child (`leaf { a { b; } }` →
+// `b`) is seen here and not there. The shape is produced by SetPath for
+// any leaf setSchema does NOT mark `multi: true`: a multi leaf absorbs the
+// bracket tail onto the node's own Keys (which is why
+// multiLeafAuthoredValues suffices there), a non-multi leaf files it under
+// one child. The hierarchical parser never produces the flat-set bracket
+// shape, which is why these sites survive every brace-authored test and
+// bite only the `set` / `load set` / CLI path. See
+// TestReaderDifferences17216PinDocClaims for the pinned differences.
 //
 // WHEN THIS IS THE WRONG READER. It takes EVERY non-empty token below the node,
 // so it must only be used where every such token is a value:

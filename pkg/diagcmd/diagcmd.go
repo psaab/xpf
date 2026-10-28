@@ -10,8 +10,10 @@
 package diagcmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -30,28 +32,80 @@ type PingRequestOptions struct {
 func isRangeErr(err error) bool { return errors.Is(err, strconv.ErrRange) }
 
 // Ping budget shared by the server handlers and the remote CLI client
-// (#15235 A51-02). The server sizes its exec budget as count*1s+15s
+// (#15235 A51-02, #17203). This is the sole implementation: the REST
+// (pkg/api) and gRPC (pkg/grpcapi) handlers and the remote CLI
+// (cmd/cli) all call it, so tuning any constant below moves every
+// surface together. The server sizes its exec budget as count*1s+15s
 // (30s floor, 150s ceiling); the client must outlive that plus stream
 // slack or a count-100 ping loses its summary when the 60s client
 // deadline fires first.
+//
+// Ping budget constants (#1819, #15235, #17203).
 const (
-	pingPacketInterval = 1 * time.Second
-	pingExecSlack      = 15 * time.Second
-	pingFloor          = 30 * time.Second
-	pingCeiling        = 150 * time.Second
+	// PingPacketInterval is the per-packet budget: the handlers do not
+	// pass -i, so ping sends one packet per second (iputils default).
+	// If an interval knob is ever added, this must become a parameter.
+	PingPacketInterval = 1 * time.Second
+	// PingExecSlack absorbs exec/VRF setup, DNS resolution, and the
+	// final per-packet reply timeout so a fully-successful run never
+	// grazes the deadline.
+	PingExecSlack = 15 * time.Second
+	// PingFloor is the previous hardcoded ping bound; the #1819
+	// right-sizing must not tighten any existing budget.
+	PingFloor = 30 * time.Second
+	// DiagExecCeiling caps every request-sized diag budget. The Count
+	// clamp (≤100 → 115s) keeps well under it today; the ceiling is
+	// defense-in-depth so a future clamp change cannot let one request
+	// pin a handler goroutine for minutes.
+	DiagExecCeiling = 150 * time.Second
+	// TracerouteTimeout bounds REST/gRPC traceroute. Neither request
+	// carries max_ttl, so this is a constant rather than a formula;
+	// 60s is the pre-#1819 HTTP bound, kept when the 30s gRPC path
+	// was aligned to it.
+	TracerouteTimeout = 60 * time.Second
 	// PingClientSlack is the extra client-side margin over the server
 	// budget for round-trip/stream delivery of the final summary.
 	PingClientSlack = 15 * time.Second
 )
 
-// PingExecTimeout is the server-side request-sized ping budget.
+// Exec budget constants shared by the request-path exec helpers
+// (#1805, #17203). The 15s/5s values mirror the apply-path contract
+// in pkg/daemon/exec_timeout.go (#1794), which remains the contract
+// reference; they live here so pkg/api and pkg/grpcapi share one
+// definition instead of mirrors. pkg/daemon cannot be imported by
+// those packages (it imports them).
+const (
+	// RequestExecTimeout bounds a request-path child process runtime;
+	// on expiry the process is killed.
+	RequestExecTimeout = 15 * time.Second
+	// RequestExecWaitDelay caps the post-kill pipe-drain window:
+	// without it, Wait blocks until every inherited write end of the
+	// output pipes closes, which may be long after the main process
+	// dies. Hard ceiling per exec becomes its context timeout + 5s.
+	RequestExecWaitDelay = 5 * time.Second
+)
+
+// PingExecTimeout is the server-side request-sized ping budget:
+// count × 1s/packet + slack, floored at the previous 30s bound and
+// capped at the diag ceiling. The count is clamped internally, so
+// callers may pass the raw request count.
 func PingExecTimeout(count int) time.Duration {
-	d := time.Duration(ClampPingCount(count))*pingPacketInterval + pingExecSlack
-	if d < pingFloor {
-		d = pingFloor
+	d := time.Duration(ClampPingCount(count))*PingPacketInterval + PingExecSlack
+	if d < PingFloor {
+		d = PingFloor
 	}
-	if d > pingCeiling {
-		d = pingCeiling
+	if d > DiagExecCeiling {
+		d = DiagExecCeiling
+	}
+	return d
+}
+
+// ClampDiagTimeout enforces DiagExecCeiling on any diag-stream
+// budget; the gRPC stream runner applies it to whatever the caller
+// passes so no future formula can exceed the ceiling.
+func ClampDiagTimeout(d time.Duration) time.Duration {
+	if d > DiagExecCeiling {
+		return DiagExecCeiling
 	}
 	return d
 }
@@ -60,6 +114,39 @@ func PingExecTimeout(count int) time.Duration {
 // server budget for the clamped count plus PingClientSlack.
 func PingClientTimeout(count int) time.Duration {
 	return PingExecTimeout(count) + PingClientSlack
+}
+
+// RunTimeout runs a command under the request-path bound, discarding
+// output. Used by the deferred power-action goroutines, which pass
+// context.Background() — a client disconnect must not cancel a
+// confirmed reboot/halt — and ignore the returned error exactly as
+// the raw .Run() calls did.
+func RunTimeout(ctx context.Context, name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, RequestExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = RequestExecWaitDelay
+	return cmd.Run()
+}
+
+// OutputTimeout runs a command under the request-path bound,
+// returning stdout only.
+func OutputTimeout(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, RequestExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = RequestExecWaitDelay
+	return cmd.Output()
+}
+
+// CombinedOutputTimeout runs a command under the request-path
+// bound, returning combined stdout+stderr.
+func CombinedOutputTimeout(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, RequestExecTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = RequestExecWaitDelay
+	return cmd.CombinedOutput()
 }
 
 // TracerouteRequestOptions is the validated CLI traceroute selector set.

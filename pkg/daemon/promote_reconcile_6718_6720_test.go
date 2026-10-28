@@ -51,7 +51,11 @@ func newPromoteReconcileEnv(t *testing.T) *promoteReconcileEnv {
 	}
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: s}
 	reg := newFakeReg()
-	m := newManagementReconciler(d, api.Config{ListenFunc: reg.listen})
+	// The later first-commit rollback enables HTTPS; keep generated TLS state
+	// in the test tree even when the suite runs with privileges. The dir is
+	// pinned on the reconciler base config at construction (#17213), so
+	// desired() inherits it on every reconcile.
+	m := newManagementReconciler(d, api.Config{ListenFunc: reg.listen, TLSSelfSignedDir: t.TempDir()})
 	d.mgmt.Store(m)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -64,9 +68,6 @@ func newPromoteReconcileEnv(t *testing.T) *promoteReconcileEnv {
 	if srv == nil {
 		t.Fatal("management server was not constructed")
 	}
-	// The later first-commit rollback enables HTTPS; keep generated TLS state
-	// in the test tree even when the suite runs with privileges.
-	srv.SetTLSCertDirForTest(t.TempDir())
 	return &promoteReconcileEnv{d: d, store: s, m: m}
 }
 
@@ -223,7 +224,7 @@ func TestPeerSyncBackstopStillReconcilesManagement6720(t *testing.T) {
 	mgmtAuthCommit(t, peerStore, mgmtAuthConfigFor("ge-0/0/0", newSecret))
 	peerText := peerStore.ShowActive()
 
-	_, err = e.d.syncAndApply(context.Background(), peerText, nil)
+	_, err = e.d.syncAndApplyForTest(context.Background(), peerText, nil)
 	if err == nil {
 		t.Fatal("setup: the topology backstop must reject a peer-synced topology transition " +
 			"on a daemon whose HA runtime cannot be torn down live; without that rejection " +
@@ -297,7 +298,7 @@ func TestPeerSyncIdentityBackstopStillReconcilesManagement6720(t *testing.T) {
 	mgmtAuthCommit(t, peerStore, mgmtAuthConfigFor("ge-0/0/0", newSecret)+clusterLines(2))
 	peerText := peerStore.ShowActive()
 
-	_, err = e.d.syncAndApply(context.Background(), peerText, nil)
+	_, err = e.d.syncAndApplyForTest(context.Background(), peerText, nil)
 	if err == nil {
 		t.Fatal("setup: the identity backstop must reject a peer-synced cluster-id change; " +
 			"without that rejection this test exercises the ordinary apply path")

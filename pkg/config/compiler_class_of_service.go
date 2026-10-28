@@ -174,6 +174,370 @@ func cosClassifiersSchema15064(kind string) *schemaNode {
 func cosRewriteRulesSchema15064(kind string) *schemaNode {
 	return schemaForPath("class-of-service", "rewrite-rules", kind)
 }
+
+// cosCodePointKindBy returns the kind for a section/keyword pair.
+func cosCodePointKindBy(section, keyword string) (cosCodePointKind, bool) {
+	for _, k := range cosCodePointKinds {
+		if k.section == section && k.keyword == keyword {
+			return k, true
+		}
+	}
+	return cosCodePointKind{}, false
+}
+
+// cosCodePointKind is the one descriptor for a CoS code-point kind (#17183).
+// The seven kinds -- classifiers dscp / ieee-802.1 / inet-precedence and
+// rewrite-rules inet-precedence / exp / dscp / ieee-802.1 -- were seven
+// hand-copied loops that recorded definedness three different ways, so the
+// #15681 fix (an entryless-but-defined name still resolves) landed in one
+// copy and the four map-backed kinds kept rejecting an entryless binding as
+// "undefined" at strict commit. Now definedness lives in exactly one place:
+// every kind records its name unconditionally (names list for the three
+// name-only kinds, Defs/store map for the rest), and both binding consumers
+// -- cosUnitRefsResolve and the ValidateConfig warn path -- ask the one
+// isDefined predicate. The entries filter remains where it belongs: consumers
+// that publish runtime state (dataplane snapshot, show, queue warnings)
+// simply see a defined rule with zero entries.
+//
+// collect reads one loss-priority node into the kind's raw code points
+// (rewrite kinds collect a one-element slice). addEntry appends the typed
+// entry to the typed def object held in def.
+type cosCodePointKind struct {
+	section string // "classifiers" or "rewrite-rules"
+	keyword string // "dscp", "ieee-802.1", "inet-precedence", "exp"
+	label   string // operator-facing phrase, e.g. "dscp classifier"
+	schema  func(string) *schemaNode
+	// names, when non-nil, is the kind's name-only list on cos: membership
+	// is definedness for the three kinds whose compiled Defs stay Go-only.
+	names func(*ClassOfServiceConfig) *[]string
+	// def find-or-creates the typed def for name in its map (initialising
+	// the map on store).
+	def      func(cos *ClassOfServiceConfig, name string) (def any)
+	collect  func(*Node) ([]uint8, error)
+	addEntry func(def any, class string, lp LossPriority, cps []uint8)
+	// store records the def in its map. Map-backed kinds store entryless
+	// defs so definedness and runtime agree on presence; the two inert
+	// rewrite kinds store only when entries exist, matching the Defs
+	// contract those Go-only maps already had (their name list carries
+	// definedness instead).
+	store func(cos *ClassOfServiceConfig, def any)
+	// bound reports a unit binding for this kind, when Junos allows one.
+	bound func(u *CoSInterfaceUnit) (string, bool)
+}
+
+func (k cosCodePointKind) prefix() string {
+	return "class-of-service " + k.section + " " + k.keyword
+}
+
+// isDefined reports whether name was defined for this kind, independent of
+// whether the definition carries any entries (#17183). This is the single
+// definedness predicate for both strict and warn binding checks.
+func (k cosCodePointKind) isDefined(cos *ClassOfServiceConfig, name string) bool {
+	if cos == nil || name == "" {
+		return false
+	}
+	if k.names != nil {
+		return slices.Contains(*k.names(cos), name)
+	}
+	return k.defExists(cos, name)
+}
+
+// defExists reports map presence without creating the def.
+func (k cosCodePointKind) defExists(cos *ClassOfServiceConfig, name string) bool {
+	switch k.section + "/" + k.keyword {
+	case "classifiers/dscp":
+		_, ok := cos.DSCPClassifiers[name]
+		return ok
+	case "classifiers/ieee-802.1":
+		_, ok := cos.IEEE8021Classifiers[name]
+		return ok
+	case "classifiers/inet-precedence":
+		_, ok := cos.INetPrecedenceClassifierDefs[name]
+		return ok
+	case "rewrite-rules/dscp":
+		_, ok := cos.DSCPRewriteRules[name]
+		return ok
+	case "rewrite-rules/ieee-802.1":
+		_, ok := cos.IEEE8021RewriteRules[name]
+		return ok
+	case "rewrite-rules/inet-precedence":
+		_, ok := cos.INetPrecedenceRewriteRuleDefs[name]
+		return ok
+	case "rewrite-rules/exp":
+		_, ok := cos.EXPRewriteRuleDefs[name]
+		return ok
+	}
+	return false
+}
+
+// cosCodePointKinds is the registry of all seven kinds, in the historical
+// compile order (classifiers before rewrite-rules).
+var cosCodePointKinds = []cosCodePointKind{
+	{
+		section: "classifiers", keyword: "dscp", label: "dscp classifier",
+		schema: cosClassifiersSchema15064,
+		def: func(cos *ClassOfServiceConfig, name string) any {
+			d := cos.DSCPClassifiers[name]
+			if d == nil {
+				d = &CoSDSCPClassifier{Name: name}
+			}
+			return d
+		},
+		collect: collectCoSDSCPCodePoints,
+		addEntry: func(def any, class string, lp LossPriority, cps []uint8) {
+			d := def.(*CoSDSCPClassifier)
+			d.Entries = append(d.Entries, &CoSDSCPClassifierEntry{ForwardingClass: class, LossPriority: lp, DSCPValues: cps})
+		},
+		store: func(cos *ClassOfServiceConfig, def any) {
+			d := def.(*CoSDSCPClassifier)
+			cos.DSCPClassifiers[d.Name] = d
+		},
+		bound: func(u *CoSInterfaceUnit) (string, bool) { return u.DSCPClassifier, u.DSCPClassifier != "" },
+	},
+	{
+		section: "classifiers", keyword: "ieee-802.1", label: "ieee-802.1 classifier",
+		schema: cosClassifiersSchema15064,
+		def: func(cos *ClassOfServiceConfig, name string) any {
+			d := cos.IEEE8021Classifiers[name]
+			if d == nil {
+				d = &CoSIEEE8021Classifier{Name: name}
+			}
+			return d
+		},
+		collect: collectCoS8021CodePoints,
+		addEntry: func(def any, class string, lp LossPriority, cps []uint8) {
+			d := def.(*CoSIEEE8021Classifier)
+			d.Entries = append(d.Entries, &CoSIEEE8021ClassifierEntry{ForwardingClass: class, LossPriority: lp, CodePoints: cps})
+		},
+		store: func(cos *ClassOfServiceConfig, def any) {
+			d := def.(*CoSIEEE8021Classifier)
+			cos.IEEE8021Classifiers[d.Name] = d
+		},
+		bound: func(u *CoSInterfaceUnit) (string, bool) { return u.IEEE8021Classifier, u.IEEE8021Classifier != "" },
+	},
+	{
+		section: "classifiers", keyword: "inet-precedence", label: "inet-precedence classifier",
+		schema: cosClassifiersSchema15064,
+		names:  func(cos *ClassOfServiceConfig) *[]string { return &cos.INetPrecedenceClassifiers },
+		def: func(cos *ClassOfServiceConfig, name string) any {
+			var d *CoSINetPrecedenceClassifier
+			if cos.INetPrecedenceClassifierDefs != nil {
+				d = cos.INetPrecedenceClassifierDefs[name]
+			}
+			if d == nil {
+				d = &CoSINetPrecedenceClassifier{Name: name}
+			}
+			return d
+		},
+		collect: collectCoSINetPrecedenceCodePoints,
+		addEntry: func(def any, class string, lp LossPriority, cps []uint8) {
+			d := def.(*CoSINetPrecedenceClassifier)
+			d.Entries = append(d.Entries, &CoSINetPrecedenceClassifierEntry{ForwardingClass: class, LossPriority: lp, Precedences: cps})
+		},
+		store: func(cos *ClassOfServiceConfig, def any) {
+			// #15681: populate Defs unconditionally (even with no entries),
+			// mirroring how the name list records definedness.
+			d := def.(*CoSINetPrecedenceClassifier)
+			if cos.INetPrecedenceClassifierDefs == nil {
+				cos.INetPrecedenceClassifierDefs = make(map[string]*CoSINetPrecedenceClassifier)
+			}
+			cos.INetPrecedenceClassifierDefs[d.Name] = d
+		},
+		bound: func(u *CoSInterfaceUnit) (string, bool) {
+			return u.INetPrecedenceClassifier, u.INetPrecedenceClassifier != ""
+		},
+	},
+	{
+		section: "rewrite-rules", keyword: "inet-precedence", label: "inet-precedence rewrite-rule",
+		schema: cosRewriteRulesSchema15064,
+		names:  func(cos *ClassOfServiceConfig) *[]string { return &cos.INetPrecedenceRewriteRules },
+		def: func(cos *ClassOfServiceConfig, name string) any {
+			d := cos.INetPrecedenceRewriteRuleDefs[name]
+			if d == nil {
+				d = &CoSINetPrecedenceRewriteRule{Name: name}
+			}
+			return d
+		},
+		collect: func(n *Node) ([]uint8, error) {
+			cp, ok, err := collectCoS3BitRewriteCodePoint(n, "inet-precedence")
+			if err != nil || !ok {
+				return nil, err
+			}
+			return []uint8{cp}, nil
+		},
+		addEntry: func(def any, class string, lp LossPriority, cps []uint8) {
+			d := def.(*CoSINetPrecedenceRewriteRule)
+			d.Entries = append(d.Entries, &CoSInertRewriteRuleEntry{ForwardingClass: class, LossPriority: lp, CodePoint: cps[0]})
+		},
+		store: func(cos *ClassOfServiceConfig, def any) {
+			d := def.(*CoSINetPrecedenceRewriteRule)
+			if len(d.Entries) > 0 {
+				if cos.INetPrecedenceRewriteRuleDefs == nil {
+					cos.INetPrecedenceRewriteRuleDefs = make(map[string]*CoSINetPrecedenceRewriteRule)
+				}
+				cos.INetPrecedenceRewriteRuleDefs[d.Name] = d
+			}
+		},
+	},
+	{
+		section: "rewrite-rules", keyword: "exp", label: "exp rewrite-rule",
+		schema: cosRewriteRulesSchema15064,
+		names:  func(cos *ClassOfServiceConfig) *[]string { return &cos.EXPRewriteRules },
+		def: func(cos *ClassOfServiceConfig, name string) any {
+			d := cos.EXPRewriteRuleDefs[name]
+			if d == nil {
+				d = &CoSEXPRewriteRule{Name: name}
+			}
+			return d
+		},
+		collect: func(n *Node) ([]uint8, error) {
+			cp, ok, err := collectCoS3BitRewriteCodePoint(n, "exp")
+			if err != nil || !ok {
+				return nil, err
+			}
+			return []uint8{cp}, nil
+		},
+		addEntry: func(def any, class string, lp LossPriority, cps []uint8) {
+			d := def.(*CoSEXPRewriteRule)
+			d.Entries = append(d.Entries, &CoSInertRewriteRuleEntry{ForwardingClass: class, LossPriority: lp, CodePoint: cps[0]})
+		},
+		store: func(cos *ClassOfServiceConfig, def any) {
+			d := def.(*CoSEXPRewriteRule)
+			if len(d.Entries) > 0 {
+				if cos.EXPRewriteRuleDefs == nil {
+					cos.EXPRewriteRuleDefs = make(map[string]*CoSEXPRewriteRule)
+				}
+				cos.EXPRewriteRuleDefs[d.Name] = d
+			}
+		},
+	},
+	{
+		section: "rewrite-rules", keyword: "dscp", label: "dscp rewrite-rule",
+		schema: cosRewriteRulesSchema15064,
+		def: func(cos *ClassOfServiceConfig, name string) any {
+			d := cos.DSCPRewriteRules[name]
+			if d == nil {
+				d = &CoSDSCPRewriteRule{Name: name}
+			}
+			return d
+		},
+		collect: func(n *Node) ([]uint8, error) {
+			cp, ok, err := collectCoSDSCPRewriteCodePoint(n)
+			if err != nil || !ok {
+				return nil, err
+			}
+			return []uint8{cp}, nil
+		},
+		addEntry: func(def any, class string, lp LossPriority, cps []uint8) {
+			d := def.(*CoSDSCPRewriteRule)
+			d.Entries = append(d.Entries, &CoSDSCPRewriteRuleEntry{ForwardingClass: class, LossPriority: lp, DSCPValue: cps[0]})
+		},
+		store: func(cos *ClassOfServiceConfig, def any) {
+			d := def.(*CoSDSCPRewriteRule)
+			cos.DSCPRewriteRules[d.Name] = d
+		},
+		bound: func(u *CoSInterfaceUnit) (string, bool) { return u.DSCPRewriteRule, u.DSCPRewriteRule != "" },
+	},
+	{
+		section: "rewrite-rules", keyword: "ieee-802.1", label: "ieee-802.1 rewrite-rule",
+		schema: cosRewriteRulesSchema15064,
+		def: func(cos *ClassOfServiceConfig, name string) any {
+			d := cos.IEEE8021RewriteRules[name]
+			if d == nil {
+				d = &CoSIEEE8021RewriteRule{Name: name}
+			}
+			return d
+		},
+		collect: func(n *Node) ([]uint8, error) {
+			cp, ok, err := collectCoS8021RewriteCodePoint(n)
+			if err != nil || !ok {
+				return nil, err
+			}
+			return []uint8{cp}, nil
+		},
+		addEntry: func(def any, class string, lp LossPriority, cps []uint8) {
+			d := def.(*CoSIEEE8021RewriteRule)
+			d.Entries = append(d.Entries, &CoSIEEE8021RewriteRuleEntry{ForwardingClass: class, LossPriority: lp, PCPValue: cps[0]})
+		},
+		store: func(cos *ClassOfServiceConfig, def any) {
+			d := def.(*CoSIEEE8021RewriteRule)
+			cos.IEEE8021RewriteRules[d.Name] = d
+		},
+		bound: func(u *CoSInterfaceUnit) (string, bool) {
+			return u.IEEE8021RewriteRule, u.IEEE8021RewriteRule != ""
+		},
+	},
+}
+
+// compileCoSCodePointKind is the single compile loop for all seven kinds
+// (#17183). Definedness is recorded unconditionally: the name is appended
+// to the kind's name list (when it has one) and the def is stored via the
+// kind's store before any entry filtering. An entry whose code points all
+// drop (empty list, or a rewrite with no code-point) contributes nothing,
+// exactly as the per-kind loops behaved; only the definedness recording
+// moved ahead of that filter.
+func compileCoSCodePointKind(kind cosCodePointKind, insts []struct {
+	name string
+	node *Node
+}, cos *ClassOfServiceConfig, opts compileOpts, warnings *[]string) error {
+	for _, inst := range insts {
+		if kind.names != nil {
+			names := kind.names(cos)
+			if !slices.Contains(*names, inst.name) {
+				*names = append(*names, inst.name)
+			}
+		}
+		def := kind.def(cos, inst.name)
+		name := inst.name
+		for _, fcNode := range cosPackedInstanceNode(inst.node, inst.name, kind.keyword, kind.schema(kind.keyword)).FindChildren("forwarding-class") {
+			className := ""
+			if len(fcNode.Keys) >= 2 {
+				className = fcNode.Keys[1]
+			}
+			if className == "" {
+				continue
+			}
+			for _, lpNode := range fcNode.FindChildren("loss-priority") {
+				lossPriority := ""
+				if len(lpNode.Keys) >= 2 {
+					lossPriority = lpNode.Keys[1]
+				}
+				if lossPriority == "" {
+					lossPriority = nodeVal(lpNode)
+				}
+				codePoints, err := kind.collect(lpNode)
+				if err != nil {
+					if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
+						if warnings != nil {
+							*warnings = append(*warnings, fmt.Sprintf(
+								"%s %q (downgraded to warning on tolerant path): %v",
+								kind.prefix(), name, err))
+						}
+						continue
+					}
+					return fmt.Errorf("%s %q: %w", kind.prefix(), name, err)
+				}
+				if len(codePoints) == 0 {
+					continue
+				}
+				kind.addEntry(def, className, LossPriority(lossPriority), codePoints)
+			}
+		}
+		kind.store(cos, def)
+	}
+	return nil
+}
+
+// cosBoundKinds returns the kinds a unit can bind, in gate order.
+func cosBoundKinds() []cosCodePointKind {
+	var out []cosCodePointKind
+	for _, k := range cosCodePointKinds {
+		if k.bound != nil {
+			out = append(out, k)
+		}
+	}
+	return out
+}
 func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOpts, warnings *[]string) error {
 
 	if cos == nil {
@@ -351,166 +715,12 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		// the shared rule. A fresh classifier per instance overwrote the
 		// same-named earlier hierarchical block (second class-of-service
 		// root or second classifiers container), losing its code points.
-		for _, inst := range namedInstances(classifiersNode.FindChildren("dscp")) {
-			classifier := cos.DSCPClassifiers[inst.name]
-			if classifier == nil {
-				classifier = &CoSDSCPClassifier{Name: inst.name}
+		// #17183: all three classifier kinds compile through the one
+		// generic loop; definedness is recorded unconditionally.
+		for _, kind := range cosCodePointKinds[:3] {
+			if err := compileCoSCodePointKind(kind, namedInstances(classifiersNode.FindChildren(kind.keyword)), cos, opts, warnings); err != nil {
+				return err
 			}
-			for _, fcNode := range cosPackedInstanceNode(inst.node, inst.name, "dscp", cosClassifiersSchema15064("dscp")).FindChildren("forwarding-class") {
-				className := ""
-				if len(fcNode.Keys) >= 2 {
-					className = fcNode.Keys[1]
-				}
-				if className == "" {
-					continue
-				}
-				for _, lpNode := range fcNode.FindChildren("loss-priority") {
-					lossPriority := ""
-					if len(lpNode.Keys) >= 2 {
-						lossPriority = lpNode.Keys[1]
-					}
-					if lossPriority == "" {
-						lossPriority = nodeVal(lpNode)
-					}
-					codePoints, err := collectCoSDSCPCodePoints(lpNode)
-					if err != nil {
-						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
-							if warnings != nil {
-								*warnings = append(*warnings, fmt.Sprintf(
-									"class-of-service classifiers dscp %q (downgraded to warning on tolerant path): %v",
-									classifier.Name, err))
-							}
-							continue
-						}
-						return fmt.Errorf("class-of-service classifiers dscp %q: %w", classifier.Name, err)
-					}
-					if len(codePoints) == 0 {
-						continue
-					}
-					classifier.Entries = append(classifier.Entries, &CoSDSCPClassifierEntry{
-						ForwardingClass: className,
-						LossPriority:    LossPriority(lossPriority),
-						DSCPValues:      codePoints,
-					})
-				}
-			}
-			if len(classifier.Entries) > 0 {
-				cos.DSCPClassifiers[classifier.Name] = classifier
-			}
-		}
-		for _, inst := range namedInstances(classifiersNode.FindChildren("ieee-802.1")) {
-			classifier := cos.IEEE8021Classifiers[inst.name]
-			if classifier == nil {
-				classifier = &CoSIEEE8021Classifier{Name: inst.name}
-			}
-			for _, fcNode := range cosPackedInstanceNode(inst.node, inst.name, "ieee-802.1", cosClassifiersSchema15064("ieee-802.1")).FindChildren("forwarding-class") {
-				className := ""
-				if len(fcNode.Keys) >= 2 {
-					className = fcNode.Keys[1]
-				}
-				if className == "" {
-					continue
-				}
-				for _, lpNode := range fcNode.FindChildren("loss-priority") {
-					lossPriority := ""
-					if len(lpNode.Keys) >= 2 {
-						lossPriority = lpNode.Keys[1]
-					}
-					if lossPriority == "" {
-						lossPriority = nodeVal(lpNode)
-					}
-					codePoints, err := collectCoS8021CodePoints(lpNode)
-					if err != nil {
-						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
-							if warnings != nil {
-								*warnings = append(*warnings, fmt.Sprintf(
-									"class-of-service classifiers ieee-802.1 %q (downgraded to warning on tolerant path): %v",
-									classifier.Name, err))
-							}
-							continue
-						}
-						return fmt.Errorf("class-of-service classifiers ieee-802.1 %q: %w", classifier.Name, err)
-					}
-					if len(codePoints) == 0 {
-						continue
-					}
-					classifier.Entries = append(classifier.Entries, &CoSIEEE8021ClassifierEntry{
-						ForwardingClass: className,
-						LossPriority:    LossPriority(lossPriority),
-						CodePoints:      codePoints,
-					})
-				}
-			}
-			if len(classifier.Entries) > 0 {
-				cos.IEEE8021Classifiers[classifier.Name] = classifier
-			}
-		}
-		// #6847: inet-precedence classifiers are now COMPILED and enforced.
-		// #4316 recorded only their names (for the accepted-but-inert
-		// advisory) because nothing consumed the map and the unit schema had
-		// no binding site. The name list is still populated for the
-		// undefined-reference check; the entries drive the dataplane.
-		for _, inst := range namedInstances(classifiersNode.FindChildren("inet-precedence")) {
-			if !slices.Contains(cos.INetPrecedenceClassifiers, inst.name) {
-				cos.INetPrecedenceClassifiers = append(cos.INetPrecedenceClassifiers, inst.name)
-			}
-			var classifier *CoSINetPrecedenceClassifier
-			if cos.INetPrecedenceClassifierDefs != nil {
-				classifier = cos.INetPrecedenceClassifierDefs[inst.name]
-			}
-			if classifier == nil {
-				classifier = &CoSINetPrecedenceClassifier{Name: inst.name}
-			}
-			for _, fcNode := range cosPackedInstanceNode(inst.node, inst.name, "inet-precedence", cosClassifiersSchema15064("inet-precedence")).FindChildren("forwarding-class") {
-				className := ""
-				if len(fcNode.Keys) >= 2 {
-					className = fcNode.Keys[1]
-				}
-				if className == "" {
-					continue
-				}
-				for _, lpNode := range fcNode.FindChildren("loss-priority") {
-					lossPriority := ""
-					if len(lpNode.Keys) >= 2 {
-						lossPriority = lpNode.Keys[1]
-					}
-					if lossPriority == "" {
-						lossPriority = nodeVal(lpNode)
-					}
-					codePoints, err := collectCoSINetPrecedenceCodePoints(lpNode)
-					if err != nil {
-						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
-							if warnings != nil {
-								*warnings = append(*warnings, fmt.Sprintf(
-									"class-of-service classifiers inet-precedence %q (downgraded to warning on tolerant path): %v",
-									classifier.Name, err))
-							}
-							continue
-						}
-						return fmt.Errorf("class-of-service classifiers inet-precedence %q: %w", classifier.Name, err)
-					}
-					if len(codePoints) == 0 {
-						continue
-					}
-					classifier.Entries = append(classifier.Entries, &CoSINetPrecedenceClassifierEntry{
-						ForwardingClass: className,
-						LossPriority:    LossPriority(lossPriority),
-						Precedences:     codePoints,
-					})
-				}
-			}
-			// #15681: populate Defs unconditionally (even with no entries),
-			// mirroring how the name list records definedness. Before this
-			// an entryless classifier was absent from Defs, so consumers
-			// keyed on Defs (queue-mapping warnings, unit-runtime check,
-			// dataplane snapshot emptiness) treated a defined-but-empty
-			// binding as undefined. Definedness checks that must accept
-			// entryless definitions already consult the name list; Defs
-			// now carries the (possibly empty) classifier object as well.
-			if cos.INetPrecedenceClassifierDefs == nil {
-				cos.INetPrecedenceClassifierDefs = make(map[string]*CoSINetPrecedenceClassifier)
-			}
-			cos.INetPrecedenceClassifierDefs[classifier.Name] = classifier
 		}
 	}
 
@@ -521,203 +731,11 @@ func compileClassOfService(node *Node, cos *ClassOfServiceConfig, opts compileOp
 		// accepted but inert. Keep their configured names for the advisory and
 		// name-only show surface, but compile their inner entries into Go-only
 		// validation models so malformed code-points and loss-priorities are
-		// still rejected at strict commit (#11811).
-		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("inet-precedence")) {
-			if !slices.Contains(cos.INetPrecedenceRewriteRules, inst.name) {
-				cos.INetPrecedenceRewriteRules = append(cos.INetPrecedenceRewriteRules, inst.name)
-			}
-			rewriteRule := cos.INetPrecedenceRewriteRuleDefs[inst.name]
-			if rewriteRule == nil {
-				rewriteRule = &CoSINetPrecedenceRewriteRule{Name: inst.name}
-			}
-			for _, fcNode := range cosPackedInstanceNode(inst.node, inst.name, "inet-precedence", cosRewriteRulesSchema15064("inet-precedence")).FindChildren("forwarding-class") {
-				className := ""
-				if len(fcNode.Keys) >= 2 {
-					className = fcNode.Keys[1]
-				}
-				if className == "" {
-					continue
-				}
-				for _, lpNode := range fcNode.FindChildren("loss-priority") {
-					lossPriority := ""
-					if len(lpNode.Keys) >= 2 {
-						lossPriority = lpNode.Keys[1]
-					}
-					if lossPriority == "" {
-						lossPriority = nodeVal(lpNode)
-					}
-					codePoint, ok, err := collectCoS3BitRewriteCodePoint(lpNode, "inet-precedence")
-					if err != nil {
-						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
-							if warnings != nil {
-								*warnings = append(*warnings, fmt.Sprintf(
-									"class-of-service rewrite-rules inet-precedence %q (downgraded to warning on tolerant path): %v",
-									rewriteRule.Name, err))
-							}
-							continue
-						}
-						return fmt.Errorf("class-of-service rewrite-rules inet-precedence %q: %w", rewriteRule.Name, err)
-					}
-					if !ok {
-						continue
-					}
-					rewriteRule.Entries = append(rewriteRule.Entries, &CoSInertRewriteRuleEntry{
-						ForwardingClass: className,
-						LossPriority:    LossPriority(lossPriority),
-						CodePoint:       codePoint,
-					})
-				}
-			}
-			if len(rewriteRule.Entries) > 0 {
-				cos.INetPrecedenceRewriteRuleDefs[rewriteRule.Name] = rewriteRule
-			}
-		}
-		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("exp")) {
-			if !slices.Contains(cos.EXPRewriteRules, inst.name) {
-				cos.EXPRewriteRules = append(cos.EXPRewriteRules, inst.name)
-			}
-			rewriteRule := cos.EXPRewriteRuleDefs[inst.name]
-			if rewriteRule == nil {
-				rewriteRule = &CoSEXPRewriteRule{Name: inst.name}
-			}
-			for _, fcNode := range cosPackedInstanceNode(inst.node, inst.name, "exp", cosRewriteRulesSchema15064("exp")).FindChildren("forwarding-class") {
-				className := ""
-				if len(fcNode.Keys) >= 2 {
-					className = fcNode.Keys[1]
-				}
-				if className == "" {
-					continue
-				}
-				for _, lpNode := range fcNode.FindChildren("loss-priority") {
-					lossPriority := ""
-					if len(lpNode.Keys) >= 2 {
-						lossPriority = lpNode.Keys[1]
-					}
-					if lossPriority == "" {
-						lossPriority = nodeVal(lpNode)
-					}
-					codePoint, ok, err := collectCoS3BitRewriteCodePoint(lpNode, "exp")
-					if err != nil {
-						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
-							if warnings != nil {
-								*warnings = append(*warnings, fmt.Sprintf(
-									"class-of-service rewrite-rules exp %q (downgraded to warning on tolerant path): %v",
-									rewriteRule.Name, err))
-							}
-							continue
-						}
-						return fmt.Errorf("class-of-service rewrite-rules exp %q: %w", rewriteRule.Name, err)
-					}
-					if !ok {
-						continue
-					}
-					rewriteRule.Entries = append(rewriteRule.Entries, &CoSInertRewriteRuleEntry{
-						ForwardingClass: className,
-						LossPriority:    LossPriority(lossPriority),
-						CodePoint:       codePoint,
-					})
-				}
-			}
-			if len(rewriteRule.Entries) > 0 {
-				cos.EXPRewriteRuleDefs[rewriteRule.Name] = rewriteRule
-			}
-		}
-		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("dscp")) {
-			rewriteRule := cos.DSCPRewriteRules[inst.name]
-			if rewriteRule == nil {
-				rewriteRule = &CoSDSCPRewriteRule{Name: inst.name}
-			}
-			for _, fcNode := range cosPackedInstanceNode(inst.node, inst.name, "dscp", cosRewriteRulesSchema15064("dscp")).FindChildren("forwarding-class") {
-				className := ""
-				if len(fcNode.Keys) >= 2 {
-					className = fcNode.Keys[1]
-				}
-				if className == "" {
-					continue
-				}
-				for _, lpNode := range fcNode.FindChildren("loss-priority") {
-					lossPriority := ""
-					if len(lpNode.Keys) >= 2 {
-						lossPriority = lpNode.Keys[1]
-					}
-					if lossPriority == "" {
-						lossPriority = nodeVal(lpNode)
-					}
-					codePoint, ok, err := collectCoSDSCPRewriteCodePoint(lpNode)
-					if err != nil {
-						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
-							if warnings != nil {
-								*warnings = append(*warnings, fmt.Sprintf(
-									"class-of-service rewrite-rules dscp %q (downgraded to warning on tolerant path): %v",
-									rewriteRule.Name, err))
-							}
-							continue
-						}
-						return fmt.Errorf("class-of-service rewrite-rules dscp %q: %w", rewriteRule.Name, err)
-					}
-					if !ok {
-						continue
-					}
-					rewriteRule.Entries = append(rewriteRule.Entries, &CoSDSCPRewriteRuleEntry{
-						ForwardingClass: className,
-						LossPriority:    LossPriority(lossPriority),
-						DSCPValue:       codePoint,
-					})
-				}
-			}
-			if len(rewriteRule.Entries) > 0 {
-				cos.DSCPRewriteRules[rewriteRule.Name] = rewriteRule
-			}
-		}
-		// #4228 Gap 4: ieee-802.1 (PCP) rewrite-rules. Fully modeled (mirror of
-		// the dscp rewrite loop, PCP domain 0..7) so the mapping is validated at
-		// commit, but accepted-but-inert — the dataplane rewrites dscp on egress
-		// only (commit advisory).
-		for _, inst := range namedInstances(rewriteRulesNode.FindChildren("ieee-802.1")) {
-			rewriteRule := cos.IEEE8021RewriteRules[inst.name]
-			if rewriteRule == nil {
-				rewriteRule = &CoSIEEE8021RewriteRule{Name: inst.name}
-			}
-			for _, fcNode := range cosPackedInstanceNode(inst.node, inst.name, "ieee-802.1", cosRewriteRulesSchema15064("ieee-802.1")).FindChildren("forwarding-class") {
-				className := ""
-				if len(fcNode.Keys) >= 2 {
-					className = fcNode.Keys[1]
-				}
-				if className == "" {
-					continue
-				}
-				for _, lpNode := range fcNode.FindChildren("loss-priority") {
-					lossPriority := ""
-					if len(lpNode.Keys) >= 2 {
-						lossPriority = lpNode.Keys[1]
-					}
-					if lossPriority == "" {
-						lossPriority = nodeVal(lpNode)
-					}
-					codePoint, ok, err := collectCoS8021RewriteCodePoint(lpNode)
-					if err != nil {
-						if opts.lenientCoSNumericCodePoint && isDowngradableCoSCodePointError(err) {
-							if warnings != nil {
-								*warnings = append(*warnings, fmt.Sprintf(
-									"class-of-service rewrite-rules ieee-802.1 %q (downgraded to warning on tolerant path): %v",
-									rewriteRule.Name, err))
-							}
-							continue
-						}
-						return fmt.Errorf("class-of-service rewrite-rules ieee-802.1 %q: %w", rewriteRule.Name, err)
-					}
-					if !ok {
-						continue
-					}
-					rewriteRule.Entries = append(rewriteRule.Entries, &CoSIEEE8021RewriteRuleEntry{
-						ForwardingClass: className,
-						LossPriority:    LossPriority(lossPriority),
-						PCPValue:        codePoint,
-					})
-				}
-			}
-			if len(rewriteRule.Entries) > 0 {
-				cos.IEEE8021RewriteRules[rewriteRule.Name] = rewriteRule
+		// still rejected at strict commit (#11811). #17183: all four rewrite
+		// kinds compile through the one generic loop.
+		for _, kind := range cosCodePointKinds[3:] {
+			if err := compileCoSCodePointKind(kind, namedInstances(rewriteRulesNode.FindChildren(kind.keyword)), cos, opts, warnings); err != nil {
+				return err
 			}
 		}
 	}
