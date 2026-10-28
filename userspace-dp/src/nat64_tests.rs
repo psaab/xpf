@@ -10783,3 +10783,53 @@ fn nat64_default_routing_instance_distinguishes_named_and_master_17677() {
         );
     }
 }
+
+// #17076: the built prefix stores ONLY the resolved plural unions — a
+// singular-only (pre-#15932/#16049) snapshot is folded into a
+// one-element list at build, and a plural list is stored as authored.
+// Pins the collapse so restoring the singular fields (and their
+// matcher arms) cannot silently return.
+#[test]
+fn nat64_17076_built_prefix_stores_only_plural_scope() {
+    // Singular-only: folded to one-element lists.
+    let state = Nat64State::from_snapshots(&[scoped_snap("trust", "blue", vec![])]);
+    assert_eq!(state.prefixes.len(), 1);
+    assert_eq!(state.prefixes[0].from_zones, vec!["trust".to_string()]);
+    assert_eq!(
+        state.prefixes[0].from_routing_instances,
+        vec!["blue".to_string()]
+    );
+    assert!(
+        state.prefixes[0].ingress_scope_constrained(),
+        "a singular-scoped prefix must read as ingress-constrained"
+    );
+    // Plural: stored as authored, not merged with the singular.
+    let mut snap = scoped_snap("trust", "blue", vec![]);
+    snap.from_zones = vec!["trust".to_string(), "untrust".to_string()];
+    snap.from_routing_instances = vec!["blue".to_string(), "red".to_string()];
+    let state = Nat64State::from_snapshots(&[snap]);
+    assert_eq!(
+        state.prefixes[0].from_zones,
+        vec!["trust".to_string(), "untrust".to_string()]
+    );
+    assert_eq!(
+        state.prefixes[0].from_routing_instances,
+        vec!["blue".to_string(), "red".to_string()]
+    );
+    // Unscoped: both lists empty, not constrained.
+    let state = Nat64State::from_snapshots(&[scoped_snap("", "", vec![])]);
+    assert!(state.prefixes[0].from_zones.is_empty());
+    assert!(state.prefixes[0].from_routing_instances.is_empty());
+    assert!(!state.prefixes[0].ingress_scope_constrained());
+    // `union_scope` resolves each axis once: plural wins, else the
+    // singular folds in, else empty.
+    assert_eq!(
+        crate::nat64::state::union_scope(&["a".to_string()], "b"),
+        vec!["a".to_string()]
+    );
+    assert_eq!(
+        crate::nat64::state::union_scope(&[], "b"),
+        vec!["b".to_string()]
+    );
+    assert!(crate::nat64::state::union_scope(&[], "").is_empty());
+}

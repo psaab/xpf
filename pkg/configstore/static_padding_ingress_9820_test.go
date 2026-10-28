@@ -25,7 +25,7 @@ routing-options {
 		t.Fatalf("parse errors: %v", perrs)
 	}
 	if _, err := compileTreeStrict(tree, -1); err == nil ||
-		!strings.Contains(err.Error(), "whitespace is not allowed") {
+		!strings.Contains(err.Error(), "must not have leading or trailing whitespace") {
 		t.Fatalf("strict ingress must refuse the padded destination, got: %v", err)
 	}
 }
