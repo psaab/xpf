@@ -206,7 +206,7 @@ fn pending_neighbor_mac(
         .or_else(|| dynamic_neighbors.get(&key).map(|entry| entry.mac))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn retry_pending_neigh(
     binding: &mut BindingWorker,
     left: &mut [BindingWorker],
@@ -1365,7 +1365,7 @@ pub(super) fn learn_dynamic_neighbor_after_admission(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn learn_dynamic_neighbor_from_frame(
     area: &MmapArea,
     desc: XdpDesc,
@@ -1409,7 +1409,7 @@ fn learn_dynamic_neighbor_from_frame(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn learn_dynamic_neighbor_with_mac(
     meta: UserspaceDpMeta,
     src_ip: IpAddr,

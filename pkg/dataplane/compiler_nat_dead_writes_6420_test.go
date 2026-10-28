@@ -42,8 +42,8 @@ var errNATWriteTripwire = errors.New("retired eBPF NAT map writer was called (#6
 //
 // GetPersistentNAT is likewise not armed: it is the one dataplane call in
 // compiler_nat.go that is NOT a shim no-op on the live userspace path (the
-// persistent-NAT table backs `show security nat source persistent-nat-table`
-// and the conntrack GC), so it is part of the KEPT half.
+// persistent-NAT table backs `show security nat source persistent-nat-table`),
+// so it is part of the KEPT half.
 type natWriteTripwireDP struct {
 	discardingDataPlane
 	validationPass bool

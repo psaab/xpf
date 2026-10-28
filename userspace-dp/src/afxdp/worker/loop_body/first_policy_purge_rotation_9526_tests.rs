@@ -2010,7 +2010,6 @@ fn extensive_rematch_declines_icmp_with_type_constrained_permit_12859() {
 /// bound to the OLD rule id rather than to the broad ICMP permit's counter.
 /// Packet-scoped enforcement of the DENY is #11064's job on the hit path, not
 /// this frame-independent rematch's.
-
 /// this frame-independent rematch's.
 #[test]
 fn extensive_rematch_declines_icmp_with_type_constrained_deny_then_broad_permit_12859() {
@@ -2094,7 +2093,6 @@ fn extensive_rematch_declines_icmp_with_type_constrained_deny_then_broad_permit_
 /// and rebinds the pair — the decline is scoped to type-constrained verdicts,
 /// not to ICMP as a protocol. Guards against an over-broad fix that declines
 /// every ICMP rematch.
-
 /// every ICMP rematch.
 #[test]
 fn extensive_rematch_retains_icmp_with_unconstrained_permit_12859() {
@@ -2166,7 +2164,6 @@ fn extensive_rematch_retains_icmp_with_unconstrained_permit_12859() {
 /// preserve the existing fail-closed teardown even when the new snapshot has
 /// type-constrained rules; otherwise the ICMP decline would weaken the
 /// established missing-ancestry contract.
-
 /// established missing-ancestry contract.
 #[test]
 fn extensive_rematch_still_purges_icmp_without_ancestry_12859() {

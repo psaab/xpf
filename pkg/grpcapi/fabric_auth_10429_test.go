@@ -49,7 +49,7 @@ func TestFabricAuth10429_CrossMethodReplayRejected(t *testing.T) {
 	// method it was originally minted for; there is no legacy verification
 	// fallback that could be stripped and replayed across methods.
 	legacyProbe := &unaryCallProbe{}
-	legacyToken := fabricAuthTokenHex([]byte(fabricTestKey), time.Now())
+	legacyToken := fabricAuthTokenHex([]byte(fabricTestKey), time.Now(), "")
 	_, err = s.fabricAuthUnaryInterceptor(ctxWithToken(legacyToken), nil, getInfo,
 		legacyProbe.handler)
 	if status.Code(err) != codes.Unauthenticated {

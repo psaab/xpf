@@ -700,12 +700,7 @@ func mergeDHCPDynamicDNS(dst, src *DHCPDynamicDNSConfig) *DHCPDynamicDNSConfig {
 	if dst.Domain == "" {
 		dst.Domain = src.Domain
 	}
-	if dst.ForwardZone == "" {
-		dst.ForwardZone = src.ForwardZone
-	}
-	if dst.ReverseZone == "" {
-		dst.ReverseZone = src.ReverseZone
-	}
+	dst.RFC2136Endpoint.MergeFrom(src.RFC2136Endpoint)
 	if dst.HostnameSource == "" {
 		dst.HostnameSource = src.HostnameSource
 	}
@@ -714,28 +709,6 @@ func mergeDHCPDynamicDNS(dst, src *DHCPDynamicDNSConfig) *DHCPDynamicDNSConfig {
 	}
 	if dst.Backend == "" {
 		dst.Backend = src.Backend
-	}
-	if dst.UpdateServer == "" {
-		dst.UpdateServer = src.UpdateServer
-	}
-	if dst.TSIGKeyName == "" {
-		dst.TSIGKeyName = src.TSIGKeyName
-	}
-	if dst.TSIGAlgorithm == "" {
-		dst.TSIGAlgorithm = src.TSIGAlgorithm
-	}
-	if dst.TSIGSecret.Reveal() == "" {
-		dst.TSIGSecret = src.TSIGSecret
-	}
-	dst.RequireTSIG = dst.RequireTSIG || src.RequireTSIG
-	if dst.SourceAddress == "" {
-		dst.SourceAddress = src.SourceAddress
-	}
-	if dst.DestinationInterface == "" {
-		dst.DestinationInterface = src.DestinationInterface
-	}
-	if dst.RoutingInstance == "" {
-		dst.RoutingInstance = src.RoutingInstance
 	}
 	if dst.TTLSeconds == 0 {
 		dst.TTLSeconds = src.TTLSeconds
@@ -816,19 +789,10 @@ func compileDHCPDynamicDNS(node *Node) *DHCPDynamicDNSConfig {
 
 	d.Enabled = enabled
 	d.Domain = props["domain"]
-	d.ForwardZone = props["forward-zone"]
-	d.ReverseZone = props["reverse-zone"]
 	d.HostnameSource = props["hostname-source"]
 	d.ConflictPolicy = props["conflict-policy"]
 	d.Backend = props["backend"]
-	d.UpdateServer = props["update-server"]
-	d.TSIGKeyName = props["tsig-key"]
-	d.TSIGAlgorithm = props["tsig-algorithm"]
-	d.TSIGSecret = NewSecret(props["tsig-secret"])
-	d.RequireTSIG = props["require-tsig"] == "true"
-	d.SourceAddress = props["source-address"]
-	d.DestinationInterface = props["destination-interface"]
-	d.RoutingInstance = props["routing-instance"]
+	d.RFC2136Endpoint = compileRFC2136Endpoint(props)
 	if v := props["ttl"]; v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			d.TTLSeconds = n
@@ -837,11 +801,11 @@ func compileDHCPDynamicDNS(node *Node) *DHCPDynamicDNSConfig {
 
 	// Empty block -> treat as absent (no DDNS). A block with only
 	// `enable` is meaningful (defaults apply), so check the union.
+	// #17237: endpoint emptiness is the shared IsZero(), so a zone-only
+	// block (forward-zone/reverse-zone) is kept, not discarded to inherit
+	// the other family's policy.
 	if !d.Enabled && d.Domain == "" && d.HostnameSource == "" &&
-		d.ConflictPolicy == "" && d.Backend == "" && d.UpdateServer == "" &&
-		d.TSIGKeyName == "" && d.TSIGAlgorithm == "" && d.TSIGSecret.Reveal() == "" && !d.RequireTSIG &&
-		d.SourceAddress == "" && d.DestinationInterface == "" &&
-		d.RoutingInstance == "" && d.TTLSeconds == 0 {
+		d.ConflictPolicy == "" && d.Backend == "" && d.RFC2136Endpoint.IsZero() && d.TTLSeconds == 0 {
 		return nil
 	}
 	return d
@@ -2056,9 +2020,23 @@ func compileForwardingOptions(node *Node, fo *ForwardingOptionsConfig) error {
 	return compileForwardingOptionsWithOpts(node, fo, strictCompileOpts(), nil)
 }
 
+// forwardingFamilyKnown17196 / samplingFamilyKnown17196 are the declared
+// family token sets for the #17196 unknown-family diagnostic at the two
+// forwarding-options tops: `forwarding-options family` declares only
+// inet6 (schemaForwardingOptions), and a sampling instance's `family`
+// declares inet/inet6. A token outside the caller's set — or an
+// undeclared residue token on a structured member — is unknown.
+var forwardingFamilyKnown17196 = map[string]bool{"inet6": true}
+
+var forwardingFamilyKnownSorted17196 = sortedFamilyKeys17196(forwardingFamilyKnown17196)
+
+var samplingFamilyKnown17196 = map[string]bool{"inet": true, "inet6": true}
+
+var samplingFamilyKnownSorted17196 = sortedFamilyKeys17196(samplingFamilyKnown17196)
+
 func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, opts compileOpts, warnings *[]string) error {
 	for _, sampNode := range node.FindChildren("sampling") {
-		if err := compileSampling(sampNode, fo); err != nil {
+		if err := compileSampling(sampNode, fo, opts, warnings); err != nil {
 			return err
 		}
 	}
@@ -2123,24 +2101,31 @@ func compileForwardingOptionsWithOpts(node *Node, fo *ForwardingOptionsConfig, o
 	//
 	// This is the same defect as #8763's traversal bug -- a two-level lookup
 	// against a one-node compound key -- in a compiler instead of the
-	// normalizer. The both-shapes walk mirrors compiler_interfaces.go's
-	// documented family handling; Name() rather than Keys[0] for the same
-	// reason recorded there (#7522: a persisted AST need not have non-empty
-	// Keys, and a bad persisted state must error rather than panic).
+	// normalizer. The both-shapes walk is the shared familyMembers
+	// extractor (#17196, family_members.go); Name() rather than Keys[0]
+	// for the same reason recorded there (#7522: a persisted AST need not
+	// have non-empty Keys, and a bad persisted state must error rather
+	// than panic).
+	//
+	// #17196: an unknown member (empty Af, undeclared token, or
+	// undeclared residue — e.g. `family { bogus inet6 { mode … } }`,
+	// which the old Keys[1] preference silently discarded to install
+	// inet6) is reported through the #9017-style diagnostic: strict
+	// rejects, lenient warns and installs nothing for that member. Only
+	// inet6 is declared under `forwarding-options family`.
 	for _, famNode := range node.FindChildren("family") {
-		var afNodes []*Node
-		if len(famNode.Keys) >= 2 {
-			afNodes = append(afNodes, famNode)
-		} else {
-			afNodes = append(afNodes, famNode.Children...)
-		}
-		for _, afNode := range afNodes {
-			if afNode == nil {
-				continue
-			}
-			afName := afNode.Name()
-			if len(afNode.Keys) >= 2 {
-				afName = afNode.Keys[1]
+		for _, m := range familyMembers(famNode) {
+			afNode, afName := m.AfNode, m.Af
+			if unknownFamilyMember17196(m, forwardingFamilyKnown17196) {
+				msg := unknownFamilyMsg17196("forwarding-options family",
+					m, forwardingFamilyKnown17196, forwardingFamilyKnownSorted17196)
+				if opts.lenientFamilyMembers17196 {
+					if warnings != nil {
+						*warnings = append(*warnings, msg+"; skipping that family member")
+					}
+					continue
+				}
+				return fmt.Errorf("%s", msg)
 			}
 			if afName != "inet6" {
 				continue
@@ -2377,7 +2362,7 @@ func validatePortMirroringZeroIngress15650(fo *ForwardingOptionsConfig, lenient 
 	return nil
 }
 
-func compileSampling(node *Node, fo *ForwardingOptionsConfig) error {
+func compileSampling(node *Node, fo *ForwardingOptionsConfig, opts compileOpts, warnings *[]string) error {
 	if fo.Sampling == nil {
 		fo.Sampling = &SamplingConfig{
 			Instances: make(map[string]*SamplingInstance),
@@ -2402,18 +2387,29 @@ func compileSampling(node *Node, fo *ForwardingOptionsConfig) error {
 		}
 
 		for _, familyNode := range sampInst.node.FindChildren("family") {
-			var afNodes []*Node
-			if len(familyNode.Keys) >= 2 {
-				afNodes = append(afNodes, familyNode)
-			} else {
-				afNodes = append(afNodes, familyNode.Children...)
-			}
-			for _, afNode := range afNodes {
-				afName := afNode.Keys[0]
-				if len(afNode.Keys) >= 2 {
-					afName = afNode.Keys[1]
+			for _, m := range familyMembers(familyNode) {
+				afNode, afName := m.AfNode, m.Af
+				// #17196: the shared extractor is nil-safe (Name()
+				// returns "" for an empty-Keys child, #4827/#7522);
+				// the old hand copy indexed Keys[0] with no guard and
+				// panicked on a malformed persisted/synced AST. An
+				// unknown member (empty Af, undeclared token, or
+				// undeclared residue — e.g. `family { bogus inet { … } }`,
+				// which the old Keys[1] preference silently discarded)
+				// is reported through the #9017-style diagnostic:
+				// strict rejects, lenient warns and installs nothing.
+				if unknownFamilyMember17196(m, samplingFamilyKnown17196) {
+					msg := unknownFamilyMsg17196(
+						fmt.Sprintf("forwarding-options sampling instance %q family", sampInst.name),
+						m, samplingFamilyKnown17196, samplingFamilyKnownSorted17196)
+					if opts.lenientFamilyMembers17196 {
+						if warnings != nil {
+							*warnings = append(*warnings, msg+"; skipping that family member")
+						}
+						continue
+					}
+					return fmt.Errorf("%s", msg)
 				}
-
 				sf := compileSamplingFamily(afNode)
 				switch afName {
 				case "inet":
@@ -2687,15 +2683,11 @@ func compileDHCPRelay(node *Node, fo *ForwardingOptionsConfig) error {
 				// Keys[1:] (flat-set replay may carry trailing values
 				// as children); braced block `interface { a; b; }`
 				// holds one child per interface. nodeVal kept only the
-				// first of each.
-				for _, k := range prop.Keys[1:] {
-					g.Interfaces = append(g.Interfaces, k)
-				}
-				for _, child := range prop.Children {
-					if v := child.Name(); v != "" {
-						g.Interfaces = append(g.Interfaces, v)
-					}
-				}
+				// first of each. The member list itself is read by the
+				// shared dhcpRelayGroupInterfaces (#17205) so the v4
+				// compiler, the v6 compiler and the v6 gate judge the
+				// same tokens.
+				g.Interfaces = append(g.Interfaces, dhcpRelayGroupInterfaces(prop)...)
 			case "active-server-group":
 				g.ActiveServerGroup = nodeVal(prop)
 			case "overrides":

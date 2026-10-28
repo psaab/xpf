@@ -729,8 +729,9 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// #709 / #746: owner-written telemetry, cacheline-isolated.
     /// `drain_latency_hist` buckets sum to `drain_invocations` (pinned
     /// in unit tests); `drain_noop_invocations` is a subset counter
-    /// (drains that returned `false`). `owner_pps` is the owner-local
-    /// pps window.
+    /// (terminating `drain_shaped_tx` calls that returned `None` — one
+    /// per `service_shaped_until_noop` pass, #17151). `owner_pps` is
+    /// the owner-local pps window.
     ///
     /// Written only by the owner worker (the sole caller of
     /// `drain_shaped_tx` on this binding); read by the snapshot path

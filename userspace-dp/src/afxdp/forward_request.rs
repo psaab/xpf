@@ -122,7 +122,7 @@ pub(in crate::afxdp) fn resolve_forward_target_ifindex_with_dynamic(
     resolve_tx_binding_ifindex(forwarding, decision.resolution.egress_ifindex)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn build_live_forward_request(
     area: &MmapArea,
     binding_lookup: &WorkerBindingLookup,
@@ -203,7 +203,7 @@ pub(super) fn build_live_forward_request_from_frame(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn build_live_forward_request_from_frame_with_dynamic(
     binding_lookup: &WorkerBindingLookup,
     current_binding_index: usize,

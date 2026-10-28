@@ -758,7 +758,7 @@ func newSurfaceAHTTP(p *config.DDNSProvider, build func() (DNSUpdater, error)) (
 // selfOwned, the no-DHCID lease path would REFUSE the pre-existing name and pin
 // the record at its first address forever. The provider's transport binding
 // (source-address / dest-interface / VRF) is honored via the shared
-// resolveBindConfig→dialer path by reusing DHCPDynamicDNSConfig as the carrier.
+// resolveBindConfig→dialer path on the shared RFC2136Endpoint (#17237).
 func newSurfaceARFC2136(p *config.DDNSProvider, _ string, resolveIf ...func(string) string) (DNSUpdater, error) {
 	if p == nil {
 		return nil, errors.New("ddns surface-a: nil provider")
@@ -773,21 +773,9 @@ func newSurfaceARFC2136(p *config.DDNSProvider, _ string, resolveIf ...func(stri
 		conflictPolicy: "replace-owned",
 		backend:        "rfc2136",
 	}
-	c := &config.DHCPDynamicDNSConfig{
-		UpdateServer:         p.UpdateServer,
-		ForwardZone:          p.ForwardZone,
-		ReverseZone:          p.ReverseZone,
-		TSIGKeyName:          p.TSIGKeyName,
-		TSIGAlgorithm:        p.TSIGAlgorithm,
-		TSIGSecret:           p.TSIGSecret,
-		RequireTSIG:          p.RequireTSIG,
-		SourceAddress:        p.SourceAddress,
-		DestinationInterface: p.DestinationInterface,
-		RoutingInstance:      p.RoutingInstance,
-	}
 	pol.forwardZones = splitZoneList(p.ForwardZone)
 	pol.reverseZones = splitZoneList(p.ReverseZone)
-	u, err := newRFC2136Updater(pol, c, nil, nil, nil, resolveIf...)
+	u, err := newRFC2136Updater(pol, p.RFC2136Endpoint, nil, nil, nil, resolveIf...)
 	if err != nil {
 		return nil, err
 	}
@@ -1345,7 +1333,21 @@ func (m *SurfaceAManager) reconcileScopeLocked(ctx context.Context, sc SurfaceAS
 	// the scope refresh-due regardless of the change-detection / forced-refresh
 	// floor, so the owner re-asserts the wire record now.
 	refreshDue := force || pendingRecovery || rt.lastPublished.IsZero() || now.Sub(rt.lastPublished) >= forced
-	if owned && !changed && !refreshDue {
+	// Endpoint change (#17233): an in-place provider edit (update-server /
+	// zone / ...) with an unchanged address must also force a republish, so
+	// the record reaches the NEW endpoint and publishLocked raises the
+	// #3735 in-place orphan alarm on the FIRST pass — not only at the
+	// forced-refresh floor (24h). This is the Surface A port of the #5814
+	// endpoint term through the single shared predicate needsRepublish;
+	// both fingerprints must be non-empty to prove a mismatch (an unknown /
+	// pre-#3735 record stays settled, no false alarm). A fixed test backend
+	// (m.backend != nil) is a single endpoint, so it is never endpoint-changed
+	// — mirroring classifyOwnedBackend, which reports ownedBackendOK there.
+	endpointChanged := false
+	if owned && m.backend == nil {
+		endpointChanged = needsRepublish(ownedRec, true, ownedRec.BackendFingerprint, backendFingerprint(sc.Provider))
+	}
+	if owned && !changed && !refreshDue && !endpointChanged {
 		m.skipped++
 		slog.Debug("ddns surface-a: address unchanged and forced-refresh not due; skipping",
 			"fqdn", sc.FQDN, "addr", addr.String())

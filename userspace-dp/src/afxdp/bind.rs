@@ -30,12 +30,12 @@ const SHARED_SECONDARY_BIND_FLAGS: [u16; 1] = [SocketConfig::XDP_BIND_SHARED_UME
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AfXdpBindStrategy {
     UmemOwnerSocket,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     SeparateOwnerSocket,
 }
 
 impl AfXdpBindStrategy {
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     fn uses_umem_owner_socket(self) -> bool {
         matches!(self, Self::UmemOwnerSocket)
     }
@@ -48,7 +48,7 @@ impl AfXdpBindStrategy {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AfXdpBinder {
     Umem,
@@ -599,7 +599,7 @@ pub(super) fn bind_strategy_for_driver(driver: Option<&str>) -> AfXdpBindStrateg
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn binder_for_strategy(strategy: AfXdpBindStrategy) -> AfXdpBinder {
     if strategy.uses_umem_owner_socket() {
         AfXdpBinder::Umem
@@ -691,7 +691,7 @@ fn fail_identity_mismatched_bind(
     drop(device);
     drop(tx);
     drop(rx);
-    drop(user);
+    // `user` (no Drop: raw fd closed by the socket delete above) drops at scope exit, last as before.
     post_create_bind_error(format!("bind identity mismatch: {mismatch}"))
 }
 
@@ -785,7 +785,7 @@ fn try_open_bind(
                             drop(device);
                             drop(tx);
                             drop(rx);
-                            drop(user);
+                            // `user` has no Drop (raw fd closed by the delete); it drops on return.
                             return Err(post_create_bind_error(format!(
                                 "prime fill ring after socket create: {err}"
                             )));
@@ -803,7 +803,7 @@ fn try_open_bind(
                     drop(device);
                     drop(tx);
                     drop(rx);
-                    drop(user);
+                    // `user` has no Drop (raw fd closed by the delete); it drops on return.
                     return Err(post_create_bind_error(format!(
                         "{} bind(fd={}) did not report XDP_OPTIONS_ZEROCOPY after bind",
                         socket_role.describe(),

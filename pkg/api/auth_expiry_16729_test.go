@@ -21,7 +21,7 @@ import (
 // installed a test-supplied resolver that reimplemented the expiry check
 // itself. These cases drive the production paths end to end:
 //
-//   - Basic, X-API-Key and Bearer through authMiddleware (the real
+//   - Basic, X-API-Key and Bearer through the production auth handler (the real
 //     throttledAuthCheck -> authCheckCredential -> checkAuthorizationIdentity /
 //     matchAPIKeyIdentityWithExpiry chain), each with an unexpired control
 //     that must still be admitted, so an over-broad rejection cannot pass.
@@ -149,7 +149,7 @@ func TestAuthMiddlewareCredentialExpiry16729(t *testing.T) {
 			// Fresh middleware per case: the auth-failure throttle is
 			// stateful, and a shared instance would let earlier failures
 			// lock out later (unrelated) cases.
-			handler := authMiddleware(cfg, false, ok)
+			handler := productionAuthHandlerOnly(t, cfg, false, ok)
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
 			req.RemoteAddr = "198.51.100.10:12345"
 			for k, v := range tc.header {

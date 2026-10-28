@@ -51,7 +51,7 @@ func TestARPBurstFollowupsCountFailures(t *testing.T) {
 	var frames int
 	delta := withBurstSend(t, failAfterN(1, &frames), func() {
 		// fd=-1: the helper's defer unix.Close(-1) returns EBADF, ignored.
-		runARPBurstFollowups(-1, "ge-0-0-2", "10.0.61.1", []byte{0x01}, []byte{0x02}, unix.SockaddrLinklayer{}, count, nil)
+		runARPBurstFollowups(-1, "ge-0-0-2", "10.0.61.1", []byte{0x01}, []byte{0x02}, unix.SockaddrLinklayer{}, count, func() bool { return true })
 	})
 
 	wantFrames := (count - 1) * 2 // 6 follow-up frames attempted
@@ -70,7 +70,7 @@ func TestNABurstFollowupsCountFailures(t *testing.T) {
 	const count = 4
 	var frames int
 	delta := withBurstSend(t, failAfterN(1, &frames), func() {
-		runNABurstFollowups(-1, "ge-0-0-2", "2001:559:8585:80::200", []byte{0x01}, unix.SockaddrLinklayer{}, count, nil)
+		runNABurstFollowups(-1, "ge-0-0-2", "2001:559:8585:80::200", []byte{0x01}, unix.SockaddrLinklayer{}, count, func() bool { return true })
 	})
 
 	wantFrames := count - 1 // 3 follow-up NAs attempted
@@ -88,7 +88,7 @@ func TestNABurstFollowupsCountFailures(t *testing.T) {
 func TestBurstFollowupsAllSucceedNoCount(t *testing.T) {
 	var frames int
 	delta := withBurstSend(t, failAfterN(1<<30, &frames), func() {
-		runARPBurstFollowups(-1, "ge-0-0-2", "10.0.61.1", []byte{0x01}, []byte{0x02}, unix.SockaddrLinklayer{}, 3, nil)
+		runARPBurstFollowups(-1, "ge-0-0-2", "10.0.61.1", []byte{0x01}, []byte{0x02}, unix.SockaddrLinklayer{}, 3, func() bool { return true })
 	})
 	if delta != 0 {
 		t.Fatalf("burstSendErrors delta = %d on all-success path, want 0", delta)

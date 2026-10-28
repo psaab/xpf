@@ -29,9 +29,9 @@ const skewTestWindow = int64(fabricAuthWindowSeconds)
 func skewTestKey() []byte { return []byte("shared-control-link-psk") }
 
 // tokenAtOffset builds the token a peer whose clock is `offset` out would send.
-func tokenAtOffset(t *testing.T, key []byte, now time.Time, offset time.Duration, method ...string) string {
+func tokenAtOffset(t *testing.T, key []byte, now time.Time, offset time.Duration, method string) string {
 	t.Helper()
-	return fabricAuthTokenHex(key, now.Add(offset), method...)
+	return fabricAuthTokenHex(key, now.Add(offset), method)
 }
 
 // TestMeasureFabricAuthSkewOnlyReportsAnAuthenticatedWindow6708 is the truth
@@ -51,7 +51,7 @@ func TestMeasureFabricAuthSkewOnlyReportsAnAuthenticatedWindow6708(t *testing.T)
 	}{
 		{
 			name:   "the_measured_141s_case",
-			token:  tokenAtOffset(t, key, now, 141*time.Second),
+			token:  tokenAtOffset(t, key, now, 141*time.Second, ""),
 			wantOK: true,
 			// 141s lands in the window 4 ahead of ours (141/30 = 4.7, and the
 			// boundary-pinned `now` puts it in window base+4).
@@ -60,14 +60,14 @@ func TestMeasureFabricAuthSkewOnlyReportsAnAuthenticatedWindow6708(t *testing.T)
 		},
 		{
 			name:     "a_peer_behind_us_reports_a_negative_skew",
-			token:    tokenAtOffset(t, key, now, -300*time.Second),
+			token:    tokenAtOffset(t, key, now, -300*time.Second, ""),
 			wantOK:   true,
 			wantSkew: -10 * skewTestWindow,
 			why:      "direction must survive; an operator needs to know WHICH node to fix",
 		},
 		{
 			name:   "a_wrong_key_is_NOT_a_clock_problem",
-			token:  tokenAtOffset(t, []byte("a-different-psk"), now, 141*time.Second),
+			token:  tokenAtOffset(t, []byte("a-different-psk"), now, 141*time.Second, ""),
 			wantOK: false,
 			why: "reporting a skew here would tell an operator to fix NTP when the " +
 				"real fault is a PSK mismatch — the same mislabelling #6708 is about",
@@ -86,14 +86,14 @@ func TestMeasureFabricAuthSkewOnlyReportsAnAuthenticatedWindow6708(t *testing.T)
 		},
 		{
 			name:   "skew_beyond_the_scan_band_is_not_characterised",
-			token:  tokenAtOffset(t, key, now, 3*time.Hour),
+			token:  tokenAtOffset(t, key, now, 3*time.Hour, ""),
 			wantOK: false,
 			why:    "the band is bounded at ±2h on purpose; past that the number adds nothing",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			skew, ok := measureFabricAuthSkew([][]byte{key}, tc.token, now)
+			skew, ok := measureFabricAuthSkew([][]byte{key}, tc.token, now, "")
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v — %s", ok, tc.wantOK, tc.why)
 			}
@@ -115,7 +115,7 @@ func TestSkewScanDoesNotWidenTheAcceptBand6708(t *testing.T) {
 	for _, offset := range []time.Duration{
 		141 * time.Second, -141 * time.Second, 30 * time.Minute,
 	} {
-		if verifyFabricAuthToken(key, tokenAtOffset(t, key, now, offset)) {
+		if verifyFabricAuthToken(key, tokenAtOffset(t, key, now, offset, ""), "") {
 			t.Fatalf("a token %v out of window VERIFIED; the accept band was widened, "+
 				"which multiplies the replay horizon of the allowlisted fabric RPCs "+
 				"(ClearSessions, cross-node failover)", offset)
@@ -124,7 +124,7 @@ func TestSkewScanDoesNotWidenTheAcceptBand6708(t *testing.T) {
 	// Positive control: the ±1 band still works, so the cell above is not
 	// passing against a verifier that rejects everything.
 	for _, offset := range []time.Duration{0, 25 * time.Second, -25 * time.Second} {
-		if !verifyFabricAuthToken(key, tokenAtOffset(t, key, now, offset)) {
+		if !verifyFabricAuthToken(key, tokenAtOffset(t, key, now, offset, ""), "") {
 			t.Fatalf("a token %v out of window was REJECTED; the ±1 accept band "+
 				"regressed and the cell above is vacuous", offset)
 		}
@@ -201,7 +201,7 @@ func TestSkewScanIsThrottled6708(t *testing.T) {
 	countingKeys := [][]byte{key}
 	scan := func(at time.Time) string {
 		scans++
-		return s.noteFabricAuthSkew(countingKeys, tokenAtOffset(t, key, now, 141*time.Second), at)
+		return s.noteFabricAuthSkew(countingKeys, tokenAtOffset(t, key, now, 141*time.Second, ""), at, "")
 	}
 
 	first := scan(now)
@@ -211,7 +211,7 @@ func TestSkewScanIsThrottled6708(t *testing.T) {
 	before := s.fabricSkew.lastScanNanos.Load()
 
 	// A second call inside the interval must NOT re-scan...
-	if got := s.noteFabricAuthSkew(countingKeys, strings.Repeat("cd", 32), now.Add(time.Second)); got != first {
+	if got := s.noteFabricAuthSkew(countingKeys, strings.Repeat("cd", 32), now.Add(time.Second), ""); got != first {
 		t.Fatalf("a throttled call re-scanned (clause changed to %q); an attacker "+
 			"can drive this path at will and each scan costs ~481 HMACs", got)
 	}
@@ -233,7 +233,7 @@ func TestSkewScanIsThrottled6708(t *testing.T) {
 		_ = got
 	}
 	s.fabricSkew.lastScanNanos.Store(0)
-	if got := s.noteFabricAuthSkew(countingKeys, strings.Repeat("cd", 32), now.Add(time.Minute)); got != "" {
+	if got := s.noteFabricAuthSkew(countingKeys, strings.Repeat("cd", 32), now.Add(time.Minute), ""); got != "" {
 		t.Fatalf("an unexplained token reported a skew clause (%q); an unverifiable "+
 			"token must not be labelled a clock problem", got)
 	}

@@ -1,24 +1,39 @@
 // Control-socket request dispatcher.
 //
-// #1345 split: the original 415-LOC `handle_stream` body has been
-// decomposed into per-verb files in this directory module. This
-// `mod.rs` retains only:
-//   - Stream timeout setup
-//   - BufReader / size-capped read_until / decode (#2523)
-//   - `state.lock()` critical section
-//   - `match request.request_type.as_str()` dispatch into per-verb
-//     handlers (substantive verbs) or inline bodies (trivial arms:
-//     `ping`/`status`, `update_fabrics`, `clear_policy_counters`,
-//     `clear_nat_counters`, `clear_zone_counters`, `shutdown`, catch-all)
-//   - Post-match `refresh_status` + status attach (gated by
-//     `!suppress_status`)
-//   - Post-lock `write_state` (when `persist_state` is set)
-//   - BufWriter / serde_json / newline / flush
-//
-// All per-verb files are byte-identical to the corresponding match
-// arm in the pre-split `handlers.rs` modulo the `&mut ServerState`
-// parameter substitution. See
-// `docs/pr/1345-server-handlers-split/plan.md` for the full design.
+// #1345 split the original `handle_stream` body into per-verb files in
+// this directory module; the bodies have diverged since the split.
+// `handle_stream` runs in phases:
+//   - Stream timeout setup, BufReader / size-capped read_until, and
+//     decode of one request (#2523).
+//   - Off-lock session verbs, served without the `ServerState` mutex:
+//     `sync_session` (#7209) and `list_sessions_by_policy` on either
+//     socket, plus — on the session socket only — `ping` and the
+//     lease-only `update_ha_state` fast path (#9629). Any other verb on
+//     the session socket is refused without taking the lock.
+//   - The locked match: `state.lock()` (via `lock_server_state_recover`)
+//     is taken once, still under that single lock, before the match
+//     dispatches into per-verb handlers or inline arms (`ping`,
+//     `status`, `scheduler_heartbeat`, `fib_dump`, `update_fabrics`,
+//     `clear_policy_counters`, `clear_nat_counters`, `clear_zone_counters`,
+//     `clear_flood_counters`, `clear_filter_counters`, `shutdown`,
+//     catch-all), followed by post-match `project_status` + status attach
+//     (gated by `!suppress_status`) unless a deferred wait that re-derives
+//     status is owed (`Deferred::status_after_wait`: settle, owner-RG
+//     export, all-sessions export).
+//   - Deferred off-lock waits (`Deferred`, #17135): the binding-settle
+//     poll (#5862), the owner-RG export ack-wait (#2962), and the
+//     all-sessions export push (#4054) wait off-lock, then each
+//     re-derives status under a fresh short lock acquisition afterwards
+//     (still gated by `!suppress_status`). The session-counter collect
+//     (#7919) is the exception: `Deferred::CounterQuery` is recorded
+//     outside the attach gate (`status_after_wait` is false for it), so
+//     the in-lock attach above already ran, and its `collect` only waits
+//     for the per-worker replies — it takes no fresh lock and does no
+//     status re-derivation.
+//   - Encode + flush via BufWriter / serde_json / newline; only after a
+//     successful flush, `write_state` persists (when `persist_state` is
+//     set), and a failed flush arms delta loss on drained contributors
+//     (#5294/#16584).
 
 mod session_counters;
 mod binding;
@@ -39,7 +54,8 @@ mod policy_list;
 use crate::afxdp::{HaRefreshOutcome, SessionDomain, HA_REFRESH_NEEDS_CONTROL_SOCKET};
 use super::super::*;
 use super::helpers::{
-    lock_server_state_recover, refresh_status, wait_for_binding_settle, write_state,
+    lock_server_state_recover, project_status, supervise_tunnels,
+    wait_for_binding_settle, write_state,
 };
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -81,7 +97,7 @@ fn attach_status_after_wait(
     if guard.quarantined_after_panic {
         running.store(false, Ordering::SeqCst);
     } else {
-        refresh_status(&mut guard);
+        project_status(&mut guard);
         response.status = Some(guard.status.clone());
     }
 }
@@ -276,7 +292,7 @@ pub(crate) fn handle_stream(
     session_domain: SessionDomain,
     // #9629: which socket accepted this connection. Session `update_ha_state`
     // takes the lease fast path (never `ServerState`); Main takes the locked
-    // path (today's behavior, byte-identical).
+    // path.
     mode: SocketMode,
 ) -> Result<(), String> {
     stream
@@ -353,9 +369,9 @@ pub(crate) fn handle_stream(
         persistent_nat_lease_count: 0,
     };
     let mut persist_state = false;
-    // Capture suppress_status before the match — bool is Copy so this
-    // is byte-identical, but reading it up front insulates the
-    // dispatcher from future partial-move concerns on `request`.
+    // Capture suppress_status before the match — reading it up front
+    // insulates the dispatcher from future partial-move concerns on
+    // `request`.
     let suppress_status = request.suppress_status;
     let is_fib_dump = request.request_type == "fib_dump";
     let neighbor_replace = request.neighbor_replace;
@@ -374,7 +390,8 @@ pub(crate) fn handle_stream(
     let mut drained_delta_slots: Vec<u32> = Vec::new();
     let mut drained_delta_workers: Vec<u32> = Vec::new();
 
-    // #7209: THE ONE VERB SERVED WITHOUT `state.lock()`.
+
+    // #7209: THE VERBS SERVED WITHOUT `state.lock()`.
     //
     // Everything below this block takes the snapshot-wide mutex, which
     // `apply_snapshot` holds across a 10 s worker-readiness barrier, a 500 ms
@@ -389,7 +406,7 @@ pub(crate) fn handle_stream(
     //
     // NO STATUS ATTACH, AND THAT IS THE POINT. An earlier draft kept the
     // `!suppress_status` attach here, reasoning that a caller asking for status
-    // is asking for a `refresh_status` and may pay for its own lock. That left
+    // is asking for a `project_status` and may pay for its own lock. That left
     // the verb STARVABLE — by a caller that simply omits the flag — and the
     // acceptance cell written for this issue asserts the property
     // unconditionally, which is the stronger and correct reading.
@@ -449,6 +466,12 @@ pub(crate) fn handle_stream(
         response.error = "verb not served on session socket; use control socket".to_string();
     }
 
+    // #17141: tunnel supervision runs once per locked request, before the
+    // match. Handlers and the post-match attach only project afterwards, so
+    // a mutating verb (e.g. update_ha_state, whose handler refreshes) plus
+    // the dispatcher's own attach cannot run the WG/GRE sweeps twice.
+    // Suppressed requests still supervise: the 1 Hz poll cadence that drives
+    // the #1866/#1881 self-heal does not depend on a status payload.
     if !served_off_lock && !session_ha && !session_ping && !session_refused {
         let mut guard = lock_server_state_recover(&state);
         // GPT-4: quarantined state serves nothing — a prior handler panic may
@@ -460,6 +483,9 @@ pub(crate) fn handle_stream(
             running.store(false, Ordering::SeqCst);
             return Err("server state quarantined after a handler panic; restart required".to_string());
         }
+        // #17141: supervise inside this same (only) lock acquisition,
+        // before the match — never a second lock just for supervision.
+        supervise_tunnels(&mut guard);
         match request.request_type.as_str() {
             "ping" => {}
             "scheduler_heartbeat" => {
@@ -556,7 +582,7 @@ pub(crate) fn handle_stream(
                             persist_state = true;
                         }
                     }
-                    refresh_status(&mut guard);
+                    project_status(&mut guard);
                 }
             }
             "update_neighbors" => neighbors::update(
@@ -574,7 +600,7 @@ pub(crate) fn handle_stream(
             ),
             "clear_policy_counters" => {
                 guard.afxdp.clear_policy_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             // #2218: reset the helper-side NAT translation hit atomics. This is
@@ -585,7 +611,7 @@ pub(crate) fn handle_stream(
             // this store the cleared total would snap back on the next poll.
             "clear_nat_counters" => {
                 guard.afxdp.clear_nat_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             // #3651: reset the helper-side cumulative per-zone traffic totals.
@@ -598,7 +624,7 @@ pub(crate) fn handle_stream(
             // would snap back on the next poll.
             "clear_zone_counters" => {
                 guard.afxdp.clear_zone_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             // #3651: reset the helper-side cumulative per-zone FLOOD-event
@@ -612,7 +638,7 @@ pub(crate) fn handle_stream(
             // reset) — never a periodic caller on this shared socket.
             "clear_flood_counters" => {
                 guard.afxdp.clear_flood_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             // #15107: reset the helper-side firewall filter term counters
@@ -625,7 +651,7 @@ pub(crate) fn handle_stream(
             // are discarded by the counters' generation guard.
             "clear_filter_counters" => {
                 guard.afxdp.clear_filter_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             "set_queue_state" => {
@@ -721,7 +747,7 @@ pub(crate) fn handle_stream(
         // counter query attaches in-lock (its only production sender sets
         // SuppressStatus, so the asymmetry is latent).
         if deferred.as_ref().is_none_or(|d| !d.status_after_wait()) && !suppress_status {
-            refresh_status(&mut guard);
+            project_status(&mut guard);
             response.status = Some(guard.status.clone());
         }
     }

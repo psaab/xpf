@@ -150,7 +150,6 @@ type xpfCollector struct {
 	dataplaneArmUncoveredSurfaces        *prometheus.Desc
 	dataplaneArmTotalSurfaces            *prometheus.Desc
 	dataplaneXDPAttachModeSurfaces       *prometheus.Desc
-	dataplaneSafetyOnce                  sync.Once
 	snmpRequestsShedTotal                *prometheus.Desc
 	snmpSourceBucketEvictionsTotal       *prometheus.Desc
 	snmpTrackedSources                   *prometheus.Desc
@@ -207,46 +206,38 @@ type xpfCollector struct {
 	threeColorPolicerDropBytes    *prometheus.Desc
 
 	// Session gauges (from GC)
-	sessionsActive              *prometheus.Desc
-	sessionsEstablished         *prometheus.Desc
-	sessionsIPv4                *prometheus.Desc
-	sessionsIPv6                *prometheus.Desc
-	sessionsSNAT                *prometheus.Desc
-	sessionsDNAT                *prometheus.Desc
-	sessionScrapeOK             *prometheus.Desc
-	gcSweepDuration             *prometheus.Desc
-	gcSweepTimestamp            *prometheus.Desc
-	gcSweepsTotal               *prometheus.Desc
-	gcExpiredDeletedTotal       *prometheus.Desc
-	gcDeadlinesSaturatedTotal   *prometheus.Desc
-	gcPersistentNATExpiredTotal *prometheus.Desc
-	gcErrorsTotal               *prometheus.Desc
-	gcAggressiveAging           *prometheus.Desc
+	sessionsActive      *prometheus.Desc
+	sessionsEstablished *prometheus.Desc
+	sessionsIPv4        *prometheus.Desc
+	sessionsIPv6        *prometheus.Desc
+	sessionsSNAT        *prometheus.Desc
+	sessionsDNAT        *prometheus.Desc
+	sessionScrapeOK     *prometheus.Desc
 
 	// NAT pool utilization
-	natPoolUsedPorts                              *prometheus.Desc
-	natPoolTotalPorts                             *prometheus.Desc
-	natPoolDeterministicInfo                      *prometheus.Desc
-	natPoolDetBlocksTotal                         *prometheus.Desc
-	natPoolDetBlocksAllocated                     *prometheus.Desc
-	userspaceSNATPoolLiveFlows                    *prometheus.Desc
-	userspaceSNATPoolMaxTrackedFlows              *prometheus.Desc
-	userspaceSNATPoolUsedPorts                    *prometheus.Desc
-	userspaceSNATPoolPersistentLeases             *prometheus.Desc
-	userspaceSNATPoolAllocationsTotal             *prometheus.Desc
-	userspaceSNATPoolReusesTotal                  *prometheus.Desc
-	userspaceSNATPoolPersistentAdmittedTotal      *prometheus.Desc
-	userspaceSNATPoolPersistentDeclinedTotal      *prometheus.Desc
-	userspaceSNATPoolExhaustionsTotal             *prometheus.Desc
-	userspaceSNATPoolIdleLeaseImportCapacityTotal *prometheus.Desc
+	natPoolUsedPorts                                *prometheus.Desc
+	natPoolTotalPorts                               *prometheus.Desc
+	natPoolDeterministicInfo                        *prometheus.Desc
+	natPoolDetBlocksTotal                           *prometheus.Desc
+	natPoolDetBlocksAllocated                       *prometheus.Desc
+	userspaceSNATPoolLiveFlows                      *prometheus.Desc
+	userspaceSNATPoolMaxTrackedFlows                *prometheus.Desc
+	userspaceSNATPoolUsedPorts                      *prometheus.Desc
+	userspaceSNATPoolPersistentLeases               *prometheus.Desc
+	userspaceSNATPoolAllocationsTotal               *prometheus.Desc
+	userspaceSNATPoolReusesTotal                    *prometheus.Desc
+	userspaceSNATPoolPersistentAdmittedTotal        *prometheus.Desc
+	userspaceSNATPoolPersistentDeclinedTotal        *prometheus.Desc
+	userspaceSNATPoolExhaustionsTotal               *prometheus.Desc
+	userspaceSNATPoolIdleLeaseImportCapacityTotal   *prometheus.Desc
 	userspaceSNATPoolFlowShardLockAcquisitionsTotal *prometheus.Desc
 	userspaceSNATPoolFlowShardLockContendedTotal    *prometheus.Desc
 	userspaceSNATPoolLiveWriteLockAcquisitionsTotal *prometheus.Desc
 	userspaceSNATPoolLiveWriteLockContendedTotal    *prometheus.Desc
 	userspaceSNATPoolLiveLockAcquisitionsTotal      *prometheus.Desc
 	userspaceSNATPoolLiveLockContendedTotal         *prometheus.Desc
-	userspaceSNATPoolRecycleScanPopsTotal         *prometheus.Desc
-	userspaceSNATPoolRecycleScanWalksTotal        *prometheus.Desc
+	userspaceSNATPoolRecycleScanPopsTotal           *prometheus.Desc
+	userspaceSNATPoolRecycleScanWalksTotal          *prometheus.Desc
 	// #16547: the #7717 overlap detector's scans/addresses pair. Two
 	// series, deliberately: scans==0 means the detector never ran
 	// (unknown), distinct from a ran-and-clean 0 addresses.
@@ -736,6 +727,7 @@ type xpfCollector struct {
 	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
 	userspaceSessionDeleteDroppedReleased     *prometheus.Desc
 	userspaceTunnelPurgeReservationsReleased  *prometheus.Desc
+	userspaceTunnelPurgeDeleteRefused         *prometheus.Desc
 	userspaceSyncedReverseRederived           *prometheus.Desc
 	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
 	userspaceS5Reinject                       *prometheus.Desc
@@ -760,6 +752,7 @@ type xpfCollector struct {
 	userspaceWorkerCommandQueueShed      *prometheus.Desc
 	userspaceServerStatePoisonRecoveries *prometheus.Desc
 	userspaceServerHandlerPanics         *prometheus.Desc
+	userspaceReinjectHandlerPanics        *prometheus.Desc
 	// #10695 (#9506): IPsec-inner admission, parse, and D11 queue counters.
 	userspaceZoneGateUnzoned                 *prometheus.Desc
 	userspaceZoneGateAmbiguous               *prometheus.Desc
@@ -1764,7 +1757,6 @@ func (c *xpfCollector) collectContext(ctx context.Context, ch chan<- prometheus.
 	c.collectDDNSMetrics(ch)
 	c.collectSurfaceADDNSMetrics(ch)
 	c.collectSystemMetrics(ch)
-	c.collectConntrackGCMetrics(ch)
 	if dp != nil {
 		c.emitHATakeoverReadiness13301(ch, dp)
 	}

@@ -408,6 +408,7 @@ impl Coordinator {
                 interface: "gr-0/0/0".into(),
                 redundancy_group: 1,
                 mode: "gre".into(),
+                kind: TunnelKind::Gre,
                 outer_family: libc::AF_INET,
                 source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 destination: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
@@ -3497,7 +3498,7 @@ fn reconcile_with_none_snapshot_reaches_no_snapshot_early_exit() {
         coordinator.slow_path.is_none(),
         "slow_path should be None after teardown of an unbound coordinator"
     );
-    // Reset phase zeroed counter / ready / bound flags.
+    // Refresh phase (zero_unbound_slot) zeroed counter / ready / bound flags.
     assert!(!bindings[0].ready);
     assert!(!bindings[0].bound);
     assert!(!bindings[0].xsk_registered);
@@ -3508,17 +3509,17 @@ fn reconcile_with_none_snapshot_reaches_no_snapshot_early_exit() {
 /// `refresh_bindings` so every now-workerless slot is routed through
 /// `zero_unbound_slot` AND the CoS owner->worker map is rebuilt empty.
 ///
-/// `reset_binding_counters` (the phase that always runs before the
-/// `no_snapshot` early-return) ONLY zeroes the counter scalars plus
-/// `bound`/`xsk_registered`/`socket_fd`. It deliberately does NOT touch
-/// `xsk_bind_mode`, `socket_ifindex`/`queue_id`/`bind_flags`,
-/// `zero_copy`, `flow_cache_capacity`, or `active_flow_count` — those
-/// are cleared only by `zero_unbound_slot` inside `refresh_bindings`.
-/// So this test pre-populates exactly those reset-survivor fields and a
-/// stale CoS owner-map entry, runs `reconcile(None, ...)`, and asserts
-/// they are cleared. Reverting the `self.refresh_bindings(bindings)`
-/// call added in the `no_snapshot` arm leaves every one of these stale
-/// → the asserts go RED.
+/// #17105 deleted the pre-refresh `reset_binding_counters` zero-pass:
+/// the fields this test pre-populates (`xsk_bind_mode`,
+/// `socket_ifindex`/`queue_id`/`bind_flags`, `zero_copy`,
+/// `flow_cache_capacity`, `active_flow_count`) were its survivors —
+/// it never touched them, and the counters it did zero are rewritten
+/// by `refresh_bindings` on every reconcile exit. So this test
+/// pre-populates exactly those survivor fields and a stale CoS
+/// owner-map entry, runs `reconcile(None, ...)`, and asserts they are
+/// cleared. Reverting the `self.refresh_bindings(bindings)` call in
+/// the `no_snapshot` arm leaves every one of these stale → the
+/// asserts go RED.
 #[test]
 fn reconcile_none_snapshot_refreshes_bindings_clearing_reset_survivor_fields() {
     let mut coordinator = Coordinator::new();
@@ -3540,8 +3541,8 @@ fn reconcile_none_snapshot_refreshes_bindings_clearing_reset_survivor_fields() {
         bound: true,
         xsk_registered: true,
         ready: true,
-        // Fields the reset pass leaves UNTOUCHED — only
-        // `zero_unbound_slot` (via refresh_bindings) clears them.
+        // Survivor fields only `zero_unbound_slot` (via
+        // refresh_bindings) clears.
         xsk_bind_mode: "ZEROCOPY".into(),
         zero_copy: true,
         socket_ifindex: 10,
@@ -7867,8 +7868,9 @@ fn validate_snapshot_buildable_matches_reconcile_5171() {
 #[test]
 fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     use crate::afxdp::zone_counters::{
-        ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
+        flush_recorded_zone_counters, record_zone_traffic,
     };
+    use crate::afxdp::zone_slot_counters::ZoneSlotMap;
     const ZONE_A: u32 = 100;
     const ZONE_B: u32 = 200;
 
@@ -7878,15 +7880,16 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     // #5163: build the seed map FROM the live store so its cached per-zone
     // atomics are the coordinator's — the lock-free fold then lands directly in
     // `coord.forwarding.zone_counter_store`.
-    let seed_map =
-        ZoneCounterSlotMap::build(&[ZONE_A, ZONE_B], &coord.forwarding.zone_counter_store);
+    let (seed_map, seed_caches) = ZoneSlotMap::build(
+        &[ZONE_A, ZONE_B],
+        &coord.forwarding.zone_counter_store,
+        &coord.forwarding.flood_counter_store,
+    );
     record_zone_traffic(&seed_map, ZONE_A, ZONE_B, 1000);
     record_zone_traffic(&seed_map, ZONE_B, ZONE_A, 500);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &seed_map);
-    let before: std::collections::HashSet<u32> = coord
-        .forwarding
-        .zone_counter_store
-        .snapshot()
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &seed_map, &seed_caches);
+    let before: std::collections::HashSet<u32> =
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
         .into_iter()
         .map(|r| r.zone_id)
         .collect();
@@ -7920,10 +7923,8 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
 
     // The live store must be UNTOUCHED — zone B's totals survive even though
     // the candidate does not configure zone B.
-    let after: std::collections::HashSet<u32> = coord
-        .forwarding
-        .zone_counter_store
-        .snapshot()
+    let after: std::collections::HashSet<u32> =
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
         .into_iter()
         .map(|r| r.zone_id)
         .collect();
@@ -7980,6 +7981,7 @@ fn zone_counter_live_coordinator(coord: &mut Coordinator) {
     flush_recorded_zone_counters(
         &coord.forwarding.zone_counter_store,
         &coord.forwarding.zone_counter_slot_map,
+        &coord.forwarding.zone_counter_caches,
     );
     assert_eq!(
         zone_counter_rows(coord),
@@ -8054,7 +8056,7 @@ fn rejected_apply_does_not_prune_live_zone_counters_6832() {
         "fixture: this apply must be rejected by the worker SPAWN arm — the arm \
          that leaves the candidate state published — got {result:?}"
     );
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8401,7 +8403,7 @@ fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
         "fixture: this apply must COMMIT (workers up) — got {result:?}"
     );
 
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8409,8 +8411,7 @@ fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
         "a COMMITTED reconcile must still drop the removed zone's totals; \
          deferring the prune past worker bring-up must not delete it"
     );
-    let survivor = live_store
-        .snapshot()
+    let survivor = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store)
         .into_iter()
         .find(|r| r.zone_id == 100)
         .expect("zone 100 is configured by both generations");
@@ -8438,7 +8439,7 @@ fn committed_refresh_prunes_zone_counters_for_removed_zones_6832() {
         .refresh_runtime_snapshot(&candidate)
         .expect("fixture: the candidate must refresh cleanly");
 
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8456,17 +8457,17 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
     // calls it, so reverting this accessor to its old inline
     // "configured-only" body left them all green. This test binds the wiring.
     use crate::afxdp::zone_counters::{
-        ZONE_COUNTER_ASSIGNABLE_SLOTS, ZoneCounterSlotMap, flush_recorded_zone_counters,
-        record_zone_traffic,
+        flush_recorded_zone_counters, record_zone_traffic,
     };
+    use crate::afxdp::zone_slot_counters::{ZoneSlotMap, ZONE_SLOT_ASSIGNABLE_SLOTS};
     const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let mut coord = Coordinator::new();
 
     // Apply 1: Z alone, holding a slot, moving traffic.
-    let map1 = ZoneCounterSlotMap::build(&[Z], &coord.forwarding.zone_counter_store);
+    let (map1, caches1) = ZoneSlotMap::build(&[Z], &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_traffic(&map1, Z, 0, 1500);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &map1);
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &map1, &caches1);
     coord.forwarding.zone_counter_slot_map = std::sync::Arc::new(map1);
     coord
         .forwarding
@@ -8481,7 +8482,7 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
 
     // Apply 2: enough lower ids to exhaust capacity. Z stays CONFIGURED and
     // keeps its retained totals, but loses its slot.
-    let mut ids: Vec<u32> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
+    let mut ids: Vec<u32> = (1..=(ZONE_SLOT_ASSIGNABLE_SLOTS as u32)).collect();
     ids.push(Z);
     for id in &ids {
         coord
@@ -8489,17 +8490,14 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
             .zone_id_to_name
             .insert(*id, format!("z{id}"));
     }
-    let map2 = ZoneCounterSlotMap::build(&ids, &coord.forwarding.zone_counter_store);
+    let (map2, _caches2) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     assert_eq!(map2.slot_of(Z), 0, "Z must lose its slot in apply 2");
     coord.forwarding.zone_counter_slot_map = std::sync::Arc::new(map2);
 
     // The store still retains Z's totals -- assert it, so this test cannot
     // pass because the data vanished for an unrelated reason.
     assert!(
-        coord
-            .forwarding
-            .zone_counter_store
-            .snapshot()
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
             .iter()
             .any(|r| r.zone_id == Z),
         "precondition: the store must still retain Z's totals"
@@ -8508,9 +8506,9 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
     // Move traffic on a zone that KEPT its slot in apply 2, so the assertions
     // below constrain both directions.
     const SURVIVOR: u32 = 1;
-    let survivor_map = ZoneCounterSlotMap::build(&ids, &coord.forwarding.zone_counter_store);
+    let (survivor_map, survivor_caches) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_traffic(&survivor_map, SURVIVOR, 0, 64);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &survivor_map);
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &survivor_map, &survivor_caches);
 
     let published = coord.zone_traffic_counters();
     assert!(
@@ -8567,7 +8565,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     //      at >=64 configured zones the ENTIRE per-zone flood surface vanishes
     //      and `show security screen ids-option statistics` reports
     //      "not available" for every zone.
-    //   3. passing `FloodCounterSlotMap::default()` instead of the live map
+    //   3. passing a default/empty slot map instead of the live map
     //      (publishes nothing).
     //
     // This is the exact asymmetry #6843 closed on the traffic half: the Go
@@ -8575,17 +8573,17 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // the Rust one was not. Mirrors
     // `zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843` above.
     use crate::afxdp::flood_counters::{
-        FLOOD_COUNTER_ASSIGNABLE_SLOTS, FloodCounterSlotMap, flush_recorded_flood_counters,
-        record_zone_flood_drop,
+        flush_recorded_flood_counters, record_zone_flood_drop,
     };
+    use crate::afxdp::zone_slot_counters::{ZoneSlotMap, ZONE_SLOT_ASSIGNABLE_SLOTS};
     const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let mut coord = Coordinator::new();
 
     // Apply 1: Z alone, holding a slot, tripping a flood check.
-    let map1 = FloodCounterSlotMap::build(&[Z], &coord.forwarding.flood_counter_store);
+    let (map1, caches1) = ZoneSlotMap::build(&[Z], &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_flood_drop(&map1, Z, "syn-flood");
-    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &map1);
+    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &map1, &caches1);
     coord.forwarding.flood_counter_slot_map = std::sync::Arc::new(map1);
     coord
         .forwarding
@@ -8601,7 +8599,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
 
     // Apply 2: enough lower ids to exhaust capacity. Z stays CONFIGURED and
     // keeps its retained counts, but loses its slot.
-    let mut ids: Vec<u32> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
+    let mut ids: Vec<u32> = (1..=(ZONE_SLOT_ASSIGNABLE_SLOTS as u32)).collect();
     ids.push(Z);
     for id in &ids {
         coord
@@ -8609,7 +8607,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
             .zone_id_to_name
             .insert(*id, format!("z{id}"));
     }
-    let map2 = FloodCounterSlotMap::build(&ids, &coord.forwarding.flood_counter_store);
+    let (map2, _caches2) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     assert_eq!(map2.slot_of(Z), 0, "Z must lose its slot in apply 2");
     assert!(map2.overflow_active, "apply 2 must set overflow_active");
     coord.forwarding.flood_counter_slot_map = std::sync::Arc::new(map2);
@@ -8617,10 +8615,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // The store still retains Z's counts -- assert it, so this test cannot pass
     // because the data vanished for an unrelated reason.
     assert!(
-        coord
-            .forwarding
-            .flood_counter_store
-            .snapshot()
+        crate::afxdp::flood_counters::flood_counter_snapshot(&coord.forwarding.flood_counter_store)
             .iter()
             .any(|r| r.zone_id == Z),
         "precondition: the store must still retain Z's flood counts"
@@ -8629,9 +8624,9 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // Trip a flood check on a zone that KEPT its slot in apply 2, so the
     // assertions below constrain both directions.
     const SURVIVOR: u32 = 1;
-    let survivor_map = FloodCounterSlotMap::build(&ids, &coord.forwarding.flood_counter_store);
+    let (survivor_map, survivor_caches) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_flood_drop(&survivor_map, SURVIVOR, "udp-flood");
-    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &survivor_map);
+    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &survivor_map, &survivor_caches);
 
     let published = coord.zone_flood_counters();
     assert!(
@@ -10682,7 +10677,7 @@ fn refresh_status_reclaims_dead_worker_holders_6979() {
         quarantined_after_panic: false,
         snapshot_policy_mismatch_total: 0,
     };
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     assert!(
         !alloc.debug_is_port_occupied(0, 30000),
@@ -12552,7 +12547,7 @@ fn refresh_status_vacates_a_dead_workers_v_min_slot_9367() {
     };
 
     // TICK 1 — the production path builds the floor.
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
     let floor = state
         .afxdp
         .cos
@@ -12586,7 +12581,7 @@ fn refresh_status_vacates_a_dead_workers_v_min_slot_9367() {
     dead_atomics.dead.store(true, Ordering::Relaxed);
 
     // TICK 2 — the real 1 Hz status path.
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     let after = state
         .afxdp
@@ -14176,7 +14171,7 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
     );
     coordinator
         .session_domain()
-        .delete_synced_tunnel_variants(target.clone(), false, false, false);
+        .delete_synced_tunnel_variants(target.clone(), crate::afxdp::SyncedDeleteMode::LOCAL, false);
     let remaining = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced);
     assert!(
         !remaining.contains_key(&target),
@@ -14262,12 +14257,13 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     source_nat_static: None, };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(target.clone(), entry);
-    let outcome = coordinator.session_domain().delete_synced_tunnel_variants(
-        target.clone(),
-        false,
-        false,
-        true,
-    );
+    let outcome = coordinator
+        .session_domain()
+        .delete_synced_tunnel_variants(
+            target.clone(),
+            crate::afxdp::SyncedDeleteMode::LOCAL_MIRROR,
+            false,
+        );
     assert_eq!(
         outcome,
         SyncedDeleteOutcome::RefusedMirrorDelete,
@@ -14275,11 +14271,153 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     );
     let lenient = coordinator.session_domain().delete_synced_tunnel_variants(
         target.clone(),
-        false,
-        false,
+        crate::afxdp::SyncedDeleteMode::LOCAL,
         false,
     );
     assert_eq!(lenient, SyncedDeleteOutcome::Applied);
+}
+
+/// #17133: every mode must behave identically through the exact delete and
+/// the tunnel-variant purge — the parity #12886 lacked (the variant ladder
+/// had no strict arm, and no scoped arm at all). One GRE fixture per mode:
+/// the stored entry carries session_id 4242 and the scoped mode names a
+/// DIFFERENT incarnation, so the scoped leg is the identity refusal.
+///
+/// Expected outcomes in the unit environment (no BPF fds, so strict mirror
+/// writes fail): LOCAL/PEER apply; LOCAL_MIRROR/PEER_MIRROR surface
+/// RefusedMirrorDelete; the scoped mode refuses identity on BOTH paths and
+/// the live entry survives both.
+#[test]
+fn synced_delete_mode_parity_exact_vs_tunnel_variants_17133() {
+    fn gre_key(discriminator: crate::session::TunnelDiscriminator) -> crate::session::SessionKey {
+        crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_GRE,
+            src_ip: "10.0.0.10".parse().unwrap(),
+            dst_ip: "10.0.0.20".parse().unwrap(),
+            src_port: 0,
+            dst_port: 0,
+            discriminator,
+            routing_domain: 0,
+        }
+    }
+    fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
+        let entry = crate::afxdp::worker::SyncedSessionEntry {
+            key: key.clone(),
+            decision: crate::afxdp::SessionDecision {
+                resolution: crate::afxdp::ForwardingResolution {
+                    disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 12,
+                    tx_ifindex: 12,
+                    tunnel_endpoint_id: 0,
+                    next_hop: None,
+                    neighbor_mac: None,
+                    src_mac: None,
+                    tx_vlan_id: 0,
+                    source_ifindex: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: crate::nat::NatDecision::default(),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            metadata: crate::session::SessionMetadata {
+                ingress_zone: 1,
+                egress_zone: 2,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 1,
+                fabric_ingress: false,
+                is_reverse: false,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            leak_incarnation: 0,
+            origin: crate::afxdp::SessionOrigin::SyncImport,
+            protocol: key.protocol,
+            tcp_flags: 0,
+            generation: 0,
+            session_id: 4242,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+            persistent_lease_hold: None,
+            source_nat_static: None,
+        };
+        crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
+            .insert(key.clone(), entry);
+    }
+    use crate::afxdp::{SyncedDeleteMode, SyncedDeleteOutcome};
+    let scoped_mismatch = SyncedDeleteMode::peer_mirror_scoped(9999).expect("non-zero");
+    let cases: [(&str, SyncedDeleteMode, SyncedDeleteOutcome, bool); 5] = [
+        ("LOCAL", SyncedDeleteMode::LOCAL, SyncedDeleteOutcome::Applied, false),
+        (
+            "LOCAL_MIRROR",
+            SyncedDeleteMode::LOCAL_MIRROR,
+            SyncedDeleteOutcome::RefusedMirrorDelete,
+            false,
+        ),
+        ("PEER", SyncedDeleteMode::PEER, SyncedDeleteOutcome::Applied, false),
+        (
+            "PEER_MIRROR",
+            SyncedDeleteMode::PEER_MIRROR,
+            SyncedDeleteOutcome::RefusedMirrorDelete,
+            false,
+        ),
+        (
+            "PEER_MIRROR_SCOPED(mismatch)",
+            scoped_mismatch,
+            SyncedDeleteOutcome::RefusedIdentity,
+            true,
+        ),
+    ];
+    for (name, mode, expected, survives) in cases {
+        let exact_coordinator = Coordinator::new();
+        let exact_key = gre_key(crate::session::TunnelDiscriminator::Keyed(1));
+        seed(&exact_coordinator, &exact_key);
+        let exact = exact_coordinator
+            .session_domain()
+            .delete_synced(exact_key.clone(), mode, false);
+        let exact_survives = crate::afxdp::shared_ops::lock_shared_recover(
+            &exact_coordinator.sessions.synced,
+        )
+        .contains_key(&exact_key);
+
+        let variant_coordinator = Coordinator::new();
+        let variant_key = gre_key(crate::session::TunnelDiscriminator::Keyed(2));
+        seed(&variant_coordinator, &variant_key);
+        let variant = variant_coordinator
+            .session_domain()
+            .delete_synced_tunnel_variants(variant_key.clone(), mode, false);
+        let variant_survives = crate::afxdp::shared_ops::lock_shared_recover(
+            &variant_coordinator.sessions.synced,
+        )
+        .contains_key(&variant_key);
+
+        assert_eq!(exact, expected, "{name}: exact delete outcome");
+        assert_eq!(
+            variant, exact,
+            "{name}: variant purge must match the exact delete (#17133/#12886)"
+        );
+        assert_eq!(exact_survives, survives, "{name}: exact delete survival");
+        assert_eq!(
+            variant_survives, exact_survives,
+            "{name}: variant purge survival must match the exact delete"
+        );
+    }
 }
 
 /// #15153 (B11-01): after a full reconcile / worker respawn, synced PPTP GRE

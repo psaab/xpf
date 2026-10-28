@@ -164,8 +164,7 @@ pub(in crate::afxdp) fn tunnel_outer_mtu(
 
 /// Dispatch the per-tunnel TCP MSS clamp by tunnel kind (#2299).
 ///
-/// For a `mode == "wireguard"` endpoint the GRE MSS formula
-/// (`native_gre_tcp_mss`) is ~36-60 bytes too high — it ignores
+/// For a WireGuard-kind endpoint the GRE MSS formula
 /// UDP(8) + WG data header(16) + Poly1305 tag(16) + §5.4.6 padding(≤15).
 /// A SYN clamped with the GRE value lets the peer send full-MSS data
 /// segments that the WG encap MTU guard then silently drops
@@ -185,9 +184,11 @@ pub(in crate::afxdp) fn tunnel_outer_mtu(
 /// MSS larger than the encap guard tolerates — it cannot reintroduce
 /// `encap_mtu_drops`.
 ///
-/// Non-WG endpoints (and the plain-forward path, `tunnel_endpoint_id ==
-/// 0`) keep the GRE formula bit-for-bit. No new branch on the
-/// plain-forward fast path: the `tunnel_endpoint_id == 0` early-out
+/// Non-WG GRE endpoints (and the plain-forward path, `tunnel_endpoint_id ==
+/// 0`) keep the GRE formula bit-for-bit. #17199: an Unknown-kind endpoint
+/// returns 0 (no clamp derived from a kind it is not) instead of falling
+/// into the GRE formula via the pre-fix binary string split. No new branch
+/// on the plain-forward fast path: the `tunnel_endpoint_id == 0` early-out
 /// short-circuits before the endpoint lookup, exactly as
 /// `native_gre_tcp_mss` does today.
 pub(in crate::afxdp) fn tunnel_tcp_mss(
@@ -204,7 +205,7 @@ pub(in crate::afxdp) fn tunnel_tcp_mss(
     else {
         return 0;
     };
-    if endpoint.mode == "wireguard" {
+    if endpoint.kind == TunnelKind::WireGuard {
         // outer family from the endpoint; inner family from the packet
         // being forwarded; outer MTU from the real egress interface.
         // #14664: gre-out is a GRE-only knob and never caps the WG value;
@@ -221,7 +222,10 @@ pub(in crate::afxdp) fn tunnel_tcp_mss(
         }
         return wg;
     }
-    native_gre_tcp_mss(forwarding, decision, addr_family)
+    if endpoint.kind == TunnelKind::Gre {
+        return native_gre_tcp_mss(forwarding, decision, addr_family);
+    }
+    0
 }
 
 /// #2486: select the per-packet TCP MSS clamp value by forwarding

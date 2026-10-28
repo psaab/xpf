@@ -80,7 +80,7 @@
 //! Production/perf impact: none. This file is `#[cfg(test)]`-only;
 //! no production code, attribute, or hot-path behaviour changes.
 
-use crate::afxdp::worker_queue::tests::{
+use crate::test_support::source_scan::{
     afxdp_rs_files, blank_cfg_test_modules, blank_comments_and_strings, cfg_test_modules,
 };
 

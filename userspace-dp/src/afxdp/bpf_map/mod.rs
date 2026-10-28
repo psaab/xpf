@@ -52,7 +52,6 @@ pub(crate) use tuple_gate::*;
 /// publishes on behalf of shared authority. See
 /// `docs/log/9517.md` for the two remedies that were tried and rejected, and
 /// `afxdp/forwarding/README.md` for the collision-surface list.
-
 /// #14648: may this session key become a row in the XDP steering map
 ///
 /// False for exactly protocol 255 — `SHIM_PROTO_FRAGMENT_NO_L4`, the
@@ -2100,7 +2099,7 @@ fn restamp_bpf_conntrack_app_id_raw(
 /// Without periodic refresh, Go callers of `IterateSessions` (CLI session
 /// display, Prometheus metrics, ARP warmup, HA sync) see stale idle times.
 ///
-/// The Go GC has `SkipSweep` set when the userspace DP is active, so stale
+/// The retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) never ran on the userspace DP, so stale
 /// `last_seen` will NOT cause premature expiry. This refresh is purely for
 /// diagnostic accuracy.
 ///

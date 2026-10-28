@@ -89,6 +89,81 @@ pub(crate) struct SyncedSessionEntry {
     pub(crate) persistent_lease_hold: Option<crate::nat::PersistentLeaseHold>,
 }
 
+impl crate::session::SessionDelta {
+    /// #17122 (R4-Q05-02): THE mapping from a shared `SyncedSessionEntry`
+    /// to a `SessionDelta` — the single construction the HA bulk export
+    /// (Open) and the tunnel-remap purge (Close) both go through.
+    ///
+    /// This exists because the two call sites previously hand-wrote the
+    /// same 21-field literal, and both copies shipped HA bugs when a
+    /// field changed: #14303 (`pptp_call_ids: 0` withheld PPTP sessions
+    /// on failover-after-resync) and #14960 (`fabric_redirect_sync:
+    /// true` + `session_id: 0` on every bulk-exported plain session).
+    /// The compiler only forces that a value is present, not that it is
+    /// the right one, so every carried field is read from `entry` here
+    /// and nowhere else: a new `SessionDelta` field fails compilation
+    /// until this constructor sets it (entry constructors elsewhere
+    /// must still populate any new `SyncedSessionEntry` field).
+    ///
+    /// Carried from the entry: `key`, `decision`, `metadata`,
+    /// `source_nat_static`, `origin`, `session_id`, `tcp_close_class`,
+    /// `tcp_handshake_state`, `pptp_call_ids`, and the packet counters
+    /// (`fwd_packets`/`rev_packets`; the shared row snapshots no byte
+    /// counts, so both byte legs stay 0). `fabric_redirect_sync` is
+    /// derived from the disposition in this one place — exactly as both
+    /// encoder legs compute `fabric_redirect_sync || disposition ==
+    /// FabricRedirect` (#14960).
+    ///
+    /// No-local-snapshot defaults, set once here: `provenance:
+    /// Incremental`, `bulk_resync: false`, `is_admission: false`,
+    /// `policy_generation: 0`, `purge_retirement: false`, and
+    /// `created_ns` / `last_seen_ns` / `observed_tos` /
+    /// `observed_tcp_flags` all 0/unknown — the shared entry carries no
+    /// creation instant, no observed ToS/TCP flags, and these deltas
+    /// are not routed through the RT_FLOW close exporter (#2465/#2749).
+    ///
+    /// Callers that need a different value for a field the entry owns
+    /// override it with struct-update syntax so the deliberate
+    /// divergence stays visible at the call site (the purge's
+    /// `source_nat_static: None` / `fabric_redirect_sync: false`), and
+    /// the bulk export restamps `tcp_handshake_state` from node-wide
+    /// completion evidence after construction (#16217).
+    pub(crate) fn from_shared(
+        entry: &SyncedSessionEntry,
+        kind: crate::session::SessionDeltaKind,
+    ) -> Self {
+        Self {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind,
+            key: entry.key.clone(),
+            decision: entry.decision,
+            metadata: entry.metadata.clone(),
+            source_nat_static: entry.source_nat_static,
+            policy_generation: 0,
+            origin: entry.origin,
+            fabric_redirect_sync: entry.decision.resolution.disposition
+                == crate::afxdp::ForwardingDisposition::FabricRedirect,
+            created_ns: 0,
+            last_seen_ns: 0,
+            counters: crate::session::SessionCounters {
+                fwd_packets: entry.fwd_packets,
+                fwd_bytes: 0,
+                rev_packets: entry.rev_packets,
+                rev_bytes: 0,
+            },
+            observed_tos: 0,
+            observed_tcp_flags: 0,
+            session_id: entry.session_id,
+            bulk_resync: false,
+            is_admission: false,
+            tcp_close_class: entry.tcp_close_class,
+            tcp_handshake_state: entry.tcp_handshake_state,
+            pptp_call_ids: entry.pptp_call_ids,
+            purge_retirement: false,
+        }
+    }
+}
+
 impl SyncedSessionEntry {
     /// #17058: the reverse construction — `SessionTable::synced_entry_for`
     /// builds one of these from a live table row in one lookup. Callers

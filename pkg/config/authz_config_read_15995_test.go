@@ -107,15 +107,15 @@ func TestConfigShowPathRenderedPricesDescendants15995(t *testing.T) {
 	tree := tree15995(t)
 
 	// Denied strict descendant below the requested ancestor: refuse.
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "", []*ConfigTree{tree}); err == nil {
 		t.Error("ShowConfig [security] was ALLOWED though it renders denied descendant security ipsec (#15995)")
 	}
 	// Same in display-set form (format must not change the price).
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "display set", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "display set", []*ConfigTree{tree}); err == nil {
 		t.Error("ShowConfig [security] | display set was ALLOWED though it renders denied descendant (#15995)")
 	}
 	// Direct denied path still refused (control — already true pre-fix).
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security", "ipsec"}, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security", "ipsec"}, "", []*ConfigTree{tree}); err == nil {
 		t.Error("ShowConfig [security ipsec] was ALLOWED under ^security ipsec")
 	}
 	// Allowed siblings still render: zones and policies carry no denied
@@ -125,16 +125,16 @@ func TestConfigShowPathRenderedPricesDescendants15995(t *testing.T) {
 		{"security", "policies"},
 		{"interfaces"},
 	} {
-		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", tree); err != nil {
+		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", []*ConfigTree{tree}); err != nil {
 			t.Errorf("ShowConfig %v must stay admitted (no denied descendant): %v", path, err)
 		}
 	}
 	// A path absent from the tree renders nothing: no descendant price.
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"routing-instances"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"routing-instances"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("ShowConfig [routing-instances] (absent) must stay admitted: %v", err)
 	}
 	// Nil tree renders nothing.
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "", nil); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "", []*ConfigTree{nil}); err != nil {
 		t.Errorf("ShowConfig [security] with nil tree must stay admitted: %v", err)
 	}
 }
@@ -146,10 +146,10 @@ func TestConfigShowPathRenderedAllowlistDescendant15995(t *testing.T) {
 	// Allow covers zones only; ipsec/policies descendants are uncovered.
 	cfg := cfg15995(t, "^security zones", "")
 	tree := tree15995(t)
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security", "zones"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security", "zones"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("ShowConfig [security zones] must stay admitted under allow ^security zones: %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "", []*ConfigTree{tree}); err == nil {
 		t.Error("ShowConfig [security] was ALLOWED under allow ^security zones though it renders uncovered descendants (#15995)")
 	}
 }
@@ -158,28 +158,28 @@ func TestConfigShowCompareRollbackRendered15995(t *testing.T) {
 	cfg := cfg15995(t, "", "^security ipsec")
 	tree := tree15995(t)
 
-	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", []string{"security"}, tree); err == nil {
+	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", []string{"security"}, []*ConfigTree{tree}); err == nil {
 		t.Error("scoped ShowCompare [security] was ALLOWED though it diffs denied descendant (#15995)")
 	}
-	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", []string{"security", "zones"}, tree); err != nil {
+	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", []string{"security", "zones"}, []*ConfigTree{tree}); err != nil {
 		t.Errorf("scoped ShowCompare [security zones] must stay admitted: %v", err)
 	}
 	// Denied descendant on EITHER arm refuses (here: second arm only).
 	empty := parseHierText(t, "security { zones { security-zone trust { description x; } } }")
-	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", []string{"security"}, empty, tree); err == nil {
+	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", []string{"security"}, []*ConfigTree{empty, tree}); err == nil {
 		t.Error("scoped ShowCompare [security] was ALLOWED with denied descendant on one arm (#15995)")
 	}
-	if err := AuthorizeConfigShowRollbackAtPathRendered(cfg, "limited", []string{"security"}, "", tree); err == nil {
+	if err := AuthorizeConfigShowRollbackAtPathRendered(cfg, "limited", []string{"security"}, "", []*ConfigTree{tree}); err == nil {
 		t.Error("scoped ShowRollback [security] was ALLOWED though it renders denied descendant (#15995)")
 	}
-	if err := AuthorizeConfigShowRollbackAtPathRendered(cfg, "limited", []string{"security", "zones"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowRollbackAtPathRendered(cfg, "limited", []string{"security", "zones"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("scoped ShowRollback [security zones] must stay admitted: %v", err)
 	}
 	// Empty path keeps the whole-render refusal for a restricted class.
-	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", nil, tree); err == nil {
+	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", nil, []*ConfigTree{tree}); err == nil {
 		t.Error("global ShowCompare was ALLOWED for a configuration-restricted class")
 	}
-	if err := AuthorizeConfigShowRollbackAtPathRendered(cfg, "limited", nil, "", tree); err == nil {
+	if err := AuthorizeConfigShowRollbackAtPathRendered(cfg, "limited", nil, "", []*ConfigTree{tree}); err == nil {
 		t.Error("whole-tree ShowRollback was ALLOWED for a configuration-restricted class")
 	}
 }
@@ -187,11 +187,59 @@ func TestConfigShowCompareRollbackRendered15995(t *testing.T) {
 func TestConfigPathOnlyRendered15995(t *testing.T) {
 	cfg := cfg15995(t, "", "^security ipsec")
 	tree := tree15995(t)
-	if err := AuthorizeConfigPathOnlyRendered(cfg, "limited", []string{"security"}, tree); err == nil {
+	if err := AuthorizeConfigPathOnlyRendered(cfg, "limited", []string{"security"}, []*ConfigTree{tree}); err == nil {
 		t.Error("AuthorizeConfigPathOnlyRendered [security] was ALLOWED though it renders denied descendant (#15995)")
 	}
-	if err := AuthorizeConfigPathOnlyRendered(cfg, "limited", []string{"security", "zones"}, tree); err != nil {
+	if err := AuthorizeConfigPathOnlyRendered(cfg, "limited", []string{"security", "zones"}, []*ConfigTree{tree}); err != nil {
 		t.Errorf("AuthorizeConfigPathOnlyRendered [security zones] must stay admitted: %v", err)
+	}
+}
+
+// TestConfigRenderedEmptyTreesRefused17158 proves #17158: a path authorizer
+// called with a limited (configuration-restricted) class, a non-empty path
+// and NO trees must refuse — the empty slice would otherwise silently skip
+// the rendered-descendant pricing (#15995), exactly the fail-open the
+// deleted AuthorizeConfigShow*AtPath twins embodied. Controls: an
+// unrestricted class and an empty path keep their prior verdicts, and a
+// non-empty slice holding only a nil tree still means "renders nothing".
+func TestConfigRenderedEmptyTreesRefused17158(t *testing.T) {
+	cfg := cfg15995(t, "", "^security ipsec")
+	path := []string{"security"}
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", nil); err == nil {
+		t.Error("ShowConfig [security] with no trees was ALLOWED for a restricted class (#17158)")
+	}
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", []*ConfigTree{}); err == nil {
+		t.Error("ShowConfig [security] with empty trees slice was ALLOWED for a restricted class (#17158)")
+	}
+	if err := AuthorizeConfigShowCompareAtPathRendered(cfg, "limited", path, nil); err == nil {
+		t.Error("scoped ShowCompare [security] with no trees was ALLOWED for a restricted class (#17158)")
+	}
+	if err := AuthorizeConfigShowRollbackAtPathRendered(cfg, "limited", path, "", nil); err == nil {
+		t.Error("scoped ShowRollback [security] with no trees was ALLOWED for a restricted class (#17158)")
+	}
+	if err := AuthorizeConfigPathOnlyRendered(cfg, "limited", path, nil); err == nil {
+		t.Error("AuthorizeConfigPathOnlyRendered [security] with no trees was ALLOWED for a restricted class (#17158)")
+	}
+	if err := AuthorizeConfigShowWholeAtTree(cfg, "limited", "", nil); err == nil {
+		t.Error("whole-tree read with no trees was ALLOWED for a restricted class (#17158)")
+	}
+	// Controls: nil entry inside a non-empty slice renders nothing.
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", []*ConfigTree{nil}); err != nil {
+		t.Errorf("ShowConfig [security] with [nil] tree must stay admitted (renders nothing): %v", err)
+	}
+	// Unrestricted class pays nothing even with no trees.
+	openCfg, err := func() (*Config, error) {
+		tr, errs := NewParser("system { login { class open { permissions [ configure view ]; } } }").Parse()
+		if len(errs) > 0 {
+			t.Fatalf("open fixture parse: %v", errs)
+		}
+		return CompileConfig(tr)
+	}()
+	if err != nil {
+		t.Fatalf("open fixture compile: %v", err)
+	}
+	if err := AuthorizeConfigShowPathRendered(openCfg, "open", path, "", nil); err != nil {
+		t.Errorf("unrestricted class with no trees must stay admitted: %v", err)
 	}
 }
 
@@ -210,10 +258,10 @@ func TestConfigShowRenderedUnrestricted15995(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open fixture compile: %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(cfg, "open", []string{"security"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "open", []string{"security"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("unrestricted class refused [security]: %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(cfg, "", []string{"security"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "", []string{"security"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("empty class refused [security]: %v", err)
 	}
 }
@@ -251,13 +299,12 @@ func TestConfigShowPartialMultiKeySelector15995(t *testing.T) {
 		{"security", "policies", "from-zone"},
 		{"security", "policies"},
 	} {
-		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", tree); err == nil {
+		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", []*ConfigTree{tree}); err == nil {
 			t.Errorf("ShowConfig %v was ALLOWED though it renders the denied complete node (#15995 C1)", path)
 		}
 	}
 	// The allowed sibling context (different to-zone) still renders.
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited",
-		[]string{"security", "policies", "from-zone", "trust", "to-zone", "trust"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security", "policies", "from-zone", "trust", "to-zone", "trust"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("allowed from-zone trust to-zone trust selector refused: %v", err)
 	}
 	// A leaf value token denied by identity: system host-name value.
@@ -266,7 +313,7 @@ func TestConfigShowPartialMultiKeySelector15995(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("leaf fixture parse: %v", errs)
 	}
-	if err := AuthorizeConfigShowPathRendered(leafCfg, "limited", []string{"system"}, "", leafTree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(leafCfg, "limited", []string{"system"}, "", []*ConfigTree{leafTree}); err == nil {
 		t.Error("ShowConfig [system] allowed though rendered leaf `system host-name SECRET-HOST-15995` is denied")
 	}
 }
@@ -309,14 +356,14 @@ security {
 		t.Fatalf("premise broken: expanded inheritance render carries no ipsec:\n%s", inh)
 	}
 	// Raw price (the bug) would admit; expanded price must refuse.
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "display inheritance", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", []string{"security"}, "display inheritance", []*ConfigTree{tree}); err != nil {
 		t.Fatalf("raw-tree price unexpectedly refused (test premise changed): %v", err)
 	}
-	if err := AuthorizeExpandedConfigShowPathRendered(cfg, "limited", []string{"security"}, "display inheritance", -1, tree); err == nil {
+	if err := AuthorizeExpandedConfigShowPathRendered(cfg, "limited", []string{"security"}, "display inheritance", -1, []*ConfigTree{tree}); err == nil {
 		t.Error("display inheritance [security] was ALLOWED though expanded render carries denied ipsec (#15995 C3)")
 	}
 	// Allowed sibling still renders expanded.
-	if err := AuthorizeExpandedConfigShowPathRendered(cfg, "limited", []string{"security", "zones"}, "display inheritance", -1, tree); err != nil {
+	if err := AuthorizeExpandedConfigShowPathRendered(cfg, "limited", []string{"security", "zones"}, "display inheritance", -1, []*ConfigTree{tree}); err != nil {
 		t.Errorf("expanded [security zones] must stay admitted: %v", err)
 	}
 	// System-path rendered variant (fold C5 at the shared layer).
@@ -330,7 +377,7 @@ security {
 	if len(errs) > 0 {
 		t.Fatalf("system fixture parse: %v", errs)
 	}
-	if err := AuthorizeConfigShowSystemPathRendered(sysCfg, "limited", []string{"system", "login"}, "show system login", sysTree); err == nil {
+	if err := AuthorizeConfigShowSystemPathRendered(sysCfg, "limited", []string{"system", "login"}, "show system login", []*ConfigTree{sysTree}); err == nil {
 		t.Error("show system login was ALLOWED though it renders denied `system login user alice` (#15995 C5)")
 	}
 	if err := AuthorizeConfigShowSystemPath(sysCfg, "limited", []string{"system", "login"}, "show system login"); err != nil {
@@ -354,19 +401,19 @@ func TestConfigShowKeywordOnlySelectorPricesInstances15995(t *testing.T) {
 		t.Fatalf("F1 fixture parse: %v", errs)
 	}
 	deny := cfg15995(t, "", "^firewall filter f1")
-	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"firewall", "filter"}, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"firewall", "filter"}, "", []*ConfigTree{tree}); err == nil {
 		t.Error("[firewall filter] ALLOWED though it renders denied filter f1 (#15995 F1)")
 	}
-	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"firewall", "filter", "f2"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"firewall", "filter", "f2"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("[firewall filter f2] must stay admitted: %v", err)
 	}
 	// Allow mirror: [firewall filter] renders f2 too, which the
 	// allowlist does not cover — refuse; [.. f1] alone admits.
 	allow := cfg15995(t, "^firewall filter f1", "")
-	if err := AuthorizeConfigShowPathRendered(allow, "limited", []string{"firewall", "filter"}, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(allow, "limited", []string{"firewall", "filter"}, "", []*ConfigTree{tree}); err == nil {
 		t.Error("allow ^firewall filter f1: [firewall filter] ALLOWED though it also renders uncovered f2 (#15995 F1)")
 	}
-	if err := AuthorizeConfigShowPathRendered(allow, "limited", []string{"firewall", "filter", "f1"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(allow, "limited", []string{"firewall", "filter", "f1"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("allow ^firewall filter f1: [firewall filter f1] refused: %v", err)
 	}
 	sysDeny := cfg15995(t, "", "^system login user admin")
@@ -374,7 +421,7 @@ func TestConfigShowKeywordOnlySelectorPricesInstances15995(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatalf("F1 system fixture parse: %v", errs)
 	}
-	if err := AuthorizeConfigShowPathRendered(sysDeny, "limited", []string{"system", "login", "user"}, "", sysTree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(sysDeny, "limited", []string{"system", "login", "user"}, "", []*ConfigTree{sysTree}); err == nil {
 		t.Error("[system login user] ALLOWED though it renders denied user admin (#15995 F1)")
 	}
 }
@@ -410,24 +457,22 @@ func TestConfigShowIntermediateMultiKey15995(t *testing.T) {
 		t.Fatalf("premise broken: truncated selector renders nothing:\n%s", out)
 	}
 	denyPolicy := cfg15995(t, "", "^security policies from-zone trust to-zone untrust policy p1")
-	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited",
-		[]string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "p1"}, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited", []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust", "policy", "p1"}, "", []*ConfigTree{tree}); err == nil {
 		t.Error("canonical complete selector ALLOWED (control should refuse)")
 	}
-	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited", trunc, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited", trunc, "", []*ConfigTree{tree}); err == nil {
 		t.Error("truncated intermediate selector ALLOWED though it renders the denied policy (#15995 fold3-1)")
 	}
-	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited", trunc, "display set", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited", trunc, "display set", []*ConfigTree{tree}); err == nil {
 		t.Error("truncated intermediate selector (display set) ALLOWED (#15995 fold3-1)")
 	}
 	// Deny on the intermediate context itself, truncated selector.
 	denyCtx := cfg15995(t, "", "^security policies from-zone trust to-zone untrust")
-	if err := AuthorizeConfigShowPathRendered(denyCtx, "limited", trunc, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(denyCtx, "limited", trunc, "", []*ConfigTree{tree}); err == nil {
 		t.Error("context-deny: truncated selector ALLOWED (#15995 fold3-1)")
 	}
 	// Allowed sibling context via the same truncated shape still renders.
-	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited",
-		[]string{"security", "policies", "from-zone", "trust", "to-zone", "trust", "policy", "p1"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(denyPolicy, "limited", []string{"security", "policies", "from-zone", "trust", "to-zone", "trust", "policy", "p1"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("allowed sibling policy refused: %v", err)
 	}
 }
@@ -447,7 +492,7 @@ func TestConfigShowAnchoredIntermediateContext15995(t *testing.T) {
 		t.Fatalf("fixture parse: %v", errs)
 	}
 	context := []string{"security", "policies", "from-zone", "trust", "to-zone", "untrust"}
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", context, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", context, "", []*ConfigTree{tree}); err == nil {
 		t.Fatal("control failed: direct denied context was admitted")
 	}
 	incomplete := []string{"security", "policies", "from-zone", "trust", "policy", "p1"}
@@ -455,13 +500,13 @@ func TestConfigShowAnchoredIntermediateContext15995(t *testing.T) {
 		t.Fatalf("premise failed: requested selector did not render policy: %q", out)
 	}
 	allowed := []string{"security", "policies", "from-zone", "trust", "to-zone", "trust", "policy", "p2"}
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", allowed, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", allowed, "", []*ConfigTree{tree}); err != nil {
 		t.Fatalf("allowed sibling was refused: %v", err)
 	}
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", incomplete, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", incomplete, "", []*ConfigTree{tree}); err == nil {
 		t.Fatal("anchored deny on intermediate context was bypassed by incomplete-selector child read")
 	}
-	if err := AuthorizeConfigShowPathRendered(cfg, "limited", incomplete, "display set", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(cfg, "limited", incomplete, "display set", []*ConfigTree{tree}); err == nil {
 		t.Fatal("anchored deny on intermediate context bypassed (display set)")
 	}
 }
@@ -490,15 +535,15 @@ func TestConfigShowBracketedMember15995(t *testing.T) {
 		{"security", "zones", "security-zone", "zgb"},
 		{"security", "zones", "security-zone", "zga"},
 	} {
-		if err := AuthorizeConfigShowPathRendered(deny, "limited", p, "", tree); err == nil {
+		if err := AuthorizeConfigShowPathRendered(deny, "limited", p, "", []*ConfigTree{tree}); err == nil {
 			t.Errorf("deny zga: %v ALLOWED though it renders zga (#15995 fold5-1)", p)
 		}
 	}
-	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"security", "zones", "security-zone", "trust"}, "", tree); err != nil {
+	if err := AuthorizeConfigShowPathRendered(deny, "limited", []string{"security", "zones", "security-zone", "trust"}, "", []*ConfigTree{tree}); err != nil {
 		t.Errorf("trust sibling refused: %v", err)
 	}
 	denyChild := cfg15995(t, "", "^security zones security-zone zga tcp-rst$")
-	if err := AuthorizeConfigShowPathRendered(denyChild, "limited", []string{"security", "zones", "security-zone", "zgb"}, "", tree); err == nil {
+	if err := AuthorizeConfigShowPathRendered(denyChild, "limited", []string{"security", "zones", "security-zone", "zgb"}, "", []*ConfigTree{tree}); err == nil {
 		t.Error("member-child deny bypassed via sibling member selector")
 	}
 }

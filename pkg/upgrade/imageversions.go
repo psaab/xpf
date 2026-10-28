@@ -116,64 +116,90 @@ var requiredKeys = []string{
 	"session-sync-protocol-version",
 }
 
-// MixedBaseVerdict is the outcome of the gate.
-type MixedBaseVerdict struct {
-	// SessionsSurvive is true only when the new image's HA + session-sync
+// UnknownWirePolicy decides what an unknown (0) peer session-sync wire
+// version means. It is the ONLY behavioural difference between the two
+// live lanes; everything else in the rule is shared.
+type UnknownWirePolicy int
+
+const (
+	// RefuseUnknownWire fails closed on peer wire 0: the LANE-2
+	// image-replace gate (scripts/deploy/xpf-deploy.py:_gate_mixed_base)
+	// cannot prove a pre-advertisement peer's frames will decode.
+	RefuseUnknownWire UnknownWirePolicy = iota
+	// PermitUnknownWire permits peer wire 0 (a pre-#7990 peer that does not
+	// advertise): refusing would block every LANE-1 roll from such a
+	// release. Deliberate since #14991 (docs/log/14991.md).
+	PermitUnknownWire
+)
+
+// ProtocolCompatVerdict is the outcome of GateProtocolCompat.
+type ProtocolCompatVerdict struct {
+	// Compatible is true only when the target's HA + session-sync
 	// protocols are back-compatible with the still-running peer, so the
-	// post-swap mixed-base cluster keeps syncing sessions across the failover.
-	SessionsSurvive bool
-	// Reason is a human-readable explanation (always set).
+	// mixed-base cluster keeps syncing sessions across the failover.
+	Compatible bool
+	// Reason is a human-readable explanation (always set when Err is nil).
 	Reason string
+	// Err is non-nil when the check itself cannot run (no target, or the
+	// target cannot prove its own constants) — never a judgement about
+	// the peer. A caller that must fail closed treats Err as a refusal.
+	Err error
 }
 
-// GateMixedBaseSwap decides whether a LANE-2 image-replace of the SECOND node
-// (to `newImg`) can preserve sessions while the FIRST node still runs the old
-// image advertising `peerHAProtocol` / `peerSessionSync`. It is fail-closed: any
-// missing field, any protocol the peer cannot speak, returns SessionsSurvive
-// =false (the operator must replace both nodes and accept a connection drop).
+// GateProtocolCompat is the single Go rule deciding whether `target` (the
+// binary/image that will run after the cut) can preserve sessions while the
+// peer still runs the old build advertising `peerHA` / `peerWire`. It is
+// fail-closed: any missing field or out-of-window protocol returns
+// Compatible=false.
 //
-// Back-compat rule: sessions survive iff the peer's live HA protocol lies within
-// the new image's [MinCompat, HAProtocol] window AND the session-sync protocol
-// matches exactly (the userspace frame format is not versioned for skew — a
-// mismatch means the replaced node cannot decode the peer's synced sessions).
-func GateMixedBaseSwap(newImg *ImageVersions, peerHAProtocol uint16, peerSessionSync int) MixedBaseVerdict {
-	if newImg == nil {
-		return MixedBaseVerdict{false, "no image version info — fail closed (replace both nodes, sessions drop)"}
+// Back-compat rule: sessions survive iff the peer's HA protocol lies within
+// the target's [HAProtocolMinCompat, HAProtocol] window AND the session-sync
+// wire matches EXACTLY (the userspace frame format is not versioned for
+// skew — a mismatch means the target cannot decode the peer's synced
+// sessions). Peer HA 0 (not advertising) always refuses. Peer wire 0 is
+// governed by `unknownWire` (see UnknownWirePolicy).
+//
+// This is the documented source of truth for the rule. Executors:
+//   - LANE-1 (in-place rolling): targetWireVerdict in rolling.go, an
+//     adapter passing PermitUnknownWire.
+//   - LANE-2 (image-replace): scripts/deploy/xpf-deploy.py
+//     _gate_mixed_base, the Python executor passing RefuseUnknownWire.
+//
+// The Go and Python bodies are pinned against each other by
+// scripts/deploy/mixed_base_gate_fixture.json (#17091), consumed by both
+// TestMixedBaseGateFixture17091 (Go) and MixedBaseFixture17091Tests
+// (Python). Edit the fixture and BOTH executors together.
+func GateProtocolCompat(target *ImageVersions, peerHA, peerWire uint16, unknownWire UnknownWirePolicy) ProtocolCompatVerdict {
+	if target == nil {
+		return ProtocolCompatVerdict{Err: fmt.Errorf("target binary protocol versions unavailable — the staged-target compatibility check cannot run")}
 	}
 	for _, k := range requiredKeys {
-		if !newImg.has(k) {
-			return MixedBaseVerdict{false, fmt.Sprintf(
-				"new image manifest missing %q — fail closed (replace both nodes, sessions drop)", k)}
+		if !target.has(k) {
+			return ProtocolCompatVerdict{Err: fmt.Errorf("target binary protocol versions missing %q — the staged-target compatibility check cannot run", k)}
 		}
 	}
-	if peerHAProtocol == 0 {
-		return MixedBaseVerdict{false,
-			"peer HA protocol unknown (peer not advertising) — fail closed"}
+	if peerHA == 0 {
+		return ProtocolCompatVerdict{Reason: "peer HA protocol unknown (peer not advertising) — fail closed"}
 	}
-	// The peer must be able to talk to the new image: the peer's version must be
-	// >= the new image's back-compat floor AND <= what the new image speaks (a
-	// peer NEWER than the new image is a downgrade we do not gate as safe).
-	if peerHAProtocol < newImg.HAProtocolMinCompat || peerHAProtocol > newImg.HAProtocol {
-		return MixedBaseVerdict{false, fmt.Sprintf(
-			"peer HA protocol %d outside new image window [%d,%d] — not back-compatible; "+
-				"replace BOTH nodes (sessions drop)",
-			peerHAProtocol, newImg.HAProtocolMinCompat, newImg.HAProtocol)}
+	if peerHA < target.HAProtocolMinCompat || peerHA > target.HAProtocol {
+		return ProtocolCompatVerdict{Reason: fmt.Sprintf(
+			"peer HA protocol %d outside target window [%d,%d] — not back-compatible; "+
+				"use image-replace (replace BOTH nodes, sessions drop)",
+			peerHA, target.HAProtocolMinCompat, target.HAProtocol)}
 	}
-	// Session-sync frame format is exact-match (unversioned for skew). An UNKNOWN
-	// peer session-sync (0) fails closed — we cannot prove the synced frames will
-	// decode (r3 Codex HIGH: 0 was previously skipped as "compatible").
-	if peerSessionSync == 0 {
-		return MixedBaseVerdict{false,
-			"peer session-sync protocol unknown — fail closed (replace both nodes, sessions drop)"}
+	if peerWire == 0 {
+		if unknownWire == PermitUnknownWire {
+			return ProtocolCompatVerdict{Compatible: true, Reason: "peer advertises no session-sync wire version (predates #7990) — permitted against the target binary"}
+		}
+		return ProtocolCompatVerdict{Reason: "peer session-sync protocol unknown — fail closed (replace both nodes, sessions drop)"}
 	}
-	if peerSessionSync != newImg.SessionSyncProtocol {
-		return MixedBaseVerdict{false, fmt.Sprintf(
-			"session-sync protocol differs (peer %d, new image %d) — synced sessions "+
-				"would not decode across the mixed cluster; replace BOTH nodes (sessions drop)",
-			peerSessionSync, newImg.SessionSyncProtocol)}
+	if int(peerWire) != target.SessionSyncProtocol {
+		return ProtocolCompatVerdict{Reason: fmt.Sprintf(
+			"target session-sync wire version %d differs from peer %d — after the cut the target could not decode the peer's synced sessions; use image-replace (replace BOTH nodes, sessions drop)",
+			target.SessionSyncProtocol, peerWire)}
 	}
-	return MixedBaseVerdict{true, fmt.Sprintf(
-		"new image HA protocol %d (compat floor %d) accepts peer %d; session-sync %d matches — "+
+	return ProtocolCompatVerdict{Compatible: true, Reason: fmt.Sprintf(
+		"target binary HA protocol %d (compat floor %d) accepts peer %d; session-sync %d matches — "+
 			"mixed-base swap preserves sessions",
-		newImg.HAProtocol, newImg.HAProtocolMinCompat, peerHAProtocol, newImg.SessionSyncProtocol)}
+		target.HAProtocol, target.HAProtocolMinCompat, peerHA, target.SessionSyncProtocol)}
 }

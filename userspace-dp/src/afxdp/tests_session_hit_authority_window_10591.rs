@@ -17,7 +17,6 @@
 //! terminal pins plus the Go ordering guard); commit-delay parameterization
 //! is follow-up #10624, blocked on a production numeric bound.
 
-#![allow(clippy::type_complexity)]
 
 use super::tests_session_hit_authority_9519::{
     MATRIX_SHAPES, binding, matrix_forward_observation, matrix_forwarding, matrix_packet,

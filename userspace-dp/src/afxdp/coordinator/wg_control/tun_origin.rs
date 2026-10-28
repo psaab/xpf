@@ -110,7 +110,7 @@ pub(in crate::afxdp) fn wg_endpoint_attachment_valid(
     let Some(endpoint) = forwarding.tunnel_endpoints.get(&tunnel_endpoint_id) else {
         return false;
     };
-    if endpoint.mode != "wireguard" {
+    if endpoint.kind != TunnelKind::WireGuard {
         return false;
     }
     endpoint.logical_ifindex == spawned_logical_ifindex
@@ -334,7 +334,7 @@ pub(in crate::afxdp) fn wg_tun_origin_packet_initiates(parsed: &WgTunOriginParse
 /// publishes only as refresh (forward already shared) or resume
 /// (tombstone = published within 300s). A skip marks nothing, so the
 /// flow stays forgotten and every response re-decides the same way.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn publish_wg_tun_origin_entries(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -377,7 +377,6 @@ pub(in crate::afxdp) fn publish_wg_tun_origin_entries(
 /// outer iteration). Deletes shared pairs idle past `DELETE_IDLE` and
 /// forgets tombstones past `TOMBSTONE_IDLE`. Removal is idempotent, so a
 /// re-delete between the idle read and the next sweep is a no-op.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn sweep_wg_tun_origin_idle(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -877,6 +876,7 @@ mod tests {
         // A GRE-mode row with the same attachment is NOT a WG attachment.
         let mut gre = forwarding.clone();
         gre.tunnel_endpoints.get_mut(&1).expect("wg row").mode = "gre".to_string();
+        gre.tunnel_endpoints.get_mut(&1).expect("wg row").kind = crate::afxdp::TunnelKind::Gre;
         assert!(!wg_endpoint_attachment_valid(&gre, 1, 400, "wg0"));
     }
 

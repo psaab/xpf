@@ -589,6 +589,7 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
         worker_command_queue_shed: 11,
         server_state_poison_recoveries: 17,
         server_handler_panics: 19,
+        reinject_handler_panics: 23,
         ..Default::default()
     };
     let value: serde_json::Value =
@@ -600,6 +601,7 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
     assert_eq!(value["worker_command_queue_shed"], 11);
     assert_eq!(value["server_state_poison_recoveries"], 17);
     assert_eq!(value["server_handler_panics"], 19);
+    assert_eq!(value["reinject_handler_panics"], 23);
 
     let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
     assert_eq!(back.tx_completion_skew, 3);
@@ -609,6 +611,7 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
     assert_eq!(back.worker_command_queue_shed, 11);
     assert_eq!(back.server_state_poison_recoveries, 17);
     assert_eq!(back.server_handler_panics, 19);
+    assert_eq!(back.reinject_handler_panics, 23);
 
     // Pre-#9900 payload (keys absent) must decode with zero defaults.
     let mut legacy_value =
@@ -631,6 +634,8 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
             .expect("new key present before strip");
         obj.remove("server_handler_panics")
             .expect("new key present before strip");
+        obj.remove("reinject_handler_panics")
+            .expect("new key present before strip");
     }
     let legacy: ProcessStatus =
         serde_json::from_value(legacy_value).expect("pre-#9900 payload decodes");
@@ -641,6 +646,7 @@ fn process_status_tx_completion_counters_roundtrip_9900() {
     assert_eq!(legacy.worker_command_queue_shed, 0);
     assert_eq!(legacy.server_state_poison_recoveries, 0);
     assert_eq!(legacy.server_handler_panics, 0);
+    assert_eq!(legacy.reinject_handler_panics, 0);
 }
 
 // #9720: round-trip + backward-compat pin for the per-command split of the
@@ -2837,6 +2843,10 @@ fn wire_invariant_default_specimens() {
             destination: "203.0.113.0/24".into(),
             next_hops: vec!["192.0.2.1".into(), "192.0.2.2".into()],
             next_hop_weights: vec![1, 4],
+            // #17142: next_table_route is skip_serializing_if=false, so a
+            // default specimen cannot pin it; the true value here is what
+            // lets the #16132 Go gate see the key at all.
+            next_table_route: true,
             ..Default::default()
         }),
     );
@@ -2859,6 +2869,84 @@ fn wire_invariant_default_specimens() {
     s.insert(
         "session_delta_info".into(),
         dump(&SessionDeltaInfo::default()),
+    );
+    // #17142: a POPULATED session_delta_info specimen with a DISTINCT
+    // sentinel per field. The default specimen above has
+    // ingress_ifindex == nat_scope_ifindex == 0, so its key set cannot
+    // see a rename SWAP between those two fields (issue mutant C: swap
+    // the two renames in binding.rs and every key-set cell stayed
+    // green). The Go cell TestSessionDeltaPopulatedSpecimenValues17142
+    // decodes THIS specimen field-by-value, so a swap — or any
+    // one-sided rename that regenerates the fixture — reds there with
+    // the two values transposed. Bools that are false by design in a
+    // meaningful delta stay false only where true would contradict
+    // another sentinel; every numeric/string field carries a unique
+    // value so no two fields can be transposed undetected.
+    s.insert(
+        "session_delta_info_populated".into(),
+        dump(&SessionDeltaInfo {
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0)
+                .expect("sentinel timestamp"),
+            slot: 17142001,
+            queue_id: 17142002,
+            worker_id: 17142003,
+            interface: "ge-0/0/0.17142".into(),
+            ifindex: 17142004,
+            event: "open-17142".into(),
+            addr_family: 42,
+            protocol: 43,
+            src_ip: "10.171.42.1".into(),
+            dst_ip: "10.171.42.2".into(),
+            src_port: 4201,
+            dst_port: 4202,
+            ingress_zone: "ingress-zone-17142".into(),
+            egress_zone: "egress-zone-17142".into(),
+            ingress_zone_id: 17142005,
+            egress_zone_id: 17142006,
+            ingress_ifindex: 17142007,
+            ingress_vlan_id: 4203,
+            nat_scope_ifindex: 17142008,
+            owner_rg_id: 17142009,
+            disposition: "disposition-17142".into(),
+            origin: "origin-17142".into(),
+            egress_ifindex: 17142010,
+            tx_ifindex: 17142011,
+            tunnel_endpoint_id: 4204,
+            tx_vlan_id: 4205,
+            next_hop: "10.171.42.3".into(),
+            neighbor_mac: "02:17:14:20:00:01".into(),
+            src_mac: "02:17:14:20:00:02".into(),
+            nat_src_ip: "10.171.42.4".into(),
+            nat_dst_ip: "10.171.42.5".into(),
+            nat_src_port: 4206,
+            nat_dst_port: 4207,
+            source_nat_provenance: 44,
+            fabric_redirect: true,
+            fabric_ingress: true,
+            log_session_init: true,
+            log_session_close: true,
+            rt_flow_session_id: 17142012,
+            routing_domain: 17142013,
+            policy_id: 17142014,
+            policy_counter_idx: 17142015,
+            policy_rule_id: "policy-rule-17142".into(),
+            app_timeout: 17142016,
+            nat64: true,
+            nat64_snat_v4: "10.171.42.6".into(),
+            source_nat_icmp_valid: true,
+            source_nat_icmp_type: 45,
+            source_nat_icmp_code: 46,
+            tunnel_discriminator: 17142017,
+            pptp_call_ids: 17142018,
+            tcp_close_class: 47,
+            tcp_handshake_state: 48,
+            install_table_domain: 17142019,
+            install_table_check: 17142020,
+            purge_retirement: true,
+            fwd_packets: 17142021,
+            rev_packets: 17142022,
+            stream_seq: 17142023,
+        }),
     );
     s.insert(
         "session_export_request".into(),

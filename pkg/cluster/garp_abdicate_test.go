@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -81,18 +83,73 @@ func TestARPBurstFollowups_RunsToCompletionWhileMaster(t *testing.T) {
 	}
 }
 
-// TestARPBurstFollowups_NilPredicateRunsToCompletion proves a nil predicate
-// (ungated callers: direct-mode re-announce) keeps the original behavior.
-func TestARPBurstFollowups_NilPredicateRunsToCompletion(t *testing.T) {
+// TestARPBurstFollowups_NilPredicateRefused17158 proves #17158: a nil
+// predicate is refused and sends nothing, at both the follow-up helper
+// and the exported burst entry points. Reverting the nil check (restoring
+// the ungated twin behaviour) makes the helper send (burst-1)*2 frames
+// and the exported calls fall through to interface/address errors instead
+// of the predicate-error text asserted below — RED.
+func TestARPBurstFollowups_NilPredicateRefused17158(t *testing.T) {
 	count, restore := recordingBurstSend(t)
 	defer restore()
 
 	const burst = 4
 	runARPBurstFollowups(-1, "eth0", "10.0.0.1", []byte{1}, []byte{2},
 		unix.SockaddrLinklayer{}, burst, nil)
+	if got := count(); got != 0 {
+		t.Fatalf("nil-predicate ARP follow-ups sent %d frames, want 0 (#17158)", got)
+	}
+	runNABurstFollowups(-1, "eth0", "fd00::1", []byte{1},
+		unix.SockaddrLinklayer{}, burst, nil)
+	if got := count(); got != 0 {
+		t.Fatalf("nil-predicate NA follow-ups sent %d frames, want 0 (#17158)", got)
+	}
+	// Exported entry points refuse before any socket/interface work: the
+	// predicate check precedes address/interface validation, so a bogus
+	// interface still yields the predicate error, not a lookup error.
+	// Asserting only err != nil would also pass pre-fix via that lookup
+	// error, so the predicate-error text itself is asserted.
+	for _, tc := range []struct {
+		name string
+		call func() error
+	}{
+		{"SendGratuitousARPBurstGated", func() error {
+			return SendGratuitousARPBurstGated("no-such-iface-17158", nil, 3, nil)
+		}},
+		{"SendGratuitousIPv6BurstGated", func() error {
+			return SendGratuitousIPv6BurstGated("no-such-iface-17158", nil, 3, nil)
+		}},
+		{"SendProxyGratuitousIPv6BurstGated", func() error {
+			return SendProxyGratuitousIPv6BurstGated("no-such-iface-17158", nil, 3, nil)
+		}},
+	} {
+		err := tc.call()
+		if err == nil {
+			t.Fatalf("%s with nil predicate was accepted (#17158)", tc.name)
+		}
+		if !strings.Contains(err.Error(), "requires a non-nil BurstStillValid predicate") {
+			t.Fatalf("%s with nil predicate returned %q, want the BurstStillValid predicate error (#17158)", tc.name, err)
+		}
+	}
+}
 
-	if got, want := count(), (burst-1)*2; got != want {
-		t.Fatalf("nil-predicate burst changed: sent %d follow-up frames, want %d", got, want)
+// TestUnsolicitedIPv6NABurstGated_NilPredicateRefused17158 proves #17158 at
+// the internal helper: sendUnsolicitedIPv6NABurstGated refuses a nil
+// predicate before opening a socket or sending the synchronous first NA.
+// Without the helper-level check the first NA goes out ungated; the
+// follow-up loop's nil refusal at runNABurstFollowups never sees it.
+// The bogus interface makes any fall-through fail differently (socket /
+// interface error), and the predicate-error text is asserted so a
+// fall-through cannot masquerade as a refusal.
+func TestUnsolicitedIPv6NABurstGated_NilPredicateRefused17158(t *testing.T) {
+	err := sendUnsolicitedIPv6NABurstGated("no-such-iface-17158",
+		&net.Interface{Name: "no-such-iface-17158"}, net.ParseIP("fd00::1"),
+		[]byte{1}, 3, nil)
+	if err == nil {
+		t.Fatalf("sendUnsolicitedIPv6NABurstGated with nil predicate was accepted (#17158)")
+	}
+	if !strings.Contains(err.Error(), "requires a non-nil BurstStillValid predicate") {
+		t.Fatalf("sendUnsolicitedIPv6NABurstGated with nil predicate returned %q, want the BurstStillValid predicate error (#17158)", err)
 	}
 }
 

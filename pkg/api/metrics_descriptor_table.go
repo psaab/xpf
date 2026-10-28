@@ -222,14 +222,6 @@ var collectorDescSession = []int{
 	xpfCollectorDescFieldIndex("sessionsSNAT"),
 	xpfCollectorDescFieldIndex("sessionsDNAT"),
 	xpfCollectorDescFieldIndex("sessionScrapeOK"),
-	xpfCollectorDescFieldIndex("gcSweepDuration"),
-	xpfCollectorDescFieldIndex("gcSweepTimestamp"),
-	xpfCollectorDescFieldIndex("gcSweepsTotal"),
-	xpfCollectorDescFieldIndex("gcExpiredDeletedTotal"),
-	xpfCollectorDescFieldIndex("gcDeadlinesSaturatedTotal"),
-	xpfCollectorDescFieldIndex("gcPersistentNATExpiredTotal"),
-	xpfCollectorDescFieldIndex("gcErrorsTotal"),
-	xpfCollectorDescFieldIndex("gcAggressiveAging"),
 }
 
 // initNATDescriptors (metrics_descriptors_nat.go).
@@ -562,6 +554,7 @@ var collectorDescUserspaceSession = []int{
 	xpfCollectorDescFieldIndex("userspaceWorkerCommandQueueShed"),
 	xpfCollectorDescFieldIndex("userspaceServerStatePoisonRecoveries"),
 	xpfCollectorDescFieldIndex("userspaceServerHandlerPanics"),
+	xpfCollectorDescFieldIndex("userspaceReinjectHandlerPanics"),
 }
 
 // initUserspaceStatus13280Descriptors (metrics_descriptors_userspace_status_13280.go).
@@ -581,6 +574,7 @@ var collectorDescUserspaceStatus13280 = []int{
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteRefusedIdentity"),
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteDroppedReleased"),
 	xpfCollectorDescFieldIndex("userspaceTunnelPurgeReservationsReleased"),
+	xpfCollectorDescFieldIndex("userspaceTunnelPurgeDeleteRefused"),
 	xpfCollectorDescFieldIndex("userspaceSyncedReverseRederived"),
 	xpfCollectorDescFieldIndex("userspacePeerDeleteRefusedLocalOwned"),
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteReplicaDropped"),

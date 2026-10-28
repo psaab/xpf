@@ -106,8 +106,8 @@ pub(crate) mod wg_uncovered_forward;
 pub use ha::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 pub(crate) use ha::{
     HelperMutationBegin, HelperMutationOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SyncedDeleteOutcome,
-    SyncedImportOutcome,
+    SYNCED_IMPORT_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX, SyncedDeleteMode,
+    SyncedDeleteOutcome, SyncedImportOutcome,
 };
 // #7919: the per-session counter query's wait handle + reply row, used by the
 // control-socket handler's two-phase dispatch.
@@ -134,24 +134,29 @@ mod sharded_neighbor;
 // so the explicit `#[path]` is unnecessary — auto-resolution finds mod.rs.
 #[path = "cos/mod.rs"]
 mod cos;
-mod session_glue;
+// #17207: `worker_commands` / `revalidation` are `pub(in crate::afxdp)`
+// (not private) so afxdp/mod.rs can import the six names below from
+// their defining leaves, breaking the `use super::*` +
+// `pub(super) use child::*` glob cycle that made the `session_glue::*`
+// re-exports ambiguous (rust-lang/rust#149145).
+pub(in crate::afxdp) mod session_glue;
 // #9856: the CommandExport direct conversion (control leg), so the worker
 // loop's cursor slice can reach it without naming the private module.
 pub(in crate::afxdp) use session_delta::{export_close_direct, export_open_direct};
 // #2442: re-export the owner-RG export walk + its chunkable candidate collector
 // so the worker loop's loss-of-sync resync path and the session-module resync
 // test can reach them without naming the private `session_glue` module.
-pub(crate) use session_glue::forward_export_candidates_for_owner_rgs;
+pub(crate) use session_glue::revalidation::forward_export_candidates_for_owner_rgs;
 /// #8586: the DELETE-specific split of `WORKER_COMMAND_QUEUE_DROPS`, re-exported
 /// so the coordinator status accessors and their wiring cell can name it
 /// without reaching into a private module.
-pub(crate) use session_glue::{
+pub(crate) use session_glue::worker_commands::{
     SESSION_DELETE_REPLICA_DROP_REPAIRED, SESSION_DELETE_REPLICA_DROPPED,
 };
 // #2653: the unbounded "emit all at once" helper is now a test-only fixture
 // (the production paths use the chunked drain-as-you-export in worker::loop_body).
 #[cfg(test)]
-pub(crate) use session_glue::export_forward_sessions_for_owner_rgs;
+pub(crate) use session_glue::revalidation::export_forward_sessions_for_owner_rgs;
 mod shared_ops;
 #[path = "shared_umem.rs"]
 mod shared_umem;
@@ -170,15 +175,13 @@ mod types;
 #[path = "umem/mod.rs"]
 mod umem;
 // #1612 step-3 STAGED scaffolding: cold-path latency histogram
-// primitives. Module-level `#[allow(dead_code)]` because every export
-// is intentionally unused at this PR — integration into BindingWorker,
+// primitives. Every export is intentionally unused at this PR — integration into BindingWorker,
 // the poll_descriptor hot path, and the wire protocol is deferred to
 // follow-up issues #1620, #1621, #1622 per
 // docs/pr/1612-scale-target-measurement/plan.md STAGED form. The
 // scaffolding lives in tree to (a) make the 11-finding plan-review
 // audit chain reviewable as compiled code and (b) provide the math
 // primitives the follow-ups will consume.
-#[allow(dead_code)]
 #[path = "cold_path_hist.rs"]
 pub(crate) mod cold_path_hist;
 // #3651: per-zone ingress/egress traffic counters (POPULATE half of #3643).
@@ -186,6 +189,9 @@ mod zone_counters;
 // #3651: per-zone SYN/ICMP/UDP flood-event counters — the flood half of the
 // same POPULATE, accounted on the screen-drop path rather than the forward path.
 mod flood_counters;
+// #17204: the ONE shared per-zone slot-counter machine (slot map, store,
+// pending, fold) both families above are built on.
+mod zone_slot_counters;
 // Clean-room WireGuard tunnel termination — see
 // docs/pr/wireguard-clean/plan.md. Engine + tests only in this PR;
 // hot-path activation lands in a follow-up.
@@ -269,7 +275,7 @@ use self::tunnel::*;
 use self::tx::dispatch::*;
 use self::tx::*;
 use self::types::*;
-pub(crate) use self::types::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
+pub(crate) use self::types::forwarding::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
 // #2844: expose the SSOT in-place Ethernet-header writer to the
 // top-level `crate::nat64` module. NAT64 lives outside `crate::afxdp`
 // (it is `mod nat64;` at the crate root), so it cannot reach the
@@ -309,15 +315,6 @@ use self::umem::*;
 // afxdp-private in production — this wrapper exists only under `cfg(test)`.
 #[cfg(test)]
 pub(crate) fn packet_rel_l4_offset_and_protocol_for_test(
-    packet: &[u8],
-    addr_family: u8,
-) -> Option<(usize, u8)> {
-    self::frame::packet_rel_l4_offset_and_protocol(packet, addr_family)
-}
-
-/// Production wrapper for the canonical ext-aware L4 walker used by the
-/// deny-only IPsec-inner descriptor path.
-pub(crate) fn packet_rel_l4_offset_and_protocol_for_ipsec(
     packet: &[u8],
     addr_family: u8,
 ) -> Option<(usize, u8)> {
@@ -853,10 +850,10 @@ mod worker;
 // #1807: shared poison-recovery helpers (lock_recover /
 // try_lock_recover) for every Mutex<VecDeque<WorkerCommand>> access.
 #[path = "worker_queue.rs"]
-// #7053: `pub(crate)` so the shared source-scan helpers in its test module
-// (blank_comments_and_strings / afxdp_rs_files / is_fixture) reach the
-// routing-instance pairing guard in filter/tests.rs. Widening the module,
-// not copying the helpers.
+// #17152: `pub(crate)` kept for the production queue helpers reached
+// crate-wide (`lock_recover`, `push_bounded`, counters); the test-only
+// source-scan helpers formerly shared through `worker_queue::tests`
+// now live in `crate::test_support::source_scan`.
 pub(crate) mod worker_queue;
 #[path = "worker_runtime.rs"]
 mod worker_runtime;
@@ -1218,7 +1215,7 @@ impl BatchCounters {
         &mut self,
         reason: &str,
         zone_id: u32,
-        flood_slots: &crate::afxdp::flood_counters::FloodCounterSlotMap,
+        flood_slots: &crate::afxdp::zone_slot_counters::ZoneSlotMap,
     ) {
         self.touched = true;
         self.screen_drops += 1;
@@ -2024,7 +2021,6 @@ struct PendingForwardHints {
 // Superseded by inline logic in build_live_forward_request() that reads ports
 // from the live UMEM area before .to_vec() copy (fixes #199).  Retained for
 // its unit test and potential future use.
-#[allow(dead_code)]
 
 fn binding_by_index_mut<'a>(
     left: &'a mut [BindingWorker],

@@ -41,6 +41,15 @@ pub(crate) static SERVER_STATE_POISON_RECOVERIES: AtomicU64 = AtomicU64::new(0);
 /// value is a bug report against the handler.
 pub(crate) static SERVER_HANDLER_PANICS: AtomicU64 = AtomicU64::new(0);
 
+/// #17123: handler panics contained at the reinject per-connection
+/// boundary ("drop one connection, keep the loop", #15112). A sibling
+/// of `SERVER_HANDLER_PANICS`, not the same counter: that counter means
+/// "quarantined and shutting down", while a reinject panic quarantines
+/// nothing and stops nothing, so folding them together would make the
+/// status field lie about which policy fired. Both arms share the
+/// payload renderer and the first-10 log cap below.
+pub(crate) static REINJECT_HANDLER_PANICS: AtomicU64 = AtomicU64::new(0);
+
 /// Lock the `ServerState` mutex, quarantining on poison instead of wedging
 /// or resuming blindly.
 ///
@@ -102,19 +111,40 @@ fn server_panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> Stri
 /// goes through `Arc<Mutex<ServerState>>` and friends) and owned values
 /// captured by `f` drop during the unwind. What it does NOT mean is that the
 /// guarded state is intact — hence the quarantine rather than a resume.
+
+/// Outcome of serving one connection under the single `catch_unwind`.
+enum ServeOutcome {
+    Ok,
+    HandlerErr(String),
+    Panic(String),
+}
+
+/// The one `catch_unwind(` call in `server/` (#17123). Policy
+/// (quarantine vs drop-connection) is the callers': they differ in what
+/// a panic *means*, not in how a panic is *contained*, so containment
+/// and payload rendering live only here. The three-way outcome keeps a
+/// handler `Err` distinguishable from a rendered panic payload, which a
+/// bare `Result<(), String>` cannot do.
+fn serve_catch_unwind(f: impl FnOnce() -> Result<(), String>) -> ServeOutcome {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(Ok(())) => ServeOutcome::Ok,
+        Ok(Err(err)) => ServeOutcome::HandlerErr(err),
+        Err(payload) => ServeOutcome::Panic(server_panic_payload_message(&payload)),
+    }
+}
+
 pub(crate) fn serve_one_catch_unwind(
     sock_name: &str,
     state: &Arc<Mutex<ServerState>>,
     running: &Arc<AtomicBool>,
     f: impl FnOnce() -> Result<(), String>,
 ) {
-    match catch_unwind(AssertUnwindSafe(f)) {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
+    match serve_catch_unwind(f) {
+        ServeOutcome::Ok => {}
+        ServeOutcome::HandlerErr(err) => {
             eprintln!("xpf-userspace-dp: {sock_name} request failed: {err}");
         }
-        Err(payload) => {
-            let msg = server_panic_payload_message(&payload);
+        ServeOutcome::Panic(msg) => {
             running.store(false, Ordering::SeqCst);
             if SERVER_HANDLER_PANICS.fetch_add(1, Ordering::Relaxed) < 10 {
                 eprintln!(
@@ -125,6 +155,43 @@ pub(crate) fn serve_one_catch_unwind(
             lock_server_state_recover(state).quarantined_after_panic = true;
         }
     }
+}
+
+/// Serve one accepted connection with drop-connection panic containment
+/// (#17123, #15112): the reinject arm of the accept loop.
+///
+/// This is the shared panic path the reinject loops lost when 61cfe3a483
+/// pasted a bare `catch_unwind` into them: the payload IS rendered
+/// (`server_panic_payload_message`, via `serve_catch_unwind`) and the
+/// panic IS counted (`REINJECT_HANDLER_PANICS`). Returns the handler's
+/// `Result` untouched on the non-panic path; on a panic, returns
+/// `Err(rendered)` where `rendered` is the panic payload message. The
+/// accept loop owns printing (capped at the first 10 via the counter)
+/// so log volume stays testable exactly as `accept_step`'s returned
+/// lines do (#9172).
+pub(crate) fn serve_connection_panic_counted(
+    f: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match serve_catch_unwind(f) {
+        ServeOutcome::Ok => Ok(()),
+        ServeOutcome::HandlerErr(err) => Err(err),
+        ServeOutcome::Panic(msg) => {
+            REINJECT_HANDLER_PANICS.fetch_add(1, Ordering::Relaxed);
+            Err(msg)
+        }
+    }
+}
+
+/// #17123: the first-10 log cap for a counted reinject panic, as a
+/// decision both the production accept loop and its test call. The
+/// counter has already been incremented by
+/// `serve_connection_panic_counted`, so the first 10 panics (post-
+/// increment values 1..=10) log and the 11th onward stays silent -
+/// the operator counter (`reinject_handler_panics`, surfaced) keeps
+/// counting either way. A pure function of the counter value: no
+/// I/O, no globals read here, so the cap is testable without a hook.
+pub(crate) fn reinject_panic_should_log(count_after_increment: u64) -> bool {
+    count_after_increment <= 10
 }
 
 #[cfg(test)]

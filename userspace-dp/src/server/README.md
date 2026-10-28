@@ -89,7 +89,7 @@ this surface over a Unix socket using a newline-delimited text protocol.
 - `helpers/` — shared daemon-loop utilities, split into cohesive
   submodules (#6234) behind a narrow `helpers/mod.rs` re-export facade so
   every `server::helpers::<name>` call site is unchanged:
-  - `helpers/status.rs` — `refresh_status` cold-path projection onto
+  - `helpers/status.rs` — `project_status` cold-path projection onto
     `ProcessStatus` plus the capability/forwarding predicates
     (`should_run_afxdp`, `reconcile_status_bindings`,
     `set_bindings_forwarding_armed`, `forwarding_unsupported_error`).
@@ -106,14 +106,14 @@ this surface over a Unix socket using a newline-delimited text protocol.
     lock-free `write_state`.
   - **`write_state` holds the `ServerState` lock only to snapshot, not to
     persist (#5469).** Persisting the state file used to run
-    `refresh_status`, `serde_json::to_vec_pretty` over the whole
+    `project_status`, `serde_json::to_vec_pretty` over the whole
     `ProcessStatus` + `ConfigSnapshot`, AND `StateWriter::persist` (file +
     parent-dir fsync) all under the `ServerState` lock. Because the fallback
     session-delta poll sets `persist_state` on every nonempty request, under
     session churn each delta poll serialized+fsynced the full state while
     holding the lock that also gates snapshot apply, status, and HA/control
     ops — a lock convoy. `write_state` now holds the lock ONLY long enough to
-    `refresh_status` and clone a minimal owned payload (`build_state_payload`,
+    `project_status` and clone a minimal owned payload (`build_state_payload`,
     the sole guard-touching half) plus a cheap Arc bump of the writer handle,
     then DROPS the guard before `encode()` (the `to_vec_pretty`) and
     `persist`. All persists still funnel through `StateWriter`'s single writer
@@ -129,20 +129,24 @@ this surface over a Unix socket using a newline-delimited text protocol.
     polling until bindings quiesce, up to 2 s at 50 ms. That poll used to run
     inside the locked `match`, holding the whole server's mutex across its
     sleeps.
-    That is not a latency nit, because of what shares the mutex. The HA
-    session socket is a SEPARATE socket accepted on a SEPARATE thread
-    (`lifecycle.rs`, #452), but its one verb — `sync_session` — dispatches
-    through the same `Arc<Mutex<ServerState>>`, so the socket split never
-    split the critical section. The Go side budgets 3 s for a session
-    round-trip (`sessionSyncRoundtripDeadline`,
-    `pkg/dataplane/userspace/process_control.go`) and #5380 aborts the REST
-    of a bulk batch on the first transport failure — so a settle overlapping
-    a mirror burst can DROP the remainder of a batch of up to 255 session
-    mirrors, during exactly the failover this path exists to serve.
-    The handlers now only RECORD that a settle is owed; `handle_request` runs
-    it after the guard drops and re-derives the response status under a fresh
-    short acquisition, the same locked-kick / unlocked-wait split #2962
-    (owner-RG export ack-wait) and #4054 (bulk export push) already use.
+    That was not a latency nit, because of what shared the mutex at the
+    time. The HA session socket was a SEPARATE socket accepted on a
+    SEPARATE thread (`lifecycle.rs`, #452), but its one verb —
+    `sync_session` — took the same
+    `Arc<Mutex<ServerState>>`, so the socket split never split the
+    critical section. The Go side budgets 3 s for a session round-trip
+    (`sessionSyncRoundtripDeadline`,
+    `pkg/dataplane/userspace/process_control.go`) and #5380 aborts the
+    REST of a bulk batch on the first transport failure — so a settle
+    overlapping a mirror burst could DROP the remainder of a batch of up
+    to 255 session mirrors, during exactly the failover this path exists
+    to serve. (#7209/#9629 have since moved the session verbs off this
+    mutex entirely; see the next bullet.)
+    The handlers now only RECORD that a settle is owed; `handle_stream`
+    runs it after the guard drops and re-derives the response status
+    under a fresh short acquisition, the same locked-kick / unlocked-wait
+    split #2962 (owner-RG export ack-wait) and #4054 (bulk export push)
+    already use.
     Interleaving between polls is the point, not a hazard: this is a
     convergence wait, not a transaction, and the predicate is re-evaluated
     from scratch each iteration.
@@ -156,6 +160,19 @@ this surface over a Unix socket using a newline-delimited text protocol.
     worker `join()` in `stop_and_clear`, and the BPF pin-open syscalls in the
     reconcile preflight. `ServerState` itself is still one mutex over four
     fields.
+  - **Session verbs are served without the `ServerState` mutex
+    (#7209/#9629).** `sync_session` and `list_sessions_by_policy` are
+    served from the session-domain handle on either socket, without
+    taking the `ServerState` mutex and without a status attach. On the
+    session socket, `ping` is likewise served without the `ServerState`
+    mutex, and session `update_ha_state` takes the lease-only fast path
+    (never `ServerState`); any other verb arriving on the session socket
+    is refused without taking the lock. Only main-socket verbs — plus
+    the main-socket `update_ha_state` path — still dispatch under the
+    locked match. Guarded by
+    `sync_session_is_served_while_the_state_lock_is_held_7209` and
+    `update_ha_state_session_ping_served_while_locked_9629` (and the
+    neighbouring #9629 session-socket cells in `tests.rs`).
 - `tests.rs` — colocated unit tests for the dispatcher, the per-verb
   handler error/gating arms, and the pure helper predicates (#1653
   §3.1). Handlers are driven through the real `handle_stream` call site
@@ -831,14 +848,17 @@ worker bound to multiple queues.
 
 ## Gotchas
 
-- **An accept error does not crash-loop the helper (#9172, V031; #15112).** All
-  four accept loops decide through `accept_step`, which also returns the
-  journal line to write, so log volume is tested rather than assumed: the
-  control and session loops in `lifecycle.rs`, and the #9506 reinject
-  submit/complete loops in `reinject_9506.rs` (#15112 — these two used to
-  `break` on any non-`WouldBlock` error, dropping the listener permanently
-  on an idle EMFILE; each accepted connection there is also served under
-  `catch_unwind` so a handler panic drops one connection, not the loop).
+- **An accept error does not crash-loop the helper (#9172, V031; #15112; #17123).** All
+  four sockets are served by the single accept loop in `server/accept_loop.rs`
+  (`run_accept_loop`), which decides through `accept_step`; `accept_step` also
+  returns the journal line to write, so log volume is tested rather than assumed.
+  The control and session loops are wired from `lifecycle.rs`, and the #9506
+  reinject submit/complete loops from `reinject_9506.rs` (#15112 — these two used
+  to `break` on any non-`WouldBlock` error, dropping the listener permanently
+  on an idle EMFILE; #17123 collapsed the four hand-written copies into the one
+  loop, and reinject handler panics are now counted (`REINJECT_HANDLER_PANICS`),
+  payload-rendered and capped at the first 10 like the control/session arm,
+  while still dropping one connection rather than the loop).
   - `WouldBlock` keeps each loop's poll interval.
   - EMFILE / ENFILE / ENOBUFS / ENOMEM -- what the accept path returns under
     descriptor or memory pressure -- are RETRIED on both loops: 50 ms doubling to

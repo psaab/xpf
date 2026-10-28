@@ -15,7 +15,7 @@
 // filter and the candidate loop rather than restated in each. Cold path
 // only (control responses), no per-packet work.
 
-use super::{lock_server_state_recover, refresh_status, should_run_afxdp};
+use super::{lock_server_state_recover, project_status, should_run_afxdp};
 use crate::protocol::{BindingStatus, ConfigSnapshot, InterfaceSnapshot, QueueStatus};
 use crate::server::ServerState;
 use chrono::Utc;
@@ -73,15 +73,17 @@ pub(crate) fn same_plan_apply_needs_binding_reconcile(
 // instead of being held by the caller across the whole 2 s.
 //
 // That matters because the lock is not the handler's; it is the WHOLE server's.
-// The HA session socket is a separate socket served by a separate thread
-// (lifecycle.rs), but `sync_session` dispatches through the same
+// Before #7209, the HA session socket was a separate socket served by a
+// separate thread (lifecycle.rs) but `sync_session` still took the same
 // `Arc<Mutex<ServerState>>`, so a settle wait held under the lock stalled every
 // session mirror behind it. The Go side gives a session request 3 s
 // (sessionSyncRoundtripDeadline, pkg/dataplane/userspace/process_control.go),
 // and #5380 aborts the REST of the bulk batch on the first transport failure —
 // so a 2 s settle overlapping a mirror burst does not merely add latency, it
 // can drop the remainder of a batch of up to 255 session mirrors during exactly
-// the failover this path exists to support.
+// the failover this path exists to support. #7209 has since moved
+// `sync_session` off this mutex; releasing the lock across the sleep remains
+// what keeps every other main-socket verb responsive during the wait.
 //
 // Interleaving is the POINT, not a side effect: another request may mutate state
 // between two polls. That is safe here because this is a CONVERGENCE wait, not a
@@ -102,7 +104,7 @@ pub(crate) fn wait_for_binding_settle(state: &Arc<Mutex<ServerState>>, timeout: 
             if guard.quarantined_after_panic {
                 return;
             }
-            refresh_status(&mut guard);
+            project_status(&mut guard);
             if bindings_settled(&guard.status.bindings) || Instant::now() >= deadline {
                 return;
             }
@@ -1081,7 +1083,7 @@ pub(crate) fn replan_bindings_from_candidates(
                 // Without this, ANY binding-plan expansion — a zone gaining an
                 // interface, a fabric parent appearing, a queue-count change
                 // that widens the slot range — silently disables the WHOLE
-                // dataplane. `refresh_status` computes
+                // dataplane. `project_status` computes
                 // `status.enabled = forwarding_armed && ... &&
                 // bindings.iter().all(|b| b.registered && b.armed)`
                 // (helpers/status.rs), so one unarmed slot makes `enabled`

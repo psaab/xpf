@@ -104,7 +104,6 @@ pub(crate) fn allocate_nat64_pool_port_deterministic_v6(
 /// Normal release drops this flow's active reference; a persistent BIB lease
 /// keeps the tuple allocated for its idle timeout. Rollback removes a
 /// speculative activation that was never published.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn release_nat64_pool_port(
     allocator: &PortAllocator,
     flow: SourceNatFlowKey,
@@ -152,7 +151,7 @@ pub(crate) fn release_nat64_pool_port(
 /// passes `None`. #15179: the params are threaded (not just a bool) so the
 /// minted lease carries `deterministic_identity: Some(V6(params))` and the
 /// local deterministic allocator can join it after failover.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn reserve_nat64_pool_port(
     allocator: &PortAllocator,
     flow: SourceNatFlowKey,
@@ -193,7 +192,7 @@ pub(crate) fn reserve_nat64_pool_port(
 /// #11478: coordinator form of [`reserve_nat64_pool_port`]. The holder mask is
 /// captured by the allocator's same live guard that evicts and installs the
 /// reservation, so worker OR/release operations cannot land between them.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
     allocator: &PortAllocator,
     flow: SourceNatFlowKey,

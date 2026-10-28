@@ -35,7 +35,7 @@ func TestRFC2136GarbageConflictPolicyRefusesDelete14432(t *testing.T) {
 			cfg.UpdateServer = srv.addrUDP
 			pol := policyFromConfig(cfg)
 			var ptr, conf int
-			u, err := newRFC2136Updater(pol, cfg, nil,
+			u, err := newRFC2136Updater(pol, cfg.RFC2136Endpoint, nil,
 				func() { ptr++ }, func() { conf++ })
 			if err != nil {
 				// Fail-closed at construction is an acceptable refusal:
@@ -88,7 +88,7 @@ func TestRFC2136GarbageConflictPolicyRefusesDeleteDirectUpdater14432(t *testing.
 	// Build a real client the same way the constructor would.
 	u2, err := newRFC2136Updater(
 		ddnsPolicy{domain: "example.com", conflictPolicy: "replace-owned", backend: "rfc2136"},
-		&config.DHCPDynamicDNSConfig{UpdateServer: srv.addrUDP}, nil, nil, nil)
+		config.RFC2136Endpoint{UpdateServer: srv.addrUDP}, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newRFC2136Updater (client donor): %v", err)
 	}
