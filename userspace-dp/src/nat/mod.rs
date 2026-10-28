@@ -242,6 +242,10 @@ mod tests_16011;
 #[cfg(test)]
 #[path = "tests_16035.rs"]
 mod tests_16035;
+// #17028: persistent-lease join/retire parity across all six modes.
+#[cfg(test)]
+#[path = "tests_join_parity_17028.rs"]
+mod tests_join_parity_17028;
 // #9874: authored-but-empty source-NAT match poison (fail-closed drop).
 #[cfg(test)]
 #[path = "tests_empty_match_poison_9874.rs"]
