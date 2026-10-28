@@ -220,6 +220,7 @@ func ReadHistorySeed(path string) ([]string, error) {
 	}
 	return filtered, nil
 }
+
 var historySeedContextSecretKeywords = func() map[string]struct{} {
 	keywords := config.SecretContextKeywords16794()
 	out := make(map[string]struct{}, len(keywords))
@@ -274,7 +275,6 @@ func hasPotentialSeedContextSecretLine(line string) bool {
 	}
 	return false
 }
-
 
 type historySeedCursor struct {
 	editPath   []string
@@ -470,8 +470,8 @@ func IsSensitiveHistoryLine(line string) bool {
 // credential; in-memory recall works either way):
 //
 //   - Any config mutation line that does not lex cleanly is sensitive:
-//   the unlexed tail may carry a credential the lexer never produced
-//   (the #16726/#15167 doctrine).
+//     the unlexed tail may carry a credential the lexer never produced
+//     (the #16726/#15167 doctrine).
 //   - Bare `password`/`secret` tokens suppress wherever they appear,
 //     as before (#15284): on a flat operational line there is no
 //     ancestor path to gate on. The resolved config path needs no
@@ -505,7 +505,7 @@ func IsSensitiveHistoryLineAt(editPath []string, line string) bool {
 			}
 			if f := strings.Fields(line); len(f) > 0 {
 				switch strings.Trim(f[0], `"'`) {
-				case "set", "edit", "top", "up":
+				case "set", "delete", "activate", "deactivate", "copy", "rename", "insert", "annotate", "edit", "top", "up":
 					return true
 				}
 			}
@@ -603,7 +603,7 @@ func sensitiveTokensAt(editPath []string, tokens []string, lexOK bool, line stri
 		// wherever their context appears on the line itself), plus
 		// the flat bare password/secret arm in the caller.
 		return config.IsSecretValueInPath16794(tokens)
-}
+	}
 }
 
 func resolvedHistoryPath(editPath, path []string) []string {

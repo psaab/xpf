@@ -69,3 +69,27 @@ func TestHistoryMutationEditContextBenignRetained17829(t *testing.T) {
 		})
 	}
 }
+
+// A leading unterminated quote makes ParseConfigMutationLine lex zero
+// tokens, so ConfigMutationVerb cannot see the verb. The Fields fallback
+// must still fail closed for every mutation verb: the gated secret in
+// the unlexed tail must be suppressed live and at seed.
+func TestHistoryUnlexableMutationLineSuppressed17829(t *testing.T) {
+	line := `"delete community S3cretUnlexable17829`
+	if !IsSensitiveHistoryLineAt([]string{"snmp"}, line) {
+		t.Errorf("IsSensitiveHistoryLineAt(snmp, %q) = false, want true (#17829)", line)
+	}
+	if persisted16794(t, []string{"snmp"}, line) {
+		t.Errorf("unlexable mutation line %q persisted via live recorder (#17829)", line)
+	}
+	seedPath := writeSeedFile17798(t, []string{"configure", "edit snmp", line})
+	seed, err := ReadHistorySeed(seedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range seed {
+		if got == line {
+			t.Errorf("ReadHistorySeed retained unlexable mutation line %q: %q (#17829)", line, seed)
+		}
+	}
+}
