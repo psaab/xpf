@@ -327,6 +327,28 @@ func (d *Daemon) systemSyslogForgetCached(keep map[string]bool) {
 	}
 }
 
+// systemSyslogForgetCachedNotInstalled evicts entries whose client identity
+// the handler no longer owns. A cache hit is only reusable while that client
+// remains installed; a foreign SetClients or shutdown drain can otherwise
+// close it while leaving the per-host cache untouched.
+func (d *Daemon) systemSyslogForgetCachedNotInstalled(installed []*logging.SyslogClient) {
+	d.systemSyslogBuiltMu.Lock()
+	defer d.systemSyslogBuiltMu.Unlock()
+	for key, cached := range d.systemSyslogBuiltByKey {
+		stillInstalled := false
+		for _, client := range installed {
+			if client == cached {
+				stillInstalled = true
+				break
+			}
+		}
+		if !stillInstalled {
+			delete(d.systemSyslogBuiltByKey, key)
+			delete(d.systemSyslogBuiltFP, key)
+		}
+	}
+}
+
 // systemSyslogSeedCacheIfEmpty adopts the handler's currently
 // installed clients into the cache on the first vetted apply, keyed by
 // their config host keys with an empty fingerprint. Each installed
@@ -1851,6 +1873,9 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 	// on this apply; seeding records the per-host association only
 	// and does not keep a seeded client alive across the swap.
 	d.systemSyslogSeedCacheIfEmpty(cfg)
+	// The gate can fail open after a foreign handler replacement or shutdown
+	// drain. Only still-installed clients are eligible for per-host reuse.
+	d.systemSyslogForgetCachedNotInstalled(d.slogHandler.Clients())
 
 	var clients []*logging.SyslogClient
 	skippedSystem15231 := 0

@@ -366,3 +366,52 @@ func TestApplySystemSyslogFailedChangeThenRevertDoesNotReuseClosedClient(t *test
 		t.Fatalf("control: unchanged apply after revert dialed (dials=%d, want still 3)", got)
 	}
 }
+
+// If an external SetClients call retires a cached system client, the next
+// apply must not recover that closed pointer from the daemon's per-host
+// cache. This is the cache-identity drift control for #17828.
+func TestApplySystemSyslogDoesNotReuseExternallyRetiredClient(t *testing.T) {
+	fake := withSystemSyslogFake16767(t)
+	d := newSystemSyslogDaemon16767(t)
+	cfg := systemSyslogCfg16767(&config.SyslogHostConfig{
+		Address:    "collector.example",
+		Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: "info"}},
+	})
+
+	d.applySystemSyslog(cfg)
+	if got := fake.dials.Load(); got != 1 {
+		t.Fatalf("premise: first apply dials=%d want 1", got)
+	}
+	first := d.slogHandler.Clients()
+	if len(first) != 1 {
+		t.Fatalf("premise: first apply installed %d, want 1", len(first))
+	}
+
+	// A foreign handler swap retires and closes the client's identity while
+	// leaving the daemon's per-host cache untouched.
+	d.slogHandler.SetClients(nil)
+	if err := first[0].Send(6, "after-external-retirement"); err == nil {
+		t.Fatal("premise: foreign SetClients(nil) must close the old client")
+	}
+
+	d.applySystemSyslog(cfg)
+	if got := fake.dials.Load(); got != 2 {
+		t.Fatalf("#17828: apply after external retirement must redial (dials=%d, want 2)", got)
+	}
+	reinstalled := d.slogHandler.Clients()
+	if len(reinstalled) != 1 {
+		t.Fatalf("apply after external retirement installed %d, want 1", len(reinstalled))
+	}
+	if reinstalled[0] == first[0] {
+		t.Fatal("#17828: apply reused the externally retired client")
+	}
+	if err := reinstalled[0].Send(6, "after-rebuild"); err != nil {
+		t.Fatalf("#17828: rebuilt client must send: %v", err)
+	}
+
+	// Control: the rebuilt identical configuration is again zero-dial.
+	d.applySystemSyslog(cfg)
+	if got := fake.dials.Load(); got != 2 {
+		t.Fatalf("control: unchanged apply after rebuild dialed (dials=%d, want still 2)", got)
+	}
+}
