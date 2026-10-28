@@ -14,13 +14,12 @@ import (
 	"github.com/psaab/xpf/pkg/logging"
 )
 
-// buildSessionCloseRawEventV4 builds the canonical 136-byte dataplane.Event
-// RT_FLOW payload for a SESSION_CLOSE, byte-for-byte mirroring the Rust
-// EventFrame::encode_session_close_rt_flow encoder
-// (userspace-dp/src/event_stream/codec.rs). This is the #2460 cross-language
-// wire-parity anchor: the offsets/endianness here MUST match the Rust
-// encoder, and the resulting bytes MUST decode to a Type=="SESSION_CLOSE"
-// EventRecord via logging.DecodeRawEventRecord / EventReader.ProcessRawEvent.
+// buildSessionCloseRawEventV4 builds the canonical dataplane.Event RT_FLOW
+// payload for a SESSION_CLOSE from Go's own layout. This is a Go-side decode
+// fixture, NOT a cross-language parity anchor: it cannot detect Rust drift.
+// The Rust-produced parity anchor is testdata/event_frames/rt_flow_close.hex
+// decoded by TestEventFrameGoldensDecode17131 (#17131). The offsets here are
+// the ones logging.DecodeRawEventRecord reads.
 //
 // Volume counters (offsets 56/64/112/120) and the created stamp (offset 108)
 // are intentionally 0 — this fixture exercises the DECODE path, and zero is a

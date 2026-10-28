@@ -69,6 +69,7 @@ pub(in crate::afxdp) struct WgDecapPacket {
     /// inferred: `try_decap` demuxes the session from `hdr.receiver_index`
     /// before any AEAD work and the record is authenticated by the time the
     /// outcome is built.
+    #[expect(dead_code, reason = "proven peer identity retained for test assertions (#17212)")]
     pub(in crate::afxdp) peer_pubkey: [u8; 32],
 }
 
@@ -433,6 +434,7 @@ pub(in crate::afxdp) fn is_wg_fragment_candidate(
 /// this integration as its consumer since it was written: "No `vec![]` in
 /// encap/decap." Allocating per packet on the decap path would be the hot-path
 /// allocation `docs/engineering-style.md` treats as a defect by default.
+#[cfg(test)]
 pub(in crate::afxdp) fn try_wg_decap_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,

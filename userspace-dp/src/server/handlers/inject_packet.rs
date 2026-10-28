@@ -1,6 +1,6 @@
 // #1345: per-verb handler for inject_packet, split out of handlers.rs in #1345.
 
-use super::super::helpers::refresh_status;
+use super::super::helpers::project_status;
 use super::super::ServerState;
 use crate::{ControlResponse, InjectPacketRequest};
 
@@ -17,7 +17,7 @@ pub(super) fn handle(
     };
     match guard.afxdp.inject_test_packet(packet_req) {
         Ok(()) => {
-            refresh_status(guard);
+            project_status(guard);
             *persist_state = true;
         }
         Err(err) => {

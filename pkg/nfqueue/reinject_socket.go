@@ -39,7 +39,7 @@ const (
 	// CLOCK_MONOTONIC acknowledgement deadline and its clock id.
 	reinjectDeadlineClockMonotonic = 1
 	reinjectMaxAckDeadline         = time.Second
-	reinjectSubmitPMechTailLen     = 79
+	reinjectSubmitPMechTailLen     = 81
 
 	// ReinjectSubmitFlagForward mirrors the Rust SUBMIT_FLAG_FORWARD bit:
 	// the submitting plane asks the worker to convert a successful D13/D14
@@ -615,7 +615,7 @@ func encodeSubmitBatch(frames []AdjudicatedFrame) ([]byte, error) {
 		putU64(&out, item.Frame.SnapshotGeneration)
 		putU64(&out, item.Frame.ConfigGeneration)
 		putU32(&out, item.Frame.FIBGeneration)
-		putU16(&out, uint16(item.ZoneID))
+		putU32(&out, item.ZoneID)
 		putU32(&out, item.IfID)
 		putU64(&out, item.Frame.PMechInventoryGeneration)
 		putU32(&out, item.Frame.PMechInventoryFIBGeneration)

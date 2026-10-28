@@ -1042,7 +1042,7 @@ impl SlowPathReinjector {
     /// `mtu()` is retained as the reinjector's "installed MTU" accessor (updated
     /// by `reconcile_mtu`) and is exercised by the #5801/#6097 tests, so it is
     /// no longer read on the production path; keep it compiled without warning.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn mtu(&self) -> i32 {
         self.mtu.load(Ordering::Relaxed) as i32
     }

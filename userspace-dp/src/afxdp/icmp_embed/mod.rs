@@ -233,7 +233,7 @@ pub(in crate::afxdp::icmp_embed) fn outer_datagram_end(
 /// Parse the embedded IP+L4 headers from an ICMP error payload and
 /// look up the corresponding session. Returns the session lookup if
 /// found.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(super) fn try_embedded_icmp_session_match(
     area: &MmapArea,
     desc: XdpDesc,

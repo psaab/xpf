@@ -2002,60 +2002,58 @@ func parsePolicyStatementInlineKeys11779(stmt *PolicyStatement, keys []string) {
 
 const policyFromMissingPredicate11779 = "<missing match predicate>"
 
-// collectProtocolList flattens a single "from protocol ..." node into the
-// protocol names it carries. After the lexer strips the brackets, a protocol
-// node reaches the compiler in one of three shapes:
-//   - block parse, bracket list: every protocol is a key on the node itself
-//     (Keys = ["protocol", "bgp", "ospf", "static"]).
-//   - flat-set SetPath, bracket list: the first protocol is Keys[1] and the
-//     remaining protocols hang off a nested single-child chain
-//     (Keys = ["protocol", "bgp"] -> child Keys = ["ospf", "static"] -> ...).
-//   - flat-set SetPath, separate "set ... from protocol <X>" commands: each
-//     command lands its own leaf (Keys = ["protocol", "<X>"]) as a sibling
-//     under the term's "from" block. The caller iterates those siblings and
-//     calls this helper once per node, which then returns the single protocol.
-//   - block parse, nested block: `from { protocol { bgp; ospf; static; } }`
-//     leaves the node itself with Keys = ["protocol"] and files one LEAF
-//     CHILD PER PROTOCOL as SIBLINGS (#6689).
+// policyFromListValues flattens a single `from <leaf> ...` node — where leaf
+// is one of protocol, prefix-list, community or as-path — into the values it
+// carries, quarantining an opaque body under the #11779
+// strict-reject / tolerant-fail-closed gate. It is the ONE place that decides
+// "opaque body" for all four leaves (#17202): the four arms used to duplicate
+// that decision with two different predicates, and the broader one
+// (!IsLeaf && Children) turned the value-block spelling `leaf { a; b; }`
+// into a strict rejection for three leaves while protocol kept working.
 //
-// The fourth shape is why the descent walks every child rather than
-// Children[0]. Following the single-child chain reached only the first
-// sibling, so a term written to filter three protocols compiled to one — and
-// with `then reject`, the two it dropped were silently ACCEPTED and installed.
-// A nested block is not the flat-set chain wearing a different shape; the
-// chain is one child deep at each level, the block is N children wide at one
-// level, and only a full descent covers both.
+// An opaque body is present in exactly two shapes:
+//   - valued leaf with a body: `prefix-list PL1 { neighbor 10.0.0.1; }` —
+//     values on the node's Keys AND a non-empty Children list; or
+//   - nested value with a body: `prefix-list { PL1 { neighbor …; } }` — a
+//     value child that itself carries children.
 //
-// Every token below a protocol node is a protocol name: Junos has no
-// per-protocol option keyword on this leaf, so unlike `system ntp server`
-// (#6690) there is no trailing-token ambiguity and no promotion hazard from
-// reading the whole subtree. Blank tokens are skipped — an empty slot is not
-// a protocol, and every value this helper returns is installed as a
-// `match source-protocol` line.
-func collectProtocolList(protoNode *Node) []string {
-	if protoNode == nil {
-		return nil
+// Only LEAF children of an unvalued leaf (`leaf { a; b; }`, #6689) are
+// values. When an opaque body fires, the values on the node's own keys are
+// kept as typed matches and the child NAMES are quarantined in UnknownFrom;
+// no grandchild token is promoted. With no opaque body every token is a
+// plain value, read by plainListValues (ast.go), the single plain-list
+// reader for all five admitted spellings. Junos has no per-value option
+// keyword on any of these four leaves, so the descent carries no promotion
+// hazard (unlike `system ntp server`, #6690); blank tokens are skipped
+// because every returned value is installed as a typed match.
+//
+// The returned quarantine list is non-empty exactly when an opaque body
+// fires, so the caller appends it unconditionally.
+func policyFromListValues(fc *Node) (values []string, opaque []string) {
+	if fc == nil {
+		return nil, nil
 	}
-	var protocols []string
-	add := func(tokens []string) {
-		for _, tok := range tokens {
-			if tok != "" {
-				protocols = append(protocols, tok)
-			}
+	if len(fc.Keys) > 1 && len(fc.Children) > 0 {
+		return policyFromKeepKeysAndQuarantine(fc)
+	}
+	for _, child := range fc.Children {
+		if child != nil && len(child.Children) > 0 {
+			return policyFromKeepKeysAndQuarantine(fc)
 		}
 	}
-	if len(protoNode.Keys) >= 2 {
-		add(protoNode.Keys[1:])
-	}
-	var walk func(*Node)
-	walk = func(parent *Node) {
-		for _, child := range parent.Children {
-			add(child.Keys)
-			walk(child)
+	return plainListValues(fc), nil
+}
+
+// policyFromKeepKeysAndQuarantine implements the opaque arm of
+// policyFromListValues: keep the values authored on the node's own keys,
+// quarantine every child name, and promote no child token.
+func policyFromKeepKeysAndQuarantine(fc *Node) (values []string, opaque []string) {
+	for _, tok := range fc.Keys[1:] {
+		if tok != "" {
+			values = append(values, tok)
 		}
 	}
-	walk(protoNode)
-	return protocols
+	return values, policyFromOpaqueChildNames11779(fc)
 }
 
 // parseRouteFilterLen parses a Junos route-filter length token of the
@@ -2288,37 +2286,26 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 			}
 			for _, fc := range fromChildren {
 				switch fc.Name() {
-				case "protocol":
-					// Junos "from protocol [ bgp ospf static ]" matches any
-					// listed protocol. The lexer strips the brackets, so the
-					// protocol list arrives in one of two AST shapes:
-					//  - hierarchical block parse: all protocols land in
-					//    fc.Keys (Keys=["protocol","bgp","ospf","static"]);
-					//  - flat-set SetPath: the first protocol is fc.Keys[1]
-					//    and the rest form a nested child chain
-					//    (Keys=["protocol","bgp"] -> child Keys=["ospf","static"]).
-					// Collect every protocol from both shapes, not just the
-					// first (#2008 H18).
-					if len(fc.Keys) > 1 && len(fc.Children) > 0 {
-						term.FromProtocols = append(term.FromProtocols, fc.Keys[1:]...)
-						term.UnknownFrom = append(term.UnknownFrom, policyFromOpaqueChildNames11779(fc)...)
-					} else {
-						term.FromProtocols = append(term.FromProtocols, collectProtocolList(fc)...)
+				case "protocol", "prefix-list", "community", "as-path":
+					// All four are plain multi-value lists (match ANY across
+					// repeated siblings, #2642): the bracket list collapses
+					// onto one leaf's Keys (#2419/#2689/#2008 H18) and the
+					// block spelling files one child per value (#6689).
+					// policyFromListValues is the single reader + opaque
+					// decision for all four (#17202); route only its result
+					// to the field named by the leaf.
+					values, opaque := policyFromListValues(fc)
+					switch fc.Name() {
+					case "protocol":
+						term.FromProtocols = append(term.FromProtocols, values...)
+					case "prefix-list":
+						term.PrefixList = append(term.PrefixList, values...)
+					case "community":
+						term.FromCommunity = append(term.FromCommunity, values...)
+					case "as-path":
+						term.FromASPath = append(term.FromASPath, values...)
 					}
-				case "prefix-list":
-					// Junos allows repeated `prefix-list` siblings in one
-					// term (match ANY). Accumulate so multiple statements are
-					// all kept, not just the last (#2642). A bracketed list
-					// `prefix-list [ p1 p2 ]` ALSO collapses onto one leaf's
-					// Keys[1:] / Children in BOTH AST shapes (#2419), so read
-					// every value via the firewallMatchValues SSOT — the prior
-					// nodeVal-only read kept just the first list entry (#2689).
-					if !fc.IsLeaf && len(fc.Children) > 0 {
-						term.PrefixList = append(term.PrefixList, fc.Keys[1:]...)
-						term.UnknownFrom = append(term.UnknownFrom, policyFromOpaqueChildNames11779(fc)...)
-					} else {
-						term.PrefixList = append(term.PrefixList, firewallMatchValues(fc)...)
-					}
+					term.UnknownFrom = append(term.UnknownFrom, opaque...)
 				case "route-filter":
 					if len(fc.Keys) >= 3 {
 						rf := &RouteFilter{
@@ -2355,31 +2342,6 @@ func parsePolicyTermChildren(term *PolicyTerm, children []*Node) {
 							rf.ThroughPrefix = routeFilterTrailingToken(fc)
 						}
 						term.RouteFilters = append(term.RouteFilters, rf)
-					}
-				case "community":
-					// Repeated `community` siblings match ANY (#2642) — keep
-					// every one, not just the last. A bracketed list
-					// `community [ c1 c2 ]` ALSO collapses onto one leaf's
-					// Keys[1:] / Children in BOTH AST shapes (#2419), so read
-					// every value via the firewallMatchValues SSOT — the prior
-					// nodeVal-only read kept just the first list entry (#2689).
-					if !fc.IsLeaf && len(fc.Children) > 0 {
-						term.FromCommunity = append(term.FromCommunity, fc.Keys[1:]...)
-						term.UnknownFrom = append(term.UnknownFrom, policyFromOpaqueChildNames11779(fc)...)
-					} else {
-						term.FromCommunity = append(term.FromCommunity, firewallMatchValues(fc)...)
-					}
-				case "as-path":
-					// Repeated `as-path` siblings match ANY (#2642). A bracketed
-					// list `as-path [ a1 a2 ]` ALSO collapses onto one leaf's
-					// Keys[1:] / Children in BOTH AST shapes (#2419), so read
-					// every value via the firewallMatchValues SSOT — the prior
-					// nodeVal-only read kept just the first list entry (#2689).
-					if !fc.IsLeaf && len(fc.Children) > 0 {
-						term.FromASPath = append(term.FromASPath, fc.Keys[1:]...)
-						term.UnknownFrom = append(term.UnknownFrom, policyFromOpaqueChildNames11779(fc)...)
-					} else {
-						term.FromASPath = append(term.FromASPath, firewallMatchValues(fc)...)
 					}
 				case "then", "to":
 					term.UnknownFrom = append(term.UnknownFrom, fc.Name())
