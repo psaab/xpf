@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // #14707 (on-box CLI twin): `show` in config mode rendered the candidate
@@ -51,17 +52,17 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 				rest := args[i+1:]
 				if len(rest) == 3 && rest[1] == "rollback" {
 					if n, err := strconv.Atoi(rest[2]); err == nil && n >= 0 {
-						scfg, slot, other, _, _, slotErr := c.store.RollbackCompareSnapshot(n, false)
-						if scfg != nil {
-							priceCfg = scfg
+						cap := c.store.CaptureRollback(n, false)
+						if cap.Cfg != nil {
+							priceCfg = cap.Cfg
 						}
-						trees = []*config.ConfigTree{slot, other}
-						c.setRenderSnapshots16613(slotErr, slot, other)
-						if slotErr != nil {
+						trees = []*config.ConfigTree{cap.Slot, cap.Other}
+						c.setRenderSnapshots16613(cap)
+						if cap.Err != nil {
 							if err := config.AuthorizeConfigShowCompareCommand(priceCfg, c.UserClass(), comparePath); err != nil {
 								return err
 							}
-							return slotErr
+							return cap.Err
 						}
 					}
 				} else {
@@ -191,13 +192,13 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			// #15995 fold: stash the priced arms for the handler.
 			priceCfg := cfg
 			if c.store != nil {
-				scfg, slot, other, _, _, slotErr := c.store.RollbackCompareSnapshot(n, true)
-				if scfg != nil {
-					priceCfg = scfg
+				cap := c.store.CaptureRollback(n, true)
+				if cap.Cfg != nil {
+					priceCfg = cap.Cfg
 				}
-				c.setRenderSnapshots16613(slotErr, slot, other)
-				if slotErr != nil {
-					return slotErr
+				c.setRenderSnapshots16613(cap)
+				if cap.Err != nil {
+					return cap.Err
 				}
 			}
 			return c.priceRollbackWholeCompareCaptured15994(priceCfg, cfg)
@@ -223,17 +224,17 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 				nodeID := -1
 				priceCfg := cfg
 				if c.store != nil {
-					scfg, tree, nid, _, slotErr := c.store.RollbackSnapshot(n)
-					if scfg != nil {
-						priceCfg = scfg
+					cap := c.store.CaptureRollbackSlot(n)
+					if cap.Cfg != nil {
+						priceCfg = cap.Cfg
 					}
-					nodeID = nid
-					if tree != nil {
-						trees = []*config.ConfigTree{tree}
+					nodeID = cap.NodeID
+					if cap.Slot != nil {
+						trees = []*config.ConfigTree{cap.Slot}
 					}
-					c.setRenderSnapshots16613(slotErr, tree, nil)
-					if slotErr != nil {
-						return slotErr
+					c.setRenderSnapshots16613(cap)
+					if cap.Err != nil {
+						return cap.Err
 					}
 				}
 				if format == displayPipeInheritance {
@@ -243,13 +244,13 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			}
 			priceCfg := cfg
 			if c.store != nil {
-				scfg, tree, _, _, slotErr := c.store.RollbackSnapshot(n)
-				if scfg != nil {
-					priceCfg = scfg
+				cap := c.store.CaptureRollbackSlot(n)
+				if cap.Cfg != nil {
+					priceCfg = cap.Cfg
 				}
-				c.setRenderSnapshots16613(slotErr, tree, nil)
-				if slotErr != nil {
-					return slotErr
+				c.setRenderSnapshots16613(cap)
+				if cap.Err != nil {
+					return cap.Err
 				}
 			}
 			return c.priceRollbackWholeCaptured15994(priceCfg, cfg, suffix)
@@ -263,14 +264,14 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 				var trees []*config.ConfigTree
 				priceCfg := cfg
 				if c.store != nil {
-					scfg, slot, other, _, _, slotErr := c.store.RollbackCompareSnapshot(n, true)
-					if scfg != nil {
-						priceCfg = scfg
+					cap := c.store.CaptureRollback(n, true)
+					if cap.Cfg != nil {
+						priceCfg = cap.Cfg
 					}
-					trees = []*config.ConfigTree{slot, other}
-					c.setRenderSnapshots16613(slotErr, slot, other)
-					if slotErr != nil {
-						return slotErr
+					trees = []*config.ConfigTree{cap.Slot, cap.Other}
+					c.setRenderSnapshots16613(cap)
+					if cap.Err != nil {
+						return cap.Err
 					}
 				}
 				return config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, c.UserClass(), rbPath, "", trees...)
@@ -281,13 +282,13 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			if a == "compare" {
 				priceCfg := cfg
 				if c.store != nil {
-					scfg, slot, other, _, _, slotErr := c.store.RollbackCompareSnapshot(n, true)
-					if scfg != nil {
-						priceCfg = scfg
+					cap := c.store.CaptureRollback(n, true)
+					if cap.Cfg != nil {
+						priceCfg = cap.Cfg
 					}
-					c.setRenderSnapshots16613(slotErr, slot, other)
-					if slotErr != nil {
-						return slotErr
+					c.setRenderSnapshots16613(cap)
+					if cap.Err != nil {
+						return cap.Err
 					}
 				}
 				return c.priceRollbackWholeCompareCaptured15994(priceCfg, cfg)
@@ -302,29 +303,29 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			var trees []*config.ConfigTree
 			priceCfg := cfg
 			if c.store != nil {
-				scfg, tree, _, _, slotErr := c.store.RollbackSnapshot(n)
-				if scfg != nil {
-					priceCfg = scfg
+				cap := c.store.CaptureRollbackSlot(n)
+				if cap.Cfg != nil {
+					priceCfg = cap.Cfg
 				}
-				if tree != nil {
-					trees = []*config.ConfigTree{tree}
+				if cap.Slot != nil {
+					trees = []*config.ConfigTree{cap.Slot}
 				}
-				c.setRenderSnapshots16613(slotErr, tree, nil)
-				if slotErr != nil {
-					return slotErr
+				c.setRenderSnapshots16613(cap)
+				if cap.Err != nil {
+					return cap.Err
 				}
 			}
 			return config.AuthorizeConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, "", trees...)
 		}
 		priceCfg := cfg
 		if c.store != nil {
-			scfg, tree, _, _, slotErr := c.store.RollbackSnapshot(n)
-			if scfg != nil {
-				priceCfg = scfg
+			cap := c.store.CaptureRollbackSlot(n)
+			if cap.Cfg != nil {
+				priceCfg = cap.Cfg
 			}
-			c.setRenderSnapshots16613(slotErr, tree, nil)
-			if slotErr != nil {
-				return slotErr
+			c.setRenderSnapshots16613(cap)
+			if cap.Err != nil {
+				return cap.Err
 			}
 		}
 		return c.priceRollbackWholeCaptured15994(priceCfg, cfg, "")
@@ -499,15 +500,14 @@ func (c *CLI) setCandidateSnapshot15995(candidate *config.ConfigTree) {
 }
 
 // setRenderSnapshots16613 records the priced snapshots together with
-// the rollback slot error (#16613): gates price a nil snapshot as
-// "renders nothing", so a missing slot must still surface as an error
-// at the handler (the snapshot_render_15995.go contract). A nil
-// slotErr leaves renderSlotErr16613 unset.
-func (c *CLI) setRenderSnapshots16613(slotErr error, slotOrActive, other *config.ConfigTree) {
-	c.setRenderSnapshots15995(slotOrActive, other)
-	// Assign unconditionally: a later capture in the same dispatch
-	// frame (or a direct gate call) must clear a previous slot error.
-	c.renderSlotErr16613 = slotErr
+// the rollback slot error carried inside the capture (#16613, #17215):
+// gates price a nil snapshot as "renders nothing", so a missing slot
+// must still surface as an error at the handler. The capture's Err is
+// assigned unconditionally so a later capture in the same dispatch
+// frame (or a direct gate call) clears a previous slot error.
+func (c *CLI) setRenderSnapshots16613(cap configstore.RollbackCapture) {
+	c.setRenderSnapshots15995(cap.Slot, cap.Other)
+	c.renderSlotErr16613 = cap.Err
 }
 
 // renderSlotErr returns the rollback slot error stashed with the
@@ -536,7 +536,7 @@ func (c *CLI) renderSnapshot15995(key string) *config.ConfigTree {
 
 // priceRollbackWholeCompareCaptured15994 prices an unscoped
 // operational rollback-vs-active compare against the arms ALREADY
-// captured+stashed by the caller's RollbackCompareSnapshot(n, true)
+// captured+stashed by the caller's CaptureRollback(n, true)
 // (#15994 fold2-3: price and stash must be the SAME capture — the
 // helper never takes a second one).
 func (c *CLI) priceRollbackWholeCompareCaptured15994(priceCfg, cfg *config.Config) error {
@@ -552,7 +552,7 @@ func (c *CLI) priceRollbackWholeCompareCaptured15994(priceCfg, cfg *config.Confi
 
 // priceRollbackWholeCaptured15994 prices an unscoped operational
 // rollback render against the slot tree ALREADY captured+stashed
-// by the caller's RollbackSnapshot(n) (fold2-3).
+// by the caller's CaptureRollbackSlot(n) (fold2-3).
 func (c *CLI) priceRollbackWholeCaptured15994(priceCfg, cfg *config.Config, suffix string) error {
 	if priceCfg == nil {
 		priceCfg = cfg

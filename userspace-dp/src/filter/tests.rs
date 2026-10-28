@@ -13136,7 +13136,7 @@ fn reject_message_type_reaches_the_filter_action_6854() {
 fn production_sources_7053() -> Vec<(String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
-    crate::afxdp::worker_queue::tests::afxdp_rs_files(&root, &mut files);
+    crate::test_support::source_scan::afxdp_rs_files(&root, &mut files);
     let mut out = Vec::new();
     for path in files {
         let rel = path
@@ -13144,13 +13144,13 @@ fn production_sources_7053() -> Vec<(String, String)> {
             .expect("under src")
             .to_string_lossy()
             .replace('\\', "/");
-        if crate::afxdp::worker_queue::tests::is_fixture(&root, &rel) {
+        if crate::test_support::source_scan::is_fixture(&root, &rel) {
             continue;
         }
         let src = std::fs::read_to_string(&path).expect("read source");
         out.push((
             rel,
-            crate::afxdp::worker_queue::tests::blank_comments_and_strings(&src),
+            crate::test_support::source_scan::blank_comments_and_strings(&src),
         ));
     }
     out

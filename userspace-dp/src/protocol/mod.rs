@@ -45,6 +45,14 @@ mod status;
 #[cfg(test)]
 mod tests;
 
+// #17152: the crate-wide #16187 `unsafe` ratchet is mounted here, at the
+// `protocol` module that owns no single file's surface, not under
+// `protocol::cos` — it scans the whole `src/` tree, and mounting it
+// under `cos.rs` made a crate-wide gate look like a CoS-file guard.
+#[cfg(test)]
+#[path = "unsafe_ratchet_16187.rs"]
+mod unsafe_ratchet_16187;
+
 pub(crate) use binding::*;
 pub(crate) use control::*;
 pub(crate) use cos::*;

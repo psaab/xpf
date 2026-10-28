@@ -1035,22 +1035,14 @@ impl WgEngine {
     /// suppress the rekey trigger. Without this check the NoSession-edge
     /// rekey (`wg_control::drive_attempt_machine`) was skipped for a
     /// confirmed-but-expired-yet-not-GC'd session, a bounded ~0-1s
-    /// blackhole at the expiry boundary until the GC tick. The check
-    /// mirrors `try_encap`'s T3 gate, `expire_sessions`, and
-    /// `peer_has_usable_session`, reading the same mock-aware `now_ns()`
-    /// clock so every WG age comparison shares one clock domain. Slow
-    /// path.
+    /// blackhole at the expiry boundary until the GC tick. The age
+    /// test itself is `WgSession::usable_at` (#17208) — the sole
+    /// usable-session predicate, shared with `try_encap`'s T3 gate,
+    /// `try_decap`, `expire_sessions`, and `peer_has_usable_session`.
+    /// Reads the mock-aware `now_ns()` clock so every WG age
+    /// comparison shares one clock domain. Slow path.
     pub(crate) fn peer_has_confirmed_session(&self, pubkey: &[u8; 32]) -> bool {
-        let Some(peer) = self.peer_arc(pubkey) else {
-            return false;
-        };
-        let now_ns = self.now_ns();
-        matches!(
-            peer.current.read().unwrap_or_else(|e| e.into_inner()).as_ref(),
-            Some(session) if session.is_confirmed()
-                && now_ns.saturating_sub(session.created_ns)
-                    < super::session::REJECT_AFTER_TIME_NS
-        )
+        self.peer_has_usable_session(pubkey, self.now_ns())
     }
 
     /// xpf's local static public key (X25519). The peer needs this to
@@ -1719,7 +1711,7 @@ impl WgEngine {
         // and proceeds — the spec's exact "on send" semantics.
         let now_ns = self.now_ns();
         let age_ns = now_ns.saturating_sub(session.created_ns);
-        if age_ns >= super::session::REJECT_AFTER_TIME_NS {
+        if session.expired_at(now_ns) {
             WgCounters::bump(&self.counters.encap_drops_expired);
             self.request_rekey(&session.peer_pubkey);
             return Err(EncapError::NoSession);
@@ -1901,7 +1893,7 @@ impl WgEngine {
         // rekey arm (see DecapError::Expired). The control thread's
         // expire_sessions tears the session down within one tick.
         let now_ns = self.now_ns();
-        if now_ns.saturating_sub(session.created_ns) >= super::session::REJECT_AFTER_TIME_NS {
+        if session.expired_at(now_ns) {
             return Err(self.counters.count_decap_err(DecapError::Expired));
         }
         let plaintext_len_max = hdr.ciphertext.len() - POLY1305_TAG_LEN;

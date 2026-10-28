@@ -1651,6 +1651,18 @@ type compileOpts struct {
 	// transport cannot bind a malformed or address-family-incompatible source.
 	// Non-local but valid sources remain a separate advisory in ValidateConfig.
 	lenientSamplingSourceAddress bool
+	// lenientFamilyMembers17196 (#17196) downgrades the shared-extractor
+	// unknown-family diagnostic at the three non-firewall tops
+	// (interfaces unit family, forwarding-options family,
+	// forwarding-options sampling instance family) from a hard compile
+	// error to a cfg.Warnings entry on tolerant load / peer-sync. An
+	// unknown member (empty-Keys child, undeclared token, or undeclared
+	// residue on a structured member) compiles to nothing in every
+	// case — the compiler installs nothing for it on either path — so a
+	// leniently-loaded malformed persisted/synced config still BOOTS
+	// (#1960) while strict commit rejects the typo. Same doctrine as
+	// lenientSamplingInstanceConflicts.
+	lenientFamilyMembers17196 bool
 	// lenientSSHKnownHosts16770 (#16770) downgrades an invalid
 	// ssh-known-hosts host/key (unknown type, type/key mismatch,
 	// wildcard/malformed host) to a warning on tolerant load / peer-sync
@@ -4101,6 +4113,7 @@ func lenientCompileOpts() (o compileOpts) {
 	o.lenientSamplingInputRate = true
 	o.lenientPortMirroringIngressAlias15651 = true
 	o.lenientSamplingSourceAddress = true
+	o.lenientFamilyMembers17196 = true
 	o.lenientSSHKnownHosts16770 = true
 	o.lenientFlowExportSeconds = true
 	o.lenientApplicationSetMembers = true
