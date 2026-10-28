@@ -27,8 +27,8 @@ func (s *Server) healthHandler(w http.ResponseWriter, _ *http.Request) {
 		h := s.compileHealthFn()
 		payload["compile_ever_succeeded"] = h.EverSucceeded
 		payload["compile_failure_count"] = h.FailureCount
-		// #5031: /health is intentionally unauthenticated (authMiddleware
-		// exempts it unconditionally). The raw compile error string
+		// #5031: /health is intentionally unauthenticated (the auth
+		// gate exempts it unconditionally). The raw compile error string
 		// (h.LastError) is copied verbatim from the compiler and can carry
 		// file paths, config internals, or a secret echoed by a schema
 		// validator that quotes the submitted value — so it MUST NOT cross
