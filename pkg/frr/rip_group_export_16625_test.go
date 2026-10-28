@@ -197,3 +197,221 @@ func TestRIPPerGroupRejectTermConfines16625(t *testing.T) {
 		t.Errorf("reject term must render as earlier deny (deny@%d permit@%d):\n%s", denyIdx, permitIdx, got)
 	}
 }
+
+func TestRIPPerGroupMaxLengthLongerBoundaryPreservesSibling16625(t *testing.T) {
+	// #18361: a max-length `longer` filter (10.0.0.1/32 longer) is a
+	// valid empty match set. It must not make the whole RIP per-group
+	// export render deny-all; the sibling broader permit in the same
+	// accepting term must survive. The host route itself must stay
+	// denied (Junos longest-match: 10.0.0.1/32 matches the /32 longer
+	// boundary and fails), so a bare exact-host deny precedes the permit.
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "t1", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	permits := listPermits16625(got, list)
+	if len(permits) != 1 || permits[0] != "10.0.0.0/8 le 32" {
+		t.Errorf("sibling broader permit must survive, permits=%v:\n%s", permits, got)
+	}
+	if strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("empty max-length longer must NOT deny-all the group:\n%s", got)
+	}
+	hostDeny := "ip prefix-list " + list + " seq 5 deny 10.0.0.1/32\n"
+	siblingPermit := "ip prefix-list " + list + " seq 10 permit 10.0.0.0/8 le 32\n"
+	if denyIdx, permitIdx := strings.Index(got, hostDeny), strings.Index(got, siblingPermit); denyIdx < 0 || permitIdx < 0 || denyIdx > permitIdx {
+		t.Errorf("bare exact-host deny must precede the sibling broader permit (deny@%d permit@%d):\n%s", denyIdx, permitIdx, got)
+	}
+}
+
+func TestRIPPerGroupEmptyMaxLengthLongerTermFallsThrough16625(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "empty-host-longer", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+				}, Action: "accept"},
+				{Name: "sibling-permit", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	permits := listPermits16625(got, list)
+	if len(permits) != 1 || permits[0] != "10.0.0.0/8 le 32" {
+		t.Errorf("later sibling permit must survive an empty boundary term, permits=%v:\n%s", permits, got)
+	}
+	if strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("empty boundary term must not deny-all the group:\n%s", got)
+	}
+	if strings.Contains(got, "deny 10.0.0.1/32") {
+		t.Errorf("an empty term must fall through, not exclude the route from a later accept:\n%s", got)
+	}
+}
+
+func TestRIPPerGroupBoundaryWithLaterAcceptFailsClosed16625(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "empty-boundary", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+				{Name: "later-host-accept", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "exact"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	if permits := listPermits16625(got, list); len(permits) != 0 {
+		t.Errorf("boundary must not override a later accept the prefix gate cannot represent, permits=%v:\n%s", permits, got)
+	}
+	if !strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("unrepresentable fallthrough must remain fail-closed:\n%s", got)
+	}
+}
+
+func TestRIPPerGroupBoundaryWithCoveringLaterAcceptFailsClosed16625(t *testing.T) {
+	// A later orlonger accept whose base covers the boundary host can
+	// change its outcome even though it is not an exact-host filter.
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "empty-boundary", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+			"Q": {Name: "Q", Terms: []*config.PolicyTerm{
+				{Name: "covering-accept", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P", "Q"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P", "Q"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	if permits := listPermits16625(got, list); len(permits) != 0 {
+		t.Errorf("covering later accept must remain fail-closed, permits=%v:\n%s", permits, got)
+	}
+	if !strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("covering later accept must keep the group fail-closed:\n%s", got)
+	}
+}
+
+func TestRIPPerGroupBoundaryBeforeRejectDefaultPreservesSibling16625(t *testing.T) {
+	// An explicit reject default terminates P before Q can accept
+	// the exact host. The empty /32 longer boundary must therefore
+	// remain representable alongside P's broader permit.
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", DefaultAction: "reject", Terms: []*config.PolicyTerm{
+				{Name: "empty-boundary", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+			"Q": {Name: "Q", Terms: []*config.PolicyTerm{
+				{Name: "later-host-accept", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "exact"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P", "Q"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P", "Q"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	if permits := listPermits16625(got, list); len(permits) != 1 || permits[0] != "10.0.0.0/8 le 32" {
+		t.Errorf("later unreachable accept must not erase P's broader permit, permits=%v:\n%s", permits, got)
+	}
+	hostDeny := "ip prefix-list " + list + " seq 5 deny 10.0.0.1/32\n"
+	siblingPermit := "ip prefix-list " + list + " seq 10 permit 10.0.0.0/8 le 32\n"
+	if denyIdx, permitIdx := strings.Index(got, hostDeny), strings.Index(got, siblingPermit); denyIdx < 0 || permitIdx < 0 || denyIdx > permitIdx {
+		t.Errorf("boundary host deny must precede the sibling broader permit (deny@%d permit@%d):\n%s", denyIdx, permitIdx, got)
+	}
+	if strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("unreachable later accept must not deny-all the group:\n%s", got)
+	}
+}
+
+func TestRIPPerGroupBoundaryWithDisjointLaterAcceptPreservesSibling16625(t *testing.T) {
+	// A later policy that can only accept prefixes disjoint from the
+	// boundary host cannot change the host's outcome, so it must not
+	// force the conservative deny-all path: P's host deny and broader
+	// permit plus Q's own accept must all survive.
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "empty-boundary", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+			"Q": {Name: "Q", Terms: []*config.PolicyTerm{
+				{Name: "disjoint-accept", RouteFilters: []*config.RouteFilter{
+					{Prefix: "192.0.2.0/24", MatchType: "exact"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P", "Q"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P", "Q"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	permits := listPermits16625(got, list)
+	if len(permits) != 2 || permits[0] != "10.0.0.0/8 le 32" || permits[1] != "192.0.2.0/24" {
+		t.Errorf("disjoint later accept must preserve P's broader permit and Q's route, permits=%v:\n%s", permits, got)
+	}
+	hostDeny := "ip prefix-list " + list + " seq 5 deny 10.0.0.1/32\n"
+	siblingPermit := "ip prefix-list " + list + " seq 10 permit 10.0.0.0/8 le 32\n"
+	if denyIdx, permitIdx := strings.Index(got, hostDeny), strings.Index(got, siblingPermit); denyIdx < 0 || permitIdx < 0 || denyIdx > permitIdx {
+		t.Errorf("boundary host deny must precede P's broader permit (deny@%d permit@%d):\n%s", denyIdx, permitIdx, got)
+	}
+	if strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("disjoint later accept must not deny-all the group:\n%s", got)
+	}
+}

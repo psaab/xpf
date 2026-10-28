@@ -199,9 +199,11 @@ type Daemon struct {
 	// the SNMP-gated link-state monitor. nil means the production netlink
 	// subscription; tests inject a channel that can model ENOBUFS closure.
 	transitGateLinkSubscribe func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onErr func(error)) error
-	// Zero means linkStateResubBackoffDefault (2s), matching the other
-	// resilient netlink monitor loops.
+	// Zero means nlWatchBackoffDefault (2s).
 	transitGateLinkResubBackoff time.Duration
+	// ipsecTopologyLinkSubscribe is the IPsec topology owner's seam;
+	// nil uses defaultIpsecTopologyLinkSubscribe (#17064).
+	ipsecTopologyLinkSubscribe func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onErr func(error)) error
 
 	// #9239: whether the LAST DHCP lease-change pass saw a delegated prefix
 	// mapped to an RA interface.
@@ -516,7 +518,7 @@ type Daemon struct {
 	probePinLinkSubscribe func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onError func(error)) error
 	probePinAddrSubscribe func(ch chan<- netlink.AddrUpdate, done <-chan struct{}, onError func(error)) error
 	// probePinResubBackoff overrides the close/error resubscribe delay; 0 uses
-	// linkStateResubBackoffDefault.
+	// nlWatchBackoffDefault.
 	probePinResubBackoff time.Duration
 	// pinRetryCancel/pinRetryWg/pinRetryStopped scope the probePinRetryLoop
 	// lifecycle so daemon shutdown can cancel + join it BEFORE FRR/routing
@@ -2102,28 +2104,18 @@ type Daemon struct {
 	// capture transitions without wiring an SNMP agent (#3950).
 	linkStateEmit func(index int, name string, up, adminUp bool)
 	// linkStateResubBackoff is the delay between a subscription close and the
-	// resubscribe attempt. Zero ⇒ linkStateResubBackoffDefault (#3950).
+	// resubscribe attempt. Zero ⇒ nlWatchBackoffDefault (#3950).
 	linkStateResubBackoff time.Duration
 
-	// --- fabric-state monitor seams (#4031) ---
-	// fabricLinkSubscribe starts the netlink link-update subscription for the
-	// fabric-state monitor (monitorFabricState). It MUST stream updates to ch
-	// and close ch when the subscription ends (a receive error — including a
-	// recoverable ENOBUFS receive-buffer overflow — or done being closed). nil
-	// ⇒ the real netlink subscription (defaultFabricLinkSubscribe). Overridable
-	// so tests can drive the resilient resubscribe loop with an injected close.
-	fabricLinkSubscribe func(ch chan<- netlink.LinkUpdate, done <-chan struct{}) error
+	// --- fabric-state monitor seams (#4031, #17064: 3-arg nlWatch shape) ---
+	fabricLinkSubscribe func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onErr func(error)) error
 	// daemonLockLease holds the host-wide singleton flock for the lifetime
 	// of Run (#15085). Set only by New; a Daemon constructed as a struct
 	// literal in tests owns no lease, and Run refuses it before any startup
 	// mutation. Nil after Run releases it on return.
-	daemonLockLease *daemonLockLease
-	// fabricNeighSubscribe starts the netlink neighbor-update subscription for
-	// the fabric-state monitor. Same close/leak contract as fabricLinkSubscribe.
-	// nil ⇒ netlink.NeighSubscribe (defaultFabricNeighSubscribe) (#4031).
-	fabricNeighSubscribe func(ch chan<- netlink.NeighUpdate, done <-chan struct{}) error
-	// fabricStateResubBackoff is the delay between a fabric subscription close
-	// and the resubscribe attempt. Zero ⇒ fabricStateResubBackoffDefault (#4031).
+	daemonLockLease      *daemonLockLease
+	fabricNeighSubscribe func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, onErr func(error)) error
+	// fabricStateResubBackoff: Zero ⇒ nlWatchBackoffDefault (#4031).
 	fabricStateResubBackoff time.Duration
 }
 

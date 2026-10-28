@@ -33,60 +33,69 @@ func (d *Daemon) ipsecTopologyLinkWatch(ctx context.Context) {
 		if !d.runIpsecTopologyLinkSubscription(ctx) {
 			return
 		}
-		timer := time.NewTimer(linkStateResubBackoffDefault)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
+		if !nlWatchBackoffWait(ctx, nlWatchBackoffDefault) {
 			return
-		case <-timer.C:
 		}
 	}
 }
 
-func (d *Daemon) runIpsecTopologyLinkSubscription(ctx context.Context) bool {
-	updates := make(chan netlink.LinkUpdate, 64)
-	done := make(chan struct{})
-	if err := netlink.LinkSubscribe(updates, done); err != nil {
-		d.ipsecTopologySubscribed.Store(false)
-		close(done)
-		d.pollIpsecTopology()
-		d.noteIpsecTopologyLinkTransition()
-		d.pollIpsecTopology()
-		return true
+// ipsecTopologyWatch builds the nlWatch for the IPsec topology owner.
+// Previously this copy subscribed with bare LinkSubscribe (no
+// ErrorCallback) and discarded the subscribe error without logging
+// (#17064); nlWatch now logs both under watcher=ipsec-topology.
+// Ordering preserved: on failure poll+note+poll; on subscribe
+// poll (UNKNOWN) -> Store(true) -> poll; on close Store(false)+note+poll;
+// the subscribed flag is cleared on every exit.
+func (d *Daemon) ipsecTopologyWatch() nlWatch[netlink.LinkUpdate] {
+	subscribe := d.ipsecTopologyLinkSubscribe
+	if subscribe == nil {
+		subscribe = defaultIpsecTopologyLinkSubscribe
 	}
-	d.ipsecTopologySubscribed.Store(false)
-	defer func() {
-		d.ipsecTopologySubscribed.Store(false)
-		close(done)
-	}()
-	// Establish the initial census before receiving events. This first pass is
-	// intentionally UNKNOWN because subscription health is not established yet.
-	d.pollIpsecTopology()
-	d.ipsecTopologySubscribed.Store(true)
-	d.pollIpsecTopology()
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case update, ok := <-updates:
-			if !ok {
-				d.ipsecTopologySubscribed.Store(false)
-				d.noteIpsecTopologyLinkTransition()
-				d.pollIpsecTopology()
-				return true
-			}
+	return nlWatch[netlink.LinkUpdate]{
+		Name:           "ipsec-topology",
+		Subscribe:      subscribe,
+		Buf:            64,
+		OnGapOnFailure: false, // failure sequence differs (note between polls); handled below via wrapper
+		OnGap: func() {
+			d.pollIpsecTopology()
+			d.ipsecTopologySubscribed.Store(true)
+			d.pollIpsecTopology()
+		},
+		OnChannelClosed: func() {
+			d.ipsecTopologySubscribed.Store(false)
+			d.noteIpsecTopologyLinkTransition()
+			d.pollIpsecTopology()
+		},
+		OnEvent: func(update netlink.LinkUpdate) {
 			if d.ipsecTopologyLinkEventRelevant(update) {
 				d.noteIpsecTopologyLinkTransition()
 			}
-			// Every event still drives a census. Proven-irrelevant noise must
-			// leave the immutable permit record untouched when the census is
-			// unchanged, while a missed/reordered relevant event is recovered
-			// by the authoritative snapshot.
+			d.pollIpsecTopology()
+		},
+	}
+}
+
+func (d *Daemon) runIpsecTopologyLinkSubscription(ctx context.Context) bool {
+	w := d.ipsecTopologyWatch()
+	// Preserve the exact failure ordering (poll, note, poll) which
+	// differs from the success OnGap ordering: wrap Subscribe so a
+	// failure runs it before nlWatch's generic handling, and suppress
+	// OnGapOnFailure.
+	inner := w.Subscribe
+	w.Subscribe = func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onErr func(error)) error {
+		err := inner(ch, done, onErr)
+		if err != nil {
+			d.ipsecTopologySubscribed.Store(false)
+			d.pollIpsecTopology()
+			d.noteIpsecTopologyLinkTransition()
 			d.pollIpsecTopology()
 		}
+		return err
 	}
+	retry := w.runOne(ctx)
+	// Every exit clears the subscribed flag (original defer).
+	d.ipsecTopologySubscribed.Store(false)
+	return retry
 }
 
 func (d *Daemon) ipsecTopologyLinkEventRelevant(update netlink.LinkUpdate) bool {
