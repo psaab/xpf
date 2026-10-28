@@ -101,8 +101,8 @@ pub(crate) enum ReconcileStage {
     /// `missing_{xsk,heartbeat,session}_pin`.
     MissingPin(MandatoryPin),
     /// A BPF map pin was present but failed to open. `map` is the map token
-    /// (`xsk` / `heartbeat` / `session` / `conntrack_v4` / `conntrack_v6` /
-    /// `dnat_table` / `dnat_table_v6`). Renders `open_{map}_map_failed:{err}`.
+    /// (`xsk` / `heartbeat` / `session` / `conntrack_v4` / `conntrack_v6`).
+    /// Renders `open_{map}_map_failed:{err}`.
     OpenMapFailed { map: &'static str, err: String },
     /// A snapshot integrity fault surfaced by the top-of-reconcile POLICY
     /// preflight, which carries the error text. Renders
@@ -161,7 +161,10 @@ impl std::fmt::Display for ReconcileStage {
                 workers,
                 bindings,
                 live,
-            } => write!(f, "planned:workers={workers}:bindings={bindings}:live={live}"),
+            } => write!(
+                f,
+                "planned:workers={workers}:bindings={bindings}:live={live}"
+            ),
             ReconcileStage::ReplayedSynced { count, workers } => {
                 write!(f, "replayed_synced:{count}:workers={workers}")
             }
@@ -304,7 +307,13 @@ mod tests {
         })
         .to_string();
 
-        for needle in ["ge-7-0-2", "q11", "bound=15", "planned=16", "Device or resource busy"] {
+        for needle in [
+            "ge-7-0-2",
+            "q11",
+            "bound=15",
+            "planned=16",
+            "Device or resource busy",
+        ] {
             assert!(
                 rendered.contains(needle),
                 "the fail-closed refusal must name {needle:?} — an operator cannot \

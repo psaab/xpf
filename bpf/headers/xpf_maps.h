@@ -453,32 +453,6 @@ struct {
  * NAT tables (IPv4)
  * ============================================================ */
 
-/* Pre-routing NAT table: (proto, dst_ip, dst_port, from_zone) -> new destination.
- * Static DNAT config entries use the configured ingress zone. Dynamic SNAT
- * return entries use from_zone=0 as a wildcard. */
-struct dnat_key {
-	__u8   protocol;
-	__u8   pad[3];
-	__be32 dst_ip;
-	__be16 dst_port;
-	__u16  from_zone;
-};
-
-struct dnat_value {
-	__be32 new_dst_ip;
-	__be16 new_dst_port;
-	__u8   flags;       /* 0=dynamic/SNAT-return, 1=static/DNAT-config */
-	__u8   pad;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_SESSIONS);
-	__type(key, struct dnat_key);
-	__type(value, struct dnat_value);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} dnat_table SEC(".maps");
-
 /* Source NAT config: (from_zone, to_zone, rule_idx) -> SNAT IP + match.
  * Populated by the compiler on commit. Multiple rules per zone-pair
  * are iterated sequentially (0..MAX-1) until first match. */
@@ -526,28 +500,6 @@ struct {
  * NAT tables (IPv6)
  * ============================================================ */
 
-struct dnat_key_v6 {
-	__u8   protocol;
-	__u8   pad[3];
-	__u8   dst_ip[16];
-	__be16 dst_port;
-	__u16  from_zone;
-};
-
-struct dnat_value_v6 {
-	__u8   new_dst_ip[16];
-	__be16 new_dst_port;
-	__u8   flags;       /* 0=dynamic/SNAT-return, 1=static/DNAT-config */
-	__u8   pad;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_SESSIONS);
-	__type(key, struct dnat_key_v6);
-__type(value, struct dnat_value_v6);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} dnat_table_v6 SEC(".maps");
 
 struct snat_value_v6 {
 	__u8   snat_ip[16];

@@ -7858,7 +7858,6 @@ fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
     let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let forwarding = ForwardingState::default();
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let mut worker_lossless_wedged = false;
     let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
     let __r3_reader = __r3_channel.reader();
@@ -7919,7 +7918,6 @@ fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
                 SteeringMap::unshared_for_test(-1),
                 -1,
                 -1,
-                &dnat_fds,
                 &d,
                 &shared_sessions,
                 &shared_nat_sessions,
@@ -8149,7 +8147,6 @@ fn owner_rg_export_echo_still_emits_every_visit_9856() {
     let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let forwarding = ForwardingState::default();
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let mut worker_lossless_wedged = false;
     let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
     let __r3_reader = __r3_channel.reader();
@@ -8206,7 +8203,6 @@ fn owner_rg_export_echo_still_emits_every_visit_9856() {
                 SteeringMap::unshared_for_test(-1),
                 -1,
                 -1,
-                &dnat_fds,
                 &d,
                 &shared_sessions,
                 &shared_nat_sessions,
@@ -13332,7 +13328,6 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let mut worker_lossless_wedged = false;
     let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
     let __r3_reader = __r3_channel.reader();
@@ -13342,7 +13337,6 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &dnat_fds,
         &[delta],
         &shared_sessions,
         &shared_nat_sessions,
@@ -13431,20 +13425,6 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
         .collect();
     assert_eq!(ring_deltas.len() + overflow_deltas.len(), N);
     assert_eq!(overflow_deltas.len(), N - RING_CAP);
-    use std::sync::atomic::Ordering;
-    let _dnat_guard = crate::afxdp::checksum::dnat_counter_guard();
-    let dnat_before = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    let snat = NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(54_321),
-        ..NatDecision::default()
-    };
-    let dnat_delta = ring_deltas
-        .first_mut()
-        .expect("ring contains an expiry Close");
-    dnat_delta.decision.nat = snat;
-    crate::afxdp::checksum::add_dnat_steering_holder(&dnat_delta.key, snat);
-
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -13490,10 +13470,6 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
         interface: Arc::<str>::from(""),
         ifindex: 6,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds {
-        v4: Some(-1),
-        v6: None,
-    };
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle_connected(
         N * 12,
         crate::event_stream::DataplaneEventRateLimitConfig {
@@ -13516,7 +13492,6 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &dnat_fds,
             deltas,
             &shared_sessions,
             &shared_nat_sessions,
@@ -13551,14 +13526,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             .count();
         queue.clear();
     }
-    // `flush`'s mutable captures end here (closures have no Drop); the counters below are read borrow-free.
-    let dnat_after = crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    assert_eq!(
-        dnat_after - dnat_before,
-        1,
-        "the SNAT Close in the overflow population must attempt dnat deletion"
-    );
-
+    drop(flush);
     assert!(shared_sessions.lock().expect("shared sessions").is_empty());
     assert!(shared_nat_sessions.lock().expect("shared NAT").is_empty());
     assert!(
@@ -13750,7 +13718,6 @@ fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191()
                 interface: Arc::<str>::from("ge-0-0-2"),
                 ifindex: 7,
             };
-            let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
             let mut worker_lossless_wedged = false;
             let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
             let __r3_reader = __r3_channel.reader();
@@ -13760,7 +13727,6 @@ fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191()
                 SteeringMap::unshared_for_test(-1),
                 -1,
                 -1,
-                &dnat_fds,
                 &[delta],
                 &shared_sessions,
                 &shared_nat_sessions,
@@ -13934,7 +13900,6 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         interface: Arc::<str>::from("ge-0-0-2"),
         ifindex: 7,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let mut worker_lossless_wedged = false;
     let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
     let __r3_reader = __r3_channel.reader();
@@ -13944,7 +13909,6 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &dnat_fds,
         &[delta],
         &shared_sessions,
         &shared_nat_sessions,
@@ -14045,7 +14009,6 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let mut worker_lossless_wedged = false;
     let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
     let __r3_reader = __r3_channel.reader();
@@ -14055,7 +14018,6 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &dnat_fds,
         &[open],
         &shared_sessions,
         &shared_nat_sessions,
@@ -14141,7 +14103,6 @@ mod flush_tuple_gate_contention_13654 {
             interface: Arc::<str>::from(""),
             ifindex: -1,
         };
-        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
         let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
         let __r3_reader = __r3_channel.reader();
         let mut slot = SessionTable::new();
@@ -14157,7 +14118,6 @@ mod flush_tuple_gate_contention_13654 {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &dnat_fds,
             deltas,
             &shared_sessions,
             &shared_nat_sessions,
@@ -14423,7 +14383,6 @@ fn flush_session_deltas_bulk_resync_event_stream_loss_does_not_rearm_14646() {
             interface: Arc::<str>::from(""),
             ifindex: -1,
         };
-        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
         let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
         let __r3_reader = __r3_channel.reader();
         // Disconnected handle: lossless push fails immediately (~!connected).
@@ -14439,7 +14398,6 @@ fn flush_session_deltas_bulk_resync_event_stream_loss_does_not_rearm_14646() {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &dnat_fds,
             &[delta],
             &shared_sessions,
             &shared_nat_sessions,
@@ -14530,7 +14488,6 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
     let __r3_reader = __r3_channel.reader();
     let mut worker_lossless_wedged = false;
@@ -14555,7 +14512,6 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &dnat_fds,
             &[command_export],
             &shared_sessions,
             &shared_nat_sessions,
@@ -14599,7 +14555,6 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &dnat_fds,
             &[loss_resync],
             &shared_sessions,
             &shared_nat_sessions,
@@ -14724,7 +14679,6 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
 
     let start = std::time::Instant::now();
     let mut worker_lossless_wedged = false;
@@ -14736,7 +14690,6 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &dnat_fds,
         &[open],
         &shared_sessions,
         &shared_nat_sessions,
@@ -14857,7 +14810,6 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
 
     // >5 batches: at 256 deltas/batch this is >1280 owned sessions, the point at
     // which the UNBOUNDED aggregate (one budget per batch) crosses
@@ -14877,7 +14829,6 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &dnat_fds,
             std::slice::from_ref(&open),
             &shared_sessions,
             &shared_nat_sessions,
@@ -14921,144 +14872,6 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
     );
 }
 
-/// #2979 FAIL-ON-REVERT: a Close delta for an SNAT'd session must delete the
-/// dynamic reverse-NAT `dnat_table` entry that `publish_dnat_table_entry`
-/// inserted at session install. The maps are `BPF_MAP_TYPE_HASH` (non-LRU,
-/// `max_entries = MAX_SESSIONS`, `BPF_F_NO_PREALLOC`), so a missing close-time
-/// delete leaks one entry per closed SNAT session until the map fills and new
-/// reverse-NAT publishes fail (#2244 capacity error).
-///
-/// Real BPF maps cannot be created under `cargo test` (the host runs with
-/// `kernel.unprivileged_bpf_disabled`), so this test observes the delete via
-/// the test-only `DNAT_DELETE_ATTEMPTS` counter incremented inside
-/// `delete_dnat_table_entry` whenever it derives a key and issues the
-/// `bpf_map_delete_elem` syscall. The fd is `-1` (the syscall returns EBADF,
-/// which is benign — the contract under test is that the close path *attempts*
-/// the keyed delete).
-///
-/// RED on revert: removing the `delete_dnat_table_entry` call from
-/// `flush_session_deltas`'s Close handler makes the SNAT-flow assertion (count
-/// increments by 1) fail. The non-SNAT control (count unchanged) guards against
-/// over-deleting on flows that never published a reverse-NAT entry.
-#[test]
-fn close_delta_deletes_dnat_table_entry_for_snat_flow() {
-    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, DnatTableFds};
-    use std::sync::atomic::Ordering;
-
-    // #6872: the SHARED guard — see checksum::DNAT_COUNTER_GUARD.
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-
-    let build_close = |nat: NatDecision| {
-        let key = test_key();
-        let metadata = test_metadata();
-        let decision = SessionDecision {
-            resolution: test_resolution(),
-            nat,
-            install_table_domain: 0,
-            install_table_check: 0,
-        };
-        SessionDelta {
-            provenance: crate::session::ExportProvenance::Incremental,
-            kind: SessionDeltaKind::Close,
-            key,
-            decision,
-            metadata,
-            policy_generation: 0,
-            origin: SessionOrigin::ForwardFlow,
-            fabric_redirect_sync: false,
-            created_ns: 0,
-            last_seen_ns: 0,
-            counters: crate::session::SessionCounters::default(),
-            observed_tos: 0,
-            observed_tcp_flags: 0,
-            session_id: 0,
-            bulk_resync: false,
-            is_admission: false,
-            tcp_close_class: 0,
-            tcp_handshake_state: 0,
-            pptp_call_ids: 0,
-            purge_retirement: false,
-            source_nat_static: None,
-        }
-    };
-
-    let ident = BindingIdentity {
-        slot: 0,
-        queue_id: 0,
-        worker_id: 0,
-        interface: Arc::<str>::from(""),
-        ifindex: -1,
-    };
-    // A live v4 table fd so the delete path is reached; -1 makes the syscall a
-    // harmless EBADF after the keyed attempt is counted.
-    let dnat_fds = DnatTableFds {
-        v4: Some(-1),
-        v6: None,
-    };
-
-    let run = |delta: SessionDelta| {
-        let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
-        let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
-        let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
-        let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
-        let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = vec![];
-        let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
-        let forwarding = ForwardingState::default();
-        let mut worker_lossless_wedged = false;
-        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
-        let __r3_reader = __r3_channel.reader();
-        flush_session_deltas(
-            &ident,
-            None,
-            SteeringMap::unshared_for_test(-1),
-            -1,
-            -1,
-            &dnat_fds,
-            &[delta],
-            &shared_sessions,
-            &shared_nat_sessions,
-            &shared_forward_wire_sessions,
-            &shared_owner_rg_indexes,
-            &recent_session_deltas,
-            &peer_worker_commands,
-            crate::afxdp::empty_worker_commands_by_id(),
-            &None,
-            &forwarding,
-            &__r3_reader,
-            &mut worker_lossless_wedged,
-            None,
-        );
-    };
-
-    // SNAT flow: the forward key's source is SNAT'd to the WAN pool address;
-    // this is exactly what the install path published into dnat_table.
-    let snat = NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(54321),
-        ..NatDecision::default()
-    };
-
-    let before = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    run(build_close(snat));
-    let after_snat = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    assert_eq!(
-        after_snat - before,
-        1,
-        "Close delta for an SNAT'd session must attempt the dnat_table reverse-NAT delete \
-         (leak fix #2979); got {} attempts",
-        after_snat - before
-    );
-
-    // Non-SNAT control: a flow that never published a dnat_table entry must not
-    // trigger a delete attempt.
-    run(build_close(NatDecision::default()));
-    let after_plain = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    assert_eq!(
-        after_plain - after_snat,
-        0,
-        "Close delta for a non-SNAT session must NOT attempt a dnat_table delete"
-    );
-}
 
 // #4805 regression: the activation-refresh wider scan must recompute
 // `allow_replace_local` per session from the CURRENT HA state, NOT hardcode
@@ -18914,7 +18727,6 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -18933,7 +18745,6 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &dnat_fds,
         &[delta_8593(&test_key(), bulk_resync)],
         &shared_sessions,
         &shared_nat_sessions,
@@ -20435,7 +20246,6 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
             interface: Arc::<str>::from("ge-0-0-2"),
             ifindex: 7,
         };
-        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
         let mut worker_lossless_wedged = false;
         let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
         let __r3_reader = __r3_channel.reader();
@@ -20445,7 +20255,6 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &dnat_fds,
             &[delta],
             &shared_sessions,
             &shared_nat_sessions,
@@ -25285,7 +25094,6 @@ fn resync_and_promote_do_not_reemit_session_create_15126() {
             interface: Arc::<str>::from("ge-0-0-2"),
             ifindex: 7,
         };
-        let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
         let mut worker_lossless_wedged = false;
         let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
         let __r3_reader = __r3_channel.reader();
@@ -25295,7 +25103,6 @@ fn resync_and_promote_do_not_reemit_session_create_15126() {
             SteeringMap::unshared_for_test(-1),
             -1,
             -1,
-            &dnat_fds,
             deltas,
             &shared_sessions,
             &shared_nat_sessions,
@@ -26506,7 +26313,6 @@ fn flush_open_fallback_depth_16627(
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -26530,7 +26336,6 @@ fn flush_open_fallback_depth_16627(
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &dnat_fds,
         &[delta],
         &shared_sessions,
         &shared_nat_sessions,
@@ -26569,7 +26374,6 @@ fn flush_open_with_provenance_16627(
         interface: Arc::<str>::from(""),
         ifindex: -1,
     };
-    let dnat_fds = crate::afxdp::checksum::DnatTableFds::default();
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -26589,7 +26393,6 @@ fn flush_open_with_provenance_16627(
         SteeringMap::unshared_for_test(-1),
         -1,
         -1,
-        &dnat_fds,
         &[delta],
         &shared_sessions,
         &shared_nat_sessions,

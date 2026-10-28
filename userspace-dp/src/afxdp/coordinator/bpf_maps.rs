@@ -37,6 +37,4 @@ pub(crate) struct BpfMaps {
     pub(crate) session_map_fd: Option<OwnedFd>,
     pub(crate) conntrack_v4_fd: Option<OwnedFd>,
     pub(crate) conntrack_v6_fd: Option<OwnedFd>,
-    pub(crate) dnat_table_fd: Option<OwnedFd>,
-    pub(crate) dnat_table_v6_fd: Option<OwnedFd>,
 }

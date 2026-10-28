@@ -138,9 +138,6 @@ var legacyDataplaneImportAllowlist = map[string]string{
 var retainedShimBoundaryBuildTagAllowlist = map[string][]string{}
 
 var userspaceShimAllowedMapTypes = map[string]ebpf.MapType{
-	"dnat_table":    ebpf.Hash,
-	"dnat_table_v6": ebpf.Hash, // #2406 SNAT66-return reverse-NAT steering
-
 	"userspace_bindings":       ebpf.Array,
 	"userspace_cpumap":         ebpf.CPUMap,
 	"userspace_ctrl":           ebpf.Array,
@@ -336,8 +333,6 @@ func TestUserspaceShimSharedMapsAreExplicitCompatibilitySet(t *testing.T) {
 	for _, name := range []string{
 		"sessions",
 		"sessions_v6",
-		"dnat_table",
-		"dnat_table_v6",
 		"fib_gen_map",
 		"rg_active",
 		"ha_watchdog",

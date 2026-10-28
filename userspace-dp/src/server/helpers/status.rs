@@ -173,10 +173,6 @@ pub(crate) fn project_status(state: &mut ServerState) {
         state.afxdp.session_replication_queue_depth_sum();
     state.status.session_replication_queue_depth_max =
         state.afxdp.session_replication_queue_depth_max();
-    // #2244: total failed dnat_table reverse-SNAT BPF-map publishes. The
-    // cause-side signal for dnat_table capacity pressure that silently
-    // breaks embedded-ICMP NAT reversal (PMTUD / traceroute).
-    state.status.dnat_publish_errors_total = state.afxdp.dnat_publish_errors_total();
     // #5674: peer-synced session imports rejected by the coordinator's
     // aggregate admission bound — the availability/DoS ceiling that keeps a
     // peer under session-table pressure (or a compromised peer) from driving
@@ -953,7 +949,9 @@ pub(crate) fn finish_binding_reconcile(
         return;
     }
     if settle {
-        *deferred = Some(crate::server::handlers::Deferred::Settle(Duration::from_secs(2)));
+        *deferred = Some(crate::server::handlers::Deferred::Settle(
+            Duration::from_secs(2),
+        ));
     }
     project_status(guard);
     *persist_state = true;

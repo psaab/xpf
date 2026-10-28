@@ -1336,10 +1336,6 @@ pub(crate) struct MapPins {
     pub conntrack_v4: String,
     #[serde(rename = "conntrack_v6", default)]
     pub conntrack_v6: String,
-    #[serde(rename = "dnat_table", default)]
-    pub dnat_table: String,
-    #[serde(rename = "dnat_table_v6", default)]
-    pub dnat_table_v6: String,
     #[serde(default)]
     pub trace: String,
 }

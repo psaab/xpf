@@ -147,104 +147,13 @@ correctly. When forwarding was armed, the userspace shim redirected ICMP TE to
 userspace where the NAT reversal did not work (per-worker session isolation
 plus cross-worker shared session lookup issue).
 
-## Observability: `dnat_table` reverse-NAT publish failures (#2244)
+## Retired: `dnat_table` reverse-NAT steering (#17229)
 
-The reverse-NAT records the embedded-ICMP handler looks up are written to the
-BPF `dnat_table` by `publish_dnat_table_entry()`
-(`userspace-dp/src/afxdp/checksum.rs`) on the worker session-install poll path.
-Before #2244 the `bpf_map_update_elem` return code was discarded: under
-`dnat_table` capacity pressure or kernel resource exhaustion the reverse record
-was silently omitted, so a later inbound ICMP error (Time Exceeded / Packet Too
-Big for PMTUD, traceroute) could not be reverse-NAT'd back to the original
-pre-NAT source — dropped or mis-delivered with no operator signal.
-
-`publish_dnat_table_entry()` now returns `false` only when the syscall actually
-fails (the no-SNAT / unsupported-family / absent-fd no-op paths return `true`).
-Each worker poll call site bumps the per-binding `dnat_publish_errors`
-(`BindingLiveState`, `userspace-dp/src/afxdp/umem/mod.rs`) on `false`;
-`publish_dnat_table_entry` logs the first 32 failures to journald then
-suppresses the rest (the counter is the durable signal — both call sites are on
-the session-install path, so an unbounded log would storm under sustained
-`dnat_table` pressure). The counter is summed by
-`Coordinator::dnat_publish_errors_total()` and surfaced as the Prometheus
-counter **`xpf_userspace_dnat_publish_errors_total`**. A nonzero value is the
-cause-side signal for `dnat_table` map-capacity pressure that degrades
-embedded-ICMP NAT reversal.
-
-## IPv6 SNAT66-return reverse-NAT steering (#2406)
-
-`publish_dnat_table_entry` originally had only an `(AF_INET, V4)` arm; an
-IPv6 SNAT'd flow fell through to the `_ => true` no-op and nothing was
-written to `dnat_table_v6`. #2406 adds the `(AF_INET6, V6)` arm
-(`dnat_v6_entry_bytes` encodes the 24-byte `dnat_key_v6` / 20-byte
-`dnat_value_v6` reverse mapping) and the matching shim reader.
-
-**What `dnat_table` / `dnat_table_v6` actually steer.** The BPF table is
-NOT consulted on the normal redirect path — a transit packet arriving on a
-bound dataplane queue is redirected to the helper by the per-queue binding
-regardless, and the helper reverse-NATs from in-memory session state. The
-shim only reads `dnat_table` / `dnat_table_v6` in the **native-GRE-inner**
-classify path (`classify_native_gre_inner_ipv4` /
-`classify_native_gre_inner_ipv6` in `userspace-xdp/src/lib.rs`): an inbound
-ICMP error whose inner (tunnel-carried) destination is a SNAT pool address
-has no live session of its own, so the dnat lookup is what decides to steer
-it to userspace. Before #2406 the v6 GRE-inner path had no `dnat_lookup_v6`,
-so an inbound ICMPv6 error (Packet Too Big / Time Exceeded) for a pool-mode
-SNAT66 flow carried over a native-GRE tunnel was not steered — silent IPv6
-PMTUD/traceroute blackhole behind pool-mode SNAT66.
-
-**Verifier-budget constraint.** `dnat_lookup_v6` does an **exact-match only**
-lookup (SNAT66-return entries always carry a concrete `snat_port`). The v4
-path additionally probes a port-0 wildcard for port-less STATIC DNAT config,
-but the second HASH lookup pushed `xdp_userspace_prog` over the 1M-insn BPF
-verifier cap (the #1864 complexity gate caught it). Port-wildcard
-static-DNAT-v6 carried inside a native-GRE tunnel is therefore not steered by
-this path; non-GRE DNAT-v6 is unaffected (binding redirect, not dnat_table).
-
-Wire/contract: `dnat_table_v6` was already created+pinned by the Go loader
-(`loader_userspace_shim.go` shared-map spec) and opened by the coordinator
-(`DnatTableFds.v6`); the shim now declares the map and binds to the shared fd
-via `MapReplacements["dnat_table_v6"]`. The retained-shim canary allowlist
-(`retirement_boundary_canary_test.go`) lists the new map. No new wire field
-or protocol_wire_v1.json change — only existing pinned-map plumbing.
-
-### dnat_table KEY port byte-order (#2406, host-order — fixes a latent v4 bug)
-
-The `dnat_table` / `dnat_table_v6` KEY **port** field is **HOST-ORDER
-numeric serialized natively**, NOT network order. This is the convention the
-*only* reader uses: the AF_XDP shim's GRE-inner classify builds its lookup key
-port via `u16::from_be_bytes(wire)` — which yields the host-order numeric
-value (e.g. 443) — and stores it natively into the key struct, identical to
-the proven `session_map_key` writer for the `userspace_sessions` map. Every
-KEY writer MUST match:
-
-- **Rust** `publish_dnat_table_entry` (v4 + v6) writes the KEY port with
-  `snat_port.to_ne_bytes()` (host-order numeric → native bytes). It previously
-  used `to_be_bytes()` (network order) on BOTH arms — on little-endian the key
-  bytes never matched the reader, so the lookup always missed. That was a
-  pre-existing latent bug for v4 reverse-SNAT-over-GRE and the as-shipped bug
-  for the new v6 path.
-- **Go** session-derived keys go through `dataplane.DNATKeyForSessionV4` /
-  `DNATKeyForSessionV6` (single source of truth, in `session_store.go`), which
-  apply `ntohs()` to the network-order `SessionValue.NATSrcPort`. Every
-  install AND every companion-delete site — `session_store.go`,
-  `maps_session.go` (`ClearAllSessions`), `pkg/grpcapi/server_sessions.go`,
-  `pkg/cli/cli_clear.go` — routes through these builders so a delete finds
-  what an install wrote.
-- **Go** static-DNAT config (`compiler_nat.go`) wrote the already-host-order
-  `dstPort` raw (dropped the `htons()` that produced a network-order key).
-  That compiler-side `dnat_table` write is GONE as of #6420 — it was a
-  `return nil` on the production shim — so the session-derived builders in
-  `session_store.go` are now the only Go writers of a `dnat_table` key, and
-  they are what the parity test below binds.
-
-The KEY `DstIP` stays in network byte order (the shim reads it with
-`from_ne_bytes` against `octets()` — already-matching on both sides). The
-dnat_table VALUE is never read by the shim (steering is `.is_some()` only), so
-its port encoding is inert and left unchanged. A Go↔Rust parity test
-(`TestDNATKeyForSessionPortParityWithShimReader` + Rust
-`dnat_v6_key_port_parity_with_shim_reader`) pins publish-key-port-bytes ==
-reader-key-port-bytes and is the regression guard for this class of bug.
+The `dnat_table` / `dnat_table_v6` BPF steering maps and their publishers
+were removed in #17229: the shim's `dnat_lookup_v4`/`_v6` readers were
+deleted in 6f303c1cbc (#16241), so no packet's fate depended on those maps.
+Embedded-ICMP reverse-NAT is handled from the helper's in-memory session
+state. The `xpf_userspace_dnat_publish_errors_total` metric is also retired.
 
 ## XDP Shim Fixes Applied
 

@@ -176,7 +176,10 @@ fn txn_ttl1_suppressed_te_installs_no_session_14643() {
         0,
         "#14643: suppressed-TE TTL=1 miss must not install fwd/rev pair"
     );
-    assert_eq!(dbg.forward, 0, "#14643: TTL=1 packet must not count as forwarded");
+    assert_eq!(
+        dbg.forward, 0,
+        "#14643: TTL=1 packet must not count as forwarded"
+    );
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "#14643: suppressed TE must not queue a forward or a TE reply"
@@ -226,9 +229,15 @@ fn txn_ttl1_suppressed_te_installs_no_session_14643() {
         1,
         "#14831: buildable TE must queue exactly one forward request"
     );
-    assert_eq!(batch.session_creates, 0, "control TE must create no session");
+    assert_eq!(
+        batch.session_creates, 0,
+        "control TE must create no session"
+    );
     assert_eq!(sessions.len(), 0, "control TE must install no session");
-    assert_eq!(pools[0].live_flows, 0, "control TE must also roll back SNAT");
+    assert_eq!(
+        pools[0].live_flows, 0,
+        "control TE must also roll back SNAT"
+    );
     assert_eq!(pools[0].used_ports, 0);
 
     let (_binding, sessions, batch, dbg, pools) = run(64, true);
@@ -238,7 +247,10 @@ fn txn_ttl1_suppressed_te_installs_no_session_14643() {
     );
     assert_eq!(sessions.len(), 2);
     assert_eq!(dbg.tx, 1, "TTL=64 control must forward");
-    assert_eq!(pools[0].live_flows, 1, "TTL=64 control retains its SNAT hold");
+    assert_eq!(
+        pools[0].live_flows, 1,
+        "TTL=64 control retains its SNAT hold"
+    );
 }
 
 /// #14831: on the session-miss arm, a buildable TTL=1 packet must queue
@@ -345,7 +357,10 @@ fn txn_ttl1_buildable_te_queues_no_live_forward_14831() {
         panic!("expected Time Exceeded reply");
     };
     assert_eq!(&bytes[34..36], &[11, 0], "ICMP Time Exceeded type/code");
-    assert_eq!(batch.session_creates, 0, "#14831: TE must create no session");
+    assert_eq!(
+        batch.session_creates, 0,
+        "#14831: TE must create no session"
+    );
     assert_eq!(sessions.len(), 0, "#14831: TE must install no session");
     assert_eq!(pools.len(), 1, "pool fixture must expose one pool");
     assert_eq!(
@@ -474,12 +489,10 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     for key in [&opening_a, &opening_b] {
         let victim_id = sessions.session_id_for(key);
-        shared_sessions
-            .lock()
-            .expect("shared sessions")
-            .insert(
+        shared_sessions.lock().expect("shared sessions").insert(
                 key.clone(),
-                SyncedSessionEntry { key: key.clone(),
+            SyncedSessionEntry {
+                key: key.clone(),
                 decision: stored_decision,
                 metadata: metadata(false),
                 persistent_lease_hold: None,
@@ -490,7 +503,12 @@ fn txn_pressure_sheds_openings_before_admitting_syn_10890() {
                 tcp_flags: TCP_FLAG_SYN,
                 generation: 0,
                 session_id: victim_id,
-                tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
+                tcp_close_class: 0,
+                tcp_handshake_state: 1,
+                rev_packets: 0u64,
+                fwd_packets: 0,
+                pptp_call_ids: 0,
+            },
             );
     }
     assert_eq!(sessions.len(), 9);
@@ -836,7 +854,8 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     shared_sessions.lock().expect("shared sessions").insert(
         victim_key.clone(),
-        SyncedSessionEntry { key: victim_key.clone(),
+        SyncedSessionEntry {
+            key: victim_key.clone(),
         decision: victim_entry.decision,
         metadata: victim_entry.metadata,
         persistent_lease_hold: None,
@@ -847,7 +866,12 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
         tcp_flags: TCP_FLAG_SYN,
         generation: 0,
         session_id: sessions.session_id_for(&victim_key),
-        tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
+            tcp_close_class: 0,
+            tcp_handshake_state: 1,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+        },
     );
     let held_lease = crate::afxdp::bpf_map::global_tuple_gate()
         .acquire_lease([victim_key.clone()])
@@ -908,7 +932,6 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
         session_map,
         -1,
         -1,
-        &crate::afxdp::checksum::DnatTableFds::default(),
         0,
         &[],
         crate::afxdp::empty_worker_commands_by_id(),
@@ -927,13 +950,11 @@ fn txn_missing_neighbor_pressure_shed_gate_failure_retries_nat64_cleanup_13764()
     );
     let nat64_after_retry = forwarding.nat64.prefixes[0].port_allocator.snapshot();
     assert_eq!(
-        nat64_after_retry.live_flows,
-        0,
+        nat64_after_retry.live_flows, 0,
         "retry must release the deferred victim's active NAT64 flow reference"
     );
     assert_eq!(
-        nat64_after_retry.used_ports,
-        1,
+        nat64_after_retry.used_ports, 1,
         "the released flow's idle BIB lease must remain reserved"
     );
 }
@@ -1029,12 +1050,10 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
     let (victim_entry, _) = sessions
         .probe_with_origin(&victim_key)
         .expect("victim local session");
-    shared_sessions
-        .lock()
-        .expect("shared sessions")
-        .insert(
+    shared_sessions.lock().expect("shared sessions").insert(
             victim_key.clone(),
-            SyncedSessionEntry { key: victim_key.clone(),
+        SyncedSessionEntry {
+            key: victim_key.clone(),
             decision: victim_entry.decision,
             metadata: victim_entry.metadata,
             persistent_lease_hold: None,
@@ -1045,7 +1064,12 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
             tcp_flags: TCP_FLAG_SYN,
             generation: 0,
             session_id: sessions.session_id_for(&victim_key),
-            tcp_close_class: 0, tcp_handshake_state: 1, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, },
+            tcp_close_class: 0,
+            tcp_handshake_state: 1,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+        },
         );
     let _held_lease = if gate_blocks_cleanup {
         Some(
@@ -1112,7 +1136,6 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
             session_map,
             -1,
             -1,
-            &crate::afxdp::checksum::DnatTableFds::default(),
             0,
             &[],
             crate::afxdp::empty_worker_commands_by_id(),
@@ -1129,11 +1152,9 @@ fn txn_pressure_shed_nat_pool_hold_behavior(gate_blocks_cleanup: bool) {
                 .contains_key(&victim_key),
             "retry must remove the stale shared session row"
         );
-        let pool_after_retry =
-            crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
+        let pool_after_retry = crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules);
         assert_eq!(
-            pool_after_retry[0].used_ports,
-            0,
+            pool_after_retry[0].used_ports, 0,
             "retry releases the victim's non-persistent SNAT allocation; the refused flow has no hold"
         );
         return;
@@ -2156,7 +2177,6 @@ fn txn_flow_cache_hit_reclassifies_ba_dscp_per_packet_3778() {
 /// filter rewrite remains higher precedence than CoS.
 #[test]
 fn txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430() {
-
     fn set_ipv4_dscp(frame: &mut [u8], dscp: u8) {
         debug_assert!(dscp < 64);
         frame[15] = (dscp << 2) | (frame[15] & 0x03);
@@ -2323,7 +2343,11 @@ fn txn_flow_cache_hit_reclassifies_ba_queue_and_lp_rewrite_per_packet_11430() {
             seed_meta,
             true,
         );
-        assert_eq!(txn_flow_cache_entries(&binding), 1, "the ACK seeds the cache");
+        assert_eq!(
+            txn_flow_cache_entries(&binding),
+            1,
+            "the ACK seeds the cache"
+        );
         let seed_request = binding
             .scratch
             .scratch_forwards
@@ -3150,8 +3174,11 @@ fn txn_failed_reply_repair_forwards_uncached_then_self_heals_below_cap() {
         routing_domain: 0,
     };
     let forward_decision = SessionDecision {
-        resolution: lookup_forwarding_resolution(&forwarding,
-        IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),).resolution,
+        resolution: lookup_forwarding_resolution(
+            &forwarding,
+            IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+        )
+        .resolution,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
@@ -4283,7 +4310,10 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
             && !(route.family == "inet6" && route.destination == "::/0")
     });
     snapshot.routes.extend([
-        RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
+        RouteSnapshot {
+            reject: false,
+            cluster_terminal: false,
+            table: "inet.0".to_string(),
         family: "inet".to_string(),
         destination: "172.16.80.100/32".to_string(),
         next_hop_weights: vec![],
@@ -4292,8 +4322,13 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0, next_table_route: false },
-        RouteSnapshot { reject: false, cluster_terminal: false, table: "inet6.0".to_string(),
+            mtu: 0,
+            next_table_route: false,
+        },
+        RouteSnapshot {
+            reject: false,
+            cluster_terminal: false,
+            table: "inet6.0".to_string(),
         family: "inet6".to_string(),
         destination: "fd00:100::/48".to_string(),
         next_hop_weights: vec![],
@@ -4302,7 +4337,9 @@ fn flowless_dnat_snapshot(policy_destination: &str) -> ConfigSnapshot {
         next_table: String::new(),
         preference: 0,
         rule_priority: 0,
-        mtu: 0, next_table_route: false },
+            mtu: 0,
+            next_table_route: false,
+        },
     ]);
     snapshot.source_nat_rules.clear();
     snapshot.destination_nat_rules = vec![DestinationNATRuleSnapshot {
@@ -5637,7 +5674,10 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
         link_local: false,
         ..Default::default()
     });
-    snapshot.routes.push(RouteSnapshot { reject: false, cluster_terminal: false, table: "inet.0".to_string(),
+    snapshot.routes.push(RouteSnapshot {
+        reject: false,
+        cluster_terminal: false,
+        table: "inet.0".to_string(),
     family: "inet".to_string(),
     destination: "9.9.9.9/32".to_string(),
     next_hop_weights: vec![],
@@ -5646,7 +5686,9 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
     next_table: String::new(),
     preference: 0,
     rule_priority: 0,
-    mtu: 0, next_table_route: false });
+        mtu: 0,
+        next_table_route: false,
+    });
     let v1_forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
@@ -5675,13 +5717,7 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
         meta.config_generation = validation.config_generation;
         meta.fib_generation = validation.fib_generation;
         txn_run_descriptor_with_validation(
-            binding,
-            sessions,
-            forwarding,
-            &ha_state,
-            frame,
-            meta,
-            validation,
+            binding, sessions, forwarding, &ha_state, frame, meta, validation,
         )
     };
     let frame = |destination, source_port, flags| {
@@ -5756,7 +5792,11 @@ fn route_overlay_fib_bump_reseeds_packet_egress_11599() {
             [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
         );
     }
-    assert_eq!(sessions.len(), 4, "the two established flows have session pairs");
+    assert_eq!(
+        sessions.len(),
+        4,
+        "the two established flows have session pairs"
+    );
     assert_eq!(
         txn_flow_cache_entries(&binding),
         2,
@@ -5910,7 +5950,13 @@ fn txn_static_input_count_charged_on_non_cacheable_session_hit_13641() {
         );
         let meta = txn_meta_v4(24, flags, frame.len() as u16);
         txn_run_descriptor_checked(
-            binding, sessions, &forwarding, &ha_state, &frame, meta, true,
+            binding,
+            sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
         )
     };
 
@@ -6094,7 +6140,10 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
         0,
     ));
     worker_b.account_packet(&reverse_key, 100, 0, 0);
-    assert!(worker_b.session_replied(&forward_key), "B saw the reply locally");
+    assert!(
+        worker_b.session_replied(&forward_key),
+        "B saw the reply locally"
+    );
     let stamped = worker_b.rev_packets_wire_for(&forward_key);
     assert_eq!(stamped, 1, "B's forward entry folded one reverse packet");
     crate::afxdp::shared_ops::publish_shared_session(
@@ -6107,7 +6156,10 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
 
     // Worker A never accounted anything; shared evidence alone retains.
     let worker_a = SessionTable::new();
-    assert!(!worker_a.session_replied(&forward_key), "A has no local reply evidence");
+    assert!(
+        !worker_a.session_replied(&forward_key),
+        "A has no local reply evidence"
+    );
     assert!(
         crate::afxdp::shared_ops::shared_session_replied(&shared_sessions, &forward_key, nat),
         "cross-worker reply proof: B's stamped reverse row retains the victim on A"

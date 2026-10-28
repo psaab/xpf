@@ -203,7 +203,6 @@ const MAX_INTERFACES: u32 = match u32::from_str_radix(env!("MAX_INTERFACES"), 10
     Err(_) => panic!("MAX_INTERFACES env var must be a u32 decimal literal"),
 };
 const BINDING_ARRAY_MAX_ENTRIES: u32 = MAX_INTERFACES * BINDING_QUEUES_PER_IFACE;
-const USERSPACE_SHIM_MAX_DNAT_ENTRIES: u32 = 10_000_000;
 const USERSPACE_TRACE_STAGE_RECEIVED: u32 = 1;
 const USERSPACE_TRACE_STAGE_BINDING_MISSING: u32 = 2;
 const USERSPACE_TRACE_STAGE_BINDING_NOT_READY: u32 = 3;
@@ -395,51 +394,6 @@ const _: [(); 28] = [(); mem::size_of::<UserspaceWgAdmissionKey>()];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct DnatKeyV4 {
-    protocol: u8,
-    pad: [u8; 3],
-    dst_ip: u32,
-    dst_port: u16,
-    pad2: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DnatValueV4 {
-    new_dst_ip: u32,
-    new_dst_port: u16,
-    flags: u8,
-    pad: u8,
-}
-
-// Mirrors `struct dnat_key_v6` / `struct dnat_value_v6` in
-// bpf/headers/xpf_maps.h (24-byte key, 20-byte value). The v6 reverse-NAT
-// table is the IPv6 analog of DNAT_TABLE: the userspace-dp helper publishes
-// a (proto, snat_ip, snat_port) -> (orig_src, orig_src_port) entry for each
-// SNAT66 flow so an inbound ICMPv6 error carried over a native-GRE tunnel
-// (whose inner destination is the SNAT pool address) is steered to the
-// helper for embedded-ICMP reverse-NAT (#2406).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DnatKeyV6 {
-    protocol: u8,
-    pad: [u8; 3],
-    dst_ip: [u8; 16],
-    dst_port: u16,
-    from_zone: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DnatValueV6 {
-    new_dst_ip: [u8; 16],
-    new_dst_port: u16,
-    flags: u8,
-    pad: u8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
 struct UserspaceSessionKey {
     addr_family: u8,
     protocol: u8,
@@ -615,22 +569,6 @@ static USERSPACE_INTERFACE_NAT_V6: HashMap<UserspaceInterfaceNatV6Key, u8> =
 #[map(name = "userspace_proxy_ndp_v6_domain")]
 static USERSPACE_PROXY_NDP_V6: HashMap<UserspaceProxyNdpV6Key, u8> =
     HashMap::with_max_entries(8192, 0);
-
-// NOTE: This map MUST be pinned/reused from the main eBPF pipeline's
-// dnat_table so dynamic SNAT-return entries are visible here. The Go
-// loader (pkg/dataplane/loader.go) must ensure the userspace XDP
-// collection shares the same pinned dnat_table map fd.
-#[map(name = "dnat_table")]
-static DNAT_TABLE: HashMap<DnatKeyV4, DnatValueV4> =
-    HashMap::with_max_entries(USERSPACE_SHIM_MAX_DNAT_ENTRIES, BPF_F_NO_PREALLOC);
-
-// IPv6 reverse-NAT steering table. Shares the same pinned-map contract as
-// DNAT_TABLE above: the Go loader / userspace-dp coordinator reuse the
-// pinned dnat_table_v6 fd so SNAT66-return entries published by the helper
-// are visible to this classify path (#2406).
-#[map(name = "dnat_table_v6")]
-static DNAT_TABLE_V6: HashMap<DnatKeyV6, DnatValueV6> =
-    HashMap::with_max_entries(USERSPACE_SHIM_MAX_DNAT_ENTRIES, BPF_F_NO_PREALLOC);
 
 // #13931: a worker may contribute four distinct rows per session (the live
 // tuple and up to three NAT wire/canonical tuples). The binding planner caps
@@ -1612,16 +1550,6 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
     // (including its DNAT/local disposition) itself.
     session_action_for_key(&key)
 }
-
-// #16241 residual (via #16695): the `DNAT_TABLE`/`DNAT_TABLE_V6` shim
-// declarations above are deliberately RETAINED even though the GRE-inner
-// classifiers no longer look into them (the `dnat_lookup_*` helpers are
-// deleted with their only callers). The maps are a load-time ABI: the Go
-// loader replaces them with the pinned dataplane-owned tables
-// (`MapReplacements["dnat_table*"]`) and validates their declared shape,
-// so deleting the declarations would break shim loading, not just dead
-// code. What was disposition-dead was the post-session *lookup* in the
-// classifiers, not the map contract.
 
 fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize) -> u8 {
     let Some(ip6) = (unsafe { read_bytes(data, data_end, l3_offset, 40) }) else {

@@ -480,17 +480,6 @@ type ProcessStatus struct {
 	// Rust serde rename(...) exactly (protocol/status.rs).
 	EventStreamProducerSeqLockAcquisitionsTotal uint64 `json:"event_stream_producer_seq_lock_acquisitions_total,omitempty"`
 	EventStreamProducerSeqLockContendedTotal    uint64 `json:"event_stream_producer_seq_lock_contended_total,omitempty"`
-	// DnatPublishErrorsTotal counts failed dnat_table reverse-SNAT BPF-map
-	// publishes across userspace workers (#2244). The dnat_table is the
-	// reverse lookup the embedded-ICMP NAT path consults to map an inbound
-	// ICMP error (PMTUD Packet Too Big / Time Exceeded / traceroute) back
-	// to the original pre-NAT source; a failed publish (map at capacity,
-	// EINVAL) silently omits the record so the error is dropped or
-	// mis-delivered. A rising value is the cause-side signal for dnat_table
-	// map-capacity pressure. Surfaced as
-	// xpf_userspace_dnat_publish_errors_total. Omitempty for wire compat
-	// with older helpers.
-	DnatPublishErrorsTotal uint64 `json:"dnat_publish_errors_total,omitempty"`
 	// SyncedImportCapDropsTotal counts peer-synced session imports rejected by
 	// the coordinator's aggregate admission bound (#5674). Locally-created
 	// sessions are capped per worker at max_sessions; peer-synced imports were

@@ -993,26 +993,26 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	}
 	status := dpuserspace.ProcessStatus{
 		SourceNATPools: []dpuserspace.SourceNATPoolStatus{{
-			PoolName:                     "pool-a",
-			RuleName:                     "snat-a",
-			LiveFlows:                    2,
-			MaxTrackedFlows:              64,
-			UsedPorts:                    1,
-			PersistentLeases:             1,
-			AllocationsTotal:             3,
-			ReusesTotal:                  5,
-			ExhaustionTotal:              7,
-			IdleLeaseImportCapacityTotal: 17,
+			PoolName:                       "pool-a",
+			RuleName:                       "snat-a",
+			LiveFlows:                      2,
+			MaxTrackedFlows:                64,
+			UsedPorts:                      1,
+			PersistentLeases:               1,
+			AllocationsTotal:               3,
+			ReusesTotal:                    5,
+			ExhaustionTotal:                7,
+			IdleLeaseImportCapacityTotal:   17,
 			FlowShardLockAcquisitionsTotal: 5,
 			FlowShardLockContendedTotal:    1,
 			LiveWriteLockAcquisitionsTotal: 6,
 			LiveWriteLockContendedTotal:    3,
-			LiveLockAcquisitionsTotal:    11,
-			LiveLockContendedTotal:       4,
-			PersistentAdmittedTotal:      13,
-			PersistentDeclinedTotal:      6,
-			RecycleScanPopsTotal:         77,
-			RecycleScanWalksTotal:        11,
+			LiveLockAcquisitionsTotal:      11,
+			LiveLockContendedTotal:         4,
+			PersistentAdmittedTotal:        13,
+			PersistentDeclinedTotal:        6,
+			RecycleScanPopsTotal:           77,
+			RecycleScanWalksTotal:          11,
 		}},
 	}
 	ch := make(chan prometheus.Metric)
@@ -1357,12 +1357,6 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		userspaceSessionReplicationQueueDepthMax: prometheus.NewDesc(
 			"xpf_userspace_session_replication_queue_depth_max",
 			"session replication queue depth high-water",
-			nil,
-			nil,
-		),
-		userspaceDnatPublishErrors: prometheus.NewDesc(
-			"xpf_userspace_dnat_publish_errors_total",
-			"dnat publish errors",
 			nil,
 			nil,
 		),
@@ -1784,9 +1778,6 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// denominator and the contended wire would otherwise pass.
 		EventStreamProducerSeqLockAcquisitionsTotal: 139,
 		EventStreamProducerSeqLockContendedTotal:    149,
-		// #2244: dnat_table reverse-NAT publish-error counter emitted
-		// unconditionally.
-		DnatPublishErrorsTotal: 7,
 		// #5674: synced-import aggregate admission-bound drop counter emitted
 		// unconditionally.
 		SyncedImportCapDropsTotal: 11,
@@ -1969,8 +1960,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	// 10 pre-#1861 metrics + the #1861 install-refusal trio + the #2244
-	// dnat_table reverse-NAT publish-error counter (= 14) + the #2315
+	// 10 pre-#1861 metrics + the #1861 install-refusal trio (= 13) + the #2315
 	// gre_decap_ecn_illegal_drops_total counter (= 15) + the #2317
 	// wg_decap_ecn_illegal_drops_total counter (= 16) + the #2331
 	// gre_encap_df_oversize_drops_total counter (= 17) + the #2782
@@ -2126,9 +2116,6 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// taken" for a mutex every session delta passes through.
 	assertCounterClose(t, got, c.userspaceEventStreamProducerSeqLockAcquired, nil, 139)
 	assertCounterClose(t, got, c.userspaceEventStreamProducerSeqLockBlocked, nil, 149)
-	// #2244: dnat_table reverse-NAT publish-error counter emitted
-	// unconditionally.
-	assertCounterClose(t, got, c.userspaceDnatPublishErrors, nil, 7)
 	// #5674: synced-import aggregate admission-bound drop counter emitted
 	// unconditionally (a 0 is a real "no over-ceiling imports rejected" signal).
 	assertCounterClose(t, got, c.userspaceSyncedImportCapDrops, nil, 11)

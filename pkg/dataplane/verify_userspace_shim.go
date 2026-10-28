@@ -210,8 +210,7 @@ func VerifyUserspaceShimObjectStats(path string) (ShimVerifierStats, error) {
 // anonymous (unpinned, unattached) collection load.
 //
 // ORDER MATTERS: validateUserspaceShimSpec checks the UNMODIFIED spec
-// (it asserts dnat_table.MaxEntries == userspaceShimMaxSessions among
-// others); the hash-map shrink is applied to a copy afterwards, just
+// (it asserts userspace_sessions.MaxEntries among others); the hash-map shrink is applied to a copy afterwards, just
 // before the load.
 func verifyUserspaceShimSpecOnly(spec *ebpf.CollectionSpec) error {
 	return verifyUserspaceShimSpecWithShrink(spec, true)
