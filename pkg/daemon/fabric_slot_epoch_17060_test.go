@@ -629,3 +629,78 @@ func TestPopulateLoopJoinedBeforeSlotClear17060(t *testing.T) {
 		t.Fatalf("shared-peer constraint resurrected after stop: resolved %v (#17060)", res.PeerMAC)
 	}
 }
+
+// TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060: cancellation
+// landing while the fast-retry timer is pending must not emit another
+// probe. The resolver never succeeds, so the loop sits in its 500ms
+// retry sleep; cancelling there and waiting past the timer proves the
+// post-select recheck returns before probeFabricNeighbor (overlay
+// lookups stay at the first attempt's count).
+func TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060(t *testing.T) {
+	parent := &testLink{attrs: netlink.LinkAttrs{
+		Name: "ge-0-0-0", Index: 111, OperState: netlink.OperUp,
+		TxQLen: 10000, HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	overlay := &testLink{attrs: netlink.LinkAttrs{
+		Name: "fab0", Index: 112, ParentIndex: 111,
+		OperState: netlink.OperUp, TxQLen: 10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	links := map[string]*testLink{"ge-0-0-0": parent, "fab0": overlay}
+	var mu sync.Mutex
+	overlayLookups := 0
+	d := &Daemon{
+		linkByNameFn: func(name string) (netlink.Link, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			if name == "fab0" {
+				overlayLookups++
+			}
+			if link, ok := links[name]; ok {
+				return link, nil
+			}
+			return nil, errors.New("hermetic retry test: unknown link")
+		},
+		neighListFn: func(ifindex, family int) ([]netlink.Neigh, error) {
+			return nil, nil // never resolved: loop keeps retrying
+		},
+	}
+	rec := newBlockingFabricRecorder17060()
+	close(rec.release) // resolver never blocks; refresh simply fails
+	d.setDataplane(&blockingFabricDP17060{rec: rec})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	d.fabricPopulateWG.Add(1)
+	go func() {
+		defer close(done)
+		d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", "10.99.20.2", make(chan struct{}, 1))
+	}()
+	// Wait for the first probe attempt, then cancel during the retry sleep.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := overlayLookups
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("populate loop never probed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("populate loop did not exit after cancel during fast retry (#17060)")
+	}
+	mu.Lock()
+	got := overlayLookups
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("cancel during fast retry probed again: overlay lookups=%d, want 2 (probe + refresh of attempt 0 only) (#17060)", got)
+	}
+	d.clearFabricSlots()
+}

@@ -360,11 +360,11 @@ type fabricSlot struct {
 	// resolution (never by the fallback itself, which would let a bad
 	// guess self-confirm) and cleared when the configured peer address
 	// changes, so a re-pointed fabric cannot be pinned to the old peer.
-	peerMAC   net.HardwareAddr
-	refreshCh   chan struct{} // wakes this slot's populate loop (#4038); clusterCommsMu-guarded
-	lastProbe   time.Time     // rate-limit active neighbor probes
-	lastLog     time.Time     // rate-limit refresh failure logs
-	probePending bool         // active neighbor probe queued for the epoch loop (#17060)
+	peerMAC      net.HardwareAddr
+	refreshCh    chan struct{} // wakes this slot's populate loop (#4038); clusterCommsMu-guarded
+	lastProbe    time.Time     // rate-limit active neighbor probes
+	lastLog      time.Time     // rate-limit refresh failure logs
+	probePending bool          // active neighbor probe queued for the epoch loop (#17060)
 }
 
 // fabricSlotLabel returns the operator-facing fabric name stored on the
@@ -439,6 +439,12 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 			case <-ctx.Done():
 				return
 			case <-time.After(500 * time.Millisecond):
+			}
+			// select may pick the timer arm even when ctx.Done() is also
+			// ready: recheck before probing so a superseded epoch never
+			// emits one more frame (#17060, mirrors the refreshCh arm).
+			if ctx.Err() != nil {
+				return
 			}
 		}
 
@@ -911,7 +917,6 @@ func (d *Daemon) takeFabricProbePending(slot int) bool {
 	d.fabricSlots[slot].probePending = false
 	return pending
 }
-
 
 func overlayOrParent(overlay, parent string) string {
 	if overlay != "" {
