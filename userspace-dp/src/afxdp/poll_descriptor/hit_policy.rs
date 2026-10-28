@@ -55,9 +55,9 @@ pub(super) enum QueryDirection {
     ReverseWire,
 }
 
-/// The judged source, already resolved to the pre-SNAT original by the
-/// caller (#12867). Carried as the finished tuple so no builder arm can
-/// substitute the wire source.
+/// The source selected by the caller: the pre-SNAT original for forward
+/// queries (#12867), or the wire responder for `ReverseWire`. The builder
+/// consumes this finished tuple without substituting another direction's source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct JudgedSource {
     pub(super) ip: IpAddr,

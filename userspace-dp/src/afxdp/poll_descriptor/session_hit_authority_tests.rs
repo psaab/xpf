@@ -543,6 +543,13 @@ fn forward_decision() -> SessionDecision {
     }
 }
 
+fn reverse_verdict_decision() -> SessionDecision {
+    let mut decision = forward_decision();
+    decision.resolution.egress_ifindex = LAN_A;
+    decision.resolution.tx_ifindex = LAN_A;
+    decision
+}
+
 #[test]
 fn owner_forward_icmp_verdict_uses_descriptor_time_12868() {
     let fw = scheduled_icmp_forwarding();
@@ -674,8 +681,8 @@ fn snat_verdict_forwarding() -> ForwardingState {
     snapshot.policies.retain(|p| p.name != "allow-other");
     snapshot.policies.push(PolicyRuleSnapshot {
         name: "typed-guard".into(),
-        from_zone: "dmz".into(),
-        to_zone: "lan".into(),
+        from_zone: "lan".into(),
+        to_zone: "dmz".into(),
         source_addresses: vec!["any".into()],
         destination_addresses: vec!["any".into()],
         applications: vec!["junos-icmp-ping".into()],
@@ -691,11 +698,16 @@ fn snat_verdict_forwarding() -> ForwardingState {
         action: "permit".into(),
         ..Default::default()
     });
-    for (name, from_zone) in [("allow-lan-orig", "lan"), ("allow-dmz-orig", "dmz")] {
+    for (name, from_zone, to_zone) in [
+        ("allow-lan-orig", "lan", "wan"),
+        ("allow-dmz-orig", "dmz", "wan"),
+        ("allow-wan-reverse-orig", "wan", "lan"),
+        ("allow-dmz-reverse-orig", "dmz", "lan"),
+    ] {
         snapshot.policies.push(PolicyRuleSnapshot {
             name: name.into(),
             from_zone: from_zone.into(),
-            to_zone: "wan".into(),
+            to_zone: to_zone.into(),
             source_addresses: vec!["10.0.0.1/32".into()],
             destination_addresses: vec!["any".into()],
             applications: vec!["any".into()],
@@ -799,8 +811,7 @@ fn hit_policy_owner_forward_icmp_judged_source_17027() {
 #[test]
 fn hit_policy_owner_reverse_icmp_judged_source_17027() {
     let fw = snat_verdict_forwarding();
-    let mut metadata = session(TEST_LAN_ZONE_ID, LAN_A, 0, true);
-    metadata.egress_zone = TEST_WAN_ZONE_ID;
+    let metadata = session(TEST_WAN_ZONE_ID, WAN, 0, true);
     let flow = SessionFlow {
         src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -811,22 +822,24 @@ fn hit_policy_owner_reverse_icmp_judged_source_17027() {
         Ipv4Addr::new(172, 16, 0, 1),
         Ipv4Addr::new(10, 0, 0, 1),
     );
-    let decision = forward_decision();
+    let decision = reverse_verdict_decision();
+    let mut packet_meta = icmp_meta();
+    packet_meta.ingress_ifindex = WAN as u32;
     for judged in [Some(&alias), None] {
         match owner_hit_icmp_verdict(
             &fw,
             &metadata,
             decision,
             &flow,
-            icmp_meta(),
+            packet_meta,
             &frame,
             SCHED_RECEIPT_NS,
             judged,
         ) {
             Some(OwnerHitIcmpVerdict::Drop(deny)) => assert_eq!(
                 (deny.judged_from_zone, deny.judged_to_zone),
-                (TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
-                "reverse ICMP must judge the wire responder regardless of the alias"
+                (TEST_WAN_ZONE_ID, TEST_LAN_ZONE_ID),
+                "reverse ICMP must judge the WAN responder, not the forward alias"
             ),
             other => panic!("reverse ICMP with wire responder source must drop, got {other:?}"),
         }
@@ -887,8 +900,7 @@ fn hit_policy_foreign_judged_source_17027() {
         ),
         _ => panic!("foreign forward on the wire source must drop"),
     }
-    let mut reverse_meta = session(TEST_LAN_ZONE_ID, LAN_A, 0, true);
-    reverse_meta.egress_zone = TEST_WAN_ZONE_ID;
+    let reverse_meta = session(TEST_WAN_ZONE_ID, WAN, 0, true);
     let reverse_flow = SessionFlow {
         src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
         dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
@@ -898,14 +910,17 @@ fn hit_policy_foreign_judged_source_17027() {
         Ipv4Addr::new(172, 16, 0, 1),
         Ipv4Addr::new(10, 0, 0, 1),
     );
+    let reverse_decision = reverse_verdict_decision();
+    let mut reverse_packet_meta = icmp_meta();
+    reverse_packet_meta.ingress_ifindex = DMZ as u32;
     match foreign_hit_verdict(
         &fw,
         &sessions,
         &key,
         &reverse_meta,
-        decision,
+        reverse_decision,
         &reverse_flow,
-        icmp_meta(),
+        reverse_packet_meta,
         &reverse_frame,
         TEST_DMZ_ZONE_ID,
         false,
@@ -914,8 +929,8 @@ fn hit_policy_foreign_judged_source_17027() {
     ) {
         ForeignHitVerdict::Drop(deny) => assert_eq!(
             (deny.judged_from_zone, deny.judged_to_zone),
-            (TEST_DMZ_ZONE_ID, TEST_WAN_ZONE_ID),
-            "foreign REVERSE must judge the wire responder, not the alias"
+            (TEST_DMZ_ZONE_ID, TEST_LAN_ZONE_ID),
+            "foreign REVERSE must judge the WAN responder, not the alias"
         ),
         _ => panic!("foreign reverse must judge the wire responder and drop"),
     }
