@@ -110,8 +110,9 @@ func IsUnknownTopLevelStanzaSchemaError(err error) bool {
 // validator or typed-value structure, including validated keys, multi/tail
 // values, and modifiers. The tolerant configstore path may persist this
 // class as a queryable typed-leaf warning. The separate #17241
-// nestedListContentSchemaError is classified as typed for collection but is
-// deliberately hard on tolerant ingress.
+// nestedListContentSchemaError is not classified as typed for ordinary
+// warning collection; its dedicated #17241 hard-error path is enforced by
+// schema-aware fallback scanning and compileTreeLenient.
 type typedLeafSchemaError struct{ msg string }
 
 func (e *typedLeafSchemaError) Error() string { return e.msg }

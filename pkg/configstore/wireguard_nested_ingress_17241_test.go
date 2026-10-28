@@ -29,6 +29,27 @@ const nestedAllowedIPsConfig17241 = `interfaces {
     }
 }`
 
+const hierarchicalNestedAllowedIPsConfig17241 = `interfaces {
+    wg0 {
+        tunnel {
+            mode wireguard;
+            wireguard {
+                listen-port 51820;
+                private-key 00bedd4ed26623ab2f765d16af2dcba4f6dbe17c284a66c6494b48b823f4c654;
+                peer {
+                    04d9dab116416940a490d8bab5d0dd921094f0a278dee3db867df8fbd2db6e16 {
+                        allowed-ips {
+                            10.0.0.0/8 {
+                                192.168.0.0/16;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}`
+
 func parseNestedAllowedIPs17241(t *testing.T) *config.ConfigTree {
 	t.Helper()
 	tree, errs := config.NewParser(nestedAllowedIPsConfig17241).Parse()
@@ -90,6 +111,42 @@ func TestSyncApplyRefusesNestedAllowedIPs17241(t *testing.T) {
 	}
 }
 
+// A tolerated non-typed schema error before the WireGuard stanza must not stop
+// the collect walk from finding a later nested-list hard refusal.
+func TestSyncApplyDoesNotLetPriorSchemaErrorHideNestedRefusal17241(t *testing.T) {
+	const priorSchemaError = `security {
+ zones { security-zone trust {
+  interfaces { ge-0/0/0.0; }
+  address-book {
+   address local 10.0.0.9/32;
+   adress-set grp { address local; }
+  }
+ } security-zone untrust; }
+}`
+	text := priorSchemaError + "\n" + hierarchicalNestedAllowedIPsConfig17241
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	tree, parseErrs := config.NewParser(text).Parse()
+	if len(parseErrs) > 0 {
+		t.Fatalf("combined fixture must parse: %v", parseErrs[0])
+	}
+	firstErr := s.schemaValidateExpandedTree(tree)
+	if firstErr == nil || config.IsTypedLeafSchemaError(firstErr) ||
+		config.IsNestedListContentSchemaError(firstErr) || !strings.Contains(firstErr.Error(), "adress-set") {
+		t.Fatalf("fixture must begin with a non-typed schema error on adress-set, got: %v", firstErr)
+	}
+
+	baseline, err := s.SyncApply(`system { host-name baseline; }`, nil)
+	if err != nil || baseline == nil {
+		t.Fatalf("install control baseline: cfg=%v err=%v", baseline, err)
+	}
+	cfg, err := s.SyncApply(text, nil)
+	assertNestedAllowedIPsRefused17241(t, err)
+	if cfg != nil || s.ActiveConfig() != baseline {
+		t.Fatalf("prior schema error must not hide nested refusal or replace active config: cfg=%v active=%p baseline=%p",
+			cfg, s.ActiveConfig(), baseline)
+	}
+}
+
 // The collect-all typed-leaf limit must not hide a later nested-list refusal.
 func TestSyncApplyRefusesNestedAllowedIPsBeyondTypedErrorCap17241(t *testing.T) {
 	var content strings.Builder
@@ -98,7 +155,7 @@ func TestSyncApplyRefusesNestedAllowedIPsBeyondTypedErrorCap17241(t *testing.T) 
 		content.WriteString(fmt.Sprintf(" scheduler-%d { transmit-rate asd; }", i))
 	}
 	content.WriteString(" } }\n")
-	content.WriteString(nestedAllowedIPsConfig17241)
+	content.WriteString(hierarchicalNestedAllowedIPsConfig17241)
 
 	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
 	baseline, err := s.SyncApply(`system { host-name baseline; }`, nil)

@@ -82,10 +82,15 @@ func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string
 		}
 
 		consumed, descendSchema := consumeNodeKeys(node.Keys, childSchema)
-		if descendSchema == nil {
+		newPath := append(append([]string(nil), path...), node.Keys[:consumed]...)
+		missingArgs := 1 + childSchema.args - consumed
+		if missingArgs > 0 && !childSchema.compoundKey {
+			if err := findNestedListContentInInstances(node.Children, childSchema, missingArgs, newPath); err != nil {
+				return err
+			}
 			continue
 		}
-		newPath := append(append([]string(nil), path...), node.Keys[:consumed]...)
+
 		walkChildren := node.Children
 		if keyword == "qualified-next-hop" {
 			walkChildren = expandRunChildren9235(walkChildren, childSchema)
@@ -96,6 +101,35 @@ func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string
 			walkChildren = expandFlatRun(node.Children, childSchema)
 		}
 		if err := findNestedListContentError(walkChildren, descendSchema, newPath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// findNestedListContentInInstances peels hierarchical named-instance keys
+// like walkInstanceChildren, then resumes schema matching on the instance
+// block's children.
+func findNestedListContentInInstances(nodes []*Node, containerSchema *schemaNode, remaining int, path []string) error {
+	if containerSchema == nil || remaining <= 0 {
+		return nil
+	}
+	for _, node := range nodes {
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		consumed := len(node.Keys)
+		if consumed > remaining {
+			consumed = remaining
+		}
+		newPath := append(append([]string(nil), path...), node.Keys[:consumed]...)
+		if stillMissing := remaining - consumed; stillMissing > 0 {
+			if err := findNestedListContentInInstances(node.Children, containerSchema, stillMissing, newPath); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := findNestedListContentError(node.Children, containerSchema, newPath); err != nil {
 			return err
 		}
 	}
