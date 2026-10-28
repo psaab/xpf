@@ -1104,7 +1104,7 @@ impl DnatTable {
     /// application source-port (H10) or ICMP type/code (H11) constraint fails
     /// closed here — exercise those via [`lookup_with_counter`]. Production
     /// uses [`lookup_with_counter_scoped`] with the real flow fields.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn lookup(
         &self,
         protocol: u8,
@@ -2270,7 +2270,6 @@ impl DnatTable {
     }
 
     /// Returns true if the table has any entries (exact-host or prefix).
-    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty() && self.prefix_entries.is_empty()
     }

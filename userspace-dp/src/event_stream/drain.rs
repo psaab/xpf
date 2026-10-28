@@ -27,8 +27,12 @@ pub(super) struct DrainOutcome {
     pub(super) disconnected: bool,
     /// The write backlog hit `WRITE_BACKLOG_MAX_BYTES` and the drain was
     /// halted before emptying the channel (stalled-consumer signal). Exposed
-    /// for tests; the loop relies on the side-effect counter.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// for tests; the loop relies on the side-effect counter. #17195: the
+    /// field is read only under `#[cfg(test)]`, but production constructors
+    /// in this file still assign it, so it cannot be `#[cfg(test)]`-gated
+    /// without gating those assignments; it carries a plain expiring
+    /// expectation instead of the former false test-only label.
+    #[expect(dead_code, reason = "#17195: field is assigned in production constructors in this file but read only by tests; expect fires when a production reader appears")]
     pub(super) stalled: bool,
 }
 

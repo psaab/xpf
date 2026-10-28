@@ -192,7 +192,6 @@ unsafe extern "C" {
 
     fn bridge_xsk_ring_cons_peek(ring: *mut XskRingCons, nb: u32, idx_out: *mut u32) -> u32;
     fn bridge_xsk_ring_cons_release(ring: *mut XskRingCons, nb: u32);
-    #[allow(dead_code)]
     fn bridge_xsk_ring_cons_cancel(ring: *mut XskRingCons, nb: u32);
     fn bridge_xsk_rx_desc_get(
         rx: *const XskRingCons,
@@ -1401,7 +1400,7 @@ pub(crate) unsafe fn create_xsk_binding_shared_owner(
 /// # Safety
 /// The returned `DeviceQueue` must be dropped before `umem`; see
 /// [`create_xsk_binding_private`].
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(crate) unsafe fn create_xsk_binding(
     umem: &mut Umem,
     info: &IfInfo,

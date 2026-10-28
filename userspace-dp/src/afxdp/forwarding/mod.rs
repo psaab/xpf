@@ -34,7 +34,7 @@ pub(in crate::afxdp) use host_inbound::{
     zone_host_inbound_from_tokens, zone_host_inbound_from_tokens_except,
 };
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn zone_pair_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
@@ -49,8 +49,8 @@ pub(super) fn zone_pair_for_flow_with_override(
     ingress_zone_override: Option<&str>,
     egress_ifindex: i32,
 ) -> (String, String) {
-    // #921: this helper is `#[cfg_attr(not(test), allow(dead_code))]`
-    // (see zone_pair_for_flow above) and is only called from tests.
+    // #921: this helper is `#[cfg(test)]` (see zone_pair_for_flow above,
+    // gated by #17195) and is only called from tests.
     // After #921, `ifindex_to_zone_id` and `EgressInterface.zone_id`
     // are u32. Resolve back to the name via `zone_id_to_name` for
     // the test-only String API. Slow path; allocations are fine.

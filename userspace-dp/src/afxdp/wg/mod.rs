@@ -60,18 +60,18 @@
 //! paper over.
 
 // TODO(#1499 r4 / integration PR): tighten this to per-item
-// `#[allow(dead_code)]` once tx/dispatch.rs and poll_descriptor.rs
-// consume the engine API. The module-wide allow exists because the
-// engine surface is intentionally complete-but-unused in this PR;
-// the integration PR will exercise most of it and the remaining
-// dead symbols (e.g. cookie-message helpers) can be allow-listed
-// individually.
+// expectations once tx/dispatch.rs and poll_descriptor.rs consume the
+// engine API. The module-wide expectation exists because the engine
+// surface is intentionally complete-but-unused in this PR; the
+// integration PR will exercise most of it and the remaining dead
+// symbols (e.g. cookie-message helpers) can be listed individually.
 //
-// Re-verified under #1826: removing this allow still surfaces 16
+// Re-verified under #1826: removing this suppression still surfaces
 // dead-code warnings (engine surface remains partially unwired even
-// after the coordinator/wg_control/ integration), so the
-// module-wide allow stays for now.
-#![allow(dead_code)] // Most of this module is not yet wired into the hot path.
+// after the coordinator/wg_control/ integration). #17195 converts the
+// module-wide allow to an expiring expectation: it fires if the module
+// ever becomes fully wired.
+#![expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // Most of this module is not yet wired into the hot path.
 
 pub(crate) mod allowed_ips;
 // #1865: operator-visible telemetry counters — one `WgCounters` per

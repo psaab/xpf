@@ -1,4 +1,4 @@
-#![allow(dead_code)] // status surfaces still consume only part of the producer API
+#![expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // status surfaces still consume only part of the producer API
 
 use super::codec::{DataplaneEventKind, DataplaneEventPayload};
 use super::{EventFrame, EventStreamSendError, EventStreamWorkerHandle};
@@ -303,7 +303,6 @@ pub(crate) enum DataplaneEventEmitOutcome {
     Dropped { reason: DataplaneEventDropReason },
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DataplaneEventKindStats {
     pub(crate) sent: u64,
@@ -313,7 +312,6 @@ pub(crate) struct DataplaneEventKindStats {
     pub(crate) disconnected: u64,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DataplaneEventStats {
     pub(crate) policy_deny: DataplaneEventKindStats,
@@ -471,7 +469,7 @@ impl EventStreamWorkerHandle {
         }
     }
 
-    #[allow(dead_code)] // surfaced through EventStreamSender::stats for now
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // surfaced through EventStreamSender::stats for now
     pub(crate) fn dataplane_event_stats(&self) -> DataplaneEventStats {
         self.shared.dataplane_event_counters.snapshot()
     }

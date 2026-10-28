@@ -1699,7 +1699,7 @@ impl Nat64State {
     }
 
     /// Returns true if any NAT64 prefixes are configured.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn is_active(&self) -> bool {
         !self.prefixes.is_empty()
     }

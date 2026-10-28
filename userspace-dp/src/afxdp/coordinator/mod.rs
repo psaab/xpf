@@ -889,7 +889,6 @@ impl Coordinator {
         self.event_stream.as_ref().map(|es| es.stats())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn dynamic_neighbors_ref(&self) -> &Arc<ShardedNeighborMap> {
         &self.neighbors.dynamic
     }
