@@ -8463,7 +8463,7 @@ fn failback_routed_refresh_rehomes_16524() {
 /// the on-link row pins the anti-loop (candidate kept verbatim).
 #[test]
 fn reresolve_destination_owner_fabric_table_17047() {
-    use crate::afxdp::session_glue::{DestinationOwner, FabricArrival, HaEnforce};
+    use crate::afxdp::session_glue::{DestinationOwner, FabricArrival};
     let now_secs = 1_000u64;
     let mut forwarding = ForwardingState::default();
     forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
@@ -8551,19 +8551,19 @@ fn reresolve_destination_owner_fabric_table_17047() {
         fabric_adopted: false,
         adopted_recovery: None,
     };
-    let rows: Vec<(&str, FabricArrival, HaEnforce, ForwardingResolution, IpAddr, &BTreeMap<i32, HAGroupRuntime>, ForwardingDisposition, i32)> = vec![
-        ("Unknown x Packet(off-link): routed re-homes (#16524)", packet(false), HaEnforce::Session, wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
-        ("Unknown x Packet(on-link): anti-loop keeps candidate", packet(true), HaEnforce::Session, wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
-        ("Unknown x Command: routed re-homes", FabricArrival::Command { fabric_ingress: false }, HaEnforce::Snapshot, wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
-        ("Active x Packet: connected candidate re-homes", packet(false), HaEnforce::Session, lan, lan_target, &ha_both_active, ForwardingDisposition::ForwardCandidate, 5),
-        ("Active x Command: connected candidate re-homes", FabricArrival::Command { fabric_ingress: false }, HaEnforce::Snapshot, lan, lan_target, &ha_both_active, ForwardingDisposition::ForwardCandidate, 5),
-        ("Active x Packet: WAN candidate retained (transient)", packet(false), HaEnforce::Session, wan, lan_target, &ha_both_active, ForwardingDisposition::FabricRedirect, 4),
-        ("Inactive x Packet: WAN candidate retained", packet(false), HaEnforce::Session, wan, lan_target, &ha_rg2_inactive, ForwardingDisposition::FabricRedirect, 4),
-        ("Inactive x Command: WAN candidate retained", FabricArrival::Command { fabric_ingress: false }, HaEnforce::Snapshot, wan, lan_target, &ha_rg2_inactive, ForwardingDisposition::FabricRedirect, 4),
+    let rows: Vec<(&str, FabricArrival, ForwardingResolution, IpAddr, &BTreeMap<i32, HAGroupRuntime>, ForwardingDisposition, i32)> = vec![
+        ("Unknown x Packet(off-link): routed re-homes (#16524)", packet(false), wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
+        ("Unknown x Packet(on-link): anti-loop keeps candidate", packet(true), wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
+        ("Unknown x Command: routed re-homes", FabricArrival::Command { fabric_ingress: false }, wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
+        ("Active x Packet: connected candidate re-homes", packet(false), lan, lan_target, &ha_both_active, ForwardingDisposition::ForwardCandidate, 5),
+        ("Active x Command: connected candidate re-homes", FabricArrival::Command { fabric_ingress: false }, lan, lan_target, &ha_both_active, ForwardingDisposition::ForwardCandidate, 5),
+        ("Active x Packet: WAN candidate retained (transient)", packet(false), wan, lan_target, &ha_both_active, ForwardingDisposition::FabricRedirect, 4),
+        ("Inactive x Packet: WAN candidate retained", packet(false), wan, lan_target, &ha_rg2_inactive, ForwardingDisposition::FabricRedirect, 4),
+        ("Inactive x Command: WAN candidate retained", FabricArrival::Command { fabric_ingress: false }, wan, lan_target, &ha_rg2_inactive, ForwardingDisposition::FabricRedirect, 4),
     ];
-    for (name, fabric, enforce, candidate, target, ha, want_disp, want_egress) in rows {
+    for (name, fabric, candidate, target, ha, want_disp, want_egress) in rows {
         let out = crate::afxdp::session_glue::reresolve_stored_session(
-            &forwarding, ha, &neighbors, now_secs, &stored, &metadata, target, candidate, fabric, enforce,
+            &forwarding, ha, &neighbors, now_secs, &stored, &metadata, target, candidate, fabric,
         );
         assert_eq!(out.disposition, want_disp, "{name}: got {out:?}");
         if want_disp == ForwardingDisposition::ForwardCandidate {

@@ -183,7 +183,6 @@ pub(in crate::afxdp) fn collect_refresh_owner_rgs_items(
             super::super::FabricArrival::Command {
                 fabric_ingress: metadata.fabric_ingress,
             },
-            super::super::HaEnforce::Snapshot,
         );
         let refreshed_decision = SessionDecision {
             resolution,

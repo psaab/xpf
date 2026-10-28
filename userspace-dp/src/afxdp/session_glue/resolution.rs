@@ -642,14 +642,16 @@ impl DestinationOwner {
     }
 }
 
-/// #17047: how the packet/command arrived, for the stored-session
-/// re-resolution pipeline. `Packet` carries the packet-time facts
-/// only the hit/reverse arms have (logical fabric arrival for
-/// `prefer_local`, fabric-LINK arrival for the anti-loop, tunnel
-/// bypass inputs, fabric adoption); `Command` is the no-packet HA
-/// transition shape (refresh/demote), where the stored metadata's
-/// `fabric_ingress` is the arrival flag and HA enforcement is the
-/// plain snapshot (no tunnel bypass, no adoption).
+/// #17047: typed re-resolution context for the stored-session pipeline.
+/// `Packet` carries packet-time facts used by the session enforcement
+/// path (tunnel bypass and fabric adoption); `Command` is the no-packet
+/// HA transition shape, using the stored `fabric_ingress` flag and plain
+/// snapshot enforcement.
+///
+/// Compile-fail note: the enforcement and arrival axes are encoded
+/// together, so `Session` + `Command` and `Snapshot` + `Packet` have
+/// no representable value. The `Command` match arm below explicitly
+/// applies snapshot enforcement.
 #[derive(Clone, Copy)]
 pub(in crate::afxdp) enum FabricArrival<'a> {
     Packet {
@@ -698,15 +700,6 @@ impl FabricArrival<'_> {
     }
 }
 
-/// #17047: HA-enforcement flavour for `reresolve_stored_session`.
-/// Packet arms use `enforce_session_ha_resolution` (snapshot plus
-/// the unseeded-tunnel bypass); commands use the snapshot alone.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(in crate::afxdp) enum HaEnforce {
-    Snapshot,
-    Session,
-}
-
 /// #17047: the ONE stored-session re-resolution pipeline, formerly
 /// spelled out at four session_glue sites (session-hit arm,
 /// reverse-synthesis arm, RefreshOwnerRGS, DemoteOwnerRGS). Every
@@ -714,8 +707,9 @@ pub(in crate::afxdp) enum HaEnforce {
 /// fresh lookup (the caller supplies it — hit arms choose cached /
 /// synced / leak-revoked variants the helper must not hide), then
 /// `prefer_local_forward_candidate_for_fabric_ingress`, then HA
-/// enforcement, then — only for a stored FabricRedirect — the
-/// fabric re-redirect composition and the
+/// enforcement selected by `fabric` (`Packet` uses session enforcement;
+/// `Command` uses snapshot enforcement), then — only for a stored
+/// FabricRedirect — the fabric re-redirect composition and the
 /// rehome-or-retain decision (#15958b + #16524, with
 /// `DestinationOwner` computed inside from the installing table).
 /// Non-redirect stored decisions keep the per-arm fabric redirect:
@@ -738,7 +732,6 @@ pub(in crate::afxdp) fn reresolve_stored_session(
     target: IpAddr,
     looked_up: ForwardingResolution,
     fabric: FabricArrival<'_>,
-    enforce: HaEnforce,
 ) -> ForwardingResolution {
     let install_table = install_table_name_for_session(forwarding, *stored, target);
     let looked_up = super::prefer_local_forward_candidate_for_fabric_ingress(
@@ -751,17 +744,14 @@ pub(in crate::afxdp) fn reresolve_stored_session(
         install_table,
         looked_up,
     );
-    let enforced = match (enforce, fabric) {
-        (
-            HaEnforce::Session,
-            FabricArrival::Packet {
-                ingress_ifindex,
-                ha_startup_grace_until_secs,
-                fabric_adopted,
-                adopted_recovery,
-                ..
-            },
-        ) => {
+    let enforced = match fabric {
+        FabricArrival::Packet {
+            ingress_ifindex,
+            ha_startup_grace_until_secs,
+            fabric_adopted,
+            adopted_recovery,
+            ..
+        } => {
             let enforced = enforce_session_ha_resolution(
                 forwarding,
                 ha_state,
@@ -785,7 +775,9 @@ pub(in crate::afxdp) fn reresolve_stored_session(
                 enforced
             }
         }
-        _ => enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up),
+        FabricArrival::Command { .. } => {
+            enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up)
+        }
     };
     if stored.resolution.disposition == ForwardingDisposition::FabricRedirect {
         let owner = DestinationOwner::from_dest_rg(

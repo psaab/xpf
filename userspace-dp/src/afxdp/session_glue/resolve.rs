@@ -610,7 +610,6 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
                 fabric_adopted,
                 adopted_recovery: adopted_recovery.as_ref(),
             },
-            super::HaEnforce::Session,
         );
         // #16217 (FZDiag34 reverse leg; FZDiag35 conversion):
         // a REVERSE hit whose stored decision still egresses LOCALLY
@@ -875,7 +874,6 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             fabric_adopted,
             adopted_recovery: adopted_recovery.as_ref(),
         },
-        super::HaEnforce::Session,
     );
     // #9752: terminal observation arms the purge walk (D8; reverse arm).
     if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {

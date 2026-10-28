@@ -94,7 +94,6 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 super::super::FabricArrival::Command {
                     fabric_ingress: metadata.fabric_ingress,
                 },
-                super::super::HaEnforce::Snapshot,
             );
             let refreshed_decision = SessionDecision {
                 resolution,
