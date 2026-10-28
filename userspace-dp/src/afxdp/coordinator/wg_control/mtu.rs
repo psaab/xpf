@@ -19,10 +19,12 @@ use crate::afxdp::wg::{POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, padded_len_capped};
 /// hold in BOTH directions, against the SAME MTU model).
 pub(in crate::afxdp::coordinator) const WG_DEFAULT_OUTER_MTU: usize = 1500;
 
-/// Inner budget for `outer_mtu`: the largest inner length whose capped
-/// record fits. Equals `outer_mtu - overhead` exactly (no worst-pad
-/// subtraction): with the pad capped at this budget, a full-budget inner
-/// packet encapps to exactly `outer_mtu` (#16499, reference behaviour).
+/// Outer-derived inner budget for `outer_mtu`: `outer_mtu - overhead`
+/// exactly (no worst-pad subtraction). When this budget is at or below
+/// the WG engine ceiling (4096), a full-budget inner packet encapps to
+/// exactly `outer_mtu` (#16499). Above that ceiling, the engine cannot
+/// encap the full outer-derived budget; `wg::mss::wg_inner_mtu` advertises
+/// at most 4096.
 #[inline]
 pub(super) fn wg_inner_budget(outer_mtu: usize, outer_v6: bool) -> usize {
     let overhead = WG_DATA_HEADER_LEN + POLY1305_TAG_LEN + if outer_v6 { 40 } else { 20 } + 8;

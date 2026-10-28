@@ -147,9 +147,10 @@ pub(crate) fn wg_tcp_mss_with_route_mtu(
 /// `engine::WG_ENGINE_MAX_INNER_MTU` (= `PADDED_PLAINTEXT_MAX` = 4096) — the
 /// largest inner IP packet the WG engine can encrypt in one transport
 /// message. On a jumbo outer link the outer-derived budget
-/// (`outer_mtu - overhead - pad`) exceeds what the engine can encap, so a
-/// sender that honored an UNCLAMPED advertised inner MTU would still have
-/// its oversized packets dropped at the encap `padded_len >
+/// (`outer_mtu - overhead`) has no pad subtraction: #16499 caps the §5.4.6
+/// pad at that inner budget. It may exceed what the engine can encap, so a
+/// sender that honored an UNCLAMPED advertised inner MTU would still have its
+/// oversized packets dropped at the encap `padded_len >
 /// PADDED_PLAINTEXT_MAX` guard (`encap_mtu_drops`). Clamping here keeps the
 /// advertised / segmentation inner MTU at or below the encryptable maximum,
 /// so what we advertise is what the engine actually accepts.

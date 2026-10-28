@@ -867,9 +867,10 @@ fn poll_timeout_ms_clamps_and_converts() {
     assert_eq!(poll_timeout_ms(now - 1, now), 0);
 }
 
-/// #16499: with the pad capped at the inner budget, a full-budget inner
-/// packet encapps to exactly the outer MTU. Budget v6/1500 = 1420,
-/// v4/1500 = 1440, v4/1492 = 1432, v4/1450 = 1390, v6/1450 = 1370.
+/// #16499: for these standard-MTU budgets (all below the engine ceiling),
+/// the capped pad lets a full-budget inner packet encap to exactly the
+/// outer MTU. Budget v6/1500 = 1420, v4/1500 = 1440, v4/1492 = 1432,
+/// v4/1450 = 1390, v6/1450 = 1370.
 #[test]
 fn encapped_size_capped_pad_fits_standard_formula_rows_16499() {
     use super::mtu::{wg_encapped_size_with_outer_mtu, wg_inner_budget};
