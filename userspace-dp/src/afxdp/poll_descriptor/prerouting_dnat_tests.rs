@@ -403,3 +403,56 @@ fn prerouting_dnat_stage11_parity_17197() {
         }
     }
 }
+
+/// #17197 fold: the Stage-11 claim path must not charge the
+/// allocator's live-write lock telemetry. The persistent row is the
+/// only row whose production tier reaches the pool allocator; run
+/// the Stage-11 claim against its idle lease and assert the
+/// allocator snapshot is unchanged, with the counting poll-loop
+/// verdict as the positive control (it must bump the counter, so a
+/// vacuous fixture cannot pass both sides).
+#[test]
+fn prerouting_dnat_stage11_peek_no_lock_telemetry_17197() {
+    let frame = ike_frame_17197();
+    let flow = ike_flow_17197();
+    let forwarding = build_forwarding_state(&snapshot_17197(Row::PersistentLease));
+    mint_persistent_lease_17197(&forwarding);
+    let allocator = &forwarding
+        .source_nat_rules
+        .iter()
+        .find(|rule| rule.persistent_nat && rule.pool_mode)
+        .expect("fixture: persistent pool rule")
+        .pool_allocator;
+    let meta = ike_meta_17197(&frame);
+    let before = allocator.snapshot();
+    // Stage-11 claim: persistent lease translates to TRANSIT (not
+    // self), so the packet is not claimed — but reaching that answer
+    // must not have taken the counted write guard.
+    let stage11 = stage11_claim_17197(&forwarding, &flow, &frame, meta, false);
+    assert!(
+        !stage11,
+        "fixture: persistent lease must select the transit translation"
+    );
+    let after_peek = allocator.snapshot();
+    assert_eq!(
+        after_peek.live_write_lock_acquisitions_total, before.live_write_lock_acquisitions_total,
+        "#17197: Stage-11 peek must not bump live_write_lock_acquisitions"
+    );
+    assert_eq!(
+        after_peek.live_write_lock_contended_total, before.live_write_lock_contended_total,
+        "#17197: Stage-11 peek must not bump live_write_lock_contended"
+    );
+    // Positive control: the counting production verdict on the same
+    // fixture DOES charge the telemetry, proving the snapshot can
+    // observe the difference.
+    let production = production_claim_17197(&forwarding, &flow, meta, false);
+    assert!(!production, "control: counting verdict agrees on transit");
+    let after_counting = allocator.snapshot();
+    assert!(
+        after_counting.live_write_lock_acquisitions_total
+            > after_peek.live_write_lock_acquisitions_total,
+        "#17197 control: counting verdict must bump live_write_lock_acquisitions: {} -> {}",
+        after_peek.live_write_lock_acquisitions_total,
+        after_counting.live_write_lock_acquisitions_total,
+    );
+}

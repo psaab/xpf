@@ -536,7 +536,7 @@ use prerouting_scope::{
     PreroutingIngressScope, prerouting_ingress_scope, prerouting_ingress_scope_ambiguous,
 };
 pub(in crate::afxdp) use prerouting_dnat::PreroutingDnatVerdict as PreroutingDnatVerdictForStage11;
-pub(in crate::afxdp) use prerouting_dnat::prerouting_dnat_verdict as prerouting_dnat_verdict_for_poll_stages;
+pub(in crate::afxdp) use prerouting_dnat::prerouting_dnat_verdict_peek as prerouting_dnat_verdict_peek_for_poll_stages;
 pub(in crate::afxdp) use prerouting_scope::prerouting_ingress_scope as prerouting_ingress_scope_for_poll_stages;
 pub(in crate::afxdp) use prerouting_scope::prerouting_ingress_scope_ambiguous as prerouting_ingress_scope_ambiguous_for_poll_stages;
 use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply, enqueue_session_miss_rst};
@@ -4560,10 +4560,14 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // #17197: the three DNAT tiers (static ->
                         // persistent -> dynamic pool) live in
                         // `prerouting_dnat_verdict`, shared with the
-                        // Stage-11 IPsec claim discriminator. The
-                        // verdict is pure; the side effects (counter
-                        // charge at committed install, persistent lease
-                        // hold) are applied here.
+                        // Stage-11 IPsec claim discriminator (which
+                        // calls the non-counting peek twin). No NAT
+                        // rule counter is charged and no lease hold is
+                        // taken by the verdict; those side effects
+                        // (counter charge at committed install,
+                        // persistent lease hold) are applied here. The
+                        // persistent tier's counted write guard is the
+                        // pre-extraction poll-loop telemetry, unchanged.
                         // #6473 (Junos order): static DNAT first.
                         // #15117: suppressed for on-link NDP (see above).
                         let dnat_verdict = prerouting_dnat_verdict(

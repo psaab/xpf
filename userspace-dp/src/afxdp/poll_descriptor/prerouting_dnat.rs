@@ -10,11 +10,18 @@
 // ambiguous provenance / persistent tier / Poisoned), so a Stage-11
 // claim could disagree with the translation production would select.
 //
-// This function IS the production decision. It is pure: hit counters
-// and persistent-lease keys are returned, never applied. The poll loop
+// This function IS the production decision. Hit counters and
+// persistent-lease keys are returned, never applied: no NAT rule
+// counter is charged and no lease hold is taken here. The poll loop
 // applies them at its committed-install sites (#2218); Stage 11 only
-// reads the classification. `#[inline]`, allocation-free, borrowed
-// counter handles (#6386 hot-path preservation contract).
+// reads the classification. The counting entry point's persistent
+// tier still takes the allocator's counted write guard (the poll
+// loop's committed-install telemetry is unchanged); Stage 11 calls
+// [`prerouting_dnat_verdict_peek`], whose persistent tier reads under
+// an uncounted read guard, so the claim path charges no allocator
+// lock telemetry either (see that function). `#[inline]`,
+// allocation-free, borrowed counter handles (#6386 hot-path
+// preservation contract).
 
 use super::prerouting_scope::PreroutingIngressScope;
 use super::*;
@@ -93,8 +100,13 @@ impl PreroutingDnatVerdict {
 /// exemption (#15117): every tier is skipped and the verdict is
 /// `None`.
 ///
-/// Pure and allocation-free: no counter is charged and no lease is
-/// held here; both are returned for the caller to apply.
+/// Allocation-free: no NAT rule counter is charged and no lease
+/// hold is taken here; both are returned for the caller to apply.
+/// The persistent tier uses the allocator's counting lookup
+/// (`persistent_inbound_lookup_for_rule`, `lock_live`), so this
+/// entry point charges the allocator's live-write lock telemetry
+/// (`live_write_lock_acquisitions`, plus contended on contention)
+/// exactly as the pre-extraction poll loop did.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn prerouting_dnat_verdict(
@@ -105,6 +117,67 @@ pub(in crate::afxdp) fn prerouting_dnat_verdict(
     packet_icmp: Option<(u8, u8)>,
     suppress_destination_nat: bool,
     now_ns: u64,
+) -> PreroutingDnatVerdict {
+    prerouting_dnat_verdict_inner(
+        forwarding,
+        meta,
+        flow,
+        scope,
+        packet_icmp,
+        suppress_destination_nat,
+        now_ns,
+        false,
+    )
+}
+
+/// #17197: Stage-11 variant of [`prerouting_dnat_verdict`] with the
+/// same tier order, scope handling and classification, but whose
+/// persistent tier uses the allocator's non-counting peek
+/// (`persistent_inbound_peek_for_rule`, `read_live`): no write guard
+/// is taken and no `live_write_lock_acquisitions` /
+/// `live_write_lock_contended` telemetry is charged. Stage 11 is a
+/// pure classification (it never holds the returned lease key and
+/// never charges the returned counters), so charging it the poll
+/// loop's committed-install lock telemetry — on a path the deleted
+/// mirror never touched the allocator from — would inject the
+/// observer into the NAT status counters. The classification can
+/// race a concurrent lease mint/revoke exactly as any read-guard
+/// snapshot can; the poll loop re-evaluates with the counting entry
+/// point before installing, so a stale peek never installs state.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn prerouting_dnat_verdict_peek(
+    forwarding: &ForwardingState,
+    meta: &UserspaceDpMeta,
+    flow: &SessionFlow,
+    scope: &PreroutingIngressScope<'_>,
+    packet_icmp: Option<(u8, u8)>,
+    suppress_destination_nat: bool,
+    now_ns: u64,
+) -> PreroutingDnatVerdict {
+    prerouting_dnat_verdict_inner(
+        forwarding,
+        meta,
+        flow,
+        scope,
+        packet_icmp,
+        suppress_destination_nat,
+        now_ns,
+        true,
+    )
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn prerouting_dnat_verdict_inner(
+    forwarding: &ForwardingState,
+    meta: &UserspaceDpMeta,
+    flow: &SessionFlow,
+    scope: &PreroutingIngressScope<'_>,
+    packet_icmp: Option<(u8, u8)>,
+    suppress_destination_nat: bool,
+    now_ns: u64,
+    persistent_peek: bool,
 ) -> PreroutingDnatVerdict {
     let resolution_target = flow.dst_ip;
     if suppress_destination_nat {
@@ -179,19 +252,35 @@ pub(in crate::afxdp) fn prerouting_dnat_verdict(
             } else {
                 &rule.from_zone
             };
-            match rule.pool_allocator.persistent_inbound_lookup_for_rule(
-                meta.protocol,
-                resolution_target,
-                flow.forward_key.dst_port,
-                flow.forward_key.src_ip,
-                flow.forward_key.src_port,
-                now_ns,
-                rule,
-                scope.zone_name,
-                packet_from_zone,
-                scope.zone_name,
-                &arrival_scope,
-            ) {
+            match if persistent_peek {
+                rule.pool_allocator.persistent_inbound_peek_for_rule(
+                    meta.protocol,
+                    resolution_target,
+                    flow.forward_key.dst_port,
+                    flow.forward_key.src_ip,
+                    flow.forward_key.src_port,
+                    now_ns,
+                    rule,
+                    scope.zone_name,
+                    packet_from_zone,
+                    scope.zone_name,
+                    &arrival_scope,
+                )
+            } else {
+                rule.pool_allocator.persistent_inbound_lookup_for_rule(
+                    meta.protocol,
+                    resolution_target,
+                    flow.forward_key.dst_port,
+                    flow.forward_key.src_ip,
+                    flow.forward_key.src_port,
+                    now_ns,
+                    rule,
+                    scope.zone_name,
+                    packet_from_zone,
+                    scope.zone_name,
+                    &arrival_scope,
+                )
+            } {
                 PersistentInbound::Miss => {}
                 PersistentInbound::Denied => {
                     persistent_dnat_denied = true;

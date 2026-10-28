@@ -2250,16 +2250,21 @@ pub(super) fn stage_ipsec_passthrough_check_with_scope(
 }
 
 /// #17197: Stage 11 claims a packet for local XFRM only when the
-/// production pre-routing DNAT verdict — the same
-/// `prerouting_dnat_verdict` the session-miss poll loop applies — is
+/// production pre-routing DNAT verdict — the same classification
+/// `prerouting_dnat_verdict` gives the session-miss poll loop,
+/// evaluated here through its non-counting peek twin — is
 /// `None` (no translation) or a translation whose target is a
 /// configured interface address (DNAT-to-self, still subject to the
 /// #4323 host gate). A transit translation (target not locally
 /// configured), a `Poisoned` verdict, and a persistent `Denied`
 /// verdict are never claimed: production would translate or drop
 /// the packet, so reinjecting it to the host would bypass that
-/// decision. This check is read-only; the poll loop still owns the
-/// hit counters and persistent-lease holds.
+/// decision. This check is read-only and non-counting: it calls
+/// the peek verdict, whose persistent tier reads the lease tables
+/// under an uncounted read guard, so it charges no NAT rule
+/// counters, takes no lease hold, and bumps no allocator
+/// live-write lock telemetry; the poll loop still owns the hit
+/// counters and persistent-lease holds.
 ///
 /// The scope is built with the same `prerouting_ingress_scope{,_ambiguous}`
 /// production pre-routing DNAT consumes (#16047/#16045): an ambiguous
@@ -2296,7 +2301,7 @@ fn ipsec_destination_claimed_local(
             ingress_nat_scope_ifindex,
         )
     };
-    let verdict = crate::afxdp::poll_descriptor::prerouting_dnat_verdict_for_poll_stages(
+    let verdict = crate::afxdp::poll_descriptor::prerouting_dnat_verdict_peek_for_poll_stages(
         forwarding,
         &meta,
         flow,
