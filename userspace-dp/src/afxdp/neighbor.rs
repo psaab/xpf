@@ -258,7 +258,6 @@ pub(super) fn monotonic_timestamp_to_datetime(
 /// Send a raw Ethernet frame via AF_PACKET on the given interface.
 /// Used for ARP/NDP solicitations that must bypass XSK (because the
 /// XSK fill ring may not be bootstrapped on the egress interface).
-
 /// Which kind of probe socket was opened. The two paths differ in how
 /// the kernel treats the ICMP header we hand it, so the send-buffer
 /// construction is keyed off this (see [`build_icmp4_echo`] /

@@ -85,7 +85,7 @@ pub(in crate::afxdp) fn pbr_table_target(
     (table, identity)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn ingress_route_table_override(
     forwarding: &ForwardingState,
     frame: &[u8],
@@ -110,7 +110,7 @@ pub(in crate::afxdp) fn ingress_route_table_override(
     .route_override
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn ingress_route_table_override_with_result(
     forwarding: &ForwardingState,
     frame: &[u8],
@@ -137,7 +137,6 @@ pub(in crate::afxdp) fn ingress_route_table_override_with_result(
 /// Re-resolve the route for a previously accepted tunnel outer when the gate
 /// found no matching PBR term. Suppresses routing-filter counts and logs; a
 /// matched PBR override should instead be reused from the gate result.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn ingress_route_table_override_uncounted(
     forwarding: &ForwardingState,
     frame: &[u8],
@@ -161,7 +160,7 @@ pub(in crate::afxdp) fn ingress_route_table_override_uncounted(
     .route_override
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn ingress_route_table_override_with_mode(
     forwarding: &ForwardingState,
     frame: &[u8],

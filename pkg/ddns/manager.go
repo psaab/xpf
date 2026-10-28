@@ -644,7 +644,7 @@ func NewProductionManager(parser LeaseParser, nodeID string) *Manager {
 			// already told the operator). Counts as no-backend skips.
 			return nopUpdater{}, nil
 		}
-		return newRFC2136Updater(pol, c, nil,
+		return newRFC2136Updater(pol, c.RFC2136Endpoint, nil,
 			func() { m.skippedPTRNotAuth.Add(1) },
 			func() { m.skippedConflict.Add(1) },
 			m.ifResolver) // #5070: resolve dest-interface to the kernel device

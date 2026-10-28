@@ -70,7 +70,7 @@ func newSurfaceAProviderChangeManager(t *testing.T, reg *endpointRegistry, now f
 // `policyID`. The same *DDNSProvider must also be placed in the reconcile catalog
 // so the fingerprint matches on both the publish and withdraw sides.
 func providerScope(policyID, server, fqdn string) (SurfaceAScope, *config.DDNSProvider) {
-	prov := &config.DDNSProvider{Name: policyID, Backend: "rfc2136", UpdateServer: server}
+	prov := &config.DDNSProvider{Name: policyID, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: server}}
 	sc := SurfaceAScope{
 		Key: ScopeKey{
 			Family:    FamilyV4,
@@ -272,7 +272,7 @@ func TestSurfaceARemovedBindingWithdrawWrongEndpointOrphans(t *testing.T) {
 
 	// The binding is removed AND the provider was edited in place to a new
 	// endpoint. The catalog still has "prov", but it now points at ns-b.
-	provNew := &config.DDNSProvider{Name: "prov", Backend: "rfc2136", UpdateServer: "ns-b.example.net:53"}
+	provNew := &config.DDNSProvider{Name: "prov", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns-b.example.net:53"}}
 	if err := m.Reconcile(context.Background(), nil, fixedObserver("203.0.113.5"), nil,
 		map[string]*config.DDNSProvider{"prov": provNew}); err != nil {
 		t.Fatalf("removed-binding reconcile must not churn an error (terminal orphan): %v", err)
@@ -345,29 +345,35 @@ func TestBackendFingerprintStableAndSecretFree(t *testing.T) {
 		t.Fatalf("nil provider must fingerprint to the empty string")
 	}
 	base := &config.DDNSProvider{
-		Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53",
+		Name: "p", Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns.example.net:53",
+		},
 	}
 	if backendFingerprint(base) != backendFingerprint(&config.DDNSProvider{
-		Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53",
+		Name: "p", Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns.example.net:53",
+		},
 	}) {
 		t.Fatalf("identical endpoint identity must fingerprint identically")
 	}
 
 	// An explicit `backend rfc2136` and the implicit default share a fingerprint.
-	if backendFingerprint(&config.DDNSProvider{Name: "p", UpdateServer: "ns.example.net:53"}) !=
-		backendFingerprint(&config.DDNSProvider{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53"}) {
+	if backendFingerprint(&config.DDNSProvider{Name: "p", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}}) !=
+		backendFingerprint(&config.DDNSProvider{Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}}) {
 		t.Fatalf("empty backend must normalize to rfc2136 in the fingerprint")
 	}
 
 	// Every endpoint-identity field must move the fingerprint.
 	endpointChanges := []*config.DDNSProvider{
-		{Name: "p", Backend: "dyndns2", UpdateServer: "ns.example.net:53"},  // backend type
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns2.example.net:53"}, // server
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", Zone: "z"},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", HostedZoneID: "Z"},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", AWSRegion: "us-east-1"},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", Server: "http://ep"},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", URLTemplate: "http://ep/%h"},
+		{Name: "p", Backend: "dyndns2", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},  // backend type
+		{Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns2.example.net:53"}}, // server
+		{Name: "p", Backend: "rfc2136", Zone: "z", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", HostedZoneID: "Z", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", AWSRegion: "us-east-1", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", Server: "http://ep", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", URLTemplate: "http://ep/%h", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
 	}
 	baseFP := backendFingerprint(base)
 	for i, p := range endpointChanges {
@@ -380,15 +386,15 @@ func TestBackendFingerprintStableAndSecretFree(t *testing.T) {
 	// no-secret contract: the fingerprint must be persistable without disclosing a
 	// secret and without depending on one).
 	secretVariants := []*config.DDNSProvider{
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", TSIGSecret: config.NewSecret("hunter2")},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", Password: config.NewSecret("hunter2")},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", APIToken: config.NewSecret("tok")},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", AWSSecretAccessKey: config.NewSecret("sk")},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", Username: "u"},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", TSIGKeyName: "k"},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", AWSAccessKeyID: "AKIA"},
-		{Name: "p", Backend: "rfc2136", UpdateServer: "ns.example.net:53", SourceAddress: "203.0.113.9"},
-		{Name: "different-name", Backend: "rfc2136", UpdateServer: "ns.example.net:53"},
+		{Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53", TSIGSecret: config.NewSecret("hunter2")}},
+		{Name: "p", Backend: "rfc2136", Password: config.NewSecret("hunter2"), RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", APIToken: config.NewSecret("tok"), RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", AWSSecretAccessKey: config.NewSecret("sk"), RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", Username: "u", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53", TSIGKeyName: "k"}},
+		{Name: "p", Backend: "rfc2136", AWSAccessKeyID: "AKIA", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
+		{Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53", SourceAddress: "203.0.113.9"}},
+		{Name: "different-name", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns.example.net:53"}},
 	}
 	for i, p := range secretVariants {
 		if backendFingerprint(p) != baseFP {
@@ -419,8 +425,13 @@ func TestSurfaceAFingerprintPersistedNoSecretOnDisk(t *testing.T) {
 		},
 	}
 	prov := &config.DDNSProvider{
-		Name: "prov", Backend: "rfc2136", UpdateServer: "ns.example.net:53",
-		TSIGKeyName: "k", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.NewSecret("SUPERSECRETKEY=="),
+		Name: "prov", Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns.example.net:53",
+			TSIGKeyName:   "k",
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret:    config.NewSecret("SUPERSECRETKEY=="),
+		},
 	}
 	sc := SurfaceAScope{
 		Key:      ScopeKey{Family: FamilyV4, Interface: "ge-0-0-2", Unit: 50, PolicyID: "prov", FQDN: "wan.example.net"},
@@ -488,7 +499,7 @@ func TestSurfaceAPass1AddressLossWithdrawWrongEndpointOrphans(t *testing.T) {
 	// Same provider NAME edited in place to ns-b; address lost (Pass 1, binding
 	// still configured).
 	scNew, _ := providerScope("prov", "ns-b.example.net:53", "wan.example.net")
-	provNew := &config.DDNSProvider{Name: "prov", Backend: "rfc2136", UpdateServer: "ns-b.example.net:53"}
+	provNew := &config.DDNSProvider{Name: "prov", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns-b.example.net:53"}}
 	scNew.Provider = provNew
 	if err := m.Reconcile(context.Background(), []SurfaceAScope{scNew}, lostObserver(), nil,
 		map[string]*config.DDNSProvider{"prov": provNew}); err != nil {

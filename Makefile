@@ -49,7 +49,7 @@ export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
 $(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib clippy-rust
 
 all: generate build build-ctl
 
@@ -570,6 +570,30 @@ test-rust: check-userspace-dt-needed
 		--bins --tests -- --test-threads=1 --exact $$(cut -f2 userspace-dp/debug-leg.tests | tr '\n' ' ')
 	# Leg 3 (#16439): debug-log-only cells, exact-named and listed first.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp sh -c 'set -eu; listed="$$("$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --list)"; for cell in $(DEBUG_LOG_CELLS_16439); do count=$$(printf "%s\n" "$$listed" | grep -c -F -x "$$cell: test" || true); if [ "$$count" != "1" ]; then echo "test-rust Leg 3 (#16439): expected exactly one listed debug-log cell $$cell, found $$count" >&2; exit 1; fi; done; "$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --test-threads=1 --exact $(DEBUG_LOG_CELLS_16439)' "$(CARGO)" "$$pinned"
+
+# #17200: clippy gate for the userspace dataplane. Clippy could not
+# complete on this crate until #17200 (deny-by-default
+# `clippy::mut_from_ref` at umem/mmap.rs and `clippy::never_loop` in a
+# #15950 test), so the 246 `#[expect(clippy::…)]` attributes were
+# unfalsifiable ceremony. This target makes them falsifiable: leg 1
+# runs the full `--all-targets` clippy with
+# `-D unfulfilled_lint_expectations`, so a stale `#[expect]` (a
+# suppressed lint that no longer fires) reds the gate instead of
+# staying a warn-level diagnostic among ~2.7k warn-level warnings.
+# `-D warnings` is deliberately NOT used: leg 1 is not warning-clean
+# enough for it. Leg 2 denies `clippy::correctness` and
+# `clippy::suspicious`, the two groups that must never regress. The
+# shim-parity tests deliberately load the same `userspace-xdp/src/*.rs`
+# file as a module from several test modules (each executes the real
+# shim source on the host), so `clippy::duplicate_mod` is allowed for
+# the deny pass only — that intentional multi-load is the parity
+# harness, not a duplicate production module. NOT wired into
+# `make test` (heavy cold clippy build); CI runs it in the Rust job
+# beside the all-targets compile check.
+.PHONY: clippy-rust
+clippy-rust:
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D unfulfilled_lint_expectations
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -A clippy::duplicate_mod
 
 # #10204: prove the release helper's static snapshot provenance and dynamic
 # dependency boundary on every Rust gate. The map must come from a fresh

@@ -426,7 +426,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
 /// `key` identifies the stored session and is the tuple tested by the
 /// translated-forward guard. `forwarding`, `now_ns`, and `worker_id` scope
 /// the local NAT reservation release.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp::session_glue) fn purge_translated_synced_hit_with_context(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,

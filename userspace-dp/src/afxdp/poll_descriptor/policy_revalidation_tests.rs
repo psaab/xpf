@@ -2762,7 +2762,6 @@ fn zone_policy_translated_keyed_row_declines_without_stamping_12867() {
 /// 198.51.100.1:443 translated to 203.0.113.10). Returns the call
 /// arguments a reverse-direction session hit carries: the reverse row's
 /// key/metadata/decision, the forward key, and the forward decision.
-#[allow(clippy::type_complexity)]
 fn reverse_snat_case_13652() -> (
     SessionKey,
     SessionKey,
@@ -3089,10 +3088,15 @@ fn reverse_snat_case_from_production_13771(
         origin,
         provenance,
     ) = reverse_snat_case_13652();
-    let forward_match = crate::session::ForwardSessionMatch {
-        key: forward_key.clone(),
-        decision: forward_decision,
-        metadata: SessionMetadata {
+    // #17080: obtain the match from the REAL local finder on an
+    // installed SNAT forward row (the pre-#17080 fixture hand-built it,
+    // which hid the finders' zeroed aux). RED pre-fix: the finder
+    // returned aux.source_nat_static None and the assert below failed.
+    let mut finder_sessions = crate::session::SessionTable::new();
+    assert!(finder_sessions.install_with_protocol_with_origin_and_source_nat(
+        forward_key.clone(),
+        forward_decision,
+        SessionMetadata {
             ingress_ifindex: 11,
             ingress_vlan_id: forwarding
                 .egress
@@ -3102,14 +3106,26 @@ fn reverse_snat_case_from_production_13771(
             nat_scope_ifindex: Some(11),
             ..forward_metadata.clone()
         },
-        forwarding_generation: crate::session::ForwardingGenerationStamp::default(),
-        aux: crate::session::SessionLookupAux {
-            session_id: 0,
-            source_nat_static: provenance,
-            leak_incarnation: 0,
-        },
-        synced_synthesis: false,
+        origin,
+        1_000_000,
+        forward_key.protocol,
+        0x10,
+        provenance,
+    ));
+    let reply_key = crate::session::reverse_session_key(&forward_key, forward_decision.nat);
+    let crate::session::ForwardNatExpiryProbe::Live(mut forward_match) =
+        finder_sessions.find_forward_nat_match_expiry(&reply_key, 1_000_000, |_| 0)
+    else {
+        panic!("#17080 fixture: local finder must find the installed SNAT forward row");
     };
+    assert_eq!(
+        forward_match.aux.source_nat_static, provenance,
+        "#17080: the local finder must preserve the forward row's SNAT provenance"
+    );
+    // The production synthesis reads the observed forward ingress
+    // identity from the match metadata; keep the fixture's LAN stamp.
+    forward_match.metadata.ingress_ifindex = 11;
+    forward_match.metadata.nat_scope_ifindex = Some(11);
     let reverse = crate::afxdp::shared_ops::build_reverse_session_from_forward_match(
         forwarding,
         &BTreeMap::new(),
@@ -6160,7 +6176,6 @@ fn reverse_hits_judge_forward_selector_by_direction_15934() {
     // pair. `companion` installs BOTH rows (forward row materialized,
     // made stale by the caller bumping the generation); otherwise only
     // the reverse row exists and the arm synthesizes the forward row.
-    #[allow(clippy::too_many_arguments)]
     fn reverse_hit(
         configured: &crate::afxdp::ForwardingState,
         stored: Option<(u8, u8)>,

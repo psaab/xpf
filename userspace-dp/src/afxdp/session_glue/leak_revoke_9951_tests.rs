@@ -132,7 +132,7 @@ fn reverse_worker_entry_fixture(
         &BTreeMap::new(),
         neighbors,
         ForwardSessionMatch {
-            aux: SessionLookupAux::default(),
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: false,
             key: forward_key,
             decision: noroute_decision(),
@@ -883,7 +883,7 @@ fn reverse_synthesis_stamps_and_revokes_leak_riding_session_9951() {
     forward_key.src_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
     forward_key.dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     let forward_match = ForwardSessionMatch {
-        aux: SessionLookupAux::default(),
+        aux: SessionLookupAux::unknown(),
         synced_synthesis: false,
         key: forward_key.clone(),
         decision: noroute_decision(),
@@ -1163,7 +1163,7 @@ fn ri_forward_match() -> (ForwardSessionMatch, SessionKey) {
     forward_key.dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     forward_key.routing_domain = domain;
     let forward_match = ForwardSessionMatch {
-        aux: SessionLookupAux::default(),
+        aux: SessionLookupAux::unknown(),
         synced_synthesis: false,
         key: forward_key.clone(),
         decision: noroute_decision(),

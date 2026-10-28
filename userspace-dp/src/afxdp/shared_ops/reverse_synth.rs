@@ -58,8 +58,6 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match(
 /// item 6): threads `table` into the reply-target resolution. `None`
 /// preserves default-instance behavior while the untabled wrapper performs
 /// native-RI derivation (#10312).
-
-#[allow(clippy::too_many_arguments)]
 /// #16217 (FZDiag35): distinguishes the two synthesis callers.
 /// The LIVE reverse install (`install_reverse_session_from_forward_match`,
 /// worker poll path) builds its forward match from a locally-observed
@@ -76,8 +74,8 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match(
 ///
 /// EXPLICIT FLAG, never inferred from `aux.session_id`: the first
 /// implementation keyed this off `aux.session_id == 0`, which inverted
-/// both populations — local table matches are built with a default
-/// aux (id 0) by the NAT lookup helpers in `session/lookup.rs`, so
+/// both populations — local table matches for rows with no stable
+/// id carry aux id 0, so
 /// live hits fell back to the reply-resolution derivation (stamp=2,
 /// the bug this leg exists to fix); shared-map matches carry the
 /// peer's nonzero session id, so they were stamped with the PEER's
@@ -236,7 +234,7 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
     SessionLookup {
         aux: SessionLookupAux {
             source_nat_static: forward_match.aux.source_nat_static,
-            ..SessionLookupAux::default()
+            ..SessionLookupAux::unknown()
         },
         decision,
         metadata,
@@ -315,7 +313,10 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
             decision: entry.decision,
             metadata: entry.metadata.clone(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            // #17080: deliberate synthesizer — no local entry to
+            // snapshot; the SyncedSessionEntry's provenance is carried
+            // on the entry itself (source_nat_static below), not aux.
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: true,
         },
         now_secs,
@@ -375,7 +376,7 @@ pub(in crate::afxdp) struct ReverseSessionResolution {
     pub(in crate::afxdp) install_table_check: u32,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_resolution_for_flow(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -457,7 +458,7 @@ pub(in crate::afxdp) fn reverse_resolution_for_session(
 /// Keeping the reverse resolution and the reverse decision's installing-table
 /// stamp together prevents a caller from resolving in one VRF and storing a
 /// zero-stamped decision that later falls back to MAIN.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_session_decision_for_flow(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -504,7 +505,7 @@ pub(in crate::afxdp) fn reverse_session_decision_for_flow(
 /// `None` preserves default-instance behavior. Besides the TUN-origin
 /// builders, the native-RI reverse synthesis (#10312) passes `Some`;
 /// remaining transit/HA VRF synthesis gaps are out of scope.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -537,7 +538,7 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
 /// peer-owned-LAN reply resolution to FabricRedirect; ordinary
 /// reverse synthesis (new-flow install, TUN builders) passes false
 /// and stays bit-identical.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
