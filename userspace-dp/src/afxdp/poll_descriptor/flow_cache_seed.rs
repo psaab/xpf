@@ -47,6 +47,9 @@ pub(super) fn stage_flow_cache_seed(
     flow_cache_policy_counter: &Option<std::sync::Arc<crate::policy::PolicyRuleCounter>>,
     filter_match_extra: TermMatchExtra<'static>,
     ingress_zone_override: Option<u32>,
+    // #17031: withheld #15916 ambiguous claimed zone, promoted by the
+    // same admission rule as every policy site.
+    ambiguous_zone: Option<u32>,
     now_secs: u64,
     // #12865: the admission-resolved egress zone captured by the caller
     // before any fabric redirect replaced the resolution.
@@ -243,14 +246,17 @@ pub(super) fn stage_flow_cache_seed(
                 meta.ingress_vlan_id,
             )
             .unwrap_or(meta.ingress_ifindex as i32);
-            // #12865: use the owner-RG-gated override, exactly as the
-            // admission sites do — the raw claimed zone must not be
-            // stamped when the gate declines it.
-            let gated_override = crate::afxdp::forwarding::gate_fabric_zone_override_on_owner_rg(
+            // #12865 / #17031: use the admission zone pair, exactly as
+            // the admission sites do — the ONE rule in
+            // `transit_policy::admission_zone_override`; the raw claimed
+            // zone (proved or ambiguous) must not be stamped when the
+            // gate declines it.
+            let gated_override = super::transit_policy::admission_zone_override(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 now_secs,
                 ingress_zone_override,
+                ambiguous_zone,
                 entry.decision.resolution,
             );
             let (from_zone, _) = zone_pair_ids_for_flow_with_override(

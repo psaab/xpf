@@ -78,7 +78,7 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
 /// ambiguous fabric stamp. It is promoted to an arrival-zone override
 /// ONLY after the quoted session's finalized resolution proves local
 /// owner-RG ownership (the same V2 predicate as
-/// `promote_ambiguous_fabric_zone`); an unowned claim leaves the raw
+/// `transit_policy::promoted_zone_override`); an unowned claim leaves the raw
 /// fabric arrival zone in force, so it can never manufacture RELATED.
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
@@ -186,15 +186,16 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     // from the promoted override. A proved peer punt already arrives as
     // `ingress_zone_override`, so this or-else never re-gates it; an
     // unowned claim yields None and the raw fabric arrival zone stands.
-    let effective_ingress_zone_override = ingress_zone_override.or_else(|| {
-        super::promote_ambiguous_fabric_zone(
-            worker_ctx.forwarding,
-            worker_ctx.ha_state,
-            now_secs,
-            ambiguous_zone,
-            icmp_resolution,
-        )
-    });
+    // #17031: ungated promoted-or-raw in transit_policy (this arm must
+    // not re-gate a proved punt — see promoted_zone_override).
+    let effective_ingress_zone_override = super::transit_policy::promoted_zone_override(
+        worker_ctx.forwarding,
+        worker_ctx.ha_state,
+        now_secs,
+        ingress_zone_override,
+        ambiguous_zone,
+        icmp_resolution,
+    );
     let arrival_zone = actual_embedded_icmp_ingress_zone(
         worker_ctx.forwarding,
         meta,
@@ -588,19 +589,13 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     .unwrap_or(ingress_meta.ingress_ifindex as i32);
     // #16053: the same owner-RG promotion as the match arm — the packet's
     // own (queued) resolution is the proof, never the claimed zone alone.
-    let gated_zone_override = super::gate_fabric_zone_override_on_owner_rg(
+    // #17031: the ONE admission rule in transit_policy.
+    let gated_zone_override = super::transit_policy::admission_zone_override(
         worker_ctx.forwarding,
         worker_ctx.ha_state,
         now_secs,
-        ingress_zone_override.or_else(|| {
-            super::promote_ambiguous_fabric_zone(
-                worker_ctx.forwarding,
-                worker_ctx.ha_state,
-                now_secs,
-                ambiguous_zone,
-                resolution,
-            )
-        }),
+        ingress_zone_override,
+        ambiguous_zone,
         resolution,
     );
     let (from_zone_id, to_zone_id) = super::zone_pair_ids_for_flow_with_override(

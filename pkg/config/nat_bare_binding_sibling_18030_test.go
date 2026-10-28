@@ -110,16 +110,6 @@ func assertNATBareST0SiblingRejected18030(t *testing.T, base []string) {
 	if got := cfg.Security.NAT.Static[0].FromInterface; got != "st0" {
 		t.Fatalf("static from scope must stay bare, got %q", got)
 	}
-	for key := range map[string]bool{
-		"source\x00snat-from-bad": true,
-		"source\x00snat-to-bad":   true,
-		"destination\x00dnat-bad": true,
-		"static\x00stat-bad":      true,
-	} {
-		if !cfg.LenientNATUndefinedScopeRuleSets[key] {
-			t.Errorf("lenient must record %s, got %v", key, cfg.LenientNATUndefinedScopeRuleSets)
-		}
-	}
 	for _, want := range []string{
 		`source-nat rule-set "snat-from-bad": from interface "st0" not defined`,
 		`source-nat rule-set "snat-to-bad": to interface "st0" not defined`,

@@ -909,8 +909,8 @@ impl crate::afxdp::ha::SessionDomain {
              previous_snat_restored={:?} previous_nat64_restored={:?}",
             entry.key,
             previous_entry.is_some(),
-            current_nat64_rolled_back,
-            current_snat_released,
+            _current_nat64_rolled_back,
+            _current_snat_released,
             previous_snat_restored,
             previous_nat64_restored
         );

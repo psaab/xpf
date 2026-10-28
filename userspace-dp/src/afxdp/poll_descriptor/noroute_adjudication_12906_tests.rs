@@ -24,6 +24,45 @@ use crate::policy::PolicyAction;
 use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
 use std::collections::BTreeMap;
 
+/// #17031: the #12906 cells exercise the raw-stamp-only shape; the
+/// ambiguous-promotion shape is pinned in `transit_policy_tests`.
+/// This shim keeps those calls unchanged apart from the renamed fn.
+#[allow(clippy::too_many_arguments)]
+fn noroute_policy_adjudication(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    ingress_logical: i32,
+    ingress_zone_override: Option<u32>,
+    resolution: ForwardingResolution,
+    nat: crate::nat::NatDecision,
+    flow_backed: bool,
+    adj_flow: &SessionFlow,
+    protocol: u8,
+    l4_present: bool,
+    policy_icmp: Option<(u8, u8)>,
+    packet_len: u64,
+    now_ns: u64,
+) -> TransitPolicyAdjudication {
+    transit_policy_adjudication(
+        forwarding,
+        ha_state,
+        now_secs,
+        ingress_logical,
+        ingress_zone_override,
+        None,
+        resolution,
+        nat,
+        flow_backed,
+        adj_flow,
+        protocol,
+        l4_present,
+        policy_icmp,
+        packet_len,
+        now_ns,
+    )
+}
+
 /// Wire (pre-translation) tuple: a LAN client hitting the public VIP
 /// `203.0.113.9:443`. The VIP DNATs to the real server
 /// `198.18.0.50:8443` (`vip_dnat_12906`).

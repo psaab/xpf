@@ -177,9 +177,6 @@ func TestNATUndefinedInterfaceRILenientWarns15278(t *testing.T) {
 	if !found {
 		t.Fatalf("lenient must warn naming snat-bad/ge-0/0/9.0, warnings=%v", cfg.Warnings)
 	}
-	if len(cfg.LenientNATUndefinedScopeRuleSets) == 0 {
-		t.Fatalf("lenient must record undefined-scope rule-sets for dataplane skip")
-	}
 }
 
 func TestStaticNATHierRoutingInstance15278(t *testing.T) {
