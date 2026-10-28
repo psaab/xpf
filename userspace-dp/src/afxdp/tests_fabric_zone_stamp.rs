@@ -180,7 +180,10 @@ fn forged_stamp_drops_when_link_authentication_required_16023() {
     let meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
     let placements: [(&str, BTreeMap<i32, HAGroupRuntime>); 2] = [
         ("split-RG", BTreeMap::from([(1, active_rg(now_secs))])),
-        ("all-RGs-local", BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))])),
+        (
+            "all-RGs-local",
+            BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]),
+        ),
     ];
     for (name, ha_state) in &placements {
         let mut forwarding = build_forwarding_state(&nat_snapshot_with_fabric());
@@ -188,12 +191,31 @@ fn forged_stamp_drops_when_link_authentication_required_16023() {
         let mut binding = fabric_binding();
         let mut sessions = SessionTable::new();
         let (batch, dbg) = txn_run_descriptor_checked(
-            &mut binding, &mut sessions, &forwarding, ha_state, &frame, meta, true,
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            ha_state,
+            &frame,
+            meta,
+            true,
         );
-        assert_eq!(batch.invalid_fabric_stamp_drops, 1, "{name}: forged stamp must drop as invalid (#16023)");
-        assert_eq!(dbg.session_miss, 0, "{name}: drop must precede session lookup (#16023)");
-        assert_eq!(sessions.len(), 0, "{name}: forged stamp must install no session (#16023)");
-        assert!(binding.scratch.scratch_forwards.is_empty(), "{name}: forged stamp must not forward (#16023)");
+        assert_eq!(
+            batch.invalid_fabric_stamp_drops, 1,
+            "{name}: forged stamp must drop as invalid (#16023)"
+        );
+        assert_eq!(
+            dbg.session_miss, 0,
+            "{name}: drop must precede session lookup (#16023)"
+        );
+        assert_eq!(
+            sessions.len(),
+            0,
+            "{name}: forged stamp must install no session (#16023)"
+        );
+        assert!(
+            binding.scratch.scratch_forwards.is_empty(),
+            "{name}: forged stamp must not forward (#16023)"
+        );
     }
     // Controls: attested link forwards in split-RG; requirement off forwards.
     for (name, attest, require) in [("attested", true, true), ("require-off", false, false)] {
@@ -208,10 +230,24 @@ fn forged_stamp_drops_when_link_authentication_required_16023() {
         let mut binding = fabric_binding();
         let mut sessions = SessionTable::new();
         txn_run_descriptor_checked(
-            &mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true,
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
+            true,
         );
-        assert_eq!(sessions.len(), 2, "{name}: legitimate punt must install (forward+reverse)");
-        assert_eq!(binding.scratch.scratch_forwards.len(), 1, "{name}: legitimate punt must forward");
+        assert_eq!(
+            sessions.len(),
+            2,
+            "{name}: legitimate punt must install (forward+reverse)"
+        );
+        assert_eq!(
+            binding.scratch.scratch_forwards.len(),
+            1,
+            "{name}: legitimate punt must forward"
+        );
     }
 }
 
@@ -471,7 +507,8 @@ fn established_ri_snat_forward_11061(
     sessions.set_forwarding_revalidation_gen(7, 9);
     sessions.mark_source_nat_revalidated(&forward_key, Some(false));
 
-    let shared_entry = SyncedSessionEntry { key: forward_key,
+    let shared_entry = SyncedSessionEntry {
+        key: forward_key,
     decision,
     metadata,
     leak_incarnation: 0,
@@ -480,9 +517,14 @@ fn established_ri_snat_forward_11061(
     tcp_flags: TCP_FLAG_ACK,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     (forwarding, sessions, shared_entry)
 }
 
@@ -981,7 +1023,6 @@ fn legitimate_fabric_punted_host_inbound_still_admitted_6458() {
         "the legitimate split-RG host-inbound punt must keep caching its session"
     );
 }
-
 
 /// #15916 co-moved host-inbound: ALL data RGs local. A WAN-side
 /// host's SSH to our reth1.0 address ingressed the PEER on its WAN
@@ -2651,7 +2692,9 @@ fn split_rg_cluster_terminal_punt_redirects_15742() {
         next_table: String::new(),
         preference: 200,
         rule_priority: 0,
-        mtu: 0, next_table_route: false });
+        mtu: 0,
+        next_table_route: false,
+    });
     let forwarding = build_forwarding_state(&snapshot);
     let now_secs = monotonic_nanos() / 1_000_000_000;
     // Split: LAN RG2 local, WAN RG1 peer-owned.
@@ -2668,8 +2711,14 @@ fn split_rg_cluster_terminal_punt_redirects_15742() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("ge-0-0-1");
     let mut sessions = SessionTable::new();
-    let (_batch, _dbg) =
-        txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    let (_batch, _dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+    );
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
         1,
@@ -2721,7 +2770,14 @@ fn split_rg_live_snapshot_tcp_punt_seeds_and_return_forwards_15742h() {
     meta.flow_dst_addr = [172, 16, 80, 200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     meta.flow_src_port = 12345;
     meta.flow_dst_port = 443;
-    let (_batch, dbg) = txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &syn, meta);
+    let (_batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &syn,
+        meta,
+    );
     assert_eq!(dbg.policy_deny, 0, "punt must not be denied");
     assert_eq!(
         binding.scratch.scratch_forwards.len(),
@@ -2742,9 +2798,19 @@ fn split_rg_live_snapshot_tcp_punt_seeds_and_return_forwards_15742h() {
         1,
         "punt must leave exactly one FabricPuntSeed, got {shapes:?}"
     );
-    assert_eq!(shapes[0].0, SessionOrigin::FabricPuntSeed, "seed origin: {shapes:?}");
-    assert_eq!(shapes[0].2, 21230, "seed ingress zone must be lan: {shapes:?}");
-    assert_eq!(shapes[0].3, 13098, "seed egress zone must be wan (via source_ifindex): {shapes:?}");
+    assert_eq!(
+        shapes[0].0,
+        SessionOrigin::FabricPuntSeed,
+        "seed origin: {shapes:?}"
+    );
+    assert_eq!(
+        shapes[0].2, 21230,
+        "seed ingress zone must be lan: {shapes:?}"
+    );
+    assert_eq!(
+        shapes[0].3, 13098,
+        "seed egress zone must be wan (via source_ifindex): {shapes:?}"
+    );
 
     // ICMP echo (flowless) on the same live snapshot must also leave
     // across the fabric — this is the gate's actual probe shape.
@@ -2761,7 +2827,8 @@ fn split_rg_live_snapshot_tcp_punt_seeds_and_return_forwards_15742h() {
         let mut emeta = txn_meta_v4(5, 0, echo.len() as u16);
         emeta.protocol = PROTO_ICMP;
         emeta.payload_offset = 42;
-        let (_eb, edbg) = txn_run_descriptor(&mut bb, &mut bsess, &forwarding, &ha_state, &echo, emeta);
+        let (_eb, edbg) =
+            txn_run_descriptor(&mut bb, &mut bsess, &forwarding, &ha_state, &echo, emeta);
         assert_eq!(edbg.policy_deny, 0, "ICMP punt must not be denied");
         assert_eq!(
             bb.scratch.scratch_forwards.len(),
@@ -2793,9 +2860,18 @@ fn split_rg_live_snapshot_tcp_punt_seeds_and_return_forwards_15742h() {
     rmeta.protocol = PROTO_TCP;
     let mut rbinding = BindingWorker::new_for_mirror_test(0, 0, 4, 0);
     rbinding.interface = Arc::<str>::from("ge-7-0-0");
-    let (_rbatch, rdbg) =
-        txn_run_descriptor(&mut rbinding, &mut sessions, &forwarding, &ha_state, &ret, rmeta);
-    assert_eq!(rdbg.policy_deny, 0, "seeded return must not be policy-denied");
+    let (_rbatch, rdbg) = txn_run_descriptor(
+        &mut rbinding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &ret,
+        rmeta,
+    );
+    assert_eq!(
+        rdbg.policy_deny, 0,
+        "seeded return must not be policy-denied"
+    );
     assert_eq!(
         rbinding.scratch.scratch_forwards.len(),
         1,
@@ -2854,8 +2930,7 @@ mod pressure_shed_matrix_17012 {
                     443,
                 )
             } else {
-                let forwarding =
-                    build_forwarding_state(&fabric_snapshot_with_lan_neighbor_7770());
+                let forwarding = build_forwarding_state(&fabric_snapshot_with_lan_neighbor_7770());
                 let now_secs = monotonic_nanos() / 1_000_000_000;
                 (
                     forwarding,
@@ -2974,19 +3049,24 @@ mod pressure_shed_matrix_17012 {
             fabric.interface = Arc::<str>::from("ge-0-0-0");
             vec![ingress, sibling, fabric]
         };
-        bindings[1].flow.flow_cache.insert(pressure_shed_cache_entry_17012(
+        bindings[1]
+            .flow
+            .flow_cache
+            .insert(pressure_shed_cache_entry_17012(
             victim_key.clone(),
             ingress_ifindex as i32,
             victim_metadata,
             victim_decision,
         ));
-        assert!(bindings[1]
+        assert!(
+            bindings[1]
             .flow
             .flow_cache
             .entries
             .iter()
             .flatten()
-            .any(|entry| entry.key == victim_key));
+                .any(|entry| entry.key == victim_key)
+        );
 
         let held_lease = if contended_lease {
             Some(
@@ -3070,8 +3150,14 @@ mod pressure_shed_matrix_17012 {
                 Some(SessionOrigin::FabricPuntSeed),
                 "the seed must be installed after pressure cleanup"
             );
-            assert!(!shared_victim_present, "successful teardown removes shared row");
-            assert!(!sibling_cache_present, "successful teardown evicts sibling cache");
+            assert!(
+                !shared_victim_present,
+                "successful teardown removes shared row"
+            );
+            assert!(
+                !sibling_cache_present,
+                "successful teardown evicts sibling cache"
+            );
         }
         drop(held_lease);
     }
@@ -3094,7 +3180,11 @@ mod pressure_shed_matrix_17012 {
         };
         let decision = tunnel_marked_decision(ForwardingDisposition::ForwardCandidate);
         let mut metadata = icmp_err_metadata();
-        assert_eq!(decision.nat, NatDecision::default(), "GC victim is SNAT-free");
+        assert_eq!(
+            decision.nat,
+            NatDecision::default(),
+            "GC victim is SNAT-free"
+        );
         metadata.is_reverse = false;
         metadata.owner_rg_id = 1;
         metadata.ingress_ifindex = 24;
@@ -3146,7 +3236,10 @@ mod pressure_shed_matrix_17012 {
         ingress.interface = Arc::<str>::from("reth1.0");
         let mut sibling = BindingWorker::new_for_mirror_test(1, 1, 24, 0);
         sibling.interface = Arc::<str>::from("reth1.0");
-        sibling.flow.flow_cache.insert(pressure_shed_cache_entry_17012(
+        sibling
+            .flow
+            .flow_cache
+            .insert(pressure_shed_cache_entry_17012(
             victim_key.clone(),
             24,
             metadata,
@@ -3157,7 +3250,10 @@ mod pressure_shed_matrix_17012 {
         let mut bindings = vec![ingress, sibling, egress];
         let (admission_allowed, shed_sessions) =
             sessions.can_admit_new_flow(2, PROTO_TCP, TCP_FLAG_SYN);
-        assert!(admission_allowed, "the selected pair frees the required slots");
+        assert!(
+            admission_allowed,
+            "the selected pair frees the required slots"
+        );
         assert_eq!(
             shed_sessions.iter().count(),
             2,
@@ -3179,7 +3275,6 @@ mod pressure_shed_matrix_17012 {
                 crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
                 -1,
                 -1,
-                &crate::afxdp::checksum::DnatTableFds::default(),
                 0,
                 &[],
                 crate::afxdp::empty_worker_commands_by_id(),
@@ -3243,7 +3338,6 @@ fn fabric_pressure_shed_contended_lease_refuses_seed_17012() {
     pressure_shed_matrix_17012::run_case(false, true);
     pressure_shed_matrix_17012::run_case(true, true);
 }
-
 
 fn inactive_rg(now_secs: u64) -> HAGroupRuntime {
     HAGroupRuntime {
@@ -4718,7 +4812,12 @@ fn v2_stamped_fabric_udp_policy_reject_suppresses_icmp_on_real_poll_12319() {
     // untouched.
     for iface in &mut snapshot.interfaces {
         if iface.ifindex == 21 {
-            iface.addresses.push(InterfaceAddressSnapshot { family: "inet".to_string(), address: "10.99.13.1/24".to_string(), scope: 0, ..Default::default() });
+            iface.addresses.push(InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "10.99.13.1/24".to_string(),
+                scope: 0,
+                ..Default::default()
+            });
         }
     }
     let forwarding = build_forwarding_state(&snapshot);
@@ -5451,7 +5550,6 @@ fn ambiguous_fragment_zones_do_not_share_association_15925() {
     assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
 }
 
-
 /// #15925 re-review regression: a V2 (scoped) ambiguous FIRST
 /// fragment that arrives as a session HIT must install its fragment
 /// association under the stamped scope ifindex (reth1.0 = 24), not
@@ -5509,24 +5607,67 @@ fn v2_ambiguous_first_fragment_installs_and_consults_scoped_15925() {
     let meta = stamped_fabric_frag_meta();
     let first = v2_stamp_frame(stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x2000, ident));
     // Replace the V1 stamp the frag builder wrote with the V2 stamp.
-    assert!(matches!(
-        parse_zone_encoded_fabric_ingress_from_frame(&first, meta, &forwarding, &ha_state, now_secs),
-        ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_LAN_ZONE_ID, ifindex: Some(24) }
-    ), "precondition: V2 all-local stamp must be Ambiguous with scope 24");
-    let (_b, dbg_first) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &first, meta, true);
-    assert_eq!(dbg_first.session_hit, 1, "first fragment must hit the UDP warm-up session");
-    assert_eq!(dbg_first.nat_applied_snat, 1, "V2 ambiguous first fragment must be admitted and SNAT'd");
-    assert_eq!(forwarding.nat64.frag_assoc.len(), 1, "first fragment must install exactly one association");
+    assert!(
+        matches!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &first,
+                meta,
+                &forwarding,
+                &ha_state,
+                now_secs
+            ),
+            ZoneEncodedFabricStamp::Ambiguous {
+                zone_id: TEST_LAN_ZONE_ID,
+                ifindex: Some(24)
+            }
+        ),
+        "precondition: V2 all-local stamp must be Ambiguous with scope 24"
+    );
+    let (_b, dbg_first) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &first,
+        meta,
+        true,
+    );
+    assert_eq!(
+        dbg_first.session_hit, 1,
+        "first fragment must hit the UDP warm-up session"
+    );
+    assert_eq!(
+        dbg_first.nat_applied_snat, 1,
+        "V2 ambiguous first fragment must be admitted and SNAT'd"
+    );
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        1,
+        "first fragment must install exactly one association"
+    );
 
     // (3) Same-datagram non-first fragment, same V2 stamp: must hit
     // the association installed above (scoped authority 24 == 24).
     let tail = v2_stamp_frame(stamped_fabric_frag_frame(TEST_LAN_ZONE_ID, 0x2001, ident));
-    let (_b, dbg_tail) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &tail, meta, true);
-    assert_eq!(dbg_tail.forward, 1, "V2 ambiguous non-first fragment must hit its scoped association");
-    assert_eq!(dbg_tail.nat_applied_snat, 1, "and must inherit the SNAT translation");
+    let (_b, dbg_tail) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &tail,
+        meta,
+        true,
+    );
+    assert_eq!(
+        dbg_tail.forward, 1,
+        "V2 ambiguous non-first fragment must hit its scoped association"
+    );
+    assert_eq!(
+        dbg_tail.nat_applied_snat, 1,
+        "and must inherit the SNAT translation"
+    );
     assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
 }
-
 
 /// #15925 re-review (OverlapKey): two ambiguous first fragments
 /// with the same (src, dst, proto, ident) but different claimed
@@ -5565,8 +5706,19 @@ fn ambiguous_cross_zone_first_fragments_are_not_overlap_duplicates_15925() {
     };
 
     let lan_first = stamped_fabric_frag_frame_src(TEST_LAN_ZONE_ID, 0x2000, ident, lan_src);
-    let (_b, lan_dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &lan_first, meta_for(lan_src), true);
-    assert_eq!(lan_dbg.nat_applied_snat, 1, "lan first fragment must be admitted");
+    let (_b, lan_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &lan_first,
+        meta_for(lan_src),
+        true,
+    );
+    assert_eq!(
+        lan_dbg.nat_applied_snat, 1,
+        "lan first fragment must be admitted"
+    );
     assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
 
     // Same L3 reassembly tuple, different claimed zone and UDP port
@@ -5578,17 +5730,34 @@ fn ambiguous_cross_zone_first_fragments_are_not_overlap_duplicates_15925() {
     dmz_first[34..36].copy_from_slice(&33334u16.to_be_bytes());
     let mut dmz_meta = meta_for(dmz_src);
     dmz_meta.flow_src_port = 33334;
-    let (_b, dmz_dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &dmz_first, dmz_meta, true);
-    assert_eq!(dmz_dbg.forward, 0, "dmz first fragment must not forward (no dmz->wan permit)");
+    let (_b, dmz_dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &dmz_first,
+        dmz_meta,
+        true,
+    );
+    assert_eq!(
+        dmz_dbg.forward, 0,
+        "dmz first fragment must not forward (no dmz->wan permit)"
+    );
     assert_eq!(dmz_dbg.nat_applied_snat, 0);
-    assert_eq!(dmz_dbg.session_miss, 1, "dmz fragment must reach independent session-miss adjudication");
+    assert_eq!(
+        dmz_dbg.session_miss, 1,
+        "dmz fragment must reach independent session-miss adjudication"
+    );
     assert!(
         dmz_dbg.policy_deny >= 1,
         "dmz fragment must be policy-denied under dmz (counters may batch-count), not silently overlap-dropped (deny=0)"
     );
-    assert_eq!(forwarding.nat64.frag_assoc.len(), 1, "dmz must not install or evict lan's association");
+    assert_eq!(
+        forwarding.nat64.frag_assoc.len(),
+        1,
+        "dmz must not install or evict lan's association"
+    );
 }
-
 
 /// #15925 (Opus2 qualification): end-to-end poll-descriptor IKE
 /// cell. A REAL Stage-9 ambiguous stamp (all data RGs local) on a
@@ -5629,7 +5798,9 @@ fn ambiguous_ike_poll_descriptor_denies_under_claimed_zone_15925() {
     frame.extend_from_slice(&[0x08, 0x00]);
     let src = Ipv4Addr::new(172, 16, 80, 200);
     let dst = Ipv4Addr::new(10, 0, 61, 1);
-    frame.extend_from_slice(&[0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 64, PROTO_UDP, 0, 0]);
+    frame.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 64, PROTO_UDP, 0, 0,
+    ]);
     frame.extend_from_slice(&src.octets());
     frame.extend_from_slice(&dst.octets());
     let udp_len = (8 + payload.len()) as u16;
@@ -5649,23 +5820,64 @@ fn ambiguous_ike_poll_descriptor_denies_under_claimed_zone_15925() {
     meta.payload_offset = 42;
     meta.flow_src_port = 40000;
     meta.flow_dst_port = 500;
-    meta.flow_src_addr = { let mut a=[0u8;16]; a[..4].copy_from_slice(&src.octets()); a };
-    meta.flow_dst_addr = { let mut a=[0u8;16]; a[..4].copy_from_slice(&dst.octets()); a };
+    meta.flow_src_addr = {
+        let mut a = [0u8; 16];
+        a[..4].copy_from_slice(&src.octets());
+        a
+    };
+    meta.flow_dst_addr = {
+        let mut a = [0u8; 16];
+        a[..4].copy_from_slice(&dst.octets());
+        a
+    };
 
     // Precondition: Stage 9 classifies this as ambiguous wan.
-    assert!(matches!(
-        parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &forwarding, &ha_state, now_secs),
-        ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_WAN_ZONE_ID, .. }
-    ), "precondition: all-local wan stamp must be Ambiguous");
+    assert!(
+        matches!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &frame,
+                meta,
+                &forwarding,
+                &ha_state,
+                now_secs
+            ),
+            ZoneEncodedFabricStamp::Ambiguous {
+                zone_id: TEST_WAN_ZONE_ID,
+                ..
+            }
+        ),
+        "precondition: all-local wan stamp must be Ambiguous"
+    );
 
     let mut binding = fabric_binding();
     let mut sessions = SessionTable::new();
-    let (batch, dbg) = txn_run_descriptor_checked(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta, true);
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
     assert_eq!(dbg.rx, 1, "IKE descriptor must arrive");
-    assert_eq!(batch.host_inbound_denied_packets, 1, "IKE must be denied at the host-inbound zone gate");
-    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "ambiguous stamp must not drop at stage 9");
-    assert_eq!(sessions.len(), 0, "denied ambiguous IKE must not install a session");
-    assert!(binding.scratch.scratch_forwards.is_empty(), "denied ambiguous IKE must not forward");
+    assert_eq!(
+        batch.host_inbound_denied_packets, 1,
+        "IKE must be denied at the host-inbound zone gate"
+    );
+    assert_eq!(
+        batch.invalid_fabric_stamp_drops, 0,
+        "ambiguous stamp must not drop at stage 9"
+    );
+    assert_eq!(
+        sessions.len(),
+        0,
+        "denied ambiguous IKE must not install a session"
+    );
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "denied ambiguous IKE must not forward"
+    );
     assert_eq!(dbg.tx, 0, "denied ambiguous IKE must not transmit/delegate");
     let _ = dbg;
 }
@@ -5695,10 +5907,22 @@ fn ambiguous_claimed_zone_screen_drop_applies_16051() {
     // ingress (ifindex 21, unzoned) has no profile at all.
     let frame = stamped_fabric_frame(TEST_LAN_ZONE_ID, TCP_FLAG_SYN | 0x01);
     let meta = txn_meta_v4(21, TCP_FLAG_SYN | 0x01, frame.len() as u16);
-    assert!(matches!(
-        parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &forwarding, &ha_state, now_secs),
-        ZoneEncodedFabricStamp::Ambiguous { zone_id: TEST_LAN_ZONE_ID, .. }
-    ), "precondition: all-local lan stamp must be Ambiguous");
+    assert!(
+        matches!(
+            parse_zone_encoded_fabric_ingress_from_frame(
+                &frame,
+                meta,
+                &forwarding,
+                &ha_state,
+                now_secs
+            ),
+            ZoneEncodedFabricStamp::Ambiguous {
+                zone_id: TEST_LAN_ZONE_ID,
+                ..
+            }
+        ),
+        "precondition: all-local lan stamp must be Ambiguous"
+    );
 
     let mut profiles = FxHashMap::default();
     profiles.insert(
@@ -5727,12 +5951,19 @@ fn ambiguous_claimed_zone_screen_drop_applies_16051() {
         batch.screen_drops, 1,
         "claimed lan profile's syn-fin drop must apply to the ambiguous arrival (#16051)"
     );
-    assert_eq!(sessions.len(), 0, "screen-dropped ambiguous arrival must install no session");
+    assert_eq!(
+        sessions.len(),
+        0,
+        "screen-dropped ambiguous arrival must install no session"
+    );
     assert!(
         binding.scratch.scratch_forwards.is_empty(),
         "screen-dropped ambiguous arrival must not forward"
     );
-    assert_eq!(batch.syn_cookie_syn_ack_sent, 0, "no premature SYN-ACK (#16051 control)");
+    assert_eq!(
+        batch.syn_cookie_syn_ack_sent, 0,
+        "no premature SYN-ACK (#16051 control)"
+    );
     assert!(
         binding.tx_pipeline.pending_tx_local.is_empty(),
         "screen-dropped ambiguous arrival must not transmit"
@@ -5773,7 +6004,10 @@ fn ambiguous_clean_syn_still_admitted_16051() {
         meta,
         &mut screen,
     );
-    assert_eq!(batch.screen_drops, 0, "clean SYN must not trip the claimed syn-fin screen");
+    assert_eq!(
+        batch.screen_drops, 0,
+        "clean SYN must not trip the claimed syn-fin screen"
+    );
     assert_eq!(
         sessions.len(),
         2,
@@ -5796,13 +6030,20 @@ fn split_fw1_forwarding_15958() -> ForwardingState {
     build_forwarding_state(&snapshot)
 }
 
-fn ha_synced_reverse_sessions_scoped_15958(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+fn ha_synced_reverse_sessions_scoped_15958(
+    forwarding: &ForwardingState,
+    now_ns: u64,
+) -> SessionTable {
     ha_synced_reverse_sessions_impl_15958(forwarding, now_ns, Some(11))
 }
 fn ha_synced_reverse_sessions_15958(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
     ha_synced_reverse_sessions_impl_15958(forwarding, now_ns, None)
 }
-fn ha_synced_reverse_sessions_impl_15958(forwarding: &ForwardingState, now_ns: u64, nat_scope_ifindex: Option<i32>) -> SessionTable {
+fn ha_synced_reverse_sessions_impl_15958(
+    forwarding: &ForwardingState,
+    now_ns: u64,
+    nat_scope_ifindex: Option<i32>,
+) -> SessionTable {
     let lan_host = Ipv4Addr::new(10, 0, 61, 102);
     let wan_host = Ipv4Addr::new(172, 16, 80, 200);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
@@ -5839,7 +6080,8 @@ fn ha_synced_reverse_sessions_impl_15958(forwarding: &ForwardingState, now_ns: u
         (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
-        let entry = SyncedSessionEntry { key: crate::session::SessionKey {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol,
             src_ip: IpAddr::V4(lan_host),
@@ -5892,7 +6134,12 @@ fn ha_synced_reverse_sessions_impl_15958(forwarding: &ForwardingState, now_ns: u
         tcp_flags,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+        };
                 let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
@@ -6080,7 +6327,10 @@ fn split_rg_fabric_return_scoped_tcp_egresses_lan_15958() {
         &frame,
         meta,
     );
-    assert_eq!(dbg.policy_deny, 0, "scoped TCP return must not be policy-denied");
+    assert_eq!(
+        dbg.policy_deny, 0,
+        "scoped TCP return must not be policy-denied"
+    );
     let _ = &batch;
     let egress = egress.expect("scoped V2 TCP ACK must be emitted on the LAN binding");
     assert_eq!(
@@ -6149,7 +6399,8 @@ fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) ->
         (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
-        let entry = SyncedSessionEntry { key: crate::session::SessionKey {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol,
             src_ip: IpAddr::V4(lan_host),
@@ -6198,21 +6449,47 @@ fn fw0_both_halves_sessions_15958b(forwarding: &ForwardingState, now_ns: u64) ->
         tcp_flags,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+        };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
         .expect("production reverse synthesis must produce a companion");
-        assert_eq!(reverse.decision.resolution.disposition, ForwardingDisposition::FabricRedirect, "fw0 reverse companion must redirect to LAN owner, got {:?}", reverse.decision.resolution);
-        assert!(sessions.install_with_protocol_with_origin(
-            entry.key.clone(), entry.decision, entry.metadata.clone(),
-            SessionOrigin::ForwardFlow, now_ns, protocol, tcp_flags,
-        ), "fw0 forward install must succeed");
+        assert_eq!(
+            reverse.decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "fw0 reverse companion must redirect to LAN owner, got {:?}",
+            reverse.decision.resolution
+        );
+        assert!(
+            sessions.install_with_protocol_with_origin(
+                entry.key.clone(),
+                entry.decision,
+                entry.metadata.clone(),
+                SessionOrigin::ForwardFlow,
+                now_ns,
+                protocol,
+                tcp_flags,
+            ),
+            "fw0 forward install must succeed"
+        );
         sessions.set_source_nat_static(&entry.key, Some(false));
-        assert!(sessions.install_with_protocol_with_origin(
-            reverse.key.clone(), reverse.decision, reverse.metadata.clone(),
-            reverse.origin, now_ns, protocol, tcp_flags,
-        ), "fw0 reverse companion install must succeed");
+        assert!(
+            sessions.install_with_protocol_with_origin(
+                reverse.key.clone(),
+                reverse.decision,
+                reverse.metadata.clone(),
+                reverse.origin,
+                now_ns,
+                protocol,
+                tcp_flags,
+            ),
+            "fw0 reverse companion install must succeed"
+        );
         sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
     }
     sessions
@@ -6259,23 +6536,56 @@ fn split_rg_punt_origin_wan_reverse_icmp_fabric_tx_15958b() {
     meta.flow_src_port = 0x1234;
     let mut bindings = wan_lan_bindings_fw0_15958b();
     let (batch, dbg, egress) = txn_run_multi_binding_15958(
-        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
     );
-    for (i, b) in bindings.iter().enumerate() {
-    }
+    for (i, b) in bindings.iter().enumerate() {}
     if let Some(e) = &egress {
     } else {
     }
     assert_eq!(batch.forward_candidate_packets, 1);
     assert_eq!(batch.session_hits, 1);
     assert_eq!(dbg.policy_deny, 0);
-    assert_eq!(bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1, "fabric TX");
-    assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX return");
-    assert_eq!(bindings[1].live.fabric_redirect_unsendable_drops.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        bindings[1]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "fabric TX"
+    );
+    assert_eq!(
+        bindings[0]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "WAN must not TX return"
+    );
+    assert_eq!(
+        bindings[1]
+            .live
+            .fabric_redirect_unsendable_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
     let egress = egress.expect("fw0 WAN reverse hit must emit a fabric TX frame toward fw1");
-    assert_eq!(&egress[0..6], &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60], "peer fabric MAC");
+    assert_eq!(
+        &egress[0..6],
+        &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60],
+        "peer fabric MAC"
+    );
     // Fabric frame: dst = peer fabric MAC, src carries zone stamp or fabric MAC.
-    assert_eq!(&egress[30..34], &[10, 0, 61, 102], "fabric frame must carry LAN host dst IP after DNAT reversal");
+    assert_eq!(
+        &egress[30..34],
+        &[10, 0, 61, 102],
+        "fabric frame must carry LAN host dst IP after DNAT reversal"
+    );
 }
 
 #[test]
@@ -6289,7 +6599,9 @@ fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
     let mut frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(172, 16, 80, 200),
         Ipv4Addr::new(172, 16, 80, 8),
-        443, 12345, TCP_FLAG_ACK,
+        443,
+        12345,
+        TCP_FLAG_ACK,
         [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
     );
     let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
@@ -6302,14 +6614,28 @@ fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
     let mut bindings = wan_lan_bindings_fw0_15958b();
     for pkt in 0..2 {
         let (batch, dbg, egress) = txn_run_multi_binding_15958(
-            &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+            &mut bindings,
+            0,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &frame,
+            meta,
         );
-        for (i, b) in bindings.iter().enumerate() {
-        }
-        if let Some(e) = &egress {
-        }
-        assert!(egress.is_some(), "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX");
-        assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX TCP return");
+        for (i, b) in bindings.iter().enumerate() {}
+        if let Some(e) = &egress {}
+        assert!(
+            egress.is_some(),
+            "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX"
+        );
+        assert_eq!(
+            bindings[0]
+                .live
+                .tx_packets
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "WAN must not TX TCP return"
+        );
     }
 }
 
@@ -6342,21 +6668,30 @@ fn split_rg_refresh_keeps_fabric_redirect_15958b() {
             .iter()
             .filter(|(_, _, metadata, _, _)| metadata.is_reverse)
             .collect();
-        assert!(!reverse_items.is_empty(), "v6={v6}: refresh must visit the reverse companion");
+        assert!(
+            !reverse_items.is_empty(),
+            "v6={v6}: refresh must visit the reverse companion"
+        );
         for (_, decision, metadata, _, _) in &reverse_items {
             assert_eq!(
                 decision.resolution.disposition,
                 ForwardingDisposition::FabricRedirect,
                 "v6={v6}: refresh must keep FabricRedirect, got {:?} (metadata egress_zone={})",
-                decision.resolution, metadata.egress_zone
+                decision.resolution,
+                metadata.egress_zone
             );
-            assert_eq!(decision.resolution.egress_ifindex, 4, "v6={v6}: redirect egress must be the fabric parent");
+            assert_eq!(
+                decision.resolution.egress_ifindex, 4,
+                "v6={v6}: redirect egress must be the fabric parent"
+            );
         }
     }
 }
 
 fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
-    let lan_host: Ipv6Addr = "2001:559:8585:ef00:1266:6aff:fe0b:d017".parse().expect("lan v6");
+    let lan_host: Ipv6Addr = "2001:559:8585:ef00:1266:6aff:fe0b:d017"
+        .parse()
+        .expect("lan v6");
     let wan_host: Ipv6Addr = "2001:559:8585:80::200".parse().expect("wan v6");
     let snat_ip: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6");
     let now_secs = now_ns / 1_000_000_000;
@@ -6381,7 +6716,8 @@ fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64)
         (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
         (PROTO_ICMPV6, 0x1234u16, 0u16, 0u8),
     ] {
-        let entry = SyncedSessionEntry { key: crate::session::SessionKey {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
             addr_family: libc::AF_INET6 as u8,
             protocol,
             src_ip: IpAddr::V6(lan_host),
@@ -6430,7 +6766,12 @@ fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64)
         tcp_flags,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+        };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
@@ -6442,13 +6783,23 @@ fn fw0_both_halves_sessions_v6_15958b(forwarding: &ForwardingState, now_ns: u64)
             reverse.decision.resolution
         );
         assert!(sessions.install_with_protocol_with_origin(
-            entry.key.clone(), entry.decision, entry.metadata.clone(),
-            SessionOrigin::ForwardFlow, now_ns, protocol, tcp_flags,
+            entry.key.clone(),
+            entry.decision,
+            entry.metadata.clone(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            protocol,
+            tcp_flags,
         ));
         sessions.set_source_nat_static(&entry.key, Some(false));
         assert!(sessions.install_with_protocol_with_origin(
-            reverse.key.clone(), reverse.decision, reverse.metadata.clone(),
-            reverse.origin, now_ns, protocol, tcp_flags,
+            reverse.key.clone(),
+            reverse.decision,
+            reverse.metadata.clone(),
+            reverse.origin,
+            now_ns,
+            protocol,
+            tcp_flags,
         ));
         sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
     }
@@ -6483,14 +6834,38 @@ fn split_rg_punt_origin_wan_reverse_icmpv6_fabric_tx_15958b() {
     meta.flow_src_port = 0x1234;
     let mut bindings = wan_lan_bindings_fw0_15958b();
     let (batch, dbg, egress) = txn_run_multi_binding_15958(
-        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
     );
     assert_eq!(batch.session_hits, 1, "v6 return must session-hit");
     assert_eq!(dbg.policy_deny, 0);
-    assert_eq!(bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1, "v6 fabric TX");
-    assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "v6 WAN must not TX");
+    assert_eq!(
+        bindings[1]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "v6 fabric TX"
+    );
+    assert_eq!(
+        bindings[0]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "v6 WAN must not TX"
+    );
     let egress = egress.expect("v6 WAN reverse hit must emit fabric TX");
-    assert_eq!(&egress[0..6], &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60], "v6 peer fabric MAC");
+    assert_eq!(
+        &egress[0..6],
+        &[0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60],
+        "v6 peer fabric MAC"
+    );
 }
 
 /// Round-2 item 1: the destination-owner test is per-ADDRESS. A
@@ -6514,7 +6889,10 @@ fn split_rg_dst_owner_is_per_address_15958b() {
         &forwarding,
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
     );
-    assert_eq!(rg_wan, 1, "WAN host connected owner must be RG1, got {rg_wan}");
+    assert_eq!(
+        rg_wan, 1,
+        "WAN host connected owner must be RG1, got {rg_wan}"
+    );
 }
 
 /// Round-2 item 2: with no resolvable fabric (empty fabric list), a
@@ -6541,8 +6919,14 @@ fn split_rg_refresh_no_fabric_retains_redirect_15958b() {
         &Arc::new(ShardedNeighborMap::default()),
         now_secs,
     );
-    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
-    assert!(!reverse_items.is_empty(), "refresh must visit the reverse companion");
+    let reverse_items: Vec<_> = items
+        .iter()
+        .filter(|(_, _, m, _, _)| m.is_reverse)
+        .collect();
+    assert!(
+        !reverse_items.is_empty(),
+        "refresh must visit the reverse companion"
+    );
     for (_, decision, _, _, _) in &reverse_items {
         assert_eq!(
             decision.resolution.disposition,
@@ -6579,7 +6963,10 @@ fn split_rg_refresh_failback_rehomes_local_15958b() {
         &Arc::new(ShardedNeighborMap::default()),
         now_secs,
     );
-    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
+    let reverse_items: Vec<_> = items
+        .iter()
+        .filter(|(_, _, m, _, _)| m.is_reverse)
+        .collect();
     assert!(!reverse_items.is_empty());
     for (_, decision, _metadata, _, _) in &reverse_items {
         // Direct: the refreshed resolution IS the LAN candidate.
@@ -6626,7 +7013,8 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
             ks
         };
         for key in &keys {
-            sessions.mark_policy_revalidated(key, crate::session::PolicyRevalidationKind::LiveEgress);
+            sessions
+                .mark_policy_revalidated(key, crate::session::PolicyRevalidationKind::LiveEgress);
         }
     }
     sessions.set_forwarding_revalidation_gen(7, 9);
@@ -6639,7 +7027,9 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(172, 16, 80, 200),
         Ipv4Addr::new(172, 16, 80, 8),
-        443, 12345, TCP_FLAG_ACK,
+        443,
+        12345,
+        TCP_FLAG_ACK,
         [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
     );
     let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
@@ -6652,11 +7042,23 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     let mut bindings = wan_lan_bindings_fw0_15958b();
     // (1) split-state hit -> fabric TX.
     let (batch1, _, _) = txn_run_multi_binding_15958(
-        &mut bindings, 0, &mut sessions, &split_forwarding, &split_ha, &frame, meta,
+        &mut bindings,
+        0,
+        &mut sessions,
+        &split_forwarding,
+        &split_ha,
+        &frame,
+        meta,
     );
     assert!(batch1.session_hits >= 1, "split hit must session-hit");
-    assert_eq!(bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
-        "split hit must cross the fabric");
+    assert_eq!(
+        bindings[1]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "split hit must cross the fabric"
+    );
     // (2) failback refresh re-homes the companion.
     let forwarding = split_fw1_forwarding_15958();
     let failback_ha = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
@@ -6667,13 +7069,26 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
         &Arc::new(ShardedNeighborMap::default()),
         now_secs,
     );
-    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
-    assert!(!reverse_items.is_empty(), "refresh must visit the companion");
+    let reverse_items: Vec<_> = items
+        .iter()
+        .filter(|(_, _, m, _, _)| m.is_reverse)
+        .collect();
+    assert!(
+        !reverse_items.is_empty(),
+        "refresh must visit the companion"
+    );
     for (_, decision, _, _, _) in &reverse_items {
-        assert_eq!(decision.resolution.disposition, ForwardingDisposition::ForwardCandidate,
-            "failback refresh must re-home to a local candidate, got {:?}", decision.resolution);
-        assert_eq!(decision.resolution.egress_ifindex, 5,
-            "failback refresh must egress the LAN interface, got {:?}", decision.resolution);
+        assert_eq!(
+            decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate,
+            "failback refresh must re-home to a local candidate, got {:?}",
+            decision.resolution
+        );
+        assert_eq!(
+            decision.resolution.egress_ifindex, 5,
+            "failback refresh must egress the LAN interface, got {:?}",
+            decision.resolution
+        );
     }
     for (key, decision, metadata, _origin, _allow) in &items {
         if metadata.is_reverse {
@@ -6682,7 +7097,10 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     }
     sessions.iter_with_origin(|_k, d, m, _o| {
         if m.is_reverse {
-            assert_eq!(d.resolution.egress_ifindex, 5, "stored companion must hold LAN egress after refresh");
+            assert_eq!(
+                d.resolution.egress_ifindex, 5,
+                "stored companion must hold LAN egress after refresh"
+            );
         }
     });
     // (3) next packet -> LAN binding TX. The production refresh is
@@ -6705,7 +7123,9 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     let frame2 = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(172, 16, 80, 200),
         Ipv4Addr::new(172, 16, 80, 8),
-        443, 12345, TCP_FLAG_ACK,
+        443,
+        12345,
+        TCP_FLAG_ACK,
         [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01],
     );
     let mut meta2 = txn_meta_v4(14, TCP_FLAG_ACK, frame2.len() as u16);
@@ -6716,7 +7136,13 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     meta2.flow_src_port = 443;
     meta2.flow_dst_port = 12345;
     let (batch2, _, lan_frame) = txn_run_multi_binding_15958(
-        &mut bindings, 0, &mut sessions, &forwarding, &failback_ha, &frame2, meta2,
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &failback_ha,
+        &frame2,
+        meta2,
     );
     // LAN delivery (REAL, Codex9): packet 2 runs under the
     // failback forwarding state (the republished snapshot — driving
@@ -6724,30 +7150,47 @@ fn split_rg_hit_failback_rehomes_hit_15958b() {
     // swallowed it in hit revalidation). It session-hits the
     // re-homed companion and transmits on the LAN binding: actual
     // tx_packets counter + LAN frame bytes asserted.
-        assert!(batch2.session_hits >= 1, "failback packet must session-hit (hits={})", batch2.session_hits);
+    assert!(
+        batch2.session_hits >= 1,
+        "failback packet must session-hit (hits={})",
+        batch2.session_hits
+    );
     assert_eq!(
-        bindings[2].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
+        bindings[2]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
         "failback packet must transmit on the LAN binding"
     );
     let lan_frame = lan_frame.expect("failback packet must emit a LAN frame");
-    assert_eq!(&lan_frame[30..34], &[10, 0, 61, 102], "LAN frame dst IP must be the LAN host");
-    assert_eq!(&lan_frame[0..6], &LAN_HOST_MAC_15958, "LAN frame dst MAC must be the LAN host");
     assert_eq!(
-        bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
+        &lan_frame[30..34],
+        &[10, 0, 61, 102],
+        "LAN frame dst IP must be the LAN host"
+    );
+    assert_eq!(
+        &lan_frame[0..6],
+        &LAN_HOST_MAC_15958,
+        "LAN frame dst MAC must be the LAN host"
+    );
+    assert_eq!(
+        bindings[1]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
         "fabric TX must stay at packet-1 count"
     );
     assert_eq!(
-        bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0,
+        bindings[0]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
         "failback hit must not use the WAN binding"
     );
 }
-
-
-
-
-
-
-
 
 /// Round-3 item 2: replaced peer. The stored redirect targets the
 /// resolved peer at synthesis; after the fabric peer identity
@@ -6773,12 +7216,22 @@ fn split_rg_refresh_retargets_current_peer_15958b() {
         &Arc::new(ShardedNeighborMap::default()),
         now_secs,
     );
-    let reverse_items: Vec<_> = items.iter().filter(|(_, _, m, _, _)| m.is_reverse).collect();
+    let reverse_items: Vec<_> = items
+        .iter()
+        .filter(|(_, _, m, _, _)| m.is_reverse)
+        .collect();
     assert!(!reverse_items.is_empty());
     for (_, decision, _, _, _) in &reverse_items {
-        assert_eq!(decision.resolution.disposition, ForwardingDisposition::FabricRedirect);
-        assert_eq!(decision.resolution.neighbor_mac, Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-            "refresh must target the CURRENT peer MAC, got {:?}", decision.resolution.neighbor_mac);
+        assert_eq!(
+            decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect
+        );
+        assert_eq!(
+            decision.resolution.neighbor_mac,
+            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            "refresh must target the CURRENT peer MAC, got {:?}",
+            decision.resolution.neighbor_mac
+        );
     }
 }
 
@@ -6803,13 +7256,19 @@ fn split_rg_synth_no_peer_failclosed_15958b() {
                 "no-peer synthesis must store FabricRedirect intent, got {:?}",
                 decision.resolution
             );
-            assert_ne!(decision.resolution.egress_ifindex, 13, "must not store WAN egress");
+            assert_ne!(
+                decision.resolution.egress_ifindex, 13,
+                "must not store WAN egress"
+            );
         }
     });
     assert!(saw_reverse, "fixture must install reverse companions");
 }
 
-fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(forwarding: &ForwardingState, now_ns: u64) -> SessionTable {
+fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(
+    forwarding: &ForwardingState,
+    now_ns: u64,
+) -> SessionTable {
     // Same as fw0_both_halves_sessions_15958b but without the
     // FabricRedirect-with-peer assert (peer intentionally absent).
     let lan_host = Ipv4Addr::new(10, 0, 61, 102);
@@ -6837,7 +7296,8 @@ fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(forwarding: &Forwardi
         (PROTO_TCP, 12345u16, 443u16, TCP_FLAG_ACK),
         (PROTO_ICMP, 0x1234u16, 0u16, 0u8),
     ] {
-        let entry = SyncedSessionEntry { key: crate::session::SessionKey {
+        let entry = SyncedSessionEntry {
+            key: crate::session::SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol,
             src_ip: IpAddr::V4(lan_host),
@@ -6886,19 +7346,34 @@ fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(forwarding: &Forwardi
         tcp_flags,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0, };
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
+        };
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             forwarding, &ha_state, &dyn_neigh, &entry, now_secs,
         )
         .expect("synthesis must produce a companion even without a peer");
         assert!(sessions.install_with_protocol_with_origin(
-            entry.key.clone(), entry.decision, entry.metadata.clone(),
-            SessionOrigin::ForwardFlow, now_ns, protocol, tcp_flags,
+            entry.key.clone(),
+            entry.decision,
+            entry.metadata.clone(),
+            SessionOrigin::ForwardFlow,
+            now_ns,
+            protocol,
+            tcp_flags,
         ));
         sessions.set_source_nat_static(&entry.key, Some(false));
         assert!(sessions.install_with_protocol_with_origin(
-            reverse.key.clone(), reverse.decision, reverse.metadata.clone(),
-            reverse.origin, now_ns, protocol, tcp_flags,
+            reverse.key.clone(),
+            reverse.decision,
+            reverse.metadata.clone(),
+            reverse.origin,
+            now_ns,
+            protocol,
+            tcp_flags,
         ));
         sessions.set_source_nat_static(&reverse.key, reverse.source_nat_static);
     }
@@ -6933,7 +7408,9 @@ fn split_rg_transient_mixed_state_retains_redirect_15958b() {
     let mut frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(172, 16, 80, 200),
         Ipv4Addr::new(172, 16, 80, 8),
-        443, 12345, TCP_FLAG_ACK,
+        443,
+        12345,
+        TCP_FLAG_ACK,
         [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00],
     );
     let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
@@ -6945,19 +7422,37 @@ fn split_rg_transient_mixed_state_retains_redirect_15958b() {
     meta.flow_dst_port = 12345;
     let mut bindings = wan_lan_bindings_fw0_15958b();
     let (batch, _, egress) = txn_run_multi_binding_15958(
-        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
     );
     assert!(batch.session_hits >= 1, "transient hit must session-hit");
     assert_eq!(
-        bindings[1].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 1,
+        bindings[1]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1,
         "transient state must retain redirect: fabric TX 1"
     );
     assert_eq!(
-        bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0,
+        bindings[0]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
         "transient state must not launder to WAN"
     );
     assert_eq!(
-        bindings[2].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0,
+        bindings[2]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
         "transient state must not transmit LAN (FIB not yet republished)"
     );
     assert!(egress.is_some(), "fabric frame must be emitted");
@@ -6973,7 +7468,9 @@ fn split_rg_transient_mixed_state_retains_redirect_15958b() {
 fn split_rg_connected_owner_scoped_by_ri_15958b() {
     let mut forwarding = split_fw1_forwarding_15958();
     // Cross-RI impostor: same LAN prefix, tenant table, RG1 interface.
-    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+    forwarding
+        .connected_v4
+        .push(crate::afxdp::ConnectedRouteV4 {
         prefix: crate::prefix::PrefixV4::from_net(
             "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("prefix"),
         ),
@@ -7025,44 +7522,86 @@ fn split_rg_connected_owner_scoped_by_ri_15958b() {
 fn split_rg_peer_owned_ledger_scoped_by_ri_15958b() {
     let mut forwarding = ForwardingState::default();
     // Default LAN interface: ifindex 5, RG2, default RI, prefix in ledger + FIB row.
-    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
-        prefix: crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+    forwarding
+        .connected_v4
+        .push(crate::afxdp::ConnectedRouteV4 {
+            prefix: crate::prefix::PrefixV4::from_net(
+                "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+            ),
         host: Ipv4Addr::new(10, 0, 61, 1),
         ifindex: 5,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
     });
-    forwarding.connected_v4_by_ifindex.insert(5, vec![
-        crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
-    ]);
+    forwarding.connected_v4_by_ifindex.insert(
+        5,
+        vec![crate::prefix::PrefixV4::from_net(
+            "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+        )],
+    );
     // Tenant LAN interface: ifindex 24, RG1, RI "tenant-a", SAME prefix,
     // peer-owned style: ledger ONLY (no connected_v4 row).
-    forwarding.connected_v4_by_ifindex.insert(24, vec![
-        crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
-    ]);
-    forwarding.ifindex_to_routing_instance.insert(24, "tenant-a".to_string());
-    forwarding.egress.insert(5, crate::afxdp::EgressInterface {
-        bind_ifindex: 5, vlan_id: 0, mtu: 1500,
-        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
-        redundancy_group: 2, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
-    });
-    forwarding.egress.insert(24, crate::afxdp::EgressInterface {
-        bind_ifindex: 24, vlan_id: 0, mtu: 1500,
-        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03], zone_id: 21230,
-        redundancy_group: 1, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
-    });
+    forwarding.connected_v4_by_ifindex.insert(
+        24,
+        vec![crate::prefix::PrefixV4::from_net(
+            "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+        )],
+    );
+    forwarding
+        .ifindex_to_routing_instance
+        .insert(24, "tenant-a".to_string());
+    forwarding.egress.insert(
+        5,
+        crate::afxdp::EgressInterface {
+            bind_ifindex: 5,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03],
+            zone_id: 21230,
+            redundancy_group: 2,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)),
+            primary_v6: None,
+        },
+    );
+    forwarding.egress.insert(
+        24,
+        crate::afxdp::EgressInterface {
+            bind_ifindex: 24,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03],
+            zone_id: 21230,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)),
+            primary_v6: None,
+        },
+    );
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     // Default scope: default interface (RG2/5), tenant ledger row must not claim.
-    assert_eq!(crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target), 2);
-    assert_eq!(crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target), 5);
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        2
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+        5
+    );
     // Tenant scope: tenant ledger row (RG1/24) claims; default FIB row must not.
     assert_eq!(
-        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(&forwarding, target, Some("tenant-a.inet.0")),
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+            &forwarding,
+            target,
+            Some("tenant-a.inet.0")
+        ),
         1,
         "tenant-scoped owner must come from the peer-owned ledger row"
     );
     assert_eq!(
-        crate::afxdp::session_glue::connected_ifindex_for_target_in_table(&forwarding, target, Some("tenant-a.inet.0")),
+        crate::afxdp::session_glue::connected_ifindex_for_target_in_table(
+            &forwarding,
+            target,
+            Some("tenant-a.inet.0")
+        ),
         24,
         "tenant-scoped ifindex must be the ledger-only interface"
     );
@@ -7081,30 +7620,54 @@ fn failback_routed_destination_rehomes_16524() {
     // WAN gateway route via ifindex 14 (RG1). 8.8.8.8 has no
     // connected prefix, so connected_ifindex == 0 and dest_rg == 0.
     let mut forwarding = ForwardingState::default();
-    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
-        prefix: crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+    forwarding
+        .connected_v4
+        .push(crate::afxdp::ConnectedRouteV4 {
+            prefix: crate::prefix::PrefixV4::from_net(
+                "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+            ),
         host: Ipv4Addr::new(10, 0, 61, 1),
         ifindex: 5,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
     });
-    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
-        prefix: crate::prefix::PrefixV4::from_net("172.16.80.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+    forwarding
+        .connected_v4
+        .push(crate::afxdp::ConnectedRouteV4 {
+            prefix: crate::prefix::PrefixV4::from_net(
+                "172.16.80.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+            ),
         host: Ipv4Addr::new(172, 16, 80, 8),
         ifindex: 14,
         tunnel_endpoint_id: 0,
         table: "inet.0".to_string(),
     });
-    forwarding.egress.insert(5, crate::afxdp::EgressInterface {
-        bind_ifindex: 5, vlan_id: 0, mtu: 1500,
-        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
-        redundancy_group: 2, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
-    });
-    forwarding.egress.insert(14, crate::afxdp::EgressInterface {
-        bind_ifindex: 14, vlan_id: 80, mtu: 1500,
-        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01], zone_id: 13098,
-        redundancy_group: 1, primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)), primary_v6: None,
-    });
+    forwarding.egress.insert(
+        5,
+        crate::afxdp::EgressInterface {
+            bind_ifindex: 5,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03],
+            zone_id: 21230,
+            redundancy_group: 2,
+            primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)),
+            primary_v6: None,
+        },
+    );
+    forwarding.egress.insert(
+        14,
+        crate::afxdp::EgressInterface {
+            bind_ifindex: 14,
+            vlan_id: 80,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01],
+            zone_id: 13098,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+            primary_v6: None,
+        },
+    );
     forwarding.ifindex_unambiguous_zone_id.insert(5, 21230);
     forwarding.ifindex_unambiguous_zone_id.insert(14, 13098);
     // Fabric link so retention has somewhere to resolve to.
@@ -7119,40 +7682,89 @@ fn failback_routed_destination_rehomes_16524() {
     });
     let stored = ForwardingResolution {
         disposition: ForwardingDisposition::FabricRedirect,
-        local_ifindex: 0, egress_ifindex: 4, tx_ifindex: 4, tunnel_endpoint_id: 0,
-        next_hop: None, neighbor_mac: None, src_mac: None, tx_vlan_id: 0,
-        source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+        local_ifindex: 0,
+        egress_ifindex: 4,
+        tx_ifindex: 4,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let wan_candidate = ForwardingResolution {
         disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0, egress_ifindex: 14, tx_ifindex: 6, tunnel_endpoint_id: 0,
+        local_ifindex: 0,
+        egress_ifindex: 14,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
         next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
-        neighbor_mac: None, src_mac: None, tx_vlan_id: 80,
-        source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 80,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     // Routed cell (DEFECT pre-fix): dst 8.8.8.8, dest_rg == 0.
     let routed_target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
-    assert_eq!(crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, routed_target), 0);
-    assert_eq!(crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, routed_target), 0);
-    let out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
-        &forwarding, stored, wan_candidate, 13098, true, true, Some(routed_target), None,
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, routed_target),
+        0
     );
-    assert_eq!(out.disposition, ForwardingDisposition::ForwardCandidate,
-        "routed failback must re-home to the WAN candidate, got {out:?}");
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, routed_target),
+        0
+    );
+    let out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
+        &forwarding,
+        stored,
+        wan_candidate,
+        13098,
+        true,
+        true,
+        Some(routed_target),
+        None,
+    );
+    assert_eq!(
+        out.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "routed failback must re-home to the WAN candidate, got {out:?}"
+    );
     assert_eq!(out.egress_ifindex, 14);
     // Connected control: dst on LAN prefix, candidate egresses LAN.
     let lan_target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
     let lan_candidate = ForwardingResolution {
         disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0, egress_ifindex: 5, tx_ifindex: 5, tunnel_endpoint_id: 0,
-        next_hop: None, neighbor_mac: None, src_mac: None, tx_vlan_id: 0,
-        source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+        local_ifindex: 0,
+        egress_ifindex: 5,
+        tx_ifindex: 5,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let out2 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
-        &forwarding, stored, lan_candidate, 21230, true, false, Some(lan_target), None,
+        &forwarding,
+        stored,
+        lan_candidate,
+        21230,
+        true,
+        false,
+        Some(lan_target),
+        None,
     );
-    assert_eq!(out2.disposition, ForwardingDisposition::ForwardCandidate,
-        "connected failback must re-home to the LAN candidate, got {out2:?}");
+    assert_eq!(
+        out2.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "connected failback must re-home to the LAN candidate, got {out2:?}"
+    );
     assert_eq!(out2.egress_ifindex, 5);
     // Transient-mixed guard: known owner active (dest_rg=2) but
     // candidate egresses WAN (FIB lag) — must RETAIN redirect.
@@ -7165,32 +7777,71 @@ fn failback_routed_destination_rehomes_16524() {
     // candidate to prove the connected test, not zone knowledge,
     // is what retains).
     let out3 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
-        &forwarding, stored, wan_candidate, 13098, true, false, Some(lan_target), None,
+        &forwarding,
+        stored,
+        wan_candidate,
+        13098,
+        true,
+        false,
+        Some(lan_target),
+        None,
     );
-    assert_eq!(out3.disposition, ForwardingDisposition::FabricRedirect,
-        "transient split FIB must retain redirect (no WAN laundering), got {out3:?}");
+    assert_eq!(
+        out3.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "transient split FIB must retain redirect (no WAN laundering), got {out3:?}"
+    );
     // Fabric-egress candidate under unknown owner must not re-home
     // (anti-loop): candidate egress is the fabric parent.
-    forwarding.fabrics.iter().for_each(|f| assert_eq!(f.parent_ifindex, 4));
+    forwarding
+        .fabrics
+        .iter()
+        .for_each(|f| assert_eq!(f.parent_ifindex, 4));
     let fabric_candidate = ForwardingResolution {
         disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0, egress_ifindex: 4, tx_ifindex: 4, tunnel_endpoint_id: 0,
-        next_hop: None, neighbor_mac: None, src_mac: None, tx_vlan_id: 0,
-        source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+        local_ifindex: 0,
+        egress_ifindex: 4,
+        tx_ifindex: 4,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     // egress 4 is not in egress map, so ingress_is_fabric is false;
     // the egress>0 guard still returns it — pin that routed re-home
     // requires a real egress, and a zero-egress candidate retains.
     let zero_candidate = ForwardingResolution {
         disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0, egress_ifindex: 0, tx_ifindex: 0, tunnel_endpoint_id: 0,
-        next_hop: None, neighbor_mac: None, src_mac: None, tx_vlan_id: 0,
-        source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let out4 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
-        &forwarding, stored, zero_candidate, 13098, true, true, Some(routed_target), None,
+        &forwarding,
+        stored,
+        zero_candidate,
+        13098,
+        true,
+        true,
+        Some(routed_target),
+        None,
     );
-    assert_ne!(out4.egress_ifindex, 14, "zero-egress candidate must not invent WAN egress");
+    assert_ne!(
+        out4.egress_ifindex, 14,
+        "zero-egress candidate must not invent WAN egress"
+    );
     let _ = fabric_candidate;
 }
 
@@ -7209,41 +7860,83 @@ fn failback_routed_refresh_rehomes_16524() {
     // entry point does NOT re-home routed destinations (it cannot
     // distinguish dest_rg==0), documenting why callers migrated.
     let mut forwarding = ForwardingState::default();
-    forwarding.egress.insert(14, crate::afxdp::EgressInterface {
-        bind_ifindex: 14, vlan_id: 80, mtu: 1500,
-        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01], zone_id: 13098,
-        redundancy_group: 1, primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)), primary_v6: None,
-    });
+    forwarding.egress.insert(
+        14,
+        crate::afxdp::EgressInterface {
+            bind_ifindex: 14,
+            vlan_id: 80,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01],
+            zone_id: 13098,
+            redundancy_group: 1,
+            primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)),
+            primary_v6: None,
+        },
+    );
     forwarding.fabrics.push(crate::afxdp::FabricLink {
-        parent_ifindex: 4, overlay_ifindex: 176,
+        parent_ifindex: 4,
+        overlay_ifindex: 176,
         peer_addr: IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2)),
         peer_mac: [0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60],
         local_mac: [0x10, 0x66, 0x6a, 0xfe, 0xd9, 0x55],
-        up: true, link_authenticated: false,
+        up: true,
+        link_authenticated: false,
     });
     let stored = ForwardingResolution {
         disposition: ForwardingDisposition::FabricRedirect,
-        local_ifindex: 0, egress_ifindex: 4, tx_ifindex: 4, tunnel_endpoint_id: 0,
-        next_hop: None, neighbor_mac: None, src_mac: None, tx_vlan_id: 0,
-        source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+        local_ifindex: 0,
+        egress_ifindex: 4,
+        tx_ifindex: 4,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let candidate = ForwardingResolution {
         disposition: ForwardingDisposition::ForwardCandidate,
-        local_ifindex: 0, egress_ifindex: 14, tx_ifindex: 6, tunnel_endpoint_id: 0,
-        next_hop: None, neighbor_mac: None, src_mac: None, tx_vlan_id: 0,
-        source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+        local_ifindex: 0,
+        egress_ifindex: 14,
+        tx_ifindex: 6,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
     };
     let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
     // New entry: re-homes.
     let new_out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
-        &forwarding, stored, candidate, 13098, true, true, Some(target), None,
+        &forwarding,
+        stored,
+        candidate,
+        13098,
+        true,
+        true,
+        Some(target),
+        None,
     );
     assert_eq!(new_out.disposition, ForwardingDisposition::ForwardCandidate);
     // Legacy entry with unknown=true encoded as active+target:
     // also re-homes (it passes unknown=active&&target.is_some()).
     let legacy_out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_scoped_15958b(
-        &forwarding, stored, candidate, 13098, true, Some(target), None,
+        &forwarding,
+        stored,
+        candidate,
+        13098,
+        true,
+        Some(target),
+        None,
     );
-    assert_eq!(legacy_out.disposition, ForwardingDisposition::ForwardCandidate,
-        "legacy wrapper must preserve routed re-home via its unknown encoding");
+    assert_eq!(
+        legacy_out.disposition,
+        ForwardingDisposition::ForwardCandidate,
+        "legacy wrapper must preserve routed re-home via its unknown encoding"
+    );
 }

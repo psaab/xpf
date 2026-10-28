@@ -3894,15 +3894,16 @@ fn queue_warm_pass_respects_snapshot_rate_limit() {
 #[test]
 fn queue_warm_pass_warms_direct_shared_destination_16217() {
     let (mut coord, rx) = warm_test_coordinator(1);
-    coord.forwarding.connected_v4.push(
-        crate::afxdp::ConnectedRouteV4 {
+    coord
+        .forwarding
+        .connected_v4
+        .push(crate::afxdp::ConnectedRouteV4 {
             prefix: PrefixV4::from_net("172.16.80.0/24".parse().unwrap()),
             host: Ipv4Addr::new(172, 16, 80, 8),
             ifindex: 80,
             tunnel_endpoint_id: 0,
             table: "inet.0".to_string(),
-        },
-    );
+        });
     let mut key = f4_key();
     key.dst_ip = "172.16.80.200".parse().unwrap();
     let mut entry = import_entry_9718(&key, 4001);
@@ -3930,15 +3931,16 @@ fn queue_warm_pass_warms_direct_shared_destination_16217() {
 #[test]
 fn queue_warm_pass_skips_gateway_routed_and_reverse_shared_16217() {
     let (mut coord, rx) = warm_test_coordinator(1);
-    coord.forwarding.connected_v4.push(
-        crate::afxdp::ConnectedRouteV4 {
+    coord
+        .forwarding
+        .connected_v4
+        .push(crate::afxdp::ConnectedRouteV4 {
             prefix: PrefixV4::from_net("172.16.80.0/24".parse().unwrap()),
             host: Ipv4Addr::new(172, 16, 80, 8),
             ifindex: 80,
             tunnel_endpoint_id: 0,
             table: "inet.0".to_string(),
-        },
-    );
+        });
     // Gateway-routed: 203.0.113.9 is outside the connected /24.
     let routed_key = f4_key();
     let mut routed = import_entry_9718(&routed_key, 4002);
@@ -3973,15 +3975,16 @@ fn queue_warm_pass_skips_gateway_routed_and_reverse_shared_16217() {
 #[test]
 fn queue_warm_pass_direct_destination_resolved_and_rg_gates_16217() {
     let (mut coord, rx) = warm_test_coordinator(1);
-    coord.forwarding.connected_v4.push(
-        crate::afxdp::ConnectedRouteV4 {
+    coord
+        .forwarding
+        .connected_v4
+        .push(crate::afxdp::ConnectedRouteV4 {
             prefix: PrefixV4::from_net("172.16.80.0/24".parse().unwrap()),
             host: Ipv4Addr::new(172, 16, 80, 8),
             ifindex: 80,
             tunnel_endpoint_id: 0,
             table: "inet.0".to_string(),
-        },
-    );
+        });
     let mut key = f4_key();
     key.dst_ip = "172.16.80.200".parse().unwrap();
     let mut entry = import_entry_9718(&key, 4004);
@@ -4002,7 +4005,10 @@ fn queue_warm_pass_direct_destination_resolved_and_rg_gates_16217() {
         "already-resolved direct destination must be skipped, got {hops:?}"
     );
     // RG goes inactive: even unresolved, the gate must skip it.
-    coord.forwarding.neighbors.remove(&(80, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))));
+    coord
+        .forwarding
+        .neighbors
+        .remove(&(80, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))));
     let now_secs = monotonic_nanos() / 1_000_000_000;
     coord.ha.rg_runtime.store(Arc::new(BTreeMap::from([(
         1i32,
@@ -4152,7 +4158,6 @@ fn refresh_fabric_links_replacement_leaves_other_parent_untouched_5686() {
 }
 
 #[test]
-
 // #16023: revoking `fabric-interface-authenticated` must force
 // link_authenticated=false on the surviving fabric entry even when the
 // new build cannot re-resolve the link (preserve path) — and on the
@@ -4184,9 +4189,14 @@ fn refresh_runtime_snapshot_revocation_clears_link_authenticated_16023() {
         }
     };
     let mut coord = Coordinator::new();
-    coord.refresh_runtime_snapshot(&make(1, true)).expect("attested apply");
+    coord
+        .refresh_runtime_snapshot(&make(1, true))
+        .expect("attested apply");
     assert_eq!(coord.forwarding.fabrics.len(), 1);
-    assert!(coord.forwarding.fabrics[0].link_authenticated, "attested apply must carry true");
+    assert!(
+        coord.forwarding.fabrics[0].link_authenticated,
+        "attested apply must carry true"
+    );
     // Revoked apply: the fabric row is still configured but UNRESOLVED
     // (empty peer_mac) so populate_fabrics skips it and the preserve/merge
     // path decides the surviving entry's flag.
@@ -4194,19 +4204,33 @@ fn refresh_runtime_snapshot_revocation_clears_link_authenticated_16023() {
     revoked.link_authenticated = false;
     let mut snap = make(2, false);
     snap.fabrics = vec![revoked];
-    coord.refresh_runtime_snapshot(&snap).expect("revoked apply");
-    assert_eq!(coord.forwarding.fabrics.len(), 1, "working link must survive unresolved revoked apply");
+    coord
+        .refresh_runtime_snapshot(&snap)
+        .expect("revoked apply");
+    assert_eq!(
+        coord.forwarding.fabrics.len(),
+        1,
+        "working link must survive unresolved revoked apply"
+    );
     assert!(
         !coord.forwarding.fabrics[0].link_authenticated,
         "revoked snapshot must force link_authenticated=false on the surviving entry (#16023)"
     );
     assert!(
-        coord.ha.fabrics.load().iter().all(|f| !f.link_authenticated),
+        coord
+            .ha
+            .fabrics
+            .load()
+            .iter()
+            .all(|f| !f.link_authenticated),
         "ha.fabrics must not retain a revoked attestation after snapshot refresh (#16023)"
     );
     let view = coord.ha.runtime.load_full();
     assert!(
-        view.forwarding().fabrics.iter().all(|f| !f.link_authenticated),
+        view.forwarding()
+            .fabrics
+            .iter()
+            .all(|f| !f.link_authenticated),
         "runtime view must not retain a revoked attestation (#16023)"
     );
 }
@@ -4220,18 +4244,30 @@ fn refresh_fabric_links_revocation_clears_link_authenticated_16023() {
     snap.link_authenticated = true;
     coord.refresh_fabric_links(&[snap]);
     assert_eq!(coord.forwarding.fabrics.len(), 1);
-    assert!(coord.forwarding.fabrics[0].link_authenticated, "attested install must carry true");
+    assert!(
+        coord.forwarding.fabrics[0].link_authenticated,
+        "attested install must carry true"
+    );
     // Revoked + UNRESOLVED refresh (empty peer_mac): preserve path. The
     // working link survives but the attestation must not.
     coord.refresh_fabric_links(&[fabric_snap_5686(parent, "10.99.0.2", "")]);
-    assert_eq!(coord.forwarding.fabrics.len(), 1, "working link must survive unresolved refresh");
+    assert_eq!(
+        coord.forwarding.fabrics.len(),
+        1,
+        "working link must survive unresolved refresh"
+    );
     assert!(
         !coord.forwarding.fabrics[0].link_authenticated,
         "revoked attestation must force link_authenticated=false on the preserved link (#16023)"
     );
     // Worker fast-path Arc and runtime view must agree (no reader keeps true).
     assert!(
-        coord.ha.fabrics.load().iter().all(|f| !f.link_authenticated),
+        coord
+            .ha
+            .fabrics
+            .load()
+            .iter()
+            .all(|f| !f.link_authenticated),
         "ha.fabrics must not retain a revoked attestation (#16023)"
     );
     // Re-attest + unresolved: attestation returns without a rebuild.
@@ -4319,7 +4355,9 @@ fn rebind_snapshot_15188(generation: u64) -> crate::ConfigSnapshot {
 fn neighbor_push_after_full_apply_ships_no_rebinds_15188() {
     let mut coord = Coordinator::new();
     // Real full apply: its publish ships the single-use metadata once.
-    coord.refresh_runtime_snapshot_disarmed(&rebind_snapshot_15188(7)).expect("full apply must succeed");
+    coord
+        .refresh_runtime_snapshot_disarmed(&rebind_snapshot_15188(7))
+        .expect("full apply must succeed");
     // Vacuity guard: the full apply itself ships the metadata, and the
     // retained state is already stripped for the next helper republish.
     {
@@ -4328,7 +4366,8 @@ fn neighbor_push_after_full_apply_ships_no_rebinds_15188() {
         assert_eq!(view.forwarding().policy_rename_ancestry.len(), 1);
     }
     assert!(
-        coord.forwarding.policy_session_rebinds.is_empty() && coord.forwarding.policy_rename_ancestry.is_empty(),
+        coord.forwarding.policy_session_rebinds.is_empty()
+            && coord.forwarding.policy_rename_ancestry.is_empty(),
         "#15188: retained forwarding must not carry single-use metadata after the full-apply publish"
     );
     // Helper-internal republish: a neighbor push.
@@ -4338,7 +4377,9 @@ fn neighbor_push_after_full_apply_ships_no_rebinds_15188() {
         &[(
             80,
             IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)),
-            NeighborEntry { mac: [2, 0, 0, 0, 0, 2] },
+            NeighborEntry {
+                mac: [2, 0, 0, 0, 0, 2],
+            },
         )],
     );
     assert!(applied, "neighbor push must be applied");
@@ -4354,7 +4395,9 @@ fn neighbor_push_after_full_apply_ships_no_rebinds_15188() {
         "#15188: neighbor push after a full apply must ship ancestry=0"
     );
     assert!(
-        view.forwarding().neighbors.contains_key(&(80, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)))),
+        view.forwarding()
+            .neighbors
+            .contains_key(&(80, IpAddr::V4(Ipv4Addr::new(10, 99, 0, 2)))),
         "control: the neighbor itself must still be published"
     );
 }
@@ -4362,7 +4405,9 @@ fn neighbor_push_after_full_apply_ships_no_rebinds_15188() {
 #[test]
 fn fabric_refresh_after_full_apply_ships_no_rebinds_15188() {
     let mut coord = Coordinator::new();
-    coord.refresh_runtime_snapshot_disarmed(&rebind_snapshot_15188(7)).expect("full apply must succeed");
+    coord
+        .refresh_runtime_snapshot_disarmed(&rebind_snapshot_15188(7))
+        .expect("full apply must succeed");
     {
         let view = coord.ha.runtime.load_full();
         assert_eq!(view.forwarding().policy_session_rebinds.len(), 1);
@@ -4394,12 +4439,20 @@ fn later_full_apply_still_ships_fresh_rebinds_15188() {
     // retained state is stripped again for the next helper republish.
     let snap = rebind_snapshot_15188;
     let mut coord = Coordinator::new();
-    coord.refresh_runtime_snapshot_disarmed(&snap(7)).expect("first full apply");
+    coord
+        .refresh_runtime_snapshot_disarmed(&snap(7))
+        .expect("first full apply");
     {
         let view = coord.ha.runtime.load_full();
-        assert_eq!(view.forwarding().policy_session_rebinds.len(), 1, "first full apply ships its rebinds");
+        assert_eq!(
+            view.forwarding().policy_session_rebinds.len(),
+            1,
+            "first full apply ships its rebinds"
+        );
     }
-    coord.refresh_runtime_snapshot_disarmed(&snap(8)).expect("second full apply");
+    coord
+        .refresh_runtime_snapshot_disarmed(&snap(8))
+        .expect("second full apply");
     let view = coord.ha.runtime.load_full();
     assert_eq!(
         view.forwarding().policy_session_rebinds.len(),
@@ -6189,7 +6242,13 @@ fn tunnel17084_defer_prune_parity_moved_attachment_and_identity() {
     // WG side: same-id changed crypto identity (still hydratable) prunes.
     let mut wg2 = Coordinator::new();
     let port2 = crate::test_ports::reserve_ephemeral_udp_port();
-    wg2.refresh_runtime_snapshot(&wg1866_snapshot(1, 4242, "wgt17084b", port2, WG1866_PRIVKEY_A))
+    wg2.refresh_runtime_snapshot(&wg1866_snapshot(
+        1,
+        4242,
+        "wgt17084b",
+        port2,
+        WG1866_PRIVKEY_A,
+    ))
         .expect("WG refresh must succeed");
     assert!(wg2.wg_control_threads.contains_key(&1));
     wg2.prune_wg_control_threads_for_snapshot(&wg1866_snapshot(
@@ -9036,65 +9095,7 @@ fn reconcile_present_conntrack_pin_open_failure_keeps_prior_generation() {
     );
 }
 
-/// fail-on-revert: same fail-closed behavior for a PRESENT dnat_table pin
-/// that fails to open (embedded-ICMP NAT reversal feature configured but
-/// unopenable -> must block, not run degraded).
-#[test]
-fn reconcile_present_dnat_pin_open_failure_keeps_prior_generation() {
-    let mut coordinator = Coordinator::new();
-    let prior = ValidationState {
-        snapshot_installed: true,
-        config_generation: 40,
-        fib_generation: 12,
-        neighbor_generation: 0,
-    };
-    coordinator.validation = prior;
-    coordinator.seed_published_validation(prior);
-
-    let mut bindings: Vec<BindingStatus> = vec![BindingStatus {
-        slot: 1,
-        interface: "ge-0-0-0".into(),
-        ifindex: 10,
-        registered: true,
-        ..BindingStatus::default()
-    }];
-
-    // Mandatory + conntrack pins OK; dnat_table pin PRESENT but fails open.
-    let mut snap = mandatory_ok_snapshot(41);
-    snap.map_pins.dnat_table = format!("{TEST_MAP_PIN_FAIL}dnat_table");
-
-    let _ = coordinator.reconcile(Some(&snap), &mut bindings, 64);
-
-    assert!(
-        matches!(
-            coordinator.last_reconcile_stage,
-            ReconcileStage::OpenMapFailed {
-                map: "dnat_table",
-                ..
-            }
-        ),
-        "expected abort at the dnat_table open, got {:?}",
-        coordinator.last_reconcile_stage
-    );
-    assert!(
-        coordinator
-            .last_reconcile_stage
-            .to_string()
-            .starts_with("open_dnat_table_map_failed:")
-    );
-    assert_eq!(
-        coordinator.validation.config_generation, 40,
-        "config_generation must NOT advance on a present-but-unopenable dnat map"
-    );
-    assert_eq!(coordinator.published_validation().config_generation, 40);
-    assert!(
-        bindings[0].last_error.starts_with("open dnat_table map:"),
-        "expected per-binding last_error for the dnat_table open failure, got {:?}",
-        bindings[0].last_error
-    );
-}
-
-/// ANTI-OVER-GATE control: when the optional conntrack/dnat pins are EMPTY
+/// ANTI-OVER-GATE control: when the optional conntrack pins are EMPTY
 /// (feature genuinely absent — the common deploy), the reconcile must NOT
 /// be gated: the preflight returns `None` silently for each empty pin and
 /// the reconcile proceeds to publish the new generation. This guards
@@ -9122,8 +9123,6 @@ fn reconcile_empty_optional_pins_advance_published_generation() {
     let snap = mandatory_ok_snapshot(51);
     assert!(snap.map_pins.conntrack_v4.is_empty());
     assert!(snap.map_pins.conntrack_v6.is_empty());
-    assert!(snap.map_pins.dnat_table.is_empty());
-    assert!(snap.map_pins.dnat_table_v6.is_empty());
 
     let _ = coordinator.reconcile(Some(&snap), &mut bindings, 64);
 
@@ -9159,8 +9158,6 @@ fn reconcile_present_optional_pins_open_ok_advance_generation() {
     let mut snap = mandatory_ok_snapshot(61);
     snap.map_pins.conntrack_v4 = format!("{TEST_MAP_PIN_OK}conntrack_v4");
     snap.map_pins.conntrack_v6 = format!("{TEST_MAP_PIN_OK}conntrack_v6");
-    snap.map_pins.dnat_table = format!("{TEST_MAP_PIN_OK}dnat_table");
-    snap.map_pins.dnat_table_v6 = format!("{TEST_MAP_PIN_OK}dnat_table_v6");
 
     let _ = coordinator.reconcile(Some(&snap), &mut bindings, 64);
 
@@ -9174,9 +9171,8 @@ fn reconcile_present_optional_pins_open_ok_advance_generation() {
 // ---------------------------------------------------------------------------
 // #6243 — the activated (`preflight_map_fds`) and deferred (`validate_map_pins`)
 // map-pin preflights are now ONE shared opener (`open_snapshot_maps`). These
-// tests lock ALL SEVEN pins' stage + per-binding strings (including the
-// previously-UNCOVERED uppercase-XSK label, heartbeat strings, conntrack_v6,
-// and dnat_table_v6), prove BOTH callers react IDENTICALLY, and lock the two
+// tests lock ALL FIVE pins' stage + per-binding strings (including the
+// previously-UNCOVERED uppercase-XSK label, heartbeat strings, and conntrack_v6), prove BOTH callers react IDENTICALLY, and lock the two
 // divergence fixes (two-pass multi-fault precedence + shared FD retention).
 // ---------------------------------------------------------------------------
 
@@ -9250,16 +9246,15 @@ fn deferred_map_pin_stage_6243(pins: crate::protocol::snapshot::MapPins) -> Reco
     }
 }
 
-/// #6243 fail-on-revert (byte-parity): lock every one of the seven pins' typed
+/// #6243 fail-on-revert (byte-parity): lock every one of the five pins' typed
 /// stage string AND per-binding `last_error` string on the activated path. The
-/// pre-#6243 suite covered only `session` / `conntrack_v4` / `dnat_table`; this
+/// pre-#6243 suite covered only `session` / `conntrack_v4`; this
 /// adds the UNCOVERED cases — the uppercase-`XSK` per-binding label (vs the
-/// lowercase `xsk` stage token), the `heartbeat` strings, `conntrack_v6`, and
-/// `dnat_table_v6`. Rewriting the per-binding `XSK` label to the lowercase stage
+/// lowercase `xsk` stage token), the `heartbeat` strings, `conntrack_v6`. Rewriting the per-binding `XSK` label to the lowercase stage
 /// token (or dropping any pin's requiredness/label) turns the matching
 /// assertion RED.
 #[test]
-fn reconcile_all_seven_pin_faults_lock_stage_and_binding_strings_6243() {
+fn reconcile_all_five_pin_faults_lock_stage_and_binding_strings_6243() {
     // #6361 OPEN-failure byte-parity helper. The old `starts_with` accepted ANY
     // suffix after the prefix, so a corrupted stage/label suffix — or a
     // stage-vs-binding `err` divergence — could slip past. This asserts the
@@ -9356,29 +9351,9 @@ fn reconcile_all_seven_pin_faults_lock_stage_and_binding_strings_6243() {
         "open_conntrack_v6_map_failed:",
         "open conntrack_v6 map: ",
     );
-
-    let mut p = all_map_pins_ok_6243();
-    p.dnat_table = format!("{TEST_MAP_PIN_FAIL}dnat_table");
-    let (stage, be) = drive_map_pin_reconcile_6243(p);
-    assert_open_parity(
-        &stage,
-        &be,
-        "open_dnat_table_map_failed:",
-        "open dnat_table map: ",
-    );
-
-    let mut p = all_map_pins_ok_6243();
-    p.dnat_table_v6 = format!("{TEST_MAP_PIN_FAIL}dnat_table_v6");
-    let (stage, be) = drive_map_pin_reconcile_6243(p);
-    assert_open_parity(
-        &stage,
-        &be,
-        "open_dnat_table_v6_map_failed:",
-        "open dnat_table_v6 map: ",
-    );
 }
 
-/// #6243 fail-on-revert (SSOT parity): for EACH of the seven pins' single-fault
+/// #6243 fail-on-revert (SSOT parity): for EACH of the five pins' single-fault
 /// snapshots, the activated (`reconcile`) and deferred
 /// (`validate_snapshot_buildable`) paths must report the IDENTICAL typed
 /// `ReconcileStage`. Both now route through the one `open_snapshot_maps`;
@@ -9428,16 +9403,6 @@ fn map_pin_faults_react_identically_activated_and_deferred_6243() {
     {
         let mut p = all_map_pins_ok_6243();
         p.conntrack_v6 = format!("{TEST_MAP_PIN_FAIL}conntrack_v6");
-        cases.push(p);
-    }
-    {
-        let mut p = all_map_pins_ok_6243();
-        p.dnat_table = format!("{TEST_MAP_PIN_FAIL}dnat_table");
-        cases.push(p);
-    }
-    {
-        let mut p = all_map_pins_ok_6243();
-        p.dnat_table_v6 = format!("{TEST_MAP_PIN_FAIL}dnat_table_v6");
         cases.push(p);
     }
 
@@ -9525,19 +9490,19 @@ fn multi_fault_map_pins_use_two_pass_precedence_from_both_paths_6243() {
 
 /// #6243 (DIVERGENCE 2 — shared FD retention): the shared `open_snapshot_maps`
 /// holds every opened FD in one `OpenedSnapshotMaps` bundle until the WHOLE
-/// seven-pin contract succeeds. The activated path KEEPS the bundle; the
+/// five-pin contract succeeds. The activated path KEEPS the bundle; the
 /// deferred path DROPS it (RAII). Because both callers route through that single
 /// opener, the point at which FD-table pressure would fail an open is identical
 /// for both — the deferred path can no longer PASS (dropping each FD per pin)
-/// where the activated path (holding all seven simultaneously) FAILS.
+/// where the activated path (holding all five simultaneously) FAILS.
 ///
 /// Real FD-pressure cannot be injected through the `TEST_MAP_PIN_OK` seam (it
 /// returns fd=-1 without consuming a descriptor), so retention parity is
 /// enforced STRUCTURALLY by the shared opener; the observable anchor here is
-/// that BOTH paths accept a snapshot whose all seven pins are present + openable
+/// that BOTH paths accept a snapshot whose all five pins are present + openable
 /// — proving each walks and opens the FULL bundle before returning Ok.
 #[test]
-fn both_paths_open_full_seven_pin_bundle_before_ok_6243() {
+fn both_paths_open_full_five_pin_bundle_before_ok_6243() {
     // #7413: this test spawns a `neigh-monitor` thread, and the #6637 leak
     // gates read the PROCESS-WIDE count of those. Held for the whole body so a
     // parallel sibling cannot move that count inside their window.
@@ -9545,11 +9510,9 @@ fn both_paths_open_full_seven_pin_bundle_before_ok_6243() {
     let mut pins = all_map_pins_ok_6243();
     pins.conntrack_v4 = format!("{TEST_MAP_PIN_OK}conntrack_v4");
     pins.conntrack_v6 = format!("{TEST_MAP_PIN_OK}conntrack_v6");
-    pins.dnat_table = format!("{TEST_MAP_PIN_OK}dnat_table");
-    pins.dnat_table_v6 = format!("{TEST_MAP_PIN_OK}dnat_table_v6");
 
     // Activated: reconcile advances the published generation (opened + retained
-    // all seven FDs and proceeded past the preflight).
+    // all five FDs and proceeded past the preflight).
     let mut coord = StoppedCoordinator::new(); // #6637
     let prior = ValidationState {
         snapshot_installed: true,
@@ -9568,10 +9531,10 @@ fn both_paths_open_full_seven_pin_bundle_before_ok_6243() {
     let _ = coord.reconcile(Some(&snap), &mut bindings, 64);
     assert_eq!(
         coord.validation.config_generation, 71,
-        "all seven present+openable pins must let the activated reconcile advance"
+        "all five present+openable pins must let the activated reconcile advance"
     );
 
-    // Deferred: validate_snapshot_buildable returns Ok (opened all seven, then
+    // Deferred: validate_snapshot_buildable returns Ok (opened all five, then
     // dropped the bundle) with no worker side effects.
     let validate_coord = Coordinator::new();
     let snap2 = ConfigSnapshot {
@@ -9583,7 +9546,7 @@ fn both_paths_open_full_seven_pin_bundle_before_ok_6243() {
         validate_coord
             .validate_snapshot_buildable(Some(&snap2))
             .is_ok(),
-        "all seven present+openable pins must pass the deferred validation gate"
+        "all five present+openable pins must pass the deferred validation gate"
     );
     assert!(
         validate_coord.workers.live.is_empty(),
@@ -9591,17 +9554,17 @@ fn both_paths_open_full_seven_pin_bundle_before_ok_6243() {
     );
 
     // #6361: bind "opens the FULL bundle" from the FAULT side too, HERE — the
-    // Ok-acceptance above only proves all-seven-present+openable passes; it
+    // Ok-acceptance above only proves all-five-present+openable passes; it
     // stays green if an optional open were dropped from the shared
     // `open_snapshot_maps`. Each optional pin set to a present-but-unopenable
     // FAIL pin must be REJECTED by BOTH paths with the matching
     // `OpenMapFailed(token)` — dropping any one optional open would let its FAIL
     // pin slip through Ok and red this loop. The sibling
-    // `reconcile_all_seven_pin_faults` test independently catches the same
+    // `reconcile_all_five_pin_faults` test independently catches the same
     // dropped open on the activated path; this adds the DEFERRED path and ties
-    // the guarantee to this test's own all-seven claim.
+    // the guarantee to this test's own all-five claim.
     //
-    // Retention (all seven FDs held simultaneously until the whole contract
+    // Retention (all five FDs held simultaneously until the whole contract
     // succeeds) cannot be exercised directly: the fd=-1 `TEST_MAP_PIN_OK` seam
     // consumes no descriptor, so real FD-table pressure is uninjectable. That
     // guarantee is therefore STRUCTURAL — the RAII `OwnedFd`s in the private
@@ -9637,14 +9600,6 @@ fn both_paths_open_full_seven_pin_bundle_before_ok_6243() {
     let mut p = all_map_pins_ok_6243();
     p.conntrack_v6 = format!("{TEST_MAP_PIN_FAIL}conntrack_v6");
     assert_optional_open_fault(p, "conntrack_v6");
-
-    let mut p = all_map_pins_ok_6243();
-    p.dnat_table = format!("{TEST_MAP_PIN_FAIL}dnat_table");
-    assert_optional_open_fault(p, "dnat_table");
-
-    let mut p = all_map_pins_ok_6243();
-    p.dnat_table_v6 = format!("{TEST_MAP_PIN_FAIL}dnat_table_v6");
-    assert_optional_open_fault(p, "dnat_table_v6");
 }
 
 /// #3766 fail-closed same-plan refresh (H2 + H3 + M1): a runtime-snapshot
@@ -11063,7 +11018,8 @@ fn f4_seed_shared_only(
     // would red for the wrong reason — measured while writing this: the first
     // fixture seeded only the allocator and the binding cell failed with the
     // fix applied.
-    let entry = crate::afxdp::worker::SyncedSessionEntry { key: key.clone(),
+    let entry = crate::afxdp::worker::SyncedSessionEntry {
+        key: key.clone(),
     decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
@@ -11113,9 +11069,14 @@ fn f4_seed_shared_only(
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(key.clone(), entry);
     assert!(
@@ -11285,7 +11246,8 @@ fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
         "fixture precondition: the NAT64 port is occupied before the delete"
     );
     // Shared authority entry (the delete's NAT decision source).
-    let entry = crate::afxdp::worker::SyncedSessionEntry { key: key.clone(),
+    let entry = crate::afxdp::worker::SyncedSessionEntry {
+        key: key.clone(),
     decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
@@ -11331,9 +11293,14 @@ fn nat64_14961_seed(coordinator: &mut Coordinator, worker_id: u32, port: u16) {
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(key.clone(), entry);
 }
@@ -11622,7 +11589,8 @@ fn import_entry_9718(
     key: &crate::session::SessionKey,
     pool_port: u16,
 ) -> crate::afxdp::worker::SyncedSessionEntry {
-    crate::afxdp::worker::SyncedSessionEntry { key: key.clone(),
+    crate::afxdp::worker::SyncedSessionEntry {
+        key: key.clone(),
     decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
@@ -11672,9 +11640,14 @@ fn import_entry_9718(
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 /// #9718: a peer import landing between the bring-up replay read and worker
@@ -14109,7 +14082,8 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
         }
     }
     fn seed(coordinator: &Coordinator, key: &crate::session::SessionKey) {
-        let entry = crate::afxdp::worker::SyncedSessionEntry { key: key.clone(),
+        let entry = crate::afxdp::worker::SyncedSessionEntry {
+            key: key.clone(),
         decision: crate::afxdp::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
                 disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
@@ -14155,9 +14129,14 @@ fn delete_synced_tunnel_variants_removes_discriminator_siblings_only_10511() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
             .insert(key.clone(), entry);
     }
@@ -14211,7 +14190,8 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
         discriminator: crate::session::TunnelDiscriminator::Keyed(1),
         routing_domain: 0,
     };
-    let entry = crate::afxdp::worker::SyncedSessionEntry { key: target.clone(),
+    let entry = crate::afxdp::worker::SyncedSessionEntry {
+        key: target.clone(),
     decision: crate::afxdp::SessionDecision {
         resolution: crate::afxdp::ForwardingResolution {
             disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
@@ -14257,9 +14237,14 @@ fn delete_synced_tunnel_variants_strict_reports_mirror_failure_12886() {
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced)
         .insert(target.clone(), entry);
     let outcome = coordinator.session_domain().delete_synced_tunnel_variants(
@@ -14602,7 +14587,11 @@ fn bringup_failure_preserves_forwarding_15950() {
     let mut bindings0 = six242_three_worker_bindings();
     coordinator.force_worker_healthy_stub = true;
     let snap_ok = mandatory_ok_snapshot(5);
-    assert!(coordinator.reconcile(Some(&snap_ok), &mut bindings0, 64).is_ok());
+    assert!(
+        coordinator
+            .reconcile(Some(&snap_ok), &mut bindings0, 64)
+            .is_ok()
+    );
     let gen_before = coordinator.validation;
     assert!(gen_before.snapshot_installed);
     // Second reconcile (gen 6) fails in bring-up (SA not ready).
@@ -14611,10 +14600,20 @@ fn bringup_failure_preserves_forwarding_15950() {
     let mut bindings = six242_three_worker_bindings();
     let snap = mandatory_ok_snapshot(6);
     let result = coordinator.reconcile(Some(&snap), &mut bindings, 64);
-    assert!(matches!(result, Err(ReconcileError::IpsecSaNotReady(_))), "got {result:?}");
-    assert!(coordinator.workers.records().is_empty(), "workers must still be stopped");
+    assert!(
+        matches!(result, Err(ReconcileError::IpsecSaNotReady(_))),
+        "got {result:?}"
+    );
+    assert!(
+        coordinator.workers.records().is_empty(),
+        "workers must still be stopped"
+    );
     // THE preservation assertions (revert-red: stop_inner(false) defaults both):
-    assert_eq!(coordinator.validation.config_generation, 6, "new generation validation must survive bring-up failure, got {:?}", coordinator.validation);
+    assert_eq!(
+        coordinator.validation.config_generation, 6,
+        "new generation validation must survive bring-up failure, got {:?}",
+        coordinator.validation
+    );
     assert!(coordinator.validation.snapshot_installed);
     // Retry (gen 6 again, SA ready) must succeed and keep generation.
     coordinator.force_ipsec_sa_not_ready = false;
@@ -14627,7 +14626,6 @@ fn bringup_failure_preserves_forwarding_15950() {
     let _ = gen_before;
 }
 
-
 #[test]
 fn stop_preserving_retires_holders_on_preserved_allocator_15966r() {
     use crate::nat::NatHolder;
@@ -14635,12 +14633,36 @@ fn stop_preserving_retires_holders_on_preserved_allocator_15966r() {
     let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
     coordinator.workers.register(3, rec, None);
     let egress: std::net::IpAddr = "192.0.2.7".parse().unwrap();
-    let alloc = coordinator.forwarding.iface_nat_allocators.allocator_for(egress).expect("allocator");
-    let flow = crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.0.5".parse().unwrap(), dst_ip: "198.51.100.9".parse().unwrap(), src_port: 4000, dst_port: 80, routing_scope: 0 };
-    assert!(alloc.reserve_flow(flow, crate::nat::TranslatedTuple { ip: egress, port: 20000 }, 0, false, 1_000, NatHolder::Worker(3)));
+    let alloc = coordinator
+        .forwarding
+        .iface_nat_allocators
+        .allocator_for(egress)
+        .expect("allocator");
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "10.0.0.5".parse().unwrap(),
+        dst_ip: "198.51.100.9".parse().unwrap(),
+        src_port: 4000,
+        dst_port: 80,
+        routing_scope: 0,
+    };
+    assert!(alloc.reserve_flow(
+        flow,
+        crate::nat::TranslatedTuple {
+            ip: egress,
+            port: 20000
+        },
+        0,
+        false,
+        1_000,
+        NatHolder::Worker(3)
+    ));
     assert!(alloc.debug_is_port_occupied(0, 20000));
     coordinator.stop_preserving_forwarding();
-    assert!(!alloc.debug_is_port_occupied(0, 20000), "holder retirement through preserving stop must free the preserved allocator's port");
+    assert!(
+        !alloc.debug_is_port_occupied(0, 20000),
+        "holder retirement through preserving stop must free the preserved allocator's port"
+    );
     assert!(coordinator.workers.records().is_empty());
 }
 
@@ -14651,12 +14673,36 @@ fn stop_for_link_cycle_retires_holders_on_preserved_allocator_16549() {
     let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
     coordinator.workers.register(3, rec, None);
     let egress: std::net::IpAddr = "192.0.2.7".parse().unwrap();
-    let alloc = coordinator.forwarding.iface_nat_allocators.allocator_for(egress).expect("allocator");
-    let flow = crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.0.5".parse().unwrap(), dst_ip: "198.51.100.9".parse().unwrap(), src_port: 4000, dst_port: 80, routing_scope: 0 };
-    assert!(alloc.reserve_flow(flow, crate::nat::TranslatedTuple { ip: egress, port: 20000 }, 0, false, 1_000, NatHolder::Worker(3)));
+    let alloc = coordinator
+        .forwarding
+        .iface_nat_allocators
+        .allocator_for(egress)
+        .expect("allocator");
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "10.0.0.5".parse().unwrap(),
+        dst_ip: "198.51.100.9".parse().unwrap(),
+        src_port: 4000,
+        dst_port: 80,
+        routing_scope: 0,
+    };
+    assert!(alloc.reserve_flow(
+        flow,
+        crate::nat::TranslatedTuple {
+            ip: egress,
+            port: 20000
+        },
+        0,
+        false,
+        1_000,
+        NatHolder::Worker(3)
+    ));
     assert!(alloc.debug_is_port_occupied(0, 20000));
     coordinator.stop_for_link_cycle();
-    assert!(!alloc.debug_is_port_occupied(0, 20000), "#16549: holder retirement through link-cycle stop must free the preserved allocator's port");
+    assert!(
+        !alloc.debug_is_port_occupied(0, 20000),
+        "#16549: holder retirement through link-cycle stop must free the preserved allocator's port"
+    );
     assert!(coordinator.workers.records().is_empty());
 }
 
@@ -14671,18 +14717,45 @@ fn stop_for_link_cycle_holder_retirement_is_durable_after_plan_shrink_16549() {
     let rec = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
     coordinator.workers.register(3, rec, None);
     let egress: std::net::IpAddr = "192.0.2.7".parse().unwrap();
-    let alloc = coordinator.forwarding.iface_nat_allocators.allocator_for(egress).expect("allocator");
-    let flow = crate::nat::SourceNatFlowKey { protocol: 6, src_ip: "10.0.0.5".parse().unwrap(), dst_ip: "198.51.100.9".parse().unwrap(), src_port: 4000, dst_port: 80, routing_scope: 0 };
-    assert!(alloc.reserve_flow(flow, crate::nat::TranslatedTuple { ip: egress, port: 20000 }, 0, false, 1_000, NatHolder::Worker(3)));
+    let alloc = coordinator
+        .forwarding
+        .iface_nat_allocators
+        .allocator_for(egress)
+        .expect("allocator");
+    let flow = crate::nat::SourceNatFlowKey {
+        protocol: 6,
+        src_ip: "10.0.0.5".parse().unwrap(),
+        dst_ip: "198.51.100.9".parse().unwrap(),
+        src_port: 4000,
+        dst_port: 80,
+        routing_scope: 0,
+    };
+    assert!(alloc.reserve_flow(
+        flow,
+        crate::nat::TranslatedTuple {
+            ip: egress,
+            port: 20000
+        },
+        0,
+        false,
+        1_000,
+        NatHolder::Worker(3)
+    ));
     assert!(alloc.debug_is_port_occupied(0, 20000));
     coordinator.stop_for_link_cycle();
-    assert!(!alloc.debug_is_port_occupied(0, 20000), "#16549: link-cycle stop must retire worker 3's bit on the preserved allocator");
+    assert!(
+        !alloc.debug_is_port_occupied(0, 20000),
+        "#16549: link-cycle stop must retire worker 3's bit on the preserved allocator"
+    );
     // Later stop with a shrunken plan (worker 4 only, no worker 3) must
     // not resurrect or depend on same-id replay; the port stays free.
     let rec4 = WorkerRuntimeRecord::for_test(gre1881_fake_worker_handle());
     coordinator.workers.register(4, rec4, None);
     coordinator.stop_for_link_cycle();
-    assert!(!alloc.debug_is_port_occupied(0, 20000), "#16549: port must stay free after a later stop whose plan lacks worker 3");
+    assert!(
+        !alloc.debug_is_port_occupied(0, 20000),
+        "#16549: port must stay free after a later stop whose plan lacks worker 3"
+    );
     assert!(coordinator.workers.records().is_empty());
 }
 
@@ -14694,18 +14767,54 @@ fn coordinator_recovery_publish_advances_pptp_epoch_15966r7() {
     coord.publish_runtime_view();
     let candidate_epoch = coord.forwarding.pptp_epoch;
     let view_epoch = coord.ha.runtime.load().forwarding().pptp_epoch;
-    assert_eq!(view_epoch, candidate_epoch, "published view must carry the stamped epoch");
+    assert_eq!(
+        view_epoch, candidate_epoch,
+        "published view must carry the stamped epoch"
+    );
     // Failed bring-up teardown + recovery publish must advance the stamp.
     coord.stop_inner(false);
     coord.publish_runtime_view();
     let recovery_epoch = coord.forwarding.pptp_epoch;
-    assert!(recovery_epoch > candidate_epoch, "stop_inner must advance pptp epoch: candidate {candidate_epoch}, recovery {recovery_epoch}");
-    assert_eq!(coord.ha.runtime.load().forwarding().pptp_epoch, recovery_epoch);
+    assert!(
+        recovery_epoch > candidate_epoch,
+        "stop_inner must advance pptp epoch: candidate {candidate_epoch}, recovery {recovery_epoch}"
+    );
+    assert_eq!(
+        coord.ha.runtime.load().forwarding().pptp_epoch,
+        recovery_epoch
+    );
     // Fresh reply captured under the recovery view installs at drain.
     let inbox = crate::session::pptp_control::PptpControlInbox::default();
-    assert!(inbox.push(PendingControlSegment { epoch: recovery_epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 1, payload: vec![1] }));
-    assert_eq!(inbox.take_pending_in_domain(1_000_000_000, recovery_epoch).len(), 1, "fresh reply under recovery epoch must survive (RED if stop_inner epoch ops removed)");
+    assert!(inbox.push(PendingControlSegment {
+        epoch: recovery_epoch,
+        src: "198.51.100.7".parse().unwrap(),
+        dst: "203.0.113.9".parse().unwrap(),
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 1,
+        payload: vec![1]
+    }));
+    assert_eq!(
+        inbox
+            .take_pending_in_domain(1_000_000_000, recovery_epoch)
+            .len(),
+        1,
+        "fresh reply under recovery epoch must survive (RED if stop_inner epoch ops removed)"
+    );
     // Candidate-epoch entry still drops under recovery.
-    assert!(inbox.push(PendingControlSegment { epoch: candidate_epoch, src: "198.51.100.7".parse().unwrap(), dst: "203.0.113.9".parse().unwrap(), src_port: 1723, dst_port: 49152, captured_ns: 2, payload: vec![2] }));
-    assert_eq!(inbox.take_pending_in_domain(2_000_000_000, recovery_epoch).len(), 0);
+    assert!(inbox.push(PendingControlSegment {
+        epoch: candidate_epoch,
+        src: "198.51.100.7".parse().unwrap(),
+        dst: "203.0.113.9".parse().unwrap(),
+        src_port: 1723,
+        dst_port: 49152,
+        captured_ns: 2,
+        payload: vec![2]
+    }));
+    assert_eq!(
+        inbox
+            .take_pending_in_domain(2_000_000_000, recovery_epoch)
+            .len(),
+        0
+    );
 }

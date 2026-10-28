@@ -137,13 +137,6 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 		prometheus.GaugeValue,
 		float64(status.SessionReplicationQueueDepthMax))
 
-	// #2244: failed dnat_table reverse-SNAT BPF-map publishes. Also
-	// emitted unconditionally so a 0 is a real "no reverse-NAT publish
-	// failures" signal rather than an absent series.
-	c.emitConstMetric(ch, c.userspaceDnatPublishErrors,
-		prometheus.CounterValue,
-		float64(status.DnatPublishErrorsTotal))
-
 	// #5674: peer-synced session imports rejected by the coordinator's
 	// aggregate admission bound. Also emitted unconditionally so a 0 is a real
 	// "no over-ceiling synced imports rejected" signal rather than an absent

@@ -60,6 +60,9 @@ pub(crate) use policy_revalidation::{
     revalidate_zone_policy_revocation_for_test, revalidate_zone_policy_revokes_for_test,
     revalidate_zone_policy_sessionless_denies_for_test,
 };
+#[cfg(test)]
+#[path = "persistent_inbound_hold_16619_tests.rs"]
+mod persistent_inbound_hold_16619_tests;
 mod pmech_replay;
 #[cfg(test)]
 #[path = "poll_descriptor_structure_13081_tests.rs"]
@@ -69,9 +72,6 @@ mod resolver_enqueue;
 mod rx_telemetry;
 pub(in crate::afxdp) mod session_admission;
 mod session_hit_authority;
-#[cfg(test)]
-#[path = "persistent_inbound_hold_16619_tests.rs"]
-mod persistent_inbound_hold_16619_tests;
 
 use crate::nat::PersistentInbound;
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
@@ -115,12 +115,11 @@ use session_hit_authority::{
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
     SynCookieAckOutcome, ike_host_inbound_gate_context,
-    ike_host_inbound_gate_context_with_ambiguous, reinject_ipsec_passthrough,
-    screen_zone_roles, stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
-    stage_ipsec_passthrough_check_with_scope,
-    stage_link_layer_classify, stage_native_gre_decap, stage_parse_flow_and_learn,
-    stage_screen_check_with_ambiguous, stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous,
-    stage_wg_decap,
+    ike_host_inbound_gate_context_with_ambiguous, reinject_ipsec_passthrough, screen_zone_roles,
+    stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
+    stage_ipsec_passthrough_check_with_scope, stage_link_layer_classify, stage_native_gre_decap,
+    stage_parse_flow_and_learn, stage_screen_check_with_ambiguous,
+    stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous, stage_wg_decap,
 };
 use super::*;
 use crate::policy::evaluate_policy_result_with_icmp_at;
@@ -527,8 +526,7 @@ fn record_ipsec_sa_miss_sample(
 
 use cookie_reply::{
     SynCookieReply, enqueue_syn_cookie_reply, syn_cookie_challenge_is_session_miss,
-    syn_cookie_final_admission, syn_cookie_final_admission_with_fence,
-    syn_cookie_host_admission,
+    syn_cookie_final_admission, syn_cookie_final_admission_with_fence, syn_cookie_host_admission,
 };
 use nat_exception::record_source_nat_failure;
 use prerouting_scope::{
@@ -741,7 +739,6 @@ pub(super) fn acquire_persistent_inbound_hold(
     None
 }
 
-
 /// #15111: drop an inbound hold that will not be anchored by a session.
 pub(super) fn rollback_persistent_inbound_hold(
     forwarding: &crate::afxdp::ForwardingState,
@@ -928,8 +925,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 let raw_frame = if let Some(owned) = replay_owned_frame.take() {
                     replay_scratch_frame = owned;
                     replay_scratch_frame.as_slice()
-                } else if let Some(slice) =
-                    area.area().slice(desc.addr as usize, desc.len as usize)
+                } else if let Some(slice) = area.area().slice(desc.addr as usize, desc.len as usize)
                 {
                     slice
                 } else {
@@ -1363,14 +1359,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // packet; tunnel-decapped inners are judged on their
                 // own (inner) frame and hop limit.
                 if !worker_ctx.forwarding.no_ipv6_reject_zero_hop_limit {
-                    let zero_hop_dst = flow
-                        .as_ref()
-                        .map(|f| f.dst_ip)
-                        .or_else(|| {
-                            crate::afxdp::frame::parse_packet_destination_from_frame(
-                                packet_frame,
-                                meta,
-                            )
+                    let zero_hop_dst = flow.as_ref().map(|f| f.dst_ip).or_else(|| {
+                        crate::afxdp::frame::parse_packet_destination_from_frame(packet_frame, meta)
                         });
                     if let Some(dst) = zero_hop_dst {
                         let dst_is_local = matches!(
@@ -1512,11 +1502,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // selected on the miss path. Keep only the live-
                             // session retransmit guard at this early stage;
                             // final admission below is authoritative.
-                            if syn_cookie_challenge_is_session_miss(
-                                sessions,
-                                flow.as_ref(),
-                                now_ns,
-                            ) {
+                            if syn_cookie_challenge_is_session_miss(sessions, flow.as_ref(), now_ns)
+                            {
                                 deferred_syn_cookie_challenge = Some(challenge);
                             } else {
                                 binding.scratch.scratch_recycle.push(desc.addr);
@@ -2390,8 +2377,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         if crate::tcp_flags::is_closing(meta.tcp_flags)
                             && !worker_ctx.forwarding.tcp_no_sequence_check
                         {
-                            if sessions.tcp_closing_seq_verdict(&fl.forward_key, seq, meta.tcp_flags)
-                                == crate::session::SeqVerdict::Invalid
+                            if sessions.tcp_closing_seq_verdict(
+                                &fl.forward_key,
+                                seq,
+                                meta.tcp_flags,
+                            ) == crate::session::SeqVerdict::Invalid
                             {
                                 binding.scratch.scratch_recycle.push(desc.addr);
                                 continue;
@@ -2731,7 +2721,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
                                     peer_worker_commands: worker_ctx.peer_worker_commands,
                                     worker_commands_by_id: worker_ctx.worker_commands_by_id,
-                                    conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                                    conntrack: crate::afxdp::session_glue::ConntrackFds {
+                                        v4: conntrack_v4_fd,
+                                        v6: conntrack_v6_fd,
+                                    },
                                     tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
                                 },
                                 worker_ctx.forwarding,
@@ -2867,7 +2860,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
                                     peer_worker_commands: worker_ctx.peer_worker_commands,
                                     worker_commands_by_id: worker_ctx.worker_commands_by_id,
-                                    conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                                    conntrack: crate::afxdp::session_glue::ConntrackFds {
+                                        v4: conntrack_v4_fd,
+                                        v6: conntrack_v6_fd,
+                                    },
                                     tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
                                 },
                                 worker_ctx.forwarding,
@@ -2897,7 +2893,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // calls — no second copy to drift.
                         if foreign_arrival_zone.is_none() {
                             crate::afxdp::session_glue::apply_deferred_forwarding_revalidation(
-                                sessions, &mut resolved,
+                                sessions,
+                                &mut resolved,
                             );
                         }
                         // #13938: replay every local-hit mutation only after
@@ -3392,11 +3389,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         crate::afxdp::session_glue::SharedSessionRefs {
                                             sessions: worker_ctx.shared_sessions,
                                             nat_sessions: worker_ctx.shared_nat_sessions,
-                                            forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
+                                            forward_wire_sessions: worker_ctx
+                                                .shared_forward_wire_sessions,
                                             owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
                                             peer_worker_commands: worker_ctx.peer_worker_commands,
                                             worker_commands_by_id: worker_ctx.worker_commands_by_id,
-                                            conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                                            conntrack: crate::afxdp::session_glue::ConntrackFds {
+                                                v4: conntrack_v4_fd,
+                                                v6: conntrack_v6_fd,
+                                            },
                                             tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
                                         },
                                         worker_ctx.forwarding,
@@ -3665,11 +3666,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     crate::afxdp::session_glue::SharedSessionRefs {
                                         sessions: worker_ctx.shared_sessions,
                                         nat_sessions: worker_ctx.shared_nat_sessions,
-                                        forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
+                                        forward_wire_sessions: worker_ctx
+                                            .shared_forward_wire_sessions,
                                         owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
                                         peer_worker_commands: worker_ctx.peer_worker_commands,
                                         worker_commands_by_id: worker_ctx.worker_commands_by_id,
-                                        conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                                        conntrack: crate::afxdp::session_glue::ConntrackFds {
+                                            v4: conntrack_v4_fd,
+                                            v6: conntrack_v6_fd,
+                                        },
                                         tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
                                     },
                                     worker_ctx.forwarding,
@@ -3936,12 +3941,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             crate::afxdp::session_glue::SharedSessionRefs {
                                                 sessions: worker_ctx.shared_sessions,
                                                 nat_sessions: worker_ctx.shared_nat_sessions,
-                                                forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
-                                                owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
-                                                peer_worker_commands: worker_ctx.peer_worker_commands,
-                                                worker_commands_by_id: worker_ctx.worker_commands_by_id,
-                                                conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
-                                                tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
+                                                forward_wire_sessions: worker_ctx
+                                                    .shared_forward_wire_sessions,
+                                                owner_rg_indexes: &worker_ctx
+                                                    .shared_owner_rg_indexes,
+                                                peer_worker_commands: worker_ctx
+                                                    .peer_worker_commands,
+                                                worker_commands_by_id: worker_ctx
+                                                    .worker_commands_by_id,
+                                                conntrack:
+                                                    crate::afxdp::session_glue::ConntrackFds {
+                                                        v4: conntrack_v4_fd,
+                                                        v6: conntrack_v6_fd,
+                                                    },
+                                                tick: crate::afxdp::session_glue::Tick::from_ns(
+                                                    now_ns,
+                                                ),
                                             },
                                             worker_ctx.forwarding,
                                             &resolved.key,
@@ -4019,12 +4034,22 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 crate::afxdp::session_glue::SharedSessionRefs {
                                                     sessions: worker_ctx.shared_sessions,
                                                     nat_sessions: worker_ctx.shared_nat_sessions,
-                                                    forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
-                                                    owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
-                                                    peer_worker_commands: worker_ctx.peer_worker_commands,
-                                                    worker_commands_by_id: worker_ctx.worker_commands_by_id,
-                                                    conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
-                                                    tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
+                                                    forward_wire_sessions: worker_ctx
+                                                        .shared_forward_wire_sessions,
+                                                    owner_rg_indexes: &worker_ctx
+                                                        .shared_owner_rg_indexes,
+                                                    peer_worker_commands: worker_ctx
+                                                        .peer_worker_commands,
+                                                    worker_commands_by_id: worker_ctx
+                                                        .worker_commands_by_id,
+                                                    conntrack:
+                                                        crate::afxdp::session_glue::ConntrackFds {
+                                                            v4: conntrack_v4_fd,
+                                                            v6: conntrack_v6_fd,
+                                                        },
+                                                    tick: crate::afxdp::session_glue::Tick::from_ns(
+                                                        now_ns,
+                                                    ),
                                                 },
                                                 worker_ctx.forwarding,
                                                 &resolved.key,
@@ -4099,11 +4124,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     crate::afxdp::session_glue::SharedSessionRefs {
                                         sessions: worker_ctx.shared_sessions,
                                         nat_sessions: worker_ctx.shared_nat_sessions,
-                                        forward_wire_sessions: worker_ctx.shared_forward_wire_sessions,
+                                        forward_wire_sessions: worker_ctx
+                                            .shared_forward_wire_sessions,
                                         owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
                                         peer_worker_commands: worker_ctx.peer_worker_commands,
                                         worker_commands_by_id: worker_ctx.worker_commands_by_id,
-                                        conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                                        conntrack: crate::afxdp::session_glue::ConntrackFds {
+                                            v4: conntrack_v4_fd,
+                                            v6: conntrack_v6_fd,
+                                        },
                                         tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
                                     },
                                     worker_ctx.forwarding,
@@ -4135,10 +4164,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     resolved.metadata.policy_counter_idx,
                                 )
                             {
-                                crate::policy::record_policy_hit_counter(
-                                    counter,
-                                    meta.pkt_len as u64,
-                                );
+                            crate::policy::record_policy_hit_counter(counter, meta.pkt_len as u64);
                             }
                         // TTL/hop-limit check on session-hit path: generate
                         // ICMP Time Exceeded for packets that would expire
@@ -4308,9 +4334,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // egress RG this node proved it owns. The
                         // recovery restores only candidates under
                         // that RG, re-resolved in that table.
-                        let adopted_recovery = if fabric_link_ingress
-                            && !crate::tcp_flags::has_syn(meta.tcp_flags)
-                        {
+                        let adopted_recovery =
+                            if fabric_link_ingress && !crate::tcp_flags::has_syn(meta.tcp_flags) {
                             crate::afxdp::shared_ops::fabric_adoption_recovery_for_wire(
                                 worker_ctx.forwarding,
                                 worker_ctx.ha_state,
@@ -4341,8 +4366,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 &flow.forward_key,
                                 now_ns,
                                 worker_ctx.dynamic_neighbors,
-                            )
-                        {
+                            ) {
                             resolve_flow_session_decision_with_conntrack_and_payload_and_ack(
                                     sessions,
                                     binding.bpf_maps.session_map.handle(),
@@ -4353,7 +4377,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         owner_rg_indexes: &worker_ctx.shared_owner_rg_indexes,
                                         peer_worker_commands: worker_ctx.peer_worker_commands,
                                         worker_commands_by_id: worker_ctx.worker_commands_by_id,
-                                        conntrack: crate::afxdp::session_glue::ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                                    conntrack: crate::afxdp::session_glue::ConntrackFds {
+                                        v4: conntrack_v4_fd,
+                                        v6: conntrack_v6_fd,
+                                    },
                                         tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
                                     },
                                     worker_ctx.forwarding,
@@ -4556,7 +4583,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         let static_dnat_decision = if ndp_hop255 {
                             None
                         } else if scope_ambiguous {
-                            worker_ctx.forwarding.static_nat.match_dnat_ambiguous_provenance_scoped(
+                                worker_ctx
+                                    .forwarding
+                                    .static_nat
+                                    .match_dnat_ambiguous_provenance_scoped(
                                 resolution_target,
                                 flow.forward_key.dst_port,
                                 Some(flow.forward_key.src_ip),
@@ -4565,7 +4595,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ingress_ri_dnat,
                             )
                         } else {
-                            worker_ctx.forwarding.static_nat.match_dnat_with_counter_scoped(
+                                worker_ctx
+                                    .forwarding
+                                    .static_nat
+                                    .match_dnat_with_counter_scoped(
                                 resolution_target,
                                 flow.forward_key.dst_port,
                                 Some(flow.forward_key.src_ip),
@@ -4682,7 +4715,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #16045: tri-state form fails closed on
                             // scope-constrained matches under ambiguous provenance.
                             let (lookup, counter) = if scope_ambiguous {
-                                worker_ctx.forwarding.dnat_table.lookup_result_ambiguous_provenance_scoped(
+                                    worker_ctx
+                                        .forwarding
+                                        .dnat_table
+                                        .lookup_result_ambiguous_provenance_scoped(
                                     meta.protocol,
                                     flow.forward_key.src_ip,
                                     resolution_target,
@@ -4694,7 +4730,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     dnat_packet_icmp,
                                 )
                             } else {
-                                worker_ctx.forwarding.dnat_table.lookup_result_with_counter_scoped(
+                                    worker_ctx
+                                        .forwarding
+                                        .dnat_table
+                                        .lookup_result_with_counter_scoped(
                                     meta.protocol,
                                     flow.forward_key.src_ip,
                                     resolution_target,
@@ -4764,9 +4803,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // zone (security-domain crossing).
                                 // #16045: ambiguous provenance fails closed on a zone-scoped claim.
                                 let nptv6_result = if scope_ambiguous {
-                                    worker_ctx.forwarding.nptv6.translate_inbound_ambiguous_provenance_result(&mut dst_v6, ingress_zone_name)
+                                        worker_ctx
+                                            .forwarding
+                                            .nptv6
+                                            .translate_inbound_ambiguous_provenance_result(
+                                                &mut dst_v6,
+                                                ingress_zone_name,
+                                            )
                                 } else {
-                                    worker_ctx.forwarding.nptv6.translate_inbound_result(&mut dst_v6, ingress_zone_name)
+                                        worker_ctx.forwarding.nptv6.translate_inbound_result(
+                                            &mut dst_v6,
+                                            ingress_zone_name,
+                                        )
                                 };
                                 match nptv6_result {
                                     crate::nptv6::Nptv6Translation::Translated => {
@@ -4775,7 +4823,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     crate::nptv6::Nptv6Translation::NoMatch => None,
                                     crate::nptv6::Nptv6Translation::Untranslatable => {
-                                        worker_ctx.forwarding.nptv6.record_untranslatable_drop();
+                                            worker_ctx
+                                                .forwarding
+                                                .nptv6
+                                                .record_untranslatable_drop();
                                         // Untranslatable is terminal: RFC
                                         // §3.7's all-zero IID is an explicit
                                         // MUST-drop; §3.2 directs discard of
@@ -4806,8 +4857,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // fail-OPEN that could leak it upstream on a default
                         // IPv6 route. Now MatchUnavailable fails CLOSED (drop +
                         // counter); only NoPrefixMatch continues IPv6 routing.
-                        let nat64_match =
-                            if !ndp_hop255 && pre_routing_dnat.is_none() && nptv6_inbound.is_none()
+                            let nat64_match = if !ndp_hop255
+                                && pre_routing_dnat.is_none()
+                                && nptv6_inbound.is_none()
                             {
                                 if let IpAddr::V6(dst_v6) = resolution_target {
                                     // #5623: gate on SOURCE eligibility BEFORE any
@@ -4834,7 +4886,15 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             if scope_ambiguous {
                                                 worker_ctx.forwarding.nat64.classify_ipv6_packet_ambiguous_provenance_scoped(src_v6, dst_v6, ingress_zone_name, ingress_ri_dnat)
                                             } else {
-                                                worker_ctx.forwarding.nat64.classify_ipv6_packet_scoped(src_v6, dst_v6, ingress_zone_name, ingress_ri_dnat)
+                                                worker_ctx
+                                                    .forwarding
+                                                    .nat64
+                                                    .classify_ipv6_packet_scoped(
+                                                        src_v6,
+                                                        dst_v6,
+                                                        ingress_zone_name,
+                                                        ingress_ri_dnat,
+                                                    )
                                             }
                                         }
                                         IpAddr::V4(_) => {
@@ -4898,8 +4958,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 None
                             };
 
-                        let effective_resolution_target = if let Some((_, dst_v4, _)) = &nat64_match
-                        {
+                            let effective_resolution_target =
+                                if let Some((_, dst_v4, _)) = &nat64_match {
                             IpAddr::V4(*dst_v4)
                         } else if let Some(internal_dst) = nptv6_inbound {
                             IpAddr::V6(internal_dst)
@@ -5326,7 +5386,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // CONSTRUCTION; stamping the gated value at install while the
                         // consult can only see the raw one would desynchronize them
                         // and turn legitimate same-domain fragments into misses.
-                        let frag_authority_zone_override = ingress_zone_override.or(ambiguous_zone);
+                            let frag_authority_zone_override =
+                                ingress_zone_override.or(ambiguous_zone);
                         let frag_authority_nat_scope_ifindex =
                             ingress_nat_scope_ifindex.or(ambiguous_scope_ifindex);
                         let ingress_zone_override = gate_fabric_zone_override_on_owner_rg(
@@ -5499,7 +5560,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // with no screen state leaves the flag pending for the
                         // next screened-zone packet's drain instead of clearing
                         // it unserved.
-                        if screen.zone_has_screen_state(from_zone) && screen.take_syn_alarm_event()
+                            if screen.zone_has_screen_state(from_zone)
+                                && screen.take_syn_alarm_event()
                         {
                             emit_screen_alarm_event(
                                 worker_ctx.event_stream,
@@ -5952,8 +6014,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // effective protocol — a v6+AH non-SYN must not be
                         // dropped as a TCP miss (it is flowless proto 51, and
                         // v4+AH never reaches this gate as TCP).
-                        let syn_protocol =
-                            crate::afxdp::frame::flowless_effective_protocol(packet_frame, meta);
+                            let syn_protocol = crate::afxdp::frame::flowless_effective_protocol(
+                                packet_frame,
+                                meta,
+                            );
                         // #16007: a tiny first fragment's flags are UNKNOWN,
                         // so it fails closed on LocalDelivery too — the one
                         // disposition the proven-flags gate exempts. A proven
@@ -5981,9 +6045,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             worker_ctx.forwarding.tcp_no_syn_check,
                             worker_ctx.forwarding.tcp_strict_syn_check,
                             worker_ctx.forwarding.tcp_no_syn_check_in_tunnel,
-                            meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG != 0,
+                                    meta.meta_flags & crate::afxdp::icmp::TUNNEL_DECAP_INGRESS_FLAG
+                                        != 0,
                             tcp_payload_len(packet_frame, meta),
-                        ) {
+                                )
+                            {
                             // #11304: Junos `tcp-rst` applies at this transit
                             // session-miss drop, never at a policy-deny site.
                             let _ = enqueue_session_miss_rst(
@@ -6042,7 +6108,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         flow.forward_key.src_port,
                                         flow.forward_key.dst_ip,
                                         flow.forward_key.dst_port,
-                                        count_bpf_session_entries(binding.bpf_maps.session_map.fd),
+                                            count_bpf_session_entries(
+                                                binding.bpf_maps.session_map.fd
+                                            ),
                                         sessions.len(),
                                     );
                                     // Dump all local sessions to compare
@@ -6378,7 +6446,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #12863: preserve the matched junos-host permit's
                                 // application idle timeout; no-match sessions
                                 // retain the use-global sentinel.
-                                inactivity_timeout_ns: crate::session::app_inactivity_timeout_ns(
+                                    inactivity_timeout_ns:
+                                        crate::session::app_inactivity_timeout_ns(
                                     host_inactivity_timeout,
                                 ),
                                 // #3073/#3706: the admitting junos-host rule's
@@ -6457,7 +6526,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #17012: LocalMiss already sheds victims for
                             // #16532; share the same teardown, including its
                             // lease-failure refusal and worker-wide cache fence.
-                            let local_shed_teardown_allowed = if local_pressure_shed.is_empty() {
+                                let local_shed_teardown_allowed = if local_pressure_shed.is_empty()
+                                {
                                 true
                             } else {
                                 let session_map = binding.bpf_maps.session_map.handle();
@@ -6471,7 +6541,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         session_map,
                                         conntrack_v4_fd,
                                         conntrack_v6_fd,
-                                        dnat_fds: worker_ctx.dnat_fds,
                                         worker_id,
                                         peer_worker_commands: worker_ctx.peer_worker_commands,
                                         worker_commands_by_id: worker_ctx.worker_commands_by_id,
@@ -6523,7 +6592,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // Fail closed — count the refusal and recycle. This
                             // covers both the capacity-refused arm and an
                             // install-helper failure after a passing preflight.
-                            if local_session_capacity_available && local_shed_teardown_allowed
+                                if local_session_capacity_available
+                                    && local_shed_teardown_allowed
                                 && install_helper_local_session_on_miss(
                                     sessions,
                                     binding.bpf_maps.session_map.handle(),
@@ -6556,7 +6626,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     decision.nat,
                                     now_ns,
                                 ) {
-                                    sessions.set_persistent_lease_hold(&flow.forward_key, Some(hold));
+                                        sessions.set_persistent_lease_hold(
+                                            &flow.forward_key,
+                                            Some(hold),
+                                        );
                                     persistent_lease_hold_outer = None;
                                 }
                                 telemetry.counters.session_creates += 1;
@@ -6596,9 +6669,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // #5213: stamp the stable id from the installed
                                 // host-local entry so the mirror row matches
                                 // RT_FLOW.
-                                let install_info = sessions
-                                    .installed_session_info(&flow.forward_key)
-                                    .expect("successful local session install has a table entry");
+                                    let install_info =
+                                        sessions.installed_session_info(&flow.forward_key).expect(
+                                            "successful local session install has a table entry",
+                                        );
                                 let session_id = install_info.session_id;
                                 // #13926: anchor an admitted host-bound first
                                 // fragment to its LocalMiss session. Non-first
@@ -6669,8 +6743,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         if decision.resolution.disposition
                             == ForwardingDisposition::ForwardCandidate
                         {
-                            let owner_rg_id =
-                                owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
+                                let owner_rg_id = owner_rg_for_resolution(
+                                    worker_ctx.forwarding,
+                                    decision.resolution,
+                                );
                             flow_cache_owner_rg_id = owner_rg_id;
                             // #850: allow-dns-reply admits sessionless DNS replies
                             // through policy (not around it). Always evaluate policy;
@@ -6685,7 +6761,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             let (cp_sample_tag, cp_t_in) = {
                                 let cp = &mut binding.cold_path;
                                 cp.sample_phase = cp.sample_phase.wrapping_add(1);
-                                let tag = (cp.sample_phase & worker_ctx.cold_path_sample_mask) == 0;
+                                    let tag =
+                                        (cp.sample_phase & worker_ctx.cold_path_sample_mask) == 0;
                                 let t = if tag {
                                     crate::afxdp::cold_path_hist::sample_tsc_start()
                                 } else {
@@ -6723,14 +6800,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 },
                                 Some(miss_class_verdict),
                             );
-                            let policy_result =
-                                crate::policy::count_policy_evaluation_result(
+                                let policy_result = crate::policy::count_policy_evaluation_result(
                                     &worker_ctx.forwarding.policy,
                                     from_zone_id,
                                     to_zone_id,
-                                    admission_verdict
-                                        .policy_result
-                                        .expect("class-admitted ForwardCandidate has policy result"),
+                                    admission_verdict.policy_result.expect(
+                                        "class-admitted ForwardCandidate has policy result",
+                                    ),
                                     meta.pkt_len as u64,
                                 );
                             // #1620: cold-path latency histogram post-eval record.
@@ -6740,7 +6816,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 let q32 = binding.cold_path.ns_per_tsc_q32;
                                 if q32 != 0 {
                                     let delta_tsc = t_out.saturating_sub(cp_t_in);
-                                    let raw_ns = ((delta_tsc as u128 * q32 as u128) >> 32) as u64;
+                                        let raw_ns =
+                                            ((delta_tsc as u128 * q32 as u128) >> 32) as u64;
                                     let baseline = binding.cold_path.wrapper_ns_baseline;
                                     let delta_ns = if raw_ns < baseline {
                                         binding.cold_path.wrapper_underflow_count = binding
@@ -6755,11 +6832,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // skip the sample on a miss
                                     // (capacity exhausted or zone-id
                                     // ≥ 65).
-                                    if let Some(slot) = crate::afxdp::cold_path_hist::lookup_slot(
+                                        if let Some(slot) =
+                                            crate::afxdp::cold_path_hist::lookup_slot(
                                         &worker_ctx.forwarding.cold_path_slot_map,
                                         from_zone_id,
                                         to_zone_id,
-                                    ) {
+                                            )
+                                        {
                                         binding.cold_path.record_sample(
                                             slot,
                                             from_zone_id,
@@ -6859,8 +6938,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.addr_family,
                                         )
                                 };
-                                let nat64_info = if let Some((prefix_idx, dst_v4, orig_dst_v6)) =
-                                    nat64_match
+                                    let nat64_info = if let Some((
+                                        prefix_idx,
+                                        dst_v4,
+                                        orig_dst_v6,
+                                    )) = nat64_match
                                 {
                                     // #4381: allocate a UNIQUE translated
                                     // (pool v4 source, L4 port/identifier) for
@@ -6875,7 +6957,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         IpAddr::V6(v6) => v6,
                                         _ => std::net::Ipv6Addr::UNSPECIFIED,
                                     };
-                                    match worker_ctx.forwarding.nat64.allocate_source_for_worker(
+                                        match worker_ctx
+                                            .forwarding
+                                            .nat64
+                                            .allocate_source_for_worker(
                                         prefix_idx,
                                         // #17072: the flow's own SessionKey carries
                                         // protocol/ports and its routing domain
@@ -6939,7 +7024,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             // from a config/empty pool
                                             // (nat64_no_source_pool) — the reason
                                             // is carried on the Err.
-                                            telemetry.counters.record_nat64_source_failure(reason);
+                                                telemetry
+                                                    .counters
+                                                    .record_nat64_source_failure(reason);
                                             binding.scratch.scratch_recycle.push(desc.addr);
                                             continue;
                                         }
@@ -7037,7 +7124,11 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             worker_ctx
                                                 .forwarding
                                                 .bindless_ipsec_selector_fence
-                                                .matches_with_nat(source, destination, decision.nat)
+                                                    .matches_with_nat(
+                                                        source,
+                                                        destination,
+                                                        decision.nat,
+                                                    )
                                         })
                                 {
                                     if let Some(release_key) = source_nat_release_key.as_ref() {
@@ -7215,7 +7306,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // case (DNS fast-path, LocalDelivery): no
                                     // install is attempted and nothing changes.
                                     let needed_sessions = usize::from(track_in_userspace)
-                                        + usize::from(track_in_userspace && install_local_reverse);
+                                            + usize::from(
+                                                track_in_userspace && install_local_reverse,
+                                            );
                                     // The local closing rows will be reclaimed
                                     // only after this read-only capacity check,
                                     // so account for exactly the slots the
@@ -7253,11 +7346,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // NAT release, and peer replication.
                                     // A contended lease defers external cleanup
                                     // and makes every admission caller refuse.
-                                    let shed_teardown_allowed = if pressure_shed_sessions.is_empty() {
+                                        let shed_teardown_allowed = if pressure_shed_sessions
+                                            .is_empty()
+                                        {
                                         true
                                     } else {
-                                        let session_map =
-                                            binding.bpf_maps.session_map.handle();
+                                            let session_map = binding.bpf_maps.session_map.handle();
                                         let current_ifindex = binding.ifindex;
                                         let flow_cache = &mut binding.flow.flow_cache;
                                         session_admission::teardown_pressure_shed_victims(
@@ -7268,7 +7362,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 session_map,
                                                 conntrack_v4_fd,
                                                 conntrack_v6_fd,
-                                                dnat_fds: worker_ctx.dnat_fds,
                                                 worker_id,
                                                 peer_worker_commands: worker_ctx
                                                     .peer_worker_commands,
@@ -7365,7 +7458,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     // For NAT64: the reverse key is IPv4 (different AF
                                     // from the forward IPv6 key). The reply arrives as
                                     // IPv4: src=dst_v4, dst=snat_v4.
-                                    let (reverse_key, reverse_protocol) = if nat64_info.is_some() {
+                                        let (reverse_key, reverse_protocol) = if nat64_info
+                                            .is_some()
+                                        {
                                         let nat = decision.nat;
                                         let dst_v4 = match nat.rewrite_dst {
                                             Some(IpAddr::V4(v4)) => v4,
@@ -7396,8 +7491,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         let translated_l4 = nat
                                             .rewrite_src_port
                                             .unwrap_or(flow.forward_key.src_port);
-                                        let (src_port, dst_port) =
-                                            if matches!(meta.protocol, PROTO_ICMP | PROTO_ICMPV6) {
+                                            let (src_port, dst_port) = if matches!(
+                                                meta.protocol,
+                                                PROTO_ICMP | PROTO_ICMPV6
+                                            ) {
                                                 (translated_l4, flow.forward_key.dst_port)
                                             } else {
                                                 (flow.forward_key.dst_port, translated_l4)
@@ -7569,14 +7666,18 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 meta.tcp_flags,
                                                 source_nat_static,
                                             );
-                                    let forward_install_info = forward_installed.then(|| {
+                                        let forward_install_info =
+                                            forward_installed.then(|| {
                                         sessions
                                             .installed_session_info(&flow.forward_key)
                                             .expect("successful forward install has a table entry")
                                     });
                                     if forward_installed {
                                         if let Some(hold) = persistent_inbound_acquired {
-                                            sessions.set_persistent_lease_hold(&flow.forward_key, Some(hold));
+                                                sessions.set_persistent_lease_hold(
+                                                    &flow.forward_key,
+                                                    Some(hold),
+                                                );
                                         }
                                     }
                                     if forward_installed {
@@ -7846,20 +7947,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             &worker_ctx.shared_owner_rg_indexes,
                                             &forward_entry,
                                         );
-                                        // Populate BPF dnat_table for embedded ICMP NAT reversal.
-                                        // Without this, mtr/traceroute intermediate hops are invisible.
-                                        // #2244: a failed map publish silently loses the reverse
-                                        // record — count it so map pressure is operator-visible.
-                                        if !publish_dnat_table_entry(
-                                            &worker_ctx.dnat_fds,
-                                            &flow.forward_key,
-                                            decision.nat,
-                                        ) {
-                                            binding
-                                                .live
-                                                .dnat_publish_errors
-                                                .fetch_add(1, Ordering::Relaxed);
-                                        }
                                         replicate_session_upsert(
                                             worker_ctx.peer_worker_commands,
                                             worker_ctx.worker_commands_by_id,
@@ -8021,8 +8108,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     }
                                     if reverse_installed {
                                         if let Some(incarnation) = reverse_leak_incarnation {
-                                            sessions
-                                                .stamp_leak_incarnation(&reverse_key, incarnation);
+                                                sessions.stamp_leak_incarnation(
+                                                    &reverse_key,
+                                                    incarnation,
+                                                );
                                         }
                                         // #1789: count failed reverse-key
                                         // publishes (was `let _ =`; the
@@ -8122,10 +8211,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             }
                                         }
                                         created += 1;
-                                        let reverse_entry = SyncedSessionEntry { key: reverse_key,
+                                            let reverse_entry = SyncedSessionEntry {
+                                                key: reverse_key,
                                         decision: reverse_decision,
                                         metadata: reverse_metadata,
-                                        leak_incarnation: reverse_leak_incarnation.unwrap_or(0),
+                                                leak_incarnation: reverse_leak_incarnation
+                                                    .unwrap_or(0),
                                         origin: SessionOrigin::ReverseFlow,
                                         protocol: meta.protocol,
                                         tcp_flags: meta.tcp_flags,
@@ -8135,11 +8226,17 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // RT_FLOW (is_reverse skip) and gets its own
                                         // fresh id at install — no carried id.
                                         session_id: 0,
-                                        tcp_close_class: 0, tcp_handshake_state: forward_install_info
+                                                tcp_close_class: 0,
+                                                tcp_handshake_state: forward_install_info
                                             .expect("installed forward session info")
-                                            .handshake_state_wire, rev_packets: sessions.rev_packets_for(&flow.forward_key), fwd_packets: 0, pptp_call_ids: 0,
+                                                    .handshake_state_wire,
+                                                rev_packets: sessions
+                                                    .rev_packets_for(&flow.forward_key),
+                                                fwd_packets: 0,
+                                                pptp_call_ids: 0,
                                         persistent_lease_hold: None,
-                                        source_nat_static: None, };
+                                                source_nat_static: None,
+                                            };
                                         publish_shared_session(
                                             worker_ctx.shared_sessions,
                                             worker_ctx.shared_nat_sessions,
@@ -8284,7 +8381,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             let owner_rg_id = if terminal_source > 0 {
                                 owner_rg_for_flow(worker_ctx.forwarding, terminal_source)
                             } else {
-                                owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution)
+                                    owner_rg_for_resolution(
+                                        worker_ctx.forwarding,
+                                        decision.resolution,
+                                    )
                             };
                             if owner_rg_id > 0 {
                                 flow_cache_owner_rg_id = owner_rg_id;
@@ -8378,7 +8478,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     session_map,
                                                     conntrack_v4_fd,
                                                     conntrack_v6_fd,
-                                                    dnat_fds: worker_ctx.dnat_fds,
                                                     worker_id,
                                                     peer_worker_commands: worker_ctx
                                                         .peer_worker_commands,
@@ -8515,8 +8614,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // a defensive nicety — are documented on that
                             // function, which is a function precisely so they can
                             // be driven directly.
-                            let owner_rg_id =
-                                owner_rg_for_resolution(worker_ctx.forwarding, decision.resolution);
+                                let owner_rg_id = owner_rg_for_resolution(
+                                    worker_ctx.forwarding,
+                                    decision.resolution,
+                                );
                             if let Some(seed_metadata) = fabric_punt_seed_metadata(
                                 worker_ctx.forwarding,
                                 route_from_zone_id,
@@ -8552,8 +8653,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         } else {
                                             sessions.can_admit(1)
                                         };
-                                    let (admission_allowed, pressure_shed_sessions) = if reuse_fits
-                                    {
+                                        let (admission_allowed, pressure_shed_sessions) =
+                                            if reuse_fits {
                                         (true, crate::session::PressureShedSessions::new())
                                     } else {
                                         sessions.can_admit_new_flow(
@@ -8562,12 +8663,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             meta.tcp_flags,
                                         )
                                     };
-                                    let shed_teardown_allowed =
-                                        if pressure_shed_sessions.is_empty() {
+                                        let shed_teardown_allowed = if pressure_shed_sessions
+                                            .is_empty()
+                                        {
                                             true
                                         } else {
-                                            let session_map =
-                                                binding.bpf_maps.session_map.handle();
+                                            let session_map = binding.bpf_maps.session_map.handle();
                                             let current_ifindex = binding.ifindex;
                                             let flow_cache = &mut binding.flow.flow_cache;
                                             session_admission::teardown_pressure_shed_victims(
@@ -8578,7 +8679,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                     session_map,
                                                     conntrack_v4_fd,
                                                     conntrack_v6_fd,
-                                                    dnat_fds: worker_ctx.dnat_fds,
                                                     worker_id,
                                                     peer_worker_commands: worker_ctx
                                                         .peer_worker_commands,
@@ -8652,7 +8752,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 decision.nat,
                                                 now_ns,
                                             ) {
-                                                sessions.set_persistent_lease_hold(&flow.forward_key, Some(hold));
+                                                    sessions.set_persistent_lease_hold(
+                                                        &flow.forward_key,
+                                                        Some(hold),
+                                                    );
                                                 persistent_lease_hold_outer = None;
                                             }
                                         }
@@ -9247,9 +9350,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 policy_icmp,
                                             ))
                                         }
-                                        PendingForwardFrame::PrebuiltTransit {
-                                            frame, ..
-                                        } => Some(enforce_queued_embedded_icmp_policy(
+                                        PendingForwardFrame::PrebuiltTransit { frame, .. } => {
+                                            Some(enforce_queued_embedded_icmp_policy(
                                             frame,
                                             meta,
                                             ingress_zone_override,
@@ -9261,7 +9363,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             related_admit,
                                             policy_src_ip,
                                             policy_icmp,
-                                        )),
+                                            ))
+                                        }
                                         _ => None,
                                     })
                                     .unwrap_or(false);
@@ -9396,9 +9499,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 policy_icmp,
                                             ))
                                         }
-                                        PendingForwardFrame::PrebuiltTransit {
-                                            frame, ..
-                                        } => Some(enforce_queued_embedded_icmp_policy(
+                                        PendingForwardFrame::PrebuiltTransit { frame, .. } => {
+                                            Some(enforce_queued_embedded_icmp_policy(
                                             frame,
                                             meta,
                                             ingress_zone_override,
@@ -9410,7 +9512,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             related_admit,
                                             policy_src_ip,
                                             policy_icmp,
-                                        )),
+                                            ))
+                                        }
                                         _ => None,
                                     })
                                     .unwrap_or(false);
@@ -12649,7 +12752,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         };
                                     // #17012: use the same cold victim teardown
                                     // as ForwardCandidate and the deferred retry.
-                                    let shed_teardown_allowed = if pressure_shed_sessions.is_empty() {
+                                    let shed_teardown_allowed = if pressure_shed_sessions.is_empty()
+                                    {
                                         true
                                     } else {
                                         let session_map = binding.bpf_maps.session_map.handle();
@@ -12663,7 +12767,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                                 session_map,
                                                 conntrack_v4_fd,
                                                 conntrack_v6_fd,
-                                                dnat_fds: worker_ctx.dnat_fds,
                                                 worker_id,
                                                 peer_worker_commands: worker_ctx
                                                     .peer_worker_commands,
@@ -12679,8 +12782,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             },
                                             &mut |key| {
                                                 flow_cache.invalidate_slot(key, current_ifindex);
-                                                for other in left.iter_mut().chain(right.iter_mut()) {
-                                                    other.flow.flow_cache.invalidate_slot(key, other.ifindex);
+                                                for other in left.iter_mut().chain(right.iter_mut())
+                                                {
+                                                    other
+                                                        .flow
+                                                        .flow_cache
+                                                        .invalidate_slot(key, other.ifindex);
                                                 }
                                             },
                                         )
@@ -12762,7 +12869,10 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             now_ns,
                                         )
                                     {
-                                        sessions.set_persistent_lease_hold(&flow.forward_key, Some(hold));
+                                        sessions.set_persistent_lease_hold(
+                                            &flow.forward_key,
+                                            Some(hold),
+                                        );
                                         persistent_lease_hold_outer = None;
                                     }
                                     let pending_install_info = pending_installed.then(|| {
@@ -12913,18 +13023,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                             &entry,
                                         );
                                         drop(seed_install_permit_14661);
-                                        // #2244: count failed reverse-NAT publishes so
-                                        // map-pressure loss is operator-visible.
-                                        if !publish_dnat_table_entry(
-                                            &worker_ctx.dnat_fds,
-                                            &flow.forward_key,
-                                            pending_decision.nat,
-                                        ) {
-                                            binding
-                                                .live
-                                                .dnat_publish_errors
-                                                .fetch_add(1, Ordering::Relaxed);
-                                        }
                                         telemetry.counters.session_creates += 1;
                                         // #14661: deferred probe fires ONLY
                                         // now — post-fence, post-SNAT, and
@@ -13648,7 +13746,9 @@ mod pptp_control_teardown_tests_11053 {
         let (a, b, key) = control_key();
         let inbox = crate::session::pptp_control::PptpControlInbox::default();
         assert!(
-            inbox.push(crate::session::pptp_control::PendingControlSegment { epoch: 0,                src: a,
+            inbox.push(crate::session::pptp_control::PendingControlSegment {
+                epoch: 0,
+                src: a,
                 dst: b,
                 src_port: 49152,
                 dst_port: 1723,

@@ -438,9 +438,6 @@ func (d *policyInvalTestDP) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6)
 	return n, nil
 }
 
-func (d *policyInvalTestDP) DeleteDNATEntry(dataplane.DNATKey) error     { return nil }
-func (d *policyInvalTestDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error { return nil }
-
 // deletedPolicyInvalFixture builds an old/new config pair that DELETES p-web
 // (id 1) plus a fake DP whose v4 + v6 session tables each hold one session
 // admitted by that deleted policy — the setup the #5578 error-propagation

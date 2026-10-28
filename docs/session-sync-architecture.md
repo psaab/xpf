@@ -922,7 +922,6 @@ For each received session it:
 4. clears cached FIB resolution
 5. installs the forward entry through `SetClusterSyncedSession*`
 6. creates and installs the reverse entry locally
-7. recreates any SNAT `dnat_table` entry locally
 
 On `BulkEnd` the receiver:
 
@@ -2347,60 +2346,12 @@ src/dst) from the key. `build_reverse_session_from_forward_match` inherits
 then derives the correct v4 `(server → snat_v4)` reply tuple. Rolling-upgrade
 safe: an old peer omits the field ⇒ not-NAT64 (bit-identical to pre-#4565).
 
-### Reverse-SNAT `dnat_table` Publish for Synced Sessions (#4393)
+### Reverse-SNAT Steering for Synced Sessions (#4393, retired by #17229)
 
-The `dnat_table` / `dnat_table_v6` BPF maps are the **embedded-ICMP reverse-NAT
-steering** maps. When an inbound ICMP error (PMTUD Packet-Too-Big, traceroute
-Time-Exceeded) quotes a NATed inner packet whose source is a source-NAT pool
-`(addr, port)`, the AF_XDP shim looks that tuple up in `dnat_table` to decide the
-packet must be handed to the helper's slow path, where `try_embedded_icmp_nat_match`
-reverse-translates the error back to the original pre-NAT client. Without the
-`dnat_table` entry the shim passes the error to the kernel (which has no NAT
-state) — the client never learns the PMTU, TCP stalls on large packets, and
-traceroute breaks.
-
-The active node populates `dnat_table` from the worker poll path
-(`poll_descriptor`, `publish_dnat_table_entry`) when it forwards the first SNAT'd
-packet of a flow. The standby never forwards that packet — it imports the
-pre-computed NAT decision over the fabric — so before #4393 the standby held no
-`dnat_table` entry for synced SNAT sessions. Post-failover the standby-turned-active
-could not steer the inbound embedded-ICMP error into the helper, so PMTUD
-blackholed for exactly the flows that survived the failover.
-
-- **Publish site:** `Coordinator::upsert_synced_session` (`afxdp/ha/session_import.rs`) calls
-  `publish_dnat_table_entry` for every forward peer-synced entry, immediately
-  after the `publish_shared_session` that populates the (also process-global)
-  `shared_nat_sessions` reverse-NAT map. `dnat_table` is a **single shared BPF
-  map** (opened once, its fds cloned to every worker), so this is a
-  once-per-synced-session publish, mirroring the primary's single publish rather
-  than a redundant per-worker write. It is **not** gated on
-  `synced_entry_allows_local_replace` (unlike the forward session-map publish):
-  the `dnat_table` is a passive steering map that must be ready the instant this
-  node becomes active, and inbound SNAT-return traffic never reaches the standby,
-  so an early entry is inert until failover. A reverse companion carries no
-  source rewrite and publishes nothing.
-- **Release site:** `Coordinator::delete_synced_session_gen` (`afxdp/ha/session_import.rs`)
-  calls `delete_dnat_table_entry` alongside the session-map delete, keyed on the
-  same `dnat_v4_key_bytes` / `dnat_v6_key_bytes` SSOT the publish used, so the
-  delete byte-matches the insert. The maps are non-LRU `HASH`
-  (`max_entries = MAX_SESSIONS`, `BPF_F_NO_PREALLOC`); a missing delete leaks one
-  slot per removed synced SNAT session. A non-SNAT / reverse entry is a no-op.
-- **Shared alias removal is owner-checked (#9679):** `shared_nat_sessions`
-  (reverse-wire and reverse-canonical aliases) and `shared_forward_wire_sessions`
-  are single-value maps. `publish_shared_session` overwrites a colliding
-  session's alias, counted by `record_shared_nat_displacement` (#1760).
-  `remove_shared_session` deleted whatever occupied the removed session's alias
-  keys, so removing a displaced session also removed the survivor's alias. A
-  worker with no local copy of the survivor then missed both lookups and sent
-  its replies to new-flow adjudication. Each alias is now deleted only while it
-  still names the removed session (`remove_shared_alias_owned_by`). The reverse
-  order, where the removed session had displaced the survivor at publish, lost
-  the survivor's alias at that publish; removal cannot restore it.
-- **Observability:** a failed publish from this coordinator path (no per-binding
-  `BindingLiveState`) bumps the shared `DNAT_PUBLISH_ERRORS_SHARED` static, which
-  `Coordinator::dnat_publish_errors_total()` folds into the existing per-binding
-  sum for `xpf_userspace_dnat_publish_errors_total` — so map-pressure reverse-NAT
-  loss stays operator-visible on the standby path too (#2244 parity).
+The former `dnat_table` BPF publish/delete for synced SNAT sessions was
+removed in #17229 together with the maps themselves: the shim readers were
+deleted in #16241, so the publish had no consumer. Synced-session import now
+relies on the shared session/NAT state only.
 
 ### Activation Refresh Recomputes `allow_replace_local` Per Session (#4805)
 

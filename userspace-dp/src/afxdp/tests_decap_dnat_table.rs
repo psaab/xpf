@@ -1,4 +1,4 @@
-// decapsulated missing-neighbor handling, replay filtering, and DNAT-table publish/delete.
+// decapsulated missing-neighbor handling and replay filtering.
 //
 // Split out of afxdp/tests.rs (#4840) as a sibling `#[path]` test module
 // loaded from afxdp/mod.rs. Pure code motion: every #[test] fn is moved
@@ -213,7 +213,8 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
         ..tunnel_resolution
     };
     let make =
-        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry { key: key.clone(),
+        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
+            key: key.clone(),
         decision: SessionDecision {
             resolution,
             nat,
@@ -247,9 +248,14 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
         // #2170 test fixture: no peer install generation.
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
     let unrelated_key = SessionKey {
         src_port: 23456,
         ..forward_key.clone()
@@ -342,7 +348,8 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
         transport_route_mtu: 0,
     };
     let make =
-        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry { key: key.clone(),
+        |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
+            key: key.clone(),
         decision: SessionDecision {
             resolution,
             nat,
@@ -375,9 +382,14 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
 
     // Purge ids 100..=131 (a large drop set). Build many purged forward
     // entries interleaved with survivors. One survivor (`survivor_shares_ip`)
@@ -460,661 +472,6 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// #2244: publish_dnat_table_entry must surface bpf_map_update_elem failures.
-//
-// Before #2244 the syscall return was discarded with `unsafe { ... };`, so a
-// failed reverse-SNAT dnat_table publish (map at capacity / EINVAL / bad fd)
-// was completely silent — no counter, no log. The embedded-ICMP NAT path then
-// cannot reverse-NAT an inbound ICMP error (PMTUD / traceroute) back to the
-// original source. These tests pin the new contract:
-//   * the function returns `true` for the no-op / nothing-to-publish paths,
-//   * it returns `false` when the syscall actually fails, and
-//   * the worker call-site increment logic bumps `dnat_publish_errors` on
-//     `false` and leaves it at 0 otherwise.
-//
-// FAIL-ON-REVERT: if the syscall return is discarded again (function reverts
-// to `-> ()` / ignores `rc`), `publish_dnat_table_entry` can no longer report
-// the failure, the `false` assertion and the counter-increment assertion both
-// regress, and these tests fail.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn publish_dnat_table_entry_noops_return_true() {
-    // No SNAT rewrite → nothing to publish, treated as success.
-    let no_snat = NatDecision::default();
-    assert!(publish_dnat_table_entry(
-        &DnatTableFds {
-            v4: Some(-1),
-            v6: None
-        },
-        &dnat_v4_key(),
-        no_snat,
-    ));
-
-    // SNAT present but no v4 table fd → nothing to publish, success.
-    assert!(publish_dnat_table_entry(
-        &DnatTableFds::default(),
-        &dnat_v4_key(),
-        dnat_snat_decision(),
-    ));
-
-    // SNAT present but the key is not AF_INET → unsupported family, success.
-    let mut v6_key = dnat_v4_key();
-    v6_key.addr_family = libc::AF_INET6 as u8;
-    assert!(publish_dnat_table_entry(
-        &DnatTableFds {
-            v4: Some(-1),
-            v6: None
-        },
-        &v6_key,
-        dnat_snat_decision(),
-    ));
-}
-
-#[test]
-fn publish_dnat_table_entry_reports_syscall_failure() {
-    // An invalid map fd forces bpf_map_update_elem to fail (EBADF). The
-    // function must now report that failure instead of swallowing it.
-    let fds = DnatTableFds {
-        v4: Some(-1),
-        v6: None,
-    };
-    let ok = publish_dnat_table_entry(&fds, &dnat_v4_key(), dnat_snat_decision());
-    assert!(
-        !ok,
-        "publish_dnat_table_entry must return false when bpf_map_update_elem fails"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// #2979: the close-handler dnat_table delete MUST key on the exact same bytes
-// the install-path publish wrote, or the delete misses and the entry leaks.
-// These tests pin the v4/v6 key encoding (the SSOT used by both publish and
-// delete) and the no-op contracts of delete_dnat_table_entry.
-//
-// FAIL-ON-REVERT: change either key helper's byte layout (or let publish and
-// delete diverge) and the byte-equality assertions go red.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn dnat_v4_key_bytes_matches_publish_encoding() {
-    // protocol, snat_ip = 172.16.80.8, snat_port = 54321 (host-order native).
-    let dk = dnat_v4_key_bytes(&dnat_v4_key(), dnat_snat_decision())
-        .expect("SNAT v4 flow must yield a key");
-    let mut want = [0u8; 12];
-    want[0] = PROTO_TCP;
-    want[4..8].copy_from_slice(&Ipv4Addr::new(172, 16, 80, 8).octets());
-    want[8..10].copy_from_slice(&54321u16.to_ne_bytes());
-    assert_eq!(
-        dk, want,
-        "v4 dnat_table key encoding drifted from the publish path"
-    );
-
-    // No SNAT -> no key (close is a no-op for plain flows).
-    assert!(dnat_v4_key_bytes(&dnat_v4_key(), NatDecision::default()).is_none());
-    // Wrong family -> no v4 key.
-    let mut v6_key = dnat_v4_key();
-    v6_key.addr_family = libc::AF_INET6 as u8;
-    assert!(dnat_v4_key_bytes(&v6_key, dnat_snat_decision()).is_none());
-}
-
-#[test]
-fn dnat_v6_key_bytes_matches_entry_bytes_key_half() {
-    let snat_v6: std::net::Ipv6Addr = "2001:559:8585:80::8".parse().unwrap();
-    let orig_v6: std::net::Ipv6Addr = "2001:559:8585:61::100".parse().unwrap();
-    let key = SessionKey {
-        addr_family: libc::AF_INET6 as u8,
-        protocol: PROTO_TCP,
-        src_ip: IpAddr::V6(orig_v6),
-        dst_ip: IpAddr::V6("2001:559:8585:80::200".parse().unwrap()),
-        src_port: 12345,
-        dst_port: 443,
-        discriminator: Default::default(),
-        routing_domain: 0,
-    };
-    let nat = NatDecision {
-        rewrite_src: Some(IpAddr::V6(snat_v6)),
-        rewrite_src_port: Some(54321),
-        ..NatDecision::default()
-    };
-    let dk = dnat_v6_key_bytes(&key, nat).expect("SNAT66 flow must yield a key");
-    // The delete key MUST byte-match the KEY half of the publish-path encoder.
-    let (entry_key, _entry_val) = dnat_v6_entry_bytes(PROTO_TCP, snat_v6, 54321, orig_v6, 12345);
-    assert_eq!(
-        dk, entry_key,
-        "v6 dnat_table_v6 delete key drifted from publish (dnat_v6_entry_bytes)"
-    );
-}
-
-#[test]
-fn delete_dnat_table_entry_noops_without_snat_or_fd() {
-    use crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS;
-    // #6872: this file had THREE readers of the process-global counter,
-    // TWO function-local `static GUARD`s that serialized nothing, and no
-    // shared guard. The issue named one unguarded reader and neither local
-    // guard here — an enumeration is a floor, not a census.
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-    use std::sync::atomic::Ordering;
-    let before = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    // No SNAT decision -> nothing was published -> no delete attempt.
-    delete_dnat_table_entry(
-        &DnatTableFds {
-            v4: Some(-1),
-            v6: None,
-        },
-        &dnat_v4_key(),
-        NatDecision::default(),
-    );
-    // SNAT present but no table fd -> no delete attempt.
-    delete_dnat_table_entry(
-        &DnatTableFds::default(),
-        &dnat_v4_key(),
-        dnat_snat_decision(),
-    );
-    assert_eq!(
-        DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed),
-        before,
-        "delete_dnat_table_entry must be a no-op for non-SNAT flows and absent fds"
-    );
-}
-
-#[test]
-fn publish_dnat_table_entry_failure_increments_counter() {
-    // Mirror the worker poll call-site increment logic against a real
-    // BindingLiveState. Pre-#2244 the counter did not exist and the syscall
-    // result was discarded, so this increment was impossible.
-    let live = BindingLiveState::new();
-    assert_eq!(live.dnat_publish_errors.load(Ordering::Relaxed), 0);
-
-    // Success / no-op path: no increment.
-    if !publish_dnat_table_entry(
-        &DnatTableFds::default(),
-        &dnat_v4_key(),
-        dnat_snat_decision(),
-    ) {
-        live.dnat_publish_errors.fetch_add(1, Ordering::Relaxed);
-    }
-    assert_eq!(
-        live.dnat_publish_errors.load(Ordering::Relaxed),
-        0,
-        "no-op publish must not bump the error counter"
-    );
-
-    // Failing publish (bad fd): increment fires.
-    let fds = DnatTableFds {
-        v4: Some(-1),
-        v6: None,
-    };
-    if !publish_dnat_table_entry(&fds, &dnat_v4_key(), dnat_snat_decision()) {
-        live.dnat_publish_errors.fetch_add(1, Ordering::Relaxed);
-    }
-    assert_eq!(
-        live.dnat_publish_errors.load(Ordering::Relaxed),
-        1,
-        "failed dnat_table publish must increment dnat_publish_errors"
-    );
-
-    // A second failure accumulates.
-    if !publish_dnat_table_entry(&fds, &dnat_v4_key(), dnat_snat_decision()) {
-        live.dnat_publish_errors.fetch_add(1, Ordering::Relaxed);
-    }
-    assert_eq!(live.dnat_publish_errors.load(Ordering::Relaxed), 2);
-}
-
-// ---------------------------------------------------------------------------
-// #2406: IPv6 SNAT66-return reverse-NAT must be published to dnat_table_v6.
-//
-// Before #2406 publish_dnat_table_entry had ONLY a (AF_INET, V4) arm; an
-// AF_INET6 SNAT'd flow fell through `_ => true` and NOTHING was written to
-// dnat_table_v6. The shim's GRE-inner v6 classify therefore never saw the
-// reverse mapping, so an inbound ICMPv6 error (PMTUD Packet-Too-Big /
-// traceroute Time-Exceeded) carried over a native-GRE tunnel whose inner
-// destination is the SNAT66 pool address was not steered to the helper —
-// silent IPv6 PMTUD/traceroute blackhole behind pool-mode SNAT66.
-//
-// FAIL-ON-REVERT: drop the (AF_INET6, V6) arm in publish_dnat_table_entry
-// and both tests below regress — `dnat_v6_entry_bytes` disappears
-// (compile error) and the publish-attempt test sees the AF_INET6 key
-// return `true` (no syscall) instead of `false` (EBADF on the forced-bad
-// v6 fd).
-// ---------------------------------------------------------------------------
-
-#[test]
-fn dnat_v6_entry_bytes_matches_struct_layout() {
-    // Reverse mapping: inbound return packet carries dst = SNAT addr/port;
-    // the value steers it back to the original pre-NAT source.
-    let snat: Ipv6Addr = "2001:559:8585:80::8".parse().unwrap();
-    let orig: Ipv6Addr = "2001:559:8585:61::100".parse().unwrap();
-    let (dk, dv) = dnat_v6_entry_bytes(PROTO_TCP, snat, 54321, orig, 12345);
-
-    // struct dnat_key_v6 (24B): protocol, 3B pad, 16B dst_ip, dst_port, from_zone.
-    assert_eq!(dk[0], PROTO_TCP, "key protocol");
-    assert_eq!(&dk[1..4], &[0u8; 3], "key pad must be zero");
-    assert_eq!(&dk[4..20], &snat.octets(), "key dst_ip = SNAT address");
-    // #2406 FAIL-ON-REVERT: the KEY port is HOST-ORDER numeric serialized
-    // natively (to_ne_bytes), matching the AF_XDP shim reader. The pre-fix
-    // code wrote to_be_bytes (network order); on little-endian x86 those byte
-    // arrays differ ([0x31,0xd4] host vs [0xd4,0x31] network for 54321), so
-    // reverting dnat_v6_entry_bytes to to_be_bytes makes this assertion RED.
-    assert_eq!(
-        &dk[20..22],
-        &54321u16.to_ne_bytes(),
-        "key dst_port = SNAT port HOST-ORDER (native) to match shim from_be_bytes reader"
-    );
-    assert_eq!(&dk[22..24], &[0u8; 2], "key from_zone = 0");
-
-    // struct dnat_value_v6 (20B): 16B new_dst_ip, new_dst_port, flags, pad.
-    // VALUE is never read by the shim; encoding is inert (kept network-order).
-    assert_eq!(
-        &dv[0..16],
-        &orig.octets(),
-        "value new_dst_ip = original source"
-    );
-    assert_eq!(
-        &dv[16..18],
-        &12345u16.to_be_bytes(),
-        "value new_dst_port (inert)"
-    );
-    assert_eq!(dv[18], 0, "value flags = 0 (dynamic SNAT-return)");
-    assert_eq!(dv[19], 0, "value pad = 0");
-}
-
-// #2406 Go<->Rust dnat-key PARITY: the bytes the Rust publisher writes for
-// the dnat_table_v6 KEY (port field) must EXACTLY equal what the AF_XDP shim
-// reader builds for the same (proto, snat_ip, snat_port) tuple. The shim
-// reader builds its key port via u16::from_be_bytes(wire) (host-order
-// numeric) and stores it natively. The Go publisher (DNATKeyForSessionV6 /
-// dnat_v6_entry_bytes here) must produce the SAME native bytes. This is the
-// regression guard that would have caught the 3c network-order bug: the only
-// correct encoding for a host-order numeric port P, stored natively, is
-// P.to_ne_bytes(). Mirror the shim's reader construction here as golden bytes.
-#[test]
-fn dnat_v6_key_port_parity_with_shim_reader() {
-    // Wire bytes for port 443 on the packet: network order [0x01, 0xbb].
-    // The shim reads them as u16::from_be_bytes([0x01,0xbb]) = 443 (host),
-    // then stores the key struct natively => key port bytes = 443.to_ne_bytes().
-    let wire_port_bytes = [0x01u8, 0xbb]; // network-order 443 on the wire
-    let shim_host_numeric = u16::from_be_bytes(wire_port_bytes); // == 443
-    let shim_key_port_bytes = shim_host_numeric.to_ne_bytes(); // native store
-
-    // The publisher is handed snat_port as a HOST-ORDER numeric (443).
-    let snat: Ipv6Addr = "2001:559:8585:80::8".parse().unwrap();
-    let orig: Ipv6Addr = "2001:559:8585:61::100".parse().unwrap();
-    let (dk, _dv) = dnat_v6_entry_bytes(PROTO_TCP, snat, 443, orig, 12345);
-
-    assert_eq!(
-        &dk[20..22],
-        &shim_key_port_bytes,
-        "Rust dnat_table_v6 KEY port bytes must equal the shim reader's key port bytes for port 443"
-    );
-    // Numeric sanity: 443 host-order on LE x86 is [0xbb,0x01]; the OLD network
-    // encoding (to_be_bytes) would be [0x01,0xbb] and FAIL this parity check.
-    assert_eq!(
-        shim_host_numeric, 443,
-        "from_be_bytes of network wire yields host numeric"
-    );
-}
-
-#[test]
-fn publish_dnat_table_entry_v6_attempts_publish() {
-    // Pre-#2406 an AF_INET6 SNAT'd flow returned `true` via the `_ => true`
-    // fall-through WITHOUT touching dnat_table_v6. With the v6 arm wired, a
-    // present-but-invalid v6 fd forces bpf_map_update_elem to fail (EBADF),
-    // which the function reports as `false` — proving the arm runs and the
-    // syscall is attempted for v6.
-    let fds = DnatTableFds {
-        v4: None,
-        v6: Some(-1),
-    };
-    let ok = publish_dnat_table_entry(&fds, &dnat_v6_key(), dnat_snat_decision_v6());
-    assert!(
-        !ok,
-        "v6 SNAT'd flow with a bad v6 fd must attempt the publish and return false (revert => returns true, no syscall)"
-    );
-
-    // No v6 fd → nothing to publish, success (the noops contract still holds).
-    let no_fd = DnatTableFds { v4: None, v6: None };
-    assert!(publish_dnat_table_entry(
-        &no_fd,
-        &dnat_v6_key(),
-        dnat_snat_decision_v6()
-    ));
-
-    // v6 SNAT decision present but no v6 fd, with a v4 fd set, must NOT use
-    // the v4 fd for a v6 flow (no cross-family publish).
-    let v4_only = DnatTableFds {
-        v4: Some(-1),
-        v6: None,
-    };
-    assert!(publish_dnat_table_entry(
-        &v4_only,
-        &dnat_v6_key(),
-        dnat_snat_decision_v6()
-    ));
-}
-
-// =====================================================================
-// #2345: inbound destination-translation policy is evaluated on the
-// POST-translation destination tuple (Junos parity).
-//
-// For the SAME-FAMILY inbound destination translations that happen BEFORE
-// the route/zone lookup — DNAT, static-DNAT, and inbound NPTv6 — the
-// security policy must match on the TRANSLATED (real/internal) destination
-// address + port, in the zone derived from that translated destination.
-// These tests are fail-on-revert: each builds a config where the ORIGINAL
-// (public/virtual) destination and the TRANSLATED (internal) destination
-// would draw DIFFERENT policy verdicts, so the observed forward/deny
-// outcome can only be produced if the match ran on the translated tuple.
-// If the policy lookup reverts to the pre-translation tuple/zone these
-// tests flip and fail.
-//
-// NAT64 (#2358): the PRIMARY (ForwardCandidate) path now ALSO matches on
-// the POST-translation destination — the EXTRACTED real IPv4 host the
-// synthetic NAT64 address decodes to, NOT the synthetic IPv6 dst. NAT64 is
-// a cross-family translation (IPv6 source, IPv4 destination), so the
-// forwarding path feeds a mixed (V6 src, V4 dst) tuple and
-// `policy.rs::try_match_rule` carries a dedicated (V6 src, V4 dst) arm that
-// matches the source against the rule's IPv6 source set and the destination
-// against the rule's IPv4 destination set. The permit/deny tests below use
-// whole-prefix `64:ff9b::/96` destination rules that still PERMIT/DENY the
-// flow — but via the extracted IPv4 dst: a v6-only destination set (no v4
-// prefix) compiles to IPv4-match-any under the legacy address-set
-// convention, so it matches the extracted v4 dst on the match-any path, NOT
-// via any synthetic-IPv6 match. The MissingNeighbor cold-path arm is the
-// one exception — it does NOT re-classify NAT64, so it retains a synthetic
-// IPv6 fallback (see that test's comment below). The test function names
-// still say `synthetic_v6`, a pre-#2358 misnomer. See
-// `docs/next-features/twice-nat.md`.
-// =====================================================================
-
-// #6745: the reverse-NAT steering row is SHARED and the close was not.
-//
-// `dnat_v4_key_bytes` builds the key from (protocol, SNAT source address, SNAT
-// source port) and nothing else — no remote endpoint. Under address-only SNAT
-// (`port no-translation`) and plain static SNAT, two flows from one internal
-// source to DIFFERENT remotes therefore land on ONE row, and the allocator
-// admits both deliberately: `AddressOnlyReverseKey` enforces uniqueness on a
-// key that DOES include dst_ip/dst_port. A per-session close then deleted that
-// row unconditionally.
-
-/// The two colliding sessions: one internal source, one SNAT identity, two
-/// different remotes. This is the shape the allocator admits on purpose.
-fn colliding_pair_6745() -> (crate::session::SessionKey, crate::session::SessionKey) {
-    let a = dnat_v4_key();
-    let mut b = a.clone();
-    b.dst_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 25));
-    (a, b)
-}
-
-#[test]
-fn colliding_sessions_share_one_steering_key_6745() {
-    // The premise. If this ever stops holding — because the key gained the
-    // remote endpoint — the holder set is no longer load-bearing and the
-    // tests below are measuring nothing, so it is asserted rather than
-    // assumed.
-    let (a, b) = colliding_pair_6745();
-    assert_ne!(a.dst_ip, b.dst_ip, "the fixtures must differ in the remote");
-    assert_eq!(
-        dnat_steering_key(&a, dnat_snat_decision()),
-        dnat_steering_key(&b, dnat_snat_decision()),
-        "two flows differing only in the remote must share one steering key -- \
-         that sharing is what #6745 is about"
-    );
-    // And the VALUES are identical too, which is why a read-before-delete
-    // value comparison cannot separate them: the value encodes the ORIGINAL
-    // source, and these two flows share it.
-    assert_eq!(a.src_ip, b.src_ip);
-    assert_eq!(a.src_port, b.src_port);
-}
-
-/// #8291: a SNAT decision whose steering key is unique to one cell.
-///
-/// The steering row is keyed by `(protocol, snat_ip, snat_port)` — all but the
-/// protocol come from the NAT decision, not the session key. `dnat_snat_decision()`
-/// pins port 54321, so every cell in this file that publishes with it lands on
-/// ONE shared row in the process-global `DNAT_STEERING_HOLDERS`. The holder
-/// cells then asserted ABSOLUTE counts, so run in parallel they saw each
-/// other's publishes and each other's `reset_dnat_steering_holders()` — which
-/// clears the WHOLE registry, not one row. Measured: this module failed 14 of
-/// 20 runs on its own, 0 of 20 with `--test-threads=1`.
-///
-/// Varying the port gives each cell a row nothing else touches, which makes the
-/// absolute assertions true by construction instead of by scheduling. The
-/// global clear then becomes unnecessary AND harmful, so the cells no longer
-/// call it — a cell that clears the whole registry is a cell that breaks its
-/// siblings.
-///
-/// Ports are taken from a band no other fixture uses; each cell asserts its row
-/// starts EMPTY, which is the control that the isolation is real rather than
-/// assumed.
-fn isolated_snat_decision_8291(tag: u16) -> NatDecision {
-    let mut nat = dnat_snat_decision();
-    nat.rewrite_src_port = Some(40_000 + tag);
-    nat
-}
-
-/// v6 sibling of [`isolated_snat_decision_8291`], for the cell that asserts the
-/// two families are held independently.
-fn isolated_snat_decision_v6_8291(tag: u16) -> NatDecision {
-    let mut nat = dnat_snat_decision_v6();
-    nat.rewrite_src_port = Some(40_000 + tag);
-    nat
-}
-
-#[test]
-fn a_shared_steering_row_survives_the_first_close_6745() {
-    // OBSERVED THROUGH delete_dnat_table_entry, not through the accounting
-    // helper it calls. An earlier revision asserted on
-    // release_dnat_steering_holder directly and stayed GREEN under the
-    // mutation that matters — restoring the UNCONDITIONAL delete, i.e. calling
-    // the helper and ignoring its answer. A refcount nothing consults is not a
-    // refcount, so the map delete itself is what this watches, via the
-    // test-only DNAT_DELETE_ATTEMPTS counter that the family arms bump only
-    // once the gate has let them through. The fd is -1: the syscall returns
-    // EBADF, which is benign — the contract under test is whether the keyed
-    // delete is ATTEMPTED.
-    use crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS;
-    // #6872: this file had THREE readers of the process-global counter,
-    // TWO function-local `static GUARD`s that serialized nothing, and no
-    // shared guard. The issue named one unguarded reader and neither local
-    // guard here — an enumeration is a floor, not a census.
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-    use std::sync::atomic::Ordering;
-
-    let (a, b) = colliding_pair_6745();
-    let nat = isolated_snat_decision_8291(1);
-    assert_eq!(
-        dnat_steering_holder_count(&a, nat),
-        0,
-        "#8291: this cell's steering row must start EMPTY. If it does not, the \
-         port band is no longer unique and every absolute assertion below is \
-         measuring another test's state"
-    );
-    let fds = DnatTableFds {
-        v4: Some(-1),
-        v6: None,
-    };
-
-    publish_dnat_table_entry(&fds, &a, nat);
-    publish_dnat_table_entry(&fds, &b, nat);
-    assert_eq!(
-        dnat_steering_holder_count(&a, nat),
-        2,
-        "both sessions must hold the row"
-    );
-
-    // A closes. The row is still B's only steering path, so NO map delete.
-    let before = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    delete_dnat_table_entry(&fds, &a, nat);
-    assert_eq!(
-        DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed),
-        before,
-        "closing the FIRST of two sessions sharing a steering row issued the map delete -- \
-         that blackholes the survivor's return traffic until it republishes (#6745)"
-    );
-    assert_eq!(dnat_steering_holder_count(&a, nat), 1);
-
-    // B closes. Now it is nobody's, and leaving it would leak a map row.
-    delete_dnat_table_entry(&fds, &b, nat);
-    assert_eq!(
-        DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed),
-        before + 1,
-        "closing the LAST holder must issue the map delete -- otherwise the fix trades a \
-         blackhole for an unbounded map leak"
-    );
-    assert_eq!(dnat_steering_holder_count(&b, nat), 0);
-}
-
-#[test]
-fn republishing_one_session_does_not_add_a_second_hold_6745() {
-    // Re-sync, reconcile replay and a second worker seeing the same flow all
-    // re-publish. If each added a hold, the row would outlive its last real
-    // user by however many times it was republished -- a leak that only shows
-    // up under map pressure.
-    let key = dnat_v4_key();
-    let nat = isolated_snat_decision_8291(2);
-    let fds = DnatTableFds::default();
-    assert_eq!(
-        dnat_steering_holder_count(&key, nat),
-        0,
-        "#8291: row starts empty"
-    );
-
-    publish_dnat_table_entry(&fds, &key, nat);
-    publish_dnat_table_entry(&fds, &key, nat);
-    publish_dnat_table_entry(&fds, &key, nat);
-    assert_eq!(
-        dnat_steering_holder_count(&key, nat),
-        1,
-        "holds must be per SESSION, not per publish"
-    );
-
-    assert!(
-        release_dnat_steering_holder(&key, nat),
-        "one close must release a singly-held row"
-    );
-}
-
-#[test]
-fn an_unaccounted_row_is_still_deleted_6745() {
-    // The failure direction of an accounting gap. A row published by a path
-    // that did not account -- or by an older build across a helper restart --
-    // must delete exactly as it did before #6745, never leak. "Unchanged" is
-    // the right answer here; "the map fills up" is not.
-    use crate::afxdp::checksum::DNAT_DELETE_ATTEMPTS;
-    // #6872: this file had THREE readers of the process-global counter,
-    // TWO function-local `static GUARD`s that serialized nothing, and no
-    // shared guard. The issue named one unguarded reader and neither local
-    // guard here — an enumeration is a floor, not a census.
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-    use std::sync::atomic::Ordering;
-
-    let key = dnat_v4_key();
-    let nat = isolated_snat_decision_8291(3);
-    let fds = DnatTableFds {
-        v4: Some(-1),
-        v6: None,
-    };
-    assert_eq!(
-        dnat_steering_holder_count(&key, nat),
-        0,
-        "#8291: an UNACCOUNTED row is the subject, so this row must have no \
-         holder — that is the precondition, not an incidental"
-    );
-    let before = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    delete_dnat_table_entry(&fds, &key, nat);
-    assert_eq!(
-        DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed),
-        before + 1,
-        "a row with no recorded holder must still be deleted -- the failure direction of an \
-         accounting gap has to be `unchanged`, never `the map fills up`"
-    );
-}
-
-#[test]
-fn the_v6_steering_row_is_held_independently_6745() {
-    // The v6 key is a different width and a different map. A holder set that
-    // collapsed the two families would let a v4 close release a v6 row.
-    let v4 = dnat_v4_key();
-    let v6 = dnat_v6_key();
-    let nat4 = isolated_snat_decision_8291(4);
-    let nat6 = isolated_snat_decision_v6_8291(4);
-    let fds = DnatTableFds::default();
-    assert_eq!(
-        dnat_steering_holder_count(&v4, nat4),
-        0,
-        "#8291: v4 row starts empty"
-    );
-    assert_eq!(
-        dnat_steering_holder_count(&v6, nat6),
-        0,
-        "#8291: v6 row starts empty"
-    );
-
-    publish_dnat_table_entry(&fds, &v4, nat4);
-    publish_dnat_table_entry(&fds, &v6, nat6);
-    assert_eq!(dnat_steering_holder_count(&v4, nat4), 1);
-    assert_eq!(dnat_steering_holder_count(&v6, nat6), 1);
-
-    assert!(release_dnat_steering_holder(&v4, nat4));
-    assert_eq!(
-        dnat_steering_holder_count(&v6, nat6),
-        1,
-        "releasing the v4 row must not touch the v6 row"
-    );
-}
-
-#[test]
-fn every_publisher_accounts_because_the_callee_does_6745() {
-    // THE ASYMMETRY IS 3 PUBLISH SITES AND 2 DELETE SITES:
-    //   publish - poll_descriptor/mod.rs (x2, both worker poll paths) and
-    //             ha/session_import.rs (the synced install).
-    //   delete  - session_delta.rs (the Close arm) and ha/session_import.rs
-    //             (delete_synced_session_gen's teardown).
-    //
-    // A design that accounted at each CALL SITE would need five correct edits
-    // and would regress silently if one were missed -- and a test exercising
-    // one site would pass while another leaked or blackholed. The accounting
-    // lives in publish_dnat_table_entry / delete_dnat_table_entry instead, so
-    // every site inherits it by construction and there is no per-site variant
-    // to get wrong. This test pins that the FUNCTIONS account, which is the
-    // property the call sites rely on.
-    let key = dnat_v4_key();
-    let nat = isolated_snat_decision_8291(5);
-    assert_eq!(dnat_steering_holder_count(&key, nat), 0);
-    publish_dnat_table_entry(&DnatTableFds::default(), &key, nat);
-    assert_eq!(
-        dnat_steering_holder_count(&key, nat),
-        1,
-        "publish_dnat_table_entry must record the hold itself -- if it does not, each of the \
-         three publish sites has to, and one of them will eventually not"
-    );
-}
-
-#[test]
-fn a_non_snat_session_holds_nothing_6745() {
-    // No source rewrite means no row was ever published, so nothing may be
-    // recorded and a close must stay the no-op it already was.
-    // #8291: no source rewrite means `dnat_steering_key` yields None, so this
-    // cell touches no row at all and needs neither a unique port nor the global
-    // clear it used to perform.
-    let key = dnat_v4_key();
-    let no_nat = NatDecision::default();
-    publish_dnat_table_entry(&DnatTableFds::default(), &key, no_nat);
-    assert_eq!(dnat_steering_holder_count(&key, no_nat), 0);
-    assert!(release_dnat_steering_holder(&key, no_nat));
-}
-
-/// #10612 T5: the coordinator replay filter drops stale-zone forwards
-/// (plus their derived reverse companions by key) while tunnel-purge
-/// semantics stay byte-identical and live-zone entries survive — with
-/// the fence ENABLED (validated set), which the pre-existing cells do
-/// not cover (they pass an unvalidated default).
-///
-/// RED-on-revert: removing the zone clause from
-/// `filter_replayed_synced_sessions` leaves the stale pair in the replay vec.
-#[test]
 fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
     use crate::afxdp::coordinator::filter_replayed_synced_sessions;
 
@@ -1151,7 +508,8 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
                 tunnel_endpoint_id: u16,
                 ingress_zone: u32,
                 egress_zone: u32,
-                is_reverse: bool| SyncedSessionEntry { key: key.clone(),
+                is_reverse: bool| SyncedSessionEntry {
+        key: key.clone(),
                 decision: SessionDecision {
                     resolution: resolution(tunnel_endpoint_id),
                     nat,
@@ -1184,9 +542,14 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
                 tcp_flags: 0,
                 generation: 0,
                 session_id: 0,
-                tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-                source_nat_static: None, };
+        source_nat_static: None,
+    };
 
     let mut forwarding = ForwardingState::default();
     forwarding.zone_id_to_name.insert(1, "lan".to_string());

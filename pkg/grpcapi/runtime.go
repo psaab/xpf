@@ -113,8 +113,6 @@ type grpcRuntime interface {
 	ClearAllSessions() (v4 int, v6 int, err error)
 	DeleteSession(key dataplane.SessionKey) error
 	DeleteSessionV6(key dataplane.SessionKeyV6) error
-	DeleteDNATEntry(key dataplane.DNATKey) error
-	DeleteDNATEntryV6(key dataplane.DNATKeyV6) error
 
 	// NAT bindings / system buffers.
 	GetPersistentNAT() *dataplane.PersistentNATTable

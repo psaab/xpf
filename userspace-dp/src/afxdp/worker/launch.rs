@@ -39,12 +39,8 @@
 
 use super::*;
 
-/// Per-worker launch plan: identity plus the plan / FD values MOVED or
+/// Per-worker launch plan: identity plus the plan values MOVED or
 /// COPIED into the worker thread (not shared coordinator state).
-///
-/// `dnat_fds` carries raw `c_int` values (`DnatTableFds` is `Copy`);
-/// ownership of the underlying FDs stays on the coordinator
-/// (`coord.bpf_maps`) — the bundle carries values, never an `OwnedFd`.
 pub(crate) struct WorkerLaunchPlan {
     pub(in crate::afxdp) worker_id: u32,
     /// #6311: the chassis-cluster node id this helper runs on (0 or 1; 0 for a
@@ -54,28 +50,23 @@ pub(crate) struct WorkerLaunchPlan {
     pub(in crate::afxdp) node_id: u8,
     pub(in crate::afxdp) binding_plans: Vec<BindingPlan>,
     pub(in crate::afxdp) poll_mode: crate::PollMode,
-    pub(in crate::afxdp) dnat_fds: DnatTableFds,
 }
-
 impl WorkerLaunchPlan {
     /// Build the per-worker launch plan from its per-worker inputs.
     /// `worker_id` + `binding_plans` come from the reconcile work list;
     /// `node_id` comes from the applied `ConfigSnapshot` (#6311);
-    /// `poll_mode` mirrors `coord.poll_mode`; `dnat_fds` is built once
-    /// before the spawn loop.
+    /// `poll_mode` mirrors `coord.poll_mode`.
     pub(in crate::afxdp) fn new(
         worker_id: u32,
         node_id: u8,
         binding_plans: Vec<BindingPlan>,
         poll_mode: crate::PollMode,
-        dnat_fds: DnatTableFds,
     ) -> Self {
         Self {
             worker_id,
             node_id,
             binding_plans,
             poll_mode,
-            dnat_fds,
         }
     }
 }
@@ -130,8 +121,7 @@ pub(crate) struct WorkerSharedDataplane {
     /// #7699: the node-shared PPTP control-segment inbox. Not in
     /// [`WorkerSharedSessions`] — it is not a session map, and the swap-hazard
     /// trio that bundle exists to pin must stay the only same-typed set there.
-    pub(in crate::afxdp) pptp_control:
-        Arc<crate::session::pptp_control::PptpControlInbox>,
+    pub(in crate::afxdp) pptp_control: Arc<crate::session::pptp_control::PptpControlInbox>,
 }
 
 impl WorkerSharedDataplane {
@@ -233,10 +223,13 @@ impl WorkerControlChannels {
 /// [`WorkerCoSState::from_coord`] is the single wiring site.
 pub(crate) struct WorkerCoSState {
     pub(in crate::afxdp) cos_owner_worker_by_queue: Arc<ArcSwap<BTreeMap<(i32, u8), u32>>>,
-    pub(in crate::afxdp) cos_owner_live_by_queue: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<BindingLiveState>>>>,
+    pub(in crate::afxdp) cos_owner_live_by_queue:
+        Arc<ArcSwap<BTreeMap<(i32, u8), Arc<BindingLiveState>>>>,
     pub(in crate::afxdp) cos_root_leases: Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSRootLease>>>>,
-    pub(in crate::afxdp) cos_exact_backlogs: Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSExactBacklog>>>>,
-    pub(in crate::afxdp) cos_queue_leases: Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>>>,
+    pub(in crate::afxdp) cos_exact_backlogs:
+        Arc<ArcSwap<BTreeMap<i32, Arc<SharedCoSExactBacklog>>>>,
+    pub(in crate::afxdp) cos_queue_leases:
+        Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueLease>>>>,
     pub(in crate::afxdp) cos_queue_vtime_floors:
         Arc<ArcSwap<BTreeMap<(i32, u8), Arc<SharedCoSQueueVtimeFloor>>>>,
 }
@@ -278,7 +271,8 @@ pub(crate) struct WorkerPublishedTelemetry {
     pub(in crate::afxdp) last_resolution: Arc<Mutex<Option<ResolutionEvent>>>,
     pub(in crate::afxdp) cos_status: Arc<ArcSwap<Vec<crate::protocol::CoSInterfaceStatus>>>,
     pub(in crate::afxdp) runtime_atomics: Arc<crate::afxdp::worker_runtime::WorkerRuntimeAtomics>,
-    pub(in crate::afxdp) cold_path_atomics: Arc<crate::afxdp::cold_path_hist::WorkerColdPathAtomics>,
+    pub(in crate::afxdp) cold_path_atomics:
+        Arc<crate::afxdp::cold_path_hist::WorkerColdPathAtomics>,
 }
 
 impl WorkerPublishedTelemetry {
@@ -335,10 +329,7 @@ mod tests {
             "nat must wire to coord.sessions.nat"
         );
         assert!(
-            Arc::ptr_eq(
-                &bundle.sessions.forward_wire,
-                &coord.sessions.forward_wire
-            ),
+            Arc::ptr_eq(&bundle.sessions.forward_wire, &coord.sessions.forward_wire),
             "forward_wire must wire to coord.sessions.forward_wire"
         );
         // The three session maps are pairwise DISTINCT allocations, so a
@@ -456,8 +447,7 @@ mod tests {
         let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
         let last_resolution = Arc::new(Mutex::new(None));
         let cos_status = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let runtime_atomics =
-            Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new());
+        let runtime_atomics = Arc::new(crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new());
         let cold_path_atomics =
             Arc::new(crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new());
 

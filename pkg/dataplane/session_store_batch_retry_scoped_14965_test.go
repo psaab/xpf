@@ -16,7 +16,7 @@ import (
 // wildcard-deleting the GRE0 row, leaking it. The peer leg
 // (deletePeerBatchKnownExactV4/V6) dropped PurgeTunnelVariants on forward
 // AND reverse keys, and on a partial-batch error returned early, orphaning
-// reverse companions and dynamic dnat_table entries of helper-applied
+// reverse companions of helper-applied
 // forwards.
 
 // scopedRetryDP is a scoped dataplane whose batch leg stops at a missing key
@@ -78,9 +78,6 @@ func (d *scopedRetryDP) DeleteSessionV6(k SessionKeyV6) error {
 	d.bareRetryV6 = append(d.bareRetryV6, k)
 	return nil
 }
-
-func (d *scopedRetryDP) DeleteDNATEntry(DNATKey) error     { return nil }
-func (d *scopedRetryDP) DeleteDNATEntryV6(DNATKeyV6) error { return nil }
 
 func (d *scopedRetryDP) GetPersistentNAT() *PersistentNATTable { return nil }
 
@@ -193,15 +190,13 @@ func TestBatchRetryWithoutScopedCapabilityFallsBackBare14965(t *testing.T) {
 // --- Peer partial-batch limbs ---
 
 // partialPeerDP applies only the first forward, then fails the batch. It
-// records every peer call so the test can prove applied companions/DNAT were
+// records every peer call so the test can prove applied companions were
 // still retired and refused forwards were left alone.
 type partialPeerDP struct {
 	DataPlane
 	err     error
 	calls   [][]ScopedSessionKey
 	callsV6 [][]ScopedSessionKeyV6
-	dnat    []DNATKey
-	dnat6   []DNATKeyV6
 }
 
 func (d *partialPeerDP) BatchDeletePeerSyncedSessionsExactScoped(s []ScopedSessionKey, _ bool) ([]ScopedSessionKey, []ScopedSessionKey, error) {
@@ -227,16 +222,6 @@ func (d *partialPeerDP) BatchDeletePeerSyncedSessionsExactScopedV6(s []ScopedSes
 	return append([]ScopedSessionKeyV6(nil), s...), append([]ScopedSessionKeyV6(nil), s...), nil
 }
 
-func (d *partialPeerDP) DeleteDNATEntry(k DNATKey) error {
-	d.dnat = append(d.dnat, k)
-	return nil
-}
-
-func (d *partialPeerDP) DeleteDNATEntryV6(k DNATKeyV6) error {
-	d.dnat6 = append(d.dnat6, k)
-	return nil
-}
-
 func (d *partialPeerDP) GetPersistentNAT() *PersistentNATTable { return nil }
 
 // Remaining peerSyncedSessionDeleter surface (unused on these paths).
@@ -257,7 +242,7 @@ func (d *partialPeerDP) DeletePeerSyncedSessionScopedV6(SessionKeyV6, uint32, ui
 	return false, nil
 }
 
-func TestPeerPartialBatchRetiresAppliedCompanionsAndDNAT14965(t *testing.T) {
+func TestPeerPartialBatchRetiresAppliedCompanions14965(t *testing.T) {
 	boom := errors.New("helper batch failed midway")
 	dp := &partialPeerDP{err: boom}
 	store := dataPlaneSessionStore{dp: dp}
@@ -312,13 +297,9 @@ func TestPeerPartialBatchRetiresAppliedCompanionsAndDNAT14965(t *testing.T) {
 	if foundRev1 {
 		t.Error("unapplied forward's reverse companion was deleted; only helper-applied forwards license companion retirement")
 	}
-	// DNAT: only the applied SNAT forward's dynamic entry is deleted.
-	if len(dp.dnat) != 1 {
-		t.Fatalf("dnat deletes = %d (%+v), want exactly 1 (applied forward only)", len(dp.dnat), dp.dnat)
-	}
 }
 
-func TestPeerPartialBatchRetiresAppliedCompanionsAndDNATV6_14965(t *testing.T) {
+func TestPeerPartialBatchRetiresAppliedCompanionsV6_14965(t *testing.T) {
 	boom := errors.New("helper v6 batch failed midway")
 	dp := &partialPeerDP{err: boom}
 	store := dataPlaneSessionStore{dp: dp}
@@ -365,13 +346,10 @@ func TestPeerPartialBatchRetiresAppliedCompanionsAndDNATV6_14965(t *testing.T) {
 	if foundRev1 {
 		t.Error("V6 unapplied forward's reverse companion was deleted")
 	}
-	if len(dp.dnat6) != 1 {
-		t.Fatalf("V6 dnat deletes = %d, want exactly 1 (applied forward only)", len(dp.dnat6))
-	}
 }
 
 // Control: a fully successful peer batch behaves exactly as before (both
-// companions + both DNAT rows, no error).
+// companions, no error).
 func TestPeerFullBatchUnchanged14965(t *testing.T) {
 	dp := &partialPeerDP{}
 	store := dataPlaneSessionStore{dp: dp}
@@ -384,7 +362,7 @@ func TestPeerFullBatchUnchanged14965(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if len(exact) != 1 || len(dp.dnat) != 1 {
-		t.Fatalf("exact=%+v dnat=%d, want 1/1 on the healthy path", exact, len(dp.dnat))
+	if len(exact) != 1 {
+		t.Fatalf("exact=%+v, want 1 on the healthy path", exact)
 	}
 }

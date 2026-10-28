@@ -72,8 +72,8 @@ type Manager struct {
 	// must not be reclaimed as missing current members until permanent-MAC
 	// restoration has completed. Guarded by mu.
 	rethRecoveryExclusions map[string]struct{}
-	applyMu               sync.Mutex
-	applyGeneration       uint64
+	applyMu                sync.Mutex
+	applyGeneration        uint64
 	// registryGeneration counts REGISTRY publications (#6741). It is bumped
 	// inside publishShimRegistryLocked's m.mu hold, so it and the m.maps /
 	// m.programs contents always move together.
@@ -474,9 +474,6 @@ func (d userspaceShimCompileDataplane) SetPolicyRule(uint32, uint32, PolicyRule)
 }
 func (d userspaceShimCompileDataplane) SetDefaultPolicy(uint8) error { return nil }
 
-func (d userspaceShimCompileDataplane) SetDNATEntry(DNATKey, DNATValue) error       { return nil }
-func (d userspaceShimCompileDataplane) SetDNATEntryV6(DNATKeyV6, DNATValueV6) error { return nil }
-
 func (d userspaceShimCompileDataplane) SetScreenConfig(uint32, ScreenConfig) error {
 	return nil
 }
@@ -497,9 +494,6 @@ func (d userspaceShimCompileDataplane) DeleteStaleZonePairPolicies(map[ZonePairK
 }
 func (d userspaceShimCompileDataplane) DeleteStaleApplications(map[AppKey]bool) {}
 
-func (d userspaceShimCompileDataplane) DeleteStaleDNATStatic(map[DNATKey]bool) {}
-func (d userspaceShimCompileDataplane) DeleteStaleDNATStaticV6(map[DNATKeyV6]bool) {
-}
 func (d userspaceShimCompileDataplane) DeleteStaleStaticNAT(map[StaticNATKeyV4]bool, map[StaticNATKeyV6]bool) {
 }
 

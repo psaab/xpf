@@ -736,10 +736,6 @@ func TestHandleMessageDeleteV4RemovesCompanions(t *testing.T) {
 	if _, ok := dp.v4sessions[reverse]; ok {
 		t.Fatal("reverse session still present")
 	}
-	wantDNAT := dataplane.DNATKey{Protocol: 6, DstIP: natIP, DstPort: dnatKeyHostPort(natPort)} // #2406 host-order key port
-	if len(dp.deletedDNATV4) != 1 || dp.deletedDNATV4[0] != wantDNAT {
-		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNATV4, wantDNAT)
-	}
 }
 
 func TestHandleMessageDeleteV6RemovesCompanions(t *testing.T) {
@@ -776,17 +772,6 @@ func TestHandleMessageDeleteV6RemovesCompanions(t *testing.T) {
 	if _, ok := dp.v6sessions[reverse]; ok {
 		t.Fatal("reverse session still present")
 	}
-	wantDNAT := dataplane.DNATKeyV6{Protocol: 17, DstIP: natIP, DstPort: dnatKeyHostPort(natPort)} // #2406 host-order key port
-	if len(dp.deletedDNATV6) != 1 || dp.deletedDNATV6[0] != wantDNAT {
-		t.Fatalf("deleted DNATv6 = %+v, want [%+v]", dp.deletedDNATV6, wantDNAT)
-	}
-}
-
-// dnatKeyHostPort converts a network-order port (as stored in
-// SessionValue.NATSrcPort) into the host-order numeric value the
-// session-derived dnat_table KEY uses (#2406). Mirrors dataplane.ntohs.
-func dnatKeyHostPort(netPort uint16) uint16 {
-	return (netPort&0xff)<<8 | netPort>>8
 }
 
 // --- Sync sweep tests ---
@@ -800,8 +785,7 @@ func dnatKeyHostPort(netPort uint16) uint16 {
 // practice the cluster sweep / install / iterate paths only call the
 // overridden subset, which this type implements explicitly:
 // Get/Set/Delete session, sync + batch Iterate for v4 and v6,
-// ReadGlobalCounter, and the cluster-DNAT delete tracking used by the
-// reverse-NAT teardown tests. Adding a sweep call-site that touches a
+// ReadGlobalCounter. Adding a sweep call-site that touches a
 // non-overridden method will fail-fast with a clear runtime panic on
 // the first test that exercises it.
 //
@@ -818,8 +802,6 @@ type mockSweepDP struct {
 	v4sessions     map[dataplane.SessionKey]dataplane.SessionValue
 	v6sessions     map[dataplane.SessionKeyV6]dataplane.SessionValueV6
 	sessionCounter uint64
-	deletedDNATV4  []dataplane.DNATKey
-	deletedDNATV6  []dataplane.DNATKeyV6
 	failSetV4      map[dataplane.SessionKey]error
 	failSetV6      map[dataplane.SessionKeyV6]error
 	failDeleteV4   map[dataplane.SessionKey]error
@@ -1010,25 +992,7 @@ func (m *mockSweepDP) BatchDeleteSessionsV6(keys []dataplane.SessionKeyV6) (int,
 	return len(keys), nil
 }
 
-func (m *mockSweepDP) DeleteDNATEntry(key dataplane.DNATKey) error {
-	m.deletedDNATV4 = append(m.deletedDNATV4, key)
-	return nil
-}
-
-func (m *mockSweepDP) DeleteDNATEntryV6(key dataplane.DNATKeyV6) error {
-	m.deletedDNATV6 = append(m.deletedDNATV6, key)
-	return nil
-}
-
 func (m *mockSweepDP) GetPersistentNAT() *dataplane.PersistentNATTable { return nil }
-
-func (m *mockSweepDP) SetDNATEntry(key dataplane.DNATKey, val dataplane.DNATValue) error {
-	return nil
-}
-
-func (m *mockSweepDP) SetDNATEntryV6(key dataplane.DNATKeyV6, val dataplane.DNATValueV6) error {
-	return nil
-}
 
 func TestSyncSweepNewSessions(t *testing.T) {
 	now := monotonicSeconds()
@@ -2011,10 +1975,6 @@ func TestReconcileStaleSessionsUsesSessionStoreCompanionDeleteV4(t *testing.T) {
 	if _, ok := dp.v4sessions[reverseKey]; ok {
 		t.Fatal("stale reverse session should be deleted")
 	}
-	wantDNAT := dataplane.DNATKey{Protocol: 6, DstIP: 0x2c0200c0, DstPort: dnatKeyHostPort(40443)} // #2406 host-order key port
-	if len(dp.deletedDNATV4) != 1 || dp.deletedDNATV4[0] != wantDNAT {
-		t.Fatalf("deleted DNAT = %+v, want [%+v]", dp.deletedDNATV4, wantDNAT)
-	}
 }
 
 func TestReconcileStaleSessionsUsesSessionStoreCompanionDeleteV6(t *testing.T) {
@@ -2057,10 +2017,6 @@ func TestReconcileStaleSessionsUsesSessionStoreCompanionDeleteV6(t *testing.T) {
 	}
 	if _, ok := dp.v6sessions[reverseKey]; ok {
 		t.Fatal("stale reverse session should be deleted")
-	}
-	wantDNAT := dataplane.DNATKeyV6{Protocol: 17, DstIP: natIP, DstPort: dnatKeyHostPort(53000)} // #2406 host-order key port
-	if len(dp.deletedDNATV6) != 1 || dp.deletedDNATV6[0] != wantDNAT {
-		t.Fatalf("deleted DNATv6 = %+v, want [%+v]", dp.deletedDNATV6, wantDNAT)
 	}
 }
 

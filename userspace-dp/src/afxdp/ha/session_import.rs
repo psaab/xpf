@@ -586,9 +586,7 @@ impl crate::afxdp::ha::SessionDomain {
                 entry.metadata.is_reverse,
                 now_ns,
             );
-            if hold_changed
-                && let Some(candidate_hold) = persistent_selection.hold
-            {
+            if hold_changed && let Some(candidate_hold) = persistent_selection.hold {
                 crate::nat::release_recorded_persistent_inbound_hold(
                     &forwarding.source_nat_rules,
                     candidate_hold,
@@ -651,9 +649,7 @@ impl crate::afxdp::ha::SessionDomain {
         // The incumbent reference remains counted throughout the tentative
         // replacement. Rollback discards only a newly acquired candidate;
         // reacquiring the incumbent is invalid after operator clear revokes it.
-        if hold_changed
-            && let Some(candidate_hold) = candidate_hold
-        {
+        if hold_changed && let Some(candidate_hold) = candidate_hold {
             crate::nat::release_recorded_persistent_inbound_hold(
                 &forwarding.source_nat_rules,
                 candidate_hold,
@@ -1515,70 +1511,6 @@ impl crate::afxdp::ha::SessionDomain {
                 monotonic_nanos(),
             );
         }
-        // #4393: publish the reverse-SNAT `dnat_table` BPF-map entry for a
-        // peer-synced forward SNAT session. The active node populates this
-        // steering map from the worker poll path when it forwards the first
-        // SNAT'd packet (`poll_descriptor`), but the standby never forwards
-        // that packet — it imports the pre-computed NAT decision here. Without
-        // this publish the standby has no `dnat_table` entry, so after failover
-        // the shim does not steer an inbound embedded-ICMP error (PMTUD
-        // Too-Big / traceroute Time-Exceeded) whose quoted inner packet carries
-        // the SNAT pool `(addr, port)` into the helper's slow path — the error
-        // is passed to the kernel (no NAT state) instead of reverse-NAT'd back
-        // to the original client, so the client never learns the PMTU (TCP
-        // stalls on large packets) and traceroute breaks. Mirrors the primary's
-        // `publish_dnat_table_entry` call site exactly (forward entry only; a
-        // reverse companion carries no SNAT source rewrite). Published
-        // unconditionally (NOT gated on `synced_entry_allows_local_replace`,
-        // unlike the forward session-map publish below): the `dnat_table` is a
-        // passive reverse-NAT steering map that must be ready the instant this
-        // node becomes active, and inbound SNAT-return traffic does not reach
-        // the standby anyway, so an early entry is inert until failover. The
-        // matching release is `delete_synced_session_gen`'s teardown, plus the
-        // #9514 holder migration below when a same-key replacement moves the
-        // row. The
-        // process-global `dnat_table` map is a single shared object, so this
-        // once-per-synced-session publish (not per worker) mirrors the primary.
-        if !entry.metadata.is_reverse {
-            // #7209: hold the loaded set across the publish — `DnatTableFds`
-            // carries RAW descriptors, so the guard must outlive the call that
-            // uses them.
-            let maps = self.bpf_maps.load();
-            let dnat_fds = DnatTableFds {
-                v4: maps.dnat_table_fd.as_ref().map(|fd| fd.fd),
-                v6: maps.dnat_table_v6_fd.as_ref().map(|fd| fd.fd),
-            };
-            if !publish_dnat_table_entry(&dnat_fds, &entry.key, entry.decision.nat) {
-                // #4393/#2244: a failed publish (map at capacity / kernel
-                // resource exhaustion) silently loses the reverse-NAT steering
-                // entry. Count it via the shared static (no per-binding context
-                // here) so `dnat_publish_errors_total` stays honest.
-                DNAT_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
-            }
-            // #9514: MIGRATE the steering hold on a same-key replacement that
-            // MOVES the row. A hold is `(key, nat)`-shaped and
-            // `release_dnat_steering_holder` drops only the pair it is given,
-            // while the final teardown (`delete_synced_session_gen`) names the
-            // STORED -- newest -- decision. So a replacement from SNAT tuple A
-            // to B, left alone, strands `(key, A)`: the delete releases only B,
-            // and every later session on row A then has its map delete refused,
-            // because the stranded hold keeps the row non-empty. Measured
-            // through this function before the fix (see docs/log/9514.md).
-            //
-            // Released THROUGH `delete_dnat_table_entry`, never with a raw map
-            // delete: the row is shared (#6745), so this drops only THIS key's
-            // hold and deletes the row only if that was the last one.
-            //
-            // Gated on the row CHANGING. A same-row refresh re-acquires the hold
-            // idempotently in the publish above; releasing it here would drop
-            // the hold of a session that is still live and delete its row.
-            if let Some(previous) = previous_entry.as_ref()
-                && crate::afxdp::checksum::dnat_steering_key(&previous.key, previous.decision.nat)
-                    != crate::afxdp::checksum::dnat_steering_key(&entry.key, entry.decision.nat)
-            {
-                delete_dnat_table_entry(&dnat_fds, &previous.key, previous.decision.nat);
-            }
-        }
         // Keep the immediate BPF publish aligned with the worker-side
         // ownership guard so XSK redirect state cannot get ahead of what
         // the local SessionTable would actually accept.
@@ -1966,14 +1898,13 @@ impl crate::afxdp::ha::SessionDomain {
         }
         // #14840 policy-batch limb: this shared removal is authoritative,
         // but unlike delete_synced_session_gen_marked it performed no
-        // steering or DNAT teardown. The coordinator claimed the forward
+        // steering teardown. The coordinator claimed the forward
         // and reverse steering rows at import (owners entry.key /
-        // reverse.key) and holds the forward's DNAT steering hold; the
-        // worker phase only collects Worker-holder intents for rows the
-        // workers themselves published. Release both coordinator claims
-        // and the DNAT hold here, under the caller's batch lease, or
-        // row(reverse) and the DNAT row stay Remaining for the life of
-        // the process. A preserved (partial) companion keeps its claim.
+        // reverse.key); the worker phase only collects Worker-holder
+        // intents for rows the workers themselves published. Release
+        // both coordinator claims here, under the caller's batch lease,
+        // or row(reverse) stays Remaining for the life of the process.
+        // A preserved (partial) companion keeps its claim.
         {
             let maps = self.bpf_maps.load();
             if let Some(session_map_fd) = maps.session_map_fd.as_ref() {
@@ -2007,17 +1938,6 @@ impl crate::afxdp::ha::SessionDomain {
                     metadata.is_reverse = true;
                     steering(companion, removed_forward.decision, &metadata);
                 }
-            }
-            if !removed_forward.metadata.is_reverse {
-                let dnat_fds = DnatTableFds {
-                    v4: maps.dnat_table_fd.as_ref().map(|fd| fd.fd),
-                    v6: maps.dnat_table_v6_fd.as_ref().map(|fd| fd.fd),
-                };
-                delete_dnat_table_entry(
-                    &dnat_fds,
-                    &removed_forward.key,
-                    removed_forward.decision.nat,
-                );
             }
         }
         if partial {
@@ -2174,9 +2094,7 @@ impl crate::afxdp::ha::SessionDomain {
     ) -> SyncedDeleteOutcome {
         #[cfg(test)]
         if clear_fence.is_some() {
-            if let Some(outcome) =
-                SYNCED_DELETE_OUTCOME_OVERRIDE_ONCE.with(|slot| slot.take())
-            {
+            if let Some(outcome) = SYNCED_DELETE_OUTCOME_OVERRIDE_ONCE.with(|slot| slot.take()) {
                 return outcome;
             }
         }
@@ -2521,23 +2439,6 @@ impl crate::afxdp::ha::SessionDomain {
                     );
                 }
             }
-            // #4393: release the reverse-SNAT `dnat_table` entry published for
-            // this peer-synced forward SNAT session at `upsert_synced_session`
-            // so it does not leak (the maps are non-LRU HASH with
-            // `max_entries = MAX_SESSIONS`; every un-deleted entry burns a slot
-            // until publishes start failing) or steer a stale inbound ICMP
-            // error after the session is gone. Keyed on the SAME
-            // `dnat_v4_key_bytes` / `dnat_v6_key_bytes` helpers the publish path
-            // used, so it byte-matches the insert key; a non-SNAT / reverse
-            // entry is a no-op.
-            if !entry.metadata.is_reverse {
-                let maps = self.bpf_maps.load();
-                let dnat_fds = DnatTableFds {
-                    v4: maps.dnat_table_fd.as_ref().map(|fd| fd.fd),
-                    v6: maps.dnat_table_v6_fd.as_ref().map(|fd| fd.fd),
-                };
-                delete_dnat_table_entry(&dnat_fds, &entry.key, entry.decision.nat);
-            }
         } else {
             let maps = self.bpf_maps.load();
             let v4_fd = maps.conntrack_v4_fd.as_ref().map_or(-1, |fd| fd.fd);
@@ -2861,7 +2762,8 @@ impl crate::afxdp::ha::SessionDomain {
             policy_counter: None,
             nat_scope_ifindex: None,
         };
-        let _ = self.upsert_synced_session(SyncedSessionEntry { key,
+        let _ = self.upsert_synced_session(SyncedSessionEntry {
+            key,
         decision: SessionDecision {
             resolution,
             nat: NatDecision::default(),
@@ -2875,9 +2777,14 @@ impl crate::afxdp::ha::SessionDomain {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, });
+            source_nat_static: None,
+        });
     }
 }
 
@@ -2984,7 +2891,8 @@ mod rejected_mirror_reservation_10790_tests {
         generation: u64,
         session_id: u64,
     ) -> SyncedSessionEntry {
-        SyncedSessionEntry { key,
+        SyncedSessionEntry {
+            key,
         decision: SessionDecision {
             resolution: ForwardingResolution {
                 disposition: ForwardingDisposition::ForwardCandidate,
@@ -3030,9 +2938,14 @@ mod rejected_mirror_reservation_10790_tests {
         tcp_flags: 0x10,
         generation,
         session_id,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, }
+            source_nat_static: None,
+        }
     }
 
     fn reserve_nat64_translation(coordinator: &Coordinator, entry: &SyncedSessionEntry) {
@@ -3114,7 +3027,8 @@ mod rejected_mirror_reservation_10790_tests {
             routing_domain: 0,
         };
         let pool_port = 23_090;
-        let entry = SyncedSessionEntry { key: key.clone(),
+        let entry = SyncedSessionEntry {
+            key: key.clone(),
         decision: SessionDecision {
             resolution: ForwardingResolution {
                 disposition: ForwardingDisposition::ForwardCandidate,
@@ -3164,9 +3078,14 @@ mod rejected_mirror_reservation_10790_tests {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
             persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         let allocator = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
         assert!(
             !allocator.debug_is_port_occupied(0, pool_port),
@@ -3525,8 +3444,7 @@ mod rejected_mirror_reservation_10790_tests {
             "fixture starts with an idle internal-host lease"
         );
 
-        let secondary_rules =
-            crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+        let secondary_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
                 name: "persistent-snat-b".to_string(),
                 from_zone: "lan".to_string(),
                 to_zone: "wan".to_string(),
@@ -3582,7 +3500,10 @@ mod rejected_mirror_reservation_10790_tests {
             .forwarding
             .source_nat_rules
             .push(secondary_rules[0].clone());
-        coordinator.forwarding.source_nat_rules.extend(crate::nat::parse_source_nat_rules(&[
+        coordinator
+            .forwarding
+            .source_nat_rules
+            .extend(crate::nat::parse_source_nat_rules(&[
             crate::SourceNATRuleSnapshot {
                 name: "remote-snat-reply".to_string(),
                 from_zone: "lan".to_string(),
@@ -3629,8 +3550,8 @@ mod rejected_mirror_reservation_10790_tests {
                 .get(&inbound_key)
                 .and_then(|stored| stored.persistent_lease_hold)
         };
-        let hold_a = stored_hold(&coordinator)
-            .expect("first coordinator import records allocator A's hold");
+        let hold_a =
+            stored_hold(&coordinator).expect("first coordinator import records allocator A's hold");
         let inbound_flows = |allocator: &crate::nat::PortAllocator| {
             allocator
                 .debug_persistent_lease_for_flow(&lease_flow, permit)
@@ -3821,12 +3742,13 @@ mod rejected_mirror_reservation_10790_tests {
         local_entry.origin = crate::session::SessionOrigin::ForwardFlow;
         local_entry.persistent_lease_hold = Some(worker_hold);
         let mut worker_sessions = crate::session::SessionTable::new();
-        assert!(worker_sessions.upsert_synced_with_origin(
+        assert!(
+            worker_sessions.upsert_synced_with_origin(
             local_entry.clone().into_session_install(now_ns + 3),
             true,
-        ));
-        local_entry.persistent_lease_hold =
-            worker_sessions.persistent_lease_hold_for(&inbound_key);
+            )
+        );
+        local_entry.persistent_lease_hold = worker_sessions.persistent_lease_hold_for(&inbound_key);
         assert_eq!(local_entry.persistent_lease_hold, Some(worker_hold));
 
         let unrelated_hold = crate::nat::acquire_persistent_inbound_for_synced(
@@ -3844,10 +3766,10 @@ mod rejected_mirror_reservation_10790_tests {
         unrelated_entry.origin = crate::session::SessionOrigin::ForwardFlow;
         unrelated_entry.persistent_lease_hold = Some(unrelated_hold);
         let mut unrelated_sessions = crate::session::SessionTable::new();
-        assert!(unrelated_sessions.upsert_synced_with_origin(
-            unrelated_entry.into_session_install(now_ns + 5),
-            true,
-        ));
+        assert!(
+            unrelated_sessions
+                .upsert_synced_with_origin(unrelated_entry.into_session_install(now_ns + 5), true,)
+        );
         assert_eq!(inbound_flows(), Some(2));
 
         // Local publication copies the worker's token. RG demotion only
@@ -3870,10 +3792,7 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(demoted.origin, crate::session::SessionOrigin::SyncImport);
         assert_eq!(demoted.persistent_lease_hold, Some(worker_hold));
         assert_eq!(
-            demoted
-                .persistent_lease_hold
-                .expect("local hold")
-                .owner,
+            demoted.persistent_lease_hold.expect("local hold").owner,
             crate::nat::PersistentLeaseOwner::LocalWorker
         );
 
@@ -4021,8 +3940,7 @@ mod rejected_mirror_reservation_10790_tests {
         assert_eq!(allocator.clear_persistent_leases(now_ns + 2), 1);
         assert_eq!(inbound_flows(), Some(1), "clear retains the active hold");
 
-        let mut replacement =
-            synced_entry(inbound_key.clone(), NatDecision::default(), 2, 17_684);
+        let mut replacement = synced_entry(inbound_key.clone(), NatDecision::default(), 2, 17_684);
         replacement.metadata.ingress_zone = 1;
         replacement.metadata.egress_zone = 2;
         {
@@ -4482,18 +4400,16 @@ mod rejected_mirror_reservation_10790_tests {
     }
 
     #[test]
-    fn strict_mirror_refusal_touches_no_dnat_session_map_or_prewarm_state_10788() {
+    fn strict_mirror_refusal_touches_no_session_map_or_prewarm_state_10788() {
         use crate::afxdp::bpf_map::{
             OwnedFd, RECORDER_ONLY_MAP_FD, clear_session_map_writes, session_map_row,
             session_map_writes,
         };
-        use crate::afxdp::checksum::dnat_steering_holder_count;
 
         let (coordinator, _commands) = worker_registered_coordinator(nat64_forwarding());
         coordinator
             .bpf_maps
             .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
-                dnat_table_fd: Some(OwnedFd { fd: -1 }),
                 session_map_fd: Some(OwnedFd {
                     fd: RECORDER_ONLY_MAP_FD,
                 }),
@@ -4521,11 +4437,6 @@ mod rejected_mirror_reservation_10790_tests {
                 .session_domain
                 .upsert_synced_session_mirror(entry),
             SyncedImportOutcome::RejectedMirrorPublish
-        );
-        assert_eq!(
-            dnat_steering_holder_count(&key, nat),
-            0,
-            "a refused import must not acquire a DNAT steering holder"
         );
         assert!(
             session_map_writes().is_empty(),
@@ -5124,7 +5035,9 @@ mod rejected_mirror_reservation_10790_tests {
             let mut pending = commands.lock().expect("worker commands");
             pending.pop_front();
         }
-        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        coordinator
+            .session_domain
+            .delete_synced_session(key.clone(), false);
         assert!(
             !alloc.debug_is_port_occupied(0, 51_075),
             "#16575: accepted delete after refused import stranded the \
@@ -5138,7 +5051,13 @@ mod rejected_mirror_reservation_10790_tests {
             {
                 break;
             }
-            drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+            drain_worker_once(
+                &coordinator,
+                &commands,
+                &mut worker_sessions,
+                &mut scratch,
+                WORKER_ID,
+            );
         }
         assert!(
             !alloc.debug_is_port_occupied(0, 51_075),
@@ -5172,7 +5091,9 @@ mod rejected_mirror_reservation_10790_tests {
         let alloc = &coordinator.forwarding.nat64.prefixes[0].port_allocator;
         let permit = crate::nat::PersistentNatPermit::AnyRemoteHost;
         assert_eq!(
-            alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+            alloc
+                .debug_persistent_lease_for_flow(&flow, permit)
+                .map(|l| l.active_flows),
             Some(1),
             "fixture: NAT64 Untracked reservation must hold one active flow"
         );
@@ -5180,9 +5101,13 @@ mod rejected_mirror_reservation_10790_tests {
             let mut pending = commands.lock().expect("worker commands");
             pending.pop_front();
         }
-        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        coordinator
+            .session_domain
+            .delete_synced_session(key.clone(), false);
         assert_eq!(
-            alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+            alloc
+                .debug_persistent_lease_for_flow(&flow, permit)
+                .map(|l| l.active_flows),
             Some(0),
             "#16575 NAT64: accepted delete stranded the holder-less NAT64 reservation"
         );
@@ -5194,10 +5119,18 @@ mod rejected_mirror_reservation_10790_tests {
             {
                 break;
             }
-            drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+            drain_worker_once(
+                &coordinator,
+                &commands,
+                &mut worker_sessions,
+                &mut scratch,
+                WORKER_ID,
+            );
         }
         assert_eq!(
-            alloc.debug_persistent_lease_for_flow(&flow, permit).map(|l| l.active_flows),
+            alloc
+                .debug_persistent_lease_for_flow(&flow, permit)
+                .map(|l| l.active_flows),
             Some(0),
             "NAT64 active flows must stay 0 after drain + repair"
         );
@@ -5223,7 +5156,13 @@ mod rejected_mirror_reservation_10790_tests {
         );
         let mut worker_sessions = crate::session::SessionTable::new();
         let mut scratch = VecDeque::new();
-        drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+        drain_worker_once(
+            &coordinator,
+            &commands,
+            &mut worker_sessions,
+            &mut scratch,
+            WORKER_ID,
+        );
         assert!(
             worker_sessions.entry_with_origin(&key).is_some(),
             "fixture: worker must have adopted the session"
@@ -5233,7 +5172,9 @@ mod rejected_mirror_reservation_10790_tests {
         fill_worker_queue(&commands);
         let drops_before = crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS
             .load(std::sync::atomic::Ordering::Relaxed);
-        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        coordinator
+            .session_domain
+            .delete_synced_session(key.clone(), false);
         assert!(
             crate::afxdp::worker_queue::WORKER_COMMAND_QUEUE_DROPS
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -5266,10 +5207,18 @@ mod rejected_mirror_reservation_10790_tests {
         );
         let mut worker_sessions = crate::session::SessionTable::new();
         let mut scratch = VecDeque::new();
-        drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+        drain_worker_once(
+            &coordinator,
+            &commands,
+            &mut worker_sessions,
+            &mut scratch,
+            WORKER_ID,
+        );
         let alloc = &coordinator.forwarding.source_nat_rules[0].pool_allocator;
         assert!(alloc.debug_is_port_occupied(0, 51_078));
-        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        coordinator
+            .session_domain
+            .delete_synced_session(key.clone(), false);
         assert!(
             alloc.debug_is_port_occupied(0, 51_078),
             "control B: adopted reservation must survive coordinator delete until worker drains"
@@ -5278,7 +5227,13 @@ mod rejected_mirror_reservation_10790_tests {
             if !alloc.debug_is_port_occupied(0, 51_078) {
                 break;
             }
-            drain_worker_once(&coordinator, &commands, &mut worker_sessions, &mut scratch, WORKER_ID);
+            drain_worker_once(
+                &coordinator,
+                &commands,
+                &mut worker_sessions,
+                &mut scratch,
+                WORKER_ID,
+            );
         }
         assert!(
             !alloc.debug_is_port_occupied(0, 51_078),
@@ -5333,7 +5288,9 @@ mod rejected_mirror_reservation_10790_tests {
             ));
         }
         assert_eq!(alloc.holder_mask_for_flow(&flow), Some(0b11));
-        coordinator.session_domain.delete_synced_session(key.clone(), false);
+        coordinator
+            .session_domain
+            .delete_synced_session(key.clone(), false);
         assert!(
             alloc.debug_is_port_occupied(0, 51_079),
             "adopted twin: coordinator must not free while worker bits remain"
@@ -5348,7 +5305,10 @@ mod rejected_mirror_reservation_10790_tests {
             2_000,
             0,
         );
-        assert!(alloc.debug_is_port_occupied(0, 51_079), "one holder remains");
+        assert!(
+            alloc.debug_is_port_occupied(0, 51_079),
+            "one holder remains"
+        );
         crate::nat::release_source_nat_allocation_for_worker(
             &coordinator.forwarding.iface_nat_allocators,
             &coordinator.forwarding.source_nat_rules,

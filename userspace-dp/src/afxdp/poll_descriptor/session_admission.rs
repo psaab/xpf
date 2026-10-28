@@ -13,7 +13,6 @@ pub(in crate::afxdp) struct ShedTeardownCtx<'a> {
     pub(in crate::afxdp) session_map: SteeringMap<'a>,
     pub(in crate::afxdp) conntrack_v4_fd: c_int,
     pub(in crate::afxdp) conntrack_v6_fd: c_int,
-    pub(in crate::afxdp) dnat_fds: &'a crate::afxdp::checksum::DnatTableFds,
     pub(in crate::afxdp) worker_id: u32,
     pub(in crate::afxdp) peer_worker_commands: &'a [Arc<Mutex<VecDeque<WorkerCommand>>>],
     pub(in crate::afxdp) worker_commands_by_id: &'a crate::afxdp::types::WorkerCommandQueues,
@@ -108,13 +107,6 @@ pub(in crate::afxdp) fn teardown_pressure_shed_victims(
             ctx.conntrack_v6_fd,
             &shed.key,
         );
-        if !shed.is_reverse {
-            crate::afxdp::checksum::delete_dnat_table_entry(
-                ctx.dnat_fds,
-                &shed.key,
-                shed.decision.nat,
-            );
-        }
         crate::afxdp::bpf_map::delete_live_session_entry(
             ctx.session_map,
             &shed.key,
@@ -245,7 +237,6 @@ pub(super) fn strict_syn_check_drops_new_flow_with_payload(
         payload_len,
     )
 }
-
 
 /// #16479: payload-aware tunnel variant — the production MISS gate.
 #[inline]
@@ -451,12 +442,7 @@ pub(super) fn transit_admission_verdict(
     input: &AdmissionInput<'_>,
     class_verdict: Option<TransitClassVerdict>,
 ) -> AdmissionVerdict {
-    transit_admission_verdict_with_cookie_redirect_policy(
-        forwarding,
-        input,
-        class_verdict,
-        false,
-    )
+    transit_admission_verdict_with_cookie_redirect_policy(forwarding, input, class_verdict, false)
 }
 
 /// A cookie reply is emitted and its ACK is consumed locally even when the
@@ -491,10 +477,8 @@ fn transit_admission_verdict_with_cookie_redirect_policy(
         ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
     ) || (authorize_fabric_redirect
         && input.resolution.disposition == ForwardingDisposition::FabricRedirect);
-    let policy_result = if local_policy_disposition
-        && class.transit_disposition
-        && class.drop.is_none()
-    {
+    let policy_result =
+        if local_policy_disposition && class.transit_disposition && class.drop.is_none() {
         Some(crate::policy::evaluate_policy_result_without_counting_at(
             &forwarding.policy,
             input.from_zone_id,

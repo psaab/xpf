@@ -260,18 +260,6 @@ pub(in crate::afxdp) static SESSION_PUBLISH_VERIFY_FAIL: AtomicU64 = AtomicU64::
 /// by `Coordinator::session_publish_errors_total()` and surfaced as
 /// `xpf_userspace_session_publish_errors_total`.
 pub(in crate::afxdp) static SESSION_PUBLISH_ERRORS_SHARED: AtomicU64 = AtomicU64::new(0);
-/// #4393: failed reverse-SNAT `dnat_table` BPF-map publishes from the
-/// coordinator's peer-synced install path (`upsert_synced_session`), which
-/// has no per-binding `BindingLiveState`. Always-on (mirrors
-/// `SESSION_PUBLISH_ERRORS_SHARED`): a swallowed publish means the standby
-/// never learns the SNAT reverse-NAT steering entry, so after failover an
-/// inbound embedded-ICMP error (PMTUD Too-Big / traceroute Time-Exceeded)
-/// quoting the NATed inner packet is not steered to the helper and the client
-/// never sees it (PMTUD blackhole). The per-binding worker poll sites use
-/// `BindingLiveState::dnat_publish_errors` instead; the two are summed by
-/// `Coordinator::dnat_publish_errors_total()` and surfaced as
-/// `xpf_userspace_dnat_publish_errors_total`.
-pub(in crate::afxdp) static DNAT_PUBLISH_ERRORS_SHARED: AtomicU64 = AtomicU64::new(0);
 // #2170 `SESSION_INSTALL_STALE_IGNORED` / `SESSION_DELETE_STALE_IGNORED` and
 // #5674 `SYNCED_IMPORT_CAP_DROPS` used to live here as process-global statics.
 // They are now PER-COORDINATOR fields on `SessionManager`
@@ -311,10 +299,7 @@ mod tests {
 
         // Native byte view of the reference key.
         let key_bytes: &[u8] = unsafe {
-            core::slice::from_raw_parts(
-                (&key as *const UserspaceSessionMapKey).cast::<u8>(),
-                size,
-            )
+            core::slice::from_raw_parts((&key as *const UserspaceSessionMapKey).cast::<u8>(), size)
         };
 
         // Copy those bytes so that the decode source starts at an ODD address,

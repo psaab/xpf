@@ -456,7 +456,6 @@
     "session_replication_lock_contended_total": 1,
     "session_replication_queue_depth_sum": 308,
     "session_replication_queue_depth_max": 4,
-    "dnat_publish_errors_total": 0,
     "synced_import_cap_drops_total": 0,
     "nat_reverse_key_shared_displacements_total": 0,
     "worker_command_queue_poison_recoveries": 0,
@@ -11169,8 +11168,6 @@
       "sessions": "/sys/fs/bpf/xpf/userspace_sessions",
       "conntrack_v4": "/sys/fs/bpf/xpf/sessions",
       "conntrack_v6": "/sys/fs/bpf/xpf/sessions_v6",
-      "dnat_table": "/sys/fs/bpf/xpf/dnat_table",
-      "dnat_table_v6": "/sys/fs/bpf/xpf/dnat_table_v6",
       "trace": "/sys/fs/bpf/xpf/userspace_trace"
     },
     "zones": [

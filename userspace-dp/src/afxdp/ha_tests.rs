@@ -317,7 +317,8 @@ fn update_ha_state_prewarms_split_rg_reverse_sessions_on_activation() {
         None,
     );
 
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -327,9 +328,14 @@ fn update_ha_state_prewarms_split_rg_reverse_sessions_on_activation() {
     // #2170 test fixture: no peer install generation.
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -429,7 +435,8 @@ fn update_ha_state_demotion_recovers_from_poisoned_worker_command_mutex() {
     // Locally-owned (non-peer-synced) shared session in RG 1. The
     // demotion must flip its origin to a peer-synced one via
     // demote_shared_owner_rgs.
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -439,9 +446,14 @@ fn update_ha_state_demotion_recovers_from_poisoned_worker_command_mutex() {
     // #2170 test fixture: no peer install generation.
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -551,7 +563,8 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
     let worker_commands = Arc::new(Mutex::new(VecDeque::new()));
 
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -560,9 +573,14 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -713,7 +731,8 @@ fn merge_owner_rg_candidate_keys_scales_linearly_not_quadratically() {
 // --- #2170 install-generation guard (helper-side belt-and-suspenders) -----
 
 fn synced_entry_with_generation(generation: u64) -> SyncedSessionEntry {
-    SyncedSessionEntry { key: test_key(),
+    SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -722,9 +741,14 @@ fn synced_entry_with_generation(generation: u64) -> SyncedSessionEntry {
     tcp_flags: 0,
     generation,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 fn synced_generation(coordinator: &Coordinator, key: &SessionKey) -> Option<u64> {
@@ -1018,7 +1042,8 @@ fn upsert_peer_against_local_arriving_during_snapshot_window_keeps_local_13709()
 // queue, so the `is_none()` / not-enqueued reject assertions below fail as
 // clean assertions. Target-count = 1 gate site.
 fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
-    SyncedSessionEntry { key: SessionKey {
+    SyncedSessionEntry {
+        key: SessionKey {
         src_port: port,
         ..test_key()
     },
@@ -1030,9 +1055,14 @@ fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
     tcp_flags: 0x10,
     generation,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 #[test]
@@ -1633,116 +1663,6 @@ fn current_generation_install_and_delete_still_apply_on_poisoned_shared_mutex() 
     );
 }
 
-// --- #4393 peer-synced SNAT reverse-NAT dnat_table publish/delete wiring ----
-
-fn synced_snat_entry() -> SyncedSessionEntry {
-    let mut decision = test_decision();
-    // Forward SNAT: the client source is rewritten to the WAN pool
-    // (addr, port) — exactly what the primary published into dnat_table.
-    decision.nat = NatDecision {
-        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
-        rewrite_src_port: Some(54321),
-        ..NatDecision::default()
-    };
-    SyncedSessionEntry { key: test_key(),
-    decision,
-    metadata: test_metadata(),
-    leak_incarnation: 0,
-    origin: SessionOrigin::SyncImport,
-    protocol: PROTO_TCP,
-    tcp_flags: 0,
-    generation: 0,
-    session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
-    persistent_lease_hold: None,
-    source_nat_static: None, }
-}
-
-/// #4393 FAIL-ON-REVERT: installing a peer-synced forward SNAT session on the
-/// standby must publish the reverse-SNAT `dnat_table` entry (the embedded-ICMP
-/// steering map), and deleting the session must release it. Without the publish
-/// the standby has no reverse-NAT steering entry, so after failover an inbound
-/// embedded-ICMP error (PMTUD Too-Big / traceroute Time-Exceeded) quoting the
-/// NATed inner packet is not steered to the helper and is never reverse-NAT'd
-/// back to the original client (PMTUD blackhole).
-///
-/// Real BPF maps cannot be created under `cargo test` (the host runs with
-/// `kernel.unprivileged_bpf_disabled`), so the publish/delete are observed via
-/// the test-only `DNAT_PUBLISH_ATTEMPTS` / `DNAT_DELETE_ATTEMPTS` counters bumped
-/// inside `publish_dnat_table_entry` / `delete_dnat_table_entry` whenever a
-/// keyed syscall is issued. The fd is `-1` (EBADF after the keyed attempt is
-/// counted). RED on revert: remove the publish from `upsert_synced_session` and
-/// the SNAT publish assertion fails; remove the delete from
-/// `delete_synced_session_gen` and the SNAT delete assertion fails. The
-/// non-SNAT control guards against publishing/deleting for flows that carry no
-/// source rewrite.
-#[test]
-fn synced_snat_install_publishes_and_delete_releases_dnat_table_entry() {
-    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, DNAT_PUBLISH_ATTEMPTS};
-
-    // #6872: the SHARED guard, not a function-local one. A `static` declared in
-    // a function body is unnameable elsewhere, so the guard this used to hold
-    // excluded nobody — including the identically-named guard in
-    // session_glue/tests.rs.
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-
-    let mut coordinator = Coordinator::new();
-    // A live v4 dnat_table fd so the publish/delete path is reached; -1 makes
-    // the syscall a harmless EBADF after the keyed attempt is counted.
-    // #7209: the descriptor set is published as a whole, so a test seeds it
-    // with one store rather than assigning a field.
-    coordinator
-        .bpf_maps
-        .store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
-            dnat_table_fd: Some(OwnedFd { fd: -1 }),
-            ..Default::default()
-        }));
-    let key = test_key();
-
-    // Forward SNAT synced install must publish the reverse-SNAT entry.
-    let before_pub = DNAT_PUBLISH_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.upsert_synced_session(synced_snat_entry());
-    let after_pub = DNAT_PUBLISH_ATTEMPTS.load(Ordering::Relaxed);
-    assert_eq!(
-        after_pub - before_pub,
-        1,
-        "peer-synced forward SNAT install must publish the reverse-SNAT dnat_table entry \
-         (#4393); got {} attempts",
-        after_pub - before_pub
-    );
-
-    // Deleting the synced SNAT session must release the reverse-SNAT entry.
-    let before_del = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(key.clone(), false);
-    let after_del = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    assert_eq!(
-        after_del - before_del,
-        1,
-        "deleting the synced SNAT session must release its reverse-SNAT dnat_table entry \
-         (#4393); got {} attempts",
-        after_del - before_del
-    );
-
-    // Non-SNAT control: a plain synced session (test_decision -> no source
-    // rewrite) publishes and deletes nothing.
-    let before_pub2 = DNAT_PUBLISH_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.upsert_synced_session(synced_entry_with_generation(0));
-    let after_pub2 = DNAT_PUBLISH_ATTEMPTS.load(Ordering::Relaxed);
-    assert_eq!(
-        after_pub2 - before_pub2,
-        0,
-        "a non-SNAT synced install must not publish a dnat_table entry"
-    );
-    let before_del2 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(key, false);
-    let after_del2 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    assert_eq!(
-        after_del2 - before_del2,
-        0,
-        "deleting a non-SNAT synced session must not attempt a dnat_table delete"
-    );
-}
-
 // #2962: kicking an export for an EMPTY owner-RG set is a no-op — it must
 // not consume an export sequence and the wait must drain nothing, preserving
 // the pre-split early return semantics.
@@ -1829,7 +1749,8 @@ fn coordinator_with_tunnel_session(tunnel_endpoint_id: u16) -> (Coordinator, Ses
     let mut decision = test_decision();
     decision.resolution.tunnel_endpoint_id = tunnel_endpoint_id;
     let key = test_key();
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
     decision,
     metadata: test_metadata(), // is_reverse = false -> emits a close delta
     leak_incarnation: 0,
@@ -1838,9 +1759,14 @@ fn coordinator_with_tunnel_session(tunnel_endpoint_id: u16) -> (Coordinator, Ses
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -2041,7 +1967,8 @@ fn bulk_export_stamps_established_on_shared_reverse_count_16217() {
     coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
 
     let mk = |port: u16, rev_packets: u64, reverse: bool| {
-        let mut entry = SyncedSessionEntry { key: test_key(),
+        let mut entry = SyncedSessionEntry {
+            key: test_key(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -2050,9 +1977,14 @@ fn bulk_export_stamps_established_on_shared_reverse_count_16217() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0x16217,
-        tcp_close_class: 0, tcp_handshake_state: pending, rev_packets, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: pending,
+            rev_packets,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
         persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         entry.key.src_port = port;
         entry.metadata.owner_rg_id = 1;
         entry.metadata.fabric_ingress = false;
@@ -2140,7 +2072,8 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_with_fabric());
 
-    let base = SyncedSessionEntry { key: test_key(),
+    let base = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -2149,9 +2082,14 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: STABLE_ID,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     let mut publish = |mut entry: SyncedSessionEntry, port: u16| {
         entry.key.src_port = port;
         // test_metadata() is fabric-ingress by default; plain rows clear it,
@@ -2815,7 +2753,8 @@ fn synced_import_zone_unresolved_counts_only_real_degradation_7209() {
 }
 
 fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
-    SyncedSessionEntry { key: SessionKey {
+    SyncedSessionEntry {
+        key: SessionKey {
         src_port,
         ..test_key()
     },
@@ -2836,9 +2775,14 @@ fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, }
+        source_nat_static: None,
+    }
 }
 
 /// #6600 fail-on-revert gate: an import whose translated NAT port is already
@@ -3034,7 +2978,8 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
 
     // A NAT64 decision naming pool port 51000 on 203.0.113.1.
     let nat64_port: u16 = 51000;
-    let mk = |src_port: u16| SyncedSessionEntry { key: SessionKey {
+    let mk = |src_port: u16| SyncedSessionEntry {
+        key: SessionKey {
         src_port,
         ..test_key()
     },
@@ -3056,9 +3001,14 @@ fn upsert_synced_session_rolls_back_source_nat_when_nat64_refuses_6600() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
 
     // Occupy the NAT64 translated identity with a DIFFERENT flow, so the
     // import's NAT64 leg refuses while its source-NAT leg succeeds.
@@ -4435,7 +4385,8 @@ fn a_deleted_synced_session_leaves_no_reverse_prewarm_key_after_a_route_moves_72
     // while the entry's own metadata names RG 1 — two distinct buckets, which
     // is what makes the asymmetry observable at all.
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -4444,9 +4395,14 @@ fn a_deleted_synced_session_leaves_no_reverse_prewarm_key_after_a_route_moves_72
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied,
@@ -4526,7 +4482,8 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
 
-    let doomed = SyncedSessionEntry { key: test_key(),
+    let doomed = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -4535,9 +4492,14 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     // Same source, different port: a distinct key that lands in the SAME two
     // buckets, which is the only arrangement in which an over-broad sweep is
     // observable at all.
@@ -4625,7 +4587,8 @@ fn deleting_one_synced_session_leaves_its_neighbours_in_the_reverse_prewarm_inde
 fn a_route_move_adds_the_new_prewarm_filing_and_delete_clears_all_of_them_7209() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -4634,9 +4597,14 @@ fn a_route_move_adds_the_new_prewarm_filing_and_delete_clears_all_of_them_7209()
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied
@@ -4712,7 +4680,8 @@ fn a_removal_outside_the_delete_verb_still_unfiles_the_prewarm_key_7209() {
     ] {
         let mut coordinator = Coordinator::new();
         coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-        let entry = SyncedSessionEntry { key: test_key(),
+        let entry = SyncedSessionEntry {
+            key: test_key(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -4721,9 +4690,14 @@ fn a_removal_outside_the_delete_verb_still_unfiles_the_prewarm_key_7209() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
         persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         assert_eq!(
             coordinator.upsert_synced_session(entry.clone()),
             SyncedImportOutcome::Applied
@@ -4791,7 +4765,8 @@ fn a_removal_outside_the_delete_verb_still_unfiles_the_prewarm_key_7209() {
 fn a_promoted_then_deleted_synced_session_leaves_no_prewarm_key_7209() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -4800,9 +4775,14 @@ fn a_promoted_then_deleted_synced_session_leaves_no_prewarm_key_7209() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied
@@ -4886,7 +4866,8 @@ fn filed_under_7209(coordinator: &Coordinator, key: &SessionKey) -> Vec<i32> {
 fn a_refresh_never_drops_a_prewarm_filing_the_current_fib_cannot_rederive_7209() {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -4895,9 +4876,14 @@ fn a_refresh_never_drops_a_prewarm_filing_the_current_fib_cannot_rederive_7209()
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied
@@ -5017,7 +5003,8 @@ fn reverse_prewarm_owner_rg_candidates_for_test(
 /// resolves to a real egress.
 #[test]
 fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companion_7209() {
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -5026,9 +5013,14 @@ fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companio
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
 
     // CONTROL: a populated table resolves the companion's reply path.
@@ -5170,7 +5162,8 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
             ..HAGroupStatus::default()
         },
     ]);
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -5179,9 +5172,14 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     let reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
@@ -5336,7 +5334,8 @@ fn stop_inner_empties_the_forwarding_table_that_a_released_lock_would_expose_720
         "fixture starts with an EMPTY table, so it cannot show that stop_inner \
          is what empties it"
     );
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -5345,9 +5344,14 @@ fn stop_inner_empties_the_forwarding_table_that_a_released_lock_would_expose_720
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
         SyncedImportOutcome::Applied
@@ -5644,7 +5648,8 @@ fn both_purge_call_sites_release_against_new_forwarding_8138() {
 // ---------------------------------------------------------------------------
 
 fn purge14961_nat64_entry(src_port: u16, pool_port: u16, tunnel_id: u16) -> SyncedSessionEntry {
-    let mut e = SyncedSessionEntry { key: SessionKey {
+    let mut e = SyncedSessionEntry {
+        key: SessionKey {
         addr_family: libc::AF_INET6 as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V6("2001:db8::1".parse().unwrap()),
@@ -5677,9 +5682,14 @@ fn purge14961_nat64_entry(src_port: u16, pool_port: u16, tunnel_id: u16) -> Sync
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     e.metadata.is_reverse = false;
     e
 }
@@ -6576,33 +6586,6 @@ fn owner_rg_export_v2_refuses_token_mismatch_17127() {
     assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
 }
 
-// ---------------------------------------------------------------------------
-// #9514 — an HA same-key replacement with a CHANGED NAT decision must not strand
-// the old decision's reverse-NAT steering holder.
-//
-// Two written claims contradicted each other about byte-identical code: #9514
-// said the old holder is stranded and later refuses row reclamation; a validated
-// external report recorded "FIXED: synchronized same-key NAT replacement cleanup
-// releases prior steering holders". Measured through the production import path
-// at 5fafce23f, before this fix: the A->B holder survived the replacement AND the
-// delete (a_after_delete=1), and a later session on row A had its map delete
-// refused (later_row_a_deletes=0). The report was wrong about this code.
-//
-// THE FIXTURE MUST MOVE THE STEERING ROW. A holder row is keyed on
-// `(protocol, SNAT source address, SNAT source port)` only, so a replacement
-// that keeps the same SNAT tuple re-acquires the very holder a release would
-// drop and cannot distinguish the claims. A and B differ in `rewrite_src_port`.
-//
-// Rows are unique to these cells (203.0.113.95, ports 49514-49519): the holder
-// registry is process-global, and #8291 is the history of cells trampling each
-// other's rows.
-//
-// Observable: the holder accounting plus the test-only DNAT_DELETE_ATTEMPTS
-// counter, bumped immediately before the `bpf_map_delete_elem` syscall. Real BPF
-// maps cannot be created under `cargo test`; the refusal being pinned happens in
-// the accounting, before that syscall.
-// ---------------------------------------------------------------------------
-
 fn snat_row_9514(port: u16) -> NatDecision {
     NatDecision {
         rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 95))),
@@ -6618,17 +6601,6 @@ fn synced_with_nat_9514(key: SessionKey, nat: NatDecision, generation: u64) -> S
     e
 }
 
-fn coordinator_with_dnat_fd_9514() -> Coordinator {
-    let coordinator = Coordinator::new();
-    coordinator
-        .bpf_maps
-        .store(std::sync::Arc::new(crate::afxdp::coordinator::BpfMaps {
-            dnat_table_fd: Some(OwnedFd { fd: -1 }),
-            ..Default::default()
-        }));
-    coordinator
-}
-
 /// A second session on the SAME steering row as `key`: the row carries no
 /// remote endpoint, so differing only in the remote lands on it.
 fn same_row_sibling_9514(key: &SessionKey) -> SessionKey {
@@ -6637,190 +6609,9 @@ fn same_row_sibling_9514(key: &SessionKey) -> SessionKey {
     k2
 }
 
-/// FAIL-ON-REVERT: A -> B (different rows), delete, then a later session on row A.
-/// Before the fix: a_after_replace=1, a_after_delete=1, later_row_a_deletes=0.
-#[test]
-fn ha_same_key_replace_changing_the_snat_row_releases_the_old_holder_9514() {
-    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, dnat_steering_holder_count};
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-    let coordinator = coordinator_with_dnat_fd_9514();
-    let key = test_key();
-    let (a, b) = (snat_row_9514(49514), snat_row_9514(49515));
-    assert_ne!(
-        crate::afxdp::checksum::dnat_steering_key(&key, a),
-        crate::afxdp::checksum::dnat_steering_key(&key, b),
-        "precondition: A and B must be DIFFERENT steering rows, or this cell cannot \
-         distinguish a released holder from a re-acquired one"
-    );
-    assert_eq!(
-        dnat_steering_holder_count(&key, a),
-        0,
-        "row A must start empty"
-    );
-
-    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
-    assert_eq!(
-        dnat_steering_holder_count(&key, a),
-        1,
-        "precondition: import holds row A"
-    );
-
-    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), b, 2));
-    let a_after_replace = dnat_steering_holder_count(&key, a);
-    let b_after_replace = dnat_steering_holder_count(&key, b);
-    assert_eq!(
-        b_after_replace, 1,
-        "precondition: the replacement landed and holds row B"
-    );
-
-    coordinator.delete_synced_session(key.clone(), false);
-    let a_after_delete = dnat_steering_holder_count(&key, a);
-    let b_after_delete = dnat_steering_holder_count(&key, b);
-
-    // A later, unrelated session lands on row A and closes.
-    let k2 = same_row_sibling_9514(&key);
-    coordinator.upsert_synced_session(synced_with_nat_9514(k2.clone(), a, 1));
-    let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(k2.clone(), false);
-    let later_row_a_deletes = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1;
-
-    assert!(
-        a_after_replace == 0
-            && a_after_delete == 0
-            && b_after_delete == 0
-            && later_row_a_deletes == 1,
-        "#9514: a same-key HA replacement that MOVES the steering row must release the old \
-         row's holder. Measured: a_after_replace={a_after_replace} a_after_delete={a_after_delete} \
-         b_after_delete={b_after_delete} later_row_a_deletes={later_row_a_deletes} (1 = a later \
-         session on row A reclaims it; 0 = the stranded holder refuses the map delete)"
-    );
-}
-
-/// DOUBLE-RELEASE CONTROL: A -> A. It cannot distinguish the #9514 claims (the
-/// replacement re-acquires the holder a release would drop), and that is why the
-/// fix is gated on the row changing: releasing here would drop a LIVE session's
-/// hold and delete its row.
-#[test]
-fn ha_same_key_replace_with_the_same_snat_row_holds_exactly_once_9514() {
-    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, dnat_steering_holder_count};
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-    let coordinator = coordinator_with_dnat_fd_9514();
-    let key = test_key();
-    let a = snat_row_9514(49516);
-    assert_eq!(
-        dnat_steering_holder_count(&key, a),
-        0,
-        "row must start empty"
-    );
-
-    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
-    let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 2));
-    let deletes_on_refresh = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d0;
-    let after_refresh = dnat_steering_holder_count(&key, a);
-    let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(key.clone(), false);
-    let deletes_on_delete = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1;
-    let after_delete = dnat_steering_holder_count(&key, a);
-    assert_eq!(
-        (after_refresh, deletes_on_refresh),
-        (1, 0),
-        "#9514: a same-row refresh must keep its single hold and delete NOTHING; releasing \
-         it would blackhole a live session's return traffic until it republished"
-    );
-    assert_eq!(after_delete, 0, "the delete must release the single hold");
-    assert_eq!(
-        deletes_on_delete, 1,
-        "the last holder's delete must issue exactly one map delete"
-    );
-}
-
-/// OVER-RELEASE CONTROL: migrating K off a SHARED row must leave the sibling's
-/// hold intact. The migration releases through the holder accounting, never with
-/// a raw map delete, so row A survives while K2 still steers through it.
-#[test]
-fn ha_replace_migrating_off_a_shared_row_keeps_the_siblings_hold_9514() {
-    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, dnat_steering_holder_count};
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-    let coordinator = coordinator_with_dnat_fd_9514();
-    let key = test_key();
-    let k2 = same_row_sibling_9514(&key);
-    let (a, b) = (snat_row_9514(49517), snat_row_9514(49518));
-    assert_eq!(
-        dnat_steering_holder_count(&key, a),
-        0,
-        "row A must start empty"
-    );
-
-    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
-    coordinator.upsert_synced_session(synced_with_nat_9514(k2.clone(), a, 1));
-    assert_eq!(
-        dnat_steering_holder_count(&key, a),
-        2,
-        "precondition: both sessions hold row A"
-    );
-
-    let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), b, 2));
-    let deletes_on_migrate = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d0;
-    let row_a_after_migrate = dnat_steering_holder_count(&k2, a);
-    assert_eq!(
-        (row_a_after_migrate, deletes_on_migrate),
-        (1, 0),
-        "#9514: K migrating off shared row A must release only K's hold and must NOT delete \
-         the row -- K2 still steers through it (#6745)"
-    );
-
-    let d1 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.delete_synced_session(k2.clone(), false);
-    assert_eq!(
-        DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d1,
-        1,
-        "once the sibling closes, row A is nobody's and must be deleted"
-    );
-    assert_eq!(dnat_steering_holder_count(&k2, a), 0);
-    coordinator.delete_synced_session(key.clone(), false);
-    assert_eq!(
-        dnat_steering_holder_count(&key, b),
-        0,
-        "K's close releases row B"
-    );
-}
-
-/// The migration also covers a replacement that DROPS the source rewrite: the
-/// new decision publishes no row at all, so the old one must be released.
-#[test]
-fn ha_same_key_replace_dropping_snat_releases_the_old_row_9514() {
-    use crate::afxdp::checksum::{DNAT_DELETE_ATTEMPTS, dnat_steering_holder_count};
-    let _g = crate::afxdp::checksum::dnat_counter_guard();
-    let coordinator = coordinator_with_dnat_fd_9514();
-    let key = test_key();
-    let a = snat_row_9514(49519);
-    assert_eq!(
-        dnat_steering_holder_count(&key, a),
-        0,
-        "row A must start empty"
-    );
-
-    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), a, 1));
-    let d0 = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed);
-    coordinator.upsert_synced_session(synced_with_nat_9514(key.clone(), NatDecision::default(), 2));
-    let deletes_on_replace = DNAT_DELETE_ATTEMPTS.load(Ordering::Relaxed) - d0;
-    assert_eq!(
-        (dnat_steering_holder_count(&key, a), deletes_on_replace),
-        (0, 1),
-        "#9514: a replacement that drops SNAT must release the old row and delete it -- \
-         nothing will ever close under decision A again"
-    );
-}
-
 // #13710 (D16-05): a same-key synced replacement that changes the NAT
-// decision must retire the OLD synthesized reverse companion. The forward
-// publish overwrites `entry.key`, but the companion key is derived from
-// `decision.nat`, so replacement leaves `reverse_session_key(K, natA)` in
-// `sessions.synced` forever: the later delete derives its companion from
-// the STORED (newest) decision and removes only `reverse_session_key(K,
-// natB)`. Unique ports (49530+) keep this cell off other cells' rows.
+// decision must retire the OLD synthesized reverse companion.
+
 fn synced_13710_contains(coordinator: &Coordinator, key: &SessionKey) -> bool {
     coordinator
         .sessions
@@ -7192,7 +6983,6 @@ fn fixture_9714_with_owner_rg(
             entry,
         );
     }
-    crate::afxdp::checksum::add_dnat_steering_holder(&forward.key, forward.decision.nat);
     Fixture9714 {
         coordinator,
         worker_a,
@@ -7228,13 +7018,6 @@ impl Fixture9714 {
         writes
             .iter()
             .any(|w| w.value.is_none() && w.key == self.forward.key)
-    }
-
-    fn dnat_holds(&self) -> usize {
-        crate::afxdp::checksum::dnat_steering_holder_count(
-            &self.forward.key,
-            self.forward.decision.nat,
-        )
     }
 }
 
@@ -7693,11 +7476,6 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
         fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
         "fixture: the local forward and reverse entries must be in the shared maps"
     );
-    let holds_before = fixture.dnat_holds();
-    assert!(
-        holds_before >= 1,
-        "fixture: the forward session must hold its DNAT steering row"
-    );
     let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
@@ -7736,13 +7514,6 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
         violations.push(format!(
             "a peer delete removed the kernel steering row of a live local session; the non-owning \
              RSS queues then adjudicate its packets as new flows (#9714). Writes: {writes:?}"
-        ));
-    }
-    let holds_after = fixture.dnat_holds();
-    if holds_after != holds_before {
-        violations.push(format!(
-            "a peer delete released the DNAT steering hold of a live local session (#9714): \
-             {holds_before} -> {holds_after}"
         ));
     }
     if fixture.queued_delete(&fixture.forward.key) || fixture.queued_delete(&fixture.reverse_key) {
@@ -7868,7 +7639,6 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
 #[test]
 fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     let fixture = fixture_9714(true);
-    let holds_before = fixture.dnat_holds();
     crate::afxdp::bpf_map::clear_session_map_writes();
 
     let outcome = fixture
@@ -7899,13 +7669,6 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     {
         violations.push(format!(
             "a peer delete of the reverse key removed its kernel steering row. Writes: {writes:?}"
-        ));
-    }
-    let holds_after = fixture.dnat_holds();
-    if holds_after != holds_before {
-        violations.push(format!(
-            "a refused peer delete of the reverse key released the flow's DNAT steering hold \
-             (#9714): {holds_before} -> {holds_after}"
         ));
     }
     if fixture.queued_delete(&fixture.forward.key) || fixture.queued_delete(&fixture.reverse_key) {
@@ -8102,7 +7865,11 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
         .coordinator
         .session_domain()
         .delete_peer_synced_session(fixture.forward.key.clone(), true);
-    assert_eq!(outcome, SyncedDeleteOutcome::Applied, "forward-only delete must apply");
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
+        "forward-only delete must apply"
+    );
     assert!(
         !fixture.shared_has(&fixture.forward.key),
         "forward-only delete must remove the named key"
@@ -8129,7 +7896,11 @@ fn ordinary_peer_delete_retires_both_halves_9752() {
         .coordinator
         .session_domain()
         .delete_peer_synced_session(fixture.forward.key.clone(), false);
-    assert_eq!(outcome, SyncedDeleteOutcome::Applied, "ordinary delete must apply");
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
+        "ordinary delete must apply"
+    );
     assert!(
         !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
         "ordinary delete must remove both halves"
@@ -8934,7 +8705,8 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
     // (mirrors the refresh-cell install, as a queued UpsertSynced).
     let forward_key = test_key();
     let reverse_key = reverse_session_key(&forward_key, test_decision().nat);
-    let stale_reverse = SyncedSessionEntry { key: reverse_key.clone(),
+    let stale_reverse = SyncedSessionEntry {
+        key: reverse_key.clone(),
     decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::FabricRedirect,
@@ -8959,7 +8731,8 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
         install_table_domain: 0,
         install_table_check: 0,
     },
-    metadata: SessionMetadata { ingress_zone: 2,
+        metadata: SessionMetadata {
+            ingress_zone: 2,
     egress_zone: 1,
     ingress_zone_check: 0,
     egress_zone_check: 0,
@@ -8976,16 +8749,22 @@ fn queued_stale_reverse_upsert_healed_by_positioned_refresh_9720() {
     inactivity_timeout_ns: None,
     policy_counter_idx: 0,
     policy_counter: None,
-    nat_scope_ifindex: None },
+            nat_scope_ifindex: None,
+        },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
     protocol: PROTO_TCP,
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     let now_ns = monotonic_nanos();
 
     coordinator
@@ -9120,19 +8899,28 @@ fn queued_forward_upsert_demoted_by_positioned_demote_9720() {
         ForwardingDisposition::FabricRedirect,
         "fixture: inactive HA enforcement must turn the live candidate into a FabricRedirect",
     );
-    let forward_upsert = SyncedSessionEntry { key: key.clone(),
+    let forward_upsert = SyncedSessionEntry {
+        key: key.clone(),
     decision: test_decision(),
-    metadata: SessionMetadata { fabric_ingress: false,
-    nat_scope_ifindex: None, ..test_metadata() },
+        metadata: SessionMetadata {
+            fabric_ingress: false,
+            nat_scope_ifindex: None,
+            ..test_metadata()
+        },
     leak_incarnation: 0,
     origin: SessionOrigin::SyncImport,
     protocol: PROTO_TCP,
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
 
     coordinator
         .update_ha_state(&[HAGroupStatus {
@@ -9550,7 +9338,6 @@ fn declined_delete_fixture_9960() -> (
     Fixture9714,
     SessionKey,
     SessionKey,
-    usize,
     super::session_import::SyncedDeleteOutcome,
     Vec<crate::afxdp::bpf_map::SessionMapWriteRecord>,
     u64,
@@ -9574,11 +9361,6 @@ fn declined_delete_fixture_9960() -> (
     assert!(
         prewarm_filed_9714(&fixture, &key),
         "FIXTURE: the key must be filed before the decline"
-    );
-    let holds_before = fixture.dnat_holds();
-    assert!(
-        holds_before >= 1,
-        "FIXTURE: the forward session must hold its DNAT steering row"
     );
     let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
     crate::afxdp::bpf_map::clear_session_map_writes();
@@ -9619,21 +9401,13 @@ fn declined_delete_fixture_9960() -> (
         outcome
     });
     let writes = crate::afxdp::bpf_map::session_map_writes();
-    (
-        fixture,
-        key,
-        reverse_key,
-        holds_before,
-        outcome,
-        writes,
-        refused_before,
-    )
+    (fixture, key, reverse_key, outcome, writes, refused_before)
 }
 
 /// Matrix row 1/6: a declined delete keeps the kernel steering row.
 #[test]
 fn declined_synced_delete_keeps_steering_row_9960() {
-    let (fixture, _key, _reverse_key, _holds_before, _outcome, writes, _refused_before) =
+    let (fixture, _key, _reverse_key, _outcome, writes, _refused_before) =
         declined_delete_fixture_9960();
     assert!(
         !writes
@@ -9643,25 +9417,13 @@ fn declined_synced_delete_keeps_steering_row_9960() {
     );
 }
 
-/// Matrix row 2/6: a declined delete keeps the DNAT steering hold.
-#[test]
-fn declined_synced_delete_keeps_dnat_hold_9960() {
-    let (fixture, _key, _reverse_key, holds_before, _outcome, _writes, _refused_before) =
-        declined_delete_fixture_9960();
-    assert_eq!(
-        fixture.dnat_holds(),
-        holds_before,
-        "DECLINED delete released the live replacement's DNAT hold"
-    );
-}
-
-/// Matrix row 3/6: the shared forward authority survives. This row is already
+/// Matrix row 2/5: the shared forward authority survives. This row is already
 /// green on origin/master; its single-gate mutant is RED in the fail-on-revert
 /// matrix because removing the existing `SharedRemoval::Declined` gate changes
 /// the observed shared state.
 #[test]
 fn declined_synced_delete_keeps_shared_forward_9960() {
-    let (fixture, key, _reverse_key, _holds_before, _outcome, _writes, _refused_before) =
+    let (fixture, key, _reverse_key, _outcome, _writes, _refused_before) =
         declined_delete_fixture_9960();
     assert!(
         fixture.shared_has(&key),
@@ -9682,10 +9444,10 @@ fn declined_synced_delete_keeps_shared_forward_9960() {
     );
 }
 
-/// Matrix row 4/6: a declined delete keeps the reverse companion.
+/// Matrix row 3/5: a declined delete keeps the reverse companion.
 #[test]
 fn declined_synced_delete_keeps_reverse_companion_9960() {
-    let (fixture, _key, reverse_key, _holds_before, _outcome, _writes, _refused_before) =
+    let (fixture, _key, reverse_key, _outcome, _writes, _refused_before) =
         declined_delete_fixture_9960();
     assert!(
         fixture.shared_has(&reverse_key),
@@ -9693,10 +9455,10 @@ fn declined_synced_delete_keeps_reverse_companion_9960() {
     );
 }
 
-/// Matrix row 5/6: a declined delete does not fan out DeleteSynced.
+/// Matrix row 4/5: a declined delete does not fan out DeleteSynced.
 #[test]
 fn declined_synced_delete_skips_worker_fanout_9960() {
-    let (fixture, key, reverse_key, _holds_before, _outcome, _writes, _refused_before) =
+    let (fixture, key, reverse_key, _outcome, _writes, _refused_before) =
         declined_delete_fixture_9960();
     assert!(
         !fixture.queued_delete(&key) && !fixture.queued_delete(&reverse_key),
@@ -9704,13 +9466,13 @@ fn declined_synced_delete_skips_worker_fanout_9960() {
     );
 }
 
-/// Matrix row 6/6: a declined delete is distinguishable from Applied, so the
+/// Matrix row 5/5: a declined delete is distinguishable from Applied, so the
 /// Go caller does not delete its BPF mirror row.
 #[test]
 fn declined_synced_delete_reports_refusal_9960() {
     use super::session_import::SyncedDeleteOutcome;
 
-    let (_fixture, _key, _reverse_key, _holds_before, outcome, _writes, _refused_before) =
+    let (_fixture, _key, _reverse_key, outcome, _writes, _refused_before) =
         declined_delete_fixture_9960();
     assert_eq!(
         outcome,
@@ -9728,7 +9490,7 @@ fn declined_synced_delete_reports_refusal_9960() {
 /// mutant even though it is maintained by the shared-removal helper as well.
 #[test]
 fn declined_synced_delete_keeps_reverse_prewarm_filing_9960() {
-    let (fixture, key, _reverse_key, _holds_before, _outcome, _writes, _refused_before) =
+    let (fixture, key, _reverse_key, _outcome, _writes, _refused_before) =
         declined_delete_fixture_9960();
     assert!(
         prewarm_filed_9714(&fixture, &key),
@@ -9740,7 +9502,7 @@ fn declined_synced_delete_keeps_reverse_prewarm_filing_9960() {
 /// same counter as the #9714 early ownership refusal.
 #[test]
 fn declined_synced_delete_counts_concurrent_ownership_refusal_9960() {
-    let (_fixture, _key, _reverse_key, _holds_before, _outcome, _writes, refused_before) =
+    let (_fixture, _key, _reverse_key, _outcome, _writes, refused_before) =
         declined_delete_fixture_9960();
     assert_eq!(
         PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed),
@@ -9837,7 +9599,8 @@ fn fixture_10512_lease(
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let mut forward = SyncedSessionEntry { key: key.clone(),
+    let mut forward = SyncedSessionEntry {
+        key: key.clone(),
     decision: SessionDecision {
         resolution: test_resolution(),
         nat: NatDecision::default(),
@@ -9851,9 +9614,14 @@ fn fixture_10512_lease(
     tcp_flags: 0x10,
     generation: 0,
     session_id: forward_id,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     forward.metadata.is_reverse = false;
     let reverse_key = reverse_session_key(&key, NatDecision::default());
     let mut reverse = forward.clone();
@@ -9916,9 +9684,12 @@ impl Fixture10512Lease {
 #[test]
 fn policy_match_carries_rename_rematch_inputs_10626() {
     let key = test_key();
-    let metadata = SessionMetadata { ingress_zone: 7,
+    let metadata = SessionMetadata {
+        ingress_zone: 7,
     egress_zone: 9,
-    nat_scope_ifindex: None, ..test_metadata() };
+        nat_scope_ifindex: None,
+        ..test_metadata()
+    };
     let nat = NatDecision {
         rewrite_dst: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
         rewrite_dst_port: Some(8443),
@@ -10105,7 +9876,8 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
             discriminator: Default::default(),
             routing_domain: 0,
         };
-        let forward = SyncedSessionEntry { key: key.clone(),
+        let forward = SyncedSessionEntry {
+            key: key.clone(),
         decision: SessionDecision {
             resolution: test_resolution(),
             nat: NatDecision::default(),
@@ -10119,9 +9891,14 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0xF40512,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
         persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         crate::afxdp::shared_ops::publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -10221,7 +9998,8 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
         );
         let mut metadata = test_metadata();
         metadata.is_reverse = false;
-        let forward = SyncedSessionEntry { key: key.clone(),
+        let forward = SyncedSessionEntry {
+            key: key.clone(),
         decision: SessionDecision {
             resolution: test_resolution(),
             nat: NatDecision::default(),
@@ -10235,9 +10013,14 @@ fn policy_shared_absent_companion_is_applied_not_partial_10512() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0xF70512,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
         persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         crate::afxdp::shared_ops::publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -11294,7 +11077,8 @@ fn coord_list_bound_shared_only_row_reports_incomplete_12072() {
     metadata.policy_counter = Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id(
         "lan->wan/tmp",
     )));
-    let entry = SyncedSessionEntry { key,
+    let entry = SyncedSessionEntry {
+        key,
     decision: test_decision(),
     metadata,
     leak_incarnation: 0,
@@ -11303,9 +11087,14 @@ fn coord_list_bound_shared_only_row_reports_incomplete_12072() {
     tcp_flags: 0x10,
     generation: 0,
     session_id,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -11375,7 +11164,8 @@ fn coord_list_bound_sync_import_resolves_current_policy_id_12072() {
     ));
     let session_id = table.session_id_for(&key);
     assert_ne!(session_id, 0, "fixture must mint a live session identity");
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
     decision: test_decision(),
     metadata,
     leak_incarnation: 0,
@@ -11384,9 +11174,14 @@ fn coord_list_bound_sync_import_resolves_current_policy_id_12072() {
     tcp_flags: 0x10,
     generation: 0,
     session_id,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -11495,7 +11290,8 @@ fn coord_list_unbound_peer_row_excluded_from_prepublish_12072() {
     let publish = |key: SessionKey, policy_id: u32, session_id: u64| {
         let mut metadata = test_metadata();
         metadata.policy_id = policy_id;
-        let entry = SyncedSessionEntry { key,
+        let entry = SyncedSessionEntry {
+            key,
         decision: test_decision(),
         metadata,
         leak_incarnation: 0,
@@ -11504,9 +11300,14 @@ fn coord_list_unbound_peer_row_excluded_from_prepublish_12072() {
         tcp_flags: 0x10,
         generation: 0,
         session_id,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
         persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -11712,7 +11513,8 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
     for domain in [7u32, 8u32] {
         let mut key = base.clone();
         key.routing_domain = domain;
-        let entry = SyncedSessionEntry { key,
+        let entry = SyncedSessionEntry {
+            key,
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -11721,9 +11523,14 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0xC1EA9000 + domain as u64,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
         persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         crate::afxdp::shared_ops::publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -11771,7 +11578,8 @@ fn clear_mirror_removes_same_tuple_in_two_domains_10512() {
 fn clear_mirror_bpf_failure_retains_authority_10512() {
     let coordinator = Coordinator::new();
     let key = test_key();
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -11780,9 +11588,14 @@ fn clear_mirror_bpf_failure_retains_authority_10512() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0xC1EA9,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     crate::afxdp::shared_ops::publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -11841,7 +11654,8 @@ fn clear_mirror_over_old_cap_pages_to_empty_16649() {
     for i in 0..5u16 {
         let mut key = test_key();
         key.src_port = 40000 + i;
-        let entry = SyncedSessionEntry { key,
+        let entry = SyncedSessionEntry {
+            key,
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -11850,9 +11664,14 @@ fn clear_mirror_over_old_cap_pages_to_empty_16649() {
         tcp_flags: 0x10,
         generation: 0,
         session_id: 0xC1EA9000 + i as u64,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
         persistent_lease_hold: None,
-        source_nat_static: None, };
+            source_nat_static: None,
+        };
         crate::afxdp::shared_ops::publish_shared_session(
             &coordinator.sessions.synced,
             &coordinator.sessions.nat,
@@ -11903,7 +11722,8 @@ fn clear_mirror_over_old_cap_pages_to_empty_16649() {
 fn clear_mirror_zero_batch_refused_untouched_16649() {
     let coordinator = Coordinator::new();
     let key = test_key();
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -11912,9 +11732,14 @@ fn clear_mirror_zero_batch_refused_untouched_16649() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0xC1EA9,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     crate::afxdp::shared_ops::publish_shared_session(
         &coordinator.sessions.synced,
         &coordinator.sessions.nat,
@@ -11972,15 +11797,19 @@ fn clear_mirror_refuses_no_progress_batch_17682() {
     );
 
     let domain = coordinator.session_domain();
-    let _outcome_override_guard = domain.override_next_synced_delete_for_test(
-        super::session_import::SyncedDeleteOutcome::Applied,
-    );
+    let _outcome_override_guard = domain
+        .override_next_synced_delete_for_test(super::session_import::SyncedDeleteOutcome::Applied);
     let err = domain
         .clear_mirror_with_batch(1)
         .expect_err("a no-progress batch must not be retried indefinitely");
     assert_eq!(err, "clear-no-progress");
     assert!(
-        coordinator.sessions.synced.lock().expect("synced").contains_key(&key),
+        coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("synced")
+            .contains_key(&key),
         "declined row must remain authoritative for retry"
     );
     assert!(
@@ -12227,7 +12056,8 @@ fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
     decision.install_table_check = check;
     let mut metadata = test_metadata();
     metadata.fabric_ingress = false;
-    let entry = SyncedSessionEntry { key: test_key(),
+    let entry = SyncedSessionEntry {
+        key: test_key(),
     decision,
     metadata,
     leak_incarnation: 0,
@@ -12236,9 +12066,14 @@ fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
 
     assert_eq!(
         coordinator.upsert_synced_session(entry.clone()),
@@ -12336,7 +12171,8 @@ fn reverse_prewarm_uses_native_table_instead_of_default_12086() {
 
     let mut key = test_key();
     key.routing_domain = domain;
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -12345,9 +12181,14 @@ fn reverse_prewarm_uses_native_table_instead_of_default_12086() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     assert!(matches!(
         crate::afxdp::forwarding::native_route_table_for_flow_target(
             &coordinator.forwarding,
@@ -12382,7 +12223,8 @@ fn reverse_prewarm_unresolvable_domain_keeps_default_reply_rg_12086() {
 
     let mut key = test_key();
     key.routing_domain = 0x00d0_1208;
-    let entry = SyncedSessionEntry { key: key.clone(),
+    let entry = SyncedSessionEntry {
+        key: key.clone(),
     decision: test_decision(),
     metadata: test_metadata(),
     leak_incarnation: 0,
@@ -12391,9 +12233,14 @@ fn reverse_prewarm_unresolvable_domain_keeps_default_reply_rg_12086() {
     tcp_flags: 0x10,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     assert!(matches!(
         crate::afxdp::forwarding::native_route_table_for_flow_target(
             &coordinator.forwarding,
@@ -12543,7 +12390,8 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
 
     let egress = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
     let remote = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
-    let entry = SyncedSessionEntry { key: SessionKey {
+    let entry = SyncedSessionEntry {
+        key: SessionKey {
         protocol: crate::ip_proto::PROTO_UDP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 101)),
         dst_ip: remote,
@@ -12568,9 +12416,14 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
     persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     let key = entry.key.clone();
     let outcome = coordinator.upsert_synced_session(entry);
     assert_eq!(
@@ -12649,7 +12502,8 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
             install_table_domain: 0,
             install_table_check: 0,
         },
-        ..SyncedSessionEntry { key: key.clone(),
+        ..SyncedSessionEntry {
+            key: key.clone(),
         decision: test_decision(),
         metadata: test_metadata(),
         leak_incarnation: 0,
@@ -12658,9 +12512,14 @@ fn zero_worker_import_refuses_interface_control_tuple_14084() {
         tcp_flags: 0,
         generation: 0,
         session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            tcp_close_class: 0,
+            tcp_handshake_state: 0,
+            rev_packets: 0u64,
+            fwd_packets: 0,
+            pptp_call_ids: 0,
         persistent_lease_hold: None,
-        source_nat_static: None, }
+            source_nat_static: None,
+        }
     };
     let ok_key = ok.key.clone();
     let ok_outcome = coordinator.upsert_synced_session(ok);
@@ -12744,14 +12603,13 @@ fn synced_delete_releases_coordinator_claim_on_reverse_row_14840() {
 
 /// #14840 limb 2a: the policy batch's shared conditional remove must
 /// release the Coordinator steering claims (forward + reverse) and the
-/// forward's DNAT steering hold, exactly as the synced delete does.
+/// exactly as the synced delete does.
 ///
 /// Pre-fix `remove_shared_policy_item` removed only the shared-map rows:
 /// no steering delete, no `delete_dnat_table_entry`, so both coordinator
-/// claims and the DNAT hold survived the batch for the life of the
-/// process.
+/// claims survived the batch for the life of the process.
 #[test]
-fn policy_shared_remove_releases_coordinator_and_dnat_14840() {
+fn policy_shared_remove_releases_coordinator_14840() {
     use super::session_import::SyncedDeleteOutcome;
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(reserve6600_forwarding());
@@ -12761,7 +12619,6 @@ fn policy_shared_remove_releases_coordinator_and_dnat_14840() {
             session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
                 fd: crate::afxdp::bpf_map::RECORDER_ONLY_MAP_FD,
             }),
-            dnat_table_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd: -1 }),
             ..Default::default()
         }));
     let mut entry = reserve6600_entry(42440, 52440);
@@ -12795,12 +12652,6 @@ fn policy_shared_remove_releases_coordinator_and_dnat_14840() {
             )
             .expect("coordinator pre-claim");
     }
-    crate::afxdp::checksum::add_dnat_steering_holder(&key, nat);
-    assert_eq!(
-        crate::afxdp::checksum::dnat_steering_holder_count(&key, nat),
-        1,
-        "control: DNAT hold present before the batch remove"
-    );
     let outcome = coordinator.session_domain().remove_shared_policy_item(
         &key,
         0xF14840,
@@ -12825,11 +12676,6 @@ fn policy_shared_remove_releases_coordinator_and_dnat_14840() {
             .owner_count(&crate::afxdp::bpf_map::session_map_row(&reverse_key)),
         0,
         "#14840: policy remove must release the reverse coordinator claim"
-    );
-    assert_eq!(
-        crate::afxdp::checksum::dnat_steering_holder_count(&key, nat),
-        0,
-        "#14840: policy remove must release the DNAT steering hold"
     );
 }
 

@@ -92,8 +92,6 @@ func (d *cursorlessClearDP) DeleteSession(key dataplane.SessionKey) error {
 }
 
 func (d *cursorlessClearDP) DeleteSessionV6(dataplane.SessionKeyV6) error { return nil }
-func (d *cursorlessClearDP) DeleteDNATEntry(dataplane.DNATKey) error      { return nil }
-func (d *cursorlessClearDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error  { return nil }
 
 // --- remaining cliRuntime surface: unused by the filtered-clear path, stubbed. ---
 func (d *cursorlessClearDP) Compile(*config.Config) (*dataplane.CompileResult, error) {

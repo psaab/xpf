@@ -63,13 +63,13 @@ func TestLivePinABIMismatchUsesStalePinRemediation(t *testing.T) {
 			wantDiffFrag: "ValueSize embedded=8 pinned=4",
 		},
 		{
-			// A shim-declared shared map (dnat_table): embedded shape is the
-			// correct one (so the earlier expected-shape arm passes); only the
-			// LIVE pin drifts, so the mismatch is caught by the live-pin arm.
-			name:         "dnat-table-live-pin-drift",
-			mapName:      "dnat_table",
+			// A shim-declared map (userspace_sessions): embedded shape is the
+			// correct one; only the LIVE pin drifts, so the mismatch is caught
+			// by the live-pin arm.
+			name:         "sessions-live-pin-drift",
+			mapName:      "userspace_sessions",
 			embedded:     nil,
-			pinnedShape:  userspaceMapABI{Type: ebpf.Hash, KeySize: 12, ValueSize: 8, MaxEntries: 16, Flags: unix.BPF_F_NO_PREALLOC},
+			pinnedShape:  userspaceMapABI{Type: ebpf.Hash, KeySize: 40, ValueSize: 1, MaxEntries: 16, Flags: unix.BPF_F_NO_PREALLOC},
 			wantDiffFrag: "MaxEntries",
 		},
 	}
@@ -160,48 +160,5 @@ func TestLivePinABIMismatchUsesStalePinRemediation(t *testing.T) {
 				t.Fatalf("err = %v, live-pin mismatch must NOT tell the operator to rebuild the shim", err)
 			}
 		})
-	}
-}
-
-// TestSSOTDriftKeepsGenerateRemediation proves the #5363 fix is SURGICAL: the
-// embedded-vs-Go-SSOT drift sites are UNCHANGED and still emit the `make
-// generate-userspace-xdp` remediation. Here an embedded dnat_table value_size
-// drifts from the Go single source of truth on a FRESH node (no live pin), so
-// the reject comes from validateSharedMapExpectedABI, not the live-pin arm — a
-// genuine "the embedded shim binary drifted from its Go contract" situation
-// where rebuilding the shim IS the right action.
-//
-// RED-on-revert direction: if someone globally swapped the constant (applying
-// the stale-pin remediation to the SSOT-drift sites too), this test flips red.
-func TestSSOTDriftKeepsGenerateRemediation(t *testing.T) {
-	t.Parallel()
-
-	base := validABIBaseSpec()
-	base.Maps["dnat_table"].ValueSize = 16 // drift from the Go SSOT (sizeOf[DNATValue]()==8)
-
-	err := validateUserspaceShimSpecWith(base, noPinReader())
-	if err == nil {
-		t.Fatal("want dnat_table value_size drift error on fresh node, got nil")
-	}
-	msg := err.Error()
-	for _, want := range []string{"dnat_table", "value_size", "make generate-userspace-xdp"} {
-		if !strings.Contains(msg, want) {
-			t.Fatalf("err = %v, want substring %q (SSOT-drift site must keep make-generate)", err, want)
-		}
-	}
-	// The SSOT-drift remediation must NOT be the stale-pin one. Pin the
-	// CONSTANT rather than a phrase from it: the previous form matched on
-	// "FULL dataplane reload", so rewording the stale-pin message silently
-	// turned this guard into a no-op that could never fire again (#6928).
-	// Comparing against the constant survives any rewording of either message.
-	if strings.Contains(msg, userspaceShimStalePinRemediation) {
-		t.Fatalf("err = %v, embedded-vs-Go SSOT drift must NOT use the stale-pin remediation", err)
-	}
-	// And it must not smuggle in the stale-pin ACTION either: `xpfd cleanup`
-	// destroys all pinned dataplane state, which is the wrong and destructive
-	// answer to a drift that `make generate-userspace-xdp` fixes in place.
-	if strings.Contains(msg, "xpfd cleanup") {
-		t.Fatalf("err = %v, SSOT drift must not tell the operator to unpin — "+
-			"the embedded shim is rebuildable, the pinned state is not disposable", err)
 	}
 }

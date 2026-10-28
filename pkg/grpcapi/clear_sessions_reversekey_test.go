@@ -58,8 +58,6 @@ func (d *recordingClearGRPCDP) DeleteSession(key dataplane.SessionKey) error {
 }
 
 func (d *recordingClearGRPCDP) DeleteSessionV6(dataplane.SessionKeyV6) error { return nil }
-func (d *recordingClearGRPCDP) DeleteDNATEntry(dataplane.DNATKey) error      { return nil }
-func (d *recordingClearGRPCDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error  { return nil }
 
 func recContainsV4(keys []dataplane.SessionKey, want dataplane.SessionKey) bool {
 	for _, k := range keys {
