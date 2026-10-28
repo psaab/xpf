@@ -1148,6 +1148,10 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 		if tr.Changed && tr.Active {
 			d.removeBlackholeRoutes(rgID)
 			d.addStableRethLinkLocal(rgID)
+			// #17052: legacy VRRP mode — pkg/vrrp announces only the
+			// VIPs; the daemon sends the router-LL + pool half of the
+			// shared target set so both modes announce identically.
+			d.sendVRRPModeNonVIPAnnounce(rgID)
 			d.applyRethServicesForRG(rgID)
 			// #16690: legacy VRRP edge consumed the transition;
 			// reconcile will see Changed=false and skip gating.

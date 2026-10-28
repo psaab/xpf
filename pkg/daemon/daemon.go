@@ -1750,6 +1750,10 @@ type Daemon struct {
 	// RG, not per send. Guarded by garpClampWarnMu.
 	garpClampWarnMu sync.Mutex
 	garpClampWarned map[int]bool
+	// poolTruncWarned dedups the #8405 pool-truncation warning per RG
+	// (#17052: split from garpClampWarned so a clamp warning no longer
+	// suppresses the distinct truncation warning). Guarded by garpClampWarnMu.
+	poolTruncWarned map[int]bool
 	// localFailoverCommitReady tracks whether this node has already
 	// applied the local side of a freshly committed transfer request for
 	// each RG. The cluster manager waits on this before telling the peer
