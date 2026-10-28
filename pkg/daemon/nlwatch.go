@@ -71,6 +71,9 @@ type nlWatch[U any] struct {
 	// WatchTick handles one Watch firing. Return true to stop cleanly
 	// (Run returns), false to continue this lifetime.
 	WatchTick func() (stop bool)
+	// OwnerDone cleanly stops the watch lifetime independently of ctx; the
+	// subscription's own done channel is closed before the lifetime returns.
+	OwnerDone <-chan struct{}
 }
 
 func (w nlWatch[U]) backoff() time.Duration {
@@ -80,16 +83,20 @@ func (w nlWatch[U]) backoff() time.Duration {
 	return nlWatchBackoffDefault
 }
 
-// Run drives the lifecycle until ctx is cancelled.
+// Run drives the lifecycle until ctx or OwnerDone is done.
 func (w nlWatch[U]) Run(ctx context.Context) {
 	for {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return
+		case <-w.OwnerDone:
+			return
+		default:
 		}
 		if !w.runOne(ctx) {
 			return
 		}
-		if !nlWatchBackoffWait(ctx, w.backoff()) {
+		if !nlWatchBackoffWaitFor(ctx, w.backoff(), w.OwnerDone) {
 			return
 		}
 	}
@@ -97,10 +104,16 @@ func (w nlWatch[U]) Run(ctx context.Context) {
 
 // nlWatchBackoffWait waits d or until ctx is done; false means stop.
 func nlWatchBackoffWait(ctx context.Context, d time.Duration) bool {
+	return nlWatchBackoffWaitFor(ctx, d, nil)
+}
+
+func nlWatchBackoffWaitFor(ctx context.Context, d time.Duration, ownerDone <-chan struct{}) bool {
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
+		return false
+	case <-ownerDone:
 		return false
 	case <-timer.C:
 		return true
@@ -108,7 +121,7 @@ func nlWatchBackoffWait(ctx context.Context, d time.Duration) bool {
 }
 
 // runOne owns one subscription lifetime. True means resubscribe after
-// backoff; false means ctx cancelled / clean stop.
+// backoff; false means ctx or OwnerDone cancelled / clean stop.
 func (w nlWatch[U]) runOne(ctx context.Context) bool {
 	if w.Enabled != nil && !w.Enabled() {
 		// Conditional subscribe is off: still honour ctx and the
@@ -123,6 +136,8 @@ func (w nlWatch[U]) runOne(ctx context.Context) bool {
 			}
 			select {
 			case <-ctx.Done():
+				return false
+			case <-w.OwnerDone:
 				return false
 			case <-w.Watch():
 				if w.WatchTick != nil && w.WatchTick() {
@@ -174,6 +189,8 @@ func (w nlWatch[U]) runOne(ctx context.Context) bool {
 		}
 		select {
 		case <-ctx.Done():
+			return false
+		case <-w.OwnerDone:
 			return false
 		case <-watchC:
 			if w.WatchTick != nil && w.WatchTick() {

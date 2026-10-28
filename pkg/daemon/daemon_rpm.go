@@ -699,9 +699,13 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 	// nlWatch.runOne repeatedly with its own backoff and forwards
 	// events; nlWatch fires OnGap (signalVerify) after every
 	// successful (re)subscribe, including the first.
+	// Its owner stop channel interrupts runOne (closing the subscription's
+	// done channel) and joins the helper before the pair owner returns.
 	runSocket := func(isAddr bool) (stop func()) {
 		done := make(chan struct{})
+		exited := make(chan struct{})
 		go func() {
+			defer close(exited)
 			backoff := resubBackoff
 			for {
 				select {
@@ -718,6 +722,7 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 						Subscribe:      linkSubscribe,
 						Buf:            32,
 						Backoff:        backoff,
+						OwnerDone:      done,
 						OnReceiveError: onError,
 						Enabled: func() bool {
 							return d.probePinVerifyFn() != nil
@@ -727,6 +732,7 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 							select {
 							case events <- rpmEvent{link: u}:
 							case <-ctx.Done():
+							case <-done:
 							}
 						},
 					}.runOne(ctx)
@@ -736,6 +742,7 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 						Subscribe:      addrSubscribe,
 						Buf:            32,
 						Backoff:        backoff,
+						OwnerDone:      done,
 						OnReceiveError: onError,
 						Enabled: func() bool {
 							return d.probePinVerifyFn() != nil
@@ -745,6 +752,7 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 							select {
 							case events <- rpmEvent{isAddr: true, addr: u}:
 							case <-ctx.Done():
+							case <-done:
 							}
 						},
 					}.runOne(ctx)
@@ -768,7 +776,10 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 				}
 			}
 		}()
-		return func() { close(done) }
+		return func() {
+			close(done)
+			<-exited
+		}
 	}
 	stopLink := runSocket(false)
 	stopAddr := runSocket(true)

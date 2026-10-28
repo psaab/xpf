@@ -723,6 +723,118 @@ func TestProbePinRetryLoopResubscribesAndResyncsOnClosedSubscriptions12088(t *te
 	}
 }
 
+// TestProbePinRetryLoopNaturalExitStopsLiveSubscriptions17064 is the
+// #17064 B1 regression cell: when the pin-retry ticker exits naturally
+// (pins removed, so the ticker arm returns without ctx cancellation),
+// the live link AND address subscription helpers must exit and their
+// netlink sockets must close. The contexts here are never cancelled
+// before the assertions, so helper/socket teardown can only come from
+// the owner's own exit. RED on the folded head: the runSocket helpers
+// pass the generation ctx (not their private done channel) to
+// nlWatch.runOne, so deferred stopLink/stopAddr cannot interrupt a
+// live subscription and the fake sockets' done channels stay open.
+func TestProbePinRetryLoopNaturalExitStopsLiveSubscriptions17064(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := rpmPinnedTestConfig()
+	var linkSubscriptions, addrSubscriptions atomic.Int32
+	var mu sync.Mutex
+	var linkDone, addrDone <-chan struct{}
+	linkEntered := make(chan struct{})
+	addrEntered := make(chan struct{})
+	d := &Daemon{
+		rpm:                   rpm.New(),
+		daemonCtx:             ctx,
+		rpmEffective:          cfg.Services.RPM,
+		probePinRetryEvery:    5 * time.Millisecond,
+		probePinResubBackoff:  time.Millisecond,
+		probePinEgressStateFn: func(string) probePinEgressState { return probePinEgressUp },
+		probePinVerify: func([]routing.ProbePin) map[string]error {
+			return nil
+		},
+		probePinLinkSubscribe: func(_ chan<- netlink.LinkUpdate, done <-chan struct{}, _ func(error)) error {
+			if linkSubscriptions.Add(1) == 1 {
+				mu.Lock()
+				linkDone = done
+				mu.Unlock()
+				close(linkEntered)
+			}
+			return nil
+		},
+		probePinAddrSubscribe: func(_ chan<- netlink.AddrUpdate, done <-chan struct{}, _ func(error)) error {
+			if addrSubscriptions.Add(1) == 1 {
+				mu.Lock()
+				addrDone = done
+				mu.Unlock()
+				close(addrEntered)
+			}
+			return nil
+		},
+	}
+	defer d.rpm.StopAll()
+
+	loopDone := make(chan struct{})
+	go func() {
+		defer close(loopDone)
+		d.probePinRetryLoop(ctx)
+	}()
+
+	// Both subscriptions must be LIVE (subscribed, socket open) before
+	// the natural exit is triggered.
+	for name, entered := range map[string]chan struct{}{"link": linkEntered, "addr": addrEntered} {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s subscription never became live: link=%d addr=%d", name, linkSubscriptions.Load(), addrSubscriptions.Load())
+		case <-loopDone:
+			t.Fatalf("probe pin retry loop exited before %s subscription was live", name)
+		}
+	}
+
+	// Trigger the natural ticker exit: pins disappear, so the ticker
+	// arm clears the active flag and returns WITHOUT cancelling ctx.
+	d.rpmMu.Lock()
+	d.rpmEffective = &config.RPMConfig{}
+	d.rpmMu.Unlock()
+
+	select {
+	case <-loopDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("probe pin retry loop did not exit after pins were removed")
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("ctx was cancelled (%v); this cell requires teardown without ctx cancel", err)
+	}
+
+	// The owner has exited: both helpers must have exited and both
+	// sockets' done channels must be closed, still without ctx cancel.
+	closed := func(done <-chan struct{}) bool {
+		if done == nil {
+			return false
+		}
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
+	if !waitUntil(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return closed(linkDone) && closed(addrDone)
+	}) {
+		mu.Lock()
+		linkClosed, addrClosed := closed(linkDone), closed(addrDone)
+		mu.Unlock()
+		t.Fatalf("live subscriptions not torn down on natural ticker exit: linkDoneClosed=%v addrDoneClosed=%v link=%d addr=%d ctxErr=%v",
+			linkClosed, addrClosed, linkSubscriptions.Load(), addrSubscriptions.Load(), ctx.Err())
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("ctx was cancelled (%v); teardown must not depend on ctx cancel", err)
+	}
+}
+
 const probePin12088InnerEnv = "XPF_12088_PROBE_PIN_INNER"
 
 // TestProbePinKernelDriftReconcilesInPrivateNetns12088 exercises the real
