@@ -585,7 +585,7 @@ type Store struct {
 	// skips its unlink and returns ErrRescueDeleteSuperseded if a newer
 	// operation already applied (#17825). Thus whichever operation applies
 	// first stays: a delete cannot unlink a save that already succeeded, and
-	// A save after a completed delete can recreate rescue.conf.
+	// a save after a completed delete can recreate rescue.conf.
 	// A writer held at rescueWriteBarrier has not yet taken rescueMu, so a
 	// delete still succeeds promptly during an in-flight save.
 	rescueMu sync.Mutex

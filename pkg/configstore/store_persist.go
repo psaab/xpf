@@ -2751,9 +2751,8 @@ func (s *Store) SaveRescueConfig() error {
 
 // DeleteRescueConfig removes the rescue configuration unless a newer rescue
 // operation has already applied, in which case it returns
-// ErrRescueDeleteSuperseded and leaves the newer state intact.
-
-// The removal is a DURABLE transition (#5197 A4-b1-F10). SaveRescueConfig
+// ErrRescueDeleteSuperseded and leaves the newer state intact. The removal is
+// a DURABLE transition (#5197 A4-b1-F10). SaveRescueConfig
 // persists rescue.conf through fsatomic.WriteFileDurable (temp + fsync +
 // rename + parent-dir fsync), so the delete must match that dir-sync
 // discipline — mirroring DB.DeleteConfirm (#4864). A bare os.Remove is not

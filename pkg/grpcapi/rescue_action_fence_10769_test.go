@@ -65,4 +65,7 @@ func TestRescueDeleteSupersededIsFailedPrecondition_17825(t *testing.T) {
 	if got := status.Code(rescueDeleteRPCError(err)); got != codes.FailedPrecondition {
 		t.Fatalf("superseded rescue delete code = %s, want FailedPrecondition", got)
 	}
+	if got := status.Code(rescueDeleteRPCError(fmt.Errorf("unlink failed"))); got != codes.Internal {
+		t.Fatalf("ordinary rescue delete code = %s, want Internal", got)
+	}
 }
