@@ -623,7 +623,6 @@ impl crate::afxdp::ha::SessionDomain {
     /// per-prefix allocator), so a session can be admissible to one and not the
     /// other. Leaving a half-taken reservation behind would be a leak no worker
     /// ever releases, because no session gets published to reap.
-
     fn reserve_synced_translation(
         &self,
         entry: &mut SyncedSessionEntry,
@@ -1022,7 +1021,6 @@ impl crate::afxdp::ha::SessionDomain {
     /// The counter remains worth having because the absent-fd publish skip is
     /// still reachable on its own (a standby taking bulk sync before its first
     /// apply), and it makes those benign occurrences visible rather than
-
     pub(crate) fn publish_mirror_only(
         &self,
         forwarding: &ForwardingState,

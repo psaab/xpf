@@ -120,7 +120,7 @@ pub(in crate::afxdp) enum NatFailure {
 /// (#3121). `nat_match_flow` is the post-DNAT flow the caller built;
 /// the helpers only differ in how that flow is derived, which stays
 /// per-arm.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn compose_outbound_source_nat(
     forwarding: &ForwardingState,
     decision: SessionDecision,
@@ -224,7 +224,7 @@ pub(in crate::afxdp) fn seed_forward_tcp_epilogue(
 /// forward session, reading the live wire counters from the table so
 /// a PPTP-discriminated GRE key carries its live call-id pair instead
 /// of the seed's former hardcoded 0 (#17021).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn forward_synced_entry(
     sessions: &SessionTable,
     key: SessionKey,

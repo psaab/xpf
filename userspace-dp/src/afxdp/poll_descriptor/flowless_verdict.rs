@@ -73,7 +73,7 @@ pub(super) fn ipv6_ext_header_over_limit_drop(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn flowless_local_delivery_verdict(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
@@ -263,7 +263,7 @@ pub(super) struct FlowlessBaseResolution {
 /// table and matches only when that table owns the address (#12086); otherwise
 /// the PBR table governs the transit fallback.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn flowless_base_resolution(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,

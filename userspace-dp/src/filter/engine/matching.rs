@@ -237,7 +237,7 @@ impl AddrFamily for V6Family {
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn term_matches_family<F: AddrFamily>(
     term: &FilterTerm,
     src_ip: F::Addr,
@@ -280,7 +280,7 @@ pub(super) fn term_matches_family<F: AddrFamily>(
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn term_matches_v4(
     term: &FilterTerm,
     src_ip: Ipv4Addr,
@@ -451,7 +451,7 @@ fn port_match(constrained: bool, except: bool, matcher: &PortMatcher, port: u16)
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn term_matches_v6(
     term: &FilterTerm,
     src_ip: Ipv6Addr,

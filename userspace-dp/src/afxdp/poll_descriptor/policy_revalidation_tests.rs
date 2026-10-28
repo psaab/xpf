@@ -2762,7 +2762,6 @@ fn zone_policy_translated_keyed_row_declines_without_stamping_12867() {
 /// 198.51.100.1:443 translated to 203.0.113.10). Returns the call
 /// arguments a reverse-direction session hit carries: the reverse row's
 /// key/metadata/decision, the forward key, and the forward decision.
-#[allow(clippy::type_complexity)]
 fn reverse_snat_case_13652() -> (
     SessionKey,
     SessionKey,
@@ -6177,7 +6176,6 @@ fn reverse_hits_judge_forward_selector_by_direction_15934() {
     // pair. `companion` installs BOTH rows (forward row materialized,
     // made stale by the caller bumping the generation); otherwise only
     // the reverse row exists and the arm synthesizes the forward row.
-    #[allow(clippy::too_many_arguments)]
     fn reverse_hit(
         configured: &crate::afxdp::ForwardingState,
         stored: Option<(u8, u8)>,

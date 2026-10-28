@@ -100,7 +100,7 @@ impl DeleteDropSweep {
     /// window; the later command remains safe because both release paths are
     /// holder-aware and therefore idempotent (#6211). Steering release still
     /// happens first, unchanged from #9560.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(in crate::afxdp) fn step_with_nat(
         &mut self,
         sessions: &mut SessionTable,

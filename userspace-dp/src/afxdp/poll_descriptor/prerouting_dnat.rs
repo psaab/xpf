@@ -108,7 +108,7 @@ impl PreroutingDnatVerdict {
 /// (`live_write_lock_acquisitions`, plus contended on contention)
 /// exactly as the pre-extraction poll loop did.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn prerouting_dnat_verdict(
     forwarding: &ForwardingState,
     meta: &UserspaceDpMeta,
@@ -145,7 +145,7 @@ pub(in crate::afxdp) fn prerouting_dnat_verdict(
 /// snapshot can; the poll loop re-evaluates with the counting entry
 /// point before installing, so a stale peek never installs state.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn prerouting_dnat_verdict_peek(
     forwarding: &ForwardingState,
     meta: &UserspaceDpMeta,
@@ -168,7 +168,7 @@ pub(in crate::afxdp) fn prerouting_dnat_verdict_peek(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn prerouting_dnat_verdict_inner(
     forwarding: &ForwardingState,
     meta: &UserspaceDpMeta,

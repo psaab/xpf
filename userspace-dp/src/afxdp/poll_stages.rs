@@ -1096,7 +1096,7 @@ pub(super) fn stage_screen_check(
 /// profile is alarm-without-drop, its trip is log-only, mirroring the
 /// raw zone's own audit mode.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn stage_screen_check_with_ambiguous(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
@@ -1595,7 +1595,7 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss(
 /// never validates (its key ring entry is not consulted) and never
 /// seeds its validated-client cache.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],
@@ -2068,7 +2068,7 @@ pub(super) fn stage_ipsec_passthrough_check(
 /// its scope with `prerouting_ingress_scope_ambiguous` instead. The
 /// claimed zone governs only the #4323/#15925 host-inbound gate.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn stage_ipsec_passthrough_check_with_scope(
     flow: Option<&SessionFlow>,
     packet_frame: &[u8],

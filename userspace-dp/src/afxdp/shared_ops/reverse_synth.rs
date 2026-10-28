@@ -58,8 +58,6 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match(
 /// item 6): threads `table` into the reply-target resolution. `None`
 /// preserves default-instance behavior while the untabled wrapper performs
 /// native-RI derivation (#10312).
-
-#[allow(clippy::too_many_arguments)]
 /// #16217 (FZDiag35): distinguishes the two synthesis callers.
 /// The LIVE reverse install (`install_reverse_session_from_forward_match`,
 /// worker poll path) builds its forward match from a locally-observed
@@ -378,7 +376,7 @@ pub(in crate::afxdp) struct ReverseSessionResolution {
     pub(in crate::afxdp) install_table_check: u32,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_resolution_for_flow(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -460,7 +458,7 @@ pub(in crate::afxdp) fn reverse_resolution_for_session(
 /// Keeping the reverse resolution and the reverse decision's installing-table
 /// stamp together prevents a caller from resolving in one VRF and storing a
 /// zero-stamped decision that later falls back to MAIN.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_session_decision_for_flow(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -507,7 +505,7 @@ pub(in crate::afxdp) fn reverse_session_decision_for_flow(
 /// `None` preserves default-instance behavior. Besides the TUN-origin
 /// builders, the native-RI reverse synthesis (#10312) passes `Some`;
 /// remaining transit/HA VRF synthesis gaps are out of scope.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -540,7 +538,7 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table(
 /// peer-owned-LAN reply resolution to FabricRedirect; ordinary
 /// reverse synthesis (new-flow install, TUN builders) passes false
 /// and stays bit-identical.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,

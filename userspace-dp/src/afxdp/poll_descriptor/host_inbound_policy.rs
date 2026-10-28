@@ -84,7 +84,7 @@ pub(in crate::afxdp) fn policy_packet_icmp(
 /// flowless callers pass `false` and keep the counting evaluation (the
 /// cold path counts the first packet exactly once).
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn junos_host_policy_eval(
     forwarding: &ForwardingState,
     flow: &SessionFlow,
@@ -199,7 +199,7 @@ pub(super) fn emit_junos_host_deny(
 /// #14313: as `emit_junos_host_deny`, with explicit L4 presence. The flowless
 /// LocalDelivery arm passes `false` so its synthetic (0,0) tuple cannot match
 /// a `0..=N` port-constrained catalog entry.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn emit_junos_host_deny_l4(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
@@ -361,7 +361,7 @@ pub(super) fn session_host_bound_policy_dst(
 /// handle applies). MISS/flowless callers pass `false` and keep the
 /// counting evaluation.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn junos_host_local_policy(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,

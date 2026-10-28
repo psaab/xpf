@@ -52,7 +52,6 @@ pub(crate) use tuple_gate::*;
 /// publishes on behalf of shared authority. See
 /// `docs/log/9517.md` for the two remedies that were tried and rejected, and
 /// `afxdp/forwarding/README.md` for the collision-surface list.
-
 /// #14648: may this session key become a row in the XDP steering map
 ///
 /// False for exactly protocol 255 — `SHIM_PROTO_FRAGMENT_NO_L4`, the
