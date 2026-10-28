@@ -4,7 +4,7 @@
     "path": "pkg/dataplane/userspace_xdp_bpfel.o",
     "sha256": "51e4b644cd52a0163227d2ae798e4dc61a8dabc4b6dabb2672c73181c438a191"
   },
-  "build_digest": "7ddcde08fac8a38206801ffd6768bce2f2f0e1b9b8663adea8a7d33ec7195ec8",
+  "build_digest": "3a9067b826b8cfbb8e5ee7d73c0a4d3df5cabb9f35ce7bb4a2d98b03c9938463",
   "shim_facts": {
     "max_ext_hdrs": 7,
     "frag_hdr_size": 8,
@@ -45,7 +45,7 @@
     },
     {
       "path": "userspace-xdp/src/degraded_ctrl_disabled.rs",
-      "sha256": "68811731cc551ac62e53665db0a409dcabd1910a7ff5ea3af73484911e560cd9"
+      "sha256": "ace83d6b2c62c85caba9820ba44fe30a11b69b3457a57bc84fd0ccb73b5e68d1"
     },
     {
       "path": "userspace-xdp/src/degraded_ndp.rs",
@@ -85,7 +85,7 @@
     },
     {
       "path": "userspace-xdp/src/lib.rs",
-      "sha256": "535c04a37a2f639a149927d0b36811054c8a3e21e64c3b44c2232c84df02fbd1"
+      "sha256": "efbf25627f35ba0118ae0be9d75b02c754f6d4098023730f2d4d193eebb5f0fb"
     },
     {
       "path": "userspace-xdp/src/tunnel_frag.rs",
