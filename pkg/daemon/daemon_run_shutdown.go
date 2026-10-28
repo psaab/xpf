@@ -77,11 +77,6 @@ func (d *Daemon) shutdownSlogHandler() {
 // interface at compile time in daemon_control_shutdown_8526_test.go.
 type controlShutdownBounder interface{ BeginControlShutdown() }
 
-// helperStopIntentMarker is implemented by runtimes that supervise helper
-// processes. It marks the current helper generation after control I/O is
-// bounded and before the shutdown sequence reaches its later waits.
-type helperStopIntentMarker interface{ MarkHelperStopIntent() }
-
 // runShutdownSequence performs ordered post-run teardown: abort in-flight apply,
 // stop the signal context, wait background goroutines, tear down services, stop
 // RA senders (silently in cluster mode, graceful goodbye in standalone mode),
@@ -165,13 +160,6 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 	shutdownDP := d.dataplane()
 	if b, ok := shutdownDP.(controlShutdownBounder); ok {
 		b.BeginControlShutdown()
-	}
-	// #18213: KillMode=mixed ensures the systemd stop signal reaches xpfd
-	// before the helper. Mark its current generation intentional after the
-	// control-I/O cut above (this marker takes m.mu) and before any further
-	// teardown can wait or signal the helper.
-	if marker, ok := shutdownDP.(helperStopIntentMarker); ok {
-		marker.MarkHelperStopIntent()
 	}
 
 	// #6788: stop the DHCP client's address-change notifications BEFORE the

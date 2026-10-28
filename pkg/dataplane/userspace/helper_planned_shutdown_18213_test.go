@@ -3,16 +3,13 @@ package userspace
 import (
 	"os/exec"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 )
 
-// #18213: a systemd stop's SIGTERM to xpf-userspace-dp must not be mistaken
-// for an unexpected helper crash. The daemon marks the current process
-// generation intentional at the beginning of its shutdown sequence; the
-// helper's reaper checks that per-generation mark before crash accounting,
-// restart debt or the unexpected-exit log.
+// #18213: systemd must deliver the initial stop signal to xpfd alone. The
+// daemon then retires the helper generation before its owned shutdown signals,
+// so the supervisor does not account that planned exit as a crash.
 
 // spawnSupervisedHelper18213 starts a real helper child under the production
 // supervisor. Its control socket has no listener, so stopLocked reaches its
@@ -45,60 +42,6 @@ func spawnSupervisedHelper18213(t *testing.T) (*Manager, *exec.Cmd, *restartReco
 		}
 	})
 	return m, cmd, rec
-}
-
-// TestMarkedSystemdSIGTERMDoesNotMintCrash18213 synchronously drives the
-// production waiter with a real SIGTERM after the daemon adapter has published
-// its planned-stop mark. It fails if the reaper ignores that generation-specific
-// marker and records a crash, restart weight, or restart timer.
-func TestMarkedSystemdSIGTERMDoesNotMintCrash18213(t *testing.T) {
-	cmd := exec.Command("sleep", "300")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("spawn: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	})
-	m := New()
-	rec := &restartRecorder{}
-	m.restartTimerFn = rec.arm
-	g := &helperGeneration{gen: 1, cmd: cmd, exited: make(chan struct{})}
-	m.mu.Lock()
-	m.proc = cmd
-	m.procGen = g.gen
-	m.procSup = g
-	m.mu.Unlock()
-
-	NewLegacyDataPlaneAdapter(m).MarkHelperStopIntent()
-	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("send planned SIGTERM: %v", err)
-	}
-	// Run the production single-waiter path synchronously so return proves
-	// its post-Wait crash decision has completed.
-	m.superviseHelper(g)
-
-	m.mu.Lock()
-	crash := m.helperCrash
-	exits := m.helperCrashUnexpectedExitsTotal
-	episodesTotal := m.helperCrashEpisodesTotal
-	m.proc = nil
-	m.procSup = nil
-	m.mu.Unlock()
-	if exits != 0 || crash.LastExitWasCrash || crash.Restarts != 0 || episodesTotal != 0 {
-		t.Errorf("planned SIGTERM produced crash accounting: exits=%d record=%+v episodes=%d; want no crash debt (#18213)",
-			exits, crash, episodesTotal)
-	}
-	if n := len(rec.snapshot()); n != 0 {
-		t.Errorf("planned SIGTERM armed %d restart(s) %v, want none (#18213)", n, rec.snapshot())
-	}
-	if got := m.HelperCrashExitCount(); got != 0 {
-		t.Errorf("HelperCrashExitCount() = %d, want 0 after planned SIGTERM", got)
-	}
-	if running, looping := m.HelperSupervisorState(); running || looping {
-		t.Errorf("planned SIGTERM left supervisor state running=%v crashLooping=%v, want no process or crash-loop weight (#18213)",
-			running, looping)
-	}
 }
 
 // TestPlannedShutdownStopLockedNoCrash18213 is the #18213 regression: a
@@ -148,12 +91,42 @@ func TestPlannedShutdownStopLockedNoCrash18213(t *testing.T) {
 	}
 }
 
+// TestGenuineSIGKILLDuringShutdownBeforeHelperStopCounts18213 protects the
+// #18242 boundary: after the daemon has begun shutdown but before it reaches
+// stopLocked, a genuine helper SIGKILL is still unexpected and must be counted.
+func TestGenuineSIGKILLDuringShutdownBeforeHelperStopCounts18213(t *testing.T) {
+	m, cmd, rec := spawnSupervisedHelper18213(t)
+	m.BeginControlShutdown()
+
+	m.mu.Lock()
+	exitsBefore := m.helperCrashUnexpectedExitsTotal
+	exited := m.procSup.exited
+	m.mu.Unlock()
+
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatalf("send genuine SIGKILL during shutdown: %v", err)
+	}
+	awaitSupervisor(t, m, exited)
+
+	m.mu.Lock()
+	crash := m.helperCrash
+	exits := m.helperCrashUnexpectedExitsTotal
+	m.mu.Unlock()
+	if exits != exitsBefore+1 {
+		t.Errorf("genuine SIGKILL during shutdown counted %d unexpected exit(s), want %d (#18213/#18242 separation)",
+			exits-exitsBefore, exitsBefore+1)
+	}
+	if !crash.LastExitWasCrash || crash.PID != cmd.Process.Pid || crash.Restarts == 0 {
+		t.Errorf("genuine SIGKILL during shutdown did not retain crash record/debt: %+v", crash)
+	}
+	if n := len(rec.snapshot()); n == 0 {
+		t.Errorf("genuine SIGKILL during shutdown scheduled no restart")
+	}
+}
+
 // TestGenuineSIGKILLStillCountsAfterPlannedStop18213 pins the #18242
-// separation: the intentional-stop excuse is fenced to the stopped
-// generation only. A NEW generation that is then genuinely SIGKILLed
-// (external kill, no stopLocked in flight) must still count exactly one
-// unexpected exit with restart debt — the fix must not stickily suppress
-// real crash accounting across generations.
+// separation: an external SIGKILL on the next generation after an intentional
+// stop still counts exactly one unexpected exit with restart debt.
 func TestGenuineSIGKILLStillCountsAfterPlannedStop18213(t *testing.T) {
 	m, _, _ := spawnSupervisedHelper18213(t)
 
@@ -182,7 +155,7 @@ func TestGenuineSIGKILLStillCountsAfterPlannedStop18213(t *testing.T) {
 	exited2 := m.procSup.exited
 	m.mu.Unlock()
 
-	// Genuine external SIGKILL — no stopLocked, no intentional marking.
+	// Genuine external SIGKILL — no stopLocked in flight.
 	if err := cmd2.Process.Kill(); err != nil {
 		t.Fatalf("kill gen2: %v", err)
 	}

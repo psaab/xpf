@@ -65,30 +65,10 @@ type helperGeneration struct {
 	gen    uint64
 	cmd    *exec.Cmd
 	exited chan struct{}
-	// intentionalStop is set only for this generation, before xpfd signals it
-	// as part of an orderly stop. Access is under m.mu; the supervisor checks
-	// it after acquiring the same lock, so a stop racing Wait is ordered.
-	intentionalStop bool
 	// waitErr and state are written by the waiter before it closes exited, so
 	// a reader that has observed the close may read them without a lock.
 	waitErr error
 	state   *os.ProcessState
-}
-
-// MarkHelperStopIntent marks the currently running helper generation as
-// intentionally stopping. The daemon calls this near the beginning of its
-// ordered shutdown sequence, after bounding any in-flight control I/O and
-// before other teardown can wait or signal. The mark is per-generation: a
-// later helper starts clear and genuine failures still count.
-func (m *Manager) MarkHelperStopIntent() {
-	if m == nil {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.proc != nil && m.procSup != nil {
-		m.procSup.intentionalStop = true
-	}
 }
 
 // describeExit renders a reaped child's disposition for a log line and the
@@ -321,12 +301,10 @@ func (m *Manager) superviseHelper(g *helperGeneration) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// The explicit per-generation stop mark handles helper exits during the
-	// daemon's ordered shutdown, before Manager.Close reaches stopLocked. A
-	// stale-generation fence remains necessary for any waiter whose process was
-	// superseded before it acquired m.mu. Either path returns before crash
-	// accounting or logging.
-	if g.intentionalStop || m.procSup != g || m.procGen != g.gen {
+	// A planned stop retires its generation under m.mu before sending helper
+	// shutdown requests or signals. Only exits from the still-current
+	// generation are unexpected and enter crash accounting.
+	if m.procSup != g || m.procGen != g.gen {
 		return
 	}
 	m.handleUnexpectedHelperExitLocked(g)

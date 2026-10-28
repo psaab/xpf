@@ -331,15 +331,6 @@ func (a *LegacyDataPlaneAdapter) BeginControlShutdown() {
 	a.manager.BeginControlShutdown()
 }
 
-// MarkHelperStopIntent forwards the daemon shutdown's generation-scoped
-// intentional-stop marker to the helper manager (#18213).
-func (a *LegacyDataPlaneAdapter) MarkHelperStopIntent() {
-	if a == nil || a.manager == nil {
-		return
-	}
-	a.manager.MarkHelperStopIntent()
-}
-
 func (a *LegacyDataPlaneAdapter) Close() error {
 	m, err := a.managerOrErr()
 	if err != nil {
