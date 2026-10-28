@@ -3946,8 +3946,9 @@ type compileOpts struct {
 // together; TestStrictCompileOptsSingleSource17148 pins that the
 // production entries and strictCompileOpts stay identical, and the AST
 // census in the same test rejects any new bare compileOpts{...} literal
-// outside this file (the tunnelid/reth side compiles excepted, see
-// there).
+// outside this file (the reth side compile in
+// compiler_validate_strict_reth_lag.go:213 excepted, see
+// sideCompileExemptions17148 there).
 func strictCompileOpts() compileOpts {
 	return compileOpts{}
 }
