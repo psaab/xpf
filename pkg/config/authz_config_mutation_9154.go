@@ -346,20 +346,12 @@ var subtreeMutationVerbs16784 = map[string]bool{
 }
 
 // authorizeSubtreeMutation16784 prices every descendant a subtree verb
-// will destroy, relocate, overwrite, or toggle (#16784). The per-line
-// gate adjudicates only the path the mutation NAMES; the candidate
-// subtree rooted there is enumerated as set lines and each descendant
-// is adjudicated with the same rules. Any denied descendant refuses
-// the whole mutation. tree is the candidate BEFORE the mutation (the
-// state the executor will act on); a nil tree, an absent subtree, or a
-// class with no *-configuration regexes prices nothing extra — the
-// per-line verdict stands. Groups: when the subtree carries group
-// stanzas its expanded effective lines are priced too, mirroring
-// authorizeExpandedTree14981, so a denied leaf behind apply-groups
-// inside the subtree is not cheaper than a literal one. The credential
-// surcharge (#16080) needs no leg here: AuthorizeConfigMutation
-// already fences ancestors of credential prefixes.
-func authorizeSubtreeMutation16784(cfg *Config, class string, tree *ConfigTree, verb string, resolvedPaths []string) error {
+// will destroy, relocate, overwrite, or toggle (#16784). Candidate lines
+// are re-lexed exactly as config paths so authorization sees the same
+// unquoted token values as the mutation gate, not display-set spelling.
+// tree is the candidate BEFORE the mutation. Groups are expanded too, so
+// a denied inherited leaf is not cheaper than a literal one.
+func authorizeSubtreeMutation16784(cfg *Config, class string, tree *ConfigTree, verb string, resolvedPaths [][]string) error {
 	if tree == nil || class == "" || !subtreeMutationVerbs16784[verb] {
 		return nil
 	}
@@ -370,34 +362,28 @@ func authorizeSubtreeMutation16784(cfg *Config, class string, tree *ConfigTree, 
 	if !restricted {
 		return nil
 	}
-	for _, p := range resolvedPaths {
-		fields := strings.Fields(p)
-		if len(fields) == 0 {
+	for _, path := range resolvedPaths {
+		if len(path) == 0 {
 			continue
 		}
-		for _, line := range subtreeSetLines16784(tree, fields) {
+		for _, line := range subtreeSetLines16784(tree, path) {
 			if err := authorizeSetLineDescendant16784(cfg, class, rules, line); err != nil {
 				return err
 			}
 		}
 		// Expanded (group-inherited) descendants of this subtree.
-		// ExpandedMutationLines returns nil for a group-free tree, so
-		// the common case costs one stanza scan.
 		lines, err := ExpandedMutationLines(tree)
 		if err != nil {
 			return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
 				"the group expansion cannot be resolved for adjudication: %w", class, err)
 		}
 		for _, line := range lines {
-			fields2 := strings.Fields(line)
-			if len(fields2) < 2 || fields2[0] != "set" {
-				continue
+			descendant, ok := canonicalConfigPathTokens17830(line)
+			if !ok {
+				return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+					"an expanded descendant cannot be lexed for adjudication (#17830)", class)
 			}
-			// Only expanded lines at/below the subtree root are this
-			// mutation's descendants; expansion elsewhere in the tree
-			// was priced when written and is priced again at commit.
-			eff := strings.Join(fields2[1:], " ")
-			if eff != p && !strings.HasPrefix(eff, p+" ") {
+			if !configPathTokensHavePrefix17830(descendant, path) {
 				continue
 			}
 			if expandedLineIsGroupDefinition14981(line) {
@@ -412,20 +398,73 @@ func authorizeSubtreeMutation16784(cfg *Config, class string, tree *ConfigTree, 
 }
 
 // authorizeSetLineDescendant16784 adjudicates one enumerated set line
-// (without its leading "set ") against rules, refusing on the first
-// denial with the mutation gate's audit shape (verb + root only, so
-// operator data in trailing tokens never reaches a log line).
+// against the same unquoted path tokens produced by the mutation lexer.
 func authorizeSetLineDescendant16784(cfg *Config, class string, rules CompiledLoginRegexes, setLine string) error {
-	path := strings.TrimSpace(strings.TrimPrefix(setLine, "set "))
-	if path == "" {
-		return nil
+	tokens, ok := canonicalConfigPathTokens17830(setLine)
+	if !ok {
+		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+			"a descendant cannot be lexed for adjudication (#17830)", class)
 	}
+	path := strings.Join(tokens, " ")
 	if decision := rules.Evaluate(path); !decision.Allowed {
 		return fmt.Errorf("permission denied: login class %q denies mutation under %q (%s); "+
 			"the subtree it acts on contains that descendant (#16784)",
 			class, configAuditRoot(path), decision.Reason)
 	}
 	return nil
+}
+
+// canonicalConfigPathTokens17830 returns the unquoted path tokens in a
+// rendered config mutation. FormatSet preserves authored quotes for display;
+// authorization must use the same lexed token values as the mutation gate.
+func canonicalConfigPathTokens17830(line string) ([]string, bool) {
+	parts, quoted, ok := lexConfigMutationLineStrict15167(line)
+	if !ok || len(parts) < 2 {
+		return nil, false
+	}
+	switch parts[0] {
+	case "set", "deactivate", "activate":
+		return parts[1:], true
+	case "annotate":
+		path, _, ok := splitAnnotateTokens(parts, quoted)
+		return path, ok
+	default:
+		return nil, false
+	}
+}
+
+func configPathTokensHavePrefix17830(path, prefix []string) bool {
+	if len(path) < len(prefix) {
+		return false
+	}
+	for i := range prefix {
+		if path[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// subtreeMutationPathTokens17830 constructs the exact token path used to
+// navigate the candidate. Keeping token boundaries matters for quoted
+// identities with interior whitespace; joining then strings.Fields-splitting
+// the display path would turn one identity into multiple path elements.
+func subtreeMutationPathTokens17830(editPath, parts []string, quoted []bool) [][]string {
+	if len(parts) < 2 || !subtreeMutationVerbs16784[parts[0]] {
+		return nil
+	}
+	rel := parts[1:]
+	if parts[0] == "copy" || parts[0] == "rename" {
+		src, _, ok := splitCopyRenameTokens(parts, quoted)
+		if !ok {
+			return nil
+		}
+		rel = src
+	}
+	path := make([]string, 0, len(editPath)+len(rel))
+	path = append(path, editPath...)
+	path = append(path, rel...)
+	return [][]string{path}
 }
 
 // subtreeSetLines16784 renders the candidate subtree rooted at path
@@ -458,11 +497,8 @@ func subtreeSetLines16784(tree *ConfigTree, path []string) []string {
 // subtree pricing against candidate (#16784): a delete / deactivate /
 // activate / copy / rename whose resolved path roots a candidate
 // subtree is refused when any descendant of that subtree is denied.
-// candidate is the tree BEFORE the mutation. Surfaces holding a
-// candidate call this so the per-line verdict cannot be cheaper than
-// the mutation's actual effect; callers without a candidate keep
-// AuthorizeConfigMutation and rely on the commit gate
-// (AuthorizeExpandedCandidate) as backstop.
+// The rooted path remains lexed tokens for candidate navigation, while
+// enumerated display-set descendants are re-lexed before authorization.
 func AuthorizeConfigMutationOnCandidate(cfg *Config, class string, editPath []string, line string, candidate *ConfigTree) error {
 	if err := AuthorizeConfigMutation(cfg, class, editPath, line); err != nil {
 		return err
@@ -484,22 +520,10 @@ func AuthorizeConfigMutationOnCandidate(cfg *Config, class string, editPath []st
 		return nil
 	}
 	verb := parts[0]
-	// Destination-overwrite pricing for copy/rename needs the
-	// PRE-mutation candidate: a destination that already exists is
-	// refused by the executor, so there is no overwrite to price.
-	// The source subtree (both verbs) and — for rename — nothing
-	// else is priced here; the destination's own per-line verdict
-	// already ran inside AuthorizeConfigMutation.
-	paths, gated := configMutationPaths(editPath, parts, quoted)
-	if !gated {
-		return nil
-	}
-	if verb == "copy" || verb == "rename" {
-		// Only the source endpoint roots a destroyed/relocated subtree.
-		if len(paths) > 0 {
-			paths = paths[:1]
-		}
-	}
+	// Copy/rename price only the source subtree: an existing destination
+	// is refused by the executor, and the destination's own per-line
+	// verdict already ran inside AuthorizeConfigMutation.
+	paths := subtreeMutationPathTokens17830(editPath, parts, quoted)
 	return authorizeSubtreeMutation16784(cfg, class, candidate, verb, paths)
 }
 

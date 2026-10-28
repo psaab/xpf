@@ -345,7 +345,12 @@ func authorizeRemovedLines16784(cfg *Config, class string, candidate, active *Co
 		if expandedLineIsGroupDefinition14981(line) {
 			continue
 		}
-		path := strings.TrimSpace(strings.TrimPrefix(line, "set "))
+		pathTokens, lexOK := canonicalConfigPathTokens17830(line)
+		if !lexOK {
+			return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+				"a removed path cannot be lexed for adjudication (#17830)", class)
+		}
+		path := strings.Join(pathTokens, " ")
 		if path == "" {
 			continue
 		}

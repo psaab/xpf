@@ -310,3 +310,147 @@ security {
 		t.Error("allowlist commit removing the uncovered guard policy was ALLOWED (#16784)")
 	}
 }
+
+// #17830: subtree/commit descendants must be adjudicated on CANONICAL
+// LEXED tokens (quotes consumed), not display-set text. A quoted
+// identity (`policy "guard"`) renders with quotes in FormatSet, so
+// evaluating the raw display line never matches a deny authored
+// against the lexed path `security policies policy guard`; a
+// whitespace-bearing identity additionally broke the strings.Fields
+// subtree navigation, finding no subtree at all.
+func TestQuotedDescendantCanonicalAuthz17830(t *testing.T) {
+	cfg := cfg16784(t, "", "^security policies policy guard")
+	cand := parseHierText(t, `
+security {
+    policies {
+        policy "guard" {
+            then { deny; }
+        }
+        policy other {
+            then { permit; }
+        }
+    }
+}
+`)
+	// Premise: display text really carries the quotes, direct lexed
+	// mutation is denied, and a quoted direct form is denied too.
+	if out := cand.FormatPathSet([]string{"security"}); !strings.Contains(out, `policy "guard"`) {
+		t.Fatalf("premise broken: display set lost authored quotes:\n%s", out)
+	}
+	if err := AuthorizeConfigMutation(cfg, "limited", nil, `delete security policies policy guard`); err == nil {
+		t.Fatal("premise failed: direct denied delete allowed")
+	}
+	if err := AuthorizeConfigMutation(cfg, "limited", nil, `delete security policies policy "guard"`); err == nil {
+		t.Fatal("premise failed: quoted direct denied delete allowed")
+	}
+	// Defect rows: ancestor mutation + commit removal of the quoted
+	// descendant must refuse (canonical lexed descendant).
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", nil, "delete security", cand); err == nil {
+		t.Error("ancestor delete of quoted denied descendant ALLOWED (#17830)")
+	}
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", nil, "delete security policies", cand); err == nil {
+		t.Error("mid-ancestor delete of quoted denied descendant ALLOWED (#17830)")
+	}
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", nil, "deactivate security", cand); err == nil {
+		t.Error("ancestor deactivate of quoted denied descendant ALLOWED (#17830)")
+	}
+	removed := parseHierText(t, `
+security {
+    policies {
+        policy other {
+            then { permit; }
+        }
+    }
+}
+`)
+	if err := AuthorizeExpandedCandidate(cfg, "limited", removed, cand); err == nil {
+		t.Error("commit removing quoted denied descendant ALLOWED (#17830)")
+	}
+	// Positive controls: same mutations allowed when the denied
+	// quoted descendant is absent, and allowed subtrees untouched.
+	noGuard := parseHierText(t, `
+security {
+    policies {
+        policy other {
+            then { permit; }
+        }
+    }
+}
+`)
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", nil, "delete security", noGuard); err != nil {
+		t.Errorf("ancestor delete without denied quoted descendant refused: %v", err)
+	}
+	if err := AuthorizeExpandedCandidate(cfg, "limited", noGuard, noGuard); err != nil {
+		t.Errorf("unchanged commit refused: %v", err)
+	}
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", nil, `delete security policies policy other`, cand); err != nil {
+		t.Errorf("allowed quoted-adjacent policy delete refused: %v", err)
+	}
+	// Quoted allowed identities must also keep the positive verdict:
+	// the ordinary gate allows their canonical spelling, and the subtree
+	// and commit checks must not deny them because display output quotes it.
+	allowQuoted := cfg16784(t, "^security policies policy guard", "")
+	if err := AuthorizeConfigMutationOnCandidate(allowQuoted, "limited", nil, `delete security policies policy "guard"`, cand); err != nil {
+		t.Errorf("allowed quoted policy subtree delete refused: %v", err)
+	}
+	if err := AuthorizeExpandedCandidate(allowQuoted, "limited", noGuard, cand); err != nil {
+		t.Errorf("commit removing allowed quoted policy refused: %v", err)
+	}
+}
+
+// #17830 whitespace leg: a whitespace-bearing identity is ONE lexed
+// token. Root reconstruction must preserve token boundaries when
+// navigating to that identity, and descendants must be authorized on
+// their unquoted canonical lexed path.
+func TestWhitespaceDescendantCanonicalAuthz17830(t *testing.T) {
+	cfg := cfg16784(t, "", "^security policies policy guard name then deny")
+	cand := parseHierText(t, `
+security {
+    policies {
+        policy "guard name" {
+            then { deny; }
+        }
+        policy other {
+            then { permit; }
+        }
+    }
+}
+`)
+	if out := cand.FormatPathSet([]string{"security", "policies"}); !strings.Contains(out, `policy "guard name" then deny`) {
+		t.Fatalf("premise broken: quoted identity missing from display path:\n%s", out)
+	}
+	// The ancestor mutation is allowed by its own path, but its subtree
+	// contains a descendant covered by the deny.
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", nil, "delete security", cand); err == nil {
+		t.Error("ancestor delete of whitespace-bearing denied descendant ALLOWED (#17830)")
+	}
+	// This targets the whitespace-bearing node itself. The typed root is
+	// lexed as four tokens; strings.Fields over its joined spelling splits
+	// the final identity and used to find no subtree.
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", []string{"security", "policies"}, `delete policy "guard name"`, cand); err == nil {
+		t.Error("delete of whitespace-bearing denied subtree ALLOWED (#17830)")
+	}
+	removed := parseHierText(t, `
+security {
+    policies {
+        policy other {
+            then { permit; }
+        }
+    }
+}
+`)
+	if err := AuthorizeExpandedCandidate(cfg, "limited", removed, cand); err == nil {
+		t.Error("commit removing whitespace-bearing denied descendant ALLOWED (#17830)")
+	}
+	// Same roots remain permitted when the denied descendant is absent;
+	// a neighboring policy is outside the deny.
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", nil, "delete security", removed); err != nil {
+		t.Errorf("ancestor delete without denied whitespace-bearing descendant refused: %v", err)
+	}
+	if err := AuthorizeConfigMutationOnCandidate(cfg, "limited", []string{"security", "policies"}, "delete policy other", cand); err != nil {
+		t.Errorf("allowed neighboring policy delete refused: %v", err)
+	}
+	if err := AuthorizeExpandedCandidate(cfg, "limited", removed, removed); err != nil {
+		t.Errorf("unchanged commit refused: %v", err)
+	}
+}
