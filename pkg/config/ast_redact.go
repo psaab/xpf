@@ -603,7 +603,12 @@ func isSecretKeywordToken16726(k string) bool {
 		"endpoint", "archive-sites":
 		return true
 	}
-	return false
+	// A bare command whose first token is credential-shaped (#16731:
+	// *password*/*secret*, auth-token, community-name) carries its
+	// value at index 1; judging it as a verb would rewrite it to
+	// `set` and drop the keyword before secretIndices could fire
+	// (#18384 fold, Rev18384FoldKimi).
+	return isCredentialShapedKeyword16731(k)
 }
 
 // redactEmbeddedCommands14413 applies embedded-command redaction to the
@@ -936,10 +941,10 @@ func redactNodes(nodes []*Node, base []string) {
 // names: those are identifiers/values, even when they contain `secret` or
 // `password` (`system login user password-admin class read-only`, #17806).
 // The keyword-position walker follows the live schema and skips each
-// recognized keyword's declared arguments. The nine unmodelled #16731
-// credential rows are recognized by their credential keyword spelling and
-// structural context when open-world paths lose schema position information;
-// arbitrary open-world values are not substring-classified.
+// recognized keyword's declared arguments. Open-world tokens (schema
+// position lost) are still substring-classified fail-closed, so an
+// unmodelled *password*/*secret* leaf masks instead of leaking
+// (#18384 review fold).
 // The closed enumeration kept missing unmodelled Junos credential leaves
 // (default-chap-secret, local-password, auth-token, community-name,
 // dhcp/dhcp-relay `authentication password`, outbound-ssh `secret`) that
