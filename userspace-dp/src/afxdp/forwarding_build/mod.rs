@@ -32,8 +32,6 @@ mod cos;
 mod fib;
 mod install_tables;
 mod interfaces;
-/// #16131: dual-carry route-table interning (see `intern.rs` header).
-pub(super) mod intern;
 mod tunnels;
 mod validated;
 mod wg;
@@ -55,7 +53,6 @@ pub(crate) use fib::fenced_neighbor_mac;
 pub(in crate::afxdp) use interfaces::{
     connected_route_tables, is_host_inbound_lifeline, pick_interface_v4, pick_interface_v6,
 };
-pub(in crate::afxdp) use intern::route_table_dual_carry_agrees;
 // #1866: WG row-identity hydration shared with the coordinator's
 // tombstone-respawn coherence check + defer-branch prune. (The
 // `WgRowIdentity` type itself is only named inside `tunnels`.)
@@ -1268,11 +1265,6 @@ fn build_fallible_forwarding_state(
         build_route_table_identity_map(snapshot, &state);
     state.route_table_identities = route_table_identities;
     state.route_table_identity_map_complete = route_table_identity_map_complete;
-    // #16131: dual-carry interning derivation. Runs immediately after the
-    // identity authority above is assigned and after every writer of the
-    // string forms (interfaces, late-stage NAT append); asserts the
-    // string/interned agreement cell before this state can publish.
-    intern::intern_route_tables(&mut state);
     state.tunnel_outer_egress_rgs = state
         .tunnel_endpoints
         .iter()

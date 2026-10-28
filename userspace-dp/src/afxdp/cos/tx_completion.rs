@@ -166,19 +166,25 @@ fn wake_cos_queue(root: &mut CoSInterfaceRuntime, queue_idx: usize) {
     mark_cos_queue_runnable(queue);
 }
 
-// #710: count an exact-drain TX submit stall on a specific queue.
-// NOT packet loss — on the exact path, `writer.insert == 0` leaves
-// the FIFO items in `queue.hot.items` or restores them (flow-fair path);
-// frames that had been copied into UMEM are released back to
-// `free_tx_frames`, and the items get another chance next drain tick.
-// The counter signals TX-ring / completion-reap pressure, which is
-// an upstream cause for the downstream effects operators chase
-// (#706 mutex contention, #709 owner-worker hotspot).
+// #710: count a TX submit stall on a specific queue.
+// NOT packet loss — on every path that reaches this helper,
+// `writer.insert == 0` leaves the items queued or restores them
+// (flow-fair / retry restore); frames that had been copied into
+// UMEM are released back to `free_tx_frames`, and the items get
+// another chance next drain tick. The counter signals TX-ring /
+// completion-reap pressure, which is an upstream cause for the
+// downstream effects operators chase (#706 mutex contention,
+// #709 owner-worker hotspot).
 //
-// Non-exact transmit paths (`transmit_batch`, `transmit_prepared_queue`)
-// do not carry queue identity at the submit site and do not reach
-// this helper. Their frame-level failures are counted in the binding-
-// level `tx_submit_error_drops` counter instead.
+// Callers: the four exact direct-service sites in `service.rs`
+// (which observe `inserted == 0` themselves) and the non-exact
+// CoS submit handlers `submit_local` / `submit_prepared`
+// (#17159), which hold the same queue identity and observe the
+// ring-full outcome as a typed `TxRetryReason` on their Retry arm.
+// A Retry never bumps `tx_submit_error_drops` (only the Drop arm
+// does), so this helper is the sole per-queue stall signal on
+// both paths. The queue-less `tx/transmit` primitives cannot call
+// it — their CoS callers compensate as above.
 #[inline]
 pub(in crate::afxdp) fn count_tx_ring_full_submit_stall(
     binding: &mut BindingWorker,
