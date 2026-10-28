@@ -420,30 +420,9 @@ type DDNSProvider struct {
 	// publishes over RFC 2136 UPDATE. "dyndns2" / "cloudflare" / "route53" /
 	// "generic" are reserved for P3 (the HTTP providers).
 	Backend string
-	// UpdateServer is the RFC 2136 target authoritative DNS, host or host:port.
-	UpdateServer string
-	// ForwardZone / ReverseZone are explicit RFC 2136 UPDATE zones for
-	// Surface A providers (#15225 A40-05, comma/space-separated lists).
-	ForwardZone string
-	ReverseZone string
-	// TSIGKeyName / TSIGAlgorithm / TSIGSecret are the TSIG credentials for
-	// authenticated RFC 2136 updates. TSIGSecret is the sensitive HMAC key,
-	// redacted by the Secret type on every marshal and by String() below.
-	TSIGKeyName   string
-	TSIGAlgorithm string
-	TSIGSecret    Secret
-	// RequireTSIG (#15992) rejects a strict commit that sets this provider
-	// to rfc2136 with a non-loopback update-server but no tsig-key. The
-	// default (false) keeps unsigned source-IP-ACL BIND publishing working.
-	RequireTSIG bool
-	// SourceAddress / DestinationInterface / RoutingInstance scope the UPDATE
-	// TRANSPORT for this provider (the same source-binding model as the Surface B
-	// per-family leaves, #2665). All optional. As of #2846 the HTTP backends
-	// (dyndns2/cloudflare/route53/generic) AND the external checkip probe bind to
-	// these too (via the shared HTTP client's DialContext) — not only RFC 2136.
-	SourceAddress        string
-	DestinationInterface string
-	RoutingInstance      string
+	// RFC2136Endpoint carries the ten shared RFC 2136 leaves (#17237);
+	// promoted selectors (p.UpdateServer, ...) are unchanged.
+	RFC2136Endpoint
 
 	// --- HTTP-provider fields (#2691 P3; plan §5.2/§5.9). Only meaningful for
 	// the dyndns2 / cloudflare / route53 / generic backends; ignored by rfc2136.
@@ -2057,12 +2036,10 @@ type DHCPDynamicDNSConfig struct {
 	// Domain is the default DNS suffix appended to a client name that is
 	// not already a FQDN (e.g. "corp.example.com").
 	Domain string
-	// ForwardZone / ReverseZone are explicit RFC 2136 UPDATE zones
-	// (#15225 A40-05, comma/space-separated lists). When set they take
-	// precedence over SOA discovery; empty means discover via SOA walk
-	// with the Domain/parent guess as fallback.
-	ForwardZone string
-	ReverseZone string
+	// RFC2136Endpoint carries the ten shared RFC 2136 leaves (#17237);
+	// promoted selectors (d.UpdateServer, d.ForwardZone, ...) are unchanged.
+	// It is per-family (v4 vs v6 may bind different sources/endpoints).
+	RFC2136Endpoint
 	// TTLSeconds is the TTL applied to published records (default 300
 	// when zero, applied at render time, not here).
 	TTLSeconds int
@@ -2082,49 +2059,6 @@ type DHCPDynamicDNSConfig struct {
 	// implemented (Kea D2 is not in the image — bake.py); selecting it warns
 	// at commit and publishes nothing.
 	Backend string
-	// UpdateServer is the RFC 2136 target authoritative DNS, host or
-	// host:port (rfc2136 backend). It IS consumed by the live path: an
-	// enabled rfc2136 backend with no update-server publishes nothing and
-	// warns at commit (validateDDNSBackendWarnings).
-	UpdateServer string
-	// TSIGKeyName / TSIGAlgorithm / TSIGSecret are the TSIG credentials
-	// for authenticated RFC 2136 updates. TSIGSecret is the sensitive HMAC
-	// key. It is redacted by String() (so a %v/%s/slog of this struct never
-	// leaks the key — see String below) AND, since #2053, by its Secret
-	// type on every JSON/YAML marshal (so the compiled-config dump on
-	// GET /api/v1/config never leaks it either). The reconciler/render paths
-	// read the cleartext via Reveal().
-	TSIGKeyName   string
-	TSIGAlgorithm string
-	TSIGSecret    Secret
-	// RequireTSIG (#15992) rejects a strict commit with a non-loopback
-	// update-server but no tsig-key — including a DISABLED family, which
-	// still withdraws persisted records at runtime (whose unsigned
-	// withdrawals the backend guard also refuses). Default (false)
-	// preserves unsigned source-IP-ACL BIND publishing.
-	RequireTSIG bool
-	// SourceAddress / DestinationInterface / RoutingInstance scope the RFC
-	// 2136 UPDATE TRANSPORT (#2691 P1b / #2665). In a multi-WAN / VRF
-	// deployment a DNS UPDATE must egress from the right source IP, the right
-	// interface, and/or the right routing-instance (VRF) or it is dropped by
-	// source-IP-keyed ACLs or sent to the wrong upstream. The live rfc2136
-	// backend builds its transport with a custom net.Dialer:
-	//   - SourceAddress       → Dialer.LocalAddr (bind the UDP/TCP socket's
-	//     source IP). Must be a bare IP literal (v4 or v6); the port is chosen
-	//     by the kernel.
-	//   - DestinationInterface → Dialer.Control → SO_BINDTODEVICE (pin egress
-	//     to a specific interface; covers the no-source-route / policy-route
-	//     case).
-	//   - RoutingInstance     → Dialer.Control → SO_BINDTODEVICE on the VRF
-	//     master device (Linux binds a socket into a VRF by binding to the vrf
-	//     device). xpf names a routing-instance and the VRF device shares that
-	//     name (pkg/routing), so the bind target is the routing-instance name.
-	// All three are optional; empty means "default table / kernel source
-	// selection" (today's behaviour). They are per-family (v4 vs v6 may bind
-	// different sources), which is why they live on this per-family struct.
-	SourceAddress        string
-	DestinationInterface string
-	RoutingInstance      string
 }
 
 // String redacts TSIGSecret so a %v/%s/slog format of a

@@ -94,7 +94,7 @@ func TestCheckIPBoundAvailableSourceWorks(t *testing.T) {
 	// bindErr=nil and the probe must proceed through the bound client. Trust
 	// the test server's certificate on the real production transport while
 	// keeping its source-bound DialContext.
-	client, err := newProviderHTTPClient(&config.DDNSProvider{Name: "p", SourceAddress: "127.0.0.1"})
+	client, err := newProviderHTTPClient(&config.DDNSProvider{Name: "p", RFC2136Endpoint: config.RFC2136Endpoint{SourceAddress: "127.0.0.1"}})
 	if err != nil {
 		t.Fatalf("a valid source-address must resolve without error, got %v", err)
 	}

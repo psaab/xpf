@@ -92,15 +92,12 @@ func resolveIfKernelName(resolve func(string) string, ref string) string {
 //
 // resolve is the committed config's Junos→kernel interface-name resolver
 // (cfg.ResolveKernelIfName); nil ⇒ the leaf slash-substitution fallback.
-func resolveBindConfig(c *config.DHCPDynamicDNSConfig, resolve func(string) string) (bindConfig, error) {
-	if c == nil {
-		return bindConfig{}, nil
-	}
+func resolveBindConfig(ep config.RFC2136Endpoint, resolve func(string) string) (bindConfig, error) {
 	var b bindConfig
-	if c.SourceAddress != "" {
-		a, err := netip.ParseAddr(c.SourceAddress)
+	if ep.SourceAddress != "" {
+		a, err := netip.ParseAddr(ep.SourceAddress)
 		if err != nil {
-			return bindConfig{}, fmt.Errorf("ddns: invalid source-address %q: %w", c.SourceAddress, err)
+			return bindConfig{}, fmt.Errorf("ddns: invalid source-address %q: %w", ep.SourceAddress, err)
 		}
 		b.sourceAddr = a.Unmap()
 	}
@@ -127,12 +124,12 @@ func resolveBindConfig(c *config.DHCPDynamicDNSConfig, resolve func(string) stri
 	//
 	// routingInst keeps the RAW routing-instance name (informational only; it
 	// is never used for the socket op — only bindDevice is).
-	b.routingInst = c.RoutingInstance
+	b.routingInst = ep.RoutingInstance
 	switch {
-	case c.DestinationInterface != "":
-		b.bindDevice = resolveIfKernelName(resolve, c.DestinationInterface)
-	case c.RoutingInstance != "":
-		b.bindDevice = routing.VRFDeviceName(c.RoutingInstance)
+	case ep.DestinationInterface != "":
+		b.bindDevice = resolveIfKernelName(resolve, ep.DestinationInterface)
+	case ep.RoutingInstance != "":
+		b.bindDevice = routing.VRFDeviceName(ep.RoutingInstance)
 	}
 	return b, nil
 }

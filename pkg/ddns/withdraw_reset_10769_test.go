@@ -29,8 +29,8 @@ func writeResetState10769(t *testing.T, path string, records ...ownedRecord) {
 
 func TestLeaseResetWithdrawalRejectsBackendFingerprintMismatch10769(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "ddns.json")
-	oldConfig := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
-	changedConfig := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "198.51.100.53:53"}
+	oldConfig := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53:53"}}
+	changedConfig := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "198.51.100.53:53"}}
 	owned := ownedRecord{
 		Family: 4, Identity: "client", Address: "192.0.2.8", FQDN: "client.example.test",
 		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
@@ -57,7 +57,7 @@ func TestLeaseResetWithdrawalRejectsBackendFingerprintMismatch10769(t *testing.T
 
 func TestLeaseResetWithdrawalErasesOnlyAfterOwnedEndpointDelete10769(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "ddns.json")
-	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53:53"}}
 	owned := ownedRecord{
 		Family: 4, Identity: "client", Address: "192.0.2.8", FQDN: "client.example.test",
 		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
@@ -86,8 +86,8 @@ func TestLeaseResetWithdrawalErasesOnlyAfterOwnedEndpointDelete10769(t *testing.
 
 func TestSurfaceAResetWithdrawalRejectsBackendFingerprintMismatch10769(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "surface-a.json")
-	provider := &config.DDNSProvider{Name: "p", Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
-	changed := &config.DDNSProvider{Name: "p", Backend: "rfc2136", UpdateServer: "198.51.100.53:53"}
+	provider := &config.DDNSProvider{Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53:53"}}
+	changed := &config.DDNSProvider{Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "198.51.100.53:53"}}
 	scope := ScopeKey{Family: FamilyV4, PolicyID: "p"}
 	owned := ownedRecord{
 		Family: 4, Identity: "router", FQDN: "fw.example.test", AddrText: "192.0.2.10",
@@ -114,7 +114,7 @@ func TestSurfaceAResetWithdrawalRejectsBackendFingerprintMismatch10769(t *testin
 
 func TestSurfaceAResetWithdrawalPreservesRecordWithoutAddress10769(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "surface-a.json")
-	provider := &config.DDNSProvider{Name: "p", Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	provider := &config.DDNSProvider{Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53:53"}}
 	scope := ScopeKey{Family: FamilyV4, PolicyID: "p"}
 	owned := ownedRecord{
 		Family: 4, Identity: "router", FQDN: "fw.example.test",
@@ -141,7 +141,7 @@ func TestSurfaceAResetWithdrawalPreservesRecordWithoutAddress10769(t *testing.T)
 
 func TestLeaseResetWithdrawalPreservesUnreconstructableOwnership10769(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "ddns.json")
-	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53:53"}}
 	owned := ownedRecord{
 		Family: 4, Identity: "client", Address: "", FQDN: "client.example.test",
 		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
@@ -170,7 +170,7 @@ func TestLeaseResetWithdrawalPreservesUnreconstructableOwnership10769(t *testing
 
 func TestLeaseResetWithdrawalSurfacesProviderDeleteFailure10769(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "ddns.json")
-	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53:53"}}
 	owned := ownedRecord{
 		Family: 4, Identity: "client", Address: "192.0.2.8", FQDN: "client.example.test",
 		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
@@ -195,7 +195,7 @@ func TestLeaseResetWithdrawalSurfacesProviderDeleteFailure10769(t *testing.T) {
 func TestLeaseResetWithdrawalSurfacesStateSaveFailure10769(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, "ddns.json")
-	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53:53"}}
 	owned := ownedRecord{
 		Family: 4, Identity: "client", Address: "192.0.2.8", FQDN: "client.example.test",
 		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,
@@ -225,7 +225,7 @@ func TestLeaseResetWithdrawalSurfacesStateSaveFailure10769(t *testing.T) {
 
 func TestLeaseResetWithdrawalIncludesBackendConstructionError10769(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "ddns.json")
-	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", UpdateServer: "192.0.2.53:53"}
+	provider := &config.DHCPDynamicDNSConfig{Enabled: true, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53:53"}}
 	owned := ownedRecord{
 		Family: 4, Identity: "client", Address: "192.0.2.8", FQDN: "client.example.test",
 		ForwardType: "A", PTRName: "8.2.0.192.in-addr.arpa", TTL: 300,

@@ -183,7 +183,7 @@ func TestSurfaceARGScopeOwnerParity17086(t *testing.T) {
 	d := &Daemon{}
 	bind := &config.InterfaceDynamicDNSConfig{Hostname: "m.example.net", Provider: "p"}
 	cfg.System.Services = &config.SystemServicesConfig{DynamicDNS: &config.DDNSServicesConfig{
-		Providers: map[string]*config.DDNSProvider{"p": {Name: "p", Backend: "rfc2136", UpdateServer: "192.0.2.53"}},
+		Providers: map[string]*config.DDNSProvider{"p": {Name: "p", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.53"}}},
 	}}
 	cfg.Interfaces.Interfaces["ge-0/0/1"].Units = map[int]*config.InterfaceUnit{
 		0: {Number: 0, DynamicDNSInet: bind},

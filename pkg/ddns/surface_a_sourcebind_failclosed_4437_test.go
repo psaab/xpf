@@ -36,7 +36,7 @@ func TestResolveSurfaceABackendFailsClosedOnCachedSourceBindError(t *testing.T) 
 		// A configured-but-unhonorable source binding: clientFor resolves the
 		// bindConfig, fails to parse the address, and returns (unbound client,
 		// error). The publish must NOT egress via that unbound client.
-		SourceAddress: "not-an-ip",
+		RFC2136Endpoint: config.RFC2136Endpoint{SourceAddress: "not-an-ip"},
 	}
 
 	b, err := resolveSurfaceABackend(p, "host.example.net", 60, cache)
