@@ -852,11 +852,17 @@ func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 	} else {
 		s.httpServers, s.httpSlots = servers, slots
 	}
-	// #16709: drop scope records for addresses that left the desired
-	// set; retained/replaced legs were (re-)recorded by their binds.
+	// #16709: scope records are shared by both planes. Pruning only the
+	// reconciled plane would erase the sibling plane's live scope and
+	// make its next reconcile attempt a colliding same-address bind.
 	{
-		serving := make([]string, 0, len(next))
-		for _, leg := range next {
+		serving := make([]string, 0, len(s.httpLegs)+len(s.httpsLegs))
+		for _, leg := range s.httpLegs {
+			if leg != nil {
+				serving = append(serving, leg.srv.Addr)
+			}
+		}
+		for _, leg := range s.httpsLegs {
 			if leg != nil {
 				serving = append(serving, leg.srv.Addr)
 			}
