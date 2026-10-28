@@ -591,7 +591,7 @@ fn note_unsupported_gre_version(frame: &[u8], meta: UserspaceDpMeta, forwarding:
         .is_some_and(|candidates| {
             candidates.iter().any(|id| {
                 forwarding.tunnel_endpoints.get(id).is_some_and(|endpoint| {
-                    tunnel_mode_kind(&endpoint.mode) == TunnelKind::Gre
+                    endpoint.kind == TunnelKind::Gre
                         && transport_instance_of_table(&endpoint.transport_table)
                             == ingress_routing_instance
                         && gre_transport_egress_matches(
@@ -1254,7 +1254,7 @@ fn gre_transport_tunnel_member_live(forwarding: &ForwardingState, tunnel_endpoin
 /// endpoint.
 ///
 /// #2327 (kind-segregation + O(N) fix): the lookup goes through
-/// `gre_decap_index`, which only contains `mode == "gre"` / `"ip6gre"`
+/// `gre_decap_index`, which only contains GRE-kind
 /// endpoints — so a GRE frame is NEVER decapped against a WireGuard or
 /// any other non-GRE row even if the outer tuple/key happen to collide.
 /// The index is keyed by the endpoint's own
@@ -1372,7 +1372,7 @@ fn match_tunnel_endpoint_inner<'a>(
         };
         // Kind re-check (defense in depth): only GRE-mode rows decap as
         // GRE, regardless of what the index claims.
-        if tunnel_mode_kind(&endpoint.mode) != TunnelKind::Gre {
+        if endpoint.kind != TunnelKind::Gre {
             continue;
         }
         // #10653: wrong transport domain — the outer arrived in a

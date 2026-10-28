@@ -682,7 +682,7 @@ fn build_fallible_forwarding_state(
     // narrowing it with an unchecked `as u8` cast that would wrap
     // (256→0 blackholes the tunnel).
     tunnels::populate_tunnel_endpoints(snapshot, &mut state)?;
-    // #1432 S2a: instantiate one WgEngine per mode=="wireguard" endpoint,
+    // #1432 S2a: instantiate one WgEngine per WireGuard-kind endpoint,
     // reusing the previous state's engine Arc when the endpoint config is
     // unchanged (TAI64N + live sessions survive the commit) and seeding a
     // fresh engine's TAI64N high-water from the prior engine otherwise.
@@ -1241,7 +1241,11 @@ fn build_fallible_forwarding_state(
         .tunnel_endpoints
         .iter()
         .filter_map(|(&id, endpoint)| {
-            if endpoint.mode == "wireguard" {
+            // #17199: only GRE-kind endpoints carry a fixed outer egress;
+            // WireGuard resolves per peer below and Unknown MUST NOT
+            // fall into the GRE arm (a binary WireGuard-vs-else split
+            // would silently classify Unknown as GRE here).
+            if endpoint.kind != TunnelKind::Gre {
                 return None;
             }
             let outer = crate::afxdp::forwarding::resolve_tunnel_outer(&state, None, id, 0)?;
@@ -1251,7 +1255,7 @@ fn build_fallible_forwarding_state(
         .collect();
     let mut wireguard_peer_outer_egress_rgs = FastMap::default();
     for (&id, endpoint) in &state.tunnel_endpoints {
-        if endpoint.mode != "wireguard" {
+        if endpoint.kind != TunnelKind::WireGuard {
             continue;
         }
         for peer in &endpoint.wg_peers {
