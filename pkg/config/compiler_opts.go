@@ -11,10 +11,16 @@ type protocolScopeOpts struct {
 	lenientOSPFAreaInterface11400 bool
 }
 
-// compileOpts carries per-call compilation policy. It is threaded into
+// compileOpts carries per-call compilation policy plus the computed
+// inputs compileTree derives before expansion (physicalInterfaces,
+// zoneQuarantineNames, currentClusterPrimary16025,
+// currentClusterAccepted16858, nodeID). It is threaded into
 // compileExpanded so the strict commit path and the tolerant
 // load/peer-sync path can share the identical compile + group-expansion
-// pipeline while differing on narrow validator severities.
+// pipeline while differing on narrow validator severities. Outputs are
+// NOT carried here (#17157): every phase result returns as an ordinary
+// return value (runPreWalkGates returns preWalkResult); compileOpts has
+// no pointer-to-map out-parameters.
 type compileOpts struct {
 	// #8690 TEST SEAM. When true, the brace-elided normalizer
 	// (compact_normalize_8662.go) is not run.
@@ -1194,7 +1200,6 @@ type compileOpts struct {
 	// boot compatibility, but colliding references are recorded and refused
 	// during userspace expansion rather than matching an arbitrary winner.
 	lenientApplicationNameCollisions bool
-	applicationNameCollisions        *map[string]struct{}
 
 	// lenientReservedApplicationNames (#5821, #12048) downgrades the
 	// reserved-name gate (validateReservedApplicationNamesStrict) from a hard
@@ -1235,7 +1240,6 @@ type compileOpts struct {
 	// without poisoning kept a discard-to-accept replacement enforceable.
 	// Same doctrine as lenientApplicationNameCollisions.
 	lenientFirewallFilterFamilyCollisions bool
-	firewallFilterCollisions              *map[string]struct{}
 
 	// lenientRoutingInstanceChildTokens (#9323) downgrades the
 	// routing-instance child-keyword gate
@@ -1658,6 +1662,18 @@ type compileOpts struct {
 	// transport cannot bind a malformed or address-family-incompatible source.
 	// Non-local but valid sources remain a separate advisory in ValidateConfig.
 	lenientSamplingSourceAddress bool
+	// lenientFamilyMembers17196 (#17196) downgrades the shared-extractor
+	// unknown-family diagnostic at the three non-firewall tops
+	// (interfaces unit family, forwarding-options family,
+	// forwarding-options sampling instance family) from a hard compile
+	// error to a cfg.Warnings entry on tolerant load / peer-sync. An
+	// unknown member (empty-Keys child, undeclared token, or undeclared
+	// residue on a structured member) compiles to nothing in every
+	// case — the compiler installs nothing for it on either path — so a
+	// leniently-loaded malformed persisted/synced config still BOOTS
+	// (#1960) while strict commit rejects the typo. Same doctrine as
+	// lenientSamplingInstanceConflicts.
+	lenientFamilyMembers17196 bool
 	// lenientSSHKnownHosts16770 (#16770) downgrades an invalid
 	// ssh-known-hosts host/key (unknown type, type/key mismatch,
 	// wildcard/malformed host) to a warning on tolerant load / peer-sync
@@ -3852,34 +3868,37 @@ type compileOpts struct {
 	// authentication limitation as a warning. New strict compiles reject it.
 	lenientSystemAAA10831 bool
 
-	// nodeAware / stampNodeID (#4329) carry the runtime cluster node
-	// identity (from /etc/xpf/node-id, or `-node-id` on `xpfd
-	// check-config`) into compileExpanded so it can be stamped onto the
-	// compiled ClusterConfig.NodeID BEFORE any NodeID-dependent derivation
-	// runs. Only the node-aware entry (compileTree node branch) sets
-	// nodeAware; the standalone CompileConfig path leaves it false so
-	// single-node compiles are unchanged. See the stamp in compileExpanded
-	// for the full rationale and guards.
-	nodeAware   bool
-	stampNodeID int
+	// nodeID (#4329, #17157) carries the runtime cluster node identity (from
+	// /etc/xpf/node-id, or `-node-id` on `xpfd check-config`) into
+	// compileExpanded so it can be stamped onto the compiled
+	// ClusterConfig.NodeID BEFORE any NodeID-dependent derivation runs
+	// (see resolveDerivedConfig). It is the ONLY node-identity channel:
+	// compileTree stamps it from its own *int selector (nodeID != nil
+	// IS the node-aware condition, the #16167 pointer-alone presence),
+	// so no parallel boolean can disagree with the stamped value. Nil:
+	// the standalone CompileConfig path leaves it nil so single-node
+	// compiles are unchanged. A negative id (defensive) never stamps
+	// (resolveDerivedConfig's `>= 0` guard), which also holds the full
+	// rationale and remaining guards.
+	nodeID *int
 	// zoneQuarantineNames (#13095) carries the pre-expansion three-view
 	// runtime zone-name union validateZoneIDCollisionAST computed, so
 	// compileExpanded can stamp it onto cfg.ZoneQuarantineNames BEFORE the
 	// zone-membership / secure-tunnel / advisory gates read the quarantine
-	// set. Both compile wrappers set it right after the collision gate; a
-	// direct compileExpanded caller that leaves it nil stamps the empty set
-	// and ZoneQuarantineNamesForConfig falls back to cfg's own zone keys,
+	// set. compileTree sets it right after the collision gate; a direct
+	// compileExpanded caller that leaves it nil stamps the empty set and
+	// ZoneQuarantineNamesForConfig falls back to cfg's own zone keys,
 	// which is the pre-#13095 behavior.
 	zoneQuarantineNames []string
 	// physicalInterfaces (#15037) carries the pre-expansion physical
 	// interface-name set (top level + every groups block + fabric
 	// members) so compileExpanded can stamp it onto cfg for the
-	// interface-monitor name gate. Both compile wrappers compute it
-	// right after cloneForExpansion, BEFORE ExpandGroups removes the
-	// groups stanza the peer node's declarations live in; a direct
-	// compileExpanded caller that leaves it nil stamps the empty set
-	// and the gate treats every physical-shaped monitor name as
-	// attributable (nothing declared anywhere).
+	// interface-monitor name gate. compileTree computes it right after
+	// cloneForExpansion, BEFORE ExpandGroups removes the groups stanza
+	// the peer node's declarations live in; a direct compileExpanded
+	// caller that leaves it nil stamps the empty set and the gate
+	// treats every physical-shaped monitor name as attributable
+	// (nothing declared anywhere).
 	physicalInterfaces map[string]bool
 	// lenientAPIAuthDuplicateScalar (#14448) downgrades the api-auth
 	// duplicate class/expires gate (validateAPIAuthDuplicateScalarAST)
@@ -3950,8 +3969,9 @@ func strictCompileOpts() compileOpts {
 // lenient flag set that CompileConfigLenient and
 // CompileConfigForNodeLenient share; both formerly inlined a byte-
 // identical ~125-field composite literal (#6423 dedup). compileOpts is a
-// value type, so each call returns a fresh copy — equivalent to the
-// original inline literals.
+// value type, so each call returns a fresh copy with all collision
+// result channels nil (no pointer-to-map fields remain, #17157) —
+// equivalent to the original inline literals.
 func lenientCompileOpts() compileOpts {
 	return compileOpts{
 		tolerant:                                 true,
@@ -4091,6 +4111,7 @@ func lenientCompileOpts() compileOpts {
 		lenientSamplingInputRate:                 true,
 		lenientPortMirroringIngressAlias15651:    true,
 		lenientSamplingSourceAddress:             true,
+		lenientFamilyMembers17196:                true,
 		lenientSSHKnownHosts16770:                true,
 		lenientFlowExportSeconds:                 true,
 		lenientApplicationSetMembers:             true,

@@ -832,7 +832,7 @@ struct {
 } ha_watchdog SEC(".maps");
 
 /* ============================================================
- * Per-IP session count maps (populated by Go GC sweep)
+ * Per-IP session count maps (populated by the dataplane)
  * Used by xdp_screen for per-source/destination session limiting.
  * ============================================================ */
 

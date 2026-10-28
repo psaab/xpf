@@ -29,17 +29,17 @@ out of the cell.
 now?"; it does not bound how long a handle someone already took stays
 usable. Two consequences the code makes explicit:
 
-- **Escaping consumers.** Six things outlive a single call. The three
+- **Escaping consumers.** Five things outlive a single call. The three
   OPERATOR-FACING management servers — gRPC, REST, and the console CLI —
   do NOT receive the backend handle: they receive `liveDataPlane`
   (`daemon_dp_live.go`), a daemon-owned indirection that re-reads the cell
   on every method, so a later `setDataplane(nil)` is immediately visible
-  to them. TWO of the three DATA-PATH consumers are deliberate
-  capture-once wiring, and are documented as such rather than claimed
-  converted: conntrack GC and cluster `SessionSync` take the DECOMPOSED
+  to them. ONE of the two DATA-PATH consumers is deliberate
+  capture-once wiring, and is documented as such rather than claimed
+  converted: cluster `SessionSync` takes the DECOMPOSED
   `dataplane.SessionStore` / `dataplane.Telemetry` domains (a live
   indirection would put an atomic load + interface assertion +
-  `SessionStoreOf` allocation on every per-session step). The THIRD — the
+  `SessionStoreOf` allocation on every per-session step). The OTHER — the
   userspace event-stream loop — is NOT capture-once: it re-resolves the
   provider, the stream instance AND the session-delta drainer from the
   cell on every poll tick (#6743 r6-F4 for the first two — it used to

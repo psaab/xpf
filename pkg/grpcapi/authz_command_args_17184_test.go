@@ -110,6 +110,7 @@ func TestArgumentFormsPingCountSize17184(t *testing.T) {
 		{"ping count other allowed", `^ping 10\.0\.0\.1 count 7$`, &pb.PingRequest{Target: "10.0.0.1", Count: 8}, false},
 		{"ping size denied", `^ping 10\.0\.0\.1 size 1400$`, &pb.PingRequest{Target: "10.0.0.1", Size: 1400}, true},
 		{"ping clamped count denied", `^ping 10\.0\.0\.1 count 100$`, &pb.PingRequest{Target: "10.0.0.1", Count: 5000}, true},
+		{"ping clamped size denied", `^ping 10\.0\.0\.1 size 65507$`, &pb.PingRequest{Target: "10.0.0.1", Size: 70000}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := cfg16067(t, tc.pattern, "")

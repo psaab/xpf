@@ -435,10 +435,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 						valueType: ValueIdentifier, valueDesc: "OSPF simple password (1..8 bytes; FRR ospfd / RFC 2328 maximum)",
 						validator: ValidateOSPFSimplePasswordLength, children: nil},
 				}},
-				"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-					"minimum-interval": {desc: "Minimum interval (milliseconds)", args: 1, valueType: ValueInteger, placeholder: "<milliseconds>", validator: ValidateInteger(10, 60000), children: nil},
-					"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},
-				}},
+				"bfd-liveness-detection": bfdLivenessSchema17182(),
 			}},
 			"area-type": {desc: "Area type", children: map[string]*schemaNode{
 				"stub": {desc: "Stub area", children: map[string]*schemaNode{
@@ -483,15 +480,12 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				// IPsec-only in Junos and xpf renders none of it, so
 				// every spelling below committed clean and left the
 				// OSPFv3 adjacency unauthenticated.
-				"ipsec-sa":            unmodeledOSPFIPsecSALeaf(),
-				"authentication":      unmodeledOSPFAuthenticationContainer(),
-				"authentication-key":  unmodeledOSPFv3AuthKeyLeaf(),
-				"authentication-type": unmodeledOSPFv3AuthTypeLeaf(),
-				"keychain":            unmodeledOSPFKeychainLeaf(),
-				"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-					"minimum-interval": {desc: "Minimum interval (milliseconds)", args: 1, valueType: ValueInteger, placeholder: "<milliseconds>", validator: ValidateInteger(10, 60000), children: nil},
-					"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},
-				}},
+				"ipsec-sa":               unmodeledOSPFIPsecSALeaf(),
+				"authentication":         unmodeledOSPFAuthenticationContainer(),
+				"authentication-key":     unmodeledOSPFv3AuthKeyLeaf(),
+				"authentication-type":    unmodeledOSPFv3AuthTypeLeaf(),
+				"keychain":               unmodeledOSPFKeychainLeaf(),
+				"bfd-liveness-detection": bfdLivenessSchema17182(),
 			}},
 			"area-type": {desc: "Area type", children: map[string]*schemaNode{
 				"stub": {desc: "Stub area", children: map[string]*schemaNode{
@@ -584,10 +578,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 					}},
 				}},
 			}},
-			"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-				"minimum-interval": {desc: "Minimum interval (milliseconds)", args: 1, valueType: ValueInteger, placeholder: "<milliseconds>", validator: ValidateInteger(10, 60000), children: nil},
-				"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},
-			}},
+			"bfd-liveness-detection": bfdLivenessSchema17182(),
 			"neighbor": {desc: "BGP neighbor", args: 1, placeholder: "<address>", keyValueType: ValueIPAddress, keyValueDesc: "BGP neighbor IP address (bare IPv4/IPv6, no prefix, no zone)", keyValueExamples: []string{"192.0.2.1", "2001:db8::1"}, keyValidator: ValidateBGPNeighborAddress, children: map[string]*schemaNode{
 				"description":   {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 				"peer-as":       {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
@@ -633,10 +624,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 						}},
 					}},
 				}},
-				"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-					"minimum-interval": {desc: "Minimum interval (milliseconds)", args: 1, valueType: ValueInteger, placeholder: "<milliseconds>", validator: ValidateInteger(10, 60000), children: nil},
-					"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},
-				}},
+				"bfd-liveness-detection": bfdLivenessSchema17182(),
 			}},
 		}},
 	}},
@@ -740,10 +728,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>",
 				valueType: ValueEnumOf, valueDesc: "authentication type",
 				valueExamples: AuthTypeSpellings(), validator: ValidateAuthType, children: nil},
-			"bfd-liveness-detection": {desc: "BFD liveness detection", children: map[string]*schemaNode{
-				"minimum-interval": {desc: "Minimum interval (milliseconds)", args: 1, valueType: ValueInteger, placeholder: "<milliseconds>", validator: ValidateInteger(10, 60000), children: nil},
-				"multiplier":       {desc: "Multiplier", args: 1, valueType: ValueInteger, placeholder: "<multiplier>", validator: ValidateInteger(2, 255), children: nil},
-			}},
+			"bfd-liveness-detection": bfdLivenessSchema17182(),
 		}},
 		"authentication-key": {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
 		"authentication-type": {desc: "Authentication type", args: 1, placeholder: "<type>",

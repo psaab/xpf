@@ -74,6 +74,8 @@ func TestArgumentFormsFold17184(t *testing.T) {
 		{"ping count denied", `^ping 10\.0\.0\.1 count 7$`, `{"target":"10.0.0.1","count":7}`, true},
 		{"ping count other allowed", `^ping 10\.0\.0\.1 count 7$`, `{"target":"10.0.0.1","count":8}`, false},
 		{"ping size denied", `^ping 10\.0\.0\.1 size 1400$`, `{"target":"10.0.0.1","size":1400}`, true},
+		{"ping clamped count denied", `^ping 10\.0\.0\.1 count 100$`, `{"target":"10.0.0.1","count":5000}`, true},
+		{"ping clamped size denied", `^ping 10\.0\.0\.1 size 65507$`, `{"target":"10.0.0.1","size":70000}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := cfg16067(t, tc.pattern)
@@ -91,6 +93,13 @@ func TestArgumentFormsFold17184(t *testing.T) {
 	longBody := `{"target":"` + strings.Repeat("a", 600) + `"}`
 	if err := call9952(t, wide, "limited", "POST", "/api/v1/diagnostics/ping", longBody); err == nil {
 		t.Error("ping with handler-rejected over-length target ALLOWED for restricted class (#17184 M2)")
+	}
+	// M2 (REST traceroute twin): the REST traceroute arm exists in
+	// restArgumentForms (POST /api/v1/diagnostics/traceroute), so the
+	// over-length (>diagcmd.MaxArgLen, #6904) unnameable cell is
+	// nameable on this surface too — not gRPC-only.
+	if err := call9952(t, wide, "limited", "POST", "/api/v1/diagnostics/traceroute", longBody); err == nil {
+		t.Error("traceroute with handler-rejected over-length target ALLOWED for restricted class (#17184 M2)")
 	}
 	// M3: events limit>10000 (handler 400) unnameable; at cap judged normally.
 	if err := call9952(t, wide, "limited", "GET", "/api/v1/security/events?limit=10001", ""); err == nil {
@@ -172,13 +181,15 @@ func restArgumentFormsCases17184(t *testing.T) map[string]bool {
 //
 // Request-decoded routes are covered in the second arm: every
 // restRoutesNoCommand entry classified by isRequestDecodedRoute9952
-// must (a) resolve per-request via restRequestCommand9952 (nil
-// request suffices to prove the route is wired there — resolution
-// itself needs a real request), (b) NOT also carry a fixed
-// restRouteCommand charge, and (c) NOT be named in
-// restRoutesWithoutArgumentForms (that map is for fixed-charge
-// routes only; naming a request-decoded route there would re-open
-// the Rev18237 B1 bare-charge confusion). Conversely every route
+// must (a) NOT also carry a fixed restRouteCommand charge, and
+// (b) NOT be named in restRoutesWithoutArgumentForms (that map is
+// for fixed-charge routes only; naming a request-decoded route
+// there would re-open the Rev18237 B1 bare-charge confusion).
+// Per-request resolution via restRequestCommand9952 is NOT checked
+// here — this arm never calls the resolver; that behavior is
+// covered end-to-end by the #15076/Fold cells
+// (TestBGPRoutesAndNATSelectorsChargedPerRequest15076 and
+// TestArgumentFormsFold17184's B1 controls). Conversely every route
 // restArgumentForms answers via its pre-switch request-decoded
 // bypass must be one of these — the bypass is keyed on
 // isRequestDecodedRoute9952, so that set IS the bypass set.

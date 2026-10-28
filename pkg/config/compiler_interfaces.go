@@ -149,6 +149,21 @@ func parseVlanTagsOuter15035(raw string) (uint64, error) {
 	return n, nil
 }
 
+// interfaceFamilyKnown17196 is the declared `interfaces … unit … family`
+// token set for the #17196 unknown-family diagnostic: the Junos AF names
+// the interface gates recognise (isInterfaceFamilyAF12090) plus the
+// families compileInterfaces itself consumes (inet/inet6/iso are switch
+// arms; the rest are known-but-unconsumed and keep falling through to
+// the #12090/#12656/#15654 gates). A token outside this set — or an
+// undeclared residue token on a structured member — is unknown.
+var interfaceFamilyKnown17196 = map[string]bool{
+	"inet": true, "inet6": true, "inet-vpn": true, "inet6-vpn": true,
+	"iso": true, "mpls": true, "ccc": true, "tcc": true, "bridge": true,
+	"vpls": true, "ethernet-switching": true, "evpn": true, "any": true,
+}
+
+var interfaceFamilyKnownSorted17196 = sortedFamilyKeys17196(interfaceFamilyKnown17196)
+
 func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, warnings *[]string) error {
 	// #6782: reth interfaces whose redundancy-group token was present but
 	// unusable. Only ever populated on the tolerant path — the strict compile
@@ -796,42 +811,45 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 				unit.InnerVlanID = int(n)
 			}
 
-			// Handle two AST shapes:
+			// Handle two AST shapes via the shared familyMembers
+			// extractor (#17196, family_members.go):
 			// - set commands:  family { inet { address ...; dhcp; } }
 			//   Keys=["family"], child Keys=["inet"] with grandchildren
 			// - hierarchical:  family inet { address ...; dhcp; }
 			//   Keys=["family","inet"], children are address/dhcp directly
+			//
+			// #7522: the extractor's Name() returns "" for an empty Keys
+			// slice, where Keys[0] panics. A child's Keys are not
+			// structurally guaranteed non-empty once the tree can come
+			// from anywhere but the parser (pkg/configstore/db.go's plain
+			// json.Unmarshal has no Node validator). A bad persisted
+			// state must ERROR on load, never panic (#1960). Same fix as
+			// #4827 on the firewall walkers.
+			//
+			// #17196: an unknown member (empty Af, undeclared token, or
+			// undeclared residue on a structured member — e.g. the
+			// leading junk in `family { bogus inet { … } }`, which the
+			// old Keys[1] preference silently discarded to install inet)
+			// is reported through the #9017-style diagnostic: strict
+			// rejects, lenient warns and installs nothing for that
+			// member. Known-but-unconsumed families (mpls, iso, …) are
+			// NOT unknown here — only inet/inet6/iso have switch arms
+			// below; the rest fall through exactly as before (their
+			// bindings are owned by the #12090/#12656/#15654 gates).
 			for _, familyNode := range unitNode.FindChildren("family") {
-				var afNodes []*Node
-				if len(familyNode.Keys) >= 2 {
-					afNodes = append(afNodes, familyNode)
-				} else {
-					afNodes = append(afNodes, familyNode.Children...)
-				}
-				for _, afNode := range afNodes {
-					// #7522: Name() rather than Keys[0]. It returns "" for an
-					// empty Keys slice, where Keys[0] panics with index out of
-					// range. afNodes is either familyNode itself (len(Keys) >= 2
-					// by the branch above, so safe) or familyNode.Children —
-					// and a CHILD's Keys are not structurally guaranteed
-					// non-empty once the tree can come from anywhere but the
-					// parser.
-					//
-					// The live parser and SetPath paths do guarantee
-					// len(Keys) >= 1, so this only bites a malformed persisted
-					// AST — pkg/configstore/db.go's plain json.Unmarshal has no
-					// Node validator — or a handcrafted tree. A bad persisted
-					// state must ERROR on load, never panic (#1960
-					// fail-closed-on-load). Same fix and same reasoning as
-					// #4827 applied to the sibling firewall family walkers.
-					//
-					// An empty afName matches no address family below and the
-					// unit is compiled without one, which is the same outcome as
-					// an unrecognised family name — it does not silently adopt a
-					// neighbour's family.
-					afName := afNode.Name()
-					if len(afNode.Keys) >= 2 {
-						afName = afNode.Keys[1]
+				for _, m := range familyMembers(familyNode) {
+					afNode, afName := m.AfNode, m.Af
+					if unknownFamilyMember17196(m, interfaceFamilyKnown17196) {
+						msg := unknownFamilyMsg17196(
+							fmt.Sprintf("interfaces %s unit %d family", ifName, unitNum),
+							m, interfaceFamilyKnown17196, interfaceFamilyKnownSorted17196)
+						if opts.lenientFamilyMembers17196 {
+							if warnings != nil {
+								*warnings = append(*warnings, msg+"; skipping that family member")
+							}
+							continue
+						}
+						return fmt.Errorf("%s", msg)
 					}
 					switch afName {
 					case "inet":
