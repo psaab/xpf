@@ -8054,6 +8054,57 @@ fn vlan_decode_once_parity_17206() {
     let st = build_forwarding_state(&distinct);
     assert_eq!(st.ingress_unit_by_logical.get(&100), Some(&0));
     assert_eq!(st.ingress_unit_by_logical.get(&101), Some(&100));
+    // VID-0 prune: a disabled/unzoned unit-0 row with vlan_id -1 owns
+    // (bind,0) via the decoded 0 in the main loop; only the decoded
+    // prune comparison (row_vlan == 0) removes it. Raw `vlan_id == 0`
+    // would leave the key. Tagged sibling nominates the bind as
+    // tagged-only. Assert the key is PRUNED from the resolved map.
+    let prune = ConfigSnapshot {
+        zones: vec![crate::ZoneSnapshot {
+            name: "trust".into(),
+            id: 11,
+            ..Default::default()
+        }],
+        interfaces: vec![
+            InterfaceSnapshot {
+                name: "ge-0/0/9.100".into(),
+                zone: "trust".into(),
+                ifindex: 110,
+                parent_ifindex: 10,
+                vlan_id: 100,
+                is_unit: Some(true),
+                hardware_addr: "02:00:00:00:00:6e".into(),
+                ..Default::default()
+            },
+            InterfaceSnapshot {
+                name: "ge-0/0/9.0".into(),
+                zone: String::new(),
+                ifindex: 100,
+                parent_ifindex: 10,
+                vlan_id: -1,
+                is_unit: Some(true),
+                hardware_addr: "02:00:00:00:00:64".into(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let st = try_build_forwarding_state_with_policy_counters(
+        &prune,
+        &crate::policy::PolicyCounterStore::default(),
+    )
+    .expect("VID-0 prune fixture must build");
+    assert!(
+        !st.ingress_logical_ifindex.contains_key(&(10, 0)),
+        "decoded VID-0 prune must remove (10,0) owned by the disabled/unzoned \
+         unit-0 row with vlan_id -1, got {:?}",
+        st.ingress_logical_ifindex
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::resolve_ingress_logical_ifindex(&st, 10, 0),
+        None,
+        "pruned (10,0) must not resolve"
+    );
 }
 
 /// #2706: a NEGATIVE interface MTU fails the snapshot CLOSED via
