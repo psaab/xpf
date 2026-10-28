@@ -767,6 +767,104 @@ mod tests {
         );
     }
 
+    /// #17194 (F1): tunnel-egress recursion — a peer destination whose FIB
+    /// egress is itself a tunnel interface must hit the
+    /// `tunnel_interfaces` arm of `resolve_tunnel_outer_to` and return
+    /// `None`; the builder maps that to `Err("wg_tun_origin_outer_recursion")`.
+    /// The peer `192.0.2.1` is routed out `st0.0` (ifindex 500), an
+    /// xfrm-style tunnel interface with NO tunnel endpoint row, via an
+    /// interface-only `@st0.0` next-hop. Because no endpoint claims 500,
+    /// the FIB hop carries no `tunnel_endpoint_id` and stays a plain
+    /// tunnel-ifindex egress (a hop out an endpoint-owned logical such as
+    /// `wg0.0` would instead take the FIB's own tunnel branch and never
+    /// reach this guard — the production shape the guard exists for).
+    /// Deleting the `tunnel_interfaces.contains(egress)` arm in
+    /// `forwarding/tunnel.rs` makes both asserts below fail (RED),
+    /// restoring it passes (GREEN). The pre-existing local-delivery case
+    /// alone cannot pin this arm: with the tunnel arm deleted, a
+    /// local-delivery peer still returns `None` via the `LocalDelivery` arm.
+    #[test]
+    fn wg_tun_origin_outer_recursion() {
+        let mut snap = wg_outer_mtu_snapshot();
+        // An xfrm-style tunnel interface with NO tunnel endpoint row:
+        // `tunnel: true` puts ifindex 500 in `tunnel_interfaces`, but no
+        // endpoint claims it, so routes out it carry no tunnel_endpoint_id.
+        snap.interfaces.push(crate::InterfaceSnapshot {
+            name: "st0.0".to_string(),
+            zone: "sfmix".to_string(),
+            linux_name: "st0".to_string(),
+            ifindex: 500,
+            mtu: 1400,
+            tunnel: true,
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "10.99.0.1/30".to_string(),
+                scope: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        // Route the peer destination out that endpoint-less tunnel iface.
+        snap.routes.push(crate::RouteSnapshot {
+            reject: false,
+            cluster_terminal: false,
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "192.0.2.0/24".to_string(),
+            next_hop_weights: vec![],
+            next_hops: vec!["@st0.0".to_string()],
+            discard: false,
+            next_table: String::new(),
+            preference: 0,
+            rule_priority: 0,
+            mtu: 0,
+            next_table_route: false,
+        });
+        let forwarding = build_forwarding_state(&snap);
+        // Preconditions: 500 really is a tunnel interface with no endpoint
+        // row, and the FIB egress for the peer destination really is that
+        // tunnel ifindex with a non-LocalDelivery disposition (so only the
+        // `tunnel_interfaces` arm can return `None`).
+        assert!(forwarding.tunnel_interfaces.contains(&500));
+        assert!(!forwarding.tunnel_endpoint_by_ifindex.contains_key(&500));
+        let outer_fib = crate::afxdp::forwarding::lookup_forwarding_resolution_v4(
+            &forwarding,
+            None,
+            std::net::Ipv4Addr::new(192, 0, 2, 1),
+            "inet.0",
+            1,
+            false,
+            None,
+        );
+        assert_eq!(outer_fib.resolution.egress_ifindex, 500);
+        assert_ne!(
+            outer_fib.resolution.disposition,
+            ForwardingDisposition::LocalDelivery
+        );
+        let endpoint = forwarding.tunnel_endpoints.get(&1).expect("wg row").clone();
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        // The resolver itself refuses the tunnel-egress outer.
+        assert!(resolve_tunnel_outer_to(
+            &forwarding,
+            Some(&neighbors),
+            &endpoint,
+            "192.0.2.1".parse().unwrap(),
+            0,
+        )
+        .is_none());
+        // And the builder maps that `None` to the recursion Err.
+        let ha = txn_ha_state();
+        let request = inner_udp_v4(FW, PEER, 5001, 5002);
+        let parsed =
+            parse_wg_tun_origin_flow(&request, &forwarding, 1).expect("parse must succeed");
+        let tunnel_peer: SocketAddr = "192.0.2.1:51820".parse().unwrap();
+        assert_eq!(
+            build_wg_tun_origin_entries(&parsed, tunnel_peer, 1, &forwarding, &ha, &neighbors, 123)
+                .err(),
+            Some("wg_tun_origin_outer_recursion")
+        );
+    }
+
     /// #10038: the publish-only attachment gate — the WG twin of GRE's
     /// `endpoint_attachment_valid` (which admits only GRE modes).
     #[test]
