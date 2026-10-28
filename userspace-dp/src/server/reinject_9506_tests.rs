@@ -54,12 +54,13 @@ fn frame(id: u64, flow_tag: u64) -> SubmitFrame {
 }
 
 fn live_target(core: &Arc<ReinjectCore>) -> Arc<ArcSwapOption<SlowPathReinjector>> {
-    // `new_without_worker` drops its rx: the 16k channel absorbs enqueues
-    // without a worker, which is exactly what the submit path needs here.
+    // Hermetic V1 target: no TUN/worker thread, but the D11 transport has a
+    // published worker 0 so non-dry-run submits route to its queue (never q0).
     let r = Arc::new(SlowPathReinjector::new_without_worker_with_core(
         1500,
         core.clone(),
     ));
+    r.ipsec_inner_transport().publish_workers([0]);
     Arc::new(ArcSwapOption::from(Some(r)))
 }
 
@@ -249,9 +250,12 @@ fn submit_conn_survives_idle_before_target_publication() {
     std::thread::sleep(std::time::Duration::from_millis(150));
     let target_core = ReinjectCore::new_shared();
     target_core.publish_epochs(PERMIT, &[(1, QEPOCH)]);
-    target.store(Some(Arc::new(
-        SlowPathReinjector::new_without_worker_with_core(1500, target_core.clone()),
-    )));
+    let target_reinjector = Arc::new(SlowPathReinjector::new_without_worker_with_core(
+        1500,
+        target_core.clone(),
+    ));
+    target_reinjector.ipsec_inner_transport().publish_workers([0]);
+    target.store(Some(target_reinjector));
     let mut frame = frame(2, 1);
     frame.flags = 0;
     client
@@ -275,7 +279,7 @@ fn submit_conn_survives_idle_before_target_publication() {
 }
 
 #[test]
-fn submit_conn_unflagged_routes_q0_writer() {
+fn submit_conn_unflagged_routes_v1_transport_not_q0() {
     let core = open_core();
     let target = live_target(&core);
     let (client, server) = UnixStream::pair().unwrap();
@@ -301,10 +305,16 @@ fn submit_conn_unflagged_routes_q0_writer() {
     assert_eq!(decisions[0].reason, ADMIT_OK);
     assert_eq!(core.stats_snapshot().non_dry_run_refused, 0);
     assert_eq!(core.live_count(), 1);
+    let reinjector = target.load_full().unwrap();
     assert_eq!(
-        target.load_full().unwrap().delegated_status().queued_packets,
-        1,
-        "unflagged submit must reach the q0 writer channel"
+        reinjector.delegated_status().queued_packets,
+        0,
+        "V1 submit must never reach the q0 writer channel"
+    );
+    assert_eq!(
+        reinjector.ipsec_inner_transport().worker_pending(0),
+        Some(1),
+        "V1 submit must land in the worker transport queue"
     );
     drop(client);
     handle.join().unwrap();
@@ -618,6 +628,7 @@ fn announce_before_target_install_uses_shared_core_for_submit() {
         1500,
         target_core.clone(),
     ));
+    target_reinjector.ipsec_inner_transport().publish_workers([0]);
     target.store(Some(target_reinjector));
 
     let mut admitted = frame(1, 1);

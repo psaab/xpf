@@ -1782,93 +1782,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, CodecError> {
-    let mut c = Cursor::new(payload);
-    let n = c.u16()? as usize;
-    if n > SUBMIT_MAX_FRAMES {
-        return Err(CodecError::TooManyFrames);
-    }
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let request_id = c.u64()?;
-        let permit_epoch = c.u64()?;
-        let queue_epoch = c.u64()?;
-        let queue_number = c.u16()?;
-        let flow_tag = c.u64()?;
-        let flags = c.u8()?;
-        if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
-            return Err(CodecError::BadFlags);
-        }
-        let family = c.u8()?;
-        let hook = c.u8()?;
-        let owned_ifindex = c.u32()?;
-        let owner_len = c.u8()? as usize;
-        let owner_bytes = c.take(owner_len)?;
-        let stn_len = c.u8()? as usize;
-        let stn_bytes = c.take(stn_len)?;
-        let owner_valid_utf8 = std::str::from_utf8(owner_bytes).is_ok();
-        let stn_valid_utf8 = std::str::from_utf8(stn_bytes).is_ok();
-        let valid = owned_ifindex != 0
-            && owner_len != 0
-            && stn_len != 0
-            && owner_len <= ORIGIN_MAX_OWNER
-            && stn_len <= ORIGIN_MAX_STN
-            && owner_valid_utf8
-            && stn_valid_utf8
-            && (family == ORIGIN_INET || family == ORIGIN_BRIDGE)
-            && (hook == ORIGIN_FORWARD || hook == ORIGIN_INPUT);
-        let data_len = c.u32()? as usize;
-        if data_len > SUBMIT_MAX_DATA_LEN {
-            return Err(CodecError::FrameTooLarge);
-        }
-        let bytes = c.take(data_len)?.to_vec();
-        let snapshot_generation = c.u64()?;
-        let config_generation = c.u64()?;
-        let fib_generation = c.u32()?;
-        let zone_id = c.u32()?;
-        let if_id = c.u32()?;
-        let pmech_inventory_generation = c.u64()?;
-        let pmech_inventory_fib_generation = c.u32()?;
-        let mut pmech_policy_identity = [0u8; 32];
-        pmech_policy_identity.copy_from_slice(c.take(32)?);
-        let deadline_mono_ns = c.u64()?;
-        let deadline_clock_id = c.u8()?;
-        out.push(SubmitFrame {
-            lease: ReinjectLease {
-                permit_epoch,
-                queue_epoch,
-                queue_number,
-                request_id,
-            },
-            flow_tag,
-            flags,
-            origin: CaptureOrigin {
-                family,
-                hook,
-                owned_ifindex,
-                owner: String::from_utf8_lossy(owner_bytes).into_owned(),
-                stn: String::from_utf8_lossy(stn_bytes).into_owned(),
-                valid,
-            },
-            bytes,
-            snapshot_generation,
-            config_generation,
-            fib_generation,
-            zone_id,
-            if_id,
-            pmech_inventory_generation,
-            pmech_inventory_fib_generation,
-            pmech_policy_identity,
-            deadline_mono_ns,
-            deadline_clock_id,
-        });
-    }
-    if !c.done() {
-        return Err(CodecError::TrailingBytes);
-    }
-    Ok(out)
-}
-
 /// A submit row whose packet bytes are already owned by a D11 slab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PooledSubmitFrame {
@@ -1891,7 +1804,7 @@ pub(crate) struct PooledSubmitFrame {
 }
 
 /// Decode a P-MECH batch directly into preallocated D11 slabs. This is the
-/// worker handoff path; unlike `decode_submit_batch`, it never materializes a
+/// sole submit decoder and the worker handoff path; it never materializes a
 /// `Vec<u8>` and then copies it into a slab.
 pub(crate) fn decode_submit_batch_into_pool(
     payload: &[u8],
