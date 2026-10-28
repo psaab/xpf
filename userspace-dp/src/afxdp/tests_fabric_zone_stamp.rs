@@ -7068,6 +7068,548 @@ fn split_rg_peer_owned_ledger_scoped_by_ri_15958b() {
     );
 }
 
+/// #17053: equal-length connected ties are deterministic — the
+/// LOWEST ifindex wins regardless of insertion order — and the
+/// session_glue attribution agrees with the canonical fib LPM.
+/// The legacy session_glue scan replaced on `len >= best_len`
+/// (last row / last hash entry wins), so inserting the same two
+/// /24s in opposite orders flipped the answer; the index kept the
+/// same order dependence. FAIL-ON-REVERT: restore `>=` in either
+/// place and the reversed-order arms flip to ifindex 24 / RG1.
+#[test]
+fn connected_tie_lowest_ifindex_both_orders_17053() {
+    // Two interfaces carry the same /24 (10.0.61.0/24): ifindex 5
+    // (RG2) and ifindex 24 (RG1), default instance, present in
+    // BOTH the FIB rows and the ledger so each source set ties.
+    let build = |order: [i32; 2]| {
+        let mut forwarding = ForwardingState::default();
+        for ifindex in order {
+            let rg = if ifindex == 5 { 2 } else { 1 };
+            let prefix = crate::prefix::PrefixV4::from_net(
+                "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+            );
+            forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+                prefix,
+                host: Ipv4Addr::new(10, 0, 61, 1),
+                ifindex,
+                tunnel_endpoint_id: 0,
+                table: "inet.0".to_string(),
+            });
+            forwarding
+                .connected_v4_by_ifindex
+                .entry(ifindex)
+                .or_default()
+                .push(prefix);
+            forwarding.egress.insert(ifindex, crate::afxdp::EgressInterface {
+                bind_ifindex: ifindex, vlan_id: 0, mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
+                redundancy_group: rg, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
+            });
+        }
+        forwarding
+    };
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    for order in [[24, 5], [5, 24]] {
+        let mut forwarding = build(order);
+        assert_eq!(
+            crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+            5,
+            "#17053: lowest ifindex must win the /24 tie (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+            2,
+            "#17053: owner RG must follow the lowest ifindex (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::forwarding::connected_lpm_ifindex(
+                &forwarding,
+                target,
+                None,
+                crate::afxdp::forwarding::ConnectedSources::LedgerOnly,
+            ),
+            Some(5),
+            "#17053: canonical ledger LPM must agree (order {order:?})"
+        );
+        // The build-time index must answer identically.
+        forwarding.rebuild_connected_owner_index();
+        assert_eq!(
+            crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+            2,
+            "#17053: indexed owner must keep the lowest-ifindex winner (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+            5,
+            "#17053: indexed scan path must keep the lowest ifindex (order {order:?})"
+        );
+    }
+    // Canonical vs session_glue parity on the same state.
+    let forwarding = build([24, 5]);
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+        crate::afxdp::forwarding::connected_lpm_ifindex(
+            &forwarding,
+            target,
+            None,
+            crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+        )
+        .unwrap_or(0),
+        "#17053: session_glue and canonical LPM must not diverge"
+    );
+}
+
+/// #17053 guard: the divergent session_glue LPM must not return.
+/// Same family-blind scope predicate, dead local branch and
+/// last-wins tie were deleted; any reintroduction trips this cell.
+#[test]
+fn connected_lpm_single_source_structure_17053() {
+    let resolution = include_str!("session_glue/resolution.rs");
+    assert!(
+        !resolution.contains("len >= best_len"),
+        "#17053: session_glue re-introduced the last-wins tie"
+    );
+    assert!(
+        !resolution.contains("fn interface_in_table_scope"),
+        "#17053: session_glue re-introduced the family-blind scope predicate"
+    );
+    assert!(
+        resolution.contains("ConnectedSources::RowsThenLedger"),
+        "#17053: session_glue must delegate to the canonical LPM"
+    );
+    let fib = include_str!("forwarding/fib.rs");
+    assert!(
+        fib.contains("pub(in crate::afxdp) fn connected_lpm_ifindex("),
+        "#17053: canonical dispatcher missing from fib.rs"
+    );
+    let state = include_str!("types/forwarding/state.rs");
+    assert!(
+        !state.contains("len >= best_len"),
+        "#17053: connected-owner index re-introduced the last-wins tie"
+    );
+}
+/// #17053 fold (Rev18099 F1): a connected winner with owner RG 0 is a
+/// FINAL answer (legacy `Hit(0)`): the scan fallback must NOT fall
+/// through to the interface-NAT tail, and scan and index must AGREE.
+/// The assignment's shape is "connected winner, missing egress row
+/// -> RG 0": the winner (ifindex 0, connected /24, NO egress row) has
+/// `owner_rg_for_flow(..) == 0` BECAUSE its egress row is missing,
+/// and the pre-fold `i32` dispatcher returned 0 for it exactly as
+/// for no-match, so `if ifindex > 0` fell through. The SAME target is
+/// an interface-NAT entry on ifindex 24 (RG1), so the NAT tail
+/// answers 1 if reached. RED pre-fold (scan 1, index Hit(0)); GREEN
+/// once the dispatcher returns `Option<i32>` (`Some(0)` = matched).
+/// The ifindex-0 winner also pins that a matched ifindex 0 itself is
+/// not collapsed into no-match.
+#[test]
+fn connected_winner_rg0_missing_egress_no_nat_tail_17053() {
+    let mut forwarding = ForwardingState::default();
+    let prefix = crate::prefix::PrefixV4::from_net(
+        "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+    );
+    // Connected winner: ifindex 0, default table, NO egress row, so
+    // `owner_rg_for_flow(.., 0) == 0` (missing egress row -> RG 0).
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix,
+        host: Ipv4Addr::new(10, 0, 61, 1),
+        ifindex: 0,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    let target_v4 = Ipv4Addr::new(10, 0, 61, 102);
+    let target = IpAddr::V4(target_v4);
+    // NAT tail would answer differently: the target itself is an
+    // interface-NAT address on ifindex 24 whose egress row says RG1.
+    forwarding
+        .interface_nat_v4
+        .entry(target_v4)
+        .or_default()
+        .insert("inet.0".to_string(), 24);
+    forwarding.egress.insert(24, crate::afxdp::EgressInterface {
+        bind_ifindex: 24, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03], zone_id: 21230,
+        redundancy_group: 1, primary_v4: Some(target_v4), primary_v6: None,
+    });
+    // Sanity: winner RG 0 (missing egress), NAT-tail RG 1, LPM matched.
+    assert_eq!(
+        crate::afxdp::forwarding::owner_rg_for_flow(&forwarding, 0), 0,
+        "#17053 fold: fixture winner must have no egress row (RG 0)"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::owner_rg_for_flow(&forwarding, 24), 1,
+        "#17053 fold: fixture NAT-tail interface must be RG1"
+    );
+    assert_eq!(
+        crate::afxdp::forwarding::connected_lpm_ifindex(
+            &forwarding,
+            target,
+            None,
+            crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+        ),
+        Some(0),
+        "#17053 fold: canonical LPM must match the ifindex-0 winner"
+    );
+    // Scan fallback (no index built): canonical RG 0 wins; the NAT
+    // tail must NOT be consulted for a matched target.
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        0,
+        "#17053 fold: scan must return the RG-0 winner, not the NAT tail"
+    );
+    // Index fast path must agree exactly (Hit(0) is final).
+    forwarding.rebuild_connected_owner_index();
+    assert_eq!(
+        forwarding.connected_owner_index_lookup(target, None),
+        Some(crate::afxdp::ConnectedOwnerIndex::Hit(0)),
+        "#17053 fold: index must answer Hit(0) for the RG-0 winner"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        0,
+        "#17053 fold: scan and index must agree for RG-0 winners"
+    );
+}
+
+/// #17053 fold (Rev18099Opus-2 F1): a CURRENT index `Miss` must skip
+/// Source 1 entirely and go straight to Source 2/NAT tail. The
+/// poisoned-row construction makes the scan observable: the target
+/// is covered by NO connected prefix when the index is built (index
+/// legitimately `Miss`, current), then a connected row that WOULD
+/// win a full scan (ifindex 5 / RG2, default table) is pushed
+/// WITHOUT changing the row/ledger counts the currency check
+/// compares — the pushed row replaces nothing but the counts are
+/// re-stamped by hand below so `connected_owner_index_current()`
+/// stays true. Pre-fold, the owner helper fell through the `Miss`
+/// into `connected_lpm_ifindex(.., RowsThenLedger)` and returned
+/// the poison RG2; the restored shortcut must never consult it.
+/// The NAT tail is the only remaining source: the same target as an
+/// RG1 interface-NAT entry must be the answer (1), proving Source 2
+/// is still reached. A second arm with NO NAT entry must answer 0.
+/// RED pre-fold (poison consulted -> 2); GREEN post-fold (1 / 0).
+#[test]
+fn connected_current_miss_skips_scan_no_poison_17053() {
+    let target_v4 = Ipv4Addr::new(10, 0, 61, 102);
+    let target = IpAddr::V4(target_v4);
+    // Build with an unrelated connected row, then index: target is a
+    // genuine Miss, and the index is current for this row set.
+    let mut forwarding = ForwardingState::default();
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net(
+            "10.0.99.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+        ),
+        host: Ipv4Addr::new(10, 0, 99, 1),
+        ifindex: 7,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(7, crate::afxdp::EgressInterface {
+        bind_ifindex: 7, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x07, 0x07], zone_id: 21230,
+        redundancy_group: 2, primary_v4: Some(Ipv4Addr::new(10, 0, 99, 1)), primary_v6: None,
+    });
+    forwarding.rebuild_connected_owner_index();
+    assert_eq!(
+        forwarding.connected_owner_index_lookup(target, None),
+        Some(crate::afxdp::ConnectedOwnerIndex::Miss),
+        "#17053 fold: target must be a genuine index Miss before poisoning"
+    );
+    assert!(forwarding.connected_owner_index_current(), "#17053 fold: index must start current");
+    // Poison: a row covering the target (would win any scan, RG2 via
+    // ifindex 5) pushed AFTER the build. Re-stamp the recorded row
+    // counts so the currency check still passes — this is exactly
+    // the state a stale-but-count-equal mutation would present, and
+    // the ONLY way a behavioral cell can observe whether the scan
+    // ran (a truly current index by construction contains no such
+    // row; the fold's contract is that the scan is not consulted).
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net(
+            "10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net"),
+        ),
+        host: Ipv4Addr::new(10, 0, 61, 1),
+        ifindex: 5,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(5, crate::afxdp::EgressInterface {
+        bind_ifindex: 5, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
+        redundancy_group: 2, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
+    });
+    forwarding.connected_owner_index_rows.0 += 1;
+    assert!(forwarding.connected_owner_index_current(), "#17053 fold: re-stamped index must read current");
+    assert_eq!(
+        forwarding.connected_owner_index_lookup(target, None),
+        Some(crate::afxdp::ConnectedOwnerIndex::Miss),
+        "#17053 fold: index (built pre-poison) must still answer Miss"
+    );
+    // Sanity: a full scan WOULD find the poison (RG2) — so returning
+    // anything else proves the scan was skipped.
+    assert_eq!(
+        crate::afxdp::forwarding::connected_lpm_ifindex(
+            &forwarding, target, None,
+            crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+        ),
+        Some(5),
+        "#17053 fold: scan would win via the poisoned row (fixture sanity)"
+    );
+    // No NAT entry: current Miss -> straight to Source 2 -> 0, NOT
+    // the poison RG2 the pre-fold fall-through returned.
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        0,
+        "#17053 fold: current Miss must skip the scan (poison RG2 must not be consulted)"
+    );
+    // With an RG1 NAT-tail entry for the target, Source 2 answers 1
+    // — proving the shortcut lands on the NAT tail, not a bare 0.
+    forwarding
+        .interface_nat_v4
+        .entry(target_v4)
+        .or_default()
+        .insert("inet.0".to_string(), 24);
+    forwarding.egress.insert(24, crate::afxdp::EgressInterface {
+        bind_ifindex: 24, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03], zone_id: 21230,
+        redundancy_group: 1, primary_v4: Some(target_v4), primary_v6: None,
+    });
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        1,
+        "#17053 fold: current Miss must reach Source 2 (NAT tail RG1), not the poison scan"
+    );
+}
+
+/// #17053 fold (Rev18099Opus-2 F2): IPv6 mirror of
+/// `connected_tie_lowest_ifindex_both_orders_17053` — same /64 on
+/// ifindexes 5/RG2 and 24/RG1 in both insertion orders, in FIB rows
+/// and ledger; session_glue, canonical LPM (RowsThenLedger +
+/// LedgerOnly) and the rebuilt index must all agree on the lowest
+/// ifindex / RG2, exercising the v6 dispatcher, v6 ledger kernel,
+/// v6 index rebuild and v6 probe.
+#[test]
+fn connected_tie_lowest_ifindex_both_orders_v6_17053() {
+    let build = |order: [i32; 2]| {
+        let mut forwarding = ForwardingState::default();
+        for ifindex in order {
+            let rg = if ifindex == 5 { 2 } else { 1 };
+            let prefix = crate::prefix::PrefixV6::from_net(
+                "2001:db8:61::/64".parse::<ipnet::Ipv6Net>().expect("net"),
+            );
+            forwarding.connected_v6.push(crate::afxdp::ConnectedRouteV6 {
+                prefix,
+                host: "2001:db8:61::1".parse().expect("host"),
+                scope: 0,
+                ifindex,
+                tunnel_endpoint_id: 0,
+                table: "inet6.0".to_string(),
+            });
+            forwarding
+                .connected_v6_by_ifindex
+                .entry(ifindex)
+                .or_default()
+                .push(prefix);
+            forwarding.egress.insert(ifindex, crate::afxdp::EgressInterface {
+                bind_ifindex: ifindex, vlan_id: 0, mtu: 1500,
+                src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
+                redundancy_group: rg, primary_v4: None, primary_v6: Some("2001:db8:61::1".parse().expect("host")),
+            });
+        }
+        forwarding
+    };
+    let target: IpAddr = "2001:db8:61::102".parse().expect("target");
+    for order in [[24, 5], [5, 24]] {
+        let mut forwarding = build(order);
+        assert_eq!(
+            crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+            5,
+            "#17053 v6: lowest ifindex must win the /64 tie (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+            2,
+            "#17053 v6: owner RG must follow the lowest ifindex (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::forwarding::connected_lpm_ifindex(
+                &forwarding, target, None,
+                crate::afxdp::forwarding::ConnectedSources::LedgerOnly,
+            ),
+            Some(5),
+            "#17053 v6: canonical ledger LPM must agree (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::forwarding::connected_lpm_ifindex(
+                &forwarding, target, None,
+                crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+            ),
+            Some(5),
+            "#17053 v6: canonical RowsThenLedger LPM must agree (order {order:?})"
+        );
+        forwarding.rebuild_connected_owner_index();
+        assert_eq!(
+            forwarding.connected_owner_index_lookup(target, None),
+            Some(crate::afxdp::ConnectedOwnerIndex::Hit(2)),
+            "#17053 v6: index must answer Hit(RG2) for the lowest-ifindex winner (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+            2,
+            "#17053 v6: indexed owner must keep the lowest-ifindex winner (order {order:?})"
+        );
+        assert_eq!(
+            crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+            5,
+            "#17053 v6: indexed scan path must keep the lowest ifindex (order {order:?})"
+        );
+    }
+    let forwarding = build([24, 5]);
+    assert_eq!(
+        crate::afxdp::session_glue::connected_ifindex_for_target(&forwarding, target),
+        crate::afxdp::forwarding::connected_lpm_ifindex(
+            &forwarding, target, None,
+            crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+        ).unwrap_or(0),
+        "#17053 v6: session_glue and canonical LPM must not diverge"
+    );
+}
+
+/// #17053 fold (Rev18099Opus-2 F2): IPv6 mirror of
+/// `connected_winner_rg0_missing_egress_no_nat_tail_17053` — a v6
+/// connected winner with owner RG 0 (ifindex 0, no egress row) is
+/// FINAL; the v6 NAT tail (same target on ifindex 24 / RG1) must
+/// not be consulted, and v6 scan and v6 index (`Hit(0)`) agree.
+#[test]
+fn connected_winner_rg0_missing_egress_no_nat_tail_v6_17053() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.connected_v6.push(crate::afxdp::ConnectedRouteV6 {
+        prefix: crate::prefix::PrefixV6::from_net(
+            "2001:db8:61::/64".parse::<ipnet::Ipv6Net>().expect("net"),
+        ),
+        host: "2001:db8:61::1".parse().expect("host"),
+        scope: 0,
+        ifindex: 0,
+        tunnel_endpoint_id: 0,
+        table: "inet6.0".to_string(),
+    });
+    let target_v6: std::net::Ipv6Addr = "2001:db8:61::102".parse().expect("target");
+    let target = IpAddr::V6(target_v6);
+    forwarding
+        .interface_nat_v6
+        .entry(target_v6)
+        .or_default()
+        .insert("inet6.0".to_string(), 24);
+    forwarding.egress.insert(24, crate::afxdp::EgressInterface {
+        bind_ifindex: 24, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03], zone_id: 21230,
+        redundancy_group: 1, primary_v4: None, primary_v6: Some(target_v6),
+    });
+    assert_eq!(crate::afxdp::forwarding::owner_rg_for_flow(&forwarding, 0), 0,
+        "#17053 v6 fold: fixture winner must have no egress row (RG 0)");
+    assert_eq!(crate::afxdp::forwarding::owner_rg_for_flow(&forwarding, 24), 1,
+        "#17053 v6 fold: fixture NAT-tail interface must be RG1");
+    assert_eq!(
+        crate::afxdp::forwarding::connected_lpm_ifindex(
+            &forwarding, target, None,
+            crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+        ),
+        Some(0),
+        "#17053 v6 fold: canonical LPM must match the ifindex-0 winner"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        0,
+        "#17053 v6 fold: scan must return the RG-0 winner, not the NAT tail"
+    );
+    forwarding.rebuild_connected_owner_index();
+    assert_eq!(
+        forwarding.connected_owner_index_lookup(target, None),
+        Some(crate::afxdp::ConnectedOwnerIndex::Hit(0)),
+        "#17053 v6 fold: index must answer Hit(0) for the RG-0 winner"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        0,
+        "#17053 v6 fold: scan and index must agree for RG-0 winners"
+    );
+}
+
+/// #17053 fold (Rev18099Opus-2 F2): IPv6 mirror of
+/// `connected_current_miss_skips_scan_no_poison_17053` — a CURRENT
+/// v6 index `Miss` must skip the v6 scan (poisoned v6 row that would
+/// win it, RG2) and land on the v6 NAT tail (RG1) or 0.
+#[test]
+fn connected_current_miss_skips_scan_no_poison_v6_17053() {
+    let target_v6: std::net::Ipv6Addr = "2001:db8:61::102".parse().expect("target");
+    let target = IpAddr::V6(target_v6);
+    let mut forwarding = ForwardingState::default();
+    forwarding.connected_v6.push(crate::afxdp::ConnectedRouteV6 {
+        prefix: crate::prefix::PrefixV6::from_net(
+            "2001:db8:99::/64".parse::<ipnet::Ipv6Net>().expect("net"),
+        ),
+        host: "2001:db8:99::1".parse().expect("host"),
+        scope: 0,
+        ifindex: 7,
+        tunnel_endpoint_id: 0,
+        table: "inet6.0".to_string(),
+    });
+    forwarding.egress.insert(7, crate::afxdp::EgressInterface {
+        bind_ifindex: 7, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x07, 0x07], zone_id: 21230,
+        redundancy_group: 2, primary_v4: None, primary_v6: Some("2001:db8:99::1".parse().expect("host")),
+    });
+    forwarding.rebuild_connected_owner_index();
+    assert_eq!(
+        forwarding.connected_owner_index_lookup(target, None),
+        Some(crate::afxdp::ConnectedOwnerIndex::Miss),
+        "#17053 v6 fold: target must be a genuine index Miss before poisoning"
+    );
+    assert!(forwarding.connected_owner_index_current(), "#17053 v6 fold: index must start current");
+    forwarding.connected_v6.push(crate::afxdp::ConnectedRouteV6 {
+        prefix: crate::prefix::PrefixV6::from_net(
+            "2001:db8:61::/64".parse::<ipnet::Ipv6Net>().expect("net"),
+        ),
+        host: "2001:db8:61::1".parse().expect("host"),
+        scope: 0,
+        ifindex: 5,
+        tunnel_endpoint_id: 0,
+        table: "inet6.0".to_string(),
+    });
+    forwarding.egress.insert(5, crate::afxdp::EgressInterface {
+        bind_ifindex: 5, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
+        redundancy_group: 2, primary_v4: None, primary_v6: Some("2001:db8:61::1".parse().expect("host")),
+    });
+    forwarding.connected_owner_index_rows.0 += 1;
+    assert!(forwarding.connected_owner_index_current(), "#17053 v6 fold: re-stamped index must read current");
+    assert_eq!(
+        crate::afxdp::forwarding::connected_lpm_ifindex(
+            &forwarding, target, None,
+            crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+        ),
+        Some(5),
+        "#17053 v6 fold: scan would win via the poisoned row (fixture sanity)"
+    );
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        0,
+        "#17053 v6 fold: current Miss must skip the scan (poison RG2 must not be consulted)"
+    );
+    forwarding
+        .interface_nat_v6
+        .entry(target_v6)
+        .or_default()
+        .insert("inet6.0".to_string(), 24);
+    forwarding.egress.insert(24, crate::afxdp::EgressInterface {
+        bind_ifindex: 24, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x03, 0x03], zone_id: 21230,
+        redundancy_group: 1, primary_v4: None, primary_v6: Some(target_v6),
+    });
+    assert_eq!(
+        crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, target),
+        1,
+        "#17053 v6 fold: current Miss must reach Source 2 (NAT tail RG1), not the poison scan"
+    );
+}
+
 /// #16524: gateway-routed destination (no connected owner) must
 /// re-home on failback, while the connected control and the
 /// transient-mixed-state retention stay green. Direct helper cells

@@ -323,8 +323,9 @@ sessions until it is promoted.
 
 In the eBPF era the Go conntrack GC's `IsLocalPrimary` gate kept the
 standby from aging synced sessions. After the eBPF retirement
-(#1373/#1476) the Go GC is `SkipSweep`'d in userspace mode (its
-`IsLocalPrimary` gate is dead code) and expiry moved to the Rust
+(#1373/#1476) the Go GC never ran in userspace mode (its
+`IsLocalPrimary` gate was dead code; the package was deleted in #17155)
+and expiry moved to the Rust
 per-worker timer wheel, which had NO standby gate — so the standby
 silently reaped long-lived peer-synced sessions at ~300 s (TCP idle) with
 no local refresh, and the newly-promoted primary then dropped their return

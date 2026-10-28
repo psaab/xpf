@@ -407,20 +407,40 @@ func (c *xpfCollector) collectRIMemberDeviceConflicts(ch chan<- prometheus.Metri
 }
 
 func (c *xpfCollector) collectGlobalCounters(ch chan<- prometheus.Metric, dp apiRuntimeDataPlane) {
-	// #3345: on a counter-read failure, SKIP emitting the sample instead of
-	// reporting a misleading 0, and bump xpf_counter_read_errors_total. A
-	// missing sample is distinguishable from a 0 sample; a clean zero would
-	// make a degraded counter bridge indistinguishable from "no events".
+	// #17193: one shared snapshot classifies every global counter once.
+	// #3345: on a genuine counter-read failure, SKIP emitting the sample
+	// instead of reporting a misleading 0, and bump
+	// xpf_counter_read_errors_total once per failed scrape (the historic
+	// closure bumped per failed counter; the alert contract is "a read
+	// failed this scrape", and the snapshot preserves the first error).
+	// #13274: ErrCounterNotPopulated is explicitly unsupported — omit the
+	// sample WITHOUT bumping. A missing sample is distinguishable from a
+	// 0 sample; a clean zero would make a degraded counter bridge
+	// indistinguishable from "no events".
+	indexes := []uint32{
+		dataplane.GlobalCtrRxPackets, dataplane.GlobalCtrTxPackets,
+		dataplane.GlobalCtrDrops, dataplane.GlobalCtrUnknownVLANDrops,
+		dataplane.GlobalCtrDstMACDrops, dataplane.GlobalCtrSessionsNew,
+		dataplane.GlobalCtrSessionsClosed, dataplane.GlobalCtrScreenDrops,
+		dataplane.GlobalCtrPolicyDeny, dataplane.GlobalCtrNATAllocFail,
+		dataplane.GlobalCtrNAT64Xlate, dataplane.GlobalCtrHostInboundDeny,
+		dataplane.GlobalCtrTCEgressPackets,
+		dataplane.GlobalCtrSyncookieSent, dataplane.GlobalCtrSyncookieValid,
+		dataplane.GlobalCtrSyncookieInvalid, dataplane.GlobalCtrSyncookieBypass,
+		dataplane.GlobalCtrSyncookieActiveBudget,
+		dataplane.GlobalCtrFlowCacheHit, dataplane.GlobalCtrFlowCacheMiss,
+		dataplane.GlobalCtrFlowCacheFlush, dataplane.GlobalCtrFlowCacheInvalidate,
+	}
+	for i := range dataplane.ScreenReasonCounters {
+		indexes = append(indexes, dataplane.ScreenReasonCounters[i].Index)
+	}
+	snap := dataplane.ReadGlobalCounters(dp, indexes...)
+	if snap.Err != nil {
+		c.counterReadErrors.Add(1)
+	}
 	emit := func(desc *prometheus.Desc, idx uint32, labels ...string) {
-		v, err := dp.ReadGlobalCounter(idx)
-		if err != nil {
-			// #13274: this counter is explicitly unsupported by the active
-			// userspace dataplane. Omit it without raising a read-failure alert;
-			// genuine dataplane read failures still follow the #3345
-			// omit-and-count contract.
-			if !errors.Is(err, dataplane.ErrCounterNotPopulated) {
-				c.counterReadErrors.Add(1)
-			}
+		v, ok := snap.Value(idx)
+		if !ok {
 			return
 		}
 		c.emitConstMetric(ch, desc, prometheus.CounterValue, float64(v), labels...)
@@ -436,7 +456,8 @@ func (c *xpfCollector) collectGlobalCounters(ch chan<- prometheus.Metric, dp api
 	emit(c.screenDropsTotal, dataplane.GlobalCtrScreenDrops)
 	// #3343: per-reason screen-drop breakdown. Emit one labeled series per
 	// reason in the shared table; a per-reason read failure SKIPS that series
-	// (and bumps counterReadErrors) under the same #3345 contract as `emit`.
+	// (and is reflected in counterReadErrors) under the same #3345 contract
+	// as `emit`.
 	for i := range dataplane.ScreenReasonCounters {
 		rc := &dataplane.ScreenReasonCounters[i]
 		emit(c.screenDropsByReasonTotal, rc.Index, rc.Reason)

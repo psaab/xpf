@@ -1,0 +1,13 @@
+[
+  {"variant": "Applied", "ok": true, "error": "", "go_class": "ok"},
+  {"variant": "AppliedRepairPending", "ok": false, "error": "synced-import-repair:worker-repair-pending", "go_class": "repair-pending"},
+  {"variant": "AppliedRepairOverflow", "ok": false, "error": "synced-import-repair:worker-repair-overflow", "go_class": "repair-overflow"},
+  {"variant": "RejectedStaleGeneration", "ok": false, "error": "synced-import-refused:stale-generation", "go_class": "refused"},
+  {"variant": "RejectedStaleZone", "ok": false, "error": "synced-import-refused:stale-zone", "go_class": "refused"},
+  {"variant": "RejectedCapacity", "ok": false, "error": "synced-import-refused:capacity", "go_class": "refused"},
+  {"variant": "RejectedReserve", "ok": false, "error": "synced-import-refused:reserve", "go_class": "refused"},
+  {"variant": "RejectedStandaloneReverse", "ok": false, "error": "synced-import-refused:standalone-reverse", "go_class": "refused"},
+  {"variant": "RejectedGateBusy", "ok": false, "error": "synced-import-refused:gate-busy", "go_class": "gate-busy"},
+  {"variant": "RejectedMirrorPublish", "ok": false, "error": "mirror-write-failed", "go_class": "bare"},
+  {"variant": "RejectedUnknownRoutingDomain", "ok": false, "error": "synced-import-refused:unknown-routing-domain", "go_class": "refused"}
+]

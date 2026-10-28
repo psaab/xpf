@@ -73,7 +73,11 @@ func compileUnit8755(t *testing.T, text string, skipNormalize bool) (*InterfaceU
 	if len(perrs) > 0 {
 		return nil, errf8755("parse error")
 	}
-	cfg, err := compileTree(tree, compileOpts{skipCompactNormalize: skipNormalize}, nil)
+	cfg, err := func() (*Config, error) {
+		o := strictCompileOpts()
+		o.skipCompactNormalize = skipNormalize
+		return compileTree(tree, o, nil)
+	}()
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +243,11 @@ func TestTheTwoSymptomsNeedDifferentChainLengths8755(t *testing.T) {
 	foldsWith := func(text string, scope func(string, string) bool) (int, *InterfaceUnit) {
 		tree, _ := NewParser(text).Parse()
 		n := normalizeCompactStanzasWithScope(tree, scope)
-		cfg, err := compileTree(tree, compileOpts{skipCompactNormalize: true}, nil)
+		cfg, err := func() (*Config, error) {
+			o := strictCompileOpts()
+			o.skipCompactNormalize = true
+			return compileTree(tree, o, nil)
+		}()
 		if err != nil || cfg == nil {
 			return n, nil
 		}

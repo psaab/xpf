@@ -1,7 +1,6 @@
-// #1345: per-verb handler for rebind. Body byte-identical to
-// handlers.rs lines 380-408.
+// #1345: per-verb handler for rebind, split out of handlers.rs in #1345.
 
-use super::super::helpers::{reconcile_status_bindings, refresh_status};
+use super::super::helpers::{reconcile_status_bindings, project_status};
 use super::super::ServerState;
 use crate::ControlResponse;
 
@@ -70,11 +69,11 @@ pub(super) fn handle(
     if let Err(err) = reconcile_status_bindings(guard) {
         response.ok = false;
         response.error = format!("rebind reconcile failed: {err}");
-        refresh_status(guard);
+        project_status(guard);
         eprintln!("rebind: reconcile failed: {err}");
         return;
     }
-    refresh_status(guard);
+    project_status(guard);
     *persist_state = true;
     eprintln!(
         "rebind: initiated, forwarding_armed={} bindings={}",

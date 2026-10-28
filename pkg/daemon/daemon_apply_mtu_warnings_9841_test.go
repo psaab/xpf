@@ -176,7 +176,7 @@ func TestApplyAndSyncCommittedReturnsMTUWarnings9841(t *testing.T) {
 	dp.applyResult = &dataplane.ApplyResult{UnconvergedMTUs: mtuTestRecords9841()}
 	compiled := &config.Config{Warnings: []string{"foreign advisory"}}
 
-	got, err := d.applyAndSyncCommitted(&config.Config{}, compiled, peerSyncNever)
+	got, err := d.applyAndSyncCommittedForTest(&config.Config{}, compiled, peerSyncNever)
 	if err != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", err)
 	}

@@ -105,13 +105,15 @@ pub(in crate::afxdp) use inspect::{
     ipv6_is_nonatomically_fragmented, is_any_fragment, is_non_first_fragment,
     l2_dst_is_group_or_broadcast, l3_enforcement_flow_from_frame, l3_enforcement_flow_from_meta,
     l3_session_flow_from_meta, meta_icmp_identifier_bearing, meta_l4_ports_in_declared_end,
-    neighbor_ip_is_learnable, neighbor_mac_is_learnable, parse_session_flow,
+    neighbor_ip_is_learnable, neighbor_mac_is_learnable,
     post_nat_expected_ports, source_is_invalid_for_icmp_error, src_is_directed_broadcast,
     src_is_directed_broadcast_in_table, term_match_extra_from_frame,
     term_match_extra_from_meta, term_match_extra_from_meta_and_frame, transit_dst_is_martian,
     transit_src_is_martian,
     try_parse_metadata, v4_addr_is_directed_broadcast_in_table,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use inspect::parse_session_flow;
 pub(super) use inspect::{
     ZoneEncodedFabricStamp, frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset,
     live_frame_ports, live_frame_ports_bytes, live_frame_ports_from_meta_bytes,
@@ -120,9 +122,11 @@ pub(super) use inspect::{
     parse_packet_destination_from_frame, parse_packet_source_from_frame,
     frame_l4_flags_unknown, local_origin_flowless_eligible,
     parse_session_flow_from_bytes, parse_session_flow_from_frame, parse_session_flow_from_meta,
-    parse_zone_encoded_fabric_ingress, parse_zone_encoded_fabric_ingress_from_frame,
+    parse_zone_encoded_fabric_ingress_from_frame,
     verified_l3_or_stamp,
 };
+#[cfg(test)]
+pub(super) use inspect::parse_zone_encoded_fabric_ingress;
 
 // #989: TCP-specific inspection + mutation kernels relocated from
 // frame/inspect.rs and forwarding/mod.rs. Visibility split mirrors
@@ -155,11 +159,13 @@ pub(in crate::afxdp) use inspect::icmp_identifier_bearing;
 // continues to surface them at the same call sites in tx/dispatch.rs.
 mod tcp_segmentation;
 pub(in crate::afxdp) use tcp_segmentation::{
-    finalize_tcp_segment_headers, segment_forwarded_tcp_frames,
+    finalize_tcp_segment_headers,
     segment_forwarded_tcp_frames_from_frame, segment_forwarded_tcp_frames_from_frame_with_commit,
     segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic,
     segment_forwarded_tcp_frames_from_frame_with_dynamic,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use tcp_segmentation::segment_forwarded_tcp_frames;
 
 // #1352 — extracted build orchestrator + per-address-family helpers.
 // See docs/pr/1352-frame-build-rewrite-split/plan.md.
@@ -1139,7 +1145,7 @@ pub(super) fn build_forwarded_frame_from_frame_with_commit_and_dynamic(
     Some((out.into(), None))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn build_forwarded_frame(
     area: &MmapArea,
     desc: XdpDesc,
@@ -1153,7 +1159,7 @@ pub(super) fn build_forwarded_frame(
         .map(|w| w.buf)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn build_forwarded_frame_into(
     out: &mut [u8],
     area: &MmapArea,
@@ -1191,7 +1197,6 @@ pub(super) fn build_forwarded_frame_into(
 /// to the old copy-within path. That preserves correctness for malformed or
 /// unusual descriptors while making the normal 256-byte-headroom path copy-free.
 struct RewritePrep {
-    #[cfg_attr(not(feature = "debug-log"), allow(dead_code))]
     eth_len: usize,
     ip_start: usize,
     frame_len: usize,
@@ -1199,7 +1204,7 @@ struct RewritePrep {
     l2_rewrite: InPlaceL2Rewrite,
     apply_nat: bool,
     skip_ttl: bool,
-    #[cfg_attr(not(feature = "debug-log"), allow(dead_code))]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17195: read only by the debug-log gated block; dead without debug-log, so expect fires if that block is removed or a non-gated reader appears"))]
     vlan_id: u16, // for the cfg-gated debug-log block
 }
 

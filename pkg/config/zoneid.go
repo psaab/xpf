@@ -79,34 +79,37 @@ func collectZoneNamesAST(securityNode *Node, out map[string]struct{}) {
 	}
 }
 
-// emitNodeExpandedZoneNames returns the security-zone names that survive
-// expanding the candidate tree for chassis-cluster node nodeID (View 2 for
-// node0, View 3 for node1), used by validateZoneIDCollisionAST. It is the
-// post-`${node}`/apply-groups view: a `${node}`-interpolated or wildcard
-// apply-group zone name is only concrete after expansion.
+// emitNodeExpandedZoneNames adds the security-zone names that survive
+// expanding the candidate tree for chassis-cluster node nodeID (View 2
+// for node0, View 3 for node1) to out, used by
+// validateZoneIDCollisionAST. It is the post-`${node}`/apply-groups
+// view: a `${node}`-interpolated or wildcard apply-group zone name is
+// only concrete after expansion.
 //
-// It is RECURSION-FREE by construction: it clones the candidate, expands groups
-// for the node, and reads the zone names straight off the expanded AST — it
-// NEVER calls CompileConfig* (which would call this gate and recurse). Per-node
-// expansion errors are NON-FATAL: the view contributes the EMPTY set. A config
-// that defines only `groups node0` and references `${node}` legitimately has no
-// `groups node1`, so expanding for node1 hits `undefined group "node1"`; that
-// is already handled on the real per-node compile path (CompileConfig falls
-// back to node0), and the collision gate must not turn it into a spurious
-// commit failure. View 1's pre-expansion presence union still covers any
-// collision inside the un-expandable group, so dropping the failed node's view
-// loses no real coverage and keeps the verdict a pure function of the candidate
-// (both nodes compute identical error-to-empty-set handling).
+// The view comes from gateNodeView (#17222). It is RECURSION-FREE by
+// construction: it clones the candidate, expands groups for the node,
+// and reads the zone names straight off the expanded AST — it NEVER
+// calls CompileConfig* (which would call this gate and recurse).
+// Per-node expansion errors are NON-FATAL: the view contributes the
+// EMPTY set. A config that defines only `groups node0` and references
+// `${node}` legitimately has no `groups node1`, so expanding for node1
+// hits `undefined group "node1"`; that is already handled on the real
+// per-node compile path (CompileConfig falls back to node0), and the
+// collision gate must not turn it into a spurious commit failure.
+// View 1's pre-expansion presence union still covers any collision
+// inside the un-expandable group, so dropping the failed node's view
+// loses no real coverage — hence no generic fallback view here — and
+// keeps the verdict a pure function of the candidate (both nodes
+// compute identical error-to-empty-set handling).
 func emitNodeExpandedZoneNames(tree *ConfigTree, nodeID int, out map[string]struct{}) {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
+	view := gateNodeView(tree, nodeID, false)
+	if view == nil {
 		return
 	}
 	// #5691: union across every top-level `security` root — a split config can
 	// declare zones in a second `security { }` stanza that compileSections still
 	// compiles.
-	for _, sec := range clone.FindChildren("security") {
+	for _, sec := range view.FindChildren("security") {
 		collectZoneNamesAST(sec, out)
 	}
 }

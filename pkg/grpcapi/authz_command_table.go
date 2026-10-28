@@ -84,6 +84,7 @@ var methodCanonicalCommand = map[string]string{
 	"ShowRollback":             "show configuration",
 	"ListHistory":              "show system commit history",
 	"GetVRRPStatus":            "show vrrp",
+	"GetClusterHAState":        "show chassis cluster",
 
 	// Operational actions.
 	"Ping":              "ping",

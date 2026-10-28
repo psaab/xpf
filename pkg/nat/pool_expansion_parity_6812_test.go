@@ -18,7 +18,7 @@ import (
 // already masked to the network base, and lookupForwardInPool INDEXES that
 // slice (p.poolV4[ipIdx]) to answer the operator-facing question "which
 // external address does this subscriber translate to?". The Rust expander
-// (expand_pool_address, userspace-dp/src/nat/source.rs) computes its own base
+// (expand_pool_address, userspace-dp/src/nat/source/expand.rs) computes its own base
 // with a hand-rolled mask that #6812 round 3 wrote to replace IpNet::network().
 //
 // If those two bases disagree, the CLI/gRPC/REST deterministic mapping names a
@@ -175,7 +175,7 @@ func TestDeterministicPoolExpansionMatchesSharedGrammarFixture_6812(t *testing.T
 	// operator-visible consequence: under a per-member skip the pool reports a
 	// working 1-address mapping while the Rust parse loop ORs
 	// expand_pool_address over every member and fails the WHOLE pool
-	// SourceNatFailureReason::InvalidPool (userspace-dp/src/nat/source.rs) — so
+	// SourceNatFailureReason::InvalidPool (userspace-dp/src/nat/source/mod.rs) — so
 	// the dataplane translates nothing and the deterministic surface names an
 	// external address for a subscriber that has none. All-or-nothing is the
 	// same clause SourceNATPoolUnusableReason enforces one layer up (#6812 F1

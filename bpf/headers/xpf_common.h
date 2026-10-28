@@ -28,7 +28,9 @@
 #define MAX_NAT_RULE_COUNTERS  256
 #define MAX_ADDRESSES          8192
 #define MAX_APP_RANGES         32     /* range-based application entries */
-#define MAX_CPUS               256
+/* MAX_CPUS retired (#18273): no retained header sizes by it since the
+ * cpu_map deletion, and the token census no longer lets the Go
+ * NumCPU substring collision keep it alive. */
 
 /* XDP tail call program indices */
 #define XDP_PROG_SCREEN        0
@@ -63,7 +65,9 @@
  * (BpfSessionValue*) and Go (bpfSessionValue*) structs. */
 #define SESS_FLAG_SNAT         (1 << 0)
 #define SESS_FLAG_DNAT         (1 << 1)
-#define SESS_FLAG_LOG          (1 << 2)
+/* SESS_FLAG_LOG retired (#18273): bit 2 has no mirror in the Go
+ * SessFlag* block (types.go) or the Rust session flags; the token
+ * census no longer lets a stray `log_flags` field keep it alive. */
 #define SESS_FLAG_STATIC_NAT   (1 << 6)
 #define SESS_FLAG_NAT64        (1 << 7)
 #define SESS_FLAG_NPTV6        (1 << 8)   /* bit 8 -- requires __u16 flags */
@@ -419,6 +423,17 @@ struct counter_value {
 	__u64 bytes;
 };
 
+/* Per-interface counter value: the Go mirror is
+ * dataplane.InterfaceCounterValue (types.go). Restored by #18273 —
+ * the #17146 trim deleted this definition while xpf_maps.h kept the
+ * interface_counters map naming it in __type(). */
+struct iface_counter_value {
+	__u64 rx_packets;
+	__u64 rx_bytes;
+	__u64 tx_packets;
+	__u64 tx_bytes;
+};
+
 /* ============================================================
  * Screen/IDS configuration
  * ============================================================ */
@@ -446,7 +461,7 @@ struct flood_state {
 	__u8  pad_fs[7];
 };
 
-/* Per-IP session count (populated by Go GC sweep for session limiting). */
+/* Per-IP session count (populated by the dataplane for session limiting). */
 struct session_count_key {
 	__u32 ip;        /* IPv4 addr or XOR hash of IPv6 */
 	__u16 zone_id;
@@ -549,6 +564,27 @@ struct nat64_config {
 	__be32 prefix[3];  /* first 96 bits of NAT64 prefix (3 x 32-bit words) */
 	__u8   snat_pool_id;
 	__u8   pad[3];
+};
+
+/* NAT64 reverse state: keyed by translated IPv4 5-tuple, maps back to
+ * original IPv6 client address + port for v4->v6 reverse translation.
+ * Restored by #18273 — the #17146 trim deleted these definitions
+ * while xpf_maps.h kept the nat64_state map naming them. */
+struct nat64_state_key {
+	__be32 src_ip;    /* original v4 server IP */
+	__be32 dst_ip;    /* our SNAT'd v4 address */
+	__be16 src_port;  /* server port */
+	__be16 dst_port;  /* our SNAT'd port */
+	__u8   protocol;
+	__u8   pad[3];
+};
+
+struct nat64_state_value {
+	__u8   orig_src_v6[16]; /* original IPv6 client address */
+	__u8   orig_dst_v6[16]; /* original IPv6 dest (prefix + v4 addr) */
+	__be16 orig_src_port;   /* original client port */
+	__be16 orig_dst_port;   /* original dest port */
+	__u32  nat64_idx;       /* which NAT64 prefix was used */
 };
 
 /* ============================================================

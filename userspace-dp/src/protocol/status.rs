@@ -106,7 +106,7 @@ pub(crate) struct ProcessStatus {
     #[serde(default)]
     pub capabilities: UserspaceCapabilities,
     /// #9629: this helper serves session-socket `update_ha_state` via the
-    /// lease-only fast path (never `ServerState`). Set in `refresh_status`;
+    /// lease-only fast path (never `ServerState`). Set in `project_status`;
     /// absent (false) from older helpers. Go gates session HA on the last
     /// observed status — never on the snapshot protocol version (no wire bump,
     /// same value both sides → unsound).
@@ -303,7 +303,7 @@ pub(crate) struct ProcessStatus {
     pub worker_runtime: Vec<WorkerRuntimeStatus>,
     // #710: cluster-wide aggregate of cross-worker CoS redirects that
     // could not locate a binding for their target egress on the landing
-    // worker. Summed across all bindings in `refresh_status` — the
+    // worker. Summed across all bindings in `project_status` — the
     // per-binding accounting is a mechanical choice (the increment
     // always lands on the landing worker's first binding), so the
     // per-binding view would be misleading as triage signal; the total
@@ -347,7 +347,7 @@ pub(crate) struct ProcessStatus {
     /// because summary.policy_count disagreed with the policies the
     /// snapshot carried (policy_count>0 with empty policies is the
     /// 670274c712 shape). Sticky in ServerState, projected by
-    /// refresh_status; additive/defaulted for older daemons.
+    /// project_status; additive/defaulted for older daemons.
     #[serde(rename = "snapshot_policy_mismatch_total", default)]
     pub snapshot_policy_mismatch_total: u64,
     /// Policy count of the last APPLIED snapshot (its summary), echoed

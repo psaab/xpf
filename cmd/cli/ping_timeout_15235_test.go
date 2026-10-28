@@ -48,3 +48,46 @@ func TestRemotePingTimeoutCoversCount100_15235(t *testing.T) {
 	}
 	t.Fatal("handlePing not found")
 }
+
+// TestRemoteTracerouteTimeoutMatchesServerBudget17203 pins the fold
+// revert: handleTraceroute's client deadline is exactly the 60s server
+// budget (diagcmd.TracerouteTimeout), not the unauthorized 75s
+// (TracerouteTimeout+PingClientSlack) growth. No truncation defect was
+// evidenced for traceroute, unlike the count-100 ping (#15235).
+func TestRemoteTracerouteTimeoutMatchesServerBudget17203(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "handleTraceroute" {
+			continue
+		}
+		found := false
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "WithTimeout" {
+					if len(call.Args) != 2 {
+						return true
+					}
+					switch a := call.Args[1].(type) {
+					case *ast.SelectorExpr:
+						if id, ok := a.X.(*ast.Ident); ok && id.Name == "diagcmd" && a.Sel.Name == "TracerouteTimeout" {
+							found = true
+						}
+					case *ast.BinaryExpr:
+						t.Fatal("handleTraceroute deadline must be exactly diagcmd.TracerouteTimeout (60s), not an inflated sum")
+					}
+				}
+			}
+			return true
+		})
+		if !found {
+			t.Fatal("handleTraceroute does not use exactly diagcmd.TracerouteTimeout")
+		}
+		return
+	}
+	t.Fatal("handleTraceroute not found")
+}

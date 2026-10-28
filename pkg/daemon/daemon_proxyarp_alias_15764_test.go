@@ -116,9 +116,12 @@ func TestSyncProxyARPRespondersUnionsAliasedJunosRefs(t *testing.T) {
 	// len(addrs)==0 branch cancelled this responder outright; when the
 	// winner was a v4 alias, only that alias's address survived.
 	_, cancel := context.WithCancel(context.Background())
+	liveDone := make(chan struct{})
 	live := &proxyARPResponder{
-		cancel:   cancel,
-		done:     make(chan struct{}),
+		// Fake goroutine exit on cancel so the Cleanup stop() join
+		// returns (#17231: stop now joins instead of cancel-forget).
+		cancel:   func() { cancel(); close(liveDone) },
+		done:     liveDone,
 		junosRef: "reth0",
 		addrs:    map[string]struct{}{"203.0.113.99": {}},
 	}
