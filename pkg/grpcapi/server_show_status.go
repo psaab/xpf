@@ -29,10 +29,11 @@ func (s *Server) GetStatus(ctx context.Context, _ *pb.GetStatusRequest) (*pb.Get
 		resp.ZoneCount = int32(len(cfg.Security.Zones))
 	}
 	// #3929: read the live session count from the dataplane session table (the
-	// same source `show security flow session` uses), NOT the BPF GC sweep
-	// stats. On the userspace dataplane (the only live forwarding path) the BPF
-	// GC sweep is skipped (#333), so gc.Stats().TotalEntries is permanently 0 —
-	// this reported 0 sessions on every real deployment. SessionCount counts
+	// same source `show security flow session` uses), NOT the retired Go
+	// conntrack GC's sweep stats (`pkg/conntrack`, deleted in #17155). On the
+	// userspace dataplane (the only live forwarding path) that sweep never ran
+	// (#333), so its TotalEntries was permanently 0 — this reported 0 sessions
+	// on every real deployment. SessionCount counts
 	// forward entries only, so it is the live session total.
 	if s.dp != nil && s.dp.IsLoaded() {
 		// Gate the cancellable full-table walk through the same admission

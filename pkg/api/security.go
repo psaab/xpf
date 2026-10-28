@@ -3,7 +3,6 @@ package api
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -12,6 +11,7 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/policymatch"
 )
@@ -707,17 +707,67 @@ func parseEventZoneFilter(s string) (uint16, bool) {
 // the same SSOT-backed classifier, so the three surfaces cannot drift (#3375).
 // Returns nil (field omitted from the JSON) for a nil admission (an off-host
 // query has no host-inbound gate) or a not-computed status, matching the CLI,
-// which prints nothing in those cases.
-func hostInboundToREST(a *dpuserspace.HostInboundAdmission) *MatchPoliciesHostInbound {
-	if a == nil || a.Status == dpuserspace.HostInboundNotComputed {
+func hostInboundToREST(v policymatch.Verdict) *MatchPoliciesHostInbound {
+	if v.HostInboundStatus == "" {
 		return nil
 	}
 	return &MatchPoliciesHostInbound{
-		Status:      a.Status.String(),
-		Token:       a.Token,
-		Kind:        a.Kind,
-		Description: a.Describe(),
+		Status:      v.HostInboundStatus,
+		Token:       v.HostInboundToken,
+		Kind:        v.HostInboundKind,
+		Description: v.HostInboundDescription,
 	}
+}
+
+// verdictToREST projects the shared flattened Verdict (#17198) onto the
+// REST JSON struct; field order/tags are pinned by MatchPoliciesResult.
+func verdictToREST(v policymatch.Verdict) MatchPoliciesResult {
+	out := MatchPoliciesResult{
+		Matched: v.Matched, PolicyName: v.PolicyName, Global: v.Global,
+		FromZone: v.FromZone, ToZone: v.ToZone, RuleID: v.RuleID,
+		Description: v.Description, SchedulerName: v.SchedulerName,
+		SchedulerActive: v.SchedulerActive, Action: v.Action,
+		SrcAddresses: v.SrcAddresses, DstAddresses: v.DstAddresses,
+		SourceAddressExcluded: v.SourceAddressExcluded, DestinationAddressExcluded: v.DestinationAddressExcluded,
+		Applications: v.Applications, HostInboundUnmatched: v.HostInboundUnmatched,
+		ContentRejected: v.ContentRejected, ContentRejectionReasons: v.ContentRejectionReasons,
+		DefaultUsed: v.DefaultUsed, UnzonedIngress: v.UnzonedIngress, HostOriginated: v.HostOriginated,
+		UnzonedEgress: v.UnzonedEgress, V4MappedCompatIngressDrop: v.V4MappedCompatIngressDrop,
+		UnsupportedTupleFamily: v.UnsupportedTupleFamily,
+		QueriedFromZone:        v.QueriedFromZone, QueriedToZone: v.QueriedToZone,
+		HostInbound:           hostInboundToREST(v),
+		RouteDropBeforePolicy: v.RouteDropBeforePolicy, RouteDropClass: v.RouteDropClass, RouteDropNote: v.RouteDropNote,
+		FragmentAssociatedDeny: v.FragmentAssociatedDeny, FragmentDenyNote: v.FragmentDenyNote,
+		FeedPublicationDebt: v.FeedPublicationDebt, FeedPublicationDebtFeeds: v.FeedPublicationDebtFeeds, FeedPublicationDebtNote: v.FeedPublicationDebtNote,
+		PostNATInputNote: v.PostNATInputNote,
+	}
+	if v.PolicyIDSet {
+		id := v.PolicyID
+		out.PolicyID = &id
+	}
+	return out
+}
+
+// matchLive assembles shared Live inputs: overlay, feed-debt source, and
+// the action-aware scheduler predicate (#3104/#17837/#3414 — applied state
+// + latch, falling back to the active-state accessor).
+func (s *Server) matchLive(cfg *config.Config) policymatch.Live {
+	var overlay map[string][]string
+	if s.feedOverlayFn != nil {
+		overlay = s.feedOverlayFn()
+	}
+	var schedState map[string]bool
+	var failClosed bool
+	if s.policySchedAppliedFn != nil {
+		schedState, failClosed = s.policySchedAppliedFn()
+	} else if s.policySchedActiveFn != nil {
+		schedState, _ = s.policySchedActiveFn()
+	}
+	live := policymatch.Live{FeedOverlay: overlay, PolicyInactiveForFn: dpuserspace.PolicyInactiveFnWithLatch(cfg, schedState, failClosed)}
+	if s.feedsFn != nil {
+		live.Feeds = policymatch.FeedInfos(s.feedsFn(), func(i feeds.FeedInfo) bool { return i.PublicationDebt })
+	}
+	return live
 }
 
 // matchPoliciesSelectorKeys is the exact, ordered set of query-string
@@ -812,33 +862,12 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 	fromZone := q.Get("from_zone")
 	toZone := q.Get("to_zone")
 
-	// #3355 (H06): the CLI surfaces (show security match-policies / test
-	// policy) require BOTH zones; REST accepted a missing zone and evaluated as
-	// if the empty string were a zone, which the #3355 defined-zone guard would
-	// then send straight to the default-policy — a misleading silent verdict for
-	// what is really a malformed query. Reject it for parity with the CLI.
-	if fromZone == "" || toZone == "" {
-		writeError(w, http.StatusBadRequest, "from_zone and to_zone are required")
-		return
-	}
-
-	// A non-empty but malformed src_ip/dst_ip would parse to nil and be
-	// treated as a wildcard by matchPolicyAddr, yielding a false-positive
-	// PERMIT verdict in the simulator (#1711). Reject it with 400. An
-	// empty value still means "unspecified" (match any).
+	// Zone/IP/protocol grammar is validated by the shared
+	// policymatch.Request.Validate below (#17198), after the typed
+	// port/ICMP/bool decoding here; it runs before the cfg==nil verdict
+	// (#3709) and, with a live config, also validates ingress_interface.
 	srcIPStr := r.URL.Query().Get("src_ip")
-	if srcIPStr != "" && net.ParseIP(srcIPStr) == nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid src_ip %q", srcIPStr))
-		return
-	}
 	dstIPStr := r.URL.Query().Get("dst_ip")
-	if dstIPStr != "" && net.ParseIP(dstIPStr) == nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid dst_ip %q", dstIPStr))
-		return
-	}
-
-	srcIP := net.ParseIP(srcIPStr)
-	dstIP := net.ParseIP(dstIPStr)
 	// #17081: an ABSENT dst_port/src_port key is omitted (nil); a present
 	// key, including "0", is a literal port. A malformed present value must
 	// not silently become omitted (#2934): fail closed with 400.
@@ -880,16 +909,7 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		srcPort = policymatch.PortPtr(uint16(v))
 	}
-	// A non-empty but unknown/out-of-range protocol token (e.g. "tcpp", "999")
-	// must NOT silently become unspecified: constrained terms would never match,
-	// but `application any` could still match and conceal invalid input (#3108).
-	// Reject it with 400. An empty value leaves the query protocol unspecified;
-	// constrained terms never match, while unconstrained terms may still match.
 	proto := r.URL.Query().Get("protocol")
-	if err := policymatch.ValidateProtocol(proto); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 	// #3284: optional ICMP/ICMPv6 type/code so a type-constrained application
 	// term (junos-icmp-ping = type 8) is honored. An empty value is unspecified
 	// (a type-constrained term then fails closed, mirroring the dataplane); a
@@ -920,243 +940,41 @@ func (s *Server) matchPoliciesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.store.ActiveConfig()
-	if cfg == nil {
-		// #3375: no active config is the deterministic fail-closed default deny.
-		// Surface the explicit string AND the typed default_used bit (same SSOT
-		// renderer the gRPC surface uses). #3709: reached only AFTER the grammar
-		// checks above, so a malformed / duplicate / missing-zone query returns
-		// 400 here too — the boot window is now grammar-consistent with the
-		// config-present path, not a 200 default-deny that skips validation.
-		nilRes := policymatch.Result{DefaultUsed: true, Action: config.PolicyDeny}
-		writeOK(w, MatchPoliciesResult{
-			Action:      nilRes.DisplayAction(),
-			DefaultUsed: true,
-			// #3627 M06: echo the queried zone pair even on the no-config
-			// fail-closed default deny so a stored diagnostic proves which zone
-			// pair produced the verdict.
-			QueriedFromZone: fromZone,
-			QueriedToZone:   toZone,
-		})
-		return
-	}
-
-	// #5579: validate the optional ingress-interface selector against the live
-	// config — it must name an interface assigned to from_zone and must not be a
-	// management/cluster lifeline (served unconditionally). An unknown /
-	// zone-mismatched / lifeline ref is a fail-closed 400, mirroring the src_ip /
-	// port / protocol validators above, so the host-inbound classifier is only
-	// ever scoped to a real interface of the queried zone. Reached after cfg !=
-	// nil so zone membership is resolvable.
-	ingressIface := q.Get("ingress_interface")
-	if err := dpuserspace.ResolveHostInboundIngressInterface(cfg, fromZone, ingressIface); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	// #3042: delegate to the single shared simulator so REST agrees with the
-	// runtime evaluator (exact zone-pair -> wildcard-zone tiers (#3090) ->
-	// scoped global (#3148) -> default-policy, predefined + nested-app-set +
-	// literal-CIDR + any-ipv4/any-ipv6 + exclusion + feed overlay). The
-	// pre-#3042 hand-written loop skipped globals, hard-coded "deny (default)",
-	// and missed predefined apps / literal CIDRs.
-	var overlay map[string][]string
-	if s.feedOverlayFn != nil {
-		overlay = s.feedOverlayFn()
-	}
-	var publicationDebt map[string]bool
-	if s.feedsFn != nil {
-		for name, info := range s.feedsFn() {
-			if info.PublicationDebt {
-				if publicationDebt == nil {
-					publicationDebt = make(map[string]bool)
-				}
-				publicationDebt[name] = true
-			}
+	// #17198/#18240: shared Evaluate runs config-independent grammar
+	// first, so the boot window (cfg==nil) rejects malformed input the same
+	// way as the live path (#3709, previously REST-only); with a live config
+	// it also validates ingress_interface (#5579). An error means grammar
+	// failed (a nil-config well-formed query returns the #3375 default-deny
+	// Result with nil error, rendered below). REST-only transport grammar
+	// (duplicate/unknown keys, present-empty ports, bool fragment flag) was
+	// decoded above. Evaluate needs the live inputs even for cfg==nil
+	// (unused there), so matchLive must be nil-config safe.
+	req17198 := policymatch.Request{FromZone: fromZone, ToZone: toZone, SrcIP: srcIPStr, DstIP: dstIPStr, Protocol: proto, SrcPort: srcPort, DstPort: dstPort, ICMPType: icmpType, ICMPCode: icmpCode, NonFirstFragment: nonFirstFrag, IngressInterface: q.Get("ingress_interface")}
+	res, err := policymatch.Evaluate(cfg, req17198, s.matchLive(cfg))
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.HasPrefix(msg, "from-zone and to-zone are required"):
+			msg = "from_zone and to_zone are required"
+		case strings.HasPrefix(msg, "invalid source-ip "):
+			msg = fmt.Sprintf("invalid src_ip %q", srcIPStr)
+		case strings.HasPrefix(msg, "invalid destination-ip "):
+			msg = fmt.Sprintf("invalid dst_ip %q", dstIPStr)
+		case strings.HasPrefix(msg, "invalid icmp-type:"):
+			msg = "invalid icmp_type: " + strings.TrimPrefix(msg, "invalid icmp-type: ")
+		case strings.HasPrefix(msg, "invalid icmp-code:"):
+			msg = "invalid icmp_code: " + strings.TrimPrefix(msg, "invalid icmp-code: ")
 		}
-	}
-	// #3104/#17837: bind the action-aware predicate to the applied scheduler
-	// state + latch so simulation follows the helper-accepted snapshot. In
-	// particular, fail-closed-latched scheduled DENY/REJECT rules stay eligible
-	// rather than falling through to a later permit.
-	//
-	// #3414: always bind a non-nil predicate for unavailable-state fail-closed
-	// behavior. Without the applied accessor (early boot / NoDataplane), the nil
-	// scheduler map treats scheduled policies as inactive, matching the snapshot
-	// builder; a non-scheduled policy remains unaffected.
-	var schedState map[string]bool
-	var failClosed bool
-	if s.policySchedAppliedFn != nil {
-		schedState, failClosed = s.policySchedAppliedFn()
-	} else if s.policySchedActiveFn != nil {
-		// Compatibility for callers wired before the latch-aware accessor:
-		// this state is the applied view, with the normal (unlatched)
-		// disposition.
-		schedState, _ = s.policySchedActiveFn()
-	}
-	// #17837: use the snapshot-builder's action-aware disposition. In
-	// particular, a fail-closed-latched scheduled DENY/REJECT remains eligible
-	// and must not be skipped in favor of a later permit.
-	inactiveForFn := dpuserspace.PolicyInactiveFnWithLatch(cfg, schedState, failClosed)
-	res := policymatch.Match(cfg, policymatch.Query{
-		FromZone: fromZone,
-		ToZone:   toZone,
-		SrcIP:    srcIP,
-		DstIP:    dstIP,
-		// #6377: colon-strict text family from the RAW query strings so the
-		// unsupported-tuple gate does not fold an IPv4-mapped IPv6 source to v4.
-		// Classify srcIPStr/dstIPStr (the un-parsed operator text) — srcIP/dstIP
-		// are net.ParseIP results that have already discarded the ':'.
-		SrcFamily:        config.NATAddrFamily(srcIPStr),
-		DstFamily:        config.NATAddrFamily(dstIPStr),
-		Protocol:         proto,
-		SrcPort:          srcPort,
-		DstPort:          dstPort,
-		ICMPType:         icmpType,
-		ICMPCode:         icmpCode,
-		NonFirstFragment: nonFirstFrag,
-		// #5579: scope the host-inbound classifier to this ingress interface's
-		// effective view (validated above). "" = zone-scoped, unchanged.
-		IngressInterface:    ingressIface,
-		FeedOverlay:         overlay,
-		FeedPublicationDebt: publicationDebt,
-		PolicyInactiveForFn: inactiveForFn,
-	})
-	// #3285: a `to-zone junos-host` query that matched no host-bound policy is
-	// not a transit default — the dataplane host gate returns None (local
-	// delivery; no global/default fallback). Surface it explicitly so the
-	// caller does not read a misleading default-policy verdict for the host
-	// path.
-	if res.ContentRejected {
-		// #3727: the dataplane fails this config closed (unexpandable
-		// application-set) and enforces none of its policies. Surface the
-		// fail-closed retention + the offending content, NOT a fabricated
-		// permit/deny/default verdict.
-		writeOK(w, MatchPoliciesResult{
-			PostNATInputNote:        res.PostNATInputNote,
-			ContentRejected:         true,
-			ContentRejectionReasons: res.ContentRejectionReasons,
-			Action:                  res.DisplayAction(),
-			QueriedFromZone:         fromZone,
-			QueriedToZone:           toZone,
-		})
+		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	if res.V4MappedCompatIngressDrop {
-		// #16803: the dataplane drops a v4-mapped/compatible IPv6 tuple at
-		// ingress before policy (#10686) — surface the typed flag + the
-		// SSOT action string, NOT a fabricated permit/deny/default verdict.
-		writeOK(w, MatchPoliciesResult{
-			PostNATInputNote:          res.PostNATInputNote,
-			V4MappedCompatIngressDrop: true,
-			Action:                    res.DisplayAction(),
-			QueriedFromZone:           fromZone,
-			QueriedToZone:             toZone,
-		})
+	if cfg == nil {
+		writeOK(w, MatchPoliciesResult{Action: res.DisplayAction(), DefaultUsed: true, QueriedFromZone: fromZone, QueriedToZone: toZone})
 		return
 	}
-	if res.HostInboundUnmatched {
-		writeOK(w, MatchPoliciesResult{
-			HostInboundUnmatched: true,
-			PostNATInputNote:     res.PostNATInputNote,
-			Action:               res.DisplayAction(),
-			// #3627 M06: echo the queried zone pair on the host-inbound path so
-			// the diagnostic names the tested zones (the host gate returns no
-			// matched-policy scope to fill FromZone/ToZone).
-			QueriedFromZone: fromZone,
-			QueriedToZone:   toZone,
-			// #3627 B1a: name the admitting host-inbound-traffic token (or report
-			// deny / global-accept / indeterminate) so a REST client sees WHICH
-			// system-service/protocol governs local delivery for this tuple, the
-			// same detail the gRPC surface + local CLI carry (#4352). nil off-host.
-			HostInbound: hostInboundToREST(res.HostInbound),
-		})
-		return
-	}
-	if !res.Matched {
-		writeOK(w, MatchPoliciesResult{
-			PostNATInputNote:         res.PostNATInputNote,
-			Action:                   res.DisplayAction(),
-			DefaultUsed:              res.DefaultUsed,
-			FeedPublicationDebt:      res.FeedPublicationDebt,
-			FeedPublicationDebtFeeds: res.FeedPublicationDebtNames,
-			FeedPublicationDebtNote:  res.FeedPublicationDebtNote(),
-			// #8318/#11067: expose direction-specific unknown-zone denies
-			// rather than making clients infer them from Action text.
-			UnzonedIngress: res.UnzonedIngress,
-			// #16805: from-zone junos-host is host-originated (kernel TX
-			// path, never policy-evaluated) — expose the typed flag so a
-			// client does not read the verdict as an unknown-zone deny.
-			HostOriginated: res.HostOriginated,
-			UnzonedEgress:  res.UnzonedEgress,
-			// #3627 M06: echo the queried zone pair for no-match/default and
-			// unzoned verdicts, which do not carry matched-policy scope.
-			QueriedFromZone: fromZone,
-			QueriedToZone:   toZone,
-			// #4373 (E4/H2/H7): a multicast/broadcast/unspecified/loopback
-			// destination is dropped at route before policy, so even the default
-			// verdict does not describe real forwarding — carry the advisory.
-			RouteDropBeforePolicy: res.RouteDropBeforePolicy,
-			RouteDropClass:        res.RouteDropClass,
-			RouteDropNote:         res.RouteDropNote(),
-		})
-		return
-	}
-	matchedID := res.PolicyID
-	writeOK(w, MatchPoliciesResult{
-		PostNATInputNote: res.PostNATInputNote,
-		Matched:          true,
-		PolicyName:       res.PolicyName,
-		Global:           res.Global,
-		FromZone:         res.FromZone,
-		ToZone:           res.ToZone,
-		// #3627 M06: also echo the queried zone pair on a positive match. It is
-		// the query context, distinct from FromZone/ToZone (the matched policy's
-		// declared scope), which can differ for a wildcard-zone or global match.
-		QueriedFromZone: fromZone,
-		QueriedToZone:   toZone,
-		// #3623: set the pointer only on a match (the two early returns above
-		// leave it nil), so a matched first policy (id 0) is emitted as
-		// "policy_id":0 rather than dropped and mistaken for no match.
-		PolicyID: &matchedID,
-		// #3668: the stable rule identity (inventory join key) + the
-		// address-exclusion flags so a positive verdict against a
-		// source/destination-address-excluded rule does not read backwards.
-		RuleID: res.RuleID,
-		// #3685 M05: carry the matched policy's description (ticket / change
-		// context) so the match verdict is not weaker than the inventory /
-		// local CLI answers over the same policymatch.Result.
-		Description: res.Description,
-		// #3685 M06: name the scheduler time-gate. A matched policy is eligible
-		// in the helper-accepted snapshot; under the fail-closed latch a
-		// scheduled DENY/REJECT can remain eligible with an inactive scheduler
-		// map entry (#17837). SchedulerActive is true only for a scheduled policy.
-		SchedulerName:              res.SchedulerName,
-		SchedulerActive:            res.SchedulerName != "",
-		Action:                     res.DisplayAction(),
-		SrcAddresses:               res.SrcAddresses,
-		DstAddresses:               res.DstAddresses,
-		SourceAddressExcluded:      res.SourceAddressExcluded,
-		DestinationAddressExcluded: res.DestinationAddressExcluded,
-		Applications:               res.Applications,
-		// #3627 B1a: a matched `to-zone junos-host` policy still passes through
-		// the separate host-inbound-traffic admission gate, so carry the
-		// classifier verdict here too (present for any host-bound query; nil for
-		// a transit/global match, which has no host gate).
-		HostInbound: hostInboundToREST(res.HostInbound),
-		// #4373 (E4/H2/H7): a matched policy for a multicast/broadcast/
-		// unspecified/loopback destination still does not forward — the flow is
-		// dropped at route before policy. Carry the advisory so a positive match
-		// verdict is not read as real forwarding.
-		RouteDropBeforePolicy: res.RouteDropBeforePolicy,
-		RouteDropClass:        res.RouteDropClass,
-		RouteDropNote:         res.RouteDropNote(),
-		// #5572: a non-first fragment whose permit was overridden to this
-		// overlapping port-bearing deny — the result is attributed to the
-		// enforcing deny above; carry the advisory so the REST answer explains
-		// the over-drop identically to the CLI + gRPC surfaces.
-		FragmentAssociatedDeny: res.FragmentAssociatedDeny,
-		FragmentDenyNote:       res.FragmentDenyNote(),
-	})
+	// #3042/#17198: shared Evaluate owns validation+Match; shared
+	// VerdictFrom owns result projection (incl. unsupported tuple).
+	writeOK(w, verdictToREST(policymatch.VerdictFrom(res, fromZone, toZone)))
 }
 
 func policyActionStr(a config.PolicyAction) string {

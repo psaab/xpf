@@ -19,8 +19,7 @@ import (
 // the bindHostsForCertGen union) leaves the new host out and this fails.
 func TestCertGenHostsAfterReconcile15228(t *testing.T) {
 	dir := t.TempDir()
-	s := NewServer(Config{TLS: true, HTTPSAddr: "10.0.0.1:8443"})
-	s.SetTLSCertDirForTest(dir)
+	s := NewServer(Config{TLS: true, HTTPSAddr: "10.0.0.1:8443", TLSSelfSignedDir: dir})
 
 	// Reconcile toward a second host. The bind itself fails (10.0.0.1 is
 	// not local) and the leg is retained/not installed — that is fine:
@@ -61,8 +60,7 @@ func TestCertGenHostsAfterReconcile15228(t *testing.T) {
 	}
 
 	// Control: single-stack construction still covers its one host.
-	single := NewServer(Config{TLS: true, HTTPSAddr: "10.0.0.1:8443"})
-	single.SetTLSCertDirForTest(t.TempDir())
+	single := NewServer(Config{TLS: true, HTTPSAddr: "10.0.0.1:8443", TLSSelfSignedDir: t.TempDir()})
 	c2, _, err := single.certGen(bindHostsForCertGen(single, "10.0.0.1"))
 	if err != nil {
 		t.Fatalf("single certGen: %v", err)

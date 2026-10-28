@@ -5,7 +5,6 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/ddns"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcpserver"
@@ -24,7 +23,7 @@ import (
 // a unit test had to fabricate (or fabricate-and-mutate) a Server to drive
 // one metric family. The collector now depends only on what it reads:
 //
-//   - live objects it snapshots per scrape (store, dp, fwdSampler, gc,
+//   - live objects it snapshots per scrape (store, dp, fwdSampler,
 //     dhcp, eventBuf) plus the server start time for uptime, and
 //   - the optional daemon callback hooks, copied verbatim from the Server
 //     fields of the same name (nil = family omitted, identical contract).
@@ -48,7 +47,6 @@ type collectorDeps struct {
 	dp         apiRuntimeDataPlane
 	fwdSampler *fwdstatus.Sampler
 	eventBuf   *logging.EventBuffer
-	gc         *conntrack.GC
 	dhcp       *dhcp.Manager
 	startTime  time.Time
 
@@ -133,7 +131,6 @@ func collectorDepsFromServer(srv *Server) collectorDeps {
 		dp:         srv.dp,
 		fwdSampler: srv.fwdSampler,
 		eventBuf:   srv.eventBuf,
-		gc:         srv.gc,
 		dhcp:       srv.dhcp,
 		startTime:  srv.startTime,
 

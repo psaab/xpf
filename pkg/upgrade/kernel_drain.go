@@ -87,7 +87,7 @@ func DrainAndConfirm(cl RollingCluster, deadline time.Duration, allowMixedHA boo
 	// NOT gated behind allowMixedHA. That flag exists because the LANE-2
 	// mixed-base gate already validated the HA WINDOW and exact-equality would
 	// wrongly abort the second node; it says nothing about the session wire,
-	// which GateMixedBaseSwap checks for EXACT equality in both cases. Reusing
+	// which GateProtocolCompat checks for EXACT equality in both cases. Reusing
 	// it here would silently disable this gate on exactly the path that most
 	// needs it.
 	syncOK, syncWhy, err := cl.SessionSyncWireCompatible()
