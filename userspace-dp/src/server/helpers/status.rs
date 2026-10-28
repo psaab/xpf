@@ -338,6 +338,7 @@ pub(crate) fn project_status(state: &mut ServerState) {
         state.afxdp.session_delete_dropped_released_total();
     state.status.tunnel_purge_reservations_released =
         state.afxdp.tunnel_purge_reservations_released_total();
+    state.status.tunnel_purge_delete_refused = state.afxdp.tunnel_purge_delete_refused_total();
     state.status.synced_import_reserve_refused = state.afxdp.synced_import_reserve_refused_total();
     state.status.synced_import_mirror_refused = state.afxdp.synced_import_mirror_refused_total();
     state.status.mirror_restore_republished = state.afxdp.mirror_restore_republished_total();

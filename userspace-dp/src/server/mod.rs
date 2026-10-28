@@ -16,6 +16,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod state;
 
 #[cfg(test)]
+#[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
 mod tests;
 
 pub(crate) use handlers::{handle_stream, SocketMode};

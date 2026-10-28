@@ -559,6 +559,7 @@ pub(crate) fn run() -> Result<(), String> {
             policy_batch_hold_max_ns: 0,
             session_delete_dropped_released: 0,
             tunnel_purge_reservations_released: 0,
+            tunnel_purge_delete_refused: 0,
             synced_import_reserve_refused: 0,
             synced_import_mirror_refused: 0,
             mirror_restore_republished: 0,

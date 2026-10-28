@@ -108,6 +108,10 @@ pub(in crate::afxdp) struct SessionManager {
     /// counted attempts would report the leak as handled while the port
     /// stayed held.
     pub(in crate::afxdp) tunnel_purge_reservations_released: AtomicU64,
+    /// #17144: tunnel-remap purge deletes refused (e.g. `RefusedGateBusy`), so
+    /// no Close was emitted, no reservation was released and the key was not
+    /// counted as purged. The entry survives for the next purge / GC.
+    pub(in crate::afxdp) tunnel_purge_delete_refused: AtomicU64,
     /// #7209: peer-synced imports whose `(from_zone, to_zone)` pair could not
     /// be resolved locally, so the source-NAT reservation was booked WITHOUT
     /// #6211's zone narrowing.
@@ -284,6 +288,7 @@ impl SessionManager {
             delete_refused_identity: AtomicU64::new(0),
             delete_dropped_released: AtomicU64::new(0),
             tunnel_purge_reservations_released: AtomicU64::new(0),
+            tunnel_purge_delete_refused: AtomicU64::new(0),
             import_cap_drops: AtomicU64::new(0),
             policy_batch_count: AtomicU64::new(0),
             policy_batch_hold_ns: AtomicU64::new(0),

@@ -1937,6 +1937,39 @@ fn purge_remapped_tunnel_sessions_no_drop_on_lossless_success() {
     );
 }
 
+/// #17144: a gate-refused purge delete must not emit a Close, must not
+/// release the reservation and must not be counted as purged.
+/// RED pre-fix: the purge discarded the outcome, emitted the Close,
+/// released the (pool, port) and returned 1.
+#[test]
+fn purge_gate_refusal_emits_no_close_and_releases_nothing_17144() {
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    register_test_worker_7209(&mut coordinator);
+    let allocs = std::sync::Arc::clone(&coordinator.forwarding.iface_nat_allocators);
+    let rules = coordinator.forwarding.source_nat_rules.clone();
+    let entry = purge8138_entry(43000, 52100, 7);
+    let key = entry.key.clone();
+    assert_eq!(coordinator.upsert_synced_session(entry.clone()), SyncedImportOutcome::Applied, "fixture import must apply");
+    assert!(purge8138_port_held(&allocs, &rules, 43001, 52100, 1_000), "precondition: import must hold the reservation");
+    let (sender, rx) = crate::event_stream::EventStreamSender::test_sender(true, 16);
+    coordinator.event_stream = Some(sender);
+    let reverse_key = crate::session::reverse_session_key(&key, entry.decision.nat);
+    let _held = crate::afxdp::bpf_map::global_tuple_gate().try_acquire_installs([reverse_key]).expect("test holds the contending reverse-key permit");
+    let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
+    assert_eq!(purged, 0, "#17144: a refused delete must not be counted as purged");
+    assert!(synced6600_contains(&coordinator, &key), "#17144: a refused delete must leave the shared session in place");
+    assert!(rx.try_recv().is_err(), "#17144: a refused delete must emit no Close delta");
+    assert!(purge8138_port_held(&allocs, &rules, 43002, 52100, 2_000), "#17144: a refused delete must not release the reservation");
+    assert_eq!(coordinator.tunnel_purge_reservations_released_total(), 0, "#17144: nothing was freed");
+    assert_eq!(coordinator.tunnel_purge_delete_refused_total(), 1, "#17144: the refused purge delete must be counted");
+    drop(_held);
+    let purged2 = coordinator.purge_remapped_tunnel_sessions(&[7], &coordinator.forwarding.clone());
+    assert_eq!(purged2, 1, "the next purge must retry and apply the delete");
+    assert!(!synced6600_contains(&coordinator, &key));
+    assert!(rx.try_recv().is_ok(), "the retried purge must emit its Close");
+}
+
 /// #14303: a PPTP session that reaches the standby only via bulk export must
 /// carry its call-id pair, or the import gate withholds it as
 /// `pptp-call-ids-not-carried` — the #13965 failure surviving on the resync
