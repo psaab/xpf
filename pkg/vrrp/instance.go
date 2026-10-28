@@ -11,6 +11,8 @@ import (
 	"golang.org/x/net/ipv6"
 
 	"github.com/vishvananda/netlink"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // VRRPState represents the VRRPv3 state machine state.
@@ -31,7 +33,7 @@ const (
 const addressOwnerPriority = 255
 
 // minLearnedMasterAdverInterval is the absolute lower bound applied to a
-// Master_Adver_Interval learned from a peer advertisement (recordMasterAdvert,
+// Master_Adver_Interval learned from a peer advertisement (admitAndRecord,
 // #4548). It matches the schema minimum for `chassis cluster
 // reth-advertise-interval` (10 ms; pkg/config/schema_chassis.go) — the smallest
 // cadence the system will ever legitimately run at. It is only the backstop for
@@ -149,7 +151,7 @@ type vrrpInstance struct {
 	// preemptHoldArmed tracks whether the preempt hold-time countdown (#2850)
 	// is currently running (#2900). It is set when stepBackup arms the
 	// preemptHoldTimer and cleared whenever the timer is stopped or fires. A
-	// config update arriving during the hold window (updateConfig → the
+	// config update arriving during the hold window (updateConfigHeld → the
 	// configUpdatedCh case in stepBackup) reads this flag to decide whether an
 	// in-flight hold must be torn down because the new config no longer
 	// warrants it (preempt disabled, priority demoted, or hold-time changed).
@@ -201,7 +203,7 @@ type vrrpInstance struct {
 
 	// Last-seen accepted master advertisement (#2082). Recorded by
 	// handleBackupRx / handleMasterRx only for an advert accepted as the
-	// current master (#14706 — see recordMasterAdvert), and read by
+	// current master (#14706 — see admitAndRecord), and read by
 	// shouldPreemptObservedMaster to gate the non-force sync-hold preempt
 	// shortcut on a strictly-higher effective priority (RFC 5798 §6.4.2).
 	// Both writers and the gate reader run in the run-loop goroutine, so
@@ -214,7 +216,7 @@ type vrrpInstance struct {
 	lastMasterSeen     time.Time // when lastMasterPriority was recorded
 	// lastMasterIPv4 / lastMasterIPv6 store the learned accepted-master
 	// source per family — the currently-known master identity the #10719
-	// detector compares against. They are recorded by recordMasterAdvert
+	// detector compares against. They are recorded by admitAndRecord
 	// alongside lastMasterPriority/lastMasterSeen for accepted adverts
 	// only (#14706); the Known flags distinguish cold start. Two
 	// fixed-size slots, not one, because a dual-stack instance hears its
@@ -237,7 +239,7 @@ type vrrpInstance struct {
 	// backup are configured with different intervals (a rolling change or a
 	// misconfig), timing the master out on the local interval fails over too
 	// early (shorter local interval → flapping) or too late (longer → traffic
-	// loss). Recorded by recordMasterAdvert for accepted non-zero-priority
+	// loss). Recorded by admitAndRecord for accepted non-zero-priority
 	// adverts only (#14706), alongside lastMasterPriority/lastMasterSeen.
 	// 0 = none learned yet (cold-start / pre-first-advert), in which case
 	// the local interval is the fallback. Guarded by mu.
@@ -342,7 +344,7 @@ type vrrpInstance struct {
 
 	preemptNowCh    chan struct{} // signals coordinated preemption from ReleaseSyncHold
 	resignCh        chan struct{} // signals forced resignation (manual failover)
-	configUpdatedCh chan struct{} // signals updateConfig mutated cfg (#2900 hold re-validate)
+	configUpdatedCh chan struct{} // signals updateConfigHeld mutated cfg (#2900 hold re-validate)
 
 	rxCh    chan *VRRPPacket
 	stopCh  chan struct{}
@@ -476,7 +478,7 @@ type vrrpInstance struct {
 }
 
 func newInstance(cfg Instance, iface *net.Interface, eventCh chan<- VRRPEvent, onEventDrop func()) *vrrpInstance {
-	cfg.VirtualAddresses = dedupeVIPs(cfg.VirtualAddresses)
+	cfg.VirtualAddresses = config.DedupeVRRPVIPs(cfg.VirtualAddresses)
 	capErr := instanceAdvertCapacityErr(cfg) // #6779, advert_capacity.go
 	return &vrrpInstance{
 		cfg:               cfg,
@@ -518,24 +520,11 @@ type configChange15689 struct {
 }
 
 // effectivePriorityLocked computes the track-adjusted advertised priority
-// from cfg/trackDown. Caller MUST hold vi.mu (read or write); it never
-// takes the lock itself (mirrors advertIntervalLocked, #6230). Priority
-// 0/255 pass through; otherwise TrackPriorityCost is subtracted while the
-// tracked link is down, clamped to [1,254] — same math as prioritySnapshot.
+// from cfg/trackDown via effectivePriority (#17145). Caller MUST hold
+// vi.mu (read or write); it never takes the lock itself (mirrors
+// advertIntervalLocked, #6230).
 func (vi *vrrpInstance) effectivePriorityLocked() int {
-	p := vi.cfg.Priority
-	if p == 0 || p == addressOwnerPriority {
-		return p
-	}
-	if vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
-	}
-	return p
+	return effectivePriority(vi.cfg.Priority, vi.cfg.TrackPriorityCost, vi.trackDown, vi.cfg.TrackInterface)
 }
 
 // takePendingConfigChange consumes the pending #15689 snapshot.
@@ -566,7 +555,7 @@ func (vi *vrrpInstance) takePendingConfigChange() configChange15689 {
 //
 // The recorded values must be the ones the arm actually used, never a
 // later re-read: a manager commit can land between an unlocked cfg
-// snapshot (advertInterval/masterDownInterval/preemptHoldDuration)
+// snapshot (advertiseIntervalMS/masterDownInterval/preemptHoldDuration)
 // and a separate note, which would baseline old* to a cfg the timer
 // was never armed under. Hence the single invariant for every
 // cfg-derived arm in the run loop: snapshot cfg -> Reset timer ->
@@ -747,11 +736,10 @@ func (vi *vrrpInstance) armAdvertTimer(advertTimer *time.Timer) {
 // armMasterDownTimer resets masterDownTimer at masterDownInterval()
 // and atomically records the armed interval as applied (same lock
 // discipline as armAdvertTimer; priority is not noted — see
-// armAdvertTimer, #15927). The computation replicates
-// masterDownInterval() under the already-held lock — getPriority()
-// takes RLock, so it cannot be called here; the skew priority is
-// computed exactly as prioritySnapshot does (0/255 pass through;
-// track-down subtracts TrackPriorityCost clamped to [1,254]).
+// armAdvertTimer, #15927). The duration comes from masterDownLocked
+// under the already-held lock — getPriority() takes RLock, so it
+// cannot be called here (#6230); masterDownLocked shares
+// effectivePriority with getPriority()/prioritySnapshot (#17145), and
 // getPriority()'s pending-resignation detour returns that same
 // effective priority from the cfg fields read here, so the durations
 // agree. With a learned master interval the duration is the peer's
@@ -760,18 +748,7 @@ func (vi *vrrpInstance) armAdvertTimer(advertTimer *time.Timer) {
 // interval changes) but harmless.
 func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
 	vi.mu.Lock()
-	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
-	p := vi.cfg.Priority
-	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
-	}
-	skew := time.Duration(256-p) * advert / 256
-	masterDownTimer.Reset(3*advert + skew)
+	masterDownTimer.Reset(vi.masterDownLocked())
 	vi.armIntervalAppliedLocked()
 	vi.mu.Unlock()
 }
@@ -788,18 +765,7 @@ func (vi *vrrpInstance) armMasterDownTimer(masterDownTimer *time.Timer) {
 // consumer re-arms instead of retaining an intermediate horizon.
 func (vi *vrrpInstance) armMasterDownSafetyTimer(masterDownTimer *time.Timer) {
 	vi.mu.Lock()
-	advert := effectiveAdvertInterval(vi.cfg.AdvertiseInterval, vi.masterAdverInterval)
-	p := vi.cfg.Priority
-	if p != 0 && p != addressOwnerPriority && vi.trackDown && vi.cfg.TrackInterface != "" {
-		p -= vi.cfg.TrackPriorityCost
-		if p < 1 {
-			p = 1
-		} else if p > 254 {
-			p = 254
-		}
-	}
-	masterDown := 3*advert + time.Duration(256-p)*advert/256
-	safety := 3 * masterDown
+	safety := 3 * vi.masterDownLocked()
 	if safety < 500*time.Millisecond {
 		safety = 500 * time.Millisecond
 	}
@@ -808,9 +774,14 @@ func (vi *vrrpInstance) armMasterDownSafetyTimer(masterDownTimer *time.Timer) {
 	vi.mu.Unlock()
 }
 
-// updateConfig updates priority, preempt, interface-tracking,
+// updateConfigHeld updates priority, preempt, interface-tracking,
 // advertise-interval, and gratuitous-ARP-count config in-place without
-// restarting.
+// restarting, with the #14404 held-RETH exception: a held RETH instance's
+// priority 0 is preserved (not clamped to 1), because 0 is the hold
+// suppression value from LocalPriorities, not a config error. The atomic
+// kernelUpgradeHold flag on the instance is the promotion gate;
+// priority 0 is belt-and-suspenders so the instance does not out-advertise
+// a live peer while held.
 //
 // It runs on the manager goroutine, NOT the run-loop goroutine that owns the
 // preemptHoldTimer (#2900). It therefore mutates cfg under mu and then signals
@@ -822,22 +793,13 @@ func (vi *vrrpInstance) armMasterDownSafetyTimer(masterDownTimer *time.Timer) {
 // AdvertiseInterval and GARPCount are copied so a day-2 change reaches the
 // running instance (#5087, #15689). The run loop consumes configUpdatedCh
 // in BOTH states: StateMaster immediately advertises and re-arms
-// advertTimer when the interval or effective priority changed (a shrink
-// left on the old arm starves BACKUP peers into a dual-MASTER window),
-// and StateBackup re-arms masterDownTimer / re-validates an armed
-// preempt hold against the recorded change. Before #15689 StateMaster
-// never drained the channel, so the token leaked into a later BACKUP
-// tenure and the advert timer kept its stale arm until its next fire.
-func (vi *vrrpInstance) updateConfig(cfg Instance) {
-	vi.updateConfigHeld(cfg, false)
-}
-
-// updateConfigHeld is updateConfig with the #14404 held-RETH exception:
-// a held RETH instance's priority 0 is preserved (not clamped to 1), because
-// 0 is the hold suppression value from LocalPriorities, not a config error.
-// The atomic kernelUpgradeHold flag on the instance is the promotion gate;
-// priority 0 is belt-and-suspenders so the instance does not out-advertise
-// a live peer while held.
+// advertTimer via armAdvertTimer when the interval or effective priority
+// changed (a shrink left on the old arm starves BACKUP peers into a
+// dual-MASTER window), and StateBackup re-arms masterDownTimer /
+// re-validates an armed preempt hold against the recorded change. Before
+// #15689 StateMaster never drained the channel, so the token leaked into
+// a later BACKUP tenure and the advert timer kept its stale arm until its
+// next fire.
 func (vi *vrrpInstance) updateConfigHeld(cfg Instance, heldRETH bool) {
 	vi.mu.Lock()
 	oldAdvertiseMS := vi.cfg.AdvertiseInterval
@@ -1093,7 +1055,7 @@ func (vi *vrrpInstance) stepBackup(masterDownTimer, advertTimer, preemptHoldTime
 		vi.applyPendingResign()
 		vi.notifyResigned(vi.staleVIPResignErr())
 	case <-vi.configUpdatedCh:
-		// A config update landed (updateConfig) while this BACKUP select
+		// A config update landed (updateConfigHeld) while this BACKUP select
 		// was running (#2900, #15689). Consume the recorded change:
 		//
 		//   - Hold armed: tear it down ONLY when the change invalidates
@@ -1203,7 +1165,7 @@ func (vi *vrrpInstance) run() {
 
 	// #8597 (muse-004 K20): Interface and GroupID are immutable for an
 	// instance's lifetime (a change rebuilds it), but Priority and Preempt are
-	// mu-guarded and written by updateConfig on the manager goroutine.
+	// mu-guarded and written by updateConfigHeld on the manager goroutine.
 	startPriority, startPreempt := vi.startupLogFields()
 	slog.Info("vrrp: instance starting",
 		"key", vi.key(),
@@ -1424,7 +1386,7 @@ func (vi *vrrpInstance) stop() {
 // field can carry, before it is stored on the instance.
 //
 // Applied at the two CONFIG entry points — the manager's config->instance
-// install (manager.go) and updateConfig — and deliberately NOT inside
+// install (manager.go) and updateConfigHeld — and deliberately NOT inside
 // newInstance. newInstance is a plain constructor, also used to model states
 // the runtime reaches by MUTATION rather than from config: ResignRG sets
 // cfg.Priority to 0 under the instance lock, and 0 there is the correct

@@ -12508,7 +12508,7 @@ fn discovered_prune_families() -> Vec<String> {
 /// The discovery itself, over arbitrary source, so its own behaviour can be
 /// measured rather than argued.
 fn prune_families_in(src: &str) -> Vec<String> {
-    let cleaned = crate::afxdp::worker_queue::tests::blank_comments_and_strings(src);
+    let cleaned = crate::test_support::source_scan::blank_comments_and_strings(src);
     let mut out = Vec::new();
     for line in cleaned.lines() {
         // Keyed on `fn NAME(`, NOT on the visibility modifier in front of it.
@@ -12578,7 +12578,7 @@ fn commit_something_else(a: u8) {}
 fn afxdp_production_sources() -> Vec<(String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp");
     let mut files = Vec::new();
-    crate::afxdp::worker_queue::tests::afxdp_rs_files(&root, &mut files);
+    crate::test_support::source_scan::afxdp_rs_files(&root, &mut files);
     let mut out = Vec::new();
     for path in files {
         let rel = path
@@ -12586,13 +12586,13 @@ fn afxdp_production_sources() -> Vec<(String, String)> {
             .expect("under src/afxdp")
             .to_string_lossy()
             .replace('\\', "/");
-        if crate::afxdp::worker_queue::tests::is_fixture(&root, &rel) {
+        if crate::test_support::source_scan::is_fixture(&root, &rel) {
             continue;
         }
         let src = std::fs::read_to_string(&path).expect("read source");
         out.push((
             rel,
-            crate::afxdp::worker_queue::tests::blank_comments_and_strings(&src),
+            crate::test_support::source_scan::blank_comments_and_strings(&src),
         ));
     }
     out
@@ -12714,7 +12714,7 @@ fn rejected_apply_then_retry_is_a_reachable_sequence_7015() {
     // two unrelated states — i.e. that the rejected state is a resting place a
     // retry departs from.
     let src = include_str!("../coordinator/tests.rs");
-    let cleaned = crate::afxdp::worker_queue::tests::blank_comments_and_strings(src);
+    let cleaned = crate::test_support::source_scan::blank_comments_and_strings(src);
     for needle in [
         "fn rejected_apply_does_not_prune_live_zone_counters_6832(",
         "fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832(",

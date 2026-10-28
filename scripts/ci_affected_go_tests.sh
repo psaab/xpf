@@ -66,17 +66,37 @@ census_packages = {
 
 # Changed paths no Go test reads (#14647). Anything not listed here and
 # not owned by a Go package seeds every package instead of nothing.
-# docs/log/ and docs/issues/*-history*.md are append-only records that
-# docsref deliberately excludes (isHistoricalArchive); the two non-test
-# workflows examine no Go source.
+# The historical-archive set (append-only records that docsref excludes
+# via isHistoricalArchive) lives in scripts/historical-paths.txt, shared
+# with pkg/docsref (#17115); the two non-test workflows examine no Go
+# source and stay local to this selector.
+def _load_historical_patterns17115():
+    pats = []
+    with open("scripts/historical-paths.txt", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                pats.append(line)
+    if not pats:
+        print("scripts/historical-paths.txt parsed to ZERO patterns", file=sys.stderr)
+        sys.exit(1)
+    return pats
+
+_historical_patterns17115 = _load_historical_patterns17115()
+
+def _historical_match17115(path):
+    for pat in _historical_patterns17115:
+        if "*" not in pat:
+            if pat == path:
+                return True
+        else:
+            pre, suf = pat.split("*", 1)
+            if len(path) >= len(pre) + len(suf) and path.startswith(pre) and path.endswith(suf):
+                return True
+    return False
+
 def never_read(path):
-    if path == "_Log.md":
-        return True
-    if path.startswith("docs/log/"):
-        return True
-    if path.startswith("docs/issues/") and (
-        path.endswith("-history.md") or path.endswith("-history-archive.md")
-    ):
+    if _historical_match17115(path):
         return True
     if path == ".github/workflows/close-keyword-lint.yml":
         return True

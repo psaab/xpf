@@ -28,7 +28,7 @@ func TestSchedulerLatchedDenyStaysEligible16723(t *testing.T) {
 		},
 	}, config.ApplicationsConfig{}), "business-hours")
 	q := Query{
-		FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80,
+		FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80),
 		PolicyInactiveForFn: dpuserspace.PolicyInactiveFnWithLatch(
 			cfg, map[string]bool{"business-hours": false}, true),
 	}

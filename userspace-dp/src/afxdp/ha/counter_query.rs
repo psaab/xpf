@@ -19,7 +19,7 @@
 //! reads 0 may be residue from an earlier flow that worker owned. Axis and
 //! attribution are different properties, and only this supplies the second.
 //!
-//! TWO-PHASE, mirroring `kick_owner_rg_export` (#2962): the kick runs under the
+//! TWO-PHASE, mirroring `kick_owner_rg_export_unpaged` (#2962): the kick runs under the
 //! `ServerState` lock and returns immediately; the bounded wait runs off-lock
 //! afterwards, so a slow or stalled worker cannot freeze the control plane.
 //!

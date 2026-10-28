@@ -64,77 +64,11 @@ func firewallFamilyPermitted9017() map[string]bool {
 	return permitted
 }
 
-// firewallFamilyMember is one address-family member under a `firewall family`
-// node: the node carrying the member's `filter` subtree plus the tokens that
-// identify it. Built by firewallFamilyMembers9883, the single shape-aware
-// extractor shared by compileFirewall and the #3884 / #4296 / #9017 gates.
-type firewallFamilyMember struct {
-	// AfNode carries the member's `filter` subtree.
-	AfNode *Node
-	// Af is the effective family token: famNode.Keys[1] for the packed shape
-	// (`family inet { ... }`), the child NAME (Keys[0]) for the set-command
-	// shape (`family { inet { ... } }`).
-	Af string
-	// Residue carries trailing keys on STRUCTURED member nodes only
-	// (len(Children) > 0): extra tokens that must ALSO be declared, e.g. the
-	// `inet` in a malformed `family { inett inet { filter F } }` child. A
-	// collapsed flat-set leaf (`["inett","filter","BAD",...]`, no children)
-	// carries no residue — its tail is the flattened remainder of the set
-	// command, not family tokens, and flagging it would spam one warning per
-	// path fragment.
-	Residue []string
-}
-
-// firewallFamilyMembers9883 walks a `family` node across BOTH AST shapes and
-// returns one member per address family. It is the ONLY firewall-family
-// extractor: compileFirewall, validateFirewallFilterFamilyCollisionsAST
-// (#3884), validateFirewallFilterFamilyAnyMatchesAST (#4296) and
-// validateFirewallFilterFamilyTokensAST (#9017) all consume it, so the token
-// the compiler installs under is always a token the gates judged.
-//
-// The sharing is load-bearing, not cosmetic. Before it, the compiler preferred
-// the SECOND key of a set-shape child (`af = afNode.Keys[1]`) while the token
-// gate read the name (Keys[0]) only: `family { inett inet { filter F } }` (a
-// peer-synced / hand-built AST) installed F into FiltersInet while the gate
-// warned it compiles to NOTHING (quarantine bypass + message lie), and the
-// converse `family { inet inett { ... } }` escaped every gate and committed a
-// strict silent void. No valid producer emits a multi-key family child (the
-// parser and SetPath always mint single-key children — a flat-set unknown
-// collapses to a LEAF, never a structured multi-key node), so the residue arm
-// only ever fires on malformed / peer-synced trees.
-//
-// #4827: Name() safely returns "" for an empty Keys slice, so a corrupted
-// persisted node (configstore JSON has no Node validator) yields Af "" — which
-// quarantines / gets flagged — instead of panicking (#1960 doctrine).
-func firewallFamilyMembers9883(famNode *Node) []firewallFamilyMember {
-	if famNode == nil {
-		return nil
-	}
-	if len(famNode.Keys) >= 2 {
-		// Packed shape: `family inet { ... }` — one node, family on Keys[1].
-		m := firewallFamilyMember{AfNode: famNode, Af: famNode.Keys[1]}
-		if len(famNode.Keys) > 2 && len(famNode.Children) > 0 {
-			m.Residue = famNode.Keys[2:]
-		}
-		return []firewallFamilyMember{m}
-	}
-	// Set-command shape: `family { inet { ... } ... }` — the family name rides
-	// on each CHILD. The effective token is the child NAME (Keys[0]), never
-	// Keys[1]: preferring the second key let a malformed leading token smuggle
-	// a declared trailing token past the gate into the install path (above).
-	var out []firewallFamilyMember
-	for _, ch := range famNode.Children {
-		if ch == nil {
-			continue
-		}
-		m := firewallFamilyMember{AfNode: ch, Af: ch.Name()}
-		if len(ch.Keys) > 1 && len(ch.Children) > 0 {
-			m.Residue = ch.Keys[1:]
-		}
-		out = append(out, m)
-	}
-	return out
-}
+// familyMember / familyMembers moved to
+// family_members.go as familyMember / familyMembers in #17196, where the
+// interface and forwarding-options compilers share the same extractor.
+// The firewall gates below keep their #9017/#9883 names in prose; the
+// types they consume are the shared ones.
 
 // firewallFamilyQuarantined9883 reports whether the member compiles to NOTHING:
 // its effective token is undeclared, or a structured member carries an
@@ -144,7 +78,7 @@ func firewallFamilyMembers9883(famNode *Node) []firewallFamilyMember {
 // compileFirewall's default) is never silent: the #9017 gate warns loud
 // (lenient) / hard-rejects (strict) on an empty permitted set whenever a
 // firewall family is present (#9883 GPT-LOW).
-func firewallFamilyQuarantined9883(m firewallFamilyMember, permitted map[string]bool) bool {
+func firewallFamilyQuarantined9883(m familyMember, permitted map[string]bool) bool {
 	if len(permitted) == 0 {
 		return false
 	}
@@ -211,7 +145,7 @@ func validateFirewallFilterFamilyTokensAST(nodes []*Node, lenient bool) ([]strin
 			// tokens compileFirewall installs under (effective token plus
 			// trailing tokens on structured nodes), so gate and compiler
 			// cannot disagree on any shape.
-			for _, m := range firewallFamilyMembers9883(famNode) {
+			for _, m := range familyMembers(famNode) {
 				toks := make([]string, 0, 1+len(m.Residue))
 				toks = append(toks, m.Af)
 				toks = append(toks, m.Residue...)

@@ -12,14 +12,14 @@ import (
 // them (the REST API and the gRPC API share the single DefaultLimiter
 // below). Each in-flight diagnostic holds a child process, its output
 // pipes, a handler goroutine and — on gRPC — a stream, for up to the
-// 150s diagExecCeiling. Without an aggregate bound a burst of concurrent
+// 150s DiagExecCeiling. Without an aggregate bound a burst of concurrent
 // diagnostic requests can pin hundreds/thousands of PIDs/FDs/goroutines
 // and starve the control plane that drives the dataplane (#5057).
 //
 // The value is deliberately small: legitimate operator/automation use
 // runs a handful of diagnostics at once, while a firewall must never let
 // a diagnostic flood exhaust host resources. A per-job deadline (present
-// via pingExecTimeout/diagTracerouteTimeout in the API packages) plus
+// via PingExecTimeout/TracerouteTimeout above) plus
 // this aggregate concurrency bound together cap the worst-case resource
 // footprint.
 const MaxConcurrentDiagnostics = 4
@@ -190,8 +190,9 @@ var DefaultLimiter = NewLimiter(MaxConcurrentDiagnostics)
 //     `rcu_read_lock_held()`); it is the BATCH path that takes
 //     `htab_lock_bucket`. So these walks do not hold per-bucket locks at all.
 //     The path that does — BatchIterateSessions, whose own comment says it
-//     exists "for reduced kernel lock contention" — is used by conntrack GC and
-//     cluster session sync and is NOT gated here. That asymmetry is deliberate
+//     exists "for reduced kernel lock contention" — was used by the retired
+//     conntrack GC (`pkg/conntrack`, deleted in #17155) and is used by cluster
+//     session sync; it is NOT gated here. That asymmetry is deliberate
 //     enough to leave alone (both are internal and self-paced, yielding between
 //     batches) but it should not be described backwards.
 //   - The "live dataplane session-sync path" is no longer an in-kernel program.

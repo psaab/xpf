@@ -4,6 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 
 	gnft "github.com/google/nftables"
@@ -151,7 +156,7 @@ func TestArmedTransitFenceMarkPinhole10391(t *testing.T) {
 	}
 	emitTransitFencePinhole(p, ForwardFenceSpec{
 		AllowedMarks: []ForwardFenceMark{{
-			Ifname: armedTransitReinjectIfname10391,
+			Ifname: HostInboundDelegatedIfname,
 			Mark:   AdjudicatedTransitMark,
 			Mask:   AdjudicatedTransitMarkMask,
 		}},
@@ -202,4 +207,27 @@ func TestArmedTransitFenceMarkPinhole10391(t *testing.T) {
 	}
 }
 
-const armedTransitReinjectIfname10391 = "xpf-usp1"
+// TestAdjudicatedTransitMarkMatchesRust pins the Go adjudicated-transit mark
+// to the Rust queue-mark classifier: the TC program in
+// userspace-dp/src/slowpath.rs writes ADJUDICATED_TRANSIT_MARK in full, and
+// the armed forward fence matches AdjudicatedTransitMark under
+// AdjudicatedTransitMarkMask. A rename or value change on either side
+// without the other stops every adjudicated IPsec transit packet at the
+// fence (fail-closed outage), so this test reds first on drift.
+func TestAdjudicatedTransitMarkMatchesRust(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "userspace-dp", "src", "slowpath.rs"))
+	if err != nil {
+		t.Fatalf("reading Rust slowpath mark: %v", err)
+	}
+	m := regexp.MustCompile(`const ADJUDICATED_TRANSIT_MARK:\s*u32\s*=\s*(0x[0-9a-fA-F_]+)`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("ADJUDICATED_TRANSIT_MARK declaration not found in userspace-dp/src/slowpath.rs")
+	}
+	rustMark, err := strconv.ParseUint(strings.ReplaceAll(string(m[1]), "_", ""), 0, 32)
+	if err != nil {
+		t.Fatalf("parsing Rust ADJUDICATED_TRANSIT_MARK %q: %v", m[1], err)
+	}
+	if got, want := uint64(AdjudicatedTransitMark), rustMark; got != want {
+		t.Errorf("Go AdjudicatedTransitMark %#x != Rust ADJUDICATED_TRANSIT_MARK %#x", got, want)
+	}
+}

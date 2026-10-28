@@ -57,7 +57,7 @@ type drainEntry struct {
 	// startIfaceEpoch is the per-interface epoch (m.ifaceEpoch[name]) captured
 	// when a CHANGED-config restart installed this entry (#4961). releaseDrain
 	// starts the replacement only if this interface's epoch is UNCHANGED — i.e.
-	// no interface-scoped withdraw (WithdrawInterfaces/WithdrawOnce naming THIS
+	// no interface-scoped withdraw (WithdrawOnce naming THIS
 	// interface) superseded the restart. It is 0 (and unused) for removal /
 	// Clear / WithdrawOnce entries, which pass onProvenClose=nil.
 	startIfaceEpoch uint64
@@ -90,9 +90,9 @@ type Manager struct {
 	// full Apply) superseded it (#2033 I16b). This prevents a stale Apply from
 	// starting RA on a demoted node.
 	//
-	// #4961: the INTERFACE-SCOPED withdraws (WithdrawInterfaces / WithdrawOnce)
+	// #4961: the INTERFACE-SCOPED withdraw (WithdrawOnce; WithdrawInterfaces deleted #17160)
 	// no longer bump this global fence — bumping it made an unrelated
-	// WithdrawInterfaces([B]) cancel a DIFFERENT interface A's in-flight
+	// interface-scoped withdraw of B cancel a DIFFERENT interface A's in-flight
 	// changed-config restart (epoch mismatch → A's replacement suppressed AND
 	// its tombstone deleted → A loses its RA sender → IPv6 loss on A's hosts).
 	// They now bump only the per-interface epoch below, so supersession is
@@ -100,7 +100,7 @@ type Manager struct {
 	epoch uint64
 
 	// ifaceEpoch is the per-interface supersession revision (#4961), bumped by
-	// the interface-scoped withdraws (WithdrawInterfaces / WithdrawOnce) for
+	// the interface-scoped withdraw (WithdrawOnce) for
 	// each interface they name. A changed-config restart records the target
 	// interface's epoch on its drainEntry (startIfaceEpoch) and a deferred Apply
 	// captures it per interface; releaseDrain / applyDeferred start the
@@ -282,6 +282,22 @@ func (m *Manager) bumpEpoch() { m.epoch++ }
 // bumpIfaceEpoch increments the per-interface supersession revision for name
 // (#4961). Callers must hold m.mu.
 func (m *Manager) bumpIfaceEpoch(name string) { m.ifaceEpoch[name]++ }
+
+// retireSenderLocked moves the live sender s for name out of m.senders into
+// a drainEntry tombstone and signals it to stop with mode (#17160: the five
+// open-coded copies of "retire a live sender" folded into one). restartEpoch
+// is recorded as the entry's startIfaceEpoch (#4961): callers passing a
+// restart capture m.ifaceEpoch[name]; all other retirements pass 0 (unused —
+// their release passes onProvenClose=nil). goodbyeWanted marks a graceful
+// retirement that owes a final lifetime-0 goodbye. Callers must hold m.mu
+// and own the returned entry's release (releaseDrain).
+func (m *Manager) retireSenderLocked(name string, s *sender, mode shutdownMode, goodbyeWanted bool, restartEpoch uint64) *drainEntry {
+	delete(m.senders, name)
+	e := &drainEntry{sender: s, cfg: s.cfg, goodbyeWanted: goodbyeWanted, startIfaceEpoch: restartEpoch}
+	m.draining[name] = e
+	s.signalStop(mode)
+	return e
+}
 
 // recordGoodbyeDebtLocked retains the #6777 retry debt for a FAILED final
 // lifetime-0 goodbye on name, so a later Apply can re-attempt it. Callers hold
@@ -790,9 +806,7 @@ func (m *Manager) Apply(configs []*config.RAInterfaceConfig) error {
 	for name, s := range m.senders {
 		if _, ok := desired[name]; !ok {
 			slog.Info("ra: withdrawing removed sender (graceful goodbye)", "interface", name)
-			delete(m.senders, name)
-			m.draining[name] = &drainEntry{sender: s, cfg: s.cfg, goodbyeWanted: true}
-			s.signalStop(modeGraceful)
+			m.retireSenderLocked(name, s, modeGraceful, true, 0)
 			toStop = append(toStop, stopReq{name, s})
 		}
 	}
@@ -826,18 +840,12 @@ func (m *Manager) Apply(configs []*config.RAInterfaceConfig) error {
 			} else {
 				slog.Info("ra: restarting sender", "interface", name)
 			}
-			delete(m.senders, name)
 			// #4961: record THIS interface's per-interface epoch on the restart
 			// tombstone. releaseDrain starts the replacement only if the epoch is
 			// still this value — an interface-scoped withdraw naming this
 			// interface bumps it and suppresses the (now-superseded) restart,
 			// while a withdraw of a DIFFERENT interface leaves it untouched.
-			m.draining[name] = &drainEntry{
-				sender:          existing,
-				cfg:             existing.cfg,
-				startIfaceEpoch: m.ifaceEpoch[name],
-			}
-			existing.signalStop(modeHard)
+			m.retireSenderLocked(name, existing, modeHard, false, m.ifaceEpoch[name])
 			toStop = append(toStop, stopReq{name, existing})
 			toRestart = append(toRestart, cfg)
 			continue
@@ -1064,32 +1072,6 @@ func (m *Manager) collectGracefulWithdrawLocked() ([]ownedDrain, uint64) {
 	return m.claimGracefulLocked(names), m.epoch
 }
 
-// WithdrawInterfaces sends goodbye RAs and stops senders only for the named
-// interfaces. Other senders are left running.
-func (m *Manager) WithdrawInterfaces(names []string) {
-	m.mu.Lock()
-	// #4961: bump ONLY the per-interface epochs for the named interfaces, NOT
-	// the whole-manager fence. Bumping the global fence made this cancel an
-	// UNRELATED interface's in-flight changed-config restart (IPv6 loss on that
-	// interface). Interface-scoped supersession is now scoped to `names`.
-	for _, name := range names {
-		m.bumpIfaceEpoch(name)
-		m.clearWantedLocked(name)
-	}
-	owned := m.claimGracefulLocked(names)
-	epoch := m.epoch
-	m.mu.Unlock()
-	for _, o := range owned {
-		// #6777: no error return to thread this through (this entry point has
-		// no production caller today), but a failed final goodbye still leaves
-		// retry debt that the next Apply picks up. Log which interface it was.
-		if err := m.releaseDrain(o.name, o.s, epoch, nil); err != nil {
-			slog.Warn("ra: interface-scoped withdraw failed",
-				"interface", o.name, "err", err)
-		}
-	}
-}
-
 // ClearInterfacesWithoutGoodbye stops only the named senders without emitting
 // lifetime-0 RAs. It cancels pending replacements and discards current or late
 // retry debt; a goodbye already requested by another operation cannot be
@@ -1113,9 +1095,7 @@ func (m *Manager) ClearInterfacesWithoutGoodbye(names []string) error {
 		m.goodbyeSuppressed[name] = true
 		delete(m.goodbyeOwed, name)
 		if s, ok := m.senders[name]; ok {
-			delete(m.senders, name)
-			m.draining[name] = &drainEntry{sender: s, cfg: s.cfg}
-			s.signalStop(modeHard)
+			m.retireSenderLocked(name, s, modeHard, false, 0)
 			owned = append(owned, ownedDrain{name: name, s: s})
 			continue
 		}
@@ -1168,9 +1148,7 @@ func (m *Manager) claimGracefulLocked(names []string) []ownedDrain {
 		seen[name] = struct{}{}
 		if s, ok := m.senders[name]; ok {
 			slog.Info("ra: sending goodbye RA", "interface", name)
-			delete(m.senders, name)
-			m.draining[name] = &drainEntry{sender: s, cfg: s.cfg, goodbyeWanted: true}
-			s.signalStop(modeGraceful)
+			m.retireSenderLocked(name, s, modeGraceful, true, 0)
 			owned = append(owned, ownedDrain{name: name, s: s})
 			continue
 		}
@@ -1180,9 +1158,11 @@ func (m *Manager) claimGracefulLocked(names []string) []ownedDrain {
 			// the standalone if owed, and upgrade the still-running sender (if
 			// any) so it may emit the goodbye itself. We do NOT take the release.
 			e.goodbyeWanted = true
-			if e.cfg == nil {
-				e.cfg = m.cfgForName(name)
-			}
+			// e.cfg stays as-is: a nil-cfg entry (a WithdrawOnce claim)
+			// carries no config to synthesize a standalone goodbye from, so
+			// leave it nil and rely on that claim's own goodbye (exactly
+			// one). There is no config lookup to consult here (#17160:
+			// cfgForName was a stub that always returned nil).
 			if e.sender != nil {
 				slog.Info("ra: upgrading draining sender to graceful goodbye",
 					"interface", name)
@@ -1194,13 +1174,6 @@ func (m *Manager) claimGracefulLocked(names []string) []ownedDrain {
 	}
 	return owned
 }
-
-// cfgForName returns a config to build a standalone goodbye from for name, when
-// an existing drainEntry was a nil-cfg claim (e.g. a WithdrawOnce entry). Best
-// effort: a WithdrawOnce entry carries no cfg, so a graceful Withdraw that
-// races it cannot synthesize one — return nil and rely on the WithdrawOnce's
-// own goodbye (it emits exactly one). Callers hold m.mu.
-func (m *Manager) cfgForName(string) *config.RAInterfaceConfig { return nil }
 
 // ResendBurst tells all running senders to re-send their startup burst. Used
 // after RETH MAC link cycles that kill the NDP socket — the sender restarts but
@@ -1306,7 +1279,7 @@ func (m *Manager) claimWithdrawOnceLocked(configs []*config.RAInterfaceConfig) [
 	//
 	// The invariant this package runs on is that a supersession bump
 	// accompanies real superseding RESPONSIBILITY. Withdraw flips the global
-	// fence and owns every drain. WithdrawInterfaces bumps and then flips
+	// fence and owns every drain. An interface-scoped graceful withdraw bumps and then flips
 	// goodbyeWanted on the entry it supersedes, so even its already-draining
 	// path takes over the goodbye. The skip path below does NEITHER — it emits
 	// nothing, claims nothing, and reports Skipped — so bumping there
@@ -1382,7 +1355,12 @@ func (m *Manager) sendOneGoodbye(cfg *config.RAInterfaceConfig) error {
 	return nil
 }
 
-// Clear stops all senders without sending goodbye RAs.
+// Clear stops all senders without sending goodbye RAs. It returns the
+// errors.Join of the per-interface release outcomes (#17160): the only
+// failure a pure Clear can surface is a goodbye claimed by a racing
+// graceful Withdraw that this Clear owns the release for — previously
+// clearLocked logged that failure and returned a constant nil (the #6777
+// shape), so the shutdown caller's error branch was unreachable.
 func (m *Manager) Clear() error {
 	m.mu.Lock()
 	m.bumpEpoch()
@@ -1396,7 +1374,8 @@ func (m *Manager) Clear() error {
 // join+release each, then re-acquires — so it returns with m.mu held (matching
 // its callers). No goodbye is emitted for a pure Clear (modeHard); but if a
 // racing graceful Withdraw flipped goodbyeWanted on an entry, clearLocked's
-// release path emits the standalone goodbye (claim-once, held across the emit).
+// release path emits the standalone goodbye (claim-once, held across the emit)
+// and that release's failure is aggregated into the returned error (#17160).
 func (m *Manager) clearLocked() error {
 	clear(m.wantedNotStarted)
 	if len(m.senders) == 0 {
@@ -1408,11 +1387,9 @@ func (m *Manager) clearLocked() error {
 	}
 	var ps []pending
 	for name, s := range m.senders {
-		delete(m.senders, name)
 		// drainEntry with the sender so a racing graceful Withdraw can flip
 		// goodbyeWanted + upgrade the live sender (#2033 MAJOR 2).
-		m.draining[name] = &drainEntry{sender: s, cfg: s.cfg}
-		s.signalStop(modeHard)
+		m.retireSenderLocked(name, s, modeHard, false, 0)
 		ps = append(ps, pending{name, s})
 	}
 	epoch := m.epoch
@@ -1423,19 +1400,22 @@ func (m *Manager) clearLocked() error {
 	// goodbye if a racing Withdraw wanted one. nil onProvenClose: Clear never
 	// starts a replacement.
 	m.mu.Unlock()
+	var errs []error
 	for _, p := range ps {
 		// Clear is the explicit NO-goodbye primitive, so a goodbye is owed here
 		// only when a racing graceful Withdraw flipped goodbyeWanted on one of
 		// these entries. That Withdraw does not own the release and cannot
-		// observe the outcome, so this log (plus the #6777 retry debt) is the
-		// only surface for it.
+		// observe the outcome: aggregate it into Clear's return (and the
+		// #6777 retry debt retains it for the next Apply) instead of only
+		// logging it behind a constant nil.
 		if err := m.releaseDrain(p.name, p.s, epoch, nil); err != nil {
 			slog.Warn("ra: clear: a goodbye claimed by a racing withdraw failed",
 				"interface", p.name, "err", err)
+			errs = append(errs, err)
 		}
 	}
 	m.mu.Lock()
-	return nil
+	return errors.Join(errs...)
 }
 
 // SenderInfo holds per-interface RA sender status for display.

@@ -65,7 +65,7 @@ func signature8807(t *testing.T, text string) (js string, warnings int, strictOK
 	cfg.Warnings = nil
 	b, _ := json.Marshal(cfg)
 	strictTree, _ := NewParser(text).Parse()
-	_, serr := compileTree(strictTree, compileOpts{}, nil)
+	_, serr := compileTree(strictTree, strictCompileOpts(), nil)
 	return string(b), warnings, serr == nil
 }
 

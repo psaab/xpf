@@ -1768,11 +1768,13 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 		TXIfindex:        int(int32(binary.LittleEndian.Uint32(payload[18:22]))),
 		TunnelEndpointID: binary.LittleEndian.Uint16(payload[22:24]),
 		TXVLANID:         binary.LittleEndian.Uint16(payload[24:26]),
-		// #3075: bytes [27:29]/[29:31] are u16 LE ingress/egress zone IDs
-		// written by the Rust codec (widened from the u8 [27]/[28] of #919/#922
-		// so a stable name-hash zone id > 255 round-trips).
-		IngressZoneID:  binary.LittleEndian.Uint16(payload[27:29]),
-		EgressZoneID:   binary.LittleEndian.Uint16(payload[29:31]),
+		// #3075/#18148: bytes [27:29]/[29:31] are u16 LE ingress/egress zone
+		// IDs written by the Rust codec (session_sync.rs casts the u32
+		// metadata `as u16`). The binary frame is GENUINELY u16 — unlike
+		// the JSON leg, which carries the full u32 — so this zero-extends
+		// and values are capped at 65535 by this wire, not by the type.
+		IngressZoneID:  uint32(binary.LittleEndian.Uint16(payload[27:29])),
+		EgressZoneID:   uint32(binary.LittleEndian.Uint16(payload[29:31])),
 		FabricRedirect: flags&SessionEventFlagFabricRedirect != 0,
 		FabricIngress:  flags&SessionEventFlagFabricIngress != 0,
 		// #2785: per-policy log selection from the open-frame flags byte.
@@ -2014,8 +2016,11 @@ func decodeSessionCloseEvent(payload []byte) (SessionDeltaInfo, bool) {
 	// trailer leaves them 0 and the daemon falls back to the legacy zone-name
 	// string (empty for close events, which drops the close).
 	if len(payload) >= off+4 {
-		d.IngressZoneID = binary.LittleEndian.Uint16(payload[off : off+2])
-		d.EgressZoneID = binary.LittleEndian.Uint16(payload[off+2 : off+4])
+		// #18148: binary close trailer is genuinely u16 (Rust encode casts
+		// `as u16`); zero-extend into the u32 field. The JSON leg differs
+		// by carrying the full u32 — see SessionDeltaInfo.
+		d.IngressZoneID = uint32(binary.LittleEndian.Uint16(payload[off : off+2]))
+		d.EgressZoneID = uint32(binary.LittleEndian.Uint16(payload[off+2 : off+4]))
 		off += 4
 	}
 	// #7188: trailing tunnel discriminator (u64 LE), length-gated. A close names

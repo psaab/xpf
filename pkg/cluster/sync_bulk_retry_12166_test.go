@@ -74,8 +74,8 @@ func TestForcedResyncRetriesWithheldBulk12166(t *testing.T) {
 	primary.mu.Unlock()
 	primary.stats.Connected.Store(true)
 	mkDelete := func(n int) []byte { return encodeDeleteV4(deleteKeyN(n), 0, false) }
-	primary.deleteJournalCap = 2
-	primary.deleteJournal = [][]byte{mkDelete(1), mkDelete(2), mkDelete(3)}
+	primary.deleteJournal.cap = 2
+	primary.deleteJournal.entries = [][]byte{mkDelete(1), mkDelete(2), mkDelete(3)}
 	primary.rejournalTail([][]byte{mkDelete(4), mkDelete(5), mkDelete(6)})
 	if !primary.forceResync.Load() || primary.needColdPrime.Load() {
 		t.Fatalf("fixture must arm only forced resync: force=%v cold-prime=%v",
