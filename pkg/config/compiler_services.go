@@ -2719,15 +2719,11 @@ func compileDHCPRelay(node *Node, fo *ForwardingOptionsConfig) error {
 				// Keys[1:] (flat-set replay may carry trailing values
 				// as children); braced block `interface { a; b; }`
 				// holds one child per interface. nodeVal kept only the
-				// first of each.
-				for _, k := range prop.Keys[1:] {
-					g.Interfaces = append(g.Interfaces, k)
-				}
-				for _, child := range prop.Children {
-					if v := child.Name(); v != "" {
-						g.Interfaces = append(g.Interfaces, v)
-					}
-				}
+				// first of each. The member list itself is read by the
+				// shared dhcpRelayGroupInterfaces (#17205) so the v4
+				// compiler, the v6 compiler and the v6 gate judge the
+				// same tokens.
+				g.Interfaces = append(g.Interfaces, dhcpRelayGroupInterfaces(prop)...)
 			case "active-server-group":
 				g.ActiveServerGroup = nodeVal(prop)
 			case "overrides":
