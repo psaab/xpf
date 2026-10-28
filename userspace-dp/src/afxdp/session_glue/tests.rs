@@ -24542,7 +24542,7 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
 fn deferred_forwarding_revalidation_persist_is_single_sourced_17063() {
     let resolve_raw = include_str!("resolve.rs");
     let poll_raw = include_str!("../poll_descriptor/mod.rs");
-    let blank = crate::afxdp::worker_queue::tests::blank_comments_and_strings;
+    let blank = crate::test_support::source_scan::blank_comments_and_strings;
     let resolve_owned = blank(resolve_raw);
     let poll_owned = blank(poll_raw);
     let resolve = resolve_owned.as_str();

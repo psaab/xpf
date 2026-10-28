@@ -1,8 +1,6 @@
 package configstore
 
 import (
-	"fmt"
-
 	"github.com/psaab/xpf/pkg/config"
 )
 
@@ -147,16 +145,7 @@ func RenderRollbackInheritanceRedacted(tree *config.ConfigTree, path []string, n
 	return RenderShowInheritanceRedacted(tree, path, nodeID)
 }
 
-// RollbackSnapshotErr reports whether a rollback slot snapshot exists;
-// gates price a nil snapshot as "renders nothing", handlers must still
-// surface the slot error. Kept beside the renderers so the two halves
-// of the contract stay in one file.
-func (s *Store) RollbackSnapshotErr(n int) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, err := s.rollbackTree(n)
-	if err != nil {
-		return fmt.Errorf("%w", err)
-	}
-	return nil
-}
+// The rollback slot error travels inside RollbackCapture.Err
+// (#17215): gates price a nil Slot as "renders nothing", handlers
+// surface capture.Err before rendering — no second live-store read
+// re-derives it.

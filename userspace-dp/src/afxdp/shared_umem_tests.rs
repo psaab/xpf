@@ -1,6 +1,18 @@
 use super::*;
+use crate::protocol::SharedUmemSnapshot;
 use serde_json::json;
 use std::sync::Arc;
+
+// #18234: `ConfigSnapshot.userspace` is the typed `UserspaceSnapshot`
+// (#17134/#17149), not a `serde_json::Value`. Build it directly; the
+// remaining `json!` uses below are wire-decode cases that must still
+// exercise the typed serde path.
+fn typed_userspace(shared_umem: SharedUmemSnapshot) -> crate::protocol::UserspaceSnapshot {
+    crate::protocol::UserspaceSnapshot {
+        shared_umem: Some(shared_umem),
+        ..Default::default()
+    }
+}
 
 #[test]
 fn policy_defaults_to_cross_nic_auto() {
@@ -13,12 +25,10 @@ fn policy_defaults_to_cross_nic_auto() {
 #[test]
 fn explicit_off_disables_shared_umem() {
     let snapshot = ConfigSnapshot {
-        userspace: serde_json::from_value(json!({
-            "shared_umem": {
-                "mode": "off"
-            }
-        }))
-        .unwrap(),
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "off".to_string(),
+            ..Default::default()
+        }),
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
@@ -28,13 +38,11 @@ fn explicit_off_disables_shared_umem() {
 #[test]
 fn explicit_interfaces_limit_policy_candidates() {
     let snapshot = ConfigSnapshot {
-        userspace: serde_json::from_value(json!({
-            "shared_umem": {
-                "mode": "cross-nic",
-                "interfaces": ["lan0", "wan0"]
-            }
-        }))
-        .unwrap(),
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "cross-nic".to_string(),
+            interfaces: vec!["lan0".to_string(), "wan0".to_string()],
+            ..Default::default()
+        }),
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
@@ -136,12 +144,10 @@ fn null_userspace_decodes_as_default() {
 #[test]
 fn same_device_debug_auto_selects_all_interfaces() {
     let snapshot = ConfigSnapshot {
-        userspace: serde_json::from_value(json!({
-            "shared_umem": {
-                "mode": "same-device-debug"
-            }
-        }))
-        .unwrap(),
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "same-device-debug".to_string(),
+            ..Default::default()
+        }),
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
@@ -181,12 +187,10 @@ fn off_policy_clears_stale_shared_status() {
     };
     let mut workers = BTreeMap::from([(0, vec![plan])]);
     let snapshot = ConfigSnapshot {
-        userspace: serde_json::from_value(json!({
-            "shared_umem": {
-                "mode": "off"
-            }
-        }))
-        .unwrap(),
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "off".to_string(),
+            ..Default::default()
+        }),
         ..ConfigSnapshot::default()
     };
     apply_shared_umem_policy_to_workers(&snapshot, &mut workers);
@@ -243,16 +247,11 @@ fn shared_umem_mode_unknown_falls_back_off_17149() {
         );
     }
     // Snapshot-level: a typo'd mode yields an Off policy, not CrossNic.
-    // #17200: decode through `serde_json::from_value` as the sibling
-    // cells do — #17134 typed `userspace` as `UserspaceSnapshot`, so a
-    // bare `json!` Value no longer type-checks here.
     let snapshot = ConfigSnapshot {
-        userspace: serde_json::from_value(json!({
-            "shared_umem": {
-                "mode": "cross-nick"
-            }
-        }))
-        .expect("typo'd shared_umem mode decodes"),
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "cross-nick".to_string(),
+            ..Default::default()
+        }),
         ..ConfigSnapshot::default()
     };
     assert_eq!(

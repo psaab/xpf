@@ -2099,7 +2099,7 @@ fn restamp_bpf_conntrack_app_id_raw(
 /// Without periodic refresh, Go callers of `IterateSessions` (CLI session
 /// display, Prometheus metrics, ARP warmup, HA sync) see stale idle times.
 ///
-/// The Go GC has `SkipSweep` set when the userspace DP is active, so stale
+/// The retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) never ran on the userspace DP, so stale
 /// `last_seen` will NOT cause premature expiry. This refresh is purely for
 /// diagnostic accuracy.
 ///

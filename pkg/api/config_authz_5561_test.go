@@ -359,7 +359,7 @@ func TestAuthorizedPrincipalStillMutatesConfig_5561(t *testing.T) {
 // that in the opposite direction.
 //
 // What survives here is the half that must NEVER change: /health and /metrics
-// carry no configuration, are exempt in authCheck, and are read by the in-tree
+// carry no configuration, are exempt in the auth check, and are read by the in-tree
 // incus harnesses. A gate that took them down would break monitoring on every
 // box, which is the failure this test exists to catch.
 func TestReadOnlyEndpointsUnaffected_5561(t *testing.T) {

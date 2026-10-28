@@ -338,7 +338,7 @@ pub(crate) struct PolicyEvaluationResult {
     pub(crate) log_session_close: bool,
     /// #3227: the matched application term's per-application inactivity (idle)
     /// timeout in SECONDS, carried so the session-install path can stamp it so
-    /// the conntrack GC ages the session out on the app's value instead of the
+    /// the helper's expiry ages the session out on the app's value instead of the
     /// global per-protocol timeout. `None` means "use the global timeout"
     /// (the default-action path and any non-app-timeout match), which is
     /// byte-identical to pre-#3227 behavior.
@@ -1196,7 +1196,7 @@ pub(crate) struct ApplicationMatch {
     /// `Some(t)` (t > 0) overrides the global per-protocol session timeout for a
     /// flow admitted by this term; `None` (or 0) leaves the global timeout in
     /// effect (back-compat). Carried from the matched term into the session at
-    /// install so the conntrack GC ages the session out on the app's value.
+    /// install so the helper's expiry ages the session out on the app's value.
     pub(crate) inactivity_timeout: Option<u32>,
 }
 

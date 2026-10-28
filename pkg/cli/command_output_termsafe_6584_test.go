@@ -112,15 +112,18 @@ var declaredUnsanitizedForks = []forkExemption{
 		"ip -6 neigh flush — as above. Tracked separately"},
 
 	// ---- the exec plumbing itself ----
-	{"../grpcapi", "exec_timeout.go", "combinedOutputTimeout", "exec helper, not a display site"},
-	{"../grpcapi", "exec_timeout.go", "combinedOutputTimeoutUnlimited", "exec helper"},
-	{"../grpcapi", "exec_timeout.go", "outputTimeout", "exec helper"},
-	{"../grpcapi", "exec_timeout.go", "outputTimeoutUnlimited", "exec helper"},
-	{"../grpcapi", "exec_timeout.go", "runTimeout", "exec helper; discards output"},
 
 	// ---- destructive admin actions, output only in errors ----
 	{"../grpcapi", "server_diag_system_action.go", "SystemAction",
 		"ip neigh flush; output only in an error string. Tracked separately"},
+	{"../grpcapi", "exec_timeout.go", "combinedOutputTimeout", "exec helper, not a display site"},
+	{"../grpcapi", "exec_timeout.go", "combinedOutputTimeoutUnlimited", "exec helper; delegates to diagcmd (#17203)"},
+	{"../grpcapi", "exec_timeout.go", "outputTimeout", "exec helper"},
+	{"../grpcapi", "exec_timeout.go", "outputTimeoutUnlimited", "exec helper; delegates to diagcmd (#17203)"},
+	{"../grpcapi", "exec_timeout.go", "runTimeout", "exec helper; discards output; delegates to diagcmd (#17203)"},
+	{"../diagcmd", "diagcmd.go", "CombinedOutputTimeout", "shared exec helper (#17203), not a display site"},
+	{"../diagcmd", "diagcmd.go", "OutputTimeout", "shared exec helper (#17203)"},
+	{"../diagcmd", "diagcmd.go", "RunTimeout", "shared exec helper (#17203); discards output"},
 	{"../factoryreset", "exec.go", "combinedOutputTimeoutUnlimited", "exec helper"},
 	{"../factoryreset", "wipe.go", "<package-scope>",
 		"zeroize userdel / passwd -l root / pkill / pgrep; output only in errors. Tracked separately"},
@@ -130,6 +133,10 @@ var forkCallees = map[string]bool{
 	"exec.Command": true, "exec.CommandContext": true,
 	"combinedOutputTimeout": true, "outputTimeout": true,
 	"combinedOutputTimeoutUnlimited": true, "outputTimeoutUnlimited": true,
+	// #17203: the shared diagcmd helpers are the sole fork implementation
+	// behind the wrappers above; sites calling them are display sites too.
+	"diagcmd.CombinedOutputTimeout": true, "diagcmd.OutputTimeout": true,
+	"diagcmd.RunTimeout": true,
 }
 
 // TestEveryCommandOutputDisplaySiteIsSanitizedOrDeclared6584 is the tripwire.
@@ -148,7 +155,7 @@ func TestEveryCommandOutputDisplaySiteIsSanitizedOrDeclared6584(t *testing.T) {
 	var undeclared []string
 	scanned := 0
 
-	for _, dir := range []string{"../cli", "../grpcapi", "../ipsec", "../factoryreset"} {
+	for _, dir := range []string{"../cli", "../grpcapi", "../ipsec", "../factoryreset", "../diagcmd"} {
 		ents, err := os.ReadDir(dir)
 		if err != nil {
 			t.Fatalf("read %s: %v", dir, err)
