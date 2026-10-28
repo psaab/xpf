@@ -30,11 +30,13 @@ type SystemConfig struct {
 	NTPServerOptions map[string]NTPServerOption
 	// NTPPeers / NTPPeerOptions carry `system ntp peer <addr>` (#15709),
 	// rendered as chrony `peer` directives. Mirror of NTPServers/
-	// NTPServerOptions for the symmetric-mode sources.
-	NTPPeers       []string                   `json:"-"`
-	NTPPeerOptions map[string]NTPServerOption `json:"-"`
+	// NTPServerOptions for the symmetric-mode sources. These authored runtime
+	// semantics are visible in compiled-config JSON and ConfigFingerprint.
+	NTPPeers       []string                   `json:"NTPPeers"`
+	NTPPeerOptions map[string]NTPServerOption `json:"NTPPeerOptions"`
 	// NTPTrustedKeyIDs carries `system ntp trusted-key <id>` ids (#15709),
-	// retained keyword-only for the commit advisory; no key material.
+	// retained only to name the commit advisory; no key material or runtime
+	// config. ConfigFingerprint excludes this diagnostic via fingerprintIgnore.
 	NTPTrustedKeyIDs []int `json:"-"`
 	// NTPServerKeyIDs carries the per-server `key <id>` ids stripped by
 	// the compiler (#14596): xpf writes no chrony keyfile, so a rendered
@@ -214,7 +216,8 @@ type UserspaceConfig struct {
 	// in #1525) were present in the compiled tree. They are accepted for
 	// stored-config compatibility but have no effect; the compiler turns
 	// each into a commit warning (userspaceRetiredKnobWarnings, #1892).
-	// Compile-time bookkeeping only — never serialized.
+	// Compile-time bookkeeping only — never serialized or compared by
+	// ConfigFingerprint (fingerprintIgnore).
 	RetiredKnobsSeen []string `json:"-"`
 }
 
@@ -651,7 +654,8 @@ type SystemSyslogConfig struct {
 	DefaultSourceAddress string `json:"-"`
 	// TopLevelInert holds sorted top-level syslog keywords xpf does not
 	// apply (console, time-format, archive, log-rotate-frequency) for
-	// the #15709 commit advisory. Keywords only, never values.
+	// the #15709 commit advisory. Keywords only, never values. ConfigFingerprint
+	// excludes this warning-only record via fingerprintIgnore.
 	TopLevelInert []string `json:"-"`
 }
 

@@ -378,7 +378,19 @@ func TestUserspaceXDPTaggedOnlyVID0LocalDropsAndControls12055(t *testing.T) {
 			})
 			ifindex := userspaceXDPTestRunIfindex(t)
 			updateUserspaceXDPTestMap(t, coll, mapNameUserspaceIngressIfaces, ifindex, tc.flags)
-			updateUserspaceXDPTestMap(t, coll, mapNameUserspaceIngressDomains, userspaceIngressDomainKey{Ifindex: ifindex, VLANID: userspaceIngressDomainUntaggedVLANID}, uint32(0))
+			// #18322: use the production domain producer so the direct
+			// PROG_RUN fixture cannot drift from per-wire-VID keying.
+			// This tagged-only parent has unit VIDs 50 and 100;
+			// singleTagIPv4UDP uses TCI VID 100.
+			testIfindex := int(ifindex)
+			domainSnapshot := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
+				{Name: "test-parent", Ifindex: testIfindex, Zone: "test"},
+				{Name: "test-parent.50", Ifindex: testIfindex + 1, ParentIfindex: testIfindex, VLANID: 50, IsUnit: true, Zone: "test"},
+				{Name: "test-parent.100", Ifindex: testIfindex + 2, ParentIfindex: testIfindex, VLANID: 100, IsUnit: true, Zone: "test"},
+			}}
+			for key, domain := range buildUserspaceIngressDomainEntries(domainSnapshot) {
+				updateUserspaceXDPTestMap(t, coll, mapNameUserspaceIngressDomains, key, domain)
+			}
 			updateUserspaceXDPTestBinding(t, coll, userspaceXDPTestRunBindingIndex(t, 0), userspaceBindingValue{
 				Slot: 0, Flags: userspaceBindingReady,
 			})

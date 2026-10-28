@@ -177,10 +177,9 @@ func TestStrictStillRejectsEmptyMatch_9874(t *testing.T) {
 	}
 }
 
-// The marker is a compile-time diagnostic (`json:"-"`): it must not join the
-// typed Config's JSON (no #4406 golden churn) and the fingerprint therefore
-// cannot see it — assert both, so a retag reds here rather than as a golden
-// avalanche.
+// The marker is a compile-time diagnostic: `json:"-"` keeps it out of typed
+// Config JSON, while fingerprintIgnore keeps it out of semantic comparison.
+// Assert both so removing either boundary fails here, not as a golden avalanche.
 func TestLenientMatchDroppedNotSerialized_9874(t *testing.T) {
 	r := &NATRule{Name: "r", LenientMatchDropped: true}
 	j, err := json.Marshal(r)
