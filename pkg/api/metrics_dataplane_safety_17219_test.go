@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // #17219: the #16202 table made every family — dataplane-safety
@@ -15,12 +17,16 @@ import (
 //
 // RED pre-fix: restoring the lazy Once field (or the stale deferral
 // comment) makes the issue's acceptance greps non-zero, and reverting
-// init to lazy allocation would leave the
-// fields nil after newCollector. GREEN post-fix: newCollector allocates
+// init to lazy allocation would leave the fields nil after
+// newCollector. The literal-collector half below is RED on the
+// unguarded emit: with a real dataplane wired, mgmtview.Probe
+// resolves, emit reaches emitConstMetric with nil descriptors, and
+// client_golang NewConstMetric dereferences desc.err — a panic
+// (proven firsthand). GREEN post-fix: newCollector allocates each
 // dataplane-safety descriptor at construction, and a
-// literal-constructed collector (which never ran newCollector) emits
-// nothing and does not panic — emitConstMetric skips its nil
-// descriptors instead of the old Once lazily allocating them.
+// literal-constructed collector with a real dataplane emits
+// nothing, does not panic, and counts one skipped series per
+// nil descriptor in counterReadErrors.
 func TestDataplaneSafetyDescriptorsEagerNoOnce17219(t *testing.T) {
 	// Eager at construction: every descriptor the family row names is
 	// non-nil immediately after newCollector, before any Describe or
@@ -40,14 +46,20 @@ func TestDataplaneSafetyDescriptorsEagerNoOnce17219(t *testing.T) {
 		}
 	}
 
-	// Literal collector: never initialized, so emit is a no-op (via
-	// mgmtview.Probe on a nil dp) and must not panic or allocate the
-	// family lazily.
-	lit := &xpfCollector{}
+	// Literal collector with a REAL dataplane: Probe resolves, so
+	// emit reaches every nil-Desc series. Pre-fix this panicked in
+	// NewConstMetric (nil desc.err deref); post-fix each series is
+	// skipped and counted, nothing is emitted, and no descriptor is
+	// lazily allocated. The arm-proof series are not reached (no
+	// completed proof), so exactly the first three series count.
+	lit := &xpfCollector{deps: collectorDeps{dp: dataplane.New()}}
 	ch := make(chan prometheus.Metric, 16)
 	lit.emitDataplaneSafety(ch)
 	if n := len(ch); n != 0 {
 		t.Errorf("literal collector emitted %d metrics, want 0", n)
+	}
+	if got := lit.counterReadErrors.Load(); got != 3 {
+		t.Errorf("literal collector counterReadErrors = %d, want 3 (one per skipped nil-Desc series)", got)
 	}
 	for name, field := range map[string]**prometheus.Desc{
 		"dataplaneObsoleteRegistryAccesses": &lit.dataplaneObsoleteRegistryAccesses,
