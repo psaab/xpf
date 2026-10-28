@@ -308,7 +308,12 @@ func indexSpan(src string, names []string, from int) int {
 // occurrence, so an identical full-set run appended to a covered
 // file — or a full-set-length run in any position the extractor
 // does not check — reds unless allowlisted, and allowlist entries
-// in covered files can go stale. Counts were inventoried at #17101.
+// in covered files can go stale. docs/ is censused like any other
+// path (no path-prefix exemption): the historical docs/**/*.sh
+// evidence scripts below are allowlisted per file with reasons, and
+// their entries double as a pin — re-exempting docs/ would leave
+// them unconsumed and red on the stale check. Counts were
+// inventoried at #17101.
 var censusAllowlist = map[string][]string{
 	// Derives BINS from seed_layout._BINS (bins.txt), so it contains
 	// no >=3 run; kept with zero runs so a retyped list would need a
@@ -354,7 +359,35 @@ var censusAllowlist = map[string][]string{
 	// literals below — inputs to the code under test.
 	"pkg/upgrade/manifest/manifest_drift_test.go": {
 		"test-fixture", "test-fixture", "test-fixture", "test-fixture",
-		"test-fixture", "test-fixture",
+		"test-fixture", "test-fixture", "test-fixture",
+	},
+	// Historical #9486 evidence scripts (frozen records of the
+	// text-boot validation runs, not production sites or the managed
+	// set definition): each re-points the three version-symlinked
+	// binaries of an old version dir
+	// (`for b in xpfd cli xpf-userspace-dp; do ln -sfn
+	// $VD/current/$b /usr/local/sbin/$b; done`); xpf-day0-config is
+	// not a version-symlinked binary and so is absent by design.
+	"docs/pr/9486/cellb-warn-textboot.sh": {
+		"historical-evidence-loop-missing-xpf-day0-config",
+	},
+	"docs/pr/9486/cellc-textboot-primary.sh": {
+		"historical-evidence-loop-missing-xpf-day0-config",
+	},
+	"docs/pr/9486/celld-pin-after-boot.sh": {
+		"historical-evidence-loop-missing-xpf-day0-config",
+	},
+	"docs/pr/9486/celle-adjacent-rollback.sh": {
+		"historical-evidence-loop-missing-xpf-day0-config",
+	},
+	"docs/pr/9486/cellf-clockfix-closure.sh": {
+		"historical-evidence-loop-missing-xpf-day0-config",
+	},
+	"docs/pr/9486/recover-textboot.sh": {
+		"historical-evidence-loop-missing-xpf-day0-config",
+	},
+	"docs/pr/9486/rollback-recut.sh": {
+		"historical-evidence-loop-missing-xpf-day0-config",
 	},
 }
 
@@ -558,9 +591,14 @@ func firstLineOf(root, rel string) (string, error) {
 // basename Makefile, a first-line shell shebang (any extension or
 // none — e.g. debian/xpf.prerm), or the explicit manifest-package
 // files — NOT every tracked file: prose formats (.md/.txt/.yaml)
-// and Go/Rust sources are out of scope by design. The census is the
+// and Go/Rust sources are out of scope by design. No path prefix is
+// exempt: docs/ is censused like everything else, and its
+// historical docs/**/*.sh evidence runs are allowlisted per file
+// with reasons in censusAllowlist (their stale check also pins the
+// absence of a docs/ exemption). The census is the
 // coverage claim: a new duplicated list anywhere in scope —
-// including an identical full-set list appended to a covered file —
+// including an identical full-set list appended to a covered file
+// or to docs/research/1880-boot-budget/measure-boot.sh —
 // reds this test until it is covered or allowlisted with a reason.
 func TestManagedBinaryDriftCanary(t *testing.T) {
 	root := repoRoot(t)
@@ -663,9 +701,6 @@ func TestManagedBinaryDriftCanary(t *testing.T) {
 			continue
 		}
 		seenFile[rel] = true
-		if strings.HasPrefix(rel, "docs/") {
-			continue
-		}
 		src := readFile(t, root, rel)
 		for _, hit := range censusRuns(src, nameSet) {
 			hit.file = rel
