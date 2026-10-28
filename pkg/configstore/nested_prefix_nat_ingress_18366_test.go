@@ -58,6 +58,38 @@ firewall {
     }
 }`,
 		},
+		{
+			name: "brace-elided firewall prefix-list",
+			leaf: "source-prefix-list",
+			config: `policy-options {
+    prefix-list pl1 { 10.0.0.0/8; }
+}
+firewall {
+    family inet {
+        filter f {
+            term t from source-prefix-list {
+                pl1 { unexpected { 10.0.0.0/8; } }
+            } then accept;
+        }
+    }
+}`,
+		},
+		{
+			name: "brace-elided NAT source-address",
+			leaf: "source-address",
+			config: `security {
+    zones { security-zone trust; security-zone untrust; }
+    nat {
+        source {
+            rule-set rs from zone trust to zone untrust {
+                rule r match source-address 10.0.0.0/8 {
+                    unexpected { 192.0.2.0/24; }
+                } then source-nat interface;
+            }
+        }
+    }
+}`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

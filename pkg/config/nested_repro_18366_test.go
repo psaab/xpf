@@ -351,6 +351,88 @@ func TestNestedPrefixNATContentRejected18366(t *testing.T) {
 	}
 }
 
+func TestBraceElidedPrefixNATContentRejected18366(t *testing.T) {
+	const prefixNested = `policy-options {
+    prefix-list pl1 { 10.0.0.0/8; }
+}
+firewall {
+    family inet {
+        filter f {
+            term t from source-prefix-list {
+                pl1 { unexpected { 10.0.0.0/8; } }
+            } then accept;
+        }
+    }
+}`
+	const prefixPlain = `policy-options {
+    prefix-list pl1 { 10.0.0.0/8; }
+}
+firewall {
+    family inet {
+        filter f {
+            term t from source-prefix-list pl1 then accept;
+        }
+    }
+}`
+	const natNested = `security {
+    zones { security-zone trust; security-zone untrust; }
+    nat {
+        source {
+            rule-set rs from zone trust to zone untrust {
+                rule r match source-address 10.0.0.0/8 {
+                    unexpected { 192.0.2.0/24; }
+                } then source-nat interface;
+            }
+        }
+    }
+}`
+	const natPlain = `security {
+    zones { security-zone trust; security-zone untrust; }
+    nat {
+        source {
+            rule-set rs from zone trust to zone untrust {
+                rule r match source-address 10.0.0.0/8 then source-nat interface;
+            }
+        }
+    }
+}`
+	for _, tc := range []struct {
+		name, nested, plain, leaf string
+	}{
+		{"firewall source-prefix-list", prefixNested, prefixPlain, "source-prefix-list"},
+		{"NAT source-address", natNested, natPlain, "source-address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nested := parseHierText(t, tc.nested)
+			assertNestedListRefused18366(t, SchemaValidate(nested), tc.leaf)
+			_, err := CompileConfig(nested)
+			assertNestedListRefused18366(t, err, tc.leaf)
+			_, err = CompileConfigLenient(nested)
+			assertNestedListRefused18366(t, err, tc.leaf)
+
+			plain := parseHierText(t, tc.plain)
+			if err := SchemaValidate(plain); err != nil {
+				t.Fatalf("SchemaValidate rejected brace-elided valid control: %v", err)
+			}
+			if _, err := CompileConfig(plain); err != nil {
+				t.Fatalf("strict compile rejected brace-elided valid control: %v", err)
+			}
+			cfg, err := CompileConfigLenient(plain)
+			if err != nil {
+				t.Fatalf("lenient compile rejected brace-elided valid control: %v", err)
+			}
+			if tc.name == "firewall source-prefix-list" {
+				filter := cfg.Firewall.FiltersInet["f"]
+				if filter == nil || len(filter.Terms) != 1 ||
+					len(filter.Terms[0].SourcePrefixLists) != 1 ||
+					filter.Terms[0].SourcePrefixLists[0].Name != "pl1" {
+					t.Fatalf("valid brace-elided prefix-list did not compile to the defined reference: %+v", filter)
+				}
+			}
+		})
+	}
+}
+
 func TestNestedPrefixNATRefusalCensus18366(t *testing.T) {
 	cos, err := os.ReadFile("schema_cos.go")
 	if err != nil {

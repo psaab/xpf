@@ -102,6 +102,12 @@ func findNestedMultiValueContentError(nodes []*Node, parent *schemaNode, path []
 		} else if childSchema.packedFlatRun && len(node.Children) > 0 {
 			walkChildren = expandFlatRun(node.Children, childSchema)
 		}
+		if packedChildren := nestedRefusalPackedScanChildren(node, childSchema, descendSchema, consumed); len(packedChildren) > 0 {
+			if err := findNestedMultiValueContentError(packedChildren, descendSchema, path); err != nil {
+				path = path[:pathLen]
+				return err
+			}
+		}
 		err := findNestedMultiValueContentError(walkChildren, descendSchema, path)
 		path = path[:pathLen]
 		if err != nil {
@@ -189,11 +195,117 @@ func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string
 		} else if childSchema.packedFlatRun && len(node.Children) > 0 {
 			walkChildren = expandFlatRun(node.Children, childSchema)
 		}
+		if packedChildren := nestedRefusalPackedScanChildren(node, childSchema, descendSchema, consumed); len(packedChildren) > 0 {
+			if err := findNestedListContentError(packedChildren, descendSchema, newPath); err != nil {
+				return err
+			}
+		}
 		if err := findNestedListContentError(walkChildren, descendSchema, newPath); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// nestedRefusalPackedScanChildren exposes marked refusal leaves embedded in a
+// compiler-consumed packed run. Unlike packedTail, these compiler readers
+// consume selected tails without the schema walk's packedTail opt-in. When the
+// run ends at a marked leaf and its authored block made packedBodyChildren
+// decline expansion, attach that block to the synthesized leaf so the shared
+// refusal check sees the content the compiler drops.
+func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *schemaNode, consumed int) []*Node {
+	if node == nil || nodeSchema == nil || descendSchema == nil ||
+		nodeSchema.packedTail || nodeSchema.packedFlatRun ||
+		len(node.Keys) <= consumed ||
+		!packedRunNestedRefusal(node.Keys, consumed, descendSchema).contains {
+		return nil
+	}
+
+	expanded := packedBodyChildren(node, nodeSchema)
+	if !sameNodeSlice(expanded, node.Children) {
+		return expanded
+	}
+
+	// The normal packed expansion conservatively returns authored children
+	// unchanged when their shape cannot be merged. Scan the packed key run
+	// independently, preserving the compiler's boundary without losing a
+	// marked terminal leaf's dropped block.
+	packed := *node
+	packed.Children = nil
+	expanded = packedBodyChildren(&packed, nodeSchema)
+	if len(node.Children) > 0 && packedRunNestedRefusal(node.Keys, consumed, descendSchema).terminal {
+		attachNestedRefusalBlock(expanded, descendSchema, node.Children)
+	}
+	return expanded
+}
+
+type packedNestedRefusal struct {
+	contains bool
+	terminal bool
+}
+
+func packedRunNestedRefusal(keys []string, start int, parent *schemaNode) packedNestedRefusal {
+	var levels [64]*schemaNode
+	if parent == nil {
+		return packedNestedRefusal{}
+	}
+	levels[0] = parent
+	depth := 1
+	var result packedNestedRefusal
+	for i := start; i < len(keys); {
+		at := -1
+		var child *schemaNode
+		for level := depth - 1; level >= 0; level-- {
+			if candidate := resolveSchemaChild(levels[level], keys[i]); candidate != nil {
+				at, child = level, candidate
+				break
+			}
+		}
+		if child == nil {
+			result.terminal = false
+			return result
+		}
+		consumed, next := consumeNodeKeys(keys[i:], child)
+		if consumed <= 0 {
+			result.terminal = false
+			return result
+		}
+		result.contains = result.contains || child.refuseNonLeafBlockChildren
+		result.terminal = child.refuseNonLeafBlockChildren
+		i += consumed
+		depth = at + 1
+		if next != nil && depth < len(levels) {
+			levels[depth] = next
+			depth++
+		}
+	}
+	return result
+}
+
+func attachNestedRefusalBlock(nodes []*Node, parent *schemaNode, body []*Node) bool {
+	for i := len(nodes) - 1; i >= 0; i-- {
+		node := nodes[i]
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		child := resolveSchemaChild(parent, node.Keys[0])
+		if child == nil {
+			continue
+		}
+		if child.refuseNonLeafBlockChildren {
+			node.Children = body
+			return true
+		}
+		_, descend := consumeNodeKeys(node.Keys, child)
+		if attachNestedRefusalBlock(node.Children, descend, body) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameNodeSlice(a, b []*Node) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
 }
 
 // findNestedListContentInInstances peels hierarchical named-instance keys
