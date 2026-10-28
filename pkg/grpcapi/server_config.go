@@ -536,10 +536,13 @@ func (s *Server) ShowCompare(ctx context.Context, req *pb.ShowCompareRequest) (*
 	// ("not in configuration mode"); only the active-baseline arm
 	// deliberately diffs without one.
 	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
+		// #17215: surface the captured slot error verbatim (the same
+		// history error the ungated helper returns), not a synthesized
+		// "slot not found" spelling.
+		if snaps.SlotErr != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "%v", snaps.SlotErr)
+		}
 		if !req.ActiveBaseline && snaps.Other == nil {
-			if req.RollbackN > 0 && snaps.Primary == nil {
-				return nil, status.Errorf(codes.InvalidArgument, "rollback slot %d not found", req.RollbackN)
-			}
 			return nil, status.Errorf(codes.InvalidArgument, "not in configuration mode")
 		}
 		if req.RollbackN > 0 && snaps.Primary == nil {
@@ -583,11 +586,11 @@ func (s *Server) ShowRollback(ctx context.Context, req *pb.ShowRollbackRequest) 
 	}
 	// #15995 fold: render the priced slot snapshot when the gate ran.
 	// Fold 3: captured nil Primary = slot absent at pricing — surface
-	// the live slot lookup error, never render a later live slot.
+	// the captured SlotErr (#17215), never render a later live slot.
 	if snaps, ok := configReadSnapshotsFrom(ctx); ok && snaps.Present {
 		if snaps.Primary == nil {
-			if err := s.store.RollbackSnapshotErr(int(req.N)); err != nil {
-				return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+			if snaps.SlotErr != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "%v", snaps.SlotErr)
 			}
 			return &pb.ShowRollbackResponse{Output: ""}, nil
 		}
