@@ -2167,6 +2167,12 @@ func (s *SyslogClient) CloseTimeout(timeout time.Duration) error {
 // requires counter stability across scrapes as a belt (#17855).
 func (s *SyslogClient) CountsFinal() bool { return s.countsFinal.Load() }
 
+// Closed reports whether Close has run on this client. A closed client
+// is terminal: Send/SendBinary fail fast and never reconnect (#4806), so
+// cache layers must treat a closed entry as a miss rather than reusing
+// the pointer (#17828).
+func (s *SyslogClient) Closed() bool { return s.closed.Load() }
+
 // ShutdownDrained reports whether this client's writer goroutine has
 // exited (observability/test seam for the daemon shutdown lifecycle).
 func (s *SyslogClient) ShutdownDrained() bool {

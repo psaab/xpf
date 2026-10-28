@@ -415,3 +415,101 @@ func TestApplySystemSyslogDoesNotReuseExternallyRetiredClient(t *testing.T) {
 		t.Fatalf("control: unchanged apply after rebuild dialed (dials=%d, want still 2)", got)
 	}
 }
+
+// #17828: SetClients closes every former client, including pointers included
+// in the replacement slice. The closed cache entry must defeat the
+// single-host fingerprint gate and be redialed on the unchanged apply.
+func TestApplySystemSyslogSameIdentitySetClientsRedialsClosedClient17828(t *testing.T) {
+	fake := withSystemSyslogFake16767(t)
+	d := newSystemSyslogDaemon16767(t)
+	port, sink := udpSink16767(t)
+	cfg := systemSyslogCfg16767(&config.SyslogHostConfig{
+		Address: "collector.example", Port: port,
+		Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: "info"}},
+	})
+
+	d.applySystemSyslog(cfg)
+	first := d.slogHandler.Clients()
+	if len(first) != 1 || fake.dials.Load() != 1 {
+		t.Fatalf("premise: installed %d clients after %d dials, want 1", len(first), fake.dials.Load())
+	}
+
+	d.slogHandler.SetClients(d.slogHandler.Clients())
+	if !first[0].Closed() {
+		t.Fatal("premise: SetClients(Clients()) must close the reinstalled client")
+	}
+
+	d.applySystemSyslog(cfg)
+	current := d.slogHandler.Clients()
+	if got := fake.dials.Load(); got != 2 {
+		t.Fatalf("#17828: unchanged apply after same-identity SetClients must redial (dials=%d, want 2)", got)
+	}
+	if len(current) != 1 || current[0] == first[0] || current[0].Closed() {
+		t.Fatalf("#17828: unchanged apply did not install a fresh live client: %v", current)
+	}
+	if err := current[0].Send(6, "after-same-identity-setclients"); err != nil {
+		t.Fatalf("#17828: rebuilt client send failed: %v", err)
+	}
+	buf := make([]byte, 2048)
+	_ = sink.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := sink.ReadFromUDP(buf)
+	if err != nil || !strings.Contains(string(buf[:n]), "after-same-identity-setclients") {
+		t.Fatalf("#17828: rebuilt client did not deliver a record: n=%d err=%v data=%q", n, err, buf[:n])
+	}
+}
+
+// #17828: reordered same-identity clients are still terminally closed by
+// SetClients. The reordered handler list must not make the unchanged
+// configuration reuse those closed per-host cache pointers.
+func TestApplySystemSyslogReorderedSetClientsRedialsClosedClients17828(t *testing.T) {
+	fake := withSystemSyslogFake16767(t)
+	d := newSystemSyslogDaemon16767(t)
+	portA, sinkA := udpSink16767(t)
+	portB, sinkB := udpSink16767(t)
+	cfg := systemSyslogCfg16767(
+		&config.SyslogHostConfig{Address: "a.example", Port: portA, Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: "info"}}},
+		&config.SyslogHostConfig{Address: "b.example", Port: portB, Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: "info"}}},
+	)
+
+	d.applySystemSyslog(cfg)
+	first := d.slogHandler.Clients()
+	if len(first) != 2 || fake.dials.Load() != 2 {
+		t.Fatalf("premise: installed %d clients after %d dials, want 2", len(first), fake.dials.Load())
+	}
+
+	d.slogHandler.SetClients([]*logging.SyslogClient{first[1], first[0]})
+	if !first[0].Closed() || !first[1].Closed() {
+		t.Fatal("premise: reordered SetClients must close both former clients")
+	}
+
+	d.applySystemSyslog(cfg)
+	current := d.slogHandler.Clients()
+	if got := fake.dials.Load(); got != 4 {
+		t.Fatalf("#17828: unchanged apply after reordered SetClients must redial both clients (dials=%d, want 4)", got)
+	}
+	if len(current) != 2 || current[0] == first[0] || current[1] == first[1] ||
+		current[0].Closed() || current[1].Closed() {
+		t.Fatalf("#17828: unchanged apply did not install fresh live clients: %v", current)
+	}
+	for i, client := range current {
+		message := []string{"after-reordered-setclients-a", "after-reordered-setclients-b"}[i]
+		if err := client.Send(6, message); err != nil {
+			t.Fatalf("#17828: rebuilt client %d send failed: %v", i, err)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		sink *net.UDPConn
+		want string
+	}{
+		{name: "a", sink: sinkA, want: "after-reordered-setclients-a"},
+		{name: "b", sink: sinkB, want: "after-reordered-setclients-b"},
+	} {
+		buf := make([]byte, 2048)
+		_ = tc.sink.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := tc.sink.ReadFromUDP(buf)
+		if err != nil || !strings.Contains(string(buf[:n]), tc.want) {
+			t.Fatalf("#17828: rebuilt client %s did not deliver a record: n=%d err=%v data=%q", tc.name, n, err, buf[:n])
+		}
+	}
+}
