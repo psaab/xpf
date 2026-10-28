@@ -386,16 +386,13 @@ func staticRouteMergeKey(destination string) string {
 	return destination
 }
 
+// Thin wrapper over the shared appendMaskAlias (#17211); see
+// cidr_mask_alias.go for the doctrine and the empty-string policy.
 func appendStaticRouteDestinationAlias(route *StaticRoute, destination string) {
-	if route == nil || destination == route.Destination {
+	if route == nil {
 		return
 	}
-	for _, alias := range route.destinationAliases {
-		if alias == destination {
-			return
-		}
-	}
-	route.destinationAliases = append(route.destinationAliases, destination)
+	appendMaskAlias(route.Destination, &route.destinationAliases, destination)
 }
 
 func appendStaticRouteNoDispositionAliases(existing, route *StaticRoute) {
@@ -840,26 +837,7 @@ func canonicalizeStaticRouteDestinationMask(route *StaticRoute) {
 	if route == nil {
 		return
 	}
-	authored := route.Destination
-	destination := authored
-	if CIDRMaskHelperRefusesPadding(destination) {
-		for _, alias := range route.destinationAliases {
-			if !CIDRMaskHelperRefusesPadding(alias) {
-				destination = alias
-				break
-			}
-		}
-	}
-	destination = normalizeHelperSupportedCIDRMaskPadding(destination)
-	if destination == authored {
-		return
-	}
-	spellings := append([]string{authored}, route.destinationAliases...)
-	route.Destination = destination
-	route.destinationAliases = nil
-	for _, spelling := range spellings {
-		appendStaticRouteDestinationAlias(route, spelling)
-	}
+	canonicalizeMaskAliases(&route.Destination, &route.destinationAliases)
 }
 
 // --- generate routes (#15658) -------------------------------------------
@@ -896,28 +874,25 @@ func mergeGenerateRoute(routes []*GenerateRoute, gr *GenerateRoute) []*GenerateR
 	return append(routes, gr)
 }
 
+// Thin wrapper over the shared appendMaskAlias (#17211); see
+// cidr_mask_alias.go for the doctrine and the empty-string policy.
 func appendGenerateRoutePrefixAlias(route *GenerateRoute, prefix string) {
-	if route == nil || prefix == "" || prefix == route.Prefix {
+	if route == nil {
 		return
 	}
-	for _, alias := range route.prefixAliases {
-		if alias == prefix {
-			return
-		}
-	}
-	route.prefixAliases = append(route.prefixAliases, prefix)
+	appendMaskAlias(route.Prefix, &route.prefixAliases, prefix)
 }
 
 // canonicalizeGenerateRoutes folds same-prefix generate routes that
 // arrived in separate compileRoutingOptions invocations (multiple
 // routing-options roots, per-instance scopes) and writes each surviving
-// prefix in the helper-supported canonical mask spelling, mirroring
-// canonicalizeStaticRouteDestinationMasks (#12507 doctrine): a "/08"
-// generate route otherwise reaches the userspace FIB but not FRR's
-// netip belt. Helper-refused padding ("/008") is kept verbatim — strict
-// commit rejects it (generateRouteHelperRefusedMaskSpellings) and a
-// tolerant load publishes it so the helper fails the snapshot closed —
-// unless a folded alias the helper parses can take its place.
+// prefix in the helper-supported canonical mask spelling via the shared
+// canonicalizeMaskAliases (#17211; #12507 doctrine): a "/08" generate
+// route otherwise reaches the userspace FIB but not FRR's netip belt.
+// Helper-refused padding ("/008") is kept verbatim — strict commit
+// rejects it (generateRouteHelperRefusedMaskSpellings) and a tolerant
+// load publishes it so the helper fails the snapshot closed — unless a
+// folded alias the helper parses can take its place.
 func canonicalizeGenerateRoutes(routes []*GenerateRoute) []*GenerateRoute {
 	if routes == nil {
 		return nil
@@ -936,26 +911,7 @@ func canonicalizeGenerateRoutePrefix(route *GenerateRoute) {
 	if route == nil {
 		return
 	}
-	authored := route.Prefix
-	prefix := authored
-	if CIDRMaskHelperRefusesPadding(prefix) {
-		for _, alias := range route.prefixAliases {
-			if !CIDRMaskHelperRefusesPadding(alias) {
-				prefix = alias
-				break
-			}
-		}
-	}
-	prefix = normalizeHelperSupportedCIDRMaskPadding(prefix)
-	if prefix == authored {
-		return
-	}
-	spellings := append([]string{authored}, route.prefixAliases...)
-	route.Prefix = prefix
-	route.prefixAliases = nil
-	for _, spelling := range spellings {
-		appendGenerateRoutePrefixAlias(route, spelling)
-	}
+	canonicalizeMaskAliases(&route.Prefix, &route.prefixAliases)
 }
 
 // canonicalizeGenerateRoutesAcrossScopes applies canonicalizeGenerateRoutes

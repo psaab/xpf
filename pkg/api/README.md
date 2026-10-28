@@ -1309,7 +1309,7 @@ under the daemon's errgroup. Nothing else imports this package.
 
 ## Dependencies
 
-`authz`, `config`, `configstore`, `conntrack`, `dataplane`, `dhcp`, `frr`,
+`authz`, `config`, `configstore`, `dataplane`, `dhcp`, `frr`,
 `ipsec`, `logging`, `routing`, `vrrp`.
 
 ## NAT show views delegate to `pkg/natshow` (#6565)
@@ -2377,7 +2377,8 @@ the drop fails loudly instead of going quietly vacuous.
   for the cursor path). This is the REST analog of the gRPC `streamDiagCmd`
   cancellation cleanup (#5060).
 - Session-count metrics come from the LIVE dataplane session table, not
-  the BPF GC sweep stats (#3929). `collectSessionGauges`
+  the retired Go conntrack GC's sweep stats (#3929, `pkg/conntrack`
+  deleted in #17155). `collectSessionGauges`
   (`metrics_sessions.go`) derives `xpf_sessions_active` (forward entries)
   and `xpf_sessions_established` (forward entries in the ESTABLISHED
   state) from the SAME `IterateSessions`/`IterateSessionsV6` scan that
@@ -2396,10 +2397,11 @@ the drop fails loudly instead of going quietly vacuous.
   cached result. A canceled waiter still returns `scrape_ok=0` promptly and does
   not receive a late result. Iterator failures discard partial counts, preserve
   the last good snapshot, omit the session gauges, and expose `scrape_ok=0`.
-  Before #3929 these surfaces read GC stats, permanently 0 on the userspace
-  dataplane because its BPF GC sweep is skipped (#333).
-  `xpf_gc_sweep_duration_seconds` still reflects the skipped zero BPF sweep
-  and is orthogonal.
+  Before #3929 these surfaces read the retired Go conntrack GC's stats
+  (`pkg/conntrack`, deleted in #17155), permanently 0 on the userspace
+  dataplane because that sweep never ran there (#333). The eight
+  `xpf_gc_*`/`xpf_conntrack_gc_*` families were deleted with it in #17155,
+  not re-sourced.
 - Dataplane counter read failures get a uniform observability-integrity
   treatment (#3345 global; #3408 per-zone / per-policy / screen-flood /
   filter): a failed counter read is no longer swallowed to `0`, because a
@@ -3149,7 +3151,7 @@ the drop fails loudly instead of going quietly vacuous.
     REPL runs one command at a time — so the console contributes at most one
     concurrent walk rather than a flood, and the remote `cli` binary is bounded
     at the gRPC surface it connects through. The daemon-internal background
-    walkers (`conntrack` GC sweep, cluster bulk/conn sweeps,
+    walkers (cluster bulk/conn sweeps,
     `warmNeighborCache`, policy invalidation, `ReconcileClusterBulk`) are
     outside for a different reason: they are not request-driven, so a REQUEST
     admission budget is the wrong instrument. Both groups are named in the test
@@ -3389,10 +3391,10 @@ the drop fails loudly instead of going quietly vacuous.
   mode. All readyz code paths null-check it.
 - Request-path external commands must be time-bounded (#1805): the
   deferred reboot/halt power actions go through `runTimeout` in
-  `exec_timeout.go` (15s timeout + 5s WaitDelay, mirroring the
-  apply-path contract in `pkg/daemon/exec_timeout.go`, #1794 — not
-  importable here because pkg/daemon imports this package; the
-  Output/CombinedOutput variants live in the pkg/grpcapi sibling copy).
+  `exec_timeout.go`, delegating to `diagcmd.RunTimeout` (15s timeout +
+  5s WaitDelay, #17203; mirroring the apply-path contract in
+  `pkg/daemon/exec_timeout.go`, #1794 — not importable here because
+  pkg/daemon imports this package).
   Power actions take `context.Background()` — client disconnect must
   not cancel a confirmed reboot — and keep ignoring errors. The
   `POST /api/v1/system/action` handler (`systemActionHandler`) journals
@@ -3407,9 +3409,10 @@ the drop fails loudly instead of going quietly vacuous.
   so an operator can self-recover from an H-3/#4476 lock wedge over REST. The
   ping/traceroute handlers keep their own request-ctx bounds but set
   `WaitDelay` so an inherited pipe cannot block past the kill; their
-  budgets are request-sized (#1819) via `pingExecTimeout` (count × 1s +
-  15s slack, 30s floor) and `diagTracerouteTimeout` (60s), capped at the
-  150s `diagExecCeiling` and mirrored in `pkg/grpcapi/exec_timeout.go`.
+  budgets are request-sized (#1819) via `diagcmd.PingExecTimeout`
+  (count × 1s + 15s slack, 30s floor) and `diagcmd.TracerouteTimeout`
+  (60s), capped at the 150s `diagcmd.DiagExecCeiling` — the sole
+  implementation in `pkg/diagcmd`, shared with gRPC (#17203).
   The argv builders (`buildPingArgv`/`buildTracerouteArgv`) place the
   user-supplied target after a `--` end-of-options separator so a
   `-`-prefixed target is an operand, not a flag (option-confusion

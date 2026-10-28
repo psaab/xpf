@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/psaab/xpf/pkg/argforms"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
@@ -143,7 +144,7 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 	//
 	// #16472: the form set now also carries the canonical base /
 	// keyword-full / selector spellings of the executed line and of
-	// the charge (see rpcArgumentForms / canonicalArgumentForms), so
+	// the charge (see rpcArgumentForms / argforms.CanonicalForms), so
 	// an anchored deny on the BASE spelling of a selector-bearing
 	// command (`^show firewall$` over `firewall-filter:F1`) fires
 	// here exactly as the console's canonicalForms make it fire
@@ -189,7 +190,7 @@ func remoteDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string
 	if res != cmdtree.CanonicalOK || strings.Join(canon, " ") != executed {
 		return false
 	}
-	baseForm, fullForm, selectorForms, chainForm := canonicalFormsOf16472(canon)
+	baseForm, fullForm, selectorForms, chainForm := argforms.CanonicalFormsOf(canon)
 	if chainForm == "" {
 		return false
 	}
