@@ -692,7 +692,7 @@ fn build_fallible_forwarding_state(
         &excluded_local_v6,
     )?;
     interfaces::populate_egress(snapshot, &mut state, &iface_ctx)?;
-    state.ingress_unit_by_logical = interfaces::ingress_unit_by_logical(snapshot);
+    state.ingress_unit_by_logical = interfaces::ingress_unit_by_logical(snapshot)?;
     // #6458/#13181: include each admitted member row's RG, not inherited
     // parent ingress aliases.
     interfaces::populate_zone_to_rgs(snapshot, &mut state);
@@ -1033,7 +1033,17 @@ fn build_fallible_forwarding_state(
             rate: mirror.rate,
         };
         if mirror.unit_scoped {
-            let vid = u16::try_from(mirror.ingress_vlan_id).unwrap_or(0);
+            // #17206: decode through the single VlanId decoder and fail
+            // closed — the old `u16::try_from(..).unwrap_or(0)` silently
+            // re-pointed a bad VID at the untagged scope (and let
+            // 4096..=65535 through as keys no 12-bit tag matches). The
+            // error is keyed by the ingress ifindex as a string because
+            // MirrorConfigSnapshot carries no interface name.
+            let vid = validated::VlanId::try_from_snapshot(
+                mirror.ingress_vlan_id,
+                &mirror.ingress_ifindex.to_string(),
+            )?
+            .get();
             state
                 .mirror_configs_scoped
                 .insert((mirror.ingress_ifindex, vid, mirror.ingress_unit), cfg);
