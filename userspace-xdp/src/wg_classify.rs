@@ -45,8 +45,12 @@
 //! on real byte buffers, rather than asserted about.
 
 /// WireGuard message types (the protocol's first header byte).
+// These protocol values are read by the host parity test; the shim only needs DATA.
+#[allow(dead_code)]
 pub const WG_TYPE_INITIATION: u8 = 1;
+#[allow(dead_code)]
 pub const WG_TYPE_RESPONSE: u8 = 2;
+#[allow(dead_code)]
 pub const WG_TYPE_COOKIE: u8 = 3;
 pub const WG_TYPE_DATA: u8 = 4;
 

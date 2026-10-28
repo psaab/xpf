@@ -85,20 +85,24 @@ func (r *Runner) stampCommittedVersion(j *Journal) error {
 // downgrade may recopy that target before the pre-STOP envelope recheck; keep
 // its history until the recheck passes so a refusal does not erase the known-
 // good rollback target.
-func (r *Runner) committedPredecessorStamp(j *Journal, target string) *committedStamp {
+func (r *Runner) committedPredecessorStamp(j *Journal, target string) (*committedStamp, error) {
 	if j == nil || j.PreviousVersion == "" || target == "" || target == j.PreviousVersion {
-		return nil
+		return nil, nil
 	}
-	currentStamp, present := r.readCommittedStamp(j.PreviousVersion)
-	if !present || currentStamp == nil || !currentStamp.Committed ||
+	targetStamp, targetPresent, err := r.readCommittedStamp(target)
+	if err != nil {
+		return nil, fmt.Errorf("read committed stamp: %w", err)
+	}
+	currentStamp, currentPresent, err := r.readCommittedStamp(j.PreviousVersion)
+	if err != nil {
+		return nil, fmt.Errorf("read current committed stamp: %w", err)
+	}
+	if !targetPresent || targetStamp == nil || !targetStamp.Committed ||
+		!currentPresent || currentStamp == nil || !currentStamp.Committed ||
 		currentStamp.Predecessor != target {
-		return nil
+		return nil, nil
 	}
-	targetStamp, present := r.readCommittedStamp(target)
-	if !present || targetStamp == nil || !targetStamp.Committed {
-		return nil
-	}
-	return targetStamp
+	return targetStamp, nil
 }
 
 // predecessorStampBackup captures a committed predecessor's stamp file and
@@ -125,35 +129,48 @@ type predecessorStampBackup struct {
 	stashImmune bool
 }
 
+// backupSnapshotCopyTree copies a committed predecessor's DB snapshot into
+// its private backup tree. It is a package var so tests can inject backup
+// copy failures deterministically (#17817). Production is copyTree.
+var backupSnapshotCopyTree = copyTree
+
 // backupCommittedPredecessor preserves the committed stamp bytes and the
 // .<ver>.dbsnap tree of a committed predecessor before a recopy demotes or
-// replaces it (#14720). Returns nil when target is not a committed
-// predecessor of the journal's live version.
-func (r *Runner) backupCommittedPredecessor(j *Journal, target string) *predecessorStampBackup {
-	if r.committedPredecessorStamp(j, target) == nil {
-		return nil
+// replaces it (#14720). Returns (nil, nil) when target is not a committed
+// predecessor, and an error if an existing rollback artifact cannot be
+// secured before snapshot mutation.
+func (r *Runner) backupCommittedPredecessor(j *Journal, target string) (*predecessorStampBackup, error) {
+	pred, err := r.committedPredecessorStamp(j, target)
+	if err != nil {
+		return nil, err
+	}
+	if pred == nil {
+		return nil, nil
 	}
 	b := &predecessorStampBackup{version: target}
-	if data, err := os.ReadFile(r.committedStampPath(target)); err == nil {
-		b.stampData = data
+	data, err := os.ReadFile(r.committedStampPath(target))
+	if err != nil {
+		return nil, fmt.Errorf("read committed stamp: %w", err)
 	}
+	b.stampData = data
+
 	snap := filepath.Join(r.cfg.VersionsDir, "."+target+".dbsnap")
-	if _, err := os.Stat(snap); err == nil {
-		tmp, err := os.MkdirTemp(r.cfg.VersionsDir, ".predbak-*")
-		if err != nil {
-			r.logf("upgrade: WARN backup committed predecessor %s snapshot: %v", target, err)
-			return b
-		}
-		b.backupDir = tmp
-		b.dbsnapDir = filepath.Join(tmp, "dbsnap")
-		if _, err := copyTree(snap, b.dbsnapDir); err != nil {
-			r.logf("upgrade: WARN backup committed predecessor %s snapshot: %v", target, err)
-			_ = os.RemoveAll(tmp)
-			b.backupDir = ""
-			b.dbsnapDir = ""
-		}
+	if _, err := os.Stat(snap); os.IsNotExist(err) {
+		return b, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("stat committed snapshot %s: %w", snap, err)
 	}
-	return b
+	tmp, err := os.MkdirTemp(r.cfg.VersionsDir, ".predbak-*")
+	if err != nil {
+		return nil, fmt.Errorf("create committed snapshot backup: %w", err)
+	}
+	b.backupDir = tmp
+	b.dbsnapDir = filepath.Join(tmp, "dbsnap")
+	if _, err := backupSnapshotCopyTree(snap, b.dbsnapDir); err != nil {
+		_ = os.RemoveAll(tmp)
+		return nil, fmt.Errorf("copy committed snapshot backup: %w", err)
+	}
+	return b, nil
 }
 
 // discardPredecessorBackup removes the temporary backup copy without
@@ -267,38 +284,40 @@ func (r *Runner) stampInFlightVersion(ver string) error {
 	return r.writeCommitStamp(committedStamp{Version: ver})
 }
 
-// readCommittedStamp returns (record, present). An absent record is a legacy
-// version and may use the loudly logged mtime fallback; a present uncommitted,
-// unreadable, or invalid record is excluded from rollback selection. A
-// committed record's self-check and predecessor are validated before trust.
-func (r *Runner) readCommittedStamp(ver string) (*committedStamp, bool) {
+// readCommittedStamp returns (record, present, error). An absent record is a
+// legacy version and may use the loudly logged mtime fallback. A present
+// uncommitted or invalid record is excluded from rollback selection. I/O
+// failures are returned so callers protecting a rollback artifact can fail
+// closed instead of treating an unreadable record as absent. A committed
+// record's self-check and predecessor are validated before trust.
+func (r *Runner) readCommittedStamp(ver string) (*committedStamp, bool, error) {
 	path := r.committedStampPath(ver)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, false
+			return nil, false, nil
 		}
 		r.logf("upgrade: WARN commit record %s unreadable (%v); excluding %s as uncommitted", path, err, ver)
-		return nil, true
+		return nil, true, err
 	}
 	var stamp committedStamp
 	if err := json.Unmarshal(data, &stamp); err != nil {
 		r.logf("upgrade: WARN commit record %s is corrupt (%v); excluding %s as uncommitted", path, err, ver)
-		return nil, true
+		return nil, true, nil
 	}
 	if stamp.Version != ver {
 		r.logf("upgrade: WARN commit record %s names version %q, not %q (copied dir?); excluding %s as uncommitted", path, stamp.Version, ver, ver)
-		return nil, true
+		return nil, true, nil
 	}
 	if stamp.Committed {
 		if stamp.CommittedAtUnixNano <= 0 {
 			r.logf("upgrade: WARN commit record %s has invalid commit time %d; excluding %s as uncommitted", path, stamp.CommittedAtUnixNano, ver)
-			return nil, true
+			return nil, true, nil
 		}
 		if stamp.Predecessor != "" && (ValidateVersionSegment(stamp.Predecessor) != nil || stamp.Predecessor == ver) {
 			r.logf("upgrade: WARN commit record %s has invalid predecessor %q; excluding %s as uncommitted", path, stamp.Predecessor, ver)
-			return nil, true
+			return nil, true, nil
 		}
 	}
-	return &stamp, true
+	return &stamp, true, nil
 }

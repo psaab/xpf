@@ -195,17 +195,17 @@ func TestForwardEnvelopeRefusalDetectionUsesErrorsAs12177(t *testing.T) {
 
 func TestCommittedPredecessorStampRequiresCurrentLink12177(t *testing.T) {
 	r, _, _ := stagedDowngradeFixture12177(t)
-	current, present := r.readCommittedStamp("3.0.0")
-	if !present || current == nil || !current.Committed {
-		t.Fatalf("current 3.0.0 stamp = (%+v,present=%v), want committed", current, present)
+	current, present, err := r.readCommittedStamp("3.0.0")
+	if err != nil || !present || current == nil || !current.Committed {
+		t.Fatalf("current 3.0.0 stamp = (%+v,present=%v,err=%v), want committed", current, present, err)
 	}
 	current.Predecessor = "1.0.0"
 	if err := r.writeCommitStamp(*current); err != nil {
 		t.Fatalf("write mismatched current predecessor: %v", err)
 	}
-	if got := r.committedPredecessorStamp(
-		&Journal{PreviousVersion: "3.0.0"}, "2.0.0"); got != nil {
-		t.Fatalf("unlinked target stamp = %+v, want nil", got)
+	if got, err := r.committedPredecessorStamp(
+		&Journal{PreviousVersion: "3.0.0"}, "2.0.0"); err != nil || got != nil {
+		t.Fatalf("unlinked target stamp = (%+v, err=%v), want nil", got, err)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestEnvelopeRefusal_ReplacePathDemotesChangedBytes12177(t *testing.T) {
 		t.Fatalf("Run error = %v, want pre-STOP refusal", err)
 	}
 	assertForwardEnvelopeRefusedBeforeStop(t, fs)
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || stamp.Committed {
 		t.Fatalf("replaced different-byte predecessor stamp = (%+v,present=%v), want non-committed", stamp, present)
 	}
@@ -239,7 +239,7 @@ func TestEnvelopeRefusal_ReplacePathPreservesIdenticalBytes12177(t *testing.T) {
 	r, cfg, fs := stagedDowngradeFixture12177(t)
 	active := filepath.Join(cfg.ConfigDBDir, "active.json")
 	mkfile(t, active, "#xpf-config-envelope v=1 writer=3.0.0 ast=1 min-reader=1 rollback-fmt=1 committed=1\n{}")
-	before, present := r.readCommittedStamp("2.0.0")
+	before, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || before == nil || !before.Committed {
 		t.Fatalf("precondition predecessor stamp = (%+v,present=%v), want committed", before, present)
 	}
@@ -252,7 +252,7 @@ func TestEnvelopeRefusal_ReplacePathPreservesIdenticalBytes12177(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "refuse-before-STOP") {
 		t.Fatalf("Run error = %v, want pre-STOP refusal", err)
 	}
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || !stamp.Committed ||
 		stamp.CommittedAtUnixNano != before.CommittedAtUnixNano {
 		t.Fatalf("identical-byte replacement stamp = (%+v,present=%v), want preserved %+v", stamp, present, before)
@@ -300,7 +300,7 @@ func TestEnvelopeRefusal_UnverifiablePredecessorDoesNotWedge12177(t *testing.T) 
 		journal, _ := r.loadJournal()
 		t.Fatalf("unverifiable predecessor left journal behind (state=%s): %v", journal.State, serr)
 	}
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || stamp.Committed {
 		t.Fatalf("unverifiable predecessor stamp = (%+v,present=%v), want non-committed", stamp, present)
 	}
@@ -333,7 +333,7 @@ func TestEnvelopeRefusal_PreStopDemotesFailedReplacement12177(t *testing.T) {
 	if got := currentTarget(t, cfg); got != "3.0.0" {
 		t.Fatalf("current -> %q after failed replacement, want 3.0.0", got)
 	}
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || stamp.Committed {
 		t.Fatalf("failed replacement stamp = (%+v,present=%v), want non-committed", stamp, present)
 	}

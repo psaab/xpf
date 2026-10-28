@@ -106,20 +106,47 @@ func IsUnknownTopLevelStanzaSchemaError(err error) bool {
 	return errors.As(err, &unknown)
 }
 
-// typedLeafSchemaError marks a schema rejection from a typed validator or
-// typed-value structure, including validated keys, multi/tail values, and
-// modifiers. The tolerant configstore path persists only this class as a
-// queryable typed-leaf warning. Top-level stanza, closed-world keyword,
-// node-validator/scalar-arity, and flat/peeled midKeyword structural errors
-// remain ordinary tolerated schema diagnostics.
+// typedLeafSchemaError marks an ordinary schema rejection from a typed
+// validator or typed-value structure, including validated keys, multi/tail
+// values, and modifiers. The tolerant configstore path may persist this
+// class as a queryable typed-leaf warning. The separate nested-list-content
+// error class is not classified as typed for ordinary warning collection;
+// its dedicated hard-error path is enforced by schema-aware fallback scanning
+// and compileTreeLenient.
 type typedLeafSchemaError struct{ msg string }
 
 func (e *typedLeafSchemaError) Error() string { return e.msg }
 
+// nestedListContentSchemaError marks a hard nested-content refusal for a
+// block-list child under a refuseNonLeafBlockChildren leaf that is not a
+// plain leaf value. Such a reader does not consume grandchildren
+// (firewallMatchValues reads only the child's Keys), so tolerating the
+// content on Store.Load or Store.SyncApply would install a silently truncated
+// config. Introduced for VRRP virtual-address/virtual-inet6-address and
+// WireGuard allowed-ips (#17241), this class also covers other direct-child
+// value-list readers. configstore's compileTreeLenient promotes it to a hard
+// error; other schema errors keep their tolerant downgrade.
+type nestedListContentSchemaError struct{ msg string }
+
+func (e *nestedListContentSchemaError) Error() string { return e.msg }
+
+// IsNestedListContentSchemaError reports whether err is the dedicated
+// nested-content refusal, including when wrapped.
+func IsNestedListContentSchemaError(err error) bool {
+	var nested *nestedListContentSchemaError
+	return errors.As(err, &nested)
+}
+
+func nestedListContentErrorf(path []string, leafName, value string) error {
+	return &nestedListContentSchemaError{msg: typedLeafErrorf(path,
+		"nested content under %s value %q is not supported; write values as separate statements (%s { %s; }) or a bracket list (%s [ %s ])",
+		leafName, value, leafName, value, leafName, value).Error()}
+}
+
 // IsTypedLeafSchemaError reports whether err (including wrapped errors) came
 // from the typed-validator/typed-value partition. It deliberately excludes
-// top-level stanza, closed-world keyword, node-validator, scalar-arity, and
-// midKeyword structural errors.
+// top-level stanza, closed-world keyword, node-validator/scalar-arity,
+// midKeyword structural, and the dedicated nested-content refusal errors.
 func IsTypedLeafSchemaError(err error) bool {
 	var typed *typedLeafSchemaError
 	return errors.As(err, &typed)

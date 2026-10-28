@@ -163,8 +163,8 @@ func TestNonTerminatingInvalidRouteFilterSkips_14137(t *testing.T) {
 // match line against the rendered (partial) list. The skipped entry's
 // Junos match set is honestly empty-or-invalid, so the rendered subset
 // is the fail-closed direction; deny-all would deny routes the valid
-// branch never rejected. #16762: the surviving entry is re-sequenced
-// longest-match-first, so it lands at seq 5 (not its authored seq 10).
+// branch never rejected. There is no strict base containment, so the
+// surviving entry preserves its authored seq 10.
 func TestRejectMixedRouteFilterKeepsValidEntry_14137(t *testing.T) {
 	po := routeFilterPolicyPO([]*config.PolicyTerm{
 		{Name: "t-reject", RouteFilters: []*config.RouteFilter{
@@ -174,7 +174,7 @@ func TestRejectMixedRouteFilterKeepsValidEntry_14137(t *testing.T) {
 	}, "reject")
 	got := New().generatePolicyOptions(po)
 	inlineName := inlinePrefixListName("P", "P", "t-reject", "")
-	if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 5 permit 10.0.0.0/8\n") {
+	if !strings.Contains(got, "ip prefix-list "+inlineName+" seq 10 permit 10.0.0.0/8\n") {
 		t.Fatalf("the valid sibling entry was dropped:\n%s", got)
 	}
 	if !strings.Contains(got, "route-map P deny 10\n match ip address prefix-list "+inlineName+"\nexit\n") {

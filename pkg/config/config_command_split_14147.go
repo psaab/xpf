@@ -37,10 +37,16 @@ package config
 // the gate adjudicated them (#14147, cf. #13628 for annotate).
 func ConfigMutationVerb(line string) (verb string, ok bool) {
 	tokens, _ := lexConfigMutationLine9938(line)
-	if len(tokens) == 0 || !configMutationVerbs[tokens[0]] {
+	if len(tokens) == 0 || !IsConfigMutationVerb(tokens[0]) {
 		return "", false
 	}
 	return tokens[0], true
+}
+
+// IsConfigMutationVerb reports whether a parsed config-mode verb mutates the
+// candidate. Use this when the caller already has lexed tokens.
+func IsConfigMutationVerb(verb string) bool {
+	return configMutationVerbs[verb]
 }
 
 // ParseInsertCommandTokens is ParseInsertCommand without the

@@ -135,15 +135,16 @@ pub(super) fn try_translate_nat64_icmp_error(
                 resolution,
                 raw_arrival_zone,
             );
-            let effective_ingress_zone_override = ingress_zone_override.or_else(|| {
-                super::promote_ambiguous_fabric_zone(
+            // #17031: ungated promoted-or-raw in transit_policy.
+            let effective_ingress_zone_override =
+                super::transit_policy::promoted_zone_override(
                     worker_ctx.forwarding,
                     worker_ctx.ha_state,
                     now_secs,
+                    ingress_zone_override,
                     ambiguous_zone,
                     icmp_resolution,
-                )
-            });
+                );
             let arrival_zone = actual_embedded_icmp_ingress_zone(
                 worker_ctx.forwarding,
                 meta,
@@ -258,15 +259,16 @@ pub(super) fn try_translate_nat64_icmp_error(
                 resolution,
                 raw_arrival_zone,
             );
-            let effective_ingress_zone_override = ingress_zone_override.or_else(|| {
-                super::promote_ambiguous_fabric_zone(
+            // #17031: ungated promoted-or-raw in transit_policy.
+            let effective_ingress_zone_override =
+                super::transit_policy::promoted_zone_override(
                     worker_ctx.forwarding,
                     worker_ctx.ha_state,
                     now_secs,
+                    ingress_zone_override,
                     ambiguous_zone,
                     icmp_resolution,
-                )
-            });
+                );
             let arrival_zone = actual_embedded_icmp_ingress_zone(
                 worker_ctx.forwarding,
                 meta,
