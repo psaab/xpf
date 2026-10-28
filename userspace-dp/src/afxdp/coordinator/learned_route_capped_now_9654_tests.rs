@@ -207,7 +207,7 @@ fn refresh_status_projects_capped_now_and_omits_it_when_unknown_9654() {
         snapshot_policy_mismatch_total: 0,
     };
     publish_capped_9654(&mut state.afxdp, true);
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
     assert_eq!(state.status.learned_route_import_capped, None);
     let json = serde_json::to_value(&state.status).expect("status serializes");
     assert!(
@@ -217,7 +217,7 @@ fn refresh_status_projects_capped_now_and_omits_it_when_unknown_9654() {
     );
 
     register_worker_9654(&mut state.afxdp, 0);
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
     assert_eq!(state.status.learned_route_import_capped, Some(true));
     let json = serde_json::to_value(&state.status).expect("status serializes");
     assert_eq!(

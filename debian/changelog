@@ -1,5 +1,12 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: build lenientCompileOpts() with per-flag assignments instead
+    of one gofmt-aligned ~330-key composite literal, and un-embed the
+    formatting-workaround embedded struct into two plain compileOpts
+    fields, so adding a long-named lenient flag changes exactly two
+    lines instead of realigning the whole literal (#17168). No
+    behavior change: the tolerant flag set is unchanged and the #4406
+    golden compiled output is byte-identical to master.
   * Config reads: the rollback slot error now travels inside one
     captured value (configstore.RollbackCapture from CaptureRollback /
     CaptureRollbackSlot) through the REST, gRPC and CLI gates to their
@@ -10,6 +17,16 @@ xpf (0.0.0) unstable; urgency=medium
     "not in configuration mode" instead of 200 "" ("no diff"), and
     gRPC ShowCompare surfaces the captured history error verbatim
     instead of a synthesized "slot not found" (#17215).
+  * NFQUEUE reinject: write the P-MECH tail zone id as u32 in the Go
+    submit encoder, matching both Rust readers widened by #17623
+    (#16557); the u16 writer displaced every following field and every
+    Go-produced frame failed decode. The P-MECH tail is 81 bytes, and
+    a shared Go/Rust golden frame (zone id above the u16 range) now
+    pins the wire so the pair cannot drift again (#18207).
+ -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Config compiler: strict mode now has a single constructor,
     strictCompileOpts() beside lenientCompileOpts(); the production
     strict entries and strict-named test compiles start from it

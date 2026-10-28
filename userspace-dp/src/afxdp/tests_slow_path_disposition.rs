@@ -1186,14 +1186,14 @@ fn nat_alloc_fail_flushes_and_snapshots() {
 // ordinals at 0.
 #[test]
 fn record_screen_drop_populates_per_reason_counters() {
-    use crate::afxdp::flood_counters::FloodCounterSlotMap;
+    use crate::afxdp::zone_slot_counters::ZoneSlotMap;
     use crate::screen::screen_reason_drop_index;
     let live = BindingLiveState::new();
     let mut counters = BatchCounters::default();
     // #3651 added the per-zone flood arguments. An EMPTY slot map (every zone
     // resolves to slot 0) keeps this test scoped to the aggregate + per-reason
     // tallies it was written for, so it stays a clean over-reach guard for them.
-    let no_zones = FloodCounterSlotMap::empty();
+    let no_zones = ZoneSlotMap::empty();
 
     counters.record_screen_drop("syn-flood", 7, &no_zones);
     counters.record_screen_drop("syn-flood", 7, &no_zones);
@@ -1252,13 +1252,15 @@ fn record_screen_drop_populates_per_reason_counters() {
 #[test]
 fn record_screen_drop_attributes_flood_reasons_to_the_ingress_zone() {
     use crate::afxdp::flood_counters::{
-        flush_recorded_flood_counters, FloodCounterSlotMap, FloodCounterStore,
+        flood_counter_snapshot, flush_recorded_flood_counters, FloodCounterStore,
     };
+    use crate::afxdp::zone_counters::ZoneCounterStore;
+    use crate::afxdp::zone_slot_counters::ZoneSlotMap;
     const TRUST: u32 = 50675; // config::StableZoneID("trust")
     const UNTRUST: u32 = 12345;
 
     let store = FloodCounterStore::default();
-    let slots = FloodCounterSlotMap::build(&[TRUST, UNTRUST], &store);
+    let (slots, caches) = ZoneSlotMap::build(&[TRUST, UNTRUST], &ZoneCounterStore::default(), &store);
     let mut counters = BatchCounters::default();
 
     counters.record_screen_drop("syn-flood", TRUST, &slots);
@@ -1270,9 +1272,9 @@ fn record_screen_drop_attributes_flood_reasons_to_the_ingress_zone() {
     // include port scans.
     counters.record_screen_drop("port-scan", TRUST, &slots);
     counters.record_screen_drop("strict-syn-check", TRUST, &slots);
-    flush_recorded_flood_counters(&store, &slots);
+    flush_recorded_flood_counters(&store, &slots, &caches);
 
-    let snap = store.snapshot();
+    let snap = flood_counter_snapshot(&store);
     let trust = snap
         .iter()
         .find(|s| s.zone_id == TRUST)

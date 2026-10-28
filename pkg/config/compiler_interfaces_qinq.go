@@ -286,18 +286,13 @@ func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding)
 		// #14436: expand a packed instance tail so a unit packed onto
 		// the interface Keys (`ge-0/0/0 bandwidth 1g unit 0 vlan-id 10
 		// inner-vlan-id 20 ...`) is checked like its braced twin.
-		ifaceBody := packedBody(iface, interfaceSchema9792())
-		if ifaceBody == nil {
-			ifaceBody = iface
-		}
-		// #14683: enumerate units via namedInstances, mirroring
-		// compileInterfaces. The two-level hierarchical form
-		// `unit { 0 { ... } }` carries Keys=[unit] with the numbered
-		// instance as a child; namedInstances descends into it, while a
-		// direct-children scan saw only the child `0` and an empty stack.
-		// Merging duplicate-unit statements matches the gate's prior
+		// #14436/#14683: enumerate units via interfaceUnitsOf (#17222),
+		// mirroring compileInterfaces: a packed instance tail on the
+		// interface line and the two-level hierarchical form
+		// `unit { 0 { ... } }` are both enumerated. Merging
+		// duplicate-unit statements matches the gate's prior
 		// keyed-union behaviour (and validateVLANMapAST).
-		for _, unitInst := range namedInstances(ifaceBody.FindChildren("unit")) {
+		for _, unitInst := range interfaceUnitsOf(iface) {
 			unit := unitInst.node
 			// The packed unit form itself may carry vlan leaves on its
 			// own Keys tail; expand those into children for the stack.
@@ -322,40 +317,27 @@ func collectQinQFromInterfacesNode(ifacesNode *Node, out map[string]qinqFinding)
 	}
 }
 
-// collectQinQFindingsForNode expands the candidate tree for chassis-cluster
-// node nodeID and records every (interface, unit) whose canonical stack
-// carries an unsupported inner tag into out. This IS the "aggregate
-// effective view for every cluster node" the #5879 invariant requires: the
-// concrete VLAN stack the compiler would render on node nodeID after
+// collectQinQFindings records every (interface, unit) whose canonical
+// stack carries an unsupported inner tag into out, across the aggregate
+// effective view for every cluster node the #5879 invariant requires:
+// the concrete VLAN stack the compiler would render after
 // `${node}`/apply-groups expansion and interface-range expansion.
 //
-// It is RECURSION-FREE by construction (mirrors emitNodeExpandedZoneNames /
-// collectNodeExpandedInterfaceUnitSpellings): it clones the candidate,
-// expands groups for the node, expands interface ranges (so a range/wildcard
-// member's inner tag is seen exactly as runPreWalkGates would), and reads
-// the tag leaves straight off the expanded AST — it NEVER calls
-// CompileConfig* (which would re-enter this gate). A per-node expansion
-// error contributes NOTHING (non-fatal): a config that legitimately defines
-// only `groups node1` and references `${node}` fails to expand for node0
-// (`undefined group "node0"`), and the real per-node compile path already
-// rejects that on the affected node — this gate must not turn it into a
-// spurious commit failure, and the OTHER node's view still catches an inner
-// tag hidden in the un-expandable group. Every `interfaces` root is unioned
-// (#5744): a split hierarchical config can declare units under a second
+// The views come from effectiveNodeViews (#17222) with the generic
+// fallback enabled: when neither per-node expansion succeeds — a group
+// literally named "${node}" — the gate inspects the same tree the
+// generic compile compiles (the #13146 raw-tree fallback vlan-map
+// already had), instead of contributing nothing while the compiler
+// compiles that tree. It is RECURSION-FREE by construction (the helper
+// clones and expands; it never calls CompileConfig*, which would
+// re-enter this gate). Every `interfaces` root is unioned (#5744): a
+// split hierarchical config can declare units under a second
 // `interfaces {}` stanza that compileSections still compiles.
-func collectQinQFindingsForNode(tree *ConfigTree, nodeID int, out map[string]qinqFinding) {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
-		return
-	}
-	// expandInterfaceRanges mutates the clone in place; its warnings are
-	// emitted on the real path (runPreWalkGates) and discarded here.
-	// #8438: the clone paths only need the budget SKIP (the expansion is capped
-	// inside); the rejection is surfaced once, by the prewalk caller.
-	_, _ = expandInterfaceRanges(clone)
-	for _, ifaces := range clone.FindChildren("interfaces") {
-		collectQinQFromInterfacesNode(ifaces, out)
+func collectQinQFindings(tree *ConfigTree, out map[string]qinqFinding) {
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{ExpandRanges: true, Fallback: true}) {
+		for _, ifaces := range view.FindChildren("interfaces") {
+			collectQinQFromInterfacesNode(ifaces, out)
+		}
 	}
 }
 
@@ -369,8 +351,9 @@ func collectQinQFindingsForNode(tree *ConfigTree, nodeID int, out map[string]qin
 // peer-only group only the STANDBY node renders — and (#16433) any unit
 // whose `vlan-tags` statement is not exactly `outer <vid>`.
 //
-// Only the two per-node EFFECTIVE views are unioned (node0 + node1
-// expansion) — deliberately NOT the pre-expansion all-groups "View 1" the
+// Only the per-node EFFECTIVE views are unioned (node0 + node1
+// expansion, plus the generic fallback view when neither expands) —
+// deliberately NOT the pre-expansion all-groups "View 1" the
 // sibling union gates (validateInterfaceUnitAliasCollisionsAST #5878,
 // validateZoneIDCollisionAST) also fold in. Those gates need View 1 because
 // their trigger is a COLLISION between two names/spellings, and View 1 keeps
@@ -381,7 +364,9 @@ func collectQinQFindingsForNode(tree *ConfigTree, nodeID int, out map[string]qin
 // effective view." Both node views are computed on both nodes regardless of
 // which node commits, so the verdict is already HA-symmetric without View 1,
 // and a peer-only APPLIED group's inner tag is caught by the other node's
-// view.
+// view. The generic fallback view is not View 1 either: it is the tree the
+// standalone compile actually compiles when neither node view expands
+// (#13146/#17222), so a top-level offending stanza there is live config.
 //
 // Strict (lenient=false): the first offending unit (interface+unit sorted)
 // is a hard compile error, so the candidate is never promoted (no partial
@@ -393,8 +378,7 @@ func validateQinQVLANStackAST(tree *ConfigTree, lenient bool) ([]string, error) 
 	// The aggregate effective view for every cluster node. Both are pure
 	// functions of the same candidate, so the verdict is identical no matter
 	// which node commits (HA symmetry).
-	collectQinQFindingsForNode(tree, 0, findings)
-	collectQinQFindingsForNode(tree, 1, findings)
+	collectQinQFindings(tree, findings)
 	if len(findings) == 0 {
 		return nil, nil
 	}
