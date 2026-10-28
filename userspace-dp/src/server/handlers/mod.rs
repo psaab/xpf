@@ -16,7 +16,7 @@
 //     `status`, `scheduler_heartbeat`, `fib_dump`, `update_fabrics`,
 //     `clear_policy_counters`, `clear_nat_counters`, `clear_zone_counters`,
 //     `clear_flood_counters`, `clear_filter_counters`, `shutdown`,
-//     catch-all), followed by post-match `refresh_status` + status attach
+//     catch-all), followed by post-match `project_status` + status attach
 //     (gated by `!suppress_status`) unless a deferred wait that re-derives
 //     status is owed (`Deferred::status_after_wait`: settle, owner-RG
 //     export, all-sessions export).
@@ -54,7 +54,8 @@ mod policy_list;
 use crate::afxdp::{HaRefreshOutcome, SessionDomain, HA_REFRESH_NEEDS_CONTROL_SOCKET};
 use super::super::*;
 use super::helpers::{
-    lock_server_state_recover, refresh_status, wait_for_binding_settle, write_state,
+    lock_server_state_recover, project_status, supervise_tunnels,
+    wait_for_binding_settle, write_state,
 };
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -96,7 +97,7 @@ fn attach_status_after_wait(
     if guard.quarantined_after_panic {
         running.store(false, Ordering::SeqCst);
     } else {
-        refresh_status(&mut guard);
+        project_status(&mut guard);
         response.status = Some(guard.status.clone());
     }
 }
@@ -405,7 +406,7 @@ pub(crate) fn handle_stream(
     //
     // NO STATUS ATTACH, AND THAT IS THE POINT. An earlier draft kept the
     // `!suppress_status` attach here, reasoning that a caller asking for status
-    // is asking for a `refresh_status` and may pay for its own lock. That left
+    // is asking for a `project_status` and may pay for its own lock. That left
     // the verb STARVABLE — by a caller that simply omits the flag — and the
     // acceptance cell written for this issue asserts the property
     // unconditionally, which is the stronger and correct reading.
@@ -465,6 +466,12 @@ pub(crate) fn handle_stream(
         response.error = "verb not served on session socket; use control socket".to_string();
     }
 
+    // #17141: tunnel supervision runs once per locked request, before the
+    // match. Handlers and the post-match attach only project afterwards, so
+    // a mutating verb (e.g. update_ha_state, whose handler refreshes) plus
+    // the dispatcher's own attach cannot run the WG/GRE sweeps twice.
+    // Suppressed requests still supervise: the 1 Hz poll cadence that drives
+    // the #1866/#1881 self-heal does not depend on a status payload.
     if !served_off_lock && !session_ha && !session_ping && !session_refused {
         let mut guard = lock_server_state_recover(&state);
         // GPT-4: quarantined state serves nothing — a prior handler panic may
@@ -476,6 +483,9 @@ pub(crate) fn handle_stream(
             running.store(false, Ordering::SeqCst);
             return Err("server state quarantined after a handler panic; restart required".to_string());
         }
+        // #17141: supervise inside this same (only) lock acquisition,
+        // before the match — never a second lock just for supervision.
+        supervise_tunnels(&mut guard);
         match request.request_type.as_str() {
             "ping" => {}
             "scheduler_heartbeat" => {
@@ -572,7 +582,7 @@ pub(crate) fn handle_stream(
                             persist_state = true;
                         }
                     }
-                    refresh_status(&mut guard);
+                    project_status(&mut guard);
                 }
             }
             "update_neighbors" => neighbors::update(
@@ -590,7 +600,7 @@ pub(crate) fn handle_stream(
             ),
             "clear_policy_counters" => {
                 guard.afxdp.clear_policy_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             // #2218: reset the helper-side NAT translation hit atomics. This is
@@ -601,7 +611,7 @@ pub(crate) fn handle_stream(
             // this store the cleared total would snap back on the next poll.
             "clear_nat_counters" => {
                 guard.afxdp.clear_nat_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             // #3651: reset the helper-side cumulative per-zone traffic totals.
@@ -614,7 +624,7 @@ pub(crate) fn handle_stream(
             // would snap back on the next poll.
             "clear_zone_counters" => {
                 guard.afxdp.clear_zone_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             // #3651: reset the helper-side cumulative per-zone FLOOD-event
@@ -628,7 +638,7 @@ pub(crate) fn handle_stream(
             // reset) — never a periodic caller on this shared socket.
             "clear_flood_counters" => {
                 guard.afxdp.clear_flood_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             // #15107: reset the helper-side firewall filter term counters
@@ -641,7 +651,7 @@ pub(crate) fn handle_stream(
             // are discarded by the counters' generation guard.
             "clear_filter_counters" => {
                 guard.afxdp.clear_filter_counters();
-                refresh_status(&mut guard);
+                project_status(&mut guard);
                 persist_state = true;
             }
             "set_queue_state" => {
@@ -737,7 +747,7 @@ pub(crate) fn handle_stream(
         // counter query attaches in-lock (its only production sender sets
         // SuppressStatus, so the asymmetry is latent).
         if deferred.as_ref().is_none_or(|d| !d.status_after_wait()) && !suppress_status {
-            refresh_status(&mut guard);
+            project_status(&mut guard);
             response.status = Some(guard.status.clone());
         }
     }

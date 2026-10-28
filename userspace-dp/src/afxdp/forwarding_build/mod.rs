@@ -267,9 +267,9 @@ pub(super) fn build_forwarding_state_with_counters(
 /// #5716: that two-step shape is the load-bearing part. `ZoneCounterStore` is
 /// `Arc`-backed, so the carry-forward `clone()` is a HANDLE ON THE LIVE STORE
 /// the running workers are folding into, not a copy — and binding a candidate
-/// to it mutates it two ways: [`ZoneCounterSlotMap::build`] GET-OR-CREATES a
+/// to it mutates it two ways: [`ZoneSlotMap::build`] GET-OR-CREATES a
 /// block per SLOT-ASSIGNED zone (a SUBSET of the configured set — it skips zone
-/// id 0 and stops at [`ZONE_COUNTER_ASSIGNABLE_SLOTS`]), and `reconcile` DROPS
+/// id 0 and stops at [`ZONE_SLOT_ASSIGNABLE_SLOTS`]), and `reconcile` DROPS
 /// the blocks for zones the candidate no longer configures. A snapshot rejected by one of the fallible
 /// integrity belts is discarded by the reconcile/refresh preflight, which keeps
 /// the previous forwarding state — so neither mutation may have happened.
@@ -482,8 +482,9 @@ fn attach_zone_counters(
     snapshot: &ConfigSnapshot,
     previous: Option<&ForwardingState>,
 ) {
-    use crate::afxdp::flood_counters::{FloodCounterSlotMap, FloodCounterStore};
-    use crate::afxdp::zone_counters::{ZoneCounterSlotMap, ZoneCounterStore};
+    use crate::afxdp::flood_counters::FloodCounterStore;
+    use crate::afxdp::zone_counters::ZoneCounterStore;
+    use crate::afxdp::zone_slot_counters::ZoneSlotMap;
     // `populate_zones` is the admission boundary: only ids represented in
     // `zone_id_to_name` are configured, non-empty, nonzero, and non-reserved.
     // Slot maps must use that exact admitted set, not raw snapshot rows.
@@ -491,23 +492,25 @@ fn attach_zone_counters(
     let store = previous
         .map(|p| p.zone_counter_store.clone())
         .unwrap_or_else(ZoneCounterStore::default);
-    state.zone_counter_slot_map = std::sync::Arc::new(ZoneCounterSlotMap::build(&zone_ids, &store));
-    state.zone_counter_store = store;
-    // #3651 flood half: the SECOND per-zone counter family, bound here rather
-    // than in its own function ON PURPOSE. Both families slot from the SAME
-    // `zone_ids` list in the same order, and a `const _: () = assert!(
-    // FLOOD_COUNTER_SLOTS == ZONE_COUNTER_SLOTS)` in `flood_counters.rs` pins
-    // their capacities equal precisely so a zone is slotted for BOTH or
-    // NEITHER. A separate attach function could be moved, reordered, or dropped
-    // independently of this one, which would make that assert claim a coupling
-    // the code no longer has; sharing one call site makes divergence
-    // unrepresentable instead of merely tested for.
-    let flood_store = previous
+    let flood_store_pre = previous
         .map(|p| p.flood_counter_store.clone())
         .unwrap_or_else(FloodCounterStore::default);
-    state.flood_counter_slot_map =
-        std::sync::Arc::new(FloodCounterSlotMap::build(&zone_ids, &flood_store));
-    state.flood_counter_store = flood_store;
+    // #17204: ONE slot map built once per apply, shared by both families.
+    let (slot_map, caches) = ZoneSlotMap::build(&zone_ids, &store, &flood_store_pre);
+    let slot_map = std::sync::Arc::new(slot_map);
+    let caches = std::sync::Arc::new(caches);
+    state.zone_counter_slot_map = std::sync::Arc::clone(&slot_map);
+    state.zone_counter_caches = std::sync::Arc::clone(&caches);
+    state.zone_counter_store = store;
+    state.flood_counter_slot_map = slot_map;
+    state.flood_counter_caches = caches;
+    state.flood_counter_store = flood_store_pre;
+    // #3651 flood half: the SECOND per-zone counter family, bound here rather
+    // than in its own function ON PURPOSE. #17204: both families share the
+    // ONE slot map and caches built above, so a zone is slotted for BOTH or
+    // NEITHER by construction. A separate attach function could still be
+    // moved, reordered, or dropped independently, so the binding stays at
+    // this one call site.
     // #8291 GRE decap refusals: a THIRD cumulative store, NOT per-zone and not
     // slot-mapped, carried here for the reason the flood half gives above — a
     // separate attach function could be

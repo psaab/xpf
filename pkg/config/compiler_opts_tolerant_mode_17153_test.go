@@ -226,10 +226,18 @@ func TestSanitizeReadOnlyAtScrubSites17153(t *testing.T) {
 	if count == 0 {
 		t.Fatal("no sanitizeFreeTextControlChars read found — guard is vacuous")
 	}
-	// Tunnel gate must read tolerant, not sanitize, at exactly one
-	// non-test call site. An exact count defeats a dummy call that
-	// passes opts.tolerant and discards its result while the real
-	// gate borrows another flag.
+	// Tunnel gate must be driven by tolerant, not sanitize, at exactly
+	// one non-test call site. An exact count defeats a dummy call that
+	// discards its result while the real gate borrows another flag.
+	// Since #17163 the production call passes the whole caller opts
+	// (tree, opts) so the Views 2/3 side compiles inherit every
+	// downgrade, and tunnelid.go selects warn-vs-error on
+	// opts.tolerant itself. The guard therefore accepts the whole-opts
+	// form: either an argument reads opts.tolerant, or the sole opts
+	// argument is passed through and tunnelid.go reads opts.tolerant
+	// (and never sanitize) for the selection. The pre-#17153 snapshot
+	// forms — passing opts.tolerant alone to a (tree, lenient bool)
+	// callee, or borrowing sanitize at the call — both turn RED.
 	tunnelCalls := 0
 	for name, f := range files {
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -246,7 +254,11 @@ func TestSanitizeReadOnlyAtScrubSites17153(t *testing.T) {
 				t.Errorf("validateTunnelEndpointIDCollisionAST called in %s, want only compiler.go", name)
 			}
 			sawTolerant := false
+			sawWholeOpts := false
 			for _, a := range c.Args {
+				if id, ok := a.(*ast.Ident); ok && id.Name == "opts" {
+					sawWholeOpts = true
+				}
 				ast.Inspect(a, func(m ast.Node) bool {
 					if isOptsField17153(m, "tolerant") {
 						sawTolerant = true
@@ -257,14 +269,33 @@ func TestSanitizeReadOnlyAtScrubSites17153(t *testing.T) {
 					return true
 				})
 			}
-			if !sawTolerant {
-				t.Errorf("validateTunnelEndpointIDCollisionAST call in %s does not pass opts.tolerant", name)
+			if !sawTolerant && !sawWholeOpts {
+				t.Errorf("validateTunnelEndpointIDCollisionAST call in %s passes neither opts.tolerant nor the whole caller opts (#17163)", name)
 			}
 			return true
 		})
 	}
 	if tunnelCalls != 1 {
 		t.Fatalf("validateTunnelEndpointIDCollisionAST has %d non-test call sites, want exactly 1 (dummy-call bypass?)", tunnelCalls)
+	}
+	// The warn-vs-error selection inside tunnelid.go must read
+	// opts.tolerant and never opts.sanitizeFreeTextControlChars.
+	tunnelFile, ok := files["tunnelid.go"]
+	if !ok {
+		t.Fatal("tunnelid.go not parsed")
+	}
+	sawTunnelTolerant := false
+	ast.Inspect(tunnelFile, func(n ast.Node) bool {
+		if isOptsField17153(n, "tolerant") {
+			sawTunnelTolerant = true
+		}
+		if isOptsField17153(n, "sanitizeFreeTextControlChars") {
+			t.Error("tunnelid.go still borrows sanitizeFreeTextControlChars for warn-vs-error")
+		}
+		return true
+	})
+	if !sawTunnelTolerant {
+		t.Error("tunnelid.go does not read opts.tolerant for warn-vs-error")
 	}
 }
 
@@ -384,11 +415,12 @@ func TestFlagDocsNameGovernedValidators17153(t *testing.T) {
 			return true
 		})
 	}
-	// Reads: tunnel arg (compiler.go), `return opts.tolerant`
+	// Reads: tunnel selection (tunnelid.go, fed the whole caller opts
+	// from compiler.go since #17163), `return opts.tolerant`
 	// (compiler_tailgates.go), RX-MTU guard, mgmt-zone guard. The
 	// composite literal in lenientCompileOpts is a key, not a read.
 	if tolerantReads != 4 {
-		t.Errorf("opts.tolerant is read at %d non-test sites, want exactly 4 (tunnel gate, deferJunosHostWarnings body, RX-MTU guard, mgmt-zone guard); an extra read is governed by no doc claim", tolerantReads)
+		t.Errorf("opts.tolerant is read at %d non-test sites, want exactly 4 (tunnel gate in tunnelid.go, deferJunosHostWarnings body, RX-MTU guard, mgmt-zone guard); an extra read is governed by no doc claim", tolerantReads)
 	}
 	// Contested/shared advisories must read their co-set suppressor,
 	// not tolerant (the other half of the F1 doc fix).

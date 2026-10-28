@@ -421,7 +421,7 @@ pub(crate) fn run() -> Result<(), String> {
             forwarding_armed: false,
             capabilities: UserspaceCapabilities::default(),
             // #9629: this binary serves session fast-path refreshes from boot
-            // (`refresh_status` re-asserts it on every attach).
+            // (`project_status` re-asserts it on every attach).
             ha_session_refresh_supported: true,
             last_snapshot_generation: 0,
             last_fib_generation: 0,
@@ -559,6 +559,7 @@ pub(crate) fn run() -> Result<(), String> {
             policy_batch_hold_max_ns: 0,
             session_delete_dropped_released: 0,
             tunnel_purge_reservations_released: 0,
+            tunnel_purge_delete_refused: 0,
             synced_import_reserve_refused: 0,
             synced_import_mirror_refused: 0,
             mirror_restore_republished: 0,
@@ -619,7 +620,7 @@ pub(crate) fn run() -> Result<(), String> {
             neighbor_pending_keys: 0,
             neg_neigh_keys: 0,
             // #1865: WG telemetry rows arrive on the first
-            // refresh_status; empty start keeps the wire omitted.
+            // project_status; empty start keeps the wire omitted.
             wg_tunnels: Vec::new(),
             per_binding: Vec::new(),
             flow_worker_map: Vec::new(),
@@ -641,7 +642,7 @@ pub(crate) fn run() -> Result<(), String> {
             filter_term_counters: Vec::new(),
             // #3651: per-zone traffic block is empty until the first status
             // refresh reads the helper's zone-counter store. #14619: the
-            // layout version is stamped by refresh_status on every refresh;
+            // layout version is stamped by project_status on every refresh;
             // the pre-refresh 0 here is never published without a refresh.
             zone_counter_layout_version: 0,
             zone_counter_slotted_zone_ids: Vec::new(),
@@ -901,7 +902,7 @@ pub(crate) fn run() -> Result<(), String> {
         // (a torn-down-while-poisoned coordinator behind a green exit code).
         let mut guard = state.lock().expect("state poisoned");
         guard.afxdp.stop_with_event_stream();
-        refresh_status(&mut guard);
+        project_status(&mut guard);
     }
     afxdp::remove_kernel_rst_suppression();
     write_state(&args.state_file, &state)?;

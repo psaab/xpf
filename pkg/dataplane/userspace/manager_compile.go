@@ -1661,14 +1661,12 @@ func configHasMultiRoutingInstanceNAT64(cfg *config.Config) bool {
 		return false
 	}
 	for _, rs := range cfg.Security.NAT.NAT64 {
-		if rs == nil {
-			continue
-		}
-		n := len(rs.FromRoutingInstances)
-		if n == 0 && rs.FromRoutingInstance != "" {
-			n = 1
-		}
-		if n > 1 {
+		// #17139: count the effective (post-lowering, deduped) union —
+		// the same set the snapshot builder ships — so a divergent
+		// singular (r1) beside a non-empty plural ([r2]) arms this gate
+		// for the [r2 r1] wire set, while default+""+flag collapsing to
+		// one wire token does not.
+		if len(config.NAT64EffectiveRoutingInstances(cfg, rs)) > 1 {
 			return true
 		}
 	}

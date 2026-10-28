@@ -48,7 +48,7 @@ const (
 	// grace matches that window. A live peer whose heartbeats are briefly
 	// lost past it is still covered by the sync-recency guard
 	// handlePeerTimeout consults (the daemon's
-	// shouldSuppressPeerHeartbeatTimeout, #1792). The never-seen arm keeps the
+	// syncSuppressesPeerTimeoutLocked, #1792/#17056). The never-seen arm keeps the
 	// cold-boot floor: a replacement for a receiver that never saw the peer is
 	// not armed, so it IS a cold start.
 	heartbeatRestartGrace = 5 * time.Second
@@ -1495,10 +1495,10 @@ func heartbeatStale(lastSeenMono, nowMono int64, timeout time.Duration) bool {
 // timeout was first declared is observed. A receiver that has never seen a
 // heartbeat (lastSeen == 0) is not "fresh".
 //
-// This is the truth source for handlePeerTimeout's post-guard re-check: after a
-// slow guard window, the only correct question is "is the heartbeat fresh
-// again?", not "is peerAlive still set?" (peerAlive is essentially always true
-// at that point — a fresh heartbeat only keeps it true).
+// This is the truth source for handlePeerTimeout's freshness check: the
+// only correct question is "is the heartbeat fresh again?", not "is
+// peerAlive still set?" (peerAlive is essentially always true at that
+// point — a fresh heartbeat only keeps it true).
 func (r *heartbeatReceiver) peerHeartbeatFresh() bool {
 	lastNano := r.lastSeen.Load()
 	if lastNano == 0 {

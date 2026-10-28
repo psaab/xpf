@@ -81,6 +81,7 @@ impl<const N: usize, K: Eq + std::hash::Hash> FamilyLpm<N, K> {
             .or_insert(peer_index);
     }
 
+    #[cfg(test)]
     fn remove_peer(&mut self, peer_index: u32) {
         for bucket in &mut self.buckets {
             bucket.retain(|_, owner| *owner != peer_index);
@@ -168,6 +169,7 @@ impl AllowedIps {
 
     /// Remove every entry for a peer. Used when the peer is dropped
     /// from the config snapshot.
+    #[cfg(test)]
     pub(crate) fn remove_peer(&mut self, peer_index: u32) {
         self.v4.remove_peer(peer_index);
         self.v6.remove_peer(peer_index);

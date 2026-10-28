@@ -124,7 +124,7 @@ func TestNoReceiverNeverSeenFloorHolds16751(t *testing.T) {
 func TestNoReceiverNeverSeenSyncFreshSuppresses16751(t *testing.T) {
 	shortenNeverSeenGrace(t, 60*time.Millisecond)
 	m := coldBootManager(t)
-	m.SetPeerNeverSeenSyncFreshFunc(func() bool { return true })
+	m.SetFakePeerSyncSourceForTesting(true, 100*time.Millisecond, true, true)
 	m.SetRGReady(0, true, nil)
 
 	// Well past the floor plus several rechecks: still held.
@@ -136,7 +136,7 @@ func TestNoReceiverNeverSeenSyncFreshSuppresses16751(t *testing.T) {
 		t.Fatal("node promoted while sync proof remained fresh")
 	}
 
-	m.SetPeerNeverSeenSyncFreshFunc(func() bool { return false })
+	m.SetFakePeerSyncSourceForTesting(false, 0, false, false)
 	if !waitPeerConfirmedAbsent(t, m, 3*time.Second) {
 		t.Fatal("silent sync: Manager clock never confirmed absence after proof went stale")
 	}

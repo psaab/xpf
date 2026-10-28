@@ -532,7 +532,7 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit_and_
     Some(out)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn segment_forwarded_tcp_frames(
     area: &MmapArea,
     desc: XdpDesc,

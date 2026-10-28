@@ -327,30 +327,30 @@ func TestFabricAuthChainStopsDestructiveUnauth(t *testing.T) {
 func TestFabricAuthTokenRoundTrip(t *testing.T) {
 	key := []byte(fabricTestKey)
 	now := time.Now()
-	tok := fabricAuthTokenHex(key, now)
-	if !verifyFabricAuthToken(key, tok) {
+	tok := fabricAuthTokenHex(key, now, "")
+	if !verifyFabricAuthToken(key, tok, "") {
 		t.Error("current-window token failed to verify")
 	}
-	if verifyFabricAuthToken([]byte("other-key"), tok) {
+	if verifyFabricAuthToken([]byte("other-key"), tok, "") {
 		t.Error("token verified under the wrong key")
 	}
-	if verifyFabricAuthToken(nil, tok) {
+	if verifyFabricAuthToken(nil, tok, "") {
 		t.Error("token verified with no key")
 	}
-	if verifyFabricAuthToken(key, "") {
+	if verifyFabricAuthToken(key, "", "") {
 		t.Error("empty token verified")
 	}
-	if verifyFabricAuthToken(key, "zz") {
+	if verifyFabricAuthToken(key, "zz", "") {
 		t.Error("malformed token verified")
 	}
 	// Adjacent windows (±1) verify; ±2 does not.
-	prev := fabricAuthTokenHex(key, now.Add(-fabricAuthWindowSeconds*time.Second))
-	next := fabricAuthTokenHex(key, now.Add(fabricAuthWindowSeconds*time.Second))
-	if !verifyFabricAuthToken(key, prev) || !verifyFabricAuthToken(key, next) {
+	prev := fabricAuthTokenHex(key, now.Add(-fabricAuthWindowSeconds*time.Second), "")
+	next := fabricAuthTokenHex(key, now.Add(fabricAuthWindowSeconds*time.Second), "")
+	if !verifyFabricAuthToken(key, prev, "") || !verifyFabricAuthToken(key, next, "") {
 		t.Error("adjacent-window token failed to verify (skew tolerance)")
 	}
-	far := fabricAuthTokenHex(key, now.Add(3*fabricAuthWindowSeconds*time.Second))
-	if verifyFabricAuthToken(key, far) {
+	far := fabricAuthTokenHex(key, now.Add(3*fabricAuthWindowSeconds*time.Second), "")
+	if verifyFabricAuthToken(key, far, "") {
 		t.Error("far-window token verified (replay horizon too wide)")
 	}
 }
