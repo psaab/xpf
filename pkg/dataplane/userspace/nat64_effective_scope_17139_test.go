@@ -70,3 +70,48 @@ func TestBuildNAT64SnapshotsEffectiveScopeUnion17139(t *testing.T) {
 		t.Fatalf("wire FromRoutingInstances(default+\"\"+flag) = %q, want [%q] (one token)", defaultSnaps[0].FromRoutingInstances, config.NATDefaultRoutingInstanceWire)
 	}
 }
+
+// #17139: the pre-v64 protocol-truncation gate predicate must count the
+// effective union, not the raw plural. Divergent singular r1 beside
+// plural [r2] ships [r2 r1] on the wire, so it is multi; default+""+flag
+// collapses to one wire token, so it is not.
+func TestConfigHasMultiRoutingInstanceNAT64EffectiveUnion17139(t *testing.T) {
+	cfg := func(rs *config.NAT64RuleSet) *config.Config {
+		c := &config.Config{}
+		c.Security.NAT.NAT64 = []*config.NAT64RuleSet{rs}
+		return c
+	}
+	if !configHasMultiRoutingInstanceNAT64(cfg(&config.NAT64RuleSet{
+		Name: "rs1", Prefix: "64:ff9b::/96",
+		FromRoutingInstance: "r1", FromRoutingInstances: []string{"r2"},
+	})) {
+		t.Fatal("divergent singular r1 + plural [r2] must be multi (builder ships [r2 r1])")
+	}
+	if !ConfigHasMultiRoutingInstanceNAT64(cfg(&config.NAT64RuleSet{
+		Name: "rs1", Prefix: "64:ff9b::/96",
+		FromRoutingInstance: "r1", FromRoutingInstances: []string{"r2"},
+	})) {
+		t.Fatal("exported predicate must agree on divergent singular+plural")
+	}
+	if configHasMultiRoutingInstanceNAT64(cfg(&config.NAT64RuleSet{
+		Name: "rs1", Prefix: "64:ff9b::/96",
+		FromRoutingInstance: "default", FromRoutingInstances: []string{""},
+		FromRoutingInstanceDefault: true,
+	})) {
+		t.Fatal("default+\"\"+flag must collapse to one effective token, not multi")
+	}
+	if configHasMultiRoutingInstanceNAT64(cfg(&config.NAT64RuleSet{
+		Name: "rs1", Prefix: "64:ff9b::/96",
+		FromRoutingInstance: "r1", FromRoutingInstances: []string{"r1"},
+	})) {
+		t.Fatal("singular already in plural must dedup to one, not multi")
+	}
+	if configHasMultiRoutingInstanceNAT64(cfg(&config.NAT64RuleSet{
+		Name: "rs1", Prefix: "64:ff9b::/96", FromRoutingInstance: "r1",
+	})) {
+		t.Fatal("singular-only must not be multi")
+	}
+	if configHasMultiRoutingInstanceNAT64(nil) {
+		t.Fatal("nil cfg must not be multi")
+	}
+}
