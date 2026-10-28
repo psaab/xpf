@@ -12,7 +12,7 @@ func setConfigEpochPeerTagCapability11055(s *SessionSync, capable bool) {
 	if capable {
 		flags = uint32(capFlagConfigEpochReverseTag)
 	}
-	s.peerCapabilityFlags.Store(flags)
+	s.peerIncarnationState().peerCapabilityFlags.Store(flags)
 }
 
 func TestActiveActiveConfigEpochAuthorityGuard11055(t *testing.T) {

@@ -83,7 +83,7 @@ func TestPeerHeartbeatAckEverIsPeerIncarnationScoped_5718(t *testing.T) {
 
 	// Incarnation #1 proves it understands heartbeats.
 	ss.handleMessage(connA, syncMsgHeartbeatAck, nil)
-	if !ss.peerHeartbeatAckEver.Load() {
+	if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("syncMsgHeartbeatAck from an installed connection must latch the peer heartbeat-ack capability")
 	}
 	// Enforcement is now armed for THIS peer: it acks, so silence is a fault.
@@ -94,7 +94,7 @@ func TestPeerHeartbeatAckEverIsPeerIncarnationScoped_5718(t *testing.T) {
 	// Incarnation #1 ends. Full disconnect (conn1 was never set, so removing
 	// conn0 leaves no active connection) must end the capability with it.
 	ss.handleDisconnect(connA)
-	if ss.peerHeartbeatAckEver.Load() {
+	if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("full disconnect must clear peerHeartbeatAckEver: the capability " +
 			"belongs to the peer incarnation that proved it, not to this " +
 			"SessionSync. Leaving it latched arms the missed-heartbeat teardown " +
@@ -138,7 +138,7 @@ func TestPeerHeartbeatAckEverClearedOnSupersession_5718(t *testing.T) {
 	connA := pipeConn(t)
 	installAckTestConn(t, ss, 0, connA)
 	ss.handleMessage(connA, syncMsgHeartbeatAck, nil)
-	if !ss.peerHeartbeatAckEver.Load() {
+	if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("setup: incarnation #1 must latch the capability")
 	}
 
@@ -153,7 +153,7 @@ func TestPeerHeartbeatAckEverClearedOnSupersession_5718(t *testing.T) {
 	// changes nothing.
 	ss.handleDisconnect(connA)
 
-	if ss.peerHeartbeatAckEver.Load() {
+	if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("a connection SUPERSEDING a live one in its fabric slot starts a new " +
 			"peer incarnation and must clear peerHeartbeatAckEver. handleDisconnect " +
 			"cannot do it: by the time the superseded connection's receiveLoop " +
@@ -205,7 +205,7 @@ func TestPeerHeartbeatAckTwoFabricStaleSurvivorCannotRearm_5718(t *testing.T) {
 			ss.installConn(tc.superseded, aSup)
 			ss.installConn(tc.survivor, aSurv)
 			ss.handleMessage(aSup, syncMsgHeartbeatAck, nil)
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatal("setup: incarnation A must latch the capability")
 			}
 
@@ -214,7 +214,7 @@ func TestPeerHeartbeatAckTwoFabricStaleSurvivorCannotRearm_5718(t *testing.T) {
 			// that slot.
 			b := pipeConn(t)
 			ss.installConn(tc.superseded, b)
-			if ss.peerHeartbeatAckEver.Load() {
+			if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatal("setup: the supersession must clear the capability")
 			}
 
@@ -225,7 +225,7 @@ func TestPeerHeartbeatAckTwoFabricStaleSurvivorCannotRearm_5718(t *testing.T) {
 			// eviction removed it from the registry outright, the observable is
 			// the same: the latch stays clear.
 			ss.handleMessage(aSurv, syncMsgHeartbeatAck, nil)
-			if ss.peerHeartbeatAckEver.Load() {
+			if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatalf("an ack from the PREVIOUS incarnation's fabric-%d connection re-armed "+
 					"the capability microseconds after the supersession cleared it — the old "+
 					"incarnation enforced against the new one. A membership-only acceptance "+
@@ -235,7 +235,7 @@ func TestPeerHeartbeatAckTwoFabricStaleSurvivorCannotRearm_5718(t *testing.T) {
 
 			// The current incarnation's own connection still arms it.
 			ss.handleMessage(b, syncMsgHeartbeatAck, nil)
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatal("the CURRENT incarnation's connection must still be able to latch the capability")
 			}
 		})
@@ -276,7 +276,7 @@ func TestPeerHeartbeatAckReclaimingStaleSlotKeepsCapability_5718(t *testing.T) {
 			bTaken := pipeConn(t)
 			ss.installConn(tc.taken, bTaken)
 			ss.handleMessage(bTaken, syncMsgHeartbeatAck, nil)
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatal("setup: incarnation B must latch the capability")
 			}
 
@@ -290,7 +290,7 @@ func TestPeerHeartbeatAckReclaimingStaleSlotKeepsCapability_5718(t *testing.T) {
 			bReclaimed := pipeConn(t)
 			ss.installConn(tc.reclaimed, bReclaimed)
 
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatalf("reclaiming fabric %d is the current peer taking its second fabric "+
 					"link, not a new incarnation. Clearing here discards a capability this "+
 					"peer proved", tc.reclaimed)
@@ -299,9 +299,9 @@ func TestPeerHeartbeatAckReclaimingStaleSlotKeepsCapability_5718(t *testing.T) {
 			// And B's original connection must still count as current — the
 			// decisive half. If the reclaim had advanced the incarnation,
 			// bTaken would be stranded at the old stamp and could never re-arm.
-			ss.peerHeartbeatAckEver.Store(false)
+			ss.peerIncarnationState().peerHeartbeatAckEver.Store(false)
 			ss.handleMessage(bTaken, syncMsgHeartbeatAck, nil)
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatalf("the fabric-%d connection that proved the capability was stranded at "+
 					"a stale incarnation stamp by the reclaim of fabric %d, so it can never "+
 					"re-arm — a permanent disarm of the missed-heartbeat teardown and "+
@@ -332,13 +332,13 @@ func TestPeerHeartbeatAckStaleConnCannotRearm_5718(t *testing.T) {
 
 	connB := pipeConn(t)
 	ss.installConn(0, connB)
-	if ss.peerHeartbeatAckEver.Load() {
+	if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("setup: the supersession must leave the capability cleared")
 	}
 
 	// The superseded connection's in-flight ack arrives after the swap.
 	ss.handleMessage(connA, syncMsgHeartbeatAck, nil)
-	if ss.peerHeartbeatAckEver.Load() {
+	if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("an ack from a SUPERSEDED connection must not latch the capability: " +
 			"it speaks for the previous peer incarnation, and honouring it " +
 			"re-arms the enforcement paths against the new one")
@@ -347,7 +347,7 @@ func TestPeerHeartbeatAckStaleConnCannotRearm_5718(t *testing.T) {
 	// The current incarnation's own ack still latches — the gate rejects stale
 	// connections, not acks in general.
 	ss.handleMessage(connB, syncMsgHeartbeatAck, nil)
-	if !ss.peerHeartbeatAckEver.Load() {
+	if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("an ack from the CURRENTLY installed connection must latch the capability")
 	}
 }
@@ -426,7 +426,7 @@ func TestPeerHeartbeatAckStoreIsAtomicWithSupersession_5718(t *testing.T) {
 		t.Fatal("the competing installConn never completed")
 	}
 
-	if ss.peerHeartbeatAckEver.Load() {
+	if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("a supersession interleaved between the incarnation check and the " +
 			"capability store, so the ack resurrected a capability the supersession " +
 			"had already cleared. The check and the store must BOTH happen under the " +
@@ -454,14 +454,14 @@ func TestPeerHeartbeatAckNotLatchedBeforeInstall_5718(t *testing.T) {
 
 	pending := pipeConn(t)
 	ss.handleMessage(pending, syncMsgHeartbeatAck, nil)
-	if ss.peerHeartbeatAckEver.Load() {
+	if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("an ack from a connection that is not installed in a fabric slot " +
 			"must not latch the capability")
 	}
 
 	// nil is the unit-test / no-connection shape and must be inert too.
 	ss.handleMessage(nil, syncMsgHeartbeatAck, nil)
-	if ss.peerHeartbeatAckEver.Load() {
+	if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		t.Fatal("an ack with no originating connection must not latch the capability")
 	}
 }
@@ -498,7 +498,7 @@ func TestPeerHeartbeatAckClearedWheneverRegistryEmpties_5718(t *testing.T) {
 		if !registryEmpty(ss) {
 			t.Fatal("setup: a fresh SessionSync must have no connections")
 		}
-		if ss.peerHeartbeatAckEver.Load() {
+		if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 			t.Fatal("a fresh SessionSync must not carry the capability")
 		}
 	})
@@ -508,14 +508,14 @@ func TestPeerHeartbeatAckClearedWheneverRegistryEmpties_5718(t *testing.T) {
 		c := pipeConn(t)
 		ss.installConn(0, c)
 		ss.handleMessage(c, syncMsgHeartbeatAck, nil)
-		if !ss.peerHeartbeatAckEver.Load() {
+		if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 			t.Fatal("setup: the capability must be latched before the disconnect")
 		}
 		ss.handleDisconnect(c)
 		if !registryEmpty(ss) {
 			t.Fatal("setup: the registry must be empty after the only fabric drops")
 		}
-		if ss.peerHeartbeatAckEver.Load() {
+		if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 			t.Fatal("the registry emptied with the capability still latched. installConn " +
 				"omits a clear on the full-disconnect edge BECAUSE reaching an empty " +
 				"registry implies handleDisconnect already cleared — that premise no " +
@@ -529,7 +529,7 @@ func TestPeerHeartbeatAckClearedWheneverRegistryEmpties_5718(t *testing.T) {
 		ss.installConn(0, c0)
 		ss.installConn(1, c1)
 		ss.handleMessage(c0, syncMsgHeartbeatAck, nil)
-		if !ss.peerHeartbeatAckEver.Load() {
+		if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 			t.Fatal("setup: the capability must be latched before the disconnects")
 		}
 		// Partial first: the capability must SURVIVE (same peer process).
@@ -537,7 +537,7 @@ func TestPeerHeartbeatAckClearedWheneverRegistryEmpties_5718(t *testing.T) {
 		if registryEmpty(ss) {
 			t.Fatal("setup: fabric 1 must survive the fabric 0 disconnect")
 		}
-		if !ss.peerHeartbeatAckEver.Load() {
+		if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 			t.Fatal("a partial disconnect must not clear the capability")
 		}
 		// Now the last one goes.
@@ -545,7 +545,7 @@ func TestPeerHeartbeatAckClearedWheneverRegistryEmpties_5718(t *testing.T) {
 		if !registryEmpty(ss) {
 			t.Fatal("setup: the registry must be empty once both fabrics drop")
 		}
-		if ss.peerHeartbeatAckEver.Load() {
+		if ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 			t.Fatal("the registry emptied via the second fabric's disconnect with the " +
 				"capability still latched — installConn's omitted full-disconnect clear " +
 				"relies on this never happening")
@@ -685,7 +685,7 @@ func TestPeerHeartbeatAckEverSurvivesPartialDisconnect_5718(t *testing.T) {
 			ss.installConn(tc.dropped, dropped)
 			ss.installConn(tc.survivor, survivor)
 			ss.handleMessage(dropped, syncMsgHeartbeatAck, nil)
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatal("setup: capability must be latched before the partial disconnect")
 			}
 
@@ -697,7 +697,7 @@ func TestPeerHeartbeatAckEverSurvivesPartialDisconnect_5718(t *testing.T) {
 				t.Fatalf("setup: fabric %d must survive a fabric %d disconnect",
 					tc.survivor, tc.dropped)
 			}
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatalf("a PARTIAL disconnect (fabric %d down, fabric %d still up) "+
 					"must NOT clear peerHeartbeatAckEver: the peer process never "+
 					"changed. Clearing on any disconnect disarms the missed-heartbeat "+
@@ -728,7 +728,7 @@ func TestPeerHeartbeatAckEverSurvivesSecondFabricComingUp_5718(t *testing.T) {
 			firstConn := pipeConn(t)
 			ss.installConn(tc.first, firstConn)
 			ss.handleMessage(firstConn, syncMsgHeartbeatAck, nil)
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatalf("setup: capability must be latched before fabric %d comes up", tc.second)
 			}
 
@@ -736,7 +736,7 @@ func TestPeerHeartbeatAckEverSurvivesSecondFabricComingUp_5718(t *testing.T) {
 			secondConn := pipeConn(t)
 			ss.installConn(tc.second, secondConn)
 
-			if !ss.peerHeartbeatAckEver.Load() {
+			if !ss.peerIncarnationState().peerHeartbeatAckEver.Load() {
 				t.Fatalf("fabric %d coming up into an EMPTY slot beside the live fabric %d "+
 					"must NOT clear peerHeartbeatAckEver: nothing was superseded and the "+
 					"peer process never changed. Clearing on every install disarms the "+

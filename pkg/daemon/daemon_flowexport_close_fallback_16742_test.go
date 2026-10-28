@@ -163,7 +163,7 @@ func TestPromoteOpenFromSyncRegistersForExport16742(t *testing.T) {
 	d.trackFlowOpenFromSync(dpuserspace.SessionDeltaInfo{
 		Event: "open", AddrFamily: dataplane.AFInet, Protocol: 6,
 		SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23461, DstPort: 443,
-		IngressZoneID: uint16(trust), EgressZoneID: uint16(untrust),
+		IngressZoneID: trust, EgressZoneID: untrust,
 		IngressIfindex: 11, EgressIfindex: 12,
 	})
 	key := flowexport.FlowKey{SrcIP: "10.0.0.102", DstIP: "192.0.2.200", SrcPort: 23461, DstPort: 443, Protocol: 6}

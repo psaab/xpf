@@ -7290,10 +7290,10 @@ fn shared_fragment_route_helper_binds_full_path_6238() {
 /// (`MAX_EXT_HDRS=8`) and a peer (`the BPF parser`), and both were false: no
 /// constant of that name has ever been 8, and the BPF parser bounded at 6.
 /// The parity itself was real. That is the failure mode a hand-written number
-/// has here — three walkers reach the same depth by different mechanisms and
-/// therefore carry three different numbers (this extractor's `0..8`
-/// iterations, `MAX_IPV6_EXT_HEADERS = 8`, the shim's `MAX_EXT_HDRS = 7`), so
-/// any single number copied into a comment is wrong for two of them.
+/// has here — the walkers reach the same depth by different mechanisms and
+/// therefore carry different numbers (`MAX_IPV6_EXT_HEADERS = 8`, the
+/// shim's `MAX_EXT_HDRS = 7`), so any single number copied into a comment
+/// is wrong for one of them.
 ///
 /// Pinning either side's literal would just re-create that. This asserts the
 /// two walkers AGREE at every chain length, which stays true through a
@@ -7303,6 +7303,13 @@ fn shared_fragment_route_helper_binds_full_path_6238() {
 /// The sweep spans the boundary deliberately: 0..=7 must resolve, 8..=10 must
 /// refuse. A sweep that stopped at 7 would pass against a walk with no bound
 /// at all.
+///
+/// #17106: the extractor now folds the ONE shared walk, so agreement is by
+/// construction; the cell is kept as the depth anchor and gains the explicit
+/// OverLimit decision — at n >= 8 the extractor must return
+/// `Err(TruncatedIpv6ExtChain)` ("ip-malformed"), not the old private walk's
+/// `Ok` with `tcp_seq == 0`. That half is fail-on-revert for the OverLimit
+/// mapping: dropping it makes n >= 8 resolve to `Ok(zeros)` here.
 #[test]
 fn screen_ext_header_depth_agrees_with_the_forwarding_walker_6885() {
     let mut screen_resolved = Vec::new();
@@ -7339,6 +7346,16 @@ fn screen_ext_header_depth_agrees_with_the_forwarding_walker_6885() {
         // pulled the TCP header out — not merely that it returned Ok. A walk
         // that gave up mid-chain still returns Ok with tcp_seq left at 0, and
         // that is precisely the ext-header evasion #3120/#4517 are about.
+        // #17106 explicit OverLimit decision: at n >= 8 the extractor must
+        // FAIL CLOSED with Err(TruncatedIpv6ExtChain), not Ok(zeros).
+        if n >= 8 {
+            assert_eq!(
+                screen.as_ref().unwrap_err(),
+                &ScreenParseError::TruncatedIpv6ExtChain,
+                "#17106: an over-limit chain (n={n}) must fail closed as ip-malformed, \
+                 not pass unscreened with tcp_seq == 0"
+            );
+        }
         screen_resolved.push(screen.map(|i| i.tcp_seq == 0x1122_3344).unwrap_or(false));
 
         let walk = crate::afxdp::walk_ipv6_ext_chain(&frame, 14);

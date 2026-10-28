@@ -42,11 +42,11 @@ import (
 	"fmt"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/frr"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/vishvananda/netlink"
 	"log/slog"
-	"os"
 	"strings"
 	"time"
 )
@@ -405,31 +405,101 @@ func (d *Daemon) applyFRRConfig(fc *frr.FullConfig) error {
 		}
 	}
 
-	// Set L4 ECMP hash when consistent-hash is configured. Independent of
-	// the reload outcome (an idempotent procfs knob); attempted even on a
-	// degraded/hard-failed reload so it is not stranded.
-	if fc.ConsistentHash {
-		setFibMultipathHashPolicy()
-	}
+	// Set L4 ECMP hash when consistent-hash is configured; restore the
+	// captured prior when it is removed (#17068 — previously assert-only,
+	// so deleting load-balance consistent-hash left L4 hashing on until
+	// reboot). Independent of the reload outcome (an idempotent procfs
+	// knob); attempted even on a degraded/hard-failed reload so it is
+	// not stranded.
+	d.reconcileFibMultipathHashPolicy(consistentHashConfigured(fc))
 	return err
 }
 
-// setFibMultipathHashPolicy enables L4 (5-tuple) ECMP hashing by writing
-// net.ipv4.fib_multipath_hash_policy=1 when it is not already set.
-// BestEffortKernelKnob procfs write — rename(2) is impossible on procfs, so
-// it stays a direct os.WriteFile. Extracted from applyFRRConfig (#1916
-// §2.D) so the enclosing function is never allowlisted in the fsatomic
-// canary; this single-purpose helper is.
-func setFibMultipathHashPolicy() {
-	path := "/proc/sys/net/ipv4/fib_multipath_hash_policy"
-	current, _ := os.ReadFile(path)
-	if strings.TrimSpace(string(current)) != "1" {
-		if err := os.WriteFile(path, []byte("1\n"), 0644); err != nil {
+// consistentHashConfigured reports whether fc's forwarding-table export
+// policy selects load-balance consistent-hash. resolveECMP only runs
+// inside buildManagedSection, which ApplyFull skips when the config has
+// no routes/protocols/cluster content (it goes straight to Clear), so on
+// that path fc.ConsistentHash is never set even though the operator's
+// policy still selects consistent-hash. The knob reconcile must not
+// depend on that render side effect: derive the answer from the same
+// policy resolveECMP reads, falling back to the rendered flag so a
+// caller that already ran the render keeps its answer.
+func consistentHashConfigured(fc *frr.FullConfig) bool {
+	if fc.ConsistentHash {
+		return true
+	}
+	if fc.ForwardingTableExport == "" || fc.PolicyOptions == nil {
+		return false
+	}
+	ps, ok := fc.PolicyOptions.PolicyStatements[fc.ForwardingTableExport]
+	if !ok {
+		return false
+	}
+	for _, term := range ps.Terms {
+		if term.LoadBalance == "consistent-hash" {
+			return true
+		}
+	}
+	return false
+}
+
+// fibMultipathHashPolicyPath is overridable in tests.
+var fibMultipathHashPolicyPath = "/proc/sys/net/ipv4/fib_multipath_hash_policy"
+
+// reconcileFibMultipathHashPolicy asserts fib_multipath_hash_policy=1
+// while consistent-hash is configured and releases it (restoring the
+// value captured on first assert) when it is not. Best-effort: failures
+// are warned, never fatal to the FRR apply.
+//
+// Restart contract (the registry is in-memory only): the operator value
+// of this knob is the kernel default 0 (L3-only hashing) — no shipped
+// sysctl.d payload or documented operator workflow sets it, and 1 (L4)
+// is only ever written here under a live consistent-hash config. So on
+// the first apply after a restart the knob can only hold 1 if a previous
+// daemon asserted it; capturing that 1 as "prior" would restore the leak
+// itself. The durable record of that fact is this function, not a state
+// file: a first assert that finds the knob already at the asserted value
+// restores 0 on release instead of the poisoned capture (see
+// fibPriorOnFirstAssert17068). Restore-on-unset is therefore bounded by
+// "no restart between assert and unset" only for an operator who set the
+// knob to the asserted value themselves before first starting xpfd — the
+// documented sysctl.d route for such a baseline.
+func (d *Daemon) reconcileFibMultipathHashPolicy(enabled bool) {
+	if enabled {
+		prior := fibPriorOnFirstAssert17068(d)
+		if prior != "" {
+			// First assert after a (re)start found the knob already at
+			// the asserted value: a previous daemon left it there, so
+			// seed the restore target with the operator default instead
+			// of capturing the asserted value as prior.
+			d.knobs().SeedPrior(fibMultipathHashPolicyPath, prior, knobOwnerFib)
+		}
+		if err := d.knobs().Assert(fibMultipathHashPolicyPath, "1", knobOwnerFib, fsatomic.RestorePrior); err != nil {
 			slog.Warn("failed to set fib_multipath_hash_policy", "err", err)
 		} else {
 			slog.Info("enabled L4 ECMP hashing (consistent-hash)")
 		}
+		return
 	}
+	for _, path := range d.knobs().Release(knobOwnerFib) {
+		slog.Warn("failed to restore fib_multipath_hash_policy; will retry on next apply", "path", path)
+	}
+}
+
+// fibPriorOnFirstAssert17068 returns the restore target to seed before
+// the first fib assert of this process when the knob already holds the
+// asserted value, or "" when no seeding is needed (the registry already
+// holds a capture, the knob holds a genuine operator prior, or the knob
+// cannot be read — the assert's own capture read will surface that).
+func fibPriorOnFirstAssert17068(d *Daemon) string {
+	if _, owned := d.knobs().Owner(fibMultipathHashPolicyPath); owned {
+		return ""
+	}
+	current, err := fsatomic.ReadKernelKnob(fibMultipathHashPolicyPath)
+	if err != nil || current != "1" {
+		return ""
+	}
+	return "0"
 }
 
 // actuateRouteOverlay is the routes-only actuator (#1827 plan §4.3,

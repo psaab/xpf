@@ -104,8 +104,6 @@ type attachedXDPFenceLease interface {
 // owned, unmanaged, and lookalike devices without changing kernel state.
 var transitFenceLinkList = netlink.LinkList
 
-const armedTransitReinjectIfname = "xpf-usp1"
-
 // armedTransitFenceSpec resolves the only ingress pinholes permitted while
 // armed:
 //   - tracked runtime XDP links whose kernel names still resolve;
@@ -152,13 +150,13 @@ func (d *Daemon) armedTransitFenceSpecForIfindexes(ifindexes []int) (xnft.Forwar
 		}
 		attrs := link.Attrs()
 		if _, ok := tracked[attrs.Index]; ok {
-			if attrs.Name != armedTransitReinjectIfname {
+			if attrs.Name != xnft.HostInboundDelegatedIfname {
 				names = append(names, attrs.Name)
 			}
 			delete(tracked, attrs.Index)
 			resolvedTracked = true
 		}
-		if attrs.Name != armedTransitReinjectIfname {
+		if attrs.Name != xnft.HostInboundDelegatedIfname {
 			continue
 		}
 		tun, ok := link.(*netlink.Tuntap)
@@ -388,15 +386,11 @@ func (d *Daemon) removeUnownedBootInputBarrier16458() bool {
 //
 // BestEffortKernelKnob per docs/engineering-style.md "Persistence classes":
 // procfs has no rename, so the atomic writers are impossible by construction
-// and a direct os.WriteFile is correct here (allowlisted in
-// pkg/fsatomic/canary_test.go).
-//
-// The read-compare before the write is load-bearing, not an optimisation:
-// writing /proc/sys/net/ipv4/ip_forward resets the per-device configuration
+// and the write goes through fsatomic.WriteKernelKnob (#17068), whose
+// read-compare is load-bearing, not an optimisation: writing
+// /proc/sys/net/ipv4/ip_forward resets the per-device configuration
 // parameters to their forwarding-dependent defaults, so a no-op rewrite on
-// every apply tail would clobber knobs a previous step set. Today's
-// applyKernelTuning already had this guard; keeping it means an already-
-// correct value is never rewritten in EITHER direction.
+// every apply tail would clobber knobs a previous step set.
 //
 // A write failure is logged and skipped rather than propagated: this runs on
 // boot and apply-tail paths that must not brick management, and the caller
@@ -409,11 +403,7 @@ func writeTransitForwardSysctls(on bool) {
 		want = "1"
 	}
 	for _, path := range transitForwardSysctlPaths() {
-		current, _ := os.ReadFile(path)
-		if strings.TrimSpace(string(current)) == want {
-			continue
-		}
-		if err := os.WriteFile(path, []byte(want), 0644); err != nil {
+		if _, err := fsatomic.WriteKernelKnob(path, want); err != nil {
 			slog.Warn("failed to set kernel transit-forwarding sysctl",
 				"path", path, "value", want, "err", err)
 		}

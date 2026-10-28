@@ -165,72 +165,19 @@ func policySchedulerConfigHash(cfg *config.Config) ([32]byte, bool) {
 	// #10949: a configured timezone is scheduler input even when scheduler
 	// windows themselves are unchanged. Hash it so a commit replaces the
 	// scheduler generation and publishes state in the new location.
-	writePolicySchedulerHashString(h, cfg.System.TimeZone)
+	config.WriteSchedulerHashString(h, cfg.System.TimeZone)
 	names := make([]string, 0, len(cfg.Schedulers))
 	for name := range cfg.Schedulers {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		writePolicySchedulerHashString(h, name)
-		sched := cfg.Schedulers[name]
-		if sched == nil {
-			writePolicySchedulerHashString(h, "<nil>")
-			continue
-		}
-		writePolicySchedulerHashString(h, sched.Name)
-		writePolicySchedulerHashString(h, sched.StartTime)
-		writePolicySchedulerHashString(h, sched.StopTime)
-		writePolicySchedulerHashString(h, sched.StartDate)
-		writePolicySchedulerHashString(h, sched.StopDate)
-		writePolicySchedulerHashBool(h, sched.Daily)
-		writePolicySchedulerHashBool(h, sched.AllDay)
-		writePolicySchedulerHashBool(h, sched.DailyExclude)
-		// #16010: an Unresolvable mark changes runtime activation without
-		// changing any window field, so it must force a scheduler
-		// re-prime; otherwise apply would reuse the previous generation's
-		// active state for a scheduler that must now fail closed.
-		writePolicySchedulerHashBool(h, sched.Unresolvable)
-		// Per-day windows, hashed in a stable weekday order so a change to
-		// any per-day arm forces a scheduler re-evaluation.
-		dayNames := make([]string, 0, len(sched.Days))
-		for day := range sched.Days {
-			dayNames = append(dayNames, day)
-		}
-		sort.Strings(dayNames)
-		for _, day := range dayNames {
-			writePolicySchedulerHashString(h, day)
-			win := sched.Days[day]
-			if win == nil {
-				writePolicySchedulerHashString(h, "<nil>")
-				continue
-			}
-			writePolicySchedulerHashString(h, win.StartTime)
-			writePolicySchedulerHashString(h, win.StopTime)
-			writePolicySchedulerHashBool(h, win.AllDay)
-			writePolicySchedulerHashBool(h, win.Exclude)
-		}
+		config.WriteSchedulerHashString(h, name)
+		cfg.Schedulers[name].Fingerprint(h)
 	}
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out, true
-}
-
-func writePolicySchedulerHashBool(h interface{ Write([]byte) (int, error) }, b bool) {
-	if b {
-		_, _ = h.Write([]byte{1})
-	} else {
-		_, _ = h.Write([]byte{0})
-	}
-}
-
-func writePolicySchedulerHashString(h interface{ Write([]byte) (int, error) }, s string) {
-	var lenBuf [8]byte
-	for i := 0; i < len(lenBuf); i++ {
-		lenBuf[i] = byte(uint64(len(s)) >> (8 * i))
-	}
-	_, _ = h.Write(lenBuf[:])
-	_, _ = h.Write([]byte(s))
 }
 
 func (d *Daemon) startPolicySchedulerLoopLocked() {

@@ -83,6 +83,44 @@ func TestArgumentScopedAllowException16067(t *testing.T) {
 
 // A malformed packed topic the handler would reject cannot be named, so
 // a restricted class denies rather than judging the bare path.
+// #17081 fold (Rev18131 B2): a PRESENT literal port 0 on the optional
+// MatchPoliciesRequest fields must reach the canonical command string. The
+// pre-fold builder gated on GetSourcePort()/GetDestinationPort() != 0, which
+// cannot distinguish absent from present-0, so an argument-scoped deny naming
+// destination-port 0 / source-port 0 never fired for exactly the query
+// #17081 made expressible - a fail-open in the restrictive direction. The
+// ICMP fields beside it already gated on pointer presence.
+//
+// FAIL-ON-REVERT: restoring the != 0 gates drops the port-0 tokens and the
+// three wantDeny cells below are ALLOWED again.
+func TestMatchPoliciesLiteralPortZeroAuthz17081(t *testing.T) {
+	zero := int32(0)
+	fiftyThree := int32(53)
+	for _, tc := range []struct {
+		name, pattern string
+		req           *pb.MatchPoliciesRequest
+		wantDeny      bool
+	}{
+		{"destination-port 0 denied", "destination-port 0", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DestinationPort: &zero}, true},
+		{"source-port 0 denied", "source-port 0", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", Protocol: "udp", SourcePort: &zero}, true},
+		{"anchored full line with destination-port 0", "^show security match-policies from-zone trust to-zone untrust destination-port 0 protocol udp$", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DestinationPort: &zero}, true},
+		{"destination-port 0 deny does not fire on 53", "destination-port 0", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DestinationPort: &fiftyThree}, false},
+		{"destination-port 0 deny does not fire when omitted", "destination-port 0", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", Protocol: "udp"}, false},
+		{"anchored absent-port line still denied bare", "^show security match-policies from-zone trust to-zone untrust protocol udp$", &pb.MatchPoliciesRequest{FromZone: "trust", ToZone: "untrust", Protocol: "udp"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := cfg16067(t, tc.pattern, "")
+			err := gateDecide7172(t, cfg, "MatchPolicies", tc.req)
+			if tc.wantDeny && err == nil {
+				t.Errorf("deny %q over MatchPolicies with a present literal port 0 was ALLOWED; the port-0 token must reach the canonical form (#17081)", tc.pattern)
+			}
+			if !tc.wantDeny && err != nil {
+				t.Errorf("deny %q over MatchPolicies refused a command it does not name: %v", tc.pattern, err)
+			}
+		})
+	}
+}
+
 func TestMalformedPackedTopicDenies16067(t *testing.T) {
 	cfg := cfg16067(t, `^show version$`, "")
 	for _, topic := range []string{

@@ -250,32 +250,19 @@ func appendRedundancyGroup(rgs []int, rg int) []int {
 }
 
 // ipsecVPNRedundancyGroup reports the redundancy group owning the reth named
-// by a VPN gateway's external-interface. A physical reth member stores the
-// parent name in RedundantParent; its own RedundancyGroup is zero.
+// by a VPN gateway's external-interface, via config.Config.InterfaceRefRG
+// (#17086 SSOT): unit split, RedundantParent chain, RethRGOwners membership.
+// A physical reth member stores the parent name in RedundantParent; its own
+// RedundancyGroup is zero, and a stray group on a non-RETH owns nothing.
 func ipsecVPNRedundancyGroup(cfg *config.Config, vpn *config.IPsecVPN) int {
-	if vpn == nil || vpn.Gateway == "" {
+	if cfg == nil || vpn == nil || vpn.Gateway == "" {
 		return 0
 	}
 	gw := cfg.Security.IPsec.Gateways[vpn.Gateway]
 	if gw == nil || gw.ExternalIface == "" {
 		return 0
 	}
-	base := gw.ExternalIface
-	if i := strings.Index(base, "."); i > 0 {
-		base = base[:i]
-	}
-	ifc := cfg.Interfaces.Interfaces[base]
-	if ifc == nil {
-		return 0
-	}
-	if ifc.RedundantParent != "" {
-		parent := cfg.Interfaces.Interfaces[ifc.RedundantParent]
-		if parent == nil {
-			return 0
-		}
-		return parent.RedundancyGroup
-	}
-	return ifc.RedundancyGroup
+	return cfg.RefRG(gw.ExternalIface)
 }
 
 // lookupIPsecVPNByName is the pre-#9511 lookup, kept only as the fallback for a

@@ -479,8 +479,10 @@ class SubprocessReachMapTests(unittest.TestCase):
     def test_make_config_drive_children_are_named_unreached(self):
         # Pin the UNREACHED enumeration: if make_config_drive stops owning
         # its children, this reds and the header map must be revisited.
+        # #17104: the ISO writer now goes through the injected `run`
+        # (write_day0_iso(run=...)), leaving only the check-config child.
         mcd = (_HERE / "make_config_drive.py").read_text()
-        self.assertEqual(mcd.count("subprocess.run("), 2)
+        self.assertEqual(mcd.count("subprocess.run("), 1)
 
 
 if __name__ == "__main__":

@@ -32,9 +32,10 @@ func TestFNV1aMatchesThePublishedVectors7194(t *testing.T) {
 	}
 }
 
-// goSchemaNames7194 reuses the parity guard's OWN Go extractor rather than
-// adding a second one — two extractors of the same thing is the disease #7194
-// is treating.
+// goSchemaNames7194 reuses the SINGLE production extractor
+// (wireschema.WireNamesOf, via goWireNames7194) rather than
+// adding a second one — two extractors of the same thing is the disease
+// #7194 is treating, and #17137 removed the last unguarded copies.
 func goSchemaNames7194(t *testing.T) []string {
 	t.Helper()
 	m := goWireNames7194(t)

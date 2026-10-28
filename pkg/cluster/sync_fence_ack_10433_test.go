@@ -75,7 +75,7 @@ func TestSendFenceAwaitReportsGenuineTimeout10433(t *testing.T) {
 	defer local.Close()
 	defer peer.Close()
 	ss.installConn(0, local)
-	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
+	ss.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagFenceAck))
 
 	errCh := make(chan error, 1)
 	go func() {
