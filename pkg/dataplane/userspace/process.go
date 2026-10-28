@@ -335,37 +335,31 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 		m.procGen == m.helperCrash.restartGen
 	restartAttempt := m.restartAttemptInProgress
 	entryGen := m.procGen
-	unexpectedExitsAtEntry := m.helperCrashUnexpectedExitsTotal
-	handledExitsAtEntry := m.preRetirementHandledExits
 	defer func() {
 		if retErr != nil {
+			// Clear the in-progress marker on every failure return so a
+			// failed supervisor retry cannot leave bringUpGen naming a
+			// generation that is no longer being brought up (#18242
+			// stale-marker hazard).
+			m.bringUpGen = 0
 			if restartAttempt && pendingCrashRetry && m.proc == nil {
-				// A failed retry can be an exited supervised child.
-				// stopLocked routes that exit through the crash handler,
-				// which has already charged and armed its retry. Only a
-				// failed bring-up without a newly observed child exit needs
-				// to charge here.
-				if m.helperCrashUnexpectedExitsTotal == unexpectedExitsAtEntry && m.preRetirementHandledExits == handledExitsAtEntry {
-					// A failed retry is observed helper failure, not quiet
-					// time — refresh the anchor so a run of failures cannot
-					// age the window out and journal the next landing as
-					// recovered.
+				// A failed retry is a new crash-loop data point (NM-1):
+				// unless its published child exit was already routed
+				// through the crash handler by stopLocked (bringUpGen
+				// cleared by that handler's teardown), charge it here so
+				// a helper that never starts keeps escalating and the
+				// operator is notified. If the child was already
+				// counted, its schedule emitted exactly one timer and
+				// charging again would double-count the attempt.
+				if !m.retryChildExitCountedLocked {
 					m.helperCrashLastAt = time.Now()
 					m.scheduleHelperRestartLocked(m.procGen)
 					m.notifyHelperSupervisorLocked()
-				} else if m.procGen != m.helperCrash.restartGen {
-					// The handler charged B's exit on the generation
-					// stopLocked retired after it; preserve that charge
-					// on the current generation so the restart remains
-					// pending rather than leaving a stale fence.
-					m.rearmHelperRestartLocked()
+				} else {
+					m.retryChildExitCountedLocked = false
 				}
 				return
 			}
-			// A failed bring-up never proved its spawned child ready, so
-			// stopLocked did not crash-charge that child's exit; clear
-			// the in-progress marker before the MAJOR-3a rearm below.
-			m.bringUpGen = 0
 			if pendingCrashRetry && m.proc == nil &&
 				m.procGen != m.helperCrash.restartGen {
 				m.rearmHelperRestartLocked()
@@ -994,17 +988,21 @@ func (m *Manager) stopLocked() {
 		if g := m.procSup; g != nil && g.gen == m.procGen {
 			select {
 			case <-g.exited:
-				if g.gen == m.bringUpGen {
+				if g.gen == m.bringUpGen && !m.restartAttemptInProgress {
 					// #18394: this child was spawned by the in-progress
-					// bring-up and never proved ready, so its exit is
-					// that bring-up's own failure — not a fresh
-					// unexpected exit of a helper that reached
-					// readiness. Do not crash-charge it here; the
-					// deferred failure path preserves any older
-					// pending retry (MAJOR-3a).
+					// ordinary (non-retry) bring-up and never proved
+					// ready, so its exit is that bring-up's own failure —
+					// not a fresh unexpected exit of a helper that
+					// reached readiness. Do not crash-charge it here;
+					// the deferred failure path preserves any older
+					// pending retry (MAJOR-3a). Supervisor retries are
+					// excluded: their pre-ready published exit IS a real
+					// crash-loop data point and stays counted.
 				} else {
 					m.handleUnexpectedHelperExitLocked(g)
-					m.preRetirementHandledExits++
+					if g.gen == m.bringUpGen {
+						m.retryChildExitCountedLocked = true
+					}
 					preRetirementCrash = true
 				}
 			default:
