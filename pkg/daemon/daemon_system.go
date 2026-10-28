@@ -1876,15 +1876,13 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 			skippedSystem15231++
 			slog.Warn("failed to create system syslog client",
 				"host", host.Address, "err", err)
-			// A failed first construction leaves nothing worth
-			// preserving — clear any stale adoption for this key so
-			// the next apply re-dials rather than serving "".
-			keyFP := fp
+			// The failed build omits this key from the preserving install, which
+			// closes any previously cached client for it. Evict that cache entry
+			// regardless of its old fingerprint: a later revert must dial a new
+			// client instead of resurrecting the now-closed pointer.
 			d.systemSyslogBuiltMu.Lock()
-			if d.systemSyslogBuiltFP[key] == keyFP {
-				delete(d.systemSyslogBuiltByKey, key)
-				delete(d.systemSyslogBuiltFP, key)
-			}
+			delete(d.systemSyslogBuiltByKey, key)
+			delete(d.systemSyslogBuiltFP, key)
 			d.systemSyslogBuiltMu.Unlock()
 			continue
 		}

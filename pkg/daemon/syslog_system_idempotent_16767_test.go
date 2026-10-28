@@ -294,3 +294,75 @@ func TestSystemSyslogPerHostFingerprintRebuildsOnlyChanged16767(t *testing.T) {
 		t.Fatal("deduped config must not arm debt")
 	}
 }
+
+// #17828: successful A -> failed B at the same endpoint -> revert A must
+// not resurrect the closed A client. The failed-B apply retires A via the
+// preserving install; the cache must evict that retired entry before any
+// revert reuses it. Control: unchanged A apply after the revert is
+// zero-dial again.
+func TestApplySystemSyslogFailedChangeThenRevertDoesNotReuseClosedClient(t *testing.T) {
+	fake := withSystemSyslogFake16767(t)
+	d := newSystemSyslogDaemon16767(t)
+	host := func(sev string) *config.SyslogHostConfig {
+		return &config.SyslogHostConfig{Address: "collector.example", Facilities: []config.SyslogFacility{{Facility: "daemon", Severity: sev}}}
+	}
+	cfgA := systemSyslogCfg16767(host("info"))
+	cfgB := systemSyslogCfg16767(host("warning"))
+
+	// A succeeds: one dial, one installed client, latched, no debt.
+	d.applySystemSyslog(cfgA)
+	if got := fake.dials.Load(); got != 1 {
+		t.Fatalf("premise: first apply dials=%d want 1", got)
+	}
+	first := d.slogHandler.Clients()
+	if len(first) != 1 {
+		t.Fatalf("premise: first apply installed %d, want 1", len(first))
+	}
+	if d.systemSyslogRetryOwed() {
+		t.Fatal("premise: successful A apply must not arm retry debt")
+	}
+
+	// B (same endpoint, severity change) fails to construct. The install
+	// retires/closes A and the apply arms retry debt.
+	fake.setFail(map[string]bool{"collector.example": true})
+	d.applySystemSyslog(cfgB)
+	if got := fake.dials.Load(); got != 2 {
+		t.Fatalf("premise: failed B apply dials=%d want 2", got)
+	}
+	if got := len(d.slogHandler.Clients()); got != 0 {
+		t.Fatalf("premise: failed B apply installed %d, want 0 (A retired)", got)
+	}
+	if !d.systemSyslogRetryOwed() {
+		t.Fatal("premise: failed B apply must arm retry debt")
+	}
+	if err := first[0].Send(6, "after-failed-change"); err == nil {
+		t.Fatal("premise: retired A client must be closed by the failed-B install")
+	}
+
+	// Revert to A with the constructor healthy again: the closed A
+	// pointer must not be served from the cache.
+	fake.setFail(nil)
+	d.applySystemSyslog(cfgA)
+	if got := fake.dials.Load(); got != 3 {
+		t.Fatalf("#17828: revert to A must re-dial the retired endpoint (dials=%d, want 3); a cache hit here resurrects a closed client", got)
+	}
+	reverted := d.slogHandler.Clients()
+	if len(reverted) != 1 {
+		t.Fatalf("revert installed %d, want 1", len(reverted))
+	}
+	if reverted[0] == first[0] {
+		t.Fatal("#17828: revert reused the closed A client pointer")
+	}
+	if d.systemSyslogRetryOwed() {
+		t.Fatal("successful revert must discharge retry debt")
+	}
+	if err := reverted[0].Send(6, "after-revert"); err != nil {
+		t.Fatalf("#17828: reverted client must send: %v", err)
+	}
+
+	// Control: unchanged A apply after the revert is zero-dial.
+	d.applySystemSyslog(cfgA)
+	if got := fake.dials.Load(); got != 3 {
+		t.Fatalf("control: unchanged apply after revert dialed (dials=%d, want still 3)", got)
+	}
+}
