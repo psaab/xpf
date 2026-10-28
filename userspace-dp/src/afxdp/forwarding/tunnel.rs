@@ -1,5 +1,5 @@
-//! #5650: tunnel outer-header forwarding resolution and neighbor-entry lookup /
-//! parsing for tunnel next-hops. Pure code-motion split out of
+//! #5650: tunnel outer-header forwarding resolution and neighbor-entry lookup
+//! for tunnel next-hops. Pure code-motion split out of
 //! `forwarding/mod.rs` (behavior-identical).
 
 use super::*;
@@ -199,39 +199,4 @@ pub(in crate::afxdp) fn lookup_neighbor_entry(
     // active probes. Runtime neighbor discovery is maintained asynchronously
     // by the helper's own netlink dump+subscribe path.
     None
-}
-
-#[cfg(test)]
-pub(in crate::afxdp) fn parse_neighbor_entries(output: &str) -> Vec<(IpAddr, NeighborEntry)> {
-    let mut out = Vec::new();
-    for line in output.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.is_empty() {
-            continue;
-        }
-        // #3771 (M12): the NUD state is the FINAL token of an `ip neigh` row
-        // (REACHABLE / STALE / FAILED / ...). Classify ONLY that token with the
-        // allowlist. The pre-#3771 denylist was applied to EVERY field, which
-        // only worked because an IP / MAC / `lladdr` never contained the
-        // "failed" / "incomplete" substrings; the allowlist would reject those
-        // non-state fields and drop every row, so we must scope it to the state.
-        match fields.last() {
-            Some(state) if neighbor_state_usable(state) => {}
-            _ => continue,
-        }
-        let Ok(ip) = fields[0].parse::<IpAddr>() else {
-            continue;
-        };
-        let Some(lladdr) = fields.iter().position(|field| *field == "lladdr") else {
-            continue;
-        };
-        let Some(candidate) = fields.get(lladdr + 1) else {
-            continue;
-        };
-        let Some(mac) = parse_mac(candidate).or_else(|| parse_mac(candidate.trim())) else {
-            continue;
-        };
-        out.push((ip, NeighborEntry { mac }));
-    }
-    out
 }
