@@ -774,65 +774,204 @@ mod tunnel_kind_17199_tests {
     }
 
     /// #17199 guard: no production `.rs` file under `src/` may compare a
-    /// tunnel `mode` string against a mode literal outside the sole
-    /// decoder `tunnel_mode_kind`. The scan reads raw source (comments
-    /// included — a commented-out compare is still drift bait) and
-    /// EXCLUDES test files/fixtures, which legitimately author modes.
-    /// FAIL-ON-REVERT: re-adding a raw compare in any production file
-    /// makes this red and names the file.
+    /// tunnel `mode` string against a mode literal outside the sole decoder
+    /// `tunnel_mode_kind`. The earlier form matched only six exact `mode ==/!=`
+    /// needles and skipped any file whose name contained `test`, so
+    /// `m.as_str() != "gre"`, `contains("gre")`, `"gre" == endpoint.mode`,
+    /// spacing / line-break variants, and whole production files with a
+    /// test-looking name all passed green. This broadened scan takes the
+    /// opposite shape (review NEEDS-FOLD on #18264): a production-context
+    /// occurrence of a tunnel-mode literal `"wireguard"|"gre"|"ip6gre"` is a
+    /// violation unless its `(rel,line)` site is allowlisted below with a
+    /// reason. The literal set is deliberately that small — `"gre"` also
+    /// names the IP protocol / host-inbound service, so every allowlist entry
+    /// must say why that hit is not a tunnel-mode compare. Production context
+    /// means: the file is not a `#[cfg(test)]`-declared fixture per
+    /// `crate::test_support::source_scan::cfg_test_modules` (the declaration
+    /// graph, not the basename — a `*test*` production file stays scanned)
+    /// and the line is outside any inline `#[cfg(test)]` module
+    /// (`blank_cfg_test_modules`). Comments are scanned on purpose: a
+    /// commented-out mode compare is still drift bait.
+    /// FAIL-ON-REVERT: reverting to the exact-needle scan, or adding any raw
+    /// mode compare outside `tunnel_mode_kind`, makes this red.
     #[test]
     fn no_raw_tunnel_mode_string_compares_outside_ssot_17199() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for e in std::fs::read_dir(dir).expect("read src dir") {
-                let p = e.expect("dir entry").path();
-                if p.is_dir() {
-                    walk(&p, out);
-                } else if p.extension().is_some_and(|x| x == "rs") {
-                    out.push(p);
-                }
+        use crate::test_support::source_scan::{
+            afxdp_rs_files, blank_cfg_test_modules, cfg_test_modules,
+        };
+        // True iff `line` combines a tunnel-mode literal with a compare-ish
+        // token against a `.mode` receiver — the reviewer's evasion class
+        // (as_str / contains / reversed / spaced forms). This is the
+        // RED-proving predicate: on its own it would have caught the two
+        // mutants below even where they do not sit on an allowlisted site.
+        fn compare_like(line: &str) -> bool {
+            let lit = ["\"wireguard\"", "\"gre\"", "\"ip6gre\""]
+                .iter()
+                .any(|l| line.contains(l));
+            if !lit {
+                return false;
             }
+            // Receiver side: any `mode` mention (field, `.mode`, spaced
+            // `endpoint. mode`, `mode.as_str()`, `tunnel_mode`, a local named
+            // `mode`/`m_mode`). Whitespace inside a field access is legal
+            // Rust, so keying on `.mode` alone would miss `endpoint. mode`.
+            let modeish = line.contains("mode");
+            let cmp = [
+                "==",
+                "!=",
+                ".contains(",
+                "matches!",
+                ".eq(",
+                ".starts_with(",
+                ".ends_with(",
+            ]
+            .iter()
+            .any(|c| line.contains(c));
+            modeish && cmp
         }
-        walk(&root, &mut files);
-        assert!(files.len() > 50, "scan found only {} files", files.len());
-        let needles = [
-            "mode == \"wireguard\"",
-            "mode != \"wireguard\"",
-            "mode == \"gre\"",
-            "mode != \"gre\"",
-            "mode == \"ip6gre\"",
-            "mode != \"ip6gre\"",
+        // Non-vacuity for `compare_like`: every evasion form the old scan
+        // missed must be recognised, and plain mode authoring must not be.
+        for probe in [
+            "if endpoint.mode.as_str() != \"gre\" { return; }",
+            "if m.mode.contains(\"gre\") { return; }",
+            "if \"gre\" == endpoint.mode { return; }",
+            "if endpoint. mode == \"wireguard\" { return; }",
+            "matches!(iface.tunnel_mode.as_str(), \"gre\" | \"ip6gre\")",
+        ] {
+            assert!(
+                compare_like(probe),
+                "compare_like missed evasion form: {probe}"
+            );
+        }
+        for probe in [
+            "mode: \"gre\".to_string(),",
+            "ep.mode = \"wireguard\".to_string();",
+            "\"gre\" | \"ip6gre\" => TunnelKind::Gre,",
+        ] {
+            assert!(
+                !compare_like(probe),
+                "compare_like flagged plain authoring: {probe}"
+            );
+        }
+        // Allowlisted production literal sites: (rel, needle, reason). `needle`
+        // must occur on the hit line; a new literal at an unlisted site — or a
+        // compare_like line anywhere, listed or not — is a violation. Reasons
+        // are per-hit, not per-file, so an entry cannot hide a future compare
+        // elsewhere in the same file beyond lines matching its needle.
+        const ALLOWED: &[(&str, &str, &str)] = &[
+            // Sole string-to-kind decoder: its match arms ARE the SSOT.
+            (
+                "afxdp/forwarding_build/tunnels.rs",
+                "\"gre\" | \"ip6gre\" =>",
+                "SSOT match arm in tunnel_mode_kind",
+            ),
+            (
+                "afxdp/forwarding_build/tunnels.rs",
+                "\"wireguard\" =>",
+                "SSOT match arm in tunnel_mode_kind",
+            ),
+            (
+                "afxdp/forwarding_build/tunnels.rs",
+                "must be \"wireguard\"",
+                "hydrate_wg_identity doc restating the SSOT gate, not a compare",
+            ),
+            // IP protocol names, not tunnel modes: proto 47 decoder + doc.
+            (
+                "ip_proto.rs",
+                "\"gre\" | \"junos-gre\"",
+                "IP-protocol name decoder (proto 47), not a tunnel mode",
+            ),
+            (
+                "ip_proto.rs",
+                "\"gre\"",
+                "IP-protocol name doc comment, not a tunnel mode",
+            ),
+            // InterfaceSnapshot.tunnel_mode is snapshot DATA classified by the
+            // Go builder (protocol v65), not a TunnelEndpoint.mode: the GRE-input
+            // filter exemption has no Rust TunnelKind for interface rows, so it
+            // matches the snapshot string directly. Not an endpoint compare.
+            (
+                "filter/compiler.rs",
+                "tunnel_mode.as_str()",
+                "InterfaceSnapshot.tunnel_mode (snapshot data) GRE-input gate; no TunnelKind exists for interface rows",
+            ),
+            // Host-inbound system-service token "gre" (proto-47 service name).
+            (
+                "afxdp/forwarding/host_inbound.rs",
+                "\"gre\"",
+                "host-inbound system-service token, not a tunnel mode",
+            ),
+            (
+                "protocol/snapshot.rs",
+                "\"gre\"/\"ip6gre\"/\"wireguard\"/\"ipip\"",
+                "TunnelEndpointSnapshot mode field doc, not a compare",
+            ),
+            // This guard's own literals, probes, allowlist and messages.
+            (
+                "afxdp/forwarding_build/tunnels.rs",
+                "\"wireguard\"",
+                "this guard's literal set / probes / allowlist",
+            ),
         ];
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let fixtures = cfg_test_modules(&root);
+        let mut files = Vec::new();
+        afxdp_rs_files(&root, &mut files);
+        files.sort();
+        assert!(files.len() > 50, "scan found only {} files", files.len());
         let mut violations = Vec::new();
+        let mut production_files = 0usize;
+        let mut compared = 0usize;
         for path in &files {
             let rel = path
                 .strip_prefix(&root)
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            // Test code authors modes legitimately; production must not.
-            let base = path.file_name().unwrap().to_string_lossy();
-            if base.contains("test") || rel.contains("/tests") || rel.contains("tests_") {
+            if fixtures.contains(&rel) {
                 continue;
             }
+            production_files += 1;
             let src = std::fs::read_to_string(path).expect("read rs");
-            for (lineno, line) in src.lines().enumerate() {
-                // The SSOT's own match arms are the one allowed site.
-                if rel == "afxdp/forwarding_build/tunnels.rs"
-                    && (line.contains("\"gre\" | \"ip6gre\" =>")
-                        || line.contains("\"wireguard\" =>"))
+            // Blank only inline #[cfg(test)] bodies; comments stay scanned.
+            let prod = blank_cfg_test_modules(&src);
+            for (lineno, line) in prod.lines().enumerate() {
+                if !["\"wireguard\"", "\"gre\"", "\"ip6gre\""]
+                    .iter()
+                    .any(|l| line.contains(l))
                 {
                     continue;
                 }
-                if needles.iter().any(|n| line.contains(n)) {
+                if compare_like(line) {
+                    compared += 1;
+                    // The one legitimate production compare-shape: the snapshot
+                    // interface gate above, allowlisted by its receiver.
+                    if !(rel == "filter/compiler.rs" && line.contains("tunnel_mode.as_str()")) {
+                        violations.push(format!("{rel}:{}: {}", lineno + 1, line.trim()));
+                        continue;
+                    }
+                }
+                let allowed = ALLOWED
+                    .iter()
+                    .any(|(r, needle, _)| *r == rel && line.contains(needle));
+                if !allowed {
                     violations.push(format!("{rel}:{}: {}", lineno + 1, line.trim()));
                 }
             }
         }
+        // Anti-vacuity: the gate must actually have walked production files and
+        // seen the known snapshot-interface compare it deliberately allows.
+        assert!(
+            production_files > 50,
+            "scan walked only {production_files} production files"
+        );
+        assert!(
+            compared >= 1,
+            "scan saw no compare-like line; its literal set is blind"
+        );
         assert!(
             violations.is_empty(),
-            "raw tunnel-mode string compares outside tunnel_mode_kind (#17199):\n{}",
+            "raw tunnel-mode string compares / unallowlisted tunnel-mode literals outside tunnel_mode_kind (#17199):\n{}",
             violations.join("\n")
         );
     }
