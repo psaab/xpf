@@ -401,12 +401,15 @@ fn update_ha_state_populates_status_ha_groups() {
 }
 
 /// #17141: an unchanged, non-suppressed `update_ha_state` must publish the
-/// worker-visible delivery map at most once. Pre-split, the handler's
+/// worker-visible delivery map zero times. Pre-split, the handler's
 /// `refresh_status` and the dispatcher's post-match `refresh_status` each
 /// ran both liveness reconciles, and the WG reconcile republished
 /// unconditionally twice — four rebuild-and-store cycles per request.
 /// With no tunnel entries the changed-set is empty, so the correct count
-/// is zero; `<= 1` leaves room for a legitimate single change publish.
+/// is exactly zero: both reconciles publish only on change (swept>0 or
+/// spawned), supervision now runs once inside the dispatcher's single
+/// lock, and every other attach only projects — so even one publish here
+/// would prove a supervision/publish regression, not a legitimate change.
 #[test]
 fn update_ha_state_publishes_delivery_map_at_most_once_17141() {
     let state = new_state(ProcessStatus {
@@ -439,11 +442,12 @@ fn update_ha_state_publishes_delivery_map_at_most_once_17141() {
         .expect("state")
         .afxdp
         .delivery_publish_count_for_test();
-    assert!(
-        publishes <= 1,
+    assert_eq!(
+        publishes, 0,
         "#17141: unchanged update_ha_state published the delivery map \
-         {publishes} times, want <= 1 (supervision must run once and the \
-         WG reconcile must publish only on change)"
+         {publishes} times, want exactly 0 (supervision must run once, \
+         inside the single dispatcher lock, and both reconciles must \
+         publish only on change)"
     );
 }
 

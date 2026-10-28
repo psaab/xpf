@@ -35,7 +35,7 @@ import (
 //     overlapping request is still rejected.
 //
 // FAIL-ON-REVERT (stale restore): drop the incarnation guard from
-// restoreManualFailoverHoldLocked and the fresh RG comes back held at the
+// restoreOperatorHoldLocked and the fresh RG comes back held at the
 // old timestamp in SecondaryHold.
 // FAIL-ON-REVERT (reservation): drop the delete-only-if-match guard and the
 // old defer wipes the new token, so the overlapping probe is admitted.

@@ -357,14 +357,6 @@ pub(crate) fn handle_stream(
     // the #1866/#1881 self-heal does not depend on a status payload.
     if !served_off_lock && !session_ha && !session_ping && !session_refused {
         let mut guard = lock_server_state_recover(&state);
-        if guard.quarantined_after_panic {
-            running.store(false, Ordering::SeqCst);
-            return Err("server state quarantined after a handler panic; restart required".to_string());
-        }
-        supervise_tunnels(&mut guard);
-    }
-    if !served_off_lock && !session_ha && !session_ping && !session_refused {
-        let mut guard = lock_server_state_recover(&state);
         // GPT-4: quarantined state serves nothing — a prior handler panic may
         // have torn it mid-mutation. Refuse and ensure shutdown is underway
         // (the panic arm already cleared `running`; this covers poison
@@ -374,6 +366,9 @@ pub(crate) fn handle_stream(
             running.store(false, Ordering::SeqCst);
             return Err("server state quarantined after a handler panic; restart required".to_string());
         }
+        // #17141: supervise inside this same (only) lock acquisition,
+        // before the match — never a second lock just for supervision.
+        supervise_tunnels(&mut guard);
         match request.request_type.as_str() {
             "ping" => {}
             "scheduler_heartbeat" => {

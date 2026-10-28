@@ -209,20 +209,33 @@ func rpmProbeTestGating(cfg *config.Config) map[probeTestKey]int {
 	// only on a node that does not hold the VIP. Virtual addresses
 	// of an explicit vrrp-group on the unit are VIPs of the same
 	// RETH RG, so they key the same map.
+	//
+	// RETH ownership comes from the #6781 SSOT (cfg.RethRGOwners),
+	// NOT a `reth*` name test: a structurally valid pair not spelled
+	// reth* (bond0 in RG2) owns its group, and a stray redundancy-group
+	// on a plain interface owns nothing (#17086). The old name test
+	// gated bond0's ip-monitoring test on the lowest data RG instead.
+	// rethRG keeps only positive groups (gating has no RG0 test), and
+	// doubles as the owners substrate for RefRGFromOwners below, whose
+	// chain walk only ever returns positive groups from it.
 	rethRG := make(map[string]int)
 	rethVIPs := make(map[netip.Addr]int)
-	for name, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil || ifc.RedundancyGroup <= 0 || !strings.HasPrefix(name, "reth") {
+	for name, rg := range cfg.RethRGOwners() {
+		if rg <= 0 {
 			continue
 		}
-		rethRG[name] = ifc.RedundancyGroup
+		ifc := cfg.Interfaces.Interfaces[name]
+		if ifc == nil {
+			continue
+		}
+		rethRG[name] = rg
 		for _, unit := range ifc.Units {
 			if unit == nil {
 				continue
 			}
 			for _, addr := range unit.Addresses {
 				if vip, ok := canonicalRPMVIPAddr(addr); ok {
-					rethVIPs[vip] = ifc.RedundancyGroup
+					rethVIPs[vip] = rg
 				}
 			}
 			for _, group := range unit.VRRPGroups {
@@ -231,7 +244,7 @@ func rpmProbeTestGating(cfg *config.Config) map[probeTestKey]int {
 				}
 				for _, addr := range group.VirtualAddresses {
 					if vip, ok := canonicalRPMVIPAddr(addr); ok {
-						rethVIPs[vip] = ifc.RedundancyGroup
+						rethVIPs[vip] = rg
 					}
 				}
 			}
@@ -256,13 +269,12 @@ func rpmProbeTestGating(cfg *config.Config) map[probeTestKey]int {
 			}
 			// A test's own binding wins over its probe-sibling's: the
 			// destination-interface pin is the test's egress contract,
-			// then the source-address VIP contract.
+			// then the source-address VIP contract. The pin resolves
+			// through the shared chain (RefRGFromOwners over the owners
+			// map above), so a member pin (ge-0/0/1.0) gates on its
+			// RETH's RG exactly as a RETH pin does (#17086).
 			if test.DestinationInterface != "" {
-				base := test.DestinationInterface
-				if i := strings.IndexByte(base, '.'); i >= 0 {
-					base = base[:i]
-				}
-				if rg, ok := rethRG[base]; ok {
+				if rg, owned := cfg.RefRGFromOwners(test.DestinationInterface, rethRG); owned && rg > 0 {
 					gated[key] = rg
 					continue
 				}

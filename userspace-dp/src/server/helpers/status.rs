@@ -5,9 +5,8 @@
 // neighbor, session, NAT, CoS, tunnel, HA, queue, exception, and debug
 // state onto the mutable `ProcessStatus`. `supervise_tunnels` is the
 // separate side-effecting self-heal (WG/GRE liveness sweeps, thread
-// joins/respawns, delivery-map publishes). `refresh_status` composes
-// the two for legacy callers that need both in one hold; the dispatcher
-// composes them itself so supervision runs once per request. Both run
+// joins/respawns, delivery-map publishes). The dispatcher supervises
+// once per locked request and every other caller only projects. Both run
 // on control responses and state snapshots, never per packet. The
 // WG/GRE self-heal stays gated on `should_run_afxdp`, the
 // high-cardinality per-key dynamic-neighbor dump stays gated on
@@ -34,7 +33,7 @@ use std::time::Duration;
 /// the cadence trivial. The dispatcher calls this once per request;
 /// `project_status` never calls it.
 pub(crate) fn supervise_tunnels(state: &mut ServerState) {
-    // Bindings must be current before the gate reads them (the legacy
+    // Bindings must be current before the gate reads them (the pre-split
     // `refresh_status` refreshed them ahead of this check).
     state.afxdp.refresh_bindings(&mut state.status.bindings);
     if should_run_afxdp(&state.status) {
@@ -50,16 +49,6 @@ pub(crate) fn supervise_tunnels(state: &mut ServerState) {
             .afxdp
             .reconcile_local_tunnel_liveness(state.snapshot.as_ref());
     }
-}
-
-/// #17141: compose supervision + projection for callers that hold the
-/// state once and need both (handlers, persist, settle poll, tests).
-/// The dispatcher does NOT use this — it supervises once and then
-/// projects per attach, so a mutating handler plus the post-match
-/// attach cannot supervise twice.
-pub(crate) fn refresh_status(state: &mut ServerState) {
-    supervise_tunnels(state);
-    project_status(state);
 }
 
 /// Pure status projection: no `reconcile_*_liveness` call, no thread
@@ -1246,7 +1235,7 @@ mod status_wiring_tests {
             .find("pub(crate) fn supervise_tunnels")
             .expect("supervise_tunnels not found");
         let sup_end = helper[sup_start..]
-            .find("pub(crate) fn refresh_status")
+            .find("pub(crate) fn project_status")
             .map(|off| sup_start + off)
             .expect("supervise_tunnels end boundary not found");
         let sup = &helper[sup_start..sup_end];

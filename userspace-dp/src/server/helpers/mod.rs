@@ -7,7 +7,7 @@
 // before (main.rs's `use server::helpers::*`, the per-verb handlers'
 // `use super::super::helpers::{...}`, and the colocated tests).
 //
-// - `status`       — `project_status` projection + `supervise_tunnels`/`refresh_status` + capability/forwarding
+// - `status`       — `project_status` projection + `supervise_tunnels` + capability/forwarding
 //                    predicates (`should_run_afxdp`, `reconcile_status_bindings`,
 //                    `set_bindings_forwarding_armed`, `forwarding_unsupported_error`).
 // - `session_sync` — synced key/entry + NAT64 reverse reconstruction.
