@@ -567,10 +567,15 @@ fn ipv6_fragment(
     frag_data_off: u16,
 ) -> ScreenPacketInfo {
     // IPv6 fragment word: offset(13) | reserved(2) | M(1). #17109:
-    // decode through the single-source decoder.
+    // decode through the single-source decoder. An ATOMIC fragment
+    // (offset 0, M=0) is a no-op (RFC 6946): never reached the
+    // extractor's FragView, so keep frag: None / is_fragment: false.
     let raw = ((frag_units & 0x1FFF) << 3) | (more as u16);
-    let frag = crate::screen::packet::ip_frag::frag_view_v6(raw, payload_len, frag_data_off);
-    let is_first = frag.more && frag.offset_bytes == 0;
+    let atomic = frag_units == 0 && !more;
+    let frag = (!atomic).then(|| {
+        crate::screen::packet::ip_frag::frag_view_v6(raw, payload_len, frag_data_off)
+    });
+    let is_first = frag.is_some_and(|f| f.more && f.offset_bytes == 0);
     ScreenPacketInfo {
         addr_family: libc::AF_INET6 as u8,
         protocol,
@@ -584,16 +589,33 @@ fn ipv6_fragment(
         tcp_ack: 0,
         tcp_mss: 0,
         pkt_len: payload_len.saturating_add(40),
-        is_fragment: true,
+        is_fragment: !atomic,
         is_first_fragment: is_first,
         ip_ihl: 5,
-        frag: Some(frag),
+        frag,
         ip_total_len: 0,
         ip_payload_len: payload_len,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     }
 }
+
+#[test]
+fn ipv6_atomic_fragment_is_not_a_fragment_17109() {
+    let pkt = ipv6_fragment(
+        IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+        IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
+        PROTO_ICMPV6,
+        0,
+        false,
+        48,
+        8,
+    );
+    assert!(!pkt.is_fragment);
+    assert!(!pkt.is_first_fragment);
+    assert_eq!(pkt.frag, None);
+}
+
 
 #[test]
 fn ping_of_death_v6_oversized_fragment_drops() {
@@ -985,7 +1007,11 @@ fn icmp_fragment_drops() {
         IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)),
         84,
     );
+    // #17109: consistent FragView — first fragment (offset 0, MF=1),
+    // legal 8-byte-multiple data (icmp_pkt: ip_total_len 84 -> data 64).
+    pkt.frag = crate::screen::packet::ip_frag::frag_view_v4(0x2000, 84, 5);
     pkt.is_fragment = true;
+    pkt.is_first_fragment = true;
     assert_eq!(
         state.check_packet("trust", &pkt, 1),
         ScreenVerdict::Drop("icmp-fragment")
@@ -1004,7 +1030,10 @@ fn icmpv6_fragment_drops() {
     // #16030: icmp_pkt leaves `frag: None`, so teardrop (earlier in
     // check_fragment_and_route) cannot fire. Give the fragment a legal
     // 8-byte-multiple data contribution so only icmp-fragment can fire.
-    pkt.frag = Some(FragView { offset_bytes: 0, more: false, data_len: 40, pod_extent: 40 });
+    // #17109: first IPv6 fragment, M=1, offset=0; one fragment header
+    // leaves 40 bytes of an 8-byte-multiple data contribution.
+    pkt.frag = Some(crate::screen::packet::ip_frag::frag_view_v6(0x0001, 48, 8));
+    pkt.is_first_fragment = true;
     pkt.ip_payload_len = 48;
     assert_eq!(
         state.check_packet("trust", &pkt, 1),
@@ -1028,6 +1057,9 @@ fn syn_frag_drops_on_first_fragment_with_syn() {
         80,
         TCP_SYN,
     );
+    // #17109: consistent FragView — first fragment (offset 0, MF=1);
+    // tcp_pkt: ip_total_len 60 -> data 40 (8-byte multiple).
+    pkt.frag = crate::screen::packet::ip_frag::frag_view_v4(0x2000, 60, 5);
     pkt.is_fragment = true;
     pkt.is_first_fragment = true;
     assert_eq!(
@@ -1046,6 +1078,9 @@ fn syn_frag_passes_when_first_fragment_without_syn() {
         80,
         TCP_ACK, // ACK without SYN — not a SYN-fragment
     );
+    // #17109: consistent FragView — first fragment (offset 0, MF=1);
+    // tcp_pkt: ip_total_len 60 -> data 40 (8-byte multiple).
+    pkt.frag = crate::screen::packet::ip_frag::frag_view_v4(0x2000, 60, 5);
     pkt.is_fragment = true;
     pkt.is_first_fragment = true;
     assert_eq!(state.check_packet("trust", &pkt, 1), ScreenVerdict::Pass);
@@ -1065,6 +1100,9 @@ fn syn_frag_passes_on_subsequent_fragment() {
         80,
         TCP_SYN,
     );
+    // #17109: consistent FragView — non-first fragment (offset 1 unit,
+    // MF=1); tcp_pkt: ip_total_len 60 -> data 40 (8-byte multiple).
+    pkt.frag = crate::screen::packet::ip_frag::frag_view_v4(0x2001, 60, 5);
     pkt.is_fragment = true;
     pkt.is_first_fragment = false;
     assert_eq!(state.check_packet("trust", &pkt, 1), ScreenVerdict::Pass);
@@ -1101,6 +1139,9 @@ fn syn_frag_disabled_when_profile_off() {
         80,
         TCP_SYN,
     );
+    // #17109: consistent FragView — first fragment (offset 0, MF=1);
+    // tcp_pkt: ip_total_len 60 -> data 40 (8-byte multiple).
+    pkt.frag = crate::screen::packet::ip_frag::frag_view_v4(0x2000, 60, 5);
     pkt.is_fragment = true;
     pkt.is_first_fragment = true;
     assert_eq!(state.check_packet("trust", &pkt, 1), ScreenVerdict::Pass);
@@ -1734,6 +1775,10 @@ fn syn_frag_drops_truncated_ipv6_first_fragment_at_screen() {
         80,
         TCP_SYN,
     );
+    // #17109: consistent FragView — IPv6 first fragment (offset 0, M=1);
+    // single 8-byte fragment header -> data 40 (8-byte multiple).
+    pkt.frag = Some(crate::screen::packet::ip_frag::frag_view_v6(0x0001, 48, 8));
+    pkt.ip_payload_len = 48;
     pkt.is_fragment = true;
     pkt.is_first_fragment = true;
     assert_eq!(
@@ -1761,6 +1806,9 @@ fn tcp_no_flag_passes_on_subsequent_fragment_with_zero_flags() {
         80,
         0, // tcp_flags=0 on a subsequent fragment is normal — meta wasn't filled
     );
+    // #17109: consistent FragView — non-first fragment (offset 1 unit,
+    // MF=1); tcp_pkt: ip_total_len 60 -> data 40 (8-byte multiple).
+    pkt.frag = crate::screen::packet::ip_frag::frag_view_v4(0x2001, 60, 5);
     pkt.is_fragment = true;
     pkt.is_first_fragment = false;
     assert_eq!(
@@ -1785,6 +1833,9 @@ fn tcp_syn_fin_passes_on_subsequent_fragment_with_syn_fin_bytes() {
         80,
         TCP_SYN | TCP_FIN,
     );
+    // #17109: consistent FragView — non-first fragment (offset 1 unit,
+    // MF=1); tcp_pkt: ip_total_len 60 -> data 40 (8-byte multiple).
+    pkt.frag = crate::screen::packet::ip_frag::frag_view_v4(0x2001, 60, 5);
     pkt.is_fragment = true;
     pkt.is_first_fragment = false;
     assert_eq!(state.check_packet("trust", &pkt, 1), ScreenVerdict::Pass);
