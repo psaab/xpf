@@ -1040,7 +1040,7 @@ pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) ha_inactive: u64,
     pub(in crate::afxdp) no_egress_binding: u64,
     pub(in crate::afxdp) build_fail: u64,
-    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17195: read only by DbgCounters::accumulate in the debug-log gated module; dead without debug-log, so expect fires if that module is removed or a non-gated reader appears"))]
     pub(in crate::afxdp) tx_err: u64,
     pub(in crate::afxdp) metadata_err: u64,
     pub(in crate::afxdp) disposition_other: u64,
@@ -1055,7 +1055,7 @@ pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) nat_applied_snat: u64,
     pub(in crate::afxdp) nat_applied_dnat: u64,
     pub(in crate::afxdp) nat_applied_none: u64,
-    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17195: read only by DbgCounters::accumulate in the debug-log gated module; dead without debug-log, so expect fires if that module is removed or a non-gated reader appears"))]
     pub(in crate::afxdp) frame_build_none: u64,
     pub(in crate::afxdp) rx_tcp_rst: u64,
     #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
