@@ -5810,10 +5810,12 @@ fn wg17089_inputs() -> crate::afxdp::types::WgSpawnInputs {
 /// #17089: identical captures are equal (engine by `ptr_eq`), and each
 /// single-field divergence flips equality AND reports the historical
 /// prune reason for that field — the field-diff half of the guard.
-/// A field added to `WgSpawnInputs` without an entry in
-/// `diff_reason`'s chain would fall through to the final reason and
-/// fail the per-field expectation below only if listed; the
-/// structural cell below is what forces new fields to be listed.
+/// A field added to `WgSpawnInputs` without an `eq` conjunct keeps
+/// equality unchanged on divergence, and one without a `diff_reason`
+/// arm falls through to the fall-through reason — in both cases this
+/// cell stays silent because its cases are written by hand. The
+/// structural cell below is what forces new fields into `eq` and
+/// `diff_reason`.
 #[test]
 fn wg_spawn_inputs_diff_reason_names_each_field_17089() {
     let base = wg17089_inputs();
@@ -5889,7 +5891,14 @@ fn wg_spawn_inputs_diff_reason_names_each_field_17089() {
 /// no spawn-time staleness is possible). A future spawn-time capture
 /// added as a bare parameter fails here until it is moved into
 /// `WgSpawnInputs` — the exact step whose omission shipped #2921 and
-/// #14675. The field list is read from the definition, never restated.
+/// #14675. Moving it into the struct alone is not enough: the prune
+/// fires only when the hand-written `PartialEq::eq` compares the
+/// field, and the reason names only when `diff_reason` tests it, so
+/// the third half below parses both of those bodies and requires
+/// every field name in each — a field whose `eq` conjunct is
+/// forgotten compiles and silently never prunes (the #2921
+/// stale-capture class). The field list is read from the definition,
+/// never restated.
 #[test]
 fn every_wg_control_loop_capture_is_in_spawn_inputs_17089() {
     // Parameters that are NOT spawn captures: coordinator identity for
@@ -6062,6 +6071,102 @@ fn every_wg_control_loop_capture_is_in_spawn_inputs_17089() {
             params.iter().any(|p| p == param),
             "WgSpawnInputs.{field} never reaches wg_control_loop. Either hand it to the loop \
              or remove the field — a captured-but-unused input misleads the prune"
+        );
+    }
+    // Third half: the prune fires only when the hand-written
+    // `PartialEq::eq` compares a field, and `diff_reason` names it
+    // only when its chain tests it. Both impls live in
+    // `types/runtime.rs` and are parsed from the same source read
+    // above. Whole-word mentions only: a field whose name is a
+    // substring of a longer identifier is not compared. A future
+    // field must appear in BOTH bodies — reaching the loop (second
+    // half above) without an `eq` conjunct compiles and silently
+    // never prunes.
+    // `diff_reason` has ONE deliberate shape exception: its final
+    // `else` arm names the last field's reason ("preferred_v6_changed")
+    // without testing that field — every earlier field missed by the
+    // chain falls through to that same arm, so a forgotten field
+    // cannot be told apart from the last one by reading the reason.
+    // For that one field an explicit test is what proves the `eq`
+    // change is what reaches the arm. Pin the exception instead of
+    // weakening the check: the arm body must be exactly the final
+    // field's reason string, so any other field's fall-through is a
+    // misreport the per-field value cell catches only if listed —
+    // and adding a field past it (appended to the struct, the
+    // natural spot) makes it the new untested fall-through and
+    // reds here until its arm is written.
+    fn mentions_field(body: &str, field: &str) -> bool {
+        body.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .any(|tok| tok == field)
+    }
+    let eq_body = types_src
+        .split_once("impl PartialEq for WgSpawnInputs {")
+        .expect("WgSpawnInputs PartialEq impl")
+        .1
+        .split_once("\n}")
+        .expect("end of WgSpawnInputs PartialEq impl")
+        .0;
+    assert!(
+        eq_body.contains("fn eq("),
+        "parsed no `fn eq` from the WgSpawnInputs PartialEq impl; the parse broke, so this \
+         ratchet is vacuous. FIX THE PARSE — do not delete the guard"
+    );
+    let diff_body = types_src
+        .split_once("fn diff_reason(")
+        .expect("WgSpawnInputs::diff_reason")
+        .1
+        .split_once("\n    }")
+        .expect("end of WgSpawnInputs::diff_reason")
+        .0;
+    assert!(
+        diff_body.contains("engine_changed"),
+        "parsed no reason strings from WgSpawnInputs::diff_reason; the parse broke, so this \
+         ratchet is vacuous. FIX THE PARSE — do not delete the guard"
+    );
+    // The fall-through field is the struct's LAST field: its reason
+    // is the chain's final else (see the exception above). Pin that
+    // identity — if the struct gains a field, the last field moves
+    // and this ratchet reds until the new field is tested explicitly.
+    let fallthrough_field = fields
+        .last()
+        .expect("WgSpawnInputs has at least one field")
+        .clone();
+    let fallthrough_reason = format!("\"{fallthrough_field}_changed\"");
+    // `diff_body` was split at the method's closing brace, so it ends
+    // with the final else block's own closing brace — compare the
+    // last reason literal in the body, not the body's last bytes.
+    let last_reason = diff_body
+        .rsplit('"')
+        .nth(1)
+        .map(|s| format!("\"{s}\""))
+        .expect("diff_reason returns at least one reason string");
+    assert!(
+        last_reason == fallthrough_reason,
+        "WgSpawnInputs::diff_reason must end with the final else arm returning \
+         {fallthrough_reason} for the struct's last field. Test every other field \
+         explicitly in the chain and leave exactly one fall-through — otherwise a \
+         forgotten field silently inherits that reason"
+    );
+    for field in &fields {
+        assert!(
+            mentions_field(eq_body, field),
+            "WgSpawnInputs.{field} is not compared by `PartialEq for WgSpawnInputs::eq` in \
+             types/runtime.rs. The stale prune fires only when a capture CHANGES, so a field \
+             no conjunct compares is never pruned no matter how far it drifts — that is \
+             exactly how #2921 shipped stale state. Add `self.{field} == other.{field}` \
+             (`Arc::ptr_eq` if {field} is an Arc) to `eq`"
+        );
+        if field == &fallthrough_field {
+            continue; // the final else arm IS its test (pinned above)
+        }
+        assert!(
+            mentions_field(diff_body, field),
+            "WgSpawnInputs.{field} is not tested by `WgSpawnInputs::diff_reason` in \
+             types/runtime.rs, so a divergence reports the fall-through reason \
+             ({fallthrough_reason}) instead of its own — and a missing arm is how a \
+             capture silently loses its prune reason. Test {field} in diff_reason's \
+             chain (before the final else) and add its per-field case to \
+             wg_spawn_inputs_diff_reason_names_each_field_17089"
         );
     }
 }
