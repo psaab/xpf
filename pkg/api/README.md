@@ -3390,10 +3390,10 @@ the drop fails loudly instead of going quietly vacuous.
   mode. All readyz code paths null-check it.
 - Request-path external commands must be time-bounded (#1805): the
   deferred reboot/halt power actions go through `runTimeout` in
-  `exec_timeout.go` (15s timeout + 5s WaitDelay, mirroring the
-  apply-path contract in `pkg/daemon/exec_timeout.go`, #1794 — not
-  importable here because pkg/daemon imports this package; the
-  Output/CombinedOutput variants live in the pkg/grpcapi sibling copy).
+  `exec_timeout.go`, delegating to `diagcmd.RunTimeout` (15s timeout +
+  5s WaitDelay, #17203; mirroring the apply-path contract in
+  `pkg/daemon/exec_timeout.go`, #1794 — not importable here because
+  pkg/daemon imports this package).
   Power actions take `context.Background()` — client disconnect must
   not cancel a confirmed reboot — and keep ignoring errors. The
   `POST /api/v1/system/action` handler (`systemActionHandler`) journals
@@ -3408,9 +3408,10 @@ the drop fails loudly instead of going quietly vacuous.
   so an operator can self-recover from an H-3/#4476 lock wedge over REST. The
   ping/traceroute handlers keep their own request-ctx bounds but set
   `WaitDelay` so an inherited pipe cannot block past the kill; their
-  budgets are request-sized (#1819) via `pingExecTimeout` (count × 1s +
-  15s slack, 30s floor) and `diagTracerouteTimeout` (60s), capped at the
-  150s `diagExecCeiling` and mirrored in `pkg/grpcapi/exec_timeout.go`.
+  budgets are request-sized (#1819) via `diagcmd.PingExecTimeout`
+  (count × 1s + 15s slack, 30s floor) and `diagcmd.TracerouteTimeout`
+  (60s), capped at the 150s `diagcmd.DiagExecCeiling` — the sole
+  implementation in `pkg/diagcmd`, shared with gRPC (#17203).
   The argv builders (`buildPingArgv`/`buildTracerouteArgv`) place the
   user-supplied target after a `--` end-of-options separator so a
   `-`-prefixed target is an operand, not a flag (option-confusion
