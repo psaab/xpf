@@ -13480,6 +13480,13 @@ fn screen_unresolved_profile_builders_are_in_parity_17243() {
             profile: "p-a2".into(),
             alarm_without_drop: false,
         },
+        // Third zone: a surviving `alarm_without_drop: true` row, so a
+        // helper hard-coding `false` cannot satisfy the pinned map below.
+        crate::ScreenMissingProfileRef {
+            zone: "dmz".into(),
+            profile: "p-c".into(),
+            alarm_without_drop: true,
+        },
     ];
     let missing_state = build_forwarding_state(&ConfigSnapshot {
         screen_missing_profile_zones: rows.clone(),
@@ -13509,6 +13516,13 @@ fn screen_unresolved_profile_builders_are_in_parity_17243() {
             UnresolvedProfileRef {
                 profile: "p-b".into(),
                 alarm_without_drop: false,
+            },
+        ),
+        (
+            "dmz".to_string(),
+            UnresolvedProfileRef {
+                profile: "p-c".into(),
+                alarm_without_drop: true,
             },
         ),
     ]
