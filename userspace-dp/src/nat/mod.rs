@@ -260,6 +260,7 @@ mod tests_reseed_persistent_siblings_15110;
 #[cfg(test)]
 #[path = "tests_static_multiport_index_15790.rs"]
 mod tests_static_multiport_index_15790;
+#[cfg(test)]
 #[path = "tests_synced_det_v4_15267.rs"]
 mod tests_synced_det_v4_15267;
 // #16481: deterministic NAT64 reseed carries retained tuples on pool-length change.
@@ -392,7 +393,6 @@ pub(crate) use source::{
     nat64_refuse_if_peer_owns,
     nat64_refuse_if_static_owns,
     nptv6_owns_wire_identity,
-    parse_source_nat_rules,
     parse_source_nat_rules_with_previous,
     peer_owns_identity_in,
     release_nat64_pool_port,
@@ -429,6 +429,10 @@ pub(crate) use source::{
     wire_nptv6_overlap_peers,
     wire_static_overlap_peers,
 };
+// #17195: `parse_source_nat_rules` is dead in every build; source/mod.rs gates
+// it `#[cfg(test)]`, so the re-export follows that gate.
+#[cfg(test)]
+pub(crate) use source::parse_source_nat_rules;
 // #6211 F2: test-only untracked entry points (see their doc comments).
 // #9902 review: the address-only `match_source_nat*` wrappers allocate
 // Untracked, so they ride the same gate — a production caller would silently

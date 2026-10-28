@@ -335,67 +335,10 @@ func validatePolicyMatchLeavesStrict(nodes []*Node, lenient bool) ([]string, err
 		return nil
 	}
 
-	// #3562: iterate EVERY top-level `security` node and EVERY `policies`
-	// sibling, not the first match at any level. parseStatements APPENDS a
-	// repeated top-level block instead of merging it (parser.go) and
-	// compileExpanded compiles every `security` root, so an offending policy in
-	// a SECOND duplicate `security {}` (or duplicate `policies {}`) block would
-	// bypass a first-`security`/first-`policies` walk while the compiler still
-	// compiled it and silently dropped the unsupported match leaf. Descending
-	// with forEachChild at security/policies closes that multi-level
-	// duplicate-block bypass. The inner per-policy match-leaf check (checkPolicy)
-	// is unchanged.
-	walkErr := forEachChild(nodes, "security", func(security *Node) error {
-		return forEachChild(security.Children, "policies", func(policies *Node) error {
-			for _, child := range policies.Children {
-				switch child.Name() {
-				case "global":
-					for _, polInst := range namedInstances(child.FindChildren("policy")) {
-						if err := checkPolicy("global", polInst.name, polInst.node, true); err != nil {
-							return err
-						}
-					}
-				case "from-zone":
-					// Mirror compilePolicies' two AST shapes.
-					type zonePair struct {
-						from, to   string
-						policyNode *Node
-					}
-					var pairs []zonePair
-					if len(child.Keys) >= 4 {
-						// Hierarchical: Keys=["from-zone","trust","to-zone","untrust"]
-						pairs = append(pairs, zonePair{child.Keys[1], child.Keys[3], child})
-					} else {
-						// Flat set: from-zone → <name> → to-zone → <name> → policy ...
-						for _, fzSub := range child.Children {
-							// This prewalk assigns scope only to real pairs. The
-							// compiler records and poisons a missing-to-zone source
-							// context instead of inventing a pair scope. Iterate every
-							// to-zone sibling so each compiled pair is validated.
-							for _, tzNode := range fzSub.FindChildren("to-zone") {
-								if len(tzNode.Keys) >= 2 {
-									pairs = append(pairs, zonePair{fzSub.Name(), tzNode.Keys[1], tzNode})
-									continue
-								}
-								for _, tzSub := range tzNode.Children {
-									pairs = append(pairs, zonePair{fzSub.Name(), tzSub.Name(), tzSub})
-								}
-							}
-						}
-					}
-					for _, zp := range pairs {
-						scope := fmt.Sprintf("from-zone %s to-zone %s", zp.from, zp.to)
-						for _, polInst := range namedInstances(zp.policyNode.FindChildren("policy")) {
-							if err := checkPolicy(scope, polInst.name, polInst.node, false); err != nil {
-								return err
-							}
-						}
-					}
-				}
-			}
-			return nil
-		})
-	})
+	// Enumeration (every duplicate root, both scopes, both zone-pair
+	// shapes incl. the #12782 keyed arm) is shared: forEachSecurityPolicy
+	// in security_policy_walk.go (#17161). Only checkPolicy is local.
+	walkErr := forEachSecurityPolicy(nodes, checkPolicy)
 	if walkErr != nil {
 		return nil, walkErr
 	}

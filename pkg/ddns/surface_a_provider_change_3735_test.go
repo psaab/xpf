@@ -192,11 +192,16 @@ func TestSurfaceAProviderRenameSameEndpointAdoptsNoAlarm(t *testing.T) {
 // H02 — an IN-PLACE provider mutation (same provider NAME, different endpoint)
 // keeps the scope key, so the scope is never a Pass-2 withdraw candidate; the
 // republish overwrites ownership with the NEW endpoint and orphans the record at
-// the OLD endpoint. publishLocked now detects the fingerprint change and alarms
-// while still publishing the new record.
+// the OLD endpoint. Since #17233 the Surface A settled skip carries the same
+// endpoint term as Surface B (#5814, shared needsRepublish), so the FIRST pass
+// after the edit — no ForceRefresh, no forced-refresh floor — reaches
+// publishLocked, which detects the fingerprint change, publishes to the new
+// endpoint, and alarms while the old record stays put.
 //
-// FAIL-ON-REVERT: remove the publishLocked fingerprint compare and the mutation
-// is silent — Orphaned stays 0, so the assertion goes RED.
+// FAIL-ON-REVERT: revert either the publishLocked fingerprint compare or the
+// #17233 endpoint term in the settled skip and the mutation is silent until
+// the 24h floor — new-endpoint upserts stay 0 and Orphaned stays 0, so the
+// assertions below go RED.
 func TestSurfaceAProviderInPlaceMutationOrphansOldEndpoint(t *testing.T) {
 	reg := newEndpointRegistry()
 	now := time.Unix(1_700_000_000, 0)
@@ -208,10 +213,11 @@ func TestSurfaceAProviderInPlaceMutationOrphansOldEndpoint(t *testing.T) {
 		t.Fatalf("initial publish: %v", err)
 	}
 
-	// Edit the provider's server in place (same PolicyID); force a republish so
-	// the unchanged address still re-asserts the wire record.
+	// Edit the provider's server in place (same PolicyID, unchanged address).
+	// No ForceRefresh: needsRepublish's endpoint term must settle-break this
+	// pass on its own (#17233; previously this test needed ForceRefresh and
+	// the production defect published nothing until the floor).
 	scNew, provNew := providerScope("prov", "ns-b.example.net:53", "wan.example.net")
-	m.ForceRefresh()
 	if err := m.Reconcile(context.Background(), []SurfaceAScope{scNew}, fixedObserver("203.0.113.5"), nil,
 		map[string]*config.DDNSProvider{"prov": provNew}); err != nil {
 		t.Fatalf("republish after in-place mutation: %v", err)

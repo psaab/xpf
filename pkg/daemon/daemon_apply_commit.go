@@ -155,8 +155,9 @@ func (d *Daemon) commitWithGenBinding(
 			}
 		}
 		// Capture the pre-commit active config right before the promotion so
-		// applyAndSyncCommitted can diff deleted policies (#4234). Active only
-		// changes under d.applySem (held here), so it is stable across the
+		// applyAndSyncCommittedWithPeerSnapshotAuthorization can diff
+		// deleted policies (#4234). Active only changes under d.applySem
+		// (held here), so it is stable across the
 		// transaction.
 		oldActive = d.store.ActiveConfig()
 		d.pendingRenameMu.Lock()
@@ -372,10 +373,13 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, peerSnapshotAuth)
 }
 
-// applyAndSyncCommitted runs the reconcile pipeline for a config the store has
-// ALREADY promoted+persisted (committed + active), then pushes it to the
-// cluster peer unless the apply failed in a way that must not propagate.
-// Shared by commitAndApply and commitConfirmedAndApply. Caller holds d.applySem.
+// applyAndSyncCommittedWithPeerSnapshotAuthorization runs the reconcile
+// pipeline for a config the store has ALREADY promoted+persisted
+// (committed + active), then pushes it to the cluster peer unless the
+// apply failed in a way that must not propagate. This is the production
+// entry shared by commitAndApply and commitConfirmedAndApply (both call
+// it directly); tests reach it via applyAndSyncCommittedForTest, which
+// passes a nil peerSnapshotAuth. Caller holds d.applySem.
 //
 // Return contract (#16828): every non-nil error from this function is a
 // POST-promotion error — the config is the store's active config regardless
@@ -402,10 +406,6 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 // unknown policy-session READ authority) from a non-fatal subsystem error that
 // must NOT. On a non-fatal error the committed config is returned alongside
 // the error so the operator sees the failure while the standby still converges.
-func (d *Daemon) applyAndSyncCommitted(oldActive, compiled *config.Config, syncPeer peerSyncPolicy) (*config.Config, error) {
-	return d.applyAndSyncCommittedWithPeerSnapshotAuthorization(oldActive, compiled, syncPeer, nil)
-}
-
 func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 	oldActive, compiled *config.Config,
 	syncPeer peerSyncPolicy,
@@ -571,7 +571,7 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 // signal.NotifyContext (SIGTERM/SIGINT), and daemon_run.go derives
 // applyCancelContext with context.WithCancel — and BOTH callers reach the
 // pipeline as applyConfigLocked(d.applyCancelCtx(), ...), so no caller can
-// inject a deadline (syncAndApply's own ctx parameter is not used for the
+// inject a deadline (syncAndApplyWithAncestry's own ctx parameter is not used for the
 // apply). A #2926 abort therefore always surfaces as context.Canceled.
 //
 // Every DeadlineExceeded that reaches here is instead a PER-COMMAND budget
@@ -587,8 +587,8 @@ func (d *Daemon) applyAndSyncCommittedWithPeerSnapshotAuthorization(
 // under a loaded full-package run.
 //
 // "My useradd took 15s" is not "the daemon is stopping", and treating it as
-// such made applyAndSyncCommitted skip the push to the standby and
-// syncAndApply DISCARD a peer-promoted config. Both recover — the #5863
+// such made the commit apply skip the push to the standby and
+// syncAndApplyWithAncestry DISCARD a peer-promoted config. Both recover — the #5863
 // (epoch x generation) marker is never claimed on the skip path so the 30s
 // configSyncReconcileLoop re-pushes, and a discard drives the #7328
 // nack/re-arm — so the exposure is bounded rather than permanent. It is still
@@ -615,8 +615,9 @@ func applyErrSkipsPeerSync(err error) bool {
 
 // pushCommittedConfigToPeer pushes the current active config to the cluster
 // peer, honoring the syncPeerForTest seam. Shared by the commit-apply path
-// (applyAndSyncCommitted, #4034) and the commit-confirmed rollback re-sync
-// (resyncRolledBackConfigToPeer, #3868) so both route through one observable
+// (applyAndSyncCommittedWithPeerSnapshotAuthorization, #4034) and the
+// commit-confirmed rollback re-sync (resyncRolledBackConfigToPeer, #3868)
+// so both route through one observable
 // point. Caller holds d.applySem and has already promoted the active config.
 func (d *Daemon) pushCommittedConfigToPeer(
 	peerSnapshotAuth *peerSnapshotProtocolAuthorization,
@@ -654,19 +655,14 @@ func (d *Daemon) pushCommittedConfigToPeer(
 	return d.syncConfigToPeerWithAuthorization(peerSnapshotAuth)
 }
 
-// syncAndApply is the cluster-sync-recv analogue of commitAndApply.
-// Holds applySem across configstore.SyncApply (peer-driven active
-// promotion) + applyConfigLocked, so a peer-sync can't interleave
-// between a local committer's Commit and applyConfig (which would
-// briefly leave store=peer-config but kernel=local-config).
-func (d *Daemon) syncAndApply(
-	ctx context.Context,
-	configText string,
-	chassisPreserve func(*config.ConfigTree),
-) (compiled *config.Config, retErr error) {
-	return d.syncAndApplyWithAncestry(ctx, configText, chassisPreserve, nil)
-}
-
+// syncAndApplyWithAncestry is the cluster-sync-recv analogue of
+// commitAndApply. This is the production entry (called by
+// handleConfigSync in daemon_ha_sync.go); tests reach it via
+// syncAndApplyForTest, which passes a nil ancestry. Holds applySem
+// across configstore.SyncApply (peer-driven active promotion) +
+// applyConfigLocked, so a peer-sync can't interleave between a local
+// committer's Commit and applyConfig (which would briefly leave
+// store=peer-config but kernel=local-config).
 func (d *Daemon) syncAndApplyWithAncestry(
 	ctx context.Context,
 	configText string,
@@ -858,7 +854,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// marker is stamped from this captured value in the deferred below (only on
 	// full success), so it records the config THIS sync actually applied — not a
 	// re-read of s.active at stamp time. Before #6296 handleConfigSync stamped
-	// MarkActiveApplied() AFTER syncAndApply released applySem, keyed to whatever
+	// MarkActiveApplied() AFTER syncAndApplyWithAncestry released applySem, keyed to whatever
 	// s.active was then: a concurrent secondary-side promoter (a local commit /
 	// commit-confirmed rollback) landing in that post-release window, whose own
 	// apply then failed non-fatally, could make the stamp key the WRONG
@@ -897,13 +893,13 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		// documented end-state follow-up.)
 		d.deviceMapPassiveAdmissionAlarm(compiled)
 		retErr = errors.Join(retErr, clearErr)
-		// #6296: stamp the applied marker HERE — inside syncAndApply while
+		// #6296: stamp the applied marker HERE — inside syncAndApplyWithAncestry while
 		// applySem is still held (this defer runs before the applySem.Release
 		// defer registered above), keyed to the digest captured above from the
 		// tree SyncApply promoted. Stamp only on FULL success (retErr == nil after
 		// the clearErr join: no fatal or non-fatal apply error AND no partial
 		// session-invalidation), matching the prior handleConfigSync gate which
-		// stamped MarkActiveApplied only when syncAndApply returned nil. A no-op
+		// stamped MarkActiveApplied only when syncAndApplyWithAncestry returned nil. A no-op
 		// on empty digest (nil-active defensive path) or a non-nil retErr leaves
 		// the prior digest, so a config whose apply did not fully converge is never
 		// marked applied — the #4957 invariant handleConfigSync's shortcut relies on.
@@ -911,12 +907,12 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	}()
 
 	// #5564: capture the apply error instead of returning early on ANY error.
-	// applyErrSkipsPeerSync (shared with applyAndSyncCommitted) classifies
+	// applyErrSkipsPeerSync (shared with the commit apply) classifies
 	// the two FATAL classes — a required-protocol-gate error (dataplane
 	// DISARMED, #2138) or a daemon-stop context abort (#2926) — that mean the
 	// config is NOT live-forwarding. On those, discard the config and return
 	// the error WITHOUT invalidating (armedActive stays false; no spurious
-	// clear), exactly as the pre-#5564 early-return and applyAndSyncCommitted's
+	// clear), exactly as the pre-#5564 early-return and the commit apply's
 	// fatal branch did. Every OTHER (non-fatal, best-effort tail) error leaves
 	// the config active + the snapshot armed, so the invalidators still run and
 	// the tail error is surfaced (joined with any partial-invalidation error),
@@ -956,7 +952,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 // deviceMapPassiveAdmissionAlarm raises a loud, never-silent HA-health alarm
 // when a peer-synced config's LOCAL device-map would strand this node's
 // management on next boot. Stores are NOT modified (no divergence loop) — the
-// alarm + the #1922 lifeline are the safety net. See syncAndApply.
+// alarm + the #1922 lifeline are the safety net. See syncAndApplyWithAncestry.
 func (d *Daemon) deviceMapPassiveAdmissionAlarm(synced *config.Config) {
 	if synced == nil || !synced.Chassis.DeviceMap.Active() {
 		return
@@ -1157,7 +1153,7 @@ func (d *Daemon) commitConfirmedAndApplyOperator(ctx context.Context, authority 
 // (gRPC/REST/remote-cli) timeouts that never re-applied the dataplane
 // because no interactive CLI.Run had registered the callback.
 //
-// Lock order is applySem -> s.mu (matches commitAndApply / syncAndApply):
+// Lock order is applySem -> s.mu (matches commitAndApply / syncAndApplyWithAncestry):
 // every store call made while applySem is held (PromoteRollback, and the
 // store calls inside applyConfigLocked such as SetArchiveConfig) takes and
 // releases s.mu internally — applySem is always acquired FIRST and s.mu is

@@ -8,6 +8,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/psaab/xpf/pkg/cliterm"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -102,16 +103,18 @@ func TestShowNATDestinationSummaryReturnsStatsErrors13199(t *testing.T) {
 	}
 }
 
+// The selector grammar lives in cliterm (#17225); TestParseNATPoolSelector17225
+// pins it there. This keeps the #13199 named cell exercising the shared symbol.
 func TestNatPoolArgRejectsMalformedSelectors13199(t *testing.T) {
-	if name, err := natPoolArg(nil); err != nil || name != "" {
-		t.Fatalf("natPoolArg(nil) = %q, %v; want empty selector", name, err)
+	if name, err := cliterm.ParseNATPoolSelector(nil); err != nil || name != "" {
+		t.Fatalf("ParseNATPoolSelector(nil) = %q, %v; want empty selector", name, err)
 	}
-	if name, err := natPoolArg([]string{"pool", "web"}); err != nil || name != "web" {
-		t.Fatalf("natPoolArg(pool web) = %q, %v; want web", name, err)
+	if name, err := cliterm.ParseNATPoolSelector([]string{"pool", "web"}); err != nil || name != "web" {
+		t.Fatalf("ParseNATPoolSelector(pool web) = %q, %v; want web", name, err)
 	}
 	for _, rest := range [][]string{{"pool"}, {"bogus"}, {"pool", "web", "extra"}, {"pool", ""}} {
-		if name, err := natPoolArg(rest); err == nil || name != "" {
-			t.Errorf("natPoolArg(%q) = %q, %v; want an error", rest, name, err)
+		if name, err := cliterm.ParseNATPoolSelector(rest); err == nil || name != "" {
+			t.Errorf("ParseNATPoolSelector(%q) = %q, %v; want an error", rest, name, err)
 		}
 	}
 }

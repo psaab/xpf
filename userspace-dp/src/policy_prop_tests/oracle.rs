@@ -95,14 +95,12 @@ pub(crate) struct GeneratedSnapshot {
 
 #[derive(Clone, Debug, Deserialize)]
 struct GeneratedCorpus {
-    #[allow(dead_code)]
     schema_version: u32,
     rows: Vec<GeneratedRow>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct DivergenceFile {
-    #[allow(dead_code)]
     _note: Option<String>,
     #[serde(default)]
     divergences: Vec<GeneratedDivergence>,
@@ -111,7 +109,6 @@ struct DivergenceFile {
 #[derive(Clone, Debug, Deserialize)]
 struct GeneratedDivergence {
     id: String,
-    #[allow(dead_code)]
     issue: Option<String>,
 }
 
@@ -130,7 +127,6 @@ pub(crate) fn divergence_ids() -> BTreeMap<String, ()> {
 
 #[derive(Clone, Debug, Deserialize)]
 struct SeedManifest {
-    #[allow(dead_code)]
     schema_version: u32,
     ids: Vec<String>,
 }

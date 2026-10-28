@@ -3,6 +3,8 @@ package vrrp
 import (
 	"fmt"
 	"log/slog"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // In-place VIP-set update (#10780).
@@ -50,15 +52,15 @@ func (vi *vrrpInstance) getAdvertCapacityErr() error {
 func vipSetDelta(old, want []string) (added, removed []string) {
 	oldSet := make(map[string]struct{}, len(old))
 	for _, vip := range old {
-		oldSet[canonicalVIPIdentity(vip)] = struct{}{}
+		oldSet[config.VRRPVIPIdentity(vip)] = struct{}{}
 	}
 	wantSet := make(map[string]struct{}, len(want))
 	for _, vip := range want {
-		wantSet[canonicalVIPIdentity(vip)] = struct{}{}
+		wantSet[config.VRRPVIPIdentity(vip)] = struct{}{}
 	}
 	seenAdded := make(map[string]struct{}, len(want))
 	for _, vip := range want {
-		id := canonicalVIPIdentity(vip)
+		id := config.VRRPVIPIdentity(vip)
 		if _, ok := oldSet[id]; !ok {
 			if _, seen := seenAdded[id]; !seen {
 				added = append(added, vip)
@@ -68,7 +70,7 @@ func vipSetDelta(old, want []string) (added, removed []string) {
 	}
 	seenRemoved := make(map[string]struct{}, len(old))
 	for _, vip := range old {
-		id := canonicalVIPIdentity(vip)
+		id := config.VRRPVIPIdentity(vip)
 		if _, ok := wantSet[id]; !ok {
 			if _, seen := seenRemoved[id]; !seen {
 				removed = append(removed, vip)
@@ -113,7 +115,7 @@ func vipSetDelta(old, want []string) (added, removed []string) {
 // set). Socket I/O (advert, GARP) and the state event run AFTER the unlock,
 // matching becomeMaster.
 func (vi *vrrpInstance) updateVIPs(desired []string) error {
-	want := dedupeVIPs(append([]string(nil), desired...))
+	want := config.DedupeVRRPVIPs(append([]string(nil), desired...))
 
 	vi.vipMu.Lock()
 
@@ -213,12 +215,12 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	// Exclude every spelling of a failed binary address from kernel truth.
 	failedAdd := make(map[string]struct{}, len(addRes.failed))
 	for _, vip := range addRes.failed {
-		failedAdd[canonicalVIPIdentity(vip)] = struct{}{}
+		failedAdd[config.VRRPVIPIdentity(vip)] = struct{}{}
 	}
 	var addedOK []string
 	if state == StateMaster {
 		for _, vip := range added {
-			if _, bad := failedAdd[canonicalVIPIdentity(vip)]; !bad {
+			if _, bad := failedAdd[config.VRRPVIPIdentity(vip)]; !bad {
 				addedOK = append(addedOK, vip)
 			}
 		}
@@ -226,7 +228,7 @@ func (vi *vrrpInstance) updateVIPs(desired []string) error {
 	vi.mu.Lock()
 	newSet := make([]string, 0, len(want)+len(removedFailed))
 	for _, vip := range want {
-		if _, bad := failedAdd[canonicalVIPIdentity(vip)]; !bad {
+		if _, bad := failedAdd[config.VRRPVIPIdentity(vip)]; !bad {
 			newSet = append(newSet, vip)
 		}
 	}

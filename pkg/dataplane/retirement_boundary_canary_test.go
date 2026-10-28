@@ -77,12 +77,11 @@ var legacyDataplaneImportAllowlist = map[string]string{
 	"pkg/cluster/sync_protocol.go":                   "wire protocol still carries legacy session records",
 	"pkg/cluster/sync_zone_rg.go":                    "#11012 per-session owner predicates and bulk-start snapshot consume legacy dataplane SessionValue/V6 wire types; no new DataPlane surface",
 	"pkg/cluster/test_seams.go":                      "#9631 test-only seam file in the production package (external HA cells drive it without internal-export tricks, peer of pkg/dhcp/test_seams.go); the generation/journal observers name the same legacy dataplane.SessionKey the sync_conn_gen.go guards already name — no new dataplane surface",
-	"pkg/conntrack/gc.go":                            "GC still uses root session-domain types until those move out of pkg/dataplane",
 	"pkg/daemon/daemon.go":                           "daemon owns dataplane.RuntimeDataPlane; legacyDP() accessor was deleted in #1519 — only the RuntimeDataPlane field + LastApplyResultOf adapter remain",
 	"pkg/daemon/daemon_apply_dataplane.go":           "#5661 pure-motion split of daemon_apply.go: dataplane+HA core apply still adapts legacy compile/apply metadata",
 	"pkg/daemon/daemon_apply_tail.go":                "#5661 pure-motion split of daemon_apply.go: tail reconcile still names legacy dataplane types",
 	"pkg/daemon/daemon_apply_mtu_warnings_9841.go":   "#9841: the commit wrapper syncs the just-published unconverged-MTU records onto the committed config via dataplane.LastApplyGenerationOf/SyncMTUUnconvergedWarnings; commit-warning projection only, no legacy enforcement path",
-	"pkg/daemon/daemon_persistent_nat_show_8607.go":  "#8607 persistent-NAT SHOW refresh names dataplane.PersistentNATTable / PersistentNATBinding and resolves the published backend through dataplane.Unwrap, to fill the table `show security nat source persistent-nat-table` reads. It exists BECAUSE the legacy path is dead here: daemon_run.go sets gc.SkipSweep on the userspace backend, so the preserve hook on SessionStore.DeleteBatchKnown* (the table's only writer) and pnat.GC() are both unreachable. Display-only, no legacy enforcement path",
+	"pkg/daemon/daemon_persistent_nat_show_8607.go":  "#8607 persistent-NAT SHOW refresh names dataplane.PersistentNATTable / PersistentNATBinding and resolves the published backend through dataplane.Unwrap, to fill the table `show security nat source persistent-nat-table` reads. It exists BECAUSE the legacy path is dead here: the retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) never ran its sweep on the userspace backend, so the preserve hook on SessionStore.DeleteBatchKnown* (the table's only writer) and pnat.GC() were both unreachable. Display-only, no legacy enforcement path",
 	"pkg/daemon/rxvlan_audit_11446.go":               "#12159: RX-VLAN audit classifies offload state via dataplane.ClassifyRxVlanOffload and probes XDP attachment through the daemon dataplane handle; audit/diagnostic only, no legacy enforcement path",
 	"pkg/daemon/daemon_policy_invalidate.go":         "#4234 commit-time deletion-clear names root dataplane session types (SessionEntryV4/V6, DeleteReasonPolicyDeleted) to invalidate a deleted policy's live sessions via SessionStore.DeleteBatchKnown*; control-plane session lifecycle, no legacy enforcement path",
 	"pkg/daemon/daemon_policy_invalidate_capture.go": "#6948 pre-publication invalidation capture names root dataplane session types (SessionEntryV4/V6, SessionKey/Value, DefaultPolicySentinelID) to snapshot the candidate sessions through SessionStore.ForEach* before the new policy snapshot is published; control-plane session lifecycle, no legacy enforcement path",
@@ -708,7 +707,17 @@ func TestHAWatchdogClaimMatcherRejectsRewordedAndFootnotedStaleClaims10791(t *te
 func TestRetiredBPFWatchdogHeadersHaveNoLiveCallers10791(t *testing.T) {
 	t.Parallel()
 
-	for _, rel := range []string{"bpf/headers/xpf_maps.h", "bpf/headers/xpf_helpers.h"} {
+	// #17146: xpf_helpers.h (with xpf_nat.h and xpf_trace.h) had no
+	// compiler and no live reader, so it is deleted, not retained.
+	// Asserting absence keeps a re-added dead copy from re-entering
+	// the retained-ABI mirror by inertia.
+	for _, rel := range []string{"bpf/headers/xpf_helpers.h", "bpf/headers/xpf_nat.h", "bpf/headers/xpf_trace.h"} {
+		if _, err := os.Stat(filepath.Join(repoRootForBoundaryCanary, rel)); !os.IsNotExist(err) {
+			t.Errorf("retired header %s must be absent (#17146): stat err=%v", rel, err)
+		}
+	}
+
+	for _, rel := range []string{"bpf/headers/xpf_maps.h"} {
 		raw, err := os.ReadFile(filepath.Join(repoRootForBoundaryCanary, rel))
 		if err != nil {
 			t.Fatalf("read retired BPF header %s: %v", rel, err)
@@ -747,6 +756,313 @@ func TestRetiredBPFWatchdogHeadersHaveNoLiveCallers10791(t *testing.T) {
 	}
 	if !strings.Contains(doc, "no c caller") {
 		t.Errorf("%s must explain there is no current C caller", docRel)
+	}
+}
+
+// headerIdentKey17146 reduces ONE identifier to its canonical key:
+// lowercase the letters, keep the digits, drop underscores (the only
+// casing/word-separator convention C and Go differ by). The census
+// never substring-matches this key against a flattened blob — that
+// was the pre-#18273 bug: the whole corpus became one alphanumeric
+// string, so MAX_CPUS "matched" inside Go NumCPU-shaped noise and
+// SESS_FLAG_LOG inside a Rust `log_flags` field, because the blob
+// erased every identifier boundary. Now the corpus is a sequence of
+// per-identifier keys (headerCorpusKeys17146), NUL-separated, and a
+// match means some corpus identifier IS this one. Extra words
+// (NumCPU vs MAX_CPUS, log_flags vs SESS_FLAG_LOG) change the key, so
+// they no longer count as readers; neither does a mere substring
+// inside a longer identifier.
+func headerIdentKey17146(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else if r >= 'A' && r <= 'Z' {
+			b.WriteRune(r - 'A' + 'a')
+		}
+	}
+	return b.String()
+}
+
+// headerCorpusKeys17146 reduces corpus text to the NUL-separated
+// canonical keys of its identifiers. Identifiers are the maximal
+// [A-Za-z0-9_] runs; every other byte is a separator, so a key never
+// spans an identifier boundary. Building one alphanumeric blob of
+// the whole corpus instead is exactly the pre-#18273 behaviour this
+// replaces.
+func headerCorpusKeys17146(s string) string {
+	var out strings.Builder
+	out.WriteByte(0)
+	for i := 0; i < len(s); {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) {
+			d := s[j]
+			if !((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') || (d >= '0' && d <= '9') || d == '_') {
+				break
+			}
+			j++
+		}
+		out.WriteString(headerIdentKey17146(s[i:j]))
+		out.WriteByte(0)
+		i = j
+	}
+	return out.String()
+}
+
+// headerCensusAllowlist18273 names retained-header identifiers whose
+// only live reader this census cannot see as a token sequence, with
+// the reason. Everything else must match on token boundaries. The
+// DSCP alias-map values are NOT reader-allowlisted away: the census
+// pins them against DSCPValues directly below, so drifting DSCP_AF11
+// in the header (or the map value away from the header) reds the test.
+var headerCensusAllowlist18273 = map[string]string{
+	"DSCP_EF":   "alias-map member: value pinned against dataplane.DSCPValues[\"ef\"] by the census (#18273)",
+	"DSCP_AF11": "alias-map member: value pinned against dataplane.DSCPValues[\"af11\"] by the census (#18273)",
+	"DSCP_AF31": "alias-map member: value pinned against dataplane.DSCPValues[\"af31\"] by the census (#18273)",
+	"DSCP_AF43": "alias-map member: value pinned against dataplane.DSCPValues[\"af43\"] by the census (#18273)",
+	// C abbreviates Interface, Go spells it out: InterfaceCounterValue.
+	"iface_counter_value": "mirror is Go InterfaceCounterValue (types.go): C abbreviates Interface to iface (#18273)",
+	// The Go rename appends the plural "s" (MaxNATPoolIPsPerPool).
+	"MAX_NAT_POOL_IPS_PER_POOL": "mirror is Go MaxNATPoolIPsPerPool (types.go): exact rename differing only by the plural-s suffix (#18273)",
+	// Restored together (xpf_common.h) for the nat64_state map: the
+	// Rust reverse-NAT state (Nat64ReverseInfo, userspace-dp
+	// nat64/state.rs) carries the same address fields (orig_src_v6,
+	// orig_dst_v6) but no type named after the C structs.
+	"nat64_state_key":   "key for the nat64_state map (#18273); Rust reverse state is Nat64ReverseInfo (nat64/state.rs) with orig_src_v6/orig_dst_v6, no same-named type",
+	"nat64_state_value": "value for the nat64_state map (#18273); Rust reverse state is Nat64ReverseInfo (nat64/state.rs) with orig_src_v6/orig_dst_v6, no same-named type",
+	// Go collapses the acronym seam: HostInboundDHCPv6 ("DHCP"+"v6")
+	// vs C HOST_INBOUND_DHCPV6 — no camel seam separates DHCP from V6.
+	"HOST_INBOUND_DHCPV6": "mirror is Go HostInboundDHCPv6 (types.go): C suffix DHCPV6 has no camel seam before V6 (#18273)",
+	// Go spells it WinNuke ("Win"+"Nuke"); C writes WINNUKE as one word.
+	"GLOBAL_CTR_SCREEN_WINNUKE": "mirror is Go GlobalCtrScreenWinNuke (types.go): C WINNUKE is one word, Go splits Win|Nuke (#18273)",
+	// Struct names differ only by Go export casing of the acronym.
+	"nptv6_key":   "mirror is Go type NPTv6Key (types.go) (#18273)",
+	"nptv6_value": "mirror is Go type NPTv6Value (types.go) (#18273)",
+	// Internal-only sizing/layout of the retained mirror: consumed
+	// solely inside the retained headers (the census doc comment's
+	// carve-out), with the map names themselves mirrored in Go.
+	"MAX_NAT64_PREFIXES": "sizing only: nat64_configs/nat64_prefix_map max_entries in xpf_maps.h (#15678 removed the Go cap; no Go mirror by design) (#18273)",
+	"pkt_meta":           "layout only: pkt_meta_scratch map value in xpf_maps.h; tail-call scratch has no Go type mirror (#18273)",
+	"policer_state":      "layout only: policer_states map value in xpf_maps.h (map name pinned in shim_pins.go); no Go type mirror (#18273)",
+}
+
+// headerCensusDSCPPins18273 parses the header's DSCP_* defines and pins
+// each value against the Go SSOT (DSCPValues, keyed by the lower-case
+// alias). A header-only rename, removal, or value drift is a failure —
+// this is what reds the census when DSCP_AF11 drifts off 10.
+func headerCensusDSCPPins18273(t *testing.T, texts ...string) {
+	t.Helper()
+	re := regexp.MustCompile(`(?m)^#define\s+(DSCP_[A-Z0-9]+)\s+(\d+)`)
+	seen := map[string]bool{}
+	for _, text := range texts {
+		for _, m := range re.FindAllStringSubmatch(text, -1) {
+			alias := strings.ToLower(strings.TrimPrefix(m[1], "DSCP_"))
+			want, ok := DSCPValues[alias]
+			if !ok {
+				t.Errorf("header define %s has no DSCPValues alias %q — add the Go mirror or retire the define (#18273)", m[1], alias)
+				continue
+			}
+			got, err := strconv.Atoi(m[2])
+			// Compare in int space with an explicit range guard: a
+			// uint8(got) conversion wraps mod 256, so a header value
+			// of e.g. 266 would alias AF11's 10 and stay green.
+			if err != nil || got < 0 || got > 255 || got != int(want) {
+				t.Errorf("header define %s=%s drifts from DSCPValues[%q]=%d (#18273)", m[1], m[2], alias, want)
+			}
+			seen[m[1]] = true
+		}
+	}
+	// The four aliases the header carries today. Removing one silently
+	// unpins that codepoint from the Go SSOT.
+	for _, name := range []string{"DSCP_EF", "DSCP_AF11", "DSCP_AF31", "DSCP_AF43"} {
+		if !seen[name] {
+			t.Errorf("header DSCP census lost define %s; its DSCPValues value is no longer pinned (#18273)", name)
+		}
+	}
+}
+
+// headerIdentifierHasLiveReader17146 reports whether ident appears
+// outside bpf/ in a .go/.rs/.sh file, after deleting bpf/ comments
+// from that corpus. Matching is per-identifier (see
+// headerCorpusKeys17146): MAX_NAT_POOLS matches MaxNatPools and
+// GlobalCtrMax as whole identifiers. Comments are stripped only on
+// the corpus side: a mention in a comment is not a reader (#17146,
+// tightened #18273).
+func headerIdentifierHasLiveReader17146(encodedCorpus string, ident string) bool {
+	needle := "\x00" + headerIdentKey17146(ident) + "\x00"
+	return strings.Contains(encodedCorpus, needle)
+}
+
+func stripCComments17146(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if i+1 < len(s) && s[i] == '/' && s[i+1] == '*' {
+			end := strings.Index(s[i+2:], "*/")
+			if end < 0 {
+				break
+			}
+			i += 2 + end + 2
+			continue
+		}
+		if i+1 < len(s) && s[i] == '/' && s[i+1] == '/' {
+			end := strings.IndexByte(s[i:], '\n')
+			if end < 0 {
+				break
+			}
+			i += end
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// TestEveryHeaderIdentifierHasLiveReader17146 is the #17146
+// acceptance gate, tightened by #18273: every #define and named
+// struct left in bpf/headers must appear on word-token boundaries in
+// some .go, .rs or .sh outside bpf/ (the DSCP alias-map defines are
+// the named exception: their header values are pinned against
+// DSCPValues instead). Internal-only use inside the remaining
+// headers does not count. Guards are exempt. FAIL-ON-REVERT: add any
+// dead define/struct to a retained header (or restore a deleted
+// header's identifiers) and this test names it.
+//
+// The census also flags use-without-definition (#18273): a `struct X`
+// or a `max_entries(MACRO)` named by a retained header that no
+// retained header defines would leave xpf_maps.h internally
+// inconsistent (the #17146 trim deleted iface_counter_value /
+// scan_track_* while keeping their maps).
+func TestEveryHeaderIdentifierHasLiveReader17146(t *testing.T) {
+	t.Parallel()
+
+	root := repoRootForBoundaryCanary
+	var corpus strings.Builder
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(root, path)
+		if rerr != nil {
+			return rerr
+		}
+		if info.IsDir() {
+			if rel == ".git" || rel == filepath.Join("bpf") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		switch filepath.Ext(path) {
+		case ".go", ".rs", ".sh":
+			raw, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			corpus.WriteString(stripCComments17146(string(raw)))
+			corpus.WriteByte('\n')
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk corpus: %v", err)
+	}
+	encodedCorpus := headerCorpusKeys17146(corpus.String())
+
+	headerNames := []string{"xpf_common.h", "xpf_conntrack.h", "xpf_maps.h"}
+	headerText := map[string]string{}
+	defined := map[string]bool{}
+	defineRe := regexp.MustCompile(`(?m)^#define\s+([A-Za-z_][A-Za-z0-9_]*)`)
+	structDefRe := regexp.MustCompile(`(?m)^struct\s+([a-z_][a-z0-9_]*)\s*\{`)
+	for _, hdr := range headerNames {
+		raw, err := os.ReadFile(filepath.Join(root, "bpf", "headers", hdr))
+		if err != nil {
+			t.Fatalf("read %s: %v", hdr, err)
+		}
+		text := stripCComments17146(string(raw))
+		headerText[hdr] = text
+		for _, m := range defineRe.FindAllStringSubmatch(text, -1) {
+			defined[m[1]] = true
+		}
+		for _, m := range structDefRe.FindAllStringSubmatch(text, -1) {
+			defined["struct "+m[1]] = true
+		}
+	}
+
+	// Defined identifiers must have a live reader (or a named
+	// allowlist entry).
+	var dead []string
+	for _, hdr := range headerNames {
+		text := headerText[hdr]
+		for _, m := range defineRe.FindAllStringSubmatch(text, -1) {
+			if strings.HasPrefix(m[1], "__") && strings.HasSuffix(m[1], "_H__") {
+				continue
+			}
+			if _, ok := headerCensusAllowlist18273[m[1]]; ok {
+				continue
+			}
+			if !headerIdentifierHasLiveReader17146(encodedCorpus, m[1]) {
+				dead = append(dead, hdr+": "+m[1])
+			}
+		}
+		for _, m := range structDefRe.FindAllStringSubmatch(text, -1) {
+			if _, ok := headerCensusAllowlist18273[m[1]]; ok {
+				continue
+			}
+			if !headerIdentifierHasLiveReader17146(encodedCorpus, m[1]) {
+				dead = append(dead, hdr+": struct "+m[1])
+			}
+		}
+	}
+	if len(dead) > 0 {
+		sort.Strings(dead)
+		t.Errorf("identifiers in bpf/headers with no live reader outside bpf/ (#17146/#18273):\n%s", strings.Join(dead, "\n"))
+	}
+
+	// Every DSCP_* alias the headers carry is value-pinned to Go.
+	headerCensusDSCPPins18273(t, headerText["xpf_common.h"], headerText["xpf_conntrack.h"], headerText["xpf_maps.h"])
+
+	// Use-without-definition: `struct X` named by any retained header
+	// (map __type(), field types) that no retained header defines.
+	// Kernel/BTF extern types the headers deliberately borrow are
+	// exempt by name.
+	structUseRe := regexp.MustCompile(`\bstruct\s+([a-z_][a-z0-9_]*)\b`)
+	typeExempt18273 := map[string]bool{"bpf_devmap_val": true}
+	var dangling []string
+	for _, hdr := range headerNames {
+		for _, m := range structUseRe.FindAllStringSubmatch(headerText[hdr], -1) {
+			if typeExempt18273[m[1]] {
+				continue
+			}
+			if !defined["struct "+m[1]] {
+				dangling = append(dangling, hdr+": struct "+m[1])
+			}
+		}
+	}
+	// Macro use in the map declarations: every macro operand of a
+	// max_entries(...) expression must resolve to a retained define.
+	// Capturing only a lone bare macro would miss compound operands
+	// (MAX_POLICIES * MAX_RULES_PER_POLICY): deleting or renaming the
+	// second operand would stay green, so check EVERY uppercase token
+	// in the full argument.
+	maxEntriesRe := regexp.MustCompile(`max_entries,\s*([^);]+)`)
+	macroOperandRe := regexp.MustCompile(`[A-Z][A-Z0-9_]*`)
+	for _, hdr := range headerNames {
+		for _, m := range maxEntriesRe.FindAllStringSubmatch(headerText[hdr], -1) {
+			for _, tok := range macroOperandRe.FindAllString(m[1], -1) {
+				if !defined[tok] {
+					dangling = append(dangling, hdr+": macro "+tok)
+				}
+			}
+		}
+	}
+	if len(dangling) > 0 {
+		sort.Strings(dangling)
+		t.Errorf("retained headers use types/macros no retained header defines (#18273):\n%s", strings.Join(dangling, "\n"))
 	}
 }
 
@@ -2622,44 +2938,6 @@ func userspaceXDPEntryProgramConstantDrift(t *testing.T, roots []string) ([]stri
 	sort.Strings(found)
 	sort.Strings(violations)
 	return found, violations
-}
-
-func TestConntrackGCConstructorDoesNotAcceptLegacyDataPlane(t *testing.T) {
-	t.Parallel()
-
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join("..", "conntrack", "gc.go"), nil, 0)
-	if err != nil {
-		t.Fatalf("parse conntrack/gc.go: %v", err)
-	}
-
-	var foundNewGC bool
-	var legacyRefs []string
-	ast.Inspect(file, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && canaryExprString(sel) == "dataplane.DataPlane" {
-			legacyRefs = append(legacyRefs, fset.Position(sel.Pos()).String())
-		}
-
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "NewGC" {
-			return true
-		}
-		foundNewGC = true
-		if fn.Type.Params == nil || len(fn.Type.Params.List) == 0 {
-			t.Fatal("conntrack.NewGC has no provider parameter")
-		}
-		if got := canaryExprString(fn.Type.Params.List[0].Type); got != "RuntimeDomainProvider" {
-			t.Fatalf("conntrack.NewGC provider = %s, want RuntimeDomainProvider", got)
-		}
-		return true
-	})
-
-	if !foundNewGC {
-		t.Fatal("conntrack.NewGC not found")
-	}
-	if len(legacyRefs) > 0 {
-		t.Fatalf("conntrack GC must not reference dataplane.DataPlane: %v", legacyRefs)
-	}
 }
 
 func compilerDataplaneCalls(t *testing.T) map[string]bool {

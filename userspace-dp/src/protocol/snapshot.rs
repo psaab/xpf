@@ -784,7 +784,11 @@ pub(crate) struct ConfigSnapshot {
     /// they are dropped at local delivery. Transit Time Exceeded is
     /// unconditional. Additive: a missing field (old Go binary)
     /// decodes to false, the Junos default-reject behaviour.
-    #[serde(rename = "no_ipv6_reject_zero_hop_limit", default, skip_serializing_if = "crate::protocol::bool_is_false")]
+    #[serde(
+        rename = "no_ipv6_reject_zero_hop_limit",
+        default,
+        skip_serializing_if = "crate::protocol::bool_is_false"
+    )]
     pub no_ipv6_reject_zero_hop_limit: bool,
     /// #15937 authorized clear: set ONLY by the Go full-Compile path on
     /// a full build; partial publishers clone the retained snapshot and
@@ -792,7 +796,11 @@ pub(crate) struct ConfigSnapshot {
     /// competent helper treats `clear_policies && policies.is_empty()`
     /// as the deliberate clear-all authorization. Additive via serde
     /// default, no protocol bump.
-    #[serde(rename = "clear_policies", default, skip_serializing_if = "crate::protocol::bool_is_false")]
+    #[serde(
+        rename = "clear_policies",
+        default,
+        skip_serializing_if = "crate::protocol::bool_is_false"
+    )]
     pub clear_policies: bool,
     #[serde(default)]
     pub policies: Vec<PolicyRuleSnapshot>,
@@ -905,13 +913,12 @@ pub(crate) struct ConfigSnapshot {
     /// removed, but the field is retained as documented-reserved to preserve
     /// the #1977 NUM_WIDTH decode-safety tests (protocol/tests.rs) and avoid a
     /// cross-language wire-protocol break. It is deserialized and ignored.
-    #[allow(dead_code)]
     #[serde(rename = "flow_export", default)]
     pub flow_export: Option<FlowExportSnapshot>,
     #[serde(rename = "mirror_configs", default)]
     pub mirror_configs: Vec<MirrorConfigSnapshot>,
-    #[serde(default)]
-    pub userspace: serde_json::Value,
+    #[serde(default, deserialize_with = "deserialize_userspace_snapshot")]
+    pub userspace: UserspaceSnapshot,
     #[serde(default)]
     pub config: serde_json::Value,
     #[serde(rename = "defer_workers", default)]
@@ -1343,6 +1350,95 @@ pub(crate) struct UserspaceCapabilities {
     pub forwarding_supported: bool,
     #[serde(rename = "unsupported_reasons", default)]
     pub unsupported_reasons: Vec<String>,
+}
+
+/// #17134: the typed mirror of the Go wire subtree the helper actually
+/// reads (`pkg/dataplane/userspace/protocol.go` carries
+/// `config.UserspaceConfig`; only `workers`, `ring_entries` and
+/// `shared_umem.{mode,interfaces,phase0_artifact_file}` are consumed
+/// here). Before this type, `ConfigSnapshot.userspace` was an untyped
+/// `serde_json::Value`, so when #5300 renamed the Go key
+/// `phase0-artifact` key the Rust reader silently lost, so it became
+/// `None` and the Phase 0 audit chain went dead with every test green.
+/// Typing the subtree makes a Go-side rename a fixture/serde event
+/// instead. Unknown keys stay tolerated (no `deny_unknown_fields`):
+/// a rolling upgrade pairs an older daemon that may emit extra
+/// `UserspaceConfig` keys with this helper, and those must decode.
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
+pub(crate) struct UserspaceSnapshot {
+    #[serde(default, deserialize_with = "crate::protocol::null_tolerant_u64")]
+    pub workers: u64,
+    #[serde(default, deserialize_with = "crate::protocol::null_tolerant_u64")]
+    pub ring_entries: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_umem: Option<SharedUmemSnapshot>,
+}
+
+/// #17134: typed mirror of `config.SharedUMEMConfig` (mode / interfaces /
+/// phase0_artifact_file). The artifact FILE path is carried for parity so
+/// a Go rename is visible here; the helper never reads the file — the
+/// environment audit is owned by the Go compile-time
+/// `sharedUMEMAuditWarnings` (#5300, ported in #17134).
+///
+/// `mode` defaults to `cross-nic` when the leaf is absent: Go declares
+/// `Mode string json:"mode,omitempty"` and `compileSharedUMEMConfig`
+/// only sets it when a `mode` leaf exists, so a stanza setting only
+/// `phase0-artifact-file` or only `interface …` emits a present
+/// `shared_umem` with NO mode. The pre-#17134 `Value` reader defaulted a
+/// missing mode to `CrossNic` (auto); without this default the typed
+/// empty string falls through `parse_shared_umem_mode` to `Off` and
+/// silently marks every binding private.
+fn default_shared_umem_mode() -> String {
+    "cross-nic".to_string()
+}
+
+/// An explicit JSON `null` mode is treated the same as a missing leaf
+/// (auto/cross-NIC): Go's `omitempty` never emits one, but the old
+/// `Value` reader's `as_str()` fallback did, and a null must not flip
+/// the policy to `Off` either.
+fn deserialize_shared_umem_mode<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(Option::<String>::deserialize(deserializer)?
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(default_shared_umem_mode))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SharedUmemSnapshot {
+    #[serde(
+        default = "default_shared_umem_mode",
+        deserialize_with = "deserialize_shared_umem_mode"
+    )]
+    pub mode: String,
+    #[serde(default, deserialize_with = "crate::protocol::null_tolerant_vec")]
+    pub interfaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub phase0_artifact_file: String,
+}
+
+impl Default for SharedUmemSnapshot {
+    fn default() -> Self {
+        Self {
+            mode: default_shared_umem_mode(),
+            interfaces: Vec::new(),
+            phase0_artifact_file: String::new(),
+        }
+    }
+}
+
+/// #17134: `userspace` is `null` in the #16132 wire specimens and when an
+/// older daemon omits the object; decode both as the default typed value
+/// instead of rejecting the whole snapshot (the #1961 failure mode
+/// `crate::protocol::null_tolerant_vec` guards for vectors).
+fn deserialize_userspace_snapshot<'de, D>(deserializer: D) -> Result<UserspaceSnapshot, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(Option::<UserspaceSnapshot>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[cfg(test)]

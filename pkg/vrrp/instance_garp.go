@@ -29,10 +29,11 @@ func garpDampened(lastNanos, nowNanos int64) bool {
 	return elapsed >= 0 && elapsed < minGARPInterval
 }
 
-// garpSendAllowed reports whether sendGARP should proceed to emit a burst,
-// given the current epoch state and whether the caller requested a forced
-// send. It centralises the two suppression gates so the decision can be
-// unit-tested without performing real network I/O:
+// garpSendAllowedForOwner reports whether sendGARP should proceed to emit a
+// burst, given the current epoch state, whether the caller requested a forced
+// send, and the caller's captured owner generation. It centralises the two
+// suppression gates so the decision can be unit-tested without performing
+// real network I/O:
 //
 //   - Epoch dedup: skip if a GARP for the current garpEpoch was already
 //     completed (lastGARPEpoch == garpEpoch, epoch > 0). This applies to
@@ -49,12 +50,8 @@ func garpDampened(lastNanos, nowNanos int64) bool {
 //     virtual MAC, so peers hold a stale ARP entry and the post-MAC-change
 //     GARP is critical even if a routine GARP happened within 500ms (#2081).
 //
-// The two-argument seam is used by focused tests; sendGARP passes its captured
-// owner generation to the internal decision so a concurrent transition cannot
-// make a prior-tenure GARP look like a burst from the new tenure.
-func (vi *vrrpInstance) garpSendAllowed(force bool, nowNanos int64) bool {
-	return vi.garpSendAllowedForOwner(force, nowNanos, vi.ownerGen.Load())
-}
+// sendGARP passes its captured owner generation so a concurrent transition
+// cannot make a prior-tenure GARP look like a burst from the new tenure.
 
 func (vi *vrrpInstance) garpSendAllowedForOwner(force bool, nowNanos int64, ownerGen uint64) bool {
 	epoch := vi.garpEpoch.Load()
@@ -178,7 +175,7 @@ func (vi *vrrpInstance) addPendingGARPVIPsLocked(vips []string) {
 		vi.pendingGARPVIPs = make(map[string]struct{}, len(vips))
 	}
 	for _, vip := range vips {
-		vi.pendingGARPVIPs[canonicalVIPIdentity(vip)] = struct{}{}
+		vi.pendingGARPVIPs[config.VRRPVIPIdentity(vip)] = struct{}{}
 	}
 }
 
@@ -186,7 +183,7 @@ func (vi *vrrpInstance) addPendingGARPVIPsLocked(vips []string) {
 // synchronous first frame succeeds while its captured ownership and membership
 // token is still current. The caller holds vipMu.
 func (vi *vrrpInstance) markGARPAnnouncedLocked(vip string) {
-	delete(vi.pendingGARPVIPs, canonicalVIPIdentity(vip))
+	delete(vi.pendingGARPVIPs, config.VRRPVIPIdentity(vip))
 	if len(vi.pendingGARPVIPs) == 0 {
 		vi.pendingGARPVIPs = nil
 	}
@@ -203,14 +200,14 @@ func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, include
 	}
 	next := make(map[string]struct{}, len(vi.pendingGARPVIPs)+len(added))
 	for _, vip := range current {
-		id := canonicalVIPIdentity(vip)
+		id := config.VRRPVIPIdentity(vip)
 		if _, pending := vi.pendingGARPVIPs[id]; pending {
 			next[id] = struct{}{}
 		}
 	}
 	if includeAdded {
 		for _, vip := range added {
-			next[canonicalVIPIdentity(vip)] = struct{}{}
+			next[config.VRRPVIPIdentity(vip)] = struct{}{}
 		}
 	}
 	if len(next) == 0 {
@@ -221,7 +218,7 @@ func (vi *vrrpInstance) pendingGARPForSetLocked(current, added []string, include
 	announcements := make([]string, 0, len(next))
 	rendered := make(map[string]struct{}, len(next))
 	for _, vip := range current {
-		id := canonicalVIPIdentity(vip)
+		id := config.VRRPVIPIdentity(vip)
 		if _, pending := next[id]; !pending {
 			continue
 		}
@@ -290,7 +287,7 @@ func (vi *vrrpInstance) reserveGARPBurstGateLocked(vips []string, epoch, ownerGe
 			vi.lastGARPOwnerGen.Load() == ownerGen) {
 		return 0, false
 	}
-	// #8597 (muse-004 K20): under vi.mu — updateConfig writes this field on the
+	// #8597 (muse-004 K20): under vi.mu — updateConfigHeld writes this field on the
 	// manager goroutine while sendGARP runs on the run loop, on detached
 	// `go vi.sendGARP` goroutines, AND synchronously from ReconcileVIPs.
 	count := vi.garpCount()
@@ -342,7 +339,7 @@ func (vi *vrrpInstance) sendGARPReservedMode(vips []string, epoch, ownerGen uint
 			return
 		}
 		if pendingOnly {
-			if _, pending := vi.pendingGARPVIPs[canonicalVIPIdentity(vip)]; !pending {
+			if _, pending := vi.pendingGARPVIPs[config.VRRPVIPIdentity(vip)]; !pending {
 				vi.vipMu.Unlock()
 				continue
 			}

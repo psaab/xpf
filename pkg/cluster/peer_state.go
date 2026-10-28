@@ -18,7 +18,7 @@ func (m *Manager) ClearPeerHeartbeatLiveness() {
 
 // peerHeartbeatFreshLocked reports whether a peer heartbeat is currently within
 // the timeout window (NOT stale). It is the truth source for
-// handlePeerTimeout's post-guard re-check. Must be called with m.mu held (it
+// handlePeerTimeout's freshness check. Must be called with m.mu held (it
 // reads m.peerHeartbeatFreshFn and m.hbReceiver).
 //
 // The test seam (m.peerHeartbeatFreshFn) takes precedence so tests can inject a

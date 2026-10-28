@@ -178,7 +178,7 @@ func (r *convergenceRun12072) commitWithPeer(
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		return err
 	}
-	_, err := r.h.d.applyAndSyncCommitted(old, next, peerSync)
+	_, err := r.h.d.applyAndSyncCommittedForTest(old, next, peerSync)
 	r.h.d.applySem.Release(1)
 	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
 	return err
@@ -475,7 +475,7 @@ func TestPolicyInvalidationRefusedBackgroundApplyRecoversAfterCatchup12072(t *te
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	_, commitErr := r.h.d.applyAndSyncCommitted(c0, c1, peerSyncNever)
+	_, commitErr := r.h.d.applyAndSyncCommittedForTest(c0, c1, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	if commitErr == nil {
 		t.Fatal("lost apply ACK was not surfaced")
@@ -827,7 +827,7 @@ func TestPolicyInvalidationConfirmedRollbackAfterDefiniteFailure12072(t *testing
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(c1, c2, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(c1, c2, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	if !errors.Is(applyErr, publishErr) {
 		t.Fatalf("definite C2 publish failure = %v, want %v", applyErr, publishErr)
@@ -896,7 +896,7 @@ func publishLandedRollbackConfig12072(
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatalf("acquire apply semaphore: %v", err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(old, next, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(old, next, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
 	return next, applyErr
@@ -927,7 +927,7 @@ func failConfirmedRollbackTarget12072(t *testing.T, r *convergenceRun12072, c1 *
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatalf("acquire apply semaphore: %v", err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(c1, c2, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(c1, c2, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	if !errors.Is(applyErr, publishErr) {
 		t.Fatalf("definite C2 publish failure = %v, want %v", applyErr, publishErr)
@@ -972,7 +972,7 @@ func publishConfirmedRollbackText12072(
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatalf("acquire apply semaphore: %v", err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(c0, c1, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(c0, c1, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
 	return c1, gen, applyErr
@@ -1144,7 +1144,7 @@ func failConfirmedTarget12072(
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatalf("acquire apply semaphore: %v", err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(prev, next, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(prev, next, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
 	if !errors.Is(applyErr, publishErr) {

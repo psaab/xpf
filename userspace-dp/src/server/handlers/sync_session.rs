@@ -1,6 +1,4 @@
-// #1345: per-verb handler for sync_session. Body byte-identical to
-// handlers.rs lines 309-342 (preserves the nested match on
-// sync_req.operation).
+// #1345: per-verb handler for sync_session, split out of handlers.rs in #1345.
 
 use super::super::helpers::{
     SyncedKeyIntent, SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX, build_synced_session_entry,
@@ -9,13 +7,13 @@ use super::super::helpers::{
 use crate::afxdp::SessionDomain;
 use crate::afxdp::{
     SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REPAIR_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
+    SYNCED_IMPORT_REFUSED_PREFIX,
 };
 use crate::{ControlResponse, SessionSyncRequest};
 
 /// #7209: served from the SESSION-DOMAIN HANDLE, not from `&mut ServerState`.
 ///
-/// This verb arrives on its own socket and its own thread (#452) but dispatched
+/// This verb arrives on its own socket and its own thread (#452) but used to dispatch
 /// through the same `Arc<Mutex<ServerState>>` as `apply_snapshot`, which holds
 /// that mutex across a 10 s worker-readiness barrier, a 500 ms mlx5 teardown
 /// quiesce, worker `join()`s and BPF map-pin opens. Go budgets 3 s for a session
@@ -168,12 +166,9 @@ pub(super) fn handle(
         "upsert" | "mirror_upsert" | "mirror_publish_only" if resolved_domain.is_none() => {
             domain.note_unknown_routing_domain_import();
             response.ok = false;
-            response.error = format!(
-                "{SYNCED_IMPORT_REFUSED_PREFIX}{}",
-                crate::afxdp::SyncedImportOutcome::RejectedUnknownRoutingDomain
-                    .refusal_reason()
-                    .expect("a rejection always carries a reason token")
-            );
+            response.error = crate::afxdp::SyncedImportOutcome::RejectedUnknownRoutingDomain
+                .wire_error()
+                .expect("a rejection always carries a wire error")
         }
         "upsert" | "mirror_upsert" => match build_synced_session_entry(
             &sync_req,
@@ -548,18 +543,9 @@ pub(super) fn handle(
 }
 
 fn apply_synced_import_outcome(response: &mut ControlResponse, outcome: SyncedImportOutcome) {
-    if let Some(reason) = outcome.repair_reason() {
+    if let Some(error) = outcome.wire_error() {
         response.ok = false;
-        response.error = format!("{SYNCED_IMPORT_REPAIR_PREFIX}{reason}");
-        return;
-    }
-    if let Some(reason) = outcome.refusal_reason() {
-        response.ok = false;
-        response.error = if reason == "mirror-write-failed" {
-            reason.to_string()
-        } else {
-            format!("{SYNCED_IMPORT_REFUSED_PREFIX}{reason}")
-        };
+        response.error = error;
     }
 }
 
@@ -602,38 +588,50 @@ mod tests {
         ));
     }
     #[test]
-    fn worker_repair_outcomes_use_a_distinct_fail_closed_wire_11360() {
-        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../pkg/dataplane/userspace/testdata/synced_import_repair_11360.json"
+    fn synced_import_wire_fixture_covers_every_outcome_17116() {
+        let rows: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../pkg/dataplane/userspace/testdata/synced_import_wire.json"
         ))
-        .expect("shared Go/Rust repair wire fixture");
-        for (outcome, fixture_name) in [
-            (
-                SyncedImportOutcome::AppliedRepairPending,
-                "pending",
-            ),
-            (
-                SyncedImportOutcome::AppliedRepairOverflow,
-                "overflow",
-            ),
-        ] {
+        .expect("shared Go/Rust synced-import wire fixture");
+        let rows = rows.as_array().expect("wire fixture is a row array");
+        assert_eq!(
+            rows.len(),
+            SyncedImportOutcome::ALL.len(),
+            "one fixture row per SyncedImportOutcome variant"
+        );
+        for outcome in SyncedImportOutcome::ALL {
+            let variant = outcome.variant_name();
+            let row = rows
+                .iter()
+                .find(|row| row["variant"] == variant)
+                .unwrap_or_else(|| panic!("wire fixture has no row for {variant}"));
             let mut response = ControlResponse {
                 ok: true,
                 ..ControlResponse::default()
             };
             apply_synced_import_outcome(&mut response, outcome);
-            assert!(!response.ok, "repair outcome was serialized as success");
-            let wire = serde_json::to_value(response).expect("control response JSON");
-            let expected = &fixtures[fixture_name];
-            assert_eq!(wire["ok"], expected["ok"]);
-            assert_eq!(wire["error"], expected["error"]);
-            let error = expected["error"]
-                .as_str()
-                .expect("fixture error token");
-            assert!(
-                !error.starts_with(SYNCED_IMPORT_REFUSED_PREFIX),
-                "legacy Go readers must not classify committed repair outcomes as rollback refusals"
+            let wire = serde_json::to_value(&response).expect("control response JSON");
+            assert_eq!(wire["ok"], row["ok"], "{variant} ok");
+            // Applied serializes with no `error` key (empty strings are
+            // skipped), which Go decodes as ""; compare decoded-to-decoded.
+            let wire_error = wire["error"].as_str().unwrap_or("");
+            assert_eq!(
+                wire_error,
+                row["error"].as_str().unwrap_or(""),
+                "{variant} error"
             );
+            if outcome == SyncedImportOutcome::Applied {
+                continue;
+            }
+            let error = row["error"].as_str().expect("fixture error token");
+            match outcome {
+                SyncedImportOutcome::AppliedRepairPending
+                | SyncedImportOutcome::AppliedRepairOverflow => assert!(
+                    !error.starts_with(SYNCED_IMPORT_REFUSED_PREFIX),
+                    "legacy Go readers must not classify committed repair outcomes as rollback refusals"
+                ),
+                _ => {}
+            }
         }
     }
 

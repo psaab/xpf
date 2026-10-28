@@ -1,0 +1,7 @@
+# Managed upgrade binaries, space-separated, in manifest order.
+# Source of truth: pkg/upgrade/manifest/manifest.go (manifest.Names).
+# Regenerate: go generate ./pkg/upgrade/manifest/
+# Consumers that cannot import Go (scripts/image/seed_layout_10771.py,
+# scripts/image/test_seed_layout_10771.py) read this file instead of
+# retyping the list (#17101). TestManagedBinaryDriftCanary pins it.
+xpfd cli xpf-userspace-dp xpf-day0-config

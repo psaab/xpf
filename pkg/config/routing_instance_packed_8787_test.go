@@ -32,7 +32,7 @@ func TestPackedRoutingInstanceSurvives8787(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("%s: fixture must parse: %v", label, perrs)
 		}
-		cfg, err := compileTree(tr, compileOpts{}, nil)
+		cfg, err := compileTree(tr, strictCompileOpts(), nil)
 		if err != nil {
 			t.Fatalf("%s: strict compile: %v", label, err)
 		}
@@ -86,7 +86,7 @@ func TestPackedRoutingInstanceSurvives8787(t *testing.T) {
 				t.Fatalf("SetPath(%q): %v", line, err)
 			}
 		}
-		cfg, err := compileTree(tree, compileOpts{}, nil)
+		cfg, err := compileTree(tree, strictCompileOpts(), nil)
 		if err != nil {
 			t.Fatalf("flat set strict compile: %v", err)
 		}
@@ -111,7 +111,7 @@ func TestPackedRoutingInstanceSurvives8787(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		if _, err := compileTree(tr, compileOpts{}, nil); err == nil ||
+		if _, err := compileTree(tr, strictCompileOpts(), nil); err == nil ||
 			!strings.Contains(err.Error(), "#9838") {
 			t.Fatalf("strict: want the #9838 refusal, got %v", err)
 		}

@@ -229,7 +229,7 @@ func TestCommittedDeferredApplyKeepsMarkerPending12235(t *testing.T) {
 	if err := d.applySem.Acquire(t.Context(), 1); err != nil {
 		t.Fatalf("acquire apply semaphore: %v", err)
 	}
-	_, applyErr := d.applyAndSyncCommitted(cfg, cfg, peerSyncNever)
+	_, applyErr := d.applyAndSyncCommittedForTest(cfg, cfg, peerSyncNever)
 	d.applySem.Release(1)
 	if applyErr != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", applyErr)
@@ -327,7 +327,7 @@ func commitOtherConfigWhilePeerDeferred12235(t *testing.T, failTail bool) (*Daem
 	if err := d.applySem.Acquire(t.Context(), 1); err != nil {
 		t.Fatalf("acquire apply semaphore: %v", err)
 	}
-	_, commitErr := d.applyAndSyncCommitted(cfgA, cfgB, peerSyncNever)
+	_, commitErr := d.applyAndSyncCommittedForTest(cfgA, cfgB, peerSyncNever)
 	d.applySem.Release(1)
 	if failTail != errors.Is(commitErr, injected) {
 		t.Fatalf("premise: config B commit = %v, want tail failure %v", commitErr, failTail)
@@ -451,7 +451,7 @@ func deferredScanFailureLanding12235(t *testing.T) (*convergenceRun12072, uint64
 	if err := r.h.d.applySem.Acquire(t.Context(), 1); err != nil {
 		t.Fatalf("acquire apply semaphore: %v", err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(c0, c1, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(c0, c1, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	if applyErr != nil {
 		t.Fatalf("deferred commit: %v", applyErr)

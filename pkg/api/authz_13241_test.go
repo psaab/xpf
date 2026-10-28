@@ -24,8 +24,8 @@ func cloneAuthConfig(a AuthConfig) AuthConfig {
 // unchanged. It deliberately does NOT pin production expiry enforcement:
 // the injected resolver below reimplements the expiry check, so this cell
 // stays green even if the production credentialExpiryActive terms are
-// dropped. Runtime expiry through the real auth paths (authMiddleware and
-// principalFrom's default resolver) is pinned by
+// dropped. Runtime expiry through the real auth paths (the production auth
+// handler and principalFrom's default resolver) is pinned by
 // TestAuthMiddlewareCredentialExpiry16729 and
 // TestPrincipalFromDefaultResolverRefusesExpiredCredential16729 (#16729).
 

@@ -3,12 +3,11 @@ package upgrade
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
-	"time"
-
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"time"
 
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cluster"
@@ -21,22 +20,20 @@ import (
 // on the LOCAL node. It uses the NON-INTERACTIVE SystemAction RPC for
 // mutations (the documented automation path — the interactive `cli -c
 // "request ... in-service-upgrade"` hard-errors in non-TTY mode, #1563)
-// and the `chassis-cluster-information` ShowText topic for the drain-
-// predicate reads.
+// and the typed GetClusterHAState RPC (#17095) for every drain-predicate
+// read.
 //
-// The information topic renders cluster.Manager.FormatInformation(), which
-// emits the fields the strong drain predicate needs:
-//   - "Remote node: healthy (nodeN)" / "lost"
-//   - per-RG "Local state: Primary|Secondary"
-//   - per-RG "Takeover ready: yes|no (reasons)"
-//   - per-RG "Effective priority: N"
-//
-// Parsing is defensive and conservative: an unrecognized / ambiguous state
-// reads as not-drained / not-ready, so the rolling driver ABORTS without
-// cutting rather than cutting unsafely. The exact field strings are
-// asserted in cluster_cli_test.go against the live FormatInformation
-// format so a status-format change is caught by a unit test, not in
-// production.
+// Before #17095 the predicates scraped `show chassis cluster
+// information|status` text (22 parse/verdict functions): a present-but-
+// garbled value collapsed to 0 and permitted a drain (#14991), and any
+// operator-facing rewording could abort or permit a roll. The typed RPC
+// carries presence explicitly, so absent / zero / malformed are distinct
+// by construction. The text parsers survive ONLY as a fallback for a
+// peer daemon that does not implement GetClusterHAState yet
+// (codes.Unimplemented — a pre-#17095 daemon during the one-release
+// skew window); they are deleted with the fallback after that window.
+// A typed response is never re-judged through the text parsers, and a
+// non-Unimplemented RPC error is never masked by falling back.
 type grpcCluster struct {
 	addr        string
 	dialTimeout time.Duration
@@ -130,297 +127,214 @@ func (g *grpcCluster) ctx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), g.dialTimeout)
 }
 
-// information fetches the rendered `show chassis cluster information` text.
-func (g *grpcCluster) information() (string, error) {
+// haStateClient is the slice of the gRPC client the HA-state reads use.
+// It is a seam so the typed verdicts and the Unimplemented fallback are
+// unit-tested without a live dial (#17095).
+type haStateClient interface {
+	GetClusterHAState(ctx context.Context, in *pb.GetClusterHAStateRequest, opts ...grpc.CallOption) (*pb.GetClusterHAStateResponse, error)
+	ShowText(ctx context.Context, in *pb.ShowTextRequest, opts ...grpc.CallOption) (*pb.ShowTextResponse, error)
+}
+
+// haState fetches the typed HA state. Only codes.Unimplemented (a
+// pre-#17095 daemon) falls back to the text parsers; every other error
+// is returned so an unreadable instrument refuses rather than being
+// re-judged through a second, text-shaped opinion.
+func (g *grpcCluster) haState() (*pb.GetClusterHAStateResponse, error) {
 	cli, closeFn, err := g.dial()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer closeFn()
-	ctx, cancel := g.ctx()
-	defer cancel()
-	resp, err := cli.ShowText(ctx, &pb.ShowTextRequest{Topic: "chassis-cluster-information"})
-	if err != nil {
-		return "", fmt.Errorf("show chassis cluster information: %w", err)
+	return haStateFromClient(cli, g.ctx)
+}
+
+func haStateFromClient(cli haStateClient, ctxFn func() (context.Context, context.CancelFunc)) (*pb.GetClusterHAStateResponse, error) {
+	ctx, cancel := ctxFn()
+	resp, err := cli.GetClusterHAState(ctx, &pb.GetClusterHAStateRequest{})
+	cancel()
+	if err == nil {
+		return resp, nil
 	}
-	return resp.GetOutput(), nil
+	if status.Code(err) != codes.Unimplemented {
+		return nil, fmt.Errorf("get cluster HA state: %w", err)
+	}
+	// Pre-#17095 daemon: one-release text fallback (#17095). Deleted
+	// with the parsers in cluster_cli_text_fallback.go after the window.
+	return haStateFromTextFallback(cli, ctxFn)
 }
 
 func (g *grpcCluster) PeerAlive() (bool, error) {
-	s, err := g.information()
+	st, err := g.haState()
 	if err != nil {
 		return false, err
 	}
-	return parsePeerAlive(s), nil
+	return st.GetPeerAlive(), nil
 }
 
 func (g *grpcCluster) SyncEstablished() (bool, error) {
-	s, err := g.information()
+	st, err := g.haState()
 	if err != nil {
 		return false, err
 	}
-	return parseSyncEstablished(s), nil
+	return st.GetSyncEstablished(), nil
 }
 
 func (g *grpcCluster) SessionSyncBulkPrimed() (bool, error) {
-	s, err := g.information()
+	st, err := g.haState()
 	if err != nil {
 		return false, err
 	}
-	return parseSessionSyncBulkPrimed(s), nil
+	return st.GetBulkPrimed(), nil
 }
 
 func (g *grpcCluster) DrainComplete() (bool, error) {
-	// DrainComplete needs BOTH the local node's RG states (Secondary) AND
-	// the PEER node's RG states (Primary) — i.e. the peer has actually
-	// taken ownership, not merely that the local node demoted itself. The
-	// status topic (FormatStatus) renders both the local AND peer node
-	// lines per RG; the information topic renders only the local view. So
-	// drain-complete is evaluated against the STATUS topic.
-	st, err := g.statusText()
+	st, err := g.haState()
 	if err != nil {
 		return false, err
 	}
-	// Also require the peer alive + sync up from the information topic.
-	info, err := g.information()
-	if err != nil {
-		return false, err
+	return drainCompleteFromState(st), nil
+}
+
+// drainCompleteFromState is the typed STRONG drain predicate (#17095):
+// peer alive + sync established, and for EVERY redundancy group the
+// local row is secondary AND the peer row is primary. An RG with no
+// peer row (UNKNOWN) or an empty RG set fails closed — the same
+// per-RG pairing the text parser enforced (Codex r3 High).
+func drainCompleteFromState(st *pb.GetClusterHAStateResponse) bool {
+	if st == nil || !st.GetPeerAlive() || !st.GetSyncEstablished() {
+		return false
 	}
-	return parseDrainComplete(st) && parsePeerAlive(info) && parseSyncEstablished(info), nil
+	groups := st.GetRedundancyGroups()
+	if len(groups) == 0 {
+		return false
+	}
+	for _, rg := range groups {
+		if rg.GetLocalState() != pb.RGNodeState_RG_NODE_STATE_SECONDARY ||
+			rg.GetPeerState() != pb.RGNodeState_RG_NODE_STATE_PRIMARY {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *grpcCluster) HAProtocolCompatible() (bool, error) {
-	// The HA protocol version lines are in the STATUS topic
-	// (FormatStatus), not information (FormatInformation).
-	s, err := g.statusText()
+	st, err := g.haState()
 	if err != nil {
 		return false, err
 	}
-	compat, _, _ := haProtocolVerdictFromStatus(s)
+	compat, _, _ := haProtocolVerdictFromState(st)
 	return compat, nil
 }
 
+// haProtocolVerdictFromState is the typed decision half of
+// HAProtocolCompatible: compatible iff both HA versions are PRESENT
+// and equal. Absent (peer not alive / field not carried) fails closed
+// with zero values for logging, mirroring the text verdict.
+func haProtocolVerdictFromState(st *pb.GetClusterHAStateResponse) (bool, uint16, uint16) {
+	if st == nil || st.LocalHaProtocol == nil || st.PeerHaProtocol == nil {
+		return false, 0, 0
+	}
+	local, peer := uint16(*st.LocalHaProtocol), uint16(*st.PeerHaProtocol)
+	return local == peer, local, peer
+}
+
 // PeerProtocolVersions returns the local/peer HA versions and the peer
-// session-sync wire version from ONE status fetch (#14991). A present but
-// malformed peer value is an error so callers fail closed; an absent peer
-// line is reported via peerPresent=false (the caller decides — the
-// rolling target gate refuses, mirroring the absent-wire-line rule).
+// session-sync wire version from ONE typed fetch (#17095, ex-#14991).
+// Absent peer values are reported via peerPresent=false (the caller
+// decides — the rolling target gate refuses); malformed is
+// unrepresentable in the typed channel, so there is no error case
+// beyond transport.
 func (g *grpcCluster) PeerProtocolVersions() (uint16, uint16, uint16, bool, error) {
-	s, err := g.statusText()
+	st, err := g.haState()
 	if err != nil {
 		return 0, 0, 0, false, err
 	}
-	return peerProtocolVersionsFromStatus(s)
+	return peerProtocolVersionsFromState(st)
 }
 
-// haProtocolVerdictFromStatus is the decision half of HAProtocolCompatible.
-// It compares the local and peer HA protocol version lines from
-// `show chassis cluster status` (FormatStatus):
-//
-//	HA protocol version: N
-//	Peer HA protocol version: M
-//
-// Compatible iff both lines parse and N == M (the rolling contract:
-// mixed N/N+1 nodes only hand off RGs when CurrentHAProtocolVersion
-// matches; a bump means the wire semantics changed and the release is
-// NOT rolling-upgradable). Malformed or absent lines fail closed
-// (compatible=false) with the parsed values for logging: if the peer
-// line is ABSENT (peer not alive / version unknown) we return false so
-// the driver does not proceed blind — PeerAlive already gates the
-// happy path, and a missing peer-version here fails closed.
-func haProtocolVerdictFromStatus(status string) (bool, uint16, uint16) {
-	local, peer, ok := parseHAProtocolVersions(status)
-	if !ok {
-		return false, 0, 0
+func peerProtocolVersionsFromState(st *pb.GetClusterHAStateResponse) (uint16, uint16, uint16, bool, error) {
+	if st != nil && st.LocalHaProtocol == nil && st.PeerHaProtocol != nil {
+		// Absent local with a present peer is a garbled instrument, not
+		// a zero local version: the typed server always carries the
+		// local value (HAStateToProto), so this shape can only come
+		// from the text fallback failing to parse the local HA line
+		// while the peer line parsed. Refuse as an error — never
+		// dereference the absent local, and never report peerPresent
+		// for a check that cannot run (#18118 F1).
+		return 0, 0, 0, false, fmt.Errorf("local HA protocol version not present in " +
+			"cluster HA state while peer HA protocol is present — the compatibility " +
+			"check cannot run, and an unreadable instrument is not evidence of compatibility")
 	}
-	return local == peer, uint16(local), uint16(peer)
-}
-
-// peerProtocolVersionsFromStatus parses one status render for the target
-// gate. Malformed present values are errors (#14991: never collapse them
-// to 0/permit); absent peer lines yield peerPresent=false.
-func peerProtocolVersionsFromStatus(status string) (uint16, uint16, uint16, bool, error) {
-	local, peer, ok := parseHAProtocolVersions(status)
-	if !ok {
-		// Distinguish "peer line absent" (peerPresent=false, no error) from
-		// "present but malformed / local unreadable" (error): the former is
-		// for the caller to refuse as an unreadable instrument; the latter
-		// is a garbled instrument and must not be read as version 0.
-		if _, peerPresent := parsePeerHAProtocol(status); !peerPresent {
-			if _, localPresent := parseLocalHAProtocol(status); localPresent {
-				return 0, 0, 0, false, nil
-			}
+	if st == nil || st.PeerHaProtocol == nil || !st.GetSessionSyncWirePresent() {
+		var local uint16
+		if st != nil && st.LocalHaProtocol != nil {
+			local = uint16(*st.LocalHaProtocol)
 		}
-		return 0, 0, 0, false, fmt.Errorf("HA protocol versions not parseable in `show chassis cluster status` — the compatibility check cannot run")
+		return local, 0, 0, false, nil
 	}
-	wire, wirePresent, wireErr := parsePeerSessionSyncWireStrict(status)
-	if wireErr != nil {
-		return 0, 0, 0, false, wireErr
+	var wire uint16
+	if st.PeerSessionSyncWire != nil {
+		wire = uint16(*st.PeerSessionSyncWire)
 	}
-	if !wirePresent {
-		return uint16(local), uint16(peer), 0, false, nil
-	}
-	return uint16(local), uint16(peer), wire, true, nil
+	return uint16(*st.LocalHaProtocol), uint16(*st.PeerHaProtocol), wire, true, nil
 }
 
-// parseLocalHAProtocol / parsePeerHAProtocol report presence of each HA
-// line (value only when strictly valid).
-func parseLocalHAProtocol(s string) (int, bool) {
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(l), "ha protocol version:") {
-			n, ok := strictVersionValue(l[len("ha protocol version:"):])
-			return n, ok
-		}
-	}
-	return 0, false
-}
-
-func parsePeerHAProtocol(s string) (int, bool) {
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(l), "peer ha protocol version:") {
-			n, ok := strictVersionValue(l[len("peer ha protocol version:"):])
-			return n, ok
-		}
-	}
-	return 0, false
-}
-
-// strictVersionValue parses a rendered version token: digits only, in
-// uint16 range. Anything else is not a version.
-func strictVersionValue(raw string) (int, bool) {
-	tok := strings.TrimSpace(raw)
-	if tok == "" {
-		return 0, false
-	}
-	for _, r := range tok {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-	}
-	n, err := strconv.Atoi(tok)
-	if err != nil || n > 65535 {
-		return 0, false
-	}
-	return n, true
-}
-
-// SessionSyncWireCompatible reads the peer's advertised session-sync wire
-// version from the STATUS topic and asks pkg/cluster for the verdict (#7990).
-//
-// The verdict lives in pkg/cluster rather than here so there is ONE definition
-// of "compatible" shared with the runtime side, rather than a second copy in
-// the upgrade driver that could drift from the wire it is judging.
+// SessionSyncWireCompatible reads the peer's advertised session-sync
+// wire version from the typed state and asks pkg/cluster for the
+// verdict (#7990). The verdict lives in pkg/cluster so there is ONE
+// definition of "compatible" shared with the runtime side.
 func (g *grpcCluster) SessionSyncWireCompatible() (bool, string, error) {
-	s, err := g.statusText()
+	st, err := g.haState()
 	if err != nil {
 		return false, "", err
 	}
-	return sessionSyncWireVerdictFromStatus(s)
+	return sessionSyncWireVerdictFromState(st)
 }
 
-// sessionSyncWireVerdictFromStatus is the DECISION half of
-// SessionSyncWireCompatible, split from the gRPC fetch so it is drivable (#7990).
-//
-// The split is not cosmetic. The first version of this code inlined the decision
-// next to the fetch, and the only test of the absent-line behaviour drove
-// parsePeerSessionSyncWireStrict and cluster.SessionSyncWireCompatible directly —
-// both of which are UNCHANGED by the defect. Reverting the absent-line handling
-// left the whole suite green. The collapse lives HERE, between the parser and
-// the verdict, so this is the layer a test has to reach.
-func sessionSyncWireVerdictFromStatus(status string) (bool, string, error) {
-	peer, present, err := parsePeerSessionSyncWireStrict(status)
-	if err != nil {
-		// #14991: a PRESENT but malformed wire value used to collapse to
-		// (0, present) and PERMIT via the unknown-peer path. A garbled
-		// instrument is not a pre-#7990 peer; fail closed as an error so
-		// the message says the check could not run.
-		return false, "", err
-	}
-	if !present {
-		// The line is ABSENT, which is a statement about the INSTRUMENT, not
-		// about the peer — and collapsing it into "peer advertises nothing"
-		// (which permits) would be a gate that cannot fire, silently, exactly
-		// the failure shape this change exists to remove.
-		//
-		// It is safe to refuse. FormatStatus renders the peer line
-		// unconditionally when the peer is alive, this node is by definition
-		// running THIS build (it is the node being upgraded), and
-		// DrainAndConfirm's PeerAlive precheck runs FIRST and refuses a dead
-		// peer. So by the time this runs the line must be present; its absence
-		// means the status could not be rendered or parsed — a renamed line, a
-		// truncated response, a peer that died between the two RPCs. Draining
-		// on any of those is not something to do quietly.
-		//
-		// Reported as an ERROR rather than an incompatibility so the operator's
-		// message says "the check could not run", not "the peer is
-		// incompatible". Those are different facts and only one is about the peer.
+// sessionSyncWireVerdictFromState is the typed decision half of
+// SessionSyncWireCompatible (#17095). The absent-field case refuses as
+// an ERROR (the instrument could not be read), exactly like the text
+// verdict: the server renders the peer wire field whenever the peer is
+// alive and PeerAlive gates first, so absence means the state could
+// not be carried — never evidence of compatibility. A present field
+func sessionSyncWireVerdictFromState(st *pb.GetClusterHAStateResponse) (bool, string, error) {
+	if st == nil || !st.GetSessionSyncWirePresent() {
 		return false, "", fmt.Errorf("peer session-sync wire version not present in " +
-			"`show chassis cluster status` — the check cannot run, and an unreadable " +
+			"cluster HA state — the check cannot run, and an unreadable " +
 			"instrument is not evidence of compatibility")
+	}
+	var peer uint16
+	if st.PeerSessionSyncWire != nil {
+		peer = uint16(*st.PeerSessionSyncWire)
 	}
 	okv, reason := cluster.SessionSyncWireCompatible(peer)
 	return okv, reason, nil
 }
 
-// parsePeerSessionSyncWireStrict extracts the peer session-sync wire
-// version from `show chassis cluster status` (FormatStatus):
-//
-//	Peer session-sync wire version: N        -> (N, true, nil)
-//	Peer session-sync wire version: unknown  -> (0, true, nil)
-//	line absent                              -> (0, false, nil)
-//	present but malformed                    -> (0, true, error)
-//
-// "unknown" and a missing line are reported DIFFERENTLY even though
-// both yield 0, because they are different facts about the instrument:
-// "unknown" means this node rendered the line and the peer advertised
-// nothing (a peer that predates #7990 and permits deliberately), while
-// a missing line means this node never rendered it at all. A malformed
-// PRESENT value is surfaced as an error (#14991) instead of collapsing
-// to (0, present), so no caller can permit on garbage.
-func parsePeerSessionSyncWireStrict(s string) (uint16, bool, error) {
-	const prefix = "peer session-sync wire version:"
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		if !strings.HasPrefix(strings.ToLower(l), prefix) {
-			continue
-		}
-		val := strings.TrimSpace(l[len(prefix):])
-		if strings.EqualFold(val, "unknown") {
-			return 0, true, nil
-		}
-		n, ok := strictVersionValue(val)
-		if !ok {
-			return 0, true, fmt.Errorf("peer session-sync wire version %q in `show chassis cluster status` is malformed — the compatibility check cannot run, and a garbled instrument is not evidence of compatibility", val)
-		}
-		return uint16(n), true, nil
-	}
-	return 0, false, nil
-}
-
-// statusText fetches the rendered `show chassis cluster status` text.
-func (g *grpcCluster) statusText() (string, error) {
-	cli, closeFn, err := g.dial()
-	if err != nil {
-		return "", err
-	}
-	defer closeFn()
-	ctx, cancel := g.ctx()
-	defer cancel()
-	resp, err := cli.ShowText(ctx, &pb.ShowTextRequest{Topic: "chassis-cluster-status"})
-	if err != nil {
-		return "", fmt.Errorf("show chassis cluster status: %w", err)
-	}
-	return resp.GetOutput(), nil
-}
-
 func (g *grpcCluster) PeerTakeoverReady() (bool, error) {
-	s, err := g.information()
+	st, err := g.haState()
 	if err != nil {
 		return false, err
 	}
-	return parsePeerTakeoverReady(s), nil
+	return peerTakeoverReadyFromState(st), nil
+}
+
+// peerTakeoverReadyFromState is the typed best-effort pre-demotion gate
+// (#17095): peer alive, and no LOCAL RG carries a takeover blocker
+// (takeover not ready incl. the hold window, transfer not ready, or a
+// monitor failure). The AUTHORITATIVE guard remains DrainComplete,
+// which after demotion confirms the peer actually holds primary for
+// every RG (rolling.go).
+func peerTakeoverReadyFromState(st *pb.GetClusterHAStateResponse) bool {
+	if st == nil || !st.GetPeerAlive() {
+		return false
+	}
+	for _, rg := range st.GetRedundancyGroups() {
+		if !rg.GetTakeoverReady() || !rg.GetTransferReady() || len(rg.GetMonitorFailures()) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *grpcCluster) ForceSecondary() error {
@@ -428,487 +342,78 @@ func (g *grpcCluster) ForceSecondary() error {
 	return g.systemAction("in-service-upgrade")
 }
 
-// --- pure parsers over `show chassis cluster information`
-// (cluster.Manager.FormatInformation) text. Kept pure + exported-to-tests
-// so a status-format drift is caught by cluster_cli_test.go (which feeds
-// REAL FormatInformation output through them), not in production. ---
-
-func parsePeerAlive(s string) bool {
-	// "Remote node: healthy (nodeN)" => alive; "Remote node: lost" => not.
-	return lineHasAll(s, "Remote node:", "healthy")
-}
-
-// parseSyncEstablished checks the session/fabric sync link is UP. The
-// information topic (FormatInformation) renders a "Sync link statistics"
-// (or "Fabric link statistics") block with a "Status: Up|Down" line
-// (status.go). Require BOTH a healthy remote AND Status: Up. A missing
-// Status line or "Status: Down" fails closed (Codex r2 High: a healthy
-// heartbeat with session sync DOWN must NOT proceed to drain+cut).
-func parseSyncEstablished(s string) bool {
-	if strings.Contains(strings.ToLower(s), "unsynced") {
-		return false
-	}
-	if !lineHasAll(s, "Remote node:", "healthy") {
-		return false
-	}
-	// Find the sync-link "Status:" line, SCOPED to the sync/fabric link
-	// section. FormatInformation renders the section under a "Fabric link
-	// statistics:" or "Sync link statistics (control-link):" header and ends
-	// it with a blank line (status.go). Scoping (vs the first "status:"
-	// anywhere) means a future pre-sync section that also emits "Status:"
-	// (e.g. IP-monitoring, FormatIPMonitoringStatus) can never be mis-read as
-	// the sync link — which would wrongly green-light a drain (AGY review-011
-	// Part I). Within the section, require the value to be EXACTLY "up", not a
-	// substring, so a future "Status: startup" is not accepted as up.
-	inSync := false
-	for _, line := range strings.Split(s, "\n") {
-		ll := strings.ToLower(strings.TrimSpace(line))
-		if !inSync {
-			if strings.HasPrefix(ll, "sync link statistics") ||
-				strings.HasPrefix(ll, "fabric link statistics") {
-				inSync = true
-			}
-			continue
-		}
-		if ll == "" {
-			// Reached the end of the sync section with no Status line (e.g.
-			// "Not configured"): fail closed.
-			break
-		}
-		if strings.HasPrefix(ll, "status:") {
-			val := strings.TrimSpace(strings.TrimPrefix(ll, "status:"))
-			return val == "up"
-		}
-	}
-	// No sync-link Status line rendered: fail closed (do not assume sync is up).
-	return false
-}
-
-// parseSessionSyncBulkPrimed reports whether the local daemon has completed
-// receiving the inbound bulk session snapshot for the current sync epoch.
-// The line is scoped to the sync/fabric section and fails closed when absent
-// or malformed; a timeout-released startup readiness bit is intentionally not
-// sufficient for rolling rejoin (#10261).
-func parseSessionSyncBulkPrimed(s string) bool {
-	inSync := false
-	for _, line := range strings.Split(s, "\n") {
-		ll := strings.ToLower(strings.TrimSpace(line))
-		if !inSync {
-			if strings.HasPrefix(ll, "sync link statistics") ||
-				strings.HasPrefix(ll, "fabric link statistics") {
-				inSync = true
-			}
-			continue
-		}
-		if ll == "" {
-			return false
-		}
-		if strings.HasPrefix(ll, "bulk sync primed:") {
-			return strings.TrimSpace(strings.TrimPrefix(ll, "bulk sync primed:")) == "yes"
-		}
-	}
-	return false
-}
-
-// parseHAProtocolVersions extracts both HA lines strictly: any present
-// line whose value is not a clean uint16, or either line absent, yields
-// ok=false (#14991 — previously trailingInt silently skipped a malformed
-// line and the caller read the pair as merely "missing").
-func parseHAProtocolVersions(s string) (local, peer int, ok bool) {
-	local, lok := parseLocalHAProtocol(s)
-	peer, pok := parsePeerHAProtocol(s)
-	if !lok || !pok {
-		return 0, 0, false
-	}
-	return local, peer, true
-}
-
-func parsePeerTakeoverReady(s string) bool {
-	// IMPORTANT (Codex): the information topic renders the LOCAL node's
-	// view, so "Takeover ready" / "Transfer ready" / "Monitor failures"
-	// reflect THIS node's readiness, not the peer's. We cannot directly see
-	// the peer's takeover-readiness from the local control socket. This
-	// precheck is therefore a BEST-EFFORT pre-demotion gate: it requires
-	// the peer alive ("Remote node: healthy") and no LOCAL takeover blocker
-	// (a local monitor/interface fault that would also affect the handoff).
-	// The AUTHORITATIVE guard is DrainComplete, which AFTER demotion
-	// confirms the peer ACTUALLY holds primary for every RG; if it does not
-	// within the deadline the rolling driver fails back and ABORTS WITHOUT
-	// cutting (rolling.go). So a peer that cannot take over cannot lead to a
-	// cut — at worst the drain times out and the node is restored.
-	//
-	// The information topic (FormatInformation) emits "Takeover ready:
-	// no (...)", "Transfer ready: no", and a "Monitor failures:" line when
-	// an RG cannot take over (status.go). Conservative
-	// — ANY of these blockers fails the precheck (Codex r4 High: the parser
-	// must not be fail-open on the real not-ready tokens).
-	if !lineHasAll(s, "Remote node:", "healthy") {
-		return false
-	}
-	for _, line := range strings.Split(s, "\n") {
-		ll := strings.ToLower(strings.TrimSpace(line))
-		// Check the STATE TOKEN (the first word after the colon), NOT a
-		// substring of the whole line — a YES line whose reason text embeds
-		// "no" (e.g. "Takeover ready: yes (no prior failures)") must not
-		// trip the guard (Codex r5).
-		if tok, ok := firstTokenAfterColon(ll, "takeover ready:"); ok && tok == "no" {
-			return false
-		}
-		if tok, ok := firstTokenAfterColon(ll, "transfer ready:"); ok && tok == "no" {
-			return false
-		}
-		if strings.HasPrefix(ll, "monitor failures:") {
-			// A "Monitor failures:" line with any content after the colon
-			// is a blocker; "none"/empty is fine.
-			rest := strings.TrimSpace(ll[len("monitor failures:"):])
-			if rest != "" && rest != "none" {
-				return false
-			}
-		}
-		if strings.Contains(ll, "monitor: fail") || strings.Contains(ll, "monitorfail") {
-			return false
-		}
-	}
-	return true
-}
-
-// firstTokenAfterColon returns the first whitespace-delimited token after
-// the given "key:" prefix in line (lowercased), e.g. for
-// "takeover ready: yes (no prior failures)" with prefix "takeover ready:"
-// it returns ("yes", true).
-func firstTokenAfterColon(line, prefix string) (string, bool) {
-	if !strings.HasPrefix(line, prefix) {
-		return "", false
-	}
-	rest := strings.TrimSpace(line[len(prefix):])
-	f := strings.Fields(rest)
-	if len(f) == 0 {
-		return "", false
-	}
-	return f[0], true
-}
-
-// parseDrainComplete evaluates the `show chassis cluster status`
-// (FormatStatus) text. It requires BOTH:
-//   - every LOCAL node RG row is `secondary` (the local node demoted), AND
-//   - every PEER node RG row is `primary` (the peer actually OWNS the RGs)
-//
-// Checking only the local side (Codex r2 Critical) is insufficient:
-// ForceSecondary forcibly demotes the local node regardless of whether the
-// peer became primary, so a healthy-but-stuck peer could leave BOTH nodes
-// secondary with VIPs stranded. We confirm the peer has taken ownership.
-//
-// FormatStatus emits, per RG, a "Redundancy group: N , Failover count: M"
-// header then a local row "nodeL  <prio>  <state> ..." and (if the peer is
-// alive) a peer row "nodeP  <prio>  <state> ...". Drain is complete only
-// when, for EVERY redundancy group, the local row is secondary AND the
-// peer row is primary — a PER-RG pairing (Codex r3 High): a global
-// "any peer primary" OR would wrongly pass an active-active cluster where
-// the peer owns one RG but not the other the local node evacuated.
-func parseDrainComplete(s string) bool {
-	localID, ok := parseLocalNodeID(s)
-	if !ok {
-		return false // cannot identify the local node => fail closed
-	}
-
-	type rgPair struct {
-		localState string
-		peerState  string
-		sawLocal   bool
-		sawPeer    bool
-	}
-	groups := map[int]*rgPair{}
-	curRG := -1
-	sawAnyRG := false
-
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		ll := strings.ToLower(l)
-		// RG header: "Redundancy group: N , Failover count: M".
-		if strings.HasPrefix(ll, "redundancy group:") {
-			// Reset curRG FIRST (Codex r4 Medium): a malformed header that
-			// fails to parse a number must NOT leave curRG pointing at the
-			// PREVIOUS RG, or the node rows after it would bleed into the
-			// wrong group's state.
-			curRG = -1
-			rest := strings.TrimSpace(l[len("Redundancy group:"):])
-			f := strings.Fields(rest)
-			if len(f) > 0 {
-				if n, nok := atoiSafe(f[0]); nok {
-					curRG = n
-					sawAnyRG = true
-					if groups[curRG] == nil {
-						groups[curRG] = &rgPair{}
-					}
-				}
-			}
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 3 || !strings.HasPrefix(fields[0], "node") {
-			continue
-		}
-		id, idOK := parseNodeToken(fields[0])
-		if !idOK || curRG < 0 {
-			continue
-		}
-		state := strings.ToLower(fields[2]) // "node prio state ..."
-		g := groups[curRG]
-		if g == nil {
-			g = &rgPair{}
-			groups[curRG] = g
-		}
-		if id == localID {
-			g.localState, g.sawLocal = state, true
-		} else {
-			g.peerState, g.sawPeer = state, true
-		}
-	}
-
-	if !sawAnyRG || len(groups) == 0 {
-		return false // no RG rows => fail closed
-	}
-	for _, g := range groups {
-		if !g.sawLocal || !g.sawPeer {
-			return false // both rows required to confirm the handoff
-		}
-		if g.localState != "secondary" || g.peerState != "primary" {
-			return false
-		}
-	}
-	return true
-}
-
-// atoiSafe parses a base-10 non-negative integer, tolerating trailing
-// non-digit cruft is NOT allowed (strict — the caller passes a clean
-// field).
-func atoiSafe(tok string) (int, bool) {
-	tok = strings.TrimSpace(tok)
-	if tok == "" {
-		return 0, false
-	}
-	n := 0
-	for _, r := range tok {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n, true
-}
-
-// parseLocalNodeID reads the "Node name: nodeN" header line FormatStatus
-// emits.
-func parseLocalNodeID(s string) (int, bool) {
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(l), "node name:") {
-			fields := strings.Fields(l)
-			return parseNodeToken(fields[len(fields)-1])
-		}
-	}
-	return 0, false
-}
-
-// parseNodeToken parses "nodeN" -> N.
-func parseNodeToken(tok string) (int, bool) {
-	low := strings.ToLower(strings.TrimSpace(tok))
-	if !strings.HasPrefix(low, "node") {
-		return 0, false
-	}
-	num := low[len("node"):]
-	if num == "" {
-		return 0, false
-	}
-	n := 0
-	for _, r := range num {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		n = n*10 + int(r-'0')
-	}
-	return n, true
-}
-
 func (g *grpcCluster) ResetFailover() error {
 	// The orchestrator rejoin is a NODE rejoin, not a set of per-RG
 	// resets: it must clear every configured RG's manual failover AND the
 	// node-global kernel-upgrade election hold, synchronously (#15239,
 	// A56-01). The single `cluster-rejoin` action does exactly that
-	// (Manager.ResetAllFailover). The previous shape — enumerate the live
-	// RG IDs and issue cluster-failover-reset:<rg> per RG — relied on
-	// each per-RG ResetFailover clearing the hold inline, which is the
-	// defect: a per-RG reset is not a promotion check, and the first RG's
-	// reset released the unverified candidate on every RG. Fail closed
-	// on the action error: RejoinAndConfirm's per-RG readback
-	// (LocalRejoinComplete, #5044/#5138) then refuses to confirm, so the
-	// roll stops instead of advancing to drain the peer.
+	// (Manager.ResetAllFailover). Fail closed on the action error:
+	// RejoinAndConfirm's per-RG readback (LocalRejoinComplete,
+	// #5044/#5138) then refuses to confirm, so the roll stops instead of
+	// advancing to drain the peer.
 	return g.systemAction("cluster-rejoin")
 }
 
-// configuredRGsFromStatus derives the configured redundancy-group ID set from
-// the rendered `show chassis cluster status` text (s) and the error from
-// fetching it (statusErr). It FAILS CLOSED: a status-fetch error, or a parse
-// that yields no RG IDs, returns an error rather than the pre-#5044 {0,1,2}
-// guess. That guess stranded RG>=3 held ForceSecondary on a transient status
-// failure — the caller (ResetFailover) reset only 0-2, returned nil, and the
-// orchestrator advanced to touch the peer while the extra groups had no
-// primary. Kept as a pure function so the fail-closed contract is unit-tested
-// without a gRPC dial.
-func configuredRGsFromStatus(s string, statusErr error) ([]int, error) {
-	if statusErr != nil {
-		return nil, fmt.Errorf("enumerate configured redundancy groups: %w", statusErr)
-	}
-	rgs := parseRGIDs(s)
-	if len(rgs) == 0 {
-		return nil, fmt.Errorf("enumerate configured redundancy groups: " +
-			"no redundancy groups found in cluster status output")
-	}
-	return rgs, nil
+// configuredRGs returns the redundancy-group IDs from the typed state.
+// It FAILS CLOSED (#5044) rather than guessing a hardcoded set: a fetch
+// error or an empty RG set is an error, never the pre-#5044 {0,1,2}
+// guess that stranded RG>=3 (see configuredRGsFromState).
+func (g *grpcCluster) configuredRGs() ([]int, error) {
+	st, err := g.haState()
+	return configuredRGsFromState(st, err)
 }
 
-// parseRGIDs extracts the redundancy-group IDs from "Redundancy group: N"
-// header lines in FormatStatus output.
-func parseRGIDs(s string) []int {
-	seen := map[int]bool{}
-	var out []int
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		if strings.HasPrefix(strings.ToLower(l), "redundancy group:") {
-			rest := strings.TrimSpace(l[len("Redundancy group:"):])
-			f := strings.Fields(rest)
-			if len(f) > 0 {
-				if n, ok := atoiSafe(f[0]); ok && !seen[n] {
-					seen[n] = true
-					out = append(out, n)
-				}
-			}
-		}
+func configuredRGsFromState(st *pb.GetClusterHAStateResponse, stateErr error) ([]int, error) {
+	if stateErr != nil {
+		return nil, fmt.Errorf("enumerate configured redundancy groups: %w", stateErr)
 	}
-	return out
+	groups := st.GetRedundancyGroups()
+	if len(groups) == 0 {
+		return nil, fmt.Errorf("enumerate configured redundancy groups: " +
+			"no redundancy groups found in cluster HA state")
+	}
+	out := make([]int, 0, len(groups))
+	for _, rg := range groups {
+		out = append(out, int(rg.GetId()))
+	}
+	return out, nil
 }
 
 // LocalRejoinComplete reports whether the local node has left the
-// ForceSecondary drain for EVERY configured redundancy group (#5138). The
-// configured RG set is enumerated fail-closed from the STATUS topic (the same
-// source ResetFailover resets over); per-RG eligibility is read from the
-// INFORMATION topic, whose FormatInformation render carries a "Weight: W/255"
-// line per RG. ForceSecondary sets weight 0 for every RG; ResetFailover
-// restores it via re-election. So a configured RG that still shows weight 0 —
-// or is absent from the local status entirely — is NOT yet rejoined. Both
-// topics are dialed here and the decision is delegated to a pure function so
-// the fail-closed contract is unit-tested without a gRPC dial.
+// ForceSecondary drain for EVERY configured redundancy group (#5138):
+// every RG in the typed state has weight > 0. ForceSecondary pins
+// weight 0; ResetFailover restores it via re-election, so a configured
+// RG still at weight 0 — or an empty RG set — is NOT yet rejoined.
 func (g *grpcCluster) LocalRejoinComplete() (bool, error) {
-	st, stErr := g.statusText()
-	info, infoErr := g.information()
-	return localRejoinCompleteFromStatus(st, stErr, info, infoErr)
+	st, err := g.haState()
+	return localRejoinCompleteFromState(st, err)
 }
 
-// localRejoinCompleteFromStatus decides per-RG rejoin from the rendered STATUS
-// text (s / statusErr — configured-RG enumeration) and INFORMATION text (info /
-// infoErr — per-RG weight). It FAILS CLOSED: a status-enumeration error, an
-// information-fetch error, a configured RG missing from the information render,
-// or a configured RG whose local weight is still 0 (the ForceSecondary drain)
-// all report not-rejoined. Kept pure so RejoinAndConfirm's per-RG gate is
-// exercised over rendered fixtures rather than a live cluster.
-func localRejoinCompleteFromStatus(s string, statusErr error, info string, infoErr error) (bool, error) {
-	rgs, err := configuredRGsFromStatus(s, statusErr)
-	if err != nil {
-		return false, err
+func localRejoinCompleteFromState(st *pb.GetClusterHAStateResponse, stateErr error) (bool, error) {
+	if stateErr != nil {
+		return false, fmt.Errorf("read cluster HA state for per-RG rejoin: %w", stateErr)
 	}
-	if infoErr != nil {
-		return false, fmt.Errorf("read cluster information for per-RG rejoin: %w", infoErr)
+	groups := st.GetRedundancyGroups()
+	if len(groups) == 0 {
+		return false, nil
 	}
-	weights := parseLocalRGWeights(info)
-	for _, rg := range rgs {
-		w, ok := weights[rg]
-		if !ok {
-			// Configured (per status) but not rendered in the local
-			// information view — cannot confirm eligibility: fail closed.
-			return false, nil
-		}
-		if w <= 0 {
-			// Still held in the ForceSecondary drain (weight 0).
+	for _, rg := range groups {
+		if rg.GetWeight() <= 0 {
 			return false, nil
 		}
 	}
 	return true, nil
 }
 
-// parseLocalRGWeights extracts the LOCAL node's per-RG weight from the
-// `show chassis cluster information` (FormatInformation) text. It returns a map
-// rgID -> weight. FormatInformation renders, per group:
-//
-//	Redundancy group N:
-//	  ...
-//	  Weight: W/255 (threshold: 0)
-//
-// The header here is "Redundancy group N:" (a trailing ':' after the ID) —
-// DISTINCT from the STATUS topic's "Redundancy group: N , Failover count: M"
-// (a ':' immediately after "group"), so a status header can never be mistaken
-// for an information header. A malformed/unparseable header resets the current
-// group so a stray Weight line cannot bleed into the previous RG.
-func parseLocalRGWeights(info string) map[int]int {
-	out := map[int]int{}
-	cur := -1
-	for _, line := range strings.Split(info, "\n") {
-		l := strings.TrimSpace(line)
-		ll := strings.ToLower(l)
-		// Information-topic RG header: "redundancy group N:" — require the
-		// space after "group" (the status header has "group:" with no space)
-		// and a trailing ':'.
-		if strings.HasPrefix(ll, "redundancy group ") && strings.HasSuffix(ll, ":") {
-			cur = -1
-			mid := strings.TrimSpace(l[len("redundancy group") : len(l)-1])
-			if n, ok := atoiSafe(mid); ok {
-				cur = n
-			}
-			continue
-		}
-		if cur >= 0 && strings.HasPrefix(ll, "weight:") {
-			// "Weight: W/255 (threshold: 0)" -> W (the digits before '/').
-			rest := strings.TrimSpace(l[len("weight:"):])
-			numTok := rest
-			if i := strings.IndexByte(rest, '/'); i >= 0 {
-				numTok = strings.TrimSpace(rest[:i])
-			}
-			if n, ok := atoiSafe(numTok); ok {
-				out[cur] = n
-			}
-		}
-	}
-	return out
-}
-
 func (g *grpcCluster) LocalPrimary() (bool, error) {
-	s, err := g.information()
+	st, err := g.haState()
 	if err != nil {
 		return false, err
 	}
-	for _, line := range strings.Split(s, "\n") {
-		ll := strings.ToLower(strings.TrimSpace(line))
-		if strings.HasPrefix(ll, "local state:") && strings.Contains(ll, "primary") {
+	for _, rg := range st.GetRedundancyGroups() {
+		if rg.GetLocalState() == pb.RGNodeState_RG_NODE_STATE_PRIMARY {
 			return true, nil
 		}
 	}
 	return false, nil
-}
-
-// lineHasAll reports whether any line of s contains all substrings
-// (case-insensitive).
-func lineHasAll(s string, subs ...string) bool {
-	for _, line := range strings.Split(s, "\n") {
-		ll := strings.ToLower(line)
-		all := true
-		for _, sub := range subs {
-			if !strings.Contains(ll, strings.ToLower(sub)) {
-				all = false
-				break
-			}
-		}
-		if all {
-			return true
-		}
-	}
-	return false
 }
