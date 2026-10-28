@@ -250,10 +250,12 @@ type Manager struct {
 	// contract and is what userspace transfer readiness gates on.
 	localHAProtocolVersion uint16
 	peerHAProtocolVersion  uint16
-	// peerTransferOutOverride preserves an explicitly acknowledged peer
+	// transferOverrides preserves an explicitly acknowledged peer
 	// transfer-out across heartbeat refreshes until the transfer is either
-	// committed or aborted locally.
-	peerTransferOutOverride map[int]uint64
+	// committed or aborted locally. Each entry carries the reqID and the
+	// pre-override peer snapshot together, so clearing an entry can never
+	// leave a stale snapshot behind (#17125).
+	transferOverrides map[int]transferOverride
 	// peerTransferCommitGraceUntil keeps the peer in secondary-hold for a
 	// short window after a transfer commit so a transient stale heartbeat
 	// cannot immediately steal the RG back from the new primary.
@@ -262,7 +264,6 @@ type Manager struct {
 	// secondary during the same window so a transient heartbeat gap cannot
 	// immediately re-promote the old primary.
 	localTransferOutHoldUntil map[int]time.Time
-	peerTransferOutPrevious   map[int]peerGroupSnapshot
 	// remoteTransferOutLeaseUntil bounds how long a peer-REQUESTED transfer-out
 	// keeps this node parked in secondary-hold without a commit. It is armed
 	// (ArmRemoteTransferOutLease) when a remote failover request demotes an RG
@@ -628,26 +629,23 @@ type Manager struct {
 	// fire-and-forget behaviour unchanged.
 	peerFenceConfirmFn func(timeout time.Duration) (FenceAck, error)
 
-	// peerTimeoutGuardFn can suppress heartbeat-driven peer loss when an
-	// external signal proves the peer is still alive (for example, recent
-	// session-sync traffic on the control link).
-	peerTimeoutGuardFn func() (suppress bool, reason string)
-	// peerNeverSeenSyncFreshFn reports whether the session-sync receive proof
-	// is still fresh while no heartbeat has ever arrived. handlePeerNeverSeen
-	// calls it under m.mu; it must be a fast, lock-free probe and must not
-	// re-enter Manager.
-	peerNeverSeenSyncFreshFn func() bool
+	// peerSync is the published session-sync receive-recency source for the
+	// heartbeat-timeout suppression and never-seen policies, which are owned
+	// by heartbeat_suppress.go under this same lock (#17056). Nil when
+	// cluster comms are stopped. Reads through it are lock-free atomics on
+	// SessionSync, safe under m.mu.
+	peerSync peerSyncSource
 
-	// peerHeartbeatRecoveredFn is notified on admitted peer heartbeats and
-	// post-guard freshness rechecks so an external liveness guard can end its
-	// continuous-suppression window. It runs under m.mu and must be fast,
-	// lock-free, idempotent, and must not re-enter Manager.
-	peerHeartbeatRecoveredFn func()
+	// hbSuppressStart is the CLOCK_MONOTONIC nanos stamp of the first
+	// heartbeat suppression in the current continuous window; 0 = inactive
+	// (#1792). A plain field under m.mu, cleared by heartbeat admission in
+	// the same critical section (#12165, #17056).
+	hbSuppressStart int64
 
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults
-	// it AFTER the (possibly slow) guard window so a heartbeat that arrived
-	// during the guard aborts the spurious peer-lost transition. Defaults to
+	// it under m.mu before the suppression decision so a fresh heartbeat
+	// aborts the spurious peer-lost transition. Defaults to
 	// the live receiver-backed check via peerHeartbeatFresh; overridable in
 	// tests to inject a fresh/stale heartbeat without a real socket.
 	peerHeartbeatFreshFn func() bool
@@ -813,6 +811,15 @@ type peerGroupSnapshot struct {
 	present bool
 }
 
+// transferOverride is one acknowledged peer transfer-out: the request ID
+// that armed it and the peer-group snapshot taken just before the override
+// rewrote the peer view, restored by a reqID-matched abort. Kept as a
+// single map value so the pair cannot be half-cleared (#17125).
+type transferOverride struct {
+	reqID    uint64
+	previous peerGroupSnapshot
+}
+
 // DefaultTakeoverHoldTime is the default additional delay after an RG becomes
 // ready before election promotes it to primary. Zero means promote as soon as
 // readiness is established.
@@ -875,10 +882,9 @@ func NewManager(nodeID, clusterID int) *Manager {
 		eventCh:                        make(chan ClusterEvent, 64),
 		garpCounts:                     make(map[int]int),
 		peerGroups:                     make(map[int]PeerGroupState),
-		peerTransferOutOverride:        make(map[int]uint64),
+		transferOverrides:              make(map[int]transferOverride),
 		peerTransferCommitGraceUntil:   make(map[int]time.Time),
 		localTransferOutHoldUntil:      make(map[int]time.Time),
-		peerTransferOutPrevious:        make(map[int]peerGroupSnapshot),
 		remoteTransferOutLeaseUntil:    make(map[int]time.Time),
 		remoteTransferOutLeaseReqID:    make(map[int]uint64),
 		abortedPeerTransferReqID:       make(map[int]uint64),

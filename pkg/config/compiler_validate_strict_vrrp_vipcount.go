@@ -2,9 +2,7 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"sort"
-	"strconv"
 )
 
 // MaxVRRPVirtualAddressesIPv4 / MaxVRRPVirtualAddressesIPv6 bound the number of
@@ -37,59 +35,24 @@ func maxVRRPVirtualAddresses(isIPv6 bool) int {
 	return MaxVRRPVirtualAddressesIPv4
 }
 
-// canonicalVRRPVIPIdentity normalizes CIDR spellings for config-side set
-// operations without importing pkg/vrrp (which depends on pkg/config).
-func canonicalVRRPVIPIdentity(vip string) string {
-	ip, ipNet, err := net.ParseCIDR(vip)
-	if err != nil {
-		return vip
-	}
-	ones, _ := ipNet.Mask.Size()
-	return ip.String() + "/" + strconv.Itoa(ones)
-}
-
-// dedupeVRRPVIPs preserves input order and the first spelling of each canonical
-// identity. Invalid tokens remain available for the existing tolerant path.
-func dedupeVRRPVIPs(vips []string) []string {
-	if len(vips) < 2 {
-		return vips
-	}
-	seen := make(map[string]struct{}, len(vips))
-	var unique []string
-	for i, vip := range vips {
-		id := canonicalVRRPVIPIdentity(vip)
-		if _, exists := seen[id]; exists {
-			if unique == nil {
-				unique = append([]string(nil), vips[:i]...)
-			}
-			continue
-		}
-		seen[id] = struct{}{}
-		if unique != nil {
-			unique = append(unique, vip)
-		}
-	}
-	if unique != nil {
-		return unique
-	}
-	return vips
-}
-
 // countVRRPVIPFamilies counts distinct canonical address/prefix identities by
 // family, accepting CIDRs or bare literals and skipping unparseable entries.
+// The parse is ParseVRRPVIP (#17150), the same one pkg/vrrp's capacity guard
+// and advert builder use, so a malformed entry such as "10.0.0.1/33" is
+// skipped by every counter alike.
 func countVRRPVIPFamilies(vips []string) (nV4, nV6 int) {
 	seen := make(map[string]struct{}, len(vips))
 	for _, vip := range vips {
-		ip := vrrpVIPHostIP(vip)
-		if ip == nil {
+		p, ok := ParseVRRPVIP(vip)
+		if !ok {
 			continue
 		}
-		id := canonicalVRRPVIPIdentity(vip)
+		id := VRRPVIPIdentity(vip)
 		if _, duplicate := seen[id]; duplicate {
 			continue
 		}
 		seen[id] = struct{}{}
-		if ip.To4() != nil {
+		if p.Addr().Is4() {
 			nV4++
 		} else {
 			nV6++
@@ -172,7 +135,7 @@ func validateVRRPVIPCountStrict(cfg *Config) error {
 	// RETH unit's address count has no advert consequence. Explicit vrrp-group
 	// blocks are still checked — they are independent of cluster mode.
 	rethVRRPActive := true
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		rethVRRPActive = false
 	}
 

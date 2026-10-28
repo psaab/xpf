@@ -588,6 +588,7 @@ func (s *SessionSync) sendFailoverResult(conn net.Conn, msgType uint8, rgID int,
 	payload[1] = status
 	binary.LittleEndian.PutUint64(payload[2:10], reqID)
 	copy(payload[10:], detail)
+	payload = clampFailoverAckPayload(msgType, payload)
 	s.writeMu.Lock()
 	err := writeMsg(ackConn, msgType, payload)
 	firstErr := err

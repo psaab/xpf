@@ -561,6 +561,18 @@ the mechanics, so this section is sequencing only.
   correct mechanisms, including its own flagship target, because
   correct markers are correct via caller contracts and readbacks that
   no intra-function dominance rule can see.
+- **Reachability is gated, like vet (#17154).** `make test-go` runs
+  `scripts/go-deadcode-gate.sh` beside the #9590 vet leg: the set of
+  functions unreachable from any binary or test
+  (`deadcode@v0.38.0 -test ./...`, go1.26 toolchain — the pinned
+  analyser's SSA builder panics under go1.27) must equal
+  `docs/deadcode-allowlist.txt` exactly. A function whose last caller
+  you removed is dead in the same change: delete it, do not leave it
+  for the next review to re-derive. A carve-out is a named, reasoned
+  allowlist row (`LEGITIMATE` for `var _` compile guards and
+  `ForTest` seams only); stale rows red, so the list only shrinks.
+  The seeded `LEGACY-DEBT` baseline is pre-existing debt to delete
+  per-package with its row — never a place to park new dead code.
 
 ## API shape discipline
 
@@ -717,7 +729,7 @@ sites got it wrong the same way — see `DurableNamespace` below.
 |---|---|---|---|
 | DurableState | `fsatomic.WriteFileDurable` | Must survive power loss: temp + fsync + rename + parent-dir fsync. | active config (`.configdb`), rollback slot 1, rescue config, `master.key`, DHCPv6 DUID, `frr.conf`, `/etc/hostname`, sudoers drop-in, user + root `authorized_keys`, TLS cert + key (`/etc/xpf/tls/*`), lifeline record, provisioned-users / -passwords / -keys markers (#5841) |
 | AtomicGeneratedConfig | `fsatomic.WriteFileAtomic` | Regenerated on boot/apply; a torn file is unacceptable, a lost-on-power-cut update is fine. **No fsync — this class exists so hot apply paths never pay one.** | swanctl conf, Kea configs, networkd `.link`/`.network`, rollback slots 2..N, sshd drop-in, rsyslog drop-in, chrony drop-in, `ssh_known_hosts`, `/etc/timezone`, `/etc/resolv.conf` |
-| BestEffortKernelKnob | direct `os.WriteFile` | procfs/sysfs: rename does not exist there, the atomic writers are impossible by construction. Also the `/etc/resolv.conf` bind-mount in-place fallback (rename onto a bind mount is EXDEV/EBUSY). | `rp_filter`, `accept_dad`/`addr_gen_mode`, RPS/RFS/XPS, `fib_multipath_hash_policy`, socket-buffer sysctls |
+| BestEffortKernelKnob | `fsatomic.WriteKernelKnob` (direct write inside `pkg/fsatomic` only) | procfs/sysfs: rename does not exist there, the atomic writers are impossible by construction. Lifecycle (capture prior on first assert, restore on release with retry debt) is the `fsatomic.KernelKnobs` registry (#17068); daemon-lifetime posture asserts through `WriteKernelKnob` without registering. Also the `/etc/resolv.conf` bind-mount in-place fallback (rename onto a bind mount is EXDEV/EBUSY). | `rp_filter`, `accept_dad`/`addr_gen_mode`, RPS/RFS/XPS, `fib_multipath_hash_policy`, socket-buffer sysctls |
 | **DurableNamespace** (#9057) | `fsatomic.RenameDurable`, or the renames followed by ONE `fsatomic.SyncDir` | The durable artifact is the DIRECTORY ENTRY, not a file's contents: rotating a generation set (`x` → `x.1` → `x.2`), or any rename whose new name must survive a power cut. A rename is atomic for the entry and the entry is **not durable until the containing directory is fsynced**. | audit-journal segment rotation, local-log and flow-trace rotation, CLI monitor trace rotation |
 
 **Why DurableNamespace needed its own row rather than a note under

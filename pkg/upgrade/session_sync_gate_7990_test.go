@@ -7,7 +7,8 @@ import (
 	"time"
 )
 
-// TestParsePeerSessionSyncWire7990 pins the status parse.
+// TestParsePeerSessionSyncWire7990 pins the strict status parse: present,
+// absent, unknown and malformed outcomes.
 func TestParsePeerSessionSyncWire7990(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -15,30 +16,37 @@ func TestParsePeerSessionSyncWire7990(t *testing.T) {
 		in      string
 		want    uint16
 		present bool
+		wantErr bool
 	}{
-		{"present", "Peer HA protocol version: 1\nPeer session-sync wire version: 2\n", 2, true},
-		{"unknown renders as a word, not a number", "Peer session-sync wire version: unknown\n", 0, true},
-		{"case insensitive", "peer session-sync WIRE version: 5\n", 5, true},
-		{"indented", "   Peer session-sync wire version: 9   \n", 9, true},
+		{"present", "Peer HA protocol version: 1\nPeer session-sync wire version: 2\n", 2, true, false},
+		{"unknown renders as a word, not a number", "Peer session-sync wire version: unknown\n", 0, true, false},
+		{"case insensitive", "peer session-sync WIRE version: 5\n", 5, true, false},
+		{"indented", "   Peer session-sync wire version: 9   \n", 9, true, false},
 		// The line is ABSENT: a pre-#7990 node, or a peer that is not alive.
 		// Must be distinguishable from "unknown" at the parser, even though the
 		// caller collapses them.
-		{"absent", "HA protocol version: 1\nPeer HA protocol version: 1\n", 0, false},
-		{"empty", "", 0, false},
-		// A garbled value must not become a version. Reported present-but-0 so
-		// the caller's permit-on-unknown path takes it rather than a different
-		// branch.
-		{"garbage value", "Peer session-sync wire version: banana\n", 0, true},
-		{"out of range", "Peer session-sync wire version: 70000\n", 0, true},
+		{"absent", "HA protocol version: 1\nPeer HA protocol version: 1\n", 0, false, false},
+		{"empty", "", 0, false, false},
+		// A garbled present value must surface as an error (#14991), never
+		// collapse to (0, present) where the permit-on-unknown path would
+		// take it.
+		{"garbage value", "Peer session-sync wire version: banana\n", 0, true, true},
+		{"out of range", "Peer session-sync wire version: 70000\n", 0, true, true},
 		// The LOCAL line must not be mistaken for the peer's — they differ only
 		// by a prefix word, which is exactly the near-miss a substring match
 		// would swallow.
-		{"local line only", "Session-sync wire version: 4\n", 0, false},
+		{"local line only", "Session-sync wire version: 4\n", 0, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, present := parsePeerSessionSyncWire(tc.in)
+			got, present, err := parsePeerSessionSyncWireStrict(tc.in)
+			if tc.wantErr && err == nil {
+				t.Errorf("parsePeerSessionSyncWireStrict(%q) err = nil, want malformed error", tc.in)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("parsePeerSessionSyncWireStrict(%q) err = %v, want nil", tc.in, err)
+			}
 			if got != tc.want || present != tc.present {
-				t.Errorf("parsePeerSessionSyncWire(%q) = (%d, %v), want (%d, %v)",
+				t.Errorf("parsePeerSessionSyncWireStrict(%q) = (%d, %v), want (%d, %v)",
 					tc.in, got, present, tc.want, tc.present)
 			}
 		})
@@ -95,7 +103,7 @@ func TestDrainProceedsOnCompatibleSessionSyncWire7990(t *testing.T) {
 // allowMixedHA must NOT disable this gate. That flag exists because the LANE-2
 // mixed-base gate already validated the HA WINDOW and exact-equality would
 // wrongly abort the second node; it says nothing about the session wire, which
-// GateMixedBaseSwap checks for EXACT equality in both cases. Reusing it here
+// GateProtocolCompat checks for EXACT equality in both cases. Reusing it here
 // would silently disable this gate on the path that most needs it.
 func TestAllowMixedHADoesNotBypassSessionSyncGate7990(t *testing.T) {
 	t.Parallel()
@@ -134,7 +142,7 @@ func TestAllowMixedHADoesNotBypassSessionSyncGate7990(t *testing.T) {
 func TestAbsentStatusLineFailsRatherThanPermits7990(t *testing.T) {
 	t.Parallel()
 	statusNoLine := "HA protocol version: 1\nPeer HA protocol version: 1\n"
-	if _, present := parsePeerSessionSyncWire(statusNoLine); present {
+	if _, present, err := parsePeerSessionSyncWireStrict(statusNoLine); err != nil || present {
 		t.Fatal("fixture is wrong: the status must NOT carry the peer line")
 	}
 	// Drive the DECISION layer, not the parser and the verdict it calls. An

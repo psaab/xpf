@@ -99,7 +99,7 @@ func TestRootStillReadsWithNoLoginModel_6660(t *testing.T) {
 }
 
 // TestHealthAndMetricsStayOpen_6660 pins the two routes that must never be
-// gated: they carry no configuration, authCheck already exempts them, and the
+// gated: they carry no configuration, the auth check already exempts them, and the
 // in-tree incus harnesses read /metrics. Gating them would break monitoring on
 // every box.
 func TestHealthAndMetricsStayOpen_6660(t *testing.T) {

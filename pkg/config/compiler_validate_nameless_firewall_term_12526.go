@@ -131,7 +131,7 @@ func ValidateFirewallNamelessTermsAST12526(tree *ConfigTree) error {
 		if node.Name() == "firewall" {
 			for _, child := range node.Children {
 				if child.Name() == "family" {
-					for _, member := range firewallFamilyMembers9883(child) {
+					for _, member := range familyMembers(child) {
 						for _, filter := range namedInstances(member.AfNode.FindChildren("filter")) {
 							for _, term := range filter.node.FindChildren("term") {
 								first, malformed := firewallNamelessTermBody12526(term)

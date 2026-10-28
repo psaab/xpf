@@ -880,6 +880,11 @@ type MatchPoliciesResult struct {
 	// explanatory V4MappedCompatIngressDropActionString rather than an
 	// enforced permit/deny/default verdict; Matched/DefaultUsed are false.
 	V4MappedCompatIngressDrop bool `json:"v4_mapped_compat_ingress_drop,omitempty"`
+	// UnsupportedTupleFamily is true for an IPv4-source/IPv6-destination
+	// tuple (#17198, typed bit from #5720 now on REST via policymatch.Verdict):
+	// NAT46 is not implemented, so no forwarding path produces it and the
+	// runtime matcher fails closed; Action is UnsupportedTupleFamilyActionString.
+	UnsupportedTupleFamily bool `json:"unsupported_tuple_family,omitempty"`
 	// QueriedFromZone/QueriedToZone echo the zone pair the caller ASKED about
 	// (#3627 M06). Unlike FromZone/ToZone (the SCOPE of the MATCHED policy, set
 	// only on a positive match), these are populated on EVERY response —

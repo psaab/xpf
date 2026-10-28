@@ -58,7 +58,7 @@ pub(crate) fn allocate_nat64_pool_port_excluding(
         persistent: Some(PersistentParams {
             permit: PersistentNatPermit::AnyRemoteHost,
             epoch: 0,
-            timeout_ns: 300 * 1_000_000_000,
+            timeout_ns: DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
         }),
         now_ns,
         holder,
@@ -173,7 +173,7 @@ pub(crate) fn reserve_nat64_pool_port(
     };
     let persistent = Some((
         flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
-        300 * 1_000_000_000,
+        DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
     ));
     let mut previous_snapshot = None;
     allocator.reserve_flow_maybe_persistent_with_identity(
@@ -219,7 +219,7 @@ pub(crate) fn reserve_nat64_pool_port_capture_and_replace(
         holder,
         Some((
             flow.persistent_source_key(PersistentNatPermit::AnyRemoteHost),
-            300 * 1_000_000_000,
+            DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
         )),
         true,
         &mut previous_snapshot,

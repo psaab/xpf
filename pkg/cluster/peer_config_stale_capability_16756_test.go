@@ -193,8 +193,8 @@ func TestDowngradeOnReconnectUnblocksGate16756(t *testing.T) {
 
 	// Incarnation advance clears the capability, then the downgraded
 	// peer advertises its (ACK-less) set.
-	s.peerCapabilityFlags2.Store(0)
-	s.peerCapabilityFlags.Store(0)
+	s.peerIncarnationState().peerCapabilityFlags2.Store(0)
+	s.peerIncarnationState().peerCapabilityFlags.Store(0)
 	s.peerSnaps.peerSnapshotProtocol.Store(0)
 	s.handleMessage(nil, syncMsgPeerCapabilities,
 		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership))

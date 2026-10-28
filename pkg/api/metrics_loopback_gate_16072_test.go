@@ -47,7 +47,7 @@ func TestLoopbackMetricsRequireAuthGate16072(t *testing.T) {
 
 	// Loopback bind (metricsRequireAuth=false): the gate is the only thing
 	// that can close /metrics.
-	loopback := authMiddleware(gated, false, ok)
+	loopback := productionAuthHandlerOnly(t, gated, false, ok)
 	metricsGateRequest(t, loopback, "/metrics", nil, http.StatusUnauthorized)
 	metricsGateRequest(t, loopback, "/metrics", map[string]string{"Authorization": "Bearer wrong-token"}, http.StatusUnauthorized)
 	metricsGateRequest(t, loopback, "/metrics", map[string]string{"Authorization": basic}, http.StatusOK)
@@ -57,11 +57,11 @@ func TestLoopbackMetricsRequireAuthGate16072(t *testing.T) {
 	metricsGateRequest(t, loopback, "/health", nil, http.StatusOK)
 
 	// Without the gate the loopback posture is unchanged (#4162).
-	openHandler := authMiddleware(open, false, ok)
+	openHandler := productionAuthHandlerOnly(t, open, false, ok)
 	metricsGateRequest(t, openHandler, "/metrics", nil, http.StatusOK)
 
 	// Non-loopback already required credentials; the gate changes nothing.
-	nonLoopback := authMiddleware(gated, true, ok)
+	nonLoopback := productionAuthHandlerOnly(t, gated, true, ok)
 	metricsGateRequest(t, nonLoopback, "/metrics", nil, http.StatusUnauthorized)
 	metricsGateRequest(t, nonLoopback, "/metrics", map[string]string{"Authorization": basic}, http.StatusOK)
 }

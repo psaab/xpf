@@ -4,9 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
@@ -29,17 +27,14 @@ func (d *statusSessionsDP) SessionCountContext(context.Context) (int, int, error
 
 // TestGetStatusSessionCountFromUserspaceTable is the #3929 RED-on-revert guard
 // for the gRPC GetStatus SessionCount. It must report the live dataplane
-// session count (forward-only v4+v6 = 7), NOT gc.Stats().TotalEntries, which is
-// permanently 0 on the userspace dataplane (the BPF GC sweep is skipped, #333).
-// Reverting server_show_status.go to `resp.SessionCount = stats.TotalEntries`
-// reports 0 and flips this assertion red.
+// session count (forward-only v4+v6 = 7), NOT a GC sweep count, which would be
+// permanently 0 on the userspace dataplane (the BPF GC sweep was skipped, #333;
+// pkg/conntrack retired in #17155). Reverting server_show_status.go to read a
+// sweep count reports 0 and flips this assertion red.
 func TestGetStatusSessionCountFromUserspaceTable(t *testing.T) {
 	s := &Server{
 		store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf")),
 		dp:    &statusSessionsDP{Manager: dataplane.New(), v4: 5, v6: 2},
-		// A GC that has never swept — models the userspace runtime, where
-		// gc.Stats() is all-zero. The reverted code would read 0 from here.
-		gc: conntrack.NewGC(nil, time.Minute),
 	}
 
 	resp, err := s.GetStatus(context.Background(), &pb.GetStatusRequest{})
@@ -56,7 +51,6 @@ func TestGetStatusSessionCountFromUserspaceTable(t *testing.T) {
 func TestGetStatusSessionCountNoDataplane(t *testing.T) {
 	s := &Server{
 		store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf")),
-		gc:    conntrack.NewGC(nil, time.Minute),
 	}
 	resp, err := s.GetStatus(context.Background(), &pb.GetStatusRequest{})
 	if err != nil {

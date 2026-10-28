@@ -38,7 +38,7 @@ var syncMagic = [4]byte{'B', 'P', 'S', 'Y'}
 // leaves heartbeat/failover semantics alone.
 //
 // The split matters because the mixed-base gate checks the two DIFFERENTLY
-// (upgrade.GateMixedBaseSwap, mirrored in scripts/deploy/xpf-deploy.py):
+// (upgrade.GateProtocolCompat, executed for LANE-2 by _gate_mixed_base in scripts/deploy/xpf-deploy.py):
 // the HA protocol is accepted over a WINDOW [MinCompatHAProtocolVersion,
 // CurrentHAProtocolVersion], while the session-sync version must match EXACTLY.
 // Welded together, a session-wire-only change was forced to push the HA version
@@ -57,7 +57,7 @@ var syncMagic = [4]byte{'B', 'P', 'S', 'Y'}
 // upgrade.
 //
 // The bump is deliberately on THIS counter and not on
-// CurrentHAProtocolVersion. GateMixedBaseSwap treats them differently:
+// CurrentHAProtocolVersion. GateProtocolCompat treats them differently:
 // session-sync must match EXACTLY, so bumping here is what makes the mixed-base
 // swap refuse up front instead of letting an operator discover a fabric that
 // will not come up. The HA protocol is accepted over a window
@@ -595,6 +595,15 @@ type SyncStats struct {
 	// lie. Unstamped installs are never withheld. Same operational meaning
 	// as the delete suppressors: counted, visible gap over silent corruption.
 	InstallsSuppressedNoPeerInstallTable atomic.Uint64
+	// InstallsSuppressedIpsecDiscriminator counts outgoing IPsec
+	// (S9.4 class-3 discriminator) session installs WITHHELD because
+	// the peer did not advertise capFlagIpsecTunnelDiscriminator or
+	// its capabilities are not yet learned (#17113). Such a peer
+	// cannot preserve the IPsec if_id discriminator, so sending the
+	// install would alias it onto another tunnel's key. Same
+	// operational meaning as the other install suppressor: counted,
+	// visible gap over silent corruption.
+	InstallsSuppressedIpsecDiscriminator atomic.Uint64
 	// DeletesStaleIgnored counts deletes refused by the #2170 install-
 	// generation guard: a journaled/deferred delete whose generation was
 	// strictly older than the currently-installed same-key entry. A nonzero
@@ -676,8 +685,12 @@ type SyncStats struct {
 type SyncStatsSnapshot struct {
 	SessionsSent uint64
 	// SweepSessionsSent is the mirror-sweep SUB-TOTAL of SessionsSent (#7842).
-	SweepSessionsSent         uint64
-	SessionsReceived          uint64
+	SweepSessionsSent uint64
+	SessionsReceived  uint64
+	// MalformedRecordsDropped is the #7175/#10724 rejected-record counter:
+	// descriptor-driven via syncStatFields (#17107) so it cannot again be
+	// counted in SyncStats yet absent from every operator surface.
+	MalformedRecordsDropped   uint64
 	SessionsInstalled         uint64
 	DeletesSent               uint64
 	DeletesReceived           uint64
@@ -741,6 +754,7 @@ type SyncStatsSnapshot struct {
 	DeletesSuppressedPurgeRetirement     uint64
 	DeletesSuppressedScopedPolicy        uint64
 	InstallsSuppressedNoPeerInstallTable uint64
+	InstallsSuppressedIpsecDiscriminator uint64
 	DeletesStaleIgnored                  uint64
 	InstallsStaleIgnored                 uint64
 	SessionsStaleConfigIgnored           uint64
@@ -1288,6 +1302,26 @@ type SessionSync struct {
 	OnBulkSyncAckReceived func()
 	// OnPeerConnected fires when a peer sync connection is established.
 	OnPeerConnected func()
+	// OnPeerReconnected fires on every per-connection dispatch of
+	// OnPeerConnected at the moved-policy layer (#17056): handleNewConnection
+	// (sync_conn.go, only when shouldColdPrime) and the BulkStart reboot
+	// switch (sync_bulkstart_recv.go, only when it announces a reboot the
+	// install did not). The daemon's OnPeerConnected consumer is not
+	// idempotent, so those callers keep their once-per-incarnation gating;
+	// this hook is invoked at exactly those dispatch points so a reconnect
+	// on the SAME SessionSync object resets the heartbeat-suppression cap
+	// stamp on the Manager, restoring the pre-move per-connect reset that
+	// publishing alone (once per comms epoch) cannot provide. Nil when no
+	// Manager is bound (test doubles, embedders without a heartbeat).
+	OnPeerReconnected func()
+	// peerReconnectOwner is the Manager that installed OnPeerReconnected
+	// via SetPeerSyncSource (#17056), or nil. It exists because func values
+	// are not comparable: unpublish/republish must clear only the binding
+	// the clearing Manager itself installed, never a successor's. Written
+	// only under that Manager's mu at publish/unpublish, before the
+	// connection goroutines that read OnPeerReconnected can dispatch for a
+	// newly published source (wiring precedes Start).
+	peerReconnectOwner *Manager
 	// OnPeerDisconnected fires when all fabric connections are lost.
 	OnPeerDisconnected func()
 	IsPrimaryFn        func() bool
@@ -1389,59 +1423,10 @@ type SessionSync struct {
 	// Armed once per overflow episode (CAS) by rejournalTail/journalDelete and
 	// consumed by whichever of the sweep loop (syncSweep) or the next reconnect
 	// (handleNewConnection) runs first.
-	forceResync atomic.Bool
-	// deleteSuppressionWarned latches the #9714 F5 operator warning so a path
-	// that can run thousands of times a second logs the episode ONCE, in the
-	// shape armDeleteResync already uses. Reset with the peer capability flags
-	// on full disconnect: the warning is about a peer INCARNATION, and a latch
-	// that outlived it would stay silent through the reconnect that actually
-	// matters — a downgrade, or the upgrade that fixes it.
-	deleteSuppressionWarned atomic.Bool
-	// purgeRetirementSuppressionWarned latches the #9752 forward-only-delete
-	// suppression warning, same incarnation scoping as deleteSuppressionWarned
-	// (reset alongside it on full disconnect).
-	purgeRetirementSuppressionWarned atomic.Bool
-	// scopedPolicySuppressionWarned latches the #10512 scoped-delete
-	// suppression warning, same incarnation scoping as
-	// deleteSuppressionWarned (reset alongside it on full disconnect).
-	scopedPolicySuppressionWarned atomic.Bool
-	// installTableSuppressionWarned latches the #9752 round 3 stamped-install
-	// suppression warning, same incarnation scoping (reset alongside on
-	// full disconnect).
-	installTableSuppressionWarned atomic.Bool
-	// bulkFencedForPeer latches a #9752 round 4 bulk refusal for the peer
-	// incarnation: once a window aborts on the install fence, retries skip
-	// quietly instead of burning full-table walks that all abort the same
-	// way. Same incarnation scoping (reset on full disconnect), plus an
-	// early clear when a capable capability frame lands.
-	bulkFencedForPeer atomic.Bool
-	// bulkFencedForIpsecPeer is the independent S9.4 refusal latch. Its
-	// eligibility is the IPsec discriminator capability, not install-table
-	// identity; either fence must be revalidated on its own bit.
-	bulkFencedForIpsecPeer atomic.Bool
-	// pbrAnnouncedForFence records that this node ANNOUNCED (sent) or
-	// INSTALLED (received) a stamped session this peer incarnation (#9752
-	// round 5 item 1). While set, a mirror-sourced (0,0) with NO memo
-	// record is suspect (in-race delta, foreign row, or post-cap) rather
-	// than genuinely-non-PBR, and the sweep/bulk fence withholds it from
-	// incapable peers. Same incarnation scoping (reset on full disconnect).
-	pbrAnnouncedForFence atomic.Bool
-	// installTableSuppressDebt records that this incarnation withheld ≥1
-	// install on the #9752 fence (#9752 round 5 item 5). Suppressed installs
-	// are never retried by the sweep (its window advances past them), so a
-	// capable discovery transfers this debt into a cold-prime re-arm (the
-	// redriven bulk snapshot carries them all). Distinct from the warn
-	// latch below it: that one must never clear (warn-once), this one is
-	// consumed by the re-arm. Same incarnation scoping.
-	installTableSuppressDebt atomic.Bool
-	// ipsecDiscriminatorSuppressDebt records that the peer's S9.4 capability
-	// was unknown or absent when an IPsec-tagged session was withheld. A
-	// capable discovery transfers this debt into a cold-prime re-arm; the
-	// authoritative bulk then heals every withheld session at once.
-	ipsecDiscriminatorSuppressDebt atomic.Bool
-	lastNewCounter                 uint64
-	lastClosedCounter              uint64
-	lastSweepEmpty                 bool
+	forceResync       atomic.Bool
+	lastNewCounter    uint64
+	lastClosedCounter uint64
+	lastSweepEmpty    bool
 	// testSweepNow overrides the monotonic-seconds reading the sweep
 	// watermarks against (nil = live clock). Test-only; production never
 	// sets it. Per-instance (not a package hook) so parallel tests cannot
@@ -1455,8 +1440,20 @@ type SessionSync struct {
 	// never sets it.
 	testClockPublishAfterStore func()
 	vrfDevice                  string
-	peerClockOffset            atomic.Int64
-	clockSynced                atomic.Bool
+	// clockSynced (global) says a ClockSync was accepted for the current
+	// incarnation (#9653). It stays on SessionSync, NOT in
+	// peerIncarnationState (#17097): a boot-ID switch keeps the surviving
+	// connection's proven clock, so it is not reset at every retirement
+	// the way peerClockOffset is. Cleared only on full disconnect.
+	clockSynced atomic.Bool
+
+	// peerIncarnationStatePtr holds the current peer incarnation's
+	// latch/debt/capability state (#17097, sync_peer_incarnation.go).
+	// A pointer (not a value field) because retirement replaces the
+	// whole state in one store under mu; nil until first use, since the
+	// ~98 in-package SessionSync literals run no constructor. Access
+	// only via peerIncarnationState()/retirePeerIncarnationLocked.
+	peerIncarnationStatePtr atomic.Pointer[peerIncarnationState]
 
 	// localSnapshotProtocol is this node's config-snapshot protocol version,
 	// advertised to the peer on every installed connection (#6650). Set by the
@@ -1467,50 +1464,6 @@ type SessionSync struct {
 	// Peer held snapshots + #6650 advertised protocol: see
 	// peerSnapshotState in sync_gen_state_16159.go.
 	peerSnaps peerSnapshotState
-
-	// peerCapabilityFlags holds the peer's advertised capability bits (#7147),
-	// carried in the trailing byte of syncMsgPeerCapabilities on top of #6650's
-	// version field. 0 means "advertises nothing", which for every bit means
-	// INCAPABLE — a pre-#7147 peer sends a 2-byte frame with no flags at all.
-	//
-	// Cleared on full disconnect alongside peerSnapshotProtocol and for the
-	// identical reason: the capability belongs to the peer INCARNATION that
-	// proved it, and the process that reconnects may be an older build. A
-	// retained fence-ack bit would make a confirmed-fence gate wait out its
-	// whole timeout against a downgraded peer that can never answer.
-	peerCapabilityFlags atomic.Uint32
-
-	// peerSessionSyncWire holds the peer's advertised SessionSyncWireVersion
-	// (#7990), carried as a trailing u16 on syncMsgPeerCapabilities on top of
-	// #6650's version field and #7147's flags byte. 0 means UNKNOWN — a peer
-	// predating #7990 advertises nothing, and that is genuinely different from
-	// "advertises 0": there is no valid sync wire version 0, so the two cannot
-	// be confused the way #6650's 0-means-incapable had to be.
-	//
-	// Why this is not derivable from anything already exchanged: the heartbeat
-	// carries HAProtocolVersion, and since #7925 the sync wire version is its
-	// OWN counter — so a peer's HA version says nothing about whether its
-	// session frames will decode. That was the gap: the image-replace gate
-	// compares both versions from the image manifest, and the LANE-1 in-place
-	// path had no channel to learn the peer's at all.
-	//
-	// Cleared on full disconnect alongside peerSnapshotProtocol and
-	// peerCapabilityFlags, for the identical reason: the version belongs to the
-	// peer INCARNATION that advertised it, and the process that reconnects may
-	// be an older build — which is precisely the rolling-upgrade case this
-	// exists for.
-	peerSessionSyncWire atomic.Uint32
-
-	// peerCapabilityFlags2 holds the peer's SECOND advertised capability
-	// byte (#16756), carried after the wire-version field in
-	// syncMsgPeerCapabilities because the first flags byte is full. Bit 0
-	// (capFlag2ConfigApplyAck) means the peer sends syncMsgConfigApplyAck;
-	// bit 1 (capFlag2PersistentNatLeaseProvenance) means it decodes lease
-	// provenance frames (types 50/51); bit 2 (capFlag2PrimaryLiveness) means it
-	// accepts the primary-liveness marker on session frames. Cleared on full
-	// disconnect and on incarnation advance alongside peerCapabilityFlags, for
-	// the identical incarnation-scoping reason.
-	peerCapabilityFlags2 atomic.Uint32
 
 	// fenceSeq numbers sequenced peer fences (#7147). Starts at 0 and is only
 	// ever read via Add(1), so the first fence is seq 1 — seq 0 is reserved on
@@ -1548,34 +1501,20 @@ type SessionSync struct {
 	// injector derives the pair from its snapshot rows, so the wire fold
 	// names `reth0.80`, not the `reth0` the child device name truncated to.
 	// Nil keeps the legacy vlan-0 fold.
-	natScopeFoldFn   func(ifindex int32) uint32
-	deleteJournalMu  sync.Mutex
-	deleteJournal    [][]byte
-	deleteJournalCap int
-	// scopedDeleteJournal is the #10512 deferred scoped-delete debt: scoped
-	// frames that could not be queued (disconnected/full) wait here — never
-	// in the bare journal — and flush only after the current peer
-	// positively advertises the scoped bit (learn-triggered), so no
+	natScopeFoldFn  func(ifindex int32) uint32
+	deleteJournalMu sync.Mutex
+	// deleteJournal is the bare deferred-delete ring; scopedDeleteJournal
+	// is the #10512 deferred scoped-delete debt: scoped frames that could
+	// not be queued (disconnected/full) wait there — never in the bare
+	// journal — and flush only after the current peer positively
+	// advertises the scoped bit (learn-triggered), so no
 	// cross-incarnation raw replay can downgrade them. Same mutex, cap
-	// discipline, and overflow resync-arming as the bare journal.
-	scopedDeleteJournal    [][]byte
-	scopedDeleteJournalCap int
-	lastPeerRxMono         atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
-	// peerHeartbeatAckEver latches when the CURRENTLY connected peer proves it
-	// understands syncMsgHeartbeat by replying syncMsgHeartbeatAck. It gates
-	// the two enforcement paths that would otherwise punish a legacy peer that
-	// simply never acks: the receiveLoop missed-heartbeat teardown
-	// (sync_conn_read.go) and PeerHealthy's silence window (below).
-	//
-	// #5718 C01a: this is peer-INCARNATION scoped, NOT SessionSync-lifetime.
-	// handleDisconnect clears it on full disconnect (alongside clockSynced) so
-	// a peer downgrade — new build acks, then rolls back to a build that never
-	// acks — cannot leave the flag latched and turn a healthy old peer into
-	// permanent connection churn plus a failover-readiness block. Do not
-	// promote this back to a set-once flag.
-	peerHeartbeatAckEver atomic.Bool
-	readDeadline         time.Duration
-	peerSilenceLimit     time.Duration
+	// discipline, and overflow resync-arming for both (boundedFrameJournal).
+	deleteJournal       boundedFrameJournal
+	scopedDeleteJournal boundedFrameJournal
+	lastPeerRxMono      atomic.Int64 // CLOCK_MONOTONIC nanos of last inbound sync msg (#1792)
+	readDeadline        time.Duration
+	peerSilenceLimit    time.Duration
 	// bulkStartMu serializes queued incremental writes with the
 	// table-truth snapshot -> BulkStart boundary (#10283). A bulk holds it
 	// while reading BulkSnapshotSource and until BulkStart is written under
@@ -1797,19 +1736,6 @@ type SessionSync struct {
 	// Highest config generation the peer positively acknowledged as applied.
 	// PeerConfigStale compares this with lastSentConfigGen.
 	peerAppliedConfigGen atomic.Uint64
-	// lastSentConfigAckCapable16756 records, atomically with
-	// lastSentConfigGen, whether the peer incarnation that was current
-	// when the newest generation was sent advertised config-apply-ACK
-	// support (#16756). It lets PeerConfigStale charge a missing ACK
-	// only to a peer that promised one. Cleared when a new peer
-	// incarnation advances (the send that follows re-records it).
-	lastSentConfigAckCapable16756 atomic.Bool
-	// peerConfigNackedGen16756 is the generation of the newest
-	// current-send NACK (#16756 legacy fallback), or 0. A NACK whose
-	// generation is behind lastSentConfigGen is a straggler and is
-	// ignored by the fallback exactly as handleConfigApplyNack ignores
-	// it for the re-push marker.
-	peerConfigNackedGen16756 atomic.Uint64
 
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64
@@ -2041,6 +1967,11 @@ type SessionSync struct {
 	// itself (testBeforeQueuedWrite shape). Test-only; pins the
 	// caps-store-vs-append race deterministically.
 	testBeforeScopedJournalTake func()
+	// testBeforeJournalTake runs in flushDeleteJournal before the journal
+	// take, then nils itself. Test-only twin of
+	// testBeforeScopedJournalTake for the bare flush (#17110 warn-parity
+	// cell drives a concurrent append during the flush).
+	testBeforeJournalTake func()
 	// testDHCPPreCommit, when non-nil, runs after DHCP decode+filter and
 	// before the commit, with NO locks held (so the test may drive reset
 	// + replacement paths from the hook rendezvous). Test-only hook for
@@ -2118,6 +2049,12 @@ func decodeFailoverBatchRequestPayload(payload []byte) ([]int, uint64, error) {
 	return ids, binary.LittleEndian.Uint64(payload[1+count : 1+count+8]), nil
 }
 func encodeFailoverBatchAckPayload(rgIDs []int, status uint8, reqID uint64, detail string) []byte {
+	// #17093: clamp the free-form detail so the payload never exceeds
+	// the FailoverBatchAck per-type cap; an over-cap ack would make a
+	// #16041-or-later peer drop the connection.
+	if maxDetail := (1 + maxFailoverBatchRGCount + 1 + 8 + 4096) - (1 + len(rgIDs) + 1 + 8); len(detail) > maxDetail {
+		detail = detail[:maxDetail]
+	}
 	payload := make([]byte, 1+len(rgIDs)+1+8+len(detail))
 	payload[0] = byte(len(rgIDs))
 	for i, rgID := range rgIDs {
@@ -2185,7 +2122,8 @@ func NewSessionSync(localAddr, peerAddr string, rt clusterRuntime) *SessionSync 
 		peerAddr:                   peerAddr,
 		sendCh:                     make(chan []byte, 4096),
 		sweepWakeCh:                make(chan struct{}, 1),
-		deleteJournalCap:           deleteJournalDefaultCap,
+		deleteJournal:              boundedFrameJournal{cap: deleteJournalDefaultCap},
+		scopedDeleteJournal:        boundedFrameJournal{cap: deleteJournalDefaultCap},
 		failoverWaiters:            make(map[int]failoverWaiter),
 		failoverCommitWaiters:      make(map[int]failoverWaiter),
 		failoverBatchWaiters:       make(map[string]failoverWaiter),
@@ -2295,7 +2233,8 @@ func NewDualSessionSync(local, peer, local1, peer1 string, rt clusterRuntime) *S
 		peerAddr1:                  peer1,
 		sendCh:                     make(chan []byte, 4096),
 		sweepWakeCh:                make(chan struct{}, 1),
-		deleteJournalCap:           deleteJournalDefaultCap,
+		deleteJournal:              boundedFrameJournal{cap: deleteJournalDefaultCap},
+		scopedDeleteJournal:        boundedFrameJournal{cap: deleteJournalDefaultCap},
 		failoverWaiters:            make(map[int]failoverWaiter),
 		failoverCommitWaiters:      make(map[int]failoverWaiter),
 		failoverBatchWaiters:       make(map[string]failoverWaiter),
@@ -2493,67 +2432,37 @@ func (s *SessionSync) SetRuntimeDomains(sessions dataplane.SessionStore, telemet
 }
 
 // Stats returns a point-in-time snapshot of sync statistics.
+//
+// #17107: the uint64 fields are loaded through syncStatFields (see
+// sync_stats.go) so the set Stats() can populate is exactly the
+// descriptor set the statistics render draws from. A SyncStats counter
+// with no descriptor cannot reach the snapshot, and
+// TestSyncStatsSnapshotComplete fails until a descriptor (and a render
+// decision) exists. The derived snapshot fields (string/bool/int/int64)
+// are populated explicitly below; they are RenderNever descriptors.
 func (s *SessionSync) Stats() SyncStatsSnapshot {
 	s.mu.Lock()
 	activeFabric := s.preferredFabricLocked()
 	s.mu.Unlock()
-	return SyncStatsSnapshot{
-		SessionsSent: s.stats.SessionsSent.Load(), SweepSessionsSent: s.stats.SweepSessionsSent.Load(),
-		SessionsReceived: s.stats.SessionsReceived.Load(), SessionsInstalled: s.stats.SessionsInstalled.Load(),
-		DeletesSent: s.stats.DeletesSent.Load(), DeletesReceived: s.stats.DeletesReceived.Load(),
-		BulkSyncs:   s.stats.BulkSyncs.Load(),
-		ConfigsSent: s.stats.ConfigsSent.Load(), ConfigsReceived: s.stats.ConfigsReceived.Load(),
-		ConfigsSentCleartext:           s.stats.ConfigsSentCleartext.Load(),
-		ConfigsReceivedCleartext:       s.stats.ConfigsReceivedCleartext.Load(),
-		CleartextSyncAlarmLatched:      s.stats.CleartextSyncAlarmLatched.Load(),
-		ConfigsStaleIgnored:            s.stats.ConfigsStaleIgnored.Load(),
-		BulkPrimesWithoutIncarnation:   s.stats.BulkPrimesWithoutIncarnation.Load(),
-		PeerBootIncarnation:            s.PeerBootIncarnation().String(),
-		ConfigsDeadIncarnationDropped:  s.stats.ConfigsDeadIncarnationDropped.Load(),
-		BulkEndsDeadIncarnationDropped: s.stats.BulkEndsDeadIncarnationDropped.Load(),
-		ClockSyncsRefused:              s.stats.ClockSyncsRefused.Load(),
-		BulkEndsForeignConnDropped:     s.stats.BulkEndsForeignConnDropped.Load(),
-		BulkEndsEpochOnlyMatched:       s.stats.BulkEndsEpochOnlyMatched.Load(),
-		BulkRecvCapped:                 s.stats.BulkRecvCapped.Load(),
-		BulkRecvAborted:                s.stats.BulkRecvAborted.Load(),
-		ConfigsApplyFailed:             s.stats.ConfigsApplyFailed.Load(),
-		ImportsRefusedByHelper:         s.stats.ImportsRefusedByHelper.Load(),
-		ImportsRejectedByHelper:        s.stats.ImportsRejectedByHelper.Load(),
-		ConfigsQueueFullDropped:        s.stats.ConfigsQueueFullDropped.Load(),
-		ConfigApplyNacksReceived:       s.stats.ConfigApplyNacksReceived.Load(),
-		IPsecSASent:                    s.stats.IPsecSASent.Load(), IPsecSAReceived: s.stats.IPsecSAReceived.Load(),
-		IPsecSAStaleIgnored:         s.stats.IPsecSAStaleIgnored.Load(),
-		IPsecSAMalformedIgnored:     s.stats.IPsecSAMalformedIgnored.Load(),
-		IPsecSAOversizeAlarmLatched: s.stats.IPsecSAOversizeAlarmLatched.Load(),
-		IPsecSAOverCapSets:          s.stats.IPsecSAOverCapSets.Load(),
-		DHCPLeasesSent:              s.stats.DHCPLeasesSent.Load(), DHCPLeasesReceived: s.stats.DHCPLeasesReceived.Load(),
-		DHCPLeasesStaleIgnored: s.stats.DHCPLeasesStaleIgnored.Load(),
-		DHCPLeasesSeeded:       s.stats.DHCPLeasesSeeded.Load(),
-		FencesSent:             s.stats.FencesSent.Load(), FencesReceived: s.stats.FencesReceived.Load(),
-		FenceAcksSent: s.stats.FenceAcksSent.Load(), FenceAcksReceived: s.stats.FenceAcksReceived.Load(),
-		FenceAcksTimedOut: s.stats.FenceAcksTimedOut.Load(), Errors: s.stats.Errors.Load(),
-		DeletesDropped:                       s.stats.DeletesDropped.Load(),
-		PreKeyAuthEvictions:                  s.stats.PreKeyAuthEvictions.Load(),
-		DeletesSuppressedPeerIncapable:       s.stats.DeletesSuppressedPeerIncapable.Load(),
-		DeletesSuppressedPurgeRetirement:     s.stats.DeletesSuppressedPurgeRetirement.Load(),
-		DeletesSuppressedScopedPolicy:        s.stats.DeletesSuppressedScopedPolicy.Load(),
-		InstallsSuppressedNoPeerInstallTable: s.stats.InstallsSuppressedNoPeerInstallTable.Load(),
-		DeletesStaleIgnored:                  s.stats.DeletesStaleIgnored.Load(),
-		InstallsStaleIgnored:                 s.stats.InstallsStaleIgnored.Load(),
-		SessionsStaleConfigIgnored:           s.stats.SessionsStaleConfigIgnored.Load(),
-		GenMapOverflow:                       s.stats.GenMapOverflow.Load(), GenTombstonesEvicted: s.stats.GenTombstonesEvicted.Load(),
-		PreAuthRejected: s.stats.PreAuthRejected.Load(), PreAuthHandshakeFailed: s.stats.PreAuthHandshakeFailed.Load(), OversizeFramesRefused: s.stats.OversizeFramesRefused.Load(), Connected: s.stats.Connected.Load(),
-		ActiveFabric:      activeFabric,
-		BulkSyncStartTime: s.stats.BulkSyncStartTime.Load(), BulkSyncEndTime: s.stats.BulkSyncEndTime.Load(),
-		BulkSyncSessions:   s.stats.BulkSyncSessions.Load(),
-		LastConfigSyncTime: s.stats.LastConfigSyncTime.Load(), LastConfigSyncSize: s.stats.LastConfigSyncSize.Load(),
-		LastFenceSeq: s.stats.LastFenceSeq.Load(), LastFenceAckAt: s.stats.LastFenceAckAt.Load(),
-		GenCapGrown: s.stats.GenCapGrown.Load(), GenCapShrunk: s.stats.GenCapShrunk.Load(),
-		RebaseSaturations:           s.stats.RebaseSaturations.Load(),
-		AuthUpgradeIdentityErrors:   s.stats.AuthUpgradeIdentityErrors.Load(),
-		DHCPLeasesDroppedNoIdentity: s.stats.DHCPLeasesDroppedNoIdentity.Load(),
-		GenGuardSessionCap:          s.genState.genGuardSessionCap.Load(),
+	snap := SyncStatsSnapshot{
+		PeerBootIncarnation:         s.PeerBootIncarnation().String(),
+		CleartextSyncAlarmLatched:   boolSyncStat(s, "CleartextSyncAlarmLatched"),
+		IPsecSAOversizeAlarmLatched: boolSyncStat(s, "IPsecSAOversizeAlarmLatched"),
+		Connected:                   boolSyncStat(s, "Connected"),
+		ActiveFabric:                activeFabric,
+		BulkSyncStartTime:           int64SyncStat(s, "BulkSyncStartTime"),
+		BulkSyncEndTime:             int64SyncStat(s, "BulkSyncEndTime"),
+		LastConfigSyncTime:          int64SyncStat(s, "LastConfigSyncTime"),
+		LastFenceAckAt:              int64SyncStat(s, "LastFenceAckAt"),
 	}
+	for _, f := range syncStatFields {
+		switch f.name {
+		case "PeerBootIncarnation", "CleartextSyncAlarmLatched", "IPsecSAOversizeAlarmLatched", "Connected", "ActiveFabric", "BulkSyncStartTime", "BulkSyncEndTime", "LastConfigSyncTime", "LastFenceAckAt":
+			continue
+		}
+		setSyncStatUint(&snap, f.name, loadSyncStat(s, f.name))
+	}
+	return snap
 }
 
 // IsConnected reports whether a peer sync connection is currently established.
@@ -2627,7 +2536,7 @@ func (s *SessionSync) PeerHealthy() bool {
 	if !s.stats.Connected.Load() {
 		return false
 	}
-	if !s.peerHeartbeatAckEver.Load() {
+	if !s.peerIncarnationState().peerHeartbeatAckEver.Load() {
 		return true
 	}
 	return s.PeerRecentlyActive(s.peerSilenceDuration())
@@ -2866,21 +2775,6 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, b
 	}
 	slog.Info("cluster sync: reconcile stale sessions complete", "deleted", deleted, "elapsed", time.Since(start))
 	return true, inventoryGeneration, inventoryRequested
-}
-
-func (s *SessionSync) FormatStats() string {
-	activeFabric := s.ActiveFabric()
-	fabricStr := "none"
-	if activeFabric >= 0 {
-		fabricStr = fmt.Sprintf("fab%d", activeFabric)
-	}
-	fenceSeq := s.stats.LastFenceSeq.Load()
-	fenceAckAt := s.stats.LastFenceAckAt.Load()
-	fenceAckStr := "never"
-	if fenceAckAt > 0 {
-		fenceAckStr = time.Unix(0, fenceAckAt).Format("Jan 02 15:04:05.000")
-	}
-	return fmt.Sprintf("Session sync statistics:\n"+"  Connected:          %v\n"+"  Active fabric:      %s\n"+"  Sessions sent:      %d\n"+"  Sessions received:  %d\n"+"  Sessions installed: %d\n"+"  Deletes sent:       %d\n"+"  Deletes received:   %d\n"+"  Bulk syncs:         %d\n"+"  Configs sent:       %d\n"+"  Configs received:   %d\n"+"  IPsec SAs sent:     %d\n"+"  IPsec SAs received: %d\n"+"  Fences sent:        %d\n"+"  Fences received:    %d\n"+"  Install fence seq:  %d\n"+"  Last fence ack:     %s\n"+"  Errors:             %d\n", s.stats.Connected.Load(), fabricStr, s.stats.SessionsSent.Load(), s.stats.SessionsReceived.Load(), s.stats.SessionsInstalled.Load(), s.stats.DeletesSent.Load(), s.stats.DeletesReceived.Load(), s.stats.BulkSyncs.Load(), s.stats.ConfigsSent.Load(), s.stats.ConfigsReceived.Load(), s.stats.IPsecSASent.Load(), s.stats.IPsecSAReceived.Load(), s.stats.FencesSent.Load(), s.stats.FencesReceived.Load(), fenceSeq, fenceAckStr, s.stats.Errors.Load())
 }
 
 func (s *SessionSync) PeerIPsecSAs() []string {

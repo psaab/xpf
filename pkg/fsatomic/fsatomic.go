@@ -13,8 +13,12 @@
 //     unacceptable but a lost-on-power-cut update is fine (swanctl,
 //     Kea, networkd snippets): use WriteFileAtomic. This class exists
 //     precisely so hot apply paths never pay an fsync.
-//   - BestEffortKernelKnob — procfs/sysfs writes: keep direct
-//     os.WriteFile; rename is impossible on those filesystems.
+//   - BestEffortKernelKnob — procfs/sysfs writes: rename is impossible
+//     there. The lifecycle primitive is WriteKernelKnob /
+//     WriteKernelKnobVerified plus the KernelKnobs owner registry
+//     (kernel_knob.go, #17068): Assert captures the prior on first
+//     assert, Release restores it with retry debt. Direct os.WriteFile
+//     to a knob outside that primitive is a canary violation.
 //
 // Semantics shared by both writers (deliberate, reviewed in
 // docs/pr/1893-configstore-durability/plan.md):

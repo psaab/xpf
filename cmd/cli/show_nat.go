@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/psaab/xpf/pkg/cliterm"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/nat"
 )
@@ -171,7 +172,7 @@ func (c *ctl) showNATDeterministic(args []string) error {
 		req.Direction = pb.NATDeterministicDirection_NAT_DETERMINISTIC_DIRECTION_FORWARD
 		req.InternalHost = args[1]
 		var err error
-		req.Pool, err = natPoolArg(args[2:])
+		req.Pool, err = cliterm.ParseNATPoolSelector(args[2:])
 		if err != nil {
 			return fmt.Errorf("%s", usage)
 		}
@@ -187,7 +188,7 @@ func (c *ctl) showNATDeterministic(args []string) error {
 		req.Direction = pb.NATDeterministicDirection_NAT_DETERMINISTIC_DIRECTION_REVERSE
 		req.NatIp = args[1]
 		req.NatPort = uint32(port)
-		req.Pool, err = natPoolArg(args[4:])
+		req.Pool, err = cliterm.ParseNATPoolSelector(args[4:])
 		if err != nil {
 			return fmt.Errorf("%s", usage)
 		}
@@ -209,17 +210,6 @@ func (c *ctl) showNATDeterministic(args []string) error {
 		forwardResultFromPB(resp).Render(os.Stdout)
 	}
 	return nil
-}
-
-// natPoolArg parses the optional trailing `pool <name>` selector.
-func natPoolArg(rest []string) (string, error) {
-	if len(rest) == 0 {
-		return "", nil
-	}
-	if len(rest) != 2 || rest[0] != "pool" || rest[1] == "" {
-		return "", fmt.Errorf("expected optional pool <name>")
-	}
-	return rest[1], nil
 }
 
 func forwardResultFromPB(resp *pb.GetNATDeterministicResponse) *nat.ForwardResult {
