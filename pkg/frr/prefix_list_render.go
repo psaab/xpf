@@ -241,10 +241,12 @@ func routeFilterPermitLine(isV6 bool, rf *config.RouteFilter) (string, bool) {
 // by descending base-prefix length (stable, so equal-length filters
 // keep authoring order) and, after each distinct prefix P, interpose a
 // deny covering P through the family maximum (`deny P le <max>`, or
-// bare `deny P` when P is already /32 or /128 because FRR requires
-// `le` to exceed the base length). A route under P that failed P's
-// match type then first-matches the deny and stops instead of falling
-// through to the broader permit.
+// bare `deny P` when P is already /32 or /128 because `le max` on
+// those bases is redundant: the bare deny is the same match set.
+// FRR accepts `le == plen` under its `mask <= ge <= le` rule; omitting
+// `le` here is brevity, not a validity requirement. A route under P
+// that failed P's match type then first-matches the deny and stops
+// instead of falling through to the broader permit.
 // Disjoint bases have no longest-match precedence over each other, so
 // a wholly disjoint list retains authored order and bytes. P == the
 // family root never gets a stop (no broader filter can contain it).
@@ -465,10 +467,12 @@ func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs
 			continue
 		}
 		if e.plen == maxLen {
-			// FRR rejects `le max` when the base is already /32 or
-			// /128. The bare deny is exactly the same set (the base
-			// prefix itself) and is needed for a max-length `longer`
-			// boundary whose match set is empty.
+			// An `le max` on a /32 or /128 base is redundant: the
+			// bare deny is exactly the same match set (the base
+			// prefix itself). FRR accepts `le == plen` under its
+			// `mask <= ge <= le` rule; omitting `le` is brevity,
+			// not a validity requirement. This stop is needed for
+			// a max-length `longer` boundary with an empty set.
 			fmt.Fprintf(definitions, "%s prefix-list %s seq %d deny %s\n", kind, frrName(plName), (seq+1)*5, sanitizeFRRValue(e.rf.Prefix))
 		} else {
 			fmt.Fprintf(definitions, "%s prefix-list %s seq %d deny %s le %d\n", kind, frrName(plName), (seq+1)*5, sanitizeFRRValue(e.rf.Prefix), maxLen)

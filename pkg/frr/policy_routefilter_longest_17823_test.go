@@ -89,8 +89,9 @@ func TestRouteFilterLongest17823SameAddressDifferentPlenStop(t *testing.T) {
 }
 
 // TestRouteFilterLongest17823EmptyLongerBoundary: a valid max-length
-// `longer` over a broader permit emits ONLY a boundary stop. Since FRR
-// rejects `le max` on a /32 or /128, that stop is the bare deny prefix.
+// `longer` over a broader permit emits ONLY a boundary stop. `le max`
+// on a /32 or /128 base is redundant: the bare deny is the same match
+// set. FRR accepts `le == plen` under its `mask <= ge <= le` rule.
 func TestRouteFilterLongest17823EmptyLongerBoundary(t *testing.T) {
 	t.Run("v4", func(t *testing.T) {
 		po := rfPolicy16762(
