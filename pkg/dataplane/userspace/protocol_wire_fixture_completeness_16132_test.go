@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // #16132: fixture-completeness for the Go↔Rust userspace wire.
@@ -174,6 +176,8 @@ func wireSpecimenTypes() map[string]any {
 		"tunnel_endpoint_snapshot":                      &TunnelEndpointSnapshot{},
 		"tunnel_endpoint_snapshot_populated":            &TunnelEndpointSnapshot{},
 		"tunnel_wg_peer_snapshot":                       &TunnelWgPeerWire{},
+		"userspace_snapshot":                            &config.UserspaceConfig{},
+		"shared_umem_snapshot":                          &config.SharedUMEMConfig{},
 		"userspace_capabilities":                        &UserspaceCapabilities{},
 		"wg_peer_status":                                &WgPeerStatus{},
 		"wg_tunnel_status":                              &WgTunnelStatus{},
@@ -227,6 +231,19 @@ var goOnlyKeys = map[string][]string{
 	"TunnelEndpointSnapshot": {"wg_local_privkey_hex"},
 	"TunnelWgPeerWire":       {"wg_preshared_key_hex"},
 	"UserspaceCapabilities":  {"policy_content_rejected"},
+	// #17134: the Go `UserspaceConfig` on the snapshot carries every
+	// helper-process field (paths, poll mode, RSS/tunables retired-knob
+	// bookkeeping); the Rust helper mirrors only the binding-relevant
+	// subtree (workers / ring_entries / shared_umem) in its typed
+	// `UserspaceSnapshot`. The remaining keys are Go-owned and never
+	// read by the helper, so they need no Rust specimen.
+	"UserspaceConfig": {
+		"binary", "claim_host_tunables", "coalescence_adaptive_disabled",
+		"coalescence_adaptive_explicit", "coalescence_rx_usecs",
+		"coalescence_tx_usecs", "control_socket", "cpu_governor",
+		"event_socket", "netdev_budget", "poll_mode",
+		"rss_indirection_disabled", "state_file",
+	},
 	"WorkerRuntimeStatus": {
 		"cold_path_alias_seen", "cold_path_first_key", "cold_path_hist",
 		"cold_path_samples", "cold_path_sum_ns",
@@ -634,4 +651,45 @@ func TestWireFixtureCompleteness16132(t *testing.T) {
 		t.Fatalf("wire fixture completeness compared only %d specimen fields; census is vacuous (want >= 1000)", totalFields)
 	}
 	t.Logf("wire fixture completeness: %d specimens, %d top-level specimen fields compared", len(specimens), totalFields)
+}
+
+// TestWireUserspaceSharedUmemPopulated17134 is the #17134 nested pin: the
+// generic gate above compares only TOP-LEVEL specimen keys, so a
+// `userspace: null` specimen (the pre-#17134 fixture) green-lit a subtree
+// no gate reached — which is how the #5300 `phase0_artifact` ->
+// `phase0_artifact_file` rename drifted. This cell requires the populated
+// ConfigSnapshot specimen to carry a typed `userspace.shared_umem` object
+// and strict-decodes it into the Go config types, so removing or renaming
+// a key on either side reds here.
+func TestWireUserspaceSharedUmemPopulated17134(t *testing.T) {
+	fixture := loadWireFixture16132(t)
+	raw, ok := fixture["config_snapshot_populated"]
+	if !ok {
+		t.Fatal("config_snapshot_populated specimen missing")
+	}
+	var snap struct {
+		Userspace json.RawMessage `json:"userspace"`
+	}
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatalf("decode config_snapshot_populated envelope: %v", err)
+	}
+	if len(snap.Userspace) == 0 || string(snap.Userspace) == "null" {
+		t.Fatal("config_snapshot_populated.userspace is null/absent — the #17134 typed subtree is unpinned")
+	}
+	dec := json.NewDecoder(bytes.NewReader(snap.Userspace))
+	dec.DisallowUnknownFields()
+	var ucfg config.UserspaceConfig
+	if err := dec.Decode(&ucfg); err != nil {
+		t.Fatalf("strict decode populated userspace into config.UserspaceConfig: %v", err)
+	}
+	if ucfg.Workers == 0 || ucfg.RingEntries == 0 {
+		t.Fatalf("populated userspace must carry workers/ring_entries, got %+v", ucfg)
+	}
+	if ucfg.SharedUMEM == nil {
+		t.Fatal("populated userspace.shared_umem is nil — typed subtree unpinned")
+	}
+	if ucfg.SharedUMEM.Mode == "" || len(ucfg.SharedUMEM.Interfaces) == 0 ||
+		ucfg.SharedUMEM.Phase0ArtifactFile == "" {
+		t.Fatalf("populated shared_umem must carry mode/interfaces/phase0_artifact_file, got %+v", ucfg.SharedUMEM)
+	}
 }

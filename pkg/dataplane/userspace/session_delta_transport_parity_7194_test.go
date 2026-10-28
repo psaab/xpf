@@ -2,9 +2,9 @@ package userspace
 
 import (
 	"path/filepath"
-	"reflect"
-	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/wireschema"
 )
 
 // session_delta_transport_parity_7194_test.go — #7194 item 1.
@@ -35,26 +35,18 @@ import (
 // contract between these two programs is the JSON on the wire, so that is what
 // is compared. Pinning the field names instead would encode the wrong SSOT.
 
-// The wire name of a Go field: the json tag before any option, falling back to
-// the field name. `json:"-"` means the field is not on the wire at all.
+// The wire names of the Go consumer: the SINGLE production extractor
+// wireschema.WireNamesOf (#17137). Until #17137 this helper
+// was a second, test-only copy of the extraction and the pkg/daemon
+// production copy was compared with nothing; now the parity guard, the
+// schema-agreement cell and the live daemon gate all derive from the
+// same production function. The map value repeats the wire name (the
+// production extractor intentionally exposes names, not fields).
 func goWireNames7194(t *testing.T) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	typ := reflect.TypeOf(SessionDeltaInfo{})
-	for i := 0; i < typ.NumField(); i++ {
-		f := typ.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		tag := f.Tag.Get("json")
-		name := strings.Split(tag, ",")[0]
-		if name == "-" {
-			continue
-		}
-		if name == "" {
-			name = f.Name
-		}
-		out[name] = f.Name
+	for _, name := range wireschema.WireNamesOf(SessionDeltaInfo{}) {
+		out[name] = name
 	}
 	return out
 }

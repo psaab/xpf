@@ -196,7 +196,7 @@ func TestWithdrawOnceSkipDoesNotSupersedeWhileWithdrawInterfacesDoes_8597(t *tes
 	}
 
 	if started := run(t, func(m *Manager) {
-		m.WithdrawInterfaces([]string{"lo"})
+		m.withdrawInterfacesForTest([]string{"lo"})
 	}); started {
 		t.Error("a WithdrawInterfaces naming lo must STILL supersede lo's restart — it " +
 			"flips goodbyeWanted and takes over the goodbye. If this half fails, the " +
