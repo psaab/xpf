@@ -1024,12 +1024,11 @@ fn icmpv6_fragment_drops() {
     let mut pkt = icmp_pkt(
         IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
         IpAddr::V6("2001:db8::2".parse::<Ipv6Addr>().unwrap()),
-        84,
+        88, // IPv6 length: 40-byte fixed header + 48-byte payload.
     );
     pkt.is_fragment = true;
-    // #16030: icmp_pkt leaves `frag: None`, so teardrop (earlier in
-    // check_fragment_and_route) cannot fire. Give the fragment a legal
-    // 8-byte-multiple data contribution so only icmp-fragment can fire.
+    // #16030: teardrop runs before icmp-fragment; keep this first
+    // fragment's data contribution legal so only icmp-fragment can fire.
     // #17109: first IPv6 fragment, M=1, offset=0; one fragment header
     // leaves 40 bytes of an 8-byte-multiple data contribution.
     pkt.frag = Some(crate::screen::packet::ip_frag::frag_view_v6(0x0001, 48, 8));
@@ -1779,6 +1778,7 @@ fn syn_frag_drops_truncated_ipv6_first_fragment_at_screen() {
     // single 8-byte fragment header -> data 40 (8-byte multiple).
     pkt.frag = Some(crate::screen::packet::ip_frag::frag_view_v6(0x0001, 48, 8));
     pkt.ip_payload_len = 48;
+    pkt.pkt_len = 88; // IPv6 fixed header (40) + payload (48).
     pkt.is_fragment = true;
     pkt.is_first_fragment = true;
     assert_eq!(
