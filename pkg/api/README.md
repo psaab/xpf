@@ -1731,6 +1731,10 @@ the drop fails loudly instead of going quietly vacuous.
     the desired map before a reconcile, adoption requires the live
     leg's recorded scope to match, and pruning after either plane's
     reconcile preserves records for both installed HTTP and HTTPS legs.
+    Scope records advance only after the full leg plan succeeds: if HTTPS
+    certificate planning fails after bind, the candidate socket closes and
+    the retained leg keeps its old scope record, so a later reconcile retries
+    the VRF change rather than adopting the wrong socket.
     The daemon's endpoint fingerprint carries the map so a scope-only
     change still rebinds. Default-VRF legs stay unscoped. Pinned by
     `pkg/api/listener_vrf_16709_test.go` and the real-kernel netns

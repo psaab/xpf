@@ -459,7 +459,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if len(s.httpServers) > 0 {
 		legs := make([]*listenerLeg, 0, len(s.httpServers))
 		for i, srv := range s.httpServers {
-			ln, err := s.listenAddr(srv.Addr)
+			ln, dev, err := s.listenAddr(srv.Addr)
 			if err != nil {
 				if i == 0 {
 					return fmt.Errorf("api: bind HTTP listener %q: %w", srv.Addr, err)
@@ -470,6 +470,7 @@ func (s *Server) Start(ctx context.Context) error {
 				continue
 			}
 			legs = append(legs, s.serveLegLocked(s.httpLegPlanAt(i), ln, false))
+			s.recordLegDevice(srv.Addr, dev)
 			slog.Info("HTTP API server listening", "addr", srv.Addr)
 		}
 		s.httpLegs = legs
@@ -479,7 +480,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if len(s.httpsServers) > 0 {
 		legs := make([]*listenerLeg, 0, len(s.httpsServers))
 		for i, srv := range s.httpsServers {
-			ln, err := s.listenAddr(srv.Addr)
+			ln, dev, err := s.listenAddr(srv.Addr)
 			if err != nil {
 				slog.Error("api: HTTPS listener bind failed at start; HTTPS disabled until the next reconcile",
 					"addr", srv.Addr, "err", err)
@@ -487,6 +488,7 @@ func (s *Server) Start(ctx context.Context) error {
 				continue
 			}
 			legs = append(legs, s.serveLegLocked(s.httpsLegPlanAt(i), ln, true))
+			s.recordLegDevice(srv.Addr, dev)
 			slog.Info("HTTPS API server listening", "addr", srv.Addr)
 		}
 		s.httpsLegs = legs
@@ -789,7 +791,7 @@ func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 		if i < len(legs) && !adopted[legs[i]] {
 			displaced = legs[i]
 		}
-		ln, err := s.listenAddr(addr)
+		ln, dev, err := s.listenAddr(addr)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("api: bind %s listener %q: %w", legKind(isTLS), addr, err))
 			next[i] = displaced // retain the previous leg (fail-closed)
@@ -815,6 +817,7 @@ func (s *Server) reconcileLegsLocked(addrs []string, isTLS bool) error {
 			continue
 		}
 		next[i] = s.serveLegLocked(plan, ln, isTLS)
+		s.recordLegDevice(addr, dev)
 		// displaced is NOT retired here: a later slot may still adopt it
 		// (the [C,A] reorder), and retiring it now would close the very
 		// socket that slot needs. The sweep below retires every leg that

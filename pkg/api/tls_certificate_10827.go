@@ -707,7 +707,7 @@ func (s *Server) recoverHTTPSLegsIfNeeded() {
 		if i < len(s.httpsServers) && s.httpsServers[i] != nil {
 			srv = s.httpsServers[i]
 		}
-		ln, err := s.listenAddr(addr)
+		ln, dev, err := s.listenAddr(addr)
 		if err != nil {
 			slog.Error("api: HTTPS listener bind failed during certificate recovery; HTTPS disabled until the next reconcile", "addr", addr, "err", err)
 			legs = append(legs, nil)
@@ -728,7 +728,7 @@ func (s *Server) recoverHTTPSLegsIfNeeded() {
 			})
 			RegisterHTTPServerTLSState(srv, legSlot)
 			legs = append(legs, s.serveLegLocked(legPlan{srv: srv, slot: slot}, ln, true))
-			servers = append(servers, srv)
+			s.recordLegDevice(addr, dev)
 			slots = append(slots, slot)
 		} else {
 			legSlot := &managementTLSCertificateSlot{}
@@ -739,7 +739,7 @@ func (s *Server) recoverHTTPSLegsIfNeeded() {
 			RegisterHTTPServerTLSState(srv, legSlot)
 			plan := s.httpsLegPlanAt(i)
 			legs = append(legs, s.serveLegLocked(plan, ln, true))
-			servers = append(servers, srv)
+			s.recordLegDevice(addr, dev)
 			slots = append(slots, plan.slot)
 		}
 		slog.Info("HTTPS API server listening (recovered after certificate load)", "addr", addr)
