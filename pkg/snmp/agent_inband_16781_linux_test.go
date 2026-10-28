@@ -28,7 +28,10 @@ import (
 // read times out. The management subtest is the positive control — it
 // passes pre- and post-fix, proving the harness itself can drive the agent.
 // The IPv6 in-band subtest (#17800) exercises the dual-stack listener's
-// actual receive path and source-pinned reply, beyond the ancillary unit pin.
+// actual receive path and source-pinned reply, beyond the ancillary unit
+// pin. It is discriminating, not vacuous: trust0 carries a second global
+// IPv6 address that is a longer-prefix source match for the manager, so the
+// source assertion fails if the IPv6 pktinfo parser arm is disabled.
 func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 	if os.Getenv("XPF_SNMP_INBAND_CHILD_16781") != "1" {
 		mgmtNS, inbandNS, mgmtConn, inbandConn, inband6Conn := snmpInbandFixture16781(t)
@@ -159,9 +162,9 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 }
 
 // snmpInbandFixture16781 builds the appliance netns with fxp0 enslaved to
-// vrf-mgmt (192.0.2.1) and trust0 in the main table (198.51.100.1, plus an
-// optional IPv6 address), with two manager netnses: one reachable only via
-// the management VRF and one in-band.
+// vrf-mgmt (192.0.2.1) and trust0 in the main table (198.51.100.1, plus
+// IPv6 addresses 2001:db8:178::1 and ::3), with two manager netnses: one
+// reachable only via the management VRF and one in-band.
 func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.UDPConn, *net.UDPConn, *net.UDPConn) {
 	t.Helper()
 	runtime.LockOSThread()
@@ -273,6 +276,17 @@ func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.
 	if err := netlink.AddrAdd(trust0, trust6Addr); err != nil {
 		t.Logf("IPv6 in-band cell unavailable: assign trust address: %v", err)
 		trust6Available = false
+	}
+	if trust6Available {
+		trust6SecondaryAddr, err := netlink.ParseAddr("2001:db8:178::3/64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		trust6SecondaryAddr.Flags = int(unix.IFA_F_NODAD)
+		if err := netlink.AddrAdd(trust0, trust6SecondaryAddr); err != nil {
+			t.Logf("IPv6 in-band cell unavailable: assign discriminating trust address: %v", err)
+			trust6Available = false
+		}
 	}
 
 	setupManager := func(ns netns.NsHandle, ifName, cidr, listenIP string) *net.UDPConn {
