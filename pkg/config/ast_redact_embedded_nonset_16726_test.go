@@ -37,6 +37,11 @@ func TestRedactEmbeddedNonSetVerbs16726(t *testing.T) {
 		{"AD user-password via delete", "delete services user-identification active-directory-access user-name svc user-password " + secret16726, secret16726, SecretDataPlaceholder},
 		{"AD user-password via Set", "Set services user-identification active-directory-access user-name svc user-password " + secret16726, secret16726, SecretDataPlaceholder},
 		{"gated password via delete", "delete system archival configuration archive-sites https://example.com/dir password " + secret16726, secret16726, SecretDataPlaceholder},
+		{"bare open-world new-password", "new-password " + secret16726, secret16726, SecretDataPlaceholder},
+		{"bare open-world wifi-password", "wifi-password " + secret16726, secret16726, SecretDataPlaceholder},
+		{"bare open-world auth-token", "auth-token " + secret16726, secret16726, SecretDataPlaceholder},
+		{"bare open-world community-name", "community-name " + secret16726, secret16726, SecretDataPlaceholder},
+		{"bare open-world after apply-groups", "set apply-groups g1 groups g2 new-password " + secret16726, secret16726, SecretDataPlaceholder},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

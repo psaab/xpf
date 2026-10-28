@@ -57,16 +57,19 @@ import (
 //	                          client secret (#16731, unmodelled Junos leaf)
 //	user-password              AD bind credential under active-directory-access
 //	                          (#15996; unmodelled stanza, AST-side only)
-//	credential-shaped keywords (#16731 fail-closed): any keyword containing
-//	                          `secret` or `password`, equal to `auth-token`, or
-//	                          equal to `community-name` masks every trailing
-//	                          token in ANY context. This covers the unmodelled
-//	                          Junos leaves default-chap-secret, local-password,
-//	                          auth-token, community-name and dhcp/dhcp-relay
-//	                          `authentication password` without enumerating
-//	                          their ancestors. Valued `*-key` is deliberately
-//	                          NOT shape-masked: trusted-key/tsig-key/aws-access-key
-//	                          are public identifiers and GRE/chassis `key`
+//	credential-shaped keywords (#16731): schema keyword-position tokens
+//	                          containing `secret` or `password`, or equal
+//	                          to `auth-token` / `community-name`, mask
+//	                          every trailing token. Schema arguments and
+//	                          wildcard instance names never arm this
+//	                          classifier (#17806). Open-world tokens (the
+//	                          path left the modelled grammar, so they are
+//	                          not in a value slot) stay fail-closed: an
+//	                          unmodelled *password*/*secret* leaf masks
+//	                          (#18384 review fold). Valued `*-key` is
+//	                          deliberately NOT shape-masked:
+//	                          trusted-key/tsig-key/aws-access-key are
+//	                          public identifiers and GRE/chassis `key`
 //	                          stays gated on the OSPF md5 pair below.
 
 // SecretDataPlaceholder is the mask emitted in place of a secret leaf value on
@@ -657,7 +660,12 @@ func isSecretKeywordToken16726(k string) bool {
 		"endpoint", "archive-sites":
 		return true
 	}
-	return false
+	// A bare command whose first token is credential-shaped (#16731:
+	// *password*/*secret*, auth-token, community-name) carries its
+	// value at index 1; judging it as a verb would rewrite it to
+	// `set` and drop the keyword before secretIndices could fire
+	// (#18384 fold, Rev18384FoldKimi).
+	return isCredentialShapedKeyword16731(k)
 }
 
 // redactEmbeddedCommands14413 applies embedded-command redaction to the
@@ -998,21 +1006,28 @@ func redactNodes(nodes []*Node, base []string) {
 // required ancestor context so a GRE tunnel `key`, a chassis identity `key` or
 // a routing-policy `community` (all non-secret) are never masked.
 //
-// #16731 fail-closed arm: credential-SHAPED keywords mask in any context.
+// #16731 fail-closed arm: credential-SHAPED keywords mask in any context,
+// but only when the token occupies a schema keyword position. The
+// classifier must not inspect schema argument slots or dynamic instance
+// names: those are identifiers/values, even when they contain `secret` or
+// `password` (`system login user password-admin class read-only`, #17806).
+// The keyword-position walker follows the live schema and skips each
+// recognized keyword's declared arguments. Open-world tokens (schema
+// position lost) are still substring-classified fail-closed, so an
+// unmodelled *password*/*secret* leaf masks instead of leaking
+// (#18384 review fold).
 // The closed enumeration kept missing unmodelled Junos credential leaves
 // (default-chap-secret, local-password, auth-token, community-name,
 // dhcp/dhcp-relay `authentication password`, outbound-ssh `secret`) that
 // commit clean on open-world/inert paths and are live credentials on
-// external systems. Shape, not ancestor enumeration, is the fix: a keyword
-// containing `secret`/`password`, or exactly `auth-token`/`community-name`,
-// has no non-secret valued use in the Junos grammar xpf accepts. Three
-// exact-name exemptions keep non-credentials legible: bare `secret` (a
-// generic token, gated below to api-auth/AAA/outbound-ssh), and the
-// value-less spellings `master-password` (closed container),
-// `no-password-authentication` / `no-passwords` (flags) — masking their
-// trailing tokens would hide the PRF name / sibling statements packed on
-// the same flattened path. Valued `*-key` is NOT shape-masked:
-// `trusted-key`/`tsig-key`/`aws-access-key` are public identifiers.
+// external systems. Three exact-name exemptions keep non-credentials
+// legible: bare `secret` (a generic token, gated below to api-auth/AAA/
+// outbound-ssh), and the value-less spellings `master-password` (closed
+// container), `no-password-authentication` / `no-passwords` (flags) —
+// masking their trailing tokens would hide the PRF name / sibling
+// statements packed on the same flattened path. Valued `*-key` is NOT
+// shape-masked: `trusted-key`/`tsig-key`/`aws-access-key` are public
+// identifiers.
 func isCredentialShapedKeyword16731(k string) bool {
 	switch k {
 	case "auth-token", "community-name":
@@ -1026,14 +1041,121 @@ func isCredentialShapedKeyword16731(k string) bool {
 	return strings.Contains(k, "secret") || strings.Contains(k, "password")
 }
 
+// credentialShapeSchemaRoot17806 is assigned by schema initialization after
+// the groups wildcard is wired. Keeping this as a pointer populated in init
+// avoids a package-initialization dependency cycle through schemaErrorf,
+// which also uses secretIndices.
+var credentialShapeSchemaRoot17806 *schemaNode
+
+// credentialShapePositionWalker17806 follows schema keyword slots once over
+// a flattened path. It avoids allocating a per-token position map and skips
+// declared argument spans as a unit.
+type credentialShapePositionWalker17806 struct {
+	schema    *schemaNode
+	skipUntil int
+	// inMultiValueRun: inside a childless multi leaf's value run —
+	// every remaining token is a value of that leaf until the walk
+	// would resolve a token as a sibling keyword (a container/leaf
+	// with children); such a sibling ends the run.
+	inMultiValueRun bool
+	multiParent     *schemaNode
+}
+
+// position reports whether fp[index] is a schema child keyword or a value/
+// identifier slot. The remaining false/false case is an open-world token.
+func (w *credentialShapePositionWalker17806) position(fp []string, index int) (schemaKeyword, valuePosition, positionKnown bool) {
+	if w.inMultiValueRun {
+		// A compound credential token (password-admin, secret-agent)
+		// is a VALUE, not a keyword — it never ends the run. A bare
+		// credential keyword (password, pre-shared-key, ...) DOES
+		// end the run so its gated/distinctive arm can fire —
+		// `archive-sites <url> password <v>` must mask (verified by
+		// TestRedactEmbeddedNonSetVerbs16726/gated_password). A
+		// sibling child with children of its own also ends the run.
+		// Either way the walker resumes at the leaf's PARENT schema
+		// so the run-ending token classifies normally.
+		k := fp[index]
+		endRun := k == "pre-shared-key" ||
+			(!strings.Contains(k, "-") && isCredentialShapedKeyword16731(k))
+		if !endRun {
+			if _, ok := w.multiParent.children[k]; ok {
+				// ANY resolvable sibling ends the run: containers,
+				// plain leaves, and wildcard-only siblings (groups)
+				// alike start a new statement whose tokens must
+				// classify through the schema (Rev18384FinalKimi:
+				// apply-groups -> groups leak).
+				endRun = true
+			}
+		}
+		if endRun {
+			w.schema = w.multiParent
+			w.inMultiValueRun = false
+			w.multiParent = nil
+		} else {
+			return false, true, true
+		}
+	}
+	if index < w.skipUntil {
+		return false, true, true
+	}
+	if index == 0 {
+		switch fp[index] {
+		case "set", "delete", "activate", "deactivate", "insert",
+			"rename", "copy", "replace", "annotate", "protect",
+			"unprotect":
+			w.skipUntil = index + 1
+			return false, true, true
+		}
+	}
+	if w.schema == nil {
+		return false, false, false
+	}
+	child, ok := w.schema.children[fp[index]]
+	if !ok {
+		if w.schema.wildcard != nil {
+			// The token occupies a dynamic name slot; descend into that
+			// instance's schema for the next token.
+			w.schema = w.schema.wildcard
+			w.skipUntil = index + 1
+			return false, true, true
+		}
+		// Open-world token: the path has left the known grammar.
+		w.schema = nil
+		return false, false, false
+	}
+	consumed, next := consumeNodeKeys(fp[index:], child)
+	if child.multi && len(child.children) == 0 {
+		// A multi-value leaf (e.g. domain-search, args:1 multi:true):
+		// every remaining token is a value of this leaf until a
+		// sibling keyword (above) ends the run — consumeNodeKeys
+		// counts only args, so later values must not fall into the
+		// open-world arm (#18384 fold, Rev18384FoldR2Kimi).
+		parent := w.schema
+		w.inMultiValueRun = true
+		w.multiParent = parent
+		w.schema = nil
+		w.skipUntil = index + consumed
+		return true, false, true
+	}
+	w.schema = next
+	w.skipUntil = index + consumed
+	return true, false, true
+}
+
 func secretIndices(fp []string) []int {
 	var out []int
+	positionWalker := credentialShapePositionWalker17806{schema: credentialShapeSchemaRoot17806}
 	for i, k := range fp {
-		// #16731: fail closed on credential-shaped keywords in any context.
-		// Checked before the switch so gated keywords (password, secret via
-		// outbound-ssh, user-password) cannot fall through unmasked when
-		// their ancestor gate misses an unmodelled subtree.
-		if isCredentialShapedKeyword16731(k) {
+		schemaKeyword, valuePosition, positionKnown := positionWalker.position(fp, i)
+		// The broad shape classifier applies only to schema keywords.
+		// In the open world (path left the modelled grammar) a
+		// credential-shaped token is not a value position, so it
+		// stays fail-closed (#16731): an unmodelled *password*/
+		// *secret* leaf masks its value rather than leaking it
+		// (#18384 review fold; unmodelled spellings need no
+		// enumeration — the fail-closed arm covers them).
+		if isCredentialShapedKeyword16731(k) && !valuePosition &&
+			(schemaKeyword || !positionKnown) {
 			for j := i + 1; j < len(fp); j++ {
 				out = append(out, j)
 			}
@@ -1119,7 +1241,7 @@ func secretIndices(fp []string) []int {
 			// `password` directly under `services authentication-source` /
 			// `device-information` (or the `security` spellings below)
 			// matched no scope and rendered in cleartext.
-			if containsAnyOf(fp[:i], "api-auth", "dynamic-dns", "archive-sites", "user-identification", "access",
+			if !valuePosition && containsAnyOf(fp[:i], "api-auth", "dynamic-dns", "archive-sites", "user-identification", "access",
 				"active-directory-access", "identity-management", "local-authentication-table",
 				"authentication-source", "device-information") {
 				for j := i + 1; j < len(fp); j++ {
@@ -1134,7 +1256,7 @@ func secretIndices(fp []string) []int {
 			// (#16731: `system services outbound-ssh client <c> secret <s>`
 			// is an unmodelled Junos leaf whose value is live on the
 			// management server).
-			if isAPIAuthNamedKeySecretPath(fp[:i]) || isAAASecretPath(fp[:i]) || containsAnyOf(fp[:i], "outbound-ssh") {
+			if !valuePosition && (isAPIAuthNamedKeySecretPath(fp[:i]) || isAAASecretPath(fp[:i]) || containsAnyOf(fp[:i], "outbound-ssh")) {
 				for j := i + 1; j < len(fp); j++ {
 					out = append(out, j)
 				}

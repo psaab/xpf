@@ -523,6 +523,11 @@ func init() {
 	}
 	registerSchemaKeywords(setSchema)
 	registerSchemaKeywords(groupWild)
+	// The credential-shape path classifier shares the live schema grammar,
+	// but secretIndices is also called from schema error scrubbing. Assign
+	// the pointer only after setSchema is fully initialized to avoid a
+	// package-variable initialization cycle.
+	credentialShapeSchemaRoot17806 = setSchema
 	// #16147 (R3, step 3 LAST): fail loud at startup on any static
 	// SchemaRef whose path no longer resolves, naming every dead ref
 	// at once. This runs after the groups-wildcard wiring above and
