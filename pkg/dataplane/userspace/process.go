@@ -345,8 +345,8 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 			if restartAttempt && pendingCrashRetry && m.proc == nil {
 				// A failed retry is a new crash-loop data point (NM-1):
 				// unless its published child exit was already routed
-				// through the crash handler by stopLocked (bringUpGen
-				// cleared by that handler's teardown), charge it here so
+				// through the crash handler by stopLocked (marked via
+				// retryChildExitCountedLocked), charge it here so
 				// a helper that never starts keeps escalating and the
 				// operator is notified. If the child was already
 				// counted, its schedule emitted exactly one timer and
