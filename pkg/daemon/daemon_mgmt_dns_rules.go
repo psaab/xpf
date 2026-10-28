@@ -23,11 +23,12 @@ const (
 	// to the management table. Keep each miss shadow adjacent to its lookup so
 	// a missing table-999 route cannot fall through to main's WAN default.
 	// Only DNS traffic is steered (#14971): each protocol gets its own
-	// lookup/shadow pair scoped by the ip-protocol attribute plus
-	// non-DNS host traffic to a nameserver's IP (SSH, NTP, monitoring, ...)
-	// keeps its main-table route instead of being hijacked into table 999 or
-	// blackholed by the shadow. Legacy unscoped pairs (UDP/TCP priorities
-	// 2500/2501) are reconciled away as invalid (#14971 migration).
+	// lookup/shadow pair scoped by the ip-protocol attribute plus destination
+	// port 53, so non-DNS host traffic to a nameserver's IP (SSH, NTP,
+	// monitoring, ...) keeps its main-table route instead of being hijacked
+	// into table 999 or blackholed by the shadow. Legacy unscoped pairs
+	// (UDP/TCP priorities 2500/2501) are reconciled away as invalid
+	// (#14971 migration).
 	mgmtDNSUDPRulePriority    = 2500
 	mgmtDNSUDPShadowPriority  = mgmtDNSUDPRulePriority + 1
 	mgmtDNSTCPRulePriority    = 2502
