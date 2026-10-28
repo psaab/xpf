@@ -72,6 +72,7 @@ const (
 	BpfrxService_GetSystemInfo_FullMethodName             = "/xpf.v1.BpfrxService/GetSystemInfo"
 	BpfrxService_SystemAction_FullMethodName              = "/xpf.v1.BpfrxService/SystemAction"
 	BpfrxService_Complete_FullMethodName                  = "/xpf.v1.BpfrxService/Complete"
+	BpfrxService_GetClusterHAState_FullMethodName         = "/xpf.v1.BpfrxService/GetClusterHAState"
 )
 
 // BpfrxServiceClient is the client API for BpfrxService service.
@@ -142,6 +143,8 @@ type BpfrxServiceClient interface {
 	SystemAction(ctx context.Context, in *SystemActionRequest, opts ...grpc.CallOption) (*SystemActionResponse, error)
 	// Tab completion
 	Complete(ctx context.Context, in *CompleteRequest, opts ...grpc.CallOption) (*CompleteResponse, error)
+	// Typed HA state for rolling / kernel-drain safety predicates (#17095).
+	GetClusterHAState(ctx context.Context, in *GetClusterHAStateRequest, opts ...grpc.CallOption) (*GetClusterHAStateResponse, error)
 }
 
 type bpfrxServiceClient struct {
@@ -718,6 +721,16 @@ func (c *bpfrxServiceClient) Complete(ctx context.Context, in *CompleteRequest, 
 	return out, nil
 }
 
+func (c *bpfrxServiceClient) GetClusterHAState(ctx context.Context, in *GetClusterHAStateRequest, opts ...grpc.CallOption) (*GetClusterHAStateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetClusterHAStateResponse)
+	err := c.cc.Invoke(ctx, BpfrxService_GetClusterHAState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // BpfrxServiceServer is the server API for BpfrxService service.
 // All implementations must embed UnimplementedBpfrxServiceServer
 // for forward compatibility.
@@ -786,6 +799,8 @@ type BpfrxServiceServer interface {
 	SystemAction(context.Context, *SystemActionRequest) (*SystemActionResponse, error)
 	// Tab completion
 	Complete(context.Context, *CompleteRequest) (*CompleteResponse, error)
+	// Typed HA state for rolling / kernel-drain safety predicates (#17095).
+	GetClusterHAState(context.Context, *GetClusterHAStateRequest) (*GetClusterHAStateResponse, error)
 	mustEmbedUnimplementedBpfrxServiceServer()
 }
 
@@ -954,6 +969,9 @@ func (UnimplementedBpfrxServiceServer) SystemAction(context.Context, *SystemActi
 }
 func (UnimplementedBpfrxServiceServer) Complete(context.Context, *CompleteRequest) (*CompleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Complete not implemented")
+}
+func (UnimplementedBpfrxServiceServer) GetClusterHAState(context.Context, *GetClusterHAStateRequest) (*GetClusterHAStateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetClusterHAState not implemented")
 }
 func (UnimplementedBpfrxServiceServer) mustEmbedUnimplementedBpfrxServiceServer() {}
 func (UnimplementedBpfrxServiceServer) testEmbeddedByValue()                      {}
@@ -1902,6 +1920,24 @@ func _BpfrxService_Complete_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _BpfrxService_GetClusterHAState_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetClusterHAStateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(BpfrxServiceServer).GetClusterHAState(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: BpfrxService_GetClusterHAState_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(BpfrxServiceServer).GetClusterHAState(ctx, req.(*GetClusterHAStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // BpfrxService_ServiceDesc is the grpc.ServiceDesc for BpfrxService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2104,6 +2140,10 @@ var BpfrxService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Complete",
 			Handler:    _BpfrxService_Complete_Handler,
+		},
+		{
+			MethodName: "GetClusterHAState",
+			Handler:    _BpfrxService_GetClusterHAState_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

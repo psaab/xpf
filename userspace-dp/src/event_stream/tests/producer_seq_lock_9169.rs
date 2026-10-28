@@ -269,7 +269,7 @@ fn refresh_status_publishes_the_producer_seq_lock_pair_9169() {
          reading below cannot be a pre-existing value",
     );
 
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     assert_eq!(
         state
