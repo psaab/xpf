@@ -979,7 +979,6 @@ type credentialShapePositionWalker17806 struct {
 	skipUntil int
 }
 
-
 // position reports whether fp[index] is a schema child keyword or a value/
 // identifier slot. The remaining false/false case is an open-world token.
 func (w *credentialShapePositionWalker17806) position(fp []string, index int) (schemaKeyword, valuePosition, positionKnown bool) {
@@ -1027,8 +1026,8 @@ func secretIndices(fp []string) []int {
 		// credential-shaped token is not a value position, so it
 		// stays fail-closed (#16731): an unmodelled *password*/
 		// *secret* leaf masks its value rather than leaking it
-		// (#18384 review fold; the five recognizers remain as
-		// documentation of modelled open-world leaves, now subsumed).
+		// (#18384 review fold; unmodelled spellings need no
+		// enumeration — the fail-closed arm covers them).
 		if isCredentialShapedKeyword16731(k) && !valuePosition &&
 			(schemaKeyword || !positionKnown) {
 			for j := i + 1; j < len(fp); j++ {

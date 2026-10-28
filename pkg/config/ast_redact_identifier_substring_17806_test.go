@@ -200,6 +200,7 @@ func TestOpenWorldCredentialShapeStaysFailClosed17806(t *testing.T) {
 	// (this is the pre-#17806 open-world behavior, kept deliberately).
 	for _, fp := range [][]string{
 		{"unmodelled", "password-admin", "class", "read-only"},
+		{"unmodelled", "password", "class", "read-only"},
 		{"unmodelled", "secret-agent", "class", "operator"},
 	} {
 		got := secretIndices(fp)
