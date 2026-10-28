@@ -2271,16 +2271,9 @@ pub(in crate::afxdp) fn cos_queue_accepts_prepared(
 }
 
 pub(in crate::afxdp) fn cos_queue_dscp_rewrite(
-    binding: &BindingWorker,
-    root_ifindex: i32,
-    queue_idx: usize,
+    queue: Option<&crate::afxdp::types::CoSQueueRuntime>,
 ) -> Option<u8> {
-    binding
-        .cos
-        .cos_interfaces
-        .get(&root_ifindex)
-        .and_then(|root| root.queues.get(queue_idx))
-        .and_then(|queue| queue.config.dscp_rewrite)
+    queue.and_then(|queue| queue.config.dscp_rewrite)
 }
 
 fn enqueue_cos_item(

@@ -4,8 +4,8 @@
 use std::sync::atomic::Ordering;
 
 use crate::afxdp::binding_state::{
-    bucket_index_for_ns, tx_batch_bucket, OwnerProfileOwnerWrites,
-    TX_SIDECAR_UNSTAMPED, TX_SUBMIT_LAT_BUCKETS,
+    bucket_index_for_ns, tx_batch_bucket, OwnerProfileOwnerWrites, TX_SIDECAR_UNSTAMPED,
+    TX_SUBMIT_LAT_BUCKETS,
 };
 use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::UMEM_FRAME_SHIFT;
@@ -120,7 +120,6 @@ pub(in crate::afxdp) fn record_kick_latency(owner: &OwnerProfileOwnerWrites, del
         .fetch_add(delta_ns, Ordering::Relaxed);
 }
 
-
 /// #16242: record one TX-ring commit of `inserted` descriptors into
 /// the per-commit histogram and accumulate the descriptors toward the
 /// next kick. Called once per `writer.commit()` at every TX submit
@@ -130,17 +129,25 @@ pub(in crate::afxdp) fn record_kick_latency(owner: &OwnerProfileOwnerWrites, del
 /// add on the worker-local accumulator — no allocation, no clock read.
 #[inline]
 pub(in crate::afxdp) fn record_tx_commit(binding: &mut BindingWorker, inserted: u32) {
+    record_tx_commit_fields(&binding.live, &mut binding.tx_pipeline, inserted);
+}
+
+#[inline]
+pub(in crate::afxdp) fn record_tx_commit_fields(
+    live: &crate::afxdp::binding_state::BindingLiveState,
+    tx_pipeline: &mut crate::afxdp::worker::WorkerTxPipeline,
+    inserted: u32,
+) {
     if inserted == 0 {
         return;
     }
-    let owner = &binding.live.owner_profile_owner;
+    let owner = &live.owner_profile_owner;
     owner.tx_batch_hist[tx_batch_bucket(inserted)].fetch_add(1, Ordering::Relaxed);
     owner.tx_batch_commits.fetch_add(1, Ordering::Relaxed);
     owner
         .tx_batch_descriptors
         .fetch_add(u64::from(inserted), Ordering::Relaxed);
-    binding.tx_pipeline.tx_pending_kick_descriptors = binding
-        .tx_pipeline
+    tx_pipeline.tx_pending_kick_descriptors = tx_pipeline
         .tx_pending_kick_descriptors
         .saturating_add(inserted);
 }
@@ -154,11 +161,19 @@ pub(in crate::afxdp) fn record_tx_commit(binding: &mut BindingWorker, inserted: 
 /// signal.
 #[inline]
 pub(in crate::afxdp) fn record_tx_kick_batch(binding: &mut BindingWorker) {
-    let pending = core::mem::take(&mut binding.tx_pipeline.tx_pending_kick_descriptors);
+    record_tx_kick_batch_fields(&binding.live, &mut binding.tx_pipeline);
+}
+
+#[inline]
+pub(in crate::afxdp) fn record_tx_kick_batch_fields(
+    live: &crate::afxdp::binding_state::BindingLiveState,
+    tx_pipeline: &mut crate::afxdp::worker::WorkerTxPipeline,
+) {
+    let pending = core::mem::take(&mut tx_pipeline.tx_pending_kick_descriptors);
     if pending == 0 {
         return;
     }
-    let owner = &binding.live.owner_profile_owner;
+    let owner = &live.owner_profile_owner;
     owner.tx_kick_batch_hist[tx_batch_bucket(pending)].fetch_add(1, Ordering::Relaxed);
     owner.tx_kick_batch_kicks.fetch_add(1, Ordering::Relaxed);
     owner

@@ -14,13 +14,13 @@
 
 use std::sync::Arc;
 
-use crate::afxdp::{tx_frame_capacity, COS_EXACT_QUEUE_LEASE_BANK_BYTES};
 use crate::afxdp::types::{
     AcquireV8ShortfallCause, CoSInterfaceRuntime, CoSQueueRuntime, SharedCoSQueueLease,
     SharedCoSRootLease,
 };
 use crate::afxdp::worker::BindingWorker;
 use crate::afxdp::worker_runtime::CoSQueueLeaseUndergrantCounters;
+use crate::afxdp::{tx_frame_capacity, COS_EXACT_QUEUE_LEASE_BANK_BYTES};
 
 /// Default (unset) floor for both root and per-queue burst-byte caps
 /// (64 × default MTU = 96 KB). Applied only when no explicit value was
@@ -75,9 +75,7 @@ impl CoSQueueLeaseAcquireTelemetry {
     #[inline]
     pub(in crate::afxdp) fn add_assign(&mut self, other: Self) {
         self.v8_calls = self.v8_calls.wrapping_add(other.v8_calls);
-        self.v8_granted_bytes = self
-            .v8_granted_bytes
-            .wrapping_add(other.v8_granted_bytes);
+        self.v8_granted_bytes = self.v8_granted_bytes.wrapping_add(other.v8_granted_bytes);
         if other.v8_shortfall_cause != AcquireV8ShortfallCause::None {
             self.v8_shortfall_cause = other.v8_shortfall_cause;
         }
@@ -409,8 +407,15 @@ pub(in crate::afxdp) fn cos_refill_ns_until(
 }
 
 pub(in crate::afxdp) fn release_cos_root_lease(binding: &mut BindingWorker, root_ifindex: i32) {
-    let released = binding
-        .cos
+    release_cos_root_lease_on_cos(&mut binding.cos, root_ifindex);
+}
+
+/// #17186: field-split form for callers holding only `&mut WorkerCos`.
+pub(in crate::afxdp) fn release_cos_root_lease_on_cos(
+    cos: &mut crate::afxdp::worker::WorkerCos,
+    root_ifindex: i32,
+) {
+    let released = cos
         .cos_interfaces
         .get_mut(&root_ifindex)
         .map(|root| core::mem::take(&mut root.tokens))
@@ -418,8 +423,7 @@ pub(in crate::afxdp) fn release_cos_root_lease(binding: &mut BindingWorker, root
     if released == 0 {
         return;
     }
-    if let Some(shared_root_lease) = binding
-        .cos
+    if let Some(shared_root_lease) = cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_root_lease.as_ref())
