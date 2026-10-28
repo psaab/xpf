@@ -5496,6 +5496,21 @@ fn zone_pair_adapter_override_verbatim_17240() {
         from_zone, "zero-zone",
         "zero-id override must return verbatim, not erase to empty"
     );
+    // No override, from-zone id 0 WITH a reverse name: production never
+    // inserts id 0 into `zone_id_to_name` (forwarding_build/zones.rs
+    // skips id 0), but a hand-built state can. The deleted twin's
+    // no-override from-zone lookup was `ifindex_to_zone_id` ->
+    // `zone_id_to_name` with no zero special-case, so it returned
+    // `zero` here; the adapter must not erase it via a `0 => ""` arm.
+    // (The TO-zone keeps its `0 => ""` arm: the twin special-cased
+    // zero only there.)
+    state.ifindex_to_zone_id.insert(30, 0);
+    state.zone_id_to_name.insert(0, "zero".to_string());
+    let (from_zone, _) = zone_pair_for_flow_with_override(&state, 30, None, 12);
+    assert_eq!(
+        from_zone, "zero",
+        "no-override from-zone with id 0 and reverse name 'zero' must return 'zero', not erase to empty"
+    );
 }
 
 #[test]

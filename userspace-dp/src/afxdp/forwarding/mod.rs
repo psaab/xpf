@@ -48,15 +48,15 @@ pub(super) fn zone_pair_for_flow(
 }
 
 // #17240: test-only String adapter over the production u32 resolver.
-// Single source of truth is `zone_pair_ids_for_flow_with_override`;
-// the to-zone (and the from-zone when there is no override) comes from
-// that resolver's ids mapped back through `zone_id_to_name`, so it
-// cannot drift from production as the former hand-rolled twin did
-// (#6713). An override name is NOT round-tripped through
-// name -> id -> name: the deleted twin returned every `Some(zone)`
-// verbatim, and a hand-built non-bijective test state (alias name,
-// id with no reverse name, id 0) must observe that same verbatim
-// string, not the canonical name / "" the round-trip would produce.
+// The to-zone comes from that resolver's egress id. The no-override
+// from-zone deliberately keeps the deleted twin's direct
+// ifindex -> zone id -> name lookup: unlike the to-zone, it did not
+// special-case id 0. Production zone building excludes id 0, but a
+// hand-built test state can name it. An override name is NOT
+// round-tripped through name -> id -> name: the deleted twin returned
+// every `Some(zone)` verbatim, and a hand-built non-bijective state
+// (alias name, id with no reverse name, id 0) must observe that same
+// verbatim string, not a canonical name or "".
 #[cfg(test)]
 pub(super) fn zone_pair_for_flow_with_override(
     forwarding: &ForwardingState,
@@ -64,9 +64,9 @@ pub(super) fn zone_pair_for_flow_with_override(
     ingress_zone_override: Option<&str>,
     egress_ifindex: i32,
 ) -> (String, String) {
-    let (from_id, to_id) =
+    let (_, to_id) =
         zone_pair_ids_for_flow_with_override(forwarding, ingress_ifindex, None, egress_ifindex);
-    let name = |id: u32| match id {
+    let to_name = |id: u32| match id {
         0 => String::new(),
         id => forwarding
             .zone_id_to_name
@@ -74,14 +74,18 @@ pub(super) fn zone_pair_for_flow_with_override(
             .cloned()
             .unwrap_or_default(),
     };
-    // `Some(zone)` returns the override verbatim (deleted-twin contract);
-    // only the `None` path resolves via ifindex -> id -> name, where
-    // id 0 / a missing reverse name yields "" exactly as the twin did.
+    // Only the to-zone preserves the deleted twin's id-0 special-case.
+    // Its no-override from-zone resolved directly through both maps.
     let from_zone = match ingress_zone_override {
         Some(zone) => zone.to_string(),
-        None => name(from_id),
+        None => forwarding
+            .ifindex_to_zone_id
+            .get(&ingress_ifindex)
+            .and_then(|id| forwarding.zone_id_to_name.get(id))
+            .cloned()
+            .unwrap_or_default(),
     };
-    (from_zone, name(to_id))
+    (from_zone, to_name(to_id))
 }
 
 /// #7480: the NoRoute slow-path adjudication decision, extracted so it can be
