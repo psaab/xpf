@@ -199,11 +199,12 @@ jobs:
       # #17200: clippy gate. Clippy could not complete on this crate
       # until #17200 (deny-by-default `clippy::mut_from_ref` and a
       # `never_loop` test), so its 246 `#[expect(clippy::…)]`
-      # attributes were unfalsifiable. `make clippy-rust` runs the full
-      # `--all-targets` clippy (must exit 0; a stale expect reds it via
-      # `unfulfilled_lint_expectations`) plus a second pass denying
-      # `clippy::correctness` and `clippy::suspicious`. Like the compile
-      # check above.
+      # attributes were unfalsifiable. `make clippy-rust` leg 1 runs
+      # the full `--all-targets` clippy with
+      # `-D unfulfilled_lint_expectations`, so a stale expect reds it
+      # (that lint is warn-level, so the targeted deny — not
+      # `-D warnings` — is what makes it gating); leg 2 denies
+      # `clippy::correctness` and `clippy::suspicious`.
       - name: Clippy Rust workspace and all targets (#17200)
         env:
           CARGO: cargo

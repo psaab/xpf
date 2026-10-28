@@ -575,11 +575,14 @@ test-rust: check-userspace-dt-needed
 # complete on this crate until #17200 (deny-by-default
 # `clippy::mut_from_ref` at umem/mmap.rs and `clippy::never_loop` in a
 # #15950 test), so the 246 `#[expect(clippy::…)]` attributes were
-# unfalsifiable ceremony. This target makes them falsifiable: the full
-# `--all-targets` run must exit 0, and `-D clippy::correctness
-# -D clippy::suspicious` deny the two groups that must never regress.
-# A stale `#[expect]` (a suppressed lint that no longer fires) is
-# `unfulfilled_lint_expectations` and also reds the plain run. The
+# unfalsifiable ceremony. This target makes them falsifiable: leg 1
+# runs the full `--all-targets` clippy with
+# `-D unfulfilled_lint_expectations`, so a stale `#[expect]` (a
+# suppressed lint that no longer fires) reds the gate instead of
+# staying a warn-level diagnostic among ~2.7k warn-level warnings.
+# `-D warnings` is deliberately NOT used: leg 1 is not warning-clean
+# enough for it. Leg 2 denies `clippy::correctness` and
+# `clippy::suspicious`, the two groups that must never regress. The
 # shim-parity tests deliberately load the same `userspace-xdp/src/*.rs`
 # file as a module from several test modules (each executes the real
 # shim source on the host), so `clippy::duplicate_mod` is allowed for
@@ -589,7 +592,7 @@ test-rust: check-userspace-dt-needed
 # beside the all-targets compile check.
 .PHONY: clippy-rust
 clippy-rust:
-	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D unfulfilled_lint_expectations
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -A clippy::duplicate_mod
 
 # #10204: prove the release helper's static snapshot provenance and dynamic
