@@ -179,8 +179,8 @@ func TestCredentialShapeKeywordPosition17806(t *testing.T) {
 
 // TestOpenWorldCredentialShapeStaysFailClosed17806 pins the #18384
 // review fold: a credential-shaped leaf outside the modelled grammar
-// must mask (fail-closed, #16731), while an identifier-shaped token
-// there keeps trailing tokens visible.
+// must mask (fail-closed, #16731); a bare unmodelled root is likewise
+// fail-closed even for identifier-shaped tokens.
 func TestOpenWorldCredentialShapeStaysFailClosed17806(t *testing.T) {
 	for _, fp := range [][]string{
 		{"unmodelled-thing", "new-password", "LEAK17806-OPEN"},
