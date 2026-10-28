@@ -102,10 +102,9 @@ impl BindingLiveState {
     /// pending" — the separate poison path in `push_session_delta` already
     /// latched loss-of-sync, so this avoids double-counting.
     pub(in crate::afxdp) fn has_pending_session_deltas(&self) -> bool {
-        self.pending_session_deltas
-            .lock()
-            .map(|pending| !pending.is_empty())
-            .unwrap_or(false)
+        // #17201: recover the committed buffer on poison instead of
+        // reading poison as "not pending".
+        !crate::sync_util::lock_tolerant(&self.pending_session_deltas).is_empty()
     }
 
     /// #16630: true if the RPC-fallback buffer still holds an undrained
@@ -115,10 +114,10 @@ impl BindingLiveState {
     /// treated as "not pending" — the poison path already latched
     /// loss-of-sync unconditionally.
     pub(in crate::afxdp) fn has_pending_incremental_session_deltas(&self) -> bool {
-        self.pending_session_deltas
-            .lock()
-            .map(|pending| pending.iter().any(|(_, bulk)| !*bulk))
-            .unwrap_or(false)
+        // #17201: recover the committed buffer on poison (see above).
+        crate::sync_util::lock_tolerant(&self.pending_session_deltas)
+            .iter()
+            .any(|(_, bulk)| !*bulk)
     }
 
     /// #5290: arm the per-binding loss-of-sync latch. Called by the control-

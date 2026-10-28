@@ -1406,7 +1406,7 @@ impl WgEngine {
     /// persistent keepalive on an already-established peer.
     #[cfg(test)]
     pub(crate) fn set_keepalive_for_test(&self, pubkey: &[u8; 32], secs: u16) {
-        let _guard = self.reconcile_lock.lock().unwrap();
+        let _guard = crate::sync_util::lock_tolerant(&self.reconcile_lock);
         let old = self.table.load_full();
         let mut peers: Vec<PeerEntry> = Vec::with_capacity(old.peers.len());
         for entry in old.peers.iter() {
@@ -1458,7 +1458,7 @@ impl WgEngine {
             .write()
             .unwrap()
             .insert(session.local_index, session.clone());
-        *peer.current.write().unwrap() = Some(session);
+        *crate::sync_util::write_tolerant(&peer.current) = Some(session);
     }
 
     /// Long-lived session/timer state for a peer (NOT its config).

@@ -323,7 +323,8 @@ fn apply_resolution(
                         .counters
                         .resolve_ok
                         .fetch_add(1, Ordering::Relaxed);
-                    if let Ok(mut map) = shared.resolved.lock() {
+                    {
+                        let mut map = crate::sync_util::lock_tolerant(&shared.resolved);
                         let prior = map.insert(*pubkey, addr);
                         if prior != Some(addr) {
                             shared
@@ -361,11 +362,9 @@ fn apply_resolution(
             // address is retained across a failed lookup.
         }
     }
-    shared
-        .resolved
-        .lock()
-        .map(|m| m.contains_key(pubkey))
-        .unwrap_or(false)
+    // #17201: recover the committed map on poison instead of reading
+    // poison as "not resolved".
+    crate::sync_util::lock_tolerant(&shared.resolved).contains_key(pubkey)
 }
 
 /// A pass with the blocking lookup injected, so concurrency can be tested
@@ -457,9 +456,7 @@ where
 }
 
 fn set_last_error(shared: &ResolverShared, msg: String) {
-    if let Ok(mut slot) = shared.telemetry.last_error.lock() {
-        *slot = Some(msg);
-    }
+    *crate::sync_util::lock_tolerant(&shared.telemetry.last_error) = Some(msg);
 }
 
 fn resolver_thread(
