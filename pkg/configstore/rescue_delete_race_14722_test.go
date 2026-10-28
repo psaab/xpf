@@ -174,12 +174,10 @@ func TestSaveRescueConfigNewestWins_14722(t *testing.T) {
 // the unlink lands — while a later save runs. Before the fix the
 // delete released rescueMu before unlinking, so the later save took
 // rescueMu, wrote durably, reported success, and was then unlinked
-// by the paused delete, leaving no rescue.conf. With the fix the
-// delete holds rescueMu across the unlink, so the later save cannot
-// complete while the delete is paused: it either blocks behind
-// rescueMu (and then writes after the delete finishes) or, had it
-// landed before the delete's critical section, would be removed by
-// it. Either way a save that reports success leaves its file.
+// by the paused delete, leaving no rescue.conf. With the fix, a later
+// save either applies after the delete's critical section, or applies
+// first and causes the delete to skip its unlink (#17825). In both
+// orders, a save that reports success leaves its file.
 func TestDeleteRescueConfigDoesNotUnlinkLaterSave_16783(t *testing.T) {
 	restoreRollbackSeams(t)
 	s := newTestStore(t)
