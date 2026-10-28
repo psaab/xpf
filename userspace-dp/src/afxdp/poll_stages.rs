@@ -1794,7 +1794,7 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
 /// diverting it away from the generic kernel TUN injector. Carrying a
 /// real ingress ifindex here would therefore MIS-DELIVER IPsec-to-self,
 /// not enforce host-inbound — the ESP/AH passthrough short-circuits with
-/// `RecycleAndContinue` before `host_inbound_admits_iface` is ever reached
+/// `RecycleAndContinue` before `host_inbound_admits_iface_for_destination` is ever reached
 /// and stays exempt from the per-zone host-inbound gate by design (see
 /// `forwarding/README.md`, "Host-terminated IPsec passthrough"); IKE carries
 /// its own SEPARATE in-stage admit checks (#4323 / #6471, below). Telemetry
