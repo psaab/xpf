@@ -4,10 +4,10 @@
 //! mirror — batch → flush → live → snapshot → copy → `BindingStatus` →
 //! `zero_unbound_slot` — and a stop that drops a field is silent: no census
 //! covers flush or `copy_live_snapshot` (#5190 covers copy/zero consistency
-//! only, through the dispatcher). The reconcile zero-pass half
-//! (`reset_binding_counters`) has no census either and is pinned by the
-//! companion cell in `reconcile/reset.rs`. This cell drives the real functions
-//! end to end so an omitted field fails here with the stop named.
+//! only, through the dispatcher). #17105 deleted the reconcile
+//! `reset_binding_counters` zero-pass; `zero_unbound_slot` is now the sole
+//! unbound-slot reset. This cell drives the real functions end to end so
+//! an omitted field fails here with the stop named.
 
 use super::*;
 
@@ -50,10 +50,9 @@ fn flowless_counters_round_trip_batch_to_status_to_reset_9956() {
         "copy must carry the flowless family snapshot → status"
     );
 
-    // The unbound-slot reset half must clear the family (`reset_binding_counters`,
-    // the reconcile zero-pass, is covered by its companion cell in
-    // `reconcile/reset.rs` — it is `pub(super)`-scoped to `reconcile` and not
-    // nameable from here).
+    // The unbound-slot reset half must clear the family. #17105:
+    // `zero_unbound_slot` is the sole unbound-slot reset (the reconcile
+    // `reset_binding_counters` zero-pass was deleted).
     zero_unbound_slot(&mut status);
     assert_eq!(
         (

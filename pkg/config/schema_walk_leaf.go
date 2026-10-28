@@ -11,6 +11,11 @@ import (
 // keyValidator when only that is set. A node sets at most one of the two;
 // callers invoke this only when at least one is non-nil.
 func validateKeySlot(schema *schemaNode, argIdx int, tok string, vc *walkContext) error {
+	if !schema.allowEdgeWhitespace {
+		if err := refuseEdgeWhitespace(tok); err != nil {
+			return err
+		}
+	}
 	if schema.keyValidatorPos != nil {
 		return schema.keyValidatorPos(argIdx, tok)
 	}
@@ -500,7 +505,12 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 			// keep checkToken (validator/treeValidator) for every token.
 			var err error
 			if leafSchema.blockChildValidator != nil {
-				err = leafSchema.blockChildValidator(tok)
+				if !leafSchema.allowEdgeWhitespace {
+					err = refuseEdgeWhitespace(tok)
+				}
+				if err == nil {
+					err = leafSchema.blockChildValidator(tok)
+				}
 			} else {
 				err = leafSchema.checkToken(vc, tok)
 			}
@@ -535,6 +545,26 @@ func validateTailLeaf(node *Node, leafSchema *schemaNode, parentPath []string, s
 	leafName := node.Keys[0]
 	path := append(append([]string(nil), parentPath...), leafName)
 	tokens := gatherLeafTailTokens(node)
+	// #17177: tail validators own their whole tail, so the central
+	// checkToken gate never sees these tokens. Apply the same
+	// edge-whitespace refusal here before the tail validator runs.
+	if !leafSchema.allowEdgeWhitespace {
+		for _, tok := range tokens {
+			if err := refuseEdgeWhitespace(tok); err != nil {
+				return typedLeafInvalidErrorf(path, tok, err)
+			}
+		}
+		for _, s := range siblings {
+			if s == nil || s == node || len(s.Keys) == 0 || s.Keys[0] != leafName {
+				continue
+			}
+			for _, tok := range gatherLeafTailTokens(s) {
+				if err := refuseEdgeWhitespace(tok); err != nil {
+					return typedLeafInvalidErrorf(path, tok, err)
+				}
+			}
+		}
+	}
 	var siblingTails [][]string
 	for _, s := range siblings {
 		if s == nil || s == node || len(s.Keys) == 0 || s.Keys[0] != leafName {

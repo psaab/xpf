@@ -471,7 +471,7 @@ fn unit_rows_with_empty_zone_10520(snapshot: &ConfigSnapshot) -> std::collection
 /// withdrawal, mirroring the consumer: `ndp` in `protocols_except` sets
 /// `ndp_excluded`, but a surviving positive ND admission (an explicit
 /// `ndp` protocol token, or `all`, whose expansion includes it) still
-/// admits ND — via the token in `host_inbound_admits_iface`'s unicast
+/// admits ND — via the token in `host_inbound_admits_iface_for_destination`'s unicast
 /// default arm, and via `ndp_positive`/types 133-136 in
 /// `host_inbound_admits_iface_for_destination` — so the raw except token
 /// alone is stale/alias noise there, exactly as Go's
@@ -1409,10 +1409,10 @@ pub(super) fn populate_interfaces(
         //
         // Fix: insert an EMPTY `ZoneHostInbound` sentinel keyed by this
         // interface's LOGICAL ifindex, so the ingress-interface-keyed
-        // `host_inbound_admits_iface` (the local-delivery poll path's entry
+        // `host_inbound_admits_iface_for_destination` (the local-delivery poll path's entry
         // point) DENIES host-bound services for a packet ingressing on it. The
         // global ICMP/ND/PMTUD accepts (`is_icmp_host_inbound_global_accept`,
-        // checked BEFORE the set in `host_inbound_admits_iface`) still deliver
+        // checked BEFORE the set in `host_inbound_admits_iface_for_destination`) still deliver
         // control traffic. Keying by ifindex — NOT by inserting zone_host_inbound
         // at id 0 — deliberately leaves the genuinely-global zone_id 0 path
         // (`host_inbound_admits` with no matching ifindex override) untouched, so
@@ -1485,7 +1485,7 @@ pub(super) fn populate_interfaces(
     // unzoned, the `None => true` global admit) — either way a sibling's
     // broader admission would govern the whole netdev, the exact leak the
     // issue reports. Insert the same EMPTY sentinel the contested-zone
-    // backstop uses, so `host_inbound_admits_iface` DENIES host-bound
+    // backstop uses, so `host_inbound_admits_iface_for_destination` DENIES host-bound
     // services there in both row orders. The AF_XDP descriptor cannot
     // distinguish units on one netdev, so no narrower verdict exists.
     // Guards mirror #10503: never clobber an existing entry (defensive —
@@ -1529,7 +1529,7 @@ pub(super) fn populate_interfaces(
     //
     // Fix: insert an EMPTY `ZoneHostInbound` sentinel keyed by each eligible
     // contested parent's ifindex, so the ingress-interface-keyed
-    // `host_inbound_admits_iface` DENIES host-bound services there. Keying by
+    // `host_inbound_admits_iface_for_destination` DENIES host-bound services there. Keying by
     // ifindex — NOT by inserting at zone id 0 — leaves the genuinely-global
     // zone-0 path untouched, exactly as #5659 does. An existing entry
     // (explicit per-interface override) is never clobbered, and a lifeline name
@@ -1592,7 +1592,7 @@ pub(super) fn populate_interfaces(
     // #10644: unzoned trunk-unit host-inbound fail-closed backstop — SYMMETRY
     // with #10556. Two unzoned address-less unit shapes survive every earlier
     // arm and resolve to zone 0 with no per-ifindex entry, so
-    // `host_inbound_admits_iface` falls back to `host_inbound_admits(0)` and
+    // `host_inbound_admits_iface_for_destination` falls back to `host_inbound_admits(0)` and
     // the `None => true` global admit arm admits every host-bound service:
     //
     //   (a) a refused-not-contested trunk parent: native unit 0 collapsed on
