@@ -2,9 +2,10 @@ package userspace
 
 import "github.com/psaab/xpf/pkg/config"
 
-// appliedSnapshot records the config + generation the helper has
-// ACTUALLY applied via a successful full apply_snapshot. It is the
-// generation the helper echoes back as status.LastSnapshotGeneration.
+// appliedSnapshot records the config + generation the Manager treats as
+// applied by the helper. Full applies, successful retained-snapshot publishes,
+// and status-loop catch-up all refresh it. FIB-only and neighbor-only generation
+// changes do not. It is the generation paired with the helper's applied view.
 //
 // #2079: the NAT pool-utilization-alarm monitor must evaluate a single
 // generation-coherent (config, counters) pair. Neither m.publishedSnapshot
@@ -12,13 +13,10 @@ import "github.com/psaab/xpf/pkg/config"
 // neighbor-regen update_neighbors path, which the helper records only as
 // last_fib_generation, not last_snapshot_generation) nor
 // m.lastSnapshot.Generation (too STRICT — BumpFIBGeneration /
-// RegenerateNeighborSnapshot bump it WITHOUT a full apply, so it
-// permanently exceeds the helper's last_snapshot_generation and would gate
-// the alarm off forever) is correct. appliedSnapshot is the provable fixed
-// point between them: it is set ONLY where a full apply_snapshot has been
-// accepted by the helper (markAppliedSnapshotLocked at the publish/catch-up
-// sites), so its Config and its Generation are both the helper's currently
-// applied generation by construction.
+// RegenerateNeighborSnapshot bump it WITHOUT a snapshot publish, so it can
+// exceed the helper's last_snapshot_generation) is correct. appliedSnapshot
+// is the applied identity tracked by markAppliedSnapshotLocked.
+
 type appliedSnapshot struct {
 	Config            *config.Config
 	Generation        uint64
@@ -90,9 +88,9 @@ type AppliedNATView struct {
 
 // markAppliedSnapshotLocked captures the just-applied snapshot's config and
 // generation as the helper-applied source for AppliedNATView. Caller MUST
-// hold m.mu and MUST call this only AFTER a successful full apply_snapshot
-// (or on the status-loop catch-up path where the helper already echoes
-// m.lastSnapshot.Generation), where m.lastSnapshot is the applied snapshot.
+// hold m.mu and MUST call this only AFTER a successful snapshot publish
+// (full or retained-snapshot partial) or status-loop catch-up where the helper
+// already echoes m.lastSnapshot.Generation.
 //
 // r11 (Codex r10 BLOCKER — deferred-apply reconcile-skew): the helper sets
 // last_snapshot_generation the instant it ACCEPTS a snapshot
@@ -153,8 +151,8 @@ func (m *Manager) markAppliedSnapshotLocked() {
 	}
 }
 
-// AppliedConfig returns the config from the helper's last reconciled full
-// snapshot. It is nil before a full apply lands. The snapshot is immutable once
+// AppliedConfig returns the config from the helper's last reconciled snapshot.
+// It is nil before an applied snapshot lands. The snapshot is immutable once
 // published and remains the authority while a replacement publish is deferred.
 func (m *Manager) AppliedConfig() *config.Config {
 	if m == nil {
@@ -163,6 +161,18 @@ func (m *Manager) AppliedConfig() *config.Config {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.appliedSnapshot.Config
+}
+
+// AppliedSnapshotGeneration returns the generation of the Manager's current
+// helper-applied snapshot. Unlike LastApplyResult, this identity also advances
+// after successful retained-snapshot partial publishes.
+func (m *Manager) AppliedSnapshotGeneration() uint64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.appliedSnapshot.Generation
 }
 
 // AppliedNATSnapshotVerdicts is the per-rule runtime NOT-INSTALLED verdict
