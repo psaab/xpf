@@ -160,6 +160,7 @@ func TestCredentialShapeKeywordPosition17806(t *testing.T) {
 		{"system", "description", "secret-rotation"},
 		{"system", "domain-search", "example.com", "password-admin", "corp.example.net"},
 		{"system", "domain-search", "example.com", "secret-agent", "corp.example.net"},
+		{"system", "domain-search", "example.com", "login", "user", "password-admin", "class", "read-only"},
 	} {
 		if got := secretIndices(fp); len(got) != 0 {
 			t.Errorf("secretIndices(%v) = %v, want none (identifier/value position)", fp, got)
