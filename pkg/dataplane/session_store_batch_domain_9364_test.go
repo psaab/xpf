@@ -8,7 +8,7 @@ import (
 //
 // `pkg/dataplane/userspace/batch_delete_domain_9364_test.go` proves the helper
 // request carries the domain it is GIVEN. That says nothing about whether
-// `DeleteBatchKnownV4` — the entry point the conntrack GC actually calls — passes
+// `DeleteBatchKnownV4` — the entry point the (now-retired, #17155) conntrack GC called — passes
 // one. A package's own cells proving a function correct while saying nothing
 // about what its caller hands it is the surviving-mutant shape this repo keeps
 // hitting, and it is exactly how #9482 happened one interface over.
@@ -93,7 +93,7 @@ func TestDeleteBatchKnownCarriesTheRoutingDomain9364(t *testing.T) {
 		}
 		if got != tenant {
 			t.Errorf("#9364: the %s key reached the dataplane with routing_domain=%d, want %d. "+
-				"The conntrack GC retires sessions through this entry point continuously, so a "+
+				"Batch deletes retire sessions through this entry point continuously, so a "+
 				"dropped domain here is the steady-state case, not an edge one", name, got, tenant)
 		}
 	}

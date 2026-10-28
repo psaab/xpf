@@ -6,8 +6,8 @@ package cluster
 // independent of CurrentHAProtocolVersion. That was the right split — a
 // session-wire-only change should not push the HA version out from under its own
 // compat floor — but it left the version with exactly ONE gating consumer: the
-// image manifest (`xpfd protocol-versions`), read by upgrade.GateMixedBaseSwap
-// for the LANE-2 image-replace path.
+// image manifest (`xpfd protocol-versions`), read by the LANE-2 executor
+// (_gate_mixed_base in xpf-deploy.py) of upgrade.GateProtocolCompat.
 //
 // The LANE-1 IN-PLACE rolling path had no such check, because it had no channel:
 // the heartbeat carries HAProtocolVersion and nothing about the sync wire, and
@@ -43,7 +43,7 @@ package cluster
 //
 // NO VERSION BUMP, and here that is not merely convenient but forced: bumping
 // SessionSyncWireVersion in order to advertise SessionSyncWireVersion would make
-// GateMixedBaseSwap — which compares it for EXACT equality — refuse session sync
+// GateProtocolCompat — which compares it for EXACT equality — refuse session sync
 // across precisely the upgrade that first carries the field.
 
 // PeerSessionSyncWireVersion reports the peer's advertised SessionSyncWireVersion,
@@ -58,7 +58,7 @@ func (s *SessionSync) PeerSessionSyncWireVersion() uint16 {
 	if s == nil {
 		return 0
 	}
-	return uint16(s.peerSessionSyncWire.Load())
+	return uint16(s.peerIncarnationState().peerSessionSyncWire.Load())
 }
 
 // SessionSyncWireCompatible reports whether the peer's session-sync wire version

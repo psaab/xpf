@@ -522,7 +522,12 @@ const (
 	// compete with kernel-model leaks in one priority walk. A v75 helper
 	// uses the old priority semantics and may select a broader leak, so the
 	// pairing must refuse rather than degrade.
-	ProtocolVersion = 76
+	// v76 -> v77 (#17099): idle/display lease records carry the typed
+	// pool identity (pool_kind + nat64_prefix). A v76 helper drops both
+	// and falls back to parsing the in-band `nat64-deterministic-{idx}`
+	// string, which misroutes a source pool of that name into the NAT64
+	// arms — so the pairing must refuse rather than degrade.
+	ProtocolVersion = 77
 
 	// MinProtocolMultiZoneScopedPolicy is the FIRST snapshot protocol version
 	// that can represent a multi-zone scoped global policy — the plural
@@ -604,6 +609,13 @@ const (
 	// answers the whole population in one response, which the bounded
 	// reader refuses past 64 MiB — the export delivers nothing.
 	MinProtocolPersistentNatLeasePaging = 71
+	// MinProtocolPersistentNatLeaseTypedPool is the first protocol version
+	// whose lease records carry the typed pool identity (#17099: pool_kind +
+	// nat64_prefix + nat64_scope). Lease export/import/display gates require
+	// it so a v76 helper (which would drop the typed identity and fall back
+	// to the positional string parse, collapsing scoped same-/96 tenants)
+	// is refused rather than silently degraded. Immutable wire floor.
+	MinProtocolPersistentNatLeaseTypedPool = 77
 
 	// MinProtocolSecureTunnelRefusal: the device-level AF_XDP binding refusal
 	// contract spans THREE bumps on the #5619/#6691 branch — v5 added
@@ -661,7 +673,14 @@ type PersistentNatRemote struct {
 const MaxPersistentNatLeaseRemotes = 1024
 
 type IdleLeaseWire struct {
-	Pool                       string                `json:"pool"`
+	Pool string `json:"pool"`
+	// PoolKind is the #17099 typed pool identity: 0/absent = legacy
+	// string-only (decode fallback), 1 = source pool, 2 = NAT64
+	// deterministic, 3 = NAT64 round-robin. Nat64Prefix carries the
+	// stable prefix text iff PoolKind is 2 or 3.
+	PoolKind                   uint8                 `json:"pool_kind,omitempty"`
+	Nat64Prefix                string                `json:"nat64_prefix,omitempty"`
+	Nat64Scope                 string                `json:"nat64_scope,omitempty"`
 	Protocol                   uint8                 `json:"protocol"`
 	SrcIP                      string                `json:"src_ip"`
 	SrcPort                    uint16                `json:"src_port"`
@@ -697,7 +716,11 @@ type IdleLeaseWire struct {
 // never reaches zero, and no GC path reclaims it. Keeping the display record
 // distinct means that rule cannot be undone by a later edit to a shared struct.
 type DisplayLeaseWire struct {
-	Pool                       string                `json:"pool"`
+	Pool string `json:"pool"`
+	// PoolKind / Nat64Prefix: see IdleLeaseWire (#17099).
+	PoolKind                   uint8                 `json:"pool_kind,omitempty"`
+	Nat64Prefix                string                `json:"nat64_prefix,omitempty"`
+	Nat64Scope                 string                `json:"nat64_scope,omitempty"`
 	Protocol                   uint8                 `json:"protocol"`
 	SrcIP                      string                `json:"src_ip"`
 	SrcPort                    uint16                `json:"src_port"`
@@ -960,8 +983,8 @@ type PolicySessionRebind struct {
 	RoutingDomain       uint32 `json:"routing_domain,omitempty"`
 	PolicyID            uint32 `json:"policy_id"`
 	RuleID              string `json:"rule_id"`
-	IngressZone         uint16 `json:"ingress_zone"`
-	EgressZone          uint16 `json:"egress_zone"`
+	IngressZone         uint32 `json:"ingress_zone"`
+	EgressZone          uint32 `json:"egress_zone"`
 	TunnelDiscriminator uint64 `json:"tunnel_discriminator,omitempty"`
 }
 

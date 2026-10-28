@@ -3,13 +3,11 @@ package daemon
 
 import (
 	"log/slog"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
 )
@@ -172,14 +170,20 @@ func (d *Daemon) buildRAConfigs(cfg *config.Config) []*config.RAInterfaceConfig 
 		if ll != "" {
 			ra.SourceLinkLocal = ll
 		}
-		if ra.SourceLinkLocal == "" && cfg.Chassis.Cluster != nil && ifc.RedundancyGroup != 0 {
+		if ra.SourceLinkLocal == "" && cfg.Chassis.Cluster != nil {
 			// RETH HA startup installs a stable router link-local on the active
 			// member. Bind RA to that address so the sender does not auto-pick a
 			// transient EUI-64 link-local which can later be removed by HA reconcile.
-			ra.SourceLinkLocal = cluster.StableRethLinkLocal(
-				cfg.Chassis.Cluster.ClusterID,
-				ifc.RedundancyGroup,
-			).String()
+			// #17086 SSOT: the group comes from InterfaceRefRG/RefRG (via
+			// RethRGOwners/declaresDeclaredDottedRG), so a member interface binds
+			// its RETH's stable address and a stray group on a non-RETH binds
+			// nothing.
+			// #17049: only when the RA's own unit carries a placement under the
+			// single placement definition (per-unit, FamilyInet6; a sibling
+			// unit's placement does not install the address on this RA's netdev).
+			if rg := cfg.RefRG(ra.Interface); rg != 0 {
+				ra.SourceLinkLocal = stableRethLinkLocalForRA(cfg, ra.Interface, rg)
+			}
 		}
 	}
 
@@ -254,18 +258,67 @@ func resolveRASourceLinkLocal(cfg *config.Config, raInterface string) (*config.I
 
 // unitConfiguredLinkLocal returns the first configured IPv6 link-local unicast
 // address (CIDR-stripped) on the unit, or "" when none is configured.
+// Delegates to the single definition in pkg/config (#17049).
 func unitConfiguredLinkLocal(unit *config.InterfaceUnit) string {
-	if unit == nil {
+	return config.UnitConfiguredLinkLocal(unit)
+}
+
+// stableRethLinkLocalForRA returns the stable RETH link-local to bind as the
+// RA source for raInterface, or "" when the RA's unit is not backed by the
+// stable LL. rg is the RA ref's owning redundancy group, resolved by the
+// caller from the config SSOT (Config.RefRG over RethRGOwners —
+// #17086), never from a raw InterfaceConfig.RedundancyGroup read: a
+// member ref carries its RETH's group, and a stray group on a non-RETH
+// carries nothing. Eligibility itself comes from master's config SSOT
+// (#17049): Config.StableRethLinkLocalPlacements(rg) already encodes the
+// per-unit gate — UnitHasIPv6 (FamilyInet6 marker, DHCPv6/DHCPv6Client, or
+// any IPv6 address), no explicitly configured link-local, and neither the
+// interface nor the unit disabled. This helper only scopes that
+// placement set to the RA's own unit: a unit-qualified ref
+// ("reth0.50") binds only when a placement exists for THAT unit of an
+// interface owning rg, so an RA on an IPv4-only, disabled, or
+// configured-link-local unit does not bind the stable address merely
+// because a sibling unit carries a placement — pkg/ra would bind an
+// address never installed on the RA's netdev and every NDP listen on it
+// would fail. A bare ref ("reth0") names no unit, so any placement on an
+// interface owning rg binds. Negative or malformed unit suffixes are
+// rejected outright (fail-safe: the sender auto-selects). The ref is
+// parsed with SplitInterfaceUnitRef so a declared dotted base (#9821,
+// e.g. `p.0`, owned via declaresDeclaredDottedRG in RethRGOwners) is not
+// mis-cut into base `p` + unit 0. With no matching placement the sender
+// falls back to its auto-selected link-local.
+func stableRethLinkLocalForRA(cfg *config.Config, raInterface string, rg int) string {
+	if cfg == nil || cfg.Chassis.Cluster == nil || rg <= 0 {
 		return ""
 	}
-	for _, addr := range unit.Addresses {
-		ip, _, err := net.ParseCIDR(addr)
-		if err != nil {
+	placements := cfg.StableRethLinkLocalPlacements(rg)
+	if len(placements) == 0 {
+		return ""
+	}
+	split := cfg.SplitInterfaceUnitRef(raInterface)
+	wantUnit := -1
+	if split.HasUnit {
+		n, err := strconv.Atoi(split.UnitTok)
+		if err != nil || n < 0 {
+			return "" // malformed/negative unit: fail-safe, sender auto-selects
+		}
+		wantUnit = n
+	}
+	// Placements are keyed by the OWNING interface (IfRef "base.unit"),
+	// while the RA ref may name a member (its RedundantParent chain owns
+	// rg) or the owner itself. Match the placement whose kernel netdev
+	// equals the RA ref's resolved kernel name — the same device the
+	// sender will bind — so member, owner, declared-dotted, and VLAN
+	// (unit.VlanID) spellings agree without re-deriving ownership here.
+	wantNetdev := cfg.ResolveKernelIfName(raInterface)
+	for _, p := range placements {
+		if wantUnit >= 0 && p.Unit != wantUnit {
 			continue
 		}
-		if ip.IsLinkLocalUnicast() && ip.To4() == nil {
-			return ip.String()
+		if p.Netdev != wantNetdev {
+			continue
 		}
+		return config.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rg).String()
 	}
 	return ""
 }

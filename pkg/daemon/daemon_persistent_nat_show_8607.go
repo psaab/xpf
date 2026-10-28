@@ -27,21 +27,20 @@ import (
 // observed, which was instrumented rather than argued. What never happens on
 // this path is the delete:
 //
-//	daemon_run.go — "When the userspace dataplane is active, skip BPF session
-//	map GC entirely":  gc.SkipSweep = func() bool { return true }
-//
-// and gc.sweep() returns at its FIRST statement when that is set — before
+// The retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) never ran
+// its sweep on the userspace dataplane — daemon_run.go set `gc.SkipSweep`
+// unconditionally there, so `sweep()` returned at its first statement, before
 // DeleteBatchKnownV4 (which calls the preserve hook) AND before pnat.GC(). So
-// the table is dead in BOTH directions on the only runtime forwarding path the
-// product has: never written, and never expired either. The remaining caller of
-// the delete path is commit-time policy invalidation, which requires an
-// operator to delete or modify a policy — not something steady-state forwarding
-// produces.
+// the table was dead in BOTH directions on the only runtime forwarding path
+// the product has: never written, and never expired either. The remaining
+// caller of the delete path is commit-time policy invalidation, which requires
+// an operator to delete or modify a policy — not something steady-state
+// forwarding produces.
 //
-// WHY NOT RE-ENABLE THE SWEEP. It is disabled for a measured reason (~19% CPU
-// scanning maps not used for forwarding, #333) and the Rust helper owns session
-// lifetime. Re-enabling it to populate a display table would pay a forwarding-
-// path cost for an operator surface.
+// WHY THE SWEEP WAS NOT RE-ENABLED (and is now deleted). It was disabled for
+// a measured reason (~19% CPU scanning maps not used for forwarding, #333)
+// and the Rust helper owns session lifetime. Re-enabling it to populate a
+// display table would pay a forwarding-path cost for an operator surface.
 //
 // WHY NOT TEACH THE RENDERER TO ASK THE BACKEND. That was the first design and
 // it is worse here. natshow's Reader is satisfied by a fixture that embeds a

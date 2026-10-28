@@ -1603,9 +1603,10 @@ snap`, and there are two of them — one per acceptance path).
   the ambiguity probe never runs. A default-instance session still sends domain
   0, byte-identical to before. **Residual:** the BATCH path
   (`BatchDeleteSessions{,V6}` → `deleteHelperSessionsV4/V6`) still sends a bare
-  delete, and that is the path the conntrack GC uses
-  (`pkg/conntrack/gc.go` → `DeleteBatchKnownV4`); its values exist at the caller
-  but the `DataPlane` interface drops them. Tracked separately.
+  delete, and that was the path the retired Go conntrack GC used
+  (`pkg/conntrack/gc.go` → `DeleteBatchKnownV4`, package deleted in #17155);
+  its values exist at the caller but the `DataPlane` interface drops them.
+  Tracked separately.
   `ClearAllSessions` is deliberately left bare — it has no values by
   construction and is exactly the caller #8636's refusal was written for.
 - Session domain adapters: `SessionStoreOf`, `TelemetryOf`, and
@@ -1621,7 +1622,7 @@ snap`, and there are two of them — one per acceptance path).
 
 ## Callers
 
-`pkg/daemon`, `pkg/cli`, `pkg/api`, `pkg/grpcapi`, `pkg/conntrack`.
+`pkg/daemon`, `pkg/cli`, `pkg/api`, `pkg/grpcapi`.
 
 ## Dependencies
 

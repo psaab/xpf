@@ -6877,11 +6877,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     };
                                     match worker_ctx.forwarding.nat64.allocate_source_for_worker(
                                         prefix_idx,
-                                        meta.protocol,
-                                        orig_src_v6,
+                                        // #17072: the flow's own SessionKey carries
+                                        // protocol/ports and its routing domain
+                                        // (#9680), so there is no loose scope
+                                        // `u32` to swap with `worker_id`.
+                                        &flow.forward_key,
                                         dst_v4,
-                                        flow.forward_key.src_port,
-                                        flow.forward_key.dst_port,
                                         now_ns,
                                         // #6522: THIS worker holds the NAT64
                                         // allocation it just made. Its
@@ -6897,10 +6898,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // told which addresses a DRAINING
                                         // source-NAT pool still holds.
                                         &worker_ctx.forwarding.source_nat_rules,
-                                        // #9680: the flow's routing domain keys the
-                                        // NAT64 BIB; release and the HA synced reserve
-                                        // read the same field off the session key.
-                                        flow.forward_key.routing_domain,
                                         Some(&worker_ctx.forwarding.iface_nat_allocators),
                                     ) {
                                         Ok((snat_v4, translated_port)) => {

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/fsatomic"
+	"github.com/psaab/xpf/pkg/netname"
 	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -1760,7 +1761,7 @@ func detectLifelineInterface() (name string, ok bool, err error) {
 func pciAddrForInterface(name string) (lifelineRecord, bool) {
 	var pciAddr string
 	if devReal, err := filepath.EvalSymlinks(filepath.Join("/sys/class/net", name, "device")); err == nil {
-		pciAddr = extractPCIAddr(devReal)
+		pciAddr = netname.PCIAddrFromDevicePath(devReal)
 	}
 	var mac string
 	if link, err := netlink.LinkByName(name); err == nil {

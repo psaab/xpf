@@ -135,7 +135,7 @@ func (s *SessionSync) noteHeartbeatAck(conn net.Conn) bool {
 	if hook := noteHeartbeatAckMidpointHook.Load(); hook != nil {
 		(*hook)()
 	}
-	s.peerHeartbeatAckEver.Store(true)
+	s.peerIncarnationState().peerHeartbeatAckEver.Store(true)
 	return true
 }
 
@@ -268,17 +268,11 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 	// outgoing queue that already passed its final authorization check.
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
 	s.peerIncarnation++
-	// The priming connection's capability frame belongs to the same peer
-	// process as its changed-boot BulkStart. Restore only that connection's
-	// learned capability set; never carry forward the retired global
-	// observation. A priming connection that sent no interpretable frame
-	// leaves the new incarnation unlearned (snapshot 0), incapable
-	// (flags 0) and wire-unknown (0) — the #14161 provenance rule, the
-	// same set installConn and full disconnect clear.
-	var snapshotProtocol uint32
-	var capabilityFlags uint32
-	var capabilityFlags2 uint32
-	var sessionSyncWire uint32
+	// #17097: the one retirement reset. The priming connection's capability
+	// frame belongs to the same peer process as its changed-boot BulkStart,
+	// so retirePeerIncarnationLocked seeds the fresh state from it alone
+	// (#14161 provenance); every latch, debt, and learned capability of the
+	// retired incarnation goes with it, not only the capability triple.
 	var primingConn net.Conn
 	switch keepIdx {
 	case 0:
@@ -286,19 +280,7 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 	case 1:
 		primingConn = s.conn1
 	}
-	if ac, ok := primingConn.(*authConn); ok &&
-		ac.bootIncarnation.known() && ac.bootIncarnation == s.peerBootIncarnation {
-		snapshotProtocol = uint32(ac.peerSnapshotVersion)
-		capabilityFlags = uint32(ac.peerCapabilityFlags)
-		sessionSyncWire = uint32(ac.peerSessionSyncWire)
-		capabilityFlags2 = uint32(ac.peerCapabilityFlags2)
-	}
-	s.peerSnaps.peerSnapshotProtocol.Store(snapshotProtocol)
-	s.peerSnaps.peerSnapshotProtocolGeneration++
-	s.peerCapabilityFlags.Store(capabilityFlags)
-	s.storePeerCapabilityFlags2(capabilityFlags2)
-	s.peerSessionSyncWire.Store(sessionSyncWire)
-	s.scopedPolicySuppressionWarned.Store(false)
+	s.retirePeerIncarnationLocked(primingConn)
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	// #14951: retiredIdentity is the process this switch retires.
 	// classifyPrimeLocked passes it explicitly, captured before it advances
@@ -308,7 +290,6 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 	if len(retiredOverride) != 0 {
 		retiredIdentity = retiredOverride[0]
 	}
-	s.peerHeartbeatAckEver.Store(false)
 	// Clock provenance (fold-2 HIGH-1): the kept conn primed the new boot —
 	// its BulkStart carried the changed id that triggered this switch (the
 	// sole caller passes the priming slot) — so any ClockSync it carried
@@ -329,10 +310,11 @@ func (s *SessionSync) applyPeerIncarnationSwitchLocked(keepIdx int, retiredOverr
 		kept = s.conn1
 	}
 	if ac, ok := kept.(*authConn); ok && ac.clockSynced.Load() && ac.bootIncarnation.known() && ac.bootIncarnation == s.peerBootIncarnation {
-		s.peerClockOffset.Store(ac.clockOffset.Load())
+		s.peerIncarnationState().peerClockOffset.Store(ac.clockOffset.Load())
 	} else {
 		clearConnClockState(kept)
-		s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
+		// The retirement above already zeroed peerClockOffset (#9915
+		// F-118: the old offset must not rebase the new one).
 	}
 	// #7762: rebase the boot-epoch baseline onto THIS incarnation.
 	//
@@ -1175,22 +1157,13 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	if supersededCurrent || epochReboot {
 		retiredIdentity := retiredIdentityForInstall
 		s.peerIncarnation++
-		s.peerHeartbeatAckEver.Store(false)
-		s.peerClockOffset.Store(0) // #9915 F-118: incarnation advanced — the old offset must not rebase the new one.
-		s.peerSnaps.peerSnapshotProtocol.Store(0)
-		s.peerSnaps.peerSnapshotProtocolGeneration++
-		// #10512: learned capability state belongs to the superseded
-		// incarnation — a same-slot replacement that skips full disconnect
-		// would otherwise inherit the old peer's bits (including the
-		// scoped-delete bit) and pass gates before advertising. Clear the
-		// same learned set full disconnect clears, atomically with the
-		// advance (s.mu held throughout installConn).
-		s.peerCapabilityFlags.Store(0)
-		s.storePeerCapabilityFlags2(0)
-		s.lastSentConfigAckCapable16756.Store(false)
-		s.peerConfigNackedGen16756.Store(0)
-		s.peerSessionSyncWire.Store(0)
-		s.scopedPolicySuppressionWarned.Store(false)
+		// #17097: the one retirement reset — learned capability state,
+		// heartbeat-ack latch, clock offset, warn latches, bulk fences,
+		// PBR latch, and suppress debts all belong to the superseded
+		// incarnation (#10512: a same-slot replacement that skips full
+		// disconnect would otherwise inherit them and pass gates before
+		// advertising). No seed: the new incarnation starts unlearned.
+		s.retirePeerIncarnationLocked(nil)
 		s.evictStaleIncarnationConnsLocked(fabricIdx, retiredIdentity)
 		if installed := s.installedPeerIdentityLocked(retiredIdentity); installed.known() {
 			s.peerIdentity = installed
@@ -1560,67 +1533,20 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 			close(waiter.ch)
 		}
 		s.clockSynced.Store(false)
-		s.peerClockOffset.Store(0) // #9915 F-118: the offset belongs to the dead incarnation, like clockSynced.
-		// #6650: the peer's snapshot-protocol capability is scoped to the peer
-		// INCARNATION that advertised it, exactly like clockSynced. A full
-		// disconnect ends that incarnation and the peer that reconnects may be
-		// an OLDER process (that is the rolling-upgrade case this gate exists
-		// for), so a retained capability would authorise a push the new
-		// incarnation cannot represent.
-		s.peerSnaps.peerSnapshotProtocol.Store(0)
-		s.peerSnaps.peerSnapshotProtocolGeneration++
-		// #7147: the capability flags are scoped to the same peer incarnation
-		// for the same reason, and a retained fence-ack bit is worse than a
-		// retained version: it would make every confirmed-fence takeover wait
-		// out its full timeout against a downgraded peer that cannot answer.
-		s.peerCapabilityFlags.Store(0)
-		s.storePeerCapabilityFlags2(0)
-		s.lastSentConfigAckCapable16756.Store(false)
-		s.peerConfigNackedGen16756.Store(0)
-		// #9714 F5: the delete-suppression warning latch is scoped to the
-		// same incarnation. Keeping it latched would silence the alarm
-		// through exactly the reconnect that matters — a downgrade that
-		// starts the suppression, or the upgrade that ends it — and an
-		// operator would see one line, once, for the life of the process.
-		s.deleteSuppressionWarned.Store(false)
-		// #9752: same incarnation scoping for the forward-only-delete latch.
-		s.purgeRetirementSuppressionWarned.Store(false)
-		// #10512: same incarnation scoping for the scoped-delete latch.
-		s.scopedPolicySuppressionWarned.Store(false)
-		// #9752 round 3: same incarnation scoping for the stamped-install latch.
-		s.installTableSuppressionWarned.Store(false)
-		// #9752 round 4: same for the bulk-refusal latch.
-		s.bulkFencedForPeer.Store(false)
-		// #9506: the discriminator refusal latch is separate from the
-		// install-table latch and resets with this peer incarnation.
-		s.bulkFencedForIpsecPeer.Store(false)
-		// #9752 round 5 item 1: same for the PBR-announced latch.
-		s.pbrAnnouncedForFence.Store(false)
-		// #9752 round 5 item 5: same for the suppress-debt latch.
-		s.installTableSuppressDebt.Store(false)
-		// #9506: the S9.4 withheld-install debt belongs to this peer
-		// incarnation; the full-disconnect cold prime covers the next one.
-		s.ipsecDiscriminatorSuppressDebt.Store(false)
-		// #7990: same incarnation scoping. A retained sync-wire version is the
-		// worst of the three to keep: it would let the LANE-1 drain gate certify
-		// compatibility against a version the reconnected (possibly downgraded)
-		// peer no longer speaks.
-		s.peerSessionSyncWire.Store(0)
-		// #5718 C01a: peerHeartbeatAckEver is a capability probe of the peer
-		// PROCESS, not of this node, so it must be scoped to the peer
-		// incarnation exactly like clockSynced above. Full disconnect ends
-		// that incarnation: the peer that reconnects may be a DIFFERENT
-		// build. Leaving the flag latched across a peer downgrade (new peer
-		// acks -> latch true -> peer rolls back to a build that never sends
-		// syncMsgHeartbeatAck) makes both readers treat a healthy old peer as
-		// failing: receiveLoop counts missedHeartbeats and tears the
-		// connection down every 2 read deadlines (sync_conn_read.go), and
-		// PeerHealthy() demands recent inbound traffic the old peer never
-		// sends (sync.go), which blocks manual-failover readiness with
-		// "session sync disconnected". Clearing here restores the intended
-		// probe-then-enforce order for each new peer: assume healthy until
-		// the CURRENT peer proves it acks.
-		s.peerHeartbeatAckEver.Store(false)
+		// #17097: the one retirement reset. A full disconnect ends the peer
+		// incarnation: the learned capability triple (#6650/#7147/#7990 —
+		// a retained fence-ack bit would make every confirmed-fence
+		// takeover wait out its full timeout against a downgraded peer that
+		// cannot answer, and a retained wire version would certify
+		// compatibility the reconnected peer no longer speaks), the
+		// heartbeat-ack probe (#5718 C01a), the clock offset (#9915 F-118),
+		// the four suppression warn latches (#9714 F5/#9752/#10512 — a
+		// latch kept would silence the alarm through exactly the reconnect
+		// that matters), the bulk-fence latches, the PBR-announced latch,
+		// and both suppress debts all retire with it. Before #17097 this
+		// list lived only here; the supersession and boot-ID-switch
+		// advances inherited everything below the capability triple.
+		s.retirePeerIncarnationLocked(nil)
 		// #15274 C03-02: the authoritative peer process identity is
 		// incarnation-scoped exactly like the capability set above. A full
 		// disconnect ends the incarnation; leaving the identity latched

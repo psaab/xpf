@@ -125,6 +125,61 @@ func addressBookEntryChildren15672() map[string]*schemaNode {
 	}
 }
 
+// gatewaySchemaNode builds the `gateway` grammar shared by `security ike`
+// and `security ipsec` (#17172). A factory (not a shared var) so each
+// attachment point owns independent schemaNode pointers: identity-keyed
+// censuses (#8768 registry, #16163) must keep counting two paths. Before
+// this, the two literals were hand-copied and diverged: `dead-peer-detection`
+// set packedStatements only under `ike`, so the braced packed spelling
+// `dead-peer-detection { interval 20 threshold 3; }` passed commit-check
+// under `ike` and was false-rejected under `ipsec`.
+func gatewaySchemaNode() *schemaNode {
+	return &schemaNode{desc: "IKE gateway (VPN peer) name", args: 1, placeholder: "<gateway-name>", packedStatements: true, children: map[string]*schemaNode{
+		"address":            {desc: "Remote gateway address(es)", args: 1, multi: true, placeholder: "<address>", children: nil},
+		"local-address":      {desc: "Local IKE address", args: 1, placeholder: "<address>", children: nil},
+		"ike-policy":         {desc: "IKE policy reference", args: 1, placeholder: "<policy-name>", children: nil},
+		"external-interface": {desc: "External interface for IKE (derives local address)", args: 1, placeholder: "<interface-name>", children: nil},
+		"local-certificate":  {desc: "Local certificate for IKE authentication", args: 1, placeholder: "<certificate-name>", children: nil},
+		"version": {desc: "IKE version (v1-only|v2-only)", args: 1, placeholder: "<version>",
+			valueType: ValueEnumOf, valueDesc: "IKE protocol version pin",
+			valueExamples: []string{"v1-only", "v2-only"},
+			validator:     ValidateEnum([]string{"v1-only", "v2-only"}), children: nil},
+		"no-nat-traversal": {desc: "Disable NAT traversal (UDP encapsulation)", children: nil},
+		"nat-traversal": {desc: "NAT traversal (enable|disable|force)", args: 1, placeholder: "<mode>",
+			valueType: ValueEnumOf, valueDesc: "NAT traversal (UDP encapsulation) mode",
+			valueExamples: []string{"enable", "disable", "force"},
+			validator:     ValidateEnum([]string{"enable", "disable", "force"}), children: nil},
+		// #4313 PR-C — closed-world flip. The Junos `dead-peer-detection`
+		// grammar is LEAF-COMPLETE: exactly `always-send`, `optimized`,
+		// `probe-idle-tunnel`, `interval <seconds>`, and `threshold <count>`
+		// (all modeled), and the compiler (compiler_ipsec.go
+		// parseDeadPeerDetectionNode) reads ONLY these five keywords.
+		// always-send/optimized/probe-idle-tunnel are bare flags;
+		// interval/threshold carry their value on the same statement line
+		// (no nested block), so closed-world never descends into an AST
+		// child — it cannot false-reject a valid config (#4191 class). A
+		// typo (`intervl`) or garbage keyword under DPD is REJECTED at
+		// strict commit instead of silently dropped; the tolerant
+		// Load/SyncApply path downgrades to a warning (#1960).
+		"dead-peer-detection": {desc: "Dead peer detection", packedStatements: true, closedWorld: true, children: map[string]*schemaNode{
+			"always-send":       {desc: "Send DPD probes regardless of traffic", children: nil},
+			"optimized":         {desc: "Optimized DPD probing", children: nil},
+			"probe-idle-tunnel": {desc: "Probe idle tunnels", children: nil},
+			"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds), placeholder: "<seconds>", children: nil},
+			"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(MinIPsecDPDThreshold, MaxIPsecDPDThreshold), placeholder: "<count>", children: nil},
+		}},
+		// #15752 (G18-03): args:3 = type + optional qualifier + value.
+		// Bare `distinguished-name` (type only, cert-derived DN) ends the
+		// statement, so a packed sibling is never stolen as its value;
+		// allowEmptyValue admits the bare form past the missing-args gate.
+		"local-identity":  {desc: "Local IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
+		"remote-identity": {desc: "Remote IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
+		"dynamic": {desc: "Dynamic peer (peer has a dynamic IP and dials in). `hostname <fqdn>` is the IKE identity the peer presents (remote id @fqdn, responder-only remote_addrs = %any, #14590); a bare `dynamic` block marks a responder-only peer with no pinned identity (#2404)", children: map[string]*schemaNode{
+			"hostname": {desc: "Dynamic peer IKE identity FQDN (presented identity, not DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
+		}},
+	}}
+}
+
 // hostInboundSchemaChildren builds the shared `host-inbound-traffic { ... }`
 // child set used at BOTH the zone level and the per-interface override (#3362,
 // #3703). system-services / protocols are multi-value value-tail leaves: a
@@ -1543,56 +1598,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			// #15752 (G18-02): Junos cert counterpart to pre-shared-key.
 			"local-certificate": {desc: "Local certificate for IKE authentication", args: 1, placeholder: "<certificate-name>", children: nil},
 		}},
-		// packedStatements (#8768): compileIPsec reads address, external-interface,
-		// local-identity and the rest as separate statements; the packed spelling
-		// collapsed them into one node and lost everything after the first.
-		"gateway": {desc: "IKE gateway (VPN peer) name", args: 1, placeholder: "<gateway-name>", packedStatements: true, children: map[string]*schemaNode{
-			"address":            {desc: "Remote gateway address(es)", args: 1, multi: true, placeholder: "<address>", children: nil},
-			"local-address":      {desc: "Local IKE address", args: 1, placeholder: "<address>", children: nil},
-			"ike-policy":         {desc: "IKE policy reference", args: 1, placeholder: "<policy-name>", children: nil},
-			"external-interface": {desc: "External interface for IKE (derives local address)", args: 1, placeholder: "<interface-name>", children: nil},
-			"local-certificate":  {desc: "Local certificate for IKE authentication", args: 1, placeholder: "<certificate-name>", children: nil},
-			"version": {desc: "IKE version (v1-only|v2-only)", args: 1, placeholder: "<version>",
-				valueType: ValueEnumOf, valueDesc: "IKE protocol version pin",
-				valueExamples: []string{"v1-only", "v2-only"},
-				validator:     ValidateEnum([]string{"v1-only", "v2-only"}), children: nil},
-			"no-nat-traversal": {desc: "Disable NAT traversal (UDP encapsulation)", children: nil},
-			"nat-traversal": {desc: "NAT traversal (enable|disable|force)", args: 1, placeholder: "<mode>",
-				valueType: ValueEnumOf, valueDesc: "NAT traversal (UDP encapsulation) mode",
-				valueExamples: []string{"enable", "disable", "force"},
-				validator:     ValidateEnum([]string{"enable", "disable", "force"}), children: nil},
-			// #4313 PR-C — closed-world flip (both the `security ike gateway`
-			// and `security ipsec gateway` copies of this identical block). The
-			// Junos `dead-peer-detection` grammar is LEAF-COMPLETE: exactly
-			// `always-send`, `optimized`, `probe-idle-tunnel`, `interval
-			// <seconds>`, and `threshold <count>` (all modeled), and the
-			// compiler (compiler_ipsec.go parseDeadPeerDetectionNode) reads ONLY
-			// these five keywords. always-send/optimized/probe-idle-tunnel are
-			// bare flags; interval/threshold carry their value on the same
-			// statement line (no nested block), so closed-world never descends
-			// into an AST child — it cannot false-reject a valid config (#4191
-			// class). A typo (`intervl`) or garbage keyword under DPD is now
-			// REJECTED at strict commit instead of silently dropped (the #4313
-			// bug — a fat-fingered interval/threshold would silently keep the
-			// Junos default); the tolerant Load/SyncApply path downgrades to a
-			// warning (#1960).
-			"dead-peer-detection": {desc: "Dead peer detection", packedStatements: true, closedWorld: true, children: map[string]*schemaNode{
-				"always-send":       {desc: "Send DPD probes regardless of traffic", children: nil},
-				"optimized":         {desc: "Optimized DPD probing", children: nil},
-				"probe-idle-tunnel": {desc: "Probe idle tunnels", children: nil},
-				"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds), placeholder: "<seconds>", children: nil},
-				"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(MinIPsecDPDThreshold, MaxIPsecDPDThreshold), placeholder: "<count>", children: nil},
-			}},
-			// #15752 (G18-03): args:3 = type + optional qualifier + value.
-			// Bare `distinguished-name` (type only, cert-derived DN) ends the
-			// statement, so a packed sibling is never stolen as its value;
-			// allowEmptyValue admits the bare form past the missing-args gate.
-			"local-identity":  {desc: "Local IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
-			"remote-identity": {desc: "Remote IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
-			"dynamic": {desc: "Dynamic peer (peer has a dynamic IP and dials in). `hostname <fqdn>` is the IKE identity the peer presents (remote id @fqdn, responder-only remote_addrs = %any, #14590); a bare `dynamic` block marks a responder-only peer with no pinned identity (#2404)", children: map[string]*schemaNode{
-				"hostname": {desc: "Dynamic peer IKE identity FQDN (presented identity, not DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
-			}},
-		}},
+		// packedStatements (#8768): the gateway reader reads address,
+		// external-interface, local-identity and the rest as separate
+		// statements; the packed spelling collapsed them into one node and
+		// lost everything after the first. Grammar from gatewaySchemaNode
+		// (#17172) — shared with `security ipsec gateway`.
+		"gateway": gatewaySchemaNode(),
 	}},
 	"ipsec": {desc: "IPsec configuration", children: map[string]*schemaNode{
 		// M2 (#2008): IPsec (Phase 2) proposal mirror of the IKE proposal
@@ -1713,54 +1724,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				valueExamples: []string{"standard", "suiteb-gcm-128"},
 				validator:     ValidateEnum(ProposalSetNames()), children: nil},
 		}},
-		// #8796: the `security ipsec` gateway is the same container as the
-		// `security ike` one above — same children, same compiler path — and it
-		// needs the same opt-in. Fixing one and not the other leaves the defect
-		// live at a spelling an operator reaches the same way.
-		"gateway": {desc: "IKE gateway (VPN peer) name", args: 1, packedStatements: true, placeholder: "<gateway-name>", children: map[string]*schemaNode{
-			"address":            {desc: "Remote gateway address(es)", args: 1, multi: true, placeholder: "<address>", children: nil},
-			"local-address":      {desc: "Local IKE address", args: 1, placeholder: "<address>", children: nil},
-			"ike-policy":         {desc: "IKE policy reference", args: 1, placeholder: "<policy-name>", children: nil},
-			"external-interface": {desc: "External interface for IKE (derives local address)", args: 1, placeholder: "<interface-name>", children: nil},
-			"local-certificate":  {desc: "Local certificate for IKE authentication", args: 1, placeholder: "<certificate-name>", children: nil},
-			"version": {desc: "IKE version (v1-only|v2-only)", args: 1, placeholder: "<version>",
-				valueType: ValueEnumOf, valueDesc: "IKE protocol version pin",
-				valueExamples: []string{"v1-only", "v2-only"},
-				validator:     ValidateEnum([]string{"v1-only", "v2-only"}), children: nil},
-			"no-nat-traversal": {desc: "Disable NAT traversal (UDP encapsulation)", children: nil},
-			"nat-traversal": {desc: "NAT traversal (enable|disable|force)", args: 1, placeholder: "<mode>",
-				valueType: ValueEnumOf, valueDesc: "NAT traversal (UDP encapsulation) mode",
-				valueExamples: []string{"enable", "disable", "force"},
-				validator:     ValidateEnum([]string{"enable", "disable", "force"}), children: nil},
-			// #4313 PR-C — closed-world flip (both the `security ike gateway`
-			// and `security ipsec gateway` copies of this identical block). The
-			// Junos `dead-peer-detection` grammar is LEAF-COMPLETE: exactly
-			// `always-send`, `optimized`, `probe-idle-tunnel`, `interval
-			// <seconds>`, and `threshold <count>` (all modeled), and the
-			// compiler (compiler_ipsec.go parseDeadPeerDetectionNode) reads ONLY
-			// these five keywords. always-send/optimized/probe-idle-tunnel are
-			// bare flags; interval/threshold carry their value on the same
-			// statement line (no nested block), so closed-world never descends
-			// into an AST child — it cannot false-reject a valid config (#4191
-			// class). A typo (`intervl`) or garbage keyword under DPD is now
-			// REJECTED at strict commit instead of silently dropped (the #4313
-			// bug — a fat-fingered interval/threshold would silently keep the
-			// Junos default); the tolerant Load/SyncApply path downgrades to a
-			// warning (#1960).
-			"dead-peer-detection": {desc: "Dead peer detection", closedWorld: true, children: map[string]*schemaNode{
-				"always-send":       {desc: "Send DPD probes regardless of traffic", children: nil},
-				"optimized":         {desc: "Optimized DPD probing", children: nil},
-				"probe-idle-tunnel": {desc: "Probe idle tunnels", children: nil},
-				"interval":          {desc: "DPD probe interval in seconds (default 10)", args: 1, valueType: ValueInteger, valueDesc: "Probe interval in seconds (1..3600)", valueExamples: []string{"10", "30"}, validator: ValidateInteger(MinIPsecDPDIntervalSeconds, MaxIPsecDPDIntervalSeconds), placeholder: "<seconds>", children: nil},
-				"threshold":         {desc: "Failed-probe count before peer is dead (default 5)", args: 1, valueType: ValueInteger, valueDesc: "Failed-probe count (1..100)", valueExamples: []string{"5", "3"}, validator: ValidateInteger(MinIPsecDPDThreshold, MaxIPsecDPDThreshold), placeholder: "<count>", children: nil},
-			}},
-			// #15752 (G18-03): mirror of the security ike gateway copy.
-			"local-identity":  {desc: "Local IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
-			"remote-identity": {desc: "Remote IKE identity (type [qualifier] value; bare distinguished-name = cert DN)", args: 3, allowEmptyValue: true, identityBareDN: true, children: nil},
-			"dynamic": {desc: "Dynamic peer (peer has a dynamic IP and dials in). `hostname <fqdn>` is the IKE identity the peer presents (remote id @fqdn, responder-only remote_addrs = %any, #14590); a bare `dynamic` block marks a responder-only peer with no pinned identity (#2404)", children: map[string]*schemaNode{
-				"hostname": {desc: "Dynamic peer IKE identity FQDN (presented identity, not DNS-resolved)", args: 1, scalar: true, placeholder: "<fqdn>", children: nil},
-			}},
-		}},
+		// #8796/#17172: the `security ipsec` gateway is the same container
+		// as the `security ike` one — same children, same compiler path —
+		// so both come from gatewaySchemaNode. Fixing one spelling and not
+		// the other leaves the defect live at a spelling an operator
+		// reaches the same way.
+		"gateway": gatewaySchemaNode(),
 		"vpn": {desc: "IPsec VPN tunnel name", args: 1, packedFlatRun: true, placeholder: "<vpn-name>", children: map[string]*schemaNode{
 			// #5297: type the leaf so a non-canonical bind-interface (anything
 			// but st<N> / st<N>.<unit>) fails closed at commit-check instead of

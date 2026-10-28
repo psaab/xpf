@@ -10,7 +10,7 @@ import (
 func scopedJournalLen10512(s *SessionSync) int {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	return len(s.scopedDeleteJournal)
+	return len(s.scopedDeleteJournal.entries)
 }
 
 func learnScopedCapable10512(t *testing.T, s *SessionSync) {
