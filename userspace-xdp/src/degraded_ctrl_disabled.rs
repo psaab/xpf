@@ -37,11 +37,13 @@ pub fn ingress_adjudicated(ingress_iface_flags: u8) -> bool {
 /// This is *not* the complete #13632 decision. Production reaches this
 /// helper only after the caller has already returned for: unadjudicated
 /// ingress (see `ingress_adjudicated`), parse failures, S-tag/QinQ and
-/// non-IP shapes, tagged-only VID-0 local destinations, and the LAND
-/// gate — each under its own reason counter. This helper therefore takes
-/// no interface flags and no tagged-only input: those facts are decided
-/// by the caller and can never be passed here. Local/control frames
-/// pass, all other (transit) frames drop.
+/// non-IP shapes, and tagged-only VID-0 local destinations, and only
+/// after the LAND gate has run (a LAND drop returns there; a LAND alarm
+/// counts and falls through to this helper) — each exit is instrumented
+/// with a reason counter. This helper therefore takes no interface flags
+/// and no tagged-only input: those facts are decided by the caller and
+/// can never be passed here. Local/control frames pass, all other
+/// (transit) frames drop.
 #[inline(always)]
 pub fn local_control_or_drop(local_or_control: bool) -> DegradedCtrlDisabledDisposition {
     if local_or_control {

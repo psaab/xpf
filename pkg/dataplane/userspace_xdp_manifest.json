@@ -4,7 +4,7 @@
     "path": "pkg/dataplane/userspace_xdp_bpfel.o",
     "sha256": "51e4b644cd52a0163227d2ae798e4dc61a8dabc4b6dabb2672c73181c438a191"
   },
-  "build_digest": "d94ec9e361fb7efc6f4f405c5f968280aa547cd9b9067697a9ca321cb9cca517",
+  "build_digest": "2f9710a24aa8bf88130f242fded21c207f330b6d3caebfd7f8f3b31cf8ae922a",
   "shim_facts": {
     "max_ext_hdrs": 7,
     "frag_hdr_size": 8,
@@ -45,7 +45,7 @@
     },
     {
       "path": "userspace-xdp/src/degraded_ctrl_disabled.rs",
-      "sha256": "1101af8cc9210117fcaa80591eb980b0b3e5a9c0b1d8f08a9b0e444a58e0d7fb"
+      "sha256": "ace83d6b2c62c85caba9820ba44fe30a11b69b3457a57bc84fd0ccb73b5e68d1"
     },
     {
       "path": "userspace-xdp/src/degraded_ndp.rs",

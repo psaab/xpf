@@ -6085,9 +6085,9 @@ fn shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632() {
 /// Unlike the privileged XDP packet test, this runs on unprivileged
 /// builders. Every input below is one production can pass: the caller in
 /// `degraded_ctrl_disabled_action` invokes `local_control_or_drop` only
-/// after it has already returned, under its own counters, for
-/// unadjudicated ingress, tagged-only VID-0 local destinations, and the
-/// other pre-parse / parse-shape arms. The unadjudicated gate itself is
+/// after it has already returned for unadjudicated ingress, tagged-only
+/// VID-0 local destinations, and the other pre-parse / parse-shape arms
+/// (each exit is instrumented with a reason counter). The unadjudicated gate itself is
 /// pinned by `ingress_adjudicated` here and by the source-order test
 /// `shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632`;
 /// the tagged-only drop is pinned by the privileged packet cells and the
