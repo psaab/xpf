@@ -50,7 +50,7 @@ func TestRedactEmbeddedCommentPayloads18379(t *testing.T) {
 
 	makeTree := func(command string) *ConfigTree {
 		return &ConfigTree{Children: []*Node{{
-			Keys: []string{"event-options", "policy", "p1", "then", "change-configuration", "commands", command},
+			Keys:   []string{"event-options", "policy", "p1", "then", "change-configuration", "commands", command},
 			IsLeaf: true,
 		}}}
 	}
@@ -84,4 +84,21 @@ func TestRedactEmbeddedCommentPayloads18379(t *testing.T) {
 			}
 		})
 	}
+	t.Run("clean quoted command keeps authored spacing", func(t *testing.T) {
+		clear := makeTree("set system host-name   preserved")
+		redacted := clear.RedactedClone()
+		for _, tc := range []struct {
+			name   string
+			render func(*ConfigTree) string
+		}{
+			{"Format", func(tree *ConfigTree) string { return tree.Format() }},
+			{"FormatSet", func(tree *ConfigTree) string { return tree.FormatSet() }},
+			{"FormatJSON", func(tree *ConfigTree) string { return tree.FormatJSON() }},
+			{"FormatXML", func(tree *ConfigTree) string { return tree.FormatXML() }},
+		} {
+			if got, want := tc.render(redacted), tc.render(clear); got != want {
+				t.Errorf("%s churned a clean command:\n got: %s\nwant: %s", tc.name, got, want)
+			}
+		}
+	})
 }

@@ -78,11 +78,10 @@ func TestEmbeddedCommentOnlyRedactedClone17813(t *testing.T) {
 	}
 	makeUnquotedBlockTree := func(command string) *ConfigTree {
 		return &ConfigTree{Children: []*Node{{
-			Keys: []string{"event-options", "policy", "p1", "then", "change-configuration", "commands"},
+			Keys:     []string{"event-options", "policy", "p1", "then", "change-configuration", "commands"},
 			Children: []*Node{{Keys: strings.Fields(command), IsLeaf: true}},
 		}}}
 	}
-
 
 	// A stored AST leaf is the persistence shape read by RedactedClone. Keep
 	// the command in the quoted `commands` value, where the comment marker is

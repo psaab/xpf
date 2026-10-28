@@ -486,7 +486,7 @@ func RedactEmbeddedChangeConfigCommand(cmd string) string {
 // compare mode, so two different unjudgeable credentials still diff as
 // changed). Empty and whitespace-only commands alone stay unchanged.
 func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
-	tokens, quoted, lexOK := lexConfigMutationLineStrict15167(cmd)
+	tokens, quoted, lexOK, comments := lexConfigMutationLineStrict15167WithComments(cmd)
 	if len(tokens) == 0 {
 		if strings.TrimSpace(cmd) == "" {
 			return cmd, false
@@ -513,7 +513,7 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 		parts[i] = quoteKey(tok)
 	}
 	rendered := strings.Join(parts, " ")
-	return rendered, changed || rendered != cmd
+	return rendered, changed || (comments && rendered != cmd)
 }
 
 func wholePayloadMask16726(cmd string, fingerprint bool) (string, bool) {
