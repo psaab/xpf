@@ -131,7 +131,7 @@ func validateLogProfileStreamReferencesStrict(cfg *Config) error {
 // configures no endpoint — neither `url` nor `hostname` (#3300 residual) — or
 // is non-empty but MALFORMED so it cannot back an HTTP fetch (#5183).
 // feeds.Manager.Apply derives
-// each server's base URL via resolveBaseURL (feeds.go): explicit `url`, else
+// each server's base URL via FeedServerBaseURL: explicit `url`, else
 // `https://<hostname>`, else the empty string — and an empty base URL makes
 // Apply SKIP the whole server (it registers NONE of its feeds, including any
 // nested feed-name entries). The endpoint-less server still compiles into
@@ -145,13 +145,11 @@ func validateLogProfileStreamReferencesStrict(cfg *Config) error {
 // closed, and this gate still turns the silent default-deny into an
 // operator-visible commit error at the feed-server root rather than the binding.
 //
-// This gate replicates resolveBaseURL's emptiness condition directly on the
-// FeedServer config struct (feedServerBaseURLEmpty) rather than importing
-// pkg/feeds (pkg/config must not depend on pkg/feeds). resolveBaseURL prefers
-// `url` and returns strings.TrimRight(url, "/") BEFORE it ever falls back to
-// `hostname`, so a slash-only `url` (e.g. `/`, `//`) trims to "" and the
-// server is skipped even when a hostname is also set — feedServerBaseURLEmpty
-// mirrors that branch order exactly. Keep in sync with resolveBaseURL.
+// The emptiness check is `FeedServerBaseURL(fs) == ""`, the same shared
+// helper the runtime calls (#17180): FeedServerBaseURL prefers `url` and
+// returns the slash-trimmed value BEFORE it ever falls back to `hostname`,
+// so a slash-only `url` (e.g. `/`, `//`) resolves to "" and the server is
+// skipped even when a hostname is also set.
 //
 // On the tolerant load / peer-sync paths the call site downgrades this to a
 // warning (opts.lenientDynamicAddressFeedRef, shared with the feed-name
@@ -182,7 +180,7 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 		if fs == nil {
 			continue
 		}
-		if feedServerBaseURLEmpty(fs) {
+		if FeedServerBaseURL(fs) == "" {
 			display := fs.Name
 			if display == "" {
 				display = name
@@ -214,7 +212,7 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 		// the bound name is omitted -> __unsupported_address__ -> whole-snapshot
 		// preflight reject -> previous-good/default-deny — so a leniently-loaded
 		// config still boots, #1960 / #3261).
-		if reason := feedServerBaseURLUnconstructible(feedServerResolvedBaseURL(fs)); reason != "" {
+		if reason := feedServerBaseURLUnconstructible(FeedServerBaseURL(fs)); reason != "" {
 			display := fs.Name
 			if display == "" {
 				display = name
@@ -230,7 +228,7 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 				"to it is unresolvable and fails CLOSED at runtime (omitted -> "+
 				"__unsupported_address__ -> whole-snapshot preflight reject, "+
 				"#5645), not silently match-none; set a valid http(s) url or hostname",
-				display, RedactURL(feedServerResolvedBaseURL(fs)), reason)
+				display, RedactURL(FeedServerBaseURL(fs)), reason)
 		}
 		// #14385 (DR5-H13): a plaintext-http feed has no transport integrity
 		// and this package has no per-feed signature / pinned-hash
@@ -243,7 +241,7 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 		// feeds, so a leniently-loaded config still boots but registers no
 		// worker for the feed — its bound name stays unresolvable and fails
 		// CLOSED (#5645) rather than installing attacker content.
-		if resolved := feedServerResolvedBaseURL(fs); strings.HasPrefix(strings.ToLower(resolved), "http://") {
+		if resolved := FeedServerBaseURL(fs); IsPlaintextFeedURL(resolved) {
 			display := fs.Name
 			if display == "" {
 				display = name
@@ -288,7 +286,7 @@ func validateDynamicAddressFeedServerEndpointStrict(cfg *Config) error {
 		// name. The tolerant path downgrades via the shared wrapper;
 		// the runtime independently registers no feed for such a path.
 		for _, fe := range fs.FeedEntries {
-			if reason := feedEntryPathMalformed(fe.Path); reason != "" {
+			if reason := FeedEntryPathError(fe.Path); reason != "" {
 				display := fs.Name
 				if display == "" {
 					display = name
@@ -321,7 +319,7 @@ func feedServerBlockedDestinationLiteral(fs *FeedServer) (string, netip.Addr, bo
 		return "", netip.Addr{}, false
 	}
 	host := ""
-	if resolved := feedServerResolvedBaseURL(fs); resolved != "" {
+	if resolved := FeedServerBaseURL(fs); resolved != "" {
 		if u, err := url.Parse(resolved); err == nil {
 			host = u.Hostname()
 		}
@@ -358,55 +356,6 @@ func feedServerBlockedDestinationLiteral(fs *FeedServer) (string, netip.Addr, bo
 	return FeedDestinationClass(ip), ip, true
 }
 
-// feedEntryPathMalformed mirrors the rejection in feeds.joinFeedURL
-// (#14723; pkg/config cannot import pkg/feeds): a non-empty per-feed
-// path must parse and be a plain relative path tail — no scheme, no
-// opaque part, no authority. An empty path is the base itself and is
-// not malformed. Keep in sync with joinFeedURL.
-func feedEntryPathMalformed(rawPath string) string {
-	if rawPath == "" {
-		return ""
-	}
-	ref, err := url.Parse(rawPath)
-	if err != nil {
-		return fmt.Sprintf("not a parseable URL path: %v", err)
-	}
-	if ref.Scheme != "" || ref.Opaque != "" || ref.Host != "" || ref.User != nil {
-		return "not a plain relative path (scheme, opaque, or authority present)"
-	}
-	return ""
-}
-
-// feedServerResolvedBaseURL returns the base url feeds.resolveBaseURL
-// (pkg/feeds/feeds.go) would produce for this server: explicit `url` wins,
-// else `https://<hostname>`, else "". Mirrors resolveBaseURL: trailing
-// "/" is trimmed from the URL PATH only (#14723), never from a query or
-// fragment token; an unparseable or scheme-less value keeps the
-// historical raw slash-trim so slash-only URLs still resolve to "".
-// Keep in sync (pkg/config cannot import pkg/feeds — import cycle).
-// Callers here reach it only after feedServerBaseURLEmpty has ruled
-// out the "" result.
-func feedServerResolvedBaseURL(fs *FeedServer) string {
-	raw := fs.URL
-	if raw == "" && fs.Hostname != "" {
-		raw = "https://" + fs.Hostname
-	}
-	if raw == "" {
-		return ""
-	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme == "" {
-		return strings.TrimRight(raw, "/")
-	}
-	u.Path = strings.TrimRight(u.Path, "/")
-	if u.Path == "" {
-		u.RawPath = ""
-	} else if u.RawPath != "" {
-		u.RawPath = strings.TrimRight(u.RawPath, "/")
-	}
-	return u.String()
-}
-
 // feedServerBaseURLUnconstructible reports why a non-empty resolved feed base
 // url could NOT back the HTTP request the runtime issues, or "" if it is well
 // formed. The contract is the runtime's own: feeds.Manager.readFeed calls
@@ -440,30 +389,6 @@ func feedServerBaseURLUnconstructible(resolved string) string {
 	return ""
 }
 
-// feedServerBaseURLEmpty reports whether feeds.resolveBaseURL would return ""
-// for this feed-server — i.e. feeds.Manager.Apply would SKIP it and register
-// none of its feeds. It mirrors resolveBaseURL (pkg/feeds/feeds.go)
-// BRANCH-FOR-BRANCH:
-//
-//	if URL != "":            empty iff strings.TrimRight(URL, "/") == ""
-//	else if Hostname != "":  never empty ("https://" + ... is always non-empty)
-//	else:                    empty
-//
-// The URL branch wins outright, so a slash-only `url` (e.g. `/`, `//`) trims to
-// "" and the server is skipped EVEN IF a hostname is also configured — the
-// fallback is never reached. resolveBaseURL performs no whitespace trimming
-// (only strings.TrimRight on "/"), so this does not either. pkg/config cannot
-// import pkg/feeds (import cycle); keep this in sync with resolveBaseURL.
-func feedServerBaseURLEmpty(fs *FeedServer) bool {
-	if fs.URL != "" {
-		return strings.TrimRight(fs.URL, "/") == ""
-	}
-	if fs.Hostname != "" {
-		return false
-	}
-	return true
-}
-
 // validateDynamicAddressFeedNameUniquenessStrict hard-rejects two
 // dynamic-address feeds that resolve to the SAME effective feed name (#4913).
 //
@@ -485,7 +410,7 @@ func feedServerBaseURLEmpty(fs *FeedServer) bool {
 // declared-name set built by validateDynamicAddressFeedReferencesStrict). An
 // endpoint-less feed-server (rejected just before by
 // validateDynamicAddressFeedServerEndpointStrict) is SKIPPED by Apply and
-// registers no worker, so it is excluded here too (feedServerBaseURLEmpty) —
+// registers no worker, so it is excluded here too (FeedServerBaseURL == "") —
 // otherwise a benign endpoint-less shadow name would be miscounted as a live
 // collision. This gate runs AFTER the endpoint gate so, on the strict path, the
 // surviving servers are exactly the ones Apply would register.
@@ -517,7 +442,7 @@ func validateDynamicAddressFeedNameUniquenessStrict(cfg *Config) error {
 	owner := make(map[string]string) // effective feed name -> first declaring server display name
 	for _, name := range names {
 		fs := servers[name]
-		if fs == nil || feedServerBaseURLEmpty(fs) {
+		if fs == nil || FeedServerBaseURL(fs) == "" {
 			continue
 		}
 		display := fs.Name
