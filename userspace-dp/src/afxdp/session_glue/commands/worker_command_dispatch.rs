@@ -140,18 +140,27 @@ pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
                     ctx.worker_id,
                 );
             }
-            WorkerCommand::EnqueueShapedLocal(req) => ctx.shaped_tx_requests.push(req),
+            WorkerCommand::EnqueueShapedLocal(req) => ctx.shaped_tx_requests.push(req), // Inline push into the tick results.
+            // #7699: a stale association re-pairs a REUSED 16-bit call id
+            // onto a dead handle, so teardown must land on every worker.
             WorkerCommand::ForgetPptpCall(handle) => {
                 ctx.sessions.pptp_mut().remove(handle);
             }
             WorkerCommand::ForgetPptpCallByControl(disconnect) => {
                 ctx.sessions.pptp_mut().forget_call_disconnected_by(disconnect);
             }
+            // #11053: tear down only the PPTP associations. The control
+            // TCP session may still be owned by this worker.
             WorkerCommand::ForgetPptpControlChannel { control, closed_ns } => {
                 ctx.sessions
                     .pptp_mut()
                     .forget_control_channel_learned_by(control, closed_ns);
             }
+            // Inline flag set into the tick results.
+            // #941 Work item C: signal the outer poll loop to vacate
+            // all shared_exact slots (we don't have BindingWorker
+            // access here, so we set the flag and let
+            // `worker.rs:818-822` dispatch.
             WorkerCommand::VacateAllSharedExactSlots => {
                 *ctx.vacate_all_shared_exact_slots = true;
             }

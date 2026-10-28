@@ -54,6 +54,12 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced_command(
     ctx: &mut WorkerCommandDispatchContext<'_>,
     entry: SyncedSessionEntry,
 ) {
+    // pre-purge snapshot re-published post-purge (backlog, late
+    // fan-out, re-import) must not reinstall the removed-zone row
+    // the purge deleted. Dropped here — before re-resolve, install,
+    // reserve, publish — and the key recorded so the worker loop
+    // evicts the stale row from shared authority (same
+    // record-here/evict-where-the-handles-are split as #6457).
     if synced_entry_is_stale_replay(entry.origin, &entry.metadata, ctx.forwarding) {
         note_stale_replay_fence_drop();
         ctx.stale_replay_dropped_keys.push(entry.key);
@@ -149,6 +155,7 @@ pub(in crate::afxdp::session_glue) fn handle_install_pptp_association(
     ctx: &mut WorkerCommandDispatchContext<'_>,
     call: crate::session::pptp::PptpCall,
 ) {
+    // #15950: disabled ALG must not install HA-imported calls.
     if ctx.forwarding.pptp_enabled() {
         let _ = ctx.sessions.pptp_mut().install_synced_association(call, ctx.now_ns);
     }
@@ -161,6 +168,11 @@ pub(in crate::afxdp::session_glue) fn handle_install_pptp_call(
     control: crate::session::pptp::ControlChannelId,
     learned_ns: u64,
 ) {
+    // #7699: learn the association on THIS worker. A collision is
+    // refused rather than merged (two calls sharing one handle
+    // share one session), and counted so a refusal is not silent.
+    // #15950: a command queued while enabled must not install
+    // after the ALG is disabled.
     if ctx.forwarding.pptp_enabled() {
         if let Err(e) = ctx
             .sessions
