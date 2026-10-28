@@ -171,8 +171,8 @@ pub(in crate::afxdp) fn classify_neighbor_state(state: &str) -> NeighborStateCla
 /// #3771 (M12): allowlist gate over [`classify_neighbor_state`] — true iff the
 /// state is a recognized usable NUD state. Shared by the FIB build
 /// (`populate_neighbors`), the runtime snapshot-refresh manager-key computation
-/// (`snapshot_refresh.rs`), the `update_neighbors` control handler
-/// (`server/handlers/neighbors.rs`), and `parse_neighbor_entries` — all of which
+/// (`snapshot_refresh.rs`), and the `update_neighbors` control handler
+/// (`server/handlers/neighbors.rs`) — all of which
 /// must agree on which neighbors are installable so a neighbor the FIB installs
 /// is never pruned as a stale manager key (and vice versa).
 pub(in crate::afxdp) fn neighbor_state_usable(state: &str) -> bool {

@@ -5384,20 +5384,6 @@ fn dynamic_neighbor_cache_enables_forward_candidate() {
     );
 }
 
-#[test]
-fn parse_neighbor_entries_accepts_stale_ipv4_and_ipv6_rows() {
-    let parsed = parse_neighbor_entries(
-        "172.16.80.200 lladdr ba:86:e9:f6:4b:d5 STALE\n2001:559:8585:80::200 lladdr ba:86:e9:f6:4b:d5 STALE\n",
-    );
-    assert_eq!(parsed.len(), 2);
-    assert_eq!(parsed[0].0, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)));
-    assert_eq!(
-        parsed[1].0,
-        IpAddr::V6("2001:559:8585:80::200".parse().expect("ipv6"))
-    );
-    assert_eq!(parsed[0].1.mac, [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
-    assert_eq!(parsed[1].1.mac, [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
-}
 
 /// #3771 (M12): neighbor-state classification is an ALLOWLIST, not the pre-fix
 /// denylist. Recognized forwarding states install; failed/incomplete/NOARP are

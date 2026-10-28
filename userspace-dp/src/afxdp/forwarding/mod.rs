@@ -47,30 +47,27 @@ pub(super) fn zone_pair_for_flow(
     zone_pair_for_flow_with_override(forwarding, ingress_ifindex, None, egress_ifindex)
 }
 
+// #17240: test-only String adapter over the production u32 resolver.
+// Single source of truth is `zone_pair_ids_for_flow_with_override`;
+// this only maps ids to names (and an override name to its id), so it
+// cannot drift from the production resolver as the former hand-rolled
+// twin did (#6713).
+#[cfg(test)]
 pub(super) fn zone_pair_for_flow_with_override(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
     ingress_zone_override: Option<&str>,
     egress_ifindex: i32,
 ) -> (String, String) {
-    // #921: this helper is `#[cfg(test)]` (see zone_pair_for_flow above,
-    // gated by #17195) and is only called from tests.
-    // After #921, `ifindex_to_zone_id` and `EgressInterface.zone_id`
-    // are u32. Resolve back to the name via `zone_id_to_name` for
-    // the test-only String API. Slow path; allocations are fine.
-    let from_zone = ingress_zone_override
-        .map(|zone| zone.to_string())
-        .or_else(|| {
-            forwarding
-                .ifindex_to_zone_id
-                .get(&ingress_ifindex)
-                .and_then(|id| forwarding.zone_id_to_name.get(id).cloned())
-        })
-        .unwrap_or_default();
-    // #6713: resolve through the shared `egress_zone_id` so this test-only
-    // String twin cannot report a different to-zone than the production
-    // u16 resolver below.
-    let to_zone = match forwarding.egress_zone_id(egress_ifindex) {
+    let override_id = ingress_zone_override
+        .and_then(|zone| forwarding.zone_name_to_id.get(zone).copied());
+    let (from_id, to_id) = zone_pair_ids_for_flow_with_override(
+        forwarding,
+        ingress_ifindex,
+        override_id,
+        egress_ifindex,
+    );
+    let name = |id: u32| match id {
         0 => String::new(),
         id => forwarding
             .zone_id_to_name
@@ -78,7 +75,12 @@ pub(super) fn zone_pair_for_flow_with_override(
             .cloned()
             .unwrap_or_default(),
     };
-    (from_zone, to_zone)
+    // An override name with no id must round-trip, not resolve via ifindex.
+    let from_zone = match ingress_zone_override {
+        Some(zone) if override_id.is_none() => zone.to_string(),
+        _ => name(from_id),
+    };
+    (from_zone, name(to_id))
 }
 
 /// #7480: the NoRoute slow-path adjudication decision, extracted so it can be
