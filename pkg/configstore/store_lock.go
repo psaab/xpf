@@ -398,6 +398,23 @@ func (s *Store) SetEditPath(path []string) {
 	s.editPath = path
 }
 
+// SetEditPathForSession restores hierarchical navigation only while the
+// named session still holds configuration mode. It combines the holder
+// check and cursor write under the store lock so an intervening lock
+// handoff cannot apply one session's saved cursor to another session.
+func (s *Store) SetEditPathForSession(sessionID string, path []string) bool {
+	if sessionID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.configDir || s.effectiveHolderLocked() != sessionID {
+		return false
+	}
+	s.editPath = path
+	return true
+}
+
 // GetEditPath returns a copy of the current edit path.
 func (s *Store) GetEditPath() []string {
 	s.mu.RLock()
