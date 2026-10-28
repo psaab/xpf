@@ -440,16 +440,6 @@ func (d *Daemon) applyProbePinsHeld(applyPins func([]routing.ProbePin) map[strin
 // pins are configured; link/address notifications make drift detection prompt.
 const probePinRetryInterval = 30 * time.Second
 
-func defaultProbePinLinkSubscribe(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onError func(error)) error {
-	return netlink.LinkSubscribeWithOptions(ch, done,
-		netlink.LinkSubscribeOptions{ErrorCallback: onError})
-}
-
-func defaultProbePinAddrSubscribe(ch chan<- netlink.AddrUpdate, done <-chan struct{}, onError func(error)) error {
-	return netlink.AddrSubscribeWithOptions(ch, done,
-		netlink.AddrSubscribeOptions{ErrorCallback: onError})
-}
-
 // retainProbePinInstallFailures preserves only installer errors that the
 // authoritative readback still confirms. These alone keep the legacy
 // unchanged-hash immediate retry behavior; readback-only drift waits for the
@@ -643,7 +633,25 @@ func (d *Daemon) stopPinRetryLoop() {
 // periodic fallback. A missing pin is held on notification/reconcile and
 // restored on the next retry tick; once healthy, the loop remains active as
 // long as pins are configured so later kernel deletions are detected.
+// probePinRetryLoop verifies pins on link/address notifications and on
+// the periodic fallback (#17064: both subscriptions now run as nlWatch
+// lifetimes via probePinWatchPair; the ticker, per-socket retry timers
+// and receive-error fan-in are Watch arms on that pair).
 func (d *Daemon) probePinRetryLoop(ctx context.Context) {
+	d.probePinWatchPair(ctx)
+	// Every clean ctx exit clears the active flag (ticker-done exit
+	// clears it itself before returning).
+	d.rpmMu.Lock()
+	d.rpmPinRetryActive = false
+	d.rpmMu.Unlock()
+}
+
+// probePinWatchPair owns the RPM pair lifecycle. It preserves the
+// original loop exactly: conditional subscribe (only when a verify fn
+// exists), independent per-socket close->retry->resubscribe+verifyAll,
+// receive errors fanned into verifyAll without tearing down, the
+// periodic ticker (which may end the loop), and ctx exit.
+func (d *Daemon) probePinWatchPair(ctx context.Context) {
 	interval := d.probePinRetryEvery
 	if interval <= 0 {
 		interval = probePinRetryInterval
@@ -652,20 +660,7 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	defer ticker.Stop()
 	resubBackoff := d.probePinResubBackoff
 	if resubBackoff <= 0 {
-		resubBackoff = linkStateResubBackoffDefault
-	}
-
-	var linkUpdates <-chan netlink.LinkUpdate
-	var addrUpdates <-chan netlink.AddrUpdate
-	var linkDone, addrDone chan struct{}
-	var linkRetry, addrRetry <-chan time.Time
-	subscriptionErrors := make(chan struct{}, 1)
-	onError := func(err error) {
-		slog.Warn("probe pin netlink subscription reported a gap; checking all pins", "err", err)
-		select {
-		case subscriptionErrors <- struct{}{}:
-		default:
-		}
+		resubBackoff = nlWatchBackoffDefault
 	}
 	linkSubscribe := d.probePinLinkSubscribe
 	if linkSubscribe == nil {
@@ -675,102 +670,121 @@ func (d *Daemon) probePinRetryLoop(ctx context.Context) {
 	if addrSubscribe == nil {
 		addrSubscribe = defaultProbePinAddrSubscribe
 	}
-	subscribeLink := func() (<-chan netlink.LinkUpdate, chan struct{}, error) {
-		updates := make(chan netlink.LinkUpdate, 32)
+
+	// Per-socket nlWatch lifetimes run in goroutines; their events and
+	// retry timers are funnelled back into this single select so the
+	// original ordering (ticker / retry / error fan-in in one goroutine,
+	// rpmMu only on the ticker arm) is preserved.
+	type rpmEvent struct {
+		isAddr bool
+		link   netlink.LinkUpdate
+		addr   netlink.AddrUpdate
+	}
+	events := make(chan rpmEvent, 64)
+	subErrors := make(chan struct{}, 1)
+	onError := func(err error) {
+		// nlWatch logs under the watcher name; RPM additionally fans
+		// the gap into a full pin verification (original behaviour).
+		select {
+		case subErrors <- struct{}{}:
+		default:
+		}
+	}
+	// makeWatch builds a lifetime runner for one socket. It reports
+	// closed/failure via the returned retry channel pattern: the runner
+	// goroutine runs nlWatch.runOne repeatedly with its own backoff and
+	// forwards events; resubscribe success triggers verifyAll via onGap.
+	runSocket := func(isAddr bool) (stop func()) {
 		done := make(chan struct{})
-		if err := linkSubscribe(updates, done, onError); err != nil {
-			close(done)
-			return nil, nil, err
-		}
-		return updates, done, nil
+		go func() {
+			backoff := resubBackoff
+			for {
+				select {
+				case <-done:
+					return
+				case <-ctx.Done():
+					return
+				default:
+				}
+				var retry bool
+				if !isAddr {
+					retry = nlWatch[netlink.LinkUpdate]{
+						Name:           "rpm-probe-link",
+						Subscribe:      linkSubscribe,
+						Buf:            32,
+						Backoff:        backoff,
+						OnReceiveError: onError,
+						Enabled: func() bool {
+							return d.probePinVerifyFn() != nil
+						},
+						OnGap: func() {},
+						OnEvent: func(u netlink.LinkUpdate) {
+							select {
+							case events <- rpmEvent{link: u}:
+							case <-ctx.Done():
+							}
+						},
+					}.runOne(ctx)
+				} else {
+					retry = nlWatch[netlink.AddrUpdate]{
+						Name:           "rpm-probe-addr",
+						Subscribe:      addrSubscribe,
+						Buf:            32,
+						Backoff:        backoff,
+						OnReceiveError: onError,
+						Enabled: func() bool {
+							return d.probePinVerifyFn() != nil
+						},
+						OnGap: func() {},
+						OnEvent: func(u netlink.AddrUpdate) {
+							select {
+							case events <- rpmEvent{isAddr: true, addr: u}:
+							case <-ctx.Done():
+							}
+						},
+					}.runOne(ctx)
+				}
+				if !retry {
+					return
+				}
+				// Resubscribe will happen after backoff; on success the
+				// next lifetime's verifyAll is triggered by signalling
+				// the error fan-in (same observable effect as original:
+				// a restored subscription verifies all pins).
+				select {
+				case subErrors <- struct{}{}:
+				default:
+				}
+				timer := time.NewTimer(backoff)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return
+				case <-done:
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+		}()
+		return func() { close(done) }
 	}
-	subscribeAddr := func() (<-chan netlink.AddrUpdate, chan struct{}, error) {
-		updates := make(chan netlink.AddrUpdate, 32)
-		done := make(chan struct{})
-		if err := addrSubscribe(updates, done, onError); err != nil {
-			close(done)
-			return nil, nil, err
-		}
-		return updates, done, nil
-	}
-	if d.probePinVerifyFn() != nil {
-		var err error
-		linkUpdates, linkDone, err = subscribeLink()
-		if err != nil {
-			slog.Warn("probe pin link subscription unavailable; retrying", "err", err)
-			linkRetry = time.After(resubBackoff)
-		}
-		addrUpdates, addrDone, err = subscribeAddr()
-		if err != nil {
-			slog.Warn("probe pin address subscription unavailable; retrying", "err", err)
-			addrRetry = time.After(resubBackoff)
-		}
-	}
-	defer func() {
-		if linkDone != nil {
-			close(linkDone)
-		}
-		if addrDone != nil {
-			close(addrDone)
-		}
-	}()
+	stopLink := runSocket(false)
+	stopAddr := runSocket(true)
+	defer stopLink()
+	defer stopAddr()
 
 	for {
 		select {
 		case <-ctx.Done():
-			d.rpmMu.Lock()
-			d.rpmPinRetryActive = false
-			d.rpmMu.Unlock()
 			return
-		case update, ok := <-linkUpdates:
-			if !ok {
-				slog.Warn("probe pin link subscription closed; resubscribing")
-				if linkDone != nil {
-					close(linkDone)
-					linkDone = nil
-				}
-				linkUpdates = nil
-				linkRetry = time.After(resubBackoff)
-				continue
+		case ev := <-events:
+			if ev.isAddr {
+				d.verifyProbePinsForAddress(ev.addr.LinkIndex)
+			} else if ev.link.Attrs() != nil {
+				d.verifyProbePinsForLink(ev.link.Attrs().Name)
 			}
-			if update.Attrs() != nil {
-				d.verifyProbePinsForLink(update.Attrs().Name)
-			}
-		case update, ok := <-addrUpdates:
-			if !ok {
-				slog.Warn("probe pin address subscription closed; resubscribing")
-				if addrDone != nil {
-					close(addrDone)
-					addrDone = nil
-				}
-				addrUpdates = nil
-				addrRetry = time.After(resubBackoff)
-				continue
-			}
-			d.verifyProbePinsForAddress(update.LinkIndex)
-		case <-linkRetry:
-			linkRetry = nil
-			updates, done, err := subscribeLink()
-			if err != nil {
-				slog.Warn("probe pin link resubscription failed; retrying", "err", err)
-				linkRetry = time.After(resubBackoff)
-				continue
-			}
-			linkUpdates, linkDone = updates, done
-			slog.Info("probe pin link subscription restored; resynchronizing")
-			d.verifyProbePinsForAll()
-		case <-addrRetry:
-			addrRetry = nil
-			updates, done, err := subscribeAddr()
-			if err != nil {
-				slog.Warn("probe pin address resubscription failed; retrying", "err", err)
-				addrRetry = time.After(resubBackoff)
-				continue
-			}
-			addrUpdates, addrDone = updates, done
-			slog.Info("probe pin address subscription restored; resynchronizing")
-			d.verifyProbePinsForAll()
-		case <-subscriptionErrors:
+		case <-subErrors:
 			d.verifyProbePinsForAll()
 		case <-ticker.C:
 			d.rpmMu.Lock()

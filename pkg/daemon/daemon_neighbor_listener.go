@@ -86,8 +86,7 @@ type neighborSnapshotProvider interface {
 // monitored neighbor's forwarding-effective state changes.
 //
 // Resubscribe loop: kernel multicast can lose events under load;
-// runOneSubscription owns one subscription lifetime and returns
-// when the subscription closes; the outer loop re-establishes.
+// nlWatch owns one subscription lifetime and re-establishes on close (#17064).
 //
 // Safety net: a 60s ticker triggers full reconciliation
 // regardless of events, in case multicast lost the relevant
@@ -100,67 +99,26 @@ func (d *Daemon) neighborListener(ctx context.Context) {
 	safetyTick := time.NewTicker(60 * time.Second)
 	defer safetyTick.Stop()
 
-	for {
-		if !d.runOneSubscription(ctx, regenDebounce, safetyTick) {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
-// runOneSubscription owns ONE NeighSubscribe lifetime. Returns
-// true on subscription close (caller should retry); false on
-// ctx cancellation (caller should exit).
-//
-// Lifetime guarantee: done is closed exactly once, regardless
-// of whether subscribe succeeded, ctx was cancelled, or the
-// updates channel was closed. No double-close.
-func (d *Daemon) runOneSubscription(
-	ctx context.Context,
-	regenDebounce chan struct{},
-	safetyTick *time.Ticker,
-) bool {
-	updates := make(chan netlink.NeighUpdate, 1024)
-	done := make(chan struct{})
-	opts := netlink.NeighSubscribeOptions{
-		ListExisting:      true,
-		ReceiveBufferSize: 1 << 20, // 1 MB
-		ErrorCallback: func(err error) {
-			slog.Warn("neighbor listener netlink error", "err", err)
-		},
-	}
-	if err := netlink.NeighSubscribeWithOptions(updates, done, opts); err != nil {
-		slog.Warn("neighbor listener subscribe failed", "err", err)
-		// NeighSubscribeWithOptions can start its done goroutine
-		// before a ListExisting dump request fails; close done
-		// explicitly to avoid leaking the goroutine.
-		close(done)
-		return true
-	}
-	defer close(done)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-safetyTick.C:
-			d.triggerRegen(regenDebounce)
-		case u, ok := <-updates:
-			if !ok {
-				return true // subscription closed; resubscribe
-			}
+	// nlWatch owns subscribe/done/backoff (#17064); the 60s safety tick
+	// rides the Watch arm so it keeps firing across resubscribes, and
+	// the default Neigh subscriber keeps ListExisting + 1MiB RcvBuf.
+	nlWatch[netlink.NeighUpdate]{
+		Name: "neighbor",
+		Buf:  1024,
+		OnEvent: func(u netlink.NeighUpdate) {
 			if !d.isMonitoredNeighbor(u.LinkIndex) {
-				continue
+				return
 			}
 			if d.shouldTriggerRegen(u) {
 				d.triggerRegen(regenDebounce)
 			}
-		}
-	}
+		},
+		Watch: func() <-chan time.Time { return safetyTick.C },
+		WatchTick: func() bool {
+			d.triggerRegen(regenDebounce)
+			return false
+		},
+	}.Run(ctx)
 }
 
 // regenDebouncer coalesces regen requests so a burst of events

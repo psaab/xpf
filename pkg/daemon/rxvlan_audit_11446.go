@@ -56,12 +56,8 @@ func (d *Daemon) rxVlanAuditLoop(ctx context.Context) {
 		if !d.runRxVlanAuditLinkSubscription(ctx, state) {
 			return
 		}
-		timer := time.NewTimer(linkStateResubBackoffDefault)
-		select {
-		case <-ctx.Done():
-			_ = timer.Stop()
+		if !nlWatchBackoffWait(ctx, nlWatchBackoffDefault) {
 			return
-		case <-timer.C:
 		}
 	}
 }
@@ -70,51 +66,42 @@ func (d *Daemon) runRxVlanAuditLinkSubscription(ctx context.Context, state *rxVl
 	if state == nil {
 		state = newRxVlanAuditState()
 	}
-	updates := make(chan netlink.LinkUpdate, 64)
-	done := make(chan struct{})
-	onErr := func(err error) {
-		slog.Warn("rxvlan audit: netlink receive error, resubscribing", "err", err)
-	}
+	ticker := time.NewTicker(rxVlanAuditInterval)
+	defer ticker.Stop()
+	audit := func() { _ = d.rxVlanAuditOnce(ctx, "", state) }
 	subscribe := rxVlanAuditLinkSubscribe
 	if subscribe == nil {
 		subscribe = defaultLinkStateSubscribe
 	}
-	if err := subscribe(updates, done, onErr); err != nil {
-		slog.Warn("rxvlan audit: link subscription failed", "err", err)
-		close(done)
-		_ = d.rxVlanAuditOnce(ctx, "", state)
-		return true
-	}
-	defer close(done)
-
-	_ = d.rxVlanAuditOnce(ctx, "", state)
-	ticker := time.NewTicker(rxVlanAuditInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-ticker.C:
+	return nlWatch[netlink.LinkUpdate]{
+		Name:           "rxvlan-audit",
+		Subscribe:      subscribe,
+		Buf:            64,
+		OnGap:          audit,
+		OnGapOnFailure: true,
+		OnChannelClosed: func() {
 			_ = d.rxVlanAuditOnce(ctx, "", state)
-		case update, ok := <-updates:
-			if !ok {
-				_ = d.rxVlanAuditOnce(ctx, "", state)
-				return true
-			}
+		},
+		Watch: func() <-chan time.Time { return ticker.C },
+		WatchTick: func() bool {
+			_ = d.rxVlanAuditOnce(ctx, "", state)
+			return false
+		},
+		OnEvent: func(update netlink.LinkUpdate) {
 			if update.Header.Type != unix.RTM_NEWLINK {
-				continue
+				return
 			}
 			attrs := update.Attrs()
 			if attrs == nil || attrs.Name == "" || attrs.Flags&net.FlagUp == 0 {
-				continue
+				return
 			}
 			name := attrs.Name
 			if state.transitSuppressed {
 				name = ""
 			}
 			_ = d.rxVlanAuditOnce(ctx, name, state)
-		}
-	}
+		},
+	}.runOne(ctx)
 }
 
 // rxVlanParentNames mirrors the compiler's physical-parent selection: a

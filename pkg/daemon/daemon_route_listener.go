@@ -89,9 +89,11 @@ func (d *Daemon) setRouteListenerLoop(loop *coalesce.Loop) {
 }
 
 // routeListener subscribes to kernel route events and marks the coalescer.
-//
-// Subscription lifetime and resubscribe-on-error follow
-// daemon_neighbor_listener.go, which is the working sibling for this shape.
+// The lifecycle runs through nlWatch (#17064): OnGap is the #9010 catch-up
+// (a live subscription with ListExisting:false replays nothing, so the
+// re-establishment itself is a refresh edge — including the first), and
+// OnReceiveError is the #8915 mark (an overflow drops the only refresh
+// edge; the callback also increments RouteListenerErrors).
 func (d *Daemon) routeListener(ctx context.Context, loop *coalesce.Loop) {
 	loop.SetTimings(routeRefreshDebounce, routeRefreshThrottle)
 	d.setRouteListenerLoop(loop)
@@ -102,73 +104,23 @@ func (d *Daemon) routeListener(ctx context.Context, loop *coalesce.Loop) {
 	loop.StartWithContext(ctx)
 	defer loop.Stop()
 
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := d.runOneRouteSubscription(ctx, loop); err != nil {
-			slog.Warn("route listener: subscription ended; resubscribing", "err", err)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
-// runOneRouteSubscription owns ONE RouteSubscribe lifetime.
-func (d *Daemon) runOneRouteSubscription(ctx context.Context, loop *coalesce.Loop) error {
-	updates := make(chan netlink.RouteUpdate, 256)
-	done := make(chan struct{})
-	defer close(done)
-
-	if err := netlink.RouteSubscribeWithOptions(updates, done, netlink.RouteSubscribeOptions{
-		ListExisting:  false,
-		ErrorCallback: d.routeListenerErrorCallback(loop),
-	}); err != nil {
-		return err
-	}
-	// #9010: THE SUBSCRIPTION IS LIVE AGAIN, WHICH IS ITSELF A REFRESH EDGE.
-	//
-	// This options set passes ListExisting:false, so a new subscription
-	// replays nothing: every route that changed while there was no
-	// subscription is invisible to `updates` forever. The outer loop's
-	// resubscribe therefore closes the socket gap and not the DATA gap.
-	//
-	// #8915 marks from the ErrorCallback, which covers a fault DURING a live
-	// subscription. It cannot cover this: a subscribe that FAILS never
-	// installs a callback, so the 2-second retry path marks nothing at all,
-	// and a subscription that simply ends returns before any error is raised.
-	//
-	// The mark is what the coalescer reads to decide whether to actuate --
-	// "an unmarked loop sweeps forever and actuates never" (#8915, measured:
-	// 0 actuations across 50 sweeps). So without this the helper FIB stays
-	// stale until the next route event that happens to arrive.
-	//
-	// Marking on the FIRST subscription too is deliberate: a refresh is
-	// idempotent and the coalescer debounces, so the cost is one actuation at
-	// startup, and special-casing "not the first" would make the recovery
-	// depend on counting rather than on the invariant.
-	d.routeListenerCatchUp(loop)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case upd, ok := <-updates:
-			if !ok {
-				return nil
-			}
+	nlWatch[netlink.RouteUpdate]{
+		Name: "route",
+		Buf:  256,
+		OnGap: func() {
+			d.routeListenerCatchUp(loop)
+		},
+		OnReceiveError: d.routeListenerErrorCallback(loop),
+		OnEvent: func(upd netlink.RouteUpdate) {
 			if !routeEventWarrantsRefresh(upd.Route.Table, d.importedRouteTableIDs()) {
-				continue
+				return
 			}
 			// MARK only. The publish is the coalescer's decision, never this
 			// goroutine's — see the per-event note above.
 			d.routeListenerMarks.Add(1)
 			loop.Mark()
-		}
-	}
+		},
+	}.Run(ctx)
 }
 
 // routeListenerCatchUp marks the coalescer for a post-gap refresh.
@@ -217,9 +169,9 @@ func (d *Daemon) routeListenerErrorCallback(loop *coalesce.Loop) func(error) {
 		// coalescer decides whether to actuate. Discriminating on the
 		// errno would make recovery depend on matching a string the
 		// netlink library does not promise.
+		// nlWatch already logs the receive error under watcher=route;
+		// this callback's job is the counter + the refresh mark.
 		d.routeListenerErrors.Add(1)
-		slog.Warn("route listener: netlink error, forcing FIB refresh",
-			"err", err, "errors_total", d.routeListenerErrors.Load())
 		loop.Mark()
 	}
 }

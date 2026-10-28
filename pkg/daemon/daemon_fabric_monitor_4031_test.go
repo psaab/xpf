@@ -118,7 +118,7 @@ func drainFabricRefresh(ch <-chan struct{}) (*int32, func()) {
 func TestMonitorFabricStateResubscribesOnLinkChannelClose(t *testing.T) {
 	rec := &fabricSubRecorder{}
 
-	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}) error {
+	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextLink()
 		go func() {
 			// Mirror the netlink socket teardown: when done closes, record it
@@ -138,7 +138,7 @@ func TestMonitorFabricStateResubscribesOnLinkChannelClose(t *testing.T) {
 		return nil
 	}
 
-	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}) error {
+	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextNeigh()
 		go func() {
 			go func() { <-done; rec.recordNeighDone(n) }()
@@ -195,7 +195,7 @@ func TestMonitorFabricStateResubscribesOnLinkChannelClose(t *testing.T) {
 func TestMonitorFabricStateResubscribesOnNeighChannelClose(t *testing.T) {
 	rec := &fabricSubRecorder{}
 
-	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}) error {
+	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextLink()
 		go func() {
 			go func() { <-done; rec.recordLinkDone(n) }()
@@ -205,7 +205,7 @@ func TestMonitorFabricStateResubscribesOnNeighChannelClose(t *testing.T) {
 		return nil
 	}
 
-	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}) error {
+	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextNeigh()
 		go func() {
 			go func() { <-done; rec.recordNeighDone(n) }()
@@ -257,7 +257,7 @@ func TestMonitorFabricStateResubscribesOnNeighChannelClose(t *testing.T) {
 func TestMonitorFabricStateContextCancelExits(t *testing.T) {
 	rec := &fabricSubRecorder{}
 
-	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}) error {
+	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextLink()
 		go func() {
 			go func() { <-done; rec.recordLinkDone(n) }()
@@ -266,7 +266,7 @@ func TestMonitorFabricStateContextCancelExits(t *testing.T) {
 		}()
 		return nil
 	}
-	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}) error {
+	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextNeigh()
 		go func() {
 			go func() { <-done; rec.recordNeighDone(n) }()
