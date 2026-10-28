@@ -77,11 +77,11 @@ const (
 	SessionEventFlagIsReverse      uint8 = 1 << 2
 	// #2785: per-policy `then log` selection carried on the open frame so a
 	// synced session logs the same RT_FLOW records after failover. Must match
-	// FLAG_LOG_SESSION_INIT/CLOSE in userspace-dp/src/event_stream/codec.rs.
+	// FLAG_LOG_SESSION_INIT/CLOSE in event_stream/codec/wire.rs.
 	SessionEventFlagLogSessionInit  uint8 = 1 << 3
 	SessionEventFlagLogSessionClose uint8 = 1 << 4
 	// #4565: NAT64 cross-family marker carried on the open frame so a peer-
 	// PROMOTED session rebuilds its reverse (v4->v6) BIB after failover. Must
-	// match FLAG_NAT64 in userspace-dp/src/event_stream/codec.rs.
+	// match FLAG_NAT64 in event_stream/codec/wire.rs.
 	SessionEventFlagNat64 uint8 = 1 << 5
 )
