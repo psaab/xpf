@@ -493,7 +493,7 @@ func TestCommitApplyArmsThePolicyInvalidationPlan6948(t *testing.T) {
 	d := &Daemon{}
 	d.applyBodyForTest = func(*config.Config) { seen = d.policyInvalidationPlan }
 
-	if _, err := d.applyAndSyncCommitted(oldCfg, newCfg, peerSyncNever); err != nil {
+	if _, err := d.applyAndSyncCommittedForTest(oldCfg, newCfg, peerSyncNever); err != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", err)
 	}
 	if seen == nil {

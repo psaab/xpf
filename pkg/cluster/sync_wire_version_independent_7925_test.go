@@ -87,7 +87,7 @@ func TestSessionSyncWireVersionIsNotDerivedFromHAProtocol7925(t *testing.T) {
 		t.Errorf("SessionSyncWireVersion is declared in terms of %v, so a session-wire-only "+
 			"change is forced to bump the HA protocol version as a side effect. That pushes "+
 			"the HA version out from under MinCompatHAProtocolVersion and fails "+
-			"GateMixedBaseSwap's [floor,current] window for peers that stayed compatible on "+
+			"GateProtocolCompat's [floor,current] window for peers that stayed compatible on "+
 			"heartbeat/failover — the two are checked differently (HA: window; session-sync: "+
 			"exact equality), which is why they must be able to move apart (#7925)", found)
 	}
