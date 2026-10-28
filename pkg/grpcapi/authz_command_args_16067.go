@@ -143,18 +143,7 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 		if !isSum || sr == nil {
 			return nil, false
 		}
-		forms, ok := argforms.SessionForms(cfg, &pb.GetSessionsRequest{
-			Zone:              sr.GetZone(),
-			Protocol:          sr.GetProtocol(),
-			SourcePrefix:      sr.GetSourcePrefix(),
-			DestinationPrefix: sr.GetDestinationPrefix(),
-			SourcePort:        sr.GetSourcePort(),
-			DestinationPort:   sr.GetDestinationPort(),
-			NatOnly:           sr.GetNatOnly(),
-			Application:       sr.GetApplication(),
-			InterfaceFilter:   sr.GetInterfaceFilter(),
-			SourceNatPool:     sr.GetSourceNatPool(),
-		}, "show security flow session")
+		forms, ok := argforms.SessionForms(cfg, selectorFromSummary(sr), "show security flow session")
 		if !ok {
 			return nil, false
 		}

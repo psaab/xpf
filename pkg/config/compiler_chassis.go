@@ -683,38 +683,53 @@ func monitorEntryNodes(cfgNode *Node, skip int) []*Node {
 // apart from the compiler's reader.
 const monitorWeightKeyword = "weight"
 
+// monitorAttrKeywords is the shared set of per-entry attribute keywords:
+// `weight` (the historical attribute) plus the #15038 ip-monitoring probe
+// binding (`interface`, `secondary-ip-address`). monitorEntryNodes reserves
+// their value slots and the #6588 duplicate gate loops over this slice, so
+// every attribute gets the same first-wins reader and duplicate policy
+// (#17232) — a new attribute added here is gated automatically.
+var monitorAttrKeywords = []string{monitorWeightKeyword, "interface", "secondary-ip-address"}
+
 // isMonitorAttrKeyword reports whether tok opens a per-entry attribute
-// (keyword + one value token) rather than a new entry name. `weight` is the
-// historical attribute; #15038 adds the ip-monitoring probe binding
-// (`interface`, `secondary-ip-address`). Without reserving their value
-// slots, a packed target shredded into one phantom entry per token.
+// (keyword + one value token) rather than a new entry name. Without
+// reserving their value slots, a packed target shredded into one phantom
+// entry per token.
 func isMonitorAttrKeyword(tok string) bool {
-	switch tok {
-	case monitorWeightKeyword, "interface", "secondary-ip-address":
-		return true
+	for _, kw := range monitorAttrKeywords {
+		if tok == kw {
+			return true
+		}
 	}
 	return false
 }
 
-// monitorWeightTokens returns every `weight` VALUE an entry carries, across
-// both locations the value can occupy (#6588):
+// monitorWeightTokens returns every `weight` VALUE an entry carries; it is
+// monitorEntryAttrTokens specialised to the weight keyword (#6588).
+func monitorWeightTokens(entry *Node) []string {
+	return monitorEntryAttrTokens(entry, monitorWeightKeyword)
+}
+
+// monitorEntryAttrTokens returns every VALUE of attribute kw an entry
+// carries, across both locations the value can occupy (#6588, generalised
+// to every monitorAttrKeywords member by #17232):
 //
 //   - inline on the entry's own Keys — `ge-0/0/0 weight 255`
 //   - as a child leaf              — `ge-0/0/0 { weight 255; }`
 //
-// Callers take the FIRST token, so the compiled weight is the same regardless
+// Callers take the FIRST token, so the compiled value is the same regardless
 // of spelling. Before #6588 the two locations disagreed on which duplicate
 // won: the inline scan overwrote (last wins) while FindChild returned the
 // first, so `weight 100 weight 200` compiled to 200 inline but 100 in a block.
 // Returning every token also lets the AST gate REJECT a duplicate rather than
 // silently pick one, which is what makes the answer spelling-independent.
 //
-// A `weight` keyword with no following token yields an empty-string entry, so
-// the gate reports it as malformed rather than the caller treating it as absent.
-func monitorWeightTokens(entry *Node) []string {
+// A keyword with no following token yields an empty-string entry, so the
+// gate reports it as malformed rather than the caller treating it as absent.
+func monitorEntryAttrTokens(entry *Node, kw string) []string {
 	var out []string
 	for i := 1; i < len(entry.Keys); i++ {
-		if entry.Keys[i] != monitorWeightKeyword {
+		if entry.Keys[i] != kw {
 			continue
 		}
 		if i+1 < len(entry.Keys) {
@@ -725,7 +740,7 @@ func monitorWeightTokens(entry *Node) []string {
 		out = append(out, "")
 	}
 	for _, c := range entry.Children {
-		if len(c.Keys) > 0 && c.Keys[0] == monitorWeightKeyword {
+		if len(c.Keys) > 0 && c.Keys[0] == kw {
 			out = append(out, nodeVal(c))
 		}
 	}
@@ -1225,40 +1240,19 @@ func compileRGIPMonitoring(rg *RedundancyGroup, child *Node) {
 			// #15038: `interface <unit>` / `secondary-ip-address <addr>`
 			// bind the probe to a unit and give the non-primary a source
 			// it actually holds. Read from BOTH locations (inline Keys and
-			// child leaves) like the weight, first-wins.
-			if v := ipMonitorTargetProp(addrChild, "interface"); v != "" {
-				target.Interface = v
+			// child leaves) like the weight, first-wins via the shared
+			// monitorEntryAttrTokens reader (#17232); a duplicate is
+			// rejected/warned by validateMonitorWeightTokensAST.
+			if toks := monitorEntryAttrTokens(addrChild, "interface"); len(toks) > 0 {
+				target.Interface = toks[0]
 			}
-			if v := ipMonitorTargetProp(addrChild, "secondary-ip-address"); v != "" {
-				target.SecondaryIPAddress = v
+			if toks := monitorEntryAttrTokens(addrChild, "secondary-ip-address"); len(toks) > 0 {
+				target.SecondaryIPAddress = toks[0]
 			}
 			ipm.Targets = append(ipm.Targets, target)
 		}
 	}
 	rg.IPMonitoring = ipm
-}
-
-// ipMonitorTargetProp returns the first value of the named per-target
-// ip-monitoring property (`interface` / `secondary-ip-address`) across both
-// spellings: inline on the entry's Keys (`10.0.0.1 interface reth0.0`) and as
-// a child leaf (`10.0.0.1 { interface reth0.0; }`). First-wins, mirroring
-// monitorWeightTokens. Empty when absent.
-func ipMonitorTargetProp(entry *Node, name string) string {
-	for i := 1; i < len(entry.Keys); i++ {
-		if entry.Keys[i] != name {
-			continue
-		}
-		if i+1 < len(entry.Keys) {
-			return entry.Keys[i+1]
-		}
-		return ""
-	}
-	for _, c := range entry.Children {
-		if len(c.Keys) > 0 && c.Keys[0] == name {
-			return nodeVal(c)
-		}
-	}
-	return ""
 }
 
 // isIPMonitoringProp reports whether tok opens an `ip-monitoring` property.

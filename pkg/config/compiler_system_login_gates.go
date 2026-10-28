@@ -555,28 +555,23 @@ func (f *loginFindings) verdict(lenient bool) ([]string, error) {
 	return f.order, nil
 }
 
-// forEachClusterNodeView calls fn with the candidate tree expanded for each
-// chassis-cluster node id, so a gate sees what EVERY node will actually render
-// — including a `groups nodeN` body that `apply-groups "${node}"` selects only
-// on the peer.
-//
-// Mirrors collectQinQFindingsForNode / collectVLANMapFindingsForNode: clone,
-// expand for the node, read the AST. It never calls CompileConfig* (which
-// would re-enter the gate). A view that fails to expand contributes nothing —
-// a config defining only `groups node1` + `${node}` does not expand for node 0,
-// and the real per-node compile path already rejects that on the affected
-// node, while the OTHER view still sees the body hidden in the group.
+// forEachClusterNodeView calls fn with each effective view of the
+// candidate tree from effectiveNodeViews (#17222): the candidate
+// expanded for each chassis-cluster node id, so a gate sees what EVERY
+// node will actually render — including a `groups nodeN` body that
+// `apply-groups "${node}"` selects only on the peer — plus, when
+// neither per-node expansion succeeds (a group literally named
+// "${node}"), the generic-compile fallback tree, so the gate inspects
+// the same tree the standalone compile compiles instead of nothing
+// (#13146). It never calls CompileConfig* (which would re-enter the
+// gate). A view that fails to expand contributes nothing — a config
+// defining only `groups node1` + `${node}` does not expand for node 0,
+// and the real per-node compile path already rejects that on the
+// affected node, while the OTHER view still sees the body hidden in
+// the group.
 func forEachClusterNodeView(tree *ConfigTree, fn func(*ConfigTree)) {
-	if tree == nil {
-		return
-	}
-	for _, nodeID := range []int{0, 1} {
-		clone := tree.Clone()
-		vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-		if err := clone.ExpandGroupsWithVars(vars); err != nil {
-			continue
-		}
-		fn(clone)
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{Fallback: true}) {
+		fn(view)
 	}
 }
 

@@ -8,7 +8,7 @@ use std::net::IpAddr;
 use super::rt_flow::{DataplaneEventKind, DataplaneEventPayload, POLICY_CONFIG_GENERATION_MARKER};
 use super::wire::*;
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(crate) fn decode_dataplane_event(
     msg_type: u8,
     payload: &[u8],
@@ -93,7 +93,7 @@ pub(crate) fn decode_dataplane_event(
     })
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 fn read_ip_16(bytes: &[u8], wire_af: u8) -> Option<IpAddr> {
     match wire_af {
         RT_FLOW_AF_INET => Some(IpAddr::from(<[u8; 4]>::try_from(&bytes[..4]).ok()?)),
@@ -102,7 +102,7 @@ fn read_ip_16(bytes: &[u8], wire_af: u8) -> Option<IpAddr> {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 fn read_nonzero_ip_16(bytes: &[u8], wire_af: u8) -> Option<IpAddr> {
     if bytes.iter().all(|b| *b == 0) {
         return None;

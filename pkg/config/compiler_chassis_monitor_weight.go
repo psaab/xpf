@@ -6,8 +6,9 @@ import (
 )
 
 // compiler_chassis_monitor_weight.go carries the #6588 commit-side gate for a
-// redundancy-group monitor weight that is present but UNUSABLE — malformed, or
-// specified twice with different values.
+// redundancy-group monitor attribute that is present but UNUSABLE — malformed,
+// or specified twice. #17232 extends the duplicate rule from `weight` to the
+// #15038 ip-monitoring probe binding (`interface`, `secondary-ip-address`).
 //
 // Why an AST pre-walk rather than a typed schema leaf or a compiled-struct
 // check:
@@ -50,13 +51,15 @@ import (
 // now flagged rather than silent.
 
 // validateMonitorWeightTokensAST walks the chassis cluster subtree and reports
-// every redundancy-group monitor weight that is present but unusable. It runs
+// every redundancy-group monitor attribute that is present but unusable. It runs
 // on the group-expanded tree so an apply-groups-inherited weight is covered.
 //
-// It derives its entries from monitorEntryNodes / monitorWeightTokens — the
+// It derives its entries from monitorEntryNodes / monitorEntryAttrTokens — the
 // same readers compileChassis uses — so the gate and the compiler cannot drift
-// apart about which token is a weight, which entry it belongs to, or how a
-// bracketed list splits.
+// apart about which token is an attribute, which entry it belongs to, or how a
+// bracketed list splits. The gate loops over monitorAttrKeywords, the same
+// slice isMonitorAttrKeyword encodes, so every attribute the compiler reads
+// first-wins is duplicate-gated (#17232).
 //
 // #16663: the cluster body is resolved through normalizedClusterNode — the
 // same view compileChassis reads — so every spelling (container, packed on
@@ -79,11 +82,38 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 		return fmt.Errorf("%s", msg)
 	}
 
-	// checkTokens applies the missing-value / non-integer / duplicate rules to
-	// the value tokens of ONE weight-like field. Every field this gate covers
-	// shares those rules because every one of them reaches the compiler through
-	// the same Atoi-then-keep-0 coercion, so they are implemented once here
-	// rather than per field.
+	// checkDuplicate applies the duplicate rule to the value tokens of ONE
+	// attribute: a keyword specified more than once is rejected (strict) or
+	// warned (lenient), because the compiler's first-wins pick would make the
+	// compiled value depend on the spelling. An empty token list means the
+	// field is absent, which is legal. Shared by weights and by the #15038
+	// ip-monitoring probe binding (#17232), which differs only in that its
+	// values are not integers.
+	checkDuplicate := func(where, subject string, toks []string) error {
+		if len(toks) <= 1 {
+			return nil
+		}
+		distinct := false
+		for _, t := range toks[1:] {
+			if t != toks[0] {
+				distinct = true
+				break
+			}
+		}
+		if distinct {
+			return emit("chassis cluster %s: %s specified %d times with different "+
+				"values %q — the compiled value would depend on the spelling; specify "+
+				"exactly one %s", where, subject, len(toks), toks, subject)
+		}
+		return emit("chassis cluster %s: %s specified %d times; specify exactly one %s",
+			where, subject, len(toks), subject)
+	}
+
+	// checkTokens applies the duplicate / missing-value / non-integer rules
+	// to the value tokens of ONE weight-like field. Every field this gate
+	// covers shares those rules because every one of them reaches the
+	// compiler through the same Atoi-then-keep-0 coercion, so they are
+	// implemented once here rather than per field.
 	//
 	// where identifies the offending field, already scoped to its redundancy
 	// group (`redundancy-group 1 interface-monitor ge-0/0/0`). subject names
@@ -102,21 +132,11 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 		if len(toks) == 0 {
 			return nil
 		}
+		if err := checkDuplicate(where, subject, toks); err != nil {
+			return err
+		}
 		if len(toks) > 1 {
-			distinct := false
-			for _, t := range toks[1:] {
-				if t != toks[0] {
-					distinct = true
-					break
-				}
-			}
-			if distinct {
-				return emit("chassis cluster %s: %s specified %d times with different "+
-					"values %q — the compiled value would depend on the spelling; specify "+
-					"exactly one %s", where, subject, len(toks), toks, subject)
-			}
-			return emit("chassis cluster %s: %s specified %d times; specify exactly one %s",
-				where, subject, len(toks), subject)
+			return nil
 		}
 		if _, err := strconv.Atoi(toks[0]); err != nil {
 			return emit("chassis cluster %s: %s %q is not an integer — it compiles to the 0 "+
@@ -129,6 +149,15 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 
 	// checkEntries validates every entry of one monitor statement. what names
 	// the statement for the operator (e.g. `interface-monitor`).
+	//
+	// Each entry is checked for every keyword in monitorAttrKeywords
+	// (#17232): `weight` gets the full integer rules, the #15038 probe
+	// binding (`interface`, `secondary-ip-address`) gets the duplicate rule.
+	// Only ip-monitoring targets carry the binding, but looping the shared
+	// slice keeps a future attribute gated the moment it is added there.
+	// A keyword with no value is NOT flagged for the binding: unlike a
+	// weight (which silently compiles to the 0 default), it compiles to
+	// the same empty binding the statement would have if it were absent.
 	//
 	// #15036: entries are ALSO checked for a duplicate interface. A
 	// re-weighted monitor authored twice compiles (via the
@@ -149,12 +178,22 @@ func validateMonitorWeightTokensAST(nodes []*Node, lenient bool) ([]string, erro
 				}
 			}
 			seen[name] = true
-			if err := checkTokens(
-				fmt.Sprintf("redundancy-group %s %s %s", rgName, what, entry.Name()),
-				monitorWeightKeyword,
-				"the monitor going down deducts NO weight and the redundancy group never demotes",
-				monitorWeightTokens(entry)); err != nil {
-				return err
+			where := fmt.Sprintf("redundancy-group %s %s %s", rgName, what, entry.Name())
+			for _, kw := range monitorAttrKeywords {
+				if kw == monitorWeightKeyword {
+					if err := checkTokens(
+						where,
+						monitorWeightKeyword,
+						"the monitor going down deducts NO weight and the redundancy group never demotes",
+						monitorWeightTokens(entry)); err != nil {
+						return err
+					}
+					continue
+				}
+				if err := checkDuplicate(where, kw,
+					monitorEntryAttrTokens(entry, kw)); err != nil {
+					return err
+				}
 			}
 		}
 		return nil

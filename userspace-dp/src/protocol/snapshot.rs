@@ -913,7 +913,6 @@ pub(crate) struct ConfigSnapshot {
     /// removed, but the field is retained as documented-reserved to preserve
     /// the #1977 NUM_WIDTH decode-safety tests (protocol/tests.rs) and avoid a
     /// cross-language wire-protocol break. It is deserialized and ignored.
-    #[allow(dead_code)]
     #[serde(rename = "flow_export", default)]
     pub flow_export: Option<FlowExportSnapshot>,
     #[serde(rename = "mirror_configs", default)]
