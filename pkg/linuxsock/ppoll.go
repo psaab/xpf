@@ -36,9 +36,16 @@ type PpollRecv struct {
 	fd     int
 	wakeFD int
 	recvFn func(buf []byte) (int, unix.Sockaddr, error)
+	pollFn func(fds []unix.PollFd, timeout *unix.Timespec, sigmask *unix.Sigset_t) (int, error)
 
 	wakeOnce  sync.Once
 	closeOnce sync.Once
+}
+
+// AttachPollFnForTest replaces ppoll for deterministic readiness tests.
+// Production receivers leave this unset.
+func (p *PpollRecv) AttachPollFnForTest(fn func(fds []unix.PollFd, timeout *unix.Timespec, sigmask *unix.Sigset_t) (int, error)) {
+	p.pollFn = fn
 }
 
 // NewPpollRecv wraps fd (already opened via Socket and bound by the
@@ -87,7 +94,11 @@ func (p *PpollRecv) Recv(buf []byte) (int, unix.Sockaddr, error) {
 			{Fd: int32(p.fd), Events: unix.POLLIN},
 			{Fd: int32(p.wakeFD), Events: unix.POLLIN},
 		}
-		_, err := unix.Ppoll(fds, nil, nil)
+		poll := unix.Ppoll
+		if p.pollFn != nil {
+			poll = p.pollFn
+		}
+		_, err := poll(fds, nil, nil)
 		if err != nil {
 			if err == unix.EINTR {
 				continue
@@ -95,6 +106,12 @@ func (p *PpollRecv) Recv(buf []byte) (int, unix.Sockaddr, error) {
 			return 0, nil, err
 		}
 		if fds[0].Revents&unix.POLLIN != 0 {
+			break
+		}
+		if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			// RX error readiness (e.g. AF_PACKET ENETDOWN): consume the
+			// pending socket error via Recvfrom so the caller's receive
+			// error backoff engages instead of busy-spinning on ppoll.
 			break
 		}
 		if fds[1].Revents&(unix.POLLIN|unix.POLLHUP|unix.POLLERR) != 0 {
