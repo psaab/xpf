@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-// compiler_chassis_rg_node_priority.go carries the #16672 gate for a
-// redundancy-group `node` statement that is not exactly
-// `node <0|1> priority <1..254>`.
-//
+// compiler_chassis_rg_node_priority.go carries the #16672 and #17820 gates
+// for redundancy-group `node` statements, which must include exactly one
+// explicit priority: `node <0|1> priority <1..254>`.
+
 // A missing `;` fuses two statements into one node:
 //
 //	redundancy-group 1 { node 1 priority 100 node 0 priority 200; }
@@ -24,26 +24,22 @@ import (
 // node 1 wins the RG although the operator wrote node 0 at 200. The
 // reverse order keeps placement but silently changes the value.
 //
-// The same shape gate also refuses the V34-03 cohort cells on this
-// statement: a missing priority, a missing/non-numeric priority value,
-// a duplicate `priority`, and trailing tokens after the value. The
-// compiled struct cannot distinguish any of these (a failed Atoi and
-// an absent priority both leave no entry), and the schema walker
-// consumes the packed tail as identity, so the check runs on the AST
-// through redundancyGroupBody — the same splitter the compiler uses.
+// The gate refuses fused statements, missing priorities or priority values,
+// non-numeric values, duplicate `priority`, and trailing tokens. The compiled
+// struct cannot distinguish some malformed forms from an absent priority (a
+// failed Atoi and an absent value both leave no entry), and the schema walker
+// consumes the packed tail as identity, so the check runs on the AST through
+// redundancyGroupBody — the same splitter the compiler uses.
 //
 // Strictness follows the sibling chassis gates: hard-reject at commit /
 // commit-check, downgrade to a cfg.Warnings entry on the tolerant load /
-// peer-sync paths (#1960 no-brick). On the tolerant path the compiler
-// keeps only the FIRST priority (see compileRGNodePriority), so the
-// fused second statement no longer overwrites the first node's own
-// priority.
+// peer-sync paths (#1960 no-brick). This preserves boot compatibility for
+// persisted configs while ensuring new commits provide explicit priorities.
 
-// rgNodePriorityShape16672 inspects one `node` child of a redundancy
-// group and returns a human-readable defect, or "" when the statement
-// is exactly `node <id> priority <value>` in either spelling:
-// inline Keys [node <id> priority <value>] or a `priority` child.
-func rgNodePriorityShape16672(child *Node) string {
+// rgNodePriorityShape inspects one `node` child of a redundancy group and
+// returns a human-readable defect, or "" when the node has an explicit
+// integer priority in either spelling: inline Keys or a `priority` child.
+func rgNodePriorityShape(child *Node) string {
 	if child == nil {
 		return ""
 	}
@@ -77,17 +73,8 @@ func rgNodePriorityShape16672(child *Node) string {
 		return fmt.Sprintf("specifies `priority` both inline and as a block (%q) — specify exactly one priority", strings.Join(keys, " "))
 	}
 	if priCount == 0 && !hasChildPri {
-		// No priority at all. A bare `node <id>;` / `node <id>` (Keys
-		// exactly [node <id>], no children) carries no priority claim;
-		// the identity gate and existing controls accept it, and a
-		// missing per-node priority is already legal (the other node's
-		// statement, or the runtime default, applies). Anything more
-		// — extra keys or a non-priority child — is a malformed claim.
-		if len(keys) <= 2 && len(child.Children) == 0 {
-			return ""
-		}
-		return fmt.Sprintf("carries no `priority` (%q) — a redundancy-group node statement must be "+
-			"`node <0|1> priority <1..254>`; add the priority or remove the statement", strings.Join(keys, " "))
+		return fmt.Sprintf("is missing required `priority` (%q) — a redundancy-group node statement must be "+
+			"`node <0|1> priority <1..254>`; specify an explicit priority", strings.Join(keys, " "))
 	}
 	if priCount == 1 {
 		// Tokens before `priority` (past the identity) or after its
@@ -186,19 +173,23 @@ func rgRawTailFused16672(rgNode *Node) string {
 }
 
 // validateRGNodePriorityShapeAST walks the chassis cluster subtree and
-// reports every redundancy-group `node` statement that is not exactly
-// `node <id> priority <value>` (#16672). It reads statements through
-// redundancyGroupBody, the same splitter compileChassis dispatches
-// from, so packed and container spellings are judged identically.
+// reports every redundancy-group `node` statement missing an explicit
+// priority or having a fused/malformed shape (#16672/#17820). It reads
+// statements through redundancyGroupBody, the same splitter compileChassis
+// dispatches from, so packed and container spellings are judged identically.
 //
 // Returns (warnings, nil) when lenient, (nil, error) on the first
 // offender when strict.
 func validateRGNodePriorityShapeAST(nodes []*Node, lenient bool) ([]string, error) {
 	var warnings []string
 	emit := func(rgName string, child *Node, defect string) error {
-		msg := fmt.Sprintf("chassis cluster redundancy-group %s node: %s (#16672) — "+
-			"the second priority would otherwise be written onto the first node, "+
-			"inverting redundancy-group primary placement", rgName, defect)
+		issue := "#16672"
+		if strings.HasPrefix(defect, "is missing required `priority`") {
+			issue = "#17820"
+		}
+		msg := fmt.Sprintf("chassis cluster redundancy-group %s node: %s (%s) — "+
+			"a malformed or priority-less node statement could silently omit or misassign an election priority "+
+			"and change redundancy-group ownership", rgName, defect, issue)
 		// child is unused beyond future location context; keep signature
 		// explicit so call sites read as statement-scoped.
 		_ = child
@@ -237,7 +228,7 @@ func validateRGNodePriorityShapeAST(nodes []*Node, lenient bool) ([]string, erro
 					if child.Name() != "node" {
 						continue
 					}
-					defect := rgNodePriorityShape16672(child)
+					defect := rgNodePriorityShape(child)
 					if defect == "" {
 						defect = rgNodeChainDefect16672(child)
 					}

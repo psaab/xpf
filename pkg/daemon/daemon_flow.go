@@ -11,7 +11,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
@@ -1137,115 +1136,50 @@ func (d *Daemon) reconcileFlowTrace(cfg *config.Config, er *logging.EventReader)
 	}
 }
 
-// linkStateResubBackoffDefault is the delay between a link-update
-// subscription closing (e.g. on a recoverable ENOBUFS) and the
-// resubscribe attempt. Matches the neighbor listener's 2s backoff.
-const linkStateResubBackoffDefault = 2 * time.Second
-
 // monitorLinkState subscribes to netlink link updates and emits SNMP
 // linkUp/linkDown traps on interface state changes.
 //
 // Resilience (#3950): a netlink multicast receive can fail with ENOBUFS
-// when a burst of link events overflows the socket receive buffer — many
-// interfaces flapping at once, precisely when link-state monitoring
-// matters most for HA (RETH member link-down tracking, DHCP-on-link-up).
+// when a burst of link events overflows the socket receive buffer.
 // ENOBUFS is RECOVERABLE: the kernel dropped some notifications but the
-// socket stays usable. The vishvananda/netlink subscribe goroutine,
-// however, treats ANY receive error as terminal — it reports the error to
-// the ErrorCallback and closes the update channel. The pre-#3950 loop
-// returned on that channel close, so a single transient ENOBUFS
-// permanently disabled link-state traps for the daemon's lifetime.
+// socket stays usable; the vishvananda/netlink subscribe goroutine,
+// however, treats ANY receive error as terminal — it reports the error
+// to the ErrorCallback and closes the update channel. The pre-#3950 loop
+// returned on that channel close, permanently disabling link-state
+// traps. The loop now runs through nlWatch (#17064), which RESUBSCRIBES
+// on channel close and RE-SYNCS via LinkList after every (re)subscribe
+// so transitions missed while unsubscribed are caught up — feeding the
+// same emit path a streamed event would. It exits only on ctx cancel.
 //
-// The loop now RESUBSCRIBES on channel close (mirroring the neighbor
-// listener's runOneSubscription pattern) and, because messages were
-// dropped during the overflow, RE-SYNCS via LinkList to catch up on any
-// up/down transitions missed while unsubscribed — feeding the same emit
-// path a streamed event would. It exits only on context cancellation.
+// seeded gates the re-sync's emit behaviour across resubscribes: the
+// FIRST subscription seeds prevOper silently; every later resubscribe
+// emits catch-up traps.
 func (d *Daemon) monitorLinkState(ctx context.Context) {
-	// prevOper persists ACROSS resubscribes so the post-ENOBUFS re-sync
-	// only emits traps for interfaces whose state genuinely changed.
 	prevOper := make(map[int]bool) // ifindex -> up
 	seeded := false
 	slog.Info("SNMP link state monitor started")
-
-	for {
-		if !d.runLinkStateSubscription(ctx, prevOper, &seeded) {
-			return // context cancelled — clean exit
-		}
-		// Subscription closed on a recoverable receive error (ENOBUFS or
-		// similar). Back off briefly, then loop to resubscribe. The
-		// catch-up re-sync runs inside runLinkStateSubscription right after
-		// the fresh subscription is live, so no state-change window is lost.
-		backoff := d.linkStateResubBackoff
-		if backoff <= 0 {
-			backoff = linkStateResubBackoffDefault
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-	}
-}
-
-// runLinkStateSubscription owns ONE netlink link-update subscription.
-// Returns true when the subscription closed on a recoverable receive
-// error (the caller should back off and resubscribe); false when ctx was
-// cancelled (the caller should exit). done is closed exactly once on every
-// path (no double-close, no leak).
-//
-// seeded gates the re-sync's emit behavior: the FIRST subscription seeds
-// prevOper silently (no traps for interfaces already up at boot); every
-// later resubscribe emits catch-up traps for transitions missed during the
-// overflow. The re-sync runs after the subscription is established so any
-// transition racing the enumeration is also streamed on the live socket.
-func (d *Daemon) runLinkStateSubscription(ctx context.Context, prevOper map[int]bool, seeded *bool) bool {
-	updates := make(chan netlink.LinkUpdate, 64)
-	done := make(chan struct{})
-
-	onErr := func(err error) {
-		// Runs on the subscribe goroutine. slog is concurrency-safe; the
-		// warning names the recoverable receive error (e.g. ENOBUFS) that is
-		// about to close the channel and trigger a resubscribe.
-		slog.Warn("SNMP link monitor: netlink receive error, resubscribing", "err", err)
-	}
-
 	subscribe := d.linkStateSubscribe
 	if subscribe == nil {
 		subscribe = defaultLinkStateSubscribe
 	}
-	if err := subscribe(updates, done, onErr); err != nil {
-		slog.Warn("SNMP link monitor: subscribe failed", "err", err)
-		// The subscribe may have started its done-watcher goroutine before a
-		// ListExisting dump failed; close done to avoid leaking it. Treat as
-		// recoverable so the caller backs off and retries.
-		close(done)
-		return true
-	}
-	defer close(done)
-
-	// Seed / catch-up now that the subscription is live.
-	d.resyncLinkState(prevOper, *seeded)
-	*seeded = true
-
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case update, ok := <-updates:
-			if !ok {
-				// The netlink subscribe goroutine closes the channel on ANY
-				// receive error, including a recoverable ENOBUFS. Resubscribe.
-				return true
-			}
+	nlWatch[netlink.LinkUpdate]{
+		Name:      "snmp-link",
+		Subscribe: subscribe,
+		Buf:       64,
+		Backoff:   d.linkStateResubBackoff,
+		OnGap: func() {
+			d.resyncLinkState(prevOper, seeded)
+			seeded = true
+		},
+		OnEvent: func(update netlink.LinkUpdate) {
 			attrs := update.Attrs()
 			if attrs == nil || attrs.Name == "lo" {
-				continue
+				return
 			}
 			d.applyLinkState(prevOper, attrs.Index, attrs.Name,
 				linkOperUp(attrs), linkAdminUp(attrs), true)
-		}
-	}
+		},
+	}.Run(ctx)
 }
 
 // resyncLinkState enumerates all current links via LinkList and reconciles
@@ -1331,14 +1265,4 @@ func (d *Daemon) emitLinkStateTrap(index int, name string, up, adminUp bool) {
 	} else {
 		d.snmpAgent.NotifyLinkDown(index, name, adminUp)
 	}
-}
-
-// defaultLinkStateSubscribe is the production linkStateSubscribe seam. It
-// subscribes to netlink RTNLGRP_LINK updates and wires onErr to the
-// subscription's ErrorCallback so a recoverable ENOBUFS is logged before
-// the channel closes and the loop resubscribes (#3950).
-func defaultLinkStateSubscribe(ch chan<- netlink.LinkUpdate, done <-chan struct{}, onErr func(error)) error {
-	return netlink.LinkSubscribeWithOptions(ch, done, netlink.LinkSubscribeOptions{
-		ErrorCallback: onErr,
-	})
 }
