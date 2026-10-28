@@ -646,7 +646,10 @@
     },
     "three_color_policers": [],
     "tunnel_endpoints": [],
-    "userspace": null,
+    "userspace": {
+      "ring_entries": 0,
+      "workers": 0
+    },
     "version": 0,
     "zones": []
   },
@@ -834,7 +837,18 @@
     },
     "three_color_policers": [],
     "tunnel_endpoints": [],
-    "userspace": null,
+    "userspace": {
+      "ring_entries": 24,
+      "shared_umem": {
+        "interfaces": [
+          "ge-0-0-1",
+          "ge-0-0-2"
+        ],
+        "mode": "cross-nic",
+        "phase0_artifact_file": "/run/xpf/shared-umem-phase0.json"
+      },
+      "workers": 23
+    },
     "version": 0,
     "wg_steered_listen_ports": [
       51820
@@ -4131,6 +4145,7 @@
     "next_hop_weights": [],
     "next_hops": [],
     "next_table": "",
+    "next_table_route": true,
     "preference": 0,
     "reject": false,
     "rule_priority": 0,
@@ -4586,6 +4601,14 @@
     "tx_ifindex": 0,
     "tx_vlan_id": 0
   },
+  "shared_umem_snapshot": {
+    "interfaces": [
+      "ge-0-0-1",
+      "ge-0-0-2"
+    ],
+    "mode": "cross-nic",
+    "phase0_artifact_file": "/run/xpf/shared-umem-phase0.json"
+  },
   "slow_path_status": {
     "active": false,
     "degraded": false,
@@ -4801,6 +4824,18 @@
   "userspace_capabilities": {
     "forwarding_supported": false,
     "unsupported_reasons": []
+  },
+  "userspace_snapshot": {
+    "ring_entries": 24,
+    "shared_umem": {
+      "interfaces": [
+        "ge-0-0-1",
+        "ge-0-0-2"
+      ],
+      "mode": "cross-nic",
+      "phase0_artifact_file": "/run/xpf/shared-umem-phase0.json"
+    },
+    "workers": 23
   },
   "wg_peer_status": {
     "peer_endpoint": "192.0.2.1:51820",

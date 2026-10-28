@@ -13,7 +13,7 @@ func TestVIPDedupeAcrossUpdateAdvertAndGARP(t *testing.T) {
 		canonical = "2001:db8::10/64"
 		alias     = "2001:0DB8:0:0:0:0:0:10/64"
 	)
-	if canonicalVIPIdentity(canonical) != canonicalVIPIdentity(alias) {
+	if config.VRRPVIPIdentity(canonical) != config.VRRPVIPIdentity(alias) {
 		t.Fatal("test spellings do not have the same canonical VIP identity")
 	}
 	want := []string{canonical, alias}
@@ -42,8 +42,8 @@ func TestVIPDedupeAcrossUpdateAdvertAndGARP(t *testing.T) {
 	if err := vi.updateVIPs(want); err != nil {
 		t.Fatalf("updateVIPs() error = %v", err)
 	}
-	if got := vi.vipsSnapshot(); len(got) != 1 || canonicalVIPIdentity(got[0]) != canonicalVIPIdentity(canonical) {
-		t.Fatalf("stored VIPs = %v, want one VIP with identity %q", got, canonicalVIPIdentity(canonical))
+	if got := vi.vipsSnapshot(); len(got) != 1 || config.VRRPVIPIdentity(got[0]) != config.VRRPVIPIdentity(canonical) {
+		t.Fatalf("stored VIPs = %v, want one VIP with identity %q", got, config.VRRPVIPIdentity(canonical))
 	}
 
 	capacityVIPs := make([]string, 0, MaxConfiguredVIPs(true)+1)
@@ -56,10 +56,10 @@ func TestVIPDedupeAcrossUpdateAdvertAndGARP(t *testing.T) {
 	}
 
 	vi.vipMu.Lock()
-	vi.pendingGARPVIPs = map[string]struct{}{canonicalVIPIdentity(canonical): {}}
+	vi.pendingGARPVIPs = map[string]struct{}{config.VRRPVIPIdentity(canonical): {}}
 	announcements := vi.pendingGARPForSetLocked(want, nil, false)
 	vi.vipMu.Unlock()
-	if len(announcements) != 1 || canonicalVIPIdentity(announcements[0]) != canonicalVIPIdentity(canonical) {
+	if len(announcements) != 1 || config.VRRPVIPIdentity(announcements[0]) != config.VRRPVIPIdentity(canonical) {
 		t.Fatalf("pending GARP VIPs = %v, want one canonical VIP", announcements)
 	}
 }
@@ -142,7 +142,7 @@ func TestCollectorsAndManagerDeduplicateCanonicalVIPs(t *testing.T) {
 	if vi == nil {
 		t.Fatal("manager did not build the desired VRRP instance")
 	}
-	if got := vi.vipsSnapshot(); len(got) != 1 || canonicalVIPIdentity(got[0]) != canonicalVIPIdentity(canonical) {
+	if got := vi.vipsSnapshot(); len(got) != 1 || config.VRRPVIPIdentity(got[0]) != config.VRRPVIPIdentity(canonical) {
 		t.Fatalf("manager stored VIPs = %v, want one canonical VIP", got)
 	}
 }
