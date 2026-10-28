@@ -25,7 +25,7 @@ func plantLiveMarker16765(t *testing.T, cfg Config) {
 // .dbsnap must still hold its original (pre-cut) bytes, not the live DB.
 func TestPreStopEnvelopeRefusal_PreservesPredecessorSnapshot16765(t *testing.T) {
 	r, cfg, fs := setupCommittedPredecessor14720(t)
-	before, _ := r.readCommittedStamp("1.0.0")
+	before, _, _ := r.readCommittedStamp("1.0.0")
 	origSnap := predecessorDBSnap14720(t, cfg, "1.0.0")
 	origStamp := predecessorStampRaw14720(t, r, "1.0.0")
 	stagePredecessor14720(t, r, cfg, fs, true)
@@ -87,9 +87,9 @@ func TestStartFailure_PredecessorSnapshotNotAdopted16765(t *testing.T) {
 	}
 	assertPredecessorDirSurvives14720(t, r, cfg)
 	assertNoPredbakLeftover14720(t, cfg)
-	stamp, present := r.readCommittedStamp("1.0.0")
+	stamp, present, err := r.readCommittedStamp("1.0.0")
 	if !present || stamp == nil || stamp.Committed {
-		t.Fatalf("start-failed predecessor stamp = (%+v,present=%v), want non-committed", stamp, present)
+		t.Fatalf("start-failed predecessor stamp = (%+v,present=%v,err=%v), want non-committed", stamp, present, err)
 	}
 }
 
@@ -99,7 +99,7 @@ func TestStartFailure_PredecessorSnapshotNotAdopted16765(t *testing.T) {
 // predecessor's .dbsnap with the live DB.
 func TestResumeResnapshot_PreservesPredecessorSnapshot16765(t *testing.T) {
 	r, cfg, fs := setupCommittedPredecessor14720(t)
-	before, _ := r.readCommittedStamp("1.0.0")
+	before, _, _ := r.readCommittedStamp("1.0.0")
 	origSnap := predecessorDBSnap14720(t, cfg, "1.0.0")
 	genid := stagePredecessor14720(t, r, cfg, fs, true)
 	plantLiveMarker16765(t, cfg)
@@ -142,9 +142,9 @@ func TestSuccessfulCutToPredecessor_KeepsRollbackChain16765(t *testing.T) {
 	if got := currentTarget(t, cfg); got != "1.0.0" {
 		t.Fatalf("current -> %q after successful cut, want 1.0.0", got)
 	}
-	stamp, present := r.readCommittedStamp("1.0.0")
+	stamp, present, err := r.readCommittedStamp("1.0.0")
 	if !present || stamp == nil || !stamp.Committed || stamp.Predecessor != "2.0.0" {
-		t.Fatalf("new live stamp = (%+v,present=%v), want committed with predecessor 2.0.0", stamp, present)
+		t.Fatalf("new live stamp = (%+v,present=%v,err=%v), want committed with predecessor 2.0.0", stamp, present, err)
 	}
 	if got, err := r.defaultRollbackTarget("1.0.0"); err != nil || got != "2.0.0" {
 		t.Fatalf("defaultRollbackTarget(1.0.0) = %q, err=%v; want 2.0.0", got, err)
@@ -284,4 +284,72 @@ func TestPredecessorSnapshotBackupFailurePreservesOriginal17817(t *testing.T) {
 	}
 	assertPredecessorSnapshotContent14720(t, cfg, origSnap)
 	assertNoPredbakLeftover14720(t, cfg)
+}
+
+// TestResumeUnreadableCommittedStampPreservesOriginal17817 mirrors the
+// Rev18347 probe: a committed predecessor whose .committed stamp exists but
+// cannot be read (replaced by a directory) must make a pre-STOP resume fail
+// closed before snapshotConfigDB can delete/replace the original snapshot.
+func TestResumeUnreadableCommittedStampPreservesOriginal17817(t *testing.T) {
+	for _, crashAfter := range []State{StateCopied, StateVerified} {
+		t.Run(string(crashAfter), func(t *testing.T) {
+			r, cfg, fs := setupCommittedPredecessor14720(t)
+			original := append([]byte(nil), predecessorDBSnap14720(t, cfg, "1.0.0")...)
+			genid := stagePredecessor14720(t, r, cfg, fs, true)
+			j := &Journal{
+				State:            StateInit,
+				TargetVersion:    "1.0.0",
+				PreviousVersion:  "2.0.0",
+				SourceGeneration: genid,
+			}
+			backup, err := r.backupCommittedPredecessor(j, j.TargetVersion)
+			if err != nil || backup == nil {
+				t.Fatalf("seed backup = (%v, %v), want non-nil backup", backup, err)
+			}
+			backup.stashImmune = true
+			if err := r.preflight(j, backup); err != nil {
+				t.Fatalf("seed PREFLIGHT: %v", err)
+			}
+			if err := r.transition(j, StatePreflight); err != nil {
+				t.Fatalf("seed PREFLIGHT journal: %v", err)
+			}
+			if err := r.copyStaged(j, backup); err != nil {
+				t.Fatalf("seed COPY: %v", err)
+			}
+			backup.stashImmune = false
+			if err := r.transition(j, StateCopied); err != nil {
+				t.Fatalf("seed COPIED journal: %v", err)
+			}
+			if crashAfter == StateVerified {
+				if err := r.verify(j); err != nil {
+					t.Fatalf("seed VERIFY: %v", err)
+				}
+				if err := r.transition(j, StateVerified); err != nil {
+					t.Fatalf("seed VERIFIED journal: %v", err)
+				}
+			}
+			r.discardPredecessorBackup(backup)
+
+			stamp := r.committedStampPath("1.0.0")
+			if err := os.Remove(stamp); err != nil {
+				t.Fatalf("remove committed stamp: %v", err)
+			}
+			if err := os.Mkdir(stamp, 0o755); err != nil {
+				t.Fatalf("replace committed stamp with directory: %v", err)
+			}
+			if fs.readerVersionsByDir == nil {
+				fs.readerVersionsByDir = make(map[string]int)
+			}
+			fs.readerVersionsByDir["1.0.0"] = 1
+			mkfile(t, filepath.Join(cfg.ConfigDBDir, "active.json"),
+				"#xpf-config-envelope v=3 writer=test ast=1 min-reader=3 rollback-fmt=1\n{\"marker\":\"skew\"}")
+
+			err = r.Run(Options{})
+			if err == nil || !strings.Contains(err.Error(), "backup committed predecessor: read committed stamp") {
+				t.Fatalf("Run error = %v, want fail-closed committed-stamp backup error", err)
+			}
+			assertPredecessorSnapshotContent14720(t, cfg, original)
+			assertNoPredbakLeftover14720(t, cfg)
+		})
+	}
 }
