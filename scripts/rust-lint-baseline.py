@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""#17190 rustc warning ratchet.
+"""#17190 rustc lint ratchet.
 
 Runs cargo check --release and cargo check --release --tests with
 --message-format=json (pinned toolchain supplied by the Makefile via
-RUSTUP_TOOLCHAIN), counts warnings per (profile, lint, file) — profile is
-"release" or "tests" — and fails on any triple not in
-userspace-dp/lint-baseline.tsv or any baseline count increase within that
-profile. Keeping the profiles as separate keys stops release-profile
-growth from being laundered by a test-profile cleanup in the summed
-census. A census that comes back empty (or below MIN_CENSUS pairs) fails
-closed: a broken toolchain invocation must not look like a clean tree.
-Each profile must additionally be non-empty on its own: a combined-only
-floor would let a fully-empty release or tests census pass (rc=0, no
-warnings) whenever the other profile alone carried >= MIN_CENSUS pairs.
-Decreases are reported (baseline can be regenerated with --write) but do
-not fail, so burn-down PRs stay green.
+RUSTUP_TOOLCHAIN), counts warnings and deny-level lint errors per
+(profile, lint, file) — profile is "release" or "tests" — and fails on any
+triple not in userspace-dp/lint-baseline.tsv or any baseline count increase
+within that profile. Compiler errors that are not lint diagnostics remain
+fatal. Keeping the profiles as separate keys stops release-profile growth
+from being laundered by a test-profile cleanup in the summed census. A census
+that comes back empty (or below MIN_CENSUS pairs) fails closed: a broken
+toolchain invocation must not look like a clean tree. Each profile must
+additionally be non-empty on its own: a combined-only floor would let a
+fully-empty release or tests census pass whenever the other profile alone
+carried >= MIN_CENSUS pairs. Decreases are reported (baseline can be
+regenerated with --write) but do not fail, so burn-down PRs stay green.
 """
 import argparse, collections, json, subprocess, sys, os
 from pathlib import Path
@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "userspace-dp" / "lint-baseline.tsv"
 
-# Floor for a believable census: the tree carries 246 (profile,lint,file)
+# Floor for a believable census: the tree carries hundreds of (profile,lint,file)
 # pairs; an empty or near-empty census means cargo/rustc output was not
 # parsed (wrong toolchain, stale target dir) and must fail, not pass.
 MIN_CENSUS_PAIRS = 50
@@ -35,23 +35,41 @@ def census(profile, args):
     cargo = os.environ.get("CARGO", "cargo")
     cmd = [cargo, "check", "--release", "--manifest-path", "userspace-dp/Cargo.toml", "--message-format=json"] + args
     out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, env=env)
-    if out.returncode != 0:
-        sys.stderr.write(out.stderr[-4000:])
-        raise SystemExit(f"cargo check {args} failed rc={out.returncode}")
     counts = collections.Counter()
     locs = {}
+    fatal = []
+    saw_error = False
     for line in out.stdout.splitlines():
         try: d = json.loads(line)
         except Exception: continue
         if d.get("reason") != "compiler-message": continue
         m = d["message"]
-        if m["level"] != "warning": continue
-        code = (m.get("code") or {}).get("code", "no_code")
-        for s in m.get("spans", []):
-            if s.get("is_primary"):
-                key = (profile, code, s["file_name"])
-                counts[key] += 1
-                locs.setdefault(key, []).append(f"{s['file_name']}:{s['line_start']}: {m['message']}")
+        level = m.get("level")
+        code = (m.get("code") or {}).get("code")
+        if level == "error":
+            saw_error = True
+            if not code or code.startswith("E"):
+                fatal.append(m.get("rendered") or m.get("message", "compiler error"))
+                continue
+        elif level != "warning":
+            continue
+        code = code or "no_code"
+        primary = [s for s in m.get("spans", []) if s.get("is_primary")]
+        if level == "error" and not primary:
+            fatal.append(m.get("rendered") or m.get("message", "lint error without a primary span"))
+            continue
+        for s in primary:
+            key = (profile, code, s["file_name"])
+            counts[key] += 1
+            locs.setdefault(key, []).append(f"{s['file_name']}:{s['line_start']}: {m['message']}")
+    if fatal:
+        sys.stderr.write(out.stderr[-4000:])
+        for message in fatal:
+            sys.stderr.write(message if message.endswith("\n") else message + "\n")
+        raise SystemExit(f"cargo check {args} failed with non-lint compiler errors rc={out.returncode}")
+    if out.returncode != 0 and not saw_error:
+        sys.stderr.write(out.stderr[-4000:])
+        raise SystemExit(f"cargo check {args} failed without compiler error diagnostics rc={out.returncode}")
     return counts, locs
 
 
@@ -102,19 +120,19 @@ def main():
         )
         return 1
     if a.write:
-        lines = ["# #17190 rustc warning baseline: profile<TAB>lint<TAB>file<TAB>count (unique primary spans; release and tests censused separately)"]
+        lines = ["# #17190 rustc lint baseline: profile<TAB>lint<TAB>file<TAB>count (unique primary spans; warning and deny-level lint diagnostics; release and tests censused separately)"]
         for (profile, lint, file), n in sorted(total.items()):
             lines.append(f"{profile}\t{lint}\t{file}\t{n}")
         BASELINE.write_text("\n".join(lines) + "\n")
-        print(f"wrote {BASELINE} with {sum(total.values())} warnings in {len(total)} (profile,lint,file) pairs")
+        print(f"wrote {BASELINE} with {sum(total.values())} lint diagnostics in {len(total)} (profile,lint,file) pairs")
         return 0
     base = load_baseline()
     failures = []
     for key, n in sorted(total.items()):
         if key not in base:
-            failures.append(f"NEW warning {key[1]} in {key[2]} [{key[0]}] (x{n}): " + "; ".join(locs[key][:3]))
+            failures.append(f"NEW lint diagnostic {key[1]} in {key[2]} [{key[0]}] (x{n}): " + "; ".join(locs[key][:3]))
         elif n > base[key]:
-            failures.append(f"INCREASE {key[1]} in {key[2]} [{key[0]}]: {base[key]} -> {n}: " + "; ".join(locs[key][:3]))
+            failures.append(f"INCREASE lint diagnostic {key[1]} in {key[2]} [{key[0]}]: {base[key]} -> {n}: " + "; ".join(locs[key][:3]))
     decreased = [(k, base[k], total.get(k, 0)) for k in base if total.get(k, 0) < base[k]]
     for k, old, new in sorted(decreased):
         print(f"note: decreased {k[1]} {k[2]} [{k[0]}]: {old} -> {new} (run --write to ratchet down)")
@@ -122,7 +140,7 @@ def main():
         print("rust-lint-baseline FAILED:", file=sys.stderr)
         for f in failures: print("  " + f, file=sys.stderr)
         return 1
-    print(f"rust-lint-baseline OK: {sum(total.values())} warnings, {len(total)} (profile,lint,file) pairs, no new/increased")
+    print(f"rust-lint-baseline OK: {sum(total.values())} lint diagnostics, {len(total)} (profile,lint,file) pairs, no new/increased")
     return 0
 
 

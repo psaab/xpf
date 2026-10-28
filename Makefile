@@ -572,6 +572,7 @@ test-rust: lint-rust-baseline check-userspace-dt-needed
 	# Leg 3 (#16439): debug-log-only cells, exact-named and listed first.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp sh -c 'set -eu; listed="$$("$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --list)"; for cell in $(DEBUG_LOG_CELLS_16439); do count=$$(printf "%s\n" "$$listed" | grep -c -F -x "$$cell: test" || true); if [ "$$count" != "1" ]; then echo "test-rust Leg 3 (#16439): expected exactly one listed debug-log cell $$cell, found $$count" >&2; exit 1; fi; done; "$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --test-threads=1 --exact $(DEBUG_LOG_CELLS_16439)' "$(CARGO)" "$$pinned"
 
+
 # #17200: clippy gate for the userspace dataplane. Clippy could not
 # complete on this crate until #17200 (deny-by-default
 # `clippy::mut_from_ref` at umem/mmap.rs and `clippy::never_loop` in a
