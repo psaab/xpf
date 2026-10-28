@@ -71,14 +71,14 @@ pub(in crate::nat) fn pat_mix(mut x: u64) -> u64 {
 /// keyed start instead of retrying the same port. Attempt 0 is the
 /// identity (callers XOR with 0-equivalent? see note) — callers pass
 /// `attempt` and this returns the XOR delta; attempt 0 returns 0.
-/// RFC 6056 Algorithm 3/5 keyed offset: hash the flow tuple under the
-/// per-boot secret, reduced modulo `range`. An observer who sees one
-/// translated port learns nothing about the next flow's port without
-/// the secret. `range == 0` yields 0 (callers guard range first).
 #[inline]
 pub(in crate::nat::allocator) fn occupancy_next_probe(attempt: u64) -> u64 {
     if attempt == 0 { 0 } else { pat_mix(attempt.wrapping_mul(0x9e37_79b9_7f4a_7c15)) }
 }
+/// RFC 6056 Algorithm 3/5 keyed offset: hash the flow tuple under the
+/// per-boot secret, reduced modulo `range`. An observer who sees one
+/// translated port learns nothing about the next flow's port without
+/// the secret. `range == 0` yields 0 (callers guard range first).
 
 #[inline]
 pub(in crate::nat) fn pat_keyed_offset(secret: u64, key: u64, range: u32) -> u32 {

@@ -356,9 +356,6 @@ pub(super) fn policer_drop_action(
 /// arms with the state available here (interface primaries are covered by
 /// `ingress_interface_local_resolution` and interface-NAT claims by its
 /// sibling above; a plain FIB local route is the remaining arm).
-/// Evaluate the physical ingress filter for a tunnel packet that is about to
-/// be claimed by decapsulation. The packet is still in its outer representation
-/// here, so this preserves the underlay interface's input-filter contract.
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -369,6 +366,9 @@ fn routing_instance_local_delivery_expected(forwarding: &ForwardingState, dst: I
         == crate::afxdp::ForwardingDisposition::LocalDelivery
 }
 
+/// Evaluate the physical ingress filter for a tunnel packet that is about to
+/// be claimed by decapsulation. The packet is still in its outer representation
+/// here, so this preserves the underlay interface's input-filter contract.
 pub(super) fn enforce_tunnel_outer_input_filter(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
