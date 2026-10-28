@@ -236,7 +236,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "48b721b436dbec6334d18a055dc76972cb650fad9d0e2732b69cc64dbe0087e0"
+	snapshotShapeGolden8892 = "a6c56598d3de2c43e92e2d02af7e0c67f112ce79b1b8971dba6a04346004e8b1"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -644,6 +644,17 @@ const (
 	// pin moves. #17247 removes `Config.LenientNATUndefinedScopeRuleSets`,
 	// a compile-time-only `json:"-"` field. That changes this Go reflection
 	// digest but not wire shape, so re-pin the golden without another bump.
+	// v77 BASELINE RECONCILIATION (#18326, not a wire bump): ProtocolVersion
+	// was already 77 (#17099), while this shape pin/golden remained at 76.
+	// Reconciliation includes #17229's removal of UserspaceMapPins.DnatTable
+	// and DnatTableV6, and #18148's widening of PolicySessionRebind ingress
+	// and egress zones from uint16 to uint32. Both are intentional changes
+	// already represented by v77; ProtocolVersion does not move here.
+	// The digest also sees #17237's embedding of config.RFC2136Endpoint into
+	// DHCPDynamicDNSConfig: the Go walk now records the embedded endpoint
+	// instead of its leaves, but JSON embedding preserves the same flattened
+	// keys, so this is digest-only and not another helper-visible change.
+	// See docs/log/18326.md for the baseline comparison and disposition.
 	snapshotShapeVersion8892 = 77
 )
 

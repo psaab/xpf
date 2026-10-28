@@ -135,7 +135,7 @@ impl InlineTxBindings<'_> {
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn stage_flow_cache_hit(
     flow_state: &mut WorkerFlowCacheState,
     tx: &mut InlineTxBindings<'_>,
@@ -1292,7 +1292,7 @@ pub(super) fn stage_flow_cache_hit(
                     target_tx
                         .tx_counters
                         .record_in_place_l2_rewrite(rewrite_result.l2_rewrite);
-                    drop(target_tx);
+                    // `target_tx`'s mutable borrows end here (no Drop impl; the prepared request is already queued).
                     // Cross-binding only: bound the target queue exactly
                     // as the dispatcher does. The hairpin arm keeps the
                     // historic push onto the ingress queue.

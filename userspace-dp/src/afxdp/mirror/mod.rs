@@ -7,16 +7,14 @@ pub(in crate::afxdp) use fast_path::{
     commit_staged_mirror_clone, enqueue_admitted_mirror_clone_to_live,
     enqueue_sampled_mirror_clone, snapshot_staged_mirror_clone, stage_sampled_mirror_clone,
 };
-// `enqueue_mirror_clone`, `enqueue_mirror_clone_to_live`, and
-// `enqueue_sampled_mirror_clone_to_live` are reachable from `crate::afxdp` but
-// are dead in non-test builds (the live/cross-worker fallbacks are exercised by
-// tests and conditional call sites). The functions themselves carry
-// `#[cfg_attr(not(test), allow(dead_code))]`; suppress the matching re-export
-// lint here, mirroring the monolithic mirror.rs glob visibility.
+// `enqueue_mirror_clone` and `enqueue_mirror_clone_to_live` are production-live
+// (#17195: their false test-only labels are gone).
+// `enqueue_sampled_mirror_clone_to_live` is dead in every build, so fast_path.rs
+// gates it `#[cfg(test)]`; the re-export follows that gate (#17195).
 #[cfg_attr(not(test), allow(unused_imports))]
-pub(in crate::afxdp) use fast_path::{
-    enqueue_mirror_clone, enqueue_mirror_clone_to_live, enqueue_sampled_mirror_clone_to_live,
-};
+pub(in crate::afxdp) use fast_path::{enqueue_mirror_clone, enqueue_mirror_clone_to_live};
+#[cfg(test)]
+pub(in crate::afxdp) use fast_path::enqueue_sampled_mirror_clone_to_live;
 pub(in crate::afxdp) use resolver::{
     admit_mirror_clone_to_live, mirror_cos_queue_id, mirror_output_filter_drops,
     record_mirror_clone_result, sample_then_admit_mirror_clone, MirrorSampleAdmission,
@@ -43,7 +41,7 @@ pub(in crate::afxdp) enum MirrorCloneResult {
 }
 
 #[inline]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn select_mirror_config(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,

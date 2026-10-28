@@ -242,7 +242,7 @@ pub(super) fn resolve_cos_queue_lp_rewrite(
 /// - With NO class at all (unclassified / locally generated): the egress
 ///   queue itself is the classification result, so its own entry keys the
 ///   rewrite — the pre-#13968 queue-keyed behaviour, preserved.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn resolve_cos_priority_class_lp_rewrite(
     forwarding: &ForwardingState,
     egress_ifindex: i32,
@@ -306,7 +306,7 @@ pub(super) fn resolve_cos_priority_class_lp_rewrite(
 /// the queue entry only when the queue is that class's own materialized
 /// queue. When the class is not materialized, the clamped queue's class
 /// (usually best-effort) must not bleach the packet's marking (Y28-05).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn resolve_cos_class_lp_rewrite(
     forwarding: &ForwardingState,
     egress_ifindex: i32,

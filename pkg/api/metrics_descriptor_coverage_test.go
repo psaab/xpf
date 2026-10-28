@@ -373,9 +373,6 @@ func populatedCoverageStatus() dpuserspace.ProcessStatus {
 		// #11503: direction-specific unzoned-policy denials.
 		UnzonedIngressDeniedTotal: 19,
 		UnzonedEgressDeniedTotal:  23,
-		// #2244: failed dnat_table reverse-NAT publish counter (always
-		// emits).
-		DnatPublishErrorsTotal: 6,
 		// #1760 W3': shared-map reverse-key displacement counter (always
 		// emits).
 		NatReverseKeySharedDisplacementsTotal: 2,
@@ -651,7 +648,6 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_pptp_allocator_collisions_total",                    // #13282 fail-closed alias collisions
 		"xpf_userspace_unzoned_ingress_denied_total",                       // #11503 direction-specific cause
 		"xpf_userspace_unzoned_egress_denied_total",                        // #11503 direction-specific cause
-		"xpf_userspace_dnat_publish_errors_total",                          // #2244 dnat_table reverse-NAT publish failures
 		"xpf_userspace_session_nat_reverse_key_shared_displacements_total", // #1760 W3' shared displacements
 		"xpf_userspace_worker_command_queue_poison_recoveries_total",       // #1807 poison recoveries
 		"xpf_userspace_worker_command_queue_drops_total",                   // #6929 per-worker command-queue capacity drops
@@ -672,6 +668,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_zone_gate_no_generation_total",
 		"xpf_userspace_ipsec_inner_parse_drops_total",
 		"xpf_userspace_ipsec_inner_ecn_illegal_drops_total",
+		"xpf_userspace_ipsec_inner_noroute_total", // #17218
 		"xpf_userspace_ipsec_inner_worker_queue_full_total",
 		"xpf_userspace_ipsec_inner_verdict_queue_full_total",
 		"xpf_userspace_ipsec_inner_verdict_queue_contended_total", // #15150

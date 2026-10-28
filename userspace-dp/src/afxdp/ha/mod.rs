@@ -18,7 +18,7 @@ pub use session_import::{
     SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REPAIR_PREFIX,
     SYNCED_IMPORT_REFUSED_PREFIX,
 };
-pub(crate) use session_import::SyncedDeleteOutcome;
+pub(crate) use session_import::{SyncedDeleteMode, SyncedDeleteOutcome};
 pub use self::session_domain::HA_REFRESH_NEEDS_CONTROL_SOCKET;
 mod tunnel_purge;
 
@@ -31,6 +31,7 @@ pub(crate) use self::export::{AllSessionsExport, ExportKick, OwnerRgExportWait};
 pub(crate) use self::export::drain_export_deltas_from_workers;
 
 #[cfg(test)]
+#[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
 #[path = "../ha_tests.rs"]
 mod tests;
 

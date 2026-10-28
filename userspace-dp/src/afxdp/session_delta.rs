@@ -105,8 +105,10 @@ pub(in crate::afxdp) fn drain_session_deltas_fair_tracked(
     // behind. The scan re-locks each buffer (cold control path only).
     // #16630: only INCREMENTAL residue counts — bulk-export residue is the
     // resync's own buffered output and must not re-arm it.
-    let overflow =
-        budget == 0 && bindings.iter().any(|b| b.has_pending_incremental_session_deltas());
+    let overflow = budget == 0
+        && bindings
+            .iter()
+            .any(|b| b.has_pending_incremental_session_deltas());
     (out, cursor, overflow, contributed)
 }
 
@@ -385,7 +387,8 @@ pub(in crate::afxdp) fn session_delta_info(
             ForwardingDisposition::MissingNeighbor => "missing_neighbor",
             ForwardingDisposition::PolicyDenied => "policy_denied",
             ForwardingDisposition::FabricRedirect => "fabric_redirect",
-            ForwardingDisposition::HAInactive | ForwardingDisposition::ClusterTerminalHAInactive => "ha_inactive",
+            ForwardingDisposition::HAInactive
+            | ForwardingDisposition::ClusterTerminalHAInactive => "ha_inactive",
             ForwardingDisposition::DiscardRoute => "discard_route",
             ForwardingDisposition::RejectRoute => "reject_route",
             ForwardingDisposition::NextTableUnsupported => "next_table_unsupported",
@@ -610,11 +613,6 @@ pub(super) fn flush_session_deltas(
     session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
-    // #2979: the reverse-NAT dnat_table / dnat_table_v6 fds so a closing SNAT
-    // session's published reverse-NAT entry is deleted here, mirroring the
-    // session_map / conntrack cleanup below. Without it the HASH (non-LRU)
-    // dnat_table leaks one entry per closed SNAT session until it fills.
-    dnat_fds: &super::checksum::DnatTableFds,
     deltas: &[SessionDelta],
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -776,17 +774,6 @@ pub(super) fn flush_session_deltas(
                     conntrack_v6_fd,
                     &delta.key,
                 );
-            }
-            // #2979: delete the dynamic reverse-NAT dnat_table entry this
-            // SNAT'd session published at install. Keyed on the SAME forward
-            // key + nat decision used by publish_dnat_table_entry (the Close
-            // delta carries the forward key — it is gated on !is_reverse at
-            // construction in session/expire.rs and session/mod.rs). A
-            // non-SNAT session is a no-op (no rewrite_src -> no key). Only the
-            // forward key publishes a dnat_table entry, so it is NOT repeated
-            // for the reverse key below.
-            if teardown_ok {
-                super::checksum::delete_dnat_table_entry(dnat_fds, &delta.key, delta.decision.nat);
             }
             // #9752 round 4 item 3: purge-retirement closes skip BOTH shared
             // teardowns here. The atomic presence leg above already decided

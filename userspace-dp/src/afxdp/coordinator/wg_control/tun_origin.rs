@@ -31,8 +31,10 @@
 //! still encapsulates.
 
 use super::super::*;
+use crate::afxdp::forwarding::{map_outer_onto_tunnel_logical, resolve_tunnel_outer_to};
 use crate::afxdp::tunnel::{
-    local_origin_packet_meta, prune_local_tunnel_sessions, wrap_raw_ip_packet_for_tunnel,
+    local_origin_packet_meta, prune_local_tunnel_sessions, tun_origin_refresh_after_ns,
+    tun_origin_session_entry, wrap_raw_ip_packet_for_tunnel,
 };
 use std::net::SocketAddr;
 
@@ -108,7 +110,7 @@ pub(in crate::afxdp) fn wg_endpoint_attachment_valid(
     let Some(endpoint) = forwarding.tunnel_endpoints.get(&tunnel_endpoint_id) else {
         return false;
     };
-    if endpoint.mode != "wireguard" {
+    if endpoint.kind != TunnelKind::WireGuard {
         return false;
     }
     endpoint.logical_ifindex == spawned_logical_ifindex
@@ -134,13 +136,7 @@ pub(in crate::afxdp) fn wg_tun_origin_publish_due(
     now_ns: u64,
 ) -> bool {
     prune_local_tunnel_sessions(local_sessions, local_sessions_last_prune_ns, now_ns);
-    // GRE parity (`maybe_enqueue_local_tunnel_session`): TCP's window is the
-    // established-cadence refresh, everything else the 1s liveness tick.
-    let refresh_after_ns = if protocol == PROTO_TCP {
-        5_000_000_000
-    } else {
-        1_000_000_000
-    };
+    let refresh_after_ns = tun_origin_refresh_after_ns(protocol);
     !matches!(
         local_sessions.get(key),
         Some(last) if now_ns.saturating_sub(*last) < refresh_after_ns
@@ -154,15 +150,6 @@ pub(in crate::afxdp) fn wg_tun_origin_publish_due(
 pub(in crate::afxdp) struct WgTunOriginEntries {
     pub(in crate::afxdp) forward: SyncedSessionEntry,
     pub(in crate::afxdp) reverse: Option<SyncedSessionEntry>,
-}
-
-/// Whether a FIB-resolved outer hop is usable as a tunnel transport hop: not
-/// local delivery, and not back into a tunnel interface (the
-/// `resolve_tunnel_outer` recursion guard, as a builder failure instead of a
-/// NoRoute map — see the call site).
-fn wg_tun_origin_outer_usable(forwarding: &ForwardingState, outer: &ForwardingResolution) -> bool {
-    outer.disposition != ForwardingDisposition::LocalDelivery
-        && !forwarding.tunnel_interfaces.contains(&outer.egress_ifindex)
 }
 
 /// Build the TUN-origin forward + reverse for one successfully-encapped inner
@@ -199,70 +186,37 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
         .get(&tunnel_endpoint_id)
         .ok_or("wg_tun_origin_unknown_endpoint")?;
     let logical_ifindex = endpoint.logical_ifindex;
-    // Per-peer outer: the row destination is NOT consulted (see doc above).
-    // Depth/flags mirror `resolve_tunnel_outer` (per-tunnel-endpoint, no
-    // 5-tuple ECMP hash — per-destination spread across outer ECMP).
-    let outer = match peer_endpoint.ip() {
-        IpAddr::V4(ip) => {
-            crate::afxdp::forwarding::lookup_forwarding_resolution_v4(
-                forwarding,
-                Some(dynamic_neighbors),
-                ip,
-                &endpoint.transport_table,
-                1,
-                false,
-                None,
-            )
-            .resolution
-        }
-        IpAddr::V6(ip) => {
-            crate::afxdp::forwarding::lookup_forwarding_resolution_v6(
-                forwarding,
-                Some(dynamic_neighbors),
-                ip,
-                &endpoint.transport_table,
-                1,
-                false,
-                None,
-            )
-            .resolution
-        }
-    };
-    // Recursion guard, mirroring `resolve_tunnel_outer`: an outer that resolves
-    // to local delivery or back into a tunnel is not a usable transport hop.
-    // Defensive: plain FIB usually refuses both first (`allow_tunnels=false`
-    // yields NoRoute for tunnel egresses, and the local short-circuit is
-    // table-scoped), in which case the honest arm below stamps NoRoute. But if
-    // FIB behavior ever changes, failing closed beats stamping nonsense — and
-    // unlike that helper (which maps to NoRoute), this is a builder failure.
-    if !wg_tun_origin_outer_usable(forwarding, &outer) {
-        return Err("wg_tun_origin_outer_recursion");
-    }
-    // Map onto the tunnel logical, mirroring
-    // `resolve_tunnel_forwarding_resolution` — disposition included (honest).
-    let resolution = enforce_ha_resolution_snapshot(
+    // Per-peer outer via the shared SSOT (#17194): the row destination is NOT
+    // consulted (WG cryptokey routing selects the peer per packet), so the
+    // destination-parameterised resolver runs on `peer_endpoint.ip()` at
+    // depth 0 (it adds +1 internally). `None` is the recursion guard
+    // (local delivery / tunnel egress) — a builder failure here, whereas the
+    // GRE helper maps it to NoRoute.
+    let outer = resolve_tunnel_outer_to(
         forwarding,
-        ha_runtime,
-        now_secs,
-        ForwardingResolution {
-            disposition: outer.disposition,
-            local_ifindex: outer.local_ifindex,
-            egress_ifindex: logical_ifindex,
-            tx_ifindex: outer.tx_ifindex,
-            tunnel_endpoint_id,
-            next_hop: outer.next_hop,
-            neighbor_mac: outer.neighbor_mac,
-            src_mac: outer.src_mac,
-            tx_vlan_id: outer.tx_vlan_id,
-            source_ifindex: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        },
+        Some(dynamic_neighbors),
+        endpoint,
+        peer_endpoint.ip(),
+        0,
+    )
+    .ok_or("wg_tun_origin_outer_recursion")?;
+    // Map onto the tunnel logical via the shared SSOT (#17194): carries the
+    // #11423 down-tunnel withdrawal and #11411 `transport_route_mtu`.
+    // The outer is resolved even when the tunnel is down so this builder
+    // keeps its recursion-Err contract; the mapping then stamps NoRoute.
+    let mapped = map_outer_onto_tunnel_logical(
+        forwarding,
+        tunnel_endpoint_id,
+        logical_ifindex,
+        peer_endpoint.ip(),
+        outer,
     );
-    // #9752 fields stay (0,0) on this FORWARD: it is endpoint-pinned, so a
-    // re-resolve takes the table-free tunnel arm (the tunnel rule of
-    // `install_table_stamp_for_miss`). Only the reverse below carries the
-    // tunnel instance's identity (#12503).
+    let resolution = enforce_ha_resolution_snapshot(forwarding, ha_runtime, now_secs, mapped);
+    // #9752: `route_mtu` stays 0 on this FORWARD (the shared mapping zeroes
+    // it): it is endpoint-pinned, so a re-resolve takes the table-free tunnel
+    // arm (the tunnel rule of `install_table_stamp_for_miss`).
+    // `transport_route_mtu` now carries the outer route MTU (#11411). Only
+    // the reverse below carries the tunnel instance's identity (#12503).
     let decision = SessionDecision {
         resolution,
         nat: NatDecision::default(),
@@ -272,55 +226,14 @@ pub(in crate::afxdp) fn build_wg_tun_origin_entries(
     // The tunnel's zone, both directions — same as GRE (`egress_zone_id` on
     // the tunnel logical: "what zone is this tunnel in").
     let zone_id = forwarding.egress_zone_id(logical_ifindex);
-    let forward = SyncedSessionEntry { key: parsed.flow.forward_key.clone(),
-    decision,
-    metadata: SessionMetadata {
-        ingress_zone: zone_id,
-        egress_zone: zone_id,
-        ingress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            zone_id,
-        ),
-        egress_zone_check: crate::session::zone_vintage_check_for_id(
-            &forwarding.zone_id_to_name,
-            zone_id,
-        ),
-        ingress_ifindex: 0,
-        ingress_vlan_id: 0,
-        forward_ingress_vlan_id: None,
-        owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
-        fabric_ingress: false,
-        is_reverse: false,
-        nat64_reverse: None,
-        // Self-originated: no admitting policy/application (Junos runs no
-        // security policy on firewall-self-originated traffic, #6224), so
-        // zeroed policy fields + the global per-protocol idle timeout
-        // (`None`), exactly like the GRE local-origin builder.
-        // `TunOrigin` (item 5) is POSITIVE provenance — stamped only
-        // here and in the GRE builder — never a peer wire import.
-        log_session_init: false,
-        log_session_close: false,
-        policy_id: 0,
-        inactivity_timeout_ns: None,
-        policy_counter_idx: 0,
-        policy_counter: None,
-        nat_scope_ifindex: None,
-    },
-    leak_incarnation: 0,
-    origin: SessionOrigin::TunOrigin,
-    protocol: parsed.meta.protocol,
-    tcp_flags: if parsed.meta.protocol == PROTO_TCP {
-        extract_tcp_flags_and_window(&parsed.frame)
-            .map(|(flags, _)| flags)
-            .unwrap_or_default()
-    } else {
-        0
-    },
-    generation: 0,
-    session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
-    persistent_lease_hold: None,
-    source_nat_static: None, };
+    let forward = tun_origin_session_entry(
+        parsed.flow.forward_key.clone(),
+        decision,
+        forwarding,
+        zone_id,
+        parsed.meta.protocol,
+        &parsed.frame,
+    );
     // Table-scoped synthesis (item 6): the reply target resolves in the
     // tunnel's instance table, so a VRF reverse finds its connected/local
     // view instead of NoRoute-ing against inet.0. The reverse carries that
@@ -421,7 +334,7 @@ pub(in crate::afxdp) fn wg_tun_origin_packet_initiates(parsed: &WgTunOriginParse
 /// publishes only as refresh (forward already shared) or resume
 /// (tombstone = published within 300s). A skip marks nothing, so the
 /// flow stays forgotten and every response re-decides the same way.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn publish_wg_tun_origin_entries(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -464,7 +377,6 @@ pub(in crate::afxdp) fn publish_wg_tun_origin_entries(
 /// outer iteration). Deletes shared pairs idle past `DELETE_IDLE` and
 /// forgets tombstones past `TOMBSTONE_IDLE`. Removal is idempotent, so a
 /// re-delete between the idle read and the next sweep is a no-op.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn sweep_wg_tun_origin_idle(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -644,7 +556,12 @@ mod tests {
             .find(|i| i.ifindex == 400)
             .expect("wg0.0 row")
             .addresses
-            .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00::1/64".to_string(), scope: 0, ..Default::default() });
+            .push(crate::InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "fd00::1/64".to_string(),
+                scope: 0,
+                ..Default::default()
+            });
         let forwarding = build_forwarding_state(&snap);
         let neighbors = Arc::new(ShardedNeighborMap::new());
         let ha = txn_ha_state();
@@ -756,40 +673,187 @@ mod tests {
         assert_eq!(noroute.forward.decision.resolution.tunnel_endpoint_id, 1);
     }
 
-    /// #10038: the outer-usability guard table. Defensive in practice (plain
-    /// FIB refuses both shapes first — see the NoRoute pin above), but if FIB
-    /// behavior ever changes, local delivery and tunnel-egress outers must
-    /// fail the build rather than stamp nonsense.
+    /// #17194 (was #10038 outer-usability table): the recursion guard now
+    /// lives in the shared `resolve_tunnel_outer_to` — it returns `None`
+    /// for local-delivery and tunnel-egress outers, and this builder maps
+    /// `None` to `Err("wg_tun_origin_outer_recursion")`. Usable outer
+    /// dispositions (ForwardCandidate / MissingNeighbor / NoRoute) still
+    /// resolve `Some` and stamp honestly.
     #[test]
     fn wg_tun_origin_outer_guard_table_10038() {
         let forwarding = build_forwarding_state(&wg_outer_mtu_snapshot());
-        let base = ForwardingResolution {
-            disposition: ForwardingDisposition::ForwardCandidate,
-            local_ifindex: 0,
-            egress_ifindex: 12,
-            tx_ifindex: 6,
-            tunnel_endpoint_id: 0,
-            next_hop: None,
-            neighbor_mac: None,
-            src_mac: None,
-            tx_vlan_id: 0,
-            source_ifindex: 0,
-            route_mtu: 0,
-            transport_route_mtu: 0,
-        };
-        assert!(wg_tun_origin_outer_usable(&forwarding, &base));
-        let mut missing = base;
-        missing.disposition = ForwardingDisposition::MissingNeighbor;
-        assert!(wg_tun_origin_outer_usable(&forwarding, &missing));
-        let mut noroute = base;
-        noroute.disposition = ForwardingDisposition::NoRoute;
-        assert!(wg_tun_origin_outer_usable(&forwarding, &noroute));
-        let mut local = base;
-        local.disposition = ForwardingDisposition::LocalDelivery;
-        assert!(!wg_tun_origin_outer_usable(&forwarding, &local));
-        let mut back_into_tunnel = base;
-        back_into_tunnel.egress_ifindex = 400;
-        assert!(!wg_tun_origin_outer_usable(&forwarding, &back_into_tunnel));
+        let endpoint = forwarding.tunnel_endpoints.get(&1).expect("wg row").clone();
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let ha = txn_ha_state();
+        // Usable: the stock peer endpoint resolves via reth0.80.
+        let usable = resolve_tunnel_outer_to(
+            &forwarding,
+            Some(&neighbors),
+            &endpoint,
+            "203.0.113.7".parse().unwrap(),
+            0,
+        )
+        .expect("peer outer must resolve");
+        assert!(matches!(
+            usable.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate
+                | ForwardingDisposition::MissingNeighbor
+                | ForwardingDisposition::NoRoute
+        ));
+        // Local delivery: the firewall's own underlay address.
+        assert!(resolve_tunnel_outer_to(
+            &forwarding,
+            Some(&neighbors),
+            &endpoint,
+            "172.16.80.8".parse().unwrap(),
+            0,
+        )
+        .is_none());
+        // The builder maps that `None` to the recursion Err.
+        let request = inner_udp_v4(FW, PEER, 5001, 5002);
+        let parsed =
+            parse_wg_tun_origin_flow(&request, &forwarding, 1).expect("parse must succeed");
+        let local_peer: SocketAddr = "172.16.80.8:51820".parse().unwrap();
+        assert_eq!(
+            build_wg_tun_origin_entries(&parsed, local_peer, 1, &forwarding, &ha, &neighbors, 123)
+                .err(),
+            Some("wg_tun_origin_outer_recursion")
+        );
+    }
+
+    /// #17194 acceptance: a WG TUN-origin entry whose peer route carries
+    /// `mtu 1400` and whose tunnel row is down (`link_up=false`) must stamp
+    /// `disposition == NoRoute` (#11423) via the shared outer→logical
+    /// mapping, and the up-tunnel control with the same route must stamp
+    /// `transport_route_mtu == 1400` (#11411). (The down arm returns the
+    /// shared `no_route_resolution`, whose MTUs are 0 by definition — the
+    /// GRE twin asserts the same NoRoute shape.) RED on the pre-fix mirror
+    /// (it stamped a forwardable disposition and `transport_route_mtu: 0`).
+    #[test]
+    fn wg_tun_origin_down_peer_route_mtu_17194() {
+        let mut snap = wg_outer_mtu_snapshot();
+        snap.routes[0].mtu = 1400;
+        snap.tunnel_endpoints[0].link_up = Some(false);
+        let forwarding = build_forwarding_state(&snap);
+        assert!(forwarding.tunnel_endpoints_down.contains(&1));
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        let ha = txn_ha_state();
+        let peer_ep: SocketAddr = "203.0.113.7:51820".parse().unwrap();
+        let request = inner_udp_v4(FW, PEER, 5001, 5002);
+        let parsed =
+            parse_wg_tun_origin_flow(&request, &forwarding, 1).expect("parse must succeed");
+        let entries =
+            build_wg_tun_origin_entries(&parsed, peer_ep, 1, &forwarding, &ha, &neighbors, 123)
+                .expect("down-tunnel build stamps NoRoute, it does not fail");
+        let resolution = entries.forward.decision.resolution;
+        assert_eq!(resolution.disposition, ForwardingDisposition::NoRoute);
+        // Control: same route MTU, tunnel up — the MTU still carries and
+        // the disposition is the honest outer disposition, not NoRoute.
+        let mut snap_up = wg_outer_mtu_snapshot();
+        snap_up.routes[0].mtu = 1400;
+        let up = build_forwarding_state(&snap_up);
+        let parsed_up = parse_wg_tun_origin_flow(&request, &up, 1).expect("parse must succeed");
+        let up_entries =
+            build_wg_tun_origin_entries(&parsed_up, peer_ep, 1, &up, &ha, &neighbors, 123)
+                .expect("up build must succeed");
+        assert_eq!(
+            up_entries.forward.decision.resolution.transport_route_mtu,
+            1400
+        );
+        assert_ne!(
+            up_entries.forward.decision.resolution.disposition,
+            ForwardingDisposition::NoRoute
+        );
+    }
+
+    /// #17194 (F1): tunnel-egress recursion — a peer destination whose FIB
+    /// egress is itself a tunnel interface must hit the
+    /// `tunnel_interfaces` arm of `resolve_tunnel_outer_to` and return
+    /// `None`; the builder maps that to `Err("wg_tun_origin_outer_recursion")`.
+    /// The peer `192.0.2.1` is routed out `st0.0` (ifindex 500), an
+    /// xfrm-style tunnel interface with NO tunnel endpoint row, via an
+    /// interface-only `@st0.0` next-hop. Because no endpoint claims 500,
+    /// the FIB hop carries no `tunnel_endpoint_id` and stays a plain
+    /// tunnel-ifindex egress (a hop out an endpoint-owned logical such as
+    /// `wg0.0` would instead take the FIB's own tunnel branch and never
+    /// reach this guard — the production shape the guard exists for).
+    /// Deleting the `tunnel_interfaces.contains(egress)` arm in
+    /// `forwarding/tunnel.rs` makes both asserts below fail (RED),
+    /// restoring it passes (GREEN). The pre-existing local-delivery case
+    /// alone cannot pin this arm: with the tunnel arm deleted, a
+    /// local-delivery peer still returns `None` via the `LocalDelivery` arm.
+    #[test]
+    fn wg_tun_origin_outer_recursion() {
+        let mut snap = wg_outer_mtu_snapshot();
+        // An xfrm-style tunnel interface with NO tunnel endpoint row:
+        // `tunnel: true` puts ifindex 500 in `tunnel_interfaces`, but no
+        // endpoint claims it, so routes out it carry no tunnel_endpoint_id.
+        snap.interfaces.push(crate::InterfaceSnapshot {
+            name: "st0.0".to_string(),
+            zone: "sfmix".to_string(),
+            linux_name: "st0".to_string(),
+            ifindex: 500,
+            mtu: 1400,
+            tunnel: true,
+            addresses: vec![crate::InterfaceAddressSnapshot {
+                family: "inet".to_string(),
+                address: "10.99.0.1/30".to_string(),
+                scope: 0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        // Route the peer destination out that endpoint-less tunnel iface.
+        snap.routes.push(crate::RouteSnapshot {
+            table: "inet.0".to_string(),
+            family: "inet".to_string(),
+            destination: "192.0.2.0/24".to_string(),
+            next_hops: vec!["@st0.0".to_string()],
+            ..Default::default()
+        });
+        let forwarding = build_forwarding_state(&snap);
+        // Preconditions: 500 really is a tunnel interface with no endpoint
+        // row, and the FIB egress for the peer destination really is that
+        // tunnel ifindex with a non-LocalDelivery disposition (so only the
+        // `tunnel_interfaces` arm can return `None`).
+        assert!(forwarding.tunnel_interfaces.contains(&500));
+        assert!(!forwarding.tunnel_endpoint_by_ifindex.contains_key(&500));
+        let outer_fib = crate::afxdp::forwarding::lookup_forwarding_resolution_v4(
+            &forwarding,
+            None,
+            std::net::Ipv4Addr::new(192, 0, 2, 1),
+            "inet.0",
+            1,
+            false,
+            None,
+        );
+        assert_eq!(outer_fib.resolution.egress_ifindex, 500);
+        assert_ne!(
+            outer_fib.resolution.disposition,
+            ForwardingDisposition::LocalDelivery
+        );
+        let endpoint = forwarding.tunnel_endpoints.get(&1).expect("wg row").clone();
+        let neighbors = Arc::new(ShardedNeighborMap::new());
+        // The resolver itself refuses the tunnel-egress outer.
+        assert!(resolve_tunnel_outer_to(
+            &forwarding,
+            Some(&neighbors),
+            &endpoint,
+            "192.0.2.1".parse().unwrap(),
+            0,
+        )
+        .is_none());
+        // And the builder maps that `None` to the recursion Err.
+        let ha = txn_ha_state();
+        let request = inner_udp_v4(FW, PEER, 5001, 5002);
+        let parsed =
+            parse_wg_tun_origin_flow(&request, &forwarding, 1).expect("parse must succeed");
+        let tunnel_peer: SocketAddr = "192.0.2.1:51820".parse().unwrap();
+        assert_eq!(
+            build_wg_tun_origin_entries(&parsed, tunnel_peer, 1, &forwarding, &ha, &neighbors, 123)
+                .err(),
+            Some("wg_tun_origin_outer_recursion")
+        );
     }
 
     /// #10038: the publish-only attachment gate — the WG twin of GRE's
@@ -804,6 +868,7 @@ mod tests {
         // A GRE-mode row with the same attachment is NOT a WG attachment.
         let mut gre = forwarding.clone();
         gre.tunnel_endpoints.get_mut(&1).expect("wg row").mode = "gre".to_string();
+        gre.tunnel_endpoints.get_mut(&1).expect("wg row").kind = crate::afxdp::TunnelKind::Gre;
         assert!(!wg_endpoint_attachment_valid(&gre, 1, 400, "wg0"));
     }
 
@@ -972,7 +1037,12 @@ mod tests {
             .find(|i| i.ifindex == 400)
             .expect("wg0.0 row")
             .addresses
-            .push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00::1/64".to_string(), scope: 0, ..Default::default() });
+            .push(crate::InterfaceAddressSnapshot {
+                family: "inet6".to_string(),
+                address: "fd00::1/64".to_string(),
+                scope: 0,
+                ..Default::default()
+            });
         snap
     }
 
@@ -1062,12 +1132,10 @@ mod tests {
             true,
             1_000_000_000,
         );
-        assert!(
-            shared
-                .lock()
-                .expect("shared")
-                .contains_key(&req_entries.forward.key)
-        );
+        assert!(shared
+            .lock()
+            .expect("shared")
+            .contains_key(&req_entries.forward.key));
         assert!(dedup.contains_key(&req_entries.forward.key));
         assert!(tombstones.contains_key(&req_entries.forward.key));
     }

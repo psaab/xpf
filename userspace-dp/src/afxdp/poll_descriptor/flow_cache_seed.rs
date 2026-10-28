@@ -23,14 +23,12 @@
 // tunnel flow (#5147 review MAJOR).
 
 use super::super::sharded_neighbor::ShardEpochSnapshot;
-use super::filter::{
-    evaluate_non_pbr_input_filter_counters_cached, evaluate_non_pbr_input_filter_log_only,
-};
+use super::filter::{established_input_filter_log, evaluate_non_pbr_input_filter_counters_cached};
 use super::*;
 use crate::filter::TermMatchExtra;
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn stage_flow_cache_seed(
     flow_cache: &mut FlowCache,
     flow: &Option<SessionFlow>,
@@ -138,6 +136,36 @@ pub(super) fn stage_flow_cache_seed(
             Some(flow),
             meta,
         );
+        // #17038: capture via the single established-flow derivation, so the
+        // frozen record carries the `Pbr`/`Input` source the uncached paths
+        // name for the same term. No input filter (or no `then log` term)
+        // captures nothing, exactly as the old log-only copy did.
+        let seed_input_filter_log = {
+            let ingress_ifindex = resolve_ingress_logical_ifindex(
+                worker_ctx.forwarding,
+                meta.ingress_ifindex as i32,
+                meta.ingress_vlan_id,
+            )
+            .unwrap_or(meta.ingress_ifindex as i32);
+            let is_v6 = matches!(flow.dst_ip, std::net::IpAddr::V6(_));
+            crate::filter::interface_input_filter(
+                &worker_ctx.forwarding.filter_state,
+                ingress_ifindex,
+                is_v6,
+            )
+            .and_then(|filter| {
+                established_input_filter_log(
+                    worker_ctx.forwarding,
+                    filter,
+                    flow,
+                    meta,
+                    ingress_zone_override,
+                    ingress_ifindex,
+                    filter_match_extra,
+                    None,
+                )
+            })
+        };
         if let Some(mut entry) = FlowCacheEntry::from_forward_decision(
             flow,
             meta,
@@ -146,13 +174,7 @@ pub(super) fn stage_flow_cache_seed(
             flow_cache_owner_rg_id,
             session_ingress_zone,
             request_target_binding_index,
-            evaluate_non_pbr_input_filter_log_only(
-                worker_ctx.forwarding,
-                filter_match_extra,
-                Some(flow),
-                meta,
-                ingress_zone_override,
-            ),
+            seed_input_filter_log,
             // #3777/#10566: capture the input `then count` handles so cache
             // hits replay them. A miss-path seed was already counted by the
             // cold evaluator; a hit-path static ACCEPT was not. Charge the
@@ -260,7 +282,7 @@ pub(super) fn stage_flow_cache_seed(
 /// dependency or neighbor descriptor; lookup generation, scheduler, RG, and
 /// short-expiry fences authorize replay.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn stage_flow_cache_deny_seed(
     flow_cache: &mut FlowCache,
     flow: Option<&SessionFlow>,
@@ -295,13 +317,32 @@ pub(super) fn stage_flow_cache_deny_seed(
         Some(flow),
         meta,
     );
-    let input_filter_log = evaluate_non_pbr_input_filter_log_only(
-        worker_ctx.forwarding,
-        filter_match_extra,
-        Some(flow),
-        meta,
-        ingress_zone_override,
-    );
+    let input_filter_log = {
+        let ingress_ifindex = resolve_ingress_logical_ifindex(
+            worker_ctx.forwarding,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+        )
+        .unwrap_or(meta.ingress_ifindex as i32);
+        let is_v6 = matches!(flow.dst_ip, std::net::IpAddr::V6(_));
+        crate::filter::interface_input_filter(
+            &worker_ctx.forwarding.filter_state,
+            ingress_ifindex,
+            is_v6,
+        )
+        .and_then(|filter| {
+            established_input_filter_log(
+                worker_ctx.forwarding,
+                filter,
+                flow,
+                meta,
+                ingress_zone_override,
+                ingress_ifindex,
+                filter_match_extra,
+                None,
+            )
+        })
+    };
     if let Some(entry) = FlowCacheEntry::from_deny_decision(
         flow,
         meta,

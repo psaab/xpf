@@ -3965,16 +3965,12 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 		if rs == nil {
 			continue
 		}
-		// #15932/#16049: check every authored zone / routing-instance in
-		// the union, not just the surviving singular field.
-		effectiveZones := rs.FromZones
-		if len(effectiveZones) == 0 && rs.FromZone != "" {
-			effectiveZones = []string{rs.FromZone}
-		}
-		effectiveRIs := rs.FromRoutingInstances
-		if len(effectiveRIs) == 0 && rs.FromRoutingInstance != "" {
-			effectiveRIs = []string{rs.FromRoutingInstance}
-		}
+		// #15932/#16049/#17139: check every zone / routing-instance in
+		// the union (FromZones ∪ {FromZone}, FromRoutingInstances ∪
+		// {FromRoutingInstance}) via the single normaliser, not just
+		// the surviving singular field.
+		effectiveZones := NAT64EffectiveZones(rs)
+		effectiveRIs := nat64GateRoutingInstances(rs)
 		if len(effectiveZones) > 0 && len(effectiveRIs) > 0 {
 			if err := emit(fmt.Sprintf(
 				"security nat nat64 rule-set %q has both `from zone %q` and `from routing-instance %q`; specify exactly one from scope (zone XOR routing-instance) — a mixed clause is never OR-widened (#15678)",
@@ -6313,37 +6309,96 @@ func nat64PrefixOwnerKey(prefix string) (string, bool) {
 // routing-instance components are the sorted effective SETS
 // (FromZones ∪ {FromZone}, FromRoutingInstances ∪ {FromRoutingInstance}),
 // so an authored list keys as its union, never as separate per-value owners.
-// nat64EffectiveZones (#15932) is the zone set a NAT64 rule-set admits:
-// the authored FromZones list when present, else the singular FromZone.
-func nat64EffectiveZones(rs *NAT64RuleSet) []string {
+
+// NAT64EffectiveZones (#15932, #17139) is the zone set a NAT64 rule-set
+// admits: the deduped union of the authored FromZones list and the
+// singular FromZone, order-preserved (list order first, singular appended
+// when not already present). Intra-list duplicates collapse (first
+// occurrence wins), matching the post-lowering dedup in
+// NAT64EffectiveRoutingInstances. It is the single normaliser for the
+// strict gate, the scoped owner key, and the snapshot builder.
+func NAT64EffectiveZones(rs *NAT64RuleSet) []string {
 	if rs == nil {
 		return nil
 	}
-	if len(rs.FromZones) > 0 {
-		return rs.FromZones
+	out := append([]string(nil), rs.FromZones...)
+	// Collapse intra-list duplicates, first occurrence wins. `out`
+	// is freshly built above, so filtering in place cannot alias
+	// authored state.
+	deduped := out[:0]
+	for _, z := range out {
+		found := false
+		for _, kept := range deduped {
+			if kept == z {
+				found = true
+				break
+			}
+		}
+		if !found {
+			deduped = append(deduped, z)
+		}
 	}
+	out = deduped
 	if rs.FromZone != "" {
-		return []string{rs.FromZone}
+		found := false
+		for _, z := range out {
+			if z == rs.FromZone {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, rs.FromZone)
+		}
 	}
-	return nil
+	return out
 }
 
-// nat64EffectiveRoutingInstances (#16049) is the routing-instance set
-// a NAT64 rule-set admits: the authored FromRoutingInstances list when
-// present, else the singular FromRoutingInstance. #16604: an explicit
-// master scope (list member "" + flag) keys as the wire token so it neither
-// collides with the unscoped key nor with a named instance. A raw literal
-// `default` is normalized using cfg's declaration, as snapshot emission is.
-func nat64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
+// nat64UnionRoutingInstances is the pre-lowering deduped union of the
+// authored FromRoutingInstances list and the singular
+// FromRoutingInstance, order-preserved (list order first, singular
+// appended when not already present). It is the single union loop
+// shared by NAT64EffectiveRoutingInstances (which then lowers it to
+// wire space) and nat64GateRoutingInstances (which validates the
+// authored names as-is).
+func nat64UnionRoutingInstances(rs *NAT64RuleSet) []string {
 	if rs == nil {
 		return nil
 	}
-	var out []string
-	if len(rs.FromRoutingInstances) > 0 {
-		out = append(out, rs.FromRoutingInstances...)
-	} else if rs.FromRoutingInstance != "" {
-		out = []string{rs.FromRoutingInstance}
+	out := append([]string(nil), rs.FromRoutingInstances...)
+	if rs.FromRoutingInstance != "" {
+		found := false
+		for _, ri := range out {
+			if ri == rs.FromRoutingInstance {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, rs.FromRoutingInstance)
+		}
 	}
+	return out
+}
+
+// NAT64EffectiveRoutingInstances (#16049, #17139) is the
+// routing-instance set a NAT64 rule-set admits: the deduped union of
+// the authored FromRoutingInstances list and the singular
+// FromRoutingInstance, order-preserved and then lowered to wire space
+// exactly as snapshot emission is. #16604: an explicit master scope
+// (list member "" + flag) keys as the wire token so it neither collides
+// with the unscoped key nor with a named instance. A raw literal
+// `default` is normalized using cfg's declaration, as snapshot
+// emission is. Dedup runs again AFTER all lowering (first occurrence
+// wins): distinct authored members can lower to the same wire token
+// (e.g. singular "default" beside a "" list member under the
+// explicit-master flag), and the wire set — and therefore the owner
+// key — must carry that token once, canonically.
+func NAT64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
+	if rs == nil {
+		return nil
+	}
+	out := nat64UnionRoutingInstances(rs)
 	if rs.FromRoutingInstanceDefault {
 		for i, ri := range out {
 			if ri == "" {
@@ -6357,7 +6412,43 @@ func nat64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
 	for i, ri := range out {
 		out[i] = NormalizeNATRoutingInstanceScope16604(cfg, ri)
 	}
-	return out
+	// Dedup after lowering, first occurrence wins. `out` is freshly
+	// built above, so filtering in place cannot alias authored state.
+	deduped := out[:0]
+	for _, ri := range out {
+		found := false
+		for _, kept := range deduped {
+			if kept == ri {
+				found = true
+				break
+			}
+		}
+		if !found {
+			deduped = append(deduped, ri)
+		}
+	}
+	return deduped
+}
+
+func nat64EffectiveZones(rs *NAT64RuleSet) []string {
+	return NAT64EffectiveZones(rs)
+}
+
+func nat64EffectiveRoutingInstances(cfg *Config, rs *NAT64RuleSet) []string {
+	return NAT64EffectiveRoutingInstances(cfg, rs)
+}
+
+// nat64GateRoutingInstances is the pre-lowering union the strict gate
+// validates (#17139): the same FromRoutingInstances ∪
+// {FromRoutingInstance} union as NAT64EffectiveRoutingInstances, but
+// without the #16604 wire lowering — the gate checks authored names
+// (the lowered ""+flag explicit master and a raw `default` literal are
+// both "defined" to natRoutingInstanceDefined15278, so lowering first
+// would only hide an authored value from the definedness check). The
+// wire lowering itself stays single-sourced in
+// NAT64EffectiveRoutingInstances for the owner key and the builder.
+func nat64GateRoutingInstances(rs *NAT64RuleSet) []string {
+	return nat64UnionRoutingInstances(rs)
 }
 
 // nat64PrefixOwnerKeyScoped is the shadow key (#9555/#15678): same

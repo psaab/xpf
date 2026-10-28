@@ -40,7 +40,7 @@ const ALG_DISABLE_SIP: u8 = 0x04;
 // suppress (`alg_type` is one of none/FTP/SIP/DNS — see xpf_conntrack.h), so
 // `alg_type_for_session` never reads this bit. Defined to document the full
 // bit layout consistently across Go and Rust; intentionally unused.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 const ALG_DISABLE_TFTP: u8 = 0x08;
 // PPTP's disable bit (#15655): gates TCP/1723 control learning and GRE v1
 // Call-ID association in poll_descriptor, not conntrack tagging (PPTP has
@@ -100,7 +100,7 @@ pub(super) fn alg_type_for_session(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn publish_v4_session(
     conntrack_v4_fd: c_int,
     key: &SessionKey,
@@ -198,7 +198,7 @@ pub(super) fn conntrack_row_routing_domain(key: &SessionKey, metadata: &SessionM
 /// flow session`. Pure (no map I/O) so the `session_id` stamping is unit-testable
 /// without a BPF map fd. Returns `None` when the reverse key resolves cross-family
 /// (the session is not v4-mappable), mirroring the pre-refactor early return.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn build_conntrack_value_v4(
     key: &SessionKey,
     decision: SessionDecision,
@@ -341,7 +341,6 @@ pub(super) fn build_conntrack_value_v4(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 /// #6923: may a v6 session key with this protocol become visible to the shim?
 ///
 /// False for exactly the next-header values the shim's extension-header walk
@@ -470,7 +469,7 @@ pub(super) fn publish_v6_session(
 /// #5213: v6 sibling of [`build_conntrack_value_v4`] — pure builder for the v6
 /// conntrack mirror value, stamping the stable `session_id`. Returns `None` on a
 /// cross-family reverse key (not v6-mappable).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn build_conntrack_value_v6(
     key: &SessionKey,
     decision: SessionDecision,

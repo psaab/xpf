@@ -6,7 +6,7 @@ import (
 )
 
 // #6689: `from { protocol { bgp; ospf; static; } }` compiled to [bgp] alone.
-// collectProtocolList followed a single-child CHAIN (Children[0] at each
+// The protocol reader followed a single-child CHAIN (Children[0] at each
 // level), and the nested-block spelling files one leaf child per protocol as
 // SIBLINGS, so only the first was ever reached.
 //

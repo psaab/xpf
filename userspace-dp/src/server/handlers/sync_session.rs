@@ -6,8 +6,8 @@ use super::super::helpers::{
 };
 use crate::afxdp::SessionDomain;
 use crate::afxdp::{
-    SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REPAIR_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
+    SyncedDeleteMode, SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
+    SYNCED_IMPORT_REFUSED_PREFIX,
 };
 use crate::{ControlResponse, SessionSyncRequest};
 
@@ -166,12 +166,9 @@ pub(super) fn handle(
         "upsert" | "mirror_upsert" | "mirror_publish_only" if resolved_domain.is_none() => {
             domain.note_unknown_routing_domain_import();
             response.ok = false;
-            response.error = format!(
-                "{SYNCED_IMPORT_REFUSED_PREFIX}{}",
-                crate::afxdp::SyncedImportOutcome::RejectedUnknownRoutingDomain
-                    .refusal_reason()
-                    .expect("a rejection always carries a reason token")
-            );
+            response.error = crate::afxdp::SyncedImportOutcome::RejectedUnknownRoutingDomain
+                .wire_error()
+                .expect("a rejection always carries a wire error")
         }
         "upsert" | "mirror_upsert" => match build_synced_session_entry(
             &sync_req,
@@ -319,27 +316,26 @@ pub(super) fn handle(
                     sync_req.operation.as_str(),
                     "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped"
                 );
+                // #17133: build the (peer x strict x scoped) mode ONCE and
+                // thread it through both the exact delete and the
+                // tunnel-variant purge. #12886 was the variant path
+                // rebuilding this choice from a narrower signature and
+                // dropping `strict_mirror`; `expected_id` was dropped the
+                // same way. The scoped zero check above guarantees the
+                // scoped constructor succeeds here.
+                let mode = if scoped {
+                    SyncedDeleteMode::peer_mirror_scoped(sync_req.session_id)
+                        .expect("scoped verb with session_id 0 returned above")
+                } else {
+                    SyncedDeleteMode {
+                        peer: sync_req.peer_delete,
+                        strict_mirror,
+                        expected_id: None,
+                    }
+                };
                 let mut mirror_delete_error = false;
                 let mut delete = |key| {
-                    let outcome = if sync_req.peer_delete {
-                        if strict_mirror {
-                            if scoped {
-                                domain.delete_peer_synced_session_mirror_scoped(
-                                    key,
-                                    forward_only,
-                                    sync_req.session_id,
-                                )
-                            } else {
-                                domain.delete_peer_synced_session_mirror(key, forward_only)
-                            }
-                        } else {
-                            domain.delete_peer_synced_session(key, forward_only)
-                        }
-                    } else if strict_mirror {
-                        domain.delete_synced_session_mirror(key, forward_only)
-                    } else {
-                        domain.delete_synced_session(key, forward_only)
-                    };
+                    let outcome = domain.delete_synced(key, mode, forward_only);
                     mirror_delete_error |= outcome.mirror_delete_failed();
                     if sync_req.peer_delete {
                         outcome.keeps_caller_rows()
@@ -349,12 +345,7 @@ pub(super) fn handle(
                 };
                 // (keeps_caller_rows, mirror_delete_failed) per variant purge.
                 let delete_tunnel_variants = |key| {
-                    let outcome = domain.delete_synced_tunnel_variants(
-                        key,
-                        sync_req.peer_delete,
-                        forward_only,
-                        strict_mirror,
-                    );
+                    let outcome = domain.delete_synced_tunnel_variants(key, mode, forward_only);
                     (
                         outcome.keeps_caller_rows(),
                         outcome.mirror_delete_failed(),
@@ -546,18 +537,9 @@ pub(super) fn handle(
 }
 
 fn apply_synced_import_outcome(response: &mut ControlResponse, outcome: SyncedImportOutcome) {
-    if let Some(reason) = outcome.repair_reason() {
+    if let Some(error) = outcome.wire_error() {
         response.ok = false;
-        response.error = format!("{SYNCED_IMPORT_REPAIR_PREFIX}{reason}");
-        return;
-    }
-    if let Some(reason) = outcome.refusal_reason() {
-        response.ok = false;
-        response.error = if reason == "mirror-write-failed" {
-            reason.to_string()
-        } else {
-            format!("{SYNCED_IMPORT_REFUSED_PREFIX}{reason}")
-        };
+        response.error = error;
     }
 }
 
@@ -600,38 +582,50 @@ mod tests {
         ));
     }
     #[test]
-    fn worker_repair_outcomes_use_a_distinct_fail_closed_wire_11360() {
-        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../pkg/dataplane/userspace/testdata/synced_import_repair_11360.json"
+    fn synced_import_wire_fixture_covers_every_outcome_17116() {
+        let rows: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../pkg/dataplane/userspace/testdata/synced_import_wire.json"
         ))
-        .expect("shared Go/Rust repair wire fixture");
-        for (outcome, fixture_name) in [
-            (
-                SyncedImportOutcome::AppliedRepairPending,
-                "pending",
-            ),
-            (
-                SyncedImportOutcome::AppliedRepairOverflow,
-                "overflow",
-            ),
-        ] {
+        .expect("shared Go/Rust synced-import wire fixture");
+        let rows = rows.as_array().expect("wire fixture is a row array");
+        assert_eq!(
+            rows.len(),
+            SyncedImportOutcome::ALL.len(),
+            "one fixture row per SyncedImportOutcome variant"
+        );
+        for outcome in SyncedImportOutcome::ALL {
+            let variant = outcome.variant_name();
+            let row = rows
+                .iter()
+                .find(|row| row["variant"] == variant)
+                .unwrap_or_else(|| panic!("wire fixture has no row for {variant}"));
             let mut response = ControlResponse {
                 ok: true,
                 ..ControlResponse::default()
             };
             apply_synced_import_outcome(&mut response, outcome);
-            assert!(!response.ok, "repair outcome was serialized as success");
-            let wire = serde_json::to_value(response).expect("control response JSON");
-            let expected = &fixtures[fixture_name];
-            assert_eq!(wire["ok"], expected["ok"]);
-            assert_eq!(wire["error"], expected["error"]);
-            let error = expected["error"]
-                .as_str()
-                .expect("fixture error token");
-            assert!(
-                !error.starts_with(SYNCED_IMPORT_REFUSED_PREFIX),
-                "legacy Go readers must not classify committed repair outcomes as rollback refusals"
+            let wire = serde_json::to_value(&response).expect("control response JSON");
+            assert_eq!(wire["ok"], row["ok"], "{variant} ok");
+            // Applied serializes with no `error` key (empty strings are
+            // skipped), which Go decodes as ""; compare decoded-to-decoded.
+            let wire_error = wire["error"].as_str().unwrap_or("");
+            assert_eq!(
+                wire_error,
+                row["error"].as_str().unwrap_or(""),
+                "{variant} error"
             );
+            if outcome == SyncedImportOutcome::Applied {
+                continue;
+            }
+            let error = row["error"].as_str().expect("fixture error token");
+            match outcome {
+                SyncedImportOutcome::AppliedRepairPending
+                | SyncedImportOutcome::AppliedRepairOverflow => assert!(
+                    !error.starts_with(SYNCED_IMPORT_REFUSED_PREFIX),
+                    "legacy Go readers must not classify committed repair outcomes as rollback refusals"
+                ),
+                _ => {}
+            }
         }
     }
 

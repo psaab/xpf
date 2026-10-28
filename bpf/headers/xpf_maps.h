@@ -395,21 +395,15 @@ struct {
 	__type(value, struct flood_state);
 } flood_counters SEC(".maps");
 
-/* Per-source-IP tracking for port scan / IP sweep detection.
- * LRU_HASH auto-evicts oldest entries when full. */
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 65536); /* MAX_PORT_SCAN_TRACK: legacy sizing, no mirror outside bpf/ */
-	__type(key, struct scan_track_key);
-	__type(value, struct scan_track_value);
-} port_scan_track SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 65536); /* MAX_PORT_SCAN_TRACK: legacy sizing, no mirror outside bpf/ */
-	__type(key, struct scan_track_key);
-	__type(value, struct scan_track_value);
-} ip_sweep_track SEC(".maps");
+/* Per-source-IP scan tracking retired (#18273): port_scan_track and
+ * ip_sweep_track named struct scan_track_key / scan_track_value,
+ * whose definitions the #17146 trim deleted. No Go/Rust map code
+ * mirrors either map by name (the live trackers are
+ * userspace-dp/src/screen/scan.rs PortScanTracker/IpSweepTracker),
+ * so the map declarations are dropped rather than the structs
+ * restored. interface_counters goes the other way: its struct is
+ * restored in xpf_common.h because Go code names the map and the
+ * dataplane.InterfaceCounterValue mirror. */
 
 /* ============================================================
  * NAT pool configuration & port allocation
@@ -433,12 +427,10 @@ struct {
 	__type(value, __be32);
 } nat_pool_ips_v4 SEC(".maps");
 
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, MAX_NAT_POOLS * MAX_NAT_POOL_IPS_PER_POOL);
-	__type(key, __u32);
-	__type(value, struct nat_pool_ip_v6);
-} nat_pool_ips_v6 SEC(".maps");
+/* nat_pool_ips_v6 retired (#18273): it named struct nat_pool_ip_v6,
+ * whose definition the #17146 trim deleted, and the Go writer side
+ * was retired with it (compiler_nat.go: nat_pool_ips_v6 writes
+ * retired). nat_pool_ips_v4 above keeps the live __be32 form. */
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -460,32 +452,6 @@ struct {
 /* ============================================================
  * NAT tables (IPv4)
  * ============================================================ */
-
-/* Pre-routing NAT table: (proto, dst_ip, dst_port, from_zone) -> new destination.
- * Static DNAT config entries use the configured ingress zone. Dynamic SNAT
- * return entries use from_zone=0 as a wildcard. */
-struct dnat_key {
-	__u8   protocol;
-	__u8   pad[3];
-	__be32 dst_ip;
-	__be16 dst_port;
-	__u16  from_zone;
-};
-
-struct dnat_value {
-	__be32 new_dst_ip;
-	__be16 new_dst_port;
-	__u8   flags;       /* 0=dynamic/SNAT-return, 1=static/DNAT-config */
-	__u8   pad;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_SESSIONS);
-	__type(key, struct dnat_key);
-	__type(value, struct dnat_value);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} dnat_table SEC(".maps");
 
 /* Source NAT config: (from_zone, to_zone, rule_idx) -> SNAT IP + match.
  * Populated by the compiler on commit. Multiple rules per zone-pair
@@ -534,28 +500,6 @@ struct {
  * NAT tables (IPv6)
  * ============================================================ */
 
-struct dnat_key_v6 {
-	__u8   protocol;
-	__u8   pad[3];
-	__u8   dst_ip[16];
-	__be16 dst_port;
-	__u16  from_zone;
-};
-
-struct dnat_value_v6 {
-	__u8   new_dst_ip[16];
-	__be16 new_dst_port;
-	__u8   flags;       /* 0=dynamic/SNAT-return, 1=static/DNAT-config */
-	__u8   pad;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, MAX_SESSIONS);
-	__type(key, struct dnat_key_v6);
-__type(value, struct dnat_value_v6);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-} dnat_table_v6 SEC(".maps");
 
 struct snat_value_v6 {
 	__u8   snat_ip[16];
@@ -709,7 +653,11 @@ struct {
 	__type(value, struct nat64_config);
 } nat64_prefix_map SEC(".maps");
 
-/* NAT64 reverse state: translated IPv4 5-tuple -> original IPv6 info */
+/* NAT64 reverse state: translated IPv4 5-tuple -> original IPv6 info.
+ * Key/value structs restored by #18273 (in xpf_common.h next to
+ * nat64_prefix_key): the #17146 trim deleted their definitions while
+ * this map — named by the Go shim allowlist (loader_userspace_shim.go)
+ * — kept naming them in __type(). */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, MAX_SESSIONS);

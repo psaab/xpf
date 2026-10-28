@@ -913,7 +913,6 @@ pub(crate) struct ConfigSnapshot {
     /// removed, but the field is retained as documented-reserved to preserve
     /// the #1977 NUM_WIDTH decode-safety tests (protocol/tests.rs) and avoid a
     /// cross-language wire-protocol break. It is deserialized and ignored.
-    #[allow(dead_code)]
     #[serde(rename = "flow_export", default)]
     pub flow_export: Option<FlowExportSnapshot>,
     #[serde(rename = "mirror_configs", default)]
@@ -1207,7 +1206,7 @@ pub(crate) struct TunnelEndpointSnapshot {
     #[serde(rename = "wg_listen_port", default)]
     pub wg_listen_port: u16,
     /// Local static private key for the WG interface, hex-encoded
-    /// (64 chars for 32 bytes). Empty when `mode != "wireguard"`.
+    /// (64 chars for 32 bytes). Empty for non-WireGuard modes.
     ///
     /// This field is intentionally `skip_serializing` so it CANNOT
     /// be written back out via any `serde_json` round-trip. The
@@ -1337,10 +1336,6 @@ pub(crate) struct MapPins {
     pub conntrack_v4: String,
     #[serde(rename = "conntrack_v6", default)]
     pub conntrack_v6: String,
-    #[serde(rename = "dnat_table", default)]
-    pub dnat_table: String,
-    #[serde(rename = "dnat_table_v6", default)]
-    pub dnat_table_v6: String,
     #[serde(default)]
     pub trace: String,
 }

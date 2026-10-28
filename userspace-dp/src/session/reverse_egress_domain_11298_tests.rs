@@ -468,3 +468,108 @@ fn same_domain_dnat_twins_are_ambiguous_16014() {
     let reply_a = reply_key(&fwd_a, NatDecision::default(), DOMAIN_A);
     assert_eq!(cross.find_forward_nat_match(&reply_a, egress_routing_domain).expect("demux").key, fwd_a);
 }
+
+/// #17080: every local reverse-NAT finder must return the matched
+/// entry's aux snapshot (session_id, source_nat_static,
+/// leak_incarnation), not a zeroed default. Pre-fix the six finders
+/// below built a zeroed aux, so a reverse companion installed from a
+/// local forward row lost its SNAT provenance (#13771 residual).
+#[test]
+fn local_reverse_nat_finders_preserve_aux_17080() {
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+        rewrite_src_port: Some(40_000),
+        ..NatDecision::default()
+    };
+    let mut table = SessionTable::new();
+    let forward = forward_key_v4(0);
+    let now = 1_000_000_000u64;
+    assert!(table.install_with_protocol_with_origin_and_source_nat(
+        forward.clone(),
+        decision(IFINDEX_EGRESS_DEFAULT, nat),
+        metadata(),
+        SessionOrigin::ForwardFlow,
+        now,
+        PROTO_TCP,
+        0x10,
+        Some(false),
+    ));
+    table.stamp_leak_incarnation(&forward, 73);
+    let expected_id = table.session_id_for(&forward);
+    assert_ne!(expected_id, 0, "fixture: forward must mint a session id");
+    let reply = reply_key(&forward, nat, 0);
+    let check = |label: &str, aux: SessionLookupAux| {
+        assert_eq!(aux.session_id, expected_id, "{label}: session_id must be preserved");
+        assert_eq!(
+            aux.source_nat_static,
+            Some(false),
+            "{label}: SNAT provenance must be preserved (#17080)"
+        );
+        assert_eq!(aux.leak_incarnation, 73, "{label}: leak incarnation must be preserved");
+    };
+    // find_forward_nat_match / _at / _lookup / _lookup_at all funnel
+    // through find_forward_nat_match_inner.
+    check(
+        "inner",
+        table.find_forward_nat_match(&reply, egress_routing_domain).expect("inner").aux,
+    );
+    check(
+        "inner_at",
+        table.find_forward_nat_match_at(&reply, now, egress_routing_domain).expect("inner_at").aux,
+    );
+    match table.find_forward_nat_match_lookup(&reply, &egress_routing_domain) {
+        ForwardNatMatchLookup::Unique(m) => check("lookup", m.aux),
+        other => panic!("lookup: expected Unique, got {other:?}"),
+    }
+    match table.find_forward_nat_match_lookup_at(&reply, now, &egress_routing_domain) {
+        ForwardNatMatchLookup::Unique(m) => check("lookup_at", m.aux),
+        other => panic!("lookup_at: expected Unique, got {other:?}"),
+    }
+    match table.find_forward_nat_match_expiry(&reply, now, egress_routing_domain) {
+        ForwardNatExpiryProbe::Live(m) => check("expiry", m.aux),
+        other => panic!("expiry: expected Live, got {other:?}"),
+    }
+    match table.find_forward_nat_quote_match_at(&reply, now) {
+        ForwardNatQuoteLookup::Unique(m) => check("quote", m.aux),
+        other => panic!("quote: expected Unique, got {other:?}"),
+    }
+    check(
+        "unique_established",
+        table
+            .find_unique_established_forward_nat_match_at(&reply, now)
+            .expect("unique_established")
+            .aux,
+    );
+    match table.lookup_ipsec_reply_alias_at(&reply, now, |_| 0) {
+        IpsecReplyAliasLookup::Unique(m) => check("ipsec_alias", m.aux),
+        other => panic!("ipsec_alias: expected Unique, got {other:?}"),
+    }
+}
+
+/// #17080: take_synced_local must return the taken entry's aux
+/// snapshot, captured before removal drops the leak incarnation.
+#[test]
+fn take_synced_local_preserves_aux_17080() {
+    let mut table = SessionTable::new();
+    let key = forward_key_v4(0);
+    let now = 1_000_000_000u64;
+    let mut local_decision = decision(IFINDEX_EGRESS_DEFAULT, NatDecision::default());
+    local_decision.resolution.disposition = crate::afxdp::ForwardingDisposition::LocalDelivery;
+    assert!(table.install_with_protocol_with_origin_and_source_nat(
+        key.clone(),
+        local_decision,
+        metadata(),
+        SessionOrigin::SyncImport,
+        now,
+        PROTO_TCP,
+        0x10,
+        Some(true),
+    ));
+    table.stamp_leak_incarnation(&key, 41);
+    let expected_id = table.session_id_for(&key);
+    assert_ne!(expected_id, 0);
+    let taken = table.take_synced_local(&key).expect("synced local taken");
+    assert_eq!(taken.aux.session_id, expected_id);
+    assert_eq!(taken.aux.source_nat_static, Some(true));
+    assert_eq!(taken.aux.leak_incarnation, 41);
+}

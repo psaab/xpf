@@ -85,7 +85,7 @@ func prodManagerTo(t *testing.T, srv *fakeDNSServer) (*Manager, *fakeLeaseSource
 			return nopUpdater{}, nil
 		}
 		c.UpdateServer = srv.addrUDP
-		return newRFC2136Updater(pol, c, nil,
+		return newRFC2136Updater(pol, c.RFC2136Endpoint, nil,
 			func() { m.skippedPTRNotAuth.Add(1) },
 			func() { m.skippedConflict.Add(1) })
 	}
@@ -95,11 +95,13 @@ func prodManagerTo(t *testing.T, srv *fakeDNSServer) (*Manager, *fakeLeaseSource
 func ddnsCfg(server string) *config.DHCPServerConfig {
 	return &config.DHCPServerConfig{
 		DynamicDNS: &config.DHCPDynamicDNSConfig{
-			Enabled:      true,
-			Domain:       "example.com",
-			TTLSeconds:   300,
-			Backend:      "rfc2136",
-			UpdateServer: server,
+			Enabled:    true,
+			Domain:     "example.com",
+			TTLSeconds: 300,
+			Backend:    "rfc2136",
+			RFC2136Endpoint: config.RFC2136Endpoint{
+				UpdateServer: server,
+			},
 		},
 	}
 }
@@ -199,10 +201,12 @@ func TestManagerEnabledThenDisabledWithdrawsOnce(t *testing.T) {
 	// (Whole-stanza removal — DynamicDNS=nil — resolves the nop and is covered
 	// by the stanza-removal withdraw test.)
 	disabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled:      false,
-		Domain:       "example.com",
-		Backend:      "rfc2136",
-		UpdateServer: srv.addrUDP,
+		Enabled: false,
+		Domain:  "example.com",
+		Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: srv.addrUDP,
+		},
 	}}
 	if err := m.Reconcile(context.Background(), disabled); err != nil {
 		t.Fatalf("disable reconcile: %v", err)
@@ -261,7 +265,10 @@ func TestManagerStanzaRemovalWithdrawsThroughLiveBackend(t *testing.T) {
 	// Enable + publish via the live (fake) backend.
 	enabled := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
 		Enabled: true, Domain: "example.com", TTLSeconds: 300,
-		Backend: "rfc2136", UpdateServer: "192.0.2.53",
+		Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "192.0.2.53",
+		},
 	}}
 	if err := m.Reconcile(context.Background(), enabled); err != nil {
 		t.Fatalf("enable reconcile: %v", err)

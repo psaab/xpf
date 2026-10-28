@@ -204,7 +204,7 @@ impl MmapArea {
         Some(unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(offset), len) })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(in crate::afxdp) fn slice_mut(&mut self, offset: usize, len: usize) -> Option<&mut [u8]> {
         unsafe { self.slice_mut_unchecked(offset, len) }
     }
@@ -234,6 +234,7 @@ impl MmapArea {
     /// AF_XDP single-writer (owner-worker) discipline plus per-frame
     /// offset assignment from the free-frame ring is what holds
     /// these invariants in production.
+    #[expect(clippy::mut_from_ref, reason = "SAFETY: see # Safety above; AF_XDP single-writer")]
     pub(in crate::afxdp) unsafe fn slice_mut_unchecked(
         &self,
         offset: usize,

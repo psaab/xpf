@@ -60,7 +60,7 @@ func cfgWithPoolProxyARP8405(rg int, addrs ...string) *config.Config {
 func TestANewOwnerAnnouncesItsPoolAddresses8405(t *testing.T) {
 	calls := captureGARP8405(t)
 	d := &Daemon{}
-	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, "172.16.80.7/32"), 1, nil)
+	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, "172.16.80.7/32"), 1, func() bool { return true })
 
 	if len(*calls) != 1 {
 		t.Fatalf("the new owner must announce the pool address; got %d GARPs.\n"+
@@ -79,7 +79,7 @@ func TestThePoolAnnounceIsOnePerAddressNotABurst8405(t *testing.T) {
 	// and depth x breadth is what turns this into a storm on a large pool.
 	calls := captureGARP8405(t)
 	d := &Daemon{}
-	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, "172.16.80.7/32"), 1, nil)
+	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, "172.16.80.7/32"), 1, func() bool { return true })
 	if (*calls)[0].count != 1 {
 		t.Errorf("pool announce used a burst of %d; want 1 per address",
 			(*calls)[0].count)
@@ -93,7 +93,7 @@ func TestAnRGThisNodeDoesNotOwnIsNotAnnounced8405(t *testing.T) {
 	calls := captureGARP8405(t)
 	d := &Daemon{}
 	// The interface belongs to RG 2; we are announcing for RG 1.
-	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(2, "172.16.80.7/32"), 1, nil)
+	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(2, "172.16.80.7/32"), 1, func() bool { return true })
 	if len(*calls) != 0 {
 		t.Errorf("announced %d addresses for an RG whose interface belongs to a "+
 			"different RG; got %v", len(*calls), *calls)
@@ -111,7 +111,7 @@ func TestThePoolAnnounceIsBounded8405(t *testing.T) {
 	}
 	calls := captureGARP8405(t)
 	d := &Daemon{}
-	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, addrs...), 1, nil)
+	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, addrs...), 1, func() bool { return true })
 
 	if len(*calls) != proxyARPAnnounceMaxAddresses {
 		t.Fatalf("announced %d addresses; the bound is %d",
@@ -154,7 +154,7 @@ func TestIPv6PoolAddressesAreNotAnnouncedThroughTheV4Path8405(t *testing.T) {
 	naCalls := captureNA12172(t)
 	d := &Daemon{}
 	d.announceProxyARPPoolAddresses(
-		cfgWithPoolProxyARP8405(1, "2001:db8::7/128", "172.16.80.7/32"), 1, nil)
+		cfgWithPoolProxyARP8405(1, "2001:db8::7/128", "172.16.80.7/32"), 1, func() bool { return true })
 	if len(*calls) != 1 || (*calls)[0].ip != "172.16.80.7" {
 		t.Errorf("only the v4 address may go out through the ARP path; got %v", *calls)
 	}

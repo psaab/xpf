@@ -147,7 +147,7 @@ pub(super) fn evaluate_filter_ref_counted(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_filter_ref_counted_family<F: AddrFamily>(
     filter: &Filter,
     src_ip: F::Addr,
@@ -445,7 +445,7 @@ fn evaluate_filter_ref_non_routing_counted(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_filter_ref_non_routing_counted_family<F: AddrFamily>(
     filter: &Filter,
     src_ip: F::Addr,
@@ -554,7 +554,7 @@ fn evaluate_filter_ref_non_routing_counted_v4(
 /// evaluator is the sole counter. Walk order is identical to the main loop so
 /// the recorded set matches.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn count_matched_non_routing_terms_family<F: AddrFamily>(
     filter: &Filter,
     src_ip: F::Addr,
@@ -718,7 +718,7 @@ fn evaluate_filter_ref_routing_instance_counted_v6<'a>(
 }
 
 /// Evaluate the lo0 (host-bound) filter for a given address family.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn evaluate_lo0_filter(
     state: &FilterState,
     is_v6: bool,
@@ -1167,7 +1167,7 @@ pub(crate) fn evaluate_filter_ref_routing_instance_uncounted<'a>(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_filter_ref_routing_instance_maybe_counted<'a>(
     filter: &'a Filter,
     src_ip: IpAddr,

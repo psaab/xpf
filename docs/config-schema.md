@@ -4037,7 +4037,7 @@ which leaves the node itself with `Keys=["protocol"]` and files one leaf child
 per value as SIBLINGS. A reader that descends `Children[0]` at each level is
 correct for the flat-set CHAIN (one child deep at every level) and reaches
 exactly one value of a block (N children wide at one level). That was the
-`collectProtocolList` defect: a routing-policy term written to filter three
+`policyFromListValues` reader defect (#6689, unified #17202): a routing-policy term written to filter three
 protocols compiled to one, and with `then reject` the two dropped protocols were
 silently ACCEPTED and installed — a fail-OPEN route-acceptance widening whose
 authored config renders back intact. Descend EVERY child, not the first, and the
@@ -6045,16 +6045,24 @@ are indistinguishable. `interface-monitor ge-0/0/0 weight nope;` therefore
 committed clean and installed a monitor that deducts NOTHING on link-down —
 the same silent-nothing class as the dropped statement. It is rejected by
 `validateMonitorWeightTokensAST` (`compiler_chassis_monitor_weight.go`), which
-derives its entries from `monitorEntryNodes` / `monitorWeightTokens` so the gate
-and the compiler can never disagree about which token is a weight or which entry
+derives its entries from `monitorEntryNodes` / `monitorEntryAttrTokens` so the gate
+and the compiler can never disagree about which token is an attribute or which entry
 owns it. Strict at commit, warn on the tolerant load / peer-sync path (#1960).
 
 That gate also settles a spelling-dependent answer: a DUPLICATE weight used to
 compile to 200 inline (`weight 100 weight 200` — the inline scan overwrote) but
 to 100 in a block (`{ weight 100; weight 200; }` — `FindChild` returns the
-first). The compiler is now uniformly first-wins via `monitorWeightTokens`, and
-a duplicate is rejected outright, so no operator is relying on which form they
-happened to write.
+first). The compiler is now uniformly first-wins via `monitorEntryAttrTokens`
+(`monitorWeightTokens` is its weight specialisation), and a duplicate is rejected
+outright, so no operator is relying on which form they happened to write. The
+same duplicate rule covers the #15038 ip-monitoring probe binding: the #17232
+generalisation deleted the first-wins-only `ipMonitorTargetProp` clone and made
+the gate loop over the shared `monitorAttrKeywords` slice (`weight`,
+`interface`, `secondary-ip-address`) that `isMonitorAttrKeyword` encodes, so a
+duplicate `interface` / `secondary-ip-address` on one target is rejected at
+commit and warned on the tolerant path instead of binding the probe
+spelling-dependently. A keyword with no value is not flagged for the binding:
+unlike a weight it compiles to the same empty binding as an absent statement.
 
 **A gate that walks ENTRY LISTS will miss the statement's own PROPERTIES.** The
 weight gate above was first written around `monitorEntryNodes`, which produces
@@ -6920,15 +6928,18 @@ these none has been demonstrated; #6693's `mixedChildIsAModifierBlock` is the
 precedent — where a verdict carries no information, drop the verdict rather than
 claim a defect.
 
-**A missing verdict used to read as a passing one.** `spellingVerdicts` builds
-its map by ranging `gateSpellingsMulti`, while a scalar leaf compares over
-`gateSpellingsScalar`. The two are consistent today and nothing enforced it, so
-`state[name]` for an unpopulated spelling yielded `""` — neither
-`err`/`unstable`/`inert` nor a real verdict, and it was counted as usable.
-Found by mutation: removing two entries from `gateSpellingsMulti` made coverage
-appear to RISE 619 → 1034, because every scalar leaf then scored two phantom
-verdicts. The helper now accepts only an explicit `keep`/`drop`, and
-`TestGateSpellingSetsAreConsistent_7484` pins the invariant.
+**A missing verdict used to read as a passing one.** Before #17191
+`spellingVerdicts` built its map by ranging `gateSpellingsMulti`, while a
+scalar leaf compared over `gateSpellingsScalar`. The two were consistent and
+nothing enforced it, so `state[name]` for an unpopulated spelling yielded `""`
+— neither `err`/`unstable`/`inert` nor a real verdict, and it was counted as
+usable. Found by mutation: removing two entries from `gateSpellingsMulti` made
+coverage appear to RISE 619 → 1034, because every scalar leaf then scored two
+phantom verdicts. The helper accepts only an explicit `keep`/`drop`,
+`TestGateSpellingSetsAreConsistent_7484` pins the invariant, and since #17191
+both sets — and the slot-escape sweep's spellings — derive from the one
+`gateSpellingForms` table, so the two-list drift the mutation exploited can no
+longer be authored.
 
 **The remaining gap, measured.** The 228 `unreachable` leaves spread across 46
 top-two-token parent prefixes — a long tail, not one bug. Largest:

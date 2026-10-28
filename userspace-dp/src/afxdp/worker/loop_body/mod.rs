@@ -37,8 +37,8 @@ use crate::slowpath_reinject_9506::{ReinjectLease, SUBMIT_FLAG_FORWARD};
 // #1776: the one-shot setup phase (thread pin, TSC calibration,
 // initial ArcSwap load_fulls, binding construction, BPF-map-FD
 // cache, initial cos_status publish) lives in loop_body/setup.rs.
-mod setup;
 mod screen_status;
+mod setup;
 
 // #1776: the cfg(debug-log) verbose per-second report + stall dump +
 // per-interval DbgCounters live in loop_body/debug_report.rs. The
@@ -69,18 +69,17 @@ mod bpf_ok_teardown_10590_tests;
 mod rebind_once_per_generation_15188_tests;
 
 #[cfg(test)]
-#[path = "p2_deadline_9506_tests.rs"]
-mod p2_deadline_9506_tests;
+#[path = "export_slice_batched_window_15950_tests.rs"]
+mod export_slice_batched_window_15950_tests;
 #[cfg(test)]
 #[path = "export_slice_delta_drain_13653_tests.rs"]
 mod export_slice_delta_drain_13653_tests;
 #[cfg(test)]
-#[path = "export_slice_batched_window_15950_tests.rs"]
-mod export_slice_batched_window_15950_tests;
+#[path = "p2_deadline_9506_tests.rs"]
+mod p2_deadline_9506_tests;
 #[cfg(test)]
 #[path = "pending_timer_16217_tests.rs"]
 mod pending_timer_16217_tests;
-
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
 // ancestry matchers, rematch/rebind walkers, the #6291/#6592 refresh seam,
@@ -121,7 +120,7 @@ use pptp_drain::run_pptp_control_drain;
 // #13075 (D4-12): conntrack-refresh slice + fabric/WG drains extracted
 // from `worker_loop` (ct_slice.rs). Loop-local.
 mod ct_slice;
-use ct_slice::{run_ct_slice, PendingNeighTimer, run_pending_neigh_timer};
+use ct_slice::{PendingNeighTimer, run_ct_slice, run_pending_neigh_timer};
 
 // #13075 (D4-12): delta-loss resync + stale-session sweeps extracted
 // from `worker_loop` (delta_recovery.rs). Loop-local.
@@ -150,14 +149,13 @@ mod tests;
 // When `bindings` is empty we synthesize a binding identity (labels
 // only — no XSK) and fall back to the loop-cached map fds (which are
 // `-1`, making the live session-map delete a harmless EBADF no-op).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn flush_session_deltas_loop(
     sessions: &mut crate::session::SessionTable,
     bindings: &[BindingWorker],
     session_map: crate::afxdp::bpf_map::SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
-    dnat_fds: &crate::afxdp::checksum::DnatTableFds,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -181,7 +179,6 @@ fn flush_session_deltas_loop(
                 binding.bpf_maps.session_map.handle(),
                 conntrack_v4_fd,
                 conntrack_v6_fd,
-                dnat_fds,
                 deltas,
                 shared_sessions,
                 shared_nat_sessions,
@@ -211,7 +208,6 @@ fn flush_session_deltas_loop(
                 session_map,
                 conntrack_v4_fd,
                 conntrack_v6_fd,
-                dnat_fds,
                 deltas,
                 shared_sessions,
                 shared_nat_sessions,
@@ -257,7 +253,6 @@ pub(crate) fn worker_loop(
         node_id,
         binding_plans,
         poll_mode,
-        dnat_fds,
     } = plan;
     let WorkerSharedDataplane {
         runtime: shared_runtime,
@@ -1084,7 +1079,10 @@ pub(crate) fn worker_loop(
                     owner_rg_indexes: &shared_owner_rg_indexes,
                     peer_worker_commands: &peer_worker_commands,
                     worker_commands_by_id: &worker_commands_by_id,
-                    conntrack: ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                    conntrack: ConntrackFds {
+                        v4: conntrack_v4_fd,
+                        v6: conntrack_v6_fd,
+                    },
                     tick: Tick::from_ns(loop_now_ns),
                 },
                 &forwarding,
@@ -1109,7 +1107,10 @@ pub(crate) fn worker_loop(
                     owner_rg_indexes: &shared_owner_rg_indexes,
                     peer_worker_commands: &peer_worker_commands,
                     worker_commands_by_id: &worker_commands_by_id,
-                    conntrack: ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                    conntrack: ConntrackFds {
+                        v4: conntrack_v4_fd,
+                        v6: conntrack_v6_fd,
+                    },
                     tick: Tick::from_ns(loop_now_ns),
                 },
                 &old_forwarding_for_filter_purge,
@@ -1137,7 +1138,10 @@ pub(crate) fn worker_loop(
                             owner_rg_indexes: &shared_owner_rg_indexes,
                             peer_worker_commands: &peer_worker_commands,
                             worker_commands_by_id: &worker_commands_by_id,
-                            conntrack: ConntrackFds { v4: conntrack_v4_fd, v6: conntrack_v6_fd },
+                            conntrack: ConntrackFds {
+                                v4: conntrack_v4_fd,
+                                v6: conntrack_v6_fd,
+                            },
                             tick: Tick::from_ns(loop_now_ns),
                         },
                         &forwarding,
@@ -1504,7 +1508,6 @@ pub(crate) fn worker_loop(
                 session_map.handle(),
                 conntrack_v4_fd,
                 conntrack_v6_fd,
-                &dnat_fds,
                 &shared_sessions,
                 &shared_nat_sessions,
                 &shared_forward_wire_sessions,
@@ -1536,7 +1539,6 @@ pub(crate) fn worker_loop(
             session_map.handle(),
             conntrack_v4_fd,
             conntrack_v6_fd,
-            &dnat_fds,
             worker_id,
             &worker_commands_by_id,
             &pptp_control,
@@ -1610,7 +1612,8 @@ pub(crate) fn worker_loop(
         // behind a 1 ms `poll(2)`, so the budget would trade a bounded 3.85 ms
         // stall for ~16 ms of drain. Seeded here rather than OR-ed after the
         // sweep so there is one assignment to reason about.
-        let mut did_work = commands_backlogged || !session_import_repairs.is_empty() || pending_timer_fired;
+        let mut did_work =
+            commands_backlogged || !session_import_repairs.is_empty() || pending_timer_fired;
         let mut dbg_poll = DebugPollCounters::default();
         // #1620: read the cold-path sample mask from forwarding state once
         // per poll cycle (rather than per-binding) — it's a daemon-wide
@@ -1672,7 +1675,6 @@ pub(crate) fn worker_loop(
                 worker_id,
                 worker_commands_by_id.as_ref(),
                 &mut shared_recycles,
-                &dnat_fds,
                 conntrack_v4_fd,
                 conntrack_v6_fd,
                 &mut dbg_poll,

@@ -20,8 +20,6 @@ var expectedMapStatCountable = map[string]bool{
 	"address_membership": true,  // HASH
 	"applications":       true,  // HASH
 	"snat_rules":         false, // ARRAY
-	"dnat_table":         true,  // HASH
-	"dnat_table_v6":      true,  // HASH
 	"nat_pool_configs":   false, // ARRAY (was stale "nat_pool_config")
 	"screen_configs":     false, // ARRAY (was stale "screen_profiles")
 	"global_counters":    false, // PERCPU_ARRAY

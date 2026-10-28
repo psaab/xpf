@@ -97,6 +97,41 @@ func TestRenderNAT64DefaultRI16681(t *testing.T) {
 	}
 }
 
+// #17139: a divergent singular beside its plural renders the effective
+// union, not plural-else-singular — FromZone="a" with FromZones=["b"]
+// shows "b, a", and the RI twin shows "r2, r1".
+func TestRenderNAT64DivergentUnion17139(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.NAT.NAT64 = []*config.NAT64RuleSet{
+		{
+			Name: "div64", Prefix: "64:ff9b::/96",
+			FromZone: "a", FromZones: []string{"b"},
+			FromRoutingInstance: "r1", FromRoutingInstances: []string{"r2"},
+		},
+	}
+	var b strings.Builder
+	RenderNAT64(&b, cfg, nil)
+	out := b.String()
+	for _, want := range []string{
+		"  From zones:   b, a\n",
+		"  From routing-instances: r2, r1\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("divergent union missing %q\nout:\n%s", want, out)
+		}
+	}
+	// Dedup: singular already in plural renders once.
+	cfg2 := &config.Config{}
+	cfg2.Security.NAT.NAT64 = []*config.NAT64RuleSet{
+		{Name: "dup64", Prefix: "64:ff9b::/96", FromZone: "b", FromZones: []string{"b", "b"}},
+	}
+	var b2 strings.Builder
+	RenderNAT64(&b2, cfg2, nil)
+	if !strings.Contains(b2.String(), "  From zones:   b\n") {
+		t.Errorf("duplicate zones must collapse to one:\n%s", b2.String())
+	}
+}
+
 func TestRenderNAT64Empty16681(t *testing.T) {
 	var b strings.Builder
 	RenderNAT64(&b, nil, nil)

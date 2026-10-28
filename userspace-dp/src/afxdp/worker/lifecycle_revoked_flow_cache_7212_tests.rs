@@ -197,7 +197,6 @@ fn rst_teardown_invalidates_tunnel_flow_cache_slot_12042() {
     );
 }
 /// A revoked session's descriptor is evicted from EVERY binding of the worker,
-
 /// not just the one the revoking packet arrived on.
 ///
 /// The three-binding shape is the point: the forward and reverse halves of one

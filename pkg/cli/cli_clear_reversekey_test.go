@@ -79,9 +79,7 @@ func (d *recordingClearCLIDP) DeleteSessionV6(key dataplane.SessionKeyV6) error 
 	return nil
 }
 
-func (d *recordingClearCLIDP) DeleteDNATEntry(dataplane.DNATKey) error     { return nil }
-func (d *recordingClearCLIDP) DeleteDNATEntryV6(dataplane.DNATKeyV6) error { return nil }
-func (d *recordingClearCLIDP) ClearAllSessions() (int, int, error)         { return 0, 0, nil }
+func (d *recordingClearCLIDP) ClearAllSessions() (int, int, error) { return 0, 0, nil }
 
 func newRecordingCLI(t *testing.T, dp cliRuntime) *CLI {
 	t.Helper()

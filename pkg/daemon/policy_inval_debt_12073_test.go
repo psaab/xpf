@@ -196,9 +196,6 @@ func (d *invalDebtTestDP12073) BatchDeleteSessionsV6(keys []dataplane.SessionKey
 	return n, nil
 }
 
-func (d *invalDebtTestDP12073) DeleteDNATEntry(dataplane.DNATKey) error     { return nil }
-func (d *invalDebtTestDP12073) DeleteDNATEntryV6(dataplane.DNATKeyV6) error { return nil }
-
 // invalDebtHarness12073 wires a Daemon that drives the REAL commit path
 // (applyAndSyncCommitted -> applyConfigLockedForCommit -> applyConfigLocked)
 // with a scripted dataplane, a primary-for-RG cluster, and a connected HA

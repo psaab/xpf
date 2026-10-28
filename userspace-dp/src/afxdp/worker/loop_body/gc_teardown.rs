@@ -83,8 +83,7 @@ pub(super) fn retire_expired_missing_neighbor_seeds(
 /// own key, so both directions' slots are covered. This is the reap path
 /// (bounded by the ~1/s GC sweep), so it adds no per-packet cost and does not
 /// regress the #2220 keepalive fast path.
-
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn reap_expired_sessions(
     bindings: &mut [BindingWorker],
     expired_entries: &[crate::session::ExpiredSession],
@@ -212,8 +211,6 @@ pub(super) fn reap_expired_sessions(
 /// accounting no-op); row removal plus flow-cache eviction are real and
 /// asserted. Cross-worker propagation is not driven.
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn production_sweep_for_test(
     sessions: &mut crate::session::SessionTable,
     bindings: &mut [BindingWorker],
@@ -244,7 +241,6 @@ pub(in crate::afxdp) fn production_sweep_for_test(
 /// same dummy-map/fd/worker-id divergences as `production_sweep_for_test`
 /// (fresh shared maps, no peer commands, no HA delete propagation).
 #[cfg(test)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn production_rotation_purge_for_test(
     sessions: &mut crate::session::SessionTable,
     binding: &BindingWorker,
@@ -391,7 +387,7 @@ pub(super) fn count_local_session_expiries(
 /// Retry teardown for locally removed pressure victims whose all-key tuple
 /// lease was contended. These records are outside the session table and would
 /// otherwise never reach ordinary expiry cleanup.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
     sessions: &mut crate::session::SessionTable,
     bindings: &mut [BindingWorker],
@@ -399,7 +395,6 @@ pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
     session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
-    dnat_fds: &crate::afxdp::checksum::DnatTableFds,
     worker_id: u32,
     peer_worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
     worker_commands_by_id: &crate::afxdp::types::WorkerCommandQueues,
@@ -429,7 +424,6 @@ pub(in crate::afxdp) fn retry_deferred_pressure_sheds(
             session_map,
             conntrack_v4_fd,
             conntrack_v6_fd,
-            dnat_fds,
             worker_id,
             peer_worker_commands,
             worker_commands_by_id,

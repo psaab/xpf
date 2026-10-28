@@ -197,7 +197,7 @@ fn generated_tcp_flags(packet: &[u8], rel_l4: usize, protocol: u8, pkt_len: usiz
 }
 
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn finish_generated_key(
     addr_family: u8,
     protocol: u8,

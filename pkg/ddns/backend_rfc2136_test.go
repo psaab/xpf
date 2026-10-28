@@ -581,7 +581,7 @@ func testUpdater(t *testing.T, srv *fakeDNSServer, c *config.DHCPDynamicDNSConfi
 	t.Helper()
 	c.UpdateServer = srv.addrUDP
 	pol := policyFromConfig(c)
-	u, err := newRFC2136Updater(pol, c, nil,
+	u, err := newRFC2136Updater(pol, c.RFC2136Endpoint, nil,
 		func() { *ptrNotAuth++ },
 		func() { *conflict++ })
 	if err != nil {
@@ -734,11 +734,13 @@ func TestRFC2136TSIGSignedAndVerified(t *testing.T) {
 	srv := newFakeDNSServer(t, map[string]string{keyName: secret})
 	var ptr, conf int
 	u := testUpdater(t, srv, &config.DHCPDynamicDNSConfig{
-		Enabled:       true,
-		Domain:        "example.com",
-		TSIGKeyName:   keyName,
-		TSIGAlgorithm: "hmac-sha256",
-		TSIGSecret:    config.NewSecret(secret),
+		Enabled: true,
+		Domain:  "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			TSIGKeyName: keyName,
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret: config.NewSecret(secret),
+		},
 	}, &ptr, &conf)
 
 	if err := u.UpsertLease(context.Background(), recV4("tsig.example.com", "10.0.1.7", 300)); err != nil {
@@ -750,11 +752,13 @@ func TestRFC2136TSIGSignedAndVerified(t *testing.T) {
 func tsigTestUpdater(t *testing.T, srv *fakeDNSServer, keyName, secret string, ptr, conf *int) *rfc2136Updater {
 	t.Helper()
 	return testUpdater(t, srv, &config.DHCPDynamicDNSConfig{
-		Enabled:       true,
-		Domain:        "example.com",
-		TSIGKeyName:   keyName,
-		TSIGAlgorithm: "hmac-sha256",
-		TSIGSecret:    config.NewSecret(secret),
+		Enabled: true,
+		Domain:  "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			TSIGKeyName: keyName,
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret: config.NewSecret(secret),
+		},
 	}, ptr, conf)
 }
 
@@ -1032,11 +1036,13 @@ func TestRFC2136TSIGWrongSecretRejectedNoLeak(t *testing.T) {
 	srv := newFakeDNSServer(t, map[string]string{keyName: serverSecret})
 	var ptr, conf int
 	u := testUpdater(t, srv, &config.DHCPDynamicDNSConfig{
-		Enabled:       true,
-		Domain:        "example.com",
-		TSIGKeyName:   keyName,
-		TSIGAlgorithm: "hmac-sha256",
-		TSIGSecret:    config.NewSecret(clientSecret),
+		Enabled: true,
+		Domain:  "example.com",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			TSIGKeyName: keyName,
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret: config.NewSecret(clientSecret),
+		},
 	}, &ptr, &conf)
 
 	err := u.UpsertLease(context.Background(), recV4("bad.example.com", "10.0.1.8", 300))
@@ -1348,8 +1354,8 @@ func TestDHCIDDeterministicAndBound(t *testing.T) {
 
 func TestRFC2136Timeout(t *testing.T) {
 	// Point at an unroutable discard address so the exchange times out.
-	pol := policyFromConfig(&config.DHCPDynamicDNSConfig{Enabled: true, Domain: "example.com", UpdateServer: "192.0.2.1:53"})
-	u, err := newRFC2136Updater(pol, &config.DHCPDynamicDNSConfig{UpdateServer: "192.0.2.1:53"}, nil, func() {}, func() {})
+	pol := policyFromConfig(&config.DHCPDynamicDNSConfig{Enabled: true, Domain: "example.com", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "192.0.2.1:53"}})
+	u, err := newRFC2136Updater(pol, config.RFC2136Endpoint{UpdateServer: "192.0.2.1:53"}, nil, func() {}, func() {})
 	if err != nil {
 		t.Fatalf("newRFC2136Updater: %v", err)
 	}
@@ -1595,11 +1601,13 @@ func TestRFC2136UnsignedUpdateWarnsOncePerProvider(t *testing.T) {
 		srv := newFakeDNSServer(t, secret)
 		var ptr, conf int
 		u := testUpdater(t, srv, &config.DHCPDynamicDNSConfig{
-			Enabled:       true,
-			Domain:        "example.com",
-			TSIGKeyName:   "k1",
-			TSIGAlgorithm: "hmac-sha256",
-			TSIGSecret:    config.NewSecret("c2VjcmV0"),
+			Enabled: true,
+			Domain:  "example.com",
+			RFC2136Endpoint: config.RFC2136Endpoint{
+				TSIGKeyName: "k1",
+				TSIGAlgorithm: "hmac-sha256",
+				TSIGSecret: config.NewSecret("c2VjcmV0"),
+			},
 		}, &ptr, &conf)
 		if u.tsigKeyName == "" {
 			t.Fatal("precondition: updater must have a TSIG key")

@@ -993,26 +993,26 @@ func TestEmitUserspaceSourceNATPoolMetrics(t *testing.T) {
 	}
 	status := dpuserspace.ProcessStatus{
 		SourceNATPools: []dpuserspace.SourceNATPoolStatus{{
-			PoolName:                     "pool-a",
-			RuleName:                     "snat-a",
-			LiveFlows:                    2,
-			MaxTrackedFlows:              64,
-			UsedPorts:                    1,
-			PersistentLeases:             1,
-			AllocationsTotal:             3,
-			ReusesTotal:                  5,
-			ExhaustionTotal:              7,
-			IdleLeaseImportCapacityTotal: 17,
+			PoolName:                       "pool-a",
+			RuleName:                       "snat-a",
+			LiveFlows:                      2,
+			MaxTrackedFlows:                64,
+			UsedPorts:                      1,
+			PersistentLeases:               1,
+			AllocationsTotal:               3,
+			ReusesTotal:                    5,
+			ExhaustionTotal:                7,
+			IdleLeaseImportCapacityTotal:   17,
 			FlowShardLockAcquisitionsTotal: 5,
 			FlowShardLockContendedTotal:    1,
 			LiveWriteLockAcquisitionsTotal: 6,
 			LiveWriteLockContendedTotal:    3,
-			LiveLockAcquisitionsTotal:    11,
-			LiveLockContendedTotal:       4,
-			PersistentAdmittedTotal:      13,
-			PersistentDeclinedTotal:      6,
-			RecycleScanPopsTotal:         77,
-			RecycleScanWalksTotal:        11,
+			LiveLockAcquisitionsTotal:      11,
+			LiveLockContendedTotal:         4,
+			PersistentAdmittedTotal:        13,
+			PersistentDeclinedTotal:        6,
+			RecycleScanPopsTotal:           77,
+			RecycleScanWalksTotal:          11,
 		}},
 	}
 	ch := make(chan prometheus.Metric)
@@ -1360,12 +1360,6 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			nil,
 			nil,
 		),
-		userspaceDnatPublishErrors: prometheus.NewDesc(
-			"xpf_userspace_dnat_publish_errors_total",
-			"dnat publish errors",
-			nil,
-			nil,
-		),
 		// #5674: synced-import aggregate admission-bound drops.
 		userspaceSyncedImportCapDrops: prometheus.NewDesc(
 			"xpf_userspace_synced_import_cap_drops_total",
@@ -1457,6 +1451,12 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		userspaceServerHandlerPanics: prometheus.NewDesc(
 			"xpf_userspace_server_handler_panics_total",
 			"server handler panics",
+			nil,
+			nil,
+		),
+		userspaceReinjectHandlerPanics: prometheus.NewDesc(
+			"xpf_userspace_reinject_handler_panics_total",
+			"reinject handler panics",
 			nil,
 			nil,
 		),
@@ -1583,6 +1583,10 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		),
 		userspaceIpsecInnerEcnIllegalDrops: prometheus.NewDesc(
 			"xpf_userspace_ipsec_inner_ecn_illegal_drops_total", "IPsec inner illegal ECN",
+			nil, nil,
+		),
+		userspaceIpsecInnerNoroute: prometheus.NewDesc(
+			"xpf_userspace_ipsec_inner_noroute_total", "IPsec inner no route",
 			nil, nil,
 		),
 		userspaceIpsecInnerWorkerQueueFull: prometheus.NewDesc(
@@ -1774,9 +1778,6 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		// denominator and the contended wire would otherwise pass.
 		EventStreamProducerSeqLockAcquisitionsTotal: 139,
 		EventStreamProducerSeqLockContendedTotal:    149,
-		// #2244: dnat_table reverse-NAT publish-error counter emitted
-		// unconditionally.
-		DnatPublishErrorsTotal: 7,
 		// #5674: synced-import aggregate admission-bound drop counter emitted
 		// unconditionally.
 		SyncedImportCapDropsTotal: 11,
@@ -1802,6 +1803,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		WorkerCommandQueueShed:      55,
 		ServerStatePoisonRecoveries: 56,
 		ServerHandlerPanics:         57,
+		ReinjectHandlerPanics:       58,
 		// #7398: distinct values so an assertion cannot pass by reading the
 		// neighbouring field — a mis-wired descriptor emits a series either way.
 		SessionInstallStaleIgnored: 21,
@@ -1829,6 +1831,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		ZoneGateNoGenerationTotal:            104,
 		IpsecInnerParseDropsTotal:            105,
 		IpsecInnerEcnIllegalDrops:            106,
+		IpsecInnerNorouteTotal:               115,
 		IpsecInnerWorkerQueueFullTotal:       107,
 		IpsecInnerVerdictQueueFullTotal:      108,
 		IpsecInnerVerdictQueueContendedTotal: 114,
@@ -1957,8 +1960,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	for m := range ch {
 		got = append(got, m)
 	}
-	// 10 pre-#1861 metrics + the #1861 install-refusal trio + the #2244
-	// dnat_table reverse-NAT publish-error counter (= 14) + the #2315
+	// 10 pre-#1861 metrics + the #1861 install-refusal trio (= 13) + the #2315
 	// gre_decap_ecn_illegal_drops_total counter (= 15) + the #2317
 	// wg_decap_ecn_illegal_drops_total counter (= 16) + the #2331
 	// gre_encap_df_oversize_drops_total counter (= 17) + the #2782
@@ -2029,12 +2031,14 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// want 109, got 111 there.) #15249 adds the GRE transport-egress
 	// refusal counter, for 113. #16215 adds the SNAT-revoked-sessions
 	// counter, for 114. #16593 adds the frag-quota-refusals counter, for 115.
+	// #17218 adds the ipsec-inner no-route counter and #17123 adds the
+	// reinject-handler-panics counter, for 117.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 115 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 115 metrics, got %d", len(got))
+	if len(got) != 117 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 117 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -2112,9 +2116,6 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// taken" for a mutex every session delta passes through.
 	assertCounterClose(t, got, c.userspaceEventStreamProducerSeqLockAcquired, nil, 139)
 	assertCounterClose(t, got, c.userspaceEventStreamProducerSeqLockBlocked, nil, 149)
-	// #2244: dnat_table reverse-NAT publish-error counter emitted
-	// unconditionally.
-	assertCounterClose(t, got, c.userspaceDnatPublishErrors, nil, 7)
 	// #5674: synced-import aggregate admission-bound drop counter emitted
 	// unconditionally (a 0 is a real "no over-ceiling imports rejected" signal).
 	assertCounterClose(t, got, c.userspaceSyncedImportCapDrops, nil, 11)
@@ -2140,6 +2141,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceWorkerCommandQueueShed, nil, 55)
 	assertCounterClose(t, got, c.userspaceServerStatePoisonRecoveries, nil, 56)
 	assertCounterClose(t, got, c.userspaceServerHandlerPanics, nil, 57)
+	assertCounterClose(t, got, c.userspaceReinjectHandlerPanics, nil, 58)
 	// #7398: assert the VALUE, not merely that a series exists — a descriptor
 	// wired to the wrong status field emits a series too.
 	assertCounterClose(t, got, c.userspaceSessionInstallStaleIgnored, nil, 21)
@@ -2180,6 +2182,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceZoneGateNoGeneration, nil, 104)
 	assertCounterClose(t, got, c.userspaceIpsecInnerParseDrops, nil, 105)
 	assertCounterClose(t, got, c.userspaceIpsecInnerEcnIllegalDrops, nil, 106)
+	assertCounterClose(t, got, c.userspaceIpsecInnerNoroute, nil, 115)
 	assertCounterClose(t, got, c.userspaceIpsecInnerWorkerQueueFull, nil, 107)
 	assertCounterClose(t, got, c.userspaceIpsecInnerVerdictQueueFull, nil, 108)
 	assertCounterClose(t, got, c.userspaceIpsecInnerVerdictQueueContended, nil, 114)

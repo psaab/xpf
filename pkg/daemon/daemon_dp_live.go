@@ -129,8 +129,6 @@ type liveDataPlaneSurface interface {
 	ClearAllSessions() (v4 int, v6 int, err error)
 	DeleteSession(key dataplane.SessionKey) error
 	DeleteSessionV6(key dataplane.SessionKeyV6) error
-	DeleteDNATEntry(key dataplane.DNATKey) error
-	DeleteDNATEntryV6(key dataplane.DNATKeyV6) error
 
 	GetPersistentNAT() *dataplane.PersistentNATTable
 	GetMapStats() []dataplane.MapStats
@@ -510,22 +508,6 @@ func (a liveDataPlane) DeleteSessionV6(key dataplane.SessionKeyV6) error {
 		return err
 	}
 	return s.DeleteSessionV6(key)
-}
-
-func (a liveDataPlane) DeleteDNATEntry(key dataplane.DNATKey) error {
-	s, err := a.resolve()
-	if err != nil {
-		return err
-	}
-	return s.DeleteDNATEntry(key)
-}
-
-func (a liveDataPlane) DeleteDNATEntryV6(key dataplane.DNATKeyV6) error {
-	s, err := a.resolve()
-	if err != nil {
-		return err
-	}
-	return s.DeleteDNATEntryV6(key)
 }
 
 // GetPersistentNAT returns the CURRENTLY published backend's persistent

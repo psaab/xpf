@@ -23,7 +23,7 @@
 
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
 pub(super) fn run_session_housekeeping(
     mut sessions: &mut crate::session::SessionTable,
@@ -37,7 +37,6 @@ pub(super) fn run_session_housekeeping(
     session_map: crate::afxdp::bpf_map::SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
-    dnat_fds: &crate::afxdp::checksum::DnatTableFds,
     worker_id: u32,
     worker_command_queues: &crate::afxdp::types::WorkerCommandQueues,
     pptp_control: &crate::session::pptp_control::PptpControlInbox,
@@ -142,7 +141,6 @@ pub(super) fn run_session_housekeeping(
         session_map,
         conntrack_v4_fd,
         conntrack_v6_fd,
-        dnat_fds,
         worker_id,
         &peer_worker_commands,
         worker_command_queues,
@@ -329,7 +327,7 @@ pub(super) fn run_session_housekeeping(
 // #13075: the loop's `drain_and_flush_all!` macro as a fn (shared with
 // the export slice via the loop's closure). See the macro in mod.rs for
 // the #2669 unconditional-flush rationale.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn drain_and_flush_all_impl(
     sessions: &mut crate::session::SessionTable,
     bindings: &mut [BindingWorker],

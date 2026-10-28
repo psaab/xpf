@@ -196,6 +196,60 @@ func systemAAAWarningsOrError10831(systemNode *Node, lenient bool) ([]string, er
 	return warnings, nil
 }
 
+// ntpSpan17239 is one maximal connected run of `system ntp` statements a
+// normalisation can see: a single `ntp` child, or a sequence of sibling
+// `ntp` siblings merged under one span root. It records every address /
+// key-id the span named, so a later statement can ask whether the span's
+// FIRST occurrence carries an entity (the #8436 first-occurrence gate).
+type ntpSpan17239 struct {
+	servers map[string]struct{}
+	peers   map[string]struct{}
+	trusted map[int]struct{}
+}
+
+// note records a server/peer/trusted-key entity in the span.
+func (sp *ntpSpan17239) note(kind, val string, id int) {
+	if sp == nil {
+		return
+	}
+	switch kind {
+	case "server":
+		if sp.servers == nil {
+			sp.servers = map[string]struct{}{}
+		}
+		sp.servers[val] = struct{}{}
+	case "peer":
+		if sp.peers == nil {
+			sp.peers = map[string]struct{}{}
+		}
+		sp.peers[val] = struct{}{}
+	case "trusted-key":
+		if sp.trusted == nil {
+			sp.trusted = map[int]struct{}{}
+		}
+		sp.trusted[id] = struct{}{}
+	}
+}
+
+// has reports whether the span already recorded the entity.
+func (sp *ntpSpan17239) has(kind, val string, id int) bool {
+	if sp == nil {
+		return false
+	}
+	switch kind {
+	case "server":
+		_, ok := sp.servers[val]
+		return ok
+	case "peer":
+		_, ok := sp.peers[val]
+		return ok
+	case "trusted-key":
+		_, ok := sp.trusted[id]
+		return ok
+	}
+	return false
+}
+
 // syslogHostCoalesce9854 is the per-address merge record for the #9854
 // syslog host coalescing: the destination being built, which scalars have
 // been recorded (so an inherited value never overwrites an inline one),
@@ -323,154 +377,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 			// shapes.
 			sys.NameServers = append(sys.NameServers, firewallMatchValues(child)...)
 		case "ntp":
-			// #6690: read EVERY server a `server` node carries, not just
-			// Keys[1]. `system { ntp { server { a; b; } } }` puts one leaf
-			// child per server and leaves the node itself with Keys=["server"]
-			// only, so the old `len(Keys) >= 2` read compiled ZERO servers from
-			// it — a green commit with no time sync at all. The bracketed
-			// spelling `server [ a b ]` collapses onto Keys[1:] (#2419) and
-			// kept only the first.
-			//
-			// This is NOT firewallMatchValues: a `server` node's trailing
-			// tokens are ambiguous. `server 1.1.1.1 prefer;` and
-			// `server [ 1.1.1.1 2.2.2.2 ];` are structurally identical after
-			// the lexer strips the brackets, so the per-server OPTION keywords
-			// have to be recognised by name or `prefer` would be compiled as a
-			// second NTP server and rendered verbatim into a chrony directive
-			// (#4902 types the value for exactly that reason).
-			// #8436: a server named by TWO `server` statements is ONE server.
-			// Before this the address was appended again — rendering a
-			// duplicate chrony `server` directive — and its option entry was
-			// REPLACED, so `server 1.1.1.1 { key 5; }` followed by
-			// `server 1.1.1.1 { version 4; }` compiled to key 0. The flat-set
-			// spelling merges, which is the conservation property #8436 is
-			// about.
-			//
-			// THE DIFFERENT-ADDRESS CASE IS UNTOUCHED: both the dedupe and the
-			// option merge are keyed on the ADDRESS, so two statements naming
-			// different servers still produce two entries with their own
-			// options. That is the only shape this could get wrong, and it has
-			// its own control cell.
-			//
-			// It also has to survive the bracketed spelling. `server [ a b ]`
-			// collapses onto one node's Keys (#2419) and ntpServerValues
-			// returns BOTH addresses from that single node, so the dedupe runs
-			// per address rather than per node — a node-level check would
-			// have discarded the second address of a bracket list.
-			for _, ntpChild := range child.FindChildren("server") {
-				ntpServers, ntpOpts := ntpServerValues(ntpChild)
-				for _, addr := range ntpServers {
-					if !ntpServerListed(sys.NTPServers, addr) {
-						sys.NTPServers = append(sys.NTPServers, addr)
-					}
-				}
-				for addr, opt := range ntpOpts {
-					if sys.NTPServerOptions == nil {
-						sys.NTPServerOptions = map[string]NTPServerOption{}
-					}
-					sys.NTPServerOptions[addr] = mergeNTPServerOption(
-						sys.NTPServerOptions[addr], opt)
-				}
-			}
-			// #14596: strip per-server `key <id>` into NTPServerKeyIDs.
-			// xpf writes no chrony keyfile, so leaving the id on the
-			// option would render chrony `key <id>` with no key material
-			// behind it and chronyd would never poll the source. The
-			// warning naming each id is emitted by
-			// systemInertKnobWarnings from NTPServerKeyIDs.
-			for addr, opt := range sys.NTPServerOptions {
-				if opt.Key <= 0 {
-					continue
-				}
-				found := false
-				for _, id := range sys.NTPServerKeyIDs {
-					if id == opt.Key {
-						found = true
-						break
-					}
-				}
-				if !found {
-					sys.NTPServerKeyIDs = append(sys.NTPServerKeyIDs, opt.Key)
-				}
-				opt.Key = 0
-				sys.NTPServerOptions[addr] = opt
-			}
-			sort.Ints(sys.NTPServerKeyIDs)
-			// #15709: peers compile like servers but to NTPPeers, rendered
-			// as chrony `peer` directives. Packed tails (`ntp peer X
-			// prefer;`) ride Keys, expanded via ntpSourceValues.
-			ntpChildren15709 := hoistAndSplitRun8939(packedBodyChildren(child, refSystemNTP.resolve()), refSystemNTP.resolve())
-			for _, peerChild := range ntpChildren15709 {
-				if peerChild.Name() != "peer" {
-					continue
-				}
-				peers, peerOpts := ntpSourceValues(peerChild, "peer")
-				for _, addr := range peers {
-					if !ntpServerListed(sys.NTPPeers, addr) {
-						sys.NTPPeers = append(sys.NTPPeers, addr)
-					}
-				}
-				for addr, opt := range peerOpts {
-					if sys.NTPPeerOptions == nil {
-						sys.NTPPeerOptions = map[string]NTPServerOption{}
-					}
-					sys.NTPPeerOptions[addr] = mergeNTPServerOption(sys.NTPPeerOptions[addr], opt)
-				}
-			}
-			// Strip peer keys like server keys (#14596 belt).
-			for addr, opt := range sys.NTPPeerOptions {
-				if opt.Key <= 0 {
-					continue
-				}
-				found := false
-				for _, id := range sys.NTPServerKeyIDs {
-					if id == opt.Key {
-						found = true
-						break
-					}
-				}
-				if !found {
-					sys.NTPServerKeyIDs = append(sys.NTPServerKeyIDs, opt.Key)
-				}
-				opt.Key = 0
-				sys.NTPPeerOptions[addr] = opt
-			}
-			sort.Ints(sys.NTPServerKeyIDs)
-			for _, tk := range child.FindChildren("trusted-key") {
-				for _, v := range firewallMatchValues(tk) {
-					if id, err := strconv.Atoi(v); err == nil && id > 0 {
-						found := false
-						for _, e := range sys.NTPTrustedKeyIDs {
-							if e == id {
-								found = true
-								break
-							}
-						}
-						if !found {
-							sys.NTPTrustedKeyIDs = append(sys.NTPTrustedKeyIDs, id)
-						}
-					}
-				}
-			}
-			sort.Ints(sys.NTPTrustedKeyIDs)
-			if thNode := child.FindChild("threshold"); thNode != nil {
-				if v := nodeVal(thNode); v != "" {
-					if n, ok := parseIntLeaf(&cfg.Warnings, "system ntp threshold", v); ok {
-						sys.NTPThreshold = n
-					}
-				}
-				// Check for inline: threshold 400 action accept;
-				for i := 2; i < len(thNode.Keys)-1; i++ {
-					if thNode.Keys[i] == "action" {
-						sys.NTPThresholdAction = thNode.Keys[i+1]
-					}
-				}
-				// Check for hierarchical: threshold 400 { action accept; } — the
-				// value rides the action CHILD's Keys, not a block under it.
-				if actNode := thNode.FindChild("action"); actNode != nil {
-					sys.NTPThresholdAction = nodeVal(actNode)
-				}
-			}
+			compileSystemNTP(child, sys, cfg)
 		case "login":
 			// #6957: allocate ONCE. This arm runs per `login` child, and two
 			// sibling `login { … }` blocks under one `system` are legal Junos —
@@ -2691,6 +2598,262 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 // shape that static `route next-hop` already uses. The table was a second source
 // of truth for the same grammar, and every future leaf in this shape would have
 // grown its own copy.
+
+// compileSystemNTP compiles the `system ntp` arm (#17239).
+//
+// Every reader of the arm iterates ONE normalised statement list:
+// `hoistAndSplitRun8939(packedBodyChildren(child, refSystemNTP.resolve()),
+// refSystemNTP.resolve())`. `packedBodyChildren` expands the compact
+// spelling (`ntp boot-server X server Y;`, packed onto the `ntp` node's
+// Keys), and `hoistAndSplitRun8939` lifts a statement nested under the
+// previous link of a flat-set / braced chain (`[ntp] > [boot-server X] >
+// [server Y]`, and the packed-tail variant `[server Y trusted-key 7
+// threshold 400]`) back to sibling position and splits packed tails.
+//
+// #17239: before this extraction only the `peer` reader (#15709) used that
+// list; `server`, `trusted-key` and `threshold` walked raw
+// `child.FindChildren` / `child.FindChild`, which see only DIRECT children.
+// A chain headed by `boot-server` therefore compiled NO server, trusted key
+// or threshold — silently, on a strict-clean commit, the only diagnostic
+// blaming the inert `boot-server` knob — while the `peer` in the same chain
+// compiled. The single switch below is the acceptance invariant: no
+// `FindChild*` walk of the raw `child` remains in this function, so a future
+// reader cannot re-diverge by choosing the other enumeration.
+func compileSystemNTP(child *Node, sys *SystemConfig, cfg *Config) {
+	// #6690: read EVERY server a `server` node carries, not just Keys[1].
+	// `system { ntp { server { a; b; } } }` puts one leaf child per server
+	// and leaves the node itself with Keys=["server"] only, so the old
+	// `len(Keys) >= 2` read compiled ZERO servers from it — a green commit
+	// with no time sync at all. The bracketed spelling
+	// `server [ a b ]` collapses onto Keys[1:] (#2419) and kept only the
+	// first.
+	//
+	// This is NOT firewallMatchValues: a `server` node's trailing tokens are
+	// ambiguous. `server 1.1.1.1 prefer;` and `server [ 1.1.1.1 2.2.2.2 ];`
+	// are structurally identical after the lexer strips the brackets, so the
+	// per-server OPTION keywords have to be recognised by name or `prefer`
+	// would be compiled as a second NTP server and rendered verbatim into a
+	// chrony directive (#4902 types the value for exactly that reason).
+	// #8436: a server named by TWO `server` statements is ONE server. Before
+	// this the address was appended again — rendering a duplicate chrony
+	// `server` directive — and its option entry was REPLACED, so
+	// `server 1.1.1.1 { key 5; }` followed by `server 1.1.1.1 { version 4; }`
+	// compiled to key 0. The flat-set spelling merges, which is the
+	// conservation property #8436 is about.
+	//
+	// THE DIFFERENT-ADDRESS CASE IS UNTOUCHED: both the dedupe and the option
+	// merge are keyed on the ADDRESS, so two statements naming different
+	// servers still produce two entries with their own options. That is the
+	// only shape this could get wrong, and it has its own control cell.
+	//
+	// It also has to survive the bracketed spelling. `server [ a b ]` collapses
+	// onto one node's Keys (#2419) and ntpServerValues returns BOTH addresses
+	// from that single node, so the dedupe runs per address rather than per
+	// node — a node-level check would have discarded the second address of a
+	// bracket list.
+	// Normalisation yields a connected run of statements, but a `multi`
+	// source statement (`server`, `peer`) can still carry its FOLLOWERS
+	// packed onto its own Keys: hoistAndSplitRun8939 / expandFlatRun refuse
+	// to cut a multi leaf's value run (#2419), so e.g. the compact
+	// `ntp server 1.1.1.1 peer 2.2.2.2;` arrives as ONE `server` node whose
+	// Keys pack the peer. A server node's trailing tokens are ambiguous (a
+	// bracket list reads exactly like trailing statements), and the
+	// pre-#17239 raw reader projected the same extra "servers" (see #4902 /
+	// `ntpServerValues`), so this tail is NOT promoted to statements. Only a
+	// chain link nested as a CHILD — the flat-set / braced chain shape, e.g.
+	// `boot-server` heading the run — is unambiguous, and that is the chain
+	// this span covers.
+	stmts := hoistAndSplitRun8939(packedBodyChildren(child, refSystemNTP.resolve()), refSystemNTP.resolve())
+	// Fresh-per-statement gate (not a span spanning statements): a
+	// `server`/`peer` statement is never gated against an unrelated
+	// earlier statement — each gets a fresh span — while consecutive
+	// non-`multi` statements (a hoisted chain link such as `boot-server`
+	// or `threshold`) share one group span. The per-call threshold
+	// (first `threshold` in this call wins) is unaffected. Within ONE
+	// statement, first-occurrence is computed ONCE per distinct address
+	// from the span state BEFORE the statement is noted, so a duplicate
+	// address inside one bracket list
+	// (`server [ 1.1.1.1 1.1.1.1 ] prefer;`) cannot overwrite its own
+	// first-occurrence flag and silently drop its options.
+	var groupSpan *ntpSpan17239
+	var thresholdNode *Node
+	for _, s := range stmts {
+		if s == nil {
+			continue
+		}
+		var grp *ntpSpan17239
+		if s.Name() == "server" || s.Name() == "peer" {
+			grp = &ntpSpan17239{}
+			groupSpan = nil
+		} else {
+			if groupSpan == nil {
+				groupSpan = &ntpSpan17239{}
+			}
+			grp = groupSpan
+		}
+		switch s.Name() {
+		case "server":
+			ntpServers, ntpOpts := ntpServerValues(s)
+			// Compute first-occurrence ONCE per distinct address from
+			// the pre-statement span state, THEN note every address:
+			// noting inside the loop lets a duplicate address in one
+			// statement overwrite its own flag false, skipping the
+			// option merge below and dropping prefer/key/version.
+			firstInSpan := make(map[string]bool, len(ntpServers))
+			for _, addr := range ntpServers {
+				if _, done := firstInSpan[addr]; !done {
+					firstInSpan[addr] = !grp.has("server", addr, 0)
+				}
+			}
+			for _, addr := range ntpServers {
+				grp.note("server", addr, 0)
+			}
+			for _, addr := range ntpServers {
+				if !ntpServerListed(sys.NTPServers, addr) {
+					sys.NTPServers = append(sys.NTPServers, addr)
+				}
+			}
+			for addr, opt := range ntpOpts {
+				if sys.NTPServerOptions == nil {
+					sys.NTPServerOptions = map[string]NTPServerOption{}
+				}
+				// #8436 first-occurrence gate: within one span only the
+				// FIRST statement naming an address contributes/merges its
+				// options; a later same-address statement in the same span
+				// is a spelling artefact, not a second configuration.
+				if !firstInSpan[addr] {
+					continue
+				}
+				sys.NTPServerOptions[addr] = mergeNTPServerOption(
+					sys.NTPServerOptions[addr], opt)
+			}
+		case "peer":
+			// #15709: peers compile like servers but to NTPPeers, rendered
+			// as chrony `peer` directives. Packed tails (`ntp peer X
+			// prefer;`) ride Keys, expanded via ntpSourceValues.
+			peers, peerOpts := ntpSourceValues(s, "peer")
+			// Same once-per-distinct-address computation as the server
+			// arm above: duplicates in one statement must not overwrite
+			// their own first-occurrence flag.
+			firstInSpan := make(map[string]bool, len(peers))
+			for _, addr := range peers {
+				if _, done := firstInSpan[addr]; !done {
+					firstInSpan[addr] = !grp.has("peer", addr, 0)
+				}
+			}
+			for _, addr := range peers {
+				grp.note("peer", addr, 0)
+			}
+			for _, addr := range peers {
+				if !ntpServerListed(sys.NTPPeers, addr) {
+					sys.NTPPeers = append(sys.NTPPeers, addr)
+				}
+			}
+			for addr, opt := range peerOpts {
+				if sys.NTPPeerOptions == nil {
+					sys.NTPPeerOptions = map[string]NTPServerOption{}
+				}
+				if !firstInSpan[addr] {
+					continue
+				}
+				sys.NTPPeerOptions[addr] = mergeNTPServerOption(sys.NTPPeerOptions[addr], opt)
+			}
+		case "trusted-key":
+			for _, v := range firewallMatchValues(s) {
+				if id, err := strconv.Atoi(v); err == nil && id > 0 {
+					grp.note("trusted-key", "", id)
+					found := false
+					for _, e := range sys.NTPTrustedKeyIDs {
+						if e == id {
+							found = true
+							break
+						}
+					}
+					if !found {
+						sys.NTPTrustedKeyIDs = append(sys.NTPTrustedKeyIDs, id)
+					}
+				}
+			}
+		case "threshold":
+			// Preserve the raw reader's FIRST-occurrence semantics: the
+			// pre-#17239 reader used FindChild (first match only).
+			if thresholdNode == nil {
+				thresholdNode = s
+			}
+		}
+	}
+	// #14596: strip per-server `key <id>` into NTPServerKeyIDs. xpf writes
+	// no chrony keyfile, so leaving the id on the option would render chrony
+	// `key <id>` with no key material behind it and chronyd would never poll
+	// the source. The warning naming each id is emitted by
+	// systemInertKnobWarnings from NTPServerKeyIDs.
+	for addr, opt := range sys.NTPServerOptions {
+		if opt.Key <= 0 {
+			continue
+		}
+		found := false
+		for _, id := range sys.NTPServerKeyIDs {
+			if id == opt.Key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sys.NTPServerKeyIDs = append(sys.NTPServerKeyIDs, opt.Key)
+		}
+		opt.Key = 0
+		sys.NTPServerOptions[addr] = opt
+	}
+	sort.Ints(sys.NTPServerKeyIDs)
+	// Strip peer keys like server keys (#14596 belt).
+	for addr, opt := range sys.NTPPeerOptions {
+		if opt.Key <= 0 {
+			continue
+		}
+		found := false
+		for _, id := range sys.NTPServerKeyIDs {
+			if id == opt.Key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			sys.NTPServerKeyIDs = append(sys.NTPServerKeyIDs, opt.Key)
+		}
+		opt.Key = 0
+		sys.NTPPeerOptions[addr] = opt
+	}
+	sort.Ints(sys.NTPServerKeyIDs)
+	sort.Ints(sys.NTPTrustedKeyIDs)
+	if thresholdNode != nil {
+		if v := nodeVal(thresholdNode); v != "" {
+			// cfg is nil on some direct compileSystem call paths; guard
+			// before dereferencing cfg.Warnings (parseIntLeaf tolerates
+			// a nil warnings pointer).
+			var warnings *[]string
+			if cfg != nil {
+				warnings = &cfg.Warnings
+			}
+			if n, ok := parseIntLeaf(warnings, "system ntp threshold", v); ok {
+				sys.NTPThreshold = n
+			}
+		}
+		// Check for inline: threshold 400 action accept;
+		for i := 2; i < len(thresholdNode.Keys)-1; i++ {
+			if thresholdNode.Keys[i] == "action" {
+				sys.NTPThresholdAction = thresholdNode.Keys[i+1]
+			}
+		}
+		// Check for hierarchical: threshold 400 { action accept; } — the
+		// value rides the action CHILD's Keys, not a block under it. The
+		// child walk is on the (already normalised) threshold statement,
+		// not on the raw `ntp` node.
+		if actNode := thresholdNode.FindChild("action"); actNode != nil {
+			sys.NTPThresholdAction = nodeVal(actNode)
+		}
+	}
+}
+
 func ntpServerModifierNames() map[string]int {
 	return ntpSourceModifierNames("server")
 }

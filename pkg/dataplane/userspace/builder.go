@@ -593,8 +593,6 @@ func userspaceMapPins() UserspaceMapPins {
 		Sessions:    dataplane.UserspaceSessionsPinPath(),
 		ConntrackV4: dataplane.ConntrackV4PinPath(),
 		ConntrackV6: dataplane.ConntrackV6PinPath(),
-		DnatTable:   dataplane.UserspaceDnatTablePinPath(),
-		DnatTableV6: dataplane.UserspaceDnatTableV6PinPath(),
 		Trace:       dataplane.UserspaceTracePinPath(),
 	}
 }

@@ -706,7 +706,7 @@ fn nptv6_source_still_valid(
 /// Static and dynamic SNAT can produce identical tuples, so equality of the
 /// translated address alone is not enough to carry authorization across a
 /// config generation.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn source_nat_translation_still_valid(
     forwarding: &ForwardingState,
     decision: &SessionDecision,
@@ -907,7 +907,7 @@ fn source_nat_translation_still_valid(
 /// drops this packet without claiming ownership of the peer's session.
 /// A transient translated alias may use the resolver's identity-checked
 /// original tuple; without that proof it remains checked against the wire key.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn source_nat_revocation_on_session_hit(
     forwarding: &ForwardingState,
     sessions: &mut SessionTable,
@@ -991,7 +991,7 @@ fn selector_provenance_absent(
         )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     forwarding: &ForwardingState,
     sessions: &mut SessionTable,
@@ -2146,7 +2146,6 @@ pub(super) fn tun_origin_reverse(metadata: &SessionMetadata, origin: SessionOrig
 /// locally). A local hit DECIDES (a non-marker local forward fails closed
 /// without consulting shared — local shadows). Lone reverse (no forward
 /// anywhere) fails closed, per the #9604 lone-reverse philosophy.
-
 /// Callers keep the lo0 packet filter, TTL, and input-filter gates: only the
 /// two NEW-session gates (host-inbound admission, junos-host policy) are
 /// skipped, matching Junos (self-originated + solicited replies run no

@@ -1791,8 +1791,6 @@ type UserspaceMapPins struct {
 	Sessions    string `json:"sessions,omitempty"`
 	ConntrackV4 string `json:"conntrack_v4,omitempty"`
 	ConntrackV6 string `json:"conntrack_v6,omitempty"`
-	DnatTable   string `json:"dnat_table,omitempty"`
-	DnatTableV6 string `json:"dnat_table_v6,omitempty"`
 	Trace       string `json:"trace,omitempty"`
 }
 
