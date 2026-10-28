@@ -471,11 +471,11 @@ func (c *ctl) dispatchConfig(line string) error {
 		// `in"` and the server looked up a path that does not exist
 		// (fail-closed: not found), and comment words leaked into the
 		// lookup path. A quoted "|" stays data, not a pipe.
-		showArgs, showOK := lexConfigShowArgs16790(line)
+		showArgs, showQuoted, showOK := lexConfigShowArgs16790(line)
 		if !showOK {
 			return fmt.Errorf("show: invalid path")
 		}
-		return c.handleConfigShow(showArgs)
+		return c.handleConfigShow(showArgs, showQuoted)
 
 	case "commit":
 		return c.handleCommit(parts[1:])
@@ -618,31 +618,24 @@ func rawRemainderAfterVerb(line, verb string) string {
 }
 
 // lexConfigShowArgs16790 lexes a full config-mode `show ...` line into
-// the argument list handleConfigShow consumes (#16790). Path tokens come
-// from the canonical config lexer (config.ParseConfigMutationLine):
-// quoted elements are unquoted to single tokens and comments are skipped,
-// exactly as the console adjudicates. The config lexer itself rejects a
-// bare pipe (TokenPipe is not an identifier/string), so the pipe and its
-// modifier are recovered from the raw remainder after the lexed path: a
-// remainder starting with "|" is the pipe modifier tokens (Fields is safe
-// there — modifiers are bare keywords/numbers), and a quoted "|" inside
-// the path was already consumed as a string token, so it never reaches
-// the remainder. ok is false when the line does not lex cleanly (including
-// a quoted "show" verb, mirroring ParseTopUpPrefix15082), so the caller
-// refuses instead of sending a Fields path nobody lexed.
-func lexConfigShowArgs16790(line string) ([]string, bool) {
-	tokens, _, ok := config.ParseConfigMutationLine(line)
+// argument values and their quote provenance (#16790, #17809). Quoted
+// elements are unquoted to single tokens and comments are skipped, exactly
+// as the console adjudicates. The strict config lexer rejects a bare pipe,
+// so the fallback recovers the pipe modifier and its tokens from the raw
+// remainder; the pipe operator is explicitly marked unquoted.
+func lexConfigShowArgs16790(line string) ([]string, []bool, bool) {
+	tokens, quoted, ok := config.ParseConfigMutationLine(line)
 	if ok {
 		if len(tokens) == 0 || tokens[0] != "show" {
-			return nil, false
+			return nil, nil, false
 		}
-		return tokens[1:], true
+		return tokens[1:], quoted[1:], true
 	}
 	// The strict lexer stops at a bare pipe; re-lex just the path head
-	// before the first unquoted pipe. Find that pipe by scanning with
-	// the lexer: tokens up to TokenPipe are the path.
+	// before that unquoted pipe. Tokens carry their lexer quote provenance.
 	lex := config.NewLexer(line)
 	var path []string
+	var pathQuoted []bool
 	sawShow := false
 	for {
 		tok := lex.Next()
@@ -650,26 +643,31 @@ func lexConfigShowArgs16790(line string) ([]string, bool) {
 		case config.TokenIdentifier, config.TokenString:
 			if !sawShow {
 				if tok.Type == config.TokenString || tok.Value != "show" {
-					return nil, false
+					return nil, nil, false
 				}
 				sawShow = true
 				continue
 			}
 			path = append(path, tok.Value)
+			pathQuoted = append(pathQuoted, tok.Type == config.TokenString)
 		case config.TokenPipe:
 			if !sawShow {
-				return nil, false
+				return nil, nil, false
 			}
+			args := append(append([]string{}, path...), "|")
+			argQuoted := append(append([]bool{}, pathQuoted...), false)
 			rest := strings.TrimSpace(line[lex.Position():])
 			if rest == "" {
 				// Trailing pipe: let handleConfigShow report the
 				// missing modifier.
-				return append(path, "|"), true
+				return args, argQuoted, true
 			}
-			args := append(append([]string{}, path...), "|")
-			return append(args, strings.Fields(rest)...), true
+			modifiers := strings.Fields(rest)
+			args = append(args, modifiers...)
+			argQuoted = append(argQuoted, make([]bool, len(modifiers))...)
+			return args, argQuoted, true
 		default:
-			return nil, false
+			return nil, nil, false
 		}
 	}
 }
