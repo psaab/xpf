@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"reflect"
 	"strconv"
@@ -1490,33 +1489,17 @@ type Daemon struct {
 	// production; reconcileRGStatePass calls the real reconcileRGState.
 	reconcileTickHook func()
 
-	// Fabric cross-chassis forwarding state for periodic refresh.
-	fabricMu         sync.RWMutex
-	fabricIface      string // physical parent (XDP attachment point)
-	fabricOverlay    string // IPVLAN overlay for neighbor resolution (#129)
-	fabricPeerIP     net.IP
-	fabricIface1     string // secondary fabric parent
-	fabricOverlay1   string // secondary fabric overlay (#129)
-	fabricPeerIP1    net.IP // secondary fabric peer IP
-	fabricPopulated  bool   // true after first successful fab0 write
-	fabric1Populated bool   // true after first successful fab1 write
-	// fabricPeerMAC / fabricPeerMAC1 cache the last peer MAC that was learned
-	// from an ADDRESS-MATCHED neighbour entry for the configured fabric peer
-	// (#6554). They are the identity the IPv6-NDP link-local fallback is
-	// constrained to: only a neighbour bearing this MAC may be accepted when
-	// the peer's fabric address itself does not resolve. Written only by an
-	// address-matched resolution (never by the fallback itself, which would
-	// let a bad guess self-confirm) and cleared when the configured peer
-	// address changes, so a re-pointed fabric cannot be pinned to the old
-	// peer's MAC.
-	fabricPeerMAC    net.HardwareAddr
-	fabricPeerMAC1   net.HardwareAddr
-	fabricRefreshCh  chan struct{} // wakes the fab0 populateFabricFwd loop
-	fabricRefreshCh1 chan struct{} // wakes the fab1 populateFabricFwd1 loop (#4038)
-	lastFabricProbe  time.Time     // rate-limit active fab0 neighbor probes
-	lastFabricProbe1 time.Time     // rate-limit active fab1 neighbor probes
-	lastFabricLog0   time.Time     // rate-limit fab0 refresh failure logs
-	lastFabricLog1   time.Time     // rate-limit fab1 refresh failure logs
+	// Fabric cross-chassis forwarding state for periodic refresh (#17040):
+	// the two fabric slots (fab0/fab1) are one parameterized state, not
+	// hand-mirrored field pairs — fab1 drifted into real defects twice
+	// (#15683, #15918) while the copies were maintained by hand.
+	fabricMu sync.RWMutex
+	// fabricSlots holds both slots under fabricMu, EXCEPT refreshCh,
+	// which is guarded by clusterCommsMu exactly as the former
+	// per-slot refresh-channel fields were (#4958): the
+	// constructor publishes it and stopClusterComms nils it under that
+	// lock, while populate loops receive their channel by value.
+	fabricSlots [2]fabricSlot
 
 	// vipWarnedIfaces tracks interfaces that already emitted a
 	// "directAddVIPs: interface not found" warning to avoid log spam
@@ -1625,7 +1608,7 @@ type Daemon struct {
 
 	// clusterCommsMu guards the cluster-comms epoch state that is published
 	// asynchronously by the startClusterComms constructor goroutine and torn
-	// down by stopClusterComms: sessionSync, fabricRefreshCh/fabricRefreshCh1,
+	// down by stopClusterComms: sessionSync, the fabric slots' refreshCh channels,
 	// clusterCommsCtx/clusterCommsCancel, clusterCommsGen (#4958), and
 	// activeClusterTransport, which joined the epoch in #6290. Before
 	// #4958 the constructor wrote sessionSync (and re-dereferenced it) and the
@@ -2314,6 +2297,7 @@ func New(opts Options) (*Daemon, error) {
 		opts:                       opts,
 		startTime:                  time.Now(),
 		store:                      store,
+		fabricSlots:                [2]fabricSlot{{name: "fabric"}, {name: "fabric1"}},
 		arpResponders:              newProxyARPResponders(),
 		rgStates:                   make(map[int]*rgStateMachine),
 		blackholeRoutes:            make(map[int][]netlink.Route),

@@ -189,7 +189,7 @@ var schemaRoutingOptions = &schemaNode{desc: "Routing options", children: map[st
 var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[string]*schemaNode{
 	"prefix-list": {desc: "Prefix list", args: 1, placeholder: "<name>", keyValidator: ValidateFRRPrefixListName, children: nil},
 	"community": {desc: "Community", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, closedWorld: true, children: map[string]*schemaNode{
-		"members": {desc: "Community members", args: 1, multi: true, placeholder: "<community>", children: nil},
+		"members": {desc: "Community members", args: 1, multi: true, placeholder: "<community>", refuseNonLeafBlockChildren: true, children: nil},
 	}},
 	"as-path": {desc: "AS path", args: 2, multi: true, placeholder: "<name>", keyValidatorPos: ValidateASPathNameArg, children: nil},
 	"policy-statement": {desc: "Policy statement", args: 1, placeholder: "<name>", keyValidator: ValidateFRRObjectName, children: map[string]*schemaNode{
@@ -276,7 +276,7 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 				// `community 65000:100`); the compiler interprets the first
 				// token as the operation when it is add/delete/set/none and
 				// otherwise treats it as a bare replace value (#2848).
-				"community": {desc: "Community (add | delete | set | none | <value>)", args: 1, multi: true, groupReplace: true, placeholder: "<add|delete|set|none|community>", children: nil},
+				"community": {desc: "Community (add | delete | set | none | <value>)", args: 1, multi: true, groupReplace: true, placeholder: "<add|delete|set|none|community>", refuseNonLeafBlockChildren: true, children: nil},
 				// `then as-path-prepend "<asn> <asn> ..."` prepends the listed
 				// ASNs to the advertised AS_PATH (FRR `set as-path prepend`).
 				// multi:true so a quoted "65001 65001" or bracketed
@@ -288,7 +288,7 @@ var schemaPolicyOptions = &schemaNode{desc: "Policy options", children: map[stri
 					valueType: ValueInteger, valueDesc: "ASN (1..4294967295; decimal digits)",
 					valueExamples: []string{"65001", "4294967295"},
 					validator:     ValidatePolicyASPathPrependASN, placeholder: "<asn>",
-					allChildKeysAreValues: true, children: nil,
+					allChildKeysAreValues: true, refuseNonLeafBlockChildren: true, children: nil,
 				},
 				// #4919: type `then origin` as an enum. Without a validator a
 				// non-control invalid token (e.g. `igpp`) passed the #4498
@@ -387,7 +387,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		// OSPFConfig.Disable; FRR renders no `router ospf`) so the
 		// statement stops drawing the #10707 open-world advisory.
 		"disable": {desc: "Disable OSPF", children: nil},
-		"export":  {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+		"export":  {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
 		"area": {desc: "OSPF area", args: 1, placeholder: "<area-id>", keyValidator: ValidateOSPFArea, children: map[string]*schemaNode{
 			"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
 				"passive":    {desc: "Passive interface", children: nil},
@@ -462,7 +462,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 	}},
 	"ospf3": {desc: "OSPFv3 configuration", children: map[string]*schemaNode{
 		"router-id": {desc: "Router ID", args: 1, placeholder: "<address>", children: nil},
-		"export":    {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+		"export":    {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
 		// #16572: whole-protocol shut (OSPFv3Config.Disable).
 		"disable": {desc: "Disable OSPFv3", children: nil},
 		"area": {desc: "OSPFv3 area", args: 1, placeholder: "<area-id>", keyValidator: ValidateOSPFArea, children: map[string]*schemaNode{
@@ -530,8 +530,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			"suppress":     {desc: "Suppress threshold", args: 1, valueType: ValueInteger, placeholder: "<value>", validator: ValidateInteger(1, 20000), children: nil},
 			"max-suppress": {desc: "Max suppress time (minutes)", args: 1, valueType: ValueInteger, placeholder: "<minutes>", validator: ValidateInteger(1, 255), children: nil},
 		}},
-		"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-		"import": {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+		"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
+		"import": {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
 		"group": {desc: "BGP group", args: 1, placeholder: "<group-name>", children: map[string]*schemaNode{
 			"type":          {desc: "BGP group type (internal | external)", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "BGP group type (internal | external)", valueExamples: []string{"internal", "external"}, validator: ValidateBGPGroupType, children: nil},
 			"peer-as":       {desc: "Peer AS number", args: 1, valueType: ValueInteger, placeholder: "<as-number>", validator: ValidateInteger(1, 4294967295), children: nil},
@@ -544,8 +544,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			"disable":                  {desc: "Disable this BGP group", children: nil},
 			"description":              {desc: "Description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 			"multihop":                 bgpMultihopSchema16679(),
-			"export":                   {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-			"import":                   {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+			"export":                   {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
+			"import":                   {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
 			"authentication-key":       {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
 			"authentication-key-chain": unmodeledBGPKeychainLeaf(),
 			"authentication-algorithm": unmodeledBGPAuthAlgorithmLeaf(),
@@ -589,8 +589,8 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 				// #16572: neighbor-level shut (BGPNeighbor.Disable).
 				"disable":                  {desc: "Disable this BGP neighbor", children: nil},
 				"multihop":                 bgpMultihopSchema16679(),
-				"export":                   {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
-				"import":                   {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+				"export":                   {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
+				"import":                   {desc: "Import policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
 				"authentication-key":       {desc: "Authentication key", args: 1, placeholder: "<key>", children: nil},
 				"authentication-key-chain": unmodeledBGPKeychainLeaf(),
 				"authentication-algorithm": unmodeledBGPAuthAlgorithmLeaf(),
@@ -668,9 +668,9 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			"neighbor": {desc: "Neighbor interface in this group", args: 1, multi: true,
 				valueHint: ValueHintInterfaceName, placeholder: "<interface-name>",
 				valueType: ValueInterfaceName, valueDesc: "interface name (ge-0/0/0, reth0.50, st0.1)",
-				validator: ValidateRIPNeighborInterface, children: nil},
+				validator: ValidateRIPNeighborInterface, refuseNonLeafBlockChildren: true, children: nil},
 			"export": {desc: "Protocols redistributed into this group", args: 1, multi: true,
-				placeholder: "<protocol>", children: nil},
+				placeholder: "<protocol>", refuseNonLeafBlockChildren: true, children: nil},
 		}},
 		// multi (#3904): `neighbor`/`passive-interface`/`redistribute
 		// [ a b ]` bracket lists collapse onto the leaf's Keys[1:] instead
@@ -678,9 +678,9 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		// compiler (compiler_protocols.go RIP block) reads every value via
 		// firewallMatchValues; the pre-#3904 Keys[1]-only read truncated to
 		// the first entry.
-		"neighbor":          {desc: "Neighbor", args: 1, multi: true, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: nil},
-		"passive-interface": {desc: "Passive interface", args: 1, multi: true, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: nil},
-		"redistribute":      {desc: "Redistribute", args: 1, multi: true, placeholder: "<protocol>", children: nil},
+		"neighbor":          {desc: "Neighbor", args: 1, multi: true, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", refuseNonLeafBlockChildren: true, children: nil},
+		"passive-interface": {desc: "Passive interface", args: 1, multi: true, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", refuseNonLeafBlockChildren: true, children: nil},
+		"redistribute":      {desc: "Redistribute", args: 1, multi: true, placeholder: "<protocol>", refuseNonLeafBlockChildren: true, children: nil},
 		"authentication-key": {desc: "Authentication key (1..16 characters)", args: 1, placeholder: "<key>",
 			valueType: ValueIdentifier, valueDesc: "RIP authentication key (1..16 characters; FRR ripd maximum)",
 			validator: ValidateRIPAuthKeyLength, children: nil},
@@ -703,7 +703,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 		"is-type": {desc: "IS type (alias of level)", args: 1, placeholder: "<type>",
 			valueType: ValueEnumOf, valueDesc: "IS-IS level",
 			valueExamples: ISISLevelSpellings(), validator: ValidateISISLevel, children: nil},
-		"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", children: nil},
+		"export": {desc: "Export policy", args: 1, multi: true, placeholder: "<policy-name>", refuseNonLeafBlockChildren: true, children: nil},
 		// #16572: whole-protocol shut (ISISConfig.Disable).
 		"disable": {desc: "Disable IS-IS", children: nil},
 		"interface": {desc: "Interface", args: 1, valueHint: ValueHintInterfaceName, placeholder: "<interface-name>", children: map[string]*schemaNode{
@@ -807,7 +807,7 @@ var schemaProtocols = &schemaNode{desc: "Protocols configuration", children: map
 			// literal at commit.
 			"dns-server-address": {desc: "RDNSS DNS server address advertised to hosts", args: 1, multi: true, placeholder: "<address>",
 				valueType: ValueIPAddress, valueDesc: "RDNSS server (IPv6 literal, RFC 8106)",
-				valueExamples: []string{"2001:db8::53"}, validator: ValidateIPv6Address, children: nil},
+				valueExamples: []string{"2001:db8::53"}, validator: ValidateIPv6Address, refuseNonLeafBlockChildren: true, children: nil},
 			// #2497: a preference typo (case drift, "mdeium") falls through the
 			// RA sender's switch default and silently advertises Medium,
 			// perturbing host default-router selection on a multi-router LAN.
@@ -1204,7 +1204,7 @@ var schemaRoutingInstances = &schemaNode{desc: "Routing instance configuration",
 		"route-distinguisher": {desc: "VRF route distinguisher (accepted; xpf compiles no BGP/MPLS VPN state from it)", args: 1, nodeValidator: validateRoutingInstanceRouteDistinguisherNode9736, placeholder: "<rd>", children: nil},
 
 		"instance-type": {desc: "Routing instance type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "Routing instance type (forwarding | virtual-router | vrf)", valueExamples: []string{"forwarding", "virtual-router", "vrf"}, validator: ValidateRoutingInstanceType9814, children: nil},
-		"interface":     {desc: "Interfaces bound to this routing instance", args: 1, multi: true, placeholder: "<interface>", children: nil},
+		"interface":     {desc: "Interfaces bound to this routing instance", args: 1, multi: true, placeholder: "<interface>", refuseNonLeafBlockChildren: true, children: nil},
 		// #15065: the per-instance routing-options grammar IS the global one
 		// for every field the compiler carries into the instance — the same
 		// compileRoutingOptions reads both, and compileRoutingInstances

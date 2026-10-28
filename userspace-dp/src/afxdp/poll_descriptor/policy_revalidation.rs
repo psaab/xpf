@@ -231,7 +231,6 @@ use super::*;
 use crate::afxdp::FastMap;
 use crate::afxdp::worker::SyncedSessionEntry;
 use crate::nat::NatDecision;
-use crate::policy::evaluate_policy_result_without_counting_at;
 use crate::session::{
     PolicyGateAnswer, PolicyGateCurrent, PolicyRevalidationKind, PolicyRevalidationTarget,
     SessionDecision, SessionKey, SessionMetadata, SessionOrigin, SessionTable,
@@ -301,12 +300,15 @@ pub(super) struct PolicyRevocation {
 /// locally-authored ingress identity is resolved live through the ledger,
 /// exactly as the forward hit path resolves the packet's arrival; a recorded
 /// zone (peer-authored or fabric identities, #6928) is used as-is.
-#[derive(Clone, Copy)]
-enum FromZoneSource {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FromZoneSource {
     /// Live-resolve through the ledger from this ingress identity.
     LiveIfindex { ifindex: i32, vlan: u16 },
     /// Use the judged entry's recorded ingress zone.
     RecordedZone(u32),
+    /// #17027: an already-resolved zone id (the foreign packet's live
+    /// arrival zone), used as-is by the shared hit-policy builder.
+    Resolved(u32),
 }
 
 /// #9604: what the cold judgment evaluates — always a FORWARD pair, no matter
@@ -1819,12 +1821,16 @@ pub(super) fn revalidate_zone_policy_on_session_hit(
             // resolved the live to-zone from the stored egress ifindex; use
             // the same resolver (recorded zone for fabric redirects).
             {
-                let new_zone = if input.decision.resolution.disposition
-                    == ForwardingDisposition::FabricRedirect
+                let new_zone = if resolution_is_locally_forwarding(input.decision.resolution)
+                    || input.decision.resolution.disposition
+                        == ForwardingDisposition::FabricRedirect
                 {
-                    Some(input.metadata.egress_zone)
-                } else if resolution_is_locally_forwarding(input.decision.resolution) {
-                    Some(forwarding.egress_zone_id(input.decision.resolution.egress_ifindex))
+                    // #17027: the judged to-zone, via the sole rule.
+                    Some(super::hit_policy::hit_egress_zone_for(
+                        forwarding,
+                        input.metadata.egress_zone,
+                        input.decision,
+                    ))
                 } else {
                     None
                 };
@@ -2530,10 +2536,13 @@ fn reverse_hit_zone_policy(
                         // new egress (fabric already excluded above).
                         let new_zone =
                             if resolution_is_locally_forwarding(input.decision.resolution) {
-                                Some(
-                                    forwarding
-                                        .egress_zone_id(input.decision.resolution.egress_ifindex),
-                                )
+                                // #17027: the judged to-zone, via the sole rule
+                                // (FabricRedirect already excluded above).
+                                Some(super::hit_policy::hit_egress_zone_for(
+                                    forwarding,
+                                    input.metadata.egress_zone,
+                                    input.decision,
+                                ))
                             } else {
                                 None
                             };
@@ -2772,12 +2781,16 @@ fn reverse_hit_zone_policy(
                 // #14318: move the pair's egress zone with the persisted
                 // route. FabricRedirect keeps its recorded zone (the
                 // transport zone is not the flow's); others use live egress.
-                let new_zone = if input.decision.resolution.disposition
-                    == ForwardingDisposition::FabricRedirect
+                let new_zone = if resolution_is_locally_forwarding(input.decision.resolution)
+                    || input.decision.resolution.disposition
+                        == ForwardingDisposition::FabricRedirect
                 {
-                    Some(fwd_metadata.egress_zone)
-                } else if resolution_is_locally_forwarding(input.decision.resolution) {
-                    Some(forwarding.egress_zone_id(input.decision.resolution.egress_ifindex))
+                    // #17027: the judged to-zone, via the sole rule.
+                    Some(super::hit_policy::hit_egress_zone_for(
+                        forwarding,
+                        fwd_metadata.egress_zone,
+                        input.decision,
+                    ))
                 } else {
                     None
                 };
@@ -2892,10 +2905,10 @@ fn zone_policy_deny_on_session_hit(
     // (from lan, to 0). A recorded 0 evaluates exactly as the live 0 it
     // replaces (default policy, #3110), so entries that were never adjudicated
     // keep today's verdict.
-    let to_zone_override = (input.decision.resolution.disposition
-        == super::ForwardingDisposition::FabricRedirect)
-        .then_some(input.metadata.egress_zone);
-    let (from_id, live_to_id) = match input.from_source {
+    // #17027: the shared query builder applies `hit_policy::hit_egress_zone_for`
+    // as the sole to-zone rule. This site resolves its from-zone through the
+    // ledger walk below because the Decline arms depend on that walk.
+    let (from_id, _live_to_id) = match input.from_source {
         FromZoneSource::LiveIfindex { ifindex, vlan } => {
             let arrival_logical =
                 resolve_ingress_logical_ifindex(forwarding, ifindex, vlan).unwrap_or(ifindex);
@@ -2907,8 +2920,10 @@ fn zone_policy_deny_on_session_hit(
         FromZoneSource::RecordedZone(z) => {
             zone_pair_ids_for_flow_with_override(forwarding, 0, Some(z), egress_ifindex)
         }
+        // #17027: revalidation inputs never carry a pre-resolved zone;
+        // the variant exists for the authority verdicts' builder calls.
+        FromZoneSource::Resolved(z) => (z, 0),
     };
-    let to_id = to_zone_override.unwrap_or(live_to_id);
     // #9513: DECLINE on a LOOKUP FAILURE — an interface this packet has no
     // identity for — and NOT on a zone of 0.
     //
@@ -2997,44 +3012,30 @@ fn zone_policy_deny_on_session_hit(
     // The SOURCE deliberately stays pre-translation (`input.src_ip`): Junos
     // evaluates policy after destination NAT and BEFORE source NAT, and admission
     // passes the pre-translation source for the same reason.
-    let policy_dst_ip = input.decision.nat.rewrite_dst.unwrap_or(input.dst_ip);
-    let policy_dst_port = input
-        .decision
-        .nat
-        .rewrite_dst_port
-        .unwrap_or(input.dst_port);
-    let result = evaluate_policy_result_without_counting_at(
-        &forwarding.policy,
-        from_id,
-        to_id,
-        input.src_ip,
-        policy_dst_ip,
+    // #17027: the query is built by the single shared builder. This site
+    // is frame-INDEPENDENT, like #7212's static walk: no ICMP type/code
+    // is supplied (`None`). #8618/#9386: `None` cannot manufacture a
+    // false DENY, which is what makes acting on a DENY safe; Gate 1b
+    // declines the case where a PERMIT could be missed. The builder is
+    // handed the pre-resolved from-zone so the Decline arms above stay
+    // the only place that decision is made.
+    let query = super::hit_policy::hit_policy_query(
+        forwarding,
+        &input.metadata,
+        input.decision,
+        FromZoneSource::Resolved(from_id),
+        super::hit_policy::JudgedSource::new(input.src_ip, input.src_port),
+        input.dst_ip,
+        input.dst_port,
         input.protocol,
-        input.src_port,
-        policy_dst_port,
-        // Frame-INDEPENDENT, like #7212's static walk: no ICMP type/code is
-        // supplied. #8618: an ICMP flow only reaches here when the snapshot has
-        // no type-constrained PERMIT term. #9386: that is NOT the same as "the
-        // verdict is identical to a fully-informed evaluation" — a
-        // type-constrained DENY also feeds the `icmp_constraints` arm and is
-        // SKIPPED here. What it does guarantee is that `None` cannot manufacture
-        // a false DENY, which is what makes acting on a DENY safe. Gate 1b
-        // declines the case where a PERMIT could be missed.
+        super::hit_policy::QueryDirection::ForwardPostDnat,
         None,
         input.now_ns,
     );
-    // #9381: the revoke predicate is PERMIT-or-not, mirroring admission
-    // (`poll_descriptor/mod.rs`: `if let PolicyAction::Permit = policy_result.action`).
-    // `PolicyAction` is THREE-valued and `Reject` is a terminal non-forwarding
-    // verdict, not a softer permit: the first-packet path drops it
-    // (`reject_reply.rs`) and `policy.rs`'s own terminal-action test spells the
-    // pair `Deny | Reject`. Spelled as `Deny` alone, this arm re-stamped every
-    // `Reject` session as revalidated, so an operator narrowing `permit` ->
-    // `reject` got the new verdict for NEW flows while every ESTABLISHED session
-    // admitted by that rule kept forwarding in both directions until idle
-    // timeout. Spelling it POSITIVELY (match `Permit`) also means a fourth
-    // action added later fails CLOSED here instead of inheriting the permit arm.
-    if matches!(result.action, crate::policy::PolicyAction::Permit) {
+    // #9381: the revoke predicate is PERMIT-or-not, mirroring admission.
+    // `permits` spells it positively, so `Reject` and any future action
+    // fail closed instead of inheriting the permit arm.
+    if super::hit_policy::permits(&query, &forwarding.policy).is_ok() {
         // Still permitted. Nothing counted, nothing logged, the session and its
         // NAT translation untouched. The CALLER re-stamps on this exit — and
         // only on this exit — so no later packet of this generation re-derives
@@ -3043,6 +3044,43 @@ fn zone_policy_deny_on_session_hit(
     }
     // DENY or REJECT: deliberately NOT re-stamped — see the header.
     ZonePolicyJudgment::Revoke
+}
+
+/// The exact stale-hit verdict exposed to sibling tests without exposing the
+/// private production judgment type.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ZonePolicyVerdictForTest {
+    Permit,
+    Revoke,
+    Decline,
+}
+
+#[cfg(test)]
+pub(super) fn zone_policy_verdict_for_test(
+    forwarding: &ForwardingState,
+    decision: SessionDecision,
+    metadata: &SessionMetadata,
+    flow: &SessionFlow,
+    from_source: FromZoneSource,
+    now_ns: u64,
+) -> ZonePolicyVerdictForTest {
+    let input = PolicyJudgmentInput {
+        decision,
+        metadata: metadata.clone(),
+        protocol: flow.forward_key.protocol,
+        src_ip: flow.forward_key.src_ip,
+        dst_ip: flow.dst_ip,
+        src_port: flow.forward_key.src_port,
+        dst_port: flow.forward_key.dst_port,
+        from_source,
+        now_ns,
+    };
+    match zone_policy_deny_on_session_hit(forwarding, &input) {
+        ZonePolicyJudgment::Permit => ZonePolicyVerdictForTest::Permit,
+        ZonePolicyJudgment::Revoke => ZonePolicyVerdictForTest::Revoke,
+        ZonePolicyJudgment::Decline => ZonePolicyVerdictForTest::Decline,
+    }
 }
 
 #[cfg(test)]

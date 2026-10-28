@@ -109,31 +109,29 @@ func IsUnknownTopLevelStanzaSchemaError(err error) bool {
 // typedLeafSchemaError marks an ordinary schema rejection from a typed
 // validator or typed-value structure, including validated keys, multi/tail
 // values, and modifiers. The tolerant configstore path may persist this
-// class as a queryable typed-leaf warning. The separate #17241
-// nestedListContentSchemaError is not classified as typed for ordinary
-// warning collection; its dedicated #17241 hard-error path is enforced by
-// schema-aware fallback scanning and compileTreeLenient.
+// class as a queryable typed-leaf warning. The separate nested-list-content
+// error class is not classified as typed for ordinary warning collection;
+// its dedicated hard-error path is enforced by schema-aware fallback scanning
+// and compileTreeLenient.
 type typedLeafSchemaError struct{ msg string }
 
 func (e *typedLeafSchemaError) Error() string { return e.msg }
 
-// nestedListContentSchemaError marks the #17241 nested refusal: a block
-// child under a refuseNonLeafBlockChildren leaf (VRRP
-// virtual-address/virtual-inet6-address, WireGuard allowed-ips) that is
-// not a plain leaf value. Unlike ordinary typed-leaf violations, this
-// class is HARD on every ingress: the nested grandchild is never read by
-// the compiler (firewallMatchValues consumes only the child's Keys), so
-// tolerating it on Store.Load / Store.SyncApply would install a silently
-// truncated config — the nested prefix silently dropped — rather than
-// preserving a legacy value. configstore's compileTreeLenient promotes
-// this class to a hard error; other schema errors keep their tolerant
-// downgrade.
+// nestedListContentSchemaError marks a hard nested-content refusal for a
+// block-list child under a refuseNonLeafBlockChildren leaf that is not a
+// plain leaf value. Such a reader does not consume grandchildren
+// (firewallMatchValues reads only the child's Keys), so tolerating the
+// content on Store.Load or Store.SyncApply would install a silently truncated
+// config. Introduced for VRRP virtual-address/virtual-inet6-address and
+// WireGuard allowed-ips (#17241), this class also covers other direct-child
+// value-list readers. configstore's compileTreeLenient promotes it to a hard
+// error; other schema errors keep their tolerant downgrade.
 type nestedListContentSchemaError struct{ msg string }
 
 func (e *nestedListContentSchemaError) Error() string { return e.msg }
 
-// IsNestedListContentSchemaError reports whether err is the #17241 nested
-// refusal, including when wrapped.
+// IsNestedListContentSchemaError reports whether err is the dedicated
+// nested-content refusal, including when wrapped.
 func IsNestedListContentSchemaError(err error) bool {
 	var nested *nestedListContentSchemaError
 	return errors.As(err, &nested)
@@ -148,7 +146,7 @@ func nestedListContentErrorf(path []string, leafName, value string) error {
 // IsTypedLeafSchemaError reports whether err (including wrapped errors) came
 // from the typed-validator/typed-value partition. It deliberately excludes
 // top-level stanza, closed-world keyword, node-validator/scalar-arity,
-// midKeyword structural, and the dedicated #17241 nested-list refusal errors.
+// midKeyword structural, and the dedicated nested-content refusal errors.
 func IsTypedLeafSchemaError(err error) bool {
 	var typed *typedLeafSchemaError
 	return errors.As(err, &typed)

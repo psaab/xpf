@@ -485,14 +485,11 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
-		// #17241: a block child that itself has Children (or is a non-leaf
-		// block such as `a { }`) carries nested content the compiler never
-		// reads — firewallMatchValues consumes only the child's Keys and
-		// never descends — so every grandchild token (`leaf { a { b; } }`)
-		// would be silently dropped. Leaves that opt in via
-		// refuseNonLeafBlockChildren (VRRP virtual-address/
-		// virtual-inet6-address, WireGuard allowed-ips) refuse the shape
-		// fail-closed, naming the leaf and the offending child token.
+		// A block child that itself has Children (or is a non-leaf block such
+		// as `a { }`) carries nested content the list reader never reads.
+		// firewallMatchValues consumes only the child's Keys, so any deeper
+		// statement would be silently dropped. Use the dedicated hard-error
+		// class also used by the existing #17241 refused leaves.
 		if leafSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
 			err := nestedListContentErrorf(path, leafName, c.Keys[0])
 			if vc.recordTypedLeaf(err) {

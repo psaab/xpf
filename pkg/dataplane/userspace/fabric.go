@@ -30,7 +30,7 @@ func buildFabricSnapshots(cfg *config.Config) []FabricSnapshot {
 // VERDICT the applied snapshot already holds for each parent netdev.
 //
 // #6691 round 11. A fabric refresh (SyncFabricState, called after every
-// refreshFabricFwd) re-resolves peer MACs for cross-chassis forwarding; round 10
+// refreshFabricFwdSlot) re-resolves peer MACs for cross-chassis forwarding; round 10
 // made it re-decide ParentUnbindable as a side effect, because the verdict is
 // computed inside the same builder. That is a partial view of a changing kernel:
 //
@@ -401,9 +401,9 @@ func selectFabricPeerMAC(neighs []netlink.Neigh, ip net.IP) net.HardwareAddr {
 // itself failed to resolve (#6554, #15918).
 //
 // This is the SINGLE authoritative implementation of the identity-constrained
-// link-local fallback. pkg/daemon's refreshFabricFwd/refreshFabricFwd1 and the
+// link-local fallback. pkg/daemon's refreshFabricFwdSlot and the
 // live userspace resolver buildFabricPeerMAC both call it, so a MAC the daemon
-// accepts (and latches fabricPopulated on) is exactly the MAC the helper
+// accepts (and latches the slot populated on) is exactly the MAC the helper
 // publishes in FabricSnapshot.PeerMAC. Before #15918 the daemon had its own
 // copy and the live resolver had none: the fallback populated the retired BPF
 // map and the readiness flag while PeerMAC stayed empty and Rust skipped the
@@ -636,7 +636,7 @@ type FabricPeerResolver interface {
 
 // ResolveFabricPeer is the single live resolver (#17044): its result is
 // both the helper's FabricSnapshot.PeerMAC source (via buildFabricPeerMAC)
-// and the daemon's fabricPopulated readiness input. It consults the
+// and the daemon's slot-populated readiness input. It consults the
 // daemon-registered identity constraint exactly as buildFabricSnapshotsFrom
 // does, so both paths agree by construction.
 func ResolveFabricPeer(overlayIfindex, parentIfindex int, peer string, localMAC net.HardwareAddr) FabricPeerResolution {
