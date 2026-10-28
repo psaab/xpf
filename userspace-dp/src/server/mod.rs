@@ -7,6 +7,7 @@
 
 // Submodules are private — external callers reach their items only
 // through the explicit `pub(crate) use` re-exports below.
+pub(crate) mod accept_loop;
 pub(crate) mod reinject_9506;
 mod handlers;
 pub(crate) mod helpers;

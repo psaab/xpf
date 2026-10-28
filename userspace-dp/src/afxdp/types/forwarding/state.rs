@@ -111,18 +111,6 @@ pub(in crate::afxdp) struct ForwardingState {
     /// owned in EVERY table, mirroring `scope_ok`'s empty-instance wildcard.
     /// Interface host addresses are NEVER wildcarded (an interface IP genuinely
     /// lives in exactly one VRF).
-    /// #16131: interned twin of the string set below, kept ONLY as a
-    /// dual-carry agreement source while the string form remains
-    /// authoritative. Derived once per build by
-    /// `forwarding_build::intern_route_tables` from the authoritative
-    /// string sets and the published `route_table_identities`; never
-    /// written by any other code, never read on the packet path. The
-    /// agreement cell in `forwarding_build/intern.rs` proves both
-    /// carries agree on every built state — a disagreement fails the
-    /// build closed rather than letting an unproven interned form
-    /// near a lookup.
-    pub(in crate::afxdp) local_table_ids_v4: FastMap<Ipv4Addr, FastSet<RouteIdentity>>,
-    pub(in crate::afxdp) local_table_ids_v6: FastMap<Ipv6Addr, FastSet<RouteIdentity>>,
     pub(in crate::afxdp) local_tables_v4: FastMap<Ipv4Addr, FastSet<String>>,
     pub(in crate::afxdp) local_tables_v6: FastMap<Ipv6Addr, FastSet<String>>,
     pub(in crate::afxdp) local_nat_any_table_v4: FastSet<Ipv4Addr>,
@@ -154,20 +142,8 @@ pub(in crate::afxdp) struct ForwardingState {
     /// last-write-wins when two VRFs configured the same address on
     /// different interfaces. The nested form also keeps the per-packet
     /// lookup allocation-free (borrowed `&str` table key).
-    /// #16131: dual-carry interned twin of the nested string-keyed map
-    /// below; the inner map is keyed by the interned `RouteIdentity`
-    /// instead of the canonical table string. Derived at build by
-    /// `forwarding_build::intern_route_tables`; the string form stays
-    /// authoritative (see `local_table_ids_v4`).
-    pub(in crate::afxdp) interface_nat_ids_v4: FastMap<Ipv4Addr, FastMap<RouteIdentity, i32>>,
-    pub(in crate::afxdp) interface_nat_ids_v6: FastMap<Ipv6Addr, FastMap<RouteIdentity, i32>>,
     pub(in crate::afxdp) interface_nat_v4: FastMap<Ipv4Addr, FastMap<String, i32>>,
     pub(in crate::afxdp) interface_nat_v6: FastMap<Ipv6Addr, FastMap<String, i32>>,
-    /// #16131: dual-carry interned twins of the string sets below;
-    /// derived at build by `forwarding_build::intern_route_tables`.
-    /// The string form stays authoritative.
-    pub(in crate::afxdp) interface_nat_table_ids_v4: FastMap<Ipv4Addr, FastSet<RouteIdentity>>,
-    pub(in crate::afxdp) interface_nat_table_ids_v6: FastMap<Ipv6Addr, FastSet<RouteIdentity>>,
     /// #12086: owning routing tables for interface-NAT local-delivery
     /// addresses. Like `local_tables_v*`, these interface addresses are not
     /// wildcarded across routing instances.
@@ -252,12 +228,6 @@ pub(in crate::afxdp) struct ForwardingState {
     /// Explicit canonical-table identity authority captured with this immutable
     /// FIB generation. Missing keys are never interpreted as the default table.
     pub(in crate::afxdp) route_table_identities: FastMap<String, RouteIdentity>,
-    /// #16131: false when any table name interned into the dual-carry
-    /// `*_ids_*` twins lacked a published `route_table_identities` row
-    /// (identity is never synthesized in that case — the name is simply
-    /// absent from the interned carry). Diagnostic only: the string
-    /// carry stays authoritative and the packet path never reads this.
-    pub(in crate::afxdp) route_table_interning_complete: bool,
     /// False when any selectable FIB table lacks an authoritative identity.
     pub(in crate::afxdp) route_table_identity_map_complete: bool,
     pub(in crate::afxdp) tunnel_endpoints: FastMap<u16, TunnelEndpoint>,
@@ -733,7 +703,7 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) cold_path_sample_mask: u64,
     /// #1636 option D: how long a queued packet with an unresolved
     /// neighbor is held before being dropped + recycled. Computed per
-    /// snapshot in `build_forwarding_state_with_policy_counters_and_previous`
+    /// snapshot in `build_forwarding_state_with_preparsed_policy_and_previous`
     /// (`compute_pending_neigh_timeout_ns`): 800ms when the kernel
     /// `retrans_time_ms` is <= NEIGH_RETRANS_FAST_THRESHOLD_MS (300ms —
     /// the daemon writes 250 but the kernel jiffy-rounds it to 252 on

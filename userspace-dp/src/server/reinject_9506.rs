@@ -425,48 +425,27 @@ pub(crate) fn spawn_reinject_socket_servers(
     let submit_thread = thread::Builder::new()
         .name("xpf-reinject-submit".to_string())
         .spawn(move || {
-            let mut backoff = super::lifecycle::AcceptBackoff::new();
-            while submit_running.load(Ordering::Acquire) {
-                let decision = super::lifecycle::accept_step(
-                    submit_listener.accept(),
-                    Duration::from_millis(1),
-                    "reinject submit socket",
-                    &mut backoff,
-                    Instant::now(),
-                    true,
-                );
-                if let Some(line) = decision.log {
-                    eprintln!("xpf-userspace-dp: {line}");
-                }
-                match decision.step {
-                    super::lifecycle::AcceptStep::Serve((stream, _)) => {
-                        if let Err(err) =
-                            super::lifecycle::reject_unprivileged_peer("reinject submit", &stream)
-                        {
-                            eprintln!("xpf-userspace-dp: {err}");
-                            continue;
-                        }
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            serve_submit_conn_with_running(
-                                stream,
-                                &submit_core,
-                                &submit_target,
-                                &submit_running,
-                            );
-                        }))
-                        .unwrap_or_else(|_| {
-                            eprintln!(
-                                "xpf-userspace-dp: reinject submit connection panicked; connection dropped, accept loop continues (#15112)"
-                            );
-                        });
-                    }
-                    super::lifecycle::AcceptStep::Sleep(delay) => thread::sleep(delay),
-                    super::lifecycle::AcceptStep::Fail(msg) => {
-                        eprintln!("xpf-userspace-dp: {msg}");
-                        thread::sleep(super::lifecycle::AcceptBackoff::MAX);
-                    }
-                }
-            }
+            // #17123: the single accept loop (server/accept_loop.rs).
+            let _ = crate::server::accept_loop::run_accept_loop(
+                &submit_listener,
+                crate::server::accept_loop::AcceptLoopSpec {
+                    name: "reinject submit socket",
+                    poll: Duration::from_millis(1),
+                    retry_unclassified: true,
+                    peer_label: "reinject submit",
+                },
+                &submit_running,
+                crate::server::accept_loop::PanicPolicy::DropConnection,
+                |stream| {
+                    serve_submit_conn_with_running(
+                        stream,
+                        &submit_core,
+                        &submit_target,
+                        &submit_running,
+                    );
+                    Ok(())
+                },
+            );
         })
         .map_err(|e| format!("spawn reinject submit server: {e}"))?;
 
@@ -475,48 +454,29 @@ pub(crate) fn spawn_reinject_socket_servers(
     let complete_thread = thread::Builder::new()
         .name("xpf-reinject-complete".to_string())
         .spawn(move || {
-            let mut backoff = super::lifecycle::AcceptBackoff::new();
-            while complete_running.load(Ordering::Acquire) {
-                let decision = super::lifecycle::accept_step(
-                    complete_listener.accept(),
-                    Duration::from_millis(1),
-                    "reinject complete socket",
-                    &mut backoff,
-                    Instant::now(),
-                    true,
-                );
-                if let Some(line) = decision.log {
-                    eprintln!("xpf-userspace-dp: {line}");
-                }
-                match decision.step {
-                    super::lifecycle::AcceptStep::Serve((stream, _)) => {
-                        if let Err(err) =
-                            super::lifecycle::reject_unprivileged_peer("reinject complete", &stream)
-                        {
-                            eprintln!("xpf-userspace-dp: {err}");
-                            continue;
-                        }
-                        let run = complete_running.clone();
-                        let core = complete_core.clone();
-                        let target = target.clone();
-                        // One completion client is expected (Go pipeline). Serve
-                        // it inline so drain order remains globally serialized.
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            serve_complete_conn_with_target(stream, &core, Some(&target), &run);
-                        }))
-                        .unwrap_or_else(|_| {
-                            eprintln!(
-                                "xpf-userspace-dp: reinject complete connection panicked; connection dropped, accept loop continues (#15112)"
-                            );
-                        });
-                    }
-                    super::lifecycle::AcceptStep::Sleep(delay) => thread::sleep(delay),
-                    super::lifecycle::AcceptStep::Fail(msg) => {
-                        eprintln!("xpf-userspace-dp: {msg}");
-                        thread::sleep(super::lifecycle::AcceptBackoff::MAX);
-                    }
-                }
-            }
+            // #17123: the single accept loop (server/accept_loop.rs).
+            // One completion client is expected (Go pipeline). Serve it
+            // inline so drain order remains globally serialized.
+            let _ = crate::server::accept_loop::run_accept_loop(
+                &complete_listener,
+                crate::server::accept_loop::AcceptLoopSpec {
+                    name: "reinject complete socket",
+                    poll: Duration::from_millis(1),
+                    retry_unclassified: true,
+                    peer_label: "reinject complete",
+                },
+                &complete_running,
+                crate::server::accept_loop::PanicPolicy::DropConnection,
+                |stream| {
+                    serve_complete_conn_with_target(
+                        stream,
+                        &complete_core,
+                        Some(&target),
+                        &complete_running,
+                    );
+                    Ok(())
+                },
+            );
         })
         .map_err(|e| format!("spawn reinject completion server: {e}"))?;
 

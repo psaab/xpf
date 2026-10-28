@@ -53,7 +53,10 @@ pub(in crate::afxdp) use shared_recycle::{
 // tests (the `tests/` submodule under this `mod.rs`, reached via `use
 // super::*`).
 #[cfg(test)]
-use shared_recycle::{shared_recycle_target_index, shared_recycle_target_index_for_split};
+use shared_recycle::{
+    SHARED_RECYCLE_UNKNOWN_SLOT_DROPS_LOGGED, SHARED_RECYCLE_UNKNOWN_SLOT_RESCUES_LOGGED,
+    shared_recycle_target_index, shared_recycle_target_index_for_split,
+};
 pub(in crate::afxdp) use slow_path::{
     SlowPathOutlet, extract_l3_packet_with_nat, handle_forward_build_failure,
     maybe_reinject_slow_path, maybe_reinject_slow_path_from_frame,
