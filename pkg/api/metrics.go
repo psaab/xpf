@@ -150,7 +150,6 @@ type xpfCollector struct {
 	dataplaneArmUncoveredSurfaces        *prometheus.Desc
 	dataplaneArmTotalSurfaces            *prometheus.Desc
 	dataplaneXDPAttachModeSurfaces       *prometheus.Desc
-	dataplaneSafetyOnce                  sync.Once
 	snmpRequestsShedTotal                *prometheus.Desc
 	snmpSourceBucketEvictionsTotal       *prometheus.Desc
 	snmpTrackedSources                   *prometheus.Desc
@@ -728,6 +727,7 @@ type xpfCollector struct {
 	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
 	userspaceSessionDeleteDroppedReleased     *prometheus.Desc
 	userspaceTunnelPurgeReservationsReleased  *prometheus.Desc
+	userspaceTunnelPurgeDeleteRefused         *prometheus.Desc
 	userspaceSyncedReverseRederived           *prometheus.Desc
 	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
 	userspaceS5Reinject                       *prometheus.Desc

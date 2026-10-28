@@ -523,8 +523,8 @@ pub(super) fn stage_native_gre_decap(
 ///
 /// Returns the ORIGINAL meta and `None` for every packet that is not an
 /// inbound WireGuard transport-data record for a configured listener, which is
-/// almost all of them; see `wg::decap::try_wg_decap_from_frame` for the gates
-/// and for why a rejection here is not a drop.
+/// almost all of them; see `wg::decap::try_wg_decap_from_frame_with_input_filter`
+/// for the gates and for why a rejection here is not a drop.
 ///
 /// A `None` frame with the third return value set is instead a terminal outer
 /// input-filter denial; the caller recycles the descriptor.
@@ -1794,7 +1794,7 @@ pub(super) fn stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous(
 /// diverting it away from the generic kernel TUN injector. Carrying a
 /// real ingress ifindex here would therefore MIS-DELIVER IPsec-to-self,
 /// not enforce host-inbound — the ESP/AH passthrough short-circuits with
-/// `RecycleAndContinue` before `host_inbound_admits_iface` is ever reached
+/// `RecycleAndContinue` before `host_inbound_admits_iface_for_destination` is ever reached
 /// and stays exempt from the per-zone host-inbound gate by design (see
 /// `forwarding/README.md`, "Host-terminated IPsec passthrough"); IKE carries
 /// its own SEPARATE in-stage admit checks (#4323 / #6471, below). Telemetry

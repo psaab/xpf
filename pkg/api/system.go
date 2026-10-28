@@ -104,7 +104,8 @@ var diagLimiter = diagcmd.DefaultLimiter
 // exercise the concurrency limiter without spawning real ping/traceroute
 // subprocesses. The default mirrors the handlers' prior inline behavior:
 // CommandContext under the caller's request-sized deadline, with
-// WaitDelay capping the post-kill pipe-drain window (#1805).
+// WaitDelay (diagcmd.RequestExecWaitDelay) capping the post-kill
+// pipe-drain window (#1805).
 var diagRun = func(ctx context.Context, argv []string) (string, error) {
 	c := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	c.WaitDelay = requestExecWaitDelay
@@ -147,9 +148,9 @@ func (s *Server) pingHandler(w http.ResponseWriter, r *http.Request) {
 
 	cmd := buildPingArgv(req, count)
 
-	// Request-sized budget (#1819): count × 1s + slack, 30s floor,
-	// 150s ceiling — see pingExecTimeout in exec_timeout.go.
-	ctx, cancel := context.WithTimeout(r.Context(), pingExecTimeout(count))
+	// Request-sized budget (#1819, #17203): count × 1s + slack, 30s
+	// floor, 150s ceiling — see diagcmd.PingExecTimeout.
+	ctx, cancel := context.WithTimeout(r.Context(), diagcmd.PingExecTimeout(count))
 	defer cancel()
 	output, err := diagRun(ctx, cmd)
 	if err != nil {
@@ -185,9 +186,9 @@ func (s *Server) tracerouteHandler(w http.ResponseWriter, r *http.Request) {
 
 	cmd := buildTracerouteArgv(req)
 
-	// Shared diag budget (#1819): same 60s as the gRPC Traceroute path
-	// — see diagTracerouteTimeout in exec_timeout.go.
-	ctx, cancel := context.WithTimeout(r.Context(), diagTracerouteTimeout)
+	// Shared diag budget (#1819, #17203): same 60s as the gRPC
+	// Traceroute path — see diagcmd.TracerouteTimeout.
+	ctx, cancel := context.WithTimeout(r.Context(), diagcmd.TracerouteTimeout)
 	defer cancel()
 	output, err := diagRun(ctx, cmd)
 	if err != nil {

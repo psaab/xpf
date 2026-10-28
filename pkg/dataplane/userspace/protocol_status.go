@@ -1059,6 +1059,7 @@ type ProcessStatus struct {
 	SessionDeleteRefusedIdentity       uint64            `json:"session_delete_refused_identity,omitempty"`
 	SessionDeleteDroppedReleased       uint64            `json:"session_delete_dropped_released,omitempty"`
 	TunnelPurgeReservationsReleased    uint64            `json:"tunnel_purge_reservations_released,omitempty"`
+	TunnelPurgeDeleteRefused           uint64            `json:"tunnel_purge_delete_refused,omitempty"`
 	SyncedReverseRederived             uint64            `json:"synced_reverse_rederived,omitempty"`
 	S5Reinject                         *S5ReinjectStatus `json:"s5_reinject,omitempty"`
 }

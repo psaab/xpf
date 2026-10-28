@@ -21,9 +21,7 @@
 
 use super::counters::WgCounters;
 use super::engine::WgEngine;
-use super::session::{
-    KEEPALIVE_TIMEOUT_NS, NO_REPLY_REINIT_NS, REJECT_AFTER_TIME_NS,
-};
+use super::session::{KEEPALIVE_TIMEOUT_NS, NO_REPLY_REINIT_NS};
 use std::sync::atomic::Ordering;
 
 /// Sentinel for "no deadline" in `TimerActions::next_deadline_ns`
@@ -31,7 +29,7 @@ use std::sync::atomic::Ordering;
 /// to 0 and busy-spin).
 pub(crate) const WG_NO_DEADLINE_NS: u64 = u64::MAX;
 
-/// Which keepalive class a `timer_pass` send action belongs to —
+/// Which keepalive class a `timer_pass_for_peer` send action belongs to —
 /// picks the telemetry counter at the emission site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeepaliveKind {
@@ -41,7 +39,7 @@ pub(crate) enum KeepaliveKind {
     Persistent,
 }
 
-/// Why `timer_pass` wants a handshake initiated. (Age-driven rekeys —
+/// Why `timer_pass_for_peer` wants a handshake initiated. (Age-driven rekeys —
 /// T1/T2/send-side-T3 — arrive via the rekey-request edge instead;
 /// they are armed at the encap/decap use sites.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +52,7 @@ pub(crate) enum InitiateReason {
     KeepaliveNoSession,
 }
 
-/// Output of one timer decision pass. Pure data — `timer_pass`
+/// Output of one timer decision pass. Pure data — `timer_pass_for_peer`
 /// performs no IO and mutates nothing; the control loop owns sends
 /// and reports outcomes back (skip-pacing, AGY r3 G1).
 #[derive(Debug, Clone, Copy)]
@@ -147,8 +145,7 @@ impl WgEngine {
         let cur = peer.current.read().unwrap_or_else(|e| e.into_inner());
         matches!(
             cur.as_ref(),
-            Some(s) if s.is_confirmed()
-                && now_ns.saturating_sub(s.created_ns) < REJECT_AFTER_TIME_NS
+            Some(s) if s.usable_at(now_ns)
         )
     }
 
@@ -216,7 +213,7 @@ impl WgEngine {
             for slot in [&peer.current, &peer.previous, &peer.next] {
                 let mut guard = slot.write().unwrap_or_else(|e| e.into_inner());
                 if let Some(session) = guard.as_ref() {
-                    if now_ns.saturating_sub(session.created_ns) >= REJECT_AFTER_TIME_NS {
+                    if session.expired_at(now_ns) {
                         dropped_indices.push(session.local_index);
                         *guard = None;
                     }
@@ -263,6 +260,10 @@ impl WgEngine {
     /// cannot see — with `endpoint_known == false` no action that
     /// requires sending is emitted and no deadline is armed for it
     /// (AGY r3 G1(b)).
+    ///
+    /// Test-only single-peer wrapper (#17212): production calls
+    /// `timer_pass_for_peer` per peer.
+    #[cfg(test)]
     pub(crate) fn timer_pass(&self, now_ns: u64, endpoint_known: bool) -> TimerActions {
         let Some(pubkey) = self.first_peer_pubkey() else {
             return TimerActions::idle();
@@ -274,8 +275,7 @@ impl WgEngine {
     /// multi-peer). The control loop calls this once per peer per tick,
     /// supplying that peer's `endpoint_known` (the learned/configured
     /// endpoint is per-peer control-thread-local state the engine cannot
-    /// see). `timer_pass` is the single-peer wrapper retained for the
-    /// pre-#1434 callers/tests.
+    /// see).
     pub(crate) fn timer_pass_for_peer(
         &self,
         pubkey: &[u8; 32],

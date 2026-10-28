@@ -354,7 +354,7 @@ pub(super) fn persistent_egress_scope_v2(
 /// control-plane helper that owns the lease-control version knows which
 /// encoding the peer used. FOLLOWUP(#15133): the coordinator-side
 /// re-encode site, once the lease-control version negotiation carries it.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(super) fn persistent_egress_scope_reencode_for_peer(_scope: u32) -> Option<u32> {
     None
 }
@@ -2267,7 +2267,7 @@ enum ReuseCount {
     /// Count the re-entry (the ordinary idempotent-reuse return).
     Counted,
     /// Record the holder only, without bumping `reuses_total`.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     Uncounted,
 }
 
@@ -3684,7 +3684,6 @@ impl PortAllocator {
     /// mint the same translated identity.
     // #8121 part 1: reached only from `idle_lease_sync_8121` and its tests
     // until the transport lands (see that module's header).
-    #[allow(dead_code)]
     pub(super) fn try_claim_translated_port(&self, addr_index: usize, port: u16) -> Option<bool> {
         Some(self.shared.occupancy.get(addr_index)?.reserve(port))
     }

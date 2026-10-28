@@ -1702,13 +1702,13 @@ func (es *EventStream) writeFrame(typ uint8, seq uint64, payload []byte) error {
 // #2467: the three identity fields at [10:22] were widened from signed
 // 16-bit to signed 32-bit. Linux ifindexes are a full `int`; with the old
 // i16 encoding an ifindex above 32767 wrapped negative. This is a breaking
-// wire-format change — the Rust encoder (event_stream/codec.rs) and this
-// decoder must be deployed together (they always are: one binary set).
+// wire-format change — the Rust encoder (EventFrame::encode_session_record
+// in event_stream/codec/session_sync.rs) and this decoder must be deployed together (they always are: one binary set).
 //
 // wireAFToDataplane maps the 1-byte wire encoding (4 = IPv4, 6 = IPv6
 // — chosen by the Rust codec to match the protocol number; see
-// userspace-dp/src/event_stream/codec.rs:88) to the Linux dataplane
-// constants used throughout the Go side (`AFInet` = 2, `AFInet6` = 10).
+// EventFrame::encode_session_record in
+// userspace-dp/src/event_stream/codec/session_sync.rs) to the Linux dataplane
 // Returns 0 for unknown values; callers reject 0.
 func wireAFToDataplane(wire uint8) uint8 {
 	switch wire {

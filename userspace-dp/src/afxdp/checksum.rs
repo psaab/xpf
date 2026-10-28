@@ -3,7 +3,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct DnatTableFds {
     pub(super) v4: Option<c_int>,
-    #[allow(dead_code)] // reserved for DNAT v6 support
+    // reserved for DNAT v6 support
     pub(super) v6: Option<c_int>,
 }
 

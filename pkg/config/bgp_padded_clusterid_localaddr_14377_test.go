@@ -16,9 +16,10 @@ import (
 // Padding is authorable through ordinary ingress: quoted strings preserve
 // their contents verbatim (`cluster-id " 10.0.0.1 "`), mirroring #9820.
 //
-// FAIL-ON-REVERT: dropping the `trimmed != raw` arm in ValidateBGPClusterID,
-// or reverting either BGP `local-address` leaf to ValidateIPAddress (which
-// trims), makes the padded cases below commit clean again -> RED.
+// FAIL-ON-REVERT: removing the central edge-whitespace refusal in
+// checkToken (#17177) or the per-validator `trimmed != raw` arm in
+// ValidateBGPClusterID makes the padded cases below commit clean
+// again -> RED.
 
 func TestBGPPaddedClusterIDSchemaGate_14377(t *testing.T) {
 	padded := []string{" 10.0.0.1 ", " 42 ", " 10.0.0.1", "42 ", "\t10.0.0.1\t"}
@@ -28,6 +29,8 @@ func TestBGPPaddedClusterIDSchemaGate_14377(t *testing.T) {
 		if err := SchemaValidate(tree); err == nil {
 			t.Errorf("cluster-id %q: expected SchemaValidate to reject padded value, got nil", v)
 		}
+		// Direct call: the strict validator refuses padding itself
+		// (validClusterID parses the raw string).
 		if err := ValidateBGPClusterID(v); err == nil {
 			t.Errorf("ValidateBGPClusterID(%q) = nil, want padded rejection", v)
 		}
@@ -63,12 +66,9 @@ func TestBGPPaddedLocalAddressSchemaGate_14377(t *testing.T) {
 			t.Errorf("padded local-address %v: expected SchemaValidate to reject, got nil", s)
 		}
 	}
-	// Direct validator cells.
-	for _, v := range []string{" 10.0.0.1 ", " 10.0.0.1", "10.0.0.1 ", " 2001:db8::1 "} {
-		if err := ValidateBGPLocalAddress(v); err == nil {
-			t.Errorf("ValidateBGPLocalAddress(%q) = nil, want padded rejection", v)
-		}
-	}
+	// Direct validator cells: padding refusal is central (#17177), so
+	// the bare function retains ValidateIPAddress's trimmed leniency;
+	// the SchemaValidate cells above pin the commit-path refusal.
 	// Controls: bare v4 and v6 addresses still validate (both leaves accept
 	// either family through ValidateIPAddress).
 	for _, v := range []string{"10.0.0.1", "2001:db8::1"} {
@@ -90,10 +90,11 @@ func TestBGPPaddedLocalAddressSchemaGate_14377(t *testing.T) {
 	if err := ValidateBGPLocalAddress("not.an.ip"); err == nil {
 		t.Error("ValidateBGPLocalAddress(not.an.ip) = nil, want error")
 	}
-	// The generic ValidateIPAddress keeps its prior trimmed leniency for its
-	// many non-BGP leaves: this fix is scoped to the BGP leaves, so a padded
-	// generic value is not re-litigated here.
+	// The generic ValidateIPAddress function keeps its trimmed leniency
+	// when called directly; the #17177 central gate in checkToken is
+	// what refuses padding at commit for every typed leaf, including
+	// the generic-IP leaves.
 	if err := ValidateIPAddress(" 10.0.0.1 "); err != nil {
-		t.Errorf("ValidateIPAddress padded = %v, want nil (scoped fix; other leaves unchanged)", err)
+		t.Errorf("ValidateIPAddress padded = %v, want nil (function-level leniency; commit gate is central)", err)
 	}
 }

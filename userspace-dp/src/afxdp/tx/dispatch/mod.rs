@@ -566,7 +566,7 @@ fn tunnel_outer_mtu_for_frag(
     let endpoint = forwarding
         .tunnel_endpoints
         .get(&decision.resolution.tunnel_endpoint_id)?;
-    match crate::afxdp::forwarding_build::tunnel_mode_kind(&endpoint.mode) {
+    match endpoint.kind {
         crate::afxdp::forwarding_build::TunnelKind::Gre => Some(
             crate::afxdp::forwarding::tunnel_outer_mtu(forwarding, decision, endpoint),
         ),
@@ -2370,7 +2370,7 @@ fn nat64_tunnel_is_encapsulable(forwarding: &ForwardingState, tunnel_endpoint_id
         .get(&tunnel_endpoint_id)
         .is_some_and(|e| {
             matches!(
-                crate::afxdp::forwarding_build::tunnel_mode_kind(&e.mode),
+                e.kind,
                 crate::afxdp::forwarding_build::TunnelKind::Gre
                     | crate::afxdp::forwarding_build::TunnelKind::WireGuard
             )

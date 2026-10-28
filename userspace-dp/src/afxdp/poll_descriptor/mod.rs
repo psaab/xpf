@@ -548,9 +548,10 @@ use filter::{
     NonPbrInputFilterEval, SessionHitInputFilterEval, SessionHitPbrRouteRevalidation,
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit, evaluate_non_pbr_input_filter,
-    evaluate_non_pbr_input_filter_counters_cached, evaluate_non_pbr_input_filter_log_only,
-    evaluate_non_pbr_input_filter_policers_cached, filter_terminal, host_inbound_gated_lo0_action,
-    input_filter_would_deny_before_screen, lo0_action_for_solicited_reply, policer_drop_action,
+    evaluate_non_pbr_input_filter_counters_cached,
+    evaluate_non_pbr_input_filter_policers_cached, filter_terminal,
+    host_inbound_gated_lo0_action, input_filter_would_deny_before_screen,
+    lo0_action_for_solicited_reply, policer_drop_action,
     revalidate_static_pbr_route_on_session_hit, stage11_input_filter_terminal,
 };
 use policy_revalidation::{
@@ -4878,9 +4879,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // emit. The log_match comes from the SAME counted
                         // evaluation at ~L838, so emitting it does not re-count
                         // the filter hit. The flow-cache descriptor populated
-                        // later (~L2615) stores the log via
-                        // evaluate_non_pbr_input_filter_log_only (the
-                        // non-counting variant) for cache-hit replay on
+                        // later stores the log via
+                        // established_input_filter_log (the non-counting
+                        // derivation, #17038) for cache-hit replay on
                         // SUBSEQUENT packets; the miss packet does not take the
                         // cache-hit path, so the same packet is never
                         // double-logged.

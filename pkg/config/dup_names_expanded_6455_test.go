@@ -126,7 +126,7 @@ apply-groups G;`,
 // this commits green on node0 and reaches the standby only through the tolerant
 // sync path, where it merely warns.
 //
-// RED-on-revert: drop node1 from expandedDupNodeViews and this compiles clean.
+// RED-on-revert: drop node1 from effectiveNodeViews and this compiles clean.
 func TestDupExpanded6455PeerOnlyNodeGroupCaught(t *testing.T) {
 	cfg := `groups {
     node1 {

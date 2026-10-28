@@ -26,6 +26,14 @@ type restConfigReadSnapshots struct {
 	// captured-but-not-rendered snapshot cannot be mistaken for
 	// the render source.
 	Renders bool
+	// SlotErr is the rollback slot error carried inside the gate's
+	// RollbackCapture (#17215); the compare and show-rollback
+	// handlers surface it before rendering.
+	SlotErr error
+	// NoCandidate records a resolved rollback compare with no
+	// candidate arm (#17215): the handler answers the store's
+	// "not in configuration mode" error instead of 200 "".
+	NoCandidate bool
 }
 
 type restConfigReadSlotError struct {
@@ -100,10 +108,10 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 			}
 			if restShowFormat(format) == "inheritance" {
 				return snaps, config.AuthorizeExpandedConfigShowPathRendered(priceCfg, class, path,
-					config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees...)
+					config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees)
 			}
 			return snaps, config.AuthorizeConfigShowPathRendered(priceCfg, class, path,
-				config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
+				config.ConfigShowDisplaySuffix(restShowFormat(format)), trees)
 		}
 		// Fold 5: whole-tree show is refused for restricted classes
 		// (AuthorizeConfigShowWhole), but an UNRESTRICTED class's
@@ -129,26 +137,26 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 				snaps.Primary = tree
 			}
 			return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class,
-				config.ConfigShowDisplaySuffix(restShowFormat(format)), snaps.Primary)
+				config.ConfigShowDisplaySuffix(restShowFormat(format)), []*config.ConfigTree{snaps.Primary})
 		}
 	case "GET /api/v1/config":
 		// Typed compiled-config render; whole tree, no display format.
 		// The handler renders ActiveConfig regardless of ?target=, so
 		// always price the ACTIVE tree (#15994 fold 4).
 		snaps, priceCfg := s.activeWholeSnap15994(cfg)
-		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", snaps.Primary)
+		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", []*config.ConfigTree{snaps.Primary})
 	case "GET /api/v1/config/export":
 		if format == "" {
 			format = "set" // configExportHandler's default
 		}
 		snaps, priceCfg := s.activeWholeSnap15994(cfg)
 		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class,
-			config.ConfigShowDisplaySuffix(restShowFormat(format)), snaps.Primary)
+			config.ConfigShowDisplaySuffix(restShowFormat(format)), []*config.ConfigTree{snaps.Primary})
 	case "GET /api/v1/config/search":
 		// Line search over the whole active render (active only,
 		// regardless of ?target= — see /config above).
 		snaps, priceCfg := s.activeWholeSnap15994(cfg)
-		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", snaps.Primary)
+		return snaps, config.AuthorizeConfigShowWholeAtTree(priceCfg, class, "", []*config.ConfigTree{snaps.Primary})
 	case "GET /api/v1/config/compare":
 		// REST compare: ?rollback?N selects the rollback baseline
 		// (configCompareHandler): rollback>0 diffs slot vs candidate,
@@ -162,22 +170,29 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		snaps := restConfigReadSnapshots{Present: true, NodeID: -1}
 		priceCfg := cfg
 		if rollbackN > 0 {
-			scfg, slot, candidate, nid, _, slotErr := s.store.RollbackCompareSnapshot(rollbackN, false)
-			if scfg != nil {
-				priceCfg = scfg
+			cap := s.store.CaptureRollback(rollbackN, false)
+			if cap.Cfg != nil {
+				priceCfg = cap.Cfg
 			}
-			snaps.NodeID = nid
-			snaps.Primary, snaps.Other = slot, candidate
-			snaps.Renders = candidate != nil
-			if slotErr != nil {
+			snaps.NodeID = cap.NodeID
+			snaps.Primary, snaps.Other = cap.Slot, cap.Other
+			snaps.Renders = snaps.Other != nil
+			snaps.SlotErr = cap.Err
+			// Candidate-baseline compare requires a candidate exactly as
+			// the ungated store helper does (#17215): a resolved slot
+			// with no candidate arms the handler's mode error.
+			if cap.Err == nil && snaps.Other == nil {
+				snaps.NoCandidate = true
+			}
+			if cap.Err != nil {
 				// The compare handler ignores ?path=; keep the missing-slot
 				// pre-check aligned with its full-arm render.
 				if err := config.AuthorizeConfigShowCompareCommand(priceCfg, class, nil); err != nil {
 					return snaps, err
 				}
-				return snaps, restConfigReadSlotError{err: slotErr}
+				return snaps, restConfigReadSlotError{err: cap.Err}
 			}
-			return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, slot, candidate)
+			return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, cap.Slot, cap.Other)
 		}
 		scfg, active, candidate, _ := s.store.CompareSnapshot()
 		if scfg != nil {
@@ -200,17 +215,17 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		priceCfg := cfg
 		var slotErr error
 		if s.store != nil {
-			scfg, tree, nid, _, capturedSlotErr := s.store.RollbackSnapshot(n)
-			slotErr = capturedSlotErr
-			if scfg != nil {
-				priceCfg = scfg
+			cap := s.store.CaptureRollbackSlot(n)
+			slotErr = cap.Err
+			if cap.Cfg != nil {
+				priceCfg = cap.Cfg
 			}
-			nodeID = nid
-			if tree != nil {
-				trees = []*config.ConfigTree{tree}
+			nodeID = cap.NodeID
+			if cap.Slot != nil {
+				trees = []*config.ConfigTree{cap.Slot}
 			}
 		}
-		snaps := restConfigReadSnapshots{NodeID: nodeID, Present: true}
+		snaps := restConfigReadSnapshots{NodeID: nodeID, Present: true, SlotErr: slotErr}
 		if len(trees) > 0 {
 			snaps.Primary = trees[0]
 		}
@@ -225,11 +240,11 @@ func (s *Server) authorizeRESTConfigRead(r *http.Request, cfg *config.Config, p 
 		if restShowFormat(format) == "inheritance" {
 			return snaps, config.AuthorizeExpandedConfigShowRollbackAtPathRendered(priceCfg, class,
 				strings.Fields(r.URL.Query().Get("path")),
-				config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees...)
+				config.ConfigShowDisplaySuffix(restShowFormat(format)), nodeID, trees)
 		}
 		return snaps, config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, class,
 			strings.Fields(r.URL.Query().Get("path")),
-			config.ConfigShowDisplaySuffix(restShowFormat(format)), trees...)
+			config.ConfigShowDisplaySuffix(restShowFormat(format)), trees)
 	}
 	return restConfigReadSnapshots{}, nil
 }

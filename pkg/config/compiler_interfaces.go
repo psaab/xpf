@@ -62,6 +62,234 @@ var vrrpGroupPropertyKeywords = map[string]bool{
 	"track-priority-cost":        true,
 }
 
+// vrrpGroupStatementArity is how many value tokens a packed vrrp-group
+// statement consumes before the splitter in vrrpGroupStatements may open
+// another statement (#17227). It reserves the slot immediately after the
+// statement keyword itself. Nested containers carry their own inner tokens
+// as arguments here so their inner keywords cannot re-arm the splitter:
+//
+//   - `track interface <if> priority-cost <n>` — see vrrpTrackPending:
+//     a FIXED reservation of 4 would let a short `track interface <if>`
+//     swallow the FOLLOWING property keyword as its fourth token (the
+//     former Keys arm only consumed `priority-cost` when it was
+//     literally the next token), so the track branch reserves tokens
+//     positionally instead of through this table.
+//   - `virtual-address` / `virtual-inet6-address` are MULTI-VALUE: the
+//     -1 entry means "absorb every token up to the next recognized
+//     property keyword" (#1813).
+//
+// `preempt` has NO entry here: its optional `hold-time <n>` pair is
+// reserved only when the token after `preempt` IS `hold-time`
+// (vrrpPreemptPending below); a bare `preempt` reserves nothing, so the
+// following property keyword opens its own statement — the former Keys
+// arm consumed the pair conditionally the same way, and a static
+// reservation of 2 would swallow `preempt priority 200` into a
+// synthetic preempt node the reader cannot see past.
+//
+// Every other statement takes exactly one value token (the schema's
+// args:1 leaves) or zero (the flags), as listed. An arity must be
+// declared for every member of vrrpGroupPropertyKeywords: a missing
+// entry would leave pending at 0 and let its value token re-arm the
+// splitter whenever the value happened to spell another keyword.
+var vrrpGroupStatementArity = map[string]int{
+	"virtual-address":            -1, // multi-value run (#1813)
+	"virtual-inet6-address":      -1, // multi-value run (#1813)
+	"priority":                   1,
+	"no-preempt":                 0,
+	"accept-data":                0,
+	"advertise-interval":         1,
+	"inet6-advertise-interval":   1,
+	"virtual-link-local-address": 1,
+	"authentication-type":        1,
+	"authentication-key":         1,
+	"track-interface":            1, // nested priority-cost rides as a child, not Keys
+	"track-priority-cost":        1,
+}
+
+// vrrpPendingAfter returns the (pending, multi) splitter state after the
+// statement keyword kw opens a synthetic node.
+func vrrpPendingAfter(kw string) (int, bool) {
+	switch a := vrrpGroupStatementArity[kw]; {
+	case a > 0:
+		return a, false
+	case a < 0:
+		return 0, true
+	default:
+		return 0, false
+	}
+}
+
+// vrrpPreemptPending recomputes the reservation for an open packed
+// `preempt` statement from the tokens absorbed so far (#17227). The
+// only continuation is the optional Junos pair `hold-time <n>`: after
+// `preempt` itself one token is reserved so a literal `hold-time` can
+// arrive; once it does, one more token (its value) is reserved. Any
+// other first token means the `preempt` was bare — the caller checks
+// each token while that reservation is still pending (see
+// vrrpGroupStatements) and lets a property keyword open the next
+// statement instead of absorbing it into this node, exactly as the
+// former Keys arm consumed the pair only when keys[i+1] was
+// literally `hold-time`.
+func vrrpPreemptPending(keys []string) int {
+	switch {
+	case len(keys) == 1: // [preempt]
+		return 1
+	case len(keys) == 2 && keys[1] == "hold-time": // [preempt hold-time]
+		return 1
+	default:
+		// [preempt hold-time <n>] complete, or a bare `preempt` whose
+		// next token was not `hold-time`: nothing more is reserved.
+		return 0
+	}
+}
+
+// vrrpTrackPending recomputes the reservation for an open packed `track`
+// statement from the tokens absorbed so far (#17227). The Junos form is
+// `track interface <if> priority-cost <n>`: after `track` one token is
+// reserved; each absorbed token reserves the next ONLY when the shape
+// still matches (`interface`, then the interface name, then a literal
+// `priority-cost`), so a short form stops reserving once the priority-cost
+// slot is known to be absent — the caller checks the token after
+// `interface <if>`: it continues the track only when it IS
+// `priority-cost`, otherwise it must be free to open the next statement
+// (the pending==0 reopen in vrrpGroupStatements handles that). Malformed
+// tails (`track foo ...`) reserve nothing further — the child reader
+// ignores a track node without an `interface` statement, as both former
+// arms did.
+func vrrpTrackPending(keys []string) int {
+	switch {
+	case len(keys) == 1: // [track]
+		return 1
+	case len(keys) == 2 && keys[1] == "interface": // [track interface]
+		return 1
+	case len(keys) == 4 && keys[1] == "interface" && keys[3] == "priority-cost":
+		return 1
+	default:
+		// [track interface <if>] with no priority-cost yet, a completed
+		// [track interface <if> priority-cost <n>], or a malformed tail:
+		// nothing more is reserved.
+		return 0
+	}
+}
+
+// vrrpGroupStatements normalizes ONE vrrp-group instance into the single
+// statement list parseVRRPGroups reads (#17227). Before this helper the
+// function carried TWO independent readers — a Keys-packed switch over
+// Keys[2:] and a child-node switch — and they had already diverged: on
+// the packed hierarchical one-liner a later legacy `track-priority-cost`
+// overwrote a nested `priority-cost` (child arm: nested wins regardless
+// of order, #1814), and a bad packed sibling erased a good nested cost
+// to 0 via a swallowed parseTrackCost (#4573 kept-prior-value rule,
+// missed in the Keys copy). Every future property was a two-site edit.
+//
+// Normalise first, then read once: the packed tail Keys[skip:] is split
+// into synthetic child nodes (one per statement, arity-aware so a value
+// token that spells a keyword cannot re-arm the splitter, #6665), then
+// the authored children are appended through expandFlatRun so a flat-set
+// chain (`set ... vrrp-group 1 priority 150 virtual-address ...`) splits
+// at the same keywords. Relative order is packed-tail first, then
+// children — the former code read Keys before children too, so merged
+// repeated instances keep their last-wins-per-property behaviour.
+//
+// skip is the number of leading identity Keys: 2 for a node reached via
+// FindChildren("vrrp-group") (Keys=[vrrp-group, <id>, ...]), 1 for the
+// sub-node shape namedInstances can hand back for a bare container
+// (Keys=[<id>, ...]).
+func vrrpGroupStatements(inst *Node) []*Node {
+	if inst == nil {
+		return nil
+	}
+	skip := 2
+	if len(inst.Keys) > 0 && inst.Keys[0] != "vrrp-group" && inst.Keys[0] != "vrrp-inet6-group" {
+		skip = 1
+	}
+	isProp := func(tok string) bool { return vrrpGroupPropertyKeywords[tok] }
+	var props []*Node
+	if len(inst.Keys) > skip {
+		// Arity-aware split. The generic packedStatementPropsArity
+		// reserves a FIXED count per statement; vrrp additionally has
+		// the multi-value virtual-address run, which must absorb until
+		// the next recognized keyword (#1813). Handle that inline so
+		// the virtual-address Keys run stays on ONE synthetic node,
+		// exactly as the child reader expects (Keys[1:]).
+		var cur *Node
+		pending := 0
+		multi := false
+		for _, tok := range inst.Keys[skip:] {
+			// A packed `track interface <if>` whose next token is NOT
+			// `priority-cost` is complete: let that token open the next
+			// statement instead of absorbing it as a would-be cost slot.
+			if cur != nil && len(cur.Keys) == 3 && cur.Keys[0] == "track" &&
+				cur.Keys[1] == "interface" && tok != "priority-cost" && pending == 0 {
+				cur = &Node{Keys: []string{tok}, Line: inst.Line, Column: inst.Column}
+				props = append(props, cur)
+				pending, multi = vrrpPendingAfter(tok)
+				if tok == "preempt" {
+					pending = 1
+				}
+				continue
+			}
+			// A bare packed `preempt` whose next token is NOT
+			// `hold-time` is complete: let a property keyword open the
+			// next statement instead of absorbing it into the preempt
+			// node (where the reader would ignore it). This check runs
+			// while the one-token `hold-time` reservation is still
+			// pending, so it must not require pending==0 — a keyword
+			// here is never the reserved slot's content unless it IS
+			// `hold-time`. A non-keyword token stays absorbed, as
+			// under the former Keys arm.
+			if cur != nil && len(cur.Keys) == 1 && cur.Keys[0] == "preempt" &&
+				tok != "hold-time" && isProp(tok) {
+				cur = &Node{Keys: []string{tok}, Line: inst.Line, Column: inst.Column}
+				props = append(props, cur)
+				pending, multi = vrrpPendingAfter(tok)
+				if tok == "preempt" {
+					pending = 1
+				}
+				continue
+			}
+			switch {
+			case multi:
+				if isProp(tok) {
+					multi = false
+					cur = &Node{Keys: []string{tok}, Line: inst.Line, Column: inst.Column}
+					props = append(props, cur)
+					pending, multi = vrrpPendingAfter(tok)
+					if tok == "preempt" {
+						pending = 1
+					}
+					continue
+				}
+				cur.Keys = append(cur.Keys, tok)
+			case pending > 0:
+				pending--
+				cur.Keys = append(cur.Keys, tok)
+				if cur.Keys[0] == "track" {
+					pending = vrrpTrackPending(cur.Keys)
+				} else if cur.Keys[0] == "preempt" {
+					pending = vrrpPreemptPending(cur.Keys)
+				}
+			case cur == nil || isProp(tok):
+				cur = &Node{Keys: []string{tok}, Line: inst.Line, Column: inst.Column}
+				props = append(props, cur)
+				pending, multi = vrrpPendingAfter(tok)
+				if tok == "track" {
+					pending = 1
+				} else if tok == "preempt" {
+					pending = 1
+				}
+			default:
+				cur.Keys = append(cur.Keys, tok)
+			}
+		}
+	}
+	// #15199: expand authored children against the v6 schema node so a
+	// Junos-spelling chain splits at the alias leaf too; the v6 node is
+	// a superset of the v4 leaf set.
+	props = append(props, expandFlatRun(inst.Children, vrrpGroupSchemaNode(true))...)
+	return props
+}
+
 // parseInterfaceNumeric9899 parses a canonical unsigned decimal token in
 // [min..max] for #9899 F030/F031 interface tunnel/VLAN leaves (key
 // 0..4294967295, TTL 1..255, VLAN/inner 0..4094). Canonical form is a
@@ -1646,8 +1874,12 @@ func isVRRPGroupNodeName(name string) bool {
 // under both an inet AND an inet6 address yields TWO distinct map
 // entries (the v4 and v6 address strings differ) — no collision.
 // Handles both AST shapes (#1796): properties packed into the instance
-// node's Keys[2:] (legacy flat-set leaves) AND properties as child
-// nodes (hierarchical blocks + schema-structured flat-set).
+// node's Keys (legacy flat-set leaves) AND properties as child nodes
+// (hierarchical blocks + schema-structured flat-set). Both shapes are
+// normalized by vrrpGroupStatements into ONE statement list read by the
+// single switch below (#17227) — the former second Keys-packed switch
+// diverged on track-cost precedence (#1814) and on the #4573
+// keep-prior-value rule.
 func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 	// #15199 (A05-07): the Junos IPv6 spelling `vrrp-inet6-group` is an
 	// alias of `vrrp-group` under family inet6; both names feed the same
@@ -1675,135 +1907,17 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 			}
 			unit.VRRPGroups[key] = vg
 		}
-		// Keys-encoded properties (flat-set leaf shape):
-		// Keys = ["vrrp-group", "<id>", prop, value, ...].
-		keys := vrrpInst.node.Keys
-		for i := 2; i < len(keys); i++ {
-			switch keys[i] {
-			case "virtual-address", "virtual-inet6-address":
-				// Multi-value (#1813): consume every
-				// following token up to the next
-				// recognized property keyword —
-				// `vrrp-group 1 virtual-address
-				// [ a b ];` packs all addresses
-				// inline.
-				for i+1 < len(keys) && !vrrpGroupPropertyKeywords[keys[i+1]] {
-					i++
-					vg.VirtualAddresses = append(vg.VirtualAddresses, keys[i])
-				}
-			case "priority":
-				if i+1 < len(keys) {
-					i++
-					// #4573: only overwrite on a clean parse. A swallowed
-					// Atoi error (`_ =`) used to reset Priority to 0 — the
-					// RFC 5798 resignation value — on the lenient / HA-sync
-					// path; keep the constructor default (100) or the prior
-					// value instead of silently resigning the group.
-					if n, err := strconv.Atoi(keys[i]); err == nil {
-						vg.Priority = n
-					}
-				}
-			case "preempt":
-				vg.Preempt = true
-				vg.PreemptSet = true
-				// Junos `preempt hold-time <seconds>` packs the
-				// nested leaf onto the Keys run in the flat-set
-				// shape: ... preempt hold-time 30. Consume the
-				// optional `hold-time <n>` pair when present.
-				if i+2 < len(keys) && keys[i+1] == "hold-time" {
-					// #4573: keep the prior value on a bad parse (`_ =`).
-					if n, err := strconv.Atoi(keys[i+2]); err == nil {
-						vg.PreemptHoldTime = n
-					}
-					i += 2
-				}
-			case "no-preempt":
-				// Junos explicit opt-out (#15046): Preempt stays
-				// false (last statement wins, mirroring the
-				// child-node walk) and PreemptSet records the
-				// authored statement so it round-trips.
-				vg.Preempt = false
-				vg.PreemptSet = true
-			case "accept-data":
-				vg.AcceptData = true
-			case "advertise-interval":
-				if i+1 < len(keys) {
-					i++
-					// #4573: keep the prior value on a bad parse (`_ =`).
-					if n, err := strconv.Atoi(keys[i]); err == nil {
-						vg.AdvertiseInterval = n
-					}
-				}
-			case "inet6-advertise-interval":
-				// #16558: Junos milliseconds (100..40000 schema-gated).
-				if i+1 < len(keys) {
-					i++
-					if n, err := strconv.Atoi(keys[i]); err == nil {
-						vg.Inet6AdvertiseIntervalMS = n
-					}
-				}
-			case "virtual-link-local-address":
-				// #16558: recorded for the name-refusal gate; never actuated.
-				if i+1 < len(keys) {
-					i++
-					vg.VirtualLinkLocalAddress = keys[i]
-				}
-			case "authentication-type":
-				if i+1 < len(keys) {
-					i++
-					vg.AuthType = keys[i]
-				}
-			case "authentication-key":
-				if i+1 < len(keys) {
-					i++
-					vg.AuthKey = NewSecret(keys[i])
-				}
-			case "track-interface":
-				if i+1 < len(keys) {
-					i++
-					// First-wins (#1814): duplicates in
-					// the Keys-packed spelling are
-					// rejected/warned by the AST
-					// pre-walk; keep the first here so
-					// lenient semantics are consistent
-					// with the child-node prune.
-					if vg.TrackInterface == "" {
-						vg.TrackInterface = keys[i]
-					}
-				}
-			case "track":
-				// Junos container packed onto the Keys run
-				// (#15046): `track interface <if> priority-cost
-				// <n>`. First-wins like track-interface above;
-				// duplicates across spellings are gated by the
-				// #1814/#15046 pre-walk.
-				if i+2 < len(keys) && keys[i+1] == "interface" {
-					if vg.TrackInterface == "" {
-						vg.TrackInterface = keys[i+2]
-					}
-					i += 2
-					if i+2 < len(keys) && keys[i+1] == "priority-cost" {
-						if n, ok := parseTrackCost(keys[i+2]); ok && vg.TrackPriorityDelta == 0 {
-							vg.TrackPriorityDelta = n
-						}
-						i += 2
-					}
-				}
-			case "track-priority-cost":
-				if i+1 < len(keys) {
-					i++
-					vg.TrackPriorityDelta, _ = parseTrackCost(keys[i])
-				}
-			}
-		}
-		// Child-node properties (hierarchical blocks and
-		// schema-structured flat-set containers).
-		// Track-interface values are gathered and applied
-		// AFTER the loop so the nested
-		// `track-interface <if> { priority-cost <n>; }`
-		// form wins over the legacy flat sibling
-		// `track-priority-cost <n>` regardless of node
-		// order (#1814 — the loop is source-order based).
+		// Single reader (#17227): vrrpGroupStatements normalizes the
+		// Keys-packed tail and the authored children into one list.
+		// Track-interface values are gathered and applied AFTER the
+		// loop so the nested `track-interface <if> { priority-cost
+		// <n>; }` form wins over the legacy flat sibling
+		// `track-priority-cost <n>` regardless of node order (#1814 —
+		// the loop is source-order based). Because there is now only
+		// this switch, a packed bad sibling (`track-priority-cost
+		// <bad>`) can no longer erase a nested cost through a
+		// swallowed parse (#4573): siblingTrackCost is only set on a
+		// clean parseTrackCost, and nested is applied last.
 		var (
 			trackIface          string
 			trackIfaceSet       bool
@@ -1812,15 +1926,7 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 			siblingTrackCost    int
 			siblingTrackCostSet bool
 		)
-		// A flat `set ... vrrp-group <id> priority <n> virtual-address <vip>`
-		// run is represented as a chain of child nodes. Expand it against the
-		// group schema before reading properties so every property is visible
-		// to this loop, just as it is in the braced spelling.
-		// #15199: expand against the v6 node so a Junos-spelling chain
-		// (`vrrp-inet6-group 1 virtual-inet6-address ...`) splits at the
-		// alias leaf too; the v6 node is a superset of the v4 leaf set.
-		props := expandFlatRun(vrrpInst.node.Children, vrrpGroupSchemaNode(true))
-		for _, prop := range props {
+		for _, prop := range vrrpGroupStatements(vrrpInst.node) {
 			switch prop.Name() {
 			case "virtual-address", "virtual-inet6-address":
 				// Multi-value spellings (#1813):
@@ -1841,9 +1947,9 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 				}
 			case "priority":
 				if v := nodeVal(prop); v != "" {
-					// #4573: only overwrite on a clean parse — see the
-					// flat-set arm above (a swallowed Atoi would resign the
-					// group at priority 0 on the lenient path).
+					// #4573: only overwrite on a clean parse (a
+					// swallowed Atoi would resign the group at
+					// priority 0 on the lenient path).
 					if n, err := strconv.Atoi(v); err == nil {
 						vg.Priority = n
 					}
@@ -1893,27 +1999,62 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 				}
 			case "virtual-link-local-address":
 				// #16558: recorded for the name-refusal gate; never actuated.
-				vg.VirtualLinkLocalAddress = nodeVal(prop)
+				// An empty value (bare packed keyword, no token after it —
+				// the former Keys arm required one) stays unset.
+				if v := nodeVal(prop); v != "" {
+					vg.VirtualLinkLocalAddress = v
+				}
 			case "authentication-type":
-				vg.AuthType = nodeVal(prop)
+				if v := nodeVal(prop); v != "" {
+					vg.AuthType = v
+				}
 			case "authentication-key":
-				vg.AuthKey = NewSecret(nodeVal(prop))
+				if v := nodeVal(prop); v != "" {
+					vg.AuthKey = NewSecret(v)
+				}
 			case "track-interface":
 				// The interface name lives in Keys[1]
 				// (NOT nodeVal — its Children[0]
 				// fallback would misread the nested
 				// priority-cost child as the name).
+				// First-wins within one instance (#1814/#17227):
+				// duplicates are rejected/warned and pruned by the
+				// AST pre-walk, but the packed one-liner carries its
+				// duplicates on THIS list (no child prune reaches
+				// them), so the reader itself keeps the first —
+				// the former Keys arm did, and the lenient
+				// first-wins contract depends on it.
+				firstTrack := !trackIfaceSet
 				if len(prop.Keys) >= 2 {
-					trackIface = prop.Keys[1]
-					trackIfaceSet = true
+					if firstTrack {
+						trackIface = prop.Keys[1]
+						trackIfaceSet = true
+					}
+				} else {
+					firstTrack = false
 				}
 				// Nested form (#1814): standard Junos
 				// `track-interface <if> { priority-cost <n>; }`.
-				if pc := prop.FindChild("priority-cost"); pc != nil {
-					if v := nodeVal(pc); v != "" {
-						if n, ok := parseTrackCost(v); ok {
-							nestedTrackCost = n
-							nestedTrackCostSet = true
+				// Only the winning (first) statement contributes
+				// its nested cost.
+				if firstTrack {
+					if pc := prop.FindChild("priority-cost"); pc != nil {
+						if v := nodeVal(pc); v != "" {
+							if n, ok := parseTrackCost(v); ok {
+								nestedTrackCost = n
+								nestedTrackCostSet = true
+							}
+						}
+					}
+					// Packed nested cost (#17227): the packed
+					// spelling `track-interface <if> priority-cost
+					// <n>` rides on this node's own Keys.
+					for i := 2; i+1 < len(prop.Keys); i++ {
+						if prop.Keys[i] == "priority-cost" {
+							if n, ok := parseTrackCost(prop.Keys[i+1]); ok {
+								nestedTrackCost = n
+								nestedTrackCostSet = true
+							}
 						}
 					}
 				}
@@ -1923,13 +2064,16 @@ func parseVRRPGroups(unit *InterfaceUnit, addrName string, addrNode *Node) {
 				// braced, or the flat-set chain
 				// `track interface <if> priority-cost <n>` packed
 				// onto Keys / nested as children. Feeds the same
-				// single-track slot as track-interface.
-				if iface, cost, ok := parseJunosTrackContainer15046(prop); ok {
-					trackIface = iface
-					trackIfaceSet = true
-					if cost > 0 {
-						nestedTrackCost = cost
-						nestedTrackCostSet = true
+				// single-track slot as track-interface. First-wins
+				// like track-interface above (#17227).
+				if !trackIfaceSet {
+					if iface, cost, ok := parseJunosTrackContainer15046(prop); ok {
+						trackIface = iface
+						trackIfaceSet = true
+						if cost > 0 {
+							nestedTrackCost = cost
+							nestedTrackCostSet = true
+						}
 					}
 				}
 			case "track-priority-cost":
@@ -2973,9 +3117,13 @@ func compileInterfaceDynamicDNS(afNode *Node) *InterfaceDynamicDNSConfig {
 //   - flat-set bracket        `set ... member-interfaces [ a b ]`
 //     → Keys=["member-interfaces"], ONE child whose Keys hold every name
 //
-// The last shape is why firewallMatchValues is not enough here: it reads only
-// Keys[0] of each child, so it would keep the first name of a flat-set bracket
-// list and drop the rest. Descend the whole subtree and take every key.
+// firewallMatchValues is not enough here because it never DESCENDS: since
+// #6714 it reads every key of each DIRECT child, so it would in fact keep
+// every name of this flat-set bracket list. What it would drop is a name
+// nested below a child — plainListValues descends the whole subtree and
+// takes every key, which is the property this leaf relies on. It also does
+// not skip a bare self-repeat on the node's own tail the way
+// firewallMatchValues does. See TestReaderDifferences17216PinDocClaims.
 //
 // `member-interfaces` has no per-member option keywords in Junos, so unlike
 // the NTP server list there is no trailing-token ambiguity to resolve — every

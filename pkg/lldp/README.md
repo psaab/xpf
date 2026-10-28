@@ -75,11 +75,13 @@ interface-name gotcha below).
 ## Socket lifecycle (#2035, #16669)
 
 - Each enabled interface gets one `ifSession` (`lldp.go`) holding a bound
-  RX `AF_PACKET` socket, a reused TX `AF_PACKET` socket, and a wake
-  eventfd. Sessions are created in `Apply()` and tracked on the `Manager`.
+  RX `AF_PACKET` socket (wrapped in the shared `linuxsock.PpollRecv`
+  cancellable-receive primitive, #17231), a reused TX `AF_PACKET` socket,
+  and (inside the primitive) a wake eventfd. Sessions are created in
+  `Apply()` and tracked on the `Manager`.
 - The RX socket has **no `SO_RCVTIMEO`** and `rxLoop` never parks in a bare
-  `Recvfrom` (#16669): `recv` waits in `ppoll` on `{rxFD, wakeFD}` and only
-  calls `Recvfrom` once the RX fd is readable. `Stop()` (which runs on the
+  `Recvfrom` (#16669): `recv` waits in the primitive's `ppoll` on
+  `{RX fd, wakeFD}` and only calls `Recvfrom` once the RX fd is readable. `Stop()` (which runs on the
   daemon shutdown critical path, just before VRRP resignation, and inside
   every re-`Apply`) cancels the context, then `signalStop()`s every session
   (one non-blocking 8-byte write to the wake eventfd), then `wg.Wait()`,
@@ -139,7 +141,8 @@ interface-name gotcha below).
 - Construction goes through the `newIfSessionFn` seam so tests can inject
   a session and assert `Stop()` returns promptly with a parked RX
   goroutine; since #16669 the injected sessions carry a real wake eventfd
-  and drive the same `ppoll` path as production, and the AF_PACKET cell
+  and drive the same `ppoll` path as production (via
+  `linuxsock.NewPpollRecvForTest` since #17231), and the AF_PACKET cell
   uses real sockets in a private netns instead of a socketpair.
 - **Apply/Stop concurrency (`#5121`):** `Apply` (a config commit) and `Stop`
   (daemon shutdown) are lifecycle transitions that can run concurrently — the
