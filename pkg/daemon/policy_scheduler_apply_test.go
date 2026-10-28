@@ -310,7 +310,7 @@ func TestApplyConfigPublishesScheduleStateToNonUserspaceDataplane(t *testing.T) 
 	d.publishInitialPolicySchedulerStateLocked(cfg, activeState, &dataplane.ApplyResult{})
 
 	if dp.updateCalls != 1 {
-		t.Fatalf("UpdatePolicyScheduleState calls = %d, want 1", dp.updateCalls)
+		t.Fatalf("UpdatePolicyScheduleStateWithLatch calls = %d, want 1", dp.updateCalls)
 	}
 	if got, ok := dp.updateStateSeen["workhours"]; !ok || !got {
 		t.Fatalf("active state for workhours = %t, present=%t; want active true", got, ok)
@@ -345,7 +345,7 @@ func TestInitialPolicySchedulerPublishFailureQueuesRetry(t *testing.T) {
 	}
 
 	// A nil result means the initial state was skipped, not converged. It must
-	// take the same retry path even though UpdatePolicyScheduleState was not run.
+	// take the same retry path even though UpdatePolicyScheduleStateWithLatch was not run.
 	callsBeforeSkippedPublish := dp.updateCalls
 	d.publishInitialPolicySchedulerStateLocked(cfg, activeState, nil)
 	if dp.updateCalls != callsBeforeSkippedPublish {
@@ -388,7 +388,7 @@ func TestPolicySchedulerUpdateUsesRuntimeUpdaterWithoutLegacyDataplane(t *testin
 	d.updatePolicyScheduleStateLocked(&config.Config{}, map[string]bool{"workhours": true})
 
 	if dp.updateCalls != 1 {
-		t.Fatalf("UpdatePolicyScheduleState calls = %d, want 1", dp.updateCalls)
+		t.Fatalf("UpdatePolicyScheduleStateWithLatch calls = %d, want 1", dp.updateCalls)
 	}
 	if got, ok := dp.stateSeen["workhours"]; !ok || !got {
 		t.Fatalf("stateSeen[workhours] = %t, present=%t; want true", got, ok)
@@ -420,7 +420,7 @@ func TestApplyConfigSeedsUserspacePolicySchedulerStateBeforeCompile(t *testing.T
 			dp.compileCfgPolicy, dp.compileCfgSchedule)
 	}
 	if dp.updateCalls != 0 {
-		t.Fatalf("UpdatePolicyScheduleState calls = %d, want 0 before aborted apply publishes", dp.updateCalls)
+		t.Fatalf("UpdatePolicyScheduleStateWithLatch calls = %d, want 0 before aborted apply publishes", dp.updateCalls)
 	}
 }
 
@@ -434,7 +434,7 @@ func TestPolicySchedulerInitialPublishSkipsUserspaceLegacyMapUpdate(t *testing.T
 	d.publishInitialPolicySchedulerStateLocked(cfg, activeState, &dataplane.ApplyResult{})
 
 	if dp.updateCalls != 0 {
-		t.Fatalf("UpdatePolicyScheduleState calls = %d, want 0 for userspace initial apply", dp.updateCalls)
+		t.Fatalf("UpdatePolicyScheduleStateWithLatch calls = %d, want 0 for userspace initial apply", dp.updateCalls)
 	}
 }
 
