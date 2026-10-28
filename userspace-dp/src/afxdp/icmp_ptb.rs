@@ -282,14 +282,16 @@ pub(in crate::afxdp) fn post_transform_needs_inner_dst(
 ///   - GRE: the #2300 SSOT `native_gre_inner_mtu` (transport MTU minus the
 ///     outer IP + GRE[+key] header) — the SAME value the #2331 encap drop
 ///     guard enforces, so this site and that drop site agree.
-///   - WireGuard: the pad-aware `wg::mss::wg_inner_mtu` derived from the
-///     PHYSICAL underlay egress MTU (`frame::wg_endpoint_physical_outer_mtu`,
-///     the #2680 SSOT) minus the WG outer overhead and worst-case §5.4.6
-///     padding — the inverse of the `frame::wg::wg_encapped_size` drop guard,
-///     so the advertised inner MTU matches the threshold the guard admits
-///     (#2684). NOT `tunnel_outer_mtu`: for a WG flow `endpoint.destination`
-///     is zeroed, so that helper falls back to the LOGICAL ifindex MTU
-///     (already underlay − encap) and double-subtracts the encap overhead.
+///   - WireGuard: `wg::mss::wg_inner_mtu` for the PHYSICAL underlay egress
+///     MTU (`frame::wg_endpoint_physical_outer_mtu`, the #2680 SSOT) minus
+///     WG outer overhead only — no worst-case pad term. #16499 caps the
+///     §5.4.6 pad at the inner budget, so a full-budget inner packet encapps
+///     to exactly the outer MTU. This is the inverse of the
+///     `frame::wg::wg_encapped_size` drop guard, so the advertised inner MTU
+///     matches the threshold the guard admits (#2684). NOT `tunnel_outer_mtu`:
+///     for a WG flow `endpoint.destination` is zeroed, so that helper falls
+///     back to the LOGICAL ifindex MTU (already underlay − encap) and
+///     double-subtracts the encap overhead.
 ///   - NAT64: the egress MTU adjusted by the v6<->v4 header-size delta
 ///     (RFC 7915): a v6 inner translated to a v4 egress may be 20 bytes
 ///     LARGER on the inner side; a v4 inner translated to a v6 egress 20
