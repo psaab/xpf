@@ -494,15 +494,26 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 		return wholePayloadMask16726(cmd, fingerprint)
 	}
 	// The outer config lexer unwraps a quoted commands value as one opaque
-	// token. If its contents start with a comment, lex those contents as an
-	// embedded command too; otherwise a quoted `"# set ..."` looks like one
-	// harmless token and its credential survives.
+	// token (tokens[0] is the unwrapped text). Lex those contents as an
+	// embedded command too, for ANY such token: a quoted whole-command
+	// (`"set ... pre-shared-key ascii-text SECRET"`) or a value whose text
+	// turns the credential into a trailing comment
+	// (`"set system host-name harmless # pre-shared-key ... SENTINEL"`) is
+	// otherwise one harmless-looking token and its credential survives.
+	// Recursion cannot loop: the inner text replays the same grammar with
+	// strictly fewer quote characters. When the inner command masks
+	// nothing, return it with changed=false so the caller keeps the
+	// authored (quoted) token byte-identical — no churn, and the inner
+	// render is never substituted for clean text. When it does mask,
+	// return the FINGERPRINTED inner render verbatim: embedding the masked
+	// text back into the outer token would needlessly re-encode nested
+	// quotes, and the placeholder the inner render produces is exactly
+	// what the outer quotes framed.
 	if len(tokens) == 1 && quoted[0] {
-		inner := strings.TrimSpace(tokens[0])
-		if strings.HasPrefix(inner, "#") || strings.HasPrefix(inner, "/*") ||
-			strings.HasPrefix(inner, "//") {
-			return redactEmbeddedCommand(tokens[0], fingerprint)
+		if innerRendered, innerChanged := redactEmbeddedCommand(tokens[0], fingerprint); innerChanged {
+			return innerRendered, true
 		}
+		return tokens[0], false
 	}
 	changed := redactEmbeddedTokens(tokens, fingerprint)
 	if !lexOK && !changed {

@@ -46,6 +46,16 @@ func TestRedactEmbeddedCommentPayloads18379(t *testing.T) {
 			command:         strconv.Quote("# " + credential),
 			wantPlaceholder: true,
 		},
+		{
+			name:            "quoted whole-command credential",
+			command:         strconv.Quote(credential),
+			wantPlaceholder: true,
+		},
+		{
+			name:         "quoted command with trailing comment credential",
+			command:      strconv.Quote("set system host-name preserved # " + credential),
+			keepOrdinary: true,
+		},
 	}
 
 	makeTree := func(command string) *ConfigTree {
