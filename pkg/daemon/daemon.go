@@ -1506,11 +1506,6 @@ type Daemon struct {
 	// constructor publishes it and stopClusterComms nils it under that
 	// lock, while populate loops receive their channel by value.
 	fabricSlots [2]fabricSlot
-	// fabricEpoch is bumped by clearFabricSlots under fabricMu (#17060).
-	// rememberFabricPeerMAC captures it with the peer it read under
-	// fabricMu and re-checks it before publishing a non-nil helper
-	// constraint, so a pre-clear reader cannot re-arm a dropped constraint.
-	fabricEpoch uint64
 	// fabricPopulateWG tracks the live populateFabricFwdSlot loops
 	// (#17060). startFabricForwardingLoops Adds on its own stack before
 	// each go statement (never inside the loop goroutine), and

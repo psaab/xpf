@@ -659,32 +659,15 @@ func (d *Daemon) rememberFabricPeerMAC(slot int, mac net.HardwareAddr) {
 	stored := make(net.HardwareAddr, 6)
 	copy(stored, mac)
 	d.fabricMu.Lock()
+	defer d.fabricMu.Unlock()
 	s := &d.fabricSlots[slot]
 	s.peerMAC = stored
-	peerIP := s.peerIP
-	epoch := d.fabricEpoch
-	d.fabricMu.Unlock()
-	// #15918: publish the identity to the live userspace resolver so its
-	// link-local fallback is constrained identically even on snapshot builds
-	// that never pass through a daemon refresh.
-	//
-	// #17060 fold: re-check the epoch under fabricMu before publishing.
-	// A reader that read peerIP before clearFabricSlots bumped the epoch
-	// must not re-arm the non-nil constraint the clear dropped. When the
-	// epochs match the registration is ordered with any concurrent clear by
-	// fabricMu itself (register-then-clear drops it; clear-then-register
-	// keeps the live peer's identity), so no registration is lost.
-	if peerIP == nil {
-		return
-	}
-	d.fabricMu.Lock()
-	current := d.fabricEpoch == epoch
-	if current {
-		current = d.fabricSlots[slot].peerIP.Equal(peerIP)
-	}
-	d.fabricMu.Unlock()
-	if current {
-		dpuserspace.RegisterFabricPeerMACConstraint(peerIP.String(), stored)
+	if s.peerIP != nil {
+		// Publish under the same lock that clearFabricSlots takes before
+		// clearing peerIP. This orders registration with the clear: the
+		// constraint is either visible for the clear to remove, or the
+		// slot is already cleared and cannot re-arm it.
+		dpuserspace.RegisterFabricPeerMACConstraint(s.peerIP.String(), stored)
 	}
 }
 
@@ -865,12 +848,12 @@ func (d *Daemon) clearFabricFwdSlot(_ context.Context, slot int) {
 	}
 }
 
-// clearFabricSlots zeroes each configured slot's epoch state and drops its
-// userspace identity constraint. stopClusterComms calls it only after joining
-// the constructor and populate loops, so no old epoch can write state after it.
+// clearFabricSlots zeroes each configured slot and drops its userspace
+// identity constraint under fabricMu, serializing it with MAC registration.
+// stopClusterComms calls it only after joining all populate loops.
 func (d *Daemon) clearFabricSlots() {
 	d.fabricMu.Lock()
-	d.fabricEpoch++
+	defer d.fabricMu.Unlock()
 	var staleConstraints [2]string
 	staleCount := 0
 	for slot := range d.fabricSlots {
@@ -891,7 +874,6 @@ func (d *Daemon) clearFabricSlots() {
 		s.lastLog = time.Time{}
 		s.probePending = false
 	}
-	d.fabricMu.Unlock()
 	for i := range staleCount {
 		dpuserspace.RegisterFabricPeerMACConstraint(staleConstraints[i], nil)
 	}
