@@ -459,12 +459,13 @@ func TestStreamRequestSpecCoversEveryStream17175(t *testing.T) {
 	}
 	// F3: a needsRequest=false declaration is a claim that NO
 	// request-priced arm can distinguish the typed empty request from
-	// the retained actual request (or from nil). If a future arm is
-	// added for such a method, open (typed-empty) and tick (retained
-	// actual) would silently diverge. Assert it structurally: for
-	// every needsRequest=false stream, the empty request and a
-	// populated request must name the same argument forms, resolve
-	// the same canonical command, price the same method permission,
+	// a populated request (or from nil). If a future arm is added for
+	// such a method, open (typed-empty) and first-message/tick
+	// (retained decoded message) would silently diverge. Assert it
+	// structurally: for
+	// every needsRequest=false stream, the empty request, a populated
+	// request and nil must name the same argument forms, resolve the
+	// same canonical command, price the same method permission,
 	// require no config-target price, carry no alias forms, and not
 	// be a config-read/commit-priced method.
 	for full, needs := range streamRequestSpec17175 {
@@ -490,11 +491,18 @@ func TestStreamRequestSpecCoversEveryStream17175(t *testing.T) {
 		if got, ok := rpcCanonicalCommand(full, populated); !ok || got != base {
 			t.Errorf("%s needsRequest=false: canonical command differs for populated request %q vs empty %q — a request-priced arm exists", full, got, base)
 		}
+		if got, ok := rpcCanonicalCommand(full, nil); !ok || got != base {
+			t.Errorf("%s needsRequest=false: canonical command differs for nil request %q vs empty %q — a request-priced arm reads nil", full, got, base)
+		}
 		cfg := streamCensusCfg17175(t)
 		emptyForms, emptyNamed := rpcArgumentForms(cfg, full, empty, base)
 		popForms, popNamed := rpcArgumentForms(cfg, full, populated, base)
 		if emptyNamed != popNamed || fmt.Sprint(emptyForms) != fmt.Sprint(popForms) {
 			t.Errorf("%s needsRequest=false: rpcArgumentForms differs empty=%v/%v populated=%v/%v — a request-priced arm exists", full, emptyForms, emptyNamed, popForms, popNamed)
+		}
+		nilForms, nilNamed := rpcArgumentForms(cfg, full, nil, base)
+		if nilNamed != emptyNamed || fmt.Sprint(nilForms) != fmt.Sprint(emptyForms) {
+			t.Errorf("%s needsRequest=false: rpcArgumentForms differs nil=%v/%v empty=%v/%v — a request-priced arm reads nil", full, nilForms, nilNamed, emptyForms, emptyNamed)
 		}
 		p1, _ := methodPermission(full, empty)
 		if p2, _ := methodPermission(full, populated); p1 != p2 {
@@ -502,6 +510,9 @@ func TestStreamRequestSpecCoversEveryStream17175(t *testing.T) {
 		}
 		if p3, _ := methodPermission(full, nil); p1 != p3 {
 			t.Errorf("%s needsRequest=false: methodPermission differs empty=%v nil=%v", full, p1, p3)
+		}
+		if _, ok := configTargetReadPermission(full, nil); ok {
+			t.Errorf("%s needsRequest=false: configTargetReadPermission prices the nil request", full)
 		}
 		if _, ok := configTargetReadPermission(full, populated); ok {
 			t.Errorf("%s needsRequest=false: configTargetReadPermission prices the populated request", full)
@@ -536,8 +547,16 @@ func populatedStreamRequest17175(fullMethod string) any {
 // (the needsRequest=false stream) through the real interceptor: a
 // class whose bare `monitor security packet-drop` charge is denied
 // must be refused, and a class that admits it must stream even with a
-// populated filter request — proving the populated request is priced
-// identically to the typed empty request at open and on ticks.
+// populated filter request and survive ticks. Ticks re-price the
+// retained decoded message, which decides identically to the typed
+// empty request priced at open (census-enforced). No behavioural
+// cell can distinguish retained-message from nil pricing for this
+// method — the census proves nil and empty name identical forms, so
+// both price identically; the never-nil tick is a code invariant
+// (the watcher prices only retainedRequest's non-nil message or the
+// open price), guarded structurally by that census.
+// TestStreamMonitorPacketDropTickRevocation17175 adds the mid-stream
+// revocation arm on the same tick.
 func TestStreamMonitorPacketDropAdmitDeny17175(t *testing.T) {
 	shortenStreamReauth9051(t)
 	const cfgText = `
@@ -581,8 +600,8 @@ system {
 	}
 
 	// Admit: the allowlist admits ^monitor, so the populated request
-	// streams and survives ticks (tick re-prices the retained actual
-	// request, which must decide identically to the empty one).
+	// streams and survives ticks (ticks re-price the retained decoded
+	// message, identically to the typed empty request).
 	s2 := streamServer17175(t, cfgText)
 	errc2, entered2, cancel2 := runStream17175(t, s2, uidDiagAllow17175,
 		fullMethod17175("MonitorPacketDrop"), populated)
@@ -604,6 +623,62 @@ system {
 	case <-errc2:
 	case <-time.After(5 * time.Second):
 		t.Fatal("admitted MonitorPacketDrop did not end on hangup")
+	}
+}
+
+// TestStreamMonitorPacketDropTickRevocation17175 pins the re-auth
+// tick with an observable revocation: an admitted MonitorPacketDrop
+// stream whose class is narrowed mid-stream to deny the bare
+// `monitor security packet-drop` charge must terminate PermissionDenied
+// on a tick that prices the retained decoded message.
+func TestStreamMonitorPacketDropTickRevocation17175(t *testing.T) {
+	shortenStreamReauth9051(t)
+	s := streamServer17175(t, streamAuthzConfig17175)
+	// allowuser (diag-allow, allow-commands ^ping|^traceroute|^monitor)
+	// admits the bare charge at open and on ticks.
+	populated := &pb.MonitorPacketDropRequest{SourcePrefix: "10.99.1.0/24", Protocol: "tcp", Count: 1}
+	errc, entered, cancel := runStream17175(t, s, uidDiagAllow17175,
+		fullMethod17175("MonitorPacketDrop"), populated)
+	defer cancel()
+	select {
+	case <-entered:
+	case err := <-errc:
+		t.Fatalf("MonitorPacketDrop refused at open under allow ^monitor: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler never entered for admitted MonitorPacketDrop")
+	}
+	const narrowed = `
+system {
+    host-name authz-17175;
+    login {
+        class diag-allow {
+            permissions view;
+            deny-commands "^monitor security packet-drop";
+        }
+        user allowuser {
+            class diag-allow;
+        }
+    }
+}
+`
+	store := s.store
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure: %v", err)
+	}
+	if err := store.LoadOverride(narrowed); err != nil {
+		t.Fatalf("LoadOverride: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	store.ExitConfigure()
+	select {
+	case err := <-errc:
+		if status.Code(err) != codes.PermissionDenied {
+			t.Fatalf("mid-stream drop revocation must end PermissionDenied, got %v (code %v)", err, status.Code(err))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the drop stream outlived the mid-stream edit denying its bare charge (#17175 tick must re-price the typed empty request retained at open)")
 	}
 }
 

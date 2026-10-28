@@ -54,9 +54,12 @@ var streamReauthInterval9051 = 5 * time.Second
 // authorizeRPCContext with the decoded message at exactly that point —
 // before any handler logic, before any Send — and retain ONLY that
 // first message so the #9051 tick re-prices the same arguments instead
-// of nil. Later RecvMsg calls (unreachable in production: the generated
-// wrapper receives exactly once) neither re-authorize nor replace the
-// retained message.
+// of nil. For a request-independent stream the wrapper starts
+// undecided like any other: its first RecvMsg runs the (request-
+// independent) full authorization and retains the decoded message,
+// so ticks price that retained message. Later RecvMsg calls
+// (unreachable in production: the generated wrapper receives exactly
+// once) neither re-authorize nor replace the retained message.
 //
 // retained/authCtx are written by the handler goroutine (first RecvMsg)
 // and read by the watcher goroutine (tick); mu guards both. Context()
@@ -93,10 +96,14 @@ func (w *authzRecvStream) Context() context.Context {
 	return w.baseCtx
 }
 
-// RecvMsg runs the deferred full authorization on the first message.
-// A denied first message returns the PermissionDenied verdict from
-// RecvMsg, which the generated wrapper propagates before the handler
-// body runs — the client sees the denial, never stream output.
+// RecvMsg runs the deferred full authorization on the first message
+// and retains it for the re-auth tick. For a request-independent
+// stream that verdict decides identically for the decoded message
+// and the typed empty request (census-enforced), so the duplicate of
+// the open-time verdict changes nothing. A denied first message
+// returns the PermissionDenied verdict from RecvMsg, which the
+// generated wrapper propagates before the handler body runs — the
+// client sees the denial, never stream output.
 func (w *authzRecvStream) RecvMsg(m any) error {
 	if err := w.ServerStream.RecvMsg(m); err != nil {
 		return err
@@ -121,8 +128,9 @@ func (w *authzRecvStream) RecvMsg(m any) error {
 	return nil
 }
 
-// retainedRequest returns the decoded first message (nil before it
-// arrives) and whether the deferred decision has run.
+// retainedRequest returns the retained request and whether the first
+// message has been decided. The retained request is the decoded first
+// message (nil before it arrives) for every stream kind.
 func (w *authzRecvStream) retainedRequest() (any, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -168,23 +176,17 @@ func (s *Server) authorizeStreamContinuously(
 	// in the interceptor body.
 	interval := streamReauthInterval9051
 
-	// #17175: for a request-dependent stream, wrap so the first RecvMsg
-	// runs the request-dependent gates and retains the message. The
-	// watcher below re-prices THAT message on each tick — never nil.
-	// For a request-independent stream the open verdict was already the
-	// full verdict, and the tick re-prices with the retained (typed
-	// empty) message the wrapper captured, which decides identically.
+	// #17175: wrap the stream so its first RecvMsg retains the decoded
+	// message and runs the full authorization there. The watcher below
+	// re-prices the RETAINED message on each tick — never nil, and
+	// never the typed empty request: ticks price exactly what the
+	// client sent, for request-independent streams too (their verdict
+	// decides identically for any message, census-enforced).
 	recv := &authzRecvStream{
 		ServerStream: ss,
 		s:            s,
 		fullMethod:   fullMethod,
 		baseCtx:      ctx,
-	}
-	needsReq := streamNeedsRequest17175(fullMethod)
-	if !needsReq {
-		// Already fully authorized at open; RecvMsg only retains.
-		recv.decided = true
-		recv.authCtx = authorizedCtx
 	}
 
 	go func() {
@@ -198,22 +200,21 @@ func (s *Server) authorizeStreamContinuously(
 				return
 			case <-t.C:
 				var tickErr error
-				if req, decided := recv.retainedRequest(); decided {
-					// Re-price the retained decoded message — never
-					// nil (#17175).
-					_, tickErr = s.authorizeRPCContext(ctx, fullMethod, req)
-				} else if needsReq {
-					// No message yet: nothing has been served, but
-					// the class may have been revoked wholesale
-					// (#9051). Re-check the coarse floor; the full
-					// request-dependent verdict runs on the first
-					// RecvMsg against the then-current config, so
-					// a principal revoked before its first message
-					// is still denied before any output.
-					_, tickErr = s.authorizeStreamOpenContext(ctx, fullMethod)
-				} else if req := emptyStreamRequest17175(fullMethod); req != nil {
+				if req, decided := recv.retainedRequest(); decided && req != nil {
+					// Re-price the retained decoded first message —
+					// never nil (#17175).
 					_, tickErr = s.authorizeRPCContext(ctx, fullMethod, req)
 				} else {
+					// No message yet: nothing has been served, but
+					// the class may have been revoked wholesale
+					// (#9051). Re-check the open price (the full
+					// typed-empty verdict for a request-
+					// independent stream, the coarse floor
+					// otherwise); the full verdict on the decoded
+					// message still runs on the first RecvMsg
+					// against the then-current config, so a
+					// principal revoked before its first message
+					// is denied before any output.
 					_, tickErr = s.authorizeStreamOpenContext(ctx, fullMethod)
 				}
 				if tickErr != nil {
