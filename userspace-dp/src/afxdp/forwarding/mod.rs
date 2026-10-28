@@ -81,13 +81,6 @@ pub(super) fn zone_pair_for_flow_with_override(
     (from_zone, to_zone)
 }
 
-/// #919/#922: zero-allocation production zone-pair resolver. Returns
-/// `(from_id, to_id)` u32 pair directly without `String` materialisation.
-/// `ingress_zone_override` is `Option<u32>` (parsed from fabric MAC),
-/// not `Option<&str>` — callers no longer round-trip through names.
-/// Returns `(0, 0)` segments for ifindexes not in the zone maps; the
-/// caller treats `0` as "unknown" and falls back to default policy.
-#[inline]
 /// #7480: the NoRoute slow-path adjudication decision, extracted so it can be
 /// tested.
 ///
@@ -301,6 +294,13 @@ pub(in crate::afxdp) fn noroute_policy_denial_gated_at(
     )
 }
 
+/// #919/#922: zero-allocation production zone-pair resolver. Returns
+/// `(from_id, to_id)` u32 pair directly without `String` materialisation.
+/// `ingress_zone_override` is `Option<u32>` (parsed from fabric MAC),
+/// not `Option<&str>` — callers no longer round-trip through names.
+/// Returns `(0, 0)` segments for ifindexes not in the zone maps; the
+/// caller treats `0` as "unknown" and falls back to default policy.
+#[inline]
 pub(super) fn zone_pair_ids_for_flow_with_override(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
@@ -639,3 +639,8 @@ mod tests_pkt_type_10691;
 #[cfg(test)]
 #[path = "tests_nat_scope_15118.rs"]
 mod tests_nat_scope_15118;
+// #17234: doc/attribute attachment — the #919/#922 resolver doc and
+// `#[inline]` must stay on the resolver, not on `noroute_policy_denial`.
+#[cfg(test)]
+#[path = "tests_doc_attachment_17234.rs"]
+mod tests_doc_attachment_17234;
