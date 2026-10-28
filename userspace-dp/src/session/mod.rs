@@ -3145,7 +3145,7 @@ impl SessionTable {
     /// #10507: production answers through `policy_revalidation_gate`
     /// (freshness and authority in one probe); this accessor is retained for
     /// test assertions.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn policy_revalidation_target(&self, key: &SessionKey) -> PolicyRevalidationTarget {
         let Some(record) = self.revalidation_record(key) else {
             return PolicyRevalidationTarget::NoLocalEntry;
@@ -5676,7 +5676,7 @@ impl SessionTable {
     /// keyed by `key`, or `None` if no live entry exists. Cold path
     /// (BPF-conntrack-map refresh on the ~1s GC cadence); a single lookup +
     /// a `Copy` of the four-`u64` snapshot.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn session_counters(&self, key: &SessionKey) -> Option<SessionCounters> {
         self.entry_by_key(key).map(|e| e.counters)
     }
@@ -5691,7 +5691,7 @@ impl SessionTable {
     /// caller that wants to bind them at their SOURCE to drive GC and drain the
     /// delta ring first — enough machinery that #6997's call site went unbound
     /// rather than under-asserted.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn observed_close_fields(&self, key: &SessionKey) -> Option<(u8, u8)> {
         self.entry_by_key(key)
             .map(|e| (e.observed_tcp_flags, e.observed_tos))
@@ -5701,7 +5701,7 @@ impl SessionTable {
     /// entry exists. Same idiom and same reason as `observed_close_fields`:
     /// `touch_if_stale`'s only externally visible effect is this field moving,
     /// so a caller binding that call site has to be able to read it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn last_seen_ns(&self, key: &SessionKey) -> Option<u64> {
         self.entry_by_key(key).map(|e| e.last_seen_ns)
     }
@@ -6296,7 +6296,7 @@ impl SessionTable {
 
     /// Thin wrapper for local-only refresh (non-HA-activation path).
     /// Keeps the existing origin; skips peer-synced entries.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn refresh_local(
         &mut self,
         key: &SessionKey,
@@ -6327,7 +6327,7 @@ impl SessionTable {
 
     /// Convenience: refresh for HA activation (always updates regardless
     /// of origin). Preserves existing origin.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn refresh_for_ha_activation(
         &mut self,
         key: &SessionKey,
@@ -6786,7 +6786,7 @@ impl SessionTable {
     /// reference half of the remove+restore round-trip the differential tests
     /// compare against, so in release builds it is retained as dead-code-allowed
     /// test reference logic (not conditionally compiled out).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     fn restore_entry(&mut self, key: SessionKey, entry: SessionEntry) -> Option<SessionEntry> {
         debug_assert!(self.can_index_reply_alias(
             &key,

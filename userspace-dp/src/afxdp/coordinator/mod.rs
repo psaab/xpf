@@ -507,7 +507,7 @@ pub struct Coordinator {
     /// was unreachable, silently, while looking alive.
     ///
     /// A one-shot restore into `bindings` would not have fixed it: EVERY
-    /// control response runs `refresh_status` -> `refresh_bindings`, so the
+    /// control response runs `project_status` -> `refresh_bindings`, so the
     /// ~1 Hz status poll re-erased it within a second, and the Go predicate
     /// requires the wedge to persist 5s before firing. The cause therefore has
     /// to live somewhere the refresh READS, which is what this map is.
@@ -889,7 +889,6 @@ impl Coordinator {
         self.event_stream.as_ref().map(|es| es.stats())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn dynamic_neighbors_ref(&self) -> &Arc<ShardedNeighborMap> {
         &self.neighbors.dynamic
     }
@@ -2023,7 +2022,7 @@ impl Coordinator {
     /// three-color policer with recorded hits, exactly as workers leave
     /// them after `record_filter_counter` + a flush and a metered packet.
     /// It exists because the binding that matters lives OUTSIDE this
-    /// package: `server::helpers::status::refresh_status` publishing these
+    /// package: `server::helpers::status::project_status` publishing these
     /// rows, and the `clear_filter_counters` handler arm clearing them.
     /// Those call sites were unbound precisely because every existing test
     /// reached past them into `crate::afxdp`, which `pkg`-external tests
@@ -2207,7 +2206,7 @@ impl Coordinator {
     /// exactly as a worker leaves it after `record_zone_flood_drop` + a flush.
     ///
     /// It exists because the binding that matters lives OUTSIDE this package:
-    /// `server::helpers::status::refresh_status` publishing these rows, and the
+    /// `server::helpers::status::project_status` publishing these rows, and the
     /// `clear_flood_counters` handler arm clearing them. Those call sites were
     /// unbound precisely because every existing test reached past them into
     /// `crate::afxdp`, which `pkg`-external tests cannot do — so the seam had to

@@ -2518,7 +2518,7 @@ impl SessionTable {
     /// (below) so no single packet-loop tick scans the whole table. This method
     /// is retained as the simple full-walk primitive used by the idle-time unit
     /// tests; hence it is test-only in non-`test` builds.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn iter_with_idle(
         &self,
         now_ns: u64,

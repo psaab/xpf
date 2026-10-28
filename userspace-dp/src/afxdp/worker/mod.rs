@@ -132,7 +132,6 @@ pub(crate) struct BindingWorker {
     pub(crate) interface: Arc<str>,
     pub(crate) ifindex: i32,
     pub(crate) live: Arc<BindingLiveState>,
-    #[allow(dead_code)]
     pub(crate) user: User,
     /// #959 Phase 11: 3 XSK kernel-ring handles extracted into
     /// `WorkerXskRings`. Field semantics unchanged; access via
@@ -1744,7 +1743,7 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) direct_tx_build_fallback_packets: u64,
     pub(crate) direct_tx_disallowed_fallback_packets: u64,
     pub(crate) debug_pending_fill_frames: u32,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(crate) debug_spare_fill_frames: u32,
     pub(crate) debug_free_tx_frames: u32,
     pub(crate) debug_pending_tx_prepared: u32,

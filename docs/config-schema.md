@@ -4037,7 +4037,7 @@ which leaves the node itself with `Keys=["protocol"]` and files one leaf child
 per value as SIBLINGS. A reader that descends `Children[0]` at each level is
 correct for the flat-set CHAIN (one child deep at every level) and reaches
 exactly one value of a block (N children wide at one level). That was the
-`collectProtocolList` defect: a routing-policy term written to filter three
+`policyFromListValues` reader defect (#6689, unified #17202): a routing-policy term written to filter three
 protocols compiled to one, and with `then reject` the two dropped protocols were
 silently ACCEPTED and installed — a fail-OPEN route-acceptance widening whose
 authored config renders back intact. Descend EVERY child, not the first, and the

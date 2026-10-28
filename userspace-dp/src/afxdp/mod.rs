@@ -175,15 +175,13 @@ mod types;
 #[path = "umem/mod.rs"]
 mod umem;
 // #1612 step-3 STAGED scaffolding: cold-path latency histogram
-// primitives. Module-level `#[allow(dead_code)]` because every export
-// is intentionally unused at this PR — integration into BindingWorker,
+// primitives. Every export is intentionally unused at this PR — integration into BindingWorker,
 // the poll_descriptor hot path, and the wire protocol is deferred to
 // follow-up issues #1620, #1621, #1622 per
 // docs/pr/1612-scale-target-measurement/plan.md STAGED form. The
 // scaffolding lives in tree to (a) make the 11-finding plan-review
 // audit chain reviewable as compiled code and (b) provide the math
 // primitives the follow-ups will consume.
-#[allow(dead_code)]
 #[path = "cold_path_hist.rs"]
 pub(crate) mod cold_path_hist;
 // #3651: per-zone ingress/egress traffic counters (POPULATE half of #3643).
@@ -2032,7 +2030,6 @@ struct PendingForwardHints {
 // Superseded by inline logic in build_live_forward_request() that reads ports
 // from the live UMEM area before .to_vec() copy (fixes #199).  Retained for
 // its unit test and potential future use.
-#[allow(dead_code)]
 
 fn binding_by_index_mut<'a>(
     left: &'a mut [BindingWorker],

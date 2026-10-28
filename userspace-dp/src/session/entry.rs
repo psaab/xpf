@@ -608,7 +608,7 @@ pub(crate) enum SessionOrigin {
 
     SharedMaterialize,
     SharedPromote,
-    #[allow(dead_code)] // enum variant for completeness
+    // enum variant for completeness
     WorkerLocalImport,
     /// #10038 (parent-review item 5): firewall-SELF-originated via a local
     /// TUN publisher (WG `tun_origin.rs`, GRE `tunnel.rs`). POSITIVE
