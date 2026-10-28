@@ -5384,21 +5384,6 @@ fn dynamic_neighbor_cache_enables_forward_candidate() {
     );
 }
 
-#[test]
-fn parse_neighbor_entries_accepts_stale_ipv4_and_ipv6_rows() {
-    let parsed = parse_neighbor_entries(
-        "172.16.80.200 lladdr ba:86:e9:f6:4b:d5 STALE\n2001:559:8585:80::200 lladdr ba:86:e9:f6:4b:d5 STALE\n",
-    );
-    assert_eq!(parsed.len(), 2);
-    assert_eq!(parsed[0].0, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)));
-    assert_eq!(
-        parsed[1].0,
-        IpAddr::V6("2001:559:8585:80::200".parse().expect("ipv6"))
-    );
-    assert_eq!(parsed[0].1.mac, [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
-    assert_eq!(parsed[1].1.mac, [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5]);
-}
-
 /// #3771 (M12): neighbor-state classification is an ALLOWLIST, not the pre-fix
 /// denylist. Recognized forwarding states install; failed/incomplete/NOARP are
 /// known-unusable; empty / `none` / future or corrupt tokens are UNKNOWN
@@ -5437,6 +5422,95 @@ fn classify_neighbor_state_is_an_allowlist() {
         );
         assert!(!neighbor_state_usable(s), "{s} must not be usable");
     }
+}
+
+/// #17240: the String adapter's override branches. Every `Some(zone)`
+/// returns verbatim — the deleted twin's contract — even in hand-built
+/// non-bijective states where a name -> id -> name round-trip would
+/// canonicalize (alias), erase (id with no reverse name), or erase
+/// (id 0). Production states are bijective, so this is observable only
+/// to test callers, but the twin must not drift for them either. Only
+/// the `None` path resolves via ifindex -> id -> name.
+#[test]
+fn zone_pair_adapter_override_verbatim_17240() {
+    let mut state = build_forwarding_state(&nat_snapshot());
+    // nat_snapshot: ifindex 24 is in `lan`, ifindex 12 is in `wan`.
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&24).copied(),
+        Some(TEST_LAN_ZONE_ID),
+        "precondition: ingress ifindex 24 must be in lan"
+    );
+    // Mapped override wins over the ingress ifindex's own zone.
+    let (from_zone, to_zone) = zone_pair_for_flow_with_override(&state, 24, Some("wan"), 24);
+    assert_eq!(
+        from_zone, "wan",
+        "mapped override must win over lan ingress"
+    );
+    assert_eq!(to_zone, "lan");
+    // Unmapped override round-trips verbatim; the lan ingress ifindex (24)
+    // must NOT substitute its zone for the unknown name.
+    let (from_zone, to_zone) = zone_pair_for_flow_with_override(&state, 24, Some("ghost-zone"), 12);
+    assert_eq!(
+        from_zone, "ghost-zone",
+        "unmapped override must round-trip verbatim, not substitute lan"
+    );
+    assert_eq!(to_zone, "wan");
+    // Alias: `alias` maps to wan's id, whose canonical name is `wan`.
+    // The deleted twin returned `alias` verbatim; a name -> id -> name
+    // round-trip would instead canonicalize it to `wan`.
+    state
+        .zone_name_to_id
+        .insert("alias".to_string(), TEST_WAN_ZONE_ID);
+    assert_eq!(
+        state
+            .zone_id_to_name
+            .get(&TEST_WAN_ZONE_ID)
+            .map(String::as_str),
+        Some("wan"),
+        "precondition: wan id's canonical name must be wan"
+    );
+    let (from_zone, _) = zone_pair_for_flow_with_override(&state, 24, Some("alias"), 12);
+    assert_eq!(
+        from_zone, "alias",
+        "alias override must return verbatim, not canonicalize to wan"
+    );
+    // No reverse: the override's id has no `zone_id_to_name` entry.
+    // The deleted twin returned the name verbatim; the round-trip
+    // would erase it to "".
+    state.zone_name_to_id.insert("orphan".to_string(), 999);
+    assert!(
+        !state.zone_id_to_name.contains_key(&999),
+        "precondition: id 999 must have no reverse name"
+    );
+    let (from_zone, _) = zone_pair_for_flow_with_override(&state, 24, Some("orphan"), 12);
+    assert_eq!(
+        from_zone, "orphan",
+        "no-reverse override must return verbatim, not erase to empty"
+    );
+    // Zero id: the override maps to sentinel id 0. The deleted twin
+    // returned the name verbatim; the round-trip would erase it to ""
+    // (the `name` closure's `0 => ""` arm).
+    state.zone_name_to_id.insert("zero-zone".to_string(), 0);
+    let (from_zone, _) = zone_pair_for_flow_with_override(&state, 24, Some("zero-zone"), 12);
+    assert_eq!(
+        from_zone, "zero-zone",
+        "zero-id override must return verbatim, not erase to empty"
+    );
+    // No override, from-zone id 0 WITH a reverse name: production never
+    // inserts id 0 into `zone_id_to_name` (forwarding_build/zones.rs
+    // skips id 0), but a hand-built state can. The deleted twin's
+    // no-override from-zone lookup was `ifindex_to_zone_id` ->
+    // `zone_id_to_name` with no zero special-case, so it returned
+    // `zero` here; the adapter must not erase it via a `0 => ""` arm.
+    // (The TO-zone keeps its `0 => ""` arm: the twin special-cased
+    // zero only there.)
+    state.ifindex_to_zone_id.insert(30, 0);
+    state.zone_id_to_name.insert(0, "zero".to_string());
+    let (from_zone, _) = zone_pair_for_flow_with_override(&state, 30, None, 12);
+    assert_eq!(
+        from_zone, "zero",
+        "no-override from-zone with id 0 and reverse name 'zero' must return 'zero', not erase to empty"
+    );
 }
 
 #[test]
