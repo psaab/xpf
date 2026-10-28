@@ -18,7 +18,6 @@
 # code written after landing is forbidden — delete the dead function instead.
 # Every row needs a reason and an issue/expiry in the last column.
 #
-pkg/api/auth_throttle_10825.go	authFailureTracker.setClockForTest	LEGITIMATE	test seam: production never replaces the clock (newAuthFailureTracker takes it); tests set it via this method; retained intentionally	#17154
 pkg/api/authz.go	credentialPrincipalUser	LEGACY-DEBT	pre-existing production dead code at #17154 gate landing (go1.26.9/deadcode v0.38.0 -test ./...); delete in per-package follow-up, do not add callers to satisfy the gate	#17154 (phase-1 baseline; deletion tracked per-package)
 pkg/api/authz_command_regex_9952.go	evaluateCommand9952	LEGACY-DEBT	pre-existing production dead code at #17154 gate landing (go1.26.9/deadcode v0.38.0 -test ./...); delete in per-package follow-up, do not add callers to satisfy the gate	#17154 (phase-1 baseline; deletion tracked per-package)
 pkg/api/config_commit_test.go	containsWarning	LEGACY-DEBT	pre-existing dead test helper at #17154 gate landing (go1.26.9/deadcode v0.38.0 -test ./...); delete in per-package follow-up, do not add callers to satisfy the gate	#17154 (phase-1 baseline; deletion tracked per-package)

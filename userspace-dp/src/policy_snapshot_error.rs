@@ -1,10 +1,16 @@
-//! Snapshot integrity errors surfaced by the policy-snapshot parser
-//! (#1606). Relocated verbatim out of `policy.rs` to keep that module
-//! under the modularity-discipline LOC threshold. Loaded as a sibling
-//! submodule via `#[path = "policy_snapshot_error.rs"]` from `policy.rs`,
-//! mirroring how `policy_tests.rs` is attached. Re-exported as
-//! `crate::policy::SnapshotIntegrityError` so all crate-wide call sites
-//! keep their existing path. Pure code-motion: no behavior change.
+//! #1606: snapshot integrity errors — the crate-wide snapshot-
+//! rejection type for the userspace dataplane. Raised by the
+//! policy-snapshot parser in `policy.rs` and by the forwarding,
+//! CoS, NAT, interface, route, and tunnel snapshot builders
+//! crate-wide; the whole snapshot is rejected (fail closed, the
+//! previous good state is retained) instead of installing a
+//! partially-valid or fail-open state. Defined in this sibling
+//! file (loaded via `#[path = "policy_snapshot_error.rs"]` from
+//! `policy.rs`, mirroring how `policy_tests.rs` is attached) to
+//! keep `policy.rs` under the modularity-discipline LOC
+//! threshold, and re-exported as
+//! `crate::policy::SnapshotIntegrityError` so all crate-wide
+//! call sites keep their existing path.
 
 /// #1606: snapshot integrity errors from the policy parser.
 #[derive(Debug, Clone)]
@@ -999,31 +1005,31 @@ pub(crate) enum SnapshotIntegrityError {
         local_ts: String,
         remote_ts: String,
     },
-    /// #15091: an address-book row (or, via the literal factories,
-    /// a rule side) carried more prefixes than the helper-side
-    /// merged-range budget ([`crate::prefix_set::MAX_PREFIX_SET_RANGES`],
-    /// mirroring the Go feed cap `MaxDynamicAddressFeedPrefixes` =
+    /// #15091: an address-book row carried more prefixes than
+    /// the helper-side merged-range budget
+    /// ([`crate::prefix_set::MAX_PREFIX_SET_RANGES`], mirroring
+    /// the Go feed cap `MaxDynamicAddressFeedPrefixes` =
     /// 1<<20). Compiling it would materialise an unbounded
     /// representation in the helper (the pre-fix one-Box-per-bit
-    /// trie cost ~2.9 GB for an in-cap 32 MiB IPv6 feed). Rejecting
-    /// the WHOLE snapshot keeps the previous good state (a fresh
-    /// boot keeps the default-deny `PolicyState`) and is
-    /// action-agnostic, consistent with the
-    /// #2124/#3261/#3367/#3711 fail-closed family. `ranges` is the
-    /// merged disjoint-range count that exceeded `limit`.
+    /// trie cost ~2.9 GB for an in-cap 32 MiB IPv6 feed).
+    /// Rejecting the WHOLE snapshot keeps the previous good
+    /// state (a fresh boot keeps the default-deny `PolicyState`)
+    /// and is action-agnostic, consistent with the
+    /// #2124/#3261/#3367/#3711 fail-closed family. `ranges` is
+    /// the merged disjoint-range count that exceeded `limit`.
+    ///
+    /// Only address-book rows hard-reject on this budget. A
+    /// policy rule's literal address side is NOT rejected here:
+    /// rule literals are built by the infallible
+    /// `PrefixSet::from_prefixes` / `from_v3_literals` factories,
+    /// whose over-budget posture is fail-closed `MatchNone`
+    /// (the side matches nothing) rather than a snapshot
+    /// rejection (#15091, #17174). There is deliberately no
+    /// rule-literal counterpart to this variant.
     AddressBookPrefixBudgetExceeded {
         book_id: u32,
         book_name: String,
         family: &'static str,
-        ranges: usize,
-        limit: usize,
-    },
-    /// #15091: a policy rule's literal address side exceeded the
-    /// same merged-range budget. Book rows report
-    /// `AddressBookPrefixBudgetExceeded`; rule literals have no
-    /// book identity, so they report the rule id instead.
-    RulePrefixBudgetExceeded {
-        rule_id: String,
         ranges: usize,
         limit: usize,
     },
@@ -1042,15 +1048,6 @@ impl std::fmt::Display for SnapshotIntegrityError {
                 f,
                 "address book id={} ({:?}) prefixes_{} merges to {} disjoint ranges, exceeding the helper budget of {} ranges — refusing to materialise an unbounded prefix set (which collapses a book-backed deny if dropped)",
                 book_id, book_name, family, ranges, limit
-            ),
-            Self::RulePrefixBudgetExceeded {
-                rule_id,
-                ranges,
-                limit,
-            } => write!(
-                f,
-                "rule {:?} literal address set merges to {} disjoint ranges, exceeding the helper budget of {} ranges — refusing to materialise an unbounded prefix set",
-                rule_id, ranges, limit
             ),
             Self::AddressBookIdZero => write!(f, "address book has reserved id=0"),
             Self::DuplicateAddressBookId(id) => {

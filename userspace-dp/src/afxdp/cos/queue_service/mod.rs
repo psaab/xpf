@@ -83,10 +83,12 @@ use selectors::{
 #[cfg(test)]
 pub(in crate::afxdp) use settle::estimate_cos_queue_wakeup_tick as estimate_cos_queue_wakeup_tick_for_test;
 use settle::{
-    assign_local_dscp_rewrite, assign_prepared_dscp_rewrite, build_cos_batch_from_queue,
-    cos_batch_tx_made_progress, cos_guarantee_quantum_bytes, cos_guarantee_visit_cap_bytes,
-    cos_surplus_quantum_bytes, estimate_cos_queue_wakeup_tick, release_exact_local_scratch_frames,
-    release_exact_prepared_scratch, restore_exact_local_scratch_to_queue_head_flow_fair,
+    COS_GUARANTEE_QUANTUM_MAX_BYTES, COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS,
+    COS_SURPLUS_ROUND_QUANTUM_BYTES, assign_local_dscp_rewrite, assign_prepared_dscp_rewrite,
+    build_cos_batch_from_queue, cos_batch_tx_made_progress, cos_guarantee_quantum_bytes,
+    cos_guarantee_visit_cap_bytes, cos_surplus_quantum_bytes, estimate_cos_queue_wakeup_tick,
+    release_exact_local_scratch_frames, release_exact_prepared_scratch,
+    restore_exact_local_scratch_to_queue_head_flow_fair,
     restore_exact_prepared_scratch_to_queue_head_flow_fair,
     settle_exact_prepared_scratch_submission_flow_fair, submit_cos_batch,
     subtract_direct_cos_queue_bytes,
@@ -121,10 +123,9 @@ use super::tx_completion::{
 // prepared-frame primitives — primitives that own the kernel ring
 // state and are hosted there for that reason.
 use crate::afxdp::tx::{
-    COS_GUARANTEE_QUANTUM_MAX_BYTES, COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS,
-    COS_SURPLUS_ROUND_QUANTUM_BYTES, TxError, TxRetryReason, cos_queue_dscp_rewrite, maybe_wake_tx,
-    reap_tx_completions, recycle_cancelled_prepared_offset_with_shared, remember_prepared_recycle,
-    stamp_submits, transmit_batch, transmit_prepared_queue,
+    TxError, TxRetryReason, cos_queue_dscp_rewrite, maybe_wake_tx, reap_tx_completions,
+    recycle_cancelled_prepared_offset_with_shared, remember_prepared_recycle, stamp_submits,
+    transmit_batch, transmit_prepared_queue,
 };
 
 pub(in crate::afxdp) enum CoSBatch {

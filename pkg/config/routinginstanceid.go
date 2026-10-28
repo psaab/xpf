@@ -135,57 +135,36 @@ func collectRoutingInstanceAST(riNode *Node, names map[string]struct{}, types ma
 
 func routingInstanceTypeFlagsAST(tree *ConfigTree, compiledNode *int) map[string]routingInstanceASTTypeFlags {
 	types := make(map[string]routingInstanceASTTypeFlags)
-	emitGenericExpandedRoutingInstancesAST(tree, nil, types)
-	emitNodeExpandedRoutingInstancesAST(tree, 0, nil, types)
-	emitNodeExpandedRoutingInstancesAST(tree, 1, nil, types)
-	// compileTree node branch accepts any integer node ID, negative ones
-	// included, and expands that node's own groups (`node%d`). A generic compile
-	// passes nil.
-	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
-		emitNodeExpandedRoutingInstancesAST(tree, *compiledNode, nil, types)
+	for _, view := range effectiveNodeViewsForNodes(tree, compiledNode, false, true) {
+		collectRoutingInstancesFromView(view, nil, types)
 	}
 	return types
 }
 
 func routingInstanceTypeFlagsASTByView(tree *ConfigTree, compiledNode *int) []map[string]routingInstanceASTTypeFlags {
-	views := make([]map[string]routingInstanceASTTypeFlags, 0, 4)
-	generic := make(map[string]routingInstanceASTTypeFlags)
-	emitGenericExpandedRoutingInstancesAST(tree, nil, generic)
-	views = append(views, generic)
-	for _, nodeID := range []int{0, 1} {
+	trees := effectiveNodeViewsForNodes(tree, compiledNode, false, true)
+	views := make([]map[string]routingInstanceASTTypeFlags, 0, len(trees))
+	for _, view := range trees {
 		types := make(map[string]routingInstanceASTTypeFlags)
-		emitNodeExpandedRoutingInstancesAST(tree, nodeID, nil, types)
-		views = append(views, types)
-	}
-	// compileTree node branch accepts any integer node ID, negative ones
-	// included, and expands that node's own groups (`node%d`).
-	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
-		types := make(map[string]routingInstanceASTTypeFlags)
-		emitNodeExpandedRoutingInstancesAST(tree, *compiledNode, nil, types)
+		collectRoutingInstancesFromView(view, nil, types)
 		views = append(views, types)
 	}
 	return views
 }
 
-// emitNodeExpandedRoutingInstancesAST collects routing-instance names and types
-// after expanding the candidate tree for chassis-cluster node nodeID. This is
-// the post-${node}/apply-groups view: an interpolated or wildcard instance name
-// is only concrete after expansion.
-//
-// Like emitNodeExpandedZoneNames (zoneid.go), this is recursion-free (clone +
-// expand + read AST, never calling CompileConfig*) and per-node expansion errors
-// are non-fatal: a failed view contributes nothing because that node's compile
-// path refuses the config (#9657).
-func emitNodeExpandedRoutingInstancesAST(tree *ConfigTree, nodeID int, names map[string]struct{}, types map[string]routingInstanceASTTypeFlags) {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
-		return
-	}
+// collectRoutingInstancesFromView collects routing-instance names and
+// types from one already-expanded view. The views come from
+// effectiveNodeViewsForNodes (#17222): the generic view (an atomic
+// ExpandGroupsNodeFallback15031 expansion, as compileTree does), the
+// node0/node1 views, and a compiledNode's own view when it is not 0/1 —
+// a node compile for any other id expands that node's own groups
+// (`node%d`), so its view counts too. A failed expansion contributes
+// no view because that node's compile path refuses the config (#9657).
+func collectRoutingInstancesFromView(view *ConfigTree, names map[string]struct{}, types map[string]routingInstanceASTTypeFlags) {
 	// #5691: union across every top-level `routing-instances` root — a split
 	// config can declare instances in a second stanza that compileSections still
 	// compiles.
-	for _, ri := range clone.FindChildren("routing-instances") {
+	for _, ri := range view.FindChildren("routing-instances") {
 		collectRoutingInstanceAST(ri, names, types)
 	}
 }
@@ -396,28 +375,8 @@ func routingInstanceNameUnionAST(tree *ConfigTree, compiledNode *int) map[string
 	for _, ri := range tree.FindChildren("routing-instances") {
 		collectRoutingInstanceNamesAST(ri, names)
 	}
-	emitGenericExpandedRoutingInstancesAST(tree, names, nil)
-	emitNodeExpandedRoutingInstancesAST(tree, 0, names, nil)
-	emitNodeExpandedRoutingInstancesAST(tree, 1, names, nil)
-	// compileTree node branch accepts any integer node ID, negative ones
-	// included, and expands that node's own groups (`node%d`), so a node compile
-	// for any other ID counts its own view too. A generic compile passes nil.
-	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
-		emitNodeExpandedRoutingInstancesAST(tree, *compiledNode, names, nil)
+	for _, view := range effectiveNodeViewsForNodes(tree, compiledNode, false, true) {
+		collectRoutingInstancesFromView(view, names, nil)
 	}
 	return names
-}
-
-// emitGenericExpandedRoutingInstancesAST collects the routing instances the
-// generic compile lands, expanding a clone exactly as compileTree
-// does (#15031: one atomic ${node} -> node0 fallback expansion, never a
-// retry on a partially merged clone). Any failure contributes nothing (#9657).
-func emitGenericExpandedRoutingInstancesAST(tree *ConfigTree, names map[string]struct{}, types map[string]routingInstanceASTTypeFlags) {
-	clone := tree.Clone()
-	if _, err := clone.ExpandGroupsNodeFallback15031(false); err != nil {
-		return
-	}
-	for _, ri := range clone.FindChildren("routing-instances") {
-		collectRoutingInstanceAST(ri, names, types)
-	}
 }
