@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: fail closed for nonempty embedded change-configuration
+    payloads that lex to no tokens or lose content to comments; recursively
+    mask quoted comment-shaped command payloads and preserve the whole-payload
+    placeholder through joined and block AST rewrites and compare fingerprints
+    (#17813).
   * Logging: keep filter-term syslog routing bound to the applied snapshot
     generation across partial publishes (#17810).
   * Daemon: add already-MASTER sync-hold reconcile coverage with an
