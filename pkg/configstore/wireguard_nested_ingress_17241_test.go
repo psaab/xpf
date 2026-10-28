@@ -111,6 +111,36 @@ func TestSyncApplyRefusesNestedAllowedIPs17241(t *testing.T) {
 	}
 }
 
+// SyncApply's lenient ingress must reject a nested value-list child rather
+// than install only the direct value while silently dropping its grandchild.
+func TestSyncApplyRefusesNestedValueListReader18325(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	baseline, err := s.SyncApply(`system { host-name baseline; }`, nil)
+	if err != nil || baseline == nil {
+		t.Fatalf("install control baseline: cfg=%v err=%v", baseline, err)
+	}
+	beforeSet := s.ShowActiveSet()
+	beforeConfig := s.ActiveConfig()
+
+	cfg, err := s.SyncApply(`system { domain-search { example.com { x; } } }`, nil)
+	if err == nil || !config.IsNestedListContentSchemaError(err) {
+		t.Fatalf("SyncApply must hard-reject nested content under domain-search, got cfg=%v err=%v", cfg, err)
+	}
+	if !strings.Contains(err.Error(), "domain-search") || !strings.Contains(err.Error(), "nested content") {
+		t.Fatalf("nested-content error %q must name domain-search", err)
+	}
+	if cfg != nil {
+		t.Fatalf("SyncApply returned a compiled config after nested-value refusal: %+v", cfg.System.DomainSearch)
+	}
+	if got := s.ActiveConfig(); got != beforeConfig {
+		t.Fatalf("SyncApply replaced the active compiled config on refusal: before=%p after=%p", beforeConfig, got)
+	}
+	if got := s.ShowActiveSet(); got != beforeSet {
+		t.Fatalf("SyncApply changed active config on refusal:\nbefore:\n%s\nafter:\n%s", beforeSet, got)
+	}
+}
+
+
 // A tolerated non-typed schema error before the WireGuard stanza must not stop
 // the collect walk from finding a later nested-list hard refusal.
 func TestSyncApplyDoesNotLetPriorSchemaErrorHideNestedRefusal17241(t *testing.T) {

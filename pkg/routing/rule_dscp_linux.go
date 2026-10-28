@@ -179,19 +179,19 @@ type RuleDSCPSelector struct {
 // Any dump or parse failure is returned: without the DSCP sidecar the
 // mirror cannot prove a candidate is unscoped, so the snapshot must fail
 // closed exactly like a RuleList failure (#3772 M9).
+//
+// This is a projection of RuleListFull (rule_dump_linux.go), the single
+// RTM_GETRULE dump site (#17078): the DSCP sidecar rides the same
+// validated decode as every other rule readback instead of a second,
+// unvalidated row parser.
 func RuleListDSCPSelectors(family int) ([]RuleDSCPSelector, error) {
-	req := nl.NewNetlinkRequest(unix.RTM_GETRULE, unix.NLM_F_DUMP|unix.NLM_F_REQUEST)
-	req.AddData(nl.NewIfInfomsg(family))
-	msgs, err := req.Execute(unix.NETLINK_ROUTE, unix.RTM_NEWRULE)
+	rows, err := RuleListFull(family)
 	if err != nil {
 		return nil, err
 	}
 	var out []RuleDSCPSelector
-	for _, m := range msgs {
-		selector, ok, err := dscpSelectorFromRuleRow(m)
-		if err != nil {
-			return nil, err
-		}
+	for _, row := range rows {
+		selector, ok := dscpSelectorFromRuleRow(row)
 		if ok {
 			out = append(out, selector)
 		}
@@ -199,43 +199,26 @@ func RuleListDSCPSelectors(family int) ([]RuleDSCPSelector, error) {
 	return out, nil
 }
 
-// dscpSelectorFromRuleRow parses one RTM_NEWRULE dump row, reporting whether
-// it carries FRA_DSCP. The Priority/Table/Dst derivation mirrors netlink
-// v1.3.1's (Handle).RuleListFiltered exactly — same defaults, same
-// attributes, same Dst construction — so the join key matches what RuleList
-// decoded from the same kernel state. Deliberately no extra validation:
-// RuleList runs first and would already have faulted on a malformed row.
-func dscpSelectorFromRuleRow(row []byte) (RuleDSCPSelector, bool, error) {
-	var selector RuleDSCPSelector
-	msg := nl.DeserializeRtMsg(row)
-	attrs, err := nl.ParseRouteAttr(row[msg.Len():])
-	if err != nil {
-		return selector, false, err
+// dscpSelectorFromRuleRow projects one decoded dump row onto its DSCP
+// selector, reporting whether it carries FRA_DSCP. The Dst spelling
+// matches netlink's own decoder exactly — the same
+// &net.IPNet{IP, Mask} construction and .String() rendering as
+// (Handle).RuleListFiltered, preserved by ruleRowFromDumpMessage — so
+// the join key matches what RuleListFull decoded from the same kernel
+// state.
+func dscpSelectorFromRuleRow(row RuleRow) (RuleDSCPSelector, bool) {
+	if !row.DSCPSet {
+		return RuleDSCPSelector{}, false
 	}
-	native := nl.NativeEndian()
-	selector.Priority = 0 // netlink's kernel default, before FRA_PRIORITY
-	var dscp uint8
-	hasDSCP := false
-	for _, attr := range attrs {
-		switch attr.Attr.Type {
-		case unix.RTA_TABLE:
-			selector.Table = int(native.Uint32(attr.Value[0:4]))
-		case nl.FRA_DST:
-			selector.Dst = (&net.IPNet{
-				IP:   attr.Value,
-				Mask: net.CIDRMask(int(msg.Dst_len), 8*len(attr.Value)),
-			}).String()
-		case nl.FRA_PRIORITY:
-			selector.Priority = int(native.Uint32(attr.Value[0:4]))
-		case FRA_DSCP:
-			hasDSCP = true
-			if len(attr.Value) > 0 {
-				dscp = attr.Value[0]
-			}
-		}
+	selector := RuleDSCPSelector{
+		Priority: row.Priority,
+		Table:    row.Table,
+		DSCP:     row.DSCP,
 	}
-	selector.DSCP = dscp
-	return selector, hasDSCP, nil
+	if row.Dst != nil {
+		selector.Dst = row.Dst.String()
+	}
+	return selector, true
 }
 
 // rejectUnencodedRuleFields fails closed on any Rule field this encoder does not

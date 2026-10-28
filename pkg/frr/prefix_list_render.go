@@ -237,25 +237,28 @@ func routeFilterPermitLine(isV6 bool, rf *config.RouteFilter) (string, bool) {
 // `walkup` qualifier, which xpf does not model, changes that). FRR
 // prefix-lists are ordered first-match, so authoring-order permits gave
 // walkup/OR semantics instead (#16762). This layout restores
-// longest-match: sort permits by descending base-prefix length (stable,
-// so equal-length filters keep authoring order) and, after each
+// longest-match: only groups with strict base containment need a new
+// layout. For those groups, sort permits by descending base-prefix length
+// (stable, so equal-length filters keep authoring order) and, after each
 // distinct prefix P, interpose `deny P le <max>` — but only when some
 // other renderable filter's base CONTAINS P, i.e. only when a route
 // under P that failed P's match type could otherwise fall through to
 // that broader permit. The failed route then first-matches the deny
 // and stops, exactly as Junos' failed longest match fails the term's
-// route-filter condition. P == the family root never gets a stop (no
-// broader filter can contain it). Single, disjoint, and same-base
-// lists therefore render byte-identically to the historical render, so
-// the common cases (including hierarchical `from` condition copies,
-// #11779) are untouched.
+// route-filter condition. Disjoint bases cannot fall through to one
+// another, so groups without strict containment preserve authored order
+// and their historical sequence slots byte-for-byte. The family root
+// never gets a stop (no broader filter can contain it). Single, disjoint,
+// and same-base lists therefore retain their historical render.
 
 // routeFilterLayoutEntry16762 is one renderable route-filter.
 type routeFilterLayoutEntry16762 struct {
-	rf     *config.RouteFilter
-	ipnet  *net.IPNet // parsed base prefix (nil when unparsable)
-	plen   int        // base prefix length, -1 when unknown
-	permit string     // routeFilterPermitLine body, no trailing newline
+	rf            *config.RouteFilter
+	idx           int        // original term index, used by unchanged lists
+	ipnet         *net.IPNet // parsed base prefix (nil when unparsable)
+	plen          int        // base prefix length, -1 when unknown
+	permit        string     // routeFilterPermitLine body, no trailing newline
+	canStillMatch bool       // a broader/nil base could catch a failed match
 }
 
 // parseRouteFilterPrefix16762 parses a route-filter's base CIDR once.
@@ -366,7 +369,7 @@ func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs
 		}
 		ipnet, plen := parseRouteFilterPrefix16762(irf.rf.Prefix)
 		entries = append(entries, routeFilterLayoutEntry16762{
-			rf: irf.rf, ipnet: ipnet, plen: plen,
+			rf: irf.rf, idx: irf.idx, ipnet: ipnet, plen: plen,
 			permit: strings.TrimSuffix(body, "\n"),
 		})
 	}
@@ -374,12 +377,32 @@ func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs
 		return 0, false
 	}
 	firstIsV6 = strings.Contains(entries[0].rf.Prefix, ":")
-	// Longest-match order: descending base length, stable. The emit
-	// loop derives canStillMatch per entry against the FULL set
-	// (broader-or-nil), independent of sorted position.
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].plen > entries[j].plen
-	})
+	// Precompute whether each entry could fall through to a broader
+	// renderable base. Only such a group needs longest-match reordering
+	// and interposed stops; otherwise retain its authored order and
+	// original sequence slots to preserve the historical bytes.
+	hasContainment := false
+	for i := range entries {
+		if entries[i].ipnet == nil {
+			continue
+		}
+		for j := range entries {
+			if i == j {
+				continue
+			}
+			if entries[j].ipnet == nil || routeFilterBaseContains16762(entries[j].ipnet, entries[i].ipnet) {
+				entries[i].canStillMatch = true
+				hasContainment = true
+				break
+			}
+		}
+	}
+	if hasContainment {
+		// Junos longest-match order: descending base length, stable.
+		sort.SliceStable(entries, func(i, j int) bool {
+			return entries[i].plen > entries[j].plen
+		})
+	}
 	seq := 0
 	for i := range entries {
 		e := entries[i]
@@ -389,28 +412,16 @@ func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs
 			kind = "ipv6"
 			maxLen = 128
 		}
-		fmt.Fprintf(definitions, "%s prefix-list %s seq %d %s\n", kind, frrName(plName), (seq+1)*5, e.permit)
-		seq++
+		entrySeq := e.idx
+		if hasContainment {
+			entrySeq = seq
+		}
+		fmt.Fprintf(definitions, "%s prefix-list %s seq %d %s\n", kind, frrName(plName), (entrySeq+1)*5, e.permit)
+		if hasContainment {
+			seq++
+		}
 		emitted++
-		if e.ipnet == nil || e.plen <= 0 {
-			continue
-		}
-		// canStillMatch: a renderable entry whose base CONTAINS this
-		// base (a nil-base entry renders orlonger-by-default, so it
-		// could still match and also forces the stop) would otherwise
-		// catch a route under this base whose match type failed.
-		canStillMatch := false
-		for j := range entries {
-			if entries[j].ipnet == nil {
-				canStillMatch = true
-				break
-			}
-			if routeFilterBaseContains16762(entries[j].ipnet, e.ipnet) {
-				canStillMatch = true
-				break
-			}
-		}
-		if !canStillMatch {
+		if e.ipnet == nil || e.plen <= 0 || !e.canStillMatch {
 			continue
 		}
 		// Only the LAST entry of each distinct base group can be

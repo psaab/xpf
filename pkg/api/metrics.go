@@ -733,6 +733,7 @@ type xpfCollector struct {
 	// #13289: process-wide #10597 WireGuard uncovered forwarding counters.
 	userspaceWGUncoveredPacketsTotal *prometheus.Desc
 	userspaceWGUncoveredQueuePoison  *prometheus.Desc
+	userspaceTupleGatePoison         *prometheus.Desc
 	// #13300: userspace maps-sync failure and watchdog telemetry.
 	userspaceRSTSuppressionDegraded  *prometheus.Desc
 	userspaceRSTSuppressionFailures  *prometheus.Desc
