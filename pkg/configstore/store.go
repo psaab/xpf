@@ -1001,12 +1001,15 @@ func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, err
 	if config.IsRedactionPlaceholderIngestError(schemaErr) {
 		return nil, schemaErr
 	}
-	// #17241: this refusal is a correctness boundary, not a legacy typed
-	// value whose compiled interpretation can be retained. In particular,
-	// firewallMatchValues never reads nested block grandchildren, so
-	// tolerating the error would install a truncated allowed-ips / VRRP
-	// list on boot or peer sync. Preserve tolerance for every other schema
-	// error by promoting only this dedicated class.
+	// #17241/#18325: this refusal is a correctness boundary, not a legacy
+	// typed value whose compiled interpretation can be retained. The
+	// nestedListContentSchemaError class covers every value-list reader
+	// opted in via refuseNonLeafBlockChildren (allowed-ips, VRRP, and the
+	// other schema-declared direct-child value lists): those readers never
+	// read nested block grandchildren, so tolerating the error would
+	// install a truncated value list on boot or peer sync. Preserve
+	// tolerance for every other schema error by promoting only this
+	// dedicated class.
 	if config.IsNestedListContentSchemaError(schemaErr) {
 		return nil, schemaErr
 	}
