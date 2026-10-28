@@ -23,7 +23,7 @@ const (
 	// to the management table. Keep each miss shadow adjacent to its lookup so
 	// a missing table-999 route cannot fall through to main's WAN default.
 	// Only DNS traffic is steered (#14971): each protocol gets its own
-	// lookup/shadow pair scoped by FRA_IP_PROTO + destination port 53, so
+	// lookup/shadow pair scoped by the ip-protocol attribute plus
 	// non-DNS host traffic to a nameserver's IP (SSH, NTP, monitoring, ...)
 	// keeps its main-table route instead of being hijacked into table 999 or
 	// blackholed by the shadow. Legacy unscoped pairs (UDP/TCP priorities
@@ -45,7 +45,7 @@ const (
 )
 
 // mgmtDNSProtocols are the DNS transports, in priority order. A kernel ip
-// rule carries exactly one FRA_IP_PROTO value, so DNS-over-UDP and
+// rule carries exactly one ip-protocol attribute value, so DNS-over-UDP and
 // DNS-over-TCP each need their own lookup/shadow pair (#14971).
 var mgmtDNSProtocols = []struct {
 	proto          int
@@ -105,7 +105,7 @@ func (netlinkMgmtDNSRuleOps) RuleDel(rule *netlink.Rule) error { return netlink.
 // fib_rule_hdr action this reconciler keys its lookup/shadow pairs
 // on, and the full decoder lives with the package that owns rule
 // machinery (#17078). Only the netlink.Rule projection is consumed
-// here; the FRA_DSCP sidecar stays with pkg/routing's own readbacks.
+// here; the DSCP-attribute sidecar stays with pkg/routing's own readbacks.
 func (netlinkMgmtDNSRuleOps) RuleList(family int) ([]netlink.Rule, error) {
 	rows, err := routing.RuleListFull(family)
 	if err != nil {
