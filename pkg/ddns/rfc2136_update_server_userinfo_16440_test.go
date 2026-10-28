@@ -43,14 +43,14 @@ func TestRFC2136UpdateServerUserinfoRejected16440(t *testing.T) {
 		if !strings.Contains(err.Error(), "<redacted>@dns.example.com") {
 			t.Fatalf("rejection must name the redacted server, got: %v", err)
 		}
-		cfg := &config.DHCPDynamicDNSConfig{Enabled: true, Domain: "example.com", UpdateServer: server}
-		if _, err := newRFC2136Updater(policyFromConfig(cfg), cfg, nil, nil, nil); err == nil {
+		cfg := &config.DHCPDynamicDNSConfig{Enabled: true, Domain: "example.com", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: server}}
+		if _, err := newRFC2136Updater(policyFromConfig(cfg), cfg.RFC2136Endpoint, nil, nil, nil); err == nil {
 			t.Fatalf("newRFC2136Updater accepted userinfo server %q", server)
 		} else if strings.Contains(err.Error(), userinfoSecret16440) {
 			t.Fatalf("constructor rejection leaked the credential: %v", err)
 		}
 		// Surface A path (the vf07 probe's route).
-		p := &config.DDNSProvider{Name: "P", Backend: "rfc2136", UpdateServer: server}
+		p := &config.DDNSProvider{Name: "P", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: server}}
 		if _, err := newSurfaceARFC2136(p, "wan.example.net"); err == nil {
 			t.Fatalf("newSurfaceARFC2136 accepted userinfo server %q", server)
 		} else if strings.Contains(err.Error(), userinfoSecret16440) {
@@ -85,7 +85,7 @@ func TestRFC2136UserinfoLastErrorLeakFalse16440(t *testing.T) {
 		"user:" + userinfoSecret16440 + "@dns.example.com",
 		"user:" + userinfoSecret16440 + "@dns.example.com:53",
 	} {
-		p := &config.DDNSProvider{Name: "P", Backend: "rfc2136", UpdateServer: server}
+		p := &config.DDNSProvider{Name: "P", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: server}}
 		if _, err := newSurfaceARFC2136(p, "wan.example.net"); err == nil {
 			t.Fatalf("userinfo server %q must be refused before any dial", server)
 		}

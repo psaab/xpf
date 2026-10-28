@@ -112,8 +112,10 @@ func TestLeaseAndSurfaceAAgreeOnOneServer6755(t *testing.T) {
 	const server = "ns1.example.net:53"
 
 	surfaceA := backendFingerprint(&config.DDNSProvider{
-		Backend:      "rfc2136",
-		UpdateServer: server,
+		Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: server,
+		},
 	})
 	// The lease policy carries a Domain — the DNS suffix it appends to client
 	// names. It is NOT the Surface A `Zone` (documented as the CLOUDFLARE zone
@@ -122,9 +124,11 @@ func TestLeaseAndSurfaceAAgreeOnOneServer6755(t *testing.T) {
 	// FAIL: with an empty Domain, mapping it onto the Zone slot would be a no-op
 	// and the mistake would pass unnoticed.
 	lease := leaseAuthorityFingerprint(&config.DHCPDynamicDNSConfig{
-		Backend:      "rfc2136",
-		UpdateServer: server,
-		Domain:       "lan.example.net",
+		Backend: "rfc2136",
+		Domain:  "lan.example.net",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: server,
+		},
 	})
 
 	if surfaceA != lease {
@@ -139,8 +143,10 @@ func TestLeaseAndSurfaceAAgreeOnOneServer6755(t *testing.T) {
 
 	// And a different server must still differ, or the agreement above is vacuous.
 	other := leaseAuthorityFingerprint(&config.DHCPDynamicDNSConfig{
-		Backend:      "rfc2136",
-		UpdateServer: "ns2.example.net:53",
+		Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns2.example.net:53",
+		},
 	})
 	if other == surfaceA {
 		t.Error("a DIFFERENT server produced the same authority: the agreement above would " +
@@ -153,12 +159,22 @@ func TestLeaseAndSurfaceAAgreeOnOneServer6755(t *testing.T) {
 // secret may reach the fingerprint.
 func TestAuthorityOmitsCredentials6755(t *testing.T) {
 	a := leaseAuthorityFingerprint(&config.DHCPDynamicDNSConfig{
-		Backend: "rfc2136", UpdateServer: "ns1.example.net:53",
-		TSIGKeyName: "k1", TSIGAlgorithm: "hmac-sha256", TSIGSecret: config.NewSecret("SECRET-ONE"),
+		Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns1.example.net:53",
+			TSIGKeyName:   "k1",
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret:    config.NewSecret("SECRET-ONE"),
+		},
 	})
 	b := leaseAuthorityFingerprint(&config.DHCPDynamicDNSConfig{
-		Backend: "rfc2136", UpdateServer: "ns1.example.net:53",
-		TSIGKeyName: "k2", TSIGAlgorithm: "hmac-sha512", TSIGSecret: config.NewSecret("SECRET-TWO"),
+		Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns1.example.net:53",
+			TSIGKeyName:   "k2",
+			TSIGAlgorithm: "hmac-sha512",
+			TSIGSecret:    config.NewSecret("SECRET-TWO"),
+		},
 	})
 	if a != b {
 		t.Error("TSIG material changed the authority fingerprint: two keys for the same " +

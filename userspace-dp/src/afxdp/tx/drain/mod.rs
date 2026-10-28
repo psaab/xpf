@@ -9,6 +9,8 @@ mod phase_trivial;
 
 use phase_backup::{BackupOutcome, drain_phase_drain_local_backup};
 use phase_shaped::drain_phase_drain_cos;
+#[cfg(test)]
+use phase_shaped::{AFTER_INITIAL_DRAIN_HOOK, service_shaped_until_noop};
 use phase_trivial::{
     drain_phase_finish, drain_phase_ingest_cos, drain_phase_maybe_rekick,
     drain_phase_reap_completions,
