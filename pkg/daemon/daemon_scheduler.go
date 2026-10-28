@@ -193,7 +193,7 @@ func (d *Daemon) startPolicySchedulerLoopLocked() {
 
 // stopPolicySchedulerLoop cancels the policy-scheduler Run() goroutine and
 // joins it. It is called from the shutdown sequence BEFORE the dataplane
-// runtime the scheduler republishes into (UpdatePolicyScheduleState) is torn
+// runtime the scheduler republishes into (UpdatePolicyScheduleStateWithLatch) is torn
 // down, so a late scheduler tick can never run against a closed runtime
 // (#5308). The applySem is acquired only to read+cancel schedulerCancel under
 // the same lock that guards it, then RELEASED before the join: an in-flight
@@ -354,9 +354,10 @@ func (d *Daemon) seedPolicySchedulerActiveStateLocked(activeState map[string]boo
 // updatePolicyScheduleStateLocked is the apply-transaction publication: it
 // carries no stale-republish latch, so it forwards failClosed=false to the
 // latch updater every published backend satisfies (see the compile-time
-// assertions in policy_scheduler_published_type_17082.go). Before #17082 it
-// resolved the retired non-latch UpdatePolicyScheduleState, which only the
-// retired eBPF backend satisfied.
+// assertions in policy_scheduler_published_type_17082.go). Before #17082 the
+// optional-interface fallback was needed only by the retired eBPF backend;
+// both published userspace types also expose the non-latch method and satisfy
+// the latch updater used here.
 func (d *Daemon) updatePolicyScheduleStateLocked(cfg *config.Config, activeState map[string]bool) error {
 	return d.updatePolicyScheduleStateWithLatchLocked(cfg, activeState, false)
 }
