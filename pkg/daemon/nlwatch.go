@@ -66,29 +66,29 @@ type nlWatch[U any] struct {
 	// Backoff is the resubscribe delay. Zero means nlWatchBackoffDefault.
 	Backoff time.Duration
 
-	OnEvent             func(U)
-	OnGap               func()
-	OnGapOnFailure      bool
+	OnEvent        func(U)
+	OnGap          func()
+	OnGapOnFailure bool
 	// OnGapOnlyOnRestore suppresses the OnGap fired by the first
 	// successful subscribe; every later success — a re-subscribe
 	// after a close, or the first success following one or more
 	// failed attempts — still fires it. Default false preserves the
 	// historical fire-on-initial-subscribe behaviour for other owners.
-	OnGapOnlyOnRestore  bool
+	OnGapOnlyOnRestore bool
 	// subscribeAttempted persists across runOne calls for the watch's
 	// lifetime so OnGapOnlyOnRestore handles failures before first success.
-	subscribeAttempted  bool
-	OnReceiveError      func(error)
-	OnChannelClosed     func()
-	Enabled             func() bool
-	Watch               func() <-chan time.Time
-	WatchReady          func() bool
+	subscribeAttempted bool
+	OnReceiveError     func(error)
+	OnChannelClosed    func()
+	Enabled            func() bool
+	Watch              func() <-chan time.Time
+	WatchReady         func() bool
 	// WatchTick handles one Watch firing. Return true to stop cleanly
 	// (Run returns), false to continue this lifetime.
-	WatchTick           func() (stop bool)
+	WatchTick func() (stop bool)
 	// OwnerDone cleanly stops the watch lifetime independently of ctx; the
 	// subscription's own done channel is closed before the lifetime returns.
-	OwnerDone           <-chan struct{}
+	OwnerDone <-chan struct{}
 }
 
 func (w nlWatch[U]) backoff() time.Duration {
