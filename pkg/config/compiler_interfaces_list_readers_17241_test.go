@@ -111,21 +111,16 @@ func TestVRRPWGListReaderParity17241(t *testing.T) {
 		})
 	}
 
-	// Preservation pins for behaviours the old hand-rolled loops had that
-	// firewallMatchValues deliberately changes / must not regress:
-	// (a) WG: a NON-leaf child (option block) contributed nothing under the
-	//     old IsLeaf guard; firewallMatchValues contributes its Keys, which
-	//     for `10.0.0.0/8 { }` is exactly that one prefix — same result.
-	t.Run("wg non-leaf child keeps its sole prefix", func(t *testing.T) {
-		src := wgpre + "allowed-ips { 10.0.0.0/8 { } 192.168.0.0/16; }" + wgpost
-		cfg, err := CompileConfig(parseHierText(t, src))
-		if err != nil {
-			t.Fatalf("compile: %v", err)
-		}
-		if got := wgAllowed17241(t, cfg); !slices.Equal(got, []string{"10.0.0.0/8", "192.168.0.0/16"}) {
-			t.Fatalf("got %v want both prefixes", got)
-		}
-	})
+	// Preservation pin (updated by the Rev18305b nested fold): a NON-leaf
+	// child used to be compiled by firewallMatchValues for its sole key
+	// (`10.0.0.0/8 { }` contributed that one prefix). The nested fold makes
+	// the canonical gate refuse that shape instead — nested content under
+	// a pure value-list leaf is not Junos and its grandchildren are never
+	// read, so accepting the empty-block spelling while refusing
+	// `a { b; }` would split the invariant. The CompileConfig-only
+	// behaviour below is therefore no longer pinned; the canonical-gate
+	// refusal for both spellings is pinned in
+	// TestVRRPWGListReaderNestedRefused17241.
 	// (b) VRRP: duplicate VIPs still dedupe to a set (DedupeVRRPVIPs),
 	//     including a duplicate introduced by the packed spelling.
 	t.Run("vrrp packed duplicate dedupes", func(t *testing.T) {
@@ -210,7 +205,10 @@ func TestListReadersSingleSourced17241(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := strings.Count(string(schemaSrc), "allChildKeysAreValues: true"); n < 3 {
+	// Count the field at any gofmt alignment: the two VRRP leaves align the
+	// field name against the adjacent refuseNonLeafBlockChildren field, so
+	// a literal "allChildKeysAreValues: true" undercounts them.
+	if n := strings.Count(string(schemaSrc), "allChildKeysAreValues:"); n < 3 {
 		t.Fatalf("schema_interfaces.go allChildKeysAreValues leaves = %d, want >=3 (virtual-address, virtual-inet6-address, allowed-ips)", n)
 	}
 }
@@ -315,12 +313,86 @@ func TestVRRPWGListReaderPackedBogusRefused17241(t *testing.T) {
 			if !strings.Contains(verr.Error(), "bogus") {
 				t.Fatalf("SchemaValidate error %q does not name the bogus token", verr)
 			}
-			// And the full canonical sequence must refuse.
+			// The canonical sequence (SchemaValidate -> CompileConfig)
+			// refuses at the gate above: verr != nil here by construction
+			// (the Fatalf on nil), so there is no CompileConfig leg to run —
+			// direct CompileConfig tolerance for VRRP tokens is by design
+			// and is not the canonical sequence.
+		})
+	}
+}
+
+// Nested-content refusal (#17241 fold, Rev18305bOpus blocker): a block
+// child of virtual-address / virtual-inet6-address / allowed-ips that
+// itself has Children carries a grandchild value the compiler never
+// reads (firewallMatchValues consumes only the child's Keys and never
+// descends), so `allowed-ips { 10.0.0.0/8 { 192.168.0.0/16; } }`
+// committed with the nested prefix silently vanished. The canonical
+// gate (SchemaValidate, via validateMultiValueLeaf +
+// refuseNonLeafBlockChildren) now refuses the shape fail-closed,
+// naming the leaf and the offending child token — for both a bogus
+// grandchild and a real-prefix grandchild (a valid nested prefix is
+// still refused: the value is nested, not a direct value of the leaf).
+// The empty-block spelling `a { }` is refused on the same invariant.
+// Fail-on-revert: drop refuseNonLeafBlockChildren from any leaf (or
+// the walker check) and that leaf's rows accept nested content again.
+func TestVRRPWGListReaderNestedRefused17241(t *testing.T) {
+	v4pre := "interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.1.1/24 { vrrp-group 1 { priority 150; "
+	v4post := " } } } } } }"
+	v6pre := "interfaces { ge-0/0/0 { unit 0 { family inet6 { address 2001:db8::1/64 { vrrp-inet6-group 1 { priority 150; "
+	v6post := " } } } } } }"
+	wgpre := "interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key " + wgKeyA + "; peer " + wgKeyB + " { "
+	wgpost := " } } } } }"
+
+	rows := []struct {
+		name string
+		src  string
+		leaf string
+		tok  string // offending direct-child token the error must name
+	}{
+		// Bogus grandchild.
+		{"vrrp-v4 nested bogus grandchild", v4pre + "virtual-address { 10.0.1.100/24 { bogus; } }" + v4post, "virtual-address", "10.0.1.100/24"},
+		{"vrrp-v6 nested bogus grandchild", v6pre + "virtual-inet6-address { 2001:db8::100/64 { bogus; } }" + v6post, "virtual-inet6-address", "2001:db8::100/64"},
+		{"wg nested bogus grandchild", wgpre + "allowed-ips { 10.0.0.0/8 { bogus; } }" + wgpost, "allowed-ips", "10.0.0.0/8"},
+		// Real-prefix grandchild: the nested value itself is valid, but it
+		// is nested — the compiler would never read it, so it must refuse.
+		{"vrrp-v4 nested real grandchild", v4pre + "virtual-address { 10.0.1.100/24 { 10.0.1.101/24; } }" + v4post, "virtual-address", "10.0.1.100/24"},
+		{"vrrp-v6 nested real grandchild", v6pre + "virtual-inet6-address { 2001:db8::100/64 { 2001:db8::101/64; } }" + v6post, "virtual-inet6-address", "2001:db8::100/64"},
+		{"wg nested real grandchild", wgpre + "allowed-ips { 10.0.0.0/8 { 192.168.0.0/16; } }" + wgpost, "allowed-ips", "10.0.0.0/8"},
+		// Empty-block (non-leaf) child: same silent-drop invariant.
+		{"wg empty-block child", wgpre + "allowed-ips { 10.0.0.0/8 { } 192.168.0.0/16; }" + wgpost, "allowed-ips", "10.0.0.0/8"},
+		{"vrrp-v4 empty-block child", v4pre + "virtual-address { 10.0.1.100/24 { } 10.0.1.101/24; }" + v4post, "virtual-address", "10.0.1.100/24"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			tree := parseHierText(t, r.src)
+			verr := SchemaValidate(tree)
 			if verr == nil {
-				if _, err := CompileConfig(tree); err == nil {
-					t.Fatalf("canonical gate (SchemaValidate -> CompileConfig) accepted packed bogus token for %s", r.leaf)
-				}
+				t.Fatalf("SchemaValidate accepted nested content under %s (grandchild silently dropped at compile)", r.leaf)
+			}
+			if !strings.Contains(verr.Error(), r.leaf) {
+				t.Fatalf("SchemaValidate error %q does not name leaf %q", verr, r.leaf)
+			}
+			if !strings.Contains(verr.Error(), r.tok) {
+				t.Fatalf("SchemaValidate error %q does not name offending token %q", verr, r.tok)
+			}
+			if !strings.Contains(verr.Error(), "nested") {
+				t.Fatalf("SchemaValidate error %q does not describe nested content", verr)
 			}
 		})
+	}
+}
+
+// Census for the nested refusal: all three leaves must carry
+// refuseNonLeafBlockChildren (source census, mirroring the
+// allChildKeysAreValues census above — without the flag the walker
+// never refuses nested content for that leaf).
+func TestListReadersNestedRefusalCensus17241(t *testing.T) {
+	schemaSrc, err := os.ReadFile("schema_interfaces.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(schemaSrc), "refuseNonLeafBlockChildren: true"); n < 3 {
+		t.Fatalf("schema_interfaces.go refuseNonLeafBlockChildren leaves = %d, want >=3 (virtual-address, virtual-inet6-address, allowed-ips)", n)
 	}
 }

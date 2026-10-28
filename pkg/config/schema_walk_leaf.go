@@ -485,6 +485,21 @@ func validateMultiValueLeaf(node *Node, leafSchema *schemaNode, parentPath []str
 		if c == nil || len(c.Keys) == 0 {
 			continue
 		}
+		// #17241: a block child that itself has Children (or is a non-leaf
+		// block such as `a { }`) carries nested content the compiler never
+		// reads — firewallMatchValues consumes only the child's Keys and
+		// never descends — so every grandchild token (`leaf { a { b; } }`)
+		// would be silently dropped. Leaves that opt in via
+		// refuseNonLeafBlockChildren (VRRP virtual-address/
+		// virtual-inet6-address, WireGuard allowed-ips) refuse the shape
+		// fail-closed, naming the leaf and the offending child token.
+		if leafSchema.refuseNonLeafBlockChildren && (len(c.Children) > 0 || !c.IsLeaf) {
+			err := typedLeafErrorf(path, "nested content under %s value %q is not supported; write values as separate statements (%s { %s; }) or a bracket list (%s [ %s ])", leafName, c.Keys[0], leafName, c.Keys[0], leafName, c.Keys[0])
+			if vc.recordTypedLeaf(err) {
+				continue
+			}
+			return err
+		}
 		if len(c.Keys) > 1 && !leafSchema.allChildKeysAreValues {
 			err := typedLeafErrorf(path, "only one value per statement inside a value block; write %q as separate statements (%s { %s; %s; }) or a bracket list (%s [ %s %s ])", strings.Join(c.Keys, " "), leafName, c.Keys[0], c.Keys[1], leafName, c.Keys[0], c.Keys[1])
 			if vc.recordTypedLeaf(err) {
