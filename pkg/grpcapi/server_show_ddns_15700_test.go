@@ -14,7 +14,7 @@ import (
 
 func TestShowDHCPDynamicDNS_V6Only_15700(t *testing.T) {
 	cfg := &config.Config{}
-	cfg.System.DHCPServer.DynamicDNSv6 = &config.DHCPDynamicDNSConfig{Enabled: true, Domain: "v6.example.com", Backend: "rfc2136", UpdateServer: "2001:db8::53"}
+	cfg.System.DHCPServer.DynamicDNSv6 = &config.DHCPDynamicDNSConfig{Enabled: true, Domain: "v6.example.com", Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "2001:db8::53"}}
 	s := &Server{ddnsStatsFn: func() *dhcpserver.DDNSStats { return &dhcpserver.DDNSStats{OwnedRecords: 2} }}
 	var buf strings.Builder
 	s.showDHCPDynamicDNS(cfg, &buf, false)

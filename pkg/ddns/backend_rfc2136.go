@@ -350,41 +350,42 @@ func ddnsUnsignedNonLoopback(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig) boo
 // Enabled: a disabled family still sends unsigned cleanup UPDATEs for owned
 // records, so the gauge must stay set while that cleanup authority exists.
 func ddnsConfigUnsignedNonLoopback(c *config.DHCPDynamicDNSConfig) bool {
-	if c == nil || c.UpdateServer == "" || c.TSIGKeyName != "" {
+	if c == nil {
 		return false
 	}
-	backend := c.Backend
+	return endpointUnsignedNonLoopback(c.RFC2136Endpoint, c.Backend)
+}
+
+// endpointUnsignedNonLoopback is the single *UnsignedNonLoopback config
+// predicate in this package (#17237): whether an endpoint targeting a
+// non-loopback server with no TSIG key trusts unsigned rcodes. Both the
+// DHCP per-family shape and the Surface A provider shape resolve to it
+// through their embedded RFC2136Endpoint, so the twin predicates cannot
+// diverge again.
+func endpointUnsignedNonLoopback(ep config.RFC2136Endpoint, backend string) bool {
+	if ep.UpdateServer == "" || ep.TSIGKeyName != "" {
+		return false
+	}
 	if backend == "" {
 		backend = "rfc2136"
 	}
 	if backend != "rfc2136" {
 		return false
 	}
-	server, err := normalizeUpdateServer(c.UpdateServer)
+	server, err := normalizeUpdateServer(ep.UpdateServer)
 	if err != nil {
 		return false
 	}
 	return !updateServerIsLoopback(server)
 }
 
-// providerUnsignedNonLoopback is the Surface A analogue: an rfc2136 provider
-// targeting a non-loopback update-server with no TSIG key.
+// providerUnsignedNonLoopback is the Surface A entry to the shared
+// endpointUnsignedNonLoopback predicate (#17237).
 func providerUnsignedNonLoopback(p *config.DDNSProvider) bool {
-	if p == nil || p.UpdateServer == "" || p.TSIGKeyName != "" {
+	if p == nil {
 		return false
 	}
-	backend := p.Backend
-	if backend == "" {
-		backend = "rfc2136"
-	}
-	if backend != "rfc2136" {
-		return false
-	}
-	server, err := normalizeUpdateServer(p.UpdateServer)
-	if err != nil {
-		return false
-	}
-	return !updateServerIsLoopback(server)
+	return endpointUnsignedNonLoopback(p.RFC2136Endpoint, p.Backend)
 }
 
 // updaterUnsignedNonLoopback reports whether a resolved backend will send
@@ -419,7 +420,8 @@ func updaterEndpointPosture(u DNSUpdater) (server string, keyed bool, ok bool) {
 }
 
 // newRFC2136Updater builds the live backend from a resolved policy plus the
-// raw config (for the TSIG/server fields the policy struct does not carry).
+// shared RFC2136Endpoint (for the TSIG/server fields the policy struct does
+// not carry) (#17237).
 // onPTRNotAuth/onConflict are the manager's skip counters. A nil client
 // seam means a real *dns.Client is used. Returns an error when the policy
 // is structurally unusable (no update-server / bad TSIG) so the caller can
@@ -430,10 +432,7 @@ func updaterEndpointPosture(u DNSUpdater) (server string, keyed bool, ok bool) {
 // destination-interface binding resolves to the real kernel device before
 // SO_BINDTODEVICE (#5070). Omitted / nil ⇒ the leaf slash-substitution fallback
 // (direct + test callers with no committed config).
-func newRFC2136Updater(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig, client dnsExchanger, onPTRNotAuth, onConflict func(), resolveIf ...func(string) string) (*rfc2136Updater, error) {
-	if c == nil {
-		return nil, errors.New("ddns: nil config for rfc2136 backend")
-	}
+func newRFC2136Updater(pol ddnsPolicy, ep config.RFC2136Endpoint, client dnsExchanger, onPTRNotAuth, onConflict func(), resolveIf ...func(string) string) (*rfc2136Updater, error) {
 	// #14432: fail closed on a garbage conflict-policy. Pre-fix, any value
 	// other than "replace-owned" took sendRemoveForward's UNGUARDED plain
 	// exact-RR delete branch, so a typo (skip-existng, none, ...) that
@@ -452,7 +451,7 @@ func newRFC2136Updater(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig, client dn
 	if pol.conflictPolicy != "" && !validConflictPolicy(pol.conflictPolicy) {
 		return nil, fmt.Errorf("ddns: invalid conflict-policy %q (valid: replace-owned, skip-existing, strict-fail); refusing to publish or withdraw DNS records", pol.conflictPolicy)
 	}
-	server, err := normalizeUpdateServer(c.UpdateServer)
+	server, err := normalizeUpdateServer(ep.UpdateServer)
 	if err != nil {
 		return nil, err
 	}
@@ -466,22 +465,22 @@ func newRFC2136Updater(pol ddnsPolicy, c *config.DHCPDynamicDNSConfig, client dn
 		client:         client,
 		onPTRNotAuth:   onPTRNotAuth,
 		onConflict:     onConflict,
-		requireTSIG:    c.RequireTSIG,
+		requireTSIG:    ep.RequireTSIG,
 	}
-	if c.TSIGKeyName != "" {
-		algo, err := canonicalTSIGAlgorithm(c.TSIGAlgorithm)
+	if ep.TSIGKeyName != "" {
+		algo, err := canonicalTSIGAlgorithm(ep.TSIGAlgorithm)
 		if err != nil {
 			return nil, err
 		}
-		u.tsigKeyName = dns.CanonicalName(c.TSIGKeyName)
+		u.tsigKeyName = dns.CanonicalName(ep.TSIGKeyName)
 		u.tsigAlgo = algo
-		u.tsigSecret = c.TSIGSecret.Reveal()
+		u.tsigSecret = ep.TSIGSecret.Reveal()
 	}
 	// #2691 P1b / #2665: resolve the source / interface / VRF binding. An
 	// invalid source-address is a hard error (the caller falls back to no-op +
 	// counts it) so a misconfigured bind never emits UPDATEs from the wrong
 	// source.
-	bind, err := resolveBindConfig(c, firstResolver(resolveIf))
+	bind, err := resolveBindConfig(ep, firstResolver(resolveIf))
 	if err != nil {
 		return nil, err
 	}
