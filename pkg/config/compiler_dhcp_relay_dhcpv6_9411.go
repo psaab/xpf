@@ -68,20 +68,33 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 			return nil
 		}
 		// `interface { ge-0/0/0.0; }` is a legitimate multi-value
-		// container. A scalar followed by a braced child is not.
+		// container. A scalar followed by a braced child is not
+		// (`interface ge-0/0/0.0 { disable; }`).
 		if len(node.Children) > 0 && len(node.Keys) > 1 {
 			return report(node.Children[0].Name())
 		}
-		if len(node.Keys) == 1 && len(node.Children) == 0 {
-			return report(node.Name() + " requires a value")
-		}
+		// A braced member carrying its own children is a nested leaf
+		// (`interface { ge-0/0/0.0 { disable; } }`), not a member list.
 		for _, member := range node.Children {
 			if member != nil && len(member.Children) > 0 {
 				return report(member.Children[0].Name())
 			}
 		}
-		if len(node.Keys) > 2 && !node.KeyBracketed(2) {
-			return report(node.Keys[2])
+		// The members are exactly what both compilers install, read
+		// through the shared dhcpRelayGroupInterfaces (#17205) — never
+		// key position or bracket provenance: FormatSet renders value
+		// leaves unbracketed, so a provenance test rejects xpf's own
+		// display-set output. Every member must be interface-shaped;
+		// a packed remainder token behind the values (`interface
+		// ge-0/0/0.0 disable`) is not, and stays refused by name.
+		members := dhcpRelayGroupInterfaces(node)
+		if len(members) == 0 {
+			return report(node.Name() + " requires a value")
+		}
+		for _, member := range members {
+			if !dhcpRelayInterfaceMemberValid(member) {
+				return report(member)
+			}
 		}
 		return nil
 	}
@@ -110,43 +123,57 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 						return warnings, err
 					}
 				case "group":
-					for _, groupChild := range child.Children {
-						if groupChild == nil {
-							continue
-						}
-						if routingInstanceApplyMetaKeyword9323(groupChild.Name()) {
-							continue
-						}
-						switch groupChild.Name() {
-						case "active-server-group":
-							if err := checkScalar(groupChild); err != nil {
-								return warnings, err
+					// Judge exactly the instances the compiler compiles:
+					// namedInstances normalises the compact
+					// `group G6 { … }` and container `group { G6 { … } }`
+					// shapes onto one instance node per group (#17205).
+					for _, inst := range namedInstances([]*Node{child}) {
+						for _, groupChild := range inst.node.Children {
+							if groupChild == nil {
+								continue
 							}
-						case "interface":
-							if err := checkInterface(groupChild); err != nil {
-								return warnings, err
+							if routingInstanceApplyMetaKeyword9323(groupChild.Name()) {
+								continue
 							}
-						case "relay-agent-interface-id":
-							if err := checkInterfaceID(groupChild); err != nil {
-								return warnings, err
-							}
-						default:
-							if err := report(groupChild.Name()); err != nil {
-								return warnings, err
+							switch groupChild.Name() {
+							case "active-server-group":
+								if err := checkScalar(groupChild); err != nil {
+									return warnings, err
+								}
+							case "interface":
+								if err := checkInterface(groupChild); err != nil {
+									return warnings, err
+								}
+							case "relay-agent-interface-id":
+								if err := checkInterfaceID(groupChild); err != nil {
+									return warnings, err
+								}
+							default:
+								if err := report(groupChild.Name()); err != nil {
+									return warnings, err
+								}
 							}
 						}
 					}
 				case "server-group":
-					for _, member := range child.Children {
-						if member != nil && len(member.Children) > 0 {
-							if err := report(member.Children[0].Name()); err != nil {
-								return warnings, err
+					// Named server-group values are validated by the
+					// typed compiler; their child addresses are not
+					// scalar statements. Iterate the same
+					// namedInstances the compilers use so the canonical
+					// Junos block `server-group { SG6 { addr; } }` is
+					// judged as the SG6 instance it compiles to, not as
+					// a member carrying a child address (#17205). A
+					// member whose address itself carries a child is a
+					// nested leaf and stays refused.
+					for _, inst := range namedInstances([]*Node{child}) {
+						for _, member := range inst.node.Children {
+							if member != nil && len(member.Children) > 0 {
+								if err := report(member.Children[0].Name()); err != nil {
+									return warnings, err
+								}
 							}
 						}
 					}
-					// Named server-group values are otherwise validated by
-					// the typed compiler; their child addresses are not
-					// scalar statements.
 				default:
 					if err := report(child.Name()); err != nil {
 						return warnings, err
