@@ -141,6 +141,12 @@ func TestSyncApplyDoesNotLetPriorSchemaErrorHideNestedRefusal17241(t *testing.T)
 	}
 	cfg, err := s.SyncApply(text, nil)
 	assertNestedAllowedIPsRefused17241(t, err)
+	if err == nil || !strings.Contains(err.Error(), "adress-set") {
+		t.Fatalf("reported error set must preserve the early adress-set schema error beside the nested refusal, got: %v", err)
+	}
+	if !config.IsNestedListContentSchemaError(err) {
+		t.Fatalf("reported error set must classify as the nested-list refusal, got: %v", err)
+	}
 	if cfg != nil || s.ActiveConfig() != baseline {
 		t.Fatalf("prior schema error must not hide nested refusal or replace active config: cfg=%v active=%p baseline=%p",
 			cfg, s.ActiveConfig(), baseline)

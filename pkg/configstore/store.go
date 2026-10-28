@@ -1126,9 +1126,9 @@ func (s *Store) schemaValidateExpandedTree(tree *config.ConfigTree) error {
 
 // schemaValidateExpandedTreeCollect16012 mirrors schemaValidateExpandedTree
 // but collects independent typed-leaf findings. Its second return carries
-// non-typed schema errors separately; #17241 nested-list refusals take
-// precedence if an earlier structural error or the typed-error cap would
-// otherwise hide them.
+// non-typed schema errors separately from those findings. A #17241 nested-list
+// refusal remains hard, and an earlier structural diagnostic is joined with
+// it when both are present.
 func (s *Store) schemaValidateExpandedTreeCollect16012(tree *config.ConfigTree) ([]error, error) {
 	if tree == nil {
 		return nil, nil

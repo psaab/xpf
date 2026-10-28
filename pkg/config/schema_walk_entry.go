@@ -61,7 +61,8 @@ const MaxCollectedTypedLeafViolations16012 = 16
 // (#16012) and, separately, the first non-typed schema error if one stopped
 // the walk. A nested-list refusal is the #17241 hard exception: when the
 // normal walk is stopped by an earlier structural error or the typed-error
-// cap, the opted-in leaves are rescanned and that refusal takes precedence.
+// cap, opted-in leaves are rescanned, and any earlier structural diagnostic
+// is preserved alongside the hard refusal.
 // Strict callers keep SchemaValidate (first error, unchanged); the tolerant
 // configstore path uses this to persist ordinary typed-leaf warnings without
 // allowing a truncated nested list through.
@@ -137,7 +138,7 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 	if err := validateStaticRouteQNHTails12813(tree.Children); err != nil {
 		if collect {
 			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
-				return nil, scrubSchemaErrorSecrets(tree, nestedErr)
+				return nil, scrubSchemaErrorSecrets(tree, errors.Join(err, nestedErr))
 			}
 		}
 		return nil, scrubSchemaErrorSecrets(tree, err)
@@ -182,7 +183,7 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 	if err := checkUnknownTopLevelStanza(tree); err != nil {
 		if collect {
 			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
-				return nil, scrubSchemaErrorSecrets(tree, nestedErr)
+				return nil, scrubSchemaErrorSecrets(tree, errors.Join(err, nestedErr))
 			}
 		}
 		return nil, scrubSchemaErrorSecrets(tree, err)
@@ -203,7 +204,11 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 		// can hide values that the compiler will silently drop.
 		if walkErr != nil || len(errs) >= MaxCollectedTypedLeafViolations16012 {
 			if nestedErr := findNestedListContentError(tree.Children, setSchema, nil); nestedErr != nil {
-				walkErr = nestedErr
+				if walkErr == nil || IsNestedListContentSchemaError(walkErr) {
+					walkErr = nestedErr
+				} else {
+					walkErr = errors.Join(walkErr, nestedErr)
+				}
 			}
 		}
 		for i, e := range errs {
@@ -213,8 +218,8 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 			// #16012 fold: a later non-typed structural error ends the
 			// ordinary walk, but does not erase independent typed-leaf
 			// violations already collected. The #17241 nested-list refusal
-			// is found by the bounded fallback scan above and takes
-			// precedence over that structural error when present.
+			// is found by the bounded fallback scan above and is joined with
+			// an earlier structural error when both are present.
 			return errs, scrubSchemaErrorSecrets(tree, walkErr)
 		}
 		return errs, nil
