@@ -219,6 +219,7 @@ func TestSessionSyncLockOrderGraphPinned16159(t *testing.T) {
 		"genState.genSentMu", "genState.recvGenMu", "applyMu",
 		"configEpochRoleMu", "configGenMu", "configApplyMu", "recvSeqMu",
 		"persistentNatLeaseApplyMu", "ipsecApplyMu", "dhcpApplyMu",
+		"configApplyDebtMu",
 	}
 	for _, name := range mutexNames {
 		if !strings.Contains(src, name) {
@@ -227,6 +228,7 @@ func TestSessionSyncLockOrderGraphPinned16159(t *testing.T) {
 	}
 	edges := []string{
 		"mu -> peerSnapshotProtocolWriteMu",
+		"peerSnapshotProtocolWriteMu -> writeMu",
 		"mu -> fenceAckMu",
 		"bulkSnapshotGenMu -> genSentMu",
 		"bulkSnapshotGenMu -> recvGenMu",
@@ -237,6 +239,9 @@ func TestSessionSyncLockOrderGraphPinned16159(t *testing.T) {
 		"persistentNatLeaseApplyMu -> recvSeqMu",
 		"recvSeqMu -> peerDHCPLeasesMu",
 		"dhcpApplyMu -> peerDHCPLeasesMu",
+		"peerSnapshotProtocolWriteMu -> configApplyDebtMu",
+		"writeMu -> configApplyDebtMu",
+		"mu -> configApplyDebtMu",
 	}
 	for _, edge := range edges {
 		if !strings.Contains(src, edge) {

@@ -178,7 +178,7 @@ func TestConfigQueueFullDropCountsNacksAndArmsDebt6778(t *testing.T) {
 		}
 		if f[1] != droppedGen {
 			t.Fatalf("the nack must name the DROPPED generation so the sender's scope guard "+
-				"matches it against lastSentConfigGen; got %d want %d", f[1], droppedGen)
+				"matches it against the current config debt snapshot; got %d want %d", f[1], droppedGen)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("no frame observed after a queue-full drop")

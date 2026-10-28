@@ -85,15 +85,20 @@ type dhcpChunkAssembly struct {
 	have        int    // distinct chunks present
 }
 
-// dhcpChunkState is the receiver's per-family assembly table. Only
-// dhcpApplyMu holders touch it (the chunk commit path and the legacy
-// commit's supersede), so it needs no lock of its own; the zero value
-// (nil map) is valid.
+// dhcpChunkState is the receiver's per-family assembly and generation-fence
+// state. Only dhcpApplyMu holders touch it (the chunk commit path and the
+// legacy commit's supersede), so it needs no lock of its own; the zero value
+// (nil maps) is valid.
 type dhcpChunkState struct {
 	pending map[dhcpChunkGeneration]*dhcpChunkAssembly
 	// order stores pending keys oldest first so bounded admission evicts
 	// by insertion order, not map iteration order.
 	order []dhcpChunkGeneration
+	// committedGen fences a generation that started before a newer set
+	// committed but whose later chunks still carry fresh frame sequences.
+	// It is keyed by incarnation because generation numbers are only
+	// comparable within one sender incarnation.
+	committedGen map[uint64]uint64
 }
 
 // encodeDHCPLeaseChunkPayload builds one chunk payload (WITHOUT the
@@ -274,4 +279,27 @@ func (st *dhcpChunkState) discard(key dhcpChunkGeneration) {
 func (st *dhcpChunkState) discardAll() {
 	st.pending = nil
 	st.order = nil
+}
+
+// recordCommit notes that generation committed for key's incarnation.
+// Caller holds dhcpApplyMu.
+func (st *dhcpChunkState) recordCommit(key dhcpChunkGeneration) {
+	if key.incarnation == 0 {
+		return
+	}
+	if st.committedGen == nil {
+		st.committedGen = make(map[uint64]uint64)
+	}
+	if key.generation > st.committedGen[key.incarnation] {
+		st.committedGen[key.incarnation] = key.generation
+	}
+}
+
+// supersededByCommit reports whether a newer generation already committed
+// for key's incarnation. Caller holds dhcpApplyMu.
+func (st *dhcpChunkState) supersededByCommit(key dhcpChunkGeneration) bool {
+	if key.incarnation == 0 {
+		return false
+	}
+	return key.generation < st.committedGen[key.incarnation]
 }

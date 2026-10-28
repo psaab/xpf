@@ -27,13 +27,18 @@ import (
 // the in-band manager's GET to the trust address is never received and the
 // read times out. The management subtest is the positive control — it
 // passes pre- and post-fix, proving the harness itself can drive the agent.
+// The IPv6 in-band subtest (#17800) exercises the dual-stack listener's
+// actual receive path and source-pinned reply, beyond the ancillary unit pin.
 func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 	if os.Getenv("XPF_SNMP_INBAND_CHILD_16781") != "1" {
-		mgmtNS, inbandNS, mgmtConn, inbandConn := snmpInbandFixture16781(t)
+		mgmtNS, inbandNS, mgmtConn, inbandConn, inband6Conn := snmpInbandFixture16781(t)
 		defer mgmtNS.Close()
 		defer inbandNS.Close()
 		defer mgmtConn.Close()
 		defer inbandConn.Close()
+		if inband6Conn != nil {
+			defer inband6Conn.Close()
+		}
 
 		if err := os.WriteFile("/proc/sys/net/ipv4/udp_l3mdev_accept", []byte("1"), 0644); err != nil {
 			t.Skipf("cannot enable UDP VRF receive acceptance in the private netns: %v", err)
@@ -48,15 +53,28 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 			t.Fatalf("duplicate inband manager socket: %v", err)
 		}
 		defer inbandFile.Close()
-		cmd := exec.Command(os.Args[0], "-test.run=^TestSNMPInbandPollWithManagementVRF16781$", "-test.v")
-		childEnv := make([]string, 0, len(os.Environ())+1)
+		extraFiles := []*os.File{mgmtFile, inbandFile}
+		childEnv := make([]string, 0, len(os.Environ())+2)
 		for _, entry := range os.Environ() {
-			if !strings.HasPrefix(entry, "XPF_SNMP_INBAND_CHILD_16781=") {
+			if !strings.HasPrefix(entry, "XPF_SNMP_INBAND_CHILD_16781=") &&
+				!strings.HasPrefix(entry, "XPF_SNMP_INBAND_IPV6_CHILD_17800=") {
 				childEnv = append(childEnv, entry)
 			}
 		}
-		cmd.Env = append(childEnv, "XPF_SNMP_INBAND_CHILD_16781=1")
-		cmd.ExtraFiles = []*os.File{mgmtFile, inbandFile}
+		childEnv = append(childEnv, "XPF_SNMP_INBAND_CHILD_16781=1")
+		if inband6Conn != nil {
+			inband6File, err := inband6Conn.File()
+			if err != nil {
+				t.Logf("IPv6 in-band cell unavailable: duplicate manager socket: %v", err)
+			} else {
+				defer inband6File.Close()
+				extraFiles = append(extraFiles, inband6File)
+				childEnv = append(childEnv, "XPF_SNMP_INBAND_IPV6_CHILD_17800=1")
+			}
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestSNMPInbandPollWithManagementVRF16781$", "-test.v")
+		cmd.Env = childEnv
+		cmd.ExtraFiles = extraFiles
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("isolated SNMP in-band scenario failed: %v\n%s", err, output)
@@ -85,6 +103,10 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 	}
 	mgmtConn := adopt(3, "mgmt-manager-udp")
 	inbandConn := adopt(4, "inband-manager-udp")
+	var inband6Conn *net.UDPConn
+	if os.Getenv("XPF_SNMP_INBAND_IPV6_CHILD_17800") == "1" {
+		inband6Conn = adopt(5, "inband-manager-udp6")
+	}
 
 	agent := NewAgentWithPaths(&config.SNMPConfig{
 		Communities: map[string]*config.SNMPCommunity{
@@ -128,12 +150,19 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 	t.Run("in-band poll answered from trust address", func(t *testing.T) {
 		poll(t, inbandConn, "198.51.100.1")
 	})
+	t.Run("in-band IPv6 source pinned to trust address #17800", func(t *testing.T) {
+		if inband6Conn == nil {
+			t.Skip("IPv6 in-band fixture setup is unavailable")
+		}
+		poll(t, inband6Conn, "2001:db8:178::1")
+	})
 }
 
 // snmpInbandFixture16781 builds the appliance netns with fxp0 enslaved to
-// vrf-mgmt (192.0.2.1) and trust0 in the main table (198.51.100.1), plus two
-// manager netnses: one reachable only via the management VRF, one in-band.
-func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.UDPConn, *net.UDPConn) {
+// vrf-mgmt (192.0.2.1) and trust0 in the main table (198.51.100.1, plus an
+// optional IPv6 address), with two manager netnses: one reachable only via
+// the management VRF and one in-band.
+func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.UDPConn, *net.UDPConn, *net.UDPConn) {
 	t.Helper()
 	runtime.LockOSThread()
 	original, err := netns.Get()
@@ -153,6 +182,16 @@ func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.
 		_ = original.Close()
 		runtime.UnlockOSThread()
 	})
+	// This fixture starts in a fresh namespace, where lo is down. Bring it up
+	// before Bind so Go's generic udp wildcard listener selects its intended
+	// dual-stack socket and this cell exercises the IPv6 receive path.
+	applianceLoopback, err := netlink.LinkByName("lo")
+	if err != nil {
+		t.Fatalf("find appliance loopback: %v", err)
+	}
+	if err := netlink.LinkSetUp(applianceLoopback); err != nil {
+		t.Fatalf("bring appliance loopback up: %v", err)
+	}
 
 	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: config.ManagementVRFDeviceName}, Table: config.ManagementVRFTableID}
 	if err := netlink.LinkAdd(vrf); err != nil {
@@ -225,6 +264,16 @@ func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.
 	}
 	addAddr(fxp0, "192.0.2.1/24")
 	addAddr(trust0, "198.51.100.1/24")
+	trust6Addr, err := netlink.ParseAddr("2001:db8:178::1/64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trust6Addr.Flags = int(unix.IFA_F_NODAD)
+	trust6Available := true
+	if err := netlink.AddrAdd(trust0, trust6Addr); err != nil {
+		t.Logf("IPv6 in-band cell unavailable: assign trust address: %v", err)
+		trust6Available = false
+	}
 
 	setupManager := func(ns netns.NsHandle, ifName, cidr, listenIP string) *net.UDPConn {
 		if err := netns.Set(ns); err != nil {
@@ -244,13 +293,33 @@ func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.
 	}
 	mgmtConn := setupManager(managerNS, "manager0", "192.0.2.2/24", "192.0.2.2")
 	inbandConn := setupManager(inbandNS, "inband0", "198.51.100.2/24", "198.51.100.2")
+	var inband6Conn *net.UDPConn
+	if trust6Available {
+		inband6Addr, err := netlink.ParseAddr("2001:db8:178::2/64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		inband6Addr.Flags = int(unix.IFA_F_NODAD)
+		if err := netlink.AddrAdd(byName("inband0"), inband6Addr); err != nil {
+			t.Logf("IPv6 in-band cell unavailable: assign manager address: %v", err)
+		} else {
+			inband6Conn, err = net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("2001:db8:178::2")})
+			if err != nil {
+				t.Logf("IPv6 in-band cell unavailable: listen on manager address: %v", err)
+				inband6Conn = nil
+			}
+		}
+	}
 
 	if err := netns.Set(appliance); err != nil {
 		mgmtConn.Close()
 		inbandConn.Close()
+		if inband6Conn != nil {
+			inband6Conn.Close()
+		}
 		t.Fatalf("restore appliance netns after opening manager sockets: %v", err)
 	}
-	return managerNS, inbandNS, mgmtConn, inbandConn
+	return managerNS, inbandNS, mgmtConn, inbandConn, inband6Conn
 }
 
 // TestPktinfoParseOOB16781 pins the pure ancillary-data round trip: a
@@ -278,6 +347,44 @@ func TestPktinfoParseOOB16781(t *testing.T) {
 	if got := parsePktinfo(nil); got.ifindex != 0 || got.dst != nil || got.oob(false) != nil {
 		t.Fatalf("empty oob pktinfo = %+v, want zero with nil reply oob", got)
 	}
+}
+
+// TestPktinfoIfindexOnly17800 pins valid ancillary records with a nonzero
+// ingress ifindex and an unspecified destination address. The address bytes
+// are present in either family’s fixed-size pktinfo record, so parsing keeps
+// a non-nil zero address and reply oob still carries the interface. A
+// pktinfo value with no destination at all has no family to encode and
+// intentionally produces no reply control message.
+func TestPktinfoIfindexOnly17800(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		oob   []byte
+		dst   net.IP
+		index int
+	}{
+		{name: "IPv4", oob: pktinfoOnlyIfindexOOB17800(true, 7), dst: net.ParseIP("0.0.0.0"), index: 7},
+		{name: "IPv6", oob: pktinfoOnlyIfindexOOB17800(false, 9), dst: net.ParseIP("::"), index: 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parsePktinfo(tc.oob)
+			if got.ifindex != tc.index || got.dst == nil || !got.dst.Equal(tc.dst) {
+				t.Fatalf("parsed ifindex-only pktinfo = %+v, want ifindex %d and unspecified %s", got, tc.index, tc.dst)
+			}
+			assertReplyOOB17832(t, got.oob(true), tc.dst, tc.index)
+			assertReplyOOB17832(t, got.oob(false), tc.dst, 0)
+		})
+	}
+
+	if got := (pktinfo{ifindex: 7}).oob(true); got != nil {
+		t.Fatalf("pktinfo without destination produced %d bytes of reply oob; want nil because its family/source is unknown", len(got))
+	}
+}
+
+func pktinfoOnlyIfindexOOB17800(v4 bool, ifindex int) []byte {
+	if v4 {
+		return unix.PktInfo4(&unix.Inet4Pktinfo{Ifindex: int32(ifindex)})
+	}
+	return unix.PktInfo6(&unix.Inet6Pktinfo{Ifindex: uint32(ifindex)})
 }
 
 // assertReplyOOB17832 decodes a reply oob produced by pktinfo.oob and

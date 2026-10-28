@@ -448,8 +448,9 @@ func (s *SessionSync) IpsecTunnelDiscriminatorCapable() bool {
 // ConfigApplyAckCapable reports whether the peer advertised that it
 // sends syncMsgConfigApplyAck after a successful config apply (#16756).
 // A false reading means either a pre-ACK peer or an incarnation whose
-// advertisement has not landed yet; PeerConfigStale distinguishes the
-// two via peerConfigCapStaleKnown16756 and must not read this alone.
+// advertisement has not landed yet. PeerConfigStale distinguishes these
+// cases with the learned-incarnation state and preserves the generation /
+// send-time capability debt as one snapshot.
 func (s *SessionSync) ConfigApplyAckCapable() bool {
 	if s == nil {
 		return false
