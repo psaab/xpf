@@ -609,10 +609,11 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   cluster-authoritative Secondary→Primary promotion) bypasses the gate
   unchanged; the gate governs only the shortcut and never prevents the normal
   master-down timer from promoting this legacy VRRP instance.
-- Stale preempt-token drain (#16766): a `preemptNowCh` kick is a
+- Stale preempt-token drain (#16766/#17827): a `preemptNowCh` kick is a
   BACKUP-tenure one-shot. `triggerPreemptNow` posts nothing while the
-  instance is MASTER (state check under `vi.mu`, serialized against
-  `setState`), `becomeMaster` drains any queued kick and clears
+  instance is MASTER (the state check and non-blocking enqueue share
+  one `vi.mu` write-lock critical section, serialized against `setState`),
+  `becomeMaster` drains any queued kick and clears
   `forcePreemptOnce` on every MASTER entry, and the `stepMaster`
   resign edge drains again — so a token posted while MASTER (sync-hold
   release racing a master-down promotion, or a `ForceRGMaster` raced

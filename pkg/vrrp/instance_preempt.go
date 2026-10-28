@@ -71,17 +71,30 @@ func (vi *vrrpInstance) discardPendingPreemptNow() {
 // becomeMaster drains it, or the edge lands first and this gate drops
 // it. A ForceRGMaster force flag that raced past ForceRGMaster's
 // non-MASTER filter is likewise cleared by the MASTER-entry drain.
+//
+// #17827: the check and enqueue must be one vi.mu critical section.
+// Otherwise, a poster paused after sampling BACKUP but before sending
+// can outlive both state-edge drains and leave a stale kick for the next
+// BACKUP tenure. Holding the write lock across the non-blocking send
+// linearizes enqueue against setState: the transition either drains the
+// token, or the poster observes MASTER and drops the kick. The hook
+// permits a deterministic regression at the check/send boundary.
+var preemptNowEnqueueHook func()
+
 func (vi *vrrpInstance) triggerPreemptNow() {
-	vi.mu.RLock()
+	vi.mu.Lock()
 	if vi.state == StateMaster {
-		vi.mu.RUnlock()
+		vi.mu.Unlock()
 		return
 	}
-	vi.mu.RUnlock()
+	if preemptNowEnqueueHook != nil {
+		preemptNowEnqueueHook()
+	}
 	select {
 	case vi.preemptNowCh <- struct{}{}:
 	default:
 	}
+	vi.mu.Unlock()
 }
 
 // getPreempt reports the EFFECTIVE preempt mode. It is the configured

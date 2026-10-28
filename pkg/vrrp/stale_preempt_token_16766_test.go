@@ -290,3 +290,112 @@ func TestStalePreemptToken16766_ReleaseSyncHoldWhileMasterPostsNothing(t *testin
 		t.Fatalf("preemptNowCh holds %d token(s) after release while MASTER, want 0 (#16766)", n)
 	}
 }
+
+// TestPreemptEnqueueSerializedWithStateTransition17827 pins the actual
+// check/send gap from #17827. The poster is held after it samples BACKUP
+// but before it can enqueue. A concurrent transition through
+// becomeMaster plus forced resignation must cross both drains only
+// after that poster is ordered before the state edge. The first BACKUP
+// iteration must stay BACKUP with no extra priority-0 adverts or MASTER
+// event; the BACKUP kick control remains covered by
+// TestStalePreemptToken16766_ControlBackupReleaseUnchanged.
+func TestPreemptEnqueueSerializedWithStateTransition17827(t *testing.T) {
+	vi, eventCh := newStaleTokenInstance16766(t)
+	adverts := capturePriorities16766(t)
+	vi.setState(StateBackup)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	posterDone := make(chan struct{})
+	previousHook := preemptNowEnqueueHook
+	preemptNowEnqueueHook = func() {
+		close(entered)
+		<-release
+	}
+	t.Cleanup(func() {
+		preemptNowEnqueueHook = previousHook
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	go func() {
+		vi.triggerPreemptNow()
+		close(posterDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("preempt poster did not reach the state-check/send barrier")
+	}
+
+	masterDown, advert, preemptHold := longTimers(t)
+	transitionStarted := make(chan struct{})
+	transitionDone := make(chan struct{})
+	go func() {
+		close(transitionStarted)
+		if !vi.becomeMaster() {
+			t.Error("becomeMaster returned false")
+		}
+		vi.beginResign()
+		vi.triggerResign()
+		if stop := vi.stepMaster(masterDown, advert); stop {
+			t.Error("stepMaster returned stop=true on forced resignation")
+		}
+		close(transitionDone)
+	}()
+	<-transitionStarted
+
+	// With the old unlock-before-send ordering, the transition can cross
+	// both drains while the poster is parked here. With the serialized
+	// implementation, the MASTER transition is blocked behind vi.mu.
+	select {
+	case <-transitionDone:
+		t.Error("state transition crossed both drains while preempt poster was paused before enqueue (#17827)")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-posterDone:
+	case <-time.After(time.Second):
+		t.Fatal("preempt poster did not finish after barrier release")
+	}
+	select {
+	case <-transitionDone:
+	case <-time.After(time.Second):
+		t.Fatal("forced-resignation transition did not finish")
+	}
+
+	if got := vi.getState(); got != StateBackup {
+		t.Fatalf("state after forced resignation = %s, want BACKUP", got)
+	}
+	burst := drainAdverts16766(adverts)
+	if len(burst) != 4 {
+		t.Fatalf("promotion + resign adverts = %v, want priority 200 then three priority-0 frames", burst)
+	}
+	if burst[0] != 200 {
+		t.Fatalf("promotion advert priority = %d, want 200", burst[0])
+	}
+	for _, priority := range burst[1:] {
+		if priority != 0 {
+			t.Fatalf("resign burst = %v, want three priority-0 frames", burst[1:])
+		}
+	}
+	if events := drainEvents16766(eventCh); len(events) != 2 || events[0] != StateMaster || events[1] != StateBackup {
+		t.Fatalf("events through promotion and resignation = %v, want [MASTER BACKUP]", events)
+	}
+	runStepBackup16766(t, vi, masterDown, advert, preemptHold)
+	if got := vi.getState(); got != StateBackup {
+		t.Fatalf("state after first BACKUP iteration = %s, want BACKUP (stale preempt kick survived resignation, #17827)", got)
+	}
+	if extra := drainAdverts16766(adverts); len(extra) != 0 {
+		t.Fatalf("extra adverts beyond the resign burst = %v, want none (#17827)", extra)
+	}
+	for _, state := range drainEvents16766(eventCh) {
+		if state == StateMaster {
+			t.Fatal("spurious MASTER event after forced resignation (#17827)")
+		}
+	}
+}

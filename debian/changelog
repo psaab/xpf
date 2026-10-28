@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * VRRP: keep the `preemptNowCh` BACKUP-tenure state check and enqueue
+    under one `vi.mu` write-lock critical section. A poster can no longer
+    pause after observing BACKUP, outlive MASTER-entry and resignation
+    drains, then leave a stale preempt kick for the first post-resignation
+    BACKUP iteration (#17827).
   * Coalesce/ipmon: ipmon actuation is single-flighted — the engine
     tick is the only Tick driver (the loop is started context-only,
     no second sweep goroutine), and Tick itself claims an in-flight
