@@ -85,30 +85,25 @@ func dhcpRelayGroupInterfaces(prop *Node) []string {
 // A relay group names LOGICAL interfaces (`ge-0/0/0.0`, `reth0.0` — see
 // #9406): a member with a ".<unit>" suffix is valid only when its base
 // is interface-shaped (ValidateInterfaceName) and the suffix a valid
-// logical unit. A bare member must itself be a plausible logical name:
-// a name-shaped token carrying a digit (`reth0`, `ge-0/0/0`), with
-// `irb` the digit-less exception Junos reserves. A bare alphabetic
-// keyword such as `disable` — the packed remainder in `interface
-// ge-0/0/0.0 disable` — has neither and is refused, without consulting
-// key position or bracket provenance (#17205).
+// logical unit. A bare member must pass ValidateInterfaceName alone:
+// digit-less bare names such as `uplink` and `vrf-mgmt` are legal
+// interface names (validate_interface_name_6834_test.go census) and the
+// pre-#17205 gate accepted any single bare member, so a digit
+// requirement refuses strict configs that compile today. Packed
+// remainders (`interface ge-0/0/0.0 disable`) are NOT refused here —
+// `disable` is itself a legal bare name under this rule — but by the
+// position-aware refusal in checkInterface, which reuses the old
+// gate's mechanism: an unbracketed value tail behind the first value
+// (Keys[2:], display-set replay carries no bracket provenance and
+// folds that tail into one member run, so a multi-token unbracketed
+// interface run IS the packed-remainder spelling).
 func dhcpRelayInterfaceMemberValid(member string) bool {
 	if member == "" {
 		return false
 	}
 	s := splitInterfaceRefWithDeclared(nil, member)
 	if !s.HasUnit {
-		if err := ValidateInterfaceName(member); err != nil {
-			return false
-		}
-		if member == "irb" {
-			return true
-		}
-		for i := range len(member) {
-			if member[i] >= '0' && member[i] <= '9' {
-				return true
-			}
-		}
-		return false
+		return ValidateInterfaceName(member) == nil
 	}
 	if err := ValidateInterfaceName(s.Base); err != nil {
 		return false

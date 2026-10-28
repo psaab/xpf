@@ -80,13 +80,34 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 				return report(member.Children[0].Name())
 			}
 		}
+		// Packed remainder (the pre-#17205 gate's mechanism, #17205
+		// fold B1): `interface ge-0/0/0.0 disable` packs a keyword tail
+		// behind a logical-interface value. That tail is NOT a second
+		// member even though `disable` alone is a legal bare name, so
+		// it is refused BY POSITION: an unbracketed tail token behind
+		// a unit-carrying first value that itself carries no unit is
+		// the remainder. The flat/display-set list spelling
+		// (`interface ge-0/0/1.0 ge-0/0/2.0`, replayed with no bracket
+		// provenance) has unit-carrying tail tokens and is judged
+		// member-by-member below, so it stays accepted; a bracketed
+		// hierarchical list is bracketed at Keys[2] and never reaches
+		// this arm.
+		if len(node.Keys) > 2 && !node.KeyBracketed(2) {
+			first := splitInterfaceRefWithDeclared(nil, node.Keys[1])
+			if first.HasUnit {
+				for _, member := range node.Keys[2:] {
+					tail := splitInterfaceRefWithDeclared(nil, member)
+					if !tail.HasUnit {
+						return report(member)
+					}
+				}
+			}
+		}
 		// The members are exactly what both compilers install, read
-		// through the shared dhcpRelayGroupInterfaces (#17205) — never
-		// key position or bracket provenance: FormatSet renders value
-		// leaves unbracketed, so a provenance test rejects xpf's own
-		// display-set output. Every member must be interface-shaped;
-		// a packed remainder token behind the values (`interface
-		// ge-0/0/0.0 disable`) is not, and stays refused by name.
+		// through the shared dhcpRelayGroupInterfaces (#17205). Every
+		// member must be interface-shaped (ValidateInterfaceName plus
+		// the logical-unit rules); digit-less bare names such as
+		// `uplink`/`vrf-mgmt` are legal members.
 		members := dhcpRelayGroupInterfaces(node)
 		if len(members) == 0 {
 			return report(node.Name() + " requires a value")
@@ -94,6 +115,86 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 		for _, member := range members {
 			if !dhcpRelayInterfaceMemberValid(member) {
 				return report(member)
+			}
+		}
+		return nil
+	}
+	// checkGroupPacked judges the packed tail of a group instance
+	// node exactly as compileDHCPRelayV6Group9553 consumes its
+	// Keys[2:] run (#17205 fold B2): the gate previously iterated
+	// only inst.node.Children, so a packed unsupported knob or a bad
+	// interface member on that run strict-compiled clean while the
+	// compiler installed it (`group { G6 unsupported-knob interface
+	// badname; }` compiled with Interfaces=[badname]). The tail is
+	// instanceValueTail anchored on the instance name, so both the
+	// compact `group G6 …` node and a container instance child
+	// (`G6 …` as one leaf) are judged. Tokens walk with the
+	// compiler's own grammar: `interface` consumes following
+	// non-keyword tokens as members, scalars consume one value, any
+	// other token is an unsupported knob refused by name.
+	checkGroupPacked := func(inst struct {
+		name string
+		node *Node
+	}) error {
+		tail := instanceValueTail(inst.node, inst.name)
+		for i := 0; i < len(tail); {
+			switch tail[i] {
+			case "active-server-group":
+				v := ""
+				if i+1 < len(tail) {
+					v = tail[i+1]
+				}
+				n := &Node{Keys: []string{"active-server-group"}, IsLeaf: true}
+				if v != "" {
+					n.Keys = []string{"active-server-group", v}
+				}
+				if err := checkScalar(n); err != nil {
+					return err
+				}
+				if v == "" {
+					i++
+				} else {
+					i += 2
+				}
+			case "relay-agent-interface-id":
+				hasVal := i+1 < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[i+1])
+				n := &Node{Keys: []string{"relay-agent-interface-id"}, IsLeaf: true}
+				if hasVal {
+					n.Keys = []string{"relay-agent-interface-id", tail[i+1]}
+				}
+				if err := checkInterfaceID(n); err != nil {
+					return err
+				}
+				if hasVal {
+					i += 2
+				} else {
+					i++
+				}
+			case "interface":
+				j := i + 1
+				var members []string
+				for j < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[j]) {
+					members = append(members, tail[j])
+					j++
+				}
+				if len(members) == 0 {
+					return report("interface requires a value")
+				}
+				if len(members) > 1 && splitInterfaceRefWithDeclared(nil, members[0]).HasUnit {
+					for _, m := range members[1:] {
+						if !splitInterfaceRefWithDeclared(nil, m).HasUnit {
+							return report(m)
+						}
+					}
+				}
+				for _, m := range members {
+					if !dhcpRelayInterfaceMemberValid(m) {
+						return report(m)
+					}
+				}
+				i = j
+			default:
+				return report(tail[i])
 			}
 		}
 		return nil
@@ -127,7 +228,15 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 					// namedInstances normalises the compact
 					// `group G6 { … }` and container `group { G6 { … } }`
 					// shapes onto one instance node per group (#17205).
+					// The packed tail of each instance node is judged
+					// first (checkGroupPacked, fold B2): the compiler
+					// consumes Keys[2:] of the same node, so a packed
+					// unsupported knob/member there must refuse even
+					// when the instance also carries braced children.
 					for _, inst := range namedInstances([]*Node{child}) {
+						if err := checkGroupPacked(inst); err != nil {
+							return warnings, err
+						}
 						for _, groupChild := range inst.node.Children {
 							if groupChild == nil {
 								continue
