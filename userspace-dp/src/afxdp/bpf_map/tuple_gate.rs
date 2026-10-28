@@ -701,27 +701,79 @@ mod tests {
             }));
             assert!(caught.is_err());
         }
+        // The entry poisoned above is orphaned: dropping `permit`
+        // removed it from the shard map (InstallPermit::drop ->
+        // remove_if_idle), so no later gate operation ever locks it
+        // again and its recovery is never counted. Re-poison a live,
+        // still-mapped entry instead. This setup install recovers the
+        // shard-entries and admission locks (before the snapshot
+        // below, so unmeasured) and creates a fresh mapped entry;
+        // that entry, the shard-entries lock and the admission lock
+        // are then all poisoned again while the entry stays mapped
+        // and `live_permit` stays held.
+        let live_permit = gate
+            .try_acquire_install(&k)
+            .expect("poisoned shard must not panic setup installs");
+        let live_entry = {
+            let shard = crate::sync_util::lock_tolerant(&gate.shards[index].entries);
+            Arc::clone(shard.get(&TupleGate::canonical(&k)).unwrap())
+        };
+        for mutex_is_entry in [false, true] {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if mutex_is_entry {
+                    let _guard = live_entry.lock().unwrap();
+                    panic!("17201 tuple-gate live-entry probe panic");
+                } else {
+                    let _guard = gate.shards[index].entries.lock().unwrap();
+                    panic!("17201 tuple-gate live-shard probe panic");
+                }
+            }));
+            assert!(caught.is_err());
+        }
+        {
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = gate.admission.lock().unwrap();
+                panic!("17201 tuple-gate live admission probe panic");
+            }));
+            assert!(caught.is_err());
+        }
         let before = TUPLE_GATE_POISON_RECOVERIES.load(Ordering::Relaxed);
+        // Dropping the held live permit is the measured window's
+        // first operation: it re-acquires all three poisoned locks
+        // while the live entry is still mapped (entry lock in
+        // InstallPermit::drop, shard-entries lock in
+        // remove_if_idle, admission lock in TupleAdmission::drop ->
+        // release_admission).
+        drop(live_permit);
         drop(gate.try_acquire_install(&k).expect("poisoned shard must not panic installs"));
         gate.with_publish(&k, || ()).expect("poisoned shard must not panic publishes");
         let lease = gate.acquire_lease([k]).expect("poisoned shard must not panic leases");
         drop(lease);
         let fence = gate.begin_clear().expect("poisoned admission must not panic clears");
         drop(fence);
-        // Exactly +2 (measured firsthand on this path): the shard-entries
-        // lock and the entry lock are each poisoned and each recovered
-        // exactly once; the poisoned admission lock's recovery does not
-        // add a third counted event on this path (its counted
-        // acquisitions run while... the delta measured is 2). Pinning
-        // exactly 2, not "> before", is what catches a missing
-        // `clear_poison()`: every later acquisition above touches
-        // shard+entry+admission repeatedly and would recount, pushing
-        // the delta far past 2.
+        // Exactly +3: dropping the held live permit (the measured
+        // window's first operation) re-acquires, while the live entry
+        // is still mapped, all three locks poisoned in the live phase
+        // -- the live entry lock and the shard-entries lock in
+        // InstallPermit::drop / remove_if_idle, and the admission
+        // lock in TupleAdmission::drop -> release_admission -- and
+        // `lock_tolerant_counted` recovers each poisoned lock exactly
+        // once (+1 counted event per lock, `clear_poison()` before
+        // return). The earlier poisonings count only +2
+        // (shard-entries + admission): the first test-poisoned entry
+        // was orphaned when the first `permit`'s drop removed it from
+        // the shard map, so no later operation re-acquires it. Every
+        // operation after the live-permit drop runs on
+        // poison-cleared locks, so none of them recounts. Pinning
+        // exactly 3, not "> before", is what catches a missing
+        // `clear_poison()`: without clearing, every later acquisition
+        // above touches shard, entry and admission repeatedly and
+        // would recount, pushing the delta far past 3.
         let after = TUPLE_GATE_POISON_RECOVERIES.load(Ordering::Relaxed);
         assert_eq!(
             after,
-            before + 2,
-            "exactly one counted recovery per re-acquired poisoned lock"
+            before + 3,
+            "exactly one counted recovery per re-acquired poisoned lock (shard, entry, admission)"
         );
         assert_eq!(
             tuple_gate_poison_recoveries(),
