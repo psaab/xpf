@@ -103,4 +103,35 @@ func TestRemoteFilteredSummaryForwardsSelector17189(t *testing.T) {
 	if len(fake2.sumReqs) != 0 {
 		t.Fatalf("no summary request may be issued for an unresolvable zone; got %d", len(fake2.sumReqs))
 	}
+
+	// Id-0 trap on the summary path (#9065): a zone that resolves by
+	// name but carries Id 0 has no runtime id yet; sending it would
+	// put the wildcard (every zone) on GetSessionSummary. It must
+	// refuse and issue NO summary request.
+	fake3 := &summary17189Client{zones: []*pb.ZoneInfo{{Name: "trust", Id: 0}}}
+	c3 := &ctl{client: fake3}
+	if err := c3.showFlowSession([]string{"summary", "zone", "trust"}); err == nil {
+		t.Fatal("summary with a zone resolving to Id 0 must be refused (Id 0 is the wildcard)")
+	}
+	if len(fake3.sumReqs) != 0 {
+		t.Fatalf("no summary request may be issued for a zone with Id 0; got %d", len(fake3.sumReqs))
+	}
+
+	// Protocol 0 (HOPOPT) on the summary path must stay present as
+	// "0": dropping it to "" would widen the summary to every
+	// protocol (the forwards-selector counterpart of the pkg/cli
+	// builder pin in TestSessionSelectorBuildersAgree17189).
+	fake4 := &summary17189Client{}
+	c4 := &ctl{client: fake4}
+	_ = captureStdout(t, func() {
+		if err := c4.showFlowSession([]string{"summary", "protocol", "0"}); err != nil {
+			t.Fatalf("summary with protocol 0 refused: %v", err)
+		}
+	})
+	if len(fake4.sumReqs) != 1 {
+		t.Fatalf("expected exactly one GetSessionSummary for protocol 0; got %d", len(fake4.sumReqs))
+	}
+	if got := fake4.sumReqs[0].GetProtocol(); got != "0" {
+		t.Errorf("summary protocol 0 = %q, want %q (absent would widen to all protocols)", got, "0")
+	}
 }
