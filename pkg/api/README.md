@@ -17,7 +17,7 @@ liveness/readiness. Prometheus metrics endpoint. SSE event streams.
   daemon downgrade `/health` to 503 when a recent compile failed
   silently; without the callback it defaults to 200.
   **Redaction (#5031):** `/health` is unconditionally unauthenticated
-  (`authMiddleware` exempts it), so it exposes only status, counters,
+  (the auth gate exempts it), so it exposes only status, counters,
   timestamps, and stable reason codes — never the raw compile/bootstrap
   error strings. `compile_last_error` and `bootstrap_import_error` are NOT
   emitted (those strings are copied verbatim from the parser/compiler and
@@ -512,7 +512,7 @@ exactly the population the issue exists to stop.
 
 **`/health` stays open; `/metrics` stays open only on the ungated
 loopback default.** `/health` carries no configuration and is exempt
-in authCheck. `/metrics` carries configured identifiers, so since
+in the auth check. `/metrics` carries configured identifiers, so since
 #16727 a credential-gated leg (non-loopback, or loopback with
 `metrics-require-auth`) also requires the credential's class to hold
 `view`; the ungated loopback leg the in-tree incus harnesses read
@@ -1353,7 +1353,7 @@ the drop fails loudly instead of going quietly vacuous.
   `NewServer` carry read-side timeouts and a header cap — `ReadHeaderTimeout`
   (`apiReadHeaderTimeout`, 10s), `ReadTimeout` (`apiReadTimeout`, 30s),
   `IdleTimeout` (`apiIdleTimeout`, 120s), and `MaxHeaderBytes`
-  (`apiMaxHeaderBytes`, 1 MiB). Header reads happen BEFORE `authMiddleware`, so
+  (`apiMaxHeaderBytes`, 1 MiB). Header reads happen BEFORE the auth gate, so
   without these a pre-auth slowloris (dribbled headers/body) could pin a
   goroutine/socket per connection once web-management binds a non-loopback
   interface. `WriteTimeout` is deliberately left UNSET (0/unlimited): the SSE
@@ -1389,7 +1389,7 @@ the drop fails loudly instead of going quietly vacuous.
   (`apiMaxConnsPerSource`, 32; IPv6 aggregated by /64) so one
   unauthenticated source cannot hold all 256 slots and lock every other
   source out of every leg. Pinned by `conn_bound_16081_test.go`.
-- **Credential verification (#4157/#10826).** `authMiddleware` checks every
+- **Credential verification (#4157/#10826).** The auth gate checks every
   configured API-key verifier with bcrypt and does not stop at the first match;
   duplicate key identities matching one presented secret are denied as
   ambiguous. Basic users also use bcrypt verifiers, and unknown usernames pay
@@ -1410,10 +1410,9 @@ the drop fails loudly instead of going quietly vacuous.
   - The authentication snapshot is a live `atomic.Pointer[AuthConfig]` (`s.auth`)
     read per request by `dynamicAuthMiddleware`; `ReplaceAuth` swaps it, so a
     revoked/tightened credential is rejected on the NEXT request with no listener
-    bounce and no restart. The `authCheck` core is shared with the static
-    `authMiddleware`, so the swap enforces byte-identical semantics (the #4157
-    constant-time + #5636 empty-secret guards, `/health` + loopback-`/metrics`
-    exemptions).
+    bounce and no restart. The swap enforces the same `authCheckCredential`
+    semantics on every leg (the #4157 constant-time + #5636 empty-secret
+    guards, `/health` + loopback-`/metrics` exemptions).
   - **What is published, and when (#5561 rounds 7/9/10/12).** A commit's
     credential set is not published as one atomic thing, because a credential
     change is really two changes with opposite safety directions and a listener
@@ -2031,15 +2030,16 @@ the drop fails loudly instead of going quietly vacuous.
     passes with the retry deleted. `startHTTPServer`'s boot delivery is bound on
     the kernel-name read plus the fact that the management server already
     exists when it happens; that call site cannot be given a serving HTTPS leg
-    in-process, because `startHTTPServer` CONSTRUCTS the `api.Server` itself and
-    `SetTLSCertDirForTest` only exists after construction, so the alternative is
-    driving the production `/etc/xpf/tls` generator. Deleting either call reds
+    in-process, because `startHTTPServer` CONSTRUCTS the `api.Server` itself
+    from a committed config that names no HTTPS leg in that cell, so there is
+    no leg to serve a certificate. (`Config.TLSSelfSignedDir`, #17213, is the
+    pre-construction seam for WHERE a self-signed pair loads from; it does not
+    create a leg the config did not ask for.) Deleting either call reds
     its own subtest and only its own. The boot cell's limit is stated in the
     test rather than implied: it proves the call happens and happens after the
     server is built, NOT that it reached a certificate, warned, or discharged
     anything — replacing the delivery with a bare `osHostname()` would satisfy
-    it, and a stronger cell needs a pre-construction certificate seam on
-    `api.Config`, which was declined as a production knob added for one test.
+    it.
 - The status-poll path (1 Hz) shares the userspace dataplane control socket
   with HA sync, session installs, snapshot sync, and forwarding sync.
   Adding a new caller at >1 Hz here will starve session installs during
@@ -3391,10 +3391,10 @@ the drop fails loudly instead of going quietly vacuous.
   mode. All readyz code paths null-check it.
 - Request-path external commands must be time-bounded (#1805): the
   deferred reboot/halt power actions go through `runTimeout` in
-  `exec_timeout.go` (15s timeout + 5s WaitDelay, mirroring the
-  apply-path contract in `pkg/daemon/exec_timeout.go`, #1794 — not
-  importable here because pkg/daemon imports this package; the
-  Output/CombinedOutput variants live in the pkg/grpcapi sibling copy).
+  `exec_timeout.go`, delegating to `diagcmd.RunTimeout` (15s timeout +
+  5s WaitDelay, #17203; mirroring the apply-path contract in
+  `pkg/daemon/exec_timeout.go`, #1794 — not importable here because
+  pkg/daemon imports this package).
   Power actions take `context.Background()` — client disconnect must
   not cancel a confirmed reboot — and keep ignoring errors. The
   `POST /api/v1/system/action` handler (`systemActionHandler`) journals
@@ -3409,9 +3409,10 @@ the drop fails loudly instead of going quietly vacuous.
   so an operator can self-recover from an H-3/#4476 lock wedge over REST. The
   ping/traceroute handlers keep their own request-ctx bounds but set
   `WaitDelay` so an inherited pipe cannot block past the kill; their
-  budgets are request-sized (#1819) via `pingExecTimeout` (count × 1s +
-  15s slack, 30s floor) and `diagTracerouteTimeout` (60s), capped at the
-  150s `diagExecCeiling` and mirrored in `pkg/grpcapi/exec_timeout.go`.
+  budgets are request-sized (#1819) via `diagcmd.PingExecTimeout`
+  (count × 1s + 15s slack, 30s floor) and `diagcmd.TracerouteTimeout`
+  (60s), capped at the 150s `diagcmd.DiagExecCeiling` — the sole
+  implementation in `pkg/diagcmd`, shared with gRPC (#17203).
   The argv builders (`buildPingArgv`/`buildTracerouteArgv`) place the
   user-supplied target after a `--` end-of-options separator so a
   `-`-prefixed target is an operand, not a flag (option-confusion
