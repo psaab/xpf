@@ -6,7 +6,11 @@
 //! `reserve_flow_maybe_persistent`, (5) synced address-only
 //! `reserve_address_only_maybe_persistent`, (6) local address-only
 //! `reserve_address_only_persistent`. Each drives an IDLE and an
-//! ACTIVE lease and asserts the activation snapshot fields, expiry-
+//! ACTIVE lease and asserts the activation snapshot fields, the
+//! CURRENT `expires_at_ns` / `timeout_ns` (join-time + timeout where
+//! the site's `JoinPolicy` refreshes expiry, bit-identical to the
+//! pre-join value where it must not; the local PAT / address-only
+//! 0 -> 1 edge adopts a second, distinct caller timeout), expiry-
 //! index membership (idle only), `active_flows`, and — for the BIB
 //! cap-failure — `exhaustion_total` per the declared policy (every
 //! cap failure bumps it, including the claimed-port copy that used
@@ -20,6 +24,18 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const POOL: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 1);
 const TIMEOUT_NS: u64 = 300_000_000_000;
+/// #17028 fold: a second, distinct timeout for rejoin-adoption pins.
+/// PAT and local address-only adopt it on the 0 -> 1 edge (non-imported
+/// leases: `promote_imported` applies immediately); both synced joins
+/// and both BIB branches must NOT adopt it, and an already-active join
+/// must not adopt it either. It sits inside the bounded range
+/// `[1s, 24h]` so `bounded_persistent_nat_timeout_ns` passes it
+/// through verbatim on every local path.
+const TIMEOUT2_NS: u64 = 120_000_000_000;
+/// The deterministic BIB's fixed timeout (mirrors
+/// `DETERMINISTIC_NAT64_BIB_TIMEOUT_NS` = 300 s, equal to `TIMEOUT_NS`):
+/// a BIB rejoin must keep it, whatever timeout the caller asked for.
+const BIB_TIMEOUT_NS: u64 = TIMEOUT_NS;
 const BIB_PARAMS: DeterministicV6 = DeterministicV6 {
     block_size: 32,
     blocks_per_ip: 2,
@@ -77,11 +93,18 @@ fn assert_index_membership(
     );
 }
 
+/// The full join-relevant snapshot: the activation fields, the lease's
+/// CURRENT `expires_at_ns` / `timeout_ns`, and `active_flows`, in that
+/// order (asserts name them by position).
+/// #17028 fold: the current expiry/timeout pin `JoinPolicy::refresh_expiry`
+/// and the 0 -> 1 timeout adoption — a join that refreshes when it
+/// must not (or vice versa), or drops/adopts the wrong timeout, now
+/// fails instead of passing silently behind the snapshot fields.
 fn snapshot_fields(
     alloc: &PortAllocator,
     flow: &SourceNatFlowKey,
     permit: PersistentNatPermit,
-) -> (bool, bool, u64, u64, u32) {
+) -> (bool, bool, u64, u64, u64, u64, u32) {
     let st = alloc
         .debug_persistent_lease_for_flow(flow, permit)
         .expect("debug lease state");
@@ -90,14 +113,18 @@ fn snapshot_fields(
         st.activation_had_previous_lease,
         st.activation_previous_expires_at_ns,
         st.activation_previous_timeout_ns,
+        st.expires_at_ns,
+        st.timeout_ns,
         st.active_flows,
     )
 }
 
 /// One row of the parity table: mint a lease, drain it to idle,
-/// record the pre-join snapshot baseline, join a second flow, and
-/// check the 0->1 re-arm; then join a third flow on the ACTIVE lease
-/// and check no snapshot churn.
+/// record the pre-join snapshot baseline, join a second flow (with a
+/// distinct timeout where the API carries one), and check the 0->1
+/// re-arm — snapshot, current expiry/timeout per the site's policy,
+/// and refcount; then join a third flow on the ACTIVE lease and
+/// check no snapshot/expiry/timeout churn.
 #[test]
 fn lease_join_parity_all_modes_17028() {
     // ---- Shape 1: local PAT -------------------------------------------
@@ -129,6 +156,13 @@ fn lease_join_parity_all_modes_17028() {
             "PAT idle-before-join",
         );
         let pre = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        // Precondition for the pins below: the drain to idle re-armed
+        // the expiry from the mint timeout (release at 2_000).
+        assert_eq!(
+            (pre.4, pre.5),
+            (2_000 + TIMEOUT_NS, TIMEOUT_NS),
+            "PAT pre-join: drain re-armed expiry/timeout, got {pre:?}"
+        );
         let f2 = v4_flow("10.0.70.1", 40000, "1.1.1.1");
         let t2 = alloc
             .allocate_translation(
@@ -139,7 +173,7 @@ fn lease_join_parity_all_modes_17028() {
                 true,
                 PersistentNatPermit::AnyRemoteHost,
                 0,
-                TIMEOUT_NS,
+                TIMEOUT2_NS,
                 3_000,
                 NatHolder::Untracked,
                 0,
@@ -147,13 +181,28 @@ fn lease_join_parity_all_modes_17028() {
             .expect("PAT idle join");
         assert_eq!(t1, t2, "PAT: idle join reuses tuple");
         let post = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
-        assert!(!post.0 && post.1, "PAT idle join: snapshot re-armed (saw_completion=false, had_previous=true), got {post:?} pre {pre:?}");
-        assert_eq!(
-            post.2,
-            pre.2.max(post.2),
-            "PAT idle join: previous expiry snapshot recorded"
+        assert!(
+            !post.0 && post.1,
+            "PAT idle join: snapshot re-armed (saw_completion=false, had_previous=true), got {post:?} pre {pre:?}"
         );
-        assert_eq!(post.4, 1, "PAT idle join: active_flows 0->1");
+        assert_eq!(
+            post.2, pre.4,
+            "PAT idle join: previous expiry snapshot == pre-join expires_at"
+        );
+        assert_eq!(
+            post.3, pre.5,
+            "PAT idle join: previous timeout snapshot == pre-join timeout"
+        );
+        assert_eq!(
+            post.4,
+            3_000 + TIMEOUT2_NS,
+            "PAT idle join (refresh_expiry=true): expires_at = join-time + adopted timeout"
+        );
+        assert_eq!(
+            post.5, TIMEOUT2_NS,
+            "PAT idle join: 0->1 adopts the caller's TIMEOUT2 timeout"
+        );
+        assert_eq!(post.6, 1, "PAT idle join: active_flows 0->1");
         assert_index_membership(
             &alloc,
             &f1,
@@ -161,7 +210,8 @@ fn lease_join_parity_all_modes_17028() {
             false,
             "PAT after idle join",
         );
-        // Active join: third flow, snapshot must not churn.
+        // Active join: third flow, snapshot must not churn — not even
+        // under a THIRD timeout: no refresh, no adoption off the edge.
         let snap_active = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
         let f3 = v4_flow("10.0.70.1", 40000, "9.9.9.9");
         alloc
@@ -180,7 +230,7 @@ fn lease_join_parity_all_modes_17028() {
             )
             .expect("PAT active join");
         let post3 = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
-        assert_eq!(post3.4, 2, "PAT active join: active_flows 1->2");
+        assert_eq!(post3.6, 2, "PAT active join: active_flows 1->2");
         assert_eq!(
             post3.2, snap_active.2,
             "PAT active join: snapshot expiry unchanged"
@@ -189,6 +239,14 @@ fn lease_join_parity_all_modes_17028() {
             post3.3, snap_active.3,
             "PAT active join: snapshot timeout unchanged"
         );
+        assert_eq!(
+            post3.4, snap_active.4,
+            "PAT active join: expires_at unchanged (refresh is 0->1 only)"
+        );
+        assert_eq!(
+            post3.5, snap_active.5,
+            "PAT active join: timeout unchanged (adoption is 0->1 only)"
+        );
         assert_index_membership(
             &alloc,
             &f1,
@@ -196,12 +254,59 @@ fn lease_join_parity_all_modes_17028() {
             false,
             "PAT after active join",
         );
+        // Drain fully, then a fresh 0->1 at TIMEOUT_NS restores the
+        // mint timeout — adoption is per-edge, not sticky-once.
+        assert!(alloc.release_flow(f3, t1, 5_000, NatHolder::Untracked));
+        assert!(alloc.release_flow(f2, t2, 6_000, NatHolder::Untracked));
+        let pre_rejoin = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(
+            (pre_rejoin.4, pre_rejoin.5),
+            (6_000 + TIMEOUT2_NS, TIMEOUT2_NS),
+            "PAT drained: last release re-armed from the adopted timeout, got {pre_rejoin:?}"
+        );
+        let f4 = v4_flow("10.0.70.1", 40000, "8.8.4.4");
+        alloc
+            .allocate_translation(
+                f4,
+                PoolAddressFamily::V4(&addrs),
+                0,
+                false,
+                true,
+                PersistentNatPermit::AnyRemoteHost,
+                0,
+                TIMEOUT_NS,
+                7_000,
+                NatHolder::Untracked,
+                0,
+            )
+            .expect("PAT rejoin at mint timeout");
+        let post4 = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(
+            (post4.2, post4.3),
+            (pre_rejoin.4, pre_rejoin.5),
+            "PAT rejoin: snapshot == pre-rejoin expiry/timeout"
+        );
+        assert_eq!(
+            post4.4,
+            7_000 + TIMEOUT_NS,
+            "PAT rejoin: expiry refreshed to join-time + TIMEOUT_NS"
+        );
+        assert_eq!(
+            post4.5, TIMEOUT_NS,
+            "PAT rejoin: timeout re-adopts the caller's TIMEOUT_NS"
+        );
+        assert_eq!(post4.6, 1, "PAT rejoin: active_flows 0->1");
     }
 
     // ---- Shapes 2+3: deterministic BIB (full-block + claimed-port) --
     // A fresh mint goes through the claimed-port branch; releasing it
     // to idle and re-joining exercises the other branch when the block
-    // is full. Both must produce identical snapshot/index outcomes.
+    // is full. Both mint and rejoin at the FIXED BIB timeout
+    // (`BIB_TIMEOUT_NS`, the call takes no timeout parameter), so the
+    // timeout pin is equality, not adoption — but the EXPIRY pin
+    // differs by branch, the #15948 policy the consolidation kept:
+    // full-block refreshes on the 0 -> 1 edge (join-time + timeout),
+    // claimed-port leaves `expires_at_ns` bit-identical to pre-join.
     for full_block in [false, true] {
         let ctx = if full_block {
             "BIB full-block"
@@ -237,6 +342,12 @@ fn lease_join_parity_all_modes_17028() {
             true,
             &format!("{ctx} idle-before-join"),
         );
+        let pre = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(
+            (pre.4, pre.5),
+            (2_000 + BIB_TIMEOUT_NS, BIB_TIMEOUT_NS),
+            "{ctx} pre-join: drain re-armed expiry/timeout, got {pre:?}"
+        );
         let f2 = bib_flow(40000, "1.1.1.1");
         let t2 = alloc
             .allocate_deterministic_v6_at(f2, &[POOL], params, SUB, 3_000, NatHolder::Untracked)
@@ -247,7 +358,28 @@ fn lease_join_parity_all_modes_17028() {
             !post.0 && post.1,
             "{ctx} idle join: snapshot re-armed, got {post:?}"
         );
-        assert_eq!(post.4, 1, "{ctx} idle join: active_flows 0->1");
+        assert_eq!(
+            (post.2, post.3),
+            (pre.4, pre.5),
+            "{ctx} idle join: snapshot == pre-join expiry/timeout"
+        );
+        if full_block {
+            assert_eq!(
+                post.4,
+                3_000 + BIB_TIMEOUT_NS,
+                "{ctx} idle join (refresh_expiry=true): expires_at = join-time + BIB timeout"
+            );
+        } else {
+            assert_eq!(
+                post.4, pre.4,
+                "{ctx} idle join (refresh_expiry=false): expires_at unchanged from pre-join"
+            );
+        }
+        assert_eq!(
+            post.5, BIB_TIMEOUT_NS,
+            "{ctx} idle join: timeout stays the fixed BIB timeout"
+        );
+        assert_eq!(post.6, 1, "{ctx} idle join: active_flows 0->1");
         assert_index_membership(
             &alloc,
             &f1,
@@ -261,19 +393,46 @@ fn lease_join_parity_all_modes_17028() {
         // here would be refused — use release+rejoin instead there.
         if full_block {
             assert!(alloc.release_flow(f2, t2, 4_000, NatHolder::Untracked));
+            let pre_rejoin = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+            assert_eq!(
+                (pre_rejoin.4, pre_rejoin.5),
+                (4_000 + BIB_TIMEOUT_NS, BIB_TIMEOUT_NS),
+                "{ctx} pre-rejoin: drain re-armed expiry/timeout, got {pre_rejoin:?}"
+            );
             let t3 = alloc
                 .allocate_deterministic_v6_at(f3, &[POOL], params, SUB, 5_000, NatHolder::Untracked)
                 .expect("BIB full-block rejoin after release");
             assert_eq!(t3, t1);
+            let post3 = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+            assert_eq!(
+                (post3.2, post3.3),
+                (pre_rejoin.4, pre_rejoin.5),
+                "{ctx} rejoin: snapshot == pre-rejoin expiry/timeout"
+            );
+            assert_eq!(
+                post3.4,
+                5_000 + BIB_TIMEOUT_NS,
+                "{ctx} rejoin (refresh_expiry=true): expires_at = join-time + BIB timeout"
+            );
+            assert_eq!(
+                post3.5, BIB_TIMEOUT_NS,
+                "{ctx} rejoin: timeout stays the fixed BIB timeout"
+            );
+            assert_eq!(post3.6, 1, "{ctx} rejoin: active_flows 0->1");
         } else {
             alloc
                 .allocate_deterministic_v6_at(f3, &[POOL], params, SUB, 4_000, NatHolder::Untracked)
                 .expect("BIB active join");
             let post3 = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
-            assert_eq!(post3.4, 2, "{ctx} active join: active_flows 1->2");
+            assert_eq!(post3.6, 2, "{ctx} active join: active_flows 1->2");
             assert_eq!(
                 post3.2, snap_active.2,
                 "{ctx} active join: snapshot unchanged"
+            );
+            assert_eq!(
+                (post3.4, post3.5),
+                (snap_active.4, snap_active.5),
+                "{ctx} active join: expires_at/timeout unchanged"
             );
             assert_index_membership(
                 &alloc,
@@ -286,6 +445,10 @@ fn lease_join_parity_all_modes_17028() {
     }
 
     // ---- Shape 4: synced PAT ------------------------------------------
+    // Synced joins preserve peer origin: `promote_imported=false`,
+    // `refresh_expiry=false`. Rejoining idle with a DIFFERENT timeout
+    // must leave BOTH `expires_at_ns` and `timeout_ns` bit-identical
+    // to the pre-join values — the peer timeout is mint-only here.
     {
         let alloc = PortAllocator::new(1, 1024, 65535);
         let f1 = v4_flow("10.0.70.4", 40000, "8.8.8.8");
@@ -316,6 +479,12 @@ fn lease_join_parity_all_modes_17028() {
             true,
             "synced PAT idle-before-join",
         );
+        let pre = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(
+            (pre.4, pre.5),
+            (2_000 + TIMEOUT_NS, TIMEOUT_NS),
+            "synced PAT pre-join: drain re-armed expiry/timeout, got {pre:?}"
+        );
         let f2 = v4_flow("10.0.70.4", 40000, "1.1.1.1");
         assert!(
             alloc.reserve_flow_maybe_persistent(
@@ -325,7 +494,7 @@ fn lease_join_parity_all_modes_17028() {
                 false,
                 3_000,
                 NatHolder::Untracked,
-                Some((key, TIMEOUT_NS)),
+                Some((key, TIMEOUT2_NS)),
                 false,
                 &mut None
             ),
@@ -336,7 +505,20 @@ fn lease_join_parity_all_modes_17028() {
             !post.0 && post.1,
             "synced PAT idle join: snapshot re-armed, got {post:?}"
         );
-        assert_eq!(post.4, 1);
+        assert_eq!(
+            (post.2, post.3),
+            (pre.4, pre.5),
+            "synced PAT idle join: snapshot == pre-join expiry/timeout"
+        );
+        assert_eq!(
+            post.4, pre.4,
+            "synced PAT idle join (refresh_expiry=false): expires_at unchanged from pre-join"
+        );
+        assert_eq!(
+            post.5, pre.5,
+            "synced PAT idle join (promote_imported=false): timeout NOT adopted from TIMEOUT2"
+        );
+        assert_eq!(post.6, 1);
         assert_index_membership(
             &alloc,
             &f1,
@@ -344,6 +526,7 @@ fn lease_join_parity_all_modes_17028() {
             false,
             "synced PAT after idle join",
         );
+        let snap_active = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
         let f3 = v4_flow("10.0.70.4", 40000, "9.9.9.9");
         assert!(
             alloc.reserve_flow_maybe_persistent(
@@ -353,20 +536,23 @@ fn lease_join_parity_all_modes_17028() {
                 false,
                 4_000,
                 NatHolder::Untracked,
-                Some((key, TIMEOUT_NS)),
+                Some((key, TIMEOUT2_NS)),
                 false,
                 &mut None
             ),
             "synced PAT active join"
         );
+        let post3 = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(post3.6, 2, "synced PAT active join refcount");
         assert_eq!(
-            snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost).4,
-            2,
-            "synced PAT active join refcount"
+            (post3.2, post3.3, post3.4, post3.5),
+            (snap_active.2, snap_active.3, snap_active.4, snap_active.5),
+            "synced PAT active join: snapshot/expiry/timeout unchanged"
         );
     }
 
     // ---- Shape 5: synced address-only ---------------------------------
+    // Same peer-origin policy as synced PAT: no refresh, no adoption.
     {
         let alloc = PortAllocator::new(1, 1024, 65535);
         let f1 = v4_flow("10.0.70.5", 40000, "8.8.8.8");
@@ -391,6 +577,12 @@ fn lease_join_parity_all_modes_17028() {
             true,
             "synced AO idle-before-join",
         );
+        let pre = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(
+            (pre.4, pre.5),
+            (2_000 + TIMEOUT_NS, TIMEOUT_NS),
+            "synced AO pre-join: drain re-armed expiry/timeout, got {pre:?}"
+        );
         let f2 = v4_flow("10.0.70.5", 40000, "1.1.1.1");
         alloc
             .reserve_address_only_maybe_persistent(
@@ -399,7 +591,7 @@ fn lease_join_parity_all_modes_17028() {
                 0,
                 3_000,
                 NatHolder::Untracked,
-                Some((key, TIMEOUT_NS)),
+                Some((key, TIMEOUT2_NS)),
                 false,
                 &mut None,
             )
@@ -409,7 +601,20 @@ fn lease_join_parity_all_modes_17028() {
             !post.0 && post.1,
             "synced AO idle join: snapshot re-armed, got {post:?}"
         );
-        assert_eq!(post.4, 1);
+        assert_eq!(
+            (post.2, post.3),
+            (pre.4, pre.5),
+            "synced AO idle join: snapshot == pre-join expiry/timeout"
+        );
+        assert_eq!(
+            post.4, pre.4,
+            "synced AO idle join (refresh_expiry=false): expires_at unchanged from pre-join"
+        );
+        assert_eq!(
+            post.5, pre.5,
+            "synced AO idle join (promote_imported=false): timeout NOT adopted from TIMEOUT2"
+        );
+        assert_eq!(post.6, 1);
         assert_index_membership(
             &alloc,
             &f1,
@@ -417,6 +622,7 @@ fn lease_join_parity_all_modes_17028() {
             false,
             "synced AO after idle join",
         );
+        let snap_active = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
         let f3 = v4_flow("10.0.70.5", 40000, "9.9.9.9");
         alloc
             .reserve_address_only_maybe_persistent(
@@ -425,19 +631,22 @@ fn lease_join_parity_all_modes_17028() {
                 0,
                 4_000,
                 NatHolder::Untracked,
-                Some((key, TIMEOUT_NS)),
+                Some((key, TIMEOUT2_NS)),
                 false,
                 &mut None,
             )
             .expect("synced AO active join");
+        let post3 = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(post3.6, 2, "synced AO active join refcount");
         assert_eq!(
-            snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost).4,
-            2,
-            "synced AO active join refcount"
+            (post3.2, post3.3, post3.4, post3.5),
+            (snap_active.2, snap_active.3, snap_active.4, snap_active.5),
+            "synced AO active join: snapshot/expiry/timeout unchanged"
         );
     }
 
     // ---- Shape 6: local address-only ----------------------------------
+    // Same local policy as PAT: refresh + adopt on the 0 -> 1 edge only.
     {
         let addrs = [POOL];
         let alloc = PortAllocator::new(1, 1024, 65535);
@@ -464,6 +673,12 @@ fn lease_join_parity_all_modes_17028() {
             true,
             "local AO idle-before-join",
         );
+        let pre = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(
+            (pre.4, pre.5),
+            (2_000 + TIMEOUT_NS, TIMEOUT_NS),
+            "local AO pre-join: drain re-armed expiry/timeout, got {pre:?}"
+        );
         let f2 = v4_flow("10.0.70.6", 40000, "1.1.1.1");
         let t2 = alloc
             .reserve_address_only_persistent(
@@ -473,7 +688,7 @@ fn lease_join_parity_all_modes_17028() {
                 false,
                 PersistentNatPermit::AnyRemoteHost,
                 0,
-                TIMEOUT_NS,
+                TIMEOUT2_NS,
                 3_000,
                 NatHolder::Untracked,
                 0,
@@ -485,7 +700,21 @@ fn lease_join_parity_all_modes_17028() {
             !post.0 && post.1,
             "local AO idle join: snapshot re-armed, got {post:?}"
         );
-        assert_eq!(post.4, 1);
+        assert_eq!(
+            (post.2, post.3),
+            (pre.4, pre.5),
+            "local AO idle join: snapshot == pre-join expiry/timeout"
+        );
+        assert_eq!(
+            post.4,
+            3_000 + TIMEOUT2_NS,
+            "local AO idle join (refresh_expiry=true): expires_at = join-time + adopted timeout"
+        );
+        assert_eq!(
+            post.5, TIMEOUT2_NS,
+            "local AO idle join: 0->1 adopts the caller's TIMEOUT2 timeout"
+        );
+        assert_eq!(post.6, 1);
         assert_index_membership(
             &alloc,
             &f1,
@@ -493,6 +722,7 @@ fn lease_join_parity_all_modes_17028() {
             false,
             "local AO after idle join",
         );
+        let snap_active = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
         let f3 = v4_flow("10.0.70.6", 40000, "9.9.9.9");
         alloc
             .reserve_address_only_persistent(
@@ -508,10 +738,12 @@ fn lease_join_parity_all_modes_17028() {
                 0,
             )
             .expect("local AO active join");
+        let post3 = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(post3.6, 2, "local AO active join refcount");
         assert_eq!(
-            snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost).4,
-            2,
-            "local AO active join refcount"
+            (post3.2, post3.3, post3.4, post3.5),
+            (snap_active.2, snap_active.3, snap_active.4, snap_active.5),
+            "local AO active join: snapshot/expiry/timeout unchanged"
         );
         assert_index_membership(
             &alloc,
@@ -520,6 +752,47 @@ fn lease_join_parity_all_modes_17028() {
             false,
             "local AO after active join",
         );
+        // Drain fully, then a fresh 0->1 at TIMEOUT_NS restores the
+        // mint timeout — adoption is per-edge, not sticky-once.
+        assert!(alloc.release_flow(f3, t2, 5_000, NatHolder::Untracked));
+        assert!(alloc.release_flow(f2, t2, 6_000, NatHolder::Untracked));
+        let pre_rejoin = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(
+            (pre_rejoin.4, pre_rejoin.5),
+            (6_000 + TIMEOUT2_NS, TIMEOUT2_NS),
+            "local AO drained: last release re-armed from the adopted timeout, got {pre_rejoin:?}"
+        );
+        let f4 = v4_flow("10.0.70.6", 40000, "8.8.4.4");
+        alloc
+            .reserve_address_only_persistent(
+                f4,
+                PoolAddressFamily::V4(&addrs),
+                0,
+                false,
+                PersistentNatPermit::AnyRemoteHost,
+                0,
+                TIMEOUT_NS,
+                7_000,
+                NatHolder::Untracked,
+                0,
+            )
+            .expect("local AO rejoin at mint timeout");
+        let post4 = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
+        assert_eq!(
+            (post4.2, post4.3),
+            (pre_rejoin.4, pre_rejoin.5),
+            "local AO rejoin: snapshot == pre-rejoin expiry/timeout"
+        );
+        assert_eq!(
+            post4.4,
+            7_000 + TIMEOUT_NS,
+            "local AO rejoin: expiry refreshed to join-time + TIMEOUT_NS"
+        );
+        assert_eq!(
+            post4.5, TIMEOUT_NS,
+            "local AO rejoin: timeout re-adopts the caller's TIMEOUT_NS"
+        );
+        assert_eq!(post4.6, 1, "local AO rejoin: active_flows 0->1");
     }
 }
 
@@ -554,7 +827,7 @@ fn bib_claimed_port_cap_fail_bumps_exhaustion_17028() {
     );
     // The lease itself is untouched by the refused join.
     assert_eq!(
-        snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost).4,
+        snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost).6,
         1
     );
 }
@@ -586,7 +859,7 @@ fn bib_revoked_live_lease_is_not_joined_17028() {
         "revoked-live BIB must not be joined, got {err:?}"
     );
     let st = snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost);
-    assert_eq!(st.4, 1, "revoked shell keeps its live flow count");
+    assert_eq!(st.6, 1, "revoked shell keeps its live flow count");
     // The original flow still releases cleanly off the shell.
     assert!(alloc.release_flow(f1, t1, 4_000, NatHolder::Untracked));
 }
