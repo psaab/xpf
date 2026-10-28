@@ -4704,7 +4704,7 @@ func TestRouteFilterLongerFRR(t *testing.T) {
 	// through to the broader /24; the /24 permit is resequenced to seq 10.
 	// This is a boundary stop, not a skipped index gap. The term still
 	// emits a match line.
-	t.Run("mixed_empty_longer_boundary_then_valid_keeps_seq_and_match", func(t *testing.T) {
+	t.Run("mixed_skipped_then_valid_keeps_seq_and_match", func(t *testing.T) {
 		got := New().generatePolicyOptions(rfPolicyOptions(
 			&config.RouteFilter{Prefix: "10.0.0.0/32", MatchType: "longer"},
 			&config.RouteFilter{Prefix: "10.0.0.0/24", MatchType: "longer"}))
