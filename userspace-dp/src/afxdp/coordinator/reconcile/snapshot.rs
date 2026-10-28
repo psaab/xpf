@@ -388,8 +388,8 @@ pub(super) fn validate_map_pins(snapshot: &ConfigSnapshot) -> Result<(), super::
 ///
 /// What remains is the ADDITIVE half, and it is still a reason not to relax
 /// this. `attach_zone_counters` get-or-creates a block per SLOT-ASSIGNED zone
-/// (`ZoneCounterSlotMap::build` skips zone id 0 and stops at
-/// `ZONE_COUNTER_ASSIGNABLE_SLOTS`, so it is a subset of the configured set).
+/// (`ZoneSlotMap::build` skips zone id 0 and stops at
+/// `ZONE_SLOT_ASSIGNABLE_SLOTS`, so it is a subset of the configured set).
 /// With `Some(&coord.forwarding)` every validation build — including one whose
 /// deferred apply never happens — would leave a zero-valued block per
 /// candidate-only zone in the live map: the #6995 residue class, invisible to

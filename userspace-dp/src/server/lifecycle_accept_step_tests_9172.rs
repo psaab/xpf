@@ -170,9 +170,11 @@ fn a_quiet_gap_between_failures_starts_a_new_episode_9172() {
 
 #[test]
 fn both_accept_loops_are_wired_through_accept_step_9172() {
-    // A TEXTUAL scan of run(), stated as one: it binds that both accept()
-    // results go through accept_step and which loop passes which
-    // retry_unclassified value, not the runtime behaviour of the loops.
+    // #17123: both loops are now served by the single accept loop in
+    // accept_loop.rs. A TEXTUAL scan, stated as one: it binds that
+    // lifecycle.rs carries no `accept()`/`accept_step(` of its own, that
+    // accept_loop.rs holds the only production `accept_step(` call, and
+    // that run() wires the session (retry) and control (fail) specs.
     // Patterns are built at runtime so this test's own text does not match.
     let file = include_str!("lifecycle.rs");
     let run_sig = ["fn ", "run", "("].concat();
@@ -181,44 +183,47 @@ fn both_accept_loops_are_wired_through_accept_step_9172() {
     let src = &file[start..end];
     let bare = [".", "accept", "()"].concat();
     let call = ["accept_step", "("].concat();
-    let total = src.matches(bare.as_str()).count();
-    let mut calls = Vec::new();
-    for (i, _) in src.match_indices(call.as_str()) {
-        let args_end = src[i..]
-            .find(");")
-            .map(|e| i + e)
-            .expect("unterminated accept_step call");
-        calls.push(&src[i + call.len()..args_end]);
-    }
-    let wired = calls.iter().filter(|a| a.contains(bare.as_str())).count();
     assert_eq!(
-        total, 2,
-        "run() must accept on exactly the two listeners, found {total}"
+        src.matches(bare.as_str()).count(),
+        0,
+        "run() must not accept() directly after #17123 — the loop lives in accept_loop.rs"
     );
     assert_eq!(
-        wired, total,
-        "every accept() result must go through accept_step"
+        src.matches(call.as_str()).count(),
+        0,
+        "run() must not call accept_step directly after #17123"
     );
-    let session_call = calls
-        .iter()
-        .find(|a| a.contains("\"session socket\""))
-        .expect("session accept_step call");
-    let control_call = calls
-        .iter()
-        .find(|a| a.contains("\"control socket\""))
-        .expect("control accept_step call");
+    // The shared loop itself: exactly one production accept_step call,
+    // and it is fed the listener's accept() result.
+    let loop_file = include_str!("accept_loop.rs");
+    // Strip the test module: its text mentions the patterns under test.
+    let prod = match loop_file.find("#[cfg(test)]") {
+        Some(i) => &loop_file[..i],
+        None => loop_file,
+    };
+    assert_eq!(
+        prod.matches(call.as_str()).count(),
+        1,
+        "accept_loop.rs must hold the only production accept_step call"
+    );
     assert!(
-        session_call
-            .trim_end()
-            .trim_end_matches(',')
-            .ends_with("true"),
+        prod.contains(bare.as_str()),
+        "the shared loop must feed accept() into accept_step"
+    );
+    // run() wires both sockets through run_accept_loop with the right
+    // retry policy: session retries unclassified errors, control fails.
+    let loop_call = ["run_accept_loop", "("].concat();
+    assert_eq!(
+        src.matches(loop_call.as_str()).count(),
+        2,
+        "run() must wire exactly the session and control loops through run_accept_loop"
+    );
+    assert!(
+        src.contains("\"session socket\"") && src.contains("retry_unclassified: true"),
         "session loop must retry unclassified errors"
     );
     assert!(
-        control_call
-            .trim_end()
-            .trim_end_matches(',')
-            .ends_with("false"),
+        src.contains("\"control socket\"") && src.contains("retry_unclassified: false"),
         "control loop must fail on unclassified errors"
     );
 }

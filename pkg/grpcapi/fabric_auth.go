@@ -179,18 +179,13 @@ func fabricRequestDigest(req interface{}) ([]byte, error) {
 	return digest[:], nil
 }
 
-// computeFabricAuthToken returns HMAC-SHA256(key,
+// computeFabricAuthTokenForDigest returns HMAC-SHA256(key,
 // domain || method-length || method || request-digest || window) — the raw
-// 32-byte digest for one window. request-digest is fixed-size SHA-256, so the
-// framing stays unambiguous without another length prefix.
-func computeFabricAuthToken(key []byte, window int64, method ...string) []byte {
-	methodName := ""
-	if len(method) > 0 {
-		methodName = method[0]
-	}
-	return computeFabricAuthTokenForDigest(key, window, methodName, fabricAuthEmptyRequestDigest[:])
-}
-
+// 32-byte digest for one window. method and reqDigest are REQUIRED inputs
+// (#10709, #17158): there is no request-unbound token form. The digest is
+// fixed-size SHA-256, so the framing stays unambiguous without another
+// length prefix. Callers that legitimately have no request body (streams,
+// empty-request RPCs) pass fabricAuthEmptyRequestDigest explicitly.
 func computeFabricAuthTokenForDigest(key []byte, window int64, method string, reqDigest []byte) []byte {
 	if len(reqDigest) != sha256.Size {
 		return nil
@@ -214,16 +209,14 @@ func computeFabricAuthTokenForDigest(key []byte, window int64, method string, re
 // fabricAuthTokenHex returns the hex-encoded current-window token for a key,
 // bound to method and the empty request body. It exists for empty-request and
 // isolated skew fixtures; production unary callers use
-// fabricAuthTokenHexForDigest. A missing key still sends no token during rollout.
-func fabricAuthTokenHex(key []byte, t time.Time, method ...string) string {
+// fabricAuthTokenHexForDigest. method is required (#17158): the pre-fix
+// optional-method form minted a token bound to no method and no request.
+// A missing key still sends no token during rollout.
+func fabricAuthTokenHex(key []byte, t time.Time, method string) string {
 	if len(key) == 0 {
 		return ""
 	}
-	methodName := ""
-	if len(method) > 0 {
-		methodName = method[0]
-	}
-	return fabricAuthTokenHexForDigest(key, t, methodName, fabricAuthEmptyRequestDigest[:])
+	return fabricAuthTokenHexForDigest(key, t, method, fabricAuthEmptyRequestDigest[:])
 }
 
 func fabricAuthTokenHexForDigest(key []byte, t time.Time, method string, reqDigest []byte) string {
@@ -235,14 +228,10 @@ func fabricAuthTokenHexForDigest(key []byte, t time.Time, method string, reqDige
 
 // verifyFabricAuthToken reports whether tokenHex is a valid token for key in
 // the current or an adjacent window, bound to method and the empty request.
-// Production unary calls use verifyFabricAuthTokenForDigest. The digest
-// comparison is constant-time (hmac.Equal).
-func verifyFabricAuthToken(key []byte, tokenHex string, method ...string) bool {
-	methodName := ""
-	if len(method) > 0 {
-		methodName = method[0]
-	}
-	return verifyFabricAuthTokenForDigest(key, tokenHex, methodName, fabricAuthEmptyRequestDigest[:])
+// Production unary calls use verifyFabricAuthTokenForDigest. method is
+// required (#17158). The digest comparison is constant-time (hmac.Equal).
+func verifyFabricAuthToken(key []byte, tokenHex string, method string) bool {
+	return verifyFabricAuthTokenForDigest(key, tokenHex, method, fabricAuthEmptyRequestDigest[:])
 }
 
 func verifyFabricAuthTokenForDigest(key []byte, tokenHex string, method string, reqDigest []byte) bool {

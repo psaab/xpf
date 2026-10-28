@@ -45,8 +45,10 @@ func TestHTTPSourceFamilyFailsClosedCrossFamily(t *testing.T) {
 	defer srv.Close()
 
 	c, err := newProviderHTTPClient(&config.DDNSProvider{
-		Name:          "p",
-		SourceAddress: "::1", // IPv6 source, IPv4-only endpoint
+		Name: "p", // IPv6 source, IPv4-only endpoint,
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			SourceAddress: "::1",
+		},
 	})
 	if err != nil {
 		t.Fatalf("newProviderHTTPClient: %v", err)
@@ -86,8 +88,10 @@ func TestHTTPSourceV4EndpointV6OnlyFailsClosed(t *testing.T) {
 
 	url := "http://" + ln.Addr().String() + "/" // http://[::1]:port/
 	c, err := newProviderHTTPClient(&config.DDNSProvider{
-		Name:          "p",
-		SourceAddress: "127.0.0.2", // IPv4 source, IPv6-only endpoint
+		Name: "p", // IPv4 source, IPv6-only endpoint,
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			SourceAddress: "127.0.0.2",
+		},
 	})
 	if err != nil {
 		t.Fatalf("newProviderHTTPClient: %v", err)
@@ -120,13 +124,15 @@ func TestRFC2136SourceFamilyPinsNet(t *testing.T) {
 	mk := func(t *testing.T, src string) *dns.Client {
 		t.Helper()
 		c := &config.DHCPDynamicDNSConfig{
-			Enabled: true, Domain: "example.com",
-			UpdateServer: "192.0.2.53:53", // TEST-NET, never dialed
+			Enabled: true, Domain: "example.com", // TEST-NET, never dialed,
+			RFC2136Endpoint: config.RFC2136Endpoint{
+				UpdateServer: "192.0.2.53:53",
+			},
 		}
 		if src != "" {
 			c.SourceAddress = src
 		}
-		u, err := newRFC2136Updater(policyFromConfig(c), c, nil, nil, nil)
+		u, err := newRFC2136Updater(policyFromConfig(c), c.RFC2136Endpoint, nil, nil, nil)
 		if err != nil {
 			t.Fatalf("newRFC2136Updater(src=%q): %v", src, err)
 		}
@@ -168,11 +174,13 @@ func TestRFC2136SourceFamilyPinsNet(t *testing.T) {
 func TestRFC2136SourceFamilyFailsClosedCrossFamily(t *testing.T) {
 	srv := newFakeDNSServer(t, nil) // listens on 127.0.0.1 (IPv4)
 	c := &config.DHCPDynamicDNSConfig{
-		Enabled: true, Domain: "example.com",
-		UpdateServer:  srv.addrUDP,
-		SourceAddress: "::1", // IPv6 source, IPv4-only server
+		Enabled: true, Domain: "example.com", // IPv6 source, IPv4-only server,
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: srv.addrUDP,
+			SourceAddress: "::1",
+		},
 	}
-	u, err := newRFC2136Updater(policyFromConfig(c), c, nil, nil, nil)
+	u, err := newRFC2136Updater(policyFromConfig(c), c.RFC2136Endpoint, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newRFC2136Updater: %v", err)
 	}

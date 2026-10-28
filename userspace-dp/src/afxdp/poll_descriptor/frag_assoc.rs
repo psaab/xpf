@@ -122,7 +122,7 @@ pub(in crate::afxdp) fn frag_ingress_zone(
 /// v6-side installs on AF_INET6 and carries `Nat64ReverseInfo` for AF_INET reply
 /// associations, which the flowless reverse consult returns to the NAT64 builder.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn nat64_install_forward_fragment_assoc(
     forwarding: &ForwardingState,
     l3_packet: &[u8],
@@ -242,7 +242,7 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
 /// an orphan tail or a tail whose head session is gone still misses and is
 /// handled by normal flowless host-inbound enforcement.
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn same_family_or_plain_install_forward_fragment_assoc(
     forwarding: &ForwardingState,
     l3_packet: &[u8],
@@ -1072,7 +1072,7 @@ fn flowless_destination_nat_requires_translation(
 /// decision keeps the full both-sides probe.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn flowless_no_route_requires_nat_translation(
     forwarding: &ForwardingState,
     l3_flow: &SessionFlow,
@@ -1176,7 +1176,7 @@ pub(super) fn flowless_no_route_requires_nat_translation(
 /// against the exact protocol and ports without minting allocator state.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn flowbacked_no_route_requires_nat_translation(
     forwarding: &ForwardingState,
     flow: &SessionFlow,
@@ -1253,7 +1253,7 @@ pub(super) fn flowbacked_no_route_requires_nat_translation(
 
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn flowbacked_requires_nat_translation_on_egress(
     forwarding: &ForwardingState,
     flow: &SessionFlow,
@@ -1539,7 +1539,7 @@ pub(in crate::afxdp) enum RetryFlowlessFragmentNat {
 /// destination-side or otherwise unbuildable translation fails closed.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn retry_flowless_fragment_nat(
     forwarding: &ForwardingState,
     flow: &SessionFlow,

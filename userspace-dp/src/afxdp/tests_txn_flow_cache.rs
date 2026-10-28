@@ -4227,7 +4227,7 @@ fn run_flowless_nat_frame(
 /// applies) and the captured slow-path reinject bytes (which
 /// `extract_l3_packet_with_nat` already rewrote), instead of the immediate
 /// forward the warm fixture produces.
-#[allow(clippy::type_complexity)]
+#[expect(clippy::type_complexity, reason = "#17200: wide test fixture type; census in docs/log/17200.md")]
 fn run_flowless_nat_frame_cold(
     snapshot: &ConfigSnapshot,
     frame: &[u8],

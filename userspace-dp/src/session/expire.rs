@@ -23,7 +23,7 @@ pub(super) const HELD_RECHECK_HORIZON_NS: u64 = FAR_FUTURE_OFFSET * WHEEL_TICK_N
 impl SessionTable {
     /// #965: stats from the most-recent `expire_stale_entries` call.
     /// Used by tests to validate K-bounds and entry classification.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn last_pop_stats(&self) -> WheelPopStats {
         self.last_pop_stats
     }
@@ -590,7 +590,7 @@ impl SessionTable {
         expired_entries
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn expire_stale(&mut self, now_ns: u64) -> u64 {
         self.expire_stale_entries(now_ns).len() as u64
     }
@@ -945,7 +945,7 @@ impl SessionTable {
     /// Pure (reads only the passed snapshot + the HA context closures),
     /// so it can be unit-tested in isolation and called from the expire
     /// pass while the entry borrow is already dropped.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     fn standby_gate_decision(
         &self,
         ha: &ExpireHaContext<'_>,

@@ -211,7 +211,6 @@ pub(super) fn new_flow_session_limit_drop(
 /// predicate. LocalDelivery uses its separate cache-only SYN gate so peer
 /// control traffic for firewall-originated connections still reaches the
 /// local stack.
-
 /// #16479 (a): payload-aware MISS gate. A SYN carrying TCP payload is
 /// dropped only when `strict_syn_check` is set; without strict the
 /// SYN+payload miss keeps its prior admission (TFO-style, and the #16042

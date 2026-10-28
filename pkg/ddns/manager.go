@@ -644,7 +644,7 @@ func NewProductionManager(parser LeaseParser, nodeID string) *Manager {
 			// already told the operator). Counts as no-backend skips.
 			return nopUpdater{}, nil
 		}
-		return newRFC2136Updater(pol, c, nil,
+		return newRFC2136Updater(pol, c.RFC2136Endpoint, nil,
 			func() { m.skippedPTRNotAuth.Add(1) },
 			func() { m.skippedConflict.Add(1) },
 			m.ifResolver) // #5070: resolve dest-interface to the kernel device
@@ -862,15 +862,30 @@ func (e *reconcileEnv) backendFPFor(family int) string { return e.backendFP[famI
 // is the endpoint that published it before withdrawing through it.
 func (e *reconcileEnv) prevFPFor(family int) string { return e.prevFP[famIdx(family)] }
 
-// backendChangedForOwned reports whether an owned record was published through a
-// DIFFERENT backend endpoint than the one now resolved for its family (#5814): a
-// server / zone / TSIG-key change. BOTH fingerprints must be non-empty to prove a
-// mismatch — an unknown fingerprint (a pre-#5814 store, a disabled family, or a
-// fixed-updater test) is compared as "cannot determine a change" and never
+// needsRepublish is the SINGLE settled predicate shared by both DDNS
+// reconcile engines (#17233): an owned record is settled only when its
+// content is unchanged (contentEqual) AND its published ENDPOINT identity is
+// unchanged (storedFP == currentFP). Endpoint drift therefore forces a
+// republish/transition on both surfaces instead of silently settling until
+// the forced-refresh floor. Both fingerprints must be non-empty to prove a
+// mismatch — an unknown fingerprint (a pre-#5814/#3735 store, a disabled
+// family, or a fixed-updater test) is "cannot determine a change" and never
 // triggers a false transition.
+func needsRepublish(owned ownedRecord, contentEqual bool, storedFP, currentFP string) bool {
+	if !contentEqual {
+		return true
+	}
+	return storedFP != "" && currentFP != "" && storedFP != currentFP
+}
+
+// backendChangedForOwned reports whether an owned record was published
+// through a DIFFERENT backend endpoint than the one now resolved for its
+// family (#5814): a server / zone / TSIG-key change. It delegates the
+// both-non-empty fingerprint comparison to needsRepublish so Surface B and
+// Surface A share one predicate (#17233); its callers use it to ROUTE a
+// transition (withdraw at the old endpoint), not only to unsettle.
 func (e *reconcileEnv) backendChangedForOwned(owned ownedRecord) bool {
-	cur := e.backendFPFor(owned.Family)
-	return owned.BackendFingerprint != "" && cur != "" && owned.BackendFingerprint != cur
+	return needsRepublish(owned, true, owned.BackendFingerprint, e.backendFPFor(owned.Family))
 }
 
 // polFor returns the resolved policy for a family.
@@ -1653,12 +1668,13 @@ func (m *Manager) reconcileOnceLocked(ctx context.Context, env *reconcileEnv, le
 		d, stillWanted := want[key]
 		// #5814: the content-only recordsEqual shortcut MUST NOT settle a record
 		// whose backend/update-server ENDPOINT changed — the DNS tuple is identical
-		// but it now lives on the WRONG server. backendChangedForOwned forces the
-		// fall-through to the transition path below (withdraw at the old endpoint,
-		// republish at the new one). An unknown fingerprint on either side (pre-#5814
-		// store, disabled family, fixed-updater test) reports "no change", so the
-		// existing efficiency skip is preserved for every non-transition record.
-		if stillWanted && recordsEqual(owned, d.ow) && !env.backendChangedForOwned(owned) {
+		// but it now lives on the WRONG server. needsRepublish (#17233, the single
+		// predicate shared with Surface A) forces the fall-through to the transition
+		// path below (withdraw at the old endpoint, republish at the new one). An
+		// unknown fingerprint on either side (pre-#5814 store, disabled family,
+		// fixed-updater test) reports "no change", so the existing efficiency skip
+		// is preserved for every non-transition record.
+		if stillWanted && !needsRepublish(owned, recordsEqual(owned, d.ow), owned.BackendFingerprint, env.backendFPFor(owned.Family)) {
 			// The published forward/reverse tuple is unchanged. If the owned
 			// record still owes its reverse PTR (#2661 partial success), leave it
 			// owned (do NOT delete the live forward) but do NOT mark it settled —

@@ -47,6 +47,7 @@ mod nat64_icmp_error;
 mod nat_exception;
 pub(in crate::afxdp) use nat_exception::source_nat_decision_for_flow;
 mod noroute_adjudication;
+mod prerouting_dnat;
 mod prerouting_scope;
 
 mod policy_revalidation;
@@ -242,7 +243,7 @@ pub(in crate::afxdp) fn forget_pptp_control_channel(
 }
 
 #[inline]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn emit_session_hit_policy_deny_event(
     forwarding: &ForwardingState,
     event_stream: Option<&crate::event_stream::EventStreamWorkerHandle>,
@@ -529,9 +530,14 @@ use cookie_reply::{
     syn_cookie_final_admission, syn_cookie_final_admission_with_fence, syn_cookie_host_admission,
 };
 use nat_exception::record_source_nat_failure;
+use prerouting_dnat::{PreroutingDnatVerdict, prerouting_dnat_verdict};
 use prerouting_scope::{
     PreroutingIngressScope, prerouting_ingress_scope, prerouting_ingress_scope_ambiguous,
 };
+pub(in crate::afxdp) use prerouting_dnat::PreroutingDnatVerdict as PreroutingDnatVerdictForStage11;
+pub(in crate::afxdp) use prerouting_dnat::prerouting_dnat_verdict_peek as prerouting_dnat_verdict_peek_for_poll_stages;
+pub(in crate::afxdp) use prerouting_scope::prerouting_ingress_scope as prerouting_ingress_scope_for_poll_stages;
+pub(in crate::afxdp) use prerouting_scope::prerouting_ingress_scope_ambiguous as prerouting_ingress_scope_ambiguous_for_poll_stages;
 use reject_reply::{deny_reply_and_emit, enqueue_filter_reject_reply, enqueue_session_miss_rst};
 use resolver_enqueue::{
     claim_window_attempt, note_kernel_probe, probe_throttled, try_enqueue_resolver,
@@ -541,9 +547,10 @@ use filter::{
     NonPbrInputFilterEval, SessionHitInputFilterEval, SessionHitPbrRouteRevalidation,
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit, evaluate_non_pbr_input_filter,
-    evaluate_non_pbr_input_filter_counters_cached, evaluate_non_pbr_input_filter_log_only,
-    evaluate_non_pbr_input_filter_policers_cached, filter_terminal, host_inbound_gated_lo0_action,
-    input_filter_would_deny_before_screen, lo0_action_for_solicited_reply, policer_drop_action,
+    evaluate_non_pbr_input_filter_counters_cached,
+    evaluate_non_pbr_input_filter_policers_cached, filter_terminal,
+    host_inbound_gated_lo0_action, input_filter_would_deny_before_screen,
+    lo0_action_for_solicited_reply, policer_drop_action,
     revalidate_static_pbr_route_on_session_hit, stage11_input_filter_terminal,
 };
 use policy_revalidation::{
@@ -4549,13 +4556,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // so scoped pre-routing matchers fail closed on a
                         // constrained match. Claimed zone never granted.
                         let ambiguous_provenance = ambiguous_zone.is_some();
-                        let PreroutingIngressScope {
-                            logical_ifindex: ingress_logical,
-                            zone_name: ingress_zone_name,
-                            ifname: ingress_ifname_dnat,
-                            routing_instance: ingress_ri_dnat,
-                            ambiguous_provenance: scope_ambiguous,
-                        } = if ambiguous_provenance {
+                        let prerouting_scope = if ambiguous_provenance {
                             prerouting_ingress_scope_ambiguous(
                                 worker_ctx.forwarding,
                                 meta.ingress_ifindex as i32,
@@ -4570,6 +4571,13 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 ingress_nat_scope_ifindex,
                             )
                         };
+                        let &PreroutingIngressScope {
+                            logical_ifindex: ingress_logical,
+                            zone_name: ingress_zone_name,
+                            ifname: ingress_ifname_dnat,
+                            routing_instance: ingress_ri_dnat,
+                            ambiguous_provenance: scope_ambiguous,
+                        } = &prerouting_scope;
                         // #3437: the DNAT `match application` term may pin a
                         // source-port (H10) and an ICMP type/code (H11). Supply
                         // the flow's source port and the packet's ICMP
@@ -4578,217 +4586,63 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // non-ICMP packet yields None and never satisfies an
                         // ICMP-type-constrained entry (fail closed).
                         let dnat_packet_icmp = policy_packet_icmp(packet_frame, meta);
+                        // #17197: the three DNAT tiers (static ->
+                        // persistent -> dynamic pool) live in
+                        // `prerouting_dnat_verdict`, shared with the
+                        // Stage-11 IPsec claim discriminator (which
+                        // calls the non-counting peek twin). No NAT
+                        // rule counter is charged and no lease hold is
+                        // taken by the verdict; those side effects
+                        // (counter charge at committed install,
+                        // persistent lease hold) are applied here. The
+                        // persistent tier's counted write guard is the
+                        // pre-extraction poll-loop telemetry, unchanged.
                         // #6473 (Junos order): static DNAT first.
                         // #15117: suppressed for on-link NDP (see above).
-                        let static_dnat_decision = if ndp_hop255 {
-                            None
-                        } else if scope_ambiguous {
-                                worker_ctx
-                                    .forwarding
-                                    .static_nat
-                                    .match_dnat_ambiguous_provenance_scoped(
-                                resolution_target,
-                                flow.forward_key.dst_port,
-                                Some(flow.forward_key.src_ip),
-                                ingress_zone_name,
-                                ingress_ifname_dnat,
-                                ingress_ri_dnat,
-                            )
-                        } else {
-                                worker_ctx
-                                    .forwarding
-                                    .static_nat
-                                    .match_dnat_with_counter_scoped(
-                                resolution_target,
-                                flow.forward_key.dst_port,
-                                Some(flow.forward_key.src_ip),
-                                ingress_zone_name,
-                                ingress_ifname_dnat,
-                                ingress_ri_dnat,
-                            )
-                        };
-                        let mut persistent_dnat = None;
-                        let mut persistent_lease_hold: Option<crate::nat::PersistentSourceKey> =
-                            None;
-                        let mut persistent_dnat_denied = false;
-                        // #16045: persistent-NAT scope is ingress-keyed;
-                        // under ambiguous provenance the reader is skipped.
-                        if !ndp_hop255 && !scope_ambiguous && static_dnat_decision.is_none() {
-                            for rule in &worker_ctx.forwarding.source_nat_rules {
-                                if !rule.persistent_nat || !rule.pool_mode {
-                                    continue;
-                                }
-                                let pool_contains_target = match resolution_target {
-                                    IpAddr::V4(ip) => rule.pool_index_v4.contains_key(&ip),
-                                    IpAddr::V6(ip) => rule.pool_index_v6.contains_key(&ip),
-                                };
-                                if !pool_contains_target {
-                                    continue;
-                                }
-                                // #14322/#15133/#15936: the lease this rule
-                                // minted is scoped to ITS normalized effective
-                                // scope (authored scope fields, empty zones
-                                // replaced by the packet's resolved zones).
-                                // Keying by the rule — never by
-                                // `rule.from_zone` alone — keeps an interface-,
-                                // routing-instance- or global-scoped sibling
-                                // that shares the pool from authorizing (or
-                                // denying) inbound on this rule's lease: the
-                                // empty-zone spelling used to collapse to
-                                // UNSCOPED, where any grant bucket admits.
-                                // The packet pair is the original flow's
-                                // (internal ingress zone, arrival zone): for a
-                                // zone-authored rule the internal side IS
-                                // `rule.from_zone`. For a non-zone rule this
-                                // pre-routing reader knows only the arrival
-                                // zone, so it spells (arrival, arrival) and
-                                // the allocator's #15936 authored fallback
-                                // recovers the grant via the mint provenance
-                                // recorded on the bucket — never UNSCOPED.
-                                let arrival_scope = crate::nat::NatScopeCtx {
-                                    ingress_ifname: ingress_ifname_dnat,
-                                    ingress_routing_instance: ingress_ri_dnat,
-                                    ..crate::nat::NatScopeCtx::default()
-                                };
-                                let packet_from_zone: &str = if rule.from_zone.is_empty() {
-                                    ingress_zone_name
-                                } else {
-                                    &rule.from_zone
-                                };
-                                match rule.pool_allocator.persistent_inbound_lookup_for_rule(
-                                    meta.protocol,
-                                    resolution_target,
-                                    flow.forward_key.dst_port,
-                                    flow.forward_key.src_ip,
-                                    flow.forward_key.src_port,
-                                    now_ns,
-                                    rule,
-                                    ingress_zone_name,
-                                    packet_from_zone,
-                                    ingress_zone_name,
-                                    &arrival_scope,
-                                ) {
-                                    PersistentInbound::Miss => {}
-                                    PersistentInbound::Denied => {
-                                        persistent_dnat_denied = true;
-                                    }
-                                    PersistentInbound::Permitted {
-                                        internal_ip,
-                                        internal_port,
-                                        address_only,
-                                        lease_key,
-                                    } => {
-                                        let candidate = NatDecision {
-                                            rewrite_dst: Some(internal_ip),
-                                            rewrite_dst_port: (!address_only)
-                                                .then_some(internal_port),
-                                            ..NatDecision::default()
-                                        };
-                                        if persistent_dnat
-                                            .is_some_and(|previous| previous != candidate)
-                                        {
-                                            persistent_dnat_denied = true;
-                                        } else {
-                                            if persistent_dnat.is_none() {
-                                                persistent_lease_hold = lease_key;
-                                                persistent_lease_hold_outer = lease_key;
-                                            }
-                                            persistent_dnat = Some(candidate);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        if persistent_dnat_denied {
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                        // #14947: a poisoned DNAT claim drops the packet —
-                        // it must not fall through to NPTv6/NAT64/policy as
-                        // untranslated transit.
-                        let mut dnat_poisoned = false;
-                        let dnat_decision = if !ndp_hop255
-                            && static_dnat_decision.is_none()
-                            && persistent_dnat.is_none()
-                            && !worker_ctx.forwarding.dnat_table.is_empty()
-                        {
-                            // #16045: tri-state form fails closed on
-                            // scope-constrained matches under ambiguous provenance.
-                            let (lookup, counter) = if scope_ambiguous {
-                                    worker_ctx
-                                        .forwarding
-                                        .dnat_table
-                                        .lookup_result_ambiguous_provenance_scoped(
-                                    meta.protocol,
-                                    flow.forward_key.src_ip,
-                                    resolution_target,
-                                    flow.forward_key.src_port,
-                                    flow.forward_key.dst_port,
-                                    ingress_zone_name,
-                                    ingress_ifname_dnat,
-                                    ingress_ri_dnat,
-                                    dnat_packet_icmp,
-                                )
-                            } else {
-                                    worker_ctx
-                                        .forwarding
-                                        .dnat_table
-                                        .lookup_result_with_counter_scoped(
-                                    meta.protocol,
-                                    flow.forward_key.src_ip,
-                                    resolution_target,
-                                    flow.forward_key.src_port,
-                                    flow.forward_key.dst_port,
-                                    ingress_zone_name,
-                                    ingress_ifname_dnat,
-                                    ingress_ri_dnat,
-                                    dnat_packet_icmp,
-                                )
-                            };
-                            match lookup {
-                                crate::nat::DnatLookup::Matched(decision) => {
-                                    Some((decision, counter))
-                                }
-                                crate::nat::DnatLookup::Poisoned => {
-                                    // #16483: mirror the #15534 flowless
-                                    // contract — the poisoned rule's hit
-                                    // counter is counted here because no
-                                    // session is ever installed for this
-                                    // dropped packet (the healthy
-                                    // `pre_routing_dnat_counter` is only
-                                    // charged at a committed install).
-                                    if let Some(c) = &counter {
-                                        c.add(meta.pkt_len as u64);
-                                    }
-                                    dnat_poisoned = true;
-                                    None
-                                }
-                                crate::nat::DnatLookup::NoMatch => None,
-                            }
-                        } else {
-                            None
-                        };
-                        if dnat_poisoned {
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                        // #2218: DNAT/static-DNAT now yields
-                        // (NatDecision, Option<Arc<NatRuleCounter>>). Split
-                        // the counter off — the decision flows unchanged into
-                        // `decision`/`effective_resolution_target` below; the
-                        // counter is recorded into the outer-scoped
-                        // `pre_routing_dnat_counter` and incremented only at a
-                        // committed session install (here or the later
-                        // MissingNeighbor seed path).
-                        let pre_routing_dnat = match static_dnat_decision
-                            .or_else(|| persistent_dnat.map(|decision| (decision, None)))
-                            .or(dnat_decision)
-                        {
-                            Some((decision, counter)) => {
+                        let dnat_verdict = prerouting_dnat_verdict(
+                            worker_ctx.forwarding,
+                            &meta,
+                            flow,
+                            &prerouting_scope,
+                            dnat_packet_icmp,
+                            ndp_hop255,
+                            now_ns,
+                        );
+                        let pre_routing_dnat = match dnat_verdict {
+                            PreroutingDnatVerdict::Static(decision, counter)
+                            | PreroutingDnatVerdict::Dynamic(decision, counter) => {
+                                // #2218: the counter is recorded into
+                                // the outer-scoped
+                                // `pre_routing_dnat_counter` and
+                                // incremented only at a committed
+                                // session install (here or the later
+                                // MissingNeighbor seed path).
                                 pre_routing_dnat_counter = counter;
                                 Some(decision)
                             }
-                            None => None,
+                            PreroutingDnatVerdict::Persistent(decision, lease_hold) => {
+                                persistent_lease_hold_outer = lease_hold;
+                                Some(decision)
+                            }
+                            PreroutingDnatVerdict::Poisoned(counter) => {
+                                // #16483: mirror the #15534 flowless
+                                // contract — the poisoned rule's hit
+                                // counter is counted here because no
+                                // session is ever installed for this
+                                // dropped packet (the healthy
+                                // `pre_routing_dnat_counter` is only
+                                // charged at a committed install).
+                                if let Some(c) = &counter {
+                                    c.add(meta.pkt_len as u64);
+                                }
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                            PreroutingDnatVerdict::Denied => {
+                                binding.scratch.scratch_recycle.push(desc.addr);
+                                continue;
+                            }
+                            PreroutingDnatVerdict::None => None,
                         };
 
                         // --- NPTv6 inbound pre-routing ---
@@ -5074,9 +4928,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // emit. The log_match comes from the SAME counted
                         // evaluation at ~L838, so emitting it does not re-count
                         // the filter hit. The flow-cache descriptor populated
-                        // later (~L2615) stores the log via
-                        // evaluate_non_pbr_input_filter_log_only (the
-                        // non-counting variant) for cache-hit replay on
+                        // later stores the log via
+                        // established_input_filter_log (the non-counting
+                        // derivation, #17038) for cache-hit replay on
                         // SUBSEQUENT packets; the miss packet does not take the
                         // cache-hit path, so the same packet is never
                         // double-logged.
@@ -5720,7 +5574,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     if persistent_lease_hold_outer.is_some() {
                                         rollback_persistent_inbound_hold(
                                             worker_ctx.forwarding,
-                                            persistent_lease_hold,
+                                            persistent_lease_hold_outer,
                                             now_ns,
                                         );
                                         persistent_lease_hold_outer = None;
@@ -6725,7 +6579,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 if persistent_lease_hold_outer.is_some() {
                                     rollback_persistent_inbound_hold(
                                         worker_ctx.forwarding,
-                                        persistent_lease_hold,
+                                        persistent_lease_hold_outer,
                                         now_ns,
                                     );
                                     persistent_lease_hold_outer = None;
@@ -8270,7 +8124,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 if persistent_lease_hold_outer.is_some() {
                                     rollback_persistent_inbound_hold(
                                         worker_ctx.forwarding,
-                                        persistent_lease_hold,
+                                        persistent_lease_hold_outer,
                                         now_ns,
                                     );
                                     persistent_lease_hold_outer = None;
@@ -13508,7 +13362,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
     received.release();
     drop(received);
 }
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn poll_binding_process_descriptor(
     binding: &mut BindingWorker,
     binding_index: usize,

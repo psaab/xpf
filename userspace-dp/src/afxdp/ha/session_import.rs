@@ -43,6 +43,7 @@ use crate::afxdp::*;
 /// shared forward row ([`Self::shared_removed`]); for `RefusedMirrorDelete`
 /// the mirror delete then failed, so the caller must keep its rows and the
 /// helper surfaces `mirror-write-failed` instead.
+#[must_use = "a refused synced delete must not be treated as applied"]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncedDeleteOutcome {
     /// The entry named by the key was removed.
@@ -127,6 +128,72 @@ impl SyncedDeleteOutcome {
     }
 }
 
+/// #17133: the ONE (peer x strict-mirror x scoped) selection for a synced
+/// delete. Built once — in the sync handler from the wire request — and
+/// threaded unchanged through both the exact delete and the tunnel-variant
+/// purge, so the two paths can never again choose different modes.
+///
+/// #12886 was a divergence between two hand-written dispatch ladders over
+/// six bool-forwarding wrappers: the variant ladder lacked the handler's
+/// strict arm (and never gained its scoped arm), so a tunnel-variant purge
+/// dropped `strict_mirror` — and dropped `expected_id` too. Named consts
+/// below replace the wrapper set for test callers; production callers build
+/// the mode from the request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SyncedDeleteMode {
+    /// The delete was sent on behalf of the peer: refuse a live LOCAL
+    /// session whose owner RG is locally forwarding-active (#9714).
+    pub peer: bool,
+    /// Mirror-strict: a gate/mirror-write failure surfaces as
+    /// `RefusedMirrorDelete` instead of `Applied`.
+    pub strict_mirror: bool,
+    /// #10512 scoped identity: only the captured incarnation may go.
+    /// `None` is an unconditional (legacy) delete; `Some(0)` is never
+    /// constructed — the handler fails zero as identity-missing first.
+    pub expected_id: Option<std::num::NonZeroU64>,
+}
+
+impl SyncedDeleteMode {
+    /// Authoritative helper-local delete (tunnel-remap purge, GC, tests).
+    pub const LOCAL: Self = Self {
+        peer: false,
+        strict_mirror: false,
+        expected_id: None,
+    };
+    /// Authoritative mirror-strict delete.
+    pub const LOCAL_MIRROR: Self = Self {
+        peer: false,
+        strict_mirror: true,
+        expected_id: None,
+    };
+    /// Peer delete (#9714), not mirror-strict.
+    pub const PEER: Self = Self {
+        peer: true,
+        strict_mirror: false,
+        expected_id: None,
+    };
+    /// Peer mirror-strict delete.
+    pub const PEER_MIRROR: Self = Self {
+        peer: true,
+        strict_mirror: true,
+        expected_id: None,
+    };
+
+    /// #10512 scoped peer mirror delete naming exactly one incarnation.
+    /// Zero is identity-missing and yields `None` (the caller fails closed).
+    pub fn peer_mirror_scoped(expected_id: u64) -> Option<Self> {
+        std::num::NonZeroU64::new(expected_id).map(|id| Self {
+            peer: true,
+            strict_mirror: true,
+            expected_id: Some(id),
+        })
+    }
+
+    fn expected_id_u64(self) -> u64 {
+        self.expected_id.map_or(0, std::num::NonZeroU64::get)
+    }
+}
+
 /// Test-only seam for the #9960 race. The hook fires after the initial clone and
 /// #9714 early checks, but immediately before the under-lock removal decision. A
 /// test can rendezvous a publisher here and install a replacement deterministically
@@ -194,6 +261,7 @@ thread_local! {
 /// failure means the session socket is unhealthy and gates takeover-readiness
 /// (#5247). Go discriminates the non-applied outcomes by their stable response
 /// token below.
+#[must_use = "a refused synced import must not be treated as applied"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncedImportOutcome {
     /// Shared authority and every live worker accepted the entry.
@@ -282,29 +350,113 @@ pub const SYNCED_IMPORT_REPAIR_PREFIX: &str = "synced-import-repair:";
 pub const SYNCED_DELETE_REFUSED_PREFIX: &str = "synced-delete-refused:";
 
 impl SyncedImportOutcome {
-    /// Stable terminal-refusal reason, or `None` for Applied and repair states.
-    pub fn refusal_reason(self) -> Option<&'static str> {
+    /// Every variant exactly once, in declaration order. The shared
+    /// Go/Rust wire fixture is keyed by variant name, and `wire_error`
+    /// below matches exhaustively, so adding a variant fails to compile
+    /// until it has a wire class here and a fixture row there (#17116).
+    pub const ALL: [Self; 11] = [
+        Self::Applied,
+        Self::AppliedRepairPending,
+        Self::AppliedRepairOverflow,
+        Self::RejectedStaleGeneration,
+        Self::RejectedStaleZone,
+        Self::RejectedCapacity,
+        Self::RejectedReserve,
+        Self::RejectedStandaloneReverse,
+        Self::RejectedGateBusy,
+        Self::RejectedMirrorPublish,
+        Self::RejectedUnknownRoutingDomain,
+    ];
+
+    /// Stable name used as the shared-fixture row key. Must match the
+    /// `variant` strings in `synced_import_wire.json`.
+    pub fn variant_name(self) -> &'static str {
         match self {
-            SyncedImportOutcome::Applied
-            | SyncedImportOutcome::AppliedRepairPending
-            | SyncedImportOutcome::AppliedRepairOverflow => None,
-            SyncedImportOutcome::RejectedStaleGeneration => Some("stale-generation"),
-            SyncedImportOutcome::RejectedStaleZone => Some("stale-zone"),
-            SyncedImportOutcome::RejectedCapacity => Some("capacity"),
-            SyncedImportOutcome::RejectedReserve => Some("reserve"),
-            SyncedImportOutcome::RejectedStandaloneReverse => Some("standalone-reverse"),
-            SyncedImportOutcome::RejectedGateBusy => Some("gate-busy"),
-            SyncedImportOutcome::RejectedMirrorPublish => Some("mirror-write-failed"),
-            SyncedImportOutcome::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
+            Self::Applied => "Applied",
+            Self::AppliedRepairPending => "AppliedRepairPending",
+            Self::AppliedRepairOverflow => "AppliedRepairOverflow",
+            Self::RejectedStaleGeneration => "RejectedStaleGeneration",
+            Self::RejectedStaleZone => "RejectedStaleZone",
+            Self::RejectedCapacity => "RejectedCapacity",
+            Self::RejectedReserve => "RejectedReserve",
+            Self::RejectedStandaloneReverse => "RejectedStandaloneReverse",
+            Self::RejectedGateBusy => "RejectedGateBusy",
+            Self::RejectedMirrorPublish => "RejectedMirrorPublish",
+            Self::RejectedUnknownRoutingDomain => "RejectedUnknownRoutingDomain",
+        }
+    }
+
+    /// Stable terminal-refusal reason, or `None` for Applied, repair, and
+    /// the bare mirror-publish states. Internal to the encoder; external
+    /// callers consume `wire_error` / `repair_reason` instead.
+    pub(crate) fn refusal_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Applied
+            | Self::AppliedRepairPending
+            | Self::AppliedRepairOverflow
+            | Self::RejectedMirrorPublish => None,
+            Self::RejectedStaleGeneration => Some("stale-generation"),
+            Self::RejectedStaleZone => Some("stale-zone"),
+            Self::RejectedCapacity => Some("capacity"),
+            Self::RejectedReserve => Some("reserve"),
+            Self::RejectedStandaloneReverse => Some("standalone-reverse"),
+            Self::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
+            Self::RejectedGateBusy => Some("gate-busy"),
         }
     }
 
     /// Stable repair-status reason, or `None` for Applied and refusals.
     pub fn repair_reason(self) -> Option<&'static str> {
         match self {
-            SyncedImportOutcome::AppliedRepairPending => Some("worker-repair-pending"),
-            SyncedImportOutcome::AppliedRepairOverflow => Some("worker-repair-overflow"),
+            Self::AppliedRepairPending => Some("worker-repair-pending"),
+            Self::AppliedRepairOverflow => Some("worker-repair-overflow"),
             _ => None,
+        }
+    }
+
+    /// The single `ControlResponse.error` encoder for a non-Applied
+    /// outcome, or `None` for `Applied` (#17116). Every wire class is
+    /// decided inside this exhaustive match, next to the variant:
+    ///
+    ///   * `Ok` (`Applied`): no error.
+    ///   * `Repair`: committed, but worker convergence is pending or its
+    ///     latch overflowed — `SYNCED_IMPORT_REPAIR_PREFIX` + repair
+    ///     reason, so older readers fail closed without rolling back.
+    ///   * `TerminalRefusal`: healthy-helper semantic refusal under
+    ///     `SYNCED_IMPORT_REFUSED_PREFIX` — Go maps it to its
+    ///     rollback-class refusal.
+    ///   * `RetryableRefusal` (`RejectedGateBusy`): deliberately under
+    ///     the SAME refusal prefix today (the shipped bytes Go keys its
+    ///     retryable gate-busy class on); the class, not the prefix,
+    ///     records that Go must retry it rather than treat it terminal.
+    ///   * `Bare` (`RejectedMirrorPublish`): the bare
+    ///     `mirror-write-failed` token with NO prefix — a helper-health
+    ///     failure, which Go keeps retryable and latches mirror health
+    ///     on, distinct from every semantic refusal above.
+    ///
+    /// The shared fixture `synced_import_wire.json` pins these exact
+    /// bytes per variant; a Rust rename of the prefix or of `gate-busy`
+    /// reds the Go classifier test that drives the same rows.
+    pub fn wire_error(self) -> Option<String> {
+        match self {
+            Self::Applied => None,
+            Self::AppliedRepairPending | Self::AppliedRepairOverflow => Some(format!(
+                "{SYNCED_IMPORT_REPAIR_PREFIX}{}",
+                self.repair_reason()
+                    .expect("repair outcomes always carry a repair reason")
+            )),
+            Self::RejectedStaleGeneration
+            | Self::RejectedStaleZone
+            | Self::RejectedCapacity
+            | Self::RejectedReserve
+            | Self::RejectedStandaloneReverse
+            | Self::RejectedUnknownRoutingDomain
+            | Self::RejectedGateBusy => Some(format!(
+                "{SYNCED_IMPORT_REFUSED_PREFIX}{}",
+                self.refusal_reason()
+                    .expect("refusals always carry a refusal reason")
+            )),
+            Self::RejectedMirrorPublish => Some("mirror-write-failed".to_string()),
         }
     }
 }
@@ -471,7 +623,6 @@ impl crate::afxdp::ha::SessionDomain {
     /// per-prefix allocator), so a session can be admissible to one and not the
     /// other. Leaving a half-taken reservation behind would be a leak no worker
     /// ever releases, because no session gets published to reap.
-
     fn reserve_synced_translation(
         &self,
         entry: &mut SyncedSessionEntry,
@@ -627,7 +778,7 @@ impl crate::afxdp::ha::SessionDomain {
         let now_ns = monotonic_nanos();
         // Reserve order is SNAT then NAT64; roll back in reverse order so an
         // unaccepted import's coordinator-only reservations unwind LIFO.
-        let current_nat64_rolled_back = crate::nat64::rollback_synced_nat64_allocation_untracked(
+        let _current_nat64_rolled_back = crate::nat64::rollback_synced_nat64_allocation_untracked(
             &forwarding.nat64,
             &entry.key,
             entry.decision.nat,
@@ -637,7 +788,7 @@ impl crate::afxdp::ha::SessionDomain {
         let incumbent_hold = previous_entry.and_then(|previous| previous.persistent_lease_hold);
         let candidate_hold = entry.persistent_lease_hold;
         let hold_changed = incumbent_hold != candidate_hold;
-        let current_snat_released =
+        let _current_snat_released =
             crate::nat::release_synced_source_nat_allocation_untracked_preserving_persistent_hold(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
@@ -866,7 +1017,6 @@ impl crate::afxdp::ha::SessionDomain {
     /// The counter remains worth having because the absent-fd publish skip is
     /// still reachable on its own (a standby taking bulk sync before its first
     /// apply), and it makes those benign occurrences visible rather than
-
     pub(crate) fn publish_mirror_only(
         &self,
         forwarding: &ForwardingState,
@@ -995,6 +1145,8 @@ impl crate::afxdp::ha::SessionDomain {
                 break;
             }
             for key in keys {
+                // Clear fence held: admission is closed, so RefusedGateBusy is
+                // unreachable; progress is verified by the round size check below (#17144).
                 let _ = self.delete_synced_session_gen_marked(
                     key,
                     0,
@@ -1663,6 +1815,9 @@ impl crate::afxdp::ha::SessionDomain {
         // shared-map removal lock, so a concurrent re-import cannot be
         // mistaken for this stale companion.
         if let Some((old_reverse_key, previous)) = stale_reverse {
+            // Stale-companion cleanup is best-effort: StaleForward means the
+            // companion already changed/was retired, and the replacement
+            // import above has already been ordered (#17144).
             let _ = self.delete_synced_reverse_companion(old_reverse_key, &previous, &_tuple_lease);
         }
         outcome
@@ -1703,12 +1858,15 @@ impl crate::afxdp::ha::SessionDomain {
             })
     }
 
+    /// #17133: purge every discriminator variant of the tuple under the
+    /// SAME `SyncedDeleteMode` the exact delete would use — there is no
+    /// second selection here (#12886: the old ladder dropped
+    /// `strict_mirror`; a scoped mode's `expected_id` was dropped too).
     pub fn delete_synced_tunnel_variants(
         &self,
         key: SessionKey,
-        peer_delete: bool,
+        mode: SyncedDeleteMode,
         forward_only: bool,
-        strict_mirror: bool,
     ) -> SyncedDeleteOutcome {
         let variants: Vec<SessionKey> = lock_shared_recover(&self.sessions.synced)
             .keys()
@@ -1725,24 +1883,58 @@ impl crate::afxdp::ha::SessionDomain {
             .collect();
         let mut outcome = SyncedDeleteOutcome::Applied;
         for variant in variants {
-            // #12886: honor strict_mirror and never discard a local
-            // outcome — a gate-busy / mirror-write refusal must surface.
-            let next = if peer_delete {
-                if strict_mirror {
-                    self.delete_peer_synced_session_mirror(variant, forward_only)
-                } else {
-                    self.delete_peer_synced_session(variant, forward_only)
-                }
-            } else if strict_mirror {
-                self.delete_synced_session_mirror(variant, forward_only)
-            } else {
-                self.delete_synced_session(variant, forward_only)
-            };
+            // #12886: never discard a local outcome — a gate-busy /
+            // mirror-write refusal must surface.
+            let next = self.delete_synced(variant, mode, forward_only);
             if next.keeps_caller_rows() || next.mirror_delete_failed() {
                 outcome = next;
             }
         }
         outcome
+    }
+
+    /// #17133: the ONE synced-delete entry. `mode` carries the whole
+    /// (peer x strict-mirror x scoped) selection; every caller — exact
+    /// delete, tunnel-variant purge, helper-local purge — goes through
+    /// here so a new delete qualifier is threaded in exactly one place.
+    ///
+    /// #9714 (peer mode): a delete sent on behalf of the PEER
+    /// (`SessionSyncRequest.peer_delete`: the Go cluster-stale apply and
+    /// the #6368 install rollback) is refused for a key this node holds
+    /// as a LOCAL session whose owner redundancy group is locally
+    /// forwarding-active: under a dual-primary split both nodes forward
+    /// the flow, and the peer closing its copy must not remove this
+    /// node's kernel, DNAT and shared rows or send `DeleteSynced` to the
+    /// sibling replicas. This is the process-wide mirror of the worker's
+    /// #9048 refusal (`handle_delete_synced`), with the same predicate,
+    /// so it fires only in a dual-primary split.
+    ///
+    /// #10512 (scoped mode): the shared removal only proceeds when the
+    /// under-lock entry still carries the expected RT_FLOW identity (a
+    /// replacement installed after capture is refused, never torn down).
+    /// The mode is unconstructible from a zero identity, so the legacy
+    /// "0 disables the check" rule cannot leak through a scoped delete.
+    ///
+    /// Returns the OUTCOME. The handler answers a refusal in-band, so the
+    /// Go side keeps its own mirror and DNAT rows for the flow the helper
+    /// kept.
+    pub fn delete_synced(
+        &self,
+        key: SessionKey,
+        mode: SyncedDeleteMode,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(
+            key,
+            0,
+            mode.peer,
+            forward_only,
+            None,
+            mode.strict_mirror,
+            mode.expected_id_u64(),
+            None,
+            None,
+        )
     }
 
     pub fn delete_synced_session(
@@ -1752,35 +1944,7 @@ impl crate::afxdp::ha::SessionDomain {
     ) -> SyncedDeleteOutcome {
         // Helper-local deletes (tunnel-remap purge, GC) are authoritative and
         // carry no peer install generation — apply unconditionally.
-        self.delete_synced_session_gen_marked(
-            key,
-            0,
-            false,
-            forward_only,
-            None,
-            false,
-            0,
-            None,
-            None,
-        )
-    }
-
-    pub(crate) fn delete_synced_session_mirror(
-        &self,
-        key: SessionKey,
-        forward_only: bool,
-    ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(
-            key,
-            0,
-            false,
-            forward_only,
-            None,
-            true,
-            0,
-            None,
-            None,
-        )
+        self.delete_synced(key, SyncedDeleteMode::LOCAL, forward_only)
     }
 
     /// #10512: one micro-batch match's SHARED-store conditional remove. The
@@ -1947,75 +2111,6 @@ impl crate::afxdp::ha::SessionDomain {
         }
     }
 
-    /// #9714: a delete sent on behalf of the PEER (`SessionSyncRequest.peer_delete`:
-    /// the Go cluster-stale apply and the #6368 install rollback). It is refused for
-    /// a key this node holds as a LOCAL session whose owner redundancy group is
-    /// locally forwarding-active: under a dual-primary split both nodes forward the
-    /// flow, and the peer closing its copy must not remove this node's kernel,
-    /// DNAT and shared rows or send `DeleteSynced` to the sibling replicas. This is
-    /// the process-wide mirror of the worker's #9048 refusal
-    /// (`handle_delete_synced`), with the same predicate, so it fires only in a
-    /// dual-primary split. Otherwise, and for every authoritative delete, it
-    /// behaves exactly as `delete_synced_session`.
-    ///
-    /// Returns the OUTCOME. The handler answers a refusal in-band, so the Go side
-    /// keeps its own mirror and DNAT rows for the flow the helper kept.
-    pub fn delete_peer_synced_session(
-        &self,
-        key: SessionKey,
-        forward_only: bool,
-    ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(
-            key,
-            0,
-            true,
-            forward_only,
-            None,
-            false,
-            0,
-            None,
-            None,
-        )
-    }
-
-    pub(crate) fn delete_peer_synced_session_mirror(
-        &self,
-        key: SessionKey,
-        forward_only: bool,
-    ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(key, 0, true, forward_only, None, true, 0, None, None)
-    }
-
-    /// #10512 scoped HA peer delete: like
-    /// [`Self::delete_peer_synced_session_mirror`], but the shared removal
-    /// only proceeds when the under-lock entry still carries the expected
-    /// RT_FLOW identity (a replacement installed after capture is
-    /// refused, never torn down).
-    pub(crate) fn delete_peer_synced_session_mirror_scoped(
-        &self,
-        key: SessionKey,
-        forward_only: bool,
-        expected_id: u64,
-    ) -> SyncedDeleteOutcome {
-        // Fail closed: zero is identity-missing (plan §2.1), never an
-        // unconditional delete. The callee treats 0 as "no check" for
-        // legacy callers; this scoped entry point must not inherit that.
-        if expected_id == 0 {
-            return SyncedDeleteOutcome::RefusedIdentity;
-        }
-        self.delete_synced_session_gen_marked(
-            key,
-            0,
-            true,
-            forward_only,
-            None,
-            true,
-            expected_id,
-            None,
-            None,
-        )
-    }
-
     /// #2170 delete-side guard (belt-and-suspenders for any helper-side delete
     /// that carries a peer install generation): refuse to remove a stored
     /// entry whose generation is strictly NEWER than the delete's, so a stale
@@ -2024,9 +2119,17 @@ impl crate::afxdp::ha::SessionDomain {
     /// (deleteClusterSynced*) — that short-circuits both the BPF map delete and
     /// this helper path, so the cluster-delete path never reaches here with a
     /// non-zero delete_gen today; the seam exists for future helper-originated
-    /// 0, falls back to unconditional delete (rolling-upgrade safe).
-    pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64, forward_only: bool) {
-        let _ = self.delete_synced_session_gen_marked(
+    /// generation-aware deletes. A `delete_gen` of 0 falls back to an
+    /// unconditional delete (rolling-upgrade safe).
+    ///
+    /// Returns the outcome (#17144): a refusal must not be read as an apply.
+    pub fn delete_synced_session_gen(
+        &self,
+        key: SessionKey,
+        delete_gen: u64,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(
             key,
             delete_gen,
             false,
@@ -2036,7 +2139,7 @@ impl crate::afxdp::ha::SessionDomain {
             0,
             None,
             None,
-        );
+        )
     }
 
     /// Retire a synthesized reverse only while it still identifies the forward
@@ -2116,7 +2219,7 @@ impl crate::afxdp::ha::SessionDomain {
         let candidate_entry = lock_shared_recover(&self.sessions.synced)
             .get(&key)
             .cloned();
-        let delete_reverse = !forward_only;
+        let _delete_reverse = !forward_only;
         if let Some(entry) = candidate_entry.as_ref()
             && entry.generation != 0
             && delete_gen != 0
@@ -2320,7 +2423,7 @@ impl crate::afxdp::ha::SessionDomain {
         };
 
         let mut mirror_delete_ok = true;
-        let mut reverse_key = if !forward_only {
+        let reverse_key = if !forward_only {
             removed_entry.as_ref().and_then(|entry| {
                 (!entry.metadata.is_reverse)
                     .then(|| reverse_session_key(&entry.key, entry.decision.nat))
@@ -2790,6 +2893,7 @@ impl crate::afxdp::ha::SessionDomain {
 
 #[cfg(test)]
 mod rejected_mirror_reservation_10790_tests {
+    #![allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
 

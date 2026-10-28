@@ -1,5 +1,6 @@
 use super::*;
 
+
 /// Compute IP header checksum delta from NAT IP rewrites.
 /// Returns a 16-bit value that can be added to `!old_csum` along with
 /// the TTL delta (`0x0100`) to produce the new checksum.

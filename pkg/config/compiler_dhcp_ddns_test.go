@@ -54,10 +54,12 @@ func TestDHCPDDNSHierarchicalAndFlatSetCompileEqually(t *testing.T) {
 		HostnameSource: "fqdn",
 		ConflictPolicy: "strict-fail",
 		Backend:        "rfc2136",
-		UpdateServer:   "192.0.2.53",
-		TSIGKeyName:    "xpf-key",
-		TSIGAlgorithm:  "hmac-sha256",
-		TSIGSecret:     NewSecret("c2VjcmV0"),
+		RFC2136Endpoint: RFC2136Endpoint{
+			UpdateServer: "192.0.2.53",
+			TSIGKeyName: "xpf-key",
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret: NewSecret("c2VjcmV0"),
+		},
 	}
 	if *df != *want {
 		t.Fatalf("flat-set DDNS mismatch:\n got %+v\nwant %+v", *df, *want)
@@ -202,10 +204,12 @@ func TestDHCPDDNSSingleFamilyAppliesToBoth(t *testing.T) {
 
 func TestDHCPDDNSStringRedactsTSIGSecret(t *testing.T) {
 	d := &DHCPDynamicDNSConfig{
-		Enabled:       true,
-		TSIGKeyName:   "k",
-		TSIGAlgorithm: "hmac-sha256",
-		TSIGSecret:    NewSecret("TOPSECRET-base64=="),
+		Enabled: true,
+		RFC2136Endpoint: RFC2136Endpoint{
+			TSIGKeyName: "k",
+			TSIGAlgorithm: "hmac-sha256",
+			TSIGSecret: NewSecret("TOPSECRET-base64=="),
+		},
 	}
 	s := d.String()
 	if strings.Contains(s, "TOPSECRET") {

@@ -1039,7 +1039,7 @@ fn v6_leak_target_preserves_local_delivery_9955() {
 /// Pre-fix, both shapes regressed to `MissingNeighbor` aimed at the
 /// firewall's own address while `ctl_no_snat` stayed `LocalDelivery`.
 /// RED on revert of the FIB interface-NAT ownership check.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn snapshot_12086_leak_parity(
     lan_ri: &str,
     wan_ri: &str,

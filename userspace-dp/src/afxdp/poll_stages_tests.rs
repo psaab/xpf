@@ -3519,8 +3519,9 @@ fn alarm_without_drop_flood_tallies_zone_alarms_not_drops_7086() {
     flush_recorded_flood_counters(
         &drop_fwd.flood_counter_store,
         &drop_fwd.flood_counter_slot_map,
+        &drop_fwd.flood_counter_caches,
     );
-    let drop_rows = drop_fwd.flood_counter_store.snapshot();
+    let drop_rows = crate::afxdp::flood_counters::flood_counter_snapshot(&drop_fwd.flood_counter_store);
     assert_eq!(
         drop_rows.len(),
         1,
@@ -3531,9 +3532,7 @@ fn alarm_without_drop_flood_tallies_zone_alarms_not_drops_7086() {
         "control: both suppressible drops are attributed to the ingress zone"
     );
     assert!(
-        drop_fwd
-            .flood_counter_store
-            .alarm_zones_for_test()
+        crate::afxdp::flood_counters::flood_alarm_zones_for_test(&drop_fwd.flood_counter_store)
             .is_empty(),
         "control: a DROPPING zone raises no alarms, so the alarm triple must \
          stay empty — the two arms are separate tallies, not one renamed"
@@ -3559,12 +3558,13 @@ fn alarm_without_drop_flood_tallies_zone_alarms_not_drops_7086() {
     flush_recorded_flood_counters(
         &alarm_fwd.flood_counter_store,
         &alarm_fwd.flood_counter_slot_map,
+        &alarm_fwd.flood_counter_caches,
     );
 
     // The reported gap: before #7086 this zone had NOTHING published, so
     // ReadFloodCounters returned ErrCounterNotPopulated and every surface
     // rendered "the zone has recorded no flood events" during a live flood.
-    let alarm_rows = alarm_fwd.flood_counter_store.alarm_zones_for_test();
+    let alarm_rows = crate::afxdp::flood_counters::flood_alarm_zones_for_test(&alarm_fwd.flood_counter_store);
     assert_eq!(
         alarm_rows.len(),
         1,
@@ -3578,7 +3578,7 @@ fn alarm_without_drop_flood_tallies_zone_alarms_not_drops_7086() {
         "both alarms must land in the UDP family of the alarming zone"
     );
     assert!(
-        alarm_fwd.flood_counter_store.snapshot().is_empty(),
+        crate::afxdp::flood_counters::flood_counter_snapshot(&alarm_fwd.flood_counter_store).is_empty(),
         "an ALARMING zone dropped nothing, so the DROP triple must stay \
          empty. Feeding the alarm arm into record_zone_flood_drop — the \
          obvious fix #7086 rejects — reds here: it would make a counter \
@@ -7218,7 +7218,7 @@ fn tiny_first_fragment_dropped_by_live_screen_stage_16007() {
 /// Build the smallest WorkerContext needed by the screen stages over
 /// `forwarding`, with an event stream whose payloads the caller drains
 /// through the returned receiver.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn screen_test_ctx<'a>(
     forwarding: &'a ForwardingState,
     ident: &'a BindingIdentity,

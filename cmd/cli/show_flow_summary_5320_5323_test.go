@@ -103,7 +103,7 @@ func TestShowSessionSummaryPeerUnreachableWarning(t *testing.T) {
 	}}}
 
 	out := captureStdout(t, func() {
-		if err := c.showSessionSummary(); err != nil {
+		if err := c.showSessionSummary(&pb.GetSessionSummaryRequest{IncludePeer: true}); err != nil {
 			t.Fatalf("showSessionSummary: %v", err)
 		}
 	})
@@ -127,7 +127,7 @@ func TestShowSessionSummaryNoWarningWhenOK(t *testing.T) {
 		PeerStatus:  pb.PeerFetchStatus_PEER_FETCH_STATUS_NOT_APPLICABLE,
 	}}}
 	out := captureStdout(t, func() {
-		if err := c.showSessionSummary(); err != nil {
+		if err := c.showSessionSummary(&pb.GetSessionSummaryRequest{IncludePeer: true}); err != nil {
 			t.Fatalf("showSessionSummary: %v", err)
 		}
 	})

@@ -37,7 +37,7 @@ fn iface_rules() -> Vec<SourceNatRule> {
 
 /// One admission through the real entry point. Every argument the #6751 mint
 /// reads is a parameter, so a test can vary exactly one axis at a time.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn admit(
     reg: &InterfaceNatAllocators,
     rules: &[SourceNatRule],

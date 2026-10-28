@@ -1716,7 +1716,7 @@ def main():
         # refuses any stray file there, so the deb must stage outside `dist/`.
         deb_dir = os.path.join(ROOT, "dist-deb")
         if not a.skip_build:
-            info("building xpf .deb (xpfd, cli, xpf-userspace-dp -> staged)...")
+            info("building xpf .deb (xpfd, cli, xpf-userspace-dp, xpf-day0-config -> staged)...")
             run(["make", "-C", ROOT, "deb"])
             # Recheck the source observation itself. DEB_VERSION selects the
             # requested package identity before build; it must not override a

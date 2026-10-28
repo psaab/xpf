@@ -255,7 +255,6 @@ new_forwarding: &ForwardingState,) -> FastSet<u32> {
 /// wire, so the sync-derived and unbound predicates are required in addition
 /// to the zone-set test. The existing terminal delete owns pair expansion,
 /// NAT release, BPF/shared-map cleanup, and HA delete propagation.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn purge_sessions_with_removed_zone_ids(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
 shared: SharedSessionRefs<'_>,
@@ -421,7 +420,6 @@ new_policy: &crate::policy::PolicyState,) -> Option<String> {
 /// input-filter rotation purge uses: NAT release, BPF/conntrack aliases,
 /// shared HA maps, cross-worker `DeleteSynced`, and a close delta the daemon
 /// turns into an HA peer delete. Returns the number of forward sessions purged.
-#[allow(clippy::too_many_arguments)]
 pub(in crate::afxdp) fn purge_sessions_bound_to_deleted_first_policy(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
 shared: SharedSessionRefs<'_>,
@@ -532,7 +530,7 @@ pub(crate) fn publish_worker_session_map_entry(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn delete_terminal_filtered_session(sessions: &mut SessionTable,
 session_map: SteeringMap<'_>,
 shared: SharedSessionRefs<'_>,
@@ -615,7 +613,7 @@ worker_id: u32,) {
 /// reverse entry). Called once per direction by `delete_terminal_filtered_session`
 /// so a translated LocalDelivery terminal hit performs the SAME full-pair
 /// teardown the idle reap and input-filter rotation purge do.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn delete_terminal_half(
     worker_id: u32,
     sessions: &mut SessionTable,

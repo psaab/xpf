@@ -248,6 +248,11 @@ fn endpoint_attachment_valid_rejects_mode_flip() {
         .get_mut(&1)
         .expect("fixture endpoint")
         .mode = "wireguard".to_string();
+    state
+        .tunnel_endpoints
+        .get_mut(&1)
+        .expect("fixture endpoint")
+        .kind = crate::afxdp::TunnelKind::WireGuard;
     assert!(
         !endpoint_attachment_valid(&state, 1, 362, "gr-0-0-0"),
         "same-id mode flip must park — the #1873 owner check cannot \
@@ -1091,6 +1096,11 @@ fn tunnel_tcp_mss_wireguard_uses_wg_overhead_not_gre() {
         .get_mut(&1)
         .expect("fixture endpoint")
         .mode = "wireguard".to_string();
+    state
+        .tunnel_endpoints
+        .get_mut(&1)
+        .expect("fixture endpoint")
+        .kind = crate::afxdp::TunnelKind::WireGuard;
 
     let wg_mss = tunnel_tcp_mss(&state, &decision, inner_family);
     assert!(wg_mss > 0, "WG branch must produce a clamp value");
@@ -1180,6 +1190,11 @@ fn tunnel_tcp_mss_wireguard_caps_inner_budget_by_route_mtu_11687() {
         .get_mut(&1)
         .expect("fixture endpoint")
         .mode = "wireguard".to_string();
+    state
+        .tunnel_endpoints
+        .get_mut(&1)
+        .expect("fixture endpoint")
+        .kind = crate::afxdp::TunnelKind::WireGuard;
     let mut decision = SessionDecision {
         resolution: gre_encap_resolution(),
         nat: NatDecision::default(),
@@ -1291,6 +1306,11 @@ fn select_tcp_mss_wg_all_tcp_caps_mtu_derived_value_14664() {
         .get_mut(&1)
         .expect("fixture endpoint")
         .mode = "wireguard".to_string();
+    state
+        .tunnel_endpoints
+        .get_mut(&1)
+        .expect("fixture endpoint")
+        .kind = crate::afxdp::TunnelKind::WireGuard;
     state.tcp_mss_all_tcp = 1200;
     let decision = tunnel_decision();
     assert_eq!(

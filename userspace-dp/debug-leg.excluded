@@ -16,7 +16,6 @@ xpf-userspace-dp	afxdp::coordinator::neighbor_manager::monitor_join_tests_5165::
 xpf-userspace-dp	afxdp::coordinator::neighbor_manager::monitor_join_tests_5165::stop_and_join_monitor_waits_for_thread	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::neighbor_manager::warmer_join_tests_6314::neighbor_warmer_joined_at_teardown_6314	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::neighbor_manager::warmer_join_tests_6314::stop_and_join_warmer_no_warmer_is_noop	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::reconcile::reset::reset_9956_tests::reset_binding_counters_clears_the_flowless_family_9956	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::reconcile::snapshot::slow_path_mtu_tests::apply_snapshot_wires_day2_preserved_mtu_reconcile	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::reconcile::snapshot::slow_path_mtu_tests::converged_trusted_lagging_delegated_recovers_bounded	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::reconcile::snapshot::slow_path_mtu_tests::day2_mtu_increase_reprograms_preserved_reinjector	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant

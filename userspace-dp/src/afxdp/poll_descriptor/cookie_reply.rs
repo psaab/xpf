@@ -38,7 +38,7 @@ pub(super) fn syn_cookie_challenge_is_session_miss(
 /// evaluation on the peer. LocalDelivery host admission remains caller-owned
 /// and is handled by `syn_cookie_host_admission`. Returning false suppresses
 /// only the synthesized ACK-RST.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn syn_cookie_final_admission(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,
@@ -80,7 +80,7 @@ pub(super) fn syn_cookie_final_admission(
 /// after policy, so a challenged SYN must not earn a SYN-ACK when any
 /// of them matches. `fence_dropped` is the caller's evaluation of
 /// those gates on the packet's composed decision.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn syn_cookie_final_admission_with_fence(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, crate::afxdp::types::HAGroupRuntime>,

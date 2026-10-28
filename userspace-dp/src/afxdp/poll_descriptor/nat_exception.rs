@@ -36,7 +36,7 @@ use super::*;
 /// [`source_nat_decision_with_holder`] directly and mints nothing.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn source_nat_decision_for_flow(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
@@ -73,7 +73,7 @@ pub(in crate::afxdp) fn source_nat_decision_for_flow(
 
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn source_nat_decision_with_holder(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
@@ -246,7 +246,7 @@ pub(super) enum ChallengeFence {
 /// #16537 O(1)-in-pool-size). Never enumerates pool addresses.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn syn_cookie_challenge_fence(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,

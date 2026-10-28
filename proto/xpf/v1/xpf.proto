@@ -76,6 +76,8 @@ service BpfrxService {
 
   // Tab completion
   rpc Complete(CompleteRequest) returns (CompleteResponse);
+  // Typed HA state for rolling / kernel-drain safety predicates (#17095).
+  rpc GetClusterHAState(GetClusterHAStateRequest) returns (GetClusterHAStateResponse);
 }
 
 // --- Config lifecycle messages ---
@@ -1648,4 +1650,87 @@ enum ZoneScreenDisposition {
   // The named profile is defined but enables no checks; the dataplane
   // substitutes conservative_default().
   ZONE_SCREEN_DISPOSITION_INERT = 3;
+}
+
+// --- Cluster HA state (#17095) ---
+//
+// GetClusterHAState is the typed channel for every rolling-upgrade and
+// kernel-drain safety predicate. Before #17095 those predicates scraped
+// `show chassis cluster information|status` text (22 parse/verdict
+// functions in pkg/upgrade/cluster_cli.go); a present-but-garbled value
+// collapsed to 0 and permitted a drain (#14991), and any operator-facing
+// rewording could abort or permit a roll. The text renderers now format
+// the SAME cluster.HAState struct this response carries (see
+// pkg/cluster/ha_state.go), so text and typed views cannot drift.
+//
+// Presence discipline (proto3 has no scalar presence without `optional`):
+// every gate input that distinguishes absent / zero / malformed in the
+// text world is an `optional` field or an enum with UNKNOWN = 0, exactly
+// like ZoneCounterAvailability (#6895). A new client talking to an old
+// server (fallback path, or Unimplemented) never reads an absent value
+// as a real zero; a new server talking to an old client simply has its
+// extra fields ignored (the skew test in pkg/upgrade).
+message GetClusterHAStateRequest {}
+
+// RGNodeState mirrors cluster.NodeState. UNKNOWN = 0 is the skew-safe
+// spelling: an absent/unknown state never equals PRIMARY or SECONDARY,
+// so drain/rejoin predicates fail closed on it.
+enum RGNodeState {
+  RG_NODE_STATE_UNKNOWN = 0;
+  RG_NODE_STATE_SECONDARY = 1;
+  RG_NODE_STATE_PRIMARY = 2;
+  RG_NODE_STATE_SECONDARY_HOLD = 3;
+  RG_NODE_STATE_LOST = 4;
+  RG_NODE_STATE_DISABLED = 5;
+}
+
+// ClusterRGState is one redundancy group's typed state for #17095.
+// peer_state is UNKNOWN when the peer is not alive or has not advertised
+// this group; takeover_ready already folds the takeover-hold window
+// (IsReadyForTakeover), matching the text renderer's contract.
+message ClusterRGState {
+  int32 id = 1;
+  RGNodeState local_state = 2;
+  RGNodeState peer_state = 3;
+  bool takeover_ready = 4;
+  repeated string takeover_reasons = 5; // empty when takeover_ready
+  bool transfer_ready = 6;
+  repeated string transfer_reasons = 7; // empty when transfer_ready
+  int32 weight = 8; // local effective weight (0 = ForceSecondary drain)
+  int32 failover_count = 9;
+  int32 local_priority = 10;
+  int32 peer_priority = 11;
+  repeated string monitor_failures = 12;
+}
+
+message GetClusterHAStateResponse {
+  int32 local_node_id = 1;
+  int32 cluster_id = 2;
+  // peer_alive is a real bool: false is the honest answer from any
+  // server that implements this RPC (an old server returns
+  // Unimplemented and the client takes the text fallback, below).
+  bool peer_alive = 3;
+  int32 peer_node_id = 4; // meaningful only when peer_alive
+  // sync_established: session/fabric sync link is up AND peer alive.
+  bool sync_established = 5;
+  // bulk_primed: inbound bulk session snapshot completed this epoch
+  // (#10261; never timeout-released).
+  bool bulk_primed = 6;
+  // HA protocol versions. optional so absent (peer not alive / old
+  // server field) is distinguishable from a real version value.
+  optional uint32 local_ha_protocol = 7;
+  optional uint32 peer_ha_protocol = 8;
+  // Peer session-sync wire version. optional + the explicit
+  // peer_session_sync_wire_present flag keep the three text-world
+  // states distinct: line absent (present=false), "unknown" (present
+  // via peer_alive render, value absent = peer predates #7990), and a
+  // real version. Malformed is unrepresentable.
+  optional uint32 peer_session_sync_wire = 9;
+  // session_sync_wire_present mirrors the text render: the server
+  // renders the peer wire line whenever the peer is alive, so this is
+  // true exactly when peer_alive. It exists so the typed verdict can
+  // keep the #7990 absent-line-refuses / unknown-permits distinction.
+  bool session_sync_wire_present = 10;
+  uint32 local_session_sync_wire = 11;
+  repeated ClusterRGState redundancy_groups = 12;
 }

@@ -6,8 +6,9 @@
 
 use crate::slowpath::SlowPathReinjector;
 use crate::slowpath_reinject_9506::{
-    decode_announce, decode_cancel, decode_submit_batch, encode_admit, encode_complete, encode_message,
-    AdmitDecision, ReinjectCore, MSG_ADMIT, MSG_ANNOUNCE, MSG_CANCEL, MSG_COMPLETE,
+    decode_announce, decode_cancel, decode_submit_batch_into_pool, decode_submit_batch_no_target,
+    encode_admit, encode_complete, encode_message, AdmitDecision, PooledSubmitDecode,
+    PooledSubmitFrame, ReinjectCore, MSG_ADMIT, MSG_ANNOUNCE, MSG_CANCEL, MSG_COMPLETE,
     MSG_SUBMIT_BATCH, SUBMIT_FLAG_DRY_RUN,
 };
 use arc_swap::ArcSwapOption;
@@ -124,6 +125,43 @@ pub(crate) fn serve_submit_conn(
     let running = Arc::new(AtomicBool::new(true));
     serve_submit_conn_with_running(stream, fallback_core, target, &running);
 }
+/// Submit one pooled row: dry-run rows are validated from their slab and
+/// released; other rows go to the pooled V1 submit (slab ownership moves
+/// to the transport on success).
+fn submit_pooled_row(
+    reinjector: &SlowPathReinjector,
+    pool: &crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool,
+    row: PooledSubmitFrame,
+    connection_id: u64,
+) -> AdmitDecision {
+    if row.flags & SUBMIT_FLAG_DRY_RUN != 0 {
+        let bytes = pool
+            .buffer(row.slab_id)
+            .map(|s| s[..row.bytes_len as usize].to_vec())
+            .unwrap_or_default();
+        pool.force_release(row.slab_id);
+        reinjector.validate_dry_run_frame(crate::slowpath_reinject_9506::SubmitFrame {
+            lease: row.lease,
+            flow_tag: row.flow_tag,
+            flags: row.flags,
+            origin: row.origin.clone(),
+            bytes,
+            snapshot_generation: row.snapshot_generation,
+            config_generation: row.config_generation,
+            fib_generation: row.fib_generation,
+            zone_id: row.zone_id,
+            if_id: row.if_id,
+            pmech_inventory_generation: row.pmech_inventory_generation,
+            pmech_inventory_fib_generation: row.pmech_inventory_fib_generation,
+            pmech_policy_identity: row.pmech_policy_identity,
+            deadline_mono_ns: row.deadline_mono_ns,
+            deadline_clock_id: row.deadline_clock_id,
+        })
+    } else {
+        reinjector.submit_ipsec_inner_v1_pooled(row, connection_id)
+    }
+}
+
 
 fn serve_submit_conn_with_running(
     mut stream: UnixStream,
@@ -176,29 +214,45 @@ fn serve_submit_conn_with_running(
                 );
             }
             MSG_SUBMIT_BATCH => {
-                let frames = match decode_submit_batch(&payload) {
-                    Ok(frames) => frames,
-                    Err(_) => break,
-                };
-                let decisions: Vec<AdmitDecision> = frames
-                    .iter()
-                    .map(|frame| {
-                        if frame.flags & SUBMIT_FLAG_DRY_RUN != 0 {
-                            if let Some(reinjector) = target_reinjector.as_ref() {
-                                reinjector.validate_dry_run_frame(frame.clone())
-                            } else {
-                                core.refuse_shutdown(frame)
-                            }
-                        } else if let Some(reinjector) = target_reinjector.as_ref() {
-                            reinjector.submit_adjudicated_frame_for_connection(
-                                frame.clone(),
-                                connection_id,
-                            )
-                        } else {
-                            core.refuse_shutdown(frame)
+                // Decode once into D11 slabs: packet bytes are owned by the
+                // pool, never materialized as a Vec and copied again.
+                let decisions: Vec<AdmitDecision> = if let Some(reinjector) =
+                    target_reinjector.as_ref()
+                {
+                    let pool = reinjector.ipsec_inner_transport().pool().clone();
+                    match decode_submit_batch_into_pool(&payload, &pool) {
+                        Ok(PooledSubmitDecode::Complete(pooled)) => pooled
+                            .into_iter()
+                            .map(|row| submit_pooled_row(reinjector, &pool, row, connection_id))
+                            .collect(),
+                        Ok(PooledSubmitDecode::SlabExhausted { decoded, undecoded }) => {
+                            let mut decisions: Vec<AdmitDecision> = decoded
+                                .into_iter()
+                                .map(|row: PooledSubmitFrame| {
+                                    let decision = core.refuse_full_pooled(&row);
+                                    pool.force_release(row.slab_id);
+                                    decision
+                                })
+                                .collect();
+                            decisions.extend(undecoded);
+                            decisions
                         }
-                    })
-                    .collect();
+                        Err(_) => break,
+                    }
+                } else {
+                    // No target: validate headers without a pool (a fresh
+                    // 512-slab pool per batch would churn ~33MB to refuse).
+                    match decode_submit_batch_no_target(&payload) {
+                        Ok(rows) => rows
+                            .into_iter()
+                            .map(|(row, flags)| {
+                                core.note_no_target_submit(flags);
+                                row
+                            })
+                            .collect(),
+                        Err(_) => break,
+                    }
+                };
                 let response = encode_message(MSG_ADMIT, &encode_admit(&decisions));
                 if stream.write_all(&response).is_err() {
                     break;
@@ -371,48 +425,27 @@ pub(crate) fn spawn_reinject_socket_servers(
     let submit_thread = thread::Builder::new()
         .name("xpf-reinject-submit".to_string())
         .spawn(move || {
-            let mut backoff = super::lifecycle::AcceptBackoff::new();
-            while submit_running.load(Ordering::Acquire) {
-                let decision = super::lifecycle::accept_step(
-                    submit_listener.accept(),
-                    Duration::from_millis(1),
-                    "reinject submit socket",
-                    &mut backoff,
-                    Instant::now(),
-                    true,
-                );
-                if let Some(line) = decision.log {
-                    eprintln!("xpf-userspace-dp: {line}");
-                }
-                match decision.step {
-                    super::lifecycle::AcceptStep::Serve((stream, _)) => {
-                        if let Err(err) =
-                            super::lifecycle::reject_unprivileged_peer("reinject submit", &stream)
-                        {
-                            eprintln!("xpf-userspace-dp: {err}");
-                            continue;
-                        }
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            serve_submit_conn_with_running(
-                                stream,
-                                &submit_core,
-                                &submit_target,
-                                &submit_running,
-                            );
-                        }))
-                        .unwrap_or_else(|_| {
-                            eprintln!(
-                                "xpf-userspace-dp: reinject submit connection panicked; connection dropped, accept loop continues (#15112)"
-                            );
-                        });
-                    }
-                    super::lifecycle::AcceptStep::Sleep(delay) => thread::sleep(delay),
-                    super::lifecycle::AcceptStep::Fail(msg) => {
-                        eprintln!("xpf-userspace-dp: {msg}");
-                        thread::sleep(super::lifecycle::AcceptBackoff::MAX);
-                    }
-                }
-            }
+            // #17123: the single accept loop (server/accept_loop.rs).
+            let _ = crate::server::accept_loop::run_accept_loop(
+                &submit_listener,
+                crate::server::accept_loop::AcceptLoopSpec {
+                    name: "reinject submit socket",
+                    poll: Duration::from_millis(1),
+                    retry_unclassified: true,
+                    peer_label: "reinject submit",
+                },
+                &submit_running,
+                crate::server::accept_loop::PanicPolicy::DropConnection,
+                |stream| {
+                    serve_submit_conn_with_running(
+                        stream,
+                        &submit_core,
+                        &submit_target,
+                        &submit_running,
+                    );
+                    Ok(())
+                },
+            );
         })
         .map_err(|e| format!("spawn reinject submit server: {e}"))?;
 
@@ -421,48 +454,29 @@ pub(crate) fn spawn_reinject_socket_servers(
     let complete_thread = thread::Builder::new()
         .name("xpf-reinject-complete".to_string())
         .spawn(move || {
-            let mut backoff = super::lifecycle::AcceptBackoff::new();
-            while complete_running.load(Ordering::Acquire) {
-                let decision = super::lifecycle::accept_step(
-                    complete_listener.accept(),
-                    Duration::from_millis(1),
-                    "reinject complete socket",
-                    &mut backoff,
-                    Instant::now(),
-                    true,
-                );
-                if let Some(line) = decision.log {
-                    eprintln!("xpf-userspace-dp: {line}");
-                }
-                match decision.step {
-                    super::lifecycle::AcceptStep::Serve((stream, _)) => {
-                        if let Err(err) =
-                            super::lifecycle::reject_unprivileged_peer("reinject complete", &stream)
-                        {
-                            eprintln!("xpf-userspace-dp: {err}");
-                            continue;
-                        }
-                        let run = complete_running.clone();
-                        let core = complete_core.clone();
-                        let target = target.clone();
-                        // One completion client is expected (Go pipeline). Serve
-                        // it inline so drain order remains globally serialized.
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            serve_complete_conn_with_target(stream, &core, Some(&target), &run);
-                        }))
-                        .unwrap_or_else(|_| {
-                            eprintln!(
-                                "xpf-userspace-dp: reinject complete connection panicked; connection dropped, accept loop continues (#15112)"
-                            );
-                        });
-                    }
-                    super::lifecycle::AcceptStep::Sleep(delay) => thread::sleep(delay),
-                    super::lifecycle::AcceptStep::Fail(msg) => {
-                        eprintln!("xpf-userspace-dp: {msg}");
-                        thread::sleep(super::lifecycle::AcceptBackoff::MAX);
-                    }
-                }
-            }
+            // #17123: the single accept loop (server/accept_loop.rs).
+            // One completion client is expected (Go pipeline). Serve it
+            // inline so drain order remains globally serialized.
+            let _ = crate::server::accept_loop::run_accept_loop(
+                &complete_listener,
+                crate::server::accept_loop::AcceptLoopSpec {
+                    name: "reinject complete socket",
+                    poll: Duration::from_millis(1),
+                    retry_unclassified: true,
+                    peer_label: "reinject complete",
+                },
+                &complete_running,
+                crate::server::accept_loop::PanicPolicy::DropConnection,
+                |stream| {
+                    serve_complete_conn_with_target(
+                        stream,
+                        &complete_core,
+                        Some(&target),
+                        &complete_running,
+                    );
+                    Ok(())
+                },
+            );
         })
         .map_err(|e| format!("spawn reinject completion server: {e}"))?;
 

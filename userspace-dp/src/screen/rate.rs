@@ -128,7 +128,6 @@ impl RateCounter {
 
     /// Reset counter (used in tests).
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(super) fn reset(&mut self) {
         self.count = 0;
         self.prev_count = 0;
@@ -282,7 +281,6 @@ impl TokenBucket {
 
     /// Reset (used in tests).
     #[cfg(test)]
-    #[allow(dead_code)]
     pub(super) fn reset(&mut self) {
         self.tokens_q = 0;
         self.last_refill_ns = 0;

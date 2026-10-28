@@ -767,7 +767,6 @@ pub(in crate::afxdp) fn ensure_ipsec_sa_monitor(coord: &mut Coordinator) {
 /// handle (`Some` when installed/already-present, `None` when the spawn failed)
 /// so the ordering/best-effort contract is directly unit-testable. Verbatim
 /// move of the pre-#6240 inline block.
-
 pub(in crate::afxdp) fn ensure_resolver(coord: &mut Coordinator) -> Option<Arc<NeighborResolver>> {
     // #1769: spawn the shared on-demand neighbor resolver BEFORE the
     // worker spawn loop so every worker captures a clone of the resolver

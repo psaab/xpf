@@ -656,4 +656,10 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 			"quarantined the daemon for a supervisor restart (#9900 F-094).",
 		nil, nil,
 	)
+	c.userspaceReinjectHandlerPanics = prometheus.NewDesc(
+		"xpf_userspace_reinject_handler_panics_total",
+		"Reinject handler panics contained per-connection; each one "+
+			"dropped one connection while the accept loop continued (#17123).",
+		nil, nil,
+	)
 }

@@ -553,6 +553,7 @@ var collectorDescUserspaceSession = []int{
 	xpfCollectorDescFieldIndex("userspaceWorkerCommandQueueShed"),
 	xpfCollectorDescFieldIndex("userspaceServerStatePoisonRecoveries"),
 	xpfCollectorDescFieldIndex("userspaceServerHandlerPanics"),
+	xpfCollectorDescFieldIndex("userspaceReinjectHandlerPanics"),
 }
 
 // initUserspaceStatus13280Descriptors (metrics_descriptors_userspace_status_13280.go).
@@ -572,6 +573,7 @@ var collectorDescUserspaceStatus13280 = []int{
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteRefusedIdentity"),
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteDroppedReleased"),
 	xpfCollectorDescFieldIndex("userspaceTunnelPurgeReservationsReleased"),
+	xpfCollectorDescFieldIndex("userspaceTunnelPurgeDeleteRefused"),
 	xpfCollectorDescFieldIndex("userspaceSyncedReverseRederived"),
 	xpfCollectorDescFieldIndex("userspacePeerDeleteRefusedLocalOwned"),
 	xpfCollectorDescFieldIndex("userspaceSessionDeleteReplicaDropped"),
@@ -642,6 +644,7 @@ var collectorDescUserspaceDrops = []int{
 	xpfCollectorDescFieldIndex("userspaceZoneGateNoGeneration"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerParseDrops"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerEcnIllegalDrops"),
+	xpfCollectorDescFieldIndex("userspaceIpsecInnerNoroute"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerWorkerQueueFull"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerVerdictQueueFull"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerVerdictQueueContended"),

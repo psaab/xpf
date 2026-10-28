@@ -108,6 +108,136 @@ pub(crate) struct LocalTunnelSourceEntry {
 /// (endpoint removed / engine identity changed / attachment changed),
 /// the defer-branch snapshot prune, and `stop_inner` — never by the
 /// finished sweep.
+/// #17089: the single capture of every by-value input a WG control
+/// thread is spawned with. Built ONLY by `Coordinator::wg_spawn_inputs`;
+/// `WgControlEntry` stores it as `spawned`, the spawn moves its fields
+/// into `wg_control_loop`, and the stale prune recomputes it and
+/// compares whole-value — so a new spawn-time input needs exactly one
+/// new field here (plus its use in the loop), never a new `spawned_*`
+/// entry field, a second literal assignment, and a hand-written prune
+/// arm. The five lockstep additions behind this struct are #2921
+/// (`outer_mtu`), #5291 (`per_peer_outer_mtu`), #9521
+/// (`kernel_transport`), #10196 (`outer_bind_device`) and #14675
+/// (`peer_config`); the first and last shipped as stale-capture defects
+/// because a capture existed without a matching prune arm.
+///
+/// Equality is field-wise with `Arc::ptr_eq` for the engine: two
+/// captures of the same live engine are equal, a rebuilt engine is
+/// not — the `engine_changed` semantics the old `engine_ptr: usize`
+/// encoded, without the ABA exposure of a bare address held by a
+/// tombstone that no longer holds the Arc.
+#[derive(Clone)]
+pub(crate) struct WgSpawnInputs {
+    /// The engine the thread drives. Identity-compared (`ptr_eq`).
+    pub(in crate::afxdp) engine: std::sync::Arc<crate::afxdp::wg::WgEngine>,
+    /// TUN attachment (#1866 D5): logical ifindex + resolved tunnel
+    /// name. Drift restarts the thread on the new TUN even when the
+    /// crypto identity is unchanged.
+    pub(in crate::afxdp) ifindex: i32,
+    pub(in crate::afxdp) tunnel_name: String,
+    /// UDP listen port the thread binds. Covered by the engine identity
+    /// today (`wg_identity_unchanged` compares it), captured here so
+    /// the prune no longer relies on that implicit coupling.
+    pub(in crate::afxdp) listen_port: u16,
+    /// #2921: resolved OUTER (underlay) MTU handed to the TUN-origin
+    /// egress guard. The WG identity tuple ignores the transport
+    /// table / egress MTU, so a same-engine underlay change must
+    /// restart the thread to keep the local path on the same MTU the
+    /// transit path re-resolves per snapshot.
+    pub(in crate::afxdp) outer_mtu: usize,
+    /// #5291: `outer_mtu` resolved PER PEER (keyed by pubkey). Only
+    /// peers with a configured endpoint appear; absence falls back to
+    /// `outer_mtu` in the loop. A non-first peer's MTU change moves no
+    /// scalar, so the whole map is compared.
+    pub(in crate::afxdp) per_peer_outer_mtu: std::collections::HashMap<[u8; 32], usize>,
+    /// #10196: VRF master (`SO_BINDTODEVICE`) captured by the socket at
+    /// spawn. A transport-table move between default and named VRFs
+    /// restarts the thread even on an unchanged engine.
+    pub(in crate::afxdp) outer_bind_device: Option<String>,
+    /// #9521/#9587: whether the thread may write kernel-path transport
+    /// plaintext to its TUN, decided from the listen port and the
+    /// snapshot's steered listen-port set.
+    pub(in crate::afxdp) kernel_transport: WgKernelTransport,
+    /// #14675: peer configuration captured at spawn (pubkey, configured
+    /// literal endpoint, authored DNS hostname per peer, pubkey-sorted).
+    /// Kept in the capture per the #17089 acceptance even though
+    /// #15950 makes `wg_peers_eq` compare `endpoint_host` (so a peer
+    /// change now also rebuilds the engine — see #17094 for the
+    /// reachability question): dropping it would silently change the
+    /// prune's reason precedence and lose the capture if engine reuse
+    /// ever widens again.
+    pub(in crate::afxdp) peer_config: Vec<WgPeerSpawnConfig>,
+    /// #7158: `(pubkey, authored host:port)` for DNS-hostname peers;
+    /// the resolver's targets, captured once at spawn.
+    pub(in crate::afxdp) endpoint_hosts: Vec<([u8; 32], String)>,
+    /// #15101: address family of the interface's literal endpoints
+    /// (`Some(true)` = IPv6, `None` = hostname-only); the resolver's
+    /// A/AAAA tie-break, captured once at spawn.
+    pub(in crate::afxdp) preferred_v6: Option<bool>,
+}
+
+impl PartialEq for WgSpawnInputs {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.engine, &other.engine)
+            && self.ifindex == other.ifindex
+            && self.tunnel_name == other.tunnel_name
+            && self.listen_port == other.listen_port
+            && self.outer_mtu == other.outer_mtu
+            && self.per_peer_outer_mtu == other.per_peer_outer_mtu
+            && self.outer_bind_device == other.outer_bind_device
+            && self.kernel_transport == other.kernel_transport
+            && self.peer_config == other.peer_config
+            && self.endpoint_hosts == other.endpoint_hosts
+            && self.preferred_v6 == other.preferred_v6
+    }
+}
+
+impl WgSpawnInputs {
+    /// #17089: operator-visible stale reason for a capture that differs
+    /// from the spawned one: the FIRST differing field, in the exact
+    /// precedence and vocabulary the pre-#17089 six-arm prune ladder
+    /// produced (`engine_changed`, `attachment_changed`,
+    /// `outer_mtu_changed`, `outer_bind_device_changed`,
+    /// `kernel_transport_changed`, `peer_config_changed`). Fields that
+    /// previously had no arm (listen_port, endpoint_hosts,
+    /// preferred_v6 — changes there rebuild the engine, so they are
+    /// shadowed by `engine_changed` in practice) report after the
+    /// historically-armed fields. Call only when `self != spawned`.
+    pub(in crate::afxdp) fn diff_reason(&self, spawned: &Self) -> &'static str {
+        if !std::sync::Arc::ptr_eq(&self.engine, &spawned.engine) {
+            "engine_changed"
+        } else if self.ifindex != spawned.ifindex || self.tunnel_name != spawned.tunnel_name {
+            "attachment_changed"
+        } else if self.outer_mtu != spawned.outer_mtu
+            || self.per_peer_outer_mtu != spawned.per_peer_outer_mtu
+        {
+            "outer_mtu_changed"
+        } else if self.outer_bind_device != spawned.outer_bind_device {
+            "outer_bind_device_changed"
+        } else if self.kernel_transport != spawned.kernel_transport {
+            "kernel_transport_changed"
+        } else if self.peer_config != spawned.peer_config {
+            "peer_config_changed"
+        } else if self.listen_port != spawned.listen_port {
+            "listen_port_changed"
+        } else if self.endpoint_hosts != spawned.endpoint_hosts {
+            "endpoint_hosts_changed"
+        } else {
+            "preferred_v6_changed"
+        }
+    }
+}
+
+/// #1866: lifecycle entry for one WG control thread, keyed by
+/// tunnel_endpoint_id in `Coordinator::wg_control_threads`.
+///
+/// An entry whose `handle` is `None` is a TOMBSTONE: the thread exited
+/// (bind/TUN failure, panic, clean stop) but the entry is retained so
+/// the respawn backoff (`last_spawn_attempt_ns`) and the recorded
+/// identity/attachment survive until the endpoint actually leaves the
+/// desired set. Entries are removed ONLY by the apply-time stale prune
+/// (endpoint removed / spawn inputs changed), the defer-branch snapshot
+/// prune, and `stop_inner` — never by the finished sweep.
 pub(crate) struct WgControlEntry {
     /// #7936: this tunnel's endpoint-resolver telemetry, owned HERE rather
     /// than by the resolver, which is a local of the control thread and dies
@@ -124,59 +254,59 @@ pub(crate) struct WgControlEntry {
     /// local-delivery packets are queued here and written to the persistent
     /// wgN TUN by that thread; publication is restricted to live handles.
     pub(in crate::afxdp) delivery_tx: Option<LocalTunnelDelivery>,
-    /// Address of the `Arc<WgEngine>` the thread was last spawned with.
-    /// Kept outside `handle` so tombstones retain identity: the
-    /// apply-time stale prune detects identity changes on tombstones
-    /// too (removal deliberately resets the backoff — a fresh identity
-    /// deserves an immediate attempt).
-    pub(in crate::afxdp) engine_ptr: usize,
-    /// TUN attachment captured at spawn (#1866 D5): logical ifindex +
-    /// resolved tunnel name. Attachment drift is a stale condition —
-    /// engine-Arc identity alone misses an interface rename with an
-    /// unchanged WG crypto identity.
-    pub(in crate::afxdp) spawned_ifindex: i32,
-    pub(in crate::afxdp) spawned_tunnel_name: String,
-    /// #2921: the resolved OUTER (underlay) MTU captured at spawn and
-    /// handed by value into `wg_control_loop` (the TUN-origin egress
-    /// MTU guard). The WG identity tuple (`wg_identity_unchanged`)
-    /// ignores the transport table, the resolved egress ifindex, and
-    /// the egress MTU, so a same-engine refresh after an underlay
-    /// route/table/MTU change reuses the engine Arc and would otherwise
-    /// keep this stale value forever — the transit/forwarded path
-    /// re-resolves the underlay per-snapshot while the local TUN path
-    /// kept the spawn-time capture. The apply-time stale prune compares
-    /// this against a fresh `resolve_wg_outer_mtu` and restarts the
-    /// thread when they diverge, so both packet origins enforce the
-    /// SAME current outer MTU.
-    pub(in crate::afxdp) spawned_outer_mtu: usize,
-    /// #10196: the VRF master captured by the control-thread socket at
-    /// spawn. An unchanged WireGuard engine can still require a restart when
-    /// the effective transport table moves between default and named VRFs.
-    pub(in crate::afxdp) spawned_outer_bind_device: Option<String>,
-    /// #5291: the resolved OUTER (underlay) egress MTU captured at spawn
-    /// PER PEER (keyed by peer public key), handed by value into the
-    /// `wg_control_loop` alongside `spawned_outer_mtu`. The TUN-origin
-    /// egress guard selects the peer that owns the inner destination's
-    /// AllowedIPs and must size that peer's encap against ITS OWN
-    /// underlay MTU — the AF_XDP transit path already resolves per-peer
-    /// (#2845/#3219). Only peers with a CONFIGURED endpoint (resolvable
-    /// while `forwarding` is reachable) appear here; a peer absent from the
-    /// map falls back to `spawned_outer_mtu`. The apply-time stale prune
-    /// compares this against a fresh `resolve_wg_per_peer_outer_mtus`
-    /// (alongside the scalar) and restarts the thread when they diverge, so a
-    /// NON-first peer's underlay MTU change — which moves no scalar — still
-    /// refreshes the TUN-origin guard.
-    pub(in crate::afxdp) spawned_per_peer_outer_mtu: std::collections::HashMap<[u8; 32], usize>,
+    /// #17089: the spawn-time capture this entry's thread (or failed
+    /// spawn attempt) was created with. Kept outside `handle` so
+    /// tombstones retain it: the apply-time stale prune compares a
+    /// fresh `wg_spawn_inputs` against it on tombstones too (removal
+    /// deliberately resets the backoff — a fresh identity deserves an
+    /// immediate attempt). `None` only for hand-built test entries
+    /// that never went through a spawn.
+    pub(in crate::afxdp) spawned: Option<WgSpawnInputs>,
     /// Stamped at EVERY spawn attempt (success or failure), before the
     /// outcome is known. Tombstone-respawn backoff keys off this.
     pub(in crate::afxdp) last_spawn_attempt_ns: u64,
-    /// #9521: whether this thread may write kernel-path transport plaintext to
-    /// its wgN TUN, decided at spawn from the endpoint's listen port and the
-    /// snapshot's steered listen-port set (#9587). The apply-time stale prune
-    /// restarts the thread when a later snapshot changes the answer, so any
-    /// set-membership change (tunnel added/removed, port moved in or out of
-    /// the steered set) takes effect without a restart.
-    pub(in crate::afxdp) spawned_kernel_transport: WgKernelTransport,
+}
+
+impl WgControlEntry {
+    /// #17089: ifindex of the stored spawn capture (0 for a hand-built
+    /// entry with no capture — test fixtures only).
+    pub(in crate::afxdp) fn spawned_ifindex(&self) -> i32 {
+        self.spawned.as_ref().map_or(0, |s| s.ifindex)
+    }
+
+    /// #17089: tunnel name of the stored spawn capture ("" for a
+    /// hand-built entry with no capture — test fixtures only).
+    pub(in crate::afxdp) fn spawned_tunnel_name(&self) -> &str {
+        self.spawned.as_ref().map_or("", |s| s.tunnel_name.as_str())
+    }
+
+    /// #17089: `Arc::ptr_eq` identity of the stored spawn capture's
+    /// engine against `engine` (false with no capture).
+    pub(in crate::afxdp) fn spawned_engine_is(
+        &self,
+        engine: &std::sync::Arc<crate::afxdp::wg::WgEngine>,
+    ) -> bool {
+        self.spawned
+            .as_ref()
+            .is_some_and(|s| std::sync::Arc::ptr_eq(&s.engine, engine))
+    }
+}
+
+/// #14675: one peer's spawn-time configuration capture, one field of
+/// `WgSpawnInputs` (#17089): public key, configured literal endpoint,
+/// and authored DNS hostname endpoint. The control thread seeds
+/// `peer_pubkeys` / `effective_endpoints` from the engine and the
+/// resolver's `endpoint_hosts` from the forwarding state exactly once
+/// at spawn. Since #15950, `wg_peers_eq` compares `endpoint_host`, so
+/// a hostname-only change rebuilds the engine and the prune's
+/// `engine_changed` reason fires first; the capture is retained (see
+/// the `peer_config` field doc and #17094) so the value the thread was
+/// actually spawned with stays recorded and comparable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WgPeerSpawnConfig {
+    pub(in crate::afxdp) pubkey: [u8; 32],
+    pub(in crate::afxdp) endpoint: Option<std::net::SocketAddr>,
+    pub(in crate::afxdp) endpoint_host: Option<String>,
 }
 
 /// #9587: the bound on the steered WireGuard listen-port set, shared by the
@@ -956,7 +1086,7 @@ impl std::ops::Deref for WorkerCommandQueues {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn empty_worker_commands_by_id() -> &'static WorkerCommandQueues {
     static EMPTY: std::sync::LazyLock<WorkerCommandQueues> =
         std::sync::LazyLock::new(|| WorkerCommandQueues::new(BTreeMap::new()));
@@ -966,20 +1096,13 @@ pub(in crate::afxdp) fn empty_worker_commands_by_id() -> &'static WorkerCommandQ
 #[derive(Default)]
 pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) rx: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) tx: u64,
     pub(in crate::afxdp) forward: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) local: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) session_hit: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) session_miss: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) session_create: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) no_route: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) missing_neigh: u64,
     /// #5174: NAT64 MissingNeighbor fail-closed drops. Bumped when a PERMITTED
     /// NAT64 flow (IPv6 dst matching a Pref64) whose extracted-IPv4 next-hop is
@@ -987,26 +1110,21 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// a plain-forward session + buffering the untranslated IPv6 frame (which the
     /// same-family cold-path replay cannot translate). The flow recovers via the
     /// ForwardCandidate path once the IPv4 neighbor resolves.
-    #[allow(dead_code)]
     pub(in crate::afxdp) nat64_missing_neigh_drop: u64,
     /// #1651 B3: dead-host negative-cache fast-fail count. Bumped when a
     /// MissingNeighbor packet to a negatively-cached (un-expired,
     /// still-unresolved) dst is recycled without buffering.
-    #[allow(dead_code)]
     pub(in crate::afxdp) neg_neigh_fast_fail: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) policy_deny: u64,
     /// #3610/M07: host-inbound-traffic admission denies, split out of
     /// `policy_deny` so a control-plane host-inbound drop is not conflated with a
     /// transit security-policy deny in the periodic debug report.
-    #[allow(dead_code)]
     pub(in crate::afxdp) host_inbound_deny: u64,
     /// #10038: solicited TUN-origin replies admitted via the forward-companion
     /// exemption (host-inbound + junos-host NEW-session gates skipped on a
     /// reverse LocalDelivery HIT). Debug-only (no BatchCounters/prometheus
     /// mapping: the mapping cost buys nothing — operators verify via delivery,
     /// and abuse signal comes from the deny side, which still counts).
-    #[allow(dead_code)]
     pub(in crate::afxdp) solicited_tun_origin_exempt: u64,
     /// #7212: established sessions REVOKED by a static interface INPUT filter
     /// revalidation — the operator attached or tightened a purely static
@@ -1016,7 +1134,6 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// packet without revoking the session. Counted once per revoked session,
     /// not per dropped packet: the session is torn down on the first denied
     /// packet and every later packet of that 5-tuple takes the session-MISS path.
-    #[allow(dead_code)]
     pub(in crate::afxdp) filter_revoked_sessions: u64,
     /// #8356: established sessions revoked because the live ZONE POLICY denies
     /// the flow — the policy sibling of `filter_revoked_sessions` above. A
@@ -1045,17 +1162,12 @@ pub(in crate::afxdp) struct DebugPollCounters {
     /// `policy_deny` (a NEW flow at the session-miss path) and from
     /// `policy_revoked_sessions` (an owner's session its own policy no longer
     /// admits).
-    #[allow(dead_code)]
     pub(in crate::afxdp) foreign_authority_drops: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) ha_inactive: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) no_egress_binding: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) build_fail: u64,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17195: read only by DbgCounters::accumulate in the debug-log gated module; dead without debug-log, so expect fires if that module is removed or a non-gated reader appears"))]
     pub(in crate::afxdp) tx_err: u64,
-    #[allow(dead_code)]
     pub(in crate::afxdp) metadata_err: u64,
     pub(in crate::afxdp) disposition_other: u64,
     pub(in crate::afxdp) enqueue_ok: u64,
@@ -1069,10 +1181,10 @@ pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) nat_applied_snat: u64,
     pub(in crate::afxdp) nat_applied_dnat: u64,
     pub(in crate::afxdp) nat_applied_none: u64,
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17195: read only by DbgCounters::accumulate in the debug-log gated module; dead without debug-log, so expect fires if that module is removed or a non-gated reader appears"))]
     pub(in crate::afxdp) frame_build_none: u64,
     pub(in crate::afxdp) rx_tcp_rst: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(in crate::afxdp) tx_tcp_rst: u64,
     pub(in crate::afxdp) rx_bytes_total: u64,
     pub(in crate::afxdp) tx_bytes_total: u64,
@@ -1091,7 +1203,7 @@ pub(in crate::afxdp) struct DebugPollCounters {
     pub(in crate::afxdp) tx_max_frame: u32,
     pub(in crate::afxdp) seg_needed_but_none: u64,
     pub(in crate::afxdp) wan_return_hits: u64,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(in crate::afxdp) wan_return_misses: u64,
     pub(in crate::afxdp) rx_tcp_fin: u64,
     pub(in crate::afxdp) rx_tcp_synack: u64,

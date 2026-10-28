@@ -46,6 +46,74 @@ func compileDHCPRelayV6(node *Node, fo *ForwardingOptionsConfig, lenient bool, w
 	return nil
 }
 
+// dhcpRelayGroupInterfaces returns every interface an `interface` statement
+// of a dhcp-relay group names, in the shape both relay compilers read it:
+// the statement's own value keys (Keys[1:]) plus every child key of a braced
+// `interface { a; b; }` container, empty-filtered (#17205). It is the single
+// source of truth for that member list: compileDHCPRelay (v4) and
+// compileDHCPRelayV6Group9553 (v6) install from it, and
+// validateDHCPRelayDHCPv6AST judges exactly the members it returns, so the
+// gate can no longer disagree with either compiler about which tokens are
+// interfaces — the bracket/flat-set/display-set spellings that used to be
+// told apart by KeyBracketed provenance (which FormatSet does not carry)
+// all land in this one list.
+func dhcpRelayGroupInterfaces(prop *Node) []string {
+	if prop == nil {
+		return nil
+	}
+	var out []string
+	for _, value := range prop.Keys[1:] {
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	for _, child := range prop.Children {
+		if child == nil {
+			continue
+		}
+		for _, k := range child.Keys {
+			if k != "" {
+				out = append(out, k)
+			}
+		}
+	}
+	return out
+}
+
+// dhcpRelayInterfaceMemberValid reports whether one member of
+// dhcpRelayGroupInterfaces is a plausible logical-interface reference.
+// A relay group names LOGICAL interfaces (`ge-0/0/0.0`, `reth0.0` — see
+// #9406): a member with a ".<unit>" suffix is valid only when its base
+// is interface-shaped (ValidateInterfaceName) and the suffix a valid
+// logical unit. A bare member must pass ValidateInterfaceName alone:
+// digit-less bare names such as `uplink` and `vrf-mgmt` are legal
+// interface names (validate_interface_name_6834_test.go census) and the
+// pre-#17205 gate accepted any single bare member, so a digit
+// requirement refuses strict configs that compile today. Packed
+// remainders (`interface ge-0/0/0.0 disable`) are NOT refused here —
+// `disable` is itself a legal bare name under this rule — but by the
+// position-aware refusal in checkInterface, which reuses the old
+// gate's mechanism: an unbracketed value tail behind the first value
+// (Keys[2:], display-set replay carries no bracket provenance and
+// folds that tail into one member run, so a multi-token unbracketed
+// interface run IS the packed-remainder spelling).
+func dhcpRelayInterfaceMemberValid(member string) bool {
+	if member == "" {
+		return false
+	}
+	s := splitInterfaceRefWithDeclared(nil, member)
+	if !s.HasUnit {
+		return ValidateInterfaceName(member) == nil
+	}
+	if err := ValidateInterfaceName(s.Base); err != nil {
+		return false
+	}
+	if s.UnitTok == "" {
+		return true // trailing-dot bare form, as the runtime treats it
+	}
+	return ValidateLogicalUnit(s.UnitTok) == nil
+}
+
 // dhcpRelayV6Nodes9553 handles both parser forms produced for this subtree:
 // `dhcp-relay { dhcpv6 { ... } }` and the brace-elided
 // `dhcp-relay dhcpv6 { ... }`. A fully elided packed path is normalized here as
@@ -287,16 +355,7 @@ func compileDHCPRelayV6Group9553(node *Node, g *DHCPRelayV6Group) {
 		}
 		switch prop.Name() {
 		case "interface":
-			for _, value := range prop.Keys[1:] {
-				if value != "" {
-					g.Interfaces = append(g.Interfaces, value)
-				}
-			}
-			for _, child := range prop.Children {
-				if child != nil && child.Name() != "" {
-					g.Interfaces = append(g.Interfaces, child.Name())
-				}
-			}
+			g.Interfaces = append(g.Interfaces, dhcpRelayGroupInterfaces(prop)...)
 		case "active-server-group":
 			g.ActiveServerGroup = nodeVal(prop)
 		case "relay-agent-interface-id":

@@ -19,7 +19,7 @@
 
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
 pub(super) fn run_delta_recovery(
     mut sessions: &mut crate::session::SessionTable,

@@ -1,5 +1,58 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Coalesce/ipmon: ipmon actuation is single-flighted — the engine
+    tick is the only Tick driver (the loop is started context-only,
+    no second sweep goroutine), and Tick itself claims an in-flight
+    slot so concurrent ticks can never enter the actuator together
+    (#17226).
+  * Coalesce: Loop.Stop now cancels the in-flight actuation context
+    before waiting for the loop to exit, and the loop's context is
+    parented on the StartWithContext caller (the daemon route
+    listener passes its run ctx). A route-refresh actuation parked on
+    the held apply semaphore now aborts on shutdown/run-ctx cancel
+    instead of holding wg.Wait for the 30s actuate timeout past
+    TimeoutStopSec=20; ipmon drops its private #3758 cancel and uses
+    the loop's Context() (#17226).
+  * Config compiler: parseVRRPGroups now reads every vrrp-group
+    property exactly once. The Keys-packed tail and the child nodes
+    are normalized into one statement list (vrrpGroupStatements)
+    before the single remaining switch, deleting the second reader
+    whose copies had diverged: on the packed hierarchical one-liner
+    a legacy track-priority-cost could overwrite a nested
+    priority-cost by source order, and a bad packed sibling erased
+    a good nested cost to 0 on the lenient path. Nested cost now
+    wins regardless of spelling or order, and a bad sibling is
+    ignored. A bare packed `preempt` no longer swallows the next
+    property: its optional `hold-time <n>` pair is reserved only
+    when the next token is literally `hold-time`, so
+    `preempt priority 200` keeps priority 200 and
+    `preempt no-preempt` stays non-preempting instead of inverting
+    (#17227).
+  * Linuxsock/LLDP/proxy-ARP: add one shared cancellable raw-receive
+    primitive (linuxsock.PpollRecv: ppoll on {socket, wake eventfd},
+    SignalStop wakes, close only after join) and migrate both raw
+    receive loops onto it. The proxy-ARP responder previously parked
+    in a bare Recvfrom whose only wake was closing the fd (which does
+    not wake a parked Recvfrom on Linux) and tore down cancel+delete
+    with no join, leaking the goroutine and its bound socket on a
+    silent link and answering the next request from its stale
+    snapshot through a reused fd number; teardown now signals, joins,
+    then closes, and the loop re-checks ctx after every successful
+    recv before sending. LLDP keeps its #16669 behaviour on the shared
+    primitive. A new linuxsock AST canary rejects direct blocking
+    Recvfrom outside the primitive (nfqueue poll-guarded reads
+    allowlisted) (#17231).
+ -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
+
+xpf (0.0.0) unstable; urgency=medium
+
+  * Config: build lenientCompileOpts() with per-flag assignments instead
+    of one gofmt-aligned ~330-key composite literal, and un-embed the
+    formatting-workaround embedded struct into two plain compileOpts
+    fields, so adding a long-named lenient flag changes exactly two
+    lines instead of realigning the whole literal (#17168). No
+    behavior change: the tolerant flag set is unchanged and the #4406
+    golden compiled output is byte-identical to master.
   * Config reads: the rollback slot error now travels inside one
     captured value (configstore.RollbackCapture from CaptureRollback /
     CaptureRollbackSlot) through the REST, gRPC and CLI gates to their
@@ -10,6 +63,16 @@ xpf (0.0.0) unstable; urgency=medium
     "not in configuration mode" instead of 200 "" ("no diff"), and
     gRPC ShowCompare surfaces the captured history error verbatim
     instead of a synthesized "slot not found" (#17215).
+  * NFQUEUE reinject: write the P-MECH tail zone id as u32 in the Go
+    submit encoder, matching both Rust readers widened by #17623
+    (#16557); the u16 writer displaced every following field and every
+    Go-produced frame failed decode. The P-MECH tail is 81 bytes, and
+    a shared Go/Rust golden frame (zone id above the u16 range) now
+    pins the wire so the pair cannot drift again (#18207).
+ -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Config compiler: strict mode now has a single constructor,
     strictCompileOpts() beside lenientCompileOpts(); the production
     strict entries and strict-named test compiles start from it

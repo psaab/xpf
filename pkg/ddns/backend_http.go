@@ -553,8 +553,8 @@ func (c *httpClientCache) size() int {
 // resolveProviderBindConfig derives the transport bindConfig (#2846) from a DDNS
 // provider catalog entry's source-binding leaves. The HTTP backends carry the
 // source-address / destination-interface / routing-instance on the provider
-// (config.DDNSProvider, #2780); RFC 2136 reuses the same resolveBindConfig via a
-// DHCPDynamicDNSConfig carrier. This adapts the provider shape onto the SAME
+// (config.DDNSProvider, #2780); RFC 2136 uses the same resolveBindConfig
+// on the shared endpoint. This adapts the provider shape onto the SAME
 // resolveBindConfig discipline so an invalid source-address is a hard error
 // (fail-open: the constructor degrades to the unbound default rather than
 // emitting from the wrong source — see the callers).
@@ -562,11 +562,7 @@ func resolveProviderBindConfig(p *config.DDNSProvider, resolve func(string) stri
 	if p == nil {
 		return bindConfig{}, nil
 	}
-	return resolveBindConfig(&config.DHCPDynamicDNSConfig{
-		SourceAddress:        p.SourceAddress,
-		DestinationInterface: p.DestinationInterface,
-		RoutingInstance:      p.RoutingInstance,
-	}, resolve)
+	return resolveBindConfig(p.RFC2136Endpoint, resolve)
 }
 
 // newProviderHTTPClient builds a bound HTTP client for an HTTP backend from its
