@@ -2628,8 +2628,13 @@ type GetGlobalStatsResponse struct {
 	ScreenDropDetails  map[string]uint64      `protobuf:"bytes,13,rep,name=screen_drop_details,json=screenDropDetails,proto3" json:"screen_drop_details,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	UnknownVlanDrops   uint64                 `protobuf:"varint,14,opt,name=unknown_vlan_drops,json=unknownVlanDrops,proto3" json:"unknown_vlan_drops,omitempty"`
 	DstMacDrops        uint64                 `protobuf:"varint,15,opt,name=dst_mac_drops,json=dstMacDrops,proto3" json:"dst_mac_drops,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// unavailable_counters names global counters the active dataplane does
+	// not populate (#17193, #13274): their numeric fields above are NOT
+	// authoritative and must not be read as measured zeros. Additive: old
+	// servers omit it, old clients ignore it.
+	UnavailableCounters []string `protobuf:"bytes,16,rep,name=unavailable_counters,json=unavailableCounters,proto3" json:"unavailable_counters,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *GetGlobalStatsResponse) Reset() {
@@ -2765,6 +2770,13 @@ func (x *GetGlobalStatsResponse) GetDstMacDrops() uint64 {
 		return x.DstMacDrops
 	}
 	return 0
+}
+
+func (x *GetGlobalStatsResponse) GetUnavailableCounters() []string {
+	if x != nil {
+		return x.UnavailableCounters
+	}
+	return nil
 }
 
 type GetZonesRequest struct {
@@ -10629,7 +10641,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\rowned_ifindex\x18\x05 \x01(\rR\fownedIfindex\x12!\n" +
 	"\fframe_digest\x18\x06 \x01(\fR\vframeDigest\x12\x16\n" +
 	"\x06reason\x18\a \x01(\tR\x06reason\"\x17\n" +
-	"\x15GetGlobalStatsRequest\"\xf2\x05\n" +
+	"\x15GetGlobalStatsRequest\"\xa5\x06\n" +
 	"\x16GetGlobalStatsResponse\x12\x1d\n" +
 	"\n" +
 	"rx_packets\x18\x01 \x01(\x04R\trxPackets\x12\x1d\n" +
@@ -10648,7 +10660,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\x14host_inbound_allowed\x18\f \x01(\x04R\x12hostInboundAllowed\x12e\n" +
 	"\x13screen_drop_details\x18\r \x03(\v25.xpf.v1.GetGlobalStatsResponse.ScreenDropDetailsEntryR\x11screenDropDetails\x12,\n" +
 	"\x12unknown_vlan_drops\x18\x0e \x01(\x04R\x10unknownVlanDrops\x12\"\n" +
-	"\rdst_mac_drops\x18\x0f \x01(\x04R\vdstMacDrops\x1aD\n" +
+	"\rdst_mac_drops\x18\x0f \x01(\x04R\vdstMacDrops\x121\n" +
+	"\x14unavailable_counters\x18\x10 \x03(\tR\x13unavailableCounters\x1aD\n" +
 	"\x16ScreenDropDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x11\n" +

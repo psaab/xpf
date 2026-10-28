@@ -253,20 +253,26 @@ func systemActionPermission(action string) config.LoginClassPermission {
 	return config.PermMaint
 }
 
-// completeMethodName is the second request-priced method (after
-// SystemAction): its ConfigMode bit selects the tier.
+// completeMethodName is one of the request-priced methods (with
+// SystemAction and ShowText): its ConfigMode bit selects the tier.
+// Which methods are request-dependent is declared per method in
+// methodPermission / rpcCanonicalCommand / rpcArgumentForms and, for
+// streams, in streamRequestSpec17175 (#17175) — no method's
+// request-dependence is singular.
 const completeMethodName = "Complete"
 
 // methodPermission returns the permission a full gRPC method requires, and
 // whether the method was found in the table at all.
 //
-// req is the DECODED request for a unary call and nil for a stream. It is
-// read for the request-priced methods: SystemAction, whose verb selects
-// the tier, ShowText, whose topic selects it, and Complete (#14952),
-// whose ConfigMode bit selects it. A request-priced method whose request
-// is missing or of an unexpected type falls back to the methodPermissions
-// entry — for Complete that is the PermView floor, reached only when the
-// mode bit cannot be seen (a stream or an unreadable decode); a decoded
+// req is the DECODED request for a unary call, the decoded first
+// message for a stream (authzRecvStream, #17175), and nil only for the
+// stream open-time coarse price. It is read for the request-priced
+// methods: SystemAction, whose verb selects the tier, ShowText, whose
+// topic selects it, and Complete (#14952), whose ConfigMode bit
+// selects it. A request-priced method whose request is missing or of
+// an unexpected type falls back to the methodPermissions entry — for
+// Complete that is the PermView floor, reached only when the mode bit
+// cannot be seen (stream open or an unreadable decode); a decoded
 // ConfigMode=true request is charged PermConfig.
 func methodPermission(fullMethod string, req any) (config.LoginClassPermission, bool) {
 	service, method, ok := splitFullMethod(fullMethod)
@@ -301,11 +307,11 @@ func methodPermission(fullMethod string, req any) (config.LoginClassPermission, 
 	return perm, true
 }
 
-// systemActionMethodName is the one method whose permission depends on its
-// request. Named rather than spelled inline so the two places that care about
-// it (methodPermission and the verb-table completeness test) cannot drift.
+// systemActionMethodName is one of the request-priced methods (with
+// ShowText and Complete). Named rather than spelled inline so the two
+// places that care about it (methodPermission and the verb-table
+// completeness test) cannot drift.
 const systemActionMethodName = "SystemAction"
-
 const getSystemInfoMethodName = "GetSystemInfo"
 
 const getBGPStatusMethodName = "GetBGPStatus"
@@ -423,6 +429,6 @@ func showTextTopicPermission(topic string) (config.LoginClassPermission, bool) {
 	return unmappedMethodPermission, false
 }
 
-// showTextMethodName is the second method whose permission depends on its
-// request. See systemActionMethodName.
+// showTextMethodName is one of the request-priced methods (with
+// SystemAction and Complete). See systemActionMethodName.
 const showTextMethodName = "ShowText"

@@ -262,6 +262,11 @@ message GetGlobalStatsResponse {
   map<string, uint64> screen_drop_details = 13;
   uint64 unknown_vlan_drops = 14;
   uint64 dst_mac_drops = 15;
+  // unavailable_counters names global counters the active dataplane does
+  // not populate (#17193, #13274): their numeric fields above are NOT
+  // authoritative and must not be read as measured zeros. Additive: old
+  // servers omit it, old clients ignore it.
+  repeated string unavailable_counters = 16;
 }
 
 message GetZonesRequest {}
