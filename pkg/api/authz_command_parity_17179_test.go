@@ -27,13 +27,19 @@ import (
 //     requests that never run, while every served (bare) topic fell
 //     through to the bare return.
 //
-// The parity cells below run each {pattern, request} pair through BOTH
-// real gates — authorizeRESTCommand (REST) and the shared argforms
-// reconstruction judged with the same rules (the gRPC gate's exact
-// EvaluateForms call, mirrored in grpcVerdict17179) — and require equal
-// verdicts. The gRPC-side gate itself (authorizeRPCCommand) is exercised
-// by TestMatchPoliciesNoZoneParityGRPC17179 in pkg/grpcapi, which pins
-// the same cells through the real gRPC gate.
+// The parity cells below run each {pattern, request} pair through the
+// REAL REST gate — authorizeRESTCommand (via call9952) — on the REST
+// side. The gRPC side is NOT run through authorizeRPCCommand here: it
+// is the shared argforms reconstruction judged with EvaluateForms
+// unanimity in grpcVerdict17179 (with `named == false` mirrored as a
+// deny), so this leg proves equality of the judged STRINGS and of the
+// core unanimity verdict, but does not exercise authorizeRPCCommand's
+// alias forms, its distinct-narrower / alias rescues, or its
+// canonical-command resolution. The real gRPC gate itself, rescues
+// included, is exercised in pkg/grpcapi:
+// TestMatchPoliciesNoZoneParityGRPC17179 and
+// TestGetEventsProtocolParityGRPC17179 pin the same MatchPolicies and
+// events-protocol intents through authorizeRPCCommand.
 
 func cfg17179(t *testing.T, deny string) *config.Config {
 	t.Helper()
@@ -64,12 +70,14 @@ system {
 	return cfg
 }
 
-// grpcVerdict17179 judges wire-request forms through the shared
-// reconstruction exactly as authorizeRPCCommand does (EvaluateForms
-// unanimity over forms[0] + forms[1:]). It exists because pkg/api must
-// not import pkg/grpcapi's gate; the forms themselves come from the
-// one shared implementation, so equality here is equality of the judged
-// strings, not of two reconstructions.
+// grpcVerdict17179 mirrors the EvaluateForms-unanimity core of
+// authorizeRPCCommand over wire-request forms from the shared
+// reconstruction (unanimity over forms[0] + forms[1:]); it does NOT
+// exercise the real gate's alias forms or rescues — see the header
+// above for what each leg actually proves. It exists because pkg/api
+// must not import pkg/grpcapi's gate; the forms themselves come from
+// the one shared implementation, so equality here is equality of the
+// judged strings, not of two reconstructions.
 func grpcVerdict17179(t *testing.T, cfg *config.Config, forms []string, named bool) bool {
 	t.Helper()
 	if !named {
@@ -203,8 +211,8 @@ func TestRESTGRPCArgFormParity17179(t *testing.T) {
 			restErr := call9952(t, cfg, "limited", "GET", tc.path, "")
 			restAllowed := restErr == nil
 
-			// gRPC verdict through the shared reconstruction + the
-			// gate's EvaluateForms unanimity.
+			// gRPC-side verdict: shared reconstruction + EvaluateForms
+			// unanimity mirror (not authorizeRPCCommand; see header).
 			forms, named := tc.grpcForms(cfg)
 			grpcAllowed := grpcVerdict17179(t, cfg, forms, named)
 
@@ -237,7 +245,15 @@ func TestRestShowTextTopicsCensus17179(t *testing.T) {
 	if start < 0 {
 		t.Fatal("showTextHandler not found in show_text.go")
 	}
-	body := src[start:]
+	// Bound the scrape at showTextHandler's closing brace (the first
+	// line consisting solely of `}` after the handler start): taking
+	// src[start:] to EOF would let a later function's case arms be
+	// mis-attributed to this handler if one is ever appended (#17179).
+	end := strings.Index(src[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("showTextHandler closing brace not found in show_text.go")
+	}
+	body := src[start : start+end+2]
 	served := map[string]bool{}
 	caseRe := regexp.MustCompile(`case\s+((?:"[^"]+"\s*,?\s*)+):`)
 	for _, m := range caseRe.FindAllStringSubmatch(body, -1) {
