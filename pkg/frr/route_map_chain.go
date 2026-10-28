@@ -103,7 +103,7 @@ func (m *Manager) composeChainRouteMap(renderPO *config.PolicyOptionsConfig, nam
 		counts[member.name] = member.stmt
 		chain = append(chain, member.name)
 	}
-	if n := beltTotal16869(config.ComposedChainSequenceCount(renderPO, counts, chain), carvedComposedReserveFor16869(renderPO, counts, chain, tail.carvedBGPOnly, tail.fallbackAction)); n > config.MaxRouteMapSequences {
+	if n := beltTotal16869(config.ComposedChainSequenceCount(renderPO, counts, chain), config.CarvedComposedExtraSequencesForStatements16869(counts, chain, tail.carvedBGPOnly, tail.fallbackAction)); n > config.MaxRouteMapSequences {
 		if tail.overflowWarn != nil {
 			tail.overflowWarn(name, n)
 		} else {
@@ -189,31 +189,4 @@ func (m *Manager) composeChainRouteMap(renderPO *config.PolicyOptionsConfig, nam
 		}
 	}
 	return b.String()
-}
-
-// carvedComposedReserveFor16869 is config.CarvedComposedExtraSequences16869
-// over an explicit statement map instead of po.PolicyStatements, so the
-// redistribute adapter reserves against the filtered members it
-// actually renders. The BGP adapter passes po.PolicyStatements
-// unchanged, preserving its former arithmetic exactly (the config
-// helper's po==nil guard is subsumed: a nil countPO yields no members
-// to walk, and the composer is never called with a nil render PO by
-// either adapter).
-func carvedComposedReserveFor16869(po *config.PolicyOptionsConfig, pss map[string]*config.PolicyStatement, chain []string, carvedBGPOnly bool, fallbackAction string) uint64 {
-	if !carvedBGPOnly || fallbackAction != "permit" {
-		return 0
-	}
-	// Mirror config.CarvedComposedExtraSequences16869's termination
-	// walk over the supplied statements: a chain that terminates
-	// never reaches the carved fall-off pair.
-	for _, name := range chain {
-		ps := pss[name]
-		if ps == nil {
-			continue
-		}
-		if (ps.DefaultAction == "accept" || ps.DefaultAction == "reject") && !policyHasNextPolicyTerm(ps) {
-			return 0
-		}
-	}
-	return 1
 }
