@@ -271,6 +271,7 @@ pub(crate) fn project_status(state: &mut ServerState) {
     state.status.zone_gate_no_generation_total = ipsec_inner.zone_gate_no_generation_total;
     state.status.ipsec_inner_parse_drops_total = ipsec_inner.ipsec_inner_parse_drops_total;
     state.status.ipsec_inner_ecn_illegal_drops = ipsec_inner.ipsec_inner_ecn_illegal_drops;
+    state.status.ipsec_inner_noroute_total = ipsec_inner.ipsec_inner_noroute_total;
     state.status.ipsec_inner_worker_queue_full_total =
         ipsec_inner.ipsec_inner_worker_queue_full_total;
     state.status.ipsec_inner_worker_queue_busy_total =

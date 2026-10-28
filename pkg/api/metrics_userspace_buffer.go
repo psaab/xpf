@@ -380,6 +380,9 @@ func (c *xpfCollector) emitUserspaceDynamicBufferMetrics(ch chan<- prometheus.Me
 	c.emitConstMetric(ch, c.userspaceIpsecInnerEcnIllegalDrops,
 		prometheus.CounterValue,
 		float64(status.IpsecInnerEcnIllegalDrops))
+	c.emitConstMetric(ch, c.userspaceIpsecInnerNoroute,
+		prometheus.CounterValue,
+		float64(status.IpsecInnerNorouteTotal))
 	c.emitConstMetric(ch, c.userspaceIpsecInnerWorkerQueueFull,
 		prometheus.CounterValue,
 		float64(status.IpsecInnerWorkerQueueFullTotal))

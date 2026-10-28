@@ -518,6 +518,7 @@ pub(crate) fn run() -> Result<(), String> {
             zone_gate_no_generation_total: 0,
             ipsec_inner_parse_drops_total: 0,
             ipsec_inner_ecn_illegal_drops: 0,
+            ipsec_inner_noroute_total: 0,
             ipsec_inner_worker_queue_full_total: 0,
             ipsec_inner_worker_queue_busy_total: 0,
             ipsec_inner_verdict_queue_full_total: 0,
