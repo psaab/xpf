@@ -136,6 +136,7 @@
 
 mod deterministic;
 mod flows;
+mod lease_table;
 mod occupancy;
 
 #[cfg(test)]
@@ -3170,17 +3171,12 @@ impl PortAllocator {
                     }
                     continue;
                 }
-                // Removing the lease de-indexes its address-only ownership;
-                // do not decrement it separately here.
-                live.remove_persistent_lease(&key);
-                Self::remove_lease_expiration_locked(
-                    &mut live,
-                    lease.addr_index,
-                    lease.expires_at_ns,
-                    key,
-                );
-                if !lease.address_only {
-                    freed.push((lease.addr_index, lease.translated.port));
+                // #17028: shared retire (Deferred: ports freed after
+                // the guard drops, stamped at clear time below).
+                if let Some(retired) = lease_table::retire_idle_lease_locked(&mut live, &key) {
+                    if let Some(port) = retired.freed_port {
+                        freed.push(port);
+                    }
                 }
             }
             (count, freed)
@@ -3714,10 +3710,11 @@ impl PortAllocator {
         {
             return false;
         }
-        Self::remove_lease_expiration_locked(&mut live, lease.addr_index, lease.expires_at_ns, key);
-        live.remove_persistent_lease(&key);
-        if !lease.address_only {
-            self.free_translated_port(lease.addr_index, lease.translated.port);
+        // #17028: shared retire; unstamped free preserved.
+        if let Some(retired) = lease_table::retire_idle_lease_locked(&mut live, &key) {
+            if let Some((addr_index, port)) = retired.freed_port {
+                self.free_translated_port(addr_index, port);
+            }
         }
         true
     }
@@ -4489,18 +4486,15 @@ impl PortAllocator {
                 if lease.active_flows != 0 || lease.inbound_flows != 0 {
                     return LeaseReuse::LiveModeMismatch;
                 }
-                // A revoked active shell becomes idle before ordinary GC gets
-                // to it. Retire it here before a fresh same-key insert can
-                // overwrite its only ownership record.
-                Self::remove_lease_expiration_locked(
-                    live,
-                    lease.addr_index,
-                    lease.expires_at_ns,
-                    key,
-                );
-                live.remove_persistent_lease(&key);
-                if !lease.address_only {
-                    self.free_translated_port_at(lease.addr_index, lease.translated.port, now_ns);
+                // A revoked idle shell retires before a fresh same-key
+                // insert can overwrite its only ownership record
+                // (#17028: shared retire; clocked free preserved).
+                if let Some(retired) =
+                    lease_table::retire_idle_lease_locked(live, &key)
+                {
+                    if let Some((addr_index, port)) = retired.freed_port {
+                        self.free_translated_port_at(addr_index, port, now_ns);
+                    }
                 }
                 return LeaseReuse::NoLease;
             }
@@ -4522,141 +4516,80 @@ impl PortAllocator {
                 return LeaseReuse::WireIdentityConflict;
             }
         }
-        let mut reusable = None;
-        let mut expired = None;
-        let mut remove_expiry = None;
-        let mut live_mode_mismatch = false;
+        // #8597 K10: the lease's MODE must agree with this port-bearing
+        // path. An ADDRESS-ONLY lease owns no occupancy bit, so reusing
+        // it here would publish a PAT decision `(A, S)` with NO bit
+        // held (#9536: a LIVE one is left standing; an IDLE one is
+        // retired mode-correctly below). Mode can flip under a live
+        // lease by ordinary operator action (`allocator_key()` does
+        // not include `no_translation`).
         let local_timeout_ns = bounded_persistent_nat_timeout_ns(persistent_nat_timeout_ns);
-        let mut promotion_timeout_ns = None;
-        if let Some(lease) = live.persistent_by_source.get_mut(&key) {
-            // #8597 K10: the lease's MODE must agree with this path's, and this
-            // is the port-bearing one. An ADDRESS-ONLY lease owns no occupancy
-            // bit — that is the whole difference between the modes — so reusing
-            // it here would publish a PAT decision `(A, S)` with NO bit held,
-            // and a later flow could then claim `(A, S)` through `claim()`.
-            // Two live flows on one translated identity is the duplicate this
-            // allocator exists to prevent.
-            //
-            // The mode can change under a live lease by ordinary operator
-            // action: `allocator_key()` is built from the pool name, addresses
-            // and range and does NOT include `no_translation`, so flipping that
-            // leaf keeps the SAME allocator and carries the leases across.
-            //
-            // A disagreeing IDLE lease falls to the `expired` arm below, which
-            // receives `lease.address_only` and tears it down mode-correctly. A
-            // disagreeing LIVE address-only lease is left standing (#9536, the
-            // arm below). Neither is silently ignored, and neither is freed by
-            // the wrong path.
-            if !lease.address_only
-                && (lease.active_flows > 0
-                    || lease.inbound_flows > 0
-                    || lease.expires_at_ns > now_ns)
+        let lease = live.persistent_by_source.get(&key).copied();
+        match lease {
+            Some(lease)
+                if !lease.address_only
+                    && (lease.active_flows > 0
+                        || lease.inbound_flows > 0
+                        || lease.expires_at_ns > now_ns) =>
             {
-                let translated = lease.translated;
-                let addr_index = lease.addr_index;
-                if lease.active_flows == 0 && lease.inbound_flows == 0 {
-                    remove_expiry = Some((addr_index, lease.expires_at_ns));
-                    lease.activation_saw_completion = false;
-                    lease.activation_previous_expires_at_ns = lease.expires_at_ns;
-                    lease.activation_previous_timeout_ns = lease.timeout_ns;
-                    lease.activation_had_previous_lease = true;
-                    if lease.imported {
-                        // #10789-F4 round 2 (F1): an imported idle adoption is
-                        // tentative until a local flow completes — same as N->N+1.
-                        // Clearing here leaks through a concurrent synced join:
-                        // rollback at 2->1 skips the 1->0 restore, and a synced
-                        // completion sets activation_saw_completion so the later
-                        // local rollback re-arms instead of restoring. Carry a
-                        // per-flow marker; release_flow promotes.
-                        promotion_timeout_ns = Some(local_timeout_ns);
-                    } else {
-                        lease.timeout_ns = local_timeout_ns;
-                    }
-                } else if lease.imported {
-                    // Q2: a local N -> N+1 join is not yet proof that this
-                    // packet survived downstream admission. Carry a marker to
-                    // `release_flow`; only successful local completion promotes.
-                    promotion_timeout_ns = Some(local_timeout_ns);
-                }
-                lease.active_flows = lease.active_flows.saturating_add(1);
-                let expires_at_ns = now_ns.saturating_add(local_timeout_ns);
-                lease.expires_at_ns = expires_at_ns;
-                reusable = Some((translated, addr_index));
-            } else if lease.address_only && (lease.active_flows > 0 || lease.inbound_flows > 0) {
-                // #9536: MODE MISMATCH UNDER A LIVE ADDRESS-ONLY LEASE -- the
-                // mirror of #9158's arm in `reserve_address_only_persistent`.
-                //
-                // Neither other arm is correct:
-                //
-                //   * REUSE is what #8597 K10 forbids: an address-only lease owns
-                //     no occupancy bit, so a PAT decision built on it would publish
-                //     an `(address, port)` nothing holds.
-                //   * TEAR DOWN (this function's behaviour before #9536) forgets
-                //     the subscriber's pinned public address while a flow is still
-                //     using it, so the next flow for the same `PersistentSourceKey`
-                //     can land on a different pool address. For
-                //     `permit any-remote-host` that pinning is the feature.
-                //
-                // So the lease is LEFT STANDING and the caller serves this flow
-                // unpinned. Nothing leaks in either direction: an address-only
-                // lease owns no port bit, and the unpinned PAT flow's own bit is
-                // freed when it releases. Once the lease's flows drain it expires
-                // normally, and the next PAT flow for the source re-pins.
-                live_mode_mismatch = true;
-            } else {
-                expired = Some((
-                    lease.translated,
-                    lease.addr_index,
-                    lease.expires_at_ns,
-                    lease.address_only,
-                    lease.deterministic,
-                ));
-            }
-        }
-        if let Some((addr_index, expires_at_ns)) = remove_expiry {
-            Self::remove_lease_expiration_locked(live, addr_index, expires_at_ns, key);
-        }
-        if live_mode_mismatch {
-            return LeaseReuse::LiveModeMismatch;
-        }
-        if let Some((translated, addr_index)) = reusable {
-            self.shared.flows.insert_in_shard(
-                shard,
-                flow,
-                LiveAllocation {
+                // #17028: the shared 0->1 / N->N+1 join (snapshot,
+                // de-index, timeout/promotion, refcount).
+                let lease_table::JoinOutcome::Joined {
                     translated,
-                    persistent_key: Some(key),
                     addr_index,
-                    deterministic: false,
-                    address_only: false,
-                    // #6522: the ALLOCATING worker's holder bit. A locally-born session is
-                    // replicated to every SIBLING worker (`replicate_session_upsert` fans a
-                    // `WorkerLocalImport` entry to `peer_worker_commands`, which EXCLUDES
-                    // this worker) and each sibling reserves against this same record, so
-                    // without this bit the mask holds every worker EXCEPT the one actually
-                    // forwarding — and the last sibling replica to age-reap frees a
-                    // `(pool_addr, port)` still in use. Recording the owner here makes the
-                    // mask complete, so the port survives until the owner itself releases.
                     promotion_timeout_ns,
-                    holders: holder.bit(),
-                },
-            );
-            live.record_pat_owner(&flow, translated);
-            self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
-            return LeaseReuse::Reused(translated);
-        }
-        if let Some((translated, addr_index, expires_at_ns, address_only, deterministic)) = expired
-        {
-            Self::remove_lease_expiration_locked(live, addr_index, expires_at_ns, key);
-            if !address_only {
-                self.free_translated_port_at(addr_index, translated.port, now_ns);
+                    ..
+                } = lease_table::join_persistent_lease_locked(
+                    live,
+                    key,
+                    lease_table::JoinPolicy {
+                        timeout_ns: local_timeout_ns,
+                        promote_imported: true,
+                        refresh_expiry: true,
+                    },
+                    now_ns,
+                )
+                else {
+                    return LeaseReuse::NoLease;
+                };
+                self.shared.flows.insert_in_shard(
+                    shard,
+                    flow,
+                    LiveAllocation {
+                        translated,
+                        persistent_key: Some(key),
+                        addr_index,
+                        deterministic: false,
+                        address_only: false,
+                        promotion_timeout_ns,
+                        holders: holder.bit(),
+                    },
+                );
+                live.record_pat_owner(&flow, translated);
+                self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+                return LeaseReuse::Reused(translated);
             }
-            live.remove_persistent_lease(&key);
+            Some(lease)
+                if lease.address_only
+                    && (lease.active_flows > 0 || lease.inbound_flows > 0) =>
+            {
+                // #9536: leave the live address-only lease standing;
+                // the caller serves this flow unpinned.
+                return LeaseReuse::LiveModeMismatch;
+            }
+            Some(_) => {
+                // Expired or idle mode-mismatched: retire mode-
+                // correctly (#17028 shared retire) and mint fresh.
+                if let Some(retired) = lease_table::retire_idle_lease_locked(live, &key) {
+                    if let Some((addr_index, port)) = retired.freed_port {
+                        self.free_translated_port_at(addr_index, port, now_ns);
+                    }
+                }
+                LeaseReuse::NoLease
+            }
+            None => LeaseReuse::NoLease,
         }
-        LeaseReuse::NoLease
     }
-
-    /// #8121: the idle-lease import needs the same expiry registration a mint
     /// does, or an imported lease is invisible to GC and outlives what the
     /// active node held.
     pub(super) fn insert_lease_expiration_locked(
@@ -4672,25 +4605,21 @@ impl PortAllocator {
     }
     /// Retire stale idle leases before HA admission. Revoked active shells
     /// remain owned until their final flow releases.
+    /// #17028: the predicate + removal live in `lease_table`; this
+    /// wrapper keeps the clocked bitmap free (stamped at `now_ns`).
     pub(super) fn reclaim_expired_idle_lease_locked(
         &self,
         live: &mut PortAllocatorLiveState,
         key: PersistentSourceKey,
         now_ns: u64,
     ) -> bool {
-        let Some(lease) = live.persistent_by_source.get(&key).copied() else {
+        let Some(retired) =
+            lease_table::reclaim_expired_idle_lease_locked(live, key, now_ns)
+        else {
             return false;
         };
-        if lease.active_flows != 0
-            || lease.inbound_flows != 0
-            || (!lease.revoked && lease.expires_at_ns > now_ns)
-        {
-            return false;
-        }
-        Self::remove_lease_expiration_locked(live, lease.addr_index, lease.expires_at_ns, key);
-        live.remove_persistent_lease(&key);
-        if !lease.address_only {
-            self.free_translated_port_at(lease.addr_index, lease.translated.port, now_ns);
+        if let Some((addr_index, port)) = retired.freed_port {
+            self.free_translated_port_at(addr_index, port, now_ns);
         }
         true
     }
@@ -5386,6 +5315,64 @@ impl PortAllocator {
     ) -> Result<TranslatedTuple, super::source::SourceNatFailureReason> {
         self.allocate_deterministic_v6_at(flow, pool_v4, params, src, 1, holder)
     }
+    /// #17028: the one deterministic-BIB join both `allocate_
+    /// deterministic_v6_at` branches share. The caller has already
+    /// classified the lease (deterministic identity, address, block
+    /// range, not revoked, live-or-unexpired) and admitted the flow;
+    /// the branches differed only in `refresh_expiry` (the full-block
+    /// copy refreshed the idle expiry, the claimed-port copy
+    /// deliberately did not — #15948) and in their cap-fail counter
+    /// (the claimed-port copy returned `AllocatorExhausted` WITHOUT
+    /// bumping `exhaustion_total`). Policy: every cap failure in
+    /// `allocate_deterministic_v6_at` bumps the counter; the claimed-
+    /// port caller now does so too, and still frees the candidate
+    /// port IT claimed (never the lease's port).
+    fn join_bib_locked(
+        &self,
+        live: &mut PortAllocatorLiveState,
+        shard: &mut flows::LiveFlowShard,
+        bib_key: PersistentSourceKey,
+        flow: SourceNatFlowKey,
+        lease: PersistentLease,
+        refresh_expiry: bool,
+        now_ns: u64,
+        holder: NatHolder,
+    ) -> TranslatedTuple {
+        let lease_table::JoinOutcome::Joined {
+            promotion_timeout_ns,
+            ..
+        } = lease_table::join_persistent_lease_locked(
+            live,
+            bib_key,
+            lease_table::JoinPolicy {
+                timeout_ns: DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
+                promote_imported: true,
+                refresh_expiry,
+            },
+            now_ns,
+        )
+        else {
+            // The caller read this lease under the same guard; a
+            // missing lease here is unreachable in practice.
+            return lease.translated;
+        };
+        self.shared.flows.insert_in_shard(
+            shard,
+            flow,
+            LiveAllocation {
+                translated: lease.translated,
+                persistent_key: Some(bib_key),
+                addr_index: lease.addr_index,
+                deterministic: true,
+                address_only: false,
+                promotion_timeout_ns,
+                holders: holder.bit(),
+            },
+        );
+        live.record_pat_owner(&flow, lease.translated);
+        self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
+        lease.translated
+    }
     pub(super) fn allocate_deterministic_v6_at(
         &self,
         flow: SourceNatFlowKey,
@@ -5459,29 +5446,12 @@ impl PortAllocator {
                     probe_start = Some(port_start as u16);
                     continue;
                 }
-                if let Some(expired) =
-                    live.persistent_by_source
-                        .get(&bib_key)
-                        .copied()
-                        .filter(|lease| {
-                            lease.active_flows == 0
-                                && lease.inbound_flows == 0
-                                && lease.expires_at_ns <= now_ns
-                        })
+
+                if let Some(retired) =
+                    lease_table::reclaim_expired_idle_lease_locked(&mut live, bib_key, now_ns)
                 {
-                    Self::remove_lease_expiration_locked(
-                        &mut live,
-                        expired.addr_index,
-                        expired.expires_at_ns,
-                        bib_key,
-                    );
-                    live.remove_persistent_lease(&bib_key);
-                    if !expired.address_only {
-                        self.free_translated_port_at(
-                            expired.addr_index,
-                            expired.translated.port,
-                            now_ns,
-                        );
+                    if let Some((addr_index, port)) = retired.freed_port {
+                        self.free_translated_port_at(addr_index, port, now_ns);
                     }
                     drop(live);
                     probe_start = Some(port_start as u16);
@@ -5503,69 +5473,23 @@ impl PortAllocator {
                             || lease.inbound_flows > 0
                             || lease.expires_at_ns > now_ns)
                     {
-                        // #14670: joining an existing BIB is a tracked flow
-                        // too — the claimed-port reuse branch below already
-                        // enforces this cap; the full-block branch must not
-                        // bypass it.
+                        // #14670: joining an existing BIB is a tracked
+                        // flow too; both branches enforce this cap.
                         if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
                             self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                             return Err(SourceNatFailureReason::AllocatorExhausted);
                         }
-                        let was_idle = lease.active_flows == 0 && lease.inbound_flows == 0;
-                        if was_idle {
-                            Self::remove_lease_expiration_locked(
-                                &mut live,
-                                lease.addr_index,
-                                lease.expires_at_ns,
-                                bib_key,
-                            );
-                        }
-                        // #14670: 0->1 re-arm activation-rollback bookkeeping
-                        // (mirrors reuse_existing_lease_locked). Without it
-                        // rollback_flow treats a promoted imported BIB as
-                        // freshly minted and deletes it. Imported leases
-                        // defer timeout promotion to a completing
-                        // release_flow via the per-flow marker.
-                        let mut promotion_timeout_ns = None;
-                        if let Some(slot) = live.persistent_by_source.get_mut(&bib_key) {
-                            if was_idle {
-                                slot.activation_saw_completion = false;
-                                slot.activation_previous_expires_at_ns = slot.expires_at_ns;
-                                slot.activation_previous_timeout_ns = slot.timeout_ns;
-                                slot.activation_had_previous_lease = true;
-                                if slot.imported {
-                                    promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
-                                }
-                            } else if slot.imported {
-                                promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
-                            }
-                            slot.active_flows = slot.active_flows.saturating_add(1);
-                            // #15948 (H31-03): an already-active lease is
-                            // not in the idle-expiry index, so its expiry
-                            // must not move without re-keying. Only the
-                            // idle->active transition (index entry just
-                            // removed above) may refresh it.
-                            if was_idle {
-                                slot.expires_at_ns =
-                                    now_ns.saturating_add(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
-                            }
-                        }
-                        self.shared.flows.insert_in_shard(
+                        // #15948: full-block refreshes idle expiry.
+                        return Ok(self.join_bib_locked(
+                            &mut live,
                             &mut __shard,
+                            bib_key,
                             flow,
-                            LiveAllocation {
-                                translated: lease.translated,
-                                persistent_key: Some(bib_key),
-                                addr_index: ip_idx,
-                                deterministic: true,
-                                address_only: false,
-                                promotion_timeout_ns,
-                                holders: holder.bit(),
-                            },
-                        );
-                        live.record_pat_owner(&flow, lease.translated);
-                        self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
-                        return Ok(lease.translated);
+                            lease,
+                            true,
+                            now_ns,
+                            holder,
+                        ));
                     }
                     return Err(SourceNatFailureReason::AllocatorExhausted);
                 }
@@ -5592,29 +5516,11 @@ impl PortAllocator {
                 self.free_translated_port(ip_idx, port);
                 return Ok(existing);
             }
-            if let Some(expired) =
-                live.persistent_by_source
-                    .get(&bib_key)
-                    .copied()
-                    .filter(|lease| {
-                        lease.active_flows == 0
-                            && lease.inbound_flows == 0
-                            && lease.expires_at_ns <= now_ns
-                    })
+            if let Some(retired) =
+                lease_table::reclaim_expired_idle_lease_locked(&mut live, bib_key, now_ns)
             {
-                Self::remove_lease_expiration_locked(
-                    &mut live,
-                    expired.addr_index,
-                    expired.expires_at_ns,
-                    bib_key,
-                );
-                live.remove_persistent_lease(&bib_key);
-                if !expired.address_only {
-                    self.free_translated_port_at(
-                        expired.addr_index,
-                        expired.translated.port,
-                        now_ns,
-                    );
+                if let Some((addr_index, port)) = retired.freed_port {
+                    self.free_translated_port_at(addr_index, port, now_ns);
                 }
             }
             if let Some(lease) = live.persistent_by_source.get(&bib_key).copied() {
@@ -5632,60 +5538,30 @@ impl PortAllocator {
                         || lease.expires_at_ns > now_ns)
                 {
                     if !self.shared.flows.admit_one(self.shared.max_tracked_flows) {
+                        // #17028 divergence-1 fix: the pre-consolidation
+                        // copy returned AllocatorExhausted WITHOUT
+                        // bumping exhaustion_total. Every cap failure
+                        // bumps it now (see join_bib_locked docs).
+                        self.shared.exhaustion_total.fetch_add(1, Ordering::Relaxed);
                         drop(live);
                         self.free_translated_port_at(ip_idx, port, now_ns);
                         return Err(SourceNatFailureReason::AllocatorExhausted);
                     }
-                    let was_idle = lease.active_flows == 0 && lease.inbound_flows == 0;
-                    if was_idle {
-                        Self::remove_lease_expiration_locked(
-                            &mut live,
-                            lease.addr_index,
-                            lease.expires_at_ns,
-                            bib_key,
-                        );
-                    }
-                    // #14670: same 0->1 activation re-arm as the full-block
-                    // branch above (and reuse_existing_lease_locked).
-                    let mut promotion_timeout_ns = None;
-                    if let Some(slot) = live.persistent_by_source.get_mut(&bib_key) {
-                        if was_idle {
-                            slot.activation_saw_completion = false;
-                            slot.activation_previous_expires_at_ns = slot.expires_at_ns;
-                            slot.activation_previous_timeout_ns = slot.timeout_ns;
-                            slot.activation_had_previous_lease = true;
-                            if slot.imported {
-                                promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
-                            }
-                        } else if slot.imported {
-                            promotion_timeout_ns = Some(DETERMINISTIC_NAT64_BIB_TIMEOUT_NS);
-                        }
-                        slot.active_flows = slot.active_flows.saturating_add(1);
-                        // Claimed-port branch historically did not refresh
-                        // the idle expiry on reuse; the 0->1 snapshot above
-                        // captures the pre-join expiry for rollback, and
-                        // release_flow re-arms expiry on completion. Keep
-                        // expires_at_ns unchanged here to avoid extending
-                        // an active lease's stale index entry.
-                    }
-                    self.shared.flows.insert_in_shard(
+                    // Claimed-port: keep expires_at unchanged (#15948);
+                    // release_flow re-arms on completion.
+                    let joined = self.join_bib_locked(
+                        &mut live,
                         &mut __shard,
+                        bib_key,
                         flow,
-                        LiveAllocation {
-                            translated: lease.translated,
-                            persistent_key: Some(bib_key),
-                            addr_index: ip_idx,
-                            deterministic: true,
-                            address_only: false,
-                            promotion_timeout_ns,
-                            holders: holder.bit(),
-                        },
+                        lease,
+                        false,
+                        now_ns,
+                        holder,
                     );
-                    live.record_pat_owner(&flow, lease.translated);
-                    self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                     drop(live);
                     self.free_translated_port_at(ip_idx, port, now_ns);
-                    return Ok(lease.translated);
+                    return Ok(joined);
                 }
                 drop(live);
                 self.free_translated_port(ip_idx, port);
@@ -6604,47 +6480,26 @@ impl PortAllocator {
         // A synced persistent flow joins its existing source lease when present.
         if let Some((persistent_key, timeout_ns)) = persistent {
             if let Some(lease) = live.persistent_by_source.get(&persistent_key).copied() {
-                let was_idle = lease.active_flows == 0 && lease.inbound_flows == 0;
-                if let Some(lease) = live.persistent_by_source.get_mut(&persistent_key) {
-                    // #8132: the 0 -> 1 edge re-arms the ACTIVATION-ROLLBACK
-                    // bookkeeping, as the local reuse path does. Without it
-                    // `rollback_flow` sees a lease that has never seen a
-                    // completion and records no previous state, concludes the
-                    // activation CREATED it, DELETES it — and here, on the
-                    // port-bearing arm, FREES the pool port the lease was
-                    // holding.
-                    //
-                    // The shape that reaches it is an idle lease installed by
-                    // #8121's `import_idle_lease`
-                    // (`activation_saw_completion: false`,
-                    // `activation_had_previous_lease: false`). An idle lease
-                    // that got there the ordinary way carries
-                    // `activation_saw_completion == true` and survives, which is
-                    // why this went unnoticed when #7360 landed: the
-                    // interaction needs BOTH changes present.
-                    if was_idle {
-                        lease.activation_saw_completion = false;
-                        lease.activation_previous_expires_at_ns = lease.expires_at_ns;
-                        lease.activation_previous_timeout_ns = lease.timeout_ns;
-                        lease.activation_had_previous_lease = true;
-                        // #10789-F4: synced joins preserve peer origin. A local
-                        // flow joining while this lease is active carries its
-                        // own promotion marker and promotes only on completion.
-                    }
-                    lease.active_flows = lease.active_flows.saturating_add(1);
-                }
-                // An ACTIVE lease must not sit in the idle-expiry index — the
-                // invariant `assert_persistent_expiry_indexes_consistent`
-                // states it, and `reuse_existing_lease_locked` maintains it the
-                // same way on the local path.
-                if was_idle {
-                    Self::remove_lease_expiration_locked(
+                // #8132/#17028: the shared 0->1 join re-arms the
+                // activation-rollback snapshot exactly as the local
+                // reuse path does (an idle #8121 import carries no
+                // previous state, so without it rollback deletes the
+                // lease and frees its port). Synced joins preserve
+                // peer origin: no promotion marker, no expiry refresh.
+                let lease_table::JoinOutcome::Joined { was_idle, .. } =
+                    lease_table::join_persistent_lease_locked(
                         &mut live,
-                        lease.addr_index,
-                        lease.expires_at_ns,
                         persistent_key,
-                    );
-                }
+                        lease_table::JoinPolicy {
+                            timeout_ns: bounded_persistent_nat_timeout_ns(timeout_ns),
+                            promote_imported: false,
+                            refresh_expiry: false,
+                        },
+                        now_ns,
+                    )
+                else {
+                    return false;
+                };
                 if !self.shared.flows.try_insert_in_shard(
                     &mut live.shard,
                     flow,
@@ -6659,10 +6514,8 @@ impl PortAllocator {
                     },
                     self.shared.max_tracked_flows,
                 ) {
-                    // Fold 2: admission lost to a racer on another
-                    // shard — undo the lease join above (refcount;
-                    // the idle-edge expiry entry is re-registered
-                    // from the copied lease) and refuse.
+                    // Fold 2: admission lost — undo the join (refcount;
+                    // idle-edge expiry re-registered from the copy).
                     if let Some(slot) = live.persistent_by_source.get_mut(&persistent_key) {
                         slot.active_flows = slot.active_flows.saturating_sub(1);
                     }
@@ -6679,7 +6532,6 @@ impl PortAllocator {
                 }
                 live.record_pat_owner(&flow, translated);
                 *previous_snapshot = live.previous_snapshot();
-
                 return true;
             }
         }
@@ -6984,7 +6836,6 @@ impl PortAllocator {
                 return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
             }
         }
-        let mut idle_lease_to_deindex: Option<(usize, u64)> = None;
         if let Some((persistent_key, _)) = persistent {
             if addr_index >= live.lease_expirations_by_addr.len() {
                 return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
@@ -6998,9 +6849,6 @@ impl PortAllocator {
                 // the reason; the `Err` itself is the signal.)
                 if lease.translated != translated || lease.addr_index != addr_index {
                     return Err(super::source::SourceNatFailureReason::AllocatorExhausted);
-                }
-                if lease.active_flows == 0 && lease.inbound_flows == 0 {
-                    idle_lease_to_deindex = Some((lease.addr_index, lease.expires_at_ns));
                 }
             }
         }
@@ -7039,70 +6887,46 @@ impl PortAllocator {
         // lease minted here is peer-derived: `imported: true`.
         let persistent_key = persistent.map(|(persistent_key, timeout_ns)| {
             let timeout_ns = bounded_persistent_nat_timeout_ns(timeout_ns);
-            match live.persistent_by_source.get_mut(&persistent_key) {
-                Some(lease) => {
-                    // The 0 -> 1 active-flow edge re-arms the
-                    // ACTIVATION-ROLLBACK bookkeeping, exactly as the local
-                    // reuse path does. Without it `rollback_flow` reads a lease
-                    // that has never seen a completion and has no recorded
-                    // previous state, concludes the activation CREATED it, and
-                    // DELETES it.
-                    //
-                    // Measured, not reasoned: an idle lease installed by
-                    // #8121's `import_idle_lease` is exactly that shape
-                    // (`activation_saw_completion: false`,
-                    // `activation_had_previous_lease: false`, `active_flows:
-                    // 0`). Join a synced flow to it and roll that flow back —
-                    // which is the #8115 peer-conflict path, not a hypothetical
-                    // — and the imported lease is gone. An idle lease that got
-                    // there the ordinary way (its flows completed) carries
-                    // `activation_saw_completion == true` and survives, which
-                    // is why nothing noticed.
-                    if idle_lease_to_deindex.is_some() {
-                        lease.activation_saw_completion = false;
-                        lease.activation_previous_expires_at_ns = lease.expires_at_ns;
-                        lease.activation_previous_timeout_ns = lease.timeout_ns;
-                        lease.activation_had_previous_lease = true;
-                        // Synced joins preserve peer origin; only a successful
-                        // local flow completion promotes an active lease.
-                    }
-                    lease.active_flows = lease.active_flows.saturating_add(1);
-                }
-                None => {
-                    live.insert_persistent_lease(
-                        persistent_key,
-                        PersistentLease {
-                            translated,
-                            incarnation: 0,
-                            addr_index,
-                            expires_at_ns: now_ns.saturating_add(timeout_ns),
-                            timeout_ns,
-                            active_flows: 1,
-                            inbound_flows: 0,
-                            completed_flows: 0,
-                            activation_saw_completion: false,
-                            activation_previous_expires_at_ns: 0,
-                            activation_had_previous_lease: false,
-                            activation_previous_timeout_ns: 0,
-                            // The lease pins an ADDRESS and holds no port bit.
-                            // Its teardown must not free one, and
-                            // `gc_expired_locked` reads this flag to decide.
-                            deterministic: false,
-                            deterministic_identity: None,
-                            address_only: true,
-                            // #10789-F4: rebuilt from a synced session — never re-exported.
-                            imported: true,
-                            revoked: false,
-                        },
-                    );
-                }
-            }
-            // An ACTIVE lease must not sit in the idle-expiry index — the
-            // invariant `assert_persistent_expiry_indexes_consistent` states
-            // it, and both the local reuse path and #7360's synced twin
-            // maintain it exactly this way.
-            if let Some((idx, expires_at_ns)) = idle_lease_to_deindex {
-                Self::remove_lease_expiration_locked(&mut live, idx, expires_at_ns, persistent_key);
+            if live.persistent_by_source.contains_key(&persistent_key) {
+                // #8132/#17028: the shared 0->1 join re-arms the
+                // activation-rollback snapshot (an idle #8121 import
+                // carries no previous state, so rollback would delete
+                // it) and de-indexes the idle expiry — replacing the
+                // open-coded `idle_lease_to_deindex` tail below.
+                // Synced joins preserve peer origin.
+                let _ = lease_table::join_persistent_lease_locked(
+                    &mut live,
+                    persistent_key,
+                    lease_table::JoinPolicy {
+                        timeout_ns,
+                        promote_imported: false,
+                        refresh_expiry: false,
+                    },
+                    now_ns,
+                );
+            } else {
+                live.insert_persistent_lease(
+                    persistent_key,
+                    PersistentLease {
+                        translated,
+                        incarnation: 0,
+                        addr_index,
+                        expires_at_ns: now_ns.saturating_add(timeout_ns),
+                        timeout_ns,
+                        active_flows: 1,
+                        inbound_flows: 0,
+                        completed_flows: 0,
+                        activation_saw_completion: false,
+                        activation_previous_expires_at_ns: 0,
+                        activation_had_previous_lease: false,
+                        activation_previous_timeout_ns: 0,
+                        deterministic: false,
+                        deterministic_identity: None,
+                        address_only: true,
+                        imported: true,
+                        revoked: false,
+                    },
+                );
             }
             persistent_key
         });
@@ -7825,22 +7649,17 @@ impl PortAllocator {
                 ));
             }
         }
-        if let Some((translated, addr_index, expires_at_ns, address_only, deterministic)) = expired
-        {
-            // Reclaimable: idle and past its inactivity window, or an IDLE lease
-            // in the other mode. Drop it so a fresh address is picked below.
-            Self::remove_lease_expiration_locked(&mut live, addr_index, expires_at_ns, key);
-            // #9158: free the bit a PAT lease owns, exactly as the port-bearing
-            // mirror does. An ADDRESS-ONLY lease holds no pool port -- its
-            // per-flow reverse-identity tokens were cleared when each flow
-            // released -- so freeing `translated.port` for one would clear an
-            // UNRELATED PAT flow's bit that happens to share the offset (#6041).
-            // Every lease reaching here is idle by the arms above, so no live
-            // flow is forwarding on the port being freed.
-            if !address_only {
-                self.free_translated_port_at(addr_index, translated.port, now_ns);
+        if expired.is_some() {
+            // Reclaimable: idle and past its inactivity window, or an
+            // IDLE lease in the other mode. #17028: the shared retire
+            // drops the expiry entries + lease and reports the port
+            // to free by-mode (a PAT lease's bit, #9158; an
+            // address-only lease holds none, #6041).
+            if let Some(retired) = lease_table::retire_idle_lease_locked(&mut live, &key) {
+                if let Some((addr_index, port)) = retired.freed_port {
+                    self.free_translated_port_at(addr_index, port, now_ns);
+                }
             }
-            live.remove_persistent_lease(&key);
         }
 
         let reusing = reuse_addr.is_some();
@@ -7975,36 +7794,24 @@ impl PortAllocator {
 
         let mut promotion_timeout_ns = None;
         if reusing {
-            // Bump the existing lease. On the 0->1 active-flow edge re-arm the
-            // activation-rollback bookkeeping and drop the stale idle expiry-index
-            // entry (an ACTIVE lease is not indexed). Always push the inactivity
-            // expiry out.
-            let mut remove_expiry = None;
-            if let Some(lease) = live.persistent_by_source.get_mut(&key) {
-                if lease.active_flows == 0 && lease.inbound_flows == 0 {
-                    remove_expiry = Some((lease.addr_index, lease.expires_at_ns));
-                    lease.activation_saw_completion = false;
-                    lease.activation_previous_expires_at_ns = lease.expires_at_ns;
-                    lease.activation_previous_timeout_ns = lease.timeout_ns;
-                    lease.activation_had_previous_lease = true;
-                    if lease.imported {
-                        // As in PAT, defer imported-idle ownership transfer
-                        // until this local flow completes; rollback simply
-                        // removes the marker, even if synced flows joined.
-                        promotion_timeout_ns = Some(timeout_ns);
-                    } else {
-                        lease.timeout_ns = timeout_ns;
-                    }
-                } else if lease.imported {
-                    // As in PAT, reserve is tentative until the local flow
-                    // completes; rollback drops this marker without promotion.
-                    promotion_timeout_ns = Some(timeout_ns);
-                }
-                lease.active_flows = lease.active_flows.saturating_add(1);
-                lease.expires_at_ns = expires_at_ns;
-            }
-            if let Some((idx, old_expires_at_ns)) = remove_expiry {
-                Self::remove_lease_expiration_locked(&mut live, idx, old_expires_at_ns, key);
+            // #17028: the shared 0->1 join (snapshot, de-index,
+            // timeout/promotion, refcount, expiry push-out).
+            let outcome = lease_table::join_persistent_lease_locked(
+                &mut live,
+                key,
+                lease_table::JoinPolicy {
+                    timeout_ns,
+                    promote_imported: true,
+                    refresh_expiry: true,
+                },
+                now_ns,
+            );
+            if let lease_table::JoinOutcome::Joined {
+                promotion_timeout_ns: marker,
+                ..
+            } = outcome
+            {
+                promotion_timeout_ns = marker;
             }
             self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
         } else if live_mode_mismatch {
@@ -8037,7 +7844,6 @@ impl PortAllocator {
                     deterministic: false,
                     deterministic_identity: None,
                     address_only: true,
-                    // #10789-F4: minted by a local lookup — exportable.
                     imported: false,
                     revoked: false,
                 },
@@ -8487,18 +8293,16 @@ impl PortAllocator {
         {
             return false;
         }
-        // The lease still exists and is idle: its occupancy bit is still set
-        // (no other allocation could have claimed it while the lease held it —
-        // the bit is the ownership token). Remove the lease and record its port
-        // so the caller frees it (recycle). Because the bit stays set until that
-        // free, a concurrent claim cannot re-hand-out the port even after the
-        // lease is gone from the map.
-        live.remove_persistent_lease(&key);
-        // #6041: an address-only persistent lease holds no pool port bit — its
-        // reverse-identity tokens were cleared per flow on release — so there is
-        // nothing to free on the occupancy bitmap. A PAT lease records its port.
-        if !lease.address_only {
-            freed.push((lease.addr_index, lease.translated.port));
+        // The lease is idle and its bit is still set (the ownership
+        // token), so no claim can re-hand-out the port in the gap
+        // before the caller frees it. #17028: shared retire, port
+        // Deferred into `freed` (address-only holds none, #6041).
+        // The collect_* callers already popped both expiry indexes.
+        let Some(retired) = lease_table::retire_idle_lease_locked(live, &key) else {
+            return false;
+        };
+        if let Some(port) = retired.freed_port {
+            freed.push(port);
         }
         true
     }

@@ -388,10 +388,14 @@ func (c *ctl) showZones(filter string) error {
 				fmt.Println("  " + config.ZoneQuarantinePoliciesQualifier)
 			}
 			fmt.Println("  Policy summary (evaluation order: zone-pair, global, default-policy):")
-			var exactLines, singleWildLines, bothAnyLines, globalLines []string
+			var zonePairLines, globalLines []string
 			zonePairPolicies := 0
 			globalPolicies := 0
 			var defaultName, defaultAction string
+			// #17075: collect zone-pair stanzas for the shared stream; globals
+			// and the default row are handled in the loop below, then zone-pair
+			// lines print in stream tier order.
+			var zpStanzas []policymatch.ZonePairStanza
 			for _, pi := range polResp.Policies {
 				switch {
 				case pi.FromZone == "-" && pi.ToZone == "-":
@@ -433,53 +437,38 @@ func (c *ctl) showZones(filter string) error {
 						globalPolicies++
 					}
 				default:
-					// Zone-pair tier. #12899: match a side when it equals the
-					// zone OR is the explicit "any" wildcard — a `from any to
-					// untrust` set governs a trust->untrust flow, and `any ->
-					// any` governs every zone, yet neither literally names the
-					// zone, so the pre-fix filter dropped both. The wildcard leg
-					// is live-zone-gated: "every zone" means every INSTALLED
-					// zone, and a quarantined zone is omitted by the builder, so
-					// a wildcard cannot govern it — a literal reference still
-					// selects the set so the row stays visible for diagnosis,
-					// carrying the server's per-rule scrub verdict.
-					fromAny := pi.FromZone == "any"
-					toAny := pi.ToZone == "any"
-					fromAffects := pi.FromZone == z.Name || (fromAny && !quarantined)
-					toAffects := pi.ToZone == z.Name || (toAny && !quarantined)
-					if !fromAffects && !toAffects {
-						continue
-					}
-					for _, rule := range pi.Rules {
-						line := fmt.Sprintf("    [zone-pair] %s -> %s: %s (%s)",
-							pi.FromZone, pi.ToZone, rule.Name, rule.Action)
-						if rule.GetQuarantined() {
-							line += " " + config.ZoneQuarantinePoliciesQualifier
+					// Zone-pair stanza: collect for the shared stream below
+					// (#17075). Applicability (literal name or live wildcard,
+					// #12899) and tier order are the stream's.
+					st := policymatch.ZonePairStanza{From: pi.FromZone, To: pi.ToZone}
+					for idx, rule := range pi.Rules {
+						if rule == nil {
+							continue
 						}
-						switch {
-						case fromAny && toAny:
-							bothAnyLines = append(bothAnyLines, line)
-						case fromAny || toAny:
-							singleWildLines = append(singleWildLines, line)
-						default:
-							exactLines = append(exactLines, line)
-						}
-						zonePairPolicies++
+						st.Rules = append(st.Rules, policymatch.StanzaRef{
+							SliceIdx: idx, From: pi.FromZone, To: pi.ToZone,
+							Rule: policymatch.InventoryRule{Name: rule.Name, Quarantined: rule.GetQuarantined(), Rule: rule},
+						})
 					}
+					zpStanzas = append(zpStanzas, st)
 				}
+			}
+			for ref := range policymatch.ZonePairZoneSummaryStream(policymatch.InventoryStanzas(zpStanzas), z.Name, quarantined) {
+				rule := ref.Rule.Rule.(*pb.PolicyRule)
+				line := fmt.Sprintf("    [zone-pair] %s -> %s: %s (%s)",
+					ref.From, ref.To, rule.Name, rule.Action)
+				if rule.GetQuarantined() {
+					line += " " + config.ZoneQuarantinePoliciesQualifier
+				}
+				zonePairLines = append(zonePairLines, line)
+				zonePairPolicies++
 			}
 			// Tier-one buckets in runtime precedence order (the response is
 			// config-ordered, so a both-any set authored FIRST would otherwise
 			// print above the exact set that actually shadows it), then the
 			// global tier — collected above because the summary must read
 			// tier-by-tier regardless of group positions in the response.
-			for _, line := range exactLines {
-				fmt.Println(line)
-			}
-			for _, line := range singleWildLines {
-				fmt.Println(line)
-			}
-			for _, line := range bothAnyLines {
+			for _, line := range zonePairLines {
 				fmt.Println(line)
 			}
 			for _, line := range globalLines {
@@ -678,20 +667,29 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 	}
 	if filtered && !globalOnly {
 		pairFilter := policymatch.NewZonePairPolicyFilter(zoneFilterConfig, fromZone, toZone)
-		// Zone-pair rule inventory follows runtime precedence, not config-group
-		// placement: exact, single-wildcard, then both-wildcard. Globals render
-		// after this loop below.
-		for tier := range 3 {
-			for _, pi := range resp.Policies {
-				if pi.FromZone == "*" && pi.ToZone == "*" {
-					continue
-				}
-				if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, pi.FromZone, pi.ToZone) ||
-					policymatch.ZonePairPolicyFilterTier(pi.FromZone, pi.ToZone) != tier {
-					continue
-				}
-				renderZonePairGroup(pi)
+		// #17075: tier order + applicability from the shared stream over the
+		// inventory adapter. Globals render after this loop below.
+		var stanzas []policymatch.ZonePairStanza
+		keptIdx := []int{}
+		for gi, pi := range resp.Policies {
+			if pi.FromZone == "*" && pi.ToZone == "*" {
+				continue
 			}
+			keptIdx = append(keptIdx, gi)
+			st := policymatch.ZonePairStanza{From: pi.FromZone, To: pi.ToZone}
+			for idx, rule := range pi.Rules {
+				if rule == nil {
+					continue
+				}
+				st.Rules = append(st.Rules, policymatch.StanzaRef{
+					SliceIdx: idx, From: pi.FromZone, To: pi.ToZone,
+					Rule: policymatch.InventoryRule{Name: rule.Name, Quarantined: rule.GetQuarantined(), Rule: rule},
+				})
+			}
+			stanzas = append(stanzas, st)
+		}
+		for stanza := range policymatch.ZonePairStanzasOrdered(policymatch.InventoryStanzas(stanzas), pairFilter) {
+			renderZonePairGroup(resp.Policies[keptIdx[stanza.SetIdx]])
 		}
 	}
 	for _, pi := range resp.Policies {
@@ -1153,17 +1151,28 @@ func (c *ctl) showPoliciesBriefFiltered(fromZone, toZone string) error {
 		}
 	}
 	if filtered {
-		for tier := range 3 {
-			for _, pi := range resp.Policies {
-				if pi.FromZone == "*" && pi.ToZone == "*" {
-					continue
-				}
-				if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, pi.FromZone, pi.ToZone) ||
-					policymatch.ZonePairPolicyFilterTier(pi.FromZone, pi.ToZone) != tier {
-					continue
-				}
-				renderZonePair(pi)
+		// #17075: tier order + applicability from the shared stream.
+		var stanzas []policymatch.ZonePairStanza
+		keptIdx := []int{}
+		for gi, pi := range resp.Policies {
+			if pi.FromZone == "*" && pi.ToZone == "*" {
+				continue
 			}
+			keptIdx = append(keptIdx, gi)
+			st := policymatch.ZonePairStanza{From: pi.FromZone, To: pi.ToZone}
+			for idx, rule := range pi.Rules {
+				if rule == nil {
+					continue
+				}
+				st.Rules = append(st.Rules, policymatch.StanzaRef{
+					SliceIdx: idx, From: pi.FromZone, To: pi.ToZone,
+					Rule: policymatch.InventoryRule{Name: rule.Name, Quarantined: rule.GetQuarantined(), Rule: rule},
+				})
+			}
+			stanzas = append(stanzas, st)
+		}
+		for stanza := range policymatch.ZonePairStanzasOrdered(policymatch.InventoryStanzas(stanzas), pairFilter) {
+			renderZonePair(resp.Policies[keptIdx[stanza.SetIdx]])
 		}
 	}
 	for _, pi := range resp.Policies {

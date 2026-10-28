@@ -1344,18 +1344,19 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// materialised (FRR treats a zero-entry prefix-list as
 				// PREFIX_PERMIT / match-ALL). Sequences reaching here are
 				// never all-INVALID (#14137 diverts those groups to
-				// deny-all / skip in the dispatch), so a zero-permit list
-				// is a legitimately empty set: the match line still
-				// references the undefined list name, which FRR resolves
-				// to NULL → RMAP_NOMATCH. Suppressing that match line would
-				// leave a bare "route-map … permit <seq>" with no match
-				// clauses, which FRR treats as match-ALL — flipping
-				// "/32 longer" from empty to permit-everything (#2110).
-				// #16762: renderRouteFilterListGroup orders nested
-				// permits longest-match-first (leaving unrelated bases
-				// in authored order) and interposes stops; a zero-permit
-				// result keeps the historical undefined-list NOMATCH
-				// behaviour below, so no special-casing here.
+				// deny-all / skip in the dispatch), so a zero-entry list
+				// here is a legitimately empty set: the match line still
+				// references the (then-undefined) list name, which FRR
+				// resolves to NULL → RMAP_NOMATCH, so the term matches
+				// NOTHING. Suppressing the match line would leave a bare
+				// "route-map … permit <seq>" with no match clauses, which
+				// FRR treats as match-ALL — flipping "/32 longer" from the
+				// empty set to permit-everything (Copilot #2110).
+				// #16762: only a group with strict base containment is
+				// sorted/re-sequenced longest-match-first and gets stops.
+				// Groups without containment preserve authored order and
+				// original seq slots; zero entries still keep the
+				// historical undefined-list NOMATCH behaviour below.
 				// First-parseable sets the family hint when nothing
 				// emitted; the first emitted entry overrides it — the
 				// same precedence the pre-#16762 loop used.

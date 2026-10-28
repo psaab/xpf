@@ -49,6 +49,14 @@ impl super::Coordinator {
             .load(Ordering::Relaxed)
     }
 
+    /// #17201: TupleGate mutex poison recoveries (shard, entry and
+    /// admission locks). Process-global atomic, read directly like the
+    /// WG uncovered twin above. Surfaced as
+    /// `xpf_tuple_gate_poison_recoveries_total`.
+    pub fn tuple_gate_poison_recoveries(&self) -> u64 {
+        crate::afxdp::bpf_map::tuple_gate_poison_recoveries()
+    }
+
     pub fn dynamic_neighbor_status(&self) -> (usize, u64) {
         let entries = self.neighbors.dynamic.len();
         let generation = self.neighbors.generation.load(Ordering::Relaxed);
@@ -1135,15 +1143,11 @@ impl super::Coordinator {
     pub fn recent_exceptions(&self) -> Vec<ExceptionStatus> {
         let anchor = MonoWallAnchor::capture();
         let mut events: Vec<ExceptionEvent> = Vec::new();
-        if let Ok(ring) = self.recent_exceptions.lock() {
-            events.extend(ring.iter().cloned());
-        }
+        events.extend(crate::sync_util::lock_tolerant(&self.recent_exceptions).iter().cloned());
         // #6242: drain each worker's exception ring off its runtime record
         // (was the standalone `worker_exception_rings` map).
         for rec in self.workers.records().values() {
-            if let Ok(ring) = rec.exception_ring.lock() {
-                events.extend(ring.iter().cloned());
-            }
+            events.extend(crate::sync_util::lock_tolerant(&rec.exception_ring).iter().cloned());
         }
         events.sort_by_key(|e| e.mono);
         let start = events.len().saturating_sub(EXCEPTION_RING_CAPACITY);
@@ -1154,10 +1158,7 @@ impl super::Coordinator {
     }
 
     pub fn recent_session_deltas(&self) -> Vec<SessionDeltaInfo> {
-        self.recent_session_deltas
-            .lock()
-            .map(|recent| recent.iter().cloned().collect())
-            .unwrap_or_default()
+        crate::sync_util::lock_tolerant(&self.recent_session_deltas).iter().cloned().collect()
     }
 
     /// #5289: the most-recent forwarding resolution across the control-thread
@@ -1172,15 +1173,11 @@ impl super::Coordinator {
                 newest = Some(ev);
             }
         };
-        if let Ok(last) = self.last_resolution.lock() {
-            consider(last.clone());
-        }
+        consider(crate::sync_util::lock_tolerant(&self.last_resolution).clone());
         // #6242: pick the newest across each worker's last-resolution slot off
         // its runtime record (was the standalone `worker_last_resolution` map).
         for rec in self.workers.records().values() {
-            if let Ok(last) = rec.last_resolution.lock() {
-                consider(last.clone());
-            }
+            consider(crate::sync_util::lock_tolerant(&rec.last_resolution).clone());
         }
         newest.map(|ev| ev.to_resolution(&self.forwarding))
     }
@@ -1828,11 +1825,9 @@ impl super::Coordinator {
                     .dead
                     .load(std::sync::atomic::Ordering::Relaxed);
                 let panic_message = if dead {
-                    match rec.panic.lock() {
-                        Ok(g) => g.clone(),
-                        Err(poisoned) => poisoned.into_inner().clone(),
-                    }
-                    .unwrap_or_default()
+                    crate::sync_util::lock_tolerant(&rec.panic)
+                        .clone()
+                        .unwrap_or_default()
                 } else {
                     String::new()
                 };

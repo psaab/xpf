@@ -221,18 +221,13 @@ impl StateWriter {
                 let mut write_mode = match RingWriter::new(8) {
                     Ok(ring) => {
                         active_bg.store(true, Ordering::Relaxed);
-                        if let Ok(mut m) = mode_bg.lock() {
-                            *m = "io_uring".to_string();
-                        }
+                        *crate::sync_util::lock_tolerant(&mode_bg) = "io_uring".to_string();
                         WriteMode::IoUring(ring)
                     }
                     Err(err) => {
-                        if let Ok(mut m) = mode_bg.lock() {
-                            *m = "sync".to_string();
-                        }
-                        if let Ok(mut last) = last_error_bg.lock() {
-                            *last = format!("io_uring unavailable: {err}");
-                        }
+                        *crate::sync_util::lock_tolerant(&mode_bg) = "sync".to_string();
+                        *crate::sync_util::lock_tolerant(&last_error_bg) =
+                            format!("io_uring unavailable: {err}");
                         WriteMode::SyncFallback
                     }
                 };
@@ -286,12 +281,8 @@ impl StateWriter {
     pub fn status(&self) -> WriterStatus {
         WriterStatus {
             active: self.active.load(Ordering::Relaxed),
-            mode: self.mode.lock().map(|m| m.clone()).unwrap_or_default(),
-            last_error: self
-                .last_error
-                .lock()
-                .map(|v| v.clone())
-                .unwrap_or_default(),
+            mode: crate::sync_util::lock_tolerant(&self.mode).clone(),
+            last_error: crate::sync_util::lock_tolerant(&self.last_error).clone(),
         }
     }
 }
@@ -387,25 +378,19 @@ fn apply_outcome(
     if outcome.io_uring_failed && matches!(mode, WriteMode::IoUring(_)) {
         *mode = WriteMode::SyncFallback;
         active.store(false, Ordering::Relaxed);
-        if let Ok(mut m) = mode_str.lock() {
-            *m = "sync".to_string();
-        }
+        *crate::sync_util::lock_tolerant(mode_str) = "sync".to_string();
     }
     match &outcome.result {
         Err(err) => {
-            if let Ok(mut last) = last_error.lock() {
-                *last = err.clone();
-            }
+            *crate::sync_util::lock_tolerant(last_error) = err.clone();
         }
         Ok(()) => {
             // The write itself succeeded. If io_uring failed and we fell back to
             // sync, surface the demotion cause so the transition is observable
             // even without a failed write.
             if outcome.io_uring_failed {
-                if let (Ok(mut last), Some(cause)) =
-                    (last_error.lock(), outcome.demotion_cause.as_ref())
-                {
-                    *last = cause.clone();
+                if let Some(cause) = outcome.demotion_cause.as_ref() {
+                    *crate::sync_util::lock_tolerant(last_error) = cause.clone();
                 }
             }
         }

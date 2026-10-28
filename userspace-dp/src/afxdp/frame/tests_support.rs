@@ -835,22 +835,15 @@ pub(super) fn test_descriptor(
         fabric_redirect: decision.resolution.disposition == ForwardingDisposition::FabricRedirect,
         tx_vlan_id: vlan_id,
         ether_type,
-        rewrite_src_ip: decision.nat.rewrite_src,
-        rewrite_dst_ip: decision.nat.rewrite_dst,
-        rewrite_src_port: decision.nat.rewrite_src_port,
-        rewrite_dst_port: decision.nat.rewrite_dst_port,
-        ip_csum_delta: compute_ip_csum_delta(flow, &decision.nat),
-        l4_csum_delta: compute_l4_csum_delta(flow, &decision.nat),
         egress_ifindex: decision.resolution.egress_ifindex,
         tx_ifindex: decision.resolution.tx_ifindex,
         target_binding_index: None,
         input_filter_log: None,
         input_filter_counters: crate::filter::CachedFilterCounters::default(),
         tx_selection: CachedTxSelectionDescriptor::default(),
-        nat64: false,
-        nptv6: false,
         apply_nat_on_fabric: false,
         last_queue_id: None,
+        ..RewriteDescriptor::from_decision(flow, decision.nat)
     }
 }
 

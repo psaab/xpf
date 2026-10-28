@@ -53,31 +53,46 @@
 /// couple this host-compiled module to the `no_std` crate root it must
 /// stay independent of. The agreement test pins these equal to the
 /// shim's constants by index and name, so the mirror cannot drift.
+// Host-test-only mirrors and oracle routines below are source-included by the
+// userspace-dp parity tests; the BPF shim calls only the live predicates.
+#[allow(dead_code)]
 pub const ARM_L2_PARSE_FAIL: u32 = 0;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_NON_ADJUDICATED_PASS: u32 = 4;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_WG_STEER: u32 = 9;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_EARLY_FILTER: u32 = 10;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_SESSION_HIT_PASS_KERNEL: u32 = 12;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_SESSION_MISS_NAT_NDP: u32 = 13;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_SESSION_MISS_ICMP_NAT_LOCAL: u32 = 14;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_SESSION_MISS_LOCAL: u32 = 15;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_SESSION_MISS_IFNAT_KERNEL_TUNNEL: u32 = 16;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_GRE_INNER_PASS_KERNEL: u32 = 19;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_CTRL_DISABLED_LOCAL: u32 = 26;
 /// See [`ARM_L2_PARSE_FAIL`].
+#[allow(dead_code)]
 pub const ARM_SESSION_MISS_PROXY_NDP: u32 = 27;
 
 /// How the degraded composition treats one healthy kernel-pass arm.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DegradedTwin {
     /// The degraded path reaches the same kernel-pass verdict on the
@@ -107,6 +122,7 @@ pub enum DegradedTwin {
 /// table to cover it, and requires every row to name a real arm — it
 /// does not consult a hardcoded name list, so a new `cpumap_or_pass`
 /// arm without a row fails the test.
+#[allow(dead_code)]
 pub const DEGRADED_TWIN: &[(u32, DegradedTwin)] = &[
     (
         ARM_L2_PARSE_FAIL,
@@ -165,6 +181,7 @@ pub const DEGRADED_TWIN: &[(u32, DegradedTwin)] = &[
 /// The `cpumap_or_pass`-disposition arm indices, in dispatch order. The
 /// agreement test derives this set from the shim source and requires
 /// `DEGRADED_TWIN` (and this list) to cover exactly it.
+#[allow(dead_code)]
 pub const KERNEL_PASS_ARMS: &[u32] = &[
     ARM_L2_PARSE_FAIL,
     ARM_NON_ADJUDICATED_PASS,
@@ -181,6 +198,7 @@ pub const KERNEL_PASS_ARMS: &[u32] = &[
 ];
 
 /// Look up the declared degraded twin of a branch arm.
+#[allow(dead_code)]
 #[inline(always)]
 pub fn degraded_twin(arm: u32) -> Option<DegradedTwin> {
     let mut i = 0;
@@ -302,6 +320,7 @@ pub fn degraded_local_or_control_prefix(
 /// local/control while degraded. The fully resolved host form and
 /// the shim's staged form return the identical verdict at every
 /// point (the host cell proves the split exhaustively).
+#[allow(dead_code)]
 #[inline(always)]
 pub fn degraded_local_or_control(
     native_gre_fragment_on_helper: bool,
@@ -350,6 +369,7 @@ pub fn degraded_local_or_control(
 /// native-GRE gate. Expressed through `degraded_local_or_control_mid`
 /// so the shim's staged execution and this fully resolved form share
 /// the same tail decision. Called by `degraded_local_or_control`.
+#[allow(dead_code)]
 #[inline(always)]
 pub fn degraded_local_or_control_tail(
     destination_is_local: bool,

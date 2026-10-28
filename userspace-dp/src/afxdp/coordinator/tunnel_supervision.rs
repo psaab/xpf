@@ -355,7 +355,8 @@ impl super::Coordinator {
         let wake = match TunnelWake::new() {
             Ok(wake) => Arc::new(wake),
             Err(err) => {
-                if let Ok(mut recent) = self.recent_exceptions.lock() {
+                {
+                    let mut recent = crate::sync_util::lock_tolerant(&self.recent_exceptions);
                     push_recent_exception(
                         &mut recent,
                         control_notice_event(
@@ -428,7 +429,8 @@ impl super::Coordinator {
                 true,
             ),
             Err(err) => {
-                if let Ok(mut recent) = self.recent_exceptions.lock() {
+                {
+                    let mut recent = crate::sync_util::lock_tolerant(&self.recent_exceptions);
                     push_recent_exception(
                         &mut recent,
                         control_notice_event(
@@ -1021,7 +1023,8 @@ impl super::Coordinator {
                 join: Some(join),
             }),
             Err(err) => {
-                if let Ok(mut recent) = self.recent_exceptions.lock() {
+                {
+                    let mut recent = crate::sync_util::lock_tolerant(&self.recent_exceptions);
                     push_recent_exception(
                         &mut recent,
                         control_notice_event(
