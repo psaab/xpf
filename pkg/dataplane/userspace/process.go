@@ -335,21 +335,24 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 		m.procGen == m.helperCrash.restartGen
 	restartAttempt := m.restartAttemptInProgress
 	entryGen := m.procGen
+	unexpectedExitsAtEntry := m.helperCrashUnexpectedExitsTotal
 	defer func() {
 		if retErr != nil {
-			// NM-1: a FAILED supervisor retry is a NEW crash-loop data
-			// point, not a preserved one — schedule (Restarts++) so a
-			// helper that never starts escalates to crash-looping. Only
-			// the Compile path re-arms at the same count (MAJOR-3a):
-			// Compile bring-up retires the generation carrying an armed
-			// retry without proving anything about the helper.
 			if restartAttempt && pendingCrashRetry && m.proc == nil {
-				// NM-2: a failed retry is observed helper failure, not quiet
-				// time — refresh the anchor so a run of failures cannot age
-				// the window out and journal the next landing as recovered.
-				m.helperCrashLastAt = time.Now()
-				m.scheduleHelperRestartLocked(m.procGen)
-				m.notifyHelperSupervisorLocked()
+				// A failed retry can be an exited supervised child.
+				// stopLocked routes that exit through the crash handler,
+				// which has already charged and armed its retry. Only a
+				// failed bring-up without a newly observed child exit needs
+				// to charge here.
+				if m.helperCrashUnexpectedExitsTotal == unexpectedExitsAtEntry {
+					// A failed retry is observed helper failure, not quiet
+					// time — refresh the anchor so a run of failures cannot
+					// age the window out and journal the next landing as
+					// recovered.
+					m.helperCrashLastAt = time.Now()
+					m.scheduleHelperRestartLocked(m.procGen)
+					m.notifyHelperSupervisorLocked()
+				}
 				return
 			}
 			if pendingCrashRetry && m.proc == nil &&
@@ -962,7 +965,31 @@ func (m *Manager) stopLocked() {
 	// debt. The bump is compatible with that path by construction: it already
 	// re-fences its next attempt on whatever `m.procGen` reads after the failed
 	// spawn.
-	m.procGen++
+	// #18213: retire this generation before any helper shutdown request or
+	// signal below. The supervisor's generation fence then recognizes the
+	// resulting exit as part of this planned stop. xpfd.service uses
+	// KillMode=mixed so systemd's initial stop signal lets xpfd reach this
+	// fence before it signals the helper.
+	// Account an exit already published by the active generation's waiter
+	// before retiring its fence. For a planned stop, the generation bump below
+	// cancels the crash handler's timer. During a failed supervisor retry,
+	// however, the helper is already gone and the handler's same-generation
+	// timer must remain live; its one schedule also owns this failed attempt's
+	// crash-loop accounting.
+	preRetirementCrash := false
+	if m.proc != nil {
+		if g := m.procSup; g != nil && g.gen == m.procGen {
+			select {
+			case <-g.exited:
+				m.handleUnexpectedHelperExitLocked(g)
+				preRetirementCrash = true
+			default:
+			}
+		}
+	}
+	if !preRetirementCrash || !m.restartAttemptInProgress {
+		m.procGen++
+	}
 	// This record bit describes a currently running supervisor retry, not
 	// durable episode history; an intentional stop makes that claim stale.
 	m.helperCrash.RecoveredSinceCrash = false
