@@ -21,7 +21,28 @@ pub(in crate::afxdp) fn resolve_tunnel_outer(
     depth: usize,
 ) -> Option<ForwardingLookupResult> {
     let endpoint = state.tunnel_endpoints.get(&tunnel_endpoint_id)?;
-    let outer = match endpoint.destination {
+    resolve_tunnel_outer_to(
+        state,
+        dynamic_neighbors,
+        endpoint,
+        endpoint.destination,
+        depth,
+    )
+}
+
+/// #17194: destination-parameterised twin of `resolve_tunnel_outer` for
+/// callers (WireGuard) whose outer destination is selected per packet rather
+/// than read from the endpoint row. Lookup flags, transport table and the
+/// recursion guard are shared with the row-destination wrapper so the two
+/// cannot drift.
+pub(in crate::afxdp) fn resolve_tunnel_outer_to(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    endpoint: &TunnelEndpoint,
+    destination: IpAddr,
+    depth: usize,
+) -> Option<ForwardingLookupResult> {
+    let outer = match destination {
         // #2734: tunnel OUTER resolution is per-tunnel-endpoint, not
         // per-inner-flow — no 5-tuple flow hash applies here, so pass
         // None (per-destination spread across outer-transport ECMP).
@@ -54,27 +75,23 @@ pub(in crate::afxdp) fn resolve_tunnel_outer(
     Some(outer)
 }
 
-pub(in crate::afxdp) fn resolve_tunnel_forwarding_resolution(
+/// #17194: map an outer lookup result onto the tunnel logical interface.
+/// Carries the #11423 down-tunnel withdrawal and the #11411
+/// `transport_route_mtu: outer.route_mtu` mapping so every caller (GRE FIB,
+/// WG TUN-origin) shares one outer→logical contract.
+pub(in crate::afxdp) fn map_outer_onto_tunnel_logical(
     state: &ForwardingState,
-    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
     tunnel_endpoint_id: u16,
-    depth: usize,
+    logical_ifindex: i32,
+    destination: IpAddr,
+    outer: ForwardingLookupResult,
 ) -> ForwardingResolution {
-    let Some(endpoint) = state.tunnel_endpoints.get(&tunnel_endpoint_id) else {
-        return no_route_resolution(None);
-    };
-    let logical_ifindex = endpoint.logical_ifindex;
-    let destination = endpoint.destination;
     // Route selection preserves a preferred drivable member as a cold-path
     // fallback when every member is non-live. Never let that fallback reopen a
     // down tunnel through an otherwise healthy outer underlay.
     if state.tunnel_endpoints_down.contains(&tunnel_endpoint_id) {
         return no_route_resolution(Some(destination));
     }
-    let Some(outer) = resolve_tunnel_outer(state, dynamic_neighbors, tunnel_endpoint_id, depth)
-    else {
-        return no_route_resolution(Some(destination));
-    };
     let outer = outer.resolution;
     ForwardingResolution {
         disposition: outer.disposition,
@@ -90,6 +107,35 @@ pub(in crate::afxdp) fn resolve_tunnel_forwarding_resolution(
         route_mtu: 0,
         transport_route_mtu: outer.route_mtu,
     }
+}
+
+pub(in crate::afxdp) fn resolve_tunnel_forwarding_resolution(
+    state: &ForwardingState,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+    tunnel_endpoint_id: u16,
+    depth: usize,
+) -> ForwardingResolution {
+    let Some(endpoint) = state.tunnel_endpoints.get(&tunnel_endpoint_id) else {
+        return no_route_resolution(None);
+    };
+    let logical_ifindex = endpoint.logical_ifindex;
+    let destination = endpoint.destination;
+    // #11423: check down before resolving so a down tunnel never even
+    // consults its (possibly healthy) outer underlay.
+    if state.tunnel_endpoints_down.contains(&tunnel_endpoint_id) {
+        return no_route_resolution(Some(destination));
+    }
+    let Some(outer) = resolve_tunnel_outer(state, dynamic_neighbors, tunnel_endpoint_id, depth)
+    else {
+        return no_route_resolution(Some(destination));
+    };
+    map_outer_onto_tunnel_logical(
+        state,
+        tunnel_endpoint_id,
+        logical_ifindex,
+        destination,
+        outer,
+    )
 }
 
 /// The ifindex on which `resolution.next_hop` must be neighbor-resolved
@@ -155,7 +201,7 @@ pub(in crate::afxdp) fn lookup_neighbor_entry(
     None
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn parse_neighbor_entries(output: &str) -> Vec<(IpAddr, NeighborEntry)> {
     let mut out = Vec::new();
     for line in output.lines() {

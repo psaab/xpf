@@ -29,6 +29,7 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		SessionDeleteRefusedIdentity:       21,
 		SessionDeleteDroppedReleased:       22,
 		TunnelPurgeReservationsReleased:    23,
+		TunnelPurgeDeleteRefused:           34,
 		SyncedReverseRederived:             24,
 		PeerDeleteRefusedLocalOwned:        25,
 		SessionDeleteReplicaDropped:        26,
@@ -50,8 +51,8 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 	for metric := range ch {
 		got = append(got, metric)
 	}
-	if len(got) != 35 {
-		t.Fatalf("emitted %d metrics, want 35 counters / labeled series / gauges", len(got))
+	if len(got) != 36 {
+		t.Fatalf("emitted %d metrics, want 36 counters / labeled series / gauges", len(got))
 	}
 	// #15104: the four ambiguity gauges carry live values, not counters.
 	for _, gauge := range []struct {
@@ -94,6 +95,7 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		{c.userspaceSessionDeleteRefusedIdentity, 21},
 		{c.userspaceSessionDeleteDroppedReleased, 22},
 		{c.userspaceTunnelPurgeReservationsReleased, 23},
+		{c.userspaceTunnelPurgeDeleteRefused, 34},
 		{c.userspaceSyncedReverseRederived, 24},
 		{c.userspacePeerDeleteRefusedLocalOwned, 25},
 		{c.userspaceSessionDeleteReplicaDropped, 26},

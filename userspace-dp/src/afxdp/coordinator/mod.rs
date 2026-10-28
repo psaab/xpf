@@ -96,7 +96,7 @@ fn wg_endpoint_set_summary(state: &ForwardingState) -> String {
     let mut parts: Vec<String> = state
         .tunnel_endpoints
         .values()
-        .filter(|ep| ep.mode == "wireguard")
+        .filter(|ep| ep.kind == TunnelKind::WireGuard)
         .map(|ep| format!("{}:{}@{}", ep.id, ep.wg_listen_port, ep.logical_ifindex))
         .collect();
     parts.sort();
@@ -591,6 +591,11 @@ pub struct Coordinator {
     /// monitor gate. Always false in release builds.
     #[cfg(test)]
     pub(crate) force_ipsec_sa_not_ready: bool,
+    /// #7209: SHARED with the session-domain handle, not copied. The six
+    /// tests that set it do so on this struct after construction; a copied
+    /// `usize` would leave the handle reading 0, so every cap assertion would
+    /// silently measure the production formula instead of the override — a
+    /// test seam that stops seaming without failing.
     /// #5674 test seam (per-instance, NOT a process-global): when nonzero,
     /// `synced_import_cap()` returns TWICE this value (the override expresses a
     /// LOGICAL ceiling; `synced_import_cap()` doubles it) instead of the real
@@ -599,11 +604,6 @@ pub struct Coordinator {
     /// `DEFAULT_MAX_SESSIONS` (131072) entries. Always 0 in release builds
     /// (the field does not exist); per-instance so parallel tests never race.
     #[cfg(test)]
-    /// #7209: SHARED with the session-domain handle, not copied. The six
-    /// tests that set it do so on this struct after construction; a copied
-    /// `usize` would leave the handle reading 0, so every cap assertion would
-    /// silently measure the production formula instead of the override — a
-    /// test seam that stops seaming without failing.
     pub(crate) synced_import_cap_override: Arc<std::sync::atomic::AtomicUsize>,
     /// #5166 test seam (per-instance, NOT a process-global): under
     /// `cfg(test)`, `refresh_runtime_snapshot_inner` records a clone of the
@@ -889,7 +889,6 @@ impl Coordinator {
         self.event_stream.as_ref().map(|es| es.stats())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn dynamic_neighbors_ref(&self) -> &Arc<ShardedNeighborMap> {
         &self.neighbors.dynamic
     }
@@ -1009,8 +1008,12 @@ impl Coordinator {
     }
 
     /// See [`Coordinator::upsert_synced_session`].
-    pub fn delete_synced_session(&self, key: crate::session::SessionKey, forward_only: bool) {
-        self.session_domain.delete_synced_session(key, forward_only);
+    pub fn delete_synced_session(
+        &self,
+        key: crate::session::SessionKey,
+        forward_only: bool,
+    ) -> crate::afxdp::SyncedDeleteOutcome {
+        self.session_domain.delete_synced_session(key, forward_only)
     }
 
     /// See [`Coordinator::upsert_synced_session`].
@@ -1019,7 +1022,7 @@ impl Coordinator {
         key: crate::session::SessionKey,
         delete_gen: u64,
         forward_only: bool,
-    ) {
+    ) -> crate::afxdp::SyncedDeleteOutcome {
         self.session_domain
             .delete_synced_session_gen(key, delete_gen, forward_only)
     }
@@ -2487,7 +2490,6 @@ impl Coordinator {
     /// a legitimate config-transition reset still lands.
     ///
     /// Returns `true` when the bump was applied, `false` when it was refused
-
     /// as a rollback.
     #[cfg(test)]
     #[must_use]
@@ -2634,6 +2636,7 @@ mod routing_domain;
 mod ipsec_inner_dead_worker_15149_tests;
 
 #[cfg(test)]
+#[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
 #[path = "tests.rs"]
 mod tests;
 

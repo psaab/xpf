@@ -7187,7 +7187,7 @@ fn tiny_first_fragment_dropped_by_live_screen_stage_16007() {
 /// Build the smallest WorkerContext needed by the screen stages over
 /// `forwarding`, with an event stream whose payloads the caller drains
 /// through the returned receiver.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn screen_test_ctx<'a>(
     forwarding: &'a ForwardingState,
     ident: &'a BindingIdentity,

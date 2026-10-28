@@ -198,7 +198,7 @@ impl WorkerControlChannels {
     /// the export buffer + the event-stream handle + the readiness sender).
     /// This is the single wiring site the production caller and the
     /// `Arc::ptr_eq` heartbeat/export-ack wiring test share.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(in crate::afxdp) fn new(
         commands: Arc<Mutex<VecDeque<WorkerCommand>>>,
         peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>>,

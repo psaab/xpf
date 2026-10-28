@@ -76,7 +76,7 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 			}
 			// Fold 3 PATH-TOCTOU: carry the priced compare path.
 			c.renderComparePath15995 = append([]string(nil), comparePath...)
-			return config.AuthorizeConfigShowCompareAtPathRendered(priceCfg, c.UserClass(), comparePath, trees...)
+			return config.AuthorizeConfigShowCompareAtPathRendered(priceCfg, c.UserClass(), comparePath, trees)
 		}
 		if a != "|" {
 			continue
@@ -120,7 +120,7 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 			}
 			c.setCandidateSnapshot15995(tree)
 		}
-		return config.AuthorizeConfigShowWholeAtTree(priceCfg, c.UserClass(), displaySuffix14707(suffix), trees...)
+		return config.AuthorizeConfigShowWholeAtTree(priceCfg, c.UserClass(), displaySuffix14707(suffix), trees)
 	}
 	// #15995: config-mode show renders the candidate subtree;
 	// | display inheritance renders its apply-groups expansion
@@ -145,9 +145,9 @@ func (c *CLI) checkConfigShowRegex(args []string) error {
 	}
 	c.renderPath15995 = append([]string(nil), full...)
 	if displaySuffix14707(suffix) == "inheritance" {
-		return config.AuthorizeExpandedConfigShowPathRendered(priceCfg, c.UserClass(), full, displaySuffix14707(suffix), nodeID, trees...)
+		return config.AuthorizeExpandedConfigShowPathRendered(priceCfg, c.UserClass(), full, displaySuffix14707(suffix), nodeID, trees)
 	}
-	return config.AuthorizeConfigShowPathRendered(priceCfg, c.UserClass(), full, displaySuffix14707(suffix), trees...)
+	return config.AuthorizeConfigShowPathRendered(priceCfg, c.UserClass(), full, displaySuffix14707(suffix), trees)
 }
 
 // checkShowSystemConfigRead adjudicates operational config renders
@@ -238,9 +238,9 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 					}
 				}
 				if format == displayPipeInheritance {
-					return config.AuthorizeExpandedConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, suffix, nodeID, trees...)
+					return config.AuthorizeExpandedConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, suffix, nodeID, trees)
 				}
-				return config.AuthorizeConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, suffix, trees...)
+				return config.AuthorizeConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, suffix, trees)
 			}
 			priceCfg := cfg
 			if c.store != nil {
@@ -274,7 +274,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 						return cap.Err
 					}
 				}
-				return config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, c.UserClass(), rbPath, "", trees...)
+				return config.AuthorizeConfigShowRollbackAtPathRendered(priceCfg, c.UserClass(), rbPath, "", trees)
 			}
 			return nil // handler syntax error; renders nothing
 		}
@@ -315,7 +315,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 					return cap.Err
 				}
 			}
-			return config.AuthorizeConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, "", trees...)
+			return config.AuthorizeConfigShowPathRendered(priceCfg, c.UserClass(), rbPath, "", trees)
 		}
 		priceCfg := cfg
 		if c.store != nil {
@@ -346,7 +346,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			c.setRenderSnapshots15995(tree, nil)
 		}
 		return config.AuthorizeConfigShowSystemPathRendered(priceCfg, c.UserClass(),
-			[]string{"system", "login"}, "show system login", trees...)
+			[]string{"system", "login"}, "show system login", trees)
 	case "internet-options":
 		return config.AuthorizeConfigShowSystemPath(cfg, c.UserClass(),
 			[]string{"system", "internet-options"}, "show system internet-options")
@@ -366,7 +366,7 @@ func (c *CLI) checkShowSystemConfigRead(args []string) error {
 			c.setRenderSnapshots15995(tree, nil)
 		}
 		return config.AuthorizeConfigShowSystemPathRendered(priceCfg, c.UserClass(),
-			[]string{"system", "root-authentication"}, "show system root-authentication", trees...)
+			[]string{"system", "root-authentication"}, "show system root-authentication", trees)
 	case "configuration":
 		if len(args) >= 3 && args[2] == "rescue" {
 			return config.AuthorizeConfigShowRescue(cfg, c.UserClass())
@@ -428,7 +428,7 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 			}
 			c.setRenderSnapshots15995(tree, nil)
 		}
-		return config.AuthorizeConfigShowWholeAtTree(priceCfg, c.UserClass(), displaySuffix14707(display), trees...)
+		return config.AuthorizeConfigShowWholeAtTree(priceCfg, c.UserClass(), displaySuffix14707(display), trees)
 	}
 	// Operational arm already charged *-commands on the LITERAL line
 	// (checkCommandRegex); the effective (group-unwrapped) command
@@ -451,9 +451,9 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 		c.setRenderSnapshots15995(tree, nil)
 	}
 	if displaySuffix14707(display) == "inheritance" {
-		return config.AuthorizeExpandedConfigPathOnlyRenderedWithOp15994(priceCfg, c.UserClass(), path, displaySuffix14707(display), nodeID, trees...)
+		return config.AuthorizeExpandedConfigPathOnlyRenderedWithOp15994(priceCfg, c.UserClass(), path, displaySuffix14707(display), nodeID, trees)
 	}
-	return config.AuthorizeConfigPathOnlyRenderedWithOp15994(priceCfg, c.UserClass(), path, displaySuffix14707(display), trees...)
+	return config.AuthorizeConfigPathOnlyRenderedWithOp15994(priceCfg, c.UserClass(), path, displaySuffix14707(display), trees)
 }
 
 // displaySuffix14707 converts "display set" to the format spelling the

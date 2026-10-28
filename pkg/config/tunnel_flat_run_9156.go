@@ -1,6 +1,9 @@
 package config
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+)
 
 // #9156 (V020): the `tunnel` container's compiler reads
 // `tunnelNode.Children` directly, so a flat-set run whose head is an UNTYPED
@@ -60,6 +63,104 @@ func tunnelRunChildren9156(tunnelNode *Node) []*Node {
 		return nil
 	}
 	return hoistAndSplitRun8939(tunnelNode.Children, tunnelSchema9156())
+}
+
+// applyTunnelProps17236 is the single tunnel-property reader shared by the
+// interface-level and unit-level tunnel sites in compileInterfaces
+// (#17236, R4-Q23-04). It supersedes the two mirrored switches that
+// diverged once already: #13215 fixed the pre-pass in the interface copy
+// only and the unit twin shipped the inherited-peer / plaintext-GRE bug
+// until #14440 extracted the shared pre-pass but left the main switch
+// duplicated. The property read is identical at both levels after
+// normalisation; the only caller-owned differences are the setup that
+// produced tc (default mode at interface level, cloneForUnit at unit
+// level) and what a numeric quarantine means, which the caller expresses
+// via where/suffix: where prefixes every numeric error
+// ("interfaces <ifname>:" / "interfaces <ifname> unit <n>:") and suffix
+// completes the lenient warning ("; quarantining interface %q" /
+// "; skipping unit %d"). nodes are the tunnel nodes in merge order
+// (#14450: scalars last-win across blocks, peers accumulate); the
+// #9156/#14440 pre-pass runs per block, in order, before that block's
+// flattened loop (#14440 ordering: after cloneForUnit at unit level).
+// Returns quarantine=true when a lenient numeric failure asks the caller
+// to skip the owning interface/unit; a strict numeric failure is
+// returned as err with quarantine=false.
+func applyTunnelProps17236(tc *TunnelConfig, nodes []*Node, where string, suffix string, lenient bool, warnings *[]string) (quarantine bool, err error) {
+	for _, tunnelNode := range nodes {
+		// #14440: retain braced scalars before the flattening loop.
+		applyTunnelBracedScalars14440(tc, tunnelNode)
+		// #9156: expand the flat-set run before reading it.
+		for _, prop := range tunnelRunChildren9156(tunnelNode) {
+			switch prop.Name() {
+			case "source":
+				if v := nodeVal(prop); v != "" {
+					tc.Source = v
+				}
+			case "destination":
+				if v := nodeVal(prop); v != "" {
+					tc.Destination = v
+				}
+			case "mode":
+				if v := nodeVal(prop); v != "" {
+					tc.Mode = TunnelMode(v)
+				}
+			case "key":
+				raw := nodeVal(prop)
+				v, perr := parseInterfaceNumeric9899(raw, 0, 4294967295)
+				if perr != nil {
+					msg := fmt.Sprintf("%s tunnel key %s", where, perr.Error())
+					if lenient {
+						if warnings != nil {
+							*warnings = append(*warnings, msg+suffix)
+						}
+						return true, nil
+					}
+					return false, fmt.Errorf("%s", msg)
+				}
+				tc.Key = uint32(v)
+			case "ttl":
+				raw := nodeVal(prop)
+				v, perr := parseInterfaceNumeric9899(raw, 1, 255)
+				if perr != nil {
+					msg := fmt.Sprintf("%s tunnel ttl %s", where, perr.Error())
+					if lenient {
+						if warnings != nil {
+							*warnings = append(*warnings, msg+suffix)
+						}
+						return true, nil
+					}
+					return false, fmt.Errorf("%s", msg)
+				}
+				tc.TTL = int(v)
+			case "keepalive":
+				if v := nodeVal(prop); v != "" {
+					if n, err := strconv.Atoi(v); err == nil {
+						tc.Keepalive = n
+					}
+				}
+			case "keepalive-retry":
+				if v := nodeVal(prop); v != "" {
+					if n, err := strconv.Atoi(v); err == nil {
+						tc.KeepaliveRetry = n
+					}
+				}
+			case "routing-instance":
+				// routing-instance { destination <name>; }
+				if destNode := prop.FindChild("destination"); destNode != nil {
+					tc.RoutingInstance = nodeVal(destNode)
+				} else if v, packed := packedTunnelRoutingInstance8936(prop); packed {
+					tc.RoutingInstance = v
+				} else if v := nodeVal(prop); v != "" {
+					tc.RoutingInstance = v
+				}
+			case "wireguard":
+				parseTunnelWireguard(tc, prop)
+			case "clear-dont-fragment-bit":
+				tc.ClearDontFragmentBit = true
+			}
+		}
+	}
+	return false, nil
 }
 
 // applyTunnelBracedScalars14440 retains braced-scalar tunnel leaves

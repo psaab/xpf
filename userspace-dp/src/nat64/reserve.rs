@@ -43,7 +43,6 @@ use super::*;
 /// different translation — is untouched. For the single-reservation case the
 /// outcome is bit-identical; only the early exit is gone. Pinned by
 /// `nat64_6876_release_frees_every_prefix_holding_the_flow`.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn release_nat64_allocation_with_mode(
     nat64: &Nat64State,
     key: &crate::session::SessionKey,
@@ -372,7 +371,7 @@ pub(crate) fn reserve_synced_nat64_allocation_for_worker(
 /// Rollback is the helper's job (`rollback_flow`, not `release_flow`): the
 /// activation is being WITHDRAWN, and the deterministic arm's block port must go
 /// back through the recycling free (#14625) rather than being dropped.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn reserve_synced_nat64_port_unless_peer_owns(
     prefix: &Nat64Prefix,
     flow: crate::nat::SourceNatFlowKey,

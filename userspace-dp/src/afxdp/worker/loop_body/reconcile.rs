@@ -152,7 +152,7 @@ pub(super) fn ancestry_destination_zone_id(
     Some(mapped)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn rematch_bound_first_policy_sessions(
     old_forwarding: &crate::afxdp::ForwardingState,
     new_forwarding: &crate::afxdp::ForwardingState,
@@ -519,7 +519,7 @@ pub(super) fn rematch_bound_first_policy_sessions(
     }
     (rebound, purged)
 }
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn rebind_policy_sessions_from_snapshot(
     sessions: &mut crate::session::SessionTable,
     forwarding: &crate::afxdp::ForwardingState,

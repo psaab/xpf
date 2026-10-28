@@ -235,7 +235,6 @@ impl std::hash::BuildHasher for HotPathSeededState {
 /// The process-global hot-path seed. Stable for the life of the process.
 /// Tests pin seeds through `HotPathSeededState::new` or each `*_seeded`
 /// helper rather than mutating this global.
-
 /// The common per-process secret for node-local hot-path hashes. Stable for the
 /// process lifetime and never zero. Fragment maps use separate keys below.
 ///
@@ -243,7 +242,6 @@ impl std::hash::BuildHasher for HotPathSeededState {
 /// would race across the parallel test runner) but by parameterized seeded
 /// cores at each hash site. Production reads this common seed only where sites
 /// intentionally share the key.
-
 #[inline]
 pub(crate) fn hot_path_hash_seed() -> u64 {
     *HOT_PATH_SEED.get_or_init(os_random_seed_u64)

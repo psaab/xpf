@@ -689,6 +689,14 @@ func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, sti
 	if cfg == nil || rgID <= 0 {
 		return
 	}
+	if stillValid == nil {
+		// #17158: the burst predicate is required. A nil predicate here
+		// would be refused by every burst sender anyway; refuse once,
+		// up front, rather than logging a send failure per address.
+		slog.Warn("directSendGARPs: pool announce refused (nil burst predicate)",
+			"rg", rgID)
+		return
+	}
 	sent := 0
 	attempted := 0
 	truncated := false
@@ -701,7 +709,7 @@ func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, sti
 			continue
 		}
 		for _, cidr := range entry.Addresses {
-			if stillValid != nil && !stillValid() {
+			if !stillValid() {
 				return // ownership moved again mid-announce; stop rather than lie
 			}
 			ip, _, err := net.ParseCIDR(cidr)

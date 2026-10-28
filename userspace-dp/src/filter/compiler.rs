@@ -1142,7 +1142,6 @@ struct TermAddressMatch {
 /// match-all (except) per the Junos empty-set semantics. An older Go control
 /// plane that omits the flag (false) falls back to the length derivation —
 /// unchanged for the non-prefix-list cases that have no empty-resolution gap.
-
 /// #14446: reject a constrained direction whose scope carries only the
 /// other family's prefixes. Both-vecs-empty is the #2400/#2506 empty-set
 /// semantic and passes; mixed lists pass; `any`/unknown families skip

@@ -501,11 +501,27 @@ pub(crate) struct SessionInstallInfo {
     pub(crate) handshake_state_wire: u8,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SessionLookupAux {
     pub(crate) session_id: u64,
     pub(crate) source_nat_static: Option<bool>,
     pub(crate) leak_incarnation: u64,
+}
+
+impl SessionLookupAux {
+    /// #17080: the deliberate "no matched entry" aux for synthesizers
+    /// that have no local record to snapshot (synced reverse synthesis,
+    /// embedded-ICMP fallback). NOT a `Default`: lookup/finder results
+    /// must come from `SessionTable::lookup_snapshot_from` /
+    /// `forward_match_from`, so zeroing a real entry's provenance is a
+    /// visible choice, never the silent default.
+    pub(crate) fn unknown() -> Self {
+        Self {
+            session_id: 0,
+            source_nat_static: None,
+            leak_incarnation: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -531,10 +547,10 @@ pub(crate) struct ForwardSessionMatch {
     /// derived from this node's own reply resolution. Every locally
     /// observed forward lookup (worker table or shared map) carries
     /// `false`, so the companion stamps the forward row's stored
-    /// owner. Never inferred from `aux.session_id`: local table
-    /// matches are built with a default aux (id 0) by several lookup
-    /// helpers, while shared-map matches carry the peer's nonzero id
-    /// — keying on the id inverted the two populations.
+    /// owner. Never inferred from `aux.session_id`: a local table
+    /// match for a row with no stable id carries id 0, while
+    /// shared-map matches carry the peer's nonzero id — keying on the
+    /// id inverted the two populations.
     pub(crate) synced_synthesis: bool,
 }
 
@@ -592,7 +608,7 @@ pub(crate) enum SessionOrigin {
 
     SharedMaterialize,
     SharedPromote,
-    #[allow(dead_code)] // enum variant for completeness
+    // enum variant for completeness
     WorkerLocalImport,
     /// #10038 (parent-review item 5): firewall-SELF-originated via a local
     /// TUN publisher (WG `tun_origin.rs`, GRE `tunnel.rs`). POSITIVE

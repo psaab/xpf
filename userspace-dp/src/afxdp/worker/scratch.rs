@@ -108,8 +108,8 @@ pub(crate) struct WorkerScratch {
     /// deferred until after the RX batch (the borrow checker
     /// prevents mutable access to two bindings simultaneously
     /// inside the RX loop). Reserved for the cross-binding
-    /// fast-path; not yet wired (hence `#[allow(dead_code)]`).
-    #[allow(dead_code)]
+    /// fast-path; not yet wired (hence the expiring expectation below).
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
     pub(crate) scratch_cross_binding_tx: Vec<(usize, PreparedTxRequest)>,
     /// #15947 (H29-01): each teardown also carries the triggering RST's
     /// own forward (key + desc addr), so the lifecycle drain can exempt

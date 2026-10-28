@@ -33,3 +33,10 @@ syscalls, and an inherited fd in that window is exactly the leak being closed.
 - Allowlist (justified direct callers): `linuxsock.Socket` itself (the wrapper),
   and `pkg/vrrp::openAfPacketReceiver` (the pre-#2476 site, which already ORs
   `SOCK_CLOEXEC` and is pinned by `pkg/vrrp/afpacket_cloexec_test.go`).
+
+- Cancellable receive (#17231): `PpollRecv` wraps a bound raw socket fd
+  plus a wake eventfd; `Recv` ppolls on both so `SignalStop` wakes a parked
+  receive, and owners close only after joining the receiving goroutine
+  (signal → join → close). `canary_test.go::TestNoDirectBlockingRecvfrom`
+  fails on any direct `unix.Recvfrom` outside the primitive and nfqueue's
+  poll-guarded reads.

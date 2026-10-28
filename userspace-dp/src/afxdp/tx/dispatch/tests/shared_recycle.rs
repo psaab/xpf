@@ -299,3 +299,129 @@ fn shared_recycle_unknown_slot_rescues_in_single_binding_worker_9904() {
         1
     );
 }
+
+// #17178: both public wrappers must produce identical drop/rescue totals
+// for the same unknown-slot input — they now share the one drain loop in
+// `drain_shared_recycles`, so this parity guard fails if a second copy of
+// the loop (or a divergent backstop predicate) is ever reintroduced.
+#[test]
+fn shared_recycle_wrappers_agree_on_unknown_slot_totals_17178() {
+    // Single-region: both wrappers rescue to a survivor and drop nothing.
+    let mut flat = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    flat[1].umem = flat[0].umem.clone();
+    let flat_lookup = WorkerBindingLookup::from_bindings(&flat);
+    let mut flat_recycles = vec![(99u32, 0x1000u64), (98, 0x2000)];
+    let flat_dropped =
+        apply_shared_recycles_to_bindings(&mut flat, &flat_lookup, &mut flat_recycles);
+
+    let mut split = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+        BindingWorker::new_for_mirror_test(2, 0, 33, 0),
+    ];
+    split[1].umem = split[0].umem.clone();
+    split[2].umem = split[0].umem.clone();
+    let split_lookup = WorkerBindingLookup::from_bindings(&split);
+    let (left, rest) = split.split_at_mut(1);
+    let (mid, right) = rest.split_at_mut(1);
+    let current = &mut mid[0];
+    let mut split_recycles = vec![(99u32, 0x1000u64), (98, 0x2000)];
+    apply_shared_recycles(left, 1, current, right, &split_lookup, &mut split_recycles);
+
+    assert_eq!(flat_dropped, 0);
+    assert_eq!(
+        flat[0].live.tx_shared_recycle_unknown_slot_rescued.load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        flat[0].live.tx_shared_recycle_unknown_slot_drops.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        current.live.tx_shared_recycle_unknown_slot_rescued.load(Ordering::Relaxed),
+        2
+    );
+    assert_eq!(
+        current.live.tx_shared_recycle_unknown_slot_drops.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        current.live.tx_errors.load(Ordering::Relaxed),
+        flat[0].live.tx_errors.load(Ordering::Relaxed)
+    );
+    let flat_preserved: usize = flat
+        .iter()
+        .map(|b| b.tx_pipeline.pending_fill_frames.len())
+        .sum();
+    assert_eq!(flat_preserved, 2);
+    assert_eq!(current.tx_pipeline.pending_fill_frames.len(), 2);
+
+    // Mixed-region: both wrappers fail closed with identical drop totals.
+    let mut flat = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+    ];
+    let flat_lookup = WorkerBindingLookup::from_bindings(&flat);
+    let mut flat_recycles = vec![(99u32, 0x1000u64)];
+    let flat_dropped =
+        apply_shared_recycles_to_bindings(&mut flat, &flat_lookup, &mut flat_recycles);
+
+    let mut split = vec![
+        BindingWorker::new_for_mirror_test(0, 0, 11, 0),
+        BindingWorker::new_for_mirror_test(1, 0, 22, 0),
+        BindingWorker::new_for_mirror_test(2, 0, 33, 0),
+    ];
+    let split_lookup = WorkerBindingLookup::from_bindings(&split);
+    let (left, rest) = split.split_at_mut(1);
+    let (mid, right) = rest.split_at_mut(1);
+    let current = &mut mid[0];
+    let mut split_recycles = vec![(99u32, 0x1000u64)];
+    apply_shared_recycles(left, 1, current, right, &split_lookup, &mut split_recycles);
+
+    assert_eq!(flat_dropped, 1);
+    assert_eq!(
+        flat[0].live.tx_shared_recycle_unknown_slot_drops.load(Ordering::Relaxed),
+        current.live.tx_shared_recycle_unknown_slot_drops.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        flat[0].live.tx_shared_recycle_unknown_slot_rescued.load(Ordering::Relaxed),
+        current.live.tx_shared_recycle_unknown_slot_rescued.load(Ordering::Relaxed)
+    );
+    assert_eq!(
+        flat[0].live.tx_errors.load(Ordering::Relaxed),
+        current.live.tx_errors.load(Ordering::Relaxed)
+    );
+}
+
+// #17178: the unknown-slot log helpers are throttled like the `tx/rings.rs`
+// UMEM-anomaly logs — a persistent anomaly must not emit one journald line
+// per poll. Zero-count calls never consume throttle budget; non-zero calls
+// advance the process-wide gate counter on every call so the `< 10` cap
+// stays closed once reached.
+#[test]
+fn shared_recycle_unknown_slot_logs_are_throttled_17178() {
+    let drops_before = SHARED_RECYCLE_UNKNOWN_SLOT_DROPS_LOGGED.load(Ordering::Relaxed);
+    log_shared_recycle_unknown_slot_drops(0, None);
+    assert_eq!(
+        SHARED_RECYCLE_UNKNOWN_SLOT_DROPS_LOGGED.load(Ordering::Relaxed),
+        drops_before
+    );
+    let rescues_before = SHARED_RECYCLE_UNKNOWN_SLOT_RESCUES_LOGGED.load(Ordering::Relaxed);
+    log_shared_recycle_unknown_slot_rescues(0, None);
+    assert_eq!(
+        SHARED_RECYCLE_UNKNOWN_SLOT_RESCUES_LOGGED.load(Ordering::Relaxed),
+        rescues_before
+    );
+    for _ in 0..12 {
+        log_shared_recycle_unknown_slot_drops(1, Some((99, 0x1000)));
+        log_shared_recycle_unknown_slot_rescues(1, Some((99, 0x1000)));
+    }
+    let drops_after = SHARED_RECYCLE_UNKNOWN_SLOT_DROPS_LOGGED.load(Ordering::Relaxed);
+    let rescues_after = SHARED_RECYCLE_UNKNOWN_SLOT_RESCUES_LOGGED.load(Ordering::Relaxed);
+    assert!(drops_after >= drops_before + 12);
+    assert!(rescues_after >= rescues_before + 12);
+    assert!(drops_after >= 10 && rescues_after >= 10);
+}

@@ -296,11 +296,14 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
                 ..resolution
             };
         };
-        // GRE/ip6gre have a fixed endpoint destination, so use the L3 egress
+        // GRE has a fixed endpoint destination, so use the L3 egress
         // RG derived once when this forwarding snapshot was built. WireGuard
         // selects an outer destination per peer; its materialized resolution
-        // carries that route's next-hop and transport table.
-        let outer_rg_id = if endpoint.mode == "wireguard" {
+        // carries that route's next-hop and transport table. #17199: an
+        // Unknown-kind endpoint matches neither arm and resolves to no
+        // outer RG, so the gate below fails it HAInactive instead of
+        // treating it as GRE (the pre-fix binary string split did).
+        let outer_rg_id = if endpoint.kind == TunnelKind::WireGuard {
             let Some(next_hop) = resolution.next_hop else {
                 return ForwardingResolution {
                     disposition: ForwardingDisposition::HAInactive,
@@ -333,11 +336,13 @@ pub(in crate::afxdp) fn enforce_ha_resolution_snapshot(
                         .map(|egress| egress.redundancy_group.max(0))
                 }
             }
-        } else {
+        } else if endpoint.kind == TunnelKind::Gre {
             forwarding
                 .tunnel_outer_egress_rgs
                 .get(&resolution.tunnel_endpoint_id)
                 .copied()
+        } else {
+            None
         };
         let Some(outer_rg_id) = outer_rg_id else {
             return ForwardingResolution {
@@ -432,7 +437,7 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
 /// the session path retains the redirect on fabric-link ingress
 /// (resolve.rs), so revalidation must not supersede it there either.
 /// The destination-only entry point remains for flow-less fixtures only.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -460,7 +465,7 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -486,7 +491,7 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn cached_flow_decision_invalid_reason_inner(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,

@@ -758,7 +758,7 @@ func newSurfaceAHTTP(p *config.DDNSProvider, build func() (DNSUpdater, error)) (
 // selfOwned, the no-DHCID lease path would REFUSE the pre-existing name and pin
 // the record at its first address forever. The provider's transport binding
 // (source-address / dest-interface / VRF) is honored via the shared
-// resolveBindConfig→dialer path by reusing DHCPDynamicDNSConfig as the carrier.
+// resolveBindConfig→dialer path on the shared RFC2136Endpoint (#17237).
 func newSurfaceARFC2136(p *config.DDNSProvider, _ string, resolveIf ...func(string) string) (DNSUpdater, error) {
 	if p == nil {
 		return nil, errors.New("ddns surface-a: nil provider")
@@ -773,21 +773,9 @@ func newSurfaceARFC2136(p *config.DDNSProvider, _ string, resolveIf ...func(stri
 		conflictPolicy: "replace-owned",
 		backend:        "rfc2136",
 	}
-	c := &config.DHCPDynamicDNSConfig{
-		UpdateServer:         p.UpdateServer,
-		ForwardZone:          p.ForwardZone,
-		ReverseZone:          p.ReverseZone,
-		TSIGKeyName:          p.TSIGKeyName,
-		TSIGAlgorithm:        p.TSIGAlgorithm,
-		TSIGSecret:           p.TSIGSecret,
-		RequireTSIG:          p.RequireTSIG,
-		SourceAddress:        p.SourceAddress,
-		DestinationInterface: p.DestinationInterface,
-		RoutingInstance:      p.RoutingInstance,
-	}
 	pol.forwardZones = splitZoneList(p.ForwardZone)
 	pol.reverseZones = splitZoneList(p.ReverseZone)
-	u, err := newRFC2136Updater(pol, c, nil, nil, nil, resolveIf...)
+	u, err := newRFC2136Updater(pol, p.RFC2136Endpoint, nil, nil, nil, resolveIf...)
 	if err != nil {
 		return nil, err
 	}

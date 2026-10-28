@@ -47,8 +47,10 @@ func TestHTTPClientUnboundHasNoDialContext(t *testing.T) {
 // is removed from newHTTPClientBound.
 func TestHTTPClientBoundInstallsDialContext(t *testing.T) {
 	c, err := newProviderHTTPClient(&config.DDNSProvider{
-		Name:          "p",
-		SourceAddress: "127.0.0.2",
+		Name: "p",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			SourceAddress: "127.0.0.2",
+		},
 	})
 	if err != nil {
 		t.Fatalf("newProviderHTTPClient(bound): %v", err)
@@ -82,8 +84,10 @@ func TestHTTPClientBoundDialsFromSourceAddress(t *testing.T) {
 	defer srv.Close()
 
 	c, err := newProviderHTTPClient(&config.DDNSProvider{
-		Name:          "p",
-		SourceAddress: wantSrc,
+		Name: "p",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			SourceAddress: wantSrc,
+		},
 	})
 	if err != nil {
 		t.Fatalf("newProviderHTTPClient: %v", err)
@@ -127,9 +131,11 @@ func TestCheckIPClientBoundDialsFromSourceAddress(t *testing.T) {
 	defer srv.Close()
 
 	client, err := NewCheckIPClient(&config.DDNSProvider{
-		Name:          "p",
-		SourceAddress: wantSrc,
-		CheckIPURL:    srv.URL,
+		Name:       "p",
+		CheckIPURL: srv.URL,
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			SourceAddress: wantSrc,
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewCheckIPClient: %v", err)
@@ -154,8 +160,10 @@ func TestCheckIPClientBoundDialsFromSourceAddress(t *testing.T) {
 // publishing from the wrong source (fail-open posture, mirrors RFC 2136).
 func TestProviderBindConfigInvalidSourceErrors(t *testing.T) {
 	_, err := newProviderHTTPClient(&config.DDNSProvider{
-		Name:          "p",
-		SourceAddress: "not-an-ip",
+		Name: "p",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			SourceAddress: "not-an-ip",
+		},
 	})
 	if err == nil {
 		t.Fatal("malformed source-address must error")
@@ -167,7 +175,9 @@ func TestProviderBindConfigInvalidSourceErrors(t *testing.T) {
 	// And the backend constructors must surface it (degrade to no-op upstream).
 	if _, err := newCloudflareBackend(&config.DDNSProvider{
 		Name: "p", APIToken: config.NewSecret("t"), Zone: "example.net",
-		SourceAddress: "not-an-ip",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			SourceAddress: "not-an-ip",
+		},
 	}, nil); err == nil {
 		t.Fatal("cloudflare with malformed source-address must error")
 	}
