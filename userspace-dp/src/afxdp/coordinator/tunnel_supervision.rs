@@ -214,7 +214,7 @@ impl super::Coordinator {
         for (id, entry) in self.tunnel_sources.iter() {
             let reason = match self.forwarding.tunnel_endpoints.get(id) {
                 None => Some("removed"),
-                Some(ep) if ep.mode != "gre" && ep.mode != "ip6gre" => Some("mode_changed"),
+                Some(ep) if ep.kind != TunnelKind::Gre => Some("mode_changed"),
                 Some(ep) => {
                     let attach_ok = ep.logical_ifindex == entry.spawned_ifindex
                         && self
@@ -258,7 +258,7 @@ impl super::Coordinator {
                 .forwarding
                 .tunnel_endpoints
                 .values()
-                .filter(|ep| ep.mode == "gre" || ep.mode == "ip6gre")
+                .filter(|ep| ep.kind == TunnelKind::Gre)
                 .map(|ep| ep.id)
                 .collect();
             for id in desired {
@@ -307,7 +307,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "gre" && endpoint.mode != "ip6gre" {
+        if endpoint.kind != TunnelKind::Gre {
             return false;
         }
         let Some(tunnel_name) = self
@@ -506,7 +506,7 @@ impl super::Coordinator {
             else {
                 return Some("removed_deferred");
             };
-            if row.mode != "gre" && row.mode != "ip6gre" {
+            if tunnel_mode_kind(&row.mode) != TunnelKind::Gre {
                 return Some("mode_changed_deferred");
             }
             if row.ifindex != entry.spawned_ifindex
@@ -586,7 +586,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "gre" && endpoint.mode != "ip6gre" {
+        if endpoint.kind != TunnelKind::Gre {
             return false;
         }
         let Some(name) = self
@@ -648,6 +648,7 @@ impl super::Coordinator {
         self.wg_control_threads.sweep_finished();
         self.publish_local_tunnel_deliveries_excluding(&[]);
 
+
         // Stale prune: gone, or any spawn input changed.
         let mut stale: Vec<(u16, &'static str)> = Vec::new();
         for (id, entry) in self.wg_control_threads.iter() {
@@ -673,7 +674,7 @@ impl super::Coordinator {
             .forwarding
             .tunnel_endpoints
             .values()
-            .filter(|ep| ep.mode == "wireguard" && self.forwarding.wg_engines.contains_key(&ep.id))
+            .filter(|ep| ep.kind == TunnelKind::WireGuard && self.forwarding.wg_engines.contains_key(&ep.id))
             .map(|ep| ep.id)
             .collect();
         for id in ids {
@@ -857,7 +858,7 @@ impl super::Coordinator {
     /// the thread was spawned with.
     fn wg_spawn_inputs(&self, id: u16) -> Option<crate::afxdp::types::WgSpawnInputs> {
         let endpoint = self.forwarding.tunnel_endpoints.get(&id)?;
-        if endpoint.mode != "wireguard" {
+        if endpoint.kind != TunnelKind::WireGuard {
             return None;
         }
         let engine = self.forwarding.wg_engines.get(&id)?.clone();
@@ -1105,7 +1106,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "wireguard" || !self.forwarding.wg_engines.contains_key(&id) {
+        if endpoint.kind != TunnelKind::WireGuard || !self.forwarding.wg_engines.contains_key(&id) {
             return false;
         }
         let Some(name) = self

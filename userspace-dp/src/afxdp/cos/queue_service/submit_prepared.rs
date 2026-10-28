@@ -167,6 +167,23 @@ pub(super) fn submit_prepared(
             // #4971: expected TX backpressure — lock-free status, no
             // `last_error` mutex on the send hot path.
             binding.live.set_tx_retry_status(reason);
+            // #17159: a ring-full submit on the non-exact CoS path is
+            // the same TX-ring pressure signal the exact sites count
+            // per queue. `items` holds the staged survivors (including
+            // any validation-drop survivors), so its length is the
+            // stalled packet count. Other retry reasons carry no
+            // ring-full meaning and stay uncounted here.
+            if matches!(
+                reason,
+                TxRetryReason::TxRingInsertFailed | TxRetryReason::PreparedTxRingInsertFailed
+            ) {
+                count_tx_ring_full_submit_stall(
+                    binding,
+                    root_ifindex,
+                    queue_idx,
+                    items.len() as u64,
+                );
+            }
             // #15786: `items` holds the staged survivors; remove any
             // validation-drop orphans before the LIFO restore.
             let (dropped, dropped_len) = dropped_prepared_positions(binding);

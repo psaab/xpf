@@ -150,7 +150,7 @@ func TestNewOwnerRefreshesUpstreamV6PoolBinding12172(t *testing.T) {
 	nas := captureNA12172(t)
 	d := &Daemon{}
 	d.announceProxyARPPoolAddresses(
-		cfgWithPoolProxyARP8405(1, v4+"/32", v6+"/128"), 1, nil)
+		cfgWithPoolProxyARP8405(1, v4+"/32", v6+"/128"), 1, func() bool { return true })
 
 	upstream.applyGARP12172(*garps, newMAC)
 	upstream.applyNA12172(*nas, newMAC)
@@ -184,7 +184,7 @@ func TestPoolNAIsOnePerAddressNotABurst12172(t *testing.T) {
 	nas := captureNA12172(t)
 	d := &Daemon{}
 	d.announceProxyARPPoolAddresses(
-		cfgWithPoolProxyARP8405(1, "2001:db8::7/128"), 1, nil)
+		cfgWithPoolProxyARP8405(1, "2001:db8::7/128"), 1, func() bool { return true })
 	if len(*nas) != 1 {
 		t.Fatalf("want 1 NA for the v6 pool address; got %d", len(*nas))
 	}
@@ -205,7 +205,7 @@ func TestPoolNARespectsOwnershipFence12172(t *testing.T) {
 	d := &Daemon{}
 	// The interface belongs to RG 2; we are announcing for RG 1.
 	d.announceProxyARPPoolAddresses(
-		cfgWithPoolProxyARP8405(2, "2001:db8::7/128"), 1, nil)
+		cfgWithPoolProxyARP8405(2, "2001:db8::7/128"), 1, func() bool { return true })
 	if len(*nas) != 0 {
 		t.Errorf("announced %d v6 addresses for an RG whose interface belongs "+
 			"to a different RG; got %v", len(*nas), *nas)
@@ -245,7 +245,7 @@ func TestPoolAnnounceBoundCoversBothFamilies12172(t *testing.T) {
 	garps := captureGARP8405(t)
 	nas := captureNA12172(t)
 	d := &Daemon{}
-	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, addrs...), 1, nil)
+	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, addrs...), 1, func() bool { return true })
 
 	if total := len(*garps) + len(*nas); total != proxyARPAnnounceMaxAddresses {
 		t.Fatalf("announced %d addresses across both families; the bound is %d",
@@ -291,7 +291,7 @@ func TestPoolAnnounceAttemptBoundCoversSendFailures12172(t *testing.T) {
 		}
 	}
 	d := &Daemon{}
-	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, addrs...), 1, nil)
+	d.announceProxyARPPoolAddresses(cfgWithPoolProxyARP8405(1, addrs...), 1, func() bool { return true })
 
 	if got := garpAttempts + naAttempts; got != proxyARPAnnounceMaxAddresses {
 		t.Errorf("attempted %d sends across both families after send errors; want the shared bound %d",
