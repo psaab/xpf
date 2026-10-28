@@ -861,7 +861,7 @@ pub struct XdpStatisticsV2 {
 /// Receive ring backed by libxdp's consumer ring.
 pub struct RingRx {
     ring: Box<XskRingCons>,
-    #[expect(dead_code, reason = "diagnostic FD read only under the debug-log feature (#17212)")]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17212: read only under debug-log"))]
     fd: c_int,
 }
 
@@ -924,7 +924,7 @@ impl RingRx {
 
     /// Relaxed read of raw kernel producer/consumer pointers.
     /// Use for diagnostics only — does NOT touch cached ring state.
-    #[expect(dead_code, reason = "diagnostic read only under the debug-log feature (#17212)")]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17212: read only under debug-log"))]
     pub fn available_relaxed(&self) -> u32 {
         let prod = unsafe { bridge_xsk_ring_cons_producer(&*self.ring) };
         let cons = unsafe { bridge_xsk_ring_cons_consumer(&*self.ring) };
@@ -942,7 +942,7 @@ impl RingRx {
         (unsafe { *flags_ptr } & 1) != 0
     }
 
-    #[expect(dead_code, reason = "diagnostic FD read only under the debug-log feature (#17212)")]
+    #[cfg_attr(not(feature = "debug-log"), expect(dead_code, reason = "#17212: read only under debug-log"))]
     pub fn as_raw_fd(&self) -> c_int {
         self.fd
     }
