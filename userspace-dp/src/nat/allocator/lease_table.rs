@@ -17,13 +17,19 @@
 //!     its "leave standing / serve unpinned" answer (PAT:
 //!     `LeaseReuse::LiveModeMismatch`, local address-only: the
 //!     `live_mode_mismatch` arm); the deterministic BIB, which has no
-//!     unpinned fallback, refuses with `AllocatorExhausted` — and now
-//!     bumps `exhaustion_total` exactly like every other refusal.
-//!   - Cap-fail counter: every `AllocatorExhausted` return in
-//!     `allocate_deterministic_v6_at` bumps `exhaustion_total`,
-//!     including the join-cap failure the claimed-port copy used to
-//!     return silently (its free of the claimed candidate port is
-//!     kept — that port was claimed by THIS call, not by the lease).
+//!     unpinned fallback, refuses with `AllocatorExhausted`. Counted
+//!     exhaustion paths bump `exhaustion_total`; the deliberate silent
+//!     identity-mismatch refusals are noted below.
+//!   - Exhaustion accounting: `allocate_deterministic_v6_at` increments
+//!     `exhaustion_total` before its counted `AllocatorExhausted` returns
+//!     for out-of-range pool/block selection, tracked-flow or per-source
+//!     lease-cap failures, and block exhaustion with no same-source lease.
+//!     Full-block and claimed-port BIB join-cap failures are also counted.
+//!     The existing-lease identity-mismatch refusals at `mod.rs:5494`
+//!     and `:5568` are deliberately NOT counted as exhaustion: they
+//!     reject a mismatched lease; nothing is full. A claimed-port cap
+//!     failure still frees its candidate port (claimed by THIS call,
+//!     not by the lease).
 //!
 //! This module only mutates `PortAllocatorLiveState` fields (the map
 //! + both expiry indexes, via the one `remove_persistent_lease`
