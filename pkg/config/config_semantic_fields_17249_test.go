@@ -41,6 +41,8 @@ func TestConfigSemanticFieldsVisible(t *testing.T) {
 		{reflect.TypeOf(StaticRoute{}), "HasPreference"},
 		{reflect.TypeOf(SystemConfig{}), "NTPPeers"},
 		{reflect.TypeOf(SystemConfig{}), "NTPPeerOptions"},
+		{reflect.TypeOf(Address{}), "DNSName"},
+		{reflect.TypeOf(Address{}), "DNSFamily"},
 	}
 	jsonName := func(field reflect.StructField) string {
 		return strings.Split(field.Tag.Get("json"), ",")[0]
@@ -75,9 +77,7 @@ func TestConfigSemanticFieldsVisible(t *testing.T) {
 	hiddenAllowlist := make(map[string]struct{})
 	for _, path := range strings.Fields(`
 Address.DNSAddresses
-Address.DNSFamily
 Address.DNSLookupFailed
-Address.DNSName
 Address.DuplicatePrefixes
 Address.ExpandedPrefixes
 Address.OversizedRange
@@ -160,10 +160,21 @@ UserspaceConfig.RetiredKnobsSeen
 ZoneConfig.DroppedEnforcementChild
 ZoneConfig.DroppedEnforcementInterfaces
 ZoneConfig.Functional
-ZoneConfig.ScreenProfileConfigured
 ZoneConfig.UnknownZoneChildren
+ZoneConfig.ScreenProfileConfigured
 `) {
 		hiddenAllowlist[path] = struct{}{}
+	}
+	hiddenRationales := map[string]string{
+		"ZoneConfig.ScreenProfileConfigured": "Compiler-derived from source-tree screen-statement presence; valid commits carry the non-empty ScreenProfile, while tolerant-load diagnostics for an empty authored binding are surfaced separately as ScreenMissingProfiles. ConfigFingerprint still includes this behavior-changing bit.",
+	}
+	for path, reason := range hiddenRationales {
+		if _, allowed := hiddenAllowlist[path]; !allowed {
+			t.Errorf("hidden rationale %s has no JSON-hidden inventory entry", path)
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("JSON-hidden field %s has no intentional-hiding rationale", path)
+		}
 	}
 	actualHidden := make(map[string]struct{})
 	seenTypes := make(map[reflect.Type]struct{})
@@ -229,6 +240,14 @@ ZoneConfig.UnknownZoneChildren
 				"192.0.2.49": {Prefer: true},
 			},
 		},
+		Security: SecurityConfig{
+			AddressBook: &AddressBook{Addresses: map[string]*Address{
+				"partner-api": {Name: "partner-api", DNSName: "api.example.com", DNSFamily: "ipv4-only", DNSAddresses: []string{"203.0.113.49/32"}},
+			}},
+			Zones: map[string]*ZoneConfig{
+				"trust": {Name: "trust", ScreenProfile: "edge", ScreenProfileConfigured: true},
+			},
+		},
 	}
 	encoded, err := json.Marshal(cfg)
 	if err != nil {
@@ -247,6 +266,18 @@ ZoneConfig.UnknownZoneChildren
 				Prefer bool
 			}
 		}
+		Security struct {
+			AddressBook struct {
+				Addresses map[string]struct {
+					DNSName   string
+					DNSFamily string
+				}
+			}
+			Zones map[string]struct {
+				ScreenProfile           string
+				ScreenProfileConfigured bool
+			}
+		}
 	}
 	if err := json.Unmarshal(encoded, &got); err != nil {
 		t.Fatalf("decode compiled config JSON: %v", err)
@@ -259,6 +290,21 @@ ZoneConfig.UnknownZoneChildren
 	if !reflect.DeepEqual(got.System.NTPPeers, []string{"192.0.2.49"}) ||
 		!got.System.NTPPeerOptions["192.0.2.49"].Prefer {
 		t.Errorf("REST JSON NTP peer fields missing or false: %s", encoded)
+	}
+	dnsAddress := got.Security.AddressBook.Addresses["partner-api"]
+	if dnsAddress.DNSName != "api.example.com" || dnsAddress.DNSFamily != "ipv4-only" {
+		t.Errorf("REST JSON DNS authored fields = %+v, want the configured name and family: %s",
+			dnsAddress, encoded)
+	}
+	if strings.Contains(string(encoded), `"DNSAddresses"`) ||
+		strings.Contains(string(encoded), "203.0.113.49/32") {
+		t.Errorf("REST JSON exposed the daemon's resolver snapshot: %s", encoded)
+	}
+	if zone := got.Security.Zones["trust"]; zone.ScreenProfile != "edge" {
+		t.Errorf("REST JSON screen profile = %+v, want profile=edge: %s", zone, encoded)
+	}
+	if strings.Contains(string(encoded), `"ScreenProfileConfigured"`) {
+		t.Errorf("REST JSON exposed the compiler-derived screen-presence bit: %s", encoded)
 	}
 
 	// These compiler/runtime markers remain REST-hidden but are still
@@ -382,6 +428,27 @@ func TestConfigFingerprintIncludesRuntimeSemanticFields17249(t *testing.T) {
 	}
 	if ConfigsIdentical(withoutPreference, preferenceFive) {
 		t.Error("an explicit preference 5 must compare different from an absent preference")
+	}
+	baseDNS := compileFingerprintConfig17249(t,
+		"set security address-book global address partner-api dns-name one.example.com")
+	otherDNSName := compileFingerprintConfig17249(t,
+		"set security address-book global address partner-api dns-name two.example.com")
+	otherDNSFamily := compileFingerprintConfig17249(t,
+		"set security address-book global address partner-api dns-name one.example.com ipv4-only")
+	if ConfigsIdentical(baseDNS, otherDNSName) {
+		t.Error("changing an authored dns-name must change the fingerprint")
+	}
+	if ConfigsIdentical(baseDNS, otherDNSFamily) {
+		t.Error("changing an authored DNS family must change the fingerprint")
+	}
+	noScreenStatement := &Config{Security: SecurityConfig{
+		Zones: map[string]*ZoneConfig{"trust": {Name: "trust"}},
+	}}
+	emptyScreenStatement := &Config{Security: SecurityConfig{
+		Zones: map[string]*ZoneConfig{"trust": {Name: "trust", ScreenProfileConfigured: true}},
+	}}
+	if ConfigsIdentical(noScreenStatement, emptyScreenStatement) {
+		t.Error("an authored empty screen binding must change the fingerprint")
 	}
 
 	serverA := compileFingerprintConfig17249(t, "set system ntp server 192.0.2.11")

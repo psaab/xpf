@@ -23,6 +23,14 @@ func TestSnapshotConfigIncludesSemanticFields17249(t *testing.T) {
 				"192.0.2.49": {Prefer: true},
 			},
 		},
+		Security: config.SecurityConfig{
+			AddressBook: &config.AddressBook{Addresses: map[string]*config.Address{
+				"partner-api": {Name: "partner-api", DNSName: "api.example.com", DNSFamily: "ipv4-only"},
+			}},
+			Zones: map[string]*config.ZoneConfig{
+				"trust": {Name: "trust", ScreenProfile: "edge", ScreenProfileConfigured: true},
+			},
+		},
 	}
 	raw, err := json.Marshal(&ConfigSnapshot{Config: cfg})
 	if err != nil {
@@ -37,13 +45,21 @@ func TestSnapshotConfigIncludesSemanticFields17249(t *testing.T) {
 					HasPreference bool
 				} `json:"StaticRoutes"`
 			} `json:"RoutingOptions"`
-		System struct {
-			NTPPeers       []string
-			NTPPeerOptions map[string]struct {
-				Prefer bool
-			}
-		} `json:"System"`
-	} `json:"config"`
+			System struct {
+				NTPPeers       []string
+				NTPPeerOptions map[string]struct {
+					Prefer bool
+				}
+			} `json:"System"`
+			Security struct {
+				AddressBook struct {
+					Addresses map[string]struct {
+						DNSName   string
+						DNSFamily string
+					}
+				}
+			} `json:"Security"`
+		} `json:"config"`
 	}
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("decode ConfigSnapshot: %v; payload=%s", err, raw)
@@ -62,5 +78,10 @@ func TestSnapshotConfigIncludesSemanticFields17249(t *testing.T) {
 	if option := got.Config.System.NTPPeerOptions["192.0.2.49"]; !option.Prefer {
 		t.Errorf("snapshot NTPPeerOptions[192.0.2.49] = %+v, want Prefer=true",
 			option)
+	}
+	dnsAddress := got.Config.Security.AddressBook.Addresses["partner-api"]
+	if dnsAddress.DNSName != "api.example.com" || dnsAddress.DNSFamily != "ipv4-only" {
+		t.Errorf("snapshot DNS fields = %+v, want api.example.com/ipv4-only; payload=%s",
+			dnsAddress, raw)
 	}
 }

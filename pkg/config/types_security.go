@@ -520,11 +520,18 @@ type PreIDDefaultPolicy struct {
 
 // ZoneConfig represents a security zone.
 type ZoneConfig struct {
-	Name                    string
-	Description             string
-	Interfaces              []string
-	ScreenProfile           string // reference to screen profile name
-	ScreenProfileConfigured bool   `json:"-"` // distinguishes an authored empty binding from no screen statement (#10973)
+	Name          string
+	Description   string
+	Interfaces    []string
+	ScreenProfile string // reference to screen profile name
+	// ScreenProfileConfigured distinguishes an authored empty binding from
+	// no screen statement (#10973). The compiler derives this provenance bit
+	// from the source statement; keep it out of JSON because valid commits
+	// always carry a non-empty ScreenProfile, while tolerant-load diagnostics
+	// that depend on an empty authored binding are separately exposed through
+	// ScreenMissingProfiles. ConfigFingerprint includes it because it changes
+	// tolerant-load behavior.
+	ScreenProfileConfigured bool `json:"-"`
 	// UnknownZoneChildren records security-zone child keywords the compiler
 	// does not model (#11575, the zone instance of the #3318 class).
 	// compileZones switched only on known child names with no default case,
@@ -1990,13 +1997,13 @@ type Address struct {
 	// at commit; UsableValue keeps every tainted entry unresolvable on tolerant
 	// load / peer-sync.
 	UnimplementedForms []string
-	// DNSName is the modelled `dns-name <fqdn>` value (#15673); empty for
-	// prefix/range/wildcard entries. DNSFamily is "", "ipv4-only", or
-	// "ipv6-only". DNSAddresses is the last resolver snapshot for the name
-	// (CIDR strings); it is runtime state, never persisted, and is refreshed
-	// by the daemon's periodic resolver. Resolvers read UsableValues.
-	DNSName      string   `json:"-"`
-	DNSFamily    string   `json:"-"`
+	// DNSName and DNSFamily are authored `dns-name <fqdn> [family]` semantics
+	// (#15673), used to select and retrieve DNS answers; they are included in
+	// compiled-config JSON so consumers retain the configured name and family.
+	// DNSAddresses is only the daemon's last resolver snapshot (CIDR strings),
+	// refreshed periodically, and is runtime state rather than authored config.
+	DNSName      string   `json:"DNSName"`
+	DNSFamily    string   `json:"DNSFamily"`
 	DNSAddresses []string `json:"-"`
 	// DNSLookupFailed records that the latest (re)resolution attempt
 	// FAILED (resolver error) rather than returning an answer — possibly

@@ -25,6 +25,13 @@ system {
         }
     }
 }
+security {
+    address-book {
+        global {
+            address partner-api dns-name api.example.com ipv4-only;
+        }
+    }
+}
 `)
 	server := &Server{store: store}
 	response := httptest.NewRecorder()
@@ -59,6 +66,14 @@ system {
 				Prefer bool
 			}
 		}
+		Security struct {
+			AddressBook struct {
+				Addresses map[string]struct {
+					DNSName   string
+					DNSFamily string
+				}
+			}
+		}
 	}
 	if err := json.Unmarshal(envelope.Data, &got); err != nil {
 		t.Fatalf("decode GET /api/v1/config data: %v; data=%s", err, envelope.Data)
@@ -78,5 +93,10 @@ system {
 	if option := got.System.NTPPeerOptions["192.0.2.49"]; !option.Prefer {
 		t.Errorf("GET /api/v1/config NTPPeerOptions[192.0.2.49] = %+v, want Prefer=true",
 			option)
+	}
+	dnsAddress := got.Security.AddressBook.Addresses["partner-api"]
+	if dnsAddress.DNSName != "api.example.com" || dnsAddress.DNSFamily != "ipv4-only" {
+		t.Errorf("GET /api/v1/config DNS fields = %+v, want api.example.com/ipv4-only",
+			dnsAddress)
 	}
 }
