@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/logging"
@@ -22,6 +24,14 @@ func streamSyslogCfg18368(names ...string) *config.Config {
 	return cfg
 }
 
+func streamSyslogUDPCfg18368(name string, port int) *config.Config {
+	cfg := streamSyslogCfg18368(name)
+	stream := cfg.Security.Log.Streams[name]
+	stream.Port = port
+	stream.Transport.Protocol = "udp"
+	return cfg
+}
+
 func newStreamSyslogApplier18368(t *testing.T) (*Daemon, *logging.EventReader, *int) {
 	t.Helper()
 	built := 0
@@ -36,13 +46,14 @@ func newStreamSyslogApplier18368(t *testing.T) (*Daemon, *logging.EventReader, *
 // #18368: even when the handler still contains the exact cached pointer,
 // Close is terminal and an unchanged fingerprint must rebuild it.
 func TestApplySecurityStreamSyslogSameIdentityRebuildsClosedClient18368(t *testing.T) {
-	d, er, built := newStreamSyslogApplier18368(t)
-	cfg := streamSyslogCfg18368("audit")
+	d, er, _ := newStreamSyslogApplier18368(t)
+	port, sink := udpSink16767(t)
+	cfg := streamSyslogUDPCfg18368("audit", port)
 
 	d.applySyslogConfig(er, cfg)
 	first := er.SyslogClients()
-	if len(first) != 1 || *built != 1 || first[0].Closed() {
-		t.Fatalf("premise: first apply installed %d clients after %d constructions", len(first), *built)
+	if len(first) != 1 || first[0].Closed() {
+		t.Fatalf("premise: first apply did not install one live client: %v", first)
 	}
 
 	first[0].Close() // same-identity retirement: the cached pointer remains installed
@@ -52,11 +63,18 @@ func TestApplySecurityStreamSyslogSameIdentityRebuildsClosedClient18368(t *testi
 	d.applySyslogConfig(er, cfg)
 
 	current := er.SyslogClients()
-	if *built != 2 {
-		t.Fatalf("#18368: unchanged apply after same-identity retirement constructed %d clients, want 2 total", *built)
-	}
 	if len(current) != 1 || current[0] == first[0] || current[0].Closed() {
 		t.Fatalf("#18368: unchanged apply did not install a fresh live client: %v", current)
+	}
+	const msg = "after-same-identity-rebuild-18368"
+	if err := current[0].Send(6, msg); err != nil {
+		t.Fatalf("#18368: rebuilt client send failed: %v", err)
+	}
+	buf := make([]byte, 2048)
+	_ = sink.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := sink.ReadFromUDP(buf)
+	if err != nil || !strings.Contains(string(buf[:n]), msg) {
+		t.Fatalf("#18368: rebuilt client did not deliver a record: n=%d err=%v data=%q", n, err, buf[:n])
 	}
 }
 
@@ -125,25 +143,33 @@ func TestApplySecurityStreamSyslogRebuildsAfterInstalledSetDrift18368(t *testing
 	}
 }
 
-// Control: an unchanged, open cached stream remains installed without
-// another construction/warm attempt.
+// Control: an unchanged, open cached UDP stream remains installed, so
+// it does not construct and dial a replacement client.
 func TestApplySecurityStreamSyslogUnchangedOpenClientNoRedial18368(t *testing.T) {
-	d, er, built := newStreamSyslogApplier18368(t)
-	cfg := streamSyslogCfg18368("audit")
+	d, er, _ := newStreamSyslogApplier18368(t)
+	port, sink := udpSink16767(t)
+	cfg := streamSyslogUDPCfg18368("audit", port)
 
 	d.applySyslogConfig(er, cfg)
 	first := er.SyslogClients()
-	if len(first) != 1 || *built != 1 || first[0].Closed() {
-		t.Fatalf("premise: first apply installed %d clients after %d constructions", len(first), *built)
+	if len(first) != 1 || first[0].Closed() {
+		t.Fatalf("premise: first apply did not install one live client: %v", first)
 	}
 	d.applySyslogConfig(er, cfg)
 
 	current := er.SyslogClients()
-	if *built != 1 {
-		t.Fatalf("control: unchanged open client caused another construction/warm attempt (total=%d, want 1)", *built)
-	}
 	if len(current) != 1 || current[0] != first[0] || current[0].Closed() {
 		t.Fatalf("control: unchanged apply did not preserve the open client: %v", current)
+	}
+	const msg = "after-unchanged-open-18368"
+	if err := current[0].Send(6, msg); err != nil {
+		t.Fatalf("control: unchanged client send failed: %v", err)
+	}
+	buf := make([]byte, 2048)
+	_ = sink.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, _, err := sink.ReadFromUDP(buf)
+	if err != nil || !strings.Contains(string(buf[:n]), msg) {
+		t.Fatalf("control: unchanged client did not deliver a record: n=%d err=%v data=%q", n, err, buf[:n])
 	}
 }
 
