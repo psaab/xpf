@@ -667,6 +667,10 @@ pub(crate) struct ProcessStatus {
     pub ipsec_inner_parse_drops_total: u64,
     #[serde(rename = "ipsec_inner_ecn_illegal_drops", default)]
     pub ipsec_inner_ecn_illegal_drops: u64,
+    /// #17218: D19 no-route denials (missing actual route or a
+    /// non-forwardable resolution).
+    #[serde(rename = "ipsec_inner_noroute_total", default)]
+    pub ipsec_inner_noroute_total: u64,
     /// D11 queue/slab/verdict/orphan accounting: ingress-enqueue refusals
     /// (contended/closed/full/per-flow cap), verdict-post refusals, slab
     /// exhaustion, worker-set retirements, post-mortem slot reclaims, and

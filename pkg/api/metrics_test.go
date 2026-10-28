@@ -1585,6 +1585,10 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 			"xpf_userspace_ipsec_inner_ecn_illegal_drops_total", "IPsec inner illegal ECN",
 			nil, nil,
 		),
+		userspaceIpsecInnerNoroute: prometheus.NewDesc(
+			"xpf_userspace_ipsec_inner_noroute_total", "IPsec inner no route",
+			nil, nil,
+		),
 		userspaceIpsecInnerWorkerQueueFull: prometheus.NewDesc(
 			"xpf_userspace_ipsec_inner_worker_queue_full_total", "IPsec inner worker queue full",
 			nil, nil,
@@ -1829,6 +1833,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 		ZoneGateNoGenerationTotal:            104,
 		IpsecInnerParseDropsTotal:            105,
 		IpsecInnerEcnIllegalDrops:            106,
+		IpsecInnerNorouteTotal:               115,
 		IpsecInnerWorkerQueueFullTotal:       107,
 		IpsecInnerVerdictQueueFullTotal:      108,
 		IpsecInnerVerdictQueueContendedTotal: 114,
@@ -2029,12 +2034,13 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	// want 109, got 111 there.) #15249 adds the GRE transport-egress
 	// refusal counter, for 113. #16215 adds the SNAT-revoked-sessions
 	// counter, for 114. #16593 adds the frag-quota-refusals counter, for 115.
+	// #17218 adds the ipsec-inner no-route counter, for 116.
 	// RE-ANCHORED, not relaxed: this count is a deliberate gate — it catches a
 	// series that is emitted but never asserted, which is how a collector grows
 	// an unverified metric. All new series ARE asserted below, so the original
 	// claim still holds and the number moves with the population.
-	if len(got) != 115 {
-		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 115 metrics, got %d", len(got))
+	if len(got) != 116 {
+		t.Fatalf("emitUserspaceDynamicBufferMetrics: want 116 metrics, got %d", len(got))
 	}
 
 	// #8447: DISTINCT values, so a collector that emitted one of the quartet
@@ -2180,6 +2186,7 @@ func TestEmitUserspaceDynamicBufferMetrics(t *testing.T) {
 	assertCounterClose(t, got, c.userspaceZoneGateNoGeneration, nil, 104)
 	assertCounterClose(t, got, c.userspaceIpsecInnerParseDrops, nil, 105)
 	assertCounterClose(t, got, c.userspaceIpsecInnerEcnIllegalDrops, nil, 106)
+	assertCounterClose(t, got, c.userspaceIpsecInnerNoroute, nil, 115)
 	assertCounterClose(t, got, c.userspaceIpsecInnerWorkerQueueFull, nil, 107)
 	assertCounterClose(t, got, c.userspaceIpsecInnerVerdictQueueFull, nil, 108)
 	assertCounterClose(t, got, c.userspaceIpsecInnerVerdictQueueContended, nil, 114)

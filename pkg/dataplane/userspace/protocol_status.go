@@ -910,6 +910,9 @@ type ProcessStatus struct {
 	// helpers (defaults to 0).
 	IpsecInnerParseDropsTotal uint64 `json:"ipsec_inner_parse_drops_total,omitempty"`
 	IpsecInnerEcnIllegalDrops uint64 `json:"ipsec_inner_ecn_illegal_drops,omitempty"`
+	// #17218: D19 no-route denials. Surfaced as
+	// xpf_userspace_ipsec_inner_noroute_total.
+	IpsecInnerNorouteTotal uint64 `json:"ipsec_inner_noroute_total,omitempty"`
 	// #10695 (#9506 counter slice): D11 queue/slab/verdict/orphan
 	// accounting — ingress-enqueue refusals (contended/closed/full/per-flow
 	// cap), verdict-post refusals, slab exhaustion, worker-set retirements,

@@ -426,6 +426,11 @@ func (c *xpfCollector) initUserspaceDropsDescriptors() {
 		"IPsec-inner packets dropped for an RFC 6040 illegal ECN combination (#9506).",
 		nil, nil,
 	)
+	c.userspaceIpsecInnerNoroute = prometheus.NewDesc(
+		"xpf_userspace_ipsec_inner_noroute_total",
+		"IPsec-inner frames refused with no route (#17218).",
+		nil, nil,
+	)
 	c.userspaceIpsecInnerWorkerQueueFull = prometheus.NewDesc(
 		"xpf_userspace_ipsec_inner_worker_queue_full_total",
 		"IPsec-inner worker ingress enqueues refused by a full, closed, contended, or capped queue (#9506).",

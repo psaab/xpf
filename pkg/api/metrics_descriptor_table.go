@@ -643,6 +643,7 @@ var collectorDescUserspaceDrops = []int{
 	xpfCollectorDescFieldIndex("userspaceZoneGateNoGeneration"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerParseDrops"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerEcnIllegalDrops"),
+	xpfCollectorDescFieldIndex("userspaceIpsecInnerNoroute"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerWorkerQueueFull"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerVerdictQueueFull"),
 	xpfCollectorDescFieldIndex("userspaceIpsecInnerVerdictQueueContended"),

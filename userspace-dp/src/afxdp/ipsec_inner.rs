@@ -40,8 +40,6 @@ pub(crate) static zone_gate_stale_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
 pub(crate) static zone_gate_no_generation_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_input_stateful_without_session_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_parse_drops_total: AtomicU64 = AtomicU64::new(0);
 // #9506 counter slice: one storage cell for the IPsec-inner ECN refusal.
 // The lowercase duplicate was a second, never-incremented `AtomicU64` — D13
@@ -52,52 +50,14 @@ pub(crate) static ipsec_inner_parse_drops_total: AtomicU64 = AtomicU64::new(0);
 // without a translation table.
 pub(crate) use IPSEC_INNER_ECN_ILLEGAL_DROPS as ipsec_inner_ecn_illegal_drops;
 #[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_session_lookup_errors_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_session_lookup_recoveries_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static session_alias_ambiguous_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_alias_overflow_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_alias_replication_failures_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_session_rollback_failures_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static policy_reject_as_deny_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static tcp_rst_suppressed_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_alg_errors_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_filter_errors_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_policer_errors_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_nat_stage_errors_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_nat_rollback_failures_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_noroute_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_routed_local_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_input_routed_transit_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_input_nat_mutation_unsupported_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_syn_cookie_refusals_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static ipsec_inner_fragment_late_total: AtomicU64 = AtomicU64::new(0);
-#[allow(non_upper_case_globals)]
-pub(crate) static nfq_reentry_unsupported_domain_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_permit_forward_armed_total: AtomicU64 = AtomicU64::new(0);
 
 /// #9506 counter slice: one-call snapshot of the Rust-incremented
-/// IPsec-inner counters. Definition-only §4.3 statics stay local until their
-/// stage arms land; exporting permanent zero series would widen this slice
-/// without adding an operator-visible signal. Go-owned counters are likewise
+/// IPsec-inner counters. Every snake_case static above has a production
+/// `fetch_add`; unarmed §4.3 placeholders were deleted in #17218 rather
+/// than exported as permanent zero series. Go-owned counters are likewise
 /// excluded.
 ///
 /// Field names match their static names (lowercased), except the canonical
@@ -110,6 +70,7 @@ pub(crate) struct IpsecInnerCounterSnapshot {
     pub zone_gate_no_generation_total: u64,
     pub ipsec_inner_parse_drops_total: u64,
     pub ipsec_inner_ecn_illegal_drops: u64,
+    pub ipsec_inner_noroute_total: u64,
     pub ipsec_inner_worker_queue_full_total: u64,
     // #15151: contention counted apart from genuine full.
     pub ipsec_inner_worker_queue_busy_total: u64,
@@ -133,6 +94,7 @@ pub(crate) fn ipsec_inner_counters_snapshot() -> IpsecInnerCounterSnapshot {
         zone_gate_no_generation_total: zone_gate_no_generation_total.load(Ordering::Relaxed),
         ipsec_inner_parse_drops_total: ipsec_inner_parse_drops_total.load(Ordering::Relaxed),
         ipsec_inner_ecn_illegal_drops: IPSEC_INNER_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed),
+        ipsec_inner_noroute_total: ipsec_inner_noroute_total.load(Ordering::Relaxed),
         ipsec_inner_worker_queue_full_total: IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
             .load(Ordering::Relaxed),
         ipsec_inner_worker_queue_busy_total: IPSEC_INNER_WORKER_QUEUE_BUSY_TOTAL
@@ -388,6 +350,7 @@ fn d14_zone_gate(
     };
     let lookup = super::forwarding::lookup_forwarding_resolution(forwarding, destination);
     let Some(actual_route) = lookup.selected_route else {
+        ipsec_inner_noroute_total.fetch_add(1, Ordering::Relaxed);
         return Err(deny(input, "d19_actual_route_missing", reason::NO_ROUTE));
     };
     if actual_route != (RouteIdentity { domain: 0, table: 254 }) {
@@ -398,6 +361,7 @@ fn d14_zone_gate(
         ));
     }
     if lookup.resolution.disposition != ForwardingDisposition::ForwardCandidate {
+        ipsec_inner_noroute_total.fetch_add(1, Ordering::Relaxed);
         return Err(deny(input, "d19_route_not_forwardable", reason::NO_ROUTE));
     }
     // The local selector projection is separate from the remote, route-derived
@@ -920,9 +884,15 @@ mod tests {
         }]);
         let view = view_with_rows(1, 1, rows, forwarding);
         let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        let before = ipsec_inner_noroute_total.load(Ordering::Relaxed);
         assert_eq!(
             adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1))).reason(),
             Some(reason::NO_ROUTE)
+        );
+        assert_eq!(
+            ipsec_inner_noroute_total.load(Ordering::Relaxed),
+            before + 1,
+            "a missing actual route must count ipsec_inner_noroute_total (#17218)"
         );
     }
 
@@ -969,9 +939,15 @@ mod tests {
         );
 
         let packet = test_packet_with_source([10, 0, 0, 1], [10, 0, 0, 1]);
+        let before = ipsec_inner_noroute_total.load(Ordering::Relaxed);
         let decision =
             adjudicate_ipsec_inner(&view, input(&packet, advisory(1, 1, 1, 1, 1)));
         assert_eq!(decision.reason(), Some(reason::NO_ROUTE));
+        assert_eq!(
+            ipsec_inner_noroute_total.load(Ordering::Relaxed),
+            before + 1,
+            "a non-forwardable route must count ipsec_inner_noroute_total (#17218)"
+        );
     }
 
     #[test]
