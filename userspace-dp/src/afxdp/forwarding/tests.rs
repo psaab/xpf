@@ -5384,7 +5384,6 @@ fn dynamic_neighbor_cache_enables_forward_candidate() {
     );
 }
 
-
 /// #3771 (M12): neighbor-state classification is an ALLOWLIST, not the pre-fix
 /// denylist. Recognized forwarding states install; failed/incomplete/NOARP are
 /// known-unusable; empty / `none` / future or corrupt tokens are UNKNOWN
@@ -5423,6 +5422,36 @@ fn classify_neighbor_state_is_an_allowlist() {
         );
         assert!(!neighbor_state_usable(s), "{s} must not be usable");
     }
+}
+
+/// #17240: the String adapter's override branches. A mapped override name
+/// resolves through `zone_name_to_id` and wins over the ingress ifindex's
+/// zone; an unmapped name round-trips verbatim rather than substituting the
+/// ingress ifindex's zone.
+#[test]
+fn zone_pair_adapter_override_verbatim_17240() {
+    let state = build_forwarding_state(&nat_snapshot());
+    // nat_snapshot: ifindex 24 is in `lan`, ifindex 12 is in `wan`.
+    assert_eq!(
+        state.ifindex_to_zone_id.get(&24).copied(),
+        Some(TEST_LAN_ZONE_ID),
+        "precondition: ingress ifindex 24 must be in lan"
+    );
+    // Mapped override wins over the ingress ifindex's own zone.
+    let (from_zone, to_zone) = zone_pair_for_flow_with_override(&state, 24, Some("wan"), 24);
+    assert_eq!(
+        from_zone, "wan",
+        "mapped override must win over lan ingress"
+    );
+    assert_eq!(to_zone, "lan");
+    // Unmapped override round-trips verbatim; the lan ingress ifindex (24)
+    // must NOT substitute its zone for the unknown name.
+    let (from_zone, to_zone) = zone_pair_for_flow_with_override(&state, 24, Some("ghost-zone"), 12);
+    assert_eq!(
+        from_zone, "ghost-zone",
+        "unmapped override must round-trip verbatim, not substitute lan"
+    );
+    assert_eq!(to_zone, "wan");
 }
 
 #[test]

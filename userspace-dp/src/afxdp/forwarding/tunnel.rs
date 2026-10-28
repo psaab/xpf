@@ -1,5 +1,5 @@
-//! #5650: tunnel outer-header forwarding resolution and neighbor-entry lookup /
-//! parsing for tunnel next-hops. Pure code-motion split out of
+//! #5650: tunnel outer-header forwarding resolution and neighbor-entry lookup
+//! for tunnel next-hops. Pure code-motion split out of
 //! `forwarding/mod.rs` (behavior-identical).
 
 use super::*;
