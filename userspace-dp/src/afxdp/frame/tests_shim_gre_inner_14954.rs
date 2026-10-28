@@ -147,11 +147,12 @@ fn gre_inner_v4_declared_length_enforced_14954() {
 /// Compose the v6 classifier verdict exactly as
 /// `classify_native_gre_inner_ipv6` does (#17238): one scalar call
 /// with fragment = non-terminal first header, declared end =
-/// `40 + payload_len` (via the v6 len gate from the inner L3 start,
-/// mirroring production's Relative form), span start = 40, span =
-/// the protocol's read length; `payload_len == 0` (jumbogram) misses
-/// before the verdict, as in production; LAND via `gre_inner_land`
-/// on the built key. A mutation of the production v6 comparison
+/// `40 + payload_len` (inlined in production, not via the len-gate
+/// helper — the helper call below reproduces that value from the
+/// inner L3 start), span start = 40, span = the protocol's read
+/// length; `payload_len == 0` (jumbogram) misses before the
+/// verdict, as in production; LAND via `gre_inner_land` on the
+/// built key. A mutation of the production v6 comparison
 /// (e.g. `>` flipped, span or declared-end constants drifted) reds
 /// these cells because they execute the same scalar function.
 fn v6_allowed(first_header: u8, payload_len: u16, l4_span_len: usize, src: &[u8; 16], dst: &[u8; 16]) -> bool {
