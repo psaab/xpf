@@ -131,13 +131,25 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 	// (`G6 …` as one leaf) are judged. Tokens walk with the
 	// compiler's own grammar: `interface` consumes following
 	// non-keyword tokens as members, scalars consume one value, any
-	// other token is an unsupported knob refused by name.
+	// other token is an unsupported knob refused by name. Meta
+	// statements (apply-groups / apply-groups-except / apply-macro,
+	// #7029) are exempt exactly as the family and children loops
+	// exempt their braced spellings: the meta token and its
+	// value/macro-body tokens up to the next statement head are
+	// skipped, never judged as a knob or a member.
 	checkGroupPacked := func(inst struct {
 		name string
 		node *Node
 	}) error {
 		tail := instanceValueTail(inst.node, inst.name)
 		for i := 0; i < len(tail); {
+			if routingInstanceApplyMetaKeyword9323(tail[i]) {
+				i++
+				for i < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[i]) && !routingInstanceApplyMetaKeyword9323(tail[i]) {
+					i++
+				}
+				continue
+			}
 			switch tail[i] {
 			case "active-server-group":
 				v := ""
@@ -173,7 +185,7 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 			case "interface":
 				j := i + 1
 				var members []string
-				for j < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[j]) {
+				for j < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[j]) && !routingInstanceApplyMetaKeyword9323(tail[j]) {
 					members = append(members, tail[j])
 					j++
 				}

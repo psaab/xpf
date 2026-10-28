@@ -293,3 +293,33 @@ func TestDHCPRelayContainerPackedGroup17205(t *testing.T) {
 		})
 	}
 }
+
+// TestDHCPRelayPackedMetaGroup17205 pins fold F1: meta statements
+// (apply-groups / apply-groups-except / apply-macro) packed onto a
+// relay group's tail are legal at any hierarchy point (#7029), so
+// the braced spellings the children loops exempt must also be
+// exempt in the packed spelling checkGroupPacked judges. The
+// compiler ignores those tokens on the same run, so strict must
+// accept them and install only the real members.
+func TestDHCPRelayPackedMetaGroup17205(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"packed apply-groups", "group { G6 apply-groups foo interface ge-0/0/0.0; }"},
+		{"packed apply-groups-except", "group { G6 apply-groups-except foo interface ge-0/0/0.0; }"},
+		{"packed apply-macro bare", "group { G6 apply-macro M foo interface ge-0/0/0.0; }"},
+		{"packed apply-macro body tokens", "group { G6 apply-macro M interface ge-0/0/0.0; }"},
+		{"packed apply-macro after scalar", "group { G6 active-server-group SG6 apply-macro M k v interface ge-0/0/0.0; }"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tree := parseHierText(t, "forwarding-options { dhcp-relay { dhcpv6 { "+
+				"active-server-group SG6; server-group SG6 { 2001:db8:9::9; } "+tc.body+" } } }")
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("#17205 F1: %s strict-refused: %v", tc.name, err)
+			}
+			g := cfg.ForwardingOptions.DHCPRelay.V6.Groups["G6"]
+			if g == nil || !slices.Equal(g.Interfaces, []string{"ge-0/0/0.0"}) {
+				t.Fatalf("#17205 F1: %s group = %+v, want interfaces [ge-0/0/0.0]", tc.name, g)
+			}
+		})
+	}
+}
