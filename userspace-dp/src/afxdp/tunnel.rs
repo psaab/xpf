@@ -104,6 +104,88 @@ const LOCAL_TUNNEL_SESSION_PRUNE_INTERVAL_NS: u64 = 5_000_000_000;
 const LOCAL_TUNNEL_SESSION_STALE_NS: u64 = 30_000_000_000;
 const LOCAL_TUNNEL_SESSION_PRUNE_THRESHOLD: usize = 4096;
 
+/// #17194: TUN-origin refresh window shared by the GRE and WG builders:
+/// 5 s for TCP (established-cadence refresh), 1 s for everything else
+/// (liveness tick).
+pub(super) fn tun_origin_refresh_after_ns(protocol: u8) -> u64 {
+    if protocol == PROTO_TCP {
+        5_000_000_000
+    } else {
+        1_000_000_000
+    }
+}
+
+/// #17194: the TunOrigin `SyncedSessionEntry` literal shared by the GRE
+/// (`build_local_origin_tunnel_tx_request`) and WG
+/// (`build_wg_tun_origin_entries`) builders — one SSOT so the stamped
+/// metadata cannot drift between the two provenances. `decision` already
+/// carries the HA-enforced resolution; `zone_id` is the tunnel's zone;
+/// `tcp_flags_frame` is the eth-wrapped inner frame TCP flags are read from.
+pub(super) fn tun_origin_session_entry(
+    key: SessionKey,
+    decision: SessionDecision,
+    forwarding: &ForwardingState,
+    zone_id: u32,
+    protocol: u8,
+    tcp_flags_frame: &[u8],
+) -> SyncedSessionEntry {
+    SyncedSessionEntry {
+        key,
+        decision,
+        metadata: SessionMetadata {
+            ingress_zone: zone_id,
+            egress_zone: zone_id,
+            ingress_zone_check: crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
+                zone_id,
+            ),
+            egress_zone_check: crate::session::zone_vintage_check_for_id(
+                &forwarding.zone_id_to_name,
+                zone_id,
+            ),
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            // Self-originated: no admitting policy/application (Junos runs no
+            // security policy on firewall-self-originated traffic, #6224), so
+            // zeroed policy fields + the global per-protocol idle timeout
+            // (`None`). `TunOrigin` below is POSITIVE provenance — stamped only
+            // by the GRE and WG builders via this helper — never a peer wire
+            // import.
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        leak_incarnation: 0,
+        origin: SessionOrigin::TunOrigin,
+        protocol,
+        tcp_flags: if protocol == PROTO_TCP {
+            extract_tcp_flags_and_window(tcp_flags_frame)
+                .map(|(flags, _)| flags)
+                .unwrap_or_default()
+        } else {
+            0
+        },
+        generation: 0,
+        session_id: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+        source_nat_static: None,
+    }
+}
+
 fn local_tunnel_io_error_is_fatal(err: &io::Error) -> bool {
     matches!(
         err.raw_os_error(),
@@ -720,73 +802,31 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     let bytes = encapsulate_native_gre_frame(&inner_frame, meta, &decision, forwarding)
         .ok_or_else(|| "encapsulate_native_gre_frame_failed".to_string())?;
     let session_entry = match (firewall_self_originated, flow.as_ref()) {
-        (true, Some(flow)) => Some(SyncedSessionEntry { key: flow.forward_key.clone(),
-        decision,
-        metadata: SessionMetadata {
-            ingress_zone: zone_id,
-            egress_zone: zone_id,
-            ingress_zone_check: crate::session::zone_vintage_check_for_id(
-                &forwarding.zone_id_to_name,
-                zone_id,
-            ),
-            egress_zone_check: crate::session::zone_vintage_check_for_id(
-                &forwarding.zone_id_to_name,
-                zone_id,
-            ),
-            ingress_ifindex: 0,
-            ingress_vlan_id: 0,
-            forward_ingress_vlan_id: None,
-            owner_rg_id: owner_rg_for_resolution(forwarding, decision.resolution),
-            fabric_ingress: false,
-            is_reverse: false,
-            nat64_reverse: None,
-            // #6224: this is the LOCAL-ORIGIN (host-outbound) GRE encapsulation
-            // path — the firewall's own kernel-routed traffic read off the TUN
-            // device (`local_tunnel_source_loop`), NOT a peer HA-sync import.
-            // `resolve_tunnel_forwarding_resolution` does route/next-hop/neighbor
-            // resolution ONLY; no security policy or application term is matched
-            // here (Junos runs no security policy on firewall-self-originated
-            // traffic). There is therefore no admitting policy/application to
-            // source the per-policy `then log` selection, the policy ID, the
-            // per-application idle timeout, or the hit-counter handle from.
-            // Zeroed policy fields and the global per-protocol idle timeout
-            // (`inactivity_timeout_ns: None` -> `session_timeout_ns` falls back
-            // to the per-protocol default) are the correct values for
-            // self-originated traffic; a per-app timeout would only differ if an
-            // admitting application existed, which it does not. The
-            // `origin: SessionOrigin::TunOrigin` tag below is POSITIVE
-            // provenance (#10038 item 5 — stamped only here and in the WG
-            // builder), NOT a peer wire import.
-            //
-            // (The earlier #2508/#3056/#3227/#3073 comments here mis-described
-            // this path as "peer-seeded import ... does not cross the HA wire
-            // yet". The real peer-import path — server/helpers.rs — DOES stamp
-            // all of these from `SessionSyncRequest` post-#3301; this path is
-            // simply not a wire path, so nothing crosses to read.)
-            log_session_init: false,
-            log_session_close: false,
-            policy_id: 0,
-            inactivity_timeout_ns: None,
-            policy_counter_idx: 0,
-            policy_counter: None,
-            nat_scope_ifindex: None,
-        },
-        leak_incarnation: 0,
-        origin: SessionOrigin::TunOrigin,
-        protocol: meta.protocol,
-        tcp_flags: if meta.protocol == PROTO_TCP {
-            extract_tcp_flags_and_window(&inner_frame)
-                .map(|(flags, _)| flags)
-                .unwrap_or_default()
-        } else {
-            0
-        },
-        // Locally decapsulated tunnel session: no peer install generation.
-        generation: 0,
-        session_id: 0,
-        tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
-        persistent_lease_hold: None,
-        source_nat_static: None, }),
+        // #6224: LOCAL-ORIGIN (host-outbound) GRE encapsulation — the
+        // firewall's own kernel-routed traffic read off the TUN device
+        // (`local_tunnel_source_loop`), NOT a peer HA-sync import.
+        // `resolve_tunnel_forwarding_resolution` does route/next-hop/neighbor
+        // resolution ONLY; no security policy or application term is matched
+        // here (Junos runs no security policy on firewall-self-originated
+        // traffic), so there is no admitting policy/application to source
+        // the per-policy `then log` selection, the policy ID, the
+        // per-application idle timeout, or the hit-counter handle from.
+        // The shared `tun_origin_session_entry` stamps the zeroed policy
+        // fields and `SessionOrigin::TunOrigin` (#10038 item 5).
+        //
+        // (The earlier #2508/#3056/#3227/#3073 comments here mis-described
+        // this path as "peer-seeded import ... does not cross the HA wire
+        // yet". The real peer-import path — server/helpers.rs — DOES stamp
+        // all of these from `SessionSyncRequest` post-#3301; this path is
+        // simply not a wire path, so nothing crosses to read.)
+        (true, Some(flow)) => Some(tun_origin_session_entry(
+            flow.forward_key.clone(),
+            decision,
+            forwarding,
+            zone_id,
+            meta.protocol,
+            &inner_frame,
+        )),
         // #14119: flowless (non-first fragment) or non-owned traffic mints
         // no TunOrigin session — payload bytes are not a flow identity.
         _ => None,
@@ -818,10 +858,8 @@ pub(super) fn build_local_origin_tunnel_tx_request(
     // `meta` describe the pre-encap packet, so use the meta-only extra
     // (tcp_flags authoritative; is-fragment / icmp-type under-match on this rare
     // local path rather than risk mis-parsing inner offsets).
-    let cos_extra = crate::afxdp::frame::term_match_extra_from_meta_and_frame(
-        &inner_frame,
-        meta.into(),
-    );
+    let cos_extra =
+        crate::afxdp::frame::term_match_extra_from_meta_and_frame(&inner_frame, meta.into());
     let cos = resolve_cos_tx_selection_at(
         forwarding,
         decision.resolution.egress_ifindex,
@@ -913,11 +951,7 @@ pub(super) fn maybe_enqueue_local_tunnel_session(
     };
     let now_ns = monotonic_nanos();
     prune_local_tunnel_sessions(local_sessions, local_sessions_last_prune_ns, now_ns);
-    let refresh_after_ns = if matches!(entry.protocol, PROTO_TCP) {
-        5_000_000_000
-    } else {
-        1_000_000_000
-    };
+    let refresh_after_ns = tun_origin_refresh_after_ns(entry.protocol);
     if matches!(
         local_sessions.get(&entry.key),
         Some(last) if now_ns.saturating_sub(*last) < refresh_after_ns
