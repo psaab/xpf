@@ -892,6 +892,7 @@ func (s TransferReadinessSnapshot) Reason() string {
 //	persistentNatLeaseApplyMu (persistent-NAT lease commit order)
 //	ipsecApplyMu (IPsec full-set commit order)
 //	dhcpApplyMu (DHCP full-set commit + chunk state)
+//	configApplyDebtMu (send generation + capability snapshot; leaf)
 //
 // Nesting edges (holder -> acquired). Pin tokens in [brackets] are the
 // exact substrings the pin test searches for in this comment:
@@ -902,6 +903,13 @@ func (s TransferReadinessSnapshot) Reason() string {
 //	  it over write. The ungated writer never acquires mu while holding it.
 //	[peerSnapshotProtocolWriteMu -> writeMu] both config writers sample and
 //	  publish send debt, then perform the socket write under this lock order.
+//	[peerSnapshotProtocolWriteMu -> configApplyDebtMu] both config writers
+//	  publish send debt while serializing peer-incarnation capability changes.
+//	[writeMu -> configApplyDebtMu] the ungated writer publishes debt while
+//	  holding writeMu; the guarded writer does not hold writeMu during publish.
+//	[mu -> configApplyDebtMu] the config-apply ACK handler reads the debt
+//	  snapshot while holding mu; configApplyDebtMu does not acquire another lock.
+//
 //	[mu -> fenceAckMu] handleDisconnect/installConn hold mu and take
 //	  fenceAckMu to release scoped fence waiters.
 //	[bulkSnapshotGenMu -> genSentMu] takeDeleteGen* linearizes a queue-time
@@ -930,7 +938,8 @@ func (s TransferReadinessSnapshot) Reason() string {
 // Leaf locks (acquire no other SessionSync mutex while held): writeMu,
 // preAuthMu, queuedFrameMu, zoneRGMu, deleteJournalMu, bulkSendMu,
 // barrierWaitMu, failoverWaitMu, configGenMu, configApplyMu,
-// configEpochRoleMu, fenceAckMu, peerSnaps.peerIPsecSAsMu,
+// configEpochRoleMu, fenceAckMu, configApplyDebtMu,
+// peerSnaps.peerIPsecSAsMu,
 // peerSnaps.peerDHCPLeasesMu. Atomics (genState.genCounter,
 // genState.genGuardSessionCap, and the *SeqCounter / epoch fields) are
 // lock-free by design: genGuardSessionCap is atomic precisely so the
