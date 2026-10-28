@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 )
@@ -44,7 +43,7 @@ func TestSyncNoiseIdentityRejectsNodeIdOutside01_9915(t *testing.T) {
 }
 
 // F-044 (sizing half): the generation-guard cap must cover the maximum possible
-// live-session key count — forward entries, i.e. half of conntrack.MaxSessions
+// live-session key count — forward entries, i.e. half of dataplane.MaxSessions
 // (which counts forward+reverse). A static 200k cap at 2% of the table leaves a
 // full-of-LIVE skip-record degradation for any table past 200k sessions.
 func TestGenGuardCapCoversMaxLiveSessions_9915(t *testing.T) {
@@ -52,8 +51,8 @@ func TestGenGuardCapCoversMaxLiveSessions_9915(t *testing.T) {
 	// effective ceiling must bind at the forward-entries count — asserted
 	// through the setter→maxCap path, not by restating the constant.
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-	ss.SetGenGuardSessionCap(uint64(conntrack.MaxSessions))
-	if got, want := ss.maxCap(), conntrack.MaxSessions/2; got != want {
+	ss.SetGenGuardSessionCap(uint64(dataplane.MaxSessions))
+	if got, want := ss.maxCap(), dataplane.MaxSessions/2; got != want {
 		t.Fatalf("maxCap with a full table wired = %d, want %d forward entries (F-044)", got, want)
 	}
 }

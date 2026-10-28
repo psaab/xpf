@@ -370,23 +370,7 @@ func applyBGPNeighborProps9192(neighbor *BGPNeighbor, child *Node, ownExport, ow
 		case "default-originate":
 			neighbor.DefaultOriginate = true
 		case "bfd-liveness-detection":
-			neighbor.BFD = true
-			for _, bc := range prop.Children {
-				switch bc.Name() {
-				case "minimum-interval":
-					if v := nodeVal(bc); v != "" {
-						if n, err := strconv.Atoi(v); err == nil {
-							neighbor.BFDInterval = n
-						}
-					}
-				case "multiplier":
-					if v := nodeVal(bc); v != "" {
-						if n, err := strconv.Atoi(v); err == nil {
-							neighbor.BFDMultiplier = n
-						}
-					}
-				}
-			}
+			parseBFDLiveness17182(prop).apply(&neighbor.BFD, &neighbor.BFDInterval, &neighbor.BFDMultiplier)
 		case "loops":
 			if v := nodeVal(prop); v != "" {
 				n, err := strconv.Atoi(v)

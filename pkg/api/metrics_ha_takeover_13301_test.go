@@ -7,7 +7,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -93,7 +92,6 @@ func TestMetricsHATakeoverReadinessUsesPublishedAdapter13301(t *testing.T) {
 	adapter := dpuserspace.NewLegacyDataPlaneAdapter(manager)
 	srv := &Server{
 		store:     newDescriptorCoverageStore(t),
-		gc:        conntrack.NewGC(nil, time.Minute),
 		startTime: time.Now(),
 		dp:        adapter,
 	}

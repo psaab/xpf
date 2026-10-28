@@ -550,11 +550,6 @@ pub(super) fn ingest_cos_pending_tx_with_provenance(
     bound_pending_tx_local(binding);
 }
 
-pub(in crate::afxdp) const COS_GUARANTEE_VISIT_NS: u64 = 200_000;
-pub(in crate::afxdp) const COS_GUARANTEE_QUANTUM_MIN_BYTES: u64 = 1500;
-pub(in crate::afxdp) const COS_GUARANTEE_QUANTUM_MAX_BYTES: u64 = 512 * 1024;
-pub(in crate::afxdp) const COS_SURPLUS_ROUND_QUANTUM_BYTES: u64 = 1500;
-
 fn process_pending_queue_in_place<T, F>(pending: &mut VecDeque<T>, mut f: F)
 where
     F: FnMut(T) -> Result<(), T>,

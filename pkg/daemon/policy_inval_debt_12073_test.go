@@ -274,7 +274,7 @@ func (h *invalDebtHarness12073) commit(oldCfg, newCfg *config.Config) error {
 		return err
 	}
 	defer h.d.applySem.Release(1)
-	_, err := h.d.applyAndSyncCommitted(oldCfg, newCfg, peerSyncNever)
+	_, err := h.d.applyAndSyncCommittedForTest(oldCfg, newCfg, peerSyncNever)
 	return err
 }
 

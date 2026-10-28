@@ -7,7 +7,7 @@ of the same flow, this module decides whether the cache is still
 usable or the resolution must be re-derived.
 
 Also writes the userspace dataplane's view of session state back
-into the BPF session map mirror so the CLI / GC / metrics surface
+into the BPF session map mirror so the CLI / metrics surface
 sees the same sessions the userspace path is processing.
 
 ## Files
