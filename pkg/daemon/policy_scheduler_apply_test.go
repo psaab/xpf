@@ -21,6 +21,8 @@ type policySchedulerApplyTestDP struct {
 	compileCalls    int
 	deferStates     []bool
 	updateCalls     int
+	latchCalls      int
+	failClosedSeen  bool
 	updateStateSeen map[string]bool
 	updateErr       error
 }
@@ -50,8 +52,14 @@ func (d *policySchedulerApplyTestDP) SetDeferWorkers(v bool) {
 	d.deferStates = append(d.deferStates, v)
 }
 
-func (d *policySchedulerApplyTestDP) UpdatePolicyScheduleState(_ *config.Config, activeState map[string]bool) error {
+// #17082: latch-only, mirroring the published backends. The embedded
+// *dataplane.Manager supplies the retired non-latch method; this override
+// shadows it so the daemon's deleted non-latch arm could not be the one
+// satisfying these cells pre-fix (latchCalls would have stayed 0).
+func (d *policySchedulerApplyTestDP) UpdatePolicyScheduleStateWithLatch(_ *config.Config, activeState map[string]bool, failClosed bool) error {
 	d.updateCalls++
+	d.latchCalls++
+	d.failClosedSeen = failClosed
 	d.updateStateSeen = activeState
 	return d.updateErr
 }
@@ -61,6 +69,7 @@ type userspacePolicySchedulerApplyTestDP struct {
 
 	seedCalls          int
 	seedStateSeen      map[string]bool
+	seedFailClosedSeen bool
 	compileStateSeen   map[string]bool
 	compileCfgPolicy   string
 	compileCfgSchedule string
@@ -151,20 +160,28 @@ func (noopLinkController) AbandonLinkCycle() bool             { return false }
 
 type runtimeOnlyPolicyUpdaterTestDP struct {
 	runtimeOnlyApplyTestDP
-	updateCalls int
-	stateSeen   map[string]bool
-	updateErr   error
+	updateCalls    int
+	stateSeen      map[string]bool
+	failClosedSeen bool
+	latchCalls     int
+	updateErr      error
 }
 
-func (d *runtimeOnlyPolicyUpdaterTestDP) UpdatePolicyScheduleState(_ *config.Config, activeState map[string]bool) error {
+// #17082: the fake satisfies ONLY the latch updater. Pre-fix the daemon
+// resolved the non-latch UpdatePolicyScheduleState, so this type compiled
+// and was called through that arm and latchCalls stayed 0.
+func (d *runtimeOnlyPolicyUpdaterTestDP) UpdatePolicyScheduleStateWithLatch(_ *config.Config, activeState map[string]bool, failClosed bool) error {
 	d.updateCalls++
+	d.latchCalls++
 	d.stateSeen = copyPolicySchedulerApplyState(activeState)
+	d.failClosedSeen = failClosed
 	return d.updateErr
 }
 
-func (d *userspacePolicySchedulerApplyTestDP) SetPolicySchedulerActiveState(activeState map[string]bool) {
+func (d *userspacePolicySchedulerApplyTestDP) SetPolicySchedulerActiveStateWithLatch(activeState map[string]bool, failClosed bool) {
 	d.seedCalls++
 	d.seedStateSeen = copyPolicySchedulerApplyState(activeState)
+	d.seedFailClosedSeen = failClosed
 }
 
 func (d *userspacePolicySchedulerApplyTestDP) Compile(cfg *config.Config) (*dataplane.CompileResult, error) {
