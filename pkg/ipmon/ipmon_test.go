@@ -857,10 +857,12 @@ func TestNotifyNextHopChangeGatedOffStandby(t *testing.T) {
 // timeout) regression: a wedged actuation must be aborted by the bounded
 // per-actuation timeout and retried WITHOUT waiting for Stop, so a stuck
 // consumer cannot hold the run loop off its retry indefinitely while the
-// daemon is up. On revert (actuate runs under the un-timed e.actuateCtx)
+// daemon is up. On revert (actuate runs under an un-timed context)
 // the first actuation blocks until Stop and the second attempt never
 // happens — attempts stays 1 and the retry assertion goes RED. It also
 // asserts the failure counter climbs across the wedged retries.
+// (Pre-#17226 the engine carried its own timed-out context here;
+// it is now the coalesce loop's, #17226.)
 func TestActuationTimeoutRetriesWithoutStop(t *testing.T) {
 	var attempts atomic.Int32
 	var unblock atomic.Bool

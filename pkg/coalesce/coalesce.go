@@ -66,11 +66,19 @@ type Loop struct {
 
 	actuate func(context.Context) bool
 
-	kick     chan struct{}
-	stop     chan struct{}
-	done     chan struct{}
-	started  bool
-	stopped  bool
+	kick    chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
+	started bool
+	stopped bool
+	// ctx/cancel own the actuation lifetime (#17226, the #3758 lesson):
+	// created in StartWithContext from its parent, ctx is the context
+	// run hands Tick (hence the one the actuator ultimately receives),
+	// and Stop calls cancel before waiting on done so a blocked
+	// actuation aborts instead of holding shutdown for the full
+	// actuate timeout. Nil on a Loop never started.
+	ctx      context.Context
+	cancel   context.CancelFunc
 	actuated uint64 // observability + tests
 }
 
@@ -159,19 +167,58 @@ func (l *Loop) Actuations() uint64 {
 	return l.actuated
 }
 
-// Start begins the loop. Idempotent.
+// Start begins the loop. Idempotent. Equivalent to
+// StartWithContext(context.Background()).
 func (l *Loop) Start() {
+	l.StartWithContext(context.Background())
+}
+
+// StartWithContext begins the loop, deriving the actuation context
+// from parent: cancelling parent aborts an in-flight actuation the
+// same way Stop does. An adopter whose lifetime is already bounded
+// by a run context (the daemon route listener) passes it here so
+// parent cancellation alone — without waiting for its deferred Stop —
+// unblocks an actuation parked on a contended semaphore.
+//
+// Idempotent: a second call, or a call after Stop, is a no-op.
+func (l *Loop) StartWithContext(parent context.Context) {
 	l.mu.Lock()
 	if l.started || l.stopped {
 		l.mu.Unlock()
 		return
 	}
 	l.started = true
+	if parent == nil {
+		parent = context.Background()
+	}
+	l.ctx, l.cancel = context.WithCancel(parent)
 	l.mu.Unlock()
 	go l.run()
 }
 
-// Stop halts the loop and waits for it to exit.
+// Context returns the loop's actuation context: parented on the
+// context passed to StartWithContext (or Background), cancelled by
+// Stop, and the context run() hands Tick — hence the one the actuator
+// ultimately receives (behind Tick's per-actuation timeout). An
+// adopter that drives Tick from its OWN run loop (ipmon) passes
+// loop.Context() and needs no private cancellable context of its
+// own. Before Start, when the loop has none, Background is returned.
+func (l *Loop) Context() context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ctx != nil {
+		return l.ctx
+	}
+	return context.Background()
+}
+
+// Stop halts the loop and waits for it to exit. It cancels the
+// actuation context BEFORE waiting for the run loop (#17226, the
+// #3758 lesson ipmon learned and this primitive lacked): the run
+// loop calls the actuator synchronously and can only observe stop
+// AFTER it returns, so a blocked actuation — e.g. one parked on a
+// held apply semaphore — would otherwise hold Stop for the full
+// actuate timeout (30s by default, past TimeoutStopSec=20).
 func (l *Loop) Stop() {
 	l.mu.Lock()
 	if l.stopped || !l.started {
@@ -180,7 +227,11 @@ func (l *Loop) Stop() {
 		return
 	}
 	l.stopped = true
+	cancel := l.cancel
 	l.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	close(l.stop)
 	<-l.done
 }
@@ -188,6 +239,10 @@ func (l *Loop) Stop() {
 // Tick evaluates one sweep without running the loop goroutine. Exported for
 // tests driving an injected clock: it is the whole loop body, so a test using
 // it exercises the real decision rather than a model of it.
+//
+// A Tick driven externally (ipmon) derives its actuation context from the
+// ctx passed in — pass Context() so Stop/parent cancellation reaches the
+// actuator. run() always does.
 func (l *Loop) Tick(ctx context.Context) {
 	l.mu.Lock()
 	now := l.now()
@@ -330,8 +385,7 @@ func (l *Loop) OnFailed(fn func()) {
 
 func (l *Loop) run() {
 	defer close(l.done)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := l.Context()
 	// A short sweep interval relative to the debounce: the loop is cheap when
 	// clean, and the bound that matters is the throttle, not the poll.
 	ticker := time.NewTicker(100 * time.Millisecond)

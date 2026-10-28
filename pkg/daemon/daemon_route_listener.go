@@ -95,7 +95,11 @@ func (d *Daemon) setRouteListenerLoop(loop *coalesce.Loop) {
 func (d *Daemon) routeListener(ctx context.Context, loop *coalesce.Loop) {
 	loop.SetTimings(routeRefreshDebounce, routeRefreshThrottle)
 	d.setRouteListenerLoop(loop)
-	loop.Start()
+	// #17226: derive the loop's actuation context from the daemon run
+	// ctx, so cancelling it aborts an actuation parked on applySem
+	// immediately instead of holding this goroutine (and shutdown's
+	// wg.Wait) for the 30s actuate timeout past TimeoutStopSec=20.
+	loop.StartWithContext(ctx)
 	defer loop.Stop()
 
 	for {

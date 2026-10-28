@@ -1,5 +1,13 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Coalesce: Loop.Stop now cancels the in-flight actuation context
+    before waiting for the loop to exit, and the loop's context is
+    parented on the StartWithContext caller (the daemon route
+    listener passes its run ctx). A route-refresh actuation parked on
+    the held apply semaphore now aborts on shutdown/run-ctx cancel
+    instead of holding wg.Wait for the 30s actuate timeout past
+    TimeoutStopSec=20; ipmon drops its private #3758 cancel and uses
+    the loop's Context() (#17226).
   * Config reads: the rollback slot error now travels inside one
     captured value (configstore.RollbackCapture from CaptureRollback /
     CaptureRollbackSlot) through the REST, gRPC and CLI gates to their

@@ -213,12 +213,13 @@ type Engine struct {
 	// (kernel FRR AND the userspace snapshot committed together) and
 	// false when any consumer failed — a false return keeps the dirty
 	// bit set so the run loop retries autonomously on the next sweep
-	// (#3757). It is passed e.actuateCtx (cancelled on Stop) so a
-	// shutdown aborts a blocked actuation instead of wedging the run
-	// loop behind an in-flight apply that never releases (#3758): the
-	// actuator MUST thread the context into any blocking wait (the
-	// apply semaphore, FRR reload) and, on cancellation, abort cleanly
-	// (return false) WITHOUT half-actuating.
+	// (#3757). It is passed the coalesce loop's context (cancelled on
+	// Stop, #17226) so a shutdown aborts a blocked actuation instead
+	// of wedging the run loop behind an in-flight apply that never
+	// releases (#3758): the actuator MUST thread the context into any
+	// blocking wait (the apply semaphore, FRR reload) and, on
+	// cancellation, abort cleanly (return false) WITHOUT
+	// half-actuating.
 	actuate func(ctx context.Context) bool
 	// resolveNextHop resolves interface-typed next-hops at overlay
 	// computation (#1844). Written by SetNextHopResolver and read by
@@ -238,14 +239,6 @@ type Engine struct {
 	kick chan struct{}
 	stop chan struct{}
 	done chan struct{}
-
-	// actuateCtx is cancelled by Stop (its cancel is actuateCancel) so
-	// an in-flight actuation blocked on the apply semaphore or an FRR
-	// reload aborts promptly on shutdown/reconcile instead of holding
-	// the run loop off its stop case forever (#3758). Created in New,
-	// cancelled exactly once in Stop under mu.
-	actuateCtx    context.Context
-	actuateCancel context.CancelFunc
 
 	// started / stopped guard the run-loop lifecycle (#3762). Both are
 	// read and written only under mu. started flips true on the first
@@ -268,7 +261,6 @@ type Engine struct {
 // was cancelled — a false return keeps the state dirty for an
 // autonomous retry (#3757).
 func New(actuate func(ctx context.Context) bool) *Engine {
-	ctx, cancel := context.WithCancel(context.Background())
 	e := &Engine{
 		policies:       make(map[string]*policyState),
 		failedTests:    make(map[string]map[string]bool),
@@ -283,8 +275,6 @@ func New(actuate func(ctx context.Context) bool) *Engine {
 		kick:           make(chan struct{}, 1),
 		stop:           make(chan struct{}),
 		done:           make(chan struct{}),
-		actuateCtx:     ctx,
-		actuateCancel:  cancel,
 	}
 	// #8354: the shared discipline. Constructed HERE rather than in Start
 	// because Apply/HandleTransition can mark the engine dirty before it is
@@ -425,6 +415,12 @@ func (e *Engine) Start() {
 	}
 	e.started = true
 	e.mu.Unlock()
+	// #17226: the loop's run goroutine is unused (this engine drives
+	// Tick itself below), but StartWithContext is what creates the
+	// cancellable actuation context run() passes via e.loop.Context()
+	// — formerly the engine's private cancellable context
+	// (#3758), now owned by the one implementation.
+	e.loop.StartWithContext(context.Background())
 	go e.run()
 }
 
@@ -434,13 +430,16 @@ func (e *Engine) Start() {
 // on e.done — a Stop with no run loop returns immediately instead of
 // blocking forever on a channel nothing will ever close.
 //
-// Stop cancels e.actuateCtx BEFORE waiting on e.done (#3758): the run
-// loop can only observe e.stop AFTER the synchronous actuator returns,
-// so if an actuation is blocked (on the apply semaphore or an FRR
-// reload) the wait on e.done would hang forever. Cancelling the
-// context first unblocks that actuation so the loop can reach its stop
-// case promptly. The cancel happens under mu (once, guarded by
-// e.stopped) so it races neither a second Stop nor the run loop.
+// Stop cancels the coalesce loop's actuation context BEFORE waiting
+// on e.done (#3758, now via the loop, #17226): the run loop can only
+// observe e.stop AFTER the synchronous actuator returns, so if an
+// actuation is blocked (on the apply semaphore or an FRR reload) the
+// wait on e.done would hang forever. e.stop is closed first, then
+// loop.Stop() cancels the actuation context (before its own wait on
+// the loop's unused run goroutine) — that cancel is what unblocks
+// the actuation so this engine's run loop can reach its stop case
+// and close e.done. Both waits happen WITHOUT e.mu held, and a
+// second Stop is a no-op via e.stopped.
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	if e.stopped {
@@ -449,9 +448,12 @@ func (e *Engine) Stop() {
 	}
 	e.stopped = true
 	started := e.started
-	e.actuateCancel()
 	e.mu.Unlock()
 	close(e.stop)
+	// Cancel the actuation context FIRST (loop.Stop cancels before its
+	// own wait, #17226): this is what unblocks a synchronous actuation
+	// so the run loop below can observe e.stop and close e.done.
+	e.loop.Stop()
 	if started {
 		<-e.done
 	}
@@ -1014,7 +1016,7 @@ func (e *Engine) run() {
 		// clear-only-when-converged-and-unchanged rule. The actuator, the
 		// applied-overlay record and the failure counter are wired to it in
 		// Start().
-		e.loop.Tick(e.actuateCtx)
+		e.loop.Tick(e.loop.Context())
 
 		e.mu.Lock()
 		wake := e.nextWakeLocked(e.now())
