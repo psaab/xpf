@@ -1,5 +1,22 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Linuxsock/LLDP/proxy-ARP: add one shared cancellable raw-receive
+    primitive (linuxsock.PpollRecv: ppoll on {socket, wake eventfd},
+    SignalStop wakes, close only after join) and migrate both raw
+    receive loops onto it. The proxy-ARP responder previously parked
+    in a bare Recvfrom whose only wake was closing the fd (which does
+    not wake a parked Recvfrom on Linux) and tore down cancel+delete
+    with no join, leaking the goroutine and its bound socket on a
+    silent link and answering the next request from its stale
+    snapshot through a reused fd number; teardown now signals, joins,
+    then closes, and the loop re-checks ctx after every successful
+    recv before sending. LLDP keeps its #16669 behaviour on the shared
+    primitive. A new linuxsock AST canary rejects direct blocking
+    Recvfrom outside the primitive (nfqueue poll-guarded reads
+    allowlisted) (#17231).
+
+xpf (0.0.0) unstable; urgency=medium
+
   * Config: build lenientCompileOpts() with per-flag assignments instead
     of one gofmt-aligned ~330-key composite literal, and un-embed the
     formatting-workaround embedded struct into two plain compileOpts
@@ -23,6 +40,8 @@ xpf (0.0.0) unstable; urgency=medium
     Go-produced frame failed decode. The P-MECH tail is 81 bytes, and
     a shared Go/Rust golden frame (zone id above the u16 range) now
     pins the wire so the pair cannot drift again (#18207).
+ -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
+
 xpf (0.0.0) unstable; urgency=medium
 
   * Config compiler: strict mode now has a single constructor,
