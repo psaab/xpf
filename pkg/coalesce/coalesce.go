@@ -65,12 +65,29 @@ type Loop struct {
 	now            func() time.Time
 
 	actuate func(context.Context) bool
+	// inflight enforces the at-most-one-actuation-in-flight invariant
+	// inside Tick itself: run() ticks on one goroutine, but an adopter
+	// that also drives Tick externally (or two external drivers) must
+	// never enter the actuator concurrently. Guarded by mu.
+	inflight bool
 
-	kick     chan struct{}
-	stop     chan struct{}
-	done     chan struct{}
-	started  bool
-	stopped  bool
+	kick    chan struct{}
+	stop    chan struct{}
+	done    chan struct{}
+	started bool
+	// startedWithRun is true only when Start/StartWithContext spawned
+	// run(); StartContextOnly leaves it false so Stop knows there is
+	// no goroutine (hence no done close) to wait for.
+	startedWithRun bool
+	stopped        bool
+	// ctx/cancel own the actuation lifetime (#17226, the #3758 lesson):
+	// created in StartWithContext/StartContextOnly from its parent,
+	// ctx is the context run hands Tick (hence the one the actuator
+	// ultimately receives), and Stop calls cancel before waiting on
+	// done so a blocked actuation aborts instead of holding shutdown
+	// for the full actuate timeout. Nil on a Loop never started.
+	ctx      context.Context
+	cancel   context.CancelFunc
 	actuated uint64 // observability + tests
 }
 
@@ -159,19 +176,88 @@ func (l *Loop) Actuations() uint64 {
 	return l.actuated
 }
 
-// Start begins the loop. Idempotent.
+// Start begins the loop. Idempotent. Equivalent to
+// StartWithContext(context.Background()).
 func (l *Loop) Start() {
+	l.StartWithContext(context.Background())
+}
+
+// StartWithContext begins the loop, deriving the actuation context
+// from parent: cancelling parent aborts an in-flight actuation the
+// same way Stop does. An adopter whose lifetime is already bounded
+// by a run context (the daemon route listener) passes it here so
+// parent cancellation alone — without waiting for its deferred Stop —
+// unblocks an actuation parked on a contended semaphore.
+//
+// Idempotent: a second call, or a call after Stop, is a no-op.
+func (l *Loop) StartWithContext(parent context.Context) {
 	l.mu.Lock()
 	if l.started || l.stopped {
 		l.mu.Unlock()
 		return
 	}
 	l.started = true
+	l.startedWithRun = true
+	if parent == nil {
+		parent = context.Background()
+	}
+	l.ctx, l.cancel = context.WithCancel(parent)
 	l.mu.Unlock()
 	go l.run()
 }
 
-// Stop halts the loop and waits for it to exit.
+// StartContextOnly creates the loop's cancellable actuation context —
+// exactly as StartWithContext does — WITHOUT spawning the run()
+// goroutine. It is for an adopter that drives Tick from its OWN run
+// loop (ipmon's engine, whose run() owns its wakeup sources and the
+// single-actuation-goroutine invariant): such an adopter must not
+// also run this package's sweep goroutine, or two goroutines tick the
+// same loop. The caller ticks with Context(); Stop cancels the context
+// before returning (there is no goroutine to join).
+//
+// Idempotent: a second call, or a call after Stop, is a no-op — the
+// context is created at most once and never resurrected.
+func (l *Loop) StartContextOnly(parent context.Context) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.started || l.stopped {
+		return
+	}
+	l.started = true
+	if parent == nil {
+		parent = context.Background()
+	}
+	l.ctx, l.cancel = context.WithCancel(parent)
+}
+
+// Context returns the loop's actuation context: parented on the
+// context passed to StartWithContext/StartContextOnly (or Background),
+// cancelled by Stop, and the context run() hands Tick — hence the one
+// the actuator ultimately receives (behind Tick's per-actuation
+// timeout). An adopter that drives Tick from its OWN run loop (ipmon)
+// passes loop.Context() and needs no private cancellable context of
+// its own. Before start, when the loop has none, Background is returned.
+func (l *Loop) Context() context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ctx != nil {
+		return l.ctx
+	}
+	return context.Background()
+}
+
+// Stop halts the loop and waits for it to exit. It cancels the
+// actuation context BEFORE waiting for the run loop (#17226, the
+// #3758 lesson ipmon learned and this primitive lacked): the run
+// loop calls the actuator synchronously and can only observe stop
+// AFTER it returns, so a blocked actuation — e.g. one parked on a
+// held apply semaphore — would otherwise hold Stop for the full
+// actuate timeout (30s by default, past TimeoutStopSec=20).
+//
+// For a loop started with StartContextOnly there is no goroutine to
+// join: Stop just cancels the context and returns, so an adopter
+// driving its own Tick (ipmon) is never waited on a done channel
+// nothing will close.
 func (l *Loop) Stop() {
 	l.mu.Lock()
 	if l.stopped || !l.started {
@@ -180,7 +266,19 @@ func (l *Loop) Stop() {
 		return
 	}
 	l.stopped = true
+	cancel := l.cancel
+	// run() is the only closer of done and the only reader of stop;
+	// a context-only loop spawned neither, so waiting would deadlock.
+	// Track which shape was started rather than inferring it from a
+	// channel that is always non-nil (New allocates both).
+	waitRun := l.startedWithRun
 	l.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if !waitRun {
+		return
+	}
 	close(l.stop)
 	<-l.done
 }
@@ -188,12 +286,24 @@ func (l *Loop) Stop() {
 // Tick evaluates one sweep without running the loop goroutine. Exported for
 // tests driving an injected clock: it is the whole loop body, so a test using
 // it exercises the real decision rather than a model of it.
+//
+// A Tick driven externally (ipmon) derives its actuation context from the
+// ctx passed in — pass Context() so Stop/parent cancellation reaches the
+// actuator. run() always does.
+//
+// Tick is single-flighted: at most one actuation is ever in flight. A
+// Tick that arrives while another Tick's actuation is still running
+// returns without firing — the dirty state is untouched, so the
+// in-flight actuation's post-actuate generation check (or the next
+// sweep after it) still actuates what this sweep saw. A caller thus
+// can never enter the actuator concurrently by ticking from two
+// goroutines (run() plus an external driver, or two drivers).
 func (l *Loop) Tick(ctx context.Context) {
 	l.mu.Lock()
 	now := l.now()
 	fire := false
 	var gen uint64
-	if !l.dirtySince.IsZero() &&
+	if !l.inflight && !l.dirtySince.IsZero() &&
 		now.Sub(l.dirtySince) >= l.debounce &&
 		now.Sub(l.lastActuation) >= l.throttle {
 		fire = true
@@ -202,6 +312,10 @@ func (l *Loop) Tick(ctx context.Context) {
 		// FAILING actuation's retry to one per throttle window instead of a
 		// hot loop.
 		l.lastActuation = now
+		// Claim the single flight before unlocking: the actuation
+		// below runs WITHOUT the lock, so the claim — not the lock —
+		// is what a concurrent Tick observes.
+		l.inflight = true
 	}
 	l.mu.Unlock()
 	if !fire {
@@ -222,6 +336,7 @@ func (l *Loop) Tick(ctx context.Context) {
 	}
 
 	l.mu.Lock()
+	l.inflight = false
 	l.actuated++
 	// Clear only when the actuation converged AND nothing was marked while it
 	// ran. Either condition failing leaves the state dirty for the next sweep.
@@ -330,8 +445,7 @@ func (l *Loop) OnFailed(fn func()) {
 
 func (l *Loop) run() {
 	defer close(l.done)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := l.Context()
 	// A short sweep interval relative to the debounce: the loop is cheap when
 	// clean, and the bound that matters is the throttle, not the poll.
 	ticker := time.NewTicker(100 * time.Millisecond)

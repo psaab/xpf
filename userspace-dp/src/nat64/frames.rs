@@ -241,7 +241,6 @@ pub(crate) fn build_nat64_v6_to_v4_nonfirst_frame_into(
 }
 
 #[cfg(test)]
-
 pub(crate) fn build_nat64_v6_to_v4_nonfirst_frame(
     frame: &[u8],
     snat_v4: Ipv4Addr,
@@ -281,7 +280,6 @@ pub(crate) fn build_nat64_v4_to_v6_nonfirst_frame_into(
 }
 
 #[cfg(test)]
-
 pub(crate) fn build_nat64_v4_to_v6_nonfirst_frame(
     frame: &[u8],
     src_v6: Ipv6Addr,
@@ -322,7 +320,6 @@ pub(crate) fn build_nat64_v6_to_v4_frame_into(
 }
 
 #[cfg(test)]
-
 pub(crate) fn build_nat64_v6_to_v4_frame(
     frame: &[u8],
     snat_v4: Ipv4Addr,
@@ -372,7 +369,6 @@ pub(crate) fn build_nat64_v4_to_v6_frame_into(
 }
 
 #[cfg(test)]
-
 pub(crate) fn build_nat64_v4_to_v6_frame(
     frame: &[u8],
     src_v6: Ipv6Addr,
@@ -423,7 +419,6 @@ pub(crate) fn build_nat64_v6_to_v4_icmp_error_frame_into(
 }
 
 #[cfg(test)]
-
 pub(crate) fn build_nat64_v6_to_v4_icmp_error_frame(
     frame: &[u8],
     snat_v4: Ipv4Addr,
@@ -476,7 +471,6 @@ pub(crate) fn build_nat64_v4_to_v6_icmp_error_frame_into(
 }
 
 #[cfg(test)]
-
 pub(crate) fn build_nat64_v4_to_v6_icmp_error_frame(
     frame: &[u8],
     src_v6: Ipv6Addr,

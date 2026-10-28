@@ -2025,7 +2025,6 @@ pub(in crate::afxdp) fn parse_flow_ports(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn authoritative_forward_ports(
     frame: &[u8],
     meta: UserspaceDpMeta,
@@ -2062,7 +2061,7 @@ pub(in crate::afxdp) fn authoritative_forward_ports(
     frame_ports.or(meta_ports)
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(in crate::afxdp) fn live_frame_ports(
     area: &MmapArea,
     desc: XdpDesc,
@@ -2421,7 +2420,7 @@ pub(in crate::afxdp) fn parse_session_flow_from_bytes(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn parse_session_flow(
     area: &MmapArea,
     desc: XdpDesc,
@@ -2894,7 +2893,7 @@ pub(in crate::afxdp) enum ZoneEncodedFabricStamp {
     Ambiguous { zone_id: u32, ifindex: Option<i32> },
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(in crate::afxdp) fn parse_zone_encoded_fabric_ingress(
     area: &MmapArea,
     desc: XdpDesc,

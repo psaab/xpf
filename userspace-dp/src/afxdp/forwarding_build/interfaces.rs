@@ -379,8 +379,11 @@ fn is_logical_unit_row(name: &str, is_unit: Option<bool>) -> bool {
 /// logical ifindex per VID) and a lone unit 0 are unambiguous.
 pub(super) fn ingress_unit_by_logical(
     snapshot: &ConfigSnapshot,
-) -> FastMap<i32, i32> {
-    let mut rows_by_key: std::collections::BTreeMap<(i32, i32), i32> =
+) -> Result<FastMap<i32, i32>, crate::policy::SnapshotIntegrityError> {
+    // #17206: key on the DECODED VlanId, not the raw i32 — a negative
+    // "no VLAN" row and VID 0 are the same VLAN, so counting them apart
+    // would keep an ambiguous row the decoder treats as one identity.
+    let mut rows_by_key: std::collections::BTreeMap<(i32, super::validated::VlanId), i32> =
         std::collections::BTreeMap::new();
     for iface in &snapshot.interfaces {
         if iface.ifindex <= 0 || !is_logical_unit_row(&iface.name, iface.is_unit) {
@@ -391,7 +394,8 @@ pub(super) fn ingress_unit_by_logical(
         } else {
             iface.ifindex
         };
-        *rows_by_key.entry((bind_ifindex, iface.vlan_id)).or_default() += 1;
+        let row = super::validated::RowIds::try_from_row(iface)?;
+        *rows_by_key.entry((bind_ifindex, row.vlan)).or_default() += 1;
     }
     let mut out = FastMap::default();
     for iface in &snapshot.interfaces {
@@ -403,7 +407,8 @@ pub(super) fn ingress_unit_by_logical(
         } else {
             iface.ifindex
         };
-        if rows_by_key.get(&(bind_ifindex, iface.vlan_id)).copied() != Some(1) {
+        let row = super::validated::RowIds::try_from_row(iface)?;
+        if rows_by_key.get(&(bind_ifindex, row.vlan)).copied() != Some(1) {
             continue;
         }
         let Some(unit) = iface
@@ -415,7 +420,7 @@ pub(super) fn ingress_unit_by_logical(
         };
         out.insert(iface.ifindex, unit);
     }
-    out
+    Ok(out)
 }
 
 /// ifindex -> [`UnitZoneClaim`] for every ifindex that carries at least one
@@ -1950,19 +1955,15 @@ pub(super) fn populate_egress(
         if iface.ifindex <= 0 || is_logical_unit_row(&iface.name, iface.is_unit) {
             continue;
         }
-        if iface.native_vlan_id < 0 || iface.native_vlan_id > 4094 {
-            return Err(
-                crate::policy::SnapshotIntegrityError::InterfaceVlanOutOfRange {
-                    interface: iface.name.clone(),
-                    vlan_id: iface.native_vlan_id,
-                },
-            );
-        }
-        let native_vlan_id =
-            super::validated::VlanId::try_from_snapshot(iface.native_vlan_id, &iface.name)?.get();
-        if native_vlan_id == 0 {
+        // #17206: decode native VLAN through RowIds (the single
+        // VlanId decoder) — the inline 4094 cap is deleted; 4095 is
+        // wire-representable and now follows the same verdict as
+        // vlan_id, while >4095 fails closed via the decoder.
+        let row = super::validated::RowIds::try_from_row(iface)?;
+        let Some(native_vlan) = row.native_vlan else {
             continue;
-        }
+        };
+        let native_vlan_id = native_vlan.get();
         if let Some(previous) = native_vlan_by_parent.insert(iface.ifindex, native_vlan_id) {
             if previous != native_vlan_id {
                 ambiguous_native_parents.insert(iface.ifindex);
@@ -1979,13 +1980,13 @@ pub(super) fn populate_egress(
         } else {
             iface.ifindex
         };
-        // #2410: validate the VLAN id ONCE here instead of narrowing it with
-        // an unchecked `iface.vlan_id.max(0) as u16` at both the ingress-key
+        // #2410/#17206: validate the VLAN id ONCE here via RowIds
+        // instead of narrowing it with an unchecked
+        // `iface.vlan_id.max(0) as u16` at both the ingress-key
         // and the EgressInterface.vlan_id site. An out-of-range value
-        // (> 65535) fails the snapshot closed rather than wrapping to a
+        // fails the snapshot closed rather than wrapping to a
         // different VLAN (a different L2 domain).
-        let vlan_id =
-            super::validated::VlanId::try_from_snapshot(iface.vlan_id, &iface.name)?.get();
+        let vlan_id = super::validated::RowIds::try_from_row(iface)?.vlan.get();
         if iface.parent_ifindex > 0 && vlan_id > 0 {
             // Generic XDP on a VLAN child runs after Linux strips the wire
             // tag. VID 0 there is the child's configured VLAN, not untagged
@@ -2291,8 +2292,7 @@ pub(super) fn populate_egress(
         let Some(native_vlan_id) = native_vlan_by_parent.get(&iface.parent_ifindex) else {
             continue;
         };
-        let vlan_id =
-            super::validated::VlanId::try_from_snapshot(iface.vlan_id, &iface.name)?.get();
+        let vlan_id = super::validated::RowIds::try_from_row(iface)?.vlan.get();
         if vlan_id != *native_vlan_id {
             continue;
         }
@@ -2334,6 +2334,8 @@ pub(super) fn populate_egress(
     // removed its key in the loop above.
     for iface in &snapshot.interfaces {
         if iface.is_unit.is_some() && (iface.admin_disabled || iface.zone.is_empty()) {
+            // #17206: prune comparisons use the decoded VlanId, not raw.
+            let row_vlan = super::validated::RowIds::try_from_row(iface)?.vlan.get();
             let is_unit0 = is_logical_unit_row(&iface.name, iface.is_unit)
                 && iface
                     .name
@@ -2350,7 +2352,7 @@ pub(super) fn populate_egress(
             // port's unit 0 (e.g. st0.0, #12250) is not in this builder's
             // tagged-only scope and its key is left to the general logic.
             if is_unit0
-                && iface.vlan_id == 0
+                && row_vlan == 0
                 && bind_ifindex > 0
                 && tagged_only_ingress_ifindexes.contains(&bind_ifindex)
             {
@@ -2372,9 +2374,8 @@ pub(super) fn populate_egress(
             // parent, ensure no (parent,0) key points at it.
             if iface.parent_ifindex > 0
                 && tagged_only_ingress_ifindexes.contains(&iface.parent_ifindex)
-                && iface.vlan_id > 0
-                && native_vlan_by_parent.get(&iface.parent_ifindex).copied()
-                    == u16::try_from(iface.vlan_id).ok()
+                && row_vlan > 0
+                && native_vlan_by_parent.get(&iface.parent_ifindex).copied() == Some(row_vlan)
             {
                 if state
                     .ingress_logical_ifindex

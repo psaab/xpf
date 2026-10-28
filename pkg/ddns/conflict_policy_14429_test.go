@@ -27,7 +27,7 @@ func TestRFC2136GarbageConflictPolicyRefusesAdd14429(t *testing.T) {
 			}
 			cfg.UpdateServer = srv.addrUDP
 			pol := policyFromConfig(cfg)
-			u, err := newRFC2136Updater(pol, cfg, nil,
+			u, err := newRFC2136Updater(pol, cfg.RFC2136Endpoint, nil,
 				func() { ptr++ }, func() { conf++ })
 			if err != nil {
 				// Fail-closed at construction is an acceptable refusal:

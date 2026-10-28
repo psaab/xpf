@@ -394,7 +394,7 @@ pub(super) fn poll_binding(
 /// existing cell green while the next RST batch reallocated both
 /// buffers from zero. This helper IS the production path — the test
 /// drives it directly and asserts the capacities survive.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn drain_rst_teardowns(
     left: &mut [BindingWorker],
     current: &mut BindingWorker,

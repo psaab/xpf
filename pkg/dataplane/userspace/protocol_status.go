@@ -709,6 +709,11 @@ type ProcessStatus struct {
 	// xpf_userspace_server_handler_panics_total. Decodes to 0 for an older
 	// helper that does not send the key.
 	ServerHandlerPanics uint64 `json:"server_handler_panics,omitempty"`
+	// #17123: reinject handler panics contained per-connection (each one
+	// drops one connection; the loop keeps accepting). Surfaced as
+	// xpf_userspace_reinject_handler_panics_total. Decodes to 0 for an older
+	// helper that does not send the key.
+	ReinjectHandlerPanics uint64 `json:"reinject_handler_panics,omitempty"`
 
 	// SessionInstallStaleIgnored is xpf_userspace_session_install_stale_ignored_total
 	// (#2170/#7398): stale-generation session INSTALLS refused by the helper's
@@ -1059,6 +1064,7 @@ type ProcessStatus struct {
 	SessionDeleteRefusedIdentity       uint64            `json:"session_delete_refused_identity,omitempty"`
 	SessionDeleteDroppedReleased       uint64            `json:"session_delete_dropped_released,omitempty"`
 	TunnelPurgeReservationsReleased    uint64            `json:"tunnel_purge_reservations_released,omitempty"`
+	TunnelPurgeDeleteRefused           uint64            `json:"tunnel_purge_delete_refused,omitempty"`
 	SyncedReverseRederived             uint64            `json:"synced_reverse_rederived,omitempty"`
 	S5Reinject                         *S5ReinjectStatus `json:"s5_reinject,omitempty"`
 }

@@ -49,42 +49,36 @@ pub(crate) const TCP_FLAGS_CTRL_MASK: u8 = TCP_FIN | TCP_SYN | TCP_RST | TCP_ACK
 
 /// True iff the SYN bit is set.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn has_syn(flags: u8) -> bool {
     (flags & TCP_SYN) != 0
 }
 
 /// True iff the ACK bit is set.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn has_ack(flags: u8) -> bool {
     (flags & TCP_ACK) != 0
 }
 
 /// True iff the RST bit is set.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn has_rst(flags: u8) -> bool {
     (flags & TCP_RST) != 0
 }
 
 /// True iff the FIN bit is set.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn has_fin(flags: u8) -> bool {
     (flags & TCP_FIN) != 0
 }
 
 /// True iff the URG bit is set.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn has_urg(flags: u8) -> bool {
     (flags & TCP_URG) != 0
 }
 
 /// True iff the PSH bit is set.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn has_psh(flags: u8) -> bool {
     (flags & TCP_PSH) != 0
 }
@@ -94,7 +88,6 @@ pub(crate) fn has_psh(flags: u8) -> bool {
 /// are intentionally ignored (a PSH-ACK is still a pure ACK for cache
 /// admission). Drives flow-cache eligibility on the hot path.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn is_ack_only(flags: u8) -> bool {
     (flags & TCP_FLAGS_CTRL_MASK) == TCP_ACK
 }
@@ -103,7 +96,6 @@ pub(crate) fn is_ack_only(flags: u8) -> bool {
 /// Equivalent to the inline `(flags & SYN) != 0 && (flags & ACK) == 0`.
 /// Distinguishes a connection-opening SYN from a SYN+ACK.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn is_initial_syn(flags: u8) -> bool {
     has_syn(flags) && !has_ack(flags)
 }
@@ -111,7 +103,6 @@ pub(crate) fn is_initial_syn(flags: u8) -> bool {
 /// True iff both SYN and ACK are set (a SYN+ACK handshake response).
 /// Equivalent to the inline `(flags & 0x12) == 0x12`.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn is_syn_ack(flags: u8) -> bool {
     (flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)
 }
@@ -120,7 +111,6 @@ pub(crate) fn is_syn_ack(flags: u8) -> bool {
 /// FIN or RST. Equivalent to the inline `(flags & (FIN | RST)) != 0`.
 /// Marks a session as closing on the conntrack path.
 #[inline]
-#[allow(dead_code)]
 pub(crate) fn is_closing(flags: u8) -> bool {
     (flags & (TCP_FIN | TCP_RST)) != 0
 }

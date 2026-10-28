@@ -383,8 +383,12 @@ func TestReconcileScopedBackendChangeAfterRestartOrphans_5814(t *testing.T) {
 // hashed in), and returns "" (unknown) for a non-live family.
 func TestDHCPBackendFingerprintIdentity_5814(t *testing.T) {
 	base := &config.DHCPDynamicDNSConfig{
-		Enabled: true, Backend: "rfc2136", UpdateServer: "ns1.example.com:53",
-		TSIGKeyName: "k1", TSIGAlgorithm: "hmac-sha256",
+		Enabled: true, Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns1.example.com:53",
+			TSIGKeyName:   "k1",
+			TSIGAlgorithm: "hmac-sha256",
+		},
 	}
 	fp := func(c *config.DHCPDynamicDNSConfig) string {
 		return dhcpBackendFingerprint(policyFromConfig(c), c)
@@ -396,8 +400,12 @@ func TestDHCPBackendFingerprintIdentity_5814(t *testing.T) {
 
 	// Stable for an identical endpoint.
 	if got := fp(&config.DHCPDynamicDNSConfig{
-		Enabled: true, Backend: "rfc2136", UpdateServer: "ns1.example.com:53",
-		TSIGKeyName: "k1", TSIGAlgorithm: "hmac-sha256",
+		Enabled: true, Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: "ns1.example.com:53",
+			TSIGKeyName:   "k1",
+			TSIGAlgorithm: "hmac-sha256",
+		},
 	}); got != fpBase {
 		t.Errorf("fingerprint not stable for identical endpoint: %q vs %q", got, fpBase)
 	}
@@ -428,9 +436,9 @@ func TestDHCPBackendFingerprintIdentity_5814(t *testing.T) {
 
 	// Non-live families are "unknown" (empty).
 	for name, c := range map[string]*config.DHCPDynamicDNSConfig{
-		"disabled":       {Enabled: false, Backend: "rfc2136", UpdateServer: "ns1.example.com:53"},
-		"no-server":      {Enabled: true, Backend: "rfc2136", UpdateServer: ""},
-		"kea-d2-backend": {Enabled: true, Backend: "kea-d2", UpdateServer: "ns1.example.com:53"},
+		"disabled":       {Enabled: false, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns1.example.com:53"}},
+		"no-server":      {Enabled: true, Backend: "rfc2136", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: ""}},
+		"kea-d2-backend": {Enabled: true, Backend: "kea-d2", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: "ns1.example.com:53"}},
 		"nil-config":     nil,
 	} {
 		if got := fp(c); got != "" {

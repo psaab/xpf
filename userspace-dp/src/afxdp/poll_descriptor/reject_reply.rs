@@ -119,7 +119,7 @@ pub(super) fn enqueue_policy_reject_reply(
 /// fail-closed (the caller still drops the packet on a `false` return).
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn enqueue_filter_reject_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
@@ -158,7 +158,7 @@ pub(in crate::afxdp) fn enqueue_filter_reject_reply(
 /// still drops the triggering packet regardless (fail-closed).
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn enqueue_deny_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
@@ -199,7 +199,7 @@ pub(super) fn enqueue_deny_reply(
 /// generated-reject limiter are shared with explicit reject replies.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn enqueue_session_miss_rst(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
@@ -246,7 +246,7 @@ pub(super) fn enqueue_session_miss_rst(
 /// code path a unit test can drive — the poll loop body itself is un-callable.
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn deny_reply_and_emit(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
@@ -294,7 +294,7 @@ pub(super) fn deny_reply_and_emit(
 
 #[cold]
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn enqueue_reject_reply(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,

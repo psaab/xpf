@@ -237,7 +237,7 @@ impl AddrFamily for V6Family {
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn term_matches_family<F: AddrFamily>(
     term: &FilterTerm,
     src_ip: F::Addr,
@@ -280,7 +280,7 @@ pub(super) fn term_matches_family<F: AddrFamily>(
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn term_matches_v4(
     term: &FilterTerm,
     src_ip: Ipv4Addr,
@@ -294,45 +294,6 @@ pub(super) fn term_matches_v4(
     term_matches_family::<V4Family>(term, src_ip, dst_ip, protocol, src_port, dst_port, dscp, extra)
 }
 
-/// #2400 (032-18) + #2506: the address membership body lives once in
-/// `crate::prefix::nets_match` (#16128) with `except` EXPLICIT. The filter
-/// keeps both empty-set arms documented there: positive empty = match
-/// NOTHING (fail closed), `except` empty = match ALL (incl. cross-family,
-/// where the other family's vec is empty). Source NAT consumes the same fn
-/// with `except == false` so its empty set stays fail-closed (#2398); the
-/// two answers are NOT merged into one paragraph — they are two explicit
-/// argument values at two call sites.
-///
-/// Port empty-set semantics DIFFER on purpose (#3205): `port_match` below
-/// fails closed in both directions; see its doc.
-///
-/// #2400 (032-19) + #2622: match a port against a filter term's port matcher
-/// with fail-closed semantics for an all-malformed list, and optional `except`
-/// inversion for the negated `source-port-except` / `destination-port-except`
-/// match.
-///
-/// - `constrained == false` (the term carried no real port spec): the matcher
-///   is `PortMatcher::Any` and matches any port — unchanged unscoped behavior.
-///   `except` is irrelevant: there is no port scope to invert.
-/// - `constrained == true` but the matcher is `PortMatcher::Any` (every
-///   configured port spec was a non-empty token that FAILED to parse, leaving
-///   zero ranges): FAIL CLOSED in BOTH directions — `#3205` (agy-070 #08).
-///   Unlike the address path, a port scope has no prefix-list indirection: a
-///   real listed port (numeric or a resolved service name) always yields a
-///   range, so `constrained && Any` can ONLY mean every token was unparseable
-///   (e.g. an unresolved symbolic port name). A positive match returns NOTHING
-///   (#2400); an `except` match must NOT invert empty into match-ALL — that was
-///   the fail-OPEN hole where `destination-port-except domain` accepted every
-///   port including the one meant to be excluded. The Go commit gate
-///   (validateFilterMatchValuesStrict) now rejects such a term, so this is
-///   defense-in-depth on the tolerant load / peer-sync path. (The Junos
-///   "empty-except = match all" semantic still applies to the ADDRESS path —
-///   `crate::prefix::nets_match` — where an empty prefix-list scope is
-///   reachable and legitimate.)
-/// - otherwise: `matcher.matches(port) XOR except`. `except == false` is the
-///   plain positive membership; `except == true` matches every port NOT in the
-///   set.
-#[inline(always)]
 /// #7174 (C19): a port constraint must not be evaluated against the SYNTHETIC
 /// ports of a non-first fragment.
 ///
@@ -409,6 +370,45 @@ pub(super) fn term_matches_v4(
 /// protocol argument is the 255 sentinel has no usable L4 header, so it has
 /// no authoritative ports either — failing closed agrees with the fragment
 /// half of the gate above on every reachable shape.
+/// #2400 (032-18) + #2506: the address membership body lives once in
+/// `crate::prefix::nets_match` (#16128) with `except` EXPLICIT. The filter
+/// keeps both empty-set arms documented there: positive empty = match
+/// NOTHING (fail closed), `except` empty = match ALL (incl. cross-family,
+/// where the other family's vec is empty). Source NAT consumes the same fn
+/// with `except == false` so its empty set stays fail-closed (#2398); the
+/// two answers are NOT merged into one paragraph — they are two explicit
+/// argument values at two call sites.
+///
+/// Port empty-set semantics DIFFER on purpose (#3205): `port_match` below
+/// fails closed in both directions; see its doc.
+///
+/// #2400 (032-19) + #2622: match a port against a filter term's port matcher
+/// with fail-closed semantics for an all-malformed list, and optional `except`
+/// inversion for the negated `source-port-except` / `destination-port-except`
+/// match.
+///
+/// - `constrained == false` (the term carried no real port spec): the matcher
+///   is `PortMatcher::Any` and matches any port — unchanged unscoped behavior.
+///   `except` is irrelevant: there is no port scope to invert.
+/// - `constrained == true` but the matcher is `PortMatcher::Any` (every
+///   configured port spec was a non-empty token that FAILED to parse, leaving
+///   zero ranges): FAIL CLOSED in BOTH directions — `#3205` (agy-070 #08).
+///   Unlike the address path, a port scope has no prefix-list indirection: a
+///   real listed port (numeric or a resolved service name) always yields a
+///   range, so `constrained && Any` can ONLY mean every token was unparseable
+///   (e.g. an unresolved symbolic port name). A positive match returns NOTHING
+///   (#2400); an `except` match must NOT invert empty into match-ALL — that was
+///   the fail-OPEN hole where `destination-port-except domain` accepted every
+///   port including the one meant to be excluded. The Go commit gate
+///   (validateFilterMatchValuesStrict) now rejects such a term, so this is
+///   defense-in-depth on the tolerant load / peer-sync path. (The Junos
+///   "empty-except = match all" semantic still applies to the ADDRESS path —
+///   `crate::prefix::nets_match` — where an empty prefix-list scope is
+///   reachable and legitimate.)
+/// - otherwise: `matcher.matches(port) XOR except`. `except == false` is the
+///   plain positive membership; `except == true` matches every port NOT in the
+///   set.
+#[inline(always)]
 fn port_terms_match(
     term: &FilterTerm,
     protocol: u8,
@@ -451,7 +451,7 @@ fn port_match(constrained: bool, except: bool, matcher: &PortMatcher, port: u16)
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn term_matches_v6(
     term: &FilterTerm,
     src_ip: Ipv6Addr,

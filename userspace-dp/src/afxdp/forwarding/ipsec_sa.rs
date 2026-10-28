@@ -301,8 +301,8 @@ impl IpsecSaStore {
         release_epoch: &std::sync::Barrier,
     ) {
         self.publish_snapshot_with_fences_hook(snapshot, false, true, || {
-            drop(snapshot_published.wait());
-            drop(release_epoch.wait());
+            let _ = snapshot_published.wait();
+            let _ = release_epoch.wait();
         });
     }
 

@@ -130,7 +130,6 @@ impl WorkerUmem {
         self.inner.total_frames
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn shares_allocation_with(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.inner, &other.inner)
     }

@@ -55,7 +55,7 @@ impl InstallTablePurge {
     /// with its validated companion, replicate conditionally. Returns the
     /// forward count purged this pass; `evicted_keys` feeds flow-cache
     /// invalidation exactly like the delete-drop sweep's.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(in crate::afxdp) fn step(
         &mut self,
         sessions: &mut SessionTable,
@@ -200,7 +200,7 @@ pub(super) fn purge_companion_is_linked(
 /// re-misses and heals) and flow-cache eviction must run — but no close is
 /// emitted and nothing is replicated, so shared authority and siblings keep
 /// exactly what the fence preserved.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn purge_one_install_table_key(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
@@ -319,7 +319,7 @@ fn purge_one_install_table_key(
 /// forward+reverse unconditionally and replicates repairing deletes —
 /// destroying exactly the shared state the fence preserved and telling every
 /// sibling to do the same.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn teardown_purge_forward(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
@@ -414,7 +414,7 @@ fn teardown_purge_forward(
 /// #9752: companion-half purge teardown. The shared entry must backlink to
 /// the accepted forward (same linkage proof); resolvability is NOT required
 /// (companions stamp (0,0) by rule R1).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn teardown_purge_companion(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
