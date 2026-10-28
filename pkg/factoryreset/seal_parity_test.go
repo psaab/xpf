@@ -158,6 +158,37 @@ func TestSealParityMappingCoversBakeTuples17085(t *testing.T) {
 	if !found {
 		t.Fatal("fixture member was not parsed from the doctored bake copy")
 	}
+
+	// Production seam defaults (Rev18106 fold): this cell runs WITHOUT
+	// RedirectWipePathsForTesting, so the wipe seam vars still carry
+	// their production values here. The legs cell redirects every seam
+	// before planting, so it stays green even if a seam's production
+	// default drifts from the seal tuple it mirrors — production
+	// zeroize would then erase the wrong file and the tuple member's
+	// prior-tenant bytes would survive. Bind each direct-path seam
+	// default to its SYSPREP_PURGE_PATHS key verbatim: mutating a
+	// default (e.g. wipeUEFIStatePath) must red here.
+	for key, seam := range map[string]string{
+		"/var/lib/xpf/uefi-bootorder-front": wipeUEFIStatePath,
+		"/var/lib/xpf/snmp-engine-id":       wipeSNMPEngineIDPath,
+		"/var/lib/xpf/snmp-engineboots":     wipeSNMPEngineBootsPath,
+		"/var/lib/systemd/random-seed":      wipeSystemdRandomSeed,
+		"/etc/xpf/.day0-config-rejected":    wipeDay0RejectedPath,
+		"/etc/xpf/.root-grown":              wipeRootGrownPath,
+		"/etc/xpf/.day0-config-applied":     configstore.FactoryResetPendingPath,
+	} {
+		if !declared[key] {
+			t.Errorf("seam-default binding key %q is not a declared seal member", key)
+		}
+		if seam != key {
+			t.Errorf("production wipe seam default %q does not equal its SYSPREP_PURGE_PATHS key %q: production zeroize would erase the wrong file", seam, key)
+		}
+	}
+	// The one ENABLE op erased at a single absolute path: machine-id is
+	// rotated at its production default, not merely present afterwards.
+	if wipeMachineIDPath != "/etc/machine-id" {
+		t.Errorf("production wipeMachineIDPath default %q, want %q (SYSPREP_ENABLE_OPS machine-id)", wipeMachineIDPath, "/etc/machine-id")
+	}
 	if _, ok := wipeSealMapping["seal-parity-unmapped-fixture"]; ok {
 		t.Fatal("fixture member unexpectedly present in wipeSealMapping")
 	}
