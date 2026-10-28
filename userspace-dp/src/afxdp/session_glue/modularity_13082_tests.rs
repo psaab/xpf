@@ -63,3 +63,64 @@ fn session_glue_readme_and_commands_doc_match_the_tree_17079() {
         "apply_worker_commands no longer lives in worker_commands.rs"
     );
 }
+#[test]
+fn session_glue_worker_command_arms_are_extracted_18144() {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/session_glue");
+    let commands_dir = base.join("commands");
+    let commands_doc = std::fs::read_to_string(commands_dir.join("mod.rs")).unwrap();
+    for name in [
+        "query_session_counters",
+        "list_sessions_by_policy",
+        "upsert_local",
+        "delete_policy_batch",
+        "delete_synced_if_table_unknown",
+        "worker_command_helpers",
+        "worker_command_drain",
+        "worker_command_dispatch",
+    ] {
+        let source = std::fs::read_to_string(commands_dir.join(format!("{name}.rs")))
+            .unwrap_or_else(|e| panic!("commands/{name}.rs: {e}"));
+        assert!(
+            source.lines().count() <= 200,
+            "commands/{name}.rs exceeds the 200-line ceiling"
+        );
+        assert!(
+            commands_doc.contains(&format!("mod {name};")),
+            "commands/mod.rs does not register {name}.rs"
+        );
+    }
+
+    let worker = std::fs::read_to_string(base.join("worker_commands.rs")).unwrap();
+    let apply_start = worker
+        .find("pub(in crate::afxdp) fn apply_worker_commands")
+        .expect("apply_worker_commands remains the public entry point");
+    let apply_end = worker[apply_start..]
+        .find("/// Dispatch one position-ready transition-debt op")
+        .map(|offset| apply_start + offset)
+        .expect("apply_worker_commands ends before the debt dispatcher");
+    assert!(
+        worker[apply_start..apply_end].lines().count() <= 200,
+        "apply_worker_commands exceeds the 200-line ceiling"
+    );
+
+    let dispatch =
+        std::fs::read_to_string(commands_dir.join("worker_command_dispatch.rs")).unwrap();
+    let dispatch_lines: Vec<_> = dispatch.lines().collect();
+    let arms: Vec<_> = dispatch_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.starts_with("            WorkerCommand::"))
+        .collect();
+    assert!(!arms.is_empty(), "worker command dispatch match is missing");
+    for (index, (start, arm)) in arms.iter().enumerate() {
+        let end = arms
+            .get(index + 1)
+            .map(|(next, _)| *next)
+            .unwrap_or(dispatch_lines.len());
+        assert!(
+            end - start <= 15,
+            "inline WorkerCommand arm exceeds 15 lines: {arm}"
+        );
+    }
+}
+
