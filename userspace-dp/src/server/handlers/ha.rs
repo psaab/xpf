@@ -1,5 +1,4 @@
-// #1345: per-verb handler for update_ha_state. Body byte-identical to
-// handlers.rs lines 156-179.
+// #1345: per-verb handler for update_ha_state, split out of handlers.rs in #1345.
 
 use super::super::helpers::refresh_status;
 use super::super::ServerState;

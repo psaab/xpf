@@ -171,6 +171,10 @@ type ipsecTopologyEvent struct {
 // ipsecSupervisor is deliberately usable without a Daemon so T12 can exercise
 // the linearization protocol without a kernel. Daemon integration is added by
 // the gate helper and keeps this state independent from dataplane ownership.
+// Lease validation is performed by the Rust writer
+// (userspace-dp/src/slowpath_reinject_9506.rs); the live Go lease is
+// nfqueue.ReinjectLease, minted by IpsecCapturePipeline. There is no
+// Go-side reinject-lease validator.
 type ipsecSupervisor struct {
 	permit atomic.Pointer[permitRecord]
 	watch  atomic.Pointer[TransitWatchSnapshot]
@@ -574,7 +578,6 @@ const (
 
 var (
 	errIpsecPermitClosed    = errors.New("ipsec: permit epoch closed")
-	errIpsecGateClosed      = errors.New("ipsec: emission gate closed")
 	errIpsecAlreadyTerminal = errors.New("ipsec: packet already has terminal verdict")
 )
 
@@ -684,27 +687,6 @@ func (s *ipsecSupervisor) commitValidatedVerdict(token ipsecLeaseToken, gateID u
 	delete(s.terminal, key)
 	s.terminalMu.Unlock()
 	return verdict, refused, nil
-}
-
-// ipsecReinjectLease is the q0-side descriptor. The actual full-frame write
-// and completion ACK are performed by the sole Rust writer; this token carries
-// the Go authority tuple and is rejected when its permit or queue generation
-// has gone stale.
-type ipsecReinjectLease struct {
-	PermitEpoch uint64
-	QueueEpoch  uint64
-	RequestID   uint64
-}
-
-func (s *ipsecSupervisor) validateReinjectLease(lease ipsecReinjectLease, queueEpoch uint64) error {
-	rec := s.loadPermit()
-	if rec == nil || rec.state != ipsecPermitOpen || rec.permitEpoch != lease.PermitEpoch {
-		return errIpsecPermitClosed
-	}
-	if lease.QueueEpoch == 0 || lease.QueueEpoch != queueEpoch || lease.RequestID == 0 {
-		return fmt.Errorf("ipsec: stale reinject lease")
-	}
-	return nil
 }
 
 func ipsecQueueGateKind(key ipsecQueueKey) (uint8, bool) {

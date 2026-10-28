@@ -57,7 +57,7 @@ func TestProtoConstrainedAppOmittedQueryProtoNoMatchDespitePermittedCompletion(t
 		t.Fatalf("want default-policy deny for an omitted query protocol, got %+v", res)
 	}
 
-	completion := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	completion := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !completion.Matched || completion.Action != config.PolicyPermit {
 		t.Fatalf("permitted tcp/80 completion no longer matches junos-http, got %+v", completion)
 	}
@@ -68,7 +68,7 @@ func TestProtoConstrainedAppOmittedQueryProtoNoMatchDespitePermittedCompletion(t
 func TestProtoConstrainedAppWrongProtoNoMatch(t *testing.T) {
 	cfg := protoConstrainedAppCfg()
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "udp", DstPort: PortPtr(80)})
 	if res.Matched {
 		t.Fatalf("udp matched a tcp-only app (#3323); res = %+v", res)
 	}
@@ -140,7 +140,7 @@ func TestProtocolLessNamedAppNeverMatches(t *testing.T) {
 
 	// Concrete query protocol: still ContentRejected — the app is unrepresentable
 	// regardless of the query, mirroring the whole-snapshot dataplane reject.
-	res = Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res = Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.ContentRejected {
 		t.Fatalf("want ContentRejected for a protocol-less named app with a concrete query, got %+v", res)
 	}

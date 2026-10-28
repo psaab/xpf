@@ -126,7 +126,7 @@ Keep stable area IDs for ownership and `--area`; refresh actual paths/counts:
 | A2 | Rust NAT, NAT64, NPTv6, translation and allocation lifecycle |
 | A3 | Go `pkg/config/`, `pkg/cmdtree/`, `pkg/appid/`: schema, parser and compilation |
 | A4 | `pkg/configstore/`, `pkg/fsatomic/`: persistence, crypto-at-rest, commit/rollback |
-| A5 | `pkg/cluster/`, `pkg/vrrp/`, `pkg/ra/`, `pkg/conntrack/`: HA and synchronization |
+| A5 | `pkg/cluster/`, `pkg/vrrp/`, `pkg/ra/`: HA and synchronization |
 | A6 | `pkg/dataplane/` and `pkg/dataplane/userspace/`: shim loading, snapshots, control messages and apply |
 | A7 | `pkg/daemon/`, `pkg/nftables/`, `pkg/networkd/`, `pkg/devicemap/`, routing/FRR/IPsec: host enforcement and lifecycle |
 | A8 | `pkg/authz/`, `pkg/grpcapi/`, `pkg/api/`, `proto/`: identity, authorization, API contracts |

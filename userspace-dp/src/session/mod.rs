@@ -6534,9 +6534,10 @@ impl SessionTable {
     /// `ha_activation` flag (always false on this path).
     #[inline]
     pub fn promote_synced_with_origin(&mut self, mut req: SessionUpdate<'_>) -> bool {
-        // #13939: the Owner path applies a deferred FIN/RST immediately after
+        // #13939/#17092: the Owner path replays the packet through a full
+        // `Defer::None` lookup (`apply_deferred_owner_hit`) right after
         // promotion. Do not let its ACK bit complete a pending handshake before
-        // that close propagates to the companion.
+        // that replay's close propagates to the companion.
         if is_closing(req.tcp_flags) {
             req.tcp_flags = 0;
         }
@@ -7570,3 +7571,10 @@ mod synced_entry_17058_tests;
 #[cfg(test)]
 #[path = "ha_transition_17083_tests.rs"]
 mod ha_transition_17083_tests;
+// #17088: the translated-alias twin matrix — key equality across
+// {TCP, UDP, ICMP, ICMPv6} x {none, SNAT-PAT, DNAT, NAT64} against
+// independently written post-translation reply tuples, plus the
+// single-source structural pin for the shared key transform.
+#[cfg(test)]
+#[path = "translated_twin_matrix_17088_tests.rs"]
+mod translated_twin_matrix_17088_tests;
