@@ -96,7 +96,7 @@ fn wg_endpoint_set_summary(state: &ForwardingState) -> String {
     let mut parts: Vec<String> = state
         .tunnel_endpoints
         .values()
-        .filter(|ep| ep.mode == "wireguard")
+        .filter(|ep| ep.kind == TunnelKind::WireGuard)
         .map(|ep| format!("{}:{}@{}", ep.id, ep.wg_listen_port, ep.logical_ifindex))
         .collect();
     parts.sort();
@@ -507,7 +507,7 @@ pub struct Coordinator {
     /// was unreachable, silently, while looking alive.
     ///
     /// A one-shot restore into `bindings` would not have fixed it: EVERY
-    /// control response runs `refresh_status` -> `refresh_bindings`, so the
+    /// control response runs `project_status` -> `refresh_bindings`, so the
     /// ~1 Hz status poll re-erased it within a second, and the Go predicate
     /// requires the wedge to persist 5s before firing. The cause therefore has
     /// to live somewhere the refresh READS, which is what this map is.
@@ -591,6 +591,11 @@ pub struct Coordinator {
     /// monitor gate. Always false in release builds.
     #[cfg(test)]
     pub(crate) force_ipsec_sa_not_ready: bool,
+    /// #7209: SHARED with the session-domain handle, not copied. The six
+    /// tests that set it do so on this struct after construction; a copied
+    /// `usize` would leave the handle reading 0, so every cap assertion would
+    /// silently measure the production formula instead of the override — a
+    /// test seam that stops seaming without failing.
     /// #5674 test seam (per-instance, NOT a process-global): when nonzero,
     /// `synced_import_cap()` returns TWICE this value (the override expresses a
     /// LOGICAL ceiling; `synced_import_cap()` doubles it) instead of the real
@@ -599,11 +604,6 @@ pub struct Coordinator {
     /// `DEFAULT_MAX_SESSIONS` (131072) entries. Always 0 in release builds
     /// (the field does not exist); per-instance so parallel tests never race.
     #[cfg(test)]
-    /// #7209: SHARED with the session-domain handle, not copied. The six
-    /// tests that set it do so on this struct after construction; a copied
-    /// `usize` would leave the handle reading 0, so every cap assertion would
-    /// silently measure the production formula instead of the override — a
-    /// test seam that stops seaming without failing.
     pub(crate) synced_import_cap_override: Arc<std::sync::atomic::AtomicUsize>,
     /// #5166 test seam (per-instance, NOT a process-global): under
     /// `cfg(test)`, `refresh_runtime_snapshot_inner` records a clone of the
@@ -889,7 +889,6 @@ impl Coordinator {
         self.event_stream.as_ref().map(|es| es.stats())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn dynamic_neighbors_ref(&self) -> &Arc<ShardedNeighborMap> {
         &self.neighbors.dynamic
     }
@@ -1009,8 +1008,12 @@ impl Coordinator {
     }
 
     /// See [`Coordinator::upsert_synced_session`].
-    pub fn delete_synced_session(&self, key: crate::session::SessionKey, forward_only: bool) {
-        self.session_domain.delete_synced_session(key, forward_only);
+    pub fn delete_synced_session(
+        &self,
+        key: crate::session::SessionKey,
+        forward_only: bool,
+    ) -> crate::afxdp::SyncedDeleteOutcome {
+        self.session_domain.delete_synced_session(key, forward_only)
     }
 
     /// See [`Coordinator::upsert_synced_session`].
@@ -1019,7 +1022,7 @@ impl Coordinator {
         key: crate::session::SessionKey,
         delete_gen: u64,
         forward_only: bool,
-    ) {
+    ) -> crate::afxdp::SyncedDeleteOutcome {
         self.session_domain
             .delete_synced_session_gen(key, delete_gen, forward_only)
     }
@@ -2023,7 +2026,7 @@ impl Coordinator {
     /// three-color policer with recorded hits, exactly as workers leave
     /// them after `record_filter_counter` + a flush and a metered packet.
     /// It exists because the binding that matters lives OUTSIDE this
-    /// package: `server::helpers::status::refresh_status` publishing these
+    /// package: `server::helpers::status::project_status` publishing these
     /// rows, and the `clear_filter_counters` handler arm clearing them.
     /// Those call sites were unbound precisely because every existing test
     /// reached past them into `crate::afxdp`, which `pkg`-external tests
@@ -2085,7 +2088,7 @@ impl Coordinator {
     ///
     /// Filter (b) exists because the store OUTLIVES the slot map. Config apply
     /// carries the store forward and `reconcile` retains every still-configured
-    /// zone (`forwarding_build/mod.rs`), while `ZoneCounterSlotMap::build`
+    /// zone (`forwarding_build/mod.rs`), while `ZoneSlotMap::build`
     /// assigns only `ZONE_COUNTER_ASSIGNABLE_SLOTS` slots in sorted zone-id
     /// order. So a zone that accumulated traffic and is then pushed past
     /// capacity by a later config — 63 lower-id zones added alongside it —
@@ -2207,7 +2210,7 @@ impl Coordinator {
     /// exactly as a worker leaves it after `record_zone_flood_drop` + a flush.
     ///
     /// It exists because the binding that matters lives OUTSIDE this package:
-    /// `server::helpers::status::refresh_status` publishing these rows, and the
+    /// `server::helpers::status::project_status` publishing these rows, and the
     /// `clear_flood_counters` handler arm clearing them. Those call sites were
     /// unbound precisely because every existing test reached past them into
     /// `crate::afxdp`, which `pkg`-external tests cannot do — so the seam had to
@@ -2216,12 +2219,18 @@ impl Coordinator {
     #[cfg(test)]
     pub(crate) fn seed_flood_counter_for_test(&mut self, zone: u32, name: &str) {
         use crate::afxdp::flood_counters::{
-            FloodCounterSlotMap, flush_recorded_flood_counters, record_zone_flood_drop,
+            flush_recorded_flood_counters, record_zone_flood_drop,
         };
-        let map = FloodCounterSlotMap::build(&[zone], &self.forwarding.flood_counter_store);
+        use crate::afxdp::zone_slot_counters::ZoneSlotMap;
+        let (map, caches) = ZoneSlotMap::build(
+            &[zone],
+            &self.forwarding.zone_counter_store,
+            &self.forwarding.flood_counter_store,
+        );
         record_zone_flood_drop(&map, zone, "syn-flood");
-        flush_recorded_flood_counters(&self.forwarding.flood_counter_store, &map);
+        flush_recorded_flood_counters(&self.forwarding.flood_counter_store, &map, &caches);
         self.forwarding.flood_counter_slot_map = std::sync::Arc::new(map);
+        self.forwarding.flood_counter_caches = std::sync::Arc::new(caches);
         self.forwarding
             .zone_id_to_name
             .insert(zone, name.to_string());
@@ -2233,13 +2242,17 @@ impl Coordinator {
     /// the status publication from the caller's side needs a seeder here.
     #[cfg(test)]
     pub(crate) fn seed_zone_traffic_counter_for_test(&mut self, zone: u32, name: &str, bytes: u64) {
-        use crate::afxdp::zone_counters::{
-            ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
-        };
-        let map = ZoneCounterSlotMap::build(&[zone], &self.forwarding.zone_counter_store);
+        use crate::afxdp::zone_counters::{flush_recorded_zone_counters, record_zone_traffic};
+        use crate::afxdp::zone_slot_counters::ZoneSlotMap;
+        let (map, caches) = ZoneSlotMap::build(
+            &[zone],
+            &self.forwarding.zone_counter_store,
+            &self.forwarding.flood_counter_store,
+        );
         record_zone_traffic(&map, zone, 0, bytes);
-        flush_recorded_zone_counters(&self.forwarding.zone_counter_store, &map);
+        flush_recorded_zone_counters(&self.forwarding.zone_counter_store, &map, &caches);
         self.forwarding.zone_counter_slot_map = std::sync::Arc::new(map);
+        self.forwarding.zone_counter_caches = std::sync::Arc::new(caches);
         self.forwarding
             .zone_id_to_name
             .insert(zone, name.to_string());
@@ -2624,6 +2637,7 @@ mod routing_domain;
 mod ipsec_inner_dead_worker_15149_tests;
 
 #[cfg(test)]
+#[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
 #[path = "tests.rs"]
 mod tests;
 

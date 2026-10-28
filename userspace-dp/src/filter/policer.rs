@@ -101,7 +101,7 @@ pub(crate) struct ColorTreatment {
 }
 
 impl ColorTreatment {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn rewrite(dscp: u8) -> Self {
         Self {
             dscp_rewrite: Some(dscp & 0x3f),
@@ -109,7 +109,6 @@ impl ColorTreatment {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn drop() -> Self {
         Self {
             dscp_rewrite: None,
@@ -259,7 +258,7 @@ impl ThreeColorPolicerState {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn sr_tcm(
         committed_rate_bytes_per_sec: u64,
         committed_burst_bytes: u64,
@@ -275,7 +274,6 @@ impl ThreeColorPolicerState {
         )
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn sr_tcm_with_treatments(
         committed_rate_bytes_per_sec: u64,
         committed_burst_bytes: u64,
@@ -305,7 +303,7 @@ impl ThreeColorPolicerState {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn tr_tcm(
         committed_rate_bytes_per_sec: u64,
         committed_burst_bytes: u64,
@@ -323,7 +321,6 @@ impl ThreeColorPolicerState {
         )
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn tr_tcm_with_treatments(
         committed_rate_bytes_per_sec: u64,
         committed_burst_bytes: u64,
@@ -365,7 +362,6 @@ impl ThreeColorPolicerState {
     /// consumption remains a bounded `compare_exchange_weak` loop over the
     /// packed `credits` word. `&self` (not `&mut self`): state is shared across
     /// all workers behind an `Arc`, replacing the previous per-packet Mutex.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn meter(
         &self,
         now_ns: u64,

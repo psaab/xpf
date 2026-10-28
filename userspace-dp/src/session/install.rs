@@ -498,7 +498,7 @@ impl SessionTable {
         self.max_sessions = n;
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn install_with_protocol(
         &mut self,
         key: SessionKey,
@@ -827,7 +827,7 @@ impl SessionTable {
         true
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn upsert_synced(
         &mut self,
         key: SessionKey,

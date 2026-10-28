@@ -10,8 +10,8 @@ mod phase_trivial;
 use phase_backup::{BackupOutcome, drain_phase_drain_local_backup};
 use phase_shaped::drain_phase_drain_cos;
 use phase_trivial::{
-    drain_phase_ingest_cos, drain_phase_maybe_rekick, drain_phase_reap_completions,
-    drain_phase_submit_and_wake,
+    drain_phase_finish, drain_phase_ingest_cos, drain_phase_maybe_rekick,
+    drain_phase_reap_completions,
 };
 
 /// Per-tick drain context — references-only, stack-built once
@@ -105,18 +105,26 @@ pub(in crate::afxdp) fn drain_pending_tx(
     drain_phase_maybe_rekick(binding, &ctx);
     drain_phase_ingest_cos(binding, &ctx, shared_recycles);
     drain_phase_drain_cos(binding, &ctx, shared_recycles, &mut did_work);
+    // `update_binding_debug_state` executes exactly once per drain
+    // invocation that reaches the backup phase, via one of two
+    // textual call sites: here on an early `Return`, or in
+    // `drain_phase_finish` on fall-through. (The pre-backup
+    // `!binding_has_pending_tx_work` bail above returns before any
+    // phase runs and never had a debug-state call.) The call only
+    // advances the debug-publish cadence counter (~1-in-65536 calls
+    // actually publish; see `debug_state.rs`), so collapsing the
+    // former yes/no-update early-return split — and the prepared
+    // `TxError::Retry` path that formerly skipped it — into this
+    // single execution does not change observable behaviour; at most
+    // the cadence counter ticks once extra on those paths.
     match drain_phase_drain_local_backup(binding, &ctx, shared_recycles, &mut did_work) {
         BackupOutcome::Continue => {}
-        BackupOutcome::EarlyReturnRetry => return true,
-        BackupOutcome::EarlyReturnAfterDebugUpdate => {
+        BackupOutcome::Return(result) => {
             update_binding_debug_state(binding);
-            return did_work || binding_has_pending_tx_work(binding);
-        }
-        BackupOutcome::EarlyReturnNoDebugUpdate => {
-            return did_work || binding_has_pending_tx_work(binding);
+            return result;
         }
     }
-    drain_phase_submit_and_wake(binding, did_work)
+    drain_phase_finish(binding, did_work)
 }
 
 /// #760: drop any prepared TX requests whose `cos_queue_id` is
@@ -323,24 +331,6 @@ pub(super) fn should_enter_shaped_drain(binding: &BindingWorker) -> bool {
 #[inline]
 fn has_queued_cos_work(cos_nonempty_interfaces: usize, cos_interface_order_len: usize) -> bool {
     cos_nonempty_interfaces > 0 && cos_interface_order_len > 0
-}
-
-pub(in crate::afxdp) fn drain_pending_tx_local_owner(
-    binding: &mut BindingWorker,
-    now_ns: u64,
-    shared_recycles: &mut Vec<(u32, u64)>,
-    forwarding: &ForwardingState,
-    worker_id: u32,
-    worker_commands_by_id: &BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
-) -> bool {
-    drain_pending_tx(
-        binding,
-        now_ns,
-        shared_recycles,
-        forwarding,
-        worker_id,
-        worker_commands_by_id,
-    )
 }
 
 pub(super) fn ingest_cos_pending_tx(

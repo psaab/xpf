@@ -695,22 +695,28 @@ func (d *repairOutcomeSessionStoreDP11360) SetClusterSyncedSessionV6(SessionKeyV
 
 func legacyRepairResponseError11360(t *testing.T) error {
 	t.Helper()
-	data, err := os.ReadFile("userspace/testdata/synced_import_repair_11360.json")
+	data, err := os.ReadFile("userspace/testdata/synced_import_wire.json")
 	if err != nil {
-		t.Fatalf("read shared repair wire fixture: %v", err)
+		t.Fatalf("read shared synced-import wire fixture: %v", err)
 	}
-	var fixtures map[string]struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+	var rows []struct {
+		Variant string `json:"variant"`
+		OK      bool   `json:"ok"`
+		Error   string `json:"error"`
 	}
-	if err := json.Unmarshal(data, &fixtures); err != nil {
-		t.Fatalf("decode shared repair wire fixture: %v", err)
+	if err := json.Unmarshal(data, &rows); err != nil {
+		t.Fatalf("decode shared synced-import wire fixture: %v", err)
 	}
-	pending, ok := fixtures["pending"]
-	if !ok || pending.OK || pending.Error == "" {
-		t.Fatalf("pending repair fixture is not a non-success response: %+v", pending)
+	for _, row := range rows {
+		if row.Variant == "AppliedRepairPending" {
+			if row.OK || row.Error == "" {
+				t.Fatalf("pending repair fixture is not a non-success response: %+v", row)
+			}
+			return errors.New(row.Error)
+		}
 	}
-	return errors.New(pending.Error)
+	t.Fatal("pending repair fixture is missing")
+	return nil
 }
 
 func TestPutClusterSyncedV4PreservesRowOnWorkerRepairOutcome11360(t *testing.T) {

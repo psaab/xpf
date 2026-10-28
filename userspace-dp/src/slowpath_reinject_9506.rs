@@ -29,8 +29,8 @@ pub(crate) const SUBMIT_MAX_DATA_LEN: usize = 65_535;
 pub(crate) const REINJECT_MAX_MSG: usize = 1_048_576;
 /// P-MECH submit tail: snapshot u64 + config u64 + FIB u32 + zone u32 +
 /// if_id u32 + inventory generation u64 + inventory FIB u32 + policy SHA-256
-/// (32 bytes) + absolute CLOCK_MONOTONIC deadline u64 + clock id u8 (79 bytes).
-pub(crate) const SUBMIT_PMECH_TAIL_LEN: usize = 79;
+/// (32 bytes) + absolute CLOCK_MONOTONIC deadline u64 + clock id u8 (81 bytes).
+pub(crate) const SUBMIT_PMECH_TAIL_LEN: usize = 81;
 pub(crate) const PMECH_DEADLINE_MAX_FUTURE_SKEW_NS: u64 = 1_000_000_000;
 pub(crate) const PMECH_DEADLINE_MIN_REMAINING_NS: u64 = 0;
 pub(crate) const PMECH_DEADLINE_CLOCK_MONOTONIC: u8 = 1;
@@ -1086,6 +1086,36 @@ impl ReinjectCore {
         Self::decision(frame, true, ADMIT_OK)
     }
 
+    pub(crate) fn refuse_full_pooled(&self, row: &PooledSubmitFrame) -> AdmitDecision {
+        let frame = SubmitFrame {
+            lease: row.lease,
+            flow_tag: row.flow_tag,
+            flags: row.flags,
+            origin: row.origin.clone(),
+            bytes: Vec::new(),
+            snapshot_generation: row.snapshot_generation,
+            config_generation: row.config_generation,
+            fib_generation: row.fib_generation,
+            zone_id: row.zone_id,
+            if_id: row.if_id,
+            pmech_inventory_generation: row.pmech_inventory_generation,
+            pmech_inventory_fib_generation: row.pmech_inventory_fib_generation,
+            pmech_policy_identity: row.pmech_policy_identity,
+            deadline_mono_ns: row.deadline_mono_ns,
+            deadline_clock_id: row.deadline_clock_id,
+        };
+        Self::decision(&frame, false, ADMIT_FULL)
+    }
+
+    /// Record a no-target submit refusal (stats only; no entry is created).
+    pub(crate) fn note_no_target_submit(&self, flags: u8) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if flags & SUBMIT_FLAG_DRY_RUN != 0 {
+            inner.stats.dry_run_refused += 1;
+        } else {
+            inner.stats.non_dry_run_refused += 1;
+        }
+    }
     fn decision(frame: &SubmitFrame, admitted: bool, reason: u8) -> AdmitDecision {
         AdmitDecision {
             request_id: frame.lease.request_id,
@@ -1782,93 +1812,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-pub(crate) fn decode_submit_batch(payload: &[u8]) -> Result<Vec<SubmitFrame>, CodecError> {
-    let mut c = Cursor::new(payload);
-    let n = c.u16()? as usize;
-    if n > SUBMIT_MAX_FRAMES {
-        return Err(CodecError::TooManyFrames);
-    }
-    let mut out = Vec::with_capacity(n);
-    for _ in 0..n {
-        let request_id = c.u64()?;
-        let permit_epoch = c.u64()?;
-        let queue_epoch = c.u64()?;
-        let queue_number = c.u16()?;
-        let flow_tag = c.u64()?;
-        let flags = c.u8()?;
-        if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
-            return Err(CodecError::BadFlags);
-        }
-        let family = c.u8()?;
-        let hook = c.u8()?;
-        let owned_ifindex = c.u32()?;
-        let owner_len = c.u8()? as usize;
-        let owner_bytes = c.take(owner_len)?;
-        let stn_len = c.u8()? as usize;
-        let stn_bytes = c.take(stn_len)?;
-        let owner_valid_utf8 = std::str::from_utf8(owner_bytes).is_ok();
-        let stn_valid_utf8 = std::str::from_utf8(stn_bytes).is_ok();
-        let valid = owned_ifindex != 0
-            && owner_len != 0
-            && stn_len != 0
-            && owner_len <= ORIGIN_MAX_OWNER
-            && stn_len <= ORIGIN_MAX_STN
-            && owner_valid_utf8
-            && stn_valid_utf8
-            && (family == ORIGIN_INET || family == ORIGIN_BRIDGE)
-            && (hook == ORIGIN_FORWARD || hook == ORIGIN_INPUT);
-        let data_len = c.u32()? as usize;
-        if data_len > SUBMIT_MAX_DATA_LEN {
-            return Err(CodecError::FrameTooLarge);
-        }
-        let bytes = c.take(data_len)?.to_vec();
-        let snapshot_generation = c.u64()?;
-        let config_generation = c.u64()?;
-        let fib_generation = c.u32()?;
-        let zone_id = c.u32()?;
-        let if_id = c.u32()?;
-        let pmech_inventory_generation = c.u64()?;
-        let pmech_inventory_fib_generation = c.u32()?;
-        let mut pmech_policy_identity = [0u8; 32];
-        pmech_policy_identity.copy_from_slice(c.take(32)?);
-        let deadline_mono_ns = c.u64()?;
-        let deadline_clock_id = c.u8()?;
-        out.push(SubmitFrame {
-            lease: ReinjectLease {
-                permit_epoch,
-                queue_epoch,
-                queue_number,
-                request_id,
-            },
-            flow_tag,
-            flags,
-            origin: CaptureOrigin {
-                family,
-                hook,
-                owned_ifindex,
-                owner: String::from_utf8_lossy(owner_bytes).into_owned(),
-                stn: String::from_utf8_lossy(stn_bytes).into_owned(),
-                valid,
-            },
-            bytes,
-            snapshot_generation,
-            config_generation,
-            fib_generation,
-            zone_id,
-            if_id,
-            pmech_inventory_generation,
-            pmech_inventory_fib_generation,
-            pmech_policy_identity,
-            deadline_mono_ns,
-            deadline_clock_id,
-        });
-    }
-    if !c.done() {
-        return Err(CodecError::TrailingBytes);
-    }
-    Ok(out)
-}
-
 /// A submit row whose packet bytes are already owned by a D11 slab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PooledSubmitFrame {
@@ -1890,19 +1833,106 @@ pub(crate) struct PooledSubmitFrame {
     pub deadline_clock_id: u8,
 }
 
-/// Decode a P-MECH batch directly into preallocated D11 slabs. This is the
-/// worker handoff path; unlike `decode_submit_batch`, it never materializes a
-/// `Vec<u8>` and then copies it into a slab.
-pub(crate) fn decode_submit_batch_into_pool(
+/// Outcome of a pooled submit decode. `SlabExhausted` is kept separate from
+/// genuine wire errors: the caller refuses every frame in `decoded` and
+/// every frame in `undecoded` (whose identity fields were read without a
+/// slab) with per-frame `ADMIT_FULL` decisions, instead of treating pool
+/// exhaustion as a protocol violation that breaks the connection and
+/// purges work admitted by earlier batches on it.
+#[derive(Debug)]
+pub(crate) enum PooledSubmitDecode {
+    Complete(Vec<PooledSubmitFrame>),
+    SlabExhausted {
+        decoded: Vec<PooledSubmitFrame>,
+        undecoded: Vec<AdmitDecision>,
+    },
+}
+
+/// Validate a submit batch for the no-target path without a slab pool:
+/// frames are syntax-checked exactly as the pooled decoder checks them,
+/// but packet bytes are skipped rather than copied into slabs that would
+/// only be released again. Returns per-frame identity on success.
+pub(crate) fn decode_submit_batch_no_target(
     payload: &[u8],
-    pool: &IpsecInnerSlabPool,
-) -> Result<Vec<PooledSubmitFrame>, CodecError> {
+) -> Result<Vec<(AdmitDecision, u8)>, CodecError> {
     let mut c = Cursor::new(payload);
     let n = c.u16()? as usize;
     if n > SUBMIT_MAX_FRAMES {
         return Err(CodecError::TooManyFrames);
     }
     let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let request_id = c.u64()?;
+        let permit_epoch = c.u64()?;
+        let queue_epoch = c.u64()?;
+        let queue_number = c.u16()?;
+        let _flow_tag = c.u64()?;
+        let flags = c.u8()?;
+        if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
+            return Err(CodecError::BadFlags);
+        }
+        let family = c.u8()?;
+        let hook = c.u8()?;
+        let owned_ifindex = c.u32()?;
+        let owner_len = c.u8()? as usize;
+        let _owner_bytes = c.take(owner_len)?;
+        let stn_len = c.u8()? as usize;
+        let _stn_bytes = c.take(stn_len)?;
+        let data_len = c.u32()? as usize;
+        if data_len > SUBMIT_MAX_DATA_LEN {
+            return Err(CodecError::FrameTooLarge);
+        }
+        let _bytes = c.take(data_len)?;
+        let _snapshot_generation = c.u64()?;
+        let _config_generation = c.u64()?;
+        let _fib_generation = c.u32()?;
+        let _zone_id = c.u32()?;
+        let _if_id = c.u32()?;
+        let _pmech_inventory_generation = c.u64()?;
+        let _pmech_inventory_fib_generation = c.u32()?;
+        let _policy_identity = c.take(32)?;
+        let _deadline_mono_ns = c.u64()?;
+        let _deadline_clock_id = c.u8()?;
+        out.push((
+            AdmitDecision {
+                request_id,
+                permit_epoch,
+                queue_epoch,
+                queue_number,
+                family,
+                hook,
+                owned_ifindex,
+                admitted: false,
+                reason: ADMIT_SHUTDOWN,
+            },
+            flags,
+        ));
+    }
+    if !c.done() {
+        return Err(CodecError::TrailingBytes);
+    }
+    Ok(out)
+}
+
+/// Decode a P-MECH batch directly into preallocated D11 slabs. This is the
+/// sole pooled submit decoder and the worker handoff path; it never
+/// materializes a `Vec<u8>` and then copies it into a slab. Genuine wire
+/// errors return `Err` after releasing every slab acquired so far; pool
+/// exhaustion returns `PooledSubmitDecode::SlabExhausted` with the frames
+/// decoded before exhaustion plus header-only `ADMIT_FULL` decisions for
+/// the rest.
+pub(crate) fn decode_submit_batch_into_pool(
+    payload: &[u8],
+    pool: &IpsecInnerSlabPool,
+) -> Result<PooledSubmitDecode, CodecError> {
+    let mut c = Cursor::new(payload);
+    let n = c.u16()? as usize;
+    if n > SUBMIT_MAX_FRAMES {
+        return Err(CodecError::TooManyFrames);
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut exhausted_first: Option<AdmitDecision> = None;
+    let mut exhausted_at: Option<usize> = None;
     let result = (|| {
         for _ in 0..n {
             let request_id = c.u64()?;
@@ -1949,11 +1979,35 @@ pub(crate) fn decode_submit_batch_into_pool(
                 && (family == ORIGIN_INET || family == ORIGIN_BRIDGE)
                 && (hook == ORIGIN_FORWARD || hook == ORIGIN_INPUT);
             let Some(slab_id) = pool.acquire() else {
-                return Err(CodecError::SlabExhausted);
+                exhausted_at = Some(out.len());
+                exhausted_first = Some(AdmitDecision {
+                    request_id,
+                    permit_epoch,
+                    queue_epoch,
+                    queue_number,
+                    family,
+                    hook,
+                    owned_ifindex,
+                    admitted: false,
+                    reason: ADMIT_FULL,
+                });
+                break;
             };
             let Some(mut slab) = pool.try_buffer(slab_id) else {
                 pool.force_release(slab_id);
-                return Err(CodecError::SlabExhausted);
+                exhausted_at = Some(out.len());
+                exhausted_first = Some(AdmitDecision {
+                    request_id,
+                    permit_epoch,
+                    queue_epoch,
+                    queue_number,
+                    family,
+                    hook,
+                    owned_ifindex,
+                    admitted: false,
+                    reason: ADMIT_FULL,
+                });
+                break;
             };
             slab.clear();
             slab.extend_from_slice(bytes);
@@ -1988,7 +2042,7 @@ pub(crate) fn decode_submit_batch_into_pool(
                 deadline_clock_id,
             });
         }
-        if !c.done() {
+        if exhausted_at.is_none() && !c.done() {
             return Err(CodecError::TrailingBytes);
         }
         Ok(())
@@ -1999,9 +2053,75 @@ pub(crate) fn decode_submit_batch_into_pool(
         }
         return Err(err);
     }
-    Ok(out)
+    let Some(at) = exhausted_at else {
+        return Ok(PooledSubmitDecode::Complete(out));
+    };
+    // Pool exhausted at frame `at`: finish parsing headers only so every
+    // remaining frame still earns its own ADMIT_FULL decision. The frame
+    // that failed to acquire was fully read; its decision comes first.
+    let mut undecoded = Vec::with_capacity(n - at);
+    undecoded.push(exhausted_first.expect("exhaustion records its frame"));
+    let tail = (|| {
+        for _ in at + 1..n {
+            let request_id = c.u64()?;
+            let permit_epoch = c.u64()?;
+            let queue_epoch = c.u64()?;
+            let queue_number = c.u16()?;
+            let _flow_tag = c.u64()?;
+            let flags = c.u8()?;
+            if flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
+                return Err(CodecError::BadFlags);
+            }
+            let family = c.u8()?;
+            let hook = c.u8()?;
+            let owned_ifindex = c.u32()?;
+            let owner_len = c.u8()? as usize;
+            let _owner_bytes = c.take(owner_len)?;
+            let stn_len = c.u8()? as usize;
+            let _stn_bytes = c.take(stn_len)?;
+            let data_len = c.u32()? as usize;
+            if data_len > SUBMIT_MAX_DATA_LEN {
+                return Err(CodecError::FrameTooLarge);
+            }
+            let _bytes = c.take(data_len)?;
+            let _snapshot_generation = c.u64()?;
+            let _config_generation = c.u64()?;
+            let _fib_generation = c.u32()?;
+            let _zone_id = c.u32()?;
+            let _if_id = c.u32()?;
+            let _pmech_inventory_generation = c.u64()?;
+            let _pmech_inventory_fib_generation = c.u32()?;
+            let _policy_identity = c.take(32)?;
+            let _deadline_mono_ns = c.u64()?;
+            let _deadline_clock_id = c.u8()?;
+            undecoded.push(AdmitDecision {
+                request_id,
+                permit_epoch,
+                queue_epoch,
+                queue_number,
+                family,
+                hook,
+                owned_ifindex,
+                admitted: false,
+                reason: ADMIT_FULL,
+            });
+        }
+        if !c.done() {
+            return Err(CodecError::TrailingBytes);
+        }
+        Ok(())
+    })();
+    if let Err(err) = tail {
+        for frame in out.drain(..) {
+            pool.force_release(frame.slab_id);
+        }
+        return Err(err);
+    }
+    Ok(PooledSubmitDecode::SlabExhausted {
+        decoded: out,
+        undecoded,
+    })
 }
-
 pub(crate) fn encode_cancel(scope: &CancelScope) -> Vec<u8> {
     let mut flags = 0;
     if scope.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
