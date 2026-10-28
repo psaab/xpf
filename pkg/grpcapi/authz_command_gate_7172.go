@@ -12,6 +12,7 @@ import (
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/optopic"
 )
 
 // authz_command_gate_7172.go is #7172 cut 5b: the command tables built in cuts
@@ -576,48 +577,12 @@ var bgpNATCanonicalCommands15076 = []string{
 	"show security nat destination rule",
 }
 
-// showTextTopicCanonicalCommand resolves one ShowText topic, using the SAME
-// exact-then-longest-prefix rule showTextTopicPermission uses to PRICE it.
-//
-// The two lookups must agree about which key a topic resolves to, or a request
-// could be priced by one rule and command-matched by another — the sibling
-// guard TestTopicCommandAndPermissionResolveTheSameKey7172 asserts they do over
-// the dispatcher's own topic list.
+// showTextTopicCanonicalCommand resolves one ShowText topic to the command
+// its registry entry names (#17108: delegated to optopic.ShowTextCommand,
+// the same exact-then-longest-prefix lookup showTextTopicPermission prices
+// by — the two can no longer diverge because there is only one lookup).
 func showTextTopicCanonicalCommand(topic string) (string, bool) {
-	if cmd, ok := showTextTopicCommand[topic]; ok {
-		return cmd, true
-	}
-	for _, r := range showTextCommandPrefix {
-		if strings.HasPrefix(topic, r.prefix) {
-			return r.command, true
-		}
-	}
-	return "", false
-}
-
-// showTextCommandPrefixRule is one prefix-keyed topic → command rule,
-// pre-resolved at init and sorted longest-key-first for the same reason
-// showTextPrefix is: an unambiguous longest match must win rather than whichever
-// key map iteration reached first.
-type showTextCommandPrefixRule struct {
-	prefix  string
-	command string
-}
-
-var showTextCommandPrefix []showTextCommandPrefixRule
-
-func init() {
-	for k, cmd := range showTextTopicCommand {
-		if strings.HasSuffix(k, ":") {
-			showTextCommandPrefix = append(showTextCommandPrefix, showTextCommandPrefixRule{k, cmd})
-		}
-	}
-	sort.Slice(showTextCommandPrefix, func(i, j int) bool {
-		if len(showTextCommandPrefix[i].prefix) != len(showTextCommandPrefix[j].prefix) {
-			return len(showTextCommandPrefix[i].prefix) > len(showTextCommandPrefix[j].prefix)
-		}
-		return showTextCommandPrefix[i].prefix < showTextCommandPrefix[j].prefix
-	})
+	return optopic.ShowTextCommand(topic)
 }
 
 // allCanonicalCommands is every command string this surface can ever present to
