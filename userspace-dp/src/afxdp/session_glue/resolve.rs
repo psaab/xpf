@@ -585,87 +585,33 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, flow, decision)
                 .resolution
         };
-        let looked_up_resolution = super::prefer_local_forward_candidate_for_fabric_ingress(
+        // #15958b/#17047: stored-session re-resolution is the ONE
+        // consolidated pipeline in resolution.rs (lookup variant
+        // chosen above; prefer/HA-enforce/fabric composition and
+        // the rehome-or-retain verdict inside). A stored
+        // FabricRedirect companion must not be re-resolved onto a
+        // gateway/default route: on the punt origin the FIB answers
+        // the LAN target with the WAN gateway route, and the
+        // retained-redirect guard keeps the fabric egress instead.
+        decision.resolution = super::reresolve_stored_session(
             forwarding,
             ha_state,
             dynamic_neighbors,
             now_secs,
-            fabric_ingress,
+            &resolved.decision,
+            &resolved.metadata,
             resolution_target,
-            install_table_name_for_session(forwarding, decision, resolution_target),
             looked_up_resolution,
-        );
-        let enforced_resolution = enforce_session_ha_resolution(
-            forwarding,
-            ha_state,
-            now_secs,
-            looked_up_resolution,
-            ingress_ifindex,
-            ha_startup_grace_until_secs,
-        );
-        // #16217: a fabric-adopted ForwardCandidate must not die on
-        // the ha_inactive terminal (see `fabric_adopted_resolution`).
-        let enforced_resolution = if fabric_adopted {
-            fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution, dynamic_neighbors, resolution_target, adopted_recovery.as_ref())
-        } else {
-            enforced_resolution
-        };
-        // #15958b: a stored FabricRedirect companion must not be
-        // re-resolved onto a gateway/default route. On the punt origin
-        // the connected LAN prefix is HA-suppressed, so the FIB lookup
-        // above answers the LAN target with the WAN gateway route
-        // (ForwardCandidate egressing in the WAN zone, owner =
-        // locally-active WAN RG); HA enforcement keeps it and the
-        // reply leaves on the WAN egress instead of the fabric. When
-        // the stored decision was FabricRedirect and the re-resolved
-        // candidate egresses in a different zone than the companion's
-        // destination (egress) zone, the route does not reach the LAN
-        // owner: retain the redirect.
-        if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
-            // M1: never re-redirect a packet that arrived on the fabric
-            // link (anti-loop, mirroring redirect_session_via_fabric_if_needed).
-            // Per-address destination owner (round-2 item 1): the RG
-            // of the connected interface serving resolution_target,
-            // not any RG in the destination zone.
-            let session_table = install_table_name_for_session(forwarding, decision, resolution_target);
-            let dest_rg = super::connected_owner_rg_for_target_in_table(forwarding, resolution_target, session_table);
-            // Unknown owner (dest_rg==0) is NOT peer-ownership: keep the candidate (no redirect).
-            let destination_owner_active = dest_rg == 0 || (dest_rg > 0
-                && ha_state
-                    .get(&dest_rg)
-                    .is_some_and(|group| group.is_forwarding_active(now_secs)));
-            // Composition (item 3): HAInactive conversion first; the
-            // zone-egress helper only converts a surviving candidate.
-            let enforced_resolution = redirect_session_via_fabric_if_needed(
-                forwarding,
-                enforced_resolution,
+            super::FabricArrival::Packet {
+                fabric_ingress,
                 fabric_link_ingress,
-                resolved.metadata.ingress_zone,
-            );
-            decision.resolution = if fabric_link_ingress {
-                enforced_resolution
-            } else {
-                super::rehome_or_retain_fabric_redirect_16524(
-                    forwarding,
-                    resolved.decision.resolution,
-                    enforced_resolution,
-                    resolved.metadata.egress_zone,
-                    destination_owner_active,
-                    dest_rg == 0,
-                    Some(resolution_target),
-                    session_table,
-                )
-            };
-        } else {
-            decision.resolution = redirect_session_via_fabric_if_needed_at(
-                forwarding,
-                ha_state,
-                now_secs,
-                enforced_resolution,
-                fabric_link_ingress,
-                resolved.metadata.ingress_zone,
-            );
-        }
+                ingress_ifindex,
+                ha_startup_grace_until_secs,
+                fabric_adopted,
+                adopted_recovery: adopted_recovery.as_ref(),
+            },
+            super::HaEnforce::Session,
+        );
         // #16217 (FZDiag34 reverse leg; FZDiag35 conversion):
         // a REVERSE hit whose stored decision still egresses LOCALLY
         // (ForwardCandidate) while the reply destination's connected
@@ -910,69 +856,27 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
     let looked_up_resolution =
         lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, flow, decision)
             .resolution;
-    let looked_up_resolution = super::prefer_local_forward_candidate_for_fabric_ingress(
+    // #15958b/#17047: same consolidated pipeline as the hit arm
+    // (single `resolution_target`, single installing-table eval).
+    decision.resolution = super::reresolve_stored_session(
         forwarding,
         ha_state,
         dynamic_neighbors,
         now_secs,
-        fabric_ingress,
+        &resolved.decision,
+        &resolved.metadata,
         resolution_target,
-        install_table_name_for_session(forwarding, decision, resolution_target),
         looked_up_resolution,
-    );
-    let enforced_resolution = enforce_session_ha_resolution(
-        forwarding,
-        ha_state,
-        now_secs,
-        looked_up_resolution,
-        ingress_ifindex,
-        ha_startup_grace_until_secs,
-    );
-    // #16217: same adopted-ForwardCandidate exemption as the hit arm.
-    let enforced_resolution = if fabric_adopted {
-        fabric_adopted_resolution(forwarding, ha_state, now_secs, looked_up_resolution, enforced_resolution, dynamic_neighbors, resolution_target, adopted_recovery.as_ref())
-    } else {
-        enforced_resolution
-    };
-    // #15958b: same retained-redirect guard as the hit arm above.
-    if resolved.decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
-        let rev_table = install_table_name_for_session(forwarding, resolved.decision, resolution_target_for_session(flow, resolved.decision));
-        let dest_rg = super::connected_owner_rg_for_target_in_table(forwarding, resolution_target_for_session(flow, resolved.decision), rev_table);
-        // Unknown owner (dest_rg==0): keep candidate.
-        let destination_owner_active = dest_rg == 0 || (dest_rg > 0
-            && ha_state
-                .get(&dest_rg)
-                .is_some_and(|group| group.is_forwarding_active(now_secs)));
-        let enforced_resolution = redirect_session_via_fabric_if_needed(
-            forwarding,
-            enforced_resolution,
+        super::FabricArrival::Packet {
+            fabric_ingress,
             fabric_link_ingress,
-            resolved.metadata.ingress_zone,
-        );
-        decision.resolution = if fabric_link_ingress {
-            enforced_resolution
-        } else {
-            super::rehome_or_retain_fabric_redirect_16524(
-                forwarding,
-                resolved.decision.resolution,
-                enforced_resolution,
-                resolved.metadata.egress_zone,
-                destination_owner_active,
-                dest_rg == 0,
-                Some(resolution_target_for_session(flow, resolved.decision)),
-                rev_table,
-            )
-        };
-    } else {
-        decision.resolution = redirect_session_via_fabric_if_needed_at(
-            forwarding,
-            ha_state,
-            now_secs,
-            enforced_resolution,
-            fabric_link_ingress,
-            resolved.metadata.ingress_zone,
-        );
-    }
+            ingress_ifindex,
+            ha_startup_grace_until_secs,
+            fabric_adopted,
+            adopted_recovery: adopted_recovery.as_ref(),
+        },
+        super::HaEnforce::Session,
+    );
     // #9752: terminal observation arms the purge walk (D8; reverse arm).
     if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
         flag_install_table_purge(worker_id);
