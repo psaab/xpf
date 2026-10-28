@@ -577,14 +577,15 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
     // Destination-owner test (M2, per-address round-2): the RG of
     // the connected interface serving `target_ip` specifically —
     // a co-zoned interface owned by another RG must not decide.
+    // #17047: typed owner (this site's local keeps the
+    // known-active-only meaning its synthesis arms need; the
+    // session_glue unknown-or-active polarity lives only in
+    // `DestinationOwner` now).
     let dest_rg = super::connected_owner_rg_for_target_in_table(forwarding, target_ip, table);
-    let destination_owner_active = dest_rg > 0
-        && matches!(
-            ha_state.get(&dest_rg),
-            Some(group) if group.is_forwarding_active(now_secs)
-        );
+    let destination_owner = super::DestinationOwner::from_dest_rg(dest_rg, ha_state, now_secs);
+    let destination_owner_known_active = matches!(destination_owner, super::DestinationOwner::Active(_));
     if fabric_ingress
-        && !destination_owner_active
+        && !destination_owner_known_active
         && dest_rg > 0
         && forwarding.egress_zone_id(resolved.egress_ifindex) != ingress_zone
     {
@@ -595,13 +596,12 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
         // destination owner (dest_rg == 0) is not peer-ownership:
         // keep the candidate.
         if dest_rg > 0 {
-            let redirected = super::rehome_or_retain_fabric_redirect_16524(
+            let redirected = super::rehome_or_retain_fabric_redirect(
                 forwarding,
                 resolved,
                 resolved,
                 ingress_zone,
-                destination_owner_active,
-                dest_rg == 0,
+                super::DestinationOwner::Inactive(dest_rg),
                 Some(target_ip),
                 table,
             );
@@ -634,7 +634,7 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
     if !fabric_ingress
         && forward_is_fabric_redirect
         && dest_rg > 0
-        && !destination_owner_active
+        && !destination_owner_known_active
         && let Some(redirect) =
             super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone)
     {
@@ -642,7 +642,7 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
     }
     if fabric_ingress
         && owner_rg_id > 0
-        && !destination_owner_active
+        && !destination_owner_known_active
         && !matches!(
             ha_state.get(&owner_rg_id),
             Some(group) if group.is_forwarding_active(now_secs)
@@ -654,7 +654,7 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
     }
     let enforced = enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolved);
     if enforced.disposition == ForwardingDisposition::HAInactive
-        && destination_owner_active
+        && destination_owner_known_active
         && resolved.disposition == ForwardingDisposition::ForwardCandidate
     {
         return resolved;
