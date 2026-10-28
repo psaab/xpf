@@ -571,7 +571,7 @@ func (c *CLI) firewallEffectiveLiveness() firewallEffectiveLiveness {
 	// of the daemon's last successfully-applied generation. Helper-BEHIND
 	// (acked < applied) is real drift — the helper has not caught up to (or
 	// rejected) the applied configuration. Helper-AHEAD (acked > applied) is
-	// BENIGN: a scheduler-only republish (Manager.UpdatePolicyScheduleState)
+	// BENIGN: a scheduler-only republish (Manager.UpdatePolicyScheduleStateWithLatch)
 	// advances the helper's snapshot generation WITHOUT calling
 	// recordApplyResultLocked, so LastApplyResult().Generation lags the helper
 	// on a perfectly healthy box. That republish only re-times policy
