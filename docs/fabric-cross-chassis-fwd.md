@@ -962,12 +962,16 @@ pre-existing gates (fabric ingress, magic, id != 0, zone exists):
   — this kills the host-inbound variant. Evaluated once at stage 9
   (`stage_classify_fabric_ingress`), so screens / SYN cookie / IKE
   admission consume only validated or owner-promoted zones.
-- **Owner-RG binding (the #6458 V2 gate).** At every session-MISS
-  zone-pair computation (flow-backed, flowless transit,
-  flowless local-delivery, and the MissingNeighbor arm) the validated override
-  is honored only when the resolution's owner RG (`owner_rg_for_resolution`) is
-  locally (`gate_fabric_zone_override_on_owner_rg`): the peer punts a new
-  flow to us only because WE own its egress RG. This binds the stamp to
+- **Owner-RG binding (the #6458 V2 gate).** The validated override is
+  honored only through `admission_zone_override` in
+  `userspace-dp/src/afxdp/poll_descriptor/transit_policy.rs` (#17031:
+  the ONE from-zone rule — owner-RG gate plus #15916 ambiguous-stamp
+  promotion, in that order, and nowhere else). Every session-MISS
+  zone-pair computation and every consumer that must agree with it
+  (zone-traffic counters, flow-cache seed stamp, queued embedded
+  ICMP) resolves its from-zone through that function; the peer punts
+  a new flow to us only because WE own its egress RG
+  (`owner_rg_for_resolution` locally active). This binds the stamp to
   the packet's actual forwarding outcome, including the rg-0
   local-delivery case V1b cannot see.
 
