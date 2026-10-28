@@ -6,8 +6,14 @@ daemon-local CLI.
 
 ## Entry
 
-`main.go` parses flags, dials the gRPC API (see `dialOpts`), and hands
-control to the shared `pkg/cli` engine.
+`main.go` parses flags, dials the gRPC API (see `dialOpts`), and runs
+its own remote dispatch — it does NOT import `pkg/cli` (the
+daemon-local console). The two CLIs are independent implementations
+(twins): they share only `pkg/cmdtree`, `pkg/cliterm`,
+`pkg/config` helpers and, for some commands, the gRPC renderers in
+`pkg/grpcapi` whose `resp.Output` this client prints verbatim. A fix
+in `pkg/cli` therefore does NOT reach this binary; mirror it here
+(see the twins note in `pkg/cli/README.md`).
 
 The dial raises the client `MaxCallRecvMsgSize` to
 `configstore.MaxConfigSize` + 1 MiB of framing headroom
