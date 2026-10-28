@@ -957,7 +957,10 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     expected.push(PMECH_DEADLINE_CLOCK_MONOTONIC);
     assert_eq!(payload, expected);
     let pool = crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool::new();
-    let pooled = decode_submit_batch_into_pool(&payload, &pool).unwrap();
+    let pooled = match decode_submit_batch_into_pool(&payload, &pool).unwrap() {
+        PooledSubmitDecode::Complete(rows) => rows,
+        PooledSubmitDecode::SlabExhausted { .. } => panic!("fresh pool must not exhaust"),
+    };
     assert_eq!(pooled.len(), frames.len());
     for (row, frame) in pooled.iter().zip(frames.iter()) {
         assert_eq!(row.lease, frame.lease);
@@ -973,13 +976,16 @@ fn codec_submit_roundtrip_and_exact_bytes() {
     // Empty batch is a legal no-op.
     let empty = encode_submit_batch(&[]);
     let pool_empty = crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool::new();
-    assert_eq!(decode_submit_batch_into_pool(&empty, &pool_empty).unwrap(), vec![]);
+    match decode_submit_batch_into_pool(&empty, &pool_empty).unwrap() {
+        PooledSubmitDecode::Complete(rows) => assert_eq!(rows, vec![]),
+        PooledSubmitDecode::SlabExhausted { .. } => panic!("empty batch must not exhaust"),
+    }
 }
 
 #[test]
 fn submit_wire_matches_pinned_go_vector_and_pooled_decoder() {
     const GO_SUBMIT_VECTOR: &[u8] = &[
-         0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x09, 0x64, 0x1d, 0x37, 0x9c, 0xc2, 0x04, 0x83, 0xcb, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x2a, 0x05, 0x6f, 0x77, 0x6e, 0x65, 0x72, 0x03, 0x73, 0x74, 0x6e, 0x00, 0x00, 0x00, 0x02, 0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x20, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01
+         0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x00, 0x09, 0x64, 0x1d, 0x37, 0x9c, 0xc2, 0x04, 0x83, 0xcb, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x2a, 0x05, 0x6f, 0x77, 0x6e, 0x65, 0x72, 0x03, 0x73, 0x74, 0x6e, 0x00, 0x00, 0x00, 0x02, 0x45, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00, 0x13, 0x00, 0x01, 0x00, 0x17, 0x00, 0x00, 0x00, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00, 0x20, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x41, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x01
      ];
     let expected_frame = SubmitFrame {
         lease: ReinjectLease {
@@ -995,7 +1001,7 @@ fn submit_wire_matches_pinned_go_vector_and_pooled_decoder() {
         snapshot_generation: 13,
         config_generation: 17,
         fib_generation: 19,
-        zone_id: 23,
+        zone_id: 0x0001_0017,
         if_id: 29,
         pmech_inventory_generation: 31,
         pmech_inventory_fib_generation: 32,
@@ -1012,7 +1018,7 @@ fn submit_wire_matches_pinned_go_vector_and_pooled_decoder() {
     assert_eq!(&GO_SUBMIT_VECTOR[TAIL_START..67], &13u64.to_be_bytes()[..]);
     assert_eq!(&GO_SUBMIT_VECTOR[67..75], &17u64.to_be_bytes()[..]);
     assert_eq!(&GO_SUBMIT_VECTOR[75..79], &19u32.to_be_bytes()[..]);
-    assert_eq!(&GO_SUBMIT_VECTOR[79..83], &23u32.to_be_bytes()[..]);
+    assert_eq!(&GO_SUBMIT_VECTOR[79..83], &0x0001_0017u32.to_be_bytes()[..]);
     assert_eq!(&GO_SUBMIT_VECTOR[83..87], &29u32.to_be_bytes()[..]);
     assert_eq!(&GO_SUBMIT_VECTOR[87..95], &31u64.to_be_bytes()[..]);
     assert_eq!(&GO_SUBMIT_VECTOR[95..99], &32u32.to_be_bytes()[..]);
@@ -1022,8 +1028,12 @@ fn submit_wire_matches_pinned_go_vector_and_pooled_decoder() {
 
 
     let pool = crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool::new();
-    let pooled = decode_submit_batch_into_pool(GO_SUBMIT_VECTOR, &pool)
-        .expect("pooled decode Go submit vector");
+    let pooled = match decode_submit_batch_into_pool(GO_SUBMIT_VECTOR, &pool)
+        .expect("pooled decode Go submit vector")
+    {
+        PooledSubmitDecode::Complete(rows) => rows,
+        PooledSubmitDecode::SlabExhausted { .. } => panic!("fresh pool must not exhaust"),
+    };
     assert_eq!(pooled.len(), 1);
     let row = &pooled[0];
     assert_eq!(row.lease, expected_frame.lease);
@@ -1034,7 +1044,7 @@ fn submit_wire_matches_pinned_go_vector_and_pooled_decoder() {
     assert_eq!(row.snapshot_generation, 13);
     assert_eq!(row.config_generation, 17);
     assert_eq!(row.fib_generation, 19);
-    assert_eq!(row.zone_id, 23);
+    assert_eq!(row.zone_id, 0x0001_0017, "zone id above u16 must survive the wire");
     assert_eq!(row.if_id, 29);
     assert_eq!(row.pmech_inventory_generation, 31);
     assert_eq!(row.pmech_inventory_fib_generation, 32);
@@ -1092,7 +1102,7 @@ fn expired_adjudicated_deadline_is_refused_before_entry_insert() {
     assert_eq!(core.view(&expired.lease), EntryView::Unknown);
     let stats = core.stats_snapshot();
     assert_eq!(stats.adjudicated_refused, 1);
-    assert_eq!(stats.adjudicated_admitted, 2);
+    assert_eq!(stats.adjudicated_admitted, 0);
 }
 
 #[test]
@@ -1113,7 +1123,10 @@ fn pooled_submit_decode_owns_bytes_once_in_slab() {
     let frame = frame(77, 9, 64);
     let payload = encode_submit_batch(&[frame]);
     let pool = crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool::new();
-    let pooled = decode_submit_batch_into_pool(&payload, &pool).expect("pooled decode");
+    let pooled = match decode_submit_batch_into_pool(&payload, &pool).expect("pooled decode") {
+        PooledSubmitDecode::Complete(rows) => rows,
+        PooledSubmitDecode::SlabExhausted { .. } => panic!("fresh pool must not exhaust"),
+    };
     assert_eq!(pooled.len(), 1);
     assert_eq!(pooled[0].bytes_len, 64);
     let slab_id = pooled[0].slab_id;
@@ -1134,7 +1147,7 @@ fn codec_submit_rejects_over_caps() {
     // data_len > 65535 rejected.
     let mut payload = encode_submit_batch(&[frame(1, 1, 64)]);
     let data_len_pos =
-        payload.len() - 64 - (SUBMIT_PMECH_TAIL_LEN + 2) - std::mem::size_of::<u32>();
+        payload.len() - 64 - SUBMIT_PMECH_TAIL_LEN - std::mem::size_of::<u32>();
     payload[data_len_pos..data_len_pos + 4].copy_from_slice(&65536u32.to_be_bytes());
     let pool1 = crate::afxdp::ipsec_inner_queue::IpsecInnerSlabPool::new();
     assert_eq!(decode_submit_batch_into_pool(&payload, &pool1).unwrap_err(), CodecError::FrameTooLarge);

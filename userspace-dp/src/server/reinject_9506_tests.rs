@@ -320,6 +320,58 @@ fn submit_conn_unflagged_routes_v1_transport_not_q0() {
     handle.join().unwrap();
 }
 #[test]
+fn submit_conn_pooled_slab_exhaustion_refuses_per_frame_without_closing() {
+    let core = open_core();
+    let target = live_target(&core);
+    let reinjector = target.load_full().unwrap();
+    let pool = reinjector.ipsec_inner_transport().pool().clone();
+    // Exhaust the transport pool so the pooled decoder cannot acquire.
+    let mut held = Vec::new();
+    while let Some(id) = pool.acquire() {
+        held.push(id);
+    }
+    let (client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_target = target.clone();
+    let handle = std::thread::spawn(move || {
+        serve_submit_conn(server, &worker_core, &worker_target);
+    });
+    let mut client = client;
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // Two unflagged frames: both must earn ADMIT_FULL, connection stays up.
+    let mut f1 = frame(41, 1);
+    f1.flags = 0;
+    let mut f2 = frame(42, 2);
+    f2.flags = 0;
+    client
+        .write_all(&encode_message(MSG_SUBMIT_BATCH, &encode_submit_batch(&[f1, f2])))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert_eq!(decisions.len(), 2, "exhaustion must refuse per-frame, not close");
+    for d in &decisions {
+        assert!(!d.admitted);
+        assert_eq!(d.reason, crate::slowpath_reinject_9506::ADMIT_FULL);
+    }
+    assert_eq!(core.live_count(), 0, "exhausted frames create no core entries");
+    // Connection survives: release the pool, a dry-run frame is answered.
+    for id in held {
+        pool.force_release(id);
+    }
+    client
+        .write_all(&encode_message(MSG_SUBMIT_BATCH, &encode_submit_batch(&[frame(43, 1)])))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert!(decisions[0].admitted, "connection must survive slab exhaustion");
+    drop(client);
+    handle.join().unwrap();
+}
+
+#[test]
 fn submit_conn_bad_frame_refused_per_frame_bad_message_closes() {
     let core = open_core();
     let target = live_target(&core);
