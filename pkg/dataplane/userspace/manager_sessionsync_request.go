@@ -131,19 +131,23 @@ func (v *sessionSyncView) fibSmac() []byte {
 }
 
 // natSrcIP/natDstIP render the NAT addresses from their NATIVE storage:
-// V4 widens its native-endian uint32 in a stack local (the pre-collapse
-// nativeUint32ToIP hop), V6 borrows its [16]byte in place. Neither path
-// stores an address slice, so nothing about the caller's value escapes.
+// V4 decodes its native-endian uint32 via dataplane.SessionIPv4
+// (#17188), V6 borrows its [16]byte in place. Neither path stores an
+// address slice, so nothing about the caller's value escapes. The
+// zero-field (no NAT) case stays a caller-side check here: ipString
+// already renders a nil or all-zero address as "", and SessionIPv4(0)
+// is 0.0.0.0, which ipString likewise renders as "" — so dropping the
+// old nil-for-zero hop changes no output.
 func (v *sessionSyncView) natSrcIP() string {
 	if v.val4 != nil {
-		return ipString(nativeUint32ToIP(v.val4.NATSrcIP))
+		return ipString(v.val4.NATSrcAddr())
 	}
 	return ipString(net.IP(v.val6.NATSrcIP[:]))
 }
 
 func (v *sessionSyncView) natDstIP() string {
 	if v.val4 != nil {
-		return ipString(nativeUint32ToIP(v.val4.NATDstIP))
+		return ipString(v.val4.NATDstAddr())
 	}
 	return ipString(net.IP(v.val6.NATDstIP[:]))
 }
@@ -534,15 +538,6 @@ func (m *Manager) zoneNameByID(zoneID uint16) string {
 		}
 	}
 	return owner
-}
-
-func nativeUint32ToIP(v uint32) net.IP {
-	if v == 0 {
-		return nil
-	}
-	var raw [4]byte
-	binary.NativeEndian.PutUint32(raw[:], v)
-	return net.IPv4(raw[0], raw[1], raw[2], raw[3]).To4()
 }
 
 func networkUint16ToHost(v uint16) uint16 {

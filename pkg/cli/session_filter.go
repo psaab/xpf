@@ -339,7 +339,7 @@ func (f *sessionFilter) matchesV4(key dataplane.SessionKey, val dataplane.Sessio
 	}
 	if f.snatPool != "" {
 		if val.Flags&dataplane.SessFlagSNAT == 0 ||
-			!config.IPInNets(uint32ToIP(val.NATSrcIP), f.snatPoolNets) {
+			!config.IPInNets(val.NATSrcAddr(), f.snatPoolNets) {
 			return false
 		}
 	}

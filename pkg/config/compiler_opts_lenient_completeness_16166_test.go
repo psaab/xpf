@@ -38,8 +38,10 @@ import (
 // Scope is deliberately the name prefix, not "every bool": compileOpts
 // also carries non-downgrade bools whose lenient value is not uniformly
 // true (skipCompactNormalize is a test seam that must stay false so the
-// normalizer runs on the tolerant path; nodeAware is stamped per call
-// by the node-aware entry, overwriting whatever the literal held).
+// normalizer runs on the tolerant path).
+// (#17157: the #4329 node identity used to ride a parallel nodeAware
+// bool that needed its own allowlist entry; it now derives from
+// opts.nodeID != nil, so no such bool remains.)
 // A future non-downgrade bool must not be named lenient*/sanitize*, and
 // a future downgrade bool must — the prefix is the contract this test
 // polices. The suppress* advisory bools are the one deliberate
@@ -62,10 +64,9 @@ var lenientCompletenessAllowlist16166 = map[string]string{
 	// #8690 test seam: production and the tolerant path must run the
 	// compact normalizer; only measurement tests set this.
 	"skipCompactNormalize": "test seam (#8690); tolerant path must normalize",
-	// #4329 runtime identity: compileConfigForNodeWithOpts stamps
-	// nodeAware/stampNodeID per call after lenientCompileOpts() returns,
-	// so the literal's value is never operative.
-	"nodeAware": "stamped per call by the node-aware entry (#4329)",
+	// (no "nodeAware" entry, #17157: node identity derives from
+	// opts.nodeID != nil; a parallel bool must never re-enter the
+	// allowlist — TestCompileOptsShape17157 fails if one does.)
 	// Advisory suppressors: not severity downgrades (the checks warn on
 	// every path), but they ARE set true in lenientCompileOpts() today.
 	// Listed so the prefix census classifies them deliberately; the
@@ -284,9 +285,9 @@ func TestLenientCompileOptsCompleteness16166(t *testing.T) {
 		t.Error("skipCompactNormalize is true in lenientCompileOpts(): the tolerant path " +
 			"must run the compact normalizer (#8690 seam is test-only)")
 	}
-	if opts.nodeAware {
-		t.Error("nodeAware is true in lenientCompileOpts(): node identity must come only " +
-			"from the node-aware entry's per-call stamp (#4329)")
+	if opts.nodeID != nil {
+		t.Error("nodeID is non-nil in lenientCompileOpts(): node identity must come only " +
+			"from compileTree's per-call stamp (#4329/#17157)")
 	}
 }
 
@@ -555,5 +556,124 @@ func TestLenientCompletenessAllowlistFullPath16166(t *testing.T) {
 	// wherever it nests (leaf detection through the same func).
 	if got := classifyLenientBool16166("plantedNested.lenientPlanted16166"); got != lenientClassDowngrade16166 {
 		t.Errorf("classifyLenientBool16166(%q) = %s, want downgrade", "plantedNested.lenientPlanted16166", got)
+	}
+}
+
+// collectPointerToMapFields17157 returns the dotted paths of every
+// *map[...] field reachable from struct type t, recursing into
+// embedded and named struct fields and through pointer-to-struct
+// fields (the walkBoolFieldsRec16166 traversal shape). It is purely
+// type-driven, so a nil pointer-to-struct in any instance can never
+// hide a nested field. Recursion is bounded per PATH, not per type:
+// the same nested type reached under two different field paths is
+// walked under both (a *map hidden under either path must red), and
+// only a type already on the current path stops the descent, which
+// terminates self-referential types (and matches the bool walk's
+// distinct-path reporting under a nil self-pointer).
+func collectPointerToMapFields17157(t reflect.Type, path string, pathTypes map[reflect.Type]bool, offenders *[]string) {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct || pathTypes[t] {
+		return
+	}
+	pathTypes[t] = true
+	defer delete(pathTypes, t)
+	for i := range t.NumField() {
+		sf := t.Field(i)
+		p := sf.Name
+		if path != "" {
+			p = path + "." + sf.Name
+		}
+		ft := sf.Type
+		if ft.Kind() == reflect.Pointer && ft.Elem().Kind() == reflect.Map {
+			*offenders = append(*offenders, p+" "+ft.String())
+			continue
+		}
+		for ft.Kind() == reflect.Pointer {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct {
+			collectPointerToMapFields17157(ft, p, pathTypes, offenders)
+		}
+	}
+}
+
+// pointerToMapFields17157 returns the dotted paths of every
+// *map[...] field anywhere in the type graph rooted at t.
+func pointerToMapFields17157(t reflect.Type) []string {
+	var offenders []string
+	collectPointerToMapFields17157(t, "", map[reflect.Type]bool{}, &offenders)
+	return offenders
+}
+
+// TestCompileOptsShape17157 is the #17157 acceptance guard: compileOpts
+// must carry NO pointer-to-map fields (the pre-#17157
+// *map[string]struct{} out-parameters that runPreWalkGates wrote
+// through while also returning values), and the #16166 allowlist must
+// not carry a nodeAware entry (node identity derives from
+// opts.nodeID != nil, compileTree's own selector).
+//
+// The no-*map check recurses through embedded and nested struct
+// fields (including pointer-to-struct fields such as
+// currentClusterAccepted16858), following the walkBoolFieldsRec16166
+// pattern: a *map[...] field hidden inside protocolScopeOpts or any
+// other nested struct is an offender, not just a direct field.
+//
+// FAIL-ON-REVERT: re-adding `applicationNameCollisions
+// *map[string]struct{}` (or any *map[...] field, direct or nested) to
+// compileOpts turns this RED, as does re-adding a "nodeAware" key to
+// lenientCompletenessAllowlist16166.
+func TestCompileOptsShape17157(t *testing.T) {
+	// Mutant-proof the recursion itself, independent of the current
+	// field population: a planted *map[...] field inside an embedded
+	// struct and inside a pointer-to-struct field must both be
+	// reported under their dotted paths, while a plain (non-pointer)
+	// map field must NOT be reported. A walk flattened to direct
+	// fields would report only the direct offender and turn this RED.
+	type plantedNested17157 struct {
+		plantedPtrMap *map[string]struct{}
+	}
+	type plantedRoot17157 struct {
+		directPtrMap *map[string]int
+		plainMap     map[string]bool
+		plantedNested17157
+		nestedPtr *plantedNested17157
+		self      *plantedRoot17157
+	}
+	got := pointerToMapFields17157(reflect.TypeOf(plantedRoot17157{}))
+	sort.Strings(got)
+	want := []string{
+		"directPtrMap *map[string]int",
+		"nestedPtr.plantedPtrMap *map[string]struct {}",
+		"plantedNested17157.plantedPtrMap *map[string]struct {}",
+	}
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("pointerToMapFields17157(plantedRoot17157) = %v, want %v "+
+			"(recursion into embedded/nested/pointer-to-struct fields is broken)", got, want)
+	}
+
+	if offenders := pointerToMapFields17157(reflect.TypeOf(compileOpts{})); len(offenders) > 0 {
+		t.Errorf("compileOpts has pointer-to-map field(s) %s: phase results must return "+
+			"as ordinary return values (preWalkResult), never through pointer "+
+			"out-parameters on compileOpts (#17157)", strings.Join(offenders, ", "))
+	}
+	if _, ok := lenientCompletenessAllowlist16166["nodeAware"]; ok {
+		t.Error("lenientCompletenessAllowlist16166 still carries \"nodeAware\": node identity " +
+			"derives from opts.nodeID != nil (#4329/#17157); the parallel bool must not " +
+			"re-enter the allowlist")
+	}
+	if _, ok := reflect.TypeOf(compileOpts{}).FieldByName("nodeAware"); ok {
+		t.Error("compileOpts still has a nodeAware field: node identity derives from " +
+			"opts.nodeID != nil (#17157)")
+	}
+	if _, ok := reflect.TypeOf(compileOpts{}).FieldByName("stampNodeID"); ok {
+		t.Error("compileOpts still has a stampNodeID field: node identity derives from " +
+			"opts.nodeID != nil (#17157)")
+	}
+	if _, ok := reflect.TypeOf(compileOpts{}).FieldByName("nodeID"); !ok {
+		t.Error("compileOpts has no nodeID field: compileTree must thread its *int " +
+			"selector through compileOpts.nodeID (#17157)")
 	}
 }
