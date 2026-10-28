@@ -120,7 +120,7 @@ func TestColdBootNeverSeenFloorSuppressesPromotion(t *testing.T) {
 // repeated fresh proof keeps the never-seen election hold in place.
 func TestColdBootNeverSeenSyncFreshSuppressesPromotion11566(t *testing.T) {
 	m := coldBootManager(t)
-	m.SetPeerNeverSeenSyncFreshFunc(func() bool { return true })
+	m.SetFakePeerSyncSourceForTesting(true, 100*time.Millisecond, true, true)
 	m.SetRGReady(0, true, nil)
 
 	r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
@@ -146,7 +146,7 @@ func TestColdBootNeverSeenSyncFreshSuppressesPromotion11566(t *testing.T) {
 // retain its existing eventual single-node promotion behavior.
 func TestColdBootNeverSeenSilentSyncAllowsPromotion11566(t *testing.T) {
 	m := coldBootManager(t)
-	m.SetPeerNeverSeenSyncFreshFunc(func() bool { return false })
+	m.SetFakePeerSyncSourceForTesting(false, 0, false, false)
 	m.SetRGReady(0, true, nil)
 
 	r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)

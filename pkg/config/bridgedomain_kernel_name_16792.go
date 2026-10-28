@@ -53,34 +53,12 @@ func validateBridgeDomainKernelNameAST(tree *ConfigTree, compiledNode *int) erro
 
 func bridgeDomainNameUnionAST(tree *ConfigTree, compiledNode *int) map[string]struct{} {
 	names := make(map[string]struct{})
-	emitGenericExpandedBridgeDomainsAST(tree, names)
-	emitNodeExpandedBridgeDomainsAST(tree, 0, names)
-	emitNodeExpandedBridgeDomainsAST(tree, 1, names)
-	if compiledNode != nil && *compiledNode != 0 && *compiledNode != 1 {
-		emitNodeExpandedBridgeDomainsAST(tree, *compiledNode, names)
+	for _, view := range effectiveNodeViewsForNodes(tree, compiledNode, false, true) {
+		for _, bdNode := range view.FindChildren("bridge-domains") {
+			collectBridgeDomainNamesAST(bdNode, names)
+		}
 	}
 	return names
-}
-
-func emitGenericExpandedBridgeDomainsAST(tree *ConfigTree, names map[string]struct{}) {
-	clone := tree.Clone()
-	if _, err := clone.ExpandGroupsNodeFallback15031(false); err != nil {
-		return
-	}
-	for _, bdNode := range clone.FindChildren("bridge-domains") {
-		collectBridgeDomainNamesAST(bdNode, names)
-	}
-}
-
-func emitNodeExpandedBridgeDomainsAST(tree *ConfigTree, nodeID int, names map[string]struct{}) {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
-		return
-	}
-	for _, bdNode := range clone.FindChildren("bridge-domains") {
-		collectBridgeDomainNamesAST(bdNode, names)
-	}
 }
 
 func collectBridgeDomainNamesAST(bdNode *Node, names map[string]struct{}) {
