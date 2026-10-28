@@ -20,11 +20,18 @@ import (
 // Verdicts are read off the built rule list by FIRST-MATCH order over
 // canonical rules (verdict(1)=accept, verdict(0)=drop), matching the
 // probe: ingress ge-17192 (hex in canon), daddr ff02::5 exact or
-// ff02::/16 prefix, icmpv6 ND type set {85,86,87,88} hex. A rule with
-// no deciding match is skipped; "policy-accept" means no rule decided
-// and the chain policy (accept) admits — the unscoped kernel fail-open
-// userspace deliberately does not reproduce (see host_inbound_decide
-// in userspace-dp/.../forwarding/host_inbound.rs).
+// ff02::/16 prefix (masked cmp ff0200.. with ffff0000.. mask),
+// icmpv6 ND type set {85,86,87,88} hex carried by a set lookup at
+// payload(base=2,off=0,len=1) with l4proto guard 3a (ICMPv6).
+// Matching is protocol-aware: the probe is ICMPv6 type 135, so a rule
+// decides it only if the probe header can satisfy every predicate —
+// a service rule pinning another L4 protocol (l4proto 06/11, port
+// payload(base=2,off=2)) or a different transport type set can never
+// match it. A rule with no deciding match is skipped;
+// "policy-accept" means no rule decided and the chain policy
+// (accept) admits — the unscoped kernel fail-open userspace
+// deliberately does not reproduce (see host_inbound_decide in
+// userspace-dp/.../forwarding/host_inbound.rs).
 
 const kernelNDNetlinkIface17192 = "ge-17192"
 
@@ -40,10 +47,6 @@ var kernelNDCatalogV6Hex17192 = []string{
 // "policy-accept" for an ND probe (icmpv6 133-136) to dst on iface.
 func kernelNDNetlinkVerdict17192(p *nlPlan, iface, dst string) string {
 	ifaceHex := hex.EncodeToString([]byte(iface))
-	dstHex := ""
-	if ip := parseIPHex17192(dst); ip != "" {
-		dstHex = ip
-	}
 	isCatalog := dst == "ff02::5"
 	for _, exprs := range p.rules {
 		line := canonRule(p, exprs)
@@ -74,35 +77,43 @@ func kernelNDNetlinkVerdict17192(p *nlPlan, iface, dst string) string {
 			}
 			continue
 		}
-		// ND-type rules to ff02::/16 (masked prefix cmp) or exact dst.
-		isND := strings.Contains(line, "85,86,87,88") || strings.Contains(line, "[85,86,87,88]")
-		_ = dstHex
-		if isND && strings.Contains(line, "ff020000000000000000000000000000") {
+		// ND probe protocol: ICMPv6 (l4proto 3a) type in
+		// {85,86,87,88} hex = {133,134,135,136}. A rule carries the
+		// ND protocol only if it pins that type set at the transport
+		// header (in practice only when l4proto 3a is also pinned).
+		// Other icmpv6 type sets (e.g. MLD 82,83,84,8f) are not ND.
+		isNDType := strings.Contains(line, "payload(base=2,off=0") && (strings.Contains(line, "lookup(inv=false,set=[85,86,87,88])") || strings.Contains(line, "lookup(inv=false,set=[85,86,87,88,") || strings.Contains(line, ",85,86,87,88]") || strings.Contains(line, ",85,86,87,88,"))
+		isFF02Prefix := strings.Contains(line, "payload(base=1,off=24,len=16") && strings.Contains(line, "ff020000000000000000000000000000") && strings.Contains(line, "ffff0000000000000000000000000000")
+		if isNDType && isFF02Prefix {
 			return verdict
 		}
-		if isND && !strings.Contains(line, "payload(base=1,off=24") {
+		if isNDType && !strings.Contains(line, "payload(base=1,off=24") {
 			// Unscoped ND accept (no daddr payload at all).
 			if !strings.Contains(line, "meta(key=6") {
 				return verdict
 			}
 		}
-		// Non-unicast ff02::/16 drop decides ff02::1 when no ND rule did.
-		if dst == "ff02::1" && strings.Contains(line, "ff020000000000000000000000000000") && !isND {
+		// Non-unicast ff02::/16 rules decide ff02::1 only if they can
+		// match the ND probe header. Service rules pin a different
+		// L4 protocol (meta(key=16 cmp 06/11) and/or a transport port
+		// (payload(base=2,off=2)) and never match an ICMPv6/135
+		// probe; rules pinning a non-ND transport type set likewise
+		// skip. A bare ff02::/16 drop (and any-service accept) has
+		// no l4proto/transport pin beyond the address and decides.
+		if dst == "ff02::1" && isFF02Prefix {
+			if strings.Contains(line, "meta(key=16,reg=1) cmp(op=0,reg=1,06)") || strings.Contains(line, "meta(key=16,reg=1) cmp(op=0,reg=1,11)") || strings.Contains(line, "meta(key=16,reg=1) cmp(op=1,reg=1,06)") || strings.Contains(line, "meta(key=16,reg=1) cmp(op=1,reg=1,11)") {
+				continue
+			}
+			if strings.Contains(line, "payload(base=2,off=2") {
+				continue
+			}
+			if strings.Contains(line, "payload(base=2,off=0") && !isNDType {
+				continue
+			}
 			return verdict
 		}
 	}
 	return "policy-accept"
-}
-
-func parseIPHex17192(s string) string {
-	// ff02::5 / ff02::1 exact hex as canon Cmp prints them.
-	switch s {
-	case "ff02::5":
-		return "ff020000000000000000000000000005"
-	case "ff02::1":
-		return "ff020000000000000000000000000001"
-	}
-	return ""
 }
 
 func kernelNDNetlinkPlan17192(t *testing.T, v HostInboundZoneView) *nlPlan {
@@ -134,7 +145,7 @@ func TestKernelNDCatalogPostureNetlink17192(t *testing.T) {
 	}{
 		{"ssh-only scoped", scoped([]string{"ssh"}, nil, nil), "drop", "accept"},
 		{"ndp-positive scoped", scoped(nil, []string{"ndp"}, nil), "drop", "accept"},
-		{"ndp-except scoped", scoped([]string{"ssh"}, []string{"ospf"}, []string{"ndp"}), "drop", "accept"},
+		{"ndp-except scoped", scoped([]string{"ssh"}, []string{"ospf"}, []string{"ndp"}), "drop", "drop"},
 		{"any-service scoped", scoped([]string{"any-service"}, nil, nil), "accept", "accept"},
 	}
 	for _, tc := range cases {

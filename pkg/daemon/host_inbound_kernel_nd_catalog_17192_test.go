@@ -30,15 +30,15 @@ import (
 // ndp-except, and also for an ndp-token-only view (the ndp token opens
 // no catalog group; only its scoped ff02::/16 ND accept exists, behind
 // the drop). any-service emits a catalog ACCEPT ahead of its own drop,
-// so any-service scoped ND to ff02::5 is ADMITTED. ff02::1 is not in the
-// catalog set, so the catalog drop never matches it: the scoped
-// ff02::/16 ND accept admits it for every ND-retaining view (ssh-only,
-// ndp-positive, any-service); ndp-except denies its catalog ND too, but
-// for ff02::1 an except view with other tokens still admits ND via the
-// non-unicast guard's service matches (e.g. ssh tcp/22), so only the
-// catalog verdict is pinned for that row there. An except view whose
-// tokens match nothing on ff02::/16 would drop ff02::1 as well.
-// ff02::/16 drop in the non-unicast guard decides).
+// so any-service scoped ND to ff02::5 is ADMITTED. ff02::1 is not in
+// the catalog set, so the catalog drop never matches it. Matching is
+// protocol-aware: the probe is ICMPv6 type 135, so a line decides it
+// only if the probe header can satisfy every predicate on that line.
+// Retaining views admit ff02::1 via the scoped ff02::/16 ND accept,
+// which precedes the non-unicast guard. For ndp-except the view emits
+// no such ND accept, so the first decidable line is the non-unicast
+// guard's ff02::/16 drop: its earlier `tcp dport 22 accept` service
+// line cannot match an ICMPv6/135 probe, so ff02::1 is DROP there.
 //
 // Unscoped truth (the F1 correction): with no IngressNetdevs the kernel
 // emits NO catalog drop for the view at all. The destination-fallback
@@ -90,8 +90,28 @@ func kernelNDVerdict17192(payload, iface, dst string) string {
 		if strings.HasPrefix(line, "icmpv6 type { 133, 134, 135, 136 }") {
 			return verdict
 		}
-		// Non-unicast ff02::/16 drop / service lines decide ff02::1.
+		// Non-unicast ff02::/16 lines decide ff02::1 only if they can
+		// match the ND probe header. Service lines pin a different
+		// L4 protocol/port (e.g. `tcp dport 22`) and never match an
+		// ICMPv6/135 probe; icmpv6 lines outside 133-136 likewise
+		// skip. Bare ff02::/16 drops (and any-service accepts) carry
+		// no L4 pin and do decide.
 		if dst == "ff02::1" && strings.Contains(line, "ff02::/16") && !strings.Contains(line, "130, 131, 132, 143") {
+			if strings.Contains(line, "icmpv6") && !strings.Contains(line, "133, 134, 135, 136") {
+				continue
+			}
+			if strings.Contains(line, "icmp type") {
+				continue
+			}
+			if strings.Contains(line, " tcp ") || strings.Contains(line, " udp ") || strings.Contains(line, "meta l4proto") {
+				continue
+			}
+			if i := strings.Index(line, "ff02::/16"); i >= 0 {
+				rest := strings.TrimSpace(line[i+len("ff02::/16"):])
+				if rest != "accept" && rest != "drop" && !strings.HasPrefix(rest, "counter name") {
+					continue
+				}
+			}
 			return verdict
 		}
 	}
@@ -118,7 +138,7 @@ func TestKernelNDCatalogPosture17192(t *testing.T) {
 	}{
 		{"ssh-only scoped", kernelNDScopedView17192([]string{"ssh"}, nil, nil), "drop", "accept"},
 		{"ndp-positive scoped", kernelNDScopedView17192(nil, []string{"ndp"}, nil), "drop", "accept"},
-		{"ndp-except scoped", kernelNDScopedView17192([]string{"ssh"}, []string{"ospf"}, []string{"ndp"}), "drop", "accept"},
+		{"ndp-except scoped", kernelNDScopedView17192([]string{"ssh"}, []string{"ospf"}, []string{"ndp"}), "drop", "drop"},
 		{"any-service scoped", kernelNDScopedView17192([]string{"any-service"}, nil, nil), "accept", "accept"},
 	}
 	for _, tc := range cases {
