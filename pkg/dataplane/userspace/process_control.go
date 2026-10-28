@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -275,11 +276,26 @@ func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket stri
 					"helper rejected it before replying — check the helper log "+
 					"for a decode/handler error: %w", req.Type, decodeErr)
 		}
-		// #18293: bytes arrived but did not decode. Tag ONLY a status poll:
-		// the wedge detector keys on this class, and tagging other verbs
-		// would let their callers' errors.Is checks see a class meant for
-		// the poll. The message and cause are unchanged.
-		if req.Type == "status" {
+		// #18293: a read-deadline expiry is silence too, exactly like EOF.
+		// The helper accepted (or never even accepted — the canonical
+		// #9651 wedge shape) and stalled/never wrote, so the round-trip
+		// deadline fired. json.Decoder surfaces that as the raw net
+		// timeout, not EOF, so without this arm every silent helper
+		// would be minted as "answered but undecodable" below and the
+		// wedge detector would never kill it (fail-open). This check
+		// precedes any byte-count reasoning: even a partial prefix
+		// followed by a stall is silence, not a completed answer.
+		if isStatusReadTimeout(decodeErr) {
+			return ControlResponse{}, decodeErr
+		}
+		// #18293: mint decode ONLY when bytes were actually received and
+		// failed to decode. Tag ONLY a status poll: the wedge detector
+		// keys on this class, and tagging other verbs would let their
+		// callers' errors.Is checks see a class meant for the poll. The
+		// message and cause are unchanged. No bytes received and not a
+		// recognized silence shape above stays untagged (conservative:
+		// wedge-countable).
+		if req.Type == "status" && bounded.received > 0 {
 			return ControlResponse{}, &statusDecodeError{cause: decodeErr}
 		}
 		return ControlResponse{}, decodeErr
@@ -313,12 +329,25 @@ var (
 	errStatusDecode = errors.New("userspace status response decode failed")
 )
 
+// isStatusReadTimeout reports whether err is a read-deadline expiry
+// anywhere in its chain: a net.Error with Timeout() (the unix socket
+// surfaces "i/o timeout" this way) or os.ErrDeadlineExceeded. Such an
+// error is silence (#9651), never a decode failure (#18293).
+func isStatusReadTimeout(err error) bool {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
 // statusDecodeError carries a status-poll response-decode failure beside its
 // verbatim cause (the helperRejectedError convention: operator text is the
 // decoder's own message, classification rides Is/Unwrap). It proves the
 // helper answered, so the #9651 wedge detector must not count it as silence.
 // Only requestDetailedAtSocket mints it, and only for req.Type == "status"
-// past the EOF and response-cap arms; statusLoop re-mints the
+// past the EOF, read-timeout, and response-cap arms with bytes actually
+// received; statusLoop re-mints the
 // validateRequiredStatusReply failure in the same class.
 type statusDecodeError struct{ cause error }
 

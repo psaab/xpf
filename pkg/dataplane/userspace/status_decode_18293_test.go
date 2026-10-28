@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -155,5 +156,177 @@ func TestStatusLoopUndecodableAnswersNoKill18293(t *testing.T) {
 			t.Fatalf("decodeErrors = %d after 5s, want >= %d (loop not polling the undecodable helper?)", dec, helperWedgeFailedPolls+5)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// stallingStatusSocket18293 serves a unix socket whose per-connection
+// behavior is scripted by handler. The handler receives the accepted
+// conn after the request has been read; it decides what (if anything)
+// to write. Returning holds the conn open only via the handler itself;
+// handlers that stall block until the client deadline closes the conn.
+func stallingStatusSocket18293(t *testing.T, handler func(net.Conn)) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "x18293stall")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "c.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(30 * time.Second))
+				var req ControlRequest
+				if err := json.NewDecoder(c).Decode(&req); err != nil {
+					return
+				}
+				handler(c)
+			}(conn)
+		}
+	}()
+	return sock
+}
+
+// TestStatusStalledHelperIsSilence18293 is the Rev18296 blocker cell: a
+// helper that accepts and then never writes (or writes a partial prefix
+// and stalls) makes the status poll hit the read deadline. That is the
+// canonical #9651 wedge shape and MUST stay untagged silence — not
+// errStatusDecode — so statusLoop's wedge counter can advance and kill
+// it. Each poll here costs one controlBaseDeadline (3s); the assertion
+// is on classification and wedge-countability, not wall-clock speed.
+func TestStatusStalledHelperIsSilence18293(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler func(net.Conn)
+	}{
+		{"never_writes", func(c net.Conn) {
+			// Hold the conn open without writing; block until the
+			// client's deadline closes it (read returns an error).
+			buf := make([]byte, 1)
+			_, _ = c.Read(buf)
+		}},
+		{"one_byte_then_stalls", func(c net.Conn) {
+			_, _ = c.Write([]byte("{"))
+			buf := make([]byte, 1)
+			_, _ = c.Read(buf)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock := stallingStatusSocket18293(t, tc.handler)
+			m := New()
+			_, err := m.requestDetailedAtSocket(ControlRequest{Type: "status"}, sock)
+			if err == nil {
+				t.Fatal("stalled helper returned nil error")
+			}
+			if errors.Is(err, errStatusDecode) {
+				t.Fatalf("stalled helper = %v, misclassified as decode failure; a read timeout is silence and must stay wedge-countable", err)
+			}
+			if !isStatusReadTimeout(err) {
+				t.Fatalf("stalled helper error = %v (%T), want a read-timeout in the chain", err, err)
+			}
+			// Wedge-countable through the real counter: feeding this
+			// exact error advances failures and never the decode count.
+			before := StatusPollDecodeErrors()
+			m2 := &Manager{}
+			now := time.Now()
+			for i := range helperWedgeFailedPolls {
+				_ = m2.noteStatusPollResultLocked(err, now.Add(time.Duration(i)*time.Second))
+			}
+			if m2.liveness.failures != helperWedgeFailedPolls {
+				t.Fatalf("wedge failures = %d after %d stalled polls, want %d (timeout must advance the counter)", m2.liveness.failures, helperWedgeFailedPolls, helperWedgeFailedPolls)
+			}
+			if m2.liveness.decodeErrors != 0 || StatusPollDecodeErrors()-before != 0 {
+				t.Fatalf("stalled polls moved the decode counter: per-manager=%d global delta=%d, want 0", m2.liveness.decodeErrors, StatusPollDecodeErrors()-before)
+			}
+		})
+	}
+}
+
+// TestStatusLoopSilentDecodeSilentSequence18293 is the loop-level mixed
+// sequence: through the REAL statusLoop + real socket, silent (stall)
+// polls advance the wedge streak, an interleaved undecodable answer
+// neither advances nor resets it, and further silent polls keep
+// advancing it. Each silent poll pays the base control deadline, so
+// the test asserts streak STATE after a bounded number of ticks
+// rather than a kill. The kill itself is pinned at the counter level
+// by TestDecodeFailureNeitherAdvancesNorResetsSilence18293 and
+// TestSilentHelperStillKilledOnSchedule18293; here m.proc is the test
+// process, so reaching the kill threshold would SIGKILL the runner —
+// the sequence deliberately stays below it.
+func TestStatusLoopSilentDecodeSilentSequence18293(t *testing.T) {
+	// Script per connection: stall, stall, undecodable, stall.
+	// stall = write nothing and hold; undecodable = the drift payload.
+	var mu sync.Mutex
+	calls := 0
+	sock := stallingStatusSocket18293(t, func(c net.Conn) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 3 {
+			_, _ = c.Write([]byte(undecodableStatusPayload18293))
+			return
+		}
+		buf := make([]byte, 1)
+		_, _ = c.Read(buf) // stall until client deadline closes
+	})
+
+	old := statusLoopInterval
+	statusLoopInterval = 5 * time.Millisecond
+	t.Cleanup(func() { statusLoopInterval = old })
+
+	m := New()
+	m.cfg.ControlSocket = sock
+	proc, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.proc = &exec.Cmd{Process: proc}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.statusLoop(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	// Silent polls each take ~controlBaseDeadline; wait until the loop
+	// has consumed at least the 4 scripted connections (2 silent +
+	// 1 decode + 1 silent) and the streak reflects them: failures==3,
+	// decodeErrors==1, kills==0.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		m.mu.Lock()
+		failures := m.liveness.failures
+		dec := m.liveness.decodeErrors
+		kills := m.liveness.kills
+		m.mu.Unlock()
+		mu.Lock()
+		n := calls
+		mu.Unlock()
+		if n >= 4 && failures == 3 && dec == 1 {
+			if kills != 0 {
+				t.Fatalf("kills = %d, want 0", kills)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after 30s: calls=%d failures=%d decodeErrors=%d kills=%d, want calls>=4 failures=3 decodeErrors=1 kills=0 (silent->decode->silent through statusLoop)", n, failures, dec, kills)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

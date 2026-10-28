@@ -377,6 +377,11 @@ type limitedResponseReader struct {
 	// that ends EXACTLY at the cap is complete, and reporting it as truncated
 	// would be the same class of wrong diagnostic in the other direction.
 	truncated bool
+	// received counts bytes the underlying reader actually delivered.
+	// #18293 uses it to tell a decode failure on answered bytes from a
+	// read deadline that expired before any reply arrived: only the
+	// former is a decode failure.
+	received int64
 }
 
 func (l *limitedResponseReader) Read(p []byte) (int, error) {
@@ -396,6 +401,7 @@ func (l *limitedResponseReader) Read(p []byte) (int, error) {
 	}
 	n, err := l.r.Read(p)
 	l.remaining -= int64(n)
+	l.received += int64(n)
 	return n, err
 }
 
