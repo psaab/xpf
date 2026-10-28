@@ -103,47 +103,60 @@ func (m *Manager) releaseFailoverLocked(rgID int, owner uint64) {
 
 // failoverReservation is the single reserve/barrier/relock/commit protocol
 // shared by ManualFailover, ManualFailoverBatch and ForceSecondary (#17120).
-// It captures, under m.mu, the exact RG incarnation (pointer), failover
-// generation, active/disabled membership and owner token for every reserved
-// id. Pointer identity is the unified revalidation policy: a config
-// remove+re-add allocates a fresh RedundancyGroupState even when the numeric
-// id and the purged generation (0) coincide, so exists+gen alone would demote
-// an incarnation the barrier never ran for. Generation still catches a
-// ResetFailover on the same incarnation (#5246/#10004).
+// It captures, under m.mu, the exact RG incarnation (pointer) for every
+// reserved or snapshotted id, plus failover generation, active/disabled
+// membership and owner token for every RESERVED id (r.ids). ForceSecondary
+// snapshots disabled RGs (pointer+active only, in rgs/active) so membership
+// revalidation covers them without reserving them. Pointer identity is the
+// unified revalidation policy: a config remove+re-add allocates a fresh
+// RedundancyGroupState even when the numeric id and the purged generation
+// (0) coincide, so exists+gen alone would demote an incarnation the barrier
+// never ran for. Generation still catches a ResetFailover on the same
+// incarnation (#5246/#10004).
 type failoverReservation struct {
-	ids    []int
+	ids    []int // reserved ids (owner token + gen captured)
 	owners map[int]uint64
 	gens   map[int]uint64
-	rgs    map[int]*RedundancyGroupState
-	active map[int]bool // nil for manual failover (no membership check)
+	rgs    map[int]*RedundancyGroupState // reserved + snapshot-only ids
+	active map[int]bool                  // nil for manual failover (no membership check)
 }
 
-// reserveLocked reserves every id. Caller must hold m.mu. supersedeExisting
+// reserveLocked reserves every id in reserveIDs (owner token + generation
+// capture; these block concurrent manual failover and carry the #10004
+// supersede gen-bump). When snapshotIDs is non-nil (ForceSecondary) the
+// reservation additionally snapshots pointer+active for those ids WITHOUT
+// reserving them, so membership revalidation covers disabled RGs that the
+// parent never blocked. Caller must hold m.mu. supersedeExisting
 // (ForceSecondary/#10004) bumps the generation of an already-reserved RG
 // before taking it over, so an older in-flight abort cannot restore over the
 // new commit; manual failover instead rejects an existing reservation.
-func (m *Manager) reserveLocked(ids []int, checkActive, supersedeExisting bool) (*failoverReservation, error) {
-	for _, rgID := range ids {
+func (m *Manager) reserveLocked(reserveIDs, snapshotIDs []int, checkActive, supersedeExisting bool) (*failoverReservation, error) {
+	for _, rgID := range reserveIDs {
 		if _, ok := m.groups[rgID]; !ok {
 			return nil, fmt.Errorf("redundancy group %d not found", rgID)
 		}
 		if !supersedeExisting && m.failoverInProgress[rgID] != 0 {
-			if len(ids) == 1 {
+			if len(reserveIDs) == 1 {
 				return nil, fmt.Errorf("failover already in progress for redundancy group %d, please wait", rgID)
 			}
-			return nil, fmt.Errorf("failover already in progress for redundancy groups %v, please wait", ids)
+			return nil, fmt.Errorf("failover already in progress for redundancy groups %v, please wait", reserveIDs)
+		}
+	}
+	for _, rgID := range snapshotIDs {
+		if _, ok := m.groups[rgID]; !ok {
+			return nil, fmt.Errorf("redundancy group %d not found", rgID)
 		}
 	}
 	r := &failoverReservation{
-		ids:    append([]int(nil), ids...),
-		owners: make(map[int]uint64, len(ids)),
-		gens:   make(map[int]uint64, len(ids)),
-		rgs:    make(map[int]*RedundancyGroupState, len(ids)),
+		ids:    append([]int(nil), reserveIDs...),
+		owners: make(map[int]uint64, len(reserveIDs)),
+		gens:   make(map[int]uint64, len(reserveIDs)),
+		rgs:    make(map[int]*RedundancyGroupState, len(reserveIDs)+len(snapshotIDs)),
 	}
 	if checkActive {
-		r.active = make(map[int]bool, len(ids))
+		r.active = make(map[int]bool, len(reserveIDs)+len(snapshotIDs))
 	}
-	for _, rgID := range ids {
+	for _, rgID := range reserveIDs {
 		if supersedeExisting && m.failoverInProgress[rgID] != 0 {
 			m.failoverGen[rgID]++
 		}
@@ -151,6 +164,16 @@ func (m *Manager) reserveLocked(ids []int, checkActive, supersedeExisting bool) 
 		m.failoverInProgress[rgID] = owner
 		r.owners[rgID] = owner
 		r.gens[rgID] = m.failoverGen[rgID]
+		rg := m.groups[rgID]
+		r.rgs[rgID] = rg
+		if checkActive {
+			r.active[rgID] = rg.State != StateDisabled
+		}
+	}
+	// Snapshot-only ids (ForceSecondary disabled RGs): capture pointer+active
+	// for revalidation without reserving or gen-bumping — a manual failover
+	// on a disabled RG during the barrier stays admissible, as on parent.
+	for _, rgID := range snapshotIDs {
 		rg := m.groups[rgID]
 		r.rgs[rgID] = rg
 		if checkActive {
@@ -199,11 +222,22 @@ func (m *Manager) runPreHook(ids []int, logName string) error {
 				if sleep > remaining {
 					sleep = remaining
 				}
-				slog.Info("cluster: waiting to admit "+logName,
-					"rg", rgID,
-					"attempt", attempts,
-					"remaining", remaining.String(),
-					"err", err)
+				// Batch retry carries the full member set ("rgs") as on
+				// parent; single/ForceSecondary keep the per-RG form.
+				if logName == "manual failover batch" {
+					slog.Info("cluster: waiting to admit "+logName,
+						"rgs", ids,
+						"rg", rgID,
+						"attempt", attempts,
+						"remaining", remaining.String(),
+						"err", err)
+				} else {
+					slog.Info("cluster: waiting to admit "+logName,
+						"rg", rgID,
+						"attempt", attempts,
+						"remaining", remaining.String(),
+						"err", err)
+				}
 				time.Sleep(sleep)
 				continue
 			}
@@ -241,10 +275,32 @@ func (m *Manager) revalidateLocked(r *failoverReservation) (missing []int, super
 			superseded = append(superseded, rgID)
 		}
 	}
-	if r.active != nil && len(m.groups) != len(r.rgs) {
-		// ForceSecondary reserved every configured RG; a count change means
-		// membership changed even if every reserved id still matches.
-		if len(missing) == 0 {
+	if r.active != nil {
+		// ForceSecondary snapshot-only ids (disabled at capture): pointer or
+		// active change is a membership change, but they were never reserved
+		// so no generation check applies.
+		for rgID, snap := range r.rgs {
+			if _, reserved := r.owners[rgID]; reserved {
+				continue
+			}
+			rg, ok := m.groups[rgID]
+			if !ok {
+				missing = append(missing, rgID)
+				continue
+			}
+			if rg != snap {
+				if !changedSet {
+					changed, changedSet = rgID, true
+				}
+				continue
+			}
+			if (rg.State != StateDisabled) != r.active[rgID] {
+				missing = append(missing, rgID)
+			}
+		}
+		// A count change means membership changed even if every captured
+		// id still matches.
+		if len(m.groups) != len(r.rgs) && len(missing) == 0 {
 			missing = append(missing, -1)
 		}
 	}
@@ -253,7 +309,7 @@ func (m *Manager) revalidateLocked(r *failoverReservation) (missing []int, super
 
 func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 	m.mu.Lock()
-	resv, rerr := m.reserveLocked([]int{rgID}, false, false)
+	resv, rerr := m.reserveLocked([]int{rgID}, nil, false, false)
 	if rerr != nil {
 		m.mu.Unlock()
 		return FailoverApplied, rerr
@@ -329,24 +385,29 @@ func (m *Manager) ForceSecondary() error {
 		m.mu.Unlock()
 		return fmt.Errorf("peer not alive — cannot force secondary without active peer")
 	}
-	// Reserve EVERY configured RG (including disabled) so membership/active
-	// revalidation covers the whole snapshot; the barrier runs only for active.
+	// Snapshot EVERY configured RG (including disabled) so membership/active
+	// revalidation covers the whole config, but RESERVE only active RGs —
+	// matching parent: disabled RGs are never demoted, so they must not block
+	// a concurrent manual failover nor take the #10004 supersede gen-bump.
 	allIDs := make([]int, 0, len(m.groups))
 	for rgID := range m.groups {
 		allIDs = append(allIDs, rgID)
 	}
 	sort.Ints(allIDs)
-	resv, rerr := m.reserveLocked(allIDs, true, true)
+	var activeIDs, disabledIDs []int
+	for _, rgID := range allIDs {
+		if m.groups[rgID].State != StateDisabled {
+			activeIDs = append(activeIDs, rgID)
+		} else {
+			disabledIDs = append(disabledIDs, rgID)
+		}
+	}
+	resv, rerr := m.reserveLocked(activeIDs, disabledIDs, true, true)
 	if rerr != nil {
 		m.mu.Unlock()
 		return rerr
 	}
-	ids := make([]int, 0, len(allIDs))
-	for _, rgID := range allIDs {
-		if resv.active[rgID] {
-			ids = append(ids, rgID)
-		}
-	}
+	ids := activeIDs
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -1032,7 +1093,7 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	}
 
 	m.mu.Lock()
-	resv, rerr := m.reserveLocked(ids, false, false)
+	resv, rerr := m.reserveLocked(ids, nil, false, false)
 	if rerr != nil {
 		m.mu.Unlock()
 		return res, rerr

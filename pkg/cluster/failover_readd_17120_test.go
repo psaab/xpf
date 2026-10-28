@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // #17120 probe-02: remove+re-add during the unlocked pre-hook window.
@@ -122,4 +123,58 @@ func TestForceSecondaryReaddDuringBarrierAborts17120(t *testing.T) {
 	}
 	assertFreshNotDemoted17120(t, m, 0, fresh0)
 	assertFreshNotDemoted17120(t, m, 1, fresh1)
+}
+
+// F1 (Rev18154Opus): a disabled RG must NOT be reserved by ForceSecondary.
+// During its barrier a manual failover on the disabled RG must be admitted
+// (not rejected "already in progress"), and ForceSecondary itself must still
+// succeed and leave the disabled RG untouched.
+func TestDisabledRGManualFailoverDuringForceSecondaryBarrier17120(t *testing.T) {
+	m := readdFixture17120(t)
+	m.mu.Lock()
+	m.groups[1].State = StateDisabled
+	m.mu.Unlock()
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	m.SetPreManualFailoverHook(func(rgID int) error {
+		if rgID == 0 {
+			close(entered)
+			<-release
+		}
+		return nil
+	})
+	done := make(chan error, 1)
+	go func() { done <- m.ForceSecondary() }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("ForceSecondary did not reach barrier")
+	}
+	// Barrier is open for active RG0; disabled RG1 must not be reserved.
+	if _, err := m.ManualFailover(1); err != nil {
+		close(release)
+		<-done
+		t.Fatalf("manual failover on disabled RG during ForceSecondary barrier: %v (want admitted, not reserved)", err)
+	}
+	close(release)
+	// The admitted manual failover flipped RG1 disabled->SecondaryHold, an
+	// active/membership change during the barrier, so ForceSecondary aborts
+	// without demotion (same gate as parent) — disclosed, not "already in
+	// progress" on the disabled RG.
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "membership changed") {
+		t.Fatalf("ForceSecondary err=%v, want membership changed abort", err)
+	}
+	m.mu.RLock()
+	if m.groups[1].forcedSecondary {
+		t.Error("disabled RG must not be pinned forcedSecondary")
+	}
+	if !m.groups[1].ManualFailover {
+		t.Error("manual failover on disabled RG should have applied")
+	}
+	if m.groups[0].ManualFailover {
+		t.Error("ForceSecondary abort must leave RG0 undemoted")
+	}
+	m.mu.RUnlock()
 }
