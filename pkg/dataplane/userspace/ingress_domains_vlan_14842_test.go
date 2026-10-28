@@ -68,6 +68,10 @@ func TestBuildUserspaceIngressDomainEntriesConflictingVIDPoisoned14842(t *testin
 	}
 }
 
+// Native-VLAN units own their parent's untagged arrivals (maps_sync.go:220-232),
+// even when they are not valid VID-0 owners. #18322 only adds the distinct
+// {parent, 0} priority-tagged alias; negative cases pin it absent while keeping
+// the pre-existing {parent, 0xffff} untagged row present.
 func TestBuildUserspaceIngressDomainEntriesNativeVLANOwnsUntagged14842(t *testing.T) {
 	cases := []struct {
 		name                string
@@ -94,7 +98,9 @@ func TestBuildUserspaceIngressDomainEntriesNativeVLANOwnsUntagged14842(t *testin
 				{Name: "ge-0/0/1.100", LinuxName: "ge-0-0-1.100", ParentLinuxName: "ge-0-0-1", Ifindex: 11, ParentIfindex: 10, VLANID: 100, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
 				{Name: "ge-0/0/1.200", LinuxName: "ge-0-0-1.200", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 12, ParentIfindex: 10, VLANID: 200, IsUnit: true, RoutingDomain: ingressDomain14842VID80},
 			}},
-			noVID0Aliases: []uint32{10},
+			checkUntaggedDomain: true,
+			wantUntaggedDomain:  ingressDomain14842VID50,
+			noVID0Aliases:       []uint32{10},
 		},
 		{
 			name: "ambiguous native units have no VID0 alias",
@@ -103,7 +109,9 @@ func TestBuildUserspaceIngressDomainEntriesNativeVLANOwnsUntagged14842(t *testin
 				{Name: "ge-0/0/1.100a", LinuxName: "ge-0-0-1.100a", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 11, ParentIfindex: 10, VLANID: 100, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
 				{Name: "ge-0/0/1.100b", LinuxName: "ge-0-0-1.100b", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 12, ParentIfindex: 10, VLANID: 100, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
 			}},
-			noVID0Aliases: []uint32{10},
+			checkUntaggedDomain: true,
+			wantUntaggedDomain:  ingressDomain14842VID50,
+			noVID0Aliases:       []uint32{10},
 		},
 	}
 	for _, tc := range cases {
@@ -111,8 +119,8 @@ func TestBuildUserspaceIngressDomainEntriesNativeVLANOwnsUntagged14842(t *testin
 			entries := buildUserspaceIngressDomainEntries(tc.snapshot)
 			if tc.checkUntaggedDomain {
 				key := userspaceIngressDomainKey{Ifindex: 10, VLANID: userspaceIngressDomainUntaggedVLANID}
-				if got := entries[key]; got != tc.wantUntaggedDomain {
-					t.Fatalf("native-VLAN untagged entry = %d, want the native unit's domain %d (entries: %v)", got, tc.wantUntaggedDomain, entries)
+				if got, ok := entries[key]; !ok || got != tc.wantUntaggedDomain {
+					t.Fatalf("native-VLAN untagged entry {10, 0xffff} = (%d, %v), want present with the native unit's domain %d (entries: %v)", got, ok, tc.wantUntaggedDomain, entries)
 				}
 			}
 			for _, ifindex := range tc.noVID0Aliases {
