@@ -15,7 +15,7 @@
 // clusterRuntime package-private (lower-case 'r') prevents accidental
 // upward dependence and
 // matches the pattern used by pkg/cli/runtime.go (#1517) and
-// pkg/api / pkg/conntrack / pkg/fwdstatus / pkg/monitoriface earlier
+// pkg/api / pkg/fwdstatus / pkg/monitoriface earlier
 // in the #1451 migration sequence.
 package cluster
 

@@ -141,14 +141,31 @@ func TestCompoundFamilyLookupIsNotTwoLevel8797(t *testing.T) {
 // refuse. A compiler that takes any family's `mode` as the inet6 mode would give
 // two nodes different IPv6 forwarding behaviour from the same payload.
 func TestOnlyTheInet6FamilySetsTheInet6Mode8797(t *testing.T) {
+	// inet6 sets it (strict seam, unchanged).
+	{
+		node := &Node{Keys: []string{"forwarding-options"}, Children: []*Node{
+			{Keys: []string{"family", "inet6"}, Children: []*Node{
+				{Keys: []string{"mode", "packet-based"}, IsLeaf: true},
+			}},
+		}}
+		fo := &ForwardingOptionsConfig{}
+		if err := compileForwardingOptions(node, fo); err != nil {
+			t.Fatalf("inet6 sets it: compile: %v", err)
+		}
+		if fo.FamilyInet6Mode != "packet-based" {
+			t.Errorf("inet6 sets it: FamilyInet6Mode = %q, want %q (#8797)", fo.FamilyInet6Mode, "packet-based")
+		}
+	}
+	// #17196: a different family must NOT set the inet6 mode. Strict now
+	// rejects the unknown family outright (it is undeclared under
+	// `forwarding-options family`); the lenient seam pins the original
+	// #8797 invariant — the mode is not taken — without the rejection.
 	for _, tc := range []struct {
 		name   string
 		family []string
-		want   string
 	}{
-		{"inet6 sets it", []string{"family", "inet6"}, "packet-based"},
-		{"inet must NOT set it", []string{"family", "inet"}, ""},
-		{"an unmodelled family must NOT set it", []string{"family", "mpls"}, ""},
+		{"inet must NOT set it", []string{"family", "inet"}},
+		{"an unmodelled family must NOT set it", []string{"family", "mpls"}},
 	} {
 		node := &Node{Keys: []string{"forwarding-options"}, Children: []*Node{
 			{Keys: tc.family, Children: []*Node{
@@ -156,12 +173,21 @@ func TestOnlyTheInet6FamilySetsTheInet6Mode8797(t *testing.T) {
 			}},
 		}}
 		fo := &ForwardingOptionsConfig{}
-		if err := compileForwardingOptions(node, fo); err != nil {
-			t.Fatalf("%s: compile: %v", tc.name, err)
+		if err := compileForwardingOptions(node, fo); err == nil {
+			t.Errorf("%s: strict compile accepted an undeclared forwarding-options family, want rejection (#17196)", tc.name)
 		}
-		if fo.FamilyInet6Mode != tc.want {
+		if fo.FamilyInet6Mode != "" {
 			t.Errorf("%s: FamilyInet6Mode = %q, want %q -- a `mode` under a DIFFERENT address family "+
-				"is being taken as the IPv6 forwarding mode (#8797)", tc.name, fo.FamilyInet6Mode, tc.want)
+				"is being taken as the IPv6 forwarding mode (#8797)", tc.name, fo.FamilyInet6Mode, "")
+		}
+		foLenient := &ForwardingOptionsConfig{}
+		var warnings []string
+		opts := lenientCompileOpts()
+		if err := compileForwardingOptionsWithOpts(node, foLenient, opts, &warnings); err != nil {
+			t.Fatalf("%s lenient: %v", tc.name, err)
+		}
+		if foLenient.FamilyInet6Mode != "" {
+			t.Errorf("%s lenient: FamilyInet6Mode = %q, want %q (#8797)", tc.name, foLenient.FamilyInet6Mode, "")
 		}
 	}
 	// The same, one level down, so the split shape is covered by the filter too.
@@ -170,11 +196,21 @@ func TestOnlyTheInet6FamilySetsTheInet6Mode8797(t *testing.T) {
 			{Keys: []string{"inet"}, Children: []*Node{{Keys: []string{"mode", "packet-based"}, IsLeaf: true}}},
 		}},
 	}}
+	// Strict rejects the undeclared split family (#17196); lenient pins
+	// the #8797 invariant that its mode is not taken as the inet6 mode.
 	fo := &ForwardingOptionsConfig{}
-	if err := compileForwardingOptions(split, fo); err != nil {
-		t.Fatalf("split: %v", err)
+	if err := compileForwardingOptions(split, fo); err == nil {
+		t.Error("split shape: strict accepted undeclared family inet, want rejection (#17196)")
 	}
 	if fo.FamilyInet6Mode != "" {
 		t.Errorf("split shape: an `inet` mode set FamilyInet6Mode = %q (#8797)", fo.FamilyInet6Mode)
+	}
+	foSplitLenient := &ForwardingOptionsConfig{}
+	var splitWarnings []string
+	if err := compileForwardingOptionsWithOpts(split, foSplitLenient, lenientCompileOpts(), &splitWarnings); err != nil {
+		t.Fatalf("split lenient: %v", err)
+	}
+	if foSplitLenient.FamilyInet6Mode != "" {
+		t.Errorf("split lenient: an `inet` mode set FamilyInet6Mode = %q (#8797)", foSplitLenient.FamilyInet6Mode)
 	}
 }

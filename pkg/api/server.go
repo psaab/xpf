@@ -26,7 +26,6 @@ import (
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/ddns"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcpserver"
@@ -252,7 +251,6 @@ type Config struct {
 	DP             apiRuntimeDataPlane
 	FwdSampler     *fwdstatus.Sampler
 	EventBuf       *logging.EventBuffer
-	GC             *conntrack.GC
 	Routing        *routing.Manager
 	FRR            *frr.Manager
 	IPsec          *ipsec.Manager
@@ -790,7 +788,6 @@ type Server struct {
 	dp             apiRuntimeDataPlane
 	fwdSampler     *fwdstatus.Sampler
 	eventBuf       *logging.EventBuffer
-	gc             *conntrack.GC
 	routing        *routing.Manager
 	frr            *frr.Manager
 	ipsec          *ipsec.Manager
@@ -933,7 +930,6 @@ func NewServer(cfg Config) *Server {
 		dp:                                   cfg.DP,
 		fwdSampler:                           cfg.FwdSampler,
 		eventBuf:                             cfg.EventBuf,
-		gc:                                   cfg.GC,
 		routing:                              cfg.Routing,
 		frr:                                  cfg.FRR,
 		ipsec:                                cfg.IPsec,
