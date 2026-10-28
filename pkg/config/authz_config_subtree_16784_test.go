@@ -454,3 +454,194 @@ security {
 		t.Errorf("unchanged commit refused: %v", err)
 	}
 }
+
+func TestCanonicalCommitQuoteFlipIsNoop17830(t *testing.T) {
+	deny := cfg16784(t, "", "^security policies policy guard match source-address")
+	allowOther := cfg16784(t, "^security policies policy other", "")
+	makePolicy := func(name, keyword, action string) *ConfigTree {
+		return parseHierText(t, `security { policies { policy `+name+` {
+			match { `+keyword+` any; }
+			then { `+action+`; }
+		} } }`)
+	}
+	for _, tc := range []struct {
+		name   string
+		cfg    *Config
+		policy string
+		action string
+	}{
+		{name: "deny", cfg: deny, policy: "guard", action: "deny"},
+		{name: "allow-other", cfg: allowOther, policy: "other", action: "permit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plain := makePolicy(tc.policy, "source-address", tc.action)
+			quoted := makePolicy(tc.policy, `"source-address"`, tc.action)
+			if !strings.Contains(quoted.FormatSet(), `match "source-address" any`) {
+				t.Fatalf("premise broken: quoted keyword disappeared from display-set output:\n%s", quoted.FormatSet())
+			}
+			for _, direction := range []struct {
+				name              string
+				active, candidate *ConfigTree
+			}{
+				{name: "plain-to-quoted", active: plain, candidate: quoted},
+				{name: "quoted-to-plain", active: quoted, candidate: plain},
+			} {
+				t.Run(direction.name, func(t *testing.T) {
+					if err := AuthorizeExpandedCandidate(tc.cfg, "limited", direction.candidate, direction.active); err != nil {
+						t.Fatalf("quote-only re-set changed canonical config but commit was refused: %v", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestCanonicalCommitRemovalStillPricesDeniedPaths17830(t *testing.T) {
+	cfg := cfg16784(t, "", "^security policies policy guard")
+
+	removedGuard := parseHierText(t, `
+security {
+    policies {
+        policy other {
+            then { permit; }
+        }
+    }
+}
+`)
+	if err := AuthorizeExpandedCandidate(cfg, "limited", removedGuard, candidate16784(t)); err == nil {
+		t.Fatal("commit removing a denied path was allowed (#16784)")
+	}
+
+	annotationActive := parseHierText(t, `
+security {
+    policies {
+        /* old annotation */
+        policy guard {
+            then { deny; }
+        }
+    }
+}
+`)
+	annotationChanged := parseHierText(t, `
+security {
+    policies {
+        /* new annotation */
+        policy guard {
+            then { deny; }
+        }
+    }
+}
+`)
+	annotationDeleted := parseHierText(t, `
+security {
+    policies {
+        policy guard {
+            then { deny; }
+        }
+    }
+}
+`)
+	for _, tc := range []struct {
+		name      string
+		candidate *ConfigTree
+	}{
+		{name: "annotation-change", candidate: annotationChanged},
+		{name: "annotation-delete", candidate: annotationDeleted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := AuthorizeExpandedCandidate(cfg, "limited", tc.candidate, annotationActive); err == nil {
+				t.Fatalf("commit changing/removing a denied-path annotation was allowed (#17830)")
+			}
+		})
+	}
+
+	deactivateActive := parseHierText(t, `
+security {
+    policies {
+        inactive: policy guard;
+    }
+}
+`)
+	deactivateRemoved := parseHierText(t, `
+security {
+    policies {
+        policy guard;
+    }
+}
+`)
+	if out := deactivateActive.FormatSet(); !strings.Contains(out, "set security policies policy guard\n") ||
+		!strings.Contains(out, "deactivate security policies policy guard\n") {
+		t.Fatalf("premise broken: deactivate fixture does not render both set and deactivate lines:\n%s", out)
+	}
+	if err := AuthorizeExpandedCandidate(cfg, "limited", deactivateRemoved, deactivateActive); err == nil {
+		t.Fatal("commit removing a denied-path deactivate marker was allowed (#17830)")
+	}
+}
+
+func TestCanonicalCommitBracketedContainerFlipIsNoop17830(t *testing.T) {
+	cfg := cfg16784(t, "", "^security zones security-zone trust")
+	active := parseHierText(t, `
+security {
+    zones {
+        security-zone [ trust mgmt ] {
+            interfaces [ ge-0/0/0 ge-0/0/1 ];
+        }
+    }
+}
+`)
+	candidate := active.Clone()
+	var clearBracketProvenance func([]*Node)
+	clearBracketProvenance = func(nodes []*Node) {
+		for _, node := range nodes {
+			node.KeysBracketed = nil
+			clearBracketProvenance(node.Children)
+		}
+	}
+	clearBracketProvenance(candidate.Children)
+	if !strings.Contains(active.FormatSet(), "[ trust mgmt ]") ||
+		strings.Contains(candidate.FormatSet(), "[ trust mgmt ]") {
+		t.Fatalf("premise broken: expected only the active display-set to carry bracket provenance:\nactive:\n%s\ncandidate:\n%s",
+			active.FormatSet(), candidate.FormatSet())
+	}
+	if err := AuthorizeExpandedCandidate(cfg, "limited", candidate, active); err != nil {
+		t.Fatalf("bracket-only re-set changed canonical config but commit was refused: %v", err)
+	}
+}
+
+func TestCanonicalExpandedAdditionQuoteFlipIsNoop17830(t *testing.T) {
+	cfg := cfg16784(t, "", "^security policies policy guard match source-address")
+	makeGroupedPolicy := func(keyword string) *ConfigTree {
+		return parseHierText(t, `groups {
+    G {
+        security {
+            policies {
+                policy guard {
+                    match { `+keyword+` any; }
+                    then { deny; }
+                }
+            }
+        }
+    }
+}
+apply-groups G;
+`)
+	}
+	active := makeGroupedPolicy("source-address")
+	candidate := makeGroupedPolicy(`"source-address"`)
+	activeLines, err := ExpandedMutationLines(active)
+	if err != nil {
+		t.Fatalf("expand active: %v", err)
+	}
+	candidateLines, err := ExpandedMutationLines(candidate)
+	if err != nil {
+		t.Fatalf("expand candidate: %v", err)
+	}
+	if !strings.Contains(strings.Join(activeLines, "\n"), "match source-address any") ||
+		!strings.Contains(strings.Join(candidateLines, "\n"), `match "source-address" any`) {
+		t.Fatalf("premise broken: group expansion did not preserve the quote-only display change:\nactive=%q\ncandidate=%q",
+			activeLines, candidateLines)
+	}
+	if err := authorizeExpandedTree14981(cfg, "limited", candidate, active); err != nil {
+		t.Fatalf("expanded addition leg treated a quote-only re-set as a new denied mutation: %v", err)
+	}
+}
