@@ -212,7 +212,7 @@ func SendGratuitousARPBurstGated(iface string, ip net.IP, count int, stillValid 
 }
 
 // runARPBurstFollowups sends the (count-1) follow-up GARP pairs at 50ms
-// intervals, then closes fd. Extracted from SendGratuitousARPBurst so the
+// intervals, then closes fd. Extracted from SendGratuitousARPBurstGated so the
 // follow-up error handling is unit-testable via the burstSend seam without a
 // raw socket. Each failed frame bumps burstSendErrors and is logged at Debug
 // (per-iteration logging at higher levels would flood — CLAUDE.md); a single
@@ -532,6 +532,9 @@ func SendProxyGratuitousIPv6BurstGated(iface string, targetIP net.IP, count int,
 }
 
 func sendUnsolicitedIPv6NABurstGated(iface string, ifi *net.Interface, target net.IP, pkt []byte, count int, stillValid BurstStillValid) error {
+	if stillValid == nil {
+		return fmt.Errorf("cluster: IPv6 NA burst on %s requires a non-nil BurstStillValid predicate (#17158)", iface)
+	}
 	fd, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_IPV6)))
 	if err != nil {
 		return fmt.Errorf("raw socket: %w", err)
