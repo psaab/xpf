@@ -145,11 +145,13 @@ func TestDeterministicOverlappingPoolForwardReverse14623(t *testing.T) {
 	}
 }
 
-// Control: mode 2 mirrors Rust NAT64 parse_pool_v4, which pushes each parsed
-// host verbatim (no seen-set). Deduping there would diverge from the NAT64
-// dataplane's pool indexing and its pool-bounded host_count, so expandPoolV4
-// must leave mode-2 membership untouched.
-func TestDeterministicNAT64PoolExpansionDoesNotDedupe14623(t *testing.T) {
+// Mode 2 mirrors Rust NAT64 parse_pool_v4 AS CALLED BY parse_nat64_rule
+// (userspace-dp/src/nat64/state.rs, #14624), which keeps only the first
+// occurrence of each address. Deduping there matches the NAT64 dataplane's
+// pool indexing and its pool-bounded host_count, so expandPoolV4 must
+// dedupe mode-2 membership the same way. (The pre-#14624 verbatim-append
+// claim this control originally pinned was itself a divergence.)
+func TestDeterministicNAT64PoolExpansionDedupes14624(t *testing.T) {
 	pool := &config.NATPool{
 		Name:      "p",
 		Addresses: []string{"203.0.113.1", "203.0.113.1/32"},
@@ -158,7 +160,7 @@ func TestDeterministicNAT64PoolExpansionDoesNotDedupe14623(t *testing.T) {
 	if lerr != nil {
 		t.Fatalf("expandPoolV4 mode2: %v", lerr)
 	}
-	if len(got) != 2 || got[0].String() != "203.0.113.1" || got[1].String() != "203.0.113.1" {
-		t.Fatalf("expandPoolV4 mode2 = %v, want verbatim [203.0.113.1 203.0.113.1] (parse_pool_v4)", got)
+	if len(got) != 1 || got[0].String() != "203.0.113.1" {
+		t.Fatalf("expandPoolV4 mode2 = %v, want deduped [203.0.113.1] (parse_nat64_rule #14624)", got)
 	}
 }

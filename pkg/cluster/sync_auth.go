@@ -546,7 +546,7 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 	// INCOMPATIBILITY, not an oversight: this is a flag day. A pre-#7163 peer
 	// sends the old HELLO, which is not a valid Noise msg1, so the handshake
 	// fails and the connection drops. SessionSyncWireVersion is bumped so
-	// GateMixedBaseSwap refuses the mixed-base swap up front rather than
+	// the mixed-base gate (GateProtocolCompat, via _gate_mixed_base) refuses the mixed-base swap up front rather than
 	// letting an operator discover it as a fabric that will not come up.
 	//
 	// #14703: the initiator seals under its SIGNING key (authKey) alone —
