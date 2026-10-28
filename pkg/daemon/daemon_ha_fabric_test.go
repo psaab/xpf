@@ -55,7 +55,7 @@ func TestRetainFabricFwdOnNeighborMissWithCachedSecondaryEntry(t *testing.T) {
 // fails — the dual-fabric event is dropped.
 func TestTriggerFabricRefreshWakesBothFabrics(t *testing.T) {
 	d := &Daemon{
-		fabricSlots: [2]fabricSlot{{refreshCh: make(chan struct{}, 1)}, {refreshCh: make(chan struct{}, 1)}},
+		fabricSlots: [2]fabricSlot{{name: "fabric", refreshCh: make(chan struct{}, 1)}, {name: "fabric1", refreshCh: make(chan struct{}, 1)}},
 	}
 
 	d.triggerFabricRefresh()
@@ -77,7 +77,7 @@ func TestTriggerFabricRefreshWakesBothFabrics(t *testing.T) {
 // signal per channel (capacity 1) and never blocks the caller.
 func TestTriggerFabricRefreshCoalesces(t *testing.T) {
 	d := &Daemon{
-		fabricSlots: [2]fabricSlot{{refreshCh: make(chan struct{}, 1)}, {refreshCh: make(chan struct{}, 1)}},
+		fabricSlots: [2]fabricSlot{{name: "fabric", refreshCh: make(chan struct{}, 1)}, {name: "fabric1", refreshCh: make(chan struct{}, 1)}},
 	}
 
 	d.triggerFabricRefresh()
@@ -97,7 +97,7 @@ func TestTriggerFabricRefreshCoalesces(t *testing.T) {
 // caller must not block or panic.
 func TestTriggerFabricRefreshSingleFabricNoPanic(t *testing.T) {
 	d := &Daemon{
-		fabricSlots: [2]fabricSlot{{refreshCh: make(chan struct{}, 1)}, {}},
+		fabricSlots: [2]fabricSlot{{name: "fabric", refreshCh: make(chan struct{}, 1)}, {name: "fabric1"}},
 		// Slot 1 refreshCh intentionally left nil (single-fabric cluster).
 	}
 

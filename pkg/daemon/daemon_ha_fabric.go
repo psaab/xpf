@@ -343,10 +343,11 @@ func (d *Daemon) resolveFabricParent(fabName string) string {
 //
 // Locking: every field is guarded by Daemon.fabricMu EXCEPT refreshCh,
 // which is guarded by Daemon.clusterCommsMu exactly as the former
-// fabricRefreshCh/fabricRefreshCh1 fields were (#4958) — the constructor
+// per-slot refresh-channel fields were (#4958) — the constructor
 // publishes it and stopClusterComms nils it under that lock, while the
 // populate loop receives its channel by value at launch.
 type fabricSlot struct {
+	name      string // operator-facing log label ("fabric" / "fabric1")
 	iface     string // physical parent (XDP attachment point)
 	overlay   string // IPVLAN overlay for neighbor resolution (#129)
 	peerIP    net.IP
@@ -365,14 +366,13 @@ type fabricSlot struct {
 	lastLog   time.Time     // rate-limit refresh failure logs
 }
 
-// fabricSlotLabel returns the operator-facing fabric name for a slot:
-// "fabric" for slot 0 and "fabric1" for slot 1. Log strings are built
-// from it so today's messages are preserved byte-for-byte.
-func fabricSlotLabel(slot int) string {
-	if slot == 1 {
-		return "fabric1"
-	}
-	return "fabric"
+// fabricSlotLabel returns the operator-facing fabric name stored on the
+// slot at construction. Log strings are built from it so today's messages
+// are preserved byte-for-byte.
+func (d *Daemon) fabricSlotLabel(slot int) string {
+	d.fabricMu.RLock()
+	defer d.fabricMu.RUnlock()
+	return d.fabricSlots[slot].name
 }
 
 // populateFabricFwdSlot resolves the fabric interface MACs for one slot
@@ -389,7 +389,7 @@ func fabricSlotLabel(slot int) string {
 // race this receive; the sender (triggerFabricRefresh) targets whatever
 // channel the live epoch published.
 func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, overlay, peerAddr string, refreshCh chan struct{}) {
-	label := fabricSlotLabel(slot)
+	label := d.fabricSlotLabel(slot)
 	peerIP := net.ParseIP(peerAddr)
 	if peerIP == nil {
 		slog.Warn("cluster: invalid "+label+" peer address", "addr", peerAddr)
@@ -671,7 +671,7 @@ func selectFabricPeerLinkLocalMAC(
 }
 
 func (d *Daemon) retainFabricFwdOnNeighborMiss(slot int, peerIP net.IP, overlay string, logWaiting bool) bool {
-	label := fabricSlotLabel(slot)
+	label := d.fabricSlotLabel(slot)
 	if !d.fabricEntryPopulated(slot) {
 		if logWaiting {
 			slog.Info("cluster: waiting for "+label+" peer neighbor entry",
@@ -819,7 +819,7 @@ func (d *Daemon) clearFabricFwdSlot(_ context.Context, slot int) {
 	s.populated = false
 	d.fabricMu.Unlock()
 	if was {
-		slog.Info("cluster: " + fabricSlotLabel(slot) + " peer cleared (path down)")
+		slog.Info("cluster: " + d.fabricSlotLabel(slot) + " peer cleared (path down)")
 	}
 }
 
@@ -836,7 +836,7 @@ func (d *Daemon) RefreshFabricFwd() {
 	var slots [2]fabricSlot
 	for i := range d.fabricSlots {
 		s := &d.fabricSlots[i]
-		slots[i] = fabricSlot{iface: s.iface, overlay: s.overlay, peerIP: s.peerIP, lastProbe: s.lastProbe}
+		slots[i] = fabricSlot{name: s.name, iface: s.iface, overlay: s.overlay, peerIP: s.peerIP, lastProbe: s.lastProbe}
 	}
 	d.fabricMu.RUnlock()
 	for slot := range slots {

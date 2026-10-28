@@ -149,7 +149,7 @@ func TestMonitorFabricStateResubscribesOnLinkChannelClose(t *testing.T) {
 	}
 
 	d := &Daemon{
-		fabricSlots:             [2]fabricSlot{{iface: "fab0", refreshCh: make(chan struct{}, 64)}},
+		fabricSlots:             [2]fabricSlot{{name: "fabric", iface: "fab0", refreshCh: make(chan struct{}, 64)}, {name: "fabric1"}},
 		fabricLinkSubscribe:     linkSubscribe,
 		fabricNeighSubscribe:    neighSubscribe,
 		fabricStateResubBackoff: time.Millisecond,
@@ -219,7 +219,7 @@ func TestMonitorFabricStateResubscribesOnNeighChannelClose(t *testing.T) {
 	}
 
 	d := &Daemon{
-		fabricSlots:             [2]fabricSlot{{refreshCh: make(chan struct{}, 64)}},
+		fabricSlots:             [2]fabricSlot{{name: "fabric", refreshCh: make(chan struct{}, 64)}, {name: "fabric1"}},
 		fabricLinkSubscribe:     linkSubscribe,
 		fabricNeighSubscribe:    neighSubscribe,
 		fabricStateResubBackoff: time.Millisecond,
@@ -276,7 +276,7 @@ func TestMonitorFabricStateContextCancelExits(t *testing.T) {
 	}
 
 	d := &Daemon{
-		fabricSlots:             [2]fabricSlot{{refreshCh: make(chan struct{}, 64)}},
+		fabricSlots:             [2]fabricSlot{{name: "fabric", refreshCh: make(chan struct{}, 64)}, {name: "fabric1"}},
 		fabricLinkSubscribe:     linkSubscribe,
 		fabricNeighSubscribe:    neighSubscribe,
 		fabricStateResubBackoff: time.Millisecond,

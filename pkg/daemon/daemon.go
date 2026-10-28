@@ -1483,7 +1483,7 @@ type Daemon struct {
 	fabricMu sync.RWMutex
 	// fabricSlots holds both slots under fabricMu, EXCEPT refreshCh,
 	// which is guarded by clusterCommsMu exactly as the former
-	// fabricRefreshCh/fabricRefreshCh1 fields were (#4958): the
+	// per-slot refresh-channel fields were (#4958): the
 	// constructor publishes it and stopClusterComms nils it under that
 	// lock, while populate loops receive their channel by value.
 	fabricSlots [2]fabricSlot
@@ -2280,6 +2280,7 @@ func New(opts Options) (*Daemon, error) {
 		opts:                       opts,
 		startTime:                  time.Now(),
 		store:                      store,
+		fabricSlots:                [2]fabricSlot{{name: "fabric"}, {name: "fabric1"}},
 		arpResponders:              newProxyARPResponders(),
 		rgStates:                   make(map[int]*rgStateMachine),
 		blackholeRoutes:            make(map[int][]netlink.Route),

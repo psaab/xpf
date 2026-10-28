@@ -180,7 +180,7 @@ func fabPeerTestDaemon(t *testing.T, parentV6 []netlink.Neigh) (*Daemon, *fabric
 	}
 	rec.neighFn = neighFn
 	d := &Daemon{
-		fabricSlots: [2]fabricSlot{{peerIP: net.ParseIP("10.99.13.2")}},
+		fabricSlots: [2]fabricSlot{{name: "fabric", peerIP: net.ParseIP("10.99.13.2")}, {name: "fabric1"}},
 		linkByNameFn: mockLinkByName(map[string]*testLink{
 			"ge-0-0-0": parent,
 			"fab0":     overlay,
@@ -617,7 +617,7 @@ func fab1PeerTestDaemon(t *testing.T, parentNeighs map[[2]int][]netlink.Neigh) (
 	}
 	rec.neighFn = neighFn
 	d := &Daemon{
-		fabricSlots: [2]fabricSlot{{}, {peerIP: net.ParseIP("10.99.14.2")}},
+		fabricSlots: [2]fabricSlot{{name: "fabric"}, {name: "fabric1", peerIP: net.ParseIP("10.99.14.2")}},
 		linkByNameFn: mockLinkByName(map[string]*testLink{
 			"ge-0-0-1": parent,
 			"fab1":     overlay,
@@ -830,8 +830,15 @@ func TestRefreshFabricFwd1LinkLocalSyncsHelper15918(t *testing.T) {
 // (e.g. re-branching on slot 1) fails the slot-1 subtests here while the
 // slot-0 control stays green.
 func TestFabricSlotParity17040(t *testing.T) {
-	for _, slot := range []int{0, 1} {
-		t.Run(fabricSlotLabel(slot), func(t *testing.T) {
+	for _, tc := range []struct {
+		slot int
+		name string
+	}{
+		{slot: 0, name: "fabric"},
+		{slot: 1, name: "fabric1"},
+	} {
+		slot := tc.slot
+		t.Run(tc.name, func(t *testing.T) {
 			peerAddr := "10.99.13.2"
 			if slot == 1 {
 				peerAddr = "10.99.14.2"
@@ -843,12 +850,14 @@ func TestFabricSlotParity17040(t *testing.T) {
 			d, rec := fabPeerTestDaemon(t, []netlink.Neigh{
 				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 			})
+			if got := d.fabricSlotLabel(slot); got != tc.name {
+				t.Fatalf("slot %d label = %q, want stored name %q", slot, got, tc.name)
+			}
 			// fabPeerTestDaemon seeds slot 0's peer; re-point to this slot.
 			d.fabricMu.Lock()
 			d.fabricSlots[0].peerIP = nil
 			d.fabricSlots[slot].peerIP = peerIP
 			d.fabricMu.Unlock()
-
 			if !d.refreshFabricFwdSlot(context.Background(), slot, "ge-0-0-0", "fab0", peerIP, false) {
 				t.Fatalf("slot %d: refresh returned false on sole link-local peer", slot)
 			}
