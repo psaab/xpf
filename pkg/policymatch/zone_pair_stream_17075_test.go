@@ -210,3 +210,38 @@ func TestZonePairStreamUnfilteredSinglePass17075(t *testing.T) {
 		t.Fatalf("unfiltered view = %v, want config order %s", names, want)
 	}
 }
+
+// TestZonePairGroupedNilStanza17075 pins Rev18317 F1: a nil
+// *config.ZonePairPolicies (the #16160 fixture shape: nil prepended) must
+// not yield a phantom ""->"" stanza into grouped views, while an authored
+// empty stanza keeps its header. SetIdx must stay aligned to the source
+// slice index for surviving stanzas.
+func TestZonePairGroupedNilStanza17075(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Security.Zones = zones("trust", "untrust")
+	cfg.Security.DefaultPolicy = config.PolicyDeny
+	cfg.Security.Policies = []*config.ZonePairPolicies{
+		nil,
+		{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{{Name: "exact-permit", Action: config.PolicyPermit, Match: config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"any"}, Applications: []string{"any"}}}}},
+		{FromZone: "any", ToZone: "any"},
+	}
+	filter := NewZonePairPolicyFilter(cfg, "", "")
+	var got []ZonePairStanza
+	for st := range ZonePairStanzasOrdered(ConfigZonePairStanzas(cfg), filter) {
+		got = append(got, st)
+	}
+	if len(got) != 2 {
+		t.Fatalf("grouped stanzas = %+v, want 2 (nil skipped, authored empty retained)", got)
+	}
+	for _, st := range got {
+		if st.From == "" && st.To == "" {
+			t.Fatalf("phantom empty stanza yielded: %+v", got)
+		}
+	}
+	if got[0].From != "trust" || got[0].To != "untrust" || got[0].SetIdx != 1 || len(got[0].Rules) != 1 {
+		t.Fatalf("first stanza = %+v, want trust->untrust SetIdx=1 with 1 rule", got[0])
+	}
+	if got[1].From != "any" || got[1].To != "any" || got[1].SetIdx != 2 || len(got[1].Rules) != 0 {
+		t.Fatalf("second stanza = %+v, want authored empty any->any SetIdx=2 with 0 rules (header retained)", got[1])
+	}
+}

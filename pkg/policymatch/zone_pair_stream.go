@@ -252,11 +252,15 @@ func ZonePairZoneSummaryStream(src iter.Seq[ZonePairStanza], zone string, viewed
 }
 
 // ConfigZonePairStanzas adapts cfg.Security.Policies to the stanza sequence
-// ZonePairStream consumes: config order, nil stanzas yielded with no rules
-// (so SetIdx stays aligned with the runtime policySetID namespace), nil rules
-// skipped, and each ref stamped with the stanza's apply-time quarantine
-// verdict (either endpoint in the scrub set — the same set
+// ZonePairStream consumes: config order, nil stanzas skipped (no ZonePairStanza
+// is yielded for a nil *config.ZonePairPolicies, so grouped renderers never
+// print a phantom ""->"" header; SetIdx is stamped per surviving stanza from
+// its source index, so the runtime policySetID namespace stays aligned),
+// nil rules skipped, and each ref stamped with the stanza's apply-time
+// quarantine verdict (either endpoint in the scrub set — the same set
 // ZoneDetailPolicySummary marks rows with, #12896). A nil cfg yields nothing.
+// Authored non-nil stanzas with zero rules are still yielded, so their
+// grouped header is preserved.
 func ConfigZonePairStanzas(cfg *config.Config) iter.Seq[ZonePairStanza] {
 	return func(yield func(ZonePairStanza) bool) {
 		if cfg == nil {
@@ -266,9 +270,6 @@ func ConfigZonePairStanzas(cfg *config.Config) iter.Seq[ZonePairStanza] {
 		for setIdx, zpp := range cfg.Security.Policies {
 			st := ZonePairStanza{SetIdx: setIdx}
 			if zpp == nil {
-				if !yield(st) {
-					return
-				}
 				continue
 			}
 			st.From, st.To = zpp.FromZone, zpp.ToZone
