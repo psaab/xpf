@@ -97,6 +97,42 @@ func TestArgumentFormsUnnameable17184(t *testing.T) {
 	}
 }
 
+// #17184 fold (M1/M2): Ping count/size are spelled at their executed
+// (clamped) values, and a target/source/routing-instance the handler
+// rejects (>diagcmd.MaxArgLen) is unnameable.
+func TestArgumentFormsPingCountSize17184(t *testing.T) {
+	for _, tc := range []struct {
+		name, pattern string
+		req           any
+		wantDeny      bool
+	}{
+		{"ping count denied", `^ping 10\.0\.0\.1 count 7$`, &pb.PingRequest{Target: "10.0.0.1", Count: 7}, true},
+		{"ping count other allowed", `^ping 10\.0\.0\.1 count 7$`, &pb.PingRequest{Target: "10.0.0.1", Count: 8}, false},
+		{"ping size denied", `^ping 10\.0\.0\.1 size 1400$`, &pb.PingRequest{Target: "10.0.0.1", Size: 1400}, true},
+		{"ping clamped count denied", `^ping 10\.0\.0\.1 count 100$`, &pb.PingRequest{Target: "10.0.0.1", Count: 5000}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := cfg16067(t, tc.pattern, "")
+			err := gateDecide7172(t, cfg, "Ping", tc.req)
+			if tc.wantDeny && err == nil {
+				t.Errorf("deny %q over Ping was ALLOWED; count/size must be spelled (#17184 M1)", tc.pattern)
+			}
+			if !tc.wantDeny && err != nil {
+				t.Errorf("deny %q over Ping refused a command it does not name: %v", tc.pattern, err)
+			}
+		})
+	}
+	// Handler-rejected (>512B) target is unnameable for a restricted class.
+	cfg := cfg16067(t, `^show version$`, "")
+	long := strings.Repeat("a", 600)
+	if err := gateDecide7172(t, cfg, "Ping", &pb.PingRequest{Target: long}); err == nil {
+		t.Error("Ping with handler-rejected over-length target was ALLOWED for a restricted class (#17184 M2)")
+	}
+	if err := gateDecide7172(t, cfg, "Traceroute", &pb.TracerouteRequest{Target: long}); err == nil {
+		t.Error("Traceroute with handler-rejected over-length target was ALLOWED for a restricted class (#17184 M2)")
+	}
+}
+
 // rpcArgumentFormsCases17184 reads the rpcArgumentForms switch's own
 // case labels out of the production source (the #5278 discipline: the
 // switch is the thing that decides which methods reconstruct, so any

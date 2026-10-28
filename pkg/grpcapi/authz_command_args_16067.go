@@ -6,6 +6,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/diagcmd"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 )
 
@@ -65,9 +66,29 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 		if pr.GetTarget() == "" {
 			return nil, false
 		}
+		// #17184 fold (M2): the handler REJECTS a target/source/
+		// routing-instance over diagcmd.MaxArgLen (checkDiagArgs,
+		// #6904) and never executes such a request, so judge the
+		// handler-rejected shape unnameable rather than spelling a
+		// command that will not run. Count/size are clamped, never
+		// rejected, so they are spelled at their executed values
+		// (M1: `ping <host> count <N> size <N>` on-box spelling).
+		if err := diagcmd.CheckArgs(pr.GetTarget(), pr.GetSource(), pr.GetRoutingInstance()); err != nil {
+			return nil, false
+		}
 		full := "ping " + pr.GetTarget()
+		if pr.GetCount() != 0 {
+			full += " count " + strconv.Itoa(diagcmd.ClampPingCount(int(pr.GetCount())))
+		}
 		if pr.GetSource() != "" {
 			full += " source " + pr.GetSource()
+		}
+		if pr.GetSize() > 0 {
+			sz := int(pr.GetSize())
+			if sz > diagcmd.MaxPingSize {
+				sz = diagcmd.MaxPingSize
+			}
+			full += " size " + strconv.Itoa(sz)
 		}
 		if pr.GetRoutingInstance() != "" {
 			full += " routing-instance " + pr.GetRoutingInstance()
@@ -79,6 +100,10 @@ func rpcArgumentForms(cfg *config.Config, fullMethod string, req any, base strin
 			return nil, false
 		}
 		if tr.GetTarget() == "" {
+			return nil, false
+		}
+		// #17184 fold (M2): same handler-rejected bound as Ping.
+		if err := diagcmd.CheckArgs(tr.GetTarget(), tr.GetSource(), tr.GetRoutingInstance()); err != nil {
 			return nil, false
 		}
 		full := "traceroute " + tr.GetTarget()
@@ -1004,6 +1029,7 @@ var argumentSampleCommands16067 = []string{
 	"show security zones trust detail",
 	"ping 192.0.2.1",
 	"ping 192.0.2.1 source 192.0.2.2",
+	"ping 192.0.2.1 count 5 size 1400",
 	"traceroute 192.0.2.1",
 	"show route table inet.0",
 	"show route protocol bgp",
