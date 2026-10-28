@@ -781,17 +781,24 @@ pub(super) fn rollback_recorded_persistent_inbound_hold(
         now_ns,
     );
 }
-// #17190 fold (B3): `admission_to_zone = to_zone_id` below is restored
-// loop-visible state, NOT the burn-down's inert `let _ = &to_zone_id`.
-// On this path the finalized-resolution store overwrites it before any
-// read, so the dead-store deny fires — but `admission_to_zone` is only
-// ever read under `== 0` guards across descriptor iterations, and the
-// store keeps the routed pair's value in place for any early-read path.
-// Restructuring it away (deleting the store, or a read-back alias) would
-// reintroduce the stale-zone bug; the reviewers' agreed resolution is to
-// keep the store and exempt exactly this one assignment. The exemption
-// is fn-scoped: every other store in this fn stays under the deny.
+// #17190 fold (B3): the routed-pair store (`note_admission_to_zone` below)
+// is restored loop-visible state, NOT the burn-down's inert
+// `let _ = &to_zone_id`. On this path the finalized-resolution store
+// overwrites it before any read, so the dead-store deny fires — but
+// `admission_to_zone` is only ever read under `== 0` guards across
+// descriptor iterations, and the store keeps the routed pair's value in
+// place for any early-read path. Restructuring it away (deleting the
+// store, or a read-back alias) would reintroduce the stale-zone bug; the
+// reviewers' agreed resolution is to keep the store and exempt exactly
+// this one assignment. The exemption is scoped to the tiny helper below:
+// no fn-wide allow remains, so every other store in
+// `poll_binding_process_descriptor_with_injection` stays under the deny.
 #[allow(unused_assignments)]
+#[inline]
+fn note_admission_to_zone(slot: &mut u32, to_zone_id: u32) {
+    *slot = to_zone_id;
+}
+
 pub(super) fn poll_binding_process_descriptor_with_injection(
     binding: &mut BindingWorker,
     binding_index: usize,
@@ -5308,7 +5315,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // pair's value, never a stale one.
                         let route_from_zone_id = from_zone_id;
                         let route_to_zone_id = to_zone_id;
-                        admission_to_zone = to_zone_id;
+                        note_admission_to_zone(&mut admission_to_zone, to_zone_id);
                         // Borrow zone names as &str for string-typed downstream
                         // callers (static_nat, match_source_nat_for_flow, debug
                         // log). No clone — the borrow lives only inside this

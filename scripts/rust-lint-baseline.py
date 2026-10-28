@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "userspace-dp" / "lint-baseline.tsv"
 
-# Floor for a believable census: the tree carries ~170 (profile,lint,file)
+# Floor for a believable census: the tree carries 246 (profile,lint,file)
 # pairs; an empty or near-empty census means cargo/rustc output was not
 # parsed (wrong toolchain, stale target dir) and must fail, not pass.
 MIN_CENSUS_PAIRS = 50
