@@ -29,6 +29,24 @@ var allowedFunctions = map[string]string{
 	"vrrp::openAfPacketReceiver": "pre-existing #2476 site; ORs SOCK_CLOEXEC + pinned by afpacket_cloexec_test.go",
 }
 
+// allowedRecvfromFunctions are the production functions permitted to keep a
+// direct unix.Recvfrom(...) CALL (#17231). Every other Recvfrom on a socket
+// fd must go through linuxsock.PpollRecv, whose ppoll+eventfd wake makes the
+// receive cancellable; a bare blocking Recvfrom cannot be woken by close(2)
+// and parks on a reused fd number.
+//
+//   - linuxsock::PpollRecv.Recv IS the primitive: ppoll guarantees
+//     readability before the read, so the Recvfrom itself does not park.
+//   - nfqueue::Queue.Recv and nfqueue::Queue.waitAck are poll-guarded:
+//     each Recvfrom is preceded in the same function by unix.Poll on the
+//     same fd with a bounded timeout, so the read cannot park indefinitely
+//     and close-to-unblock is never the wake mechanism.
+var allowedRecvfromFunctions = map[string]string{
+	"linuxsock::PpollRecv.Recv": "the #17231 cancellable-receive primitive; ppoll precedes the read",
+	"nfqueue::Queue.Recv":       "poll-guarded: unix.Poll with deadline precedes Recvfrom in the same function",
+	"nfqueue::Queue.waitAck":    "poll-guarded: unix.Poll with deadline precedes Recvfrom in the same function",
+}
+
 // funcKey formats the receiver-aware allowlist key for a FuncDecl in the
 // package at pkgRel (mirrors pkg/fsatomic/canary_test.go).
 func funcKey(pkgRel string, fn *ast.FuncDecl) string {
@@ -154,6 +172,99 @@ func TestNoDirectUnixSocket(t *testing.T) {
 
 	// Self-test guard: a walk bug that scans nothing would make this canary
 	// vacuously pass.
+	t.Logf("scanned %d production .go files under pkg/", scanned)
+	if scanned == 0 {
+		t.Fatal("canary scanned 0 files — the repo walk is broken")
+	}
+
+	for _, v := range violations {
+		t.Error(v)
+	}
+}
+
+// TestNoDirectBlockingRecvfrom is the #17231 receive canary. It walks every
+// production (non-test) .go file under pkg/ with go/ast and flags any direct
+// unix.Recvfrom(...) call outside allowedRecvfromFunctions. A new blocking
+// Recvfrom outside linuxsock.PpollRecv (or a poll-guarded nfqueue read)
+// reintroduces the close-does-not-wake defect: the goroutine parks on a
+// silent link, leaks with its bound socket, and can answer through a reused
+// fd number after cancel.
+func TestNoDirectBlockingRecvfrom(t *testing.T) {
+	var violations []string
+	scanned := 0
+
+	root := ".."
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		scanned++
+
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			t.Fatalf("parse %s: %v", path, perr)
+		}
+
+		unixName := ""
+		for _, imp := range f.Imports {
+			ip, _ := strconv.Unquote(imp.Path.Value)
+			if ip != "golang.org/x/sys/unix" {
+				continue
+			}
+			unixName = "unix"
+			if imp.Name != nil {
+				unixName = imp.Name.Name
+				if unixName == "." {
+					violations = append(violations,
+						fmt.Sprintf("%s: dot-import of unix defeats the Recvfrom canary", path))
+				}
+			}
+		}
+		if unixName == "" || unixName == "_" || unixName == "." {
+			return nil
+		}
+
+		pkgRel := pkgRelKey(path)
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			if _, allowed := allowedRecvfromFunctions[funcKey(pkgRel, fn)]; allowed {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "Recvfrom" {
+					return true
+				}
+				ident, ok := sel.X.(*ast.Ident)
+				if !ok || ident.Name != unixName {
+					return true
+				}
+				violations = append(violations, fmt.Sprintf(
+					"%s: direct %s.Recvfrom call in %s — use linuxsock.PpollRecv so the receive is cancellable via ppoll+eventfd (a bare blocking Recvfrom cannot be woken by close and parks on a reused fd); see #17231/#16669",
+					fset.Position(call.Pos()), unixName, funcKey(pkgRel, fn)))
+				return true
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+
 	t.Logf("scanned %d production .go files under pkg/", scanned)
 	if scanned == 0 {
 		t.Fatal("canary scanned 0 files — the repo walk is broken")

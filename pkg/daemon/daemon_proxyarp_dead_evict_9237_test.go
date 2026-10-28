@@ -51,7 +51,7 @@ func TestDeadResponderIsEvictedAndRestarted9237(t *testing.T) {
 
 	// A responder whose goroutine has already exited: `done` is closed, exactly
 	// as runProxyARPResponder's `defer close(r.done)` leaves it after a failed
-	// OpenARPSocket.
+	// OpenARPReceiver.
 	_, cancel := context.WithCancel(context.Background())
 	dead := &proxyARPResponder{
 		cancel:   cancel,
