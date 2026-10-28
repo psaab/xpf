@@ -689,9 +689,6 @@ func (c *ctl) showPoliciesFiltered(fromZone, toZone string, globalOnly bool) err
 			stanzas = append(stanzas, st)
 		}
 		for stanza := range policymatch.ZonePairStanzasOrdered(policymatch.InventoryStanzas(stanzas), pairFilter) {
-			if len(stanza.Rules) == 0 {
-				continue
-			}
 			renderZonePairGroup(resp.Policies[keptIdx[stanza.SetIdx]])
 		}
 	}
@@ -1175,9 +1172,6 @@ func (c *ctl) showPoliciesBriefFiltered(fromZone, toZone string) error {
 			stanzas = append(stanzas, st)
 		}
 		for stanza := range policymatch.ZonePairStanzasOrdered(policymatch.InventoryStanzas(stanzas), pairFilter) {
-			if len(stanza.Rules) == 0 {
-				continue
-			}
 			renderZonePair(resp.Policies[keptIdx[stanza.SetIdx]])
 		}
 	}
