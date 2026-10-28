@@ -314,7 +314,7 @@ type PolicyApplicationSnapshot struct {
 	// <n>`. 0/absent means "use the global per-protocol SessionTimeouts" — the
 	// historical behavior. When a session is admitted by a policy whose matched
 	// application term sets this, the userspace dataplane stamps it on the
-	// session and the conntrack GC ages the session out on this value instead
+	// session and the helper's expiry ages the session out on this value instead
 	// of the global TCP/UDP/ICMP timeout. The legacy (retired-eBPF) map
 	// compiler wired the same per-app `appTimeout`, so carrying it here closes a
 	// userspace parity regression. omitempty keeps the wire additive: an old

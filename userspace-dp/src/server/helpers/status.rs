@@ -989,7 +989,9 @@ mod status_wiring_tests {
         std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {}", p.display(), e))
     }
 
-    /// Strip comment lines before scanning.
+    use crate::test_support::source_scan::blank_comments_and_strings;
+
+    /// Blank comments and strings before scanning (#17152).
     ///
     /// Load-bearing, and found the hard way: the doc comment on THIS test
     /// quotes the very assignment the scan looks for, so with comments
@@ -997,11 +999,16 @@ mod status_wiring_tests {
     /// `state.status.shared_session_poison_recoveries = ...` line was deleted
     /// — the documentation satisfied the check on the code's behalf. Any
     /// source-scanning gate that can be quoted in prose has this failure mode.
+    ///
+    /// The previous whole-line-only `code_only` dropped only lines that
+    /// START with `//`, so a trailing `// state.afxdp.x()` note or a
+    /// `/* state.afxdp.x() */` block kept the gate green after the real
+    /// assignment was deleted. The shared #12270 blanker
+    /// (`test_support::source_scan`) blanks line tails, nested blocks,
+    /// string bodies and char literals, so only real code can satisfy
+    /// the scan.
     fn code_only(src: &str) -> String {
-        src.lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        blank_comments_and_strings(src)
     }
 
     /// #6751: drop ALL whitespace before matching.
@@ -1194,6 +1201,39 @@ mod status_wiring_tests {
                 && proto.contains("pub ike_exchange_entries: u64"),
             "#13290: ProcessStatus must carry ike_exchange_evictions_total \
              and ike_exchange_entries wire fields"
+        );
+    }
+
+    /// #17152 fixture control: the blanker behind `code_only` must not
+    /// let a trailing or block comment quote the accessor the
+    /// `every_counter_accessor_is_wired_into_process_status` gate scans
+    /// for. The old whole-line-only `code_only` kept both shapes, so
+    /// deleting the real assignment while leaving either comment stayed
+    /// green. Pinning the blanker directly means a regression here reds
+    /// even if the gate's needle changes.
+    #[test]
+    fn status_scan_blanker_ignores_trailing_and_block_comments_17152() {
+        let needle = "state.afxdp.shared_session_poison_recoveries_total()";
+        let trailing = format!("let x = 0; // was {needle}");
+        let block = format!("let x = 0; /* was {needle} */");
+        let whole_line = format!("// {needle}");
+        let real = format!("state.status.x = {needle};");
+        assert!(
+            !squeeze(&code_only(&trailing)).contains(&squeeze(needle)),
+            "#17152: a trailing // comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            !squeeze(&code_only(&block)).contains(&squeeze(needle)),
+            "#17152: a /* */ block comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            !squeeze(&code_only(&whole_line)).contains(&squeeze(needle)),
+            "#17152: a whole-line // comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            squeeze(&code_only(&real)).contains(&squeeze(needle)),
+            "#17152: real code calling the accessor must still satisfy the scan \
+             (a blanker that blanks everything would pass the three rows above vacuously)"
         );
     }
 }

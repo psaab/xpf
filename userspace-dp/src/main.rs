@@ -60,6 +60,12 @@ mod test_alloc;
 #[cfg(test)]
 #[global_allocator]
 static TEST_COUNTING_ALLOC: test_alloc::CountingAlloc = test_alloc::CountingAlloc;
+// #17152: crate-wide #[cfg(test)] source-scan helpers
+// (`test_support::source_scan`), shared by every source-scanning gate
+// instead of reaching through `afxdp::worker_queue::tests`.
+#[cfg(test)]
+mod test_support;
+
 
 mod protocol;
 mod server;

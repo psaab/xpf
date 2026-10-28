@@ -446,7 +446,7 @@ struct flood_state {
 	__u8  pad_fs[7];
 };
 
-/* Per-IP session count (populated by Go GC sweep for session limiting). */
+/* Per-IP session count (populated by the dataplane for session limiting). */
 struct session_count_key {
 	__u32 ip;        /* IPv4 addr or XOR hash of IPv6 */
 	__u16 zone_id;
