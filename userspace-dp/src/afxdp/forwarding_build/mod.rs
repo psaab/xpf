@@ -71,7 +71,8 @@ pub(in crate::afxdp) use tunnels::{TunnelKind, tunnel_mode_kind};
 // by path. The test suite (`tests.rs`, `use super::*`) keeps calling an
 // infallible `build_cos_state(..) -> CoSState` — provided by this
 // `#[cfg(test)]` wrapper that `.expect()`s the valid snapshots the CoS
-// tests build (mirrors the `build_forwarding_state` infallible wrapper).
+// tests build (mirrors the `build_forwarding_state` infallible wrapper in
+// [`build_test_api`]).
 #[cfg(test)]
 fn build_cos_state(snapshot: &ConfigSnapshot) -> CoSState {
     cos::build_cos_state(snapshot).expect("test CoS snapshot must not produce integrity error")
@@ -213,59 +214,118 @@ fn parse_syn_cookie_key_base(base: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// Test/legacy entry point — infallible; panics on snapshot
-/// integrity error (which test snapshots never hit). Production
-/// code uses `try_build_forwarding_state_*` instead.
-pub(super) fn build_forwarding_state(snapshot: &ConfigSnapshot) -> ForwardingState {
-    try_build_forwarding_state_with_policy_counters(snapshot, &PolicyCounterStore::default())
-        .expect("test snapshot must not produce policy integrity error")
-}
-
-pub(super) fn build_forwarding_state_with_policy_counters(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-) -> ForwardingState {
-    try_build_forwarding_state_with_policy_counters(snapshot, policy_counters)
-        .expect("test snapshot must not produce policy integrity error")
-}
-
-pub(super) fn try_build_forwarding_state_with_policy_counters(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
-    // #2218: the policy-only wrappers default the NAT counter store; the
-    // resulting `Arc`s are throwaway (a fresh default store per call), used
-    // by tests and any caller that does not yet own a `NatCounterStore`.
-    build_forwarding_state_with_policy_counters_and_previous(
-        snapshot,
-        policy_counters,
-        &crate::nat::NatCounterStore::default(),
-        None,
-    )
-}
-
-/// #2218: test/build entry point that threads BOTH counter stores so a
-/// test can hold the `NatCounterStore` and read back hit counts after a
-/// flow. Mirrors `build_forwarding_state` (infallible).
+/// The production forwarding-build entries.
+///
+/// Exactly two non-`cfg(test)` build entries exist, and both take a
+/// preparsed [`crate::policy::PolicyState`] (from
+/// [`crate::policy::PreparedPolicyState::parse_snapshot`]) so production
+/// never re-parses policy inside the build:
+/// [`build_forwarding_state_with_preparsed_policy_and_previous`] and
+/// [`build_forwarding_state_with_preparsed_policy_previous_and_dynamic`].
+/// Every other `build_forwarding_state*` wrapper (the infallible
+/// `.expect()` shortcuts and the policy-parsing `try_*` / `*_and_previous`
+/// forms) is test scaffolding and lives in [`build_test_api`] under
+/// `#[cfg(test)]` (#17220) — it is not compiled into the production
+/// binary and must never acquire a production caller.
 #[cfg(test)]
-pub(super) fn build_forwarding_state_with_counters(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-    nat_counters: &crate::nat::NatCounterStore,
-) -> ForwardingState {
-    build_forwarding_state_with_policy_counters_and_previous(
-        snapshot,
-        policy_counters,
-        nat_counters,
-        None,
-    )
-    .expect("test snapshot must not produce policy integrity error")
+pub(super) mod build_test_api {
+    use super::*;
+
+    /// Test entry point — infallible; panics on snapshot integrity error
+    /// (which test snapshots never hit).
+    pub fn build_forwarding_state(snapshot: &ConfigSnapshot) -> ForwardingState {
+        try_build_forwarding_state_with_policy_counters(snapshot, &PolicyCounterStore::default())
+            .expect("test snapshot must not produce policy integrity error")
+    }
+
+    pub fn build_forwarding_state_with_policy_counters(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+    ) -> ForwardingState {
+        try_build_forwarding_state_with_policy_counters(snapshot, policy_counters)
+            .expect("test snapshot must not produce policy integrity error")
+    }
+
+    pub fn try_build_forwarding_state_with_policy_counters(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+    ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+        // #2218: the policy-only wrappers default the NAT counter store; the
+        // resulting `Arc`s are throwaway (a fresh default store per call), used
+        // by tests and any caller that does not yet own a `NatCounterStore`.
+        build_forwarding_state_with_policy_counters_and_previous(
+            snapshot,
+            policy_counters,
+            &crate::nat::NatCounterStore::default(),
+            None,
+        )
+    }
+
+    /// #2218: test/build entry point that threads BOTH counter stores so a
+    /// test can hold the `NatCounterStore` and read back hit counts after a
+    /// flow. Mirrors `build_forwarding_state` (infallible).
+    pub fn build_forwarding_state_with_counters(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+        nat_counters: &crate::nat::NatCounterStore,
+    ) -> ForwardingState {
+        build_forwarding_state_with_policy_counters_and_previous(
+            snapshot,
+            policy_counters,
+            nat_counters,
+            None,
+        )
+        .expect("test snapshot must not produce policy integrity error")
+    }
+
+    pub fn build_forwarding_state_with_policy_counters_and_previous(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+        nat_counters: &crate::nat::NatCounterStore,
+        previous: Option<&ForwardingState>,
+    ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+        super::build_forwarding_state_with_policy_state_and_previous(
+            snapshot,
+            policy_counters,
+            nat_counters,
+            previous,
+            None,
+            None,
+        )
+    }
+
+    pub fn build_forwarding_state_with_policy_counters_previous_and_dynamic(
+        snapshot: &ConfigSnapshot,
+        policy_counters: &PolicyCounterStore,
+        nat_counters: &crate::nat::NatCounterStore,
+        previous: Option<&ForwardingState>,
+        dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
+    ) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
+        super::build_forwarding_state_with_policy_state_and_previous(
+            snapshot,
+            policy_counters,
+            nat_counters,
+            previous,
+            None,
+            dynamic,
+        )
+    }
 }
 
-/// Build a candidate `ForwardingState`, then — and only then — bind it to the
-/// carried-forward per-zone counter stores (traffic, and since #3651's flood
-/// half, flood-event as well, and since #8291 the GRE decap refusal total;
-/// `attach_zone_counters` binds all three).
+#[cfg(test)]
+pub(super) use build_test_api::{
+    build_forwarding_state, build_forwarding_state_with_counters,
+    build_forwarding_state_with_policy_counters,
+    build_forwarding_state_with_policy_counters_and_previous,
+    build_forwarding_state_with_policy_counters_previous_and_dynamic,
+    try_build_forwarding_state_with_policy_counters,
+};
+
+/// Build a candidate `ForwardingState` from a preparsed policy state, then
+/// — and only then — bind it to the carried-forward per-zone counter stores
+/// (traffic, and since #3651's flood half, flood-event as well, and since
+/// #8291 the GRE decap refusal total; `attach_zone_counters` binds all
+/// three).
 ///
 /// #5716: that two-step shape is the load-bearing part. `ZoneCounterStore` is
 /// `Arc`-backed, so the carry-forward `clone()` is a HANDLE ON THE LIVE STORE
@@ -315,42 +375,6 @@ pub(super) fn build_forwarding_state_with_counters(
 /// the CoS row catches. Six more rows would only widen the second, weaker
 /// class — a single BELT moved below the binding, which is caught by that
 /// belt's own row and by no other.
-pub(super) fn build_forwarding_state_with_policy_counters_and_previous(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-    nat_counters: &crate::nat::NatCounterStore,
-    previous: Option<&ForwardingState>,
-) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
-    build_forwarding_state_with_policy_state_and_previous(
-        snapshot,
-        policy_counters,
-        nat_counters,
-        previous,
-        None,
-        None,
-    )
-}
-
-/// #16555: production build carrying the live dynamic neighbor map so
-/// `populate_neighbors` can apply the #13951 fence (previous static +
-/// dynamic confirmation) instead of laundering a spoofed kernel MAC.
-pub(super) fn build_forwarding_state_with_policy_counters_previous_and_dynamic(
-    snapshot: &ConfigSnapshot,
-    policy_counters: &PolicyCounterStore,
-    nat_counters: &crate::nat::NatCounterStore,
-    previous: Option<&ForwardingState>,
-    dynamic: Option<&crate::afxdp::ShardedNeighborMap>,
-) -> Result<ForwardingState, crate::policy::SnapshotIntegrityError> {
-    build_forwarding_state_with_policy_state_and_previous(
-        snapshot,
-        policy_counters,
-        nat_counters,
-        previous,
-        None,
-        dynamic,
-    )
-}
-
 pub(super) fn build_forwarding_state_with_preparsed_policy_and_previous(
     snapshot: &ConfigSnapshot,
     policy_counters: &PolicyCounterStore,
@@ -368,7 +392,9 @@ pub(super) fn build_forwarding_state_with_preparsed_policy_and_previous(
     )
 }
 
-/// #16555: preparsed-policy twin of the dynamic-carrying build.
+/// #16555: preparsed-policy twin of the dynamic-carrying build — the
+/// production entry for callers that fence neighbors against the live
+/// dynamic map.
 pub(super) fn build_forwarding_state_with_preparsed_policy_previous_and_dynamic(
     snapshot: &ConfigSnapshot,
     policy_counters: &PolicyCounterStore,
@@ -458,7 +484,7 @@ fn build_forwarding_state_with_policy_state_and_previous(
 /// than getting an `attach_flood_counters` of their own.
 ///
 /// INFALLIBLE, and called only after the fallible builder has returned `Ok` —
-/// see [`build_forwarding_state_with_policy_counters_and_previous`].
+/// see [`build_forwarding_state_with_preparsed_policy_and_previous`].
 ///
 /// This function is now ADDITIVE ONLY. It resolves (get-or-creates) one block
 /// per SLOT-ASSIGNED zone out of the live, `Arc`-shared store, and does not
@@ -980,7 +1006,7 @@ fn build_fallible_forwarding_state(
     // store (get-or-create per slot-assigned zone, plus the destructive prune),
     // so it happens in `attach_zone_counters` after this fallible builder has
     // returned `Ok` — see the doc comment on
-    // `build_forwarding_state_with_policy_counters_and_previous`.
+    // `build_forwarding_state_with_preparsed_policy_and_previous`.
     //
     // Build filter state from snapshot. #2505: this is fallible — an
     // unresolvable `from protocol` token raises a SnapshotIntegrityError that

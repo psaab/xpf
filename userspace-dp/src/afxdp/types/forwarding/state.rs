@@ -721,7 +721,7 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) cold_path_sample_mask: u64,
     /// #1636 option D: how long a queued packet with an unresolved
     /// neighbor is held before being dropped + recycled. Computed per
-    /// snapshot in `build_forwarding_state_with_policy_counters_and_previous`
+    /// snapshot in `build_forwarding_state_with_preparsed_policy_and_previous`
     /// (`compute_pending_neigh_timeout_ns`): 800ms when the kernel
     /// `retrans_time_ms` is <= NEIGH_RETRANS_FAST_THRESHOLD_MS (300ms —
     /// the daemon writes 250 but the kernel jiffy-rounds it to 252 on
