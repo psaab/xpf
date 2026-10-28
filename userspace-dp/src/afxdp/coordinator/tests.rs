@@ -3497,7 +3497,7 @@ fn reconcile_with_none_snapshot_reaches_no_snapshot_early_exit() {
         coordinator.slow_path.is_none(),
         "slow_path should be None after teardown of an unbound coordinator"
     );
-    // Reset phase zeroed counter / ready / bound flags.
+    // Refresh phase (zero_unbound_slot) zeroed counter / ready / bound flags.
     assert!(!bindings[0].ready);
     assert!(!bindings[0].bound);
     assert!(!bindings[0].xsk_registered);
@@ -3508,17 +3508,17 @@ fn reconcile_with_none_snapshot_reaches_no_snapshot_early_exit() {
 /// `refresh_bindings` so every now-workerless slot is routed through
 /// `zero_unbound_slot` AND the CoS owner->worker map is rebuilt empty.
 ///
-/// `reset_binding_counters` (the phase that always runs before the
-/// `no_snapshot` early-return) ONLY zeroes the counter scalars plus
-/// `bound`/`xsk_registered`/`socket_fd`. It deliberately does NOT touch
-/// `xsk_bind_mode`, `socket_ifindex`/`queue_id`/`bind_flags`,
-/// `zero_copy`, `flow_cache_capacity`, or `active_flow_count` — those
-/// are cleared only by `zero_unbound_slot` inside `refresh_bindings`.
-/// So this test pre-populates exactly those reset-survivor fields and a
-/// stale CoS owner-map entry, runs `reconcile(None, ...)`, and asserts
-/// they are cleared. Reverting the `self.refresh_bindings(bindings)`
-/// call added in the `no_snapshot` arm leaves every one of these stale
-/// → the asserts go RED.
+/// #17105 deleted the pre-refresh `reset_binding_counters` zero-pass:
+/// the fields this test pre-populates (`xsk_bind_mode`,
+/// `socket_ifindex`/`queue_id`/`bind_flags`, `zero_copy`,
+/// `flow_cache_capacity`, `active_flow_count`) were its survivors —
+/// it never touched them, and the counters it did zero are rewritten
+/// by `refresh_bindings` on every reconcile exit. So this test
+/// pre-populates exactly those survivor fields and a stale CoS
+/// owner-map entry, runs `reconcile(None, ...)`, and asserts they are
+/// cleared. Reverting the `self.refresh_bindings(bindings)` call in
+/// the `no_snapshot` arm leaves every one of these stale → the
+/// asserts go RED.
 #[test]
 fn reconcile_none_snapshot_refreshes_bindings_clearing_reset_survivor_fields() {
     let mut coordinator = Coordinator::new();
@@ -3540,8 +3540,8 @@ fn reconcile_none_snapshot_refreshes_bindings_clearing_reset_survivor_fields() {
         bound: true,
         xsk_registered: true,
         ready: true,
-        // Fields the reset pass leaves UNTOUCHED — only
-        // `zero_unbound_slot` (via refresh_bindings) clears them.
+        // Survivor fields only `zero_unbound_slot` (via
+        // refresh_bindings) clears.
         xsk_bind_mode: "ZEROCOPY".into(),
         zero_copy: true,
         socket_ifindex: 10,
