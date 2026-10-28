@@ -130,7 +130,7 @@ var restRouteCommand = map[string]string{
 // exemption. The coarse permission bits and, for the config routes, the
 // *-configuration regexes still apply on their own paths.
 var restRoutesNoCommand = map[string]string{
-	"GET /health":  "unauthenticated liveness probe; authMiddleware exempts it unconditionally, so there is no principal to charge",
+	"GET /health":  "unauthenticated liveness probe; the auth gate exempts it unconditionally, so there is no principal to charge",
 	"GET /metrics": "Prometheus exposition, not an operational command; on credential-gated legs readAuthz charges the coarse PermView bit (#16727), and it carries no canonical command to charge here",
 
 	// SESSION PLUMBING, NOT COMMANDS (#15077). The REST twins of the
