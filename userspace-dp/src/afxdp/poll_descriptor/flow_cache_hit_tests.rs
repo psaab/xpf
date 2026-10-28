@@ -1584,46 +1584,131 @@ fn flow_cache_seed_promotes_ambiguous_zone_only_when_owner_active_17031() {
     }
 }
 
-/// #17031 (Rev18320 round 2): structural pin for the descriptor stage-9
+/// #17031 (Rev18320 round 2/3): structural pin for the descriptor stage-9
 /// wiring that the function-level seed cell above cannot observe. The
 /// seed cell supplies `Some(CLAIMED_ZONE)` itself, so production could
 /// regress to passing `None` at `mod.rs` stage-9 -> `stage_flow_cache_seed`
 /// and that cell would stay green; this source assertion reds that exact
 /// regression.
 ///
+/// STRUCTURAL, not raw-text (round 3): comments and string/char literal
+/// bodies are blanked with the shared #17152 helper first, then the one
+/// whole-identifier `stage_flow_cache_seed` call is extracted by
+/// balanced-paren matching and its argument list is split only on
+/// depth-0 commas. The round-2 guard split the raw text on the callee
+/// name and on `,`/`);`, so a 21-argument decoy written inside a string
+/// satisfied it while the real call passed `None` — a false green,
+/// proven in review. A decoy in prose or a literal is blanked before
+/// matching and can no longer satisfy (or duplicate) this guard; only
+/// the actual call expression is inspected. The crate has no direct
+/// `syn` dev-dependency, so this token-level matcher follows the
+/// established `blank_comments_and_strings` + depth-0 segment pattern
+/// (`protocol::cos_literal_guard_7689`, `afxdp::session_glue` scans).
+///
 /// FAIL-ON-REVERT: changing the stage-9 argument in the
 /// `ambiguous_zone` position (index 14, between `ingress_zone_override`
-/// and `now_secs`) from `ambiguous_zone` to `None` reds this cell.
+/// and `now_secs`) from `ambiguous_zone` to `None` reds this cell, as
+/// does planting a decoy call in a string/comment while doing so.
 #[test]
 fn stage9_descriptor_forwards_ambiguous_zone_to_flow_cache_seed_17031() {
+    use crate::test_support::source_scan::blank_comments_and_strings;
+
     let src = include_str!("mod.rs");
-    // Strip line comments so prose mentioning the seed cannot satisfy
-    // or duplicate the assertions below (mirrors the #7091 wiring guard).
-    let code: String = src
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut calls = code.split("stage_flow_cache_seed(");
-    let _before = calls.next().expect("split yields a leading segment");
-    let call = calls
-        .next()
-        .expect("poll_descriptor/mod.rs must call stage_flow_cache_seed");
-    assert!(
-        calls.next().is_none(),
+    let code = blank_comments_and_strings(src);
+    let bytes = code.as_bytes();
+    let needle = "stage_flow_cache_seed";
+    let mut call_args: Vec<Vec<String>> = Vec::new();
+    let mut from = 0usize;
+    while let Some(hit) = code[from..].find(needle) {
+        let start = from + hit;
+        let after_name = start + needle.len();
+        from = after_name;
+        let ident_byte = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_';
+        let before_ok = start == 0 || !ident_byte(&bytes[start - 1]);
+        let after_ok = !bytes.get(after_name).is_some_and(ident_byte);
+        if !before_ok || !after_ok {
+            continue;
+        }
+        let mut open = after_name;
+        while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+            open += 1;
+        }
+        if bytes.get(open) != Some(&b'(') {
+            continue;
+        }
+        // Do not mistake a function declaration's parameter list for a call.
+        let before = code[..start].trim_end();
+        if before
+            .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .next()
+            == Some("fn")
+        {
+            continue;
+        }
+        // Balanced-paren extraction of THIS call's argument list: nested
+        // calls/groups cannot terminate it early at an inner `)`/`;`.
+        let mut depth = (0i32, 0i32, 0i32);
+        let mut close = None;
+        for i in open..bytes.len() {
+            match bytes[i] {
+                b'(' => depth.0 += 1,
+                b')' => {
+                    depth.0 -= 1;
+                    if depth == (0, 0, 0) {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                b'[' => depth.1 += 1,
+                b']' => depth.1 -= 1,
+                b'{' => depth.2 += 1,
+                b'}' => depth.2 -= 1,
+                _ => {}
+            }
+        }
+        let close = close.expect(
+            "#17031: stage_flow_cache_seed call in poll_descriptor/mod.rs \
+             has unbalanced parentheses; cannot pin its wiring",
+        );
+        // Split only on depth-0 commas, so commas inside a nested
+        // argument expression never shift the pinned positions.
+        let mut args: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut depth = (0i32, 0i32, 0i32);
+        for ch in code[open + 1..close].chars() {
+            match ch {
+                '(' => depth.0 += 1,
+                ')' => depth.0 -= 1,
+                '[' => depth.1 += 1,
+                ']' => depth.1 -= 1,
+                '{' => depth.2 += 1,
+                '}' => depth.2 -= 1,
+                _ => {}
+            }
+            if ch == ',' && depth == (0, 0, 0) {
+                args.push(std::mem::take(&mut cur));
+            } else {
+                cur.push(ch);
+            }
+        }
+        args.push(cur);
+        let args: Vec<String> = args
+            .iter()
+            .map(|arg| arg.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|arg| !arg.is_empty())
+            .collect();
+        call_args.push(args);
+    }
+    assert_eq!(
+        call_args.len(),
+        1,
         "#17031: expected exactly ONE production stage_flow_cache_seed call \
-         in poll_descriptor/mod.rs; a second call site needs its own \
-         ambiguous_zone wiring argument before this guard can speak for it"
+         in poll_descriptor/mod.rs (comments/strings blanked); found {}; a \
+         second call site needs its own ambiguous_zone wiring argument \
+         before this guard can speak for it",
+        call_args.len()
     );
-    let args_text = call
-        .split(");")
-        .next()
-        .expect("stage-9 seed call must be terminated");
-    let args: Vec<&str> = args_text
-        .split(',')
-        .map(str::trim)
-        .filter(|arg| !arg.is_empty())
-        .collect();
+    let args = &call_args[0];
     assert_eq!(
         args.len(),
         21,
