@@ -1,0 +1,549 @@
+{
+  "version": 1,
+  "description": "Cross-language deterministic NAT (CGNAT/NAPT64) forward/reverse golden vectors (#17124, R4-Q47-08). This file is the ONE source for the index/reverse arithmetic shared by Rust userspace-dp/src/nat/allocator/deterministic.rs (deterministic_indices_v4/v6, reverse_deterministic_v4/v6, build_pool_reverse_index) and Go pkg/nat/deterministic.go (poolParams/expandPoolV4/lookupForwardInPool/lookupReverseInPool). Both a cargo test (deterministic_nat_vectors_fixture_17124, next to deterministic.rs) and a go test (TestDeterministicNATVectorsSharedFixture17124) load THIS file; neither side keeps a copied table, so mutating any expected value turns BOTH red. Fields per vector: pool_spec (pool members as configured: bare IPv4, /32, or CIDR), pool_expanded (exact ordered allocator pool after mode-correct expansion; mode1=v4 dedupe-first-occurrence via expand_pool_address seen-set, mode2=NAT64 first-occurrence dedupe via parse_nat64_rule seen-set), pool_len (for large CIDR pools where listing pool_expanded would bloat the file), mode (1=v4,2=v6/NAPT64), port_low/port_high (effective range: pool port range or 1024-65535 default), block_size, host_prefix (subscriber CIDR: v4 CIDR or v6 /32|/64), derived blocks_per_ip=(port_high-port_low+1)/block_size, host_count (mode1: 2^(32-prefix); mode2: len(pool)*blocks_per_ip), forward rows (subscriber -> sub_idx/ip_idx/block_idx/external_ip/port block; external_ip null = must fail closed), reverse rows ((external_ip,port) -> subscriber; null = must fail closed). Rows include the three historical divergences: #9498 reverse-wrap, #14623 duplicate-pool, #15283 narrowed port range.",
+  "vectors": [
+    {
+      "id": "v4-golden-a",
+      "mode": 1,
+      "pool_spec": [
+        "203.0.113.1",
+        "203.0.113.2",
+        "203.0.113.3",
+        "203.0.113.4"
+      ],
+      "port_low": 1024,
+      "port_high": 65535,
+      "block_size": 512,
+      "host_prefix": "100.64.0.0/22",
+      "forward": [
+        {
+          "subscriber": "100.64.0.5",
+          "external_ip": "203.0.113.1",
+          "sub_idx": 5,
+          "ip_idx": 0,
+          "block_idx": 5,
+          "port_low": 3584,
+          "port_high": 4095
+        },
+        {
+          "subscriber": "100.64.1.0",
+          "external_ip": "203.0.113.3",
+          "sub_idx": 256,
+          "ip_idx": 2,
+          "block_idx": 4,
+          "port_low": 3072,
+          "port_high": 3583
+        },
+        {
+          "subscriber": "100.64.0.0",
+          "external_ip": "203.0.113.1",
+          "sub_idx": 0,
+          "ip_idx": 0,
+          "block_idx": 0,
+          "port_low": 1024,
+          "port_high": 1535
+        },
+        {
+          "subscriber": "100.64.3.255",
+          "external_ip": null,
+          "sub_idx": 1023,
+          "ip_idx": 8,
+          "block_idx": 15,
+          "note": "forward indices exist but ip_idx beyond pool (caller/Go must fail closed)"
+        }
+      ],
+      "reverse": [
+        {
+          "external_ip": "203.0.113.1",
+          "port": 3584,
+          "subscriber": "100.64.0.5",
+          "sub_idx": 5,
+          "ip_idx": 0,
+          "block_idx": 5,
+          "block_low": 3584,
+          "block_high": 4095
+        },
+        {
+          "external_ip": "203.0.113.3",
+          "port": 3072,
+          "subscriber": "100.64.1.0",
+          "sub_idx": 256,
+          "ip_idx": 2,
+          "block_idx": 4,
+          "block_low": 3072,
+          "block_high": 3583
+        },
+        {
+          "external_ip": "203.0.113.4",
+          "port": 65024,
+          "subscriber": "100.64.1.247",
+          "sub_idx": 503,
+          "ip_idx": 3,
+          "block_idx": 125,
+          "block_low": 65024,
+          "block_high": 65535
+        },
+        {
+          "external_ip": "203.0.113.99",
+          "port": 1024,
+          "subscriber": null,
+          "note": "external not in pool"
+        },
+        {
+          "external_ip": "203.0.113.1",
+          "port": 1023,
+          "subscriber": null,
+          "note": "port below port_low"
+        }
+      ]
+    },
+    {
+      "id": "v6-golden-32",
+      "mode": 2,
+      "pool_spec": [
+        "198.51.100.1",
+        "198.51.100.2",
+        "198.51.100.3",
+        "198.51.100.4"
+      ],
+      "port_low": 1024,
+      "port_high": 65535,
+      "block_size": 512,
+      "host_prefix": "2001:db8::/32",
+      "forward": [
+        {
+          "subscriber": "2001:db8:0:5::",
+          "external_ip": "198.51.100.1",
+          "sub_idx": 5,
+          "ip_idx": 0,
+          "block_idx": 5,
+          "port_low": 3584,
+          "port_high": 4095
+        },
+        {
+          "subscriber": "2001:db8:0:100::",
+          "external_ip": "198.51.100.3",
+          "sub_idx": 256,
+          "ip_idx": 2,
+          "block_idx": 4,
+          "port_low": 3072,
+          "port_high": 3583
+        },
+        {
+          "subscriber": "2001:db8:0:1f8::",
+          "external_ip": null,
+          "sub_idx": 504,
+          "note": "beyond pool-bounded host_count 504"
+        },
+        {
+          "subscriber": "2001:db9:0:5::",
+          "external_ip": null,
+          "sub_idx": null,
+          "note": "out-of-prefix shared word #4863"
+        },
+        {
+          "subscriber": "2001:db8::5",
+          "external_ip": "198.51.100.1",
+          "sub_idx": 0,
+          "ip_idx": 0,
+          "block_idx": 0,
+          "port_low": 1024,
+          "port_high": 1535,
+          "note": "subscriber word is octets[4..8]; trailing IID ignored"
+        }
+      ],
+      "reverse": [
+        {
+          "external_ip": "198.51.100.1",
+          "port": 3584,
+          "subscriber": "2001:db8:0:5::",
+          "sub_idx": 5,
+          "ip_idx": 0,
+          "block_idx": 5,
+          "block_low": 3584,
+          "block_high": 4095
+        },
+        {
+          "external_ip": "198.51.100.3",
+          "port": 3072,
+          "subscriber": "2001:db8:0:100::",
+          "sub_idx": 256,
+          "ip_idx": 2,
+          "block_idx": 4,
+          "block_low": 3072,
+          "block_high": 3583
+        },
+        {
+          "external_ip": "198.51.100.4",
+          "port": 65024,
+          "subscriber": "2001:db8:0:1f7::",
+          "sub_idx": 503,
+          "ip_idx": 3,
+          "block_idx": 125,
+          "block_low": 65024,
+          "block_high": 65535
+        }
+      ]
+    },
+    {
+      "id": "v6-golden-64",
+      "mode": 2,
+      "pool_spec": [
+        "198.51.100.1",
+        "198.51.100.2",
+        "198.51.100.3",
+        "198.51.100.4"
+      ],
+      "port_low": 1024,
+      "port_high": 65535,
+      "block_size": 512,
+      "host_prefix": "2001:db8::/64",
+      "forward": [
+        {
+          "subscriber": "2001:db8::7:0:0",
+          "external_ip": "198.51.100.1",
+          "sub_idx": 7,
+          "ip_idx": 0,
+          "block_idx": 7,
+          "port_low": 4608,
+          "port_high": 5119
+        },
+        {
+          "subscriber": "2001:db8:0:1:0:7::",
+          "external_ip": null,
+          "sub_idx": null,
+          "note": "out-of-/64-prefix shared word #4863"
+        },
+        {
+          "subscriber": "2001:db8::7:0:1",
+          "external_ip": "198.51.100.1",
+          "sub_idx": 7,
+          "ip_idx": 0,
+          "block_idx": 7,
+          "port_low": 4608,
+          "port_high": 5119,
+          "note": "subscriber word is octets[8..12]; trailing IID ignored"
+        }
+      ],
+      "reverse": [
+        {
+          "external_ip": "198.51.100.1",
+          "port": 4700,
+          "subscriber": "2001:db8::7:0:0",
+          "sub_idx": 7,
+          "ip_idx": 0,
+          "block_idx": 7,
+          "block_low": 4608,
+          "block_high": 5119
+        }
+      ]
+    },
+    {
+      "id": "v4-14623-duplicate-pool",
+      "mode": 1,
+      "pool_spec": [
+        "203.0.113.1/32",
+        "203.0.113.0/30"
+      ],
+      "port_low": 1024,
+      "port_high": 2047,
+      "block_size": 512,
+      "host_prefix": "100.64.0.0/29",
+      "pool_expanded": [
+        "203.0.113.1",
+        "203.0.113.0",
+        "203.0.113.2",
+        "203.0.113.3"
+      ],
+      "forward": [
+        {
+          "subscriber": "100.64.0.4",
+          "external_ip": "203.0.113.2",
+          "sub_idx": 4,
+          "ip_idx": 2,
+          "block_idx": 0,
+          "port_low": 1024,
+          "port_high": 1535
+        },
+        {
+          "subscriber": "100.64.0.6",
+          "external_ip": "203.0.113.3",
+          "sub_idx": 6,
+          "ip_idx": 3,
+          "block_idx": 0,
+          "port_low": 1024,
+          "port_high": 1535
+        },
+        {
+          "subscriber": "100.64.0.1",
+          "external_ip": "203.0.113.1",
+          "sub_idx": 1,
+          "ip_idx": 0,
+          "block_idx": 1,
+          "port_low": 1536,
+          "port_high": 2047
+        }
+      ],
+      "reverse": [
+        {
+          "external_ip": "203.0.113.2",
+          "port": 1024,
+          "subscriber": "100.64.0.4",
+          "sub_idx": 4,
+          "ip_idx": 2,
+          "block_idx": 0,
+          "block_low": 1024,
+          "block_high": 1535
+        },
+        {
+          "external_ip": "203.0.113.3",
+          "port": 1024,
+          "subscriber": "100.64.0.6",
+          "sub_idx": 6,
+          "ip_idx": 3,
+          "block_idx": 0,
+          "block_low": 1024,
+          "block_high": 1535
+        },
+        {
+          "external_ip": "203.0.113.0",
+          "port": 1536,
+          "subscriber": "100.64.0.3",
+          "sub_idx": 3,
+          "ip_idx": 1,
+          "block_idx": 1,
+          "block_low": 1536,
+          "block_high": 2047
+        }
+      ]
+    },
+    {
+      "id": "v6-14624-duplicate-pool-deduped",
+      "mode": 2,
+      "pool_spec": [
+        "198.51.100.1",
+        "198.51.100.1/32",
+        "198.51.100.2"
+      ],
+      "port_low": 1024,
+      "port_high": 65535,
+      "block_size": 512,
+      "host_prefix": "2001:db8::/32",
+      "pool_expanded": [
+        "198.51.100.1",
+        "198.51.100.2"
+      ],
+      "forward": [
+        {
+          "subscriber": "2001:db8:0:7e::",
+          "external_ip": "198.51.100.2",
+          "sub_idx": 126,
+          "ip_idx": 1,
+          "block_idx": 0,
+          "port_low": 1024,
+          "port_high": 1535,
+          "note": "deduped second position is 198.51.100.2 (#14624 first-occurrence)"
+        },
+        {
+          "subscriber": "2001:db8:0:fc::",
+          "external_ip": null,
+          "sub_idx": 252,
+          "note": "word 252 beyond deduped host_count 252 (2*126)"
+        }
+      ],
+      "reverse": [
+        {
+          "external_ip": "198.51.100.2",
+          "port": 1024,
+          "subscriber": "2001:db8:0:7e::",
+          "sub_idx": 126,
+          "ip_idx": 1,
+          "block_idx": 0,
+          "block_low": 1024,
+          "block_high": 1535
+        },
+        {
+          "external_ip": "198.51.100.1",
+          "port": 1024,
+          "subscriber": "2001:db8::",
+          "sub_idx": 0,
+          "ip_idx": 0,
+          "block_idx": 0,
+          "block_low": 1024,
+          "block_high": 1535
+        }
+      ]
+    },
+    {
+      "id": "v4-15283-narrow-port-range",
+      "mode": 1,
+      "pool_spec": [
+        "203.0.113.1/32",
+        "203.0.113.2/32"
+      ],
+      "port_low": 2000,
+      "port_high": 3000,
+      "block_size": 100,
+      "host_prefix": "100.64.0.0/24",
+      "forward": [
+        {
+          "subscriber": "100.64.0.5",
+          "external_ip": "203.0.113.1",
+          "sub_idx": 5,
+          "ip_idx": 0,
+          "block_idx": 5,
+          "port_low": 2500,
+          "port_high": 2599
+        },
+        {
+          "subscriber": "100.64.0.10",
+          "external_ip": "203.0.113.2",
+          "sub_idx": 10,
+          "ip_idx": 1,
+          "block_idx": 0,
+          "port_low": 2000,
+          "port_high": 2099
+        },
+        {
+          "subscriber": "100.64.0.19",
+          "external_ip": "203.0.113.2",
+          "sub_idx": 19,
+          "ip_idx": 1,
+          "block_idx": 9,
+          "port_low": 2900,
+          "port_high": 2999
+        },
+        {
+          "subscriber": "100.64.0.20",
+          "external_ip": null,
+          "sub_idx": 20,
+          "ip_idx": 2,
+          "block_idx": 0,
+          "note": "ip_idx beyond 2-address pool"
+        }
+      ],
+      "reverse": [
+        {
+          "external_ip": "203.0.113.2",
+          "port": 2500,
+          "subscriber": "100.64.0.15",
+          "sub_idx": 15,
+          "ip_idx": 1,
+          "block_idx": 5,
+          "block_low": 2500,
+          "block_high": 2599
+        },
+        {
+          "external_ip": "203.0.113.1",
+          "port": 1999,
+          "subscriber": null,
+          "note": "port below narrowed low 2000"
+        },
+        {
+          "external_ip": "203.0.113.1",
+          "port": 3000,
+          "subscriber": null,
+          "note": "offset 1000 block 10 >= blocks_per_ip 10"
+        }
+      ]
+    },
+    {
+      "id": "v6-15283-narrow-port-range",
+      "mode": 2,
+      "pool_spec": [
+        "198.51.100.1",
+        "198.51.100.2"
+      ],
+      "port_low": 2000,
+      "port_high": 3000,
+      "block_size": 100,
+      "host_prefix": "2001:db8::/32",
+      "forward": [
+        {
+          "subscriber": "2001:db8:0:5::",
+          "external_ip": "198.51.100.1",
+          "sub_idx": 5,
+          "ip_idx": 0,
+          "block_idx": 5,
+          "port_low": 2500,
+          "port_high": 2599
+        },
+        {
+          "subscriber": "2001:db8:0:f::",
+          "external_ip": "198.51.100.2",
+          "sub_idx": 15,
+          "ip_idx": 1,
+          "block_idx": 5,
+          "port_low": 2500,
+          "port_high": 2599
+        },
+        {
+          "subscriber": "2001:db8:0:14::",
+          "external_ip": null,
+          "sub_idx": 20,
+          "note": "word 20 beyond host_count 20 (2*10)"
+        }
+      ],
+      "reverse": [
+        {
+          "external_ip": "198.51.100.2",
+          "port": 2599,
+          "subscriber": "2001:db8:0:f::",
+          "sub_idx": 15,
+          "ip_idx": 1,
+          "block_idx": 5,
+          "block_low": 2500,
+          "block_high": 2599
+        },
+        {
+          "external_ip": "198.51.100.1",
+          "port": 3000,
+          "subscriber": null,
+          "note": "block 10 >= blocks_per_ip 10"
+        }
+      ]
+    },
+    {
+      "id": "v4-9498-reverse-wrap",
+      "mode": 1,
+      "pool_spec": [
+        "10.0.0.0/16",
+        "10.1.0.0/21"
+      ],
+      "port_low": 1024,
+      "port_high": 65535,
+      "block_size": 1,
+      "host_prefix": "100.64.0.0/32",
+      "pool_len": 67584,
+      "forward": [
+        {
+          "subscriber": "100.64.0.0",
+          "external_ip": "10.0.0.0",
+          "sub_idx": 0,
+          "ip_idx": 0,
+          "block_idx": 0,
+          "port_low": 1024,
+          "port_high": 1024
+        }
+      ],
+      "reverse": [
+        {
+          "external_ip": "10.1.4.16",
+          "port": 17408,
+          "subscriber": null,
+          "note": "#9498 wrap: ip_idx 66576 block 16384 checked product 4294967296 must fail closed, not wrap to subscriber 0"
+        },
+        {
+          "external_ip": "10.0.0.0",
+          "port": 1024,
+          "subscriber": "100.64.0.0",
+          "sub_idx": 0,
+          "ip_idx": 0,
+          "block_idx": 0,
+          "block_low": 1024,
+          "block_high": 1024
+        }
+      ]
+    }
+  ]
+}

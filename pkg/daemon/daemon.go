@@ -22,7 +22,6 @@ import (
 	"github.com/psaab/xpf/pkg/coalesce"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcprelay"
@@ -31,6 +30,7 @@ import (
 	"github.com/psaab/xpf/pkg/feeds"
 	"github.com/psaab/xpf/pkg/flowexport"
 	"github.com/psaab/xpf/pkg/frr"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/grpcapi"
 	"github.com/psaab/xpf/pkg/ipmon"
 	"github.com/psaab/xpf/pkg/ipsec"
@@ -129,10 +129,10 @@ type Daemon struct {
 	// here so a corrected commit re-arms it — #6741 owns that window).
 	// The three operator-facing management servers therefore receive
 	// liveDataPlane (daemon_dp_live.go), which re-reads this cell per
-	// call, instead of a startup snapshot of the handle; the conntrack
-	// GC, cluster SessionSync, and the userspace event-stream loop stay
-	// deliberate capture-once consumers (rationale in daemon_dp_live.go
-	// and pkg/daemon/README.md).
+	// call, instead of a startup snapshot of the handle; cluster
+	// SessionSync is the sole deliberate capture-once consumer and the
+	// userspace event-stream loop re-resolves per tick (rationale in
+	// daemon_dp_live.go and pkg/daemon/README.md).
 	dpCell atomic.Pointer[dpSlot]
 
 	// dataplaneArmed is the #5275 arm state: true ONLY while the runtime
@@ -863,7 +863,6 @@ type Daemon struct {
 	// sockets and capture probed destinations without touching the network
 	// (#5451).
 	neighborWarmDialer neighborWarmDialer
-	hbSuppressStart    atomic.Int64 // CLOCK_MONOTONIC nanos of first heartbeat suppression; 0 = inactive (#1792)
 	syncPrimeRetryGen  atomic.Uint64
 	// syncPrimeRetryBeforeSleepForTest blocks the retry loop at the
 	// sleep boundary for the 10387 drain-window cell. Nil in production.
@@ -987,7 +986,6 @@ type Daemon struct {
 	aggWg      sync.WaitGroup
 	aggStopped bool
 	vrrpMgr    *vrrp.Manager
-	gc         *conntrack.GC
 	startTime  time.Time // daemon start time; used to suppress stale config sync
 
 	// #846: applySem (capacity 1) serializes applyConfig + the
@@ -1070,6 +1068,14 @@ type Daemon struct {
 	// (#16601) — notably the DNS refresher's clone — so the pre-apply
 	// resolver does not resolve them again. Guarded by dnsRefreshMu.
 	dnsResolvedConfigs map[*config.Config]struct{}
+	// relayRefRGIndex is the per-packet DHCP-relay gate's precomputed
+	// ref→RG index (#17086), keyed by config pointer identity: rebuilt
+	// only when the active config pointer changes, so the per-packet
+	// Lookup stays O(1) instead of paying InterfaceRefRG's
+	// O(interfaces) build per packet. Guarded by relayRefRGIndexMu.
+	relayRefRGIndexMu sync.Mutex
+	relayRefRGIndex   *config.RefRGIndex
+	relayRefRGBase    *config.Config
 	// lastRethMembers records the local RETH member Linux names programmed by
 	// the previous apply (#16860). A member that leaves its RETH keeps the
 	// virtual MAC until the next apply restores its PermHWAddr; without this
@@ -1351,6 +1357,13 @@ type Daemon struct {
 	// ingress netdevs and cannot suppress a later unleased-DHCP interface guard.
 	// Updated and cleared alongside hostInboundCoveredAddrs under applySem.
 	hostInboundDHCPRetainedAddrs map[string]struct{}
+	// kernelKnobs is the #17068 BestEffortKernelKnob lifecycle registry:
+	// owners assert procfs knobs through it (prior captured on first
+	// assert) and release them on config removal so the host returns to
+	// its pre-assert state. Lazily created by knobs(); guarded by
+	// kernelKnobsMu because apply paths and ipmon actuation can race.
+	kernelKnobsMu sync.Mutex
+	kernelKnobs   *fsatomic.KernelKnobs
 	// lo0Enforced records whether the currently-loaded xpf_lo0 table is a REAL
 	// operator filter (the #6476 lo0 cold-boot fence gate). It is set true ONLY by
 	// a successful real InstallLo0 that RENDERED AT LEAST ONE KERNEL RULE. A cold-boot

@@ -5,7 +5,7 @@
 // wire fields: the forward `SessionKey`, the MAC/next-hop parsing, and
 // the #4565 NAT64 cross-family reverse-translation reconstruction. Pure
 // control-response reconstruction — no packet path, no allocation on the
-// worker loop. Bodies byte-for-byte identical to the pre-split source.
+// worker loop.
 
 use crate::afxdp::{self, SYNCED_IMPORT_REFUSED_PREFIX, SyncedSessionEntry};
 use crate::ip_proto::PROTO_GRE;

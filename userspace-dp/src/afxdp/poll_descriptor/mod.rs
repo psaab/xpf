@@ -543,9 +543,10 @@ use filter::{
     NonPbrInputFilterEval, SessionHitInputFilterEval, SessionHitPbrRouteRevalidation,
     apply_lo0_filter_action, collect_revoked_flow_cache_keys, emit_input_filter_log_match,
     evaluate_input_filter_on_session_hit, evaluate_non_pbr_input_filter,
-    evaluate_non_pbr_input_filter_counters_cached, evaluate_non_pbr_input_filter_log_only,
-    evaluate_non_pbr_input_filter_policers_cached, filter_terminal, host_inbound_gated_lo0_action,
-    input_filter_would_deny_before_screen, lo0_action_for_solicited_reply, policer_drop_action,
+    evaluate_non_pbr_input_filter_counters_cached,
+    evaluate_non_pbr_input_filter_policers_cached, filter_terminal,
+    host_inbound_gated_lo0_action, input_filter_would_deny_before_screen,
+    lo0_action_for_solicited_reply, policer_drop_action,
     revalidate_static_pbr_route_on_session_hit, stage11_input_filter_terminal,
 };
 use policy_revalidation::{
@@ -5014,9 +5015,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                         // emit. The log_match comes from the SAME counted
                         // evaluation at ~L838, so emitting it does not re-count
                         // the filter hit. The flow-cache descriptor populated
-                        // later (~L2615) stores the log via
-                        // evaluate_non_pbr_input_filter_log_only (the
-                        // non-counting variant) for cache-hit replay on
+                        // later stores the log via
+                        // established_input_filter_log (the non-counting
+                        // derivation, #17038) for cache-hit replay on
                         // SUBSEQUENT packets; the miss packet does not take the
                         // cache-hit path, so the same packet is never
                         // double-logged.
@@ -6877,11 +6878,12 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     };
                                     match worker_ctx.forwarding.nat64.allocate_source_for_worker(
                                         prefix_idx,
-                                        meta.protocol,
-                                        orig_src_v6,
+                                        // #17072: the flow's own SessionKey carries
+                                        // protocol/ports and its routing domain
+                                        // (#9680), so there is no loose scope
+                                        // `u32` to swap with `worker_id`.
+                                        &flow.forward_key,
                                         dst_v4,
-                                        flow.forward_key.src_port,
-                                        flow.forward_key.dst_port,
                                         now_ns,
                                         // #6522: THIS worker holds the NAT64
                                         // allocation it just made. Its
@@ -6897,10 +6899,6 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                         // told which addresses a DRAINING
                                         // source-NAT pool still holds.
                                         &worker_ctx.forwarding.source_nat_rules,
-                                        // #9680: the flow's routing domain keys the
-                                        // NAT64 BIB; release and the HA synced reserve
-                                        // read the same field off the session key.
-                                        flow.forward_key.routing_domain,
                                         Some(&worker_ctx.forwarding.iface_nat_allocators),
                                     ) {
                                         Ok((snat_v4, translated_port)) => {

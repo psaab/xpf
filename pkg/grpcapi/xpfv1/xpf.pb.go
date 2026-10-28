@@ -2567,8 +2567,13 @@ type GetGlobalStatsResponse struct {
 	ScreenDropDetails  map[string]uint64      `protobuf:"bytes,13,rep,name=screen_drop_details,json=screenDropDetails,proto3" json:"screen_drop_details,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	UnknownVlanDrops   uint64                 `protobuf:"varint,14,opt,name=unknown_vlan_drops,json=unknownVlanDrops,proto3" json:"unknown_vlan_drops,omitempty"`
 	DstMacDrops        uint64                 `protobuf:"varint,15,opt,name=dst_mac_drops,json=dstMacDrops,proto3" json:"dst_mac_drops,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// unavailable_counters names global counters the active dataplane does
+	// not populate (#17193, #13274): their numeric fields above are NOT
+	// authoritative and must not be read as measured zeros. Additive: old
+	// servers omit it, old clients ignore it.
+	UnavailableCounters []string `protobuf:"bytes,16,rep,name=unavailable_counters,json=unavailableCounters,proto3" json:"unavailable_counters,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *GetGlobalStatsResponse) Reset() {
@@ -2704,6 +2709,13 @@ func (x *GetGlobalStatsResponse) GetDstMacDrops() uint64 {
 		return x.DstMacDrops
 	}
 	return 0
+}
+
+func (x *GetGlobalStatsResponse) GetUnavailableCounters() []string {
+	if x != nil {
+		return x.UnavailableCounters
+	}
+	return nil
 }
 
 type GetZonesRequest struct {
@@ -7897,17 +7909,21 @@ func (x *VRRPInstanceInfo) GetPreempt() bool {
 }
 
 type MatchPoliciesRequest struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	FromZone        string                 `protobuf:"bytes,1,opt,name=from_zone,json=fromZone,proto3" json:"from_zone,omitempty"`
-	ToZone          string                 `protobuf:"bytes,2,opt,name=to_zone,json=toZone,proto3" json:"to_zone,omitempty"`
-	SourceIp        string                 `protobuf:"bytes,3,opt,name=source_ip,json=sourceIp,proto3" json:"source_ip,omitempty"`
-	DestinationIp   string                 `protobuf:"bytes,4,opt,name=destination_ip,json=destinationIp,proto3" json:"destination_ip,omitempty"`
-	DestinationPort int32                  `protobuf:"varint,5,opt,name=destination_port,json=destinationPort,proto3" json:"destination_port,omitempty"`
-	Protocol        string                 `protobuf:"bytes,6,opt,name=protocol,proto3" json:"protocol,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FromZone      string                 `protobuf:"bytes,1,opt,name=from_zone,json=fromZone,proto3" json:"from_zone,omitempty"`
+	ToZone        string                 `protobuf:"bytes,2,opt,name=to_zone,json=toZone,proto3" json:"to_zone,omitempty"`
+	SourceIp      string                 `protobuf:"bytes,3,opt,name=source_ip,json=sourceIp,proto3" json:"source_ip,omitempty"`
+	DestinationIp string                 `protobuf:"bytes,4,opt,name=destination_ip,json=destinationIp,proto3" json:"destination_ip,omitempty"`
+	// destination_port / source_port are proto3 `optional` (#17081): absent
+	// means the query omitted the port (a port-constrained term never
+	// matches); a present 0 is a literal L4 port 0, which a `0-N` term
+	// matches when L4 is present. Before #17081 the plain int32 encoded
+	// omitted as 0 and returned the inverse verdict for literal port 0.
+	DestinationPort *int32 `protobuf:"varint,5,opt,name=destination_port,json=destinationPort,proto3,oneof" json:"destination_port,omitempty"`
+	Protocol        string `protobuf:"bytes,6,opt,name=protocol,proto3" json:"protocol,omitempty"`
 	// source_port lets the simulator honor source-port-constrained application
-	// terms (#3042). 0 = unspecified; a term constrained on source-port never
-	// matches without a value, while unconstrained terms may still match.
-	SourcePort int32 `protobuf:"varint,7,opt,name=source_port,json=sourcePort,proto3" json:"source_port,omitempty"`
+	// terms (#3042). Absent = unspecified (see destination_port, #17081).
+	SourcePort *int32 `protobuf:"varint,7,opt,name=source_port,json=sourcePort,proto3,oneof" json:"source_port,omitempty"`
 	// icmp_type / icmp_code let the simulator honor ICMP/ICMPv6 type-constrained
 	// application terms (#3284, for example junos-icmp-ping = type 8). junos-ping
 	// is protocol-only in the version-bounded predefined definitions (#11340).
@@ -7999,8 +8015,8 @@ func (x *MatchPoliciesRequest) GetDestinationIp() string {
 }
 
 func (x *MatchPoliciesRequest) GetDestinationPort() int32 {
-	if x != nil {
-		return x.DestinationPort
+	if x != nil && x.DestinationPort != nil {
+		return *x.DestinationPort
 	}
 	return 0
 }
@@ -8013,8 +8029,8 @@ func (x *MatchPoliciesRequest) GetProtocol() string {
 }
 
 func (x *MatchPoliciesRequest) GetSourcePort() int32 {
-	if x != nil {
-		return x.SourcePort
+	if x != nil && x.SourcePort != nil {
+		return *x.SourcePort
 	}
 	return 0
 }
@@ -10225,7 +10241,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\rowned_ifindex\x18\x05 \x01(\rR\fownedIfindex\x12!\n" +
 	"\fframe_digest\x18\x06 \x01(\fR\vframeDigest\x12\x16\n" +
 	"\x06reason\x18\a \x01(\tR\x06reason\"\x17\n" +
-	"\x15GetGlobalStatsRequest\"\xf2\x05\n" +
+	"\x15GetGlobalStatsRequest\"\xa5\x06\n" +
 	"\x16GetGlobalStatsResponse\x12\x1d\n" +
 	"\n" +
 	"rx_packets\x18\x01 \x01(\x04R\trxPackets\x12\x1d\n" +
@@ -10244,7 +10260,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\x14host_inbound_allowed\x18\f \x01(\x04R\x12hostInboundAllowed\x12e\n" +
 	"\x13screen_drop_details\x18\r \x03(\v25.xpf.v1.GetGlobalStatsResponse.ScreenDropDetailsEntryR\x11screenDropDetails\x12,\n" +
 	"\x12unknown_vlan_drops\x18\x0e \x01(\x04R\x10unknownVlanDrops\x12\"\n" +
-	"\rdst_mac_drops\x18\x0f \x01(\x04R\vdstMacDrops\x1aD\n" +
+	"\rdst_mac_drops\x18\x0f \x01(\x04R\vdstMacDrops\x121\n" +
+	"\x14unavailable_counters\x18\x10 \x03(\tR\x13unavailableCounters\x1aD\n" +
 	"\x16ScreenDropDetailsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x11\n" +
@@ -10676,21 +10693,23 @@ const file_xpf_proto_rawDesc = "" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12\x1a\n" +
 	"\bpriority\x18\x04 \x01(\x05R\bpriority\x12+\n" +
 	"\x11virtual_addresses\x18\x05 \x03(\tR\x10virtualAddresses\x12\x18\n" +
-	"\apreempt\x18\x06 \x01(\bR\apreempt\"\xb3\x03\n" +
+	"\apreempt\x18\x06 \x01(\bR\apreempt\"\xe2\x03\n" +
 	"\x14MatchPoliciesRequest\x12\x1b\n" +
 	"\tfrom_zone\x18\x01 \x01(\tR\bfromZone\x12\x17\n" +
 	"\ato_zone\x18\x02 \x01(\tR\x06toZone\x12\x1b\n" +
 	"\tsource_ip\x18\x03 \x01(\tR\bsourceIp\x12%\n" +
-	"\x0edestination_ip\x18\x04 \x01(\tR\rdestinationIp\x12)\n" +
-	"\x10destination_port\x18\x05 \x01(\x05R\x0fdestinationPort\x12\x1a\n" +
-	"\bprotocol\x18\x06 \x01(\tR\bprotocol\x12\x1f\n" +
-	"\vsource_port\x18\a \x01(\x05R\n" +
-	"sourcePort\x12 \n" +
-	"\ticmp_type\x18\b \x01(\rH\x00R\bicmpType\x88\x01\x01\x12 \n" +
-	"\ticmp_code\x18\t \x01(\rH\x01R\bicmpCode\x88\x01\x01\x12,\n" +
+	"\x0edestination_ip\x18\x04 \x01(\tR\rdestinationIp\x12.\n" +
+	"\x10destination_port\x18\x05 \x01(\x05H\x00R\x0fdestinationPort\x88\x01\x01\x12\x1a\n" +
+	"\bprotocol\x18\x06 \x01(\tR\bprotocol\x12$\n" +
+	"\vsource_port\x18\a \x01(\x05H\x01R\n" +
+	"sourcePort\x88\x01\x01\x12 \n" +
+	"\ticmp_type\x18\b \x01(\rH\x02R\bicmpType\x88\x01\x01\x12 \n" +
+	"\ticmp_code\x18\t \x01(\rH\x03R\bicmpCode\x88\x01\x01\x12,\n" +
 	"\x12non_first_fragment\x18\n" +
 	" \x01(\bR\x10nonFirstFragment\x12+\n" +
-	"\x11ingress_interface\x18\v \x01(\tR\x10ingressInterfaceB\f\n" +
+	"\x11ingress_interface\x18\v \x01(\tR\x10ingressInterfaceB\x13\n" +
+	"\x11_destination_portB\x0e\n" +
+	"\f_source_portB\f\n" +
 	"\n" +
 	"_icmp_typeB\f\n" +
 	"\n" +

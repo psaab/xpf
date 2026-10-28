@@ -10605,9 +10605,9 @@ fn config_apply_builds_both_per_zone_counter_slot_maps_3651() {
     // carry-forward the store is recreated empty and every count resets to 0 on
     // every commit.
     record_zone_flood_drop(&first.flood_counter_slot_map, TRUST, "syn-flood");
-    flush_recorded_flood_counters(&first.flood_counter_store, &first.flood_counter_slot_map);
+    flush_recorded_flood_counters(&first.flood_counter_store, &first.flood_counter_slot_map, &first.flood_counter_caches);
     record_zone_traffic(&first.zone_counter_slot_map, TRUST, UNTRUST, 1500);
-    flush_recorded_zone_counters(&first.zone_counter_store, &first.zone_counter_slot_map);
+    flush_recorded_zone_counters(&first.zone_counter_store, &first.zone_counter_slot_map, &first.zone_counter_caches);
 
     let second = build_forwarding_state_with_policy_counters_and_previous(
         &snapshot,
@@ -10617,7 +10617,7 @@ fn config_apply_builds_both_per_zone_counter_slot_maps_3651() {
     )
     .expect("re-apply of a clean snapshot must build");
 
-    let flood = second.flood_counter_store.snapshot();
+    let flood = crate::afxdp::flood_counters::flood_counter_snapshot(&second.flood_counter_store);
     let trust_flood = flood
         .iter()
         .find(|r| r.zone_id == TRUST)
@@ -10628,7 +10628,7 @@ fn config_apply_builds_both_per_zone_counter_slot_maps_3651() {
          per-zone counters survive a commit"
     );
 
-    let traffic = second.zone_counter_store.snapshot();
+    let traffic = crate::afxdp::zone_counters::zone_counter_snapshot(&second.zone_counter_store);
     let trust_traffic = traffic
         .iter()
         .find(|r| r.zone_id == TRUST)
@@ -10806,9 +10806,9 @@ fn zone_counter_prev_state() -> ForwardingState {
     };
     let prev = build_forwarding_state(&prev_snapshot);
     record_zone_traffic(&prev.zone_counter_slot_map, 100, 200, 64);
-    flush_recorded_zone_counters(&prev.zone_counter_store, &prev.zone_counter_slot_map);
+    flush_recorded_zone_counters(&prev.zone_counter_store, &prev.zone_counter_slot_map, &prev.zone_counter_caches);
     assert_eq!(
-        prev.zone_counter_store.snapshot().len(),
+        crate::afxdp::zone_counters::zone_counter_snapshot(&prev.zone_counter_store).len(),
         2,
         "both zones must be counting before the build under test"
     );
@@ -10834,7 +10834,7 @@ fn zone_counter_snapshot_with_zones(zone_ids: &[u32]) -> ConfigSnapshot {
 /// The candidate zone set every rejection row below builds on: it DROPS live
 /// zone 200 and ADDS a brand-new zone 300, so one drive exercises both live-store
 /// mutations a rejected build must not make — the destructive `reconcile` prune
-/// of 200, and the `ZoneCounterSlotMap::build` get-or-create of 300.
+/// of 200, and the `ZoneSlotMap::build` get-or-create of 300.
 const ZONE_COUNTER_CANDIDATE_ZONES: [u32; 2] = [100, 300];
 
 /// FOUR of the inner builder's ten fallible integrity belts, chosen by
@@ -11348,7 +11348,7 @@ fn rejected_build_does_not_prune_live_zone_counters() {
             "{label}: rejected through a different belt than the row names              ({err:?}) — the row is no longer exercising the belt it is here for"
         );
 
-        let live = prev.zone_counter_store.snapshot();
+        let live = crate::afxdp::zone_counters::zone_counter_snapshot(&prev.zone_counter_store);
         assert_eq!(
             live.len(),
             2,
@@ -11364,7 +11364,7 @@ fn rejected_build_does_not_prune_live_zone_counters() {
 #[test]
 fn rejected_build_does_not_create_zone_blocks_in_the_live_store() {
     // The mirror image of the prune, and the half the sparse snapshot hides.
-    // `ZoneCounterSlotMap::build` GET-OR-CREATES one atomic block per
+    // `ZoneSlotMap::build` GET-OR-CREATES one atomic block per
     // SLOT-ASSIGNED zone — a subset of the configured set, since it skips zone
     // id 0 and stops at `ZONE_COUNTER_ASSIGNABLE_SLOTS` — resolved out of the
     // store it is handed — and that is
@@ -11695,9 +11695,7 @@ fn accepted_build_defers_the_prune_to_the_commit_point() {
     // Half 1 — the build itself is now ADDITIVE ONLY. Zone 200 is absent from
     // this snapshot and its totals are still here, because no apply has
     // committed yet.
-    let mut after_build: Vec<u32> = next
-        .zone_counter_store
-        .snapshot()
+    let mut after_build: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&next.zone_counter_store)
         .iter()
         .map(|r| r.zone_id)
         .collect();
@@ -11714,7 +11712,7 @@ fn accepted_build_defers_the_prune_to_the_commit_point() {
     // moving it) reds here, and every rejected-apply assertion stays green.
     commit_zone_counter_prune(&next);
 
-    let live = next.zone_counter_store.snapshot();
+    let live = crate::afxdp::zone_counters::zone_counter_snapshot(&next.zone_counter_store);
     assert_eq!(
         live.len(),
         1,
@@ -11727,14 +11725,14 @@ fn accepted_build_defers_the_prune_to_the_commit_point() {
     );
     // The prune is on the shared store, so the previous state's handle
     // observes it too (same Arc).
-    assert_eq!(prev.zone_counter_store.snapshot().len(), 1);
+    assert_eq!(crate::afxdp::zone_counters::zone_counter_snapshot(&prev.zone_counter_store).len(), 1);
 }
 
 // ── #3651 flood half of the #5716/#6832 rejected-build guarantee ──────
 //
 // The flood-event store is the traffic store's exact sibling: `Arc`-backed,
 // carried forward through the SAME `previous` handle, get-or-created per
-// slot-assigned zone by `FloodCounterSlotMap::build`, and pruned by the same
+// slot-assigned zone by `ZoneSlotMap::build`, and pruned by the same
 // `reconcile`. #6938 therefore binds it inside `attach_zone_counters` and
 // prunes it inside `commit_zone_counter_prune` rather than giving it its own
 // pair, so it inherits the ordering structurally.
@@ -11755,7 +11753,7 @@ fn flood_counter_prev_state() -> ForwardingState {
     let prev = zone_counter_prev_state();
     record_zone_flood_drop(&prev.flood_counter_slot_map, 100, "syn-flood");
     record_zone_flood_drop(&prev.flood_counter_slot_map, 200, "syn-flood");
-    flush_recorded_flood_counters(&prev.flood_counter_store, &prev.flood_counter_slot_map);
+    flush_recorded_flood_counters(&prev.flood_counter_store, &prev.flood_counter_slot_map, &prev.flood_counter_caches);
     assert_eq!(
         flood_store_zone_ids(&prev),
         vec![100, 200],
@@ -11766,9 +11764,7 @@ fn flood_counter_prev_state() -> ForwardingState {
 
 /// Sorted zone ids currently tracked by a state's flood store.
 fn flood_store_zone_ids(state: &ForwardingState) -> Vec<u32> {
-    let mut ids: Vec<u32> = state
-        .flood_counter_store
-        .snapshot()
+    let mut ids: Vec<u32> = crate::afxdp::flood_counters::flood_counter_snapshot(&state.flood_counter_store)
         .iter()
         .map(|r| r.zone_id)
         .collect();
@@ -11851,7 +11847,7 @@ fn accepted_build_defers_the_flood_prune_to_the_commit_point_3651() {
          well as the traffic store — commit_zone_counter_prune reconciles both"
     );
     // The survivor keeps its carried-forward count rather than resetting.
-    let live = next.flood_counter_store.snapshot();
+    let live = crate::afxdp::flood_counters::flood_counter_snapshot(&next.flood_counter_store);
     assert_eq!(live[0].zone_id, 100);
     assert!(
         live[0].syn_flood_events > 0,
@@ -12508,7 +12504,7 @@ fn discovered_prune_families() -> Vec<String> {
 /// The discovery itself, over arbitrary source, so its own behaviour can be
 /// measured rather than argued.
 fn prune_families_in(src: &str) -> Vec<String> {
-    let cleaned = crate::afxdp::worker_queue::tests::blank_comments_and_strings(src);
+    let cleaned = crate::test_support::source_scan::blank_comments_and_strings(src);
     let mut out = Vec::new();
     for line in cleaned.lines() {
         // Keyed on `fn NAME(`, NOT on the visibility modifier in front of it.
@@ -12578,7 +12574,7 @@ fn commit_something_else(a: u8) {}
 fn afxdp_production_sources() -> Vec<(String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp");
     let mut files = Vec::new();
-    crate::afxdp::worker_queue::tests::afxdp_rs_files(&root, &mut files);
+    crate::test_support::source_scan::afxdp_rs_files(&root, &mut files);
     let mut out = Vec::new();
     for path in files {
         let rel = path
@@ -12586,13 +12582,13 @@ fn afxdp_production_sources() -> Vec<(String, String)> {
             .expect("under src/afxdp")
             .to_string_lossy()
             .replace('\\', "/");
-        if crate::afxdp::worker_queue::tests::is_fixture(&root, &rel) {
+        if crate::test_support::source_scan::is_fixture(&root, &rel) {
             continue;
         }
         let src = std::fs::read_to_string(&path).expect("read source");
         out.push((
             rel,
-            crate::afxdp::worker_queue::tests::blank_comments_and_strings(&src),
+            crate::test_support::source_scan::blank_comments_and_strings(&src),
         ));
     }
     out
@@ -12714,7 +12710,7 @@ fn rejected_apply_then_retry_is_a_reachable_sequence_7015() {
     // two unrelated states — i.e. that the rejected state is a resting place a
     // retry departs from.
     let src = include_str!("../coordinator/tests.rs");
-    let cleaned = crate::afxdp::worker_queue::tests::blank_comments_and_strings(src);
+    let cleaned = crate::test_support::source_scan::blank_comments_and_strings(src);
     for needle in [
         "fn rejected_apply_does_not_prune_live_zone_counters_6832(",
         "fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832(",

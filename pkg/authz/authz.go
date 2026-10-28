@@ -171,25 +171,13 @@ func Authorize(cfg *config.Config, p Principal, required config.LoginClassPermis
 	return nil
 }
 
-// PermissionName renders a coarse permission for a denial message using the
-// Junos vocabulary an operator sees in `system login class ... permissions`.
+// PermissionName renders a coarse permission for a denial message. The
+// rendering table is single-sourced in config.LoginClassPermission.String
+// (#17121); this wrapper exists so denial/log call sites name the authz
+// surface. The word printed here is the same word the commit advisory
+// prints for the same permission.
 func PermissionName(p config.LoginClassPermission) string {
-	switch p {
-	case config.PermView:
-		return "view"
-	case config.PermClear:
-		return "clear"
-	case config.PermControl:
-		return "control"
-	case config.PermConfig:
-		return "configure"
-	case config.PermMaint:
-		return "maintenance"
-	case config.PermAll:
-		return "all"
-	default:
-		return fmt.Sprintf("permission(%d)", int(p))
-	}
+	return p.String()
 }
 
 // PrincipalForUID builds the principal for a kernel-reported peer UID by

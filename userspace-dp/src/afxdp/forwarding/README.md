@@ -827,7 +827,7 @@ an interface that declared an interface-level stanza and is not a
 management/cluster-control lifeline. `forwarding_build::interfaces`
 classifies it into `ForwardingState::ifindex_host_inbound`, keyed by the
 interface's own **LOGICAL** unit ifindex (`iface.ifindex`). The local-delivery
-admit path calls `host_inbound_admits_iface`, which prefers the per-INTERFACE
+admit path calls `host_inbound_admits_iface_for_destination`, which prefers the per-INTERFACE
 set when the ingress ifindex has one and otherwise falls back to the
 zone-keyed `host_inbound_admits` — so a service exposed on one interface of a
 zone is admitted there while the zone-default set (possibly empty →
@@ -841,7 +841,7 @@ with the resolved logical ingress ifindex — NOT the raw physical bind port in
 `meta.ingress_vlan_id` selects the unit; the caller resolves `(parent, vlan) →
 logical` once via `resolve_ingress_logical_ifindex` (untagged ports resolve
 physical == logical) and threads it into `host_inbound_gated_lo0_action`, which
-forwards it to `host_inbound_admits_iface`. This mirrors the sibling
+forwards it to `host_inbound_admits_iface_for_destination`. This mirrors the sibling
 input-filter, zone-pair (#3021), screen (#3022), and CoS (#3026) sites — every
 per-ingress map keyed by the logical unit resolves first. Before #3609 the gate
 passed the raw physical ifindex, so a VLAN sub-interface's override was missed
@@ -920,7 +920,7 @@ global-zone admit arm and admit every host-bound service (SSH/NETCONF/BGP/SNMP)
 on that interface — an asymmetry vs the #2391/#3405 fail-closed posture. To
 restore symmetry, `populate_interfaces` inserts an EMPTY `ZoneHostInbound`
 sentinel into `ifindex_host_inbound` keyed by that interface's logical ifindex,
-so the ingress-interface-keyed `host_inbound_admits_iface` DENIES host-bound
+so the ingress-interface-keyed `host_inbound_admits_iface_for_destination` DENIES host-bound
 services there. The insert is scoped to an interface that (a) is unzoned, (b)
 actually registered a `local_v4`/`local_v6` target, (c) has no explicit
 per-interface `host_inbound_configured` override (never clobber the operator's
@@ -1143,7 +1143,7 @@ unnecessary given the local-dest shunt.
 ### Host-inbound ordering: IKE admission and SA-gated ESP-in-UDP (#10516 + #4323 Option B + #6471)
 
 Stage 11 runs BEFORE the per-zone host-inbound admission gate
-(`host_inbound_admits_iface`) and, on a match, short-circuits the poll
+(`host_inbound_admits_iface_for_destination`) and, on a match, short-circuits the poll
 loop (`Passthrough`/`Denied`), so a packet it claims never reaches the
 later local-delivery gate. Within Stage 11 the admission split is by
 class (`classify_ipsec_admission`):

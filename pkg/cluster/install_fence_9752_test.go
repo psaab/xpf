@@ -110,7 +110,7 @@ func TestCapableDiscoveryRearmsColdPrimeAfterSuppression9752(t *testing.T) {
 	if got := len(ss.sendCh); got != 0 {
 		t.Fatal("FIXTURE: undiscovered send must be withheld")
 	}
-	if !ss.installTableSuppressDebt.Load() {
+	if !ss.peerIncarnationState().installTableSuppressDebt.Load() {
 		t.Fatal("FIXTURE: suppression must record debt")
 	}
 	// Capable discovery transfers the debt into a re-arm.
@@ -119,7 +119,7 @@ func TestCapableDiscoveryRearmsColdPrimeAfterSuppression9752(t *testing.T) {
 	if !ss.needColdPrime.Load() {
 		t.Fatal("capable discovery with suppress debt must re-arm the cold prime")
 	}
-	if ss.installTableSuppressDebt.Load() {
+	if ss.peerIncarnationState().installTableSuppressDebt.Load() {
 		t.Error("re-arm must consume the debt (no double-pay on re-discovery)")
 	}
 }
@@ -144,7 +144,7 @@ func TestIncapableDiscoveryDoesNotRearm9752(t *testing.T) {
 	if ss.needColdPrime.Load() {
 		t.Error("incapable discovery must not re-arm (peer cannot take a stamped snapshot)")
 	}
-	if !ss.installTableSuppressDebt.Load() {
+	if !ss.peerIncarnationState().installTableSuppressDebt.Load() {
 		t.Error("debt must survive an incapable discovery (still owed)")
 	}
 }

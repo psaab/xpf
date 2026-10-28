@@ -11,7 +11,6 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
@@ -253,7 +252,7 @@ func TestCollectEmitsCounterReadErrorsAfterSubcollectors(t *testing.T) {
 	defer func() { readHostInboundDenyCounters = orig }()
 
 	store := newDescriptorCoverageStore(t)
-	srv := &Server{store: store, gc: conntrack.NewGC(nil, time.Minute), startTime: time.Now()}
+	srv := &Server{store: store, startTime: time.Now()}
 	srv.dp = &policyErrScrapeDP{&descriptorCoverageDP{
 		Manager: dataplane.New(),
 		status:  dpuserspace.ProcessStatus{},

@@ -679,7 +679,6 @@ fn wg_tunnel_status_carries_endpoint_resolver_counters_7936() {
             spawned_outer_mtu: 1420,
             spawned_outer_bind_device: None,
             spawned_per_peer_outer_mtu: std::collections::HashMap::new(),
-            spawned_peer_config: Vec::new(),
             last_spawn_attempt_ns: 0,
             spawned_kernel_transport: crate::afxdp::types::WgKernelTransport::Deliver,
             resolver_telemetry: Some(std::sync::Arc::clone(&telemetry)),
@@ -776,7 +775,7 @@ fn refresh_status_publishes_policy_revoked_sessions_total_10021() {
     };
     assert_eq!(state.status.policy_revoked_sessions_total, 0);
 
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     assert_eq!(
         state.status.policy_revoked_sessions_total, 37,
@@ -801,7 +800,7 @@ fn refresh_status_publishes_snat_revoked_sessions_total_16215() {
         snapshot_policy_mismatch_total: 0,
     };
     assert_eq!(state.status.snat_revoked_sessions_total, 0);
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
     assert_eq!(
         state.status.snat_revoked_sessions_total, 4,
         "refresh_status must publish the live per-binding SNAT-revocation sum (#16215)"
@@ -828,7 +827,7 @@ fn refresh_status_stamps_zone_and_flood_layout_versions_when_quiet_14619() {
     assert!(!state.afxdp.zone_counter_overflow_active());
     assert!(!state.afxdp.flood_counter_overflow_active());
 
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     assert_eq!(
         state.status.zone_counter_layout_version,
@@ -859,10 +858,10 @@ fn refresh_status_stamps_zone_and_flood_layout_versions_when_quiet_14619() {
     state
         .afxdp
         .seed_zone_traffic_counter_for_test(7, "trust", 1500);
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
     assert!(!state.status.zone_traffic_counters.is_empty());
     state.afxdp.clear_zone_counters();
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
     assert!(
         state.status.zone_traffic_counters.is_empty(),
         "post-clear snapshot must be empty (all-zero rows dropped)"
@@ -911,7 +910,7 @@ fn process_status_exports_nat64_over_budget_and_deterministic_downgrade_counters
         quarantined_after_panic: false,
         snapshot_policy_mismatch_total: 0,
     };
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     let json = serde_json::to_value(&state.status).expect("status serializes");
     assert!(
@@ -994,7 +993,7 @@ fn unzoned_policy_denial_counters_reach_status_and_policy_snapshot_11503() {
         quarantined_after_panic: false,
         snapshot_policy_mismatch_total: 0,
     };
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     assert_eq!(state.status.unzoned_ingress_denied_total, ingress_counted);
     assert_eq!(state.status.unzoned_egress_denied_total, egress_counted);
@@ -1053,7 +1052,7 @@ fn refresh_status_projects_delegated_slow_path_status_10069() {
         snapshot_policy_mismatch_total: 0,
     };
 
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     let json = serde_json::to_value(&state.status).expect("status serializes");
     assert_eq!(json["slow_path_delegated"]["active"], true);

@@ -492,8 +492,8 @@ fn completion_token(e: &OverlapEntry) -> Option<OverlapCompletionToken> {
 
 /// Dry-run merge of `new` into `len` ranges: sort by start, coalesce adjacency
 /// (`nxt.0 <= cur.1`), return the merged set — or `Err(())` on would-overflow.
-/// Shared by [`OverlapTracker::check_overlap`] (discards) and
-/// [`OverlapTracker::check_and_record`] (commits) so their verdicts agree by construction.
+/// Shared by [`OverlapTracker::check_overlap_fragment_detailed`] (discards) and
+/// [`OverlapTracker::check_and_record_fragment_detailed`] (commits) so their verdicts agree by construction.
 fn merge_ranges(
     ranges: &[(u32, u32); OVERLAP_MAX_RANGES],
     len: usize,
@@ -688,12 +688,11 @@ impl OverlapTracker {
         overlap_shard_index_seeded(key, self.seed)
     }
 
-    /// Pure overlap CHECK: same verdict [`Self::check_and_record`] would return, but
-    /// records nothing, refreshes nothing, allocates nothing (no shard-full condition).
-    /// The early (pre-enforcement) hook uses this — dropping an overlap before policy/NAT
-    /// verdicts are earned — while recording happens post-commit at the TX site, so
-    /// refused traffic never plants ranges (no cross-domain plant-then-duplicate
-    /// poisoning, no flood-driven squat behind drops).
+    /// Test-only pure overlap CHECK (`is_last = false`). Same verdict
+    /// [`Self::record_and_settle_non_terminal`] would return, but records nothing,
+    /// refreshes nothing, allocates nothing (no shard-full condition). Production
+    /// checks use [`Self::check_overlap_fragment_detailed`] directly.
+    #[cfg(test)]
     pub(crate) fn check_overlap(
         &self,
         key: OverlapKey,
@@ -707,6 +706,9 @@ impl OverlapTracker {
         result.dropped
     }
 
+    /// Test-only pure overlap CHECK for an explicit `is_last`; production
+    /// checks use [`Self::check_overlap_fragment_detailed`] directly.
+    #[cfg(test)]
     pub(crate) fn check_overlap_fragment(
         &self,
         key: OverlapKey,
@@ -719,17 +721,6 @@ impl OverlapTracker {
         let result =
             self.check_overlap_fragment_detailed(key, start, end, is_last, now_ns, drop_counter);
         result.dropped
-    }
-
-    pub(crate) fn check_overlap_detailed(
-        &self,
-        key: OverlapKey,
-        start: u32,
-        end: u32,
-        now_ns: u64,
-        drop_counter: &AtomicU64,
-    ) -> OverlapCheckResult {
-        self.check_overlap_fragment_detailed(key, start, end, false, now_ns, drop_counter)
     }
 
     pub(crate) fn check_overlap_fragment_detailed(
@@ -814,15 +805,21 @@ impl OverlapTracker {
         }
     }
 
-    /// Late (post-commit) check AND record: re-checks `(start, end)` under the shard lock
-    /// (closing the cross-worker race between the early [`Self::check_overlap`] and the
-    /// commit), then records on pass (coalescing adjacency, refreshing the idle deadline,
-    /// LRU-refreshing). Returns `true` (drop, entry left byte-identical) on: strict
-    /// overlap, empty range (counted to `drop_counter`), range-cap overflow (`OVERFLOW`),
-    /// or shard-full (`SHARD_FULL`). Only admitted (forwarding) fragments reach this —
-    /// refused traffic never plants ranges. The caller selects `drop_counter`
-    /// (`DROPPED` for the pre-translation key, `POST_NAT_DROPPED` for the translated key).
-    pub(crate) fn check_and_record(
+    /// Test-only late check AND record + immediate settle: re-checks `(start, end)`
+    /// under the shard lock (closing the cross-worker race between the early
+    /// check and the commit), then records on pass (coalescing adjacency,
+    /// refreshing the idle deadline, LRU-refreshing) and settles the admission
+    /// at once with `is_last = false`. Production records with
+    /// [`Self::check_and_record_fragment_detailed`] and settles later via
+    /// [`Self::commit_admission`] / [`Self::fail_admission`]. Returns `true`
+    /// (drop, entry left byte-identical) on: strict overlap, empty range
+    /// (counted to `drop_counter`), range-cap overflow (`OVERFLOW`), or
+    /// shard-full (`SHARD_FULL`). Only admitted (forwarding) fragments reach
+    /// this — refused traffic never plants ranges. The caller selects
+    /// `drop_counter` (`DROPPED` for the pre-translation key,
+    /// `POST_NAT_DROPPED` for the translated key).
+    #[cfg(test)]
+    pub(crate) fn record_and_settle_non_terminal(
         &self,
         key: OverlapKey,
         start: u32,
@@ -839,7 +836,9 @@ impl OverlapTracker {
         dropped
     }
 
-    pub(crate) fn check_and_record_fragment(
+    /// Test-only [`Self::record_and_settle_non_terminal`] for an explicit `is_last`.
+    #[cfg(test)]
+    pub(crate) fn record_fragment_and_settle(
         &self,
         key: OverlapKey,
         start: u32,
@@ -857,7 +856,10 @@ impl OverlapTracker {
         dropped
     }
 
-    pub(crate) fn check_and_record_detailed(
+    /// Test-only detailed record with `is_last = false`; returns the unsettled
+    /// result so the caller settles it explicitly.
+    #[cfg(test)]
+    pub(crate) fn record_non_terminal_detailed(
         &self,
         key: OverlapKey,
         start: u32,
@@ -1541,8 +1543,8 @@ mod tests {
     #[test]
     fn adjacent_ranges_do_not_overlap_9950() {
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
-        assert!(!t.check_and_record(v4_key(), 16, 24, 2_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(v4_key(), 16, 24, 2_000, &FRAG_OVERLAP_DROPPED));
         assert_eq!(t.len(), 1);
     }
 
@@ -1551,8 +1553,8 @@ mod tests {
         for (a, b) in [((0u32, 16u32), (8u32, 24u32)), ((8, 24), (0, 16))] {
             let t = OverlapTracker::new();
             let d = dropped_delta(|| {
-                assert!(!t.check_and_record(v4_key(), a.0, a.1, 1_000, &FRAG_OVERLAP_DROPPED));
-                assert!(t.check_and_record(v4_key(), b.0, b.1, 2_000, &FRAG_OVERLAP_DROPPED));
+                assert!(!t.record_and_settle_non_terminal(v4_key(), a.0, a.1, 1_000, &FRAG_OVERLAP_DROPPED));
+                assert!(t.record_and_settle_non_terminal(v4_key(), b.0, b.1, 2_000, &FRAG_OVERLAP_DROPPED));
             });
             assert_eq!(d, 1);
         }
@@ -1564,15 +1566,15 @@ mod tests {
         // retransmits mint new idents, so this never fires benignly for TCP.
         // RED-on-revert: adjacency-only comparison (`<=`) would pass the duplicate.
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
-        assert!(t.check_and_record(v4_key(), 0, 16, 2_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(v4_key(), 0, 16, 2_000, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
     fn empty_range_drops_fail_closed_9950() {
         let t = OverlapTracker::new();
-        assert!(t.check_and_record(v4_key(), 8, 8, 1_000, &FRAG_OVERLAP_DROPPED));
-        assert!(t.check_and_record(v4_key(), 16, 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(v4_key(), 8, 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(v4_key(), 16, 8, 1_000, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
@@ -1583,7 +1585,7 @@ mod tests {
         let mut off = 0u32;
         for _ in 0..44 {
             assert!(
-                !t.check_and_record(v4_key(), off, off + 1480, 1_000, &FRAG_OVERLAP_DROPPED),
+                !t.record_and_settle_non_terminal(v4_key(), off, off + 1480, 1_000, &FRAG_OVERLAP_DROPPED),
                 "off={off}"
             );
             off += 1480;
@@ -1599,13 +1601,13 @@ mod tests {
         let t = OverlapTracker::new();
         for i in (0..17u32).step_by(2) {
             assert!(
-                !t.check_and_record(v4_key(), i * 8, i * 8 + 8, 1_000, &FRAG_OVERLAP_DROPPED),
+                !t.record_and_settle_non_terminal(v4_key(), i * 8, i * 8 + 8, 1_000, &FRAG_OVERLAP_DROPPED),
                 "even i={i}"
             );
         }
         for i in (1..17u32).step_by(2) {
             assert!(
-                !t.check_and_record(v4_key(), i * 8, i * 8 + 8, 2_000, &FRAG_OVERLAP_DROPPED),
+                !t.record_and_settle_non_terminal(v4_key(), i * 8, i * 8 + 8, 2_000, &FRAG_OVERLAP_DROPPED),
                 "odd i={i}"
             );
         }
@@ -1621,11 +1623,11 @@ mod tests {
         for i in 0..16u32 {
             let s = i * 24;
             assert!(
-                !t.check_and_record(v4_key(), s, s + 8, 1_000, &FRAG_OVERLAP_DROPPED),
+                !t.record_and_settle_non_terminal(v4_key(), s, s + 8, 1_000, &FRAG_OVERLAP_DROPPED),
                 "i={i}"
             );
         }
-        assert!(t.check_and_record(v4_key(), 16 * 24, 16 * 24 + 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(v4_key(), 16 * 24, 16 * 24 + 8, 1_000, &FRAG_OVERLAP_DROPPED));
         assert_eq!(
             FRAG_OVERLAP_OVERFLOW_DROPPED.load(Ordering::Relaxed).wrapping_sub(o0),
             1
@@ -1666,7 +1668,7 @@ mod tests {
             ident += 1;
         }
         for k in &keys {
-            assert!(!t.check_and_record(*k, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
+            assert!(!t.record_and_settle_non_terminal(*k, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
         }
         let s0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
         let mut klast = v4_key();
@@ -1680,12 +1682,12 @@ mod tests {
             }
             li += 1;
         }
-        assert!(t.check_and_record(klast, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(klast, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED));
         assert_eq!(
             FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed).wrapping_sub(s0),
             1
         );
-        assert!(t.check_and_record(keys[0], 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(keys[0], 4, 12, 2_000, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
@@ -1697,9 +1699,9 @@ mod tests {
         a.routing_domain = 1;
         let mut b = v4_key();
         b.routing_domain = 2;
-        assert!(!t.check_and_record(a, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
-        assert!(!t.check_and_record(b, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
-        assert!(t.check_and_record(a, 8, 24, 2_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(a, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(b, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(a, 8, 24, 2_000, &FRAG_OVERLAP_DROPPED));
         assert_eq!(t.len(), 2);
     }
 
@@ -1796,8 +1798,8 @@ mod tests {
             other => panic!("expected truncated IPv6 Fragment, got {other:?}"),
         }
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(k, s, e, 1_000, &FRAG_OVERLAP_DROPPED));
-        assert!(t.check_and_record(k2, s2, e2, 2_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(k, s, e, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(k2, s2, e2, 2_000, &FRAG_OVERLAP_DROPPED));
         // Atomic → NonFragment; truncated header → Unreadable; no frag header → NonFragment.
         let mut atomic = pkt.clone();
         atomic[42..44].copy_from_slice(&0x0000u16.to_be_bytes());
@@ -1842,9 +1844,9 @@ mod tests {
         assert_ne!(pa.fairness_origin, pb.fairness_origin);
         assert_eq!(pa.src, pool);
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(pa, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(pa, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
         let p0 = FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed);
-        assert!(t.check_and_record(pb, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(t.record_and_settle_non_terminal(pb, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
         assert_eq!(
             FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed).wrapping_sub(p0),
             1
@@ -1903,11 +1905,11 @@ mod tests {
         // post key is guarded out (never recorded), while the moved key
         // is recorded — disjoint range passes, overlapping range drops.
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(pre, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(pre, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
         let p0 = FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed);
         if !overlap_same_datagram(&moved, &pre) {
-            assert!(!t.check_and_record(moved, 16, 32, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
-            assert!(t.check_and_record(moved, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+            assert!(!t.record_and_settle_non_terminal(moved, 16, 32, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+            assert!(t.record_and_settle_non_terminal(moved, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
         }
         assert_eq!(
             FRAG_OVERLAP_POST_NAT_DROPPED.load(Ordering::Relaxed).wrapping_sub(p0),
@@ -1948,8 +1950,8 @@ mod tests {
         assert_eq!(pa.ident, 1);
         assert_eq!(pa.addr_family, libc::AF_INET as u8);
         let t = OverlapTracker::new();
-        assert!(!t.check_and_record(pa, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
-        assert!(t.check_and_record(pb, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(pa, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(t.record_and_settle_non_terminal(pb, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
         // v4→v6 direction needs no post-check (injectivity proof in module docs).
         let mut v4pre = v4_key();
         v4pre.routing_domain = 0;
@@ -2160,7 +2162,7 @@ mod tests {
         assert!(!t.check_overlap(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
         assert!(!t.check_overlap(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
         assert_eq!(t.len(), 0);
-        assert!(!t.check_and_record(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!t.record_and_settle_non_terminal(v4_key(), 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
         assert!(t.check_overlap(v4_key(), 8, 24, 2_000, &FRAG_OVERLAP_DROPPED));
         assert!(!t.check_overlap(v4_key(), 16, 24, 2_000, &FRAG_OVERLAP_DROPPED));
     }
@@ -2172,7 +2174,7 @@ mod tests {
         let t = OverlapTracker::new();
         for i in 0..16u32 {
             let s = i * 24;
-            assert!(!t.check_and_record(v4_key(), s, s + 8, 1_000, &FRAG_OVERLAP_DROPPED));
+            assert!(!t.record_and_settle_non_terminal(v4_key(), s, s + 8, 1_000, &FRAG_OVERLAP_DROPPED));
         }
         let o0 = FRAG_OVERLAP_OVERFLOW_DROPPED.load(Ordering::Relaxed);
         assert!(t.check_overlap(v4_key(), 16 * 24, 16 * 24 + 8, 1_000, &FRAG_OVERLAP_DROPPED));
@@ -2710,7 +2712,7 @@ mod tests {
         atk.routing_domain = 7;
         for ident in 0..2048u32 {
             atk.ident = ident;
-            let _ = t.check_and_record(atk, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
+            let _ = t.record_and_settle_non_terminal(atk, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
         }
         // 16 shards x 8 per-sender (named constant lands with the quota impl).
         assert!(
@@ -2736,13 +2738,13 @@ mod tests {
                 first_victim = Some(key);
             }
             assert!(
-                !t.check_and_record(key, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
+                !t.record_and_settle_non_terminal(key, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
                 "cross-VRF victim must forward in shard {target}"
             );
         }
         // Victim protection is intact: an overlapping tail on a victim key drops.
         let v0 = first_victim.expect("shard-0 victim key");
-        assert!(t.check_and_record(v0, 4, 12, now_ns + 1, &FRAG_OVERLAP_DROPPED));
+        assert!(t.record_and_settle_non_terminal(v0, 4, 12, now_ns + 1, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
@@ -2767,7 +2769,7 @@ mod tests {
                 let shard = overlap_shard_index(&attack);
                 if per_sender[s][shard] < OVERLAP_CAP_PER_SENDER_PER_SHARD {
                     let dropped =
-                        t.check_and_record(attack, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED);
+                        t.record_and_settle_non_terminal(attack, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED);
                     if s < OVERLAP_CAP_PER_DOMAIN_PER_SHARD
                         / OVERLAP_CAP_PER_SENDER_PER_SHARD
                     {
@@ -2800,7 +2802,7 @@ mod tests {
                 ident += 1;
             };
             assert!(
-                !t.check_and_record(key, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED),
+                !t.record_and_settle_non_terminal(key, 0, 8, 1_000, &FRAG_OVERLAP_DROPPED),
                 "other-domain victim must forward in shard {target}"
             );
         }
@@ -2834,19 +2836,19 @@ mod tests {
             let shard = overlap_shard_index(&atk);
             if attempts_per_shard[shard] < OVERLAP_CAP_PER_SHARD {
                 let now_ns = 1 + attempts * OVERLAP_TTL_NS / 1024;
-                let _ = t.check_and_record(atk, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
+                let _ = t.record_and_settle_non_terminal(atk, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
                 attempts_per_shard[shard] += 1;
                 attempts += 1;
                 if attempts % 256 == 0 {
                     let round = (attempts / 256) as u32 - 1;
                     xvrf.ident = 500_000 + round;
                     assert!(
-                        !t.check_and_record(xvrf, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
+                        !t.record_and_settle_non_terminal(xvrf, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
                         "cross-VRF victim must forward in round {round}"
                     );
                     mate.ident = 600_000 + round;
                     assert!(
-                        !t.check_and_record(mate, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
+                        !t.record_and_settle_non_terminal(mate, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED),
                         "same-VRF other-sender victim must forward in round {round}"
                     );
                 }
@@ -2891,7 +2893,7 @@ mod tests {
                     ingress_zone: 0,
                     fairness_origin: None,
                 };
-                if !t.check_and_record(key, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED) {
+                if !t.record_and_settle_non_terminal(key, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED) {
                     admitted += 1;
                 }
             }
@@ -2951,7 +2953,7 @@ mod tests {
             "protocol and routing domain must not split same-datagram shard placement"
         );
 
-        let result = t.check_and_record_detailed(victim, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
+        let result = t.record_non_terminal_detailed(victim, 0, 8, now_ns, &FRAG_OVERLAP_DROPPED);
         assert!(
             !result.dropped,
             "legitimate same-domain key in shard {TARGET_SHARD} must forward, reason={:?}",
@@ -3194,7 +3196,7 @@ mod tests {
         for &ident in &a_idents[..OVERLAP_CAP_PER_SENDER_PER_SHARD] {
             let post = post_key(tenant_a, ident);
             assert!(
-                !tracker.check_and_record(post, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+                !tracker.record_and_settle_non_terminal(post, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
                 "tenant A incomplete datagram {ident} must be admitted"
             );
         }
@@ -3202,12 +3204,12 @@ mod tests {
         // pool address and shard must not be denied by A's quota.
         let b_post = post_key(tenant_b, b_ident);
         assert!(
-            !tracker.check_and_record(b_post, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+            !tracker.record_and_settle_non_terminal(b_post, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
             "tenant B must not share tenant A's post-NAT sender quota"
         );
         // Tenant A's ninth incomplete datagram is at its own quota: it
         // is admitted by reclaiming tenant A's OWN oldest settled-
-        // incomplete entry (#16599; the check_and_record admissions
+        // incomplete entry (#16599; the record_and_settle_non_terminal admissions
         // above have settled, pending==0), never tenant B's. Pre-#16599
         // it failed closed here; the per-tenant property this test
         // guards is that B's budget and anchor are untouched.
@@ -3215,7 +3217,7 @@ mod tests {
         let a_second = post_key(tenant_a, a_idents[1]);
         let a_ninth = post_key(tenant_a, a_idents[OVERLAP_CAP_PER_SENDER_PER_SHARD]);
         assert!(
-            !tracker.check_and_record(a_ninth, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+            !tracker.record_and_settle_non_terminal(a_ninth, 0, 8, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
             "tenant A's ninth must be admitted by reclaiming its own oldest entry (#16599)"
         );
         assert!(
@@ -3238,12 +3240,12 @@ mod tests {
         for &ident in &a_idents[..OVERLAP_CAP_PER_SENDER_PER_SHARD] {
             let post = post_key(tenant_a, ident);
             assert!(
-                !tracker.check_and_record(post, 8, 16, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+                !tracker.record_and_settle_non_terminal(post, 8, 16, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
                 "tenant A tail for {ident} must be admitted"
             );
         }
         assert!(
-            !tracker.check_and_record(b_post, 8, 16, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
+            !tracker.record_and_settle_non_terminal(b_post, 8, 16, now_ns, &FRAG_OVERLAP_POST_NAT_DROPPED),
             "tenant B tail must remain admitted after A completes"
         );
     }
@@ -3273,9 +3275,9 @@ mod tests {
         // under the post key drops an overlapping second fragment, and
         // the arrival domain's ranges do not leak into it.
         let tracker = OverlapTracker::new();
-        assert!(!tracker.check_and_record(post, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
-        assert!(tracker.check_and_record(post, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
-        assert!(!tracker.check_and_record(pre, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
+        assert!(!tracker.record_and_settle_non_terminal(post, 0, 16, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(tracker.record_and_settle_non_terminal(post, 8, 24, 1_000, &FRAG_OVERLAP_POST_NAT_DROPPED));
+        assert!(!tracker.record_and_settle_non_terminal(pre, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED));
     }
 
     #[test]
@@ -3324,7 +3326,7 @@ mod tests {
         // Tenant B fills its own post-NAT quota with incomplete heads.
         let b_idents = in_shard(tenant_b, OVERLAP_CAP_PER_SENDER_PER_SHARD);
         for &ident in &b_idents {
-            assert!(!tracker.check_and_record(
+            assert!(!tracker.record_and_settle_non_terminal(
                 post_key(tenant_b, ident),
                 0,
                 8,
@@ -3356,7 +3358,7 @@ mod tests {
             [OVERLAP_CAP_PER_SENDER_PER_SHARD + 1];
         assert_ne!(a_next, a_ident);
         assert!(
-            tracker.check_and_record(
+            tracker.record_and_settle_non_terminal(
                 post_key(tenant_a, a_next),
                 0,
                 8,
@@ -3457,19 +3459,19 @@ mod tests {
         trust.ingress_zone = 2;
         let mut untrust = trust;
         untrust.ingress_zone = 1;
-        assert!(!t.check_and_record(trust, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED),
+        assert!(!t.record_and_settle_non_terminal(trust, 0, 16, 1_000, &FRAG_OVERLAP_DROPPED),
             "trust head must admit");
         // Same tuple, other zone, overlapping range: separate datagram for
         // overlap purposes — must admit as its own entry, not drop as overlap.
-        assert!(!t.check_and_record(untrust, 8, 24, 1_000, &FRAG_OVERLAP_DROPPED),
+        assert!(!t.record_and_settle_non_terminal(untrust, 8, 24, 1_000, &FRAG_OVERLAP_DROPPED),
             "cross-zone overlapping fragment must not poison/drop via trust entry");
         // Trust tail (adjacent, non-overlapping) still admits and is protected:
-        assert!(!t.check_and_record(trust, 16, 32, 1_000, &FRAG_OVERLAP_DROPPED),
+        assert!(!t.record_and_settle_non_terminal(trust, 16, 32, 1_000, &FRAG_OVERLAP_DROPPED),
             "trust tail must still admit");
         // And a true same-zone overlap still drops fail-closed.
-        assert!(t.check_and_record(trust, 8, 24, 1_000, &FRAG_OVERLAP_DROPPED),
+        assert!(t.record_and_settle_non_terminal(trust, 8, 24, 1_000, &FRAG_OVERLAP_DROPPED),
             "same-zone overlap must still drop");
-        assert!(t.check_and_record(untrust, 16, 32, 1_000, &FRAG_OVERLAP_DROPPED),
+        assert!(t.record_and_settle_non_terminal(untrust, 16, 32, 1_000, &FRAG_OVERLAP_DROPPED),
             "same-zone (untrust) overlap with its own entry must still drop");
     }
     #[test]
@@ -3641,7 +3643,7 @@ mod tests {
             let k = mk(s, id, zone);
             // is_last=false: no terminal end, never completes.
             assert!(
-                !t2.check_and_record_fragment(k, 0, 8, false, now_ns, &FRAG_OVERLAP_DROPPED),
+                !t2.record_fragment_and_settle(k, 0, 8, false, now_ns, &FRAG_OVERLAP_DROPPED),
                 "incomplete fill s={s} ident={id} must admit"
             );
         }
@@ -4044,7 +4046,7 @@ mod tests {
         // sender fills its quota and its bare admission tokens are
         // HELD (never settled), so every entry stays pending==1; its
         // 9th datagram must fail closed and evict nothing. (The bool
-        // check_and_record_fragment wrapper auto-commits, and a
+        // record_fragment_and_settle wrapper auto-commits, and a
         // dropped OverlapCheckResult fails its admission on Drop —
         // either would settle the entry and make it reclaimable, so
         // neither models "still in flight".)

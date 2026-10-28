@@ -58,7 +58,7 @@ func TestSendFailoverBatchResultDisconnectsBrokenAckConn14160(t *testing.T) {
 	fallback := &failoverResultConn14160{}
 	ss := newBatchResultSync14160(ack, fallback)
 
-	ss.sendFailoverBatchResult(fallback, syncMsgFailoverBatchAck, []int{1, 2}, 42, failoverAckApplied, "")
+	ss.sendFailoverAckFrame(fallback, syncMsgFailoverBatchAck, []int{1, 2}, 42, failoverAckApplied, "")
 
 	if !ack.closed.Load() {
 		t.Fatal("broken ack conn was not disconnected after fallback success: " +
@@ -92,7 +92,7 @@ func TestSendFailoverBatchResultDualFailureDisconnectsBoth14160(t *testing.T) {
 	fallback := &failoverResultConn14160{writeErr: errors.New("fallback conn write failed")}
 	ss := newBatchResultSync14160(ack, fallback)
 
-	ss.sendFailoverBatchResult(fallback, syncMsgFailoverBatchAck, []int{1, 2}, 42, failoverAckApplied, "")
+	ss.sendFailoverAckFrame(fallback, syncMsgFailoverBatchAck, []int{1, 2}, 42, failoverAckApplied, "")
 
 	if !ack.closed.Load() {
 		t.Fatal("ack conn was not disconnected on dual failure (#14160)")
@@ -119,7 +119,7 @@ func TestSendFailoverBatchResultHealthyAckKeepsConns14160(t *testing.T) {
 	fallback := &failoverResultConn14160{}
 	ss := newBatchResultSync14160(ack, fallback)
 
-	ss.sendFailoverBatchResult(fallback, syncMsgFailoverBatchAck, []int{1}, 7, failoverAckApplied, "")
+	ss.sendFailoverAckFrame(fallback, syncMsgFailoverBatchAck, []int{1}, 7, failoverAckApplied, "")
 
 	if ack.closed.Load() || fallback.closed.Load() {
 		t.Fatal("no conn may be disconnected when the ack write succeeds")
@@ -136,7 +136,7 @@ func TestSendFailoverResultDisconnectsBrokenAckConn14160(t *testing.T) {
 	fallback := &failoverResultConn14160{}
 	ss := newBatchResultSync14160(ack, fallback)
 
-	ss.sendFailoverResult(fallback, syncMsgFailoverAck, 1, 42, failoverAckApplied, "")
+	ss.sendFailoverAckFrame(fallback, syncMsgFailoverAck, []int{1}, 42, failoverAckApplied, "")
 
 	if !ack.closed.Load() {
 		t.Fatal("single-result path must disconnect the broken ack conn after fallback success")

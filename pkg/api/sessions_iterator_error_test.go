@@ -5,12 +5,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -85,9 +83,7 @@ func TestRESTSessionViewsFailOnIteratorError(t *testing.T) {
 }
 
 func newSessionGaugeCollector() *xpfCollector {
-	gc := conntrack.NewGC(nil, time.Minute)
 	return &xpfCollector{
-		deps:                collectorDeps{gc: gc},
 		sessionsActive:      prometheus.NewDesc("xpf_sessions_active", "test", nil, nil),
 		sessionsEstablished: prometheus.NewDesc("xpf_sessions_established", "test", nil, nil),
 		sessionsIPv4:        prometheus.NewDesc("xpf_sessions_ipv4", "test", nil, nil),
@@ -95,7 +91,6 @@ func newSessionGaugeCollector() *xpfCollector {
 		sessionsSNAT:        prometheus.NewDesc("xpf_sessions_snat", "test", nil, nil),
 		sessionsDNAT:        prometheus.NewDesc("xpf_sessions_dnat", "test", nil, nil),
 		sessionScrapeOK:     prometheus.NewDesc("xpf_sessions_breakdown_scrape_ok", "test", nil, nil),
-		gcSweepDuration:     prometheus.NewDesc("xpf_gc_sweep_duration_seconds", "test", nil, nil),
 	}
 }
 

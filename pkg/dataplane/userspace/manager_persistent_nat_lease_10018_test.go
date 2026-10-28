@@ -44,7 +44,7 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 				return err
 			},
 			old:     true,
-			minimum: MinProtocolPersistentNatLeaseMintFromZone,
+			minimum: MinProtocolPersistentNatLeaseTypedPool,
 		},
 		{
 			name: "display-old-helper",
@@ -53,7 +53,7 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 				return err
 			},
 			old:     true,
-			minimum: MinProtocolPersistentNatLeaseScope,
+			minimum: MinProtocolPersistentNatLeaseTypedPool,
 		},
 		{
 			name: "import-old-helper",
@@ -61,7 +61,7 @@ func TestPersistentNatLeaseVerbsFailClosedOnProtocol10018(t *testing.T) {
 				return m.ImportIdleLeases([]IdleLeaseWire{scopedLease10018()})
 			},
 			old:     true,
-			minimum: MinProtocolPersistentNatLeaseMintFromZone,
+			minimum: MinProtocolPersistentNatLeaseTypedPool,
 		},
 		{
 			name: "export-status-probe-failure",
@@ -150,6 +150,29 @@ func TestPersistentNatLeaseVerbsAllowObservedCurrentProtocol10018(t *testing.T) 
 			}
 			if statusCalls != 1 {
 				t.Fatalf("status probe calls = %d, want exactly one", statusCalls)
+			}
+		})
+	}
+}
+
+// #17099 fold B3: a v76 helper (typed-pool floor minus one) must be refused
+// by export/import/display, not silently degraded to string-only records.
+func TestPersistentNatLeaseTypedPoolFloorRefusesV76_17099(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		operation func(*Manager) error
+	}{
+		{"export", func(m *Manager) error { _, err := m.ExportIdleLeases(); return err }},
+		{"import", func(m *Manager) error { return m.ImportIdleLeases([]IdleLeaseWire{scopedLease10018()}) }},
+		{"display", func(m *Manager) error { _, err := m.ExportPersistentLeaseDisplay(); return err }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New()
+			m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+			m.helperStatusObserved = true
+			m.lastStatus.ConfigSnapshotProtocolVersion = MinProtocolPersistentNatLeaseTypedPool - 1
+			if err := tc.operation(m); !errors.Is(err, ErrPersistentNatLeaseScopeProtocolIncompatible) {
+				t.Fatalf("v76 helper %s error = %v, want typed-pool incompatibility", tc.name, err)
 			}
 		})
 	}

@@ -24,7 +24,6 @@ func TestReconcileLegsPositionalSwapDoesNotSelfCollide_14983(t *testing.T) {
 	s := NewServer(Config{
 		Addrs: reqAddrs,
 	})
-	s.SetTLSCertDirForTest(t.TempDir())
 	if err := s.Start(ctx); err != nil {
 		cancel()
 		t.Fatalf("Start: %v", err)
@@ -68,7 +67,6 @@ func TestReconcileLegsDuplicatesRejected_14983(t *testing.T) {
 	defer cancel()
 
 	s := NewServer(Config{Addrs: []string{"127.0.0.1:0"}})
-	s.SetTLSCertDirForTest(t.TempDir())
 	if err := s.Start(ctx); err != nil {
 		cancel()
 		t.Fatalf("Start: %v", err)

@@ -1,7 +1,6 @@
-// #1345: per-verb handler for stop_workers. Body byte-identical to
-// handlers.rs lines 409-433.
+// #1345: per-verb handler for stop_workers, split out of handlers.rs in #1345.
 
-use super::super::helpers::refresh_status;
+use super::super::helpers::project_status;
 use super::super::ServerState;
 
 pub(super) fn handle(guard: &mut ServerState, persist_state: &mut bool) {
@@ -29,7 +28,7 @@ pub(super) fn handle(guard: &mut ServerState, persist_state: &mut bool) {
         binding.ready = false;
         binding.last_error.clear();
     }
-    refresh_status(guard);
+    project_status(guard);
     *persist_state = true;
     eprintln!(
         "stop_workers: all workers stopped, bindings={}",

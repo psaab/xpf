@@ -34,13 +34,13 @@ func TestQueueSessionWhileDisconnectedStamps9631(t *testing.T) {
 	ss.QueueDeleteV4(key, false)
 	ss.deleteJournalMu.Lock()
 	defer ss.deleteJournalMu.Unlock()
-	if len(ss.deleteJournal) != 1 {
-		t.Fatalf("journal holds %d entries, want 1 (the close journals while down)", len(ss.deleteJournal))
+	if len(ss.deleteJournal.entries) != 1 {
+		t.Fatalf("journal holds %d entries, want 1 (the close journals while down)", len(ss.deleteJournal.entries))
 	}
 	// encodeDeleteV4 lays the #2170 generation out after the 16-byte 5-tuple;
 	// #9752 appends one forwardOnly byte after it, so the gen is no longer
 	// the trailing uint64 — parse at the fixed offset.
-	raw := ss.deleteJournal[0]
+	raw := ss.deleteJournal.entries[0]
 	if len(raw) != syncHeaderSize+25 {
 		t.Fatalf("journaled delete len = %d, want %d (header + 16-byte tuple + gen + forwardOnly)", len(raw), syncHeaderSize+25)
 	}

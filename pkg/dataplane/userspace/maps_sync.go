@@ -2211,7 +2211,25 @@ func snapshotBindingPlanKey(snapshot *ConfigSnapshot) string {
 		// meaningful to everything downstream of this hash.
 		ifaces := append([]string(nil), su.Interfaces...)
 		sort.Strings(ifaces)
-		fmt.Fprintf(&b, "shared_umem=%s/%s/%s;", su.Mode, strings.Join(ifaces, ","), su.Phase0ArtifactFile)
+		// #17134 fold F1: Rust canonicalizes a missing/empty/null mode to
+		// `cross-nic` in `deserialize_shared_umem_mode` BEFORE hashing
+		// (`update_snapshot_binding_plan_key` reads the typed
+		// `shared_umem.mode`, which can never be empty), while Go emits
+		// `""` when no `mode` leaf is authored (Mode is
+		// `json:"mode,omitempty"`, set only from a leaf). Hashing the raw
+		// authored Mode here made adding an explicit `mode cross-nic`
+		// leaf move ONLY this key: the operator edit Rust treats as a
+		// no-op was classified !samePlan and forced a full helper
+		// restart / AF_XDP teardown instead of a same-plan refresh.
+		// Mirror the deserializer: empty normalizes to `cross-nic`.
+		// Only empty is normalized — every non-empty spelling (off,
+		// auto, unknown) is hashed verbatim, exactly as Rust hashes the
+		// deserialized string before `parse_shared_umem_mode` maps it.
+		mode := su.Mode
+		if mode == "" {
+			mode = "cross-nic"
+		}
+		fmt.Fprintf(&b, "shared_umem=%s/%s/%s;", mode, strings.Join(ifaces, ","), su.Phase0ArtifactFile)
 	}
 	// #9009 D3: the refusal tally, built ONCE and used by both loops. Rust
 	// filters rows whose BIND TARGET the snapshot refuses — `replan_queues`

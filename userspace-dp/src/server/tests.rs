@@ -11,7 +11,7 @@
 use super::helpers::{
     bindings_settled, build_synced_session_entry, clear_pre_persist_lock_probe,
     forwarding_unsupported_error, parse_session_sync_mac, reconcile_status_bindings,
-    refresh_status, set_bindings_forwarding_armed, should_run_afxdp, take_pre_persist_lock_free,
+    project_status, set_bindings_forwarding_armed, should_run_afxdp, take_pre_persist_lock_free,
     write_state,
 };
 use super::{handle_stream, ServerState, SocketMode};
@@ -398,6 +398,57 @@ fn update_ha_state_populates_status_ha_groups() {
     // exact status-field-parity surface #1642 regressed in.
     assert_eq!(status.ha_groups.len(), 1, "expected one HA group");
     assert_eq!(status.ha_groups[0].rg_id, 1);
+}
+
+/// #17141: an unchanged, non-suppressed `update_ha_state` must publish the
+/// worker-visible delivery map zero times. Pre-split, the handler's
+/// `refresh_status` and the dispatcher's post-match `refresh_status` each
+/// ran both liveness reconciles, and the WG reconcile republished
+/// unconditionally twice — four rebuild-and-store cycles per request.
+/// With no tunnel entries the changed-set is empty, so the correct count
+/// is exactly zero: both reconciles publish only on change (swept>0 or
+/// spawned), supervision now runs once inside the dispatcher's single
+/// lock, and every other attach only projects — so even one publish here
+/// would prove a supervision/publish regression, not a legitimate change.
+#[test]
+fn update_ha_state_publishes_delivery_map_at_most_once_17141() {
+    let state = new_state(ProcessStatus {
+        forwarding_armed: true,
+        capabilities: crate::UserspaceCapabilities {
+            forwarding_supported: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    state
+        .lock()
+        .expect("state")
+        .afxdp
+        .arm_delivery_publish_count_for_test();
+    let mut request = req("update_ha_state");
+    request.ha_state = Some(HAStateUpdateRequest {
+        groups: vec![HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }],
+    });
+    // Deliberately NOT suppress_status: the Go HA senders leave it unset
+    // on the control socket, which is the double-run shape.
+    let response = run_request(state.clone(), request);
+    assert!(response.ok, "unexpected error: {}", response.error);
+    let publishes = state
+        .lock()
+        .expect("state")
+        .afxdp
+        .delivery_publish_count_for_test();
+    assert_eq!(
+        publishes, 0,
+        "#17141: unchanged update_ha_state published the delivery map \
+         {publishes} times, want exactly 0 (supervision must run once, \
+         inside the single dispatcher lock, and both reconciles must \
+         publish only on change)"
+    );
 }
 
 /// #9629 acceptance: an `update_ha_state` refresh must LAND while another
@@ -5347,13 +5398,15 @@ fn never_settling_state() -> Arc<Mutex<ServerState>> {
 /// Fail-on-revert (#5862): `wait_for_binding_settle` must RELEASE the global
 /// `ServerState` lock across each 50 ms sleep.
 ///
-/// The HA session socket is a separate socket on a separate thread
-/// (`lifecycle.rs`), but its one verb — `sync_session` — dispatches through the
-/// same `Arc<Mutex<ServerState>>` as every main-socket verb, so the socket split
-/// never split the critical section. A 2 s settle held under that lock is longer
-/// than the Go side's 3 s session round-trip budget once queuing is added, and
-/// #5380 makes the FIRST session timeout abort the rest of the bulk batch — so
-/// this is a dropped-mirror bug at failover, not only a latency tail.
+/// Before #7209, the HA session socket was a separate socket on a separate
+/// thread (`lifecycle.rs`), but its one verb — `sync_session` — took the
+/// same `Arc<Mutex<ServerState>>` as every main-socket verb, so the socket
+/// split never split the critical section. A 2 s settle held under that lock
+/// is longer than the Go side's 3 s session round-trip budget once queuing is
+/// added, and #5380 makes the FIRST session timeout abort the rest of the bulk
+/// batch — so this was a dropped-mirror bug at failover, not only a latency
+/// tail. #7209 has since moved `sync_session` off this mutex; the guard here
+/// still pins that the settle releases the lock for every other verb.
 ///
 /// The assertion is deliberately about the LOCK, not about a timing average: it
 /// takes the lock from another thread mid-wait and requires that acquisition to
@@ -5384,8 +5437,7 @@ fn wait_for_binding_settle_releases_state_lock_between_polls() {
         elapsed < Duration::from_millis(200),
         "acquiring the ServerState lock took {elapsed:?} while a binding-settle \
          wait was in flight — the wait is holding the lock across its sleep, so \
-         every HA sync_session on the dedicated session socket queues behind it \
-         (#5862)"
+         every other main-socket verb queues behind it (#5862)"
     );
 
     waiter.join().expect("settle waiter");
@@ -5394,7 +5446,7 @@ fn wait_for_binding_settle_releases_state_lock_between_polls() {
 /// The end-to-end half: a `sync_session` request must be SERVED while a
 /// `set_forwarding_state` settle wait is in flight. This drives both through the
 /// real `handle_stream` dispatcher, which is what proves the handler wiring
-/// (locked arm records the owed settle; `handle_request` runs it after the guard
+/// (locked arm records the owed settle; `handle_stream` runs it after the guard
 /// drops) and not merely the helper in isolation.
 #[test]
 fn sync_session_is_served_during_a_forwarding_settle_wait() {
@@ -5860,7 +5912,7 @@ fn synced_import_rejects_incomplete_packet_path_keys_and_counts_10720() {
             1,
             "{name}: incomplete-key refusal must be counted exactly once"
         );
-        refresh_status(&mut guard);
+        project_status(&mut guard);
         assert_eq!(
             guard.status.synced_import_incomplete_key,
             1,
@@ -8825,6 +8877,129 @@ fn failed_queue_reconcile_restores_every_binding_on_the_queue_6750() {
     );
 }
 
+/// #17126: one table over the three verbs whose reconcile tail now lives in
+/// `finish_binding_reconcile`. Each case faults the reconcile with the stored
+/// bad snapshot and asserts the shared tail's three guarantees together:
+/// `ok=false` with the per-verb `"<verb> reconcile failed"` error, NO state
+/// file persisted (persist_state stayed false, so the handler never wrote
+/// the file at `state_file`), and the requested bits restored to their
+/// pre-commit values. The per-verb #5621/#6135/#6750 cells above stay as
+/// the finer-grained pins; this cell is the one that would go red if a
+/// future verb were wired to the helper with the wrong verb string, a
+/// persist on the error arm, or a missing restore.
+///
+/// RED-on-revert: restoring any handler's open-coded tail with its
+/// `let _ = reconcile_status_bindings(..)` discard, dropping the helper's
+/// restore, or setting persist on its error arm flips the matching row.
+#[test]
+fn faulted_reconcile_three_verbs_share_the_finish_tail_17126() {
+    // (request builder, expected error substring, restored-bit checker)
+    // Each fixture starts from the DISARMED / UNREGISTERED side so the
+    // commit is observable and the restore has something to put back.
+    let forwarding_case = (
+        {
+            let mut request = req("set_forwarding_state");
+            request.forwarding = Some(ForwardingControlRequest { armed: true });
+            request
+        },
+        "forwarding reconcile failed",
+    );
+    let binding_case = (
+        {
+            let mut request = req("set_binding_state");
+            request.binding = Some(BindingControlRequest {
+                slot: 0,
+                registered: true,
+                armed: true,
+            });
+            request
+        },
+        "binding reconcile failed",
+    );
+    let queue_case = (
+        {
+            let mut request = req("set_queue_state");
+            request.queue = Some(QueueControlRequest {
+                queue_id: 2,
+                registered: true,
+                armed: true,
+            });
+            request
+        },
+        "queue reconcile failed",
+    );
+
+    for (request, expected_error) in [forwarding_case, binding_case, queue_case] {
+        let verb = request.request_type.clone();
+        // Forwarding starts disarmed (its commit arms it); binding/queue
+        // start armed at the helper level with an unregistered binding
+        // (their commits register it). Both start un-restored-observable.
+        let state = if verb == "set_forwarding_state" {
+            Arc::new(Mutex::new(ServerState {
+                status: ProcessStatus {
+                    forwarding_armed: false,
+                    capabilities: forwarding_caps(),
+                    bindings: vec![BindingStatus {
+                        slot: 0,
+                        queue_id: 2,
+                        registered: true,
+                        armed: false,
+                        ifindex: 10,
+                        ..BindingStatus::default()
+                    }],
+                    ..ProcessStatus::default()
+                },
+                snapshot: Some(failing_reconcile_snapshot()),
+                afxdp: afxdp::Coordinator::new(),
+                state_writer: Arc::new(StateWriter::new()),
+                quarantined_after_panic: false,
+                snapshot_policy_mismatch_total: 0,
+            }))
+        } else {
+            armed_state_with_failing_reconcile(vec![BindingStatus {
+                slot: 0,
+                queue_id: 2,
+                registered: false,
+                armed: false,
+                ifindex: 10,
+                ..BindingStatus::default()
+            }])
+        };
+        let state_file = unique_state_file(&format!("finish-tail-17126-{verb}"));
+        assert!(
+            !std::path::Path::new(&state_file).exists(),
+            "precondition: state file must not exist before the {verb} request"
+        );
+        let response = run_request_on_file(state.clone(), request, &state_file);
+        assert!(!response.ok, "{verb}: faulted reconcile must report ok=false");
+        assert!(
+            response.error.contains(expected_error),
+            "{verb}: unexpected error {}",
+            response.error
+        );
+        assert!(
+            !std::path::Path::new(&state_file).exists(),
+            "{verb}: a faulted reconcile must NOT persist (no state file written)"
+        );
+        let guard = state.lock().expect("state");
+        assert!(
+            !guard.status.bindings[0].registered || verb == "set_forwarding_state",
+            "{verb}: registration bit left committed after a faulted reconcile"
+        );
+        if verb == "set_forwarding_state" {
+            assert!(
+                !guard.status.forwarding_armed,
+                "forwarding_armed left committed after a faulted reconcile"
+            );
+        }
+        assert!(
+            !guard.status.bindings[0].armed,
+            "{verb}: arm bit left committed after a faulted reconcile"
+        );
+        let _ = std::fs::remove_file(&state_file);
+    }
+}
+
 // #6785: THE WIRING CELL. `upsert_synced_session` now returns a typed outcome,
 // but a typed outcome the handler discards is exactly the bug: the three
 // semantic refusal paths already bumped counters and returned, and the control
@@ -8933,7 +9108,7 @@ fn refresh_status_projects_interface_snat_registry_counters_6751() {
     crate::nat::INTERFACE_SNAT_REGISTRY_CAP_EXHAUSTION.fetch_add(7, Ordering::Relaxed);
     crate::nat::INTERFACE_SNAT_SYNC_IDENTITY_CONFLICT_DROPS.fetch_add(11, Ordering::Relaxed);
 
-    refresh_status(&mut guard);
+    project_status(&mut guard);
 
     assert_eq!(
         guard.status.interface_snat_pat_collisions_total,
@@ -10591,7 +10766,7 @@ fn refresh_status_projects_the_delete_replica_counters_8586() {
     crate::afxdp::SESSION_DELETE_REPLICA_DROP_REPAIRED
         .fetch_add(5, Ordering::Relaxed);
 
-    refresh_status(&mut guard);
+    project_status(&mut guard);
 
     assert_eq!(
         guard.status.session_delete_replica_dropped,
@@ -10690,7 +10865,7 @@ fn refresh_status_projects_ipsec_inner_counters() {
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL
         .store(41, Ordering::Relaxed);
 
-    refresh_status(&mut guard);
+    project_status(&mut guard);
     // Restore process-global counters before assertions so a failed assertion
     // cannot poison later tests in this process.
     crate::afxdp::ipsec_inner::zone_gate_unzoned_total

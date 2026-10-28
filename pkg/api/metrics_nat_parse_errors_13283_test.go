@@ -9,7 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -18,7 +17,7 @@ import (
 // type from the helper through ProcessStatus and the Prometheus scrape.
 func TestNATParseErrorsReachScrape13283(t *testing.T) {
 	store := newDescriptorCoverageStore(t)
-	srv := &Server{store: store, gc: conntrack.NewGC(nil, time.Minute), startTime: time.Now()}
+	srv := &Server{store: store, startTime: time.Now()}
 	srv.dp = &descriptorCoverageDP{
 		Manager: dataplane.New(),
 		status: dpuserspace.ProcessStatus{

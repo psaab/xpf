@@ -16,7 +16,7 @@ import (
 // never calls it.
 func RedirectWipePathsForTesting(root string) (restore func()) {
 	oldMachine, oldApplianceMarker, oldSSH, oldRootSSHUser, oldHistory := wipeMachineIDPath, wipeApplianceMarkerPath, wipeSSHHostKeyDir, wipeRootSSHUserDir, wipeRootBashHistory
-	oldEngineID, oldBoots, oldSeed := wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeSystemdRandomSeed
+	oldEngineID, oldBoots, oldUEFI, oldSeed := wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeUEFIStatePath, wipeSystemdRandomSeed
 	oldFeedShrinkHistoryPath := wipeFeedShrinkHistoryPath
 	oldAptLists, oldAptArchive, oldUtmp := wipeAptListsDir, wipeAptArchiveDir, wipeRunUtmpPath
 	oldDay0Reject, oldRootGrown := wipeDay0RejectedPath, wipeRootGrownPath
@@ -50,6 +50,7 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	wipeRootBashHistory = filepath.Join(root, "root", ".bash_history")
 	wipeSNMPEngineIDPath = filepath.Join(root, "var", "lib", "xpf", "snmp-engine-id")
 	wipeSNMPEngineBootsPath = filepath.Join(root, "var", "lib", "xpf", "snmp-engineboots")
+	wipeUEFIStatePath = filepath.Join(root, "var", "lib", "xpf", "uefi-bootorder-front")
 	wipeFeedShrinkHistoryPath = filepath.Join(root, "var", "lib", "xpf", "feed-shrink-history.json")
 	wipeSystemdRandomSeed = filepath.Join(root, "var", "lib", "systemd", "random-seed")
 	wipeAptListsDir = filepath.Join(root, "var", "lib", "apt", "lists")
@@ -127,7 +128,7 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 
 	return func() {
 		wipeMachineIDPath, wipeApplianceMarkerPath, wipeSSHHostKeyDir, wipeRootSSHUserDir, wipeRootBashHistory = oldMachine, oldApplianceMarker, oldSSH, oldRootSSHUser, oldHistory
-		wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeSystemdRandomSeed = oldEngineID, oldBoots, oldSeed
+		wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeUEFIStatePath, wipeSystemdRandomSeed = oldEngineID, oldBoots, oldUEFI, oldSeed
 		wipeFeedShrinkHistoryPath = oldFeedShrinkHistoryPath
 		wipeAptListsDir, wipeAptArchiveDir, wipeRunUtmpPath = oldAptLists, oldAptArchive, oldUtmp
 		wipeDay0RejectedPath, wipeRootGrownPath = oldDay0Reject, oldRootGrown
