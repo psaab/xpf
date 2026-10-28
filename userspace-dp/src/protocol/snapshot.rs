@@ -1206,7 +1206,7 @@ pub(crate) struct TunnelEndpointSnapshot {
     #[serde(rename = "wg_listen_port", default)]
     pub wg_listen_port: u16,
     /// Local static private key for the WG interface, hex-encoded
-    /// (64 chars for 32 bytes). Empty when `mode != "wireguard"`.
+    /// (64 chars for 32 bytes). Empty for non-WireGuard modes.
     ///
     /// This field is intentionally `skip_serializing` so it CANNOT
     /// be written back out via any `serde_json` round-trip. The

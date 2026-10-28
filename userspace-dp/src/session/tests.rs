@@ -6236,7 +6236,7 @@ fn inplace_vacant_handle_asserts_in_debug() {
 
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "refresh_for_ha_transition: stale handle")]
+#[should_panic(expected = "refresh_for_ha_transition: key_to_handle had stale handle")]
 fn ha_transition_vacant_handle_asserts_in_debug() {
     let (mut t, key) = rig_vacant_handle_table();
     let _ = t.refresh_for_ha_transition(&key, decision(), metadata(), 2_000);

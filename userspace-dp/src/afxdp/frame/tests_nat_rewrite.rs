@@ -1785,6 +1785,7 @@ fn gre_forwarding_8896(id: u16) -> ForwardingState {
             interface: "gr-0/0/0.0".into(),
             redundancy_group: 0,
             mode: "gre".into(),
+            kind: TunnelKind::Gre,
             outer_family: libc::AF_INET,
             source: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
             destination: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
@@ -1930,6 +1931,7 @@ fn nat64_8896_unknown_mode_and_missing_row_still_fail_closed() {
         // default here would GRE-encapsulate an unrecognised or future mode.
         let mut fwd = gre_forwarding_8896(id);
         fwd.tunnel_endpoints.get_mut(&id).expect("row").mode = "ipsec-vti-future".into();
+        fwd.tunnel_endpoints.get_mut(&id).expect("row").kind = TunnelKind::Unknown;
         assert!(
             build_nat64_forwarded_frame(
                 &frame,
@@ -3149,6 +3151,7 @@ fn nat64_wg_mss_uses_translated_family_16511() {
     let tunnel_id = 1u16;
     let mut fwd = gre_forwarding_8896(tunnel_id);
     fwd.tunnel_endpoints.get_mut(&tunnel_id).expect("row").mode = "wireguard".into();
+    fwd.tunnel_endpoints.get_mut(&tunnel_id).expect("row").kind = TunnelKind::WireGuard;
 
     let mut decision = icmp_test_decision(Nat64State::forward_decision(
         Ipv4Addr::new(203, 0, 113, 1),

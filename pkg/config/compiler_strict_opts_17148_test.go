@@ -36,7 +36,7 @@ import (
 //     cannot drift from the plain strict entries.
 //  3. No second spelling: an AST census over non-test sources rejects
 //     any compileOpts{...} composite literal outside compiler_opts.go
-//     (the two best-effort side compiles excepted, named below), and a
+//     (the one best-effort side compile excepted, named below), and a
 //     census over compileTree/compileExpanded call sites in test
 //     sources rejects any direct compileOpts{...} literal argument —
 //     a test that wants strict starts from strictCompileOpts() and
@@ -151,7 +151,6 @@ func TestStrictCompileOptsSingleSource17148(t *testing.T) {
 // strict/tolerant entry point. A new entry here is a reviewed decision,
 // not a convenience.
 var sideCompileExemptions17148 = map[string]string{
-	"tunnelid.go":                          "best-effort tunnel-endpoint union (#5829, R4-Q20-05 owns its opts); not a commit gate",
 	"compiler_validate_strict_reth_lag.go": "best-effort expanded reth-member union; not a commit gate",
 }
 

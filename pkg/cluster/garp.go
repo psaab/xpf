@@ -128,9 +128,9 @@ func buildGratuitousARP(mac net.HardwareAddr, ip net.IP, opcode uint16) []byte {
 // allowed to transmit. It is captured at burst start and consulted before
 // EVERY follow-up frame. The VRRP instance passes a closure that returns
 // true only while the node is STILL master AND the garpEpoch matches the
-// value observed when the burst was launched (#2867). A nil predicate means
-// "always valid" — used by callers (direct-mode re-announce, tests) that
-// have no per-instance epoch/state to gate against.
+// value observed when the burst was launched (#2867). The predicate is
+// REQUIRED (#17158): the gated senders refuse a nil predicate, so the
+// ungated pre-#2867 behaviour cannot be selected silently.
 //
 // The detached follow-up loop sends (count-1) frames over (count-1)*50ms.
 // Without this gate, a node that abdicates (loses master / becomes backup)
@@ -139,24 +139,19 @@ func buildGratuitousARP(mac net.HardwareAddr, ip net.IP, opcode uint16) []byte {
 // already handed the VIP off — the exact blackhole GARP exists to prevent.
 type BurstStillValid func() bool
 
-// SendGratuitousARPBurst sends one immediate GARP pair (request + reply), then
+// SendGratuitousARPBurstGated sends one immediate GARP pair (request + reply), then
 // schedules (count-1) follow-up pairs at 50ms intervals in a background goroutine.
 // Returns after the first pair is sent (<1ms), making it suitable for the
 // critical failover path.
 //
-// This is the ungated variant (nil predicate): the follow-up loop always runs
-// to completion. Callers on the VRRP critical path MUST use
-// SendGratuitousARPBurstGated so the follow-ups stop if the node abdicates.
-func SendGratuitousARPBurst(iface string, ip net.IP, count int) error {
-	return SendGratuitousARPBurstGated(iface, ip, count, nil)
-}
-
-// SendGratuitousARPBurstGated is SendGratuitousARPBurst with an abdication
-// gate (#2867). stillValid is captured at burst start and checked before each
-// follow-up pair; if it returns false the loop stops immediately (closing the
-// socket) so an abdicated node stops poisoning neighbor caches. A nil
-// stillValid is equivalent to the ungated behavior.
+// stillValid is the abdication gate (#2867) and is REQUIRED (#17158): a nil
+// predicate is refused with an error. Before #17158 an ungated twin took
+// the short name SendGratuitousARPBurst; #2867 kept it and #2898 shipped
+// through it. That twin is deleted; this gated form is the only burst.
 func SendGratuitousARPBurstGated(iface string, ip net.IP, count int, stillValid BurstStillValid) error {
+	if stillValid == nil {
+		return fmt.Errorf("cluster: GARP burst on %s requires a non-nil BurstStillValid predicate (#17158)", iface)
+	}
 	if count <= 0 {
 		count = 1
 	}
@@ -217,7 +212,7 @@ func SendGratuitousARPBurstGated(iface string, ip net.IP, count int, stillValid 
 }
 
 // runARPBurstFollowups sends the (count-1) follow-up GARP pairs at 50ms
-// intervals, then closes fd. Extracted from SendGratuitousARPBurst so the
+// intervals, then closes fd. Extracted from SendGratuitousARPBurstGated so the
 // follow-up error handling is unit-testable via the burstSend seam without a
 // raw socket. Each failed frame bumps burstSendErrors and is logged at Debug
 // (per-iteration logging at higher levels would flood — CLAUDE.md); a single
@@ -229,13 +224,19 @@ func SendGratuitousARPBurstGated(iface string, ip net.IP, count int, stillValid 
 // (#2867): the node has abdicated (no longer master, or garpEpoch bumped) and
 // must stop announcing VIPs it no longer owns. The check runs after the 50ms
 // sleep, immediately before the send, so an abdication that lands mid-sleep is
-// honored on the very next iteration. A nil stillValid never aborts.
+// honored on the very next iteration. A nil stillValid is refused (#17158):
+// it sends nothing, so even a direct helper call cannot run ungated.
 func runARPBurstFollowups(fd int, iface, ip string, reqPkt, repPkt []byte, addr unix.SockaddrLinklayer, count int, stillValid BurstStillValid) {
 	defer unix.Close(fd)
+	if stillValid == nil {
+		slog.Debug("cluster: GARP burst follow-up refused (nil predicate)",
+			"interface", iface, "ip", ip)
+		return
+	}
 	var failed int
 	for i := 1; i < count; i++ {
 		time.Sleep(50 * time.Millisecond)
-		if stillValid != nil && !stillValid() {
+		if !stillValid() {
 			slog.Debug("cluster: GARP burst follow-up aborted (abdicated)",
 				"interface", iface, "ip", ip, "iter", i, "remaining", count-i)
 			break
@@ -467,23 +468,18 @@ func SendGratuitousIPv6(iface string, ip net.IP, count int) error {
 	return nil
 }
 
-// SendGratuitousIPv6Burst sends one immediate unsolicited NA, then schedules
+// SendGratuitousIPv6BurstGated sends one immediate unsolicited NA, then schedules
 // (count-1) follow-ups at 50ms intervals in a background goroutine.
 // Returns after the first NA is sent, making it suitable for the critical
 // failover path.
 //
-// This is the ungated variant (nil predicate). Callers on the VRRP critical
-// path MUST use SendGratuitousIPv6BurstGated so the follow-ups stop if the
-// node abdicates (#2867).
-func SendGratuitousIPv6Burst(iface string, ip net.IP, count int) error {
-	return SendGratuitousIPv6BurstGated(iface, ip, count, nil)
-}
-
-// SendGratuitousIPv6BurstGated is SendGratuitousIPv6Burst with an abdication
-// gate (#2867). stillValid is captured at burst start and checked before each
-// follow-up NA; false stops the loop immediately. A nil stillValid is
-// equivalent to the ungated behavior.
+// stillValid is the abdication gate (#2867) and is REQUIRED (#17158): a nil
+// predicate is refused with an error. Before #17158 an ungated twin took
+// the short name SendGratuitousIPv6Burst; that twin is deleted.
 func SendGratuitousIPv6BurstGated(iface string, ip net.IP, count int, stillValid BurstStillValid) error {
+	if stillValid == nil {
+		return fmt.Errorf("cluster: IPv6 NA burst on %s requires a non-nil BurstStillValid predicate (#17158)", iface)
+	}
 	if count <= 0 {
 		count = 1
 	}
@@ -507,7 +503,11 @@ func SendGratuitousIPv6BurstGated(iface string, ip net.IP, count int, stillValid
 // address actually assigned to that interface. Prefer an assigned global/ULA
 // address when available. Linux's route-based source selection for ff02::1 can
 // choose link-local, so this raw packet path does not mirror kernel selection.
+// stillValid is REQUIRED as in SendGratuitousIPv6BurstGated (#17158).
 func SendProxyGratuitousIPv6BurstGated(iface string, targetIP net.IP, count int, stillValid BurstStillValid) error {
+	if stillValid == nil {
+		return fmt.Errorf("cluster: proxy IPv6 NA burst on %s requires a non-nil BurstStillValid predicate (#17158)", iface)
+	}
 	if count <= 0 {
 		count = 1
 	}
@@ -532,6 +532,9 @@ func SendProxyGratuitousIPv6BurstGated(iface string, targetIP net.IP, count int,
 }
 
 func sendUnsolicitedIPv6NABurstGated(iface string, ifi *net.Interface, target net.IP, pkt []byte, count int, stillValid BurstStillValid) error {
+	if stillValid == nil {
+		return fmt.Errorf("cluster: IPv6 NA burst on %s requires a non-nil BurstStillValid predicate (#17158)", iface)
+	}
 	fd, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_IPV6)))
 	if err != nil {
 		return fmt.Errorf("raw socket: %w", err)
@@ -568,7 +571,7 @@ func sendUnsolicitedIPv6NABurstGated(iface string, ifi *net.Interface, target ne
 }
 
 // runNABurstFollowups sends the (count-1) follow-up unsolicited NAs at 50ms
-// intervals, then closes fd. Extracted from SendGratuitousIPv6Burst for the
+// intervals, then closes fd. Extracted from SendGratuitousIPv6BurstGated for the
 // same reason as runARPBurstFollowups: the follow-up error handling is
 // unit-testable via the burstSend seam. Each failed NA bumps burstSendErrors
 // and is logged at Debug; a single Warn fires after the loop if any failed.
@@ -576,13 +579,19 @@ func sendUnsolicitedIPv6NABurstGated(iface string, ifi *net.Interface, target ne
 //
 // Like the ARP follow-up loop, it aborts cleanly (before any frame) when
 // stillValid returns false (#2867) — the node has abdicated and must stop
-// announcing VIPs it no longer owns. A nil stillValid never aborts.
+// announcing VIPs it no longer owns. A nil stillValid is refused (#17158):
+// it sends nothing, so even a direct helper call cannot run ungated.
 func runNABurstFollowups(fd int, iface, ip string, pkt []byte, addr unix.SockaddrLinklayer, count int, stillValid BurstStillValid) {
 	defer unix.Close(fd)
+	if stillValid == nil {
+		slog.Debug("cluster: NA burst follow-up refused (nil predicate)",
+			"interface", iface, "ip", ip)
+		return
+	}
 	var failed int
 	for i := 1; i < count; i++ {
 		time.Sleep(50 * time.Millisecond)
-		if stillValid != nil && !stillValid() {
+		if !stillValid() {
 			slog.Debug("cluster: NA burst follow-up aborted (abdicated)",
 				"interface", iface, "ip", ip, "iter", i, "remaining", count-i)
 			break

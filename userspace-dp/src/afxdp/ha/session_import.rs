@@ -43,6 +43,7 @@ use crate::afxdp::*;
 /// shared forward row ([`Self::shared_removed`]); for `RefusedMirrorDelete`
 /// the mirror delete then failed, so the caller must keep its rows and the
 /// helper surfaces `mirror-write-failed` instead.
+#[must_use = "a refused synced delete must not be treated as applied"]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncedDeleteOutcome {
     /// The entry named by the key was removed.
@@ -194,6 +195,7 @@ thread_local! {
 /// failure means the session socket is unhealthy and gates takeover-readiness
 /// (#5247). Go discriminates the non-applied outcomes by their stable response
 /// token below.
+#[must_use = "a refused synced import must not be treated as applied"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncedImportOutcome {
     /// Shared authority and every live worker accepted the entry.
@@ -713,7 +715,7 @@ impl crate::afxdp::ha::SessionDomain {
         let now_ns = monotonic_nanos();
         // Reserve order is SNAT then NAT64; roll back in reverse order so an
         // unaccepted import's coordinator-only reservations unwind LIFO.
-        let current_nat64_rolled_back = crate::nat64::rollback_synced_nat64_allocation_untracked(
+        let _current_nat64_rolled_back = crate::nat64::rollback_synced_nat64_allocation_untracked(
             &forwarding.nat64,
             &entry.key,
             entry.decision.nat,
@@ -723,7 +725,7 @@ impl crate::afxdp::ha::SessionDomain {
         let incumbent_hold = previous_entry.and_then(|previous| previous.persistent_lease_hold);
         let candidate_hold = entry.persistent_lease_hold;
         let hold_changed = incumbent_hold != candidate_hold;
-        let current_snat_released =
+        let _current_snat_released =
             crate::nat::release_synced_source_nat_allocation_untracked_preserving_persistent_hold(
                 &forwarding.iface_nat_allocators,
                 &forwarding.source_nat_rules,
@@ -1083,6 +1085,8 @@ impl crate::afxdp::ha::SessionDomain {
                 break;
             }
             for key in keys {
+                // Clear fence held: admission is closed, so RefusedGateBusy is
+                // unreachable; progress is verified by the round size check below (#17144).
                 let _ = self.delete_synced_session_gen_marked(
                     key,
                     0,
@@ -1815,6 +1819,9 @@ impl crate::afxdp::ha::SessionDomain {
         // shared-map removal lock, so a concurrent re-import cannot be
         // mistaken for this stale companion.
         if let Some((old_reverse_key, previous)) = stale_reverse {
+            // Stale-companion cleanup is best-effort: StaleForward means the
+            // companion already changed/was retired, and the replacement
+            // import above has already been ordered (#17144).
             let _ = self.delete_synced_reverse_companion(old_reverse_key, &previous, &_tuple_lease);
         }
         outcome
@@ -2188,9 +2195,17 @@ impl crate::afxdp::ha::SessionDomain {
     /// (deleteClusterSynced*) — that short-circuits both the BPF map delete and
     /// this helper path, so the cluster-delete path never reaches here with a
     /// non-zero delete_gen today; the seam exists for future helper-originated
-    /// 0, falls back to unconditional delete (rolling-upgrade safe).
-    pub fn delete_synced_session_gen(&self, key: SessionKey, delete_gen: u64, forward_only: bool) {
-        let _ = self.delete_synced_session_gen_marked(
+    /// generation-aware deletes. A `delete_gen` of 0 falls back to an
+    /// unconditional delete (rolling-upgrade safe).
+    ///
+    /// Returns the outcome (#17144): a refusal must not be read as an apply.
+    pub fn delete_synced_session_gen(
+        &self,
+        key: SessionKey,
+        delete_gen: u64,
+        forward_only: bool,
+    ) -> SyncedDeleteOutcome {
+        self.delete_synced_session_gen_marked(
             key,
             delete_gen,
             false,
@@ -2200,7 +2215,7 @@ impl crate::afxdp::ha::SessionDomain {
             0,
             None,
             None,
-        );
+        )
     }
 
     /// Retire a synthesized reverse only while it still identifies the forward
@@ -2282,7 +2297,7 @@ impl crate::afxdp::ha::SessionDomain {
         let candidate_entry = lock_shared_recover(&self.sessions.synced)
             .get(&key)
             .cloned();
-        let delete_reverse = !forward_only;
+        let _delete_reverse = !forward_only;
         if let Some(entry) = candidate_entry.as_ref()
             && entry.generation != 0
             && delete_gen != 0
@@ -2486,7 +2501,7 @@ impl crate::afxdp::ha::SessionDomain {
         };
 
         let mut mirror_delete_ok = true;
-        let mut reverse_key = if !forward_only {
+        let reverse_key = if !forward_only {
             removed_entry.as_ref().and_then(|entry| {
                 (!entry.metadata.is_reverse)
                     .then(|| reverse_session_key(&entry.key, entry.decision.nat))
@@ -2967,6 +2982,7 @@ impl crate::afxdp::ha::SessionDomain {
 
 #[cfg(test)]
 mod rejected_mirror_reservation_10790_tests {
+    #![allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
