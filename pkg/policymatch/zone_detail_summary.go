@@ -145,61 +145,26 @@ func ZoneDetailPolicySummary(cfg *config.Config, zone string, schedActive map[st
 	//     within each tier) so an operator reads the effective precedence, not
 	//     raw stanza placement.
 	//
-	// policySetID still advances in config order so each rule's displayed id
-	// stays in the correct span-accumulated namespace no matter which tier
-	// bucket its line lands in.
-	var exactLines, singleWildLines, bothAnyLines []string
+	// #17075: tier order, nil-skipping, config-order-within-tier and the
+	// per-stanza scrub verdict now come from the shared stream
+	// (ZonePairZoneSummaryStream over ConfigZonePairStanzas).
+	// policySetID for the global tier below is still the stanza count.
 	zonePairPolicies := 0
-	var policySetID uint32
-	for _, zpp := range cfg.Security.Policies {
-		// #3476: skip a nil zone-pair set (tolerant / HA-sync path) while
-		// advancing the policy-set ID, rather than dereferencing zpp.FromZone.
-		if zpp == nil {
-			policySetID++
-			continue
+	for ref := range ZonePairZoneSummaryStream(ConfigZonePairStanzas(cfg), zone, viewedExcluded) {
+		pol := ref.Policy
+		id := dpuserspace.RuntimePolicyIndex(runtimeIDs, uint32(ref.SetIdx), uint32(ref.SliceIdx))
+		inactive := haveSched && dpuserspace.PolicyInactive(pol.SchedulerName, schedActive)
+		mods := zoneDetailModifiers(id, pol.SchedulerName, inactive, pol.Log,
+			pol.Count, pol.Match.SourceAddressExcluded, pol.Match.DestinationAddressExcluded)
+		line := fmt.Sprintf("    [zone-pair] %s -> %s: %s (%s) %s",
+			ref.From, ref.To, pol.Name, ActionString(pol.Action), mods)
+		if ref.Quarantined {
+			line += " " + config.ZoneQuarantinePoliciesQualifier
 		}
-		fromAny := zpp.FromZone == "any"
-		toAny := zpp.ToZone == "any"
-		fromAffects := zpp.FromZone == zone || (fromAny && !viewedExcluded)
-		toAffects := zpp.ToZone == zone || (toAny && !viewedExcluded)
-		// #12896: the apply-time scrub drops this whole set when either
-		// endpoint is a collision loser ("any" is a policy sentinel, never a
-		// quarantined name), so every rule in it renders with the qualifier
-		// instead of reading as an active participant.
-		_, fromScrubbed := scrubbed[zpp.FromZone]
-		_, toScrubbed := scrubbed[zpp.ToZone]
-		setScrubbed := fromScrubbed || toScrubbed
-		if fromAffects || toAffects {
-			for i, pol := range zpp.Policies {
-				// #3476: skip a nil rule like the runtime walker does.
-				if pol == nil {
-					continue
-				}
-				id := dpuserspace.RuntimePolicyIndex(runtimeIDs, policySetID, uint32(i))
-				inactive := haveSched && dpuserspace.PolicyInactive(pol.SchedulerName, schedActive)
-				mods := zoneDetailModifiers(id, pol.SchedulerName, inactive, pol.Log,
-					pol.Count, pol.Match.SourceAddressExcluded, pol.Match.DestinationAddressExcluded)
-				line := fmt.Sprintf("    [zone-pair] %s -> %s: %s (%s) %s",
-					zpp.FromZone, zpp.ToZone, pol.Name, ActionString(pol.Action), mods)
-				if setScrubbed {
-					line += " " + config.ZoneQuarantinePoliciesQualifier
-				}
-				switch {
-				case fromAny && toAny:
-					bothAnyLines = append(bothAnyLines, line)
-				case fromAny || toAny:
-					singleWildLines = append(singleWildLines, line)
-				default:
-					exactLines = append(exactLines, line)
-				}
-				zonePairPolicies++
-			}
-		}
-		policySetID++
+		lines = append(lines, line)
+		zonePairPolicies++
 	}
-	lines = append(lines, exactLines...)
-	lines = append(lines, singleWildLines...)
-	lines = append(lines, bothAnyLines...)
+	policySetID := uint32(len(cfg.Security.Policies))
 
 	// Tier 2: applicable GLOBAL policies. The global tier's policySetID is the
 	// count of zone-pair sets (policySetID after the loop), mirroring the
