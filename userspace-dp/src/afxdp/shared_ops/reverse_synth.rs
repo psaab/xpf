@@ -76,8 +76,8 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match(
 ///
 /// EXPLICIT FLAG, never inferred from `aux.session_id`: the first
 /// implementation keyed this off `aux.session_id == 0`, which inverted
-/// both populations — local table matches are built with a default
-/// aux (id 0) by the NAT lookup helpers in `session/lookup.rs`, so
+/// both populations — local table matches for rows with no stable
+/// id carry aux id 0, so
 /// live hits fell back to the reply-resolution derivation (stamp=2,
 /// the bug this leg exists to fix); shared-map matches carry the
 /// peer's nonzero session id, so they were stamped with the PEER's
@@ -236,7 +236,7 @@ pub(in crate::afxdp) fn build_reverse_session_from_forward_match_in_table(
     SessionLookup {
         aux: SessionLookupAux {
             source_nat_static: forward_match.aux.source_nat_static,
-            ..SessionLookupAux::default()
+            ..SessionLookupAux::unknown()
         },
         decision,
         metadata,
@@ -315,7 +315,10 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
             decision: entry.decision,
             metadata: entry.metadata.clone(),
             forwarding_generation: ForwardingGenerationStamp::default(),
-            aux: SessionLookupAux::default(),
+            // #17080: deliberate synthesizer — no local entry to
+            // snapshot; the SyncedSessionEntry's provenance is carried
+            // on the entry itself (source_nat_static below), not aux.
+            aux: SessionLookupAux::unknown(),
             synced_synthesis: true,
         },
         now_secs,
