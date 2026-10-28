@@ -66,7 +66,7 @@ func TestMetricsAuthGateNonLoopback(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := authMiddleware(cfg, tc.requireAuth, next)
+			handler := productionAuthHandlerOnly(t, cfg, tc.requireAuth, next)
 			req := httptest.NewRequest("GET", tc.path, nil)
 			for k, v := range tc.header {
 				req.Header.Set(k, v)

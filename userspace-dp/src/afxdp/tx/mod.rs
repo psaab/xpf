@@ -18,10 +18,6 @@ pub(in crate::afxdp) use transmit::{
 };
 
 pub(super) mod drain;
-pub(in crate::afxdp) use drain::{
-    COS_GUARANTEE_QUANTUM_MAX_BYTES, COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS,
-    COS_SURPLUS_ROUND_QUANTUM_BYTES,
-};
 pub(super) use drain::{
     bound_pending_tx_local, bound_pending_tx_prepared, drain_pending_tx,
     drain_pending_tx_local_owner, pending_tx_capacity,

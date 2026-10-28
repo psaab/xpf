@@ -222,14 +222,6 @@ var collectorDescSession = []int{
 	xpfCollectorDescFieldIndex("sessionsSNAT"),
 	xpfCollectorDescFieldIndex("sessionsDNAT"),
 	xpfCollectorDescFieldIndex("sessionScrapeOK"),
-	xpfCollectorDescFieldIndex("gcSweepDuration"),
-	xpfCollectorDescFieldIndex("gcSweepTimestamp"),
-	xpfCollectorDescFieldIndex("gcSweepsTotal"),
-	xpfCollectorDescFieldIndex("gcExpiredDeletedTotal"),
-	xpfCollectorDescFieldIndex("gcDeadlinesSaturatedTotal"),
-	xpfCollectorDescFieldIndex("gcPersistentNATExpiredTotal"),
-	xpfCollectorDescFieldIndex("gcErrorsTotal"),
-	xpfCollectorDescFieldIndex("gcAggressiveAging"),
 }
 
 // initNATDescriptors (metrics_descriptors_nat.go).

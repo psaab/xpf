@@ -43,7 +43,7 @@ func TestSharedMatcherRegressionMatrix(t *testing.T) {
 						config.PolicyMatch{Applications: []string{"junos-http"}})),
 				},
 			}, config.ApplicationsConfig{}),
-			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80},
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)},
 			wantMatched: true, wantAction: config.PolicyPermit, wantName: "allow-http",
 		},
 		{
@@ -63,7 +63,7 @@ func TestSharedMatcherRegressionMatrix(t *testing.T) {
 					"inner": {Name: "inner", Applications: []string{"junos-https"}},
 				},
 			}),
-			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 443},
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(443)},
 			wantMatched: true, wantAction: config.PolicyPermit, wantName: "allow-set",
 		},
 		{
@@ -136,7 +136,7 @@ func TestSharedMatcherRegressionMatrix(t *testing.T) {
 					"srcport-app": {Name: "srcport-app", Protocol: "tcp", SourcePort: "5000", DestinationPort: "80"},
 				},
 			}),
-			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", SrcPort: 5000, DstPort: 80},
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", SrcPort: PortPtr(5000), DstPort: PortPtr(80)},
 			wantMatched: true, wantAction: config.PolicyPermit, wantName: "allow-srcport",
 		},
 		{
@@ -154,7 +154,7 @@ func TestSharedMatcherRegressionMatrix(t *testing.T) {
 					"srcport-app": {Name: "srcport-app", Protocol: "tcp", SourcePort: "5000", DestinationPort: "80"},
 				},
 			}),
-			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", SrcPort: 6000, DstPort: 80},
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", SrcPort: PortPtr(6000), DstPort: PortPtr(80)},
 			wantMatched: false, wantDefault: true, wantAction: config.PolicyDeny,
 		},
 		{
@@ -187,7 +187,7 @@ func TestSharedMatcherRegressionMatrix(t *testing.T) {
 					permit("global-allow", config.PolicyMatch{}),
 				},
 			}, config.ApplicationsConfig{}),
-			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 22},
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(22)},
 			wantMatched: true, wantAction: config.PolicyPermit, wantName: "global-allow",
 		},
 		{
@@ -197,7 +197,7 @@ func TestSharedMatcherRegressionMatrix(t *testing.T) {
 			cfg: cfgWith(config.SecurityConfig{
 				DefaultPolicy: config.PolicyPermit,
 			}, config.ApplicationsConfig{}),
-			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 22},
+			q:           Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(22)},
 			wantMatched: false, wantDefault: true, wantAction: config.PolicyPermit,
 		},
 	}
@@ -362,7 +362,7 @@ func TestOldNarrowMatcherDiverges(t *testing.T) {
 						config.PolicyMatch{Applications: []string{"junos-http"}})),
 				},
 			}, config.ApplicationsConfig{}),
-			q: Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80},
+			q: Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)},
 		},
 		{
 			name: "literal CIDR",
@@ -381,13 +381,13 @@ func TestOldNarrowMatcherDiverges(t *testing.T) {
 				DefaultPolicy:  config.PolicyDeny,
 				GlobalPolicies: []*config.Policy{permit("global-allow", config.PolicyMatch{})},
 			}, config.ApplicationsConfig{}),
-			q: Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 22},
+			q: Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(22)},
 		},
 		{
 			name: "default permit-all",
 			cfg: cfgWith(config.SecurityConfig{DefaultPolicy: config.PolicyPermit},
 				config.ApplicationsConfig{}),
-			q: Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 22},
+			q: Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(22)},
 		},
 	}
 	for _, c := range cases {
@@ -418,7 +418,7 @@ func oldNarrowMatchPermits(cfg *config.Config, q Query) bool {
 			if !oldMatchAddr(pol.Match.DestinationAddresses, q.DstIP, cfg) {
 				continue
 			}
-			if !oldMatchApp(pol.Match.Applications, q.Protocol, q.DstPort, cfg) {
+			if !oldMatchApp(pol.Match.Applications, q.Protocol, portValue(q.DstPort), cfg) {
 				continue
 			}
 			return pol.Action == config.PolicyPermit

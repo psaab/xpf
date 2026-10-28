@@ -1751,7 +1751,7 @@ fn kick_owner_rg_export_empty_set_is_noop_and_consumes_no_sequence() {
     let coordinator = Coordinator::new();
     let before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
     let wait = coordinator
-        .kick_owner_rg_export(&[], 0, false)
+        .kick_owner_rg_export_unpaged(&[], 0)
         .expect("kick");
     assert_eq!(
         coordinator.sessions.export_seq.load(Ordering::Relaxed),
@@ -1779,7 +1779,7 @@ fn kick_owner_rg_export_enqueues_command_then_wait_completes_on_ack() {
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
 
     let wait = coordinator
-        .kick_owner_rg_export(&[1, 2], 0, false)
+        .kick_owner_rg_export_unpaged(&[1, 2], 0)
         .expect("kick");
 
     {
@@ -6086,8 +6086,17 @@ fn owner_rg_export_pages_a_capped_window_without_rekicking_the_workers() {
     // PAGE 1: an ordinary capped export. Kicks phase 1, waits for the ack.
     // (#9856: the 5 deltas ride the worker's dedicated export buffer tagged
     // with the kicked sequence — the window the collect path drains.)
+    // #17127: page 1 enters through the v2 entry (as production does),
+    // so its token is the one the continuation below must carry.
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 3, false)
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            false,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            0,
+        )
         .expect("kick page 1");
     assert_eq!(
         commands.lock().expect("commands").len(),
@@ -6117,10 +6126,20 @@ fn owner_rg_export_pages_a_capped_window_without_rekicking_the_workers() {
          a truncated one, which is why max=0 was the only safe request"
     );
 
-    // PAGE 2: a CONTINUATION. It must kick nothing, consume no sequence, and
-    // not block on an ack that will never come.
+    // PAGE 2: a CONTINUATION carrying page 1's token (`wait.token()`).
+    // It must kick nothing, consume no sequence, and not block on an
+    // ack that will never come. Pre-#17127 this cell used the legacy
+    // tokenless continuation (`continuation=true, token=None`), a
+    // shape production never sends and which skipped the token check.
     let wait2 = coordinator
-        .kick_owner_rg_export(&[1], 3, true)
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            wait.token().0,
+            wait.token().1,
+        )
         .expect("continuation kick");
     assert_eq!(
         commands.lock().expect("commands").len(),
@@ -6174,7 +6193,7 @@ fn owner_rg_export_uncapped_drains_everything_and_reports_no_more() {
     // (#9856: deltas ride the worker's dedicated export buffer tagged with
     // the kicked sequence.)
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 0, false)
+        .kick_owner_rg_export_unpaged(&[1], 0)
         .expect("kick");
     let uncapped_seq = coordinator.sessions.export_seq.load(Ordering::Relaxed);
     let uncapped_buffer = coordinator
@@ -6224,7 +6243,7 @@ fn owner_rg_export_exact_fit_reports_no_more() {
     // (#9856: deltas ride the worker's dedicated export buffer tagged with
     // the kicked sequence.)
     let wait = coordinator
-        .kick_owner_rg_export(&[1], 4, false)
+        .kick_owner_rg_export_unpaged(&[1], 4)
         .expect("kick");
     let exact_seq = coordinator.sessions.export_seq.load(Ordering::Relaxed);
     let exact_buffer = coordinator
@@ -6265,7 +6284,7 @@ fn owner_rg_export_exact_cap_with_lagging_ack_reports_more() {
         .register(0, WorkerRuntimeRecord::for_test(handle), None);
 
     let wait = coordinator
-        .kick_owner_rg_export(&[1], EXPORT_BUFFER_CAP_ENTRIES, false)
+        .kick_owner_rg_export_unpaged(&[1], EXPORT_BUFFER_CAP_ENTRIES)
         .expect("kick");
     let sequence = coordinator.sessions.export_seq.load(Ordering::Relaxed);
     let export_buffer = coordinator
@@ -6294,12 +6313,267 @@ fn owner_rg_export_exact_cap_with_lagging_ack_reports_more() {
     );
 
     ack.store(sequence, Ordering::Release);
+    // #17127: the terminal probe is a v2 continuation carrying page 1's
+    // token, not the legacy tokenless continuation.
     let wait2 = coordinator
-        .kick_owner_rg_export(&[1], EXPORT_BUFFER_CAP_ENTRIES, true)
+        .kick_owner_rg_export_v2(
+            &[1],
+            EXPORT_BUFFER_CAP_ENTRIES,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            wait.token().0,
+            wait.token().1,
+        )
         .expect("terminal probe");
     let (page2, more2) = wait2.wait_and_collect().expect("terminal page");
     assert!(page2.is_empty(), "the first page drained the full window");
     assert!(!more2, "the probe observes the now-published ACK");
+}
+
+// ---------------------------------------------------------------------------
+// #17127: the five #9856 v2 refusal arms. Before this change none had a
+// test: the only token-carrying continuation cell was the happy path
+// (`server/tests.rs`), and the Rust paging cells entered through the
+// legacy tokenless continuation, which skipped the token check. Each
+// cell below asserts `Err` (with the arm's message), `export_seq`
+// unchanged, and the open window untouched — a refused kick must
+// neither consume a sequence nor disturb a window a later valid
+// continuation still drains.
+// ---------------------------------------------------------------------------
+
+/// Open a capped window on `coordinator` (worker 0 registered by the
+/// caller) and collect page 1, leaving the remainder buffered. Returns
+/// the page-1 wait (its `token()` is the window's token) and the
+/// export buffer holding the remainder.
+fn open_capped_window_17127(
+    coordinator: &Coordinator,
+    commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+) -> (
+    crate::afxdp::OwnerRgExportWait,
+    Arc<crate::afxdp::binding_state::ExportBufferState>,
+) {
+    let wait = coordinator
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            false,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            0,
+            0,
+        )
+        .expect("kick page 1");
+    assert_eq!(
+        commands.lock().expect("commands").len(),
+        1,
+        "fixture: page 1 must kick the workers"
+    );
+    let seq = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let export_buffer = coordinator
+        .workers
+        .records()
+        .get(&0)
+        .expect("worker 0")
+        .export_buffer
+        .clone();
+    for _ in 0..5 {
+        export_buffer
+            .push_export_open(seq, SessionDeltaInfo::default())
+            .expect("fixture fits");
+    }
+    coordinator
+        .workers
+        .records()
+        .get(&0)
+        .expect("worker 0")
+        .handle
+        .session_export_ack
+        .store(seq, Ordering::Release);
+    let (page1, more1) = wait.wait_and_collect().expect("page 1");
+    assert_eq!(page1.len(), 3, "fixture: page 1 returns exactly the cap");
+    assert!(more1, "fixture: the window must be incomplete after page 1");
+    (wait, export_buffer)
+}
+
+/// Assert a refused v2 kick left `export_seq` and the open window
+/// untouched: a valid continuation carrying `token` still drains the
+/// 2-entry remainder and reports the window complete.
+fn assert_window_untouched_17127(
+    coordinator: &Coordinator,
+    seq_before: u64,
+    token: (u64, u64),
+    export_buffer: &crate::afxdp::binding_state::ExportBufferState,
+) {
+    assert_eq!(
+        coordinator.sessions.export_seq.load(Ordering::Relaxed),
+        seq_before,
+        "a refused kick must not consume an export sequence"
+    );
+    let wait = coordinator
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            token.0,
+            token.1,
+        )
+        .expect("valid continuation after refusal");
+    let (page, more) = wait.wait_and_collect().expect("continuation page");
+    assert_eq!(
+        page.len(),
+        2,
+        "the open window must still hold the remainder after a refused kick"
+    );
+    assert!(!more, "the remainder drains the window to completion");
+    assert!(
+        export_buffer.drain_export(usize::MAX).is_empty(),
+        "nothing may be left behind once the caller has seen more=false"
+    );
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_unsupported_protocol_version_17127() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+
+    let err = coordinator
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION + 1,
+            wait.token().0,
+            wait.token().1,
+        )
+        .err()
+        .expect("unsupported version must be refused");
+    assert!(err.contains("is unsupported"), "{err}");
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_zero_token_continuation_17127() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+
+    for (incarnation, sequence) in [(0, wait.token().1), (wait.token().0, 0), (0, 0)] {
+        let err = coordinator
+            .kick_owner_rg_export_v2(
+                &[1],
+                3,
+                true,
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                incarnation,
+                sequence,
+            )
+            .err()
+            .expect("zero-token continuation must be refused");
+        assert!(err.contains("requires nonzero"), "{err}");
+    }
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_page1_with_token_17127() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+
+    for (incarnation, sequence) in [(wait.token().0, 0), (0, wait.token().1), wait.token()] {
+        let err = coordinator
+            .kick_owner_rg_export_v2(
+                &[1],
+                3,
+                false,
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                incarnation,
+                sequence,
+            )
+            .err()
+            .expect("page 1 carrying a token must be refused");
+        // A fresh kick over an open window would say BUSY; the token arm
+        // must fire first, so the message pins the arm, not the BUSY arm.
+        assert!(err.contains("must not carry a continuation token"), "{err}");
+    }
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_continuation_with_no_open_window_17127() {
+    let coordinator = Coordinator::new();
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    // No kick ever happened, so no window is open. The token is
+    // well-formed (nonzero) so the refusal is the no-window arm, not
+    // the zero-token arm.
+    let err = coordinator
+        .kick_owner_rg_export_v2(
+            &[1],
+            3,
+            true,
+            crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+            1,
+            1,
+        )
+        .err()
+        .expect("continuation with no open window must be refused");
+    assert!(err.contains("no open window"), "{err}");
+    assert_eq!(
+        coordinator.sessions.export_seq.load(Ordering::Relaxed),
+        seq_before,
+        "a refused continuation must not consume an export sequence"
+    );
+    // The refusal opened nothing: a fresh kick still proceeds.
+    let _wait = coordinator
+        .kick_owner_rg_export_unpaged(&[], 0)
+        .expect("fresh kick after refusal must proceed");
+}
+
+#[test]
+fn owner_rg_export_v2_refuses_token_mismatch_17127() {
+    let mut coordinator = Coordinator::new();
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    let handle = test_worker_handle(commands.clone());
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let (wait, export_buffer) = open_capped_window_17127(&coordinator, &commands);
+    let seq_before = coordinator.sessions.export_seq.load(Ordering::Relaxed);
+    let (incarnation, sequence) = wait.token();
+
+    for (bad_incarnation, bad_sequence) in
+        [(incarnation + 1, sequence), (incarnation, sequence + 1)]
+    {
+        let err = coordinator
+            .kick_owner_rg_export_v2(
+                &[1],
+                3,
+                true,
+                crate::protocol::SESSION_EXPORT_PAGING_PROTOCOL_VERSION,
+                bad_incarnation,
+                bad_sequence,
+            )
+            .err()
+            .expect("mismatched continuation token must be refused");
+        assert!(err.contains("token mismatch"), "{err}");
+    }
+    assert_window_untouched_17127(&coordinator, seq_before, wait.token(), &export_buffer);
 }
 
 // ---------------------------------------------------------------------------
@@ -7001,17 +7275,16 @@ fn a_peer_delete_of_a_live_local_session_with_an_unresolved_owner_rg_is_refused_
     );
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
     // an outcome-first order hides every state property behind it from the matrix.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "a peer delete of a live LOCAL session whose owner RG is UNRESOLVED was applied: \
              owner 0 is unknown-not-absent, and the install guard already refuses it (#9714 F4)"
@@ -7060,14 +7333,14 @@ fn a_peer_delete_with_an_unresolved_owner_rg_and_no_active_group_still_deletes_9
     );
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "owner 0 was treated as protected with NO group forwarding-active: the guard must key on \
          whether this node is actually forwarding, not on the owner being unknown (#9714 F4)"
     );
@@ -7428,11 +7701,10 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     let refused_before = PEER_DELETE_REFUSED_LOCAL_OWNED.load(Ordering::Relaxed);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // PREMISES fail fast (a broken fixture makes the cell meaningless); PROPERTIES are
@@ -7446,7 +7718,7 @@ fn a_peer_delete_of_a_live_local_session_is_refused_9714() {
     // under-lock predicate as the sole defence) reds this cell on "got ok=true" and
     // never reaches "were the shared rows kept?", which was the entire question.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "the refusal must be reported, or the handler answers ok and the Go side deletes its \
              mirror and DNAT rows for a flow the helper kept (#9714)"
@@ -7528,15 +7800,15 @@ fn a_peer_delete_with_the_owner_rg_inactive_still_deletes_9714() {
     let fixture = fixture_9714(false);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
          for a session the helper removed (#9714)"
     );
@@ -7563,15 +7835,15 @@ fn a_peer_delete_of_a_peer_synced_session_still_deletes_with_the_owner_rg_active
     let fixture = fixture_9714_with_origin(true, SessionOrigin::SyncImport);
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
-    assert!(
-        !refused,
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
         "an applied peer delete reported a refusal; the Go side would keep mirror and DNAT rows \
          for a session the helper removed (#9714)"
     );
@@ -7599,17 +7871,16 @@ fn a_peer_delete_of_the_reverse_key_of_a_live_local_session_is_refused_9714() {
     let holds_before = fixture.dnat_holds();
     crate::afxdp::bpf_map::clear_session_map_writes();
 
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.reverse_key.clone(), false)
-        .is_refused_local_owned();
+        .delete_peer_synced_session(fixture.reverse_key.clone(), false);
 
     let writes = crate::afxdp::bpf_map::session_map_writes();
     // Properties COLLECTED, not asserted in sequence — see the acceptance cell for why
     // an outcome-first order hides every state property behind it from the matrix.
     let mut violations: Vec<String> = Vec::new();
-    if !refused {
+    if outcome != SyncedDeleteOutcome::RefusedLocalOwned {
         violations.push(
             "a peer delete of the reverse key of a live local session must be refused and say so \
              (#9714)"
@@ -7827,12 +8098,11 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
         fixture.shared_has(&fixture.forward.key) && fixture.shared_has(&fixture.reverse_key),
         "FIXTURE: forward and reverse must be in the shared maps"
     );
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), true)
-        .is_refused_local_owned();
-    assert!(!refused, "forward-only delete must apply");
+        .delete_peer_synced_session(fixture.forward.key.clone(), true);
+    assert_eq!(outcome, SyncedDeleteOutcome::Applied, "forward-only delete must apply");
     assert!(
         !fixture.shared_has(&fixture.forward.key),
         "forward-only delete must remove the named key"
@@ -7855,12 +8125,11 @@ fn forward_only_peer_delete_preserves_the_reverse_half_9752() {
 #[test]
 fn ordinary_peer_delete_retires_both_halves_9752() {
     let fixture = fixture_9714_with_origin(false, SessionOrigin::SyncImport);
-    let refused = fixture
+    let outcome = fixture
         .coordinator
         .session_domain()
-        .delete_peer_synced_session(fixture.forward.key.clone(), false)
-        .is_refused_local_owned();
-    assert!(!refused, "ordinary delete must apply");
+        .delete_peer_synced_session(fixture.forward.key.clone(), false);
+    assert_eq!(outcome, SyncedDeleteOutcome::Applied, "ordinary delete must apply");
     assert!(
         !fixture.shared_has(&fixture.forward.key) && !fixture.shared_has(&fixture.reverse_key),
         "ordinary delete must remove both halves"
@@ -12636,16 +12905,97 @@ fn kick_export_refused_worker_fails_fast_15950() {
     {
         let mut q = commands.lock().unwrap();
         for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
-            assert!(crate::afxdp::worker_queue::push_bounded(&mut q, WorkerCommand::DeleteSynced(test_key())));
+            assert!(crate::afxdp::worker_queue::push_bounded(
+                &mut q,
+                WorkerCommand::DeleteSynced(test_key())
+            ));
         }
     }
     let handle = test_worker_handle(commands.clone());
-    coordinator.workers.register(0, WorkerRuntimeRecord::for_test(handle), None);
-    let err = coordinator.kick_owner_rg_export(&[1], 0, false).err().expect("full queue must fail fast, not open a 15s window");
+    coordinator
+        .workers
+        .register(0, WorkerRuntimeRecord::for_test(handle), None);
+    let err = coordinator
+        .kick_owner_rg_export_unpaged(&[1], 0)
+        .err()
+        .expect("full queue must fail fast, not open a 15s window");
     assert!(err.contains("refused"), "{err}");
     // no window opened: a fresh kick with drained queue would work — assert busy check is not stuck by checking error is refused not busy on retry after drain
     commands.lock().unwrap().clear();
-    let wait = coordinator.kick_owner_rg_export(&[1], 0, false).expect("retry after drain must kick");
+    let wait = coordinator
+        .kick_owner_rg_export_unpaged(&[1], 0)
+        .expect("retry after drain must kick");
     // ack it
     let _ = wait;
+}
+
+/// #17138: the `SyncedDeleteOutcome` contract table is the single source of
+/// truth for (shared removed / Go keeps rows / mirror delete failed) per
+/// variant. This guard enumerates `SyncedDeleteOutcome::ALL`, so adding a
+/// variant without a table row — or flipping a predicate without updating
+/// the row — fails here instead of silently diverging from the doc table
+/// in `session_import.rs` and from the handler's wire mapping.
+#[test]
+fn synced_delete_outcome_contract_table_17138() {
+    use super::session_import::SyncedDeleteOutcome;
+
+    // (variant, shared_removed, keeps_caller_rows, mirror_delete_failed)
+    let expected: [(SyncedDeleteOutcome, bool, bool, bool); 9] = [
+        (SyncedDeleteOutcome::Applied, true, false, false),
+        (SyncedDeleteOutcome::RefusedLocalOwned, false, true, false),
+        (
+            SyncedDeleteOutcome::RefusedConcurrentLocalOwned,
+            false,
+            true,
+            false,
+        ),
+        (
+            SyncedDeleteOutcome::RefusedStaleGeneration,
+            false,
+            false,
+            false,
+        ),
+        (SyncedDeleteOutcome::RefusedGateBusy, false, true, false),
+        (SyncedDeleteOutcome::RefusedMirrorDelete, true, true, true),
+        (SyncedDeleteOutcome::RefusedIdentity, false, true, false),
+        (SyncedDeleteOutcome::StaleForward, false, false, false),
+        (SyncedDeleteOutcome::PartialCompanion, true, false, false),
+    ];
+    assert_eq!(
+        SyncedDeleteOutcome::ALL.len(),
+        expected.len(),
+        "a SyncedDeleteOutcome variant was added without a contract-table row (#17138)"
+    );
+    for (variant, shared_removed, keeps_rows, mirror_failed) in expected {
+        assert!(
+            SyncedDeleteOutcome::ALL.contains(&variant),
+            "{variant:?} missing from SyncedDeleteOutcome::ALL (#17138)"
+        );
+        assert_eq!(
+            variant.shared_removed(),
+            shared_removed,
+            "{variant:?}: shared_removed disagrees with the contract table (#17138)"
+        );
+        assert_eq!(
+            variant.keeps_caller_rows(),
+            keeps_rows,
+            "{variant:?}: keeps_caller_rows disagrees with the contract table (#17138)"
+        );
+        assert_eq!(
+            variant.mirror_delete_failed(),
+            mirror_failed,
+            "{variant:?}: mirror_delete_failed disagrees with the contract table (#17138)"
+        );
+    }
+    // Reverse direction: every element of ALL must have an expected row.
+    // The length + membership checks above cannot catch a variant that is
+    // added to ALL (bumping its length in step) without a contract row —
+    // the two hand-maintained lists would grow together and stay equal —
+    // nor a duplicate row masking a missing one.
+    for variant in SyncedDeleteOutcome::ALL {
+        assert!(
+            expected.iter().any(|(row, ..)| *row == variant),
+            "{variant:?} is in SyncedDeleteOutcome::ALL without a contract-table row (#17138)"
+        );
+    }
 }

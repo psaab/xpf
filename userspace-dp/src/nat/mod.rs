@@ -260,12 +260,17 @@ mod tests_reseed_persistent_siblings_15110;
 #[cfg(test)]
 #[path = "tests_static_multiport_index_15790.rs"]
 mod tests_static_multiport_index_15790;
+#[cfg(test)]
 #[path = "tests_synced_det_v4_15267.rs"]
 mod tests_synced_det_v4_15267;
 // #16481: deterministic NAT64 reseed carries retained tuples on pool-length change.
 #[cfg(test)]
 #[path = "tests_det_reseed_16481.rs"]
 mod tests_det_reseed_16481;
+// #17033: synced PAT refresh counts as an idempotent reuse.
+#[cfg(test)]
+#[path = "tests_reenter_17033.rs"]
+mod tests_reenter_17033;
 
 const NAT_SCOPE_TIER_INTERFACE: u8 = 0;
 const NAT_SCOPE_TIER_ZONE: u8 = 1;
@@ -354,7 +359,7 @@ pub(crate) use allocator::{
     DeterministicV4, DeterministicV6, MAX_NAT_HOLDER_WORKERS, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS,
     MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS, NatHolder, PersistentInbound, PersistentLeaseHold,
     PersistentLeaseOwner, PersistentSourceKey, PortAllocator, PortAllocatorSnapshot, ReseedOutcome,
-    SourceNatReservationSnapshot,
+    SourceNatReservationSnapshot, DETERMINISTIC_NAT64_BIB_TIMEOUT_NS,
     deterministic_indices_v4, sticky_pool_index,
 };
 pub(crate) use destination::{DnatKey, DnatLookup, DnatTable, DnatValue};

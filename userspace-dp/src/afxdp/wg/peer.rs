@@ -54,8 +54,8 @@ pub(crate) struct PeerConfig {
     /// carry: a rename must drop the old name's resolved address.
     pub(crate) endpoint_host: Option<String>,
     /// Optional keepalive interval in seconds (per WG: 0 = off).
-    /// Consumed by the #1888 S5 timer pass (`WgEngine::timer_pass` T8 —
-    /// see wg/timers.rs).
+    /// Consumed by the #1888 S5 timer pass (`WgEngine::timer_pass_for_peer`
+    /// T8 — see wg/timers.rs).
     pub(crate) persistent_keepalive: u16,
     /// Per-peer preshared key (#1434 B2). 32 zero bytes = no PSK
     /// (semantically identical to the all-zero key in Noise IKpsk2).
@@ -67,6 +67,7 @@ pub(crate) struct PeerConfig {
 }
 
 impl PeerConfig {
+    #[cfg(test)]
     pub(crate) fn new(
         endpoint: Option<SocketAddr>,
         persistent_keepalive: u16,
@@ -595,14 +596,6 @@ impl Peer {
         self.live_endpoint.store(Some(Arc::new(endpoint)));
     }
 
-    /// #14675: drop the adopted live endpoint when the operator's
-    /// configured endpoint changes or is removed. Without this the
-    /// dataplane peer_for_dest keeps preferring the stale roamed /
-    /// resolved address over the new configured value even after the
-    /// control loop resets its own effective map.
-    pub(crate) fn clear_live_endpoint(&self) {
-        self.live_endpoint.store(None);
-    }
     /// #16711: the fresh learned outer PMTU for this peer, if any.
     #[inline]
     pub(crate) fn learned_pmtu(&self, now_ns: u64) -> Option<usize> {

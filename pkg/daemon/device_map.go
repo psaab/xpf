@@ -20,6 +20,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/devicemap"
+	"github.com/psaab/xpf/pkg/netname"
 	"github.com/vishvananda/netlink"
 )
 
@@ -999,7 +1000,7 @@ func teardownRestoreTarget(target string) (predictable string, live bool) {
 	nic := presentNIC{Name: target}
 	if devReal, err := filepath.EvalSymlinks(
 		filepath.Join("/sys/class/net", target, "device")); err == nil {
-		nic.PCIAddr = devicemap.ExtractPCIAddr(devReal)
+		nic.PCIAddr = netname.PCIAddrFromDevicePath(devReal)
 	}
 	return predictableName(nic), true
 }

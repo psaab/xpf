@@ -25,27 +25,21 @@ pub enum SeqVerdict {
 
 /// #16129: which hit mutations a session lookup defers until the caller has
 /// decided the packet's authority (#9519). Replaces the `(defer_close,
-/// defer_all)` bool pair — `(true, true)` was live but indistinguishable by
-/// type from the nonsensical reading; the enum makes the three live modes
-/// the only representable states.
+/// defer_all)` bool pair. Two live modes remain: ordinary inline mutation
+/// and the fully read-only authority probe. The former close-only mode
+/// (#10636) lost its last production caller in #13938, which replaced it
+/// with the `Defer::All` probe plus a `Defer::None` Owner replay
+/// (`apply_deferred_owner_hit`); it was removed in #17092.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Defer {
     /// Apply every hit mutation inline (ordinary packet lookup).
     None,
-    /// Defer only the FIN/RST close-state mutation (#10636); refresh and
-    /// handshake state still apply.
-    Close,
     /// Defer every hit mutation (#13938); the caller replays a
     /// `Defer::None` lookup after an Owner verdict.
     All,
 }
 
 impl Defer {
-    #[inline]
-    pub(crate) fn close(self) -> bool {
-        matches!(self, Self::Close | Self::All)
-    }
-
     #[inline]
     pub(crate) fn all(self) -> bool {
         matches!(self, Self::All)
@@ -91,18 +85,6 @@ impl<'a> SessionQuery<'a> {
         Self { ack, ..Self::new(key, now_ns, tcp_flags, payload_len) }
     }
 
-    /// Close-deferring lookup — the
-    /// `lookup_with_origin_deferring_close_expiry` mode.
-    pub(crate) fn deferring_close(key: &'a SessionKey, now_ns: u64, tcp_flags: u8) -> Self {
-        Self {
-            key,
-            now_ns,
-            tcp_flags,
-            defer: Defer::Close,
-            payload_len: 0,
-            ack: None,
-        }
-    }
 
     /// #16042: authority-deferring lookup carrying the parsed segment ack.
     /// The probe itself mutates nothing (`Defer::All`); the ack rides along
@@ -851,44 +833,6 @@ impl SessionTable {
         }
     }
 
-    /// #10636: [`Self::lookup_with_origin`] WITHOUT the TCP close-state
-    /// mutation. A RST/FIN from a FOREIGN zone is dropped by the #9519
-    /// authority verdict, yet the inline close used to land during `resolve` —
-    /// BEFORE that verdict — sticking closing/reset state, demoting the
-    /// expiry to the 2s RST window, propagating to the companion (#4109),
-    /// and emitting an HA close Update (#9412), all for a dropped packet.
-    ///
-    /// This variant refreshes `last_seen_ns` for ordinary traffic (so a
-    /// foreign packet can keep an idle session alive per the #9519 contract)
-    /// and still runs the handshake state machine. A deferred FIN/RST on an
-    /// already-closing entry does not refresh its deadline. The poll site
-    /// applies the skipped close after an Owner verdict via
-    /// [`Self::apply_deferred_owner_close`]; a foreign arrival drops it with
-    /// the packet. The result preserves stale-vs-absent classification from
-    /// the same primary-index probe.
-    pub fn lookup_with_origin_deferring_close_expiry(
-        &mut self,
-        key: &SessionKey,
-        now_ns: u64,
-        tcp_flags: u8,
-    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_query(&SessionQuery::deferring_close(key, now_ns, tcp_flags))
-    }
-
-    /// #13938: a local hit is resolved before #9519 has decided whether this
-    /// packet owns the session. Defer every hit mutation (TCP handshake state,
-    /// refresh, companion propagation, HA updates, and wheel refresh), not
-    /// just FIN/RST close state. The poll path replays the normal lookup only
-    /// after an Owner verdict; foreign packets use the returned snapshot for
-    /// their packet-local verdict without changing the entry.
-    pub fn lookup_with_origin_deferring_authority(
-        &mut self,
-        key: &SessionKey,
-        now_ns: u64,
-        tcp_flags: u8,
-    ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_deferring_authority_with_payload(key, now_ns, tcp_flags, 0)
-    }
 
     /// #14935: deferring-authority lookup carrying TCP payload progress so
     /// the Owner replay can re-stamp a CLOSING entry on data.
@@ -933,7 +877,6 @@ impl SessionTable {
         let key = query.key;
         let now_ns = query.now_ns;
         let tcp_flags = query.tcp_flags;
-        let defer_close = query.defer.close();
         let defer_all = query.defer.all();
         let payload_len = query.payload_len;
         // #964 Step 1: resolve handle from key. Direct-primary path
@@ -998,7 +941,7 @@ impl SessionTable {
             // direction refreshes a closing entry. A RST-aborted entry and
             // both TIME_WAIT halves therefore keep a fixed deadline.
             let was_closing = entry.closing;
-            let do_close = !defer_close && !defer_all && is_tcp && is_closing(tcp_flags);
+            let do_close = !defer_all && is_tcp && is_closing(tcp_flags);
             let close_progress = if do_close {
                 Self::stamp_tcp_close(entry, key, tcp_flags)
             } else {
@@ -1075,11 +1018,12 @@ impl SessionTable {
                 entry.handshake_pending = false;
                 entry.syn_ack_first = false;
             }
-            // #13682: a close-deferring hit runs before zone authority is
-            // known. Do not let a deferred FIN/RST slide an already-closing
-            // entry's deadline; an Owner applies actual close progress after
-            // the verdict, while a foreign packet is dropped. Ordinary hits
-            // from the non-FINed half still refresh the half-close window.
+            // #13682/#17092: with the close-only deferral gone, the only
+            // pre-verdict probe is fully read-only (`Defer::All`), so a
+            // foreign FIN/RST cannot slide an already-closing entry here;
+            // an Owner replay (`Defer::None`) applies actual close progress
+            // after the verdict. Ordinary hits from the non-FINed half
+            // still refresh the half-close window.
             //
             // #14935: a data-bearing segment (payload progress) re-stamps a
             // CLOSING (single-FIN) entry from EITHER direction — the FINed
@@ -1088,7 +1032,7 @@ impl SessionTable {
             // the #10885 fixed fuse. The fixed fuse is retained ONLY for
             // TIME_WAIT (both FINs) and RST: `entry.reset` and the
             // both-FINs class check below exclude payload refresh there.
-            let deferred_close_segment = defer_close && is_tcp && is_closing(tcp_flags);
+            let deferred_close_segment = defer_all && is_tcp && is_closing(tcp_flags);
             let payload_progress = is_tcp
                 && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
                 && entry.closing
@@ -1126,17 +1070,7 @@ impl SessionTable {
                     // short/global window instead.
                     session_timeout_ns(
                         key.protocol,
-                        // #10636: a deferring lookup withholds the close, so the
-                        // refresh must not see the close bits either —
-                        // `session_timeout_ns` demotes on `is_closing(flags)`
-                        // directly. Scrub FIN/RST (SYN/ACK/PSH/URG preserved for
-                        // the opening/established arms); the deferred apply
-                        // re-buckets onto the close window explicitly.
-                        if defer_close {
-                            tcp_flags & !(TCP_FIN | TCP_RST)
-                        } else {
-                            tcp_flags
-                        },
+                        tcp_flags,
                         // #6752: the EFFECTIVE established class. A flow promoted by
                         // the SYN-ACK but not yet completed stays on the opening
                         // window, so a handshake the client never finishes reaps at
@@ -1315,7 +1249,7 @@ impl SessionTable {
         SessionExpiryProbe::Live(result)
     }
 
-    /// #10636: stamp the sticky close bits shared by inline and deferred close.
+    /// #10636: stamp the sticky close bits for an inline close.
     /// Returns true only when the first RST or a FIN in a previously un-FINed
     /// direction advances the close state; repeated FIN/RST packets do not
     /// refresh the close window.
@@ -1372,64 +1306,6 @@ impl SessionTable {
         let _ = self.lookup_with_origin_with_ack(key, now_ns, tcp_flags, payload_len, ack);
     }
 
-    /// #10636: apply a close the deferring lookup skipped, after the #9519
-    /// authority verdict names this packet's arrival an Owner. Fails closed:
-    /// a non-TCP packet, a non-closing segment, a missing entry, a stale
-    /// index, or an idle-crossed entry applies nothing. The poll site calls
-    /// this only for an Owner arrival; a foreign arrival drops the deferred
-    /// close with the packet, which is the whole fix.
-    pub fn apply_deferred_owner_close(&mut self, key: &SessionKey, now_ns: u64, tcp_flags: u8) {
-        if !matches!(key.protocol, PROTO_TCP) || !is_closing(tcp_flags) {
-            return;
-        }
-        let (handle, via_alias) = match self.resolve_lookup_handle(key) {
-            Some(resolved) => resolved,
-            None => return,
-        };
-        let timeouts = self.timeouts;
-        let (actual_key, propagate, close_class_before, handshake_state_before, became_closing) = {
-            let record = match self.entries.get_mut(handle as usize) {
-                Some(record) => record,
-                None => return,
-            };
-            if !Self::lookup_record_matches_key(record, key, via_alias) {
-                return;
-            }
-            if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
-                return;
-            }
-            let entry = &mut record.entry;
-            let close_class_before = entry.tcp_close_class_wire();
-            let handshake_state_before = entry.tcp_handshake_state_wire(key.protocol);
-            let was_closing = entry.closing;
-            if !Self::stamp_tcp_close(entry, key, tcp_flags) {
-                return;
-            }
-            entry.last_seen_ns = now_ns;
-            entry.expires_after_ns = tcp_close_window_for_entry(entry, &timeouts);
-            (
-                record.key.clone(),
-                TcpStatePropagation {
-                    nat: entry.decision.nat,
-                    close: true,
-                    reset: has_rst(tcp_flags),
-                    fin: has_fin(tcp_flags),
-                    established: false,
-                    handshake_completed: false,
-                },
-                close_class_before,
-                handshake_state_before,
-                !was_closing,
-            )
-        };
-        // #16489: first transition into CLOSING via the deferred path.
-        if became_closing {
-            self.seed_closing_counters_baseline(&actual_key, propagate.nat);
-        }
-        self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
-        self.emit_session_state_update(&actual_key, close_class_before, handshake_state_before);
-        self.push_to_wheel(&actual_key, now_ns);
-    }
 
     fn closing_tcp_pair_keys_for_syn(
         &self,

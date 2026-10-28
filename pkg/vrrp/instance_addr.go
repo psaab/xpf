@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"net"
 	"sort"
-	"strconv"
-	"strings"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // interfaceAddrs returns the interface's current addresses, via the test seam
@@ -56,8 +56,8 @@ func (vi *vrrpInstance) setLocalIPv6(ip net.IP) {
 	vi.localIPv6.Store(&ip)
 }
 
-// vipAddrSet returns the configured virtual addresses (prefix stripped) as a
-// set. Used to EXCLUDE VIPs when selecting our own advert source: during
+// vipAddrSet returns the configured virtual addresses as a set of canonical
+// host strings. Used to EXCLUDE VIPs when selecting our own advert source: during
 // split-brain both nodes hold the VIP, so sending from it would make the peer
 // filter our adverts as self-sent. VIP sets may be updated in place at config
 // commit (#10780), so read the mutable slice under vi.mu.
@@ -66,68 +66,25 @@ func (vi *vrrpInstance) vipAddrSet() map[string]bool {
 	defer vi.mu.RUnlock()
 	s := make(map[string]bool, len(vi.cfg.VirtualAddresses))
 	for _, vip := range vi.cfg.VirtualAddresses {
-		addr := vip
-		if idx := strings.Index(addr, "/"); idx >= 0 {
-			addr = addr[:idx]
-		}
-		s[canonAddr(addr)] = true
+		s[canonAddr(vip)] = true
 	}
 	return s
 }
 
-// canonAddr returns the canonical string form of an IP literal so that VIP
+// canonAddr returns the canonical host string of a configured VIP so that VIP
 // exclusion keys match the lookup side, which uses net.IP.String() (Go's
 // canonical form). A non-canonically-formatted VIP — e.g. an uppercase or
-// non-zero-compressed link-local "fe80::AB" — would otherwise be keyed by its
-// raw config string and miss the "fe80::ab" lookup, leaking the VIP into local
-// link-local source selection and making the engine treat its own adverts as
-// self-sent (#2516). net.ParseIP rejects CIDR, so the caller must strip any
-// "/prefix" first; an unparseable string falls back to itself unchanged.
+// non-zero-compressed link-local "fe80::AB/64" — would otherwise be keyed by
+// its raw config string and miss the "fe80::ab" lookup, leaking the VIP into
+// local link-local source selection and making the engine treat its own
+// adverts as self-sent (#2516). The parse is config.ParseVRRPVIP (#17150):
+// CIDR and bare spellings alike yield the canonical host; an unparseable
+// string falls back to itself unchanged.
 func canonAddr(s string) string {
-	if ip := net.ParseIP(s); ip != nil {
-		return ip.String()
+	if p, ok := config.ParseVRRPVIP(s); ok {
+		return p.Addr().String()
 	}
 	return s
-}
-
-// canonicalVIPIdentity returns the address and prefix in normalized form for
-// set comparisons. Invalid tokens remain distinct so actuation reports them
-// through the existing parse-error path.
-func canonicalVIPIdentity(vip string) string {
-	ip, ipNet, err := net.ParseCIDR(vip)
-	if err != nil {
-		return vip
-	}
-	ones, _ := ipNet.Mask.Size()
-	return ip.String() + "/" + strconv.Itoa(ones)
-}
-
-// dedupeVIPs keeps the first spelling of each parsed address/prefix identity.
-// Invalid tokens remain distinct except for exact repeats, preserving the
-// existing actuation parse-error path while ensuring one entry per VIP.
-func dedupeVIPs(vips []string) []string {
-	if len(vips) < 2 {
-		return vips
-	}
-	seen := make(map[string]struct{}, len(vips))
-	var unique []string
-	for i, vip := range vips {
-		id := canonicalVIPIdentity(vip)
-		if _, exists := seen[id]; exists {
-			if unique == nil {
-				unique = append([]string(nil), vips[:i]...)
-			}
-			continue
-		}
-		seen[id] = struct{}{}
-		if unique != nil {
-			unique = append(unique, vip)
-		}
-	}
-	if unique != nil {
-		return unique
-	}
-	return vips
 }
 
 // resolveLocalIPv4 deterministically selects our IPv4 advert source: the

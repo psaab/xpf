@@ -33,7 +33,7 @@ func TestFoldWidenedDuplicateSimulatorReportsTheRefusal9571(t *testing.T) {
 	gl := func(body string) string {
 		return `security { zones { security-zone trust; security-zone untrust; } policies { global { ` + body + ` } } }`
 	}
-	q := Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), Protocol: "tcp", SrcPort: 40000, DstPort: 443}
+	q := Query{FromZone: "trust", ToZone: "untrust", SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"), Protocol: "tcp", SrcPort: PortPtr(40000), DstPort: PortPtr(443)}
 	for _, tc := range []struct{ name, text string }{
 		{"zone-pair deny then permit", zp(`policy p1 { ` + anyM + ` then { deny; } } policy p1 { ` + anyM + ` then { permit; } }`)},
 		{"global deny then permit", gl(`policy p1 { ` + anyM + ` then { deny; } } policy p1 { ` + anyM + ` then { permit; } }`)},

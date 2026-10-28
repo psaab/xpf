@@ -90,11 +90,13 @@ func ShowTextTopicCommands() map[string]string {
 }
 
 // CommandForShowTextTopic returns the canonical operational command that emits
-// a ShowText topic. This is the direction pkg/grpcapi needs: it holds a decoded
-// topic and must price it against deny-commands.
+// a ShowText topic (#17108: delegated to optopic.ShowTextCommand, so the
+// exact-then-longest-prefix resolution lives once in the registry — a
+// plain map index here made every packed topic unresolvable). This is the
+// direction pkg/grpcapi needs: it holds a decoded topic and must price it
+// against deny-commands.
 func CommandForShowTextTopic(topic string) (string, bool) {
-	command, ok := showTextTopicCommand[topic]
-	return command, ok
+	return optopic.ShowTextCommand(topic)
 }
 
 var showTextCommandTopic = sync.OnceValue(func() map[string]string {

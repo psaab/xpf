@@ -71,6 +71,61 @@ def _iso_tool():
     die("need xorriso/genisoimage/mkisofs (apt-get install xorriso)")
 
 
+def write_day0_iso(conf_path, out_path, node_id=None, iso_tool=None, run=subprocess.run):
+    """Stage conf_path (+ optional node-id) and build the secret-bearing ISO.
+
+    This is the single source of truth for the stage -> mkiso -> chmod
+    sequence shared by build_config_drive() below and xpf-deploy.py
+    (#17104, R4-Q46-07). It was hand-kept twice; a one-sided 0600 fix
+    became defect #4905-C in the twin, and every later fix had to be
+    ported by memory in lockstep.
+
+    conf_path is copied to <stage>/xpf.conf (chmod 0600 — it carries the
+    root hash, IKE PSK, SNMP community and DDNS tokens), node_id (when
+    not None) is written as <stage>/node-id, and the ISO is built with
+    volume label xpf-config under _owner_only_umask() so it never exists
+    world-readable, then chmodded 0600 as a belt for a pre-existing
+    wider-mode output. The stage dir is always removed.
+
+    iso_tool names the builder (xorriso / genisoimage / mkisofs); None
+    auto-detects via _iso_tool(). run is the subprocess runner, called
+    as run(argv, check=True): the default subprocess.run raises on a
+    failed build, and xpf-deploy injects its run_capture (via a lambda
+    adapter) so a failed mkiso dies with the tool's real error (H-21)
+    instead of a bare traceback. Returns out_path.
+    """
+    tool = iso_tool if iso_tool is not None else _iso_tool()
+    stage = tempfile.mkdtemp(prefix="xpf-day0-")
+    try:
+        shutil.copyfile(conf_path, os.path.join(stage, "xpf.conf"))
+        # 0o600, not 0o644: the staged xpf.conf carries every day-0 secret
+        # (root-authentication hash, IKE PSK, SNMP community, DDNS tokens).
+        # The 0700 mkdtemp already shields it, but keep the staged copy
+        # owner-only too (#4905-C).
+        os.chmod(os.path.join(stage, "xpf.conf"), 0o600)
+        if node_id is not None:
+            with open(os.path.join(stage, "node-id"), "w") as f:
+                f.write(f"{node_id}\n")
+        if os.path.basename(tool) == "xorriso":
+            argv = ["xorriso", "-as", "mkisofs", "-quiet", "-V", "xpf-config",
+                    "-J", "-r", "-o", out_path, stage]
+        else:
+            argv = [tool, "-quiet", "-V", "xpf-config", "-J", "-r", "-o", out_path, stage]
+        with _owner_only_umask():
+            run(argv, check=True)
+        # The finished ISO embeds xpf.conf — the most secret-bearing day-0
+        # artifact. xorriso/genisoimage/mkisofs writes it under the process
+        # umask (~0022 -> 0644, world-readable) and it lingers until an
+        # explicit destroy, so any co-located UID could `isoinfo -x
+        # /xpf.conf` the secrets out. Restrict it to owner-only immediately
+        # after build (#4905-C). The owner still reads it fine when
+        # attaching it to the VM.
+        os.chmod(out_path, 0o600)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+    return out_path
+
+
 def build_config_drive(config, out=None, node_id=None, validate=True):
     """Build the day-0 ISO. Returns the output path."""
     if not os.path.isfile(config):
@@ -96,37 +151,8 @@ def build_config_drive(config, out=None, node_id=None, validate=True):
             print("WARNING: no xpfd binary — skipping build-host validation "
                   "(the appliance still validates at first boot).", file=sys.stderr)
 
-    tool = _iso_tool()
-    stage = tempfile.mkdtemp(prefix="xpf-day0-")
-    try:
-        shutil.copyfile(config, os.path.join(stage, "xpf.conf"))
-        # 0o600, not 0o644: the staged xpf.conf carries every day-0 secret
-        # (root-authentication hash, IKE PSK, SNMP community, DDNS tokens).
-        # The 0700 mkdtemp already shields it, but keep the staged copy
-        # owner-only too, matching the deploy path (#4905-C / xpf-deploy.py).
-        os.chmod(os.path.join(stage, "xpf.conf"), 0o600)
-        if node_id is not None:
-            with open(os.path.join(stage, "node-id"), "w") as f:
-                f.write(f"{node_id}\n")
-        print(f"==> building {out} (volume label xpf-config)")
-        if tool == "xorriso":
-            argv = ["xorriso", "-as", "mkisofs", "-quiet", "-V", "xpf-config",
-                    "-J", "-r", "-o", out, stage]
-        else:
-            argv = [tool, "-quiet", "-V", "xpf-config", "-J", "-r", "-o", out, stage]
-        with _owner_only_umask():
-            subprocess.run(argv, check=True)
-        # The finished ISO embeds xpf.conf — the most secret-bearing day-0
-        # artifact. xorriso/genisoimage/mkisofs writes it under the process
-        # umask (~0022 -> 0644, world-readable) and it lingers in CWD until an
-        # explicit destroy, so any co-located UID could `isoinfo -x /xpf.conf`
-        # the secrets out. Restrict it to owner-only immediately after build,
-        # matching the deploy implementation (#4905-C). The owner still reads
-        # it fine when attaching it to the VM.
-        os.chmod(out, 0o600)
-    finally:
-        shutil.rmtree(stage, ignore_errors=True)
-    return out
+    print(f"==> building {out} (volume label xpf-config)")
+    return write_day0_iso(config, out, node_id=node_id, run=subprocess.run)
 
 
 def main():

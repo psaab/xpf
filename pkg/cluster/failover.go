@@ -34,10 +34,6 @@ import (
 // Single-RG manual failover and transfer protocol.
 // =============================================================================
 
-// ManualFailover forces a redundancy group to transfer out of primary.
-// Unlike ForceSecondary, this preserves the group's monitor-derived weight
-// and advertises an explicit transfer-out state so the peer can claim
-// primary without relying on weight-zero election semantics.
 // FailoverOutcome reports what a manual-failover request actually did to one
 // redundancy group (#8000).
 //
@@ -101,53 +97,119 @@ func (m *Manager) releaseFailoverLocked(rgID int, owner uint64) {
 	}
 }
 
-func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
+// failoverReservation is the single reserve/barrier/relock/commit protocol
+// shared by ManualFailover, ManualFailoverBatch and ForceSecondary (#17120).
+// It captures, under m.mu, the exact RG incarnation (pointer) for every
+// reserved or snapshotted id, plus failover generation, active/disabled
+// membership and owner token for every RESERVED id (r.ids). ForceSecondary
+// snapshots disabled RGs (pointer+active only, in rgs/active) so membership
+// revalidation covers them without reserving them. Pointer identity is the
+// unified revalidation policy: a config remove+re-add allocates a fresh
+// RedundancyGroupState even when the numeric id and the purged generation
+// (0) coincide, so exists+gen alone would demote an incarnation the barrier
+// never ran for. Generation still catches a ResetFailover on the same
+// incarnation (#5246/#10004).
+type failoverReservation struct {
+	ids    []int // reserved ids (owner token + gen captured)
+	owners map[int]uint64
+	gens   map[int]uint64
+	rgs    map[int]*RedundancyGroupState // reserved + snapshot-only ids
+	active map[int]bool                  // nil for manual failover (no membership check)
+}
+
+// reserveLocked reserves every id in reserveIDs (owner token + generation
+// capture; these block concurrent manual failover and carry the #10004
+// supersede gen-bump). When snapshotIDs is non-nil (ForceSecondary) the
+// reservation additionally snapshots pointer+active for those ids WITHOUT
+// reserving them, so membership revalidation covers disabled RGs that the
+// parent never blocked. Caller must hold m.mu. supersedeExisting
+// (ForceSecondary/#10004) bumps the generation of an already-reserved RG
+// before taking it over, so an older in-flight abort cannot restore over the
+// new commit; manual failover instead rejects an existing reservation.
+func (m *Manager) reserveLocked(reserveIDs, snapshotIDs []int, checkActive, supersedeExisting bool) (*failoverReservation, error) {
+	for _, rgID := range reserveIDs {
+		if _, ok := m.groups[rgID]; !ok {
+			return nil, fmt.Errorf("redundancy group %d not found", rgID)
+		}
+		if !supersedeExisting && m.failoverInProgress[rgID] != 0 {
+			if len(reserveIDs) == 1 {
+				return nil, fmt.Errorf("failover already in progress for redundancy group %d, please wait", rgID)
+			}
+			return nil, fmt.Errorf("failover already in progress for redundancy groups %v, please wait", reserveIDs)
+		}
+	}
+	for _, rgID := range snapshotIDs {
+		if _, ok := m.groups[rgID]; !ok {
+			return nil, fmt.Errorf("redundancy group %d not found", rgID)
+		}
+	}
+	r := &failoverReservation{
+		ids:    append([]int(nil), reserveIDs...),
+		owners: make(map[int]uint64, len(reserveIDs)),
+		gens:   make(map[int]uint64, len(reserveIDs)),
+		rgs:    make(map[int]*RedundancyGroupState, len(reserveIDs)+len(snapshotIDs)),
+	}
+	if checkActive {
+		r.active = make(map[int]bool, len(reserveIDs)+len(snapshotIDs))
+	}
+	for _, rgID := range reserveIDs {
+		if supersedeExisting && m.failoverInProgress[rgID] != 0 {
+			m.failoverGen[rgID]++
+		}
+		owner := m.nextFailoverOwnerLocked()
+		m.failoverInProgress[rgID] = owner
+		r.owners[rgID] = owner
+		r.gens[rgID] = m.failoverGen[rgID]
+		rg := m.groups[rgID]
+		r.rgs[rgID] = rg
+		if checkActive {
+			r.active[rgID] = rg.State != StateDisabled
+		}
+	}
+	// Snapshot-only ids (ForceSecondary disabled RGs): capture pointer+active
+	// for revalidation without reserving or gen-bumping — a manual failover
+	// on a disabled RG during the barrier stays admissible, as on parent.
+	for _, rgID := range snapshotIDs {
+		rg := m.groups[rgID]
+		r.rgs[rgID] = rg
+		if checkActive {
+			r.active[rgID] = rg.State != StateDisabled
+		}
+	}
+	return r, nil
+}
+
+// releaseReservationLocked drops every reservation still owned by this
+// reservation. Caller must hold m.mu.
+func (m *Manager) releaseReservationLocked(r *failoverReservation) {
+	for _, rgID := range r.ids {
+		m.releaseFailoverLocked(rgID, r.owners[rgID])
+	}
+}
+
+// runPreHook runs the single retry loop for ids, always logging retries.
+// logName is "manual failover" or "manual failover batch" (ForceSecondary
+// passes "manual failover", preserving its members' per-RG wording).
+// Call WITHOUT m.mu: the barrier waits on a peer round trip.
+func (m *Manager) runPreHook(ids []int, logName string) error {
 	m.mu.Lock()
-	rg, ok := m.groups[rgID]
-	if !ok {
-		m.mu.Unlock()
-		return FailoverApplied, fmt.Errorf("redundancy group %d not found", rgID)
-	}
-	if m.failoverInProgress[rgID] != 0 {
-		m.mu.Unlock()
-		return FailoverApplied, fmt.Errorf("failover already in progress for redundancy group %d, please wait", rgID)
-	}
-	owner := m.nextFailoverOwnerLocked()
-	m.failoverInProgress[rgID] = owner
-	// Snapshot the per-RG failover generation before releasing m.mu for the
-	// pre-hook. A ResetFailover landing in the unlocked window bumps it, and
-	// the post-relock re-check below then abandons the trailing SecondaryHold
-	// write instead of clobbering the operator's reset (#5246).
-	failoverGen := m.failoverGen[rgID]
 	preHook := m.preManualFailoverFn
 	retryTimeout := m.preManualFailoverRetryTimeout
 	retryInterval := m.preManualFailoverRetryInterval
-	staleFn := m.peerConfigStaleFn
 	m.mu.Unlock()
-
-	// #9569: this demotes the local node, so the peer is what gets promoted.
-	// Refuse when it did not apply the newest config this node sent, as the
-	// node-targeted form already refuses through the peer's transfer readiness.
-	if err := peerConfigStaleRefusal(staleFn, fmt.Sprintf("manual failover of redundancy group %d", rgID)); err != nil {
-		m.mu.Lock()
-		m.releaseFailoverLocked(rgID, owner)
-		m.mu.Unlock()
-		return FailoverApplied, err
+	if preHook == nil {
+		return nil
 	}
-
-	var preHookErr error
-	if preHook != nil {
+	for _, rgID := range ids {
 		deadline := time.Now().Add(retryTimeout)
 		for attempts := 1; ; attempts++ {
 			if err := preHook(rgID); err != nil {
 				if !IsRetryablePreFailoverError(err) {
-					preHookErr = fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
-					break
+					return fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
 				}
 				remaining := time.Until(deadline)
 				if remaining <= 0 {
-					preHookErr = fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
-					break
+					return fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
 				}
 				sleep := retryInterval
 				if sleep <= 0 {
@@ -156,52 +218,140 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 				if sleep > remaining {
 					sleep = remaining
 				}
-				slog.Info("cluster: waiting to admit manual failover",
-					"rg", rgID,
-					"attempt", attempts,
-					"remaining", remaining.String(),
-					"err", err)
+				// Batch retry carries the full member set ("rgs") as on
+				// parent; single/ForceSecondary keep the per-RG form.
+				if logName == "manual failover batch" {
+					slog.Info("cluster: waiting to admit "+logName,
+						"rgs", ids,
+						"rg", rgID,
+						"attempt", attempts,
+						"remaining", remaining.String(),
+						"err", err)
+				} else {
+					slog.Info("cluster: waiting to admit "+logName,
+						"rg", rgID,
+						"attempt", attempts,
+						"remaining", remaining.String(),
+						"err", err)
+				}
 				time.Sleep(sleep)
 				continue
 			}
 			break
 		}
 	}
+	return nil
+}
+
+// revalidateLocked is the one revalidation policy for all three entry
+// points. Caller must hold m.mu. It returns:
+//   - missing: an id no longer exists (or, when active was captured, any
+//     membership/active change — ForceSecondary's all-or-nothing gate)
+//   - superseded: ids whose generation changed (reset won, #5246)
+//   - changed: an id whose pointer changed without a generation change
+//     (remove+re-add at gen 0) — callers must abort, not demote.
+func (m *Manager) revalidateLocked(r *failoverReservation) (missing []int, superseded []int, changed int, changedSet bool) {
+	for _, rgID := range r.ids {
+		rg, ok := m.groups[rgID]
+		if !ok {
+			missing = append(missing, rgID)
+			continue
+		}
+		if rg != r.rgs[rgID] {
+			if !changedSet {
+				changed, changedSet = rgID, true
+			}
+			continue
+		}
+		if r.active != nil && (rg.State != StateDisabled) != r.active[rgID] {
+			missing = append(missing, rgID)
+			continue
+		}
+		if m.failoverGen[rgID] != r.gens[rgID] {
+			superseded = append(superseded, rgID)
+		}
+	}
+	if r.active != nil {
+		// ForceSecondary snapshot-only ids (disabled at capture): pointer or
+		// active change is a membership change, but they were never reserved
+		// so no generation check applies.
+		for rgID, snap := range r.rgs {
+			if _, reserved := r.owners[rgID]; reserved {
+				continue
+			}
+			rg, ok := m.groups[rgID]
+			if !ok {
+				missing = append(missing, rgID)
+				continue
+			}
+			if rg != snap {
+				if !changedSet {
+					changed, changedSet = rgID, true
+				}
+				continue
+			}
+			if (rg.State != StateDisabled) != r.active[rgID] {
+				missing = append(missing, rgID)
+			}
+		}
+		// A count change means membership changed even if every captured
+		// id still matches.
+		if len(m.groups) != len(r.rgs) && len(missing) == 0 {
+			missing = append(missing, -1)
+		}
+	}
+	return missing, superseded, changed, changedSet
+}
+
+// ManualFailover forces a redundancy group to transfer out of primary.
+// Unlike ForceSecondary, this preserves the group's monitor-derived weight
+// and advertises an explicit transfer-out state so the peer can claim
+// primary without relying on weight-zero election semantics.
+func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
+	m.mu.Lock()
+	resv, rerr := m.reserveLocked([]int{rgID}, nil, false, false)
+	if rerr != nil {
+		m.mu.Unlock()
+		return FailoverApplied, rerr
+	}
+	staleFn := m.peerConfigStaleFn
+	m.mu.Unlock()
+
+	// #9569: this demotes the local node, so the peer is what gets promoted.
+	if err := peerConfigStaleRefusal(staleFn, fmt.Sprintf("manual failover of redundancy group %d", rgID)); err != nil {
+		m.mu.Lock()
+		m.releaseReservationLocked(resv)
+		m.mu.Unlock()
+		return FailoverApplied, err
+	}
+
+	preHookErr := m.runPreHook([]int{rgID}, "manual failover")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	// Always clear the in-progress flag under the same lock acquisition
-	// that performs the state change, so there is no window where another
-	// caller can slip in between flag-clear and state-commit.
-	defer m.releaseFailoverLocked(rgID, owner)
+	defer m.releaseReservationLocked(resv)
 
 	if preHookErr != nil {
 		return FailoverApplied, preHookErr
 	}
 
-	rg, ok = m.groups[rgID]
-	if !ok {
+	missing, superseded, _, changedSet := m.revalidateLocked(resv)
+	if len(missing) > 0 {
+		return FailoverApplied, fmt.Errorf("redundancy group %d not found", rgID)
+	}
+	if changedSet {
+		// #17120: remove+re-add during the barrier — the barrier ran for the
+		// old incarnation, not this fresh pointer (gen may coincide at 0).
 		return FailoverApplied, fmt.Errorf("redundancy group %d not found", rgID)
 	}
 	// If a ResetFailover ran during the unlocked pre-hook window it bumped
-	// this RG's failover generation. The trailing SecondaryHold write below
-	// would otherwise silently clobber the operator's reset (#5246). Detect
-	// the supersede and abandon the write, leaving the reset's restored state
-	// intact. failoverInProgress is cleared by the deferred delete above.
-	if m.failoverGen[rgID] != failoverGen {
+	// this RG's failover generation (#5246). Detect the supersede and abandon.
+	if len(superseded) > 0 {
 		slog.Info("cluster: manual failover superseded by reset, abandoning", "rg", rgID)
-		// #8000: report the supersede rather than a bare nil. The caller needs
-		// it for two things a plain success cannot express — telling the
-		// operator the RG did NOT move, and dropping the fence barrier it armed,
-		// which nothing will now actuate.
 		return FailoverSuperseded, nil
 	}
+	rg := m.groups[rgID]
 	oldState := rg.State
-	// A fresh manual failover supersedes any prior remote transfer-out lease on
-	// this RG. The remote path re-arms via ArmRemoteTransferOutLease after this
-	// returns; a local operator failover leaves it cleared so its deliberate
-	// hold is never auto-restored (#5079).
 	m.clearRemoteTransferOutLeaseLocked(rgID)
 	rg.transferCommitRolePinned = false
 	rg.ManualFailover = true
@@ -223,9 +373,6 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 // MUST run before any RG is demoted so a failed barrier leaves the node fully
 // forwarding (#10261).
 func (m *Manager) ForceSecondary() error {
-	// #9569: forcing every RG secondary promotes the peer for all of them (the
-	// ISSU drain). Refuse when it did not apply the newest config this node
-	// sent. The predicate is read under the lock and evaluated outside it.
 	m.mu.Lock()
 	staleFn := m.peerConfigStaleFn
 	m.mu.Unlock()
@@ -233,120 +380,63 @@ func (m *Manager) ForceSecondary() error {
 		return err
 	}
 
-	// Snapshot the hook and the active RG ids before releasing m.mu. Reserve
-	// every member for the full barrier window, matching
-	// ManualFailoverBatch: a concurrent failover cannot interleave, and a
-	// ResetFailover is detected by the generation check at commit.
 	m.mu.Lock()
 	if !m.peerAlive {
 		m.mu.Unlock()
 		return fmt.Errorf("peer not alive — cannot force secondary without active peer")
 	}
-	preHook := m.preManualFailoverFn
-	retryTimeout := m.preManualFailoverRetryTimeout
-	retryInterval := m.preManualFailoverRetryInterval
-	ids := make([]int, 0, len(m.groups))
-	groupSnapshot := make(map[int]*RedundancyGroupState, len(m.groups))
-	activeSnapshot := make(map[int]bool, len(m.groups))
-	for rgID, rg := range m.groups {
-		groupSnapshot[rgID] = rg
-		active := rg.State != StateDisabled
-		activeSnapshot[rgID] = active
-		if active {
-			ids = append(ids, rgID)
+	// Snapshot EVERY configured RG (including disabled) so membership/active
+	// revalidation covers the whole config, but RESERVE only active RGs —
+	// matching parent: disabled RGs are never demoted, so they must not block
+	// a concurrent manual failover nor take the #10004 supersede gen-bump.
+	allIDs := make([]int, 0, len(m.groups))
+	for rgID := range m.groups {
+		allIDs = append(allIDs, rgID)
+	}
+	sort.Ints(allIDs)
+	var activeIDs, disabledIDs []int
+	for _, rgID := range allIDs {
+		if m.groups[rgID].State != StateDisabled {
+			activeIDs = append(activeIDs, rgID)
+		} else {
+			disabledIDs = append(disabledIDs, rgID)
 		}
 	}
-	sort.Ints(ids)
-	owners := make(map[int]uint64, len(ids))
-	gens := make(map[int]uint64, len(ids))
-	for _, rgID := range ids {
-		// ISSU is the newer, explicit operator intent. It supersedes a
-		// peer-transfer request that is in its unlocked post-ACK hook instead
-		// of being rejected behind that request; bumping the generation makes
-		// the older abort path unable to restore its stale hold over this
-		// force-secondary commit (#10004).
-		if m.failoverInProgress[rgID] != 0 {
-			m.failoverGen[rgID]++
-		}
-		owners[rgID] = m.nextFailoverOwnerLocked()
-		m.failoverInProgress[rgID] = owners[rgID]
-		gens[rgID] = m.failoverGen[rgID]
+	resv, rerr := m.reserveLocked(activeIDs, disabledIDs, true, true)
+	if rerr != nil {
+		m.mu.Unlock()
+		return rerr
 	}
+	ids := activeIDs
+	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
-		for rgID, owner := range owners {
-			m.releaseFailoverLocked(rgID, owner)
-		}
+		m.releaseReservationLocked(resv)
 		m.mu.Unlock()
 	}()
-	m.mu.Unlock()
 
-	// Run the hook once per configured RG, matching ManualFailoverBatch: it is
-	// intentionally outside the manager lock because the userspace barrier
-	// waits for a peer round-trip and the hook may call back into cluster state.
-	if preHook != nil {
-		for _, rgID := range ids {
-			deadline := time.Now().Add(retryTimeout)
-			for {
-				if err := preHook(rgID); err == nil {
-					break
-				} else if !IsRetryablePreFailoverError(err) {
-					return fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
-				} else if remaining := time.Until(deadline); remaining <= 0 {
-					return fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
-				} else {
-					sleep := retryInterval
-					if sleep <= 0 {
-						sleep = DefaultPreManualFailoverRetryInterval
-					}
-					if sleep > remaining {
-						sleep = remaining
-					}
-					time.Sleep(sleep)
-				}
-			}
-		}
+	if err := m.runPreHook(ids, "manual failover"); err != nil {
+		return err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Re-check peer liveness after the unlocked barrier waits: handing off to a
-	// peer that disappeared while the barrier was running would strand VIPs.
 	if !m.peerAlive {
 		return fmt.Errorf("peer not alive — cannot force secondary without active peer")
 	}
-	// Commit only the exact RG incarnation and active/disabled membership that
-	// were fenced. A config remove + re-add gets a fresh pointer even if its
-	// numeric id and generation both happen to return to their old values; an
-	// RG added or re-enabled during the barrier aborts rather than being
-	// demoted without a barrier.
-	if len(m.groups) != len(groupSnapshot) {
+	missing, superseded, _, changedSet := m.revalidateLocked(resv)
+	if len(missing) > 0 || changedSet {
 		return fmt.Errorf("redundancy-group membership changed while preparing force-secondary; aborting without demotion")
 	}
-	for rgID, snap := range groupSnapshot {
-		rg, ok := m.groups[rgID]
-		if !ok || rg != snap || (rg.State != StateDisabled) != activeSnapshot[rgID] {
-			return fmt.Errorf("redundancy-group membership changed while preparing force-secondary; aborting without demotion")
-		}
-	}
-	for _, rgID := range ids {
-		if m.failoverGen[rgID] != gens[rgID] {
-			return fmt.Errorf("redundancy-group %d changed while preparing force-secondary; aborting without demotion", rgID)
-		}
+	if len(superseded) > 0 {
+		return fmt.Errorf("redundancy-group %d changed while preparing force-secondary; aborting without demotion", superseded[0])
 	}
 	for _, rgID := range ids {
 		rg := m.groups[rgID]
-		// ISSU force-secondary is a deliberate drain; drop any remote
-		// transfer-out lease so it is never auto-restored (#5079).
 		oldState := rg.State
 		m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
 		rg.transferCommitRolePinned = false
-		// #16743: pin weight 0 as a state fact (forcedSecondary), not just a
-		// value in the derived Weight field — recalcWeight honours the flag,
-		// so a later commit / peer config sync feeding monitors cannot
-		// recompute the drain away. Cleared with ManualFailover by
-		// ResetFailover / peer loss (see manager.go).
 		rg.Weight = 0
 		rg.forcedSecondary = true
 		rg.ManualFailover = true
@@ -357,7 +447,6 @@ func (m *Manager) ForceSecondary() error {
 			m.sendEvent(rg.GroupID, oldState, rg.State, "Forced secondary (ISSU)")
 		}
 	}
-
 	slog.Info("cluster: forced secondary for all RGs (ISSU)")
 	return nil
 }
@@ -401,7 +490,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 	// Leaving any of it armed means stale transfer authority outlives the
 	// reset it was granted under:
 	//
-	//   - peerTransferOutOverride has NO expiry: it re-forces the peer to
+	//   - transferOverrides has NO expiry: it re-forces the peer to
 	//     SecondaryHold on every heartbeat (#6527/#6656), so electRG takes
 	//     its "Peer transfer out" arm and self-elects primary regardless
 	//     of what the peer reports — dual-primary if the peer has also
@@ -415,11 +504,9 @@ func (m *Manager) ResetFailover(rgID int) error {
 	//     also keeps a transferCommitRolePinned secondary parked via
 	//     electRG's committed-secondary arm.
 	//
-	// clearPeerTransferOutOverrideLocked also drops the reqID-matched
-	// peerTransferOutPrevious snapshot, keeping the override pair in
-	// lockstep (same pairing as notePeerTransferCommitted /
-	// FinalizePeerTransferOut / the RG-removal purge #8435). A later
-	// abort restore for a pre-reset reqID then no-ops on reqID mismatch.
+	// clearPeerTransferOutOverrideLocked drops the whole transferOverride
+	// entry (reqID + peer snapshot together, #17125), so a later abort
+	// restore for a pre-reset reqID then no-ops on reqID mismatch.
 	m.clearPeerTransferOutOverrideLocked(rgID)
 	delete(m.abortedPeerTransferReqID, rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
@@ -450,12 +537,20 @@ func (m *Manager) FenceStatus() (action string, events []HistoryEvent) {
 	return
 }
 
-// manualFailoverHoldSnapshot records the operator hold that a peer-transfer
-// request temporarily clears. A reset that wins while the request is outside
-// m.mu increments failoverGen; the generation check prevents a stale abort
-// from resurrecting that newer operator decision. The abort also leaves any
-// newer hold already installed by another operator path untouched.
-type manualFailoverHoldSnapshot struct {
+// operatorHoldSnapshot records the operator intent that a peer-transfer
+// request or the peer-loss clears temporarily clear: the local manual hold,
+// the peer transfer-out override (#17125: one transferOverride
+// value), and the aborted-request marker. A
+// reset that wins while the caller is outside m.mu increments failoverGen;
+// the generation check prevents a stale restore from resurrecting that
+// newer operator decision (#5246). The restore also leaves any newer hold
+// already installed by another operator path untouched.
+//
+// This is the single snapshot/restore pair for that intent: both the
+// peer-transfer abort arms (abortRequestedPeerFailover{,Batch}) and the
+// #15211 fence-abort restore in handlePeerTimeout go through it, so a
+// guard added here cannot be lost in a hand copy elsewhere (#17117).
+type operatorHoldSnapshot struct {
 	rg            *RedundancyGroupState
 	armed         bool
 	at            time.Time
@@ -465,15 +560,117 @@ type manualFailoverHoldSnapshot struct {
 	// forcedSecondary records whether the snapshotted hold was an ISSU
 	// drain pin (#16743), so the abort restores the pin with the hold.
 	forcedSecondary bool
+	override        transferOverride
+	hasOverride     bool
+	abortedReqID    uint64
+	hasAborted      bool
 	generation      uint64
 }
 
-func (m *Manager) restoreManualFailoverHoldLocked(rgID int, snapshot manualFailoverHoldSnapshot) {
-	if !snapshot.armed || m.failoverGen[rgID] != snapshot.generation {
+// snapshotOperatorHoldLocked captures the operator intent for rgID. The
+// hold fields are armed only when ManualFailover is set (mirroring the
+// peer-transfer snapshot sites); the override and aborted marker are
+// captured independently. An RG removed from m.groups restores NOTHING:
+// the restore requires the same RG incarnation for every arm (#17117
+// fold; a removed+re-added RG must not inherit the old override). Caller holds m.mu.
+func (m *Manager) snapshotOperatorHoldLocked(rgID int) operatorHoldSnapshot {
+	snap := operatorHoldSnapshot{generation: m.failoverGen[rgID]}
+	if rg, ok := m.groups[rgID]; ok {
+		snap.rg = rg
+		if rg.ManualFailover {
+			snap.armed = true
+			snap.at = rg.ManualFailoverAt
+			snap.state = rg.State
+			snap.weight = rg.Weight
+			snap.forcedSecondary = rg.forcedSecondary
+			// #10245/#16743: capture restoreWeight BEFORE the caller
+			// clears the pin — debtDerivedWeightLocked honours
+			// forcedSecondary (returns 0), so computing it after the
+			// clear would compare 0 against the real debt weight and
+			// mark a pinned hold as monitor-derived.
+			snap.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
+		}
+	}
+	if override, ok := m.transferOverrides[rgID]; ok {
+		snap.override, snap.hasOverride = override, true
+	}
+	if reqID, ok := m.abortedPeerTransferReqID[rgID]; ok {
+		snap.abortedReqID, snap.hasAborted = reqID, true
+	}
+	return snap
+}
+
+// restoreOperatorHoldLocked restores a snapshot taken by
+// snapshotOperatorHoldLocked unless a ResetFailover (or an in-flight
+// ForceSecondary supersede) bumped failoverGen after the snapshot — the
+// newer operator decision wins and nothing is resurrected (#17117).
+//
+// Every arm is also gated on the RG incarnation (#18148/#17117-fold):
+// the generation check alone cannot see a remove+re-add in the fence
+// window, because UpdateConfig's removal purge DELETES the failoverGen
+// entry (group_state.go) and the re-add seeds it back at 0. A snapshot
+// taken at gen 0 then compares 0==0 on a FRESH incarnation and the
+// override/aborted arms (which carry no RG pointer check) would
+// resurrect the removed incarnation's no-expiry override onto the new
+// RG — the #8435 self-promote/dual-primary class. So a non-nil snapshot
+// pointer must still be the live group, and a nil-pointer snapshot
+// restores nothing.
+//
+// The no-capture sites (empty operatorHoldSnapshot{} on the failed-send
+// arm, or a hold entry for a peer-transfer caller whose RG still exists)
+// preserve their historical behaviour: snapshot capture fills rg, and a
+// wholly empty snapshot has no pointer and no arms, so it stays a no-op.
+//
+// Three cases:
+//   - snapshot.rg == nil (no RG captured, e.g. the rg==nil fence entries
+//     snapshotted before the peer-loss clears): restore nothing. The old
+//     rg==nil override restore is REMOVED: with the purge deleting the
+//     gen entry, "no RG at snapshot time" is indistinguishable from
+//     "RG removed and re-added in the window", so restoring an override
+//     for an absent id could install the removed incarnation's override
+//     on a fresh RG.
+//   - snapshot.rg != nil && m.groups[rgID] == snapshot.rg: same
+//     incarnation; restore the armed hold (unless a newer hold stands)
+//     plus the override/aborted arms exactly as before.
+//   - snapshot.rg != nil && m.groups[rgID] != snapshot.rg (removed or
+//     replaced): restore NOTHING — every arm is suppressed.
+//
+// Caller holds m.mu.
+func (m *Manager) restoreOperatorHoldLocked(rgID int, snapshot operatorHoldSnapshot, eventReason string) {
+	if m.failoverGen[rgID] != snapshot.generation {
+		return
+	}
+	// Same-incarnation gate for ALL arms (#18148/#17117-fold): a
+	// snapshot with no RG pointer carries no proven incarnation, and a
+	// snapshot whose pointer is no longer the live group is stale.
+	if snapshot.rg == nil {
 		return
 	}
 	rg, ok := m.groups[rgID]
 	if !ok || rg != snapshot.rg {
+		return
+	}
+	if snapshot.hasOverride {
+		// Restore the whole transferOverride (#17125): writing it
+		// directly puts back the snapshotted reqID + previous peer
+		// snapshot together, instead of re-deriving `previous` from
+		// the peer view as it stands after the fence wait (the way
+		// applyPeerTransferOutOverrideLocked would).
+		m.transferOverrides[rgID] = snapshot.override
+		if pg, ok := m.peerGroups[rgID]; ok {
+			pg.State = StateSecondaryHold
+			pg.StateOverriddenLocally = true
+			pg.OverrideReason = "transfer-out override"
+			m.peerGroups[rgID] = pg
+			if rg := m.groups[rgID]; rg != nil {
+				rg.PeerPriority = pg.Priority
+			}
+		}
+	}
+	if snapshot.hasAborted {
+		m.abortedPeerTransferReqID[rgID] = snapshot.abortedReqID
+	}
+	if !snapshot.armed {
 		return
 	}
 	if rg.ManualFailover {
@@ -490,7 +687,7 @@ func (m *Manager) restoreManualFailoverHoldLocked(rgID int, snapshot manualFailo
 	rg.ManualFailoverAt = snapshot.at
 	rg.State = snapshot.state
 	if oldState != rg.State {
-		m.sendEvent(rg.GroupID, oldState, rg.State, "Manual failover restored after failed peer transfer")
+		m.sendEvent(rg.GroupID, oldState, rg.State, eventReason)
 	}
 }
 
@@ -573,11 +770,11 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// fence. Retain the abort marker before releasing our reservation
 		// and send the bound abort. The local manual hold is unchanged.
 		if reqID != 0 {
-			m.abortRequestedPeerFailover(rgID, reqID, manualFailoverHoldSnapshot{}, abortFn)
+			m.abortRequestedPeerFailover(rgID, reqID, operatorHoldSnapshot{}, abortFn)
 		}
 		return err
 	}
-	var hold manualFailoverHoldSnapshot
+	var hold operatorHoldSnapshot
 	m.mu.Lock()
 	rg, ok = m.groups[rgID]
 	if !ok {
@@ -588,20 +785,13 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	// acknowledged the transfer-out request. Preflight rejection or request-send
 	// failure must not silently release the existing transfer-out state.
 	if rg.ManualFailover {
-		hold = manualFailoverHoldSnapshot{
-			rg:              rg,
-			armed:           true,
-			at:              rg.ManualFailoverAt,
-			state:           rg.State,
-			weight:          rg.Weight,
-			forcedSecondary: rg.forcedSecondary,
-			generation:      m.failoverGen[rgID],
-		}
-		// #10245/#16743: capture restoreWeight BEFORE clearing the pin —
-		// debtDerivedWeightLocked honours forcedSecondary (returns 0), so
-		// computing it after the clear would compare 0 against the real
-		// debt weight and mark a pinned hold as monitor-derived.
-		hold.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
+		hold = m.snapshotOperatorHoldLocked(rgID)
+		// The peer-transfer abort rolls the override back through its own
+		// reqID-matched restorePeerTransferOutOverrideLocked; the hold
+		// snapshot's override/aborted arms belong to the fence-abort
+		// caller and must not replay here.
+		hold.override, hold.hasOverride = transferOverride{}, false
+		hold.abortedReqID, hold.hasAborted = 0, false
 		rg.ManualFailover = false
 		rg.forcedSecondary = false
 		rg.ManualFailoverAt = time.Time{}
@@ -609,7 +799,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	}
 	m.mu.Unlock()
 	if err := m.commitRequestedPeerFailover(rgID, reqID); err != nil {
-		// The commit applies peerTransferOutOverride before running the
+		// The commit applies the transfer override before running the
 		// election. Roll back the reqID-matched override and restore the
 		// preexisting local manual-failover hold on every commit failure.
 		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
@@ -671,7 +861,7 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold manualFailoverHoldSnapshot, abortFn func(rgID int, reqID uint64) error) {
+func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold operatorHoldSnapshot, abortFn func(rgID int, reqID uint64) error) {
 	// #15164: record the aborted reqID BEFORE any election can re-run, so a
 	// heartbeat that still advertises the owner's secondary-hold under this
 	// request cannot re-promote us via "Peer transfer out". Then notify the
@@ -696,7 +886,7 @@ func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold manual
 	if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 		delete(m.peerTransferCommitGraceUntil, rgID)
 	}
-	m.restoreManualFailoverHoldLocked(rgID, hold)
+	m.restoreOperatorHoldLocked(rgID, hold, "Manual failover restored after failed peer transfer")
 	m.runElection()
 	m.mu.Unlock()
 	if abortFn != nil {
@@ -904,7 +1094,7 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 	// from the previous owner direction. If we keep forcing the peer into
 	// secondary-hold here, the next heartbeat can immediately re-elect the
 	// old owner during rapid failback/failover sequences.
-	delete(m.peerTransferOutOverride, rgID)
+	m.clearPeerTransferOutOverrideLocked(rgID)
 	delete(m.abortedPeerTransferReqID, rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
@@ -991,9 +1181,6 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 		return res, err
 	}
 	if len(ids) == 1 {
-		// The single-member batch delegates, so the batch's own contract
-		// depends on the singular path reporting its outcome too — which is why
-		// #8000 could not be fixed on the batch alone.
 		outcome, err := m.ManualFailover(ids[0])
 		if err != nil {
 			return res, err
@@ -1007,142 +1194,55 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 	}
 
 	m.mu.Lock()
-	for _, rgID := range ids {
-		if _, ok := m.groups[rgID]; !ok {
-			m.mu.Unlock()
-			return res, fmt.Errorf("redundancy group %d not found", rgID)
-		}
-		if m.failoverInProgress[rgID] != 0 {
-			m.mu.Unlock()
-			return res, fmt.Errorf("failover already in progress for redundancy groups %v, please wait", ids)
-		}
+	resv, rerr := m.reserveLocked(ids, nil, false, false)
+	if rerr != nil {
+		m.mu.Unlock()
+		return res, rerr
 	}
-	batchGen := make(map[int]uint64, len(ids))
-	batchOwners := make(map[int]uint64, len(ids))
-	for _, rgID := range ids {
-		owner := m.nextFailoverOwnerLocked()
-		m.failoverInProgress[rgID] = owner
-		batchOwners[rgID] = owner
-		// Snapshot each member's failover generation before releasing m.mu
-		// for the pre-hook so a ResetFailover on a member during the unlocked
-		// window is detected and its reset preserved (#5246).
-		batchGen[rgID] = m.failoverGen[rgID]
-	}
-	preHook := m.preManualFailoverFn
-	retryTimeout := m.preManualFailoverRetryTimeout
-	retryInterval := m.preManualFailoverRetryInterval
 	staleFn := m.peerConfigStaleFn
 	m.mu.Unlock()
 
-	// #9569: the same gate as ManualFailover, for every RG in the batch.
 	if err := peerConfigStaleRefusal(staleFn, fmt.Sprintf("manual failover of redundancy groups %v", ids)); err != nil {
 		m.mu.Lock()
-		for _, rgID := range ids {
-			m.releaseFailoverLocked(rgID, batchOwners[rgID])
-		}
+		m.releaseReservationLocked(resv)
 		m.mu.Unlock()
 		return res, err
 	}
 
-	var preHookErr error
-	if preHook != nil {
-		for _, rgID := range ids {
-			deadline := time.Now().Add(retryTimeout)
-			for attempts := 1; ; attempts++ {
-				if err := preHook(rgID); err != nil {
-					if !IsRetryablePreFailoverError(err) {
-						preHookErr = fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
-						break
-					}
-					remaining := time.Until(deadline)
-					if remaining <= 0 {
-						preHookErr = fmt.Errorf("pre-failover prepare for redundancy group %d: %w", rgID, err)
-						break
-					}
-					sleep := retryInterval
-					if sleep <= 0 {
-						sleep = DefaultPreManualFailoverRetryInterval
-					}
-					if sleep > remaining {
-						sleep = remaining
-					}
-					slog.Info("cluster: waiting to admit manual failover batch",
-						"rgs", ids,
-						"rg", rgID,
-						"attempt", attempts,
-						"remaining", remaining.String(),
-						"err", err)
-					time.Sleep(sleep)
-					continue
-				}
-				break
-			}
-			if preHookErr != nil {
-				break
-			}
-		}
-	}
+	preHookErr := m.runPreHook(ids, "manual failover batch")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	defer func() {
-		for _, rgID := range ids {
-			m.releaseFailoverLocked(rgID, batchOwners[rgID])
-		}
-	}()
+	defer m.releaseReservationLocked(resv)
 
 	if preHookErr != nil {
 		return res, preHookErr
 	}
 
-	// #7176 (C179-065): a member REMOVED from config during the unlocked
-	// pre-hook window must be reported, not silently skipped. The singular
-	// ManualFailover returns "redundancy group %d not found" for exactly this
-	// condition after its own re-lock (see above); the batch used to `continue`,
-	// so the same condition on the same path reported full success. There is no
-	// contract behind the batch's side of that split — it is the one place the
-	// two genuinely diverge — and reporting it makes them agree.
-	//
-	// Resolved BEFORE any member is mutated, and the resolved pointers are what
-	// the commit loop iterates: the whole commit half runs under one lock, so
-	// the pre-scan is atomic with the writes and an unknown member can never
-	// leave the batch half-applied.
-	//
-	// The SUPERSEDE skip below deliberately keeps its `continue`. That is #5246
-	// working as designed — the reset wins — and it is pinned by name in
-	// failover_races_5245_5246_test.go ("ManualFailover should return without
-	// error when superseded"). The singular path does the same thing, so it is
-	// not a batch defect. The operator-facing consequence of reporting success
-	// for a partially-applied BATCH is real and is tracked separately by #8000;
-	// it needs an API change, not a silent reversal of a pinned contract.
-	resolved := make([]*RedundancyGroupState, 0, len(ids))
-	for _, rgID := range ids {
-		rg := m.groups[rgID]
-		if rg == nil {
-			return res, fmt.Errorf("redundancy group %d not found", rgID)
-		}
-		resolved = append(resolved, rg)
+	// #7176: member removed during unlocked window must be reported before
+	// any mutation; #17120: remove+re-add (pointer changed, gen may be 0)
+	// is the same "barrier ran for another incarnation" case.
+	missing, superseded, changed, changedSet := m.revalidateLocked(resv)
+	if len(missing) > 0 {
+		return res, fmt.Errorf("redundancy group %d not found", missing[0])
+	}
+	if changedSet {
+		return res, fmt.Errorf("redundancy group %d not found", changed)
+	}
+	supersededSet := make(map[int]bool, len(superseded))
+	for _, rgID := range superseded {
+		supersededSet[rgID] = true
 	}
 
 	now := time.Now()
-	for i, rgID := range ids {
-		rg := resolved[i]
-		// A ResetFailover on this member during the unlocked window bumped
-		// its failover generation — its reset wins; skip the SecondaryHold
-		// write so we don't clobber it (#5246).
-		if m.failoverGen[rgID] != batchGen[rgID] {
-			// #8000: record it. The skip itself is #5246 working as designed
-			// and stays exactly as it was; what changes is that the caller can
-			// now SEE it, instead of the batch reporting a full handoff and
-			// leaving the applied-ack to time out on a barrier nothing will
-			// actuate.
+	for _, rgID := range ids {
+		rg := m.groups[rgID]
+		if supersededSet[rgID] {
 			slog.Info("cluster: manual failover batch member superseded by reset, skipping", "rg", rgID)
 			res.Superseded = append(res.Superseded, rgID)
 			continue
 		}
 		oldState := rg.State
-		// Fresh batch failover supersedes any prior remote transfer-out lease;
-		// the remote path re-arms after this returns (#5079).
 		m.clearRemoteTransferOutLeaseLocked(rgID)
 		rg.transferCommitRolePinned = false
 		res.Applied = append(res.Applied, rgID)
@@ -1257,23 +1357,17 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 		return err
 	}
 
-	holdSnapshots := make(map[int]manualFailoverHoldSnapshot, len(ids))
+	holdSnapshots := make(map[int]operatorHoldSnapshot, len(ids))
 	m.mu.Lock()
 	for _, rgID := range ids {
 		rg := m.groups[rgID]
 		if rg != nil && rg.ManualFailover {
-			// restoreWeight must be captured before the pin is cleared
-			// (see the single-RG twin, #10245/#16743).
-			snap := manualFailoverHoldSnapshot{
-				rg:              rg,
-				armed:           true,
-				at:              rg.ManualFailoverAt,
-				state:           rg.State,
-				weight:          rg.Weight,
-				forcedSecondary: rg.forcedSecondary,
-				generation:      m.failoverGen[rgID],
-			}
-			snap.restoreWeight = rg.Weight != m.debtDerivedWeightLocked(rg)
+			snap := m.snapshotOperatorHoldLocked(rgID)
+			// As in the single-RG twin: the batch abort rolls the override
+			// back through its own reqID-matched restore; the fence-abort
+			// override/aborted arms must not replay here.
+			snap.override, snap.hasOverride = transferOverride{}, false
+			snap.abortedReqID, snap.hasAborted = 0, false
 			holdSnapshots[rgID] = snap
 			rg.ManualFailover = false
 			rg.forcedSecondary = false
@@ -1352,7 +1446,7 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]manualFailoverHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error) {
+func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]operatorHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error) {
 	// #16818: batch form of abortRequestedPeerFailover — the election must
 	// run unconditionally so the aborted-marker arm demotes every RG the
 	// batch commit promoted, whatever snapshot the override restore left.
@@ -1364,7 +1458,7 @@ func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, hol
 		}
 	}
 	for _, rgID := range rgIDs {
-		m.restoreManualFailoverHoldLocked(rgID, holds[rgID])
+		m.restoreOperatorHoldLocked(rgID, holds[rgID], "Manual failover restored after failed peer transfer")
 	}
 	m.runElection()
 	m.mu.Unlock()
@@ -1433,7 +1527,7 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 		// before we park this node as the old owner. Otherwise the next peer
 		// heartbeat can still force the peer into secondary-hold and snap the
 		// RG back during rapid alternating moves.
-		delete(m.peerTransferOutOverride, rgID)
+		m.clearPeerTransferOutOverrideLocked(rgID)
 		delete(m.abortedPeerTransferReqID, rgID)
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
@@ -1455,14 +1549,21 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 
 func (m *Manager) applyPeerTransferOutOverrideLocked(rgID int, reqID uint64) {
 	previous, ok := m.peerGroups[rgID]
-	m.peerTransferOutOverride[rgID] = reqID
-	m.peerTransferOutPrevious[rgID] = peerGroupSnapshot{
-		state:   previous,
-		present: ok,
+	m.transferOverrides[rgID] = transferOverride{
+		reqID: reqID,
+		previous: peerGroupSnapshot{
+			state:   previous,
+			present: ok,
+		},
 	}
 	peerGroup := previous
 	peerGroup.GroupID = rgID
 	peerGroup.State = StateSecondaryHold
+	// #7367: mark the substitution so `show chassis cluster status` can
+	// distinguish this from a peer that actually reported secondary-hold.
+	// The State value and every election consequence are unchanged.
+	peerGroup.StateOverriddenLocally = true
+	peerGroup.OverrideReason = "transfer-out override"
 	m.peerGroups[rgID] = peerGroup
 	if rg := m.groups[rgID]; rg != nil {
 		rg.PeerPriority = peerGroup.Priority
@@ -1470,19 +1571,17 @@ func (m *Manager) applyPeerTransferOutOverrideLocked(rgID int, reqID uint64) {
 }
 
 func (m *Manager) clearPeerTransferOutOverrideLocked(rgID int) {
-	delete(m.peerTransferOutOverride, rgID)
-	delete(m.peerTransferOutPrevious, rgID)
+	delete(m.transferOverrides, rgID)
 }
 
 func (m *Manager) restorePeerTransferOutOverrideLocked(rgID int, reqID uint64) bool {
-	currentReqID, ok := m.peerTransferOutOverride[rgID]
-	if !ok || currentReqID != reqID {
+	override, ok := m.transferOverrides[rgID]
+	if !ok || override.reqID != reqID {
 		return false
 	}
-	delete(m.peerTransferOutOverride, rgID)
-	snapshot, hadSnapshot := m.peerTransferOutPrevious[rgID]
-	delete(m.peerTransferOutPrevious, rgID)
-	if hadSnapshot && snapshot.present {
+	delete(m.transferOverrides, rgID)
+	snapshot := override.previous
+	if snapshot.present {
 		// A fresh heartbeat can race this restore and overwrite peerGroups
 		// with newer live state. If that happens we may briefly put the older
 		// snapshot back here, but the next heartbeat corrects it again.
@@ -1575,7 +1674,7 @@ func (m *Manager) suppressPeerTimeoutForTransferCommitLocked(now time.Time) (boo
 //
 // The helper takes newPeerGroups as the map being rebuilt (Go maps are
 // reference types, so mutations on the parameter are visible to the caller)
-// and now as the heartbeat reception timestamp. m.peerTransferOutOverride,
+// and now as the heartbeat reception timestamp. m.transferOverrides,
 // m.peerTransferCommitGraceUntil, and m.localTransferOutHoldUntil are
 // read/mutated through the *Manager receiver as before. Caller must hold
 // m.mu write-locked (matching the existing handlePeerHeartbeat protocol).
@@ -1591,7 +1690,7 @@ func (m *Manager) applyTransferCommitOverridesOnPeerStateLocked(newPeerGroups ma
 			delete(m.abortedPeerTransferReqID, rgID)
 		}
 	}
-	for rgID := range m.peerTransferOutOverride {
+	for rgID := range m.transferOverrides {
 		peerGroup, ok := newPeerGroups[rgID]
 		if !ok {
 			continue

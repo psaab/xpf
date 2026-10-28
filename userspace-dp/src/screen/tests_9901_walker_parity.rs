@@ -1,19 +1,19 @@
-//! #9901 (F-072): the screen extractor and the forwarding walker must agree
-//! on every IPv6 extension-header chain — pinned as a BEHAVIOURAL agreement,
-//! not as a shared number and not (only) as shared source.
+//! #9901 (F-072) / #17106: the screen extractor and the forwarding walker must
+//! agree on every IPv6 extension-header chain — pinned as a BEHAVIOURAL
+//! agreement, not as a shared number and not (only) as shared source.
 //!
-//! The two walkers reach the same verdicts by different mechanisms (the
-//! extractor's `0..8` loop with a terminal iteration vs `walk_ipv6_ext_chain`
-//! with `MAX_IPV6_EXT_HEADERS`, documented at the extractor's walk) and since
-//! #9901 share the TRAVERSED SET (`IPV6_GENERIC_EXT_HEADERS`, guarded here and
-//! delegated-to there). What this file pins is the agreement relation over
-//! all 256 next-header values x two chain shapes x every truncation length:
+//! Since #17106 the extractor folds the ONE shared `walk_ipv6_ext_chain`
+//! (recording `rh_source_route_seen` / `second_non_atomic_seen` for the
+//! screen), so agreement is by construction; this file keeps pinning the
+//! agreement relation over all 256 next-header values x two chain shapes x
+//! every truncation length, so a future screen-side fold change cannot
+//! silently diverge:
 //!
-//! - R1 (fail-closed, EXACT): the forwarding walker reports `Truncated` iff
-//!   the screen extractor returns `Err`. This is the IDS-evasion direction —
-//!   a chain the forwarder cannot parse must never screen clean — and it holds
-//!   in both directions because both sides key truncation off the same chain
-//!   bytes (base + each header's declared advance).
+//! - R1 (fail-closed): the forwarding walker reports `Truncated` iff the
+//!   screen extractor returns `Err(TruncatedIpv6ExtChain)`, and the walker
+//!   reporting `OverLimit` likewise maps to that same Err (#17106 explicit
+//!   decision). This is the IDS-evasion direction — a chain the forwarder
+//!   cannot parse must never screen clean.
 //! - R2 (TCP resolution): when the walker resolves `L4(off, TCP)` on a chain
 //!   without a non-first fragment, the extractor must read the SAME bytes the
 //!   walker pointed at (seq/ack), or zeros when fewer than 20 TCP bytes are
@@ -84,12 +84,16 @@ fn assert_agreement(shape: &str, v: u8, prefix: &[u8]) {
         80,
         L3,
     );
-    let truncated = matches!(walk.outcome, ExtChainOutcome::Truncated);
+    // #17106: OverLimit maps to the same fail-closed Err as Truncated.
+    let truncated = matches!(
+        walk.outcome,
+        ExtChainOutcome::Truncated | ExtChainOutcome::OverLimit
+    );
     assert_eq!(
         screen.is_err(),
         truncated,
-        "#9901 R1: {shape} v={v} t={t}: screen Err must equal walker Truncated \
-         (walk={:?}, screen={screen:?})",
+        "#9901 R1 / #17106: {shape} v={v} t={t}: screen Err must equal walker \
+         Truncated|OverLimit (walk={:?}, screen={screen:?})",
         walk.outcome,
     );
     // R2: TCP resolution agreement on the non-truncated side.
@@ -188,13 +192,13 @@ fn walker_and_screen_agree_on_non_first_fragment_9901() {
 #[test]
 fn extractor_references_the_shared_ext_header_set_9901() {
     // The behavioural sweep above pins AGREEMENT; this pins SHARING — that
-    // `screen/extract.rs` guards on the `IPV6_GENERIC_EXT_HEADERS` single
-    // source rather than a re-spelled arm list, and that the forwarding
-    // predicate still delegates to the same const. Re-spelling the set in
-    // either file reds here while the sweep stays green, which is exactly
-    // the convention-drift F-072 is about.
+    // `screen/extract.rs` folds the ONE shared `walk_ipv6_ext_chain` rather
+    // than a private loop, and that the forwarding predicate still delegates
+    // to the shared traversed-set const. Re-introducing a private walk in
+    // extract.rs reds here while the sweep stays green, which is exactly
+    // the convention-drift F-072 / #17106 is about.
     // Strip comment-only lines before pinning: a `contains` pin over raw
-    // source would still pass with the arm commented out (the text survives
+    // source would still pass with the call commented out (the text survives
     // in the comment). Code lines only — the pins anchor on real code.
     fn code_only(src: &str) -> String {
         src.lines()
@@ -214,13 +218,18 @@ fn extractor_references_the_shared_ext_header_set_9901() {
         "non-vacuity: both sources must be real files",
     );
     assert!(
-        extract.contains("n if IPV6_GENERIC_EXT_HEADERS.contains(&n)"),
-        "#9901: screen/extract.rs must guard its generic ext-header arm on the \
-         shared IPV6_GENERIC_EXT_HEADERS const, not a local arm list",
+        extract.contains("walk_ipv6_ext_chain(frame, l3_offset)"),
+        "#17106: screen/extract.rs must call the shared walk_ipv6_ext_chain \
+         at its IPv6 arm, not a private loop",
     );
     assert!(
-        extract.matches("IPV6_GENERIC_EXT_HEADERS").count() >= 2,
-        "#9901: the shared const must be both imported and used in extract.rs",
+        !extract.contains("for _ in 0..8"),
+        "#17106: screen/extract.rs must not keep a private bounded walk loop",
+    );
+    assert!(
+        !extract.contains("ipv6_ah_sighted"),
+        "#17106: screen/extract.rs must not run a second AH walk; AH folds \
+         from the shared walk's ah_present",
     );
     assert!(
         inspect.contains("IPV6_GENERIC_EXT_HEADERS.contains(&protocol)"),

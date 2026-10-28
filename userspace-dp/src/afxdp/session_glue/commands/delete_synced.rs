@@ -1,5 +1,65 @@
 use super::super::*;
 use crate::afxdp::DeferredRedirectDelete;
+/// #17073: the caller contract of [`handle_delete_synced_with_guard`],
+/// encoded once here instead of as two positional bools at every call
+/// site. The three real modes are exhaustive: the fourth bool
+/// combination (peer-owner guard on, mirror deferred) compiled but
+/// had no caller, and the RT_FLOW close reason was keyed on the
+/// mirror-timing flag, so a future non-deferred policy delete would
+/// have logged CLEAR instead of POLICY_DELETE. Each variant now
+/// carries its close reason and mirror timing together, so the two
+/// can never be recombined incorrectly.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::afxdp::session_glue) enum DeleteOrigin {
+    /// Peer-sync delete (`WorkerCommand::DeleteSynced` and its scoped
+    /// conditional twin): enforce the peer-owner guard, remove the
+    /// BPF mirror immediately, and emit no harvested close (the
+    /// peer's local owner emits the one logical close).
+    PeerSync,
+    /// Local clear (`WorkerCommand::DeleteLocalControl`): no peer-owner
+    /// guard, remove the BPF mirror immediately, and emit one
+    /// harvested close with reason CLEAR.
+    LocalClear,
+    /// Policy batch (`handle_remove_policy_item` under the abort
+    /// fence): no peer-owner guard, defer every BPF redirect delete
+    /// to the coordinator's phase 2 (no BPF under the fence), and
+    /// emit one harvested close with reason POLICY_DELETE. The
+    /// deferred-intent accumulator is passed alongside this variant,
+    /// never as a bare `&mut Vec` next to positional bools.
+    PolicyBatch,
+}
+
+impl DeleteOrigin {
+    /// Whether the peer-owner guard refuses a delete that would tear
+    /// down a live locally-owned session (#9048). Only peer-sync
+    /// deletes enforce it; locally initiated clears and policy
+    /// removals act on this node's own authority.
+    pub(super) fn enforces_peer_owner(self) -> bool {
+        matches!(self, Self::PeerSync)
+    }
+
+    /// `Some(reason)` when this origin emits one harvested close with
+    /// that RT_FLOW close reason, `None` when it stays silent. The
+    /// reason is a property of the origin, never of mirror timing:
+    /// `LocalClear` is CLEAR and `PolicyBatch` is POLICY_DELETE by
+    /// construction, independent of when the mirror rows are removed.
+    pub(super) fn close_reason(self) -> Option<u8> {
+        match self {
+            Self::PeerSync => None,
+            Self::LocalClear => Some(crate::event_stream::codec::RT_FLOW_CLOSE_REASON_CLEAR),
+            Self::PolicyBatch => {
+                Some(crate::event_stream::codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE)
+            }
+        }
+    }
+
+    /// Whether the BPF mirror rows are removed immediately (`true`)
+    /// or collected as deferred intents for the coordinator's phase 2
+    /// (`false`, policy batch only — no BPF under the abort fence).
+    pub(super) fn removes_mirror_immediately(self) -> bool {
+        !matches!(self, Self::PolicyBatch)
+    }
+}
 
 /// Apply one identity-conditional delete from a micro-batch envelope. The
 /// session id is checked immediately before dispatching the ordinary teardown
@@ -108,8 +168,7 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
         now_secs,
         deleted_keys,
         worker_id,
-        false,
-        false,
+        DeleteOrigin::PolicyBatch,
         &mut *deferred_redirects,
         0,
         None,
@@ -127,8 +186,7 @@ pub(in crate::afxdp::session_glue) fn handle_remove_policy_item(
             now_secs,
             deleted_keys,
             worker_id,
-            false,
-            false,
+            DeleteOrigin::PolicyBatch,
             &mut *deferred_redirects,
             item.companion_session_id,
             None,
@@ -226,8 +284,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced(
         now_secs,
         deleted_keys,
         worker_id,
-        true,
-        true,
+        DeleteOrigin::PeerSync,
         &mut Vec::new(),
         0,
         None,
@@ -261,8 +318,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_conditional(
         now_secs,
         deleted_keys,
         worker_id,
-        true,
-        true,
+        DeleteOrigin::PeerSync,
         &mut Vec::new(),
         expected_id,
         companion.map(|k| (k, companion_expected_id)),
@@ -278,8 +334,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     now_secs: u64,
     deleted_keys: &mut Vec<SessionKey>,
     worker_id: u32,
-    enforce_peer_owner: bool,
-    remove_mirror: bool,
+    origin: DeleteOrigin,
     deferred_redirects: &mut Vec<DeferredRedirectDelete>,
     expected_id: u64,
     // #10512 scoped companion: torn down in this same handler after the
@@ -357,7 +412,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     // forward session through the ingress-zone fallback, so this was not a
     // corner. The coordinator's #9714 guard carried the identical fail-open and
     // moved in the same change: install and delete now ask one question.
-    let refuse = enforce_peer_owner
+    let refuse = origin.enforces_peer_owner()
         && matches!(existing_origin, Some(origin) if !origin.is_peer_synced())
         && delete_alias.as_ref().is_some_and(|lookup| {
             !synced_entry_allows_local_replace(ha_state, lookup.metadata.owner_rg_id, now_secs)
@@ -372,17 +427,13 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
     let pptp_control_channel =
         crate::session::SessionTable::pptp_control_channel_for_key(&key);
     let persistent_hold_16615 = sessions.take_persistent_lease_hold(&key);
-    // Locally initiated clears/policy removals emit one harvested close;
-    // peer-driven deletes remain silent to avoid duplicate records.
-    if !enforce_peer_owner {
-        let reason = if remove_mirror {
-            crate::event_stream::codec::RT_FLOW_CLOSE_REASON_CLEAR
-        } else {
-            crate::event_stream::codec::RT_FLOW_CLOSE_REASON_POLICY_DELETE
-        };
-        sessions.delete_with_control_close(&key, reason);
-    } else {
-        sessions.delete(&key);
+    // #17073: locally initiated clears/policy removals emit one harvested
+    // close with the origin's own reason; peer-driven deletes remain
+    // silent to avoid duplicate records. The reason comes from
+    // `DeleteOrigin::close_reason`, never from mirror timing.
+    match origin.close_reason() {
+        Some(reason) => sessions.delete_with_control_close(&key, reason),
+        None => sessions.delete(&key),
     }
     if let Some(control) = pptp_control_channel {
         sessions.pptp_mut().forget_control_channel(control);
@@ -420,7 +471,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
             now_ns,
             worker_id,
         );
-        if remove_mirror {
+        if origin.removes_mirror_immediately() {
             delete_session_map_entry_for_removed_session(
                 session_map,
                 &key,
@@ -442,16 +493,16 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
                 worker_id,
             });
         }
-    } else if remove_mirror {
+    } else if origin.removes_mirror_immediately() {
         // #9560 round 3: the local entry is already gone, so there is no decision to
         // derive this session's rows from — and the bare key is only ONE of them. Its
         // NAT and forward-wire aliases were claimed by this worker too, and releasing
         // just the key left them claimed by a holder that will never name them again.
         release_all_session_rows(session_map, &key);
     }
-    // Deferred mode (remove_mirror == false): the already-gone branch
-    // issues NO BPF here — phase 2 executes the covering forward intent
-    // instead ("NO BPF under this fence, ever").
+    // PolicyBatch (deferred): the already-gone branch issues NO BPF
+    // here — phase 2 executes the covering forward intent instead
+    // ("NO BPF under this fence, ever").
     // Scoped companion (see param doc): same-handler teardown after the
     // forward. Reached only when the forward matched (mismatch returned
     // at the top), so a declined forward leaves both halves untouched.
@@ -471,8 +522,7 @@ pub(in crate::afxdp::session_glue) fn handle_delete_synced_with_guard(
                 now_secs,
                 deleted_keys,
                 worker_id,
-                enforce_peer_owner,
-                remove_mirror,
+                origin,
                 deferred_redirects,
                 if live_companion_id == 0 { 0 } else { companion_expected_id },
                 None,

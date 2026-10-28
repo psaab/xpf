@@ -33,8 +33,7 @@
 // under the existing rest_api_auth surface (a lockout rejection IS an
 // authentication failure); no second surface is created for the same event.
 //
-// State lives on the middleware instance, never in a package global: the
-// static authMiddleware owns a tracker in its closure, and the live-swap
+// State lives on the Server, never in a package global: the production
 // dynamicAuthMiddleware uses the Server's (Server.throttle, lazily built).
 // Per-instance state keeps test servers isolated without a reset hook and
 // keeps the two legs of one server under one budget. Separate Server instances,
@@ -133,40 +132,6 @@ func newAuthFailureTracker(clock func() time.Time) *authFailureTracker {
 		globalAccounts: make(map[string]*authFailureBucket),
 		sources:        make(map[string]*authFailureBucket),
 	}
-}
-
-// setClockForTest replaces the clock. Tests advance time without sleeping;
-// production never replaces it.
-func (t *authFailureTracker) setClockForTest(clock func() time.Time) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.now = clock
-}
-
-// locked reports whether the source/account, global Basic-account, or source
-// prefix is currently locked. Read-only: checking never extends a lockout.
-func (t *authFailureTracker) locked(source, account string) (bool, time.Duration) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	now := t.now()
-	longest := time.Duration(0)
-	locked := false
-	for _, b := range [3]*authFailureBucket{
-		t.accounts[source+"\x00"+account],
-		t.globalAccounts[globalBasicAccountKey(account)],
-		t.sources[source],
-	} {
-		if b == nil {
-			continue
-		}
-		if remaining := b.lockedUntil.Sub(now); remaining > 0 {
-			locked = true
-			if remaining > longest {
-				longest = remaining
-			}
-		}
-	}
-	return locked, longest
 }
 
 // authThrottleReservation owns one admitted verifier attempt until exactly one
@@ -525,89 +490,6 @@ func (t *authFailureTracker) chargeLocked(b *authFailureBucket, now time.Time, t
 	b.lockedUntil = now.Add(d)
 	b.failures = 0
 	b.windowStart = b.lockedUntil
-}
-
-// recordFailure charges the per-source/account pair, global claimed Basic
-// account when applicable, and source-prefix budgets. New buckets are refused
-// when no safe capacity is available, preserving the fixed-capacity invariant;
-// existing buckets continue through the normal charge rules.
-func (t *authFailureTracker) recordFailure(source, account string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	now := t.now()
-	if b := t.accountBucketLocked(source + "\x00" + account); b != nil {
-		t.chargeLocked(b, now, authThrottleAccountFailures)
-	}
-	if key := globalBasicAccountKey(account); key != "" {
-		if b := t.globalAccountBucketLocked(key); b != nil {
-			t.chargeLocked(b, now, authThrottleGlobalBasicFailures)
-		}
-	}
-	if b := t.sourceBucketLocked(source); b != nil {
-		t.chargeLocked(b, now, authThrottleSourceFailures)
-	}
-}
-
-// recordSuccess clears the source/account pair and the corresponding global
-// Basic bucket, but leaves source-prefix failures alone.
-func (t *authFailureTracker) recordSuccess(source, account string) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	now := t.now()
-	t.clearAccountLocked(source, account, now)
-	t.clearGlobalBasicAccountLocked(account, now)
-}
-
-// accountBucketLocked returns the existing bucket for key, creating it when
-// room is available. It returns nil when the shared table is full of buckets
-// that must be preserved (live lockouts or in-flight reservations).
-func (t *authFailureTracker) accountBucketLocked(key string) *authFailureBucket {
-	if b := t.accounts[key]; b != nil {
-		return b
-	}
-	if !t.sweepIfFullLocked() {
-		return nil
-	}
-	b := &authFailureBucket{windowStart: t.now()}
-	t.accounts[key] = b
-	return b
-}
-
-// globalAccountBucketLocked returns the existing global bucket for key,
-// creating it when room is available. It returns nil when the shared table
-// is full of buckets that must be preserved.
-func (t *authFailureTracker) globalAccountBucketLocked(key string) *authFailureBucket {
-	if b := t.globalAccounts[key]; b != nil {
-		return b
-	}
-	if !t.sweepIfFullLocked() {
-		return nil
-	}
-	b := &authFailureBucket{windowStart: t.now()}
-	t.globalAccounts[key] = b
-	return b
-}
-
-// sourceBucketLocked returns the existing source bucket, creating it when
-// room is available. It returns nil when the shared table is full of buckets
-// that must be preserved.
-func (t *authFailureTracker) sourceBucketLocked(source string) *authFailureBucket {
-	if b := t.sources[source]; b != nil {
-		return b
-	}
-	if !t.sweepIfFullLocked() {
-		return nil
-	}
-	b := &authFailureBucket{windowStart: t.now()}
-	t.sources[source] = b
-	return b
-}
-
-// sweepIfFullLocked keeps all tracker tables within the shared entry budget.
-// Expired buckets go first; only unlocked failures may be evicted to make room.
-// It reports whether room is available for one more entry.
-func (t *authFailureTracker) sweepIfFullLocked() bool {
-	return t.makeRoomLocked(1, t.now())
 }
 
 // throttle returns the server's REST credential-failure tracker, building it

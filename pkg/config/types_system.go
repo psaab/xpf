@@ -222,7 +222,9 @@ type UserspaceConfig struct {
 // through to the userspace helper. Omission lets the helper attempt
 // opportunistic cross-NIC shared UMEM and fall back per binding when the live
 // device/kernel path cannot support it. Phase 0 artifacts are audit evidence:
-// the helper logs mismatches but does not gate runtime selection on them.
+// the Go compile-time audit (sharedUMEMAuditWarnings, #17134) warns on
+// kernel/PCI/driver/MTU/queue-topology mismatches but does not gate runtime
+// selection on them.
 //
 // Phase0ArtifactFile is the operator-DECLARED path to the machine-readable
 // Phase 0 audit artifact (#5300). It intentionally carries only the declared

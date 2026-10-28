@@ -134,24 +134,29 @@ mod sharded_neighbor;
 // so the explicit `#[path]` is unnecessary — auto-resolution finds mod.rs.
 #[path = "cos/mod.rs"]
 mod cos;
-mod session_glue;
+// #17207: `worker_commands` / `revalidation` are `pub(in crate::afxdp)`
+// (not private) so afxdp/mod.rs can import the six names below from
+// their defining leaves, breaking the `use super::*` +
+// `pub(super) use child::*` glob cycle that made the `session_glue::*`
+// re-exports ambiguous (rust-lang/rust#149145).
+pub(in crate::afxdp) mod session_glue;
 // #9856: the CommandExport direct conversion (control leg), so the worker
 // loop's cursor slice can reach it without naming the private module.
 pub(in crate::afxdp) use session_delta::{export_close_direct, export_open_direct};
 // #2442: re-export the owner-RG export walk + its chunkable candidate collector
 // so the worker loop's loss-of-sync resync path and the session-module resync
 // test can reach them without naming the private `session_glue` module.
-pub(crate) use session_glue::forward_export_candidates_for_owner_rgs;
+pub(crate) use session_glue::revalidation::forward_export_candidates_for_owner_rgs;
 /// #8586: the DELETE-specific split of `WORKER_COMMAND_QUEUE_DROPS`, re-exported
 /// so the coordinator status accessors and their wiring cell can name it
 /// without reaching into a private module.
-pub(crate) use session_glue::{
+pub(crate) use session_glue::worker_commands::{
     SESSION_DELETE_REPLICA_DROP_REPAIRED, SESSION_DELETE_REPLICA_DROPPED,
 };
 // #2653: the unbounded "emit all at once" helper is now a test-only fixture
 // (the production paths use the chunked drain-as-you-export in worker::loop_body).
 #[cfg(test)]
-pub(crate) use session_glue::export_forward_sessions_for_owner_rgs;
+pub(crate) use session_glue::revalidation::export_forward_sessions_for_owner_rgs;
 mod shared_ops;
 #[path = "shared_umem.rs"]
 mod shared_umem;
@@ -186,6 +191,9 @@ mod zone_counters;
 // #3651: per-zone SYN/ICMP/UDP flood-event counters — the flood half of the
 // same POPULATE, accounted on the screen-drop path rather than the forward path.
 mod flood_counters;
+// #17204: the ONE shared per-zone slot-counter machine (slot map, store,
+// pending, fold) both families above are built on.
+mod zone_slot_counters;
 // Clean-room WireGuard tunnel termination — see
 // docs/pr/wireguard-clean/plan.md. Engine + tests only in this PR;
 // hot-path activation lands in a follow-up.
@@ -269,7 +277,7 @@ use self::tunnel::*;
 use self::tx::dispatch::*;
 use self::tx::*;
 use self::types::*;
-pub(crate) use self::types::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
+pub(crate) use self::types::forwarding::{ForwardingDisposition, ForwardingResolution, NeighborEntry};
 // #2844: expose the SSOT in-place Ethernet-header writer to the
 // top-level `crate::nat64` module. NAT64 lives outside `crate::afxdp`
 // (it is `mod nat64;` at the crate root), so it cannot reach the
@@ -660,7 +668,9 @@ pub(crate) use coordinator::neigh_monitor_test_serial;
 #[cfg(test)]
 pub(crate) use coordinator::{ListTestWorker, register_list_test_worker};
 // #8121 part 2: idle persistent-NAT lease sync records.
-pub(crate) use coordinator::{IdleLeaseImportCounts, PoolDisplayLease, PoolIdleLease};
+pub(crate) use coordinator::{
+    IdleLeaseImportCounts, LeasePoolId, LeasePoolMode, PoolDisplayLease, PoolIdleLease,
+};
 // afxdp/tests.rs (14k-LOC catch-all) was split into cohesive per-subsystem
 // sibling test modules plus a shared support module in #4840. Pure test
 // code-motion; each file carries the union use-block and reaches production
@@ -851,10 +861,10 @@ mod worker;
 // #1807: shared poison-recovery helpers (lock_recover /
 // try_lock_recover) for every Mutex<VecDeque<WorkerCommand>> access.
 #[path = "worker_queue.rs"]
-// #7053: `pub(crate)` so the shared source-scan helpers in its test module
-// (blank_comments_and_strings / afxdp_rs_files / is_fixture) reach the
-// routing-instance pairing guard in filter/tests.rs. Widening the module,
-// not copying the helpers.
+// #17152: `pub(crate)` kept for the production queue helpers reached
+// crate-wide (`lock_recover`, `push_bounded`, counters); the test-only
+// source-scan helpers formerly shared through `worker_queue::tests`
+// now live in `crate::test_support::source_scan`.
 pub(crate) mod worker_queue;
 #[path = "worker_runtime.rs"]
 mod worker_runtime;
@@ -874,7 +884,7 @@ pub(crate) use self::coordinator::{MandatoryPin, ReconcileStage, WorkerBindShort
 pub(in crate::afxdp) use self::coordinator::WorkerRuntimeRecord;
 // #2962: the lock-free owner-RG export wait handle. The control-socket
 // dispatcher (server/handlers) names this as the return type of
-// kick_owner_rg_export so it can run the blocking ack-wait off the
+// kick_owner_rg_export_unpaged so it can run the blocking ack-wait off the
 // global ServerState lock.
 pub(crate) use self::ha::OwnerRgExportWait;
 // #4054: re-export the two-phase all-sessions bulk export handle so the
@@ -1216,7 +1226,7 @@ impl BatchCounters {
         &mut self,
         reason: &str,
         zone_id: u32,
-        flood_slots: &crate::afxdp::flood_counters::FloodCounterSlotMap,
+        flood_slots: &crate::afxdp::zone_slot_counters::ZoneSlotMap,
     ) {
         self.touched = true;
         self.screen_drops += 1;
