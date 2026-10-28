@@ -94,10 +94,12 @@ func vrrp17227Flat(lines ...string) []string {
 // the two measured divergences from the issue.
 func TestVRRPSingleReaderParity17227(t *testing.T) {
 	rows := []struct {
-		name   string
-		braced string
-		packed string
-		flat   []string
+		name     string
+		braced   string
+		packed   string
+		flat     []string
+		inet6    bool
+		lenient6 bool
 	}{
 		{
 			name:   "priority",
@@ -219,9 +221,118 @@ func TestVRRPSingleReaderParity17227(t *testing.T) {
 				vrrp17227Base+"preempt",
 				vrrp17227Base+"track-interface ge-0/0/1"),
 		},
+		{
+			name:   "bare preempt then advertise-interval",
+			braced: "preempt; advertise-interval 5;",
+			packed: "preempt advertise-interval 5",
+			flat: vrrp17227Flat(
+				vrrp17227Base+"preempt",
+				vrrp17227Base+"advertise-interval 5"),
+		},
+		{
+			name:   "bare preempt then track",
+			braced: "preempt; track { interface ge-0/0/1 { priority-cost 30; } }",
+			packed: "preempt track interface ge-0/0/1 priority-cost 30",
+			flat: vrrp17227Flat(
+				vrrp17227Base+"preempt",
+				vrrp17227Base+"track interface ge-0/0/1 priority-cost 30"),
+		},
+		{
+			name:   "bare preempt then track-priority-cost",
+			braced: "preempt; track-interface ge-0/0/1; track-priority-cost 20;",
+			packed: "preempt track-interface ge-0/0/1 track-priority-cost 20",
+			flat: vrrp17227Flat(
+				vrrp17227Base+"preempt",
+				vrrp17227Base+"track-interface ge-0/0/1",
+				vrrp17227Base+"track-priority-cost 20"),
+		},
+		{
+			name:   "preempt then preempt hold-time re-arms",
+			braced: "preempt; preempt { hold-time 30; }",
+			packed: "preempt preempt hold-time 30",
+			flat: vrrp17227Flat(
+				vrrp17227Base+"preempt",
+				vrrp17227Base+"preempt hold-time 30"),
+		},
+		{
+			name:   "inet6 fixture virtual-inet6-address extra VIP",
+			braced: "virtual-inet6-address 2001:db8::2/64;",
+			packed: "virtual-inet6-address 2001:db8::2/64",
+			flat: vrrp17227Inet6Flat(
+				vrrp17227Inet6Base + "virtual-inet6-address 2001:db8::2/64"),
+			inet6: true,
+		},
+		{
+			name:   "inet6 fixture inet6-advertise-interval",
+			braced: "inet6-advertise-interval 500;",
+			packed: "inet6-advertise-interval 500",
+			flat: vrrp17227Inet6Flat(
+				vrrp17227Inet6Base + "inet6-advertise-interval 500"),
+			inet6: true,
+		},
+		{
+			name:   "inet6 fixture bare preempt then virtual-link-local-address",
+			braced: "preempt; virtual-link-local-address fe80::1;",
+			packed: "preempt virtual-link-local-address fe80::1",
+			flat: vrrp17227Inet6Flat(
+				vrrp17227Inet6Base+"preempt",
+				vrrp17227Inet6Base+"virtual-link-local-address fe80::1"),
+			inet6:    true,
+			lenient6: true,
+		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
+			if row.inet6 {
+				bracedTree := func() *ConfigTree { return parseHierText(t, vrrp17227Inet6Braced(row.braced)) }
+				packedTree := func() *ConfigTree { return parseHierText(t, vrrp17227Inet6Packed(row.packed)) }
+				flatTree := func() *ConfigTree { return replaySetLines(t, row.flat) }
+				if row.lenient6 {
+					// virtual-link-local-address is name-refused strict
+					// in every spelling; lenient records it on the
+					// group, so parity is compared on the lenient path.
+					bcfg, err := CompileConfigLenient(bracedTree())
+					if err != nil {
+						t.Fatalf("braced lenient compile: %v", err)
+					}
+					pcfg, err := CompileConfigLenient(packedTree())
+					if err != nil {
+						t.Fatalf("packed lenient compile: %v", err)
+					}
+					fcfg, err := CompileConfigLenient(flatTree())
+					if err != nil {
+						t.Fatalf("flat lenient compile: %v", err)
+					}
+					bg, pg, fg := vrrp17227Inet6Group(t, bcfg), vrrp17227Inet6Group(t, pcfg), vrrp17227Inet6Group(t, fcfg)
+					if !reflect.DeepEqual(bg, pg) {
+						t.Fatalf("braced != packed:\nbraced=%+v\npacked=%+v", bg, pg)
+					}
+					if !reflect.DeepEqual(bg, fg) {
+						t.Fatalf("braced != flat:\nbraced=%+v\nflat=%+v", bg, fg)
+					}
+					return
+				}
+				bcfg, err := CompileConfig(bracedTree())
+				if err != nil {
+					t.Fatalf("braced compile: %v", err)
+				}
+				pcfg, err := CompileConfig(packedTree())
+				if err != nil {
+					t.Fatalf("packed compile: %v", err)
+				}
+				fcfg, err := CompileConfig(flatTree())
+				if err != nil {
+					t.Fatalf("flat compile: %v", err)
+				}
+				bg, pg, fg := vrrp17227Inet6Group(t, bcfg), vrrp17227Inet6Group(t, pcfg), vrrp17227Inet6Group(t, fcfg)
+				if !reflect.DeepEqual(bg, pg) {
+					t.Fatalf("braced != packed:\nbraced=%+v\npacked=%+v", bg, pg)
+				}
+				if !reflect.DeepEqual(bg, fg) {
+					t.Fatalf("braced != flat:\nbraced=%+v\nflat=%+v", bg, fg)
+				}
+				return
+			}
 			bcfg, err := CompileConfig(parseHierText(t, vrrp17227Braced(row.braced)))
 			if err != nil {
 				t.Fatalf("braced compile: %v", err)
@@ -357,6 +468,31 @@ func TestVRRPSingleReaderPackedAuth17227(t *testing.T) {
 			braced: "authentication-key " + secret + ";",
 			packed: "authentication-key " + secret,
 			flat:   vrrp17227Flat(vrrp17227Base + "authentication-key " + secret),
+		},
+		{
+			name:   "bare preempt then type only",
+			braced: "preempt; authentication-type md5;",
+			packed: "preempt authentication-type md5",
+			flat: vrrp17227Flat(
+				vrrp17227Base+"preempt",
+				vrrp17227Base+"authentication-type md5"),
+		},
+		{
+			name:   "bare preempt then key only",
+			braced: "preempt; authentication-key " + secret + ";",
+			packed: "preempt authentication-key " + secret,
+			flat: vrrp17227Flat(
+				vrrp17227Base+"preempt",
+				vrrp17227Base+"authentication-key "+secret),
+		},
+		{
+			name:   "bare preempt then type and key",
+			braced: "preempt; authentication-type md5; authentication-key " + secret + ";",
+			packed: "preempt authentication-type md5 authentication-key " + secret,
+			flat: vrrp17227Flat(
+				vrrp17227Base+"preempt",
+				vrrp17227Base+"authentication-type md5",
+				vrrp17227Base+"authentication-key "+secret),
 		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -526,4 +662,34 @@ func TestVRRPSingleReaderInet6Packed17227(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestVRRPSingleReaderBarePreemptRows17227 anchors the fold rows added
+// to TestVRRPSingleReaderParity17227 / TestVRRPSingleReaderPackedAuth17227
+// on PR #18277: bare `preempt` before advertise-interval, track,
+// track-priority-cost, authentication-type/-key and the inet6 leaves,
+// plus `preempt preempt hold-time 30` proving a second packed `preempt`
+// re-arms the hold-time pair instead of being absorbed by the first.
+func TestVRRPSingleReaderBarePreemptRows17227(t *testing.T) {
+	cfg, err := CompileConfig(parseHierText(t, vrrp17227Packed(
+		"preempt preempt hold-time 30")))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	vg := vrrp17227Group(t, cfg)
+	if !vg.Preempt || vg.PreemptHoldTime != 30 {
+		t.Fatalf("preempt preempt hold-time 30 = %+v, want Preempt=true hold=30 (second preempt must re-arm)", vg)
+	}
+	for _, body := range []string{
+		"preempt advertise-interval 5",
+		"preempt track interface ge-0/0/1 priority-cost 30",
+	} {
+		cfg, err := CompileConfig(parseHierText(t, vrrp17227Packed(body)))
+		if err != nil {
+			t.Fatalf("packed %q: %v", body, err)
+		}
+		if vg := vrrp17227Group(t, cfg); !vg.Preempt {
+			t.Fatalf("packed %q: Preempt=false, want true (bare preempt swallowed)", body)
+		}
+	}
 }

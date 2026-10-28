@@ -125,10 +125,11 @@ func vrrpPendingAfter(kw string) (int, bool) {
 // `preempt` itself one token is reserved so a literal `hold-time` can
 // arrive; once it does, one more token (its value) is reserved. Any
 // other first token means the `preempt` was bare — the caller checks
-// each token while pending==0 (see vrrpGroupStatements) and lets a
-// property keyword open the next statement instead of absorbing it
-// into this node, exactly as the former Keys arm consumed the pair
-// only when keys[i+1] was literally `hold-time`.
+// each token while that reservation is still pending (see
+// vrrpGroupStatements) and lets a property keyword open the next
+// statement instead of absorbing it into this node, exactly as the
+// former Keys arm consumed the pair only when keys[i+1] was
+// literally `hold-time`.
 func vrrpPreemptPending(keys []string) int {
 	switch {
 	case len(keys) == 1: // [preempt]
