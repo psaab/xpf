@@ -358,16 +358,16 @@ func TestPolicyVerdictCorpusPinsEmbeddedV4IPv6Case10686(t *testing.T) {
 // half carries the mirror pin; symmetric removal reds both.
 func TestPolicyVerdictCorpusPins17077Cases(t *testing.T) {
 	want := map[string]int{
-		"transit-fragment-reject-13705":        2,
-		"unknown-zone-egress-11067":            1,
-		"unknown-zone-ingress-8318":            1,
-		"unknown-zone-junos-host-global-11369": 2,
+		"transit-fragment-reject-13705":             2,
+		"unknown-zone-egress-11067":                 1,
+		"unknown-zone-ingress-8318":                 1,
+		"unknown-zone-junos-host-global-11369":      2,
 		"unknown-zone-junos-host-global-only-11369": 2,
-		"icmp-type-code":                       3,
-		"omitted-selectors":                    3,
-		"feed-overlay-12965":                   2,
-		"lenient-quarantine-5649":              2,
-		"content-rejected-3727":                1,
+		"icmp-type-code":                            3,
+		"omitted-selectors":                         3,
+		"feed-overlay-12965":                        2,
+		"lenient-quarantine-5649":                   2,
+		"content-rejected-3727":                     1,
 	}
 	cases := parsePolicyCorpus9167(t, policyCorpusPath9167)
 	seen := map[string]int{}
