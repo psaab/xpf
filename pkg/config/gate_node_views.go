@@ -42,7 +42,7 @@ type gateNodeViewOpts struct {
 // the generic-compile fallback tree described on gateNodeViewOpts.
 //
 // It is the single source of truth for the per-cluster-node gate prologue
-// previously hand-copied into ten gate files, of which only two received
+// previously hand-copied into twelve gate files, of which only two received
 // the #13146 raw-tree fallback: a literal `groups "${node}"` defeated the
 // other copies' per-node expansions, so gates such as QinQ (#5879),
 // packed-login (#6662) and login-class-shadow (#6701) silently inspected
@@ -79,6 +79,13 @@ func effectiveNodeViews(tree *ConfigTree, opts gateNodeViewOpts) []*ConfigTree {
 	}
 	if opts.Fallback && len(views) == 0 {
 		if view := gateGenericView(tree, opts.Tagged); view != nil {
+			if opts.ExpandRanges {
+				// Same per-view range expansion as the node views
+				// above: the fallback tree the generic compile
+				// compiles must expose interface-range members to
+				// the VLAN gates exactly as the node views do.
+				_, _ = expandInterfaceRanges(view)
+			}
 			views = append(views, view)
 		}
 	}

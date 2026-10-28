@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// #17222: the per-cluster-node gate prologue was hand-copied into ten
+// #17222: the per-cluster-node gate prologue was hand-copied into twelve
 // gate files and the #13146 literal-"${node}" fallback reached only
 // two of them (vlan-map, vlan-tagging), so on a strict generic commit
 // the QinQ (#5879), packed-login (#6662) and login-class-shadow
@@ -71,6 +71,36 @@ func TestGateNodeViewsLiteralNodeFallback17222(t *testing.T) {
 			control: `system { login { class ops { permissions all; } class ops deny-commands "request system zeroize"; } }`,
 			gate:    validateLoginPackedStatementsAST,
 			marker:  "written on the instance line",
+		},
+		{
+			// #17222 fold: the offending unit arrives only as an
+			// interface-range member. On the literal-${node} tree
+			// neither per-node view exists, so the generic FALLBACK
+			// view must itself apply expandInterfaceRanges — without
+			// it the fallback view still carries the unexpanded
+			// `interface-range R` stanza and the gate can only report
+			// the phantom range name, never the member. The marker
+			// therefore names the member interface: RED pre-fold
+			// (error names `interface-range`), GREEN post-fold.
+			name:    "qinq-range-fallback",
+			lit:     litNodePrefix17222 + `interfaces { interface-range R { member ge-0/0/0; vlan-tagging; unit 0 { vlan-id 100; inner-vlan-id 200; } } }`,
+			control: `interfaces { interface-range R { member ge-0/0/0; vlan-tagging; unit 0 { vlan-id 100; inner-vlan-id 200; } } }`,
+			gate:    validateQinQVLANStackAST,
+			marker:  "interfaces ge-0/0/0 unit 0",
+		},
+		{
+			name:    "vlanmap-range-fallback",
+			lit:     litNodePrefix17222 + `interfaces { interface-range R { member ge-0/0/0; unit 0 { vlan-id 100; input-vlan-map { push; } } } }`,
+			control: `interfaces { interface-range R { member ge-0/0/0; unit 0 { vlan-id 100; input-vlan-map { push; } } } }`,
+			gate:    validateVLANMapAST,
+			marker:  "interfaces ge-0/0/0 unit 0",
+		},
+		{
+			name:    "vlan-tagging-range-fallback",
+			lit:     litNodePrefix17222 + `interfaces { interface-range R { member ge-0/0/0; unit 0 { vlan-id 100; } } }`,
+			control: `interfaces { interface-range R { member ge-0/0/0; unit 0 { vlan-id 100; } } }`,
+			gate:    validateVlanIDTaggingAST,
+			marker:  "interfaces ge-0/0/0 unit 0",
 		},
 	}
 	for _, tc := range cases {

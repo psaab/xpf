@@ -76,20 +76,6 @@ var dupNameScannersExpanded = []func(*ConfigTree, bool) ([]string, error){
 	validateSourceNATDuplicateContextAST,
 }
 
-// expandCandidateForNode returns a group-expanded CLONE of tree under
-// the given cluster node's `${node}` binding, or nil when that node's
-// expansion fails (gateNodeView, #17222).
-//
-// A per-node expansion error is non-fatal here and contributes the
-// empty view: the real path's own ExpandGroups (compiler.go) owns
-// reporting a broken apply-groups reference, and this gate must not
-// turn a diagnostic it does not own into a second, differently-worded
-// rejection. No generic fallback view: the pre-expansion scanners
-// already cover the raw top-level tree.
-func expandCandidateForNode(tree *ConfigTree, nodeID int) *ConfigTree {
-	return gateNodeView(tree, nodeID, false)
-}
-
 // validateDuplicateNamesExpandedAST is the post-expansion half of the
 // duplicate-name gate family (#6455 Finding 1).
 //
@@ -122,6 +108,13 @@ func validateDuplicateNamesExpandedAST(tree *ConfigTree, lenient bool, preWarnin
 	var warnings []string
 	emitted := map[string]bool{}
 
+	// A per-node expansion error is non-fatal here and contributes the
+	// empty view (effectiveNodeViews / gateNodeView, #17222): the real
+	// path's own ExpandGroups (compiler.go) owns reporting a broken
+	// apply-groups reference, and this gate must not turn a diagnostic
+	// it does not own into a second, differently-worded rejection.
+	// No generic fallback view: the pre-expansion scanners already
+	// cover the raw top-level tree.
 	for _, clone := range effectiveNodeViews(tree, gateNodeViewOpts{}) {
 		for _, scan := range dupNameScannersExpanded {
 			// The scanner is always run in LENIENT mode so it returns EVERY
