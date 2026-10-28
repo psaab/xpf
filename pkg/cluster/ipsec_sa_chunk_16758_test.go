@@ -247,7 +247,7 @@ func TestIPsecSAChunkInterleavedGenerationsSurvive17846(t *testing.T) {
 		return appendFullSetSeq(encodeIPsecSAChunkPayload(body, generation, uint32(index), 2, 2), 1000, seq)
 	}
 
-	seq := uint64(1)
+	seq := uint64(100)
 	next := func() uint64 { seq++; return seq }
 
 	// Open generations 101..105 with their first chunk only, filling
@@ -350,7 +350,7 @@ func TestIPsecSAChunkForgedTotalNamesRefused16758(t *testing.T) {
 	}
 	// Over per-chunk bound: one chunk carrying maxIPsecSANames+1 names.
 	bigBody := encodeIPsecSAPayload(ipsecNames16758(maxIPsecSANames + 1))
-	over := encodeIPsecSAChunkPayload(bigBody, 7, 0, 1, uint32(maxIPsecSANames+1))
+	over := encodeIPsecSAChunkPayload(bigBody, 2, 0, 1, uint32(maxIPsecSANames+1))
 	if recv.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(over, 1000, 3)) {
 		t.Fatal("chunk over per-chunk name bound must be rejected")
 	}
@@ -366,10 +366,10 @@ func TestIPsecSAChunkInconsistentAssemblyRefused16758(t *testing.T) {
 	recv := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	recv.handleMessage(nil, syncMsgIPsecSA, appendFullSetSeq(encodeIPsecSAPayload([]string{"vpn-a"}), 1000, 1))
 	one := encodeIPsecSAPayload([]string{"vpn-x"})
-	if !recv.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(encodeIPsecSAChunkPayload(one, 5, 0, 2, 2), 1000, 2)) {
+	if !recv.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(encodeIPsecSAChunkPayload(one, 2, 0, 2, 2), 1000, 2)) {
 		t.Fatal("CONTROL: first consistent chunk must be accepted")
 	}
-	if recv.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(encodeIPsecSAChunkPayload(one, 5, 1, 3, 2), 1000, 3)) {
+	if recv.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(encodeIPsecSAChunkPayload(one, 2, 1, 3, 2), 1000, 3)) {
 		t.Fatal("chunk disagreeing on total must be rejected")
 	}
 	if n := len(recv.ipsecChunkState.pending); n != 0 {
@@ -380,10 +380,10 @@ func TestIPsecSAChunkInconsistentAssemblyRefused16758(t *testing.T) {
 	}
 	// Over-total: totalNames=1 across two chunks carrying one name each.
 	recv2 := NewSessionSync(":0", "10.0.0.2:4785", nil)
-	if !recv2.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(encodeIPsecSAChunkPayload(one, 6, 0, 2, 1), 1000, 1)) {
+	if !recv2.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(encodeIPsecSAChunkPayload(one, 1, 0, 2, 1), 1000, 1)) {
 		t.Fatal("CONTROL: first chunk of over-total fixture must be accepted")
 	}
-	if recv2.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(encodeIPsecSAChunkPayload(one, 6, 1, 2, 1), 1000, 2)) {
+	if recv2.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(encodeIPsecSAChunkPayload(one, 1, 1, 2, 1), 1000, 2)) {
 		t.Fatal("chunk pushing assembly past totalNames must be rejected")
 	}
 	if n := len(recv2.ipsecChunkState.pending); n != 0 {
@@ -508,7 +508,7 @@ func TestIPsecSAChunkHugeBodyRefusedAtDecode17826(t *testing.T) {
 		t.Fatalf("fixture held set = %v, want [vpn-a]", held)
 	}
 	hugeBody := bytes.Repeat([]byte("a\n"), 8_000_000)
-	forged := encodeIPsecSAChunkPayload(hugeBody, 9, 0, 1, uint32(ipsecChunkMaxTotalNames))
+	forged := encodeIPsecSAChunkPayload(hugeBody, 2, 0, 1, uint32(ipsecChunkMaxTotalNames))
 	if recv.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(forged, 1000, 2)) {
 		t.Fatal("chunk carrying ~8M names in one body must be rejected")
 	}
@@ -517,5 +517,40 @@ func TestIPsecSAChunkHugeBodyRefusedAtDecode17826(t *testing.T) {
 	}
 	if held := recv.PeerIPsecSAs(); len(held) != 1 || held[0] != "vpn-a" {
 		t.Fatalf("huge-body chunk disturbed held set: %v", held)
+	}
+
+}
+
+// TestIPsecSAChunkGenerationCannotExceedFrameSequence18371 pins the
+// sender invariant that a chunk set's generation is its first frame
+// sequence: a forged generation ahead of its sequence must not poison the
+// committed-generation watermark and suppress a later legitimate set.
+func TestIPsecSAChunkGenerationCannotExceedFrameSequence18371(t *testing.T) {
+	recv := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	var callbacks [][]string
+	recv.OnIPsecSAReceived = func(names []string) {
+		callbacks = append(callbacks, append([]string(nil), names...))
+	}
+	chunk := func(generation, seq uint64, name string) []byte {
+		body := encodeIPsecSAPayload([]string{name})
+		return appendFullSetSeq(encodeIPsecSAChunkPayload(body, generation, 0, 1, 1), 1000, seq)
+	}
+	if recv.handleMessage(nil, syncMsgIPsecSAChunk, chunk(^uint64(0), 1, "vpn-forged")) {
+		t.Fatal("generation ahead of frame sequence must be rejected")
+	}
+	if held := recv.PeerIPsecSAs(); len(held) != 0 {
+		t.Fatalf("inconsistent generation committed before valid set: %v", held)
+	}
+	if !recv.handleMessage(nil, syncMsgIPsecSAChunk, chunk(2, 2, "vpn-valid")) {
+		t.Fatal("valid generation 2 / sequence 2 must be accepted after malformed frame")
+	}
+	if held := recv.PeerIPsecSAs(); len(held) != 1 || held[0] != "vpn-valid" {
+		t.Fatalf("valid generation 2 was suppressed by inconsistent frame: %v", held)
+	}
+	if len(callbacks) != 1 || len(callbacks[0]) != 1 || callbacks[0][0] != "vpn-valid" {
+		t.Fatalf("only valid generation should notify callback, got %v", callbacks)
+	}
+	if got := recv.Stats().IPsecSAMalformedIgnored; got != 1 {
+		t.Fatalf("IPsecSAMalformedIgnored = %d, want 1", got)
 	}
 }

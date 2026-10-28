@@ -48,18 +48,35 @@ func peerConfigStaleRefusal(fn func() (bool, string), what string) error {
 	return nil
 }
 
-// peerConfigCapStaleKnown16756 reports whether the peer incarnation that
-// was current when the newest generation was sent advertised ACK
-// support. It pairs lastSentConfigGen with the capability recorded
-// alongside it, so it separates "the peer said it cannot ACK" (false)
-// from "the peer promised an ACK" (true). A peer that never sent a
-// capabilities frame (peerCapabilitiesLearned false) records false at
-// send time and keeps the legacy fallback — exactly a pre-ACK peer.
-func (s *SessionSync) peerConfigCapStaleKnown16756() bool {
-	if s == nil {
-		return false
+// configApplyDebt16756 is the paired state for the newest config send.
+// generation and the capability advertised for that send must be published
+// together; a known legacy capability is distinct from not having learned the
+// peer's capability yet.
+type configApplyDebt16756 struct {
+	generation      uint64
+	capabilityKnown bool
+	ackCapable      bool
+}
+
+func (s *SessionSync) configApplyDebtSnapshot16756() configApplyDebt16756 {
+	s.configApplyDebtMu.RLock()
+	debt := s.lastSentConfigDebt16756
+	s.configApplyDebtMu.RUnlock()
+	return debt
+}
+
+// peerConfigAckCapabilitySnapshot16756 samples the learned marker and ACK
+// capability from one peer incarnation. The pointer retry avoids combining a
+// retired capability set with the successor's learned state.
+func (s *SessionSync) peerConfigAckCapabilitySnapshot16756() (known, ackCapable bool) {
+	for {
+		state := s.peerIncarnationState()
+		known = s.peerSnaps.peerSnapshotProtocol.Load() != 0
+		flags2 := state.peerCapabilityFlags2.Load()
+		if s.peerIncarnationStatePtr.Load() == state {
+			return known, uint8(flags2)&capFlag2ConfigApplyAck != 0
+		}
 	}
-	return s.peerIncarnationState().lastSentConfigAckCapable16756.Load()
 }
 
 // PeerConfigStale reports whether handing over to the peer would promote
@@ -69,6 +86,8 @@ func (s *SessionSync) peerConfigCapStaleKnown16756() bool {
 // ACK-capable peer (advertised capFlag2ConfigApplyAck for the incarnation
 // that received the newest send): only a positive apply ACK clears the
 // gate — a NACK is diagnostic, and silence is stale (#9569/#11070).
+// If that peer disconnects before ACKing, its send debt survives until a
+// successor applies it or explicitly advertises the legacy capability set.
 //
 // Legacy peer (no ACK advertisement for that incarnation — it predates
 // the type-40 ACK, 28556c2b19): it can never ACK, so requiring one
@@ -80,30 +99,35 @@ func (s *SessionSync) PeerConfigStale() (bool, string) {
 	if s == nil {
 		return false, ""
 	}
-	sent := s.lastSentConfigGen.Load()
+	debt := s.configApplyDebtSnapshot16756()
+	sent := debt.generation
 	if sent == 0 {
 		return false, ""
 	}
 	legacyStale := func() (bool, string) {
-		if nacked := s.peerIncarnationState().peerConfigNackedGen16756.Load(); nacked >= sent {
+		if nacked := s.peerConfigNackedGen16756.Load(); nacked >= sent {
 			return true, fmt.Sprintf("peer predates config-apply ACK and reported it did not apply config generation %d (peer nacked %d)", sent, nacked)
 		}
 		return false, ""
 	}
-	if !s.peerConfigCapStaleKnown16756() {
+	// Sample the current incarnation after reading the send-time debt. A
+	// legacy send can use NACK-only semantics while the peer remains legacy
+	// (or disconnected), but a successor that proves ACK capability must
+	// satisfy the still-outstanding generation with a positive ACK.
+	s.mu.Lock()
+	state := s.peerIncarnationState()
+	learned := s.peerSnaps.peerSnapshotProtocol.Load() != 0
+	currentAckCapable := uint8(state.peerCapabilityFlags2.Load())&capFlag2ConfigApplyAck != 0
+	s.mu.Unlock()
+	if learned && !currentAckCapable {
 		return legacyStale()
 	}
-	// The send-time recording says the receiving incarnation promised an
-	// ACK. If the CURRENT incarnation does not advertise the bit —
-	// downgrade-on-reconnect, or an advance whose new peer has not
-	// advertised yet (flags cleared, applied mark reset by the boot
-	// switch) — the promised ACK can never arrive from it, and the
-	// strict gate would refuse on (sent, 0) forever. Treat the current
-	// peer as the legacy peer it now is. A currently ACK-capable peer
-	// keeps the strict gate below.
-	if !s.ConfigApplyAckCapable() {
+	if debt.capabilityKnown && !debt.ackCapable && !(learned && currentAckCapable) {
 		return legacyStale()
 	}
+	// An unknown/disconnected incarnation is NOT proof of a pre-ACK peer
+	// when the send itself was ACK-capable: keep that debt fail-closed until
+	// capability discovery identifies a compatible successor.
 	applied := s.peerAppliedConfigGen.Load()
 	if applied < sent {
 		return true, fmt.Sprintf("the standby has not acknowledged applying config generation %d (peer applied %d)", sent, applied)
