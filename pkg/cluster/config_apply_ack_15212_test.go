@@ -18,7 +18,7 @@ func TestOnPeerConfigApplyAckFiresOnlyOnAdvance15212(t *testing.T) {
 		binary.LittleEndian.PutUint64(p[:], gen)
 		s.handleMessage(nil, syncMsgConfigApplyAck, p[:])
 	}
-	s.lastSentConfigGen.Store(8)
+	s.recordLastSentConfigGen(8)
 	ack(7)
 	ack(7) // duplicate: no advance, no second fire
 	ack(9) // unsent: ignored

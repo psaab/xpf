@@ -4043,10 +4043,15 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     newest sent generation was NACKed (#16756). ACK support is
     advertised as `capFlag2ConfigApplyAck` in a second capability byte
     appended after the identity tail of `syncMsgPeerCapabilities`; the
-    capability recorded at send time (`lastSentConfigAckCapable16756`)
-    decides which semantics a given send is judged by, and a
-    downgrade-on-reconnect re-judges under the current peer. The legacy
-    refusal names the real cause ("peer predates config-apply ACK").
+    send's generation, capability-known state and ACK support are published
+    as one coherent `lastSentConfigDebt16756` snapshot that survives
+    incarnation retirement; unknown remains strict, while an explicit
+    downgrade-on-reconnect selects the legacy fallback. The matching legacy
+    NACK mark also survives retirement. Ungated config pushes serialize
+    capability sampling, debt publication and socket write against capability
+    advertisements, and a modern successor must ACK outstanding debt even if
+    the send-time snapshot recorded legacy capability.
+    The legacy refusal names the real cause ("peer predates config-apply ACK").
     With no session sync there is no push that could have failed, so
     handover proceeds as before. Crash takeover stays ungated.
 - `TakeoverHoldTime` adds extra delay before election when this node would

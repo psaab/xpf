@@ -468,10 +468,16 @@ func (s *SessionSync) queueConfigOnConn(
 			return false
 		}
 	} else {
+		// Serialize the capability sample, debt publication, and config write
+		// against peer-incarnation capability changes, as the guarded path
+		// does. Without this, an advertisement could flip legacy to modern
+		// after the debt is recorded but before the config reaches the peer.
+		s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
 		s.writeMu.Lock()
 		s.recordLastSentConfigGen(gen)
 		err = writeMsg(conn, msgType, payload)
 		s.writeMu.Unlock()
+		s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	}
 	if err != nil {
 		slog.Warn("cluster sync: config send error", "err", err)
@@ -495,22 +501,27 @@ func (s *SessionSync) queueConfigOnConn(
 	return true
 }
 func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
-	// #16756: record the receiving incarnation's ACK capability
-	// atomically with the mark (senders hold writeMu, and this CAS is
-	// the only writer) so PeerConfigStale charges a missing ACK only
-	// to a peer that promised one for THIS send. CAS first, then the
-	// bit, so a racing PeerConfigStale never pairs a new generation
-	// with the previous send's capability.
-	for {
-		old := s.lastSentConfigGen.Load()
-		if gen <= old {
-			return
-		}
-		if s.lastSentConfigGen.CompareAndSwap(old, gen) {
-			s.peerIncarnationState().lastSentConfigAckCapable16756.Store(s.ConfigApplyAckCapable())
-			return
-		}
+	// #17816: publish the generation and the receiving incarnation's
+	// ACK capability as one mutex-protected snapshot. The gate takes the
+	// same lock for its read, so it cannot pair a new generation with the
+	// previous send's capability. This debt intentionally survives peer
+	// incarnation retirement until ACKed or explicitly re-judged as legacy.
+	capabilityKnown, ackCapable := s.peerConfigAckCapabilitySnapshot16756()
+	s.configApplyDebtMu.Lock()
+	if gen <= s.lastSentConfigDebt16756.generation {
+		s.configApplyDebtMu.Unlock()
+		return
 	}
+	s.lastSentConfigDebt16756 = configApplyDebt16756{
+		generation:      gen,
+		capabilityKnown: capabilityKnown,
+		ackCapable:      ackCapable,
+	}
+	if hook := s.testBeforeLastSentConfigDebtUnlock; hook != nil {
+		s.testBeforeLastSentConfigDebtUnlock = nil
+		hook()
+	}
+	s.configApplyDebtMu.Unlock()
 }
 
 // errConfigApplyQueueFull is the health-debt reason recorded when a config

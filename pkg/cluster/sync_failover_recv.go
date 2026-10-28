@@ -262,11 +262,14 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	if s.peerSnaps.peerSnapshotProtocol.Load() != uint32(peerProto) {
 		s.peerSnaps.peerSnapshotProtocolGeneration++
 	}
-	s.peerSnaps.peerSnapshotProtocol.Store(uint32(peerProto))
-	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
+	// Publish capability fields before the nonzero protocol that makes the
+	// incarnation "learned". PeerConfigStale uses that ordering to distinguish
+	// an explicit legacy advertisement from a disconnected/unknown peer.
 	s.peerIncarnationState().peerCapabilityFlags.Store(uint32(peerFlags))
 	s.storePeerCapabilityFlags2(uint32(peerFlags2))
 	s.peerIncarnationState().peerSessionSyncWire.Store(uint32(peerWire))
+	s.peerSnaps.peerSnapshotProtocol.Store(uint32(peerProto))
+	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	s.mu.Unlock()
 	// #10512 learn-trigger: learning completed (capable or not) —
 	// flush unconditionally and let the flush retain (unlearned),
