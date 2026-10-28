@@ -16,7 +16,10 @@ from load_subject import load_subject  # noqa: E402
 _HERE = Path(__file__).resolve().parent
 seed_layout = load_subject("seed_layout_10771", _HERE / "seed_layout_10771.py")
 
-BINS = ("xpfd", "cli", "xpf-userspace-dp", "xpf-day0-config")
+# Derived from the same generated SSOT file the subject reads
+# (pkg/upgrade/manifest/bins.txt, #17101) — never a retyped literal,
+# so this oracle cannot drift from the gate it tests.
+BINS = tuple(seed_layout._BINS.split())
 
 
 class SeededRuntimeLayoutTests(unittest.TestCase):
