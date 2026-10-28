@@ -40,8 +40,6 @@ pub(in crate::afxdp) use headers::{
     TPID_8021AD, TPID_8021Q, TxVlanTag, write_eth_header, write_eth_header_tagged,
     write_ipv4_header, write_ipv4_tunnel_header, write_ipv6_header,
 };
-#[cfg(test)]
-pub(in crate::afxdp) use headers::write_udp_header;
 // #2844: re-exported `pub(crate)` so the top-level `crate::nat64`
 // module (outside `crate::afxdp`) can use the one SSOT Ethernet writer.
 pub(crate) use headers::write_eth_header_slice;
@@ -153,8 +151,6 @@ pub(in crate::afxdp) use tcp::{
     tcp_payload_offset, tcp_payload_offset_from_l3,
 };
 pub(super) use tcp::{extract_tcp_flags_and_window, tcp_flags_str};
-#[cfg(test)]
-pub(super) use tcp::extract_tcp_window;
 // #15119: segmentation builders and the dispatch admission gate decline
 // TCP-MD5/TCP-AO datagrams via this shared option walk.
 pub(in crate::afxdp) use tcp::tcp_header_has_auth_option;

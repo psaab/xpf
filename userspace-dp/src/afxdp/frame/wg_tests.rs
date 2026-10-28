@@ -7,6 +7,7 @@
 
 use super::super::super::test_fixtures::*;
 use super::*;
+use crate::afxdp::wg::pad_to_16;
 
 #[test]
 fn pad_to_16_rounds_up() {
