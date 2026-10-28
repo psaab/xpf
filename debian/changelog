@@ -3,6 +3,11 @@ xpf (0.0.0) unstable; urgency=medium
   * Daemon: add already-MASTER sync-hold reconcile coverage with an
     authoritative VRRP manager instance retained through held, release-only,
     and steady-state passes (#17821).
+  * VRRP: serialize both ordinary preempt kicks and cluster-authoritative
+    `ForceRGMaster` against state transitions. The manager now checks the
+    state, sets `forcePreemptOnce`, and queues its kick in one `vi.mu`
+    critical section, preventing a delayed force from crossing MASTER
+    entry/resignation drains and re-promoting a resigned node (#17827).
   * Coalesce/ipmon: ipmon actuation is single-flighted — the engine
     tick is the only Tick driver (the loop is started context-only,
     no second sweep goroutine), and Tick itself claims an in-flight

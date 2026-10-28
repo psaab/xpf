@@ -46,16 +46,14 @@ type schemaNode struct {
 	// only for leaves whose compiler reads just the child name; as-path-prepend
 	// sets this because firewallMatchValues consumes each child key.
 	allChildKeysAreValues bool
-	// refuseNonLeafBlockChildren opts a typed multi leaf into refusing any
-	// hierarchical block-list child that is not a plain leaf value: either
-	// it carries its own Children (`leaf { a { b; } }`) or it is a non-leaf
-	// block (`leaf { a { } }`). The compilers for such leaves read only the
-	// child's Keys (firewallMatchValues never descends), so nested content
-	// would be silently dropped at compile while the gate waved it through.
-	// Only leaves whose Junos grammar is a pure value list set this
-	// (#17241: VRRP virtual-address/virtual-inet6-address, WireGuard
-	// allowed-ips). compileTreeLenient treats this specific error as hard;
-	// other leaves and typed-leaf errors retain legacy tolerance.
+	// refuseNonLeafBlockChildren opts a typed multi-value leaf into refusing any
+	// hierarchical block-list child that is not a plain leaf value. The leaf's
+	// reader consumes direct child keys but does not descend into child blocks,
+	// so nested content would be silently dropped. Set it only on value-list
+	// leaves without their own nested grammar; proxy-ARP address ranges use a
+	// separate reader and remain unmarked. Existing #17241 users include VRRP
+	// virtual-address/virtual-inet6-address and WireGuard allowed-ips; the
+	// tolerant compiler treats this refusal as a hard error.
 	refuseNonLeafBlockChildren bool
 	// blockChildValidator, when set on a `multi && children == nil` typed
 	// leaf, validates each hierarchical block-list child token

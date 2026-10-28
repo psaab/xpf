@@ -125,26 +125,34 @@ pub(super) fn build_screen_profiles(snapshot: &ConfigSnapshot) -> FxHashMap<Stri
     profiles
 }
 
-/// #3082: build the zone → missing-screen-profile-name map from the snapshot's
-/// `screen_missing_profile_zones`. These are zones that REFERENCE a screen
-/// profile undefined at snapshot-build time (lenient/HA-sync path). The
-/// dataplane uses this to distinguish "no screen configured" (Pass) from
-/// "references a missing screen" (Pass + rate-limited runtime WARN).
-pub(super) fn build_screen_missing_profiles(
-    snapshot: &ConfigSnapshot,
+/// Shared builder for the two unresolved-screen-profile maps (#17243).
+///
+/// Both wire sets use the same `ScreenMissingProfileRef` shape and the same
+/// decode rule: skip an empty zone, forward `profile` and
+/// `alarm_without_drop` verbatim, and let a later row win (the pre-
+/// consolidation `FxHashMap::insert` semantics of both twins). Keeping ONE
+/// body is what prevents the divergence the #9425 comment recorded: that
+/// comment claimed the audit flag was read "only here" (on the inert set)
+/// long after #16006 added the identical read to the missing set.
+///
+/// #9425/#16006 rule (replaces the stale #9425 "only here" sentence): the
+/// audit modifier travels WITH the reference on BOTH sets. It is meaningful
+/// wherever the referenced profile is DEFINED — the inert set (profile
+/// defined, no check enabled) and the defined-but-unresolved subset of the
+/// missing set (profile defined but marked BadNumericUnresolved for a bad
+/// limit-session value) — and the runtime honours it on either arm exactly
+/// alike. For a TRULY UNDEFINED profile there is no profile to read it
+/// from: Go leaves the field false, so forwarding it verbatim cannot
+/// manufacture audit mode for an undefined reference from Go-produced
+/// snapshots.
+fn unresolved_profile_refs(
+    rows: &[crate::ScreenMissingProfileRef],
 ) -> FxHashMap<String, UnresolvedProfileRef> {
     let mut out = FxHashMap::default();
-    for r in &snapshot.screen_missing_profile_zones {
+    for r in rows {
         if r.zone.is_empty() {
             continue;
         }
-        // #16006: a defined-but-unresolved profile (bad limit-session
-        // value) carries its authored alarm-without-drop on this
-        // reference, and the runtime honours it on the missing arm
-        // exactly like the inert one. Go leaves the field false for a
-        // truly undefined profile (there is no profile to read it
-        // from), so forwarding it verbatim cannot manufacture audit
-        // mode for an undefined reference from Go-produced snapshots.
         out.insert(
             r.zone.clone(),
             UnresolvedProfileRef {
@@ -156,32 +164,26 @@ pub(super) fn build_screen_missing_profiles(
     out
 }
 
+/// #3082: build the zone → missing-screen-profile-name map from the snapshot's
+/// `screen_missing_profile_zones`. These are zones that REFERENCE a screen
+/// profile undefined at snapshot-build time (lenient/HA-sync path). The
+/// dataplane uses this to distinguish "no screen configured" (Pass) from
+/// "references a missing screen" (Pass + rate-limited runtime WARN).
+pub(super) fn build_screen_missing_profiles(
+    snapshot: &ConfigSnapshot,
+) -> FxHashMap<String, UnresolvedProfileRef> {
+    unresolved_profile_refs(&snapshot.screen_missing_profile_zones)
+}
+
 /// #7888: build the zone -> screen-profile-name map for zones whose profile IS
-/// DEFINED but enables no check (the #7059 third state). Mirrors
-/// `build_screen_missing_profiles` exactly; the two maps stay separate so the
-/// runtime WARN can name the right cause, and so the `Pass` arm can be "in
-/// neither map" rather than a flag inside one.
+/// DEFINED but enables no check (the #7059 third state). Shares the single
+/// `unresolved_profile_refs` body with `build_screen_missing_profiles`; the
+/// two maps stay separate so the runtime WARN can name the right cause, and
+/// so the `Pass` arm can be "in neither map" rather than a flag inside one.
 pub(super) fn build_screen_inert_profiles(
     snapshot: &ConfigSnapshot,
 ) -> FxHashMap<String, UnresolvedProfileRef> {
-    let mut out = FxHashMap::default();
-    for r in &snapshot.screen_inert_profile_zones {
-        if r.zone.is_empty() {
-            continue;
-        }
-        out.insert(
-            r.zone.clone(),
-            // #9425: the audit modifier travels WITH the reference. Reading it
-            // only here, on the INERT set, is what keeps the shared wire struct
-            // from leaking meaning into the UNDEFINED set, where the field is
-            // always false because there is no profile to read it from.
-            UnresolvedProfileRef {
-                profile: r.profile.clone(),
-                alarm_without_drop: r.alarm_without_drop,
-            },
-        );
-    }
-    out
+    unresolved_profile_refs(&snapshot.screen_inert_profile_zones)
 }
 
 fn parse_syn_cookie_master_key(key: &str) -> Option<[u8; 16]> {

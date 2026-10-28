@@ -64,7 +64,7 @@ func (d *controlShutdownDP) BeginControlShutdown() {
 // the REAL teardown path with a scheduler generation that only finishes once
 // the control socket has been bounded — exactly the production shape, where
 // the joined goroutine is the policy scheduler and its updateFn is
-// UpdatePolicyScheduleState, the site #8526 was filed against.
+// UpdatePolicyScheduleStateWithLatch, the site #8526 was filed against.
 //
 // The sequence can therefore only return promptly if BeginControlShutdown ran
 // BEFORE d.stopPolicySchedulerLoop()'s unbounded schedulerWg.Wait(). That
@@ -91,7 +91,7 @@ func TestRunShutdownSequenceBoundsControlIOBeforeJoiningTheScheduler8526(t *test
 	d.setDataplane(dp)
 
 	// The scheduler generation stopPolicySchedulerLoop joins. It stands in for
-	// a tick blocked inside UpdatePolicyScheduleState holding m.mu across a
+	// a tick blocked inside UpdatePolicyScheduleStateWithLatch holding m.mu across a
 	// control round trip: it is released by the control-socket bound, and
 	// otherwise only by a fallback far outside the stop budget.
 	joined := make(chan struct{})
@@ -119,7 +119,7 @@ func TestRunShutdownSequenceBoundsControlIOBeforeJoiningTheScheduler8526(t *test
 	case <-time.After(bound):
 		t.Fatalf("runShutdownSequence was still running after %v: it joins the policy "+
 			"scheduler without first bounding the dataplane control socket, so a tick "+
-			"inside UpdatePolicyScheduleState holds it for the full control round-trip "+
+			"inside UpdatePolicyScheduleStateWithLatch holds it for the full control round-trip "+
 			"deadline (67s reachable) against TimeoutStopSec=20 (#8526)", bound)
 	}
 	if runErr != sentinel {

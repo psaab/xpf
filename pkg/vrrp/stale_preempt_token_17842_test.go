@@ -6,15 +6,11 @@ import (
 	"time"
 )
 
-// #17842: a one-shot preempt token/force queued DURING a MASTER tenure
-// (raced past triggerPreemptNow's MASTER gate / ForceRGMaster's
-// non-MASTER filter) was drained on MASTER entry and on the forced-
-// resignation edge (#16766), but NOT on peer demotion: handleMasterRx
-// routes a higher-priority (or tie-break-winning) peer advert through
-// becomeBackup, which left preemptNowCh/forcePreemptOnce untouched.
-// The first stepBackup then consumed the stale token and re-promoted
-// the just-demoted node — with force=true bypassing the priority gate
-// against the very master that demoted it.
+// #17842: directly injected one-shot preempt token/force state is drained
+// not only on MASTER entry and forced resignation (#16766), but also on
+// peer demotion. The first stepBackup must not consume the request and
+// re-promote the just-demoted node with force=true, bypassing the priority
+// gate against the very master that demoted it.
 //
 // These tests drive the real receive path (handleMasterRx) end to end
 // with sendPacketFn capture. The instance under test has priority 200
@@ -31,9 +27,9 @@ func TestStalePreemptToken17842_SubjectPeerDemotionDrainsTenureToken(t *testing.
 	adverts := capturePriorities16766(t)
 	vi.setState(StateMaster)
 
-	// Race the kick past the gate, exactly as #16766's tenure test:
-	// raw channel post + raw force flag (ForceRGMaster's check-then-set
-	// window wrote forcePreemptOnce outside the run loop).
+	// Deliberately inject a token and force flag directly while MASTER
+	// to retain coverage for the drain's defensive behavior. The real
+	// ForceRGMaster path now serializes check/set/enqueue with transitions.
 	vi.preemptNowCh <- struct{}{}
 	vi.mu.Lock()
 	vi.forcePreemptOnce = true

@@ -4,10 +4,11 @@ package cliterm
 // IsSensitiveHistoryLine. A legacy pre-#16794 file could contain
 // `set community S3cretF …` typed under `edit snmp`; on the bare line it
 // flags nothing, so the secret was re-seeded into live recall. The seed
-// filter must now replay the file sequentially, judging each line at the
-// edit cursor established by preceding navigation lines and advancing
-// that cursor on every scanned line (including filtered secret lines),
-// exactly as the live dispatch did when the lines were typed.
+// filter replays the file sequentially and advances every plausible cursor
+// on every scanned line (including filtered secret lines). Because concurrent
+// sessions share this file without session markers, it also suppresses any
+// mutation whose tokens could carry a context-gated secret, even when linear
+// replay judges the line as benign under its current cursor.
 //
 // FAIL-ON-REVERT: reverting ReadHistorySeed to IsSensitiveHistoryLine
 // re-seeds the edit-context secret row and this test fails.
@@ -50,10 +51,10 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 		{"edit prefix with chained supported pipes advances cursor",
 			[]string{"configure", "edit snmp | no-more | count", "set community S3cretPipeChain17798"},
 			[]string{"configure"}},
-		{"ambiguous operational abbreviation stays out of config mode",
+		{"ambiguous operational abbreviation stays out of config mode; community mutation still omitted from shared seed",
 			[]string{"c", "edit snmp", "set community S3cretAmbiguous17798"},
-			[]string{"c", "edit snmp", "set community S3cretAmbiguous17798"}},
-		{"explicit exit then configure re-entry starts at root and retains benign GRE key",
+			[]string{"c", "edit snmp"}},
+		{"explicit exit then configure re-entry seeds navigation but omits ambiguous generic GRE key",
 			[]string{
 				"configure",
 				"edit protocols ospf area 0 interface ge-0/0/0 authentication md5 1",
@@ -68,7 +69,6 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 				"top exit",
 				"configure",
 				"edit interfaces gr-0/0/0 unit 0 tunnel",
-				"set key 4242",
 			}},
 		{"configure rejected in config mode keeps snmp cursor and filters secret",
 			[]string{"configure", "edit snmp", "configure", "set community S3cretRejectedConfigure17798"},
@@ -88,27 +88,27 @@ func TestReadHistorySeedCursorAware17798(t *testing.T) {
 		{"benign top-level kept",
 			[]string{"show version", "set system host-name fw1"},
 			[]string{"show version", "set system host-name fw1"}},
-		{"shell non-config then bare community kept",
+		{"shell non-config then context-gated community omitted from shared seed",
 			[]string{"show version", "set community S3cretNoCfg"},
-			[]string{"show version", "set community S3cretNoCfg"}},
-		{"context reset by exit; secret inside dropped, bare community after exit kept",
+			[]string{"show version"}},
+		{"context reset by exit; context-gated community omitted before and after exit",
 			[]string{"configure", "edit snmp", "set community S3cretReset authorization read-only", "exit", "set community S3cretAfterExit"},
-			[]string{"configure", "edit snmp", "exit", "set community S3cretAfterExit"}},
+			[]string{"configure", "edit snmp", "exit"}},
 		{"secret advances cursor",
 			[]string{"configure", "edit snmp", "set community S3cretAdv authorization read-only", "set trap-group S3cretTrap targets 192.0.2.1"},
 			[]string{"configure", "edit snmp"}},
 		{"top prefix preserves cursor",
 			[]string{"configure", "edit snmp", "top set system host-name fw1", "set community S3cretAfterPrefix"},
 			[]string{"configure", "edit snmp", "top set system host-name fw1"}},
-		{"prefixed up exit at root releases config mode",
+		{"prefixed up exit at root releases config mode; context-gated mutation omitted from shared seed",
 			[]string{"configure", "edit snmp", "up exit", "edit snmp", "set community S3cretUpExitRoot17798"},
-			[]string{"configure", "edit snmp", "up exit", "edit snmp", "set community S3cretUpExitRoot17798"}},
+			[]string{"configure", "edit snmp", "up exit", "edit snmp"}},
 		{"quoted top exit does not release config mode",
 			[]string{"configure", "edit snmp", `top "exit"`, "set community S3cretQuotedExit17798"},
 			[]string{"configure", "edit snmp", `top "exit"`}},
-		{"prefixed up quit at root releases config mode",
+		{"prefixed up quit at root releases config mode; context-gated mutation omitted from shared seed",
 			[]string{"configure", "edit snmp", "up quit", "edit snmp", "set community S3cretUpQuitRoot17798"},
-			[]string{"configure", "edit snmp", "up quit", "edit snmp", "set community S3cretUpQuitRoot17798"}},
+			[]string{"configure", "edit snmp", "up quit", "edit snmp"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,17 +157,20 @@ func TestReadHistorySeedReentryDualCursor17972(t *testing.T) {
 				t.Fatalf("seed leaked credential %q", credential)
 			}
 		})
-		// Root-reentry hypothesis must preserve benign GRE key controls.
-		t.Run(v+"/benign-GRE-key", func(t *testing.T) {
+		// A generic key is context-sensitive; with no session markers,
+		// seed replay cannot prove this was the GRE identifier rather than
+		// a secret under another process's OSPF MD5 cursor.
+		t.Run(v+"/generic-key-omitted-from-seed", func(t *testing.T) {
 			lines := []string{"configure", "edit snmp", v,
 				"edit interfaces gr-0/0/0 unit 0 tunnel", "set key 4242"}
 			seed, err := ReadHistorySeed(writeSeedFile17798(t, lines))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !slices.Equal(seed, lines) {
-				t.Fatalf("seed=%q want %q", seed, lines)
+			if !slices.Equal(seed, lines[:len(lines)-1]) {
+				t.Fatalf("seed=%q want navigation-only %q", seed, lines[:len(lines)-1])
 			}
+
 		})
 	}
 }
