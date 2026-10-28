@@ -62,7 +62,9 @@ func ValidateBGPLocalAddress(raw string) error {
 // (mirrors ValidateBGPLocalAddress / #14377). Migration: remove
 // quotes/padding and use the bare address.
 func ValidateTunnelEndpoint(raw string) error {
-	// #17177: edge-whitespace refusal is owned centrally by checkToken.
+	if raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("invalid tunnel endpoint %q (leading or trailing whitespace is not allowed; use a bare IP address)", raw)
+	}
 	return ValidateIPAddress(raw)
 }
 
