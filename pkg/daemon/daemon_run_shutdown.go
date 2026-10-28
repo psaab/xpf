@@ -149,7 +149,7 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 	//   - wg.Wait(), which is unbounded; and
 	//   - d.stopPolicySchedulerLoop(), which ends in an unbounded
 	//     d.schedulerWg.Wait() joining the goroutine whose updateFn IS
-	//     UpdatePolicyScheduleState — the site #8526 was filed against.
+	//     UpdatePolicyScheduleStateWithLatch — the site #8526 was filed against.
 	//
 	// Cutting an in-flight publish short here is consistent with what the rest
 	// of this prologue already does: applies are fenced and cancelled two
@@ -366,7 +366,7 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 	// wg.Wait does NOT cover them. Both call into subsystems torn down further
 	// below and therefore MUST be stopped first: the policy scheduler
 	// republishes schedule state through the dataplane runtime
-	// (UpdatePolicyScheduleState — closed by dp.Close/dp.Teardown), and the RPM
+	// (UpdatePolicyScheduleStateWithLatch — closed by dp.Close/dp.Teardown), and the RPM
 	// probe-pin retry loop runs routing-pin syscalls through the routing/FRR
 	// manager (stopped by frr.Stop / routing teardown). Cancelling + joining
 	// here guarantees no late scheduler tick runs against a closed runtime and
