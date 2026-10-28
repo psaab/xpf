@@ -300,6 +300,40 @@ func TestRIPPerGroupBoundaryWithLaterAcceptFailsClosed16625(t *testing.T) {
 	}
 }
 
+func TestRIPPerGroupBoundaryWithCoveringLaterAcceptFailsClosed16625(t *testing.T) {
+	// A later orlonger accept whose base covers the boundary host can
+	// change its outcome even though it is not an exact-host filter.
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "empty-boundary", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.1/32", MatchType: "longer"},
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+			"Q": {Name: "Q", Terms: []*config.PolicyTerm{
+				{Name: "covering-accept", RouteFilters: []*config.RouteFilter{
+					{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				}, Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P", "Q"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P", "Q"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	if permits := listPermits16625(got, list); len(permits) != 0 {
+		t.Errorf("covering later accept must remain fail-closed, permits=%v:\n%s", permits, got)
+	}
+	if !strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("covering later accept must keep the group fail-closed:\n%s", got)
+	}
+}
+
 func TestRIPPerGroupBoundaryBeforeRejectDefaultPreservesSibling16625(t *testing.T) {
 	// An explicit reject default terminates P before Q can accept
 	// the exact host. The empty /32 longer boundary must therefore
