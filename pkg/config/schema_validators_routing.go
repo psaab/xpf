@@ -45,9 +45,7 @@ func ValidateBGPNeighborAddress(raw string) error {
 	if raw == "" {
 		return fmt.Errorf("missing value (expected a BGP neighbor IP address, e.g. 192.0.2.1 or 2001:db8::1)")
 	}
-	if raw != strings.TrimSpace(raw) {
-		return fmt.Errorf("invalid BGP neighbor address %q (leading or trailing whitespace is not allowed; use a bare IP address)", raw)
-	}
+	// #17177: edge-whitespace refusal is owned centrally by validateKeySlot.
 	addr, err := netip.ParseAddr(raw)
 	if err != nil {
 		if strings.Contains(raw, "/") {
@@ -416,23 +414,25 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 // accepted; a bare IP without a length, or outright garbage, is rejected
 // with a targeted message. route is family-agnostic so both families pass.
 func ValidateRouteDestination(raw string) error {
-	// #9820: validate what is emitted. The compiler stores the RAW
-	// destination and the renderer drops a padded one silently (netip
-	// shape belt), while parseCIDRStrict validates the TRIMMED form —
-	// so a quoted-padded destination would commit clean and install
-	// nothing. Padding IS authorable through ordinary ingress (the lexer
-	// preserves quoted-string contents verbatim). Newlines need no arm
-	// here: the #1798 prewalk already rejects control characters in any
-	// key; the real class is spaces, which previously committed clean but
-	// installed nothing (omitted by the existing prefix check). Scoped to
-	// this validator (not the shared parseCIDRStrict): other CIDR consumers
-	// are out of #9820's scope.
+	// Strict-validator contract: this function is consumed directly
+	// by the strict compiler gates (generateRouteInvalidPrefixes,
+	// staticRouteInvalidPrefixes) which run on CompileConfig WITHOUT
+	// SchemaValidate, and by render belts in pkg/frr. It must
+	// therefore refuse edge whitespace itself: parseCIDRStrict trims,
+	// so without this arm a padded CIDR (" 10.0.0.0/8 ") compiles on
+	// the direct path, is stored raw, is omitted by FRR's netip belt
+	// and refuses the userspace helper snapshot — the #15658
+	// split-brain. The SchemaValidate path also refuses padding
+	// centrally (#17177 refuseEdgeWhitespace) before this validator
+	// runs; both refusals name the padding. Do NOT defer entirely to
+	// the central gate: direct consumers bypass it.
 	if raw != strings.TrimSpace(raw) {
 		return fmt.Errorf("not a valid route destination (leading or trailing whitespace is not allowed; use a bare CIDR, e.g. 10.0.0.0/24 or 2001:db8::/32)")
 	}
-	// parseCIDRStrict requires a /prefix-length and upgrades the two common
-	// operator mistakes (bare IP, garbage) to targeted messages. The returned
-	// IP is discarded because both v4 and v6 destinations are valid here.
+	// parseCIDRStrict requires a /prefix-length and upgrades the two
+	// common operator mistakes (bare IP, garbage) to targeted
+	// messages. The returned IP is discarded because both v4 and v6
+	// destinations are valid here.
 	if _, err := parseCIDRStrict(raw, "10.0.0.0/24"); err != nil {
 		return fmt.Errorf("not a valid route destination (expected a CIDR, e.g. 10.0.0.0/24 or 2001:db8::/32): %v", err)
 	}
@@ -469,12 +469,12 @@ func ValidateStaticNextHop(raw string) error {
 	if tok == "" {
 		return fmt.Errorf("missing next-hop (expected an IP address, e.g. 192.168.1.1 or 2001:db8::1, or an interface name)")
 	}
-	// #9820: validate what is emitted (see ValidateRouteDestination).
-	// The compiler stores the RAW next-hop; the renderer drops a padded
-	// one silently and the family gate cannot classify it — so a
-	// quoted-padded next-hop would commit clean and install nothing.
-	// Control characters are already rejected by the #1798 prewalk; the
-	// real class is spaces.
+	// Strict-validator contract: the compiler stores the RAW next-hop
+	// and the renderer drops a padded one silently while the family
+	// gate cannot classify it, so padding must be refused here, not
+	// only centrally (#17177): direct calls (and any future strict
+	// compiler gate consuming this validator) bypass checkToken /
+	// validateKeySlot. See ValidateRouteDestination.
 	if tok != raw {
 		return fmt.Errorf("not a valid next-hop (leading or trailing whitespace is not allowed; use a bare IP address, ip@interface, or interface name)")
 	}

@@ -160,7 +160,7 @@ sync.
         index).
       - **#3609 — per-interface host-inbound override:** the local-delivery
         host-inbound gate (`poll_descriptor/filter.rs::host_inbound_gated_lo0_action`
-        → `forwarding::host_inbound_admits_iface`) looks up
+        → `forwarding::host_inbound_admits_iface_for_destination`) looks up
         `ifindex_host_inbound` — keyed by the LOGICAL unit ifindex in
         `forwarding_build/interfaces.rs` — with the resolved logical ingress
         ifindex threaded in by each caller (session HIT / MISS / flowless).
