@@ -629,16 +629,15 @@ const (
 	// no new wire field, so the golden below is unchanged in shape but
 	// the version pin moves with ProtocolVersion.
 	// v70 STANDS (#16077): Config.UnimplementedAAALeaves is compile-time
-	// only (`json:"-"`, the LenientNATUndefinedScopeRuleSets precedent).
-	// ConfigSnapshot embeds Config, so this reflection walk sees the
-	// field, but it is absent from ConfigSnapshot JSON and Rust keeps
-	// `config` as an opaque serde_json::Value with no consumer for it.
+	// only (`json:"-"`). ConfigSnapshot embeds Config, so this reflection walk
+	// sees the field, but it is absent from ConfigSnapshot JSON and Rust
+	// keeps `config` as an opaque serde_json.Value with no consumer.
 	// No helper of any vintage can observe the change, so ProtocolVersion
-	// stays and only this golden moves. The pre-change master digest was
-	// already drifted (base 29de2603… at ProtocolVersion 70 while this
-	// pin still said 68/cf98a6a5…); this entry folds that pre-existing
-	// drift together with the one new walked field into the v70 golden,
-	// it does not blame the drift on #16077.
+	// stays and only this golden moves.
+	// The pre-change master digest was already drifted (base 29de2603… at
+	// ProtocolVersion 70 while this pin still said 68/cf98a6a8…); this entry
+	// folds that pre-existing drift with #16077's field into the
+	// v70 golden.
 	// v70 STANDS (#16141): CoS LossPriority fields (six CoS entries plus
 	// FirewallFilterTerm), CoSScheduler.Priority (SchedulerPriority),
 	// and TunnelConfig.Mode (TunnelMode) were retyped from string to
@@ -661,6 +660,11 @@ const (
 	// without adding snapshot fields. v75 (#16877) changes the idle-lease
 	// control wire but not the snapshot shape; the protocol pin still moves.
 	// v76 (#17684) changes RulePriority semantics only; the shape is stable.
+	// v77 (#17099) adds typed pool identity to lease records; the protocol
+	// pin moves. #17247 removes `Config.LenientNATUndefinedScopeRuleSets`,
+	// a compile-time-only `json:"-"` field. The pre-exemption walk counted its
+	// line, but the post-exemption walk skips ConfigSnapshot.Config entirely, so
+	// the removal contributes zero lines and leaves the current digest unchanged.
 	// v77 BASELINE RECONCILIATION (#18326, not a wire bump): ProtocolVersion
 	// was already 77 (#17099), while this shape pin/golden remained at 76.
 	// Reconciliation includes #17229's removal of UserspaceMapPins.DnatTable
