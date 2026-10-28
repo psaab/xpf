@@ -742,16 +742,10 @@ func withinDateRange(now time.Time, sched *config.SchedulerConfig) (inRange, ok 
 	return true, true
 }
 
+// parseSchedulerDateBound delegates to config.ParseSchedulerDateBound,
+// the single source of truth for the scheduler date grammar (#17187).
 func parseSchedulerDateBound(raw string, loc *time.Location) (time.Time, bool, error) {
-	if strings.Contains(raw, ".") {
-		if len(raw) != len("2006-01-02.15:04") {
-			return time.Time{}, true, fmt.Errorf("invalid scheduler date-time %q", raw)
-		}
-		t, err := time.ParseInLocation("2006-01-02.15:04", raw, loc)
-		return t, true, err
-	}
-	t, err := time.ParseInLocation("2006-01-02", raw, loc)
-	return t, false, err
+	return config.ParseSchedulerDateBound(raw, loc)
 }
 
 // effectiveDayWindow resolves the window applying to weekday wd: a per-day
@@ -838,22 +832,13 @@ func (t tod) before(other tod) bool {
 	return t.s < other.s
 }
 
+// parseTimeOfDay delegates to config.ParseSchedulerTimeOfDay, the single
+// source of truth for the scheduler time-of-day grammar (#17187), and
+// projects the parsed instant onto wall-clock H/M/S components.
 func parseTimeOfDay(s string) (tod, error) {
-	var t time.Time
-	var err error
-	switch strings.Count(s, ":") {
-	case 1:
-		if len(s) != len("15:04") {
-			return tod{}, fmt.Errorf("invalid scheduler time %q", s)
-		}
-		t, err = time.Parse("15:04", s)
-	case 2:
-		t, err = time.Parse("15:04:05", s)
-	default:
-		return tod{}, fmt.Errorf("invalid scheduler time %q", s)
-	}
+	t, err := config.ParseSchedulerTimeOfDay(s)
 	if err != nil {
-		return tod{}, err
+		return tod{}, fmt.Errorf("invalid scheduler time %q: %w", s, err)
 	}
 	return tod{h: t.Hour(), m: t.Minute(), s: t.Second()}, nil
 }
