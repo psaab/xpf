@@ -10676,7 +10676,7 @@ fn refresh_status_reclaims_dead_worker_holders_6979() {
         quarantined_after_panic: false,
         snapshot_policy_mismatch_total: 0,
     };
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     assert!(
         !alloc.debug_is_port_occupied(0, 30000),
@@ -12546,7 +12546,7 @@ fn refresh_status_vacates_a_dead_workers_v_min_slot_9367() {
     };
 
     // TICK 1 — the production path builds the floor.
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
     let floor = state
         .afxdp
         .cos
@@ -12580,7 +12580,7 @@ fn refresh_status_vacates_a_dead_workers_v_min_slot_9367() {
     dead_atomics.dead.store(true, Ordering::Relaxed);
 
     // TICK 2 — the real 1 Hz status path.
-    crate::server::helpers::status::refresh_status(&mut state);
+    crate::server::helpers::status::project_status(&mut state);
 
     let after = state
         .afxdp
