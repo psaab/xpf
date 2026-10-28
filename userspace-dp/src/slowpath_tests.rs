@@ -1373,6 +1373,104 @@ fn handshake_step_staggered_start_waits_genuine_failure_fails() {
     assert_eq!(handshake_step(Live, Starting, true), Ready);
 }
 
+/// #17169: the hermetic constructor must run the production V1 submit.
+/// Each `admit_descriptor` refusal reason maps to exactly one ADMIT wire
+/// reason; mutating the WORKER_QUEUE_BUSY arm to ADMIT_BAD_LEASE must fail
+/// the BUSY cell below. All cells assert V1 routing (q0 queued == 0).
+#[test]
+fn v1_submit_reason_map_table_17169() {
+    use crate::slowpath_reinject_9506::{
+        ReinjectCore, ReinjectLease, ADMIT_BAD_LEASE, ADMIT_FULL, ADMIT_SHUTDOWN,
+    };
+    fn v1_frame(id: u64, flow_tag: u64, deadline: u64) -> SubmitFrame {
+        SubmitFrame {
+            lease: ReinjectLease { permit_epoch: 7, queue_epoch: 11, queue_number: 1, request_id: id },
+            flow_tag, flags: 0,
+            origin: CaptureOrigin::inet_forward(42, "owner", "stn"),
+            bytes: vec![0x45u8; 64],
+            snapshot_generation: 1, config_generation: 1, fib_generation: 1,
+            zone_id: 1, if_id: 1,
+            pmech_inventory_generation: 0, pmech_inventory_fib_generation: 0,
+            pmech_policy_identity: [0; 32],
+            deadline_mono_ns: deadline, deadline_clock_id: 1,
+        }
+    }
+    fn v1_reinjector() -> (SlowPathReinjector, std::sync::Arc<ReinjectCore>) {
+        let core = ReinjectCore::new_shared();
+        core.publish_epochs(7, &[(1, 11)]);
+        let r = SlowPathReinjector::new_without_worker_with_core(1500, core.clone());
+        (r, core)
+    }
+    let future = || crate::afxdp::monotonic_nanos() + 500_000_000;
+    // EVALUATOR_UNAVAILABLE (no published worker) -> ADMIT_SHUTDOWN.
+    {
+        let (r, core) = v1_reinjector();
+        let d = r.submit_adjudicated_frame(v1_frame(1, 1, future()));
+        assert!(!d.admitted);
+        assert_eq!(d.reason, ADMIT_SHUTDOWN, "EVALUATOR_UNAVAILABLE cell");
+        assert_eq!(core.live_count(), 1, "refused entry stays live until purge (socket pin)");
+        assert_eq!(r.delegated_status().queued_packets, 0);
+    }
+    // Success: descriptor lands in worker queue, never q0.
+    {
+        let (r, core) = v1_reinjector();
+        r.ipsec_inner_transport().publish_workers([0]);
+        let d = r.submit_adjudicated_frame(v1_frame(2, 1, future()));
+        assert!(d.admitted, "success cell must admit: {d:?}");
+        assert_eq!(core.live_count(), 1);
+        assert_eq!(r.delegated_status().queued_packets, 0, "V1 never q0");
+        assert_eq!(r.ipsec_inner_transport().worker_pending(0), Some(1));
+    }
+    // WORKER_QUEUE_FULL -> ADMIT_FULL. Fill via transport directly (core
+    // admit would consume request ids, but transport fill is the queue).
+    {
+        let (r, _core) = v1_reinjector();
+        r.ipsec_inner_transport().publish_workers([0]);
+        for i in 0..crate::afxdp::ipsec_inner_queue::IPSEC_INNER_QUEUE_DEPTH {
+            let d = r.submit_adjudicated_frame(v1_frame(100 + i as u64, 1000 + i as u64, future()));
+            assert!(d.admitted, "fill {i} must admit: {d:?}");
+        }
+        let d = r.submit_adjudicated_frame(v1_frame(9999, 9999, future()));
+        assert!(!d.admitted);
+        assert_eq!(d.reason, ADMIT_FULL, "WORKER_QUEUE_FULL cell");
+        assert_eq!(r.delegated_status().queued_packets, 0);
+    }
+    // WORKER_QUEUE_BUSY -> ADMIT_FULL (mutating arm to BAD_LEASE fails here).
+    {
+        let (r, _core) = v1_reinjector();
+        let transport = r.ipsec_inner_transport();
+        transport.publish_workers([0]);
+        transport.authority().add_worker(9);
+        // live {0,9}; flow_tag 1 -> index 1 -> worker 9 (no queue).
+        let d = r.submit_adjudicated_frame(v1_frame(7, 1, future()));
+        assert!(!d.admitted, "BUSY cell must refuse: {d:?}");
+        assert_eq!(d.reason, ADMIT_FULL, "WORKER_QUEUE_BUSY cell");
+        assert_eq!(r.delegated_status().queued_packets, 0);
+    }
+    // Core P2 deadline refusal -> ADMIT_BAD_LEASE.
+    {
+        let (r, _core) = v1_reinjector();
+        r.ipsec_inner_transport().publish_workers([0]);
+        let past = crate::afxdp::monotonic_nanos().saturating_sub(1);
+        let d = r.submit_adjudicated_frame(v1_frame(8, 1, past.max(1)));
+        assert!(!d.admitted);
+        assert_eq!(d.reason, ADMIT_BAD_LEASE, "expired deadline cell");
+        assert_eq!(r.delegated_status().queued_packets, 0);
+    }
+    // Slab exhausted (submit acquire fails) -> ADMIT_FULL.
+    {
+        let (r, _core) = v1_reinjector();
+        r.ipsec_inner_transport().publish_workers([0]);
+        let pool = r.ipsec_inner_transport().pool().clone();
+        let mut held = Vec::new();
+        while let Some(id) = pool.acquire() { held.push(id); }
+        let d = r.submit_adjudicated_frame(v1_frame(9, 1, future()));
+        assert!(!d.admitted);
+        assert_eq!(d.reason, ADMIT_FULL, "slab exhausted cell");
+        for id in held { pool.force_release(id); }
+    }
+}
+
 /// #13707 cross-outlet starvation: flooding the delegated outlet must not
 /// consume the trusted outlet's rate-limit tokens. On the shared-limiter
 /// code every enqueue_* variant spends from one Mutex<RateLimiter>, so a
