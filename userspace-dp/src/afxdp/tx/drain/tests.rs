@@ -785,3 +785,76 @@ fn drain_pending_tx_counts_reingest_noop_17151() {
         "the re-ingest ingest must consume the inbox item into the queue"
     );
 }
+
+/// #17166 guard: the pre-split line anchors, the pure alias, the
+/// misleading phase-6 name, and the 4-variant `BackupOutcome`
+/// debug-update split must not recur. This test pins the source
+/// shape so a future phase split cannot silently re-introduce
+/// names or anchors describing a deleted file. The retired
+/// spellings are assembled from fragments below so this guard
+/// does not itself trip the repo-wide acceptance grep.
+#[test]
+fn drain_phase_names_and_anchors_stay_current_17166() {
+    let sources: [(&str, &str); 6] = [
+        ("mod.rs", include_str!("mod.rs")),
+        ("phase_backup.rs", include_str!("phase_backup.rs")),
+        ("phase_shaped.rs", include_str!("phase_shaped.rs")),
+        ("phase_trivial.rs", include_str!("phase_trivial.rs")),
+        ("tx/mod.rs", include_str!("../mod.rs")),
+        ("binding.rs", include_str!("../../../protocol/binding.rs")),
+    ];
+    let alias = ["drain_pending_tx_", "local_owner"].concat();
+    let phase6 = ["submit_", "and_wake"].concat();
+    let anchor = ["drain", ".rs:"].concat();
+    let anchor_colon = ["drain", ".rs::"].concat();
+    for (name, src) in sources {
+        for banned in [
+            anchor.as_str(),
+            anchor_colon.as_str(),
+            alias.as_str(),
+            phase6.as_str(),
+            "EarlyReturnRetry",
+            "EarlyReturnAfterDebugUpdate",
+            "EarlyReturnNoDebugUpdate",
+        ] {
+            assert!(
+                !src.contains(banned),
+                "{name} must not contain retired drain reference {banned:?} (#17166)"
+            );
+        }
+    }
+    // BackupOutcome collapsed to exactly {Continue, Return(bool)}:
+    // reject any third variant, payload change, or rename.
+    let backup = include_str!("phase_backup.rs");
+    let enum_start = backup
+        .find("pub(super) enum BackupOutcome")
+        .expect("BackupOutcome enum present");
+    let enum_body = &backup[enum_start..backup[enum_start..].find('}').map(|i| enum_start + i).expect("enum closes")];
+    let variants: Vec<&str> = enum_body
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && !line.starts_with("//") && !line.contains("enum BackupOutcome")
+        })
+        .collect();
+    assert_eq!(
+        variants,
+        ["Continue,", "Return(bool),"],
+        "BackupOutcome must have exactly the Continue and Return(bool) variants (#17166)"
+    );
+    // Callers repointed directly at drain_pending_tx.
+    for (name, src) in [
+        ("dispatch/mod.rs", include_str!("../dispatch/mod.rs")),
+        ("tcp_segmentation.rs", include_str!("../tcp_segmentation.rs")),
+    ] {
+        assert!(
+            src.contains("drain_pending_tx("),
+            "{name} must call drain_pending_tx directly (#17166)"
+        );
+    }
+    // Rename present.
+    assert!(
+        include_str!("phase_trivial.rs").contains("fn drain_phase_finish"),
+        "phase 6 must be named drain_phase_finish (#17166)"
+    );
+}
