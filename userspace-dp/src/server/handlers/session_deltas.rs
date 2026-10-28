@@ -1,6 +1,6 @@
 // #1345: per-verb handler for drain_session_deltas, split out of handlers.rs in #1345.
 
-use super::super::helpers::refresh_status;
+use super::super::helpers::project_status;
 use super::super::ServerState;
 use crate::{ControlResponse, SessionDeltaDrainRequest};
 
@@ -21,7 +21,7 @@ pub(super) fn drain(
     *drained_delta_slots = contributed;
     let drained_any = !deltas.is_empty();
     response.session_deltas = deltas;
-    refresh_status(guard);
+    project_status(guard);
     if drained_any {
         *persist_state = true;
     }

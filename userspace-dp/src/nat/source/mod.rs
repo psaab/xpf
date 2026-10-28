@@ -375,7 +375,7 @@ pub(crate) struct SourceNatPoolAllocatorKey {
 }
 
 impl SourceNatRule {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn allocator_key(&self) -> Option<SourceNatPoolAllocatorKey> {
         let total_pool = self.pool_addresses_v4.len() + self.pool_addresses_v6.len();
         // #9874: leniently poisoned rules mint nothing and contribute no
@@ -1917,7 +1917,7 @@ fn port_ranges_intersect(left: &[(u16, u16)], right: &[(u16, u16)]) -> bool {
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn parse_source_nat_rules(snaps: &[SourceNATRuleSnapshot]) -> Vec<SourceNatRule> {
     parse_source_nat_rules_with_previous(snaps, None, &NatCounterStore::default(), 0)
 }
@@ -2292,7 +2292,7 @@ fn parse_source_nat_rules_inner(
     out
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 fn source_nat_runtime_compatible(new_rule: &SourceNatRule, old_rule: &SourceNatRule) -> bool {
     new_rule.name == old_rule.name
         && new_rule.pool_name == old_rule.pool_name

@@ -218,7 +218,7 @@ pub(super) fn endpoint_attachment_valid(
     let Some(endpoint) = forwarding.tunnel_endpoints.get(&tunnel_endpoint_id) else {
         return false;
     };
-    if endpoint.mode != "gre" && endpoint.mode != "ip6gre" {
+    if endpoint.kind != TunnelKind::Gre {
         return false;
     }
     endpoint.logical_ifindex == spawned_logical_ifindex

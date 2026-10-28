@@ -513,6 +513,14 @@ impl super::Coordinator {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// #17144: tunnel-remap purge deletes refused; the session survived, no
+    /// Close was emitted and no reservation was released for it.
+    pub fn tunnel_purge_delete_refused_total(&self) -> u64 {
+        self.sessions
+            .tunnel_purge_delete_refused
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// #5674: total peer-synced session imports rejected by the coordinator's
     /// aggregate admission bound (`upsert_synced_session`). Locally-created
     /// sessions are capped per worker at `DEFAULT_MAX_SESSIONS`; peer-synced

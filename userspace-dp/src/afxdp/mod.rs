@@ -175,15 +175,13 @@ mod types;
 #[path = "umem/mod.rs"]
 mod umem;
 // #1612 step-3 STAGED scaffolding: cold-path latency histogram
-// primitives. Module-level `#[allow(dead_code)]` because every export
-// is intentionally unused at this PR — integration into BindingWorker,
+// primitives. Every export is intentionally unused at this PR — integration into BindingWorker,
 // the poll_descriptor hot path, and the wire protocol is deferred to
 // follow-up issues #1620, #1621, #1622 per
 // docs/pr/1612-scale-target-measurement/plan.md STAGED form. The
 // scaffolding lives in tree to (a) make the 11-finding plan-review
 // audit chain reviewable as compiled code and (b) provide the math
 // primitives the follow-ups will consume.
-#[allow(dead_code)]
 #[path = "cold_path_hist.rs"]
 pub(crate) mod cold_path_hist;
 // #3651: per-zone ingress/egress traffic counters (POPULATE half of #3643).
@@ -191,6 +189,9 @@ mod zone_counters;
 // #3651: per-zone SYN/ICMP/UDP flood-event counters — the flood half of the
 // same POPULATE, accounted on the screen-drop path rather than the forward path.
 mod flood_counters;
+// #17204: the ONE shared per-zone slot-counter machine (slot map, store,
+// pending, fold) both families above are built on.
+mod zone_slot_counters;
 // Clean-room WireGuard tunnel termination — see
 // docs/pr/wireguard-clean/plan.md. Engine + tests only in this PR;
 // hot-path activation lands in a follow-up.
@@ -314,15 +315,6 @@ use self::umem::*;
 // afxdp-private in production — this wrapper exists only under `cfg(test)`.
 #[cfg(test)]
 pub(crate) fn packet_rel_l4_offset_and_protocol_for_test(
-    packet: &[u8],
-    addr_family: u8,
-) -> Option<(usize, u8)> {
-    self::frame::packet_rel_l4_offset_and_protocol(packet, addr_family)
-}
-
-/// Production wrapper for the canonical ext-aware L4 walker used by the
-/// deny-only IPsec-inner descriptor path.
-pub(crate) fn packet_rel_l4_offset_and_protocol_for_ipsec(
     packet: &[u8],
     addr_family: u8,
 ) -> Option<(usize, u8)> {
@@ -1223,7 +1215,7 @@ impl BatchCounters {
         &mut self,
         reason: &str,
         zone_id: u32,
-        flood_slots: &crate::afxdp::flood_counters::FloodCounterSlotMap,
+        flood_slots: &crate::afxdp::zone_slot_counters::ZoneSlotMap,
     ) {
         self.touched = true;
         self.screen_drops += 1;
@@ -2029,7 +2021,7 @@ struct PendingForwardHints {
 // Superseded by inline logic in build_live_forward_request() that reads ports
 // from the live UMEM area before .to_vec() copy (fixes #199).  Retained for
 // its unit test and potential future use.
-#[allow(dead_code)]
+
 fn binding_by_index_mut<'a>(
     left: &'a mut [BindingWorker],
     current_index: usize,

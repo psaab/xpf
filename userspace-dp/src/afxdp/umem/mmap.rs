@@ -204,7 +204,7 @@ impl MmapArea {
         Some(unsafe { std::slice::from_raw_parts(self.ptr.as_ptr().add(offset), len) })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(in crate::afxdp) fn slice_mut(&mut self, offset: usize, len: usize) -> Option<&mut [u8]> {
         unsafe { self.slice_mut_unchecked(offset, len) }
     }

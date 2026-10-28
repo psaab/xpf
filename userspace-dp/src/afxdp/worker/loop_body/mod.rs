@@ -1698,6 +1698,7 @@ pub(crate) fn worker_loop(
         crate::afxdp::zone_counters::flush_recorded_zone_counters(
             &forwarding.zone_counter_store,
             &forwarding.zone_counter_slot_map,
+            &forwarding.zone_counter_caches,
         );
         // #3651: and this worker's coalesced per-zone flood-EVENT tally. Same
         // cadence and same `forwarding` snapshot, so the slot map matches the
@@ -1708,6 +1709,7 @@ pub(crate) fn worker_loop(
         crate::afxdp::flood_counters::flush_recorded_flood_counters(
             &forwarding.flood_counter_store,
             &forwarding.flood_counter_slot_map,
+            &forwarding.flood_counter_caches,
         );
         #[cfg(feature = "debug-log")]
         {

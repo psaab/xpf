@@ -71,7 +71,9 @@ const (
 //
 // The two must agree, and TestOwnerRGExportAckWaitMatchesTheHelper9344 asserts
 // the AGREEMENT by READING the Rust constant rather than pinning either side to
-// a literal — the same shape as the syncedImportRefusedPrefix agreement test.
+// a literal — the same shape as the shared synced-import wire fixture
+// (testdata/synced_import_wire.json), whose rows the Rust encoder test and
+// Go's TestSyncedImportWireClassifierMatchesRustEncoder17116 both drive.
 // A number restated in two languages with a comment saying "keep these in sync"
 // is a number that will drift.
 const ownerRGExportAckWait = 15 * time.Second

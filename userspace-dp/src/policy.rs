@@ -4459,6 +4459,13 @@ pub(crate) fn evaluate_junos_host_policy(
     )
 }
 
+/// #9385: this walker passes `PolicyHitCount::Count` to each
+/// `apply_frag_deny_override_and_count` call deliberately. This is the
+/// `to-zone junos-host` (host-inbound) evaluation; #3706 makes it the counting
+/// site for a host-bound packet. The established-hit path SKIPS its own
+/// re-count for LocalDelivery because this re-eval already counted the packet.
+/// Only #8356's zone-policy re-derivation is side-effect-free, and it does not
+/// come through here.
 /// #3292: L4-presence-aware `junos-host` policy evaluation. `l4_present = false`
 /// marks a flowless / no-L4 packet (a non-first fragment on the flowless
 /// LocalDelivery arm); port-bearing application terms then fail closed while
@@ -4486,13 +4493,6 @@ pub(crate) fn evaluate_junos_host_policy(
 /// unaffected for every flow that does not overlap a deny. The L4 path never
 /// records a skip, so it stays byte-identical.
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
-/// #9385: this walker passes `PolicyHitCount::Count` to each
-/// `apply_frag_deny_override_and_count` call deliberately. This is the
-/// `to-zone junos-host` (host-inbound) evaluation; #3706 makes it the counting
-/// site for a host-bound packet. The established-hit path SKIPS its own
-/// re-count for LocalDelivery because this re-eval already counted the packet.
-/// Only #8356's zone-policy re-derivation is side-effect-free, and it does not
-/// come through here.
 pub(crate) fn evaluate_junos_host_policy_l3_aware(
     state: &PolicyState,
     from_id: u32,

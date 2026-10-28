@@ -1968,6 +1968,13 @@ type compileOpts struct {
 	// path: a published malformed prefix fails the helper snapshot closed
 	// (RouteDestinationUnparseable), fail-closed for a blackhole.
 	lenientGenerateRoutePrefix bool
+	// lenientStaticRoutePrefix downgrades an invalid static-route
+	// destination (staticRouteInvalidPrefixes: garbage, bare IP, or
+	// whitespace-padded CIDR) from a strict compile error to
+	// cfg.Warnings entries. Mirrors lenientGenerateRoutePrefix
+	// (#15658): the route is kept on the tolerant path so a persisted
+	// malformed destination fails the helper snapshot closed.
+	lenientStaticRoutePrefix bool
 	// lenientDHCPStaticBindings (#2243 review) downgrades the DHCP-server
 	// static (fixed/reserved) host-binding gate (validateDHCPStaticBindingsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
@@ -3954,8 +3961,9 @@ type compileOpts struct {
 // together; TestStrictCompileOptsSingleSource17148 pins that the
 // production entries and strictCompileOpts stay identical, and the AST
 // census in the same test rejects any new bare compileOpts{...} literal
-// outside this file (the tunnelid/reth side compiles excepted, see
-// there).
+// outside this file (the reth side compile in
+// compiler_validate_strict_reth_lag.go:213 excepted, see
+// sideCompileExemptions17148 there).
 func strictCompileOpts() compileOpts {
 	return compileOpts{}
 }
@@ -4150,6 +4158,7 @@ func lenientCompileOpts() (o compileOpts) {
 	o.lenientStaticRouteCIDRMaskSpelling = true
 	o.lenientGenerateRoutePolicy = true
 	o.lenientGenerateRoutePrefix = true
+	o.lenientStaticRoutePrefix = true
 	o.lenientDHCPStaticBindings = true
 	o.lenientDHCPPoolSubnets = true
 	o.lenientDHCPPoolValues = true

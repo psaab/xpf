@@ -96,7 +96,8 @@ pub(in crate::afxdp) fn match_source_nat_for_flow(
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn match_source_nat_for_flow_result(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
@@ -119,8 +120,8 @@ pub(in crate::afxdp) fn match_source_nat_for_flow_result(
         0,
         false,
         None,
-        // #6522: no worker context in this `#[cfg_attr(not(test),
-        // allow(dead_code))]` helper — keep the untracked contract.
+        // #6522: no worker context in this `#[cfg(test)]` helper
+        // (#17195) — keep the untracked contract.
         crate::nat::NatHolder::Untracked,
         &mut counter,
     )

@@ -27,7 +27,7 @@
 //     interface has no input filter in this family. The post-guard bodies
 //     call the cold evaluate_non_pbr_input_filter and the cold
 //     revalidate_static_input_filter_on_session_hit.
-//   - evaluate_non_pbr_input_filter / _log_only,
+//   - evaluate_non_pbr_input_filter, established_input_filter_log,
 //     emit_input_filter_log_match, apply_lo0_filter_action are the
 //     rare/exception bodies: #[cold] #[inline(never)] for .text.unlikely
 //     placement away from the hot loop's cache lines.
@@ -333,6 +333,7 @@ pub(super) fn evaluate_non_pbr_input_filter(
             log_match,
             ingress_zone_id,
             l4_present: extra.l4_present,
+            source: FilterLogSource::Input,
         }),
     }
 }
@@ -351,16 +352,13 @@ pub(super) fn policer_drop_action(
     }
 }
 
-/// Evaluate the physical ingress filter for a tunnel packet that is about to
-/// be claimed by decapsulation. The packet is still in its outer representation
-/// here, so this preserves the underlay interface's input-filter contract.
-#[cold]
-#[inline(never)]
 /// #14120: does any FIB row deliver `dst` locally? The tunnel gate runs
 /// before route lookup, so this mirrors the miss path's local-delivery
 /// arms with the state available here (interface primaries are covered by
 /// `ingress_interface_local_resolution` and interface-NAT claims by its
 /// sibling above; a plain FIB local route is the remaining arm).
+#[cold]
+#[inline(never)]
 fn routing_instance_local_delivery_expected(forwarding: &ForwardingState, dst: IpAddr) -> bool {
     crate::afxdp::forwarding::lookup_forwarding_resolution(forwarding, dst)
         .resolution
@@ -368,6 +366,9 @@ fn routing_instance_local_delivery_expected(forwarding: &ForwardingState, dst: I
         == crate::afxdp::ForwardingDisposition::LocalDelivery
 }
 
+/// Evaluate the physical ingress filter for a tunnel packet that is about to
+/// be claimed by decapsulation. The packet is still in its outer representation
+/// here, so this preserves the underlay interface's input-filter contract.
 pub(super) fn enforce_tunnel_outer_input_filter(
     tx_pipeline: &mut WorkerTxPipeline,
     forwarding: &ForwardingState,
@@ -618,28 +619,69 @@ pub(in crate::afxdp) fn input_filter_would_deny_before_screen(
     .is_some_and(|result| result.action != crate::filter::FilterAction::Accept)
 }
 
+/// #17038: THE single log-only derivation of an established flow's input
+/// filter `then log` record. Both accept-path consumers funnel here — the
+/// flow-cache seed capture (which freezes the record for replay) and the
+/// uncached static session hit (which emits it per packet) — so the record
+/// and its `source` cannot diverge: `Pbr` when the routing walk terminates
+/// on a routing-instance term, else `Input` (#8114 item 1). Before #17038
+/// the seed capture was a second copy (`evaluate_non_pbr_input_filter_log_only`)
+/// that carried no source, and the cache replay hard-coded `Input`, so one
+/// PBR-steered flow's reason byte flipped with cache residency.
+///
+/// `filter` is the ingress interface's input filter, borrowed by the caller
+/// (the seed path resolves it from `meta`; the hit path already holds it).
+/// `logical_ifindex` is that interface's LOGICAL unit. When `final_action`
+/// is Some the carried log's action is rewritten to it: an inline-policer
+/// RED drop must log DENY (Discard), not the Accept placeholder a logged
+/// accept term carries — same normalization
+/// `evaluate_filter_ref_log_match` applies for terminal discards (#15949).
 #[cold]
 #[inline(never)]
-pub(super) fn evaluate_non_pbr_input_filter_log_only(
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(super) fn established_input_filter_log(
     forwarding: &ForwardingState,
-    extra: TermMatchExtra<'_>,
-    flow: Option<&SessionFlow>,
+    filter: &crate::filter::Filter,
+    flow: &SessionFlow,
     meta: UserspaceDpMeta,
     ingress_zone_override: Option<u32>,
+    logical_ifindex: i32,
+    extra: TermMatchExtra<'_>,
+    final_action: Option<crate::filter::FilterAction>,
 ) -> Option<CachedInputFilterLog> {
-    let Some(flow) = flow else {
+    // #16502: label (and log-match) with the same (0,0) rule the verdict
+    // walks use, so a synthetic tuple cannot be labelled Pbr — or matched to
+    // a log term — through a port constraint enforcement fails closed.
+    let extra = crate::filter::mark_ports_unknown_for_zero_flow(
+        extra,
+        flow.forward_key.src_port,
+        flow.forward_key.dst_port,
+    );
+    if !filter.has_log_terms {
         return None;
+    }
+    // Determine source: routing-instance walk terminating => Pbr.
+    let is_pbr = filter.affects_route_lookup
+        && crate::filter::evaluate_filter_ref_routing_instance_uncounted(
+            filter,
+            flow.src_ip,
+            flow.dst_ip,
+            flow.forward_key.protocol,
+            flow.forward_key.src_port,
+            flow.forward_key.dst_port,
+            meta.dscp,
+            extra,
+        )
+        .is_some();
+    let source = if is_pbr {
+        FilterLogSource::Pbr
+    } else {
+        FilterLogSource::Input
     };
-    let ingress_ifindex = resolve_ingress_logical_ifindex(
-        forwarding,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-    )
-    .unwrap_or(meta.ingress_ifindex as i32);
     let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
-    let log_match = crate::filter::evaluate_interface_filter_log_match(
+    let mut log_match = crate::filter::evaluate_interface_filter_log_match(
         &forwarding.filter_state,
-        ingress_ifindex,
+        logical_ifindex,
         is_v6,
         flow.src_ip,
         flow.dst_ip,
@@ -650,15 +692,19 @@ pub(super) fn evaluate_non_pbr_input_filter_log_only(
         extra,
         true,
     )?;
+    if let Some(action) = final_action {
+        log_match.action = action;
+    }
     Some(CachedInputFilterLog {
         log_match,
         ingress_zone_id: filter_log_ingress_zone_id(
             forwarding,
             meta,
             ingress_zone_override,
-            ingress_ifindex,
+            logical_ifindex,
         ),
         l4_present: extra.l4_present,
+        source,
     })
 }
 
@@ -1300,6 +1346,9 @@ pub(super) fn revalidate_static_pbr_route_on_session_hit(
 /// Derive the log-only match (no counters, no metering) for an ACCEPTED
 /// static hit; `None` when the filter has no log term. Mirrors the
 /// flow-cache replay semantics (per-packet), not once-per-session.
+/// #17038: thin wrapper over `established_input_filter_log`, the single
+/// derivation shared with the flow-cache seed capture; the returned source
+/// is the record's own frozen `source`.
 #[cold]
 #[inline(never)]
 pub(super) fn static_hit_log(
@@ -1311,8 +1360,6 @@ pub(super) fn static_hit_log(
     logical_ingress_ifindex: i32,
     extra: crate::filter::TermMatchExtra<'_>,
 ) -> Option<(CachedInputFilterLog, FilterLogSource)> {
-    // Source without evaluating: Pbr iff the routing walk terminates on a
-    // routing-instance term (mirrors static_input_filter_deny_eval/14121).
     static_hit_log_for_action(forwarding, filter, flow, meta, ingress_zone_override, logical_ingress_ifindex, extra, None)
 }
 
@@ -1332,65 +1379,18 @@ pub(super) fn static_hit_log_for_action(
     extra: crate::filter::TermMatchExtra<'_>,
     final_action: Option<crate::filter::FilterAction>,
 ) -> Option<(CachedInputFilterLog, FilterLogSource)> {
-    // #16502: label (and log-match) with the same (0,0) rule the verdict
-    // walks use, so a synthetic tuple cannot be labelled Pbr — or matched to
-    // a log term — through a port constraint enforcement fails closed.
-    let extra = crate::filter::mark_ports_unknown_for_zero_flow(
-        extra,
-        flow.forward_key.src_port,
-        flow.forward_key.dst_port,
-    );
-    if !filter.has_log_terms {
-        return None;
-    }
-    // Determine source: routing-instance walk terminating => Pbr.
-    let is_pbr = filter.affects_route_lookup
-        && crate::filter::evaluate_filter_ref_routing_instance_uncounted(
-            filter,
-            flow.src_ip,
-            flow.dst_ip,
-            flow.forward_key.protocol,
-            flow.forward_key.src_port,
-            flow.forward_key.dst_port,
-            meta.dscp,
-            extra,
-        )
-        .is_some();
-    let source = if is_pbr {
-        FilterLogSource::Pbr
-    } else {
-        FilterLogSource::Input
-    };
-    let is_v6 = matches!(flow.dst_ip, IpAddr::V6(_));
-    let mut log_match = crate::filter::evaluate_interface_filter_log_match(
-        &forwarding.filter_state,
+    let log = established_input_filter_log(
+        forwarding,
+        filter,
+        flow,
+        meta,
+        ingress_zone_override,
         logical_ingress_ifindex,
-        is_v6,
-        flow.src_ip,
-        flow.dst_ip,
-        flow.forward_key.protocol,
-        flow.forward_key.src_port,
-        flow.forward_key.dst_port,
-        meta.dscp,
         extra,
-        true,
+        final_action,
     )?;
-    if let Some(action) = final_action {
-        log_match.action = action;
-    }
-    Some((
-        CachedInputFilterLog {
-            log_match,
-            ingress_zone_id: filter_log_ingress_zone_id(
-                forwarding,
-                meta,
-                ingress_zone_override,
-                logical_ingress_ifindex,
-            ),
-            l4_present: extra.l4_present,
-        },
-        source,
-    ))
+    let source = log.source;
+    Some((log, source))
 }
 
 #[inline]
@@ -1487,6 +1487,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
                             log_match,
                             ingress_zone_id,
                             l4_present: extra.l4_present,
+                            source: FilterLogSource::Pbr,
                         }),
                     },
                     revoked_key: None,
@@ -2044,6 +2045,7 @@ fn static_input_filter_deny_eval(
                     log_match,
                     ingress_zone_id,
                     l4_present: extra.l4_present,
+                    source: FilterLogSource::Pbr,
                 }),
             },
             FilterLogSource::Pbr,
@@ -2320,7 +2322,7 @@ pub(super) fn emit_cached_input_filter_log(
         flow,
         meta,
         cached_log,
-        FilterLogSource::Input,
+        cached_log.source,
         false,
         now_ns,
     );

@@ -349,7 +349,8 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
             return false;
         };
         // Mirror ha.rs: WG selects its outer destination per peer.
-        let outer_rg = if endpoint.mode == "wireguard" {
+        // #17199: Unknown kind matches neither arm -> None -> decline.
+        let outer_rg = if endpoint.kind == TunnelKind::WireGuard {
             let Some(next_hop) = resolution.next_hop else {
                 return false;
             };
@@ -375,11 +376,13 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
                         .map(|e| e.redundancy_group.max(0))
                 }
             }
-        } else {
+        } else if endpoint.kind == TunnelKind::Gre {
             forwarding
                 .tunnel_outer_egress_rgs
                 .get(&resolution.tunnel_endpoint_id)
                 .copied()
+        } else {
+            None
         };
         return match outer_rg {
             Some(rg) if rg > 0 => forwarding_active_rgs.contains(&rg),

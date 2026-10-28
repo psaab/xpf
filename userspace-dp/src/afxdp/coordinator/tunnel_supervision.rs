@@ -45,6 +45,24 @@ pub(super) fn take_test_gre_unpublish_before_join_observed() -> bool {
     TEST_GRE_UNPUBLISH_BEFORE_JOIN_OBSERVED.swap(false, std::sync::atomic::Ordering::Acquire)
 }
 
+/// #17141 test-only publish counter: each
+/// `publish_local_tunnel_deliveries_excluding` store bumps this so a
+/// dispatcher cell can assert an unchanged `update_ha_state` republishes
+/// at most once. Re-arming resets it.
+#[cfg(test)]
+static TEST_DELIVERY_PUBLISH_COUNT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(super) fn arm_test_delivery_publish_count() {
+    TEST_DELIVERY_PUBLISH_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(super) fn test_delivery_publish_count() -> u64 {
+    TEST_DELIVERY_PUBLISH_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// #10553/#17084: registry `before_join` hook for the GRE family —
 /// asserts the armed ifindex is already unpublished, then records it.
 /// Takes the published-map Arc (not `&Coordinator`) so callers can
@@ -69,6 +87,17 @@ impl super::Coordinator {
     #[cfg(test)]
     pub(crate) fn wg_engine_count_for_test(&self) -> usize {
         self.forwarding.wg_engines.len()
+    }
+
+    /// #17141: reset/read the test-only delivery-publish counter.
+    #[cfg(test)]
+    pub(crate) fn arm_delivery_publish_count_for_test(&self) {
+        arm_test_delivery_publish_count();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delivery_publish_count_for_test(&self) -> u64 {
+        test_delivery_publish_count()
     }
 
     /// #14131: whether endpoint `id` currently holds a LIVE WG control
@@ -185,7 +214,7 @@ impl super::Coordinator {
         for (id, entry) in self.tunnel_sources.iter() {
             let reason = match self.forwarding.tunnel_endpoints.get(id) {
                 None => Some("removed"),
-                Some(ep) if ep.mode != "gre" && ep.mode != "ip6gre" => Some("mode_changed"),
+                Some(ep) if ep.kind != TunnelKind::Gre => Some("mode_changed"),
                 Some(ep) => {
                     let attach_ok = ep.logical_ifindex == entry.spawned_ifindex
                         && self
@@ -229,7 +258,7 @@ impl super::Coordinator {
                 .forwarding
                 .tunnel_endpoints
                 .values()
-                .filter(|ep| ep.mode == "gre" || ep.mode == "ip6gre")
+                .filter(|ep| ep.kind == TunnelKind::Gre)
                 .map(|ep| ep.id)
                 .collect();
             for id in desired {
@@ -263,6 +292,8 @@ impl super::Coordinator {
         for (ifindex, delivery) in self.wg_control_threads.live_deliveries_excluding(exclude) {
             map.insert(ifindex, delivery);
         }
+        #[cfg(test)]
+        TEST_DELIVERY_PUBLISH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.local_tunnel_deliveries.store(Arc::new(map));
     }
 
@@ -276,7 +307,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "gre" && endpoint.mode != "ip6gre" {
+        if endpoint.kind != TunnelKind::Gre {
             return false;
         }
         let Some(tunnel_name) = self
@@ -475,7 +506,7 @@ impl super::Coordinator {
             else {
                 return Some("removed_deferred");
             };
-            if row.mode != "gre" && row.mode != "ip6gre" {
+            if tunnel_mode_kind(&row.mode) != TunnelKind::Gre {
                 return Some("mode_changed_deferred");
             }
             if row.ifindex != entry.spawned_ifindex
@@ -501,7 +532,7 @@ impl super::Coordinator {
     }
 
     /// #1881 (mirrors `reconcile_wg_control_liveness`): periodic
-    /// self-heal, called from the server's `refresh_status` ONLY while
+    /// self-heal, called from the server's `supervise_tunnels` ONLY while
     /// `should_run_afxdp` holds. TOMBSTONE-ONLY and SNAPSHOT-COHERENT:
     /// never creates entries; a tombstone respawns only past the
     /// backoff AND only when the latest STORED snapshot's row for the
@@ -555,7 +586,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "gre" && endpoint.mode != "ip6gre" {
+        if endpoint.kind != TunnelKind::Gre {
             return false;
         }
         let Some(name) = self
@@ -609,7 +640,7 @@ impl super::Coordinator {
         // Current WG engines keyed by id, with their Arc address identity.
         let mut desired: BTreeMap<u16, usize> = BTreeMap::new();
         for endpoint in self.forwarding.tunnel_endpoints.values() {
-            if endpoint.mode != "wireguard" {
+            if endpoint.kind != TunnelKind::WireGuard {
                 continue;
             }
             if let Some(engine) = self.forwarding.wg_engines.get(&endpoint.id) {
@@ -702,6 +733,7 @@ impl super::Coordinator {
         }
         self.publish_local_tunnel_deliveries_excluding(&[]);
     }
+
 
     /// #9587: may endpoint `id`'s control thread write kernel-path transport
     /// plaintext to its wgN TUN? ONE decision per endpoint, read at spawn and
@@ -829,7 +861,8 @@ impl super::Coordinator {
         per_peer
     }
 
-    fn spawn_one_wg_control_thread(&mut self, id: u16) {
+    /// Returns true when a live control thread was started.
+    fn spawn_one_wg_control_thread(&mut self, id: u16) -> bool {
         let outer_mtu = self.resolve_wg_outer_mtu(id);
         // #5291: per-peer underlay MTU snapshot handed into the control
         // thread alongside the scalar fallback, so the TUN-origin egress
@@ -838,13 +871,13 @@ impl super::Coordinator {
         // reachable; kept fresh by the #2921 restart-on-MTU-change gate.
         let per_peer_outer_mtu = self.resolve_wg_per_peer_outer_mtus(id);
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
-            return;
+            return false;
         };
-        if endpoint.mode != "wireguard" {
-            return;
+        if endpoint.kind != TunnelKind::WireGuard {
+            return false;
         }
         let Some(engine) = self.forwarding.wg_engines.get(&id).cloned() else {
-            return;
+            return false;
         };
         let engine_ptr = Arc::as_ptr(&engine) as usize;
         let Some(tunnel_name) = self
@@ -853,7 +886,7 @@ impl super::Coordinator {
             .get(&endpoint.logical_ifindex)
             .cloned()
         else {
-            return;
+            return false;
         };
         let spawned_ifindex = endpoint.logical_ifindex;
         let listen_port = endpoint.wg_listen_port;
@@ -945,7 +978,7 @@ impl super::Coordinator {
                         resolver_telemetry: Some(resolver_telemetry),
                     },
                 );
-                return;
+                return false;
             }
         };
         let delivery = LocalTunnelDelivery {
@@ -1007,6 +1040,7 @@ impl super::Coordinator {
                 None
             }
         };
+        let started = handle.is_some();
         let delivery_tx = handle.as_ref().map(|_| delivery);
         self.wg_control_threads.insert(
             id,
@@ -1024,10 +1058,11 @@ impl super::Coordinator {
                 resolver_telemetry: Some(resolver_telemetry),
             },
         );
+        started
     }
 
     /// #1866 Change 2: periodic self-heal, called from the server's
-    /// `refresh_status` ONLY while `should_run_afxdp` holds. TOMBSTONE-
+    /// `supervise_tunnels` ONLY while `should_run_afxdp` holds. TOMBSTONE-
     /// ONLY and SNAPSHOT-COHERENT:
     ///
     ///   - never creates entries for ids absent from the map (entry
@@ -1039,32 +1074,39 @@ impl super::Coordinator {
     ///     identity-identical and attachment-identical to the forwarding
     ///     endpoint the spawn would use (a sweep must never start a
     ///     thread the latest accepted snapshot does not describe);
-    ///   - at most one spawn attempt per invocation.
+    ///   - at most one spawn attempt per invocation;
+    ///   - the delivery map is republished only when the sweep or a
+    ///     respawn changed the set (mirrors `reconcile_local_tunnel_liveness`).
     pub(crate) fn reconcile_wg_control_liveness(
         &mut self,
         latest_snapshot: Option<&crate::ConfigSnapshot>,
     ) {
-        self.wg_control_threads.sweep_finished();
-        self.publish_local_tunnel_deliveries_excluding(&[]);
-        let Some(snapshot) = latest_snapshot else {
-            return;
-        };
-        let now = monotonic_nanos();
-        let tombstones = self.wg_control_threads.tombstone_ids();
-        for id in tombstones {
-            let Some(entry) = self.wg_control_threads.get(&id) else {
-                continue;
-            };
-            if now.saturating_sub(entry.last_spawn_attempt_ns) < WG_SPAWN_BACKOFF_NS {
-                continue;
+        // #17141: capture the sweep count and spawn outcome (master's
+        // registry sweep returns the tombstoned count) and publish only
+        // on change below, mirroring reconcile_local_tunnel_liveness —
+        // NOT master's unconditional publish on entry.
+        let swept = self.wg_control_threads.sweep_finished();
+        let mut spawned = false;
+        if let Some(snapshot) = latest_snapshot {
+            let now = monotonic_nanos();
+            let tombstones = self.wg_control_threads.tombstone_ids();
+            for id in tombstones {
+                let Some(entry) = self.wg_control_threads.get(&id) else {
+                    continue;
+                };
+                if now.saturating_sub(entry.last_spawn_attempt_ns) < WG_SPAWN_BACKOFF_NS {
+                    continue;
+                }
+                if !self.wg_tombstone_respawn_coherent(id, snapshot) {
+                    continue;
+                }
+                spawned = self.spawn_one_wg_control_thread(id);
+                break; // ≤1 spawn attempt per invocation
             }
-            if !self.wg_tombstone_respawn_coherent(id, snapshot) {
-                continue;
-            }
-            self.spawn_one_wg_control_thread(id);
-            break; // ≤1 spawn attempt per invocation
         }
-        self.publish_local_tunnel_deliveries_excluding(&[]);
+        if swept > 0 || spawned {
+            self.publish_local_tunnel_deliveries_excluding(&[]);
+        }
     }
 
     /// #1866: whether a tombstone respawn for `id` is coherent — the
@@ -1076,7 +1118,7 @@ impl super::Coordinator {
         let Some(endpoint) = self.forwarding.tunnel_endpoints.get(&id) else {
             return false;
         };
-        if endpoint.mode != "wireguard" || !self.forwarding.wg_engines.contains_key(&id) {
+        if endpoint.kind != TunnelKind::WireGuard || !self.forwarding.wg_engines.contains_key(&id) {
             return false;
         }
         let Some(name) = self

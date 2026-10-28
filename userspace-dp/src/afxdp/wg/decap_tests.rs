@@ -3171,6 +3171,7 @@ fn gre_tun_origin_pair_needs_no_permit_10038() {
         .clone();
     gre_row.id = GRE_TUN_ID;
     gre_row.mode = "gre".to_string();
+    gre_row.kind = TunnelKind::Gre;
     // A WG row hydrates with an UNSPECIFIED outer pair (multi-peer: no single
     // destination — `forwarding_build/tunnels.rs`); a genuine GRE row carries
     // concrete outers, so stamp them (this is also why the WG builder resolves
@@ -3305,6 +3306,7 @@ fn gre_tun_origin_vrf_reverse_resolves_local_10038() {
         .clone();
     gre_row.id = GRE_TUN_ID;
     gre_row.mode = "gre".to_string();
+    gre_row.kind = TunnelKind::Gre;
     gre_row.source = "172.16.80.8".parse().unwrap();
     gre_row.destination = "203.0.113.7".parse().unwrap();
     forwarding.tunnel_endpoints.insert(GRE_TUN_ID, gre_row);

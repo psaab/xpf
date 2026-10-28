@@ -727,6 +727,7 @@ type xpfCollector struct {
 	userspaceSessionDeleteRefusedIdentity     *prometheus.Desc
 	userspaceSessionDeleteDroppedReleased     *prometheus.Desc
 	userspaceTunnelPurgeReservationsReleased  *prometheus.Desc
+	userspaceTunnelPurgeDeleteRefused         *prometheus.Desc
 	userspaceSyncedReverseRederived           *prometheus.Desc
 	userspacePeerDeleteRefusedLocalOwned      *prometheus.Desc
 	userspaceS5Reinject                       *prometheus.Desc

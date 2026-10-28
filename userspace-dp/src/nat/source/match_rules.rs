@@ -367,13 +367,6 @@ pub(crate) fn match_source_nat_result(
     )
 }
 
-/// #2218: same as `match_source_nat_result_for_tuple` but the matched
-/// rule's per-rule hit counter (if any) is written to `matched_counter`.
-/// The `SourceNatLookup` enum stays wire-/Eq-frozen (it is destructured
-/// and `matches!`-compared in many tests and over no wire), so the counter
-/// rides out via this out-parameter rather than a new enum payload — the
-/// least-invasive shape. The cold-path commit site clones the captured
-/// `Arc` and increments it once per committed translated flow.
 /// #8447: the rule-match outcome counters live on this thin wrapper, so they
 /// observe EVERY return of the real body. The body has many early returns and
 /// per-return instrumentation would silently under-count the moment another is
@@ -383,6 +376,13 @@ pub(crate) fn match_source_nat_result(
 /// `consulted` is bumped for every call including `NoMatch`, because the
 /// question it answers is "did a packet reach source-NAT at all", not "did NAT
 /// act on one". Without it a zero in the other three is unreadable.
+/// #2218: same as `match_source_nat_result_for_tuple` but the matched
+/// rule's per-rule hit counter (if any) is written to `matched_counter`.
+/// The `SourceNatLookup` enum stays wire-/Eq-frozen (it is destructured
+/// and `matches!`-compared in many tests and over no wire), so the counter
+/// rides out via this out-parameter rather than a new enum payload — the
+/// least-invasive shape. The cold-path commit site clones the captured
+/// `Arc` and increments it once per committed translated flow.
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn match_source_nat_result_for_tuple(
     iface_allocs: &InterfaceNatAllocators,

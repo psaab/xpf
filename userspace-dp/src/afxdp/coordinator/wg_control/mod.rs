@@ -1,6 +1,6 @@
 //! WireGuard control thread (#1432 S2a).
 //!
-//! One supervised aux thread per `mode == "wireguard"` tunnel endpoint,
+//! One supervised aux thread per WireGuard-kind tunnel endpoint,
 //! modeled on `spawn_local_tunnel_sources` (the GRE local-origin
 //! template). The thread owns three handles:
 //!
@@ -56,8 +56,8 @@
 //! (timeout = min(next timer deadline, 100ms cap) — the cap bounds
 //! stop/join and worker-edge latency) and runs a 1s-granularity timer
 //! arm: session expiry (REJECT_AFTER_TIME teardown), the pure
-//! `WgEngine::timer_pass` (passive/persistent keepalives, no-reply
-//! reinit), and the handshake ATTEMPT machine (5s retransmit pacing,
+//! per-peer `WgEngine::timer_pass_for_peer` (passive/persistent keepalives,
+//! no-reply reinit), and the handshake ATTEMPT machine (5s retransmit pacing,
 //! 90s give-up window, identity-based success). Per-use T1/T2/T3 age
 //! enforcement lives in the engine's encap/decap paths; this loop owns
 //! all sends. Design of record:

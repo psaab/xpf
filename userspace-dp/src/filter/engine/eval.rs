@@ -718,7 +718,7 @@ fn evaluate_filter_ref_routing_instance_counted_v6<'a>(
 }
 
 /// Evaluate the lo0 (host-bound) filter for a given address family.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn evaluate_lo0_filter(
     state: &FilterState,
     is_v6: bool,

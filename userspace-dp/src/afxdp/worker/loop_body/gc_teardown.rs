@@ -211,7 +211,6 @@ pub(super) fn reap_expired_sessions(
 /// accounting no-op); row removal plus flow-cache eviction are real and
 /// asserted. Cross-worker propagation is not driven.
 #[cfg(test)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn production_sweep_for_test(
     sessions: &mut crate::session::SessionTable,
     bindings: &mut [BindingWorker],
@@ -242,7 +241,6 @@ pub(in crate::afxdp) fn production_sweep_for_test(
 /// same dummy-map/fd/worker-id divergences as `production_sweep_for_test`
 /// (fresh shared maps, no peer commands, no HA delete propagation).
 #[cfg(test)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn production_rotation_purge_for_test(
     sessions: &mut crate::session::SessionTable,
     binding: &BindingWorker,

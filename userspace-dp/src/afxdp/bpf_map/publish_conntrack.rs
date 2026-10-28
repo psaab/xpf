@@ -40,7 +40,7 @@ const ALG_DISABLE_SIP: u8 = 0x04;
 // suppress (`alg_type` is one of none/FTP/SIP/DNS — see xpf_conntrack.h), so
 // `alg_type_for_session` never reads this bit. Defined to document the full
 // bit layout consistently across Go and Rust; intentionally unused.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 const ALG_DISABLE_TFTP: u8 = 0x08;
 // PPTP's disable bit (#15655): gates TCP/1723 control learning and GRE v1
 // Call-ID association in poll_descriptor, not conntrack tagging (PPTP has
