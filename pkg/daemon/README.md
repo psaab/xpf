@@ -1919,9 +1919,14 @@ instances). Since #17052 both modes share one announce engine
 (`pkg/cluster/announce.go`: `AnnounceTargets` + `SendAnnounceTargets`,
 the single `ClampGratuitousARPCount` on the announce path): direct mode
 sends the full set, legacy VRRP mode's `pkg/vrrp` sends the VIPs and the
-daemon sends the non-VIP half (`sendVRRPModeNonVIPAnnounce` on the
-MASTER arm — router link-local NAs + pool GARPs/NAs) so the announced
-(iface, IP, kind) set is identical. `directSendGARPs` (`daemon_ha_vip.go`) sends a broadcast GARP
+daemon sends the non-VIP half (router link-local NAs + pool
+GARPs/NAs) so the announced (iface, IP, kind) set is identical. The
+non-VIP half is level-triggered (`convergeLegacyNonVIPAnnounce`, the
+#16696 pattern): cluster-primary, VRRP MASTER and the reconcile pass
+all funnel through it and it claims each activation epoch exactly
+once, so a cluster-first promotion on the default userspace dataplane
+(which consumes the rg-state edge before ForceRGMaster) cannot
+swallow the announce. `directSendGARPs` (`daemon_ha_vip.go`) sends a broadcast GARP
 burst per VIP plus a supplementary **directed** ARP probe to the subnet
 gateway so a router that ignores broadcast gratuitous ARP still re-binds the
 VIP to the new master's MAC. The probe target is derived by the single source

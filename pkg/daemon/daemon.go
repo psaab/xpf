@@ -1455,6 +1455,14 @@ type Daemon struct {
 	// pass. Guarded by rethServicesMu.
 	rethServicesMu      sync.Mutex
 	rethServicesApplied map[int]bool
+	// nonVIPAnnounceMu / nonVIPAnnounced guard the legacy-VRRP non-VIP
+	// announce (#17052) against duplicate bursts within one activation
+	// epoch. SendAnnounceTargets is edge-triggered, so whichever producer
+	// (cluster event, VRRP MASTER event, or reconcile pass) first observes
+	// an activation claims it here; the marker is cleared on deactivation
+	// so the next failover announces again. Guarded by nonVIPAnnounceMu.
+	nonVIPAnnounceMu sync.Mutex
+	nonVIPAnnounced  map[int]uint64
 
 	// blackholeRoutes tracks blackhole routes injected for inactive RG subnets.
 	// When an RG goes BACKUP, we inject blackhole routes for its RETH subnets
@@ -2323,6 +2331,7 @@ func New(opts Options) (*Daemon, error) {
 		rethServicesApplied:        make(map[int]bool),
 		localFailoverCommitReady:   make(map[int]bool),
 		localFailoverCommitTimeout: 3 * time.Second,
+		nonVIPAnnounced:            make(map[int]uint64),
 		localFailoverCommitDelay:   200 * time.Millisecond,
 		failoverActuations:         *newFailoverActuationRegistry(),
 		userspaceDemotionPrepUntil: make(map[int]time.Time),

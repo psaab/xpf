@@ -548,10 +548,71 @@ func clusterClampedCount(cfg *config.Config, rgID int) int {
 	return c
 }
 
+// legacyNonVIPAnnouncePending reports whether the legacy-VRRP non-VIP
+// announce (#17052) is still owed for rgID at the current activation
+// epoch. It is the level-triggered source of truth shared by every
+// producer (cluster event, VRRP MASTER event, reconcile pass): the
+// announce is owed while the RG is active at an epoch not yet claimed,
+// and ceases to be owed once claimed or once the RG goes inactive
+// (which clears the claim so the next failover re-announces).
+func (d *Daemon) legacyNonVIPAnnouncePending(rgID int) bool {
+	if d.isNoRethVRRP() {
+		return false
+	}
+	d.rgStatesMu.RLock()
+	s := d.rgStates[rgID]
+	d.rgStatesMu.RUnlock()
+	if s == nil {
+		return false
+	}
+	active, epoch := s.CurrentDesired()
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	if !active {
+		delete(d.nonVIPAnnounced, rgID)
+		return false
+	}
+	return d.nonVIPAnnounced[rgID] != epoch
+}
+
+// convergeLegacyNonVIPAnnounce sends the non-VIP announce exactly once
+// per activation epoch when it is still owed (#17052, the #16696
+// level-triggered pattern applied to announcements). Every producer
+// that observes an activation -- cluster-primary, VRRP MASTER, and the
+// periodic reconcile -- funnels through here, so cluster-first ordering
+// (the default userspace / non-strict case, where SetCluster consumes
+// the edge and ForceRGMaster then reports Changed=false to the VRRP
+// handler) can no longer swallow the announce, and no producer can
+// double-burst an epoch another producer already claimed. The claim is
+// taken under the mutex BEFORE any frame is sent, so a racing producer
+// cannot interleave a second burst.
+func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
+	if !d.legacyNonVIPAnnouncePending(rgID) {
+		return
+	}
+	d.rgStatesMu.RLock()
+	s := d.rgStates[rgID]
+	d.rgStatesMu.RUnlock()
+	_, epoch := s.CurrentDesired()
+	d.nonVIPAnnounceMu.Lock()
+	if d.nonVIPAnnounced == nil {
+		d.nonVIPAnnounced = make(map[int]uint64)
+	}
+	if d.nonVIPAnnounced[rgID] == epoch {
+		d.nonVIPAnnounceMu.Unlock()
+		return
+	}
+	d.nonVIPAnnounced[rgID] = epoch
+	d.nonVIPAnnounceMu.Unlock()
+	d.sendVRRPModeNonVIPAnnounce(rgID)
+}
+
 // sendVRRPModeNonVIPAnnounce sends, in legacy VRRP mode, the non-VIP
 // half of the shared target set on RG activation (#17052): the router
 // link-local NAs and the pool GARPs/NAs that pkg/vrrp never sends (it
 // owns only the VIPs). Gated on continued mastership via rgState.
+// Producers reach this ONLY through convergeLegacyNonVIPAnnounce, which
+// owns the per-epoch exactly-once claim.
 func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) {
 	if d.isNoRethVRRP() {
 		return
@@ -645,10 +706,19 @@ func (d *Daemon) warnPoolTruncOnce(rgID int) bool {
 // the shared announce engine (#17052). Kept as a named entry point for
 // the #8405/#12172 tests; production failover announce goes through
 // directSendGARPs / sendVRRPModeNonVIPAnnounce, which include these
-// targets in the full set. stillValid MUST be non-nil in production
-// (a nil predicate is ungated — test-only convenience).
+// targets in the full set. stillValid is REQUIRED (#17158): a nil
+// predicate is refused up front, once, rather than failing per address
+// inside the gated senders.
 func (d *Daemon) announceProxyARPPoolAddresses(cfg *config.Config, rgID int, stillValid cluster.BurstStillValid) {
 	if cfg == nil || rgID <= 0 {
+		return
+	}
+	if stillValid == nil {
+		// #17158: the burst predicate is required. A nil predicate here
+		// would be refused by every burst sender anyway; refuse once,
+		// up front, rather than logging a send failure per address.
+		slog.Warn("directSendGARPs: pool announce refused (nil burst predicate)",
+			"rg", rgID)
 		return
 	}
 	res := cluster.SendAnnounceTargets(cluster.PoolAnnounceTargets(cfg, rgID), stillValid, d.directSender())

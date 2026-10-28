@@ -234,10 +234,11 @@ func (s AnnounceSender) probe() func(string, net.IP, net.IP) error {
 
 // AnnounceResult reports what SendAnnounceTargets did, for caller logging.
 type AnnounceResult struct {
-	Sent          int // targets whose first frame succeeded
-	PoolAttempted int
-	PoolTruncated bool
-	FirstErr      error
+	Sent           int // targets whose first frame succeeded
+	PoolAttempted  int
+	PoolTruncated  bool
+	FirstErr       error
+	ProbeSucceeded bool // a gateway ARP probe succeeded (#17052: lets the VRRP leg log probe success independent of the GARP result)
 }
 
 // SendAnnounceTargets emits the frame sequence for targets in order:
@@ -269,6 +270,8 @@ func SendAnnounceTargets(targets []AnnounceTarget, stillValid BurstStillValid, s
 				if t.ProbeIP != nil {
 					if err := sender.probe()(t.Iface, t.IP.To4(), t.ProbeIP); err != nil {
 						slog.Warn("announce: ARP probe failed", "iface", t.Iface, "gw", t.ProbeIP, "err", err)
+					} else {
+						res.ProbeSucceeded = true
 					}
 				}
 			} else {

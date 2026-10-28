@@ -751,6 +751,14 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// service edge here or it is lost — the later VRRP MASTER and
 		// reconcile inputs report Changed=false.
 		d.driveRethServicesEdge(ev.GroupID, tr, noRethVRRP)
+		// #17052: same consumed-edge hazard for the non-VIP announce.
+		// In legacy non-strict mode (the default userspace dataplane)
+		// this cluster input may be the one that flipped desired; the
+		// ForceRGMaster above then yields Changed=false in
+		// handleVRRPEvent, so the VRRP-arm announce never fires. Run
+		// the level-triggered converger here too: it claims the epoch
+		// exactly once, and whichever producer runs first wins.
+		d.convergeLegacyNonVIPAnnounce(ev.GroupID)
 	} else {
 		// Demotion: run preflight and resign VRRP BEFORE
 		// clearing rg_active (#485). The preflight shifts
@@ -1151,7 +1159,10 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			// #17052: legacy VRRP mode — pkg/vrrp announces only the
 			// VIPs; the daemon sends the router-LL + pool half of the
 			// shared target set so both modes announce identically.
-			d.sendVRRPModeNonVIPAnnounce(rgID)
+			// Via the converger so a cluster-first activation (which
+			// already claimed this epoch on the cluster arm) does not
+			// double-burst, and vice versa.
+			d.convergeLegacyNonVIPAnnounce(rgID)
 			d.applyRethServicesForRG(rgID)
 			// #16690: legacy VRRP edge consumed the transition;
 			// reconcile will see Changed=false and skip gating.
@@ -1611,6 +1622,10 @@ func (d *Daemon) reconcileRGState() {
 			// (pre-fix) or a sync-hold mirror refresh whose transition
 			// syncRGSyncHold discarded. No-op once converged.
 			d.convergeRethServices(rgID)
+			// #17052: same lost-edge repair for the non-VIP announce:
+			// covers sync-hold release and any producer whose edge was
+			// consumed before it could run. No-op once claimed.
+			d.convergeLegacyNonVIPAnnounce(rgID)
 		}
 		// Stable link-local: ensure correct on EVERY reconcile tick.
 		// The kernel preserves NODAD addresses across daemon restarts,

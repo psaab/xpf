@@ -356,7 +356,10 @@ func (vi *vrrpInstance) sendGARPReservedMode(vips []string, epoch, ownerGen uint
 			GARP: garpBurstFn, NA: naBurstFn, Probe: arpProbeFn,
 		})
 		announced := res.Sent > 0 // GARP/NA first-frame success only (probe never counts)
-		if ip.To4() != nil && target.ProbeIP != nil && announced {
+		// Probe-success Info fires on probe success alone (#17052 M3):
+		// the probe exists for routers that ignore broadcast GARP, so
+		// requiring announced would silence exactly the rebind that worked.
+		if ip.To4() != nil && target.ProbeIP != nil && res.ProbeSucceeded {
 			slog.Info("vrrp: probed subnet gateway",
 				"key", vi.key(), "gw", target.ProbeIP, "interface", vi.cfg.Interface)
 		}
