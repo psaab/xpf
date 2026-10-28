@@ -10,8 +10,7 @@
 // dump stays gated on `XPF_DEBUG_NEIGHBOR_KEYS`, bindings are refreshed
 // before the queue/per-binding projections, and worker snapshots are read
 // before the aggregates derived from them. No added coordinator
-// traversal, status clone, or allocation. Bodies byte-for-byte identical
-// to the pre-split source.
+// traversal, status clone, or allocation.
 
 use super::summarize_queues;
 use crate::afxdp;
@@ -924,7 +923,7 @@ pub(crate) fn finish_binding_reconcile(
     prior: BindingArmSnapshot,
     settle: bool,
     persist_state: &mut bool,
-    settle_wait: &mut Option<Duration>,
+    deferred: &mut Option<crate::server::handlers::Deferred>,
 ) {
     if let Err(err) = reconcile_status_bindings(guard) {
         response.ok = false;
@@ -937,7 +936,7 @@ pub(crate) fn finish_binding_reconcile(
         return;
     }
     if settle {
-        *settle_wait = Some(Duration::from_secs(2));
+        *deferred = Some(crate::server::handlers::Deferred::Settle(Duration::from_secs(2)));
     }
     refresh_status(guard);
     *persist_state = true;
