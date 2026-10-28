@@ -237,25 +237,28 @@ func routeFilterPermitLine(isV6 bool, rf *config.RouteFilter) (string, bool) {
 // `walkup` qualifier, which xpf does not model, changes that). FRR
 // prefix-lists are ordered first-match, so authoring-order permits gave
 // walkup/OR semantics instead (#16762). This layout restores
-// longest-match: sort permits by descending base-prefix length (stable,
-// so equal-length filters keep authoring order) and, after each
-// distinct prefix P, interpose `deny P le <max>` — but only when some
-// other renderable filter's base CONTAINS P, i.e. only when a route
-// under P that failed P's match type could otherwise fall through to
-// that broader permit. The failed route then first-matches the deny
-// and stops, exactly as Junos' failed longest match fails the term's
-// route-filter condition. P == the family root never gets a stop (no
-// broader filter can contain it). Single, disjoint, and same-base
-// lists therefore render byte-identically to the historical render, so
-// the common cases (including hierarchical `from` condition copies,
-// #11779) are untouched.
+// longest-match: when one base strictly contains another, sort permits
+// by descending base-prefix length (stable, so equal-length filters
+// keep authoring order) and, after each distinct prefix P, interpose a
+// deny covering P through the family maximum (`deny P le <max>`, or
+// bare `deny P` when P is already /32 or /128 because FRR requires
+// `le` to exceed the base length). A route under P that failed P's
+// match type then first-matches the deny and stops instead of falling
+// through to the broader permit.
+// Disjoint bases have no longest-match precedence over each other, so
+// a wholly disjoint list retains authored order and bytes. P == the
+// family root never gets a stop (no broader filter can contain it).
+// Same-base lists (including hierarchical `from` condition copies,
+// #11779) also retain authored order and bytes.
 
-// routeFilterLayoutEntry16762 is one renderable route-filter.
+// routeFilterLayoutEntry16762 is one renderable route-filter or a valid
+// empty max-length `longer` boundary whose prefix still participates in
+// longest-match selection.
 type routeFilterLayoutEntry16762 struct {
 	rf     *config.RouteFilter
-	ipnet  *net.IPNet // parsed base prefix (nil when unparsable)
-	plen   int        // base prefix length, -1 when unknown
-	permit string     // routeFilterPermitLine body, no trailing newline
+	ipnet  *net.IPNet // parsed base prefix
+	plen   int        // base prefix length
+	permit string     // routeFilterPermitLine body, empty only for a boundary
 }
 
 // parseRouteFilterPrefix16762 parses a route-filter's base CIDR once.
@@ -344,11 +347,12 @@ func routeFilterBaseContains16762(outer, inner *net.IPNet) bool {
 
 // renderRouteFilterListGroup renders the FINAL prefix-list entries for
 // one term-family group (or single-family term) into definitions and
-// reports whether it emitted, plus the match family of the FIRST
-// emitted entry for the single-sequence case. The per-entry permits
-// come from the SAME routeFilterDerivation16762 seam as
-// renderRouteFilterEntry, so every historical skip rule (#2072 /
-// #2103 / #2105 / #2525) is judged here, never re-derived.
+// reports how many permits it emitted, plus the match family of the FIRST
+// emitted entry for the single-sequence case. The per-entry permits come
+// from the SAME routeFilterDerivation16762 seam as renderRouteFilterEntry,
+// so every historical skip rule (#2072 / #2103 / #2105 / #2525) is judged
+// here, never re-derived. A valid empty max-length `longer` is retained
+// as a boundary even though that seam correctly emits no permit for it.
 func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs []indexedRouteFilter, seqFam string) (emitted int, firstIsV6 bool) {
 	if len(rfs) == 0 {
 		return 0, false
@@ -361,25 +365,55 @@ func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs
 			isV6 = strings.Contains(irf.rf.Prefix, ":")
 		}
 		body, ok := routeFilterPermitLine(isV6, irf.rf)
-		if !ok {
-			continue
-		}
 		ipnet, plen := parseRouteFilterPrefix16762(irf.rf.Prefix)
+		if !ok {
+			maxLen := 32
+			if isV6 {
+				maxLen = 128
+			}
+			// A max-length `longer` is a valid empty match set, but its
+			// prefix remains the longest matching boundary. Keep it in
+			// the layout so the stop-deny below prevents fall-through to
+			// any broader permit. All other skipped entries remain
+			// absent: malformed/unhandled entries must never create a
+			// boundary or affect valid siblings.
+			if irf.rf.MatchType != "longer" || ipnet == nil || plen != maxLen {
+				continue
+			}
+		}
+		permit := ""
+		if ok {
+			permit = strings.TrimSuffix(body, "\n")
+		}
 		entries = append(entries, routeFilterLayoutEntry16762{
-			rf: irf.rf, ipnet: ipnet, plen: plen,
-			permit: strings.TrimSuffix(body, "\n"),
+			rf: irf.rf, ipnet: ipnet, plen: plen, permit: permit,
 		})
 	}
 	if len(entries) == 0 {
 		return 0, false
 	}
 	firstIsV6 = strings.Contains(entries[0].rf.Prefix, ":")
-	// Longest-match order: descending base length, stable. The emit
-	// loop derives canStillMatch per entry against the FULL set
-	// (broader-or-nil), independent of sorted position.
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].plen > entries[j].plen
-	})
+	// Longest-match requires inner bases before their broader containers.
+	// If no containment exists, preserve the authored order: sorting
+	// disjoint prefixes would change bytes and sequence numbers despite
+	// having no effect on route matching.
+	hasContainment := false
+	for i := range entries {
+		for j := range entries {
+			if routeFilterBaseContains16762(entries[i].ipnet, entries[j].ipnet) {
+				hasContainment = true
+				break
+			}
+		}
+		if hasContainment {
+			break
+		}
+	}
+	if hasContainment {
+		sort.SliceStable(entries, func(i, j int) bool {
+			return entries[i].plen > entries[j].plen
+		})
+	}
 	seq := 0
 	for i := range entries {
 		e := entries[i]
@@ -389,18 +423,22 @@ func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs
 			kind = "ipv6"
 			maxLen = 128
 		}
-		fmt.Fprintf(definitions, "%s prefix-list %s seq %d %s\n", kind, frrName(plName), (seq+1)*5, e.permit)
-		seq++
-		emitted++
+		if e.permit != "" {
+			fmt.Fprintf(definitions, "%s prefix-list %s seq %d %s\n", kind, frrName(plName), (seq+1)*5, e.permit)
+			seq++
+			emitted++
+		}
 		if e.ipnet == nil || e.plen <= 0 {
 			continue
 		}
-		// canStillMatch: a renderable entry whose base CONTAINS this
-		// base (a nil-base entry renders orlonger-by-default, so it
-		// could still match and also forces the stop) would otherwise
+		// canStillMatch: a permit whose base CONTAINS this base (a
+		// nil-base permit conservatively forces a stop) would otherwise
 		// catch a route under this base whose match type failed.
 		canStillMatch := false
 		for j := range entries {
+			if entries[j].permit == "" {
+				continue
+			}
 			if entries[j].ipnet == nil {
 				canStillMatch = true
 				break
@@ -426,7 +464,15 @@ func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs
 		if !lastOfBase {
 			continue
 		}
-		fmt.Fprintf(definitions, "%s prefix-list %s seq %d deny %s le %d\n", kind, frrName(plName), (seq+1)*5, sanitizeFRRValue(e.rf.Prefix), maxLen)
+		if e.plen == maxLen {
+			// FRR rejects `le max` when the base is already /32 or
+			// /128. The bare deny is exactly the same set (the base
+			// prefix itself) and is needed for a max-length `longer`
+			// boundary whose match set is empty.
+			fmt.Fprintf(definitions, "%s prefix-list %s seq %d deny %s\n", kind, frrName(plName), (seq+1)*5, sanitizeFRRValue(e.rf.Prefix))
+		} else {
+			fmt.Fprintf(definitions, "%s prefix-list %s seq %d deny %s le %d\n", kind, frrName(plName), (seq+1)*5, sanitizeFRRValue(e.rf.Prefix), maxLen)
+		}
 		seq++
 	}
 	return emitted, firstIsV6
@@ -439,10 +485,12 @@ func renderRouteFilterListGroup(definitions *strings.Builder, plName string, rfs
 // prefix-length-range, or an invalid upto. It is the single source of
 // truth for "this entry's match set is unknowable", shared by the config
 // quarantine and the FRR term rule (#14137) so the two cannot drift.
-// A max-length `longer` (or /128) is NOT skipped here: that entry is
-// valid with an honestly empty match set, so the term rule must not
-// broaden it to deny-all — renderRouteFilterEntry still writes no line
-// for it and the undefined-list match stays NOMATCH for both actions.
+// A max-length `longer` is NOT skipped here: it is a valid route-filter
+// with an honestly empty match set, not an invalid entry or deny-all.
+// renderRouteFilterEntry still writes no line for it; the term-level
+// longest-match layout may retain its base solely as a stop boundary
+// when it is nested under a broader permit. A lone empty entry therefore
+// keeps the undefined-list NOMATCH behavior for both actions.
 func routeFilterEntrySkipped(rf *config.RouteFilter) bool {
 	return config.RouteFilterEntrySkipped(rf)
 }

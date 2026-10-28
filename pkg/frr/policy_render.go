@@ -1338,25 +1338,24 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// reaches here (see below).
 				matchV6 := seqFam == "v6"
 				matchFamilyKnown := seqFam != ""
-				// emitted counts the prefix-list entries actually written.
-				// A #2103-skipped (/32 longer, empty set) entry writes NO
-				// "ip prefix-list" line, so the list may end up with zero
-				// entries — and we intentionally never materialise a
-				// count==0 list (FRR treats a count==0 prefix-list as
+				// emitted counts permit entries, not synthetic stop-deny
+				// entries. A #2103-skipped (/32 longer, empty set) writes
+				// no permit. If no permits remain, no definitions are
+				// materialised (FRR treats a zero-entry prefix-list as
 				// PREFIX_PERMIT / match-ALL). Sequences reaching here are
 				// never all-INVALID (#14137 diverts those groups to
-				// deny-all / skip in the dispatch), so a zero-entry list
-				// here is a legitimately empty set: the match line still
-				// references the (then-undefined) list name, which FRR
-				// resolves to NULL → RMAP_NOMATCH, so the term matches
-				// NOTHING. Suppressing the match line would leave a bare
-				// "route-map … permit <seq>" with no match clauses, which
-				// FRR treats as match-ALL — flipping "/32 longer" from the
-				// empty set to permit-everything (Copilot #2110).
-				// #16762: renderRouteFilterListGroup re-sequences the
-				// permits longest-match-first and interposes stops; a
-				// zero-entry result keeps the historical undefined-list
-				// NOMATCH behaviour below, so no special-casing here.
+				// deny-all / skip in the dispatch), so a zero-permit list
+				// is a legitimately empty set: the match line still
+				// references the undefined list name, which FRR resolves
+				// to NULL → RMAP_NOMATCH. Suppressing that match line would
+				// leave a bare "route-map … permit <seq>" with no match
+				// clauses, which FRR treats as match-ALL — flipping
+				// "/32 longer" from empty to permit-everything (#2110).
+				// #16762: renderRouteFilterListGroup orders nested
+				// permits longest-match-first (leaving unrelated bases
+				// in authored order) and interposes stops; a zero-permit
+				// result keeps the historical undefined-list NOMATCH
+				// behaviour below, so no special-casing here.
 				// First-parseable sets the family hint when nothing
 				// emitted; the first emitted entry overrides it — the
 				// same precedence the pre-#16762 loop used.
