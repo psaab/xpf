@@ -998,7 +998,6 @@ pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
 /// group), so its verdicts are the production verdicts, never a fourth
 /// hand-copied body.
 #[cfg(test)]
-#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn host_inbound_admits_iface(
     state: &ForwardingState,
     ingress_ifindex: i32,
