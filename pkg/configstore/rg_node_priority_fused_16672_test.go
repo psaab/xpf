@@ -60,3 +60,34 @@ func TestRGFusedNodePriorityStoreCommit16672(t *testing.T) {
 		}
 	})
 }
+
+// #17820 acceptance at the operator boundary: every RG node statement must
+// carry its own explicit priority. The #16672 control above proves that
+// separate statements with priorities still commit through Store.Commit.
+func TestRGBareNodePriorityStoreCommit17820(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"bare node 0", `node 0;`},
+		{"bare node 1", `node 1;`},
+		{"bare beside explicit node", `node 1; node 0 priority 200;`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			if err := s.EnterConfigure(); err != nil {
+				t.Fatalf("EnterConfigure: %v", err)
+			}
+			defer s.ExitConfigure()
+			text := strings.Replace(rgFused16672Store, "%s", tc.body, 1)
+			if err := s.LoadOverride(text); err != nil {
+				t.Fatalf("LoadOverride: %v", err)
+			}
+			if _, err := s.Commit(); err == nil ||
+				!strings.Contains(err.Error(), "#17820") ||
+				!strings.Contains(err.Error(), "missing required `priority`") {
+				t.Fatalf("Store.Commit must reject bare RG node %q for missing priority (#17820), got: %v", tc.body, err)
+			}
+		})
+	}
+}
