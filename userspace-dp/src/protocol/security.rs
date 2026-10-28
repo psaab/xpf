@@ -666,7 +666,7 @@ pub(crate) struct PolicyApplicationSnapshot {
     /// `None`/0 means "use the global per-protocol `SessionTimeouts`" — the
     /// historical behavior. When a session is admitted by a policy whose matched
     /// application term carries this, the dataplane stamps it on the session and
-    /// the conntrack GC ages the session out on this value instead of the global
+    /// the helper's expiry ages the session out on this value instead of the global
     /// TCP/UDP/ICMP timeout (closing the legacy-eBPF `appTimeout` parity
     /// regression). `#[serde(default)]` makes an old Go snapshot that omits the
     /// field decode to `None` (use-global — today's behavior), and

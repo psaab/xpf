@@ -870,6 +870,30 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				return out
 			},
 		},
+		// #17172: the ipsec-parent DPD now opts in via gatewaySchemaNode,
+		// so the #8768 registry (keyed by schema path, asserted both ways)
+		// demands its own fixtures — same statements/read as the ike copy.
+		"security/ipsec/gateway/dead-peer-detection": {
+			prefix: "security { ipsec { gateway g1 { ",
+			open:   "dead-peer-detection",
+			closer: " } } }",
+			stmts: map[string]string{
+				"interval":  "interval 10",
+				"threshold": "threshold 3",
+			},
+			second: map[string]string{
+				"interval":  "interval 20",
+				"threshold": "threshold 5",
+			},
+			read: func(c *Config) string {
+				out := ""
+				for _, g := range c.Security.IPsec.Gateways {
+					out += fmt.Sprintf("dpdOn=%v mode=%q int=%d thr=%d",
+						g.DPDEnable, g.DeadPeerDetect, g.DPDInterval, g.DPDThreshold)
+				}
+				return out
+			},
+		},
 		// #8850 opted both address books in so a packed run of entries splits
 		// per statement instead of folding into one and swallowing every entry
 		// after the first. Both admitted leaves are compared, per this cell's

@@ -118,7 +118,7 @@ func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 	if _, err := d.commitConfirmedAndApply(context.Background(), configstore.InternalCommitter(), 1, peerSyncNever); !errors.Is(err, errDaemonResetting) {
 		t.Fatalf("commitConfirmedAndApply must be rejected during a factory reset; got %v", err)
 	}
-	if _, err := d.syncAndApply(context.Background(), "", nil); !errors.Is(err, errDaemonResetting) {
+	if _, err := d.syncAndApplyForTest(context.Background(), "", nil); !errors.Is(err, errDaemonResetting) {
 		t.Fatalf("syncAndApply must be rejected during a factory reset; got %v", err)
 	}
 	// The central reconcile is also gated (defense-in-depth).
