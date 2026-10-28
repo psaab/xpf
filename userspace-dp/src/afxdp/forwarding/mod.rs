@@ -49,9 +49,14 @@ pub(super) fn zone_pair_for_flow(
 
 // #17240: test-only String adapter over the production u32 resolver.
 // Single source of truth is `zone_pair_ids_for_flow_with_override`;
-// this only maps ids to names (and an override name to its id), so it
-// cannot drift from the production resolver as the former hand-rolled
-// twin did (#6713).
+// the to-zone (and the from-zone when there is no override) comes from
+// that resolver's ids mapped back through `zone_id_to_name`, so it
+// cannot drift from production as the former hand-rolled twin did
+// (#6713). An override name is NOT round-tripped through
+// name -> id -> name: the deleted twin returned every `Some(zone)`
+// verbatim, and a hand-built non-bijective test state (alias name,
+// id with no reverse name, id 0) must observe that same verbatim
+// string, not the canonical name / "" the round-trip would produce.
 #[cfg(test)]
 pub(super) fn zone_pair_for_flow_with_override(
     forwarding: &ForwardingState,
@@ -59,14 +64,8 @@ pub(super) fn zone_pair_for_flow_with_override(
     ingress_zone_override: Option<&str>,
     egress_ifindex: i32,
 ) -> (String, String) {
-    let override_id =
-        ingress_zone_override.and_then(|zone| forwarding.zone_name_to_id.get(zone).copied());
-    let (from_id, to_id) = zone_pair_ids_for_flow_with_override(
-        forwarding,
-        ingress_ifindex,
-        override_id,
-        egress_ifindex,
-    );
+    let (from_id, to_id) =
+        zone_pair_ids_for_flow_with_override(forwarding, ingress_ifindex, None, egress_ifindex);
     let name = |id: u32| match id {
         0 => String::new(),
         id => forwarding
@@ -75,10 +74,12 @@ pub(super) fn zone_pair_for_flow_with_override(
             .cloned()
             .unwrap_or_default(),
     };
-    // An override name with no id must round-trip, not resolve via ifindex.
+    // `Some(zone)` returns the override verbatim (deleted-twin contract);
+    // only the `None` path resolves via ifindex -> id -> name, where
+    // id 0 / a missing reverse name yields "" exactly as the twin did.
     let from_zone = match ingress_zone_override {
-        Some(zone) if override_id.is_none() => zone.to_string(),
-        _ => name(from_id),
+        Some(zone) => zone.to_string(),
+        None => name(from_id),
     };
     (from_zone, name(to_id))
 }
