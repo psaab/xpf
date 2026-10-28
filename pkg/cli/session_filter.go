@@ -774,40 +774,78 @@ func (f *sessionFilter) resolveEgressIfaces(fibIfindex uint32, fibVlanID uint16,
 	return f.zoneIfaces[egressZone]
 }
 
-func buildPeerShowRequest(f sessionFilter) *pb.GetSessionsRequest {
-	req := &pb.GetSessionsRequest{Limit: 10000}
+// toSelector is the single translation from the parsed local filter to
+// the wire selector fields shared by GetSessionsRequest and
+// GetSessionSummaryRequest (#17189). The conditional blocks are the
+// filter's presence semantics — a zero field means "no filter" — except
+// protocol, where hasProto keeps protocol 0 (HOPOPT) present as the
+// string "0" instead of dropping it to the wildcard. Field-wise rather
+// than a struct copy: protobuf messages embed lock state.
+//
+// The returned value is a plain struct, not a proto message, so each
+// request builder assigns its own message's fields from it exactly once;
+// ClearSessionsRequest is NOT built from it because it renames/retypes
+// two fields (see buildPeerClearRequest).
+type sessionSelector struct {
+	zone              uint32
+	protocol          string
+	hasProtocol       bool
+	sourcePrefix      string
+	destinationPrefix string
+	sourcePort        uint32
+	destinationPort   uint32
+	natOnly           bool
+	application       string
+	interfaceFilter   string
+	sourceNatPool     string
+}
+
+// toSelector projects the parsed filter onto sessionSelector (#17189).
+func (f sessionFilter) toSelector() sessionSelector {
+	var sel sessionSelector
 	if f.zoneID != 0 {
 		// Zone IDs are config-compile-derived and config is synced
 		// across the cluster, so the peer resolves the same ID.
-		req.Zone = uint32(f.zoneID)
+		sel.zone = uint32(f.zoneID)
 	}
 	if f.hasProto {
-		req.Protocol = strings.ToUpper(protoNameFromNum(f.proto))
+		sel.protocol = strings.ToUpper(protoNameFromNum(f.proto))
+		sel.hasProtocol = true
 	}
 	if f.srcNet != nil {
-		req.SourcePrefix = f.srcNet.String()
+		sel.sourcePrefix = f.srcNet.String()
 	}
 	if f.dstNet != nil {
-		req.DestinationPrefix = f.dstNet.String()
+		sel.destinationPrefix = f.dstNet.String()
 	}
 	if f.srcPort != 0 {
-		req.SourcePort = uint32(f.srcPort)
+		sel.sourcePort = uint32(f.srcPort)
 	}
 	if f.dstPort != 0 {
-		req.DestinationPort = uint32(f.dstPort)
+		sel.destinationPort = uint32(f.dstPort)
 	}
-	if f.natOnly {
-		req.NatOnly = true
+	sel.natOnly = f.natOnly
+	sel.application = f.appName
+	sel.interfaceFilter = f.iface
+	sel.sourceNatPool = f.snatPool
+	return sel
+}
+
+func buildPeerShowRequest(f sessionFilter) *pb.GetSessionsRequest {
+	sel := f.toSelector()
+	req := &pb.GetSessionsRequest{Limit: 10000}
+	req.Zone = sel.zone
+	if sel.hasProtocol {
+		req.Protocol = sel.protocol
 	}
-	if f.appName != "" {
-		req.Application = f.appName
-	}
-	if f.iface != "" {
-		req.InterfaceFilter = f.iface
-	}
-	if f.snatPool != "" {
-		req.SourceNatPool = f.snatPool
-	}
+	req.SourcePrefix = sel.sourcePrefix
+	req.DestinationPrefix = sel.destinationPrefix
+	req.SourcePort = sel.sourcePort
+	req.DestinationPort = sel.destinationPort
+	req.NatOnly = sel.natOnly
+	req.Application = sel.application
+	req.InterfaceFilter = sel.interfaceFilter
+	req.SourceNatPool = sel.sourceNatPool
 	return req
 }
 
@@ -900,40 +938,24 @@ func peerSessionsTotal(resp *pb.GetSessionsResponse) int32 {
 }
 
 // buildPeerSummaryRequest translates the local session filter into the
-// peer summary request (#15236 A52-04), mirroring buildPeerShowRequest so the
-// peer counts only filter-matching sessions.
+// peer summary request (#15236 A52-04) from the same toSelector
+// projection as buildPeerShowRequest (#17189), so the peer counts only
+// filter-matching sessions.
 func buildPeerSummaryRequest(f sessionFilter) *pb.GetSessionSummaryRequest {
+	sel := f.toSelector()
 	req := &pb.GetSessionSummaryRequest{}
-	if f.zoneID != 0 {
-		req.Zone = uint32(f.zoneID)
+	req.Zone = sel.zone
+	if sel.hasProtocol {
+		req.Protocol = sel.protocol
 	}
-	if f.hasProto {
-		req.Protocol = strings.ToUpper(protoNameFromNum(f.proto))
-	}
-	if f.srcNet != nil {
-		req.SourcePrefix = f.srcNet.String()
-	}
-	if f.dstNet != nil {
-		req.DestinationPrefix = f.dstNet.String()
-	}
-	if f.srcPort != 0 {
-		req.SourcePort = uint32(f.srcPort)
-	}
-	if f.dstPort != 0 {
-		req.DestinationPort = uint32(f.dstPort)
-	}
-	if f.natOnly {
-		req.NatOnly = true
-	}
-	if f.appName != "" {
-		req.Application = f.appName
-	}
-	if f.iface != "" {
-		req.InterfaceFilter = f.iface
-	}
-	if f.snatPool != "" {
-		req.SourceNatPool = f.snatPool
-	}
+	req.SourcePrefix = sel.sourcePrefix
+	req.DestinationPrefix = sel.destinationPrefix
+	req.SourcePort = sel.sourcePort
+	req.DestinationPort = sel.destinationPort
+	req.NatOnly = sel.natOnly
+	req.Application = sel.application
+	req.InterfaceFilter = sel.interfaceFilter
+	req.SourceNatPool = sel.sourceNatPool
 	return req
 }
 
