@@ -324,10 +324,12 @@ The WG arm now derives the outer MTU from the PHYSICAL underlay via
 `frame::wg_endpoint_physical_outer_mtu`, a thin wrapper over the same #2680
 `outer_physical_egress_mtu` SSOT the encap guard uses.
 Corrected formula: advertised inner MTU = `wg_inner_mtu(outer_family,
-physical_underlay_mtu)` = `physical_mtu − WG_OVERHEAD_{V4,V6}` (the
-§5.4.6 pad is capped at that budget since #16499, so no worst-pad term)
-— EXACTLY the inverse of `wg_encapped_size` the encap guard
-admits against, so the PTB and the guard now agree. GRE is unaffected:
+physical_underlay_mtu)`, the outer-derived budget with no worst-pad
+subtraction, clamped by `WG_ENGINE_MAX_INNER_MTU = 4096` (#2457).
+This is the combined limit of the outer-MTU fit checked by
+`wg_encapped_size` and the engine ceiling; when the ceiling binds (e.g.
+outer 9000/v4), the PTB advertises 4096 rather than the guard's
+outer-fit budget of 8940. GRE is unaffected:
 its `endpoint.destination` is the real outer hop, so `tunnel_outer_mtu`
 already resolves to the physical underlay for `native_gre_inner_mtu`.
 

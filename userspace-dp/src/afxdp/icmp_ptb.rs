@@ -291,9 +291,10 @@ pub(in crate::afxdp) fn post_transform_needs_inner_dst(
 ///     the engine ceiling `WG_ENGINE_MAX_INNER_MTU` (4096, #2457): when
 ///     the clamp binds (e.g. outer 9000/v4: 8940 -> 4096) the clamped
 ///     4096-byte inner encapps to 4156, NOT to the 9000-byte outer MTU.
-///     This is the inverse of the `frame::wg::wg_encapped_size` drop
-///     guard, so the advertised inner MTU matches the threshold the
-///     guard admits (#2684). NOT `tunnel_outer_mtu`: for a WG flow
+///     This is the inverse of the guard's outer-MTU-fit threshold; the
+///     engine ceiling is an independent bound, so the advertised inner
+///     MTU matches their combined limit (#2684), not the frame guard alone.
+///     NOT `tunnel_outer_mtu`: for a WG flow
 ///     `endpoint.destination` is zeroed, so that helper falls back to
 ///     the LOGICAL ifindex MTU (already underlay − encap) and
 ///     double-subtracts the encap overhead.
