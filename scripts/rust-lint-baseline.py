@@ -10,8 +10,10 @@ profile. Keeping the profiles as separate keys stops release-profile
 growth from being laundered by a test-profile cleanup in the summed
 census. A census that comes back empty (or below MIN_CENSUS pairs) fails
 closed: a broken toolchain invocation must not look like a clean tree.
+Each profile must additionally be non-empty on its own: a combined-only
+floor would let a fully-empty release or tests census pass (rc=0, no
+warnings) whenever the other profile alone carried >= MIN_CENSUS pairs.
 Decreases are reported (baseline can be regenerated with --write) but do
-not fail, so burn-down PRs stay green.
 """
 import argparse, collections, json, subprocess, sys, os
 from pathlib import Path
@@ -80,6 +82,14 @@ def main():
     total = collections.Counter(); locs = {}
     for profile, extra in PROFILES:
         c, l = census(profile, extra)
+        if not c:
+            print(
+                f"rust-lint-baseline FAILED: census for profile {profile!r} "
+                "is empty (0 (profile,lint,file) pairs); refusing to pass "
+                "on an empty/broken per-profile census",
+                file=sys.stderr,
+            )
+            return 1
         total.update(c)
         for k, v in l.items(): locs.setdefault(k, []).extend(v)
     if len(total) < MIN_CENSUS_PAIRS:

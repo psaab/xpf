@@ -595,7 +595,8 @@ test-rust: lint-rust-baseline check-userspace-dt-needed
 clippy-rust:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D unfulfilled_lint_expectations
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -A clippy::duplicate_mod
-# #17190: rustc warning ratchet — fail on any new/increased (lint,file) warning
+# #17190: rustc warning ratchet — fail on any new/increased (profile,lint,file) warning
+
 # vs userspace-dp/lint-baseline.tsv. Mechanical lints are also #![deny] in
 # src/main.rs and src/bin/fairness-eval.rs. Runs the pinned toolchain via
 # RUSTUP_TOOLCHAIN (the census script invokes cargo in argv form, so a
