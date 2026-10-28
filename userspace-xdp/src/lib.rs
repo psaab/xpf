@@ -783,9 +783,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // subprogram call — see `land_gate` below. As two inline matches
     // over `land_disposition_for_packet` (here + ctrl-disabled) LLVM
     // duplicated the WG-key construction and both map walks under
-    // every calling state; the historical #15854 measurement was 963340
-    // processed insns: 3.67% below the 1,000,000 kernel cap, but 113340
-    // above the 850,000-instruction install floor, so it fails the margin gate.
+    // every calling state. The outlined gate shares this work across
+    // paths; the current measurement is in
+    // pkg/dataplane/userspace_xdp_gate_verdict.json, with object/source
+    // hashes in pkg/dataplane/userspace_xdp_manifest.json. Regenerate with
+    // `make generate-userspace-xdp` (which runs cmd/shimverify).
     if land_gate(&parsed, ingress_ifindex) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_LAND_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
@@ -841,15 +843,14 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // checks the READY flag, reads the heartbeat and applies the
     // timeout, returning the slot packed with a failure code. The
     // four failure arms that used to sit inline here each carried a
-    // trace call plus a degraded-local check, and the verifier
-    // re-walked the packed trace callee under every one of those
-    // calling states (keeping the four traces separate measured
-    // 953428 processed insns; this merged form measures ~816k — see
-    // docs/log/15854.md). The merged arm below preserves each
-    // failure's stage, reason and trace slot exactly (u32::MAX for a
-    // missing binding, the resolved slot otherwise) and the same
-    // degraded-local pass/drop decision; only the trace call is
-    // shared. The #5173 call-site count moves 12 -> 9 with it.
+    // trace call plus a degraded-local check, and the verifier re-walked
+    // the packed trace callee under each calling state. Sharing the call
+    // preserves each failure's stage, reason, trace slot (u32::MAX for a
+    // missing binding, resolved slot otherwise), and degraded-local
+    // pass/drop decision. The current measurement is in
+    // pkg/dataplane/userspace_xdp_gate_verdict.json, with hashes in
+    // pkg/dataplane/userspace_xdp_manifest.json; regenerate with
+    // `make generate-userspace-xdp` (which runs cmd/shimverify).
     let ready = binding_ready_slot(ingress_ifindex, rx_queue, ctrl.heartbeat_timeout_ms);
     let ready_code = (ready >> 32) as u32;
     let ready_slot = ready as u32;
@@ -2475,8 +2476,10 @@ fn parse_ipv6(
         parse_l4(data, data_end, offset, protocol, data_end)?;
     // #10662: keep the capture-bound L4 parse EXACTLY as before. Passing a
     // declared bound through parse_l4 multiplied verifier states past the
-    // kernel cap while the control build fit comfortably (dated figures in
-    // #10998, not here: absolute counts rot every merge). This single
+    // kernel cap while the control build fit comfortably (current figures
+    // in pkg/dataplane/userspace_xdp_gate_verdict.json, with hashes in
+    // pkg/dataplane/userspace_xdp_manifest.json; regenerate with
+    // `make generate-userspace-xdp`, which runs cmd/shimverify). This single
     // post-check compares only the consumed packet-relative L4 end; the
     // scalar truncation verdict never becomes a new packet bound or enters
     // the heavy parse.
@@ -2598,13 +2601,14 @@ fn should_fallback_early(pkt: &ParsedPacket) -> bool {
 //
 // #15854: this replaces the two inline `is_land` + match blocks
 // (healthy + ctrl-disabled) over a separate outlined resolver. The
-// inline matches duplicated the key construction and both map walks
-// under every calling state — the #15843 regression that took the
-// tracked object from 920733 to 963340 processed insns (3.67%
-// headroom) and over the guest kernel's 1M cap. One outlined call
-// per path is the record_trace_packed (#15645) shape: the verifier
-// walks the gate once. Do not re-inline without re-measuring
-// through cmd/shimverify.
+// inline matches duplicated the key construction and both map walks under
+// every calling state. One outlined call per path shares the work, in the
+// `record_trace_packed` (#15645) shape: the verifier walks the gate once.
+// Current verifier results are in pkg/dataplane/userspace_xdp_gate_verdict.json,
+// with object/source hashes in pkg/dataplane/userspace_xdp_manifest.json.
+// Regenerate with `make generate-userspace-xdp` (which runs cmd/shimverify).
+// docs/log/15854.md holds the dated history only. Do not re-inline without
+// re-measuring through cmd/shimverify.
 #[inline(never)]
 fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     if !is_land(&pkt.src_addr, &pkt.dst_addr) {
@@ -2642,8 +2646,11 @@ fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
 // shape): this resolver's WG-key construction and two map reads
 // were inlined at both call sites (WG steer + worker claim) and
 // re-walked under every calling state. One subprogram walk instead;
-// measured with the LAND/binding outlines in docs/log/15854.md.
-// Do not re-inline without re-measuring through cmd/shimverify.
+// measured with the LAND/binding outlines. Current results are in
+// pkg/dataplane/userspace_xdp_gate_verdict.json (hashes in
+// pkg/dataplane/userspace_xdp_manifest.json); regenerate with
+// `make generate-userspace-xdp` (which runs cmd/shimverify). Do not re-inline
+// without re-measuring through cmd/shimverify.
 #[inline(never)]
 fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     if pkt.protocol != PROTO_UDP || pkt.flow_dst_port == 0 {
@@ -2889,7 +2896,10 @@ fn first_fragment_l4(
 /// sent someone to reason against a moved figure, which is most of what that
 /// issue cost. State relationships that do not move instead: carrying fits,
 /// consuming does not, and the install-blocking ceiling is the 15% floor, not
-/// the 1M cap. The current dated measurement lives in #10998, not here.
+/// the 1M cap. Current results are in
+/// pkg/dataplane/userspace_xdp_gate_verdict.json (object/source hashes in
+/// pkg/dataplane/userspace_xdp_manifest.json); regenerate with
+/// `make generate-userspace-xdp` (which runs cmd/shimverify).
 /// `declared_end` (#9901, F-075) is the caller's bound on how far L4 reads
 /// may go — the IPv4 declared-datagram end, a pure scalar. Every arm below
 /// scalar-checks its span against it BEFORE reading; the reads themselves
