@@ -156,10 +156,10 @@ func (c *ctl) handleShow(args []string) error {
 		// table/instance/protocol selector, an unknown subcommand, and any
 		// unrecognised trailing token must error instead of widening to
 		// showRoutes() (route-all, the full table) or silently dropping the
-		// trailing token. The usage string is duplicated verbatim from
-		// pkg/cli (showRouteUsage); the two binaries cannot share the const
-		// without an import cycle through the CLI package.
-		const showRouteUsage = "usage: show route [<destination> [exact|longer|orlonger]] | show route [terse|detail|summary|fib] | show route table <name> | show route instance <name> | show route protocol <name>"
+		// trailing token. The usage string is cliterm.ShowRouteUsage
+		// (#17230), shared with pkg/cli via the dependency-light package
+		// both binaries already import.
+		showRouteUsage := cliterm.ShowRouteUsage
 		if len(args) == 1 {
 			return c.showRoutes()
 		}

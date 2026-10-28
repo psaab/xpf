@@ -30,7 +30,11 @@ import (
 // boxing bug cannot be reintroduced from this side.
 //
 // COUNT NOTE. The #7280 baseline predates the #11566 never-seen sync-freshness
-// hook. Keep every currently reported hook in the explicit list below.
+// hook. #17056 removed the timeout-guard, heartbeat-recovered and
+// never-seen hooks entirely: the Manager now owns the suppression policy
+// and reads one published sync source (SyncSourceInstalled, asserted in
+// the wiring test below). Keep every currently reported hook in the
+// explicit list below.
 
 // A fresh manager must report every hook UNINSTALLED.
 //
@@ -89,9 +93,6 @@ func allWiredHooks7280() []string {
 		cluster.HookPreManualFailover,
 		cluster.HookLocalTransferCommitRdy,
 		cluster.HookTransferReadiness,
-		cluster.HookPeerTimeoutGuard,
-		cluster.HookPeerNeverSeenSyncFresh,
-		cluster.HookPeerHeartbeatRecovered,
 		cluster.HookHeartbeatRestartNotify,
 		cluster.HookPeerFence,
 		cluster.HookPeerFenceConfirm,
@@ -118,9 +119,6 @@ func TestWireClusterPeerFailoverHooksInstallsManagerHooks_7280(t *testing.T) {
 		cluster.HookPreManualFailover,
 		cluster.HookLocalTransferCommitRdy,
 		cluster.HookTransferReadiness,
-		cluster.HookPeerTimeoutGuard,
-		cluster.HookPeerNeverSeenSyncFresh,
-		cluster.HookPeerHeartbeatRecovered,
 		cluster.HookHeartbeatRestartNotify,
 	} {
 		if !got[name] {
@@ -136,6 +134,16 @@ func TestWireClusterPeerFailoverHooksInstallsManagerHooks_7280(t *testing.T) {
 	// value rather than merely "non-zero" is what makes this bind the
 	// expression and not just the call: the field is never nil, so a
 	// non-zero check would pass on the clamp floor alone.
+	// #17056: the sync source is a published reference, not a hook. The
+	// wiring must install it, and a fresh Manager must report it absent —
+	// the same false-before-wiring discipline as InstalledHooks above.
+	if !d.cluster.SyncSourceInstalled() {
+		t.Error("wireClusterPeerFailoverHooks did not publish the peer sync source via SetPeerSyncSource (#17056)")
+	}
+	if newClusterManager(true).SyncSourceInstalled() {
+		t.Error("a freshly constructed Manager reports a peer sync source already published; the seam cannot distinguish wired from unwired (#17056)")
+	}
+
 	if want := 2*d.localFailoverCommitTimeout + 20*time.Second; d.cluster.RemoteTransferOutLease() != want {
 		t.Errorf("RemoteTransferOutLease = %v, want %v — the daemon's computed "+
 			"lease did not reach the Manager (#7280)",

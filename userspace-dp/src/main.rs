@@ -31,7 +31,6 @@ mod test_zone_ids;
 mod test_ports;
 mod state_writer;
 mod tcp_flags;
-#[allow(dead_code)]
 mod xsk_ffi;
 
 // #9726: build.rs's linked-library checks. build.rs includes the same file with
