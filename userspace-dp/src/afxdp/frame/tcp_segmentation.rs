@@ -116,66 +116,10 @@ pub(in crate::afxdp) fn finalize_tcp_segment_headers(
     Some(())
 }
 
+
+
+
 pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    apply_nat_on_fabric: bool,
-    expected_ports: Option<(u16, u16)>,
-) -> Option<Vec<Vec<u8>>> {
-    segment_forwarded_tcp_frames_from_frame_with_commit(
-        frame,
-        meta,
-        decision,
-        forwarding,
-        apply_nat_on_fabric,
-        expected_ports,
-    )
-    .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
-}
-
-pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_dynamic(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    apply_nat_on_fabric: bool,
-    expected_ports: Option<(u16, u16)>,
-    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<Vec<Vec<u8>>> {
-    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
-        frame,
-        meta,
-        decision,
-        forwarding,
-        apply_nat_on_fabric,
-        expected_ports,
-        dynamic_neighbors,
-    )
-    .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
-}
-
-pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    apply_nat_on_fabric: bool,
-    expected_ports: Option<(u16, u16)>,
-) -> Option<Vec<(Vec<u8>, Option<super::wg::WgEncapCommit>)>> {
-    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
-        frame,
-        meta,
-        decision,
-        forwarding,
-        apply_nat_on_fabric,
-        expected_ports,
-        None,
-    )
-}
-
-pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,
     decision: &SessionDecision,
@@ -211,11 +155,11 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit_and_
     // build segments the encap guard then drops. Mirror the PTB SSOT
     // (`icmp_ptb::tunnel_inner_mtu`, #2684/#2845): select the same peer from
     // the frame's inner destination (post-NAT when the decision rewrites
-    // it — the encap builder LPMs the post-NAT frame) and size from
-    // `wg_endpoint_physical_outer_mtu` with that peer's family. No usable
-    // inner destination / no covering peer keeps the physical helper's
-    // first-peer/logical fallback, byte-identical in the single-underlay
-    // common case.
+    // it — the encap builder LPMs the post-NAT frame) and use the family/MTU
+    // pair returned by `wg_selected_peer_outer`, which resolves that peer's
+    // physical route. No usable inner destination / no covering peer keeps
+    // that helper's first-peer/logical fallback, byte-identical in the
+    // single-underlay common case.
     let inner_dst_for_wg = if decision.resolution.tunnel_endpoint_id != 0 {
         // The encap path reads the POST-NAT inner frame; the decision's
         // rewrite (when it applies to this packet) is therefore the key the
@@ -263,7 +207,7 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames_from_frame_with_commit_and_
                     .tunnel_endpoints
                     .get(&decision.resolution.tunnel_endpoint_id)?;
                 let (outer_family, outer_mtu) =
-                    crate::afxdp::frame::wg_selected_peer_outer_with_dynamic(
+                    crate::afxdp::frame::wg_selected_peer_outer(
                         decision,
                         forwarding,
                         endpoint,
@@ -548,8 +492,7 @@ pub(in crate::afxdp) fn segment_forwarded_tcp_frames(
         decision,
         forwarding,
         false,
-        expected_ports,
-    )
+        expected_ports, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
 }
 
 /// Emit the AF_INET per-segment L3/L4 finalization for one segmented TCP
@@ -750,7 +693,7 @@ fn encap_tunnel_segment(
             encapsulate_native_gre_frame(frame_out, meta, decision, forwarding)
                 .map(|frame| (frame, None))
         }
-        Some(TunnelKind::WireGuard) => wg::wg_encap_frame_with_commit_and_dynamic(
+        Some(TunnelKind::WireGuard) => wg::wg_encap_frame(
             frame_out,
             meta,
             decision,
@@ -1043,12 +986,13 @@ mod mode_aware_segmentation_tests {
             .counters()
             .encap_packets
             .load(std::sync::atomic::Ordering::Relaxed);
-        let segments = segment_forwarded_tcp_frames_from_frame_with_commit(
+        let segments = segment_forwarded_tcp_frames_from_frame(
             &frame,
             meta_v4(),
             &decision,
             &state,
             false,
+            None,
             None,
         )
         .expect("WG segmentation must produce frames");
@@ -1132,8 +1076,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        )
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .expect("GRE segmentation must produce frames");
         assert!(segments.len() > 1);
         // GRE outer is IPv4 (fixture outer_family inet): eth(14) + IPv4(20)
@@ -1187,8 +1130,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        )
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .expect("GRE segmentation must produce frames");
         assert!(segments.len() > 1);
 
@@ -1236,8 +1178,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        )
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .expect("WG segmentation must produce frames");
         for seg in &segments {
             assert_eq!(&seg[12..14], &[0x08, 0x00], "WG v4 outer ethertype");
@@ -1273,8 +1214,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        );
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
         assert!(
             out.is_none(),
             "unknown tunnel mode must fail closed (drop), not GRE-encap"
@@ -1300,8 +1240,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        );
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
         assert!(
             out.is_none(),
             "missing tunnel endpoint row must fail closed (drop)"
@@ -1392,8 +1331,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        )
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .expect("plain IPv4 segmentation must produce frames");
         assert!(
             segments.len() >= 2,
@@ -1659,8 +1597,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        )
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .expect("declared 1440 > 1280 MTU must segment");
         assert!(segments.len() >= 2, "1440 over 1280 MTU splits");
         let mut total_payload = 0usize;
@@ -1700,8 +1637,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        )
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .expect("declared 1460 > 1280 MTU must segment");
         assert!(segments.len() >= 2, "1460 over 1280 MTU splits");
         let mut total_payload = 0usize;
@@ -1746,8 +1682,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        );
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
         assert!(
             out.is_none(),
             "a declaration shorter than the IP+TCP headers must fail closed (not segment)"
@@ -1784,8 +1719,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        )
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .expect("declared 1468 > 1280 MTU must segment");
         assert!(segments.len() >= 2, "1468 over 1280 MTU splits");
         // The IP header of every segment is fixed(40) + hop-by-hop(8).
@@ -1857,8 +1791,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        );
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
         assert!(
             out.is_none(),
             "a v6 declaration shorter than the IP+TCP headers must fail closed (not segment)"
@@ -1932,8 +1865,7 @@ mod mode_aware_segmentation_tests {
             &decision,
             &state,
             false,
-            None,
-        )
+            None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .expect("WG segmentation must produce frames for the selected v6 peer");
         assert!(segments.len() > 1);
         let want = crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET6, 1500);
@@ -2019,12 +1951,11 @@ mod mode_aware_segmentation_tests {
                 &decision,
                 &state,
                 false,
-                None,
-            )
+                None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
             .is_none(),
             "without the dynamic map, segmented WG encap must fail closed (#13978 preserved)"
         );
-        let segments = segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+        let segments = segment_forwarded_tcp_frames_from_frame(
             &frame,
             meta_v4(),
             &decision,
@@ -2242,7 +2173,7 @@ mod mode_aware_segmentation_tests {
         meta.l4_offset = (14 + 40 + 12) as u16;
         assert!(ipv6_ah_sighted(&frame, libc::AF_INET6 as u8, 14));
         assert!(
-            segment_forwarded_tcp_frames_from_frame(&frame, meta, &decision, &state, false, None,)
+            segment_forwarded_tcp_frames_from_frame(&frame, meta, &decision, &state, false, None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
                 .is_none(),
             "AH-bearing TCP must not be segmented"
         );

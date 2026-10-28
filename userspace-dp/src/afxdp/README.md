@@ -1144,15 +1144,14 @@ sync.
     unknown tunnel kind) fails open to `Forward`.
     **Per-peer WG underlay (#2845):** for WireGuard the underlay MTU is
     NOT one-per-interface — different peers of one wg endpoint can have
-    different endpoints / transport routes / underlay MTUs. The dispatcher
-    threads the pre-encap inner destination into `post_transform_inner_mtu`,
-    which passes it to `frame::wg_endpoint_physical_outer_mtu`. That helper
-    selects the SAME peer the encap path will (`engine.peer_for_dest` —
-    AllowedIPs LPM on the inner destination) and resolves the physical
-    underlay MTU via THAT peer's endpoint route, so the advertised inner PMTU
-    matches the underlay the encap guard will actually admit the packet onto.
-    When the inner destination is unavailable, no live engine is present, or
-    no peer covers it, it falls back to the first peer with an endpoint (the
+    different endpoints / transport routes / underlay MTUs. `post_transform_inner_mtu`
+    threads the pre-encap inner destination to `frame::wg_selected_peer_outer`,
+    which selects the SAME peer as the encap path (`engine.peer_for_dest` —
+    AllowedIPs LPM on the inner destination) and resolves that peer's physical
+    underlay route. The pad-aware WG inner-MTU calculation therefore matches
+    the underlay the encap guard will actually admit the packet onto. When the
+    inner destination is unavailable, no live engine is present, or no peer
+    covers it, selection falls back to the first peer with an endpoint (the
     pre-#2845 per-interface behaviour — byte-identical when all peers share
     one underlay). A covering peer with NO endpoint resolves to the
     conservative logical-ifindex MTU rather than borrowing a different peer's

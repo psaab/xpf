@@ -34,8 +34,7 @@ fn segment_forwarded_tcp_frames_keeps_fabric_ingress_low_ttl_both_families() {
             &decision,
             &forwarding,
             false, // apply_nat_on_fabric
-            Some((meta.flow_src_port, meta.flow_dst_port)),
-        )
+            Some((meta.flow_src_port, meta.flow_dst_port)), None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .unwrap_or_else(|| {
             panic!(
                 "[{}] fabric-ingress oversized segment with TTL/hop-limit==1 \
@@ -85,8 +84,7 @@ fn segment_forwarded_tcp_frames_drops_non_fabric_low_ttl_both_families() {
             &decision,
             &forwarding,
             false,
-            Some((meta.flow_src_port, meta.flow_dst_port)),
-        );
+            Some((meta.flow_src_port, meta.flow_dst_port)), None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
         assert!(
             result.is_none(),
             "[{}] non-fabric oversized segment with TTL/hop-limit==1 must be \
@@ -115,8 +113,7 @@ fn segment_forwarded_tcp_frames_decrements_non_fabric_healthy_ttl_both_families(
             &decision,
             &forwarding,
             false,
-            Some((meta.flow_src_port, meta.flow_dst_port)),
-        )
+            Some((meta.flow_src_port, meta.flow_dst_port)), None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
         .unwrap_or_else(|| panic!("[{}] healthy-TTL oversized segment must segment", label));
         assert!(segments.len() > 1, "[{}] expected multiple segments", label);
         for seg in &segments {
