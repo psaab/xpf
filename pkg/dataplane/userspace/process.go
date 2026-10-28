@@ -336,6 +336,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 	restartAttempt := m.restartAttemptInProgress
 	entryGen := m.procGen
 	unexpectedExitsAtEntry := m.helperCrashUnexpectedExitsTotal
+	handledExitsAtEntry := m.preRetirementHandledExits
 	defer func() {
 		if retErr != nil {
 			if restartAttempt && pendingCrashRetry && m.proc == nil {
@@ -344,7 +345,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 				// which has already charged and armed its retry. Only a
 				// failed bring-up without a newly observed child exit needs
 				// to charge here.
-				if m.helperCrashUnexpectedExitsTotal == unexpectedExitsAtEntry {
+				if m.helperCrashUnexpectedExitsTotal == unexpectedExitsAtEntry && m.preRetirementHandledExits == handledExitsAtEntry {
 					// A failed retry is observed helper failure, not quiet
 					// time — refresh the anchor so a run of failures cannot
 					// age the window out and journal the next landing as
@@ -352,9 +353,19 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 					m.helperCrashLastAt = time.Now()
 					m.scheduleHelperRestartLocked(m.procGen)
 					m.notifyHelperSupervisorLocked()
+				} else if m.procGen != m.helperCrash.restartGen {
+					// The handler charged B's exit on the generation
+					// stopLocked retired after it; preserve that charge
+					// on the current generation so the restart remains
+					// pending rather than leaving a stale fence.
+					m.rearmHelperRestartLocked()
 				}
 				return
 			}
+			// A failed bring-up never proved its spawned child ready, so
+			// stopLocked did not crash-charge that child's exit; clear
+			// the in-progress marker before the MAJOR-3a rearm below.
+			m.bringUpGen = 0
 			if pendingCrashRetry && m.proc == nil &&
 				m.procGen != m.helperCrash.restartGen {
 				m.rearmHelperRestartLocked()
@@ -492,6 +503,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 	// triggering NAPI which consumes fill ring entries and posts WQEs for
 	// zero-copy.
 	m.scheduleStartupNAPIBootstrapLocked()
+	m.bringUpGen = m.procGen
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(cfg.ControlSocket); err == nil {
@@ -501,6 +513,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 					m.setLastStatusLocked(status)
 				}
 				slog.Info("userspace dataplane helper started", "pid", cmd.Process.Pid, "socket", cfg.ControlSocket)
+				m.bringUpGen = 0
 				m.notifyHelperSupervisorLocked()
 				return nil
 			}
@@ -981,8 +994,19 @@ func (m *Manager) stopLocked() {
 		if g := m.procSup; g != nil && g.gen == m.procGen {
 			select {
 			case <-g.exited:
-				m.handleUnexpectedHelperExitLocked(g)
-				preRetirementCrash = true
+				if g.gen == m.bringUpGen {
+					// #18394: this child was spawned by the in-progress
+					// bring-up and never proved ready, so its exit is
+					// that bring-up's own failure — not a fresh
+					// unexpected exit of a helper that reached
+					// readiness. Do not crash-charge it here; the
+					// deferred failure path preserves any older
+					// pending retry (MAJOR-3a).
+				} else {
+					m.handleUnexpectedHelperExitLocked(g)
+					m.preRetirementHandledExits++
+					preRetirementCrash = true
+				}
 			default:
 			}
 		}
