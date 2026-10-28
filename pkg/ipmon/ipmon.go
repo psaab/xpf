@@ -415,12 +415,15 @@ func (e *Engine) Start() {
 	}
 	e.started = true
 	e.mu.Unlock()
-	// #17226: the loop's run goroutine is unused (this engine drives
-	// Tick itself below), but StartWithContext is what creates the
-	// cancellable actuation context run() passes via e.loop.Context()
-	// — formerly the engine's private cancellable context
-	// (#3758), now owned by the one implementation.
-	e.loop.StartWithContext(context.Background())
+	// #17226: this engine drives Tick itself from run() below — it is
+	// the single actuation goroutine (see run's invariant). The loop
+	// must therefore NOT spawn its own sweep goroutine: use
+	// StartContextOnly, which creates only the cancellable actuation
+	// context (formerly the engine's private #3758 context, now owned
+	// by the one implementation) that run() passes via e.loop.Context().
+	// Starting the loop's run() here as well would tick from TWO
+	// goroutines and enter the actuator concurrently.
+	e.loop.StartContextOnly(context.Background())
 	go e.run()
 }
 
@@ -435,11 +438,11 @@ func (e *Engine) Start() {
 // observe e.stop AFTER the synchronous actuator returns, so if an
 // actuation is blocked (on the apply semaphore or an FRR reload) the
 // wait on e.done would hang forever. e.stop is closed first, then
-// loop.Stop() cancels the actuation context (before its own wait on
-// the loop's unused run goroutine) — that cancel is what unblocks
-// the actuation so this engine's run loop can reach its stop case
-// and close e.done. Both waits happen WITHOUT e.mu held, and a
-// second Stop is a no-op via e.stopped.
+// loop.Stop() cancels the actuation context (the loop is
+// context-only here, so it has no goroutine of its own to join) —
+// that cancel is what unblocks the actuation so this engine's run
+// loop can reach its stop case and close e.done. Both waits happen
+// WITHOUT e.mu held, and a second Stop is a no-op via e.stopped.
 func (e *Engine) Stop() {
 	e.mu.Lock()
 	if e.stopped {
@@ -450,8 +453,8 @@ func (e *Engine) Stop() {
 	started := e.started
 	e.mu.Unlock()
 	close(e.stop)
-	// Cancel the actuation context FIRST (loop.Stop cancels before its
-	// own wait, #17226): this is what unblocks a synchronous actuation
+	// Cancel the actuation context FIRST (loop.Stop cancels before
+	// returning, #17226): this is what unblocks a synchronous actuation
 	// so the run loop below can observe e.stop and close e.done.
 	e.loop.Stop()
 	if started {
