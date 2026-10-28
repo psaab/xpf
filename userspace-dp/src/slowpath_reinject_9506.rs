@@ -29,8 +29,8 @@ pub(crate) const SUBMIT_MAX_DATA_LEN: usize = 65_535;
 pub(crate) const REINJECT_MAX_MSG: usize = 1_048_576;
 /// P-MECH submit tail: snapshot u64 + config u64 + FIB u32 + zone u32 +
 /// if_id u32 + inventory generation u64 + inventory FIB u32 + policy SHA-256
-/// (32 bytes) + absolute CLOCK_MONOTONIC deadline u64 + clock id u8 (79 bytes).
-pub(crate) const SUBMIT_PMECH_TAIL_LEN: usize = 79;
+/// (32 bytes) + absolute CLOCK_MONOTONIC deadline u64 + clock id u8 (81 bytes).
+pub(crate) const SUBMIT_PMECH_TAIL_LEN: usize = 81;
 pub(crate) const PMECH_DEADLINE_MAX_FUTURE_SKEW_NS: u64 = 1_000_000_000;
 pub(crate) const PMECH_DEADLINE_MIN_REMAINING_NS: u64 = 0;
 pub(crate) const PMECH_DEADLINE_CLOCK_MONOTONIC: u8 = 1;

@@ -153,8 +153,8 @@ pub(crate) fn ipsec_inner_counters_snapshot() -> IpsecInnerCounterSnapshot {
 }
 
 
-/// Advisory/generation fields carried in each Go submit row. They occupy 70
-/// of the 79-byte `SUBMIT_PMECH_TAIL_LEN` tail; the other 9 bytes are the
+/// Advisory/generation fields carried in each Go submit row. They occupy 72
+/// of the 81-byte `SUBMIT_PMECH_TAIL_LEN` tail; the other 9 bytes are the
 /// monotonic deadline and its clock id. Go remains the pre-gate authority;
 /// Rust treats every value as advisory and cross-checks it against the exact
 /// tunnel row and the one RuntimeView loaded by the worker tick.
