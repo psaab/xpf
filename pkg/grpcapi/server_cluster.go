@@ -3,13 +3,13 @@ package grpcapi
 import (
 	"context"
 	"fmt"
-	"net"
 	"sort"
 	"strings"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
+	"github.com/psaab/xpf/pkg/feeds"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
 	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/routing"
@@ -150,53 +150,8 @@ func (s *Server) buildInterfacesInput() cluster.InterfacesInput {
 }
 
 func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) (*pb.MatchPoliciesResponse, error) {
-	cfg := s.store.ActiveConfig()
-	if cfg == nil {
-		// #3375: with no active config the verdict is the deterministic
-		// fail-closed default deny — render the same explicit string + typed
-		// default_used bit REST returns, so a gRPC client never sees a BLANK
-		// action and mis-reads the no-config posture as "no answer".
-		nilRes := policymatch.Result{DefaultUsed: true, Action: config.PolicyDeny}
-		return &pb.MatchPoliciesResponse{
-			Action:      nilRes.DisplayAction(),
-			DefaultUsed: true,
-			// #3627 M06: echo the queried zone pair even on the no-config
-			// fail-closed default deny so a stored diagnostic proves which
-			// zone pair produced the verdict.
-			QueriedFromZone: req.FromZone,
-			QueriedToZone:   req.ToZone,
-		}, nil
-	}
-
-	// #3355 (H06): the CLI surfaces (show security match-policies / test
-	// policy) require BOTH zones; gRPC accepted a missing zone and evaluated as
-	// if the empty string were a zone, which the #3355 defined-zone guard would
-	// then send straight to the default-policy — a misleading silent verdict for
-	// what is really a malformed query. Reject it for parity with the CLI.
-	if req.FromZone == "" || req.ToZone == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "from-zone and to-zone are required")
-	}
-
-	// An empty source/destination IP means "unspecified" (match any),
-	// which is a legitimate simulator query. A NON-EMPTY but malformed
-	// value is an operator error: net.ParseIP returns nil and
-	// matchPolicyAddr treats nil as a wildcard, which would yield a
-	// false-positive PERMIT verdict (#1711). Reject it explicitly so the
-	// simulator never silently turns garbage input into "any".
-	if req.SourceIp != "" && net.ParseIP(req.SourceIp) == nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid source-ip %q", req.SourceIp)
-	}
-	if req.DestinationIp != "" && net.ParseIP(req.DestinationIp) == nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid destination-ip %q", req.DestinationIp)
-	}
-
-	parsedSrc := net.ParseIP(req.SourceIp)
-	parsedDst := net.ParseIP(req.DestinationIp)
-
-	// #17081: ports are proto3 optional — absent stays omitted, a present
-	// value (including literal 0) is a concrete port. A negative or >65535
-	// present value cannot describe a real packet and is rejected rather
-	// than coerced to omitted (#3116).
+	// Decode proto optionals (transport-only): present ports/ICMP keep
+	// #17081 literal-zero presence; ranged here, then shared Validate.
 	srcPort, err := grpcPortValue(req.SourcePort)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid source-port: %v", err)
@@ -205,21 +160,6 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid destination-port: %v", err)
 	}
-
-	// A non-empty but unknown/out-of-range protocol token ("tcpp", "999") must
-	// be rejected: constrained terms never match it, while `application any`
-	// would still match and hide the invalid input (#3108). An empty value leaves
-	// the query protocol unspecified; constrained terms never match, while
-	// unconstrained terms may still match.
-	if err := policymatch.ValidateProtocol(req.Protocol); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
-	}
-
-	// #3284: thread the optional ICMP/ICMPv6 type/code into the simulator so a
-	// type-constrained application term (junos-icmp-ping = type 8) matches only
-	// the declared type. The proto3 optional uint32 carries presence; values
-	// outside [0,255] cannot describe a real ICMP packet, so reject them rather
-	// than truncate to 8 bits (which would silently alias e.g. 264->8).
 	icmpType, err := grpcICMPValue(req.IcmpType)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid icmp-type: %v", err)
@@ -228,207 +168,93 @@ func (s *Server) MatchPolicies(_ context.Context, req *pb.MatchPoliciesRequest) 
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid icmp-code: %v", err)
 	}
-
-	// #5579: validate the optional ingress-interface selector against the live
-	// config — it must name an interface assigned to from_zone, and must not be a
-	// management/cluster lifeline (served unconditionally). An unknown /
-	// zone-mismatched / lifeline ref is a fail-closed InvalidArgument, mirroring
-	// the src_ip / port / protocol validators above, so the host-inbound
-	// classifier is only ever scoped to a real interface of the queried zone.
-	if err := dpuserspace.ResolveHostInboundIngressInterface(cfg, req.FromZone, req.IngressInterface); err != nil {
+	r := policymatch.Request{FromZone: req.FromZone, ToZone: req.ToZone, SrcIP: req.SourceIp, DstIP: req.DestinationIp, Protocol: req.Protocol, SrcPort: srcPort, DstPort: dstPort, ICMPType: icmpType, ICMPCode: icmpCode, NonFirstFragment: req.NonFirstFragment, IngressInterface: req.IngressInterface}
+	cfg := s.store.ActiveConfig()
+	// #17198/#18240: shared Evaluate runs config-independent grammar
+	// BEFORE the cfg==nil verdict (#3709 boot window, previously REST-only);
+	// with a live config it also validates ingress_interface (#5579), then
+	// assembles and runs Match; cfg==nil well-formed yields the #3375
+	// default-deny Result rendered below.
+	res, err := policymatch.Evaluate(cfg, r, s.matchLive(cfg))
+	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
+	if cfg == nil {
+		// #3375: deterministic fail-closed default deny + queried zones.
+		return &pb.MatchPoliciesResponse{Action: res.DisplayAction(), DefaultUsed: true, QueriedFromZone: req.FromZone, QueriedToZone: req.ToZone}, nil
+	}
+	// #3042/#17198: shared Evaluate + VerdictFrom own evaluation/projection.
+	return verdictToProto(policymatch.VerdictFrom(res, req.FromZone, req.ToZone), res), nil
+}
 
-	// #3042: delegate to the single shared simulator so gRPC agrees with the
-	// runtime evaluator (exact zone-pair -> wildcard-zone tiers (#3090) ->
-	// scoped global (#3148) -> default-policy, predefined + nested-app-set +
-	// literal-CIDR + any-ipv4/any-ipv6 + exclusion + feed overlay). The
-	// pre-#3042 loop skipped globals, hard-coded "deny (default)", and missed
-	// predefined apps / literal CIDRs.
+// matchLive assembles shared Live inputs (overlay, feed debt, scheduler).
+func (s *Server) matchLive(cfg *config.Config) policymatch.Live {
 	var overlay map[string][]string
 	if s.feedOverlayFn != nil {
 		overlay = s.feedOverlayFn()
 	}
-	var publicationDebt map[string]bool
+	live := policymatch.Live{FeedOverlay: overlay, PolicyInactiveForFn: s.policyInactiveForFn(cfg)}
 	if s.feedsFn != nil {
-		for name, info := range s.feedsFn() {
-			if info.PublicationDebt {
-				if publicationDebt == nil {
-					publicationDebt = make(map[string]bool)
-				}
-				publicationDebt[name] = true
-			}
-		}
+		live.Feeds = policymatch.FeedInfos(s.feedsFn(), func(i feeds.FeedInfo) bool { return i.PublicationDebt })
 	}
-	res := policymatch.Match(cfg, policymatch.Query{
-		FromZone: req.FromZone,
-		ToZone:   req.ToZone,
-		SrcIP:    parsedSrc,
-		DstIP:    parsedDst,
-		// #6377: colon-strict text family from the RAW request string so the
-		// unsupported-tuple gate does not fold an IPv4-mapped IPv6 source to v4
-		// (net.ParseIP has discarded the ':' above).
-		SrcFamily: config.NATAddrFamily(req.SourceIp),
-		DstFamily: config.NATAddrFamily(req.DestinationIp),
-		Protocol:  req.Protocol,
-		SrcPort:   srcPort,
-		DstPort:   dstPort,
-		ICMPType:  icmpType,
-		ICMPCode:  icmpCode,
-		// #5572: a non-first IP fragment (no L4 header) is the flowless packet
-		// shape the dataplane calls l4_present == false; the simulator then
-		// reproduces the #4569 fragment-associated deny. false (default) is a
-		// normal L4-present packet, so an existing client is unchanged.
-		NonFirstFragment: req.NonFirstFragment,
-		// #5579: scope the host-inbound classifier to this ingress interface's
-		// effective view (validated above). "" = zone-scoped, unchanged.
-		IngressInterface:    req.IngressInterface,
-		FeedOverlay:         overlay,
-		FeedPublicationDebt: publicationDebt,
-		// #3104: skip scheduler-inactive policies like the runtime does, so the
-		// simulator falls through to the next active rule / default-policy.
-		PolicyInactiveForFn: s.policyInactiveForFn(cfg),
-	})
-	// #3285: a `to-zone junos-host` query that matched no host-bound policy is
-	// NOT a transit default — the dataplane host gate returns None (local
-	// delivery; no global/default fallback). Signal it explicitly so the client
-	// does not render a misleading default-policy verdict for the host path.
-	if res.ContentRejected {
-		// #3727: the dataplane fails this config closed (unexpandable
-		// application-set) and enforces none of its policies. Render the SSOT
-		// fail-closed action string (self-describing) so a gRPC client does not
-		// read a fabricated permit/deny/default verdict. Matched/DefaultUsed stay
-		// false. #14362: also set the typed content_rejected flag so the remote
-		// CLI can branch on the posture without string-parsing `action` (the
-		// reasons are surfaced in full on the REST and `test policy` text
-		// surfaces).
-		return &pb.MatchPoliciesResponse{
-			PostNatInputNote: res.PostNATInputNote,
-			Matched:          false,
-			ContentRejected:  true,
-			Action:           res.DisplayAction(),
-			QueriedFromZone:  req.FromZone,
-			QueriedToZone:    req.ToZone,
-		}, nil
+	return live
+}
+
+// verdictToProto copies the shared Verdict (#17198) onto the proto response,
+// preserving per-branch wire semantics (PolicyId only on match #3623,
+// ContentRejectionReasons REST/local-only per #14362 note in git history).
+func verdictToProto(v policymatch.Verdict, res policymatch.Result) *pb.MatchPoliciesResponse {
+	out := &pb.MatchPoliciesResponse{
+		PostNatInputNote: v.PostNATInputNote, Matched: v.Matched, Action: v.Action,
+		QueriedFromZone: v.QueriedFromZone, QueriedToZone: v.QueriedToZone,
 	}
-	if res.V4MappedCompatIngressDrop {
-		// #16803: the dataplane drops a v4-mapped/compatible IPv6 tuple at
-		// ingress before policy (#10686) — set the typed flag + the SSOT
-		// action string so a gRPC client does not read a fabricated
-		// permit/deny/default verdict. Matched/DefaultUsed stay false.
-		return &pb.MatchPoliciesResponse{
-			PostNatInputNote:          res.PostNATInputNote,
-			Matched:                   false,
-			V4MappedCompatIngressDrop: true,
-			Action:                    res.DisplayAction(),
-			QueriedFromZone:           req.FromZone,
-			QueriedToZone:             req.ToZone,
-		}, nil
+	if v.HostInboundStatus != "" {
+		out.HostInbound = hostInboundToProto(res.HostInbound)
 	}
-	if res.HostInboundUnmatched {
-		// #3375: render the same explanatory action string REST returns instead
-		// of leaving it blank, so a gRPC client showing `action` directly gets a
-		// self-describing host-inbound verdict (DisplayAction is the SSOT shared
-		// with REST). Matched stays false and there is no default-policy fallback.
-		return &pb.MatchPoliciesResponse{
-			PostNatInputNote:     res.PostNATInputNote,
-			Matched:              false,
-			HostInboundUnmatched: true,
-			Action:               res.DisplayAction(),
-			// #3627 M06: echo the queried zone pair on the host-inbound path so
-			// the diagnostic names the tested zones (the host gate returns no
-			// matched-policy scope to fill from_zone/to_zone).
-			QueriedFromZone: req.FromZone,
-			QueriedToZone:   req.ToZone,
-			// #3627 B1a: name the admitting host-inbound-traffic token (or report
-			// deny / global-accept / indeterminate) so a gRPC client sees WHICH
-			// system-service/protocol governs local delivery for this tuple, the
-			// same detail the local CLI prints (#4352). nil off-host / not-computed.
-			HostInbound: hostInboundToProto(res.HostInbound),
-		}, nil
+	switch {
+	case v.ContentRejected:
+		out.ContentRejected = true
+		out.UnsupportedTupleFamily = v.UnsupportedTupleFamily
+		out.V4MappedCompatIngressDrop = v.V4MappedCompatIngressDrop
+	case v.V4MappedCompatIngressDrop:
+		out.V4MappedCompatIngressDrop = true
+		out.UnsupportedTupleFamily = v.UnsupportedTupleFamily
+	case v.HostInboundUnmatched:
+		out.HostInboundUnmatched = true
+	case !v.Matched:
+		out.DefaultUsed = v.DefaultUsed
+		out.UnzonedIngress = v.UnzonedIngress
+		out.HostOriginated = v.HostOriginated
+		out.UnzonedEgress = v.UnzonedEgress
+		out.UnsupportedTupleFamily = v.UnsupportedTupleFamily
+		out.FeedPublicationDebt = v.FeedPublicationDebt
+		out.FeedPublicationDebtFeeds = v.FeedPublicationDebtFeeds
+		out.FeedPublicationDebtNote = v.FeedPublicationDebtNote
+		out.RouteDropBeforePolicy = v.RouteDropBeforePolicy
+		out.RouteDropClass = v.RouteDropClass
+		out.RouteDropNote = v.RouteDropNote
+	default:
+		out.PolicyName = v.PolicyName
+		out.Global = v.Global
+		out.FromZone = v.FromZone
+		out.ToZone = v.ToZone
+		out.PolicyId = proto.Uint32(v.PolicyID)
+		out.RuleId = v.RuleID
+		out.SourceAddressExcluded = v.SourceAddressExcluded
+		out.DestinationAddressExcluded = v.DestinationAddressExcluded
+		out.Description = v.Description
+		out.SchedulerName = v.SchedulerName
+		out.SchedulerActive = v.SchedulerActive
+		out.SrcAddresses = v.SrcAddresses
+		out.DstAddresses = v.DstAddresses
+		out.Applications = v.Applications
+		out.RouteDropBeforePolicy = v.RouteDropBeforePolicy
+		out.RouteDropClass = v.RouteDropClass
+		out.RouteDropNote = v.RouteDropNote
+		out.FragmentAssociatedDeny = v.FragmentAssociatedDeny
+		out.FragmentDenyNote = v.FragmentDenyNote
 	}
-	if !res.Matched {
-		return &pb.MatchPoliciesResponse{
-			PostNatInputNote:         res.PostNATInputNote,
-			Matched:                  false,
-			Action:                   res.DisplayAction(),
-			DefaultUsed:              res.DefaultUsed,
-			UnzonedIngress:           res.UnzonedIngress,
-			HostOriginated:           res.HostOriginated,
-			UnzonedEgress:            res.UnzonedEgress,
-			UnsupportedTupleFamily:   res.UnsupportedTupleFamily,
-			FeedPublicationDebt:      res.FeedPublicationDebt,
-			FeedPublicationDebtFeeds: res.FeedPublicationDebtNames,
-			FeedPublicationDebtNote:  res.FeedPublicationDebtNote(),
-			// #3627 M06: echo the queried zone pair on no-match/default and
-			// unzoned paths, which carry no matched-policy scope.
-			QueriedFromZone: req.FromZone,
-			QueriedToZone:   req.ToZone,
-			// #4373 (E4/H2/H7): a multicast/broadcast/unspecified/loopback
-			// destination is dropped at route before policy, so even the default
-			// verdict does not describe real forwarding — carry the advisory.
-			RouteDropBeforePolicy: res.RouteDropBeforePolicy,
-			RouteDropClass:        res.RouteDropClass,
-			RouteDropNote:         res.RouteDropNote(),
-		}, nil
-	}
-	return &pb.MatchPoliciesResponse{
-		PostNatInputNote: res.PostNATInputNote,
-		Matched:          true,
-		PolicyName:       res.PolicyName,
-		Global:           res.Global,
-		FromZone:         res.FromZone,
-		ToZone:           res.ToZone,
-		// #3627 M06: also echo the queried zone pair on a positive match. It is
-		// the query context, distinct from from_zone/to_zone (the matched
-		// policy's declared scope), which can differ for a wildcard-zone or
-		// global match.
-		QueriedFromZone: req.FromZone,
-		QueriedToZone:   req.ToZone,
-		// #3623: proto3 explicit presence — set only on a match, so a matched
-		// first policy (runtime id 0) is distinguishable on the wire from an
-		// unmatched response (field absent). The two early returns above leave
-		// PolicyId unset for the unmatched / host-inbound cases.
-		PolicyId: proto.Uint32(res.PolicyID),
-		// #3668: the stable rule identity (inventory join key) + the
-		// source/destination address-exclusion flags so a positive verdict for a
-		// negated-address rule conveys the exclusion instead of reading backwards.
-		RuleId:                     res.RuleID,
-		SourceAddressExcluded:      res.SourceAddressExcluded,
-		DestinationAddressExcluded: res.DestinationAddressExcluded,
-		// #3685 M05: the matched policy's description (ticket / change context),
-		// mirroring the inventory and local CLI result over the same
-		// policymatch.Result.
-		Description: res.Description,
-		// #3685 M06: name the scheduler time-gate. A matched policy is eligible
-		// in the helper-accepted snapshot; under the fail-closed latch a
-		// scheduled DENY/REJECT may remain eligible with an inactive scheduler
-		// map entry (#17837). SchedulerActive is true only for a scheduled policy.
-		SchedulerName:   res.SchedulerName,
-		SchedulerActive: res.SchedulerName != "",
-		Action:          res.DisplayAction(),
-		SrcAddresses:    res.SrcAddresses,
-		DstAddresses:    res.DstAddresses,
-		Applications:    res.Applications,
-		// #3627 B1a: a matched `to-zone junos-host` policy still passes through
-		// the separate host-inbound-traffic admission gate, so carry the
-		// classifier verdict here too (present for any host-bound query; nil for
-		// a transit/global match, which has no host gate).
-		HostInbound: hostInboundToProto(res.HostInbound),
-		// #4373 (E4/H2/H7): a matched policy for a multicast/broadcast/
-		// unspecified/loopback destination still does not forward — the flow is
-		// dropped at route before policy. Carry the advisory so a positive match
-		// verdict is not read as real forwarding.
-		RouteDropBeforePolicy: res.RouteDropBeforePolicy,
-		RouteDropClass:        res.RouteDropClass,
-		RouteDropNote:         res.RouteDropNote(),
-		// #5572: a non-first fragment whose permit was overridden to an
-		// overlapping port-bearing deny carries the advisory so a gRPC client
-		// explains the over-drop identically to the CLI + REST surfaces. The
-		// response is already attributed to the enforcing deny above.
-		FragmentAssociatedDeny: res.FragmentAssociatedDeny,
-		FragmentDenyNote:       res.FragmentDenyNote(),
-	}, nil
+	return out
 }
 
 // grpcPortValue converts an optional proto3 int32 port field into the

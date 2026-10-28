@@ -203,8 +203,11 @@ running heartbeat onto the defaults just as a changed value does.
   `SetLocalTransferCommitReadyHook`,
   `SetPeerFailoverFunc`, `SetPeerFailoverCommitFunc`,
   `SetPeerFailoverBatchFunc`,
-  `SetPeerFailoverCommitBatchFunc`, `SetPeerFenceFunc`,
-  `SetPeerTimeoutGuard`) — `hooks.go`.
+  `SetPeerFailoverCommitBatchFunc`, `SetPeerFenceFunc`) — `hooks.go`.
+- Peer sync source (`SetPeerSyncSource`, `SyncSourceInstalled`) —
+  `heartbeat_suppress.go`. The daemon publishes one SessionSync reference;
+  the suppression policy, 5s cap stamp and heartbeat-admission reset live
+  there under `Manager.mu` (#17056).
 - Event-history methods (`RecordEvent`, `EventHistoryFor`) —
   `events_log.go`. Underlying types and `EventHistory` ring
   buffer — `events.go`.
@@ -532,7 +535,7 @@ starts (`armRestart`):
 After that, the ordinary `threshold*interval` staleness applies. A live peer
 whose heartbeats are briefly lost past the restart grace is still covered by the
 sync-recency guard that `handlePeerTimeout` consults
-(`shouldSuppressPeerHeartbeatTimeout`, #1792).
+(`syncSuppressesPeerTimeoutLocked`, #1792/#17056).
 
 Two receivers are never armed and keep the cold-boot floor on both arms:
 - a replacement for a receiver that had NEVER seen the peer;
@@ -997,7 +1000,7 @@ it too.
 
 **This is a FLAG DAY.** A pre-#7163 peer sends the old HELLO, which is not a
 valid Noise message, so the handshake fails and the connection drops.
-`SessionSyncWireVersion` is bumped 1 → 2 so `GateMixedBaseSwap` refuses a
+`SessionSyncWireVersion` is bumped 1 → 2 so the mixed-base gate (`GateProtocolCompat`, via `_gate_mixed_base`) refuses a
 mixed-base swap up front instead of letting an operator discover it as a fabric
 that will not come up. `CurrentHAProtocolVersion` is deliberately NOT bumped:
 that would additionally refuse the peer over heartbeat/failover semantics this
@@ -3548,7 +3551,7 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   No `SessionSyncWireVersion` / `CurrentHAProtocolVersion` bump, for the same
   reason as #2239 and #6650 below: `MinCompatHAProtocolVersion ==
   CurrentHAProtocolVersion`, so the accepted window is a single point and a
-  bump would make `GateMixedBaseSwap` refuse the rolling upgrade.
+  bump would make `GateProtocolCompat` refuse the rolling upgrade.
 - **The ack means peer-CONFIRMED, not received.** It is written only after the
   receiver's `fenceAllRedundancyGroups` returns, and reports what that
   achieved. The decoder REFUSES a short frame rather than zero-filling it:
@@ -3965,7 +3968,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
 - Heartbeat staleness is interval × threshold: runtime defaults are 100ms × 5
   = 500ms, and the deployed lab config is 200ms × 5 = 1s. Those raw thresholds
   do not describe silent-node-death detection while session sync stays
-  connected: `shouldSuppressPeerHeartbeatTimeout` suppresses a timeout when
+  connected: `syncSuppressesPeerTimeoutLocked` suppresses a timeout when
   last peer sync traffic is ≤2s old, capped at 5s continuous suppression.
   Silent death with an established sync connection is approximately
   max(threshold, remaining sync-recency window) plus up to one heartbeat tick:
@@ -3975,7 +3978,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   defer handling. These are detection times, not end-to-end restoration SLAs
   (`pkg/cluster/heartbeat.go:61-65,1916-1960`;
   `pkg/cluster/heartbeat_manager.go:790-832`;
-  `pkg/daemon/daemon_ha_sync.go:170-206`;
+  `pkg/cluster/heartbeat_suppress.go`;
   `docs/ha-cluster-userspace.conf:71-72`).
 - Interface/IP monitoring is separate: a 1s poll requires 3 consecutive
   failed checks to mark down, with a default 5s hold-down after a state
@@ -4607,19 +4610,22 @@ it.
 - Dual-active overlap is intentional: primary sets `rg_active=true`
   immediately on becoming master; secondary defers `rg_active=false` until
   it sees the VRRP BACKUP event. Brief overlap, never both inactive.
-- `handlePeerTimeout` runs its peer-timeout guard (`peerTimeoutGuardFn`) with
-  `m.mu` released, so the receiver read path can run `handlePeerHeartbeat`
-  during the call for ANY guard duration (a configured slow guard only widens
-  the window). After the guard it re-checks heartbeat STALENESS via
-  `peerHeartbeatFreshLocked`, not just `peerAlive` (#2080): a heartbeat that
-  lands during the guard window keeps `peerAlive` true but is a fresh
-  heartbeat, so the only correct post-guard question is "is the heartbeat
-  fresh again?". `peerHeartbeatFreshLocked`
-  re-reads the receiver's `lastSeen` against the live monotonic clock (test
-  seam: `peerHeartbeatFreshFn`); a fresh heartbeat aborts the peer-lost
-  transition and prevents spurious failover churn. A nil receiver / unset seam
-  reports not-fresh, so the no-receiver call paths behave exactly as before the
-  re-check existed.
+- `handlePeerTimeout` decides sync-recency suppression under `m.mu` from
+  the published sync source (`syncSuppressesPeerTimeoutLocked`, #17056);
+  there is no guard callback and no unlock/relock around the decision.
+  Heartbeat admission clears the cap stamp in the same critical section,
+  and every per-connection reconnect dispatch on the published source
+  (`OnPeerReconnected`, bound by `SetPeerSyncSource`) clears it too, so a
+  reconnect on the same `SessionSync` object starts a fresh 5s window.
+  Before the suppression decision it re-checks heartbeat STALENESS via
+  `peerHeartbeatFreshLocked`, not just `peerAlive` (#2080): a heartbeat
+  admitted before the timeout runs keeps `peerAlive` true and is fresh,
+  so the only correct question at that point is "is the heartbeat fresh
+  again?". `peerHeartbeatFreshLocked` re-reads the receiver's `lastSeen`
+  against the live monotonic clock (test seam: `peerHeartbeatFreshFn`);
+  a fresh heartbeat aborts the peer-lost transition and prevents spurious
+  failover churn. A nil receiver / unset seam reports not-fresh, so the
+  no-receiver call paths behave exactly as before the re-check existed.
 
   **#6198/#6666 correction:** the BPF-ABI `SessionID` was described here as
   `now<<16|slot` — a composition #6198 removed (it collapsed every session

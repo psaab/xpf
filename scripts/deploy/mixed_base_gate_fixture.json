@@ -1,0 +1,18 @@
+{
+  "description": "Shared mixed-base protocol gate vectors (#17091). One rule, two executors: GateProtocolCompat in pkg/upgrade (LANE-1 via targetWireVerdict, PermitUnknownWire; also the documented source of truth) and _gate_mixed_base in scripts/deploy/xpf-deploy.py (LANE-2, RefuseUnknownWire). 'target' is the post-cut binary/image constants; 'missing' lists target keys absent from its protocol-versions/manifest (the gate must fail closed as a target error). 'policy' is refuse|permit (the unknown-wire policy). 'expected' is survive|refuse|error: error = the check cannot run (nil/missing target); refuse = ran and judged incompatible. Consumed by TestMixedBaseGateFixture17091 (Go) and MixedBaseFixture17091Tests (Python). The Python executor judges from string dicts, so peer values arrive as strings; a negative peer wire exercises its _u16 rejection, which the Go side cannot represent in uint16 (Go parse-side rejection is pinned separately by TestParseImageVersions_NegativeSessionSync_FailsClosed). Do NOT retype these vectors into either test — edit this file and both executors together.",
+  "cases": [
+    {"name": "peer-in-window-sync-match", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 1, "peer_wire": 3, "policy": "refuse", "expected": "survive"},
+    {"name": "same-version-peer", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 2, "peer_wire": 3, "policy": "refuse", "expected": "survive"},
+    {"name": "unknown-peer-ha", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 0, "peer_wire": 3, "policy": "refuse", "expected": "refuse"},
+    {"name": "peer-below-floor", "target": {"ha": 2, "floor": 2, "sync": 3}, "peer_ha": 1, "peer_wire": 3, "policy": "refuse", "expected": "refuse"},
+    {"name": "peer-newer-than-target", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 3, "peer_wire": 3, "policy": "refuse", "expected": "refuse"},
+    {"name": "sync-mismatch", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 1, "peer_wire": 4, "policy": "refuse", "expected": "refuse"},
+    {"name": "unknown-wire-refuse-policy", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 1, "peer_wire": 0, "policy": "refuse", "expected": "refuse"},
+    {"name": "unknown-wire-permit-policy", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 1, "peer_wire": 0, "policy": "permit", "expected": "survive"},
+    {"name": "unknown-wire-permit-still-requires-window", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 3, "peer_wire": 0, "policy": "permit", "expected": "refuse"},
+    {"name": "unknown-wire-permit-still-requires-known-ha", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 0, "peer_wire": 0, "policy": "permit", "expected": "refuse"},
+    {"name": "missing-target-sync", "target": {"ha": 2, "floor": 1, "sync": 3}, "missing": ["session-sync-protocol-version"], "peer_ha": 1, "peer_wire": 3, "policy": "refuse", "expected": "error"},
+    {"name": "nil-target", "target": null, "peer_ha": 1, "peer_wire": 3, "policy": "refuse", "expected": "error"},
+    {"name": "negative-peer-wire", "target": {"ha": 2, "floor": 1, "sync": 3}, "peer_ha": 1, "peer_wire": -1, "policy": "refuse", "expected": "refuse", "python_only": true}
+  ]
+}

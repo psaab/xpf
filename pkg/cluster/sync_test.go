@@ -4297,7 +4297,7 @@ func TestSendFailoverIgnoresStaleAckForEarlierRequest(t *testing.T) {
 	firstReqID := binary.LittleEndian.Uint64(payload[1:9])
 
 	ss.failoverWaitMu.Lock()
-	delete(ss.failoverWaiters, 9)
+	delete(ss.failoverWaiters, failoverWaitKey{partition: failoverWaitRequest, key: "9", single: true})
 	ss.failoverWaitMu.Unlock()
 
 	done2 := make(chan error, 1)

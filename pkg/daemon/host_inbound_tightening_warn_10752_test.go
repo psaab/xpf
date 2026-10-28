@@ -1338,7 +1338,7 @@ func TestApplyAndSyncCommittedWarnsTighteningStranded10752(t *testing.T) {
 	d.recordKeptSuspicious10752(map[netip.Addr]keptAddrEvidence{
 		netip.MustParseAddr("198.51.100.9"): kept10752(99, []string{"stale"}, 0, nil),
 	})
-	got, err := d.applyAndSyncCommitted(oldActive, compiled, peerSyncNever)
+	got, err := d.applyAndSyncCommittedForTest(oldActive, compiled, peerSyncNever)
 	if err != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", err)
 	}
@@ -1396,7 +1396,7 @@ func TestApplyAndSyncCommittedAdvisoryCrossScope10752(t *testing.T) {
 
 	oldActive := tighteningScopeCfg(t, []string{"any-service"}, []string{"ssh"})
 	compiled := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
-	got, err := d.applyAndSyncCommitted(oldActive, compiled, peerSyncNever)
+	got, err := d.applyAndSyncCommittedForTest(oldActive, compiled, peerSyncNever)
 	if err != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", err)
 	}
@@ -1447,7 +1447,7 @@ func TestApplyAndSyncCommittedWarnsExemptRemoval10752(t *testing.T) {
 	oldActive := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
 	oldActive.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"bgp"}
 	compiled := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
-	got, err := d.applyAndSyncCommitted(oldActive, compiled, peerSyncNever)
+	got, err := d.applyAndSyncCommittedForTest(oldActive, compiled, peerSyncNever)
 	if err != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", err)
 	}
@@ -1506,7 +1506,7 @@ func TestApplyAndSyncCommittedWarnsBareRemoval10752(t *testing.T) {
 	oldActive := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
 	oldActive.Security.Zones["wan"].HostInboundTraffic.Protocols = []string{"ospf"}
 	compiled := tighteningScopeCfg(t, []string{"ssh"}, []string{"ssh"})
-	got, err := d.applyAndSyncCommitted(oldActive, compiled, peerSyncNever)
+	got, err := d.applyAndSyncCommittedForTest(oldActive, compiled, peerSyncNever)
 	if err != nil {
 		t.Fatalf("applyAndSyncCommitted: %v", err)
 	}
