@@ -104,8 +104,8 @@ func TestNATBareInterfaceControl16827(t *testing.T) {
 }
 
 func TestNATBareInterfaceInertShapes16827(t *testing.T) {
-	// No-unit stanza: strict rejects, lenient warns + records, and the
-	// stored value stays bare (never widened to a fabricated unit).
+	// No-unit stanza: strict rejects, lenient warns, and the stored value
+	// stays bare (never widened to a fabricated unit).
 	cmds := append(bareNATBase16827(),
 		"set interfaces ge-0/0/5 family inet address 10.0.5.1/24",
 		"set security nat source rule-set snat-bad from interface ge-0/0/5",
@@ -129,9 +129,6 @@ func TestNATBareInterfaceInertShapes16827(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("lenient must warn naming snat-bad/ge-0/0/5, warnings=%v", cfg.Warnings)
-	}
-	if !cfg.LenientNATUndefinedScopeRuleSets["source\x00snat-bad"] {
-		t.Fatalf("lenient must record snat-bad in undefined-scope set, got %v", cfg.LenientNATUndefinedScopeRuleSets)
 	}
 
 	// A valid non-zero-unit-only interface must not widen a bare ref to .0.
@@ -185,9 +182,6 @@ func TestNATBareInterfaceUnitZeroTaggedSiblingRejected17883(t *testing.T) {
 	}
 	if got := cfg.Security.NAT.Source[0].FromInterface; got != "ge-0/0/7" {
 		t.Fatalf("unresolved bare scope must stay bare, got %q", got)
-	}
-	if !cfg.LenientNATUndefinedScopeRuleSets["source\x00snat-bad"] {
-		t.Fatalf("lenient must record snat-bad in undefined-scope set, got %v", cfg.LenientNATUndefinedScopeRuleSets)
 	}
 	foundWarning := false
 	for _, warning := range cfg.Warnings {
@@ -318,15 +312,7 @@ func TestNATBareInterfaceBoundST0SiblingRejected17883(t *testing.T) {
 	if got := cfg.Security.NAT.Static[0].FromInterface; got != "st0" {
 		t.Fatalf("static from scope must stay bare, got %q", got)
 	}
-	wantKeys := map[string]string{
-		"source\x00snat-bad":      "snat-bad",
-		"destination\x00dnat-bad": "dnat-bad",
-		"static\x00stat-bad":      "stat-bad",
-	}
-	for key, name := range wantKeys {
-		if !cfg.LenientNATUndefinedScopeRuleSets[key] {
-			t.Errorf("lenient must record %s, got %v", name, cfg.LenientNATUndefinedScopeRuleSets)
-		}
+	for _, name := range []string{"snat-bad", "dnat-bad", "stat-bad"} {
 		found := false
 		for _, warning := range cfg.Warnings {
 			if strings.Contains(warning, name) && strings.Contains(warning, "st0") {
@@ -485,16 +471,6 @@ func TestNATBareInterfaceBindingOnlyUnitZeroSiblingRejected18024(t *testing.T) {
 	}
 	if got := cfg.Security.NAT.Static[0].FromInterface; got != "st0" {
 		t.Fatalf("static from scope must stay bare, got %q", got)
-	}
-	wantKeys := map[string]string{
-		"source\x00snat-bad":      "snat-bad",
-		"destination\x00dnat-bad": "dnat-bad",
-		"static\x00stat-bad":      "stat-bad",
-	}
-	for key, name := range wantKeys {
-		if !cfg.LenientNATUndefinedScopeRuleSets[key] {
-			t.Errorf("lenient must record %s, got %v", name, cfg.LenientNATUndefinedScopeRuleSets)
-		}
 	}
 	wantWarnings := []string{
 		`source-nat rule-set "snat-bad": from interface "st0" not defined`,

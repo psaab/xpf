@@ -110,6 +110,8 @@ fn single_peer_engine(private_key: [u8; 32], peer_pub: [u8; 32], cidr: &str) -> 
 /// finish a handshake through.
 #[test]
 fn install_session_recovers_poisoned_reconcile_lock_6422() {
+    let _counter_test_guard = super::tests::test_support::serialize_poison_counter_tests();
+
     let (init_priv, init_pub) = keypair();
     let (peer_priv, peer_pub) = keypair();
     let engine = single_peer_engine(init_priv, peer_pub, "10.0.0.0/24");
@@ -276,6 +278,7 @@ fn create_initiation_recovers_poisoned_pending_map_6422() {
 /// reaped and REJECT_AFTER_TIME stopped being enforced.
 #[test]
 fn expire_sessions_recovers_poisoned_reconcile_lock_6422() {
+    let _counter_test_guard = super::tests::test_support::serialize_poison_counter_tests();
     let (init_engine, _resp_engine, _init_pub, resp_pub) = established_pair(
         vec!["10.0.0.0/24".parse().unwrap()],
         vec!["10.0.1.0/24".parse().unwrap()],

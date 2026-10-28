@@ -216,72 +216,52 @@ func (s *Server) showPoliciesHitCount(filter string, buf *strings.Builder) {
 		"From zone", "To zone", "Policy", "Action", "Packets", "Bytes")
 	fmt.Fprintln(buf, strings.Repeat("-", 88))
 	var totalPkts, totalBytes uint64
-	passes := 1
-	if filterFrom != "" || filterTo != "" {
-		passes = 3
-	}
+	// #17075: tier order + applicability from the shared stream.
 	pairFilter := policymatch.NewZonePairPolicyFilter(cfg, filterFrom, filterTo)
-	for tier := range passes {
-		for setIdx, zpp := range cfg.Security.Policies {
-			// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
-			if zpp == nil {
-				continue
-			}
-			if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
-				continue
-			}
-			policySetID := uint32(setIdx)
-			if passes > 1 && policymatch.ZonePairPolicyFilterTier(zpp.FromZone, zpp.ToZone) != tier {
-				continue
-			}
-			for i, pol := range zpp.Policies {
-				// #3476: skip a nil rule like the runtime walker does.
-				if pol == nil {
-					continue
-				}
-				action := "permit"
-				switch pol.Action {
-				case 1:
-					action = "deny"
-				case 2:
-					action = "reject"
-				}
-				ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
-				ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
-				var pkts, bytes uint64
-				published := true
-				if !ruleQuarantined && (statsEnabled || pol.Count) && readPolicy != nil {
-					counters, err := readPolicy(ruleID)
-					switch {
-					case err == nil:
-						pkts = counters.Packets
-						bytes = counters.Bytes
-					case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
-						published = false // #7016
-						unpublished++
-					default:
-						if readErr == nil {
-							readErr = err
-						}
-					}
-				} else if !ruleQuarantined && !statsEnabled && !pol.Count {
-					statsDisabled++
-				}
-				totalPkts += pkts
-				totalBytes += bytes
-				fromDisplay := qualifyZone(zpp.FromZone)
-				toDisplay := qualifyZone(zpp.ToZone)
-				packetDisplay := policyCounterCell(pkts, published)
-				byteDisplay := policyCounterCell(bytes, published)
-				if ruleQuarantined {
-					packetDisplay = config.ZoneQuarantineLiveCountersUnavailable
-					byteDisplay = config.ZoneQuarantineLiveCountersUnavailable
-				}
-				fmt.Fprintf(buf, "%-12s %-12s %-24s %-8s %12s %16s\n",
-					fromDisplay, toDisplay, pol.Name, action,
-					packetDisplay, byteDisplay)
-			}
+	for ref := range policymatch.ZonePairStreamForFilter(policymatch.ConfigZonePairStanzas(cfg), pairFilter) {
+		policySetID := uint32(ref.SetIdx)
+		i, pol := ref.SliceIdx, ref.Policy
+		action := "permit"
+		switch pol.Action {
+		case 1:
+			action = "deny"
+		case 2:
+			action = "reject"
 		}
+		ruleQuarantined := isQuarantined(ref.From) || isQuarantined(ref.To)
+		ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
+		var pkts, bytes uint64
+		published := true
+		if !ruleQuarantined && (statsEnabled || pol.Count) && readPolicy != nil {
+			counters, err := readPolicy(ruleID)
+			switch {
+			case err == nil:
+				pkts = counters.Packets
+				bytes = counters.Bytes
+			case errors.Is(err, dpuserspace.ErrPolicyCounterUnpublished):
+				published = false // #7016
+				unpublished++
+			default:
+				if readErr == nil {
+					readErr = err
+				}
+			}
+		} else if !ruleQuarantined && !statsEnabled && !pol.Count {
+			statsDisabled++
+		}
+		totalPkts += pkts
+		totalBytes += bytes
+		fromDisplay := qualifyZone(ref.From)
+		toDisplay := qualifyZone(ref.To)
+		packetDisplay := policyCounterCell(pkts, published)
+		byteDisplay := policyCounterCell(bytes, published)
+		if ruleQuarantined {
+			packetDisplay = config.ZoneQuarantineLiveCountersUnavailable
+			byteDisplay = config.ZoneQuarantineLiveCountersUnavailable
+		}
+		fmt.Fprintf(buf, "%-12s %-12s %-24s %-8s %12s %16s\n",
+			fromDisplay, toDisplay, pol.Name, action,
+			packetDisplay, byteDisplay)
 	}
 	policySetID := uint32(len(cfg.Security.Policies))
 	// Global policies (#3059): the runtime evaluates global policies after
@@ -534,75 +514,57 @@ func (s *Server) showPoliciesDetail(filter string, buf *strings.Builder) {
 		}
 	}
 	// #3408: readErr declared above policyStats; warning emitted after reads.
-	passes := 1
-	if filterFrom != "" || filterTo != "" {
-		passes = 3
-	}
+	// #17075: tier order + applicability from the shared stream (grouped form).
 	pairFilter := policymatch.NewZonePairPolicyFilter(cfg, filterFrom, filterTo)
-	for tier := range passes {
-		for setIdx, zpp := range cfg.Security.Policies {
-			// #3476: skip a nil zone-pair set (tolerant / HA-sync path).
-			if zpp == nil {
-				continue
+	for stanza := range policymatch.ZonePairStanzasOrdered(policymatch.ConfigZonePairStanzas(cfg), pairFilter) {
+		policySetID := uint32(stanza.SetIdx)
+		fmt.Fprintf(buf, "Policy: %s -> %s, State: enabled\n",
+			qualifyZone(stanza.From), qualifyZone(stanza.To))
+		for _, ref := range stanza.Rules {
+			i, pol := ref.SliceIdx, ref.Policy
+			ruleQuarantined := isQuarantined(ref.From) || isQuarantined(ref.To)
+			action := "permit"
+			switch pol.Action {
+			case 1:
+				action = "deny"
+			case 2:
+				action = "reject"
 			}
-			if !policymatch.ZonePairPolicyAppliesToFilterPair(pairFilter, zpp.FromZone, zpp.ToZone) {
-				continue
+			capAction := strings.ToUpper(action[:1]) + action[1:]
+			ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
+			// #3062: a scheduler-inactive policy appends State: inactive +
+			// the scheduler name. Active/non-scheduled policies stay
+			// bit-identical (no suffix), keeping the gRPC text plane in
+			// agreement with the CLI detail surface.
+			fmt.Fprintf(buf, "\n  Policy: %s, action-type: %s%s, Index: %d\n", pol.Name, capAction,
+				policyDetailStateSuffix(pol.SchedulerName, schedActive, haveSched),
+				dpuserspace.RuntimePolicyIndex(runtimeIDs, policySetID, uint32(i)))
+			if pol.Description != "" {
+				fmt.Fprintf(buf, "    Description: %s\n", pol.Description)
 			}
-			policySetID := uint32(setIdx)
-			if passes > 1 && policymatch.ZonePairPolicyFilterTier(zpp.FromZone, zpp.ToZone) != tier {
-				continue
+			fmt.Fprintf(buf, "    Match:\n")
+			fmt.Fprintf(buf, "      Source zone: %s\n", qualifyZone(ref.From))
+			fmt.Fprintf(buf, "      Destination zone: %s\n", qualifyZone(ref.To))
+			printAddrs("Source addresses", pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded)
+			printAddrs("Destination addresses", pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded)
+			fmt.Fprintf(buf, "      Applications:\n")
+			for _, app := range pol.Match.Applications {
+				fmt.Fprintf(buf, "        %s\n", app)
+				// #15652: expand predefined/set/term apps like CLI printAppDetail.
+				printResolvedAppDetail15652(buf, cfg, app, "          ")
 			}
-			fmt.Fprintf(buf, "Policy: %s -> %s, State: enabled\n",
-				qualifyZone(zpp.FromZone), qualifyZone(zpp.ToZone))
-			for i, pol := range zpp.Policies {
-				// #3476: skip a nil rule like the runtime walker does.
-				if pol == nil {
-					continue
-				}
-				ruleQuarantined := isQuarantined(zpp.FromZone) || isQuarantined(zpp.ToZone)
-				action := "permit"
-				switch pol.Action {
-				case 1:
-					action = "deny"
-				case 2:
-					action = "reject"
-				}
-				capAction := strings.ToUpper(action[:1]) + action[1:]
-				ruleID := dpuserspace.PolicyCounterID(policySetID, uint32(i))
-				// #3062: a scheduler-inactive policy appends State: inactive +
-				// the scheduler name. Active/non-scheduled policies stay
-				// bit-identical (no suffix), keeping the gRPC text plane in
-				// agreement with the CLI detail surface.
-				fmt.Fprintf(buf, "\n  Policy: %s, action-type: %s%s, Index: %d\n", pol.Name, capAction,
-					policyDetailStateSuffix(pol.SchedulerName, schedActive, haveSched),
-					dpuserspace.RuntimePolicyIndex(runtimeIDs, policySetID, uint32(i)))
-				if pol.Description != "" {
-					fmt.Fprintf(buf, "    Description: %s\n", pol.Description)
-				}
-				fmt.Fprintf(buf, "    Match:\n")
-				fmt.Fprintf(buf, "      Source zone: %s\n", qualifyZone(zpp.FromZone))
-				fmt.Fprintf(buf, "      Destination zone: %s\n", qualifyZone(zpp.ToZone))
-				printAddrs("Source addresses", pol.Match.SourceAddresses, pol.Match.SourceAddressExcluded)
-				printAddrs("Destination addresses", pol.Match.DestinationAddresses, pol.Match.DestinationAddressExcluded)
-				fmt.Fprintf(buf, "      Applications:\n")
-				for _, app := range pol.Match.Applications {
-					fmt.Fprintf(buf, "        %s\n", app)
-					// #15652: expand predefined/set/term apps like CLI printAppDetail.
-					printResolvedAppDetail15652(buf, cfg, app, "          ")
-				}
-				fmt.Fprintf(buf, "    Then:\n")
-				fmt.Fprintf(buf, "      %s\n", action)
-				// #3667 (H04): surface the independent at-create/at-close session-log
-				// modes instead of a bare "log" so a remote operator can tell whether
-				// session starts, closes, or both are logged (different cost + audit
-				// meaning). SessionLogModes is the SSOT shared with the local CLI.
-				if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
-					fmt.Fprintf(buf, "      Session log: %s\n", strings.Join(modes, ", "))
-				}
-				policyStats(buf, "      ", "    ", pol, ruleQuarantined, ruleID)
+			fmt.Fprintf(buf, "    Then:\n")
+			fmt.Fprintf(buf, "      %s\n", action)
+			// #3667 (H04): surface the independent at-create/at-close session-log
+			// modes instead of a bare "log" so a remote operator can tell whether
+			// session starts, closes, or both are logged (different cost + audit
+			// meaning). SessionLogModes is the SSOT shared with the local CLI.
+			if modes := pol.Log.SessionLogModes(); len(modes) > 0 {
+				fmt.Fprintf(buf, "      Session log: %s\n", strings.Join(modes, ", "))
 			}
-			fmt.Fprintln(buf)
+			policyStats(buf, "      ", "    ", pol, ruleQuarantined, ruleID)
 		}
+		fmt.Fprintln(buf)
 	}
 	policySetID := uint32(len(cfg.Security.Policies))
 	// Global policies. #3357: a from/to-zone filter no longer suppresses the

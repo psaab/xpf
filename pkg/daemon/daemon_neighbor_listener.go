@@ -86,8 +86,7 @@ type neighborSnapshotProvider interface {
 // monitored neighbor's forwarding-effective state changes.
 //
 // Resubscribe loop: kernel multicast can lose events under load;
-// runOneSubscription owns one subscription lifetime and returns
-// when the subscription closes; the outer loop re-establishes.
+// nlWatch owns one subscription lifetime and re-establishes on close (#17064).
 //
 // Safety net: a 60s ticker triggers full reconciliation
 // regardless of events, in case multicast lost the relevant
@@ -100,67 +99,26 @@ func (d *Daemon) neighborListener(ctx context.Context) {
 	safetyTick := time.NewTicker(60 * time.Second)
 	defer safetyTick.Stop()
 
-	for {
-		if !d.runOneSubscription(ctx, regenDebounce, safetyTick) {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(2 * time.Second):
-		}
-	}
-}
-
-// runOneSubscription owns ONE NeighSubscribe lifetime. Returns
-// true on subscription close (caller should retry); false on
-// ctx cancellation (caller should exit).
-//
-// Lifetime guarantee: done is closed exactly once, regardless
-// of whether subscribe succeeded, ctx was cancelled, or the
-// updates channel was closed. No double-close.
-func (d *Daemon) runOneSubscription(
-	ctx context.Context,
-	regenDebounce chan struct{},
-	safetyTick *time.Ticker,
-) bool {
-	updates := make(chan netlink.NeighUpdate, 1024)
-	done := make(chan struct{})
-	opts := netlink.NeighSubscribeOptions{
-		ListExisting:      true,
-		ReceiveBufferSize: 1 << 20, // 1 MB
-		ErrorCallback: func(err error) {
-			slog.Warn("neighbor listener netlink error", "err", err)
-		},
-	}
-	if err := netlink.NeighSubscribeWithOptions(updates, done, opts); err != nil {
-		slog.Warn("neighbor listener subscribe failed", "err", err)
-		// NeighSubscribeWithOptions can start its done goroutine
-		// before a ListExisting dump request fails; close done
-		// explicitly to avoid leaking the goroutine.
-		close(done)
-		return true
-	}
-	defer close(done)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return false
-		case <-safetyTick.C:
-			d.triggerRegen(regenDebounce)
-		case u, ok := <-updates:
-			if !ok {
-				return true // subscription closed; resubscribe
-			}
+	// nlWatch owns subscribe/done/backoff (#17064); the 60s safety tick
+	// rides the Watch arm so it keeps firing across resubscribes, and
+	// the default Neigh subscriber keeps ListExisting + 1MiB RcvBuf.
+	nlWatch[netlink.NeighUpdate]{
+		Name: "neighbor",
+		Buf:  1024,
+		OnEvent: func(u netlink.NeighUpdate) {
 			if !d.isMonitoredNeighbor(u.LinkIndex) {
-				continue
+				return
 			}
 			if d.shouldTriggerRegen(u) {
 				d.triggerRegen(regenDebounce)
 			}
-		}
-	}
+		},
+		Watch: func() <-chan time.Time { return safetyTick.C },
+		WatchTick: func() bool {
+			d.triggerRegen(regenDebounce)
+			return false
+		},
+	}.Run(ctx)
 }
 
 // regenDebouncer coalesces regen requests so a burst of events
@@ -548,21 +506,23 @@ func (d *Daemon) collectMonitoredNeighbors(cfg *config.Config) []probeTarget {
 	// that must stay warm. Cold-start "fill missing" is
 	// resolveNeighbors's responsibility.
 
-	// Source 3: fabric peers (probed via fabric overlay link).
+	// Source 3: fabric peers (probed via fabric overlay link). Copy only
+	// the fabricMu-guarded fields — refreshCh belongs to clusterCommsMu.
 	d.fabricMu.RLock()
-	fabricPeerIP := d.fabricPeerIP
-	fabricPeerIP1 := d.fabricPeerIP1
-	fabricOverlay := d.fabricOverlay
-	fabricOverlay1 := d.fabricOverlay1
-	d.fabricMu.RUnlock()
-	if fabricPeerIP != nil && fabricOverlay != "" {
-		if link, err := netlink.LinkByName(fabricOverlay); err == nil {
-			addTarget(fabricPeerIP, link.Attrs().Index, criticalityFabric)
-		}
+	var fabricSlots [2]struct {
+		peerIP  net.IP
+		overlay string
 	}
-	if fabricPeerIP1 != nil && fabricOverlay1 != "" {
-		if link, err := netlink.LinkByName(fabricOverlay1); err == nil {
-			addTarget(fabricPeerIP1, link.Attrs().Index, criticalityFabric)
+	for i := range d.fabricSlots {
+		fabricSlots[i].peerIP = d.fabricSlots[i].peerIP
+		fabricSlots[i].overlay = d.fabricSlots[i].overlay
+	}
+	d.fabricMu.RUnlock()
+	for _, s := range fabricSlots {
+		if s.peerIP != nil && s.overlay != "" {
+			if link, err := netlink.LinkByName(s.overlay); err == nil {
+				addTarget(s.peerIP, link.Attrs().Index, criticalityFabric)
+			}
 		}
 	}
 

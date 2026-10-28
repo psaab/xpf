@@ -664,7 +664,7 @@ type Config struct {
 	// registry (including the trailing warning-only NAT potential-
 	// shadow appender) appear in Warnings only. Warnings remains the
 	// prose surface every existing consumer reads. Compile-time only;
-	// never serialized.
+	// never serialized or compared (fingerprintIgnore).
 	Diagnostics []Diagnostic `json:"-"`
 
 	// LenientNATTerminalActionRules records every NAT rule the TOLERANT path
@@ -704,11 +704,6 @@ type Config struct {
 	// record) still fails closed there.
 	// Compile-time only; never serialized.
 	LenientNATUndefinedZoneRuleSets map[NATRuleSetRef]bool `json:"-"`
-	// LenientNATUndefinedScopeRuleSets records NAT rule-sets the TOLERANT
-	// path admitted despite an undefined interface/routing-instance scope
-	// (#15278 D02-02), as "kind\x00name" keys (kind: source/destination/static).
-	// Compile-time only; never serialized.
-	LenientNATUndefinedScopeRuleSets map[string]bool `json:"-"`
 	// userIdentificationStanzas records the user-identification sub-stanzas
 	// (active-directory-access / identity-management /
 	// local-authentication-table / device-information /
@@ -738,7 +733,7 @@ type Config struct {
 	// *Config, so removing the stanza clears it without a separate clear
 	// path. Leaf names only — never values — so no AAA secret can reach
 	// an alarm surface through it. Compile-time only; never serialized
-	// (`json:"-"`, the LenientNATUndefinedScopeRuleSets precedent).
+	// (`json:"-"`).
 	UnimplementedAAALeaves []string `json:"-"`
 }
 

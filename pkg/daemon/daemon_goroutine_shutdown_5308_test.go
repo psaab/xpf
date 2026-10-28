@@ -8,7 +8,7 @@ package daemon
 //
 //   - the policy scheduler (startPolicySchedulerLoopLocked → scheduler.Run),
 //     which republishes schedule state through the dataplane runtime
-//     (UpdatePolicyScheduleState), and
+//     (UpdatePolicyScheduleStateWithLatch), and
 //   - the RPM probe-pin retry loop (probePinRetryLoop), which runs routing-pin
 //     syscalls through the routing/FRR manager.
 //

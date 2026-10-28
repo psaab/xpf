@@ -194,17 +194,10 @@ func buildUserspaceIngressDomainEntries(snapshot *ConfigSnapshot) map[userspaceI
 	for _, ifindex := range buildUserspaceIngressIfindexes(snapshot) {
 		ingress[ifindex] = struct{}{}
 	}
-	nativeVLANByParent := make(map[int]int)
-	ambiguousNativeParents := make(map[int]struct{})
-	for _, iface := range snapshot.Interfaces {
-		if iface.Ifindex <= 0 || iface.IsUnit || iface.NativeVLANID <= 0 || iface.NativeVLANID > 4094 {
-			continue
-		}
-		if previous, exists := nativeVLANByParent[iface.Ifindex]; exists && previous != iface.NativeVLANID {
-			ambiguousNativeParents[iface.Ifindex] = struct{}{}
-		}
-		nativeVLANByParent[iface.Ifindex] = iface.NativeVLANID
-	}
+	nativeVLANSelection := buildUserspaceNativeVLANOwnership(snapshot)
+	nativeVLANByParent := nativeVLANSelection.vlanByParent
+	ambiguousNativeParents := nativeVLANSelection.ambiguousParents
+	nativeVLANWithoutUnit := nativeVLANSelection.unownedParents
 	for _, iface := range snapshot.Interfaces {
 		if iface.Ifindex <= 0 || iface.AdminDisabled {
 			continue
@@ -230,6 +223,22 @@ func buildUserspaceIngressDomainEntries(snapshot *ConfigSnapshot) map[userspaceI
 			if _, ambiguous := ambiguousNativeParents[iface.ParentIfindex]; !ambiguous {
 				put(userspaceIngressDomainKey{Ifindex: parent, VLANID: userspaceIngressDomainUntaggedVLANID}, iface.RoutingDomain)
 			}
+		}
+	}
+	// #18322: priority-tagged VID 0 stays a distinct wire key in the shim,
+	// but a tagged-only parent has no VID-0 unit from which to publish it.
+	// Alias that key to the parent domain used for untagged ingress so the
+	// shim's tagged-only local-destination guard can recognize its owner.
+	// A parent with unresolved native-VLAN ownership remains tagged-only but
+	// has no VID-0 owner: the same zoned, enabled, unambiguous unit selection
+	// used below must succeed before its native VLAN can own VID 0.
+	for ifindex := range buildUserspaceTaggedOnlyIngressIfindexes(snapshot) {
+		if _, unresolvedNativeOwner := nativeVLANWithoutUnit[int(ifindex)]; unresolvedNativeOwner {
+			continue
+		}
+		untaggedKey := userspaceIngressDomainKey{Ifindex: ifindex, VLANID: userspaceIngressDomainUntaggedVLANID}
+		if domain, ok := entries[untaggedKey]; ok {
+			put(userspaceIngressDomainKey{Ifindex: ifindex, VLANID: 0}, domain)
 		}
 	}
 	return entries
@@ -963,18 +972,20 @@ func appendBindingIndex(indices []uint32, idx uint32) []uint32 {
 // degradedPathReasonNames maps BPF array index to a human-readable name.
 // Must stay in sync with USERSPACE_FALLBACK_REASON_* in userspace-xdp/src/lib.rs.
 var degradedPathReasonNames = [21]string{
-	0:  "ctrl_disabled",
-	1:  "parse_fail",
-	2:  "binding_missing",
-	3:  "binding_not_ready",
-	4:  "heartbeat_missing",
-	5:  "heartbeat_stale",
+	0: "ctrl_disabled",
+	1: "parse_fail",
+	2: "binding_missing",
+	3: "binding_not_ready",
+	4: "heartbeat_missing",
+	5: "heartbeat_stale",
+	// #17248: reserved ABI slot; the shim no longer emits this reason.
 	6:  "icmp",
 	7:  "early_filter",
 	8:  "adjust_meta",
 	9:  "meta_bounds",
 	10: "redirect_err",
 	11: "interface_nat_no_session",
+	// #17248: reserved ABI slot; the shim no longer emits this reason.
 	12: "no_session",
 	13: "strict_drop",
 	14: "pass_to_kernel",
@@ -2088,6 +2099,67 @@ func buildUserspaceIngressIfindexes(snapshot *ConfigSnapshot) []uint32 {
 	return out
 }
 
+type userspaceNativeVLANOwnership struct {
+	vlanByParent     map[int]int
+	ambiguousParents map[int]struct{}
+	ambiguousUnits   map[int]struct{}
+	unitByParent     map[int]int
+	unownedParents   map[int]struct{}
+}
+
+// buildUserspaceNativeVLANOwnership is the shared owner predicate for native
+// VLAN selection. Only one enabled, zoned unit matching the parent's
+// configured native VLAN can own VID 0; ambiguous or unowned native
+// selections remain tagged-only and must not publish a VID-0 domain alias.
+func buildUserspaceNativeVLANOwnership(snapshot *ConfigSnapshot) userspaceNativeVLANOwnership {
+	selection := userspaceNativeVLANOwnership{
+		vlanByParent:     make(map[int]int),
+		ambiguousParents: make(map[int]struct{}),
+		ambiguousUnits:   make(map[int]struct{}),
+		unitByParent:     make(map[int]int),
+		unownedParents:   make(map[int]struct{}),
+	}
+	if snapshot == nil {
+		return selection
+	}
+	for _, iface := range snapshot.Interfaces {
+		if iface.Ifindex <= 0 || iface.IsUnit || iface.NativeVLANID <= 0 || iface.NativeVLANID > 4094 {
+			continue
+		}
+		if previous, exists := selection.vlanByParent[iface.Ifindex]; exists && previous != iface.NativeVLANID {
+			selection.ambiguousParents[iface.Ifindex] = struct{}{}
+		}
+		selection.vlanByParent[iface.Ifindex] = iface.NativeVLANID
+	}
+	for _, iface := range snapshot.Interfaces {
+		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 || !iface.IsUnit || iface.AdminDisabled || iface.Zone == "" {
+			continue
+		}
+		nativeVLANID := selection.vlanByParent[iface.ParentIfindex]
+		if nativeVLANID <= 0 || iface.VLANID != nativeVLANID {
+			continue
+		}
+		if previous, exists := selection.unitByParent[iface.ParentIfindex]; exists && previous != iface.Ifindex {
+			selection.ambiguousUnits[iface.ParentIfindex] = struct{}{}
+		}
+		selection.unitByParent[iface.ParentIfindex] = iface.Ifindex
+	}
+	for parentIfindex := range selection.vlanByParent {
+		if _, ambiguous := selection.ambiguousParents[parentIfindex]; ambiguous {
+			selection.unownedParents[parentIfindex] = struct{}{}
+			continue
+		}
+		if _, ambiguous := selection.ambiguousUnits[parentIfindex]; ambiguous {
+			selection.unownedParents[parentIfindex] = struct{}{}
+			continue
+		}
+		if _, exists := selection.unitByParent[parentIfindex]; !exists {
+			selection.unownedParents[parentIfindex] = struct{}{}
+		}
+	}
+	return selection
+}
+
 // buildUserspaceTaggedOnlyIngressIfindexes mirrors
 // forwarding_build::interfaces::populate_egress's VID-0 ownership decision
 // (#11297/#11434) for the XDP shim. Each set member is an ifindex whose VID-0
@@ -2099,23 +2171,14 @@ func buildUserspaceIngressIfindexes(snapshot *ConfigSnapshot) []uint32 {
 // configured native VLAN selection removes the parent only when one
 // unambiguous zoned, enabled unit carries that VID. A disabled or unzoned
 // unit owns no VID-0 identity, so it must not clear TAGGED_ONLY.
+
 func buildUserspaceTaggedOnlyIngressIfindexes(snapshot *ConfigSnapshot) map[uint32]struct{} {
 	if snapshot == nil {
 		return nil
 	}
 	taggedOnly := make(map[uint32]struct{})
 	untaggedUnitIfindexes := make(map[uint32]struct{})
-	nativeVLANByParent := make(map[int]int)
-	ambiguousNativeParents := make(map[int]struct{})
-	for _, iface := range snapshot.Interfaces {
-		if iface.Ifindex <= 0 || iface.IsUnit || iface.NativeVLANID <= 0 || iface.NativeVLANID > 4094 {
-			continue
-		}
-		if previous, exists := nativeVLANByParent[iface.Ifindex]; exists && previous != iface.NativeVLANID {
-			ambiguousNativeParents[iface.Ifindex] = struct{}{}
-		}
-		nativeVLANByParent[iface.Ifindex] = iface.NativeVLANID
-	}
+	nativeVLANSelection := buildUserspaceNativeVLANOwnership(snapshot)
 	for _, iface := range snapshot.Interfaces {
 		if iface.Ifindex <= 0 {
 			continue
@@ -2135,36 +2198,15 @@ func buildUserspaceTaggedOnlyIngressIfindexes(snapshot *ConfigSnapshot) map[uint
 			untaggedUnitIfindexes[uint32(bindIfindex)] = struct{}{}
 		}
 	}
-	nativeUnitByParent := make(map[int]int)
-	for _, iface := range snapshot.Interfaces {
-		if iface.Ifindex <= 0 || iface.ParentIfindex <= 0 || !iface.IsUnit || iface.AdminDisabled || iface.Zone == "" {
-			continue
-		}
-		nativeVLANID := nativeVLANByParent[iface.ParentIfindex]
-		if nativeVLANID <= 0 || iface.VLANID != nativeVLANID {
-			continue
-		}
-		if previous, exists := nativeUnitByParent[iface.ParentIfindex]; exists && previous != iface.Ifindex {
-			ambiguousNativeParents[iface.ParentIfindex] = struct{}{}
-		}
-		nativeUnitByParent[iface.ParentIfindex] = iface.Ifindex
-	}
-	nativeVLANWithoutUnit := make(map[int]struct{})
-	for parentIfindex := range nativeVLANByParent {
-		if _, ambiguous := ambiguousNativeParents[parentIfindex]; ambiguous {
-			nativeVLANWithoutUnit[parentIfindex] = struct{}{}
-			continue
-		}
-		if _, exists := nativeUnitByParent[parentIfindex]; exists {
+	for parentIfindex := range nativeVLANSelection.vlanByParent {
+		if _, unresolved := nativeVLANSelection.unownedParents[parentIfindex]; !unresolved {
 			delete(taggedOnly, uint32(parentIfindex))
-			continue
 		}
-		nativeVLANWithoutUnit[parentIfindex] = struct{}{}
 	}
 	for ifindex := range untaggedUnitIfindexes {
 		delete(taggedOnly, ifindex)
 	}
-	for parentIfindex := range nativeVLANWithoutUnit {
+	for parentIfindex := range nativeVLANSelection.unownedParents {
 		taggedOnly[uint32(parentIfindex)] = struct{}{}
 	}
 	if len(taggedOnly) == 0 {

@@ -861,16 +861,12 @@ impl PolicyCounterStore {
         // so retain its reserved id explicitly — otherwise every reconcile
         // would evict it and reset the default-deny hit count to zero.
         active_rule_ids.insert(DEFAULT_POLICY_COUNTER_RULE_ID.to_string());
-        if let Ok(mut counters) = self.counters.lock() {
-            counters.retain(|rule_id, _| active_rule_ids.contains(rule_id));
-        }
+        crate::sync_util::lock_tolerant(&self.counters).retain(|rule_id, _| active_rule_ids.contains(rule_id));
     }
 
     pub(crate) fn clear(&self) {
-        if let Ok(counters) = self.counters.lock() {
-            for counter in counters.values() {
-                counter.reset();
-            }
+        for counter in crate::sync_util::lock_tolerant(&self.counters).values() {
+            counter.reset();
         }
     }
 
@@ -883,9 +879,7 @@ impl PolicyCounterStore {
     /// this live, `Arc`-shared store. The builder captures this set before it
     /// starts and hands it back to `retain_rule_ids` on the `Err` path.
     pub(crate) fn tracked_rule_ids(&self) -> Vec<String> {
-        let Ok(counters) = self.counters.lock() else {
-            return Vec::new();
-        };
+        let counters = crate::sync_util::lock_tolerant(&self.counters);
         let mut ids: Vec<String> = counters.keys().cloned().collect();
         ids.sort();
         ids
@@ -901,13 +895,11 @@ impl PolicyCounterStore {
     /// is the safe direction: it can only fail to evict, never destroy.
     pub(crate) fn retain_rule_ids(&self, keep: &[String]) {
         let keep: FxHashSet<&str> = keep.iter().map(String::as_str).collect();
-        if let Ok(mut counters) = self.counters.lock() {
-            counters.retain(|rule_id, _| keep.contains(rule_id.as_str()));
-        }
+        crate::sync_util::lock_tolerant(&self.counters).retain(|rule_id, _| keep.contains(rule_id.as_str()));
     }
 
     fn rule_hit_counter(&self, rule_id: &str) -> Arc<PolicyRuleCounter> {
-        let mut counters = self.counters.lock().expect("policy counter store poisoned");
+        let mut counters = crate::sync_util::lock_tolerant(&self.counters);
         if let Some(counter) = counters.get(rule_id) {
             return counter.clone();
         }

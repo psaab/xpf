@@ -4,7 +4,7 @@
     "path": "pkg/dataplane/userspace_xdp_bpfel.o",
     "sha256": "51e4b644cd52a0163227d2ae798e4dc61a8dabc4b6dabb2672c73181c438a191"
   },
-  "build_digest": "2f9710a24aa8bf88130f242fded21c207f330b6d3caebfd7f8f3b31cf8ae922a",
+  "build_digest": "3a9067b826b8cfbb8e5ee7d73c0a4d3df5cabb9f35ce7bb4a2d98b03c9938463",
   "shim_facts": {
     "max_ext_hdrs": 7,
     "frag_hdr_size": 8,
@@ -53,7 +53,7 @@
     },
     {
       "path": "userspace-xdp/src/early_filter.rs",
-      "sha256": "b6b0eaa21aa6d6144ab18ba4154a4e5e7a957226c77dfe61e6280ba856975e7b"
+      "sha256": "4b1fe69b9451d8e0dd726a2f62359ac651d71ad7136fd3355797cd36a20eb36c"
     },
     {
       "path": "userspace-xdp/src/gre_classify.rs",
@@ -77,15 +77,15 @@
     },
     {
       "path": "userspace-xdp/src/kernel_pass.rs",
-      "sha256": "a247d0cf73203f55ce3de7341ba9e5e90aad48f8eaeb9b5de703f556bb640373"
+      "sha256": "0241508c19fd491847902e5c3a620dc2bb50e01e31337cc27fcbc4eb8e5456de"
     },
     {
       "path": "userspace-xdp/src/land.rs",
-      "sha256": "ae53fa9b4d5c99ada1f13cb3f642b69d9f12891bf9703a9a63b6e158bd7e161a"
+      "sha256": "8faf749233f757eb45f78893e1c38e4eb0b9bf67c1845a168ff5fe578997e0f2"
     },
     {
       "path": "userspace-xdp/src/lib.rs",
-      "sha256": "a8afcf149093ac1cc2a8405547a6b60e5a4db96df778cd0e72f616d9e6d03f1f"
+      "sha256": "efbf25627f35ba0118ae0be9d75b02c754f6d4098023730f2d4d193eebb5f0fb"
     },
     {
       "path": "userspace-xdp/src/tunnel_frag.rs",
@@ -93,7 +93,7 @@
     },
     {
       "path": "userspace-xdp/src/wg_classify.rs",
-      "sha256": "54760d5798c417d707d670eb364b54268d18addea4396a5ce26ef9a5716a79ca"
+      "sha256": "9f74f03f5ddeffdcaa4eb593fdc96d710e4c62b1743bf24205acc2ce6ca454b3"
     }
   ]
 }

@@ -128,24 +128,26 @@ has_routing_domains: bool,
 has_multiple_zones: bool,) -> bool { allow_replace_local
     && uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains, has_multiple_zones) }
 
-pub(in crate::afxdp) fn apply_worker_commands(commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
-sessions: &mut SessionTable,
-session_map: SteeringMap<'_>,
-conntrack_v4_fd: c_int,
-conntrack_v6_fd: c_int,
-forwarding: &ForwardingState,
-ha_state: &BTreeMap<i32, HAGroupRuntime>,
-dynamic_neighbors: &Arc<ShardedNeighborMap>,
-// #6211 F2: THIS worker's id, threaded from `WorkerLaunchPlan::worker_id`
-// in the worker loop. A peer-synced reservation is held by every worker, so
-// a release must drop THIS worker's bit rather than free the port outright.
-worker_id: u32,
-// #7201: worker-owned, recycled across calls. The drain moves its bounded
-// slice in here instead of `mem::take`-ing the shared deque, so the shared
-// deque keeps its allocation (the producers hold the lock; they were paying
-// to regrow it from zero capacity on every pass) and this buffer keeps its
-// own. Entered empty and left empty — the dispatch loop below drains it.
-scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
+pub(in crate::afxdp) fn apply_worker_commands(
+    commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    // #6211 F2: THIS worker's id, threaded from `WorkerLaunchPlan::worker_id`
+    // in the worker loop. A peer-synced reservation is held by every worker, so
+    // a release must drop THIS worker's bit rather than free the port outright.
+    worker_id: u32,
+    // #7201: worker-owned, recycled across calls. The drain moves its bounded
+    // slice in here instead of `mem::take`-ing the shared deque, so the shared
+    // deque keeps its allocation (the producers hold the lock; they were paying
+    // to regrow it from zero capacity on every pass) and this buffer keeps its
+    // own. Entered empty and left empty — the dispatch loop below drains it.
+    scratch: &mut VecDeque<WorkerCommand>,
+) -> WorkerCommandResults {
     // Sample monotonic time ONCE per tick so every handler sees the same
     // `now_ns` / `now_secs` and there is no intra-tick clock skew between
     // session-table side effects (#1346 plan v2 invariant 3).
@@ -182,602 +184,38 @@ scratch: &mut VecDeque<WorkerCommand>,) -> WorkerCommandResults {
     let mut export_kick_epoch: Option<u64> = None;
     let mut shaped_tx_requests = Vec::new();
     let mut vacate_all_shared_exact_slots = false;
-    // Hot path: try_lock avoids blocking on the mutex when another thread
-    // holds it (rare) and avoids the cost of lock+unlock on empty queues
-    // when there's nothing to do (common case during steady-state forwarding).
-    // #1807: a poisoned mutex is recovered (committed-prefix + clear_poison
-    // policy, worker_queue.rs) and the recovered deque is processed as
-    // normal — treating poison as absence-of-work made the worker
-    // permanently deaf to coordinator commands.
-    //
-    // #7201: this takes a BOUNDED PREFIX, not the whole deque. Every command is
-    // a session-table mutation plus a BPF-map publish syscall, and the worker
-    // does not touch its AF_XDP rings until the loop below finishes — so an
-    // unbounded drain is unserviced ring time. See
-    // `worker_queue::WORKER_COMMAND_DRAIN_BUDGET` for the measurement and the
-    // ring arithmetic that fix the slice size.
-    //
-    // #9720: no early returns — the debt step below must run on every path
-    // (an empty queue still steps a zero-countdown op ready; a contended one
-    // still reports the carry flag), so an empty or contended queue falls
-    // through with an empty scratch (a no-op dispatch) instead of returning.
-    // `scratch_len_before` deltas the drain: scratch enters empty by
-    // invariant, but the delta stays correct even for a test-reused buffer.
-    let (mut session_import_repairs, ready_remains_at_start, mut session_import_repair_pending) =
-        worker_queue::take_ready_session_import_repairs(
+    let (
+        session_import_repairs,
+        session_import_repair_pending,
+        commands_backlogged,
+        queue_lock_acquired,
+        drained,
+    ) = commands::take_worker_command_slice(commands, worker_id, scratch);
+    {
+        let mut dispatch_context = commands::WorkerCommandDispatchContext {
+            sessions: &mut *sessions,
+            session_map,
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            forwarding,
+            ha_state,
+            dynamic_neighbors,
             worker_id,
-            worker_queue::SESSION_IMPORT_REPAIR_DRAIN_BUDGET,
-        );
-    let repair_due_at_start = !session_import_repairs.is_empty() || ready_remains_at_start;
-    let scratch_len_before = scratch.len();
-    let (commands_backlogged, queue_lock_acquired) = if repair_due_at_start {
-        let backlogged = worker_queue::try_lock_recover(commands)
-            .map(|pending| !pending.is_empty())
-            .unwrap_or(false);
-        (backlogged, false)
-    } else {
-        match worker_queue::try_lock_recover(commands) {
-            Some(mut pending) => {
-                let backlogged = if pending.is_empty() {
-                    false
-                } else {
-                    // #11718: stop the budgeted slice at the nearest repair
-                    // boundary; its later FIFO suffix stays queued for after
-                    // the shared-authority repair has been applied.
-                    let drain_limit = if session_import_repair_pending {
-                        worker_queue::session_import_repair_drain_limit(
-                            worker_id,
-                            worker_queue::WORKER_COMMAND_DRAIN_BUDGET,
-                        )
-                    } else {
-                        worker_queue::WORKER_COMMAND_DRAIN_BUDGET
-                    };
-                    worker_queue::drain_bounded_into_with_limit(
-                        &mut pending,
-                        scratch,
-                        drain_limit,
-                    )
-                };
-                let drained = scratch.len() - scratch_len_before;
-                // Capture the drain while still holding the same queue lock
-                // used by importers to assign repair positions. A refused
-                // import records its debt after releasing that lock.
-                worker_queue::note_worker_commands_drained(worker_id, drained);
-                let (ready, _, pending_repairs) =
-                    worker_queue::take_ready_session_import_repairs(
-                        worker_id,
-                        worker_queue::SESSION_IMPORT_REPAIR_DRAIN_BUDGET,
-                    );
-                session_import_repairs = ready;
-                session_import_repair_pending = pending_repairs;
-                (backlogged, true)
-            }
-            None => {
-                session_import_repair_pending =
-                    worker_queue::has_session_import_repair_debt(worker_id);
-                // The queue is not known to be empty — a producer holds it.
-                (false, false)
-            }
-        }
-    };
-    let drained = scratch.len() - scratch_len_before;
-    for cmd in scratch.drain(..) {
-        match cmd {
-            WorkerCommand::DemoteOwnerRGS { owner_rgs } => {
-                // #9752: a terminal demote arms the purge walk (D8).
-                if commands::handle_demote_owner_rgs(
-                    sessions,
-                    session_map,
-                    conntrack_v4_fd,
-                    conntrack_v6_fd,
-                    forwarding,
-                    ha_state,
-                    dynamic_neighbors,
-                    owner_rgs,
-                    now_ns,
-                    now_secs,
-                    &mut cancelled_keys,
-                    &mut cancelled_keys_seen,
-                ) {
-                    flag_install_table_purge(worker_id);
-                }
-            }
-            WorkerCommand::RefreshOwnerRGS { owner_rgs } => {
-                // #9752: a terminal refresh arms the purge walk (D8).
-                if commands::handle_refresh_owner_rgs(
-                    sessions,
-                    session_map,
-                    forwarding,
-                    ha_state,
-                    dynamic_neighbors,
-                    owner_rgs,
-                    now_ns,
-                    now_secs,
-                ) {
-                    flag_install_table_purge(worker_id);
-                }
-            }
-            WorkerCommand::ExportOwnerRGSessions {
-                sequence,
-                owner_rgs,
-            } => {
-                commands::handle_export_owner_rg_sessions(
-                    sessions,
-                    &mut exported_sequences,
-                    &mut export_window_sequences,
-                    &mut export_owner_rgs,
-                    &mut export_kick_epoch,
-                    sequence,
-                    owner_rgs,
-                );
-            }
-            WorkerCommand::QuerySessionCounters {
-                sequence,
-                key,
-                reply,
-            } => {
-                // READ-ONLY. `counters_with_replica_flag` looks the key up
-                // without touching the table; nothing here installs, refreshes
-                // or expires anything. A diagnostic that perturbed the state it
-                // reports would be worse than no diagnostic.
-                let answer = match sessions.counters_with_replica_flag(&key) {
-                    Some((counters, replica)) => SessionCounterAnswer {
-                        sequence,
-                        found: true,
-                        replica,
-                        fwd_packets: counters.fwd_packets,
-                        fwd_bytes: counters.fwd_bytes,
-                        rev_packets: counters.rev_packets,
-                        rev_bytes: counters.rev_bytes,
-                    },
-                    None => SessionCounterAnswer {
-                        sequence,
-                        found: false,
-                        replica: false,
-                        fwd_packets: 0,
-                        fwd_bytes: 0,
-                        rev_packets: 0,
-                        rev_bytes: 0,
-                    },
-                };
-                *reply.lock().unwrap_or_else(|e| e.into_inner()) = Some(answer);
-            }
-            WorkerCommand::ListSessionsByPolicy {
-                request,
-                collected,
-                overflow,
-                errors,
-                pending,
-            } => {
-                let wanted = |policy_id: u32| {
-                    policy_id != 0 && request.policy_ids.iter().any(|candidate| *candidate == policy_id)
-                };
-                let family_allowed = |family: u8| {
-                    request.families.is_empty()
-                        || request
-                            .families
-                            .iter()
-                            .any(|candidate| *candidate == family)
-                };
-                let class_allowed = |is_reverse: bool| {
-                    request.classes.is_empty()
-                        || request.classes.iter().any(|class| {
-                            (is_reverse && class == "reverse")
-                                || (!is_reverse && class == "forward")
-                        })
-                };
-                if request.mode == "legacy" && request.before_secs.is_none() {
-                    errors
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .push("legacy-before-secs-missing".to_string());
-                } else {
-                    sessions.iter_with_identity(
-                        |key, decision, metadata, origin, created_ns, session_id| {
-                            let family = crate::afxdp::ha::policy_wire_family(key.addr_family);
-                            if !family_allowed(family) || !class_allowed(metadata.is_reverse) {
-                                return;
-                            }
-                            let Some(policy_id) = policy_id_for_list_request(
-                                forwarding,
-                                metadata,
-                                origin,
-                                &request.mode,
-                            ) else {
-                                return;
-                            };
-                            if !wanted(policy_id) {
-                                return;
-                            }
-                            // Legacy time fence (#6948): keep sessions admitted
-                            // at or before the activation stamp (old numbering).
-                            // `Some(0)` is explicitly UNBOUNDED — Go sends the
-                            // raw activation stamp, and 0 means "boundary
-                            // unknown" (clear every matching id), never a real
-                            // timestamp. `None` in legacy mode is a caller bug
-                            // and is rejected above, not silently unbounded.
-                            if request.mode == "legacy"
-                                && request
-                                    .before_secs
-                                    .map(|before| {
-                                        before != 0 && created_ns / 1_000_000_000 > before
-                                    })
-                                    .unwrap_or(true)
-                            {
-                                return;
-                            }
-                            if session_id == 0 {
-                                errors
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                    .push(format!(
-                                        "identity-missing:{}:{}",
-                                        key.src_ip, key.dst_ip
-                                    ));
-                                return;
-                            }
-                            // Shared admission: skip fast past the cap (no
-                            // lock), else reserve (dedups cross-worker
-                            // replicas) BEFORE building the row. The build
-                            // below runs unlocked; only reserve and push take
-                            // the collector lock.
-                            if overflow.load(std::sync::atomic::Ordering::Acquire) {
-                                return;
-                            }
-                            let admitted = collected
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                .reserve(overflow.as_ref(), key.clone(), session_id);
-                            if !admitted {
-                                return;
-                            }
-                            let Some(mut row) = crate::afxdp::ha::policy_match_from_parts(
-                                key,
-                                metadata,
-                                decision.nat,
-                                session_id,
-                                created_ns,
-                            ) else {
-                                errors
-                                    .lock()
-                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                    .push("unsupported-address-family".to_string());
-                                return;
-                            };
-                            row.policy_id = policy_id;
-                            if let Some((companion_key, _, companion_id)) =
-                                sessions.policy_companion(key, decision.nat)
-                            {
-                                if companion_id == 0 {
-                                    errors
-                                        .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                        .push(format!(
-                                            "companion-identity-missing:{}:{}",
-                                            key.src_ip, key.dst_ip
-                                        ));
-                                    return;
-                                }
-                                row.reverse_key =
-                                    crate::afxdp::ha::policy_tuple_from_key(&companion_key);
-                                if row.reverse_key.is_none() {
-                                    errors
-                                        .lock()
-                                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                        .push("unsupported-companion-family".to_string());
-                                    return;
-                                }
-                                row.expected_companion_rt_flow_session_id = companion_id;
-                            }
-                            collected
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                .push(row);
-                        },
-                    );
-                }
-                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-            }
-            WorkerCommand::InstallPptpAssociation(call) => {
-                // #15950: disabled ALG must not install HA-imported calls.
-                if forwarding.pptp_enabled() {
-                    let _ = sessions
-                        .pptp_mut()
-                        .install_synced_association(call, now_ns);
-                }
-            }
-            WorkerCommand::UpsertSynced(entry) => {
-                // pre-purge snapshot re-published post-purge (backlog, late
-                // fan-out, re-import) must not reinstall the removed-zone row
-                // the purge deleted. Dropped here — before re-resolve, install,
-                // reserve, publish — and the key recorded so the worker loop
-                // evicts the stale row from shared authority (same
-                // record-here/evict-where-the-handles-are split as #6457).
-                if synced_entry_is_stale_replay(entry.origin, &entry.metadata, forwarding) {
-                    note_stale_replay_fence_drop();
-                    stale_replay_dropped_keys.push(entry.key);
-                } else {
-                    commands::handle_upsert_synced(
-                        sessions,
-                        session_map,
-                        forwarding,
-                        ha_state,
-                        dynamic_neighbors,
-                        entry,
-                        now_ns,
-                        now_secs,
-                        worker_id,
-                    );
-                }
-            }
-            WorkerCommand::UpsertLocal(entry) => {
-                // Inline in the dispatcher (no `commands/` handler):
-                // the debug_assert contract below is tied to this arm.
-                // #1870: local-tunnel pair entries are coordinator-
-                // authoritative replicas of state ALREADY published to
-                // the shared maps (the tunnel.rs publish precedes the
-                // enqueue). Routing them through the capped
-                // install_with_protocol_with_origin let max_sessions
-                // refuse the worker-table copy while the reactive
-                // shared-hit materialization
-                // (materialize_shared_session_hit) reinstalls the
-                // reverse entry uncapped on the next reply packet — a
-                // futile cap that only polluted create_drops and
-                // delayed/voided the prewarm. Use the uncapped
-                // sync-family install these SyncImport-origin entries
-                // belong to. allow_replace_local=true preserves the
-                // pre-#1870 replace semantics (the capped install
-                // clobbered any same-key entry below cap); the data is
-                // locally generated — the producer only runs when the
-                // tunnel resolution is ForwardCandidate
-                // (build_local_origin_tunnel_tx_request) — so the
-                // "don't let peer data clobber local sessions" guard
-                // does not apply.
-                debug_assert!(
-                    entry.origin.is_peer_synced(),
-                    "UpsertLocal entries must carry a sync-family origin; a \
-                     local origin would have pushed an HA delta on the old \
-                     install path"
-                );
-                // #5212 / #9412: the shared mapping preserves the entry's id (a
-                // local-tunnel replica carries 0 => fresh local alloc) and its
-                // close class.
-                let installed = sessions.upsert_synced_with_origin(
-                    entry.into_session_install(now_ns),
-                    /* allow_replace_local = */ true,
-                );
-                // The only false exit is the local-clobber guard, which
-                // allow_replace_local=true bypasses — infallible by
-                // construction (#1855 contract: assert in debug, inert
-                // in release).
-                debug_assert!(
-                    installed,
-                    "upsert_synced_with_origin(_, true) is infallible"
-                );
-                let _ = installed;
-            }
-            WorkerCommand::DeleteSynced(key) => {
-                commands::handle_delete_synced(
-                    sessions,
-                    session_map,
-                    forwarding,
-                    ha_state,
-                    key,
-                    now_ns,
-                    now_secs,
-                    &mut deleted_synced_keys,
-                    worker_id,
-                );
-            }
-            WorkerCommand::DeleteLocalControl(key) => {
-                commands::handle_delete_synced_with_guard(
-                    sessions,
-                    session_map,
-                    forwarding,
-                    ha_state,
-                    key,
-                    now_ns,
-                    now_secs,
-                    &mut deleted_synced_keys,
-                    worker_id,
-                    commands::DeleteOrigin::LocalClear,
-                    &mut Vec::new(),
-                    0,
-                    None,
-                );
-            }
-            WorkerCommand::DeleteSyncedConditional { key, expected_id, companion, companion_expected_id } => {
-                commands::handle_delete_synced_conditional(
-                    sessions,
-                    session_map,
-                    forwarding,
-                    ha_state,
-                    key,
-                    expected_id,
-                    now_ns,
-                    now_secs,
-                    &mut deleted_synced_keys,
-                    worker_id,
-                    companion,
-                    companion_expected_id,
-                );
-            }
-            WorkerCommand::DeletePolicyBatch {
-                items,
-                applied,
-                pending,
-                report,
-                intents,
-            } => {
-                // Abort fence, phase 1 (table work ONLY): hold the report
-                // mutex across cancel-check and the per-item teardown loop, so
-                // cancel validation is atomic with the table mutations (see
-                // PolicyDeleteBatchReport). Microsecond, syscall-free, and
-                // tree-standard to hold — BPF redirect deletes are collected
-                // as intents and stashed into the shared handoff INSIDE this
-                // scope (table-side metadata only): holding syscalls would let
-                // a slow worker wedge the coordinator's abort indefinitely,
-                // and post-fence worker BPF would break abort-quiescence.
-                // The coordinator drains + executes after phase-1 acks, under
-                // the batch lease. Lock order fence -> applied slot / intents,
-                // never reversed: the coordinator reads slots and drains
-                // intents without the fence (after all acks) and takes the
-                // fence touching neither (on abort).
-                {
-                    let mut guard = report
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if !guard.cancelled {
-                        let mut applied_slot = applied
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        let mut deferred = Vec::new();
-                        for (index, item) in items.iter().enumerate() {
-                            // #15966r: forget broadcast PPTP associations only
-                            // AFTER the identity-conditional policy delete
-                            // applies. A stale captured session-id (or a
-                            // companion refusal) returns false and must leave
-                            // a replacement channel's calls and buffered
-                            // segments untouched.
-                            let local_id_before = sessions.session_id_for(&item.key);
-                            let applied = commands::handle_remove_policy_item(
-                                sessions,
-                                session_map,
-                                forwarding,
-                                ha_state,
-                                item,
-                                &mut *guard,
-                                index,
-                                now_ns,
-                                now_secs,
-                                &mut deleted_synced_keys,
-                                worker_id,
-                                &mut deferred,
-                            );
-                            // Genuine delete = applied here, or this worker
-                            // never held the incarnation (absent): broadcast
-                            // associations must still be purged. A present
-                            // session with a different id is a replacement
-                            // incarnation and is protected.
-                            // Trade-off (explicit, #15966r4): the absent arm
-                            // cannot discriminate a stale batch (captured
-                            // before a replacement was learned on THIS
-                            // worker, which holds no local row to check)
-                            // from a genuine delete on a non-owning worker.
-                            // It chooses purge: leaving broadcast calls
-                            // after a genuine delete resurrects a revoked
-                            // channel, while a stale purge is bounded by
-                            // call re-learning on the live control channel
-                            // and association idle expiry. The present-row
-                            // arm IS incarnation-scoped above.
-                            let genuine = applied || local_id_before == 0;
-                            if applied {
-                                applied_slot[index] = true;
-                            }
-                            if genuine {
-                                if let Some(ch) = crate::session::SessionTable::pptp_control_channel_for_key(&item.key) {
-                                    sessions.pptp_mut().forget_control_channel(ch);
-                                    if !deleted_pptp_control_channels.contains(&ch) {
-                                        deleted_pptp_control_channels.push(ch);
-                                    }
-                                }
-                            }
-                        }
-                        intents
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .extend(deferred);
-                    }
-                }
-                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-            }
-            WorkerCommand::ProbePolicyBatch {
-                bares,
-                found,
-                pending,
-            } => {
-                commands::handle_probe_policy_tuples(sessions, &bares, found.as_ref());
-                pending.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
-            }
-            WorkerCommand::DeleteSyncedIfTableUnknown { key, domain, check } => {
-                // #9752: conditional purge delete — decline (no-op, not even
-                // `deleted_keys`: the entry survives so its flow-cache permit
-                // stays backed, the #9048 reasoning) unless OUR entry still
-                // carries this stamp AND is unresolvable under CURRENT
-                // registry. Lagging senders, re-added tables, and
-                // Companions are not replicated: they converge locally
-                // (age/evict; default-scoped and validation-gated).
-                let purgeable =
-                    sessions
-                        .entry_with_origin(&key)
-                        .is_some_and(|(decision, metadata, _)| {
-                            !metadata.is_reverse
-                                && decision.install_table_domain == domain
-                                && decision.install_table_check == check
-                                && install_table_purge::install_table_purge_predicate(
-                                    forwarding, &key, &decision,
-                                )
-                        });
-                if purgeable {
-                    commands::handle_delete_synced(
-                        sessions,
-                        session_map,
-                        forwarding,
-                        ha_state,
-                        key,
-                        now_ns,
-                        now_secs,
-                        &mut deleted_synced_keys,
-                        worker_id,
-                    );
-                }
-            }
-            WorkerCommand::EnqueueShapedLocal(req) => {
-                // Inline push into the tick results.
-                shaped_tx_requests.push(req);
-            }
-            WorkerCommand::InstallPptpCall {
-                call,
-                control,
-                learned_ns,
-            } => {
-                // #7699: learn the association on THIS worker. A collision is
-                // refused rather than merged (two calls sharing one handle
-                // share one session), and counted so a refusal is not silent.
-                // #15950: a command queued while enabled must not install
-                // after the ALG is disabled.
-                if forwarding.pptp_enabled() {
-                    if let Err(e) = sessions.pptp_mut().install(call, control, learned_ns) {
-                        debug_log!("PPTP association refused: {:?}", e);
-                    }
-                }
-            }
-            WorkerCommand::ForgetPptpCall(handle) => {
-                // #7699: a stale association re-pairs a REUSED 16-bit call id
-                // onto a dead handle, so teardown must land on every worker.
-                sessions.pptp_mut().remove(handle);
-            }
-            WorkerCommand::ForgetPptpCallByControl(disconnect) => {
-                sessions
-                    .pptp_mut()
-                    .forget_call_disconnected_by(disconnect);
-            }
-            WorkerCommand::ForgetPptpControlChannel { control, closed_ns } => {
-                // #11053: tear down only the PPTP associations. The control
-                // TCP session may still be owned by this worker.
-                sessions
-                    .pptp_mut()
-                    .forget_control_channel_learned_by(control, closed_ns);
-            }
-            WorkerCommand::VacateAllSharedExactSlots => {
-                // Inline flag set into the tick results.
-                // #941 Work item C: signal the outer poll loop to vacate
-                // all shared_exact slots (we don't have BindingWorker
-                // access here, so we set the flag and let
-                // `worker.rs:818-822` dispatch).
-                vacate_all_shared_exact_slots = true;
-            }
-        }
+            now_ns,
+            now_secs,
+            cancelled_keys: &mut cancelled_keys,
+            cancelled_keys_seen: &mut cancelled_keys_seen,
+            exported_sequences: &mut exported_sequences,
+            export_window_sequences: &mut export_window_sequences,
+            export_owner_rgs: &mut export_owner_rgs,
+            export_kick_epoch: &mut export_kick_epoch,
+            stale_replay_dropped_keys: &mut stale_replay_dropped_keys,
+            deleted_synced_keys: &mut deleted_synced_keys,
+            deleted_pptp_control_channels: &mut deleted_pptp_control_channels,
+            shaped_tx_requests: &mut shaped_tx_requests,
+            vacate_all_shared_exact_slots: &mut vacate_all_shared_exact_slots,
+        };
+        commands::dispatch_worker_commands(&mut dispatch_context, scratch);
     }
     // #9720: step the refused-transition debt by the drained slice and
     // dispatch the ops whose position is reached — AFTER the slice. The
@@ -1445,4 +883,3 @@ pub(in crate::afxdp) fn reconcile_peer_synced_against_shared(
     }
     total
 }
-

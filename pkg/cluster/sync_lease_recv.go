@@ -57,9 +57,10 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) bool {
 		s.peerSnaps.peerIPsecSAsMu.Lock()
 		s.peerSnaps.peerIPsecSAs = names
 		s.peerSnaps.peerIPsecSAsMu.Unlock()
-		// #16758: a committed legacy set supersedes every in-flight chunk
+		// A committed legacy set supersedes every in-flight chunk
 		// assembly (its seq is newer by the guard that just advanced).
 		s.ipsecChunkState.discardAll()
+		s.ipsecChunkState.recordCommit(ipsecSAChunkGeneration{incarnation: incarnation, generation: seq})
 	}
 	s.recvSeqMu.Unlock()
 	if !applied {
@@ -101,17 +102,20 @@ func (s *SessionSync) handleIPsecSAChunk(conn net.Conn, payload []byte) bool {
 			"incarnation", incarnation, "seq", seq, "bytes", len(base))
 		return false
 	}
-	names, malformed := decodeIPsecSAChunkBody(chunkBody)
-	if malformed {
+	// The sender stamps its first frame sequence as the generation; no
+	// frame can carry a larger generation than its own sequence. Refuse
+	// before decoding the body, advancing seq, or assembling chunks.
+	if generation > seq {
 		s.stats.IPsecSAMalformedIgnored.Add(1)
-		slog.Warn("cluster sync: dropping malformed IPsec SA chunk — prior set retained",
-			"generation", generation, "index", index)
+		slog.Warn("cluster sync: dropping IPsec SA chunk generation ahead of frame sequence",
+			"incarnation", incarnation, "generation", generation, "seq", seq)
 		return false
 	}
-	if len(names) > ipsecChunkNamesPerChunk {
+	names, decodeErr := decodeIPsecSAChunkBody(chunkBody)
+	if decodeErr != nil {
 		s.stats.IPsecSAMalformedIgnored.Add(1)
-		slog.Warn("cluster sync: dropping IPsec SA chunk over per-chunk name bound — prior set retained",
-			"generation", generation, "index", index, "names", len(names), "cap", ipsecChunkNamesPerChunk)
+		slog.Warn("cluster sync: dropping malformed IPsec SA chunk — prior set retained",
+			"generation", generation, "index", index, "error", decodeErr)
 		return false
 	}
 	s.ipsecApplyMu.Lock()
@@ -140,6 +144,15 @@ func (s *SessionSync) handleIPsecSAChunk(conn net.Conn, payload []byte) bool {
 		s.ipsecApplyMu.Unlock()
 		return true
 	}
+	if s.ipsecChunkState.supersededByCommit(key) {
+		s.recvSeqMu.Unlock()
+		s.ipsecApplyMu.Unlock()
+		s.stats.IPsecSAStaleIgnored.Add(1)
+		slog.Warn("cluster sync: dropping completed stale IPsec SA chunk generation — standby retains newer set",
+			"incarnation", incarnation, "generation", generation)
+		return false
+	}
+	s.ipsecChunkState.recordCommit(key)
 	s.peerSnaps.peerIPsecSAsMu.Lock()
 	s.peerSnaps.peerIPsecSAs = complete
 	s.peerSnaps.peerIPsecSAsMu.Unlock()
@@ -305,6 +318,7 @@ func (s *SessionSync) handleDHCPLeaseV4(conn net.Conn, payload []byte) bool {
 		// chunk assembly for this family (its seq is newer by the
 		// guard that just advanced).
 		s.dhcpChunkState4.discardAll()
+		s.dhcpChunkState4.recordCommit(dhcpChunkGeneration{incarnation: incarnation, generation: seq})
 	}
 	s.recvSeqMu.Unlock()
 	if !applied {
@@ -390,6 +404,7 @@ func (s *SessionSync) handleDHCPLeaseV6(conn net.Conn, payload []byte) bool {
 		snapshot.Received = true
 		s.storePeerDHCPLeaseSnapshot(6, snapshot)
 		s.dhcpChunkState6.discardAll()
+		s.dhcpChunkState6.recordCommit(dhcpChunkGeneration{incarnation: incarnation, generation: seq})
 	}
 	s.recvSeqMu.Unlock()
 	if !applied {
@@ -444,6 +459,15 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed DHCP lease chunk header",
 			"family", family, "incarnation", incarnation, "seq", seq, "bytes", len(base))
+		return false
+	}
+	// The sender stamps its first frame sequence as the generation; no
+	// frame can carry a larger generation than its own sequence. Refuse
+	// before decoding the body, advancing seq, or assembling chunks.
+	if generation > seq {
+		s.stats.MalformedRecordsDropped.Add(1)
+		slog.Warn("cluster sync: dropping DHCP lease chunk generation ahead of frame sequence",
+			"family", family, "incarnation", incarnation, "generation", generation, "seq", seq)
 		return false
 	}
 	var snapshot dhcpserver.LeaseSyncSnapshot
@@ -515,6 +539,15 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		s.dhcpApplyMu.Unlock()
 		return true
 	}
+	if state.supersededByCommit(key) {
+		s.recvSeqMu.Unlock()
+		s.dhcpApplyMu.Unlock()
+		s.stats.DHCPLeasesStaleIgnored.Add(1)
+		slog.Warn("cluster sync: dropping completed stale DHCP lease chunk generation — standby retains newer set",
+			"family", family, "incarnation", incarnation, "generation", generation)
+		return false
+	}
+	state.recordCommit(key)
 	snapshot.Leases = complete
 	snapshot.Received = true
 	s.storePeerDHCPLeaseSnapshot(family, snapshot)

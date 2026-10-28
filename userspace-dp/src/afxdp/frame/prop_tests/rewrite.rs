@@ -25,7 +25,6 @@ use super::strategies::{
     arb_packet_with_nat, arb_vlan, build_valid_frame, ExtHdr, PacketSpec, ValidPacket, AF4, AF6,
 };
 use super::*;
-use crate::afxdp::checksum::{compute_ip_csum_delta, compute_l4_csum_delta};
 
 /// Harness-defined same-packet inverse of a NAT decision (plan P-N1).
 /// Explicitly NOT `NatDecision::reverse` (nat/mod.rs:63-79) — that
@@ -163,11 +162,13 @@ fn make_decision(pkt: &ValidPacket, nat: NatDecision, tx_vlan: u16) -> SessionDe
         transport_route_mtu: 0,
     }, nat, install_table_domain: 0, install_table_check: 0 }
 }
-
-/// Build the rewrite descriptor exactly as the flow cache does
-/// (flow_cache.rs:323-355): same MACs, same NAT fields, deltas from
-/// `compute_ip_csum_delta` / `compute_l4_csum_delta`.
-fn make_descriptor(pkt: &ValidPacket, nat: NatDecision, tx_vlan: u16) -> RewriteDescriptor {
+/// Build the non-NAT descriptor fields for a packet while deriving all
+/// NAT fields through the same constructor used by the flow cache.
+fn descriptor_for_packet(
+    pkt: &ValidPacket,
+    nat: NatDecision,
+    tx_vlan: u16,
+) -> RewriteDescriptor {
     let flow = pkt.session_flow();
     RewriteDescriptor {
         dst_mac: [0xba, 0x86, 0xe9, 0xf6, 0x4b, 0xd5],
@@ -175,24 +176,18 @@ fn make_descriptor(pkt: &ValidPacket, nat: NatDecision, tx_vlan: u16) -> Rewrite
         fabric_redirect: false,
         tx_vlan_id: tx_vlan,
         ether_type: if pkt.addr_family == AF6 { 0x86dd } else { 0x0800 },
-        rewrite_src_ip: nat.rewrite_src,
-        rewrite_dst_ip: nat.rewrite_dst,
-        rewrite_src_port: nat.rewrite_src_port,
-        rewrite_dst_port: nat.rewrite_dst_port,
-        ip_csum_delta: compute_ip_csum_delta(&flow, &nat),
-        l4_csum_delta: compute_l4_csum_delta(&flow, &nat),
         egress_ifindex: 12,
         tx_ifindex: 11,
         target_binding_index: None,
         input_filter_log: None,
         input_filter_counters: crate::filter::CachedFilterCounters::default(),
         tx_selection: CachedTxSelectionDescriptor::default(),
-        nat64: false,
-        nptv6: false,
         apply_nat_on_fabric: false,
         last_queue_id: None,
+        ..RewriteDescriptor::from_decision(&flow, nat)
     }
 }
+
 
 const DIFF_ADDR: usize = 256;
 
@@ -310,7 +305,7 @@ proptest! {
         let generic = rewrite_forwarded_frame_in_place(
             &area_a, desc, pkt.meta, &decision, false, None, 0,
         );
-        let rd = make_descriptor(&pkt, nat, tx_vlan);
+        let rd = descriptor_for_packet(&pkt, nat, tx_vlan);
         let fast = apply_rewrite_descriptor(&area_b, desc, pkt.meta, &rd, None);
 
         // #10729 X2-F6: the descriptor path declines AH (its precomputed
@@ -446,7 +441,7 @@ fn pin_ttl_expired_declines_l3_untouched() {
         );
 
         let area = area_with_frame(&pkt.frame);
-        let rd = make_descriptor(&pkt, nat, 0);
+        let rd = descriptor_for_packet(&pkt, nat, 0);
         assert!(
             apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).is_none(),
             "descriptor path must decline TTL≤1 (v6={v6})"
@@ -634,7 +629,7 @@ fn declined_rewrite_leaves_umem_byte_identical_4965() {
             rewrite_src_port: Some(0x3333),
             ..NatDecision::default()
         };
-        let rd = make_descriptor(&pkt, nat, 0);
+        let rd = descriptor_for_packet(&pkt, nat, 0);
         let decision = make_decision(&pkt, nat, 0);
         let result = apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).or_else(|| {
             rewrite_forwarded_frame_in_place(&area, desc, pkt.meta, &decision, false, None, 0)
@@ -667,7 +662,7 @@ fn pin_descriptor_port_mismatch_declines() {
         len: pkt.frame.len() as u32,
         options: 0,
     };
-    let rd = make_descriptor(&pkt, nat, 0);
+    let rd = descriptor_for_packet(&pkt, nat, 0);
     assert!(
         apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, Some((0x1112, 0x2222))).is_none(),
         "descriptor must decline on expected-port mismatch"
@@ -709,7 +704,7 @@ fn pin_5466_descriptor_fragment_decline_frame_untouched() {
     };
     // Descriptor MACs differ from the frame's DST_MAC/SRC_MAC, so a
     // pre-gate eth write is detectable by the full-frame compare.
-    let rd = make_descriptor(&pkt, NatDecision::default(), 0);
+    let rd = descriptor_for_packet(&pkt, NatDecision::default(), 0);
     assert!(
         apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).is_none(),
         "descriptor must decline a non-first fragment"
@@ -754,7 +749,7 @@ fn pin_5466_descriptor_vlan_push_memmove_decline_frame_untouched() {
         options: 0,
     };
     // tx_vlan_id > 0 → target eth_len 18 → VLAN push (memmove, no headroom).
-    let rd = make_descriptor(&pkt, NatDecision::default(), 100);
+    let rd = descriptor_for_packet(&pkt, NatDecision::default(), 100);
     assert!(
         apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).is_none(),
         "descriptor must decline a non-first fragment on the vlan-push memmove path"
@@ -803,7 +798,7 @@ fn pin_5466_descriptor_success_matches_generic() {
             &area_d,
             desc,
             pkt.meta,
-            &make_descriptor(&pkt, nat, tx_vlan),
+            &descriptor_for_packet(&pkt, nat, tx_vlan),
             None,
         )
         .expect("descriptor rewrite must succeed (#5466 success path intact)");
@@ -844,7 +839,7 @@ fn pin_descriptor_nat64_decline_frame_untouched() {
     // NAT64: always declines, frame untouched.
     {
         let area = area_with_frame(&pkt.frame);
-        let mut rd = make_descriptor(&pkt, NatDecision::default(), 0);
+        let mut rd = descriptor_for_packet(&pkt, NatDecision::default(), 0);
         rd.nat64 = true;
         assert!(apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).is_none());
         let after = area.slice(DIFF_ADDR, pkt.frame.len()).unwrap();
@@ -858,7 +853,7 @@ fn pin_descriptor_nat64_decline_frame_untouched() {
     // untouched (NPTv6 is IPv6-only; the v4 ether_type is inconsistent).
     {
         let area = area_with_frame(&pkt.frame);
-        let mut rd = make_descriptor(&pkt, NatDecision::default(), 0);
+        let mut rd = descriptor_for_packet(&pkt, NatDecision::default(), 0);
         rd.nptv6 = true; // ether_type stays 0x0800 (this is a v4 pin packet)
         assert!(apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).is_none());
         let after = area.slice(DIFF_ADDR, pkt.frame.len()).unwrap();
@@ -870,13 +865,13 @@ fn pin_descriptor_nat64_decline_frame_untouched() {
     }
 }
 
-/// #2652 — NPTv6 descriptor fast path is BYTE-IDENTICAL to the generic
-/// slow path. NPTv6 (RFC 6296) is a same-family IPv6 dst-prefix rewrite
-/// that is checksum-neutral by design: the generic `apply_nat_ipv6`
-/// writes the new address and SKIPS the L4 checksum adjust
-/// (`skip_l4_csum = nat.nptv6`); the descriptor carries `l4_csum_delta
-/// == 0` (`compute_l4_csum_delta` short-circuits on `nat.nptv6`) so the
-/// fast path's IPv6 arm also leaves the L4 checksum untouched.
+/// #2652/#3121 — NPTv6 descriptor fast path is BYTE-IDENTICAL to the
+/// generic slow path. A pure, single-sided NPTv6 address rewrite is
+/// checksum-neutral by design: the shared NAT fold rule keeps the
+/// descriptor delta at 0 and makes the generic `apply_nat_ipv6` skip
+/// that address adjustment. When NPTv6 composes with DNAT and both
+/// address slots are rewritten, the rule folds the non-neutral DNAT
+/// delta in both paths.
 ///
 /// This is the fail-on-revert proof: with the descriptor `nptv6` flag
 /// honored (orchestrator no longer early-returns for `rd.nptv6`), the
@@ -927,8 +922,7 @@ fn pin_nptv6_descriptor_matches_generic_byte_for_byte() {
     // Descriptor fast path — descriptor built exactly as the flow cache does,
     // including the nptv6 flag (#2652) and the zero L4 csum delta.
     let area_d = area_with_frame(&pkt.frame);
-    let mut rd = make_descriptor(&pkt, nptv6_nat, 0);
-    rd.nptv6 = true;
+    let rd = descriptor_for_packet(&pkt, nptv6_nat, 0);
     assert_eq!(
         rd.l4_csum_delta, 0,
         "NPTv6 descriptor must carry a zero L4 csum delta (checksum-neutral)"
@@ -966,12 +960,9 @@ fn pin_nptv6_descriptor_matches_generic_byte_for_byte() {
 /// no longer blanket-skip on `nat.nptv6` when a destination rewrite is
 /// also present.
 ///
-/// FAIL-ON-REVERT: with the pre-#3121 short-circuit restored
-/// (`compute_l4_csum_delta` returns 0 whenever `nat.nptv6`, and
-/// `apply_nat_ipv6`'s compose arm skips on `nat.nptv6`), the DNAT
-/// destination change is left out of the L4 checksum -> the output
-/// frame's stored checksum no longer matches the rewritten addresses ->
-/// `oracle_packet_valid` rejects both paths -> RED.
+/// FAIL-ON-REVERT: a mutant that blanket-skips L4 folding whenever
+/// `nptv6` is set omits the composed DNAT delta from both paths; the
+/// checksum oracle rejects that output -> RED.
 #[test]
 fn pin_nptv6_composes_with_dnat_checksum_valid() {
     // Valid IPv6 TCP packet (no VLAN). src6 = 2001::66, dst6 = 2001::c8.
@@ -1019,8 +1010,7 @@ fn pin_nptv6_composes_with_dnat_checksum_valid() {
     // including the nptv6 flag. Unlike pure NPTv6 (#2652), the compose
     // descriptor carries a NON-zero L4 delta (the DNAT term).
     let area_d = area_with_frame(&pkt.frame);
-    let mut rd = make_descriptor(&pkt, nat, 0);
-    rd.nptv6 = true;
+    let rd = descriptor_for_packet(&pkt, nat, 0);
     assert_ne!(
         rd.l4_csum_delta, 0,
         "NPTv6+DNAT compose descriptor must carry the DNAT L4 csum delta (#3121)"
@@ -1126,7 +1116,7 @@ fn pin_1838_generic_v6_nat_ext_header_rewrites_real_l4() {
     let g = rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None, 0)
         .expect("generic in-place rewrite succeeds");
     let area_d = area_with_frame(&pkt.frame);
-    let rd = make_descriptor(&pkt, nat, 0);
+    let rd = descriptor_for_packet(&pkt, nat, 0);
     let d = apply_rewrite_descriptor(&area_d, desc, pkt.meta, &rd, None)
         .expect("descriptor path succeeds");
     assert_eq!(g, d, "InPlaceRewriteResult must agree");
@@ -1213,7 +1203,7 @@ fn pin_1839_v6_tcp_zero_encoding_parity() {
     );
 
     let area = area_with_frame(&pkt.frame);
-    let rd = make_descriptor(&pkt, nat, 0);
+    let rd = descriptor_for_packet(&pkt, nat, 0);
     assert_eq!(rd.l4_csum_delta, 0xffff, "same-port delta is ≡0 (0xFFFF)");
     let d = apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None)
         .expect("descriptor succeeds");
@@ -1254,7 +1244,7 @@ fn descriptor_v6_udp_computed_zero_canonicalizes() {
         options: 0,
     };
     let area = area_with_frame(&pkt.frame);
-    let rd = make_descriptor(&pkt, nat, 0);
+    let rd = descriptor_for_packet(&pkt, nat, 0);
     let d = apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None)
         .expect("descriptor succeeds");
     let out_d = area.slice(d.offset as usize, d.len as usize).unwrap();
@@ -1279,7 +1269,7 @@ fn run_both_paths(pkt: &ValidPacket, nat: NatDecision) -> (Vec<u8>, Vec<u8>) {
     let g = rewrite_forwarded_frame_in_place(&area_g, desc, pkt.meta, &decision, false, None, 0)
         .expect("generic in-place rewrite succeeds");
     let area_d = area_with_frame(&pkt.frame);
-    let rd = make_descriptor(pkt, nat, 0);
+    let rd = descriptor_for_packet(pkt, nat, 0);
     let d = apply_rewrite_descriptor(&area_d, desc, pkt.meta, &rd, None)
         .expect("descriptor rewrite succeeds");
     assert_eq!(g, d, "InPlaceRewriteResult must agree");

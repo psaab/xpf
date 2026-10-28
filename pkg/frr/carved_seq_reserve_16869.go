@@ -12,12 +12,6 @@ func carvedSingleExtraSeqs16869(carved bool, ps *config.PolicyStatement) uint64 
 	return config.CarvedSingleExtraSequences16869(carved, ps)
 }
 
-// carvedComposedReserve16869 returns the extra carved fall-off sequence beyond
-// the fallback ComposedChainSequenceCount reserves.
-func carvedComposedReserve16869(po *config.PolicyOptionsConfig, chain []string, carvedBGPOnly bool, fallbackAction string) uint64 {
-	return config.CarvedComposedExtraSequences16869(po, chain, carvedBGPOnly, fallbackAction)
-}
-
 // beltTotal16869 adds a carved reserve to a possibly-saturated count without
 // wrapping the sentinel back into the in-bound range.
 func beltTotal16869(count, reserve uint64) uint64 {

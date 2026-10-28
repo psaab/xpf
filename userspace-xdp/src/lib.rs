@@ -30,8 +30,6 @@ const PROTO_GRE: u8 = 47;
 const PROTO_ICMPV6: u8 = 58;
 const GRE_PROTO_IPV4: u16 = 0x0800;
 const GRE_PROTO_IPV6: u16 = 0x86dd;
-const TCP_FLAG_SYN: u8 = 0x02;
-const TCP_FLAG_ACK: u8 = 0x10;
 // The BPF-side symbol names retain FALLBACK for index/map compatibility. The
 // Go/operator surface exposes these retained-shim actions as degraded-path
 // counters.
@@ -41,12 +39,20 @@ const USERSPACE_FALLBACK_REASON_BINDING_MISSING: u32 = 2;
 const USERSPACE_FALLBACK_REASON_BINDING_NOT_READY: u32 = 3;
 const USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING: u32 = 4;
 const USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE: u32 = 5;
+// #17248: reserved degraded-path ABI slot 6 ("icmp" in the Go
+// `degradedPathReasonNames` table). This slot is intentionally never emitted;
+// the #8258 agreement test pins it so the following indices cannot renumber.
+#[allow(dead_code)]
 const USERSPACE_FALLBACK_REASON_ICMP: u32 = 6;
 const USERSPACE_FALLBACK_REASON_EARLY_FILTER: u32 = 7;
 const USERSPACE_FALLBACK_REASON_ADJUST_META: u32 = 8;
 const USERSPACE_FALLBACK_REASON_META_BOUNDS: u32 = 9;
 const USERSPACE_FALLBACK_REASON_REDIRECT_ERR: u32 = 10;
 const USERSPACE_FALLBACK_REASON_INTERFACE_NAT_NO_SESSION: u32 = 11;
+// #17248: reserved degraded-path ABI slot 12 ("no_session" in the Go
+// `degradedPathReasonNames` table). This slot is intentionally never emitted;
+// the #8258 agreement test pins it so the following indices cannot renumber.
+#[allow(dead_code)]
 const USERSPACE_FALLBACK_REASON_NO_SESSION: u32 = 12;
 const USERSPACE_FALLBACK_REASON_STRICT_DROP: u32 = 13;
 const USERSPACE_FALLBACK_REASON_PASS_TO_KERNEL: u32 = 14;
@@ -208,12 +214,16 @@ const USERSPACE_TRACE_STAGE_BINDING_MISSING: u32 = 2;
 const USERSPACE_TRACE_STAGE_BINDING_NOT_READY: u32 = 3;
 const USERSPACE_TRACE_STAGE_HEARTBEAT_MISSING: u32 = 4;
 const USERSPACE_TRACE_STAGE_HEARTBEAT_STALE: u32 = 5;
+// #17248: reserved trace-stage ABI slot 6; keep its number without emitting it.
+#[allow(dead_code)]
 const USERSPACE_TRACE_STAGE_ICMP_FALLBACK: u32 = 6;
 const USERSPACE_TRACE_STAGE_EARLY_FILTER: u32 = 7;
 const USERSPACE_TRACE_STAGE_INTERFACE_NAT_LOCAL: u32 = 8;
 const USERSPACE_TRACE_STAGE_LOCAL_DESTINATION: u32 = 9;
 const USERSPACE_TRACE_STAGE_REDIRECT: u32 = 10;
 const USERSPACE_TRACE_STAGE_REDIRECT_ERR: u32 = 11;
+// #17248: reserved trace-stage ABI slot 12; keep its number without emitting it.
+#[allow(dead_code)]
 const USERSPACE_TRACE_STAGE_NO_SESSION: u32 = 12;
 
 #[repr(C)]
@@ -310,13 +320,6 @@ const _: [(); 24] = [(); mem::offset_of!(UserspaceDpMeta, routing_table)];
 const _: [(); 36] = [(); mem::offset_of!(UserspaceDpMeta, addr_family)];
 const _: [(); 40] = [(); mem::offset_of!(UserspaceDpMeta, dscp)];
 const _: [(); 80] = [(); mem::offset_of!(UserspaceDpMeta, config_generation)];
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct UserspaceBindingKey {
-    ifindex: u32,
-    queue_id: u32,
-}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -441,21 +444,6 @@ struct VlanHdr {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
-struct Ipv4Hdr {
-    version_ihl: u8,
-    tos: u8,
-    tot_len: u16,
-    id: u16,
-    frag_off: u16,
-    ttl: u8,
-    protocol: u8,
-    check: u16,
-    saddr: u32,
-    daddr: u32,
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
 struct Ipv6Hdr {
     version_priority: u8,
     flow_lbl: [u8; 3],
@@ -464,13 +452,6 @@ struct Ipv6Hdr {
     hop_limit: u8,
     saddr: [u8; 16],
     daddr: [u8; 16],
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct Ipv6OptHdr {
-    nexthdr: u8,
-    hdrlen: u8,
 }
 
 #[repr(C)]
@@ -802,9 +783,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // subprogram call — see `land_gate` below. As two inline matches
     // over `land_disposition_for_packet` (here + ctrl-disabled) LLVM
     // duplicated the WG-key construction and both map walks under
-    // every calling state; the historical #15854 measurement was 963340
-    // processed insns: 3.67% below the 1,000,000 kernel cap, but 113340
-    // above the 850,000-instruction install floor, so it fails the margin gate.
+    // every calling state. The outlined gate shares this work across
+    // paths; the current measurement is in
+    // pkg/dataplane/userspace_xdp_gate_verdict.json, with object/source
+    // hashes in pkg/dataplane/userspace_xdp_manifest.json. Regenerate with
+    // `make generate-userspace-xdp` (which runs cmd/shimverify).
     if land_gate(&parsed, ingress_ifindex) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_LAND_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
@@ -860,15 +843,14 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // checks the READY flag, reads the heartbeat and applies the
     // timeout, returning the slot packed with a failure code. The
     // four failure arms that used to sit inline here each carried a
-    // trace call plus a degraded-local check, and the verifier
-    // re-walked the packed trace callee under every one of those
-    // calling states (keeping the four traces separate measured
-    // 953428 processed insns; this merged form measures ~816k — see
-    // docs/log/15854.md). The merged arm below preserves each
-    // failure's stage, reason and trace slot exactly (u32::MAX for a
-    // missing binding, the resolved slot otherwise) and the same
-    // degraded-local pass/drop decision; only the trace call is
-    // shared. The #5173 call-site count moves 12 -> 9 with it.
+    // trace call plus a degraded-local check, and the verifier re-walked
+    // the packed trace callee under each calling state. Sharing the call
+    // preserves each failure's stage, reason, trace slot (u32::MAX for a
+    // missing binding, resolved slot otherwise), and degraded-local
+    // pass/drop decision. The current measurement is in
+    // pkg/dataplane/userspace_xdp_gate_verdict.json, with hashes in
+    // pkg/dataplane/userspace_xdp_manifest.json; regenerate with
+    // `make generate-userspace-xdp` (which runs cmd/shimverify).
     let ready = binding_ready_slot(ingress_ifindex, rx_queue, ctrl.heartbeat_timeout_ms);
     let ready_code = (ready >> 32) as u32;
     let ready_slot = ready as u32;
@@ -967,7 +949,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_WG_STEER);
         return Ok(cpumap_or_pass(ctrl));
     }
-    if !native_gre_fragment && !wg_fragment && should_fallback_early(&parsed, ingress_domain) {
+    if !native_gre_fragment && !wg_fragment && should_fallback_early(&parsed) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_EARLY_FILTER);
         record_trace(
             ctrl.flags,
@@ -1364,7 +1346,6 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
 ///
 /// `stack_margin_8249_test.go` pins the resulting margin so this cannot erode
 /// silently back to the eight bytes it started at.
-#[inline(never)]
 fn write_userspace_meta(
     meta_ptr: *mut UserspaceDpMeta,
     parsed: &ParsedPacket,
@@ -1907,7 +1888,7 @@ fn is_degraded_local_or_control(
     // this is defence in depth; the prefix applies this veto before
     // `early_pass`, whose multicast arm would otherwise pass the packet.
     let unresolved_ext_chain = parsed.unresolved_ipv6_ext_chain;
-    let early_pass = should_fallback_early(parsed, ingress_domain);
+    let early_pass = should_fallback_early(parsed);
     if let Some(verdict) = kernel_pass::degraded_local_or_control_head(
         native_gre_fragment_on_helper,
         wg_tail_excluded,
@@ -2474,7 +2455,7 @@ fn parse_ipv6(
         } else {
             false
         };
-        let seen = unsafe { USERSPACE_V6FRAG_SCRATCH.get(0) }.copied();
+        let seen = USERSPACE_V6FRAG_SCRATCH.get(0).copied();
         let non_first = match (wrote, seen) {
             (true, Some(v)) => v != 0,
             _ => true,
@@ -2494,8 +2475,10 @@ fn parse_ipv6(
         parse_l4(data, data_end, offset, protocol, data_end)?;
     // #10662: keep the capture-bound L4 parse EXACTLY as before. Passing a
     // declared bound through parse_l4 multiplied verifier states past the
-    // kernel cap while the control build fit comfortably (dated figures in
-    // #10998, not here: absolute counts rot every merge). This single
+    // kernel cap while the control build fit comfortably (current figures
+    // in pkg/dataplane/userspace_xdp_gate_verdict.json, with hashes in
+    // pkg/dataplane/userspace_xdp_manifest.json; regenerate with
+    // `make generate-userspace-xdp`, which runs cmd/shimverify). This single
     // post-check compares only the consumed packet-relative L4 end; the
     // scalar truncation verdict never becomes a new packet bound or enters
     // the heavy parse.
@@ -2576,7 +2559,7 @@ fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex:
     wg_steer_to_kernel_on_port_match(local_destination, pkt.udp_wg_transport_data)
 }
 
-fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
+fn should_fallback_early(pkt: &ParsedPacket) -> bool {
     // #16038: an unresolved IPv6 extension chain must never pass early — its
     // `protocol` is still a traversable ext-header type with ports 0/0, and a
     // multicast/link-local destination would otherwise kernel-PASS it before
@@ -2617,13 +2600,14 @@ fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
 //
 // #15854: this replaces the two inline `is_land` + match blocks
 // (healthy + ctrl-disabled) over a separate outlined resolver. The
-// inline matches duplicated the key construction and both map walks
-// under every calling state — the #15843 regression that took the
-// tracked object from 920733 to 963340 processed insns (3.67%
-// headroom) and over the guest kernel's 1M cap. One outlined call
-// per path is the record_trace_packed (#15645) shape: the verifier
-// walks the gate once. Do not re-inline without re-measuring
-// through cmd/shimverify.
+// inline matches duplicated the key construction and both map walks under
+// every calling state. One outlined call per path shares the work, in the
+// `record_trace_packed` (#15645) shape: the verifier walks the gate once.
+// Current verifier results are in pkg/dataplane/userspace_xdp_gate_verdict.json,
+// with object/source hashes in pkg/dataplane/userspace_xdp_manifest.json.
+// Regenerate with `make generate-userspace-xdp` (which runs cmd/shimverify).
+// docs/log/15854.md holds the dated history only. Do not re-inline without
+// re-measuring through cmd/shimverify.
 #[inline(never)]
 fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     if !is_land(&pkt.src_addr, &pkt.dst_addr) {
@@ -2661,8 +2645,11 @@ fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
 // shape): this resolver's WG-key construction and two map reads
 // were inlined at both call sites (WG steer + worker claim) and
 // re-walked under every calling state. One subprogram walk instead;
-// measured with the LAND/binding outlines in docs/log/15854.md.
-// Do not re-inline without re-measuring through cmd/shimverify.
+// measured with the LAND/binding outlines. Current results are in
+// pkg/dataplane/userspace_xdp_gate_verdict.json (hashes in
+// pkg/dataplane/userspace_xdp_manifest.json); regenerate with
+// `make generate-userspace-xdp` (which runs cmd/shimverify). Do not re-inline
+// without re-measuring through cmd/shimverify.
 #[inline(never)]
 fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     if pkt.protocol != PROTO_UDP || pkt.flow_dst_port == 0 {
@@ -2808,14 +2795,6 @@ fn live_userspace_session_action(pkt: &ParsedPacket) -> u8 {
     unsafe { USERSPACE_SESSIONS.get(&key).copied() }.unwrap_or(0)
 }
 
-fn is_connection_initiating(pkt: &ParsedPacket) -> bool {
-    match pkt.protocol {
-        PROTO_TCP => (pkt.tcp_flags & TCP_FLAG_SYN) != 0 && (pkt.tcp_flags & TCP_FLAG_ACK) == 0,
-        PROTO_UDP | PROTO_ICMP | PROTO_ICMPV6 => true,
-        _ => true,
-    }
-}
-
 /// #9901 (F-075): the L4 tuple for a FIRST fragment, whose L4 header is
 /// legitimately partial. `declared_end` is the declared-datagram bound (a pure
 /// scalar from `parse_ipv4`); every span is scalar-checked against it BEFORE
@@ -2916,7 +2895,10 @@ fn first_fragment_l4(
 /// sent someone to reason against a moved figure, which is most of what that
 /// issue cost. State relationships that do not move instead: carrying fits,
 /// consuming does not, and the install-blocking ceiling is the 15% floor, not
-/// the 1M cap. The current dated measurement lives in #10998, not here.
+/// the 1M cap. Current results are in
+/// pkg/dataplane/userspace_xdp_gate_verdict.json (object/source hashes in
+/// pkg/dataplane/userspace_xdp_manifest.json); regenerate with
+/// `make generate-userspace-xdp` (which runs cmd/shimverify).
 /// `declared_end` (#9901, F-075) is the caller's bound on how far L4 reads
 /// may go — the IPv4 declared-datagram end, a pure scalar. Every arm below
 /// scalar-checks its span against it BEFORE reading; the reads themselves
