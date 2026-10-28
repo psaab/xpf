@@ -935,8 +935,8 @@ func (s TransferReadinessSnapshot) Reason() string {
 //	[dhcpApplyMu -> peerDHCPLeasesMu] via the commit above; the lease
 //	  store is the innermost lock and never acquires another.
 //
-// Leaf locks (acquire no other SessionSync mutex while held): writeMu,
-// preAuthMu, queuedFrameMu, zoneRGMu, deleteJournalMu, bulkSendMu,
+// Leaf locks (acquire no other SessionSync mutex while held): preAuthMu,
+// queuedFrameMu, zoneRGMu, deleteJournalMu, bulkSendMu,
 // barrierWaitMu, failoverWaitMu, configGenMu, configApplyMu,
 // configEpochRoleMu, fenceAckMu, configApplyDebtMu,
 // peerSnaps.peerIPsecSAsMu,
