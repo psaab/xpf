@@ -31,9 +31,11 @@ routing-options {
         }
     }
 }`)
-	if err == nil || !strings.Contains(err.Error(), "whitespace is not allowed") {
+	if err == nil || !strings.Contains(err.Error(), "must not have leading or trailing whitespace") {
 		t.Fatalf("padded destination must be refused with the padding reason, got: %v", err)
 	}
+	// Direct call: the strict validator refuses padding itself (it is
+	// consumed by strict compiler gates without SchemaValidate).
 	if err := ValidateRouteDestination(" 10.0.0.0/8 "); err == nil {
 		t.Fatal("ValidateRouteDestination accepted padding")
 	}
@@ -51,9 +53,10 @@ routing-options {
         }
     }
 }`)
-	if err == nil || !strings.Contains(err.Error(), "whitespace is not allowed") {
+	if err == nil || !strings.Contains(err.Error(), "must not have leading or trailing whitespace") {
 		t.Fatalf("padded next-hop must be refused with the padding reason, got: %v", err)
 	}
+	// Direct calls: the strict validator refuses padding itself.
 	for _, bad := range []string{" 192.0.2.1 ", "\tge-0/0/1.0", "2001:db8::1@eth0 "} {
 		if err := ValidateStaticNextHop(bad); err == nil {
 			t.Errorf("ValidateStaticNextHop(%q) accepted, want rejection", bad)
