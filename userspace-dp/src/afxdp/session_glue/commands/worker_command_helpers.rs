@@ -54,12 +54,11 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced_command(
     ctx: &mut WorkerCommandDispatchContext<'_>,
     entry: SyncedSessionEntry,
 ) {
-    // pre-purge snapshot re-published post-purge (backlog, late
-    // fan-out, re-import) must not reinstall the removed-zone row
-    // the purge deleted. Dropped here — before re-resolve, install,
-    // reserve, publish — and the key recorded so the worker loop
-    // evicts the stale row from shared authority (same
-    // record-here/evict-where-the-handles-are split as #6457).
+    // #9752/#6457: a pre-purge snapshot re-published post-purge (backlog, late
+    // fan-out, re-import) must not reinstall the removed-zone row the purge
+    // deleted. Drop it before re-resolve, install, reserve, and publish, then
+    // record the key so the worker loop evicts stale shared authority: the
+    // same record-here/evict-where-the-handles-are split as #6457.
     if synced_entry_is_stale_replay(entry.origin, &entry.metadata, ctx.forwarding) {
         note_stale_replay_fence_drop();
         ctx.stale_replay_dropped_keys.push(entry.key);

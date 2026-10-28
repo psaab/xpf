@@ -10,8 +10,8 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_local(
     entry: SyncedSessionEntry,
     now_ns: u64,
 ) {
-    // #18144: extracted from the `apply_worker_commands` dispatcher;
-    // the debug_assert contract below is tied to this handler.
+    // This logic was inline in the dispatcher (with no `commands/` handler);
+    // the debug_assert contract below remains tied to this command arm.
     // #1870: local-tunnel pair entries are coordinator-
     // authoritative replicas of state ALREADY published to
     // the shared maps (the tunnel.rs publish precedes the

@@ -105,13 +105,6 @@ pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
                     companion_expected_id,
                 );
             }
-            WorkerCommand::InstallPptpCall {
-                call,
-                control,
-                learned_ns,
-            } => {
-                super::handle_install_pptp_call(ctx, call, control, learned_ns);
-            }
             WorkerCommand::DeletePolicyBatch { items, applied, pending, report, intents } => {
                 super::handle_delete_policy_batch_command(
                     ctx, items, applied, &pending, report, intents,
@@ -141,6 +134,13 @@ pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
                 );
             }
             WorkerCommand::EnqueueShapedLocal(req) => ctx.shaped_tx_requests.push(req), // Inline push into the tick results.
+            WorkerCommand::InstallPptpCall {
+                call,
+                control,
+                learned_ns,
+            } => {
+                super::handle_install_pptp_call(ctx, call, control, learned_ns);
+            }
             // #7699: a stale association re-pairs a REUSED 16-bit call id
             // onto a dead handle, so teardown must land on every worker.
             WorkerCommand::ForgetPptpCall(handle) => {
