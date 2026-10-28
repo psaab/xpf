@@ -982,11 +982,35 @@ var credentialShapeSchemaRoot17806 *schemaNode
 type credentialShapePositionWalker17806 struct {
 	schema    *schemaNode
 	skipUntil int
+	// inMultiValueRun: inside a childless multi leaf's value run —
+	// every remaining token is a value of that leaf until the walk
+	// would resolve a token as a sibling keyword (a container/leaf
+	// with children); such a sibling ends the run.
+	inMultiValueRun bool
+	multiParent     *schemaNode
 }
 
 // position reports whether fp[index] is a schema child keyword or a value/
 // identifier slot. The remaining false/false case is an open-world token.
 func (w *credentialShapePositionWalker17806) position(fp []string, index int) (schemaKeyword, valuePosition, positionKnown bool) {
+	if w.inMultiValueRun {
+		// A compound credential token (password-admin, secret-agent)
+		// is a VALUE, not a keyword — it never ends the run. A bare
+		// credential keyword (password, secret, pre-shared-key, ...)
+		// DOES end the run so its gated/distinctive arm can fire —
+		// `archive-sites <url> password <v>` must mask (verified by
+		// TestRedactEmbeddedNonSetVerbs16726/gated_password).
+		k := fp[index]
+		if k == "pre-shared-key" || (!strings.Contains(k, "-") && isCredentialShapedKeyword16731(k)) {
+			w.inMultiValueRun = false
+			w.multiParent = nil
+		} else if sib, ok := w.multiParent.children[k]; ok && len(sib.children) > 0 {
+			w.inMultiValueRun = false
+			w.multiParent = nil
+		} else {
+			return false, true, true
+		}
+	}
 	if index < w.skipUntil {
 		return false, true, true
 	}
@@ -1016,6 +1040,19 @@ func (w *credentialShapePositionWalker17806) position(fp []string, index int) (s
 		return false, false, false
 	}
 	consumed, next := consumeNodeKeys(fp[index:], child)
+	if child.multi && len(child.children) == 0 {
+		// A multi-value leaf (e.g. domain-search, args:1 multi:true):
+		// every remaining token is a value of this leaf until a
+		// sibling keyword (above) ends the run — consumeNodeKeys
+		// counts only args, so later values must not fall into the
+		// open-world arm (#18384 fold, Rev18384FoldR2Kimi).
+		parent := w.schema
+		w.inMultiValueRun = true
+		w.multiParent = parent
+		w.schema = nil
+		w.skipUntil = index + consumed
+		return true, false, true
+	}
 	w.schema = next
 	w.skipUntil = index + consumed
 	return true, false, true
