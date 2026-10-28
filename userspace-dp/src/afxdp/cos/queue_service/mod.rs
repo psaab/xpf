@@ -91,9 +91,10 @@ use settle::{
     settle_exact_local_fifo_submission_queue_gone,
     settle_exact_local_scratch_submission_flow_fair_queue_gone,
     settle_exact_prepared_fifo_submission_queue_gone,
-    settle_exact_prepared_scratch_submission_flow_fair, submit_cos_batch,
-    settle_exact_prepared_scratch_submission_flow_fair_queue_gone,
-    subtract_direct_cos_queue_bytes,
+    settle_exact_prepared_scratch_submission_flow_fair,
+    settle_exact_prepared_scratch_submission_flow_fair_queue_gone, submit_cos_batch,
+    subtract_direct_cos_queue_bytes, COS_GUARANTEE_QUANTUM_MAX_BYTES,
+    COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS, COS_SURPLUS_ROUND_QUANTUM_BYTES,
 };
 pub(in crate::afxdp) use settle::{
     settle_exact_local_fifo_submission, settle_exact_local_scratch_submission_flow_fair,
@@ -130,8 +131,7 @@ use crate::afxdp::tx::{
     cos_queue_dscp_rewrite, maybe_wake_tx, maybe_wake_tx_fields, reap_tx_completions,
     reap_tx_completions_fields, recycle_cancelled_prepared_offset_with_shared,
     remember_prepared_recycle, stamp_submits, transmit_batch, transmit_prepared_queue, TxError,
-    TxRetryReason, COS_GUARANTEE_QUANTUM_MAX_BYTES, COS_GUARANTEE_QUANTUM_MIN_BYTES,
-    COS_GUARANTEE_VISIT_NS, COS_SURPLUS_ROUND_QUANTUM_BYTES,
+    TxRetryReason,
 };
 
 pub(in crate::afxdp) enum CoSBatch {

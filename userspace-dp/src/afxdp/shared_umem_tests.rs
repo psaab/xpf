@@ -1,6 +1,18 @@
 use super::*;
+use crate::protocol::SharedUmemSnapshot;
 use serde_json::json;
 use std::sync::Arc;
+
+// #18234: `ConfigSnapshot.userspace` is the typed `UserspaceSnapshot`
+// (#17134/#17149), not a `serde_json::Value`. Build it directly; the
+// remaining `json!` uses below are wire-decode cases that must still
+// exercise the typed serde path.
+fn typed_userspace(shared_umem: SharedUmemSnapshot) -> crate::protocol::UserspaceSnapshot {
+    crate::protocol::UserspaceSnapshot {
+        shared_umem: Some(shared_umem),
+        ..Default::default()
+    }
+}
 
 #[test]
 fn policy_defaults_to_cross_nic_auto() {
@@ -8,16 +20,14 @@ fn policy_defaults_to_cross_nic_auto() {
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
     assert_eq!(policy.mode, SharedUmemMode::CrossNic);
     assert!(policy.interfaces.is_empty());
-    assert!(policy.phase0_audit.is_none());
 }
 
 #[test]
 fn explicit_off_disables_shared_umem() {
     let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "off"
-            }
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "off".to_string(),
+            ..Default::default()
         }),
         ..ConfigSnapshot::default()
     };
@@ -28,11 +38,10 @@ fn explicit_off_disables_shared_umem() {
 #[test]
 fn explicit_interfaces_limit_policy_candidates() {
     let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "cross-nic",
-                "interfaces": ["lan0", "wan0"]
-            }
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "cross-nic".to_string(),
+            interfaces: vec!["lan0".to_string(), "wan0".to_string()],
+            ..Default::default()
         }),
         ..ConfigSnapshot::default()
     };
@@ -46,44 +55,65 @@ fn explicit_interfaces_limit_policy_candidates() {
 }
 
 #[test]
-fn artifact_interfaces_do_not_gate_or_select_runtime_policy() {
+fn present_but_modeless_snapshot_defaults_to_cross_nic() {
+    // #17134 fold (Rev18187 B1): Go emits a present `shared_umem` with
+    // no `mode` leaf routinely (`Mode` is `json:"mode,omitempty"` and
+    // `compileSharedUMEMConfig` sets it only from a `mode` leaf — a
+    // stanza setting only `interface …` or only
+    // `phase0-artifact-file`). The pre-#17134 `Value` reader defaulted
+    // a missing mode to CrossNic; the typed path must too — an empty
+    // mode falling through to `Off` would silently mark every binding
+    // private. Covers the missing leaf, an explicit empty string, and
+    // an explicit null.
+    for shared in [
+        json!({ "interfaces": ["lan0", "wan0"] }),
+        json!({ "mode": "", "interfaces": ["lan0"] }),
+        json!({ "mode": null, "interfaces": ["lan0"] }),
+        json!({ "phase0_artifact_file": "/run/xpf/phase0.json" }),
+    ] {
+        let snapshot = ConfigSnapshot {
+            userspace: serde_json::from_value(json!({ "shared_umem": shared }))
+                .expect("modeless shared_umem decodes"),
+            ..ConfigSnapshot::default()
+        };
+        let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+        assert_eq!(
+            policy.mode,
+            SharedUmemMode::CrossNic,
+            "present-but-modeless shared_umem must stay cross-NIC/auto"
+        );
+    }
+    // …with its configured interface filter intact.
     let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "cross-nic",
-                "phase0_artifact": {
-                    "passed": true,
-                    "selected_interfaces": ["lan0", "wan0"]
-                }
-            }
-        }),
+        userspace: serde_json::from_value(json!({
+            "shared_umem": { "interfaces": ["lan0", "wan0"] }
+        }))
+        .unwrap(),
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
-    assert!(policy.interfaces.is_empty());
-    assert!(policy.selects_interface("dmz0"));
-    assert_eq!(
-        policy
-            .phase0_audit
-            .as_ref()
-            .and_then(|audit| audit.reason.as_deref()),
-        Some("Phase 0 artifact missing kernel_release")
-    );
+    assert!(policy.selects_interface("lan0"));
+    assert!(!policy.selects_interface("dmz0"));
 }
 
 #[test]
-fn explicit_config_filter_is_not_blocked_by_stale_artifact() {
+fn unknown_shared_umem_keys_are_ignored() {
+    // #17134: unknown keys in the typed subtree (e.g. a future Go
+    // `SharedUMEMConfig` field, or a retired artifact object
+    // an older daemon might still emit) must be tolerated, not rejected:
+    // no `deny_unknown_fields`, rolling-upgrade safe.
+    let userspace: crate::protocol::UserspaceSnapshot = serde_json::from_value(json!({
+        "workers": 2,
+        "shared_umem": {
+            "mode": "cross-nic",
+            "interfaces": ["lan0", "wan0"],
+            "legacy_artifact": {"passed": false, "selected_interfaces": ["dmz0"]},
+            "future_field": 1
+        }
+    }))
+    .expect("unknown shared_umem keys tolerated");
     let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "cross-nic",
-                "interfaces": ["lan0", "wan0"],
-                "phase0_artifact": {
-                    "passed": false,
-                    "selected_interfaces": ["dmz0"]
-                }
-            }
-        }),
+        userspace,
         ..ConfigSnapshot::default()
     };
     let policy = SharedUmemPolicy::from_snapshot(&snapshot);
@@ -91,22 +121,32 @@ fn explicit_config_filter_is_not_blocked_by_stale_artifact() {
         policy.interfaces,
         BTreeSet::from(["lan0".to_string(), "wan0".to_string()])
     );
-    assert_eq!(
-        policy
-            .phase0_audit
-            .as_ref()
-            .and_then(|audit| audit.reason.as_deref()),
-        Some("Phase 0 artifact did not pass")
-    );
+    assert!(policy.selects_interface("lan0"));
+    assert!(!policy.selects_interface("dmz0"));
+}
+
+#[test]
+fn null_userspace_decodes_as_default() {
+    // #17134: the #16132 `config_snapshot` specimen carries
+    // `"userspace": null`; the typed field must decode it as default
+    // rather than rejecting the whole snapshot.
+    // Decode through ConfigSnapshot so the field's null-tolerant
+    // deserializer (not the struct's derived one) is what runs.
+    let mut raw = serde_json::to_value(ConfigSnapshot::default()).expect("default serializes");
+    raw["userspace"] = serde_json::Value::Null;
+    let snapshot: ConfigSnapshot =
+        serde_json::from_value(raw).expect("null userspace decodes");
+    let policy = SharedUmemPolicy::from_snapshot(&snapshot);
+    assert_eq!(policy.mode, SharedUmemMode::CrossNic);
+    assert!(policy.interfaces.is_empty());
 }
 
 #[test]
 fn same_device_debug_auto_selects_all_interfaces() {
     let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "same-device-debug"
-            }
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "same-device-debug".to_string(),
+            ..Default::default()
         }),
         ..ConfigSnapshot::default()
     };
@@ -147,10 +187,9 @@ fn off_policy_clears_stale_shared_status() {
     };
     let mut workers = BTreeMap::from([(0, vec![plan])]);
     let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "off"
-            }
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "off".to_string(),
+            ..Default::default()
         }),
         ..ConfigSnapshot::default()
     };
@@ -209,10 +248,9 @@ fn shared_umem_mode_unknown_falls_back_off_17149() {
     }
     // Snapshot-level: a typo'd mode yields an Off policy, not CrossNic.
     let snapshot = ConfigSnapshot {
-        userspace: json!({
-            "shared_umem": {
-                "mode": "cross-nick"
-            }
+        userspace: typed_userspace(SharedUmemSnapshot {
+            mode: "cross-nick".to_string(),
+            ..Default::default()
         }),
         ..ConfigSnapshot::default()
     };

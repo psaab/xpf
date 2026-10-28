@@ -506,11 +506,11 @@ fn overlap_tail_dropped_like_plain_control_10661() {
     assert_eq!((k, s, e), (ck, cs, ce), "#10661: chain == control");
     let t = OverlapTracker::new();
     assert!(
-        !t.check_and_record(k, s, e, 1_000, &FRAG_OVERLAP_DROPPED),
+        !t.record_and_settle_non_terminal(k, s, e, 1_000, &FRAG_OVERLAP_DROPPED),
         "#10661: first sighting of the range admits"
     );
     assert!(
-        t.check_and_record(k, s + 8, e + 8, 2_000, &FRAG_OVERLAP_DROPPED),
+        t.record_and_settle_non_terminal(k, s + 8, e + 8, 2_000, &FRAG_OVERLAP_DROPPED),
         "#10661: the overlapping tail must drop, exactly like the control"
     );
 }

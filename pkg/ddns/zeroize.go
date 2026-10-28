@@ -55,15 +55,25 @@ func EraseStateIfEmpty(path string) error {
 	if err := CheckStateEmpty(path); err != nil {
 		return err
 	}
-	hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
-	if herr != nil {
-		return fmt.Errorf("ddns: inspect hard links for %s: %w", path, herr)
-	}
-	if len(hardlinks) != 0 {
-		return fmt.Errorf("ddns: refusing to erase hard-linked %s: %w", path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("ddns: remove empty ownership state %s: %w", path, err)
+	if err := configstore.EraseFileForReset(path); err != nil {
+		// Historic ddns spellings preserved verbatim (#17171 fold),
+		// mapped from the primitive's typed/sentinel classes. The
+		// CheckStateEmpty gate above already rejects non-regular
+		// canonicals, so no inspect/remove of a non-regular reaches
+		// here; the remaining classes fall through with the prefix.
+		var linkErr *configstore.FactoryResetHardlinkError
+		switch {
+		case errors.As(err, &linkErr):
+			return fmt.Errorf("ddns: refusing to erase hard-linked %s: %w", path, linkErr)
+		case errors.Is(err, configstore.ErrEraseInspectLinks):
+			return fmt.Errorf("ddns: inspect hard links for %s: %w", path, err)
+		case errors.Is(err, configstore.ErrEraseInspect):
+			return fmt.Errorf("ddns: inspect %s: %w", path, err)
+		case errors.Is(err, configstore.ErrEraseRemove):
+			return fmt.Errorf("ddns: remove empty ownership state %s: %w", path, err)
+		default:
+			return fmt.Errorf("ddns: %w", err)
+		}
 	}
 	if err := sweepCrashTemps(path); err != nil {
 		return err
@@ -106,40 +116,60 @@ func ListCrashTemps(path string) ([]string, error) {
 // staged for path but never renamed over it by a crashed save. Scoped to
 // this store's base name so another writer's temps in the shared directory
 // are untouched. A symlinked temp fails closed for operator inspection.
+// Per-temp failures keep their historic ddns spellings (#17171 fold),
+// mapped from the primitive's typed/sentinel classes; a list failure is
+// returned unwrapped because ListCrashTemps already embeds "ddns: ".
 func sweepCrashTemps(path string) error {
-	temps, err := ListCrashTemps(path)
-	if err != nil {
-		return err
+	listErr, err := configstore.SweepCrashTempsWithListError(func() ([]string, error) { return ListCrashTemps(path) })
+	if listErr != nil {
+		return listErr
+	}
+	if err == nil {
+		return nil
+	}
+	// The joined error loses per-temp paths/classes, so re-derive the
+	// historic wording per surviving temp.
+	temps, lerr := ListCrashTemps(path)
+	if lerr != nil {
+		return lerr
 	}
 	var errs []error
 	for _, full := range temps {
-		info, err := os.Lstat(full)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			errs = append(errs, fmt.Errorf("ddns: inspect crash temp %s: %w", full, err))
-			continue
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			errs = append(errs, fmt.Errorf("ddns: crash temp %s is a symlink; NOT erasing it", full))
-			continue
-		}
-		hardlinks, herr := configstore.CollectHardlinkedFiles(full, "")
-		if herr != nil {
-			errs = append(errs, fmt.Errorf("ddns: inspect hard links for crash temp %s: %w", full, herr))
-			continue
-		}
-		if len(hardlinks) != 0 {
-			errs = append(errs, fmt.Errorf("ddns: refusing to erase hard-linked crash temp %s: %w", full, &configstore.FactoryResetHardlinkError{Paths: hardlinks}))
-			continue
-		}
-		if err := os.Remove(full); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("ddns: remove crash temp %s: %w", full, err))
-		}
+		errs = append(errs, ddnsTempEraseError(full))
+	}
+	if len(errs) == 0 {
+		return fmt.Errorf("ddns: %w", err)
 	}
 	return errors.Join(errs...)
 }
+
+// ddnsTempEraseError re-derives the historic per-temp ddns wording for
+// a temp that survived the shared sweep (#17171 fold).
+func ddnsTempEraseError(full string) error {
+	err := configstore.EraseFileForReset(full)
+	if err == nil {
+		return fmt.Errorf("ddns: crash temp %s reappeared after sweep", full)
+	}
+	var symErr *configstore.FactoryResetSymlinkError
+	var linkErr *configstore.FactoryResetHardlinkError
+	switch {
+	case errors.As(err, &symErr):
+		// Historic wording AND the typed refusal (the parity cells
+		// assert errors.As): wrap the type inside the sentence.
+		return fmt.Errorf("ddns: crash temp %s is a symlink; NOT erasing it: %w", full, symErr)
+	case errors.As(err, &linkErr):
+		return fmt.Errorf("ddns: refusing to erase hard-linked crash temp %s: %w", full, linkErr)
+	case errors.Is(err, configstore.ErrEraseInspectLinks):
+		return fmt.Errorf("ddns: inspect hard links for crash temp %s: %w", full, err)
+	case errors.Is(err, configstore.ErrEraseInspect):
+		return fmt.Errorf("ddns: inspect crash temp %s: %w", full, err)
+	case errors.Is(err, configstore.ErrEraseRemove):
+		return fmt.Errorf("ddns: remove crash temp %s: %w", full, err)
+	default:
+		return fmt.Errorf("ddns: %w", err)
+	}
+}
+
 func checkNoStateResidue(path string) error {
 	if _, err := os.Lstat(degradedMarkerPath(path)); err == nil {
 		return fmt.Errorf("ddns: ownership state %s has a degraded marker; published records cannot be proven withdrawn", path)
