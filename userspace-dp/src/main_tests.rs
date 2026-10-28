@@ -19,14 +19,15 @@ fn test_zone_name_to_id() -> rustc_hash::FxHashMap<String, u32> {
 #[test]
 fn same_binding_plan_ignores_runtime_only_snapshot_changes() {
     let current = ConfigSnapshot {
-        userspace: serde_json::json!({
+        userspace: serde_json::from_value(serde_json::json!({
             "binary": "/usr/libexec/xpf-userspace-dp",
             "control_socket": "/run/xpf/control.sock",
             "state_file": "/run/xpf/state.json",
             "workers": 2,
             "ring_entries": 2048,
             "poll_mode": "interrupt",
-        }),
+        }))
+        .unwrap(),
         interfaces: vec![
             InterfaceSnapshot {
                 name: "ge-0/0/1.0".to_string(),
@@ -72,14 +73,15 @@ fn same_binding_plan_ignores_runtime_only_snapshot_changes() {
         ..Default::default()
     };
     let mut next = current.clone();
-    next.userspace = serde_json::json!({
+    next.userspace = serde_json::from_value(serde_json::json!({
         "binary": "/tmp/other-helper",
         "control_socket": "/tmp/control.sock",
         "state_file": "/tmp/state.json",
         "workers": 2,
         "ring_entries": 2048,
         "poll_mode": "busy-poll",
-    });
+    }))
+    .unwrap();
     next.interfaces.push(InterfaceSnapshot {
         name: "em0.0".to_string(),
         zone: "mgmt".to_string(),
@@ -96,41 +98,37 @@ fn same_binding_plan_ignores_runtime_only_snapshot_changes() {
 #[test]
 fn same_binding_plan_canonicalizes_shared_umem_json_set_order() {
     let current = ConfigSnapshot {
-        userspace: serde_json::from_str(
-            r#"{
+        userspace: serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(
+                r#"{
                 "workers": 2,
                 "ring_entries": 2048,
                 "shared_umem": {
                     "mode": "cross-nic",
                     "interfaces": ["ge-0-0-1", "ge-0-0-2"],
-                    "phase0_artifact": {
-                        "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"],
-                        "selected_nic_pci_ids": ["0000:08:00.0", "0000:09:00.0"],
-                        "selected_device_pair": ["0000:08:00.0", "0000:09:00.0"],
-                        "mtu": {"ge-0-0-1": 1500, "ge-0-0-2": 1500}
-                    }
+                    "phase0_artifact_file": "/run/xpf/shared-umem-phase0.json"
                 }
             }"#,
+            )
+            .unwrap(),
         )
         .unwrap(),
         ..Default::default()
     };
     let next = ConfigSnapshot {
-        userspace: serde_json::from_str(
-            r#"{
+        userspace: serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(
+                r#"{
                 "shared_umem": {
-                    "phase0_artifact": {
-                        "mtu": {"ge-0-0-2": 1500, "ge-0-0-1": 1500},
-                        "selected_device_pair": ["0000:09:00.0", "0000:08:00.0"],
-                        "selected_nic_pci_ids": ["0000:09:00.0", "0000:08:00.0"],
-                        "selected_interfaces": ["ge-0-0-2", "ge-0-0-1"]
-                    },
+                    "phase0_artifact_file": "/run/xpf/shared-umem-phase0.json",
                     "interfaces": ["ge-0-0-2", "ge-0-0-1"],
                     "mode": "cross-nic"
                 },
                 "ring_entries": 2048,
                 "workers": 2
             }"#,
+            )
+            .unwrap(),
         )
         .unwrap(),
         ..Default::default()
@@ -142,37 +140,35 @@ fn same_binding_plan_canonicalizes_shared_umem_json_set_order() {
 #[test]
 fn same_binding_plan_detects_shared_umem_json_set_membership_change() {
     let current = ConfigSnapshot {
-        userspace: serde_json::from_str(
-            r#"{
+        userspace: serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(
+                r#"{
                 "workers": 2,
                 "ring_entries": 2048,
                 "shared_umem": {
                     "mode": "cross-nic",
-                    "interfaces": ["ge-0-0-1", "ge-0-0-2"],
-                    "phase0_artifact": {
-                        "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"],
-                        "selected_nic_pci_ids": ["0000:08:00.0", "0000:09:00.0"]
-                    }
+                    "interfaces": ["ge-0-0-1", "ge-0-0-2"]
                 }
             }"#,
+            )
+            .unwrap(),
         )
         .unwrap(),
         ..Default::default()
     };
     let next = ConfigSnapshot {
-        userspace: serde_json::from_str(
-            r#"{
+        userspace: serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(
+                r#"{
                 "workers": 2,
                 "ring_entries": 2048,
                 "shared_umem": {
                     "mode": "cross-nic",
-                    "interfaces": ["ge-0-0-1", "ge-0-0-3"],
-                    "phase0_artifact": {
-                        "selected_interfaces": ["ge-0-0-1", "ge-0-0-3"],
-                        "selected_nic_pci_ids": ["0000:08:00.0", "0000:0a:00.0"]
-                    }
+                    "interfaces": ["ge-0-0-1", "ge-0-0-3"]
                 }
             }"#,
+            )
+            .unwrap(),
         )
         .unwrap(),
         ..Default::default()
@@ -182,39 +178,38 @@ fn same_binding_plan_detects_shared_umem_json_set_membership_change() {
 }
 
 #[test]
-fn binding_plan_key_hashes_large_shared_umem_artifact() {
-    let huge_note = "x".repeat(1024 * 1024);
+fn binding_plan_key_hashes_shared_umem_policy() {
+    // #17134: the typed shared_umem subtree (mode + interfaces +
+    // phase0_artifact_file) is what the plan key hashes; a large
+    // interface list must hash without embedding raw values in the key.
     let snapshot = ConfigSnapshot {
-        userspace: serde_json::json!({
+        userspace: serde_json::from_value(serde_json::json!({
             "workers": 2,
             "ring_entries": 2048,
             "shared_umem": {
                 "mode": "cross-nic",
                 "interfaces": ["ge-0-0-1", "ge-0-0-2"],
-                "phase0_artifact": {
-                    "selected_interfaces": ["ge-0-0-1", "ge-0-0-2"],
-                    "selected_nic_pci_ids": ["0000:08:00.0", "0000:09:00.0"],
-                    "diagnostic_note": huge_note
-                }
+                "phase0_artifact_file": "/run/xpf/shared-umem-phase0.json"
             }
-        }),
+        }))
+        .unwrap(),
         ..Default::default()
     };
 
     let key = crate::server::helpers::snapshot_binding_plan_key(&snapshot);
     assert!(key.starts_with("sha256:"));
     assert_eq!(key.len(), "sha256:".len() + 64);
-    assert!(!key.contains("diagnostic_note"));
-    assert!(!key.contains('x'));
+    assert!(!key.contains("ge-0-0-1"));
 }
 
 #[test]
 fn same_binding_plan_detects_binding_topology_change() {
     let current = ConfigSnapshot {
-        userspace: serde_json::json!({
+        userspace: serde_json::from_value(serde_json::json!({
             "workers": 2,
             "ring_entries": 2048,
-        }),
+        }))
+        .unwrap(),
         interfaces: vec![InterfaceSnapshot {
             name: "ge-0/0/1.0".to_string(),
             zone: "lan".to_string(),
@@ -327,7 +322,10 @@ fn queue_planner_and_plan_key_agree_on_binding_set() {
     );
     let bindings_changed = replan_queues(Some(&mgmt_changed), 1, &[], true).expect("plan");
     assert_eq!(
-        bindings.iter().map(|b| b.interface.clone()).collect::<Vec<_>>(),
+        bindings
+            .iter()
+            .map(|b| b.interface.clone())
+            .collect::<Vec<_>>(),
         bindings_changed
             .iter()
             .map(|b| b.interface.clone())
@@ -383,8 +381,8 @@ fn plan_key_covers_every_replan_queues_input() {
 
     let base = mk("ge-0-0-1", 11, 2);
     let base_key = snapshot_binding_plan_key(&base);
-    let base_layout: Vec<(String, i32, u32)> =
-        replan_queues(Some(&base), 2, &[], true).expect("plan")
+    let base_layout: Vec<(String, i32, u32)> = replan_queues(Some(&base), 2, &[], true)
+        .expect("plan")
         .iter()
         .map(|b| (b.interface.clone(), b.ifindex, b.queue_id))
         .collect();
@@ -397,7 +395,8 @@ fn plan_key_covers_every_replan_queues_input() {
         "a candidate linux_name change must bump the plan key (#2916): the \
          same-plan branch would otherwise leave the binding on the old netdev"
     );
-    let name_layout: Vec<String> = replan_queues(Some(&name_changed), 2, &[], true).expect("plan")
+    let name_layout: Vec<String> = replan_queues(Some(&name_changed), 2, &[], true)
+        .expect("plan")
         .iter()
         .map(|b| b.interface.clone())
         .collect();
@@ -416,7 +415,8 @@ fn plan_key_covers_every_replan_queues_input() {
          ifindex"
     );
     assert!(
-        replan_queues(Some(&ifindex_changed), 2, &[], true).expect("plan")
+        replan_queues(Some(&ifindex_changed), 2, &[], true)
+            .expect("plan")
             .iter()
             .all(|b| b.ifindex == 99),
         "replan_queues must carry the new ifindex onto every binding"
@@ -432,7 +432,9 @@ fn plan_key_covers_every_replan_queues_input() {
     );
     assert_ne!(
         base_layout.len(),
-        replan_queues(Some(&rx_changed), 2, &[], true).expect("plan").len(),
+        replan_queues(Some(&rx_changed), 2, &[], true)
+            .expect("plan")
+            .len(),
         "replan_queues must emit a different number of bindings when \
          rx_queues changes"
     );
@@ -902,7 +904,10 @@ fn queue_planner_excludes_tunnel_and_local_fabric_ge_interfaces() {
     };
     let bindings = replan_queues(Some(&snapshot), 1, &[], true).expect("plan");
     assert_eq!(
-        bindings.iter().map(|b| b.interface.clone()).collect::<Vec<_>>(),
+        bindings
+            .iter()
+            .map(|b| b.interface.clone())
+            .collect::<Vec<_>>(),
         vec!["ge-0-0-7".to_string()],
         "tunnel and local-fabric ge-* interfaces must be excluded from the plan"
     );
@@ -1049,7 +1054,10 @@ fn build_synced_session_entry_applies_log_flags() {
     let entry =
         build_synced_session_entry(&req, &test_zone_name_to_id(), 0).expect("synced session entry");
     assert!(entry.metadata.log_session_init, "log_session_init applied");
-    assert!(entry.metadata.log_session_close, "log_session_close applied");
+    assert!(
+        entry.metadata.log_session_close,
+        "log_session_close applied"
+    );
 
     // Close-only: init must NOT leak true.
     let req_close = SessionSyncRequest {
@@ -1266,7 +1274,8 @@ fn queue_planner_preserves_existing_state() {
         vec![("ge-0-0-1".to_string(), 1)],
         BTreeMap::from([("ge-0-0-1".to_string(), 11)]),
         true,
-    ).expect("plan");
+    )
+    .expect("plan");
     if let Some(b0) = bindings.iter().find(|b| b.slot == 0) {
         assert!(b0.registered);
         assert!(b0.armed);
@@ -1325,7 +1334,8 @@ fn queue_planner_preserves_manual_unregistration() {
         vec![("ge-0-0-1".to_string(), 1)],
         BTreeMap::from([("ge-0-0-1".to_string(), 11)]),
         true,
-    ).expect("plan");
+    )
+    .expect("plan");
     let b0 = bindings.iter().find(|b| b.slot == 0).expect("binding 0");
     assert!(!b0.registered);
     assert!(!b0.armed);
@@ -1352,8 +1362,8 @@ fn queue_planner_keeps_queue_zero_available_for_userspace() {
                     family: "inet".to_string(),
                     address: "10.0.61.1/24".to_string(),
                     scope: 0,
-                ..Default::default()
-            }],
+                    ..Default::default()
+                }],
                 ..Default::default()
             },
         ],
@@ -1405,7 +1415,11 @@ fn queue_planner_binds_each_interfaces_own_queue_count_7497() {
          global minimum applied to both (2 x 2)"
     );
     let queues = summarize_queues(&bindings);
-    assert_eq!(queues.len(), 4, "the widest interface sets the queue-id range");
+    assert_eq!(
+        queues.len(),
+        4,
+        "the widest interface sets the queue-id range"
+    );
     // The plan is RAGGED: rows 0-1 carry both interfaces, rows 2-3 carry only
     // the 4-queue one. Asserting the ragged shape rather than just the count is
     // what distinguishes per-interface planning from "bind 6 things".
@@ -1768,9 +1782,11 @@ fn run_control_request(
     let running = Arc::new(AtomicBool::new(true));
     let state_file = state_file.to_string();
     let handle = {
-            let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
-        };
+        let sd = state.lock().expect("state").afxdp.session_domain().clone();
+        std::thread::spawn(move || {
+            handle_stream(server, &state_file, state, running, sd, SocketMode::Main)
+        })
+    };
 
     serde_json::to_writer(&mut client, &request).expect("write request");
     std::io::Write::write_all(&mut client, b"\n").expect("newline");
@@ -1836,10 +1852,11 @@ fn apply_snapshot_same_plan_clearing_defer_workers_reconcile_abort_fails_closed_
             forwarding_supported: true,
             unsupported_reasons: Vec::new(),
         },
-        userspace: serde_json::json!({
+        userspace: serde_json::from_value(serde_json::json!({
             "workers": 1,
             "ring_entries": 64,
-        }),
+        }))
+        .unwrap(),
         // #5171: define the "lan" zone the interface references so the
         // forwarding build in validate_snapshot_buildable resolves it. Before
         // #5171 the deferred apply skipped the build entirely, so this gen-1
@@ -1971,7 +1988,9 @@ fn apply_snapshot_rejects_unsupported_protocol_version() {
         let running = running.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
+            std::thread::spawn(move || {
+                handle_stream(server, &state_file, state, running, sd, SocketMode::Main)
+            })
         }
     };
 
@@ -2033,7 +2052,10 @@ fn apply_snapshot_rejects_v35_typed_snat_before_apply_11064() {
             ..ConfigSnapshot::default()
         },
     );
-    assert!(!response.ok, "v35 typed-SNAT snapshot was applied: {response:?}");
+    assert!(
+        !response.ok,
+        "v35 typed-SNAT snapshot was applied: {response:?}"
+    );
     assert_eq!(
         response.error,
         format!(
@@ -2065,7 +2087,9 @@ fn apply_snapshot_for_test(
         let state_file = state_file.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
+            std::thread::spawn(move || {
+                handle_stream(server, &state_file, state, running, sd, SocketMode::Main)
+            })
         }
     };
 
@@ -2140,8 +2164,8 @@ fn apply_path_persistent_snat_key(
         dst_ip,
         src_port,
         dst_port,
-            discriminator: Default::default(),
-            routing_domain: 0,
+        discriminator: Default::default(),
+        routing_domain: 0,
     }
 }
 
@@ -4368,15 +4392,15 @@ fn synced_session_rejects_unresolved_ipv6_ext_protocol_6923() {
             dst_port,
             ingress_zone: "lan".to_string(),
             egress_zone: "wan".to_string(),
-        // #7188: state the discriminator explicitly. This fixture sweeps
-        // protocol 47 in over-reach guard (a), and #7188's install gate refuses
-        // a protocol-47 record whose peer did NOT carry a discriminator — so
-        // leaving the field at its "not carried" default would make that guard
-        // pass for the wrong reason (refused by the new gate, never reaching
-        // the #6923 one it was written to test). An explicit `None` is what a
-        // modern peer sends for every protocol in this sweep.
-        tunnel_discriminator: crate::session::TunnelDiscriminator::None.to_wire(),
-        ..SessionSyncRequest::default()
+            // #7188: state the discriminator explicitly. This fixture sweeps
+            // protocol 47 in over-reach guard (a), and #7188's install gate refuses
+            // a protocol-47 record whose peer did NOT carry a discriminator — so
+            // leaving the field at its "not carried" default would make that guard
+            // pass for the wrong reason (refused by the new gate, never reaching
+            // the #6923 one it was written to test). An explicit `None` is what a
+            // modern peer sends for every protocol in this sweep.
+            tunnel_discriminator: crate::session::TunnelDiscriminator::None.to_wire(),
+            ..SessionSyncRequest::default()
         }
     };
     let v6 = libc::AF_INET6 as u8;
@@ -4385,18 +4409,22 @@ fn synced_session_rejects_unresolved_ipv6_ext_protocol_6923() {
     let traversable: Vec<u8> = (0u8..=255)
         .filter(|p| crate::afxdp::ipv6_ext_header_is_traversable(*p))
         .collect();
-    assert_eq!(traversable.len(), 10, "#6923: the traversable set changed size");
+    assert_eq!(
+        traversable.len(),
+        10,
+        "#6923: the traversable set changed size"
+    );
     for protocol in &traversable {
         let err = build_synced_session_key(
             &sync_req(v6, *protocol, "2001:db8::11", "2001:db8::22"),
             0,
             SyncedKeyIntent::Install,
         )
-            .expect_err(&format!(
-                "#6923: a synced IPv6 session keyed on extension-header protocol {protocol} must \
+        .expect_err(&format!(
+            "#6923: a synced IPv6 session keyed on extension-header protocol {protocol} must \
                  be REFUSED — importing it hands the shim a hit for the exact over-limit chain it \
                  refused to parse"
-            ));
+        ));
         assert!(
             err.contains("unresolved IPv6 extension-header protocol"),
             "#6923: protocol {protocol}: unexpected rejection reason {err}"
@@ -4493,8 +4521,8 @@ fn no_plan_can_mint_a_worker_id_beyond_the_nat_holder_mask_6211_f2() {
                 ifidx.insert(n.clone(), (i + 2) as i32);
                 cands.push((n, rx));
             }
-            let plan = replan_bindings_from_candidates(workers, &[], cands, ifidx, true)
-                .expect("plan");
+            let plan =
+                replan_bindings_from_candidates(workers, &[], cands, ifidx, true).expect("plan");
             for b in &plan {
                 assert!(
                     b.worker_id < crate::nat::MAX_NAT_HOLDER_WORKERS,
@@ -4539,7 +4567,8 @@ fn per_interface_queue_count_is_capped_at_the_stride_7497() {
         vec![("ge-0-0-1".to_string(), 200)],
         BTreeMap::from([("ge-0-0-1".to_string(), 11)]),
         true,
-    ).expect("plan");
+    )
+    .expect("plan");
     assert_eq!(
         plan.len(),
         BINDING_QUEUES_PER_IFACE,
@@ -4576,8 +4605,8 @@ fn worker_knob_still_caps_worker_groups_7497() {
                 ifidx.insert(n.clone(), (i + 2) as i32);
                 cands.push((n, rx));
             }
-            let plan = replan_bindings_from_candidates(workers, &[], cands, ifidx, true)
-                .expect("plan");
+            let plan =
+                replan_bindings_from_candidates(workers, &[], cands, ifidx, true).expect("plan");
             let ids: BTreeSet<u32> = plan.iter().map(|b| b.worker_id).collect();
             assert_eq!(
                 ids.len(),
@@ -4607,7 +4636,8 @@ fn replan_accepts_huge_worker_count_on_a_small_queue_nic_6211_f2() {
         vec![("ge-0-0-1".to_string(), 16)],
         BTreeMap::from([("ge-0-0-1".to_string(), 11)]),
         true,
-    ).expect("plan");
+    )
+    .expect("plan");
     assert_eq!(
         bindings.len(),
         16,
@@ -5226,7 +5256,8 @@ fn ownerless_fabric_parent_is_refused() {
         }],
         ..Default::default()
     };
-    let planned = replan_queues(Some(&bindable), 6, &[], true).expect("plan")
+    let planned = replan_queues(Some(&bindable), 6, &[], true)
+        .expect("plan")
         .iter()
         .map(|b| b.interface.clone())
         .collect::<std::collections::BTreeSet<_>>();
@@ -5365,7 +5396,9 @@ fn fabric_vote_cannot_overturn_an_owning_row() {
 /// both operand orders are measured against the real `handle_stream` dispatch.
 #[test]
 fn apply_snapshot_rejects_a_newer_protocol_version_too() {
-    use crate::{ConfigSnapshot, ControlRequest, ControlResponse, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, ControlRequest, ControlResponse,
+    };
 
     let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let state = Arc::new(Mutex::new(ServerState {
@@ -5387,7 +5420,9 @@ fn apply_snapshot_rejects_a_newer_protocol_version_too() {
         let running = running.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
+            std::thread::spawn(move || {
+                handle_stream(server, &state_file, state, running, sd, SocketMode::Main)
+            })
         }
     };
 
@@ -5516,7 +5551,6 @@ fn zero_ifindex_owner_row_still_refuses_the_fabric_parent() {
     clear_rx_queue_count_override();
 }
 
-
 /// #6749: a binding-plan EXPANSION must not disable the whole dataplane.
 ///
 /// `replan_bindings_from_candidates` rebuilds the binding vector by SLOT, and a
@@ -5565,11 +5599,16 @@ fn expansion_arms_new_slots_from_the_global_state_6749() {
             vec![("ge-0-0-1".to_string(), 1), ("ge-0-0-2".to_string(), 1)],
             ifindex_by_name,
             forwarding_armed,
-        ).expect("plan")
+        )
+        .expect("plan")
     }
 
     let armed = expand(true);
-    assert_eq!(armed.len(), 2, "premise: the plan must actually have expanded");
+    assert_eq!(
+        armed.len(),
+        2,
+        "premise: the plan must actually have expanded"
+    );
     assert!(
         armed.iter().all(|b| b.registered),
         "premise: both slots must be registered, else `enabled` is false for a different reason",
@@ -5592,7 +5631,10 @@ fn expansion_arms_new_slots_from_the_global_state_6749() {
          the global arm state, not assume `true` — hardcoding it would arm an HA \
          secondary or a box mid-shutdown, a forwarding fail-OPEN strictly worse \
          than the outage #6749 is about. Slots: {:?}",
-        disarmed.iter().map(|b| (b.slot, b.armed)).collect::<Vec<_>>(),
+        disarmed
+            .iter()
+            .map(|b| (b.slot, b.armed))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -5625,13 +5667,17 @@ fn expansion_does_not_overwrite_an_existing_slots_arm_state_6749() {
         vec![("ge-0-0-1".to_string(), 1), ("ge-0-0-2".to_string(), 1)],
         ifindex_by_name,
         true,
-    ).expect("plan");
+    )
+    .expect("plan");
     assert!(
         !out[0].armed,
         "the pre-existing mid-bringup slot was declared armed by the replan; \
          only a NEW slot inherits the global state (#6749)",
     );
-    assert!(out[1].armed, "the new slot must inherit the armed box state");
+    assert!(
+        out[1].armed,
+        "the new slot must inherit the armed box state"
+    );
 }
 /// #13714: bindings minted while the ifindex is unresolved stay
 /// unregistered/unarmed forever.
@@ -5651,8 +5697,7 @@ fn expansion_does_not_overwrite_an_existing_slots_arm_state_6749() {
 #[test]
 fn replan_after_initial_ifindex_failure_arms_bindings_13714() {
     // Plan 1: ifindex unresolved (<= 0) — minted unregistered/unarmed.
-    let no_ifindex: std::collections::BTreeMap<String, i32> =
-        std::collections::BTreeMap::new();
+    let no_ifindex: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
     let failed = replan_bindings_from_candidates(
         1,
         &[],
@@ -5676,8 +5721,7 @@ fn replan_after_initial_ifindex_failure_arms_bindings_13714() {
 
     // Plan 2: ifindex now resolves; `existing` is exactly what plan 1 minted.
     // THIS is the application-level re-plan after the initial failure.
-    let mut resolved: std::collections::BTreeMap<String, i32> =
-        std::collections::BTreeMap::new();
+    let mut resolved: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
     resolved.insert("ge-0-0-1".to_string(), 11);
     let recovered = replan_bindings_from_candidates(
         1,
@@ -5732,8 +5776,7 @@ fn replan_after_initial_ifindex_failure_arms_bindings_13714() {
 /// every other unresolvable binding in this planner behaves.
 #[test]
 fn replan_after_initial_ifindex_failure_respects_disarmed_box_13714() {
-    let no_ifindex: std::collections::BTreeMap<String, i32> =
-        std::collections::BTreeMap::new();
+    let no_ifindex: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
     let failed = replan_bindings_from_candidates(
         1,
         &[],
@@ -5742,8 +5785,7 @@ fn replan_after_initial_ifindex_failure_respects_disarmed_box_13714() {
         false,
     )
     .expect("plan");
-    let mut resolved: std::collections::BTreeMap<String, i32> =
-        std::collections::BTreeMap::new();
+    let mut resolved: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
     resolved.insert("ge-0-0-1".to_string(), 11);
     // ge-0-0-2 intentionally left unresolved.
     let out = replan_bindings_from_candidates(
@@ -5762,7 +5804,8 @@ fn replan_after_initial_ifindex_failure_respects_disarmed_box_13714() {
         recovered.registered && !recovered.armed,
         "recovered binding on a DISARMED box must register but stay unarmed \
          (fail-open otherwise), got registered={} armed={}",
-        recovered.registered, recovered.armed
+        recovered.registered,
+        recovered.armed
     );
     let stuck = out
         .iter()
@@ -5772,10 +5815,11 @@ fn replan_after_initial_ifindex_failure_respects_disarmed_box_13714() {
         !stuck.registered && !stuck.armed && stuck.ifindex <= 0,
         "a binding whose ifindex never resolves must stay unregistered/unarmed \
          (fail-closed), got ifindex={} registered={} armed={}",
-        stuck.ifindex, stuck.registered, stuck.armed
+        stuck.ifindex,
+        stuck.registered,
+        stuck.armed
     );
 }
-
 
 /// #8279: the userspace-ingress test must precede the L3 PARSE, because the
 /// parse's failure arm is a DROP.
@@ -5889,8 +5933,12 @@ fn shim_ingress_test_precedes_the_l3_parse_8279() {
     let parse_fail = only_index(
         &toks,
         &[
-            "drop_degraded_transit", "(", "ctrl", ",",
-            "USERSPACE_FALLBACK_REASON_PARSE_FAIL", ")",
+            "drop_degraded_transit",
+            "(",
+            "ctrl",
+            ",",
+            "USERSPACE_FALLBACK_REASON_PARSE_FAIL",
+            ")",
         ],
         "parse-failure drop",
     );
@@ -5938,7 +5986,10 @@ fn shim_degraded_ctrl_disabled_tests_adjudicated_before_parse_13632() {
         .map(|i| i + 1)
         .expect("#13632: no following top-level fn");
     let toks = shim_token_vec(&rest[..end]);
-    assert!(toks.len() > 100, "#13632: degraded function slice too short");
+    assert!(
+        toks.len() > 100,
+        "#13632: degraded function slice too short"
+    );
 
     fn hits(toks: &[String], needle: &[&str]) -> Vec<usize> {
         toks.windows(needle.len())
@@ -6075,7 +6126,6 @@ fn shim_degraded_ctrl_disabled_decision_13632() {
         "tagged-only VID-0 local traffic retains its earlier DROP"
     );
 }
-
 
 // ---------------------------------------------------------------------------
 // #7497: the binding-slot capacity cap.
@@ -6219,9 +6269,7 @@ fn plan_exceeding_binding_slot_capacity_is_refused_7497() {
 
 /// One interface's candidates with a caller-chosen ifindex, for the
 /// #9900 F-150 ceiling cells below.
-fn ifindex_ceiling_candidates_9900(
-    ifindex: i32,
-) -> (Vec<(String, usize)>, BTreeMap<String, i32>) {
+fn ifindex_ceiling_candidates_9900(ifindex: i32) -> (Vec<(String, usize)>, BTreeMap<String, i32>) {
     let mut ifindex_by_name = BTreeMap::new();
     ifindex_by_name.insert("ge-0-0-0".to_string(), ifindex);
     (vec![("ge-0-0-0".to_string(), 2)], ifindex_by_name)
@@ -6343,10 +6391,7 @@ fn carry_forward_follows_binding_identity_not_slot_7497() {
         iface_code * 1000 + queue as u64 + 1
     }
 
-    let ifidx = BTreeMap::from([
-        ("ge-0-0-1".to_string(), 11),
-        ("ge-0-0-2".to_string(), 12),
-    ]);
+    let ifidx = BTreeMap::from([("ge-0-0-1".to_string(), 11), ("ge-0-0-2".to_string(), 12)]);
 
     // Generation 1: A has 4 queues, B has 2.
     let mut gen1 = replan_bindings_from_candidates(
@@ -6355,7 +6400,8 @@ fn carry_forward_follows_binding_identity_not_slot_7497() {
         vec![("ge-0-0-1".to_string(), 4), ("ge-0-0-2".to_string(), 2)],
         ifidx.clone(),
         true,
-    ).expect("plan");
+    )
+    .expect("plan");
     assert_eq!(gen1.len(), 6, "4 + 2 rows");
     for b in gen1.iter_mut() {
         b.rx_packets = tag(&b.interface, b.queue_id);
@@ -6379,7 +6425,8 @@ fn carry_forward_follows_binding_identity_not_slot_7497() {
         vec![("ge-0-0-1".to_string(), 4), ("ge-0-0-2".to_string(), 4)],
         ifidx,
         true,
-    ).expect("plan");
+    )
+    .expect("plan");
     assert_eq!(gen2.len(), 8, "4 + 4 rows after B grows");
 
     // The reshuffle actually happened — otherwise the two keyings agree and this

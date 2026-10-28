@@ -20,23 +20,6 @@ import (
 
 // --- helpers ---
 
-// resolveFabricParent returns the physical parent interface name if name is a
-// fabric IPVLAN overlay (fab0/fab1). Monitor commands should show wire-level
-// fabric traffic, not the overlay (#135, #136).
-func resolveFabricParent(name string) string {
-	link, err := netlink.LinkByName(name)
-	if err != nil {
-		return name
-	}
-	if ipv, ok := link.(*netlink.IPVlan); ok {
-		parent, err := netlink.LinkByIndex(ipv.Attrs().ParentIndex)
-		if err == nil {
-			return parent.Attrs().Name
-		}
-	}
-	return name
-}
-
 // canonicalInterfaceName returns the canonical row identity for a
 // config/zone interface reference (#15726). A unit-0 reference
 // ("reth0.0", "ge-0/0/0.0") denotes the same logical interface as its
@@ -288,98 +271,6 @@ func (s *Server) countNATSessions(ctx context.Context, flag uint16, zoneByID map
 		return true
 	})
 	return counts
-}
-
-type builtinApp struct {
-	proto uint8
-	port  uint16
-}
-
-var builtinApps = map[string]builtinApp{
-	"junos-http":        {proto: 6, port: 80},
-	"junos-https":       {proto: 6, port: 443},
-	"junos-ssh":         {proto: 6, port: 22},
-	"junos-telnet":      {proto: 6, port: 23},
-	"junos-ftp":         {proto: 6, port: 21},
-	"junos-smtp":        {proto: 6, port: 25},
-	"junos-dns-tcp":     {proto: 6, port: 53},
-	"junos-dns-udp":     {proto: 17, port: 53},
-	"junos-bgp":         {proto: 6, port: 179},
-	"junos-ntp":         {proto: 17, port: 123},
-	"junos-snmp":        {proto: 17, port: 161},
-	"junos-syslog":      {proto: 17, port: 514},
-	"junos-dhcp-client": {proto: 17, port: 68},
-	"junos-ike":         {proto: 17, port: 500},
-	"junos-ipsec-nat-t": {proto: 17, port: 4500},
-}
-
-func resolveAppName(proto uint8, dstPort uint16, cfg *config.Config) string {
-	if cfg != nil {
-		for name, app := range cfg.Applications.Applications {
-			var appProto uint8
-			switch strings.ToLower(app.Protocol) {
-			case "tcp":
-				appProto = 6
-			case "udp":
-				appProto = 17
-			case "icmp":
-				appProto = 1
-			default:
-				continue
-			}
-			if appProto != proto {
-				continue
-			}
-			portStr := app.DestinationPort
-			if portStr == "" {
-				continue
-			}
-			if strings.Contains(portStr, "-") {
-				parts := strings.SplitN(portStr, "-", 2)
-				lo, err1 := strconv.Atoi(parts[0])
-				hi, err2 := strconv.Atoi(parts[1])
-				if err1 == nil && err2 == nil && int(dstPort) >= lo && int(dstPort) <= hi {
-					return name
-				}
-			} else {
-				if v, err := strconv.Atoi(portStr); err == nil && uint16(v) == dstPort {
-					return name
-				}
-			}
-		}
-	}
-	for name, ba := range builtinApps {
-		if ba.proto == proto && ba.port == dstPort {
-			return name
-		}
-	}
-	return ""
-}
-
-func lookupAppFilter(appName string, cfg *config.Config) (proto uint8, port uint16, ok bool) {
-	if ba, found := builtinApps[appName]; found {
-		return ba.proto, ba.port, true
-	}
-	if cfg != nil {
-		if app, found := cfg.Applications.Applications[appName]; found {
-			switch strings.ToLower(app.Protocol) {
-			case "tcp":
-				proto = 6
-			case "udp":
-				proto = 17
-			case "icmp":
-				proto = 1
-			default:
-				return 0, 0, false
-			}
-			if app.DestinationPort != "" {
-				if v, err := strconv.Atoi(app.DestinationPort); err == nil {
-					return proto, uint16(v), true
-				}
-			}
-		}
-	}
-	return 0, 0, false
 }
 
 // screenChecks delegates to config.ScreenChecks, the single source of truth

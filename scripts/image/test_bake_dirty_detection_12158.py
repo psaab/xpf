@@ -46,8 +46,9 @@ version=$(sed -n '1s/^xpf (\([^)]*\)).*/\1/p' debian/changelog)
     echo "describe_dirty_now=$(git describe --tags --always --dirty)"
     make -n -f debian/rules override_dh_auto_build
 } >"$XPF_12158_CAPTURE" 2>&1
-: >"../xpf_${version}_amd64.deb"
-: >"../xpf-appliance_${version}_amd64.deb"
+stage=${XPF_DEB_STAGE:-..}
+: >"$stage/xpf_${version}_amd64.deb"
+: >"$stage/xpf-appliance_${version}_amd64.deb"
 """
 
 
@@ -90,8 +91,10 @@ class DebRecipeMarkerTests(unittest.TestCase):
             (self.root / "cmd" / name / "main.go").write_text(
                 'package main\nimport "fixture.local/xpf/pkg"\n'
                 "func main() { _ = pkg.Value }\n")
+        (self.root / "scripts").mkdir(parents=True, exist_ok=True)
         for rel in (".gitignore", "Makefile", "debian/.gitignore",
-                    "debian/rules", "scripts/image/build_provenance.py",
+                    "debian/rules", "scripts/check-changelog-18178.sh",
+                    "scripts/image/build_provenance.py",
                     "scripts/image/validate-build-metadata.py"):
             shutil.copy2(_ROOT / rel, self.root / rel)
         (self.root / "debian/changelog").write_text(
