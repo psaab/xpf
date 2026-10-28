@@ -64,7 +64,7 @@ func TestSupersededStartedCutIsStampedCommitted15280(t *testing.T) {
 	fs.readerErr = errors.New("injected fresh preflight failure")
 
 	// Sanity: 2.0.0 starts uncommitted.
-	if stamp, present := r.readCommittedStamp("2.0.0"); !present || stamp == nil || stamp.Committed {
+	if stamp, present, _ := r.readCommittedStamp("2.0.0"); !present || stamp == nil || stamp.Committed {
 		t.Fatalf("seeded 2.0.0 stamp = %+v present=%v; want present uncommitted", stamp, present)
 	}
 
@@ -75,7 +75,7 @@ func TestSupersededStartedCutIsStampedCommitted15280(t *testing.T) {
 
 	// The health-confirmed stale cut must have been stamped committed with
 	// its journaled predecessor.
-	stamp, present := r.readCommittedStamp("2.0.0")
+	stamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || stamp == nil || !stamp.Committed {
 		t.Fatalf("stamp(2.0.0) = %+v present=%v; want committed", stamp, present)
 	}
@@ -114,7 +114,7 @@ func TestSupersededStartedCutRollbackTarget15280(t *testing.T) {
 	if filepath.Base(cur) != "3.0.0" {
 		t.Fatalf("current = %q after superseding cut, want 3.0.0", cur)
 	}
-	if stamp, present := r.readCommittedStamp("2.0.0"); !present || stamp == nil || !stamp.Committed {
+	if stamp, present, _ := r.readCommittedStamp("2.0.0"); !present || stamp == nil || !stamp.Committed {
 		t.Fatalf("stamp(2.0.0) = %+v present=%v; want committed", stamp, present)
 	}
 	got, err := r.defaultRollbackTarget("3.0.0")
@@ -189,7 +189,7 @@ func TestSupersededStartedCutNonLiveRefuses15280(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "stale STARTED recovery") {
 		t.Fatalf("Run with non-live STARTED target = %v; want stale STARTED recovery refusal", err)
 	}
-	if stamp, present := r.readCommittedStamp("2.0.0"); present && stamp != nil && stamp.Committed {
+	if stamp, present, _ := r.readCommittedStamp("2.0.0"); present && stamp != nil && stamp.Committed {
 		t.Fatalf("non-live 2.0.0 was stamped committed: %+v", stamp)
 	}
 	j, lerr := r.loadJournal()

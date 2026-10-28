@@ -82,7 +82,7 @@ func (r *fabricSubRecorder) neighDoneWasClosed(n int) bool {
 	return false
 }
 
-// drainFabricRefresh consumes d.fabricRefreshCh into an atomic counter so a
+// drainFabricRefresh consumes slot 0's refreshCh into an atomic counter so a
 // test can assert the monitor kept triggering fabric refreshes after a
 // resubscribe. Returns the counter and a stop func.
 func drainFabricRefresh(ch <-chan struct{}) (*int32, func()) {
@@ -118,7 +118,7 @@ func drainFabricRefresh(ch <-chan struct{}) (*int32, func()) {
 func TestMonitorFabricStateResubscribesOnLinkChannelClose(t *testing.T) {
 	rec := &fabricSubRecorder{}
 
-	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}) error {
+	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextLink()
 		go func() {
 			// Mirror the netlink socket teardown: when done closes, record it
@@ -138,7 +138,7 @@ func TestMonitorFabricStateResubscribesOnLinkChannelClose(t *testing.T) {
 		return nil
 	}
 
-	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}) error {
+	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextNeigh()
 		go func() {
 			go func() { <-done; rec.recordNeighDone(n) }()
@@ -149,13 +149,12 @@ func TestMonitorFabricStateResubscribesOnLinkChannelClose(t *testing.T) {
 	}
 
 	d := &Daemon{
-		fabricIface:             "fab0",
-		fabricRefreshCh:         make(chan struct{}, 64),
+		fabricSlots:             [2]fabricSlot{{name: "fabric", iface: "fab0", refreshCh: make(chan struct{}, 64)}, {name: "fabric1"}},
 		fabricLinkSubscribe:     linkSubscribe,
 		fabricNeighSubscribe:    neighSubscribe,
 		fabricStateResubBackoff: time.Millisecond,
 	}
-	refreshes, stopDrain := drainFabricRefresh(d.fabricRefreshCh)
+	refreshes, stopDrain := drainFabricRefresh(d.fabricSlots[0].refreshCh)
 	defer stopDrain()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -195,7 +194,7 @@ func TestMonitorFabricStateResubscribesOnLinkChannelClose(t *testing.T) {
 func TestMonitorFabricStateResubscribesOnNeighChannelClose(t *testing.T) {
 	rec := &fabricSubRecorder{}
 
-	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}) error {
+	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextLink()
 		go func() {
 			go func() { <-done; rec.recordLinkDone(n) }()
@@ -205,7 +204,7 @@ func TestMonitorFabricStateResubscribesOnNeighChannelClose(t *testing.T) {
 		return nil
 	}
 
-	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}) error {
+	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextNeigh()
 		go func() {
 			go func() { <-done; rec.recordNeighDone(n) }()
@@ -220,12 +219,12 @@ func TestMonitorFabricStateResubscribesOnNeighChannelClose(t *testing.T) {
 	}
 
 	d := &Daemon{
-		fabricRefreshCh:         make(chan struct{}, 64),
+		fabricSlots:             [2]fabricSlot{{name: "fabric", refreshCh: make(chan struct{}, 64)}, {name: "fabric1"}},
 		fabricLinkSubscribe:     linkSubscribe,
 		fabricNeighSubscribe:    neighSubscribe,
 		fabricStateResubBackoff: time.Millisecond,
 	}
-	_, stopDrain := drainFabricRefresh(d.fabricRefreshCh)
+	_, stopDrain := drainFabricRefresh(d.fabricSlots[0].refreshCh)
 	defer stopDrain()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -257,7 +256,7 @@ func TestMonitorFabricStateResubscribesOnNeighChannelClose(t *testing.T) {
 func TestMonitorFabricStateContextCancelExits(t *testing.T) {
 	rec := &fabricSubRecorder{}
 
-	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}) error {
+	linkSubscribe := func(ch chan<- netlink.LinkUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextLink()
 		go func() {
 			go func() { <-done; rec.recordLinkDone(n) }()
@@ -266,7 +265,7 @@ func TestMonitorFabricStateContextCancelExits(t *testing.T) {
 		}()
 		return nil
 	}
-	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}) error {
+	neighSubscribe := func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, _ func(error)) error {
 		n := rec.nextNeigh()
 		go func() {
 			go func() { <-done; rec.recordNeighDone(n) }()
@@ -277,12 +276,12 @@ func TestMonitorFabricStateContextCancelExits(t *testing.T) {
 	}
 
 	d := &Daemon{
-		fabricRefreshCh:         make(chan struct{}, 64),
+		fabricSlots:             [2]fabricSlot{{name: "fabric", refreshCh: make(chan struct{}, 64)}, {name: "fabric1"}},
 		fabricLinkSubscribe:     linkSubscribe,
 		fabricNeighSubscribe:    neighSubscribe,
 		fabricStateResubBackoff: time.Millisecond,
 	}
-	_, stopDrain := drainFabricRefresh(d.fabricRefreshCh)
+	_, stopDrain := drainFabricRefresh(d.fabricSlots[0].refreshCh)
 	defer stopDrain()
 
 	ctx, cancel := context.WithCancel(context.Background())
