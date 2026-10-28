@@ -2660,13 +2660,12 @@ func (s *Store) rescuePath() string {
 // operator command and reporting success without writing would lie about the
 // safety net — and an unfenced save registers itself in rescueWG so a
 // concurrent QuiesceRescueWrites JOINs it before the wipe erases rescue.conf.
-// The fence read and the Add(1) run under s.mu guarded by !rescueFenced: the
-// read lock is mutually exclusive with the write lock QuiesceRescueWrites
-// sets the fence under, so a concurrent quiesce either observes this save in
-// rescueWG and JOINs it or sets the fence first and this save rejects — the
-// counter can never rise from zero concurrently with Wait. Only the WRITE
-// itself runs off-lock, so a long durable write never blocks
-// reconcile/QuiesceRescueWrites (#6185).
+// The fence read, generation claim and Add(1) run under s.mu's write lock:
+// exclusivity prevents concurrent saves from racing on rescueSeq, and also
+// ensures QuiesceRescueWrites either observes this save in rescueWG or sets
+// the fence first so this save rejects — the counter cannot rise from zero
+// concurrently with Wait. Only the WRITE itself runs off-lock, so a long
+// durable write never blocks reconcile/QuiesceRescueWrites (#6185).
 //
 // #14722 D18-05: the save also claims a rescue generation under s.mu
 // (together with the snapshot above) and, after rescueWriteBarrier,
@@ -2682,18 +2681,18 @@ func (s *Store) rescuePath() string {
 // it either lands before the delete's critical section and is
 // removed, or runs after the delete has finished).
 func (s *Store) SaveRescueConfig() error {
-	s.mu.RLock()
+	s.mu.Lock()
 	if s.rescueFenced.Load() {
 		// A factory reset is erasing (or has erased) rescue.conf; do not
 		// recreate it.
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		return fmt.Errorf("save rescue config: %w", ErrRescueSaveFenced)
 	}
 	data := s.active.Format()
 	if !s.everCommitted || strings.TrimSpace(data) == "" {
 		// A rescue save is a safety net, not a way to replace the last good
 		// copy with a fresh bootstrap tree or an empty configuration.
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		return fmt.Errorf("save rescue config: %w", ErrRescueSaveNoCommittedConfig)
 	}
 	// #14722 D18-05: claim this save's generation together with the data
@@ -2704,7 +2703,7 @@ func (s *Store) SaveRescueConfig() error {
 	s.rescueSeq++
 	myGen := s.rescueSeq
 	s.rescueWG.Add(1)
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	defer s.rescueWG.Done()
 	rescueWriteBarrier()
 
