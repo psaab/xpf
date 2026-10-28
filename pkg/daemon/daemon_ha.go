@@ -126,10 +126,10 @@ func (d *Daemon) syncRGSyncHoldTransition(s *rgStateMachine) rgTransition {
 
 // mergeSyncHoldTransition folds a sync-hold mirror refresh into the
 // transition produced by the caller's own state-machine input (#16692).
-// Active/Epoch/InvalidateSeq stay the caller's — they describe the final
-// desired state; only Changed is widened, so the edge side effects gated
-// on it (rg_active, blackholes, RETH services) run exactly once for a
-// release whose own input no longer moves the machine.
+// Active/Epoch/ActivationSeq/InvalidateSeq stay the caller's — they
+// describe its state-machine update; only Changed is widened, so the
+// edge side effects gated on it (rg_active, blackholes, RETH services)
+// run exactly once for a release whose own input no longer moves the machine.
 func mergeSyncHoldTransition(tr, mirror rgTransition) rgTransition {
 	if mirror.Changed {
 		tr.Changed = true
@@ -851,11 +851,15 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		d.driveRethServicesEdge(ev.GroupID, tr, noRethVRRP)
 		// #17052: explicit deactivation arm for the non-VIP announce
 		// marker — drop the claimed activation generation on the cluster
-		// demotion edge (desired may already be inactive here if VRRP
-		// BACKUP flipped it first) so the next activation re-announces.
-		// Clearing is unconditional on this arm (not gated on tr.Active):
-		// the marker must not survive any demotion the daemon acts on.
-		d.clearLegacyNonVIPAnnounce(ev.GroupID)
+		// demotion edge ONLY when desired is actually inactive here
+		// (e.g. VRRP BACKUP flipped it first), so the next activation
+		// re-announces. While VRRP remains MASTER desired stays active
+		// at the SAME generation, so clearing unconditionally would
+		// re-owe that generation and the converger would re-send the
+		// full burst on the next tick (Rev18310Glm round 3).
+		if !tr.Active {
+			d.clearLegacyNonVIPAnnounce(ev.GroupID, tr.ActivationSeq)
+		}
 	}
 
 	// Strict VIP ownership: suppress GARP on secondary, allow on primary.
@@ -1188,7 +1192,7 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 		if tr.Changed && !tr.Active {
 			// #17052: explicit deactivation arm — drop the claimed
 			// activation generation so the next MASTER re-announces.
-			d.clearLegacyNonVIPAnnounce(rgID)
+			d.clearLegacyNonVIPAnnounce(rgID, tr.ActivationSeq)
 			// Deactivation order: inject blackhole routes FIRST,
 			// then clear rg_active. Re-read desired state to
 			// guard against interleaved cluster goroutine.
@@ -1627,7 +1631,7 @@ func (d *Daemon) reconcileRGState() {
 					// #17052: reconcile deactivation arm — explicitly
 					// drop the claimed activation generation so the next
 					// activation re-announces.
-					d.clearLegacyNonVIPAnnounce(rgID)
+					d.clearLegacyNonVIPAnnounce(rgID, tr.ActivationSeq)
 				}
 			}
 			anyRGChanged = true
@@ -1639,7 +1643,7 @@ func (d *Daemon) reconcileRGState() {
 				// event arms were lost still re-arms the next
 				// activation's announce. Runs before the converger so
 				// an inactive RG never re-claims.
-				d.clearLegacyNonVIPAnnounce(rgID)
+				d.clearLegacyNonVIPAnnounce(rgID, tr.ActivationSeq)
 			}
 			// #16696: level-triggered repair for a service edge no
 			// producer ran — handleClusterEvent's legacy-mode edge

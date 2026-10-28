@@ -1923,14 +1923,21 @@ daemon sends the non-VIP half (router link-local NAs + pool
 GARPs/NAs) so the announced (iface, IP, kind) set is identical. The
 non-VIP half is level-triggered (`convergeLegacyNonVIPAnnounce`, the
 #16696 pattern): cluster-primary, VRRP MASTER and the reconcile pass
-all funnel through it and it claims each activation generation exactly
-once — the generation (`rgStateMachine.CurrentActivation`) increments
-only on inactive→active transitions, never on no-change reconcile
-inputs, and the marker is cleared explicitly on the cluster-demotion,
-VRRP BACKUP and reconcile deactivation arms. A cluster-first promotion
-on the default userspace dataplane (which consumes the rg-state edge
-before ForceRGMaster) therefore cannot swallow the announce, and a
-steady-state reconcile tick cannot re-send it. `directSendGARPs` (`daemon_ha_vip.go`) sends a broadcast GARP
+all funnel through it. The claim is keyed to an activation generation
+(`rgStateMachine.CurrentActivation`) that increments only on
+inactive→active transitions, never on no-change reconcile inputs.
+Deactivation clears claims only through the transition's generation
+when the RG is actually inactive: the cluster-demotion arm checks
+desired state, while VRRP BACKUP and reconcile clear on their inactive
+paths. A demotion that leaves VRRP MASTER active preserves the same claim,
+so the next reconcile pass does not resend; late cleanup from an older
+deactivation cannot erase a newer claim. If `AnnounceResult.FirstErr`
+is non-nil and `Sent` is zero, the claim is released for retry on the next
+producer/reconcile pass; partial success remains claimed to avoid
+duplicating targets already announced. A cluster-first promotion on the
+default userspace dataplane (which consumes the rg-state edge before
+ForceRGMaster) therefore cannot swallow the announce, and a steady-state
+reconcile tick cannot re-send it.
 burst per VIP plus a supplementary **directed** ARP probe to the subnet
 gateway so a router that ignores broadcast gratuitous ARP still re-binds the
 VIP to the new master's MAC. The probe target is derived by the single source

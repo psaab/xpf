@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net"
 	"reflect"
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sync/semaphore"
@@ -393,9 +395,11 @@ func TestNonVIPAnnounceLifecycle17052(t *testing.T) {
 
 	// 4. Deactivate via VRRP BACKUP while cluster is still primary:
 	// desired stays active (clusterPri || master) — the BACKUP arm must
-	// NOT clear yet, and no burst fires. Then cluster demotion flips
-	// desired inactive: the cluster demotion arm clears the marker
-	// explicitly.
+	// NOT clear yet, and no burst fires. Then pre-apply the cluster's
+	// inactive desired value before delivering the demotion event. This
+	// keeps the lifecycle cell hermetic (the event's blackhole-route
+	// syscall only runs on a Changed transition), while still asserting
+	// the demotion arm clears a claim after desired has gone inactive.
 	vd.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
 		GroupID: 101, Interface: "reth0", State: vrrp.StateBackup,
 	}, rgTransition{})
@@ -406,13 +410,20 @@ func TestNonVIPAnnounceLifecycle17052(t *testing.T) {
 		t.Fatalf("marker cleared while still active: got %d, want claim %d", got, gen1)
 	}
 	vd.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
+	s.SetCluster(false)
+	if s.IsActive() {
+		t.Fatal("setup: cluster demotion must pre-apply desired inactive")
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen1 {
+		t.Fatalf("state-machine deactivation alone cleared the claim: got %d, want %d", got, gen1)
+	}
 	if timer := vd.handleClusterEvent(context.Background(), cluster.ClusterEvent{
 		GroupID: 1, OldState: cluster.StatePrimary, NewState: cluster.StateSecondary,
 	}, nil); timer != nil {
 		timer.Stop()
 	}
 	if s.IsActive() {
-		t.Fatal("setup: cluster demotion after BACKUP must deactivate RG1")
+		t.Fatal("setup: cluster demotion after BACKUP must leave RG1 inactive")
 	}
 	if got := nonVIPAnnouncedGen17052(vd, 1); got != 0 {
 		t.Fatalf("cluster demotion arm must clear the marker explicitly, got claim %d", got)
@@ -456,6 +467,186 @@ func TestNonVIPAnnounceLifecycle17052(t *testing.T) {
 	}
 	if burstLen() != 2*first {
 		t.Fatalf("cluster-second event re-sent after reactivation: %d calls, want %d", burstLen(), 2*first)
+	}
+}
+
+// TestNonVIPAnnounceClusterDemotionWhileVRRPMaster17052 pins the round-3
+// demotion case: VRRP MASTER activates and claims a generation; a cluster
+// demotion while VRRP remains MASTER must preserve that claim, and the next
+// converger pass must not resend. BACKUP really deactivates it, allowing one
+// send after the following MASTER reactivation.
+func TestNonVIPAnnounceClusterDemotionWhileVRRPMaster17052(t *testing.T) {
+	store := fenceTestStore(t, paritySetLines(false))
+	vd := clusterFirstDaemon17052(t, store)
+	var calls []announceCall17052
+	installAnnounceCapture17052(t, &calls)
+	s := vd.getOrCreateRGState(1)
+
+	vd.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
+		GroupID: 101, Interface: "reth0", State: vrrp.StateMaster,
+	}, rgTransition{})
+	active, gen1 := s.CurrentActivation()
+	if !active || gen1 != 1 {
+		t.Fatalf("VRRP MASTER must activate generation 1, got active=%v gen=%d", active, gen1)
+	}
+	first := len(calls)
+	if first == 0 {
+		t.Fatal("VRRP MASTER activation sent no non-VIP burst")
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen1 {
+		t.Fatalf("VRRP MASTER must claim generation %d, got %d", gen1, got)
+	}
+
+	// Model the cluster-primary state already established alongside VRRP
+	// MASTER before delivering its demotion edge. Desired remains active
+	// through VRRP ownership when clusterPri becomes false.
+	s.SetCluster(true)
+	vd.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
+	if timer := vd.handleClusterEvent(context.Background(), cluster.ClusterEvent{
+		GroupID: 1, OldState: cluster.StatePrimary, NewState: cluster.StateSecondary,
+	}, nil); timer != nil {
+		timer.Stop()
+	}
+	active, genAfterDemotion := s.CurrentActivation()
+	if !active || genAfterDemotion != gen1 {
+		t.Fatalf("cluster demotion must preserve active generation %d, got active=%v gen=%d", gen1, active, genAfterDemotion)
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen1 {
+		t.Fatalf("active cluster demotion cleared generation %d claim, got %d", gen1, got)
+	}
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if len(calls) != first {
+		t.Fatalf("active cluster demotion caused a re-send: %d calls, want %d", len(calls), first)
+	}
+
+	// The BACKUP deactivation arm also installs blackhole routes on the
+	// kernel-dataplane path. Publish the in-memory userspace-mode test
+	// runtime so this lifecycle cell remains hermetic.
+	vd.userspaceDemotionPrepUntil = make(map[int]time.Time)
+	vd.setDataplane(newReconcileSnapshotDP("announce-17052-backup"))
+	t.Cleanup(func() { vd.setDataplane(nil) })
+	vd.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
+		GroupID: 101, Interface: "reth0", State: vrrp.StateBackup,
+	}, rgTransition{})
+	vd.setDataplane(nil)
+	if s.IsActive() {
+		t.Fatal("BACKUP after cluster demotion must deactivate the RG")
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != 0 {
+		t.Fatalf("real deactivation must clear the claim, got %d", got)
+	}
+
+	vd.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
+		GroupID: 101, Interface: "reth0", State: vrrp.StateMaster,
+	}, rgTransition{})
+	active, gen2 := s.CurrentActivation()
+	if !active || gen2 != gen1+1 {
+		t.Fatalf("reactivation must be generation %d, got active=%v gen=%d", gen1+1, active, gen2)
+	}
+	if len(calls) != 2*first {
+		t.Fatalf("reactivation must send exactly one new burst: %d calls, want %d", len(calls), 2*first)
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen2 {
+		t.Fatalf("reactivation must claim generation %d, got %d", gen2, got)
+	}
+	// A deactivation cleanup delayed past reactivation may clear only its
+	// observed generation, never the newer generation's claim.
+	beforeLateClear := len(calls)
+	vd.clearLegacyNonVIPAnnounce(1, gen1)
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen2 {
+		t.Fatalf("late generation %d cleanup erased newer generation %d claim: got %d", gen1, gen2, got)
+	}
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if len(calls) != beforeLateClear {
+		t.Fatalf("late generation cleanup caused a duplicate burst: calls=%d want=%d", len(calls), beforeLateClear)
+	}
+}
+
+// TestNonVIPAnnounceRetriesAfterTotalFailure17052 pins retry-on-next-pass
+// semantics. A generation with no successfully announced non-VIP target is
+// unclaimed so reconciliation can retry; a successful retry claims it and
+// later passes do not duplicate it.
+func TestNonVIPAnnounceRetriesAfterTotalFailure17052(t *testing.T) {
+	store := fenceTestStore(t, paritySetLines(false))
+	vd := clusterFirstDaemon17052(t, store)
+	origG, origN, origP, origProbe := directGARPBurstFn, directNABurstFn, directProxyNABurstFn, directARPProbeFn
+	fail := true
+	partial := false
+	partialAttempt := 0
+	var failedCalls, successfulCalls int
+	send := func(string, net.IP, int, cluster.BurstStillValid) error {
+		if fail {
+			failedCalls++
+			return errors.New("synthetic announce failure")
+		}
+		if partial {
+			partialAttempt++
+			if partialAttempt > 1 {
+				failedCalls++
+				return errors.New("synthetic partial announce failure")
+			}
+		}
+		successfulCalls++
+		return nil
+	}
+	directGARPBurstFn = send
+	directNABurstFn = send
+	directProxyNABurstFn = send
+	directARPProbeFn = func(string, net.IP, net.IP) error { return nil }
+	t.Cleanup(func() {
+		directGARPBurstFn, directNABurstFn, directProxyNABurstFn, directARPProbeFn = origG, origN, origP, origProbe
+	})
+
+	s := vd.getOrCreateRGState(1)
+	s.SetCluster(true)
+	active, gen := s.CurrentActivation()
+	if !active || gen == 0 {
+		t.Fatalf("setup: expected active generation, got active=%v gen=%d", active, gen)
+	}
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if failedCalls == 0 || successfulCalls != 0 {
+		t.Fatalf("setup: expected all sends to fail, failed=%d succeeded=%d", failedCalls, successfulCalls)
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != 0 {
+		t.Fatalf("all-failed generation must be unclaimed for retry, got claim %d", got)
+	}
+	if !vd.legacyNonVIPAnnouncePending(1) {
+		t.Fatal("all-failed generation must remain pending")
+	}
+
+	fail = false
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if successfulCalls == 0 {
+		t.Fatal("next producer/reconcile pass did not retry the failed announce")
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen {
+		t.Fatalf("successful retry must claim generation %d, got %d", gen, got)
+	}
+	before := successfulCalls
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if successfulCalls != before {
+		t.Fatalf("successful generation was re-sent: %d successful sends, want %d", successfulCalls, before)
+	}
+	// A partial delivery stays claimed: retrying the full list would
+	// duplicate the target that succeeded on the first attempt.
+	s.SetCluster(false)
+	s.SetCluster(true)
+	_, gen2 := s.CurrentActivation()
+	partial = true
+	beforeSuccess, beforeFailure := successfulCalls, failedCalls
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if successfulCalls != beforeSuccess+1 || failedCalls <= beforeFailure {
+		t.Fatalf("setup: expected one success followed by failures, succeeded=%d failed=%d",
+			successfulCalls-beforeSuccess, failedCalls-beforeFailure)
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen2 {
+		t.Fatalf("partial delivery must keep generation %d claimed, got %d", gen2, got)
+	}
+	beforeSuccess, beforeFailure = successfulCalls, failedCalls
+	vd.convergeLegacyNonVIPAnnounce(1)
+	if successfulCalls != beforeSuccess || failedCalls != beforeFailure {
+		t.Fatalf("partial delivery retried and duplicated a target: successes=%d failures=%d",
+			successfulCalls-beforeSuccess, failedCalls-beforeFailure)
 	}
 }
 

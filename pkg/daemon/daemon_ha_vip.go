@@ -555,8 +555,9 @@ func clusterClampedCount(cfg *config.Config, rgID int) int {
 // generation is the rg-state machine's activationSeq — it increments
 // ONLY on inactive->active transitions, never on no-change inputs —
 // so a reconcile tick at the same activation never re-owes it. The
-// marker is cleared explicitly on the deactivation arms (see
-// clearLegacyNonVIPAnnounce), not as a side effect of this check.
+// marker is cleared on real deactivation and after a total send failure
+// (Sent == 0 && FirstErr != nil), not as a side effect of this check.
+// Partial delivery remains claimed to avoid duplicating successful targets.
 func (d *Daemon) legacyNonVIPAnnouncePending(rgID int) bool {
 	if d.isNoRethVRRP() {
 		return false
@@ -576,38 +577,35 @@ func (d *Daemon) legacyNonVIPAnnouncePending(rgID int) bool {
 	return d.nonVIPAnnounced[rgID] != generation
 }
 
-// clearLegacyNonVIPAnnounce drops the per-activation claim for rgID so
-// the next activation re-announces (#17052). Called explicitly from
-// every deactivation arm — cluster demotion, VRRP BACKUP and the
-// reconcile deactivation path in daemon_ha.go — never as a side effect
-// of a pending check, so a producer that merely observes an inactive
-// RG cannot silently consume the lifecycle event.
-func (d *Daemon) clearLegacyNonVIPAnnounce(rgID int) {
+// clearLegacyNonVIPAnnounce drops claims no newer than the deactivated
+// generation. A late deactivation cleanup must not erase a new claim
+// created by a concurrent reactivation (#17052).
+func (d *Daemon) clearLegacyNonVIPAnnounce(rgID int, generation uint64) {
 	d.nonVIPAnnounceMu.Lock()
 	defer d.nonVIPAnnounceMu.Unlock()
-	delete(d.nonVIPAnnounced, rgID)
+	if claimed, ok := d.nonVIPAnnounced[rgID]; ok && claimed <= generation {
+		delete(d.nonVIPAnnounced, rgID)
+	}
 }
 
-// convergeLegacyNonVIPAnnounce sends the non-VIP announce exactly once
-// per activation generation when it is still owed (#17052, the #16696
-// level-triggered pattern applied to announcements). Every producer
-// that observes an activation -- cluster-primary, VRRP MASTER, and the
-// periodic reconcile -- funnels through here, so cluster-first ordering
-// (the default userspace / non-strict case, where SetCluster consumes
-// the edge and ForceRGMaster then reports Changed=false to the VRRP
-// handler) can no longer swallow the announce, and no producer can
-// double-burst a generation another producer already claimed.
+// convergeLegacyNonVIPAnnounce attempts the non-VIP announce for the
+// current activation generation (#17052, the #16696 level-triggered
+// pattern applied to announcements). Every producer that observes an
+// activation -- cluster-primary, VRRP MASTER, and periodic reconcile --
+// funnels through here, so cluster-first ordering (the default userspace /
+// non-strict case, where SetCluster consumes the edge and ForceRGMaster
+// then reports Changed=false to the VRRP handler) cannot swallow it.
 //
 // The claim is atomic: the (active, generation) pair is read in ONE
-// rg-state lock hold (CurrentActivation) and the generation observed
-// there is the one claimed under nonVIPAnnounceMu BEFORE any frame is
-// sent, so a racing producer cannot interleave a second burst and a
-// newer generation arriving between the read and the claim is never
-// silently consumed — it stays unclaimed and the next producer (or the
-// same call's caller on its next pass) sends for it. Keyed to the
-// activation generation, NOT CurrentDesired's epoch: epoch bumps on
-// every reconcileLocked input (every 2s reconcile pass), which would
-// re-send the full burst forever.
+// rg-state lock hold (CurrentActivation) and the observed generation is
+// claimed under nonVIPAnnounceMu BEFORE any frame is sent, preventing
+// concurrent producers from double-sending it. If every non-VIP send
+// fails (Sent == 0 && FirstErr != nil), only this generation's claim is
+// released so the next producer/reconcile pass can retry; partial success
+// stays claimed to avoid duplicating delivered targets. Keyed to the
+// activation generation, NOT CurrentDesired's epoch: epoch bumps on every
+// reconcileLocked input (every 2s reconcile pass), which would re-send
+// the full burst forever.
 func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
 	if d.isNoRethVRRP() {
 		return
@@ -632,7 +630,20 @@ func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
 	}
 	d.nonVIPAnnounced[rgID] = generation
 	d.nonVIPAnnounceMu.Unlock()
-	d.sendVRRPModeNonVIPAnnounce(rgID)
+	res := d.sendVRRPModeNonVIPAnnounce(rgID)
+	if res.Sent == 0 && res.FirstErr != nil {
+		// No non-VIP target accepted a frame. Release only this
+		// activation's claim so the next producer/reconcile pass can
+		// retry; a partial success remains at-most-once to avoid
+		// duplicating already-delivered targets.
+		slog.Warn("vrrp-mode announce: all non-VIP targets failed; retrying on next producer/reconcile pass",
+			"rg", rgID, "err", res.FirstErr)
+		d.nonVIPAnnounceMu.Lock()
+		if d.nonVIPAnnounced[rgID] == generation {
+			delete(d.nonVIPAnnounced, rgID)
+		}
+		d.nonVIPAnnounceMu.Unlock()
+	}
 }
 
 // sendVRRPModeNonVIPAnnounce sends, in legacy VRRP mode, the non-VIP
@@ -640,14 +651,14 @@ func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
 // link-local NAs and the pool GARPs/NAs that pkg/vrrp never sends (it
 // owns only the VIPs). Gated on continued mastership via rgState.
 // Producers reach this ONLY through convergeLegacyNonVIPAnnounce, which
-// owns the exactly-once claim for the activation generation.
-func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) {
+// owns the generation claim and all-failed retry decision.
+func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) cluster.AnnounceResult {
 	if d.isNoRethVRRP() {
-		return
+		return cluster.AnnounceResult{}
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
-		return
+		return cluster.AnnounceResult{}
 	}
 	stillValid := func() bool {
 		d.rgStatesMu.RLock()
@@ -656,7 +667,7 @@ func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) {
 		return s != nil && s.IsActive()
 	}
 	if !stillValid() {
-		return
+		return cluster.AnnounceResult{}
 	}
 	_, configured, clamped := cluster.AnnounceBurstCount(cfg, rgID)
 	if clamped && d.warnGARPClampOnce(rgID) {
@@ -672,6 +683,7 @@ func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) {
 			"max", cluster.PoolAnnounceMaxAddresses,
 			"consequence", "the remaining pool addresses rely on upstream neighbor-discovery ageing")
 	}
+	return res
 }
 
 // resetVIPWarnings drops the VIP warning-suppression set so a new config gets

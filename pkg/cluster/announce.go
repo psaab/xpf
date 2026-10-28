@@ -232,7 +232,7 @@ func (s AnnounceSender) probe() func(string, net.IP, net.IP) error {
 	return announceARPProbeFn
 }
 
-// AnnounceResult reports what SendAnnounceTargets did, for caller logging.
+// AnnounceResult reports the emitted target results and first error to callers.
 type AnnounceResult struct {
 	Sent           int // targets whose first frame succeeded
 	PoolAttempted  int
