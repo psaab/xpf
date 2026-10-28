@@ -69,18 +69,26 @@ func (d *Daemon) fabricIPVLANReassertLoop(ctx context.Context) {
 }
 
 // missingFabricOverlays returns the configured fabric overlays that are not
-// ready, as (parent, name, addrs, mtu) tuples ready for ensureFabricIPVLAN.
+// address-ready, as (parent, name, addrs, mtu) tuples ready for
+// ensureFabricIPVLAN.
 //
 // This is the CHEAP gate. On a healthy node it is one netlink name lookup and,
 // for an up device, one address listing per configured fab device — at most
 // two — and returns nothing, so the loop costs effectively nothing when
 // everything is up. It deliberately does NOT verify the parent index: that
-// remains ensureFabricIPVLAN's job (#17221). MTU and address drift are NOT
-// cosmetic here: fabricOverlayReady is the same predicate ensureFabricIPVLAN
-// ends with, so the gate and the actuator cannot disagree, and the reuse
-// branch reconciles MTU and addresses in place rather than restarting a
-// working overlay. The gate answers "is there a usable fab device at all" —
-// usable now includes carrying the fabric address.
+// remains ensureFabricIPVLAN's job (#17221). The gate shares only the
+// ADDRESS predicate with the actuator: fabricOverlayAddrReady
+// (administratively up and carrying every configured address) is the
+// address half of the actuator's terminal fabricOverlayReady, and both
+// read the kernel through the fabricAddrList17221 seam, so the gate and
+// the actuator cannot disagree about whether the fabric address is
+// present. MTU is NOT part of the gate: it is owned by the actuator's
+// terminal fabricOverlayReady check at apply, so this 30s loop does not
+// heal MTU drift on an otherwise address-ready overlay. When the gate
+// does fire, the reuse branch reconciles MTU and addresses in place
+// rather than restarting a working overlay. The gate answers "is there a
+// usable fab device at all" — usable now includes carrying the fabric
+// address.
 func (d *Daemon) missingFabricOverlays(cfg *config.Config) []deferredIPVLAN {
 	var out []deferredIPVLAN
 	config.RangeInterfaces(cfg, func(ifName string, ifCfg *config.InterfaceConfig) {

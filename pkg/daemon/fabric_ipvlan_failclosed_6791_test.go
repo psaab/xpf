@@ -558,6 +558,45 @@ func TestApplyFabricIPVLANAddrReplaceFailureReachesApplyTail_17221(t *testing.T)
 	}
 }
 
+// TestEnsureFabricIPVLANCreateBranchAddrReplaceFailure_17221 is the
+// create-branch counterpart of TestApplyFabricIPVLANAddrReplaceFailureReachesApplyTail_17221:
+// when fab0 does NOT already exist on the parent, the create path
+// (daemon_ha_fabric.go's LinkAdd branch) must also fail closed on an
+// AddrReplace error instead of reporting a healthy address-less overlay.
+//
+// The link table starts WITHOUT fab0; the process-wide fabricLinkAdd17221
+// fake installed by installFabricLinkFakes17221 then makes it appear — with
+// the desired MTU, because the create branch reconciles MTU before the
+// address write — so execution reaches the create-branch AddrReplace (not
+// an earlier MTU/lookup failure) and must return its EACCES.
+func TestEnsureFabricIPVLANCreateBranchAddrReplaceFailure_17221(t *testing.T) {
+	parent := &fakeFabricLink{attrs: netlink.LinkAttrs{Name: "ge-0-0-0", Index: 2, MTU: 9000}}
+	links := map[string]netlink.Link{"ge-0-0-0": parent}
+	installFabricLinkFakes17221(t, links)
+	origAdd := fabricLinkAdd17221
+	fabricLinkAdd17221 = func(netlink.Link) error {
+		links["fab0"] = &fakeFabricLink{attrs: netlink.LinkAttrs{
+			Name: "fab0", Index: 3, ParentIndex: 2, MTU: 9000,
+		}}
+		return nil
+	}
+	t.Cleanup(func() { fabricLinkAdd17221 = origAdd })
+	installFabricAddrFake17221(t, func(netlink.Link) ([]netlink.Addr, error) {
+		return nil, nil
+	}, nil) // AddrReplace -> EACCES
+	err := ensureFabricIPVLAN("ge-0-0-0", "fab0", []string{"10.99.0.1/24"}, 0)
+	if err == nil {
+		t.Fatal("ensureFabricIPVLAN returned nil on the create branch with " +
+			"AddrReplace failing (EACCES); the address failure is warn-only again (#17221)")
+	}
+	if !errors.Is(err, unix.EACCES) {
+		t.Fatalf("ensureFabricIPVLAN error %v does not wrap EACCES", err)
+	}
+	if !strings.Contains(err.Error(), "fab0") {
+		t.Errorf("ensureFabricIPVLAN error %v does not name fab0", err)
+	}
+}
+
 // installFabricLinkFakes17221 swaps the #17221 link seams (and the #10216
 // MTU lookup seam, which reads the same fake table) for a test.
 func installFabricLinkFakes17221(t *testing.T, links map[string]netlink.Link) {
