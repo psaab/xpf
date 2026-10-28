@@ -10,6 +10,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
@@ -79,6 +80,9 @@ func assertFabricSlotsZeroed17060(t *testing.T, d *Daemon) {
 		d.fabricProbePending || d.fabricProbePending1 {
 		t.Fatal("probe rate-limit/pending state survived teardown (#17060)")
 	}
+	if !d.lastFabricLog0.IsZero() || !d.lastFabricLog1.IsZero() {
+		t.Fatal("fabric refresh failure log rate limits survived teardown (#17060)")
+	}
 	if got0, got1 := d.snapshotFabricRefreshChans(); got0 != nil || got1 != nil {
 		t.Fatalf("refresh channels survived teardown: %v %v", got0, got1)
 	}
@@ -91,12 +95,93 @@ func assertFabricSlotsZeroed17060(t *testing.T, d *Daemon) {
 func TestStopClusterCommsClearsFabricSlots17060(t *testing.T) {
 	d := &Daemon{}
 	seedFabricSlots17060(t, d)
+	d.fabricMu.Lock()
+	d.lastFabricLog0 = time.Now()
+	d.lastFabricLog1 = time.Now()
+	d.fabricMu.Unlock()
 
 	d.stopClusterComms()
 
 	assertFabricSlotsZeroed17060(t, d)
 	// The constraint map has no exported getter; a cleared constraint is
 	// proven behaviourally by TestFabricConstraintClearedOnStop17060.
+
+	// Restart the real epoch-owned populate loops after stop. Hold each loop
+	// in its first refresh after it publishes its configuration, so this
+	// assertion observes state freshly written by the new epoch rather than
+	// state left over from teardown. The link seam errors before any netlink
+	// access or probe transmission.
+	refreshEntered := make(chan string, 2)
+	releaseRefresh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRefresh) }) }
+	d.store = newConfigStore(t, t.TempDir()+"/config.conf")
+	d.fabricLinkSubscribe = func(chan<- netlink.LinkUpdate, <-chan struct{}) error {
+		return nil
+	}
+	d.fabricNeighSubscribe = func(chan<- netlink.NeighUpdate, <-chan struct{}) error {
+		return nil
+	}
+
+	cc := &config.ClusterConfig{
+		FabricInterface:    "ge-0-0-0",
+		FabricPeerAddress:  "10.99.0.2",
+		Fabric1Interface:   "ge-0-0-5",
+		Fabric1PeerAddress: "10.99.1.2",
+	}
+	wantIface0 := d.resolveFabricParent(cc.FabricInterface)
+	wantIface1 := d.resolveFabricParent(cc.Fabric1Interface)
+	// The start helper passes an empty overlay when it equals the parent;
+	// populateFabricFwd normalizes that to the parent before storing it.
+	wantOverlay0 := config.LinuxIfName(cc.FabricInterface)
+	wantOverlay1 := config.LinuxIfName(cc.Fabric1Interface)
+	d.linkByNameFn = func(name string) (netlink.Link, error) {
+		if name == wantIface0 || name == wantIface1 {
+			refreshEntered <- name
+			<-releaseRefresh
+		}
+		// Fail startup-probe lookups before transmission; hold the parent
+		// refresh lookups above until after the state assertion.
+		return nil, errors.New("hermetic restart link lookup")
+	}
+	ctx, gen, _ := d.beginClusterCommsEpoch(context.Background())
+	ch0, ch1 := make(chan struct{}, 1), make(chan struct{}, 1)
+	if !d.publishFabricRefreshChansIfCurrent(gen, ch0, ch1) {
+		t.Fatal("could not publish restarted fabric channels (#17060)")
+	}
+	d.startFabricForwardingLoops(ctx, cc, ch0, ch1)
+	t.Cleanup(func() {
+		release()
+		d.stopClusterComms()
+	})
+
+	entered := make(map[string]bool, 2)
+	for range 2 {
+		select {
+		case name := <-refreshEntered:
+			entered[name] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("restarted populate loops did not reach their refreshes (#17060)")
+		}
+	}
+	d.fabricMu.RLock()
+	restarted := d.fabricIface == wantIface0 &&
+		d.fabricOverlay == wantOverlay0 && d.fabricPeerIP.Equal(net.ParseIP(cc.FabricPeerAddress)) &&
+		d.fabricIface1 == wantIface1 && d.fabricOverlay1 == wantOverlay1 &&
+		d.fabricPeerIP1.Equal(net.ParseIP(cc.Fabric1PeerAddress))
+	d.fabricMu.RUnlock()
+	if !entered[wantIface0] || !entered[wantIface1] || !restarted {
+		d.fabricMu.RLock()
+		gotIface0, gotOverlay0, gotPeer0 := d.fabricIface, d.fabricOverlay, d.fabricPeerIP.String()
+		gotIface1, gotOverlay1, gotPeer1 := d.fabricIface1, d.fabricOverlay1, d.fabricPeerIP1.String()
+		d.fabricMu.RUnlock()
+		t.Fatalf("new epoch did not repopulate both fabric slots: entered=%v restarted=%v got=(%q,%q,%s)/(%q,%q,%s) want=(%q,%q,%s)/(%q,%q,%s) (#17060)",
+			entered, restarted, gotIface0, gotOverlay0, gotPeer0, gotIface1, gotOverlay1, gotPeer1,
+			wantIface0, wantOverlay0, cc.FabricPeerAddress, wantIface1, wantOverlay1, cc.Fabric1PeerAddress)
+	}
+	release()
+	d.stopClusterComms()
+	assertFabricSlotsZeroed17060(t, d)
 }
 
 // TestFabricConstraintClearedOnStop17060: after teardown, an ambiguous

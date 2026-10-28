@@ -912,6 +912,8 @@ func (d *Daemon) clearFabricSlots() {
 	d.lastFabricProbe1 = time.Time{}
 	d.fabricProbePending = false
 	d.fabricProbePending1 = false
+	d.lastFabricLog0 = time.Time{}
+	d.lastFabricLog1 = time.Time{}
 	d.fabricMu.Unlock()
 	for _, peer := range staleConstraints {
 		dpuserspace.RegisterFabricPeerMACConstraint(peer, nil)
