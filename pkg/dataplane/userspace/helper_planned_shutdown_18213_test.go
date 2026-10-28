@@ -179,3 +179,100 @@ func TestGenuineSIGKILLStillCountsAfterPlannedStop18213(t *testing.T) {
 		t.Errorf("genuine SIGKILL minted no restart debt: %+v", crash)
 	}
 }
+
+// TestGenuineSIGKILLReapedWhileMutexHeldBeforeStopCounts18213 is the
+// Rev18367 exact interleaving: m.mu is held continuously across the genuine
+// SIGKILL and the waiter's reap (exited closed), and only then does
+// stopLocked retire the generation. The exit happened BEFORE retirement, so
+// mutex acquisition order must not fence it away: it must count as one
+// unexpected exit with a crash record and an armed restart.
+//
+// RED on the unmodified head: stopLocked's procGen++ lands before the waiter
+// acquires m.mu, the waiter's generation fence sees a retired generation,
+// and the genuine kill is silently accounted as ZERO.
+func TestGenuineSIGKILLReapedWhileMutexHeldBeforeStopCounts18213(t *testing.T) {
+	m, cmd, rec := spawnSupervisedHelper18213(t)
+	m.BeginControlShutdown()
+
+	m.mu.Lock()
+	exitsBefore := m.helperCrashUnexpectedExitsTotal
+	exited := m.procSup.exited
+	// Hold m.mu across the kill AND the reap: the waiter runs cmd.Wait,
+	// publishes its state and closes exited, then blocks on m.mu. Only after
+	// the exit is fully observed does stopLocked retire the generation.
+	if err := cmd.Process.Kill(); err != nil {
+		m.mu.Unlock()
+		t.Fatalf("send genuine SIGKILL while holding m.mu: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		m.mu.Unlock()
+		t.Fatal("supervisor never reaped the child while m.mu was held")
+	}
+	m.stopLocked()
+	m.mu.Unlock()
+
+	// stopLocked returned after the waiter closed exited, but the waiter's
+	// bookkeeping follows after it acquires m.mu. Give it a bounded window,
+	// mirroring TestPlannedShutdownStopLockedNoCrash18213.
+	time.Sleep(100 * time.Millisecond)
+
+	m.mu.Lock()
+	crash := m.helperCrash
+	exits := m.helperCrashUnexpectedExitsTotal
+	m.mu.Unlock()
+	if exits != exitsBefore+1 {
+		t.Errorf("genuine SIGKILL reaped before stopLocked counted %d unexpected exit(s), want %d: an exit observed before generation retirement must count even when m.mu was held across the reap (#18213)",
+			exits-exitsBefore, exitsBefore+1)
+	}
+	if !crash.LastExitWasCrash || crash.PID != cmd.Process.Pid || crash.Restarts == 0 {
+		t.Errorf("genuine SIGKILL reaped before stopLocked did not retain crash record/debt: %+v", crash)
+	}
+	if n := len(rec.snapshot()); n == 0 {
+		t.Errorf("genuine SIGKILL reaped before stopLocked scheduled no restart")
+	}
+}
+
+// TestGenuineSIGKILLAfterGenerationRetirementDoesNotCount18213 pins the
+// opposite side of the same boundary. stopLocked retires the process
+// generation before sending any helper signal; a SIGKILL after that point is
+// therefore part of the intentional stop, not unexpected crash accounting.
+func TestGenuineSIGKILLAfterGenerationRetirementDoesNotCount18213(t *testing.T) {
+	m, cmd, rec := spawnSupervisedHelper18213(t)
+	m.BeginControlShutdown()
+
+	m.mu.Lock()
+	exitsBefore := m.helperCrashUnexpectedExitsTotal
+	exited := m.procSup.exited
+	// procGen++ is stopLocked's retirement linearization point; hold the lock
+	// through the post-retirement kill and reap so the waiter cannot account
+	// until after that fence is established.
+	m.procGen++
+	if err := cmd.Process.Kill(); err != nil {
+		m.mu.Unlock()
+		t.Fatalf("send SIGKILL after generation retirement: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(10 * time.Second):
+		m.mu.Unlock()
+		t.Fatal("supervisor never reaped the child after generation retirement")
+	}
+	m.mu.Unlock()
+
+	time.Sleep(100 * time.Millisecond)
+	m.mu.Lock()
+	crash := m.helperCrash
+	exits := m.helperCrashUnexpectedExitsTotal
+	m.mu.Unlock()
+	if exits != exitsBefore {
+		t.Errorf("post-retirement SIGKILL counted %d unexpected exit(s), want none", exits-exitsBefore)
+	}
+	if crash.LastExitWasCrash || crash.Restarts != 0 {
+		t.Errorf("post-retirement SIGKILL created crash record/debt: %+v", crash)
+	}
+	if n := len(rec.snapshot()); n != 0 {
+		t.Errorf("post-retirement SIGKILL scheduled %d restart(s) %v, want none", n, rec.snapshot())
+	}
+}

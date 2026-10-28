@@ -967,6 +967,19 @@ func (m *Manager) stopLocked() {
 	// resulting exit as part of this planned stop. xpfd.service uses
 	// KillMode=mixed so systemd's initial stop signal lets xpfd reach this
 	// fence before it signals the helper.
+	// A waiter may have completed Wait and closed exited while blocked on this
+	// mutex. Account that pre-retirement exit before advancing procGen; otherwise
+	// the generation fence below would let mutex acquisition order erase a real
+	// crash. Exits after this check remain part of the intentional stop.
+	if m.proc != nil {
+		if g := m.procSup; g != nil && g.gen == m.procGen {
+			select {
+			case <-g.exited:
+				m.handleUnexpectedHelperExitLocked(g)
+			default:
+			}
+		}
+	}
 	m.procGen++
 	// This record bit describes a currently running supervisor retry, not
 	// durable episode history; an intentional stop makes that claim stale.
