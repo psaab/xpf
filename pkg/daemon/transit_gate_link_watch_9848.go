@@ -82,5 +82,6 @@ func (d *Daemon) transitGateWatch(refreshWake chan string) nlWatch[netlink.LinkU
 // runTransitGateLinkSubscription owns one lifetime; kept as the named
 // seam existing cells drive. True means retry, false means ctx done.
 func (d *Daemon) runTransitGateLinkSubscription(ctx context.Context, refreshWake chan string) bool {
-	return d.transitGateWatch(refreshWake).runOne(ctx)
+	watch := d.transitGateWatch(refreshWake)
+	return watch.runOne(ctx)
 }

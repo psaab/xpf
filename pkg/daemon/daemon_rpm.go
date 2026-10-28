@@ -684,25 +684,72 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 	subErrors := make(chan struct{}, 1)
 	signalVerify := func() {
 		// nlWatch logs under the watcher name; RPM additionally fans
-		// every subscription gap (successful (re)subscribe via OnGap,
-		// receive error via OnReceiveError) into a full pin verification,
-		// preserving the baseline restored-success verify. Non-blocking:
-		// a pending signal already guarantees a verify, so coalesced
-		// gaps need no queue.
+		// restored subscriptions (OnGap) and receive errors
+		// (OnReceiveError) into a full pin verification, preserving the
+		// baseline restored-success verify. Non-blocking: a pending
+		// signal already guarantees a verify, so coalesced gaps need no
+		// queue.
 		select {
 		case subErrors <- struct{}{}:
 		default:
 		}
 	}
 	onError := func(err error) { signalVerify() }
-	// runSocket owns one socket's lifetimes: the goroutine runs
-	// nlWatch.runOne repeatedly with its own backoff and forwards
-	// events; nlWatch fires OnGap (signalVerify) after every
-	// successful (re)subscribe, including the first.
-	// Its owner stop channel interrupts runOne (closing the subscription's
-	// done channel) and joins the helper before the pair owner returns.
+	// runSocket owns one socket's lifetimes: its nlWatch is reused across
+	// runOne calls, preserving restoration state while forwarding events.
+	// OnGap (signalVerify) fires on successful resubscriptions, not the
+	// clean first subscribe; a first failed subscribe followed by success
+	// also counts as restoration. The owner stop channel interrupts
+	// runOne (closing the subscription's done channel) and joins the
+	// helper before the pair owner returns.
 	runSocket := func(isAddr bool) (stop func()) {
 		done := make(chan struct{})
+		var runOne func(context.Context) bool
+		if isAddr {
+			watch := &nlWatch[netlink.AddrUpdate]{
+				Name:           "rpm-probe-addr",
+				Subscribe:      addrSubscribe,
+				Buf:            32,
+				Backoff:        resubBackoff,
+				OwnerDone:      done,
+				OnReceiveError: onError,
+				Enabled: func() bool {
+					return d.probePinVerifyFn() != nil
+				},
+				OnGapOnlyOnRestore: true,
+				OnGap:              signalVerify,
+				OnEvent: func(u netlink.AddrUpdate) {
+					select {
+					case events <- rpmEvent{isAddr: true, addr: u}:
+					case <-ctx.Done():
+					case <-done:
+					}
+				},
+			}
+			runOne = watch.runOne
+		} else {
+			watch := &nlWatch[netlink.LinkUpdate]{
+				Name:           "rpm-probe-link",
+				Subscribe:      linkSubscribe,
+				Buf:            32,
+				Backoff:        resubBackoff,
+				OwnerDone:      done,
+				OnReceiveError: onError,
+				Enabled: func() bool {
+					return d.probePinVerifyFn() != nil
+				},
+				OnGapOnlyOnRestore: true,
+				OnGap:              signalVerify,
+				OnEvent: func(u netlink.LinkUpdate) {
+					select {
+					case events <- rpmEvent{link: u}:
+					case <-ctx.Done():
+					case <-done:
+					}
+				},
+			}
+			runOne = watch.runOne
+		}
 		exited := make(chan struct{})
 		go func() {
 			defer close(exited)
@@ -715,55 +762,14 @@ func (d *Daemon) probePinWatchPair(ctx context.Context) {
 					return
 				default:
 				}
-				var retry bool
-				if !isAddr {
-					retry = nlWatch[netlink.LinkUpdate]{
-						Name:           "rpm-probe-link",
-						Subscribe:      linkSubscribe,
-						Buf:            32,
-						Backoff:        backoff,
-						OwnerDone:      done,
-						OnReceiveError: onError,
-						Enabled: func() bool {
-							return d.probePinVerifyFn() != nil
-						},
-						OnGap: signalVerify,
-						OnEvent: func(u netlink.LinkUpdate) {
-							select {
-							case events <- rpmEvent{link: u}:
-							case <-ctx.Done():
-							case <-done:
-							}
-						},
-					}.runOne(ctx)
-				} else {
-					retry = nlWatch[netlink.AddrUpdate]{
-						Name:           "rpm-probe-addr",
-						Subscribe:      addrSubscribe,
-						Buf:            32,
-						Backoff:        backoff,
-						OwnerDone:      done,
-						OnReceiveError: onError,
-						Enabled: func() bool {
-							return d.probePinVerifyFn() != nil
-						},
-						OnGap: signalVerify,
-						OnEvent: func(u netlink.AddrUpdate) {
-							select {
-							case events <- rpmEvent{isAddr: true, addr: u}:
-							case <-ctx.Done():
-							case <-done:
-							}
-						},
-					}.runOne(ctx)
-				}
+				retry := runOne(ctx)
 				if !retry {
 					return
 				}
-				// No verify here: nlWatch fires OnGap (signalVerify)
-				// only after the next successful (re)subscribe, so
-				// pin drift during the backoff window is caught at
-				// restore and failed subscribes do not spam verifyAll.
+				// No verify here: the restoration-only OnGap signals
+				// after the next successful subscribe, so pin drift
+				// during the backoff window is caught on restore and
+				// failed subscribes do not spam verifyAll.
 				timer := time.NewTimer(backoff)
 				select {
 				case <-ctx.Done():

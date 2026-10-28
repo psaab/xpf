@@ -73,7 +73,7 @@ func (d *Daemon) runRxVlanAuditLinkSubscription(ctx context.Context, state *rxVl
 	if subscribe == nil {
 		subscribe = defaultLinkStateSubscribe
 	}
-	return nlWatch[netlink.LinkUpdate]{
+	watch := nlWatch[netlink.LinkUpdate]{
 		Name:           "rxvlan-audit",
 		Subscribe:      subscribe,
 		Buf:            64,
@@ -101,7 +101,8 @@ func (d *Daemon) runRxVlanAuditLinkSubscription(ctx context.Context, state *rxVl
 			}
 			_ = d.rxVlanAuditOnce(ctx, name, state)
 		},
-	}.runOne(ctx)
+	}
+	return watch.runOne(ctx)
 }
 
 // rxVlanParentNames mirrors the compiler's physical-parent selection: a

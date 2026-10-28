@@ -128,6 +128,78 @@ func TestNLWatchTable17064(t *testing.T) {
 	}
 }
 
+// TestNLWatchOnGapOnlyOnRestore17064 checks both restoration paths: a
+// successful initial subscription that closes, and a failed initial
+// attempt followed by a successful subscription. Neither initial
+// attempt calls OnGap; the later successful subscription does.
+func TestNLWatchOnGapOnlyOnRestore17064(t *testing.T) {
+	for _, firstAttemptFails := range []bool{false, true} {
+		name := "closed-initial-subscription"
+		if firstAttemptFails {
+			name = "failed-initial-subscribe"
+		}
+		t.Run(name, func(t *testing.T) {
+			captureSlog17064(t)
+			var calls, gaps atomic.Int32
+			restoreEntered := make(chan struct{})
+			restoreGate := make(chan struct{})
+			w := nlWatch[netlink.LinkUpdate]{
+				Name:               "restore-only",
+				Backoff:            time.Millisecond,
+				OnGapOnlyOnRestore: true,
+				OnGap:              func() { gaps.Add(1) },
+				Subscribe: func(ch chan<- netlink.LinkUpdate, _ <-chan struct{}, _ func(error)) error {
+					switch n := calls.Add(1); n {
+					case 1:
+						if firstAttemptFails {
+							return errors.New("initial subscribe failed")
+						}
+						close(ch)
+						return nil
+					case 2:
+						close(restoreEntered)
+						<-restoreGate
+						return nil
+					default:
+						return errors.New("unexpected extra subscribe")
+					}
+				},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { w.Run(ctx); close(done) }()
+
+			select {
+			case <-restoreEntered:
+			case <-time.After(2 * time.Second):
+				close(restoreGate)
+				cancel()
+				t.Fatalf("restoration subscribe did not start; calls=%d", calls.Load())
+			}
+			if got := gaps.Load(); got != 0 {
+				close(restoreGate)
+				cancel()
+				t.Fatalf("OnGap before restoration succeeded = %d, want 0", got)
+			}
+
+			close(restoreGate)
+			if !waitUntil(t, 2*time.Second, func() bool { return gaps.Load() == 1 }) {
+				cancel()
+				t.Fatalf("restoration did not fire OnGap; calls=%d gaps=%d", calls.Load(), gaps.Load())
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("Run did not exit on cancel")
+			}
+			if got := gaps.Load(); got != 1 {
+				t.Fatalf("OnGap count = %d, want exactly one restoration callback", got)
+			}
+		})
+	}
+}
+
 // TestNLWatchOnGapOnFailure17064 asserts the failure-gap arm used by
 // transit-gate / rxvlan: a failing subscribe still runs OnGap.
 func TestNLWatchOnGapOnFailure17064(t *testing.T) {

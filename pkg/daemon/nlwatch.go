@@ -24,15 +24,20 @@ const nlWatchBackoffDefault = 2 * time.Second
 //
 // Run owns: the update/done channels, logging every subscribe failure
 // and every receive error under Name (wrapping OnReceiveError), calling
-// OnGap after every successful (re)subscribe, and the stoppable backoff
-// timer between lifetimes. It returns only on ctx cancellation or
-// owner stop (OwnerDone closed, or Watch reporting a clean stop).
+// OnGap after a successful (re)subscribe and the stoppable backoff
+// timer between lifetimes. Owners with OnGapOnlyOnRestore suppress
+// OnGap on the first successful subscribe of a watch's lifetime; a
+// failed first attempt makes the next success a restoration. OnGap is
+// otherwise unchanged (fires on the initial subscribe). It returns
+// only on ctx cancellation or owner stop (OwnerDone closed, or Watch
+// reporting a clean stop).
 //
 // Per-owner semantics stay with the owner via the callbacks:
-//   - OnEvent handles one streamed update.
 //   - OnGap is the catch-up/re-sync after a (re)subscribe (events may
 //     have been dropped). Owners that must also act on a subscribe
 //     FAILURE (transit gate, rxvlan, IPsec topology) set OnGapOnFailure.
+//     Owners that must NOT act on the clean initial subscribe (RPM pin
+//     verify) set OnGapOnlyOnRestore; the failure arm is unaffected.
 //   - OnReceiveError (optional) runs in addition to the Name log line
 //     on a receive error (route: mark coalescer + counter; RPM: fan-in).
 //   - Watch, when non-nil, is an extra select arm for owners with a
@@ -61,20 +66,29 @@ type nlWatch[U any] struct {
 	// Backoff is the resubscribe delay. Zero means nlWatchBackoffDefault.
 	Backoff time.Duration
 
-	OnEvent         func(U)
-	OnGap           func()
-	OnGapOnFailure  bool
-	OnReceiveError  func(error)
-	OnChannelClosed func()
-	Enabled         func() bool
-	Watch           func() <-chan time.Time
-	WatchReady      func() bool
+	OnEvent             func(U)
+	OnGap               func()
+	OnGapOnFailure      bool
+	// OnGapOnlyOnRestore suppresses the OnGap fired by the first
+	// successful subscribe; every later success — a re-subscribe
+	// after a close, or the first success following one or more
+	// failed attempts — still fires it. Default false preserves the
+	// historical fire-on-initial-subscribe behaviour for other owners.
+	OnGapOnlyOnRestore  bool
+	// subscribeAttempted persists across runOne calls for the watch's
+	// lifetime so OnGapOnlyOnRestore handles failures before first success.
+	subscribeAttempted  bool
+	OnReceiveError      func(error)
+	OnChannelClosed     func()
+	Enabled             func() bool
+	Watch               func() <-chan time.Time
+	WatchReady          func() bool
 	// WatchTick handles one Watch firing. Return true to stop cleanly
 	// (Run returns), false to continue this lifetime.
-	WatchTick func() (stop bool)
+	WatchTick           func() (stop bool)
 	// OwnerDone cleanly stops the watch lifetime independently of ctx; the
 	// subscription's own done channel is closed before the lifetime returns.
-	OwnerDone <-chan struct{}
+	OwnerDone           <-chan struct{}
 }
 
 func (w nlWatch[U]) backoff() time.Duration {
@@ -123,7 +137,7 @@ func nlWatchBackoffWaitFor(ctx context.Context, d time.Duration, ownerDone <-cha
 
 // runOne owns one subscription lifetime. True means resubscribe after
 // backoff; false means ctx or OwnerDone cancelled / clean stop.
-func (w nlWatch[U]) runOne(ctx context.Context) bool {
+func (w *nlWatch[U]) runOne(ctx context.Context) bool {
 	if w.Enabled != nil && !w.Enabled() {
 		// Conditional subscribe is off: still honour ctx and the
 		// owner's Watch arm (RPM ticker must keep running), then
@@ -170,6 +184,8 @@ func (w nlWatch[U]) runOne(ctx context.Context) bool {
 	if subscribe == nil {
 		subscribe = defaultNLSubscribe[U]()
 	}
+	previousAttempt := w.subscribeAttempted
+	w.subscribeAttempted = true
 	if err := subscribe(updates, done, onErr); err != nil {
 		slog.Warn("netlink subscribe failed", "watcher", w.Name, "err", err)
 		close(done)
@@ -179,7 +195,7 @@ func (w nlWatch[U]) runOne(ctx context.Context) bool {
 		return true
 	}
 	defer close(done)
-	if w.OnGap != nil {
+	if w.OnGap != nil && (!w.OnGapOnlyOnRestore || previousAttempt) {
 		w.OnGap()
 	}
 	for {
