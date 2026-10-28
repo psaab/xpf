@@ -92,13 +92,9 @@ func collectVLANMapFromInterfacesNode(ifacesNode *Node, out map[string]vlanMapFi
 		if ifName == "" {
 			continue
 		}
-		// #14436: expand a packed instance tail so its unit is checked
-		// like the braced spelling.
-		ifaceBody := packedBody(iface, interfaceSchema9792())
-		if ifaceBody == nil {
-			ifaceBody = iface
-		}
-		for _, unitInst := range namedInstances(ifaceBody.FindChildren("unit")) {
+		// #14436: enumerate units via interfaceUnitsOf (#17222) so a
+		// packed instance tail is checked like the braced spelling.
+		for _, unitInst := range interfaceUnitsOf(iface) {
 			stmts := unitVLANMapStmts(unitInst.node)
 			if len(stmts) == 0 {
 				continue
@@ -115,26 +111,18 @@ func collectVLANMapFromInterfacesNode(ifacesNode *Node, out map[string]vlanMapFi
 	}
 }
 
-// collectVLANMapFindingsForNode expands the candidate tree for chassis-
-// cluster node nodeID and records every (interface, unit) that carries an
-// unsupported vlan-map stanza into out. It returns whether group expansion
-// succeeded, so callers can mirror CompileConfig's raw-tree fallback when
-// neither node context can expand (for example a literal "${node}" group).
-func collectVLANMapFindingsForNode(tree *ConfigTree, nodeID int, out map[string]vlanMapFinding) bool {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
-		return false
+// collectVLANMapFindings records every (interface, unit) that carries
+// an unsupported vlan-map stanza into out, across the effective views
+// from effectiveNodeViews (#17222) with the generic fallback enabled:
+// when neither per-node expansion succeeds — a group literally named
+// "${node}" — the gate inspects the same tree the generic compile
+// compiles instead of silently returning no findings (#13146).
+func collectVLANMapFindings(tree *ConfigTree, out map[string]vlanMapFinding) {
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{ExpandRanges: true, Fallback: true}) {
+		for _, ifaces := range view.FindChildren("interfaces") {
+			collectVLANMapFromInterfacesNode(ifaces, out)
+		}
 	}
-	// expandInterfaceRanges mutates the clone in place; its warnings are
-	// emitted on the real path (runPreWalkGates) and discarded here.
-	// #8438: the clone paths only need the budget SKIP (the expansion is capped
-	// inside); the rejection is surfaced once, by the prewalk caller.
-	_, _ = expandInterfaceRanges(clone)
-	for _, ifaces := range clone.FindChildren("interfaces") {
-		collectVLANMapFromInterfacesNode(ifaces, out)
-	}
-	return true
 }
 
 // validateVLANMapAST is the #6178 input-vlan-map / output-vlan-map honesty
@@ -153,16 +141,7 @@ func collectVLANMapFindingsForNode(tree *ConfigTree, nodeID int, out map[string]
 // contract).
 func validateVLANMapAST(tree *ConfigTree, lenient bool) ([]string, error) {
 	findings := make(map[string]vlanMapFinding)
-	expandedAny := collectVLANMapFindingsForNode(tree, 0, findings)
-	expandedAny = collectVLANMapFindingsForNode(tree, 1, findings) || expandedAny
-	if !expandedAny {
-		// CompileConfig falls back to compiling the raw tree when neither
-		// `${node}` expansion is available; inspect that same effective input
-		// rather than silently bypassing the unsupported-feature gate.
-		for _, ifaces := range tree.FindChildren("interfaces") {
-			collectVLANMapFromInterfacesNode(ifaces, findings)
-		}
-	}
+	collectVLANMapFindings(tree, findings)
 	if len(findings) == 0 {
 		return nil, nil
 	}
