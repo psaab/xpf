@@ -552,10 +552,9 @@ func bgpStatusCanonicalCommand(typ string) (string, bool) {
 // natRuleStatsCanonicalCommand attributes GetNATRuleStats by nat_type
 // (#15076). The handler accepts only "", "source" and "destination";
 // any other selector is unresolved here so a restricted class denies
-// instead of receiving the source charge. The rule-set name is an
-// argument value and stays dropped, exactly as the topic tables drop
-// theirs — both the `rule` and `rule-set <name>` lines perform this RPC
-// for the same family charge.
+// instead of receiving the source charge. This prices only the family;
+// the rule_set/rule argument text is reconstructed by
+// natRuleStatsArgumentForms (#17184).
 func natRuleStatsCanonicalCommand(natType string) (string, bool) {
 	switch natType {
 	case "", "source":
