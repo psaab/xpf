@@ -90,13 +90,15 @@ fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // occurs must count its wake-up recovery, and exactly one caller per
     // poisoning may bump the counter / emit the journald line. A
     // pre-acquisition `is_poisoned()` check does neither — blocked threads
-    // recover silently and N fresh callers each stamp. Guard recovery
-    // itself is delegated to the crate helper on the clean arm; the
-    // poisoned arm must stamp before recovering, so it keeps the explicit
-    // `clear_poison` + `into_inner` (the helper's counted arm would clear
-    // and count the same recovery a second time).
+    // recover silently and N fresh callers each stamp. The clean arm returns
+    // the matched guard directly: the `match` scrutinee temporary lives for
+    // the whole `match`, so re-acquiring the same non-reentrant mutex here
+    // (e.g. via `lock_tolerant(m)`) would self-deadlock on every clean
+    // acquisition. The poisoned arm stamps before recovering, so it keeps
+    // the explicit `clear_poison` + `into_inner` (the helper's counted arm
+    // would clear and count the same recovery a second time).
     match m.lock() {
-        Ok(_) => crate::sync_util::lock_tolerant(m),
+        Ok(guard) => guard,
         Err(poisoned) => {
             m.clear_poison();
             WG_HANDSHAKE_LOCK_POISON_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

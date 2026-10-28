@@ -2641,6 +2641,39 @@ mod framed_handshake {
         );
     }
 
+    /// #17201: the clean arm of handshake_session::lock_recover must return
+    /// its matched guard instead of re-locking the same mutex. The bounded
+    /// receive makes the former self-deadlock fail this cell instead of
+    /// wedging the test process indefinitely.
+    #[test]
+    fn reserve_pending_completes_with_a_clean_reconcile_lock_17201() {
+        use crate::afxdp::wg::session::SessionRole;
+        use std::sync::Arc as StdArc;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (init, _resp, _init_pub, resp_pub) = engine_pair();
+        let init = StdArc::new(init);
+        let worker = init.clone();
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result = worker.try_reserve_pending_for_test(resp_pub, SessionRole::Initiator);
+            let _ = tx.send(result);
+        });
+
+        let idx = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("clean handshake lock_recover must not self-deadlock")
+            .expect("reserve_pending must succeed with a clean reconcile_lock");
+        assert_eq!(init.pending_count(), 1);
+        assert_ne!(idx, 0);
+        assert!(
+            !init.reconcile_lock.is_poisoned(),
+            "a clean acquisition must not stamp poison"
+        );
+    }
+
     /// #6227 item 5, RED-on-revert: a prior panic while holding
     /// `reconcile_lock` poisons it. Before the fix every handshake-session
     /// call site did `self.reconcile_lock.lock().unwrap()`, so the NEXT
