@@ -70,7 +70,9 @@ import (
 //     after a positional swap or partial rebind. A commit with nothing to
 //     converge, and one whose only failure was to ENABLE a leg that
 //     therefore does not exist, both publish whole. After each reconcile
-//     m.cur resyncs from the serving legs (syncCurFromLiveLocked).
+//     the address/TLS fields in m.cur resync from serving legs
+//     (syncCurFromLiveLocked); the scope fingerprint advances separately
+//     only after all scope-driven plane reconciles succeed (#17812).
 //     Removing ALL api-auth is a revocation too and lands
 //     immediately, but WHAT lands depends on where the live legs are
 //     (publishNilDirectionLocked, #5561 round 14): the nil itself REMOVES a
@@ -722,6 +724,7 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 	// then replaces any same-address leg whose live scope differs.
 	m.srv.SetBindDevices(next.BindDevices)
 	scopeChanged := !bindDevicesEqual(nextE.bindDevices, m.cur.bindDevices)
+	scopeReconcileFailed := false
 
 	// HTTP leg: rebind only when the address set changes (or its degraded
 	// state changes, #14582, or its bind scope changes, #16709); an empty
@@ -732,13 +735,15 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		// a boot-failed listener is retrying, not the one it failed at boot (#6401).
 		m.lastHTTPAttempt = next.Addr
 		hErr := m.srv.ReconcileHTTPAddrs(nextE.httpAddrs())
-		// #14983: resync m.cur from the legs now serving even on a
-		// partial (joined-error) reconcile, so the fingerprint names
-		// the retained legs alongside the converged ones instead of
-		// keeping the pre-rebind set wholesale.
+		// #14983: resync m.cur's address/TLS fields from the legs now
+		// serving even on a partial (joined-error) reconcile, so the
+		// fingerprint names the retained legs alongside converged ones.
 		m.syncCurFromLiveLocked(next)
 		if hErr != nil {
 			errs = append(errs, hErr)
+			if scopeChanged {
+				scopeReconcileFailed = true
+			}
 		}
 	}
 
@@ -766,7 +771,17 @@ func (m *managementReconciler) reconcileTo(next api.Config) error {
 		m.syncCurFromLiveLocked(next)
 		if hErr != nil {
 			errs = append(errs, hErr)
+			if scopeChanged {
+				scopeReconcileFailed = true
+			}
 		}
+	}
+
+	// SetBindDevices publishes desired state before binding. Only record that
+	// scope as converged when every plane driven by this scope change succeeded;
+	// otherwise the old fingerprint keeps the failed rebind as retry debt.
+	if scopeChanged && !scopeReconcileFailed {
+		m.cur.bindDevices = m.srv.BindDevices()
 	}
 
 	if !next.TLS {
@@ -1143,16 +1158,17 @@ func (m *managementReconciler) liveAllLoopbackLocked() bool {
 	return true
 }
 
-// syncCurFromLiveLocked resyncs the recorded fingerprint from the
-// legs ACTUALLY serving after a (possibly partial) reconcile (#14983).
+// syncCurFromLiveLocked resyncs the address/TLS fingerprint fields from
+// the legs ACTUALLY serving after a (possibly partial) reconcile (#14983).
 // On full success this reproduces the exact pre-#14983 fingerprint
 // assignment (desired set, mirrors, degraded flags, tls); on partial
 // failure it records the UNION actually serving — converged legs at
 // their new addresses plus each retained leg at its old address — in
 // serving order, so later gates that still read m.cur see every live
 // leg. A plane with no serving leg keeps its previous fingerprint
-// (retry debt: the change-detection predicate stays unequal). Caller
-// holds mu.
+// (retry debt: the change-detection predicate stays unequal). The
+// bind-device fingerprint advances separately only after all planes
+// driven by a scope change succeed (#17812). Caller holds mu.
 func (m *managementReconciler) syncCurFromLiveLocked(next api.Config) {
 	if m.srv == nil {
 		return
@@ -1180,14 +1196,11 @@ func (m *managementReconciler) syncCurFromLiveLocked(next api.Config) {
 		m.cur.httpsAddrs = nil
 		m.cur.httpsDegraded = next.HTTPSBindDegraded
 	}
-	// #16709: advance the scope fingerprint to the server's published
-	// snapshot only when a leg is serving to carry it; a plane whose
-	// bind failed keeps the previous value as retry debt (SetBindDevices
-	// already published the desired snapshot, and scopeChanged will
-	// re-drive the reconcile until a leg lands with that scope).
-	if len(httpLive) > 0 || len(httpsLive) > 0 {
-		m.cur.bindDevices = m.srv.BindDevices()
-	} else if len(nextE.httpAddrs()) == 0 && len(nextE.httpsBindAddrs()) == 0 {
+	// #17812: the scope fingerprint is committed by reconcileTo only
+	// after all scope-driven plane reconciles succeed. BindDevices is the
+	// desired snapshot, not evidence that a retained listener was rebound.
+	if len(httpLive) == 0 && len(httpsLive) == 0 &&
+		len(nextE.httpAddrs()) == 0 && len(nextE.httpsBindAddrs()) == 0 {
 		m.cur.bindDevices = nil
 	}
 	// If TLS is desired but no HTTPS leg is serving, keep the previous
