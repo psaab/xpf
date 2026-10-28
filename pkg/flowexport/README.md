@@ -4,7 +4,7 @@ NetFlow v9 and IPFIX (NetFlow v10) exporters. Both ship flow records to
 remote collectors with per-zone direction filters and 1-in-N session
 sampling. Wired off `pkg/logging.EventReader` SESSION_OPEN and
 SESSION_CLOSE events in `pkg/daemon/daemon_flowexport.go`, not the
-conntrack GC delete callback. No per-packet sampling path.
+the retired Go conntrack GC's delete callback (`pkg/conntrack`, deleted in #17155). No per-packet sampling path.
 
 **Open-time decisions and orphan-close fallback (#15946/#16303/#16742).**
 The single SESSION_OPEN fanout callback (`flowExportOpenCallback`)
