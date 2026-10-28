@@ -1208,6 +1208,7 @@ fn insert_tunnel_endpoint(fwd: &mut ForwardingState, mode: &str, outer_family: i
             interface: "tun0.0".into(),
             redundancy_group: 0,
             mode: mode.into(),
+            kind: crate::afxdp::tunnel_mode_kind(mode),
             outer_family,
             source: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
             destination: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),

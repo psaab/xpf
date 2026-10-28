@@ -66,11 +66,6 @@ pub(in crate::nat) fn pat_mix(mut x: u64) -> u64 {
     x ^ (x >> 31)
 }
 
-/// RFC 6056 Algorithm 3/5 keyed offset: hash the flow tuple under the
-/// per-boot secret, reduced modulo `range`. An observer who sees one
-/// translated port learns nothing about the next flow's port without
-/// the secret. `range == 0` yields 0 (callers guard range first).
-#[inline]
 /// FOLD (#16350 fold-2): probe-advance mixer. Attempt `n` folds into
 /// the claim key so a rejection/exclusion advances to an unrelated
 /// keyed start instead of retrying the same port. Attempt 0 is the
@@ -80,6 +75,10 @@ pub(in crate::nat) fn pat_mix(mut x: u64) -> u64 {
 pub(in crate::nat::allocator) fn occupancy_next_probe(attempt: u64) -> u64 {
     if attempt == 0 { 0 } else { pat_mix(attempt.wrapping_mul(0x9e37_79b9_7f4a_7c15)) }
 }
+/// RFC 6056 Algorithm 3/5 keyed offset: hash the flow tuple under the
+/// per-boot secret, reduced modulo `range`. An observer who sees one
+/// translated port learns nothing about the next flow's port without
+/// the secret. `range == 0` yields 0 (callers guard range first).
 
 #[inline]
 pub(in crate::nat) fn pat_keyed_offset(secret: u64, key: u64, range: u32) -> u32 {

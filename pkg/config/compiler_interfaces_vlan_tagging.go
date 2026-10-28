@@ -245,7 +245,7 @@ func collectVlanIDTaggingFromInterfacesNode(ifacesNode *Node, out map[string]vla
 		if strings.Contains(ifName, ".") {
 			continue
 		}
-		for _, unitInst := range namedInstances(iface.FindChildren("unit")) {
+		for _, unitInst := range interfaceUnitsOf(iface) {
 			stmts := positiveTagStmts(unitInst.node)
 			key := ifName + "\x00" + unitInst.name
 			if len(stmts) == 0 {
@@ -292,30 +292,23 @@ func collectVlanIDTaggingFromInterfacesNode(ifacesNode *Node, out map[string]vla
 	}
 }
 
-func collectVlanIDTaggingFindingsForNode(tree *ConfigTree, nodeID int, out map[string]vlanIDTaggingFinding) bool {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
-		return false
+// collectVlanIDTaggingFindings records findings across the effective
+// views from effectiveNodeViews (#17222) with the generic fallback
+// enabled, so the literal-"${node}" tree the generic compile compiles
+// is inspected too (#13146), via interfaceUnitsOf like its siblings.
+func collectVlanIDTaggingFindings(tree *ConfigTree, out map[string]vlanIDTaggingFinding) {
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{ExpandRanges: true, Fallback: true}) {
+		for _, ifaces := range view.FindChildren("interfaces") {
+			collectVlanIDTaggingFromInterfacesNode(ifaces, out)
+		}
 	}
-	_, _ = expandInterfaceRanges(clone)
-	for _, ifaces := range clone.FindChildren("interfaces") {
-		collectVlanIDTaggingFromInterfacesNode(ifaces, out)
-	}
-	return true
 }
 
 // validateVlanIDTaggingAST is the #14574 gate, extended by #15034 and
 // #16583 to the untagged non-zero unit on any parent. See file header.
 func validateVlanIDTaggingAST(tree *ConfigTree, lenient bool) ([]string, error) {
 	findings := make(map[string]vlanIDTaggingFinding)
-	expandedAny := collectVlanIDTaggingFindingsForNode(tree, 0, findings)
-	expandedAny = collectVlanIDTaggingFindingsForNode(tree, 1, findings) || expandedAny
-	if !expandedAny {
-		for _, ifaces := range tree.FindChildren("interfaces") {
-			collectVlanIDTaggingFromInterfacesNode(ifaces, findings)
-		}
-	}
+	collectVlanIDTaggingFindings(tree, findings)
 	if len(findings) == 0 {
 		return nil, nil
 	}

@@ -5,7 +5,6 @@
 
 use super::super::*;
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(in crate::afxdp) struct TunnelEndpoint {
     pub(in crate::afxdp) id: u16,
@@ -31,6 +30,13 @@ pub(in crate::afxdp) struct TunnelEndpoint {
     pub(in crate::afxdp) interface: String,
     pub(in crate::afxdp) redundancy_group: i32,
     pub(in crate::afxdp) mode: String,
+    /// #17199: typed kind decoded ONCE from `mode` by
+    /// `tunnel_mode_kind` when the endpoint is populated (or by test
+    /// fixture constructors via the same classifier). `mode` stays
+    /// for show/telemetry only; every classification MUST read this
+    /// field so an Unknown mode cannot be GRE for one consumer and
+    /// non-GRE for another.
+    pub(in crate::afxdp) kind: TunnelKind,
     pub(in crate::afxdp) outer_family: i32,
     pub(in crate::afxdp) source: IpAddr,
     pub(in crate::afxdp) destination: IpAddr,
@@ -38,8 +44,8 @@ pub(in crate::afxdp) struct TunnelEndpoint {
     pub(in crate::afxdp) ttl: u8,
     pub(in crate::afxdp) clear_dont_fragment_bit: bool,
     pub(in crate::afxdp) transport_table: String,
-    // WireGuard (#1432 S2a, multi-peer #1434). Populated only when
-    // mode == "wireguard".
+    // WireGuard (#1432 S2a, multi-peer #1434). Populated only for
+    // WireGuard-kind endpoints.
     pub(in crate::afxdp) wg_listen_port: u16,
     /// Local static X25519 private key, hex-decoded. Zeroized on drop
     /// and redacted in Debug — must never leak via `{:?}` or the
@@ -110,9 +116,10 @@ impl std::fmt::Debug for TunnelEndpoint {
             .field("clear_dont_fragment_bit", &self.clear_dont_fragment_bit)
             .field("transport_table", &self.transport_table)
             .field("wg_listen_port", &self.wg_listen_port)
+            .field("kind", &self.kind)
             .field(
                 "wg_local_privkey",
-                &if self.mode == "wireguard" {
+                &if self.kind == TunnelKind::WireGuard {
                     "<redacted>"
                 } else {
                     "<unset>"

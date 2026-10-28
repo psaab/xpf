@@ -25,21 +25,15 @@
 
 use super::*;
 
-#[cfg_attr(not(test), allow(dead_code))]
 const SYN_COOKIE_REPLY_TTL: u8 = 64;
-#[cfg_attr(not(test), allow(dead_code))]
 const SYN_COOKIE_REPLY_HOP_LIMIT: u8 = 64;
-#[cfg_attr(not(test), allow(dead_code))]
 const SYN_COOKIE_TCP_WINDOW: u16 = 64240;
-#[cfg_attr(not(test), allow(dead_code))]
 const ETHERNET_MIN_FRAME_LEN: usize = 60;
 // #2151: TCP flag bits come from the shared crate::tcp_flags SSOT.
 // Re-aliased to the historical TCP_FLAG_* spellings used in this module's
 // reply builders; values are bit-identical.
 use crate::tcp_flags::{TCP_ACK as TCP_FLAG_ACK, TCP_RST as TCP_FLAG_RST, TCP_SYN as TCP_FLAG_SYN};
-#[cfg_attr(not(test), allow(dead_code))]
 const TCP_MIN_HEADER_LEN: usize = 20;
-#[cfg_attr(not(test), allow(dead_code))]
 const TCP_MSS_OPTION_LEN: usize = 4;
 
 /// #15119/#16819: TCP option kinds carrying per-connection authentication:
@@ -339,7 +333,7 @@ pub(in crate::afxdp) fn tcp_payload_offset_from_l3(
 /// the IPv6 packet carries extension headers. Fails safe (returns
 /// `None`) on a truncated/malformed chain.
 #[inline]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 pub(in crate::afxdp) fn extract_tcp_window(frame: &[u8], addr_family: u8) -> Option<u16> {
     let l3 = match frame_l3_offset(frame) {
         Some(off) => off,
@@ -402,7 +396,6 @@ pub(in crate::afxdp) fn tcp_flags_str(flags: u8) -> String {
 ///   - malformed TCP options (length=0, length=1, or option past
 ///     data_offset boundary)
 #[inline]
-#[allow(dead_code)]
 pub(super) fn clamp_tcp_mss(packet: &mut [u8], max_mss: u16) -> bool {
     if max_mss == 0 {
         return false;
@@ -546,7 +539,6 @@ pub(super) fn clamp_tcp_mss(packet: &mut [u8], max_mss: u16) -> bool {
 /// minimal SYN+ACK with the encoded cookie as the sequence number, advertises
 /// the selected MSS when present, and recomputes checksums from scratch.
 #[inline]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn build_syn_cookie_syn_ack_frame(
     frame: &[u8],
     cookie_isn: u32,
@@ -590,7 +582,6 @@ pub(in crate::afxdp) fn build_syn_cookie_syn_ack_frame(
 ///
 /// The L2/L3/L4 assembly (identity swap, checksums, window-0-on-RST) is
 /// shared with the SYN-cookie path via `build_syn_cookie_tcp_reply_v{4,6}`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn build_reject_rst_frame(frame: &[u8]) -> Option<Vec<u8>> {
     let parsed = parse_tcp_reply_source(frame)?;
     // #3204's L2 group/broadcast refusal now lives in `parse_tcp_reply_source`
@@ -623,7 +614,6 @@ pub(in crate::afxdp) fn build_reject_rst_frame(frame: &[u8]) -> Option<Vec<u8>> 
 /// SYN and FIN control bits, plus the TCP payload byte count derived
 /// from the IP total/payload length minus the L3 and TCP header lengths.
 /// Used to compute the RST `ack` for a no-ACK inbound segment.
-#[cfg_attr(not(test), allow(dead_code))]
 fn tcp_segment_consumed_len(frame: &[u8], parsed: TcpReplySource) -> Option<u32> {
     let mut len: u32 = 0;
     if (parsed.flags & TCP_FLAG_SYN) != 0 {
@@ -704,7 +694,6 @@ fn tcp_segment_consumed_len(frame: &[u8], parsed: TcpReplySource) -> Option<u32>
 /// held only once the key matched the eBPF `struct validated_client_key`.
 /// See `screen::SynCookieClientKey` and
 /// `docs/syn-cookie-flood-protection.md`, "Whitelist scope and lifetime".
-#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::afxdp) fn build_syn_cookie_ack_rst_frame(frame: &[u8]) -> Option<Vec<u8>> {
     let parsed = parse_tcp_reply_source(frame)?;
     if (parsed.flags & TCP_FLAG_ACK) == 0 || (parsed.flags & TCP_FLAG_SYN) != 0 {
@@ -721,7 +710,6 @@ pub(in crate::afxdp) fn build_syn_cookie_ack_rst_frame(frame: &[u8]) -> Option<V
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy)]
 struct TcpReplySource {
     l3: usize,
@@ -733,7 +721,6 @@ struct TcpReplySource {
     flags: u8,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn parse_tcp_reply_source(frame: &[u8]) -> Option<TcpReplySource> {
     let l3 = frame_l3_offset(frame)?;
     // #9111 (#3204 completed): NEVER build a reply to an L2 group/broadcast
@@ -831,7 +818,6 @@ fn parse_tcp_reply_source(frame: &[u8]) -> Option<TcpReplySource> {
     })
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn build_syn_cookie_tcp_reply(
     frame: &[u8],
     parsed: TcpReplySource,
@@ -864,7 +850,6 @@ fn build_syn_cookie_tcp_reply(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn build_syn_cookie_tcp_reply_v4(
     frame: &[u8],
     parsed: TcpReplySource,
@@ -905,7 +890,6 @@ fn build_syn_cookie_tcp_reply_v4(
     Some(out)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn build_syn_cookie_tcp_reply_v6(
     frame: &[u8],
     parsed: TcpReplySource,
@@ -940,7 +924,6 @@ fn build_syn_cookie_tcp_reply_v6(
     Some(out)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn write_reply_eth_header(frame: &[u8], out: &mut [u8], l3: usize) -> Option<()> {
     if l3 != 14 && l3 != 18 {
         return None;
@@ -955,7 +938,6 @@ fn write_reply_eth_header(frame: &[u8], out: &mut [u8], l3: usize) -> Option<()>
     Some(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn write_syn_cookie_tcp_header(
     tcp: &mut [u8],
     parsed: TcpReplySource,
@@ -989,7 +971,6 @@ fn write_syn_cookie_tcp_header(
 
 /// Clamp TCP MSS in a full Ethernet frame starting at `l3_offset`.
 #[inline(always)]
-#[allow(dead_code)]
 pub(super) fn clamp_tcp_mss_frame(frame: &mut [u8], l3_offset: usize, max_mss: u16) -> bool {
     if max_mss == 0 || l3_offset >= frame.len() {
         return false;

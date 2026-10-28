@@ -163,7 +163,7 @@ pub(crate) struct EventStreamStats {
     /// fails closed by ignoring it (watermark + replay buffer left intact). A
     /// non-zero, growing value means the peer's ACK view is corrupt.
     pub(crate) invalid_acks: u64,
-    #[allow(dead_code)] // stats field for future reporting
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // stats field for future reporting
     pub(crate) replayed: u64,
     /// #9169 / #4800 site 4: acquisitions of the process-global
     /// `producer_seq_lock` taken by a producer, and the blocked subset. Read as
@@ -172,7 +172,7 @@ pub(crate) struct EventStreamStats {
     /// finding from "taken but never blocked".
     pub(crate) producer_seq_lock_acquisitions: u64,
     pub(crate) producer_seq_lock_contended: u64,
-    #[allow(dead_code)] // producer-call-site wiring will surface these fields
+    // producer-call-site wiring will surface these fields
     pub(crate) dataplane_events: DataplaneEventStats,
 }
 
@@ -291,7 +291,7 @@ struct EventStreamShared {
     frames_invalid_acks: AtomicU64,
     frames_replayed: AtomicU64,
     dataplane_event_counters: DataplaneEventCounters,
-    #[allow(dead_code)] // consumed by producer call sites once they are wired
+    // consumed by producer call sites once they are wired
     dataplane_event_limiter: DataplaneEventRateLimiter,
     dataplane_event_queue: DataplaneEventQueueBudget,
 }
@@ -707,7 +707,7 @@ impl EventStreamWorkerHandle {
     /// capacity frees, the deadline expires, or the peer disconnects. Test-only
     /// after #3878 rerouted `push_delta_lossless` through the seq-allocating
     /// `send_lossless_encoded` closure.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     fn send_frame_lossless(&self, frame: EventFrame) -> Result<(), String> {
         self.send_lossless_encoded(LOSSLESS_QUEUE_TIMEOUT, move || (frame.clone(), None))
             .map(|_| ())

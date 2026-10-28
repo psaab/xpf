@@ -37,7 +37,7 @@ pub(crate) struct Iperf3Timestamp {
 #[derive(Debug, Deserialize)]
 pub(crate) struct Iperf3Connected {
     pub(crate) socket: u64,
-    #[allow(dead_code)] // diagnostic only; useful for future per-stream debugging
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // diagnostic only; useful for future per-stream debugging
     #[serde(default)]
     pub(crate) local_port: u32,
 }
@@ -111,9 +111,9 @@ pub(crate) struct Iperf3CpuUtilization {
 pub(crate) struct BindingFlowsRow {
     /// Wall-clock-aligned 1s timestamp (seconds since epoch, integer).
     pub(crate) timestamp: u64,
-    #[allow(dead_code)] // diagnostic only; kept for traceability
+    #[cfg_attr(not(test), expect(dead_code, reason = "#17195: dead in the release fairness-eval build but read under --tests; retained deliberately, so expect fires if a release caller appears"))]
     pub(crate) binding_slot: u32,
-    #[allow(dead_code)] // not used in aggregation; iface filter is the discriminator
+    #[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")] // not used in aggregation; iface filter is the discriminator
     pub(crate) queue_id: u32,
     /// Owner worker id; the contract's `{a_i}` is keyed on this, not
     /// binding_slot (multiple bindings per worker, one per interface).

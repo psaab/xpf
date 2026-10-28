@@ -54,12 +54,13 @@ fn frame(id: u64, flow_tag: u64) -> SubmitFrame {
 }
 
 fn live_target(core: &Arc<ReinjectCore>) -> Arc<ArcSwapOption<SlowPathReinjector>> {
-    // `new_without_worker` drops its rx: the 16k channel absorbs enqueues
-    // without a worker, which is exactly what the submit path needs here.
+    // Hermetic V1 target: no TUN/worker thread, but the D11 transport has a
+    // published worker 0 so non-dry-run submits route to its queue (never q0).
     let r = Arc::new(SlowPathReinjector::new_without_worker_with_core(
         1500,
         core.clone(),
     ));
+    r.ipsec_inner_transport().publish_workers([0]);
     Arc::new(ArcSwapOption::from(Some(r)))
 }
 
@@ -249,9 +250,12 @@ fn submit_conn_survives_idle_before_target_publication() {
     std::thread::sleep(std::time::Duration::from_millis(150));
     let target_core = ReinjectCore::new_shared();
     target_core.publish_epochs(PERMIT, &[(1, QEPOCH)]);
-    target.store(Some(Arc::new(
-        SlowPathReinjector::new_without_worker_with_core(1500, target_core.clone()),
-    )));
+    let target_reinjector = Arc::new(SlowPathReinjector::new_without_worker_with_core(
+        1500,
+        target_core.clone(),
+    ));
+    target_reinjector.ipsec_inner_transport().publish_workers([0]);
+    target.store(Some(target_reinjector));
     let mut frame = frame(2, 1);
     frame.flags = 0;
     client
@@ -275,7 +279,7 @@ fn submit_conn_survives_idle_before_target_publication() {
 }
 
 #[test]
-fn submit_conn_unflagged_routes_q0_writer() {
+fn submit_conn_unflagged_routes_v1_transport_not_q0() {
     let core = open_core();
     let target = live_target(&core);
     let (client, server) = UnixStream::pair().unwrap();
@@ -301,14 +305,123 @@ fn submit_conn_unflagged_routes_q0_writer() {
     assert_eq!(decisions[0].reason, ADMIT_OK);
     assert_eq!(core.stats_snapshot().non_dry_run_refused, 0);
     assert_eq!(core.live_count(), 1);
+    let reinjector = target.load_full().unwrap();
     assert_eq!(
-        target.load_full().unwrap().delegated_status().queued_packets,
-        1,
-        "unflagged submit must reach the q0 writer channel"
+        reinjector.delegated_status().queued_packets,
+        0,
+        "V1 submit must never reach the q0 writer channel"
+    );
+    assert_eq!(
+        reinjector.ipsec_inner_transport().worker_pending(0),
+        Some(1),
+        "V1 submit must land in the worker transport queue"
     );
     drop(client);
     handle.join().unwrap();
 }
+#[test]
+fn submit_conn_pooled_slab_exhaustion_refuses_per_frame_without_closing() {
+    let core = open_core();
+    let target = live_target(&core);
+    let reinjector = target.load_full().unwrap();
+    let pool = reinjector.ipsec_inner_transport().pool().clone();
+    // Exhaust the transport pool so the pooled decoder cannot acquire.
+    let mut held = Vec::new();
+    while let Some(id) = pool.acquire() {
+        held.push(id);
+    }
+    let (client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_target = target.clone();
+    let handle = std::thread::spawn(move || {
+        serve_submit_conn(server, &worker_core, &worker_target);
+    });
+    let mut client = client;
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // Two unflagged frames: both must earn ADMIT_FULL, connection stays up.
+    let mut f1 = frame(41, 1);
+    f1.flags = 0;
+    let mut f2 = frame(42, 2);
+    f2.flags = 0;
+    client
+        .write_all(&encode_message(MSG_SUBMIT_BATCH, &encode_submit_batch(&[f1, f2])))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert_eq!(decisions.len(), 2, "exhaustion must refuse per-frame, not close");
+    for d in &decisions {
+        assert!(!d.admitted);
+        assert_eq!(d.reason, crate::slowpath_reinject_9506::ADMIT_FULL);
+    }
+    assert_eq!(core.live_count(), 0, "exhausted frames create no core entries");
+    // Connection survives: release the pool, a dry-run frame is answered.
+    for id in held {
+        pool.force_release(id);
+    }
+    client
+        .write_all(&encode_message(MSG_SUBMIT_BATCH, &encode_submit_batch(&[frame(43, 1)])))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert!(decisions[0].admitted, "connection must survive slab exhaustion");
+    drop(client);
+    handle.join().unwrap();
+}
+
+#[test]
+fn submit_conn_pooled_worker_queue_busy_refuses_admit_full_17169() {
+    // #17169 B3: force WORKER_QUEUE_BUSY through the production pooled
+    // path (MSG_SUBMIT_BATCH -> submit_ipsec_inner_v1_pooled). Worker 9
+    // is live in the authority (so routing selects it) but has no
+    // ingress queue, so admit_descriptor returns WORKER_QUEUE_BUSY;
+    // the pooled submit must map it via the single-sourced reason map
+    // to ADMIT_FULL, never ADMIT_BAD_LEASE. Removing the BUSY arm from
+    // ipsec_inner_admit_reason must turn this cell RED.
+    let core = open_core();
+    let target = live_target(&core);
+    let reinjector = target.load_full().unwrap();
+    reinjector.ipsec_inner_transport().authority().add_worker(9);
+    // live {0, 9}; flow_tag 1 routes to index 1 -> worker 9 (no queue),
+    // mirroring the non-pooled BUSY cell in v1_submit_reason_map_table_17169.
+    let (client, server) = UnixStream::pair().unwrap();
+    let worker_core = core.clone();
+    let worker_target = target.clone();
+    let handle = std::thread::spawn(move || {
+        serve_submit_conn(server, &worker_core, &worker_target);
+    });
+    let mut client = client;
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut busy = frame(51, 1);
+    busy.flags = 0;
+    client
+        .write_all(&encode_message(MSG_SUBMIT_BATCH, &encode_submit_batch(&[busy])))
+        .unwrap();
+    let (ty, payload) = read_message(&mut client).unwrap();
+    assert_eq!(ty, MSG_ADMIT);
+    let decisions = crate::slowpath_reinject_9506::decode_admit(&payload).unwrap();
+    assert_eq!(decisions.len(), 1);
+    assert!(!decisions[0].admitted, "pooled BUSY cell must refuse: {decisions:?}");
+    assert_eq!(
+        decisions[0].reason,
+        crate::slowpath_reinject_9506::ADMIT_FULL,
+        "pooled WORKER_QUEUE_BUSY must map to ADMIT_FULL"
+    );
+    assert_eq!(
+        reinjector.delegated_status().queued_packets, 0,
+        "V1 pooled submit must never reach the q0 writer channel"
+    );
+    assert_eq!(
+        reinjector.ipsec_inner_transport().worker_pending(0),
+        Some(0),
+        "BUSY refusal must not enqueue on the real worker"
+    );
+    drop(client);
+    handle.join().unwrap();
+}
+
 #[test]
 fn submit_conn_bad_frame_refused_per_frame_bad_message_closes() {
     let core = open_core();
@@ -618,6 +731,7 @@ fn announce_before_target_install_uses_shared_core_for_submit() {
         1500,
         target_core.clone(),
     ));
+    target_reinjector.ipsec_inner_transport().publish_workers([0]);
     target.store(Some(target_reinjector));
 
     let mut admitted = frame(1, 1);

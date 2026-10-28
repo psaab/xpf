@@ -1,4 +1,3 @@
-#![allow(dead_code)] // status surfaces still consume only part of the producer API
 
 use super::codec::{DataplaneEventKind, DataplaneEventPayload};
 use super::{EventFrame, EventStreamSendError, EventStreamWorkerHandle};
@@ -87,9 +86,6 @@ impl Default for DataplaneEventRateLimitConfig {
 }
 
 impl DataplaneEventRateLimitConfig {
-    fn unlimited(self) -> bool {
-        self.events_per_second == 0
-    }
 
     fn runtime_for(events_per_second: u64, burst: u64) -> DataplaneEventRateLimit {
         if events_per_second == 0 {
@@ -303,7 +299,6 @@ pub(crate) enum DataplaneEventEmitOutcome {
     Dropped { reason: DataplaneEventDropReason },
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DataplaneEventKindStats {
     pub(crate) sent: u64,
@@ -313,7 +308,6 @@ pub(crate) struct DataplaneEventKindStats {
     pub(crate) disconnected: u64,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DataplaneEventStats {
     pub(crate) policy_deny: DataplaneEventKindStats,
@@ -471,7 +465,9 @@ impl EventStreamWorkerHandle {
         }
     }
 
-    #[allow(dead_code)] // surfaced through EventStreamSender::stats for now
+    // Surfaced through EventStreamSender::stats for the status path;
+    // this worker-handle accessor itself is test-only (#17212).
+    #[cfg(test)]
     pub(crate) fn dataplane_event_stats(&self) -> DataplaneEventStats {
         self.shared.dataplane_event_counters.snapshot()
     }

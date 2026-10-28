@@ -71,7 +71,7 @@ pub(crate) struct ServerState {
     /// the supervisor restarts it into clean state. Never cleared in-process.
     pub(crate) quarantined_after_panic: bool,
     /// HARDENING (#15742 follow-up): cumulative snapshot-policy mismatch
-    /// refusals. Sticky here (not on ProcessStatus) so refresh_status,
+    /// refusals. Sticky here (not on ProcessStatus) so project_status,
     /// which rebuilds status projections, cannot zero it; projected into
     /// status.snapshot_policy_mismatch_total on every refresh.
     pub(crate) snapshot_policy_mismatch_total: u64,
