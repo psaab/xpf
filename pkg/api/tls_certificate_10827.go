@@ -729,6 +729,7 @@ func (s *Server) recoverHTTPSLegsIfNeeded() {
 			RegisterHTTPServerTLSState(srv, legSlot)
 			legs = append(legs, s.serveLegLocked(legPlan{srv: srv, slot: slot}, ln, true))
 			s.recordLegDevice(addr, dev)
+			servers = append(servers, srv)
 			slots = append(slots, slot)
 		} else {
 			legSlot := &managementTLSCertificateSlot{}
@@ -740,6 +741,7 @@ func (s *Server) recoverHTTPSLegsIfNeeded() {
 			plan := s.httpsLegPlanAt(i)
 			legs = append(legs, s.serveLegLocked(plan, ln, true))
 			s.recordLegDevice(addr, dev)
+			servers = append(servers, srv)
 			slots = append(slots, plan.slot)
 		}
 		slog.Info("HTTPS API server listening (recovered after certificate load)", "addr", addr)
