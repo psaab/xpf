@@ -233,7 +233,7 @@ func TestRESTSessionFiltersFailClosed(t *testing.T) {
 }
 
 // natIPv4 builds the native-endian u32 the dataplane stores for an IPv4
-// NAT address (octets read as u32::from_ne_bytes), matching uint32ToIP.
+// NAT address (octets read as u32::from_ne_bytes), matching dataplane.SessionIPv4 (#17188).
 func natIPv4(a, b, c, d byte) uint32 {
 	return binary.NativeEndian.Uint32([]byte{a, b, c, d})
 }
