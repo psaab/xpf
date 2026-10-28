@@ -1040,7 +1040,7 @@ func gateSpellingForms() []gateSpellingForm {
 			verdict: func(g gateLeaf, vals []string) [3]func() (string, error) {
 				v1, v2 := vals[0], vals[1]
 				return [3]func() (string, error){
-					func() (string, error) { return spellingSets(g) },
+					func() (string, error) { return spellingSets(g, spellingFlat(g)) },
 					func() (string, error) { return spellingSets(g, fmt.Sprintf("%s [ %s ]", spellingFlat(g), v1)) },
 					func() (string, error) { return spellingSets(g, fmt.Sprintf("%s [ %s %s ]", spellingFlat(g), v1, v2)) },
 				}
@@ -1058,7 +1058,7 @@ func gateSpellingForms() []gateSpellingForm {
 			verdict: func(g gateLeaf, vals []string) [3]func() (string, error) {
 				v1, v2 := vals[0], vals[1]
 				return [3]func() (string, error){
-					func() (string, error) { return spellingSets(g) },
+					func() (string, error) { return spellingSets(g, spellingFlat(g)) },
 					func() (string, error) { return spellingSets(g, spellingFlat(g)+" "+v1) },
 					func() (string, error) { return spellingSets(g, spellingFlat(g)+" "+v1, spellingFlat(g)+" "+v2) },
 				}

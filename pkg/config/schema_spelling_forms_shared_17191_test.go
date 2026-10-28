@@ -103,16 +103,19 @@ func TestGateSpellingFormsShared17191(t *testing.T) {
 
 	// The slot-escape exemption bucket is consistent with the
 	// differential's: exactly the F row carries it, and it names
-	// exactly the mixedChildIsAModifierBlock sites.
+	// exactly the mixedChildIsAModifierBlock sites. Pin F's map
+	// explicitly — when it was merely iterated with empty rows
+	// skipped, emptying it left this whole block unexercised and
+	// the guard stayed green.
+	var fExempt map[string]bool
 	for _, f := range gateSpellingForms() {
 		if len(f.slotEscapeExemptSites) == 0 {
 			continue
 		}
 		if f.name != "F-hier-mixed" {
 			t.Errorf("spelling %q carries slot-escape exempt sites %v; only F may (its child slot is the modifier position)", f.name, f.slotEscapeExemptSites)
-		}
-		if len(f.slotEscapeExemptSites) != len(mixedChildIsAModifierBlock) {
-			t.Errorf("F slot-escape exempt sites = %v, mixedChildIsAModifierBlock = %v — the two modifier buckets must name the same sites", f.slotEscapeExemptSites, mixedChildIsAModifierBlock)
+		} else {
+			fExempt = f.slotEscapeExemptSites
 		}
 		for site := range f.slotEscapeExemptSites {
 			if _, ok := mixedChildIsAModifierBlock[site]; !ok {
@@ -129,6 +132,19 @@ func TestGateSpellingFormsShared17191(t *testing.T) {
 			if found {
 				t.Errorf("gateSlotEscapeSpellings still probes F at exempt site %q", site)
 			}
+		}
+	}
+	// F's exempt map must be NON-empty and equal the archive-sites
+	// bucket (mixedChildIsAModifierBlock) — not merely a subset of it.
+	if len(fExempt) == 0 {
+		t.Fatalf("F-hier-mixed slot-escape exempt sites are empty; want the archive-sites bucket %v", mixedChildIsAModifierBlock)
+	}
+	if len(fExempt) != len(mixedChildIsAModifierBlock) {
+		t.Errorf("F slot-escape exempt sites = %v, mixedChildIsAModifierBlock = %v — the two modifier buckets must name the same sites", fExempt, mixedChildIsAModifierBlock)
+	}
+	for site := range mixedChildIsAModifierBlock {
+		if !fExempt[site] {
+			t.Errorf("F slot-escape exempt sites %v miss mixedChildIsAModifierBlock site %q", fExempt, site)
 		}
 	}
 
