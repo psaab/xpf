@@ -15476,9 +15476,10 @@ the value sits in a single typed slot:
     nonzero) and unknown-leaf rejection live in `validateFlowAgingStrict`
     (`compiler_validate_strict.go`, dispatched from `compiler.go` with a
     `lenientFlowAging` no-brick downgrade) because the schema walker is
-    single-leaf. **#3440 H1:** watermark aging drives only the Go-side
-    conntrack GC hysteresis, which is skipped on the userspace AF_XDP
-    dataplane (the only runtime forwarding path), so setting any aging knob
+    single-leaf. **#3440 H1:** watermark aging drove only the Go-side
+    conntrack GC hysteresis (`pkg/conntrack`, deleted in #17155; that sweep
+    never ran on the userspace AF_XDP dataplane, the only runtime forwarding
+    path), so setting any aging knob
     emits an accepted-only commit advisory (`compiler_validate_warn.go`,
     `security flow aging ... accepted-only`) — typing the schema only stops
     invalid values from persisting, it does not make the knob enforced.

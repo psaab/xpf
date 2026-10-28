@@ -1156,8 +1156,8 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	}
 
 	// #3440 H1 / #10890: `security flow aging` values still do not reach the
-	// userspace session table. The Go-side conntrack GC sweep is skipped on
-	// the userspace AF_XDP dataplane, and the configured early-ageout and
+	// userspace session table. The Go-side conntrack GC that consumed them is
+	// retired (`pkg/conntrack`, deleted in #17155), and the configured early-ageout and
 	// high/low-watermark values are not wired into its admission policy.
 	// #10890 adds a separate fixed 90%-of-cap policy: when a validated new
 	// TCP initial SYN reaches a worker at that pressure, it sheds local

@@ -9,7 +9,7 @@ import (
 
 // #3227 — a custom application's `inactivity-timeout` must ride the userspace
 // PolicyApplicationSnapshot so the dataplane can stamp it on the admitted
-// session and the conntrack GC ages the session out on the app's idle timeout
+// session and the helper's expiry ages the session out on the app's idle timeout
 // instead of the global per-protocol timeout. The legacy (retired-eBPF) map
 // compiler wired the same per-app `appTimeout`, so this closes a userspace
 // parity regression.
