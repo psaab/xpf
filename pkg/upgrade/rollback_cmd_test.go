@@ -215,7 +215,7 @@ func TestRollbackTo_DefaultExcludesActuallyFailedCutVersion(t *testing.T) {
 	if got := currentTarget(t, cfg); got != "1.0.0" {
 		t.Fatalf("current after auto-rollback -> %q, want 1.0.0", got)
 	}
-	if stamp, present := r.readCommittedStamp("4.0.0"); !present || stamp == nil || stamp.Committed {
+	if stamp, present, _ := r.readCommittedStamp("4.0.0"); !present || stamp == nil || stamp.Committed {
 		t.Fatalf("failed target commit record = (%+v,present=%v), want explicit non-committed", stamp, present)
 	}
 

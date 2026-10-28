@@ -60,9 +60,9 @@ func (c *xpfCollector) initForwardingDescriptors() {
 		"xpf_pbr_rules_mismatched",
 		"Number of missing or structurally mismatched desired lookup rules, "+
 			"plus unexpected or duplicate in-band lookup entries, compared using "+
-			"netlink-visible fields. RuleList does not expose FRA_DSCP or the rule "+
-			"action, so those fields cannot be checked. Absent when readback fails "+
-			"(#11440).",
+			"netlink-visible fields including the rule action. The DSCP selector "+
+			"is checked only for desired rules that declare one. Absent when "+
+			"readback fails (#11440, #17078).",
 		nil, nil,
 	)
 	// #4422/#11307: number of routing-instance filter terms DROPPED from the

@@ -1135,7 +1135,7 @@ There are two distinct fallback boundaries:
      before it re-arms, because `desiredForwardingArmedLocked()` returns true
      whenever forwarding is *supported* and never consults the accepted
      snapshot protocol version. Without it, a scheduler-tick disarm
-     (`UpdatePolicyScheduleState` → `disarmSnapshotProtocolFailureLocked`,
+     (`UpdatePolicyScheduleStateWithLatch` → `disarmSnapshotProtocolFailureLocked`,
      which unlike an operator commit does NOT revert the active config) would
      leave `m.lastSnapshot` requiring the protocol while the helper is
      disarmed + protocol-stale, and the next reconcile tick would re-arm it —

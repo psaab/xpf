@@ -325,7 +325,7 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 					// Information-Request path), which is now an explicit,
 					// validated choice instead of an accident of any typo.
 					"client-type":    {desc: "Client type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "DHCPv6 client type (stateful | stateless | autoconfig)", valueExamples: []string{"stateful", "stateless", "autoconfig"}, validator: ValidateEnum([]string{"stateful", "stateless", "autoconfig"}), children: nil},
-					"client-ia-type": {desc: "Client IA type", args: 1, multi: true, placeholder: "<type>", children: nil},
+					"client-ia-type": {desc: "Client IA type", args: 1, multi: true, placeholder: "<type>", refuseNonLeafBlockChildren: true, children: nil},
 					"prefix-delegating": {desc: "Prefix delegation", children: map[string]*schemaNode{
 						// #6587: both leaves were untyped `<length>` placeholders
 						// parsed with an unbounded strconv.Atoi whose error is
@@ -379,13 +379,13 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 							valueExamples: []string{"fd00:1234::/48", "2001:db8:1::/48"},
 							keyValidator:  ValidateIPv6CIDR,
 							validator:     ValidateIPv6CIDR,
-							children:      nil,
+							children:      nil, refuseNonLeafBlockChildren: true,
 						},
 					}},
 					"client-identifier": {desc: "Client identifier", children: map[string]*schemaNode{
 						"duid-type": {desc: "DUID type", args: 1, placeholder: "<type>", valueType: ValueEnumOf, valueDesc: "DUID type (duid-ll | duid-llt)", valueExamples: []string{"duid-ll", "duid-llt"}, validator: ValidateEnum([]string{"duid-ll", "duid-llt"}), children: nil},
 					}},
-					"req-option": {desc: "Request option", args: 1, multi: true, placeholder: "<option>", valueType: ValueEnumOf, valueDesc: "DHCPv6 option to request (dns-server | domain-name)", valueExamples: []string{"dns-server", "domain-name"}, validator: ValidateEnum([]string{"dns-server", "domain-name"}), children: nil},
+					"req-option": {desc: "Request option", args: 1, multi: true, placeholder: "<option>", valueType: ValueEnumOf, valueDesc: "DHCPv6 option to request (dns-server | domain-name)", valueExamples: []string{"dns-server", "domain-name"}, validator: ValidateEnum([]string{"dns-server", "domain-name"}), refuseNonLeafBlockChildren: true, children: nil},
 					"update-router-advertisement": {desc: "Update router advertisement", children: map[string]*schemaNode{
 						"interface": {desc: "Interface", args: 1, placeholder: "<interface>", children: nil},
 					}},
@@ -461,7 +461,14 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 			valueExamples:       vaExamples,
 			validator:           vaValidator,
 			blockChildValidator: vaBlockValidator,
-			children:            nil,
+			// #17241: the compiler reads EVERY key of each block
+			// child via firewallMatchValues, so the packed braced
+			// spelling `virtual-address { a b; }` must validate
+			// every token (and must not be refused as a
+			// multi-token child) — see validateMultiValueLeaf.
+			allChildKeysAreValues:      true,
+			refuseNonLeafBlockChildren: true,
+			children:                   nil,
 		},
 		"priority": {
 			desc:          "VRRP priority",
@@ -554,7 +561,12 @@ func vrrpGroupSchemaNode(v6 bool) *schemaNode {
 			valueExamples:       vaExamples,
 			validator:           vaValidator,
 			blockChildValidator: vaBlockValidator,
-			children:            nil,
+			// #17241: see virtual-address — every child key is a
+			// compiled value (firewallMatchValues), so validate
+			// every token instead of refusing packed children.
+			allChildKeysAreValues:      true,
+			refuseNonLeafBlockChildren: true,
+			children:                   nil,
 		}
 	}
 	return &schemaNode{desc: "VRRP group", args: 1, placeholder: "<group-id>", keyValidator: ValidateVRRPGroupID, packedFlatRun: true, children: children}
@@ -733,7 +745,7 @@ func wireguardSchemaNode() *schemaNode {
 			// child). The compiler hard-rejects duplicate pubkeys at
 			// commit (schema_walk.go validateWireguardPeers).
 			"peer": {desc: "WireGuard peer (keyed by public key)", args: 1, placeholder: "<public-key>", children: map[string]*schemaNode{
-				"allowed-ips": {desc: "Peer allowed IPs (CIDR)", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+				"allowed-ips": {desc: "Peer allowed IPs (CIDR)", args: 1, multi: true, placeholder: "<prefix>", valueType: ValueCIDR, valueDesc: "Peer allowed prefix (CIDR, e.g. 10.0.0.0/8 or 2001:db8::/48)", valueExamples: []string{"10.0.0.0/8", "2001:db8::/48"}, validator: ValidateWGAllowedIPPrefix, children: nil, allChildKeysAreValues: true, refuseNonLeafBlockChildren: true},
 				"endpoint":    {desc: "Peer endpoint (ip:port)", args: 1, placeholder: "<ip:port>", children: nil},
 				"persistent-keepalive": {
 					desc:          "Persistent keepalive seconds",

@@ -338,35 +338,7 @@ pub(crate) fn handle_stream(
 
     let mut response = ControlResponse {
         ok: true,
-        error: String::new(),
-        error_code: String::new(),
-        error_retry_class: String::new(),
-        status: None,
-        session_counters: Vec::new(),
-        session_policy_matches: Vec::new(),
-        session_policy_complete: false,
-        session_policy_continuation: String::new(),
-        session_policy_per_worker_errors: Vec::new(),
-        session_deltas: Vec::new(),
-        session_export_more: false,
-        session_export_dropped: 0,
-        session_export_incarnation: 0,
-        session_export_seq: 0,
-        idle_leases: Vec::new(),
-        display_leases: Vec::new(),
-        lease_export_more: false,
-        lease_export_continuation: String::new(),
-        session_mirror_v4_count: 0,
-        session_mirror_v6_count: 0,
-        session_mirror_complete: false,
-        session_mirror_fence_id: 0,
-        session_mirror_continuation: String::new(),
-        policy_delete_outcomes: Vec::new(),
-        policy_delete_complete: false,
-        policy_delete_errors: Vec::new(),
-        fib_generation: 0,
-        fib_routes: Vec::new(),
-        persistent_nat_lease_count: 0,
+        ..Default::default()
     };
     let mut persist_state = false;
     // Capture suppress_status before the match — reading it up front

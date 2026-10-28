@@ -49,7 +49,7 @@ export TMPDIR GOCACHE GOTMPDIR CARGO_TARGET_DIR
 $(shell mkdir -p $(TMPDIR) $(GOCACHE) $(GOTMPDIR) $(CARGO_TARGET_DIR))
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib clippy-rust
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-connectivity-mtr-selftest test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib clippy-rust
 
 all: generate build build-ctl
 
@@ -1602,6 +1602,10 @@ test-connectivity:
 		--gate test-connectivity --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		-- ./test/incus/test-connectivity.sh $(MODE)
+
+# Hermetic unit fixtures for the IPv4 RETH MTR path checker.
+test-connectivity-mtr-selftest:
+	./test/incus/connectivity-mtr-selftest.sh
 
 # On-wire properties test (PMTUD reflection + NPTv6 checksum neutrality)
 test-wire-properties:

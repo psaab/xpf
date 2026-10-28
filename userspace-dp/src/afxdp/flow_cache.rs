@@ -177,6 +177,25 @@ pub(super) struct RewriteDescriptor {
     pub(super) last_queue_id: Option<u8>,
 }
 
+impl RewriteDescriptor {
+    /// Populate the NAT-related descriptor fields from the same decision
+    /// used by the generic rewrite path. Keeping checksum deltas here makes
+    /// production flow-cache entries and parity tests share the construction.
+    pub(super) fn from_decision(flow: &SessionFlow, nat: NatDecision) -> Self {
+        Self {
+            rewrite_src_ip: nat.rewrite_src,
+            rewrite_dst_ip: nat.rewrite_dst,
+            rewrite_src_port: nat.rewrite_src_port,
+            rewrite_dst_port: nat.rewrite_dst_port,
+            ip_csum_delta: crate::afxdp::frame::compute_ip_csum_delta(flow, &nat),
+            l4_csum_delta: crate::afxdp::frame::compute_l4_csum_delta(flow, &nat),
+            nat64: nat.nat64,
+            nptv6: nat.nptv6,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct FlowCacheStamp {
     pub(super) config_generation: u64,
@@ -483,13 +502,12 @@ impl FlowCacheEntry {
         // remain cacheable because `is_ack_only` ignores PSH/URG, so
         // steady-state data and UDP still fast-path.
         //
-        // #2652: NPTv6 (RFC 6296 stateless prefix translation) IS cacheable.
-        // It is a same-family IPv6 address byte-rewrite that is checksum-neutral
-        // by design, so the descriptor fast path (`apply_rewrite_descriptor` →
-        // `apply_rewrite_descriptor_ipv6`) reproduces it byte-for-byte: it
-        // writes the new IPv6 address(es) and, because `compute_l4_csum_delta`
-        // returns 0 for nptv6, leaves the L4 checksum untouched — exactly what
-        // the slow-path `apply_nat_ipv6` does (`skip_l4_csum = nat.nptv6`).
+        // #2652/#3121: NPTv6 (RFC 6296 stateless prefix translation) IS
+        // cacheable. The shared `nat_folds_l4_checksum` rule makes a pure,
+        // single-sided NPTv6 address rewrite checksum-neutral in both the
+        // descriptor delta and generic IPv6 path. When NPTv6 composes with a
+        // destination rewrite and both IPs are present, the same rule folds
+        // the non-neutral DNAT delta rather than skipping the whole checksum.
         //
         // NAT64 stays EXCLUDED. It is a version-changing translation (IPv6 40B
         // header <-> IPv4 20B header, fragment-header handling) built by
@@ -743,26 +761,15 @@ impl FlowCacheEntry {
                 } else {
                     0x86dd
                 },
-                rewrite_src_ip: decision.nat.rewrite_src,
-                rewrite_dst_ip: decision.nat.rewrite_dst,
-                rewrite_src_port: decision.nat.rewrite_src_port,
-                rewrite_dst_port: decision.nat.rewrite_dst_port,
-                ip_csum_delta: compute_ip_csum_delta(flow, &decision.nat),
-                l4_csum_delta: compute_l4_csum_delta(flow, &decision.nat),
                 egress_ifindex: decision.resolution.egress_ifindex,
                 tx_ifindex: decision.resolution.tx_ifindex,
                 target_binding_index,
                 input_filter_log,
                 input_filter_counters,
                 tx_selection,
-                nat64: false,
-                // #2652: carry the NPTv6 flag so the descriptor fast path
-                // routes through the IPv6 arm with a zero L4 csum delta
-                // (checksum-neutral). NAT64 is never cached (gated out in
-                // `should_cache`), so its flag stays false here.
-                nptv6: decision.nat.nptv6,
                 apply_nat_on_fabric,
                 last_queue_id: None,
+                ..RewriteDescriptor::from_decision(flow, decision.nat)
             },
             decision,
             policy_deny: None,

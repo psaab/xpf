@@ -14,7 +14,7 @@ func TestSyncPeerAddrsDualToSingleClearsSecondary_13542(t *testing.T) {
 	d := newWiringTestDaemon()
 	ss := newWiringTestSessionSync()
 	d.fabricMu.Lock()
-	d.fabricPeerIP1 = net.ParseIP("10.99.9.2")
+	d.fabricSlots[1].peerIP = net.ParseIP("10.99.9.2")
 	d.fabricMu.Unlock()
 	d.wireSessionSyncTransportRefs(ss, cc, "fabric", "10.99.0.2", "10.99.1.1:4785")
 	if got := d.fabricPeerAddrs(); len(got) != 2 {

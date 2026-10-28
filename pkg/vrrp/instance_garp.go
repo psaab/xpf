@@ -290,22 +290,16 @@ func (vi *vrrpInstance) reserveGARPBurstGateLocked(vips []string, epoch, ownerGe
 	// #8597 (muse-004 K20): under vi.mu — updateConfigHeld writes this field on the
 	// manager goroutine while sendGARP runs on the run loop, on detached
 	// `go vi.sendGARP` goroutines, AND synchronously from ReconcileVIPs.
-	count := vi.garpCount()
-	if count <= 0 {
-		count = 3 // default
-	} else if clamped, was := config.ClampGratuitousARPCount(count); was {
-		// #5695 (codex-182 M16): an unbounded configured count fans the full
-		// per-VIP burst (1 immediate frame + (count-1) 50ms follow-ups) on
-		// every failover — a self-inflicted CPU/socket-exhaustion vector.
-		// Clamp to the runtime safety maximum. Warn at most ONCE per instance
-		// (never per-send: sendGARP runs on the per-failover path — logging
-		// rules forbid a Warn inside it).
+	// #17052: burst count via the shared announce clamp (single
+	// ClampGratuitousARPCount on the announce path, in pkg/cluster).
+	// Warn at most ONCE per instance on clamp (#5695).
+	count, wasClamped := cluster.EffectiveAnnounceBurstCount(vi.garpCount())
+	if wasClamped {
 		if vi.garpClampWarned.CompareAndSwap(false, true) {
 			slog.Warn("vrrp: gratuitous-arp-count clamped to runtime safety maximum",
-				"key", vi.key(), "configured", count, "clamped", clamped,
+				"key", vi.key(), "configured", vi.garpCount(), "clamped", count,
 				"max", config.GratuitousARPBurstClamp)
 		}
-		count = clamped
 	}
 	// Reserve this epoch before releasing vipMu. Per-VIP lock handoffs would
 	// otherwise let a duplicate same-epoch send begin before this burst stores
@@ -349,37 +343,25 @@ func (vi *vrrpInstance) sendGARPReservedMode(vips []string, epoch, ownerGen uint
 			vi.vipMu.Unlock()
 			continue
 		}
-		announced := false
+		target := cluster.AnnounceTarget{Iface: vi.cfg.Interface, IP: ip, Kind: cluster.AnnounceVIP, Burst: count}
 		if ip.To4() != nil {
-			if err := garpBurstFn(vi.cfg.Interface, ip, count, stillMaster); err != nil {
-				slog.Warn("vrrp: GARP failed", "key", vi.key(), "vip", ip, "err", err)
-			} else {
-				announced = true
+			if gwIP, ok := GatewayProbeTarget(ipNet); ok && !gwIP.Equal(ip.To4()) {
+				target.ProbeIP = gwIP
 			}
-			// Probe the first usable host (network address + 1) of the
-			// VIP subnet — this is the most common gateway address. The
-			// ARP Request's source IP/MAC forces the gateway to update its
-			// ARP cache for the VIP. GatewayProbeTarget returns ok=false on
-			// /31 and /32, where no in-subnet gateway host exists; the
-			// broadcast GARP burst above still fires (#2377).
-			gwIP, ok := GatewayProbeTarget(ipNet)
-			if ok && !gwIP.Equal(ip.To4()) {
-				// Send the probe with the VIP as the ARP sender so the
-				// gateway re-binds VIP to our (new) MAC, not the primary IP (#2152).
-				if err := arpProbeFn(vi.cfg.Interface, ip.To4(), gwIP); err != nil {
-					slog.Warn("vrrp: gateway ARP probe failed",
-						"key", vi.key(), "gw", gwIP, "err", err)
-				} else {
-					slog.Info("vrrp: probed subnet gateway",
-						"key", vi.key(), "gw", gwIP, "interface", vi.cfg.Interface)
-				}
-			}
-		} else {
-			if err := naBurstFn(vi.cfg.Interface, ip, count, stillMaster); err != nil {
-				slog.Warn("vrrp: NA failed", "key", vi.key(), "vip", ip, "err", err)
-			} else {
-				announced = true
-			}
+		}
+		// #17052: frame sequence via the shared announce engine; the
+		// sender still runs under vipMu so markGARPAnnouncedLocked and
+		// the per-VIP ownership fence keep their exact semantics.
+		res := cluster.SendAnnounceTargets([]cluster.AnnounceTarget{target}, stillMaster, cluster.AnnounceSender{
+			GARP: garpBurstFn, NA: naBurstFn, Probe: arpProbeFn,
+		})
+		announced := res.Sent > 0 // GARP/NA first-frame success only (probe never counts)
+		// Probe-success Info fires on probe success alone (#17052 M3):
+		// the probe exists for routers that ignore broadcast GARP, so
+		// requiring announced would silence exactly the rebind that worked.
+		if ip.To4() != nil && target.ProbeIP != nil && res.ProbeSucceeded {
+			slog.Info("vrrp: probed subnet gateway",
+				"key", vi.key(), "gw", target.ProbeIP, "interface", vi.cfg.Interface)
 		}
 		if announced && stillMaster() {
 			vi.markGARPAnnouncedLocked(vip)

@@ -5903,6 +5903,16 @@ Consequences worth knowing when adding a reader:
     of re-arming the outer splitter. `ValidateDeviceMapLogicalName` admits
     keyword-shaped names, so that is a name an operator can configure.
 
+  - **Every redundancy-group node statement requires an explicit priority (#17820).**
+    The RG-scoped `node <id>` is a per-node election statement, distinct from
+    the chassis cluster's own node identity. Each statement must use
+    `node <0|1> priority <1..254>`: the schema models the priority's value range,
+    and `validateRGNodePriorityShapeAST` enforces its presence across nested,
+    packed, and flat-set forms. Strict commit rejects omission; tolerant load
+    warns and boots persisted configs (#1960). This extends the AST shape gate
+    added for fused statements in #16672. Without a configured value the runtime
+    clamps the missing zero priority to 1.
+
   Two divergences the work surfaced, both tracked separately rather than folded
   in: `fabric1-interface` and `fabric1-peer-address` are compiled by
   `compileChassis` but absent from `schemaChassis` (no completion, no

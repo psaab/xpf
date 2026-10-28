@@ -188,7 +188,7 @@ func TestShowEffectiveFirewallFiltersGenerationDrift(t *testing.T) {
 
 // TestShowEffectiveFirewallFiltersHelperAheadIsLive covers the benign helper-
 // AHEAD edge (#5420 review): a scheduler-only republish
-// (Manager.UpdatePolicyScheduleState) advances the helper's snapshot generation
+// (Manager.UpdatePolicyScheduleStateWithLatch) advances the helper's snapshot generation
 // and the helper ACKs it, but that path never calls recordApplyResultLocked — so
 // LastApplyResult().Generation lags the helper's LastSnapshotGeneration on a
 // perfectly HEALTHY, armed box. The republish carries the same filter content

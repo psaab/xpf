@@ -239,13 +239,13 @@ func (d *Daemon) fabricPeerAddrs() []string {
 	var addrs []string
 	if d.syncPeerAddr != "" {
 		addrs = append(addrs, d.syncPeerAddr)
-	} else if d.fabricPeerIP != nil {
-		addrs = append(addrs, d.fabricPeerIP.String())
+	} else if d.fabricSlots[0].peerIP != nil {
+		addrs = append(addrs, d.fabricSlots[0].peerIP.String())
 	}
 	if d.syncPeerAddr1 != "" {
 		addrs = append(addrs, d.syncPeerAddr1)
-	} else if !d.syncPeerAddr1Disabled && d.fabricPeerIP1 != nil {
-		addrs = append(addrs, d.fabricPeerIP1.String())
+	} else if !d.syncPeerAddr1Disabled && d.fabricSlots[1].peerIP != nil {
+		addrs = append(addrs, d.fabricSlots[1].peerIP.String())
 	}
 	return addrs
 }
@@ -771,7 +771,7 @@ func (d *Daemon) startClusterSyncAuxLoops(commsCtx context.Context, cc *config.C
 //
 // Order contract: called only after publishFabricRefreshChansIfCurrent
 // succeeded, and each loop is handed its OWN channel by value (#4038/#4958).
-func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config.ClusterConfig, fabRefreshCh, fabRefreshCh1 chan struct{}) {
+func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config.ClusterConfig, fabRefreshChans [2]chan struct{}) {
 	// Resolve the fabric peer for cross-chassis redirect,
 	// then periodically refresh to correct neighbor drift.
 	// Resolve to physical parent (ge-0-0-0) — BPF runs on
@@ -782,7 +782,7 @@ func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config
 	if fabOverlay == fabParent {
 		fabOverlay = "" // no overlay — legacy mode
 	}
-	go d.populateFabricFwd(commsCtx, fabParent, fabOverlay, cc.FabricPeerAddress, fabRefreshCh)
+	go d.populateFabricFwdSlot(commsCtx, 0, fabParent, fabOverlay, cc.FabricPeerAddress, fabRefreshChans[0])
 
 	// Resolve the secondary fabric peer if fab1 configured.
 	if cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != "" {
@@ -791,7 +791,7 @@ func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config
 		if fab1Overlay == fab1Parent {
 			fab1Overlay = "" // no overlay
 		}
-		go d.populateFabricFwd1(commsCtx, fab1Parent, fab1Overlay, cc.Fabric1PeerAddress, fabRefreshCh1)
+		go d.populateFabricFwdSlot(commsCtx, 1, fab1Parent, fab1Overlay, cc.Fabric1PeerAddress, fabRefreshChans[1])
 	}
 
 	// Monitor fabric link/neighbor state via netlink (#124).

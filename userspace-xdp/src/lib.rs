@@ -30,8 +30,6 @@ const PROTO_GRE: u8 = 47;
 const PROTO_ICMPV6: u8 = 58;
 const GRE_PROTO_IPV4: u16 = 0x0800;
 const GRE_PROTO_IPV6: u16 = 0x86dd;
-const TCP_FLAG_SYN: u8 = 0x02;
-const TCP_FLAG_ACK: u8 = 0x10;
 // The BPF-side symbol names retain FALLBACK for index/map compatibility. The
 // Go/operator surface exposes these retained-shim actions as degraded-path
 // counters.
@@ -41,12 +39,20 @@ const USERSPACE_FALLBACK_REASON_BINDING_MISSING: u32 = 2;
 const USERSPACE_FALLBACK_REASON_BINDING_NOT_READY: u32 = 3;
 const USERSPACE_FALLBACK_REASON_HEARTBEAT_MISSING: u32 = 4;
 const USERSPACE_FALLBACK_REASON_HEARTBEAT_STALE: u32 = 5;
+// #17248: reserved degraded-path ABI slot 6 ("icmp" in the Go
+// `degradedPathReasonNames` table). This slot is intentionally never emitted;
+// the #8258 agreement test pins it so the following indices cannot renumber.
+#[allow(dead_code)]
 const USERSPACE_FALLBACK_REASON_ICMP: u32 = 6;
 const USERSPACE_FALLBACK_REASON_EARLY_FILTER: u32 = 7;
 const USERSPACE_FALLBACK_REASON_ADJUST_META: u32 = 8;
 const USERSPACE_FALLBACK_REASON_META_BOUNDS: u32 = 9;
 const USERSPACE_FALLBACK_REASON_REDIRECT_ERR: u32 = 10;
 const USERSPACE_FALLBACK_REASON_INTERFACE_NAT_NO_SESSION: u32 = 11;
+// #17248: reserved degraded-path ABI slot 12 ("no_session" in the Go
+// `degradedPathReasonNames` table). This slot is intentionally never emitted;
+// the #8258 agreement test pins it so the following indices cannot renumber.
+#[allow(dead_code)]
 const USERSPACE_FALLBACK_REASON_NO_SESSION: u32 = 12;
 const USERSPACE_FALLBACK_REASON_STRICT_DROP: u32 = 13;
 const USERSPACE_FALLBACK_REASON_PASS_TO_KERNEL: u32 = 14;
@@ -208,12 +214,16 @@ const USERSPACE_TRACE_STAGE_BINDING_MISSING: u32 = 2;
 const USERSPACE_TRACE_STAGE_BINDING_NOT_READY: u32 = 3;
 const USERSPACE_TRACE_STAGE_HEARTBEAT_MISSING: u32 = 4;
 const USERSPACE_TRACE_STAGE_HEARTBEAT_STALE: u32 = 5;
+// #17248: reserved trace-stage ABI slot 6; keep its number without emitting it.
+#[allow(dead_code)]
 const USERSPACE_TRACE_STAGE_ICMP_FALLBACK: u32 = 6;
 const USERSPACE_TRACE_STAGE_EARLY_FILTER: u32 = 7;
 const USERSPACE_TRACE_STAGE_INTERFACE_NAT_LOCAL: u32 = 8;
 const USERSPACE_TRACE_STAGE_LOCAL_DESTINATION: u32 = 9;
 const USERSPACE_TRACE_STAGE_REDIRECT: u32 = 10;
 const USERSPACE_TRACE_STAGE_REDIRECT_ERR: u32 = 11;
+// #17248: reserved trace-stage ABI slot 12; keep its number without emitting it.
+#[allow(dead_code)]
 const USERSPACE_TRACE_STAGE_NO_SESSION: u32 = 12;
 
 #[repr(C)]
@@ -310,13 +320,6 @@ const _: [(); 24] = [(); mem::offset_of!(UserspaceDpMeta, routing_table)];
 const _: [(); 36] = [(); mem::offset_of!(UserspaceDpMeta, addr_family)];
 const _: [(); 40] = [(); mem::offset_of!(UserspaceDpMeta, dscp)];
 const _: [(); 80] = [(); mem::offset_of!(UserspaceDpMeta, config_generation)];
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct UserspaceBindingKey {
-    ifindex: u32,
-    queue_id: u32,
-}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -441,21 +444,6 @@ struct VlanHdr {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
-struct Ipv4Hdr {
-    version_ihl: u8,
-    tos: u8,
-    tot_len: u16,
-    id: u16,
-    frag_off: u16,
-    ttl: u8,
-    protocol: u8,
-    check: u16,
-    saddr: u32,
-    daddr: u32,
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
 struct Ipv6Hdr {
     version_priority: u8,
     flow_lbl: [u8; 3],
@@ -464,13 +452,6 @@ struct Ipv6Hdr {
     hop_limit: u8,
     saddr: [u8; 16],
     daddr: [u8; 16],
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct Ipv6OptHdr {
-    nexthdr: u8,
-    hdrlen: u8,
 }
 
 #[repr(C)]
@@ -967,7 +948,7 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_WG_STEER);
         return Ok(cpumap_or_pass(ctrl));
     }
-    if !native_gre_fragment && !wg_fragment && should_fallback_early(&parsed, ingress_domain) {
+    if !native_gre_fragment && !wg_fragment && should_fallback_early(&parsed) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_EARLY_FILTER);
         record_trace(
             ctrl.flags,
@@ -1364,7 +1345,6 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
 ///
 /// `stack_margin_8249_test.go` pins the resulting margin so this cannot erode
 /// silently back to the eight bytes it started at.
-#[inline(never)]
 fn write_userspace_meta(
     meta_ptr: *mut UserspaceDpMeta,
     parsed: &ParsedPacket,
@@ -1907,7 +1887,7 @@ fn is_degraded_local_or_control(
     // this is defence in depth; the prefix applies this veto before
     // `early_pass`, whose multicast arm would otherwise pass the packet.
     let unresolved_ext_chain = parsed.unresolved_ipv6_ext_chain;
-    let early_pass = should_fallback_early(parsed, ingress_domain);
+    let early_pass = should_fallback_early(parsed);
     if let Some(verdict) = kernel_pass::degraded_local_or_control_head(
         native_gre_fragment_on_helper,
         wg_tail_excluded,
@@ -2474,7 +2454,7 @@ fn parse_ipv6(
         } else {
             false
         };
-        let seen = unsafe { USERSPACE_V6FRAG_SCRATCH.get(0) }.copied();
+        let seen = USERSPACE_V6FRAG_SCRATCH.get(0).copied();
         let non_first = match (wrote, seen) {
             (true, Some(v)) => v != 0,
             _ => true,
@@ -2576,7 +2556,7 @@ fn wg_steer_to_kernel(ctrl: &UserspaceCtrl, pkt: &ParsedPacket, ingress_ifindex:
     wg_steer_to_kernel_on_port_match(local_destination, pkt.udp_wg_transport_data)
 }
 
-fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
+fn should_fallback_early(pkt: &ParsedPacket) -> bool {
     // #16038: an unresolved IPv6 extension chain must never pass early — its
     // `protocol` is still a traversable ext-header type with ports 0/0, and a
     // multicast/link-local destination would otherwise kernel-PASS it before
@@ -2806,14 +2786,6 @@ fn live_userspace_session_action(pkt: &ParsedPacket) -> u8 {
         dst_addr: pkt.dst_addr,
     };
     unsafe { USERSPACE_SESSIONS.get(&key).copied() }.unwrap_or(0)
-}
-
-fn is_connection_initiating(pkt: &ParsedPacket) -> bool {
-    match pkt.protocol {
-        PROTO_TCP => (pkt.tcp_flags & TCP_FLAG_SYN) != 0 && (pkt.tcp_flags & TCP_FLAG_ACK) == 0,
-        PROTO_UDP | PROTO_ICMP | PROTO_ICMPV6 => true,
-        _ => true,
-    }
 }
 
 /// #9901 (F-075): the L4 tuple for a FIRST fragment, whose L4 header is

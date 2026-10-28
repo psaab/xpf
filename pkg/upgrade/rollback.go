@@ -397,8 +397,8 @@ func (r *Runner) defaultRollbackTarget(current string) (string, error) {
 		if err != nil {
 			continue
 		}
-		stamp, present := r.readCommittedStamp(name)
-		if present && (stamp == nil || !stamp.Committed) {
+		stamp, present, stampErr := r.readCommittedStamp(name)
+		if stampErr != nil || (present && (stamp == nil || !stamp.Committed)) {
 			continue
 		}
 		c := candidate{name: name, mod: info.ModTime().UnixNano(), stamp: stamp}
@@ -431,7 +431,7 @@ func (r *Runner) defaultRollbackTarget(current string) (string, error) {
 	for _, c := range legacy {
 		listing = append(listing, fmt.Sprintf("%s(legacy mtime=%d)", c.name, c.mod))
 	}
-	currentStamp, currentHasRecord := r.readCommittedStamp(current)
+	currentStamp, currentHasRecord, _ := r.readCommittedStamp(current)
 	if currentHasRecord && currentStamp != nil && currentStamp.Committed && currentStamp.Predecessor != "" {
 		if predecessor, ok := byName[currentStamp.Predecessor]; ok {
 			r.logf("upgrade: rollback candidates ordered by committed history (mtime tie-break only): %s; default selects committed predecessor %s of current %s",

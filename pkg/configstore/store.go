@@ -981,30 +981,51 @@ func crossCheckLoginIdleTimeout10828(compiled *config.Config) error {
 // this split was retired in #1830 (e) — the dataplane no longer caps
 // equal-flow-enforcement at 32 workers.)
 func (s *Store) compileTreeLenient(tree *config.ConfigTree) (*config.Config, error) {
-	// #1319 PR 2: the typed-leaf SchemaValidate gate is STRICT only on the
-	// operator-driven commit / commit-check path (compileTree). The tolerant
-	// Store.Load / Store.SyncApply ingress downgrades legacy typed-leaf
+	// #1319 PR 2: typed-leaf SchemaValidate findings are normally STRICT only
+	// on the operator-driven commit / commit-check path (compileTree). The
+	// tolerant Store.Load / Store.SyncApply ingress downgrades legacy typed-leaf
 	// violations to warnings because older binaries may have committed them.
-	// A display-only redaction placeholder is not a legacy value and cannot be
-	// promoted as a secret, so preserve that specific guard error below.
-	// Other typed-leaf violations retain the #1733/#1798/#1814 lenient policy;
-	// see freetext.go.
+	// #17241's nested-list refusal is the narrow exception: leniently compiling
+	// it would install a truncated list because the nested values are unread.
+	// A display-only redaction placeholder is also not a legacy value and cannot
+	// be promoted as a secret, so preserve that specific guard error below.
+	// Every other typed-leaf violation retains the #1733/#1798/#1814 lenient
+	// policy; see freetext.go.
 	schemaErr := s.schemaValidateExpandedTree(tree)
 	// #16012: collect every independent typed-leaf violation for the
-	// tolerant log + persisted warnings; first-error schemaErr above
-	// still drives classification and the redaction-placeholder guard.
-	var typedErrs16012 []error
-	if collected, _ := s.schemaValidateExpandedTreeCollect16012(tree); len(collected) > 0 {
-		typedErrs16012 = collected
+	// tolerant log + persisted warnings. The first-error schemaErr above
+	// still drives the normal classification; the collect error is retained
+	// because #17241 can be found there even if an unrelated error stopped
+	// the first-error walk.
+	typedErrs16012, collectErr16012 := s.schemaValidateExpandedTreeCollect16012(tree)
+	if config.IsRedactionPlaceholderIngestError(schemaErr) {
+		return nil, schemaErr
+	}
+	// #17241/#18325: this refusal is a correctness boundary, not a legacy
+	// typed value whose compiled interpretation can be retained. The
+	// nestedListContentSchemaError class covers every value-list reader
+	// opted in via refuseNonLeafBlockChildren (allowed-ips, VRRP, and the
+	// other schema-declared direct-child value lists): those readers never
+	// read nested block grandchildren, so tolerating the error would
+	// install a truncated value list on boot or peer sync. Preserve
+	// tolerance for every other schema error by promoting only this
+	// dedicated class.
+	if config.IsNestedListContentSchemaError(schemaErr) {
+		return nil, schemaErr
+	}
+	if config.IsNestedListContentSchemaError(collectErr16012) {
+		return nil, collectErr16012
+	}
+	for _, te := range typedErrs16012 {
+		if config.IsNestedListContentSchemaError(te) {
+			return nil, te
+		}
 	}
 	if len(typedErrs16012) > 1 {
 		for _, te := range typedErrs16012 {
 			slog.Warn("typed-leaf schema violation in tolerated config; continuing (a strict commit would reject this)",
 				"err", te, "issue", "#16012")
 		}
-	}
-	if config.IsRedactionPlaceholderIngestError(schemaErr) {
-		return nil, schemaErr
 	}
 	if schemaErr != nil {
 		switch {
@@ -1106,13 +1127,12 @@ func (s *Store) schemaValidateExpandedTree(tree *config.ConfigTree) error {
 	return schemaValidateExpandedTreeForNode(tree, s.nodeID)
 }
 
-// schemaValidateExpandedTreeCollect16012 is the #16012 tolerant variant:
-// same expansion as schemaValidateExpandedTree, but collects every
-// independent typed-leaf violation (bounded) instead of the first only.
-// The second return is the first non-typed schema error if one stopped
-// the walk; typed errors collected before it are still returned in the
-// first value. Callers classify structural errors via schemaErr.
-func (s *Store) schemaValidateExpandedTreeCollect16012(tree *config.ConfigTree) ([]error, error) { // typed errors preserved even when second return is a later structural error
+// schemaValidateExpandedTreeCollect16012 mirrors schemaValidateExpandedTree
+// but collects independent typed-leaf findings. Its second return carries
+// non-typed schema errors separately from those findings. A #17241 nested-list
+// refusal remains hard, and an earlier structural diagnostic is joined with
+// it when both are present.
+func (s *Store) schemaValidateExpandedTreeCollect16012(tree *config.ConfigTree) ([]error, error) {
 	if tree == nil {
 		return nil, nil
 	}

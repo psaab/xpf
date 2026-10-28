@@ -37,3 +37,21 @@ func TestWGUncoveredStatusWire13289(t *testing.T) {
 		t.Fatalf("absent WG counters did not default to zero: %+v", older)
 	}
 }
+
+func TestTupleGateStatusWire17201(t *testing.T) {
+	const payload = `{"tuple_gate_poison_recoveries":19}`
+	var status ProcessStatus
+	if err := json.Unmarshal([]byte(payload), &status); err != nil {
+		t.Fatalf("decode tuple-gate status: %v", err)
+	}
+	if status.TupleGatePoisonRecoveries != 19 {
+		t.Fatalf("TupleGatePoisonRecoveries = %d, want 19", status.TupleGatePoisonRecoveries)
+	}
+	var older ProcessStatus
+	if err := json.Unmarshal([]byte(`{}`), &older); err != nil {
+		t.Fatalf("decode older status without tuple-gate counter: %v", err)
+	}
+	if older.TupleGatePoisonRecoveries != 0 {
+		t.Fatalf("absent tuple-gate counter did not default to zero: %+v", older)
+	}
+}

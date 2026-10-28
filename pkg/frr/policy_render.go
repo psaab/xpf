@@ -1338,11 +1338,10 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// reaches here (see below).
 				matchV6 := seqFam == "v6"
 				matchFamilyKnown := seqFam != ""
-				// emitted counts the prefix-list entries actually written.
-				// A #2103-skipped (/32 longer, empty set) entry writes NO
-				// "ip prefix-list" line, so the list may end up with zero
-				// entries — and we intentionally never materialise a
-				// count==0 list (FRR treats a count==0 prefix-list as
+				// emitted counts permit entries, not synthetic stop-deny
+				// entries. A #2103-skipped (/32 longer, empty set) writes
+				// no permit. If no permits remain, no definitions are
+				// materialised (FRR treats a zero-entry prefix-list as
 				// PREFIX_PERMIT / match-ALL). Sequences reaching here are
 				// never all-INVALID (#14137 diverts those groups to
 				// deny-all / skip in the dispatch), so a zero-entry list
@@ -1353,10 +1352,11 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// "route-map … permit <seq>" with no match clauses, which
 				// FRR treats as match-ALL — flipping "/32 longer" from the
 				// empty set to permit-everything (Copilot #2110).
-				// #16762: renderRouteFilterListGroup re-sequences the
-				// permits longest-match-first and interposes stops; a
-				// zero-entry result keeps the historical undefined-list
-				// NOMATCH behaviour below, so no special-casing here.
+				// #16762: only a group with strict base containment is
+				// sorted/re-sequenced longest-match-first and gets stops.
+				// Groups without containment preserve authored order and
+				// original seq slots; zero entries still keep the
+				// historical undefined-list NOMATCH behaviour below.
 				// First-parseable sets the family hint when nothing
 				// emitted; the first emitted entry overrides it — the
 				// same precedence the pre-#16762 loop used.
@@ -2175,114 +2175,30 @@ func (m *Manager) renderComposedRouteMapExport15157(po *config.PolicyOptionsConf
 // AND the `next policy` escape of the last reachable member both land on
 // the carved pair, so neither path can leak a non-BGP route.
 func (m *Manager) renderComposedRouteMapWithDefault(po *config.PolicyOptionsConfig, composedName string, chain []string, fallbackAction string, carvedBGPOnly bool) string {
-	// #5732 render-side belt: this composed route-map numbers its members'
-	// sequences with ONE running counter, so a chain whose members each pass the
-	// per-policy #5701 bound can still SUM past the FRR ceiling and emit a
-	// `route-map` line past seq 65535 — poisoning the whole vtysh-batched
-	// frr-reload. The strict commit gate
-	// (config.validateBGPComposedChainSequenceBoundStrict) rejects it; this belt
-	// covers the tolerant load / peer-sync / rollback path (#1960) where that
-	// gate only warns: do not render the oversized EXPANSION. The gate and this
-	// belt consult the SAME config.ComposedChainSequenceCount predicate, so they
-	// can never disagree on what overflows.
-	//
-	// #6807: return a bounded explicit DENY under composedName rather than the
-	// empty string. The neighbor's `route-map <composedName> in|out` is emitted
-	// by BGP rendering regardless of what this function returns, so an empty
-	// return left that attachment naming an unresolvable map — which FRR denies
-	// (RMAP_DENY on a failed route_map_lookup_by_name, stable/10.6), not
-	// permits as the previous comment claimed. Same tradeoff as the
-	// single-policy site (#5701); see renderQuarantineDenyRouteMap.
-	// #16869: a carved non-terminated chain renders one extra
-	// sequence (fall-off pair) beyond the count's reserved fallback;
-	// the strict chain gate and this belt use the same reserve helper.
-	if n := beltTotal16869(config.ComposedChainSequenceCount(po, po.PolicyStatements, chain), carvedComposedReserve16869(po, chain, carvedBGPOnly, fallbackAction)); n > config.MaxRouteMapSequences {
-		slog.Warn("oversized composed BGP policy-chain route-map: expansion would overflow FRR "+
-			"sequence numbers and poison the reload; rendering an explicit DENY under this name "+
-			"instead — routes on neighbors carrying this chain are withdrawn until it is reduced",
-			"route-map", composedName, "sequences", n, "max", config.MaxRouteMapSequences)
-		m.noteQuarantined(composedName)
-		return renderQuarantineDenyRouteMap(composedName)
-	}
-	type policyPart struct {
-		definitions string
-		body        string
-		nextPolicy  bool
-		startSeq    int
-		defaultSeq  int
-		defaultVerb string
-	}
-	parts := make([]policyPart, 0, len(chain))
-	seq := 10
-	terminated := false
+	// #17026: thin adapter over the single chain composer in
+	// route_map_chain.go. The belt comment formerly here (#5732:
+	// gate and belt consult the SAME
+	// config.ComposedChainSequenceCount predicate so they can never
+	// disagree; #6807 explicit-deny shape; #16869 carved reserve)
+	// now lives on composeChainRouteMap, which this adapter feeds
+	// with the authored statements.
+	members := make([]namedPolicy, 0, len(chain))
 	for _, name := range chain {
 		ps := po.PolicyStatements[name]
 		if ps == nil {
 			// Defensive: chain is pre-filtered to defined policy-statements.
 			continue
 		}
-		definitions, body, next := m.renderPolicyTermSequencesWithDefinitions(po, composedName, composedName+"-"+name, ps, seq)
-		part := policyPart{definitions: definitions, body: body, nextPolicy: policyHasNextPolicyTerm(ps), startSeq: seq}
-		seq = next
-		switch ps.DefaultAction {
-		case "accept":
-			part.defaultVerb = "permit"
-			part.defaultSeq = seq
-			seq += 10
-			terminated = !part.nextPolicy
-		case "reject":
-			part.defaultVerb = "deny"
-			part.defaultSeq = seq
-			seq += 10
-			terminated = !part.nextPolicy
-		}
-		parts = append(parts, part)
-		if terminated {
-			break
-		}
+		members = append(members, namedPolicy{name: name, stmt: ps})
 	}
-
-	var b strings.Builder
-	for _, part := range parts {
-		b.WriteString(part.definitions)
-	}
-
-	fallbackSeq := seq
-	carved := carvedBGPOnly && fallbackAction == "permit" && !terminated
-	for i, part := range parts {
-		target := fallbackSeq
-		if i+1 < len(parts) {
-			target = parts[i+1].startSeq
-		}
-		if part.nextPolicy {
-			part.body = renderNextPolicyTarget(part.body, target)
-		}
-		b.WriteString(part.body)
-		if part.defaultVerb != "" {
-			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(composedName), part.defaultVerb, part.defaultSeq)
-			b.WriteString("exit\n")
-		}
-	}
-	if !terminated {
-		// The ordinary composed BGP attachment falls off to Junos
-		// default-ACCEPT (#2998). A narrowed alias passes "deny" here so
-		// the dropped authored members cannot silently widen that attached
-		// map; explicit member defaults remain authoritative.
-		//
-		// #15157 carved tail (export only, carvedBGPOnly): permit only
-		// BGP-sourced routes, deny the rest — the Junos default export.
-		// The `next policy` escape of the last member targets fallbackSeq
-		// too, so both fall-off paths land on the carved permit first.
-		if carved {
-			fmt.Fprintf(&b, "route-map %s permit %d\n", frrName(composedName), fallbackSeq)
-			b.WriteString(" match source-protocol bgp\n")
-			b.WriteString("exit\n")
-			fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(composedName), fallbackSeq+10)
-			b.WriteString("exit\n")
-		} else {
-			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(composedName), fallbackAction, fallbackSeq)
-			b.WriteString("exit\n")
-		}
-	}
-	return b.String()
+	return m.composeChainRouteMap(po, composedName, members, chainTail{
+		fallbackAction: fallbackAction,
+		carvedBGPOnly:  carvedBGPOnly,
+		overflowWarn: func(name string, n uint64) {
+			slog.Warn("oversized composed BGP policy-chain route-map: expansion would overflow FRR "+
+				"sequence numbers and poison the reload; rendering an explicit DENY under this name "+
+				"instead — routes on neighbors carrying this chain are withdrawn until it is reduced",
+				"route-map", name, "sequences", n, "max", config.MaxRouteMapSequences)
+		},
+	})
 }
