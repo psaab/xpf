@@ -23,6 +23,8 @@ xpf (0.0.0) unstable; urgency=medium
     Go-produced frame failed decode. The P-MECH tail is 81 bytes, and
     a shared Go/Rust golden frame (zone id above the u16 range) now
     pins the wire so the pair cannot drift again (#18207).
+ -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
+
 xpf (0.0.0) unstable; urgency=medium
 
   * Config compiler: strict mode now has a single constructor,
