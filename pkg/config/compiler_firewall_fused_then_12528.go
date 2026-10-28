@@ -314,7 +314,7 @@ func validateFirewallFusedThenStrict12528(children []*Node, lenient bool) ([]str
 			}
 			switch child.Name() {
 			case "family":
-				for _, m := range firewallFamilyMembers9883(child) {
+				for _, m := range familyMembers(child) {
 					if firewallFamilyQuarantined9883(m, permitted) {
 						continue
 					}

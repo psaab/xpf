@@ -8,9 +8,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/psaab/xpf/pkg/argforms"
 	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/optopic"
 )
 
 // authz_command_gate_7172.go is #7172 cut 5b: the command tables built in cuts
@@ -143,7 +145,7 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 	//
 	// #16472: the form set now also carries the canonical base /
 	// keyword-full / selector spellings of the executed line and of
-	// the charge (see rpcArgumentForms / canonicalArgumentForms), so
+	// the charge (see rpcArgumentForms / argforms.CanonicalForms), so
 	// an anchored deny on the BASE spelling of a selector-bearing
 	// command (`^show firewall$` over `firewall-filter:F1`) fires
 	// here exactly as the console's canonicalForms make it fire
@@ -189,7 +191,7 @@ func remoteDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string
 	if res != cmdtree.CanonicalOK || strings.Join(canon, " ") != executed {
 		return false
 	}
-	baseForm, fullForm, selectorForms, chainForm := canonicalFormsOf16472(canon)
+	baseForm, fullForm, selectorForms, chainForm := argforms.CanonicalFormsOf(canon)
 	if chainForm == "" {
 		return false
 	}
@@ -551,10 +553,9 @@ func bgpStatusCanonicalCommand(typ string) (string, bool) {
 // natRuleStatsCanonicalCommand attributes GetNATRuleStats by nat_type
 // (#15076). The handler accepts only "", "source" and "destination";
 // any other selector is unresolved here so a restricted class denies
-// instead of receiving the source charge. The rule-set name is an
-// argument value and stays dropped, exactly as the topic tables drop
-// theirs — both the `rule` and `rule-set <name>` lines perform this RPC
-// for the same family charge.
+// instead of receiving the source charge. This prices only the family;
+// the rule_set/rule argument text is reconstructed by
+// natRuleStatsArgumentForms (#17184).
 func natRuleStatsCanonicalCommand(natType string) (string, bool) {
 	switch natType {
 	case "", "source":
@@ -576,48 +577,12 @@ var bgpNATCanonicalCommands15076 = []string{
 	"show security nat destination rule",
 }
 
-// showTextTopicCanonicalCommand resolves one ShowText topic, using the SAME
-// exact-then-longest-prefix rule showTextTopicPermission uses to PRICE it.
-//
-// The two lookups must agree about which key a topic resolves to, or a request
-// could be priced by one rule and command-matched by another — the sibling
-// guard TestTopicCommandAndPermissionResolveTheSameKey7172 asserts they do over
-// the dispatcher's own topic list.
+// showTextTopicCanonicalCommand resolves one ShowText topic to the command
+// its registry entry names (#17108: delegated to optopic.ShowTextCommand,
+// the same exact-then-longest-prefix lookup showTextTopicPermission prices
+// by — the two can no longer diverge because there is only one lookup).
 func showTextTopicCanonicalCommand(topic string) (string, bool) {
-	if cmd, ok := showTextTopicCommand[topic]; ok {
-		return cmd, true
-	}
-	for _, r := range showTextCommandPrefix {
-		if strings.HasPrefix(topic, r.prefix) {
-			return r.command, true
-		}
-	}
-	return "", false
-}
-
-// showTextCommandPrefixRule is one prefix-keyed topic → command rule,
-// pre-resolved at init and sorted longest-key-first for the same reason
-// showTextPrefix is: an unambiguous longest match must win rather than whichever
-// key map iteration reached first.
-type showTextCommandPrefixRule struct {
-	prefix  string
-	command string
-}
-
-var showTextCommandPrefix []showTextCommandPrefixRule
-
-func init() {
-	for k, cmd := range showTextTopicCommand {
-		if strings.HasSuffix(k, ":") {
-			showTextCommandPrefix = append(showTextCommandPrefix, showTextCommandPrefixRule{k, cmd})
-		}
-	}
-	sort.Slice(showTextCommandPrefix, func(i, j int) bool {
-		if len(showTextCommandPrefix[i].prefix) != len(showTextCommandPrefix[j].prefix) {
-			return len(showTextCommandPrefix[i].prefix) > len(showTextCommandPrefix[j].prefix)
-		}
-		return showTextCommandPrefix[i].prefix < showTextCommandPrefix[j].prefix
-	})
+	return optopic.ShowTextCommand(topic)
 }
 
 // allCanonicalCommands is every command string this surface can ever present to

@@ -398,8 +398,8 @@ the userspace dataplane admission boundary is in
       redundancy-group ids are disjoint.
 
   Put other VRRP on VRIDs 1-100 or 116-255, or on another segment.
-- **Session sync**: incremental 1s sweep + ring buffer + GC delete
-  callbacks, TCP on fabric link.
+- **Session sync**: incremental 1s sweep + ring buffer + helper
+  session-delta deletes, TCP on fabric link.
 - **Config sync**: RG0 primary → secondary with `${node}` variable expansion;
   only the RG0 primary pushes, including on peer reconnect (#78). Each push
   carries a monotonic config generation and applies through a single-consumer

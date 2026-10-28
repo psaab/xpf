@@ -367,6 +367,27 @@ type schemaNode struct {
 	// but kept the route-map match reference, turning an authored accept
 	// into an operational match-none (a silent false-deny).
 	keyValidatorPos PositionalKeyValidator
+
+	// allowEdgeWhitespace opts a typed/key slot OUT of the central
+	// edge-whitespace refusal in checkToken/validateKeySlot (#17177).
+	// It exists only for a leaf whose consumer genuinely wants the
+	// edge whitespace as data (e.g. an OpenSSH authorized-key value,
+	// whose grammar is '<type> <base64> [comment]' — internal spaces
+	// are the value). Credentials deliberately do NOT opt out
+	// (#17888): their bytes are stored and compared exactly, so a
+	// padded credential must refuse, not ride along. The reason MUST
+	// be recorded in
+	// allowEdgeWhitespaceReason; the padding census
+	// (TestTypedValidatorsRefusePadding17177) fails any opt-out
+	// without a reason. Default false: every typed value and
+	// identity arg must be a bare (unpadded) token, because the
+	// compiler stores the raw token and runtime consumers parse it
+	// exactly — a validator that trimmed would green-light a value
+	// the consumer then silently drops.
+	allowEdgeWhitespace bool
+	// allowEdgeWhitespaceReason records why the leaf above genuinely
+	// consumes edge whitespace; required when allowEdgeWhitespace is set.
+	allowEdgeWhitespaceReason string
 }
 
 // isTypedLeaf reports whether the node carries typed-value metadata

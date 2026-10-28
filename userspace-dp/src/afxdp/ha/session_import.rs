@@ -11,9 +11,38 @@ use crate::afxdp::*;
 /// with `BPF_EXIST` precisely so it will not recreate a deleted entry. The moment a
 /// generation-aware helper-originated delete exists, the conflation goes live.
 ///
-/// Four states, because "I did it", "I declined early", "I declined under the
-/// removal lock" and "I declined for a DIFFERENT reason" are different answers
-/// to the caller, and only the first of them permits any further teardown.
+/// Per-variant contract (`shared removed` = on the shared conditional-remove
+/// path this call removed the forward shared row — i.e. the predicate’s
+/// classification, not a guarantee that every path reporting the variant
+/// itself removed anything; in particular the generation-marked path can
+/// report `Applied` or strict-mirror `RefusedMirrorDelete` for a
+/// concurrently-absent entry it removed nothing from, where the caller’s
+/// mirror and stale-row cleanup still runs; `Go keeps rows` =
+/// [`Self::keeps_caller_rows`], i.e. a peer delete so reported makes the
+/// handler answer `synced-delete-refused:peer-delete-local-owned` and Go
+/// keeps its mirror and DNAT rows; `wire token` = the token this variant
+/// surfaces as on the wire — the peer-delete token above for row-keeping
+/// peer deletes, the bare `mirror-write-failed` error for a failed
+/// strict-mirror delete, the per-match `mirror_delete_policy_batch` token,
+/// or no dedicated token):
+///
+/// | Variant | Shared removed (conditional-remove path) | Go keeps rows | Wire token |
+/// | --- | --- | --- | --- |
+/// | `Applied` | yes | no | none (success) |
+/// | `RefusedLocalOwned` | no | yes | `synced-delete-refused:peer-delete-local-owned` |
+/// | `RefusedConcurrentLocalOwned` | no | yes | `synced-delete-refused:peer-delete-local-owned` |
+/// | `RefusedStaleGeneration` | no | no | none |
+/// | `RefusedGateBusy` | no | yes | `synced-delete-refused:peer-delete-local-owned` |
+/// | `RefusedMirrorDelete` | yes | yes | `mirror-write-failed` |
+/// | `RefusedIdentity` | no | yes | `synced-delete-refused:peer-delete-local-owned`; `refused_identity` (policy batch) |
+/// | `StaleForward` | no | no | `stale_forward` (policy batch only) |
+/// | `PartialCompanion` | yes (forward only) | no | `partial_companion` (policy batch only) |
+///
+/// On the shared conditional-remove path, `Applied`, `PartialCompanion`,
+/// and `RefusedMirrorDelete` are the outcomes whose call removed the
+/// shared forward row ([`Self::shared_removed`]); for `RefusedMirrorDelete`
+/// the mirror delete then failed, so the caller must keep its rows and the
+/// helper surfaces `mirror-write-failed` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SyncedDeleteOutcome {
     /// The entry named by the key was removed.
@@ -31,6 +60,11 @@ pub(crate) enum SyncedDeleteOutcome {
     RefusedStaleGeneration,
     /// Refused because tuple admission could not be acquired before timeout.
     RefusedGateBusy,
+    /// On the shared conditional-remove path the shared entry was removed,
+    /// but the strict mirror (BPF) delete then failed, so the caller keeps
+    /// its mirror and DNAT rows and the handler surfaces
+    /// `mirror-write-failed`. (The generation-marked path can also report
+    /// this for a concurrently-absent entry it removed nothing from.)
     RefusedMirrorDelete,
     /// Refused because the captured session incarnation or its companion changed.
     RefusedIdentity,
@@ -43,9 +77,25 @@ pub(crate) enum SyncedDeleteOutcome {
 }
 
 impl SyncedDeleteOutcome {
+    /// Every variant, for the contract-table guard test. Adding a variant
+    /// without a row in the table above and in
+    /// `synced_delete_outcome_contract_table_17138` fails that test.
+    pub(crate) const ALL: [Self; 9] = [
+        Self::Applied,
+        Self::RefusedLocalOwned,
+        Self::RefusedConcurrentLocalOwned,
+        Self::RefusedStaleGeneration,
+        Self::RefusedGateBusy,
+        Self::RefusedMirrorDelete,
+        Self::RefusedIdentity,
+        Self::StaleForward,
+        Self::PartialCompanion,
+    ];
+
     /// Whether the helper refused a PEER delete while the caller must keep its
     /// mirror and DNAT rows. A stale-generation refusal is NOT this: it means
     /// the helper already holds something newer, so the Go side has nothing to
+    /// keep for the named incarnation.
     pub(crate) fn keeps_caller_rows(self) -> bool {
         matches!(
             self,
@@ -57,11 +107,19 @@ impl SyncedDeleteOutcome {
         )
     }
 
-    /// Compatibility predicate for the #9714 early ownership refusal. New
-    /// callers should use [`Self::keeps_caller_rows`], which also covers the
-    /// under-lock concurrent ownership decline from #9960.
-    pub(crate) fn is_refused_local_owned(self) -> bool {
-        matches!(self, Self::RefusedLocalOwned)
+    /// On the shared conditional-remove path, whether this call removed the
+    /// shared forward row: `Applied`, the forward half of
+    /// `PartialCompanion`, and `RefusedMirrorDelete` (whose shared removal
+    /// landed before the mirror delete failed). This is the predicate’s
+    /// classification on that path only; it does not assert that every
+    /// caller path reporting these variants itself removed a row — the
+    /// generation-marked path also reports them for a concurrently-absent
+    /// entry.
+    pub(crate) fn shared_removed(self) -> bool {
+        matches!(
+            self,
+            Self::Applied | Self::PartialCompanion | Self::RefusedMirrorDelete
+        )
     }
 
     pub(crate) fn mirror_delete_failed(self) -> bool {
@@ -224,29 +282,113 @@ pub const SYNCED_IMPORT_REPAIR_PREFIX: &str = "synced-import-repair:";
 pub const SYNCED_DELETE_REFUSED_PREFIX: &str = "synced-delete-refused:";
 
 impl SyncedImportOutcome {
-    /// Stable terminal-refusal reason, or `None` for Applied and repair states.
-    pub fn refusal_reason(self) -> Option<&'static str> {
+    /// Every variant exactly once, in declaration order. The shared
+    /// Go/Rust wire fixture is keyed by variant name, and `wire_error`
+    /// below matches exhaustively, so adding a variant fails to compile
+    /// until it has a wire class here and a fixture row there (#17116).
+    pub const ALL: [Self; 11] = [
+        Self::Applied,
+        Self::AppliedRepairPending,
+        Self::AppliedRepairOverflow,
+        Self::RejectedStaleGeneration,
+        Self::RejectedStaleZone,
+        Self::RejectedCapacity,
+        Self::RejectedReserve,
+        Self::RejectedStandaloneReverse,
+        Self::RejectedGateBusy,
+        Self::RejectedMirrorPublish,
+        Self::RejectedUnknownRoutingDomain,
+    ];
+
+    /// Stable name used as the shared-fixture row key. Must match the
+    /// `variant` strings in `synced_import_wire.json`.
+    pub fn variant_name(self) -> &'static str {
         match self {
-            SyncedImportOutcome::Applied
-            | SyncedImportOutcome::AppliedRepairPending
-            | SyncedImportOutcome::AppliedRepairOverflow => None,
-            SyncedImportOutcome::RejectedStaleGeneration => Some("stale-generation"),
-            SyncedImportOutcome::RejectedStaleZone => Some("stale-zone"),
-            SyncedImportOutcome::RejectedCapacity => Some("capacity"),
-            SyncedImportOutcome::RejectedReserve => Some("reserve"),
-            SyncedImportOutcome::RejectedStandaloneReverse => Some("standalone-reverse"),
-            SyncedImportOutcome::RejectedGateBusy => Some("gate-busy"),
-            SyncedImportOutcome::RejectedMirrorPublish => Some("mirror-write-failed"),
-            SyncedImportOutcome::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
+            Self::Applied => "Applied",
+            Self::AppliedRepairPending => "AppliedRepairPending",
+            Self::AppliedRepairOverflow => "AppliedRepairOverflow",
+            Self::RejectedStaleGeneration => "RejectedStaleGeneration",
+            Self::RejectedStaleZone => "RejectedStaleZone",
+            Self::RejectedCapacity => "RejectedCapacity",
+            Self::RejectedReserve => "RejectedReserve",
+            Self::RejectedStandaloneReverse => "RejectedStandaloneReverse",
+            Self::RejectedGateBusy => "RejectedGateBusy",
+            Self::RejectedMirrorPublish => "RejectedMirrorPublish",
+            Self::RejectedUnknownRoutingDomain => "RejectedUnknownRoutingDomain",
+        }
+    }
+
+    /// Stable terminal-refusal reason, or `None` for Applied, repair, and
+    /// the bare mirror-publish states. Internal to the encoder; external
+    /// callers consume `wire_error` / `repair_reason` instead.
+    pub(crate) fn refusal_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Applied
+            | Self::AppliedRepairPending
+            | Self::AppliedRepairOverflow
+            | Self::RejectedMirrorPublish => None,
+            Self::RejectedStaleGeneration => Some("stale-generation"),
+            Self::RejectedStaleZone => Some("stale-zone"),
+            Self::RejectedCapacity => Some("capacity"),
+            Self::RejectedReserve => Some("reserve"),
+            Self::RejectedStandaloneReverse => Some("standalone-reverse"),
+            Self::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
+            Self::RejectedGateBusy => Some("gate-busy"),
         }
     }
 
     /// Stable repair-status reason, or `None` for Applied and refusals.
     pub fn repair_reason(self) -> Option<&'static str> {
         match self {
-            SyncedImportOutcome::AppliedRepairPending => Some("worker-repair-pending"),
-            SyncedImportOutcome::AppliedRepairOverflow => Some("worker-repair-overflow"),
+            Self::AppliedRepairPending => Some("worker-repair-pending"),
+            Self::AppliedRepairOverflow => Some("worker-repair-overflow"),
             _ => None,
+        }
+    }
+
+    /// The single `ControlResponse.error` encoder for a non-Applied
+    /// outcome, or `None` for `Applied` (#17116). Every wire class is
+    /// decided inside this exhaustive match, next to the variant:
+    ///
+    ///   * `Ok` (`Applied`): no error.
+    ///   * `Repair`: committed, but worker convergence is pending or its
+    ///     latch overflowed — `SYNCED_IMPORT_REPAIR_PREFIX` + repair
+    ///     reason, so older readers fail closed without rolling back.
+    ///   * `TerminalRefusal`: healthy-helper semantic refusal under
+    ///     `SYNCED_IMPORT_REFUSED_PREFIX` — Go maps it to its
+    ///     rollback-class refusal.
+    ///   * `RetryableRefusal` (`RejectedGateBusy`): deliberately under
+    ///     the SAME refusal prefix today (the shipped bytes Go keys its
+    ///     retryable gate-busy class on); the class, not the prefix,
+    ///     records that Go must retry it rather than treat it terminal.
+    ///   * `Bare` (`RejectedMirrorPublish`): the bare
+    ///     `mirror-write-failed` token with NO prefix — a helper-health
+    ///     failure, which Go keeps retryable and latches mirror health
+    ///     on, distinct from every semantic refusal above.
+    ///
+    /// The shared fixture `synced_import_wire.json` pins these exact
+    /// bytes per variant; a Rust rename of the prefix or of `gate-busy`
+    /// reds the Go classifier test that drives the same rows.
+    pub fn wire_error(self) -> Option<String> {
+        match self {
+            Self::Applied => None,
+            Self::AppliedRepairPending | Self::AppliedRepairOverflow => Some(format!(
+                "{SYNCED_IMPORT_REPAIR_PREFIX}{}",
+                self.repair_reason()
+                    .expect("repair outcomes always carry a repair reason")
+            )),
+            Self::RejectedStaleGeneration
+            | Self::RejectedStaleZone
+            | Self::RejectedCapacity
+            | Self::RejectedReserve
+            | Self::RejectedStandaloneReverse
+            | Self::RejectedUnknownRoutingDomain
+            | Self::RejectedGateBusy => Some(format!(
+                "{SYNCED_IMPORT_REFUSED_PREFIX}{}",
+                self.refusal_reason()
+                    .expect("refusals always carry a refusal reason")
+            )),
+            Self::RejectedMirrorPublish => Some("mirror-write-failed".to_string()),
         }
     }
 }
@@ -4030,6 +4172,7 @@ mod rejected_mirror_reservation_10790_tests {
             coordinator
                 .import_idle_persistent_leases(
                     &[crate::afxdp::PoolIdleLease {
+                        pool: crate::afxdp::LeasePoolId::Source("p".to_string()),
                         pool_name: "p".to_string(),
                         lease: crate::nat::IdleLeaseRecord {
                             protocol: key.protocol,

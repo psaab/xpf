@@ -43,9 +43,8 @@ func ValidateIPAddress(raw string) error {
 // address. Refuse padding at commit so the operator fixes the spelling.
 // Migration: remove quotes/padding and use the bare address.
 func ValidateBGPLocalAddress(raw string) error {
-	if raw != strings.TrimSpace(raw) {
-		return fmt.Errorf("invalid local-address %q (leading or trailing whitespace is not allowed; use a bare IP address)", raw)
-	}
+	// #17177: edge-whitespace refusal is owned centrally by checkToken;
+	// this validator keeps only the IP grammar.
 	return ValidateIPAddress(raw)
 }
 
@@ -93,13 +92,14 @@ func ValidateBGPClusterID(raw string) error {
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a BGP cluster-id: an IPv4 dotted-quad like 10.0.0.1, or an integer 1..4294967295)")
 	}
-	// #14377: validate what is rendered. The renderer gates on
-	// validClusterID (net.ParseIP / ParseUint on the RAW string, no trim),
-	// so a padded value that TrimSpace hides here was committed and then
-	// silently omitted from frr.conf — a route reflector with no cluster-id
-	// falls back to its router-id, defeating RR loop prevention. Padding IS
-	// authorable (quoted strings preserve it verbatim), so refuse it,
-	// mirroring ValidateOSPFArea / #9820. Migration: use the bare value.
+	// Strict-validator contract: validClusterID in pkg/frr parses the
+	// RAW string (net.ParseIP / ParseUint, no trim), so a padded value
+	// this validator trimmed would be committed and then silently
+	// omitted from frr.conf — the route reflector falls back to its
+	// router-id, defeating RR loop prevention (#14377). Padding IS
+	// authorable (quoted strings preserve it verbatim), so refuse it
+	// here as well as centrally (#17177 checkToken). Migration: use
+	// the bare value.
 	if trimmed != raw {
 		return fmt.Errorf("invalid cluster-id %q (leading or trailing whitespace is not allowed; use a bare IPv4 dotted-quad or integer)", raw)
 	}
@@ -298,20 +298,20 @@ func ValidateOSPFArea(raw string) error {
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected an OSPF area id: an IPv4 dotted-quad like 0.0.0.0, or an integer 0..4294967295)")
 	}
-	// #9820: validate what is emitted. The renderer interpolates the RAW
-	// key; padding that TrimSpace hides would pass here while the RAW key
-	// renders. Padding IS authorable through ordinary ingress (the lexer
-	// preserves quoted-string contents verbatim and the parser accepts
-	// them as path values), so `area " 0.0.0.0 "` commits clean today and
-	// functions (spaces are harmless FRR token separators) — refusing it
-	// is therefore an INTENTIONAL compatibility tightening (option 1):
-	// area IDs must be bare tokens, where bare = unpadded DECODED value
-	// (quotes themselves are fine). Migration: remove quotes/padding.
-	// Newlines need no story here: the #1798 prewalk already rejects
-	// control characters in every key on the strict path and scrubs them
-	// to spaces on the lenient path, so no `\n`-padding ever rendered
-	// split lines; this arm additionally refuses it first, with the
-	// area-specific message. Tolerant path omits-with-warning.
+	// Strict-validator contract: validFRROSPFArea in pkg/frr documents
+	// commit==render equivalence as "exactly what the commit gate
+	// accepts (ValidateOSPFArea, incl. its mapped + padding arms) AND
+	// a single FRR token", and ospfAreaIdentity11400 keys a padded
+	// area as a distinct raw area. The renderer interpolates the RAW
+	// key, so padding TrimSpace hides here would commit while the raw
+	// key renders/keys differently. Refuse padding here as well as
+	// centrally (#17177 checkToken/validateKeySlot). This is the
+	// #9820 intentional tightening: area IDs must be bare tokens,
+	// where bare = unpadded DECODED value (quotes themselves are
+	// fine). Migration: remove quotes/padding. The #1798 prewalk
+	// already rejects control characters on the strict path; this arm
+	// additionally refuses newline padding first with the
+	// area-specific message.
 	if trimmed != raw {
 		return fmt.Errorf("invalid area id %q (leading or trailing whitespace is not allowed; use a bare IPv4 dotted-quad or integer)", raw)
 	}

@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -137,7 +136,7 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 }
 
 // genGuardMapCap is the ABSOLUTE CEILING for the per-side EFFECTIVE guard
-// caps: half of conntrack.MaxSessions, which counts forward+reverse entries
+// caps: half of dataplane.MaxSessions, which counts forward+reverse entries
 // while guard keys are forward sessions (#9915 F-044). Nothing reads it
 // directly except maxCap()'s clamp; every map goes through sentCap()/recvCap().
 //
@@ -209,7 +208,7 @@ func (s *SessionSync) noteBulkInstallOutcomeV6(key dataplane.SessionKeyV6, retry
 //   - Sender: above the cap a new key was not stamped, so its delete went out
 //     with generation 0. After an overflow, a missing stamp now draws a fresh
 //     generation (takeDeleteGenV4).
-const genGuardMapCap = conntrack.MaxSessions / 2
+const genGuardMapCap = dataplane.MaxSessions / 2
 
 // genGuardMapDefaultCap is the starting effective cap: the pre-#9915 static
 // value. Growth past it is strictly demand-driven (full-of-live), so quiet
@@ -1045,16 +1044,6 @@ func stampInstallGen[K comparable, SK comparable](
 	s.genState.genSentMu.Unlock()
 }
 
-// stampCloseClassSentV4/V6 record the close class under the sender-side cap,
-// growing once on full-of-live like the generation stamps. Callers hold genSentMu.
-func (s *SessionSync) stampCloseClassSentV4(key dataplane.SessionKey, sessionID uint64, class *uint8) {
-	stampCloseClassSentCore(s, &s.genState.closeClassSentV4, key, sessionID, class)
-}
-
-func (s *SessionSync) stampCloseClassSentV6(key dataplane.SessionKeyV6, sessionID uint64, class *uint8) {
-	stampCloseClassSentCore(s, &s.genState.closeClassSentV6, key, sessionID, class)
-}
-
 // sentTCPHandshakeState records the greatest TCP handshake stage sent for one
 // session incarnation. The BPF mirror drops this sync-only field, so sweep and
 // bulk resends restore it from this bounded sender memo.
@@ -1097,18 +1086,6 @@ func stampTCPHandshakeStateLocked[K comparable](
 		return
 	}
 	m[key] = sentTCPHandshakeState{sessionID: sessionID, state: next}
-}
-
-func (s *SessionSync) stampTCPHandshakeStateSentV4(
-	key dataplane.SessionKey, sessionID uint64, state *uint8,
-) {
-	stampTCPHandshakeStateSentCore(s, &s.genState.tcpHandshakeSentV4, key, sessionID, state)
-}
-
-func (s *SessionSync) stampTCPHandshakeStateSentV6(
-	key dataplane.SessionKeyV6, sessionID uint64, state *uint8,
-) {
-	stampTCPHandshakeStateSentCore(s, &s.genState.tcpHandshakeSentV6, key, sessionID, state)
 }
 
 // takeDeleteGenV4 returns the generation a delete for this wire key should
@@ -1413,29 +1390,6 @@ func (s *SessionSync) recordInstalledGenV6(key dataplane.SessionKeyV6, gen uint6
 // fill with tombstones of closed sessions and then skip-record every NEW key.
 // The oldest tombstone is now evicted to make room (genTombstoneOrder); a live
 // entry never is.
-
-func (s *SessionSync) tombstoneBareLocked(key dataplane.SessionKey, gen uint64) {
-	tombstoneBareCore(s, &s.genState.recvGenV4, &s.genState.recvTombV4, key, gen)
-}
-
-// tombstoneBareLockedV6 is the IPv6 twin of tombstoneBareLocked.
-func (s *SessionSync) tombstoneBareLockedV6(key dataplane.SessionKeyV6, gen uint64) {
-	tombstoneBareCore(s, &s.genState.recvGenV6, &s.genState.recvTombV6, key, gen)
-}
-
-// tombstoneScopedLocked records a scoped tombstone (or evicts on gen-0)
-// without a refusal check. Caller holds recvGenMu.
-func (s *SessionSync) tombstoneScopedLocked(skey scopedDeleteKeyV4, gen uint64) {
-	tombstoneScopedCore(s, &s.genState.recvGenScopedV4, &s.genState.recvTombScopedV4, &s.genState.recvGenScopedByTupleV4,
-		func(sk scopedDeleteKeyV4) dataplane.SessionKey { return sk.Key }, skey, gen)
-}
-
-// tombstoneScopedLockedV6 is the IPv6 twin of tombstoneScopedLocked.
-func (s *SessionSync) tombstoneScopedLockedV6(skey scopedDeleteKeyV6, gen uint64) {
-	tombstoneScopedCore(s, &s.genState.recvGenScopedV6, &s.genState.recvTombScopedV6, &s.genState.recvGenScopedByTupleV6,
-		func(sk scopedDeleteKeyV6) dataplane.SessionKeyV6 { return sk.Key }, skey, gen)
-}
-
 func (s *SessionSync) deleteGenGuardV4(key dataplane.SessionKey, deleteGen uint64) bool {
 	s.genState.recvGenMu.Lock()
 	defer s.genState.recvGenMu.Unlock()
