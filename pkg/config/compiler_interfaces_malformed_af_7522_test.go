@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #7522: compileInterfaces indexed afNode.Keys[0] with no bounds check, so a
 // family node whose CHILD carries an empty Keys slice panicked with index out
@@ -140,9 +143,22 @@ func TestChildShapedFamilyStillCompiles7522(t *testing.T) {
 		{Keys: []string{"interfaces"}, Children: []*Node{ifNode}},
 	}}
 
-	cfg, err := CompileConfig(tree)
+	// #17196: the malformed sibling is now reported, not silently
+	// ignored — strict rejects, lenient warns and still compiles the
+	// well-formed sibling. This cell rides the lenient path so it can
+	// pin that the good family next to the bad one is not dropped.
+	cfg, err := CompileConfigLenient(tree)
 	if err != nil {
-		t.Fatalf("CompileConfig: %v", err)
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	var warned bool
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "is not a known address family") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("lenient compile must warn on the malformed sibling, warnings=%v", cfg.Warnings)
 	}
 	ifc := cfg.Interfaces.Interfaces["ge-0/0/9"]
 	if ifc == nil {

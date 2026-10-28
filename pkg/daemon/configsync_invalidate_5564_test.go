@@ -120,7 +120,7 @@ func TestSyncAndApplyRunsInvalidatorsOnNonFatalApplyError(t *testing.T) {
 	nonFatal := errors.New("apply host-inbound filter: simulated best-effort failure")
 	d.applyErrForTest = nonFatal
 
-	compiled, err := d.syncAndApply(context.Background(), peerText, nil)
+	compiled, err := d.syncAndApplyForTest(context.Background(), peerText, nil)
 
 	// The non-fatal tail error must be SURFACED (not swallowed) up the sync path.
 	if !errors.Is(err, nonFatal) {
@@ -169,7 +169,7 @@ func TestSyncAndApplySkipsInvalidatorsOnFatalApplyError(t *testing.T) {
 	d.applyBodyForTest = func(*config.Config) {}
 	d.applyErrForTest = dpuserspace.ErrPolicySchedulerProtocolIncompatible
 
-	compiled, err := d.syncAndApply(context.Background(), peerText, nil)
+	compiled, err := d.syncAndApplyForTest(context.Background(), peerText, nil)
 
 	if !errors.Is(err, dpuserspace.ErrPolicySchedulerProtocolIncompatible) {
 		t.Fatalf("a fatal apply error must be surfaced; got %v", err)
@@ -204,7 +204,7 @@ func TestSyncAndApplyRunsInvalidatorsOnCleanApply(t *testing.T) {
 	d.applyBodyForTest = func(*config.Config) {}
 	// applyErrForTest nil = clean apply.
 
-	compiled, err := d.syncAndApply(context.Background(), peerText, nil)
+	compiled, err := d.syncAndApplyForTest(context.Background(), peerText, nil)
 	if err != nil {
 		t.Fatalf("a clean peer sync must succeed; got %v", err)
 	}
@@ -234,7 +234,7 @@ func TestSyncAndApplySurfacesPartialInvalidationError(t *testing.T) {
 	d.setDataplane(dp) // #2114: publish through the cell
 	d.applyBodyForTest = func(*config.Config) {}
 
-	compiled, err := d.syncAndApply(context.Background(), peerText, nil)
+	compiled, err := d.syncAndApplyForTest(context.Background(), peerText, nil)
 	if err == nil {
 		t.Fatal("syncAndApply swallowed a failed policy session invalidation; the stale-" +
 			"authorization gap must be surfaced up the sync-recv path (#5578)")

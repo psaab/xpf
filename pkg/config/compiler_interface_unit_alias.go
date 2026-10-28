@@ -80,7 +80,7 @@ import (
 // registers only the literal wildcard name in View 1 (which never matches the
 // base interface), so only post-expansion do both concrete spellings land on
 // the same interface. Per-node expansion errors are NON-FATAL and contribute
-// the EMPTY set (mirrors emitNodeExpandedTunnelNames): a config with only
+// the EMPTY set (mirrors emitNodeExpandedTunnelNames via gateNodeView, #17222): a config with only
 // `groups node0` legitimately fails node1 expansion, and View 1 still covers
 // any collision inside the un-expandable group. Because all three views are
 // pure functions of the SAME candidate config (Views 2/3 both computed on both
@@ -156,28 +156,23 @@ func collectInterfaceUnitSpellingsAST(ifacesNode *Node, perIface map[string]map[
 }
 
 // collectNodeExpandedInterfaceUnitSpellings folds the per-interface unit
-// spellings the compiler would see after expanding the candidate tree for
-// chassis-cluster node nodeID into perIface (#5878 Views 2/3). It clones the
-// candidate, resolves apply-groups "${node}" for the node, expands interface
-// ranges (so a range/wildcard member's alias is seen exactly as the real
-// runPreWalkGates path sees it), and collects every top-level "interfaces"
-// root's units. Mirrors emitNodeExpandedTunnelNames: per-node expansion errors
-// are NON-FATAL and contribute the empty set (View 1 still covers a collision
-// inside an un-expandable group), so the verdict stays a pure function of the
-// candidate config and is identical on both nodes.
-func collectNodeExpandedInterfaceUnitSpellings(tree *ConfigTree, nodeID int, perIface map[string]map[int]map[string]int) {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
-		return
-	}
-	// expandInterfaceRanges mutates the clone in place; its warnings are
-	// emitted on the real path (runPreWalkGates) and discarded here.
-	// #8438: the clone paths only need the budget SKIP (the expansion is capped
-	// inside); the rejection is surfaced once, by the prewalk caller.
-	_, _ = expandInterfaceRanges(clone)
-	for _, ifaces := range clone.FindChildren("interfaces") {
-		collectInterfaceUnitSpellingsAST(ifaces, perIface)
+// spellings the compiler would see after expanding the candidate tree
+// for each cluster node into perIface (#5878 Views 2/3), via
+// effectiveNodeViews (#17222) with interface ranges expanded (so a
+// range/wildcard member's alias is seen exactly as the real
+// runPreWalkGates path sees it). Per-node expansion errors are
+// NON-FATAL and contribute no view (View 1 still covers a collision
+// inside an un-expandable group — hence no generic fallback view), so
+// the verdict stays a pure function of the candidate config and is
+// identical on both nodes. Each node's view is folded separately with
+// MAX, as before.
+func collectNodeExpandedInterfaceUnitSpellings(tree *ConfigTree, perIface map[string]map[int]map[string]int) {
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{ExpandRanges: true}) {
+		pass := make(map[string]map[int]map[string]int)
+		for _, ifaces := range view.FindChildren("interfaces") {
+			collectInterfaceUnitSpellingsAST(ifaces, pass)
+		}
+		foldMaxUnitCounts(perIface, pass)
 	}
 }
 
@@ -261,14 +256,9 @@ func validateInterfaceUnitAliasCollisionsAST(tree *ConfigTree, lenient bool) ([]
 
 	// Views 2/3 — post-expansion per-interface unit spellings for node0 and
 	// node1. Both computed on both nodes from the shared candidate, so the
-	// union stays HA-symmetric; per-node expansion errors contribute the empty
-	// set (non-fatal).
-	view2 := make(map[string]map[int]map[string]int)
-	view3 := make(map[string]map[int]map[string]int)
-	collectNodeExpandedInterfaceUnitSpellings(tree, 0, view2)
-	collectNodeExpandedInterfaceUnitSpellings(tree, 1, view3)
-	foldMaxUnitCounts(perIface, view2)
-	foldMaxUnitCounts(perIface, view3)
+	// union stays HA-symmetric; per-node expansion errors contribute no
+	// view (non-fatal).
+	collectNodeExpandedInterfaceUnitSpellings(tree, perIface)
 
 	var warnings []string
 	emit := func(format string, args ...any) error {
