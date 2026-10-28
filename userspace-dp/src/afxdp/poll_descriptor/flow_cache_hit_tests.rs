@@ -1447,6 +1447,136 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         "install_failed=false must allow the ordinary flow-cache seed"
     );
 }
+/// #17031 (Rev18320 M1): `stage_flow_cache_seed` must actually stamp a
+/// promoted ambiguous claim, and must NOT stamp it when the owner RG is
+/// not locally active. Before the fold every seed caller passed
+/// `ambiguous_zone: None`, so dropping the new parameter (or passing the
+/// scope ifindex's zone instead) stayed green.
+///
+/// FAIL-ON-REVERT: reverting `stage_flow_cache_seed` to raw-only
+/// (ignoring `ambiguous_zone`) reds the active half (entry stays
+/// unstamped / fabric-zone 0); stamping the claim ungated reds the
+/// inactive half (claimed zone appears despite no local owner proof).
+/// FAIL-ON-REVERT (cont.): dropping the `ambiguous_zone` argument at the
+/// production call site (`mod.rs`, stage-9 -> `stage_flow_cache_seed`)
+/// also reds the active half, because production would again pass `None`.
+#[test]
+fn flow_cache_seed_promotes_ambiguous_zone_only_when_owner_active_17031() {
+    // Distinct claimed zone so a stamp cannot be confused with the
+    // fixture's trust/untrust zones or with a raw override.
+    const CLAIMED_ZONE: u32 = TEST_DMZ_ZONE_ID;
+    let now_secs: u64 = 1;
+
+    for (rg_active, expect_stamped) in [(true, true), (false, false)] {
+        let mut fixture =
+            LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+        // Owner RG of the cached decision's egress (EGRESS_IFINDEX) is RG1.
+        fixture
+            .forwarding
+            .egress
+            .get_mut(&EGRESS_IFINDEX)
+            .expect("zone-accounting fixture seeds the egress")
+            .redundancy_group = 1;
+        // The logical ingress (20080) carries no zone, so without a
+        // stamped override the seed's from-zone resolves to 0 and
+        // nothing is stamped — the NOT-stamped assertion is therefore
+        // discriminating, not vacuous.
+        assert_eq!(
+            fixture
+                .forwarding
+                .ifindex_to_zone_id
+                .get(&LOGICAL_INGRESS_IFINDEX),
+            None,
+            "precondition: logical ingress must be unzoned"
+        );
+        if rg_active {
+            fixture.ha_state.insert(
+                1,
+                HAGroupRuntime {
+                    active: true,
+                    watchdog_timestamp: now_secs,
+                    lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+                },
+            );
+        }
+        let frame = vlan_tagged_tcp_v4_frame(0);
+        let meta = test_meta(&frame);
+        let key = test_key();
+        let flow = Some(SessionFlow {
+            src_ip: key.src_ip,
+            dst_ip: key.dst_ip,
+            forward_key: key.clone(),
+        });
+        let next_hop = cached_entry()
+            .decision
+            .resolution
+            .next_hop
+            .expect("cached decision carries a next-hop");
+        let live_mac = cached_entry()
+            .decision
+            .resolution
+            .neighbor_mac
+            .expect("cached decision carries a neighbor MAC");
+        fixture
+            .dynamic_neighbors
+            .insert((EGRESS_IFINDEX, next_hop), NeighborEntry { mac: live_mac });
+        let worker_ctx = fixture.worker_ctx();
+        let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+        let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
+        let mut flow_cache = FlowCache::new();
+        stage_flow_cache_seed(
+            &mut flow_cache,
+            &flow,
+            meta,
+            ValidationState::default(),
+            cached_entry().decision,
+            None,
+            0,
+            // session_ingress_zone=None so from_forward_decision leaves
+            // metadata.ingress_zone == 0 and the seed stamp block runs.
+            None,
+            false,
+            false,
+            0,
+            &policy_counter,
+            crate::filter::TermMatchExtra::default(),
+            // raw proved override: none — the claim arrives ambiguous only.
+            None,
+            Some(CLAIMED_ZONE),
+            now_secs,
+            0,
+            false,
+            false,
+            &neighbor_epoch_snapshot,
+            &worker_ctx,
+        );
+        let entry = flow_cache
+            .lookup(
+                &key,
+                FlowCacheLookup::for_packet(meta, ValidationState::default(), &fixture.forwarding),
+                1,
+                &fixture.rg_epochs,
+            )
+            .expect("seed must install a flow-cache entry in both halves");
+        if expect_stamped {
+            assert_eq!(
+                entry.metadata.ingress_zone, CLAIMED_ZONE,
+                "#17031: active owner RG must promote the ambiguous claim \
+                 into the seed's stamped ingress_zone"
+            );
+        } else {
+            assert_eq!(
+                entry.metadata.ingress_zone, 0,
+                "#17031: inactive owner RG must NOT stamp the ambiguous \
+                 claim (fabric/unzoned ingress governs, zone 0)"
+            );
+            assert_ne!(
+                entry.metadata.ingress_zone, CLAIMED_ZONE,
+                "#17031: unpromoted claim must never appear as the stamp"
+            );
+        }
+    }
+}
 
 /// #6304 FAIL-ON-REVERT (live call site): a NON-sampled packet on the
 /// established-flow HOT path must not produce, reserve for, or account a

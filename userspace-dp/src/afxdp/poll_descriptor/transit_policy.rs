@@ -8,7 +8,8 @@
 //! [`admission_zone_override`]: the #6458 V2 owner-RG gate plus the
 //! #15916 ambiguous-stamp promotion, in that order, and nowhere else.
 //! `gate_fabric_zone_override_on_owner_rg` is called only from this
-//! module (and its definition in `forwarding::fabric`);
+//! module and from its wrapper `promote_ambiguous_fabric_zone`
+//! (`forwarding/fabric.rs`, plus the definition there);
 //! `promote_ambiguous_fabric_zone` is called only from
 //! [`admission_zone_override`] / [`promoted_zone_override`] here.
 //! Per-site copies of that chain repeatedly shipped subset fixes
