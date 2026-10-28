@@ -855,9 +855,9 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				}},
 				"rule": {desc: "Source NAT rule name", args: 1, placeholder: "<rule-name>", children: map[string]*schemaNode{
 					"match": {desc: "Match criteria", closedWorld: true, children: map[string]*schemaNode{
-						"source-address":           {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+						"source-address":           {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil, refuseNonLeafBlockChildren: true},
 						"source-address-name":      {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
-						"destination-address":      {desc: "Destination address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+						"destination-address":      {desc: "Destination address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil, refuseNonLeafBlockChildren: true},
 						"destination-address-name": {desc: "Destination address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
 						"destination-port":         {desc: "Destination port to match", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
 						"application":              {desc: "Application to match", args: 1, multi: true, placeholder: "<application>", children: nil, refuseNonLeafBlockChildren: true},
@@ -955,9 +955,9 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				}},
 				"rule": {desc: "Destination NAT rule name", args: 1, placeholder: "<rule-name>", children: map[string]*schemaNode{
 					"match": {desc: "Match criteria", closedWorld: true, children: map[string]*schemaNode{
-						"source-address":           {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+						"source-address":           {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil, refuseNonLeafBlockChildren: true},
 						"source-address-name":      {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
-						"destination-address":      {desc: "Destination address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+						"destination-address":      {desc: "Destination address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil, refuseNonLeafBlockChildren: true},
 						"destination-address-name": {desc: "Destination address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
 						"destination-port":         {desc: "Destination port or range to match", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
 						"protocol":                 {desc: "IP protocol to match", args: 1, multi: true, placeholder: "<protocol>", children: nil, refuseNonLeafBlockChildren: true},
@@ -1028,8 +1028,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					// (consumed verbatim by nodeVal), so they stay untyped
 					// like the source/destination-NAT match leaves above.
 					"match": {desc: "Match criteria", closedWorld: true, children: map[string]*schemaNode{
-						"destination-address": {desc: "Destination address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
-						"source-address":      {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+						"destination-address": {desc: "Destination address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil, refuseNonLeafBlockChildren: true},
+						"source-address":      {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil, refuseNonLeafBlockChildren: true},
 						// #2491: external (pre-translation) destination port the
 						// inbound packet must carry for a port-mapped static-NAT
 						// rule (`then static-nat prefix <ip> mapped-port <port>`).
@@ -1084,7 +1084,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					"routing-instance": {desc: "Ingress routing instance name", args: 1, multi: true, placeholder: "<routing-instance>", children: nil},
 				}},
 				"match": {desc: "Match criteria", closedWorld: true, children: map[string]*schemaNode{
-					"source-address":      {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
+					"source-address":      {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil, refuseNonLeafBlockChildren: true},
 					"source-address-name": {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
 				}},
 				"prefix":      {desc: "NAT64 IPv6 prefix (must be /96)", args: 1, placeholder: "<ipv6-prefix>", children: nil},
