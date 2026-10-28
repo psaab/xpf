@@ -800,13 +800,14 @@ fn lease_join_parity_all_modes_17028() {
 /// `exhaustion_total`, exactly like the full-block branch. Ports
 /// 1024..=1027 give a tracked-flow cap of 4, but `block_size = 2` /
 /// `blocks_per_ip = 1` confine this subscriber to the block
-/// [1024, 1025]: the mint claims 1024, so every later same-BIB flow
-/// claims the one free port 1025, JOINS the existing lease, and
-/// returns the candidate (flows = 4 = cap). A fifth flow again
-/// claims 1025 and then hits the claimed-port `admit_one` cap-fail
-/// (the divergence-1 bump) — ports 1026/1027 sit outside the block
-/// and are never claimed, so the full-block exhaustion branch
-/// cannot fire instead.
+/// [1024, 1025]: the mint claims 1024; each later same-BIB flow claims
+/// 1025 as a temporary candidate, JOINS the existing lease, returns
+/// its existing lease tuple (port 1024), and releases candidate 1025
+/// back to the pool (flows = 4 = cap).
+/// A fifth flow again claims 1025 and then hits the claimed-port
+/// `admit_one` cap-fail (the divergence-1 bump) — ports 1026/1027 sit
+/// outside the block and are never claimed, so the full-block
+/// exhaustion branch cannot fire instead.
 #[test]
 fn bib_claimed_port_cap_fail_bumps_exhaustion_17028() {
     let params = DeterministicV6 {
@@ -822,9 +823,10 @@ fn bib_claimed_port_cap_fail_bumps_exhaustion_17028() {
     assert_eq!(t1.port, 1024, "mint claims the first block port");
     let before = alloc.snapshot().exhaustion_total;
     // Three more same-BIB flows (distinct remotes, same subscriber
-    // transport): each claims the free port 1025, joins the lease,
-    // returns the candidate, and raises the tracked-flow count to
-    // the cap of 4 — none of them touches the exhaustion counter.
+    // transport): each claims 1025 temporarily and joins the lease,
+    // returning the existing lease tuple (port 1024) while releasing
+    // candidate 1025 back to the pool. They raise the tracked-flow
+    // count to the cap of 4 without touching the exhaustion counter.
     for (i, dst) in ["1.1.1.1", "2.2.2.2", "3.3.3.3"].iter().enumerate() {
         let joined = alloc
             .allocate_deterministic_v6_at(
@@ -838,11 +840,11 @@ fn bib_claimed_port_cap_fail_bumps_exhaustion_17028() {
             .expect("claimed-port join below the cap");
         assert_eq!(
             joined, t1,
-            "claimed-port join returns the lease's translated tuple"
+            "claimed-port join returns the existing lease tuple (port 1024)"
         );
         assert!(
             !alloc.debug_is_port_occupied(0, 1025),
-            "claimed-port join must return its temporary candidate 1025"
+            "claimed-port join must release temporary candidate 1025 back to the pool"
         );
         assert!(
             alloc.debug_is_port_occupied(0, 1024),
@@ -870,7 +872,7 @@ fn bib_claimed_port_cap_fail_bumps_exhaustion_17028() {
     );
     assert!(
         !alloc.debug_is_port_occupied(0, 1025),
-        "cap-failed claimed-port call must return its temporary candidate 1025"
+        "cap-failed claimed-port call must release temporary candidate 1025 back to the pool"
     );
     assert_eq!(
         alloc.snapshot().exhaustion_total,
