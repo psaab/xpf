@@ -177,19 +177,150 @@ func TestListReadersSingleSourced17241(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(src)
-	for _, leaf := range []string{`"allowed-ips"`, `"virtual-address"`} {
+	// Scoped census (#17241 fold): the file legitimately calls
+	// firewallMatchValues at unrelated DHCPv6 callsites
+	// (client-ia-type / pinned-prefix / req-option), so a bare
+	// file-wide count >= 2 proves nothing about THESE leaves. Pin
+	// the exact single-source call shape at each named site instead:
+	// the allowed-ips append and the virtual-address append.
+	for _, site := range []string{
+		"peer.AllowedIPs = append(peer.AllowedIPs, firewallMatchValues(prop)...)",
+		"vg.VirtualAddresses = append(vg.VirtualAddresses, firewallMatchValues(prop)...)",
+	} {
+		if n := strings.Count(text, site); n != 1 {
+			t.Fatalf("single-source call %q callsites = %d, want exactly 1", site, n)
+		}
+	}
+	// Both case arms must still exist.
+	for _, leaf := range []string{`"allowed-ips"`, `"virtual-address", "virtual-inet6-address"`} {
 		if !strings.Contains(text, leaf) {
 			t.Fatalf("leaf case %s missing", leaf)
 		}
-	}
-	// Both sites must append firewallMatchValues(prop)...
-	if n := strings.Count(text, "firewallMatchValues(prop)"); n < 2 {
-		t.Fatalf("firewallMatchValues(prop) callsites = %d, want >=2 (allowed-ips + virtual-address)", n)
 	}
 	// The old dropped-value spellings must be gone from the reader file.
 	for _, bad := range []string{"vn.Keys[0]", "child.Name(); v != "} {
 		if strings.Contains(text, bad) {
 			t.Fatalf("hand-rolled Keys[0]/Name()-only child reader %q reintroduced in compiler_interfaces.go", bad)
 		}
+	}
+	// Schema census: all three leaves must carry the opt-in that lets
+	// the commit gate validate every packed token (Rev18305Opus B1).
+	// Without it SchemaValidate refuses `{ a b; }` outright.
+	schemaSrc, err := os.ReadFile("schema_interfaces.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(schemaSrc), "allChildKeysAreValues: true"); n < 3 {
+		t.Fatalf("schema_interfaces.go allChildKeysAreValues leaves = %d, want >=3 (virtual-address, virtual-inet6-address, allowed-ips)", n)
+	}
+}
+
+// Canonical commit-gate parity (#17241 fold, Rev18305Opus B1): the
+// parity rows above only called CompileConfig, which never runs
+// SchemaValidate — so the packed braced spelling passed the test
+// while the real commit gate (configstore: SchemaValidate on the
+// expanded tree, then strict compile) REFUSED it at
+// validateMultiValueLeaf (multi-token block child, no
+// allChildKeysAreValues). These rows run the canonical sequence —
+// SchemaValidate first, then CompileConfig — on the packed spelling
+// for all three leaves, and pin that every packed token is honoured.
+// Fail-on-revert: drop allChildKeysAreValues from any leaf and its
+// row fails at SchemaValidate; drop the firewallMatchValues reader
+// and its row fails at the compiled-values assertion.
+func TestVRRPWGListReaderCanonicalGate17241(t *testing.T) {
+	v4pre := "interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.1.1/24 { vrrp-group 1 { priority 150; "
+	v4post := " } } } } } }"
+	v6pre := "interfaces { ge-0/0/0 { unit 0 { family inet6 { address 2001:db8::1/64 { vrrp-inet6-group 1 { priority 150; "
+	v6post := " } } } } } }"
+	wgpre := "interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key " + wgKeyA + "; peer " + wgKeyB + " { "
+	wgpost := " } } } } }"
+
+	rows := []struct {
+		name string
+		src  string
+		kind string
+		want []string
+	}{
+		{"vrrp-v4 braced packed canonical", v4pre + "virtual-address { 10.0.1.100/24 10.0.1.101/24; }" + v4post, "vrrp", []string{"10.0.1.100/24", "10.0.1.101/24"}},
+		{"vrrp-v6 braced packed canonical", v6pre + "virtual-inet6-address { 2001:db8::100/64 2001:db8::101/64; }" + v6post, "vrrp", []string{"2001:db8::100/64", "2001:db8::101/64"}},
+		{"wg braced packed canonical", wgpre + "allowed-ips { 10.0.0.0/8 192.168.0.0/16; }" + wgpost, "wg", []string{"10.0.0.0/8", "192.168.0.0/16"}},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			tree := parseHierText(t, r.src)
+			if err := SchemaValidate(tree); err != nil {
+				t.Fatalf("SchemaValidate (commit gate) refused packed spelling: %v", err)
+			}
+			cfg, err := CompileConfig(tree)
+			if err != nil {
+				t.Fatalf("strict compile after SchemaValidate: %v", err)
+			}
+			var got []string
+			if r.kind == "wg" {
+				got = wgAllowed17241(t, cfg)
+			} else {
+				got = vrrpVIPs17241(t, cfg)
+			}
+			want := append([]string(nil), r.want...)
+			sort.Strings(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("canonical gate got %v want %v (packed token dropped?)", got, want)
+			}
+		})
+	}
+}
+
+// Fail-closed packed tokens (#17241 fold, Rev18305Opus B2): with
+// allChildKeysAreValues every packed token IS a value, so a bogus
+// second token must ERROR at the strict commit gate — it must not
+// silently ride along (the pre-fold untyped allowed-ips leaf would
+// have let CompileConfig's netip gate catch it only after
+// SchemaValidate waved it through, and a leaf without the flag
+// refused the whole spelling for the wrong reason). Each row pins
+// SchemaValidate AND strict CompileConfig both refusing
+// `{ valid bogus; }` on all three leaves.
+func TestVRRPWGListReaderPackedBogusRefused17241(t *testing.T) {
+	v4pre := "interfaces { ge-0/0/0 { unit 0 { family inet { address 10.0.1.1/24 { vrrp-group 1 { priority 150; "
+	v4post := " } } } } } }"
+	v6pre := "interfaces { ge-0/0/0 { unit 0 { family inet6 { address 2001:db8::1/64 { vrrp-inet6-group 1 { priority 150; "
+	v6post := " } } } } } }"
+	wgpre := "interfaces { wg0 { tunnel { mode wireguard; wireguard { listen-port 51820; private-key " + wgKeyA + "; peer " + wgKeyB + " { "
+	wgpost := " } } } } }"
+
+	rows := []struct {
+		name string
+		src  string
+		leaf string
+	}{
+		{"vrrp-v4 packed bogus", v4pre + "virtual-address { 10.0.1.100/24 bogus; }" + v4post, "virtual-address"},
+		{"vrrp-v6 packed bogus", v6pre + "virtual-inet6-address { 2001:db8::100/64 bogus; }" + v6post, "virtual-inet6-address"},
+		{"wg packed bogus", wgpre + "allowed-ips { 10.0.0.0/8 bogus; }" + wgpost, "allowed-ips"},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			// Canonical commit gate: SchemaValidate runs FIRST
+			// (configstore), so a bogus packed token is refused
+			// before the compiler ever sees it. That gate refusal
+			// is the strict-commit ERROR this cell pins — direct
+			// CompileConfig without the gate tolerates garbage
+			// VRRP tokens on the lenient VIP path by design
+			// (ParseVRRPVIP ok=false tokens ride through dedupe),
+			// which is exactly why the gate must not wave them
+			// through.
+			tree := parseHierText(t, r.src)
+			verr := SchemaValidate(tree)
+			if verr == nil {
+				t.Fatalf("SchemaValidate accepted packed bogus token for %s (must error, not ride along)", r.leaf)
+			}
+			if !strings.Contains(verr.Error(), "bogus") {
+				t.Fatalf("SchemaValidate error %q does not name the bogus token", verr)
+			}
+			// And the full canonical sequence must refuse.
+			if verr == nil {
+				if _, err := CompileConfig(tree); err == nil {
+					t.Fatalf("canonical gate (SchemaValidate -> CompileConfig) accepted packed bogus token for %s", r.leaf)
+				}
+			}
+		})
 	}
 }

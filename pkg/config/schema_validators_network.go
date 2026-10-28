@@ -263,6 +263,31 @@ func ValidateFeedDestinationPrefix(raw string) error {
 	return nil
 }
 
+// ValidateWGAllowedIPPrefix accepts any IPv4 or IPv6 CIDR for a
+// WireGuard peer `allowed-ips` entry (#17241). It mirrors the strict
+// compile gate in validateOneWireguardTunnel, which rejects a
+// malformed prefix with netip.ParsePrefix: a bare IP without a
+// prefix length, or outright garbage, is rejected. Typing the leaf
+// (instead of leaving it ValueAny) routes it through
+// validateMultiValueLeaf so the packed braced spelling
+// `allowed-ips { a b; }` validates EVERY token at SchemaValidate —
+// before this, the leaf was untyped, the walker only refused the
+// multi-token child structurally, and the headline packed spelling
+// could not commit at all.
+func ValidateWGAllowedIPPrefix(raw string) error {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return fmt.Errorf("missing value (expected an allowed prefix, e.g. 10.0.0.0/8)")
+	}
+	if _, err := netip.ParsePrefix(trimmed); err != nil {
+		if _, parseErr := netip.ParseAddr(trimmed); parseErr == nil {
+			return fmt.Errorf("missing /prefix-length (got %q; write e.g. %s/32 or the containing prefix)", raw, trimmed)
+		}
+		return fmt.Errorf("not a valid allowed prefix (expected e.g. 10.0.0.0/8 or 2001:db8::/48): %v", err)
+	}
+	return nil
+}
+
 // parseCIDRStrict is the shared require-a-prefix CIDR parse for the two
 // family validators. It upgrades the two common operator mistakes to
 // targeted messages: a bare IP (missing /prefix-length) and outright
