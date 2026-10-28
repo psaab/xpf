@@ -3046,17 +3046,25 @@ fn zone_policy_deny_on_session_hit(
     ZonePolicyJudgment::Revoke
 }
 
-/// Test-only access to the actual stale-hit zone-policy judgment, keeping
-/// its private input and verdict types inside this module.
+/// The exact stale-hit verdict exposed to sibling tests without exposing the
+/// private production judgment type.
 #[cfg(test)]
-pub(super) fn zone_policy_permits_for_test(
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ZonePolicyVerdictForTest {
+    Permit,
+    Revoke,
+    Decline,
+}
+
+#[cfg(test)]
+pub(super) fn zone_policy_verdict_for_test(
     forwarding: &ForwardingState,
     decision: SessionDecision,
     metadata: &SessionMetadata,
     flow: &SessionFlow,
     from_source: FromZoneSource,
     now_ns: u64,
-) -> bool {
+) -> ZonePolicyVerdictForTest {
     let input = PolicyJudgmentInput {
         decision,
         metadata: metadata.clone(),
@@ -3068,10 +3076,11 @@ pub(super) fn zone_policy_permits_for_test(
         from_source,
         now_ns,
     };
-    matches!(
-        zone_policy_deny_on_session_hit(forwarding, &input),
-        ZonePolicyJudgment::Permit
-    )
+    match zone_policy_deny_on_session_hit(forwarding, &input) {
+        ZonePolicyJudgment::Permit => ZonePolicyVerdictForTest::Permit,
+        ZonePolicyJudgment::Revoke => ZonePolicyVerdictForTest::Revoke,
+        ZonePolicyJudgment::Decline => ZonePolicyVerdictForTest::Decline,
+    }
 }
 
 #[cfg(test)]

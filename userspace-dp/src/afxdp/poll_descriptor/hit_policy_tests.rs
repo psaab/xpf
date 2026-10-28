@@ -622,7 +622,7 @@ fn fabric_recorded_zone_verdict_level_17027() {
                          dec: SessionDecision,
                          meta: &SessionMetadata,
                          from: FromZoneSource| {
-        super::super::policy_revalidation::zone_policy_permits_for_test(
+        super::super::policy_revalidation::zone_policy_verdict_for_test(
             fw,
             dec,
             meta,
@@ -653,18 +653,19 @@ fn fabric_recorded_zone_verdict_level_17027() {
         (TEST_LAN_ZONE_ID, TEST_DMZ_ZONE_ID),
         "zone-policy non-fabric verdict must judge live (lan, dmz)"
     );
-    assert!(zone_judgment(
-        &forwarding,
-        fabric_forward,
-        &forward_meta,
-        FromZoneSource::RecordedZone(TEST_LAN_ZONE_ID),
-    ));
-    assert!(!zone_judgment(
-        &forwarding,
-        live_forward,
-        &forward_meta,
-        live_from,
-    ));
+    assert_eq!(
+        zone_judgment(
+            &forwarding,
+            fabric_forward,
+            &forward_meta,
+            FromZoneSource::RecordedZone(TEST_LAN_ZONE_ID),
+        ),
+        super::super::policy_revalidation::ZonePolicyVerdictForTest::Permit,
+    );
+    assert_eq!(
+        zone_judgment(&forwarding, live_forward, &forward_meta, live_from),
+        super::super::policy_revalidation::ZonePolicyVerdictForTest::Revoke,
+    );
 
     // Anti-mutant control: recorded dmz denies even though the live ledger
     // says wan and would permit. If FabricRedirect read live here, this
@@ -672,16 +673,17 @@ fn fabric_recorded_zone_verdict_level_17027() {
     let unmoved_forwarding = build_forwarding_state(&snapshot);
     let recorded_dmz = metadata(TEST_LAN_ZONE_ID, TEST_DMZ_ZONE_ID, false);
     assert_eq!(unmoved_forwarding.egress_zone_id(WAN_IF), TEST_WAN_ZONE_ID);
-    assert!(!zone_judgment(
-        &unmoved_forwarding,
-        fabric_forward,
-        &recorded_dmz,
-        FromZoneSource::RecordedZone(TEST_LAN_ZONE_ID),
-    ));
-    assert!(zone_judgment(
-        &unmoved_forwarding,
-        live_forward,
-        &recorded_dmz,
-        live_from,
-    ));
+    assert_eq!(
+        zone_judgment(
+            &unmoved_forwarding,
+            fabric_forward,
+            &recorded_dmz,
+            FromZoneSource::RecordedZone(TEST_LAN_ZONE_ID),
+        ),
+        super::super::policy_revalidation::ZonePolicyVerdictForTest::Revoke,
+    );
+    assert_eq!(
+        zone_judgment(&unmoved_forwarding, live_forward, &recorded_dmz, live_from),
+        super::super::policy_revalidation::ZonePolicyVerdictForTest::Permit,
+    );
 }
