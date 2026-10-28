@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -381,5 +383,82 @@ func TestIPsecSAChunkHeaderBounds16758(t *testing.T) {
 	}
 	if frames := cc.frames(); len(frames) != 0 {
 		t.Fatalf("over-cap set emitted %d frames, want 0", len(frames))
+	}
+}
+
+// TestIPsecSAChunkBodyNameBoundAtDecode17826 pins the named decoder errors
+// and the exact per-chunk name-count boundary from #17826.
+func TestIPsecSAChunkBodyNameBoundAtDecode17826(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      []byte
+		wantNames int
+		wantErr   error
+	}{
+		{
+			name:      "at limit accepted",
+			body:      bytes.Repeat([]byte("a\n"), ipsecChunkNamesPerChunk),
+			wantNames: ipsecChunkNamesPerChunk,
+		},
+		{
+			name:    "one over limit returns named error",
+			body:    bytes.Repeat([]byte("a\n"), ipsecChunkNamesPerChunk+1),
+			wantErr: errIPsecSAChunkTooManyNames,
+		},
+		{
+			name:    "over limit with valid tail is rejected whole",
+			body:    append(bytes.Repeat([]byte("a\n"), ipsecChunkNamesPerChunk+1), []byte("vpn-tail")...),
+			wantErr: errIPsecSAChunkTooManyNames,
+		},
+		{
+			name:    "overlong name returns named error",
+			body:    bytes.Repeat([]byte("n"), maxIPsecSANameLen+1),
+			wantErr: errIPsecSAChunkNameTooLong,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := decodeIPsecSAChunkBody(tc.body)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("decode error = %v, want named error %v", err, tc.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("refused chunk returned names %v; want nil", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decode error = %v, want success", err)
+			}
+			if len(got) != tc.wantNames {
+				t.Fatalf("decoded %d names, want %d", len(got), tc.wantNames)
+			}
+		})
+	}
+}
+
+// TestIPsecSAChunkHugeBodyRefusedAtDecode17826 is the receiver-level
+// companion: a chunk frame whose body carries ~8M minimal names (the
+// 16MiB-frame admission shape) is refused and counted
+// IPsecSAMalformedIgnored with the held set retained — the same outcome
+// the caller's post-decode bound produced, now reached inside the
+// decoder before the names are materialized.
+func TestIPsecSAChunkHugeBodyRefusedAtDecode17826(t *testing.T) {
+	recv := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	recv.handleMessage(nil, syncMsgIPsecSA, appendFullSetSeq(encodeIPsecSAPayload([]string{"vpn-a"}), 1000, 1))
+	if held := recv.PeerIPsecSAs(); len(held) != 1 || held[0] != "vpn-a" {
+		t.Fatalf("fixture held set = %v, want [vpn-a]", held)
+	}
+	hugeBody := bytes.Repeat([]byte("a\n"), 8_000_000)
+	forged := encodeIPsecSAChunkPayload(hugeBody, 9, 0, 1, uint32(ipsecChunkMaxTotalNames))
+	if recv.handleMessage(nil, syncMsgIPsecSAChunk, appendFullSetSeq(forged, 1000, 2)) {
+		t.Fatal("chunk carrying ~8M names in one body must be rejected")
+	}
+	if got := recv.Stats().IPsecSAMalformedIgnored; got != 1 {
+		t.Fatalf("huge-body chunk refusal not counted: IPsecSAMalformedIgnored=%d want 1", got)
+	}
+	if held := recv.PeerIPsecSAs(); len(held) != 1 || held[0] != "vpn-a" {
+		t.Fatalf("huge-body chunk disturbed held set: %v", held)
 	}
 }

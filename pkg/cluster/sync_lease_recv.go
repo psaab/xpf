@@ -101,17 +101,11 @@ func (s *SessionSync) handleIPsecSAChunk(conn net.Conn, payload []byte) bool {
 			"incarnation", incarnation, "seq", seq, "bytes", len(base))
 		return false
 	}
-	names, malformed := decodeIPsecSAChunkBody(chunkBody)
-	if malformed {
+	names, decodeErr := decodeIPsecSAChunkBody(chunkBody)
+	if decodeErr != nil {
 		s.stats.IPsecSAMalformedIgnored.Add(1)
 		slog.Warn("cluster sync: dropping malformed IPsec SA chunk — prior set retained",
-			"generation", generation, "index", index)
-		return false
-	}
-	if len(names) > ipsecChunkNamesPerChunk {
-		s.stats.IPsecSAMalformedIgnored.Add(1)
-		slog.Warn("cluster sync: dropping IPsec SA chunk over per-chunk name bound — prior set retained",
-			"generation", generation, "index", index, "names", len(names), "cap", ipsecChunkNamesPerChunk)
+			"generation", generation, "index", index, "error", decodeErr)
 		return false
 	}
 	s.ipsecApplyMu.Lock()

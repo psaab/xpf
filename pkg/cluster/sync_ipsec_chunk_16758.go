@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 )
 
 // #16758: chunked IPsec SA full-sets.
@@ -137,15 +138,19 @@ func encodeIPsecSAChunkBodies(names []string) (bodies [][]byte, total int) {
 	return bodies, len(names)
 }
 
-// decodeIPsecSAChunkBody decodes one chunk body with the same per-name
-// bounds as the legacy decoder but WITHOUT the legacy element bound: the
-// chunk header's totalNames and the assembly's received>totalNames refusal
-// bound the assembled set, and each chunk is sender-bounded to
-// ipsecChunkNamesPerChunk names (a chunk announcing more is refused by the
-// caller before assembly). Names are copied, never aliased to the frame.
-func decodeIPsecSAChunkBody(payload []byte) ([]string, bool) {
+var (
+	errIPsecSAChunkNameTooLong  = errors.New("cluster sync: IPsec SA chunk name exceeds byte limit")
+	errIPsecSAChunkTooManyNames = errors.New("cluster sync: IPsec SA chunk exceeds per-chunk name limit")
+)
+
+// decodeIPsecSAChunkBody decodes one chunk body with the same per-name and
+// per-frame element bounds as the legacy decoder. Names are copied, never
+// aliased to the frame. The per-frame bound is enforced before materializing
+// each name so a peer cannot make the decoder build an over-bound slice only
+// for the receiver to reject it.
+func decodeIPsecSAChunkBody(payload []byte) ([]string, error) {
 	if len(payload) == 0 {
-		return nil, false
+		return nil, nil
 	}
 	var names []string
 	for len(payload) > 0 {
@@ -159,11 +164,14 @@ func decodeIPsecSAChunkBody(payload []byte) ([]string, bool) {
 			continue
 		}
 		if len(line) > maxIPsecSANameLen {
-			return nil, true
+			return nil, errIPsecSAChunkNameTooLong
+		}
+		if len(names) >= ipsecChunkNamesPerChunk {
+			return nil, errIPsecSAChunkTooManyNames
 		}
 		names = append(names, string(line))
 	}
-	return names, false
+	return names, nil
 }
 
 // addChunk records one decoded chunk in the pending assembly for key and
