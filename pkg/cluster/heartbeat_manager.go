@@ -1135,7 +1135,9 @@ func (m *Manager) handlePeerTimeout() {
 // the cold-boot absence hold until that proof goes stale. With no fresh proof,
 // this confirms absence without marking the peer ever seen, preserving the
 // readiness gate while allowing single-node promotion.
-func (m *Manager) handlePeerNeverSeen() {
+// It reports fresh-proof suppression so the Manager-clock caller can re-arm
+// a consumed retry without relying on another configuration apply or receiver.
+func (m *Manager) handlePeerNeverSeen() bool {
 	// #16745 defense in depth: a receiver that never saw the peer on THIS
 	// incarnation (lastSeen==0) but whose Manager has seen a live peer is
 	// not a cold boot — it is a peer that was alive and is now silent (the
@@ -1150,17 +1152,17 @@ func (m *Manager) handlePeerNeverSeen() {
 	m.mu.RUnlock()
 	if seenAlive {
 		m.handlePeerTimeout()
-		return
+		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.peerEverSeen || m.peerConfirmedAbsent {
-		return // a heartbeat arrived or absence was already confirmed
+		return false // a heartbeat arrived or absence was already confirmed
 	}
 	if m.peerSyncFreshLocked() {
 		slog.Debug("cluster: suppressing never-seen peer confirmation while session-sync proof is fresh")
-		return
+		return true
 	}
 	m.peerConfirmedAbsent = true
 	// #15211 (A22-02): a never-seen peer cannot be fenced under ANY
@@ -1172,6 +1174,7 @@ func (m *Manager) handlePeerNeverSeen() {
 	slog.Info("cluster: peer never seen after heartbeat timeout, proceeding with election")
 	m.history.Record(EventHeartbeat, -1, "Peer never seen (timeout)")
 	m.electSingleNode()
+	return false
 }
 
 // neverSeenGrace is how long the Manager-owned never-seen clock waits before
@@ -1245,15 +1248,33 @@ func (m *Manager) confirmNeverSeenIfDue(gen uint64) {
 	m.neverSeenTimer = nil
 	if m.peerSyncFreshLocked() {
 		slog.Debug("cluster: suppressing never-seen peer confirmation while session-sync proof is fresh")
-		m.neverSeenTimer = time.AfterFunc(neverSeenRecheckInterval, func() {
-			m.confirmNeverSeenIfDue(gen)
-		})
+		m.scheduleNeverSeenRecheckLocked(gen)
 		m.mu.Unlock()
 		return
 	}
 	m.neverSeenSince = time.Time{}
 	m.mu.Unlock()
-	m.handlePeerNeverSeen()
+	if m.handlePeerNeverSeen() {
+		m.mu.Lock()
+		m.scheduleNeverSeenRecheckLocked(gen)
+		m.mu.Unlock()
+	}
+}
+
+// scheduleNeverSeenRecheckLocked schedules a fresh-proof retry if this timer
+// generation still owns the never-seen clock. The helper may report fresh
+// proof after the callback's own probe was stale; in that case, re-arm only
+// if no newer timer or disarm has taken ownership in the meantime.
+//
+// Caller must hold m.mu.
+func (m *Manager) scheduleNeverSeenRecheckLocked(gen uint64) {
+	if gen != m.neverSeenTimerGen || m.stopped || m.controlInterface == "" ||
+		m.peerEverSeen || m.peerConfirmedAbsent || m.neverSeenTimer != nil {
+		return
+	}
+	m.neverSeenTimer = time.AfterFunc(neverSeenRecheckInterval, func() {
+		m.confirmNeverSeenIfDue(gen)
+	})
 }
 
 // neverSeenRecheckInterval is how often the Manager-owned clock re-probes

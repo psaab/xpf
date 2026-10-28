@@ -57,7 +57,7 @@ func (c *ctl) handleShowSystem(args []string) error {
 			if err != nil {
 				return err
 			}
-			path, pipe, err := splitShowPipe(args[2:])
+			path, pipe, err := splitShowPipe(args[2:], nil)
 			if err != nil {
 				return err
 			}

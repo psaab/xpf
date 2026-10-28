@@ -75,7 +75,7 @@ func (c *ctl) handleShow(args []string) error {
 		return c.showCommand("show chassis")
 
 	case "configuration":
-		path, pipe, err := splitShowPipe(args[1:])
+		path, pipe, err := splitShowPipe(args[1:], nil)
 		if err != nil {
 			return err
 		}
@@ -373,8 +373,8 @@ func (c *ctl) showRoutes() error {
 	return c.showCommand("show route")
 }
 
-func (c *ctl) handleConfigShow(args []string) error {
-	path, pipe, err := splitShowPipe(args)
+func (c *ctl) handleConfigShow(args []string, quoted []bool) error {
+	path, pipe, err := splitShowPipe(args, quoted)
 	if err != nil {
 		return err
 	}
@@ -425,19 +425,18 @@ func (c *ctl) handleConfigShow(args []string) error {
 }
 
 // splitShowPipe separates a show command's path from its single pipe modifier.
-// Unlike substring matching, it never interprets a path/token containing
-// "compare" or "display" as a modifier. A token that merely CONTAINS "|"
-// (a quoted path element such as `a|b`, #16790) is path data, not a pipe;
-// only the bare "|" token separates.
-func splitShowPipe(args []string) (path, pipe []string, err error) {
+// Quote provenance distinguishes a quoted path token equal to "|" from the
+// bare operator; a nil mask means args came from an already-tokenized caller.
+func splitShowPipe(args []string, quoted []bool) (path, pipe []string, err error) {
 	pipeIndex := -1
 	for i, arg := range args {
-		if arg == "|" {
-			if pipeIndex >= 0 {
-				return nil, nil, fmt.Errorf("syntax error: only one pipe modifier is allowed")
-			}
-			pipeIndex = i
+		if arg != "|" || (i < len(quoted) && quoted[i]) {
+			continue
 		}
+		if pipeIndex >= 0 {
+			return nil, nil, fmt.Errorf("syntax error: only one pipe modifier is allowed")
+		}
+		pipeIndex = i
 	}
 	if pipeIndex < 0 {
 		return args, nil, nil
