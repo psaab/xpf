@@ -19,11 +19,17 @@ import (
 //     deadlock and handlePeerTimeout never drops the lock for it.
 //   - hbSuppressStart is a plain field under m.mu (CLOCK_MONOTONIC nanos,
 //     0 = inactive). Heartbeat admission clears it in the same critical
-//     section (handlePeerHeartbeat), and a fresh sync connection clears it
-//     via resetSyncSuppressionLocked at publish time (SetPeerSyncSource).
+//     section (handlePeerHeartbeat); publishing a sync source clears it
+//     (SetPeerSyncSource), and every per-connection OnPeerConnected
+//     dispatch on that source clears it again via the OnPeerReconnected
+//     binding SetPeerSyncSource installs — so a reconnect on the same
+//     SessionSync object gets a fresh 5s window, as the pre-move daemon
+//     reset on every onSessionSyncPeerConnected did.
 //   - The daemon publishes exactly one reference — SetPeerSyncSource(ss|nil)
 //     at publish/stop — replacing the three former daemon hooks that joined
-//     the guard, the recovery notification and the never-seen probe.
+//     the guard, the recovery notification and the never-seen probe. The
+//     per-connection binding above is installed by that publish, inside
+//     pkg/cluster; it is not a fourth daemon hook.
 //
 // Timing contract (unchanged from #1792): suppress only while inbound peer
 // sync traffic is at most maxPeerSyncSilence (2s) old, and never for more
@@ -58,17 +64,53 @@ type peerSyncSource interface {
 // confirmation, or nil when cluster comms stop. It replaces the three
 // daemon hooks that used to join this policy across the package boundary
 // (#17056). Publishing a non-nil source resets the suppression cap stamp:
-// a fresh connection starts a fresh continuous-suppression window (the
-// pre-move daemon reset the stamp in its OnPeerConnected handler).
+// a fresh comms epoch starts a fresh continuous-suppression window. The
+// publish alone cannot provide the pre-move per-CONNECTION reset — the
+// same SessionSync object reconnects without being republished — so
+// SetPeerSyncSource also binds ss.OnPeerReconnected to
+// resetPeerSyncSuppression: every per-connection OnPeerConnected dispatch
+// (handleNewConnection when it cold-primes, and the BulkStart reboot
+// switch when it announces) then resets the stamp on this Manager, which
+// is the moved-policy equivalent of the pre-move daemon resetting
+// hbSuppressStart on every onSessionSyncPeerConnected. Unpublishing (nil)
+// clears the binding this Manager installed, but only if it is still ours,
+// so a replaced source's binding is never clobbered.
 func (m *Manager) SetPeerSyncSource(ss *SessionSync) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if prev, ok := m.peerSync.(*SessionSync); ok && prev != ss {
+		clearPeerReconnectBinding(prev, m)
+	}
 	if ss == nil {
 		m.peerSync = nil
 	} else {
+		ss.OnPeerReconnected = m.resetPeerSyncSuppression
+		ss.peerReconnectOwner = m
 		m.peerSync = ss
 	}
 	m.resetSyncSuppressionLocked()
+}
+
+// resetPeerSyncSuppression is the per-connection reset bound to
+// SessionSync.OnPeerReconnected at publish time (#17056). It runs on the
+// SessionSync goroutine that dispatches OnPeerConnected, outside any
+// SessionSync lock, and takes only m.mu.
+func (m *Manager) resetPeerSyncSuppression() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.resetSyncSuppressionLocked()
+}
+
+// clearPeerReconnectBinding removes the OnPeerReconnected binding mgr
+// installed on ss, if the current binding is still mgr's (tracked via
+// ss.peerReconnectOwner, since func values are not comparable). A binding
+// installed by another Manager (the source was republished elsewhere) or
+// by a test is left untouched.
+func clearPeerReconnectBinding(ss *SessionSync, mgr *Manager) {
+	if ss.peerReconnectOwner == mgr {
+		ss.OnPeerReconnected = nil
+		ss.peerReconnectOwner = nil
+	}
 }
 
 // SyncSourceInstalled reports whether a peer sync source is published.

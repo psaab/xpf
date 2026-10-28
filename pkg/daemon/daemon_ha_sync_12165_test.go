@@ -16,6 +16,19 @@ import (
 // consumed. This daemon-level cell drives the real wiring
 // (wireClusterPeerFailoverHooks -> SetPeerSyncSource) end to end; the
 // stamp itself is observed through the Manager seam.
+//
+// Mechanism (this cell, no sleep): recovery admission clears the stamp
+// (asserted directly after the recovery heartbeat below); interval #2
+// must then re-stamp STRICTLY after interval #1 (second > first) and
+// suppress. The 5s ageing the pre-move cell did with a real sleep is
+// done by backdating the stamp past its cap through
+// SetHBSuppressStartForTesting — in the sibling cluster cell
+// (TestHandlePeerTimeout_SuppressedGuardClearsLateHeartbeatStamp12165 in
+// pkg/cluster/heartbeat_guard_recheck_test.go) applies before its second
+// gap, and the trailing block below applies again to prove interval #2's
+// own cap expires. Removing the 5s sleep keeps the cell hermetic; the
+// strictness it carried (a stale stamp must not suppress) is preserved by
+// the backdate + strict-ordering assertions, not by wall time.
 // FAIL-ON-REVERT: remove the admission clear in
 // cluster.handlePeerHeartbeat (or the SetPeerSyncSource publish here)
 // and interval #2 promotes instead of suppressing.
@@ -65,13 +78,13 @@ func TestHeartbeatRecoveryRearmsSuppressionCap12165(t *testing.T) {
 		t.Fatalf("recovery: hbSuppressStart = %d, want cleared (0) after heartbeat admission", got)
 	}
 
-	// Backdate would-be stale stamp is now impossible from the daemon;
-	// instead age the (cleared) state by moving straight to interval #2:
-	// it must stamp fresh (> first) and suppress. Without the recovery
-	// clear, interval #1's stamp (backdated past its cap below in the
-	// cluster cell) would cause takeover here; at daemon level the clear
-	// assertion above is the direct pin, and the stamp ordering below
-	// proves re-arm.
+	// Interval #2: with the stamp cleared by admission, this timeout must
+	// re-stamp STRICTLY after interval #1 and suppress. Without the
+	// recovery clear, interval #1's stamp would still be installed here;
+	// backdating it past its cap (in the cluster cell, and in the trailing
+	// block below for interval #2's own cap) is what makes a stale stamp
+	// promote, so the clear assertion above plus the strict ordering
+	// below together pin the re-arm without a 5s sleep.
 	ss.SetPeerReceiveAgeForTesting(100*time.Millisecond, true)
 	d.cluster.HandlePeerTimeoutForTesting()
 	if !d.cluster.PeerAlive() || d.cluster.IsLocalPrimary(0) {
@@ -81,8 +94,8 @@ func TestHeartbeatRecoveryRearmsSuppressionCap12165(t *testing.T) {
 	if second == 0 {
 		t.Fatal("interval #2: hbSuppressStart = 0 after re-armed suppression, want nonzero stamp")
 	}
-	if second < first {
-		t.Fatalf("interval #2: hbSuppressStart = %d, want a stamp no earlier than first interval's %d (recovery did not re-arm the cap)", second, first)
+	if second <= first {
+		t.Fatalf("interval #2: hbSuppressStart = %d, want a fresh stamp strictly after first interval's %d (recovery did not re-arm the cap)", second, first)
 	}
 	if age := time.Duration(cluster.MonotonicNanos() - second); age < 0 || age > 5*time.Second {
 		t.Fatalf("interval #2: re-armed stamp age = %v, want within [0, 5s]", age)

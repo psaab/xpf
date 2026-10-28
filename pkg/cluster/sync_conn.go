@@ -937,6 +937,15 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 			slog.Info("cluster sync: scheduling OnPeerConnected callback", "fabric", fabricIdx)
 			go s.OnPeerConnected()
 		}
+		// #17056: this dispatch is a (re)connect on this SessionSync
+		// object. Reset the Manager's suppression cap stamp for it, so a
+		// reconnect gets a fresh 5s window instead of inheriting the prior
+		// connection's (possibly expired) continuous-suppression interval.
+		// Fired at exactly this dispatch point (shouldColdPrime only) to
+		// match the pre-move daemon reset in onSessionSyncPeerConnected.
+		if s.OnPeerReconnected != nil {
+			go s.OnPeerReconnected()
+		}
 		// Re-read the resync arm AFTER flushDeleteJournal: a rejournalTail
 		// eviction during that flush (or a journalDelete drop while we were
 		// disconnected) arms forceResync, and dropped deletes are only

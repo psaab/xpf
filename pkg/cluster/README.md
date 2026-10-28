@@ -4608,17 +4608,19 @@ it.
 - `handlePeerTimeout` decides sync-recency suppression under `m.mu` from
   the published sync source (`syncSuppressesPeerTimeoutLocked`, #17056);
   there is no guard callback and no unlock/relock around the decision.
-  Heartbeat admission clears the cap stamp in the same critical section.
-  It also re-checks heartbeat STALENESS via
-  `peerHeartbeatFreshLocked`, not just `peerAlive` (#2080): a heartbeat that
-  lands during the guard window keeps `peerAlive` true but is a fresh
-  heartbeat, so the only correct post-guard question is "is the heartbeat
-  fresh again?". `peerHeartbeatFreshLocked`
-  re-reads the receiver's `lastSeen` against the live monotonic clock (test
-  seam: `peerHeartbeatFreshFn`); a fresh heartbeat aborts the peer-lost
-  transition and prevents spurious failover churn. A nil receiver / unset seam
-  reports not-fresh, so the no-receiver call paths behave exactly as before the
-  re-check existed.
+  Heartbeat admission clears the cap stamp in the same critical section,
+  and every per-connection reconnect dispatch on the published source
+  (`OnPeerReconnected`, bound by `SetPeerSyncSource`) clears it too, so a
+  reconnect on the same `SessionSync` object starts a fresh 5s window.
+  Before the suppression decision it re-checks heartbeat STALENESS via
+  `peerHeartbeatFreshLocked`, not just `peerAlive` (#2080): a heartbeat
+  admitted before the timeout runs keeps `peerAlive` true and is fresh,
+  so the only correct question at that point is "is the heartbeat fresh
+  again?". `peerHeartbeatFreshLocked` re-reads the receiver's `lastSeen`
+  against the live monotonic clock (test seam: `peerHeartbeatFreshFn`);
+  a fresh heartbeat aborts the peer-lost transition and prevents spurious
+  failover churn. A nil receiver / unset seam reports not-fresh, so the
+  no-receiver call paths behave exactly as before the re-check existed.
 
   **#6198/#6666 correction:** the BPF-ABI `SessionID` was described here as
   `now<<16|slot` — a composition #6198 removed (it collapsed every session

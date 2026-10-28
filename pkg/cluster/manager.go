@@ -643,8 +643,8 @@ type Manager struct {
 
 	// peerHeartbeatFreshFn reports whether a peer heartbeat is currently
 	// within the timeout window (i.e. NOT stale). handlePeerTimeout consults
-	// it AFTER the (possibly slow) guard window so a heartbeat that arrived
-	// during the guard aborts the spurious peer-lost transition. Defaults to
+	// it under m.mu before the suppression decision so a fresh heartbeat
+	// aborts the spurious peer-lost transition. Defaults to
 	// the live receiver-backed check via peerHeartbeatFresh; overridable in
 	// tests to inject a fresh/stale heartbeat without a real socket.
 	peerHeartbeatFreshFn func() bool

@@ -640,8 +640,11 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// heartbeat-recovered and never-seen-fresh hooks: the policy, its 5s
 	// cap stamp and the heartbeat-admission reset now live together in
 	// pkg/cluster under Manager.mu (heartbeat_suppress.go). Publishing
-	// resets the cap stamp, preserving the fresh-connection reset the
-	// daemon used to do in onSessionSyncPeerConnected. #11682's silence
+	// resets the cap stamp, and SetPeerSyncSource binds the source's
+	// per-connection reconnect dispatch to the same reset, so a reconnect
+	// on this same SessionSync object also gets a fresh 5s window — the
+	// fresh-connection reset the daemon used to do in
+	// onSessionSyncPeerConnected. #11682's silence
 	// window is preserved inside Manager.peerSyncFreshLocked, which reads
 	// PeerRecentlyActiveWithinSilenceWindow off this same source.
 	d.cluster.SetPeerSyncSource(ss)

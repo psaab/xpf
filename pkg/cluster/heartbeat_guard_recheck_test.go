@@ -5,13 +5,18 @@ import (
 	"time"
 )
 
-// TestHandlePeerTimeout_FreshHeartbeatDuringGuardWindow exercises the #2080
-// bug directly: a fresh peer heartbeat must abort the peer-lost transition.
-// #17056: there is no longer a guard window — handlePeerTimeout decides
-// under m.mu — so the cell now pins the same outcome through the freshness
-// seam the timeout path consults first: fresh heartbeat -> peer stays
-// alive, peer groups preserved.
-func TestHandlePeerTimeout_FreshHeartbeatDuringGuardWindow(t *testing.T) {
+// TestHandlePeerTimeout_FreshHeartbeatAbortsPeerLost17056 exercises the
+// #2080 bug directly: a fresh peer heartbeat must abort the peer-lost
+// transition. #17056: there is no longer a guard window — handlePeerTimeout
+// decides under m.mu — so the cell pins the same outcome through the
+// freshness seam the timeout path consults first: fresh heartbeat -> peer
+// stays alive, peer groups preserved. (Renamed from
+// TestHandlePeerTimeout_FreshHeartbeatDuringGuardWindow and
+// TestHandlePeerTimeout_StaleAfterGuardStillMarksLost's sibling naming;
+// the guard window those names invoked no longer exists. The stale
+// control below is renamed likewise to
+// TestHandlePeerTimeout_StaleHeartbeatStillMarksLost17056.)
+func TestHandlePeerTimeout_FreshHeartbeatAbortsPeerLost17056(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(
 		makeRG(0, false, map[int]int{0: 200, 1: 100}),
@@ -38,11 +43,12 @@ func TestHandlePeerTimeout_FreshHeartbeatDuringGuardWindow(t *testing.T) {
 	}
 }
 
-// TestHandlePeerTimeout_StaleAfterGuardStillMarksLost is the negative control:
-// when the heartbeat is genuinely stale (and no fresh sync source suppresses),
-// the peer must still be marked lost. This guards against an over-eager abort
-// that would break real failover.
-func TestHandlePeerTimeout_StaleAfterGuardStillMarksLost(t *testing.T) {
+// TestHandlePeerTimeout_StaleHeartbeatStillMarksLost17056 is the negative
+// control: when the heartbeat is genuinely stale (and no fresh sync source
+// suppresses), the peer must still be marked lost. This guards against an
+// over-eager abort that would break real failover. (Renamed from
+// TestHandlePeerTimeout_StaleAfterGuardStillMarksLost, #17056.)
+func TestHandlePeerTimeout_StaleHeartbeatStillMarksLost17056(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(
 		makeRG(0, false, map[int]int{0: 200, 1: 100}),
@@ -222,6 +228,105 @@ func TestHandlePeerTimeout_SuppressedGuardClearsLateHeartbeatStamp12165(t *testi
 	m.handlePeerTimeout()
 	if m.PeerAlive() {
 		t.Fatal("gap 2: suppression did not expire after its own 5s cap")
+	}
+}
+
+// #17056 reconnect cell: a disconnect+reconnect on the SAME SessionSync
+// object (no republish, no heartbeat admission in between) must reset the
+// suppression cap stamp, so the post-reconnect gap gets a fresh 5s window
+// instead of inheriting the prior connection's expired cap. This pins the
+// per-connection reset the pre-move daemon did in
+// onSessionSyncPeerConnected (hbSuppressStart.Store(0) on every connect);
+// the moved policy provides it through the OnPeerReconnected binding
+// SetPeerSyncSource installs, fired at the sync_conn.go /
+// sync_bulkstart_recv.go OnPeerConnected dispatch points. Sub-tick: the
+// backdated stamp is already past its cap, so without the reset the first
+// post-reconnect timeout promotes immediately (cap expired early); with
+// it, the timeout re-stamps and suppresses.
+// FAIL-ON-REVERT: drop the OnPeerReconnected binding in SetPeerSyncSource
+// (or its dispatch in sync_conn.go) and the post-reconnect timeout below
+// marks the peer lost instead of suppressing.
+func TestHandlePeerTimeout_ReconnectResetsSuppressionCap17056(t *testing.T) {
+	m := NewManager(0, 1)
+	cfg := makeConfig(
+		makeRG(0, false, map[int]int{0: 200, 1: 100}),
+	)
+	m.UpdateConfig(cfg)
+	m.SetRGReady(0, true, nil)
+
+	peerPrimary := &HeartbeatPacket{
+		NodeID:    1,
+		ClusterID: 1,
+		Groups: []HeartbeatGroup{{
+			GroupID: 0, Priority: 100, Weight: 100, State: uint8(StatePrimary),
+		}},
+	}
+	m.handlePeerHeartbeat(peerPrimary)
+
+	// Real SessionSync (not the fake): the reconnect binding lives on the
+	// real object and is installed by the real publish.
+	ss := NewSessionSync("127.0.0.1:4785", "127.0.0.1:4785", nil)
+	ss.SetConnectedForTesting(true)
+	ss.SetPeerReceiveAgeForTesting(100*time.Millisecond, true)
+	m.SetPeerSyncSource(ss)
+	if ss.OnPeerReconnected == nil {
+		t.Fatal("SetPeerSyncSource did not bind OnPeerReconnected (#17056)")
+	}
+	if ss.peerReconnectOwner != m {
+		t.Fatal("SetPeerSyncSource did not record the reconnect-binding owner (#17056)")
+	}
+
+	// Gap on the first connection: suppression opens and stamps.
+	m.handlePeerTimeout()
+	if !m.PeerAlive() {
+		t.Fatal("gap 1: fresh sync traffic must suppress peer loss")
+	}
+	if first := m.HBSuppressStartForTesting(); first == 0 {
+		t.Fatal("gap 1: hbSuppressStart = 0 after suppression began, want nonzero stamp")
+	}
+
+	// Disconnect + reconnect on the same object, sub-tick, with NO
+	// heartbeat admission in between (admission would clear the stamp on
+	// its own and mask a missing reconnect reset). The stamp is backdated
+	// past its 5s cap first, modelling a first connection whose
+	// continuous-suppression window had already expired by reconnect time.
+	m.SetHBSuppressStartForTesting(MonotonicNanos() - (6 * time.Second).Nanoseconds())
+	ss.SetConnectedForTesting(false) // disconnect: no timeout runs while down
+	ss.SetConnectedForTesting(true)  // reconnect on the same SessionSync
+	ss.SetPeerReceiveAgeForTesting(100*time.Millisecond, true)
+	// The per-connection dispatch point (sync_conn.go / sync_bulkstart_recv.go
+	// in production) fires the bound reset.
+	ss.OnPeerReconnected()
+	if got := m.HBSuppressStartForTesting(); got != 0 {
+		t.Fatalf("reconnect: hbSuppressStart = %d, want cleared (0) by the per-connection reset", got)
+	}
+
+	// First post-reconnect timeout must re-stamp fresh and suppress: the
+	// cap must NOT be treated as already expired from the prior connection.
+	m.handlePeerTimeout()
+	if !m.PeerAlive() {
+		t.Fatal("post-reconnect: prior connection's expired cap caused premature peer loss (#17056)")
+	}
+	second := m.HBSuppressStartForTesting()
+	if second == 0 {
+		t.Fatal("post-reconnect: hbSuppressStart = 0, want a fresh stamp for the new connection's window")
+	}
+	if age := time.Duration(MonotonicNanos() - second); age < 0 || age > time.Second {
+		t.Fatalf("post-reconnect: fresh stamp age = %v, want within [0, 1s] (sub-tick reconnect)", age)
+	}
+
+	// The new connection's own cap still applies: backdate past 5s and the
+	// next timeout must stop suppressing.
+	m.SetHBSuppressStartForTesting(MonotonicNanos() - (6 * time.Second).Nanoseconds())
+	m.handlePeerTimeout()
+	if m.PeerAlive() {
+		t.Fatal("post-reconnect: suppression did not expire after the new connection's own 5s cap")
+	}
+
+	// Unpublish clears only this Manager's binding.
+	m.SetPeerSyncSource(nil)
+	if ss.OnPeerReconnected != nil || ss.peerReconnectOwner != nil {
+		t.Fatal("SetPeerSyncSource(nil) left the reconnect binding installed (#17056)")
 	}
 }
 

@@ -64,8 +64,11 @@ func (d *Daemon) onSessionSyncPeerConnected() {
 	d.configSyncPushedGen = 0
 	d.configSyncMu.Unlock()
 	// #17056: the suppression cap stamp now lives in pkg/cluster under
-	// Manager.mu and is reset when the daemon publishes this connection's
-	// sync object via SetPeerSyncSource (wireClusterPeerFailoverHooks).
+	// Manager.mu. Publishing this connection's sync object via
+	// SetPeerSyncSource (wireClusterPeerFailoverHooks) resets it, and the
+	// per-connection binding that publish installs on the SessionSync
+	// resets it again on every reconnect dispatch of this handler's
+	// caller (OnPeerConnected), so no reset is needed here.
 
 	// Determine whether this is a true cold start or a routine reconnect.
 	// A cold start means no bulk sync has ever completed during this
