@@ -396,6 +396,128 @@ func (p *blockingFabricDP17060) ResolveFabricPeer(slot int, overlayIfindex, pare
 	return p.rec.ResolveFabricPeer(slot, overlayIfindex, parentIfindex, peer, localMAC)
 }
 
+// TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060 covers the periodic
+// wake arms, after the initial populate probe has succeeded. For each slot it
+// holds the initial refresh in the resolver, then makes both ctx.Done() and a
+// buffered refresh poke ready before releasing it. Since select may choose
+// either arm, retries continue until the wake arm consumed a poke, proving
+// that the cancelled-wake path was exercised. The matching synthetic
+// neighbour keeps every allowed initial probe hermetic; overlay lookup counts
+// prove the cancelled wake did not enter probeFabricNeighbor.
+func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
+	for _, tc := range []struct {
+		name, fabIface, overlay, peer string
+		parentIdx, overlayIdx         int
+		run                           func(*Daemon, context.Context, chan struct{})
+	}{
+		{
+			name: "fab0", fabIface: "ge-0-0-0", overlay: "fab0",
+			peer: "10.99.20.2", parentIdx: 111, overlayIdx: 112,
+			run: func(d *Daemon, ctx context.Context, ch chan struct{}) {
+				d.fabricPopulateWG.Add(1)
+				d.populateFabricFwd(ctx, "ge-0-0-0", "fab0", "10.99.20.2", ch)
+			},
+		},
+		{
+			name: "fab1", fabIface: "ge-0-0-5", overlay: "fab1",
+			peer: "10.99.21.2", parentIdx: 121, overlayIdx: 122,
+			run: func(d *Daemon, ctx context.Context, ch chan struct{}) {
+				d.fabricPopulateWG.Add(1)
+				d.populateFabricFwd1(ctx, "ge-0-0-5", "fab1", "10.99.21.2", ch)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sawWakeArm := false
+			for attempt := 0; attempt < 32 && !sawWakeArm; attempt++ {
+				parent := &testLink{attrs: netlink.LinkAttrs{
+					Name: tc.fabIface, Index: tc.parentIdx, OperState: netlink.OperUp,
+					TxQLen: 10000, HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+				}}
+				overlay := &testLink{attrs: netlink.LinkAttrs{
+					Name: tc.overlay, Index: tc.overlayIdx, ParentIndex: tc.parentIdx,
+					OperState: netlink.OperUp, TxQLen: 10000,
+					HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+				}}
+				links := map[string]*testLink{tc.fabIface: parent, tc.overlay: overlay}
+				var mu sync.Mutex
+				overlayLookups := 0
+				d := &Daemon{
+					linkByNameFn: func(name string) (netlink.Link, error) {
+						mu.Lock()
+						defer mu.Unlock()
+						if name == tc.overlay {
+							overlayLookups++
+						}
+						if link, ok := links[name]; ok {
+							return link, nil
+						}
+						return nil, errors.New("hermetic wake test: unknown link")
+					},
+					neighListFn: func(ifindex, family int) ([]netlink.Neigh, error) {
+						if ifindex == tc.overlayIdx && family == netlink.FAMILY_V4 {
+							return []netlink.Neigh{fabPeerNeigh(t, tc.peer, fabPeerTestPeerMAC)}, nil
+						}
+						return nil, nil
+					},
+				}
+				rec := newBlockingFabricRecorder17060()
+				d.setDataplane(&blockingFabricDP17060{rec: rec})
+				ctx, cancel := context.WithCancel(context.Background())
+				ch := make(chan struct{}, 1)
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					tc.run(d, ctx, ch)
+				}()
+				select {
+				case <-rec.entered:
+				case <-time.After(5 * time.Second):
+					cancel()
+					close(rec.release)
+					t.Fatal("populate loop did not reach its initial refresh resolver (#17060)")
+				}
+				mu.Lock()
+				baselineLookups := overlayLookups
+				mu.Unlock()
+
+				d.fabricMu.Lock()
+				if tc.name == "fab1" {
+					d.fabricProbePending1 = true
+				} else {
+					d.fabricProbePending = true
+				}
+				d.fabricMu.Unlock()
+				ch <- struct{}{}
+				cancel()
+				close(rec.release)
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("populate loop did not exit after cancelled wake (#17060)")
+				}
+				mu.Lock()
+				gotLookups := overlayLookups
+				mu.Unlock()
+				if gotLookups != baselineLookups {
+					t.Fatalf("cancelled buffered wake probed %s: overlay lookups=%d, want unchanged %d (#17060)",
+						tc.name, gotLookups, baselineLookups)
+				}
+				select {
+				case <-ch:
+					// Cancellation won select; retry so the wake arm itself is covered.
+				default:
+					sawWakeArm = true
+				}
+				d.clearFabricSlots()
+			}
+			if !sawWakeArm {
+				t.Fatal("select never consumed the buffered poke while cancellation was ready (#17060)")
+			}
+		})
+	}
+}
+
 // TestPopulateLoopJoinedBeforeSlotClear17060 runs REAL populate loops
 // (fab0 + fab1, both sharing peer 10.99.0.2) concurrently with the REAL
 // stopClusterComms. The fab0 loop is held inside refreshFabricPeer by a

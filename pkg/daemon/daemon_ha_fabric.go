@@ -427,6 +427,12 @@ func (d *Daemon) populateFabricFwd(ctx context.Context, fabIface, overlay, peerA
 		case <-ticker.C:
 			d.refreshFabricFwd(ctx, fabIface, overlay, peerIP, false)
 		case <-refreshCh:
+			// select may pick this arm even when ctx.Done() is also ready:
+			// the probe below must not put one more frame on the wire for a
+			// caller whose context is ALREADY cancelled (#17060).
+			if ctx.Err() != nil {
+				return
+			}
 			if d.takeFabricProbePending(0) {
 				d.probeFabricNeighbor(ctx, overlayOrParent(overlay, fabIface), peerIP)
 			}
@@ -1005,6 +1011,11 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 		case <-ticker.C:
 			d.refreshFabricFwd1(ctx, fabIface, overlay, peerIP, false)
 		case <-refreshCh:
+			// As on fab0, the select may choose a ready poke over the
+			// cancellation arm; do not probe a superseded epoch (#17060).
+			if ctx.Err() != nil {
+				return
+			}
 			if d.takeFabricProbePending(1) {
 				d.probeFabricNeighbor(ctx, overlayOrParent(overlay, fabIface), peerIP)
 			}
