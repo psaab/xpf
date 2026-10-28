@@ -421,49 +421,8 @@ func (s *Server) showTestPolicy(req *pb.ShowTextRequest, cfg *config.Config, buf
 		// CIDRs, and ignored the feed overlay — exactly the operator-lie class
 		// #3042 removed from the REST/gRPC MatchPolicies and CLI
 		// match-policies surfaces. This was the one surface #3042 missed.
-		var overlay map[string][]string
-		if s.feedOverlayFn != nil {
-			overlay = s.feedOverlayFn()
-		}
-		var publicationDebt map[string]bool
-		if s.feedsFn != nil {
-			for name, info := range s.feedsFn() {
-				if info.PublicationDebt {
-					if publicationDebt == nil {
-						publicationDebt = make(map[string]bool)
-					}
-					publicationDebt[name] = true
-				}
-			}
-		}
-		res := policymatch.Match(cfg, policymatch.Query{
-			FromZone: fromZone,
-			ToZone:   toZone,
-			SrcIP:    net.ParseIP(srcIP),
-			DstIP:    net.ParseIP(dstIP),
-			// #6377: colon-strict text family from the RAW operator string so
-			// the unsupported-tuple gate does not fold an IPv4-mapped IPv6
-			// source to v4 (net.ParseIP has discarded the ':' above).
-			SrcFamily: config.NATAddrFamily(srcIP),
-			DstFamily: config.NATAddrFamily(dstIP),
-			Protocol:  proto,
-			SrcPort:   srcPort,
-			DstPort:   dstPort,
-			ICMPType:  icmpType,
-			ICMPCode:  icmpCode,
-			// #5572: non-first-fragment (l4_present == false) reproduces the
-			// #4569 fragment-associated deny; false is a normal L4 packet.
-			NonFirstFragment: nonFirstFrag,
-			// #5579: scope the host-inbound classifier to this ingress interface's
-			// effective view (validated above). "" = zone-scoped, unchanged.
-			IngressInterface:    ingressIface,
-			FeedOverlay:         overlay,
-			FeedPublicationDebt: publicationDebt,
-			// #3104: skip scheduler-inactive policies like the runtime does, so
-			// the `test policy` diagnostic falls through to the next active rule
-			// / default-policy, agreeing with the dataplane.
-			PolicyInactiveForFn: s.policyInactiveForFn(cfg),
-		})
+		req17198 := policymatch.Request{FromZone: fromZone, ToZone: toZone, SrcIP: srcIP, DstIP: dstIP, Protocol: proto, SrcPort: srcPort, DstPort: dstPort, ICMPType: icmpType, ICMPCode: icmpCode, NonFirstFragment: nonFirstFrag, IngressInterface: ingressIface}
+		res := policymatch.Match(cfg, policymatch.Assemble(cfg, req17198, s.matchLive(cfg)))
 		if res.PostNATInputNote != "" {
 			fmt.Fprintf(buf, "NOTE: %s\n", res.PostNATInputNote)
 		}

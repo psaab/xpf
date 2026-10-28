@@ -35,6 +35,7 @@ import (
 	"github.com/psaab/xpf/pkg/logging"
 	"github.com/psaab/xpf/pkg/natpoolalarm"
 	"github.com/psaab/xpf/pkg/osident"
+	"github.com/psaab/xpf/pkg/policymatch"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/psaab/xpf/pkg/rpm"
 	"github.com/psaab/xpf/pkg/sysservices"
@@ -397,16 +398,16 @@ func (c *CLI) feedPublicationDebt() map[string]bool {
 	if c == nil || c.feedsFn == nil {
 		return nil
 	}
-	debt := make(map[string]bool)
-	for name, info := range c.feedsFn() {
-		if info.PublicationDebt {
-			debt[name] = true
-		}
+	return (policymatch.Live{Feeds: policymatch.FeedInfos(c.feedsFn(), func(i feeds.FeedInfo) bool { return i.PublicationDebt })}).PublicationDebt()
+}
+
+// matchLive assembles shared Live inputs (#17198).
+func (c *CLI) matchLive(cfg *config.Config) policymatch.Live {
+	live := policymatch.Live{FeedOverlay: c.feedOverlay(), PolicyInactiveForFn: c.policyInactiveForFn(cfg)}
+	if c != nil && c.feedsFn != nil {
+		live.Feeds = policymatch.FeedInfos(c.feedsFn(), func(i feeds.FeedInfo) bool { return i.PublicationDebt })
 	}
-	if len(debt) == 0 {
-		return nil
-	}
-	return debt
+	return live
 }
 
 // SetLLDPNeighborsFn sets a callback for retrieving live LLDP neighbor data.

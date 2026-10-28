@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 
@@ -633,10 +632,7 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
-	fromZone, toZone, srcIP, dstIP, proto := sel.FromZone, sel.ToZone, sel.SrcIP, sel.DstIP, sel.Protocol
-	srcPort, dstPort := sel.SrcPort, sel.DstPort
-	icmpType, icmpCode := sel.ICMPType, sel.ICMPCode
-	nonFirstFrag := sel.NonFirstFragment
+	fromZone, toZone := sel.FromZone, sel.ToZone
 
 	if fromZone == "" || toZone == "" {
 		// #3628: the selector list is the shared SSOT in policymatch so all four
@@ -646,9 +642,6 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 		fmt.Println(policymatch.MatchPoliciesUsage)
 		return nil
 	}
-
-	parsedSrc := net.ParseIP(srcIP)
-	parsedDst := net.ParseIP(dstIP)
 
 	// #5579: validate the optional ingress-interface selector against the live
 	// config (zone membership + lifeline reject) so the host-inbound classifier is
@@ -668,32 +661,7 @@ func (c *CLI) showMatchPolicies(cfg *config.Config, args []string) error {
 	// address-name resolves to its live CIDRs on-box, matching the REST/gRPC
 	// simulators and the AF_XDP helper. Nil (CLI outside the daemon) keeps the
 	// pre-#3105 static-only behavior.
-	res := policymatch.Match(cfg, policymatch.Query{
-		FromZone: fromZone,
-		ToZone:   toZone,
-		SrcIP:    parsedSrc,
-		DstIP:    parsedDst,
-		// #6377: colon-strict text family from the RAW operator string so the
-		// unsupported-tuple gate does not fold an IPv4-mapped IPv6 source to v4.
-		SrcFamily: config.NATAddrFamily(srcIP),
-		DstFamily: config.NATAddrFamily(dstIP),
-		Protocol:  proto,
-		SrcPort:   srcPort,
-		DstPort:   dstPort,
-		ICMPType:  icmpType,
-		ICMPCode:  icmpCode,
-		// #5572: a non-first IP fragment (no L4 header) reproduces the #4569
-		// fragment-associated deny; false is a normal L4-present packet.
-		NonFirstFragment: nonFirstFrag,
-		// #5579: scope the host-inbound classifier to this ingress interface's
-		// effective view (validated above). "" = zone-scoped, unchanged.
-		IngressInterface:    sel.IngressInterface,
-		FeedOverlay:         c.feedOverlay(),
-		FeedPublicationDebt: c.feedPublicationDebt(),
-		// #3104: skip scheduler-inactive policies like the runtime does, so the
-		// simulator falls through to the next active rule / default-policy.
-		PolicyInactiveForFn: c.policyInactiveForFn(cfg),
-	})
+	res := policymatch.Match(cfg, policymatch.Assemble(cfg, sel.Request(), c.matchLive(cfg)))
 	if res.PostNATInputNote != "" {
 		fmt.Printf("NOTE: %s\n", res.PostNATInputNote)
 	}
