@@ -34,7 +34,7 @@ func TestGreDecapUnsupportedVersionRefusalsWireKeyLockstepWithRust(t *testing.T)
 
 	// #7160: resolved by FIELD, not by file path — `ProcessStatus` moved out
 	// of `control.rs` when that file crossed the modularity floor.
-	rustKey := rustProcessStatusRename(t, rustField)
+	rustKey := rustWireKeyInProtocolStruct(t, "ProcessStatus", rustField, false)
 
 	field, ok := reflect.TypeOf(ProcessStatus{}).FieldByName(goField)
 	if !ok {
@@ -84,7 +84,7 @@ func TestGreDecapPtNibbleMismatchRefusalsWireKeyLockstepWithRust(t *testing.T) {
 	const rustField = "gre_decap_pt_nibble_mismatch_refusals_total"
 	const goField = "GreDecapPtNibbleMismatchRefusalsTotal"
 
-	rustKey := rustProcessStatusRename(t, rustField)
+	rustKey := rustWireKeyInProtocolStruct(t, "ProcessStatus", rustField, false)
 	field, ok := reflect.TypeOf(ProcessStatus{}).FieldByName(goField)
 	if !ok {
 		t.Fatalf("ProcessStatus has no field %s", goField)
@@ -121,7 +121,7 @@ func TestGreReassembledDecapRefusalsWireKeyLockstepWithRust(t *testing.T) {
 	const rustField = "gre_reassembled_decap_refusals_total"
 	const goField = "GreReassembledDecapRefusalsTotal"
 
-	rustKey := rustProcessStatusRename(t, rustField)
+	rustKey := rustWireKeyInProtocolStruct(t, "ProcessStatus", rustField, false)
 	field, ok := reflect.TypeOf(ProcessStatus{}).FieldByName(goField)
 	if !ok {
 		t.Fatalf("ProcessStatus has no field %s", goField)
@@ -158,7 +158,7 @@ func TestGreDecapTransportEgressRefusalsWireKeyLockstepWithRust(t *testing.T) {
 	const rustField = "gre_decap_transport_egress_refusals_total"
 	const goField = "GreDecapTransportEgressRefusalsTotal"
 
-	rustKey := rustProcessStatusRename(t, rustField)
+	rustKey := rustWireKeyInProtocolStruct(t, "ProcessStatus", rustField, false)
 	field, ok := reflect.TypeOf(ProcessStatus{}).FieldByName(goField)
 	if !ok {
 		t.Fatalf("ProcessStatus has no field %s", goField)

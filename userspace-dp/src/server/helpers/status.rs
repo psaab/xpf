@@ -10,8 +10,7 @@
 // dump stays gated on `XPF_DEBUG_NEIGHBOR_KEYS`, bindings are refreshed
 // before the queue/per-binding projections, and worker snapshots are read
 // before the aggregates derived from them. No added coordinator
-// traversal, status clone, or allocation. Bodies byte-for-byte identical
-// to the pre-split source.
+// traversal, status clone, or allocation.
 
 use super::summarize_queues;
 use crate::afxdp;

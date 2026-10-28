@@ -1156,8 +1156,8 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	}
 
 	// #3440 H1 / #10890: `security flow aging` values still do not reach the
-	// userspace session table. The Go-side conntrack GC sweep is skipped on
-	// the userspace AF_XDP dataplane, and the configured early-ageout and
+	// userspace session table. The Go-side conntrack GC that consumed them is
+	// retired (`pkg/conntrack`, deleted in #17155), and the configured early-ageout and
 	// high/low-watermark values are not wired into its admission policy.
 	// #10890 adds a separate fixed 90%-of-cap policy: when a validated new
 	// TCP initial SYN reaches a worker at that pressure, it sheds local
@@ -2195,10 +2195,16 @@ func schedulerEqualTimeWindowForm(s *SchedulerConfig) (string, bool) {
 }
 
 // schedulerTimeOfDayEqual reports whether two scheduler time-of-day bounds
-// denote the same clock time. It uses the same parser as schema validation,
-// so HH:MM and HH:MM:SS values compare as equal when they represent the same
-// instant. Bounds parse RAW, with no whitespace trim, exactly like the runtime:
-// padded or otherwise unparseable bounds fail closed there.
+// denote the same clock time. It uses the same parser as schema validation
+// and the runtime evaluator (ParseSchedulerTimeOfDay, #17187), so HH:MM
+// and HH:MM:SS values compare as equal when they represent the same
+// instant. Bounds parse RAW, with no whitespace trim: a padded or
+// otherwise unparseable bound makes this comparison false (no
+// equal-window warning is derived from it), and at runtime the same
+// unparseable bound makes the scheduler INACTIVE. That is fail-closed
+// only for a scheduled permit; for a scheduled DENY it means the deny
+// never engages, so the padded form must be rejected at commit by the
+// untrimmed validator rather than relied on to "fail closed" (#17187).
 func schedulerTimeOfDayEqual(start, stop string) bool {
 	s, err := parseSchedulerTimeOfDay(start)
 	if err != nil {

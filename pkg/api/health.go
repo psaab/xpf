@@ -202,10 +202,10 @@ func (s *Server) statusHandler(w http.ResponseWriter, r *http.Request) {
 		resp.ZoneCount = len(cfg.Security.Zones)
 	}
 	// #3929: report the live session count from the dataplane session table,
-	// NOT the BPF GC sweep stats. On the userspace dataplane (the only live
-	// forwarding path) the BPF GC sweep is skipped (#333), so
-	// gc.Stats().TotalEntries is permanently 0 — this reported 0 sessions on
-	// every real deployment.
+	// NOT the retired Go conntrack GC's sweep stats (`pkg/conntrack`, deleted
+	// in #17155). On the userspace dataplane (the only live forwarding path)
+	// that sweep never ran (#333), so its TotalEntries was permanently 0 —
+	// this reported 0 sessions on every real deployment.
 	if s.dp != nil && s.dp.IsLoaded() {
 		release, err := sessionWalkLimiter.Acquire()
 		if err != nil {

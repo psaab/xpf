@@ -115,8 +115,9 @@ func gatherGaugesByName(t *testing.T, c *xpfCollector, dp apiRuntimeDataPlane) m
 // guard for the Prometheus session gauges. It derives active/established/
 // breakdown from a userspace session snapshot (the live dataplane session
 // table). Reverting collectSessionGauges to source xpf_sessions_active /
-// xpf_sessions_established from gc.Stats() (permanently 0 on the userspace
-// dataplane, which skips the BPF GC sweep per #333) drops active from 4 -> 0
+// xpf_sessions_established from the retired Go conntrack GC's stats
+// (`pkg/conntrack`, deleted in #17155; permanently 0 on the userspace
+// dataplane, where its sweep never ran per #333) drops active from 4 -> 0
 // and established from 3 -> 0, flipping both assertions red.
 func TestPrometheusSessionGaugesFromUserspaceTable(t *testing.T) {
 	c := newSessionGaugeCollector() // gc present, never swept => Stats() all-zero
@@ -166,8 +167,8 @@ func TestPrometheusSessionGaugesEmptyTable(t *testing.T) {
 
 // TestRESTStatusSessionCountFromUserspaceTable is the #3929 RED-on-revert
 // guard for the REST /status SessionCount. It must reflect the live dataplane
-// session count (forward-only = 4), NOT gc.Stats().TotalEntries (0 on the
-// userspace dataplane). Reverting health.go to `resp.SessionCount =
+// session count (forward-only = 4), NOT the retired GC's TotalEntries (0 on
+// the userspace dataplane). Reverting health.go to `resp.SessionCount =
 // stats.TotalEntries` reports 0 and flips this assertion red.
 func TestRESTStatusSessionCountFromUserspaceTable(t *testing.T) {
 	s := &Server{

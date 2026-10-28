@@ -139,7 +139,8 @@ the actual bind result at runtime, and fall back to private UMEM when the live
 kernel/driver path rejects the group.
 
 The artifact remains useful as audit evidence for a lab or release note. When
-configured, xpf parses it and logs whether the artifact still matches the
+configured, the Go config compiler's audit (`sharedUMEMAuditWarnings`,
+#17134) warns at commit/load whether the artifact still matches the
 running kernel, PCI IDs, driver, MTU, and queue topology. Audit failure is
 visible but non-blocking. Operators should not need to keep
 `/run/xpf/shared-umem-phase0.json` in sync just to get copy-free forwarding.
