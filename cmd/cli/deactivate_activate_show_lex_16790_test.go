@@ -21,7 +21,7 @@ import (
 
 type lexRecorder16790 struct {
 	pb.BpfrxServiceClient
-	setInputs   []string
+	setInputs    []string
 	configPath   []string
 	configFormat pb.ConfigFormat
 	configCalls  int
