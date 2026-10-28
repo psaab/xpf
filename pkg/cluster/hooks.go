@@ -93,32 +93,6 @@ func (m *Manager) SetPeerFenceConfirmFunc(fn func(timeout time.Duration) (FenceA
 	m.peerFenceConfirmFn = fn
 }
 
-// SetPeerTimeoutGuard sets a callback that can suppress heartbeat-driven
-// peer-loss if another control-plane signal proves the peer is still alive.
-func (m *Manager) SetPeerTimeoutGuard(fn func() (bool, string)) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.peerTimeoutGuardFn = fn
-}
-
-// SetPeerNeverSeenSyncFreshFunc installs the sync-recency probe used before
-// confirming an unheard peer absent. It runs under m.mu and therefore must be
-// a fast, lock-free read that does not call back into Manager.
-func (m *Manager) SetPeerNeverSeenSyncFreshFunc(fn func() bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.peerNeverSeenSyncFreshFn = fn
-}
-
-// SetPeerHeartbeatRecoveredFunc installs an idempotent notification for an
-// admitted peer heartbeat or a post-guard freshness recheck. It runs under
-// m.mu and must be a fast, lock-free action that does not call back into Manager.
-func (m *Manager) SetPeerHeartbeatRecoveredFunc(fn func()) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.peerHeartbeatRecoveredFn = fn
-}
-
 // SetHeartbeatRestartNotifyFunc sets the callback invoked around the
 // RestartHeartbeat socket teardown/rebind window. The daemon wires it to
 // SessionSync.SendLivenessKeepalive so the peer's heartbeat-timeout

@@ -227,17 +227,12 @@ func (c *CLI) showStatistics(detail bool) error {
 		return nil
 	}
 
-	// #3345: surface a counter-read failure rather than printing clean zeros
-	// that hide a degraded counter bridge. This is the canonical operator
+	// #17193: one shared snapshot classifies every global counter once.
+	// #3345: a genuine failure still warns below; #13274: unavailable
+	// counters print "unavailable", never a fabricated 0, and never
+	// trigger the read-failed warning. This is the canonical operator
 	// global-counter view (`show security flow statistics`).
-	var readErr error
-	readCounter := func(idx uint32) uint64 {
-		v, err := c.dp.ReadGlobalCounter(idx)
-		if err != nil && readErr == nil {
-			readErr = err
-		}
-		return v
-	}
+	snap := dataplane.ReadGlobalCounters(c.dp, dataplane.AllGlobalCounterIndexes()...)
 
 	names := []struct {
 		idx  uint32
@@ -261,14 +256,19 @@ func (c *CLI) showStatistics(detail bool) error {
 
 	fmt.Println("Global statistics:")
 	for _, n := range names {
-		fmt.Printf("  %-25s %d\n", n.name+":", readCounter(n.idx))
+		if snap.IsUnavailable(n.idx) {
+			fmt.Printf("  %-25s %s\n", n.name+":", "unavailable")
+			continue
+		}
+		v, _ := snap.Value(n.idx)
+		fmt.Printf("  %-25s %d\n", n.name+":", v)
 	}
 
 	if !detail {
-		// #3345: even in the non-detail path, surface a read failure (the
-		// global loop above is the only read set here).
-		if readErr != nil {
-			fmt.Printf("warning: global counter read failed (statistics may be incomplete): %v\n", readErr)
+		// #3345: even in the non-detail path, surface a genuine read
+		// failure (the global loop above is the only read set here).
+		if snap.Err != nil {
+			fmt.Printf("warning: global counter read failed (statistics may be incomplete): %v\n", snap.Err)
 		}
 		return nil
 	}
@@ -281,15 +281,14 @@ func (c *CLI) showStatistics(detail bool) error {
 	fmt.Printf("  %-25s %d\n", "Total:", v4+v6)
 
 	// Screen drops breakdown
-	screenDrops := readCounter(dataplane.GlobalCtrScreenDrops)
+	screenDrops, _ := snap.Value(dataplane.GlobalCtrScreenDrops)
 	if screenDrops > 0 {
 		fmt.Printf("\nScreen drop details:\n")
 		// #3343: shared screen-reason table — adds the previously-omitted
 		// session-limit row and keeps every surface on the same reason set.
 		for i := range dataplane.ScreenReasonCounters {
 			rc := &dataplane.ScreenReasonCounters[i]
-			v := readCounter(rc.Index)
-			if v > 0 {
+			if v, ok := snap.Value(rc.Index); ok && v > 0 {
 				fmt.Printf("  %-25s %d\n", rc.Label+":", v)
 			}
 		}
@@ -312,8 +311,8 @@ func (c *CLI) showStatistics(detail bool) error {
 	// #3345: check AFTER all global-counter reads (incl. the detail screen
 	// breakdown) so a failure on a late read is surfaced rather than printing
 	// a stale 0.
-	if readErr != nil {
-		fmt.Printf("warning: global counter read failed (statistics may be incomplete): %v\n", readErr)
+	if snap.Err != nil {
+		fmt.Printf("warning: global counter read failed (statistics may be incomplete): %v\n", snap.Err)
 	}
 
 	return nil
@@ -1072,36 +1071,28 @@ func (c *CLI) showFlowStatistics() error {
 		return nil
 	}
 
-	// #3345: surface a counter-read failure rather than printing clean zeros
-	// that hide a degraded counter bridge.
-	var readErr error
-	readCounter := func(idx uint32) uint64 {
-		v, err := c.dp.ReadGlobalCounter(idx)
-		if err != nil && readErr == nil {
-			readErr = err
-		}
+	// #17193: one shared snapshot classifies every global counter once.
+	// #3345: a genuine failure still warns below; #13274: unavailable
+	// counters print "unavailable", never a fabricated 0, and never
+	// trigger the read-failed warning.
+	snap := dataplane.ReadGlobalCounters(c.dp, dataplane.AllGlobalCounterIndexes()...)
+	value := func(idx uint32) uint64 {
+		v, _ := snap.Value(idx)
 		return v
 	}
+	line := func(label string, idx uint32) {
+		if snap.IsUnavailable(idx) {
+			fmt.Printf("  %-30s %s\n", label, "unavailable")
+			return
+		}
+		fmt.Printf("  %-30s %d\n", label, value(idx))
+	}
 
-	rxPkts := readCounter(dataplane.GlobalCtrRxPackets)
-	txPkts := readCounter(dataplane.GlobalCtrTxPackets)
-	drops := readCounter(dataplane.GlobalCtrDrops)
-	unknownVLANDrops := readCounter(dataplane.GlobalCtrUnknownVLANDrops)
-	dstMACDrops := readCounter(dataplane.GlobalCtrDstMACDrops)
-	sessNew := readCounter(dataplane.GlobalCtrSessionsNew)
-	sessClosed := readCounter(dataplane.GlobalCtrSessionsClosed)
-	screenDrops := readCounter(dataplane.GlobalCtrScreenDrops)
-	policyDeny := readCounter(dataplane.GlobalCtrPolicyDeny)
-	natFail := readCounter(dataplane.GlobalCtrNATAllocFail)
-	hostDeny := readCounter(dataplane.GlobalCtrHostInboundDeny)
-	hostAllow := readCounter(dataplane.GlobalCtrHostInbound)
-	tcEgress := readCounter(dataplane.GlobalCtrTCEgressPackets)
-	nat64 := readCounter(dataplane.GlobalCtrNAT64Xlate)
-	fabricRedir := readCounter(dataplane.GlobalCtrFabricRedirect)
-	cacheHit := readCounter(dataplane.GlobalCtrFlowCacheHit)
-	cacheMiss := readCounter(dataplane.GlobalCtrFlowCacheMiss)
-	cacheFlush := readCounter(dataplane.GlobalCtrFlowCacheFlush)
-	cacheInval := readCounter(dataplane.GlobalCtrFlowCacheInvalidate)
+	sessNew := value(dataplane.GlobalCtrSessionsNew)
+	sessClosed := value(dataplane.GlobalCtrSessionsClosed)
+	screenDrops := value(dataplane.GlobalCtrScreenDrops)
+	cacheHit, cacheHitOK := snap.Value(dataplane.GlobalCtrFlowCacheHit)
+	cacheMiss, cacheMissOK := snap.Value(dataplane.GlobalCtrFlowCacheMiss)
 
 	// #15236 (A52-05): "Current sessions" is table occupancy from
 	// SessionCount(), not create-minus-expire of locally created sessions
@@ -1111,31 +1102,31 @@ func (c *CLI) showFlowStatistics() error {
 	fmt.Println("Flow statistics:")
 	fmt.Printf("  %-30s %d\n", "Current sessions:", v4Cur+v6Cur)
 	fmt.Printf("  %-30s %d\n", "Local forwarding sessions (created-closed):", dataplane.CurrentSessions(sessNew, sessClosed))
-	fmt.Printf("  %-30s %d\n", "Sessions created:", sessNew)
-	fmt.Printf("  %-30s %d\n", "Sessions closed:", sessClosed)
+	line("Sessions created:", dataplane.GlobalCtrSessionsNew)
+	line("Sessions closed:", dataplane.GlobalCtrSessionsClosed)
 	fmt.Println()
-	fmt.Printf("  %-30s %d\n", "Packets received:", rxPkts)
-	fmt.Printf("  %-30s %d\n", "Packets transmitted:", txPkts)
-	fmt.Printf("  %-30s %d\n", "Packets dropped:", drops)
-	fmt.Printf("  %-30s %d\n", "Unknown VLAN drops:", unknownVLANDrops)
-	fmt.Printf("  %-30s %d\n", "Destination MAC drops:", dstMACDrops)
-	fmt.Printf("  %-30s %d\n", "TC egress packets:", tcEgress)
+	line("Packets received:", dataplane.GlobalCtrRxPackets)
+	line("Packets transmitted:", dataplane.GlobalCtrTxPackets)
+	line("Packets dropped:", dataplane.GlobalCtrDrops)
+	line("Unknown VLAN drops:", dataplane.GlobalCtrUnknownVLANDrops)
+	line("Destination MAC drops:", dataplane.GlobalCtrDstMACDrops)
+	line("TC egress packets:", dataplane.GlobalCtrTCEgressPackets)
 	fmt.Println()
-	fmt.Printf("  %-30s %d\n", "Policy deny:", policyDeny)
-	fmt.Printf("  %-30s %d\n", "NAT allocation failures:", natFail)
-	fmt.Printf("  %-30s %d\n", "NAT64 translations:", nat64)
-	fmt.Printf("  %-30s %d\n", "Fabric redirects:", fabricRedir)
+	line("Policy deny:", dataplane.GlobalCtrPolicyDeny)
+	line("NAT allocation failures:", dataplane.GlobalCtrNATAllocFail)
+	line("NAT64 translations:", dataplane.GlobalCtrNAT64Xlate)
+	line("Fabric redirects:", dataplane.GlobalCtrFabricRedirect)
 	fmt.Println()
-	fmt.Printf("  %-30s %d\n", "Host-inbound allowed:", hostAllow)
-	fmt.Printf("  %-30s %d\n", "Host-inbound denied:", hostDeny)
+	line("Host-inbound allowed:", dataplane.GlobalCtrHostInbound)
+	line("Host-inbound denied:", dataplane.GlobalCtrHostInboundDeny)
 
 	// Flow cache (IPv4 + IPv6)
-	if cacheHit > 0 || cacheMiss > 0 {
+	if (cacheHitOK && cacheHit > 0) || (cacheMissOK && cacheMiss > 0) {
 		fmt.Println()
-		fmt.Printf("  %-30s %d\n", "Flow cache hits:", cacheHit)
-		fmt.Printf("  %-30s %d\n", "Flow cache misses:", cacheMiss)
-		fmt.Printf("  %-30s %d\n", "Flow cache flushes:", cacheFlush)
-		fmt.Printf("  %-30s %d\n", "Flow cache invalidations:", cacheInval)
+		line("Flow cache hits:", dataplane.GlobalCtrFlowCacheHit)
+		line("Flow cache misses:", dataplane.GlobalCtrFlowCacheMiss)
+		line("Flow cache flushes:", dataplane.GlobalCtrFlowCacheFlush)
+		line("Flow cache invalidations:", dataplane.GlobalCtrFlowCacheInvalidate)
 		if cacheHit+cacheMiss > 0 {
 			hitRate := float64(cacheHit) / float64(cacheHit+cacheMiss) * 100
 			fmt.Printf("  %-30s %.1f%%\n", "Flow cache hit rate:", hitRate)
@@ -1151,8 +1142,7 @@ func (c *CLI) showFlowStatistics() error {
 		// detailed breakdown alongside the rest.
 		for i := range dataplane.ScreenReasonCounters {
 			rc := &dataplane.ScreenReasonCounters[i]
-			v := readCounter(rc.Index)
-			if v > 0 {
+			if v, ok := snap.Value(rc.Index); ok && v > 0 {
 				fmt.Printf("    %-28s %d\n", rc.Label+":", v)
 			}
 		}
@@ -1161,8 +1151,8 @@ func (c *CLI) showFlowStatistics() error {
 	// #3345: check AFTER all global-counter reads (incl. the screen breakdown
 	// loop) so a failure on a late read is surfaced rather than printing a
 	// stale 0.
-	if readErr != nil {
-		fmt.Printf("warning: global counter read failed (statistics may be incomplete): %v\n", readErr)
+	if snap.Err != nil {
+		fmt.Printf("warning: global counter read failed (statistics may be incomplete): %v\n", snap.Err)
 	}
 
 	return nil
