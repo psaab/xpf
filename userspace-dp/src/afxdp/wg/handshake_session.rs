@@ -85,17 +85,27 @@ pub(in crate::afxdp::wg) static WG_HANDSHAKE_LOCK_POISON_RECOVERIES: std::sync::
 /// here; only the poison policy is shared.
 #[inline]
 fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    // #17201: folded onto the crate-level tolerant helper; this wrapper
-    // keeps the WG-specific counter + journald line and `clear_poison`,
-    // stamped on the poisoned arm only (checked before acquisition).
-    if m.is_poisoned() {
-        m.clear_poison();
-        WG_HANDSHAKE_LOCK_POISON_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        eprintln!(
-            "xpf-wg: handshake-session mutex poisoned by a prior panic; recovering and clearing poison"
-        );
+    // Stamp ONLY on the acquired `Err` arm (the `worker_queue::lock_recover`
+    // shape): a thread already blocked in `lock()` when the poisoning panic
+    // occurs must count its wake-up recovery, and exactly one caller per
+    // poisoning may bump the counter / emit the journald line. A
+    // pre-acquisition `is_poisoned()` check does neither — blocked threads
+    // recover silently and N fresh callers each stamp. Guard recovery
+    // itself is delegated to the crate helper on the clean arm; the
+    // poisoned arm must stamp before recovering, so it keeps the explicit
+    // `clear_poison` + `into_inner` (the helper's counted arm would clear
+    // and count the same recovery a second time).
+    match m.lock() {
+        Ok(_) => crate::sync_util::lock_tolerant(m),
+        Err(poisoned) => {
+            m.clear_poison();
+            WG_HANDSHAKE_LOCK_POISON_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "xpf-wg: handshake-session mutex poisoned by a prior panic; recovering and clearing poison"
+            );
+            poisoned.into_inner()
+        }
     }
-    crate::sync_util::lock_tolerant(m)
 }
 
 /// A handshake in progress: the snow `HandshakeState` plus the metadata

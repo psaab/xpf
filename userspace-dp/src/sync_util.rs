@@ -26,19 +26,30 @@
 //! flips these locks guard (check the critical section for panic sites
 //! before converting a cross-field-invariant lock, per the style rule).
 //!
-//! An optional counter hook is available via [`lock_tolerant_counted`] /
-//! [`read_tolerant_counted`] / [`write_tolerant_counted`]: pass
-//! `Some(&AtomicU64)` to bump a per-subsystem recovery counter on the
-//! poisoned arm only (no journald line per acquisition). Pass `None` (the
-//! plain helpers) when the subsystem has no counter to stamp. The counted
-//! helpers `clear_poison()` before returning the recovered guard (and the
-//! plain helpers clear poison even without a counter, mirroring
-//! `worker_queue::lock_recover`), so the counter measures recovery
-//! EVENTS — exactly +1 per poisoning — not every later hot-path
-//! acquisition; without the clear, one poisoning would bump it forever.
+//! An optional counter hook is available via [`lock_tolerant_counted`]:
+//! pass `Some(&AtomicU64)` to bump a per-subsystem recovery counter on
+//! the poisoned arm only (no journald line per acquisition). Pass `None`
+//! (the plain helper) when the subsystem has no counter to stamp. The
+//! counted helpers `clear_poison()` before returning the recovered
+//! guard (and the plain helpers clear poison even without a counter,
+//! mirroring `worker_queue::lock_recover`), so the counter measures
+//! recovery EVENTS — exactly +1 per poisoning — not every later
+//! hot-path acquisition; without the clear, one poisoning would bump
+//! it forever.
+//!
+//! Production surface today is the `Mutex` arm plus
+//! [`wait_timeout_tolerant_counted`]. The `RwLock` arm
+//! (`read_tolerant` / `read_tolerant_counted` / `write_tolerant` /
+//! `write_tolerant_counted`) and the plain [`wait_timeout_tolerant`]
+//! are `#[cfg(test)]`: their only callers are test helpers, and
+//! production `RwLock` sites keep the inline
+//! `unwrap_or_else(PoisonError::into_inner)` idiom. Lift a gate when
+//! the first production caller lands.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Condvar, Mutex, MutexGuard};
+#[cfg(test)]
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 /// Lock a `Mutex`, recovering the committed state on poison instead of
@@ -68,12 +79,21 @@ pub(crate) fn lock_tolerant_counted<'a, T>(
 }
 
 /// Read-lock an `RwLock`, recovering on poison (see [`lock_tolerant`]).
+/// Test-only today: the callers (`pending_count`, `force_current_for_test`)
+/// are `#[cfg(test)]`; production `RwLock` sites keep their inline
+/// `unwrap_or_else(PoisonError::into_inner)`. Gated so the production
+/// build carries no dead helper; lift the gate with the first
+/// production caller.
+#[cfg(test)]
 #[inline]
 pub(crate) fn read_tolerant<T>(l: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     read_tolerant_counted(l, None)
 }
 
 /// [`read_tolerant`] with an optional poison-recovery counter.
+/// Test-only for the same reason as [`read_tolerant`]; the counted
+/// `Mutex` arm is the production entry point.
+#[cfg(test)]
 #[inline]
 pub(crate) fn read_tolerant_counted<'a, T>(
     l: &'a RwLock<T>,
@@ -92,12 +112,17 @@ pub(crate) fn read_tolerant_counted<'a, T>(
 }
 
 /// Write-lock an `RwLock`, recovering on poison (see [`lock_tolerant`]).
+/// Test-only today (sole caller is the `#[cfg(test)]`
+/// `force_current_for_test`); see [`read_tolerant`].
+#[cfg(test)]
 #[inline]
 pub(crate) fn write_tolerant<T>(l: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     write_tolerant_counted(l, None)
 }
 
 /// [`write_tolerant`] with an optional poison-recovery counter.
+/// Test-only for the same reason as [`write_tolerant`].
+#[cfg(test)]
 #[inline]
 pub(crate) fn write_tolerant_counted<'a, T>(
     l: &'a RwLock<T>,
@@ -116,7 +141,10 @@ pub(crate) fn write_tolerant_counted<'a, T>(
 }
 
 /// `Condvar::wait_timeout`, recovering the guard on poison instead of
-/// panicking. The timeout result is returned unchanged.
+/// panicking. The timeout result is returned unchanged. Test-only
+/// today: production Condvar waits use the counted arm
+/// ([`wait_timeout_tolerant_counted`], `tuple_gate::begin_clear`).
+#[cfg(test)]
 #[inline]
 pub(crate) fn wait_timeout_tolerant<'a, T>(
     condvar: &Condvar,

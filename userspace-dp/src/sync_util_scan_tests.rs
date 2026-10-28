@@ -1,16 +1,33 @@
 //! #17201 source-scan: no production lock acquisition may use a banned
 //! poison shape. Compiled only under `cfg(test)` (declared in `main.rs`).
 //!
-//! Banned in production (engineering-style, #2402):
+//! What this scan PROVES (textual, per production file after the
+//! blankers below): none of these spellings appears outside the counted
+//! exclusions —
 //! - `if let Ok(..) = <expr>.lock()/.read()/.write()` and the
 //!   `let Ok(..) = .. else` form (silently skips the operation / empty state)
 //! - `.lock()/.read()/.write() ... .map(..).unwrap_or_default()`,
 //!   `.map(..).unwrap_or(0)` and `.map(..).unwrap_or(<non-literal-default>)`
-//!   (substitutes EMPTY state)
+//!   (substitutes EMPTY state), when the `.lock()/.read()/.write()` is
+//!   textually in the same statement — including a lock result returned
+//!   from a helper (`fn f() -> LockResult<..> { m.lock() }`) and then
+//!   mapped / defaulted by its caller in the same file;
 //! - `.lock()/.read()/.write() ... .expect(..)` / `.unwrap()`, including
-//!   the variable-mediated form `let g = <expr>.lock(); g.expect(..)` /
-//!   `g.unwrap()` (panics on every later acquire), and
-//!   `Condvar::wait_timeout(..).expect(..)`
+//!   the variable-mediated forms `let g = <expr>.lock(); g.expect(..)` /
+//!   `g.unwrap()`, `let r = <helper returning LockResult>(); r.expect(..)`,
+//!   and a returned lock result consumed by `.expect(..)` / `.unwrap()`
+//!   in the same statement or a later one in the same file, and
+//!   `Condvar::wait_timeout(..).expect(..)`.
+//!
+//! What it does NOT prove (reviewer-planted / read blind spots, NOT
+//! banned-shape guarantees): helper indirection across files, a lock
+//! result stored in a struct field or returned through a non-`LockResult`
+//! alias, `.lock().unwrap_or_else(<arbitrary closure>)` (only the
+//! `into_inner` recovering closure is legitimate — any other closure
+//! body is a human-review item, not scanned), `try_lock` in any form
+//! (`.try_lock().ok()`, `let Ok(..) = ..try_lock() else`), and
+//! `match <expr>.lock() { Err(_) => .. }` arms. Those shapes require
+//! code review; this test must not be cited as covering them.
 //!
 //! Production text is obtained with the shared #17152 blankers
 //! (`test_support::source_scan`): comments/strings are blanked and
@@ -27,8 +44,9 @@
 //! - the 3 `afxdp/ipsec_inner_queue.rs` sites owned by R4-Q10-01;
 //! - `test_ports.rs`, a test utility compiled into the test binary only
 //!   in effect (declared `#[cfg(test)]` in `main.rs`).
-//! Any other banned shape — in any production file, including a file
-//! added after this test — fails this test.
+//! Any other occurrence of the PROVEN spellings above — in any
+//! production file, including a file added after this test — fails
+//! this test.
 
 use std::path::{Path, PathBuf};
 
@@ -343,6 +361,105 @@ fn banned_hits(flat: &str) -> (Vec<String>, Vec<String>) {
             start = at + kind.len();
         }
     }
+    // Helper-returned lock results (the planted aliased-lock / map-chain
+    // forms): a `fn .. -> LockResult<..>` hands its caller a still-
+    // poisonable result, so the helper NAME becomes a lock-result source
+    // just like `.lock()` itself. Track those names (same file only —
+    // cross-file indirection is a documented blind spot) and flag, for
+    // every call `<name>(`: a same-statement `.map(..).unwrap_or..` /
+    // direct `.unwrap_or..` chain (empty-state substitution), a same-
+    // statement `.expect(` / `.unwrap()`, and `let <var> = <name>(..);`
+    // with a later `<var>.expect(` / `<var>.unwrap()` / `<var>.unwrap_or..`
+    // (variable-mediated). The definition site (`fn <name>(`) is skipped.
+    {
+        let mut helpers: Vec<String> = Vec::new();
+        let mut start = 0;
+        while let Some(pos) = flat[start..].find("-> LockResult<") {
+            let at = start + pos;
+            if let Some(paren) = flat[..at].rfind('(') {
+                let before = flat[..paren].trim_end();
+                let name: String = before
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                if !name.is_empty() && !helpers.contains(&name) {
+                    helpers.push(name);
+                }
+            }
+            start = at + "-> LockResult<".len();
+        }
+        for name in &helpers {
+            let call = format!("{name}(");
+            let mut start = 0;
+            while let Some(pos) = flat[start..].find(&call) {
+                let at = start + pos;
+                start = at + call.len();
+                if at >= 3 && &flat[at.saturating_sub(3)..at] == "fn " {
+                    continue;
+                }
+                let stmt_end = flat[at..]
+                    .find(';')
+                    .map(|e| at + e)
+                    .unwrap_or((at + 300).min(flat.len()));
+                let chain = &flat[at..stmt_end];
+                let after_call = &chain[call.len()..];
+                let direct_default = after_call.trim_start().starts_with(".unwrap_or(")
+                    || after_call.trim_start().starts_with(".unwrap_or_default()");
+                if !chain.contains(".unwrap_or_else(")
+                    && ((chain.contains(".map(")
+                        && (chain.contains(".unwrap_or(")
+                            || chain.contains(".unwrap_or_default()")))
+                        || direct_default)
+                {
+                    hard.push(format!(
+                        "helper-returned {call}...map/unwrap_or..: ...{}...",
+                        ctx(at, call.len())
+                    ));
+                    continue;
+                }
+                if chain.contains(".expect(") || chain.contains(".unwrap()") {
+                    expect.push(format!(
+                        "helper-returned {call}...expect/unwrap: ...{}...",
+                        ctx(at, call.len())
+                    ));
+                }
+            }
+        }
+        let mut start = 0;
+        while let Some(pos) = flat[start..].find("let ") {
+            let at = start + pos;
+            let stmt_end = flat[at..].find(';').map(|e| at + e).unwrap_or(flat.len());
+            let stmt = &flat[at..stmt_end];
+            start = at + 4;
+            if !helpers.iter().any(|h| stmt.contains(&format!("{h}("))) {
+                continue;
+            }
+            let Some(eq) = stmt.find('=') else { continue };
+            let mut var = stmt[4..eq].trim();
+            if let Some(rest) = var.strip_prefix("mut ") {
+                var = rest.trim();
+            }
+            if var.is_empty() || !var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            for tail in [".expect(", ".unwrap()", ".unwrap_or(", ".unwrap_or_default()"] {
+                let needle = format!("{var}{tail}");
+                let mut s2 = stmt_end;
+                while let Some(p2) = flat[s2..].find(&needle) {
+                    let at2 = s2 + p2;
+                    expect.push(format!(
+                        "helper-variable-mediated {needle}: ...{}...",
+                        ctx(at2, needle.len())
+                    ));
+                    s2 = at2 + needle.len();
+                }
+            }
+        }
+    }
     (hard, expect)
 }
 
@@ -376,6 +493,18 @@ fn scan_detects_variable_mediated_and_nonliteral_unwrap_or_17201() {
             "unwrap_or_default via variable",
             "fn f(m: &Mutex<Vec<u32>>) -> Vec<u32> { let g = m.lock(); g.unwrap_or_default() }",
         ),
+        (
+            "aliased lock result via LockResult helper (planted)",
+            "fn shards_result(s: &S) -> LockResult<MutexGuard<Vec<u32>>> { s.shards.lock() } fn caller(s: &S) { let r = shards_result(s); let _g = r.expect(\"shards poisoned\"); }",
+        ),
+        (
+            "map-chain via LockResult helper without lock adjacency (planted)",
+            "fn shards_result(s: &S) -> LockResult<MutexGuard<Vec<u32>>> { s.shards.lock() } fn caller(s: &S) -> u32 { shards_result(s).map(|g| g.len() as u32).unwrap_or(0) }",
+        ),
+        (
+            "direct expect on LockResult helper call",
+            "fn shards_result(s: &S) -> LockResult<MutexGuard<Vec<u32>>> { s.shards.lock() } fn caller(s: &S) { let _g = shards_result(s).expect(\"shards poisoned\"); }",
+        ),
     ];
     for (name, src) in mutants {
         let (hard, expect) = banned_hits(&squash(src));
@@ -389,6 +518,10 @@ fn scan_detects_variable_mediated_and_nonliteral_unwrap_or_17201() {
         "fn f(m: &Mutex<u32>) { let g = crate::sync_util::lock_tolerant(m); drop(g); }",
         "fn f(m: &Mutex<u32>) { let g = m.lock().unwrap_or_else(|e| e.into_inner()); drop(g); }",
         "fn f(m: &Mutex<u32>) { let g = lock_tolerant_counted(m, Some(&C)); drop(g); }",
+        // A `LockResult` helper consumed with the recovering idiom stays clean.
+        "fn shards_result(s: &S) -> LockResult<MutexGuard<Vec<u32>>> { s.shards.lock() } fn caller(s: &S) { let _g = shards_result(s).unwrap_or_else(|e| e.into_inner()); }",
+        // A `LockResult` helper whose result is matched (not unwrapped) stays clean.
+        "fn shards_result(s: &S) -> LockResult<MutexGuard<Vec<u32>>> { s.shards.lock() } fn caller(s: &S) { match shards_result(s) { Ok(_g) => {}, Err(_) => {} } }",
     ];
     for src in clean {
         let (hard, expect) = banned_hits(&squash(src));
