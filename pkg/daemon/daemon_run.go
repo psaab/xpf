@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/psaab/xpf/pkg/cli"
 	"github.com/psaab/xpf/pkg/coalesce"
@@ -320,53 +319,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 			starter.StartFIBSync(ctx)
 		}
 
-		gc := d.newConntrackGC(rt, 10*time.Second)
-		d.gc = gc
-
-		// When the userspace dataplane is active, skip BPF session map
-		// GC entirely — sessions are managed in user-space. Without
-		// this, BatchLookup burns ~19% CPU scanning maps not used for
-		// forwarding decisions.
-		//
-		// The helper still mirrors sessions to BPF conntrack for display
-		// and periodically refreshes last_seen (~10s) so IterateSessions
-		// callers see accurate idle times.  See #333.
-		if _, ok := rt.(userspaceSessionDeltaDrainer); ok {
-			gc.SkipSweep = func() bool { return true }
-		}
-
-		// In cluster mode, GC should only expire sessions when this node
-		// is primary.  The peer primary ages sessions and syncs deletes.
-		if d.cluster != nil {
-			gc.IsLocalPrimary = d.cluster.IsLocalPrimaryAny
-		}
-
-		// Wire GC delete callbacks for incremental session sync.
-		// Deletes are synced if this node is primary for any RG — the peer
-		// ignores deletes for sessions it doesn't have.
-		gc.OnDeleteV4 = func(key dataplane.SessionKey) {
-			// Always sync deletes. Dropping deletes leaves stale sessions
-			// on the peer indefinitely.
-			if ss := d.getSessionSync(); d.cluster != nil && d.cluster.IsLocalPrimaryAny() && ss != nil {
-				ss.QueueDeleteV4(key, false)
-			}
-		}
-		gc.OnDeleteV6 = func(key dataplane.SessionKeyV6) {
-			if ss := d.getSessionSync(); d.cluster != nil && d.cluster.IsLocalPrimaryAny() && ss != nil {
-				ss.QueueDeleteV6(key, false)
-			}
-		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			gc.Run(ctx)
-		}()
+		// #17155: the pkg/conntrack GC sweep is retired. On the only
+		// constructible runtime (userspace) SkipSweep was always true,
+		// so the sweep body never ran; session expiry is owned by the
+		// helper's per-worker GC and deletes are synced via the session
+		// delta/event paths, not GC callbacks.
 
 		// #8607: keep the persistent-NAT SHOW table populated.
 		//
-		// It is started HERE, beside the GC whose SkipSweep above is the
-		// reason it is needed, and NOT from cluster-comms wiring where the
+		// It is started HERE, beside where the retired GC used to sit
+		// (#17155: the retired GC's never-run sweep was the reason this is needed), and NOT from cluster-comms wiring where the
 		// #8121 lease PUSH loop lives. That loop is gated on being RG master,
 		// which is right for a peer push and wrong for an operator table: a
 		// standalone box with a persistent-NAT pool would keep the empty table

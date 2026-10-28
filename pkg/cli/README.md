@@ -436,7 +436,9 @@ EOF or an over-cap suffix is never reported as a successful empty FIB.
   `buildPeerClearRequest` — every filter dimension must be carried,
   because an empty `ClearSessionsRequest` means clear-all to the peer.
   Key ports are network byte order (`ntohs` before comparing) and
-  dataplane IPv4 NAT fields decode with NativeEndian (`uint32ToIP`).
+  dataplane IPv4 NAT fields decode with NativeEndian via
+  `dataplane.SessionIPv4` / `SessionValue.NATSrcAddr()` (#17188) —
+  NOT pkg/nat's big-endian pool decoder.
   The FILTERED clear (`clearFilteredSessions`) is BOUNDED (#4886): it
   collects at most `cliClearFilteredBatch` forward keys (plus each
   session's reverse/DNAT companion), deletes that chunk, and resumes —

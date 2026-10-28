@@ -5347,13 +5347,15 @@ fn never_settling_state() -> Arc<Mutex<ServerState>> {
 /// Fail-on-revert (#5862): `wait_for_binding_settle` must RELEASE the global
 /// `ServerState` lock across each 50 ms sleep.
 ///
-/// The HA session socket is a separate socket on a separate thread
-/// (`lifecycle.rs`), but its one verb — `sync_session` — dispatches through the
-/// same `Arc<Mutex<ServerState>>` as every main-socket verb, so the socket split
-/// never split the critical section. A 2 s settle held under that lock is longer
-/// than the Go side's 3 s session round-trip budget once queuing is added, and
-/// #5380 makes the FIRST session timeout abort the rest of the bulk batch — so
-/// this is a dropped-mirror bug at failover, not only a latency tail.
+/// Before #7209, the HA session socket was a separate socket on a separate
+/// thread (`lifecycle.rs`), but its one verb — `sync_session` — took the
+/// same `Arc<Mutex<ServerState>>` as every main-socket verb, so the socket
+/// split never split the critical section. A 2 s settle held under that lock
+/// is longer than the Go side's 3 s session round-trip budget once queuing is
+/// added, and #5380 makes the FIRST session timeout abort the rest of the bulk
+/// batch — so this was a dropped-mirror bug at failover, not only a latency
+/// tail. #7209 has since moved `sync_session` off this mutex; the guard here
+/// still pins that the settle releases the lock for every other verb.
 ///
 /// The assertion is deliberately about the LOCK, not about a timing average: it
 /// takes the lock from another thread mid-wait and requires that acquisition to
@@ -5384,8 +5386,7 @@ fn wait_for_binding_settle_releases_state_lock_between_polls() {
         elapsed < Duration::from_millis(200),
         "acquiring the ServerState lock took {elapsed:?} while a binding-settle \
          wait was in flight — the wait is holding the lock across its sleep, so \
-         every HA sync_session on the dedicated session socket queues behind it \
-         (#5862)"
+         every other main-socket verb queues behind it (#5862)"
     );
 
     waiter.join().expect("settle waiter");
@@ -5394,7 +5395,7 @@ fn wait_for_binding_settle_releases_state_lock_between_polls() {
 /// The end-to-end half: a `sync_session` request must be SERVED while a
 /// `set_forwarding_state` settle wait is in flight. This drives both through the
 /// real `handle_stream` dispatcher, which is what proves the handler wiring
-/// (locked arm records the owed settle; `handle_request` runs it after the guard
+/// (locked arm records the owed settle; `handle_stream` runs it after the guard
 /// drops) and not merely the helper in isolation.
 #[test]
 fn sync_session_is_served_during_a_forwarding_settle_wait() {

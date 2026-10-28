@@ -31,7 +31,7 @@ func TestDualHeaderValidKeyDoesNotBypassAPIKeyLockout14711(t *testing.T) {
 			t.Fatalf("key-only bad attempt %d = (%v, %v), want ordinary failure", i, authorized, retry)
 		}
 	}
-	if locked, _ := tracker.locked(source, authThrottleAPIKeyAccount); !locked {
+	if locked, _ := probePairLocked(tracker, source, authThrottleAPIKeyAccount); !locked {
 		t.Fatal("api-key bucket not locked after key-only failures")
 	}
 
@@ -83,7 +83,7 @@ func TestDualHeaderBadKeyAttemptsLockAPIKeyBucket14711(t *testing.T) {
 			t.Fatalf("attempt %d = (%v, %v), want lockout starting at sixth request", i+1, authorized, retry)
 		}
 	}
-	if locked, _ := tracker.locked(source, authThrottleAPIKeyAccount); !locked {
+	if locked, _ := probePairLocked(tracker, source, authThrottleAPIKeyAccount); !locked {
 		t.Fatal("api-key bucket not locked after dual-header bad-key attempts")
 	}
 
@@ -124,7 +124,7 @@ func TestDualHeaderUnusedFallbackPreservesFailures14711(t *testing.T) {
 	const source = "198.51.100.150"
 	cfg := AuthConfig{Users: map[string]string{"operator": "correct-password"}}
 	tracker := newAuthFailureTracker(nil)
-	tracker.recordFailure(source, authThrottleAPIKeyAccount)
+	chargeFailures(t, tracker, source, authThrottleAPIKeyAccount, 1)
 	r := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
 	r.RemoteAddr = source + ":43000"
 	r.SetBasicAuth("operator", "correct-password")

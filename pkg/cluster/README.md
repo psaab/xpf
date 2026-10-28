@@ -997,7 +997,7 @@ it too.
 
 **This is a FLAG DAY.** A pre-#7163 peer sends the old HELLO, which is not a
 valid Noise message, so the handshake fails and the connection drops.
-`SessionSyncWireVersion` is bumped 1 → 2 so `GateMixedBaseSwap` refuses a
+`SessionSyncWireVersion` is bumped 1 → 2 so the mixed-base gate (`GateProtocolCompat`, via `_gate_mixed_base`) refuses a
 mixed-base swap up front instead of letting an operator discover it as a fabric
 that will not come up. `CurrentHAProtocolVersion` is deliberately NOT bumped:
 that would additionally refuse the peer over heartbeat/failover semantics this
@@ -3548,7 +3548,7 @@ takeover gate, and the marker clears when a peer heartbeat returns.
   No `SessionSyncWireVersion` / `CurrentHAProtocolVersion` bump, for the same
   reason as #2239 and #6650 below: `MinCompatHAProtocolVersion ==
   CurrentHAProtocolVersion`, so the accepted window is a single point and a
-  bump would make `GateMixedBaseSwap` refuse the rolling upgrade.
+  bump would make `GateProtocolCompat` refuse the rolling upgrade.
 - **The ack means peer-CONFIRMED, not received.** It is written only after the
   receiver's `fenceAllRedundancyGroups` returns, and reports what that
   achieved. The decoder REFUSES a short frame rather than zero-filling it:
@@ -4304,9 +4304,10 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   routine rather than exceptional. And `RequestPeerFailover` early-returns
   "node is already primary" without touching the peer, which is why re-issuing
   the same failover to diagnose the state changes nothing.
-- HA delete-sync callbacks fire from the GC loop. They must not block, and
-  must log at `slog.Debug` — earlier `slog.Info` flooded at 15 req/s and
-  drowned out real diagnostics (per CLAUDE.md logging rules).
+- HA delete-sync queueing (helper session-delta closes in
+  `daemon_ha_userspace_stream.go`, and commit-time policy invalidation) must
+  not block, and must log at `slog.Debug` — earlier `slog.Info` flooded at
+  15 req/s and drowned out real diagnostics (per CLAUDE.md logging rules).
 - **`Manager.Start` must NOT hold `m.mu` across the monitor's `Stop()` (#4828).**
   The `Monitor` poll goroutine calls back into `SetMonitorWeight`, which takes
   `m.mu`; `Stop()` joins that goroutine via `wg.Wait()`. Holding `m.mu` while
@@ -4377,7 +4378,7 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   later sweep) carries a higher generation and still installs (last-writer-wins).
   A `gen == 0` (legacy) delete still evicts. The generation maps start bounded by
   `genGuardMapDefaultCap` (200000) and grow on full-of-live demand toward the
-  `genGuardMapCap` ceiling (half of conntrack.MaxSessions; #9915 F-044). On overflow the map is NEVER cleared (#2198 F1): an
+  `genGuardMapCap` ceiling (half of `dataplane.MaxSessions`, moved from the deleted `pkg/conntrack` in #17155; #9915 F-044). On overflow the map is NEVER cleared (#2198 F1): an
   existing key updates in place, and a live entry is never dropped.
   **Tombstones age out oldest-first (#9719).**
   - A tombstone never frees its entry. So a long-lived connection used to fill the
@@ -5011,7 +5012,7 @@ it.
     is what bounds that pre-verdict growth: the combined live keys in
     one window may not exceed `bulkRecvCap()` — the forward-session
     table capacity (`maxCap()`: the wired helper capacity, else the
-    200k default, ceiling `conntrack.MaxSessions/2`). The cap is on
+    200k default, ceiling `dataplane.MaxSessions/2`). The cap is on
     live occupancy, not cumulative distinct keys: a successful delete
     during the window frees its key's slot
     (`removeBulkRecvV4/V6` from the delete paths), so delete+reinstall

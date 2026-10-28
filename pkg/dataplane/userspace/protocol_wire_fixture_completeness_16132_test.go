@@ -156,6 +156,7 @@ func wireSpecimenTypes() map[string]any {
 		"session_counter_row_wire":                      &SessionCounterRow{},
 		"session_delta_drain_request":                   &SessionDeltaDrainRequest{},
 		"session_delta_info":                            &SessionDeltaInfo{},
+		"session_delta_info_populated":                  &SessionDeltaInfo{},
 		"session_export_request":                        &SessionExportRequest{},
 		"session_policy_list_request":                   &SessionPolicyListRequest{},
 		"session_policy_match":                          &SessionPolicyMatch{},

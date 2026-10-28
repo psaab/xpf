@@ -73,15 +73,17 @@ pub(crate) fn same_plan_apply_needs_binding_reconcile(
 // instead of being held by the caller across the whole 2 s.
 //
 // That matters because the lock is not the handler's; it is the WHOLE server's.
-// The HA session socket is a separate socket served by a separate thread
-// (lifecycle.rs), but `sync_session` dispatches through the same
+// Before #7209, the HA session socket was a separate socket served by a
+// separate thread (lifecycle.rs) but `sync_session` still took the same
 // `Arc<Mutex<ServerState>>`, so a settle wait held under the lock stalled every
 // session mirror behind it. The Go side gives a session request 3 s
 // (sessionSyncRoundtripDeadline, pkg/dataplane/userspace/process_control.go),
 // and #5380 aborts the REST of the bulk batch on the first transport failure —
 // so a 2 s settle overlapping a mirror burst does not merely add latency, it
 // can drop the remainder of a batch of up to 255 session mirrors during exactly
-// the failover this path exists to support.
+// the failover this path exists to support. #7209 has since moved
+// `sync_session` off this mutex; releasing the lock across the sleep remains
+// what keeps every other main-socket verb responsive during the wait.
 //
 // Interleaving is the POINT, not a side effect: another request may mutate state
 // between two polls. That is safe here because this is a CONVERGENCE wait, not a
