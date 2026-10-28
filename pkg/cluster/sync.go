@@ -1925,10 +1925,10 @@ type SessionSync struct {
 	// on it. Taken only by the DHCP arms; the callback must not reenter DHCP
 	// receive paths (see OnDHCPLeasesReceived).
 	dhcpApplyMu sync.Mutex
-	// #15160: per-family pending chunk assemblies, guarded by dhcpApplyMu
-	// (touched only by the DHCP chunk handler's commit section and the
-	// legacy arms' supersede). A pending assembly never commits until its
-	// final chunk lands; a newer committed set discards it.
+	// #15160: per-family pending DHCP chunk assemblies and per-incarnation
+	// committed generations, guarded by dhcpApplyMu. The chunk handler fences
+	// stale completions before replacing the held set; a legacy commit also
+	// discards all pending assemblies.
 	dhcpChunkState4 dhcpChunkState
 	dhcpChunkState6 dhcpChunkState
 	// #16758: pending IPsec SA chunk assemblies and per-incarnation committed

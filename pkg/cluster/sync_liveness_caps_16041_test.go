@@ -803,28 +803,28 @@ func TestDownstreamRejectedFramesDoNotRefreshLiveness16041(t *testing.T) {
 	t.Run("inconsistent chunk assembly rejected, consistent accepted", func(t *testing.T) {
 		ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
 		one := encodeDHCPLeasePayload([]dhcpserver.SyncLease{dhcpChunkLease15160(7)})
-		if !ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 5, 0, 2, 1, 77, 1)) {
+		if !ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 1, 0, 2, 1, 77, 1)) {
 			t.Fatal("CONTROL: first consistent chunk must be recorded (accepted)")
 		}
-		bad := chunkFrame16041(t, one, 5, 1, 3, 1, 77, 2)
+		bad := chunkFrame16041(t, one, 1, 1, 3, 1, 77, 2)
 		if ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, bad) {
 			t.Fatal("chunk disagreeing with the assembly on total must be rejected")
 		}
 		if n := len(ss.dhcpChunkState4.pending); n != 0 {
 			t.Fatalf("inconsistent generation left %d pending assemblies, want 0", n)
 		}
-		if !ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 6, 0, 2, 1, 77, 3)) {
+		if !ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 3, 0, 2, 1, 77, 3)) {
 			t.Fatal("CONTROL: first chunk of the over-total fixture must be recorded")
 		}
-		if ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 6, 1, 2, 1, 77, 4)) {
+		if ss.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 3, 1, 2, 1, 77, 4)) {
 			t.Fatal("chunk pushing the assembly past totalLeases must be rejected")
 		}
 		ss2 := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
 		two := encodeDHCPLeasePayload([]dhcpserver.SyncLease{dhcpChunkLease15160(7), dhcpChunkLease15160(8)})
-		if !ss2.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 5, 0, 2, 2, 77, 1)) {
+		if !ss2.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 1, 0, 2, 2, 77, 1)) {
 			t.Fatal("CONTROL: chunk 0 of a consistent pair must be accepted")
 		}
-		if !ss2.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 5, 1, 2, 2, 77, 2)) {
+		if !ss2.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunkFrame16041(t, one, 1, 1, 2, 2, 77, 2)) {
 			t.Fatal("CONTROL: completing chunk must be accepted")
 		}
 		if got := len(ss2.PeerDHCPLeases4()); got != 2 {
