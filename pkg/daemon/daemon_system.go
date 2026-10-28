@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/logging"
@@ -461,6 +462,16 @@ func buildIfNamesWithLookup(cfg *config.Config, lookupIfindex func(string) (int,
 	return config.SessionIfNamesByIfindex(cfg, lookupIfindex)
 }
 
+func appliedSnapshotGenerationOf(rt dataplane.RuntimeDataPlane) uint64 {
+	provider, ok := dataplane.Unwrap(rt).(interface {
+		AppliedSnapshotGeneration() uint64
+	})
+	if !ok {
+		return 0
+	}
+	return provider.AppliedSnapshotGeneration()
+}
+
 func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) {
 	if er == nil {
 		return
@@ -470,36 +481,38 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	// collision loser claim the shared id nondeterministically.
 	er.SetZoneNames(config.SyslogZoneNames(cfg))
 
-	// Wire policy names and app names for structured logging.
-	// #2114: ONE cell load inside applyResult (LastApplyResultOf is
-	// nil-safe) — a separate dataplane() guard here would observe a
-	// different publication than the result read (Codex PR #6743 r3-7).
-	if cr := d.applyResult(); cr != nil {
+	// Resolve the published dataplane once: both the full-apply result and the
+	// applied-snapshot identity must describe the same backend (#2114).
+	rt := d.dataplane()
+	cr := dataplane.LastApplyResultOf(rt)
+	appliedGeneration := appliedSnapshotGenerationOf(rt)
+	filterGeneration := appliedGeneration
+	if filterGeneration == 0 && cr != nil {
+		// Non-userspace backends do not expose the retained applied identity;
+		// keep their established LastApplyResult generation as the fallback.
+		filterGeneration = cr.Generation
+	}
+	if cr != nil {
 		er.SetPolicyNamesForGeneration(cr.Generation, cr.PolicyNames)
 		if cr.AppNames != nil {
 			er.SetAppNames(cr.AppNames)
 		}
-		// #16775: install the filter-term syslog projection TOGETHER
-		// with the dataplane publish, generation-bound. cr.Generation is
-		// the generation of the snapshot the dataplane now enforces
-		// (LastApplyResult is set inside ApplyConfig at publish), so a
-		// FILTER_LOG stamped with the new generation resolves against
-		// this map, and a queued old-generation hit whose positional id
-		// now collides is suppressed instead of forwarded. This runs on
-		// every applySyslogConfig call (apply-tail 14b, daemon start,
-		// syslog retry); the generation makes the transient window
-		// fail-closed rather than mis-routed. When SnapshotPublishDeferred
-		// the snapshot has not landed: keep the previous generation's map
-		// (the dataplane still enforces it) and let the deferred-publish
-		// completion install the new one (installDeferredFilterTermSyslog).
-		if !cr.SnapshotPublishDeferred && cr.Generation != 0 {
-			er.SetFilterTermSyslogForGeneration(cr.Generation, dpuserspace.FilterTermSyslogMap(cfg))
+		// #16775: FILTER_LOG terms are positional in the snapshot currently
+		// enforced by the dataplane. LastApplyResult tracks full applies only;
+		// successful partial publishes can advance the applied identity
+		// without replacing it, so syslog retries must use filterGeneration.
+		// When SnapshotPublishDeferred the new snapshot has not landed: keep
+		// the previous generation's map until deferred completion installs it.
+		if !cr.SnapshotPublishDeferred && filterGeneration != 0 {
+			er.SetFilterTermSyslogForGeneration(filterGeneration, dpuserspace.FilterTermSyslogMap(cfg))
 		} else if cr.Generation == 0 {
 			er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))
 		}
+	} else if appliedGeneration != 0 {
+		er.SetFilterTermSyslogForGeneration(appliedGeneration, dpuserspace.FilterTermSyslogMap(cfg))
 	} else {
-		// No apply result (no dataplane / not yet applied): keep the
-		// unversioned install so the gate is still wired.
+		// No applied or full-apply generation (no dataplane / not yet applied):
+		// keep the unversioned install so the gate is still wired.
 		er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))
 	}
 
