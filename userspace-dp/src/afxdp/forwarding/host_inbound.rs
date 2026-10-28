@@ -755,39 +755,38 @@ struct HostInboundPkt {
     dst_ip: Option<IpAddr>,
 }
 
-/// #17192: which admission view [`host_inbound_decide`] judges. The two
-/// kinds differ ONLY in how a missing view (`None`) and a non-ND packet to
-/// a catalog multicast group are treated for an unknown view — never in
-/// the ND or set logic, which is shared verbatim. Before #17192 the zone
-/// and interface-override arms restated that logic in four hand-copied
-/// bodies and had already diverged on ND to a catalog group.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ViewKind {
-    /// Zone view: a missing view is the genuinely unknown / global zone
-    /// (#3405 `None => true`), EXCEPT that a known catalog destination is
-    /// fail-closed even for an unknown zone.
-    Zone,
-    /// Interface-override view: selected only when an override exists, so
-    /// the missing case never reaches the decision body.
-    Override,
-}
-
 /// #17192: the SINGLE host-inbound admission decision, written once.
-/// `view` is the selected admission set (`None` = no zone entry); `kind`
-/// records whether it was selected as the zone view or as an ingress
-/// interface override. Order: global ICMP error/PMTUD accept (#3171),
-/// then ND (#15671/#15931), then the catalog-multicast guard, then the
-/// set. ND to a catalog multicast group requires an explicit ND positive
-/// (or `any-service`) in BOTH view kinds — the pre-#17192 zone arm
-/// admitted it on the bare ND default while the override arm (and the
-/// kernel catalog guards, which precede the ND accepts in both nft
-/// renderers) denied it; the catalog rule is the one pinned here. See
-/// `ndp_zone_override_catalog_parity_17192`.
-fn host_inbound_decide(
-    view: Option<&ZoneHostInbound>,
-    kind: ViewKind,
-    pkt: &HostInboundPkt,
-) -> bool {
+/// `view` is the selected admission set (`None` = no zone entry and no
+/// interface override -- an unknown / unscoped view). Order: global ICMP
+/// error/PMTUD accept (#3171), then ND (#15671/#15931), then the
+/// catalog-multicast guard, then the set.
+///
+/// ND to a catalog multicast group requires an explicit ND positive
+/// (`ndp` token / `protocols all`, which expands to it) or `any-service`
+/// on a PRESENT view; the bare ND default does not open it, `ndp except`
+/// denies, and an unknown view (`None`) is fail-closed for a catalog
+/// destination. Unicast and non-catalog ND (including `ff02::1` and
+/// solicited-node groups, which are not in the catalog) keep the
+/// #15671/#15931 default on both present and absent views.
+///
+/// Kernel posture, stated exactly (pinned by the Go cells
+/// `TestKernelNDCatalogPosture17192` in pkg/daemon and
+/// `TestKernelNDCatalogPostureNetlink17192` in pkg/nftables): on SCOPED
+/// ingress the kernel denies ND to the five v6 catalog groups
+/// (`ff02::5`, `ff02::6`, `ff02::9`, `ff02::d`, `ff02::12`) unless the
+/// view's token set opens that exact group, because the ingress-scoped
+/// catalog drop (`emitHostInboundMulticast{IngressGuards,GuardsNetlink}`)
+/// precedes the ND accepts. That scoped kernel verdict matches this
+/// function. On UNSCOPED ingress (destination-fallback or wholly
+/// scopeless views) the kernel emits its ND accept with NO catalog drop
+/// ahead of it, so the kernel ADMITS an `ssh`-only view's ND to
+/// `ff02::5` unscoped. Userspace has no ingress-scope bit to reproduce
+/// that distinction -- it judges only the selected view and the
+/// destination -- and deliberately stays STRICTER there: fail-closed for
+/// a catalog destination on an unknown view, rather than reproducing a
+/// kernel fail-open that exists only because no drop was emitted.
+/// `ndp_zone_override_catalog_parity_17192` pins the Rust half.
+fn host_inbound_decide(view: Option<&ZoneHostInbound>, pkt: &HostInboundPkt) -> bool {
     if is_icmp_host_inbound_global_accept(pkt.protocol, pkt.is_v6, pkt.icmp_type) {
         return true;
     }
@@ -885,7 +884,11 @@ fn host_inbound_decide(
             // admit for a legitimately zoneless NON-addressed control interface; and
             // the empty-table case is unreachable by the ordering above rather than
             // by anything this function does.
-            debug_assert_eq!(kind, ViewKind::Zone);
+            // #17192: `None` reaches here only with no zone entry and no
+            // interface override (callers pass `Some` for an override).
+            // Explicitly fail-closed for a catalog destination; every
+            // other (non-catalog) destination keeps the #3405/#5659/#6873
+            // destination default documented above (`_ => true`).
             match pkt.dst_ip {
                 Some(dst) if is_host_inbound_multicast_group(dst) => false,
                 _ => true,
@@ -917,7 +920,6 @@ pub(in crate::afxdp) fn host_inbound_admits(
     // rationale for the `None => true` arm is preserved on that arm there.
     host_inbound_decide(
         state.zone_host_inbound.get(&ingress_zone_id),
-        ViewKind::Zone,
         &HostInboundPkt {
             protocol,
             dst_port,
@@ -946,7 +948,6 @@ pub(in crate::afxdp) fn host_inbound_admits_for_destination(
     // zone view and carries the real destination.
     host_inbound_decide(
         state.zone_host_inbound.get(&ingress_zone_id),
-        ViewKind::Zone,
         &HostInboundPkt {
             protocol,
             dst_port,
@@ -984,13 +985,9 @@ pub(in crate::afxdp) fn host_inbound_admits_iface_for_destination(
         dst_ip: Some(dst_ip),
     };
     if let Some(hi) = state.ifindex_host_inbound.get(&ingress_ifindex) {
-        return host_inbound_decide(Some(hi), ViewKind::Override, &pkt);
+        return host_inbound_decide(Some(hi), &pkt);
     }
-    host_inbound_decide(
-        state.zone_host_inbound.get(&ingress_zone_id),
-        ViewKind::Zone,
-        &pkt,
-    )
+    host_inbound_decide(state.zone_host_inbound.get(&ingress_zone_id), &pkt)
 }
 
 /// #17192: destination-less test seam for the pre-consolidation call

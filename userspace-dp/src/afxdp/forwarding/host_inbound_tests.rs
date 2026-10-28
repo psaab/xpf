@@ -1202,10 +1202,23 @@ fn ndp_interface_override_default_15931() {
 // the SAME token set must give the SAME verdict for ND to a catalog
 // multicast group. Before the consolidation the zone arm admitted
 // ICMPv6 135 to ff02::5 on the bare ND default while the override arm
-// (and the kernel catalog guards) denied it; the four hand-copied bodies
-// had diverged under a comment claiming they agreed. Both entry points
-// now share `host_inbound_decide`, so this cell can only fail if a
-// second decision body is reintroduced.
+// denied it; the four hand-copied bodies had diverged under a comment
+// claiming they agreed. Both entry points now share
+// `host_inbound_decide`, so this cell can only fail if a second decision
+// body is reintroduced.
+//
+// This cell is Rust-vs-Rust only: it pins zone==override here, NOT the
+// kernel verdict. Kernel truth is pinned separately by the Go cells
+// `TestKernelNDCatalogPosture17192` (pkg/daemon, nft text) and
+// `TestKernelNDCatalogPostureNetlink17192` (pkg/nftables, netlink
+// chains), which this cell cites: scoped kernel ingress denies ND to
+// the v6 catalog groups ahead of the ND accepts (matching the deny
+// asserted below), while UNSCOPED kernel ingress admits an ssh-only
+// view's ND to ff02::5 (no catalog drop ahead of the destination-
+// fallback / unscoped ND accept). Userspace is deliberately stricter
+// than that unscoped kernel fail-open: an unknown view (no zone entry,
+// no override -- exercised below via a missing zone id) is fail-closed
+// for a catalog destination, and non-catalog ND keeps its default.
 #[test]
 fn ndp_zone_override_catalog_parity_17192() {
     const ZONE: u32 = 17192;
@@ -1280,5 +1293,44 @@ fn ndp_zone_override_catalog_parity_17192() {
     ));
     assert!(!host_inbound_admits_iface_for_destination(
         &excluded, IFACE, ZONE, 58, 0, true, 135, catalog,
+    ));
+
+    // Unknown view (no zone entry, no override): fail-closed for a
+    // catalog destination -- deliberately stricter than the kernel's
+    // unscoped fail-open pinned by the Go cells cited above -- while
+    // non-catalog ND (ff02::1, unicast) keeps the ND default and a
+    // non-ND catalog packet keeps the #3405 unknown-zone destination
+    // default via the catalog guard (denied) / non-catalog admit.
+    let empty = ForwardingState::default();
+    assert!(
+        !host_inbound_admits_for_destination(&empty, 9999, 58, 0, true, 135, catalog),
+        "unknown view must deny ND to a catalog group (fail-closed, #17192)"
+    );
+    let all_nodes: IpAddr = "ff02::1".parse().unwrap();
+    assert!(
+        host_inbound_admits_for_destination(&empty, 9999, 58, 0, true, 135, all_nodes),
+        "unknown view must keep the ND default for non-catalog ff02::1"
+    );
+    assert!(
+        host_inbound_admits_for_destination(&empty, 9999, 58, 0, true, 135, unicast),
+        "unknown view must keep the ND default for unicast ND"
+    );
+    // any-service present view opens catalog ND; protocols-all expands
+    // to an ndp positive, so it opens it too.
+    let mut any = ForwardingState::default();
+    any.zone_host_inbound.insert(
+        ZONE,
+        zone_host_inbound_from_tokens(&["any-service".to_string()], &[]),
+    );
+    assert!(host_inbound_admits_for_destination(
+        &any, ZONE, 58, 0, true, 135, catalog,
+    ));
+    let mut proto_all = ForwardingState::default();
+    proto_all.zone_host_inbound.insert(
+        ZONE,
+        zone_host_inbound_from_tokens(&[], &["all".to_string()]),
+    );
+    assert!(host_inbound_admits_for_destination(
+        &proto_all, ZONE, 58, 0, true, 135, catalog,
     ));
 }
