@@ -16,11 +16,15 @@
 // (never the candidate / desired-but-unapplied config — invariant 3) plus
 // the query tuple, so it needs no dataplane round-trip and adds no
 // persistent reverse index to the packet path (invariant 7). It mirrors
-// the Rust dataplane allocator exactly — userspace-dp/src/nat/allocator.rs
+// the Rust dataplane allocator exactly —
+// userspace-dp/src/nat/allocator/deterministic.rs
 // deterministic_indices_v4 / reverse_deterministic_v4 and the _v6 twins —
-// and is pinned to it by cross-language golden vectors
-// (deterministic_test.go) and a Go-side parity test that cross-checks the
-// parameter derivation against the shipped wire-field builders
+// and is pinned to it by the shared cross-language golden vectors in
+// userspace-dp/tests/fixtures/deterministic_nat_vectors_v1.json, read by
+// both a cargo test (deterministic_nat_vectors_fixture_17124) and a go
+// test (TestDeterministicNATVectorsSharedFixture17124) (#17124), plus a
+// Go-side parity test that cross-checks the parameter derivation against
+// the shipped wire-field builders
 // (pkg/dataplane/userspace, nat_deterministic_parity_test.go).
 package nat
 
@@ -183,7 +187,7 @@ type detParams struct {
 	hostCount   uint32
 
 	// mode 1 (IPv4 subscriber):
-	hostBaseV4 uint32 // host-order numeric base (== Rust u32::from(Ipv4Addr))
+	hostBaseV4 uint32 // pool-numeric base (big-endian; == Rust u32::from(Ipv4Addr), NOT CPU order)
 
 	// mode 2 (IPv6 subscriber / NAPT64):
 	hostBaseV6 [16]byte
@@ -353,7 +357,7 @@ func nat64ReferencedPools(cfg *config.Config) map[string]bool {
 		// Count a pool as deterministically enforced only when the referencing
 		// rule is one the dataplane actually installs. buildNAT64Snapshots
 		// (pkg/dataplane/userspace/nat64.go) drops a rule with an empty prefix,
-		// and userspace-dp/src/nat64.rs skips any rule whose prefix is not
+		// and userspace-dp/src/nat64/state.rs (parse_nat64_rule) skips any rule whose prefix is not
 		// EXACTLY `<ipv6>/96` (the RFC 6052 well-known/network-specific prefix
 		// this build supports). A rule with an empty, non-/96, or unparseable
 		// prefix installs nothing, so its source pool's IPv6 subscribers are
@@ -368,7 +372,7 @@ func nat64ReferencedPools(cfg *config.Config) map[string]bool {
 }
 
 // nat64PrefixInstallable mirrors the NAT64 rule-prefix gate in
-// userspace-dp/src/nat64.rs: a rule installs only when its prefix splits on
+// userspace-dp/src/nat64/state.rs (parse_nat64_rule): a rule installs only when its prefix splits on
 // '/' into EXACTLY two parts, the mask parses as 96, and the address parses as
 // an IPv6 (not IPv4-mapped) address. An empty prefix, a missing/extra slash, a
 // non-/96 mask, or an unparseable address makes the dataplane skip the whole
@@ -528,18 +532,20 @@ func poolPortRangeV4(pool *config.NATPool) (uint16, uint16, bool) {
 
 // expandPoolV4 resolves the pool's ordered external IPv4 addresses using the
 // dataplane semantics for the selected deterministic mode. Mode 1 mirrors
-// Rust expand_pool_address: a CIDR enumerates every host (subject to the
-// safety cap) and only the first occurrence of each address is kept
-// (#14623 — the production caller threads seen-sets through the expansion,
-// so an overlapping member creates no second pool position; keeping the
-// duplicate would shift every later index and make this surface name a
-// different external address / subscriber than the dataplane enforces).
-// Mode 2 instead mirrors NAT64 parse_pool_v4: only a bare IPv4
-// address or explicit /32 is an allocator member; compiler-expanded "a to b"
-// ranges arrive as ordered /32 entries. An IPv4 subnet is rejected because
-// the NAT64 dataplane filters it rather than expanding it. parse_pool_v4
-// pushes each parsed host verbatim (no seen-set), so mode 2 is deliberately
-// NOT deduped. IPv6 entries are
+// Rust expand_pool_address (userspace-dp/src/nat/source/expand.rs): a CIDR
+// enumerates every host (subject to the safety cap) and only the first
+// occurrence of each address is kept (#14623 — the production caller in
+// userspace-dp/src/nat/source/mod.rs threads seen-sets through the
+// expansion, so an overlapping member creates no second pool position;
+// keeping the duplicate would shift every later index and make this
+// surface name a different external address / subscriber than the
+// dataplane enforces). Mode 2 mirrors NAT64 parse_pool_v4
+// (userspace-dp/src/nat64/state.rs): only a bare IPv4 address or explicit
+// /32 is an allocator member; compiler-expanded "a to b" ranges arrive as
+// ordered /32 entries. An IPv4 subnet is rejected because the NAT64
+// dataplane skips the whole rule rather than expanding it. parse_pool_v4's
+// caller (parse_nat64_rule, #14624) also keeps only the first occurrence
+// of each address, so BOTH modes dedupe first-occurrence. IPv6 entries are
 // skipped in both modes and pool.Address is prepended exactly as the wire
 // builders do.
 func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
@@ -550,23 +556,20 @@ func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
 	addrs = append(addrs, pool.Addresses...)
 
 	var out []net.IP
-	// #14623: mode-1 first-occurrence dedupe, mirroring the seen_v4 set the
-	// Rust production caller threads through expand_pool_address. Keyed on
-	// the host-order u32 so a bare host, its /32 form, and a CIDR-enumerated
-	// host all collide. Mode 2 mirrors parse_pool_v4, which has no seen-set,
-	// so seen stays nil there and appends remain verbatim.
-	var seen map[uint32]struct{}
-	if mode == ModeV4 {
-		seen = make(map[uint32]struct{})
-	}
+	// #14623/#14624: first-occurrence dedupe in BOTH modes — mode 1 mirrors
+	// the seen_v4 set the Rust production caller threads through
+	// expand_pool_address, mode 2 mirrors the seen-set parse_nat64_rule
+	// threads through parse_pool_v4 (#14624; before that fix the NAT64
+	// caller appended verbatim and a duplicated member minted the same
+	// translated tuple for two subscribers). Keyed on the pool-numeric
+	// u32 (big-endian, Rust u32::from(Ipv4Addr)) so a bare host, its /32
+	seen := make(map[uint32]struct{})
 	appendV4 := func(v uint32) {
-		if seen != nil {
-			if _, dup := seen[v]; dup {
-				return
-			}
-			seen[v] = struct{}{}
+		if _, dup := seen[v]; dup {
+			return
 		}
-		out = append(out, uint32ToIP(v))
+		seen[v] = struct{}{}
+		out = append(out, bigEndianPoolUint32ToIP(v))
 	}
 	for _, a := range addrs {
 		// Classify the family with the colon-strict Go/Rust-parity SSOT
@@ -597,7 +600,7 @@ func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
 			// prefix length — it takes `10.0.0.0/016` as `/16` — where
 			// netip.ParsePrefix (the control-plane grammar,
 			// sourceNATPoolAddressReason) and parse_canonical_prefix_len (the
-			// dataplane's, userspace-dp/src/nat/source.rs) both reject it.
+			// dataplane's, userspace-dp/src/nat/source/expand.rs) both reject it.
 			//
 			// Without this check the deterministic surface is the most
 			// confident liar in the system: the pool is stamped `invalid_pool`
@@ -805,7 +808,7 @@ func lookupReverseInPool(p detParams, poolName string, natIP net.IP, natPort uin
 		if subIdx > math.MaxUint32-p.hostBaseV4 {
 			return nil, lerrf(ErrCodeNotFound, "subscriber index overflow")
 		}
-		subscriber = uint32ToIP(p.hostBaseV4 + subIdx).String()
+		subscriber = bigEndianPoolUint32ToIP(p.hostBaseV4 + subIdx).String()
 	case ModeV6:
 		off := p.wordOffset
 		baseWord := binary.BigEndian.Uint32(p.hostBaseV6[off : off+4])
@@ -876,7 +879,17 @@ func blockPorts(p detParams, blockIdx uint32) (uint16, uint16) {
 	return low, high
 }
 
-func uint32ToIP(v uint32) net.IP {
+// bigEndianPoolUint32ToIP converts a deterministic-NAT pool-numeric
+// u32 to net.IP with BigEndian. Pool numeric means Rust
+// u32::from(Ipv4Addr) — the first octet is the most significant
+// byte — NOT CPU/host byte order: pool words are derived with
+// binary.BigEndian.Uint32 over pool base addresses in this file, so
+// the inverse decode is BigEndian on every CPU. It is the OPPOSITE
+// semantics of dataplane.SessionIPv4 (#17188) — session-map NAT
+// fields are native-endian (from_ne_bytes) and must go through that
+// decoder, never this one. The former shared/host-order names hid
+// that trap.
+func bigEndianPoolUint32ToIP(v uint32) net.IP {
 	b := make(net.IP, 4)
 	binary.BigEndian.PutUint32(b, v)
 	return b

@@ -108,7 +108,7 @@ func TestJunosHostFragmentDeniesOnPermissiveFallThrough_6576(t *testing.T) {
 func TestJunosHostL4LifelineUnchanged_6576(t *testing.T) {
 	q := hostFragQuery()
 	q.NonFirstFragment = false
-	q.DstPort = 12345 // not ssh — matches neither the deny nor (absent) permit
+	q.DstPort = PortPtr(12345) // not ssh — matches neither the deny nor (absent) permit
 
 	res := Match(junosHostFragmentCfg(false), q)
 	if !res.HostInboundUnmatched {

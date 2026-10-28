@@ -48,9 +48,33 @@ import "strings"
 
 // RethRGOwners returns interface name -> redundancy-group id for every
 // interface that is a REDUNDANT-ETHERNET INTERFACE — either STRUCTURALLY (some
-// port names it as its `gigether-options redundant-parent`) or NOMINALLY (it is
-// spelled `reth*`) — mapped to the redundancy group it carries.
+// port names it as its `gigether-options redundant-parent`), NOMINALLY (it is
+// spelled `reth*`), or by DECLARED REDUNDANCY GROUP (#18122: a declared dotted
+// interface such as `p.0` with a set `redundancy-group` and no members owns
+// that group) — mapped to the redundancy group it carries.
 //
+// declaresDeclaredDottedRG reports whether a declared dotted interface name
+// (#9821) with a non-zero redundancy group owns that group without members
+// (#18122). The dotted declared name is the #9821 shape, where the declared
+// name `p.0` outranks any parse. Membership is the ONLY added test: an
+// undotted stray (`ge-0/0/5`, raw RG set but not dotted-declared, no members,
+// non-reth) still owns nothing, and so does a dotted non-numeric name.
+func declaresDeclaredDottedRG(name string, rg int) bool {
+	if rg == 0 {
+		return false
+	}
+	i := strings.LastIndex(name, ".")
+	if i < 0 || i == len(name)-1 {
+		return false
+	}
+	for _, c := range name[i+1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // It deliberately does NOT filter on `RedundancyGroup > 0`. That term belongs
 // to the CALLER, because the two ownership modes need different things from it:
 // the VRRP-backed collector synthesizes instances only for groups above 0,
@@ -87,12 +111,16 @@ func (c *Config) RethRGOwners() map[string]int {
 			continue
 		}
 		_, hasMembers := rethToPhys[name]
-		if !hasMembers && !strings.HasPrefix(name, "reth") {
+		if !hasMembers && !strings.HasPrefix(name, "reth") && !declaresDeclaredDottedRG(name, ifc.RedundancyGroup) {
 			// Neither structurally nor nominally a redundant-ethernet
-			// interface: no port names it as their redundant-parent AND it is
-			// not spelled `reth*`. It owns no group. Commit rejects this shape
-			// (validateRethRedundancyGroupStrict); a tolerantly-loaded config
-			// that still carries it is excluded here rather than half-applied.
+			// interface: no port names it as their redundant-parent, it is
+			// not spelled `reth*` (#9821 declared-dotted interface names
+			// declared with a redundancy-group are owned via
+			// declaresDeclaredDottedRG above), and it carries no
+			// declared-dotted redundancy group. It owns no group. Commit
+			// rejects this shape (validateRethRedundancyGroupStrict); a
+			// tolerantly-loaded config that still carries it is excluded
+			// here rather than half-applied.
 			continue
 		}
 		owners[name] = ifc.RedundancyGroup
@@ -106,6 +134,142 @@ func (c *Config) RethRGOwners() map[string]int {
 func (c *Config) RethRGOwner(name string) (int, bool) {
 	rg, ok := c.RethRGOwners()[name]
 	return rg, ok
+}
+
+// InterfaceRefRG is the single answer to "which redundancy group owns
+// interface ref X" (#17086). It resolves any ref form — a RETH base
+// (`reth0`, `bond0`), a unit ref (`reth0.0`, `bond0.50`), a physical
+// member (`ge-0/0/1`, `ge-0/0/1.0`), or a member-of-member chain —
+// through the same steps every consumer used to hand-roll divergently:
+//
+//  1. Split the unit suffix with SplitInterfaceUnitRef (declared-name
+//     aware, so a dotted declared base such as `p.0` wins over a naive
+//     first-dot cut).
+//  2. Follow the RedundantParent chain from the base, with a cycle
+//     guard, to the first RethRGOwners member carrying a positive
+//     group (or, failing that, the first group-0 owner).
+//  3. Report that group. Membership in RethRGOwners is the ONLY
+//     ownership test: a stray `redundancy-group` on an interface that
+//     is neither structurally nor nominally a RETH owns nothing (the
+//     over-inclusion shape validateRethRedundancyGroupStrict rejects
+//     at commit), and a structurally valid pair not spelled `reth*`
+//     owns its group (the under-inclusion shape the old name tests
+//     dropped).
+//
+// owned is false when the ref resolves to no RETH owner — an unknown
+// interface, a plain interface, or a stray-RG interface. (A parent
+// chain that only cycles through group-0 structural owners reports
+// owned at group 0, never an invented positive group.) The returned
+// rg is meaningful only when owned is true; a
+// RETH carrying group 0 reports (0, true), preserving the RethRGOwners
+// contract that the >0 term belongs to the caller. Callers that only
+// care about positive groups test `owned && rg > 0` (via RefRG below
+// or inline) — that test is theirs, the ownership answer is this
+// function's alone.
+//
+// Cost is O(interfaces) per call (it builds RethRGOwners). A caller in
+// a hot loop must build a RefRGIndex once per config and query that
+// instead; see RefRGIndex.
+func (c *Config) InterfaceRefRG(ref string) (rg int, owned bool) {
+	if c == nil {
+		return 0, false
+	}
+	return c.RefRGFromOwners(ref, c.RethRGOwners())
+}
+
+// RefRGIndex is a precomputed ref→RG index over one Config (#17086).
+// The DHCP-relay master gate reads it PER PACKET (relayMasterGateOpen),
+// so it must stay O(1) per lookup: the index resolves every declared
+// interface name — base, member, and member-chain forms — exactly
+// once at build time, and Lookup is a map read plus one unit split.
+//
+// Build it once per config (RefRGIndexFor) and rebuild it when the
+// config changes; it is a snapshot and does not track later edits.
+type RefRGIndex struct {
+	byBase map[string]int // declared base name -> owning RG (owners only)
+	cfg    *Config        // split grammar only (SplitInterfaceUnitRef)
+}
+
+// RefRGIndexFor builds the RefRGIndex for cfg. A nil cfg yields an
+// index that owns nothing.
+func (c *Config) RefRGIndexFor() *RefRGIndex {
+	idx := &RefRGIndex{byBase: make(map[string]int), cfg: c}
+	if c == nil {
+		return idx
+	}
+	owners := c.RethRGOwners()
+	for name := range c.Interfaces.Interfaces {
+		if rg, ok := c.RefRGFromOwners(name, owners); ok {
+			idx.byBase[name] = rg
+		}
+	}
+	return idx
+}
+
+// Lookup answers InterfaceRefRG's question against the precomputed
+// index: identical answers, O(1). A nil index owns nothing.
+func (idx *RefRGIndex) Lookup(ref string) (rg int, owned bool) {
+	if idx == nil {
+		return 0, false
+	}
+	base := ref
+	if idx.cfg != nil {
+		base = idx.cfg.SplitInterfaceUnitRef(ref).Base
+	}
+	rg, owned = idx.byBase[base]
+	return rg, owned
+}
+
+// RefRG is the positive-group convenience over InterfaceRefRG for the
+// many consumers whose contract is "the owning RG, or 0 when none":
+// it returns the group when the ref is RETH-owned AND carries a group
+// above 0, else 0. It exists so no consumer re-derives the >0 term
+// against a raw RedundancyGroup field ever again (#17086).
+func (c *Config) RefRG(ref string) int {
+	if rg, owned := c.InterfaceRefRG(ref); owned && rg > 0 {
+		return rg
+	}
+	return 0
+}
+
+// RefRGFromOwners is InterfaceRefRG against a caller-built owners map,
+// so a walk over many refs pays the O(interfaces) build once. It is
+// exported for pkg/daemon's lease-scope walk, which already builds
+// RethRGOwners per pass and must not rebuild it per interface
+// (#17086).
+//
+// Walk semantics: follow the RedundantParent chain with a cycle guard.
+// The first owner carrying a POSITIVE group wins — a member whose
+// parent is a RETH resolves to that RETH's group, and an intermediate
+// structural owner at group 0 (a port named as a parent by another
+// member) does not stop the walk. If the chain resolves only to a
+// group-0 owner, the ref is owned at group 0. A stray group on a
+// non-owner is never returned: non-owners are walked through, and if
+// no owner is reached the ref owns nothing.
+func (c *Config) RefRGFromOwners(ref string, owners map[string]int) (int, bool) {
+	name := c.SplitInterfaceUnitRef(ref).Base
+	seen := make(map[string]struct{})
+	firstOwnerRG, sawOwner := 0, false
+	for name != "" {
+		if _, dup := seen[name]; dup {
+			break
+		}
+		seen[name] = struct{}{}
+		if rg, ok := owners[name]; ok {
+			if rg > 0 {
+				return rg, true
+			}
+			if !sawOwner {
+				firstOwnerRG, sawOwner = rg, true
+			}
+		}
+		ifc, ok := LookupInterface(c, name)
+		if !ok || ifc.RedundantParent == "" {
+			break
+		}
+		name = c.SplitInterfaceUnitRef(ifc.RedundantParent).Base
+	}
+	return firstOwnerRG, sawOwner
 }
 
 // SessionHAState returns "Active", "Backup", or "unknown" for a session whose

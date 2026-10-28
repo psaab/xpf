@@ -94,7 +94,7 @@ import (
 //     unaffected by its presence. The #2170 trailing-field discipline.
 //  3. Bumping would be actively harmful. MinCompatHAProtocolVersion ==
 //     CurrentHAProtocolVersion today, so the accepted HA window is a single
-//     point; GateMixedBaseSwap refuses when peerHAProtocol is outside
+//     point; GateProtocolCompat refuses when peerHAProtocol is outside
 //     [MinCompat, Current]. A bump makes the window [N+1, N+1] and refuses a
 //     peer at N — the bump itself would break the rolling upgrade this feature
 //     has to survive, converting a narrowing bug into an outage (#6650 records
@@ -211,6 +211,12 @@ const (
 	// marker appended to session frames. Senders omit it until this bit is
 	// advertised, preserving the legacy frame shape for older peers.
 	capFlag2PrimaryLiveness uint8 = 1 << 2
+	// capFlag2PersistentNatLeaseTypedPool (#17099): the peer decodes
+	// persistent-NAT lease types 52/53, which carry the typed pool
+	// identity (pool_kind + nat64_prefix). Absent or unlearned peers
+	// receive the legacy 41/43/50/51 layouts with the typed fields
+	// stripped, so their helper decode-fallback still applies.
+	capFlag2PersistentNatLeaseTypedPool uint8 = 1 << 3
 )
 
 // localCapabilityFlags is what this build advertises. It is a compile-time
@@ -223,7 +229,7 @@ const localCapabilityFlags = capFlagFenceAck | capFlagPeerDeleteOwnership | capF
 // capability byte (#16756, extended by #16877 and #16880), appended after the
 // wire-version field in syncMsgPeerCapabilities. Compile-time for the same
 // reason as localCapabilityFlags: a property of the binary, not runtime state.
-const localCapabilityFlags2 = capFlag2ConfigApplyAck | capFlag2PersistentNatLeaseProvenance | capFlag2PrimaryLiveness
+const localCapabilityFlags2 = capFlag2ConfigApplyAck | capFlag2PersistentNatLeaseProvenance | capFlag2PrimaryLiveness | capFlag2PersistentNatLeaseTypedPool
 
 // FenceResult is what the local fence handler reports about what it achieved.
 // It is the daemon's answer to "how many RGs did you just drive to
@@ -338,7 +344,7 @@ func (s *SessionSync) PeerFenceAckCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags.Load())&capFlagFenceAck != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags.Load())&capFlagFenceAck != 0
 }
 
 // PeerDeleteOwnershipCapable reports whether the peer advertised that its helper
@@ -357,7 +363,7 @@ func (s *SessionSync) PeerDeleteOwnershipCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags.Load())&capFlagPeerDeleteOwnership != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags.Load())&capFlagPeerDeleteOwnership != 0
 }
 
 // PurgeRetirementForwardOnlyCapable reports whether the peer advertised that
@@ -369,7 +375,7 @@ func (s *SessionSync) PurgeRetirementForwardOnlyCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags.Load())&capFlagPurgeRetirementForwardOnly != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags.Load())&capFlagPurgeRetirementForwardOnly != 0
 }
 
 // InstallTableIdentityCapable reports whether the peer advertised that it
@@ -386,7 +392,7 @@ func (s *SessionSync) InstallTableIdentityCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags.Load())&capFlagInstallTableIdentity != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags.Load())&capFlagInstallTableIdentity != 0
 }
 
 // ScopedPolicyDeleteCapable reports whether the peer advertised that it
@@ -399,7 +405,7 @@ func (s *SessionSync) ScopedPolicyDeleteCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags.Load())&capFlagScopedPolicyDelete != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags.Load())&capFlagScopedPolicyDelete != 0
 }
 
 // ConfigAncestryCapable reports whether the peer advertised support for the
@@ -409,7 +415,7 @@ func (s *SessionSync) ConfigAncestryCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags.Load())&capFlagConfigAncestry != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags.Load())&capFlagConfigAncestry != 0
 }
 
 // ConfigAncestryNegotiated reports whether this peer incarnation has sent its
@@ -426,7 +432,7 @@ func (s *SessionSync) PeerConfigEpochReverseTagCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags.Load())&capFlagConfigEpochReverseTag != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags.Load())&capFlagConfigEpochReverseTag != 0
 }
 
 // IpsecTunnelDiscriminatorCapable reports whether the current peer advertised
@@ -436,7 +442,7 @@ func (s *SessionSync) IpsecTunnelDiscriminatorCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags.Load())&capFlagIpsecTunnelDiscriminator != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags.Load())&capFlagIpsecTunnelDiscriminator != 0
 }
 
 // ConfigApplyAckCapable reports whether the peer advertised that it
@@ -448,7 +454,7 @@ func (s *SessionSync) ConfigApplyAckCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags2.Load())&capFlag2ConfigApplyAck != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags2.Load())&capFlag2ConfigApplyAck != 0
 }
 
 // PersistentNatLeaseProvenanceCapable reports whether the peer advertised
@@ -459,21 +465,32 @@ func (s *SessionSync) PersistentNatLeaseProvenanceCapable() bool {
 	if s == nil {
 		return false
 	}
-	return uint8(s.peerCapabilityFlags2.Load())&capFlag2PersistentNatLeaseProvenance != 0
+	return uint8(s.peerIncarnationState().peerCapabilityFlags2.Load())&capFlag2PersistentNatLeaseProvenance != 0
+}
+
+// PersistentNatLeaseTypedPoolCapable reports whether the peer advertised
+// support for typed-pool persistent-NAT lease frames (types 52/53,
+// #17099). Senders must also require peerCapabilitiesLearned and fall
+// back to legacy frames while discovery is pending.
+func (s *SessionSync) PersistentNatLeaseTypedPoolCapable() bool {
+	if s == nil {
+		return false
+	}
+	return uint8(s.peerIncarnationState().peerCapabilityFlags2.Load())&capFlag2PersistentNatLeaseTypedPool != 0
 }
 
 // PrimaryLivenessCapable reports whether the current peer advertised support
 // for the sync-only primary-liveness marker. Before discovery or with an older
 // peer, liveness refreshes are withheld to preserve the legacy wire format.
 func (s *SessionSync) PrimaryLivenessCapable() bool {
-	return s != nil && uint8(s.peerCapabilityFlags2.Load())&capFlag2PrimaryLiveness != 0
+	return s != nil && uint8(s.peerIncarnationState().peerCapabilityFlags2.Load())&capFlag2PrimaryLiveness != 0
 }
 
 func (s *SessionSync) storePeerCapabilityFlags2(flags uint32) {
 	if s == nil {
 		return
 	}
-	old := s.peerCapabilityFlags2.Swap(flags)
+	old := s.peerIncarnationState().peerCapabilityFlags2.Swap(flags)
 	livenessMask := uint32(capFlag2PrimaryLiveness)
 	if old&livenessMask != flags&livenessMask {
 		s.wakeSyncSweep()
@@ -510,7 +527,7 @@ func (s *SessionSync) wakeSyncSweepForInterval(scanSeconds uint64) {
 // decoded for the CURRENT peer incarnation.
 //
 // peerSnapshotProtocol is stored from that same frame and cleared alongside the
-// flags on full disconnect, and no real peer advertises snapshot protocol 0, so a
+// flags at every incarnation retirement (#17097), and no real peer advertises snapshot protocol 0, so a
 // non-zero reading is exactly "this incarnation has told us what it is". That is the
 // signal separating "the peer said it cannot" from "the peer has not said yet" — a
 // distinction peerCapabilityFlags cannot carry alone, because 0 encodes both and

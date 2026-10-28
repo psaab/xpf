@@ -482,19 +482,19 @@ func TestParseHAProtocolCompatible(t *testing.T) {
 	mismatch := "HA protocol version: 1\nPeer HA protocol version: 2\n"
 	noPeer := "HA protocol version: 1\n"
 
-	if !parseHAProtocolCompatible(match) {
+	if compat, _, _ := haProtocolVerdictFromStatus(match); !compat {
 		t.Error("equal protocol versions should be compatible")
 	}
-	if parseHAProtocolCompatible(mismatch) {
+	if compat, _, _ := haProtocolVerdictFromStatus(mismatch); compat {
 		t.Error("mismatched protocol versions must be incompatible (not rolling-upgradable)")
 	}
-	if parseHAProtocolCompatible(noPeer) {
+	if compat, _, _ := haProtocolVerdictFromStatus(noPeer); compat {
 		t.Error("missing peer protocol line must fail closed")
 	}
 }
 
 // TestStatusEmitsProtocolLines guards that FormatStatus still emits the HA
-// protocol version lines parseHAProtocolCompatible keys on.
+// protocol version lines haProtocolVerdictFromStatus keys on.
 func TestStatusEmitsProtocolLines(t *testing.T) {
 	m := cluster.NewManager(0, 1)
 	m.UpdateConfig(&config.ClusterConfig{

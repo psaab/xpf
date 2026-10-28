@@ -1,10 +1,6 @@
 package daemon
 
-import (
-	"strings"
-
-	"github.com/psaab/xpf/pkg/config"
-)
+import "github.com/psaab/xpf/pkg/config"
 
 // rg_ownership_8297.go carries a THREE-state ownership answer for consumers
 // whose safe fail direction is "act" rather than "stay silent".
@@ -162,32 +158,15 @@ func (d *Daemon) proxyARPSuppressedForRG(rgID int) bool {
 // `proxy-arp` entry names, or 0 when it belongs to none.
 //
 // The entry names a Junos ref such as `reth0.80`; the redundancy group lives on
-// the BASE interface (`reth0`, `redundant-ether-options redundancy-group 1`), so
-// the unit suffix is trimmed before the lookup. A ref that resolves to no
-// configured interface returns 0 — answer — for the same reason the unknown
-// ownership state does.
+// the RETH owner, reached through config.Config.InterfaceRefRG (#17086 SSOT):
+// unit split, RedundantParent chain, RethRGOwners membership. A ref that
+// resolves to no RETH owner returns 0 — answer — for the same reason the
+// unknown ownership state does.
 func proxyARPRedundancyGroupFor(cfg *config.Config, ifaceRef string) int {
 	if cfg == nil {
 		return 0
 	}
-	base := ifaceRef
-	if i := strings.IndexByte(base, '.'); i >= 0 {
-		base = base[:i]
-	}
-	ifc, ok := cfg.Interfaces.Interfaces[base]
-	if !ok || ifc == nil {
-		return 0
-	}
-	if ifc.RedundancyGroup > 0 {
-		return ifc.RedundancyGroup
-	}
-	// A physical member names its reth parent; the group lives there.
-	if ifc.RedundantParent != "" {
-		if parent, ok := cfg.Interfaces.Interfaces[ifc.RedundantParent]; ok && parent != nil {
-			return parent.RedundancyGroup
-		}
-	}
-	return 0
+	return cfg.RefRG(ifaceRef)
 }
 
 // proxyARPEntrySuppressed is the wiring the #8297 fix turns on: it is what

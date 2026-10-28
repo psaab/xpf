@@ -133,10 +133,6 @@ const (
 	showCursor     = "\x1b[?25h"
 )
 
-func resolveFabricParent(name string) string {
-	return monitoriface.ResolvePhysicalParent(name)
-}
-
 func aggregateUserspaceIfaceSnapshot(kernelName string, status dpuserspace.ProcessStatus) *userspaceIfaceSnapshot {
 	return monitoriface.AggregateUserspaceSnapshot(kernelName, status)
 }

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 )
@@ -44,7 +43,7 @@ func TestSyncNoiseIdentityRejectsNodeIdOutside01_9915(t *testing.T) {
 }
 
 // F-044 (sizing half): the generation-guard cap must cover the maximum possible
-// live-session key count — forward entries, i.e. half of conntrack.MaxSessions
+// live-session key count — forward entries, i.e. half of dataplane.MaxSessions
 // (which counts forward+reverse). A static 200k cap at 2% of the table leaves a
 // full-of-LIVE skip-record degradation for any table past 200k sessions.
 func TestGenGuardCapCoversMaxLiveSessions_9915(t *testing.T) {
@@ -52,8 +51,8 @@ func TestGenGuardCapCoversMaxLiveSessions_9915(t *testing.T) {
 	// effective ceiling must bind at the forward-entries count — asserted
 	// through the setter→maxCap path, not by restating the constant.
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-	ss.SetGenGuardSessionCap(uint64(conntrack.MaxSessions))
-	if got, want := ss.maxCap(), conntrack.MaxSessions/2; got != want {
+	ss.SetGenGuardSessionCap(uint64(dataplane.MaxSessions))
+	if got, want := ss.maxCap(), dataplane.MaxSessions/2; got != want {
 		t.Fatalf("maxCap with a full table wired = %d, want %d forward entries (F-044)", got, want)
 	}
 }
@@ -99,7 +98,7 @@ func TestFenceSurvivesIdleFabricFlap_9915(t *testing.T) {
 	if ss.getActiveConn() == nil {
 		t.Fatal("FIXTURE: no active conn after installing both fabrics")
 	}
-	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
+	ss.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagFenceAck))
 
 	type fenceOutcome struct {
 		ack FenceAck
@@ -159,7 +158,7 @@ func TestFenceAbortsWhenItsOwnFabricDrops_9915(t *testing.T) {
 	if ss.getActiveConn() != f0a {
 		t.Fatal("FIXTURE: fab0 must be the active conn")
 	}
-	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
+	ss.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagFenceAck))
 
 	out := make(chan error, 1)
 	go func() {
@@ -271,12 +270,12 @@ func TestClockOffsetResetOnFullDisconnect_9915(t *testing.T) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], 500000) // offset +500000, deterministic
 	ss.handleMessage(nil, syncMsgClockSync, buf[:])
-	before := ss.peerClockOffset.Load()
+	before := ss.peerIncarnationState().peerClockOffset.Load()
 	if before == 0 {
 		t.Fatal("FIXTURE: the honest clock sync was not stored")
 	}
 	ss.handleDisconnect(c0)
-	if got := ss.peerClockOffset.Load(); got != 0 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 0 {
 		t.Fatalf("peerClockOffset = %d after a full disconnect, want 0; the dead "+
 			"incarnation's offset survives into the reconnect window (F-118)", got)
 	}
@@ -297,12 +296,12 @@ func TestClockOffsetKeepsOnPartialDisconnect_9915(t *testing.T) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], 500000) // offset +500000, deterministic
 	ss.handleMessage(nil, syncMsgClockSync, buf[:])
-	before := ss.peerClockOffset.Load()
+	before := ss.peerIncarnationState().peerClockOffset.Load()
 	if before == 0 {
 		t.Fatal("FIXTURE: the honest clock sync was not stored")
 	}
 	ss.handleDisconnect(c0)
-	if got := ss.peerClockOffset.Load(); got != before {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != before {
 		t.Fatalf("peerClockOffset = %d after a partial disconnect, want %d (same peer process) (F-118)", got, before)
 	}
 }
@@ -416,7 +415,7 @@ func TestRebaseSaturationCountedAtInstall_9915(t *testing.T) {
 	// Positive offset + huge timestamp: the rebase overflows, saturates, counts.
 	ss, dp := newTestSync()
 	clockSync(ss, local-100) // offset +100; plausible uptime-scale peer clock
-	if got := ss.peerClockOffset.Load(); got != 100 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 100 {
 		t.Fatalf("FIXTURE: offset = %d, want +100", got)
 	}
 	key := keyFor(0x9915)
@@ -437,7 +436,7 @@ func TestRebaseSaturationCountedAtInstall_9915(t *testing.T) {
 	// Control: huge timestamp with a NEGATIVE offset neither saturates nor counts.
 	ss2, dp2 := newTestSync()
 	clockSync(ss2, local+100) // offset -100
-	if got := ss2.peerClockOffset.Load(); got != -100 {
+	if got := ss2.peerIncarnationState().peerClockOffset.Load(); got != -100 {
 		t.Fatalf("FIXTURE: offset = %d, want -100", got)
 	}
 	key2 := keyFor(0x9916)
@@ -473,7 +472,7 @@ func TestFenceAbortsWhenItsFabricIsSuperseded_9915(t *testing.T) {
 	if ss.getActiveConn() != f0a {
 		t.Fatal("FIXTURE: fab0 must be the active conn")
 	}
-	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
+	ss.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagFenceAck))
 	out := make(chan error, 1)
 	go func() {
 		_, err := ss.SendFenceAwait(3 * time.Second)
@@ -516,7 +515,7 @@ func TestFenceAbortsWhenItsFabricIsEvicted_9915(t *testing.T) {
 	if ss.getActiveConn() != f0a {
 		t.Fatal("FIXTURE: fab0 must be the active conn")
 	}
-	ss.peerCapabilityFlags.Store(uint32(capFlagFenceAck))
+	ss.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagFenceAck))
 	out := make(chan error, 1)
 	go func() {
 		_, err := ss.SendFenceAwait(3 * time.Second)
@@ -796,11 +795,11 @@ func TestClockSyncRetiredConnDisconnectRejected_9915(t *testing.T) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], 900000) // offset +100000
 	ss.handleMessage(ac, syncMsgClockSync, buf[:])
-	if got := ss.peerClockOffset.Load(); got != 100000 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 100000 {
 		t.Fatalf("FIXTURE: offset = %d, want +100000", got)
 	}
 	ss.handleDisconnect(ac)
-	if got := ss.peerClockOffset.Load(); got != 0 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 0 {
 		t.Fatalf("FIXTURE: offset = %d after disconnect, want 0", got)
 	}
 	if ac.clockSynced.Load() {
@@ -808,7 +807,7 @@ func TestClockSyncRetiredConnDisconnectRejected_9915(t *testing.T) {
 	}
 	// The already-read frame resumes after retirement: must drop.
 	ss.handleMessage(ac, syncMsgClockSync, buf[:])
-	if got := ss.peerClockOffset.Load(); got != 0 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 0 {
 		t.Fatalf("peerClockOffset = %d after redelivering on a retired conn, want 0 (F-118 review)", got)
 	}
 	// A replacement conn falls back to the cleared global, not the retired value.
@@ -840,18 +839,18 @@ func TestClockSyncRetiredConnSwitchRejected_9915(t *testing.T) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], 900000)
 	ss.handleMessage(ac0, syncMsgClockSync, buf[:])
-	if got := ss.peerClockOffset.Load(); got != 100000 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 100000 {
 		t.Fatalf("FIXTURE: offset = %d, want +100000", got)
 	}
 	// Incarnation switch keeping fabric 1: evicts fabric 0, clears global.
 	ss.mu.Lock()
 	ss.applyPeerIncarnationSwitchLocked(1)
 	ss.mu.Unlock()
-	if got := ss.peerClockOffset.Load(); got != 0 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 0 {
 		t.Fatalf("FIXTURE: offset = %d after switch, want 0", got)
 	}
 	ss.handleMessage(ac0, syncMsgClockSync, buf[:])
-	if got := ss.peerClockOffset.Load(); got != 0 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 0 {
 		t.Fatalf("peerClockOffset = %d after redelivering on an evicted conn, want 0 (F-118 review)", got)
 	}
 }
@@ -971,7 +970,7 @@ func TestClockSyncPublicationLockProbes_9915(t *testing.T) {
 		t.Fatal("ClockSync publication did not complete")
 	}
 	const wantOffset int64 = 100000
-	if got := ss.peerClockOffset.Load(); got != wantOffset {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != wantOffset {
 		t.Fatalf("peerClockOffset = %d after locked publication, want %d", got, wantOffset)
 	}
 	if got := ac.clockOffset.Load(); got != wantOffset {
@@ -1204,7 +1203,7 @@ func TestClockOffsetPreservedOnPrimedSwitch_9915(t *testing.T) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], 900000)
 	ss.handleMessage(ac1, syncMsgClockSync, buf[:])
-	if got := ss.peerClockOffset.Load(); got != 100000 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 100000 {
 		t.Fatalf("FIXTURE: offset = %d, want +100000", got)
 	}
 	// The replacement's FIRST BulkStart carries the new boot id and triggers
@@ -1231,7 +1230,7 @@ func TestClockOffsetPreservedOnPrimedSwitch_9915(t *testing.T) {
 	if got := ss.clockOffsetFor(ac1); got != 100000 {
 		t.Fatalf("clockOffsetFor(kept) = %d, want preserved +100000 (HIGH-1)", got)
 	}
-	if got := ss.peerClockOffset.Load(); got != 100000 {
+	if got := ss.peerIncarnationState().peerClockOffset.Load(); got != 100000 {
 		t.Fatalf("peerClockOffset = %d, want preserved +100000 (HIGH-1)", got)
 	}
 	key := dataplane.SessionKey{Protocol: 6, SrcPort: 0x9917, DstPort: 80}

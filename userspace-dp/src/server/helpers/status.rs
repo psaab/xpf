@@ -10,15 +10,17 @@
 // dump stays gated on `XPF_DEBUG_NEIGHBOR_KEYS`, bindings are refreshed
 // before the queue/per-binding projections, and worker snapshots are read
 // before the aggregates derived from them. No added coordinator
-// traversal, status clone, or allocation. Bodies byte-for-byte identical
-// to the pre-split source.
+// traversal, status clone, or allocation.
 
 use super::summarize_queues;
 use crate::afxdp;
-use crate::protocol::{BindingCountersSnapshot, ProcessStatus, UserspaceCapabilities};
+use crate::protocol::{
+    BindingCountersSnapshot, ControlResponse, ProcessStatus, UserspaceCapabilities,
+};
 use crate::server::ServerState;
 use chrono::Utc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 pub(crate) fn refresh_status(state: &mut ServerState) {
     state.afxdp.refresh_bindings(&mut state.status.bindings);
@@ -890,6 +892,56 @@ pub(crate) fn restore_binding_arm_state(status: &mut ProcessStatus, prior: Bindi
     }
 }
 
+/// #17126: the shared commit-requested-state / reconcile / roll-back-on-error
+/// tail for the three binding verbs that commit requested arm/registration
+/// bits into `guard.status` before reconciling (`set_forwarding_state`,
+/// `set_binding_state`, `set_queue_state`). #6750 unified only the
+/// capture/restore step (`BindingArmSnapshot`); the error/settle/persist tail
+/// stayed open-coded in three copies, so a fourth reconcile verb or a fifth
+/// outcome rule would repeat the lockstep edit. This helper owns that tail —
+/// the same principle b4465fc7d3 stated for the restore step: a divergence
+/// between the copies could only ever be a bug, never a policy difference.
+///
+/// `settle` is whether a successful reconcile owes the 2 s binding-settle
+/// wait: forwarding settles only when arming, binding/queue settle whenever
+/// the registration changed (their callers only reach here in that case).
+///
+/// On `Err`: `ok=false` with `"<verb> reconcile failed: {err}"` (#5621/#6135),
+/// the prior snapshot captured before the commit is restored (#6750),
+/// status is refreshed, and neither settle nor persist is set — the caller
+/// returns without persisting a success it did not achieve. On success:
+/// settle (if owed), refresh, persist.
+///
+/// Excluded by design: `rebind` commits no requested state (it clears
+/// runtime bits that `refresh_status` re-derives), and
+/// `update_ha_state` applies through `afxdp.update_ha_state`, not this
+/// reconcile — neither shares this tail.
+pub(crate) fn finish_binding_reconcile(
+    guard: &mut ServerState,
+    response: &mut ControlResponse,
+    verb: &str,
+    prior: BindingArmSnapshot,
+    settle: bool,
+    persist_state: &mut bool,
+    deferred: &mut Option<crate::server::handlers::Deferred>,
+) {
+    if let Err(err) = reconcile_status_bindings(guard) {
+        response.ok = false;
+        response.error = format!("{verb} reconcile failed: {err}");
+        // #6750: roll the requested state back BEFORE refreshing, so the
+        // refreshed status describes what the sockets are actually doing
+        // and Go's 1 Hz poll sees the mismatch that drives a retry.
+        restore_binding_arm_state(&mut guard.status, prior);
+        refresh_status(guard);
+        return;
+    }
+    if settle {
+        *deferred = Some(crate::server::handlers::Deferred::Settle(Duration::from_secs(2)));
+    }
+    refresh_status(guard);
+    *persist_state = true;
+}
+
 pub(crate) fn set_bindings_forwarding_armed(status: &mut ProcessStatus, armed: bool) {
     for binding in &mut status.bindings {
         binding.armed = armed && binding.registered;
@@ -937,7 +989,9 @@ mod status_wiring_tests {
         std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {}", p.display(), e))
     }
 
-    /// Strip comment lines before scanning.
+    use crate::test_support::source_scan::blank_comments_and_strings;
+
+    /// Blank comments and strings before scanning (#17152).
     ///
     /// Load-bearing, and found the hard way: the doc comment on THIS test
     /// quotes the very assignment the scan looks for, so with comments
@@ -945,11 +999,16 @@ mod status_wiring_tests {
     /// `state.status.shared_session_poison_recoveries = ...` line was deleted
     /// — the documentation satisfied the check on the code's behalf. Any
     /// source-scanning gate that can be quoted in prose has this failure mode.
+    ///
+    /// The previous whole-line-only `code_only` dropped only lines that
+    /// START with `//`, so a trailing `// state.afxdp.x()` note or a
+    /// `/* state.afxdp.x() */` block kept the gate green after the real
+    /// assignment was deleted. The shared #12270 blanker
+    /// (`test_support::source_scan`) blanks line tails, nested blocks,
+    /// string bodies and char literals, so only real code can satisfy
+    /// the scan.
     fn code_only(src: &str) -> String {
-        src.lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        blank_comments_and_strings(src)
     }
 
     /// #6751: drop ALL whitespace before matching.
@@ -1142,6 +1201,39 @@ mod status_wiring_tests {
                 && proto.contains("pub ike_exchange_entries: u64"),
             "#13290: ProcessStatus must carry ike_exchange_evictions_total \
              and ike_exchange_entries wire fields"
+        );
+    }
+
+    /// #17152 fixture control: the blanker behind `code_only` must not
+    /// let a trailing or block comment quote the accessor the
+    /// `every_counter_accessor_is_wired_into_process_status` gate scans
+    /// for. The old whole-line-only `code_only` kept both shapes, so
+    /// deleting the real assignment while leaving either comment stayed
+    /// green. Pinning the blanker directly means a regression here reds
+    /// even if the gate's needle changes.
+    #[test]
+    fn status_scan_blanker_ignores_trailing_and_block_comments_17152() {
+        let needle = "state.afxdp.shared_session_poison_recoveries_total()";
+        let trailing = format!("let x = 0; // was {needle}");
+        let block = format!("let x = 0; /* was {needle} */");
+        let whole_line = format!("// {needle}");
+        let real = format!("state.status.x = {needle};");
+        assert!(
+            !squeeze(&code_only(&trailing)).contains(&squeeze(needle)),
+            "#17152: a trailing // comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            !squeeze(&code_only(&block)).contains(&squeeze(needle)),
+            "#17152: a /* */ block comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            !squeeze(&code_only(&whole_line)).contains(&squeeze(needle)),
+            "#17152: a whole-line // comment quoting the accessor must not satisfy the scan"
+        );
+        assert!(
+            squeeze(&code_only(&real)).contains(&squeeze(needle)),
+            "#17152: real code calling the accessor must still satisfy the scan \
+             (a blanker that blanks everything would pass the three rows above vacuously)"
         );
     }
 }

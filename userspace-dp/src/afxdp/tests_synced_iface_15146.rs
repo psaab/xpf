@@ -446,15 +446,20 @@ fn a_synced_interface_import_is_refused_when_a_nat64_flow_owns_the_identity_1514
         .nat64
         .allocate_source_for_worker(
             0,
-            TCP,
-            "2001:db8::1".parse::<Ipv6Addr>().unwrap(),
+            &crate::session::SessionKey {
+                addr_family: libc::AF_INET6 as u8,
+                protocol: TCP,
+                src_ip: IpAddr::V6("2001:db8::1".parse::<Ipv6Addr>().unwrap()),
+                dst_ip: IpAddr::V6("64:ff9b::5db8:d822".parse::<Ipv6Addr>().unwrap()),
+                src_port: 40000,
+                dst_port: 443,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
             SRV.parse::<Ipv4Addr>().unwrap(),
-            40000,
-            443,
             1_000,
             0,
             &state.source_nat_rules,
-            0,
             Some(&state.iface_nat_allocators),
         )
         .expect("fixture: the NAT64 mint must succeed first");

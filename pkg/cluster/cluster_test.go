@@ -1216,7 +1216,7 @@ func TestHandlePeerHeartbeatSkipsTransferOverridesForAbsentRG(t *testing.T) {
 	<-m.Events()
 
 	m.mu.Lock()
-	m.peerTransferOutOverride[0] = 77
+	m.transferOverrides[0] = transferOverride{reqID: 77}
 	m.peerTransferCommitGraceUntil[0] = time.Now().Add(time.Second)
 	m.mu.Unlock()
 
