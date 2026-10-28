@@ -20,8 +20,10 @@ import (
 // fails persistently AND whose durable cert is stale, every commit re-emitted
 // the full stale-cert diagnostic, forever.
 //
-// These tests drive the REAL production loader (Config.TLSSelfSignedDir
-// routes certGen through generateSelfSignedCertAt) against a seeded temp dir and count the
+// These tests drive the REAL production loader against a seeded temp dir:
+// bare &Server{} fixtures (which bypass NewServer and its
+// Config.TLSSelfSignedDir routing) assign selfSignedCertGenForDir — the same
+// closure NewServer installs — directly, and count the
 // actual operator-visible warning text. They do not count certGen calls: the
 // property is what an operator reads in the log, and a call count is a probe
 // keyed to the implementation that happens to produce it.
