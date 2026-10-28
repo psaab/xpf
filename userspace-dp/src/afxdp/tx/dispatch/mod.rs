@@ -53,7 +53,10 @@ pub(in crate::afxdp) use shared_recycle::{
 // tests (the `tests/` submodule under this `mod.rs`, reached via `use
 // super::*`).
 #[cfg(test)]
-use shared_recycle::{shared_recycle_target_index, shared_recycle_target_index_for_split};
+use shared_recycle::{
+    SHARED_RECYCLE_UNKNOWN_SLOT_DROPS_LOGGED, SHARED_RECYCLE_UNKNOWN_SLOT_RESCUES_LOGGED,
+    shared_recycle_target_index, shared_recycle_target_index_for_split,
+};
 pub(in crate::afxdp) use slow_path::{
     SlowPathOutlet, extract_l3_packet_with_nat, handle_forward_build_failure,
     maybe_reinject_slow_path, maybe_reinject_slow_path_from_frame,
@@ -566,7 +569,7 @@ fn tunnel_outer_mtu_for_frag(
     let endpoint = forwarding
         .tunnel_endpoints
         .get(&decision.resolution.tunnel_endpoint_id)?;
-    match crate::afxdp::forwarding_build::tunnel_mode_kind(&endpoint.mode) {
+    match endpoint.kind {
         crate::afxdp::forwarding_build::TunnelKind::Gre => Some(
             crate::afxdp::forwarding::tunnel_outer_mtu(forwarding, decision, endpoint),
         ),
@@ -1074,7 +1077,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
     left: &mut [BindingWorker],
     ingress_index: usize,
@@ -1603,7 +1606,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                     }
                     copied_source_frame = true;
                     if target_binding.tx_pipeline.pending_tx_prepared.len() >= TX_BATCH_SIZE {
-                        let _ = drain_pending_tx_local_owner(
+                        let _ = drain_pending_tx(
                             target_binding,
                             now_ns,
                             post_recycles,
@@ -1702,7 +1705,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                     }
                     copied_source_frame = true;
                     if target_binding.tx_pipeline.pending_tx_local.len() >= TX_BATCH_SIZE {
-                        let _ = drain_pending_tx_local_owner(
+                        let _ = drain_pending_tx(
                             target_binding,
                             now_ns,
                             post_recycles,
@@ -1883,7 +1886,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                                 || !target_binding.tx_pipeline.pending_tx_prepared.is_empty()
                                 || !target_binding.tx_pipeline.pending_tx_local.is_empty())
                         {
-                            let _ = drain_pending_tx_local_owner(
+                            let _ = drain_pending_tx(
                                 target_binding,
                                 now_ns,
                                 post_recycles,
@@ -2110,7 +2113,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             if target_binding.tx_pipeline.pending_tx_prepared.len() >= TX_BATCH_SIZE
                 || target_binding.tx_pipeline.pending_tx_local.len() >= TX_BATCH_SIZE
             {
-                let _ = drain_pending_tx_local_owner(
+                let _ = drain_pending_tx(
                     target_binding,
                     now_ns,
                     post_recycles,
@@ -2370,7 +2373,7 @@ fn nat64_tunnel_is_encapsulable(forwarding: &ForwardingState, tunnel_endpoint_id
         .get(&tunnel_endpoint_id)
         .is_some_and(|e| {
             matches!(
-                crate::afxdp::forwarding_build::tunnel_mode_kind(&e.mode),
+                e.kind,
                 crate::afxdp::forwarding_build::TunnelKind::Gre
                     | crate::afxdp::forwarding_build::TunnelKind::WireGuard
             )

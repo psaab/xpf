@@ -57,7 +57,7 @@ impl InboundOutcome {
 /// inline (edge drain + post-msg2 keepalive) before this iteration's
 /// TUN burst (plan v9 completion-site ordering). Type-3 (cookie),
 /// unknown types, and failed authentication are `Unauthenticated`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn dispatch_inbound(
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,
@@ -377,7 +377,7 @@ pub(super) enum EncapOutcome {
 /// NoSession arms the (control-thread) initiation timer; a single
 /// round-trip increments the WG egress counter exactly once (telemetry
 /// is consolidated on the engine, not per call site).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn encap_and_send(
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,

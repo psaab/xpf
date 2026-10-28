@@ -307,15 +307,14 @@ Guard layers (`build-userspace-xdp.sh`):
    an **ABI compatibility check** (#5307): it compares the embedded shim's
    `Type`, `KeySize`, `ValueSize`, `MaxEntries`, and `Flags` — the exact
    fields cilium/ebpf's `MapSpec.Compatible` flags with `ErrMapIncompatible`
-   at load — against the Go-side expected shape for `dnat_table` and
-   `dnat_table_v6`, and against the RUNNING daemon's live pins (read-only via
+   at load — against the Go-side expected shapes, and against the RUNNING daemon's live pins (read-only via
    `ebpf.LoadPinnedMap` + shape accessors). The live-pin inventory
    (`userspaceABICheckedPinnedMaps`) is the union of the shim-declared
    PinByName maps (`userspacePinnedShimMaps`) and Go-created/replaced shared
    maps (`userspaceShimSharedMapSpecs`), minus only maps rebuilt before the
    new dataplane is activated. Before #5484 it covered only the PinByName
    group, so state-bearing shared maps the shim does NOT declare —
-   `sessions_v6`, `dnat_table_v6`, and the HA / per-CPU maps (`rg_active`,
+   `sessions_v6`, and the HA / per-CPU maps (`rg_active`,
    `ha_watchdog`, `session_id_gen`, the `*_counters`) — were never
    pre-flighted; an incompatible live pin passed a green pre-flight and then
    failed `ErrMapIncompatible` in `loadUserspaceShimSharedMaps` AFTER the old
@@ -1341,8 +1340,8 @@ snap`, and there are two of them — one per acceptance path).
   - **The NAT phases no longer build eBPF NAT map records (#6420).**
     `compileNAT` / `compileStaticNAT` / `compileNAT64` (`compiler_nat.go`)
     used to construct `SNATValue`, `SNATValueV6`, `SNATEgressValue`,
-    `NATPoolConfig`, `DNATValue`, static-NAT and `NAT64Config` records and
-    hand them to `SetSNATRule` / `SetDNATEntry` / `SetNATPoolConfig` / the
+    `NATPoolConfig`, static-NAT and `NAT64Config` records and
+    hand them to `SetSNATRule` / `SetNATPoolConfig` / the
     stale-NAT deleters. Every one of those writes landed nowhere: the only
     production compile path is `Manager.CompileUserspaceShim`, whose
     `userspaceShimCompileDataplane` implements each of them as `return nil`

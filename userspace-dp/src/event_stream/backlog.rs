@@ -25,7 +25,6 @@
 /// headroom so transient bursts (plus any in-flight replay/partial-write
 /// remainder) are absorbed losslessly, while a persistently stalled consumer
 /// stays bounded.
-
 /// The cap is checked at the top of the drain loop, before the in-flight frame
 /// is appended, so the UNWRITTEN backlog can reach at most
 /// `WRITE_BACKLOG_MAX_BYTES` plus one already-pulled max `EventFrame` (≤ 512 B)

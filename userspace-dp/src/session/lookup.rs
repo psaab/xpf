@@ -119,6 +119,45 @@ impl<'a> SessionQuery<'a> {
 }
 
 impl SessionTable {
+    /// #17080: the ONE snapshot constructor for a matched record.
+    /// `aux` is the matched entry's snapshot (session_id,
+    /// source_nat_static, leak_incarnation) per entry.rs's contract —
+    /// every finder/lookup MUST build its result here so a field added
+    /// to `SessionLookupAux` cannot be silently zeroed by one producer
+    /// (the #13771 residual: six local finders used a zeroed aux, so a
+    /// reverse companion installed from a local forward row lost its
+    /// SNAT provenance).
+    fn lookup_snapshot_from(&self, record: &SessionRecord) -> SessionLookup {
+        SessionLookup {
+            decision: record.entry.decision,
+            metadata: record.entry.metadata.clone_without_policy_counter(),
+            forwarding_generation: record.entry.forwarding_generation,
+            aux: SessionLookupAux {
+                session_id: record.entry.session_id,
+                source_nat_static: record.entry.source_nat_static,
+                leak_incarnation: self
+                    .leak_incarnations
+                    .get(&record.key)
+                    .copied()
+                    .unwrap_or(0),
+            },
+        }
+    }
+
+    /// #17080: forward-match twin of `lookup_snapshot_from`. Takes the
+    /// full (policy-counter-carrying) metadata clone the finders have
+    /// always returned; only the aux snapshot is unified.
+    fn forward_match_from(&self, record: &SessionRecord) -> ForwardSessionMatch {
+        ForwardSessionMatch {
+            key: record.key.clone(),
+            decision: record.entry.decision,
+            metadata: record.entry.metadata.clone(),
+            forwarding_generation: record.entry.forwarding_generation,
+            aux: self.lookup_snapshot_from(record).aux,
+            synced_synthesis: false,
+        }
+    }
+
     /// Note seq/window for the entry matching `key` (this packet's direction).
     pub fn note_tcp_seq(&mut self, key: &SessionKey, seq: u32, ack: u32, window: u16, payload_len: u32, tcp_flags: u8, max_window: u32) {
         self.note_tcp_seq_scaled(key, seq, ack, window, None, payload_len, tcp_flags, max_window);
@@ -595,23 +634,7 @@ impl SessionTable {
     /// validation, and cannot mutate the table by construction.
     pub fn probe_with_origin(&self, key: &SessionKey) -> Option<(SessionLookup, SessionOrigin)> {
         let record = self.probe_record_with_origin(key)?;
-        Some((
-            SessionLookup {
-                decision: record.entry.decision,
-                metadata: record.entry.metadata.clone_without_policy_counter(),
-                forwarding_generation: record.entry.forwarding_generation,
-                aux: SessionLookupAux {
-                    session_id: record.entry.session_id,
-                    source_nat_static: record.entry.source_nat_static,
-                    leak_incarnation: self
-                        .leak_incarnations
-                        .get(&record.key)
-                        .copied()
-                        .unwrap_or(0),
-                },
-            },
-            record.entry.origin,
-        ))
+        Some((self.lookup_snapshot_from(record), record.entry.origin))
     }
 
     /// Read-only, expiry-aware probe for quoted traffic that is not itself
@@ -626,23 +649,7 @@ impl SessionTable {
         if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
             return None;
         }
-        Some((
-            SessionLookup {
-                decision: record.entry.decision,
-                metadata: record.entry.metadata.clone_without_policy_counter(),
-                forwarding_generation: record.entry.forwarding_generation,
-                aux: SessionLookupAux {
-                    session_id: record.entry.session_id,
-                    source_nat_static: record.entry.source_nat_static,
-                    leak_incarnation: self
-                        .leak_incarnations
-                        .get(&record.key)
-                        .copied()
-                        .unwrap_or(0),
-                },
-            },
-            record.entry.origin,
-        ))
+        Some((self.lookup_snapshot_from(record), record.entry.origin))
     }
     /// Expiry-aware lookup that distinguishes an idle-crossed indexed record
     /// from an absent key without probing `key_to_handle` a second time.
@@ -657,23 +664,7 @@ impl SessionTable {
         if now_ns.saturating_sub(record.entry.last_seen_ns) > record.entry.expires_after_ns {
             return SessionExpiryProbe::IdleCrossed;
         }
-        SessionExpiryProbe::Live((
-            SessionLookup {
-                decision: record.entry.decision,
-                metadata: record.entry.metadata.clone_without_policy_counter(),
-                forwarding_generation: record.entry.forwarding_generation,
-                aux: SessionLookupAux {
-                    session_id: record.entry.session_id,
-                    source_nat_static: record.entry.source_nat_static,
-                    leak_incarnation: self
-                        .leak_incarnations
-                        .get(&record.key)
-                        .copied()
-                        .unwrap_or(0),
-                },
-            },
-            record.entry.origin,
-        ))
+        SessionExpiryProbe::Live((self.lookup_snapshot_from(record), record.entry.origin))
     }
     /// #14628: expiry-aware probe that also returns the entry's CANONICAL
     /// key. `probe_with_origin_at` cannot name it: an alias hit (the
@@ -695,20 +686,7 @@ impl SessionTable {
         }
         SessionExpiryProbe::Live((
             record.key.clone(),
-            SessionLookup {
-                decision: record.entry.decision,
-                metadata: record.entry.metadata.clone_without_policy_counter(),
-                forwarding_generation: record.entry.forwarding_generation,
-                aux: SessionLookupAux {
-                    session_id: record.entry.session_id,
-                    source_nat_static: record.entry.source_nat_static,
-                    leak_incarnation: self
-                        .leak_incarnations
-                        .get(&record.key)
-                        .copied()
-                        .unwrap_or(0),
-                },
-            },
+            self.lookup_snapshot_from(record),
             record.entry.origin,
         ))
     }
@@ -739,25 +717,7 @@ impl SessionTable {
                 idle_crossed = true;
                 continue;
             }
-            let matched = (
-                ForwardSessionMatch {
-                    key: record.key.clone(),
-                    decision: entry.decision,
-                    metadata: entry.metadata.clone(),
-                    forwarding_generation: entry.forwarding_generation,
-                    aux: SessionLookupAux {
-                        session_id: entry.session_id,
-                        source_nat_static: entry.source_nat_static,
-                        leak_incarnation: self
-                            .leak_incarnations
-                            .get(&record.key)
-                            .copied()
-                            .unwrap_or(0),
-                    },
-                    synced_synthesis: false,
-                },
-                entry.origin,
-            );
+            let matched = (self.forward_match_from(record), entry.origin);
             if first.is_some() {
                 // #14382: second live validated candidate — the wire
                 // tuple is ambiguous. Fail closed as Absent (the
@@ -1506,14 +1466,7 @@ impl SessionTable {
         let Some(record) = candidate else {
             return IpsecReplyAliasLookup::NativeMiss;
         };
-        IpsecReplyAliasLookup::Unique(ForwardSessionMatch {
-            key: record.key.clone(),
-            decision: record.entry.decision,
-            metadata: record.entry.metadata.clone(),
-            forwarding_generation: record.entry.forwarding_generation,
-            aux: SessionLookupAux::default(),
-            synced_synthesis: false,
-        })
+        IpsecReplyAliasLookup::Unique(self.forward_match_from(record))
     }
 
     pub fn find_forward_nat_match<F>(
@@ -1623,14 +1576,7 @@ impl SessionTable {
                 idle_crossed = true;
                 continue;
             }
-            let m = ForwardSessionMatch {
-                key: record.key.clone(),
-                decision: entry.decision,
-                metadata: entry.metadata.clone(),
-                forwarding_generation: entry.forwarding_generation,
-                aux: SessionLookupAux::default(),
-                synced_synthesis: false,
-            };
+            let m = self.forward_match_from(record);
             if let Some(prev) = &first {
                 // #16014 (extends #14374): any second passing candidate with
                 // a different forward key or NAT decision is ambiguous,
@@ -1715,14 +1661,7 @@ impl SessionTable {
             }
         }
         if let Some(record) = candidate {
-            ForwardNatQuoteLookup::Unique(ForwardSessionMatch {
-                key: record.key.clone(),
-                decision: record.entry.decision,
-                metadata: record.entry.metadata.clone(),
-                forwarding_generation: record.entry.forwarding_generation,
-                aux: SessionLookupAux::default(),
-                synced_synthesis: false,
-            })
+            ForwardNatQuoteLookup::Unique(self.forward_match_from(record))
         } else {
             ForwardNatQuoteLookup::NoMatch
         }
@@ -1762,14 +1701,7 @@ impl SessionTable {
             candidate = Some(record);
         }
         let record = candidate?;
-        Some(ForwardSessionMatch {
-            key: record.key.clone(),
-            decision: record.entry.decision,
-            metadata: record.entry.metadata.clone(),
-            forwarding_generation: record.entry.forwarding_generation,
-            aux: SessionLookupAux::default(),
-            synced_synthesis: false,
-        })
+        Some(self.forward_match_from(record))
     }
 
     fn find_forward_nat_match_inner<F>(
@@ -1836,14 +1768,7 @@ impl SessionTable {
             {
                 continue;
             }
-            let m = ForwardSessionMatch {
-                key: record.key.clone(),
-                decision: entry.decision,
-                metadata: entry.metadata.clone(),
-                forwarding_generation: entry.forwarding_generation,
-                aux: SessionLookupAux::default(),
-                synced_synthesis: false,
-            };
+            let m = self.forward_match_from(record);
             if let Some(prev) = &first {
                 // #16014 (extends #14374): any second passing candidate with
                 // a different forward key or NAT decision is ambiguous,
@@ -1987,25 +1912,7 @@ impl SessionTable {
             {
                 continue;
             }
-            let matched = (
-                ForwardSessionMatch {
-                    key: record.key.clone(),
-                    decision: entry.decision,
-                    metadata: entry.metadata.clone(),
-                    forwarding_generation: entry.forwarding_generation,
-                    aux: SessionLookupAux {
-                        session_id: entry.session_id,
-                        source_nat_static: entry.source_nat_static,
-                        leak_incarnation: self
-                            .leak_incarnations
-                            .get(&record.key)
-                            .copied()
-                            .unwrap_or(0),
-                    },
-                    synced_synthesis: false,
-                },
-                entry.origin,
-            );
+            let matched = (self.forward_match_from(record), entry.origin);
             if first.is_some() {
                 return None;
             }
@@ -2536,12 +2443,15 @@ impl SessionTable {
         {
             return None;
         }
+        // #17080: capture the aux snapshot BEFORE remove_entry (it drops
+        // the leak incarnation); the removed entry alone cannot rebuild it.
+        let aux = self.lookup_aux_info(key);
         self.remove_entry(key, RemovalKind::Transfer)
             .map(|entry| SessionLookup {
                 decision: entry.decision,
                 metadata: entry.metadata,
                 forwarding_generation: entry.forwarding_generation,
-                aux: SessionLookupAux::default(),
+                aux,
             })
     }
 
@@ -2608,7 +2518,7 @@ impl SessionTable {
     /// (below) so no single packet-loop tick scans the whole table. This method
     /// is retained as the simple full-walk primitive used by the idle-time unit
     /// tests; hence it is test-only in non-`test` builds.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn iter_with_idle(
         &self,
         now_ns: u64,

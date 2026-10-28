@@ -798,25 +798,14 @@ func (s *Server) fetchPeerSessions(ctx context.Context, req *pb.GetSessionsReque
 	peerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	// Forward all filters but NOT include_peer — prevents recursion.
-	peerReq := &pb.GetSessionsRequest{
-		Limit:             req.Limit,
-		Offset:            req.Offset,
-		Zone:              req.Zone,
-		Protocol:          req.Protocol,
-		SourcePrefix:      req.SourcePrefix,
-		DestinationPrefix: req.DestinationPrefix,
-		SourcePort:        req.SourcePort,
-		DestinationPort:   req.DestinationPort,
-		NatOnly:           req.NatOnly,
-		Application:       req.Application,
-		InterfaceFilter:   req.InterfaceFilter,
-		SourceNatPool:     req.SourceNatPool,
-		// Do NOT forward PageToken to peer — tokens encode local BPF map
-		// keys and are meaningless on a different node's keyspace. Peer
-		// always returns its full (first-page) result set.
-		PageSize: req.PageSize,
-		NoEnrich: req.NoEnrich,
-	}
+	peerReq := selectorFromSessions(req)
+	peerReq.Limit = req.Limit
+	peerReq.Offset = req.Offset
+	// Do NOT forward PageToken to peer — tokens encode local BPF map
+	// keys and are meaningless on a different node's keyspace. Peer
+	// always returns its full (first-page) result set.
+	peerReq.PageSize = req.PageSize
+	peerReq.NoEnrich = req.NoEnrich
 	peerResp, err := client.GetSessions(peerCtx, peerReq)
 	if err != nil {
 		slog.Warn("failed to fetch peer sessions", "err", err)
@@ -1014,20 +1003,10 @@ func (s *Server) getSessionsLegacy(ctx context.Context, req *pb.GetSessionsReque
 }
 
 // buildSessionSummaryFilter reuses the GetSessions filter builder for the
-// summary request's filter fields (#15236 A52-04).
+// summary request's filter fields (#15236 A52-04), via the shared #17189
+// selector projection.
 func (s *Server) buildSessionSummaryFilter(req *pb.GetSessionSummaryRequest) *sessionFilter {
-	return s.buildSessionFilter(&pb.GetSessionsRequest{
-		Zone:              req.GetZone(),
-		Protocol:          req.GetProtocol(),
-		SourcePrefix:      req.GetSourcePrefix(),
-		DestinationPrefix: req.GetDestinationPrefix(),
-		SourcePort:        req.GetSourcePort(),
-		DestinationPort:   req.GetDestinationPort(),
-		NatOnly:           req.GetNatOnly(),
-		Application:       req.GetApplication(),
-		InterfaceFilter:   req.GetInterfaceFilter(),
-		SourceNatPool:     req.GetSourceNatPool(),
-	})
+	return s.buildSessionFilter(selectorFromSummary(req))
 }
 
 func (s *Server) GetSessionSummary(ctx context.Context, req *pb.GetSessionSummaryRequest) (*pb.GetSessionSummaryResponse, error) {
@@ -1206,10 +1185,7 @@ func (s *Server) proxyPeerSessionSummary(ctx context.Context, req *pb.GetSession
 	defer conn.Close()
 	peerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	fwd := &pb.GetSessionSummaryRequest{}
-	if req != nil {
-		fwd = &pb.GetSessionSummaryRequest{Zone: req.GetZone(), Protocol: req.GetProtocol(), SourcePrefix: req.GetSourcePrefix(), DestinationPrefix: req.GetDestinationPrefix(), SourcePort: req.GetSourcePort(), DestinationPort: req.GetDestinationPort(), NatOnly: req.GetNatOnly(), Application: req.GetApplication(), InterfaceFilter: req.GetInterfaceFilter(), SourceNatPool: req.GetSourceNatPool()}
-	}
+	fwd := forwardSelector(req)
 	return pb.NewBpfrxServiceClient(conn).GetSessionSummary(peerCtx, fwd)
 }
 
@@ -1486,18 +1462,8 @@ func (s *Server) ClearSessions(ctx context.Context, req *pb.ClearSessionsRequest
 	// the former inline filter comparing network-order key ports to
 	// host-order request ports, and adds the interface / nat-only /
 	// source-nat-pool filters the CLI advertises.
-	getReq := &pb.GetSessionsRequest{
-		Protocol:          req.Protocol,
-		SourcePrefix:      req.SourcePrefix,
-		DestinationPrefix: req.DestinationPrefix,
-		SourcePort:        req.SourcePort,
-		DestinationPort:   req.DestinationPort,
-		NatOnly:           req.NatOnly,
-		Application:       req.Application,
-		InterfaceFilter:   req.Interface,
-		SourceNatPool:     req.SourceNatPool,
-	}
-	if req.Zone != "" {
+	getReq, clearZoneName := selectorFromClear(req)
+	if clearZoneName != "" {
 		// An unresolvable zone must fail the RPC: leaving the zone ID
 		// at 0 would silently widen the clear to every zone.
 		// #12891: a quarantined (ID-collision loser) name resolves in
@@ -1530,7 +1496,7 @@ func (s *Server) ClearSessions(ctx context.Context, req *pb.ClearSessionsRequest
 
 	// Clear matching IPv4 + IPv6 sessions with a BOUNDED handler working set
 	// (#5454). The pre-#5454 path materialized EVERY matching forward key,
-	// reverse companion, and DNAT companion into unbounded slices before the
+	// reverse companion into unbounded slices before the
 	// first delete — O(N) handler-goroutine allocation where N is up to the
 	// full (multi-million entry) session table. ClearSessions is fabric-
 	// reachable (fabricAllowedUnaryMethods), so a PSK-holding peer could
@@ -1554,7 +1520,7 @@ func (s *Server) ClearSessions(ctx context.Context, req *pb.ClearSessionsRequest
 // clearFilteredBatch bounds the number of matching session keys the filtered
 // ClearSessions path holds in the handler goroutine at once (#5454). The
 // session table can hold millions of entries; the pre-#5454 path collected
-// every match (forward + reverse + DNAT keys) before deleting, an O(matches)
+// every match (forward + reverse keys) before deleting, an O(matches)
 // allocation a fabric-reachable caller could weaponize. Collection now stops at
 // this many forward keys, deletes that chunk, and resumes, so peak key-slice
 // memory is O(clearFilteredBatch), not O(matches). It is a var (not const) so a
@@ -1570,42 +1536,35 @@ var clearFilteredBatch = 1024
 var clearFilteredBatchObserver func(chunkLen int)
 
 // clearBatchV4 accumulates one bounded chunk of matching v4 session keys plus
-// each matched session's reverse and DNAT companion keys, then deletes them.
+// each matched session's reverse companion keys, then deletes them.
 type clearBatchV4 struct {
-	fwd  []dataplane.SessionKey
-	rev  []dataplane.SessionKey
-	dnat []dataplane.DNATKey
+	fwd []dataplane.SessionKey
+	rev []dataplane.SessionKey
 }
 
 func (b *clearBatchV4) reset() {
 	b.fwd = b.fwd[:0]
 	b.rev = b.rev[:0]
-	b.dnat = b.dnat[:0]
 }
 
-// collect appends a matched session's forward key plus its reverse and DNAT
-// companions, mirroring the exact key construction the pre-#5454 inline path
-// used: the reverse companion is keyed on the TRANSLATED tuple val.ReverseKey
+// collect appends a matched session's forward key plus its reverse companion,
+// mirroring the exact key construction the pre-#5454 inline path used: the
+// reverse companion is keyed on the TRANSLATED tuple val.ReverseKey
 // (NOT a naive src/dst swap — #2733), skipped when ReverseKey.Protocol == 0
-// (no companion installed); the DNAT companion key uses the write-side host-
-// order encoding (#2406) and only for dynamic (non-static) SNAT sessions.
+// (no companion installed).
 // Returns true once the forward chunk has reached clearFilteredBatch.
 func (b *clearBatchV4) collect(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 	b.fwd = append(b.fwd, key)
 	if val.ReverseKey.Protocol != 0 {
 		b.rev = append(b.rev, val.ReverseKey)
 	}
-	if val.Flags&dataplane.SessFlagSNAT != 0 &&
-		val.Flags&dataplane.SessFlagStaticNAT == 0 {
-		b.dnat = append(b.dnat, dataplane.DNATKeyForSessionV4(key, val))
-	}
 	return len(b.fwd) >= clearFilteredBatch
 }
 
-// deleteAll deletes the collected forward keys (counting successes), reverse
-// companions, and DNAT companions, aggregating failures exactly as the
-// pre-#5454 inline path did (a benign ErrKeyNotExist on the computed reverse /
-// DNAT companion of a NAT'd session is not a failure — #2468). Returns the
+// deleteAll deletes the collected forward keys (counting successes) and reverse
+// companions, aggregating failures exactly as the
+// pre-#5454 inline path did (a benign ErrKeyNotExist on the computed reverse
+// companion of a NAT'd session is not a failure — #2468). Returns the
 // number of forward sessions successfully deleted.
 func (b *clearBatchV4) deleteAll(s *Server, agg *clearErrors) int {
 	deleted := 0
@@ -1622,14 +1581,11 @@ func (b *clearBatchV4) deleteAll(s *Server, agg *clearErrors) int {
 	for _, key := range b.rev {
 		agg.addExceptNotFound("v4 reverse delete", s.dp.DeleteSession(key))
 	}
-	for _, dk := range b.dnat {
-		agg.addExceptNotFound("v4 DNAT companion delete", s.dp.DeleteDNATEntry(dk))
-	}
 	return deleted
 }
 
 // clearFilteredSessionsV4 deletes every v4 session matching filter, plus each
-// matched session's reverse and DNAT companion, while holding at most
+// matched session's reverse companion, while holding at most
 // O(clearFilteredBatch) keys in the handler goroutine (#5454). It returns the
 // number of forward sessions deleted and records sub-operation failures on agg.
 //
@@ -1749,25 +1705,19 @@ func (s *Server) clearFilteredSessionsV4Rescan(ctx context.Context, filter *sess
 
 // clearBatchV6 is the IPv6 analogue of clearBatchV4.
 type clearBatchV6 struct {
-	fwd  []dataplane.SessionKeyV6
-	rev  []dataplane.SessionKeyV6
-	dnat []dataplane.DNATKeyV6
+	fwd []dataplane.SessionKeyV6
+	rev []dataplane.SessionKeyV6
 }
 
 func (b *clearBatchV6) reset() {
 	b.fwd = b.fwd[:0]
 	b.rev = b.rev[:0]
-	b.dnat = b.dnat[:0]
 }
 
 func (b *clearBatchV6) collect(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 	b.fwd = append(b.fwd, key)
 	if val.ReverseKey.Protocol != 0 {
 		b.rev = append(b.rev, val.ReverseKey)
-	}
-	if val.Flags&dataplane.SessFlagSNAT != 0 &&
-		val.Flags&dataplane.SessFlagStaticNAT == 0 {
-		b.dnat = append(b.dnat, dataplane.DNATKeyForSessionV6(key, val))
 	}
 	return len(b.fwd) >= clearFilteredBatch
 }
@@ -1785,9 +1735,6 @@ func (b *clearBatchV6) deleteAll(s *Server, agg *clearErrors) int {
 	}
 	for _, key := range b.rev {
 		agg.addExceptNotFound("v6 reverse delete", s.dp.DeleteSessionV6(key))
-	}
-	for _, dk := range b.dnat {
-		agg.addExceptNotFound("v6 DNAT companion delete", s.dp.DeleteDNATEntryV6(dk))
 	}
 	return deleted
 }
@@ -1981,7 +1928,7 @@ func (e *clearErrors) add(op string, err error) {
 
 // addExceptNotFound is add() for delete operations whose target key is
 // COMPUTED, not enumerated — the reverse-session companion (a naive
-// src/dst swap of the forward key) and the DNAT companion entry. For a
+// src/dst swap of the forward key). For a
 // NAT'd session those computed keys frequently do not exist (the real
 // reverse companion is keyed on the TRANSLATED tuple val.ReverseKey, not
 // the naive swap), so the dataplane returns ebpf.ErrKeyNotExist. That is

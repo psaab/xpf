@@ -1467,56 +1467,6 @@ type NPTv6Value struct {
 	Pad         [5]byte
 }
 
-// DNAT table flags.
-const (
-	DNATFlagDynamic = 0 // dynamic/SNAT-return entry
-	DNATFlagStatic  = 1 // static/DNAT-config entry
-)
-
-// DNATKey mirrors the C struct dnat_key.
-//
-// #2406 BYTE-ORDER: DstPort is HOST-ORDER numeric (NOT network order). The
-// AF_XDP shim is the only reader of this BPF map key; it builds its lookup
-// key port via u16::from_be_bytes(wire) — the host-order numeric value — and
-// stores it natively, identical to the proven session_map_key. Writers MUST
-// match: session-derived keys go through DNATKeyForSessionV4 (ntohs of the
-// network-order SessionValue.NATSrcPort); static-DNAT config writes the
-// already-host-order port raw (no htons). DstIP stays in network byte order
-// (the shim reads it with from_ne_bytes against octets() on both sides).
-type DNATKey struct {
-	Protocol uint8
-	Pad      [3]byte
-	DstIP    uint32 // network byte order
-	DstPort  uint16 // host byte order (#2406 — matches shim from_be_bytes reader)
-	FromZone uint16 // 0 = wildcard / dynamic SNAT-return entry
-}
-
-// DNATValue mirrors the C struct dnat_value.
-type DNATValue struct {
-	NewDstIP   uint32 // network byte order
-	NewDstPort uint16 // network byte order
-	Flags      uint8
-	Pad        uint8
-}
-
-// DNATKeyV6 mirrors the C struct dnat_key_v6.
-// DstPort is HOST-ORDER numeric (see DNATKey doc, #2406).
-type DNATKeyV6 struct {
-	Protocol uint8
-	Pad      [3]byte
-	DstIP    [16]byte
-	DstPort  uint16 // host byte order (#2406 — matches shim from_be_bytes reader)
-	FromZone uint16 // 0 = wildcard / dynamic SNAT-return entry
-}
-
-// DNATValueV6 mirrors the C struct dnat_value_v6.
-type DNATValueV6 struct {
-	NewDstIP   [16]byte
-	NewDstPort uint16 // network byte order
-	Flags      uint8
-	Pad        uint8
-}
-
 // SNATKey mirrors the C struct snat_key.
 type SNATKey struct {
 	FromZone uint16
@@ -1544,7 +1494,6 @@ type SNATValueV6 struct {
 	Pad       uint8
 	CounterID uint16 // index into nat_rule_counters
 }
-
 
 // MirrorConfig mirrors the C struct mirror_config for port mirroring.
 // Key is the ingress ifindex; value tells XDP where to clone-redirect.

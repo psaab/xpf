@@ -35,6 +35,8 @@ func (c *xpfCollector) emitUserspaceStatus13280(ch chan<- prometheus.Metric, sta
 		prometheus.CounterValue, float64(status.SessionDeleteDroppedReleased))
 	c.emitConstMetric(ch, c.userspaceTunnelPurgeReservationsReleased,
 		prometheus.CounterValue, float64(status.TunnelPurgeReservationsReleased))
+	c.emitConstMetric(ch, c.userspaceTunnelPurgeDeleteRefused,
+		prometheus.CounterValue, float64(status.TunnelPurgeDeleteRefused))
 	c.emitConstMetric(ch, c.userspaceSyncedReverseRederived,
 		prometheus.CounterValue, float64(status.SyncedReverseRederived))
 

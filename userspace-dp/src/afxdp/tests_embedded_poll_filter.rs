@@ -5,7 +5,7 @@
 // verbatim; shared test-support helpers live in afxdp/tests_support.rs.
 #![allow(unused_imports)]
 
-use super::poll_descriptor::{try_reverse_embedded_icmp_error, EmbeddedIcmpReversal};
+use super::poll_descriptor::{EmbeddedIcmpReversal, try_reverse_embedded_icmp_error};
 use super::test_fixtures::*;
 use super::tests_support::*;
 use super::worker::WorkerTxPipeline;
@@ -842,7 +842,8 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let entry = SyncedSessionEntry { key: SessionKey {
+    let entry = SyncedSessionEntry {
+        key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V4(client_ip),
@@ -906,9 +907,14 @@ fn embedded_icmp_nat_match_uses_shared_nat_session_for_ipv4() {
     // #2170 test fixture: no peer install generation.
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
@@ -1261,7 +1267,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     );
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_with_disposition_and_knob(
     allow_reverse_policy: bool,
     ha_state: BTreeMap<i32, HAGroupRuntime>,
@@ -1435,7 +1441,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -1472,7 +1478,6 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_on_flowless_path_5690_impl_w
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -2363,16 +2368,22 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
     // lease must be active at THAT time, not at wall-clock now.
     let now_secs = 123;
     let ha_state = BTreeMap::from([
-        (1, HAGroupRuntime {
+        (
+            1,
+            HAGroupRuntime {
             active: true,
             watchdog_timestamp: now_secs,
             lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
-        }),
-        (2, HAGroupRuntime {
+            },
+        ),
+        (
+            2,
+            HAGroupRuntime {
             active: true,
             watchdog_timestamp: now_secs,
             lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
-        }),
+            },
+        ),
     ]);
     let mut snapshot = nat_snapshot_with_fabric();
     snapshot.policies.clear();
@@ -2415,7 +2426,13 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
         ..UserspaceDpMeta::default()
     };
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &forwarding, &ha_state, now_secs),
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame,
+            meta,
+            &forwarding,
+            &ha_state,
+            now_secs
+        ),
         ZoneEncodedFabricStamp::Ambiguous {
             zone_id: TEST_WAN_ZONE_ID,
             ifindex: None
@@ -2492,7 +2509,9 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
     // from the live reverse half (its cached LAN resolution), as a
     // real SNAT session pair carries.
     {
-        let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision {
+        let reverse_key = crate::session::reverse_session_key(
+            &forward_key,
+            NatDecision {
             rewrite_src: Some(IpAddr::V4(snat_ip)),
             rewrite_dst: None,
             rewrite_src_port: Some(snat_port),
@@ -2500,8 +2519,10 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
             source_nat_icmp: None,
             nat64: false,
             nptv6: false,
-        });
-        assert!(sessions.install_with_protocol_with_origin(
+            },
+        );
+        assert!(
+            sessions.install_with_protocol_with_origin(
             reverse_key,
             SessionDecision {
                 resolution: ForwardingResolution {
@@ -2526,7 +2547,13 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
                     source_nat_icmp: None,
                     nat64: false,
                     nptv6: false,
-                }.reverse(IpAddr::V4(client_ip), IpAddr::V4(server_ip), client_port, 80),
+                    }
+                    .reverse(
+                        IpAddr::V4(client_ip),
+                        IpAddr::V4(server_ip),
+                        client_port,
+                        80
+                    ),
                 install_table_domain: 0,
                 install_table_check: 0,
             },
@@ -2554,7 +2581,8 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
             123_000_000_000,
             PROTO_TCP,
             0x18,
-        ));
+            )
+        );
     }
     let (batch, _dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -2593,16 +2621,22 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
     // lease must be active at THAT time, not at wall-clock now.
     let now_secs = 123;
     let ha_state = BTreeMap::from([
-        (1, HAGroupRuntime {
+        (
+            1,
+            HAGroupRuntime {
             active: true,
             watchdog_timestamp: now_secs,
             lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
-        }),
-        (2, HAGroupRuntime {
+            },
+        ),
+        (
+            2,
+            HAGroupRuntime {
             active: true,
             watchdog_timestamp: now_secs,
             lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
-        }),
+            },
+        ),
     ]);
     let mut snapshot = nat_snapshot_with_fabric();
     snapshot.policies.clear();
@@ -2660,7 +2694,13 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
         ..UserspaceDpMeta::default()
     };
     assert_eq!(
-        parse_zone_encoded_fabric_ingress_from_frame(&frame, meta, &forwarding, &ha_state, now_secs),
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame,
+            meta,
+            &forwarding,
+            &ha_state,
+            now_secs
+        ),
         ZoneEncodedFabricStamp::Ambiguous {
             zone_id: TEST_WAN_ZONE_ID,
             ifindex: None
@@ -2736,7 +2776,9 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
     // Reverse companion whose cached delivery egresses the RG-3
     // interface (26): owner RG 3 is not forwarding-active locally.
     {
-        let reverse_key = crate::session::reverse_session_key(&forward_key, NatDecision {
+        let reverse_key = crate::session::reverse_session_key(
+            &forward_key,
+            NatDecision {
             rewrite_src: Some(IpAddr::V4(snat_ip)),
             rewrite_dst: None,
             rewrite_src_port: Some(snat_port),
@@ -2744,8 +2786,10 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
             source_nat_icmp: None,
             nat64: false,
             nptv6: false,
-        });
-        assert!(sessions.install_with_protocol_with_origin(
+            },
+        );
+        assert!(
+            sessions.install_with_protocol_with_origin(
             reverse_key,
             SessionDecision {
                 resolution: ForwardingResolution {
@@ -2770,7 +2814,13 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
                     source_nat_icmp: None,
                     nat64: false,
                     nptv6: false,
-                }.reverse(IpAddr::V4(client_ip), IpAddr::V4(server_ip), client_port, 80),
+                    }
+                    .reverse(
+                        IpAddr::V4(client_ip),
+                        IpAddr::V4(server_ip),
+                        client_port,
+                        80
+                    ),
                 install_table_domain: 0,
                 install_table_check: 0,
             },
@@ -2798,7 +2848,8 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
             123_000_000_000,
             PROTO_TCP,
             0x18,
-        ));
+            )
+        );
     }
     let (batch, dbg) = txn_run_descriptor_checked(
         &mut binding,
@@ -2825,10 +2876,15 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
         1,
         "unowned claimed-zone PMTUD must recycle its descriptor exactly once"
     );
-    assert_eq!(dbg.ha_inactive, 1, "unowned delivery must count HA-inactive once");
-    assert_eq!(dbg.policy_deny, 0, "non-ForwardCandidate refusal must not emit a policy deny");
+    assert_eq!(
+        dbg.ha_inactive, 1,
+        "unowned delivery must count HA-inactive once"
+    );
+    assert_eq!(
+        dbg.policy_deny, 0,
+        "non-ForwardCandidate refusal must not emit a policy deny"
+    );
 }
-
 
 // ---------------------------------------------------------------------------
 // #6472: NAT64 (cross-family) ICMP error translation on the flowless arm.
@@ -4773,7 +4829,9 @@ fn n9162_capture(binding: &BindingWorker, sessions_delta: i64) -> N9162Outcome {
     let (prebuilt, target_ifindex, flow_key_none) = match binding.scratch.scratch_forwards.first() {
         Some(fwd) => (
             match &fwd.frame {
-                PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => Some(bytes.buf.clone()),
+                PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => {
+                    Some(bytes.buf.clone())
+                }
                 _ => None,
             },
             fwd.target_ifindex,
@@ -7235,7 +7293,7 @@ fn run_pptp_control_reply_policy_case(policy_denied: bool) {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -7272,7 +7330,6 @@ fn run_pptp_control_reply_policy_case(policy_denied: bool) {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -7557,7 +7614,7 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -7594,7 +7651,6 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -7645,12 +7701,14 @@ fn poll_descriptor_policy_deny_keys_logical_ingress_zone_3021() {
     // (ifindex 11). Reverting the production site to meta.ingress_ifindex
     // makes this report wan and the test fails RED.
     assert_eq!(
-        u32::from(event.ingress_zone_id), TEST_LAN_ZONE_ID,
+        u32::from(event.ingress_zone_id),
+        TEST_LAN_ZONE_ID,
         "the VLAN sub-interface's OWN logical ingress zone (lan) must drive \
          the zone-pair policy (#3021); a physical-keyed lookup reports wan"
     );
     assert_ne!(
-        u32::from(event.ingress_zone_id), TEST_WAN_ZONE_ID,
+        u32::from(event.ingress_zone_id),
+        TEST_WAN_ZONE_ID,
         "the physical parent's wan zone must NOT be used for the VLAN unit"
     );
     assert_eq!(u32::from(event.egress_zone_id), TEST_WAN_ZONE_ID);
@@ -7771,7 +7829,7 @@ fn poll_descriptor_input_filter_discard_drops_and_logs() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -7808,7 +7866,6 @@ fn poll_descriptor_input_filter_discard_drops_and_logs() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -7955,7 +8012,7 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -7992,7 +8049,6 @@ fn poll_descriptor_session_hit_rechecks_dscp_input_filter() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -8207,7 +8263,7 @@ fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -8244,7 +8300,6 @@ fn poll_descriptor_lo0_filter_discard_drops_without_reinject() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -8406,7 +8461,7 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -8443,7 +8498,6 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -8506,7 +8560,8 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
         PROTO_TCP,
         TCP_FLAG_SYN,
     ));
-    let shared_entry = SyncedSessionEntry { key: flow_key.clone(),
+    let shared_entry = SyncedSessionEntry {
+        key: flow_key.clone(),
     decision: local_decision,
     metadata: local_metadata,
     leak_incarnation: 0,
@@ -8516,9 +8571,14 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
     // #2170 test fixture: no peer install generation.
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     publish_shared_session(
         &shared_sessions,
         &shared_nat_sessions,
@@ -8570,10 +8630,12 @@ fn poll_descriptor_lo0_filter_drops_cached_local_delivery_session_hit() {
     assert_eq!(sessions.len(), 0);
     assert!(shared_sessions.lock().expect("shared sessions").is_empty());
     assert!(shared_nat_sessions.lock().expect("shared nat").is_empty());
-    assert!(shared_forward_wire_sessions
+    assert!(
+        shared_forward_wire_sessions
         .lock()
         .expect("shared forward wire")
-        .is_empty());
+            .is_empty()
+    );
     let deltas = sessions.drain_deltas(16);
     assert_eq!(deltas.len(), 1);
     assert_eq!(deltas[0].kind, SessionDeltaKind::Close);
@@ -8734,7 +8796,7 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -8771,7 +8833,6 @@ fn input_filter_discard_drops_the_embedded_icmp_reversal_7359() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -9069,7 +9130,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -9106,7 +9167,6 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -9467,7 +9527,7 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -9504,7 +9564,6 @@ fn gre_decapped_embedded_icmp_reversal_reads_the_inner_frame_8271() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -9898,7 +9957,7 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, _event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -9935,7 +9994,6 @@ fn poll_descriptor_embedded_icmp_reversal_reachable_for_pure_dnat_9030() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -10153,7 +10211,8 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let entry = SyncedSessionEntry { key: SessionKey {
+    let entry = SyncedSessionEntry {
+        key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_GRE,
         src_ip: IpAddr::V4(client_ip),
@@ -10223,9 +10282,14 @@ fn embedded_icmp_resolves_a_translated_gre_tunnel_9031() {
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
@@ -10321,7 +10385,8 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
 
-    let mut entry = SyncedSessionEntry { key: SessionKey {
+    let mut entry = SyncedSessionEntry {
+        key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_GRE,
         src_ip: IpAddr::V4(client_ip),
@@ -10384,9 +10449,14 @@ fn embedded_icmp_does_not_resolve_a_different_gre_tunnel_9031() {
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     entry.key.discriminator = TunnelDiscriminator::Keyed(session_key_value as u32);
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
@@ -10706,7 +10776,7 @@ fn install_pptp_association_9298(
         .expect("fixture: the PPTP association must install")
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn publish_pptp_gre_session_9298(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -10717,7 +10787,8 @@ fn publish_pptp_gre_session_9298(
     handle: u32,
     egress_ifindex: i32,
 ) -> SharedSessionOwnerRgIndexes {
-    let entry = SyncedSessionEntry { key: SessionKey {
+    let entry = SyncedSessionEntry {
+        key: SessionKey {
         addr_family: if client.is_ipv4() {
             libc::AF_INET as u8
         } else {
@@ -10790,9 +10861,14 @@ fn publish_pptp_gre_session_9298(
     tcp_flags: 0,
     generation: 0,
     session_id: 0,
-    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0u64,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
             persistent_lease_hold: None,
-    source_nat_static: None, };
+        source_nat_static: None,
+    };
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     publish_shared_session(
         shared_sessions,
@@ -12157,7 +12233,6 @@ fn poll_descriptor_untranslated_v4_error_admission_impl(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn poll_descriptor_untranslated_v4_error_admission_knob_impl(
     install_session: bool,
     cross_zone_arrival: bool,
@@ -12322,7 +12397,7 @@ fn poll_descriptor_untranslated_v4_error_admission_knob_impl(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -12359,7 +12434,6 @@ fn poll_descriptor_untranslated_v4_error_admission_knob_impl(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -12853,7 +12927,7 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -12890,7 +12964,6 @@ fn poll_descriptor_untranslated_ptb_v6_admitted_10286_impl(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -13221,7 +13294,7 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -13258,7 +13331,6 @@ fn poll_descriptor_quoted_reply_frag_needed_reaches_server_10672_impl() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -13599,7 +13671,7 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
     let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands = Vec::new();
-    let dnat_fds = DnatTableFds::default();
+
     let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
     let (event_handle, event_rx) = crate::event_stream::test_worker_handle(
         8,
@@ -13636,7 +13708,6 @@ fn poll_descriptor_quoted_reply_ptb_v6_reaches_server_10672() {
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        dnat_fds: &dnat_fds,
         rg_epochs: &rg_epochs,
         cold_path_sample_mask: 0xff,
     };
@@ -13906,7 +13977,7 @@ fn rx_and_post_admission_source_learns_cannot_overwrite_live_v6_neighbor_13644()
         let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
         let last_resolution = Arc::new(Mutex::new(None));
         let peer_worker_commands = Vec::new();
-        let dnat_fds = DnatTableFds::default();
+
         let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
         let pptp_control = Arc::new(crate::session::pptp_control::PptpControlInbox::default());
         let worker_ctx = WorkerContext {
@@ -13931,7 +14002,6 @@ fn rx_and_post_admission_source_learns_cannot_overwrite_live_v6_neighbor_13644()
             last_resolution: &last_resolution,
             peer_worker_commands: &peer_worker_commands,
             worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-            dnat_fds: &dnat_fds,
             rg_epochs: &rg_epochs,
             cold_path_sample_mask: 0xff,
         };
@@ -14320,11 +14390,29 @@ fn challenge_suppressed_for_opening_retransmit_15947() {
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
     let source = Ipv4Addr::new(192, 0, 2, 10);
-    let first = g11332_send_syn(&mut binding, &mut sessions, &forwarding, &mut screen, source);
+    let first = g11332_send_syn(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        source,
+    );
     assert_eq!(first.syn_cookie_challenges, 0);
-    let second = g11332_send_syn(&mut binding, &mut sessions, &forwarding, &mut screen, source);
-    assert_eq!(second.syn_cookie_challenges, 1, "screen counts the challenge decision");
-    assert_eq!(second.syn_cookie_syn_ack_sent, 0, "Opening retransmit gets no second cookie");
+    let second = g11332_send_syn(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        source,
+    );
+    assert_eq!(
+        second.syn_cookie_challenges, 1,
+        "screen counts the challenge decision"
+    );
+    assert_eq!(
+        second.syn_cookie_syn_ack_sent, 0,
+        "Opening retransmit gets no second cookie"
+    );
     assert!(binding.tx_pipeline.pending_tx_local.is_empty());
 }
 
@@ -14374,19 +14462,64 @@ fn port_zero_syn_is_screened_despite_except_discard_pbr_term_16502() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let b1 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_a, 0, 0);
-    assert_eq!(b1.syn_cookie_challenges, 0, "arm B: first (0,0) SYN is below threshold");
-    let b2 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_b, 0, 0);
-    assert_eq!(b2.syn_cookie_challenges, 1, "arm B: second (0,0) SYN must be screened");
-    assert_eq!(g9528_packets(&forwarding), 0, "arm B: except-80 term must not count (0,0)");
+    let b1 = g16502_send_syn_ports(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        source_a,
+        0,
+        0,
+    );
+    assert_eq!(
+        b1.syn_cookie_challenges, 0,
+        "arm B: first (0,0) SYN is below threshold"
+    );
+    let b2 = g16502_send_syn_ports(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        source_b,
+        0,
+        0,
+    );
+    assert_eq!(
+        b2.syn_cookie_challenges, 1,
+        "arm B: second (0,0) SYN must be screened"
+    );
+    assert_eq!(
+        g9528_packets(&forwarding),
+        0,
+        "arm B: except-80 term must not count (0,0)"
+    );
     let (forwarding, mut screen) = g11332_runtime(None);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let a1 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_a, 0, 0);
+    let a1 = g16502_send_syn_ports(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        source_a,
+        0,
+        0,
+    );
     assert_eq!(a1.syn_cookie_challenges, 0);
-    let a2 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_b, 0, 0);
-    assert_eq!(a2.syn_cookie_challenges, 1, "arm A: unfiltered (0,0) SYNs are screened");
+    let a2 = g16502_send_syn_ports(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        source_b,
+        0,
+        0,
+    );
+    assert_eq!(
+        a2.syn_cookie_challenges, 1,
+        "arm A: unfiltered (0,0) SYNs are screened"
+    );
     let mut term = g9528_term("discard", "scrub");
     term.destination_ports_except = vec!["80".to_string()];
     let (forwarding, mut screen) = g11332_runtime(Some(term));
@@ -14395,9 +14528,24 @@ fn port_zero_syn_is_screened_despite_except_discard_pbr_term_16502() {
     let mut sessions = SessionTable::new();
     for expected in 1..=2u64 {
         let src = if expected == 1 { source_a } else { source_b };
-        let batch = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, src, 49152, 443);
-        assert_eq!(batch.syn_cookie_challenges, 0, "arm C: discarded SYNs never reach screens");
-        assert_eq!(g9528_packets(&forwarding), expected, "arm C: enforcement counts each discard");
+        let batch = g16502_send_syn_ports(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &mut screen,
+            src,
+            49152,
+            443,
+        );
+        assert_eq!(
+            batch.syn_cookie_challenges, 0,
+            "arm C: discarded SYNs never reach screens"
+        );
+        assert_eq!(
+            g9528_packets(&forwarding),
+            expected,
+            "arm C: enforcement counts each discard"
+        );
     }
     let mut term = g9528_term("discard", "scrub");
     term.destination_ports_except = vec!["80".to_string()];
@@ -14405,10 +14553,29 @@ fn port_zero_syn_is_screened_despite_except_discard_pbr_term_16502() {
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut sessions = SessionTable::new();
-    let d1 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_a, 49152, 80);
+    let d1 = g16502_send_syn_ports(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        source_a,
+        49152,
+        80,
+    );
     assert_eq!(d1.syn_cookie_challenges, 0);
-    let d2 = g16502_send_syn_ports(&mut binding, &mut sessions, &forwarding, &mut screen, source_b, 49153, 80);
-    assert_eq!(d2.syn_cookie_challenges, 1, "arm D: port-80 SYNs miss the term and are screened");
+    let d2 = g16502_send_syn_ports(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &mut screen,
+        source_b,
+        49153,
+        80,
+    );
+    assert_eq!(
+        d2.syn_cookie_challenges, 1,
+        "arm D: port-80 SYNs miss the term and are screened"
+    );
 }
 
 /// #16502 property cell: over (ports x term shape), pre-screen deny implies
@@ -14421,16 +14588,88 @@ fn prescreen_deny_implies_enforcement_deny_16502() {
     let src = Ipv4Addr::new(192, 0, 2, 10);
     let dst = Ipv4Addr::new(198, 51, 100, 20);
     let shapes: &[(&str, &str, &str, &[&str], &[&str], &[&str], &[&str])] = &[
-        ("pbr-discard-except80", "discard", "scrub", &[], &["80"], &[], &[]),
-        ("pbr-reject-except80", "reject", "scrub", &[], &["80"], &[], &[]),
-        ("pbr-discard-dport0", "discard", "scrub", &["0"], &[], &[], &[]),
-        ("pbr-accept-except80", "accept", "scrub", &[], &["80"], &[], &[]),
-        ("plain-discard-except80", "discard", "", &[], &["80"], &[], &[]),
-        ("plain-discard-sport-except", "discard", "", &[], &[], &[], &["1234"]),
-        ("pbr-discard-sport0", "discard", "scrub", &[], &[], &["0"], &[]),
-        ("plain-accept-except80", "accept", "", &[], &["80"], &[], &[]),
+        (
+            "pbr-discard-except80",
+            "discard",
+            "scrub",
+            &[],
+            &["80"],
+            &[],
+            &[],
+        ),
+        (
+            "pbr-reject-except80",
+            "reject",
+            "scrub",
+            &[],
+            &["80"],
+            &[],
+            &[],
+        ),
+        (
+            "pbr-discard-dport0",
+            "discard",
+            "scrub",
+            &["0"],
+            &[],
+            &[],
+            &[],
+        ),
+        (
+            "pbr-accept-except80",
+            "accept",
+            "scrub",
+            &[],
+            &["80"],
+            &[],
+            &[],
+        ),
+        (
+            "plain-discard-except80",
+            "discard",
+            "",
+            &[],
+            &["80"],
+            &[],
+            &[],
+        ),
+        (
+            "plain-discard-sport-except",
+            "discard",
+            "",
+            &[],
+            &[],
+            &[],
+            &["1234"],
+        ),
+        (
+            "pbr-discard-sport0",
+            "discard",
+            "scrub",
+            &[],
+            &[],
+            &["0"],
+            &[],
+        ),
+        (
+            "plain-accept-except80",
+            "accept",
+            "",
+            &[],
+            &["80"],
+            &[],
+            &[],
+        ),
     ];
-    let port_pairs: &[(u16, u16)] = &[(0, 0), (0, 80), (0, 443), (49152, 0), (49152, 80), (49152, 443), (1234, 443)];
+    let port_pairs: &[(u16, u16)] = &[
+        (0, 0),
+        (0, 80),
+        (0, 443),
+        (49152, 0),
+        (49152, 80),
+        (49152, 443),
+        (1234, 443),
+    ];
     for (name, action, ri, dports, dexcept, sports, sexcept) in shapes {
         let mut term = g9528_term(action, ri);
         term.destination_ports = dports.iter().map(|s| s.to_string()).collect();
@@ -14439,25 +14678,77 @@ fn prescreen_deny_implies_enforcement_deny_16502() {
         term.source_ports_except = sexcept.iter().map(|s| s.to_string()).collect();
         let (forwarding, _screen) = g11332_runtime(Some(term));
         for &(sport, dport) in port_pairs {
-            let frame = build_txn_tcp_syn_frame_v4(src, dst, sport, dport, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+            let frame = build_txn_tcp_syn_frame_v4(
+                src,
+                dst,
+                sport,
+                dport,
+                0x02,
+                crate::afxdp::tests_support::TEST_LAN_MAC,
+            );
             let meta = txn_meta_v4(24, 0x02, frame.len() as u16);
-            let flow = crate::afxdp::frame::parse_session_flow_from_bytes(&frame, meta).expect("SYN frame parses to a flow");
-            assert_eq!((flow.forward_key.src_port, flow.forward_key.dst_port), (sport, dport), "{name}: fixture ports must reach the flow key");
-            let prescreen_deny = super::poll_descriptor::filter::input_filter_would_deny_before_screen(&forwarding, &frame, Some(&flow), meta);
-            let filter = forwarding.filter_state.iface_filter_v4_fast.get(&24).expect("input filter compiled");
-            let extra = crate::filter::mark_ports_unknown_for_zero_flow(crate::afxdp::frame::term_match_extra_from_frame(&frame, meta), sport, dport);
-            let enforcement_deny = match crate::filter::evaluate_filter_ref_routing_instance_uncounted(filter, IpAddr::V4(src), IpAddr::V4(dst), flow.forward_key.protocol, sport, dport, meta.dscp, extra) {
+            let flow = crate::afxdp::frame::parse_session_flow_from_bytes(&frame, meta)
+                .expect("SYN frame parses to a flow");
+            assert_eq!(
+                (flow.forward_key.src_port, flow.forward_key.dst_port),
+                (sport, dport),
+                "{name}: fixture ports must reach the flow key"
+            );
+            let prescreen_deny =
+                super::poll_descriptor::filter::input_filter_would_deny_before_screen(
+                    &forwarding,
+                    &frame,
+                    Some(&flow),
+                    meta,
+                );
+            let filter = forwarding
+                .filter_state
+                .iface_filter_v4_fast
+                .get(&24)
+                .expect("input filter compiled");
+            let extra = crate::filter::mark_ports_unknown_for_zero_flow(
+                crate::afxdp::frame::term_match_extra_from_frame(&frame, meta),
+                sport,
+                dport,
+            );
+            let enforcement_deny =
+                match crate::filter::evaluate_filter_ref_routing_instance_uncounted(
+                    filter,
+                    IpAddr::V4(src),
+                    IpAddr::V4(dst),
+                    flow.forward_key.protocol,
+                    sport,
+                    dport,
+                    meta.dscp,
+                    extra,
+                ) {
                 Some(pbr) => pbr.action != crate::filter::FilterAction::Accept,
-                None => crate::filter::filter_ref_static_verdict(filter, IpAddr::V4(src), IpAddr::V4(dst), flow.forward_key.protocol, sport, dport, meta.dscp, extra) != crate::filter::FilterAction::Accept,
+                    None => {
+                        crate::filter::filter_ref_static_verdict(
+                            filter,
+                            IpAddr::V4(src),
+                            IpAddr::V4(dst),
+                            flow.forward_key.protocol,
+                            sport,
+                            dport,
+                            meta.dscp,
+                            extra,
+                        ) != crate::filter::FilterAction::Accept
+                    }
             };
-            assert!(!prescreen_deny || enforcement_deny, "{name} ports=({sport},{dport}): pre-screen deny must imply enforcement deny");
+            assert!(
+                !prescreen_deny || enforcement_deny,
+                "{name} ports=({sport},{dport}): pre-screen deny must imply enforcement deny"
+            );
             if (sport, dport) == (0, 0) {
-                assert!(!prescreen_deny, "{name} ports=(0,0): synthetic tuple must not pre-screen deny");
+                assert!(
+                    !prescreen_deny,
+                    "{name} ports=(0,0): synthetic tuple must not pre-screen deny"
+                );
             }
         }
     }
 }
-
 
 #[test]
 fn post_snat_fence_suppresses_cookie_challenge_15947() {
@@ -14479,7 +14770,8 @@ fn post_snat_fence_suppresses_cookie_challenge_15947() {
                 ..Default::default()
             }];
             snapshot.bindless_selector_fence_enabled = true;
-            snapshot.bindless_selector_rows = vec![crate::protocol::IpsecBindlessSelectorSnapshot {
+            snapshot.bindless_selector_rows =
+                vec![crate::protocol::IpsecBindlessSelectorSnapshot {
                 local_ts: "9.9.9.0/24".to_string(),
                 remote_ts: "203.0.113.0/24".to_string(),
             }];
@@ -14488,7 +14780,11 @@ fn post_snat_fence_suppresses_cookie_challenge_15947() {
         let mut profiles = FxHashMap::default();
         profiles.insert(
             "lan".to_string(),
-            crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() },
+            crate::screen::ScreenProfile {
+                syn_flood_threshold: 1,
+                syn_cookie: true,
+                ..crate::screen::ScreenProfile::default()
+            },
         );
         let mut screen = ScreenState::new();
         screen.update_profiles(profiles);
@@ -14502,7 +14798,14 @@ fn post_snat_fence_suppresses_cookie_challenge_15947() {
     let src = Ipv4Addr::new(10, 0, 61, 103);
     let dst = Ipv4Addr::new(9, 9, 9, 9);
     for (idx, port) in [49160u16, 49161].iter().enumerate() {
-        let frame = build_txn_tcp_syn_frame_v4(src, dst, *port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let frame = build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            *port,
+            443,
+            0x02,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
         let meta = {
             let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
             m.flow_src_addr[..4].copy_from_slice(&src.octets());
@@ -14510,9 +14813,20 @@ fn post_snat_fence_suppresses_cookie_challenge_15947() {
             m.flow_src_port = *port;
             m
         };
-        let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, meta, &mut screen);
+        let (batch, _) = txn_run_descriptor_with_screen_state(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &txn_ha_state(),
+            &frame,
+            meta,
+            &mut screen,
+        );
         if idx == 1 {
-            assert_eq!(batch.syn_cookie_challenges, 1, "threshold-crossing fresh tuple must trigger a challenge (non-vacuous fence oracle)");
+            assert_eq!(
+                batch.syn_cookie_challenges, 1,
+                "threshold-crossing fresh tuple must trigger a challenge (non-vacuous fence oracle)"
+            );
         }
         assert_eq!(
             batch.syn_cookie_syn_ack_sent, 0,
@@ -14537,23 +14851,28 @@ fn post_snat_fence_second_pool_address_suppresses_cookie_challenge_15947() {
                 from_zone: "lan".to_string(),
                 to_zone: "wan".to_string(),
                 source_addresses: vec!["0.0.0.0/0".to_string()],
-                pool_addresses: vec![
-                    "203.0.113.10".to_string(),
-                    "203.0.113.11".to_string(),
-                ],
+                pool_addresses: vec!["203.0.113.10".to_string(), "203.0.113.11".to_string()],
                 port_low: 5000,
                 port_high: 5001,
                 ..Default::default()
             }];
             snapshot.bindless_selector_fence_enabled = true;
-            snapshot.bindless_selector_rows = vec![crate::protocol::IpsecBindlessSelectorSnapshot {
+            snapshot.bindless_selector_rows =
+                vec![crate::protocol::IpsecBindlessSelectorSnapshot {
                 local_ts: "9.9.9.0/24".to_string(),
                 remote_ts: "203.0.113.11/32".to_string(),
             }];
             snapshot
         });
         let mut profiles = FxHashMap::default();
-        profiles.insert("lan".to_string(), crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() });
+        profiles.insert(
+            "lan".to_string(),
+            crate::screen::ScreenProfile {
+                syn_flood_threshold: 1,
+                syn_cookie: true,
+                ..crate::screen::ScreenProfile::default()
+            },
+        );
         let mut screen = ScreenState::new();
         screen.update_profiles(profiles);
         screen.update_syn_cookie_master_key(Some([0x42; 16]));
@@ -14565,21 +14884,49 @@ fn post_snat_fence_second_pool_address_suppresses_cookie_challenge_15947() {
     let src = Ipv4Addr::new(10, 0, 61, 103);
     let dst = Ipv4Addr::new(9, 9, 9, 9);
     for (idx, port) in [49180u16, 49181].iter().enumerate() {
-        let frame = build_txn_tcp_syn_frame_v4(src, dst, *port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let frame = build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            *port,
+            443,
+            0x02,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
         let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
         m.flow_src_addr[..4].copy_from_slice(&src.octets());
         m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
         m.flow_src_port = *port;
-        let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, m, &mut screen);
+        let (batch, _) = txn_run_descriptor_with_screen_state(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &txn_ha_state(),
+            &frame,
+            m,
+            &mut screen,
+        );
         if idx == 1 {
-            assert_eq!(batch.syn_cookie_challenges, 1, "threshold-crossing tuple must trigger a challenge");
+            assert_eq!(
+                batch.syn_cookie_challenges, 1,
+                "threshold-crossing tuple must trigger a challenge"
+            );
         }
-        assert_eq!(batch.syn_cookie_syn_ack_sent, 0, "second-address fence SYN {idx} must not receive a SYN-ACK");
+        assert_eq!(
+            batch.syn_cookie_syn_ack_sent, 0,
+            "second-address fence SYN {idx} must not receive a SYN-ACK"
+        );
         assert!(binding.tx_pipeline.pending_tx_local.is_empty());
     }
-    assert_eq!(sessions.len(), 2, "first (unchallenged) SYN installs forward+reverse; challenged SYN installs none");
+    assert_eq!(
+        sessions.len(),
+        2,
+        "first (unchallenged) SYN installs forward+reverse; challenged SYN installs none"
+    );
     let snap = forwarding.source_nat_rules[0].pool_allocator.snapshot();
-    assert_eq!(snap.used_ports, 1, "only the first real flow holds a pool port; challenged SYN minted none");
+    assert_eq!(
+        snap.used_ports, 1,
+        "only the first real flow holds a pool port; challenged SYN minted none"
+    );
     assert_eq!(snap.allocations_total, 1);
 }
 
@@ -14633,7 +14980,14 @@ fn unfenced_challenge_does_not_retain_snat_allocation_15947() {
             snapshot
         });
         let mut profiles = FxHashMap::default();
-        profiles.insert("lan".to_string(), crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() });
+        profiles.insert(
+            "lan".to_string(),
+            crate::screen::ScreenProfile {
+                syn_flood_threshold: 1,
+                syn_cookie: true,
+                ..crate::screen::ScreenProfile::default()
+            },
+        );
         let mut screen = ScreenState::new();
         screen.update_profiles(profiles);
         screen.update_syn_cookie_master_key(Some([0x42; 16]));
@@ -14644,17 +14998,36 @@ fn unfenced_challenge_does_not_retain_snat_allocation_15947() {
     let mut sessions = SessionTable::new();
     let src = Ipv4Addr::new(10, 0, 61, 103);
     let dst = Ipv4Addr::new(9, 9, 9, 9);
-    let send = |binding: &mut BindingWorker, sessions: &mut SessionTable, screen: &mut ScreenState, port: u16| -> BatchCounters {
-        let frame = build_txn_tcp_syn_frame_v4(src, dst, port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+    let send = |binding: &mut BindingWorker,
+                sessions: &mut SessionTable,
+                screen: &mut ScreenState,
+                port: u16|
+     -> BatchCounters {
+        let frame = build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            port,
+            443,
+            0x02,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
         let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
         m.flow_src_addr[..4].copy_from_slice(&src.octets());
         m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
         m.flow_src_port = port;
-        txn_run_descriptor_with_screen_state(binding, sessions, &forwarding, &txn_ha_state(), &frame, m, screen).0
+        txn_run_descriptor_with_screen_state(
+            binding,
+            sessions,
+            &forwarding,
+            &txn_ha_state(),
+            &frame,
+            m,
+            screen,
+        )
+        .0
     };
-    let pool_snapshot = |forwarding: &ForwardingState| {
-        forwarding.source_nat_rules[0].pool_allocator.snapshot()
-    };
+    let pool_snapshot =
+        |forwarding: &ForwardingState| forwarding.source_nat_rules[0].pool_allocator.snapshot();
     let a = send(&mut binding, &mut sessions, &mut screen, 49170);
     assert_eq!(a.syn_cookie_challenges, 0);
     assert_eq!(sessions.len(), 2, "normal SYN A installs forward+reverse");
@@ -14664,26 +15037,56 @@ fn unfenced_challenge_does_not_retain_snat_allocation_15947() {
     binding.tx_pipeline.pending_tx_local.clear();
     let b = send(&mut binding, &mut sessions, &mut screen, 49171);
     assert_eq!(b.syn_cookie_challenges, 1);
-    assert_eq!(b.syn_cookie_syn_ack_sent, 1, "unfenced challenged SYN B gets its SYN-ACK");
+    assert_eq!(
+        b.syn_cookie_syn_ack_sent, 1,
+        "unfenced challenged SYN B gets its SYN-ACK"
+    );
     assert_eq!(sessions.len(), 2, "challenged SYN B installs no session");
     // Direct allocator-state oracle (not inferred from C's reply): B's
     // challenge changed NO pool state — used ports, live flows,
     // persistent leases, and allocation count are exactly A's.
     let after_b = pool_snapshot(&forwarding);
-    assert_eq!(after_b.used_ports, after_a.used_ports, "B retained no pool port");
-    assert_eq!(after_b.live_flows, after_a.live_flows, "B retained no live flow");
-    assert_eq!(after_b.persistent_leases, after_a.persistent_leases, "B retained no lease");
-    assert_eq!(after_b.allocations_total, after_a.allocations_total, "B minted no allocation");
+    assert_eq!(
+        after_b.used_ports, after_a.used_ports,
+        "B retained no pool port"
+    );
+    assert_eq!(
+        after_b.live_flows, after_a.live_flows,
+        "B retained no live flow"
+    );
+    assert_eq!(
+        after_b.persistent_leases, after_a.persistent_leases,
+        "B retained no lease"
+    );
+    assert_eq!(
+        after_b.allocations_total, after_a.allocations_total,
+        "B minted no allocation"
+    );
     binding.tx_pipeline.pending_tx_local.clear();
     let c = send(&mut binding, &mut sessions, &mut screen, 49172);
     assert_eq!(c.syn_cookie_challenges, 1);
-    assert_eq!(c.syn_cookie_syn_ack_sent, 1, "challenged SYN C must still reply: B retained no pool identity");
+    assert_eq!(
+        c.syn_cookie_syn_ack_sent, 1,
+        "challenged SYN C must still reply: B retained no pool identity"
+    );
     assert_eq!(sessions.len(), 2, "challenged SYN C installs no session");
     let after_c = pool_snapshot(&forwarding);
-    assert_eq!(after_c.used_ports, after_a.used_ports, "C retained no pool port either");
-    assert_eq!(after_c.live_flows, after_a.live_flows, "C retained no live flow either");
-    assert_eq!(after_c.persistent_leases, after_a.persistent_leases, "C retained no lease either");
-    assert_eq!(after_c.allocations_total, after_a.allocations_total, "C minted no allocation either");
+    assert_eq!(
+        after_c.used_ports, after_a.used_ports,
+        "C retained no pool port either"
+    );
+    assert_eq!(
+        after_c.live_flows, after_a.live_flows,
+        "C retained no live flow either"
+    );
+    assert_eq!(
+        after_c.persistent_leases, after_a.persistent_leases,
+        "C retained no lease either"
+    );
+    assert_eq!(
+        after_c.allocations_total, after_a.allocations_total,
+        "C minted no allocation either"
+    );
 }
 
 #[test]
@@ -14708,13 +15111,23 @@ fn large_pool_unfenced_challenge_still_replies_16537() {
             snapshot
         });
         let mut profiles = FxHashMap::default();
-        profiles.insert("lan".to_string(), crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() });
+        profiles.insert(
+            "lan".to_string(),
+            crate::screen::ScreenProfile {
+                syn_flood_threshold: 1,
+                syn_cookie: true,
+                ..crate::screen::ScreenProfile::default()
+            },
+        );
         let mut screen = ScreenState::new();
         screen.update_profiles(profiles);
         screen.update_syn_cookie_master_key(Some([0x42; 16]));
         (forwarding, screen)
     };
-    assert_eq!(forwarding.source_nat_rules[0].pool_addresses_v4.len(), 65536);
+    assert_eq!(
+        forwarding.source_nat_rules[0].pool_addresses_v4.len(),
+        65536
+    );
     assert_eq!(forwarding.source_nat_rules[0].pool_ranges_v4.len(), 1);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
     binding.interface = Arc::<str>::from("reth1.0");
@@ -14722,20 +15135,44 @@ fn large_pool_unfenced_challenge_still_replies_16537() {
     let src = Ipv4Addr::new(10, 0, 61, 103);
     let dst = Ipv4Addr::new(9, 9, 9, 9);
     for (idx, port) in [49200u16, 49201].iter().enumerate() {
-        let frame = build_txn_tcp_syn_frame_v4(src, dst, *port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let frame = build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            *port,
+            443,
+            0x02,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
         let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
         m.flow_src_addr[..4].copy_from_slice(&src.octets());
         m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
         m.flow_src_port = *port;
-        let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, m, &mut screen);
+        let (batch, _) = txn_run_descriptor_with_screen_state(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &txn_ha_state(),
+            &frame,
+            m,
+            &mut screen,
+        );
         if idx == 1 {
-            assert_eq!(batch.syn_cookie_challenges, 1, "threshold tuple must challenge");
-            assert_eq!(batch.syn_cookie_syn_ack_sent, 1, "unfenced /16 challenged SYN must still get its SYN-ACK");
+            assert_eq!(
+                batch.syn_cookie_challenges, 1,
+                "threshold tuple must challenge"
+            );
+            assert_eq!(
+                batch.syn_cookie_syn_ack_sent, 1,
+                "unfenced /16 challenged SYN must still get its SYN-ACK"
+            );
         }
         binding.tx_pipeline.pending_tx_local.clear();
     }
     let snap = forwarding.source_nat_rules[0].pool_allocator.snapshot();
-    assert_eq!(snap.allocations_total, 1, "only the first real flow minted; challenged SYN minted none");
+    assert_eq!(
+        snap.allocations_total, 1,
+        "only the first real flow minted; challenged SYN minted none"
+    );
 }
 
 #[test]
@@ -14756,14 +15193,22 @@ fn large_pool_fence_on_last_address_suppresses_challenge_16537() {
                 ..Default::default()
             }];
             snapshot.bindless_selector_fence_enabled = true;
-            snapshot.bindless_selector_rows = vec![crate::protocol::IpsecBindlessSelectorSnapshot {
+            snapshot.bindless_selector_rows =
+                vec![crate::protocol::IpsecBindlessSelectorSnapshot {
                 local_ts: "9.9.9.0/24".to_string(),
                 remote_ts: "198.51.255.255/32".to_string(),
             }];
             snapshot
         });
         let mut profiles = FxHashMap::default();
-        profiles.insert("lan".to_string(), crate::screen::ScreenProfile { syn_flood_threshold: 1, syn_cookie: true, ..crate::screen::ScreenProfile::default() });
+        profiles.insert(
+            "lan".to_string(),
+            crate::screen::ScreenProfile {
+                syn_flood_threshold: 1,
+                syn_cookie: true,
+                ..crate::screen::ScreenProfile::default()
+            },
+        );
         let mut screen = ScreenState::new();
         screen.update_profiles(profiles);
         screen.update_syn_cookie_master_key(Some([0x42; 16]));
@@ -14775,16 +15220,37 @@ fn large_pool_fence_on_last_address_suppresses_challenge_16537() {
     let src = Ipv4Addr::new(10, 0, 61, 103);
     let dst = Ipv4Addr::new(9, 9, 9, 9);
     for (idx, port) in [49210u16, 49211].iter().enumerate() {
-        let frame = build_txn_tcp_syn_frame_v4(src, dst, *port, 443, 0x02, crate::afxdp::tests_support::TEST_LAN_MAC);
+        let frame = build_txn_tcp_syn_frame_v4(
+            src,
+            dst,
+            *port,
+            443,
+            0x02,
+            crate::afxdp::tests_support::TEST_LAN_MAC,
+        );
         let mut m = txn_meta_v4(24, 0x02, frame.len() as u16);
         m.flow_src_addr[..4].copy_from_slice(&src.octets());
         m.flow_dst_addr[..4].copy_from_slice(&dst.octets());
         m.flow_src_port = *port;
-        let (batch, _) = txn_run_descriptor_with_screen_state(&mut binding, &mut sessions, &forwarding, &txn_ha_state(), &frame, m, &mut screen);
+        let (batch, _) = txn_run_descriptor_with_screen_state(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &txn_ha_state(),
+            &frame,
+            m,
+            &mut screen,
+        );
         if idx == 1 {
-            assert_eq!(batch.syn_cookie_challenges, 1, "threshold tuple must challenge (non-vacuous)");
+            assert_eq!(
+                batch.syn_cookie_challenges, 1,
+                "threshold tuple must challenge (non-vacuous)"
+            );
         }
-        assert_eq!(batch.syn_cookie_syn_ack_sent, 0, "fence on last /16 address must suppress SYN {idx}");
+        assert_eq!(
+            batch.syn_cookie_syn_ack_sent, 0,
+            "fence on last /16 address must suppress SYN {idx}"
+        );
         assert!(binding.tx_pipeline.pending_tx_local.is_empty());
     }
 }

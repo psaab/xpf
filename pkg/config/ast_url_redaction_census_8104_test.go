@@ -111,7 +111,7 @@ var astLeafForRedactedField = map[string]astLeafClaim{
 	"ArchivalConfig.ArchiveSitesWithPassword": {
 		set: `set system syslog file f1 archive archive-sites "%s"`,
 	},
-	"DDNSProvider.UpdateServer": {
+	"DDNSProvider.UpdateServer": { // scanner name: receiver DDNSProvider, field is RFC2136Endpoint.UpdateServer (#17237 embedded)
 		set: `set system services dynamic-dns provider p1 update-server "%s"`,
 	},
 	"DDNSProvider.Server": {

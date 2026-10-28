@@ -1,5 +1,5 @@
 //! WireGuard engine instantiation for `build_forwarding_state` (#1432
-//! S2a). Builds one `Arc<WgEngine>` per `mode == "wireguard"` tunnel
+//! S2a). Builds one `Arc<WgEngine>` per WireGuard-kind tunnel
 //! endpoint and stores it in `ForwardingState.wg_engines`, keyed by
 //! tunnel_endpoint_id.
 //!
@@ -56,7 +56,7 @@ pub(super) fn populate_wg_engines(
         return;
     }
     for (&id, endpoint) in state.tunnel_endpoints.iter() {
-        if endpoint.mode != "wireguard" {
+        if endpoint.kind != TunnelKind::WireGuard {
             continue;
         }
         // #1434: build one WgPeerConfig per configured peer (the engine

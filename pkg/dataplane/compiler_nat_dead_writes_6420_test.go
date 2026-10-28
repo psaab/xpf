@@ -3,7 +3,7 @@ package dataplane
 // #6420: the NAT compiler must not write eBPF NAT map records any more.
 //
 // compileNAT / compileStaticNAT / compileNAT64 used to build SNATValue,
-// DNATValue, NATPoolConfig, SNATEgressValue, static-NAT and NAT64 records and
+// NATPoolConfig, SNATEgressValue, static-NAT and NAT64 records and
 // hand them to the DataPlane. Every one of those writes landed nowhere: the
 // only production compile path is Manager.CompileUserspaceShim, whose
 // userspaceShimCompileDataplane implements each NAT setter and each stale-NAT
@@ -88,14 +88,6 @@ func (d *natWriteTripwireDP) SetNATPoolIPV6(uint32, uint32, [16]byte) error {
 	return d.trip("SetNATPoolIPV6")
 }
 
-func (d *natWriteTripwireDP) SetDNATEntry(DNATKey, DNATValue) error {
-	return d.trip("SetDNATEntry")
-}
-
-func (d *natWriteTripwireDP) SetDNATEntryV6(DNATKeyV6, DNATValueV6) error {
-	return d.trip("SetDNATEntryV6")
-}
-
 func (d *natWriteTripwireDP) SetStaticNATEntryV4(uint32, uint8, uint32) error {
 	return d.trip("SetStaticNATEntryV4")
 }
@@ -129,14 +121,6 @@ func (d *natWriteTripwireDP) DeleteStaleSNATRulesV6(map[SNATKey]bool) {
 	d.record("DeleteStaleSNATRulesV6")
 }
 
-func (d *natWriteTripwireDP) DeleteStaleDNATStatic(map[DNATKey]bool) {
-	d.record("DeleteStaleDNATStatic")
-}
-
-func (d *natWriteTripwireDP) DeleteStaleDNATStaticV6(map[DNATKeyV6]bool) {
-	d.record("DeleteStaleDNATStaticV6")
-}
-
 func (d *natWriteTripwireDP) DeleteStaleStaticNAT(map[StaticNATKeyV4]bool, map[StaticNATKeyV6]bool) {
 	d.record("DeleteStaleStaticNAT")
 }
@@ -162,7 +146,7 @@ func TestNATWriteTripwireIsArmed_6420(t *testing.T) {
 // TestNATCompilerCallsNoDataplaneNATWriter_6420 is the deletion's fail-on-revert
 // guard.
 //
-// RED-on-revert: restore any `dp.SetSNATRule` / `dp.SetDNATEntry` /
+// RED-on-revert: restore any `dp.SetSNATRule` /
 // `dp.SetNATPoolConfig` / `dp.SetSNATEgressIP` / `dp.SetStaticNATEntryV4` /
 // `dp.SetNAT64Config` (or their siblings) in compiler_nat.go and the row fails
 // with `validate nat: ... SetSNATRule: retired eBPF NAT map writer was called`.

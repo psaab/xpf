@@ -24,8 +24,6 @@
     "sessions": "/sys/fs/bpf/xpf/userspace_sessions",
     "conntrack_v4": "/sys/fs/bpf/xpf/sessions",
     "conntrack_v6": "/sys/fs/bpf/xpf/sessions_v6",
-    "dnat_table": "/sys/fs/bpf/xpf/dnat_table",
-    "dnat_table_v6": "/sys/fs/bpf/xpf/dnat_table_v6",
     "trace": "/sys/fs/bpf/xpf/userspace_trace"
   },
   "zones": [

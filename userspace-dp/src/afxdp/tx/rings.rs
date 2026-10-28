@@ -5,12 +5,15 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::afxdp::binding_state::BindingLiveState;
 use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::PreparedTxRecycle;
-use crate::afxdp::worker::{BindingWorker, WorkerTelemetry};
+use crate::afxdp::worker::{
+    BindingWorker, WorkerScratch, WorkerTelemetry, WorkerTimers, WorkerTxPipeline, WorkerXskRings,
+};
 use crate::afxdp::{
-    FILL_BATCH_SIZE, FILL_WAKE_SAFETY_INTERVAL_NS, RX_WAKE_IDLE_POLLS, RX_WAKE_MIN_INTERVAL_NS,
-    TX_WAKE_MIN_INTERVAL_NS, UMEM_FRAME_SIZE, XskBindMode,
+    XskBindMode, FILL_BATCH_SIZE, FILL_WAKE_SAFETY_INTERVAL_NS, RX_WAKE_IDLE_POLLS,
+    RX_WAKE_MIN_INTERVAL_NS, TX_WAKE_MIN_INTERVAL_NS, UMEM_FRAME_SIZE,
 };
 
 use super::stats::{record_kick_latency, record_tx_completions_with_stamp, record_tx_kick_batch};
@@ -94,21 +97,55 @@ pub(in crate::afxdp) fn reap_tx_completions(
     binding: &mut BindingWorker,
     shared_recycles: &mut Vec<(u32, u64)>,
 ) -> u32 {
+    reap_tx_completions_fields(
+        binding.slot,
+        binding.ifindex,
+        binding.queue_id,
+        umem_region_len(binding),
+        &mut binding.xsk,
+        &mut binding.telemetry,
+        &mut binding.scratch,
+        &mut binding.tx_pipeline,
+        &binding.live,
+        shared_recycles,
+        &mut binding.timers,
+        &mut binding.tx_counters,
+        &mut binding.flow.flow_cache,
+        &mut binding.cos.cos_interfaces,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn reap_tx_completions_fields(
+    slot: u32,
+    ifindex: i32,
+    queue_id: u32,
+    region_len: u64,
+    xsk: &mut WorkerXskRings,
+    telemetry: &mut WorkerTelemetry,
+    scratch: &mut WorkerScratch,
+    tx_pipeline: &mut WorkerTxPipeline,
+    live: &BindingLiveState,
+    shared_recycles: &mut Vec<(u32, u64)>,
+    timers: &mut WorkerTimers,
+    tx_counters: &mut crate::afxdp::worker::WorkerTxCounters,
+    flow_cache: &mut crate::afxdp::FlowCache,
+    cos_interfaces: &mut crate::afxdp::FastMap<i32, crate::afxdp::types::CoSInterfaceRuntime>,
+) -> u32 {
     // #9900 F-092: NO `outstanding_tx == 0` early-return — it hid skew
     // permanently (a completion ring with entries at gauge 0 never drained).
     // The `available == 0 → None` fast path below keeps the idle cost at one
     // shared-memory read.
-    let Some(available) = record_tx_completion_ring_available_for_reap(
-        &mut binding.telemetry,
-        binding.xsk.device.available(),
-    ) else {
+    let Some(available) =
+        record_tx_completion_ring_available_for_reap(telemetry, xsk.device.available())
+    else {
         return 0;
     };
     let mut reaped = 0u32;
-    binding.scratch.scratch_completed_offsets.clear();
-    let mut completed = binding.xsk.device.complete(available);
+    scratch.scratch_completed_offsets.clear();
+    let mut completed = xsk.device.complete(available);
     while let Some(offset) = completed.read() {
-        binding.scratch.scratch_completed_offsets.push(offset);
+        scratch.scratch_completed_offsets.push(offset);
         reaped += 1;
     }
     completed.release();
@@ -123,7 +160,7 @@ pub(in crate::afxdp) fn reap_tx_completions(
     // six submit sites bump the gauge and the reap decrement is the only
     // drain — so the ring is drained WITHOUT recycling or sidecar folding.
     // Recycling here would double-push a frame the pool already holds.
-    let stale_drain = binding.tx_pipeline.outstanding_tx == 0;
+    let stale_drain = tx_pipeline.outstanding_tx == 0;
     if !stale_drain {
         let ts_completion = monotonic_nanos();
         // #812: delegate the per-offset fold to the shared helper so
@@ -131,35 +168,47 @@ pub(in crate::afxdp) fn reap_tx_completions(
         // exact production algorithm — NOT a test-only fake. See unit
         // pins under `#[cfg(test)]` below.
         record_tx_completions_with_stamp(
-            &mut binding.tx_pipeline.tx_submit_ns,
-            &binding.scratch.scratch_completed_offsets,
+            &mut tx_pipeline.tx_submit_ns,
+            &scratch.scratch_completed_offsets,
             ts_completion,
-            &binding.live.owner_profile_owner,
+            &live.owner_profile_owner,
         );
-        for i in 0..binding.scratch.scratch_completed_offsets.len() {
-            let offset = binding.scratch.scratch_completed_offsets[i];
-            recycle_completed_tx_offset(binding, shared_recycles, offset);
+        for i in 0..scratch.scratch_completed_offsets.len() {
+            let offset = scratch.scratch_completed_offsets[i];
+            recycle_completed_tx_offset_fields(
+                tx_pipeline,
+                slot,
+                ifindex,
+                queue_id,
+                region_len,
+                shared_recycles,
+                offset,
+            );
         }
     }
     // #9900 F-092: count over-delivery instead of saturating it away. The
     // `reaped > outstanding > 0` residual (a bogus offset inside an otherwise
     // legitimate batch) still recycles after range/align filtering — the
     // batch members are indistinguishable without an ownership bitmap.
-    let outstanding_before = binding.tx_pipeline.outstanding_tx;
+    let outstanding_before = tx_pipeline.outstanding_tx;
     let (gauge, skew) = account_tx_completions(outstanding_before, reaped);
-    binding.tx_pipeline.outstanding_tx = gauge;
+    tx_pipeline.outstanding_tx = gauge;
     if skew != 0 && TX_COMPLETION_SKEW_TOTAL.fetch_add(skew, Ordering::Relaxed) < 10 {
         eprintln!(
             "TX_COMPLETION_SKEW: slot={} if={} q={} reaped={} outstanding_before={} (kernel over-delivered completions)",
-            binding.slot, binding.ifindex, binding.queue_id, reaped, outstanding_before,
+            slot, ifindex, queue_id, reaped, outstanding_before,
         );
     }
-    binding.telemetry.dbg_completions_reaped += reaped as u64;
-    binding
-        .live
-        .tx_completions
+    telemetry.dbg_completions_reaped += reaped as u64;
+    live.tx_completions
         .fetch_add(reaped as u64, Ordering::Relaxed);
-    update_binding_debug_state(binding);
+    crate::afxdp::binding_state::publish_binding_debug_state_fields(
+        timers,
+        live,
+        tx_counters,
+        flow_cache,
+        cos_interfaces,
+    );
     reaped
 }
 
@@ -187,7 +236,11 @@ pub(in crate::afxdp) fn drain_pending_fill(binding: &mut BindingWorker, now_ns: 
     if binding.tx_pipeline.pending_fill_frames.is_empty() {
         return false;
     }
-    let batch_size = binding.tx_pipeline.pending_fill_frames.len().min(FILL_BATCH_SIZE);
+    let batch_size = binding
+        .tx_pipeline
+        .pending_fill_frames
+        .len()
+        .min(FILL_BATCH_SIZE);
     binding.scratch.scratch_fill.clear();
     while binding.scratch.scratch_fill.len() < batch_size {
         let Some(offset) = binding.tx_pipeline.pending_fill_frames.pop_front() else {
@@ -222,7 +275,10 @@ pub(in crate::afxdp) fn drain_pending_fill(binding: &mut BindingWorker, now_ns: 
         return false;
     }
     let inserted = {
-        let mut fill = binding.xsk.device.fill(binding.scratch.scratch_fill.len() as u32);
+        let mut fill = binding
+            .xsk
+            .device
+            .fill(binding.scratch.scratch_fill.len() as u32);
         let inserted = fill.insert(binding.scratch.scratch_fill.iter().copied());
         fill.commit();
         inserted
@@ -236,8 +292,14 @@ pub(in crate::afxdp) fn drain_pending_fill(binding: &mut BindingWorker, now_ns: 
     }
     binding.telemetry.dbg_fill_submitted += inserted as u64;
     if inserted < binding.scratch.scratch_fill.len() as u32 {
-        binding.telemetry.dbg_fill_failed += (binding.scratch.scratch_fill.len() as u32 - inserted) as u64;
-        for offset in binding.scratch.scratch_fill.drain(inserted as usize..).rev() {
+        binding.telemetry.dbg_fill_failed +=
+            (binding.scratch.scratch_fill.len() as u32 - inserted) as u64;
+        for offset in binding
+            .scratch
+            .scratch_fill
+            .drain(inserted as usize..)
+            .rev()
+        {
             binding.tx_pipeline.pending_fill_frames.push_front(offset);
         }
     }
@@ -362,30 +424,51 @@ fn recycle_completed_tx_offset(
     shared_recycles: &mut Vec<(u32, u64)>,
     offset: u64,
 ) {
-    if let Some(recycle) = binding.tx_pipeline.in_flight_prepared_recycles.remove(&offset) {
+    let region_len = umem_region_len(binding);
+    recycle_completed_tx_offset_fields(
+        &mut binding.tx_pipeline,
+        binding.slot,
+        binding.ifindex,
+        binding.queue_id,
+        region_len,
+        shared_recycles,
+        offset,
+    );
+}
+
+fn recycle_completed_tx_offset_fields(
+    tx_pipeline: &mut WorkerTxPipeline,
+    slot: u32,
+    ifindex: i32,
+    queue_id: u32,
+    region_len: u64,
+    shared_recycles: &mut Vec<(u32, u64)>,
+    offset: u64,
+) {
+    if let Some(recycle) = tx_pipeline.in_flight_prepared_recycles.remove(&offset) {
         apply_prepared_recycle(
-            &mut binding.tx_pipeline.free_tx_frames,
+            &mut tx_pipeline.free_tx_frames,
             shared_recycles,
             recycle,
             offset,
         );
-    } else if completion_offset_returnable_to_free_pool(offset, umem_region_len(binding)) {
+    } else if completion_offset_returnable_to_free_pool(offset, region_len) {
         // #9900 F-092 (GPT-2): PRODUCTION ownership transition — the offset
         // recycles only if an untracked submit recorded it. A duplicate or
         // stale delivery (or a tracked completion re-delivered after its
         // recycle entry was consumed) finds no entry and is dropped + counted
         // instead of double-pushed into the free pool. `debug_assert` on the
         // pool scan stays as the belt-and-braces exact property in tests.
-        if binding.tx_pipeline.in_flight_untracked_tx.remove(&offset) {
+        if tx_pipeline.in_flight_untracked_tx.remove(&offset) {
             debug_assert!(
-                !binding.tx_pipeline.free_tx_frames.contains(&offset),
+                !tx_pipeline.free_tx_frames.contains(&offset),
                 "TX completion double-free: offset {offset} already in the free pool",
             );
-            binding.tx_pipeline.free_tx_frames.push_back(offset);
+            tx_pipeline.free_tx_frames.push_back(offset);
         } else if TX_COMPLETION_DUPLICATE_TOTAL.fetch_add(1, Ordering::Relaxed) < 10 {
             eprintln!(
                 "TX_COMPLETION_DUPLICATE: slot={} if={} q={} offset={} (no untracked-submit ownership; dropped, not recycled)",
-                binding.slot, binding.ifindex, binding.queue_id, offset,
+                slot, ifindex, queue_id, offset,
             );
         }
     } else {
@@ -395,22 +478,43 @@ fn recycle_completed_tx_offset(
         if TX_COMPLETION_INVALID_TOTAL.fetch_add(1, Ordering::Relaxed) < 10 {
             eprintln!(
                 "TX_COMPLETION_INVALID: slot={} if={} q={} offset={} (not an aligned in-region frame base; dropped, not recycled)",
-                binding.slot, binding.ifindex, binding.queue_id, offset,
+                slot, ifindex, queue_id, offset,
             );
         }
     }
 }
 
 pub(in crate::afxdp) fn maybe_wake_tx(binding: &mut BindingWorker, force: bool, now_ns: u64) {
-    let bind_mode = XskBindMode::from_u8(binding.live.bind_mode.load(Ordering::Relaxed));
+    maybe_wake_tx_fields(
+        &binding.live,
+        &binding.xsk,
+        &mut binding.timers,
+        &mut binding.telemetry,
+        &mut binding.tx_pipeline,
+        force,
+        now_ns,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::afxdp) fn maybe_wake_tx_fields(
+    live: &BindingLiveState,
+    xsk: &WorkerXskRings,
+    timers: &mut WorkerTimers,
+    telemetry: &mut WorkerTelemetry,
+    tx_pipeline: &mut WorkerTxPipeline,
+    force: bool,
+    now_ns: u64,
+) {
+    let bind_mode = XskBindMode::from_u8(live.bind_mode.load(Ordering::Relaxed));
     if !bind_mode.is_zerocopy()
-        || binding.xsk.tx.needs_wakeup()
+        || xsk.tx.needs_wakeup()
         || force
-        || now_ns.saturating_sub(binding.timers.last_tx_wake_ns) >= TX_WAKE_MIN_INTERVAL_NS
+        || now_ns.saturating_sub(timers.last_tx_wake_ns) >= TX_WAKE_MIN_INTERVAL_NS
     {
         // Use a direct sendto() syscall (not any wrapper) so we can
         // observe errno and feed the #825 kick-latency telemetry.
-        let fd = binding.xsk.tx.as_raw_fd();
+        let fd = xsk.tx.as_raw_fd();
         // #825 plan §3.3 site 1: two fresh `monotonic_nanos()` calls
         // bracket the `sendto` syscall. `now_ns` is caller-cached —
         // stale up to `IDLE_SPIN_ITERS * spin_cost` per #812 §3.1 R1
@@ -434,8 +538,8 @@ pub(in crate::afxdp) fn maybe_wake_tx(binding: &mut BindingWorker, force: bool, 
         // kick to THIS kick (per-kick batch histogram). Drained
         // unconditionally on an actual sendto so a failed kick still
         // consumes the sample exactly once.
-        record_tx_kick_batch(binding);
-        binding.telemetry.dbg_sendto_calls += 1;
+        super::stats::record_tx_kick_batch_fields(live, tx_pipeline);
+        telemetry.dbg_sendto_calls += 1;
         // #825 plan §3.3 LOW-3 R1 sentinel, code-review R1 HIGH-1 hardening:
         // skip record unless (a) `kick_start != 0` AND (b) `kick_end >=
         // kick_start`. Both guards are required:
@@ -453,13 +557,13 @@ pub(in crate::afxdp) fn maybe_wake_tx(binding: &mut BindingWorker, force: bool, 
         //     `ts_completion >= ts_submit` precedent at :113-119.
         if kick_start != 0 && kick_end >= kick_start {
             let delta_ns = kick_end - kick_start;
-            record_kick_latency(&binding.live.owner_profile_owner, delta_ns);
+            record_kick_latency(&live.owner_profile_owner, delta_ns);
         }
         if rc < 0 {
             let errno = unsafe { *libc::__errno_location() };
             // EAGAIN/EWOULDBLOCK is normal for MSG_DONTWAIT; ENOBUFS means kernel dropped.
             if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK {
-                binding.telemetry.dbg_sendto_eagain += 1;
+                telemetry.dbg_sendto_eagain += 1;
                 // #825 plan §3.3 site 1 / §5: parallel atomic to
                 // `dbg_sendto_eagain` (which is worker-local and
                 // never published). Counts outer `sendto` returns
@@ -468,39 +572,31 @@ pub(in crate::afxdp) fn maybe_wake_tx(binding: &mut BindingWorker, force: bool, 
                 // off. `dbg_sendto_eagain` stays in place: the
                 // worker-local debug-tick log at
                 // `worker.rs:~1051` continues to work.
-                binding
-                    .live
-                    .owner_profile_owner
+                live.owner_profile_owner
                     .tx_kick_retry_count
                     .fetch_add(1, Ordering::Relaxed);
             } else if errno == libc::ENOBUFS {
-                binding.telemetry.dbg_sendto_enobufs += 1;
-                if binding.telemetry.dbg_sendto_enobufs <= 10 {
+                telemetry.dbg_sendto_enobufs += 1;
+                if telemetry.dbg_sendto_enobufs <= 10 {
                     eprintln!(
-                        "TX_ENOBUFS: slot={} if={} q={} outstanding_tx={} free_tx={}",
-                        binding.slot,
-                        binding.ifindex,
-                        binding.queue_id,
-                        binding.tx_pipeline.outstanding_tx,
-                        binding.tx_pipeline.free_tx_frames.len(),
+                        "TX_ENOBUFS: outstanding_tx={} free_tx={}",
+                        tx_pipeline.outstanding_tx,
+                        tx_pipeline.free_tx_frames.len(),
                     );
                 }
             } else {
-                binding.telemetry.dbg_sendto_err += 1;
-                if binding.telemetry.dbg_sendto_err <= 5 {
+                telemetry.dbg_sendto_err += 1;
+                if telemetry.dbg_sendto_err <= 5 {
                     eprintln!(
-                        "DBG SENDTO_ERR: slot={} if={} q={} errno={} outstanding_tx={} free_tx={}",
-                        binding.slot,
-                        binding.ifindex,
-                        binding.queue_id,
+                        "DBG SENDTO_ERR: errno={} outstanding_tx={} free_tx={}",
                         errno,
-                        binding.tx_pipeline.outstanding_tx,
-                        binding.tx_pipeline.free_tx_frames.len(),
+                        tx_pipeline.outstanding_tx,
+                        tx_pipeline.free_tx_frames.len(),
                     );
                 }
             }
         }
-        binding.timers.last_tx_wake_ns = now_ns;
+        timers.last_tx_wake_ns = now_ns;
     }
 }
 
@@ -671,9 +767,15 @@ mod tests {
         ));
         // RX-addr and in-place shapes never complete untracked.
         assert!(!completion_offset_returnable_to_free_pool(256, region));
-        assert!(!completion_offset_returnable_to_free_pool(4096 + 252, region));
+        assert!(!completion_offset_returnable_to_free_pool(
+            4096 + 252,
+            region
+        ));
         assert!(!completion_offset_returnable_to_free_pool(region, region));
-        assert!(!completion_offset_returnable_to_free_pool(region + 4096, region));
+        assert!(!completion_offset_returnable_to_free_pool(
+            region + 4096,
+            region
+        ));
         assert!(!completion_offset_returnable_to_free_pool(
             (u64::MAX - 4095) & !4095,
             region
@@ -737,7 +839,6 @@ mod tests {
             TX_COMPLETION_DUPLICATE_TOTAL.load(Ordering::Relaxed),
             dup_before + 1
         );
-
     }
     #[test]
     fn reap_tx_completions_drains_stale_ring_at_zero_gauge_9900() {
@@ -760,13 +861,11 @@ mod tests {
             skew_before + 1
         );
         // The sidecar fold is skipped too: no live stamp is disturbed.
-        assert!(
-            binding
-                .tx_pipeline
-                .tx_submit_ns
-                .iter()
-                .all(|s| *s == crate::afxdp::binding_state::TX_SIDECAR_UNSTAMPED)
-        );
+        assert!(binding
+            .tx_pipeline
+            .tx_submit_ns
+            .iter()
+            .all(|s| *s == crate::afxdp::binding_state::TX_SIDECAR_UNSTAMPED));
     }
 
     #[test]
@@ -824,5 +923,47 @@ mod tests {
             FILL_INVALID_TOTAL.load(Ordering::Relaxed),
             invalid_before + 1
         );
+    }
+
+    #[test]
+    fn drain_pending_fill_publishes_debug_state_on_success_17186() {
+        // Parent called update_binding_debug_state at the tail of every
+        // successful fill drain. Seed the cadence counter just below the
+        // mask so this drain's publish fires, and a pending counter that
+        // only the publish flushes.
+        let mut binding = BindingWorker::new_for_mirror_test(7, 1, 11, 0);
+        binding.timers.debug_state_counter = crate::afxdp::binding_state::DEBUG_STATE_PUBLISH_MASK;
+        binding.tx_counters.pending_direct_tx_packets = 3;
+        binding.tx_pipeline.pending_fill_frames.push_back(0);
+        assert!(drain_pending_fill(&mut binding, monotonic_nanos()));
+        assert_eq!(
+            binding.live.direct_tx_packets.load(Ordering::Relaxed),
+            3,
+            "successful fill drain must publish debug state (parent cadence)"
+        );
+        assert_eq!(binding.tx_counters.pending_direct_tx_packets, 0);
+    }
+
+    #[test]
+    fn reap_fields_publishes_debug_state_at_cadence_17186() {
+        // The fields reap must publish (not merely skip) when the cadence
+        // fires: seed counter at the mask boundary and a pending counter.
+        let _counter_lock = COUNTER_TEST_LOCK.lock().expect("counter test lock");
+        let mut binding = BindingWorker::new_for_mirror_test(7, 1, 11, 0);
+        binding.timers.debug_state_counter = crate::afxdp::binding_state::DEBUG_STATE_PUBLISH_MASK;
+        binding.tx_counters.pending_direct_tx_packets = 5;
+        binding.tx_pipeline.outstanding_tx = 1;
+        let held = binding.tx_pipeline.free_tx_frames.pop_front().unwrap();
+        binding.tx_pipeline.in_flight_untracked_tx.insert(held);
+        binding.xsk.device.push_comp_for_test(held);
+        let mut shared = Vec::new();
+        let reaped = reap_tx_completions(&mut binding, &mut shared);
+        assert_eq!(reaped, 1);
+        assert_eq!(
+            binding.live.direct_tx_packets.load(Ordering::Relaxed),
+            5,
+            "fields reap must publish debug state at cadence, not skip it"
+        );
+        assert_eq!(binding.tx_counters.pending_direct_tx_packets, 0);
     }
 }

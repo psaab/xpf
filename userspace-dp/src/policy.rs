@@ -3554,7 +3554,6 @@ pub(crate) fn evaluate_policy_result_with_len(
 /// has to classify itself instead of inheriting whichever answer a negated
 /// comparison happened to give it. That is the failure
 /// `NonRoutingCountPolicy::counting` records for its own third variant.
-
 /// #16129: by-value query for one policy evaluation. All fields are `Copy`
 /// scalars / `IpAddr` (no cloned keys, no allocation) so the packet path pays
 /// no copy beyond the registers it already held; the mode fields select the
@@ -3689,7 +3688,7 @@ impl PolicyHitCount {
 /// unaffected. The forwarding path (poll_descriptor) calls this directly with
 /// the per-packet type/code; the back-compat `evaluate_policy_result_with_len`
 /// and the `evaluate_policy*` test/legacy wrappers pass `None`.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_policy_result_with_icmp(
     state: &PolicyState,
     from_id: u32,
@@ -3717,7 +3716,7 @@ pub(crate) fn evaluate_policy_result_with_icmp(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_policy_result_with_icmp_at(
     state: &PolicyState,
     from_id: u32,
@@ -3749,7 +3748,7 @@ pub(crate) fn evaluate_policy_result_with_icmp_at(
 /// enforcement gate (the input-filter and PBR halves live in the forwarding
 /// path). The synthetic L3 tuple this is called with is used ONLY for evaluation
 /// + logging and is NEVER installed as a session.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_policy_result_l3_aware(
     state: &PolicyState,
     from_id: u32,
@@ -3779,7 +3778,7 @@ pub(crate) fn evaluate_policy_result_l3_aware(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_policy_result_l3_aware_at(
     state: &PolicyState,
     from_id: u32,
@@ -3813,7 +3812,7 @@ pub(crate) fn evaluate_policy_result_l3_aware_at(
 /// decision, so default-permit can delegate the packet to the kernel. A
 /// resolved egress in zone 0 is denied by
 /// `evaluate_policy_result_l3_aware` instead.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
     state: &PolicyState,
     from_id: u32,
@@ -3843,7 +3842,7 @@ pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress_at(
     state: &PolicyState,
     from_id: u32,
@@ -3877,7 +3876,7 @@ pub(crate) fn evaluate_policy_result_l3_aware_unresolved_egress_at(
 /// guarantee, and the walk bumped `rule.hit_counter` / `state.default_counter`
 /// internally on whatever it matched. The freedom is a property of the CALL, and
 /// this is how the call expresses it.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_policy_result_without_counting(
     state: &PolicyState,
     from_id: u32,
@@ -3904,7 +3903,7 @@ pub(crate) fn evaluate_policy_result_without_counting(
 }
 
 /// Evaluate without hit-counter side effects at a caller-captured monotonic time.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_policy_result_without_counting_at(
     state: &PolicyState,
     from_id: u32,
@@ -4040,7 +4039,7 @@ impl TierWalk<'_> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_policy_result_counted(
     state: &PolicyState,
     from_id: u32,
@@ -4422,7 +4421,7 @@ fn resolve_policy_zone_id(zone_name_to_id: &FxHashMap<String, u32>, name: &str) 
 /// downgrades either to a warning so an already-persisted config still boots.
 /// Actually wiring host-originated policy against the kernel TX path is a
 /// documented follow-up.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_junos_host_policy(
     state: &PolicyState,
     from_id: u32,
@@ -4452,6 +4451,13 @@ pub(crate) fn evaluate_junos_host_policy(
     )
 }
 
+/// #9385: this walker passes `PolicyHitCount::Count` to each
+/// `apply_frag_deny_override_and_count` call deliberately. This is the
+/// `to-zone junos-host` (host-inbound) evaluation; #3706 makes it the counting
+/// site for a host-bound packet. The established-hit path SKIPS its own
+/// re-count for LocalDelivery because this re-eval already counted the packet.
+/// Only #8356's zone-policy re-derivation is side-effect-free, and it does not
+/// come through here.
 /// #3292: L4-presence-aware `junos-host` policy evaluation. `l4_present = false`
 /// marks a flowless / no-L4 packet (a non-first fragment on the flowless
 /// LocalDelivery arm); port-bearing application terms then fail closed while
@@ -4478,14 +4484,7 @@ pub(crate) fn evaluate_junos_host_policy(
 /// guarantee (an unmatched host-bound flow is never newly denied) is
 /// unaffected for every flow that does not overlap a deny. The L4 path never
 /// records a skip, so it stays byte-identical.
-#[allow(clippy::too_many_arguments)]
-/// #9385: this walker passes `PolicyHitCount::Count` to each
-/// `apply_frag_deny_override_and_count` call deliberately. This is the
-/// `to-zone junos-host` (host-inbound) evaluation; #3706 makes it the counting
-/// site for a host-bound packet. The established-hit path SKIPS its own
-/// re-count for LocalDelivery because this re-eval already counted the packet.
-/// Only #8356's zone-policy re-derivation is side-effect-free, and it does not
-/// come through here.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_junos_host_policy_l3_aware(
     state: &PolicyState,
     from_id: u32,
@@ -4514,7 +4513,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware(
 }
 
 /// Evaluate host-bound policy at a captured time and count the packet once.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
     state: &PolicyState,
     from_id: u32,
@@ -4545,7 +4544,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_at(
 }
 
 /// Re-derive host-bound policy without changing packet or rule counters.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting(
     state: &PolicyState,
     from_id: u32,
@@ -4582,7 +4581,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting(
 /// rule, so its counter is resolved positionally at re-check time).
 /// Alias of the without-counting re-derivation, named for the
 /// established-session call site.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn rederive_junos_host_policy_l3_aware_at(
     state: &PolicyState,
     from_id: u32,
@@ -4610,7 +4609,7 @@ pub(crate) fn rederive_junos_host_policy_l3_aware_at(
 }
 
 /// Re-derive host-bound policy without changing packet or rule counters.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting_at(
     state: &PolicyState,
     from_id: u32,
@@ -4639,7 +4638,7 @@ pub(crate) fn evaluate_junos_host_policy_l3_aware_without_counting_at(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn evaluate_junos_host_policy_l3_aware_at_with_hit_count(
     state: &PolicyState,
     from_id: u32,

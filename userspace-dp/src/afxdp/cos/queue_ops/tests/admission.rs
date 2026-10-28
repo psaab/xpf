@@ -150,7 +150,7 @@ fn exact_local_fifo_boundary_survives_partial_commit() {
 
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, sent_bytes) = settle_exact_local_fifo_submission(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut free_tx_frames,
         &mut scratch_local_tx,
         &mut in_flight_untracked_tx,
@@ -369,7 +369,7 @@ fn exact_prepared_fifo_boundary_survives_partial_commit() {
     let mut in_flight_prepared_recycles = FastMap::default();
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, sent_bytes) = settle_exact_prepared_fifo_submission(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut scratch_prepared_tx,
         &mut in_flight_prepared_recycles,
         &mut in_flight_untracked_tx,

@@ -237,7 +237,7 @@ func (c *CLI) clearFilteredSessions(f sessionFilter) error {
 
 	var agg sessionClearErrors
 	// #4886 A: bound the working set. The pre-#4886 CLI snapshotted EVERY
-	// matching forward key + its reverse and DNAT companions (v4 then v6) into
+	// matching forward key + its reverse companions (v4 then v6) into
 	// growing slices before deleting, so a broad filtered clear on a
 	// multi-million-entry table allocated O(matches) up front and could OOM the
 	// in-process daemon before making progress. clearFilteredV4Bounded /
@@ -279,14 +279,13 @@ type cliSessionCursor interface {
 
 // cliClearBatchV4 accumulates one bounded chunk of matching v4 forward keys plus
 // each session's reverse companion (keyed on the TRANSLATED tuple val.ReverseKey,
-// #2733) and DNAT companion (#2406), mirroring grpcapi.clearBatchV4 (#5454/#4886).
+// #2733), mirroring grpcapi.clearBatchV4 (#5454/#4886).
 type cliClearBatchV4 struct {
-	fwd  []dataplane.SessionKey
-	rev  []dataplane.SessionKey
-	dnat []dataplane.DNATKey
+	fwd []dataplane.SessionKey
+	rev []dataplane.SessionKey
 }
 
-func (b *cliClearBatchV4) reset() { b.fwd = b.fwd[:0]; b.rev = b.rev[:0]; b.dnat = b.dnat[:0] }
+func (b *cliClearBatchV4) reset() { b.fwd = b.fwd[:0]; b.rev = b.rev[:0] }
 
 // collect appends a matched forward session's keys and returns true once the
 // forward chunk is full. Callers must skip reverse entries (val.IsReverse != 0)
@@ -296,13 +295,10 @@ func (b *cliClearBatchV4) collect(key dataplane.SessionKey, val dataplane.Sessio
 	if val.ReverseKey.Protocol != 0 {
 		b.rev = append(b.rev, val.ReverseKey)
 	}
-	if val.Flags&dataplane.SessFlagSNAT != 0 && val.Flags&dataplane.SessFlagStaticNAT == 0 {
-		b.dnat = append(b.dnat, dataplane.DNATKeyForSessionV4(key, val))
-	}
 	return len(b.fwd) >= cliClearFilteredBatch
 }
 
-// deleteAll deletes this chunk's forward keys plus reverse/DNAT companions.
+// deleteAll deletes this chunk's forward keys plus reverse companions.
 // It returns deleted (forward keys this call actually removed, for the operator
 // "N cleared" tally) and removed (forward keys no longer in the map after this
 // call = deleted PLUS already-gone/not-found). removed drives the #5948
@@ -327,9 +323,6 @@ func (b *cliClearBatchV4) deleteAll(c *CLI, agg *sessionClearErrors) (deleted, r
 	}
 	for _, key := range b.rev {
 		agg.addExceptNotFound("v4 reverse delete", c.dp.DeleteSession(key))
-	}
-	for _, dk := range b.dnat {
-		agg.addExceptNotFound("v4 DNAT companion delete", c.dp.DeleteDNATEntry(dk))
 	}
 	return deleted, removed
 }
@@ -435,20 +428,16 @@ func clearFilteredV4Rescan(c *CLI, f *sessionFilter, agg *sessionClearErrors) in
 
 // cliClearBatchV6 is the IPv6 analogue of cliClearBatchV4.
 type cliClearBatchV6 struct {
-	fwd  []dataplane.SessionKeyV6
-	rev  []dataplane.SessionKeyV6
-	dnat []dataplane.DNATKeyV6
+	fwd []dataplane.SessionKeyV6
+	rev []dataplane.SessionKeyV6
 }
 
-func (b *cliClearBatchV6) reset() { b.fwd = b.fwd[:0]; b.rev = b.rev[:0]; b.dnat = b.dnat[:0] }
+func (b *cliClearBatchV6) reset() { b.fwd = b.fwd[:0]; b.rev = b.rev[:0] }
 
 func (b *cliClearBatchV6) collect(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 	b.fwd = append(b.fwd, key)
 	if val.ReverseKey.Protocol != 0 {
 		b.rev = append(b.rev, val.ReverseKey)
-	}
-	if val.Flags&dataplane.SessFlagSNAT != 0 && val.Flags&dataplane.SessFlagStaticNAT == 0 {
-		b.dnat = append(b.dnat, dataplane.DNATKeyForSessionV6(key, val))
 	}
 	return len(b.fwd) >= cliClearFilteredBatch
 }
@@ -469,9 +458,6 @@ func (b *cliClearBatchV6) deleteAll(c *CLI, agg *sessionClearErrors) (deleted, r
 	}
 	for _, key := range b.rev {
 		agg.addExceptNotFound("v6 reverse delete", c.dp.DeleteSessionV6(key))
-	}
-	for _, dk := range b.dnat {
-		agg.addExceptNotFound("v6 DNAT companion delete", c.dp.DeleteDNATEntryV6(dk))
 	}
 	return deleted, removed
 }
@@ -575,7 +561,7 @@ func (e *sessionClearErrors) add(op string, err error) {
 
 // addExceptNotFound is add() for delete operations whose target key is
 // COMPUTED, not enumerated — the reverse-session companion (a naive
-// src/dst swap of the forward key) and the DNAT companion entry. For a
+// src/dst swap of the forward key). For a
 // NAT'd session those computed keys frequently do not exist (the real
 // reverse companion is keyed on the TRANSLATED tuple val.ReverseKey, not
 // the naive swap), so the dataplane returns ebpf.ErrKeyNotExist. That is

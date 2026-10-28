@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/linuxsock"
 	"golang.org/x/sys/unix"
 )
 
@@ -43,7 +44,7 @@ func newSocketpairSession(t *testing.T, iface *net.Interface) (sess *ifSession, 
 		t.Fatalf("eventfd: %v", err)
 	}
 	// fds[0] is the session's rx/tx fd; fds[1] is the test-controlled peer.
-	return &ifSession{iface: iface, rxFD: fds[0], txFD: fds[0], wakeFD: wakeFD}, fds[1]
+	return &ifSession{iface: iface, rx: linuxsock.NewPpollRecvForTest(fds[0], wakeFD), txFD: fds[0]}, fds[1]
 }
 
 // TestSessionRecvUnblocksOnClose proves the wake latency fix (#16669): a

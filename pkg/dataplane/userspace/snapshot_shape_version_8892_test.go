@@ -27,13 +27,16 @@ import (
 // question (did someone bump one side alone), and it would have passed straight
 // through this defect.
 //
-// So this pins the shape. Add, remove or retype a field on a snapshot struct
-// and the digest moves; the cell then demands that ProtocolVersion moved too.
-// It cannot tell a compatible addition from an incompatible one, and does not
-// try: it forces a human decision at the one moment the decision is cheap,
-// which is the moment the field is added.
+// The digest pins the shape of fields the helper parses by name. Opaque
+// subtrees are excluded only by an explicit boundary in opaqueToHelper8892,
+// paired with a Rust type assertion that expires if the subtree becomes typed.
+// A changed helper-parsed field moves the digest and requires the human to
+// decide whether ProtocolVersion must move too. The digest cannot tell a
+// compatible addition from an incompatible one, and does not try: it forces
+// that decision at the moment the field is added.
 
 // snapshotShapeStructs8892 are the structs whose wire shape the helper parses.
+// Explicitly exempted opaque subtrees are declared in opaqueToHelper8892.
 // Adding a new snapshot struct here is part of adding one to the protocol.
 func snapshotShapeStructs8892() []any {
 	return []any{
@@ -41,6 +44,20 @@ func snapshotShapeStructs8892() []any {
 		AddressBookSnapshot{}, SnapshotSummary{}, FabricSnapshot{},
 		IpsecBindlessSelectorSnapshot{},
 	}
+}
+
+// opaqueToHelper8892 names walked fields the Rust helper deserializes
+// into an opaque value and never reads by field name, so their Go layout
+// is not helper-parsed wire shape and must not move this digest.
+// ConfigSnapshot.Config is `pub config: serde_json::Value`
+// (userspace-dp/src/protocol/snapshot.rs); the Rust cell
+// config_snapshot_config_stays_opaque_to_helper17244 in that file pins
+// that type so this exemption expires if Rust ever types the field.
+// (#17244: 988/1692 was a stale pre-v77 measurement. On #18326's v77 baseline
+// the subtree is 1018/1725 lines before exclusion; 707 lines remain in this
+// digest after the opaque ConfigSnapshot.Config exemption.)
+var opaqueToHelper8892 = map[string]bool{
+	"ConfigSnapshot.Config": true,
 }
 
 func shapeDigest8892(t *testing.T) (string, int) {
@@ -64,6 +81,9 @@ func shapeDigest8892(t *testing.T) (string, int) {
 			}
 			tag := f.Tag.Get("json")
 			lines = append(lines, fmt.Sprintf("%s%s %s %q", prefix, f.Name, f.Type.String(), tag))
+			if opaqueToHelper8892[prefix+f.Name] {
+				continue // opaque to the helper: record the field, do not descend
+			}
 			walk(f.Type, prefix+f.Name+".", depth+1)
 		}
 	}
@@ -76,10 +96,10 @@ func shapeDigest8892(t *testing.T) (string, int) {
 	return hex.EncodeToString(sum[:]), len(lines)
 }
 
-// snapshotShapeGolden8892 is the pinned digest of the config snapshot wire shape.
-// If it moves, the shape changed: either bump ProtocolVersion and update this
-// value in the same commit, or explain in the commit message why the change is
-// invisible to a helper.
+// snapshotShapeGolden8892 is the pinned digest of the helper-parsed snapshot shape.
+// If it moves, a helper-parsed field changed: either bump ProtocolVersion and
+// update this value in the same commit, or explain why the shape change is
+// invisible to the helper.
 //
 // v10 (issue 9054): `ConfigSnapshot.LearnedRouteImportCapped`. ProtocolVersion
 // WAS bumped alongside it, deliberately, and the reason is the one this cell's
@@ -236,7 +256,7 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // refuse every snapshot in exchange for nothing. The golden below moved to the
 // #9984-merge digest; ProtocolVersion was 24 until #10018's lease-wire bump.
 const (
-	snapshotShapeGolden8892 = "cdcf8bdbce46b5fb42d40b5c432a64e2f080cdab24278253f543925ef8f2bc03"
+	snapshotShapeGolden8892 = "9f1e98f40a45a87f20988483f6106cffdb45704d479f3f6b98830a159d5db341"
 	// v13 BUMPED (issue 9412) against the SAME digest. The TCP close class
 	// crosses the HA session-sync path, and the old behaviour is the defect it
 	// fixes, so the v9 rule requires the bump. The session-sync messages are not
@@ -641,7 +661,25 @@ const (
 	// without adding snapshot fields. v75 (#16877) changes the idle-lease
 	// control wire but not the snapshot shape; the protocol pin still moves.
 	// v76 (#17684) changes RulePriority semantics only; the shape is stable.
-	snapshotShapeVersion8892 = 76
+	// v77 BASELINE RECONCILIATION (#18326, not a wire bump): ProtocolVersion
+	// was already 77 (#17099), while this shape pin/golden remained at 76.
+	// Reconciliation includes #17229's removal of UserspaceMapPins.DnatTable
+	// and DnatTableV6, and #18148's widening of PolicySessionRebind ingress
+	// and egress zones from uint16 to uint32. Both are intentional changes
+	// already represented by v77; ProtocolVersion does not move here.
+	// The digest also sees #17237's embedding of config.RFC2136Endpoint into
+	// DHCPDynamicDNSConfig: the Go walk now records the embedded endpoint
+	// instead of its leaves, but JSON embedding preserves the same flattened
+	// keys, so this is digest-only and not another helper-visible change.
+	// See docs/log/18326.md for the baseline comparison and disposition.
+	// v77 SCOPE RECONCILIATION (#17244; no protocol bump): the digest keeps the
+	// ConfigSnapshot.Config field declaration but stops descending into its Go
+	// Config subtree. Rust reads this field as opaque serde_json::Value, so
+	// config-type layout changes are not helper-parsed shape changes. The
+	// config_snapshot_config_stays_opaque_to_helper17244 Rust cell pins that
+	// boundary. Re-pinned on the #18326 v77 baseline; ProtocolVersion remains 77.
+	// Digest: 9f1e98f40a45a87f20988483f6106cffdb45704d479f3f6b98830a159d5db341.
+	snapshotShapeVersion8892 = 77
 )
 
 func TestSnapshotShapeIsPinnedToProtocolVersion8892(t *testing.T) {

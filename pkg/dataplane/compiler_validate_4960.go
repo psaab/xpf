@@ -205,8 +205,6 @@ func (discardingDataPlane) SetApplication(protocol uint8, dstPort uint16, appID 
 	return nil
 }
 func (discardingDataPlane) SetAppRange(index uint32, entry AppRangeEntry) error { return nil }
-func (discardingDataPlane) SetDNATEntry(key DNATKey, val DNATValue) error       { return nil }
-func (discardingDataPlane) SetDNATEntryV6(key DNATKeyV6, val DNATValueV6) error { return nil }
 
 func (discardingDataPlane) SetScreenConfig(profileID uint32, cfg ScreenConfig) error { return nil }
 func (discardingDataPlane) SetFlowTimeout(idx, seconds uint32) error                 { return nil }
@@ -214,8 +212,6 @@ func (discardingDataPlane) SetFlowConfig(cfg FlowConfigValue) error             
 func (discardingDataPlane) DeleteStaleZonePairPolicies(written map[ZonePairKey]bool) {}
 func (discardingDataPlane) DeleteStaleApplications(written map[AppKey]bool)          {}
 
-func (discardingDataPlane) DeleteStaleDNATStatic(written map[DNATKey]bool)     {}
-func (discardingDataPlane) DeleteStaleDNATStaticV6(written map[DNATKeyV6]bool) {}
 func (discardingDataPlane) DeleteStaleStaticNAT(writtenV4 map[StaticNATKeyV4]bool, writtenV6 map[StaticNATKeyV6]bool) {
 }
 func (discardingDataPlane) ZeroStaleScreenConfigs(maxID uint32) {}

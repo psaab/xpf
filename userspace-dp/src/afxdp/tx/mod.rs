@@ -1,13 +1,15 @@
 use super::*;
 
 pub(super) mod stats;
-pub(in crate::afxdp) use stats::{record_tx_commit, stamp_submits};
+pub(in crate::afxdp) use stats::{record_tx_commit, record_tx_commit_fields, stamp_submits};
 #[cfg(test)]
 pub(in crate::afxdp) use stats::{record_kick_latency, record_tx_completions_with_stamp};
 
 pub(super) mod rings;
 pub(super) use rings::{drain_pending_fill, maybe_wake_rx};
-pub(in crate::afxdp) use rings::{maybe_wake_tx, reap_tx_completions};
+pub(in crate::afxdp) use rings::{
+    maybe_wake_tx, maybe_wake_tx_fields, reap_tx_completions, reap_tx_completions_fields,
+};
 
 pub(super) mod transmit;
 use transmit::transmit_prepared_batch;
@@ -19,8 +21,7 @@ pub(in crate::afxdp) use transmit::{
 
 pub(super) mod drain;
 pub(super) use drain::{
-    bound_pending_tx_local, bound_pending_tx_prepared, drain_pending_tx,
-    drain_pending_tx_local_owner, pending_tx_capacity,
+    bound_pending_tx_local, bound_pending_tx_prepared, drain_pending_tx, pending_tx_capacity,
 };
 
 pub(super) mod cos_classify;
@@ -40,7 +41,7 @@ pub(super) use cos_classify::{
     resolve_cos_tx_selection_at_prenat,
 };
 // Private use, not a re-export: a `pub(super) use` of a `pub(super)`
-// item triggers E0364. drain.rs reaches this through `use super::*;`.
+// item triggers E0364. The drain submodule reaches this through `use super::*;`.
 use cos_classify::enqueue_prepared_into_cos;
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //! This is the SECOND of the two S2a egress encap sites; the primary is
 //! the WG control thread's TUN-read loop (coordinator/wg_control/mod.rs).
 //! This site fires only when an AF_XDP forwarding decision targets a
-//! `mode == "wireguard"` tunnel endpoint id directly (a route/connected
+//! `WireGuard-kind` tunnel endpoint id directly (a route/connected
 //! entry carrying the WG endpoint id). In the canonical wgN-TUN topology
 //! the kernel routes inner traffic to the wgN device and the control
 //! thread owns egress, so this path is rarely hit; it exists so a
@@ -670,7 +670,7 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex_with_dynamic(
         return None;
     }
     let endpoint = forwarding.tunnel_endpoints.get(&id)?;
-    if !matches!(tunnel_mode_kind(&endpoint.mode), TunnelKind::WireGuard) {
+    if endpoint.kind != TunnelKind::WireGuard {
         return None;
     }
     // #6340: DISPATCH must select the SAME peer `wg_encap_frame` emits bytes
@@ -819,7 +819,7 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
         )
     })?;
     let inner_packet = inner_frame.get(inner_l3..)?;
-    let inner_len = crate::afxdp::gre::packet_trimmed_len(inner_packet, inner_meta.addr_family)?;
+    let inner_len = packet_trimmed_len(inner_packet, inner_meta.addr_family)?;
     let inner_packet = &inner_packet[..inner_len];
 
     // #1434 B1b cryptokey routing: select the egress peer by the inner

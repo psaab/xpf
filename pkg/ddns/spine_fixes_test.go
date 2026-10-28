@@ -178,7 +178,7 @@ func TestRestartNoBackendKeepsOwnershipNotOrphan(t *testing.T) {
 			return nopUpdater{}, nil
 		}
 		c.UpdateServer = srv.addrUDP
-		return newRFC2136Updater(pol, c, nil,
+		return newRFC2136Updater(pol, c.RFC2136Endpoint, nil,
 			func() { m1.skippedPTRNotAuth.Add(1) },
 			func() { m1.skippedConflict.Add(1) })
 	}
@@ -228,14 +228,17 @@ func TestRestartNoBackendKeepsOwnershipNotOrphan(t *testing.T) {
 			return nopUpdater{}, nil
 		}
 		c.UpdateServer = srv.addrUDP
-		return newRFC2136Updater(pol, c, nil,
+		return newRFC2136Updater(pol, c.RFC2136Endpoint, nil,
 			func() { m3.skippedPTRNotAuth.Add(1) },
 			func() { m3.skippedConflict.Add(1) })
 	}
 	// Live backend present but DDNS now disabled (turn-off) → withdraw-all
 	// through the live backend resolved for the family.
 	disabledLive := &config.DHCPServerConfig{DynamicDNS: &config.DHCPDynamicDNSConfig{
-		Enabled: false, Backend: "rfc2136", UpdateServer: srv.addrUDP,
+		Enabled: false, Backend: "rfc2136",
+		RFC2136Endpoint: config.RFC2136Endpoint{
+			UpdateServer: srv.addrUDP,
+		},
 	}}
 	if err := m3.Reconcile(context.Background(), disabledLive); err != nil {
 		t.Fatalf("process-3 withdraw reconcile: %v", err)

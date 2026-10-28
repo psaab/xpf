@@ -47,6 +47,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::afxdp::TunnelKind;
+
 /// Per-worker forward-queue depth. Mirrors `IPSEC_INNER_QUEUE_DEPTH`: deep
 /// enough to absorb a WG control-thread burst (`WG_RX_BURST` is 64) without
 /// shedding, shallow enough that a wedged worker's backlog stays bounded.
@@ -351,7 +353,7 @@ pub(in crate::afxdp) fn build_injected_packet(
             return None;
         }
     };
-    if endpoint.mode != "wireguard"
+    if endpoint.kind != TunnelKind::WireGuard
         || endpoint.logical_ifindex != descriptor.logical_ifindex
         || forwarding
             .ifindex_to_name
@@ -369,7 +371,7 @@ pub(in crate::afxdp) fn build_injected_packet(
             return None;
         }
     };
-    let Some(inner_len) = crate::afxdp::gre::packet_trimmed_len(&descriptor.inner, inner_family)
+    let Some(inner_len) = crate::afxdp::frame::packet_trimmed_len(&descriptor.inner, inner_family)
     else {
         WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
         return None;
@@ -379,7 +381,7 @@ pub(in crate::afxdp) fn build_injected_packet(
         return None;
     };
     let Some((protocol, rel_l4_offset, payload_offset)) =
-        crate::afxdp::gre::parse_inner_protocol_and_offsets(inner, inner_family)
+        crate::afxdp::frame::parse_inner_protocol_and_offsets(inner, inner_family)
     else {
         WG_UNCOVERED_MALFORMED_TOTAL.fetch_add(1, Ordering::Relaxed);
         return None;
@@ -1268,6 +1270,11 @@ mod tests {
             .get_mut(&1)
             .expect("wg endpoint")
             .mode = "gre".to_string();
+        gre_mode
+            .tunnel_endpoints
+            .get_mut(&1)
+            .expect("wg endpoint")
+            .kind = TunnelKind::Gre;
         assert!(
             build_injected_packet(
                 &attached_descriptor(None, valid_inner_v4(0)),

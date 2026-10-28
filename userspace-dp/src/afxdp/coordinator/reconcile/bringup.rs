@@ -168,13 +168,11 @@ pub(super) fn bring_up_workers(
             .fetch_add(orphaned.len() as u64, Ordering::Relaxed);
     }
     // Capture the values the later phases need BEFORE `fds` is moved into
-    // `publish_runtime`: the session map's raw descriptor (replay) and the DNAT
-    // table fds (Copy; the worker launch bundle). The replay writes as the
-    // coordinator, which claims no steering row (#9560), through the coordinator's
-    // one registry.
+    // `publish_runtime`: the session map's raw descriptor (replay). The replay
+    // writes as the coordinator, which claims no steering row (#9560), through
+    // the coordinator's one registry.
     let session_map_raw_fd = fds.session_map_fd.fd;
     let session_map_owners = Arc::clone(&coord.steering_owners);
-    let dnat_fds = fds.dnat_fds;
     // Phase: PUBLISH. Move the OwnedFds onto `coord.bpf_maps` and publish the
     // mirror-target + CoS owner/active-shard maps the workers read — BEFORE any
     // replay or launch.
@@ -244,7 +242,6 @@ pub(super) fn bring_up_workers(
         snapshot.node_id,
         worker_command_queues,
         tunnel_purge_ids,
-        dnat_fds,
         &startup_report_tx,
     ) {
         // #14130 (supersedes the #4952 differential for the spawn arm): a
@@ -492,15 +489,11 @@ fn publish_runtime(
         session_map_fd,
         conntrack_v4_fd,
         conntrack_v6_fd,
-        dnat_table_fd,
-        dnat_table_v6_fd,
-        dnat_fds: _,
         forwarding: _,
     } = fds;
     // #7209: ONE store of the whole set, so a reader can never observe a
-    // half-populated generation (e.g. a live `session_map_fd` beside a stale
-    // `dnat_table_fd`). The previous set's descriptors are closed when the last
-    // holder releases its `Arc`.
+    // half-populated generation. The previous set's descriptors are closed
+    // when the last holder releases its `Arc`.
     coord
         .bpf_maps
         .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
@@ -509,8 +502,6 @@ fn publish_runtime(
             session_map_fd: Some(session_map_fd),
             conntrack_v4_fd,
             conntrack_v6_fd,
-            dnat_table_fd,
-            dnat_table_v6_fd,
         }));
     let worker_binding_ifindexes = workers
         .iter()
@@ -659,11 +650,8 @@ pub(in crate::afxdp) fn replay_preserved_sessions(
         tunnel_purge_ids,
         &coord.forwarding,
     );
-    let replayed_synced_sessions = coord.replay_synced_sessions(
-        &replay_entries,
-        worker_command_queues.as_ref(),
-        session_map,
-    );
+    let replayed_synced_sessions =
+        coord.replay_synced_sessions(&replay_entries, worker_command_queues.as_ref(), session_map);
     if replayed_synced_sessions > 0 {
         coord.last_reconcile_stage = ReconcileStage::ReplayedSynced {
             count: replayed_synced_sessions,
@@ -727,14 +715,11 @@ pub(in crate::afxdp) fn replay_late_synced_sessions(
             &mut pending,
             WorkerCommand::UpsertSynced(replica),
         ) {
-            if let Some(position) = crate::afxdp::worker_queue::session_import_repair_position(
-                worker_id,
-                pending.len(),
-            ) {
+            if let Some(position) =
+                crate::afxdp::worker_queue::session_import_repair_position(worker_id, pending.len())
+            {
                 let _ = crate::afxdp::worker_queue::record_session_import_repair(
-                    worker_id,
-                    &entry.key,
-                    position,
+                    worker_id, &entry.key, position,
                 );
             }
         }
@@ -782,7 +767,6 @@ pub(in crate::afxdp) fn ensure_ipsec_sa_monitor(coord: &mut Coordinator) {
 /// handle (`Some` when installed/already-present, `None` when the spawn failed)
 /// so the ordering/best-effort contract is directly unit-testable. Verbatim
 /// move of the pre-#6240 inline block.
-
 pub(in crate::afxdp) fn ensure_resolver(coord: &mut Coordinator) -> Option<Arc<NeighborResolver>> {
     // #1769: spawn the shared on-demand neighbor resolver BEFORE the
     // worker spawn loop so every worker captures a clone of the resolver
@@ -873,7 +857,6 @@ fn spawn_workers(
     node_id: u8,
     worker_command_queues: Arc<WorkerCommandQueues>,
     tunnel_purge_ids: &[u16],
-    dnat_fds: DnatTableFds,
     startup_report_tx: &mpsc::Sender<WorkerStartupReport>,
 ) -> LaunchOutcome {
     // #5143: per-worker STARTUP READINESS barrier. Each spawned worker reports
@@ -1009,7 +992,7 @@ fn spawn_workers(
         // `coord` HERE and are then MOVED into the worker body, which
         // never touches `coord` (it must be 'static for the spawn).
         let launch_plan =
-            WorkerLaunchPlan::new(worker_id, node_id, binding_plans, worker_poll_mode, dnat_fds);
+            WorkerLaunchPlan::new(worker_id, node_id, binding_plans, worker_poll_mode);
         let shared_dataplane = WorkerSharedDataplane::from_coord(coord);
         let control_channels = WorkerControlChannels::new(
             commands_clone,
@@ -1344,8 +1327,9 @@ fn await_readiness(
             // Timed out with reports still outstanding, or every sender was
             // dropped (a worker panicked in setup before reporting). Either
             // way the missing worker(s) are treated as failed below.
-            Err(mpsc::RecvTimeoutError::Timeout)
-            | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break;
+            }
         }
     }
     for &worker_id in spawned_worker_ids {

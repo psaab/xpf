@@ -54,17 +54,26 @@ type policyCorpusSnapshotFile9167 struct {
 	Cases map[string]policyCorpusSnapshot9167 `json:"cases"`
 }
 
-// corpusCaseSetLines9167 reads ONLY what this generator needs: the case names
-// and their config lines. The query grammar is deliberately not parsed here —
-// the generator has no business seeing the expectations.
-func corpusCaseSetLines9167(t *testing.T) map[string][]string {
+// corpusCase9167 is one generator-side case: its config lines plus the
+// #17077 case-level inputs (lenient flag, feed overlay) the snapshot builder
+// needs. The query grammar is deliberately not parsed here — the generator
+// has no business seeing the expectations.
+type corpusCase9167 struct {
+	SetLines    []string
+	Lenient     bool
+	FeedOverlay map[string][]string
+}
+
+// corpusCaseSetLines9167 reads ONLY what this generator needs: the case names,
+// their config lines, and the #17077 `lenient` flag / `feed` overlay lines.
+func corpusCaseSetLines9167(t *testing.T) map[string]corpusCase9167 {
 	t.Helper()
 	f, err := os.Open(policyCorpusTextPath9167)
 	if err != nil {
 		t.Fatalf("#9167: the shared corpus is unreadable: %v", err)
 	}
 	defer f.Close()
-	out := map[string][]string{}
+	out := map[string]corpusCase9167{}
 	var name string
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -75,12 +84,35 @@ func corpusCaseSetLines9167(t *testing.T) map[string][]string {
 		}
 		switch {
 		case strings.HasPrefix(line, "case "):
-			name = strings.TrimSpace(line[5:])
-			out[name] = nil
+			rest := strings.TrimSpace(line[5:])
+			name = rest
+			cc := corpusCase9167{}
+			if f := strings.Fields(rest); len(f) == 2 && f[1] == "lenient" {
+				name, cc.Lenient = f[0], true
+			}
+			out[name] = cc
 		case line == "end":
 			name = ""
 		case strings.HasPrefix(line, "set ") && name != "":
-			out[name] = append(out[name], line)
+			cc := out[name]
+			cc.SetLines = append(cc.SetLines, line)
+			out[name] = cc
+		case strings.HasPrefix(line, "feed ") && name != "":
+			rest := strings.TrimSpace(line[5:])
+			feedName, rhs, ok := strings.Cut(rest, "=")
+			if !ok || feedName == "" {
+				t.Fatalf("#9167: bad feed line %q", line)
+			}
+			cc := out[name]
+			if cc.FeedOverlay == nil {
+				cc.FeedOverlay = map[string][]string{}
+			}
+			var prefixes []string
+			if rhs != "" {
+				prefixes = strings.Split(rhs, ",")
+			}
+			cc.FeedOverlay[feedName] = prefixes
+			out[name] = cc
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -104,9 +136,9 @@ func buildCorpusSnapshots9167(t *testing.T) policyCorpusSnapshotFile9167 {
 			"reads those from the corpus text directly.",
 		Cases: map[string]policyCorpusSnapshot9167{},
 	}
-	for name, lines := range cases {
+	for name, cc := range cases {
 		tr := &config.ConfigTree{}
-		for _, l := range lines {
+		for _, l := range cc.SetLines {
 			p, err := config.ParseSetCommand(l)
 			if err != nil {
 				t.Fatalf("case %q: parse %q: %v", name, l, err)
@@ -115,50 +147,37 @@ func buildCorpusSnapshots9167(t *testing.T) policyCorpusSnapshotFile9167 {
 				t.Fatalf("case %q: setpath %q: %v", name, l, err)
 			}
 		}
-		cfg, err := config.CompileConfig(tr)
-		if err != nil {
-			t.Fatalf("case %q: the corpus config does not COMMIT: %v", name, err)
+		compile := config.CompileConfig
+		if cc.Lenient {
+			compile = config.CompileConfigLenient
 		}
-		rules, err := buildPolicySnapshots(cfg)
+		cfg, err := compile(tr)
 		if err != nil {
-			t.Fatalf("case %q: policy snapshot: %v", name, err)
+			t.Fatalf("case %q: the corpus config does not compile (lenient=%v): %v", name, cc.Lenient, err)
 		}
-		books, _, err := buildAddressBookTable(cfg)
+		books, nameToID, err := buildAddressBookTableWithFeeds(cfg, cc.FeedOverlay)
 		if err != nil {
 			t.Fatalf("case %q: address book: %v", name, err)
 		}
-		// WIRE SHAPE, MEASURED RATHER THAN NORMALISED. The first generated file
-		// carried `"address_books": null` for every case with no address book,
-		// and the Rust half refused it. The tempting fix is to normalise nil to
-		// `[]` here -- and that makes this fixture MORE well-formed than the real
-		// producer, which can hide exactly the Go/Rust mismatch the differential
-		// exists to catch.
-		//
-		// So the producer was measured instead. ConfigSnapshot declares all three
-		// of these fields `,omitempty` (protocol.go: Zones, Policies,
-		// AddressBooks), and so does every slice field of the three element types
-		// (PolicyRuleSnapshot x10, AddressBookSnapshot x2, ZoneSnapshot x2); the
-		// Rust decoder marks every one `#[serde(default)]`. Production therefore
-		// never sends `null` for any of them: a nil or empty list is an ABSENT
-		// key, which `default` fills. The `null` came from THIS wrapper, which was
-		// declared without `,omitempty` -- the generator was LESS faithful than
-		// production, not more.
-		//
-		// The fix reproduces the wire shape rather than inventing a third one: the
-		// wrapper carries the same `,omitempty` tags, so an empty list is omitted
-		// exactly as production omits it and the Rust side decodes it through the
-		// same `#[serde(default)]` path production uses.
-		// TestPolicyCorpusSnapshotMirrorsTheWireShape9167 pins those tags to
-		// ConfigSnapshot's by reflection so the two cannot drift apart silently.
-		//
-		// The null-tolerant class IS real in this tree -- #2214's null_tolerant_vec
-		// exists because NAT64 pool_addresses and firewall-filter terms carry NO
-		// `,omitempty` and a nil slice aborted the whole snapshot decode -- but
-		// none of those fields is part of this snapshot's shape.
+		rules, err := buildPolicySnapshotsWithAddressBook(cfg, nil, cc.FeedOverlay, nameToID)
+		if err != nil {
+			t.Fatalf("case %q: policy snapshot: %v", name, err)
+		}
+		zones := buildZoneSnapshots(cfg)
+		if cc.Lenient {
+			// #17077: emit the post-quarantine snapshot the dataplane
+			// actually receives (builder.go runs quarantineCollidingZones
+			// before publishing): the quarantined zone and its policies
+			// are absent, so the Rust half enforces the same posture the
+			// Go simulator's zoneKnown gate reports.
+			snap := &ConfigSnapshot{Zones: zones, Policies: rules, Config: cfg}
+			quarantineCollidingZones(snap)
+			zones, rules = snap.Zones, snap.Policies
+		}
 		out.Cases[name] = policyCorpusSnapshot9167{
 			DefaultPolicy: policyActionString(cfg.Security.DefaultPolicy),
 			Rules:         rules,
-			Zones:         buildZoneSnapshots(cfg),
+			Zones:         zones,
 			AddressBooks:  books,
 		}
 	}
