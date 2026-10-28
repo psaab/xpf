@@ -408,6 +408,7 @@ impl Coordinator {
                 interface: "gr-0/0/0".into(),
                 redundancy_group: 1,
                 mode: "gre".into(),
+                kind: TunnelKind::Gre,
                 outer_family: libc::AF_INET,
                 source: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
                 destination: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),

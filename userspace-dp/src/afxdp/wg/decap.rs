@@ -288,7 +288,7 @@ fn wg_endpoint_for_listen_port(
                 cross_family_specific
             };
             if endpoint.wg_listen_port == dst_port
-                && tunnel_mode_kind(&endpoint.mode) == TunnelKind::WireGuard
+                && endpoint.kind == TunnelKind::WireGuard
                 && transport_instance_of_table(&endpoint.transport_table) == ingress_instance
                 && source_matches
                 && wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)

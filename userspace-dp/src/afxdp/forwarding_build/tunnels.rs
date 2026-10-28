@@ -59,7 +59,8 @@ pub(super) fn populate_tunnel_endpoints(
         // the snapshot closed rather than wrapping (256→0 blackholes the
         // tunnel).
         let ttl = super::validated::TunnelTtl::try_from_snapshot(endpoint.ttl, endpoint.id)?.get();
-        let is_wireguard = endpoint.mode == "wireguard";
+        let kind = tunnel_mode_kind(&endpoint.mode);
+        let is_wireguard = kind == TunnelKind::WireGuard;
         // #16514: carry the tunnel logical MTU (configured
         // `interfaces gr-… [unit N] mtu`) into the runtime endpoint so
         // `native_gre_inner_mtu` can cap the physical-derived budget.
@@ -160,6 +161,7 @@ pub(super) fn populate_tunnel_endpoints(
                 interface: endpoint.interface.clone(),
                 redundancy_group: endpoint.redundancy_group,
                 mode: endpoint.mode.clone(),
+                kind,
                 outer_family,
                 source,
                 destination,
@@ -197,7 +199,7 @@ pub(super) fn populate_tunnel_endpoints(
         // (outer_family, source, destination); the decap lookup queries
         // with the received frame's mirrored (addr_family, outer_dst,
         // outer_src).
-        if tunnel_mode_kind(&endpoint.mode) == TunnelKind::Gre {
+        if kind == TunnelKind::Gre {
             state
                 .gre_decap_index
                 .entry((outer_family, source, destination))
@@ -211,11 +213,14 @@ pub(super) fn populate_tunnel_endpoints(
     Ok(())
 }
 
-/// #2327: the typed kind of a tunnel-endpoint `mode` string. Centralizes
-/// the kind classification that the decap index, the egress encap
-/// dispatcher, and the GRE supervision paths all rely on, so a future
-/// tunnel kind is added in exactly one place and the egress dispatcher's
-/// fail-closed `_ =>` arm cannot silently treat it as GRE.
+/// #2327/#17199: the typed kind of a tunnel-endpoint `mode` string.
+/// Centralizes the kind classification that the decap index, the egress
+/// encap dispatcher, and the GRE supervision paths all rely on, so a
+/// future tunnel kind is added in exactly one place and the egress
+/// dispatcher's fail-closed `_ =>` arm cannot silently treat it as GRE.
+/// This is the ONLY place a tunnel `mode` string is compared against
+/// mode literals (guarded by the #17199 source-scan test); every other
+/// consumer MUST read `TunnelEndpoint.kind`, decoded once here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::afxdp) enum TunnelKind {
     /// `gre` / `ip6gre` — native GRE encapsulation/decapsulation.
@@ -228,9 +233,10 @@ pub(in crate::afxdp) enum TunnelKind {
     Unknown,
 }
 
-/// Classify a tunnel-endpoint `mode` string into a `TunnelKind`. Mirrors
-/// the canonical GRE-kind test used across the supervision paths
-/// (`mode == "gre" || mode == "ip6gre"`).
+/// Classify a tunnel-endpoint `mode` string into a `TunnelKind`. The
+/// sole string-to-kind decoder: `populate_tunnel_endpoints` stores the
+/// result on `TunnelEndpoint.kind` and `hydrate_wg_identity` gates on
+/// it for snapshot rows; no other site compares a `mode` string.
 pub(in crate::afxdp) fn tunnel_mode_kind(mode: &str) -> TunnelKind {
     match mode {
         "gre" | "ip6gre" => TunnelKind::Gre,
@@ -304,7 +310,7 @@ pub(in crate::afxdp) fn wg_peers_eq(a: &[WgRuntimePeer], b: &[WgRuntimePeer]) ->
 pub(in crate::afxdp) fn hydrate_wg_identity(
     row: &crate::protocol::snapshot::TunnelEndpointSnapshot,
 ) -> Option<WgRowIdentity> {
-    if row.mode != "wireguard" {
+    if tunnel_mode_kind(&row.mode) != TunnelKind::WireGuard {
         return None;
     }
     // A WG tunnel with no listen port cannot bind a socket and is
@@ -675,6 +681,159 @@ mod wg_endpoint_shape_7158_tests {
             checked >= 20,
             "only {checked} fixture cases were checked; the file is supposed to \
              cover literals, hostnames, port rules and malformed hosts"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tunnel_kind_17199_tests {
+    use super::*;
+
+    fn snapshot_with_mode(mode: &str) -> crate::protocol::ConfigSnapshot {
+        let mut snap = crate::protocol::ConfigSnapshot::default();
+        snap.tunnel_endpoints = vec![crate::protocol::snapshot::TunnelEndpointSnapshot {
+            id: 9,
+            interface: "gr-0/0/0".into(),
+            ifindex: 50,
+            mode: mode.into(),
+            source: "203.0.113.1".into(),
+            destination: "198.51.100.1".into(),
+            ttl: 64,
+            ..Default::default()
+        }];
+        snap
+    }
+
+    /// #17199 acceptance: an Unknown-mode endpoint is classified ONCE as
+    /// `TunnelKind::Unknown` on the populated endpoint, is absent from
+    /// the GRE decap index, and is absent from `tunnel_outer_egress_rgs`
+    /// (the pre-fix binary string split put it in the GRE arm there).
+    /// FAIL-ON-REVERT: restoring a WireGuard-vs-else split in
+    /// `forwarding_build/mod.rs` puts id 9 back in the outer-RG map.
+    #[test]
+    fn unknown_mode_endpoint_is_unknown_and_absent_from_outer_rg_17199() {
+        let snap = snapshot_with_mode("ipip");
+        let state = crate::afxdp::forwarding_build::build_forwarding_state(&snap);
+        let ep = state
+            .tunnel_endpoints
+            .get(&9)
+            .expect("unknown-mode endpoint must still populate (show/telemetry)");
+        assert_eq!(ep.kind, TunnelKind::Unknown);
+        assert!(
+            state
+                .gre_decap_index
+                .values()
+                .all(|ids| !ids.contains(&9)),
+            "unknown endpoint must not be in the GRE decap index"
+        );
+        assert!(
+            !state.tunnel_outer_egress_rgs.contains_key(&9),
+            "unknown endpoint must be absent from tunnel_outer_egress_rgs"
+        );
+        // MSS: unknown kind yields 0, not the GRE formula.
+        let decision = crate::afxdp::SessionDecision {
+            resolution: crate::afxdp::ForwardingResolution {
+                disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 0,
+                tx_ifindex: 0,
+                tunnel_endpoint_id: 9,
+                next_hop: None,
+                neighbor_mac: None,
+                src_mac: None,
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: crate::afxdp::NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        assert_eq!(
+            crate::afxdp::forwarding::tunnel_tcp_mss(&state, &decision, 4),
+            0,
+            "unknown endpoint must not get the GRE MSS"
+        );
+    }
+
+    /// #17199: GRE and WireGuard rows still classify and populate their
+    /// kind-specific state (positive control for the cell above).
+    #[test]
+    fn gre_mode_endpoint_is_gre_and_indexed_17199() {
+        let snap = snapshot_with_mode("gre");
+        let state = crate::afxdp::forwarding_build::build_forwarding_state(&snap);
+        assert_eq!(state.tunnel_endpoints[&9].kind, TunnelKind::Gre);
+        assert!(
+            state
+                .gre_decap_index
+                .values()
+                .any(|ids| ids.contains(&9)),
+            "GRE endpoint must be in the decap index"
+        );
+    }
+
+    /// #17199 guard: no production `.rs` file under `src/` may compare a
+    /// tunnel `mode` string against a mode literal outside the sole
+    /// decoder `tunnel_mode_kind`. The scan reads raw source (comments
+    /// included — a commented-out compare is still drift bait) and
+    /// EXCLUDES test files/fixtures, which legitimately author modes.
+    /// FAIL-ON-REVERT: re-adding a raw compare in any production file
+    /// makes this red and names the file.
+    #[test]
+    fn no_raw_tunnel_mode_string_compares_outside_ssot_17199() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).expect("read src dir") {
+                let p = e.expect("dir entry").path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        walk(&root, &mut files);
+        assert!(files.len() > 50, "scan found only {} files", files.len());
+        let needles = [
+            "mode == \"wireguard\"",
+            "mode != \"wireguard\"",
+            "mode == \"gre\"",
+            "mode != \"gre\"",
+            "mode == \"ip6gre\"",
+            "mode != \"ip6gre\"",
+        ];
+        let mut violations = Vec::new();
+        for path in &files {
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Test code authors modes legitimately; production must not.
+            let base = path.file_name().unwrap().to_string_lossy();
+            if base.contains("test") || rel.contains("/tests") || rel.contains("tests_") {
+                continue;
+            }
+            let src = std::fs::read_to_string(path).expect("read rs");
+            for (lineno, line) in src.lines().enumerate() {
+                // The SSOT's own match arms are the one allowed site.
+                if rel == "afxdp/forwarding_build/tunnels.rs"
+                    && (line.contains("\"gre\" | \"ip6gre\" =>")
+                        || line.contains("\"wireguard\" =>"))
+                {
+                    continue;
+                }
+                if needles.iter().any(|n| line.contains(n)) {
+                    violations.push(format!("{rel}:{}: {}", lineno + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "raw tunnel-mode string compares outside tunnel_mode_kind (#17199):\n{}",
+            violations.join("\n")
         );
     }
 }

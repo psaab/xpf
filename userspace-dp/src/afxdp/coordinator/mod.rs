@@ -96,7 +96,7 @@ fn wg_endpoint_set_summary(state: &ForwardingState) -> String {
     let mut parts: Vec<String> = state
         .tunnel_endpoints
         .values()
-        .filter(|ep| ep.mode == "wireguard")
+        .filter(|ep| ep.kind == TunnelKind::WireGuard)
         .map(|ep| format!("{}:{}@{}", ep.id, ep.wg_listen_port, ep.logical_ifindex))
         .collect();
     parts.sort();

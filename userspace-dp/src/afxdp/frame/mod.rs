@@ -494,7 +494,7 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
     }
     let inner_meta = translated_meta?;
     let kind = forwarding.tunnel_endpoints.get(&decision.resolution.tunnel_endpoint_id)
-        .map(|e| tunnel_mode_kind(&e.mode));
+        .map(|e| e.kind);
     let mut frames: SmallVec<[(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>); 1]> = SmallVec::new();
     for inner in inner_frames {
         let encapsulated = match kind {
@@ -1120,7 +1120,7 @@ pub(super) fn build_forwarded_frame_from_frame_with_commit_and_dynamic(
         let kind = forwarding
             .tunnel_endpoints
             .get(&decision.resolution.tunnel_endpoint_id)
-            .map(|e| tunnel_mode_kind(&e.mode));
+            .map(|e| e.kind);
         return match kind {
             Some(TunnelKind::WireGuard) => wg::wg_encap_frame_with_commit_and_dynamic(
                 &out,

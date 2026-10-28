@@ -108,7 +108,7 @@ pub(in crate::afxdp) fn wg_endpoint_attachment_valid(
     let Some(endpoint) = forwarding.tunnel_endpoints.get(&tunnel_endpoint_id) else {
         return false;
     };
-    if endpoint.mode != "wireguard" {
+    if endpoint.kind != TunnelKind::WireGuard {
         return false;
     }
     endpoint.logical_ifindex == spawned_logical_ifindex
@@ -804,6 +804,7 @@ mod tests {
         // A GRE-mode row with the same attachment is NOT a WG attachment.
         let mut gre = forwarding.clone();
         gre.tunnel_endpoints.get_mut(&1).expect("wg row").mode = "gre".to_string();
+        gre.tunnel_endpoints.get_mut(&1).expect("wg row").kind = crate::afxdp::TunnelKind::Gre;
         assert!(!wg_endpoint_attachment_valid(&gre, 1, 400, "wg0"));
     }
 

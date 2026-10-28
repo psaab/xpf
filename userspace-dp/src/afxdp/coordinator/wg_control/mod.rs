@@ -1,6 +1,6 @@
 //! WireGuard control thread (#1432 S2a).
 //!
-//! One supervised aux thread per `mode == "wireguard"` tunnel endpoint,
+//! One supervised aux thread per WireGuard-kind tunnel endpoint,
 //! modeled on `spawn_local_tunnel_sources` (the GRE local-origin
 //! template). The thread owns three handles:
 //!

@@ -265,8 +265,8 @@ pub(in crate::afxdp) struct ForwardingState {
     /// decap fast path. Keyed by the OUTER tuple as seen FROM THE
     /// ENDPOINT's perspective — `(outer_family, endpoint.source,
     /// endpoint.destination)` — so a received GRE frame is matched with
-    /// `(meta.addr_family, outer_dst, outer_src)`. Only `mode == "gre"`
-    /// / `"ip6gre"` endpoints are indexed (kind-segregation): a GRE
+    /// `(meta.addr_family, outer_dst, outer_src)`. Only GRE-kind
+    /// endpoints are indexed (kind-segregation): a GRE
     /// (proto-47) packet can NEVER be decapped against a WireGuard or
     /// any non-GRE row even if its outer tuple/key collide. Each bucket
     /// is a `Vec<u16>` of endpoint IDs so a duplicate outer tuple
@@ -276,7 +276,7 @@ pub(in crate::afxdp) struct ForwardingState {
     /// `tunnel_endpoints.values().find(...)` scan (agy #4).
     pub(in crate::afxdp) gre_decap_index: FastMap<(i32, IpAddr, IpAddr), Vec<u16>>,
     /// WireGuard engines keyed by tunnel_endpoint_id (#1432 S2a). One
-    /// per `mode == "wireguard"` endpoint. Shared (`Arc`) so workers
+    /// per WireGuard-kind endpoint. Shared (`Arc`) so workers
     /// hold the engine across a forwarding-state ArcSwap; engine
     /// identity is reused across reloads when the endpoint config is
     /// unchanged (see `forwarding_build::wg`), so the TAI64N clock and
