@@ -3,11 +3,11 @@ package upgrade
 import (
 	"context"
 	"fmt"
-	"time"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"time"
 
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/cluster"
@@ -253,6 +253,18 @@ func (g *grpcCluster) PeerProtocolVersions() (uint16, uint16, uint16, bool, erro
 }
 
 func peerProtocolVersionsFromState(st *pb.GetClusterHAStateResponse) (uint16, uint16, uint16, bool, error) {
+	if st != nil && st.LocalHaProtocol == nil && st.PeerHaProtocol != nil {
+		// Absent local with a present peer is a garbled instrument, not
+		// a zero local version: the typed server always carries the
+		// local value (HAStateToProto), so this shape can only come
+		// from the text fallback failing to parse the local HA line
+		// while the peer line parsed. Refuse as an error — never
+		// dereference the absent local, and never report peerPresent
+		// for a check that cannot run (#18118 F1).
+		return 0, 0, 0, false, fmt.Errorf("local HA protocol version not present in " +
+			"cluster HA state while peer HA protocol is present — the compatibility " +
+			"check cannot run, and an unreadable instrument is not evidence of compatibility")
+	}
 	if st == nil || st.PeerHaProtocol == nil || !st.GetSessionSyncWirePresent() {
 		var local uint16
 		if st != nil && st.LocalHaProtocol != nil {
@@ -405,4 +417,3 @@ func (g *grpcCluster) LocalPrimary() (bool, error) {
 	}
 	return false, nil
 }
-

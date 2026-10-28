@@ -302,3 +302,194 @@ func TestHAStateSkewAddedFieldStaysGreen17095(t *testing.T) {
 		t.Error("added RG field broke the HA verdict")
 	}
 }
+
+// TestHAStateFallbackLocalAbsentPeerPresentNoPanic17095 is the #18118
+// F1 cell: the text fallback can leave LocalHaProtocol unset while the
+// peer HA line and the peer wire line are present (peer line parses,
+// local line missing or garbled). peerProtocolVersionsFromState must
+// refuse as an ERROR — the same fail-closed shape checkTargetCompatible
+// already gives a peerPresent=false or a transport error — never panic
+// dereferencing the absent local, and never report peerPresent for a
+// check that cannot run. Driven through peerProtocolVersionsFromStatus
+// (haStateFromText + the typed verdict) so the cell exercises the
+// fallback conversion, not only the typed helper.
+func TestHAStateFallbackLocalAbsentPeerPresentNoPanic17095(t *testing.T) {
+	t.Parallel()
+	mkStat := func(localLine string) string {
+		return "Node name: node0\n" + localLine +
+			"Peer HA protocol version: 1\n" +
+			"Peer session-sync wire version: 2\n" +
+			"Redundancy group: 0 , Failover count: 2\nnode0   100      secondary      yes      no       None\nnode1   200      primary        yes      no       None\n"
+	}
+	for _, tc := range []struct {
+		name      string
+		localLine string
+	}{
+		{"local HA line missing", ""},
+		{"local HA line garbled", "HA protocol version: banana\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := haStateFromText("", mkStat(tc.localLine))
+			if err != nil {
+				t.Fatalf("haStateFromText: %v (conversion must stay readable; the verdict refuses)", err)
+			}
+			if st.LocalHaProtocol != nil {
+				t.Fatalf("local HA = %v, want absent for %q", st.LocalHaProtocol, tc.localLine)
+			}
+			if st.PeerHaProtocol == nil || !st.GetSessionSyncWirePresent() {
+				t.Fatalf("fixture must carry peer HA + wire present: %+v", st)
+			}
+			// Must not panic (the pre-fold code dereferenced the absent
+			// local unconditionally at this exact shape).
+			_, _, _, present, err := peerProtocolVersionsFromState(st)
+			if err == nil {
+				t.Error("local-absent + peer-present: err = nil, want fail-closed error")
+			}
+			if present {
+				t.Error("local-absent + peer-present: peerPresent = true, want false")
+			}
+			// Same refusal through the fallback-era entry the rolling
+			// target gate used before #17095.
+			if _, _, _, present, err := peerProtocolVersionsFromStatus(mkStat(tc.localLine)); err == nil || present {
+				t.Errorf("peerProtocolVersionsFromStatus: present=%v err=%v, want (false, error)", present, err)
+			}
+			// The HA equality verdict on the same state stays fail-closed
+			// without panicking either.
+			if compat, _, _ := haProtocolVerdictFromState(st); compat {
+				t.Error("local-absent state read as HA-compatible")
+			}
+		})
+	}
+	// Control: local HA present + peer present + wire present still
+	// reports the versions, so the refusal above is the absent-local
+	// shape and not a blanket refusal.
+	if _, peerHA, wire, present, err := peerProtocolVersionsFromStatus(mkStat("HA protocol version: 3\n")); err != nil || !present || peerHA != 1 || wire != 2 {
+		t.Errorf("control: peerHA=%d wire=%d present=%v err=%v, want (1, 2, true, nil)", peerHA, wire, present, err)
+	}
+}
+
+// TestHAStateFallbackUnidentifiedLocalNodeFailsClosed17095 is the
+// #18118 F2 cell: when the status render's "Node name:" line is missing
+// or unparseable, the text fallback must not default the local node to
+// node 0. On a node1 render that default inverts every RG row (the real
+// local node1 primary row reads as the peer, the node0 secondary row as
+// local), so drainCompleteFromState reported a NOT-drained cluster as
+// drained and peerTakeoverReadyFromState reported ready. The old text
+// parseDrainComplete failed closed when parseLocalNodeID failed; the
+// fallback now leaves every RG's states UNKNOWN and every RG
+// takeover-blocked, while the identity-free facts stay readable.
+func TestHAStateFallbackUnidentifiedLocalNodeFailsClosed17095(t *testing.T) {
+	t.Parallel()
+	info := "Remote node: healthy (node0)\nFabric link statistics:\n  Status: Up\n  Bulk sync primed: yes\n" +
+		"Redundancy group 0:\n  Takeover ready: yes\n  Transfer ready: yes\n  Monitor failures: none\n"
+	// node1's view, NOT drained: local node1 is primary, peer node0 is
+	// secondary. Read as local=node0 (the pre-fold default) this exact
+	// fixture is "local secondary + peer primary" = drained.
+	rows := "Redundancy group: 0 , Failover count: 2\n" +
+		"node0   100      secondary      yes      no       None\n" +
+		"node1   200      primary        yes      no       None\n"
+	haLines := "HA protocol version: 1\nPeer HA protocol version: 1\n" +
+		"Peer session-sync wire version: 2\n"
+	for _, tc := range []struct {
+		name   string
+		header string
+	}{
+		{"Node name line missing", ""},
+		{"Node name line garbled", "Node name: banana\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := haStateFromText(info, tc.header+haLines+rows)
+			if err != nil {
+				t.Fatalf("haStateFromText: %v", err)
+			}
+			groups := st.GetRedundancyGroups()
+			if len(groups) != 1 {
+				t.Fatalf("groups = %v, want the one rendered RG", groups)
+			}
+			if got := groups[0].GetLocalState(); got != pb.RGNodeState_RG_NODE_STATE_UNKNOWN {
+				t.Errorf("local state = %v, want UNKNOWN (never inverted)", got)
+			}
+			if got := groups[0].GetPeerState(); got != pb.RGNodeState_RG_NODE_STATE_UNKNOWN {
+				t.Errorf("peer state = %v, want UNKNOWN (never inverted)", got)
+			}
+			if drainCompleteFromState(st) {
+				t.Error("unidentified local node read as drain-complete on a not-drained render")
+			}
+			if peerTakeoverReadyFromState(st) {
+				t.Error("unidentified local node read as takeover-ready")
+			}
+			// Identity-free facts stay readable: the fallback is a
+			// partial instrument, not a blanket refusal.
+			if !st.GetPeerAlive() || !st.GetSyncEstablished() {
+				t.Errorf("identity-free facts lost: %+v", st)
+			}
+		})
+	}
+	// Control: the same render WITH its Node name line identifies
+	// node1, reads local=primary / peer=secondary, and is honestly
+	// not-drained — so the UNKNOWNs above are the missing identity,
+	// not a blanket refusal.
+	st, err := haStateFromText(info, "Node name: node1\n"+haLines+rows)
+	if err != nil {
+		t.Fatalf("control haStateFromText: %v", err)
+	}
+	groups := st.GetRedundancyGroups()
+	if len(groups) != 1 || groups[0].GetLocalState() != pb.RGNodeState_RG_NODE_STATE_PRIMARY ||
+		groups[0].GetPeerState() != pb.RGNodeState_RG_NODE_STATE_SECONDARY {
+		t.Fatalf("control groups = %v, want local primary / peer secondary", groups)
+	}
+	if drainCompleteFromState(st) {
+		t.Error("control (local primary) read as drain-complete")
+	}
+	if !peerTakeoverReadyFromState(st) {
+		t.Error("control read as not takeover-ready, want ready (no blockers rendered)")
+	}
+}
+
+// TestHAStateFallbackMalformedRGHeaderBlocksTakeover17095 is the
+// #18118 F2 companion cell: a malformed "Redundancy group N:" header in
+// the information render resets the blockers parser's cur to -1, so
+// that RG's "Takeover ready: no" line is dropped and (pre-fold) every
+// RG read takeover-ready. The fallback now marks every RG blocked when
+// any RG header is unreadable, so peerTakeoverReadyFromState refuses.
+func TestHAStateFallbackMalformedRGHeaderBlocksTakeover17095(t *testing.T) {
+	t.Parallel()
+	stat := "Node name: node0\nHA protocol version: 1\nPeer HA protocol version: 1\n" +
+		"Peer session-sync wire version: 2\n" +
+		"Redundancy group: 0 , Failover count: 2\nnode0   100      secondary      yes      no       None\nnode1   200      primary        yes      no       None\n"
+	mkInfo := func(header string) string {
+		return "Remote node: healthy (node1)\nFabric link statistics:\n  Status: Up\n  Bulk sync primed: yes\n" +
+			header + "\n  Takeover ready: no\n  Transfer ready: yes\n  Monitor failures: none\n"
+	}
+	st, err := haStateFromText(mkInfo("Redundancy group banana:"), stat)
+	if err != nil {
+		t.Fatalf("haStateFromText: %v", err)
+	}
+	if peerTakeoverReadyFromState(st) {
+		t.Error("malformed RG header read as takeover-ready: the blocked RG's 'Takeover ready: no' was dropped")
+	}
+	groups := st.GetRedundancyGroups()
+	if len(groups) != 1 || groups[0].GetTakeoverReady() || groups[0].GetTransferReady() {
+		t.Errorf("groups = %v, want RG0 takeover/transfer blocked on unreadable header", groups)
+	}
+	// Control: a well-formed header carrying the same blocker also
+	// refuses (the blocker path itself), and a well-formed header with
+	// no blocker stays ready — the refusal above is the unreadable
+	// header, not a blanket refusal.
+	st, err = haStateFromText(mkInfo("Redundancy group 0:"), stat)
+	if err != nil {
+		t.Fatalf("control haStateFromText: %v", err)
+	}
+	if peerTakeoverReadyFromState(st) {
+		t.Error("control: rendered 'Takeover ready: no' read as ready")
+	}
+	readyInfo := "Remote node: healthy (node1)\nFabric link statistics:\n  Status: Up\n  Bulk sync primed: yes\n" +
+		"Redundancy group 0:\n  Takeover ready: yes\n  Transfer ready: yes\n  Monitor failures: none\n"
+	st, err = haStateFromText(readyInfo, stat)
+	if err != nil {
+		t.Fatalf("ready control haStateFromText: %v", err)
+	}
+	if !peerTakeoverReadyFromState(st) {
+		t.Error("ready control read as not takeover-ready, want ready")
+	}
+}

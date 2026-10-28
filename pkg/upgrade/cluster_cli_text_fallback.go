@@ -48,6 +48,24 @@ func haStateFromTextFallback(cli haStateClient, ctxFn func() (context.Context, c
 // (#18118 B2): the strict parser's error must not be dropped into
 // present+nil, which the verdict permits as advertised-unknown
 // (#14991 fail-open).
+//
+// Local-node identification fails closed too (#18118 F2). The status
+// render's "Node name:" line is the ONLY source of the local node ID;
+// when it is missing or unparseable the fallback must not default to
+// node 0: with localID=0 a node1 render's rows invert (the real local
+// node1 row reads as the peer and vice versa), drainCompleteFromState
+// can report a not-drained cluster as drained, and the old text
+// parseDrainComplete — which returned false when parseLocalNodeID
+// failed — failed closed. So an unidentified local node leaves every
+// RG's local/peer states UNKNOWN (never inverted) and marks every RG
+// takeover-blocked, so no verdict built on this state can permit a
+// drain while the partial facts (peer alive, sync, wire, HA versions)
+// stay readable. Takeover blocking needs no local identity (it is
+// scoped by the information render's RG headers), so a malformed RG
+// header there resets cur=-1 and leaves that RG's blockers UNREAD —
+// peerTakeoverBlockers therefore also reports whether every RG header
+// parsed; an unreadable header marks every RG blocked for the same
+// reason.
 func haStateFromText(info, st string) (*pb.GetClusterHAStateResponse, error) {
 	resp := &pb.GetClusterHAStateResponse{
 		PeerAlive:       parsePeerAlive(info),
@@ -70,25 +88,39 @@ func haStateFromText(info, st string) (*pb.GetClusterHAStateResponse, error) {
 			resp.PeerSessionSyncWire = &w
 		}
 	}
-	if id, ok := parseLocalNodeID(st); ok {
-		resp.LocalNodeId = int32(id)
+	localID, localKnown := parseLocalNodeID(st)
+	if localKnown {
+		resp.LocalNodeId = int32(localID)
 	}
-	if local, peer, ok := parseHAProtocolVersions(st); ok {
-		l, pr := uint32(local), uint32(peer)
-		resp.LocalHaProtocol, resp.PeerHaProtocol = &l, &pr
-	} else if local, present := parseLocalHAProtocol(st); present {
+	// HA versions carry presence independently, exactly as the typed
+	// server does (HAStateToProto: local always, peer when known). A
+	// peer line that parses while the local line is missing/garbled
+	// therefore yields peer-present + local-absent; the verdicts refuse
+	// that shape as an unreadable instrument (#18118 F1) instead of
+	// dropping the peer fact or dereferencing the absent local.
+	if local, present := parseLocalHAProtocol(st); present {
 		l := uint32(local)
 		resp.LocalHaProtocol = &l
 	}
+	if peer, present := parsePeerHAProtocol(st); present {
+		pr := uint32(peer)
+		resp.PeerHaProtocol = &pr
+	}
 	weights := parseLocalRGWeights(info)
-	takeoverBlock := peerTakeoverBlockers(info)
+	takeoverBlock, takeoverKnown := peerTakeoverBlockers(info)
 	for _, id := range parseRGIDs(st) {
+		localState := pb.RGNodeState_RG_NODE_STATE_UNKNOWN
+		peerState := pb.RGNodeState_RG_NODE_STATE_UNKNOWN
+		if localKnown {
+			localState = rgLocalState(st, localID, id)
+			peerState = rgPeerState(st, localID, id)
+		}
 		rg := &pb.ClusterRGState{
 			Id:            int32(id),
-			LocalState:    rgLocalState(st, int(resp.GetLocalNodeId()), id),
-			PeerState:     rgPeerState(st, int(resp.GetLocalNodeId()), id),
-			TakeoverReady: !takeoverBlock[id],
-			TransferReady: !takeoverBlock[id],
+			LocalState:    localState,
+			PeerState:     peerState,
+			TakeoverReady: localKnown && takeoverKnown && !takeoverBlock[id],
+			TransferReady: localKnown && takeoverKnown && !takeoverBlock[id],
 			FailoverCount: int32(rgFailoverCount(st, id)),
 		}
 		if w, ok := weights[id]; ok {
@@ -111,8 +143,14 @@ func isUnknownWireLine(st string) bool {
 
 // peerTakeoverBlockers marks RGs the information render blocks (mirrors
 // parsePeerTakeoverReady's per-token checks, scoped per RG header).
-func peerTakeoverBlockers(info string) map[int]bool {
+// The second return reports whether every "Redundancy group N:" header
+// parsed: a malformed header resets cur to -1, so that RG's blocker
+// lines are silently dropped — the caller must treat an unreadable
+// header as "blockers unknown" and fail closed (#18118 F2), never as
+// "no blockers".
+func peerTakeoverBlockers(info string) (map[int]bool, bool) {
 	blocked := map[int]bool{}
+	known := true
 	cur := -1
 	for _, line := range strings.Split(info, "\n") {
 		l := strings.TrimSpace(line)
@@ -121,6 +159,10 @@ func peerTakeoverBlockers(info string) map[int]bool {
 			cur = -1
 			if n, ok := atoiSafe(strings.TrimSpace(l[len("redundancy group") : len(l)-1])); ok {
 				cur = n
+			} else {
+				// Malformed header: this RG's blocker lines below are
+				// unreadable, so no RG's readiness can be trusted.
+				known = false
 			}
 			continue
 		}
@@ -139,7 +181,7 @@ func peerTakeoverBlockers(info string) map[int]bool {
 			}
 		}
 	}
-	return blocked
+	return blocked, known
 }
 
 func rgStateFromStatus(st string, localID, rgID int, wantLocal bool) pb.RGNodeState {
@@ -268,25 +310,6 @@ func parseSessionSyncBulkPrimed(s string) bool {
 	return false
 }
 
-func parsePeerSessionSyncWire(s string) (uint16, bool) {
-	const prefix = "peer session-sync wire version:"
-	for _, line := range strings.Split(s, "\n") {
-		l := strings.TrimSpace(line)
-		if !strings.HasPrefix(strings.ToLower(l), prefix) {
-			continue
-		}
-		val := strings.TrimSpace(l[len(prefix):])
-		if strings.EqualFold(val, "unknown") {
-			return 0, true
-		}
-		if n, ok := strictVersionValue(val); ok {
-			return uint16(n), true
-		}
-		return 0, true
-	}
-	return 0, false
-}
-
 func parsePeerSessionSyncWireStrict(s string) (uint16, bool, error) {
 	const prefix = "peer session-sync wire version:"
 	for _, line := range strings.Split(s, "\n") {
@@ -333,11 +356,6 @@ func parseHAProtocolVersions(s string) (local, peer int, ok bool) {
 		return 0, 0, false
 	}
 	return local, peer, true
-}
-
-func parseHAProtocolCompatible(s string) bool {
-	local, peer, ok := parseHAProtocolVersions(s)
-	return ok && local == peer
 }
 
 func strictVersionValue(raw string) (int, bool) {
