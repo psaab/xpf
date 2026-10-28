@@ -123,6 +123,7 @@ pub(in crate::afxdp::wg) struct PendingHandshake {
     peer_pubkey: [u8; WG_KEY_LEN],
     /// Our locally-chosen index (the reservation key). The peer echoes
     /// it as the `receiver_index` of the message it sends back.
+    #[expect(dead_code, reason = "reservation key duplicated as the pending map key (#17212)")]
     local_index: u32,
     /// Initiator or responder — determines the session-confirmation gate
     /// (see `WgSession`). The peer's index is NOT stored here: both

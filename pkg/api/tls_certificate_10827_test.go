@@ -188,7 +188,7 @@ func TestManagementTLSRemintsExpiredSystemGeneratedCertificate(t *testing.T) {
 	if err := os.Rename(filepath.Join(dir, "expired.key"), filepath.Join(dir, "key.pem")); err != nil {
 		t.Fatal(err)
 	}
-	s := NewServer(Config{})
+	s := NewServer(Config{TLSSelfSignedDir: dir})
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := s.Start(ctx); err != nil {
 		cancel()
@@ -198,7 +198,6 @@ func TestManagementTLSRemintsExpiredSystemGeneratedCertificate(t *testing.T) {
 		cancel()
 		s.Wait()
 	}()
-	s.SetTLSCertDirForTest(dir)
 	before := managementTLSCertificateInvalidEvents.Load()
 	if err := s.ReconcileHTTPS(true, "127.0.0.1:0"); err != nil {
 		t.Fatalf("reconcile HTTPS with expired durable pair: %v", err)

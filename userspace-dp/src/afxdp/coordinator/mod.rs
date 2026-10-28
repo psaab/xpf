@@ -2069,7 +2069,7 @@ impl Coordinator {
     ///
     /// Filter (b) exists because the store OUTLIVES the slot map. Config apply
     /// carries the store forward and `reconcile` retains every still-configured
-    /// zone (`forwarding_build/mod.rs`), while `ZoneCounterSlotMap::build`
+    /// zone (`forwarding_build/mod.rs`), while `ZoneSlotMap::build`
     /// assigns only `ZONE_COUNTER_ASSIGNABLE_SLOTS` slots in sorted zone-id
     /// order. So a zone that accumulated traffic and is then pushed past
     /// capacity by a later config — 63 lower-id zones added alongside it —
@@ -2200,12 +2200,18 @@ impl Coordinator {
     #[cfg(test)]
     pub(crate) fn seed_flood_counter_for_test(&mut self, zone: u32, name: &str) {
         use crate::afxdp::flood_counters::{
-            FloodCounterSlotMap, flush_recorded_flood_counters, record_zone_flood_drop,
+            flush_recorded_flood_counters, record_zone_flood_drop,
         };
-        let map = FloodCounterSlotMap::build(&[zone], &self.forwarding.flood_counter_store);
+        use crate::afxdp::zone_slot_counters::ZoneSlotMap;
+        let (map, caches) = ZoneSlotMap::build(
+            &[zone],
+            &self.forwarding.zone_counter_store,
+            &self.forwarding.flood_counter_store,
+        );
         record_zone_flood_drop(&map, zone, "syn-flood");
-        flush_recorded_flood_counters(&self.forwarding.flood_counter_store, &map);
+        flush_recorded_flood_counters(&self.forwarding.flood_counter_store, &map, &caches);
         self.forwarding.flood_counter_slot_map = std::sync::Arc::new(map);
+        self.forwarding.flood_counter_caches = std::sync::Arc::new(caches);
         self.forwarding
             .zone_id_to_name
             .insert(zone, name.to_string());
@@ -2217,13 +2223,17 @@ impl Coordinator {
     /// the status publication from the caller's side needs a seeder here.
     #[cfg(test)]
     pub(crate) fn seed_zone_traffic_counter_for_test(&mut self, zone: u32, name: &str, bytes: u64) {
-        use crate::afxdp::zone_counters::{
-            ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
-        };
-        let map = ZoneCounterSlotMap::build(&[zone], &self.forwarding.zone_counter_store);
+        use crate::afxdp::zone_counters::{flush_recorded_zone_counters, record_zone_traffic};
+        use crate::afxdp::zone_slot_counters::ZoneSlotMap;
+        let (map, caches) = ZoneSlotMap::build(
+            &[zone],
+            &self.forwarding.zone_counter_store,
+            &self.forwarding.flood_counter_store,
+        );
         record_zone_traffic(&map, zone, 0, bytes);
-        flush_recorded_zone_counters(&self.forwarding.zone_counter_store, &map);
+        flush_recorded_zone_counters(&self.forwarding.zone_counter_store, &map, &caches);
         self.forwarding.zone_counter_slot_map = std::sync::Arc::new(map);
+        self.forwarding.zone_counter_caches = std::sync::Arc::new(caches);
         self.forwarding
             .zone_id_to_name
             .insert(zone, name.to_string());

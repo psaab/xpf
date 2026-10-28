@@ -91,8 +91,8 @@ func httpsBoundAddr14582(m *managementReconciler) string {
 
 // bootWebMgmt14582 commits cfgText through a real store and boots a live
 // management reconciler over the fake listener registry, with the kernel
-// seam installed. The reconciler's TLS cert dir is redirected so generated
-// certs never touch /etc/xpf.
+// seam installed. The reconciler's TLS cert dir is pinned at construction
+// (#17213) so generated certs never touch /etc/xpf.
 func bootWebMgmt14582(t *testing.T, k *webMgmtKernelAddrs, cfgText string) (*Daemon, *managementReconciler, *configstore.Store, *fakeReg) {
 	t.Helper()
 	k.install(t)
@@ -100,7 +100,7 @@ func bootWebMgmt14582(t *testing.T, k *webMgmtKernelAddrs, cfgText string) (*Dae
 	mgmtAuthCommit(t, store, cfgText)
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: store}
 	reg := newFakeReg()
-	m := newManagementReconciler(d, api.Config{ListenFunc: reg.listen})
+	m := newManagementReconciler(d, api.Config{ListenFunc: reg.listen, TLSSelfSignedDir: t.TempDir()})
 	d.mgmt.Store(m)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -113,7 +113,6 @@ func bootWebMgmt14582(t *testing.T, k *webMgmtKernelAddrs, cfgText string) (*Dae
 	if srv == nil {
 		t.Fatal("management server was not constructed; every assertion would be vacuous")
 	}
-	srv.SetTLSCertDirForTest(t.TempDir())
 	return d, m, store, reg
 }
 

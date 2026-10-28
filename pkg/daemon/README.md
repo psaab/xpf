@@ -1144,8 +1144,8 @@ Three properties carry the mechanism:
   warning text (a text assertion there passes with the retry deleted); the
   `startHTTPServer` one on the kernel-name read, which sits past the
   nil-reconciler guard, because that call site cannot be handed a serving HTTPS
-  leg in-process — it constructs the `api.Server` itself and the cert-dir test
-  seam exists only afterwards.
+  leg in-process — it constructs the `api.Server` itself from a committed
+  config that names no HTTPS leg in that cell.
 - **The name is read from the kernel at DELIVERY**, never stored at rename time,
   so a deferred diagnosis is never the replay of a name captured at some earlier
   commit. It IS the kernel's current name for every rename the daemon performs
@@ -3503,9 +3503,16 @@ never lock an operator out of a remote box it manages.
   sequence whose error could not propagate. It now returns
   `errors.Join(fabricErrs...)`, captured as `fabricErr` and threaded into the tail
   join. Safe to surface because `ensureFabricIPVLAN` returns an error ONLY when
-  there is no usable overlay: address failures are warn-only inside it and it uses
-  the idempotent `AddrReplace`, and an already-correct overlay returns nil — so
-  there is no benign already-exists that could newly fail a healthy commit.
+  there is no usable overlay: since #17221 its configured addresses are
+  fail-closed exactly like the MTU (#10216) — the idempotent `AddrReplace`
+  means a returned error is a real failure, not a benign already-exists — both
+  branches end with `fabricOverlayReady` (admin-up, MTU, every configured
+  address present) on a fresh lookup, and an already-correct overlay returns
+  nil — so there is no benign already-exists that could newly fail a healthy
+  commit. #17221 also closed the retry-gate half: `missingFabricOverlays`
+  checks the same address predicate, so an overlay that is up but missing its
+  fabric address is re-driven by the 30s loop (in place, via the reuse
+  branch) instead of being reported healthy until the next commit.
 - **A caller-less config apply has a retry owner and a degraded signal
   (#9811).** A `commit confirmed` timeout promotes the STORE to the
   rollback target and then applies it, because the store has already moved
@@ -3552,11 +3559,14 @@ never lock an operator out of a remote box it manages.
   unconditionally in `Run` alongside `proxyARPReassertLoop` /
   `raDeadSenderReassertLoop`, it takes `applySem` BEFORE reading `ActiveConfig`
   (#4001) and re-checks its gate inside the semaphore; the gate is one netlink name
-  lookup per configured `fab*` device (present AND admin-up), so it is free on a
-  healthy node and a complete no-op on a config with no fabric interfaces. Tests:
+  lookup plus, for an up device, one address listing per configured `fab*`
+  device (present, admin-up, and carrying its configured addresses — #17221),
+  so it is free on a healthy node and a complete no-op on a config with no
+  fabric interfaces. Tests:
   `fabric_ipvlan_failclosed_6791_test.go` (producing half returns-and-names the
   failure with a healthy-path control; the `applyTailReconciles` commit-join WIRING
-  proof; gate quiet-when-up / fires-when-down; the re-assert re-creates; and a
+  proof; gate quiet-when-up-with-address / fires-when-down /
+  fires-when-address-absent; the re-assert re-creates; and a
   loop-START cell asserting `Run` launches it unconditionally).
 
   **Fabric overlay management-VRF membership (#9813).** A fabric overlay carries

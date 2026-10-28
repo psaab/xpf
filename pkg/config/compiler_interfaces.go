@@ -2973,9 +2973,13 @@ func compileInterfaceDynamicDNS(afNode *Node) *InterfaceDynamicDNSConfig {
 //   - flat-set bracket        `set ... member-interfaces [ a b ]`
 //     → Keys=["member-interfaces"], ONE child whose Keys hold every name
 //
-// The last shape is why firewallMatchValues is not enough here: it reads only
-// Keys[0] of each child, so it would keep the first name of a flat-set bracket
-// list and drop the rest. Descend the whole subtree and take every key.
+// firewallMatchValues is not enough here because it never DESCENDS: since
+// #6714 it reads every key of each DIRECT child, so it would in fact keep
+// every name of this flat-set bracket list. What it would drop is a name
+// nested below a child — plainListValues descends the whole subtree and
+// takes every key, which is the property this leaf relies on. It also does
+// not skip a bare self-repeat on the node's own tail the way
+// firewallMatchValues does. See TestReaderDifferences17216PinDocClaims.
 //
 // `member-interfaces` has no per-member option keywords in Junos, so unlike
 // the NTP server list there is no trailing-token ambiguity to resolve — every

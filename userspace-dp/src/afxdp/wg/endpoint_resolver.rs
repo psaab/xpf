@@ -228,11 +228,13 @@ impl WgEndpointResolver {
         }
     }
 
+    #[expect(dead_code, reason = "test-only accessor; status reads the shared telemetry Arc (#17212)")]
     pub(crate) fn counters(&self) -> &WgEndpointResolverCounters {
         &self.shared.telemetry.counters
     }
 
     /// Most recent failure text, for the operator surface.
+    #[expect(dead_code, reason = "test-only accessor; status reads the shared telemetry Arc (#17212)")]
     pub(crate) fn last_error(&self) -> Option<String> {
         self.shared
             .telemetry

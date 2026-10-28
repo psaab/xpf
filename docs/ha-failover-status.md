@@ -1065,7 +1065,7 @@ via the receive switch's missing `default` arm, and the fence sequence is
 trailing data on an existing type whose old receiver reads no payload. A
 fence-ack capability bit rides the trailing byte of `syncMsgPeerCapabilities`
 (#6650). Neither `SessionSyncWireVersion` nor `CurrentHAProtocolVersion` is
-bumped — bumping would push `GateMixedBaseSwap`'s single-point compatibility
+bumped — bumping would push `GateProtocolCompat`'s single-point compatibility
 window off the peer's version and refuse the rolling upgrade this has to
 survive. A mixed pair degrades exactly to `disable-rg` behaviour on both sides.
 
