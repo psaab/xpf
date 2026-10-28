@@ -1,5 +1,4 @@
 use super::super::*;
-
 pub(in crate::afxdp::session_glue) struct WorkerCommandDispatchContext<'a> {
     pub(in crate::afxdp::session_glue) sessions: &'a mut SessionTable,
     pub(in crate::afxdp::session_glue) session_map: SteeringMap<'a>,
@@ -25,7 +24,6 @@ pub(in crate::afxdp::session_glue) struct WorkerCommandDispatchContext<'a> {
     pub(in crate::afxdp::session_glue) shaped_tx_requests: &'a mut Vec<TxRequest>,
     pub(in crate::afxdp::session_glue) vacate_all_shared_exact_slots: &'a mut bool,
 }
-
 pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
     ctx: &mut WorkerCommandDispatchContext<'_>,
     scratch: &mut VecDeque<WorkerCommand>,
