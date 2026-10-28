@@ -4193,6 +4193,7 @@ mod rejected_mirror_reservation_10790_tests {
         };
         let mut replacement = synced_entry(key.clone(), replacement_nat, 6, 511);
         replacement.metadata.ingress_zone = 3;
+        let mut refused_mirror_promotions = 0;
         assert_eq!(
             coordinator
                 .session_domain
@@ -4207,6 +4208,11 @@ mod rejected_mirror_reservation_10790_tests {
         let after_replay = source_allocator
             .debug_persistent_lease_for_flow(&local_flow, permit)
             .expect("the incumbent persistent lease is restored");
+        refused_mirror_promotions += (!after_replay.imported) as usize;
+        assert!(
+            after_replay.imported,
+            "first strict-mirror refusal must not promote the imported lease"
+        );
         assert_eq!(
             after_replay, before_replay,
             "replay restores the complete imported expiry/completion snapshot"
@@ -4240,11 +4246,14 @@ mod rejected_mirror_reservation_10790_tests {
             source_allocator.holder_mask_for_flow(&local_flow),
             Some(0b11)
         );
-        assert_eq!(
-            source_allocator
-                .debug_persistent_lease_for_flow(&local_flow, permit)
-                .expect("same-tuple refusal leaves the incumbent lease intact"),
-            before_replay
+        let after_same_tuple_refusal = source_allocator
+            .debug_persistent_lease_for_flow(&local_flow, permit)
+            .expect("same-tuple refusal leaves the incumbent lease intact");
+        refused_mirror_promotions += (!after_same_tuple_refusal.imported) as usize;
+        assert_eq!(after_same_tuple_refusal, before_replay);
+        assert!(
+            after_same_tuple_refusal.imported,
+            "same-tuple strict-mirror refusal must not promote the imported lease"
         );
         assert_eq!(
             coordinator.mirror_restore_failed_total(),
@@ -4337,11 +4346,18 @@ mod rejected_mirror_reservation_10790_tests {
             Some(0b11),
             "the second refusal must replay the re-adopted worker holders"
         );
+        let after_second_refusal = source_allocator
+            .debug_persistent_lease_for_flow(&local_flow, permit)
+            .expect("the second incumbent is restored");
+        refused_mirror_promotions += (!after_second_refusal.imported) as usize;
+        assert_eq!(after_second_refusal, before_second_replay);
+        assert!(
+            after_second_refusal.imported,
+            "second strict-mirror refusal must not promote the imported lease"
+        );
         assert_eq!(
-            source_allocator
-                .debug_persistent_lease_for_flow(&local_flow, permit)
-                .expect("the second incumbent is restored"),
-            before_second_replay
+            refused_mirror_promotions, 0,
+            "all three strict-mirror refusals must leave the imported lease unpromoted"
         );
         let release_at_ns = monotonic_nanos();
         crate::nat::release_source_nat_allocation_for_worker(
@@ -4367,11 +4383,42 @@ mod rejected_mirror_reservation_10790_tests {
             1,
         );
         let promoted = coordinator.export_idle_persistent_leases(release_at_ns + 2);
-        assert_eq!(promoted.len(), 1);
-        assert_eq!(promoted[0].lease.translated_ip, peer_ip);
-        assert_eq!(promoted[0].lease.translated_port, peer_port);
-        assert_eq!(promoted[0].lease.address_only, address_only);
-        assert_eq!(promoted[0].lease.timeout_ns, LOCAL_TIMEOUT_NS);
+        // #14322 exports one row per egress-scope grant bucket. The peer's
+        // legacy unscoped grant and local lan->wan grant are two rows for one
+        // persistent lease, not duplicate promotions of that lease.
+        assert_eq!(
+            promoted.len(),
+            2,
+            "one promoted lease has one exported record per permission scope"
+        );
+        assert_eq!(promoted[0].pool, promoted[1].pool);
+        for record in &promoted {
+            assert_eq!(record.pool_name, "p");
+            assert_eq!(record.lease.protocol, key.protocol);
+            assert_eq!(record.lease.src_ip, key.src_ip);
+            assert_eq!(record.lease.src_port, key.src_port);
+            assert_eq!(record.lease.routing_scope, key.routing_domain);
+            assert_eq!(record.lease.translated_ip, peer_ip);
+            assert_eq!(record.lease.translated_port, peer_port);
+            assert_eq!(record.lease.address_only, address_only);
+            assert_eq!(record.lease.timeout_ns, LOCAL_TIMEOUT_NS);
+        }
+        let imported_scope = promoted
+            .iter()
+            .find(|record| record.lease.egress_scope == 0)
+            .expect("peer's imported unscoped permission remains represented");
+        assert!(!imported_scope.lease.permit_any_remote);
+        assert_eq!(imported_scope.lease.mint_from_zone, None);
+        let local_scope = promoted
+            .iter()
+            .find(|record| record.lease.egress_scope != 0)
+            .expect("completed local flow adds its scoped permission");
+        assert!(local_scope.lease.permit_any_remote);
+        assert_eq!(local_scope.lease.mint_from_zone.as_deref(), Some("lan"));
+        assert_ne!(
+            imported_scope.lease.egress_scope,
+            local_scope.lease.egress_scope
+        );
         assert_eq!(source_allocator.holder_mask_for_flow(&local_flow), None);
         let local_owned = source_allocator
             .debug_persistent_lease_for_flow(&local_flow, permit)
