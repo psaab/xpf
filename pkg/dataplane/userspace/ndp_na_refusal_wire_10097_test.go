@@ -57,7 +57,7 @@ func TestNdpNaRefusalWireKeysLockstepWithRust10097(t *testing.T) {
 	} {
 		// #7160: resolved by FIELD, not by file path — `ProcessStatus` moved out
 		// of `control.rs` when that file crossed the modularity floor.
-		rustKey := rustProcessStatusRename(t, tc.rustField)
+		rustKey := rustWireKeyInProtocolStruct(t, "ProcessStatus", tc.rustField, false)
 
 		field, ok := reflect.TypeOf(ProcessStatus{}).FieldByName(tc.goField)
 		if !ok {

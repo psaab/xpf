@@ -7,22 +7,25 @@ of the same flow, this module decides whether the cache is still
 usable or the resolution must be re-derived.
 
 Also writes the userspace dataplane's view of session state back
-into the BPF session map mirror so the CLI / GC / metrics surface
+into the BPF session map mirror so the CLI / metrics surface
 sees the same sessions the userspace path is processing.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | Small module root preserving the existing `session_glue` API surface and test wiring. |
+| `mod.rs` | Small module root preserving the existing `session_glue` API surface and test wiring. Not the dispatcher (that is `worker_commands.rs`). |
 | `resolution.rs` | Cached FIB/table resolution and the helpers that compare/rebuild it. |
 | `resolve.rs` | Per-packet flow/session resolution (`resolve_flow_session_decision*`). |
-| `worker_commands.rs` | Worker-command dispatch, replication enqueueing, and delete-drop repair. |
+| `forward_commit.rs` | Single source of truth for forward-session metadata, NAT composition, TCP epilogue, and shared-entry construction (#17021). |
+| `worker_commands.rs` | Worker-command dispatcher (`apply_worker_commands`), replication enqueueing, and delete-drop repair. Large arms (`ListSessionsByPolicy`, `DeletePolicyBatch`, `QuerySessionCounters`, `UpsertLocal`, `DeleteSyncedIfTableUnknown`) stay inline there; delegated handlers live under `commands/`. |
 | `revalidation.rs` | Policy/zone/SNAT session revalidation, purge sweeps, and BPF session-map mirror writers. |
 | `tx_cancel.rs` | TCP-RST queue cancellation and pending-frame recycling. |
 | `promote.rs` | Synced-session hit handling: `maybe_promote_synced_session` (promote a peer-synced hit to locally-owned) and `purge_translated_synced_hit` (drop + NAT-release a transient alias-owned hit). |
-| `commands/` | Worker-command handlers (`handle_upsert_synced`, `handle_delete_synced`, owner-RG refresh/demote/export). |
-| `tests.rs` | Co-located unit tests for cache validation + mirror semantics. |
+| `delete_drop_sweep.rs` | Resumable, budgeted delete-drop reconcile (`DeleteDropSweep`, #9327). |
+| `install_table_purge.rs` | Flag-driven paced purge of sessions whose installing table is unresolvable (#9752). |
+| `commands/` | Worker-command handlers delegated from `worker_commands.rs` (`handle_upsert_synced`, `handle_delete_synced` and its twins, owner-RG refresh/demote/export, `handle_remove_policy_item`). |
+| `tests.rs` and `*_tests.rs` | Co-located unit tests for cache validation, mirror semantics, and per-issue behavioural cells (loaded via `#[path]` from `mod.rs`). |
 
 ## Where it sits
 

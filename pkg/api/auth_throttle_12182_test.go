@@ -16,12 +16,19 @@ func fillAuthThrottleWithLiveLockouts12182(t *testing.T, tracker *authFailureTra
 	t.Helper()
 	const account = authThrottleAPIKeyAccount
 	identities := authThrottleMaxEntries / 2
+	// Build the locked state directly: a bucket that has just locked is
+	// exactly {lockouts: 1, lockedUntil: now+base, windowStart: lockedUntil}
+	// (chargeLocked's post-lock shape). Driving 20 reserve/complete charges
+	// per source cannot build it — admission refuses once the pair bucket
+	// locks at 5, which is the production behaviour under test elsewhere.
+	tracker.mu.Lock()
 	for i := 0; i < identities; i++ {
 		source := fmt.Sprintf("198.51.%d.%d", i/256, i%256)
-		for range authThrottleSourceFailures {
-			tracker.recordFailure(source, account)
-		}
+		lockedUntil := now.Add(authThrottleBaseLockout)
+		tracker.accounts[source+"\x00"+account] = &authFailureBucket{lockouts: 1, lockedUntil: lockedUntil, windowStart: lockedUntil}
+		tracker.sources[source] = &authFailureBucket{lockouts: 1, lockedUntil: lockedUntil, windowStart: lockedUntil}
 	}
+	tracker.mu.Unlock()
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	if got := tracker.entryCountLocked(); got != authThrottleMaxEntries {
@@ -66,7 +73,7 @@ func TestAuthThrottleFullOfLiveLockoutsRefusesAdmission12182(t *testing.T) {
 	fillAuthThrottleWithLiveLockouts12182(t, tracker, now)
 
 	const victimSource = "198.51.0.0"
-	if locked, wait := tracker.locked(victimSource, authThrottleAPIKeyAccount); !locked || wait != authThrottleBaseLockout {
+	if locked, wait := probePairLocked(tracker, victimSource, authThrottleAPIKeyAccount); !locked || wait != authThrottleBaseLockout {
 		t.Fatalf("victim lockout before pressure = (%v, %v), want (true, %v)", locked, wait, authThrottleBaseLockout)
 	}
 
@@ -80,7 +87,7 @@ func TestAuthThrottleFullOfLiveLockoutsRefusesAdmission12182(t *testing.T) {
 		t.Fatalf("after refused admission live/total buckets = %d/%d, want %d/%d: live lockouts were evicted",
 			live, total, authThrottleMaxEntries, authThrottleMaxEntries)
 	}
-	if locked, wait := tracker.locked(victimSource, authThrottleAPIKeyAccount); !locked || wait != authThrottleBaseLockout {
+	if locked, wait := probePairLocked(tracker, victimSource, authThrottleAPIKeyAccount); !locked || wait != authThrottleBaseLockout {
 		t.Fatalf("victim lockout after pressure = (%v, %v), want (true, %v): Retry-After erased", locked, wait, authThrottleBaseLockout)
 	}
 }
@@ -110,10 +117,11 @@ func TestAuthThrottleFullOfExpiredBucketsStillAdmits12182(t *testing.T) {
 }
 
 // TestAuthThrottleFullOfLiveLockoutsLegacyInsertionRefuses12182 is the #12182
-// R1 fold-in: the legacy recordFailure insertion path must also refuse new
-// buckets when the shared table is full of live lockouts, instead of growing
-// past authThrottleMaxEntries. Pre-fix, one recordFailure on a full table
-// grew it to 4097 entries.
+// R1 fold-in, retargeted at #17209 from the deleted recordFailure helper to
+// the production charge path: a failure charge must also refuse new
+// buckets when the shared table is full of live lockouts, instead of
+// growing past authThrottleMaxEntries. Pre-#17209, one recordFailure
+// on a full table grew it to 4097 entries.
 func TestAuthThrottleFullOfLiveLockoutsLegacyInsertionRefuses12182(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	tracker := newAuthFailureTracker(func() time.Time { return now })
@@ -123,12 +131,12 @@ func TestAuthThrottleFullOfLiveLockoutsLegacyInsertionRefuses12182(t *testing.T)
 	// New API-key identity: the new source must be refused. This pins the
 	// source accessor only; an over-capacity account bucket admitted here
 	// would be evicted again by the later source insertion on the same call.
-	tracker.recordFailure("203.0.113.251", authThrottleAPIKeyAccount)
+	chargeAttempted(tracker, "203.0.113.251", authThrottleAPIKeyAccount)
 	// New Basic identity attempts all three accessors. The aggregate assertions
 	// only pin source refusal here; a later accessor can evict an earlier
 	// over-capacity account or global bucket.
 	const pressureBasic = authThrottleBasicAccountPrefix + "pressure-victim"
-	tracker.recordFailure("203.0.113.252", pressureBasic)
+	chargeAttempted(tracker, "203.0.113.252", pressureBasic)
 
 	live, total := countLiveLockedBuckets12182(tracker, now)
 	if total != authThrottleMaxEntries || live != authThrottleMaxEntries {
@@ -144,7 +152,7 @@ func TestAuthThrottleFullOfLiveLockoutsLegacyInsertionRefuses12182(t *testing.T)
 		t.Fatalf("legacy insertion admitted new buckets on a full live table (account=%v source=%v global=%v), want refusal",
 			accountInserted, sourceInserted, globalInserted)
 	}
-	if locked, wait := tracker.locked(victimSource, authThrottleAPIKeyAccount); !locked || wait != authThrottleBaseLockout {
+	if locked, wait := probePairLocked(tracker, victimSource, authThrottleAPIKeyAccount); !locked || wait != authThrottleBaseLockout {
 		t.Fatalf("victim lockout after legacy pressure = (%v, %v), want (true, %v): Retry-After erased", locked, wait, authThrottleBaseLockout)
 	}
 
@@ -152,14 +160,14 @@ func TestAuthThrottleFullOfLiveLockoutsLegacyInsertionRefuses12182(t *testing.T)
 	// source bucket already present, no later insertion can re-evict an
 	// over-capacity bucket admitted by a regressed account or global guard.
 	// Bearer has no global bucket, so this isolates the account accessor.
-	tracker.recordFailure(victimSource, authThrottleBearerAccount)
+	chargeAttempted(tracker, victimSource, authThrottleBearerAccount)
 	live, total = countLiveLockedBuckets12182(tracker, now)
 	if total != authThrottleMaxEntries || live != authThrottleMaxEntries {
 		t.Fatalf("after existing-source account pressure live/total = %d/%d, want %d/%d",
 			live, total, authThrottleMaxEntries, authThrottleMaxEntries)
 	}
 	// The claimed Basic username additionally exercises the global accessor.
-	tracker.recordFailure(victimSource, authThrottleBasicAccountPrefix+"probe")
+	chargeAttempted(tracker, victimSource, authThrottleBasicAccountPrefix+"probe")
 	live, total = countLiveLockedBuckets12182(tracker, now)
 	if total != authThrottleMaxEntries || live != authThrottleMaxEntries {
 		t.Fatalf("after existing-source global pressure live/total = %d/%d, want %d/%d",
@@ -167,7 +175,7 @@ func TestAuthThrottleFullOfLiveLockoutsLegacyInsertionRefuses12182(t *testing.T)
 	}
 	// Existing identities remain lookup-safe without growing the table; the
 	// live lockout drops this failure.
-	tracker.recordFailure(victimSource, authThrottleAPIKeyAccount)
+	chargeAttempted(tracker, victimSource, authThrottleAPIKeyAccount)
 	live, total = countLiveLockedBuckets12182(tracker, now)
 	if total != authThrottleMaxEntries || live != authThrottleMaxEntries {
 		t.Fatalf("after existing-identity failure live/total = %d/%d, want %d/%d",

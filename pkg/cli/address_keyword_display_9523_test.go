@@ -21,15 +21,9 @@ func TestAddressResolversNeverResolveAKeywordAsAName9523(t *testing.T) {
 		AddressSets: map[string]*config.AddressSet{},
 	}
 	for _, kw := range []string{"any", "any4", "any-ipv6"} {
-		if got := resolveAddress(cfg, kw); got != "" {
-			t.Errorf("resolveAddress(%q) = %q: the keyword was resolved as a name", kw, got)
-		}
 		if got := resolveAddressDetail(cfg, kw); got != kw {
 			t.Errorf("resolveAddressDetail(%q) = %q: the keyword was resolved as a name", kw, got)
 		}
-	}
-	if got := resolveAddress(cfg, "corp"); got != " (10.0.0.0/8)" {
-		t.Errorf("control: an ordinary name must still resolve, got %q", got)
 	}
 	if got := resolveAddressDetail(cfg, "corp"); got != "10.0.0.0/8" {
 		t.Errorf("control: an ordinary name must still resolve, got %q", got)

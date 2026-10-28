@@ -17,14 +17,12 @@ import (
 // decide ownership from a `RedundancyGroup` comparison or a `"reth"` name test
 // of its own. Both must route through config.RethRGOwners.
 //
-// #16723 re-anchor: the direct-mode collector's body moved to pkg/config
-// (Config.RethVIPsForRG in reth_vips.go, #15038) and the vrrp.RethVIPsForRG
-// spelling kept here is a one-line delegate to it. Scanning only the
-// delegate for RethRGOwners() therefore names the wrapper, not the
-// collector: the census now scans CollectRethInstances in vrrp.go AND
-// Config.RethVIPsForRG in ../config/reth_vips.go, and separately pins
-// that the delegate routes to the config collector and carries no
-// private ownership reading of its own.
+// #17140 re-anchor: the ONE RETH VIP walk is Config.RethVIPsByRG in
+// pkg/config/reth_vips.go. Config.RethVIPsForRG is an index into it and
+// vrrp.CollectRethInstances only wraps its entries in Instances. The census
+// therefore scans RethVIPsByRG in ../config/reth_vips.go (the walk) and
+// CollectRethInstances in vrrp.go (the wrapper, which must delegate to it
+// and carry no private ownership reading or sub-interface construction),
 //
 // The two tests fail in different ways on purpose. Deleting the shared
 // predicate and hand-rolling an equivalent reading in both collectors keeps the
@@ -42,44 +40,52 @@ func TestRethOwnershipCollectorsUseTheSharedPredicate(t *testing.T) {
 	}
 	cfgBody := stripLineComments(string(cfgSrc))
 
-	// Each collector is scanned in the file that now owns its body:
-	// CollectRethInstances stayed in vrrp.go; the direct-mode collector
-	// is Config.RethVIPsForRG in pkg/config/reth_vips.go (#15038/#16723).
-	collectors := []struct {
-		fn   string
-		src  string
-		file string
-	}{
-		{"CollectRethInstances", body, "vrrp.go"},
-		{"(c *Config) RethVIPsForRG", cfgBody, "../config/reth_vips.go"},
-	}
-	for _, col := range collectors {
-		fn := col.fn
-		t.Run(fn, func(t *testing.T) {
-			b, ok := funcBody(col.src, fn)
-			if !ok {
-				t.Fatalf("could not locate func %s in %s — this guard is "+
-					"anchored on the function name; rename it here too", fn, col.file)
-			}
-			if !strings.Contains(b, "RethRGOwners()") {
-				t.Errorf("%s does not call cfg.RethRGOwners(); RETH redundancy-"+
-					"group ownership must come from the one shared predicate "+
-					"(#6781), or the two ownership modes drift apart again", fn)
-			}
-			// A private re-reading of the same decision.
-			if m := regexp.MustCompile(`\.RedundancyGroup\s*(<=|>=|==|!=|>|<)`).FindString(b); m != "" {
-				t.Errorf("%s compares .RedundancyGroup directly (%q). Ownership "+
-					"is decided by config.RethRGOwners; a local comparison is "+
-					"the divergence #6781 fixed", fn, m)
-			}
-			if strings.Contains(b, `HasPrefix(name, "reth")`) ||
-				strings.Contains(b, `HasPrefix(ifName, "reth")`) {
-				t.Errorf("%s name-tests for \"reth\". That reading excluded a "+
-					"structurally valid pair not spelled reth* and left its "+
-					"group with no VIPs (#6781); use config.RethRGOwners", fn)
-			}
-		})
-	}
+	// #17140: the ONE walk is Config.RethVIPsByRG in pkg/config/reth_vips.go.
+	// It must route ownership through RethRGOwners and must be the only
+	// function in the repo that builds a RETH sub-interface name.
+	t.Run("RethVIPsByRG walk", func(t *testing.T) {
+		b, ok := funcBody(cfgBody, "(c *Config) RethVIPsByRG")
+		if !ok {
+			t.Fatalf("could not locate func (c *Config) RethVIPsByRG in ../config/reth_vips.go — this guard is anchored on the function name; rename it here too")
+		}
+		if !strings.Contains(b, "RethRGOwners()") {
+			t.Errorf("RethVIPsByRG does not call RethRGOwners(); RETH redundancy-group ownership must come from the one shared predicate (#6781), or the two ownership modes drift apart again")
+		}
+		if m := regexp.MustCompile(`\.RedundancyGroup\s*(<=|>=|==|!=|>|<)`).FindString(b); m != "" {
+			t.Errorf("RethVIPsByRG compares .RedundancyGroup directly (%q). Ownership is decided by config.RethRGOwners; a local comparison is the divergence #6781 fixed", m)
+		}
+		if strings.Contains(b, `HasPrefix(name, "reth")`) || strings.Contains(b, `HasPrefix(ifName, "reth")`) {
+			t.Errorf("RethVIPsByRG name-tests for \"reth\"; use config.RethRGOwners (#6781)")
+		}
+		if !strings.Contains(b, "DedupeVRRPVIPs") {
+			t.Errorf("RethVIPsByRG does not apply the #11482 canonical dedupe (DedupeVRRPVIPs); alias spellings would again feed duplicate VIPs to the direct path (#17140)")
+		}
+	})
+
+	// CollectRethInstances must stay a wrapper over the shared walk: it
+	// delegates to RethVIPsByRG and must not grow a private ownership
+	// reading, sub-interface construction, or unit-address walk.
+	t.Run("CollectRethInstances wrapper", func(t *testing.T) {
+		b, ok := funcBody(body, "CollectRethInstances")
+		if !ok {
+			t.Fatalf("could not locate func CollectRethInstances in vrrp.go — this guard is anchored on the function name; rename it here too")
+		}
+		if !strings.Contains(b, "RethVIPsByRG()") {
+			t.Errorf("CollectRethInstances does not delegate to cfg.RethVIPsByRG(); the VRRP collector must wrap the one shared walk (#17140)")
+		}
+		if m := regexp.MustCompile(`\.RedundancyGroup\s*(<=|>=|==|!=|>|<)`).FindString(b); m != "" {
+			t.Errorf("CollectRethInstances compares .RedundancyGroup directly (%q); ownership is decided by config.RethRGOwners (#6781)", m)
+		}
+		if strings.Contains(b, `HasPrefix(name, "reth")`) || strings.Contains(b, `HasPrefix(ifName, "reth")`) {
+			t.Errorf("CollectRethInstances name-tests for \"reth\"; use config.RethRGOwners (#6781)")
+		}
+		if strings.Contains(b, "RethRGOwners()") {
+			t.Errorf("CollectRethInstances calls RethRGOwners() directly; it must consume RethVIPsByRG so there is one walk (#17140)")
+		}
+		if strings.Contains(b, "LinuxIfName") || strings.Contains(b, ".VlanID") || strings.Contains(b, "TaggingEnabled") {
+			t.Errorf("CollectRethInstances builds a RETH sub-interface name or walks VLAN units itself; that construction belongs only in Config.RethVIPsByRG (#17140)")
+		}
+	})
 
 	// The vrrp.RethVIPsForRG delegate must stay a delegate: it routes to
 	// Config.RethVIPsForRG and must not grow a private ownership reading
@@ -101,6 +107,17 @@ func TestRethOwnershipCollectorsUseTheSharedPredicate(t *testing.T) {
 		if strings.Contains(b, `HasPrefix(name, "reth")`) ||
 			strings.Contains(b, `HasPrefix(ifName, "reth")`) {
 			t.Errorf("vrrp.RethVIPsForRG name-tests for \"reth\"; use config.RethRGOwners (#6781)")
+		}
+	})
+
+	// Config.RethVIPsForRG must stay an index into the shared walk.
+	t.Run("RethVIPsForRG index", func(t *testing.T) {
+		b, ok := funcBody(cfgBody, "(c *Config) RethVIPsForRG")
+		if !ok {
+			t.Fatalf("could not locate func (c *Config) RethVIPsForRG in ../config/reth_vips.go — this guard is anchored on the function name; rename it here too")
+		}
+		if !strings.Contains(b, "RethVIPsByRG()") {
+			t.Errorf("Config.RethVIPsForRG does not index into RethVIPsByRG(); it must not grow a second walk (#17140)")
 		}
 	})
 }

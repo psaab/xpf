@@ -58,7 +58,7 @@ func (s *SessionSync) PeerSessionSyncWireVersion() uint16 {
 	if s == nil {
 		return 0
 	}
-	return uint16(s.peerSessionSyncWire.Load())
+	return uint16(s.peerIncarnationState().peerSessionSyncWire.Load())
 }
 
 // SessionSyncWireCompatible reports whether the peer's session-sync wire version

@@ -281,7 +281,7 @@ func (m *Manager) syncSessionRequestOutcomesLocked(reqs ...SessionSyncRequest) [
 // dropped). It does NOT make the transmit contiguous. This path acquires and
 // releases m.sessionMu once PER request (requestSessionSync), so m.sessionMu is
 // free between consecutive requests and an unrelated session-socket mutation —
-// an operator clear, a policy invalidation, a GC delete, a stale-session
+// an operator clear, a policy invalidation, an expiry delete, a stale-session
 // reconciliation — can land between them (#5698). That interleaving is the
 // CORRECT behaviour here: a bulk caller passes up to sessionHelperDeleteChunk
 // (256) requests, and holding sessionMu across a chunk that large would starve

@@ -9,59 +9,67 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #6781 STRUCTURAL binding for the pkg/daemon RG-ownership readers.
+// #6781/#17086 STRUCTURAL binding for the pkg/daemon RG-ownership
+// readers: the ref→RG question has ONE answer, config.Config's
+// InterfaceRefRG / RefRG / RethRGOwners (#17086), and no pkg/daemon
+// file may re-derive it from a raw `.RedundancyGroup` field read.
 //
-// These five decide "which interfaces belong to redundancy group N" for stable
-// RETH link-local add/remove, the direct-mode GARP / router-LL burst, DHCP
-// RG-scoping, and BACKUP blackhole routes. Each carried its own
-// `strings.HasPrefix(name, "reth")` reading, so a structurally valid redundant
-// pair not spelled `reth*` got VIPs from both ownership modes and then no GARP,
-// no stable link-local and no blackhole routes — VRRP mastering an interface
-// nothing else manages.
+// The pre-#17086 guard enumerated five hand-listed functions and
+// checked each called RethRGOwners; rpmProbeTestGating was not in
+// the list, kept its `reth*` name test through two rewrites, and
+// gated a structural bond0 RETH on the wrong RG. An enumeration
+// guard protects exactly the sites someone remembered to list. This
+// version greps instead: EVERY non-test .go file in pkg/daemon is
+// scanned, and any `.RedundancyGroup` field read outside the
+// documented classification predicates below fails the build.
 //
-// rethInterfacesMatchingRG's own doc comment (#6520) already states the rule
-// this enforces: "Deriving the two from one walker is not a style preference: a
-// divergence between them is ALWAYS a bug."
+// Exemptions are whole-file and each names why the read is NOT the
+// ref→RG ownership question:
 //
-// A behavioural test alone is probe-bounded — it covers the shapes someone
-// thought to write down. This asserts the MECHANISM: none of these functions
-// may re-derive RG membership from a name test or a raw RedundancyGroup
-// comparison; all must read config.Config.RethRGOwners.
+//   - daemon_ha_sync.go: `currentRedundancyGroups` returns the
+//     []*config.RedundancyGroup TYPE (chassis RG definitions), never
+//     an interface's field.
+//   - rxvlan_audit_11446.go: `rxVlanParentNames` classifies physical
+//     parents for the RX-VLAN audit — "carries any group OR is named
+//     reth*" excludes a parent from audit, it does not answer which
+//     RG owns a ref. A stray group correctly excludes there.
+//
+// The scan strips //-comments first, so prose quoting the pattern
+// neither satisfies nor trips it. New interface-field reads must go
+// through the SSOT; if a future read is genuinely not the ownership
+// question, it joins the exemption list WITH its reason.
 func TestDaemonRGReadersUseTheSharedPredicate(t *testing.T) {
-	for _, tc := range []struct{ file, fn string }{
-		{"daemon_ha_vip.go", "addStableRethLinkLocal"},
-		{"daemon_ha_vip.go", "removeStableRethLinkLocal"},
-		{"daemon_ha_vip.go", "directSendGARPs"},
-		{"daemon_ha.go", "rethInterfacesMatchingRG"},
-		{"daemon_ha.go", "injectBlackholeRoutesFor"},
-	} {
-		t.Run(tc.fn, func(t *testing.T) {
-			raw, err := os.ReadFile(tc.file)
-			if err != nil {
-				t.Fatalf("read %s: %v", tc.file, err)
-			}
-			body, ok := rgFuncBody(stripGoLineComments(string(raw)), tc.fn)
-			if !ok {
-				t.Fatalf("could not locate %s in %s — this guard is anchored on "+
-					"the function name; rename it here too", tc.fn, tc.file)
-			}
-			if !strings.Contains(body, "RethRGOwners()") {
-				t.Errorf("%s does not call cfg.RethRGOwners(); RETH "+
-					"redundancy-group membership must come from the one shared "+
-					"predicate (#6781/#6520)", tc.fn)
-			}
-			if strings.Contains(body, `HasPrefix(name, "reth")`) ||
-				strings.Contains(body, `HasPrefix(ifName, "reth")`) {
-				t.Errorf("%s name-tests for \"reth\". That reading excluded a "+
-					"structurally valid pair not spelled reth*, leaving its "+
-					"group with VIPs but no GARP, link-local or blackhole "+
-					"routes (#6781)", tc.fn)
-			}
-			if m := regexp.MustCompile(`\.RedundancyGroup\s*(<=|>=|==|!=|>|<)`).FindString(body); m != "" {
-				t.Errorf("%s compares .RedundancyGroup directly (%q); membership "+
-					"is decided by config.RethRGOwners", tc.fn, m)
-			}
-		})
+	exempt := map[string]string{
+		"daemon_ha_sync.go":     "returns []*config.RedundancyGroup (RG definitions), not an interface field read",
+		"rxvlan_audit_11446.go": "rxVlanParentNames classification predicate, not the ref→RG question",
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read pkg/daemon dir: %v", err)
+	}
+	fieldRead := regexp.MustCompile(`\.(RedundancyGroup)\b`)
+	scanned := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if _, ok := exempt[name]; ok {
+			continue
+		}
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		scanned++
+		if m := fieldRead.FindString(stripGoLineComments(string(raw))); m != "" {
+			t.Errorf("%s reads %s directly; interface→RG ownership must come from "+
+				"config.InterfaceRefRG / RefRG / RethRGOwners (#6781/#17086). If this "+
+				"read is not the ownership question, exempt the file above with its reason", name, m)
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("scanned no pkg/daemon files — the guard is anchored on the package directory")
 	}
 }
 
@@ -77,35 +85,6 @@ func stripGoLineComments(s string) string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// rgFuncBody returns the brace-matched body of the named func (method or not).
-func rgFuncBody(src, name string) (string, bool) {
-	idx := strings.Index(src, ") "+name+"(")
-	if idx < 0 {
-		idx = strings.Index(src, "func "+name+"(")
-		if idx < 0 {
-			return "", false
-		}
-	}
-	open := strings.Index(src[idx:], "{")
-	if open < 0 {
-		return "", false
-	}
-	open += idx
-	depth := 0
-	for i := open; i < len(src); i++ {
-		switch src[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return src[open : i+1], true
-			}
-		}
-	}
-	return "", false
 }
 
 // TestAllRGReadersAgreeOnStructuralPair is the BEHAVIOURAL half for the daemon

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cliterm"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -1294,7 +1295,11 @@ func (c *CLI) showNATDeterministic(args []string) error {
 		if len(args) < 2 {
 			return fmt.Errorf("%s", usage)
 		}
-		res, lerr := nat.LookupForward(view, natPoolArg(args[2:]), args[1])
+		pool, err := cliterm.ParseNATPoolSelector(args[2:])
+		if err != nil {
+			return fmt.Errorf("%s", usage)
+		}
+		res, lerr := nat.LookupForward(view, pool, args[1])
 		if lerr != nil {
 			fmt.Printf("No deterministic mapping (%s): %s\n", lerr.Code, lerr.Detail)
 			return nil
@@ -1309,7 +1314,11 @@ func (c *CLI) showNATDeterministic(args []string) error {
 		if err != nil || port < 1 || port > 65535 {
 			return fmt.Errorf("nat-port must be 1-65535")
 		}
-		res, lerr := nat.LookupReverse(view, natPoolArg(args[4:]), args[1], uint16(port))
+		pool, err := cliterm.ParseNATPoolSelector(args[4:])
+		if err != nil {
+			return fmt.Errorf("%s", usage)
+		}
+		res, lerr := nat.LookupReverse(view, pool, args[1], uint16(port))
 		if lerr != nil {
 			fmt.Printf("No deterministic mapping (%s): %s\n", lerr.Code, lerr.Detail)
 			return nil
@@ -1319,14 +1328,6 @@ func (c *CLI) showNATDeterministic(args []string) error {
 	default:
 		return fmt.Errorf("unknown deterministic-nat query %q (want internal-host or nat-ip)", args[0])
 	}
-}
-
-// natPoolArg extracts an optional trailing `pool <name>` filter.
-func natPoolArg(rest []string) string {
-	if len(rest) >= 2 && rest[0] == "pool" {
-		return rest[1]
-	}
-	return ""
 }
 
 // sourceNATPoolOccupancy indexes the helper's live source-NAT pool status by

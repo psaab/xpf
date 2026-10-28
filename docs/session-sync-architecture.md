@@ -731,7 +731,7 @@ could not see it.
 rather than table-truth, for a reason that has nothing to do with which sites
 publish: the helper owns session lifetime in its own `SessionTable`, the mirror
 is written best-effort (a publish that fails under map pressure is counted, not
-retried), and the Go GC has `SkipSweep` set precisely because the map is not
+retried), and the retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) never ran against it precisely because the map is not
 authoritative. Framing the window from it would still be framing it from a
 copy. The table-truth window source stays.
 
@@ -1978,7 +1978,7 @@ grown.
 
 ### Delete Journal
 
-Delete messages are queued immediately from conntrack GC callbacks. If the peer
+Delete messages are queued immediately when the helper's session-delta stream reports a close (and from commit-time policy invalidation). If the peer
 is disconnected — **or the peer is connected but `sendCh` is momentarily full
 (backpressure)** — the delete is journaled in a bounded ring by
 `QueueDeleteV4`/`V6` instead of being sent inline.
@@ -2934,7 +2934,7 @@ the export sequence — so doing that wait under the lock would freeze the whole
 control plane for up to 15 s whenever a worker is slow or stalled (exactly the
 failover-critical moment). The handler is therefore split into two phases:
 
-- **Locked phase** (`Coordinator::kick_owner_rg_export`): enqueue the
+- **Locked phase** (`Coordinator::kick_owner_rg_export_unpaged` / `kick_owner_rg_export_v2`): enqueue the
   `ExportOwnerRGSessions` command to every worker, bump `export_seq`, and
   snapshot the lock-free handles the wait needs — the per-worker
   `session_export_ack` atomics (`Arc<AtomicU64>`) and the per-binding delta
@@ -3203,7 +3203,7 @@ systems have different boot times and independent monotonic clocks.
 When a node becomes primary for an RG:
 
 - synced sessions for newly-owned zones become locally authoritative
-- GC delete callbacks become active for those zones
+- helper session-delta delete queueing becomes active for those zones (the peer-delete gate is `IsLocalPrimaryAny`, see `daemon_policy_invalidate.go` / `daemon_ha_userspace_stream.go`)
 - userspace session state for the newly-owned RG is refreshed or promoted as
   needed for local forwarding
 - direct-mode failover also relies on post-transition re-announcements to move
@@ -3419,8 +3419,8 @@ the same key.
 `PauseIncrementalSync(reason)` / `ResumeIncrementalSync(reason)` provide a
 depth-counted pause mechanism. Multiple callers can pause independently; the
 sweep only resumes when all callers have resumed. The pause stops only the
-periodic sweep goroutine without affecting GC delete callbacks or explicit sync
-producers. (These helpers — along with `WaitForIdle` and
+periodic sweep goroutine without affecting helper session-delta delete
+queueing or explicit sync producers. (These helpers — along with `WaitForIdle` and
 `WaitForPeerBarriersDrained` — are retained primitives with no current live
 caller; the demotion path uses only the single peer barrier described above.)
 
@@ -3475,7 +3475,9 @@ This document has been corrected through multiple passes:
   explicit demotion-prep sequence, userspace delta filtering details.
 - v3: Corrected delta filtering field names (`FabricRedirect` +
   `FabricIngress`, not a combined field). Clarified that `PauseIncrementalSync`
-  only pauses the sweep — GC delete callbacks are never suppressed. Added
+  only paused the sweep — at the time, GC delete callbacks were never
+  suppressed (the Go conntrack GC was later deleted in #17155; delete
+  queueing is now via helper session-delta closes). Added
   manual failover retry admission logic, depth-counted pause mechanism,
   readiness generation guard, barrier ordering via sendCh.
 - v4 (current, #2930): Corrected demotion-path doc drift. The live graceful
@@ -3504,7 +3506,7 @@ the lower-latency userspace delta path scoped to the AF_XDP helper.
 
 ### Delete Journal Overflow
 
-The delete journal is bounded (`deleteJournalCap`, default 10000). Extended
+The delete journals (bare and scoped) are bounded (`boundedFrameJournal`, default cap 10000 each). Extended
 disconnects with high churn can push it past the cap, evicting the oldest queued
 deletes. Those evicted records are session teardowns the standby still needs;
 they are already gone from the primary's local table, so no incremental install
@@ -3564,7 +3566,7 @@ wrong.
 | `pkg/cluster/sync.go` | Wire protocol, bulk sync, barriers, retry state |
 | `pkg/cluster/sync_test.go` | Session sync protocol tests |
 | `pkg/daemon/daemon.go` | Readiness, retry, userspace delta filtering, demotion prep |
-| `pkg/conntrack/gc.go` | GC delete callbacks |
+| `pkg/cluster/sync_conn_write.go` | Delete queueing (`QueueDeleteV4`/`V6`) for helper session-delta closes |
 | `pkg/dataplane/types.go` | Session key/value definitions |
 | `pkg/dataplane/userspace/manager.go` | Userspace session install, helper RPCs |
 | `userspace-dp/src/session.rs` | Rust session table |

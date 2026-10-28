@@ -200,12 +200,10 @@ func TestRethStableLinkLocalStillSurvivesStrip15148(t *testing.T) {
 // counts as configured (no EUI-64), and a non-IPv6 unit gets neither strip
 // exemption nor ensure.
 func TestRethConfiguredLinkLocalOnlyUnit15148(t *testing.T) {
-	if !rethUnitHasConfiguredLinkLocal(&config.InterfaceConfig{
-		Units: map[int]*config.InterfaceUnit{
-			0: {Number: 0, Addresses: []string{"fe80::1/64"}},
-		},
-	}, 0) {
-		t.Fatal("rethUnitHasConfiguredLinkLocal must recognise fe80::1/64")
+	if !config.UnitHasConfiguredLinkLocal(&config.InterfaceUnit{
+		Number: 0, Addresses: []string{"fe80::1/64"},
+	}) {
+		t.Fatal("UnitHasConfiguredLinkLocal must recognise fe80::1/64")
 	}
 	got := configuredRethLinkLocalIPs(&config.InterfaceConfig{
 		Units: map[int]*config.InterfaceUnit{

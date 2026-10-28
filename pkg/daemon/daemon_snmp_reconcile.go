@@ -449,6 +449,7 @@ func (d *Daemon) daemonSNMPRethInfos() []snmpRethInfo {
 		return nil
 	}
 	rethToPhys := cfg.RethToPhysical()
+	rethRGOwners := cfg.RethRGOwners() // #17086 SSOT
 	names := make([]string, 0, len(rethToPhys))
 	for name := range rethToPhys {
 		names = append(names, name)
@@ -460,10 +461,7 @@ func (d *Daemon) daemonSNMPRethInfos() []snmpRethInfo {
 		if !ok {
 			continue
 		}
-		rg := 0
-		if ifc := cfg.Interfaces.Interfaces[name]; ifc != nil {
-			rg = ifc.RedundancyGroup
-		}
+		rg := rethRGOwners[name]
 		primary := true // standalone / no cluster: locally active
 		if d.cluster != nil && rg > 0 {
 			primary = d.cluster.IsLocalPrimary(rg)

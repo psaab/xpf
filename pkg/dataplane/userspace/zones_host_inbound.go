@@ -2,7 +2,6 @@ package userspace
 
 import (
 	"fmt"
-	"net"
 	"sort"
 	"strings"
 
@@ -95,102 +94,39 @@ type stableRethLinkLocalTarget struct {
 	addr  string
 }
 
-// stableRethLinkLocalTargets mirrors daemon.addStableRethLinkLocal. That
-// routine installs fe80::bf72:<cluster>:<rg> on the netdev selected by
-// unit.VlanID > 0 (#16686): a tagged unit 0 lives on <member>.<vlan-id>,
-// an untagged unit 0 on the bare member. The host-inbound identity is the
-// unit-qualified name (reth0.<unit>), so a tagged unit 0 scopes reth0.0,
-// not the bare interface. A unit's explicit link-local suppresses the
-// stable LL on that unit only (#15684).
-//
-// This helper is intentionally local to pkg/dataplane/userspace: importing
-// pkg/cluster here would create the existing cluster → dataplane dependency
-// cycle. Keep the byte construction in parity with cluster.StableRethLinkLocal
-// (pkg/cluster/reth.go).
+// stableRethLinkLocalTargets mirrors the daemon install: it maps the single
+// placement definition in pkg/config
+// (Config.StableRethLinkLocalPlacements, #17049) to unit-qualified
+// host-inbound identities. That definition installs
+// fe80::bf72:<cluster>:<rg> on the netdev selected by unit.VlanID > 0
+// (#16686): a tagged unit 0 lives on <member>.<vlan-id>, an untagged unit 0
+// on the bare member. The host-inbound identity is the unit-qualified name
+// (reth0.<unit>), so a tagged unit 0 scopes reth0.0, not the bare
+// interface. A unit's explicit link-local suppresses the stable LL on that
+// unit only (#15684). RG 0 is the cluster control group, not a RETH service
+// group, and is skipped here as before.
 func stableRethLinkLocalTargets(cfg *config.Config) []stableRethLinkLocalTarget {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
 	owners := cfg.RethRGOwners()
-	if len(owners) == 0 {
-		return nil
+	rgIDs := make([]int, 0, len(owners))
+	seenRG := make(map[int]bool, len(owners))
+	for _, rgID := range owners {
+		if rgID <= 0 || seenRG[rgID] {
+			continue
+		}
+		seenRG[rgID] = true
+		rgIDs = append(rgIDs, rgID)
 	}
-	clusterID := cfg.Chassis.Cluster.ClusterID
-	ifNames := make([]string, 0, len(owners))
-	for ifName := range owners {
-		ifNames = append(ifNames, ifName)
-	}
-	sort.Strings(ifNames)
-
+	sort.Ints(rgIDs)
 	var out []stableRethLinkLocalTarget
-	for _, ifName := range ifNames {
-		rgID := owners[ifName]
-		if rgID <= 0 {
-			// RG 0 is the cluster control group, not a RETH service group.
-			continue
-		}
-		ifc := cfg.Interfaces.Interfaces[ifName]
-		if ifc == nil || ifc.Disable {
-			continue
-		}
-		addr := stableRethLinkLocalString(clusterID, rgID)
-		unitNums := make([]int, 0, len(ifc.Units))
-		for unitNum := range ifc.Units {
-			unitNums = append(unitNums, unitNum)
-		}
-		sort.Ints(unitNums)
-		seen := make(map[string]bool)
-		for _, unitNum := range unitNums {
-			unit := ifc.Units[unitNum]
-			if unit == nil || unit.Disable || !stableRethUnitHasIPv6(unit) {
-				continue
-			}
-			if stableRethUnitHasConfiguredLinkLocal(ifc, unitNum) {
-				continue
-			}
-			iface := fmt.Sprintf("%s.%d", ifName, unitNum)
-			if seen[iface] {
-				continue
-			}
-			seen[iface] = true
-			out = append(out, stableRethLinkLocalTarget{iface: iface, addr: addr})
+	for _, rgID := range rgIDs {
+		for _, p := range cfg.StableRethLinkLocalPlacements(rgID) {
+			out = append(out, stableRethLinkLocalTarget{iface: p.IfRef, addr: p.Addr.String()})
 		}
 	}
 	return out
-}
-
-func stableRethLinkLocalString(clusterID, rgID int) string {
-	return net.IP{0xfe, 0x80, 0, 0, 0, 0, 0, 0,
-		0, 0, 0xbf, 0x72, 0, byte(clusterID), 0, byte(rgID)}.String()
-}
-
-func stableRethUnitHasConfiguredLinkLocal(ifc *config.InterfaceConfig, unitNum int) bool {
-	if ifc == nil {
-		return false
-	}
-	unit := ifc.Units[unitNum]
-	if unit == nil {
-		return false
-	}
-	for _, raw := range unit.Addresses {
-		ip, _, err := net.ParseCIDR(raw)
-		if err == nil && ip.To4() == nil && ip.IsLinkLocalUnicast() {
-			return true
-		}
-	}
-	return false
-}
-
-func stableRethUnitHasIPv6(unit *config.InterfaceUnit) bool {
-	if unit == nil {
-		return false
-	}
-	for _, raw := range unit.Addresses {
-		if strings.Contains(raw, ":") {
-			return true
-		}
-	}
-	return unit.DHCPv6 || unit.DHCPv6Client != nil
 }
 
 // hostInboundScopeLinkAddr reports whether a snapshot address row is kernel
