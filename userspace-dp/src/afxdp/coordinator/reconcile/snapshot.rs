@@ -110,7 +110,7 @@ impl MapPinFault {
     }
 }
 
-/// #6243: THE single opener for the seven snapshot BPF map pins — the shared
+/// #6243: THE single opener for the five snapshot BPF map pins — the shared
 /// source of truth both the activated reconcile ([`preflight_map_fds`]) and the
 /// deferred-apply validation ([`validate_map_pins`]) route through, so they can
 /// never drift on which snapshots pass the map-pin gate or how a fault is
@@ -342,7 +342,7 @@ pub(super) fn build_reconcile_forwarding(
 ///   was TWO-pass, so a multi-fault snapshot could report a DIFFERENT stage
 ///   from each path; the shared two-pass order makes them identical.
 /// - the deferred walk dropped each FD immediately, so under FD-table pressure
-///   it could PASS where activated (retaining all seven FDs) FAILED; the shared
+///   it could PASS where activated (retaining all five FDs) FAILED; the shared
 ///   bundle now holds every opened FD until the whole contract succeeds, so the
 ///   deferred path catches the low-FD case too.
 ///

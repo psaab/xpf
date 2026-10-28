@@ -461,10 +461,6 @@ struct {
  * NAT tables (IPv4)
  * ============================================================ */
 
-/* Pre-routing NAT table: (proto, dst_ip, dst_port, from_zone) -> new destination.
- * Static DNAT config entries use the configured ingress zone. Dynamic SNAT
- * return entries use from_zone=0 as a wildcard. */
-
 /* Source NAT config: (from_zone, to_zone, rule_idx) -> SNAT IP + match.
  * Populated by the compiler on commit. Multiple rules per zone-pair
  * are iterated sequentially (0..MAX-1) until first match. */
