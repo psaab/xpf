@@ -974,7 +974,10 @@ fn unknown_tunnel_kind_mtu_forwards_and_counts_9901() {
 /// because that module's helpers are private). Transport MTU 1400 via the
 /// `tunnel_outer_mtu` chain (tx_ifindex 22 misses, egress_ifindex 80 hits),
 /// so the GRE inner budget is 1376 (1400 - outer_ip(20) - gre(4)) and the
-/// WG inner budget is 1325 (1400 - WG_OVERHEAD_V4(60) - max_pad(15)).
+/// WG inner budget is 1340 (1400 - WG_OVERHEAD_V4(60): outer IP(20) +
+/// UDP(8) + WG data header(16) + Poly1305 tag(16); #16499 caps the §5.4.6
+/// pad at this budget, so no worst-case 15-byte pad is subtracted — the
+/// pre-#16499 pin of 1325 drifted when the pad model changed).
 fn forwarding_for_ptb_with_tunnel(mtu: usize, mode: &str) -> ForwardingState {
     let mut forwarding = forwarding_for_ptb(mtu);
     forwarding.tunnel_endpoints.insert(
@@ -1048,7 +1051,7 @@ fn tunnel_gre_nodf_oversize_emits_ptb_with_inner_mtu_10705() {
 }
 
 /// #10705 WG arm: the same conversion for a WireGuard endpoint, quoting
-/// the pad-aware WG inner MTU (1325). The dispatcher override is
+/// the capped-pad WG inner MTU (1340). The dispatcher override is
 /// mode-agnostic (tunnel_endpoint_id + resolved inner budget); this cell
 /// pins the WG number, not just the GRE one.
 #[test]
@@ -1070,8 +1073,8 @@ fn tunnel_wg_nodf_oversize_emits_ptb_with_inner_mtu_10705() {
     let icmp = 14 + 20;
     assert_eq!(
         u16::from_be_bytes([b[icmp + 6], b[icmp + 7]]),
-        1325,
-        "advertised next-hop MTU = WG inner budget (1400 - 60 - 15)"
+        1340,
+        "advertised next-hop MTU = WG inner budget (1400 - 60, #16499 capped pad)"
     );
     assert_eq!(
         bindings[1].tx_pipeline.pending_tx_local.len()
