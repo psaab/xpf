@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/dhcpserver"
@@ -306,8 +307,8 @@ func TestDHCPLeaseChunkFramingGuards15160(t *testing.T) {
 	// chunk 0 of 2, then chunk 1 claiming total 3 — inconsistent assembly,
 	// must never commit.
 	small := encodeDHCPLeasePayload([]dhcpserver.SyncLease{dhcpChunkLease15160(7)})
-	c0 := encodeDHCPLeaseChunkPayload(small, 2, 0, 2, 1)
-	c1bad := encodeDHCPLeaseChunkPayload(small, 2, 1, 3, 1)
+	c0 := encodeDHCPLeaseChunkPayload(small, 1, 0, 2, 1)
+	c1bad := encodeDHCPLeaseChunkPayload(small, 1, 1, 3, 1)
 	recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, appendFullSetSeq(c0, 77, 1))
 	recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, appendFullSetSeq(c1bad, 77, 2))
 	if held := recv.PeerDHCPLeases4(); len(held) != 1 || held[0].Address != prior[0].Address {
@@ -331,7 +332,7 @@ func TestDHCPLeaseChunkInterleavedGenerationsSurvive17956(t *testing.T) {
 		base := encodeDHCPLeaseChunkPayload(body, generation, uint32(index), 2, 2)
 		return appendFullSetSeq(base, 1000, seq)
 	}
-	seq := uint64(1)
+	seq := uint64(100)
 	nextSeq := func() uint64 {
 		seq++
 		return seq
@@ -446,5 +447,39 @@ func TestDHCPLeaseChunkOlderGenerationCannotOverwriteNewerCommit18369(t *testing
 	}
 	if n := recv.Stats().DHCPLeasesStaleIgnored; n != 1 {
 		t.Fatalf("DHCPLeasesStaleIgnored = %d, want 1 for stale completed G", n)
+	}
+
+}
+
+// TestDHCPLeaseChunkGenerationCannotExceedFrameSequence18371 pins the
+// sender invariant that a chunk set's generation is its first frame
+// sequence: a forged generation ahead of its sequence must not poison the
+// committed-generation watermark and suppress a later legitimate set.
+func TestDHCPLeaseChunkGenerationCannotExceedFrameSequence18371(t *testing.T) {
+	recv := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	var callbacks [][]dhcpserver.SyncLease
+	recv.OnDHCPLeasesReceived = func(_ int, leases []dhcpserver.SyncLease) {
+		callbacks = append(callbacks, append([]dhcpserver.SyncLease(nil), leases...))
+	}
+	chunk := func(generation, seq uint64, lease dhcpserver.SyncLease) []byte {
+		body := encodeDHCPLeasePayload([]dhcpserver.SyncLease{lease})
+		return appendFullSetSeq(encodeDHCPLeaseChunkPayload(body, generation, 0, 1, 1), 1000, seq)
+	}
+	forged := chunk(math.MaxUint64, 1, dhcpChunkLease15160(700))
+	if recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, forged) {
+		t.Fatal("generation ahead of frame sequence must be rejected")
+	}
+	if held := recv.PeerDHCPLeases4(); len(held) != 0 {
+		t.Fatalf("inconsistent generation committed before valid set: %v", held)
+	}
+	valid := dhcpChunkLease15160(701)
+	if !recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, chunk(2, 2, valid)) {
+		t.Fatal("valid generation 2 / sequence 2 must be accepted after malformed frame")
+	}
+	if held := recv.PeerDHCPLeases4(); len(held) != 1 || held[0].Address != valid.Address {
+		t.Fatalf("valid generation 2 was suppressed by inconsistent frame: %v", held)
+	}
+	if len(callbacks) != 1 || len(callbacks[0]) != 1 || callbacks[0][0].Address != valid.Address {
+		t.Fatalf("only valid generation should notify callback, got %v", callbacks)
 	}
 }

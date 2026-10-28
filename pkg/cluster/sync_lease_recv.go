@@ -102,6 +102,15 @@ func (s *SessionSync) handleIPsecSAChunk(conn net.Conn, payload []byte) bool {
 			"incarnation", incarnation, "seq", seq, "bytes", len(base))
 		return false
 	}
+	// The sender stamps its first frame sequence as the generation; no
+	// frame can carry a larger generation than its own sequence. Refuse
+	// before decoding the body, advancing seq, or assembling chunks.
+	if generation > seq {
+		s.stats.IPsecSAMalformedIgnored.Add(1)
+		slog.Warn("cluster sync: dropping IPsec SA chunk generation ahead of frame sequence",
+			"incarnation", incarnation, "generation", generation, "seq", seq)
+		return false
+	}
 	names, decodeErr := decodeIPsecSAChunkBody(chunkBody)
 	if decodeErr != nil {
 		s.stats.IPsecSAMalformedIgnored.Add(1)
@@ -450,6 +459,15 @@ func (s *SessionSync) handleDHCPLeaseChunk(conn net.Conn, msgType uint8, payload
 		s.stats.MalformedRecordsDropped.Add(1)
 		slog.Warn("cluster sync: dropping malformed DHCP lease chunk header",
 			"family", family, "incarnation", incarnation, "seq", seq, "bytes", len(base))
+		return false
+	}
+	// The sender stamps its first frame sequence as the generation; no
+	// frame can carry a larger generation than its own sequence. Refuse
+	// before decoding the body, advancing seq, or assembling chunks.
+	if generation > seq {
+		s.stats.MalformedRecordsDropped.Add(1)
+		slog.Warn("cluster sync: dropping DHCP lease chunk generation ahead of frame sequence",
+			"family", family, "incarnation", incarnation, "generation", generation, "seq", seq)
 		return false
 	}
 	var snapshot dhcpserver.LeaseSyncSnapshot
