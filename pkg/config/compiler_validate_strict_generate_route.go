@@ -75,3 +75,56 @@ func generateRouteHelperRefusedMaskSpellings(cfg *Config) []string {
 	}
 	return out
 }
+
+// staticRouteInvalidPrefixes is the static-route sibling of
+// generateRouteInvalidPrefixes: every authored static destination
+// (surviving spelling plus folded aliases) that
+// ValidateRouteDestination rejects, one message per route. Before
+// this gate, CompileConfig without SchemaValidate had NO strict
+// check on static destinations at all — the family gate and the
+// helper-refused-mask gate both parse leniently, so a garbage or
+// padded destination compiled, was stored raw, was omitted by FRR's
+// netip belt and refused the userspace helper snapshot (the #15658
+// split-brain for statics). Strict compilation rejects the first
+// offender; the tolerant path warns per offender and keeps the
+// route, so a persisted malformed destination still fails the helper
+// snapshot closed. Junos `default` is a compiler-level keyword the
+// schema grammar does not produce as a destination spelling; it is
+// skipped here. Global routes are walked first (v4 list, then inet6
+// list), then each routing instance.
+func staticRouteInvalidPrefixes(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var out []string
+	check := func(scope string, routes []*StaticRoute) {
+		for _, sr := range routes {
+			if sr == nil {
+				continue
+			}
+			for i, spelling := range append([]string{sr.Destination}, sr.destinationAliases...) {
+				if spelling == "default" {
+					continue
+				}
+				if err := ValidateRouteDestination(spelling); err != nil {
+					merged := ""
+					if i > 0 {
+						merged = fmt.Sprintf(" (merged into %q)", sr.Destination)
+					}
+					out = append(out, fmt.Sprintf("%s %q%s: %v", scope, spelling, merged, err))
+				}
+			}
+		}
+	}
+	check("routing-options static route", cfg.RoutingOptions.StaticRoutes)
+	check("routing-options static route", cfg.RoutingOptions.Inet6StaticRoutes)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil {
+			continue
+		}
+		scope := fmt.Sprintf("routing-instances %s static route", ri.Name)
+		check(scope, ri.StaticRoutes)
+		check(scope, ri.Inet6StaticRoutes)
+	}
+	return out
+}

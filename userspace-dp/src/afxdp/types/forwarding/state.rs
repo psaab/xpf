@@ -766,7 +766,12 @@ pub(in crate::afxdp) struct ForwardingState {
     /// forwarded packet via `record_zone_traffic` (two array reads, no hash).
     /// Rotated via the ForwardingState ArcSwap alongside `cold_path_slot_map`.
     pub(in crate::afxdp) zone_counter_slot_map:
-        std::sync::Arc<crate::afxdp::zone_counters::ZoneCounterSlotMap>,
+        std::sync::Arc<crate::afxdp::zone_slot_counters::ZoneSlotMap>,
+    /// #17204: per-slot cached atomic blocks for BOTH families, resolved from
+    /// the two stores at build time so the per-batch folds never lock. The
+    /// flood family folds through this same caches value (family 2).
+    pub(in crate::afxdp) zone_counter_caches:
+        std::sync::Arc<crate::afxdp::zone_counters::ZoneCounterCaches>,
     /// #3651: coordinator-owned cumulative per-zone traffic totals. Keyed by
     /// stable zone id, `Clone` shares the inner `Arc<Mutex>`, so cloning this
     /// state (worker publish) and carrying it forward across config applies
@@ -779,7 +784,11 @@ pub(in crate::afxdp) struct ForwardingState {
     /// on the forward path) via `record_zone_flood_drop`. Rotated via the
     /// ForwardingState ArcSwap alongside its siblings.
     pub(in crate::afxdp) flood_counter_slot_map:
-        std::sync::Arc<crate::afxdp::flood_counters::FloodCounterSlotMap>,
+        std::sync::Arc<crate::afxdp::zone_slot_counters::ZoneSlotMap>,
+    /// Alias of `zone_counter_caches` for the flood family's named surface;
+    /// both Arcs point at the one caches value built per apply.
+    pub(in crate::afxdp) flood_counter_caches:
+        std::sync::Arc<crate::afxdp::flood_counters::FloodCounterCaches>,
     /// #3651: coordinator-owned cumulative per-zone flood-event totals. Keyed by
     /// stable zone id, `Clone` shares the inner `Arc<Mutex>`, so cloning this
     /// state (worker publish) and carrying it forward across config applies

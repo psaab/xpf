@@ -289,7 +289,7 @@ func TestNeverSeenTakeoverMarkedDegraded15211(t *testing.T) {
 // Control: sync-fresh suppression must NOT mark degraded (no takeover happened).
 func TestNeverSeenSyncFreshDoesNotMarkDegraded15211(t *testing.T) {
 	m := coldBootManager(t)
-	m.SetPeerNeverSeenSyncFreshFunc(func() bool { return true })
+	m.SetFakePeerSyncSourceForTesting(true, 100*time.Millisecond, true, true)
 	m.SetRGReady(0, true, nil)
 	m.handlePeerNeverSeen()
 	if peerConfirmedAbsent(m) {
