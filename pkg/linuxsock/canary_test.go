@@ -35,6 +35,13 @@ var allowedFunctions = map[string]string{
 // receive cancellable; a bare blocking Recvfrom cannot be woken by close(2)
 // and parks on a reused fd number.
 //
+// The exemption covers ONLY the literal direct-call form
+// `unix.Recvfrom(...)` inside one of these functions. A unix.Recvfrom
+// selector used as a value — assigned to a variable, passed as an argument,
+// returned, or bound at package level — is flagged even there: the bound
+// value can be invoked later from anywhere, so no enclosing-function
+// allowlist can vouch for its call sites.
+//
 //   - linuxsock::PpollRecv.Recv IS the primitive: ppoll guarantees
 //     readability before the read, so the Recvfrom itself does not park.
 //   - nfqueue::Queue.Recv and nfqueue::Queue.waitAck are poll-guarded:
@@ -184,11 +191,14 @@ func TestNoDirectUnixSocket(t *testing.T) {
 
 // TestNoDirectBlockingRecvfrom is the #17231 receive canary. It walks every
 // production (non-test) .go file under pkg/ with go/ast and flags any direct
-// unix.Recvfrom(...) call outside allowedRecvfromFunctions. A new blocking
-// Recvfrom outside linuxsock.PpollRecv (or a poll-guarded nfqueue read)
-// reintroduces the close-does-not-wake defect: the goroutine parks on a
-// silent link, leaks with its bound socket, and can answer through a reused
-// fd number after cancel.
+// unix.Recvfrom(...) call outside allowedRecvfromFunctions, plus ANY
+// unix.Recvfrom selector used as a value anywhere (variable bindings, argument
+// passes, returns, package-level vars): binding the function to a value and
+// calling through it is the same blocking receive with one rename in between.
+// A new blocking Recvfrom outside linuxsock.PpollRecv (or a poll-guarded
+// nfqueue read) reintroduces the close-does-not-wake defect: the goroutine
+// parks on a silent link, leaks with its bound socket, and can answer through
+// a reused fd number after cancel.
 func TestNoDirectBlockingRecvfrom(t *testing.T) {
 	var violations []string
 	scanned := 0
@@ -233,31 +243,66 @@ func TestNoDirectBlockingRecvfrom(t *testing.T) {
 
 		pkgRel := pkgRelKey(path)
 		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+			// inspectDecl flags every unix.Recvfrom selector in one
+			// top-level declaration that is not the Fun of a direct call
+			// inside an allowlisted function. Direct calls elsewhere keep
+			// the original diagnostic; every other occurrence (assignment,
+			// argument, return, package-level binding, parenthesised or
+			// otherwise indirected call) is a used-as-value violation,
+			// including inside allowlisted functions.
+			inspectDecl := func(node ast.Node, key string, allowedFn bool) {
+				directCallFuns := map[*ast.SelectorExpr]bool{}
+				ast.Inspect(node, func(n ast.Node) bool {
+					call, ok := n.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					sel, ok := call.Fun.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "Recvfrom" {
+						return true
+					}
+					ident, ok := sel.X.(*ast.Ident)
+					if !ok || ident.Name != unixName {
+						return true
+					}
+					directCallFuns[sel] = true
+					return true
+				})
+				ast.Inspect(node, func(n ast.Node) bool {
+					sel, ok := n.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "Recvfrom" {
+						return true
+					}
+					ident, ok := sel.X.(*ast.Ident)
+					if !ok || ident.Name != unixName {
+						return true
+					}
+					if directCallFuns[sel] {
+						if allowedFn {
+							return true
+						}
+						violations = append(violations, fmt.Sprintf(
+							"%s: direct %s.Recvfrom call in %s — use linuxsock.PpollRecv so the receive is cancellable via ppoll+eventfd (a bare blocking Recvfrom cannot be woken by close and parks on a reused fd); see #17231/#16669",
+							fset.Position(sel.Pos()), unixName, key))
+						return true
+					}
+					violations = append(violations, fmt.Sprintf(
+						"%s: %s.Recvfrom used as a value in %s — Recvfrom may only appear as a direct call inside an allowlisted poll-guarded function; use linuxsock.PpollRecv so the receive is cancellable via ppoll+eventfd (a bare blocking Recvfrom cannot be woken by close and parks on a reused fd); see #17231/#16669",
+						fset.Position(sel.Pos()), unixName, key))
+					return true
+				})
 			}
-			if _, allowed := allowedRecvfromFunctions[funcKey(pkgRel, fn)]; allowed {
-				continue
+			switch decl := decl.(type) {
+			case *ast.FuncDecl:
+				if decl.Body == nil {
+					continue
+				}
+				key := funcKey(pkgRel, decl)
+				_, allowedFn := allowedRecvfromFunctions[key]
+				inspectDecl(decl.Body, key, allowedFn)
+			case *ast.GenDecl:
+				inspectDecl(decl, pkgRel+"::<package-level>", false)
 			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Recvfrom" {
-					return true
-				}
-				ident, ok := sel.X.(*ast.Ident)
-				if !ok || ident.Name != unixName {
-					return true
-				}
-				violations = append(violations, fmt.Sprintf(
-					"%s: direct %s.Recvfrom call in %s — use linuxsock.PpollRecv so the receive is cancellable via ppoll+eventfd (a bare blocking Recvfrom cannot be woken by close and parks on a reused fd); see #17231/#16669",
-					fset.Position(call.Pos()), unixName, funcKey(pkgRel, fn)))
-				return true
-			})
 		}
 		return nil
 	})
