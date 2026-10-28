@@ -118,7 +118,7 @@ func TestDNSApplyResolveRacesMatchPoliciesReader16687(t *testing.T) {
 		_, published := dnsDaemon16687(t)
 		q := policymatch.Query{
 			FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
-			SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.0.1"), DstPort: 443,
+			SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.0.1"), DstPort: policymatch.PortPtr(443),
 		}
 		for range 300 {
 			_ = policymatch.Match(published, q)
@@ -130,7 +130,7 @@ func TestDNSApplyResolveRacesMatchPoliciesReader16687(t *testing.T) {
 		d, published := dnsDaemon16687(t)
 		q := policymatch.Query{
 			FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
-			SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.0.1"), DstPort: 443,
+			SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.0.1"), DstPort: policymatch.PortPtr(443),
 		}
 		stop := make(chan struct{})
 		var wg sync.WaitGroup

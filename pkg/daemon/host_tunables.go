@@ -20,6 +20,7 @@ package daemon
 
 import (
 	"errors"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -79,10 +80,11 @@ func (realHostTunableFS) readFile(path string) ([]byte, error) {
 }
 
 func (realHostTunableFS) writeFile(path string, data []byte) error {
-	// 0644 is the sysfs/proc convention; real writes go through the
-	// kernel's sysfs handler and ignore the mode, but setting it keeps
-	// this identical to `echo > ...`.
-	return os.WriteFile(path, data, 0644)
+	// Route through the shared BestEffortKernelKnob writer (#17068):
+	// values here carry no trailing newline, so trim before the
+	// read-compare-write. The fake FS in tests bypasses this entirely.
+	_, err := fsatomic.WriteKernelKnob(path, strings.TrimSpace(string(data)))
+	return err
 }
 
 func (realHostTunableFS) listNeighDirs(dir string) []string {

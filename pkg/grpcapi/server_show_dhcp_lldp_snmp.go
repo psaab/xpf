@@ -16,6 +16,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcpserver"
+	"github.com/psaab/xpf/pkg/lldp"
 	"github.com/psaab/xpf/pkg/termsafe"
 )
 
@@ -599,44 +600,26 @@ func (s *Server) showDHCPRelay(cfg *config.Config, buf *strings.Builder) {
 
 // showLLDP renders the configured LLDP transmit interval, hold
 // multiplier, hold time, monitored interfaces, and current neighbor
-// count.
+// count via lldp.RenderSummary (the single source of truth shared
+// with the CLI, #17130).
 func (s *Server) showLLDP(cfg *config.Config, buf *strings.Builder) {
-	if cfg == nil || cfg.Protocols.LLDP == nil {
-		buf.WriteString("LLDP not configured\n")
-		return
-	}
-	lldpCfg := cfg.Protocols.LLDP
-	if lldpCfg.Disable {
-		buf.WriteString("LLDP: disabled\n")
-		return
-	}
-	interval := lldpCfg.Interval
-	if interval <= 0 {
-		interval = 30
-	}
-	holdMult := lldpCfg.HoldMultiplier
-	if holdMult <= 0 {
-		holdMult = 4
-	}
-	buf.WriteString("LLDP:\n")
-	fmt.Fprintf(buf, "  Transmit interval: %ds\n", interval)
-	fmt.Fprintf(buf, "  Hold multiplier:   %d\n", holdMult)
-	fmt.Fprintf(buf, "  Hold time:         %ds\n", interval*holdMult)
-	if len(lldpCfg.Interfaces) > 0 {
-		var ifNames []string
-		for _, iface := range lldpCfg.Interfaces {
-			if iface.Disable {
-				ifNames = append(ifNames, iface.Name+" (disabled)")
-			} else {
-				ifNames = append(ifNames, iface.Name)
-			}
+	var lldpCfg *lldp.LLDPConfig
+	if cfg != nil && cfg.Protocols.LLDP != nil {
+		src := cfg.Protocols.LLDP
+		lldpCfg = &lldp.LLDPConfig{
+			Interval:       src.Interval,
+			HoldMultiplier: src.HoldMultiplier,
+			Disable:        src.Disable,
 		}
-		fmt.Fprintf(buf, "  Interfaces:        %s\n", strings.Join(ifNames, ", "))
+		for _, iface := range src.Interfaces {
+			lldpCfg.Interfaces = append(lldpCfg.Interfaces, lldp.LLDPInterface{Name: iface.Name, Disable: iface.Disable})
+		}
 	}
+	neighbors := -1
 	if s.lldpNeighborsFn != nil {
-		neighbors := s.lldpNeighborsFn()
-		fmt.Fprintf(buf, "  Neighbors:         %d\n", len(neighbors))
+		neighbors = len(s.lldpNeighborsFn())
 	}
+	lldp.RenderSummary(buf, lldpCfg, neighbors)
 }
 
 // showLLDPNeighbors renders the live LLDP neighbor table.

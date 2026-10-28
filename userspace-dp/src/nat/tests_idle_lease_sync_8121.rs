@@ -1592,7 +1592,7 @@ const LEASE_CREATION_SITES_8121: &[(&str, &str)] = &[
 fn every_persistent_lease_creation_site_has_a_sync_route_8121() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nat");
     let mut files = Vec::new();
-    crate::afxdp::worker_queue::tests::afxdp_rs_files(&root, &mut files);
+    crate::test_support::source_scan::afxdp_rs_files(&root, &mut files);
 
     let mut found: Vec<String> = Vec::new();
     for path in files {
@@ -1601,11 +1601,11 @@ fn every_persistent_lease_creation_site_has_a_sync_route_8121() {
             .expect("under src/nat")
             .to_string_lossy()
             .replace('\\', "/");
-        if crate::afxdp::worker_queue::tests::is_fixture(&root, &rel) {
+        if crate::test_support::source_scan::is_fixture(&root, &rel) {
             continue;
         }
         let src = std::fs::read_to_string(&path).expect("read source");
-        let cleaned = crate::afxdp::worker_queue::tests::blank_comments_and_strings(&src);
+        let cleaned = crate::test_support::source_scan::blank_comments_and_strings(&src);
         // The enclosing `fn` of each insert: walk forward tracking the most
         // recent top-level-ish `fn` declaration, which is what makes the pin
         // survive line-number churn.
@@ -1672,7 +1672,7 @@ fn the_lease_census_actually_finds_its_population_8121() {
     );
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/nat");
     let mut files = Vec::new();
-    crate::afxdp::worker_queue::tests::afxdp_rs_files(&root, &mut files);
+    crate::test_support::source_scan::afxdp_rs_files(&root, &mut files);
     assert!(
         files.len() > 5,
         "the source walk found {} files under src/nat — the pattern or the root \

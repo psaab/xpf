@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"math"
-	"slices"
 	"sort"
 	"strings"
 )
@@ -469,38 +468,20 @@ func cosUnitRefsResolve(cos *ClassOfServiceConfig, ifName string, unit int, u *C
 				where, u.OutputTrafficControlProfile)
 		}
 	}
-	if u.DSCPClassifier != "" {
-		if _, ok := cos.DSCPClassifiers[u.DSCPClassifier]; !ok {
-			return fmt.Errorf("%s references undefined dscp classifier %q", where, u.DSCPClassifier)
-		}
-	}
-	if u.IEEE8021Classifier != "" {
-		if _, ok := cos.IEEE8021Classifiers[u.IEEE8021Classifier]; !ok {
-			return fmt.Errorf("%s references undefined ieee-802.1 classifier %q", where, u.IEEE8021Classifier)
-		}
-	}
-	// INetPrecedenceClassifiers records NAMES only (#6847), so membership is a
-	// slice scan rather than a map lookup — the same asymmetry the warn path has.
-	if u.INetPrecedenceClassifier != "" {
-		if !slices.Contains(cos.INetPrecedenceClassifiers, u.INetPrecedenceClassifier) {
-			return fmt.Errorf("%s references undefined inet-precedence classifier %q",
-				where, u.INetPrecedenceClassifier)
-		}
-	}
-	if u.DSCPRewriteRule != "" {
-		if _, ok := cos.DSCPRewriteRules[u.DSCPRewriteRule]; !ok {
-			return fmt.Errorf("%s references undefined dscp rewrite-rule %q", where, u.DSCPRewriteRule)
-		}
-	}
-	// IEEE8021RewriteRules is modeled but documented inert on this dataplane.
-	// A dangling name is still an operator typo and still rejected: the gate is
-	// about whether the NAME resolves, not whether the resolved rule has a
-	// runtime effect. Gating only the enforced references would make commit
-	// behaviour depend on an implementation detail invisible from the config.
-	if u.IEEE8021RewriteRule != "" {
-		if _, ok := cos.IEEE8021RewriteRules[u.IEEE8021RewriteRule]; !ok {
-			return fmt.Errorf("%s references undefined ieee-802.1 rewrite-rule %q",
-				where, u.IEEE8021RewriteRule)
+	// #17183: all five bindable code-point kinds resolve through the one
+	// isDefined predicate. The gate is about whether the NAME resolves, not
+	// whether the resolved rule has a runtime effect or any entries: an
+	// entryless-but-defined classifier or rewrite-rule (the normal
+	// intermediate state of an incremental edit, and the #15681 contract)
+	// commits; only a never-defined name rejects. Gating only the enforced
+	// references would make commit behaviour depend on an implementation
+	// detail invisible from the config (e.g. ieee-802.1 rewrite-rules are
+	// modeled but inert on this dataplane, yet a dangling name is still an
+	// operator typo).
+	for _, kind := range cosBoundKinds() {
+		name, bound := kind.bound(u)
+		if bound && !kind.isDefined(cos, name) {
+			return fmt.Errorf("%s references undefined %s %q", where, kind.label, name)
 		}
 	}
 	return nil

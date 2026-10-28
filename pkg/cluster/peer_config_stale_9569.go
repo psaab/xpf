@@ -59,7 +59,7 @@ func (s *SessionSync) peerConfigCapStaleKnown16756() bool {
 	if s == nil {
 		return false
 	}
-	return s.lastSentConfigAckCapable16756.Load()
+	return s.peerIncarnationState().lastSentConfigAckCapable16756.Load()
 }
 
 // PeerConfigStale reports whether handing over to the peer would promote
@@ -85,7 +85,7 @@ func (s *SessionSync) PeerConfigStale() (bool, string) {
 		return false, ""
 	}
 	legacyStale := func() (bool, string) {
-		if nacked := s.peerConfigNackedGen16756.Load(); nacked >= sent {
+		if nacked := s.peerIncarnationState().peerConfigNackedGen16756.Load(); nacked >= sent {
 			return true, fmt.Sprintf("peer predates config-apply ACK and reported it did not apply config generation %d (peer nacked %d)", sent, nacked)
 		}
 		return false, ""

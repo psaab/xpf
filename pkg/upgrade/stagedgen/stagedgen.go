@@ -227,7 +227,7 @@ func (c Config) Publish() (genid string, err error) {
 
 	// 2. Copy staged/* -> <genid>.partial.
 	_ = os.RemoveAll(partial)
-	if err := copyTreeFsync(c.StagedDir, partial); err != nil {
+	if err := fsatomic.CopyTreeDurable(c.StagedDir, partial, fsatomic.CopyTreeOptions{}); err != nil {
 		_ = os.RemoveAll(partial)
 		return "", fmt.Errorf("stagedgen: copy staged -> %s: %w", partial, err)
 	}

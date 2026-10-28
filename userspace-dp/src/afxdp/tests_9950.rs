@@ -1021,7 +1021,7 @@ fn f035_shard_full_drop_is_not_forward_accounted_10285() {
         key
     });
     for key in keys.iter().take(crate::fragment_overlap::OVERLAP_CAP_PER_SHARD) {
-        assert!(!tracker.check_and_record_fragment(
+        assert!(!tracker.record_fragment_and_settle(
             *key,
             0,
             8,
@@ -2044,9 +2044,9 @@ fn f035_enforcement_order_armed_screen_9950() {
         ingress_zone: 0,
         fairness_origin: None,
     };
-    assert!(!t.check_and_record(key, 0, 20, 1_000, &crate::fragment_overlap::FRAG_OVERLAP_DROPPED));
+    assert!(!t.record_and_settle_non_terminal(key, 0, 20, 1_000, &crate::fragment_overlap::FRAG_OVERLAP_DROPPED));
     assert!(
-        t.check_and_record(key, 8, 28, 2_000, &crate::fragment_overlap::FRAG_OVERLAP_DROPPED),
+        t.record_and_settle_non_terminal(key, 8, 28, 2_000, &crate::fragment_overlap::FRAG_OVERLAP_DROPPED),
         "overlapping tail dropped despite passing screens"
     );
 }

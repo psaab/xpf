@@ -36,7 +36,7 @@ func TestHostInboundMappedIPv6DstClassifiedAsV6(t *testing.T) {
 			// dhcpv6 token admits udp/547.
 			name: "mapped-v6 dst udp/547 -> dhcpv6 (ip6) admits",
 			q: Query{
-				FromZone: "edge", ToZone: "junos-host", Protocol: "udp", DstPort: 547,
+				FromZone: "edge", ToZone: "junos-host", Protocol: "udp", DstPort: PortPtr(547),
 				DstIP:     net.ParseIP("::ffff:192.0.2.1"),
 				DstFamily: config.NATAddrFamily("::ffff:192.0.2.1"), // "v6"
 			},
@@ -46,7 +46,7 @@ func TestHostInboundMappedIPv6DstClassifiedAsV6(t *testing.T) {
 			// Control: a genuine v6 destination classifies the same way.
 			name: "genuine v6 dst udp/547 -> dhcpv6 (ip6) admits",
 			q: Query{
-				FromZone: "edge", ToZone: "junos-host", Protocol: "udp", DstPort: 547,
+				FromZone: "edge", ToZone: "junos-host", Protocol: "udp", DstPort: PortPtr(547),
 				DstIP:     net.ParseIP("2001:db8::1"),
 				DstFamily: config.NATAddrFamily("2001:db8::1"), // "v6"
 			},
@@ -57,7 +57,7 @@ func TestHostInboundMappedIPv6DstClassifiedAsV6(t *testing.T) {
 			// token admits udp/67 — the family threading did not break v4.
 			name: "genuine v4 dst udp/67 -> dhcp (ip) admits",
 			q: Query{
-				FromZone: "edge", ToZone: "junos-host", Protocol: "udp", DstPort: 67,
+				FromZone: "edge", ToZone: "junos-host", Protocol: "udp", DstPort: PortPtr(67),
 				DstIP:     net.ParseIP("10.0.0.1"),
 				DstFamily: config.NATAddrFamily("10.0.0.1"), // "v4"
 			},

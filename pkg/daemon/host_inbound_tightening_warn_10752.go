@@ -24,7 +24,7 @@ import (
 // while the stanza is still open. This file closes that gap at the commit
 // funnel — the only applier returning a response object capable of carrying
 // warnings: applyAndSyncCommittedWithPeerSnapshotAuthorization (oldActive +
-// compiled). Other old+new holders (syncAndApply, executeConfirmedRollback)
+// compiled). Other old+new holders (syncAndApplyWithAncestry, executeConfirmedRollback)
 // run the sweep and journal without projecting transition warnings.
 //
 // Firing has two shapes. When this attempt's own conntrack sweep (stashed by

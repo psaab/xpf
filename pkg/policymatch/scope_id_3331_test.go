@@ -144,7 +144,7 @@ func TestMatchResultRuntimeIDMatchesShowPolicies(t *testing.T) {
 	res := Match(cfg, Query{
 		FromZone: "trust", ToZone: "untrust",
 		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.2.5"),
-		Protocol: "udp", DstPort: 9999,
+		Protocol: "udp", DstPort: PortPtr(9999),
 	})
 	if !res.Matched || res.PolicyName != "second" {
 		t.Fatalf("expected match on second, got Matched=%v name=%q", res.Matched, res.PolicyName)

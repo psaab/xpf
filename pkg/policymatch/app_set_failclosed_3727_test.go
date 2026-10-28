@@ -63,7 +63,7 @@ func TestAppSetExpansionFailsClosedUnderDefaultPermit(t *testing.T) {
 		},
 	}, badSetApps())
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 
 	if !res.ContentRejected {
 		t.Fatalf("ContentRejected = false, want true: a malformed application-set must fail-close the simulator like the runtime, not fall through to default-permit (Matched=%v DefaultUsed=%v Action=%v)",
@@ -98,7 +98,7 @@ func TestAppSetExpansionBadSetBeforeAny(t *testing.T) {
 		},
 	}, badSetApps())
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.ContentRejected {
 		t.Fatalf("ContentRejected = false, want true for `[ bad-set any ]` (Matched=%v Action=%v)", res.Matched, res.Action)
 	}
@@ -122,7 +122,7 @@ func TestAppSetExpansionAnyBeforeBadSet(t *testing.T) {
 		},
 	}, badSetApps())
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.ContentRejected {
 		t.Fatalf("ContentRejected = false, want true for `[ any bad-set ]`: the runtime BuildCatalog fail-close is order-insensitive (Matched=%v Action=%v)", res.Matched, res.Action)
 	}
@@ -145,7 +145,7 @@ func TestAppSetExpansionUnrelatedPolicyPoisonsWholeConfig(t *testing.T) {
 	}, badSetApps())
 
 	// This query would match the clean trust->untrust permit pre-fix.
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.ContentRejected {
 		t.Fatalf("ContentRejected = false, want true: a malformed set in dmz->wan must fail the WHOLE config closed, so the trust->untrust permit is not certified (Matched=%v PolicyName=%q Action=%v)",
 			res.Matched, res.PolicyName, res.Action)
@@ -164,7 +164,7 @@ func TestAppSetExpansionGlobalPolicy(t *testing.T) {
 		GlobalPolicies: []*config.Policy{denyPol("g-badset", config.PolicyMatch{Applications: []string{"bad-set"}})},
 	}, badSetApps())
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 80})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(80)})
 	if !res.ContentRejected {
 		t.Fatalf("ContentRejected = false, want true for a malformed set in a global policy (Matched=%v Action=%v)", res.Matched, res.Action)
 	}
@@ -192,7 +192,7 @@ func TestWellFormedAppSetStillMatches(t *testing.T) {
 		},
 	})
 
-	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: 443})
+	res := Match(cfg, Query{FromZone: "trust", ToZone: "untrust", Protocol: "tcp", DstPort: PortPtr(443)})
 	if res.ContentRejected {
 		t.Fatalf("ContentRejected = true for a well-formed nested application-set; reasons=%v", res.ContentRejectionReasons)
 	}
