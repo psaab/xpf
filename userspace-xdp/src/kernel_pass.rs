@@ -378,8 +378,9 @@ pub fn degraded_local_or_control_tail(
 /// The degraded mid composition: the tail arms before the native-GRE
 /// gate. Returns `Some(verdict)` when the zero-hop-limit veto or a
 /// pass arm decides, `None` when only the native-GRE gate remains.
-/// The shim calls this before classifying the GRE inner packet, so the
-/// classifier runs only for packets that reach its gate.
+/// The shim calls this after computing `gre_inner_pass` (guarded by
+/// `native_gre`) but before the mid call, so the read-only GRE inner
+/// session lookup runs even when mid decides; no verdict changes.
 #[inline(always)]
 pub fn degraded_local_or_control_mid(
     destination_is_local: bool,

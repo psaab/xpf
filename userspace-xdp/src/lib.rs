@@ -1920,12 +1920,16 @@ fn is_degraded_local_or_control(
     // Together the stages are exactly the host-executed
     // `degraded_local_or_control`, so
     // reordering any veto or arm inside the composition changes the
-    // executed verdict. Resolution stays lazy in the original order:
-    // every fact is a pure function of inputs the old chain already
-    // loaded (packet fields, ctrl flags, read-only map verdicts); none
-    // mutates state or consumes the packet, each stage's map lookups
-    // run only after the previous stage falls through — exactly as the
-    // former lazy chain ran them — and the GRE inner classification
+    // executed verdict. Resolution stays lazy in the original order,
+    // with one exception: `gre_inner_pass` is computed (guarded by
+    // `native_gre`) before the mid call, so the read-only GRE inner
+    // session lookup runs even when mid decides — one wasted
+    // session-map lookup on the degraded native-GRE path; every
+    // fact is a pure function of inputs the old chain already loaded
+    // (packet fields, ctrl flags, read-only map verdicts); none
+    // mutates state or consumes the packet, so no verdict changes,
+    // and each remaining stage's map lookups run only after the
+    // previous stage falls through. The GRE inner classification
     // reuses the already-resolved `destination_is_local` as the former
     // native-GRE arm did. The staged form is the verifier shape that
     // passes: the fully resolved single call rejects at the 1M cap
@@ -2035,9 +2039,10 @@ fn is_degraded_local_or_control(
     // #10651: degraded twin of the healthy native-GRE inner arm
     // (`gre_classify::native_gre_inner_pass_steers_to_kernel_typed`).
     // The mid stage consults this fact only when `native_gre` is set;
-    // it is resolved here, after the prefix fall-through, on the same
-    // cold path where the former native-GRE arm classified the inner
-    // packet, guarded so non-GRE packets never classify.
+    // it is resolved here — after the prefix fall-through but before
+    // the mid call — guarded so non-GRE packets never classify. The
+    // read-only session lookup therefore also runs when mid decides;
+    // no verdict changes.
     let gre_inner_pass = if native_gre {
         native_gre_inner_pass_steers_to_kernel_typed(
             OuterDestinationLocal::from_is_local_destination(destination_is_local),
