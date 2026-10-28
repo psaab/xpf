@@ -1453,13 +1453,19 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
 /// `ambiguous_zone: None`, so dropping the new parameter (or passing the
 /// scope ifindex's zone instead) stayed green.
 ///
+/// Scope: this is FUNCTION-LEVEL coverage only. This cell drives
+/// `stage_flow_cache_seed` directly and supplies `Some(CLAIMED_ZONE)`
+/// itself, so it cannot observe what the descriptor passes at its
+/// stage-9 call site. That production wiring is pinned separately by
+/// `stage9_descriptor_forwards_ambiguous_zone_to_flow_cache_seed_17031`
+/// below — a structural source assertion that stage-9 forwards the
+/// in-scope `ambiguous_zone` variable (not `None`) in the seed's
+/// `ambiguous_zone` parameter position.
+///
 /// FAIL-ON-REVERT: reverting `stage_flow_cache_seed` to raw-only
 /// (ignoring `ambiguous_zone`) reds the active half (entry stays
 /// unstamped / fabric-zone 0); stamping the claim ungated reds the
 /// inactive half (claimed zone appears despite no local owner proof).
-/// FAIL-ON-REVERT (cont.): dropping the `ambiguous_zone` argument at the
-/// production call site (`mod.rs`, stage-9 -> `stage_flow_cache_seed`)
-/// also reds the active half, because production would again pass `None`.
 #[test]
 fn flow_cache_seed_promotes_ambiguous_zone_only_when_owner_active_17031() {
     // Distinct claimed zone so a stamp cannot be confused with the
@@ -1576,6 +1582,71 @@ fn flow_cache_seed_promotes_ambiguous_zone_only_when_owner_active_17031() {
             );
         }
     }
+}
+
+/// #17031 (Rev18320 round 2): structural pin for the descriptor stage-9
+/// wiring that the function-level seed cell above cannot observe. The
+/// seed cell supplies `Some(CLAIMED_ZONE)` itself, so production could
+/// regress to passing `None` at `mod.rs` stage-9 -> `stage_flow_cache_seed`
+/// and that cell would stay green; this source assertion reds that exact
+/// regression.
+///
+/// FAIL-ON-REVERT: changing the stage-9 argument in the
+/// `ambiguous_zone` position (index 14, between `ingress_zone_override`
+/// and `now_secs`) from `ambiguous_zone` to `None` reds this cell.
+#[test]
+fn stage9_descriptor_forwards_ambiguous_zone_to_flow_cache_seed_17031() {
+    let src = include_str!("mod.rs");
+    // Strip line comments so prose mentioning the seed cannot satisfy
+    // or duplicate the assertions below (mirrors the #7091 wiring guard).
+    let code: String = src
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut calls = code.split("stage_flow_cache_seed(");
+    let _before = calls.next().expect("split yields a leading segment");
+    let call = calls
+        .next()
+        .expect("poll_descriptor/mod.rs must call stage_flow_cache_seed");
+    assert!(
+        calls.next().is_none(),
+        "#17031: expected exactly ONE production stage_flow_cache_seed call \
+         in poll_descriptor/mod.rs; a second call site needs its own \
+         ambiguous_zone wiring argument before this guard can speak for it"
+    );
+    let args_text = call
+        .split(");")
+        .next()
+        .expect("stage-9 seed call must be terminated");
+    let args: Vec<&str> = args_text
+        .split(',')
+        .map(str::trim)
+        .filter(|arg| !arg.is_empty())
+        .collect();
+    assert_eq!(
+        args.len(),
+        21,
+        "#17031: stage_flow_cache_seed call arity drifted; re-pin the \
+         ambiguous_zone position before trusting the index assertions: {args:?}"
+    );
+    assert_eq!(
+        args[13], "ingress_zone_override",
+        "#17031: argument before the ambiguous position must be the raw \
+         proved override (position drift?): {args:?}"
+    );
+    assert_eq!(
+        args[14], "ambiguous_zone",
+        "#17031: descriptor stage-9 must forward the in-scope \
+         ambiguous_zone variable into stage_flow_cache_seed (not None); \
+         found {:?}",
+        args[14]
+    );
+    assert_eq!(
+        args[15], "now_secs",
+        "#17031: argument after the ambiguous position must be now_secs \
+         (position drift?): {args:?}"
+    );
 }
 
 /// #6304 FAIL-ON-REVERT (live call site): a NON-sampled packet on the
