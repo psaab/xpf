@@ -168,9 +168,10 @@ func NATUndefinedZoneRuleSets(cfg *Config) map[NATRuleSetRef]bool {
 // #15278 (D02-02): NAT rule-set from/to interface and routing-instance
 // scopes naming an undefined logical unit or routing-instance. Unlike the
 // zone axis (#15001), the dataplane does not abort — it silently never
-// matches — so strict rejects and tolerant warns + records for any future
-// skip. Interface check mirrors validateZoneInterfaceDefinedStrict's
-// generosity: configured unit, lo0.0, materialized st0, implicit tunnel 0.
+// matches — so strict rejects and tolerant warns while preserving the
+// unresolved scope in the snapshot; no runtime skip record is needed.
+// Interface checks mirror validateZoneInterfaceDefinedStrict's generosity:
+// configured unit, lo0.0, materialized st0, implicit tunnel 0.
 func natInterfaceDefined15278(cfg *Config, ref string) bool {
 	if cfg == nil || ref == "" {
 		return true
@@ -284,94 +285,96 @@ func natRoutingInstanceDefined15278(cfg *Config, name string) bool {
 	return false
 }
 
-func natUndefinedScopeOffenders(cfg *Config) []string {
+// natUndefinedScopeFinding is one per-axis undefined-scope diagnostic.
+// Strict rejection and tolerant warnings project the same findings,
+// preserving the prior source from-interface, to-interface, from-RI,
+// and to-RI ordering, followed by destination and static from scopes
+// (interface before routing-instance) (#17247).
+type natUndefinedScopeFinding struct {
+	Ref   NATRuleSetRef
+	Field string // e.g. "from interface" or "to routing-instance"
+	Value string // the undefined interface or routing-instance name
+}
+
+func (f natUndefinedScopeFinding) message() string {
+	return fmt.Sprintf("%s-nat rule-set %q: %s %q not defined",
+		f.Ref.Kind, f.Ref.Name, f.Field, f.Value)
+}
+
+// natUndefinedScopeFindings is the single undefined-scope walk. Empty
+// scope fields are unscoped and are not findings; nil rule-sets are
+// skipped (#3494 tolerant shape). It preserves the historical source,
+// destination, static and per-axis ordering.
+func natUndefinedScopeFindings(cfg *Config) []natUndefinedScopeFinding {
 	if cfg == nil {
 		return nil
 	}
-	var out []string
-	checkRIface := func(kind, rsName, axis, iface string) {
+	var out []natUndefinedScopeFinding
+	checkInterface := func(ref NATRuleSetRef, field, iface string) {
 		if iface != "" && !natInterfaceDefined15278(cfg, iface) {
-			out = append(out, fmt.Sprintf("%s rule-set %q: %s interface %q not defined", kind, rsName, axis, iface))
+			out = append(out, natUndefinedScopeFinding{
+				Ref: ref, Field: field, Value: iface,
+			})
 		}
 	}
-	checkRI := func(kind, rsName, axis, ri string) {
+	checkRoutingInstance := func(ref NATRuleSetRef, field, ri string) {
 		if ri != "" && !natRoutingInstanceDefined15278(cfg, ri) {
-			out = append(out, fmt.Sprintf("%s rule-set %q: %s routing-instance %q not defined", kind, rsName, axis, ri))
+			out = append(out, natUndefinedScopeFinding{
+				Ref: ref, Field: field, Value: ri,
+			})
 		}
 	}
 	for _, rs := range cfg.Security.NAT.Source {
 		if rs == nil {
 			continue
 		}
-		checkRIface("source-nat", rs.Name, "from", rs.FromInterface)
-		checkRIface("source-nat", rs.Name, "to", rs.ToInterface)
-		checkRI("source-nat", rs.Name, "from", rs.FromRoutingInstance)
-		checkRI("source-nat", rs.Name, "to", rs.ToRoutingInstance)
+		ref := NATRuleSetRef{Kind: "source", Name: rs.Name}
+		checkInterface(ref, "from interface", rs.FromInterface)
+		checkInterface(ref, "to interface", rs.ToInterface)
+		checkRoutingInstance(ref, "from routing-instance", rs.FromRoutingInstance)
+		checkRoutingInstance(ref, "to routing-instance", rs.ToRoutingInstance)
 	}
 	if dnat := cfg.Security.NAT.Destination; dnat != nil {
 		for _, rs := range dnat.RuleSets {
 			if rs == nil {
 				continue
 			}
-			checkRIface("destination-nat", rs.Name, "from", rs.FromInterface)
-			checkRI("destination-nat", rs.Name, "from", rs.FromRoutingInstance)
+			ref := NATRuleSetRef{Kind: "destination", Name: rs.Name}
+			checkInterface(ref, "from interface", rs.FromInterface)
+			checkRoutingInstance(ref, "from routing-instance", rs.FromRoutingInstance)
 		}
 	}
 	for _, rs := range cfg.Security.NAT.Static {
 		if rs == nil {
 			continue
 		}
-		checkRIface("static-nat", rs.Name, "from", rs.FromInterface)
-		checkRI("static-nat", rs.Name, "from", rs.FromRoutingInstance)
+		ref := NATRuleSetRef{Kind: "static", Name: rs.Name}
+		checkInterface(ref, "from interface", rs.FromInterface)
+		checkRoutingInstance(ref, "from routing-instance", rs.FromRoutingInstance)
+	}
+	return out
+}
+
+// natUndefinedScopeOffenders projects the unified walk to per-axis
+// diagnostic strings, preserving source-then-destination-then-static order.
+func natUndefinedScopeOffenders(cfg *Config) []string {
+	findings := natUndefinedScopeFindings(cfg)
+	if len(findings) == 0 {
+		return nil
+	}
+	out := make([]string, len(findings))
+	for i, finding := range findings {
+		out[i] = finding.message()
 	}
 	return out
 }
 
 func validateNATUndefinedScopeStrict(cfg *Config) error {
-	if cfg == nil {
-		return nil
-	}
-	for _, o := range natUndefinedScopeOffenders(cfg) {
-		return fmt.Errorf("%s", o)
+	findings := natUndefinedScopeFindings(cfg)
+	if len(findings) > 0 {
+		return fmt.Errorf("%s", findings[0].message())
 	}
 	return nil
-}
-
-// NATUndefinedScopeRuleSetNames returns "kind\x00name" keys for tolerant record.
-func NATUndefinedScopeRuleSetNames(cfg *Config) map[string]bool {
-	out := make(map[string]bool)
-	if cfg == nil {
-		return out
-	}
-	add := func(kind, name string, bad bool) {
-		if bad {
-			out[kind+"\x00"+name] = true
-		}
-	}
-	for _, rs := range cfg.Security.NAT.Source {
-		if rs == nil {
-			continue
-		}
-		bad := (rs.FromInterface != "" && !natInterfaceDefined15278(cfg, rs.FromInterface)) || (rs.ToInterface != "" && !natInterfaceDefined15278(cfg, rs.ToInterface)) || (rs.FromRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.FromRoutingInstance)) || (rs.ToRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.ToRoutingInstance))
-		add("source", rs.Name, bad)
-	}
-	if dnat := cfg.Security.NAT.Destination; dnat != nil {
-		for _, rs := range dnat.RuleSets {
-			if rs == nil {
-				continue
-			}
-			bad := (rs.FromInterface != "" && !natInterfaceDefined15278(cfg, rs.FromInterface)) || (rs.FromRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.FromRoutingInstance))
-			add("destination", rs.Name, bad)
-		}
-	}
-	for _, rs := range cfg.Security.NAT.Static {
-		if rs == nil {
-			continue
-		}
-		bad := (rs.FromInterface != "" && !natInterfaceDefined15278(cfg, rs.FromInterface)) || (rs.FromRoutingInstance != "" && !natRoutingInstanceDefined15278(cfg, rs.FromRoutingInstance))
-		add("static", rs.Name, bad)
-	}
-	return out
 }
 
 // canonicalizeNATInterfaceScopes rewrites every NAT rule-set interface
@@ -379,10 +382,9 @@ func NATUndefinedScopeRuleSetNames(cfg *Config) map[string]bool {
 // resolving unit-less refs on plain physical interfaces to unit 0 via
 // Config.CanonicalNATInterfaceScopeRef. It runs after section compile
 // (interfaces known) and before the #15278 undefined-scope gate, so the
-// gate judges — and LenientNATUndefinedScopeRuleSets records — the
-// canonical spelling, and hand-built configs that reach the snapshot
-// builders without compile are still normalized there. Bare refs that
-// do not resolve stay bare and keep the gate's disposition.
+// gate judges the canonical spelling, and hand-built configs that reach
+// the snapshot builders without compile are still normalized there. Bare
+// refs that do not resolve stay bare and keep the gate's disposition.
 func canonicalizeNATInterfaceScopes(cfg *Config) {
 	if cfg == nil {
 		return

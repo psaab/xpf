@@ -76,6 +76,8 @@ pub fn is_ipv6_multicast(ip: [u8; 16]) -> bool {
 
 /// Is this IPv6 destination link-local (fe80::/10)?
 #[inline(always)]
+// Host-test-only fixture assertion; early filtering intentionally does not use it.
+#[allow(dead_code)]
 pub fn is_ipv6_link_local(ip: [u8; 16]) -> bool {
     ip[0] == 0xfe && (ip[1] & 0xc0) == 0x80
 }

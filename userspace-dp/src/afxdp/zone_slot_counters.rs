@@ -401,10 +401,7 @@ impl<B: SlotBlock> ZoneSlotStore<B> {
     /// the SAME `Arc` back across applies, so its totals never reset or
     /// double.
     fn zone_totals(&self, zone_id: u32) -> Arc<B> {
-        let mut totals = self
-            .totals
-            .lock()
-            .expect("zone slot counter store poisoned");
+        let mut totals = crate::sync_util::lock_tolerant(&self.totals);
         Arc::clone(totals.entry(zone_id).or_default())
     }
 
@@ -414,10 +411,7 @@ impl<B: SlotBlock> ZoneSlotStore<B> {
     /// snapshot is a straight field copy; the flood snapshot deliberately
     /// stays drops-only, see `flood_counters`).
     pub(in crate::afxdp) fn snapshot_blocks(&self) -> Vec<(u32, Arc<B>)> {
-        let totals = self
-            .totals
-            .lock()
-            .expect("zone slot counter store poisoned");
+        let totals = crate::sync_util::lock_tolerant(&self.totals);
         let mut out: Vec<(u32, Arc<B>)> = totals
             .iter()
             .filter(|(_, t)| !t.is_zero())
@@ -468,10 +462,7 @@ impl<B: SlotBlock> ZoneSlotStore<B> {
     /// no longer sees (traffic would appear to stop counting until the next
     /// config apply).
     pub(in crate::afxdp) fn clear(&self) {
-        let totals = self
-            .totals
-            .lock()
-            .expect("zone slot counter store poisoned");
+        let totals = crate::sync_util::lock_tolerant(&self.totals);
         for block in totals.values() {
             block.reset();
         }
@@ -484,9 +475,7 @@ impl<B: SlotBlock> ZoneSlotStore<B> {
     /// retained, so a slot map rebuilt in the same apply resolves the SAME
     /// block (no reset/double).
     pub(in crate::afxdp) fn reconcile(&self, configured: &FxHashSet<u32>) {
-        self.totals
-            .lock()
-            .expect("zone slot counter store poisoned")
+        crate::sync_util::lock_tolerant(&self.totals)
             .retain(|zone_id, _| configured.contains(zone_id));
     }
 

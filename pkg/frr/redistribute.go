@@ -494,9 +494,17 @@ func (m *Manager) renderRedistComposedMapCluster15158(po *config.PolicyOptionsCo
 // variant-filtered against the ORIGINAL po (route-filter parsing),
 // then rendered against the family-restricted view.
 func (m *Manager) renderRedistComposedMapVariant16864(po *config.PolicyOptionsConfig, name string, chain []string, proto string, ctx redistVariantContext16864, clusterMode bool) string {
-	var filtered []*config.PolicyStatement
-	var names []string
-	var total uint64
+	// #17026: thin adapter over the single chain composer in
+	// route_map_chain.go. Member preparation stays here — per-source
+	// filtering against the authored po, then variant filtering —
+	// because it is redistribute-specific; composition, the SSOT
+	// overflow belt, and the tail are shared with the BGP composer.
+	// The former hand sum of config.RouteMapSequenceCount over the
+	// members (which neither truncated at a terminating member nor
+	// saturated) is gone: composeChainRouteMap consults
+	// config.ComposedChainSequenceCount over these filtered
+	// statements.
+	var members []namedPolicy
 	vpo := redistVariantPO16864(po, ctx)
 	for _, pn := range chain {
 		ps := po.PolicyStatements[pn]
@@ -506,82 +514,21 @@ func (m *Manager) renderRedistComposedMapVariant16864(po *config.PolicyOptionsCo
 		src := redistPolicyForProtocol(ps, proto)
 		f, dropped, denyAlls := redistPolicyForVariant16864(po, src, proto, ctx)
 		logRedistVariantDrop16864(pn, proto, ctx, dropped, denyAlls)
-		filtered = append(filtered, f)
-		names = append(names, pn)
-		// #16868: the sequence bound counts only members that
-		// actually render — the loop below stops at a terminal
-		// default, and members after it (named solely to keep a
-		// terminal guard's attachment composed) emit nothing.
-		total += config.RouteMapSequenceCount(vpo, f)
-		if redistChainMemberTerminal16868(f, proto) {
-			break
-		}
+		members = append(members, namedPolicy{name: pn, stmt: f})
 	}
-	if total > config.MaxRouteMapSequences {
-		slog.Warn("oversized composed redistribute route-map; rendering an explicit deny instead (#15156)",
-			"route_map", name, "sequences", total, "max", config.MaxRouteMapSequences)
-		m.noteQuarantined(name)
-		return renderQuarantineDenyRouteMap(name) + "!\n"
-	}
-	type part struct {
-		definitions string
-		body        string
-		nextPolicy  bool
-		startSeq    int
-		defaultSeq  int
-		defaultVerb string
-	}
-	var parts []part
-	seq := 10
-	terminated := false
-	for i, f := range filtered {
-		definitions, body, next := m.renderPolicyTermSequencesWithDefinitions(vpo, name, name+"-"+names[i], f, seq)
-		p := part{definitions: definitions, body: body, nextPolicy: policyHasNextPolicyTerm(f), startSeq: seq}
-		seq = next
-		switch f.DefaultAction {
-		case "accept":
-			p.defaultVerb = "permit"
-			p.defaultSeq = seq
-			seq += 10
-			terminated = !p.nextPolicy
-		case "reject":
-			p.defaultVerb = "deny"
-			p.defaultSeq = seq
-			seq += 10
-			terminated = !p.nextPolicy
-		}
-		parts = append(parts, p)
-		if terminated {
-			break
-		}
-	}
-	var b strings.Builder
-	for _, p := range parts {
-		b.WriteString(p.definitions)
-	}
+	var leadingTagDeny string
 	if clusterMode && proto == "static" {
-		b.WriteString(clusterTagDeny15158(name))
+		leadingTagDeny = clusterTagDeny15158(name)
 	}
-	fallbackSeq := seq
-	for i, p := range parts {
-		target := fallbackSeq
-		if i+1 < len(parts) {
-			target = parts[i+1].startSeq
-		}
-		if p.nextPolicy {
-			p.body = renderNextPolicyTarget(p.body, target)
-		}
-		b.WriteString(p.body)
-		if p.defaultVerb != "" {
-			fmt.Fprintf(&b, "route-map %s %s %d\n", frrName(name), p.defaultVerb, p.defaultSeq)
-			b.WriteString("exit\n")
-		}
-	}
-	if !terminated {
-		fmt.Fprintf(&b, "route-map %s deny %d\n", frrName(name), fallbackSeq)
-		b.WriteString("exit\n")
-	}
-	return b.String()
+	out := m.composeChainRouteMap(vpo, name, members, chainTail{
+		fallbackAction: "deny",
+		leadingTagDeny: leadingTagDeny,
+		overflowWarn: func(mapName string, n uint64) {
+			slog.Warn("oversized composed redistribute route-map; rendering an explicit deny instead (#15156)",
+				"route_map", mapName, "sequences", n, "max", config.MaxRouteMapSequences)
+		},
+	})
+	return out
 }
 
 // redistOrSeqSpan16868 is one sequence span inside a scratch body.
@@ -631,9 +578,13 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 	// render as a lone quarantine deny, indistinguishable from a
 	// genuine single-deny chain — detect it arithmetically so a
 	// non-final quarantine stays fail-closed for the whole map.
+	// #17026: the arithmetic is the shared SSOT over the same
+	// filtered members the single-chain composer counts, not a
+	// hand sum.
 	vpo := redistVariantPO16864(po, ctx)
 	for _, chain := range chains {
-		var total uint64
+		counts := make(map[string]*config.PolicyStatement, len(chain))
+		names := make([]string, 0, len(chain))
 		for _, pn := range chain {
 			ps := po.PolicyStatements[pn]
 			if ps == nil {
@@ -641,12 +592,10 @@ func (m *Manager) renderRedistOrComposedMap16868(po *config.PolicyOptionsConfig,
 			}
 			src := redistPolicyForProtocol(ps, proto)
 			f, _, _ := redistPolicyForVariant16864(po, src, proto, ctx)
-			total += config.RouteMapSequenceCount(vpo, f)
-			if redistChainMemberTerminal16868(f, proto) {
-				break
-			}
+			counts[pn] = f
+			names = append(names, pn)
 		}
-		if total > config.MaxRouteMapSequences {
+		if total := config.ComposedChainSequenceCount(vpo, counts, names); total > config.MaxRouteMapSequences {
 			m.noteQuarantined(name)
 			return renderQuarantineDenyRouteMap(name) + "!\n"
 		}

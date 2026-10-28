@@ -110,8 +110,10 @@ func TestFactoryResetGatesAndEntersResetGeneration(t *testing.T) {
 	d.applySem.Release(1)
 
 	// (3) In the reset generation, a racing commit / HA-sync must be REJECTED
-	// before it persists (which would re-create the erased .configdb SSOT). The
-	// guard sits before any nil-store access, so these return cleanly.
+	// before it persists (which would re-create the erased .configdb SSOT).
+	// This bare Daemon intentionally has no store: commitAndApply's #16719
+	// RollbackDiscardGen sample is before applySem, so the reset check must
+	// precede that sample and return the reset error (not a nil-store panic).
 	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(), "", peerSyncNever); !errors.Is(err, errDaemonResetting) {
 		t.Fatalf("commitAndApply must be rejected during a factory reset; got %v", err)
 	}

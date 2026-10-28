@@ -516,8 +516,8 @@ fn nat_translated_entry() -> FlowCacheEntry {
     entry.decision.nat = nat;
     entry.descriptor.rewrite_src_ip = nat.rewrite_src;
     entry.descriptor.rewrite_dst_ip = nat.rewrite_dst;
-    entry.descriptor.ip_csum_delta = crate::afxdp::checksum::compute_ip_csum_delta(&flow, &nat);
-    entry.descriptor.l4_csum_delta = crate::afxdp::checksum::compute_l4_csum_delta(&flow, &nat);
+    entry.descriptor.ip_csum_delta = crate::afxdp::frame::compute_ip_csum_delta(&flow, &nat);
+    entry.descriptor.l4_csum_delta = crate::afxdp::frame::compute_l4_csum_delta(&flow, &nat);
     entry
 }
 
@@ -1388,6 +1388,7 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         &policy_counter,
         crate::filter::TermMatchExtra::default(),
         None,
+        None,
         0,
         0,
         false,
@@ -1426,6 +1427,7 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         &policy_counter,
         crate::filter::TermMatchExtra::default(),
         None,
+        None,
         0,
         0,
         false,
@@ -1443,6 +1445,292 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
             )
             .is_some(),
         "install_failed=false must allow the ordinary flow-cache seed"
+    );
+}
+/// #17031 (Rev18320 M1): `stage_flow_cache_seed` must actually stamp a
+/// promoted ambiguous claim, and must NOT stamp it when the owner RG is
+/// not locally active. Before the fold every seed caller passed
+/// `ambiguous_zone: None`, so dropping the new parameter (or passing the
+/// scope ifindex's zone instead) stayed green.
+///
+/// Scope: this is FUNCTION-LEVEL coverage only. This cell drives
+/// `stage_flow_cache_seed` directly and supplies `Some(CLAIMED_ZONE)`
+/// itself, so it cannot observe what the descriptor passes at its
+/// stage-9 call site. That production wiring is pinned separately by
+/// `stage9_descriptor_forwards_ambiguous_zone_to_flow_cache_seed_17031`
+/// below — a structural source assertion that stage-9 forwards the
+/// in-scope `ambiguous_zone` variable (not `None`) in the seed's
+/// `ambiguous_zone` parameter position.
+///
+/// FAIL-ON-REVERT: reverting `stage_flow_cache_seed` to raw-only
+/// (ignoring `ambiguous_zone`) reds the active half (entry stays
+/// unstamped / fabric-zone 0); stamping the claim ungated reds the
+/// inactive half (claimed zone appears despite no local owner proof).
+#[test]
+fn flow_cache_seed_promotes_ambiguous_zone_only_when_owner_active_17031() {
+    // Distinct claimed zone so a stamp cannot be confused with the
+    // fixture's trust/untrust zones or with a raw override.
+    const CLAIMED_ZONE: u32 = TEST_DMZ_ZONE_ID;
+    let now_secs: u64 = 1;
+
+    for (rg_active, expect_stamped) in [(true, true), (false, false)] {
+        let mut fixture =
+            LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+        // Owner RG of the cached decision's egress (EGRESS_IFINDEX) is RG1.
+        fixture
+            .forwarding
+            .egress
+            .get_mut(&EGRESS_IFINDEX)
+            .expect("zone-accounting fixture seeds the egress")
+            .redundancy_group = 1;
+        // The logical ingress (20080) carries no zone, so without a
+        // stamped override the seed's from-zone resolves to 0 and
+        // nothing is stamped — the NOT-stamped assertion is therefore
+        // discriminating, not vacuous.
+        assert_eq!(
+            fixture
+                .forwarding
+                .ifindex_to_zone_id
+                .get(&LOGICAL_INGRESS_IFINDEX),
+            None,
+            "precondition: logical ingress must be unzoned"
+        );
+        if rg_active {
+            fixture.ha_state.insert(
+                1,
+                HAGroupRuntime {
+                    active: true,
+                    watchdog_timestamp: now_secs,
+                    lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+                },
+            );
+        }
+        let frame = vlan_tagged_tcp_v4_frame(0);
+        let meta = test_meta(&frame);
+        let key = test_key();
+        let flow = Some(SessionFlow {
+            src_ip: key.src_ip,
+            dst_ip: key.dst_ip,
+            forward_key: key.clone(),
+        });
+        let next_hop = cached_entry()
+            .decision
+            .resolution
+            .next_hop
+            .expect("cached decision carries a next-hop");
+        let live_mac = cached_entry()
+            .decision
+            .resolution
+            .neighbor_mac
+            .expect("cached decision carries a neighbor MAC");
+        fixture
+            .dynamic_neighbors
+            .insert((EGRESS_IFINDEX, next_hop), NeighborEntry { mac: live_mac });
+        let worker_ctx = fixture.worker_ctx();
+        let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+        let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
+        let mut flow_cache = FlowCache::new();
+        stage_flow_cache_seed(
+            &mut flow_cache,
+            &flow,
+            meta,
+            ValidationState::default(),
+            cached_entry().decision,
+            None,
+            0,
+            // session_ingress_zone=None so from_forward_decision leaves
+            // metadata.ingress_zone == 0 and the seed stamp block runs.
+            None,
+            false,
+            false,
+            0,
+            &policy_counter,
+            crate::filter::TermMatchExtra::default(),
+            // raw proved override: none — the claim arrives ambiguous only.
+            None,
+            Some(CLAIMED_ZONE),
+            now_secs,
+            0,
+            false,
+            false,
+            &neighbor_epoch_snapshot,
+            &worker_ctx,
+        );
+        let entry = flow_cache
+            .lookup(
+                &key,
+                FlowCacheLookup::for_packet(meta, ValidationState::default(), &fixture.forwarding),
+                1,
+                &fixture.rg_epochs,
+            )
+            .expect("seed must install a flow-cache entry in both halves");
+        if expect_stamped {
+            assert_eq!(
+                entry.metadata.ingress_zone, CLAIMED_ZONE,
+                "#17031: active owner RG must promote the ambiguous claim \
+                 into the seed's stamped ingress_zone"
+            );
+        } else {
+            assert_eq!(
+                entry.metadata.ingress_zone, 0,
+                "#17031: inactive owner RG must NOT stamp the ambiguous \
+                 claim (fabric/unzoned ingress governs, zone 0)"
+            );
+            assert_ne!(
+                entry.metadata.ingress_zone, CLAIMED_ZONE,
+                "#17031: unpromoted claim must never appear as the stamp"
+            );
+        }
+    }
+}
+
+/// #17031 (Rev18320 round 2/3): structural pin for the descriptor stage-9
+/// wiring that the function-level seed cell above cannot observe. The
+/// seed cell supplies `Some(CLAIMED_ZONE)` itself, so production could
+/// regress to passing `None` at `mod.rs` stage-9 -> `stage_flow_cache_seed`
+/// and that cell would stay green; this source assertion reds that exact
+/// regression.
+///
+/// STRUCTURAL, not raw-text (round 3): comments and string/char literal
+/// bodies are blanked with the shared #17152 helper first, then the one
+/// whole-identifier `stage_flow_cache_seed` call is extracted by
+/// balanced-paren matching and its argument list is split only on
+/// depth-0 commas. The round-2 guard split the raw text on the callee
+/// name and on `,`/`);`, so a 21-argument decoy written inside a string
+/// satisfied it while the real call passed `None` — a false green,
+/// proven in review. A decoy in prose or a literal is blanked before
+/// matching and can no longer satisfy (or duplicate) this guard; only
+/// the actual call expression is inspected. The crate has no direct
+/// `syn` dev-dependency, so this token-level matcher follows the
+/// established `blank_comments_and_strings` + depth-0 segment pattern
+/// (`protocol::cos_literal_guard_7689`, `afxdp::session_glue` scans).
+///
+/// FAIL-ON-REVERT: changing the stage-9 argument in the
+/// `ambiguous_zone` position (index 14, between `ingress_zone_override`
+/// and `now_secs`) from `ambiguous_zone` to `None` reds this cell, as
+/// does planting a decoy call in a string/comment while doing so.
+#[test]
+fn stage9_descriptor_forwards_ambiguous_zone_to_flow_cache_seed_17031() {
+    use crate::test_support::source_scan::blank_comments_and_strings;
+
+    let src = include_str!("mod.rs");
+    let code = blank_comments_and_strings(src);
+    let bytes = code.as_bytes();
+    let needle = "stage_flow_cache_seed";
+    let mut call_args: Vec<Vec<String>> = Vec::new();
+    let mut from = 0usize;
+    while let Some(hit) = code[from..].find(needle) {
+        let start = from + hit;
+        let after_name = start + needle.len();
+        from = after_name;
+        let ident_byte = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_';
+        let before_ok = start == 0 || !ident_byte(&bytes[start - 1]);
+        let after_ok = !bytes.get(after_name).is_some_and(ident_byte);
+        if !before_ok || !after_ok {
+            continue;
+        }
+        let mut open = after_name;
+        while open < bytes.len() && bytes[open].is_ascii_whitespace() {
+            open += 1;
+        }
+        if bytes.get(open) != Some(&b'(') {
+            continue;
+        }
+        // Do not mistake a function declaration's parameter list for a call.
+        let before = code[..start].trim_end();
+        if before
+            .rsplit(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .next()
+            == Some("fn")
+        {
+            continue;
+        }
+        // Balanced-paren extraction of THIS call's argument list: nested
+        // calls/groups cannot terminate it early at an inner `)`/`;`.
+        let mut depth = (0i32, 0i32, 0i32);
+        let mut close = None;
+        for i in open..bytes.len() {
+            match bytes[i] {
+                b'(' => depth.0 += 1,
+                b')' => {
+                    depth.0 -= 1;
+                    if depth == (0, 0, 0) {
+                        close = Some(i);
+                        break;
+                    }
+                }
+                b'[' => depth.1 += 1,
+                b']' => depth.1 -= 1,
+                b'{' => depth.2 += 1,
+                b'}' => depth.2 -= 1,
+                _ => {}
+            }
+        }
+        let close = close.expect(
+            "#17031: stage_flow_cache_seed call in poll_descriptor/mod.rs \
+             has unbalanced parentheses; cannot pin its wiring",
+        );
+        // Split only on depth-0 commas, so commas inside a nested
+        // argument expression never shift the pinned positions.
+        let mut args: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut depth = (0i32, 0i32, 0i32);
+        for ch in code[open + 1..close].chars() {
+            match ch {
+                '(' => depth.0 += 1,
+                ')' => depth.0 -= 1,
+                '[' => depth.1 += 1,
+                ']' => depth.1 -= 1,
+                '{' => depth.2 += 1,
+                '}' => depth.2 -= 1,
+                _ => {}
+            }
+            if ch == ',' && depth == (0, 0, 0) {
+                args.push(std::mem::take(&mut cur));
+            } else {
+                cur.push(ch);
+            }
+        }
+        args.push(cur);
+        let args: Vec<String> = args
+            .iter()
+            .map(|arg| arg.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|arg| !arg.is_empty())
+            .collect();
+        call_args.push(args);
+    }
+    assert_eq!(
+        call_args.len(),
+        1,
+        "#17031: expected exactly ONE production stage_flow_cache_seed call \
+         in poll_descriptor/mod.rs (comments/strings blanked); found {}; a \
+         second call site needs its own ambiguous_zone wiring argument \
+         before this guard can speak for it",
+        call_args.len()
+    );
+    let args = &call_args[0];
+    assert_eq!(
+        args.len(),
+        21,
+        "#17031: stage_flow_cache_seed call arity drifted; re-pin the \
+         ambiguous_zone position before trusting the index assertions: {args:?}"
+    );
+    assert_eq!(
+        args[13], "ingress_zone_override",
+        "#17031: argument before the ambiguous position must be the raw \
+         proved override (position drift?): {args:?}"
+    );
+    assert_eq!(
+        args[14], "ambiguous_zone",
+        "#17031: descriptor stage-9 must forward the in-scope \
+         ambiguous_zone variable into stage_flow_cache_seed (not None); \
+         found {:?}",
+        args[14]
+    );
+    assert_eq!(
+        args[15], "now_secs",
+        "#17031: argument after the ambiguous position must be now_secs \
+         (position drift?): {args:?}"
     );
 }
 
@@ -4128,6 +4416,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
                 &policy_counter,
                 crate::filter::TermMatchExtra::default(),
                 None,
+                None,
                 0,
                 0,
                 false,
@@ -4290,6 +4579,7 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
                 0,
                 &policy_counter,
                 crate::filter::TermMatchExtra::default(),
+                None,
                 None,
                 0,
                 0,

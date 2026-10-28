@@ -677,8 +677,11 @@ pub(super) fn arb_nat_packet() -> impl Strategy<Value = ValidPacket> {
 }
 
 /// Family-matched NAT decision: any non-empty subset of
-/// {src ip, dst ip, sport, dport}. Never NAT64/NPTv6 (the descriptor
-/// path refuses those and the flow cache never builds them).
+/// {src ip, dst ip, sport, dport}. Never NAT64: arbitrary cross-family rewrites
+/// are unsupported here. The generator leaves `nptv6` false because arbitrary
+/// v6 address rewrites need not be checksum-neutral; deterministic neutral
+/// NPTv6 and NPTv6+DNAT cases live in `rewrite.rs` and
+/// `nat_l4_rule_parity_17250.rs`.
 pub(super) fn arb_nat(v6: bool) -> impl Strategy<Value = NatDecision> {
     (
         1u8..16,

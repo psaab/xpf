@@ -1455,6 +1455,19 @@ type Daemon struct {
 	// pass. Guarded by rethServicesMu.
 	rethServicesMu      sync.Mutex
 	rethServicesApplied map[int]bool
+	// nonVIPAnnounceMu / nonVIPAnnounced guard the legacy-VRRP non-VIP
+	// announce (#17052) against duplicate bursts within one activation.
+	// The map value is the rg-state ACTIVATION generation claimed
+	// (rgStateMachine.CurrentActivation — increments only on
+	// inactive->active transitions, never on no-change reconcile
+	// inputs). SendAnnounceTargets is edge-triggered, so whichever
+	// producer (cluster event, VRRP MASTER event, or reconcile pass)
+	// first observes an activation claims its generation here; the
+	// marker is cleared explicitly on the deactivation arms
+	// (clearLegacyNonVIPAnnounce) so the next failover announces again.
+	// Guarded by nonVIPAnnounceMu.
+	nonVIPAnnounceMu sync.Mutex
+	nonVIPAnnounced  map[int]uint64
 
 	// blackholeRoutes tracks blackhole routes injected for inactive RG subnets.
 	// When an RG goes BACKUP, we inject blackhole routes for its RETH subnets
@@ -1750,6 +1763,10 @@ type Daemon struct {
 	// RG, not per send. Guarded by garpClampWarnMu.
 	garpClampWarnMu sync.Mutex
 	garpClampWarned map[int]bool
+	// poolTruncWarned dedups the #8405 pool-truncation warning per RG
+	// (#17052: split from garpClampWarned so a clamp warning no longer
+	// suppresses the distinct truncation warning). Guarded by garpClampWarnMu.
+	poolTruncWarned map[int]bool
 	// localFailoverCommitReady tracks whether this node has already
 	// applied the local side of a freshly committed transfer request for
 	// each RG. The cluster manager waits on this before telling the peer
@@ -2319,6 +2336,7 @@ func New(opts Options) (*Daemon, error) {
 		rethServicesApplied:        make(map[int]bool),
 		localFailoverCommitReady:   make(map[int]bool),
 		localFailoverCommitTimeout: 3 * time.Second,
+		nonVIPAnnounced:            make(map[int]uint64),
 		localFailoverCommitDelay:   200 * time.Millisecond,
 		failoverActuations:         *newFailoverActuationRegistry(),
 		userspaceDemotionPrepUntil: make(map[int]time.Time),
