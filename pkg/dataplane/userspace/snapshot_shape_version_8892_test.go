@@ -662,8 +662,9 @@ const (
 	// v76 (#17684) changes RulePriority semantics only; the shape is stable.
 	// v77 (#17099) adds typed pool identity to lease records; the protocol
 	// pin moves. #17247 removes `Config.LenientNATUndefinedScopeRuleSets`,
-	// a compile-time-only `json:"-"` field. That changes this Go reflection
-	// digest but not wire shape, so re-pin the golden without another bump.
+	// a compile-time-only `json:"-"` field. The pre-exemption walk counted its
+	// line, but the post-exemption walk skips ConfigSnapshot.Config entirely, so
+	// the removal contributes zero lines and leaves the current digest unchanged.
 	// v77 BASELINE RECONCILIATION (#18326, not a wire bump): ProtocolVersion
 	// was already 77 (#17099), while this shape pin/golden remained at 76.
 	// Reconciliation includes #17229's removal of UserspaceMapPins.DnatTable
