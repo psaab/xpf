@@ -335,3 +335,111 @@ func TestDeleteRescueConfigSkipsNewerSave_17825(t *testing.T) {
 		t.Fatalf("DeleteRescueConfig error = %v, want ErrRescueDeleteSuperseded", deleteErr)
 	}
 }
+
+var errInjectedRescueUnlink = errors.New("injected rescue unlink failure")
+
+// TestFailedNewerRescueDeleteDoesNotSupersedeOlderDelete_18358 pins the
+// Rev18358Task-2 finding on PR #18358: DeleteRescueConfig must advance
+// rescueAppliedGen only after its unlink and dir sync succeed. An older
+// delete claims generation N and pauses before rescueMu; a newer delete
+// claims N+1 and fails its unlink (injected). The failed attempt must not
+// advance rescueAppliedGen, so the older delete proceeds rather than
+// reporting ErrRescueDeleteSuperseded.
+func TestFailedNewerRescueDeleteDoesNotSupersedeOlderDelete_18358(t *testing.T) {
+	restoreRollbackSeams(t)
+	s := newTestStore(t)
+	if _, err := s.SyncApply("system { host-name before-delete-18358; }", nil); err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	if err := s.SaveRescueConfig(); err != nil {
+		t.Fatalf("initial SaveRescueConfig: %v", err)
+	}
+	rescuePath := s.rescuePath()
+
+	failUnlink := true
+	origRemove := rbRemove
+	rbRemove = func(path string) error {
+		if failUnlink && path == rescuePath {
+			return errInjectedRescueUnlink
+		}
+		return origRemove(path)
+	}
+	t.Cleanup(func() { rbRemove = origRemove })
+
+	appliedBefore := rescueAppliedGenForTest(s)
+	olderClaimed := make(chan struct{})
+	releaseOlder := make(chan struct{})
+	releaseOnce := sync.Once{}
+	releaseOlderFn := func() { releaseOnce.Do(func() { close(releaseOlder) }) }
+	var claimCount int
+	var claimMu sync.Mutex
+	oldBarrier := rescueDeleteClaimBarrier
+	t.Cleanup(func() { rescueDeleteClaimBarrier = oldBarrier })
+	rescueDeleteClaimBarrier = func() {
+		claimMu.Lock()
+		claimCount++
+		first := claimCount == 1
+		claimMu.Unlock()
+		if first {
+			close(olderClaimed)
+			<-releaseOlder
+		}
+	}
+	defer releaseOlderFn()
+
+	olderDone := make(chan error, 1)
+	go func() { olderDone <- s.DeleteRescueConfig() }()
+	select {
+	case <-olderClaimed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("older delete did not claim its generation")
+	}
+
+	// The newer delete claims the next generation and runs while the older
+	// delete is held before rescueMu.
+	newerDone := make(chan error, 1)
+	go func() { newerDone <- s.DeleteRescueConfig() }()
+	select {
+	case err := <-newerDone:
+		if !errors.Is(err, errInjectedRescueUnlink) {
+			t.Fatalf("newer DeleteRescueConfig error = %v, want injected unlink failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("newer delete did not finish")
+	}
+	if _, err := os.Stat(rescuePath); err != nil {
+		t.Fatalf("rescue.conf must survive a failed delete: %v", err)
+	}
+	loaded, err := s.LoadRescueConfig()
+	if err != nil || !strings.Contains(loaded, "before-delete-18358") {
+		t.Fatalf("rescue.conf must remain loadable after failed delete: loaded=%q err=%v", loaded, err)
+	}
+	if got := rescueAppliedGenForTest(s); got != appliedBefore {
+		t.Errorf("rescueAppliedGen after failed newer delete = %d, want unchanged %d", got, appliedBefore)
+	}
+
+	// Disable the injected failure; the older delete must now apply
+	// successfully instead of being superseded by the failed try.
+	failUnlink = false
+	releaseOlderFn()
+	select {
+	case err := <-olderDone:
+		if errors.Is(err, ErrRescueDeleteSuperseded) {
+			t.Fatalf("older delete superseded by FAILED newer delete")
+		}
+		if err != nil {
+			t.Fatalf("older DeleteRescueConfig: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("older delete did not finish")
+	}
+	if _, err := os.Stat(rescuePath); !os.IsNotExist(err) {
+		t.Fatalf("rescue.conf must be removed by the older delete: stat err=%v", err)
+	}
+}
+
+func rescueAppliedGenForTest(s *Store) uint64 {
+	s.rescueMu.Lock()
+	defer s.rescueMu.Unlock()
+	return s.rescueAppliedGen
+}
