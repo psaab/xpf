@@ -1,24 +1,39 @@
 // Control-socket request dispatcher.
 //
-// #1345 split: the original 415-LOC `handle_stream` body has been
-// decomposed into per-verb files in this directory module. This
-// `mod.rs` retains only:
-//   - Stream timeout setup
-//   - BufReader / size-capped read_until / decode (#2523)
-//   - `state.lock()` critical section
-//   - `match request.request_type.as_str()` dispatch into per-verb
-//     handlers (substantive verbs) or inline bodies (trivial arms:
-//     `ping`/`status`, `update_fabrics`, `clear_policy_counters`,
-//     `clear_nat_counters`, `clear_zone_counters`, `shutdown`, catch-all)
-//   - Post-match `refresh_status` + status attach (gated by
-//     `!suppress_status`)
-//   - Post-lock `write_state` (when `persist_state` is set)
-//   - BufWriter / serde_json / newline / flush
-//
-// All per-verb files are byte-identical to the corresponding match
-// arm in the pre-split `handlers.rs` modulo the `&mut ServerState`
-// parameter substitution. See
-// `docs/pr/1345-server-handlers-split/plan.md` for the full design.
+// #1345 split the original `handle_stream` body into per-verb files in
+// this directory module; the bodies have diverged since the split.
+// `handle_stream` runs in phases:
+//   - Stream timeout setup, BufReader / size-capped read_until, and
+//     decode of one request (#2523).
+//   - Off-lock session verbs, served without the `ServerState` mutex:
+//     `sync_session` (#7209) and `list_sessions_by_policy` on either
+//     socket, plus — on the session socket only — `ping` and the
+//     lease-only `update_ha_state` fast path (#9629). Any other verb on
+//     the session socket is refused without taking the lock.
+//   - The locked match: `state.lock()` (via `lock_server_state_recover`)
+//     is taken once, still under that single lock, before the match
+//     dispatches into per-verb handlers or inline arms (`ping`,
+//     `status`, `scheduler_heartbeat`, `fib_dump`, `update_fabrics`,
+//     `clear_policy_counters`, `clear_nat_counters`, `clear_zone_counters`,
+//     `clear_flood_counters`, `clear_filter_counters`, `shutdown`,
+//     catch-all), followed by post-match `refresh_status` + status attach
+//     (gated by `!suppress_status`) unless a deferred wait that re-derives
+//     status is owed (`Deferred::status_after_wait`: settle, owner-RG
+//     export, all-sessions export).
+//   - Deferred off-lock waits (`Deferred`, #17135): the binding-settle
+//     poll (#5862), the owner-RG export ack-wait (#2962), and the
+//     all-sessions export push (#4054) wait off-lock, then each
+//     re-derives status under a fresh short lock acquisition afterwards
+//     (still gated by `!suppress_status`). The session-counter collect
+//     (#7919) is the exception: `Deferred::CounterQuery` is recorded
+//     outside the attach gate (`status_after_wait` is false for it), so
+//     the in-lock attach above already ran, and its `collect` only waits
+//     for the per-worker replies — it takes no fresh lock and does no
+//     status re-derivation.
+//   - Encode + flush via BufWriter / serde_json / newline; only after a
+//     successful flush, `write_state` persists (when `persist_state` is
+//     set), and a failed flush arms delta loss on drained contributors
+//     (#5294/#16584).
 
 mod session_counters;
 mod binding;
@@ -276,7 +291,7 @@ pub(crate) fn handle_stream(
     session_domain: SessionDomain,
     // #9629: which socket accepted this connection. Session `update_ha_state`
     // takes the lease fast path (never `ServerState`); Main takes the locked
-    // path (today's behavior, byte-identical).
+    // path.
     mode: SocketMode,
 ) -> Result<(), String> {
     stream
@@ -353,9 +368,9 @@ pub(crate) fn handle_stream(
         persistent_nat_lease_count: 0,
     };
     let mut persist_state = false;
-    // Capture suppress_status before the match — bool is Copy so this
-    // is byte-identical, but reading it up front insulates the
-    // dispatcher from future partial-move concerns on `request`.
+    // Capture suppress_status before the match — reading it up front
+    // insulates the dispatcher from future partial-move concerns on
+    // `request`.
     let suppress_status = request.suppress_status;
     let is_fib_dump = request.request_type == "fib_dump";
     let neighbor_replace = request.neighbor_replace;
@@ -374,7 +389,8 @@ pub(crate) fn handle_stream(
     let mut drained_delta_slots: Vec<u32> = Vec::new();
     let mut drained_delta_workers: Vec<u32> = Vec::new();
 
-    // #7209: THE ONE VERB SERVED WITHOUT `state.lock()`.
+
+    // #7209: THE VERBS SERVED WITHOUT `state.lock()`.
     //
     // Everything below this block takes the snapshot-wide mutex, which
     // `apply_snapshot` holds across a 10 s worker-readiness barrier, a 500 ms

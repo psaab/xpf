@@ -3,17 +3,16 @@
 pure functions the deployer relies on (fable-review-165 H-24).
 
 The deployer is 1348 lines imported/executed by nothing. The single most
-load-bearing piece is `_gate_mixed_base` — the Python "EXACT mirror of
-upgrade.GateMixedBaseSwap". That gate decides whether a LANE-2 HA image roll
-can preserve sessions across the failover; its docstring leans on the Go
-side's tests, and nothing here stops the mirror from drifting from the Go
-gate (pkg/upgrade/imageversions.go:139, pkg/upgrade/imageversions_test.go).
-
-These vectors are the SAME ones the Go test pins (imageversions_test.go):
-peer HA 1 or 2 in window [1,2] + sync 3 -> survive; peer HA 0 / below floor /
-above ceiling / sync-mismatch / sync-0 / negative -> fail closed. RED on any
-fix-forward that relaxes a leg (drops the session-sync exact-match, treats an
-unknown peer as compatible, or widens the HA window).
+load-bearing piece is `_gate_mixed_base` — the LANE-2 Python executor of
+the single Go rule `upgrade.GateProtocolCompat` (#17091). That gate
+decides whether a LANE-2 HA image roll can preserve sessions across the
+failover. The Go and Python bodies are pinned against each other by the
+SHARED fixture `mixed_base_gate_fixture.json` in this directory,
+consumed by MixedBaseFixture17091Tests here and by
+TestMixedBaseGateFixture17091 in pkg/upgrade — the vectors are no longer
+retyped per language. RED on any fix-forward that relaxes a leg (drops
+the session-sync exact-match, treats an unknown peer as compatible, or
+widens the HA window).
 
 Also covers the surrounding pure surface H-24 lists as untested:
 `_u16`, `_read_image_manifest_versions` (the manifest key round-trip that
@@ -24,6 +23,7 @@ feeds the gate), `_node_protocol_versions` (the peer probe parse),
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -87,7 +87,7 @@ class MixedBaseGateTests(unittest.TestCase):
     def setUp(self):
         self.img = _manifest_dict()  # HA 2, floor 1, sync 3
 
-    # --- survive legs (must match GateMixedBaseSwap true cases) ---
+    # --- survive legs (must match GateProtocolCompat true cases) ---
     def test_peer_in_window_and_sync_match_survives(self):
         survive, reason = xpf_deploy._gate_mixed_base(self.img, _peer(1, 3))
         self.assertTrue(survive, reason)
@@ -147,6 +147,73 @@ class MixedBaseGateTests(unittest.TestCase):
             "session_sync_protocol_version: 70000"))
         survive, _ = xpf_deploy._gate_mixed_base(img, _peer(1, 3))
         self.assertFalse(survive)
+
+# ── #17091: shared cross-language fixture (single source of vectors) ────
+class MixedBaseFixture17091Tests(unittest.TestCase):
+    """Consumes mixed_base_gate_fixture.json — the SAME file the Go
+    TestMixedBaseGateFixture17091 reads — so the Python LANE-2 executor
+    (_gate_mixed_base, RefuseUnknownWire) and the Go rule
+    (GateProtocolCompat) cannot drift behind retyped tables.
+
+    The Python executor judges from string dicts and has no
+    target-error channel: a fixture 'error' row (nil/missing target)
+    must surface as (False, reason naming the missing key) here, while
+    Go surfaces it as ProtocolCompatVerdict.Err. 'permit' rows are
+    LANE-1-only: this executor always refuses an unknown wire, so a
+    permit/survive row must REFUSE here — that asymmetry is the one
+    deliberate policy difference, pinned explicitly.
+
+    RED on mutation: flip the peer_sync == 0 refusal and
+    unknown-wire-refuse-policy fails; drop the exact-match leg and
+    sync-mismatch fails; widen the HA window and peer-below-floor /
+    peer-newer-than-target fail."""
+
+    _FIXTURE = json.loads(
+        (Path(__file__).resolve().parent
+         / "mixed_base_gate_fixture.json").read_text())
+
+    def test_shared_fixture_vectors(self):
+        cases = self._FIXTURE["cases"]
+        self.assertTrue(cases, "fixture has no cases")
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                self._run_case(case)
+
+    def _run_case(self, case):
+        target = case["target"]
+        if target is None:
+            # No target at all: the deployer cannot even build a gate
+            # input; an empty image dict is the missing-everything case
+            # and must fail closed.
+            img = {}
+        else:
+            img = {"ha-protocol-version": str(target["ha"]),
+                   "ha-protocol-min-compat": str(target["floor"]),
+                   "session-sync-protocol-version": str(target["sync"])}
+            for key in case.get("missing", []):
+                del img[key]
+        peer = {"ha-protocol-version": str(case["peer_ha"]),
+                "session-sync-protocol-version": str(case["peer_wire"])}
+        survive, reason = xpf_deploy._gate_mixed_base(img, peer)
+        expected = case["expected"]
+        if case["policy"] == "permit":
+            # LANE-1-only policy: the LANE-2 executor refuses an unknown
+            # wire, so permit/survive becomes refuse here. Window/HA
+            # refusals agree under either policy.
+            if expected == "survive":
+                expected = "refuse"
+        if expected == "survive":
+            self.assertTrue(survive, f"{case['name']}: {reason}")
+        else:
+            # Both 'refuse' and 'error' fail closed in Python; an
+            # 'error' row must additionally name the missing key.
+            self.assertFalse(survive,
+                             f"{case['name']}: survived ({reason})")
+            if expected == "error":
+                missing = case.get("missing") or []
+                if missing:
+                    self.assertIn(missing[0], reason,
+                                  f"{case['name']}: {reason}")
 
 
 # ── manifest key round-trip: _read_image_manifest_versions feeds the gate ──

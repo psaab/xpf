@@ -77,12 +77,11 @@ var legacyDataplaneImportAllowlist = map[string]string{
 	"pkg/cluster/sync_protocol.go":                   "wire protocol still carries legacy session records",
 	"pkg/cluster/sync_zone_rg.go":                    "#11012 per-session owner predicates and bulk-start snapshot consume legacy dataplane SessionValue/V6 wire types; no new DataPlane surface",
 	"pkg/cluster/test_seams.go":                      "#9631 test-only seam file in the production package (external HA cells drive it without internal-export tricks, peer of pkg/dhcp/test_seams.go); the generation/journal observers name the same legacy dataplane.SessionKey the sync_conn_gen.go guards already name — no new dataplane surface",
-	"pkg/conntrack/gc.go":                            "GC still uses root session-domain types until those move out of pkg/dataplane",
 	"pkg/daemon/daemon.go":                           "daemon owns dataplane.RuntimeDataPlane; legacyDP() accessor was deleted in #1519 — only the RuntimeDataPlane field + LastApplyResultOf adapter remain",
 	"pkg/daemon/daemon_apply_dataplane.go":           "#5661 pure-motion split of daemon_apply.go: dataplane+HA core apply still adapts legacy compile/apply metadata",
 	"pkg/daemon/daemon_apply_tail.go":                "#5661 pure-motion split of daemon_apply.go: tail reconcile still names legacy dataplane types",
 	"pkg/daemon/daemon_apply_mtu_warnings_9841.go":   "#9841: the commit wrapper syncs the just-published unconverged-MTU records onto the committed config via dataplane.LastApplyGenerationOf/SyncMTUUnconvergedWarnings; commit-warning projection only, no legacy enforcement path",
-	"pkg/daemon/daemon_persistent_nat_show_8607.go":  "#8607 persistent-NAT SHOW refresh names dataplane.PersistentNATTable / PersistentNATBinding and resolves the published backend through dataplane.Unwrap, to fill the table `show security nat source persistent-nat-table` reads. It exists BECAUSE the legacy path is dead here: daemon_run.go sets gc.SkipSweep on the userspace backend, so the preserve hook on SessionStore.DeleteBatchKnown* (the table's only writer) and pnat.GC() are both unreachable. Display-only, no legacy enforcement path",
+	"pkg/daemon/daemon_persistent_nat_show_8607.go":  "#8607 persistent-NAT SHOW refresh names dataplane.PersistentNATTable / PersistentNATBinding and resolves the published backend through dataplane.Unwrap, to fill the table `show security nat source persistent-nat-table` reads. It exists BECAUSE the legacy path is dead here: the retired Go conntrack GC (`pkg/conntrack`, deleted in #17155) never ran its sweep on the userspace backend, so the preserve hook on SessionStore.DeleteBatchKnown* (the table's only writer) and pnat.GC() were both unreachable. Display-only, no legacy enforcement path",
 	"pkg/daemon/rxvlan_audit_11446.go":               "#12159: RX-VLAN audit classifies offload state via dataplane.ClassifyRxVlanOffload and probes XDP attachment through the daemon dataplane handle; audit/diagnostic only, no legacy enforcement path",
 	"pkg/daemon/daemon_policy_invalidate.go":         "#4234 commit-time deletion-clear names root dataplane session types (SessionEntryV4/V6, DeleteReasonPolicyDeleted) to invalidate a deleted policy's live sessions via SessionStore.DeleteBatchKnown*; control-plane session lifecycle, no legacy enforcement path",
 	"pkg/daemon/daemon_policy_invalidate_capture.go": "#6948 pre-publication invalidation capture names root dataplane session types (SessionEntryV4/V6, SessionKey/Value, DefaultPolicySentinelID) to snapshot the candidate sessions through SessionStore.ForEach* before the new policy snapshot is published; control-plane session lifecycle, no legacy enforcement path",
@@ -2756,44 +2755,6 @@ func userspaceXDPEntryProgramConstantDrift(t *testing.T, roots []string) ([]stri
 	sort.Strings(found)
 	sort.Strings(violations)
 	return found, violations
-}
-
-func TestConntrackGCConstructorDoesNotAcceptLegacyDataPlane(t *testing.T) {
-	t.Parallel()
-
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, filepath.Join("..", "conntrack", "gc.go"), nil, 0)
-	if err != nil {
-		t.Fatalf("parse conntrack/gc.go: %v", err)
-	}
-
-	var foundNewGC bool
-	var legacyRefs []string
-	ast.Inspect(file, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && canaryExprString(sel) == "dataplane.DataPlane" {
-			legacyRefs = append(legacyRefs, fset.Position(sel.Pos()).String())
-		}
-
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "NewGC" {
-			return true
-		}
-		foundNewGC = true
-		if fn.Type.Params == nil || len(fn.Type.Params.List) == 0 {
-			t.Fatal("conntrack.NewGC has no provider parameter")
-		}
-		if got := canaryExprString(fn.Type.Params.List[0].Type); got != "RuntimeDomainProvider" {
-			t.Fatalf("conntrack.NewGC provider = %s, want RuntimeDomainProvider", got)
-		}
-		return true
-	})
-
-	if !foundNewGC {
-		t.Fatal("conntrack.NewGC not found")
-	}
-	if len(legacyRefs) > 0 {
-		t.Fatalf("conntrack GC must not reference dataplane.DataPlane: %v", legacyRefs)
-	}
 }
 
 func compilerDataplaneCalls(t *testing.T) map[string]bool {

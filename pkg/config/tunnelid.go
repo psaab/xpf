@@ -207,9 +207,8 @@ func astTunnelModeWireguard(tunnelNode *Node) bool {
 // un-expandable group); only a collision that exists solely as concrete
 // post-expansion names in the failed view is out of view for that node.
 func emitNodeExpandedTunnelNames(tree *ConfigTree, nodeID int, opts compileOpts, out map[string]struct{}) {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
+	clone := gateNodeView(tree, nodeID, false)
+	if clone == nil {
 		return
 	}
 	// #5691: compile EVERY top-level `interfaces` root into one InterfacesConfig

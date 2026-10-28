@@ -298,7 +298,7 @@ pub(super) fn build_conntrack_value_v4(
         // (`timeout_secs == 0`), which is the pre-#8125 behaviour for exactly
         // the case that has no window to report. It is a default, not a
         // measurement, and the refresh loop corrects it within one cycle once
-        // an entry exists. Go GC is SkipSweep'd and the helper owns lifetime
+        // an entry exists. The helper owns lifetime (the Go conntrack GC is retired, #17155),
         // (#333), so nothing downstream acts on this value — it is an operator
         // display.
         timeout: if timeout_secs > 0 { timeout_secs } else { 1800 },
@@ -920,7 +920,7 @@ mod routing_domain_row_9546_tests {
     //! Go round-trip cells and the privileged Go mirror cells cover rows the GO
     //! writer produces; these cover the rows the HELPER produces, which is the
     //! writer for every helper-owned local session and therefore the dominant
-    //! source of the rows the conntrack GC deletes.
+    //! source of the rows batch deletes remove.
     //!
     //! They drive the BUILDERS, not just the pure helper. A cell on
     //! `conntrack_row_routing_domain` alone stays green if a builder stops calling
@@ -1074,8 +1074,8 @@ mod routing_domain_row_9546_tests {
         .expect("a same-family v4 key must build a row");
         assert_eq!(
             row.routing_domain, TENANT,
-            "build_conntrack_value_v4 wrote routing_domain={}, want {TENANT} — the Go GC reads \
-             this back to scope its delete; 0 here restores the #9546 inertness",
+            "build_conntrack_value_v4 wrote routing_domain={}, want {TENANT} — scoped \
+             delete paths read this back to scope their delete; 0 here restores the #9546 inertness",
             row.routing_domain
         );
     }

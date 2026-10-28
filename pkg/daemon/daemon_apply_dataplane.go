@@ -314,24 +314,11 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		deferWorkersActive = false
 	}
 
-	// 2.1. Wire aggressive session aging config to GC.
-	if d.gc != nil {
-		d.gc.SetAgingConfig(
-			cfg.Security.Flow.AgingEarlyAgeout,
-			cfg.Security.Flow.AgingHighWatermark,
-			cfg.Security.Flow.AgingLowWatermark,
-		)
-
-		// Enable per-IP session counting if any screen profile has session limits.
-		sessionLimitEnabled := false
-		for _, sp := range cfg.Security.Screen {
-			if sp.LimitSession.SourceIPBased > 0 || sp.LimitSession.DestinationIPBased > 0 {
-				sessionLimitEnabled = true
-				break
-			}
-		}
-		d.gc.SetSessionLimitEnabled(sessionLimitEnabled)
-	}
+	// 2.1. #17155: `security flow aging` / screen session-limit config
+	// has no Go GC sink to wire to — the pkg/conntrack sweep is retired
+	// and the userspace helper owns expiry. The #3440 commit advisory
+	// (pkg/config/compiler_validate_warn.go) still warns that aging is
+	// accepted-only / inert on userspace; do not re-add a dead sink.
 
 	// 2.2. Install zone and session ownership as one apply-time snapshot. A
 	// nil zone map preserves the prior zone IDs when this phase has no apply

@@ -967,7 +967,7 @@ func (m *Manager) BatchDeleteSessions(keys []dataplane.SessionKey) (int, error) 
 // The BPF mirror has no domain axis (#7160), so it takes the bare keys exactly as
 // before; the domain matters only on the HELPER wire, where a bare 5-tuple is
 // resolved by probing every routing instance and REFUSED when two tenants match
-// (#8636). The domain-carrying path is used by conntrack GC and commit-time
+// (#8636). The domain-carrying path is used by commit-time
 // policy invalidation; it now also surfaces helper failures so an authoritative
 // row left behind by the BPF-first order cannot masquerade as a clean delete
 // (#10513, #5578).

@@ -13,7 +13,6 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/dhcp"
@@ -420,7 +419,6 @@ func gatheredNames(mfs []*dto.MetricFamily) map[string]bool {
 // silently dropping a whole family fails the canary too.
 func TestCollectorDescriptorCoverage(t *testing.T) {
 	store := newDescriptorCoverageStore(t)
-	gc := conntrack.NewGC(nil, time.Minute)
 	eventBuf := logging.NewEventBuffer(8)
 	var eventSubs []*logging.Subscription
 	for sub := eventBuf.TrySubscribe(1); sub != nil; sub = eventBuf.TrySubscribe(1) {
@@ -434,7 +432,6 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 
 	srv := &Server{
 		store:     store,
-		gc:        gc,
 		startTime: time.Now(),
 		eventBuf:  eventBuf,
 		feedsFn: func() map[string]feeds.FeedInfo {
@@ -617,9 +614,6 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_filter_hits_total",                                            // collectFilterCounters
 		"xpf_nat_pool_total_ports",                                         // collectNATPoolMetrics
 		"xpf_sessions_active",                                              // collectSessionGauges
-		"xpf_conntrack_gc_sweeps_total",                                    // conntrack GC cumulative telemetry
-		"xpf_conntrack_gc_expired_deleted_total",                           // conntrack GC cumulative telemetry
-		"xpf_conntrack_gc_errors_total",                                    // conntrack GC operation failures
 		"xpf_daemon_uptime_seconds",                                        // collectSystemMetrics
 		"xpf_daemon_neighbor_periodic_last_success_age_seconds",            // #1780 neighbor watchdog
 		"xpf_ipmon_policy_failed",                                          // #1827 ip-monitoring

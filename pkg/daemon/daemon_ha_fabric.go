@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -22,27 +23,43 @@ import (
 // configuredMTU is the fabric interface's configured MTU. The fabric floor
 // remains 9000 when it is absent or lower; a configured jumbo above that floor
 // is the exact value reconciled on both parent and overlay (#10216).
+//
+// #17221: configured addresses are fail-closed exactly like the MTU. Both
+// branches end with fabricOverlayReady on a fresh lookup, so an address
+// write that fails (or does not take) returns an error instead of a commit
+// that reports a healthy overlay carrying no session-sync address.
 func ensureFabricIPVLAN(parent, name string, addrs []string, configuredMTU int) error {
-	parentLink, err := netlink.LinkByName(parent)
+	parentLink, err := fabricLinkByName17221(parent)
 	if err != nil {
 		return fmt.Errorf("parent %s: %w", parent, err)
 	}
 
 	// Ensure parent is UP — IPVLAN inherits carrier from parent.
-	netlink.LinkSetUp(parentLink)
+	_ = fabricLinkSetUp17221(parentLink)
 
 	wantMTU := fabricMTU10216(configuredMTU)
 
 	// Check if IPVLAN already exists on the correct parent. A decrease must
 	// lower the overlay first; Linux rejects a parent decrease while an upper
 	// IPVLAN still advertises the larger MTU.
-	if existing, err := netlink.LinkByName(name); err == nil {
+	if existing, err := fabricLinkByName17221(name); err == nil && existing != nil && existing.Attrs() != nil {
 		if existing.Attrs().ParentIndex == parentLink.Attrs().Index {
 			if err := reconcileFabricMTUPair10216(parent, parentLink, name, existing, wantMTU); err != nil {
 				return err
 			}
-			reconcileIPVLANAddrs(existing, name, addrs)
-			netlink.LinkSetUp(existing)
+			if err := reconcileIPVLANAddrs(existing, name, addrs); err != nil {
+				return fmt.Errorf("fabric IPVLAN %s address reconciliation: %w", name, err)
+			}
+			if err := fabricLinkSetUp17221(existing); err != nil {
+				return fmt.Errorf("bring up %s: %w", name, err)
+			}
+			fresh, err := fabricLinkByName17221(name)
+			if err != nil {
+				return fmt.Errorf("find reconciled IPVLAN %s: %w", name, err)
+			}
+			if err := fabricOverlayReady(fresh, addrs, wantMTU); err != nil {
+				return fmt.Errorf("fabric IPVLAN %s not ready: %w", name, err)
+			}
 			return nil
 		}
 		// Wrong parent — remove and recreate.
@@ -61,11 +78,11 @@ func ensureFabricIPVLAN(parent, name string, addrs []string, configuredMTU int) 
 		},
 		Mode: netlink.IPVLAN_MODE_L2,
 	}
-	if err := netlink.LinkAdd(ipvlan); err != nil {
+	if err := fabricLinkAdd17221(ipvlan); err != nil {
 		return fmt.Errorf("create IPVLAN %s on %s: %w", name, parent, err)
 	}
 
-	link, err := netlink.LinkByName(name)
+	link, err := fabricLinkByName17221(name)
 	if err != nil {
 		return fmt.Errorf("find created IPVLAN %s: %w", name, err)
 	}
@@ -77,56 +94,159 @@ func ensureFabricIPVLAN(parent, name string, addrs []string, configuredMTU int) 
 		return fmt.Errorf("fabric IPVLAN %s MTU reconciliation: %w", name, err)
 	}
 
-	// Add configured addresses.
+	// Add configured addresses. A warn-only write makes the address the
+	// overlay exists to carry applied-by-nobody (#17221): there is no other
+	// writer, so a failure must reach the caller.
 	for _, addrStr := range addrs {
 		addr, err := netlink.ParseAddr(addrStr)
 		if err != nil {
-			slog.Warn("fabric IPVLAN: invalid address", "addr", addrStr, "err", err)
-			continue
+			return fmt.Errorf("fabric IPVLAN %s: invalid address %q: %w", name, addrStr, err)
 		}
-		if err := netlink.AddrReplace(link, addr); err != nil {
-			slog.Warn("fabric IPVLAN: failed to add address",
-				"name", name, "addr", addrStr, "err", err)
+		if err := fabricAddrReplace17221(link, addr); err != nil {
+			return fmt.Errorf("fabric IPVLAN %s: add address %s: %w", name, addrStr, err)
 		}
 	}
 
-	if err := netlink.LinkSetUp(link); err != nil {
+	if err := fabricLinkSetUp17221(link); err != nil {
 		return fmt.Errorf("bring up %s: %w", name, err)
 	}
+	fresh, err := fabricLinkByName17221(name)
+	if err != nil {
+		return fmt.Errorf("find created IPVLAN %s: %w", name, err)
+	}
+	if err := fabricOverlayReady(fresh, addrs, wantMTU); err != nil {
+		return fmt.Errorf("fabric IPVLAN %s not ready: %w", name, err)
+	}
+	present, err := fabricPresentAddrs(fresh)
+	if err != nil {
+		return fmt.Errorf("fabric IPVLAN %s: list addresses: %w", name, err)
+	}
 	slog.Info("created fabric IPVLAN", "name", name, "parent", parent,
-		"addrs", addrs, "mtu", wantMTU)
+		"addrs", present, "mtu", wantMTU)
+	return nil
+}
+
+// Address/link seams (#17221) mirroring the fabricLinkByName10216 /
+// fabricLinkSetMTU10216 pattern, so the fail-closed address contract is
+// testable without a real IPVLAN. Production values are the netlink ops.
+var (
+	fabricLinkByName17221 = netlink.LinkByName
+	fabricLinkAdd17221    = netlink.LinkAdd
+	fabricLinkSetUp17221  = netlink.LinkSetUp
+	fabricAddrList17221   = func(link netlink.Link) ([]netlink.Addr, error) {
+		return netlink.AddrList(link, netlink.FAMILY_ALL)
+	}
+	fabricAddrReplace17221 = netlink.AddrReplace
+	fabricAddrDel17221     = netlink.AddrDel
+)
+
+// fabricPresentAddrs returns the addresses currently on link, normalized to
+// CIDR strings and sorted for stable logging and comparison.
+func fabricPresentAddrs(link netlink.Link) ([]string, error) {
+	addrs, err := fabricAddrList17221(link)
+	if err != nil {
+		return nil, err
+	}
+	present := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		if a.IPNet == nil {
+			continue
+		}
+		present = append(present, a.IPNet.String())
+	}
+	sort.Strings(present)
+	return present, nil
+}
+
+// fabricOverlayMissingAddrs returns the normalized CIDR strings among want
+// that are absent from link. Invalid configured addresses are errors: a
+// fabric address that cannot be parsed can never be ready.
+func fabricOverlayMissingAddrs(link netlink.Link, want []string) ([]string, error) {
+	desired := make(map[string]bool, len(want))
+	for _, addrStr := range want {
+		addr, err := netlink.ParseAddr(addrStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid address %q: %w", addrStr, err)
+		}
+		desired[addr.IPNet.String()] = true
+	}
+	present, err := fabricPresentAddrs(link)
+	if err != nil {
+		return nil, err
+	}
+	have := make(map[string]bool, len(present))
+	for _, p := range present {
+		have[p] = true
+	}
+	var missing []string
+	for k := range desired {
+		if !have[k] {
+			missing = append(missing, k)
+		}
+	}
+	sort.Strings(missing)
+	return missing, nil
+}
+
+// fabricOverlayReady is the readiness predicate ensureFabricIPVLAN ends
+// with on a fresh lookup in both branches (#17221): administratively up,
+// at the desired MTU, and carrying every configured address. The reassert
+// gate (missingFabricOverlays) shares its address half through
+// fabricOverlayMissingAddrs, so the gate and the actuator cannot disagree
+// about whether the fabric address is present.
+func fabricOverlayReady(link netlink.Link, addrs []string, wantMTU int) error {
+	if link == nil || link.Attrs() == nil {
+		return fmt.Errorf("no link attributes")
+	}
+	attrs := link.Attrs()
+	name := attrs.Name
+	if attrs.Flags&net.FlagUp == 0 {
+		return fmt.Errorf("fabric IPVLAN %s is not administratively up", name)
+	}
+	if attrs.MTU != wantMTU {
+		return fmt.Errorf("fabric IPVLAN %s MTU %d, want %d", name, attrs.MTU, wantMTU)
+	}
+	missing, err := fabricOverlayMissingAddrs(link, addrs)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("fabric IPVLAN %s missing addresses %v", name, missing)
+	}
 	return nil
 }
 
 // reconcileIPVLANAddrs adds missing addresses and removes stale ones from an
 // existing IPVLAN interface (#127). Called when ensureFabricIPVLAN finds the
 // overlay already exists on the correct parent.
-func reconcileIPVLANAddrs(link netlink.Link, name string, desired []string) {
-	// Build set of desired addresses (normalized to CIDR strings).
+//
+// #17221: a failure to LIST, a failed AddrReplace of a desired address, or a
+// desired address still missing afterwards is returned — the fabric address
+// has no other writer, so warn-only made it applied-by-nobody. A stale-delete
+// failure stays warn-only: the extra address is cleaned by the next reconcile
+// and does not strand session sync.
+func reconcileIPVLANAddrs(link netlink.Link, name string, desired []string) error {
 	want := make(map[string]*netlink.Addr, len(desired))
 	for _, addrStr := range desired {
 		addr, err := netlink.ParseAddr(addrStr)
 		if err != nil {
-			slog.Warn("fabric IPVLAN: invalid address in config", "addr", addrStr, "err", err)
-			continue
+			return fmt.Errorf("invalid address %q: %w", addrStr, err)
 		}
 		want[addr.IPNet.String()] = addr
 	}
-
-	// Get current addresses.
-	existing, err := netlink.AddrList(link, netlink.FAMILY_ALL)
+	existing, err := fabricAddrList17221(link)
 	if err != nil {
-		slog.Warn("fabric IPVLAN: failed to list addresses", "name", name, "err", err)
-		return
+		return fmt.Errorf("list addresses: %w", err)
 	}
-
-	// Remove stale addresses not in desired set.
 	have := make(map[string]bool, len(existing))
 	for _, a := range existing {
+		if a.IPNet == nil {
+			continue
+		}
 		key := a.IPNet.String()
 		have[key] = true
 		if _, ok := want[key]; !ok {
-			if err := netlink.AddrDel(link, &a); err != nil {
+			if err := fabricAddrDel17221(link, &a); err != nil {
 				slog.Warn("fabric IPVLAN: failed to remove stale address",
 					"name", name, "addr", key, "err", err)
 			} else {
@@ -135,19 +255,25 @@ func reconcileIPVLANAddrs(link netlink.Link, name string, desired []string) {
 			}
 		}
 	}
-
-	// Add missing addresses.
 	for key, addr := range want {
 		if !have[key] {
-			if err := netlink.AddrReplace(link, addr); err != nil {
-				slog.Warn("fabric IPVLAN: failed to add address",
-					"name", name, "addr", key, "err", err)
-			} else {
-				slog.Info("fabric IPVLAN: added missing address",
-					"name", name, "addr", key)
+			if err := fabricAddrReplace17221(link, addr); err != nil {
+				return fmt.Errorf("add address %s: %w", key, err)
 			}
+			slog.Info("fabric IPVLAN: added missing address",
+				"name", name, "addr", key)
 		}
 	}
+	// Verify through a fresh listing: a successful AddrReplace whose
+	// address is still absent is still applied-by-nobody.
+	missing, err := fabricOverlayMissingAddrs(link, desired)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("addresses still missing after reconcile: %v", missing)
+	}
+	return nil
 }
 
 // fabricOverlayNames are every fabric IPVLAN this daemon can create.

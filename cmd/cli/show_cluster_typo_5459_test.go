@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/psaab/xpf/pkg/cliterm"
+)
 
 // #5459: `show chassis cluster <subsystem> <arg>` must reject an
 // UNRECOGNIZED sub-arg with a usage error instead of silently falling
@@ -8,9 +12,9 @@ import "testing"
 // a valid-looking result with exit 0 for operator typos). A bare
 // subsystem with NO sub-arg keeps its historical default view.
 //
-// clusterSubsystemView is the pure token-validation helper the remote-CLI
-// dispatch (handleShow) delegates to; asserting on it directly avoids
-// needing a live gRPC client.
+// cliterm.ClusterSubsystemView is the shared token-validation helper
+// the remote-CLI dispatch (handleShow) delegates to; asserting on it
+// directly avoids needing a live gRPC client.
 
 func TestClusterSubsystemView_UnknownArgErrors(t *testing.T) {
 	// A present-but-unrecognized token must error for every subsystem.
@@ -29,9 +33,9 @@ func TestClusterSubsystemView_UnknownArgErrors(t *testing.T) {
 		{"fabric", []string{"stats"}},
 	}
 	for _, tc := range cases {
-		topic, filter, err := clusterSubsystemView(tc.sub, tc.rest)
+		topic, filter, err := cliterm.ClusterSubsystemView(tc.sub, tc.rest)
 		if err == nil {
-			t.Errorf("clusterSubsystemView(%q, %v): expected error for unknown arg, got topic=%q filter=%q nil err (typo suppression regression)",
+			t.Errorf("ClusterSubsystemView(%q, %v): expected error for unknown arg, got topic=%q filter=%q nil err (typo suppression regression)",
 				tc.sub, tc.rest, topic, filter)
 		}
 	}
@@ -55,13 +59,13 @@ func TestClusterSubsystemView_RecognizedArgs(t *testing.T) {
 		{"fabric", []string{"statistics"}, "chassis-cluster-fabric-statistics", ""},
 	}
 	for _, tc := range cases {
-		topic, filter, err := clusterSubsystemView(tc.sub, tc.rest)
+		topic, filter, err := cliterm.ClusterSubsystemView(tc.sub, tc.rest)
 		if err != nil {
-			t.Errorf("clusterSubsystemView(%q, %v): unexpected error: %v", tc.sub, tc.rest, err)
+			t.Errorf("ClusterSubsystemView(%q, %v): unexpected error: %v", tc.sub, tc.rest, err)
 			continue
 		}
 		if topic != tc.wantTopic || filter != tc.wantFilter {
-			t.Errorf("clusterSubsystemView(%q, %v) = (%q, %q); want (%q, %q)",
+			t.Errorf("ClusterSubsystemView(%q, %v) = (%q, %q); want (%q, %q)",
 				tc.sub, tc.rest, topic, filter, tc.wantTopic, tc.wantFilter)
 		}
 	}
@@ -81,13 +85,13 @@ func TestClusterSubsystemView_BareSubsystemKeepsDefault(t *testing.T) {
 		{"fabric", "chassis-cluster-fabric-statistics"},
 	}
 	for _, tc := range cases {
-		topic, filter, err := clusterSubsystemView(tc.sub, nil)
+		topic, filter, err := cliterm.ClusterSubsystemView(tc.sub, nil)
 		if err != nil {
-			t.Errorf("clusterSubsystemView(%q, nil): unexpected error for bare subsystem: %v", tc.sub, err)
+			t.Errorf("ClusterSubsystemView(%q, nil): unexpected error for bare subsystem: %v", tc.sub, err)
 			continue
 		}
 		if topic != tc.wantTopic || filter != "" {
-			t.Errorf("clusterSubsystemView(%q, nil) = (%q, %q); want (%q, \"\")",
+			t.Errorf("ClusterSubsystemView(%q, nil) = (%q, %q); want (%q, \"\")",
 				tc.sub, topic, filter, tc.wantTopic)
 		}
 	}

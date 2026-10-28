@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -132,12 +131,6 @@ func ntohs(v uint16) uint16 {
 	var b [2]byte
 	binary.BigEndian.PutUint16(b[:], v)
 	return binary.NativeEndian.Uint16(b[:])
-}
-
-func uint32ToIP(v uint32) net.IP {
-	ip := make(net.IP, 4)
-	binary.NativeEndian.PutUint32(ip, v)
-	return ip
 }
 
 func (s *Server) dataplaneLoaded() bool {

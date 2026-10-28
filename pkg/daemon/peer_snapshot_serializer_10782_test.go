@@ -34,7 +34,7 @@ func TestPeerSyncPromotionWaitsForSnapshotSerializer10782(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		close(started)
-		_, err := d.syncAndApply(t.Context(), after, nil)
+		_, err := d.syncAndApplyForTest(t.Context(), after, nil)
 		done <- err
 	}()
 	<-started
