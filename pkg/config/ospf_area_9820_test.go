@@ -86,12 +86,10 @@ protocols {
 // Direct validator cells for spellings no `set` line can carry
 // (newlines) plus the boundary set.
 func TestValidateOSPFAreaBoundary_9820(t *testing.T) {
-	// Padding refusal is central (#17177): the bare validator retains
-	// trimmed leniency (including newline padding, which the #1798
-	// prewalk rejects on the strict path before this validator runs),
-	// so padded spellings are pinned at the commit gate by
-	// TestOSPFAreaPaddedRefused_9820, not here.
+	// The strict validator refuses padding itself (validFRROSPFArea's
+	// documented commit==render equivalence relies on it).
 	for _, bad := range []string{
+		"\n0.0.0.0", "0.0.0.0\n", " 0.0.0.0 ", "\t0.0.0.0\t",
 		"0 1", "not-an-area", "2001:db8::1",
 	} {
 		if err := ValidateOSPFArea(bad); err == nil {

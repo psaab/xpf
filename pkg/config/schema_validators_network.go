@@ -90,8 +90,17 @@ func ValidateBGPClusterID(raw string) error {
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected a BGP cluster-id: an IPv4 dotted-quad like 10.0.0.1, or an integer 1..4294967295)")
 	}
-	// #17177: edge-whitespace refusal is owned centrally by checkToken;
-	// the trimmed form is only used for the grammar arms below.
+	// Strict-validator contract: validClusterID in pkg/frr parses the
+	// RAW string (net.ParseIP / ParseUint, no trim), so a padded value
+	// this validator trimmed would be committed and then silently
+	// omitted from frr.conf — the route reflector falls back to its
+	// router-id, defeating RR loop prevention (#14377). Padding IS
+	// authorable (quoted strings preserve it verbatim), so refuse it
+	// here as well as centrally (#17177 checkToken). Migration: use
+	// the bare value.
+	if trimmed != raw {
+		return fmt.Errorf("invalid cluster-id %q (leading or trailing whitespace is not allowed; use a bare IPv4 dotted-quad or integer)", raw)
+	}
 	// IPv4 dotted-quad form. net.ParseIP rejects a bare integer, so the
 	// integer spelling falls through to the ParseUint arm below.
 	if ip := net.ParseIP(trimmed); ip != nil {
@@ -287,10 +296,23 @@ func ValidateOSPFArea(raw string) error {
 	if trimmed == "" {
 		return fmt.Errorf("missing value (expected an OSPF area id: an IPv4 dotted-quad like 0.0.0.0, or an integer 0..4294967295)")
 	}
-	// #17177: edge-whitespace refusal is owned centrally by
-	// checkToken/validateKeySlot; the trimmed form is only used for
-	// the grammar arms below. (The #9820 tightening is preserved —
-	// it now fires with the shared message at the dispatch point.)
+	// Strict-validator contract: validFRROSPFArea in pkg/frr documents
+	// commit==render equivalence as "exactly what the commit gate
+	// accepts (ValidateOSPFArea, incl. its mapped + padding arms) AND
+	// a single FRR token", and ospfAreaIdentity11400 keys a padded
+	// area as a distinct raw area. The renderer interpolates the RAW
+	// key, so padding TrimSpace hides here would commit while the raw
+	// key renders/keys differently. Refuse padding here as well as
+	// centrally (#17177 checkToken/validateKeySlot). This is the
+	// #9820 intentional tightening: area IDs must be bare tokens,
+	// where bare = unpadded DECODED value (quotes themselves are
+	// fine). Migration: remove quotes/padding. The #1798 prewalk
+	// already rejects control characters on the strict path; this arm
+	// additionally refuses newline padding first with the
+	// area-specific message.
+	if trimmed != raw {
+		return fmt.Errorf("invalid area id %q (leading or trailing whitespace is not allowed; use a bare IPv4 dotted-quad or integer)", raw)
+	}
 	// Dotted-quad form. net.ParseIP rejects a bare integer, so the integer
 	// spelling falls through to the ParseUint arm below.
 	if ip := net.ParseIP(trimmed); ip != nil {

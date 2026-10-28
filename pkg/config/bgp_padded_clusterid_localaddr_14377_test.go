@@ -17,10 +17,9 @@ import (
 // their contents verbatim (`cluster-id " 10.0.0.1 "`), mirroring #9820.
 //
 // FAIL-ON-REVERT: removing the central edge-whitespace refusal in
-// checkToken (#17177, formerly the per-validator `trimmed != raw` arms)
-// makes the padded cases below commit clean again -> RED. Direct
-// validator calls below still reject padded values via their grammar
-// (net.ParseIP/ParseUint on the raw string), just with grammar text.
+// checkToken (#17177) or the per-validator `trimmed != raw` arm in
+// ValidateBGPClusterID makes the padded cases below commit clean
+// again -> RED.
 
 func TestBGPPaddedClusterIDSchemaGate_14377(t *testing.T) {
 	padded := []string{" 10.0.0.1 ", " 42 ", " 10.0.0.1", "42 ", "\t10.0.0.1\t"}
@@ -30,12 +29,10 @@ func TestBGPPaddedClusterIDSchemaGate_14377(t *testing.T) {
 		if err := SchemaValidate(tree); err == nil {
 			t.Errorf("cluster-id %q: expected SchemaValidate to reject padded value, got nil", v)
 		}
-		// Direct call: padding refusal is now central (#17177), so the
-		// bare validator may accept the trimmed form; the SchemaValidate
-		// cell above is the commit-path pin. Keep a grammar check that
-		// the bare value itself is valid.
-		if err := ValidateBGPClusterID(strings.TrimSpace(v)); err != nil {
-			t.Errorf("ValidateBGPClusterID(trimmed %q) = %v, want nil (grammar control)", v, err)
+		// Direct call: the strict validator refuses padding itself
+		// (validClusterID parses the raw string).
+		if err := ValidateBGPClusterID(v); err == nil {
+			t.Errorf("ValidateBGPClusterID(%q) = nil, want padded rejection", v)
 		}
 	}
 	// Controls: bare valid forms still commit.

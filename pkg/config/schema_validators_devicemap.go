@@ -90,7 +90,13 @@ func ValidateDeviceMapLogicalName(raw string) error {
 	if name == "" {
 		return fmt.Errorf("missing logical interface name (e.g. ge-0/0/3 or fxp0)")
 	}
-	// #17177: edge-whitespace refusal is owned centrally by validateKeySlot.
+	// Strict-validator contract: the compiler stores the RAW logical
+	// name and LinuxIfName folds only "/", so a padded name keys as a
+	// distinct interface and never binds. Refuse padding here as well
+	// as centrally (#17177 validateKeySlot).
+	if name != raw {
+		return fmt.Errorf("logical interface name %q must not have leading/trailing whitespace", raw)
+	}
 	if strings.ContainsAny(name, " \t") {
 		return fmt.Errorf("logical interface name %q must not contain whitespace", raw)
 	}

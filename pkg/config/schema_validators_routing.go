@@ -414,20 +414,25 @@ func validatePackedPolicyRouteFilterTailStrict12067(node *Node, parent *schemaNo
 // accepted; a bare IP without a length, or outright garbage, is rejected
 // with a targeted message. route is family-agnostic so both families pass.
 func ValidateRouteDestination(raw string) error {
-	// #17177: edge-whitespace refusal is owned centrally by
-	// validateKeySlot (and by checkToken for value slots) on the
-	// SchemaValidate commit path. This validator is also called
-	// directly by the strict compiler gate, which performs no
-	// padding refusal of its own: parseCIDRStrict below trims before
-	// parsing, so a padded CIDR is ACCEPTED on that direct path.
-	// Only the commit path is gated earlier (SchemaValidate runs
-	// first) and refuses padded spellings with the shared message;
-	// the direct-path leniency is deliberate (see
-	// static_route_padding_9820_test.go) — do not add a local
-	// refusal here.
-	// parseCIDRStrict requires a /prefix-length and upgrades the two common
-	// operator mistakes (bare IP, garbage) to targeted messages. The returned
-	// IP is discarded because both v4 and v6 destinations are valid here.
+	// Strict-validator contract: this function is consumed directly
+	// by the strict compiler gates (generateRouteInvalidPrefixes,
+	// staticRouteInvalidPrefixes) which run on CompileConfig WITHOUT
+	// SchemaValidate, and by render belts in pkg/frr. It must
+	// therefore refuse edge whitespace itself: parseCIDRStrict trims,
+	// so without this arm a padded CIDR (" 10.0.0.0/8 ") compiles on
+	// the direct path, is stored raw, is omitted by FRR's netip belt
+	// and refuses the userspace helper snapshot — the #15658
+	// split-brain. The SchemaValidate path also refuses padding
+	// centrally (#17177 refuseEdgeWhitespace) before this validator
+	// runs; both refusals name the padding. Do NOT defer entirely to
+	// the central gate: direct consumers bypass it.
+	if raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("not a valid route destination (leading or trailing whitespace is not allowed; use a bare CIDR, e.g. 10.0.0.0/24 or 2001:db8::/32)")
+	}
+	// parseCIDRStrict requires a /prefix-length and upgrades the two
+	// common operator mistakes (bare IP, garbage) to targeted
+	// messages. The returned IP is discarded because both v4 and v6
+	// destinations are valid here.
 	if _, err := parseCIDRStrict(raw, "10.0.0.0/24"); err != nil {
 		return fmt.Errorf("not a valid route destination (expected a CIDR, e.g. 10.0.0.0/24 or 2001:db8::/32): %v", err)
 	}
@@ -464,8 +469,15 @@ func ValidateStaticNextHop(raw string) error {
 	if tok == "" {
 		return fmt.Errorf("missing next-hop (expected an IP address, e.g. 192.168.1.1 or 2001:db8::1, or an interface name)")
 	}
-	// #17177: edge-whitespace refusal is owned centrally by
-	// validateKeySlot; tok is the trimmed form for the grammar below.
+	// Strict-validator contract: the compiler stores the RAW next-hop
+	// and the renderer drops a padded one silently while the family
+	// gate cannot classify it, so padding must be refused here, not
+	// only centrally (#17177): direct calls (and any future strict
+	// compiler gate consuming this validator) bypass checkToken /
+	// validateKeySlot. See ValidateRouteDestination.
+	if tok != raw {
+		return fmt.Errorf("not a valid next-hop (leading or trailing whitespace is not allowed; use a bare IP address, ip@interface, or interface name)")
+	}
 	// Rust-FIB ip@interface / @interface spec.
 	if ipPart, ifPart, hasAt := strings.Cut(tok, "@"); hasAt {
 		if ifPart == "" {

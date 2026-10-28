@@ -1960,6 +1960,13 @@ type compileOpts struct {
 	// path: a published malformed prefix fails the helper snapshot closed
 	// (RouteDestinationUnparseable), fail-closed for a blackhole.
 	lenientGenerateRoutePrefix bool
+	// lenientStaticRoutePrefix downgrades an invalid static-route
+	// destination (staticRouteInvalidPrefixes: garbage, bare IP, or
+	// whitespace-padded CIDR) from a strict compile error to
+	// cfg.Warnings entries. Mirrors lenientGenerateRoutePrefix
+	// (#15658): the route is kept on the tolerant path so a persisted
+	// malformed destination fails the helper snapshot closed.
+	lenientStaticRoutePrefix bool
 	// lenientDHCPStaticBindings (#2243 review) downgrades the DHCP-server
 	// static (fixed/reserved) host-binding gate (validateDHCPStaticBindingsStrict)
 	// from a hard compile error to a cfg.Warnings entry. The strict commit /
@@ -4134,6 +4141,7 @@ func lenientCompileOpts() compileOpts {
 		lenientStaticRouteCIDRMaskSpelling:       true,
 		lenientGenerateRoutePolicy:               true,
 		lenientGenerateRoutePrefix:               true,
+		lenientStaticRoutePrefix:                 true,
 		lenientDHCPStaticBindings:                true,
 		lenientDHCPPoolSubnets:                   true,
 		lenientDHCPPoolValues:                    true,
