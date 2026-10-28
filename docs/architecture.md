@@ -88,7 +88,9 @@ It is no longer a selectable backend.
 
 ## Key design patterns
 
-- **Go control plane** handles config compilation, session GC, management
+- **Go control plane** handles config compilation, session management
+  (expiry itself is owned by the Rust helper's per-worker expiry; the
+  retired Go conntrack GC was deleted in #17155), management
   APIs, HA cluster, and routing.
 - **Rust AF_XDP userspace dataplane** owns the only packet-forwarding path.
 - **Retained eBPF surface** is the userspace XDP shim (`userspace-xdp/`)
@@ -417,7 +419,7 @@ editing cmdtree.
     cross-site `<form>` POST. The same-origin policy blocks *reading* the
     response but not *sending* the side-effecting request, so a malicious page
     could drive a credentialed state change. `mutationCrossSiteGuard`
-    (`pkg/api/crosssite.go`) wraps the mux BEFORE `authMiddleware` and rejects
+    (`pkg/api/crosssite.go`) wraps the mux BEFORE the auth gate and rejects
     any non-safe-method request (403) that shows cross-site provenance:
     `Sec-Fetch-Site: cross-site|same-site`, an `Origin`/`Referer` whose
     host:port differs from the target, or a CORS "simple" form content type
@@ -459,7 +461,6 @@ editing cmdtree.
 | `pkg/vrrp/` | Native VRRPv3 state machine; 30ms default RETH advertisements only in legacy VRRP-backed mode (`no-private-rg-election`, unless `no-reth-vrrp`); the compiler-default private-RG mode suppresses RETH VRRP (`pkg/config/compiler_system.go:3132-3137`, `pkg/vrrp/vrrp.go:153-166`) |
 | `pkg/ra/` | Embedded RA sender (replaces radvd) |
 | `pkg/cli/` | Interactive Junos-style CLI |
-| `pkg/conntrack/` | Session garbage collection (with HA delete sync) |
 | `pkg/logging/` | Ring buffer reader, event buffer, syslog client |
 | `pkg/dhcp/` | DHCPv4/DHCPv6 clients |
 | `pkg/frr/` | FRR config generation + managed section in frr.conf |

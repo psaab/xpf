@@ -4082,9 +4082,12 @@ plus — since #6714 — every key of each child, which covers every leaf whose
 flat-set path absorbs the list onto the node itself. `interfaces fab0 fabric-options
 member-interfaces` does not: its schema node is a plain `children: nil` leaf
 with no `args` and no `multi`, so `SetPath` files the whole bracket list as ONE
-child carrying every name on that child's Keys — and `firewallMatchValues`
-would keep only the first. `fabricMemberValues` (`compiler_interfaces.go`)
-therefore descends the subtree and takes EVERY key. The same read is now driven
+child carrying every name on that child's Keys. Since #6714
+`firewallMatchValues` reads every key of each DIRECT child, so it would in
+fact keep every name of that bracket list; what it would not do is DESCEND
+below a child, nor does it take a bare self-repeat on the node's own tail
+as a value. `fabricMemberValues` (`compiler_interfaces.go`) therefore uses
+`plainListValues`, which descends the subtree and takes EVERY key. The same read is now driven
 through `FindChildren("member-interfaces")` rather than `FindChild`, because
 repeated hierarchical statements land as sibling nodes. Before the fold the
 hierarchical bracket spelling and the plain single-value spelling
@@ -15476,9 +15479,10 @@ the value sits in a single typed slot:
     nonzero) and unknown-leaf rejection live in `validateFlowAgingStrict`
     (`compiler_validate_strict.go`, dispatched from `compiler.go` with a
     `lenientFlowAging` no-brick downgrade) because the schema walker is
-    single-leaf. **#3440 H1:** watermark aging drives only the Go-side
-    conntrack GC hysteresis, which is skipped on the userspace AF_XDP
-    dataplane (the only runtime forwarding path), so setting any aging knob
+    single-leaf. **#3440 H1:** watermark aging drove only the Go-side
+    conntrack GC hysteresis (`pkg/conntrack`, deleted in #17155; that sweep
+    never ran on the userspace AF_XDP dataplane, the only runtime forwarding
+    path), so setting any aging knob
     emits an accepted-only commit advisory (`compiler_validate_warn.go`,
     `security flow aging ... accepted-only`) — typing the schema only stops
     invalid values from persisting, it does not make the knob enforced.

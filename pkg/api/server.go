@@ -26,7 +26,6 @@ import (
 	"github.com/psaab/xpf/pkg/authz"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
-	"github.com/psaab/xpf/pkg/conntrack"
 	"github.com/psaab/xpf/pkg/ddns"
 	"github.com/psaab/xpf/pkg/dhcp"
 	"github.com/psaab/xpf/pkg/dhcpserver"
@@ -252,7 +251,6 @@ type Config struct {
 	DP             apiRuntimeDataPlane
 	FwdSampler     *fwdstatus.Sampler
 	EventBuf       *logging.EventBuffer
-	GC             *conntrack.GC
 	Routing        *routing.Manager
 	FRR            *frr.Manager
 	IPsec          *ipsec.Manager
@@ -790,7 +788,6 @@ type Server struct {
 	dp             apiRuntimeDataPlane
 	fwdSampler     *fwdstatus.Sampler
 	eventBuf       *logging.EventBuffer
-	gc             *conntrack.GC
 	routing        *routing.Manager
 	frr            *frr.Manager
 	ipsec          *ipsec.Manager
@@ -870,7 +867,7 @@ type Server struct {
 
 // Management HTTP/HTTPS server timeouts (M-6). Both http.Server literals used
 // to set only Addr/Handler(/TLSConfig), leaving every timeout field zero (no
-// limit). Header reads happen BEFORE authMiddleware, so a pre-auth slowloris —
+// limit). Header reads happen BEFORE the auth gate, so a pre-auth slowloris —
 // N connections dribbling request headers or a request body one byte at a time
 // — could pin a goroutine/socket per connection indefinitely and wedge the
 // control-plane API once web-management binds a non-loopback interface (gosec
@@ -900,7 +897,7 @@ type Server struct {
 const (
 	// apiReadHeaderTimeout bounds the time to read the request headers — the
 	// slow-header slowloris defense, and the pre-auth guard since header read
-	// precedes authMiddleware.
+	// precedes the auth gate.
 	apiReadHeaderTimeout = 10 * time.Second
 	// apiReadTimeout bounds the time to read the ENTIRE request (headers +
 	// body) — the slow-body slowloris defense. 30s is generous for any
@@ -933,7 +930,6 @@ func NewServer(cfg Config) *Server {
 		dp:                                   cfg.DP,
 		fwdSampler:                           cfg.FwdSampler,
 		eventBuf:                             cfg.EventBuf,
-		gc:                                   cfg.GC,
 		routing:                              cfg.Routing,
 		frr:                                  cfg.FRR,
 		ipsec:                                cfg.IPsec,
@@ -1167,7 +1163,7 @@ func NewServer(cfg Config) *Server {
 	// limiter and session-gauge cache, then derive an auth wrapper from each
 	// listener's configured bind independently. Never infer this from r.Host
 	// or the sibling listener: only a literal loopback bind leaves /metrics
-	// open when auth is configured. /health remains exempt in authMiddleware.
+	// open when auth is configured. /health remains exempt in the auth gate.
 	// #5866: wrap with a middleware that reads the LIVE auth snapshot (s.auth)
 	// atomically per request, so ReplaceAuth takes effect on the next request
 	// without rebinding. metricsRequireAuth is fixed per listener (its bind
@@ -1953,8 +1949,8 @@ func (s *Server) SetTLSCertDirForTest(dir string) {
 // reads s.auth atomically per request so a ReplaceAuth swap takes effect
 // immediately, and a retired leg's slot reads the policy it was pinned to.
 // A nil snapshot passes through (no auth) — the loopback clamp guarantees such a
-// listener is loopback-only. It enforces byte-for-byte the same checks as the
-// static authMiddleware via the shared authCheck.
+// listener is loopback-only. It enforces its checks through
+// throttledAuthCheck with this leg's gate folded in.
 func (s *Server) dynamicAuthMiddleware(metricsRequireAuth bool, slot *authSlot, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		a := slot.load()
