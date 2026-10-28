@@ -31,33 +31,21 @@ pub fn ingress_adjudicated(ingress_iface_flags: u8) -> bool {
     ingress_iface_flags & INGRESS_IFACE_FLAG_ADJUDICATED != 0
 }
 
-/// Post-parse disposition over facts already computed from a parsed frame.
-/// `tagged_only_vid0_local` retains its higher-priority drop; all other
-/// local/control frames pass, and all transit frames drop.
+/// Post-parse disposition over the fact already computed from a parsed
+/// frame that reached the end of `degraded_ctrl_disabled_action`.
+///
+/// This is *not* the complete #13632 decision. Production reaches this
+/// helper only after the caller has already returned for: unadjudicated
+/// ingress (see `ingress_adjudicated`), parse failures, S-tag/QinQ and
+/// non-IP shapes, tagged-only VID-0 local destinations, and the LAND
+/// gate — each under its own reason counter. This helper therefore takes
+/// no interface flags and no tagged-only input: those facts are decided
+/// by the caller and can never be passed here. Local/control frames
+/// pass, all other (transit) frames drop.
 #[inline(always)]
-pub fn ctrl_disabled_disposition(
-    tagged_only_vid0_local: bool,
-    local_or_control: bool,
-) -> DegradedCtrlDisabledDisposition {
-    if tagged_only_vid0_local {
-        return DegradedCtrlDisabledDisposition::DropTransit;
-    }
+pub fn local_control_or_drop(local_or_control: bool) -> DegradedCtrlDisabledDisposition {
     if local_or_control {
         return DegradedCtrlDisabledDisposition::PassLocalControl;
     }
     DegradedCtrlDisabledDisposition::DropTransit
-}
-
-/// Complete #13632 behavioral decision. The flags gate is evaluated
-/// before either post-parse fact may grant a pass.
-#[inline(always)]
-pub fn ctrl_disabled_action(
-    ingress_iface_flags: u8,
-    tagged_only_vid0_local: bool,
-    local_or_control: bool,
-) -> DegradedCtrlDisabledDisposition {
-    if !ingress_adjudicated(ingress_iface_flags) {
-        return DegradedCtrlDisabledDisposition::DropTransit;
-    }
-    ctrl_disabled_disposition(tagged_only_vid0_local, local_or_control)
 }
