@@ -220,6 +220,10 @@ var schemaChassis = &schemaNode{desc: "Chassis configuration", children: map[str
 		"private-rg-election":    {desc: "Elect RG primaries over the control link without RETH VRRP (default)", children: nil},
 		"no-private-rg-election": {desc: "Disable private RG election (use legacy RETH VRRP election)", children: nil},
 		"redundancy-group": {desc: "Redundancy group", args: 1, placeholder: "<group-id>", children: map[string]*schemaNode{
+			// #17820: every RG `node` statement requires an explicit election
+			// priority. The typed child validates a present value; the AST
+			// shape gate enforces presence across nested, packed, and flat-set
+			// forms because the schema walker cannot require an instance child.
 			"node": {desc: "Per-node settings for this redundancy group", args: 1, placeholder: "<node-id>", closedWorld: true, children: map[string]*schemaNode{
 				// Junos vSRX: 1..254. Runtime-binding: the priority
 				// feeds VRRP and is truncated to uint8 on the wire
