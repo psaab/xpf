@@ -59,8 +59,8 @@ pub(super) fn zone_pair_for_flow_with_override(
     ingress_zone_override: Option<&str>,
     egress_ifindex: i32,
 ) -> (String, String) {
-    let override_id = ingress_zone_override
-        .and_then(|zone| forwarding.zone_name_to_id.get(zone).copied());
+    let override_id =
+        ingress_zone_override.and_then(|zone| forwarding.zone_name_to_id.get(zone).copied());
     let (from_id, to_id) = zone_pair_ids_for_flow_with_override(
         forwarding,
         ingress_ifindex,
