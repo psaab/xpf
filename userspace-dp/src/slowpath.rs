@@ -764,43 +764,32 @@ fn ipsec_inner_descriptor(
         Some(6) => (libc::AF_INET6 as u8, 0x86dd),
         _ => (0, 0),
     };
-    let (rel_l4_offset, protocol, payload_offset) =
-        if inner_family == 0 {
-            (0, 0, 0)
-        } else if let Some((offset, protocol)) =
-            crate::afxdp::packet_rel_l4_offset_and_protocol_for_ipsec(bytes, inner_family)
-        {
-            // #15787: the fragment-no-L4 sentinel (255) falls to the
-            // catch-all arm: payload offset == L4 offset (the first
-            // payload byte), no L4 header is read. Non-first inner
-            // fragments are admitted to the deny-only adjudicator
-            // instead of being stamped (0,0,0) and dropped.
-            let payload = match protocol {
-                6 => offset
-                    .checked_add(12)
-                    .and_then(|field| bytes.get(field))
-                    .map(|byte| usize::from(byte >> 4) * 4)
-                    .filter(|header_len| *header_len >= 20)
-                    .and_then(|header_len| offset.checked_add(header_len))
-                    .filter(|end| *end <= bytes.len()),
-                17 if bytes.len() >= offset.saturating_add(8) => {
-                    Some(offset.saturating_add(8))
-                }
-                6 => None,
-                _ => Some(offset),
-            };
-            if let Some(payload) = payload {
-                (
-                    u16::try_from(offset).unwrap_or(u16::MAX),
-                    protocol,
-                    u16::try_from(payload).unwrap_or(u16::MAX),
-                )
-            } else {
-                (0, 0, 0)
+    // #17164: the shared tunnel-inner parser (GRE/WG/IPsec) is the
+    // single source for (protocol, rel_l4_offset, payload_offset). The
+    // former private copy over `packet_rel_l4_offset_and_protocol`
+    // diverged: short UDP was admitted with payload == L4 instead of
+    // failing closed (the shared parser returns None, mapped to
+    // (0,0,0) here), ICMP got payload == L4 instead of L4+8, and the
+    // TCP arm carried a rustc-flagged unreachable `6 => None`. The
+    // shared parser already resolves the #15787 fragment-no-L4
+    // sentinel (255, payload == L4) and walks HbH/AH chains, so
+    // non-first fragments and extension-headed inners keep their
+    // admitted verdicts; AH identity needs no exception here because
+    // it is resolved downstream (`flowless_effective_protocol`,
+    // ipsec_inner.rs). Unlike the GRE/WG decap paths this descriptor
+    // path does not trim to the IP-declared length first: the slab
+    // holds exactly the decrypted inner datagram and the descriptor's
+    // `len` is its byte length.
+    let (rel_l4_offset, protocol, payload_offset) = if inner_family == 0 {
+        (0, 0, 0)
+    } else {
+        match crate::afxdp::frame::parse_inner_protocol_and_offsets(bytes, inner_family) {
+            Some((protocol, rel_l4_offset, payload_offset)) => {
+                (rel_l4_offset, protocol, payload_offset)
             }
-        } else {
-            (0, 0, 0)
-        };
+            None => (0, 0, 0),
+        }
+    };
     let mut stn = [0u8; IPSEC_INNER_STN_MAX];
     let stn_len = frame.origin.stn.len().min(IPSEC_INNER_STN_MAX);
     stn[..stn_len].copy_from_slice(&frame.origin.stn.as_bytes()[..stn_len]);

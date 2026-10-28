@@ -1546,3 +1546,154 @@ fn queue_full_refunds_slowpath_rate_limit_tokens_13707() {
         ));
     }
 }
+
+/// #17164 parity table: identical inners through BOTH descriptor builders
+/// — the IPsec-inner descriptor (`ipsec_inner_descriptor`, deny-only
+/// slowpath) and the shared tunnel-inner parser
+/// (`parse_inner_protocol_and_offsets`, GRE/WG decap). A `None` from the
+/// shared parser maps to (0,0,0) on the IPsec side; anything else must
+/// match exactly. Each row cites the divergence it pins: short UDP and
+/// ICMP diverged pre-fix (IPsec admitted short UDP with payload == L4
+/// and stamped ICMP payload == L4 instead of L4+8), and TCP+options was
+/// the #13713 copy-caused bug.
+#[test]
+fn ipsec_inner_descriptor_matches_shared_parser_17164() {
+    use crate::afxdp::frame::parse_inner_protocol_and_offsets;
+    use crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
+
+    fn v4(protocol: u8, frag_off: u16, l4: &[u8]) -> Vec<u8> {
+        let total = 20 + l4.len();
+        let mut p = vec![0u8; total];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        p[6..8].copy_from_slice(&frag_off.to_be_bytes());
+        p[9] = protocol;
+        p[20..].copy_from_slice(l4);
+        p
+    }
+    fn v6(next: u8, chain: &[u8], l4: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8; 40];
+        p[0] = 0x60;
+        p[4..6].copy_from_slice(&((chain.len() + l4.len()) as u16).to_be_bytes());
+        p[6] = next;
+        p.extend_from_slice(chain);
+        p.extend_from_slice(l4);
+        p
+    }
+    fn frag_hdr(next: u8, off_word: u16) -> Vec<u8> {
+        let mut h = vec![0u8; 8];
+        h[0] = next;
+        h[2..4].copy_from_slice(&off_word.to_be_bytes());
+        h
+    }
+    fn hbh_tcp() -> Vec<u8> {
+        // Hop-by-Hop (len 0 => 8 bytes) then TCP.
+        let mut h = vec![0u8; 8];
+        h[0] = 6;
+        h
+    }
+    fn ah_tcp() -> Vec<u8> {
+        // AH: next=TCP, len=0 => (0+2)*4 = 8 bytes, then TCP.
+        let mut h = vec![0u8; 8];
+        h[0] = 6;
+        h[1] = 0;
+        h
+    }
+
+    let mut tcp_opts = vec![0u8; 32 + 4];
+    tcp_opts[12] = 8 << 4; // 32-byte TCP header
+    let mut tcp20 = vec![0u8; 20 + 3];
+    tcp20[12] = 5 << 4;
+
+    // (name, packet, family, expected shared-parser verdict)
+    let cases: Vec<(&str, Vec<u8>, u8, Option<(u8, u16, u16)>)> = vec![
+        // Short UDP: 2 L4 bytes (< 8-byte header) must fail closed on both.
+        (
+            "v4 short UDP",
+            v4(17, 0, &[0u8; 2]),
+            libc::AF_INET as u8,
+            None,
+        ),
+        (
+            "v4 UDP ok",
+            v4(17, 0, &[0u8; 8 + 3]),
+            libc::AF_INET as u8,
+            Some((17, 20, 28)),
+        ),
+        // ICMP payload is L4+8, not L4 (pre-fix IPsec stamped 20).
+        (
+            "v4 ICMP",
+            v4(1, 0, &[0u8; 8 + 2]),
+            libc::AF_INET as u8,
+            Some((1, 20, 28)),
+        ),
+        (
+            "v4 short ICMP",
+            v4(1, 0, &[0u8; 4]),
+            libc::AF_INET as u8,
+            None,
+        ),
+        (
+            "v4 TCP+options",
+            v4(6, 0, &tcp_opts),
+            libc::AF_INET as u8,
+            Some((6, 20, 52)),
+        ),
+        // Non-first fragments: sentinel, payload == L4, on both.
+        (
+            "v4 non-first frag",
+            v4(6, 185, &[0u8; 20]),
+            libc::AF_INET as u8,
+            Some((SHIM_PROTO_FRAGMENT_NO_L4, 20, 20)),
+        ),
+        (
+            "v6 non-first frag",
+            v6(44, &frag_hdr(6, 0x05c8), &[0u8; 20]),
+            libc::AF_INET6 as u8,
+            Some((SHIM_PROTO_FRAGMENT_NO_L4, 48, 48)),
+        ),
+        // IPv6 extension chains resolve to the inner TCP on both.
+        (
+            "v6 HbH->TCP",
+            v6(0, &hbh_tcp(), &tcp20),
+            libc::AF_INET6 as u8,
+            Some((6, 48, 68)),
+        ),
+        (
+            "v6 AH->TCP",
+            v6(51, &ah_tcp(), &tcp20),
+            libc::AF_INET6 as u8,
+            Some((6, 48, 68)),
+        ),
+        (
+            "v6 short UDP",
+            v6(17, &[], &[0u8; 2]),
+            libc::AF_INET6 as u8,
+            None,
+        ),
+        (
+            "v6 ICMPv6",
+            v6(58, &[], &[0u8; 8 + 1]),
+            libc::AF_INET6 as u8,
+            Some((58, 40, 48)),
+        ),
+    ];
+
+    for (name, pkt, family, expected) in cases {
+        assert_eq!(
+            parse_inner_protocol_and_offsets(&pkt, family),
+            expected,
+            "{name}: shared parser verdict changed"
+        );
+        let desc = ipsec_inner_descriptor(&ipsec_descriptor_frame(pkt), 1, 1, 1);
+        let ipsec = match expected {
+            Some((protocol, rel_l4, payload)) => (rel_l4, protocol, payload),
+            None => (0, 0, 0),
+        };
+        assert_eq!(
+            (desc.rel_l4_offset, desc.protocol, desc.payload_offset),
+            ipsec,
+            "{name}: IPsec descriptor diverged from the shared parser"
+        );
+    }
+}
