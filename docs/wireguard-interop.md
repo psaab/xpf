@@ -284,13 +284,19 @@ capped at the inner budget (`outer_mtu − overhead`), matching Linux
 16-byte multiple with no cap, so an operator `mtu` set by the standard
 underlay-minus-overhead formula (1420 on IPv6/1500, 1432 on IPv4
 PPPoE 1492) made every full-size TUN-origin packet up to 15 bytes too
-big and it was dropped at `encap_mtu_drops` with no PTB. With the cap
-a full-budget inner packet encapps to exactly the outer MTU on both
-encap sites (TUN-origin `wg_control` and transit `frame/wg.rs`), the
-size models (`wg_control/mtu.rs`, `frame/wg.rs`) and the advertised
-inner MTU (`wg::mss::wg_inner_mtu`, now `outer − overhead` with no
-worst-pad subtraction) all agree. `wg_tcp_mss` stays worst-pad
-conservative (its contract is any sender alignment). The Go default
+big and it was dropped at `encap_mtu_drops` with no PTB. With the cap,
+a full outer-derived-budget inner packet encapps to exactly the outer
+MTU only when that budget is at or below the engine ceiling (4096).
+The encap sites (TUN-origin `wg_control` and transit `frame/wg.rs`) and
+size models (`wg_control/mtu.rs`, `frame/wg.rs`) use the outer-derived
+budget; the advertised inner MTU (`wg::mss::wg_inner_mtu`) is
+`min(outer − overhead, 4096)`. If the engine ceiling binds, the
+advertised inner packet is smaller than the outer-derived budget and
+does not fill the outer MTU: for outer 9000/v4, 9000 − 60 = 8940 is
+clamped to 4096, whose encapped size is 4096 + 60 = 4156, not 9000.
+At ordinary underlay MTUs where the ceiling does not bind, the full
+advertised budget still encapps exactly to the outer MTU. `wg_tcp_mss`
+stays worst-pad conservative (its contract is any sender alignment). The Go default
 wgN MTU likewise drops the worst-pad subtraction, and an operator
 `mtu` above the default-underlay budget logs a warning (the value is
 still honored; the Rust per-peer guard remains authoritative).
