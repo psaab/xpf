@@ -798,25 +798,14 @@ func (s *Server) fetchPeerSessions(ctx context.Context, req *pb.GetSessionsReque
 	peerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	// Forward all filters but NOT include_peer — prevents recursion.
-	peerReq := &pb.GetSessionsRequest{
-		Limit:             req.Limit,
-		Offset:            req.Offset,
-		Zone:              req.Zone,
-		Protocol:          req.Protocol,
-		SourcePrefix:      req.SourcePrefix,
-		DestinationPrefix: req.DestinationPrefix,
-		SourcePort:        req.SourcePort,
-		DestinationPort:   req.DestinationPort,
-		NatOnly:           req.NatOnly,
-		Application:       req.Application,
-		InterfaceFilter:   req.InterfaceFilter,
-		SourceNatPool:     req.SourceNatPool,
-		// Do NOT forward PageToken to peer — tokens encode local BPF map
-		// keys and are meaningless on a different node's keyspace. Peer
-		// always returns its full (first-page) result set.
-		PageSize: req.PageSize,
-		NoEnrich: req.NoEnrich,
-	}
+	peerReq := selectorFromSessions(req)
+	peerReq.Limit = req.Limit
+	peerReq.Offset = req.Offset
+	// Do NOT forward PageToken to peer — tokens encode local BPF map
+	// keys and are meaningless on a different node's keyspace. Peer
+	// always returns its full (first-page) result set.
+	peerReq.PageSize = req.PageSize
+	peerReq.NoEnrich = req.NoEnrich
 	peerResp, err := client.GetSessions(peerCtx, peerReq)
 	if err != nil {
 		slog.Warn("failed to fetch peer sessions", "err", err)
@@ -1014,20 +1003,10 @@ func (s *Server) getSessionsLegacy(ctx context.Context, req *pb.GetSessionsReque
 }
 
 // buildSessionSummaryFilter reuses the GetSessions filter builder for the
-// summary request's filter fields (#15236 A52-04).
+// summary request's filter fields (#15236 A52-04), via the shared #17189
+// selector projection.
 func (s *Server) buildSessionSummaryFilter(req *pb.GetSessionSummaryRequest) *sessionFilter {
-	return s.buildSessionFilter(&pb.GetSessionsRequest{
-		Zone:              req.GetZone(),
-		Protocol:          req.GetProtocol(),
-		SourcePrefix:      req.GetSourcePrefix(),
-		DestinationPrefix: req.GetDestinationPrefix(),
-		SourcePort:        req.GetSourcePort(),
-		DestinationPort:   req.GetDestinationPort(),
-		NatOnly:           req.GetNatOnly(),
-		Application:       req.GetApplication(),
-		InterfaceFilter:   req.GetInterfaceFilter(),
-		SourceNatPool:     req.GetSourceNatPool(),
-	})
+	return s.buildSessionFilter(selectorFromSummary(req))
 }
 
 func (s *Server) GetSessionSummary(ctx context.Context, req *pb.GetSessionSummaryRequest) (*pb.GetSessionSummaryResponse, error) {
@@ -1206,10 +1185,7 @@ func (s *Server) proxyPeerSessionSummary(ctx context.Context, req *pb.GetSession
 	defer conn.Close()
 	peerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	fwd := &pb.GetSessionSummaryRequest{}
-	if req != nil {
-		fwd = &pb.GetSessionSummaryRequest{Zone: req.GetZone(), Protocol: req.GetProtocol(), SourcePrefix: req.GetSourcePrefix(), DestinationPrefix: req.GetDestinationPrefix(), SourcePort: req.GetSourcePort(), DestinationPort: req.GetDestinationPort(), NatOnly: req.GetNatOnly(), Application: req.GetApplication(), InterfaceFilter: req.GetInterfaceFilter(), SourceNatPool: req.GetSourceNatPool()}
-	}
+	fwd := forwardSelector(req)
 	return pb.NewBpfrxServiceClient(conn).GetSessionSummary(peerCtx, fwd)
 }
 
@@ -1486,18 +1462,8 @@ func (s *Server) ClearSessions(ctx context.Context, req *pb.ClearSessionsRequest
 	// the former inline filter comparing network-order key ports to
 	// host-order request ports, and adds the interface / nat-only /
 	// source-nat-pool filters the CLI advertises.
-	getReq := &pb.GetSessionsRequest{
-		Protocol:          req.Protocol,
-		SourcePrefix:      req.SourcePrefix,
-		DestinationPrefix: req.DestinationPrefix,
-		SourcePort:        req.SourcePort,
-		DestinationPort:   req.DestinationPort,
-		NatOnly:           req.NatOnly,
-		Application:       req.Application,
-		InterfaceFilter:   req.Interface,
-		SourceNatPool:     req.SourceNatPool,
-	}
-	if req.Zone != "" {
+	getReq, clearZoneName := selectorFromClear(req)
+	if clearZoneName != "" {
 		// An unresolvable zone must fail the RPC: leaving the zone ID
 		// at 0 would silently widen the clear to every zone.
 		// #12891: a quarantined (ID-collision loser) name resolves in

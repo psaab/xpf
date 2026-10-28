@@ -182,14 +182,20 @@ func parseFlowSessionArgs(args []string) (*flowSessionParse, error) {
 			return nil, fmt.Errorf("unknown session filter %q", args[i])
 		}
 	}
-	// `summary` and `sort-by` are global aggregations on this remote
-	// surface: the summary RPC (GetSessionSummary) takes no filter, and
-	// the top-talkers path walks the whole table. Earlier they parsed a
-	// filter and then SILENTLY ignored it — the #3439 silent-drop bug in
-	// a different sub-path. Reject the combination with a clear error
-	// instead of returning an unfiltered result the operator did not ask
-	// for (use the filtered per-session listing for a narrowed view).
-	if p.hasFilter && p.action != flowSessionList {
+	// `sort-by` is a global aggregation on this remote surface: the
+	// top-talkers path walks the whole table and takes no filter.
+	// Earlier it parsed a filter and then SILENTLY ignored it — the
+	// #3439 silent-drop bug in a different sub-path. Reject that
+	// combination with a clear error instead of returning an
+	// unfiltered result the operator did not ask for.
+	//
+	// `summary` is NOT rejected: #15236 gave GetSessionSummary the same
+	// selector set as GetSessions, so a filtered summary is forwarded
+	// (summaryRequestFromParse) and the peer counts only matching
+	// sessions. The pre-#15236 refusal here ("the summary RPC takes no
+	// filter", #17189) outlived the RPC change and refused a command
+	// the on-box CLI has accepted since #15236.
+	if p.hasFilter && p.action == flowSessionSortBy {
 		return nil, fmt.Errorf("session filters cannot be combined with %q", flowSessionActionName(p.action))
 	}
 	return p, nil
@@ -201,7 +207,13 @@ func (c *ctl) showFlowSession(args []string) error {
 		return err
 	}
 	if p.action == flowSessionSummary {
-		return c.showSessionSummary()
+		// Resolve the zone name to its ID before projecting, exactly
+		// as the list path does: zone 0 is the wildcard, so a failed
+		// resolve must error rather than widen the summary (#9065).
+		if err := c.resolveSessionZone(p); err != nil {
+			return err
+		}
+		return c.showSessionSummary(summaryRequestFromParse(p))
 	}
 	if p.action == flowSessionSortBy {
 		return c.showText("sessions-top:" + p.sortKey)
@@ -343,8 +355,33 @@ func printSessionEntries(resp *pb.GetSessionsResponse, brief bool) {
 	fmt.Printf("Total sessions: %d\n", resp.Total)
 }
 
-func (c *ctl) showSessionSummary() error {
-	resp, err := c.client.GetSessionSummary(c.ctx(), &pb.GetSessionSummaryRequest{IncludePeer: true})
+// summaryRequestFromParse projects the parsed list request's selector
+// fields onto GetSessionSummaryRequest (#17189): the two requests share
+// the selector set since #15236, so the filtered summary the operator
+// typed is the summary the daemon computes. List/presentation state
+// (limit, include_peer on the source) does not transfer; include_peer is
+// set here because the summary surface always fans out to the peer.
+func summaryRequestFromParse(p *flowSessionParse) *pb.GetSessionSummaryRequest {
+	req := &pb.GetSessionSummaryRequest{IncludePeer: true}
+	if p == nil || p.req == nil {
+		return req
+	}
+	src := p.req
+	req.Zone = src.Zone
+	req.Protocol = src.Protocol
+	req.SourcePrefix = src.SourcePrefix
+	req.DestinationPrefix = src.DestinationPrefix
+	req.SourcePort = src.SourcePort
+	req.DestinationPort = src.DestinationPort
+	req.NatOnly = src.NatOnly
+	req.Application = src.Application
+	req.InterfaceFilter = src.InterfaceFilter
+	req.SourceNatPool = src.SourceNatPool
+	return req
+}
+
+func (c *ctl) showSessionSummary(summaryReq *pb.GetSessionSummaryRequest) error {
+	resp, err := c.client.GetSessionSummary(c.ctx(), summaryReq)
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
