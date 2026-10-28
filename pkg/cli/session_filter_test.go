@@ -13,7 +13,7 @@ import (
 )
 
 // natSrcU32 encodes an IPv4 translated source the way session dumps
-// carry it (decoded for display via uint32ToIP).
+// carry it (decoded for display via SessionValue.NATSrcAddr, #17188).
 func natSrcU32(s string) uint32 {
 	return binary.NativeEndian.Uint32(net.ParseIP(s).To4())
 }

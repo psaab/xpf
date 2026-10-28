@@ -168,20 +168,12 @@ func buildZoneRGMap(cfg *config.Config, zoneIDs map[string]uint32) cluster.ZoneR
 		// ShouldSyncZone is queried with).
 		zid := uint16(zid32)
 		for _, ifName := range zone.Interfaces {
-			// #9821 D17: the split base (declared-aware), suffix ignored as
-			// before — a dotted RG owner's member resolves to its declared stanza.
-			baseName := cfg.SplitInterfaceUnitRef(ifName).Base
-			if ifc, ok := cfg.Interfaces.Interfaces[baseName]; ok && ifc != nil {
-				rg := ifc.RedundancyGroup
-				if rg <= 0 && ifc.RedundantParent != "" {
-					parentName := cfg.SplitInterfaceUnitRef(ifc.RedundantParent).Base
-					if parent, ok := cfg.Interfaces.Interfaces[parentName]; ok && parent != nil {
-						rg = parent.RedundancyGroup
-					}
-				}
-				if rg > 0 {
-					result[zid] = append(result[zid], rg)
-				}
+			// #17086 SSOT: InterfaceRefRG's positive form — unit split,
+			// RedundantParent chain, RethRGOwners membership. A stray
+			// group on a non-RETH interface no longer leaks into the
+			// zone's RG set.
+			if rg := cfg.RefRG(ifName); rg > 0 {
+				result[zid] = append(result[zid], rg)
 			}
 		}
 	}
@@ -210,7 +202,7 @@ func buildZoneFoldRGMap(cfg *config.Config) map[uint32]int {
 			delete(result, fold)
 			continue
 		}
-		rg := configuredInterfaceRG(cfg, localName)
+		rg := cfg.RefRG(localName) // #17086 SSOT
 		if rg <= 0 {
 			continue
 		}
@@ -224,31 +216,6 @@ func buildZoneFoldRGMap(cfg *config.Config) map[uint32]int {
 		}
 	}
 	return result
-}
-
-// configuredInterfaceRG follows the RETH membership chain from a resolved
-// physical interface to the redundancy group that owns it.
-func configuredInterfaceRG(cfg *config.Config, name string) int {
-	if cfg == nil {
-		return 0
-	}
-	seen := make(map[string]struct{})
-	for name != "" {
-		base := cfg.SplitInterfaceUnitRef(name).Base
-		if _, ok := seen[base]; ok {
-			return 0
-		}
-		seen[base] = struct{}{}
-		ifc := cfg.Interfaces.Interfaces[base]
-		if ifc == nil {
-			return 0
-		}
-		if ifc.RedundancyGroup > 0 {
-			return ifc.RedundancyGroup
-		}
-		name = ifc.RedundantParent
-	}
-	return 0
 }
 
 // rgHasRETH returns whether rgID owns a RETH (#6781 SSoT, #15946).

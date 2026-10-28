@@ -77,16 +77,22 @@ const (
 // the repo-root cargo config (cargo loads ancestor configs too, so a
 // root-level BPF-target rustflags edit could change the .o — currently
 // inert x86_64, hashed for completeness), the build recipe itself
-// (build-userspace-xdp.sh embeds the bpf-linker version pin and threads
-// MAX_INTERFACES), and bpf/headers/xpf_common.h (whose MAX_INTERFACES
-// #define is awk-extracted by the recipe and sizes the shim's binding
-// array + maps). Paths are repo-relative POSIX.
+// (build-userspace-xdp.sh embeds the bpf-linker version pin), and
+// bpf/headers/xpf_common.h (whose MAX_INTERFACES #define is awk-extracted
+// by the recipe (build-userspace-xdp.sh) and sizes the shim's
+// binding array + maps). Paths are repo-relative POSIX.
 //
-// xpf_common.h is hashed directly here so the freshness gate is
+// The header is hashed whole-file directly here so the freshness gate is
 // self-sufficient: the header->Go max_entries parity canary
 // (TestMaxInterfacesMatchesCHeader) t.Skips when the header is absent, so
-// leaning on it alone left a fail-open hole. Whole-file hashing trades a
-// little churn on unrelated header edits for a fail-closed gate.
+// leaning on it alone left a fail-open hole. The shim build consumes only
+// MAX_INTERFACES from this header (#17146: it reads nothing else here),
+// but the freshness gate hashes the entire file, so edits to other
+// retained-ABI content still churn the freshness hash and require a
+// `make generate` restamp. That whole-file coupling is the deliberate
+// fail-closed contract (#4977); it caused the two master-red windows in
+// #10561/#17146 and is retained rather than narrowed to the extracted
+// define.
 //
 // Deliberately EXCLUDED: userspace-xdp/.gitignore (not a build input) and
 // cargo's target/ tree (build artifacts, untracked).

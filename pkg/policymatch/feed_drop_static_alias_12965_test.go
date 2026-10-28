@@ -95,7 +95,7 @@ func TestSimulatorDropHoldPrecedenceOverStaticAlias12965(t *testing.T) {
 				SrcIP:       net.ParseIP("10.9.9.9"),
 				DstIP:       net.ParseIP("192.0.2.80"),
 				Protocol:    "tcp",
-				DstPort:     80,
+				DstPort:     PortPtr(80),
 				FeedOverlay: overlay,
 			})
 			if !res.Matched || res.PolicyName != "later-permit" || res.Action != config.PolicyPermit {
@@ -111,7 +111,7 @@ func TestSimulatorDropHoldPrecedenceOverStaticAlias12965(t *testing.T) {
 				SrcIP:       net.ParseIP("203.0.113.7"),
 				DstIP:       net.ParseIP("192.0.2.80"),
 				Protocol:    "tcp",
-				DstPort:     80,
+				DstPort:     PortPtr(80),
 				FeedOverlay: ready,
 			})
 			if !res.Matched || res.PolicyName != "deny-dropped-alias" || res.Action != config.PolicyDeny {
@@ -128,7 +128,7 @@ func TestSimulatorDropHoldPrecedenceOverStaticAlias12965(t *testing.T) {
 				SrcIP:    net.ParseIP("10.9.9.9"),
 				DstIP:    net.ParseIP("192.0.2.80"),
 				Protocol: "tcp",
-				DstPort:  80,
+				DstPort:  PortPtr(80),
 			})
 			assertContentRejected(t, res, "trust->untrust/deny-dropped-alias")
 
@@ -142,7 +142,7 @@ func TestSimulatorDropHoldPrecedenceOverStaticAlias12965(t *testing.T) {
 				SrcIP:    net.ParseIP("10.9.9.9"),
 				DstIP:    net.ParseIP("192.0.2.80"),
 				Protocol: "tcp",
-				DstPort:  80,
+				DstPort:  PortPtr(80),
 			})
 			if !res.Matched || res.PolicyName != "deny-dropped-alias" || res.Action != config.PolicyDeny {
 				t.Fatalf("pure static alias must keep matching, got Matched=%v Policy=%q Action=%v", res.Matched, res.PolicyName, res.Action)
@@ -168,7 +168,7 @@ func TestSimulatorDropHoldDestinationAliasMatchNone12965(t *testing.T) {
 		SrcIP:       net.ParseIP("203.0.113.7"),
 		DstIP:       net.ParseIP("10.9.9.9"),
 		Protocol:    "tcp",
-		DstPort:     80,
+		DstPort:     PortPtr(80),
 		FeedOverlay: overlay,
 	})
 	if !res.Matched || res.PolicyName != "later-permit" || res.Action != config.PolicyPermit {

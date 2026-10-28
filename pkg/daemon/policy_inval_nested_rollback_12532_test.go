@@ -74,8 +74,8 @@ func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testin
 		row := &r.dp.rows[i]
 		rule := r.dp.ruleBySession[row.ExpectedRTFlowSessionID]
 		row.PolicyID = ids[rule]
-		row.IngressZoneID = uint16(config.StableZoneID("trust"))
-		row.EgressZoneID = uint16(config.StableZoneID("untrust"))
+		row.IngressZoneID = config.StableZoneID("trust")
+		row.EgressZoneID = config.StableZoneID("untrust")
 		row.Tuple.DstPort = variantDestinationPort12686(rule)
 	}
 	r.h.d.store.MarkActiveApplied()
@@ -94,8 +94,8 @@ func TestPolicyInvalidationNestedRollbackKeepsRootDeniedCandidate12532(t *testin
 			SrcPort: 1099, DstPort: variantDestinationPort12686("trust->untrust/x"),
 		},
 		PolicyID: xID, ExpectedRTFlowSessionID: 99,
-		IngressZoneID: uint16(config.StableZoneID("trust")),
-		EgressZoneID:  uint16(config.StableZoneID("untrust")),
+		IngressZoneID: config.StableZoneID("trust"),
+		EgressZoneID:  config.StableZoneID("untrust"),
 	})
 	r.dp.ruleBySession[99] = "trust->untrust/x"
 	r.dp.deleteErrOnce = true
@@ -353,8 +353,8 @@ func TestPolicyInvalidationNestedRollbackChecksRestoredRuleMatch12532(t *testing
 				SrcPort: uint16(2000 + session.id), DstPort: session.port,
 			},
 			PolicyID: aID, ExpectedRTFlowSessionID: session.id,
-			IngressZoneID: uint16(config.StableZoneID("trust")),
-			EgressZoneID:  uint16(config.StableZoneID("untrust")),
+			IngressZoneID: config.StableZoneID("trust"),
+			EgressZoneID:  config.StableZoneID("untrust"),
 		})
 		r.dp.ruleBySession[session.id] = "trust->untrust/a"
 	}
@@ -399,8 +399,8 @@ func TestPolicyInvalidationNestedRollbackKeepsOlderRecordedRule12532(t *testing.
 	for i := range r.dp.rows {
 		row := &r.dp.rows[i]
 		row.PolicyID = ids[r.dp.ruleBySession[row.ExpectedRTFlowSessionID]]
-		row.IngressZoneID = uint16(uint16(config.StableZoneID("trust")))
-		row.EgressZoneID = uint16(uint16(config.StableZoneID("untrust")))
+		row.IngressZoneID = config.StableZoneID("trust")
+		row.EgressZoneID = config.StableZoneID("untrust")
 	}
 	r.h.d.store.MarkActiveApplied()
 
@@ -416,8 +416,8 @@ func TestPolicyInvalidationNestedRollbackKeepsOlderRecordedRule12532(t *testing.
 			SrcPort: 1009, DstPort: 80,
 		},
 		PolicyID: dpuserspace.PolicyIDsByStableKey(c1)["trust->untrust/x"], ExpectedRTFlowSessionID: 9,
-		IngressZoneID: uint16(uint16(config.StableZoneID("trust"))),
-		EgressZoneID:  uint16(uint16(config.StableZoneID("untrust"))),
+		IngressZoneID: config.StableZoneID("trust"),
+		EgressZoneID:  config.StableZoneID("untrust"),
 	}
 	r.dp.rows = append(r.dp.rows, session9)
 	r.dp.ruleBySession[9] = "trust->untrust/x"
@@ -476,8 +476,8 @@ func TestPolicyInvalidationReauthorizationRefusesZoneIDCollision12532(t *testing
 				SrcPort: uint16(3000 + i), DstPort: variantDestinationPort12686("trust->untrust/a"),
 			},
 			ExpectedRTFlowSessionID: uint64(3000 + i),
-			IngressZoneID:           uint16(trustID),
-			EgressZoneID:            uint16(config.StableZoneID("untrust")),
+			IngressZoneID:           trustID,
+			EgressZoneID:            config.StableZoneID("untrust"),
 		}
 		capture.deleted.policy = append(capture.deleted.policy, match)
 		capture.candidateRuleIDs[policyInvalidationMatchID(match)] = "trust->untrust/a"
@@ -525,8 +525,8 @@ func TestReauthorizeAllKeptDoesNotAliasCapture12797(t *testing.T) {
 				SrcPort: uint16(4000 + i), DstPort: 80,
 			},
 			ExpectedRTFlowSessionID: uint64(4000 + i),
-			IngressZoneID:           uint16(trustID),
-			EgressZoneID:            uint16(config.StableZoneID("untrust")),
+			IngressZoneID:           trustID,
+			EgressZoneID:            config.StableZoneID("untrust"),
 		}
 		source.deleted.policy = append(source.deleted.policy, match)
 		source.candidateRuleIDs[policyInvalidationMatchID(match)] = "trust->untrust/denied"

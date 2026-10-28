@@ -35,8 +35,9 @@ after HA failover. To make that **structural**, not flag-defended:
   there is no check-then-act anywhere:
     - **Graceful intent is atomic.** A graceful withdraw beats a racing hard
       `Clear`: `signalStop` stores graceful unconditionally and hard only via
-      compare-and-swap from "none" — never a downgrade. `Withdraw`/
-      `WithdrawInterfaces` install the entry (active-sender case) or flip
+      compare-and-swap from "none" — never a downgrade. `Withdraw` (and the
+      former interface-scoped withdraw, now test-only — #17160) installs
+      the entry (active-sender case) or flip
       `goodbyeWanted` on an existing one, AND `signalStop(modeGraceful)`,
       under the SAME lock that bumps the epoch — a racing `Clear` cannot slip
       a hard stop into a gap.
@@ -86,7 +87,7 @@ after HA failover. To make that **structural**, not flag-defended:
 - **Single stop-then-act path (round-4 unification).** `releaseDrain` is the
   SOLE owner of "stop the old sender (join-or-timeout) → optionally emit
   exactly-once → optionally start a replacement on PROVEN-close → release
-  tombstone." `Withdraw`, `WithdrawInterfaces`, `Clear` and `Apply` (both the
+  tombstone." `Withdraw`, `Clear` and `Apply` (both the
   removal and the changed-config **restart**) all route through it. The restart
   passes an `onProvenClose` callback that opens the replacement conn — it runs
   ONLY on the proven-closed (`<-stopped`) arm, under `m.mu`, with the tombstone
@@ -268,10 +269,12 @@ after HA failover. To make that **structural**, not flag-defended:
   and captured per deferred interface). The (re)placement starts only if BOTH
   are unchanged. The whole-manager fence is bumped by `Apply`, `Withdraw`, and
   `Clear` (a node-wide transition to BACKUP must abort every in-flight start).
-  The INTERFACE-SCOPED withdraws (`WithdrawInterfaces`, `WithdrawOnce`) bump
+  The INTERFACE-SCOPED withdraw (`WithdrawOnce`; the former
+  `WithdrawInterfaces` was deleted in #17160 and survives only as a test
+  helper) bumps
   ONLY the per-interface revision of the interfaces they name — NOT the fence.
   Before #4961 they bumped the global fence, so an unrelated
-  `WithdrawInterfaces([B])` (e.g. from a concurrent HA reconcile, which is not
+  interface-scoped withdraw of B (e.g. from a concurrent HA reconcile, which is not
   under `applySem`) cancelled interface A's in-flight changed-config restart:
   the epoch mismatch suppressed A's replacement AND deleted its tombstone, so A
   silently lost its RA sender and A's hosts lost their IPv6 default route /
@@ -329,12 +332,12 @@ after HA failover. To make that **structural**, not flag-defended:
   claimed path this call takes the interface over and emits the goodbye, so a
   deferred `Apply` start that captured the epoch in `deferredIfaceEpoch` must
   still be superseded — deleting it would let a deferred start bring the sender
-  back after the operator withdrew it. `WithdrawInterfaces` keeps its
+  back after the operator withdrew it. An interface-scoped graceful withdraw keeps its
   unconditional bump, because it flips `goodbyeWanted` on the entry it
   supersedes and therefore does take over.
 
   The contrast is the invariant, stated as a test: a `WithdrawOnce` that SKIPS
-  must not cancel a restart, and a `WithdrawInterfaces` naming the same
+  must not cancel a restart, and an interface-scoped graceful withdraw naming the same
   interface still must.
 - **Bounded writes.** Every owner `WriteTo` sets a 1 s write deadline so a
   stuck socket cannot wedge withdrawal; the owner always returns promptly,
@@ -406,8 +409,6 @@ never retried and the stale IPv6 default-router identity lingered on hosts
   owns (IPv6 blackhole, the opposite of the burst's repair intent). If the
   re-resolve fails, the burst is SKIPPED and logged rather than advertising a
   known-stale SLLA (host NUD + the next successful refresh recover).
-- `WithdrawInterfaces(names []string)` — `ra.go`. Graceful goodbye + stop
-  by interface name.
 - `WithdrawOnce(configs []*config.RAInterfaceConfig) []GoodbyeResult` —
   `ra.go`. Goodbye-only (no burst, no link toggle); skips busy interfaces.
   Returns a per-interface outcome (`Sent`/`Skipped`/`Err`) so a caller can
@@ -421,9 +422,12 @@ never retried and the stale IPv6 default-router identity lingered on hosts
   the goodbye emit, so the busy state — and thus the mutual exclusion —
   extends over the whole operation, not just the install instant.
 - `Clear() error` — `ra.go`. Hard stop (no goodbye) of every sender — the
-  explicit no-goodbye primitive for a forced/unsafe stop. NOTE: config-driven
-  removal no longer uses this; the daemon's standalone reconcile now withdraws
-  gracefully (`Withdraw()`) when all RA config is removed (#5092).
+  explicit no-goodbye primitive for a forced/unsafe stop. Returns the joined
+  per-interface release outcomes (#17160): the only failure it can surface is
+  a goodbye claimed by a racing graceful `Withdraw` whose release this `Clear`
+  owns. NOTE: config-driven removal no longer uses this; the daemon's
+  standalone reconcile now withdraws gracefully (`Withdraw()`) when all RA
+  config is removed (#5092).
 - `ClearInterfacesWithoutGoodbye(names []string) error` — `ra.go`. Silent per-interface stop;
   leaves unrelated senders running, supersedes pending starts, and drops
   existing or late goodbye retry debt for those names. Cluster demotion uses it
@@ -634,8 +638,12 @@ never retried and the stale IPv6 default-router identity lingered on hosts
   link-local configured on THAT unit; a **bare** name scans units lowest-first
   and uses the lowest-numbered unit that carries a configured link-local
   (byte-identical to the historical unit-0-only lookup when unit 0 holds it).
-  When no unit carries a configured link-local, a RETH interface still falls
-  back to `cluster.StableRethLinkLocal`. Before #2996 the lookup only ever read
+  When no unit carries a configured link-local, a RETH interface falls
+  back to the stable RETH link-local only when the RA's unit carries a
+  placement under the single definition
+  `Config.StableRethLinkLocalPlacements` in `pkg/config` (#17049;
+  `cluster.StableRethLinkLocal` delegates to `config.StableRethLinkLocal`).
+  Before #2996 the lookup only ever read
   `Units[0]`, so an RA on a subinterface (link-local under a non-zero unit)
   silently ignored the configured source.
 - **Bind retry runs UNLOCKED, in the owner goroutine (#2453).** `start()` no

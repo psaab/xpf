@@ -173,7 +173,7 @@ func wire11056Tuple(proto string, dstPort int) Query {
 		FromZone: "lan", ToZone: "wan",
 		SrcIP:    net.ParseIP("10.0.61.102"),   // CLUSTER_LAN_HOST, the burst sender
 		DstIP:    net.ParseIP("172.16.80.201"), // the VLAN-80 capture point
-		Protocol: proto, DstPort: dstPort,
+		Protocol: proto, DstPort: PortPtr(uint16(dstPort)),
 	}
 }
 
@@ -304,7 +304,7 @@ func TestWireHostinboundDenyFixtureAdmitsOnlyNetconf_11056(t *testing.T) {
 			FromZone: "wan", ToZone: JunosHostZone,
 			SrcIP:    net.ParseIP("172.16.80.174"), // outside prober (xpf-mouse-target)
 			DstIP:    net.ParseIP("172.16.80.8"),   // DUT WAN address the gate probes
-			Protocol: "tcp", DstPort: port,
+			Protocol: "tcp", DstPort: PortPtr(uint16(port)),
 		}
 	}
 

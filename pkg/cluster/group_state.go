@@ -15,6 +15,15 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 	if cfg == nil {
 		return
 	}
+	// #17132: after releasing m.mu below, run one immediate dampened poll
+	// so the new monitor set is reflected within this apply. PollNow must
+	// not run under m.mu: poll -> SetMonitorWeight takes m.mu (lock order
+	// m.mu -> mon.mu, #4828/#6550).
+	defer func() {
+		if mon := m.Monitor(); mon != nil {
+			mon.PollNow()
+		}
+	}()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -91,7 +100,7 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 			delete(m.garpCounts, id)
 			// #8435: the FOURTH same-id-re-add map-lifecycle gap in this loop.
 			//
-			// peerTransferOutOverride is armed between
+			// transferOverrides is armed between
 			// `commitRequestedPeerFailover` succeeding and
 			// `notePeerTransferCommitted`, bounded by failoverAckTimeout (20s).
 			// A stale override surviving an RG's removal meant a same-id re-add
@@ -104,11 +113,11 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 			// failover`, requiring a config commit that removes and re-adds that
 			// RG inside it. A race, not a steady state -- but the outcome is
 			// dual-primary.
-			delete(m.peerTransferOutOverride, id)
+			m.clearPeerTransferOutOverrideLocked(id)
 			// #8435, found by the struct-enumerated guard rather than named in
 			// the issue: two more per-RG hold deadlines survived the boundary.
 			//
-			// Both fail SAFE where peerTransferOutOverride fails unsafe -- a
+			// Both fail SAFE where transferOverrides fails unsafe -- a
 			// stale hold parks something in SECONDARY, where a stale override
 			// promotes to PRIMARY -- and both self-expire on a timer. That is
 			// why only the override produced a reproduced dual-primary, and it
@@ -135,7 +144,6 @@ func (m *Manager) UpdateConfig(cfg *config.ClusterConfig) {
 			// abandons. Keeping the counter would let it match and clobber.
 			delete(m.failoverInProgress, id)
 			delete(m.failoverGen, id)
-			delete(m.peerTransferOutPrevious, id)
 			delete(m.remoteTransferOutLeaseUntil, id)
 			delete(m.remoteTransferOutLeaseReqID, id)
 			delete(m.abortedPeerTransferReqID, id)

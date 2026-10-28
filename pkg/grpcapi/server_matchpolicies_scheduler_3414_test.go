@@ -90,7 +90,7 @@ func TestGRPCMatchPoliciesScheduledPolicyFailsClosedWhenStateUnavailable(t *test
 		FromZone:        "trust",
 		ToZone:          "untrust",
 		Protocol:        "tcp",
-		DestinationPort: 80,
+		DestinationPort: int32Ptr17081(80),
 	}
 
 	// Case A: no provider -> state unavailable -> fail closed (default deny).
@@ -181,7 +181,7 @@ func TestGRPCMatchPoliciesUsesAppliedSchedulerState17837(t *testing.T) {
 		FromZone:        "trust",
 		ToZone:          "untrust",
 		Protocol:        "tcp",
-		DestinationPort: 80,
+		DestinationPort: int32Ptr17081(80),
 	})
 	if err != nil {
 		t.Fatalf("MatchPolicies() error = %v", err)

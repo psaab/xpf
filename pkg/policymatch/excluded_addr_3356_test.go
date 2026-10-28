@@ -57,7 +57,7 @@ func TestExcludedEmptySetFailsClosed(t *testing.T) {
 		SrcIP:    net.ParseIP("10.0.5.7"),
 		DstIP:    net.ParseIP("10.0.9.9"),
 		Protocol: "tcp",
-		DstPort:  80,
+		DstPort:  PortPtr(80),
 	})
 	if res.Matched {
 		t.Fatalf("empty-but-excluded source set matched (fail-open #2008/#3356); res = %+v", res)
@@ -86,7 +86,7 @@ func TestExcludedV6OnlyDoesNotOverBlockV4(t *testing.T) {
 		SrcIP:    net.ParseIP("10.0.5.7"), // v4 source, not in the v6 excluded set
 		DstIP:    net.ParseIP("10.0.9.9"),
 		Protocol: "tcp",
-		DstPort:  80,
+		DstPort:  PortPtr(80),
 	})
 	if !res.Matched || res.Action != config.PolicyPermit {
 		t.Fatalf("v4 flow over-blocked by a v6-only exclusion (#3023/#3356); res = %+v", res)
@@ -104,7 +104,7 @@ func TestExcludedV6OnlyStillExcludesV6Match(t *testing.T) {
 		SrcIP:    net.ParseIP("2001:db8::1"), // inside the excluded set
 		DstIP:    net.ParseIP("2001:db8::2"),
 		Protocol: "tcp",
-		DstPort:  80,
+		DstPort:  PortPtr(80),
 	})
 	if res.Matched {
 		t.Fatalf("v6 source inside the excluded set matched; exclusion not live; res = %+v", res)

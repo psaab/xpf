@@ -2,8 +2,6 @@ package vrrp
 
 import (
 	"log/slog"
-	"net"
-	"strings"
 	"time"
 )
 
@@ -51,24 +49,12 @@ func (vi *vrrpInstance) hasIPv4VIP() bool {
 
 // vipFamilies reports which IP families have at least one parseable virtual
 // address. VIP sets can change in place at config commit (#10780), so inspect
-// the mutable slice under vi.mu.
+// the mutable slice under vi.mu. The parse itself is vipFamiliesIn
+// (config.ParseVRRPVIP, #17150).
 func (vi *vrrpInstance) vipFamilies() (hasIPv4, hasIPv6 bool) {
 	vi.mu.RLock()
 	defer vi.mu.RUnlock()
-	for _, vip := range vi.cfg.VirtualAddresses {
-		addr := vip
-		if idx := strings.Index(addr, "/"); idx >= 0 {
-			addr = addr[:idx]
-		}
-		if ip := net.ParseIP(addr); ip != nil {
-			if ip.To4() != nil {
-				hasIPv4 = true
-			} else {
-				hasIPv6 = true
-			}
-		}
-	}
-	return hasIPv4, hasIPv6
+	return vipFamiliesIn(vi.cfg.VirtualAddresses)
 }
 
 // becomeMaster transitions to Master state: add VIPs, and — only if the

@@ -250,10 +250,12 @@ type Manager struct {
 	// contract and is what userspace transfer readiness gates on.
 	localHAProtocolVersion uint16
 	peerHAProtocolVersion  uint16
-	// peerTransferOutOverride preserves an explicitly acknowledged peer
+	// transferOverrides preserves an explicitly acknowledged peer
 	// transfer-out across heartbeat refreshes until the transfer is either
-	// committed or aborted locally.
-	peerTransferOutOverride map[int]uint64
+	// committed or aborted locally. Each entry carries the reqID and the
+	// pre-override peer snapshot together, so clearing an entry can never
+	// leave a stale snapshot behind (#17125).
+	transferOverrides map[int]transferOverride
 	// peerTransferCommitGraceUntil keeps the peer in secondary-hold for a
 	// short window after a transfer commit so a transient stale heartbeat
 	// cannot immediately steal the RG back from the new primary.
@@ -262,7 +264,6 @@ type Manager struct {
 	// secondary during the same window so a transient heartbeat gap cannot
 	// immediately re-promote the old primary.
 	localTransferOutHoldUntil map[int]time.Time
-	peerTransferOutPrevious   map[int]peerGroupSnapshot
 	// remoteTransferOutLeaseUntil bounds how long a peer-REQUESTED transfer-out
 	// keeps this node parked in secondary-hold without a commit. It is armed
 	// (ArmRemoteTransferOutLease) when a remote failover request demotes an RG
@@ -813,6 +814,15 @@ type peerGroupSnapshot struct {
 	present bool
 }
 
+// transferOverride is one acknowledged peer transfer-out: the request ID
+// that armed it and the peer-group snapshot taken just before the override
+// rewrote the peer view, restored by a reqID-matched abort. Kept as a
+// single map value so the pair cannot be half-cleared (#17125).
+type transferOverride struct {
+	reqID    uint64
+	previous peerGroupSnapshot
+}
+
 // DefaultTakeoverHoldTime is the default additional delay after an RG becomes
 // ready before election promotes it to primary. Zero means promote as soon as
 // readiness is established.
@@ -875,10 +885,9 @@ func NewManager(nodeID, clusterID int) *Manager {
 		eventCh:                        make(chan ClusterEvent, 64),
 		garpCounts:                     make(map[int]int),
 		peerGroups:                     make(map[int]PeerGroupState),
-		peerTransferOutOverride:        make(map[int]uint64),
+		transferOverrides:              make(map[int]transferOverride),
 		peerTransferCommitGraceUntil:   make(map[int]time.Time),
 		localTransferOutHoldUntil:      make(map[int]time.Time),
-		peerTransferOutPrevious:        make(map[int]peerGroupSnapshot),
 		remoteTransferOutLeaseUntil:    make(map[int]time.Time),
 		remoteTransferOutLeaseReqID:    make(map[int]uint64),
 		abortedPeerTransferReqID:       make(map[int]uint64),

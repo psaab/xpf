@@ -45,7 +45,7 @@ func runBusyPrimaryLiveness16880(t *testing.T, timeout, appTimeout, period uint3
 	}
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.IsPrimaryFn = func() bool { return true }
 	ss.lastSweepTime = base
 	ss.lastPrimaryLivenessSweepTime = base
@@ -111,7 +111,7 @@ func TestStartSyncSweepKeepsShortTimeoutLivenessCadence16880(t *testing.T) {
 	}
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.IsPrimaryFn = func() bool { return true }
 
 	var sweepCalls uint64
@@ -197,7 +197,7 @@ func TestQueuedShortTimeoutSurvivesConcurrentSweepPublish16880(t *testing.T) {
 	}
 	ss.sessions = barrier
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.IsPrimaryFn = func() bool { return true }
 	ss.lastSweepTime = base
 	ss.lastPrimaryLivenessSweepTime = base
@@ -259,7 +259,7 @@ func TestQueuedEqualCadenceRegistrationSurvivesPublication16880(t *testing.T) {
 	}
 	ss.sessions = barrier
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.IsPrimaryFn = func() bool { return true }
 	ss.lastSweepTime = base
 	ss.lastPrimaryLivenessSweepTime = base
@@ -516,7 +516,7 @@ func primaryLivenessSweptWithProfile16880(t *testing.T, protocol uint8, value da
 		ss.genState.genSentMu.Unlock()
 	}
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.IsPrimaryFn = func() bool { return true }
 	ss.lastSweepTime = value.Created + 1
 	ss.lastPrimaryLivenessSweepTime = previous
@@ -626,7 +626,7 @@ func TestPrimaryLivenessUsesConfiguredReceiverUDPTimeout16880(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 	ss.SetReceiverSessionTimeoutProfile(ReceiverSessionTimeoutProfile{UDPSessionSeconds: 10})
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.IsPrimaryFn = func() bool { return true }
 	ss.lastSweepTime = base + 1
 	ss.lastPrimaryLivenessSweepTime = base + 9
@@ -833,7 +833,7 @@ func TestQueuedShortTimeoutWakesLivenessSweep16880(t *testing.T) {
 	}
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.IsPrimaryFn = func() bool { return true }
 	completed := make(chan struct{}, 4)
 	ss.sessions = completedSweepSessionStore16880{
@@ -911,7 +911,7 @@ func TestNewDualSessionSyncWakesForShortTimeout16880(t *testing.T) {
 	if !ss.IsDualFabric() {
 		t.Fatal("fixture did not construct dual-fabric session sync")
 	}
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 	ss.primaryLivenessScanIntervalSeconds.Store(10)
 
 	ss.wakeSweepForQueuedSession(unix.IPPROTO_UDP, 2, 2, 0, 0, 0)
@@ -939,7 +939,7 @@ func TestPrimaryLivenessMarkerRequiresPeerCapability16880(t *testing.T) {
 		{name: "unknown peer", ss: &SessionSync{}},
 		{name: "capable peer", ss: func() *SessionSync {
 			ss := &SessionSync{}
-			ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
+			ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness))
 			return ss
 		}(), want: true},
 	} {
@@ -966,7 +966,7 @@ func TestQueuedPrimaryLivenessFrameRechecksPeerAfterDowngrade16880(t *testing.T)
 	ss.conn0 = localConn
 	ss.mu.Unlock()
 	ss.stats.Connected.Store(true)
-	ss.peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness | capFlag2PersistentNatLeaseProvenance))
+	ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PrimaryLiveness | capFlag2PersistentNatLeaseProvenance))
 
 	key := dataplane.SessionKey{SrcPort: 12345, DstPort: 443, Protocol: 6}
 	value := dataplane.SessionValue{PrimaryLiveness: true}
@@ -978,7 +978,7 @@ func TestQueuedPrimaryLivenessFrameRechecksPeerAfterDowngrade16880(t *testing.T)
 	// The frame was encoded for a peer advertising both capabilities; the
 	// reconnect then advertises provenance alone before queued bytes are written.
 	ss.testBeforeQueuedWrite = func() {
-		ss.peerCapabilityFlags2.Store(uint32(capFlag2PersistentNatLeaseProvenance))
+		ss.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2PersistentNatLeaseProvenance))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
