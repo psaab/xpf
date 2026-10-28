@@ -2727,6 +2727,99 @@ mod framed_handshake {
         );
     }
 
+    /// #17201 blocked-thread exactly-once probe: eight callers block on
+    /// `reconcile_lock` while its holder panics, so every caller wakes on
+    /// the same poisoning. Only the first woken caller may take the
+    /// poisoned `Err` arm and stamp `WG_HANDSHAKE_LOCK_POISON_RECOVERIES`;
+    /// it clears the poison before releasing the lock, so the remaining
+    /// blocked callers must acquire through the clean arm. Removing the
+    /// `clear_poison` (per-caller stamping) turns this RED with a delta
+    /// of eight instead of exactly one. All waits are bounded, so a
+    /// deadlock fails this cell instead of hanging the test process.
+    #[test]
+    fn handshake_lock_recover_stamps_exactly_once_under_contention_17201() {
+        use crate::afxdp::wg::handshake_session::WG_HANDSHAKE_LOCK_POISON_RECOVERIES;
+        use crate::afxdp::wg::session::SessionRole;
+        use std::sync::Arc as StdArc;
+        use std::sync::atomic::Ordering as AOrd;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const WORKERS: usize = 8;
+
+        let (init, _resp, _init_pub, resp_pub) = engine_pair();
+        let init = StdArc::new(init);
+
+        // Holder takes reconcile_lock first and holds it until every
+        // worker is queued behind it, then panics while holding it.
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let holder_engine = init.clone();
+        let holder = std::thread::spawn(move || {
+            let _guard = holder_engine.reconcile_lock.lock().unwrap();
+            let _ = held_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(15));
+            panic!("simulated panic while holding reconcile_lock under contention");
+        });
+        held_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("holder must acquire reconcile_lock");
+
+        let before = WG_HANDSHAKE_LOCK_POISON_RECOVERIES.load(AOrd::Relaxed);
+
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
+        let (result_tx, result_rx) = mpsc::channel();
+        for _ in 0..WORKERS {
+            let worker = init.clone();
+            let worker_ready = ready_tx.clone();
+            let worker_result = result_tx.clone();
+            std::thread::spawn(move || {
+                let _ = worker_ready.send(());
+                let result = worker.try_reserve_pending_for_test(resp_pub, SessionRole::Initiator);
+                let _ = worker_result.send(result);
+            });
+        }
+        for _ in 0..WORKERS {
+            ready_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("every worker must reach the reconcile_lock call");
+        }
+        // Let every signalled worker actually block inside lock() before
+        // the poisoning panic releases the lock.
+        std::thread::sleep(Duration::from_millis(150));
+        release_tx
+            .send(())
+            .expect("holder must be waiting to poison reconcile_lock");
+
+        let mut acquired = 0usize;
+        for _ in 0..WORKERS {
+            let result = result_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("blocked handshake lock_recover callers must not deadlock");
+            result.expect("every blocked caller must recover and reserve successfully");
+            acquired += 1;
+        }
+        assert_eq!(acquired, WORKERS, "every blocked caller must acquire");
+        assert!(
+            holder.join().is_err(),
+            "holder must panic while holding reconcile_lock"
+        );
+        assert_eq!(
+            WG_HANDSHAKE_LOCK_POISON_RECOVERIES.load(AOrd::Relaxed) - before,
+            1,
+            "one poisoning under contention must stamp the recovery counter exactly once"
+        );
+        assert!(
+            !init.reconcile_lock.is_poisoned(),
+            "the first recovery must clear the poison for the blocked callers"
+        );
+        assert_eq!(
+            init.pending_count(),
+            1,
+            "serialized recovered reservations leave one pending reservation"
+        );
+    }
+
     /// Liveness/soundness smoke: hammer full handshakes while a thread churns
     /// the peer in/out via reconcile_peers, exercising the lock serialization
     /// and the reconcile-drains-pending path. Must not panic/deadlock and a
