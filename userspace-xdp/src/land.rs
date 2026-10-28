@@ -34,6 +34,8 @@
 /// `pkg/dataplane/userspace/land_screen.go`.
 pub const LAND_SCREEN_PASS: u8 = 0;
 /// LAND enabled, drop-enforcing.
+// Host-test-only: every non-PASS/non-ALARM value falls through as Drop.
+#[allow(dead_code)]
 pub const LAND_SCREEN_DROP: u8 = 1;
 /// Audit mode: count the alarm and pass to the kernel.
 pub const LAND_SCREEN_ALARM: u8 = 2;
