@@ -374,7 +374,7 @@ func validateHostInboundVRRPBypassWarnings(cfg *Config) []string {
 	}
 	// RETH-derived instances: mirror CollectRethInstances' suppression.
 	rethActive := true
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		rethActive = false
 	}
 	if rethActive {

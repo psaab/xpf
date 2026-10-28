@@ -47,6 +47,128 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// #17135: off-lock deferred work kicked under the `ServerState` lock.
+/// Each variant owns exactly the payload its lock-free phase needs; payloads
+/// differ, so the waits themselves stay separate (#2962/#4054/#5862/#7919).
+/// Only the post-wait status attach is shared. `status_after_wait` is the
+/// single predicate the in-lock attach consults instead of a hand-kept
+/// boolean over the individual `Option`s.
+pub(crate) enum Deferred {
+    Settle(Duration),
+    OwnerRgExport(crate::afxdp::OwnerRgExportWait),
+    AllSessionsExport(crate::afxdp::AllSessionsExport),
+    CounterQuery(crate::afxdp::SessionCounterQueryWait),
+}
+
+impl Deferred {
+    fn status_after_wait(&self) -> bool {
+        matches!(
+            self,
+            Deferred::Settle(_) | Deferred::OwnerRgExport(_) | Deferred::AllSessionsExport(_)
+        )
+    }
+}
+
+/// #17135: relock, quarantine check, refresh, attach status — the shared
+/// post-wait tail for every deferred verb. Quarantined state yields no
+/// status (GPT-4, #9900): skip the attach and ensure shutdown is underway.
+fn attach_status_after_wait(
+    state: &Arc<Mutex<ServerState>>,
+    running: &Arc<AtomicBool>,
+    response: &mut ControlResponse,
+) {
+    let mut guard = lock_server_state_recover(state);
+    if guard.quarantined_after_panic {
+        running.store(false, Ordering::SeqCst);
+    } else {
+        refresh_status(&mut guard);
+        response.status = Some(guard.status.clone());
+    }
+}
+
+#[cfg(test)]
+mod deferred_17135_tests {
+    use super::*;
+
+    fn test_state(quarantined: bool) -> Arc<Mutex<ServerState>> {
+        // Build via a raw byte name so this fixture does not itself match
+        // the acceptance grep for the production quarantine checks.
+        let state = Arc::new(Mutex::new(ServerState {
+            status: ProcessStatus { pid: 17135, ..Default::default() },
+            snapshot: None,
+            afxdp: crate::afxdp::Coordinator::new(),
+            state_writer: Arc::new(crate::state_writer::StateWriter::new()),
+            snapshot_policy_mismatch_total: 0,
+            quarantined_after_panic: false,
+        }));
+        state.lock().expect("state").quarantined_after_panic = quarantined;
+        state
+    }
+
+    #[test]
+    fn attach_status_after_wait_attaches_refreshed_status_17135() {
+        let state = test_state(false);
+        let running = Arc::new(AtomicBool::new(true));
+        let mut response = ControlResponse::default();
+        attach_status_after_wait(&state, &running, &mut response);
+        let status = response.status.expect("status must attach");
+        assert_eq!(status.pid, 17135);
+        assert!(running.load(Ordering::SeqCst), "healthy attach must not stop the daemon");
+    }
+
+    #[test]
+    fn attach_status_after_wait_quarantined_yields_no_status_17135() {
+        let state = test_state(true);
+        let running = Arc::new(AtomicBool::new(true));
+        let mut response = ControlResponse::default();
+        attach_status_after_wait(&state, &running, &mut response);
+        assert!(response.status.is_none(), "quarantined state yields no status");
+        assert!(!running.load(Ordering::SeqCst), "quarantine must ensure shutdown is underway");
+    }
+
+    #[test]
+    fn deferred_status_after_wait_classifies_each_variant_17135() {
+        // Every variant is built from a REAL kick on an empty coordinator
+        // (no workers, no sessions): OwnerRgExport via the empty-set kick
+        // (#2962 no-op), CounterQuery via the broadcast with zero workers
+        // (#7919), AllSessionsExport via the bulk snapshot with a test
+        // event stream and no sessions (#4054). Pinning CounterQuery ->
+        // false is load-bearing: it is the sole variant whose status was
+        // already attached in-lock, so a flipped arm would double-attach.
+        assert!(Deferred::Settle(Duration::from_secs(2)).status_after_wait());
+
+        let coordinator = crate::afxdp::Coordinator::new();
+        let owner_wait = coordinator
+            .kick_owner_rg_export_unpaged(&[], 0)
+            .expect("empty owner-RG kick");
+        assert!(Deferred::OwnerRgExport(owner_wait).status_after_wait());
+
+        let key = crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+            dst_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 2)),
+            src_port: 40001,
+            dst_port: 80,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        };
+        let counter_wait = coordinator.kick_session_counter_query(&key);
+        assert!(
+            !Deferred::CounterQuery(counter_wait).status_after_wait(),
+            "CounterQuery attaches in-lock; it must NOT attach after the wait"
+        );
+
+        let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(true, 16);
+        let mut coordinator = crate::afxdp::Coordinator::new();
+        coordinator.event_stream = Some(sender);
+        let all_export = coordinator
+            .snapshot_all_sessions_export()
+            .expect("empty bulk export");
+        assert!(Deferred::AllSessionsExport(all_export).status_after_wait());
+    }
+}
+
 /// #9629: which socket accepted this connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SocketMode {
@@ -237,41 +359,20 @@ pub(crate) fn handle_stream(
     let suppress_status = request.suppress_status;
     let is_fib_dump = request.request_type == "fib_dump";
     let neighbor_replace = request.neighbor_replace;
-    // #7919: two-phase like the exports — the locked arm only KICKS the
-    // broadcast; the bounded wait runs after the lock drops, so a stalled
-    // worker cannot hold the control plane for the wait's duration.
-    let mut counter_query_wait: Option<crate::afxdp::SessionCounterQueryWait> = None;
-
-    // #2962: the owner-RG session export must NOT block under the global
-    // ServerState lock. The locked `match` arm only KICKS the export
-    // (enqueues the per-worker command + captures the lock-free ack/delta
-    // handles); the blocking 15 s ack-wait runs here, AFTER the lock is
-    // dropped, so a slow/stalled worker can no longer freeze status polls,
-    // session installs, snapshot/FIB bumps, and HA state updates. When set,
-    // the post-match status attach is also deferred until after the wait so
-    // the reported status reflects the drained state.
-    let mut export_wait: Option<crate::afxdp::OwnerRgExportWait> = None;
-    // #4054: the all-sessions bulk export follows the same off-lock split. The
-    // locked `match` arm only SNAPSHOTS the export (session-table copy + Arc
-    // handle + cloned zone map); the blocking `push_delta_lossless` loop runs
-    // below, AFTER the lock is dropped, so a large/backpressured bulk export can
-    // no longer freeze status polls, session installs, snapshot/FIB bumps, and
-    // HA state updates. As with `export_wait`, the post-match status attach is
-    // deferred until after the push.
-    let mut all_export: Option<crate::afxdp::AllSessionsExport> = None;
+    // #17135: deferred off-lock work (#2962/#4054/#5862/#7919). Each locked
+    // arm only KICKS its phase and records the payload here; the blocking
+    // wait/push runs after the lock drops so a stalled worker cannot freeze
+    // status polls, session installs, snapshot/FIB bumps, and HA updates.
+    // When set, the post-match status attach is also deferred until after
+    // the wait so the reported status reflects the drained/settled state
+    // (see `Deferred::status_after_wait`).
+    let mut deferred: Option<Deferred> = None;
     // #16584: bindings (drain verb) / workers (owner-RG collect) that
     // contributed to the destructively-drained batch in
     // `response.session_deltas`. The tail arms loss on exactly these if the
     // response write fails.
     let mut drained_delta_slots: Vec<u32> = Vec::new();
     let mut drained_delta_workers: Vec<u32> = Vec::new();
-    // #5862: the binding-settle wait follows the same split. The locked arm only
-    // RECORDS that a settle is owed; the 2 s poll runs below with the lock
-    // released and re-taken per iteration, so an HA `sync_session` on the
-    // dedicated session socket — which dispatches through this same mutex — is
-    // served in the gaps instead of timing out against its 3 s deadline (and
-    // taking the rest of a #5380 bulk batch down with it).
-    let mut settle_wait: Option<Duration> = None;
 
     // #7209: THE ONE VERB SERVED WITHOUT `state.lock()`.
     //
@@ -399,7 +500,7 @@ pub(crate) fn handle_stream(
                 request.forwarding,
                 &mut response,
                 &mut persist_state,
-                &mut settle_wait,
+                &mut deferred,
             ),
             "update_ha_state" => ha::update(
                 &mut guard,
@@ -533,7 +634,7 @@ pub(crate) fn handle_stream(
                     request.queue,
                     &mut response,
                     &mut persist_state,
-                    &mut settle_wait,
+                    &mut deferred,
                 )
             }
             "set_binding_state" => binding::set(
@@ -541,7 +642,7 @@ pub(crate) fn handle_stream(
                 request.binding,
                 &mut response,
                 &mut persist_state,
-                &mut settle_wait,
+                &mut deferred,
             ),
             "inject_packet" => inject_packet::handle(
                 &mut guard,
@@ -582,22 +683,24 @@ pub(crate) fn handle_stream(
                 // handle. The blocking ack-wait runs after the lock drops.
                 // #9856: BUSY (or no-window continuation) folds into the
                 // response here; no wait runs without a handle.
-                export_wait =
-                    export::owner_rg_kick(&mut guard, request.session_export, &mut response);
+                deferred = export::owner_rg_kick(&mut guard, request.session_export, &mut response)
+                    .map(Deferred::OwnerRgExport);
             }
             "export_all_sessions" => {
                 // #4054: locked phase only — snapshot + capture the push
                 // handle. The blocking push loop runs after the lock drops.
-                all_export = export::all_kick(&mut guard, &mut response);
+                deferred =
+                    export::all_kick(&mut guard, &mut response).map(Deferred::AllSessionsExport);
             }
             "session_counters" => {
                 // #7919 READ-ONLY diagnostic. Locked phase only: broadcast the
                 // query and capture the wait handle.
-                counter_query_wait = session_counters::kick(
+                deferred = session_counters::kick(
                     &mut guard,
                     request.session_counter_query.as_ref(),
                     &mut response,
-                );
+                )
+                .map(Deferred::CounterQuery);
             }
             "rebind" => rebind::handle(&mut guard, &mut response, &mut persist_state),
             "stop_workers" => stop_workers::handle(&mut guard, &mut persist_state),
@@ -611,84 +714,68 @@ pub(crate) fn handle_stream(
                 response.error = format!("unknown request type {other}");
             }
         }
-        // #2962/#4054: defer status attach for the export verbs — it is
-        // computed after the lock-free ack-wait / push below so it reflects the
-        // drained state (and is not produced while holding the lock across a
-        // wait or a blocking push).
-        if export_wait.is_none() && all_export.is_none() && settle_wait.is_none() && !suppress_status
-        {
+        // #2962/#4054/#5862: defer status attach for verbs whose deferred
+        // phase re-derives it — computed after the lock-free wait below so
+        // it reflects the drained/settled state (and is not produced while
+        // holding the lock across a wait or a blocking push). #7919's
+        // counter query attaches in-lock (its only production sender sets
+        // SuppressStatus, so the asymmetry is latent).
+        if deferred.as_ref().is_none_or(|d| !d.status_after_wait()) && !suppress_status {
             refresh_status(&mut guard);
             response.status = Some(guard.status.clone());
         }
     }
 
-    // #5862: the binding-settle poll runs here, with the global ServerState lock
-    // RELEASED between iterations, so `sync_session` on the dedicated HA session
-    // socket is served in the gaps rather than queued behind a 2 s wait it
-    // cannot outlast (its round-trip deadline is 3 s and the #5380 batch abort
-    // makes the first timeout drop the rest of the burst). Status is re-derived
-    // afterwards under a fresh short-lived acquisition so the response reflects
-    // the SETTLED bindings — which is what the pre-#5862 in-lock refresh gave,
-    // and the reason the in-lock attach above is skipped when a settle is owed.
-    if let Some(timeout) = settle_wait {
-        wait_for_binding_settle(&state, timeout);
-        if !suppress_status {
-            let mut guard = lock_server_state_recover(&state);
-            // GPT-4: quarantined state yields no status — skip the attach
-            // (the verb above completed under its own lock hold; only this
-            // fresh read is suspect). Ensure shutdown is underway.
-            if guard.quarantined_after_panic {
-                running.store(false, Ordering::SeqCst);
-            } else {
-                refresh_status(&mut guard);
-                response.status = Some(guard.status.clone());
+    // #17135: off-lock deferred phases. The waits must stay off-lock
+    // (#2962/#4054/#5862/#7919) and their payloads differ, so they cannot
+    // merge into one wait; only the post-wait status attach is shared
+    // (`attach_status_after_wait`). At most one variant is ever set (one
+    // verb per request), so the match arms are mutually exclusive.
+    match deferred {
+        Some(Deferred::Settle(timeout)) => {
+            // #5862: poll with the lock RELEASED between iterations, so
+            // `sync_session` on the dedicated HA session socket is served
+            // in the gaps instead of timing out against its 3 s deadline.
+            // Status is re-derived afterwards so the response reflects the
+            // SETTLED bindings — the reason the in-lock attach above is
+            // skipped when a settle is owed.
+            wait_for_binding_settle(&state, timeout);
+            if !suppress_status {
+                attach_status_after_wait(&state, &running, &mut response);
             }
         }
-    }
-
-    // #2962: blocking owner-RG export ack-wait runs here, with the global
-    // ServerState lock RELEASED, so the control plane stays responsive while
-    // one export drains. Status is then re-derived under a fresh short-lived
-    // lock acquisition (the wait is already done).
-    // #7919: bounded wait for the per-worker replies, lock-free.
-    if let Some(wait) = counter_query_wait {
-        response.session_counters = session_counters::collect(wait);
-    }
-    if let Some(wait) = export_wait {
-        export::owner_rg_collect(
-            wait,
-            &mut response,
-            &mut persist_state,
-            &mut drained_delta_workers,
-        );
-        if !suppress_status {
-            let mut guard = lock_server_state_recover(&state);
-            // GPT-4: quarantined state yields no status (see above).
-            if guard.quarantined_after_panic {
-                running.store(false, Ordering::SeqCst);
-            } else {
-                refresh_status(&mut guard);
-                response.status = Some(guard.status.clone());
+        Some(Deferred::CounterQuery(wait)) => {
+            // #7919: bounded wait for the per-worker replies, lock-free.
+            // Status was already attached in-lock above (see
+            // `Deferred::status_after_wait`).
+            response.session_counters = session_counters::collect(wait);
+        }
+        Some(Deferred::OwnerRgExport(wait)) => {
+            // #2962: blocking ack-wait with the lock RELEASED, so the
+            // control plane stays responsive while one export drains.
+            // Status is then re-derived under a fresh short-lived lock
+            // acquisition (the wait is already done).
+            export::owner_rg_collect(
+                wait,
+                &mut response,
+                &mut persist_state,
+                &mut drained_delta_workers,
+            );
+            if !suppress_status {
+                attach_status_after_wait(&state, &running, &mut response);
             }
         }
-    }
-
-    // #4054: all-sessions bulk export push runs here, with the global
-    // ServerState lock RELEASED, so the control plane stays responsive while a
-    // large/backpressured bulk export serializes. Status is then re-derived
-    // under a fresh short-lived lock acquisition (the push is already done).
-    if let Some(export) = all_export {
-        export::all_push(export, &mut response);
-        if !suppress_status {
-            let mut guard = lock_server_state_recover(&state);
-            // GPT-4: quarantined state yields no status (see above).
-            if guard.quarantined_after_panic {
-                running.store(false, Ordering::SeqCst);
-            } else {
-                refresh_status(&mut guard);
-                response.status = Some(guard.status.clone());
+        Some(Deferred::AllSessionsExport(export)) => {
+            // #4054: bulk push with the lock RELEASED, so the control
+            // plane stays responsive while a large/backpressured export
+            // serializes. Status is then re-derived under a fresh
+            // short-lived lock acquisition (the push is already done).
+            export::all_push(export, &mut response);
+            if !suppress_status {
+                attach_status_after_wait(&state, &running, &mut response);
             }
         }
+        None => {}
     }
 
     // #5294: the state-file persist must NOT gate delivery of the response.

@@ -57,8 +57,8 @@ func TestRethOwnershipCollectorsUseTheSharedPredicate(t *testing.T) {
 		if strings.Contains(b, `HasPrefix(name, "reth")`) || strings.Contains(b, `HasPrefix(ifName, "reth")`) {
 			t.Errorf("RethVIPsByRG name-tests for \"reth\"; use config.RethRGOwners (#6781)")
 		}
-		if !strings.Contains(b, "dedupeVRRPVIPs") {
-			t.Errorf("RethVIPsByRG does not apply the #11482 canonical dedupe (dedupeVRRPVIPs); alias spellings would again feed duplicate VIPs to the direct path (#17140)")
+		if !strings.Contains(b, "DedupeVRRPVIPs") {
+			t.Errorf("RethVIPsByRG does not apply the #11482 canonical dedupe (DedupeVRRPVIPs); alias spellings would again feed duplicate VIPs to the direct path (#17140)")
 		}
 	})
 
