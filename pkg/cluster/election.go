@@ -1157,12 +1157,7 @@ func (m *Manager) recalcWeight(rg *RedundancyGroupState) {
 	if rg.forcedSecondary {
 		rg.Weight = 0
 	} else {
-		totalLost := 0
-		for _, iface := range rg.MonitorFails {
-			key := monitorKey{rgID: rg.GroupID, iface: iface}
-			totalLost += m.monitorWeights[key]
-		}
-		rg.Weight = rgWeightFromDebt(totalLost)
+		rg.Weight = rgWeightFromDebt(m.monitorDebtTotalLocked(rg))
 	}
 	if oldWeight != rg.Weight {
 		slog.Info("cluster: weight changed",
@@ -1173,6 +1168,27 @@ func (m *Manager) recalcWeight(rg *RedundancyGroupState) {
 	} else {
 		m.electSingleNode()
 	}
+}
+
+// monitorDebtTotalLocked returns effective monitor debt for an RG. The
+// dataplane-arm and startup-sync holds share the larger of their debts instead
+// of adding together: their normal floor-sized costs bottom out at weight 1,
+// while an explicit full debt (255) on either reserved key still resigns the
+// RG. Every other monitor debt remains additive. Caller must hold m.mu.
+func (m *Manager) monitorDebtTotalLocked(rg *RedundancyGroupState) int {
+	totalLost, holdLost := 0, 0
+	for _, iface := range rg.MonitorFails {
+		weight := m.monitorWeights[monitorKey{rgID: rg.GroupID, iface: iface}]
+		switch iface {
+		case DataplaneArmMonitorIface, startupSyncHoldMonitorIface:
+			if weight > holdLost {
+				holdLost = weight
+			}
+		default:
+			totalLost += weight
+		}
+	}
+	return totalLost + holdLost
 }
 
 // reconcileMonitorDebtsLocked realigns each RG's installed interface-monitor
@@ -1290,11 +1306,7 @@ func (m *Manager) reconcileMonitorDebtsLocked(cfg *config.ClusterConfig) {
 		if rg.forcedSecondary {
 			rg.Weight = 0
 		} else {
-			totalLost := 0
-			for _, iface := range rg.MonitorFails {
-				totalLost += m.monitorWeights[monitorKey{rgID: rgID, iface: iface}]
-			}
-			rg.Weight = rgWeightFromDebt(totalLost)
+			rg.Weight = rgWeightFromDebt(m.monitorDebtTotalLocked(rg))
 		}
 		if oldWeight != rg.Weight {
 			slog.Info("cluster: monitor debt reconciled on config change",
@@ -1314,10 +1326,7 @@ func (m *Manager) reconcileMonitorDebtsLocked(cfg *config.ClusterConfig) {
 // kernel-upgrade hold never reaches the caller (electRG returns
 // first) and does not touch Weight at all. Caller must hold m.mu.
 func (m *Manager) localWeightIsMonitorDebtLocked(rg *RedundancyGroupState) bool {
-	totalLost := 0
-	for _, iface := range rg.MonitorFails {
-		totalLost += m.monitorWeights[monitorKey{rgID: rg.GroupID, iface: iface}]
-	}
+	totalLost := m.monitorDebtTotalLocked(rg)
 	return totalLost > 0 && rg.Weight == rgWeightFromDebt(totalLost)
 }
 
