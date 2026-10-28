@@ -1002,7 +1002,7 @@ pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress(
 /// #16222: per-flow twin of `prefer_local_forward_candidate_for_fabric_ingress`
 /// for the flow-cache revalidation path: the probe uses the per-flow ECMP
 /// hash so it judges the same candidate the session path would produce.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn prefer_local_forward_candidate_for_fabric_ingress_for_flow(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
@@ -1202,7 +1202,7 @@ pub(in crate::afxdp) fn should_seed_fabric_punt(
 /// dropped so one flow does not emit two SESSION_CREATE/CLOSE records from two
 /// nodes; `policy_id` is kept, because `show security flow session` on this
 /// node should be able to say which policy admitted what it is holding.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn fabric_punt_seed_metadata(
     forwarding: &ForwardingState,
     from_zone_id: u32,

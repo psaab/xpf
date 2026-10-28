@@ -53,9 +53,8 @@
 
 use super::super::*;
 use super::WG_TYPE_DATA;
-use crate::afxdp::gre::{
-    outer_datagram_end, outer_ecn_bits, packet_trimmed_len, parse_inner_protocol_and_offsets,
-};
+use crate::afxdp::frame::{packet_trimmed_len, parse_inner_protocol_and_offsets};
+use crate::afxdp::gre::{outer_datagram_end, outer_ecn_bits};
 
 /// A decapsulated WireGuard transport-data record, ready to replace its outer
 /// frame for the rest of the worker's pass.
@@ -289,7 +288,7 @@ fn wg_endpoint_for_listen_port(
                 cross_family_specific
             };
             if endpoint.wg_listen_port == dst_port
-                && tunnel_mode_kind(&endpoint.mode) == TunnelKind::WireGuard
+                && endpoint.kind == TunnelKind::WireGuard
                 && transport_instance_of_table(&endpoint.transport_table) == ingress_instance
                 && source_matches
                 && wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)

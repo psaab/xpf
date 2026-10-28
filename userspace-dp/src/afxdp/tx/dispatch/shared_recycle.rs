@@ -10,6 +10,118 @@
 
 use super::*;
 
+/// #17178: cumulative unknown-slot drop log lines emitted. Throttle gate
+/// for `log_shared_recycle_unknown_slot_drops`, mirroring the
+/// `tx/rings.rs` UMEM-anomaly convention (`fetch_add(1) < 10`).
+pub(in crate::afxdp) static SHARED_RECYCLE_UNKNOWN_SLOT_DROPS_LOGGED: AtomicU64 = AtomicU64::new(0);
+/// #17178: cumulative unknown-slot rescue log lines emitted. Throttle
+/// gate for `log_shared_recycle_unknown_slot_rescues`.
+pub(in crate::afxdp) static SHARED_RECYCLE_UNKNOWN_SLOT_RESCUES_LOGGED: AtomicU64 =
+    AtomicU64::new(0);
+
+/// #17178: borrow-shape adapter for the ONE drain loop. The two public
+/// wrappers differ only in how a binding index maps onto their slices
+/// (split `left/current/right` vs one flat slice) and which binding is
+/// charged for unknown slots — never in drop/rescue accounting.
+trait SharedRecycleBindings {
+    fn binding_count(&self) -> usize;
+    fn slot_at(&self, target_index: usize) -> Option<u32>;
+    fn push(&mut self, target_index: usize, offset: u64);
+    fn blame_live(&self) -> Option<&BindingLiveState>;
+}
+
+impl SharedRecycleBindings for [BindingWorker] {
+    fn binding_count(&self) -> usize {
+        self.len()
+    }
+    fn slot_at(&self, target_index: usize) -> Option<u32> {
+        self.get(target_index).map(|binding| binding.slot)
+    }
+    fn push(&mut self, target_index: usize, offset: u64) {
+        if let Some(binding) = self.get_mut(target_index) {
+            binding.tx_pipeline.pending_fill_frames.push_back(offset);
+        }
+    }
+    fn blame_live(&self) -> Option<&BindingLiveState> {
+        self.first().map(|binding| binding.live.as_ref())
+    }
+}
+
+struct SplitBindings<'a> {
+    left: &'a mut [BindingWorker],
+    current_index: usize,
+    current: &'a mut BindingWorker,
+    right: &'a mut [BindingWorker],
+}
+
+impl SharedRecycleBindings for SplitBindings<'_> {
+    fn binding_count(&self) -> usize {
+        self.left.len() + 1 + self.right.len()
+    }
+    fn slot_at(&self, target_index: usize) -> Option<u32> {
+        split_binding_slot_at(
+            self.left,
+            self.current_index,
+            self.current,
+            self.right,
+            target_index,
+        )
+    }
+    fn push(&mut self, target_index: usize, offset: u64) {
+        if let Some(binding) = binding_by_index_mut(
+            self.left,
+            self.current_index,
+            self.current,
+            self.right,
+            target_index,
+        ) {
+            binding.tx_pipeline.pending_fill_frames.push_back(offset);
+        }
+    }
+    fn blame_live(&self) -> Option<&BindingLiveState> {
+        Some(&self.current.live)
+    }
+}
+
+fn drain_shared_recycles<B: SharedRecycleBindings + ?Sized>(
+    bindings: &mut B,
+    binding_lookup: &WorkerBindingLookup,
+    shared_recycles: &mut Vec<(u32, u64)>,
+    backstop: Option<usize>,
+) -> u64 {
+    let mut dropped = 0u64;
+    let mut rescued = 0u64;
+    let mut first_drop = None;
+    let mut first_rescue = None;
+    for (slot, offset) in shared_recycles.drain(..) {
+        let target_index =
+            shared_recycle_target_index(bindings.binding_count(), binding_lookup, slot, |idx| {
+                bindings.slot_at(idx)
+            });
+        if let Some(target_index) = target_index {
+            bindings.push(target_index, offset);
+            continue;
+        }
+        if let Some(host) = backstop {
+            // Same-region per the premise on `split_is_single_region`:
+            // kernel-masked to the chunk base on consume, bounds-checked,
+            // growth-bounded. See note there.
+            bindings.push(host, offset);
+            first_rescue.get_or_insert((slot, offset));
+            rescued = rescued.saturating_add(1);
+        } else {
+            first_drop.get_or_insert((slot, offset));
+            dropped = dropped.saturating_add(1);
+        }
+    }
+    log_shared_recycle_unknown_slot_drops(dropped, first_drop);
+    log_shared_recycle_unknown_slot_rescues(rescued, first_rescue);
+    let blame_live = bindings.blame_live();
+    record_shared_recycle_unknown_slot_drops(blame_live, dropped);
+    record_shared_recycle_unknown_slot_rescues(blame_live, rescued);
+    dropped
+}
+
 pub(in crate::afxdp) fn apply_shared_recycles(
     left: &mut [BindingWorker],
     current_index: usize,
@@ -25,39 +137,15 @@ pub(in crate::afxdp) fn apply_shared_recycles(
     // `Rc::ptr_eq` compares where N = worker bindings (typically < 32) —
     // single-digit ns against the drain's per-frame ring ops. Deliberately
     // not lazy-gated behind the first unknown: the gate would cost the same
-    // order as the scan it skips.
-    let backstop = split_is_single_region(left, current, right);
-    let mut dropped = 0u64;
-    let mut rescued = 0u64;
-    let mut first_drop = None;
-    let mut first_rescue = None;
-    for (slot, offset) in shared_recycles.drain(..) {
-        if route_shared_recycle_by_slot(
-            left,
-            current_index,
-            current,
-            right,
-            binding_lookup,
-            slot,
-            offset,
-        ) {
-            continue;
-        }
-        if backstop {
-            // Same-region per the premise above: kernel-masked to the chunk
-            // base on consume, bounds-checked, growth-bounded. See note.
-            current.tx_pipeline.pending_fill_frames.push_back(offset);
-            first_rescue.get_or_insert((slot, offset));
-            rescued = rescued.saturating_add(1);
-        } else {
-            first_drop.get_or_insert((slot, offset));
-            dropped = dropped.saturating_add(1);
-        }
-    }
-    log_shared_recycle_unknown_slot_drops(dropped, first_drop);
-    log_shared_recycle_unknown_slot_rescues(rescued, first_rescue);
-    record_shared_recycle_unknown_slot_drops(Some(&current.live), dropped);
-    record_shared_recycle_unknown_slot_rescues(Some(&current.live), rescued);
+    // order as the scan it skips. The rescue host is `current` itself.
+    let backstop = split_is_single_region(left, current, right).then_some(current_index);
+    let mut bindings = SplitBindings {
+        left,
+        current_index,
+        current,
+        right,
+    };
+    drain_shared_recycles(&mut bindings, binding_lookup, shared_recycles, backstop);
 }
 
 // F-149 (#9904): same-region backstop premise, stated because the rescue
@@ -110,36 +198,9 @@ pub(in crate::afxdp) fn split_is_single_region(
 
 fn single_region_backstop_index(bindings: &[BindingWorker]) -> Option<usize> {
     let first = bindings.first()?;
-    bindings
-        .iter()
-        .all(|binding| binding.umem.shares_allocation_with(&first.umem))
-        .then_some(0)
-}
-
-fn route_shared_recycle_by_slot(
-    left: &mut [BindingWorker],
-    current_index: usize,
-    current: &mut BindingWorker,
-    right: &mut [BindingWorker],
-    binding_lookup: &WorkerBindingLookup,
-    slot: u32,
-    offset: u64,
-) -> bool {
-    let target_index = shared_recycle_target_index_for_split(
-        left.len(),
-        right.len(),
-        binding_lookup,
-        slot,
-        |idx| split_binding_slot_at(left, current_index, current, right, idx),
-    );
-    if let Some(target_index) = target_index
-        && let Some(binding) =
-            binding_by_index_mut(left, current_index, current, right, target_index)
-    {
-        binding.tx_pipeline.pending_fill_frames.push_back(offset);
-        return true;
-    }
-    false
+    // #17178: delegate to the ONE single-region predicate — `first` as
+    // the split path's `current`, the remaining bindings as its `right`.
+    split_is_single_region(&[], first, &bindings[1..]).then_some(0)
 }
 
 pub(super) fn shared_recycle_target_index_for_split<F>(
@@ -235,6 +296,12 @@ pub(in crate::afxdp) fn log_shared_recycle_unknown_slot_drops(
     if dropped == 0 {
         return;
     }
+    // #17178: throttle like the `tx/rings.rs` UMEM-anomaly logs — only
+    // the first 10 drop lines are emitted process-wide; the per-binding
+    // live counters keep counting every drop.
+    if SHARED_RECYCLE_UNKNOWN_SLOT_DROPS_LOGGED.fetch_add(1, Ordering::Relaxed) >= 10 {
+        return;
+    }
     if let Some((slot, offset)) = first_drop {
         eprintln!(
             "xpf-userspace-dp: dropping {} shared UMEM recycles for unknown slots \
@@ -254,6 +321,12 @@ pub(in crate::afxdp) fn log_shared_recycle_unknown_slot_rescues(
     first_rescue: Option<(u32, u64)>,
 ) {
     if rescued == 0 {
+        return;
+    }
+    // #17178: throttle like the `tx/rings.rs` UMEM-anomaly logs — only
+    // the first 10 rescue lines are emitted process-wide; the per-binding
+    // live counters keep counting every rescue.
+    if SHARED_RECYCLE_UNKNOWN_SLOT_RESCUES_LOGGED.fetch_add(1, Ordering::Relaxed) >= 10 {
         return;
     }
     if let Some((slot, offset)) = first_rescue {
@@ -285,45 +358,7 @@ pub(in crate::afxdp) fn apply_shared_recycles_to_bindings(
     // not lazy-gated behind the first unknown: the gate would cost the same
     // order as the scan it skips.
     let backstop = single_region_backstop_index(bindings);
-    let mut dropped = 0u64;
-    let mut rescued = 0u64;
-    let mut first_drop = None;
-    let mut first_rescue = None;
-    for (slot, offset) in shared_recycles.drain(..) {
-        let target_index =
-            shared_recycle_target_index(bindings.len(), binding_lookup, slot, |idx| {
-                bindings.get(idx).map(|binding| binding.slot)
-            });
-        if let Some(target_index) = target_index
-            && let Some(binding) = bindings.get_mut(target_index)
-        {
-            binding.tx_pipeline.pending_fill_frames.push_back(offset);
-            continue;
-        }
-        if let Some(host) = backstop
-            && let Some(binding) = bindings.get_mut(host)
-        {
-            // Same-region per the premise above: kernel-masked to the chunk
-            // base on consume, bounds-checked, growth-bounded. See note.
-            binding.tx_pipeline.pending_fill_frames.push_back(offset);
-            first_rescue.get_or_insert((slot, offset));
-            rescued = rescued.saturating_add(1);
-        } else {
-            first_drop.get_or_insert((slot, offset));
-            dropped = dropped.saturating_add(1);
-        }
-    }
-    log_shared_recycle_unknown_slot_drops(dropped, first_drop);
-    log_shared_recycle_unknown_slot_rescues(rescued, first_rescue);
-    record_shared_recycle_unknown_slot_drops(
-        bindings.first().map(|binding| binding.live.as_ref()),
-        dropped,
-    );
-    record_shared_recycle_unknown_slot_rescues(
-        bindings.first().map(|binding| binding.live.as_ref()),
-        rescued,
-    );
-    dropped
+    drain_shared_recycles(bindings, binding_lookup, shared_recycles, backstop)
 }
 
 pub(in crate::afxdp) fn resolve_tx_binding_ifindex(

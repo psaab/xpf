@@ -61,13 +61,18 @@ until the deferred bring-up.
 
 Differences that matter (#1881):
 
-- WG threads restart when the engine Arc identity OR attachment
-  changes — and also on an underlay outer-MTU change (#2921) and when a
-  snapshot changes whether the thread may deliver kernel-path transport
-  plaintext (`kernel_transport_changed`, #9521). Every WG peer commit
+- WG threads restart when any spawn-time capture changes (#17089):
+  `wg_spawn_inputs` builds the single `WgSpawnInputs` value (engine
+  Arc identity, TUN attachment, listen port, outer MTU + per-peer
+  MTUs (#2921/#5291), outer bind device (#10196), kernel-transport
+  posture (#9521), peer config (#14675), resolver endpoint hosts /
+  preferred family), the entry stores it as `spawned`, and the stale
+  prune restarts the thread when a fresh capture differs — there is
+  no per-capture prune ladder to forget an arm of. Every WG peer commit
   rebuilds the engine (#15950: `wg_peers_eq` compares `endpoint_host`),
   so peer adds/removes and endpoint/hostname changes restart via
-  `engine_changed` (#17094 retired the dead #14675 same-engine guard);
+  `engine_changed` in practice (#17094 retired the dead #14675
+  same-engine guard; `peer_config` stays in the capture per #17089).
   GRE threads restart ONLY
   on attachment drift — endpoint
   content (destination/source/key, routes, CoS) reaches the live GRE

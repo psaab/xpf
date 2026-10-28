@@ -271,6 +271,7 @@ pub(crate) fn project_status(state: &mut ServerState) {
     state.status.zone_gate_no_generation_total = ipsec_inner.zone_gate_no_generation_total;
     state.status.ipsec_inner_parse_drops_total = ipsec_inner.ipsec_inner_parse_drops_total;
     state.status.ipsec_inner_ecn_illegal_drops = ipsec_inner.ipsec_inner_ecn_illegal_drops;
+    state.status.ipsec_inner_noroute_total = ipsec_inner.ipsec_inner_noroute_total;
     state.status.ipsec_inner_worker_queue_full_total =
         ipsec_inner.ipsec_inner_worker_queue_full_total;
     state.status.ipsec_inner_worker_queue_busy_total =
@@ -323,6 +324,8 @@ pub(crate) fn project_status(state: &mut ServerState) {
         crate::server::helpers::guards::SERVER_STATE_POISON_RECOVERIES.load(Ordering::Relaxed);
     state.status.server_handler_panics =
         crate::server::helpers::guards::SERVER_HANDLER_PANICS.load(Ordering::Relaxed);
+    state.status.reinject_handler_panics =
+        crate::server::helpers::guards::REINJECT_HANDLER_PANICS.load(Ordering::Relaxed);
     // #7398: the three counters below were computed, unit-tested and never
     // assigned into ProcessStatus, so they reached no operator through status,
     // gRPC or Prometheus. They are the queue the UNSURFACED allowlist below
@@ -338,6 +341,7 @@ pub(crate) fn project_status(state: &mut ServerState) {
         state.afxdp.session_delete_dropped_released_total();
     state.status.tunnel_purge_reservations_released =
         state.afxdp.tunnel_purge_reservations_released_total();
+    state.status.tunnel_purge_delete_refused = state.afxdp.tunnel_purge_delete_refused_total();
     state.status.synced_import_reserve_refused = state.afxdp.synced_import_reserve_refused_total();
     state.status.synced_import_mirror_refused = state.afxdp.synced_import_mirror_refused_total();
     state.status.mirror_restore_republished = state.afxdp.mirror_restore_republished_total();

@@ -173,7 +173,7 @@ use binding_index::{
 };
 use gre_classify::{
     InnerSessionAction, OuterDestinationLocal, USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
-    degraded_general_local_pass_applies, gre_inner_fragment_or_length_rejected,
+    degraded_general_local_pass_applies, gre_inner_fragment_or_length_rejected, gre_inner_land,
     native_gre_fragment_stays_on_helper, native_gre_inner_pass_steers_to_kernel_typed,
     wg_degraded_fragment_excluded, wg_fragment_stays_on_helper,
 };
@@ -1586,7 +1586,7 @@ fn classify_native_gre_inner_ipv4(data: usize, data_end: usize, l3_offset: usize
     };
     key.src_addr[..4].copy_from_slice(&iph[12..16]);
     key.dst_addr[..4].copy_from_slice(&iph[16..20]);
-    if key.src_addr == key.dst_addr {
+    if gre_inner_land(&key.src_addr, &key.dst_addr) {
         return 0;
     }
     // #16241 residual (via #16695): the ONLY consumers of this classifier
@@ -1641,20 +1641,34 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
     // and a Fragment behind Hop/Routing/Dest/AH equally bails because
     // the FIRST header is already non-terminal. The helper adjudicates
     // such inners after decap/reassembly.
-    if eh_class(protocol) != EH_CLASS_TERMINAL {
-        return 0;
-    }
-    let Some(l4_offset) = l3_offset.checked_add(40) else {
-        return 0;
-    };
+    // #17238: the fragment/length verdict is the shared gre_classify
+    // verdict both classifiers call (host-executed). The fragment
+    // input is the terminal-first-header bail above composed as a
+    // boolean: any non-terminal first header (Fragment 44 included,
+    // direct or behind another extension header, whose first header
+    // is already non-terminal) is a fragment-or-chain the shim cannot
+    // mint a key from. Declared end is `40 + payload_len` from the
+    // inner L3 start, span start 40, span the arm's read length —
+    // exactly the v4 composition with v6 constants. This replaces
+    // the hand-rolled `l4_span_len > payload_len` compare, which no
+    // host cell executed.
     let l4_span_len = match protocol {
         PROTO_TCP => 14,
         PROTO_UDP | PROTO_ICMPV6 => 8,
         _ => 0,
     };
-    if l4_span_len > payload_len as usize {
+    if gre_inner_fragment_or_length_rejected(
+        eh_class(protocol) != EH_CLASS_TERMINAL,
+        0,
+        40 + payload_len as usize,
+        40,
+        l4_span_len,
+    ) {
         return 0;
     }
+    let Some(l4_offset) = l3_offset.checked_add(40) else {
+        return 0;
+    };
     let mut key = UserspaceSessionKey {
         addr_family: AF_INET6,
         protocol,
@@ -1666,7 +1680,7 @@ fn classify_native_gre_inner_ipv6(data: usize, data_end: usize, l3_offset: usize
     };
     key.src_addr.copy_from_slice(&ip6[8..24]);
     key.dst_addr.copy_from_slice(&ip6[24..40]);
-    if key.src_addr == key.dst_addr {
+    if gre_inner_land(&key.src_addr, &key.dst_addr) {
         return 0;
     }
     match protocol {

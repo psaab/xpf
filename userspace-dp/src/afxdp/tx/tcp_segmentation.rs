@@ -133,7 +133,7 @@ pub(super) fn segment_forwarded_tcp_frames_into_prepared(
             || !target_binding.tx_pipeline.pending_tx_prepared.is_empty()
             || !target_binding.tx_pipeline.pending_tx_local.is_empty())
     {
-        let _ = drain_pending_tx_local_owner(
+        let _ = drain_pending_tx(
             target_binding,
             now_ns,
             post_recycles,

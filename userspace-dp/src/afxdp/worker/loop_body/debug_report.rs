@@ -174,7 +174,7 @@ impl DbgCounters {
 /// Called once per report interval, before the interval-counter
 /// reset in mod.rs.
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn emit_periodic_report(
     worker_id: u32,
     elapsed: u64,
@@ -291,7 +291,7 @@ pub(super) fn emit_periodic_report(
 /// (snapshotted in mod.rs before the interval-counter reset);
 /// `stall_prev_fwd` is the PREVIOUS interval's fwd count.
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn check_and_dump_stall(
     worker_id: u32,
     prev_rx_total: u64,

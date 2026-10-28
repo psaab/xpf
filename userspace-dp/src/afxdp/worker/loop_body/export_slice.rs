@@ -22,7 +22,7 @@
 use super::slice_pacing::{EXPORT_SLICE_BUDGET, EXPORT_SLICE_DEADLINE_NS, EXPORT_SLICE_EMITS};
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
 pub(super) fn run_export_slice(
     mut sessions: &mut crate::session::SessionTable,

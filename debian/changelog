@@ -1,5 +1,18 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Coalesce/ipmon: ipmon actuation is single-flighted — the engine
+    tick is the only Tick driver (the loop is started context-only,
+    no second sweep goroutine), and Tick itself claims an in-flight
+    slot so concurrent ticks can never enter the actuator together
+    (#17226).
+  * Coalesce: Loop.Stop now cancels the in-flight actuation context
+    before waiting for the loop to exit, and the loop's context is
+    parented on the StartWithContext caller (the daemon route
+    listener passes its run ctx). A route-refresh actuation parked on
+    the held apply semaphore now aborts on shutdown/run-ctx cancel
+    instead of holding wg.Wait for the 30s actuate timeout past
+    TimeoutStopSec=20; ipmon drops its private #3758 cancel and uses
+    the loop's Context() (#17226).
   * Config compiler: parseVRRPGroups now reads every vrrp-group
     property exactly once. The Keys-packed tail and the child nodes
     are normalized into one statement list (vrrpGroupStatements)

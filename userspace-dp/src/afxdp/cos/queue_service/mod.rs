@@ -19,24 +19,23 @@ use crate::afxdp::frame::{apply_dscp_rewrite_to_frame, frame_has_tcp_rst};
 use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::{
-    COS_PRIORITY_LEVELS, CoSInterfaceRuntime, CoSOversubscriptionPolicy, CoSPendingTxItem,
-    CoSQueueRuntime, ExactDemandQueueMask, ExactLocalScratchTxRequest,
-    ExactPreparedScratchTxRequest, PreparedTxRecycle, PreparedTxRequest, SharedCoSExactBacklog,
-    TxRequest, WorkerCoSQueueFastPath,
+    CoSInterfaceRuntime, CoSOversubscriptionPolicy, CoSPendingTxItem, CoSQueueRuntime,
+    ExactDemandQueueMask, ExactLocalScratchTxRequest, ExactPreparedScratchTxRequest,
+    PreparedTxRecycle, PreparedTxRequest, SharedCoSExactBacklog, TxRequest, WorkerCoSQueueFastPath,
+    COS_PRIORITY_LEVELS,
 };
 use crate::afxdp::umem::MmapArea;
 use crate::afxdp::worker::BindingWorker;
-use crate::afxdp::{FastMap, FastSet, TX_BATCH_SIZE, tx_frame_capacity};
+use crate::afxdp::{tx_frame_capacity, FastMap, FastSet, TX_BATCH_SIZE};
 use crate::xsk_ffi::xdp::XdpDesc;
 
 use super::{
-    COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_effective_burst_bytes, cos_item_len,
-    cos_queue_clear_orphan_snapshot_after_drop, cos_queue_front, cos_queue_front_with_cap,
-    cos_queue_is_empty, cos_queue_peek_min_bucket, cos_queue_pop_known_bucket,
-    cos_queue_push_front, cos_queue_remove_orphan_snapshot_at,
-    cos_queue_v_min_consume_suspension, cos_queue_v_min_continue,
-    cos_refill_ns_until, maybe_top_up_cos_queue_lease, publish_committed_queue_vtime,
-    refill_cos_tokens,
+    cos_effective_burst_bytes, cos_item_len, cos_queue_clear_orphan_snapshot_after_drop,
+    cos_queue_front, cos_queue_front_with_cap, cos_queue_is_empty, cos_queue_peek_min_bucket,
+    cos_queue_pop_known_bucket, cos_queue_push_front, cos_queue_remove_orphan_snapshot_at,
+    cos_queue_v_min_consume_suspension, cos_queue_v_min_continue, cos_refill_ns_until,
+    maybe_top_up_cos_queue_lease, publish_committed_queue_vtime, refill_cos_tokens,
+    CoSQueueLeaseAcquireTelemetry, COS_MIN_BURST_BYTES,
 };
 // #1229 v7 per-bucket TX accounting + threshold-gated EWMA.
 use super::exact_demand::{exact_demand_rate_bytes_for_mask, serviceable_exact_demand_mask};
@@ -83,15 +82,19 @@ use selectors::{
 #[cfg(test)]
 pub(in crate::afxdp) use settle::estimate_cos_queue_wakeup_tick as estimate_cos_queue_wakeup_tick_for_test;
 use settle::{
-    COS_GUARANTEE_QUANTUM_MAX_BYTES, COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS,
-    COS_SURPLUS_ROUND_QUANTUM_BYTES, assign_local_dscp_rewrite, assign_prepared_dscp_rewrite,
-    build_cos_batch_from_queue, cos_batch_tx_made_progress, cos_guarantee_quantum_bytes,
-    cos_guarantee_visit_cap_bytes, cos_surplus_quantum_bytes, estimate_cos_queue_wakeup_tick,
-    release_exact_local_scratch_frames, release_exact_prepared_scratch,
-    restore_exact_local_scratch_to_queue_head_flow_fair,
+    assign_local_dscp_rewrite, assign_prepared_dscp_rewrite, build_cos_batch_from_queue,
+    cos_batch_tx_made_progress, cos_guarantee_quantum_bytes, cos_guarantee_visit_cap_bytes,
+    cos_surplus_quantum_bytes, estimate_cos_queue_wakeup_tick, release_exact_local_scratch_frames,
+    release_exact_prepared_scratch, restore_exact_local_scratch_to_queue_head_flow_fair,
+    restore_exact_local_scratch_to_queue_head_flow_fair_queue_gone,
     restore_exact_prepared_scratch_to_queue_head_flow_fair,
-    settle_exact_prepared_scratch_submission_flow_fair, submit_cos_batch,
-    subtract_direct_cos_queue_bytes,
+    settle_exact_local_fifo_submission_queue_gone,
+    settle_exact_local_scratch_submission_flow_fair_queue_gone,
+    settle_exact_prepared_fifo_submission_queue_gone,
+    settle_exact_prepared_scratch_submission_flow_fair,
+    settle_exact_prepared_scratch_submission_flow_fair_queue_gone, submit_cos_batch,
+    subtract_direct_cos_queue_bytes, COS_GUARANTEE_QUANTUM_MAX_BYTES,
+    COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS, COS_SURPLUS_ROUND_QUANTUM_BYTES,
 };
 pub(in crate::afxdp) use settle::{
     settle_exact_local_fifo_submission, settle_exact_local_scratch_submission_flow_fair,
@@ -113,19 +116,22 @@ use selectors::{select_cos_surplus_batch, select_nonexact_cos_guarantee_batch};
 use waterfill::apply_phase1_waterfill_honor_refund;
 
 use super::tx_completion::{
-    CoSServicePhase, ParkReason, apply_cos_prepared_result, apply_cos_send_result,
-    apply_direct_exact_send_result, cos_root_can_service_after_prime, cos_tick_for_ns,
-    count_park_reason, count_tx_ring_full_submit_stall, park_cos_queue, prime_cos_root_for_service,
-    refresh_cos_interface_activity, restore_cos_local_items_inner,
-    restore_cos_prepared_items_inner,
+    apply_cos_prepared_result, apply_cos_send_result, apply_direct_exact_send_result,
+    apply_direct_exact_send_result_fields, cos_root_can_service_after_prime, cos_tick_for_ns,
+    count_park_reason, count_tx_ring_full_submit_stall,
+    count_tx_ring_full_submit_stall_on_interfaces, park_cos_queue, prime_cos_root_for_service,
+    publish_cos_exact_backlog_on_cos, refresh_cos_interface_activity,
+    refresh_cos_interface_activity_on_cos, restore_cos_local_items_inner,
+    restore_cos_prepared_items_inner, CoSServicePhase, ParkReason,
 };
 // Back-edges to crate::afxdp::tx are XSK-ring / worker-binding /
 // prepared-frame primitives — primitives that own the kernel ring
 // state and are hosted there for that reason.
 use crate::afxdp::tx::{
-    TxError, TxRetryReason, cos_queue_dscp_rewrite, maybe_wake_tx, reap_tx_completions,
-    recycle_cancelled_prepared_offset_with_shared, remember_prepared_recycle, stamp_submits,
-    transmit_batch, transmit_prepared_queue,
+    cos_queue_dscp_rewrite, maybe_wake_tx, maybe_wake_tx_fields, reap_tx_completions,
+    reap_tx_completions_fields, recycle_cancelled_prepared_offset_with_shared,
+    remember_prepared_recycle, stamp_submits, transmit_batch, transmit_prepared_queue, TxError,
+    TxRetryReason,
 };
 
 pub(in crate::afxdp) enum CoSBatch {

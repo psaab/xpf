@@ -51,9 +51,10 @@ mod tx_inbox;
 // `profile::Owner|Peer` precedent and to avoid E0364 (documented in
 // `userspace-dp/src/afxdp/tx/mod.rs:38`).
 pub(in crate::afxdp) use debug_state::{
-    DEBUG_STATE_PUBLISH_MASK, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
     advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
-    update_binding_debug_state, update_binding_idle_debug_state,
+    publish_binding_debug_state_fields, update_binding_debug_state,
+    update_binding_idle_debug_state, DEBUG_STATE_PUBLISH_MASK,
+    IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
 };
 pub(in crate::afxdp) use latency::{
     bucket_index_for_ns, tx_batch_bucket, DRAIN_HIST_BUCKETS, TX_BATCH_BUCKETS,
@@ -729,8 +730,9 @@ pub(in crate::afxdp) struct BindingLiveState {
     /// #709 / #746: owner-written telemetry, cacheline-isolated.
     /// `drain_latency_hist` buckets sum to `drain_invocations` (pinned
     /// in unit tests); `drain_noop_invocations` is a subset counter
-    /// (drains that returned `false`). `owner_pps` is the owner-local
-    /// pps window.
+    /// (terminating `drain_shaped_tx` calls that returned `None` — one
+    /// per `service_shaped_until_noop` pass, #17151). `owner_pps` is
+    /// the owner-local pps window.
     ///
     /// Written only by the owner worker (the sole caller of
     /// `drain_shaped_tx` on this binding); read by the snapshot path

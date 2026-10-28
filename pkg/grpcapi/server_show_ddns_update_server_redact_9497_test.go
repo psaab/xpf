@@ -18,13 +18,13 @@ func TestShowDDNSUpdateServerIsRedacted_9497(t *testing.T) {
 
 	dhcp := func(update string) *config.Config {
 		cfg := &config.Config{}
-		cfg.System.DHCPServer.DynamicDNS = &config.DHCPDynamicDNSConfig{Enabled: true, UpdateServer: update, TSIGKeyName: "k1"}
+		cfg.System.DHCPServer.DynamicDNS = &config.DHCPDynamicDNSConfig{Enabled: true, RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer: update, TSIGKeyName: "k1"}}
 		return cfg
 	}
 	svc := func(update string) *config.Config {
 		cfg := &config.Config{}
 		cfg.System.Services = &config.SystemServicesConfig{DynamicDNS: &config.DDNSServicesConfig{
-			Providers: map[string]*config.DDNSProvider{"p1": {Name: "p1", UpdateServer: update}},
+			Providers: map[string]*config.DDNSProvider{"p1": { Name: "p1", RFC2136Endpoint: config.RFC2136Endpoint{UpdateServer:update} }},
 		}}
 		return cfg
 	}

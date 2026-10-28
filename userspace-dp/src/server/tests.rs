@@ -10850,6 +10850,7 @@ fn refresh_status_projects_ipsec_inner_counters() {
     crate::afxdp::ipsec_inner::zone_gate_no_generation_total.store(11, Ordering::Relaxed);
     crate::afxdp::ipsec_inner::ipsec_inner_parse_drops_total.store(13, Ordering::Relaxed);
     crate::afxdp::ipsec_inner::ipsec_inner_ecn_illegal_drops.store(17, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::ipsec_inner_noroute_total.store(47, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
         .store(19, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
@@ -10880,6 +10881,8 @@ fn refresh_status_projects_ipsec_inner_counters() {
         .store(before.ipsec_inner_parse_drops_total, Ordering::Relaxed);
     crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS
         .store(before.ipsec_inner_ecn_illegal_drops, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner::ipsec_inner_noroute_total
+        .store(before.ipsec_inner_noroute_total, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
         .store(before.ipsec_inner_worker_queue_full_total, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
@@ -10924,6 +10927,11 @@ fn refresh_status_projects_ipsec_inner_counters() {
         guard.status.ipsec_inner_ecn_illegal_drops,
         17,
         "the ECN-refusal counter must reach its own status field"
+    );
+    assert_eq!(
+        guard.status.ipsec_inner_noroute_total,
+        47,
+        "the no-route counter must reach its own status field"
     );
     assert_eq!(
         guard.status.ipsec_inner_worker_queue_full_total,
@@ -10978,6 +10986,7 @@ fn process_status_ipsec_inner_counters_serialize_under_snake_case_keys_9506() {
         zone_gate_no_generation_total: 11,
         ipsec_inner_parse_drops_total: 13,
         ipsec_inner_ecn_illegal_drops: 17,
+        ipsec_inner_noroute_total: 47,
         ipsec_inner_worker_queue_full_total: 19,
         ipsec_inner_verdict_queue_full_total: 23,
         ipsec_inner_verdict_queue_contended_total: 43,
@@ -10995,6 +11004,7 @@ fn process_status_ipsec_inner_counters_serialize_under_snake_case_keys_9506() {
         ("zone_gate_no_generation_total", 11),
         ("ipsec_inner_parse_drops_total", 13),
         ("ipsec_inner_ecn_illegal_drops", 17),
+        ("ipsec_inner_noroute_total", 47),
         ("ipsec_inner_worker_queue_full_total", 19),
         ("ipsec_inner_verdict_queue_full_total", 23),
         ("ipsec_inner_verdict_queue_contended_total", 43),
@@ -11351,5 +11361,24 @@ fn apply_snapshot_authorized_clear_marker_installs_empty() {
         guard.snapshot.as_ref().expect("retained").policies.len(),
         1,
         "prior policies retained after unmarked refusal"
+    );
+}
+
+/// #17123 B1: refresh_status must project REINJECT_HANDLER_PANICS onto its
+/// own ProcessStatus field. Deleting or mis-wiring that one assignment
+/// leaves the field at 0 while the counter holds before+29, red here.
+#[test]
+fn refresh_status_projects_reinject_handler_panics_17123() {
+    use std::sync::atomic::Ordering;
+
+    let state = new_state(ProcessStatus::default());
+    let mut guard = state.lock().expect("server state");
+    let before = crate::server::helpers::REINJECT_HANDLER_PANICS.load(Ordering::Relaxed);
+    crate::server::helpers::REINJECT_HANDLER_PANICS.fetch_add(29, Ordering::Relaxed);
+    project_status(&mut guard);
+    assert_eq!(
+        guard.status.reinject_handler_panics,
+        before + 29,
+        "reinject handler panics must reach their own status field (#17123)"
     );
 }

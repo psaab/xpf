@@ -64,7 +64,7 @@ pub(super) struct WorkerLoopSetup {
 /// changed — statements, order, and side-effect sequence are
 /// preserved).
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn worker_loop_setup(
     worker_id: u32,
     node_id: u8,

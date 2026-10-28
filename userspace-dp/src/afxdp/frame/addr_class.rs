@@ -91,7 +91,6 @@ pub(in crate::afxdp) fn dest_is_multicast_or_broadcast(addr_family: u8, packet: 
 /// directed broadcast: a /31 (RFC 3021) has no broadcast and a /32's
 /// host-all-ones value equals the host itself, so both are skipped to
 /// avoid mis-suppressing a legitimate unicast to a /32 connected host.
-
 /// #14654: routing table owning the trigger's ingress routing domain,
 /// for ICMP-error directed-broadcast scoping. Domain 0 owns `inet.0`;
 /// a nonzero domain resolves through the installing-table registry.

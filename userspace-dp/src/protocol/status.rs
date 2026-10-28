@@ -667,6 +667,10 @@ pub(crate) struct ProcessStatus {
     pub ipsec_inner_parse_drops_total: u64,
     #[serde(rename = "ipsec_inner_ecn_illegal_drops", default)]
     pub ipsec_inner_ecn_illegal_drops: u64,
+    /// #17218: D19 no-route denials (missing actual route or a
+    /// non-forwardable resolution).
+    #[serde(rename = "ipsec_inner_noroute_total", default)]
+    pub ipsec_inner_noroute_total: u64,
     /// D11 queue/slab/verdict/orphan accounting: ingress-enqueue refusals
     /// (contended/closed/full/per-flow cap), verdict-post refusals, slab
     /// exhaustion, worker-set retirements, post-mortem slot reclaims, and
@@ -742,6 +746,10 @@ pub(crate) struct ProcessStatus {
     /// (each one quarantined + restarted). Additive / defaulted.
     #[serde(rename = "server_handler_panics", default)]
     pub server_handler_panics: u64,
+    /// #17123: reinject handler panics contained per-connection (each one
+    /// drops one connection; the loop keeps accepting). Additive / defaulted.
+    #[serde(rename = "reinject_handler_panics", default)]
+    pub reinject_handler_panics: u64,
     /// #9048: peer `DeleteSynced` commands REFUSED because the key named a
     /// LIVE LOCAL session this node is actively forwarding for — the
     /// delete-side mirror of the install-side clobber guard in
@@ -826,6 +834,11 @@ pub(crate) struct ProcessStatus {
     /// `xpf_userspace_tunnel_purge_reservations_released_total`.
     #[serde(rename = "tunnel_purge_reservations_released", default)]
     pub tunnel_purge_reservations_released: u64,
+    /// #17144: tunnel-remap purge deletes refused (e.g. gate busy); the session
+    /// survived, no Close was emitted and no reservation was released for it.
+    /// Surfaced as `xpf_userspace_tunnel_purge_delete_refused_total`.
+    #[serde(rename = "tunnel_purge_delete_refused", default)]
+    pub tunnel_purge_delete_refused: u64,
     /// #6600/#7398: peer-synced imports refused because this node could not
     /// reserve the translated NAT port the session names. Sustained growth
     /// means the standby cannot hold the primary's translations, so those

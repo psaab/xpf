@@ -83,7 +83,7 @@ fn sojourn_not_recorded_at_batch_build() {
 
 #[test]
 fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
-    use crate::afxdp::types::{COS_SOJOURN_WINDOW_NS, CoSQueueSojourn};
+    use crate::afxdp::types::{CoSQueueSojourn, COS_SOJOURN_WINDOW_NS};
     let now_ns = 10 * COS_SOJOURN_WINDOW_NS;
     let area = MmapArea::new(65536).expect("mmap");
     let mut root = sojourn_test_exact_root();
@@ -125,7 +125,7 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
     );
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_local_scratch_submission_flow_fair(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut free_tx_frames,
         &mut scratch_local_tx,
         &mut in_flight_untracked_tx,
@@ -162,7 +162,7 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
     assert_eq!(scratch_local_tx.len(), 1);
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_local_scratch_submission_flow_fair(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut free_tx_frames,
         &mut scratch_local_tx,
         &mut in_flight_untracked_tx,
@@ -184,7 +184,7 @@ fn sojourn_local_settle_samples_committed_prefix_exactly_once() {
 }
 #[test]
 fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
-    use crate::afxdp::types::{COS_SOJOURN_WINDOW_NS, CoSQueueSojourn};
+    use crate::afxdp::types::{CoSQueueSojourn, COS_SOJOURN_WINDOW_NS};
     let now_ns = 10 * COS_SOJOURN_WINDOW_NS;
     let area = MmapArea::new(65536).expect("mmap");
     let mut root = sojourn_test_exact_root();
@@ -225,7 +225,7 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
     );
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_prepared_scratch_submission_flow_fair(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut scratch_prepared_tx,
         &mut in_flight_prepared_recycles,
         &mut in_flight_untracked_tx,
@@ -259,7 +259,7 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
     assert_eq!(scratch_prepared_tx.len(), 1);
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_prepared_scratch_submission_flow_fair(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut scratch_prepared_tx,
         &mut in_flight_prepared_recycles,
         &mut in_flight_untracked_tx,
@@ -280,7 +280,7 @@ fn sojourn_prepared_settle_samples_committed_prefix_exactly_once() {
 }
 #[test]
 fn sojourn_recorded_end_to_end_via_submit_local() {
-    use crate::afxdp::types::{COS_SOJOURN_WINDOW_NS, CoSQueueSojourn};
+    use crate::afxdp::types::{CoSQueueSojourn, COS_SOJOURN_WINDOW_NS};
     // Full path: drain_shaped_tx → build_cos_batch_from_queue →
     // submit_local → transmit_batch → enq-sidecar committed-prefix
     // sampling. The single item is fully sent, so it is sampled
@@ -458,7 +458,7 @@ fn sojourn_zero_stamp_items_record_nothing_end_to_end() {
     assert!(matches!(build, ExactCoSScratchBuild::Ready));
     let mut in_flight_untracked_tx = crate::afxdp::FastSet::default();
     let (sent_packets, _) = settle_exact_local_scratch_submission_flow_fair(
-        Some(&mut root.queues[0]),
+        &mut root.queues[0],
         &mut free_tx_frames,
         &mut scratch_local_tx,
         &mut in_flight_untracked_tx,

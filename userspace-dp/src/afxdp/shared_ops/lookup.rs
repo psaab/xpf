@@ -349,7 +349,8 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
             return false;
         };
         // Mirror ha.rs: WG selects its outer destination per peer.
-        let outer_rg = if endpoint.mode == "wireguard" {
+        // #17199: Unknown kind matches neither arm -> None -> decline.
+        let outer_rg = if endpoint.kind == TunnelKind::WireGuard {
             let Some(next_hop) = resolution.next_hop else {
                 return false;
             };
@@ -375,11 +376,13 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
                         .map(|e| e.redundancy_group.max(0))
                 }
             }
-        } else {
+        } else if endpoint.kind == TunnelKind::Gre {
             forwarding
                 .tunnel_outer_egress_rgs
                 .get(&resolution.tunnel_endpoint_id)
                 .copied()
+        } else {
+            None
         };
         return match outer_rg {
             Some(rg) if rg > 0 => forwarding_active_rgs.contains(&rg),
@@ -400,7 +403,7 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
 /// Poll callsites pass the result into the adopted resolve so the
 /// recovery re-resolves in the session's validated install table
 /// and restores only candidates whose egress RG == the proved RG.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn fabric_adoption_recovery_for_wire(
     forwarding: &crate::afxdp::ForwardingState,
     ha_state: &std::collections::BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
@@ -1109,7 +1112,7 @@ pub(in crate::afxdp) fn lookup_shared_forward_wire_match(
 /// shared forward-wire candidate carries the same nonzero session identity.
 /// The index stores one candidate per wire key, so a wire-tuple collision must
 /// not borrow another flow's original source selectors.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn shared_source_nat_original_key(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     wire_key: &SessionKey,
@@ -1677,7 +1680,7 @@ pub(in crate::afxdp) fn evict_owner_closing_tcp_pair_for_syn(
     true
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared_and_payload(
     sessions: &mut SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
