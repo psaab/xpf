@@ -211,6 +211,15 @@ type Config struct {
 	TLS               bool        // enable HTTPS with a management certificate
 	TLSCertificate    string      // optional PEM certificate-chain path
 	TLSPrivateKey     string      // optional PEM private-key path; pair must be configured together
+	// TLSSelfSignedDir is the directory the durable self-signed management
+	// pair (cert.pem/key.pem) is loaded from or minted into when no custom
+	// pair is configured (#17213). Empty defaults to the production
+	// /etc/xpf/tls. The daemon leaves it empty; tests set it to a writable
+	// temp dir at CONSTRUCTION so NewServer's own leg build exercises the
+	// production install path (buildHTTPSServer) — replacing the former
+	// post-construction hook that re-implemented per-leg certificate
+	// installation in parallel with production (#17213).
+	TLSSelfSignedDir string
 	Auth              *AuthConfig // nil = no authentication; MetricsRequireAuth inside it opts loopback /metrics into credential gating (#16072)
 	// MetricsRequireAuth opts loopback /metrics into api-auth credential
 	// gating (#16072). The daemon copies it from
@@ -1183,8 +1192,12 @@ func NewServer(cfg Config) *Server {
 		s.httpsDesiredAddrs = effectiveHTTPSAddrs(cfg)
 	}
 	s.tlsDesiredConfigured.Store(cfg.TLS && len(effectiveHTTPSAddrs(cfg)) > 0)
+	selfSignedDir := cfg.TLSSelfSignedDir
+	if selfSignedDir == "" {
+		selfSignedDir = defaultTLSSelfSignedDir
+	}
 	s.certGen = func(bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
-		return generateSelfSignedCertAtWithStatusHosts(tlsDir, certPath, keyPath, bindHosts)
+		return generateSelfSignedCertAtWithStatusHosts(selfSignedDir, filepath.Join(selfSignedDir, "cert.pem"), filepath.Join(selfSignedDir, "key.pem"), bindHosts)
 	}
 
 	s.httpsBindHosts = func() []string {
@@ -1889,61 +1902,6 @@ func (s *Server) HTTPSCertForTest() *tls.Certificate {
 	return s.managementTLSCertificateForServer(srv)
 }
 
-// SetTLSCertDirForTest points the server's HTTPS certificate generator at dir
-// instead of the production /etc/xpf/tls paths (#6381). Test-only: it lets a
-// cross-package test (pkg/daemon managementReconciler) exercise the DURABLE
-// self-signed-cert path (#1916 D6) against a WRITABLE temp dir, so an HTTPS
-// rebind LOADS a valid persisted pair AS-IS (the shipping behavior) instead of
-// failing to persist and re-minting a fresh in-memory cert on every reconcile
-// (the CI-only artifact — an unwritable /etc/xpf/tls — that the old
-// TestMgmtReconcileTLSChange_5866 assertion silently depended on). It routes
-// through the real production generateSelfSignedCertAt, so the durable
-// load-as-is path is genuinely bound.
-func (s *Server) SetTLSCertDirForTest(dir string) {
-	s.tlsCertificateMu.Lock()
-	defer s.tlsCertificateMu.Unlock()
-	s.certGen = func(bindHosts []string) (tls.Certificate, *x509.Certificate, error) {
-		return generateSelfSignedCertAtWithStatusHosts(dir, filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), bindHosts)
-	}
-	// Swap in the durable loader for legs built at construction against the
-	// production /etc/xpf/tls paths (which re-mint per call on an unwritable
-	// host). A reload failure keeps the previous per-leg state (fail-closed);
-	// the fallback slot's load reports its own failure. #14984: restamp each
-	// leg's OWN slot (not just the fallback), so a later refresh/test observes
-	// the durable pair per family.
-	for _, srv := range s.httpsServers {
-		state, err := s.loadManagementTLSCertificateLocked(srv.Addr)
-		if err != nil {
-			continue
-		}
-		if slot, ok := httpServerTLSState.Load(srv); ok {
-			if cs, ok2 := slot.(*managementTLSCertificateSlot); ok2 {
-				cs.state.Store(state)
-			}
-		}
-		s.installManagementTLSCertificate(state)
-	}
-	for _, leg := range s.httpsLegs {
-		if leg == nil || leg.srv == nil {
-			continue
-		}
-		if _, seen := httpServerTLSState.Load(leg.srv); seen {
-			continue
-		}
-		state, err := s.loadManagementTLSCertificateLocked(leg.srv.Addr)
-		if err != nil {
-			continue
-		}
-		legSlot := &managementTLSCertificateSlot{}
-		legSlot.state.Store(state)
-		if leg.srv.TLSConfig != nil {
-			leg.srv.TLSConfig.GetCertificate = s.managementTLSGetCertificateFor(legSlot)
-		}
-		RegisterHTTPServerTLSState(leg.srv, legSlot)
-		s.installManagementTLSCertificate(state)
-	}
-}
-
 // dynamicAuthMiddleware wraps next with the auth snapshot of the LEG that
 // accepted the request (#5866; per-leg since #5561 round 14): a live leg's slot
 // reads s.auth atomically per request so a ReplaceAuth swap takes effect
@@ -2066,11 +2024,10 @@ func (s *Server) serveBound(ctx context.Context, httpLn, httpsLn net.Listener) e
 	return shutErr
 }
 
-const (
-	tlsDir   = "/etc/xpf/tls"
-	certPath = "/etc/xpf/tls/cert.pem"
-	keyPath  = "/etc/xpf/tls/key.pem"
-)
+// defaultTLSSelfSignedDir is the production location of the durable
+// self-signed management pair (#17213). Config.TLSSelfSignedDir overrides
+// it at construction; the pair's file names are fixed (cert.pem/key.pem).
+const defaultTLSSelfSignedDir = "/etc/xpf/tls"
 
 // TLS persistence test seams (#1916 injected-failure tests). Production
 // code must never mutate these. tlsHostname is the SAN-source seam (#5719):
@@ -2116,14 +2073,14 @@ func isDNSSANSafeHostname(h string) bool {
 }
 
 // generateSelfSignedCert creates or loads a self-signed TLS certificate
-// using the production /etc/xpf/tls paths. See generateSelfSignedCertAt.
+// using the production self-signed directory. See generateSelfSignedCertAt.
 func generateSelfSignedCert(bindHost string) (tls.Certificate, error) {
 	cert, _, err := generateSelfSignedCertWithStatus(bindHost)
 	return cert, err
 }
 
 func generateSelfSignedCertWithStatus(bindHost string) (tls.Certificate, *x509.Certificate, error) {
-	return generateSelfSignedCertAtWithStatus(tlsDir, certPath, keyPath, bindHost)
+	return generateSelfSignedCertAtWithStatus(defaultTLSSelfSignedDir, filepath.Join(defaultTLSSelfSignedDir, "cert.pem"), filepath.Join(defaultTLSSelfSignedDir, "key.pem"), bindHost)
 }
 
 // generateSelfSignedCertAtWithStatusHosts is generateSelfSignedCertAtWithStatus
@@ -2841,8 +2798,7 @@ func tightenTLSPathPerms(path string, want os.FileMode, wantDir bool) error {
 			// identically and mint's durable write surfaces the real
 			// persistence error — the pre-#16060 behavior. Refusing
 			// here would be stricter than the load itself and would
-			// break callers that probe an inaccessible production path
-			// before swapping to a writable one (SetTLSCertDirForTest).
+			// break callers that probe an inaccessible production path.
 			return nil
 		}
 		if _, rerr := os.Readlink(path); rerr == nil {

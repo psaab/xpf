@@ -174,47 +174,71 @@ func (s *Store) CompareSnapshot() (*config.Config, *config.ConfigTree, *config.C
 	return s.compiled, active, candidate, gen
 }
 
-// RollbackCompareSnapshot is ShowConfigSnapshot for a rollback
-// compare: policy plus deep copies of (slot, candidate) — or (slot,
-// active) when activeBaseline — under one lock. An unresolved slot
-// yields slotErr (the handler's slot error) and nil arms.
-func (s *Store) RollbackCompareSnapshot(n int, activeBaseline bool) (cfg *config.Config, slot, other *config.ConfigTree, nodeID int, gen uint64, slotErr error) {
+// RollbackCapture is one atomic rollback read capture: the compiled
+// policy, the deep-copied slot tree (Slot), the second compare arm
+// (Other: candidate, or active when CaptureRollback's activeBaseline
+// was set; nil for CaptureRollbackSlot), the store node ID, the
+// active publication generation, and the slot resolution error.
+//
+// Err travels INSIDE the capture (#17215): the old getters returned it
+// as an anonymous trailing value that every gate could blank with
+// `_`, and the four read surfaces then re-derived (or dropped) the
+// error by hand. Callers MUST check Err before rendering: gates price
+// a nil Slot as "renders nothing", handlers surface Err. On a slot
+// error Slot and Other are nil; Cfg/NodeID/Gen still describe the
+// capture generation so pricing uses the snapshot's own policy.
+type RollbackCapture struct {
+	Cfg    *config.Config
+	Slot   *config.ConfigTree
+	Other  *config.ConfigTree
+	NodeID int
+	Gen    uint64
+	Err    error
+}
+
+// CaptureRollback is ShowConfigSnapshot for a rollback compare:
+// policy plus deep copies of (slot, candidate) — or (slot, active)
+// when activeBaseline — under one lock.
+func (s *Store) CaptureRollback(n int, activeBaseline bool) RollbackCapture {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	var gen uint64
 	if snap := s.activeSnap.Load(); snap != nil {
 		gen = snap.gen
 	}
 	tree, err := s.rollbackTree(n)
 	if err != nil {
-		return s.compiled, nil, nil, s.nodeID, gen, err
+		return RollbackCapture{Cfg: s.compiled, NodeID: s.nodeID, Gen: gen, Err: err}
 	}
-	slot = tree.Clone()
+	slot := tree.Clone()
+	var other *config.ConfigTree
 	if activeBaseline {
 		if s.active != nil {
 			other = s.active.Clone()
 		}
-		return s.compiled, slot, other, s.nodeID, gen, nil
+		return RollbackCapture{Cfg: s.compiled, Slot: slot, Other: other, NodeID: s.nodeID, Gen: gen}
 	}
 	if s.candidate != nil {
 		other = s.candidate.Clone()
 	}
-	return s.compiled, slot, other, s.nodeID, gen, nil
+	return RollbackCapture{Cfg: s.compiled, Slot: slot, Other: other, NodeID: s.nodeID, Gen: gen}
 }
 
-// RollbackSnapshot is ShowConfigSnapshot for a scoped rollback render:
-// policy plus a deep copy of the slot tree under one lock. An
-// unresolved slot yields slotErr and a nil tree.
-func (s *Store) RollbackSnapshot(n int) (cfg *config.Config, tree *config.ConfigTree, nodeID int, gen uint64, slotErr error) {
+// CaptureRollbackSlot is ShowConfigSnapshot for a scoped rollback
+// render: policy plus a deep copy of the slot tree under one lock
+// (Other stays nil). An unresolved slot yields Err and a nil Slot.
+func (s *Store) CaptureRollbackSlot(n int) RollbackCapture {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	var gen uint64
 	if snap := s.activeSnap.Load(); snap != nil {
 		gen = snap.gen
 	}
 	src, err := s.rollbackTree(n)
 	if err != nil {
-		return s.compiled, nil, s.nodeID, gen, err
+		return RollbackCapture{Cfg: s.compiled, NodeID: s.nodeID, Gen: gen, Err: err}
 	}
-	return s.compiled, src.Clone(), s.nodeID, gen, nil
+	return RollbackCapture{Cfg: s.compiled, Slot: src.Clone(), NodeID: s.nodeID, Gen: gen}
 }
 
 // NodeID returns the store's cluster node identity — the identity the

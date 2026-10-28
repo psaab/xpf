@@ -68,15 +68,27 @@ func (d *Daemon) fabricIPVLANReassertLoop(ctx context.Context) {
 	}
 }
 
-// missingFabricOverlays returns the configured fabric overlays that are absent
-// or down, as (parent, name, addrs, mtu) tuples ready for ensureFabricIPVLAN.
+// missingFabricOverlays returns the configured fabric overlays that are not
+// address-ready, as (parent, name, addrs, mtu) tuples ready for
+// ensureFabricIPVLAN.
 //
-// This is the CHEAP gate. On a healthy node it is one netlink name lookup per
-// configured fab device — at most two — and returns nothing, so the loop costs
-// effectively nothing when everything is up. It deliberately does NOT verify
-// the parent index, MTU or addresses: those are ensureFabricIPVLAN's job and
-// re-running it for a cosmetic drift would restart a working overlay every
-// tick. The gate answers only "is there a usable fab device at all".
+// This is the CHEAP gate. On a healthy node it is one netlink name lookup and,
+// for an up device, one address listing per configured fab device — at most
+// two — and returns nothing, so the loop costs effectively nothing when
+// everything is up. It deliberately does NOT verify the parent index: that
+// remains ensureFabricIPVLAN's job (#17221). The gate shares only the
+// ADDRESS predicate with the actuator: fabricOverlayAddrReady
+// (administratively up and carrying every configured address) is the
+// address half of the actuator's terminal fabricOverlayReady, and both
+// read the kernel through the fabricAddrList17221 seam, so the gate and
+// the actuator cannot disagree about whether the fabric address is
+// present. MTU is NOT part of the gate: it is owned by the actuator's
+// terminal fabricOverlayReady check at apply, so this 30s loop does not
+// heal MTU drift on an otherwise address-ready overlay. When the gate
+// does fire, the reuse branch reconciles MTU and addresses in place
+// rather than restarting a working overlay. The gate answers "is there a
+// usable fab device at all" — usable now includes carrying the fabric
+// address.
 func (d *Daemon) missingFabricOverlays(cfg *config.Config) []deferredIPVLAN {
 	var out []deferredIPVLAN
 	config.RangeInterfaces(cfg, func(ifName string, ifCfg *config.InterfaceConfig) {
@@ -84,14 +96,13 @@ func (d *Daemon) missingFabricOverlays(cfg *config.Config) []deferredIPVLAN {
 			return
 		}
 		fabLinux := config.LinuxIfName(ifName)
-		link, err := d.fabricLinkByName(fabLinux)
-		if err == nil && link != nil && link.Attrs() != nil &&
-			link.Attrs().Flags&net.FlagUp != 0 {
-			return // present and administratively up — nothing to do
-		}
 		var addrs []string
 		if unit, ok := config.LookupUnit(ifCfg, 0); ok {
 			addrs = unit.Addresses
+		}
+		link, err := d.fabricLinkByName(fabLinux)
+		if err == nil && link != nil && d.fabricOverlayAddrReady(link, addrs) {
+			return // present, up, and carrying its configured addresses
 		}
 		out = append(out, deferredIPVLAN{
 			parent: config.LinuxIfName(ifCfg.LocalFabricMember),
@@ -101,6 +112,22 @@ func (d *Daemon) missingFabricOverlays(cfg *config.Config) []deferredIPVLAN {
 		})
 	})
 	return out
+}
+
+// fabricOverlayAddrReady is the gate's half of fabricOverlayReady
+// (#17221): the link is administratively up and carries every configured
+// address. MTU is deliberately not re-checked here — ensureFabricIPVLAN's
+// terminal fabricOverlayReady owns it, and adding an MTU branch would make
+// a healthy-MTU-correct node indistinguishable in the tests that pin the
+// quiet gate without modelling MTU on every fake link. The address check
+// uses the same fabricAddrList17221 seam ensureFabricIPVLAN verifies
+// through, so gate and actuator read the kernel the same way.
+func (d *Daemon) fabricOverlayAddrReady(link netlink.Link, addrs []string) bool {
+	if link.Attrs() == nil || link.Attrs().Flags&net.FlagUp == 0 {
+		return false
+	}
+	missing, err := fabricOverlayMissingAddrs(link, addrs)
+	return err == nil && len(missing) == 0
 }
 
 // staleFabricOverlays returns fabric IPVLANs that EXIST on the box but which

@@ -10,6 +10,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/linuxsock"
 	"golang.org/x/sys/unix"
 )
 
@@ -59,6 +60,15 @@ type proxyARPResponders struct {
 type proxyARPResponder struct {
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// recvMu guards recv, the live cancellable receiver published by
+	// runProxyARPResponder once its socket is open (#17231). Teardown
+	// (sync/stop) reads it under this lock to SignalStop the parked
+	// receive; runProxyARPResponder clears it under the same lock before
+	// closing, so a racing teardown can never signal a closed or reused
+	// receiver. Nil until the socket opens and after it closes.
+	recvMu sync.Mutex
+	recv   *linuxsock.PpollRecv
 
 	// addrsMu guards the reconcile snapshot: addresses, interface identity,
 	// redundancy-group ownership input, and the current interface MAC. A
@@ -181,11 +191,46 @@ func (d *Daemon) answerPolicyFor(r *proxyARPResponder) cluster.ARPAnswerPolicy {
 	}
 }
 
+// stopLocked signals this responder's parked receive (if its socket
+// is open) without closing anything. Callers then JOIN on done before
+// any close: runProxyARPResponder owns the receiver's Close, deferred
+// after its loop returns, so signal → join → close holds by
+// construction (#17231) and no recv is ever in flight on a closed or
+// reused fd.
+func (r *proxyARPResponder) stopLocked() {
+	r.recvMu.Lock()
+	recv := r.recv
+	r.recvMu.Unlock()
+	if recv != nil {
+		recv.SignalStop()
+	}
+}
+
+// stop cancels the responder context, wakes its parked receive, and
+// joins the goroutine: when stop returns, runProxyARPResponder has
+// returned and closed its receiver, so nothing can answer a later
+// frame from the stale snapshot. Responders whose done is already
+// closed (never opened, or already dead) return immediately. The
+// goroutine-opening-the-socket window is covered because the loop
+// checks ctx immediately after publishing the receiver, and ctx is
+// already cancelled by then, so done closes promptly.
+func (r *proxyARPResponder) stop() {
+	r.cancel()
+	r.stopLocked()
+	<-r.done
+}
+
+// openARPReceiverFn is the socket-open seam. Tests override it to
+// inject a socketpair-backed PpollRecv so the stop-wakes-recv contract
+// can be exercised without CAP_NET_RAW; production opens the real
+// AF_PACKET receiver via cluster.OpenARPReceiver.
+var openARPReceiverFn = cluster.OpenARPReceiver
+
 // runProxyARPResponder is the receive loop for one interface.
 func (d *Daemon) runProxyARPResponder(ctx context.Context, ifName string, r *proxyARPResponder) {
 	defer close(r.done)
 
-	fd, ifIndex, mac, err := cluster.OpenARPSocket(ifName)
+	recv, ifIndex, mac, err := openARPReceiverFn(ifName)
 	if err != nil {
 		slog.Warn("proxy-arp responder: cannot open ARP socket; pool addresses on "+
 			"this interface will not be answered and return traffic depends on the "+
@@ -193,6 +238,27 @@ func (d *Daemon) runProxyARPResponder(ctx context.Context, ifName string, r *pro
 			"iface", ifName, "err", err)
 		return
 	}
+	// Publish the receiver for teardown's SignalStop, and own its Close:
+	// deferred here, after the loop returns, it runs before done closes,
+	// so a joining stop() observes a fully closed receiver. Clearing the
+	// published pointer first means a teardown racing this exit can only
+	// signal a live receiver or none — never a closed one.
+	defer func() {
+		r.recvMu.Lock()
+		r.recv = nil
+		r.recvMu.Unlock()
+		recv.Close()
+	}()
+	r.recvMu.Lock()
+	r.recv = recv
+	r.recvMu.Unlock()
+	// If teardown already cancelled us before the receiver was
+	// published, its SignalStop found nil; wake ourselves so the first
+	// Recv returns at once instead of parking on the silent link.
+	if ctx.Err() != nil {
+		recv.SignalStop()
+	}
+
 	// Publish the MAC returned with the socket only when reconcile has not
 	// already published a newer snapshot. Without this conditional, the
 	// interleaving "socket opens with M1; reconcile stores M2; socket-open path
@@ -203,24 +269,6 @@ func (d *Daemon) runProxyARPResponder(ctx context.Context, ifName string, r *pro
 		r.macSet = true
 	}
 	r.addrsMu.Unlock()
-	// The fd is closed EXACTLY ONCE, by whichever of the two paths gets there
-	// first: the watcher goroutine below (to unblock a parked Recvfrom on
-	// shutdown) or this function's own exit. A plain `defer unix.Close(fd)`
-	// alongside the watcher is a DOUBLE CLOSE — and a double close is not
-	// harmless here, because the kernel reuses the lowest free descriptor
-	// number: between the two closes another goroutine can open a socket or a
-	// file that lands on this number and have it closed underneath it. That
-	// failure is silent, remote from its cause, and load-dependent.
-	var closeOnce sync.Once
-	closeFD := func() { closeOnce.Do(func() { unix.Close(fd) }) }
-	defer closeFD()
-
-	// Unblock a blocking Recvfrom on shutdown; the read then returns EBADF and
-	// the loop exits.
-	go func() {
-		<-ctx.Done()
-		closeFD()
-	}()
 
 	policy := d.answerPolicyFor(r)
 	buf := make([]byte, 2048)
@@ -228,10 +276,10 @@ func (d *Daemon) runProxyARPResponder(ctx context.Context, ifName string, r *pro
 		if ctx.Err() != nil {
 			return
 		}
-		n, _, err := unix.Recvfrom(fd, buf, 0)
+		n, _, err := recv.Recv(buf)
 		if err != nil {
 			if ctx.Err() != nil {
-				return // shutdown closed the fd
+				return // cancelled: wake eventfd (or self-wake above)
 			}
 			if err == unix.EINTR {
 				continue
@@ -239,7 +287,15 @@ func (d *Daemon) runProxyARPResponder(ctx context.Context, ifName string, r *pro
 			slog.Debug("proxy-arp responder: recv", "iface", ifName, "err", err)
 			return
 		}
-		if err := respondToARPFrame(fd, ifIndex, ifName, r, policy, buf[:n]); err != nil {
+		// #17231: re-check ctx after every successful recv before
+		// sending. A frame that raced the cancel (both fds ready in
+		// ppoll, the frame won) must not be answered from the stale
+		// snapshot — pre-fix it was, through whatever socket then
+		// owned the fd number.
+		if ctx.Err() != nil {
+			return
+		}
+		if err := respondToARPFrame(recv.FD(), ifIndex, ifName, r, policy, buf[:n]); err != nil {
 			slog.Debug("proxy-arp responder: send reply", "iface", ifName, "err", err)
 		}
 	}
@@ -359,7 +415,12 @@ func (d *Daemon) syncProxyARPResponders(cfg *config.Config, want map[string][]st
 
 	for name, r := range d.arpResponders.running {
 		if _, keep := want[name]; !keep {
-			r.cancel()
+			// #17231: signal → join → close (stop joins; the loop owns
+			// the close), never cancel-and-forget: a cancelled responder
+			// parked on a silent link would otherwise leak with its
+			// bound socket and answer the next request from its stale
+			// snapshot through a reused fd number.
+			r.stop()
 			delete(d.arpResponders.running, name)
 			slog.Info("proxy-arp responder: stopped", "iface", name)
 		}
@@ -378,7 +439,7 @@ func (d *Daemon) syncProxyARPResponders(cfg *config.Config, want map[string][]st
 			// Configured on this interface but with no IPv4 address to answer
 			// for. Do not start a socket that can never answer.
 			if r, ok := d.arpResponders.running[name]; ok {
-				r.cancel()
+				r.stop()
 				delete(d.arpResponders.running, name)
 			}
 			continue
@@ -427,7 +488,7 @@ func (d *Daemon) stopProxyARPResponders() {
 	d.arpResponders.mu.Lock()
 	defer d.arpResponders.mu.Unlock()
 	for name, r := range d.arpResponders.running {
-		r.cancel()
+		r.stop()
 		delete(d.arpResponders.running, name)
 	}
 }

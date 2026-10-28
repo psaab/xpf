@@ -122,7 +122,7 @@ pub(in crate::afxdp) fn resolve_forward_target_ifindex_with_dynamic(
     resolve_tx_binding_ifindex(forwarding, decision.resolution.egress_ifindex)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(super) fn build_live_forward_request(
     area: &MmapArea,
     binding_lookup: &WorkerBindingLookup,

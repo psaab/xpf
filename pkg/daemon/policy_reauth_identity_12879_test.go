@@ -475,7 +475,7 @@ func publishLandedVariantConfig12879(
 	if err := r.h.d.applySem.Acquire(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	_, applyErr := r.h.d.applyAndSyncCommitted(old, next, peerSyncNever)
+	_, applyErr := r.h.d.applyAndSyncCommittedForTest(old, next, peerSyncNever)
 	r.h.d.applySem.Release(1)
 	_, _ = r.h.sender.ApplyQueuedMessagesForTesting(r.h.receiver)
 	return next, applyErr

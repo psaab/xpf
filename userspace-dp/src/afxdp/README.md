@@ -160,7 +160,7 @@ sync.
         index).
       - **#3609 — per-interface host-inbound override:** the local-delivery
         host-inbound gate (`poll_descriptor/filter.rs::host_inbound_gated_lo0_action`
-        → `forwarding::host_inbound_admits_iface`) looks up
+        → `forwarding::host_inbound_admits_iface_for_destination`) looks up
         `ifindex_host_inbound` — keyed by the LOGICAL unit ifindex in
         `forwarding_build/interfaces.rs` — with the resolved logical ingress
         ifindex threaded in by each caller (session HIT / MISS / flowless).
@@ -1357,7 +1357,11 @@ sync.
   and the captured set is deduped against `tx_selection.filter_counters`
   (`retain_absent_from`) so a count-plus-forwarding-class input term the cos
   TX-selection rebuild already folded in is not recorded twice. Cached
-  PBR logs replay with the `Input` source; the cold packet keeps `Pbr`.
+  PBR logs replay with the `Pbr` source (#17038): the seed capture and the
+  uncached static hit share the single `established_input_filter_log`
+  derivation, which freezes the source into `CachedInputFilterLog`, so a
+  PBR-steered flow's `then log` reason byte no longer flips with cache
+  residency; the cold packet also keeps `Pbr`.
 
   **Short-lived flow-backed deny caching (#11073):** `PolicyDenied` and
   `DiscardRoute` decisions are cached only for UDP and established TCP ACK

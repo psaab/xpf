@@ -190,6 +190,13 @@ func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) bool {
 			"remote", connRemoteAddrString(conn))
 		go s.OnPeerConnected()
 	}
+	if pc.announce && s.OnPeerReconnected != nil {
+		// #17056: same per-connection reset as the install dispatch in
+		// handleNewConnection — this BulkStart announces a reboot the
+		// install did not, so without firing here a reconnect classified
+		// only by its boot id would keep the prior connection's stamp.
+		go s.OnPeerReconnected()
+	}
 	if pc.retired && !pc.announce {
 		// The connection's install already dispatched OnPeerConnected.
 		// Its capability callback may have reconciled before this switch
