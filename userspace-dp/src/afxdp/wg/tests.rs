@@ -21,6 +21,19 @@ use snow::Builder;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    static WG_HANDSHAKE_POISON_COUNTER_TEST_SERIALIZER: std::sync::Mutex<()> =
+        std::sync::Mutex::new(());
+
+    pub(crate) fn serialize_poison_counter_tests() -> std::sync::MutexGuard<'static, ()> {
+        WG_HANDSHAKE_POISON_COUNTER_TEST_SERIALIZER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+
 /// Generate a fresh X25519 keypair using snow's resolver. Slow
 /// path — fine for tests.
 pub(crate) fn keypair() -> ([u8; 32], [u8; 32]) {
@@ -2686,6 +2699,8 @@ mod framed_handshake {
     /// returning `Ok`).
     #[test]
     fn reserve_pending_recovers_from_a_poisoned_reconcile_lock() {
+        let _counter_test_guard = test_support::serialize_poison_counter_tests();
+
         use crate::afxdp::wg::handshake_session::WG_HANDSHAKE_LOCK_POISON_RECOVERIES;
         use crate::afxdp::wg::session::SessionRole;
         use std::sync::Arc as StdArc;
@@ -2738,6 +2753,7 @@ mod framed_handshake {
     /// deadlock fails this cell instead of hanging the test process.
     #[test]
     fn handshake_lock_recover_stamps_exactly_once_under_contention_17201() {
+        let _counter_test_guard = test_support::serialize_poison_counter_tests();
         use crate::afxdp::wg::handshake_session::WG_HANDSHAKE_LOCK_POISON_RECOVERIES;
         use crate::afxdp::wg::session::SessionRole;
         use std::sync::Arc as StdArc;
