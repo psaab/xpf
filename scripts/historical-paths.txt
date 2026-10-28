@@ -1,0 +1,17 @@
+# Historical-archive path patterns (#17115, R4-Q47-03).
+#
+# Single source for the set of files whose contents quote what was written
+# at some past time rather than pointing at rationale a reader should follow
+# now: generated histories and append-only logs. Both consumers load this
+# file instead of hand-keeping their own copy:
+#   - pkg/docsref (isHistoricalArchive): skips citations from these files.
+#   - scripts/ci_affected_go_tests.sh (never_read): a change confined to
+#     these paths reads no Go source, so it does not seed every package.
+#
+# Format: one pattern per line. A pattern is an exact repo-relative path,
+# or contains a single "*" matching any (possibly empty) run of characters.
+# Blank lines and lines starting with # are ignored.
+_Log.md
+docs/issues/*-history.md
+docs/issues/*-history-archive.md
+docs/log/*

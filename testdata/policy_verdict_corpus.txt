@@ -391,3 +391,25 @@ q trust untrust ::10.0.1.5 2001:db8:2::5 udp 1234 80 permit permit-any
 q trust untrust 2001:db8:1::5 ::ffff:10.0.2.5 udp 1234 80 permit permit-any
 q trust untrust 2001:db8:1::5 ::10.0.2.5 udp 1234 80 permit permit-any
 end
+
+# #17081: a literal port 0 is a PRESENT port in both halves — the Go corpus
+# reader builds PortPtr(0) and the Rust reader passes u16 0 with
+# l4_present=true, so a `0-1023` deny term matches it (the #13920 shape).
+# The control row (dport 53) hits the same deny; a query port outside the
+# range (2000) falls through to the permit-all rule behind it.
+case port-zero-range-17081
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set interfaces ge-0/0/1 unit 0 family inet address 10.0.2.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security zones security-zone untrust interfaces ge-0/0/1.0
+set security policies default-policy permit-all
+set applications application app-low protocol udp
+set applications application app-low destination-port 0-1023
+set security policies from-zone trust to-zone untrust policy d match source-address any
+set security policies from-zone trust to-zone untrust policy d match destination-address any
+set security policies from-zone trust to-zone untrust policy d match application app-low
+set security policies from-zone trust to-zone untrust policy d then deny
+q trust untrust 10.0.1.5 10.0.2.5 udp 40000 0 deny d
+q trust untrust 10.0.1.5 10.0.2.5 udp 40000 53 deny d
+q trust untrust 10.0.1.5 10.0.2.5 udp 40000 2000 permit -
+end

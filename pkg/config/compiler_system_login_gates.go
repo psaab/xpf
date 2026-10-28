@@ -42,13 +42,13 @@ import (
 //     compounds with the #6701 identity fix in the permissive direction, which
 //     is why the two ship together;
 //   - an empty class permission set maps to the coarse `{none}` bucket, and a
-//     dropped `deny-commands` / `deny-configuration` never reaches the #5831
-//     gate: that gate reads LoginClass.DenyLeavesPresent, which the packed drop
-//     leaves empty, so the commit it would have REFUSED is accepted and the
-//     restriction the operator wrote is silently discarded. (Before #5831 the
-//     same drop instead suppressed a MORE PERMISSIVE advisory; the gate
-//     replaced that advisory, but the field the bug empties is still the one
-//     the check reads.);
+//     dropped `deny-commands` / `deny-configuration` never reaches the runtime
+//     regex evaluator: that evaluator reads LoginClass.DenyLeavesPresent
+//     (login_regex_scope_7172.go), which the packed drop leaves empty, so it
+//     enforces no deny restriction and the restriction the operator wrote is
+//     silently discarded. The field the bug empties is still the one the
+//     enforcement reads — it is a runtime evaluator now, not the #5831 commit
+//     gate that was retired when #7172 made the regexes enforced.
 //   - a dropped `authentication` block leaves the account with no key and no
 //     password.
 //
@@ -175,7 +175,7 @@ func loginPackedConsequence(keyword string) string {
 	case "class":
 		return "the class compiles with NO permissions and NO allow/deny regexes, so it " +
 			"grants nothing and a dropped deny-commands / deny-configuration never reaches " +
-			"the #5831 gate that would refuse the commit outright"
+			"the runtime regex evaluator, so the restriction is silently discarded"
 	}
 	return "the instance compiles with an EMPTY body"
 }
@@ -555,28 +555,23 @@ func (f *loginFindings) verdict(lenient bool) ([]string, error) {
 	return f.order, nil
 }
 
-// forEachClusterNodeView calls fn with the candidate tree expanded for each
-// chassis-cluster node id, so a gate sees what EVERY node will actually render
-// — including a `groups nodeN` body that `apply-groups "${node}"` selects only
-// on the peer.
-//
-// Mirrors collectQinQFindingsForNode / collectVLANMapFindingsForNode: clone,
-// expand for the node, read the AST. It never calls CompileConfig* (which
-// would re-enter the gate). A view that fails to expand contributes nothing —
-// a config defining only `groups node1` + `${node}` does not expand for node 0,
-// and the real per-node compile path already rejects that on the affected
-// node, while the OTHER view still sees the body hidden in the group.
+// forEachClusterNodeView calls fn with each effective view of the
+// candidate tree from effectiveNodeViews (#17222): the candidate
+// expanded for each chassis-cluster node id, so a gate sees what EVERY
+// node will actually render — including a `groups nodeN` body that
+// `apply-groups "${node}"` selects only on the peer — plus, when
+// neither per-node expansion succeeds (a group literally named
+// "${node}"), the generic-compile fallback tree, so the gate inspects
+// the same tree the standalone compile compiles instead of nothing
+// (#13146). It never calls CompileConfig* (which would re-enter the
+// gate). A view that fails to expand contributes nothing — a config
+// defining only `groups node1` + `${node}` does not expand for node 0,
+// and the real per-node compile path already rejects that on the
+// affected node, while the OTHER view still sees the body hidden in
+// the group.
 func forEachClusterNodeView(tree *ConfigTree, fn func(*ConfigTree)) {
-	if tree == nil {
-		return
-	}
-	for _, nodeID := range []int{0, 1} {
-		clone := tree.Clone()
-		vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-		if err := clone.ExpandGroupsWithVars(vars); err != nil {
-			continue
-		}
-		fn(clone)
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{Fallback: true}) {
+		fn(view)
 	}
 }
 

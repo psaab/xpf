@@ -55,7 +55,7 @@ func validateRethVRRPGroupIDStrict(cfg *Config) error {
 	// directly manages VIPs (no-reth-vrrp) or elects over the control link
 	// only (private-rg-election), no reth-derived VRRP instance is ever
 	// synthesized, so an overflowing rgID has no runtime consequence.
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		return nil
 	}
 

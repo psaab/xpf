@@ -8,7 +8,7 @@ import (
 // #14979 (D34-04): ResetFailover left the transfer-commit authority armed.
 //
 // A transfer completion arms, per RG:
-//   - peerTransferOutOverride (+ peerTransferOutPrevious snapshot) —
+//   - transferOverrides (reqID + peer snapshot in one entry) —
 //     requester side, no expiry, re-forces the peer to SecondaryHold on
 //     every heartbeat;
 //   - peerTransferCommitGraceUntil — requester side, same rewrite until
@@ -32,8 +32,7 @@ import (
 func armTransferState14979(m *Manager, rgID int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.peerTransferOutOverride[rgID] = 77
-	m.peerTransferOutPrevious[rgID] = peerGroupSnapshot{present: true}
+	m.transferOverrides[rgID] = transferOverride{reqID: 77, previous: peerGroupSnapshot{present: true}}
 	m.peerTransferCommitGraceUntil[rgID] = time.Now().Add(time.Minute)
 	m.localTransferOutHoldUntil[rgID] = time.Now().Add(time.Minute)
 }
@@ -41,8 +40,8 @@ func armTransferState14979(m *Manager, rgID int) {
 func transferStateArmed14979(m *Manager, rgID int) (override, previous, grace, hold bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	_, override = m.peerTransferOutOverride[rgID]
-	_, previous = m.peerTransferOutPrevious[rgID]
+	_, override = m.transferOverrides[rgID]
+	previous = override
 	_, grace = m.peerTransferCommitGraceUntil[rgID]
 	_, hold = m.localTransferOutHoldUntil[rgID]
 	return

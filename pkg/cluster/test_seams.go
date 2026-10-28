@@ -58,14 +58,69 @@ func (s *SessionSync) SetPeerReceiveAgeForTesting(age time.Duration, received bo
 	s.lastPeerRxMono.Store(MonotonicNanos() - int64(age))
 }
 
-// PeerNeverSeenSyncFreshForTesting evaluates the currently installed
-// never-seen sync-proof hook, if any. The production callback contract is a
-// fast lock-free read and does not re-enter Manager.
+// fakePeerSyncSource17056 is a test fake for peerSyncSource. silenceFresh
+// models PeerRecentlyActiveWithinSilenceWindow independently so the
+// never-seen window and the 2s suppression window stay distinguishable.
+type fakePeerSyncSource17056 struct {
+	connected    bool
+	age          time.Duration
+	received     bool
+	silenceFresh bool
+}
+
+func (f *fakePeerSyncSource17056) IsConnected() bool { return f.connected }
+func (f *fakePeerSyncSource17056) LastPeerReceiveAge() (time.Duration, bool) {
+	return f.age, f.received
+}
+func (f *fakePeerSyncSource17056) PeerRecentlyActiveWithinSilenceWindow() bool {
+	return f.silenceFresh
+}
+
+// setPeerSyncSourceForTesting injects a fake sync source (tests only).
+func (m *Manager) setPeerSyncSourceForTesting(src peerSyncSource) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peerSync = src
+	m.resetSyncSuppressionLocked()
+}
+
+// PeerNeverSeenSyncFreshForTesting evaluates the published sync source's
+// never-seen freshness proof (#17056: no hook remains; the Manager reads
+// the source it owns under its own lock).
 func (m *Manager) PeerNeverSeenSyncFreshForTesting() bool {
 	m.mu.RLock()
-	fn := m.peerNeverSeenSyncFreshFn
-	m.mu.RUnlock()
-	return fn != nil && fn()
+	defer m.mu.RUnlock()
+	return m.peerSyncFreshLocked()
+}
+
+// SetPeerSyncSourceForTesting publishes a real SessionSync as the peer
+// sync source without a wire round trip, mirroring SetConnectedForTesting.
+func (m *Manager) SetPeerSyncSourceForTesting(ss *SessionSync) {
+	m.SetPeerSyncSource(ss)
+}
+
+// SetFakePeerSyncSourceForTesting injects a fake sync source with explicit
+// connected / receive-age / silence-window state (#17056 cells).
+func (m *Manager) SetFakePeerSyncSourceForTesting(connected bool, age time.Duration, received, silenceFresh bool) {
+	m.setPeerSyncSourceForTesting(&fakePeerSyncSource17056{
+		connected: connected, age: age, received: received, silenceFresh: silenceFresh,
+	})
+}
+
+// HBSuppressStartForTesting returns the continuous-suppression cap stamp
+// (CLOCK_MONOTONIC nanos, 0 = inactive) under m.mu.
+func (m *Manager) HBSuppressStartForTesting() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.hbSuppressStart
+}
+
+// SetHBSuppressStartForTesting backdates the suppression cap stamp so a
+// cell can expire the current continuous window without sleeping (#12165).
+func (m *Manager) SetHBSuppressStartForTesting(mono int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hbSuppressStart = mono
 }
 
 // HandlePeerTimeoutForTesting runs the real peer-timeout path without a
@@ -208,8 +263,8 @@ func (s *SessionSync) SentInstallGenerationV4ForTesting(key dataplane.SessionKey
 func (s *SessionSync) DeleteJournalGenerationV4ForTesting(key dataplane.SessionKey) (uint64, bool) {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	for i := len(s.deleteJournal) - 1; i >= 0; i-- {
-		raw := s.deleteJournal[i]
+	for i := len(s.deleteJournal.entries) - 1; i >= 0; i-- {
+		raw := s.deleteJournal.entries[i]
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV4 {
 			continue
 		}
@@ -289,8 +344,8 @@ func (s *SessionSync) SetScopedPolicyDeleteCapableForTesting(capable bool) {
 func (s *SessionSync) ScopedDeleteJournalEntryForTesting(key dataplane.SessionKey) (uint32, uint64, bool) {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	for i := len(s.scopedDeleteJournal) - 1; i >= 0; i-- {
-		raw := s.scopedDeleteJournal[i]
+	for i := len(s.scopedDeleteJournal.entries) - 1; i >= 0; i-- {
+		raw := s.scopedDeleteJournal.entries[i]
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV4 {
 			continue
 		}
@@ -307,8 +362,8 @@ func (s *SessionSync) ScopedDeleteJournalEntryForTesting(key dataplane.SessionKe
 func (s *SessionSync) ScopedDeleteJournalEntryV6ForTesting(key dataplane.SessionKeyV6) (uint32, uint64, bool) {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	for i := len(s.scopedDeleteJournal) - 1; i >= 0; i-- {
-		raw := s.scopedDeleteJournal[i]
+	for i := len(s.scopedDeleteJournal.entries) - 1; i >= 0; i-- {
+		raw := s.scopedDeleteJournal.entries[i]
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV6 {
 			continue
 		}
@@ -326,8 +381,8 @@ func (s *SessionSync) ScopedDeleteJournalEntryV6ForTesting(key dataplane.Session
 func (s *SessionSync) DeleteJournalGenerationV6ForTesting(key dataplane.SessionKeyV6) (uint64, bool) {
 	s.deleteJournalMu.Lock()
 	defer s.deleteJournalMu.Unlock()
-	for i := len(s.deleteJournal) - 1; i >= 0; i-- {
-		raw := s.deleteJournal[i]
+	for i := len(s.deleteJournal.entries) - 1; i >= 0; i-- {
+		raw := s.deleteJournal.entries[i]
 		if len(raw) < syncHeaderSize || raw[4] != syncMsgDeleteV6 {
 			continue
 		}

@@ -7,12 +7,12 @@ import (
 )
 
 // #9364 — the BATCH session-delete path stripped the routing domain, so the
-// conntrack GC's deletes went out as bare 5-tuples and hit #8636's
+// (now-retired, #17155) conntrack GC's deletes went out as bare 5-tuples and hit #8636's
 // ambiguous-routing-domain refusal on a standby.
 //
 // #9146 fixed the SINGULAR delete. This is the half that matters more: the batch
 // path is what retires sessions continuously on every running box
-// (`pkg/conntrack/gc.go` expiry, `pkg/daemon/daemon_policy_invalidate.go`), while
+// (`pkg/daemon/daemon_policy_invalidate.go`), while
 // the singular path serves the operator clears. So the fix that landed covered
 // the operator paths and left the steady-state one bare.
 //

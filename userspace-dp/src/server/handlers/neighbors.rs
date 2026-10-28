@@ -1,5 +1,4 @@
-// #1345: per-verb handler for update_neighbors. Body byte-identical to
-// handlers.rs lines 186-208.
+// #1345: per-verb handler for update_neighbors, split out of handlers.rs in #1345.
 
 use super::super::helpers::refresh_status;
 use super::super::ServerState;

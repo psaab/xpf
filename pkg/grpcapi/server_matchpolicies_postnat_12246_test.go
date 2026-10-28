@@ -126,7 +126,7 @@ func TestMatchPoliciesCarriesPostNATInputNote12246(t *testing.T) {
 			s:    committed,
 			req: &pb.MatchPoliciesRequest{
 				FromZone: "untrust", ToZone: "trust", Protocol: "tcp",
-				DestinationIp: "203.0.113.10", DestinationPort: 80,
+				DestinationIp: "203.0.113.10", DestinationPort: int32Ptr17081(80),
 			},
 			premise: func(r *pb.MatchPoliciesResponse) bool {
 				return r.GetMatched() && r.GetPolicyName() == "permit-vip"
@@ -137,7 +137,7 @@ func TestMatchPoliciesCarriesPostNATInputNote12246(t *testing.T) {
 			s:    committed,
 			req: &pb.MatchPoliciesRequest{
 				FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
-				DestinationIp: "203.0.113.10", DestinationPort: 80,
+				DestinationIp: "203.0.113.10", DestinationPort: int32Ptr17081(80),
 			},
 			premise: func(r *pb.MatchPoliciesResponse) bool {
 				return !r.GetMatched() && r.GetDefaultUsed()
@@ -148,7 +148,7 @@ func TestMatchPoliciesCarriesPostNATInputNote12246(t *testing.T) {
 			s:    committed,
 			req: &pb.MatchPoliciesRequest{
 				FromZone: "untrust", ToZone: "junos-host", Protocol: "tcp",
-				DestinationPort: 22,
+				DestinationPort: int32Ptr17081(22),
 			},
 			premise: func(r *pb.MatchPoliciesResponse) bool {
 				return r.GetHostInboundUnmatched()
@@ -159,7 +159,7 @@ func TestMatchPoliciesCarriesPostNATInputNote12246(t *testing.T) {
 			s:    rejected,
 			req: &pb.MatchPoliciesRequest{
 				FromZone: "untrust", ToZone: "trust", Protocol: "tcp",
-				DestinationIp: "10.0.0.5", DestinationPort: 8080,
+				DestinationIp: "10.0.0.5", DestinationPort: int32Ptr17081(8080),
 			},
 			premise: func(r *pb.MatchPoliciesResponse) bool {
 				return !r.GetMatched() && r.GetAction() == policymatch.ContentRejectedActionString

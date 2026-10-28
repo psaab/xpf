@@ -112,6 +112,10 @@ type peerIncarnationState struct {
 	// installTableSuppressionWarned latches the #9752 round 3
 	// stamped-install suppression warning, same incarnation scoping.
 	installTableSuppressionWarned atomic.Bool
+	// ipsecDiscriminatorSuppressionWarned latches the S9.4 IPsec
+	// discriminator suppression warning (#17113), same incarnation
+	// scoping as installTableSuppressionWarned.
+	ipsecDiscriminatorSuppressionWarned atomic.Bool
 	// bulkFencedForPeer latches a #9752 round 4 bulk refusal for the peer
 	// incarnation: once a window aborts on the install fence, retries
 	// skip quietly instead of burning full-table walks that all abort

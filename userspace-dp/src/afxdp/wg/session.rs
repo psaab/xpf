@@ -262,6 +262,28 @@ impl WgSession {
         self.confirmed.load(Ordering::Acquire)
     }
 
+    /// Whether the session keys are past REJECT_AFTER_TIME at
+    /// `now_ns` (WG whitepaper §6.1: keys older than 180s MUST NOT be
+    /// used to send or receive). `now_ns` is passed by the caller so
+    /// every age comparison stays in the caller's clock domain
+    /// (including the test mock clock); no clock is read here.
+    /// This is the sole REJECT_AFTER_TIME age test (#17208) — the
+    /// encap T3 gate, the decap gate, `expire_sessions`, and the
+    /// usable-session predicate all route through it.
+    #[inline]
+    pub(crate) fn expired_at(&self, now_ns: u64) -> bool {
+        now_ns.saturating_sub(self.created_ns) >= REJECT_AFTER_TIME_NS
+    }
+
+    /// Whether the session is usable at `now_ns`: key-confirmed AND
+    /// not past REJECT_AFTER_TIME. The sole usable-session predicate
+    /// (#17208); an expired-but-not-yet-GC'd session is not usable
+    /// (#4546).
+    #[inline]
+    pub(crate) fn usable_at(&self, now_ns: u64) -> bool {
+        self.is_confirmed() && !self.expired_at(now_ns)
+    }
+
     /// Mark the session as confirmed. Called from `try_decap` after a
     /// successful AEAD authentication of an inbound transport record.
     /// `Release` pairs with the `Acquire` load in `is_confirmed` so

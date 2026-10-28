@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"strings"
+
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // CloseKernelTransitForCleanup closes and verifies both transit legs before the
@@ -21,16 +21,8 @@ func CloseKernelTransitForCleanup() error {
 		}
 	}
 	for _, path := range transitForwardSysctlPaths() {
-		if err := os.WriteFile(path, []byte("0"), 0644); err != nil {
-			errs = append(errs, fmt.Errorf("write %s=0: %w", path, err))
-			continue
-		}
-		back, err := os.ReadFile(path)
-		if err != nil || strings.TrimSpace(string(back)) != "0" {
-			if err == nil {
-				err = fmt.Errorf("read back %q", strings.TrimSpace(string(back)))
-			}
-			errs = append(errs, fmt.Errorf("verify %s=0: %w", path, err))
+		if _, err := fsatomic.WriteKernelKnobVerified(path, "0"); err != nil {
+			errs = append(errs, fmt.Errorf("write/verify %s=0: %w", path, err))
 		}
 	}
 	if err := errors.Join(errs...); err != nil {

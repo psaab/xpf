@@ -269,7 +269,7 @@ func normalizeBareVRRPVIPs(cfg *Config, hostFallback bool) []string {
 					changed = true
 				}
 				if changed {
-					vg.VirtualAddresses = dedupeVRRPVIPs(vg.VirtualAddresses)
+					vg.VirtualAddresses = DedupeVRRPVIPs(vg.VirtualAddresses)
 				}
 			}
 		}

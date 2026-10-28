@@ -101,8 +101,12 @@ func Test_6694_FabricMembersSingleHierarchicalMember(t *testing.T) {
 }
 
 // Test_6694_FabricMembersEveryFlatSetSpelling covers the flat-set path. The
-// bracket list keeps every name on ONE child node's Keys, which is why the
-// firewallMatchValues SSOT (Keys[0] of each child) does not close this leaf.
+// bracket list keeps every name on ONE child node's Keys; since #6714
+// firewallMatchValues reads every key of each direct child, so that shape
+// alone no longer discriminates it from plainListValues — the pinned
+// difference is descent (and the bare self-repeat skip), see
+// TestReaderDifferences17216PinDocClaims. This leaf still needs the
+// descending reader.
 func Test_6694_FabricMembersEveryFlatSetSpelling(t *testing.T) {
 	want := []string{"ge-0/0/7", "ge-7/0/7"}
 

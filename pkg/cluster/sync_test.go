@@ -266,13 +266,31 @@ func TestQueueWithoutConnection(t *testing.T) {
 	}
 }
 
-func TestFormatStats(t *testing.T) {
-	ss := NewSessionSync(":4785", "10.0.0.2:4785", nil)
-	ss.stats.SessionsSent.Store(100)
-	ss.stats.SessionsReceived.Store(50)
-	out := ss.FormatStats()
-	if out == "" {
-		t.Fatal("format stats should produce output")
+// #17107: FormatStats is deleted (it was a test-only fourth renderer
+// reading s.stats directly). Its rendering decision now lives in
+// syncStatFields; the operator surface is Manager.FormatStatistics /
+// FormatDataPlaneStatistics / FormatInformation, whose conditional rows
+// come from renderSyncStatRows17107 (status.go). This cell pins that
+// REAL surface — not a test-only renderer — produces the nonzero rows
+// for a populated snapshot.
+func TestSyncStatsDescriptorRender17107(t *testing.T) {
+	snap := &SyncStatsSnapshot{SessionsSent: 100, SessionsReceived: 50, DeletesDropped: 7}
+	out := renderSyncStatRows17107(snap, "  ")
+	for _, want := range []string{"Deletes dropped: 7"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("renderSyncStatRows17107 missing %q:\n%s", want, out)
+		}
+	}
+	// SessionsSent/SessionsReceived are RenderAlways service-table rows,
+	// not conditional descriptor rows: they must NOT appear here (the
+	// statistics tables render them separately).
+	for _, unwanted := range []string{"Sessions sent", "Sessions received"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("renderSyncStatRows17107 must not render RenderAlways row %q:\n%s", unwanted, out)
+		}
+	}
+	if zero := renderSyncStatRows17107(&SyncStatsSnapshot{}, "  "); zero != "" {
+		t.Errorf("renderSyncStatRows17107(zero snapshot) = %q, want empty", zero)
 	}
 }
 
@@ -2438,8 +2456,8 @@ func TestDeleteJournalBasic(t *testing.T) {
 
 	// Journal should have 3 entries.
 	ss.deleteJournalMu.Lock()
-	if len(ss.deleteJournal) != 3 {
-		t.Fatalf("expected 3 journal entries, got %d", len(ss.deleteJournal))
+	if len(ss.deleteJournal.entries) != 3 {
+		t.Fatalf("expected 3 journal entries, got %d", len(ss.deleteJournal.entries))
 	}
 	ss.deleteJournalMu.Unlock()
 
@@ -2459,36 +2477,61 @@ func TestDeleteJournalBasic(t *testing.T) {
 
 	// Journal should be empty.
 	ss.deleteJournalMu.Lock()
-	if len(ss.deleteJournal) != 0 {
-		t.Fatalf("journal should be empty after flush, got %d", len(ss.deleteJournal))
+	if len(ss.deleteJournal.entries) != 0 {
+		t.Fatalf("journal should be empty after flush, got %d", len(ss.deleteJournal.entries))
 	}
 	ss.deleteJournalMu.Unlock()
 }
 
+// frameJournal17110 names one boundedFrameJournal instance for the
+// table-driven small-cap cells (#17110): both journals must obey the
+// identical cap/evict/count/resync discipline, and the scoped instance
+// was previously unreachable at small cap (scopedDeleteJournalCap was
+// never assigned anywhere).
+type frameJournal17110 struct {
+	name    string
+	journal func(ss *SessionSync) *boundedFrameJournal
+	push    func(ss *SessionSync, msg []byte)
+}
+
+func frameJournals17110() []frameJournal17110 {
+	return []frameJournal17110{
+		{"bare",
+			func(ss *SessionSync) *boundedFrameJournal { return &ss.deleteJournal },
+			func(ss *SessionSync, msg []byte) { ss.journalDelete(msg) }},
+		{"scoped",
+			func(ss *SessionSync) *boundedFrameJournal { return &ss.scopedDeleteJournal },
+			func(ss *SessionSync, msg []byte) { ss.journalScopedDelete(msg) }},
+	}
+}
+
 func TestDeleteJournalOverflow(t *testing.T) {
-	// When journal is full, oldest entries are evicted and DeletesDropped incremented.
-	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-	ss.deleteJournalCap = 5 // small cap for testing
+	// When journal is full, oldest entries are evicted and DeletesDropped
+	// incremented — identically for the bare and scoped journals (#17110).
+	for _, jn := range frameJournals17110() {
+		t.Run(jn.name, func(t *testing.T) {
+			ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+			j := jn.journal(ss)
+			j.cap = 5 // small cap for testing
 
-	// Queue 8 deletes while disconnected — first 3 should be evicted.
-	for i := 0; i < 8; i++ {
-		key := dataplane.SessionKey{
-			SrcIP:    [4]byte{10, 0, 1, byte(i)},
-			Protocol: 6,
-			SrcPort:  uint16(1000 + i),
-			DstPort:  80,
-		}
-		ss.QueueDeleteV4(key, false)
-	}
+			// Push 8 frames while disconnected — first 3 should be evicted.
+			for i := range 8 {
+				jn.push(ss, encodeDeleteV4(deleteKeyN(i), 0, false))
+			}
 
-	ss.deleteJournalMu.Lock()
-	if len(ss.deleteJournal) != 5 {
-		t.Fatalf("journal should be capped at 5, got %d", len(ss.deleteJournal))
-	}
-	ss.deleteJournalMu.Unlock()
-
-	if ss.stats.DeletesDropped.Load() != 3 {
-		t.Fatalf("expected 3 dropped deletes, got %d", ss.stats.DeletesDropped.Load())
+			ss.deleteJournalMu.Lock()
+			gotLen := len(j.entries)
+			ss.deleteJournalMu.Unlock()
+			if gotLen != 5 {
+				t.Fatalf("journal should be capped at 5, got %d", gotLen)
+			}
+			if ss.stats.DeletesDropped.Load() != 3 {
+				t.Fatalf("expected 3 dropped deletes, got %d", ss.stats.DeletesDropped.Load())
+			}
+			if !ss.forceResync.Load() {
+				t.Fatal("forceResync NOT armed after journal evicted records (#5450/#17110)")
+			}
+		})
 	}
 }
 
@@ -2596,11 +2639,11 @@ func TestDeleteJournalConnectedFlushViaSweep(t *testing.T) {
 
 	// The delete must be journaled (not sent) and carry a fresh gen > installGen.
 	ss.deleteJournalMu.Lock()
-	if len(ss.deleteJournal) != 1 {
+	if len(ss.deleteJournal.entries) != 1 {
 		ss.deleteJournalMu.Unlock()
-		t.Fatalf("expected 1 journaled delete, got %d", len(ss.deleteJournal))
+		t.Fatalf("expected 1 journaled delete, got %d", len(ss.deleteJournal.entries))
 	}
-	wantGen := binary.LittleEndian.Uint64(ss.deleteJournal[0][syncHeaderSize+16 : syncHeaderSize+24])
+	wantGen := binary.LittleEndian.Uint64(ss.deleteJournal.entries[0][syncHeaderSize+16 : syncHeaderSize+24])
 	ss.deleteJournalMu.Unlock()
 	if wantGen == 0 || wantGen <= installGen {
 		t.Fatalf("delete gen %d must be non-zero and strictly greater than install gen %d", wantGen, installGen)
@@ -2620,7 +2663,7 @@ func TestDeleteJournalConnectedFlushViaSweep(t *testing.T) {
 	ss.syncSweep()
 
 	ss.deleteJournalMu.Lock()
-	remaining := len(ss.deleteJournal)
+	remaining := len(ss.deleteJournal.entries)
 	ss.deleteJournalMu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("journaled delete not flushed by connected sweep, %d remain (bug #3926)", remaining)
@@ -2664,7 +2707,7 @@ func TestSessionQueueDoesNotJournal(t *testing.T) {
 	ss.QueueSessionV4(key, val)
 
 	ss.deleteJournalMu.Lock()
-	if len(ss.deleteJournal) != 0 {
+	if len(ss.deleteJournal.entries) != 0 {
 		t.Fatal("session updates should not be journaled")
 	}
 	ss.deleteJournalMu.Unlock()
@@ -2696,7 +2739,7 @@ func TestDeleteJournalFlushRetainsTailOnFullQueue(t *testing.T) {
 	const n = 5
 	for i := 0; i < n; i++ {
 		ss.deleteJournalMu.Lock()
-		ss.deleteJournal = append(ss.deleteJournal, encodeDeleteV4(deleteKeyN(i), 0, false))
+		ss.deleteJournal.entries = append(ss.deleteJournal.entries, encodeDeleteV4(deleteKeyN(i), 0, false))
 		ss.deleteJournalMu.Unlock()
 	}
 
@@ -2710,13 +2753,13 @@ func TestDeleteJournalFlushRetainsTailOnFullQueue(t *testing.T) {
 	}
 	ss.deleteJournalMu.Lock()
 	defer ss.deleteJournalMu.Unlock()
-	if len(ss.deleteJournal) != n {
-		t.Fatalf("expected all %d un-sent deletes re-journaled, got %d", n, len(ss.deleteJournal))
+	if len(ss.deleteJournal.entries) != n {
+		t.Fatalf("expected all %d un-sent deletes re-journaled, got %d", n, len(ss.deleteJournal.entries))
 	}
 	// FIFO order preserved.
 	for i := 0; i < n; i++ {
 		want := encodeDeleteV4(deleteKeyN(i), 0, false)
-		if string(ss.deleteJournal[i]) != string(want) {
+		if string(ss.deleteJournal.entries[i]) != string(want) {
 			t.Fatalf("re-journaled delete %d out of order", i)
 		}
 	}
@@ -2732,7 +2775,7 @@ func TestDeleteJournalFlushPartialThenRetains(t *testing.T) {
 	const n = 5
 	for i := 0; i < n; i++ {
 		ss.deleteJournalMu.Lock()
-		ss.deleteJournal = append(ss.deleteJournal, encodeDeleteV4(deleteKeyN(i), 0, false))
+		ss.deleteJournal.entries = append(ss.deleteJournal.entries, encodeDeleteV4(deleteKeyN(i), 0, false))
 		ss.deleteJournalMu.Unlock()
 	}
 
@@ -2743,13 +2786,13 @@ func TestDeleteJournalFlushPartialThenRetains(t *testing.T) {
 	}
 	ss.deleteJournalMu.Lock()
 	defer ss.deleteJournalMu.Unlock()
-	if len(ss.deleteJournal) != 2 {
-		t.Fatalf("expected 2 un-sent deletes re-journaled, got %d", len(ss.deleteJournal))
+	if len(ss.deleteJournal.entries) != 2 {
+		t.Fatalf("expected 2 un-sent deletes re-journaled, got %d", len(ss.deleteJournal.entries))
 	}
 	// The two re-journaled deletes are the last two (indices 3,4) in order.
 	for j, i := range []int{3, 4} {
 		want := encodeDeleteV4(deleteKeyN(i), 0, false)
-		if string(ss.deleteJournal[j]) != string(want) {
+		if string(ss.deleteJournal.entries[j]) != string(want) {
 			t.Fatalf("re-journaled delete %d (orig idx %d) out of order", j, i)
 		}
 	}
@@ -2757,7 +2800,10 @@ func TestDeleteJournalFlushPartialThenRetains(t *testing.T) {
 
 // TestRejournalTailFIFOPrependAndOverflow unit-tests rejournalTail across
 // all three branches: no overflow, overflow within the tail, and tail
-// fully dropped (overflow into the concurrently-journaled deletes).
+// fully dropped (overflow into the concurrently-journaled deletes). The
+// scoped twin (#17110) runs the identical table against
+// rejournalScopedTail / scopedDeleteJournal, so the previously
+// unreachable scoped prependTail overflow blocks execute too.
 func TestRejournalTailFIFOPrependAndOverflow(t *testing.T) {
 	mk := func(n int) []byte { return encodeDeleteV4(deleteKeyN(n), 0, false) }
 	eq := func(t *testing.T, got [][]byte, wantIdx []int) {
@@ -2772,46 +2818,58 @@ func TestRejournalTailFIFOPrependAndOverflow(t *testing.T) {
 		}
 	}
 
-	// Branch 1: no overflow. journal=[1,2] (newer), tail=[3,4,5] (older).
-	// Result: tail prepended -> [3,4,5,1,2].
-	t.Run("no_overflow", func(t *testing.T) {
-		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-		ss.deleteJournalCap = 10
-		ss.deleteJournal = [][]byte{mk(1), mk(2)}
-		ss.rejournalTail([][]byte{mk(3), mk(4), mk(5)})
-		eq(t, ss.deleteJournal, []int{3, 4, 5, 1, 2})
-		if d := ss.stats.DeletesDropped.Load(); d != 0 {
-			t.Fatalf("dropped = %d, want 0", d)
+	journals := []struct {
+		name      string
+		journal   func(ss *SessionSync) *boundedFrameJournal
+		rejournal func(ss *SessionSync, tail [][]byte)
+	}{
+		{"bare", func(ss *SessionSync) *boundedFrameJournal { return &ss.deleteJournal },
+			func(ss *SessionSync, tail [][]byte) { ss.rejournalTail(tail) }},
+		{"scoped", func(ss *SessionSync) *boundedFrameJournal { return &ss.scopedDeleteJournal },
+			func(ss *SessionSync, tail [][]byte) { ss.rejournalScopedTail(tail) }},
+	}
+	branches := []struct {
+		name     string
+		cap      int
+		existing []int
+		tail     []int
+		want     []int
+		dropped  uint64
+	}{
+		// journal=[1,2] (newer), tail=[3,4,5] (older) -> [3,4,5,1,2].
+		{"no_overflow", 10, []int{1, 2}, []int{3, 4, 5}, []int{3, 4, 5, 1, 2}, 0},
+		// cap=4, total=5, dropped=1 (< len(tail)=3) -> [4,5,1,2].
+		{"overflow_within_tail", 4, []int{1, 2}, []int{3, 4, 5}, []int{4, 5, 1, 2}, 1},
+		// cap=2, total=6, dropped=4 (>= len(tail)=3) -> journal[1:] = [2,3].
+		{"tail_fully_dropped", 2, []int{1, 2, 3}, []int{4, 5, 6}, []int{2, 3}, 4},
+	}
+	for _, jn := range journals {
+		for _, br := range branches {
+			t.Run(jn.name+"/"+br.name, func(t *testing.T) {
+				ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+				j := jn.journal(ss)
+				j.cap = br.cap
+				for _, idx := range br.existing {
+					j.entries = append(j.entries, mk(idx))
+				}
+				var tail [][]byte
+				for _, idx := range br.tail {
+					tail = append(tail, mk(idx))
+				}
+				jn.rejournal(ss, tail)
+				eq(t, j.entries, br.want)
+				if d := ss.stats.DeletesDropped.Load(); d != br.dropped {
+					t.Fatalf("dropped = %d, want %d", d, br.dropped)
+				}
+				if br.dropped > 0 && !ss.forceResync.Load() {
+					t.Fatal("forceResync NOT armed after rejournal dropped records (#5450)")
+				}
+				if br.dropped == 0 && ss.forceResync.Load() {
+					t.Fatal("forceResync armed without any dropped deletes")
+				}
+			})
 		}
-	})
-
-	// Branch 2: overflow within tail. cap=4, journal=[1,2], tail=[3,4,5].
-	// total=5, dropped=1 (< len(tail)=3) -> drop oldest tail entry (3),
-	// keep [4,5] + [1,2] = [4,5,1,2].
-	t.Run("overflow_within_tail", func(t *testing.T) {
-		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-		ss.deleteJournalCap = 4
-		ss.deleteJournal = [][]byte{mk(1), mk(2)}
-		ss.rejournalTail([][]byte{mk(3), mk(4), mk(5)})
-		eq(t, ss.deleteJournal, []int{4, 5, 1, 2})
-		if d := ss.stats.DeletesDropped.Load(); d != 1 {
-			t.Fatalf("dropped = %d, want 1", d)
-		}
-	})
-
-	// Branch 3: tail fully dropped. cap=2, journal=[1,2,3], tail=[4,5,6].
-	// total=6, dropped=4 (>= len(tail)=3) -> drop all tail + oldest 1 of
-	// journal -> keep journal[1:] = [2,3].
-	t.Run("tail_fully_dropped", func(t *testing.T) {
-		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-		ss.deleteJournalCap = 2
-		ss.deleteJournal = [][]byte{mk(1), mk(2), mk(3)}
-		ss.rejournalTail([][]byte{mk(4), mk(5), mk(6)})
-		eq(t, ss.deleteJournal, []int{2, 3})
-		if d := ss.stats.DeletesDropped.Load(); d != 4 {
-			t.Fatalf("dropped = %d, want 4", d)
-		}
-	})
+	}
 }
 
 // TestDeleteJournalOverflowArmsForceResync is the #5450 fail-on-revert guard: a
@@ -2824,76 +2882,96 @@ func TestRejournalTailFIFOPrependAndOverflow(t *testing.T) {
 func TestDeleteJournalOverflowArmsForceResync(t *testing.T) {
 	mk := func(n int) []byte { return encodeDeleteV4(deleteKeyN(n), 0, false) }
 
-	// rejournalTail WITHOUT overflow: fits within cap, drops nothing, must not
+	journals := frameJournals17110()
+	// rejournal WITHOUT overflow: fits within cap, drops nothing, must not
 	// arm the resync.
-	t.Run("rejournal_no_overflow_not_armed", func(t *testing.T) {
-		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-		ss.deleteJournalCap = 10
-		ss.deleteJournal = [][]byte{mk(1), mk(2)}
-		ss.rejournalTail([][]byte{mk(3), mk(4), mk(5)})
-		if ss.stats.DeletesDropped.Load() != 0 {
-			t.Fatalf("precondition: expected 0 dropped, got %d", ss.stats.DeletesDropped.Load())
-		}
-		if ss.forceResync.Load() {
-			t.Fatal("forceResync armed without any dropped deletes")
-		}
-	})
+	for _, jn := range journals {
+		t.Run(jn.name+"/rejournal_no_overflow_not_armed", func(t *testing.T) {
+			ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+			j := jn.journal(ss)
+			j.cap = 10
+			j.entries = [][]byte{mk(1), mk(2)}
+			if jn.name == "scoped" {
+				ss.rejournalScopedTail([][]byte{mk(3), mk(4), mk(5)})
+			} else {
+				ss.rejournalTail([][]byte{mk(3), mk(4), mk(5)})
+			}
+			if ss.stats.DeletesDropped.Load() != 0 {
+				t.Fatalf("precondition: expected 0 dropped, got %d", ss.stats.DeletesDropped.Load())
+			}
+			if ss.forceResync.Load() {
+				t.Fatal("forceResync armed without any dropped deletes")
+			}
+		})
 
-	// rejournalTail WITH overflow: exceeds cap, drops records, must arm the
-	// resync so the standby's reconcileStaleSessions runs on the next bulk.
-	t.Run("rejournal_overflow_arms", func(t *testing.T) {
-		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-		ss.deleteJournalCap = 2
-		ss.deleteJournal = [][]byte{mk(1), mk(2), mk(3)}
-		ss.rejournalTail([][]byte{mk(4), mk(5), mk(6)})
-		if ss.stats.DeletesDropped.Load() == 0 {
-			t.Fatal("precondition: expected drops on overflow, got 0")
-		}
-		if !ss.forceResync.Load() {
-			t.Fatal("forceResync NOT armed after rejournalTail dropped records (#5450 regression)")
-		}
-	})
+		// rejournal WITH overflow: exceeds cap, drops records, must arm
+		// the resync so the standby's reconcileStaleSessions runs on the
+		// next bulk.
+		t.Run(jn.name+"/rejournal_overflow_arms", func(t *testing.T) {
+			ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+			j := jn.journal(ss)
+			j.cap = 2
+			j.entries = [][]byte{mk(1), mk(2), mk(3)}
+			if jn.name == "scoped" {
+				ss.rejournalScopedTail([][]byte{mk(4), mk(5), mk(6)})
+			} else {
+				ss.rejournalTail([][]byte{mk(4), mk(5), mk(6)})
+			}
+			if ss.stats.DeletesDropped.Load() == 0 {
+				t.Fatal("precondition: expected drops on overflow, got 0")
+			}
+			if !ss.forceResync.Load() {
+				t.Fatal("forceResync NOT armed after rejournal dropped records (#5450 regression)")
+			}
+		})
 
-	// journalDelete WITH overflow (via QueueDeleteV4 while disconnected): the
-	// second drop site must arm the resync too.
-	t.Run("journal_delete_overflow_arms", func(t *testing.T) {
-		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-		ss.deleteJournalCap = 5
-		for i := 0; i < 8; i++ {
-			ss.QueueDeleteV4(dataplane.SessionKey{
-				SrcIP:    [4]byte{10, 0, 1, byte(i)},
-				Protocol: 6,
-				SrcPort:  uint16(1000 + i),
-				DstPort:  80,
-			}, false)
-		}
-		if ss.stats.DeletesDropped.Load() == 0 {
-			t.Fatal("precondition: expected drops after 8 deletes into cap-5 journal, got 0")
-		}
-		if !ss.forceResync.Load() {
-			t.Fatal("forceResync NOT armed after journalDelete evicted records (#5450 regression)")
-		}
-	})
+		// journal push WITH overflow: the push drop site must arm too.
+		// The bare leg drives the public QueueDeleteV4 path; the scoped
+		// leg drives journalScopedDelete directly (unlearned, so the
+		// post-append flush retains the debt).
+		t.Run(jn.name+"/journal_overflow_arms", func(t *testing.T) {
+			ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+			jn.journal(ss).cap = 5
+			for i := range 8 {
+				if jn.name == "scoped" {
+					jn.push(ss, mk(i))
+				} else {
+					ss.QueueDeleteV4(deleteKeyN(i), false)
+				}
+			}
+			if ss.stats.DeletesDropped.Load() == 0 {
+				t.Fatal("precondition: expected drops after 8 pushes into cap-5 journal, got 0")
+			}
+			if !ss.forceResync.Load() {
+				t.Fatal("forceResync NOT armed after journal evicted records (#5450 regression)")
+			}
+		})
 
-	// journalDelete WITHOUT overflow: within cap, drops nothing, must not arm.
-	t.Run("journal_delete_no_overflow_not_armed", func(t *testing.T) {
-		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-		ss.deleteJournalCap = 16
-		for i := 0; i < 4; i++ {
-			ss.QueueDeleteV4(dataplane.SessionKey{
-				SrcIP:    [4]byte{10, 0, 2, byte(i)},
-				Protocol: 6,
-				SrcPort:  uint16(2000 + i),
-				DstPort:  443,
-			}, false)
-		}
-		if ss.stats.DeletesDropped.Load() != 0 {
-			t.Fatalf("precondition: expected 0 dropped, got %d", ss.stats.DeletesDropped.Load())
-		}
-		if ss.forceResync.Load() {
-			t.Fatal("forceResync armed without any dropped deletes")
-		}
-	})
+		// journal push WITHOUT overflow: within cap, drops nothing, must
+		// not arm.
+		t.Run(jn.name+"/journal_no_overflow_not_armed", func(t *testing.T) {
+			ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+			jn.journal(ss).cap = 16
+			for i := range 4 {
+				if jn.name == "scoped" {
+					jn.push(ss, mk(10+i))
+				} else {
+					ss.QueueDeleteV4(dataplane.SessionKey{
+						SrcIP:    [4]byte{10, 0, 2, byte(i)},
+						Protocol: 6,
+						SrcPort:  uint16(2000 + i),
+						DstPort:  443,
+					}, false)
+				}
+			}
+			if ss.stats.DeletesDropped.Load() != 0 {
+				t.Fatalf("precondition: expected 0 dropped, got %d", ss.stats.DeletesDropped.Load())
+			}
+			if ss.forceResync.Load() {
+				t.Fatal("forceResync armed without any dropped deletes")
+			}
+		})
+	}
 }
 
 // bulkCaptureConn is a net.Conn stub for the #6081 forceResync consume-path
@@ -3048,8 +3126,8 @@ func TestForceResyncConsumeSweepReconcilesStandby(t *testing.T) {
 	// armDeleteResync). This is the genuine precondition the consume path exists
 	// to service.
 	mk := func(n int) []byte { return encodeDeleteV4(deleteKeyN(n), 0, false) }
-	prim.deleteJournalCap = 2
-	prim.deleteJournal = [][]byte{mk(1), mk(2), mk(3)}
+	prim.deleteJournal.cap = 2
+	prim.deleteJournal.entries = [][]byte{mk(1), mk(2), mk(3)}
 	prim.rejournalTail([][]byte{mk(4), mk(5), mk(6)})
 	if prim.stats.DeletesDropped.Load() == 0 {
 		t.Fatal("precondition: expected the overflow to drop records")
@@ -3167,7 +3245,7 @@ func TestDeleteJournalFlushAllFit(t *testing.T) {
 	const n = 4
 	for i := 0; i < n; i++ {
 		ss.deleteJournalMu.Lock()
-		ss.deleteJournal = append(ss.deleteJournal, encodeDeleteV4(deleteKeyN(i), 0, false))
+		ss.deleteJournal.entries = append(ss.deleteJournal.entries, encodeDeleteV4(deleteKeyN(i), 0, false))
 		ss.deleteJournalMu.Unlock()
 	}
 	ss.flushDeleteJournal()
@@ -3177,8 +3255,8 @@ func TestDeleteJournalFlushAllFit(t *testing.T) {
 	}
 	ss.deleteJournalMu.Lock()
 	defer ss.deleteJournalMu.Unlock()
-	if len(ss.deleteJournal) != 0 {
-		t.Fatalf("journal should be empty after a fully-flushed journal, got %d", len(ss.deleteJournal))
+	if len(ss.deleteJournal.entries) != 0 {
+		t.Fatalf("journal should be empty after a fully-flushed journal, got %d", len(ss.deleteJournal.entries))
 	}
 }
 
@@ -3197,7 +3275,7 @@ func TestDeleteJournalFlushOrderingWithQueuedSession(t *testing.T) {
 	ss.sendCh <- encodeSessionV4(key, val)
 	// Then flush a same-key delete.
 	ss.deleteJournalMu.Lock()
-	ss.deleteJournal = append(ss.deleteJournal, encodeDeleteV4(key, 0, false))
+	ss.deleteJournal.entries = append(ss.deleteJournal.entries, encodeDeleteV4(key, 0, false))
 	ss.deleteJournalMu.Unlock()
 	ss.flushDeleteJournal()
 

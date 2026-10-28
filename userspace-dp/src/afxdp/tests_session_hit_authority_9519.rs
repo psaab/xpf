@@ -2253,9 +2253,9 @@ fn an_owner_bare_syn_preserves_closing_pair_when_tuple_gate_busy_10886() {
     assert_eq!(copies[&forward].tcp_close_class, 1);
     assert_eq!(copies[&reverse].tcp_close_class, 1);
 }
-/// #13938 residual of #10636: the deferring lookup withheld only the
-/// FIN/RST close. Every other mutation inside
-/// `lookup_with_origin_deferring_close_expiry` still ran BEFORE the #9519
+/// #13938 residual of #10636: the former close-only deferring lookup
+/// withheld only the FIN/RST close (that dead mode was removed in
+/// #17092). Every other mutation inside it still ran BEFORE the #9519
 /// authority verdict: a foreign SYN-ACK "reply" promoted the OPENING pair
 /// (forward+reverse), queued an HA Update, and let the client's following
 /// ACK complete the handshake onto the 300s established window — although

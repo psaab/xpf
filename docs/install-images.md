@@ -735,10 +735,11 @@ the handshake.
 
 The gate is already wired, and it fails CLOSED rather than letting an operator
 discover this as a fabric that will not come up: `cluster.SessionSyncWireVersion`
-went 1 → 2, and `upgrade.GateMixedBaseSwap` matches the session-sync protocol
-EXACTLY, so a LANE-2 image-replace of the second node returns
-`SessionsSurvive=false` with `session-sync protocol differs (peer 1, new image
-2)`. `deploy_rolling()` therefore refuses the session-preserving path and tells
+went 1 → 2, and the mixed-base gate (`upgrade.GateProtocolCompat`, executed
+by `_gate_mixed_base`) matches the session-sync protocol
+EXACTLY, so a LANE-2 image-replace of the second node refuses with
+`session-sync protocol differs (peer 1, new image 2)`. `deploy_rolling()`
+therefore refuses the session-preserving path and tells
 you to replace both nodes.
 
 `CurrentHAProtocolVersion` is deliberately NOT bumped. Bumping it would
@@ -840,8 +841,8 @@ regression. It covers:
   throwaway key; SKIPs without minisign/gpg/apt-ftparchive);
 - `scripts/deploy/test_xpf_deploy_*.py` — the deployer's pure functions,
   NIC ordering, per-VM disks, and the **mixed-base HA safety gate**
-  (`_gate_mixed_base`, the Python mirror of `upgrade.GateMixedBaseSwap`)
-  with the same parity vectors as the Go test (#4211 H-24).
+  (`_gate_mixed_base`, the Python executor of `upgrade.GateProtocolCompat`)
+  pinned by the shared fixture `mixed_base_gate_fixture.json` (#17091).
 
 The incus/QEMU image boot matrix (`validate.py`) and the loss-cluster
 smokes need a hypervisor and are NOT part of `make selftest` — they have

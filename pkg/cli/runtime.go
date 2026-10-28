@@ -5,8 +5,7 @@
 // CLI-specific surface that lists exactly the methods pkg/cli/*.go
 // invokes via c.dp.*. This mirrors the pattern already shipped by
 // pkg/api (apiRuntimeDataPlane), pkg/fwdstatus (DataPlaneAccessor),
-// pkg/monitoriface (RuntimeDataPlane), and pkg/conntrack
-// (RuntimeDomainProvider).
+// pkg/monitoriface (RuntimeDataPlane).
 //
 // cliRuntime is a strict subset of dataplane.DataPlane. Every concrete
 // dataplane in the tree today (the legacy eBPF Manager, the userspace
@@ -86,28 +85,6 @@ type cliUserspaceStatusProvider interface {
 // potentially large control-socket read rather than periodic telemetry.
 type cliUserspaceFIBProvider interface {
 	DumpFIB() (uint32, []dpuserspace.FibRouteWire, error)
-}
-
-// cliUserspaceCrashProvider is the #7250 helper-crash accessor.
-//
-// SEPARATE from cliUserspaceStatusProvider rather than folded into it: the
-// crash record is Manager state that outlives the helper process, whereas
-// ProcessStatus is the helper's own published status and is CLEARED when the
-// helper dies. Widening the status interface would also have forced every
-// existing implementor — including test fakes — to grow a method they have no
-// use for.
-type cliUserspaceCrashProvider interface {
-	HelperCrashState() (dpuserspace.HelperCrashRecord, bool)
-}
-
-// cliUserspaceCrashHistoryProvider is the #8397 completed-episode accessor.
-//
-// Separate from cliUserspaceCrashProvider because the open crash record,
-// completed-episode ring, and cumulative unexpected-exit counter have distinct
-// lifetimes. A successful retry leaves the current episode open until its
-// quiet-window boundary; completed history is retained after that boundary.
-type cliUserspaceCrashHistoryProvider interface {
-	HelperCrashHistory() ([]dpuserspace.HelperCrashEpisode, int)
 }
 
 // cliUserspaceControlProvider extends the status provider with the

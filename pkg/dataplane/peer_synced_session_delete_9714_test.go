@@ -287,7 +287,7 @@ func TestTheNotFoundFallbackIsMarkedOnlyForClusterStale9714(t *testing.T) {
 		t.Fatalf("DeleteWithCompanionsV4 gc: %v", err)
 	}
 	if len(dp.peerSingleV4) != 1 || len(dp.singleV4) != 1 {
-		t.Errorf("a GC delete of a missing key must use the unmarked single-key delete; peer=%d unmarked=%d",
+		t.Errorf("an expiry (non-cluster-stale) delete of a missing key must use the unmarked single-key delete; peer=%d unmarked=%d",
 			len(dp.peerSingleV4), len(dp.singleV4))
 	}
 }

@@ -24,10 +24,9 @@ pub(super) fn owner_rg_kick(
     let kick = if export_req.protocol_version == 0 && !export_req.continuation {
         // Legacy raw callers intentionally omit the v2 marker. Preserve their
         // unpaged API while requiring the marker for every paged window.
-        guard.afxdp.kick_owner_rg_export(
+        guard.afxdp.kick_owner_rg_export_unpaged(
             &export_req.owner_rgs,
             export_req.max as usize,
-            false,
         )
     } else {
         guard.afxdp.kick_owner_rg_export_v2(

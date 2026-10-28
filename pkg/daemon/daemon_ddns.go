@@ -288,26 +288,16 @@ func (d *Daemon) buildLeaseSubnetRGMap(cfg *config.Config) []leaseSubnetRG {
 }
 
 // rgForInterfaces returns the redundancy group that owns the given DHCP-group
-// interfaces (#2664). An interface that is a RETH member maps to its
-// RedundancyGroup; the first RG-owned interface wins (a DHCP group binds to one
-// HA-owned segment in practice). Returns 0 when no interface is RG-owned (a
-// non-HA pool).
+// interfaces (#2664), via config.Config.InterfaceRefRG (#17086 SSOT). The
+// first RG-owned interface wins (a DHCP group binds to one HA-owned segment
+// in practice). Returns 0 when no interface is RG-owned (a non-HA pool).
 func rgForInterfaces(cfg *config.Config, ifaces []string) int {
 	if cfg == nil {
 		return 0
 	}
 	for _, name := range ifaces {
-		// The configured interface name may be the RETH logical name (reth0.0)
-		// or a unit form; match against the config's interface table by the
-		// base interface name.
-		base := name
-		if i := strings.IndexByte(base, '.'); i >= 0 {
-			base = base[:i]
-		}
-		if ifc, ok := cfg.Interfaces.Interfaces[base]; ok && ifc != nil {
-			if ifc.RedundancyGroup > 0 {
-				return ifc.RedundancyGroup
-			}
+		if rg := cfg.RefRG(name); rg > 0 {
+			return rg
 		}
 	}
 	return 0
