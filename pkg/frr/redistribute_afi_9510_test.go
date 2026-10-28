@@ -6,9 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"log/slog"
-	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,138 +93,328 @@ func TestResolveRedistributePolicyTermAddressFamily_9510(t *testing.T) {
 }
 
 // The filter passes a router it has no row for. So every call site's self
-// literal must have a row, and no call site may pass a non-literal self that
-// this scan would skip. The count check closes that gap.
+// must have a row, and no call site may pass a non-literal self that this
+// scan would skip. #17032: the census keys on the AFI type, not on wrapper
+// spelling. go/ast finds every call to a method whose parameter list
+// carries the redistribution self, regardless of whether the method is a
+// legacy wrapper (resolveRedistribute), a Cluster15158 production form,
+// or a terminal sink (redistributeEntriesAt) — the shapes the old regex
+// census keyed on literals and therefore could not see (an AFI-less
+// router added through resolveRedistributeCluster15158 or
+// redistributeEntriesAt stayed GREEN). A call is classified by the self
+// argument AT ITS DECLARED POSITION: a string literal is read directly;
+// an identifier must be the self parameter of its enclosing censused
+// definition, which is itself proven (in that definition's body) to
+// forward that parameter, or a pinned literal, into a censused callee.
+// Any other shape — unknown identifier, composite expression, missing
+// self argument, an enclosing definition outside the censused set —
+// fails closed. Completeness is pinned by counting the self-carrying
+// callee definitions themselves: adding a new wrapper or sink whose
+// signature carries a redistribution self changes the pin and fails
+// here until the callee set is extended.
 func TestRedistNodeAFICoversEveryCallSite_9510(t *testing.T) {
+	fset := token.NewFileSet()
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	callRE := regexp.MustCompile(`\.resolveRedistribute\(`)
-	litRE := regexp.MustCompile(`\.resolveRedistribute\([^,()]+,\s*[^,()]+,\s*"([a-z0-9]*)",`)
-	// #9666: IS-IS renders through resolveISISRedistribute, which takes the
-	// router's level rather than a self literal and hard-codes self "isis"
-	// into redistributeEntries. Its call sites count as "isis" ONLY if that
-	// hard-coding is proven below.
-	isisCallRE := regexp.MustCompile(`\.resolveISISRedistribute\(`)
-	isisSelfRE := regexp.MustCompile(`func \(m \*Manager\) resolveISISRedistribute\([^)]*\) string \{\s*return m\.resolveISISRedistributeCluster15158\([^,()]+,\s*[^,()]+,\s*[^,()]+,\s*[^,()]+,\s*false,`)
-	// #15156: the chain resolver forwards its self into
-	// redistChainEntries15156 exactly like the single-export wrappers.
-	// Its <2-defined fallback calls
-	// resolveRedistributeCluster15158(e, po, self, ...) — proven by
-	// chainSelfRE below, not a literal at the call site. (#16205
-	// deleted the dead non-cluster resolveRedistributeChain wrapper;
-	// the production chain entry is the Cluster15158 form.)
-	chainSelfRE := regexp.MustCompile(`resolveRedistributeCluster15158\(e, po, self,`)
-	// #15158: protocols_render*.go reaches the chain resolution
-	// through the cluster chain resolver, which forwards the same
-	// literal self. Count those calls with the same literal-self
-	// requirement. Its own fallback forwards self non-literally,
-	// proven by chainSelfRE above.
-	clusterChainCallRE := regexp.MustCompile(`\.resolveRedistributeChainCluster15158\([^,]+,\s*[^,]+,\s*"([a-z0-9]+)",`)
-	chainISISCallRE := regexp.MustCompile(`\.resolveISISRedistributeChain\(`)
-	clusterChainISISCallRE := regexp.MustCompile(`WriteString\(m\.resolveISISRedistributeChainCluster15158\(`)
-	// #15158: BGP bare-token redistribution renders through
-	// resolveRedistributeCluster15158 with literal self "bgp" at the
-	// render site; count it so the positive control still sees BGP.
-	bgpClusterCallRE := regexp.MustCompile(`WriteString\(m\.resolveRedistributeCluster15158\(e, policyOptions, "bgp",`)
-	// #12071: the QNH overlay generator reaches redistributeEntries through
-	// addExport, whose self parameter must pass through unchanged. Every
-	// addExport call must also pass a literal self this census can read.
-	// With the wrappers and this proven closure, any further caller is an
-	// unseen router whose AFI coverage this census cannot establish.
-	qnhCallRE := regexp.MustCompile(`addExport\(`)
-	qnhLitRE := regexp.MustCompile(`addExport\([^,()]+,\s*"([a-z0-9]*)",`)
-	qnhSelfRE := regexp.MustCompile(`addExport := func\(daemon, self,[^)]*\) \{(?s:.*?)m\.redistributeEntries\(export, fc\.PolicyOptions, self, scope\)`)
-	entriesCallRE := regexp.MustCompile(`\.redistributeEntries\(`)
-	calls, lits := 0, map[string]int{}
-	isisCalls, isisSelfProven, entriesCalls := 0, false, 0
-	chainSelfProven := false
-	qnhCalls, qnhLiteralCalls, qnhSelfProven := 0, 0, false
-	qnhLits := map[string]int{}
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
+	// selfPos[callee] is the parameter index of the redistribution self,
+	// or -1 for the ISIS/BGP-IPv6 forms whose self is a hard-coded
+	// literal inside the body (proven from each definition below;
+	// hardSelf maps them to the literal their sink call must carry).
+	selfPos := map[string]int{
+		"resolveRedistribute":                      2,
+		"resolveRedistributeCluster15158":          2,
+		"resolveRedistributeChainCluster15158":     2,
+		"resolveISISRedistribute":                  -1,
+		"resolveISISRedistributeCluster15158":      -1,
+		"resolveISISRedistributeChain":             -1,
+		"resolveISISRedistributeChainCluster15158": -1,
+		"resolveBGPIPv6Redistribute":               -1,
+		"resolveBGPIPv6RedistributeCluster15158":   -1,
+		"redistributeEntries":                      2,
+		"redistributeEntriesAt":                    2,
+		"redistChainEntries15156":                  2,
+		"redistBGPUnionEntries16868":               2,
+		"bgpPolicyRedistEntriesAt14586":            2,
+		"bgpChainRedistEntries16868":               2,
+		"redistOrChains16868":                      2,
+		"redistOrRouteMapName16868":                2,
+		"addExport":                                1, // forwarder closure (daemon, self, ...)
+		"addChain":                                 1, // forwarder closure (chain, self, node)
+	}
+	hardSelf := map[string]string{
+		"resolveISISRedistribute":                  "isis",
+		"resolveISISRedistributeCluster15158":      "isis",
+		"resolveISISRedistributeChain":             "isis",
+		"resolveISISRedistributeChainCluster15158": "isis",
+		"resolveBGPIPv6Redistribute":               "bgp",
+		"resolveBGPIPv6RedistributeCluster15158":   "bgp",
+	}
+	type defn struct {
+		name   string
+		params []string
+		body   *ast.BlockStmt
+		pos    token.Pos
+	}
+	defsByName := map[string][]*defn{}
+	// enclosing maps each definition body to its defn, so a call's
+	// identifier argument can be tied to the parameter of the function
+	// that textually contains it.
+	enclosing := map[*ast.BlockStmt]*defn{}
+	var allBodies []*ast.BlockStmt
+	seenLit := map[*ast.BlockStmt]bool{}
+	paramsOf := func(ft *ast.FuncType) []string {
+		var out []string
+		if ft == nil || ft.Params == nil {
+			return out
+		}
+		for _, field := range ft.Params.List {
+			if len(field.Names) == 0 {
+				out = append(out, "")
+				continue
+			}
+			for _, nm := range field.Names {
+				out = append(out, nm.Name)
+			}
+		}
+		return out
+	}
+	record := func(name string, ft *ast.FuncType, body *ast.BlockStmt, pos token.Pos) {
+		if body == nil {
+			return
+		}
+		allBodies = append(allBodies, body)
+		if _, ok := selfPos[name]; !ok {
+			return
+		}
+		d := &defn{name: name, params: paramsOf(ft), body: body, pos: pos}
+		defsByName[name] = append(defsByName[name], d)
+		enclosing[body] = d
+	}
+	for _, fname := range files {
+		if strings.HasSuffix(fname, "_test.go") {
 			continue
 		}
-		b, err := os.ReadFile(f)
+		f, err := parser.ParseFile(fset, fname, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// #15156 fallback inside resolveRedistributeChainCluster15158
-		// forwards self non-literally. That fallback reaches
-		// redistributeEntries via resolveRedistributeCluster15158,
-		// so it adds no literal-self call for this census to count;
-		// the production chain call sites in protocols_render*.go
-		// (matched by clusterChainCallRE with a literal self) are
-		// the counted entries. chainSelfRE proves the forwarding
-		// shape: if it does not match somewhere in the package,
-		// fail below rather than silently losing the proof.
-		chainSelfProven = chainSelfProven || chainSelfRE.Match(b)
-		calls += len(callRE.FindAllIndex(b, -1))
-		for _, mm := range litRE.FindAllSubmatch(b, -1) {
-			lits[string(mm[1])]++
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok {
+				record(fd.Name.Name, fd.Type, fd.Body, fd.Pos())
+			}
 		}
-		isisCalls += len(isisCallRE.FindAllIndex(b, -1))
-		isisSelfProven = isisSelfProven || isisSelfRE.Match(b)
-		qnhCalls += len(qnhCallRE.FindAllIndex(b, -1))
-		for _, mm := range qnhLitRE.FindAllSubmatch(b, -1) {
-			self := string(mm[1])
-			lits[self]++
-			qnhLits[self]++
-			qnhLiteralCalls++
+		// Every FuncLit body is a walk context; a FuncLit assigned to a
+		// bare identifier (addExport/addChain) is also a censused
+		// definition when its name is in the callee set.
+		ast.Inspect(f, func(n ast.Node) bool {
+			if fl, ok := n.(*ast.FuncLit); ok {
+				if fl.Body != nil && !seenLit[fl.Body] {
+					seenLit[fl.Body] = true
+					allBodies = append(allBodies, fl.Body)
+				}
+				return true
+			}
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+				return true
+			}
+			id, ok := as.Lhs[0].(*ast.Ident)
+			if !ok {
+				return true
+			}
+			fl, ok := as.Rhs[0].(*ast.FuncLit)
+			if !ok {
+				return true
+			}
+			if _, censused := selfPos[id.Name]; censused {
+				if _, dup := enclosing[fl.Body]; !dup {
+					d := &defn{name: id.Name, params: paramsOf(fl.Type), body: fl.Body, pos: fl.Pos()}
+					defsByName[id.Name] = append(defsByName[id.Name], d)
+					enclosing[fl.Body] = d
+				}
+			}
+			return true
+		})
+	}
+	calleeName := func(ce *ast.CallExpr) string {
+		if sel, ok := ce.Fun.(*ast.SelectorExpr); ok {
+			return sel.Sel.Name
 		}
-		qnhSelfProven = qnhSelfProven || qnhSelfRE.Match(b)
-		entriesCalls += len(entriesCallRE.FindAllIndex(b, -1))
-		for _, mm := range clusterChainCallRE.FindAllSubmatch(b, -1) {
-			lits[string(mm[1])]++
-			calls++
+		if id, ok := ce.Fun.(*ast.Ident); ok {
+			return id.Name
 		}
-		if n := len(chainISISCallRE.FindAllIndex(b, -1)); n > 0 {
-			calls += n
-			lits["isis"] += n
+		return ""
+	}
+	// literalAt returns the string literal at args[idx], if present.
+	literalAt := func(args []ast.Expr, idx int) (string, bool) {
+		if idx < 0 || idx >= len(args) {
+			return "", false
 		}
-		if n := len(clusterChainISISCallRE.FindAllIndex(b, -1)); n > 0 {
-			calls += n
-			lits["isis"] += n
+		bl, ok := args[idx].(*ast.BasicLit)
+		if !ok || bl.Kind != token.STRING {
+			return "", false
 		}
-		if n := len(bgpClusterCallRE.FindAllIndex(b, -1)); n > 0 {
-			calls += n
-			lits["bgp"] += n
+		s, err := strconv.Unquote(bl.Value)
+		return s, err == nil
+	}
+	// Sinks apply the AFI filter themselves; they need no forwarding
+	// proof. Their (self, node) callers are censused in Pass 2.
+	sinks := map[string]bool{"redistributeEntries": true, "redistributeEntriesAt": true}
+	// Pass 1 — definition proof: every non-sink censused definition must
+	// reach a censused callee carrying (a) its own self parameter
+	// unchanged, (b) the pinned literal for a hard-coded form, or (c)
+	// any literal (a wrapper pinning its own router, e.g.
+	// "bgp"/"bgp-ipv6"). A definition that reaches no censused callee,
+	// or reaches one only through an unproven expression, cannot be
+	// trusted as a forwarder.
+	for name, ds := range defsByName {
+		if sinks[name] {
+			continue
+		}
+		want := selfPos[name]
+		for _, d := range ds {
+			proven := false
+			ast.Inspect(d.body, func(n ast.Node) bool {
+				ce, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				inner := calleeName(ce)
+				ipos, ok := selfPos[inner]
+				if !ok || inner == name {
+					return true
+				}
+				if want < 0 {
+					// Hard-coded form: forward into its twin or carry
+					// the pinned literal into a sink.
+					if strings.HasPrefix(inner, name) {
+						proven = true
+						return true
+					}
+					if s, ok := literalAt(ce.Args, ipos); ok && s == hardSelf[name] {
+						proven = true
+					}
+					return true
+				}
+				if ipos < 0 {
+					proven = true // delegates to a hard-coded form
+					return true
+				}
+				if s, ok := literalAt(ce.Args, ipos); ok && s != "" {
+					proven = true
+					return true
+				}
+				if id, ok := ce.Args[ipos].(*ast.Ident); ok && want < len(d.params) && id.Name == d.params[want] {
+					proven = true
+				}
+				return true
+			})
+			if !proven {
+				p := fset.Position(d.pos)
+				t.Fatalf("%s (%s:%d): definition does not forward its self parameter or a pinned literal into a censused callee; the census cannot prove its router", name, filepath.Base(p.Filename), p.Line)
+			}
 		}
 	}
-	if isisCalls > 0 {
-		if !isisSelfProven {
-			t.Fatalf("found %d resolveISISRedistribute calls but could not prove it passes self \"isis\" to redistributeEntries", isisCalls)
+	// Pass 2 — call census: every call to a censused callee in every
+	// non-test body. Bodies are walked with their enclosing defn (nil
+	// for a non-censused function, where only literals may appear).
+	lits := map[string]int{}
+	type bodyCtx struct {
+		body *ast.BlockStmt
+		def  *defn
+	}
+	var ctxs []bodyCtx
+	// Walk every top-level function body, censused or not, plus the
+	// forwarder closure bodies recorded above.
+	seenBody := map[*ast.BlockStmt]bool{}
+	addCtx := func(b *ast.BlockStmt) {
+		if b == nil || seenBody[b] {
+			return
 		}
-		calls += isisCalls
-		lits["isis"] += isisCalls
+		seenBody[b] = true
+		ctxs = append(ctxs, bodyCtx{b, enclosing[b]})
 	}
-	if !chainSelfProven {
-		t.Fatalf("could not prove resolveRedistributeChainCluster15158 forwards its self argument non-literally into resolveRedistributeCluster15158; the #15156 chain fallback shape changed and this census cannot see its router")
+	for _, b := range allBodies {
+		addCtx(b)
 	}
-	if qnhCalls == 0 || !qnhSelfProven {
-		t.Fatalf("found %d QNH addExport calls but could not prove its self parameter reaches redistributeEntries", qnhCalls)
+	literalCalls := 0
+	for _, ctx := range ctxs {
+		ast.Inspect(ctx.body, func(n ast.Node) bool {
+			// Do not descend into a nested closure: its calls are
+			// visited under its own context (or, for an anonymous
+			// non-censused closure, identifiers cannot be proven).
+			if fl, ok := n.(*ast.FuncLit); ok && fl.Body != ctx.body {
+				return false // visited under its own context
+			}
+			ce, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			name := calleeName(ce)
+			ipos, ok := selfPos[name]
+			if !ok {
+				return true
+			}
+			p := fset.Position(ce.Pos())
+			where := filepath.Base(p.Filename) + ":" + strconv.Itoa(p.Line)
+			if ipos < 0 {
+				lits[hardSelf[name]]++
+				if hardSelf[name] == "bgp" {
+					// The BGP-IPv6 node itself: its sink carries the
+					// "bgp-ipv6" node literal (Pass 1 proved it).
+					lits["bgp-ipv6"]++
+				}
+				literalCalls++
+				return true
+			}
+			if name == "redistributeEntriesAt" {
+				if node, ok := literalAt(ce.Args, 3); ok && node != "" {
+					lits[node]++
+				}
+			}
+			if s, ok := literalAt(ce.Args, ipos); ok {
+				if s == "" {
+					t.Errorf("%s: call to %s passes an empty self literal; frrRedistNodeAFI has no row for it", where, name)
+					return true
+				}
+				lits[s]++
+				literalCalls++
+				return true
+			}
+			id, ok := ce.Args[ipos].(*ast.Ident)
+			if !ok {
+				t.Errorf("%s: call to %s passes a non-literal, non-identifier self; a call this census cannot read is a router the filter cannot see", where, name)
+				return true
+			}
+			// Identifier: proven only as the self parameter of the
+			// enclosing censused definition (Pass 1 proved that
+			// definition forwards it). Its literal is counted at the
+			// outermost literal call site, so nothing is added here.
+			if ctx.def == nil || selfPos[ctx.def.name] < 0 || selfPos[ctx.def.name] >= len(ctx.def.params) || ctx.def.params[selfPos[ctx.def.name]] != id.Name {
+				t.Errorf("%s: call to %s passes self via identifier %q, which is not the proven self parameter of its enclosing censused definition; a call this census cannot read is a router the filter cannot see", where, name, id.Name)
+			}
+			return true
+		})
 	}
-	if qnhLiteralCalls != qnhCalls {
-		t.Fatalf("found %d QNH addExport calls but %d with a literal self %v; a call this scan cannot read is a router the filter cannot see", qnhCalls, qnhLiteralCalls, qnhLits)
+	if literalCalls == 0 {
+		t.Fatal("census found no literal-self calls; it is not reading the production call sites")
 	}
-	if qnhLits["ospf"] == 0 || qnhLits["rip"] == 0 {
-		t.Errorf("QNH overlay caller positive control missing ospf/rip self literals: %v", qnhLits)
+	// Completeness pin: the censused callee definitions themselves,
+	// counted over declarations. Adding a new self-carrying wrapper or
+	// sink — or renaming one away — breaks the pin until this census
+	// is extended to classify it.
+	defCount := 0
+	for _, ds := range defsByName {
+		defCount += len(ds)
 	}
-	calls += qnhCalls
-	if entriesCalls != 3 {
-		t.Fatalf("redistributeEntries has %d callers, want exactly the wrappers plus the proven QNH overlay closure; another caller would be a router this census cannot see", entriesCalls)
+	if defCount != 19 {
+		t.Fatalf("census completeness pin: %d censused callee definitions, want 19 (%v); a self-carrying callee was added or removed without updating this census", defCount, defsByName)
 	}
-	n := 0
-	for _, c := range lits {
-		n += c
-	}
-	if calls == 0 || n != calls {
-		t.Fatalf("found %d resolveRedistribute calls but %d with a literal self %v; a call this scan cannot read is a router the filter cannot see", calls, n, lits)
-	}
-	// Positive control: the scan must see the five routers known to render
+	// Positive control: the scan must see the routers known to render
 	// redistribute today, or it is reading the wrong files.
-	for _, want := range []string{"ospf", "ospf6", "bgp", "rip", "isis"} {
+	for _, want := range []string{"ospf", "ospf6", "bgp", "rip", "isis", "bgp-ipv6"} {
 		if lits[want] == 0 {
 			t.Errorf("scan did not find the %q call site; census is blind", want)
 		}

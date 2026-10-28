@@ -187,8 +187,7 @@ func TestRESTConnBoundSharedAcrossPlanes16081(t *testing.T) {
 	apiMaxConnsTotal = 2
 	t.Cleanup(func() { apiMaxConnsTotal = orig })
 
-	s := NewServer(Config{Addr: "127.0.0.1:0", TLS: true, HTTPSAddr: "127.0.0.1:0"})
-	s.SetTLSCertDirForTest(t.TempDir())
+	s := NewServer(Config{Addr: "127.0.0.1:0", TLS: true, HTTPSAddr: "127.0.0.1:0", TLSSelfSignedDir: t.TempDir()})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); s.Wait() })
 	if err := s.Start(ctx); err != nil {
