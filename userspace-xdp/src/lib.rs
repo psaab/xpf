@@ -803,8 +803,10 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // over `land_disposition_for_packet` (here + ctrl-disabled) LLVM
     // duplicated the WG-key construction and both map walks under
     // every calling state. The outlined gate shares this work across
-    // paths; the dated #15854 verifier results live in
-    // docs/log/15854.md.
+    // paths; the current measurement is in
+    // pkg/dataplane/userspace_xdp_gate_verdict.json, with object/source
+    // hashes in pkg/dataplane/userspace_xdp_manifest.json. Regenerate with
+    // `make generate-userspace-xdp` (which runs cmd/shimverify).
     if land_gate(&parsed, ingress_ifindex) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_LAND_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
@@ -864,8 +866,10 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // the packed trace callee under each calling state. Sharing the call
     // preserves each failure's stage, reason, trace slot (u32::MAX for a
     // missing binding, resolved slot otherwise), and degraded-local
-    // pass/drop decision. Historical measurements live in
-    // docs/log/15854.md.
+    // pass/drop decision. The current measurement is in
+    // pkg/dataplane/userspace_xdp_gate_verdict.json, with hashes in
+    // pkg/dataplane/userspace_xdp_manifest.json; regenerate with
+    // `make generate-userspace-xdp` (which runs cmd/shimverify).
     let ready = binding_ready_slot(ingress_ifindex, rx_queue, ctrl.heartbeat_timeout_ms);
     let ready_code = (ready >> 32) as u32;
     let ready_slot = ready as u32;
@@ -2492,9 +2496,10 @@ fn parse_ipv6(
         parse_l4(data, data_end, offset, protocol, data_end)?;
     // #10662: keep the capture-bound L4 parse EXACTLY as before. Passing a
     // declared bound through parse_l4 multiplied verifier states past the
-    // kernel cap while the control build fit comfortably (dated figures in
-    // #10998, not here: absolute counts rot every merge). This single
-    // post-check compares only the consumed packet-relative L4 end; the
+    // kernel cap while the control build fit comfortably (current figures
+    // in pkg/dataplane/userspace_xdp_gate_verdict.json, with hashes in
+    // pkg/dataplane/userspace_xdp_manifest.json; regenerate with
+    // `make generate-userspace-xdp`, which runs cmd/shimverify). This single
     // scalar truncation verdict never becomes a new packet bound or enters
     // the heavy parse.
     let declared_end = ipv6_declared_end(l3_offset as usize, payload_len);
@@ -2618,8 +2623,11 @@ fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
 // inline matches duplicated the key construction and both map walks under
 // every calling state. One outlined call per path shares the work, in the
 // `record_trace_packed` (#15645) shape: the verifier walks the gate once.
-// Historical #15854 verifier results live in docs/log/15854.md. Do not
-// re-inline without re-measuring through cmd/shimverify.
+// Current verifier results are in pkg/dataplane/userspace_xdp_gate_verdict.json,
+// with object/source hashes in pkg/dataplane/userspace_xdp_manifest.json.
+// Regenerate with `make generate-userspace-xdp` (which runs cmd/shimverify).
+// docs/log/15854.md holds the dated history only. Do not re-inline without
+// re-measuring through cmd/shimverify.
 #[inline(never)]
 fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     if !is_land(&pkt.src_addr, &pkt.dst_addr) {
@@ -2657,8 +2665,11 @@ fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
 // shape): this resolver's WG-key construction and two map reads
 // were inlined at both call sites (WG steer + worker claim) and
 // re-walked under every calling state. One subprogram walk instead;
-// measured with the LAND/binding outlines in docs/log/15854.md.
-// Do not re-inline without re-measuring through cmd/shimverify.
+// measured with the LAND/binding outlines. Current results are in
+// pkg/dataplane/userspace_xdp_gate_verdict.json (hashes in
+// pkg/dataplane/userspace_xdp_manifest.json); regenerate with
+// `make generate-userspace-xdp` (which runs cmd/shimverify). Do not re-inline
+// without re-measuring through cmd/shimverify.
 #[inline(never)]
 fn wg_zone_admits_packet(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     if pkt.protocol != PROTO_UDP || pkt.flow_dst_port == 0 {
@@ -2912,7 +2923,10 @@ fn first_fragment_l4(
 /// sent someone to reason against a moved figure, which is most of what that
 /// issue cost. State relationships that do not move instead: carrying fits,
 /// consuming does not, and the install-blocking ceiling is the 15% floor, not
-/// the 1M cap. The current dated measurement lives in #10998, not here.
+/// the 1M cap. Current results are in
+/// pkg/dataplane/userspace_xdp_gate_verdict.json (object/source hashes in
+/// pkg/dataplane/userspace_xdp_manifest.json); regenerate with
+/// `make generate-userspace-xdp` (which runs cmd/shimverify).
 /// `declared_end` (#9901, F-075) is the caller's bound on how far L4 reads
 /// may go — the IPv4 declared-datagram end, a pure scalar. Every arm below
 /// scalar-checks its span against it BEFORE reading; the reads themselves
