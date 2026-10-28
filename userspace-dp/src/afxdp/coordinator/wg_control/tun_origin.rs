@@ -805,19 +805,11 @@ mod tests {
         });
         // Route the peer destination out that endpoint-less tunnel iface.
         snap.routes.push(crate::RouteSnapshot {
-            reject: false,
-            cluster_terminal: false,
             table: "inet.0".to_string(),
             family: "inet".to_string(),
             destination: "192.0.2.0/24".to_string(),
-            next_hop_weights: vec![],
             next_hops: vec!["@st0.0".to_string()],
-            discard: false,
-            next_table: String::new(),
-            preference: 0,
-            rule_priority: 0,
-            mtu: 0,
-            next_table_route: false,
+            ..Default::default()
         });
         let forwarding = build_forwarding_state(&snap);
         // Preconditions: 500 really is a tunnel interface with no endpoint
