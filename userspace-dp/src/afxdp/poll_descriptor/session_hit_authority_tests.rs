@@ -663,6 +663,264 @@ fn foreign_hit_verdict_uses_descriptor_time_12868() {
     ));
 }
 
+// ===== #17027 verdict cells: the judged source drives the verdict =====
+//
+// One ICMP scenario, three verdicts. Zone-pair permits name only the pre-SNAT
+// original (10.0.0.1); the wire source (203.0.113.10) falls to default deny.
+// An unrelated typed rule arms the owner forward ICMP check.
+
+fn snat_verdict_forwarding() -> ForwardingState {
+    let mut snapshot = policy_deny_snapshot();
+    snapshot.policies.retain(|p| p.name != "allow-other");
+    snapshot.policies.push(PolicyRuleSnapshot {
+        name: "typed-guard".into(),
+        from_zone: "dmz".into(),
+        to_zone: "lan".into(),
+        source_addresses: vec!["any".into()],
+        destination_addresses: vec!["any".into()],
+        applications: vec!["junos-icmp-ping".into()],
+        application_terms: vec![crate::PolicyApplicationSnapshot {
+            name: "junos-icmp-ping".into(),
+            protocol: "icmp".into(),
+            source_port: String::new(),
+            destination_port: String::new(),
+            icmp_type: Some(8),
+            icmp_code: None,
+            inactivity_timeout: None,
+        }],
+        action: "permit".into(),
+        ..Default::default()
+    });
+    for (name, from_zone) in [("allow-lan-orig", "lan"), ("allow-dmz-orig", "dmz")] {
+        snapshot.policies.push(PolicyRuleSnapshot {
+            name: name.into(),
+            from_zone: from_zone.into(),
+            to_zone: "wan".into(),
+            source_addresses: vec!["10.0.0.1/32".into()],
+            destination_addresses: vec!["any".into()],
+            applications: vec!["any".into()],
+            action: "permit".into(),
+            ..Default::default()
+        });
+    }
+    let fw = build_forwarding_state(&snapshot);
+    assert!(
+        fw.policy.icmp_packet_verdict_may_depend_on_type(PROTO_ICMP),
+        "fixture must arm the type-dependent owner check"
+    );
+    fw
+}
+
+fn snat_verdict_flow() -> SessionFlow {
+    let src_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+    let dst_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1));
+    SessionFlow {
+        src_ip,
+        dst_ip,
+        forward_key: crate::session::SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: PROTO_ICMP,
+            src_ip,
+            dst_ip,
+            src_port: 0,
+            dst_port: 0,
+            discriminator: crate::session::TunnelDiscriminator::None,
+            routing_domain: 0,
+        },
+    }
+}
+
+fn snat_verdict_alias() -> crate::session::SessionKey {
+    crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
+        src_port: 0,
+        dst_port: 0,
+        discriminator: crate::session::TunnelDiscriminator::None,
+        routing_domain: 0,
+    }
+}
+
+fn snat_verdict_frame(src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
+    crate::afxdp::tests_support::build_icmp_echo_frame_v4(
+        src,
+        dst,
+        64,
+        crate::afxdp::tests_support::TEST_LAN_MAC,
+    )
+}
+
+#[test]
+fn hit_policy_owner_forward_icmp_judged_source_17027() {
+    let fw = snat_verdict_forwarding();
+    let metadata = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
+    let flow = snat_verdict_flow();
+    let alias = snat_verdict_alias();
+    let frame = snat_verdict_frame(
+        Ipv4Addr::new(203, 0, 113, 10),
+        Ipv4Addr::new(172, 16, 0, 1),
+    );
+    let decision = forward_decision();
+    assert_eq!(
+        owner_hit_icmp_verdict(
+            &fw,
+            &metadata,
+            decision,
+            &flow,
+            icmp_meta(),
+            &frame,
+            SCHED_RECEIPT_NS,
+            Some(&alias),
+        ),
+        Some(OwnerHitIcmpVerdict::Forward),
+        "forward ICMP on the pre-SNAT original must permit"
+    );
+    match owner_hit_icmp_verdict(
+        &fw,
+        &metadata,
+        decision,
+        &flow,
+        icmp_meta(),
+        &frame,
+        SCHED_RECEIPT_NS,
+        None,
+    ) {
+        Some(OwnerHitIcmpVerdict::Drop(deny)) => assert_eq!(
+            (deny.judged_from_zone, deny.judged_to_zone),
+            (TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+            "wire-source deny must carry the judged lan->wan pair"
+        ),
+        other => panic!("forward ICMP on the wire source must drop, got {other:?}"),
+    }
+}
+
+#[test]
+fn hit_policy_owner_reverse_icmp_judged_source_17027() {
+    let fw = snat_verdict_forwarding();
+    let mut metadata = session(TEST_LAN_ZONE_ID, LAN_A, 0, true);
+    metadata.egress_zone = TEST_WAN_ZONE_ID;
+    let flow = SessionFlow {
+        src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        forward_key: snat_verdict_flow().forward_key,
+    };
+    let alias = snat_verdict_alias();
+    let frame = snat_verdict_frame(
+        Ipv4Addr::new(172, 16, 0, 1),
+        Ipv4Addr::new(10, 0, 0, 1),
+    );
+    let decision = forward_decision();
+    for judged in [Some(&alias), None] {
+        match owner_hit_icmp_verdict(
+            &fw,
+            &metadata,
+            decision,
+            &flow,
+            icmp_meta(),
+            &frame,
+            SCHED_RECEIPT_NS,
+            judged,
+        ) {
+            Some(OwnerHitIcmpVerdict::Drop(deny)) => assert_eq!(
+                (deny.judged_from_zone, deny.judged_to_zone),
+                (TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID),
+                "reverse ICMP must judge the wire responder regardless of the alias"
+            ),
+            other => panic!("reverse ICMP with wire responder source must drop, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn hit_policy_foreign_judged_source_17027() {
+    let fw = snat_verdict_forwarding();
+    let flow = snat_verdict_flow();
+    let alias = snat_verdict_alias();
+    let frame = snat_verdict_frame(
+        Ipv4Addr::new(203, 0, 113, 10),
+        Ipv4Addr::new(172, 16, 0, 1),
+    );
+    let decision = forward_decision();
+    let sessions = SessionTable::new();
+    let key = flow.forward_key.clone();
+    let forward_meta = session(TEST_LAN_ZONE_ID, LAN_A, 0, false);
+    assert!(
+        matches!(
+            foreign_hit_verdict(
+                &fw,
+                &sessions,
+                &key,
+                &forward_meta,
+                decision,
+                &flow,
+                icmp_meta(),
+                &frame,
+                TEST_DMZ_ZONE_ID,
+                false,
+                SCHED_RECEIPT_NS,
+                Some(&alias),
+            ),
+            ForeignHitVerdict::Forward
+        ),
+        "foreign FORWARD must judge the pre-SNAT original"
+    );
+    match foreign_hit_verdict(
+        &fw,
+        &sessions,
+        &key,
+        &forward_meta,
+        decision,
+        &flow,
+        icmp_meta(),
+        &frame,
+        TEST_DMZ_ZONE_ID,
+        false,
+        SCHED_RECEIPT_NS,
+        None,
+    ) {
+        ForeignHitVerdict::Drop(deny) => assert_eq!(
+            (deny.judged_from_zone, deny.judged_to_zone),
+            (TEST_DMZ_ZONE_ID, TEST_WAN_ZONE_ID),
+            "foreign forward wire deny must carry the judged dmz->wan pair"
+        ),
+        _ => panic!("foreign forward on the wire source must drop"),
+    }
+    let mut reverse_meta = session(TEST_LAN_ZONE_ID, LAN_A, 0, true);
+    reverse_meta.egress_zone = TEST_WAN_ZONE_ID;
+    let reverse_flow = SessionFlow {
+        src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        forward_key: flow.forward_key.clone(),
+    };
+    let reverse_frame = snat_verdict_frame(
+        Ipv4Addr::new(172, 16, 0, 1),
+        Ipv4Addr::new(10, 0, 0, 1),
+    );
+    match foreign_hit_verdict(
+        &fw,
+        &sessions,
+        &key,
+        &reverse_meta,
+        decision,
+        &reverse_flow,
+        icmp_meta(),
+        &reverse_frame,
+        TEST_DMZ_ZONE_ID,
+        false,
+        SCHED_RECEIPT_NS,
+        Some(&alias),
+    ) {
+        ForeignHitVerdict::Drop(deny) => assert_eq!(
+            (deny.judged_from_zone, deny.judged_to_zone),
+            (TEST_DMZ_ZONE_ID, TEST_WAN_ZONE_ID),
+            "foreign REVERSE must judge the wire responder, not the alias"
+        ),
+        _ => panic!("foreign reverse must judge the wire responder and drop"),
+    }
+}
+
 #[test]
 fn drop_foreign_knob_turns_a_permitted_foreign_hit_into_a_drop_16044() {
     // Same fixture as foreign_hit_verdict_uses_descriptor_time_12868: at

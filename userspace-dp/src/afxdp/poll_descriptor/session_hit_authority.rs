@@ -107,10 +107,12 @@
 //!   `FabricRedirect` is the sole exception — its stored egress names
 //!   the fabric transport, so the recorded `metadata.egress_zone`
 //!   remains the judged to-zone (#7770).
-//! * REVERSE — the same live pair on the WIRE destination. A reply's only destination
-//!   translation is an un-SNAT, which admission never applies to a new flow;
-//!   judging the un-translated client would let a foreign zone reach an internal
-//!   host through a pool address no policy names.
+//! * REVERSE — the reverse pair judges the wire responder source
+//!   (`flow.src_ip`), never the authenticated forward alias, and the WIRE
+//!   destination. A reply's only destination translation is an un-SNAT, which
+//!   admission never applies to a new flow; judging the un-translated client
+//!   would let a foreign zone reach an internal host through an unnamed pool
+//!   address.
 //! * HOST-BOUND (`LocalDelivery`) — passed through here and judged downstream by
 //!   the host-inbound gate and `junos-host` policy of the ARRIVAL zone, which is
 //!   where host-bound authority lives.
@@ -277,11 +279,10 @@ pub(super) enum OwnerHitIcmpVerdict {
     Drop(HitPolicyDeny),
 }
 
-/// #17027: `judged_source` is the authenticated pre-SNAT source the
-/// caller resolved for this hit (the canonical key, or the resolver's
-/// `source_nat_validation_key` for a translated alias). `None` means
-/// the wire tuple IS the original (no translation to undo), so the
-/// flow's own source is judged.
+/// #17027: `judged_source` is the authenticated pre-SNAT source the caller
+/// resolved for a FORWARD hit (the canonical key, or the resolver's
+/// `source_nat_validation_key` for a translated alias). Reverse ICMP requests
+/// are judged on their wire responder instead, regardless of this alias.
 #[cold]
 #[inline(never)]
 pub(super) fn owner_hit_icmp_verdict(
@@ -299,7 +300,13 @@ pub(super) fn owner_hit_icmp_verdict(
     if decision.resolution.disposition == ForwardingDisposition::LocalDelivery {
         return None;
     }
-    let source = judged_source_or_wire(judged_source, flow);
+    let source = if metadata.is_reverse {
+        // #10637/#17027: reverse requests judge the REVERSE pair on wire tuples;
+        // the wire source is the responder, never the translated forward alias.
+        JudgedSource::new(flow.src_ip, flow.forward_key.src_port)
+    } else {
+        judged_source_or_wire(judged_source, flow)
+    };
     // Reverse ICMP requests are new queries, even when no configured rule
     // constrains the type. The default-deny reverse pair is still policy and
     // must be consulted; only actual reply types coast on the session.
@@ -370,11 +377,10 @@ pub(super) fn owner_hit_icmp_verdict(
     })
 }
 
-/// The source the established-hit query judges: the caller's
-/// authenticated pre-SNAT key when it supplied one, else the wire
-/// flow's own source (no translation to undo). Reverse hits always
-/// judge the wire source — their packet is a reply whose source is
-/// the responder, never a translated forward alias (#17027).
+/// The source the FORWARD established-hit query judges: the caller's
+/// authenticated pre-SNAT key when it supplied one, else the wire flow's own
+/// source (no translation to undo). Reverse callers bypass this helper and
+/// select the responder's wire source (#17027).
 #[inline]
 fn judged_source_or_wire(key: Option<&SessionKey>, flow: &SessionFlow) -> JudgedSource {
     match key {

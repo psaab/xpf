@@ -22,13 +22,13 @@
 //!   ifindex (#9384/#13924): a commit that moves the egress interface
 //!   into a denying zone is caught on the next hit. This is the sole
 //!   copy of that rule in the established-hit path.
-//! * **Source:** policy runs after destination NAT and BEFORE source
-//!   NAT (Junos order, #9382), so the judged source is always the
-//!   pre-SNAT original the caller authenticated — the canonical key
-//!   for a stale entry, the resolver's `source_nat_validation_key`
-//!   for a sessionless/foreign alias (#12867). Callers resolve that
-//!   choice; the builder receives the finished `(src_ip, src_port)`
-//!   and cannot fall back to the wire tuple on its own.
+//! * **Source:** forward policy runs after destination NAT and BEFORE source
+//!   NAT (Junos order), so the forward query's judged source is the pre-SNAT
+//!   original the caller authenticated — the canonical key for a stale entry,
+//!   the resolver's `source_nat_validation_key` for a sessionless/foreign alias
+//!   (#12867). `ReverseWire` instead judges the packet's wire responder, never
+//!   the translated forward alias. Callers resolve the choice; the builder
+//!   receives the finished `(src_ip, src_port)` and cannot substitute a tuple.
 //! * **Destination:** `ForwardPostDnat` judges the post-translation
 //!   tuple (`nat.rewrite_dst` / `rewrite_dst_port`, #9382);
 //!   `ReverseWire` judges the WIRE destination — a reply's only
@@ -104,12 +104,12 @@ pub(super) fn hit_egress_zone_for(
 /// Build the one established-hit zone-policy query.
 ///
 /// `from` selects a live-ifindex resolution, a recorded zone, or an
-/// already-resolved zone id (the foreign arrival); `source` is the
-/// authenticated pre-SNAT tuple; `direction` picks the post-DNAT or
-/// wire destination; `wire_dst`/`wire_dst_port` are the flow's wire
-/// destination (the `ReverseWire` destination and the `ForwardPostDnat`
-/// fallback); `protocol`/`icmp`/`now_ns` are the judged protocol, the
-/// packet's ICMP selector (or `None` for the frame-independent
+/// already-resolved zone id (the foreign arrival); `source` is the selected
+/// judged tuple (pre-SNAT original for forward, wire responder for reverse);
+/// `direction` picks the post-DNAT or wire destination; `wire_dst`/
+/// `wire_dst_port` are the flow's wire destination (the reverse destination
+/// and the forward fallback); `protocol`/`icmp`/`now_ns` are the judged
+/// protocol, the packet's ICMP selector (or `None` for frame-independent
 /// re-derivation) and the packet clock.
 ///
 /// The revalidation caller keeps its `Decline` arms (no egress

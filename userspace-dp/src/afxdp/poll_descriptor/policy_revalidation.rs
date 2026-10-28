@@ -2905,15 +2905,9 @@ fn zone_policy_deny_on_session_hit(
     // (from lan, to 0). A recorded 0 evaluates exactly as the live 0 it
     // replaces (default policy, #3110), so entries that were never adjudicated
     // keep today's verdict.
-    // #17027: the to-zone rule itself lives in `hit_policy::hit_egress_zone_for`
-    // (the sole copy); this site still resolves its from-zone through the
-    // ledger walk below because its Decline arms key off that walk, then
-    // discards the walk's to-zone half in favour of the shared rule.
-    let to_id = super::hit_policy::hit_egress_zone_for(
-        forwarding,
-        input.metadata.egress_zone,
-        input.decision,
-    );
+    // #17027: the shared query builder applies `hit_policy::hit_egress_zone_for`
+    // as the sole to-zone rule. This site resolves its from-zone through the
+    // ledger walk below because the Decline arms depend on that walk.
     let (from_id, _live_to_id) = match input.from_source {
         FromZoneSource::LiveIfindex { ifindex, vlan } => {
             let arrival_logical =
@@ -3038,7 +3032,6 @@ fn zone_policy_deny_on_session_hit(
         None,
         input.now_ns,
     );
-    debug_assert_eq!(query.to_id, to_id, "#17027: builder and ledger walk must agree on the to-zone");
     // #9381: the revoke predicate is PERMIT-or-not, mirroring admission.
     // `permits` spells it positively, so `Reject` and any future action
     // fail closed instead of inheriting the permit arm.
