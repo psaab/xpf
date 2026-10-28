@@ -109,6 +109,9 @@ pub(in crate::afxdp) fn reap_tx_completions(
         &binding.live,
         shared_recycles,
         &mut binding.timers,
+        &mut binding.tx_counters,
+        &mut binding.flow.flow_cache,
+        &mut binding.cos.cos_interfaces,
     )
 }
 
@@ -125,6 +128,9 @@ pub(in crate::afxdp) fn reap_tx_completions_fields(
     live: &BindingLiveState,
     shared_recycles: &mut Vec<(u32, u64)>,
     timers: &mut WorkerTimers,
+    tx_counters: &mut crate::afxdp::worker::WorkerTxCounters,
+    flow_cache: &mut crate::afxdp::FlowCache,
+    cos_interfaces: &mut crate::afxdp::FastMap<i32, crate::afxdp::types::CoSInterfaceRuntime>,
 ) -> u32 {
     // #9900 F-092: NO `outstanding_tx == 0` early-return — it hid skew
     // permanently (a completion ring with entries at gauge 0 never drained).
@@ -196,7 +202,13 @@ pub(in crate::afxdp) fn reap_tx_completions_fields(
     telemetry.dbg_completions_reaped += reaped as u64;
     live.tx_completions
         .fetch_add(reaped as u64, Ordering::Relaxed);
-    crate::afxdp::binding_state::skip_binding_debug_state(timers);
+    crate::afxdp::binding_state::publish_binding_debug_state_fields(
+        timers,
+        live,
+        tx_counters,
+        flow_cache,
+        cos_interfaces,
+    );
     reaped
 }
 
@@ -311,6 +323,7 @@ pub(in crate::afxdp) fn drain_pending_fill(binding: &mut BindingWorker, now_ns: 
     {
         maybe_wake_rx(binding, true, now_ns);
     }
+    update_binding_debug_state(binding);
     true
 }
 
@@ -910,5 +923,47 @@ mod tests {
             FILL_INVALID_TOTAL.load(Ordering::Relaxed),
             invalid_before + 1
         );
+    }
+
+    #[test]
+    fn drain_pending_fill_publishes_debug_state_on_success_17186() {
+        // Parent called update_binding_debug_state at the tail of every
+        // successful fill drain. Seed the cadence counter just below the
+        // mask so this drain's publish fires, and a pending counter that
+        // only the publish flushes.
+        let mut binding = BindingWorker::new_for_mirror_test(7, 1, 11, 0);
+        binding.timers.debug_state_counter = crate::afxdp::binding_state::DEBUG_STATE_PUBLISH_MASK;
+        binding.tx_counters.pending_direct_tx_packets = 3;
+        binding.tx_pipeline.pending_fill_frames.push_back(0);
+        assert!(drain_pending_fill(&mut binding, monotonic_nanos()));
+        assert_eq!(
+            binding.live.direct_tx_packets.load(Ordering::Relaxed),
+            3,
+            "successful fill drain must publish debug state (parent cadence)"
+        );
+        assert_eq!(binding.tx_counters.pending_direct_tx_packets, 0);
+    }
+
+    #[test]
+    fn reap_fields_publishes_debug_state_at_cadence_17186() {
+        // The fields reap must publish (not merely skip) when the cadence
+        // fires: seed counter at the mask boundary and a pending counter.
+        let _counter_lock = COUNTER_TEST_LOCK.lock().expect("counter test lock");
+        let mut binding = BindingWorker::new_for_mirror_test(7, 1, 11, 0);
+        binding.timers.debug_state_counter = crate::afxdp::binding_state::DEBUG_STATE_PUBLISH_MASK;
+        binding.tx_counters.pending_direct_tx_packets = 5;
+        binding.tx_pipeline.outstanding_tx = 1;
+        let held = binding.tx_pipeline.free_tx_frames.pop_front().unwrap();
+        binding.tx_pipeline.in_flight_untracked_tx.insert(held);
+        binding.xsk.device.push_comp_for_test(held);
+        let mut shared = Vec::new();
+        let reaped = reap_tx_completions(&mut binding, &mut shared);
+        assert_eq!(reaped, 1);
+        assert_eq!(
+            binding.live.direct_tx_packets.load(Ordering::Relaxed),
+            5,
+            "fields reap must publish debug state at cadence, not skip it"
+        );
+        assert_eq!(binding.tx_counters.pending_direct_tx_packets, 0);
     }
 }

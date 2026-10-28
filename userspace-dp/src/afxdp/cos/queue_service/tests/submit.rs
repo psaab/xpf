@@ -1199,3 +1199,105 @@ fn remove_dropped_prepared_snapshots_sorts_phase_order_15949() {
         "survivor snapshot (orig pos 1) must remain; unsorted removal would delete it"
     );
 }
+
+// ===== #17186 settle-miss ownership (queue gone after kernel commit) =====
+// These construct the miss directly (the production arms are unreachable
+// with a live &mut BindingWorker, so the helpers they delegate to are the
+// testable surface). FAIL-ON-REVERT: restoring the old subtract-back /
+// scratch-leaving arms makes the tracker/suffix/gauge assertions RED.
+
+#[test]
+fn settle_miss_local_fifo_records_prefix_no_suffix_recycle_17186() {
+    let mut scratch = vec![
+        ExactLocalScratchTxRequest { offset: 64, len: 10 },
+        ExactLocalScratchTxRequest { offset: 128, len: 10 },
+        ExactLocalScratchTxRequest { offset: 192, len: 10 },
+    ];
+    let mut untracked = crate::afxdp::FastSet::default();
+    let mut free_frames: VecDeque<u64> = VecDeque::new();
+    settle_exact_local_fifo_submission_queue_gone(&mut scratch, &mut untracked, 1);
+    assert!(scratch.is_empty(), "miss must clear the scratch");
+    assert!(untracked.contains(&64), "kernel-owned prefix must be tracked");
+    assert!(!untracked.contains(&128) && !untracked.contains(&192));
+    assert!(free_frames.is_empty(), "FIFO suffix copies are not recycled here");
+    // Gauge invariant is caller-side: outstanding stays at inserted (1),
+    // drained later by reap; no subtract happens in the helper.
+}
+
+#[test]
+fn settle_miss_local_flow_fair_records_prefix_recycles_suffix_17186() {
+    let mk = |b: u8| TxRequest {
+        bytes: vec![b].into(),
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: Some(0),
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: 0,
+    };
+    let mut scratch = vec![(64u64, mk(1)), (128, mk(2)), (192, mk(3))];
+    let mut free_frames: VecDeque<u64> = VecDeque::new();
+    let mut untracked = crate::afxdp::FastSet::default();
+    settle_exact_local_scratch_submission_flow_fair_queue_gone(
+        &mut free_frames,
+        &mut scratch,
+        &mut untracked,
+        1,
+    );
+    assert!(scratch.is_empty());
+    assert!(untracked.contains(&64), "inserted prefix recorded");
+    assert!(!untracked.contains(&128) && !untracked.contains(&192));
+    assert_eq!(free_frames, VecDeque::from([128, 192]), "suffix offsets recycled, no leak");
+}
+
+#[test]
+fn settle_miss_prepared_fifo_clears_scratch_17186() {
+    let mut scratch = vec![
+        ExactPreparedScratchTxRequest { offset: 64, len: 10 },
+        ExactPreparedScratchTxRequest { offset: 128, len: 10 },
+    ];
+    settle_exact_prepared_fifo_submission_queue_gone(&mut scratch, 1);
+    assert!(scratch.is_empty(), "miss must not leave the scratch for the next pass");
+}
+
+#[test]
+fn settle_miss_prepared_flow_fair_remembers_prefix_only_17186() {
+    let mk = |offset: u64, recycle: PreparedTxRecycle| PreparedTxRequest {
+        offset,
+        len: 10,
+        recycle,
+        expected_ports: None,
+        expected_addr_family: libc::AF_INET as u8,
+        expected_protocol: PROTO_TCP,
+        flow_key: None,
+        egress_ifindex: 42,
+        cos_queue_id: Some(0),
+        dscp_rewrite: None,
+        mirror_clone: false,
+        overlap_admissions: None,
+        enqueue_ns: 0,
+    };
+    // Prefix (inserted=1): FillOnSlot recycle must be remembered.
+    // Suffix: FreeTxFrame must NOT enter untracked.
+    let mut scratch = vec![
+        mk(64, PreparedTxRecycle::FillOnSlot(7)),
+        mk(128, PreparedTxRecycle::FreeTxFrame),
+        mk(192, PreparedTxRecycle::FreeTxFrame),
+    ];
+    let mut recycles: crate::afxdp::FastMap<u64, PreparedTxRecycle> = Default::default();
+    let mut untracked = crate::afxdp::FastSet::default();
+    settle_exact_prepared_scratch_submission_flow_fair_queue_gone(
+        &mut scratch,
+        &mut recycles,
+        &mut untracked,
+        1,
+    );
+    assert!(scratch.is_empty());
+    assert_eq!(recycles.get(&64), Some(&PreparedTxRecycle::FillOnSlot(7)), "prefix recycle remembered");
+    assert!(!untracked.contains(&128) && !untracked.contains(&192), "suffix must not be remembered");
+    assert!(recycles.get(&128).is_none() && recycles.get(&192).is_none());
+}

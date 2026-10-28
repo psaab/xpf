@@ -47,6 +47,9 @@ pub(super) fn service_exact_local_queue_direct(
             &binding.live,
             shared_recycles,
             &mut binding.timers,
+            &mut binding.tx_counters,
+            &mut binding.flow.flow_cache,
+            &mut binding.cos.cos_interfaces,
         );
     }
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(
@@ -100,9 +103,8 @@ pub(super) fn service_exact_local_queue_direct(
                     queue_idx,
                     dropped_bytes,
                 );
-            } else {
-                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
+            refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: the scratch-build fell through `ExactCoSScratchBuild::Drop`
             // with a frame-level error (capacity or slice). Subset of
@@ -122,9 +124,8 @@ pub(super) fn service_exact_local_queue_direct(
                     queue_idx,
                     dropped_bytes,
                 );
-            } else {
-                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
+            refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
             binding
                 .live
                 .mirror_drops_tx_frame_reserve
@@ -214,7 +215,7 @@ pub(super) fn service_exact_local_queue_direct(
             &mut binding.tx_pipeline.free_tx_frames,
             &mut binding.scratch.scratch_exact_local_tx,
         );
-        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
+        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -231,12 +232,21 @@ pub(super) fn service_exact_local_queue_direct(
         .get_mut(&root_ifindex)
         .and_then(|root| root.queues.get_mut(queue_idx))
     else {
-        // #17186: queue resolved at build above; disappearance here is
-        // unreachable (single &mut BindingWorker per pass). The kernel
-        // already owns the `inserted` prefix, so roll the gauge back
-        // rather than leak it, and leave the scratch for the next pass.
-        binding.tx_pipeline.outstanding_tx =
-            binding.tx_pipeline.outstanding_tx.saturating_sub(inserted);
+        // #17186 settle-miss: queue resolved at build above; disappearance
+        // here is unreachable in production (single &mut BindingWorker per
+        // pass), but if it ever happens the kernel already owns the
+        // `inserted` prefix. Record that prefix in the untracked tracker,
+        // clear the scratch (suffix offsets are NOT recycled — the FIFO
+        // scratch holds only copies and its suffix was never popped from
+        // a queue; see settle.rs queue-gone helpers), and do NOT roll
+        // `outstanding_tx` back: the reap path drains kernel-owned frames
+        // and a subtract here would double-subtract on later completions.
+        settle_exact_local_fifo_submission_queue_gone(
+            &mut binding.scratch.scratch_exact_local_tx,
+            &mut binding.tx_pipeline.in_flight_untracked_tx,
+            inserted as usize,
+        );
+        publish_cos_exact_backlog_on_cos(&binding.cos, binding.slot, root_ifindex);
         return ExactServiceOutcome::NoProgress;
     };
     let (sent_packets, sent_bytes) = settle_exact_local_fifo_submission(
@@ -259,6 +269,7 @@ pub(super) fn service_exact_local_queue_direct(
     apply_direct_exact_send_result_fields(
         &binding.live,
         &mut binding.cos,
+        binding.slot,
         root_ifindex,
         queue_idx,
         sent_packets,
@@ -298,6 +309,9 @@ fn service_exact_local_queue_direct_flow_fair(
             &binding.live,
             shared_recycles,
             &mut binding.timers,
+            &mut binding.tx_counters,
+            &mut binding.flow.flow_cache,
+            &mut binding.cos.cos_interfaces,
         );
     }
     let queue_dscp_rewrite = cos_queue_dscp_rewrite(
@@ -340,19 +354,25 @@ fn service_exact_local_queue_direct_flow_fair(
             error,
             dropped_bytes,
         } => {
-            let Some(queue) = binding
+            // Restore scratch offsets even on a (unreachable) queue miss:
+            // the popped TxRequests' UMEM offsets leak if we return first.
+            if let Some(queue) = binding
                 .cos
                 .cos_interfaces
                 .get_mut(&root_ifindex)
                 .and_then(|root| root.queues.get_mut(queue_idx))
-            else {
-                return ExactServiceOutcome::NoProgress;
-            };
-            restore_exact_local_scratch_to_queue_head_flow_fair(
-                queue,
-                &mut binding.tx_pipeline.free_tx_frames,
-                &mut binding.scratch.scratch_local_tx,
-            );
+            {
+                restore_exact_local_scratch_to_queue_head_flow_fair(
+                    queue,
+                    &mut binding.tx_pipeline.free_tx_frames,
+                    &mut binding.scratch.scratch_local_tx,
+                );
+            } else {
+                restore_exact_local_scratch_to_queue_head_flow_fair_queue_gone(
+                    &mut binding.tx_pipeline.free_tx_frames,
+                    &mut binding.scratch.scratch_local_tx,
+                );
+            }
             if dropped_bytes > 0 {
                 subtract_direct_cos_queue_bytes(
                     &mut binding.cos.cos_interfaces,
@@ -360,9 +380,8 @@ fn service_exact_local_queue_direct_flow_fair(
                     queue_idx,
                     dropped_bytes,
                 );
-            } else {
-                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
+            refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: the scratch-build fell through `ExactCoSScratchBuild::Drop`
             // with a frame-level error (capacity or slice). Subset of
@@ -382,9 +401,8 @@ fn service_exact_local_queue_direct_flow_fair(
                     queue_idx,
                     dropped_bytes,
                 );
-            } else {
-                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
+            refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
             binding
                 .live
                 .mirror_drops_tx_frame_reserve
@@ -463,20 +481,24 @@ fn service_exact_local_queue_direct_flow_fair(
             true,
             now_ns,
         );
-        let Some(queue) = binding
+        if let Some(queue) = binding
             .cos
             .cos_interfaces
             .get_mut(&root_ifindex)
             .and_then(|root| root.queues.get_mut(queue_idx))
-        else {
-            return ExactServiceOutcome::NoProgress;
-        };
-        restore_exact_local_scratch_to_queue_head_flow_fair(
-            queue,
-            &mut binding.tx_pipeline.free_tx_frames,
-            &mut binding.scratch.scratch_local_tx,
-        );
-        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
+        {
+            restore_exact_local_scratch_to_queue_head_flow_fair(
+                queue,
+                &mut binding.tx_pipeline.free_tx_frames,
+                &mut binding.scratch.scratch_local_tx,
+            );
+        } else {
+            restore_exact_local_scratch_to_queue_head_flow_fair_queue_gone(
+                &mut binding.tx_pipeline.free_tx_frames,
+                &mut binding.scratch.scratch_local_tx,
+            );
+        }
+        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -493,9 +515,16 @@ fn service_exact_local_queue_direct_flow_fair(
         .get_mut(&root_ifindex)
         .and_then(|root| root.queues.get_mut(queue_idx))
     else {
-        // #17186: unreachable queue disappearance (see FIFO settle above).
-        binding.tx_pipeline.outstanding_tx =
-            binding.tx_pipeline.outstanding_tx.saturating_sub(inserted);
+        // #17186 settle-miss (flow-fair local): kernel owns the inserted
+        // prefix — record it, recycle the uninserted suffix offsets, and
+        // leave `outstanding_tx` for the reap path (see FIFO arm above).
+        settle_exact_local_scratch_submission_flow_fair_queue_gone(
+            &mut binding.tx_pipeline.free_tx_frames,
+            &mut binding.scratch.scratch_local_tx,
+            &mut binding.tx_pipeline.in_flight_untracked_tx,
+            inserted as usize,
+        );
+        publish_cos_exact_backlog_on_cos(&binding.cos, binding.slot, root_ifindex);
         return ExactServiceOutcome::NoProgress;
     };
     let (sent_packets, sent_bytes) = settle_exact_local_scratch_submission_flow_fair(
@@ -520,6 +549,7 @@ fn service_exact_local_queue_direct_flow_fair(
     apply_direct_exact_send_result_fields(
         &binding.live,
         &mut binding.cos,
+        binding.slot,
         root_ifindex,
         queue_idx,
         sent_packets,
@@ -614,9 +644,8 @@ pub(super) fn service_exact_prepared_queue_direct(
                     queue_idx,
                     dropped_bytes,
                 );
-            } else {
-                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
+            refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: the scratch-build fell through `ExactCoSScratchBuild::Drop`
             // with a frame-level error (capacity or slice). Subset of
@@ -706,7 +735,7 @@ pub(super) fn service_exact_prepared_queue_direct(
             now_ns,
         );
         release_exact_prepared_scratch(&mut binding.scratch.scratch_exact_prepared_tx);
-        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
+        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -723,9 +752,16 @@ pub(super) fn service_exact_prepared_queue_direct(
         .get_mut(&root_ifindex)
         .and_then(|root| root.queues.get_mut(queue_idx))
     else {
-        // #17186: unreachable queue disappearance (see FIFO settle above).
-        binding.tx_pipeline.outstanding_tx =
-            binding.tx_pipeline.outstanding_tx.saturating_sub(inserted);
+        // #17186 settle-miss (prepared FIFO): the scratch holds only
+        // (offset,len) copies; the popped requests' recycles were consumed
+        // by the queue pops that cannot run here, so there is no suffix to
+        // recycle and no recycle to remember. Clear the scratch and leave
+        // `outstanding_tx` for the reap path (see FIFO arm above).
+        settle_exact_prepared_fifo_submission_queue_gone(
+            &mut binding.scratch.scratch_exact_prepared_tx,
+            inserted as usize,
+        );
+        publish_cos_exact_backlog_on_cos(&binding.cos, binding.slot, root_ifindex);
         return ExactServiceOutcome::NoProgress;
     };
     let (sent_packets, sent_bytes) = settle_exact_prepared_fifo_submission(
@@ -747,6 +783,7 @@ pub(super) fn service_exact_prepared_queue_direct(
     apply_direct_exact_send_result_fields(
         &binding.live,
         &mut binding.cos,
+        binding.slot,
         root_ifindex,
         queue_idx,
         sent_packets,
@@ -816,18 +853,22 @@ fn service_exact_prepared_queue_direct_flow_fair(
             error,
             dropped_bytes,
         } => {
-            let Some(queue) = binding
+            if let Some(queue) = binding
                 .cos
                 .cos_interfaces
                 .get_mut(&root_ifindex)
                 .and_then(|root| root.queues.get_mut(queue_idx))
-            else {
-                return ExactServiceOutcome::NoProgress;
-            };
-            restore_exact_prepared_scratch_to_queue_head_flow_fair(
-                queue,
-                &mut binding.scratch.scratch_prepared_tx,
-            );
+            {
+                restore_exact_prepared_scratch_to_queue_head_flow_fair(
+                    queue,
+                    &mut binding.scratch.scratch_prepared_tx,
+                );
+            } else {
+                // Queue gone: the popped PreparedTxRequests cannot be
+                // re-queued; drop them (their recycles die with them, as
+                // in the parent None arm's `.clear()`).
+                binding.scratch.scratch_prepared_tx.clear();
+            }
             if dropped_bytes > 0 {
                 subtract_direct_cos_queue_bytes(
                     &mut binding.cos.cos_interfaces,
@@ -835,9 +876,8 @@ fn service_exact_prepared_queue_direct_flow_fair(
                     queue_idx,
                     dropped_bytes,
                 );
-            } else {
-                refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
             }
+            refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
             binding.live.tx_errors.fetch_add(1, Ordering::Relaxed);
             // #710: the scratch-build fell through `ExactCoSScratchBuild::Drop`
             // with a frame-level error (capacity or slice). Subset of
@@ -924,19 +964,20 @@ fn service_exact_prepared_queue_direct_flow_fair(
             true,
             now_ns,
         );
-        let Some(queue) = binding
+        if let Some(queue) = binding
             .cos
             .cos_interfaces
             .get_mut(&root_ifindex)
             .and_then(|root| root.queues.get_mut(queue_idx))
-        else {
-            return ExactServiceOutcome::NoProgress;
-        };
-        restore_exact_prepared_scratch_to_queue_head_flow_fair(
-            queue,
-            &mut binding.scratch.scratch_prepared_tx,
-        );
-        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
+        {
+            restore_exact_prepared_scratch_to_queue_head_flow_fair(
+                queue,
+                &mut binding.scratch.scratch_prepared_tx,
+            );
+        } else {
+            binding.scratch.scratch_prepared_tx.clear();
+        }
+        refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
         // #4971: expected TX backpressure — lock-free status, no mutex.
         binding
             .live
@@ -953,9 +994,18 @@ fn service_exact_prepared_queue_direct_flow_fair(
         .get_mut(&root_ifindex)
         .and_then(|root| root.queues.get_mut(queue_idx))
     else {
-        // #17186: unreachable queue disappearance (see FIFO settle above).
-        binding.tx_pipeline.outstanding_tx =
-            binding.tx_pipeline.outstanding_tx.saturating_sub(inserted);
+        // #17186 settle-miss (flow-fair prepared): the scratch holds the
+        // popped requests themselves — remember the kernel-owned prefix's
+        // recycles exactly as the Some-path settle does, drop the
+        // uninserted suffix without remembering, and leave
+        // `outstanding_tx` for the reap path (see FIFO arm above).
+        settle_exact_prepared_scratch_submission_flow_fair_queue_gone(
+            &mut binding.scratch.scratch_prepared_tx,
+            &mut binding.tx_pipeline.in_flight_prepared_recycles,
+            &mut binding.tx_pipeline.in_flight_untracked_tx,
+            inserted as usize,
+        );
+        publish_cos_exact_backlog_on_cos(&binding.cos, binding.slot, root_ifindex);
         return ExactServiceOutcome::NoProgress;
     };
     let (sent_packets, sent_bytes) = settle_exact_prepared_scratch_submission_flow_fair(
@@ -979,6 +1029,7 @@ fn service_exact_prepared_queue_direct_flow_fair(
     apply_direct_exact_send_result_fields(
         &binding.live,
         &mut binding.cos,
+        binding.slot,
         root_ifindex,
         queue_idx,
         sent_packets,

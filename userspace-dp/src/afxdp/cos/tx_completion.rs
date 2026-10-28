@@ -689,6 +689,7 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result(
     apply_direct_exact_send_result_fields(
         &binding.live,
         &mut binding.cos,
+        binding.slot,
         root_ifindex,
         queue_idx,
         sent_packets,
@@ -703,6 +704,7 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result(
 pub(in crate::afxdp) fn apply_direct_exact_send_result_fields(
     live: &crate::afxdp::binding_state::BindingLiveState,
     cos: &mut crate::afxdp::worker::WorkerCos,
+    slot: u32,
     root_ifindex: i32,
     queue_idx: usize,
     sent_packets: u64,
@@ -726,7 +728,7 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result_fields(
     {
         shared_queue_lease.consume(sent_bytes);
     }
-    refresh_cos_interface_activity_on_cos(cos, root_ifindex);
+    refresh_cos_interface_activity_on_cos(cos, root_ifindex, Some(slot));
     if sent_packets > 0 {
         live.tx_packets.fetch_add(sent_packets, Ordering::Relaxed);
         live.tx_bytes.fetch_add(sent_bytes, Ordering::Relaxed);
@@ -745,18 +747,23 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity(
     binding: &mut BindingWorker,
     root_ifindex: i32,
 ) {
-    refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex);
+    refresh_cos_interface_activity_on_cos(&mut binding.cos, root_ifindex, Some(binding.slot));
 }
 
 /// #17186: field-split form for callers holding only `&mut WorkerCos`.
-/// The publish step needs the binding slot, which `WorkerCos` does not
-/// carry; backlog publish is therefore the caller's responsibility on
-/// this path (production `service_exact_*` settles run it via the
-/// whole-binding wrapper on the next drain pass).
+/// The `publish` step needs the binding slot, which `WorkerCos` does not
+/// carry, so it is an explicit parameter: `service_exact_*` settles pass
+/// `Some(binding.slot)` and get the parent whole-binding cadence (the
+/// publish the parent `refresh_cos_interface_activity` ended with);
+/// callers that genuinely cannot publish pass `None` and own that
+/// omission. Callers that hold only `&WorkerCos` but do own a slot must
+/// NOT pass `None` to defer the publish to "the next drain pass" — no
+/// such pass is guaranteed.
 #[inline]
 pub(in crate::afxdp) fn refresh_cos_interface_activity_on_cos(
     cos: &mut crate::afxdp::worker::WorkerCos,
     root_ifindex: i32,
+    publish_slot: Option<u32>,
 ) {
     let mut new_nonempty = 0usize;
     let mut new_runnable = 0usize;
@@ -821,7 +828,9 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity_on_cos(
         root.nonempty_queues = new_nonempty;
         root.runnable_queues = new_runnable;
     }
-    // backlog publish deferred to whole-binding callers (see above).
+    if let Some(slot) = publish_slot {
+        publish_cos_exact_backlog_on_cos(cos, slot, root_ifindex);
+    }
     if old_nonempty == 0 && new_nonempty > 0 {
         cos.cos_nonempty_interfaces = cos.cos_nonempty_interfaces.saturating_add(1);
     } else if old_nonempty > 0 && new_nonempty == 0 {

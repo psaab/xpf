@@ -27,6 +27,17 @@ pub(super) fn restore_exact_local_scratch_to_queue_head_flow_fair(
     }
 }
 
+/// Queue-gone form of the local flow-fair restore (T-7): recycle each
+/// scratch entry's UMEM offset before dropping the request.
+pub(super) fn restore_exact_local_scratch_to_queue_head_flow_fair_queue_gone(
+    free_tx_frames: &mut VecDeque<u64>,
+    scratch_local_tx: &mut Vec<(u64, TxRequest)>,
+) {
+    while let Some((offset, _req)) = scratch_local_tx.pop() {
+        free_tx_frames.push_front(offset);
+    }
+}
+
 pub(in crate::afxdp) fn release_exact_prepared_scratch(
     scratch_prepared_tx: &mut Vec<ExactPreparedScratchTxRequest>,
 ) {
@@ -241,6 +252,90 @@ pub(super) fn subtract_direct_cos_queue_bytes(
     if let Some(root) = cos_interfaces.get_mut(&root_ifindex) {
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             queue.hot.queued_bytes = queue.hot.queued_bytes.saturating_sub(dropped_bytes);
+        }
+    }
+    // Parent also refreshed interface activity here (whole-binding form);
+    // this field-split form cannot (no WorkerCos leases/counters), so
+    // every caller refreshes after this call — see service.rs Drop arms.
+}
+
+// ===== #17186 settle-miss ownership (queue gone after kernel commit) =====
+// The four settle-miss arms in service.rs cannot pop a queue that no
+// longer exists, but the kernel already owns the `inserted` prefix of
+// the scratch. These queue-free helpers give that prefix exactly the
+// ownership the Some-path settle would have recorded, and recycle the
+// uninserted suffix — without touching `outstanding_tx` (the caller
+// bumped it for the inserted prefix and the reap path drains it; only
+// the bogus subtract-back in the first #17186 revision double-subtracted
+// it on later completions). `sent_*` returns 0: no queue telemetry
+// (sojourn / bucket / pop) is sampled for frames whose queue is gone.
+
+pub(super) fn settle_exact_local_fifo_submission_queue_gone(
+    scratch_local_tx: &mut Vec<ExactLocalScratchTxRequest>,
+    in_flight_untracked_tx: &mut FastSet<u64>,
+    inserted: usize,
+) {
+    let sent = inserted.min(scratch_local_tx.len());
+    for req in scratch_local_tx.iter().take(sent) {
+        in_flight_untracked_tx.insert(req.offset);
+    }
+    scratch_local_tx.clear();
+}
+
+pub(super) fn settle_exact_local_scratch_submission_flow_fair_queue_gone(
+    free_tx_frames: &mut VecDeque<u64>,
+    scratch_local_tx: &mut Vec<(u64, TxRequest)>,
+    in_flight_untracked_tx: &mut FastSet<u64>,
+    inserted: usize,
+) {
+    // The scratch is in pop order (TxRequest bytes already copied into
+    // UMEM at drain). Pop from the back: while `len >= inserted` the
+    // popped entry is the uninserted suffix — recycle its offset. The
+    // remaining `inserted` entries are kernel-owned: record them.
+    while let Some((offset, _req)) = scratch_local_tx.pop() {
+        if scratch_local_tx.len() >= inserted {
+            free_tx_frames.push_front(offset);
+        } else {
+            in_flight_untracked_tx.insert(offset);
+        }
+    }
+}
+
+pub(super) fn settle_exact_prepared_fifo_submission_queue_gone(
+    scratch_prepared_tx: &mut Vec<ExactPreparedScratchTxRequest>,
+    inserted: usize,
+) {
+    // The FIFO prepared scratch holds only (offset, len) copies; the
+    // popped PreparedTxRequests (and their PreparedTxRecycles) were
+    // consumed by the Some-path settle's queue pops, which cannot run
+    // here. There is therefore no recycle memory to record and no suffix
+    // offset in this scratch to recycle (prepared offsets are not free-
+    // pool frames). The kernel-owned prefix stays outstanding until the
+    // completion reap drops it as stale/duplicate (counted there).
+    let _ = inserted;
+    scratch_prepared_tx.clear();
+}
+
+pub(super) fn settle_exact_prepared_scratch_submission_flow_fair_queue_gone(
+    scratch_prepared_tx: &mut Vec<PreparedTxRequest>,
+    in_flight_prepared_recycles: &mut FastMap<u64, PreparedTxRecycle>,
+    in_flight_untracked_tx: &mut FastSet<u64>,
+    inserted: usize,
+) {
+    // Flow-fair prepared scratch holds the popped requests themselves.
+    // Pop from the back: suffix entries were never submitted — drop them
+    // WITHOUT remembering (remembering would make a later never-submitted
+    // offset look kernel-owned). Prefix entries are kernel-owned:
+    // remember exactly as the Some-path settle does.
+    while let Some(req) = scratch_prepared_tx.pop() {
+        if scratch_prepared_tx.len() >= inserted {
+            // uninserted suffix: no ownership recorded
+        } else {
+            remember_prepared_recycle(
+                in_flight_prepared_recycles,
+                in_flight_untracked_tx,
+                &req,
+            );
         }
     }
 }

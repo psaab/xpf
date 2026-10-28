@@ -86,8 +86,13 @@ use settle::{
     cos_batch_tx_made_progress, cos_guarantee_quantum_bytes, cos_guarantee_visit_cap_bytes,
     cos_surplus_quantum_bytes, estimate_cos_queue_wakeup_tick, release_exact_local_scratch_frames,
     release_exact_prepared_scratch, restore_exact_local_scratch_to_queue_head_flow_fair,
+    restore_exact_local_scratch_to_queue_head_flow_fair_queue_gone,
     restore_exact_prepared_scratch_to_queue_head_flow_fair,
+    settle_exact_local_fifo_submission_queue_gone,
+    settle_exact_local_scratch_submission_flow_fair_queue_gone,
+    settle_exact_prepared_fifo_submission_queue_gone,
     settle_exact_prepared_scratch_submission_flow_fair, submit_cos_batch,
+    settle_exact_prepared_scratch_submission_flow_fair_queue_gone,
     subtract_direct_cos_queue_bytes,
 };
 pub(in crate::afxdp) use settle::{
@@ -114,8 +119,9 @@ use super::tx_completion::{
     apply_direct_exact_send_result_fields, cos_root_can_service_after_prime, cos_tick_for_ns,
     count_park_reason, count_tx_ring_full_submit_stall,
     count_tx_ring_full_submit_stall_on_interfaces, park_cos_queue, prime_cos_root_for_service,
-    refresh_cos_interface_activity, refresh_cos_interface_activity_on_cos,
-    restore_cos_local_items_inner, restore_cos_prepared_items_inner, CoSServicePhase, ParkReason,
+    publish_cos_exact_backlog_on_cos, refresh_cos_interface_activity,
+    refresh_cos_interface_activity_on_cos, restore_cos_local_items_inner,
+    restore_cos_prepared_items_inner, CoSServicePhase, ParkReason,
 };
 // Back-edges to crate::afxdp::tx are XSK-ring / worker-binding /
 // prepared-frame primitives — primitives that own the kernel ring

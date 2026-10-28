@@ -50,11 +50,128 @@ pub(in crate::afxdp) fn update_binding_debug_state(binding: &mut BindingWorker) 
     publish_binding_debug_state(binding);
 }
 
-/// #17186: field-split reap path has no whole binding to publish; it only
-/// advances the cadence counter so the publish epoch is not stalled.
-pub(in crate::afxdp) fn skip_binding_debug_state(timers: &mut WorkerTimers) {
-    let _ = advance_debug_state_publish_counter(timers);
+/// #17186: field-split form for the fields reap path. Advances the cadence
+/// counter and, when it fires (~65 ms), runs the same publish the whole-
+/// binding `update_binding_debug_state` wrapper ran at the reap tail —
+/// the head-of-function body, over only the fields a reap can carry.
+/// `publish_binding_debug_state` itself needs every BindingWorker field;
+/// the reap's bounded output is the direct/indirect TX counters, the flow
+/// cache counters, and the V_min scratch flush.
+pub(in crate::afxdp) fn publish_binding_debug_state_fields(
+    timers: &mut WorkerTimers,
+    live: &BindingLiveState,
+    tx_counters: &mut crate::afxdp::worker::WorkerTxCounters,
+    flow_cache: &mut crate::afxdp::FlowCache,
+    cos_interfaces: &mut crate::afxdp::FastMap<i32, crate::afxdp::types::CoSInterfaceRuntime>,
+) {
+    if !advance_debug_state_publish_counter(timers) {
+        return;
+    }
+    if tx_counters.pending_direct_tx_packets != 0 {
+        live.direct_tx_packets
+            .fetch_add(tx_counters.pending_direct_tx_packets, Ordering::Relaxed);
+        tx_counters.pending_direct_tx_packets = 0;
+    }
+    if tx_counters.pending_copy_tx_packets != 0 {
+        live.copy_tx_packets
+            .fetch_add(tx_counters.pending_copy_tx_packets, Ordering::Relaxed);
+        tx_counters.pending_copy_tx_packets = 0;
+    }
+    if tx_counters.pending_in_place_tx_packets != 0 {
+        live.in_place_tx_packets
+            .fetch_add(tx_counters.pending_in_place_tx_packets, Ordering::Relaxed);
+        tx_counters.pending_in_place_tx_packets = 0;
+    }
+    if tx_counters.pending_in_place_vlan_push_desc_packets != 0 {
+        live.in_place_vlan_push_desc_packets.fetch_add(
+            tx_counters.pending_in_place_vlan_push_desc_packets,
+            Ordering::Relaxed,
+        );
+        tx_counters.pending_in_place_vlan_push_desc_packets = 0;
+    }
+    if tx_counters.pending_in_place_vlan_pop_desc_packets != 0 {
+        live.in_place_vlan_pop_desc_packets.fetch_add(
+            tx_counters.pending_in_place_vlan_pop_desc_packets,
+            Ordering::Relaxed,
+        );
+        tx_counters.pending_in_place_vlan_pop_desc_packets = 0;
+    }
+    if tx_counters.pending_in_place_vlan_push_no_headroom_packets != 0 {
+        live.in_place_vlan_push_no_headroom_packets.fetch_add(
+            tx_counters.pending_in_place_vlan_push_no_headroom_packets,
+            Ordering::Relaxed,
+        );
+        tx_counters.pending_in_place_vlan_push_no_headroom_packets = 0;
+    }
+    if tx_counters.pending_in_place_l2_memmove_fallback_packets != 0 {
+        live.in_place_l2_memmove_fallback_packets.fetch_add(
+            tx_counters.pending_in_place_l2_memmove_fallback_packets,
+            Ordering::Relaxed,
+        );
+        tx_counters.pending_in_place_l2_memmove_fallback_packets = 0;
+    }
+    if tx_counters.pending_direct_tx_no_frame_fallback_packets != 0 {
+        live.direct_tx_no_frame_fallback_packets.fetch_add(
+            tx_counters.pending_direct_tx_no_frame_fallback_packets,
+            Ordering::Relaxed,
+        );
+        tx_counters.pending_direct_tx_no_frame_fallback_packets = 0;
+    }
+    if tx_counters.pending_direct_tx_build_fallback_packets != 0 {
+        live.direct_tx_build_fallback_packets.fetch_add(
+            tx_counters.pending_direct_tx_build_fallback_packets,
+            Ordering::Relaxed,
+        );
+        tx_counters.pending_direct_tx_build_fallback_packets = 0;
+    }
+    if tx_counters.pending_direct_tx_disallowed_fallback_packets != 0 {
+        live.direct_tx_disallowed_fallback_packets.fetch_add(
+            tx_counters.pending_direct_tx_disallowed_fallback_packets,
+            Ordering::Relaxed,
+        );
+        tx_counters.pending_direct_tx_disallowed_fallback_packets = 0;
+    }
+    // Flow-cache counters (same flush publish_binding_debug_state does).
+    if flow_cache.hits != 0 {
+        live.flow_cache_hits
+            .fetch_add(flow_cache.hits, Ordering::Relaxed);
+        flow_cache.hits = 0;
+    }
+    if flow_cache.misses != 0 {
+        live.flow_cache_misses
+            .fetch_add(flow_cache.misses, Ordering::Relaxed);
+        flow_cache.misses = 0;
+    }
+    if flow_cache.evictions != 0 {
+        live.flow_cache_evictions
+            .fetch_add(flow_cache.evictions, Ordering::Relaxed);
+        flow_cache.evictions = 0;
+    }
+    for (arm, slot) in flow_cache.evictions_by_arm.iter_mut().enumerate() {
+        if *slot != 0 {
+            live.flow_cache_evictions_by_arm[arm].fetch_add(*slot, Ordering::Relaxed);
+            *slot = 0;
+        }
+    }
+    if flow_cache.collision_evictions != 0 {
+        live.flow_cache_collision_evictions
+            .fetch_add(flow_cache.collision_evictions, Ordering::Relaxed);
+        flow_cache.collision_evictions = 0;
+    }
+    flow_cache.tick_advance_epoch();
+    // Active-flow / flow-worker-map / CoS active counts need binding
+    // identity fields (slot/queue/worker/interface/ifindex) the reap does
+    // not carry; they stay with the whole-binding publish on the worker's
+    // normal poll cadence, exactly as every other non-reap caller does.
+    // V_min scratch flush over every root (same call publish makes).
+    flush_v_min_scratches_into(
+        cos_interfaces.values_mut(),
+        &live.v_min_throttle_hard_cap_overrides,
+        &live.v_min_throttles,
+        &live.v_min_suspended_batches,
+    );
 }
+
 
 pub(in crate::afxdp) fn update_binding_idle_debug_state(binding: &mut BindingWorker, now_ns: u64) {
     // #1294: the hot-path counter's ~65ms assumption only holds while a
