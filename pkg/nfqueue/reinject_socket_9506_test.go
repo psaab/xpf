@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,25 +188,25 @@ func TestEncodeSubmitBatchPMechTailTwoFrames9506(t *testing.T) {
 	if got := binary.BigEndian.Uint32(payload[tail+16 : tail+20]); got != 13 {
 		t.Fatalf("first FIB generation=%d, want 13", got)
 	}
-	if got := binary.BigEndian.Uint16(payload[tail+20 : tail+22]); got != 4 {
+	if got := binary.BigEndian.Uint32(payload[tail+20 : tail+24]); got != 4 {
 		t.Fatalf("first zone ID=%d, want 4", got)
 	}
-	if got := binary.BigEndian.Uint32(payload[tail+22 : tail+26]); got != 7 {
+	if got := binary.BigEndian.Uint32(payload[tail+24 : tail+28]); got != 7 {
 		t.Fatalf("first if ID=%d, want 7", got)
 	}
-	if got := binary.BigEndian.Uint64(payload[tail+26 : tail+34]); got != 14 {
+	if got := binary.BigEndian.Uint64(payload[tail+28 : tail+36]); got != 14 {
 		t.Fatalf("first P-MECH inventory generation=%d, want 14", got)
 	}
-	if got := binary.BigEndian.Uint32(payload[tail+34 : tail+38]); got != 15 {
+	if got := binary.BigEndian.Uint32(payload[tail+36 : tail+40]); got != 15 {
 		t.Fatalf("first P-MECH inventory FIB generation=%d, want 15", got)
 	}
-	if got := payload[tail+38 : tail+70]; !bytes.Equal(got, frames[0].Frame.PMechPolicyIdentity[:]) {
+	if got := payload[tail+40 : tail+72]; !bytes.Equal(got, frames[0].Frame.PMechPolicyIdentity[:]) {
 		t.Fatalf("first P-MECH policy identity=%x, want %x", got, frames[0].Frame.PMechPolicyIdentity)
 	}
-	if got := binary.BigEndian.Uint64(payload[tail+70 : tail+78]); got != frames[0].DeadlineMonoNS {
+	if got := binary.BigEndian.Uint64(payload[tail+72 : tail+80]); got != frames[0].DeadlineMonoNS {
 		t.Fatalf("first monotonic deadline=%x, want %x", got, frames[0].DeadlineMonoNS)
 	}
-	if got := payload[tail+78]; got != reinjectDeadlineClockMonotonic {
+	if got := payload[tail+80]; got != reinjectDeadlineClockMonotonic {
 		t.Fatalf("first deadline clock id=%d, want %d", got, reinjectDeadlineClockMonotonic)
 	}
 	second := 2 + rowLen
@@ -225,8 +226,10 @@ func TestReinjectSubmitGoRustPinnedLayout9506(t *testing.T) {
 			Family: CaptureFamilyInet, Hook: CaptureHookForward,
 			Owner: "owner", STN: "stn", OwnedIfindex: 42,
 		},
-		Lease:  ReinjectLease{RequestID: 1, PermitEpoch: 7, QueueNumber: 9, QueueEpoch: 11},
-		ZoneID: 23, IfID: 29,
+		Lease: ReinjectLease{RequestID: 1, PermitEpoch: 7, QueueNumber: 9, QueueEpoch: 11},
+		// #18207: a zone id above the u16 range proves the wire field is
+		// u32; a truncating writer would emit 23 and miss the golden.
+		ZoneID: 0x00010017, IfID: 29,
 		DeadlineMonoNS:  0x0102030405060708,
 		DeadlineClockID: reinjectDeadlineClockMonotonic,
 	}
@@ -237,7 +240,7 @@ func TestReinjectSubmitGoRustPinnedLayout9506(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const pinnedGoRustVector = "000100000000000000010000000000000007000000000000000b0009641d379cc20483cb0001010000002a056f776e65720373746e000000024500000000000000000d00000000000000110000001300170000001d000000000000001f000000204141414141414141414141414141414141414141414141414141414141414141010203040506070801"
+	const pinnedGoRustVector = "000100000000000000010000000000000007000000000000000b0009641d379cc20483cb0001010000002a056f776e65720373746e000000024500000000000000000d000000000000001100000013000100170000001d000000000000001f000000204141414141414141414141414141414141414141414141414141414141414141010203040506070801"
 	want, err := hex.DecodeString(pinnedGoRustVector)
 	if err != nil {
 		t.Fatal(err)
@@ -245,15 +248,34 @@ func TestReinjectSubmitGoRustPinnedLayout9506(t *testing.T) {
 	if !bytes.Equal(payload, want) {
 		t.Fatalf("submit vector=%x, want pinned Go/Rust bytes %x", payload, want)
 	}
+	// #18207: the Go encoder must byte-match the shared golden the Rust
+	// reader is pinned to (pkg/nfqueue/testdata/reinject_submit_frame_18207.hex,
+	// read by submit_wire_matches_pinned_go_vector_and_both_decoders and
+	// regenerated only under XPF_WRITE_GOLDEN_18207=1). A zone-width drift
+	// on either side changes these bytes; a Rust round-trip cannot see it.
+	goldenRaw, err := os.ReadFile("testdata/reinject_submit_frame_18207.hex")
+	if err != nil {
+		t.Fatalf("read shared golden: %v", err)
+	}
+	golden, err := hex.DecodeString(strings.TrimSpace(string(goldenRaw)))
+	if err != nil {
+		t.Fatalf("shared golden is not hex: %v", err)
+	}
+	if !bytes.Equal(payload, golden) {
+		t.Fatalf("submit vector=%x, want shared golden %x", payload, golden)
+	}
 	const explicitTailStart = 59
-	if len(payload) != 138 || reinjectSubmitPMechTailLen != 79 {
-		t.Fatalf("pinned frame length=%d, tail const=%d, want 138/79", len(payload), reinjectSubmitPMechTailLen)
+	if len(payload) != 140 || reinjectSubmitPMechTailLen != 81 {
+		t.Fatalf("pinned frame length=%d, tail const=%d, want 140/81", len(payload), reinjectSubmitPMechTailLen)
 	}
-	if got := binary.BigEndian.Uint64(payload[explicitTailStart+70 : explicitTailStart+78]); got != 0x0102030405060708 {
-		t.Fatalf("pinned deadline at 70..77=%x", got)
+	if got := binary.BigEndian.Uint32(payload[explicitTailStart+20 : explicitTailStart+24]); got != 0x00010017 {
+		t.Fatalf("pinned zone ID at 20..23=%d, want 65559", got)
 	}
-	if got := payload[explicitTailStart+78]; got != 1 {
-		t.Fatalf("pinned clock id at 78=%d, want 1", got)
+	if got := binary.BigEndian.Uint64(payload[explicitTailStart+72 : explicitTailStart+80]); got != 0x0102030405060708 {
+		t.Fatalf("pinned deadline at 72..79=%x", got)
+	}
+	if got := payload[explicitTailStart+80]; got != 1 {
+		t.Fatalf("pinned clock id at 80=%d, want 1", got)
 	}
 }
 

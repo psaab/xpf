@@ -177,6 +177,25 @@ func runUniformGatesRoutingRibRPM(tree *ConfigTree, cfg *Config, opts compileOpt
 		}
 	}
 
+	// Static-route destinations get the same invalid-prefix treatment
+	// as generate routes below: a destination ValidateRouteDestination
+	// rejects (garbage, bare IP, whitespace-padded CIDR) otherwise
+	// splits FRR (omits the route) from userspace (helper refuses the
+	// whole snapshot). Strict rejects the first offender; tolerant
+	// warns per offender and keeps the route so the helper still fails
+	// closed.
+	if problems := staticRouteInvalidPrefixes(cfg); len(problems) > 0 {
+		if !opts.lenientStaticRoutePrefix {
+			return fmt.Errorf("%s", problems[0])
+		}
+		for _, problem := range problems {
+			cfg.Warnings = append(cfg.Warnings,
+				"static-route destination (downgraded to warning on tolerant path; "+
+					"a published route that keeps it makes the userspace helper refuse the "+
+					"whole snapshot): "+problem)
+		}
+	}
+
 	// #15658: generate-route prefixes get the same treatment as static
 	// destinations. A malformed prefix (ValidateRouteDestination, also the
 	// schema keyValidator) or a helper-refused padded mask otherwise splits

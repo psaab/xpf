@@ -7867,8 +7867,9 @@ fn validate_snapshot_buildable_matches_reconcile_5171() {
 #[test]
 fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     use crate::afxdp::zone_counters::{
-        ZoneCounterSlotMap, flush_recorded_zone_counters, record_zone_traffic,
+        flush_recorded_zone_counters, record_zone_traffic,
     };
+    use crate::afxdp::zone_slot_counters::ZoneSlotMap;
     const ZONE_A: u32 = 100;
     const ZONE_B: u32 = 200;
 
@@ -7878,15 +7879,16 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
     // #5163: build the seed map FROM the live store so its cached per-zone
     // atomics are the coordinator's — the lock-free fold then lands directly in
     // `coord.forwarding.zone_counter_store`.
-    let seed_map =
-        ZoneCounterSlotMap::build(&[ZONE_A, ZONE_B], &coord.forwarding.zone_counter_store);
+    let (seed_map, seed_caches) = ZoneSlotMap::build(
+        &[ZONE_A, ZONE_B],
+        &coord.forwarding.zone_counter_store,
+        &coord.forwarding.flood_counter_store,
+    );
     record_zone_traffic(&seed_map, ZONE_A, ZONE_B, 1000);
     record_zone_traffic(&seed_map, ZONE_B, ZONE_A, 500);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &seed_map);
-    let before: std::collections::HashSet<u32> = coord
-        .forwarding
-        .zone_counter_store
-        .snapshot()
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &seed_map, &seed_caches);
+    let before: std::collections::HashSet<u32> =
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
         .into_iter()
         .map(|r| r.zone_id)
         .collect();
@@ -7920,10 +7922,8 @@ fn validate_snapshot_buildable_does_not_prune_live_zone_counters_5171() {
 
     // The live store must be UNTOUCHED — zone B's totals survive even though
     // the candidate does not configure zone B.
-    let after: std::collections::HashSet<u32> = coord
-        .forwarding
-        .zone_counter_store
-        .snapshot()
+    let after: std::collections::HashSet<u32> =
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
         .into_iter()
         .map(|r| r.zone_id)
         .collect();
@@ -7980,6 +7980,7 @@ fn zone_counter_live_coordinator(coord: &mut Coordinator) {
     flush_recorded_zone_counters(
         &coord.forwarding.zone_counter_store,
         &coord.forwarding.zone_counter_slot_map,
+        &coord.forwarding.zone_counter_caches,
     );
     assert_eq!(
         zone_counter_rows(coord),
@@ -8054,7 +8055,7 @@ fn rejected_apply_does_not_prune_live_zone_counters_6832() {
         "fixture: this apply must be rejected by the worker SPAWN arm — the arm \
          that leaves the candidate state published — got {result:?}"
     );
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8401,7 +8402,7 @@ fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
         "fixture: this apply must COMMIT (workers up) — got {result:?}"
     );
 
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8409,8 +8410,7 @@ fn committed_reconcile_prunes_zone_counters_for_removed_zones_6832() {
         "a COMMITTED reconcile must still drop the removed zone's totals; \
          deferring the prune past worker bring-up must not delete it"
     );
-    let survivor = live_store
-        .snapshot()
+    let survivor = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store)
         .into_iter()
         .find(|r| r.zone_id == 100)
         .expect("zone 100 is configured by both generations");
@@ -8438,7 +8438,7 @@ fn committed_refresh_prunes_zone_counters_for_removed_zones_6832() {
         .refresh_runtime_snapshot(&candidate)
         .expect("fixture: the candidate must refresh cleanly");
 
-    let mut surviving: Vec<u32> = live_store.snapshot().iter().map(|r| r.zone_id).collect();
+    let mut surviving: Vec<u32> = crate::afxdp::zone_counters::zone_counter_snapshot(&live_store).iter().map(|r| r.zone_id).collect();
     surviving.sort_unstable();
     assert_eq!(
         surviving,
@@ -8456,17 +8456,17 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
     // calls it, so reverting this accessor to its old inline
     // "configured-only" body left them all green. This test binds the wiring.
     use crate::afxdp::zone_counters::{
-        ZONE_COUNTER_ASSIGNABLE_SLOTS, ZoneCounterSlotMap, flush_recorded_zone_counters,
-        record_zone_traffic,
+        flush_recorded_zone_counters, record_zone_traffic,
     };
+    use crate::afxdp::zone_slot_counters::{ZoneSlotMap, ZONE_SLOT_ASSIGNABLE_SLOTS};
     const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let mut coord = Coordinator::new();
 
     // Apply 1: Z alone, holding a slot, moving traffic.
-    let map1 = ZoneCounterSlotMap::build(&[Z], &coord.forwarding.zone_counter_store);
+    let (map1, caches1) = ZoneSlotMap::build(&[Z], &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_traffic(&map1, Z, 0, 1500);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &map1);
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &map1, &caches1);
     coord.forwarding.zone_counter_slot_map = std::sync::Arc::new(map1);
     coord
         .forwarding
@@ -8481,7 +8481,7 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
 
     // Apply 2: enough lower ids to exhaust capacity. Z stays CONFIGURED and
     // keeps its retained totals, but loses its slot.
-    let mut ids: Vec<u32> = (1..=(ZONE_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
+    let mut ids: Vec<u32> = (1..=(ZONE_SLOT_ASSIGNABLE_SLOTS as u32)).collect();
     ids.push(Z);
     for id in &ids {
         coord
@@ -8489,17 +8489,14 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
             .zone_id_to_name
             .insert(*id, format!("z{id}"));
     }
-    let map2 = ZoneCounterSlotMap::build(&ids, &coord.forwarding.zone_counter_store);
+    let (map2, _caches2) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     assert_eq!(map2.slot_of(Z), 0, "Z must lose its slot in apply 2");
     coord.forwarding.zone_counter_slot_map = std::sync::Arc::new(map2);
 
     // The store still retains Z's totals -- assert it, so this test cannot
     // pass because the data vanished for an unrelated reason.
     assert!(
-        coord
-            .forwarding
-            .zone_counter_store
-            .snapshot()
+        crate::afxdp::zone_counters::zone_counter_snapshot(&coord.forwarding.zone_counter_store)
             .iter()
             .any(|r| r.zone_id == Z),
         "precondition: the store must still retain Z's totals"
@@ -8508,9 +8505,9 @@ fn zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843() {
     // Move traffic on a zone that KEPT its slot in apply 2, so the assertions
     // below constrain both directions.
     const SURVIVOR: u32 = 1;
-    let survivor_map = ZoneCounterSlotMap::build(&ids, &coord.forwarding.zone_counter_store);
+    let (survivor_map, survivor_caches) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_traffic(&survivor_map, SURVIVOR, 0, 64);
-    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &survivor_map);
+    flush_recorded_zone_counters(&coord.forwarding.zone_counter_store, &survivor_map, &survivor_caches);
 
     let published = coord.zone_traffic_counters();
     assert!(
@@ -8567,7 +8564,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     //      at >=64 configured zones the ENTIRE per-zone flood surface vanishes
     //      and `show security screen ids-option statistics` reports
     //      "not available" for every zone.
-    //   3. passing `FloodCounterSlotMap::default()` instead of the live map
+    //   3. passing a default/empty slot map instead of the live map
     //      (publishes nothing).
     //
     // This is the exact asymmetry #6843 closed on the traffic half: the Go
@@ -8575,17 +8572,17 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // the Rust one was not. Mirrors
     // `zone_traffic_counters_drops_a_zone_that_lost_its_slot_6843` above.
     use crate::afxdp::flood_counters::{
-        FLOOD_COUNTER_ASSIGNABLE_SLOTS, FloodCounterSlotMap, flush_recorded_flood_counters,
-        record_zone_flood_drop,
+        flush_recorded_flood_counters, record_zone_flood_drop,
     };
+    use crate::afxdp::zone_slot_counters::{ZoneSlotMap, ZONE_SLOT_ASSIGNABLE_SLOTS};
     const Z: u32 = 50675; // config::StableZoneID("trust")
 
     let mut coord = Coordinator::new();
 
     // Apply 1: Z alone, holding a slot, tripping a flood check.
-    let map1 = FloodCounterSlotMap::build(&[Z], &coord.forwarding.flood_counter_store);
+    let (map1, caches1) = ZoneSlotMap::build(&[Z], &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_flood_drop(&map1, Z, "syn-flood");
-    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &map1);
+    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &map1, &caches1);
     coord.forwarding.flood_counter_slot_map = std::sync::Arc::new(map1);
     coord
         .forwarding
@@ -8601,7 +8598,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
 
     // Apply 2: enough lower ids to exhaust capacity. Z stays CONFIGURED and
     // keeps its retained counts, but loses its slot.
-    let mut ids: Vec<u32> = (1..=(FLOOD_COUNTER_ASSIGNABLE_SLOTS as u32)).collect();
+    let mut ids: Vec<u32> = (1..=(ZONE_SLOT_ASSIGNABLE_SLOTS as u32)).collect();
     ids.push(Z);
     for id in &ids {
         coord
@@ -8609,7 +8606,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
             .zone_id_to_name
             .insert(*id, format!("z{id}"));
     }
-    let map2 = FloodCounterSlotMap::build(&ids, &coord.forwarding.flood_counter_store);
+    let (map2, _caches2) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     assert_eq!(map2.slot_of(Z), 0, "Z must lose its slot in apply 2");
     assert!(map2.overflow_active, "apply 2 must set overflow_active");
     coord.forwarding.flood_counter_slot_map = std::sync::Arc::new(map2);
@@ -8617,10 +8614,7 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // The store still retains Z's counts -- assert it, so this test cannot pass
     // because the data vanished for an unrelated reason.
     assert!(
-        coord
-            .forwarding
-            .flood_counter_store
-            .snapshot()
+        crate::afxdp::flood_counters::flood_counter_snapshot(&coord.forwarding.flood_counter_store)
             .iter()
             .any(|r| r.zone_id == Z),
         "precondition: the store must still retain Z's flood counts"
@@ -8629,9 +8623,9 @@ fn zone_flood_counters_drops_a_zone_that_lost_its_slot_3651() {
     // Trip a flood check on a zone that KEPT its slot in apply 2, so the
     // assertions below constrain both directions.
     const SURVIVOR: u32 = 1;
-    let survivor_map = FloodCounterSlotMap::build(&ids, &coord.forwarding.flood_counter_store);
+    let (survivor_map, survivor_caches) = ZoneSlotMap::build(&ids, &coord.forwarding.zone_counter_store, &coord.forwarding.flood_counter_store);
     record_zone_flood_drop(&survivor_map, SURVIVOR, "udp-flood");
-    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &survivor_map);
+    flush_recorded_flood_counters(&coord.forwarding.flood_counter_store, &survivor_map, &survivor_caches);
 
     let published = coord.zone_flood_counters();
     assert!(
