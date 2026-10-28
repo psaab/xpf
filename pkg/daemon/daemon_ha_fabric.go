@@ -412,6 +412,9 @@ func (d *Daemon) populateFabricFwd(ctx context.Context, fabIface, overlay, peerA
 		case <-ticker.C:
 			d.refreshFabricFwd(ctx, fabIface, overlay, peerIP, false)
 		case <-refreshCh:
+			if d.takeFabricProbePending(0) {
+				d.probeFabricNeighbor(ctx, overlayOrParent(overlay, fabIface), peerIP)
+			}
 			d.refreshFabricFwd(ctx, fabIface, overlay, peerIP, false)
 		}
 	}
@@ -825,6 +828,49 @@ func (d *Daemon) clearFabricPeer(_ context.Context, slot int) {
 func (d *Daemon) clearFabricFwd0(ctx context.Context) { d.clearFabricPeer(ctx, 0) }
 func (d *Daemon) clearFabricFwd1(ctx context.Context) { d.clearFabricPeer(ctx, 1) }
 
+// clearFabricSlots zeroes BOTH fabric slots' epoch state (#17060) and
+// drops the helper identity constraints they registered. It runs from
+// stopClusterComms under clusterCommsMu, mirroring the fabricRefreshCh
+// nilling there, AFTER cancel + clusterCommsWG.Wait: no constructor can
+// still publish, and the populate loops are drained by that same cancel.
+// A still-perched loop may re-store its config between the cancel and
+// this clear — that ordering is exactly why the clear sits here rather
+// than under fabricMu alone at cancel time. Keep it that late.
+//
+// Only the constraint CLEARS race a peer-changed populate's own clear
+// for the same address (both write nil). fabricPeerMAC itself is
+// snapshotted and cleared under fabricMu, so a racing
+// rememberFabricPeerMAC cannot resurrect a cleared slot.
+func (d *Daemon) clearFabricSlots() {
+	d.fabricMu.Lock()
+	peer0, peer1 := d.fabricPeerIP, d.fabricPeerIP1
+	staleConstraints := make([]string, 0, 2)
+	if peer0 != nil {
+		staleConstraints = append(staleConstraints, peer0.String())
+	}
+	if peer1 != nil && (peer0 == nil || !peer1.Equal(peer0)) {
+		staleConstraints = append(staleConstraints, peer1.String())
+	}
+	d.fabricIface = ""
+	d.fabricOverlay = ""
+	d.fabricPeerIP = nil
+	d.fabricPeerMAC = nil
+	d.fabricPopulated = false
+	d.fabricIface1 = ""
+	d.fabricOverlay1 = ""
+	d.fabricPeerIP1 = nil
+	d.fabricPeerMAC1 = nil
+	d.fabric1Populated = false
+	d.lastFabricProbe = time.Time{}
+	d.lastFabricProbe1 = time.Time{}
+	d.fabricProbePending = false
+	d.fabricProbePending1 = false
+	d.fabricMu.Unlock()
+	for _, peer := range staleConstraints {
+		dpuserspace.RegisterFabricPeerMACConstraint(peer, nil)
+	}
+}
+
 // populateFabricFwd1 resolves the secondary fabric interface MACs and populates
 // the secondary fabric peer for cross-chassis redirect (#17044).
 // Mirrors populateFabricFwd for slot 1.
@@ -895,6 +941,9 @@ func (d *Daemon) populateFabricFwd1(ctx context.Context, fabIface, overlay, peer
 		case <-ticker.C:
 			d.refreshFabricFwd1(ctx, fabIface, overlay, peerIP, false)
 		case <-refreshCh:
+			if d.takeFabricProbePending(1) {
+				d.probeFabricNeighbor(ctx, overlayOrParent(overlay, fabIface), peerIP)
+			}
 			d.refreshFabricFwd1(ctx, fabIface, overlay, peerIP, false)
 		}
 	}
@@ -908,40 +957,49 @@ func (d *Daemon) refreshFabricFwd1(ctx context.Context, fabIface, overlay string
 
 // RefreshFabricFwd triggers an immediate fabric peer refresh.
 // Call this on link state changes, neighbor changes, or failover transitions.
-// Refreshes both fab0 (key=0) and fab1 (key=1) entries.
+// It is a non-blocking poke of each slot's epoch refresh channel (#17060):
+// every refresh (and its probe) then runs on the epoch-owned populate loop
+// with that epoch's context. There is deliberately no Background-context
+// fallback — with comms stopped the channels are nil and this is a no-op,
+// which is exactly when the per-epoch loops have already stopped.
 func (d *Daemon) RefreshFabricFwd() {
-	d.fabricMu.RLock()
-	fabIface := d.fabricIface
-	overlay := d.fabricOverlay
-	peerIP := d.fabricPeerIP
-	fabIface1 := d.fabricIface1
-	overlay1 := d.fabricOverlay1
-	peerIP1 := d.fabricPeerIP1
-	probeAt0 := d.lastFabricProbe
-	probeAt1 := d.lastFabricProbe1
-	d.fabricMu.RUnlock()
-	if fabIface != "" && peerIP != nil {
-		if time.Since(probeAt0) >= 2*time.Second {
-			d.fabricMu.Lock()
-			if time.Since(d.lastFabricProbe) >= 2*time.Second {
-				d.lastFabricProbe = time.Now()
-				go d.probeFabricNeighbor(context.Background(), overlayOrParent(overlay, fabIface), peerIP)
-			}
-			d.fabricMu.Unlock()
-		}
-		d.refreshFabricFwd(context.Background(), fabIface, overlay, peerIP, false)
+	d.queueFabricProbe()
+	d.triggerFabricRefresh()
+}
+
+// queueFabricProbe rate-limits (2s/slot) and queues an active neighbour
+// probe per configured slot (#17060). The probe itself runs on the
+// epoch-owned populate loop when it wakes for the refresh poke, so it
+// inherits that epoch's context. Probe flags are consumed (and cleared)
+// by the loop; stopClusterComms zeroes them with the rest of the slot.
+func (d *Daemon) queueFabricProbe() {
+	now := time.Now()
+	d.fabricMu.Lock()
+	defer d.fabricMu.Unlock()
+	if d.fabricIface != "" && d.fabricPeerIP != nil &&
+		now.Sub(d.lastFabricProbe) >= 2*time.Second {
+		d.lastFabricProbe = now
+		d.fabricProbePending = true
 	}
-	if fabIface1 != "" && peerIP1 != nil {
-		if time.Since(probeAt1) >= 2*time.Second {
-			d.fabricMu.Lock()
-			if time.Since(d.lastFabricProbe1) >= 2*time.Second {
-				d.lastFabricProbe1 = time.Now()
-				go d.probeFabricNeighbor(context.Background(), overlayOrParent(overlay1, fabIface1), peerIP1)
-			}
-			d.fabricMu.Unlock()
-		}
-		d.refreshFabricFwd1(context.Background(), fabIface1, overlay1, peerIP1, false)
+	if d.fabricIface1 != "" && d.fabricPeerIP1 != nil &&
+		now.Sub(d.lastFabricProbe1) >= 2*time.Second {
+		d.lastFabricProbe1 = now
+		d.fabricProbePending1 = true
 	}
+}
+
+// takeFabricProbePending consumes slot's queued-probe flag.
+func (d *Daemon) takeFabricProbePending(slot int) bool {
+	d.fabricMu.Lock()
+	defer d.fabricMu.Unlock()
+	if slot == 1 {
+		p := d.fabricProbePending1
+		d.fabricProbePending1 = false
+		return p
+	}
+	p := d.fabricProbePending
+	d.fabricProbePending = false
+	return p
 }
 
 func overlayOrParent(overlay, parent string) string {

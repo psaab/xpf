@@ -1478,6 +1478,8 @@ type Daemon struct {
 	reconcileTickHook func()
 
 	// Fabric cross-chassis forwarding state for periodic refresh.
+	// Epoch-scoped (#17060): (re)installed by the populate loops each
+	// comms epoch, zeroed by clearFabricSlots in stopClusterComms.
 	fabricMu         sync.RWMutex
 	fabricIface      string // physical parent (XDP attachment point)
 	fabricOverlay    string // IPVLAN overlay for neighbor resolution (#129)
@@ -1496,14 +1498,16 @@ type Daemon struct {
 	// let a bad guess self-confirm) and cleared when the configured peer
 	// address changes, so a re-pointed fabric cannot be pinned to the old
 	// peer's MAC.
-	fabricPeerMAC    net.HardwareAddr
-	fabricPeerMAC1   net.HardwareAddr
-	fabricRefreshCh  chan struct{} // wakes the fab0 populateFabricFwd loop
-	fabricRefreshCh1 chan struct{} // wakes the fab1 populateFabricFwd1 loop (#4038)
-	lastFabricProbe  time.Time     // rate-limit active fab0 neighbor probes
-	lastFabricProbe1 time.Time     // rate-limit active fab1 neighbor probes
-	lastFabricLog0   time.Time     // rate-limit fab0 refresh failure logs
-	lastFabricLog1   time.Time     // rate-limit fab1 refresh failure logs
+	fabricPeerMAC       net.HardwareAddr
+	fabricPeerMAC1      net.HardwareAddr
+	fabricRefreshCh     chan struct{} // wakes the fab0 populateFabricFwd loop
+	fabricRefreshCh1    chan struct{} // wakes the fab1 populateFabricFwd1 loop (#4038)
+	lastFabricProbe     time.Time     // rate-limit active fab0 neighbor probes
+	lastFabricProbe1    time.Time     // rate-limit active fab1 neighbor probes
+	fabricProbePending  bool          // fab0 probe queued for the epoch loop (#17060)
+	fabricProbePending1 bool          // fab1 probe queued for the epoch loop (#17060)
+	lastFabricLog0      time.Time     // rate-limit fab0 refresh failure logs
+	lastFabricLog1      time.Time     // rate-limit fab1 refresh failure logs
 
 	// vipWarnedIfaces tracks interfaces that already emitted a
 	// "directAddVIPs: interface not found" warning to avoid log spam

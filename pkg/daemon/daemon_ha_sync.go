@@ -1799,6 +1799,12 @@ func (d *Daemon) stopClusterComms() {
 	d.sessionSync = nil
 	d.fabricRefreshCh = nil
 	d.fabricRefreshCh1 = nil
+	// #17060: fabric slot state is epoch-scoped like the channels above.
+	// Zero it here — under clusterCommsMu, after the cancel+join above —
+	// so no removed fabric can be probed/refreshed by a later event and
+	// reconcileRGState's fabric gate cannot read a stale populated latch
+	// (see clearFabricSlots).
+	d.clearFabricSlots()
 	// #7072: activeClusterTransport is DELIBERATELY NOT cleared here, and the
 	// issue that asked for it is refuted by measurement rather than argument.
 	//

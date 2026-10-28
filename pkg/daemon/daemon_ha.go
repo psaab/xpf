@@ -734,7 +734,7 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// when the rg_state machine has already drifted inactive.
 		if noRethVRRP {
 			d.reconcileDirectVIPOwnership(ev.GroupID, "cluster-primary")
-			go d.RefreshFabricFwd()
+			d.RefreshFabricFwd()
 		}
 		if noRethVRRP && d.cluster != nil && d.cluster.IsLocalPrimary(ev.GroupID) && (d.dataplane() == nil || !s.NeedsApply()) {
 			d.setLocalFailoverCommitReady(ev.GroupID, true)
@@ -1141,7 +1141,7 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			} else {
 				recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
 			}
-			go d.RefreshFabricFwd()
+			d.RefreshFabricFwd()
 		}
 		// Only remove blackholes and apply services when ALL
 		// VRRP instances in the RG are MASTER (#132).
@@ -1177,7 +1177,7 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 				} else {
 					recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
 				}
-				go d.RefreshFabricFwd()
+				d.RefreshFabricFwd()
 			}
 			d.removeStableRethLinkLocal(rgID)
 			d.clearRethServicesForRG(rgID)
