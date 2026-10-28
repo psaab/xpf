@@ -272,28 +272,146 @@ func TestSendFailoverAckFrameOneRGBatchAckDecodes17102(t *testing.T) {
 	}
 }
 
+// swapFailConn17102 is a broken conn whose first Write swaps the
+// SessionSync's active conn to a healthy replacement before returning
+// the write error (mid-write active-conn change, M1 divergence window).
+// It needs a back-pointer to the SessionSync, installed after construction.
+type swapFailConn17102 struct {
+	failoverFailConn17102
+	ss      *SessionSync
+	repl    net.Conn
+	swapped bool
+}
+
+func (c *swapFailConn17102) Write(b []byte) (int, error) {
+	if !c.swapped && c.ss != nil {
+		c.swapped = true
+		c.ss.mu.Lock()
+		c.ss.conn1 = c.repl
+		// Make conn1 the preferred fabric so a wrapper that (incorrectly)
+		// re-resolves the active conn after the write lands on repl.
+		c.ss.conn0Gen = 1
+		c.ss.conn1Gen = 0
+		c.ss.peerIncarnation = 0
+		c.ss.mu.Unlock()
+	}
+	return c.failoverFailConn17102.Write(b)
+}
+
+// healthyConn17102 is a conn that accepts writes and records Close.
+type healthyConn17102 struct {
+	mu     sync.Mutex
+	closed bool
+}
+
+func (c *healthyConn17102) Read([]byte) (int, error) { return 0, io.EOF }
+func (c *healthyConn17102) Write(b []byte) (int, error) {
+	return len(b), nil
+}
+func (c *healthyConn17102) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+	return nil
+}
+func (c *healthyConn17102) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+func (c *healthyConn17102) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 4785}
+}
+func (c *healthyConn17102) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 4785}
+}
+func (c *healthyConn17102) SetDeadline(time.Time) error      { return nil }
+func (c *healthyConn17102) SetReadDeadline(time.Time) error  { return nil }
+func (c *healthyConn17102) SetWriteDeadline(time.Time) error { return nil }
+
+var _ net.Conn = (*healthyConn17102)(nil)
+
 // TestFailoverRoundTripSendFailureDisconnectsUsedConn17102 pins fold M1:
-// on send failure the wrapper disconnects the conn failoverRoundTrip
-// actually wrote to (UsedConn), returned in the outcome, not a conn
-// re-resolved by the wrapper before the round trip.
+// on send failure every wrapper disconnects the conn failoverRoundTrip
+// actually wrote to (failoverTripResult.UsedConn), not a conn
+// re-resolved by the wrapper. The active conn changes mid-write: the
+// broken conn swaps in a healthy replacement as the preferred active
+// conn before returning its write error. Pre-fix (549f631b69) the
+// wrappers captured getActiveConn() BEFORE the round trip and the
+// round trip re-resolved it internally, but with only one installed
+// conn the two resolutions coincide; here the swap makes them
+// diverge: a wrapper that disconnects anything but UsedConn either
+// disconnects the healthy replacement (wrong conn torn down, healthy
+// peer link killed) or leaves the broken used conn installed. The
+// direct failoverRoundTrip assertion pins UsedConn itself.
 func TestFailoverRoundTripSendFailureDisconnectsUsedConn17102(t *testing.T) {
-	broken := &failoverFailConn17102{writeErr: errors.New("write boom")}
-	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
-	ss.outboundBulkAcked.Store(true)
-	ss.mu.Lock()
-	ss.conn0 = broken
-	ss.stats.Connected.Store(true)
-	ss.mu.Unlock()
-	if _, err := ss.SendFailover(3); err == nil || !strings.Contains(err.Error(), "failed to send") {
-		t.Fatalf("err = %v, want failed-to-send", err)
+	wrappers := []struct {
+		name string
+		call func(ss *SessionSync) error
+	}{
+		{"SendFailover", func(ss *SessionSync) error { _, err := ss.SendFailover(3); return err }},
+		{"SendFailoverBatch", func(ss *SessionSync) error { _, err := ss.SendFailoverBatch([]int{1, 2}); return err }},
+		{"SendFailoverCommit", func(ss *SessionSync) error { return ss.SendFailoverCommit(3, 42) }},
+		{"SendFailoverCommitBatch", func(ss *SessionSync) error { return ss.SendFailoverCommitBatch([]int{1, 2}, 42) }},
 	}
-	if !broken.closed {
-		t.Fatal("send failure did not disconnect the used (broken) conn via UsedConn (M1)")
+	for _, w := range wrappers {
+		t.Run(w.name, func(t *testing.T) {
+			broken := &swapFailConn17102{failoverFailConn17102: failoverFailConn17102{writeErr: errors.New("write boom")}}
+			repl := &healthyConn17102{}
+			ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+			broken.ss = ss
+			broken.repl = repl
+			ss.outboundBulkAcked.Store(true)
+			ss.mu.Lock()
+			ss.conn0 = broken
+			// peerIncarnation 0 == conn0Gen 0, so conn0 is preferred
+			// until the swap stamps conn0Gen=1.
+			ss.stats.Connected.Store(true)
+			ss.mu.Unlock()
+			if err := w.call(ss); err == nil || !strings.Contains(err.Error(), "failed to send") {
+				t.Fatalf("err = %v, want failed-to-send", err)
+			}
+			if !broken.swapped {
+				t.Fatal("mid-write swap never happened: test does not exercise the M1 divergence window")
+			}
+			if !broken.closed {
+				t.Fatal("send failure did not disconnect the used (broken) conn via UsedConn (M1)")
+			}
+			if repl.isClosed() {
+				t.Fatal("send failure disconnected the healthy replacement conn: wrapper disconnected a re-resolved conn, not UsedConn (M1)")
+			}
+			ss.mu.Lock()
+			c0, c1 := ss.conn0, ss.conn1
+			ss.mu.Unlock()
+			if c0 != nil {
+				t.Fatal("broken used conn still installed in conn0 after send-failure disconnect (M1)")
+			}
+			if c1 != net.Conn(repl) {
+				t.Fatalf("healthy replacement conn1 = %v, want untouched repl after UsedConn disconnect", c1)
+			}
+		})
 	}
-	ss.mu.Lock()
-	remaining := ss.conn0
-	ss.mu.Unlock()
-	if remaining != nil {
-		t.Fatal("broken used conn still installed after send-failure disconnect (M1)")
-	}
+	t.Run("failoverRoundTripUsedConn", func(t *testing.T) {
+		broken := &swapFailConn17102{failoverFailConn17102: failoverFailConn17102{writeErr: errors.New("write boom")}}
+		repl := &healthyConn17102{}
+		ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+		broken.ss = ss
+		broken.repl = repl
+		ss.outboundBulkAcked.Store(true)
+		ss.mu.Lock()
+		ss.conn0 = broken
+		ss.stats.Connected.Store(true)
+		ss.mu.Unlock()
+		res := ss.failoverRoundTrip(syncMsgFailover, []int{3}, true, 0, true, nil,
+			func(reqID uint64) []byte { return encodeFailoverSingleReqPayload(3, reqID) })
+		if res.Outcome != failoverTripSendFailed {
+			t.Fatalf("outcome = %v, want send-failed", res.Outcome)
+		}
+		if res.UsedConn != net.Conn(broken) {
+			t.Fatalf("failoverTripResult.UsedConn = %v, want the broken conn actually written to (M1)", res.UsedConn)
+		}
+		if !broken.swapped {
+			t.Fatal("mid-write swap never happened")
+		}
+	})
 }

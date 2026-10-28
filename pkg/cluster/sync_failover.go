@@ -696,6 +696,11 @@ func (s *SessionSync) sendFailoverAckFrame(conn net.Conn, msgType uint8, rgIDs [
 		payload[1] = status
 		binary.LittleEndian.PutUint64(payload[2:10], reqID)
 		copy(payload[10:], detail)
+		// #17093: clamp the single-ack detail to its per-type cap in
+		// the unified sender (master's sendFailoverResult clamp,
+		// preserved on merge); batch payloads are clamped inside
+		// encodeFailoverBatchAckPayload.
+		payload = clampFailoverAckPayload(msgType, payload)
 	} else {
 		payload = encodeFailoverBatchAckPayload(rgIDs, status, reqID, detail)
 	}
