@@ -36,7 +36,9 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 		defer inbandNS.Close()
 		defer mgmtConn.Close()
 		defer inbandConn.Close()
-		defer inband6Conn.Close()
+		if inband6Conn != nil {
+			defer inband6Conn.Close()
+		}
 
 		if err := os.WriteFile("/proc/sys/net/ipv4/udp_l3mdev_accept", []byte("1"), 0644); err != nil {
 			t.Skipf("cannot enable UDP VRF receive acceptance in the private netns: %v", err)
@@ -51,20 +53,28 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 			t.Fatalf("duplicate inband manager socket: %v", err)
 		}
 		defer inbandFile.Close()
-		inband6File, err := inband6Conn.File()
-		if err != nil {
-			t.Fatalf("duplicate inband IPv6 manager socket: %v", err)
-		}
-		defer inband6File.Close()
-		cmd := exec.Command(os.Args[0], "-test.run=^TestSNMPInbandPollWithManagementVRF16781$", "-test.v")
-		childEnv := make([]string, 0, len(os.Environ())+1)
+		extraFiles := []*os.File{mgmtFile, inbandFile}
+		childEnv := make([]string, 0, len(os.Environ())+2)
 		for _, entry := range os.Environ() {
-			if !strings.HasPrefix(entry, "XPF_SNMP_INBAND_CHILD_16781=") {
+			if !strings.HasPrefix(entry, "XPF_SNMP_INBAND_CHILD_16781=") &&
+				!strings.HasPrefix(entry, "XPF_SNMP_INBAND_IPV6_CHILD_17800=") {
 				childEnv = append(childEnv, entry)
 			}
 		}
-		cmd.Env = append(childEnv, "XPF_SNMP_INBAND_CHILD_16781=1")
-		cmd.ExtraFiles = []*os.File{mgmtFile, inbandFile, inband6File}
+		childEnv = append(childEnv, "XPF_SNMP_INBAND_CHILD_16781=1")
+		if inband6Conn != nil {
+			inband6File, err := inband6Conn.File()
+			if err != nil {
+				t.Logf("IPv6 in-band cell unavailable: duplicate manager socket: %v", err)
+			} else {
+				defer inband6File.Close()
+				extraFiles = append(extraFiles, inband6File)
+				childEnv = append(childEnv, "XPF_SNMP_INBAND_IPV6_CHILD_17800=1")
+			}
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestSNMPInbandPollWithManagementVRF16781$", "-test.v")
+		cmd.Env = childEnv
+		cmd.ExtraFiles = extraFiles
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("isolated SNMP in-band scenario failed: %v\n%s", err, output)
@@ -93,7 +103,10 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 	}
 	mgmtConn := adopt(3, "mgmt-manager-udp")
 	inbandConn := adopt(4, "inband-manager-udp")
-	inband6Conn := adopt(5, "inband-manager-udp6")
+	var inband6Conn *net.UDPConn
+	if os.Getenv("XPF_SNMP_INBAND_IPV6_CHILD_17800") == "1" {
+		inband6Conn = adopt(5, "inband-manager-udp6")
+	}
 
 	agent := NewAgentWithPaths(&config.SNMPConfig{
 		Communities: map[string]*config.SNMPCommunity{
@@ -138,14 +151,17 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 		poll(t, inbandConn, "198.51.100.1")
 	})
 	t.Run("in-band IPv6 source pinned to trust address #17800", func(t *testing.T) {
+		if inband6Conn == nil {
+			t.Skip("IPv6 in-band fixture setup is unavailable")
+		}
 		poll(t, inband6Conn, "2001:db8:178::1")
 	})
 }
 
 // snmpInbandFixture16781 builds the appliance netns with fxp0 enslaved to
-// vrf-mgmt (192.0.2.1) and trust0 in the main table (198.51.100.1 and
-// 2001:db8:178::1), plus two manager netnses: one reachable only via the
-// management VRF, one in-band.
+// vrf-mgmt (192.0.2.1) and trust0 in the main table (198.51.100.1, plus an
+// optional IPv6 address), with two manager netnses: one reachable only via
+// the management VRF and one in-band.
 func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.UDPConn, *net.UDPConn, *net.UDPConn) {
 	t.Helper()
 	runtime.LockOSThread()
@@ -253,8 +269,10 @@ func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.
 		t.Fatal(err)
 	}
 	trust6Addr.Flags = int(unix.IFA_F_NODAD)
+	trust6Available := true
 	if err := netlink.AddrAdd(trust0, trust6Addr); err != nil {
-		t.Skipf("cannot assign IPv6 trust address in private netns: %v", err)
+		t.Logf("IPv6 in-band cell unavailable: assign trust address: %v", err)
+		trust6Available = false
 	}
 
 	setupManager := func(ns netns.NsHandle, ifName, cidr, listenIP string) *net.UDPConn {
@@ -275,27 +293,30 @@ func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.
 	}
 	mgmtConn := setupManager(managerNS, "manager0", "192.0.2.2/24", "192.0.2.2")
 	inbandConn := setupManager(inbandNS, "inband0", "198.51.100.2/24", "198.51.100.2")
-	inband6Addr, err := netlink.ParseAddr("2001:db8:178::2/64")
-	if err != nil {
-		t.Fatal(err)
-	}
-	inband6Addr.Flags = int(unix.IFA_F_NODAD)
-	if err := netlink.AddrAdd(byName("inband0"), inband6Addr); err != nil {
-		mgmtConn.Close()
-		inbandConn.Close()
-		t.Skipf("cannot assign IPv6 in-band manager address in private netns: %v", err)
-	}
-	inband6Conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("2001:db8:178::2")})
-	if err != nil {
-		mgmtConn.Close()
-		inbandConn.Close()
-		t.Skipf("cannot listen on IPv6 in-band manager address: %v", err)
+	var inband6Conn *net.UDPConn
+	if trust6Available {
+		inband6Addr, err := netlink.ParseAddr("2001:db8:178::2/64")
+		if err != nil {
+			t.Fatal(err)
+		}
+		inband6Addr.Flags = int(unix.IFA_F_NODAD)
+		if err := netlink.AddrAdd(byName("inband0"), inband6Addr); err != nil {
+			t.Logf("IPv6 in-band cell unavailable: assign manager address: %v", err)
+		} else {
+			inband6Conn, err = net.ListenUDP("udp6", &net.UDPAddr{IP: net.ParseIP("2001:db8:178::2")})
+			if err != nil {
+				t.Logf("IPv6 in-band cell unavailable: listen on manager address: %v", err)
+				inband6Conn = nil
+			}
+		}
 	}
 
 	if err := netns.Set(appliance); err != nil {
 		mgmtConn.Close()
 		inbandConn.Close()
-		inband6Conn.Close()
+		if inband6Conn != nil {
+			inband6Conn.Close()
+		}
 		t.Fatalf("restore appliance netns after opening manager sockets: %v", err)
 	}
 	return managerNS, inbandNS, mgmtConn, inbandConn, inband6Conn
