@@ -802,9 +802,9 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // subprogram call — see `land_gate` below. As two inline matches
     // over `land_disposition_for_packet` (here + ctrl-disabled) LLVM
     // duplicated the WG-key construction and both map walks under
-    // every calling state; the historical #15854 measurement was 963340
-    // processed insns: 3.67% below the 1,000,000 kernel cap, but 113340
-    // above the 850,000-instruction install floor, so it fails the margin gate.
+    // every calling state. The outlined gate shares this work across
+    // paths; the dated #15854 verifier results live in
+    // docs/log/15854.md.
     if land_gate(&parsed, ingress_ifindex) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_LAND_DROP);
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
@@ -860,15 +860,12 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // checks the READY flag, reads the heartbeat and applies the
     // timeout, returning the slot packed with a failure code. The
     // four failure arms that used to sit inline here each carried a
-    // trace call plus a degraded-local check, and the verifier
-    // re-walked the packed trace callee under every one of those
-    // calling states (keeping the four traces separate measured
-    // 953428 processed insns; this merged form measures ~816k — see
-    // docs/log/15854.md). The merged arm below preserves each
-    // failure's stage, reason and trace slot exactly (u32::MAX for a
-    // missing binding, the resolved slot otherwise) and the same
-    // degraded-local pass/drop decision; only the trace call is
-    // shared. The #5173 call-site count moves 12 -> 9 with it.
+    // trace call plus a degraded-local check, and the verifier re-walked
+    // the packed trace callee under each calling state. Sharing the call
+    // preserves each failure's stage, reason, trace slot (u32::MAX for a
+    // missing binding, resolved slot otherwise), and degraded-local
+    // pass/drop decision. Historical measurements live in
+    // docs/log/15854.md.
     let ready = binding_ready_slot(ingress_ifindex, rx_queue, ctrl.heartbeat_timeout_ms);
     let ready_code = (ready >> 32) as u32;
     let ready_slot = ready as u32;
@@ -2618,13 +2615,11 @@ fn should_fallback_early(pkt: &ParsedPacket, ingress_domain: u32) -> bool {
 //
 // #15854: this replaces the two inline `is_land` + match blocks
 // (healthy + ctrl-disabled) over a separate outlined resolver. The
-// inline matches duplicated the key construction and both map walks
-// under every calling state — the #15843 regression that took the
-// tracked object from 920733 to 963340 processed insns (3.67%
-// headroom) and over the guest kernel's 1M cap. One outlined call
-// per path is the record_trace_packed (#15645) shape: the verifier
-// walks the gate once. Do not re-inline without re-measuring
-// through cmd/shimverify.
+// inline matches duplicated the key construction and both map walks under
+// every calling state. One outlined call per path shares the work, in the
+// `record_trace_packed` (#15645) shape: the verifier walks the gate once.
+// Historical #15854 verifier results live in docs/log/15854.md. Do not
+// re-inline without re-measuring through cmd/shimverify.
 #[inline(never)]
 fn land_gate(pkt: &ParsedPacket, ingress_ifindex: u32) -> bool {
     if !is_land(&pkt.src_addr, &pkt.dst_addr) {
