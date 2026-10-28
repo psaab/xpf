@@ -390,18 +390,19 @@ func IsSensitiveHistoryLine(line string) bool {
 // tokens (for `edit`, the resolved NEW cursor — entering a secret
 // stanza is navigation, but a value token after a secret keyword on
 // that line, e.g. `edit snmp community <s>`, is a credential).
-// Every config mutation verb is judged on editPath + its lexed path
-// tokens; this includes delete/activate/deactivate and multi-path
-// mutations (copy/rename/insert/annotate). `top`/`up <cmd>` prefixes
-// are first resolved to their target cursor (config.ParseTopUpPrefix15082)
-// so the inner command is judged where it will run. Operational lines,
-// bare navigation, show/… are judged on their own tokens with no cursor.
+// Every config mutation verb is judged on its resolved path(s): the
+// edit cursor plus lexed path tokens, with copy/rename endpoints,
+// insert element/reference, and annotate target resolved separately.
+// `top`/`up <cmd>` prefixes are first resolved to their target cursor
+// (config.ParseTopUpPrefix15082), so the inner command is judged where
+// it will run. Operational lines, bare navigation, show/… are judged
+// on their own tokens with no cursor.
 //
 // Fail-closed arms beyond the SSOT, deliberate for a history file
 // (over-suppress costs one history entry; under-suppress persists a
 // credential; in-memory recall works either way):
 //
-// - Any config mutation line that does not lex cleanly is sensitive:
+//   - Any config mutation line that does not lex cleanly is sensitive:
 //   the unlexed tail may carry a credential the lexer never produced
 //   (the #16726/#15167 doctrine).
 //   - Bare `password`/`secret` tokens suppress wherever they appear,
@@ -447,13 +448,13 @@ func IsSensitiveHistoryLineAt(editPath []string, line string) bool {
 	return sensitiveTokensAt(editPath, tokens, lexOK, line)
 }
 
-// Recursive top/up calls pass lexOK=true with the inner tokens already
-// lexed, so no re-joined string is ever re-judged with different
-// tokenization than the executor's.
+// Recursive top/up calls retain the parser's raw innerLine alongside its
+// lexed tokens. Path splitters need the original quote provenance (e.g. a
+// quoted `to` within a copy/rename endpoint).
 func sensitiveTokensAt(editPath []string, tokens []string, lexOK bool, line string) bool {
 	switch tokens[0] {
 	case "top", "up":
-		target, inner, _, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(editPath), line)
+		target, inner, innerLine, ok := config.ParseTopUpPrefix15082(config.NormalizeEditPathTokens(editPath), line)
 		if !ok {
 			// Malformed prefix with a trailing command: the inner
 			// command's target cannot be resolved — fail closed.
@@ -466,15 +467,60 @@ func sensitiveTokensAt(editPath []string, tokens []string, lexOK bool, line stri
 		if !lexOK {
 			return true
 		}
-		return sensitiveTokensAt(target, inner, true, strings.Join(inner, " "))
+		return sensitiveTokensAt(target, inner, true, innerLine)
 	case "set", "edit":
 		if !lexOK {
 			return true
 		}
-		resolved := append(append([]string{}, config.NormalizeEditPathTokens(editPath)...), tokens[1:]...)
-		return config.IsSecretValueInPath16794(resolved)
+		return config.IsSecretValueInPath16794(resolvedHistoryPath(editPath, tokens[1:]))
+	case "copy", "rename":
+		if !lexOK {
+			return true
+		}
+		src, dst, ok := config.ParseCopyRenameCommand(line)
+		if !ok {
+			return true
+		}
+		cursor := config.NormalizeEditPathTokens(editPath)
+		sourcePath := src
+		if len(cursor) > 0 {
+			sourcePath = make([]string, 0, len(cursor)+len(src))
+			sourcePath = append(sourcePath, cursor...)
+			sourcePath = append(sourcePath, src...)
+		}
+		if config.IsSecretValueInPath16794(sourcePath) {
+			return true
+		}
+		destinationPath := config.ResolveCopyRenameDestination(cursor, src, dst)
+		return config.IsSecretValueInPath16794(destinationPath)
+	case "insert":
+		if !lexOK {
+			return true
+		}
+		elem, ref, _, ok := config.ParseInsertCommandTokens(line)
+		if !ok {
+			return true
+		}
+		elemPath := resolvedHistoryPath(editPath, elem)
+		if config.IsSecretValueInPath16794(elemPath) {
+			return true
+		}
+		if len(ref) > len(elemPath) {
+			return true
+		}
+		refPath := config.InsertRefPath(elemPath, ref)
+		return config.IsSecretValueInPath16794(refPath)
+	case "annotate":
+		if !lexOK {
+			return true
+		}
+		path, _, ok := config.ParseAnnotateCommandStrict16522(line)
+		if !ok {
+			return true
+		}
+		return config.IsSecretValueInPath16794(resolvedHistoryPath(editPath, path))
 	default:
-		if _, mutation := config.ConfigMutationVerb(line); mutation {
+		if config.IsConfigMutationVerb(tokens[0]) {
 			if !lexOK {
 				return true
 			}
@@ -482,11 +528,7 @@ func sensitiveTokensAt(editPath []string, tokens []string, lexOK bool, line stri
 			// the same tokens with that cursor catches context-gated values
 			// on every path-bearing verb, not just set/edit. The mutation
 			// verb is not part of the config path.
-			if len(editPath) == 0 {
-				return config.IsSecretValueInPath16794(tokens[1:])
-			}
-			resolved := append(append([]string{}, config.NormalizeEditPathTokens(editPath)...), tokens[1:]...)
-			return config.IsSecretValueInPath16794(resolved)
+			return config.IsSecretValueInPath16794(resolvedHistoryPath(editPath, tokens[1:]))
 		}
 		// Operational / other lines do not act relative to the cursor;
 		// judge the line's own tokens through the same SSOT union
@@ -495,6 +537,16 @@ func sensitiveTokensAt(editPath []string, tokens []string, lexOK bool, line stri
 		// the flat bare password/secret arm in the caller.
 		return config.IsSecretValueInPath16794(tokens)
 }
+}
+
+func resolvedHistoryPath(editPath, path []string) []string {
+	if len(editPath) == 0 {
+		return path
+	}
+	cursor := config.NormalizeEditPathTokens(editPath)
+	resolved := make([]string, 0, len(cursor)+len(path))
+	resolved = append(resolved, cursor...)
+	return append(resolved, path...)
 }
 
 // maxPersistedHistoryLines bounds the on-disk history file. readline's
