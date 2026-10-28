@@ -62,8 +62,10 @@ use promote::should_keep_synced_hit_transient;
 
 mod forward_commit;
 mod resolution;
-mod worker_commands;
-mod revalidation;
+// #17207: widened from private to `pub(in crate::afxdp)` so
+// afxdp/mod.rs can name these leaves directly (see there).
+pub(in crate::afxdp) mod worker_commands;
+pub(in crate::afxdp) mod revalidation;
 mod tx_cancel;
 mod resolve;
 #[cfg(test)]

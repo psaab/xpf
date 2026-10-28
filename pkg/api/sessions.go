@@ -1196,17 +1196,6 @@ func ntohs(v uint16) uint16 {
 	return binary.NativeEndian.Uint16(b[:])
 }
 
-// uint32ToIP converts a dataplane IPv4 field to net.IP. Session-map
-// values hold IP bytes in network order read as a NATIVE-endian u32
-// (the Rust helper publishes u32::from_ne_bytes(octets)); BigEndian
-// here reversed NAT addresses in the REST session view on
-// little-endian hosts (#1827 PR-3 r1, AGY finding).
-func uint32ToIP(v uint32) net.IP {
-	ip := make(net.IP, 4)
-	binary.NativeEndian.PutUint32(ip, v)
-	return ip
-}
-
 // sessionEgressKey is config.SessionIfaceKey (#16065): the derivation
 // is shared with the CLI, gRPC and daemon tables so no surface can
 // resolve a unit's device differently.
@@ -1464,7 +1453,7 @@ func (q *sessionQuery) matchV4(key dataplane.SessionKey, val dataplane.SessionVa
 		}
 	}
 	if q.snatPool != "" {
-		if val.Flags&dataplane.SessFlagSNAT == 0 || !config.IPInNets(uint32ToIP(val.NATSrcIP), q.snatPoolNets) {
+		if val.Flags&dataplane.SessFlagSNAT == 0 || !config.IPInNets(val.NATSrcAddr(), q.snatPoolNets) {
 			return false
 		}
 	}
@@ -1800,14 +1789,14 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 	var natParts []string
 	if val.Flags&dataplane.SessFlagSNAT != 0 {
 		port := effectiveNATSrcPort(val.Flags, ntohs(val.NATSrcPort), ntohs(key.SrcPort))
-		natParts = append(natParts, fmt.Sprintf("SNAT %s:%d", uint32ToIP(val.NATSrcIP), port))
-		se.NATSrcAddr = uint32ToIP(val.NATSrcIP).String()
+		natParts = append(natParts, fmt.Sprintf("SNAT %s:%d", val.NATSrcAddr(), port))
+		se.NATSrcAddr = val.NATSrcAddr().String()
 		se.NATSrcPort = port
 	}
 	if val.Flags&dataplane.SessFlagDNAT != 0 {
 		port := effectiveNATDstPort(val.Flags, ntohs(val.NATDstPort), ntohs(key.DstPort))
-		natParts = append(natParts, fmt.Sprintf("DNAT %s:%d", uint32ToIP(val.NATDstIP), port))
-		se.NATDstAddr = uint32ToIP(val.NATDstIP).String()
+		natParts = append(natParts, fmt.Sprintf("DNAT %s:%d", val.NATDstAddr(), port))
+		se.NATDstAddr = val.NATDstAddr().String()
 		se.NATDstPort = port
 	}
 	se.NAT = strings.Join(natParts, "; ")

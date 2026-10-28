@@ -74,23 +74,26 @@ func SweepHelperState(path string, opts SweepOpts) error {
 	}
 	var canonicalErr error
 	if !skipCanonical {
-		info, lerr := os.Lstat(path)
-		switch {
-		case lerr == nil && info.Mode()&os.ModeSymlink != 0:
-			canonicalErr = fmt.Errorf("%srefusing to sweep symlinked helper state %s: link target is out of erase scope", p, path)
-		case lerr != nil && !os.IsNotExist(lerr):
-			canonicalErr = fmt.Errorf("%sinspect helper state %s: %w", p, path, lerr)
-		case lerr == nil:
-			hardlinks, herr := configstore.CollectHardlinkedFiles(path, "")
+		if err := configstore.EraseFileForReset(path); err != nil {
+			var symErr *configstore.FactoryResetSymlinkError
+			var linkErr *configstore.FactoryResetHardlinkError
 			switch {
-			case herr != nil:
-				canonicalErr = fmt.Errorf("%sinspect hard links for helper state %s: %w", p, path, herr)
-			case len(hardlinks) != 0:
-				canonicalErr = fmt.Errorf("%srefusing to erase hard-linked helper state %s: %w", p, path, &configstore.FactoryResetHardlinkError{Paths: hardlinks})
+			case errors.As(err, &symErr):
+				canonicalErr = fmt.Errorf("%srefusing to sweep symlinked helper state %s: link target is out of erase scope", p, path)
+			case errors.As(err, &linkErr):
+				canonicalErr = fmt.Errorf("%srefusing to erase hard-linked helper state %s: %w", p, path, linkErr)
+			case errors.Is(err, configstore.ErrEraseInspect):
+				canonicalErr = fmt.Errorf("%sinspect helper state %s: %w", p, path, err)
+			case errors.Is(err, configstore.ErrEraseInspectLinks):
+				canonicalErr = fmt.Errorf("%sinspect hard links for helper state %s: %w", p, path, err)
+			case errors.Is(err, configstore.ErrEraseRemove):
+				canonicalErr = fmt.Errorf("%sremove helper state file %s: %w", p, path, err)
 			default:
-				if rerr := os.Remove(path); rerr != nil && !os.IsNotExist(rerr) {
-					canonicalErr = fmt.Errorf("%sremove helper state file %s: %w", p, path, rerr)
-				}
+				// Non-regular refusal: no historic helper spelling
+				// (the old code lumped the class into its remove
+				// error); keep the primitive's wording under the
+				// caller's prefix.
+				canonicalErr = fmt.Errorf("%s%w", p, err)
 			}
 		}
 		if canonicalErr != nil {
