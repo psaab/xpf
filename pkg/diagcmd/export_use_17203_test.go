@@ -24,20 +24,29 @@ func TestAllExportedDiagBudgetSymbolsAreUsed17203(t *testing.T) {
 	// (not "every export in the package") so unrelated diagcmd
 	// exports with in-package-only use do not churn this list.
 	// Only the entry points are listed: the tuning constants
-	// (PingPacketInterval, PingExecSlack, …) are inputs to
-	// PingExecTimeout inside this package, so their "use" is the
-	// function itself — orphaned constants cannot be detected this
-	// way and are instead pinned by TestPingExecTimeoutTable17203.
+	// (PingPacketInterval, PingExecSlack, …) and the request-exec
+	// constants (RequestExecTimeout, RequestExecWaitDelay) are inputs
+	// to the helpers below inside this package, so their "use" is the
+	// helpers themselves — orphaned constants cannot be detected this
+	// way and are instead pinned by TestPingExecTimeoutTable17203
+	// and TestExecHelpers17203.
 	want := []string{
 		"TracerouteTimeout",
-		"RequestExecTimeout", "RequestExecWaitDelay",
 		"PingExecTimeout", "ClampDiagTimeout", "PingClientTimeout",
 		"RunTimeout", "OutputTimeout", "CombinedOutputTimeout",
+	}
+	// Function entry points must be *called* (a selector mention,
+	// e.g. in a comment-adjacent alias, is not a call site).
+	wantCalled := map[string]bool{
+		"PingExecTimeout": true, "ClampDiagTimeout": true,
+		"PingClientTimeout": true, "RunTimeout": true,
+		"OutputTimeout": true, "CombinedOutputTimeout": true,
 	}
 
 	// Repository root is three directories above pkg/diagcmd.
 	root := filepath.Join("..", "..")
 	used := map[string]bool{}
+	called := map[string]bool{}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -62,8 +71,30 @@ func TestAllExportedDiagBudgetSymbolsAreUsed17203(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		// Pure alias declarations (`const x = diagcmd.X`) are not use:
+		// a dead alias in pkg/api / pkg/grpcapi satisfied this census
+		// for RequestExecTimeout while nothing read the alias (#17203
+		// fold). Collect those selector nodes and exclude them.
+		alias := map[*ast.SelectorExpr]bool{}
 		ast.Inspect(f, func(n ast.Node) bool {
-			if sel, ok := n.(*ast.SelectorExpr); ok {
+			if vs, ok := n.(*ast.ValueSpec); ok {
+				for _, v := range vs.Values {
+					if sel, ok := v.(*ast.SelectorExpr); ok {
+						alias[sel] = true
+					}
+				}
+			}
+			return true
+		})
+		ast.Inspect(f, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "diagcmd" {
+						called[sel.Sel.Name] = true
+					}
+				}
+			}
+			if sel, ok := n.(*ast.SelectorExpr); ok && !alias[sel] {
 				if id, ok := sel.X.(*ast.Ident); ok && id.Name == "diagcmd" {
 					used[sel.Sel.Name] = true
 				}
@@ -80,6 +111,9 @@ func TestAllExportedDiagBudgetSymbolsAreUsed17203(t *testing.T) {
 	for _, name := range want {
 		if !used[name] {
 			orphaned = append(orphaned, name)
+		}
+		if wantCalled[name] && !called[name] {
+			orphaned = append(orphaned, name+" (never called)")
 		}
 	}
 	sort.Strings(orphaned)

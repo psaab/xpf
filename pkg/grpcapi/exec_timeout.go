@@ -25,10 +25,10 @@ import (
 // pkg/api and the remote CLI. Aliases keep package-local call sites
 // short. The 15s/5s values mirror the apply-path contract in
 // pkg/daemon/exec_timeout.go (#1794, contract reference).
-const (
-	requestExecTimeout   = diagcmd.RequestExecTimeout
-	requestExecWaitDelay = diagcmd.RequestExecWaitDelay
-)
+// requestExecWaitDelay is live (server_diag_ping.go); there is no
+// timeout alias — diagcmd.RequestExecTimeout is reached only
+// via the diagcmd helpers below, so a local copy would have no reader.
+const requestExecWaitDelay = diagcmd.RequestExecWaitDelay
 
 // Concurrency bounding for request-path diagnostic forks (#6552).
 //

@@ -16,12 +16,10 @@ import (
 // traceroute budgets likewise live in diagcmd (PingExecTimeout,
 // TracerouteTimeout, DiagExecCeiling — #1819, #15235).
 
-// Aliases so existing package-local call sites and tests keep their
-// short names while diagcmd owns the values.
-const (
-	requestExecTimeout   = diagcmd.RequestExecTimeout
-	requestExecWaitDelay = diagcmd.RequestExecWaitDelay
-)
+// requestExecWaitDelay is live (system.go diagRun); there is no
+// timeout alias — diagcmd.RequestExecTimeout is reached only
+// via diagcmd.RunTimeout, so a local copy would have no reader.
+const requestExecWaitDelay = diagcmd.RequestExecWaitDelay
 
 func runTimeout(ctx context.Context, name string, args ...string) error {
 	return diagcmd.RunTimeout(ctx, name, args...)
