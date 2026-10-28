@@ -53,8 +53,9 @@ func snapshotShapeStructs8892() []any {
 // (userspace-dp/src/protocol/snapshot.rs); the Rust cell
 // config_snapshot_config_stays_opaque_to_helper17244 in that file pins
 // that type so this exemption expires if Rust ever types the field.
-// (#17244: before this exemption 988 of 1692 digest lines were this
-// subtree, and every config-type edit moved the "wire" golden.)
+// (#17244: 988/1692 was a stale pre-v77 measurement. On #18326's v77 baseline
+// the subtree is 1018/1725 lines before exclusion; 707 lines remain in this
+// digest after the opaque ConfigSnapshot.Config exemption.)
 var opaqueToHelper8892 = map[string]bool{
 	"ConfigSnapshot.Config": true,
 }
