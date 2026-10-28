@@ -197,6 +197,16 @@ type Manager struct {
 	// restartAttemptInProgress distinguishes a supervisor retry from ordinary
 	// Compile bring-up, which is allowed to end a prior crash episode.
 	restartAttemptInProgress bool
+	// bringUpGen is the generation spawned by the in-progress
+	// ensureProcessLocked bring-up (0 = none). A child that dies
+	// before proving ready is that bring-up's failure, not a fresh
+	// unexpected exit: stopLocked must not crash-charge it (#18394).
+	bringUpGen uint64
+	// retryChildExitCountedLocked records that stopLocked already
+	// routed the current supervisor retry's published child exit
+	// through the crash handler (counted + charged), so
+	// ensureProcessLocked's deferred NM-1 charge must not fire again.
+	retryChildExitCountedLocked bool
 	// helperSupervisorObserver is a wake-only callback notified when the
 	// supervised helper changes between running and stopped. It is called
 	// under m.mu and MUST NOT call back into Manager; the daemon observer only
