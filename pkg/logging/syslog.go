@@ -182,7 +182,7 @@ type SyslogClient struct {
 	// Send/SendBinary/Connect/reconnect check it both before and after any
 	// operation that can race Close. The separate connMu lets Close detach and
 	// close a socket without waiting for s.mu, which an in-flight Write holds.
-	closed atomic.Bool
+	closed      atomic.Bool
 	countsFinal atomic.Bool // #17855: set when the writer goroutine exits after Close
 }
 
