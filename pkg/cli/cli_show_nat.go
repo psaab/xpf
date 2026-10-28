@@ -189,13 +189,20 @@ func (c *CLI) showNATSource(cfg *config.Config, args []string) error {
 	warnSessionScan(errV4, errV6)
 	fmt.Printf("Active SNAT sessions: %d\n", snatCount)
 
-	// Show NAT alloc fail counter. #3345: emit an explicit warning on a read
-	// failure rather than silently omitting the line — a degraded counter
-	// bridge must be distinguishable from "zero allocation failures".
-	if allocFails, err := c.dp.ReadGlobalCounter(dataplane.GlobalCtrNATAllocFail); err == nil {
+	// Show NAT alloc fail counter. #17193: via the shared snapshot.
+	// #3345: emit an explicit warning on a genuine read failure rather
+	// than silently omitting the line — a degraded counter bridge must
+	// be distinguishable from "zero allocation failures". #13274: an
+	// unavailable counter prints "unavailable", never a fabricated 0.
+	snap := dataplane.ReadGlobalCounters(c.dp, dataplane.GlobalCtrNATAllocFail)
+	switch {
+	case snap.IsUnavailable(dataplane.GlobalCtrNATAllocFail):
+		fmt.Printf("NAT allocation failures: %s\n", "unavailable")
+	case snap.Err != nil:
+		fmt.Printf("warning: NAT allocation-failure counter read failed (counter unavailable): %v\n", snap.Err)
+	default:
+		allocFails, _ := snap.Value(dataplane.GlobalCtrNATAllocFail)
 		fmt.Printf("NAT allocation failures: %d\n", allocFails)
-	} else {
-		fmt.Printf("warning: NAT allocation-failure counter read failed (counter unavailable): %v\n", err)
 	}
 
 	return nil
