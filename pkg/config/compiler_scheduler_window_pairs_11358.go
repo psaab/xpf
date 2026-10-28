@@ -128,12 +128,11 @@ func validateSchedulerWindowPairs11358(tree *ConfigTree, lenient bool) ([]string
 		return nil, nil, nil
 	}
 	findings := make(map[schedulerWindowKey11358]schedulerWindowFinding11358)
-	for _, nodeID := range []int{0, 1} {
-		view := tree.Clone()
-		vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-		if err := view.ExpandGroupsWithVarsTagged(vars); err != nil {
-			continue
-		}
+	// Tagged expansion, deliberately WITHOUT the generic fallback
+	// (#17222): this gate's tagged provenance views are not the plain
+	// generic view, and changing that silently would widen/narrow its
+	// verdicts beyond the recorded decision.
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{Tagged: true}) {
 		collectSchedulerWindowPairFindings11358(view, findings)
 	}
 	if len(findings) == 0 {
