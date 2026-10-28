@@ -68,20 +68,146 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 			return nil
 		}
 		// `interface { ge-0/0/0.0; }` is a legitimate multi-value
-		// container. A scalar followed by a braced child is not.
+		// container. A scalar followed by a braced child is not
+		// (`interface ge-0/0/0.0 { disable; }`).
 		if len(node.Children) > 0 && len(node.Keys) > 1 {
 			return report(node.Children[0].Name())
 		}
-		if len(node.Keys) == 1 && len(node.Children) == 0 {
-			return report(node.Name() + " requires a value")
-		}
+		// A braced member carrying its own children is a nested leaf
+		// (`interface { ge-0/0/0.0 { disable; } }`), not a member list.
 		for _, member := range node.Children {
 			if member != nil && len(member.Children) > 0 {
 				return report(member.Children[0].Name())
 			}
 		}
+		// Packed remainder (the pre-#17205 gate's mechanism, #17205
+		// fold B1): `interface ge-0/0/0.0 disable` packs a keyword tail
+		// behind a logical-interface value. That tail is NOT a second
+		// member even though `disable` alone is a legal bare name, so
+		// it is refused BY POSITION: an unbracketed tail token behind
+		// a unit-carrying first value that itself carries no unit is
+		// the remainder. The flat/display-set list spelling
+		// (`interface ge-0/0/1.0 ge-0/0/2.0`, replayed with no bracket
+		// provenance) has unit-carrying tail tokens and is judged
+		// member-by-member below, so it stays accepted; a bracketed
+		// hierarchical list is bracketed at Keys[2] and never reaches
+		// this arm.
 		if len(node.Keys) > 2 && !node.KeyBracketed(2) {
-			return report(node.Keys[2])
+			first := splitInterfaceRefWithDeclared(nil, node.Keys[1])
+			if first.HasUnit {
+				for _, member := range node.Keys[2:] {
+					tail := splitInterfaceRefWithDeclared(nil, member)
+					if !tail.HasUnit {
+						return report(member)
+					}
+				}
+			}
+		}
+		// The members are exactly what both compilers install, read
+		// through the shared dhcpRelayGroupInterfaces (#17205). Every
+		// member must be interface-shaped (ValidateInterfaceName plus
+		// the logical-unit rules); digit-less bare names such as
+		// `uplink`/`vrf-mgmt` are legal members.
+		members := dhcpRelayGroupInterfaces(node)
+		if len(members) == 0 {
+			return report(node.Name() + " requires a value")
+		}
+		for _, member := range members {
+			if !dhcpRelayInterfaceMemberValid(member) {
+				return report(member)
+			}
+		}
+		return nil
+	}
+	// checkGroupPacked judges the packed tail of a group instance
+	// node exactly as compileDHCPRelayV6Group9553 consumes its
+	// Keys[2:] run (#17205 fold B2): the gate previously iterated
+	// only inst.node.Children, so a packed unsupported knob or a bad
+	// interface member on that run strict-compiled clean while the
+	// compiler installed it (`group { G6 unsupported-knob interface
+	// badname; }` compiled with Interfaces=[badname]). The tail is
+	// instanceValueTail anchored on the instance name, so both the
+	// compact `group G6 …` node and a container instance child
+	// (`G6 …` as one leaf) are judged. Tokens walk with the
+	// compiler's own grammar: `interface` consumes following
+	// non-keyword tokens as members, scalars consume one value, any
+	// other token is an unsupported knob refused by name. Meta
+	// statements (apply-groups / apply-groups-except / apply-macro,
+	// #7029) are exempt exactly as the family and children loops
+	// exempt their braced spellings: the meta token and its
+	// value/macro-body tokens up to the next statement head are
+	// skipped, never judged as a knob or a member.
+	checkGroupPacked := func(inst struct {
+		name string
+		node *Node
+	}) error {
+		tail := instanceValueTail(inst.node, inst.name)
+		for i := 0; i < len(tail); {
+			if routingInstanceApplyMetaKeyword9323(tail[i]) {
+				i++
+				for i < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[i]) && !routingInstanceApplyMetaKeyword9323(tail[i]) {
+					i++
+				}
+				continue
+			}
+			switch tail[i] {
+			case "active-server-group":
+				v := ""
+				if i+1 < len(tail) {
+					v = tail[i+1]
+				}
+				n := &Node{Keys: []string{"active-server-group"}, IsLeaf: true}
+				if v != "" {
+					n.Keys = []string{"active-server-group", v}
+				}
+				if err := checkScalar(n); err != nil {
+					return err
+				}
+				if v == "" {
+					i++
+				} else {
+					i += 2
+				}
+			case "relay-agent-interface-id":
+				hasVal := i+1 < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[i+1])
+				n := &Node{Keys: []string{"relay-agent-interface-id"}, IsLeaf: true}
+				if hasVal {
+					n.Keys = []string{"relay-agent-interface-id", tail[i+1]}
+				}
+				if err := checkInterfaceID(n); err != nil {
+					return err
+				}
+				if hasVal {
+					i += 2
+				} else {
+					i++
+				}
+			case "interface":
+				j := i + 1
+				var members []string
+				for j < len(tail) && !dhcpRelayV6GroupKeyword9553(tail[j]) && !routingInstanceApplyMetaKeyword9323(tail[j]) {
+					members = append(members, tail[j])
+					j++
+				}
+				if len(members) == 0 {
+					return report("interface requires a value")
+				}
+				if len(members) > 1 && splitInterfaceRefWithDeclared(nil, members[0]).HasUnit {
+					for _, m := range members[1:] {
+						if !splitInterfaceRefWithDeclared(nil, m).HasUnit {
+							return report(m)
+						}
+					}
+				}
+				for _, m := range members {
+					if !dhcpRelayInterfaceMemberValid(m) {
+						return report(m)
+					}
+				}
+				i = j
+			default:
+				return report(tail[i])
+			}
 		}
 		return nil
 	}
@@ -110,43 +236,65 @@ func validateDHCPRelayDHCPv6AST(nodes []*Node, lenient bool) ([]string, error) {
 						return warnings, err
 					}
 				case "group":
-					for _, groupChild := range child.Children {
-						if groupChild == nil {
-							continue
+					// Judge exactly the instances the compiler compiles:
+					// namedInstances normalises the compact
+					// `group G6 { … }` and container `group { G6 { … } }`
+					// shapes onto one instance node per group (#17205).
+					// The packed tail of each instance node is judged
+					// first (checkGroupPacked, fold B2): the compiler
+					// consumes Keys[2:] of the same node, so a packed
+					// unsupported knob/member there must refuse even
+					// when the instance also carries braced children.
+					for _, inst := range namedInstances([]*Node{child}) {
+						if err := checkGroupPacked(inst); err != nil {
+							return warnings, err
 						}
-						if routingInstanceApplyMetaKeyword9323(groupChild.Name()) {
-							continue
-						}
-						switch groupChild.Name() {
-						case "active-server-group":
-							if err := checkScalar(groupChild); err != nil {
-								return warnings, err
+						for _, groupChild := range inst.node.Children {
+							if groupChild == nil {
+								continue
 							}
-						case "interface":
-							if err := checkInterface(groupChild); err != nil {
-								return warnings, err
+							if routingInstanceApplyMetaKeyword9323(groupChild.Name()) {
+								continue
 							}
-						case "relay-agent-interface-id":
-							if err := checkInterfaceID(groupChild); err != nil {
-								return warnings, err
-							}
-						default:
-							if err := report(groupChild.Name()); err != nil {
-								return warnings, err
+							switch groupChild.Name() {
+							case "active-server-group":
+								if err := checkScalar(groupChild); err != nil {
+									return warnings, err
+								}
+							case "interface":
+								if err := checkInterface(groupChild); err != nil {
+									return warnings, err
+								}
+							case "relay-agent-interface-id":
+								if err := checkInterfaceID(groupChild); err != nil {
+									return warnings, err
+								}
+							default:
+								if err := report(groupChild.Name()); err != nil {
+									return warnings, err
+								}
 							}
 						}
 					}
 				case "server-group":
-					for _, member := range child.Children {
-						if member != nil && len(member.Children) > 0 {
-							if err := report(member.Children[0].Name()); err != nil {
-								return warnings, err
+					// Named server-group values are validated by the
+					// typed compiler; their child addresses are not
+					// scalar statements. Iterate the same
+					// namedInstances the compilers use so the canonical
+					// Junos block `server-group { SG6 { addr; } }` is
+					// judged as the SG6 instance it compiles to, not as
+					// a member carrying a child address (#17205). A
+					// member whose address itself carries a child is a
+					// nested leaf and stays refused.
+					for _, inst := range namedInstances([]*Node{child}) {
+						for _, member := range inst.node.Children {
+							if member != nil && len(member.Children) > 0 {
+								if err := report(member.Children[0].Name()); err != nil {
+									return warnings, err
+								}
 							}
 						}
 					}
-					// Named server-group values are otherwise validated by
-					// the typed compiler; their child addresses are not
-					// scalar statements.
 				default:
 					if err := report(child.Name()); err != nil {
 						return warnings, err

@@ -17,6 +17,7 @@ use std::cell::RefCell;
 /// is sufficient and avoids any `unsafe`.
 pub(crate) struct WgWorkerScratch {
     /// Output buffer for `try_encap`. Sized to `max_frame`.
+    #[expect(dead_code, reason = "test-only encap buffer; production encap writes caller buffers (#17212)")]
     pub(crate) encap_out: RefCell<Vec<u8>>,
     /// Output buffer for `try_decap` (decrypted plaintext). Sized
     /// to `max_frame` (decap output is strictly smaller than the
