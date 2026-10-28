@@ -157,8 +157,7 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 	// sequence has already decided to abandon. The #5643 host-authorization
 	// closeout the drain protects is nft + local credentials, not dataplane
 	// control I/O, so it is unaffected.
-	shutdownDP := d.dataplane()
-	if b, ok := shutdownDP.(controlShutdownBounder); ok {
+	if b, ok := d.dataplane().(controlShutdownBounder); ok {
 		b.BeginControlShutdown()
 	}
 
