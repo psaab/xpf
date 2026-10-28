@@ -1,6 +1,45 @@
 {
   "_note": "GENERATED from testdata/policy_verdict_corpus.txt by TestPolicyVerdictCorpusSnapshotsAreFresh9167 (UPDATE_9167=1). Do not hand-edit: it is the snapshot Go puts on the wire, and the Rust half of the #9167 differential reads it. The EXPECTED VERDICTS are NOT here on purpose — Rust reads those from the corpus text directly.",
   "cases": {
+    "content-rejected-3727": {
+      "default_policy": "permit",
+      "rules": [
+        {
+          "rule_id": "trust-\u003euntrust/p-bad",
+          "name": "p-bad",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "badport"
+          ],
+          "application_terms": [
+            {
+              "name": "__unsupported__",
+              "protocol": "__unsupported__"
+            }
+          ],
+          "action": "permit"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 1929257543,
+          "host_inbound_configured": true
+        }
+      ]
+    },
     "default-policy-permit-all": {
       "default_policy": "permit",
       "zones": [
@@ -200,6 +239,65 @@
         }
       ]
     },
+    "feed-overlay-12965": {
+      "default_policy": "deny",
+      "rules": [
+        {
+          "rule_id": "trust-\u003euntrust/deny-feed",
+          "name": "deny-feed",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_book_ids": [
+            910758555
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "deny"
+        },
+        {
+          "rule_id": "trust-\u003euntrust/later-permit",
+          "policy_id": 1,
+          "name": "later-permit",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "permit"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 1929257543,
+          "host_inbound_configured": true
+        }
+      ],
+      "address_books": [
+        {
+          "id": 910758555,
+          "name": "bad-actors",
+          "prefixes_v4": [
+            "198.51.100.0/24"
+          ]
+        }
+      ]
+    },
     "first-match-wins-within-a-pair": {
       "default_policy": "deny",
       "rules": [
@@ -299,6 +397,46 @@
             "any"
           ],
           "action": "deny"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 1929257543,
+          "host_inbound_configured": true
+        }
+      ]
+    },
+    "icmp-type-code": {
+      "default_policy": "deny",
+      "rules": [
+        {
+          "rule_id": "trust-\u003euntrust/p-icmp-ping",
+          "name": "p-icmp-ping",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "junos-icmp-ping"
+          ],
+          "application_terms": [
+            {
+              "name": "junos-icmp-ping",
+              "protocol": "icmp",
+              "icmp_type": 8
+            }
+          ],
+          "action": "permit"
         }
       ],
       "zones": [
@@ -419,6 +557,39 @@
         }
       ]
     },
+    "lenient-quarantine-5649": {
+      "default_policy": "deny",
+      "rules": [
+        {
+          "rule_id": "zzq17760-\u003etrust/s-permit",
+          "name": "s-permit",
+          "from_zone": "zzq17760",
+          "to_zone": "trust",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "permit"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "zzq17760",
+          "id": 1679679597,
+          "host_inbound_configured": true
+        }
+      ]
+    },
     "named-policy-then-reject": {
       "default_policy": "permit",
       "rules": [
@@ -437,6 +608,71 @@
             "any"
           ],
           "action": "reject"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 1929257543,
+          "host_inbound_configured": true
+        }
+      ]
+    },
+    "omitted-selectors": {
+      "default_policy": "permit",
+      "rules": [
+        {
+          "rule_id": "trust-\u003euntrust/p-web",
+          "name": "p-web",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "app-web"
+          ],
+          "application_terms": [
+            {
+              "name": "app-web",
+              "protocol": "tcp",
+              "destination_port": "80"
+            }
+          ],
+          "action": "permit"
+        },
+        {
+          "rule_id": "trust-\u003euntrust/p-sport",
+          "policy_id": 1,
+          "name": "p-sport",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "app-sport"
+          ],
+          "application_terms": [
+            {
+              "name": "app-sport",
+              "protocol": "tcp",
+              "source_port": "1234",
+              "destination_port": "25"
+            }
+          ],
+          "action": "deny"
         }
       ],
       "zones": [
@@ -683,6 +919,191 @@
           "prefixes_v4": [
             "10.0.1.100/32"
           ]
+        }
+      ]
+    },
+    "transit-fragment-reject-13705": {
+      "default_policy": "deny",
+      "rules": [
+        {
+          "rule_id": "trust-\u003euntrust/reject-https",
+          "name": "reject-https",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_book_ids": [
+            488896378
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "junos-https"
+          ],
+          "application_terms": [
+            {
+              "name": "junos-https",
+              "protocol": "tcp",
+              "destination_port": "443"
+            }
+          ],
+          "action": "reject"
+        },
+        {
+          "rule_id": "trust-\u003euntrust/permit-all",
+          "policy_id": 1,
+          "name": "permit-all",
+          "from_zone": "trust",
+          "to_zone": "untrust",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "permit"
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 1929257543,
+          "host_inbound_configured": true
+        }
+      ],
+      "address_books": [
+        {
+          "id": 488896378,
+          "name": "trust-net",
+          "prefixes_v4": [
+            "10.0.0.0/8"
+          ]
+        }
+      ]
+    },
+    "unknown-zone-egress-11067": {
+      "default_policy": "permit",
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 1929257543,
+          "host_inbound_configured": true
+        }
+      ]
+    },
+    "unknown-zone-ingress-8318": {
+      "default_policy": "permit",
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        },
+        {
+          "name": "untrust",
+          "id": 1929257543,
+          "host_inbound_configured": true
+        }
+      ]
+    },
+    "unknown-zone-junos-host-global-11369": {
+      "default_policy": "permit",
+      "rules": [
+        {
+          "rule_id": "any-\u003ejunos-host/block-unzoned",
+          "name": "block-unzoned",
+          "from_zone": "any",
+          "to_zone": "junos-host",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "deny"
+        },
+        {
+          "rule_id": "junos-global-\u003ejunos-global/block-global-unzoned",
+          "policy_id": 1,
+          "name": "block-global-unzoned",
+          "from_zone": "junos-global",
+          "to_zone": "junos-global",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "deny",
+          "match_from_zone": "any",
+          "match_to_zone": "junos-host",
+          "match_from_zones": [
+            "any"
+          ],
+          "match_to_zones": [
+            "junos-host"
+          ]
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        }
+      ]
+    },
+    "unknown-zone-junos-host-global-only-11369": {
+      "default_policy": "permit",
+      "rules": [
+        {
+          "rule_id": "junos-global-\u003ejunos-global/block-global-unzoned",
+          "name": "block-global-unzoned",
+          "from_zone": "junos-global",
+          "to_zone": "junos-global",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "deny",
+          "match_from_zone": "any",
+          "match_to_zone": "junos-host",
+          "match_from_zones": [
+            "any"
+          ],
+          "match_to_zones": [
+            "junos-host"
+          ]
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
         }
       ]
     },

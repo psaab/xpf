@@ -28,11 +28,11 @@ func setupCommittedPredecessor14720(t *testing.T) (*Runner, Config, *fakeSystem)
 	if got := currentTarget(t, cfg); got != "2.0.0" {
 		t.Fatalf("current -> %q, want 2.0.0", got)
 	}
-	stamp, present := r.readCommittedStamp("1.0.0")
+	stamp, present, _ := r.readCommittedStamp("1.0.0")
 	if !present || stamp == nil || !stamp.Committed || stamp.Predecessor != "" {
 		t.Fatalf("predecessor 1.0.0 stamp = (%+v,present=%v), want committed first cut", stamp, present)
 	}
-	curStamp, present := r.readCommittedStamp("2.0.0")
+	curStamp, present, _ := r.readCommittedStamp("2.0.0")
 	if !present || curStamp == nil || !curStamp.Committed || curStamp.Predecessor != "1.0.0" {
 		t.Fatalf("live 2.0.0 stamp = (%+v,present=%v), want committed with predecessor 1.0.0", curStamp, present)
 	}
@@ -139,7 +139,7 @@ func assertPredecessorSnapshotContent14720(t *testing.T, cfg Config, want []byte
 func assertPredecessorSurvives14720(t *testing.T, r *Runner, cfg Config, before *committedStamp) {
 	t.Helper()
 	assertPredecessorDirSurvives14720(t, r, cfg)
-	stamp, present := r.readCommittedStamp("1.0.0")
+	stamp, present, _ := r.readCommittedStamp("1.0.0")
 	if !present || stamp == nil || !stamp.Committed {
 		t.Fatalf("predecessor stamp = (%+v,present=%v), want committed stamp preserved", stamp, present)
 	}
@@ -169,7 +169,7 @@ func TestVerifyFailure_PreservesCommittedPredecessor14720(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, cfg, fs := setupCommittedPredecessor14720(t)
-			before, _ := r.readCommittedStamp("1.0.0")
+			before, _, _ := r.readCommittedStamp("1.0.0")
 			origSnap := predecessorDBSnap14720(t, cfg, "1.0.0")
 			origStamp := predecessorStampRaw14720(t, r, "1.0.0")
 			stagePredecessor14720(t, r, cfg, fs, tc.identical)
@@ -195,7 +195,7 @@ func TestVerifyFailure_PreservesCommittedPredecessor14720(t *testing.T) {
 				}
 			} else {
 				assertPredecessorDirSurvives14720(t, r, cfg)
-				stamp, present := r.readCommittedStamp("1.0.0")
+				stamp, present, _ := r.readCommittedStamp("1.0.0")
 				if !present || stamp == nil || stamp.Committed {
 					t.Fatalf("changed-byte predecessor stamp = (%+v,present=%v), want non-committed", stamp, present)
 				}
@@ -209,7 +209,7 @@ func TestVerifyFailure_PreservesCommittedPredecessor14720(t *testing.T) {
 // failure must still not delete the pre-existing committed predecessor dir.
 func TestVerifyFailure_SameGenerationReusePreservesPredecessor14720(t *testing.T) {
 	r, cfg, fs := setupCommittedPredecessor14720(t)
-	before, _ := r.readCommittedStamp("1.0.0")
+	before, _, _ := r.readCommittedStamp("1.0.0")
 	origSnap := predecessorDBSnap14720(t, cfg, "1.0.0")
 	genid := stagePredecessor14720(t, r, cfg, fs, true)
 	// Falsify the installed .srcgen so COPY takes the same-generation resume
@@ -256,7 +256,7 @@ func TestStartFailure_PredecessorDirSurvives14720(t *testing.T) {
 	// consumed the cut's snapshot) — content is asserted on the pre-STOP
 	// and verify arms where no rollback runs.
 	assertNoPredbakLeftover14720(t, cfg)
-	stamp, present := r.readCommittedStamp("1.0.0")
+	stamp, present, _ := r.readCommittedStamp("1.0.0")
 	if !present || stamp == nil || stamp.Committed {
 		t.Fatalf("start-failed predecessor stamp = (%+v,present=%v), want non-committed", stamp, present)
 	}
@@ -282,7 +282,7 @@ func TestStartFailure_ChangedPredecessorStaysDemoted14720(t *testing.T) {
 	if got := currentTarget(t, cfg); got != "2.0.0" {
 		t.Fatalf("current -> %q after failed replacement, want 2.0.0", got)
 	}
-	stamp, present := r.readCommittedStamp("1.0.0")
+	stamp, present, _ := r.readCommittedStamp("1.0.0")
 	if !present || stamp == nil || stamp.Committed {
 		t.Fatalf("changed-byte predecessor stamp = (%+v,present=%v), want non-committed", stamp, present)
 	}

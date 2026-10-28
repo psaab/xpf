@@ -963,18 +963,20 @@ func appendBindingIndex(indices []uint32, idx uint32) []uint32 {
 // degradedPathReasonNames maps BPF array index to a human-readable name.
 // Must stay in sync with USERSPACE_FALLBACK_REASON_* in userspace-xdp/src/lib.rs.
 var degradedPathReasonNames = [21]string{
-	0:  "ctrl_disabled",
-	1:  "parse_fail",
-	2:  "binding_missing",
-	3:  "binding_not_ready",
-	4:  "heartbeat_missing",
-	5:  "heartbeat_stale",
+	0: "ctrl_disabled",
+	1: "parse_fail",
+	2: "binding_missing",
+	3: "binding_not_ready",
+	4: "heartbeat_missing",
+	5: "heartbeat_stale",
+	// #17248: reserved ABI slot; the shim no longer emits this reason.
 	6:  "icmp",
 	7:  "early_filter",
 	8:  "adjust_meta",
 	9:  "meta_bounds",
 	10: "redirect_err",
 	11: "interface_nat_no_session",
+	// #17248: reserved ABI slot; the shim no longer emits this reason.
 	12: "no_session",
 	13: "strict_drop",
 	14: "pass_to_kernel",

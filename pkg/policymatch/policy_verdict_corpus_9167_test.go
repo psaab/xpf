@@ -30,21 +30,26 @@ const policyCorpusPath9167 = "../../testdata/policy_verdict_corpus.txt"
 // it. Exported-shaped fields keep the generator in pkg/dataplane/userspace able
 // to reuse this reader through the shared parser below.
 type policyCorpusCase9167 struct {
-	Name     string
-	SetLines []string
-	Queries  []policyCorpusQuery9167
-	Line     int
+	Name        string
+	Lenient     bool // compile with CompileConfigLenient (#17077 quarantine shapes)
+	FeedOverlay map[string][]string
+	SetLines    []string
+	Queries     []policyCorpusQuery9167
+	Line        int
 }
 
 type policyCorpusQuery9167 struct {
-	From, To         string
-	Src, Dst         string
-	Protocol         string
-	SrcPort, DstPort *uint16
-	WantAction       string // permit | deny | reject
-	WantPolicy       string // policy name, or "-" for the default verdict
-	Frag             bool   // non-first fragment: Query.NonFirstFragment
-	Line             int
+	From, To   string
+	Src, Dst   string
+	Protocol   string  // "-" encodes an omitted protocol selector (#17077)
+	SrcPort    *uint16 // nil encodes an omitted (`-`) port selector (#17077)
+	DstPort    *uint16 // nil encodes an omitted (`-`) port selector (#17077)
+	ICMPType   *uint8  // from `icmp=T[/C]`; nil = type not carried by the packet
+	ICMPCode   *uint8
+	WantAction string // permit | deny | reject | content-rejected
+	WantPolicy string // policy name, or "-" for the default verdict
+	Frag       bool   // non-first fragment: Query.NonFirstFragment
+	Line       int
 }
 
 // parsePolicyCorpus9167 is the ONE reader. Both languages have their own
@@ -75,7 +80,15 @@ func parsePolicyCorpus9167(t *testing.T, path string) []policyCorpusCase9167 {
 			if cur != nil {
 				t.Fatalf("%s:%d: `case` inside an unterminated case %q", path, ln, cur.Name)
 			}
-			cur = &policyCorpusCase9167{Name: strings.TrimSpace(line[5:]), Line: ln}
+			rest := strings.TrimSpace(line[5:])
+			name := rest
+			lenient := false
+			if f := strings.Fields(rest); len(f) == 2 && f[1] == "lenient" {
+				name, lenient = f[0], true
+			} else if len(f) != 1 {
+				t.Fatalf("%s:%d: bad case header %q (want `case <name> [lenient]`)", path, ln, line)
+			}
+			cur = &policyCorpusCase9167{Name: name, Lenient: lenient, Line: ln}
 		case line == "end":
 			if cur == nil {
 				t.Fatalf("%s:%d: `end` with no open case", path, ln)
@@ -91,38 +104,94 @@ func parsePolicyCorpus9167(t *testing.T, path string) []policyCorpusCase9167 {
 				t.Fatalf("%s:%d: `set` outside a case", path, ln)
 			}
 			cur.SetLines = append(cur.SetLines, line)
+		case strings.HasPrefix(line, "feed "):
+			if cur == nil {
+				t.Fatalf("%s:%d: `feed` outside a case", path, ln)
+			}
+			rest := strings.TrimSpace(line[5:])
+			name, rhs, ok := strings.Cut(rest, "=")
+			if !ok || name == "" {
+				t.Fatalf("%s:%d: bad feed line %q (want feed <name>=<cidr>[,...])", path, ln, line)
+			}
+			if cur.FeedOverlay == nil {
+				cur.FeedOverlay = map[string][]string{}
+			}
+			var prefixes []string
+			if rhs != "" {
+				prefixes = strings.Split(rhs, ",")
+			}
+			cur.FeedOverlay[name] = prefixes
 		case strings.HasPrefix(line, "q "):
 			if cur == nil {
 				t.Fatalf("%s:%d: `q` outside a case", path, ln)
 			}
 			fields := strings.Fields(line[2:])
-			if len(fields) != 9 && !(len(fields) == 10 && fields[9] == "frag") {
-				t.Fatalf("%s:%d: a query needs 9 fields "+
-					"(from to src dst proto sport dport action policy [frag]), got %d: %q",
+			if len(fields) < 9 {
+				t.Fatalf("%s:%d: a query needs at least 9 fields "+
+					"(from to src dst proto sport dport action policy [frag|icmp=T[/C]]...), got %d: %q",
 					path, ln, len(fields), line)
 			}
-			// #17081: corpus ports are concrete packet ports (Rust u16,
-			// l4_present), so present 0 is literal — never omitted.
-			spN, err := strconv.Atoi(fields[5])
-			if err != nil {
-				t.Fatalf("%s:%d: bad source port %q", path, ln, fields[5])
+			q := policyCorpusQuery9167{
+				From: fields[0], To: fields[1], Src: fields[2], Dst: fields[3],
+				Protocol: fields[4], WantAction: fields[7], WantPolicy: fields[8], Line: ln,
 			}
-			dpN, err := strconv.Atoi(fields[6])
-			if err != nil {
-				t.Fatalf("%s:%d: bad dest port %q", path, ln, fields[6])
+			if fields[4] == "-" {
+				q.Protocol = ""
+				if fields[8] != "-" {
+					t.Fatalf("%s:%d: a `-` protocol row must expect the default verdict (policy `-`) — an underspecified tuple cannot vouch for a named policy on the Rust surface (see corpus header)", path, ln)
+				}
 			}
-			sp, dp := PortPtr(uint16(spN)), PortPtr(uint16(dpN))
+			for _, sel := range []struct {
+				tok string
+				dst **uint16
+			}{{fields[5], &q.SrcPort}, {fields[6], &q.DstPort}} {
+				if sel.tok == "-" {
+					continue
+				}
+				n, err := strconv.Atoi(sel.tok)
+				if err != nil || n < 0 || n > 65535 {
+					t.Fatalf("%s:%d: bad port %q", path, ln, sel.tok)
+				}
+				*sel.dst = PortPtr(uint16(n))
+			}
 			switch fields[7] {
-			case "permit", "deny", "reject":
+			case "permit", "deny", "reject", "content-rejected":
 			default:
-				t.Fatalf("%s:%d: unknown expected action %q (want permit|deny|reject)",
+				t.Fatalf("%s:%d: unknown expected action %q (want permit|deny|reject|content-rejected)",
 					path, ln, fields[7])
 			}
-			cur.Queries = append(cur.Queries, policyCorpusQuery9167{
-				From: fields[0], To: fields[1], Src: fields[2], Dst: fields[3],
-				Protocol: fields[4], SrcPort: sp, DstPort: dp,
-				WantAction: fields[7], WantPolicy: fields[8], Frag: len(fields) == 10, Line: ln,
-			})
+			if q.WantAction == "content-rejected" && q.WantPolicy != "-" {
+				t.Fatalf("%s:%d: a content-rejected row asserts no matched policy; policy must be `-`", path, ln)
+			}
+			for _, tok := range fields[9:] {
+				switch {
+				case tok == "frag":
+					if q.Frag {
+						t.Fatalf("%s:%d: duplicate `frag` token", path, ln)
+					}
+					q.Frag = true
+				case strings.HasPrefix(tok, "icmp="):
+					if q.ICMPType != nil {
+						t.Fatalf("%s:%d: duplicate `icmp=` token", path, ln)
+					}
+					ts, cs, hasCode := strings.Cut(tok[5:], "/")
+					tv, err := ParseICMPValue(ts)
+					if err != nil {
+						t.Fatalf("%s:%d: bad icmp type in %q: %v", path, ln, tok, err)
+					}
+					q.ICMPType = tv
+					if hasCode {
+						cv, err := ParseICMPValue(cs)
+						if err != nil {
+							t.Fatalf("%s:%d: bad icmp code in %q: %v", path, ln, tok, err)
+						}
+						q.ICMPCode = cv
+					}
+				default:
+					t.Fatalf("%s:%d: unknown query token %q (want frag or icmp=T[/C])", path, ln, tok)
+				}
+			}
+			cur.Queries = append(cur.Queries, q)
 		default:
 			t.Fatalf("%s:%d: unrecognized corpus line %q", path, ln, line)
 		}
@@ -148,17 +217,30 @@ func policyCorpusConfig9167(t *testing.T, c policyCorpusCase9167) *config.Config
 			t.Fatalf("case %q: setpath %q: %v", c.Name, l, err)
 		}
 	}
-	// The STRICT compiler, deliberately: a corpus case is a config an operator
-	// could commit. A case that only compiles leniently would be asserting the
-	// tolerant ingress path, which is #9410's subject and a different question.
-	cfg, err := config.CompileConfig(tr)
+	// STRICT by default: a corpus case is a config an operator could commit.
+	// A `lenient` case (#17077: ZoneID-collision quarantine) compiles with
+	// CompileConfigLenient; its generator snapshot is the post-quarantine one
+	// the dataplane actually receives, so both halves assert that posture
+	// rather than the strict-commit refusal.
+	compile := config.CompileConfig
+	if c.Lenient {
+		compile = config.CompileConfigLenient
+	}
+	cfg, err := compile(tr)
 	if err != nil {
-		t.Fatalf("case %q (corpus line %d): the config does not COMMIT: %v\n"+
-			"Every corpus case must be operator-committable; if this case is meant to "+
-			"exercise the tolerant path it belongs in #9410's cells, not here.",
-			c.Name, c.Line, err)
+		t.Fatalf("case %q (corpus line %d): the config does not compile (lenient=%v): %v",
+			c.Name, c.Line, c.Lenient, err)
 	}
 	return cfg
+}
+
+// policyCorpusPort9167 renders a corpus port for failure messages: `-` is the
+// omitted selector (nil), never a numeric port.
+func policyCorpusPort9167(p *uint16) string {
+	if p == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", *p)
 }
 
 // TestPolicyVerdictCorpusGoHalf9167 drives pkg/policymatch over the shared
@@ -183,47 +265,46 @@ func TestPolicyVerdictCorpusGoHalf9167(t *testing.T) {
 		t.Run(c.Name, func(t *testing.T) {
 			cfg := policyCorpusConfig9167(t, c)
 			for _, q := range c.Queries {
-				// net.ParseIP folds mapped literals to To4 bytes. Preserve the
-				// corpus's colon-strict family just like the production selector
-				// path so mapped policy rows exercise the v6 matcher in Go and Rust.
 				res := Match(cfg, Query{
 					FromZone: q.From, ToZone: q.To,
 					SrcIP: net.ParseIP(q.Src), DstIP: net.ParseIP(q.Dst),
 					SrcFamily: config.NATAddrFamily(q.Src), DstFamily: config.NATAddrFamily(q.Dst),
 					Protocol: q.Protocol, SrcPort: q.SrcPort, DstPort: q.DstPort,
+					ICMPType: q.ICMPType, ICMPCode: q.ICMPCode,
 					NonFirstFragment: q.Frag,
+					FeedOverlay:      c.FeedOverlay,
 				})
-				gotAction := policyActionName9167(res.Action)
-				gotPolicy := res.PolicyName
-				if !res.Matched {
-					gotPolicy = "-"
-				}
-				if res.ContentRejected {
-					t.Errorf("corpus line %d: the config was CONTENT-REJECTED (%v). A corpus "+
-						"case must be one the dataplane can represent, or the row asserts "+
-						"nothing about the tier walk.", q.Line, res.ContentRejectionReasons)
+				if q.WantAction == "content-rejected" {
+					if !res.ContentRejected {
+						t.Errorf("corpus line %d: %s want content-rejected, Go simulator: %s %s (ContentRejected=false)",
+							q.Line, c.Name, policyActionName9167(res.Action), res.PolicyName)
+					}
 					continue
 				}
-				// #16803: the embedded-v4 case records the policy-CORE
-				// verdict (see the corpus header); since #10686 the frame
-				// is dropped at ingress, so Match reports the ingress
-				// drop instead of the recorded policy verdict. Accept
-				// exactly that shape for those rows — the Rust half
-				// still pins the policy-core verdict the bypass reached.
+				if res.ContentRejected {
+					t.Errorf("corpus line %d: the config was CONTENT-REJECTED (%v) but the row wants %s %s",
+						q.Line, res.ContentRejectionReasons, q.WantAction, q.WantPolicy)
+					continue
+				}
 				if res.V4MappedCompatIngressDrop {
 					if c.Name != "embedded-v4-ipv6-policy-family-10686" {
 						t.Errorf("corpus line %d: unexpected ingress-drop verdict outside the #10686 case", q.Line)
 					}
 					continue
 				}
+				gotAction := policyActionName9167(res.Action)
+				gotPolicy := res.PolicyName
+				if !res.Matched {
+					gotPolicy = "-"
+				}
 				if gotAction != q.WantAction || gotPolicy != q.WantPolicy {
-					t.Errorf("corpus line %d: %s %s->%s %s %s:%d->%s:%d\n"+
+					t.Errorf("corpus line %d: %s %s->%s %s %s:%s->%s:%s\n"+
 						"  Go simulator: %s %s\n  corpus       : %s %s\n"+
 						"The corpus expectation is authored from the Junos semantics and is "+
 						"produced by neither implementation, so a disagreement here is a "+
 						"defect in pkg/policymatch (or in the expectation, which is reviewed "+
 						"as part of changing it).",
-						q.Line, c.Name, q.From, q.To, q.Protocol, q.Src, *q.SrcPort, q.Dst, *q.DstPort,
+						q.Line, c.Name, q.From, q.To, q.Protocol, q.Src, policyCorpusPort9167(q.SrcPort), q.Dst, policyCorpusPort9167(q.DstPort),
 						gotAction, gotPolicy, q.WantAction, q.WantPolicy)
 				}
 			}
@@ -269,6 +350,42 @@ func TestPolicyVerdictCorpusPinsEmbeddedV4IPv6Case10686(t *testing.T) {
 	}
 	t.Fatalf("corpus case embedded-v4-ipv6-policy-family-10686 is missing (%d cases present)",
 		len(cases))
+}
+
+// TestPolicyVerdictCorpusPins17077Cases pins every #17077 case by NAME: the
+// count floors admit silent deletion of any single case, so without this the
+// new grammar dimensions could be removed with both halves green. The Rust
+// half carries the mirror pin; symmetric removal reds both.
+func TestPolicyVerdictCorpusPins17077Cases(t *testing.T) {
+	want := map[string]int{
+		"transit-fragment-reject-13705":             2,
+		"unknown-zone-egress-11067":                 1,
+		"unknown-zone-ingress-8318":                 1,
+		"unknown-zone-junos-host-global-11369":      2,
+		"unknown-zone-junos-host-global-only-11369": 2,
+		"icmp-type-code":                            3,
+		"omitted-selectors":                         3,
+		"feed-overlay-12965":                        2,
+		"lenient-quarantine-5649":                   2,
+		"content-rejected-3727":                     1,
+	}
+	cases := parsePolicyCorpus9167(t, policyCorpusPath9167)
+	seen := map[string]int{}
+	for _, c := range cases {
+		if _, ok := want[c.Name]; ok {
+			seen[c.Name] = len(c.Queries)
+		}
+	}
+	for name, queries := range want {
+		got, ok := seen[name]
+		if !ok {
+			t.Errorf("corpus case %q is missing (%d cases present); the #17077 coverage was removed", name, len(cases))
+			continue
+		}
+		if got < queries {
+			t.Errorf("corpus case %q carries %d queries, want at least %d", name, got, queries)
+		}
+	}
 }
 
 func policyActionName9167(a config.PolicyAction) string {

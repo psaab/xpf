@@ -94,15 +94,15 @@ func TestPublishFabricRefreshChansDropsStaleEpoch(t *testing.T) {
 	live0 := make(chan struct{}, 1)
 	live1 := make(chan struct{}, 1)
 
-	if !d.publishFabricRefreshChansIfCurrent(gen2, live0, live1) {
+	if !d.publishFabricRefreshChansIfCurrent(gen2, [2]chan struct{}{live0, live1}) {
 		t.Fatal("current-epoch fabric channel publish was dropped; expected it to win")
 	}
-	if d.publishFabricRefreshChansIfCurrent(gen1, stale0, stale1) {
+	if d.publishFabricRefreshChansIfCurrent(gen1, [2]chan struct{}{stale0, stale1}) {
 		t.Fatal("stale-epoch fabric channel publish succeeded; generation guard missing (#4958 regression)")
 	}
-	got0, got1 := d.snapshotFabricRefreshChans()
-	if got0 != live0 || got1 != live1 {
-		t.Fatalf("stale-epoch publish overwrote the live fabric channels: got (%p,%p) want (%p,%p)", got0, got1, live0, live1)
+	got := d.snapshotFabricRefreshChans()
+	if got[0] != live0 || got[1] != live1 {
+		t.Fatalf("stale-epoch publish overwrote the live fabric channels: got (%p,%p) want (%p,%p)", got[0], got[1], live0, live1)
 	}
 }
 

@@ -285,8 +285,9 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	}
 
 	// #15278 (D02-02) NAT undefined interface/RI scope gate, after the zone
-	// gate so zone errors keep priority. Strict rejects; tolerant warns and
-	// records the rule-sets.
+	// gate so zone errors keep priority. Strict rejects; tolerant warns with
+	// the same per-axis findings and preserves the authored scope in snapshots.
+	// #17247 consolidates diagnostics without changing the dataplane verdict.
 	// #16827: fold unit-less NAT interface scopes onto unit 0 before the
 	// gate judges them, so an admitted ref is the name the dataplane
 	// compares; bare refs that cannot resolve stay bare for the gate.
@@ -297,7 +298,6 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 				cfg.Warnings = append(cfg.Warnings,
 					fmt.Sprintf("nat undefined scope (downgraded to warning on tolerant path): %s", offender))
 			}
-			cfg.LenientNATUndefinedScopeRuleSets = NATUndefinedScopeRuleSetNames(cfg)
 		} else {
 			return err
 		}

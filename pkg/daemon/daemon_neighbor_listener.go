@@ -506,21 +506,23 @@ func (d *Daemon) collectMonitoredNeighbors(cfg *config.Config) []probeTarget {
 	// that must stay warm. Cold-start "fill missing" is
 	// resolveNeighbors's responsibility.
 
-	// Source 3: fabric peers (probed via fabric overlay link).
+	// Source 3: fabric peers (probed via fabric overlay link). Copy only
+	// the fabricMu-guarded fields — refreshCh belongs to clusterCommsMu.
 	d.fabricMu.RLock()
-	fabricPeerIP := d.fabricPeerIP
-	fabricPeerIP1 := d.fabricPeerIP1
-	fabricOverlay := d.fabricOverlay
-	fabricOverlay1 := d.fabricOverlay1
-	d.fabricMu.RUnlock()
-	if fabricPeerIP != nil && fabricOverlay != "" {
-		if link, err := netlink.LinkByName(fabricOverlay); err == nil {
-			addTarget(fabricPeerIP, link.Attrs().Index, criticalityFabric)
-		}
+	var fabricSlots [2]struct {
+		peerIP  net.IP
+		overlay string
 	}
-	if fabricPeerIP1 != nil && fabricOverlay1 != "" {
-		if link, err := netlink.LinkByName(fabricOverlay1); err == nil {
-			addTarget(fabricPeerIP1, link.Attrs().Index, criticalityFabric)
+	for i := range d.fabricSlots {
+		fabricSlots[i].peerIP = d.fabricSlots[i].peerIP
+		fabricSlots[i].overlay = d.fabricSlots[i].overlay
+	}
+	d.fabricMu.RUnlock()
+	for _, s := range fabricSlots {
+		if s.peerIP != nil && s.overlay != "" {
+			if link, err := netlink.LinkByName(s.overlay); err == nil {
+				addTarget(s.peerIP, link.Attrs().Index, criticalityFabric)
+			}
 		}
 	}
 

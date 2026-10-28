@@ -17,14 +17,16 @@ import (
 
 func cliTopUp15082(t *testing.T, store *configstore.Store) *CLI {
 	t.Helper()
-	return cliWithDiscardReadline14716(t, store, "")
+	c := cliWithDiscardReadline14716(t, store, "")
+	c.setConfigOwned(true)
+	return c
 }
 
 func topUpStore15082(t *testing.T) *configstore.Store {
 	t.Helper()
 	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
-	if err := store.EnterConfigure(); err != nil {
-		t.Fatalf("EnterConfigure: %v", err)
+	if err := store.EnterConfigureSession(localConfigSessionID); err != nil {
+		t.Fatalf("EnterConfigureSession: %v", err)
 	}
 	for _, line := range []string{
 		"security policies from-zone trust to-zone untrust policy allow-all match source-address any",

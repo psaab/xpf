@@ -2296,7 +2296,7 @@ before rendering:
   active config is the one that completed an apply): the snapshots are
   prefixed with `Effective firewall filters — dataplane-acknowledged
   (generation N).` and are safe to read as live. Helper-ahead is benign — a
-  scheduler-only republish (`Manager.UpdatePolicyScheduleState`) advances the
+  scheduler-only republish (`Manager.UpdatePolicyScheduleStateWithLatch`) advances the
   helper's snapshot generation without bumping the last recorded apply
   generation, and it carries the same filter content, so the view is still live.
 - **Disarmed, generation drift, or active config not applied** (including a

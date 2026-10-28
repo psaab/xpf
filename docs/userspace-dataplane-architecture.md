@@ -3794,7 +3794,7 @@ scaled deadline; a hung helper that still times out) are pinned by
 The scaled deadline above is generous on purpose, and that generosity collides
 with the unit's stop budget. `m.mu` is held across a control round trip by a
 whole CLASS of `*Manager` methods — **21** at the time of writing, including
-`UpdatePolicyScheduleState`, `UpdateRGActive`, `PublishRouteOverlaySnapshot`,
+`UpdatePolicyScheduleStateWithLatch`, `UpdateRGActive`, `PublishRouteOverlaySnapshot`,
 `ensureProcessLocked`, and the 1 Hz `statusLoop` — so the reachable **67s**
 bound is also the reachable bound on how long anything can wait for `m.mu`.
 The count is not pinned in prose anywhere: a hand census written for this
@@ -3808,7 +3808,7 @@ exactly that lock:
 - `Manager.Close` / `Manager.Teardown` take `m.mu` before `stopLocked`; and
 - `runShutdownSequence` calls `d.stopPolicySchedulerLoop()` early, which ends
   in an **unbounded** `d.schedulerWg.Wait()`. The goroutine it joins is the
-  policy scheduler, whose `updateFn` is `UpdatePolicyScheduleState`. A tick
+  policy scheduler, whose `updateFn` is `UpdatePolicyScheduleStateWithLatch`. A tick
   inside a 67s round trip stalls the whole shutdown sequence before FRR stop,
   RA withdraw, VRRP stop and dp teardown have run at all.
 
@@ -3818,7 +3818,7 @@ systemd is about to kill alongside it — transit blackholed until the next
 start.
 
 **The fix does not narrow any critical section.** Releasing `m.mu` around the
-round trip in `UpdatePolicyScheduleState` would fix one door out of 21 (one of
+round trip in `UpdatePolicyScheduleStateWithLatch` would fix one door out of 21 (one of
 the others runs every second), and the long hold is not
 incidental: that method builds the snapshot from manager state, publishes it,
 and commits `m.generation` / `m.lastSnapshot` / `m.publishedSnapshot` from the

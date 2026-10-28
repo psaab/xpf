@@ -860,6 +860,14 @@ func compileTree(tree *ConfigTree, opts compileOpts, nodeID *int) (*Config, erro
 	// nodeID, so no parallel boolean can disagree with the stamped
 	// value. See resolveDerivedConfig for the full rationale and guards.
 	opts.nodeID = nodeID
+	// The compiler's list readers consume direct child keys and deliberately
+	// do not descend into value blocks. Reject nested content here as well as
+	// in SchemaValidate so CompileConfig and tolerant compile entry points
+	// cannot install a silently truncated list.
+	var nestedPath [64]string
+	if err := findNestedMultiValueContentError(tree.Children, setSchema, nestedPath[:0]); err != nil {
+		return nil, err
+	}
 	cfg, err := compileExpanded(tree, opts)
 	if err != nil {
 		return nil, err

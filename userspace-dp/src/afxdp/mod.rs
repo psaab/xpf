@@ -70,8 +70,6 @@ mod bind;
 mod binding_state;
 #[path = "bpf_map/mod.rs"]
 mod bpf_map;
-#[path = "checksum.rs"]
-mod checksum;
 // #4800: test-only exclusion between readers and movers of the process-global
 // new-flow contention counters. The mover side is taken inside the moving
 // functions, so the mover set is derived rather than inventoried.
@@ -213,7 +211,6 @@ use self::bind::{
 };
 use self::binding_state::*;
 use self::bpf_map::*;
-use self::checksum::*;
 use self::event_emit::*;
 use self::flow_cache::*;
 use self::forwarding::*;
