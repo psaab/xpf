@@ -25,12 +25,13 @@ import (
 // identity), and body is encodeIPsecSAPayload of that chunk's names
 // (newline-joined, no count prefix — the same codec as the legacy frame).
 // Chunk frames each carry their own increasing full-set seq; the receiver
-// admits chunks in seq order and assembles by (incarnation, generation),
-// committing the concatenated set atomically — held-set store + high-water
-// advance + callback under ipsecApplyMu, exactly like a legacy frame —
-// only when every chunk has arrived. An unclosed generation never commits
-// (the prior set is retained); a newer legacy set supersedes pending
-// assemblies, and at the pending cap only the oldest assembly is evicted.
+// admits chunks in seq order and assembles by (incarnation, generation).
+// Once complete, any generation older than the last committed generation
+// for its incarnation is stale and dropped; otherwise the set commits
+// atomically — held-set store + callback under ipsecApplyMu. An unclosed
+// generation never commits (the prior set is retained); a newer legacy set
+// supersedes pending assemblies, and at the pending cap only the oldest
+// assembly is evicted.
 //
 // Budget: each chunk holds at most maxIPsecSANames names, so its body is
 // at most maxIPsecSANames*(maxIPsecSANameLen+1) bytes (~1 MiB), far below
@@ -77,15 +78,20 @@ type ipsecSAChunkAssembly struct {
 	received   uint32
 }
 
-// ipsecSAChunkState is the receiver's pending-assembly table. Only
-// ipsecApplyMu holders touch it (the chunk commit path and the legacy
-// commit's supersede), so it needs no lock of its own; the zero value
+// ipsecSAChunkState is the receiver's pending-assembly and generation-fence
+// state. Only ipsecApplyMu holders touch it (the chunk commit path and the
+// legacy commit's supersede), so it needs no lock of its own; the zero value
 // (nil map) is valid.
 type ipsecSAChunkState struct {
 	pending map[ipsecSAChunkGeneration]*ipsecSAChunkAssembly
 	// order stores pending keys oldest first so bounded admission evicts
 	// by insertion order, not map iteration order.
 	order []ipsecSAChunkGeneration
+	// committedGen fences a generation that started before a newer set
+	// committed but whose later chunks still carry fresh frame sequences.
+	// It is keyed by incarnation because generation numbers are only
+	// comparable within one sender incarnation.
+	committedGen map[uint64]uint64
 }
 
 // encodeIPsecSAChunkPayload builds one chunk payload (WITHOUT the full-set
@@ -253,4 +259,27 @@ func (st *ipsecSAChunkState) removePending(key ipsecSAChunkGeneration) {
 func (st *ipsecSAChunkState) discardAll() {
 	st.pending = nil
 	st.order = nil
+}
+
+// recordCommit notes that generation committed for key's incarnation.
+// Caller holds ipsecApplyMu.
+func (st *ipsecSAChunkState) recordCommit(key ipsecSAChunkGeneration) {
+	if key.incarnation == 0 {
+		return
+	}
+	if st.committedGen == nil {
+		st.committedGen = make(map[uint64]uint64)
+	}
+	if key.generation > st.committedGen[key.incarnation] {
+		st.committedGen[key.incarnation] = key.generation
+	}
+}
+
+// supersededByCommit reports whether a newer generation already committed
+// for key's incarnation. Caller holds ipsecApplyMu.
+func (st *ipsecSAChunkState) supersededByCommit(key ipsecSAChunkGeneration) bool {
+	if key.incarnation == 0 {
+		return false
+	}
+	return key.generation < st.committedGen[key.incarnation]
 }

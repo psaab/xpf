@@ -171,6 +171,63 @@ func TestIPsecSAChunkIncompleteNeverCommits16758(t *testing.T) {
 	}
 }
 
+// TestIPsecSAChunkOlderGenerationCannotOverwriteNewerCommit17826 reproduces
+// a generation whose oversized final chunk is refused, then completes with
+// a valid later-sequenced retry after a newer generation has committed. The
+// frame sequence admits that retry, but its original generation must remain
+// fenced by the newer committed set.
+func TestIPsecSAChunkOlderGenerationCannotOverwriteNewerCommit17826(t *testing.T) {
+	recv := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	var callbacks [][]string
+	recv.OnIPsecSAReceived = func(names []string) {
+		callbacks = append(callbacks, append([]string(nil), names...))
+	}
+	chunk := func(generation uint64, index uint32, seq uint64, name string) []byte {
+		body := encodeIPsecSAPayload([]string{name})
+		return appendFullSetSeq(encodeIPsecSAChunkPayload(body, generation, index, 2, 2), 1000, seq)
+	}
+
+	if !recv.handleMessage(nil, syncMsgIPsecSAChunk, chunk(2, 0, 2, "vpn-g0")) {
+		t.Fatal("G index 0 must be admitted into its pending assembly")
+	}
+	overlong := []byte(strings.Repeat("x", maxIPsecSANameLen+1))
+	refused := appendFullSetSeq(encodeIPsecSAChunkPayload(overlong, 2, 1, 2, 2), 1000, 3)
+	if recv.handleMessage(nil, syncMsgIPsecSAChunk, refused) {
+		t.Fatal("G's over-limit index 1 must be refused")
+	}
+	if n := len(recv.ipsecChunkState.pending); n != 1 {
+		t.Fatalf("refused G chunk must leave its existing assembly pending, got %d assemblies", n)
+	}
+
+	for _, f := range [][]byte{
+		chunk(4, 0, 4, "vpn-h0"),
+		chunk(4, 1, 5, "vpn-h1"),
+	} {
+		if !recv.handleMessage(nil, syncMsgIPsecSAChunk, f) {
+			t.Fatal("H chunks must be accepted")
+		}
+	}
+	if held := recv.PeerIPsecSAs(); len(held) != 2 || held[0] != "vpn-h0" || held[1] != "vpn-h1" {
+		t.Fatalf("H must publish before G's retry: held %v", held)
+	}
+	if len(callbacks) != 1 || len(callbacks[0]) != 2 || callbacks[0][0] != "vpn-h0" || callbacks[0][1] != "vpn-h1" {
+		t.Fatalf("only H's completed set should have fired a callback, got %v", callbacks)
+	}
+
+	if recv.handleMessage(nil, syncMsgIPsecSAChunk, chunk(2, 1, 6, "vpn-g1")) {
+		t.Fatal("G's now-complete older generation must be dropped")
+	}
+	if held := recv.PeerIPsecSAs(); len(held) != 2 || held[0] != "vpn-h0" || held[1] != "vpn-h1" {
+		t.Fatalf("stale G completion overwrote H: held %v", held)
+	}
+	if len(callbacks) != 1 {
+		t.Fatalf("stale G completion must not fire OnIPsecSAReceived, got %v", callbacks)
+	}
+	if n := recv.Stats().IPsecSAStaleIgnored; n != 1 {
+		t.Fatalf("IPsecSAStaleIgnored = %d, want 1 for stale completed G", n)
+	}
+}
+
 // TestIPsecSAChunkInterleavedGenerationsSurvive17846 pins #17846: opening
 // more generations than the pending-assembly cap must evict only the
 // oldest assembly. The flush-all budget replaced every pending generation

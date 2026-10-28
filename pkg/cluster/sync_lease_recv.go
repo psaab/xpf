@@ -57,9 +57,10 @@ func (s *SessionSync) handleIPsecSA(conn net.Conn, payload []byte) bool {
 		s.peerSnaps.peerIPsecSAsMu.Lock()
 		s.peerSnaps.peerIPsecSAs = names
 		s.peerSnaps.peerIPsecSAsMu.Unlock()
-		// #16758: a committed legacy set supersedes every in-flight chunk
+		// A committed legacy set supersedes every in-flight chunk
 		// assembly (its seq is newer by the guard that just advanced).
 		s.ipsecChunkState.discardAll()
+		s.ipsecChunkState.recordCommit(ipsecSAChunkGeneration{incarnation: incarnation, generation: seq})
 	}
 	s.recvSeqMu.Unlock()
 	if !applied {
@@ -134,6 +135,15 @@ func (s *SessionSync) handleIPsecSAChunk(conn net.Conn, payload []byte) bool {
 		s.ipsecApplyMu.Unlock()
 		return true
 	}
+	if s.ipsecChunkState.supersededByCommit(key) {
+		s.recvSeqMu.Unlock()
+		s.ipsecApplyMu.Unlock()
+		s.stats.IPsecSAStaleIgnored.Add(1)
+		slog.Warn("cluster sync: dropping completed stale IPsec SA chunk generation — standby retains newer set",
+			"incarnation", incarnation, "generation", generation)
+		return false
+	}
+	s.ipsecChunkState.recordCommit(key)
 	s.peerSnaps.peerIPsecSAsMu.Lock()
 	s.peerSnaps.peerIPsecSAs = complete
 	s.peerSnaps.peerIPsecSAsMu.Unlock()
