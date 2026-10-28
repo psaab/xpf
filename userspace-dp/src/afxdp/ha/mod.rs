@@ -31,6 +31,7 @@ pub(crate) use self::export::{AllSessionsExport, ExportKick, OwnerRgExportWait};
 pub(crate) use self::export::drain_export_deltas_from_workers;
 
 #[cfg(test)]
+#[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
 #[path = "../ha_tests.rs"]
 mod tests;
 

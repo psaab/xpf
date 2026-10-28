@@ -254,11 +254,8 @@ func (d *Daemon) reassertFabricIPVLANOnce(ctx context.Context) {
 		}
 		slog.Warn("fabric IPVLAN present but not in the active config — reaping",
 			"name", name)
-		if err := d.fabricLinkDel(link); err != nil {
-			slog.Error("fabric IPVLAN reap failed; will retry",
-				"name", name, "err", err)
-			continue
-		}
-		slog.Info("fabric IPVLAN reaped", "name", name)
+		// Routed through the helper (#17224): it emits the Error on failure
+		// and the Info only on success; the caller keeps the retry loop.
+		_ = d.deleteFabricOverlay(link, "reaping stale fabric IPVLAN")
 	}
 }

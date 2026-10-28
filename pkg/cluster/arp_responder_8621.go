@@ -170,17 +170,21 @@ func BuildARPReply(ourMAC net.HardwareAddr, targetIP net.IP, req *ARPRequest) ([
 // to the wrong node.
 type ARPAnswerPolicy func(ifName string, targetIP net.IP) bool
 
-// OpenARPSocket opens an AF_PACKET/SOCK_RAW socket bound to one interface,
-// receiving only ARP. Split out so the responder loop is testable against a
-// pipe rather than a raw socket.
-func OpenARPSocket(ifName string) (fd int, ifIndex int, mac net.HardwareAddr, err error) {
+// OpenARPReceiver opens an AF_PACKET/SOCK_RAW socket bound to one
+// interface, receiving only ARP, wrapped in the shared cancellable
+// receive primitive (linuxsock.PpollRecv, #17231) so the responder's
+// receive loop can be woken on cancel instead of parking in a bare
+// blocking Recvfrom that close(2) cannot wake. The caller owns the
+// receiver and must Close it only after joining the receiving
+// goroutine (signal → join → close).
+func OpenARPReceiver(ifName string) (recv *linuxsock.PpollRecv, ifIndex int, mac net.HardwareAddr, err error) {
 	ifi, err := net.InterfaceByName(ifName)
 	if err != nil {
-		return -1, 0, nil, fmt.Errorf("interface %s: %w", ifName, err)
+		return nil, 0, nil, fmt.Errorf("interface %s: %w", ifName, err)
 	}
-	fd, err = linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_ARP)))
+	fd, err := linuxsock.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htons(unix.ETH_P_ARP)))
 	if err != nil {
-		return -1, 0, nil, fmt.Errorf("raw socket: %w", err)
+		return nil, 0, nil, fmt.Errorf("raw socket: %w", err)
 	}
 	// Bind to THIS interface. Without it the socket receives ARP from every
 	// interface and the responder would answer on the wrong segment for an
@@ -190,9 +194,14 @@ func OpenARPSocket(ifName string) (fd int, ifIndex int, mac net.HardwareAddr, er
 		Ifindex:  ifi.Index,
 	}); err != nil {
 		unix.Close(fd)
-		return -1, 0, nil, fmt.Errorf("bind %s: %w", ifName, err)
+		return nil, 0, nil, fmt.Errorf("bind %s: %w", ifName, err)
 	}
-	return fd, ifi.Index, ifi.HardwareAddr, nil
+	recv, err = linuxsock.NewPpollRecv(fd)
+	if err != nil {
+		unix.Close(fd)
+		return nil, 0, nil, fmt.Errorf("wake eventfd: %w", err)
+	}
+	return recv, ifi.Index, ifi.HardwareAddr, nil
 }
 
 // ARPReplyVerdict is why a request was or was not answered. It is a named

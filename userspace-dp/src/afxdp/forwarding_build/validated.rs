@@ -18,9 +18,9 @@
 
 use crate::policy::SnapshotIntegrityError;
 
-/// A validated 802.1Q VLAN id (0..=65535). 0 is the legitimate
+/// A validated 802.1Q VLAN id (0..=4095). 0 is the legitimate
 /// "untagged" sentinel the egress/ingress paths already use.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 pub(in crate::afxdp) struct VlanId(u16);
 
 impl VlanId {
@@ -83,6 +83,42 @@ impl VlanId {
     #[inline]
     pub(in crate::afxdp) fn get(self) -> u16 {
         self.0
+    }
+}
+
+/// #17206: the per-row decoded VLAN ids for one interface snapshot row.
+///
+/// Every forwarding-build consumer that needs a row's VLAN identity
+/// MUST go through this struct (built once per row via
+/// [`RowIds::try_from_row`]) instead of reading `iface.vlan_id` or
+/// `iface.native_vlan_id` raw. Before #17206 four later builder sites
+/// each re-derived their own range rule (native capped at 4094 then
+/// re-decoded, mirror coerced with `unwrap_or(0)`, the #16063
+/// ambiguity count keyed on the raw `i32`, the #14334 VID-0 prune
+/// compared raw), so the decode-once contract of [`VlanId`] was
+/// bypassed and a tolerant/non-Go snapshot could be silently
+/// re-pointed at a different L2 domain. `native_vlan` is `None` when
+/// the row carries no native VLAN (0 after decode — Go omits
+/// `native_vlan_id` when unset), preserving the pre-fix valid-path
+/// semantics: negatives decode to 0/None exactly as `VlanId` does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::afxdp) struct RowIds {
+    pub vlan: VlanId,
+    pub native_vlan: Option<VlanId>,
+}
+
+impl RowIds {
+    pub(in crate::afxdp) fn try_from_row(
+        iface: &crate::protocol::snapshot::InterfaceSnapshot,
+    ) -> Result<Self, SnapshotIntegrityError> {
+        let vlan = VlanId::try_from_snapshot(iface.vlan_id, &iface.name)?;
+        let native_raw = VlanId::try_from_snapshot(iface.native_vlan_id, &iface.name)?;
+        let native_vlan = if native_raw.get() == 0 {
+            None
+        } else {
+            Some(native_raw)
+        };
+        Ok(Self { vlan, native_vlan })
     }
 }
 

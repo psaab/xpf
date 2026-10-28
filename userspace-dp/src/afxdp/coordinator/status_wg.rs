@@ -12,12 +12,13 @@ use super::Coordinator;
 use chrono::Utc;
 use std::sync::atomic::Ordering;
 
+use crate::afxdp::TunnelKind;
 use crate::afxdp::monotonic_nanos;
 use crate::afxdp::neighbor::monotonic_timestamp_to_datetime;
 
 impl Coordinator {
     /// #1865: per-WG-tunnel telemetry rows for `ProcessStatus.wg_tunnels`.
-    /// One row per `mode == "wireguard"` tunnel endpoint with a live
+    /// One row per WireGuard-kind tunnel endpoint with a live
     /// engine, sorted by endpoint id for deterministic wire output but
     /// KEYED by tunnel name (`ifindex_to_name`; positional ids renumber
     /// across commits — #1873). A missing name falls back to
@@ -31,7 +32,7 @@ impl Coordinator {
             .forwarding
             .tunnel_endpoints
             .iter()
-            .filter(|(_, ep)| ep.mode == "wireguard")
+            .filter(|(_, ep)| ep.kind == TunnelKind::WireGuard)
             .map(|(id, _)| *id)
             .collect();
         ids.sort_unstable();

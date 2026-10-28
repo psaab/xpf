@@ -421,7 +421,7 @@ pub(crate) fn run() -> Result<(), String> {
             forwarding_armed: false,
             capabilities: UserspaceCapabilities::default(),
             // #9629: this binary serves session fast-path refreshes from boot
-            // (`refresh_status` re-asserts it on every attach).
+            // (`project_status` re-asserts it on every attach).
             ha_session_refresh_supported: true,
             last_snapshot_generation: 0,
             last_fib_generation: 0,
@@ -552,6 +552,7 @@ pub(crate) fn run() -> Result<(), String> {
             worker_command_queue_shed: 0,
             server_state_poison_recoveries: 0,
             server_handler_panics: 0,
+            reinject_handler_panics: 0,
             session_install_stale_ignored: 0,
             session_delete_stale_ignored: 0,
             session_delete_refused_identity: 0,
@@ -560,6 +561,7 @@ pub(crate) fn run() -> Result<(), String> {
             policy_batch_hold_max_ns: 0,
             session_delete_dropped_released: 0,
             tunnel_purge_reservations_released: 0,
+            tunnel_purge_delete_refused: 0,
             synced_import_reserve_refused: 0,
             synced_import_mirror_refused: 0,
             mirror_restore_republished: 0,
@@ -620,7 +622,7 @@ pub(crate) fn run() -> Result<(), String> {
             neighbor_pending_keys: 0,
             neg_neigh_keys: 0,
             // #1865: WG telemetry rows arrive on the first
-            // refresh_status; empty start keeps the wire omitted.
+            // project_status; empty start keeps the wire omitted.
             wg_tunnels: Vec::new(),
             per_binding: Vec::new(),
             flow_worker_map: Vec::new(),
@@ -642,7 +644,7 @@ pub(crate) fn run() -> Result<(), String> {
             filter_term_counters: Vec::new(),
             // #3651: per-zone traffic block is empty until the first status
             // refresh reads the helper's zone-counter store. #14619: the
-            // layout version is stamped by refresh_status on every refresh;
+            // layout version is stamped by project_status on every refresh;
             // the pre-refresh 0 here is never published without a refresh.
             zone_counter_layout_version: 0,
             zone_counter_slotted_zone_ids: Vec::new(),
@@ -780,110 +782,79 @@ pub(crate) fn run() -> Result<(), String> {
         thread::Builder::new()
             .name("session-socket".to_string())
             .spawn(move || {
-                let mut backoff = AcceptBackoff::new();
-                while running.load(Ordering::SeqCst) {
-                    let decision = accept_step(
-                        session_listener.accept(),
-                        Duration::from_millis(10),
-                        "session socket",
-                        &mut backoff,
-                        Instant::now(),
-                        true,
-                    );
-                    if let Some(line) = decision.log {
-                        eprintln!("xpf-userspace-dp: {line}");
-                    }
-                    match decision.step {
-                        AcceptStep::Serve((stream, _)) => {
-                            // #9003: prove the peer before dispatching. A
-                            // connectable session socket installs and reads
-                            // sessions.
-                            if let Err(err) = reject_unprivileged_peer("session socket", &stream) {
-                                eprintln!("xpf-userspace-dp: {err}");
-                                continue;
-                            }
-                            // Log handle_stream failures rather than discarding
-                            // them: a request that fails to decode (e.g. a
-                            // wire-type mismatch) closes the socket with no
-                            // response, and the Go side sees only a bare EOF.
-                            // Surfacing the error here turns a silent
-                            // multi-session debugging chase into one log line
-                            // (#1961). Served under per-connection
-                            // `catch_unwind` (#9900 F-094): a handler panic
-                            // quarantines the state and stops the daemon for a
-                            // supervisor restart (GPT-4), instead of killing
-                            // the session thread's accept loop.
-                            serve_one_catch_unwind("session", &state, &running, || {
-                                handle_stream(
-                                    stream,
-                                    &state_file,
-                                    state.clone(),
-                                    running.clone(),
-                                    session_domain.clone(),
-                                    SocketMode::Session,
-                                )
-                            });
-                        }
-                        AcceptStep::Sleep(delay) => thread::sleep(delay),
-                        // Unreachable with retry_unclassified = true; kept so a
-                        // future change to accept_step cannot turn it into a
-                        // hot loop or a process exit from this thread.
-                        AcceptStep::Fail(msg) => {
-                            eprintln!("xpf-userspace-dp: {msg}");
-                            thread::sleep(AcceptBackoff::MAX);
-                        }
-                    }
-                }
+                // #17123: the single accept loop (server/accept_loop.rs).
+                // Log handle_stream failures rather than discarding them:
+                // a request that fails to decode (e.g. a wire-type
+                // mismatch) closes the socket with no response, and the Go
+                // side sees only a bare EOF. Surfacing the error here
+                // turns a silent multi-session debugging chase into one
+                // log line (#1961). Served under per-connection
+                // `catch_unwind` (#9900 F-094): a handler panic quarantines
+                // the state and stops the daemon for a supervisor restart
+                // (GPT-4), instead of killing the session thread's accept
+                // loop.
+                let _ = crate::server::accept_loop::run_accept_loop(
+                    &session_listener,
+                    crate::server::accept_loop::AcceptLoopSpec {
+                        name: "session socket",
+                        poll: Duration::from_millis(10),
+                        retry_unclassified: true,
+                        peer_label: "session socket",
+                    },
+                    &running,
+                    crate::server::accept_loop::PanicPolicy::QuarantineAndStop {
+                        sock_name: "session",
+                        state: &state,
+                    },
+                    |stream| {
+                        handle_stream(
+                            stream,
+                            &state_file,
+                            state.clone(),
+                            running.clone(),
+                            session_domain.clone(),
+                            SocketMode::Session,
+                        )
+                    },
+                );
             })
             .map_err(|e| format!("spawn session thread: {e}"))?
     };
 
-    let mut backoff = AcceptBackoff::new();
-    while running.load(Ordering::SeqCst) {
-        let decision = accept_step(
-            listener.accept(),
-            Duration::from_millis(50),
-            "control socket",
-            &mut backoff,
-            Instant::now(),
-            false,
-        );
-        if let Some(line) = decision.log {
-            eprintln!("xpf-userspace-dp: {line}");
-        }
-        match decision.step {
-            AcceptStep::Serve((stream, _)) => {
-                // #9003: prove the peer before dispatching. This socket carries
-                // apply_snapshot — the WireGuard private key and every preshared
-                // key — and its handlers run no caller check of their own.
-                if let Err(err) = reject_unprivileged_peer("control socket", &stream) {
-                    eprintln!("xpf-userspace-dp: {err}");
-                    continue;
-                }
-                // See the session-socket note above: surface decode/handler
-                // failures instead of discarding them. This is the socket that
-                // carries apply_snapshot, where a wire-type mismatch silently
-                // left the helper disabled and forwarding nothing (#1961).
-                // Per-connection `catch_unwind` (#9900 F-094): a handler panic
-                // quarantines the state and stops the daemon for a supervisor
-                // restart (GPT-4), instead of killing the control thread's
-                // accept loop (which would wedge the daemon: `running` stays
-                // true and nothing serves requests).
-                serve_one_catch_unwind("control", &state, &running, || {
-                    handle_stream(
-                        stream,
-                        &args.state_file,
-                        state.clone(),
-                        running.clone(),
-                        main_session_domain.clone(),
-                        SocketMode::Main,
-                    )
-                });
-            }
-            AcceptStep::Sleep(delay) => thread::sleep(delay),
-            AcceptStep::Fail(msg) => return Err(msg),
-        }
-    }
+    // #17123: the single accept loop (server/accept_loop.rs). See the
+    // session-socket note above: surface decode/handler failures instead
+    // of discarding them. This is the socket that carries apply_snapshot,
+    // where a wire-type mismatch silently left the helper disabled and
+    // forwarding nothing (#1961). Per-connection `catch_unwind` (#9900
+    // F-094): a handler panic quarantines the state and stops the daemon
+    // for a supervisor restart (GPT-4), instead of killing the control
+    // thread's accept loop (which would wedge the daemon: `running`
+    // stays true and nothing serves requests). The control loop's `Fail`
+    // is process-fatal: `run_accept_loop` returns `Err`, as before.
+    crate::server::accept_loop::run_accept_loop(
+        &listener,
+        crate::server::accept_loop::AcceptLoopSpec {
+            name: "control socket",
+            poll: Duration::from_millis(50),
+            retry_unclassified: false,
+            peer_label: "control socket",
+        },
+        &running,
+        crate::server::accept_loop::PanicPolicy::QuarantineAndStop {
+            sock_name: "control",
+            state: &state,
+        },
+        |stream| {
+            handle_stream(
+                stream,
+                &args.state_file,
+                state.clone(),
+                running.clone(),
+                main_session_domain.clone(),
+                SocketMode::Main,
+            )
+        },
+    )?;
 
     // Wait for the session thread to finish.
     if let Err(panic) = session_thread.join() {
@@ -902,7 +873,7 @@ pub(crate) fn run() -> Result<(), String> {
         // (a torn-down-while-poisoned coordinator behind a green exit code).
         let mut guard = state.lock().expect("state poisoned");
         guard.afxdp.stop_with_event_stream();
-        refresh_status(&mut guard);
+        project_status(&mut guard);
     }
     afxdp::remove_kernel_rst_suppression();
     write_state(&args.state_file, &state)?;

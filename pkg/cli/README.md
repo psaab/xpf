@@ -1,9 +1,10 @@
 # pkg/cli
 
 Interactive Junos-style CLI: readline-driven REPL with tab completion, `?`
-help, prefix matching, `| match` filtering, and command history. Used by
-both the daemon-local CLI (xpfd in TTY mode) and the remote CLI
-(`cmd/cli`) once it has a gRPC connection.
+help, prefix matching, `| match` filtering, and command history. Used
+only by the daemon-local CLI (xpfd in TTY mode). The remote CLI
+(`cmd/cli`) is an independent gRPC client that does NOT import this
+package — see the twins note under Gotchas below.
 
 ## Entry points
 
@@ -172,7 +173,8 @@ EOF or an over-cap suffix is never reported as a successful empty FIB.
 
 ## Callers
 
-`cmd/cli` (remote client), `cmd/xpfd` (when stdin is a TTY).
+`cmd/xpfd` only (when stdin is a TTY). `cmd/cli` is NOT a caller: it
+never imports this package.
 
 ## Dependencies
 
@@ -181,6 +183,16 @@ EOF or an over-cap suffix is never reported as a successful empty FIB.
 `rpm`, `vrrp`.
 
 ## Gotchas
+
+- **Twins: this package and `cmd/cli` are independent implementations
+  (#17230).** `cmd/cli` never imports `pkg/cli`; the two share only
+  `pkg/cmdtree`, `pkg/cliterm`, `pkg/config` helpers and, for some
+  commands, the `pkg/grpcapi` renderers whose output the remote
+  client prints verbatim. Shared grammars single-source in
+  `pkg/cliterm` (e.g. `ShowRouteUsage`), which both binaries already
+  import. As the termsafe gotcha below puts it, a fix on one
+  renderer alone leaves the other at pre-fix behavior — every CLI
+  fix must be checked on both surfaces.
 
 - **`show security nat source pool` reports the allocator's recycled-scan cost,
   and it is gated on the DENOMINATOR (#9392).** #9327 measured that the Rust

@@ -1,16 +1,18 @@
 // Status projection helpers (#6234 split out of the former monolithic
 // `server/helpers.rs`).
 //
-// `refresh_status` is the single cold-path orchestration that projects
-// worker, neighbor, session, NAT, CoS, tunnel, HA, queue, exception, and
-// debug state onto the mutable `ProcessStatus`. It runs on control
-// responses and state snapshots, never per packet. Ordering + side-effect
-// cadence are preserved exactly: the WG/GRE liveness self-heal stays gated
-// on `should_run_afxdp`, the high-cardinality per-key dynamic-neighbor
-// dump stays gated on `XPF_DEBUG_NEIGHBOR_KEYS`, bindings are refreshed
-// before the queue/per-binding projections, and worker snapshots are read
-// before the aggregates derived from them. No added coordinator
-// traversal, status clone, or allocation.
+// `project_status` is the pure cold-path projection that copies worker,
+// neighbor, session, NAT, CoS, tunnel, HA, queue, exception, and debug
+// state onto the mutable `ProcessStatus`. `supervise_tunnels` is the
+// separate side-effecting self-heal (WG/GRE liveness sweeps, thread
+// joins/respawns, delivery-map publishes). The dispatcher supervises
+// once per locked request and every other caller only projects. Both run
+// on control responses and state snapshots, never per packet. The
+// WG/GRE self-heal stays gated on `should_run_afxdp`, the
+// high-cardinality per-key dynamic-neighbor dump stays gated on
+// `XPF_DEBUG_NEIGHBOR_KEYS`, bindings are refreshed before the
+// queue/per-binding projections, and worker snapshots are read before
+// the aggregates derived from them.
 
 use super::summarize_queues;
 use crate::afxdp;
@@ -22,18 +24,21 @@ use chrono::Utc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-pub(crate) fn refresh_status(state: &mut ServerState) {
+/// #17141: tunnel-thread supervision, split out of the status
+/// projection. Joins finished WG/GRE threads, may respawn one per
+/// family, and republishes the worker-visible delivery map only on
+/// change. Gated on `should_run_afxdp` so a disarmed/stopped helper
+/// never re-binds WG ports (the stop-gate — Claude SMR r1 F1, #1866).
+/// The per-id 3s backoff and the ≤1-spawn-per-invocation bound keep
+/// the cadence trivial. The dispatcher calls this once per request;
+/// `project_status` never calls it.
+pub(crate) fn supervise_tunnels(state: &mut ServerState) {
+    // Bindings must be current before the gate reads them (the pre-split
+    // `refresh_status` refreshed them ahead of this check).
     state.afxdp.refresh_bindings(&mut state.status.bindings);
-    // HARDENING (#15742 follow-up): project the sticky mismatch counter
-    // (owned by ServerState so this rebuild cannot zero it).
-    state.status.snapshot_policy_mismatch_total = state.snapshot_policy_mismatch_total;
-    // #1866 Change 2: WG control-thread self-heal. Tombstone-only +
-    // snapshot-coherent (see Coordinator::reconcile_wg_control_liveness)
-    // and gated on should_run_afxdp so a disarmed/stopped helper never
-    // re-binds WG ports (the stop-gate — Claude SMR r1 F1). Runs on
-    // every non-suppressed control response; the per-id 3s backoff and
-    // the ≤1-spawn-per-invocation bound keep the cadence trivial.
     if should_run_afxdp(&state.status) {
+        // #1866 Change 2: WG control-thread self-heal. Tombstone-only +
+        // snapshot-coherent (see Coordinator::reconcile_wg_control_liveness).
         state
             .afxdp
             .reconcile_wg_control_liveness(state.snapshot.as_ref());
@@ -44,6 +49,15 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
             .afxdp
             .reconcile_local_tunnel_liveness(state.snapshot.as_ref());
     }
+}
+
+/// Pure status projection: no `reconcile_*_liveness` call, no thread
+/// join/respawn, no delivery-map publish (#17141).
+pub(crate) fn project_status(state: &mut ServerState) {
+    state.afxdp.refresh_bindings(&mut state.status.bindings);
+    // HARDENING (#15742 follow-up): project the sticky mismatch counter
+    // (owned by ServerState so this rebuild cannot zero it).
+    state.status.snapshot_policy_mismatch_total = state.snapshot_policy_mismatch_total;
     let writer_status = state.state_writer.status();
     state.status.io_uring_active = writer_status.active;
     state.status.io_uring_mode = writer_status.mode;
@@ -310,6 +324,8 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         crate::server::helpers::guards::SERVER_STATE_POISON_RECOVERIES.load(Ordering::Relaxed);
     state.status.server_handler_panics =
         crate::server::helpers::guards::SERVER_HANDLER_PANICS.load(Ordering::Relaxed);
+    state.status.reinject_handler_panics =
+        crate::server::helpers::guards::REINJECT_HANDLER_PANICS.load(Ordering::Relaxed);
     // #7398: the three counters below were computed, unit-tested and never
     // assigned into ProcessStatus, so they reached no operator through status,
     // gRPC or Prometheus. They are the queue the UNSURFACED allowlist below
@@ -325,6 +341,7 @@ pub(crate) fn refresh_status(state: &mut ServerState) {
         state.afxdp.session_delete_dropped_released_total();
     state.status.tunnel_purge_reservations_released =
         state.afxdp.tunnel_purge_reservations_released_total();
+    state.status.tunnel_purge_delete_refused = state.afxdp.tunnel_purge_delete_refused_total();
     state.status.synced_import_reserve_refused = state.afxdp.synced_import_reserve_refused_total();
     state.status.synced_import_mirror_refused = state.afxdp.synced_import_mirror_refused_total();
     state.status.mirror_restore_republished = state.afxdp.mirror_restore_republished_total();
@@ -914,8 +931,7 @@ pub(crate) fn restore_binding_arm_state(status: &mut ProcessStatus, prior: Bindi
 /// settle (if owed), refresh, persist.
 ///
 /// Excluded by design: `rebind` commits no requested state (it clears
-/// runtime bits that `refresh_status` re-derives), and
-/// `update_ha_state` applies through `afxdp.update_ha_state`, not this
+/// runtime bits that `project_status` re-derives), and
 /// reconcile — neither shares this tail.
 pub(crate) fn finish_binding_reconcile(
     guard: &mut ServerState,
@@ -933,13 +949,13 @@ pub(crate) fn finish_binding_reconcile(
         // refreshed status describes what the sockets are actually doing
         // and Go's 1 Hz poll sees the mismatch that drives a retry.
         restore_binding_arm_state(&mut guard.status, prior);
-        refresh_status(guard);
+        project_status(guard);
         return;
     }
     if settle {
         *deferred = Some(crate::server::handlers::Deferred::Settle(Duration::from_secs(2)));
     }
-    refresh_status(guard);
+    project_status(guard);
     *persist_state = true;
 }
 
@@ -1202,6 +1218,42 @@ mod status_wiring_tests {
                 && proto.contains("pub ike_exchange_entries: u64"),
             "#13290: ProcessStatus must carry ike_exchange_evictions_total \
              and ike_exchange_entries wire fields"
+        );
+    }
+
+    #[test]
+    fn project_status_contains_no_tunnel_supervision_17141() {
+        let helper = code_only(&read("src/server/helpers/status.rs"));
+        let start = helper
+            .find("pub(crate) fn project_status")
+            .expect("project_status not found");
+        let end = helper[start..]
+            .find("pub(crate) fn project_event_stream_producer_stats")
+            .map(|off| start + off)
+            .expect("project_status end boundary not found");
+        let body = &helper[start..end];
+        assert!(
+            !body.contains("reconcile_wg_control_liveness")
+                && !body.contains("reconcile_local_tunnel_liveness")
+                && !body.contains("supervise_tunnels"),
+            "#17141: project_status must be a pure projection — tunnel \
+             supervision (thread joins/respawns, delivery publishes) belongs \
+             only in supervise_tunnels"
+        );
+        // Vacuity guard: the supervision calls must exist in the file,
+        // inside supervise_tunnels, or the scan above passes trivially.
+        let sup_start = helper
+            .find("pub(crate) fn supervise_tunnels")
+            .expect("supervise_tunnels not found");
+        let sup_end = helper[sup_start..]
+            .find("pub(crate) fn project_status")
+            .map(|off| sup_start + off)
+            .expect("supervise_tunnels end boundary not found");
+        let sup = &helper[sup_start..sup_end];
+        assert!(
+            sup.contains("reconcile_wg_control_liveness")
+                && sup.contains("reconcile_local_tunnel_liveness"),
+            "#17141: supervise_tunnels must own both liveness reconciles"
         );
     }
 

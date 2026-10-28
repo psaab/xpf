@@ -202,7 +202,7 @@ interfaces {
 		t.Fatalf("expected 2 top-level interfaces roots, got %d", got)
 	}
 
-	if _, err := validateTunnelEndpointIDCollisionAST(tree, false); err == nil {
+	if _, err := validateTunnelEndpointIDCollisionAST(tree, compileOpts{}); err == nil {
 		t.Fatalf("expected a tunnel-endpoint id collision error across split interfaces roots "+
 			"(%s.0 / %s.0 both fold to %d), got nil (#5691)",
 			ifA, ifB, StableTunnelEndpointID(ifA+".0"))
