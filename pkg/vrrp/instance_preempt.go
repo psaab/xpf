@@ -77,8 +77,10 @@ func (vi *vrrpInstance) discardPendingPreemptNow() {
 // can outlive both state-edge drains and leave a stale kick for the next
 // BACKUP tenure. Holding the write lock across the non-blocking send
 // linearizes enqueue against setState: the transition either drains the
-// token, or the poster observes MASTER and drops the kick. The hook
-// permits a deterministic regression at the check/send boundary.
+// token, or the poster observes MASTER and drops the kick. The
+// preemptNowEnqueueHook exists solely for deterministic tests; it runs
+// with vi.mu held, must not re-enter that lock, and is nil in production.
+
 var preemptNowEnqueueHook func()
 
 func (vi *vrrpInstance) triggerPreemptNow() {
