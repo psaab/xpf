@@ -254,7 +254,24 @@ const ADDITIVE_WIRE_EXHAUSTIVE_CEILING: &[(&str, usize)] = &[
     ("NAT64RuleSnapshot", 0),
     ("PacketResolution", 1),
     ("ProcessStatus", 1),
-    ("SessionDeltaInfo", 1),
+    // #18297: raised 1 -> 2, the table's first increase. The ratchet only
+    // ever goes DOWN by design, so an increase needs its own justification
+    // rather than a silent bump: both exhaustive literals are intentional
+    // and neither can take a tail without losing the property it exists
+    // for. (1) The production converter `session_delta_info`
+    // (afxdp/session_delta.rs) maps every field explicitly from the
+    // delta — tailing it would default any FUTURE field silently instead
+    // of forcing a wire-mapping decision at compile time, the exact
+    // #6949 failure (JSON leg carrying none of the binary leg's fields).
+    // (2) The #17142 populated specimen (protocol/tests.rs) enumerates
+    // all 60 fields with a distinct sentinel each so the Go cell
+    // TestSessionDeltaPopulatedSpecimenValues17142 catches any serde
+    // rename transposition by value; tailing it would serialize
+    // identically today but would let a future field enter the struct
+    // with no sentinel and no compile error, so the transposition census
+    // would silently stop being exhaustive. The ceiling now holds
+    // exactly these two; a third exhaustive literal still reds.
+    ("SessionDeltaInfo", 2),
     ("SlowPathStatus", 1),
     ("SourceNATRuleSnapshot", 0),
     ("SourceNatPoolStatus", 1),
