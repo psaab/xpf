@@ -8,7 +8,6 @@ use super::mtu::{wg_inner_budget, wg_inner_fits_outer_mtu};
 use super::sock::wg_send_to;
 use crate::afxdp::wg::counters::WgCounters;
 use std::net::{SocketAddr, UdpSocket};
-use std::os::fd::AsRawFd;
 
 /// One inbound datagram's disposition. Handshake completions must be
 /// handled INLINE at this site — before the same iteration's TUN
@@ -62,7 +61,7 @@ pub(super) fn dispatch_inbound(
     engine: &crate::afxdp::wg::WgEngine,
     socket: &UdpSocket,
     socket_is_v6: bool,
-    tun: &mut std::fs::File,
+    _tun: &mut std::fs::File,
     datagram: &[u8],
     from: SocketAddr,
     outer_ecn: Option<u8>,

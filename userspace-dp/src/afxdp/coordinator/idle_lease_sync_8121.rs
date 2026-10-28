@@ -530,7 +530,7 @@ impl Coordinator {
                         continue;
                     };
                     let addr_index = prefix.pool_v4.iter().position(|a| *a == translated);
-                    let Some(idx) = addr_index else {
+                    let Some(_idx) = addr_index else {
                         counts.skipped_unknown_address += 1;
                         continue;
                     };

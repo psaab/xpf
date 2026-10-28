@@ -26,7 +26,7 @@ pub(crate) use self::session_domain::{
     policy_match_from_parts, policy_tuple_from_key, policy_wire_family, HaRefreshOutcome,
     HelperMutationBegin, HelperMutationOutcome, SessionDomain,
 };
-pub(crate) use self::export::{AllSessionsExport, ExportKick, OwnerRgExportWait};
+pub(crate) use self::export::{AllSessionsExport, OwnerRgExportWait};
 #[cfg(test)]
 pub(crate) use self::export::drain_export_deltas_from_workers;
 
@@ -35,4 +35,4 @@ pub(crate) use self::export::drain_export_deltas_from_workers;
 #[path = "../ha_tests.rs"]
 mod tests;
 
-pub(crate) use counter_query::{SessionCounterQueryWait, WorkerSessionCounters};
+pub(crate) use counter_query::SessionCounterQueryWait;

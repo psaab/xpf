@@ -13,7 +13,6 @@
 //! both seams below are `#[inline]` no-ops; the single production statement
 //! in `bringup.rs` is what every build executes.
 use super::super::super::*;
-use super::super::supervisor::spawn_supervised_worker;
 use super::super::Coordinator;
 
 /// #17111: IPsec-SA readiness override for `bring_up_workers`.

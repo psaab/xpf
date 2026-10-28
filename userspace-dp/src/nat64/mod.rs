@@ -189,11 +189,10 @@ use crate::nat::{
     static_owns_wire_identity,
 };
 use crate::prefix::PrefixV6;
-use crate::session::SessionDecision;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
 use std::sync::atomic::AtomicU32;
 
@@ -296,12 +295,24 @@ mod reserve;
 mod state;
 mod translate;
 
+#[allow(unused_imports)]
 pub(crate) use checksum::*;
 pub(crate) use frames::*;
+#[allow(unused_imports)]
 pub(crate) use icmp::*;
 pub(crate) use reserve::*;
 pub(crate) use state::*;
 pub(crate) use translate::*;
+#[allow(unused_imports)]
+use checksum::*;
+#[allow(unused_imports)]
+use frames::*;
+#[allow(unused_imports)]
+use icmp::*;
+#[allow(unused_imports)]
+use reserve::*;
+#[allow(unused_imports)]
+use translate::*;
 
 // ---------------------------------------------------------------------------
 // Tests

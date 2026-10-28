@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use super::{COS_MIN_BURST_BYTES, cos_effective_burst_bytes};
+use super::cos_effective_burst_bytes;
 use super::admission::apply_cos_queue_flow_fair_promotion;
 use super::tx_completion::cos_tick_for_ns;
 use crate::afxdp::types::{

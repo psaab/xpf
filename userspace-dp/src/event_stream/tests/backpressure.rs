@@ -364,7 +364,7 @@ fn keeping_up_consumer_sees_full_fidelity_and_no_stalls() {
     let capacity = 16;
     let (tx, rx) = mpsc::sync_channel::<EventFrame>(capacity);
     let shared = Arc::new(EventStreamShared::new());
-    let handle = EventStreamWorkerHandle {
+    let _handle = EventStreamWorkerHandle {
         tx: tx.clone(),
         shared: shared.clone(),
     };

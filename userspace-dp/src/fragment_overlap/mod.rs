@@ -3173,7 +3173,7 @@ mod tests {
         // and the post src/dst are identical for both tenants).
         let seed = 1u64;
         let tracker = OverlapTracker::with_seed(seed);
-        let mut idents_in_shard = |src: Ipv4Addr, shard: usize, count: usize| {
+        let idents_in_shard = |src: Ipv4Addr, shard: usize, count: usize| {
             let mut out = Vec::new();
             let mut ident = 0u32;
             while out.len() < count {
@@ -3311,7 +3311,7 @@ mod tests {
         let tenant_a = Ipv4Addr::new(10, 0, 61, 100);
         let tenant_b = Ipv4Addr::new(10, 0, 61, 101);
         let shard = overlap_shard_index_seeded(&post_key(tenant_a, 0), seed);
-        let mut in_shard = |src: Ipv4Addr, count: usize| {
+        let in_shard = |src: Ipv4Addr, count: usize| {
             let mut out = Vec::new();
             let mut ident = 0u32;
             while out.len() < count {
@@ -3774,7 +3774,7 @@ mod tests {
         let full0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
         let inc0 = FRAG_OVERLAP_CROSS_ZONE_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed);
         let comp0 = FRAG_OVERLAP_CROSS_ZONE_RECLAIMED.load(Ordering::Relaxed);
-        let mut r = t.check_and_record_fragment_detailed(
+        let r = t.check_and_record_fragment_detailed(
             victim_c,
             0,
             8,
@@ -3984,7 +3984,7 @@ mod tests {
             &planted.iter().map(|k| k.ident).collect::<Vec<_>>(),
         );
         let full0 = FRAG_OVERLAP_SHARD_FULL_DROPPED.load(Ordering::Relaxed);
-        let rec0 = FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed);
+        let _rec0 = FRAG_OVERLAP_SAME_SENDER_INCOMPLETE_RECLAIMED.load(Ordering::Relaxed);
         let mut r = t.check_and_record_fragment_detailed(
             ninth,
             0,

@@ -216,10 +216,7 @@ pub(crate) fn zone_name_to_id_from_snapshot(zones: &[ZoneSnapshot]) -> FxHashMap
 /// from/to zone resolution and mapped to [`JUNOS_HOST_ZONE_ID`].
 pub(crate) const JUNOS_HOST_ZONE_NAME: &str = "junos-host";
 
-use crate::ip_proto::{
-    PROTO_AH, PROTO_EGP, PROTO_ESP, PROTO_GRE, PROTO_ICMP, PROTO_ICMPV6, PROTO_IGMP, PROTO_IPIP,
-    PROTO_OSPF, PROTO_PIM, PROTO_SCTP, PROTO_TCP, PROTO_UDP, PROTO_VRRP,
-};
+use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PolicyAction {

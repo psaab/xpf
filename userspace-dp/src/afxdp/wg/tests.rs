@@ -8,7 +8,7 @@
 use super::allowed_ips::AllowedIps;
 use super::dscp::tos_from_dscp;
 use super::engine::{DecapError, EncapError, WgEngine, WgEngineConfig, WgPeerConfig};
-use super::framing::{encode_data_header, parse_data_header};
+use super::framing::parse_data_header;
 use super::mss::wg_tcp_mss;
 // #1440: outer.rs DELETED. The two surviving smoke tests that
 // exercised the deleted wrappers (`outer_l2_with_vlan_when_set`
@@ -269,7 +269,7 @@ fn decap_rejects_inner_src_outside_allowed_ips() {
     // The responder's peer (the initiator) is allowed 10.0.0.0/24.
     // The initiator sends a packet with src 10.0.99.99 — must be
     // dropped by the AllowedIPs gate, NOT silently accepted.
-    let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    let (init_engine, resp_engine, _init_pub, resp_pub) = established_pair(
         vec!["10.0.1.0/24".parse().unwrap()],
         vec!["10.0.0.0/24".parse().unwrap()],
     );
@@ -285,7 +285,7 @@ fn decap_rejects_inner_src_outside_allowed_ips() {
 
 #[test]
 fn replay_window_rejects_duplicate_ciphertext() {
-    let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    let (init_engine, resp_engine, _init_pub, resp_pub) = established_pair(
         vec!["10.0.1.0/24".parse().unwrap()],
         vec!["10.0.0.0/24".parse().unwrap()],
     );
@@ -551,7 +551,7 @@ fn transport_plaintext_is_padded_to_16_byte_multiple() {
     // be zero-padded to a multiple of 16 before encryption. Test
     // several inner-packet lengths to cover both the "exact
     // multiple" and "needs padding" arms.
-    let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    let (init_engine, resp_engine, _init_pub, resp_pub) = established_pair(
         vec!["10.0.1.0/24".parse().unwrap()],
         vec!["10.0.0.0/24".parse().unwrap()],
     );
@@ -733,7 +733,7 @@ fn decap_zeros_plaintext_on_allowed_ips_violation() {
     // initiator covers `10.0.0.0/24` only. The initiator then
     // sends with inner src `10.0.99.99` — authenticates, fails
     // AllowedIPs gate, must return AllowedIpsViolation AND wipe.
-    let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    let (init_engine, resp_engine, _init_pub, resp_pub) = established_pair(
         vec!["10.0.1.0/24".parse().unwrap()],
         vec!["10.0.0.0/24".parse().unwrap()],
     );
@@ -1631,7 +1631,7 @@ fn allowed_ips_unit_check() {
 fn try_decap_rejects_sub_poly1305_tag_records_without_panicking() {
     use super::framing::encode_data_header;
 
-    let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+    let (init_engine, resp_engine, _init_pub, resp_pub) = established_pair(
         vec!["10.0.1.0/24".parse().unwrap()],
         vec!["10.0.0.0/24".parse().unwrap()],
     );
@@ -3677,7 +3677,7 @@ mod telemetry_counters {
     /// AllowedIPs-violating inner → decap_drops_allowed_ips.
     #[test]
     fn allowed_ips_violation_counts() {
-        let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+        let (init_engine, resp_engine, _init_pub, resp_pub) = established_pair(
             vec!["0.0.0.0/0".parse().unwrap()],
             // Responder only accepts 10.7.0.0/16 from the initiator.
             vec!["10.7.0.0/16".parse().unwrap()],
@@ -3703,7 +3703,7 @@ mod telemetry_counters {
     /// (ShortRecord folds into the malformed-header class).
     #[test]
     fn short_record_counts_malformed_header() {
-        let (init_engine, resp_engine, init_pub, resp_pub) = established_pair(
+        let (init_engine, resp_engine, _init_pub, resp_pub) = established_pair(
             vec!["0.0.0.0/0".parse().unwrap()],
             vec!["0.0.0.0/0".parse().unwrap()],
         );

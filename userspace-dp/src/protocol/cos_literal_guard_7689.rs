@@ -70,7 +70,7 @@ fn cos_scheduler_snapshot_literals_carry_an_update_tail_7689() {
     afxdp_rs_files(&root, &mut files);
 
     let mut literals = 0usize;
-    let mut skipped_non_literal = 0usize;
+    let mut _skipped_non_literal = 0usize;
     let mut exhaustive: Vec<String> = Vec::new();
 
     for path in &files {
@@ -121,7 +121,7 @@ fn cos_scheduler_snapshot_literals_carry_an_update_tail_7689() {
                 || pre.ends_with("impl")
                 || pre.ends_with("for")
             {
-                skipped_non_literal += 1;
+                _skipped_non_literal += 1;
                 continue;
             }
 

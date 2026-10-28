@@ -2,7 +2,6 @@
 // but RFC 6146 requires one BIB per (protocol, subscriber, source port, scope).
 use super::allocator::{DeterministicV6, NatHolder, PortAllocator};
 use super::source::SourceNatFlowKey;
-use super::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const POOL: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 1);

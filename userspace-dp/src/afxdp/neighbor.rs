@@ -364,7 +364,7 @@ pub(super) fn build_solicit_sockaddr_in6(v6: Ipv6Addr, ifindex: i32) -> libc::so
     sa6
 }
 
-/// Trigger kernel ARP/NDP resolution by sending an ICMP echo via a
+// Trigger kernel ARP/NDP resolution by sending an ICMP echo via a
 /// kernel socket bound to the egress interface. The kernel's own ARP
 /// stack handles VLAN tagging correctly. No fork/exec overhead.
 ///

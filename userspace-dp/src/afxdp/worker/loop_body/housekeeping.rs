@@ -110,30 +110,6 @@ pub(super) fn run_session_housekeeping(
         node_served: &node_served,
     };
     let mut deferred_delta_cleanup = false;
-    // #13075: the loop-local `drain_and_flush_all!` macro, as a nested fn
-    // taking the drain state explicitly (a closure would capture `sessions`
-    // / `bindings` for its whole lifetime and block the expiry walk between
-    // calls). `flush_deltas` is the caller's expansion of
-    // `flush_drained_session_deltas!` (a loop-local macro_rules in mod.rs,
-    // not nameable across modules), passed in so the flush semantics —
-    // including the #5468 lossless-wedge latch and the #2874 delta-loss
-    // latch — stay exactly the loop's.
-    macro_rules! drain_and_flush_all {
-        () => {
-            drain_and_flush_all_impl(
-                &mut *sessions,
-                &mut *bindings,
-                binding_lookup,
-                &mut *shared_recycles,
-                shared_runtime,
-                shared_sessions,
-                shared_owner_rg_indexes,
-                &mut deferred_delta_cleanup,
-                worker_lossless_wedged,
-                &mut *flush_deltas,
-            )
-        };
-    }
     retry_deferred_pressure_sheds(
         &mut sessions,
         &mut bindings,

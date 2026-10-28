@@ -4638,7 +4638,7 @@ fn shared_ifindex_nd_only_difference_is_disputed_16057() {
 fn refused_addressed_base_denies_host_bound_but_preserves_controls_10556() {
     use crate::afxdp::forwarding::{host_inbound_admits, host_inbound_admits_iface};
     use crate::protocol::snapshot::InterfaceAddressSnapshot;
-    use crate::ZoneSnapshot;
+    
 
     const SHARED_IFINDEX: i32 = 611;
     const TAGGED_IFINDEX: i32 = 612;
@@ -14033,7 +14033,7 @@ fn quarantine_row_never_overwrites_survivor_ifindex_claim_9956() {
 fn refused_native_unit_zero_trunk_parent_denies_host_inbound_10644() {
     use crate::afxdp::forwarding::{host_inbound_admits, host_inbound_admits_iface};
     use crate::protocol::snapshot::InterfaceAddressSnapshot;
-    use crate::ZoneSnapshot;
+    
 
     const PARENT_IFINDEX: i32 = 11;
     const SIBLING_IFINDEX: i32 = 12;
@@ -14130,7 +14130,7 @@ fn refused_native_unit_zero_trunk_parent_denies_host_inbound_10644() {
 fn unzoned_tagged_vlan_unit_denies_host_inbound_10644() {
     use crate::afxdp::forwarding::{host_inbound_admits, host_inbound_admits_iface};
     use crate::protocol::snapshot::InterfaceAddressSnapshot;
-    use crate::ZoneSnapshot;
+    
 
     const PARENT_IFINDEX: i32 = 11;
     const ZONED_IFINDEX: i32 = 12;

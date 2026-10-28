@@ -3164,7 +3164,7 @@ mod pressure_shed_matrix_17012 {
     #[test]
     fn gc_pressure_shed_retry_evicts_sibling_cache_17012() {
         let forwarding = build_forwarding_state(&nat_snapshot());
-        let ha_state = txn_ha_state();
+        let _ha_state = txn_ha_state();
         let mut sessions = SessionTable::new();
         sessions.set_max_sessions_for_test(2);
         let victim_key = crate::session::SessionKey {
@@ -6543,8 +6543,10 @@ fn split_rg_punt_origin_wan_reverse_icmp_fabric_tx_15958b() {
         &frame,
         meta,
     );
-    for (i, b) in bindings.iter().enumerate() {}
-    if let Some(e) = &egress {
+    for (_i, _b) in bindings.iter().enumerate() {
+    }
+    if let Some(_e) = &egress {
+
     } else {
     }
     assert_eq!(batch.forward_candidate_packets, 1);
@@ -6595,7 +6597,7 @@ fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
     let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
     sessions.set_forwarding_revalidation_gen(7, 9);
-    let mut frame = build_txn_tcp_syn_frame_v4(
+    let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(172, 16, 80, 200),
         Ipv4Addr::new(172, 16, 80, 8),
         443,
@@ -6612,29 +6614,16 @@ fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
     meta.flow_dst_port = 12345;
     let mut bindings = wan_lan_bindings_fw0_15958b();
     for pkt in 0..2 {
-        let (batch, dbg, egress) = txn_run_multi_binding_15958(
-            &mut bindings,
-            0,
-            &mut sessions,
-            &forwarding,
-            &ha_state,
-            &frame,
-            meta,
+        let (_batch, _dbg, egress) = txn_run_multi_binding_15958(
+            &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
         );
-        for (i, b) in bindings.iter().enumerate() {}
-        if let Some(e) = &egress {}
-        assert!(
-            egress.is_some(),
-            "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX"
-        );
-        assert_eq!(
-            bindings[0]
-                .live
-                .tx_packets
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "WAN must not TX TCP return"
-        );
+        for (_i, _b) in bindings.iter().enumerate() {
+        }
+        if let Some(_e) = &egress {
+        }
+        assert!(egress.is_some(), "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX");
+        assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX TCP return");
+
     }
 }
 
@@ -7404,7 +7393,7 @@ fn split_rg_transient_mixed_state_retains_redirect_15958b() {
     });
     sessions.set_forwarding_revalidation_gen(7, 9);
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
-    let mut frame = build_txn_tcp_syn_frame_v4(
+    let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(172, 16, 80, 200),
         Ipv4Addr::new(172, 16, 80, 8),
         443,

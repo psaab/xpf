@@ -856,7 +856,7 @@ fn table_has_deferred_leak_v6(state: &ForwardingState, table: &str, ip: Ipv6Addr
     })
 }
 
-/// #17852: test-only, thread-local count of source-ownership scans, so
+// #17852: test-only, thread-local count of source-ownership scans, so
 /// regression cells can prove lookups and incarnation checks in tables
 /// without deferred returns do no ownership walk. Zero cost in
 /// non-test builds (no counter exists there).

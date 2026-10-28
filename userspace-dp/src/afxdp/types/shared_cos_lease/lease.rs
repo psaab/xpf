@@ -459,8 +459,8 @@ impl SharedCoSQueueLease {
                     let reservoir = (((rate_bytes as u128 * lag_ns as u128) / 1_000_000_000u128)
                         as u64)
                         .max(CARRY_FRAME_BYTES);
-                    let proportional = ((reservoir as u128 * CARRY_DRAIN_MAX_EPOCHS as u128
-                        / CARRY_MAX_EPOCHS as u128) as u64);
+                    let proportional = (reservoir as u128 * CARRY_DRAIN_MAX_EPOCHS as u128
+                        / CARRY_MAX_EPOCHS as u128) as u64;
                     let epoch_cap = ((rate_bytes as u128
                         * CARRY_MAX_EPOCHS as u128
                         * EPOCH_DURATION_NS as u128)

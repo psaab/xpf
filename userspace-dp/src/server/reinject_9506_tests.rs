@@ -9,7 +9,7 @@ use crate::slowpath::SlowPathReinjector;
 use crate::slowpath_reinject_9506::{
     encode_cancel, encode_complete, encode_message, encode_submit_batch, read_message,
     CancelScope, CaptureOrigin, ReinjectCompletion, ReinjectCore, ReinjectLease,
-    ReinjectOutcome, SubmitFrame, ADMIT_BAD_LEASE, ADMIT_NON_DRY_RUN, ADMIT_OK,
+    ReinjectOutcome, SubmitFrame, ADMIT_BAD_LEASE, ADMIT_OK,
     ADMIT_SHUTDOWN, ADMIT_STALE, MSG_ADMIT, MSG_ANNOUNCE, MSG_CANCEL, MSG_COMPLETE, MSG_SUBMIT_BATCH,
     ORIGIN_FORWARD, ORIGIN_INET, PMECH_DEADLINE_CLOCK_MONOTONIC, SUBMIT_FLAG_DRY_RUN,
 };

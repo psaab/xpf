@@ -1366,10 +1366,12 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         .resolution
         .neighbor_mac
         .expect("cached decision carries a neighbor MAC");
-    fixture
-        .dynamic_neighbors
-        .insert((EGRESS_IFINDEX, next_hop), NeighborEntry { mac: live_mac });
-    let mut worker_ctx = fixture.worker_ctx();
+    fixture.dynamic_neighbors.insert(
+        (EGRESS_IFINDEX, next_hop),
+        NeighborEntry { mac: live_mac },
+    );
+    let worker_ctx = fixture.worker_ctx();
+
     let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
     let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
 
@@ -5030,7 +5032,7 @@ fn cached_filter_pinned_queue_refreshes_ingress_lp_rewrite_11679() {
         name: name.into(),
         entries,
     };
-    let mut snapshot = crate::ConfigSnapshot {
+    let snapshot = crate::ConfigSnapshot {
         interfaces: vec![
             crate::InterfaceSnapshot {
                 name: "reth0.0".into(),
@@ -5589,7 +5591,7 @@ fn cached_deny_superseded_when_node_neighbor_lands_16217() {
     entry.decision.resolution.egress_ifindex = EGRESS_IFINDEX;
 
     // Hop landed ONLY in the node map.
-    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
     fixture
         .dynamic_neighbors
         .insert((EGRESS_IFINDEX, hop), NeighborEntry { mac });
@@ -5638,7 +5640,7 @@ fn cached_deny_superseded_when_node_neighbor_lands_16217() {
     );
 
     // Control: contradicting MAC — deny stays served (fail-closed).
-    let mut fixture_bad = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
+    let fixture_bad = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_event_stream();
     fixture_bad.dynamic_neighbors.insert(
         (EGRESS_IFINDEX, hop),
         NeighborEntry {
@@ -5870,7 +5872,7 @@ fn cached_output_filter_discard_counts_transit_drop_15941() {
 fn cached_selector_fence_counts_transit_fence_drop_15941() {
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_selector_fence();
     let frame = tcp_v4_ack_frame();
-    let meta = test_meta(&frame);
+    let _meta = test_meta(&frame);
     let run = run_stage(&fixture, &frame, 0);
     assert_eq!(run.flow_cache_tallies.0, 1, "must be a real cache hit");
     assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
@@ -7188,7 +7190,7 @@ fn lookup_fence_departed_candidate_reaches_hit_stage_16217() {
 #[test]
 fn adopted_mark_revalidates_ownership_each_hit_16217() {
     let frame = tcp_v4_ack_frame();
-    let meta = test_meta(&frame);
+    let _meta = test_meta(&frame);
     // Failback: the ADOPTED entry's egress RG1 is no longer
     // forwarding-active here. The validator spells this shape's rejection
     // `EnforceChanged` (enforce runs before the departure arm whenever the

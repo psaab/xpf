@@ -955,7 +955,7 @@ impl SessionTable {
         is_reverse: bool,
         is_opening: bool,
         fabric_ingress: bool,
-        last_seen_ns: u64,
+        _last_seen_ns: u64,
         expires_after_ns: u64,
         first_held_ns: u64,
         seen_rg_epoch: u32,

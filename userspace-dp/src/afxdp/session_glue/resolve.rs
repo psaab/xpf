@@ -413,7 +413,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
     }
     let now_ns = shared.tick.ns;
     let now_secs = shared.tick.secs;
-    if let Some(mut hit) = lookup_session_across_scopes_with_shared_and_payload(
+    if let Some(hit) = lookup_session_across_scopes_with_shared_and_payload(
         sessions,
         shared.sessions,
         shared.nat_sessions,

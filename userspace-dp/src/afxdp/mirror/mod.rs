@@ -4,8 +4,7 @@ mod fast_path;
 mod resolver;
 
 pub(in crate::afxdp) use fast_path::{
-    commit_staged_mirror_clone, enqueue_admitted_mirror_clone_to_live,
-    enqueue_sampled_mirror_clone, snapshot_staged_mirror_clone, stage_sampled_mirror_clone,
+    commit_staged_mirror_clone, enqueue_admitted_mirror_clone_to_live, snapshot_staged_mirror_clone, stage_sampled_mirror_clone,
 };
 // `enqueue_mirror_clone` and `enqueue_mirror_clone_to_live` are production-live
 // (#17195: their false test-only labels are gone).

@@ -48,7 +48,6 @@ pub(crate) static ipsec_inner_parse_drops_total: AtomicU64 = AtomicU64::new(0);
 // canonical static.
 // The alias keeps the §4.3 source-level name joinable to the metric contract
 // without a translation table.
-pub(crate) use IPSEC_INNER_ECN_ILLEGAL_DROPS as ipsec_inner_ecn_illegal_drops;
 #[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_noroute_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
@@ -1448,7 +1447,7 @@ mod tests {
             ("2001:db8::/64", 20, Some(next_hop)),
             ("2001:db8:1::/64", 10, Some("2001:db8:1::ff".parse().expect("tunnel hop"))),
         ];
-        let routes = prefixes.iter().map(|(prefix, ifindex, hop)| {
+        let routes = prefixes.iter().map(|(prefix, ifindex, _hop)| {
             IpsecMainRouteSnapshot {
                 domain: 0,
                 table: 254,

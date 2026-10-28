@@ -4,7 +4,6 @@
 //! plus `snapshot` because `ProcessStatus` and `ControlRequest`
 //! aggregate them.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // #7160: `ProcessStatus` now lives in the sibling `status` module (split out
@@ -13,16 +12,10 @@ use serde::{Deserialize, Serialize};
 use super::status::ProcessStatus;
 
 use super::binding::{
-    BindingCountersSnapshot, BindingStatus, ExceptionStatus, HAGroupStatus, QueueStatus,
-    SessionDeltaInfo, WorkerRuntimeStatus,
+    HAGroupStatus,
+    SessionDeltaInfo,
 };
-use super::cos::{CoSActiveFlowCountStatus, CoSInterfaceStatus};
-use super::nat::{NatRuleCounterStatus, SourceNatPoolStatus};
-use super::resolution::{FlowWorkerStatus, PacketResolution};
-use super::security::{
-    FirewallFilterTermCounterStatus, PolicyRuleCounterStatus, ThreeColorPolicerStatus,
-};
-use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot, UserspaceCapabilities};
+use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot};
 
 /// The config-snapshot wire contract version, mirrored on the Go side by
 /// `userspace.ProtocolVersion` (pkg/dataplane/userspace/protocol.go). The two

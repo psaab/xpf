@@ -79,6 +79,10 @@ pub(in crate::nat::allocator) fn occupancy_next_probe(attempt: u64) -> u64 {
 /// translated port learns nothing about the next flow's port without
 /// the secret. `range == 0` yields 0 (callers guard range first).
 
+/// RFC 6056 Algorithm 3/5 keyed offset: hash the flow tuple under the
+/// per-boot secret, reduced modulo `range`. An observer who sees one
+/// translated port learns nothing about the next flow's port without
+/// the secret. `range == 0` yields 0 (callers guard range first).
 #[inline]
 pub(in crate::nat) fn pat_keyed_offset(secret: u64, key: u64, range: u32) -> u32 {
     if range == 0 {
@@ -520,7 +524,7 @@ impl AddressOccupancy {
         // be claimed at age ~0. Ranges <=256 bound the probe at 256
         // CAS attempts, so the innermost mutex is held only briefly;
         // lock order is unchanged (recycle stays innermost).
-        let mut small_recycle = if self.range <= SMALL_POOL_QUARANTINE_MAX_RANGE {
+        let small_recycle = if self.range <= SMALL_POOL_QUARANTINE_MAX_RANGE {
             Some(self.recycle.lock().unwrap_or_else(|e| e.into_inner()))
         } else {
             None

@@ -668,7 +668,7 @@ fn interface_snat_v6_collision_is_patted_6751() {
     let egress6: IpAddr = "2001:559:8585:80::8".parse().unwrap();
     let server6: IpAddr = "2001:559:8585:80::200".parse().unwrap();
 
-    let mut mint = |src: &str| -> NatDecision {
+    let mint = |src: &str| -> NatDecision {
         let mut counter = None;
         decision(match_source_nat_result_for_tuple(
             &reg,

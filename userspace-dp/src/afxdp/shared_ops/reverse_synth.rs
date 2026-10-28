@@ -690,7 +690,7 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
 ) -> (SessionLookup, bool) {
     // #16019 fold 3: capture the forward key before the match is consumed —
     // the reverse row's rev stamp reads the FORWARD entry's counters.
-    let forward_key_for_rev = forward_match.key.clone();
+    let _forward_key_for_rev = forward_match.key.clone();
     let reverse = build_reverse_session_from_forward_match(
         forwarding,
         ha_state,

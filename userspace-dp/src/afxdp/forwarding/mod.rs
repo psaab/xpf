@@ -17,7 +17,9 @@ pub(in crate::afxdp) use ipsec_sa::*;
 // #10868: test-only monitor probe and lifecycle skip gate shared by the
 // XFRM-dependent coordinator/server lifecycle tests.
 #[cfg(test)]
-pub(crate) use self::ipsec_sa::{require_xfrm_monitor_for_lifecycle_test, xfrm_monitor_usable};
+pub(crate) use self::ipsec_sa::{
+    require_xfrm_monitor_for_lifecycle_test,
+};
 pub(in crate::afxdp) use mss::*;
 mod ha;
 pub(in crate::afxdp) use ha::*;
@@ -32,6 +34,7 @@ pub(in crate::afxdp) use host_inbound::{
     host_inbound_admits, host_inbound_admits_for_destination,
     host_inbound_admits_iface_for_destination, zone_host_inbound_from_snapshot,
     zone_host_inbound_from_tokens, zone_host_inbound_from_tokens_except,
+
 };
 // #17192: the destination-less iface entry point is a test-only seam
 // delegating to the production destination-aware entry point.

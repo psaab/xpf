@@ -279,7 +279,7 @@ pub(in crate::afxdp) fn fabric_adoption_gate_for_wire(
     forwarding: &crate::afxdp::ForwardingState,
     ha_state: &std::collections::BTreeMap<i32, crate::afxdp::HAGroupRuntime>,
     forwarding_active_rgs: &std::collections::BTreeSet<i32>,
-    now_secs: u64,
+    _now_secs: u64,
     sessions: &crate::session::SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,

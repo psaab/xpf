@@ -201,8 +201,8 @@ pub(crate) use unresolved::UnresolvedProfileRef;
 #[cfg(test)]
 pub(crate) use packet::{FragView, ScreenParseError};
 pub(crate) use syncookie::{
-    SYN_COOKIE_MSS_VALUES, SynCookieAckVerdict, SynCookieChallenge, SynCookieCodec,
-    SynCookieClientKey, SynCookieKeyRing, SynCookieTuple, SynCookieValidation,
+    SynCookieAckVerdict, SynCookieChallenge, SynCookieCodec,
+    SynCookieClientKey, SynCookieKeyRing, SynCookieTuple,
 };
 
 // Test-only re-exports — screen/tests.rs constructs SipHash24 and

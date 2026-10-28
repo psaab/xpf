@@ -51,7 +51,7 @@ fn wg_encapped_size_with_outer_mtu(inner_len: usize, outer_v6: bool, outer_mtu: 
     wg_record_len + outer_ip_len + 8
 }
 
-/// Test-only seam: counts every entry into `outer_physical_egress_resolution`
+// Test-only seam: counts every entry into `outer_physical_egress_resolution`
 /// (each one performs exactly one outer-underlay FIB LPM). `wg_encap_frame`
 /// resolves the outer route ONCE per packet (#3992); a test resets this to 0,
 /// builds one frame, and asserts the count is exactly 1 (it was 2 before the

@@ -1663,6 +1663,7 @@ fn current_generation_install_and_delete_still_apply_on_poisoned_shared_mutex() 
     );
 }
 
+
 // #2962: kicking an export for an EMPTY owner-RG set is a no-op — it must
 // not consume an export sequence and the wait must drain nothing, preserving
 // the pre-split early return semantics.
@@ -2124,6 +2125,7 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
         source_nat_static: None,
     };
     let mut publish = |mut entry: SyncedSessionEntry, port: u16| {
+
         entry.key.src_port = port;
         // test_metadata() is fabric-ingress by default; plain rows clear it,
         // fabric-ingress rows keep it, so both legs are exercised as-is.
@@ -4536,7 +4538,7 @@ fn synced_import_unpublished_counts_the_absent_map_not_the_owner_decision_7209()
 #[test]
 fn no_worker_registered_keeps_a_synced_import_off_the_reservation_path_7209() {
     // --- Leg A: NO worker -> the reservation must not run at all. ----------
-    let mut no_worker = Coordinator::new();
+    let no_worker = Coordinator::new();
     assert!(
         no_worker.workers.records().is_empty(),
         "fixture broken: a fresh Coordinator must have no worker records, or \
@@ -11771,7 +11773,7 @@ fn coord_list_pages_beyond_4096_10512() {
     assert_eq!(page2.len(), 4, "terminal page holds the rest");
     assert!(complete2, "terminal page must complete");
     assert!(cont2.is_empty(), "terminal page continues nothing");
-    let mut ids: std::collections::HashSet<u64> = page1
+    let ids: std::collections::HashSet<u64> = page1
         .iter()
         .chain(page2.iter())
         .map(|r| r.expected_rt_flow_session_id)

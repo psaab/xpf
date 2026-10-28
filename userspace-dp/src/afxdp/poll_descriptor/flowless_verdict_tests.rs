@@ -302,7 +302,7 @@ mod flowless_local_delivery_tests {
         let fw = fw_with_host_inbound(ZONE, &["ssh"], &[]);
         let flow = flowless_flow(PROTO_TCP);
         let mut counters = BatchCounters::default();
-        let v = flowless_local_delivery_verdict(
+        let _v = flowless_local_delivery_verdict(
             &fw,
             Some(&handle),
             flowless_extra(),

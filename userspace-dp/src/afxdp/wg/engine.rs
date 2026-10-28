@@ -63,8 +63,7 @@ use super::peer::{Peer, PeerConfig, encode_roam_endpoint};
 use super::session::{REJECT_AFTER_MESSAGES, ReplayDecision, WgSession};
 use super::tai64n::Tai64nClock;
 use super::{
-    POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES,
-    WG_SMALL_ORDER_KEYS, WG_ZERO_PSK, pad_to_16, padded_len_capped,
+    POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES, WG_ZERO_PSK, pad_to_16, padded_len_capped,
 };
 use arc_swap::ArcSwap;
 use curve25519_dalek::MontgomeryPoint;

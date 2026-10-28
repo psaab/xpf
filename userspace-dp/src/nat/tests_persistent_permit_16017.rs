@@ -429,7 +429,7 @@ fn validated_import_after_tightening_stays_demoted_16017() {
         &NatCounterStore::default(),
         now + 2,
     );
-    let pool_addrs = vec![translated.ip];
+    let _pool_addrs = vec![translated.ip];
     // This is the coordinator's tightened branch: after_generation without
     // local AnyRemoteHost authorization.
     assert_eq!(

@@ -507,7 +507,7 @@ fn build_forwarding_state_with_policy_state_and_previous(
 /// double-counting across a slot renumber.
 fn attach_zone_counters(
     state: &mut ForwardingState,
-    snapshot: &ConfigSnapshot,
+    _snapshot: &ConfigSnapshot,
     previous: Option<&ForwardingState>,
 ) {
     use crate::afxdp::flood_counters::FloodCounterStore;

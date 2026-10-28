@@ -255,7 +255,7 @@ fn a_close_emits_one_update_per_class_transition_9412() {
     let forward = key_v4();
     let now = SEC;
     let reverse = install_forward_reverse_pair(&mut table, &forward, now, TCP_ACK);
-    let mut step = |t: &mut SessionTable, key: &SessionKey, at: u64, flags: u8| {
+    let step = |t: &mut SessionTable, key: &SessionKey, at: u64, flags: u8| {
         assert!(t.lookup(key, at, flags).is_some());
         t.drain_deltas(64)
             .into_iter()

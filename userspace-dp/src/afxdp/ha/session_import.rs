@@ -195,6 +195,7 @@ impl SyncedDeleteMode {
 }
 
 /// Test-only seam for the #9960 race. The hook fires after the initial clone and
+
 /// #9714 early checks, but immediately before the under-lock removal decision. A
 /// test can rendezvous a publisher here and install a replacement deterministically
 /// instead of relying on scheduler timing. Thread-local storage keeps concurrent
@@ -225,7 +226,7 @@ impl Drop for SyncedDeleteOutcomeOverrideGuard {
         SYNCED_DELETE_OUTCOME_OVERRIDE_ONCE.with(|slot| slot.set(None));
     }
 }
-/// Test-only seam for the #13709 race. The hook fires after the candidate
+// Test-only seam for the #13709 race. The hook fires after the candidate
 /// previous-entry snapshot, before the tuple lease is acquired. A test can
 /// publish an intervening replacement deterministically instead of relying on
 /// scheduler timing. Thread-local storage isolates concurrent tests and adds
@@ -812,8 +813,6 @@ impl crate::afxdp::ha::SessionDomain {
         // mirror refuses, so the unaccepted replacement does not displace the
         // still-authoritative entry. A failed restore is observable; refusal
         // handling remains best-effort and never changes its outcome.
-        let mut previous_snat_restored = None;
-        let mut previous_nat64_restored = None;
         if let Some(previous) = previous_entry
             && !previous.metadata.is_reverse
         {
@@ -890,8 +889,6 @@ impl crate::afxdp::ha::SessionDomain {
                     }
                 }
             }
-            previous_snat_restored = Some(snat_restored);
-            previous_nat64_restored = Some(nat64_restored);
             if !snat_restored {
                 self.sessions
                     .mirror_restore_failed

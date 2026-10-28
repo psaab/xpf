@@ -558,7 +558,15 @@ test-race-dp:
 # is what gates these cells, and a second release-feature build
 # would double the cold cost for no additional oracle.
 DEBUG_LOG_CELLS_16439 := afxdp::worker::loop_body::debug_report::policy_revoked_sessions_fold_tests::accumulate_carries_policy_revoked_sessions_10021 afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_tuple_mismatch_recycles_frame_exactly_once afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_pat_translation_is_not_a_tuple_mismatch_9782 afxdp::tx::dispatch::tests::segmentation::segmentation_pat_translation_survives_expected_ports_9782
-test-rust: check-userspace-dt-needed
+test-rust: lint-rust-baseline check-userspace-dt-needed
+
+# #17190: rustc warning ratchet — fail on any new/increased (lint,file) warning
+# vs userspace-dp/lint-baseline.tsv. Mechanical lints are also #![deny] in
+# src/main.rs and src/bin/fairness-eval.rs.
+.PHONY: lint-rust-baseline
+lint-rust-baseline:
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp CARGO=$(CARGO) python3 scripts/rust-lint-baseline.py
+
 	# Leg 0: compile bench invariants only; benches are never executed.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
 	# Leg 1: full release suite; overflow checks remain off by design.

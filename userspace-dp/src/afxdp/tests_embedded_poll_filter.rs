@@ -5916,7 +5916,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_6474() {
     let icmp6_csum = checksum16_ipv6(client_v6, server_v6, PROTO_ICMPV6, &frame[l4..]);
     frame[l4 + 2..l4 + 4].copy_from_slice(&icmp6_csum.to_be_bytes());
 
-    let mut snapshot = nat_snapshot();
+    let snapshot = nat_snapshot();
     // #13935: session-matched same-family ICMPv6 is independent of the
     // currently no-op allow-embedded-icmp setting.
     let forwarding = build_forwarding_state(&snapshot);
@@ -9236,7 +9236,7 @@ fn input_filter_count_term_advances_for_the_embedded_icmp_reversal_7359() {
         PROTO_TCP,
         0x18,
     ));
-    let sessions_before = sessions.len();
+    let _sessions_before = sessions.len();
 
     let mut screen = ScreenState::new();
     let mut batch = BatchCounters::default();
@@ -15997,7 +15997,7 @@ fn poll_descriptor_snat_outbound_icmp_error_renat_v6_with_reverse_half_14628() {
     let icmp6_csum = checksum16_ipv6(client_v6, server_v6, PROTO_ICMPV6, &frame[l4..]);
     frame[l4 + 2..l4 + 4].copy_from_slice(&icmp6_csum.to_be_bytes());
 
-    let mut snapshot = nat_snapshot();
+    let snapshot = nat_snapshot();
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);

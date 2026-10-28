@@ -341,7 +341,7 @@ fn bench_pop_commit_settle_publish() {
         queue.hot.local_item_count = 0;
         test_flow_fair_state_mut(queue).pop_snapshot_stack.clear();
         for i in 0..ITEMS_PER_BATCH {
-            let mut req = TxRequest {
+            let req = TxRequest {
                 bytes: packet.to_vec().into(),
                 expected_ports: None,
                 expected_addr_family: libc::AF_INET as u8,

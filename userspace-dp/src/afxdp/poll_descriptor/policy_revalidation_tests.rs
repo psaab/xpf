@@ -5548,7 +5548,7 @@ fn forward_hit_revalidation_still_rebinds_pair_14941() {
         dst_ip: forward.dst_ip,
         forward_key: forward.clone(),
     };
-    let resolved = crate::afxdp::session_glue::resolve_flow_session_decision(
+    let _resolved = crate::afxdp::session_glue::resolve_flow_session_decision(
         &mut sessions,
         crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
         SharedSessionRefs {

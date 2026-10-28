@@ -58,14 +58,12 @@ use shared_recycle::{
     shared_recycle_target_index, shared_recycle_target_index_for_split,
 };
 pub(in crate::afxdp) use slow_path::{
-    SlowPathOutlet, extract_l3_packet_with_nat, handle_forward_build_failure,
-    maybe_reinject_slow_path, maybe_reinject_slow_path_from_frame,
+    SlowPathOutlet, handle_forward_build_failure,
     maybe_reinject_slow_path_from_frame_with_outlet, reinject_host_authorized, slow_path_admit,
 };
 // pub(in crate::afxdp::tx) was previously pub(super) on the
 // extract_l3_packet[_from_frame] family; the re-export keeps the
 // pre-split sibling-tx/ visibility verbatim.
-pub(in crate::afxdp::tx) use slow_path::{extract_l3_packet, extract_l3_packet_from_frame};
 
 // #2208: test-only fault injection for the oversized-frame control flow.
 // A built copy-path frame larger than `tx_frame_capacity()` (4096) cannot
@@ -2193,7 +2191,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             } else {
                 build_failed = true;
             }
-            copied_source_frame = true;
+            let _ = &copied_source_frame;
         }
         if build_failed {
             handle_forward_build_failure(

@@ -7,7 +7,7 @@ use super::super::helpers::{
 use crate::afxdp::SessionDomain;
 use crate::afxdp::{
     SyncedDeleteMode, SyncedDeleteOutcome, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REFUSED_PREFIX,
+    SYNCED_IMPORT_REPAIR_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX,
 };
 use crate::{ControlResponse, SessionSyncRequest};
 
