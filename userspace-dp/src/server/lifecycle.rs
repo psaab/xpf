@@ -9,9 +9,9 @@
 // small helpers that derive companion socket paths from the
 // primary control-socket path.
 //
-// Pure relocation. Bodies byte-for-byte identical; visibility
-// widened from file-private to `pub(crate)` so main.rs's `fn main()`
-// shell can call into `server::lifecycle::run`.
+// Split out of main.rs; visibility widened from file-private to
+// `pub(crate)` so main.rs's `fn main()` shell can call into
+// `server::lifecycle::run`.
 
 use super::super::*;
 use crate::server::reinject_9506::{

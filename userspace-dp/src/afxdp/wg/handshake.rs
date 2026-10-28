@@ -163,6 +163,7 @@ fn macs_equal(a: &[u8; WG_MAC_LEN], b: &[u8; WG_MAC_LEN]) -> bool {
 /// A WG type-1 initiation produced by [`build_initiation`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BuiltInitiation {
+    #[expect(dead_code, reason = "test-only length field asserted by handshake tests (#17212)")]
     pub len: usize,
 }
 
@@ -209,9 +210,9 @@ pub(crate) struct ParsedInitiation<'a> {
 }
 
 /// Parse + authenticate a WG type-1 initiation with a precomputed MAC1 key.
-/// Single core: [`parse_initiation`] derives the key inline and delegates
-/// here, so the strict parse (length + canonical u32 type-word + MAC1)
-/// cannot drift between the two entry points. #9918 F-144.
+/// Single core: the test-only [`parse_initiation`] derives the key inline and
+/// delegates here, so the strict parse (length + canonical u32 type-word +
+/// MAC1) cannot drift between the two entry points. #9918 F-144.
 pub(crate) fn parse_initiation_with_key<'a>(
     msg: &'a [u8],
     mac1_key: &[u8; 32],
@@ -257,6 +258,10 @@ pub(crate) fn parse_initiation_with_key<'a>(
 /// `BLAKE2s-256(LABEL_MAC1 || our_static_pub)`. mac2 is NOT verified in S1
 /// (skip-verify; a peer holding our cookie legitimately sets it). The
 /// returned `noise_body` (108 bytes) is fed to snow `read_message`.
+///
+/// Test-only wrapper (#17212): production calls
+/// `parse_initiation_with_key` with its cached MAC1 key.
+#[cfg(test)]
 pub(crate) fn parse_initiation<'a>(
     msg: &'a [u8],
     our_static_pub: &[u8; WG_KEY_LEN],
@@ -285,6 +290,7 @@ pub(super) fn is_canonical_type(msg: &[u8], expected_type: u8) -> bool {
 /// A WG type-2 response produced by [`build_response`].
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct BuiltResponse {
+    #[expect(dead_code, reason = "test-only length field asserted by handshake tests (#17212)")]
     pub len: usize,
 }
 
@@ -331,7 +337,7 @@ pub(crate) struct ParsedResponse<'a> {
 }
 
 /// Parse + authenticate a WG type-2 response with a precomputed MAC1 key.
-/// Single core; [`parse_response`] delegates here. #9918 F-144.
+/// Single core; the test-only [`parse_response`] delegates here. #9918 F-144.
 pub(crate) fn parse_response_with_key<'a>(
     msg: &'a [u8],
     mac1_key: &[u8; 32],
@@ -340,7 +346,7 @@ pub(crate) fn parse_response_with_key<'a>(
         return Err(FramingError::WrongLength);
     }
     // Strict 32-bit LE type word (type byte 2 + zero reserved). See
-    // `parse_initiation` / `is_canonical_type`.
+    // `is_canonical_type`.
     if !is_canonical_type(msg, WG_TYPE_RESPONSE) {
         return Err(FramingError::BadType);
     }
@@ -365,6 +371,10 @@ pub(crate) fn parse_response_with_key<'a>(
 /// Parse + authenticate a WG type-2 response. `our_static_pub` is xpf's own
 /// static public key (the recipient of a response is the initiator = us).
 /// mac1 verified; mac2 skipped (S1).
+///
+/// Test-only wrapper (#17212): production calls
+/// `parse_response_with_key` with its cached MAC1 key.
+#[cfg(test)]
 pub(crate) fn parse_response<'a>(
     msg: &'a [u8],
     our_static_pub: &[u8; WG_KEY_LEN],

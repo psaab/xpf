@@ -443,7 +443,20 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 	// synthetic proposals now that both the proposal and policy maps exist.
 	expandIKEProposalSets(sec)
 
-	// IKE gateways
+	compileGatewayInstances(node, sec)
+
+	return nil
+}
+
+// compileGatewayInstances compiles every `gateway` instance under an
+// `ike` or `ipsec` parent into sec.IPsec.Gateways (#17172). Both parents
+// share the IPsecGateway struct and the gatewaySchemaNode grammar, so the
+// reader is shared too: before this extraction the loop was hand-copied
+// in compileIKE and compileIPsec and the copies diverged (#13540).
+func compileGatewayInstances(node *Node, sec *SecurityConfig) {
+	if sec.IPsec.Gateways == nil {
+		sec.IPsec.Gateways = make(map[string]*IPsecGateway)
+	}
 	for _, inst := range namedInstances(node.FindChildren("gateway")) {
 		gw := sec.IPsec.Gateways[inst.name]
 		if gw == nil {
@@ -528,8 +541,6 @@ func compileIKE(node *Node, sec *SecurityConfig) error {
 		}
 		sec.IPsec.Gateways[gw.Name] = gw
 	}
-
-	return nil
 }
 
 // parseDeadPeerDetectionNode compiles a `dead-peer-detection` stanza on an IKE
@@ -751,85 +762,8 @@ func compileIPsec(node *Node, sec *SecurityConfig) error {
 	// synthetic proposals now that both maps exist.
 	expandIPsecProposalSets(sec)
 
-	// Gateways (may appear under ipsec or ike)
-	if sec.IPsec.Gateways == nil {
-		sec.IPsec.Gateways = make(map[string]*IPsecGateway)
-	}
-	for _, inst := range namedInstances(node.FindChildren("gateway")) {
-		gw := sec.IPsec.Gateways[inst.name]
-		if gw == nil {
-			gw = &IPsecGateway{Name: inst.name}
-		}
-		for _, p := range expandFlatRun(inst.node.Children, gatewayLeafSchema8939(node)) {
-			v := nodeVal(p)
-			switch p.Name() {
-			case "address":
-				accumulateGatewayAddresses(gw, gatewayAddressValues(p))
-			case "local-address":
-				if v != "" {
-					gw.LocalAddress = v
-				}
-			case "ike-policy":
-				if v != "" {
-					gw.IKEPolicy = v
-				}
-			case "external-interface":
-				if v != "" {
-					// Keep parity with the `security ike gateway` compiler
-					// above: runtime resolution and fail-closed rendering need
-					// the original interface spelling for diagnostics.
-					gw.ExternalIface = v
-				}
-			case "local-certificate":
-				if v != "" {
-					gw.LocalCertificate = v
-				}
-			case "version":
-				if v != "" {
-					gw.Version = v
-				}
-			case "no-nat-traversal":
-				gw.NoNATTraversal = true
-				gw.NATTraversal = "disable"
-			case "nat-traversal":
-				if v != "" {
-					gw.NATTraversal = v
-				}
-				if v == "disable" {
-					gw.NoNATTraversal = true
-				}
-			case "dead-peer-detection":
-				parseDeadPeerDetectionNode(p, gw, resolveSchemaChild(gatewayLeafSchema8939(node), "dead-peer-detection"))
-			case "local-identity":
-				if len(p.Keys) >= 3 {
-					_ = p.Keys[2] // arity demand, see parseGatewayIdentity15752 (#8807 census)
-				}
-				gw.LocalIDType, gw.LocalIDValue, gw.LocalDNModifier = parseGatewayIdentity15752(p)
-			case "remote-identity":
-				gw.RemoteIDType, gw.RemoteIDValue, gw.RemoteDNModifier = parseGatewayIdentity15752(p)
-			case "dynamic":
-				// Junos `dynamic` identifies a dynamic-IP peer by the IKE
-				// identity it presents; `hostname <fqdn>` is that identity,
-				// not a DNS endpoint to dial. Always responder-only
-				// (remote_addrs = %any, remote id = @FQDN) (#14590).
-				if len(p.Keys) >= 3 && p.Keys[1] == "hostname" {
-					gw.DynamicHostname = p.Keys[2]
-					// #3332: compact-hierarchical trailing tokens past the FQDN.
-					if len(p.Keys) > 3 {
-						gw.DynamicHostnameExtras = append(gw.DynamicHostnameExtras, p.Keys[3:]...)
-					}
-				} else {
-					for _, c := range p.Children {
-						if c.Name() == "hostname" {
-							gw.DynamicHostname = nodeVal(c)
-						}
-					}
-				}
-				gw.ResponderOnly = true
-			}
-		}
-		sec.IPsec.Gateways[gw.Name] = gw
-	}
+	// Gateways (may appear under ipsec or ike) — shared reader (#17172).
+	compileGatewayInstances(node, sec)
 
 	// VPN tunnels
 	for _, inst := range namedInstances(node.FindChildren("vpn")) {
@@ -1217,9 +1151,10 @@ func isPlausibleHostname(s string) bool {
 // gatewayLeafSchema8939 resolves the `gateway` container under whichever
 // security parent is being compiled, so expandFlatRun can tell one of its
 // leaves from a value token. `security ike gateway` and `security ipsec
-// gateway` are DISTINCT schema nodes with distinct leaf sets -- they share the
-// IPsecGateway struct and duplicate the reader, which is why both loops need
-// this rather than one of them covering the other.
+// gateway` are DISTINCT schema nodes (fresh pointers from
+// gatewaySchemaNode, #17172) with IDENTICAL leaf sets, sharing the
+// IPsecGateway struct and the compileGatewayInstances reader; the parent
+// branch still determines which node's flags govern the packed split.
 func gatewayLeafSchema8939(parent *Node) *schemaNode {
 	if parent == nil || len(parent.Keys) == 0 {
 		return nil

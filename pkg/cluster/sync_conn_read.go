@@ -458,7 +458,7 @@ func (s *SessionSync) bulkRecvNow() time.Time {
 
 // bulkRecvCap is the ceiling for the combined distinct keys in one bulk
 // receive window (#16039): the forward-session table capacity. Forward
-// keys are half of conntrack.MaxSessions, which counts forward+reverse
+// keys are half of dataplane.MaxSessions, which counts forward+reverse
 // entries; the wired helper capacity (SetGenGuardSessionCap) replaces
 // the ceiling when known, exactly as maxCap clamps the gen-guard caps.
 // A zero result (only reachable via a zero genGuardMapCeilingOverride

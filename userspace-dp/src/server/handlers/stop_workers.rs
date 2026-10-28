@@ -1,5 +1,4 @@
-// #1345: per-verb handler for stop_workers. Body byte-identical to
-// handlers.rs lines 409-433.
+// #1345: per-verb handler for stop_workers, split out of handlers.rs in #1345.
 
 use super::super::helpers::project_status;
 use super::super::ServerState;

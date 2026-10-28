@@ -8,7 +8,7 @@
 // guard dropped (#5469). The `OwnedStatePayload` type structure is the
 // proof that serialization is lock-free — it owns its data and cannot
 // reach the guard. Cold path (periodic + fallback delta poll), not the
-// worker loop. Bodies byte-for-byte identical to the pre-split source.
+// worker loop.
 
 use super::{lock_server_state_recover, project_status};
 use crate::protocol::{ConfigSnapshot, ProcessStatus};

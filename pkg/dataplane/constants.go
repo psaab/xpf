@@ -32,6 +32,12 @@ const (
 	// userspace-xdp/src/lib.rs. This is the max_entries of the aya
 	// Array<UserspaceBindingValue> named "userspace_bindings".
 	BindingArrayMaxEntries uint32 = MaxInterfaces * BindingQueuesPerIface
+	// MaxSessions is the maximum number of session entries in the BPF
+	// session maps. This counts both forward and reverse entries, so the
+	// effective session count for watermark comparison is total/2. Moved
+	// from pkg/conntrack in #17155; keep in sync with
+	// userspaceShimMaxSessions.
+	MaxSessions = 10_000_000
 
 	// BindingSlotMapMaxEntries mirrors BINDING_SLOT_MAP_MAX_ENTRIES in
 	// userspace-xdp/src/binding_index.rs: the max_entries of the two shim

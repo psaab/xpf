@@ -983,20 +983,33 @@ func (c *ctl) showStatistics(detail bool) error {
 	if err != nil {
 		return fmt.Errorf("%v", err)
 	}
+	// #17193: counters the server names in unavailable_counters are
+	// known-unsourced (#13274); render "unavailable", never the
+	// non-authoritative numeric 0 the server left in the field.
+	unavailable := make(map[string]bool, len(resp.UnavailableCounters))
+	for _, name := range resp.UnavailableCounters {
+		unavailable[name] = true
+	}
+	line := func(label, name string, v uint64) {
+		if unavailable[name] {
+			fmt.Printf("  %-25s %s\n", label, "unavailable")
+			return
+		}
+		fmt.Printf("  %-25s %d\n", label, v)
+	}
 	fmt.Println("Global statistics:")
-	fmt.Printf("  %-25s %d\n", "RX packets:", resp.RxPackets)
-	fmt.Printf("  %-25s %d\n", "TX packets:", resp.TxPackets)
-	fmt.Printf("  %-25s %d\n", "Drops:", resp.Drops)
-	fmt.Printf("  %-25s %d\n", "Sessions created:", resp.SessionsCreated)
-	fmt.Printf("  %-25s %d\n", "Sessions closed:", resp.SessionsClosed)
-	fmt.Printf("  %-25s %d\n", "Screen drops:", resp.ScreenDrops)
-	fmt.Printf("  %-25s %d\n", "Policy denies:", resp.PolicyDenies)
-	fmt.Printf("  %-25s %d\n", "NAT alloc failures:", resp.NatAllocFailures)
-	fmt.Printf("  %-25s %d\n", "Host-inbound denies:", resp.HostInboundDenies)
-	fmt.Printf("  %-25s %d\n", "Host-inbound allowed:", resp.HostInboundAllowed)
-	fmt.Printf("  %-25s %d\n", "TC egress packets:", resp.TcEgressPackets)
-	fmt.Printf("  %-25s %d\n", "NAT64 translations:", resp.Nat64Translations)
-
+	line("RX packets:", "rx_packets", resp.RxPackets)
+	line("TX packets:", "tx_packets", resp.TxPackets)
+	line("Drops:", "drops", resp.Drops)
+	line("Sessions created:", "sessions_created", resp.SessionsCreated)
+	line("Sessions closed:", "sessions_closed", resp.SessionsClosed)
+	line("Screen drops:", "screen_drops", resp.ScreenDrops)
+	line("Policy denies:", "policy_denies", resp.PolicyDenies)
+	line("NAT alloc failures:", "nat_alloc_failures", resp.NatAllocFailures)
+	line("Host-inbound denies:", "host_inbound_denies", resp.HostInboundDenies)
+	line("Host-inbound allowed:", "host_inbound_allowed", resp.HostInboundAllowed)
+	line("TC egress packets:", "tc_egress_packets", resp.TcEgressPackets)
+	line("NAT64 translations:", "nat64_translations", resp.Nat64Translations)
 	if !detail {
 		return nil
 	}

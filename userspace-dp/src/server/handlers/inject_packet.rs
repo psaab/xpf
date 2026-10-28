@@ -1,5 +1,4 @@
-// #1345: per-verb handler for inject_packet. Body byte-identical to
-// handlers.rs lines 292-308.
+// #1345: per-verb handler for inject_packet, split out of handlers.rs in #1345.
 
 use super::super::helpers::project_status;
 use super::super::ServerState;
