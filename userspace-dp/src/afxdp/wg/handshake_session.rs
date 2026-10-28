@@ -85,6 +85,18 @@ pub(in crate::afxdp::wg) static WG_HANDSHAKE_LOCK_POISON_RECOVERIES: std::sync::
 /// here; only the poison policy is shared.
 #[inline]
 fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // Stamp ONLY on the acquired `Err` arm (the `worker_queue::lock_recover`
+    // shape): a thread already blocked in `lock()` when the poisoning panic
+    // occurs must count its wake-up recovery, and exactly one caller per
+    // poisoning may bump the counter / emit the journald line. A
+    // pre-acquisition `is_poisoned()` check does neither — blocked threads
+    // recover silently and N fresh callers each stamp. The clean arm returns
+    // the matched guard directly: the `match` scrutinee temporary lives for
+    // the whole `match`, so re-acquiring the same non-reentrant mutex here
+    // (e.g. via `lock_tolerant(m)`) would self-deadlock on every clean
+    // acquisition. The poisoned arm stamps before recovering, so it keeps
+    // the explicit `clear_poison` + `into_inner` (the helper's counted arm
+    // would clear and count the same recovery a second time).
     match m.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
@@ -299,7 +311,7 @@ impl WgEngine {
     /// diagnostic accessor.
     #[cfg(test)]
     pub(crate) fn pending_count(&self) -> usize {
-        self.pending.read().unwrap().len()
+        crate::sync_util::read_tolerant(&self.pending).len()
     }
 
     /// Build a framed WG type-1 initiation toward `peer_pubkey`.

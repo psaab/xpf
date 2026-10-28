@@ -484,9 +484,9 @@ pub(super) fn record_exception(
 ) {
     let now = Instant::now();
     let key = exception_sample_key(reason, meta, debug);
-    if let Ok(mut ring) = recent_exceptions.lock()
-        && ring.admit(key, now)
     {
+        let mut ring = crate::sync_util::lock_tolerant(recent_exceptions);
+        if ring.admit(key, now) {
         ring.push(build_exception_event(
             now,
             binding,
@@ -495,6 +495,7 @@ pub(super) fn record_exception(
             meta,
             debug,
         ));
+    }
     }
 }
 
@@ -523,12 +524,13 @@ pub(super) fn record_exception_owned(
 ) {
     let now = Instant::now();
     let key = exception_sample_key(reason, meta, debug);
-    if let Ok(mut ring) = recent_exceptions.lock()
-        && ring.admit(key, now)
     {
+        let mut ring = crate::sync_util::lock_tolerant(recent_exceptions);
+        if ring.admit(key, now) {
         let mut event = build_exception_event(now, binding, "", packet_length, meta, debug);
         event.reason_owned = Some(Arc::from(reason));
         ring.push(event);
+    }
     }
 }
 
@@ -552,12 +554,13 @@ pub(super) fn record_exception_suffixed(
 ) {
     let now = Instant::now();
     let key = exception_sample_key_parts(reason, suffix, meta, debug);
-    if let Ok(mut ring) = recent_exceptions.lock()
-        && ring.admit(key, now)
     {
+        let mut ring = crate::sync_util::lock_tolerant(recent_exceptions);
+        if ring.admit(key, now) {
         let mut event = build_exception_event(now, binding, reason, packet_length, meta, debug);
         event.reason_suffix = suffix;
         ring.push(event);
+    }
     }
 }
 
@@ -573,9 +576,9 @@ pub(super) fn record_source_nat_exception(
     let reason = failure.exception_reason();
     let now = Instant::now();
     let key = exception_sample_key(reason, meta, debug);
-    if let Ok(mut ring) = recent_exceptions.lock()
-        && ring.admit(key, now)
     {
+        let mut ring = crate::sync_util::lock_tolerant(recent_exceptions);
+        if ring.admit(key, now) {
         let mut event = build_exception_event(now, binding, reason, packet_length, meta, debug);
         // Only the SNAT-failure path carries rule/pool names. `Arc<str>`
         // clone (one small allocation) is gated by the sampler above, so a
@@ -587,6 +590,7 @@ pub(super) fn record_source_nat_exception(
             event.pool_name = Some(Arc::from(failure.pool_name.as_str()));
         }
         ring.push(event);
+    }
     }
 }
 
@@ -1026,13 +1030,11 @@ pub(super) fn update_last_resolution(
     debug: Option<&ResolutionDebug>,
     _forwarding: &ForwardingState,
 ) {
-    if let Ok(mut last) = last_resolution.lock() {
-        *last = Some(ResolutionEvent {
-            mono: Instant::now(),
-            resolution,
-            debug: debug.cloned(),
-        });
-    }
+    *crate::sync_util::lock_tolerant(last_resolution) = Some(ResolutionEvent {
+        mono: Instant::now(),
+        resolution,
+        debug: debug.cloned(),
+    });
 }
 
 #[cfg(test)]

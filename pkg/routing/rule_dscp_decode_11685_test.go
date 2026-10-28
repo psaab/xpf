@@ -45,10 +45,11 @@ func TestDSCPSelectorFromRuleRow11685(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			row := ruleRowWithDSCPSelector11685(t, 30016, 100, "198.51.100.0/24", tc.dscp)
-			got, scoped, err := dscpSelectorFromRuleRow(row)
+			decoded, err := ruleRowFromDumpMessage(unix.AF_INET, row)
 			if err != nil {
-				t.Fatalf("dscpSelectorFromRuleRow: %v", err)
+				t.Fatalf("ruleRowFromDumpMessage: %v", err)
 			}
+			got, scoped := dscpSelectorFromRuleRow(decoded)
 			if scoped != tc.wantScoped {
 				t.Fatalf("scoped=%t, want %t", scoped, tc.wantScoped)
 			}
