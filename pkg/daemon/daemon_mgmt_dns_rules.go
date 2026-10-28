@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dhcp"
+	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
@@ -99,171 +100,23 @@ type netlinkMgmtDNSRuleOps struct{}
 func (netlinkMgmtDNSRuleOps) RuleAdd(rule *netlink.Rule) error { return netlink.RuleAdd(rule) }
 func (netlinkMgmtDNSRuleOps) RuleDel(rule *netlink.Rule) error { return netlink.RuleDel(rule) }
 
-// RuleList decodes the policy-rule action from fib_rule_hdr.Type. netlink
-// v1.3.1's RuleList omits that field, so use the same kernel dump while
-// retaining the selectors needed to reconcile only our host-DNS rules.
+// RuleList reads the kernel fib-rule table through
+// routing.RuleListFull: netlink v1.3.1's RuleList omits the
+// fib_rule_hdr action this reconciler keys its lookup/shadow pairs
+// on, and the full decoder lives with the package that owns rule
+// machinery (#17078). Only the netlink.Rule projection is consumed
+// here; the FRA_DSCP / FRA_L3MDEV sidecar stays with pkg/routing's
+// own readbacks.
 func (netlinkMgmtDNSRuleOps) RuleList(family int) ([]netlink.Rule, error) {
-	req := nl.NewNetlinkRequest(unix.RTM_GETRULE, unix.NLM_F_DUMP|unix.NLM_F_REQUEST)
-	req.AddData(nl.NewIfInfomsg(family))
-	msgs, err := req.Execute(unix.NETLINK_ROUTE, unix.RTM_NEWRULE)
+	rows, err := routing.RuleListFull(family)
 	if err != nil {
 		return nil, err
 	}
-	return decodeMgmtDNSRuleMessages(family, msgs)
-}
-
-func decodeMgmtDNSRuleMessages(family int, msgs [][]byte) ([]netlink.Rule, error) {
-	rules := make([]netlink.Rule, 0, len(msgs))
-	for _, raw := range msgs {
-		if len(raw) < unix.SizeofRtMsg {
-			return nil, fmt.Errorf("short family %d policy-rule message: %d bytes", family, len(raw))
-		}
-		msg := nl.DeserializeRtMsg(raw)
-		attrs, err := nl.ParseRouteAttr(raw[msg.Len():])
-		if err != nil {
-			return nil, fmt.Errorf("parse family %d policy-rule attributes: %w", family, err)
-		}
-		rule := netlink.NewRule()
-		rule.Priority = 0
-		rule.Family = int(msg.Family)
-		rule.Table = int(msg.Table)
-		rule.Type = msg.Type
-		rule.Invert = msg.Flags&netlink.FibRuleInvert != 0
-		rule.Tos = uint(msg.Tos)
-		for _, attr := range attrs {
-			switch attr.Attr.Type {
-			case unix.RTA_TABLE:
-				if len(attr.Value) < 4 {
-					return nil, fmt.Errorf("short policy-rule table attribute in family %d", family)
-				}
-				rule.Table = int(nl.NativeEndian().Uint32(attr.Value[:4]))
-			case nl.FRA_PRIORITY:
-				value, err := mgmtDNSRuleUint32(attr.Value, "priority")
-				if err != nil {
-					return nil, err
-				}
-				rule.Priority = int(value)
-			case nl.FRA_DST:
-				prefix, err := mgmtDNSRulePrefix(attr.Value, msg.Dst_len)
-				if err != nil {
-					return nil, fmt.Errorf("decode policy-rule destination in family %d: %w", family, err)
-				}
-				rule.Dst = prefix
-			case nl.FRA_SRC:
-				prefix, err := mgmtDNSRulePrefix(attr.Value, msg.Src_len)
-				if err != nil {
-					return nil, fmt.Errorf("decode policy-rule source in family %d: %w", family, err)
-				}
-				rule.Src = prefix
-			case nl.FRA_FWMARK:
-				value, err := mgmtDNSRuleUint32(attr.Value, "mark")
-				if err != nil {
-					return nil, err
-				}
-				rule.Mark = value
-			case nl.FRA_FWMASK:
-				value, err := mgmtDNSRuleUint32(attr.Value, "mark mask")
-				if err != nil {
-					return nil, err
-				}
-				rule.Mask = &value
-			case nl.FRA_TUN_ID:
-				if len(attr.Value) < 8 {
-					return nil, fmt.Errorf("short policy-rule tunnel id attribute in family %d", family)
-				}
-				rule.TunID = uint(nl.NativeEndian().Uint64(attr.Value[:8]))
-			case nl.FRA_IIFNAME:
-				rule.IifName = mgmtDNSRuleIfName(attr.Value)
-			case nl.FRA_OIFNAME:
-				rule.OifName = mgmtDNSRuleIfName(attr.Value)
-			case nl.FRA_SUPPRESS_PREFIXLEN:
-				value, err := mgmtDNSRuleUint32(attr.Value, "suppress prefix length")
-				if err != nil {
-					return nil, err
-				}
-				if value != ^uint32(0) {
-					rule.SuppressPrefixlen = int(value)
-				}
-			case nl.FRA_SUPPRESS_IFGROUP:
-				value, err := mgmtDNSRuleUint32(attr.Value, "suppress interface group")
-				if err != nil {
-					return nil, err
-				}
-				if value != ^uint32(0) {
-					rule.SuppressIfgroup = int(value)
-				}
-			case nl.FRA_FLOW:
-				value, err := mgmtDNSRuleUint32(attr.Value, "flow")
-				if err != nil {
-					return nil, err
-				}
-				rule.Flow = int(value)
-			case nl.FRA_GOTO:
-				value, err := mgmtDNSRuleUint32(attr.Value, "goto")
-				if err != nil {
-					return nil, err
-				}
-				rule.Goto = int(value)
-			case nl.FRA_IP_PROTO:
-				// Kernel emits FRA_IP_PROTO as u8 (1 byte); the previous
-				// u32 decode only ever saw our synthetic 4-byte fixtures.
-				// Accept 1..4 bytes, fail closed on empty/oversize (#14971).
-				if len(attr.Value) < 1 || len(attr.Value) > 4 {
-					return nil, fmt.Errorf("invalid policy-rule IP protocol attribute length %d in family %d", len(attr.Value), family)
-				}
-				var protoBuf [4]byte
-				copy(protoBuf[:], attr.Value)
-				rule.IPProto = int(nl.NativeEndian().Uint32(protoBuf[:]))
-			case nl.FRA_DPORT_RANGE:
-				if len(attr.Value) < 4 {
-					return nil, fmt.Errorf("short policy-rule destination-port range in family %d", family)
-				}
-				native := nl.NativeEndian()
-				rule.Dport = netlink.NewRulePortRange(native.Uint16(attr.Value[:2]), native.Uint16(attr.Value[2:4]))
-			case nl.FRA_SPORT_RANGE:
-				if len(attr.Value) < 4 {
-					return nil, fmt.Errorf("short policy-rule source-port range in family %d", family)
-				}
-				native := nl.NativeEndian()
-				rule.Sport = netlink.NewRulePortRange(native.Uint16(attr.Value[:2]), native.Uint16(attr.Value[2:4]))
-			case nl.FRA_UID_RANGE:
-				if len(attr.Value) < 8 {
-					return nil, fmt.Errorf("short policy-rule UID range in family %d", family)
-				}
-				native := nl.NativeEndian()
-				rule.UIDRange = netlink.NewRuleUIDRange(native.Uint32(attr.Value[:4]), native.Uint32(attr.Value[4:8]))
-			case nl.FRA_PROTOCOL:
-				if len(attr.Value) < 1 {
-					return nil, fmt.Errorf("short policy-rule protocol attribute in family %d", family)
-				}
-				rule.Protocol = attr.Value[0]
-			}
-		}
-		rules = append(rules, *rule)
+	rules := make([]netlink.Rule, 0, len(rows))
+	for _, row := range rows {
+		rules = append(rules, row.Rule)
 	}
 	return rules, nil
-}
-
-func mgmtDNSRulePrefix(ip []byte, prefixLen uint8) (*net.IPNet, error) {
-	if (len(ip) != net.IPv4len && len(ip) != net.IPv6len) || int(prefixLen) > 8*len(ip) {
-		return nil, fmt.Errorf("invalid address length %d or prefix length %d", len(ip), prefixLen)
-	}
-	return &net.IPNet{IP: ip, Mask: net.CIDRMask(int(prefixLen), 8*len(ip))}, nil
-}
-
-func mgmtDNSRuleUint32(value []byte, name string) (uint32, error) {
-	if len(value) < 4 {
-		return 0, fmt.Errorf("short policy-rule %s attribute", name)
-	}
-	return nl.NativeEndian().Uint32(value[:4]), nil
-}
-
-func mgmtDNSRuleIfName(value []byte) string {
-	name := string(value)
-	if len(name) > 0 && name[len(name)-1] == 0 {
-		name = name[:len(name)-1]
-	}
-	return name
 }
 
 type mgmtDNSRuleKey struct {

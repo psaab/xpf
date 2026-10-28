@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"maps"
@@ -205,47 +204,11 @@ func TestNetlinkMgmtDNSRuleListReadsKernelAction11385(t *testing.T) {
 	t.Skip("kernel has no default priority-0 local-table rule")
 }
 
-func TestMgmtDNSRuleDumpDecodesActionAndExtendedTable11385(t *testing.T) {
-	makeMessage := func(priority, table int, action uint8) []byte {
-		msg := nl.NewRtMsg()
-		msg.Family = unix.AF_INET
-		msg.Dst_len = 32
-		msg.Table = uint8(table)
-		if table > 255 {
-			msg.Table = unix.RT_TABLE_UNSPEC
-		}
-		msg.Type = action
-		raw := append([]byte(nil), msg.Serialize()...)
-		raw = append(raw, nl.NewRtAttr(nl.FRA_DST, net.ParseIP("192.0.2.53").To4()).Serialize()...)
-		raw = append(raw, nl.NewRtAttr(nl.FRA_IIFNAME, []byte("lo\x00")).Serialize()...)
-		raw = append(raw, nl.NewRtAttr(nl.FRA_PRIORITY, nl.Uint32Attr(uint32(priority))).Serialize()...)
-		if table > 255 {
-			raw = append(raw, nl.NewRtAttr(unix.RTA_TABLE, nl.Uint32Attr(uint32(table))).Serialize()...)
-		}
-		raw = append(raw, nl.NewRtAttr(nl.FRA_IP_PROTO, nl.Uint32Attr(uint32(unix.IPPROTO_UDP))).Serialize()...)
-		var portBuf [4]byte
-		binary.NativeEndian.PutUint16(portBuf[0:2], 53)
-		binary.NativeEndian.PutUint16(portBuf[2:4], 53)
-		raw = append(raw, nl.NewRtAttr(nl.FRA_DPORT_RANGE, portBuf[:]).Serialize()...)
-		return raw
-	}
-	rules, err := decodeMgmtDNSRuleMessages(unix.AF_INET, [][]byte{
-		makeMessage(mgmtDNSRulePriority, mgmtDNSRuleLookupTable, unix.RTN_UNICAST),
-		makeMessage(mgmtDNSRuleShadowPriority, unix.RT_TABLE_UNSPEC, nl.FR_ACT_UNREACHABLE),
-	})
-	if err != nil {
-		t.Fatalf("decode synthetic policy-rule dump: %v", err)
-	}
-	if len(rules) != 2 {
-		t.Fatalf("decoded %d rules, want lookup and shadow", len(rules))
-	}
-	for i, wantKind := range []string{"lookup", "shadow"} {
-		_, kind, ok := managedMgmtDNSRule(rules[i])
-		if !ok || kind != wantKind {
-			t.Fatalf("decoded rule %d = %#v, kind=%q, want %q", i, rules[i], kind, wantKind)
-		}
-	}
-}
+// TestMgmtDNSRuleDumpDecodesActionAndExtendedTable11385 moved with
+// the decoder: the synthetic-dump decode cell now lives in
+// pkg/routing (TestRuleDumpDecodesActionAndExtendedTable17078),
+// and the daemon projection is covered by
+// TestNetlinkMgmtDNSRuleListReadsKernelAction11385 above.
 func TestMgmtDNSRuleFailureKeepsNameserverOutOfResolver11385(t *testing.T) {
 	server := netip.MustParseAddr("192.0.2.53")
 	leases := []*dhcp.Lease{{Interface: "fxp0", Family: dhcp.AFInet, DNS: []netip.Addr{server}}}

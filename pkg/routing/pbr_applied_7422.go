@@ -7,6 +7,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
 // pbr_applied_7422.go reports two different readback facts:
@@ -17,12 +18,17 @@ import (
 //     fields differ, are missing, or are occupied by an unexpected rule.
 //
 // Each PBR lookup rule uses the even offset of a two-priority pair; its
-// unreachable shadow occupies the following odd offset. netlink v1.3.1 does
-// not decode fib-rule action into Rule.Type, nor does RuleList expose FRA_DSCP.
-// The occupancy count therefore cannot prove a rule was applied, and the
-// mismatch check explicitly cannot verify the DSCP selector (or action). The
-// priority-band SSOT is shared with the install side (#4479); rules outside it
-// are not ours.
+// unreachable shadow occupies the following odd offset. The live readback
+// goes through RuleListFull (rule_dump_linux.go), which decodes the
+// fib-rule action (Rule.Type) netlink v1.3.1's RuleList omits, so the
+// mismatch check DOES verify the action: a lookup slot replaced by an
+// unreachable rule at the same priority is a mismatch (#17078). The
+// DSCP selector is carried too, but it is compared only when the
+// desired rule declares one (PBRRule.DSCPSet): the fake-able
+// PBRAppliedStatus path reads []netlink.Rule, which cannot represent
+// a readback DSCP, so an undeclared desire must not be charged for a
+// selector it never asked to check. The priority-band SSOT is shared
+// with the install side (#4479); rules outside it are not ours.
 //
 // The bool is not advisory. A failed RuleList is indistinguishable from "no
 // rules installed" in the count alone, and reporting 0 against a non-zero
@@ -31,14 +37,14 @@ import (
 // zeros. Both families must succeed.
 
 // PBRAppliedStatus returns PBR-band occupancy, the number of mismatched
-// expected lookup slots, and whether both family readbacks succeeded.
 //
 // Desired PBR lookup rules are assigned even priorities in slice order, with
 // one rule per two-priority pair. A mismatch is one for each missing or
 // incorrect expected slot, plus each unexpected/duplicate in-band lookup rule.
-// RuleList exposes all Rule fields except the fib-rule action, and netlink
-// v1.3.1 does not expose FRA_DSCP at all; DSCP selectors and actions therefore
-// cannot contribute to this mismatch signal. The exported metric help states
+// The comparison covers every netlink-visible field including the fib-rule
+// action (Rule.Type, decoded by RuleListFull on the live path). The DSCP
+// selector is compared only on the live path and only when the desired
+// rule declares one (PBRRule.DSCPSet); the exported metric help states
 // this limit explicitly.
 func PBRAppliedStatus(ops ruleOps, desired []PBRRule) (bandOccupancy, mismatched int, ok bool) {
 	if ops == nil {
@@ -57,13 +63,30 @@ func PBRAppliedStatus(ops ruleOps, desired []PBRRule) (bandOccupancy, mismatched
 		slots[index].expected, slots[index].expectedOK =
 			pbrExpectedLookupRule(pbr, int(lo)+2*index)
 	}
+	// When the ops can also return full rows, the DSCP sidecar joins
+	// the comparison for slots whose desired rule declares a DSCP
+	// selector; the RuleList projection alone cannot represent it.
+	fullOps, hasFull := ops.(fullRuleOps)
 	for _, family := range []int{syscall.AF_INET, syscall.AF_INET6} {
-		rules, err := ops.RuleList(family)
-		if err != nil {
-			return 0, 0, false
+		var rows []RuleRow
+		if hasFull {
+			var err error
+			rows, err = fullOps.RuleListFullRows(family)
+			if err != nil {
+				return 0, 0, false
+			}
+		} else {
+			rules, err := ops.RuleList(family)
+			if err != nil {
+				return 0, 0, false
+			}
+			rows = make([]RuleRow, len(rules))
+			for i := range rules {
+				rows[i].Rule = rules[i]
+			}
 		}
-		for i := range rules {
-			rule := rules[i]
+		for i := range rows {
+			rule := rows[i].Rule
 			priority := rule.Priority
 			if priority < int(lo) || priority >= int(hi) || (priority-int(lo))%2 != 0 {
 				continue
@@ -77,7 +100,9 @@ func PBRAppliedStatus(ops ruleOps, desired []PBRRule) (bandOccupancy, mismatched
 			slot := &slots[index]
 			slot.count++
 			if slot.expectedOK && !slot.matched &&
-				pbrNetlinkRuleMatches(slot.expected, rule) {
+				pbrNetlinkRuleMatches(slot.expected, rule) &&
+				(!hasFull || !desired[index].DSCPSet ||
+					(rows[i].DSCPSet && rows[i].DSCP == desired[index].DSCP)) {
 				slot.matched = true
 			}
 		}
@@ -123,37 +148,63 @@ func pbrExpectedLookupRule(pbr PBRRule, priority int) (netlink.Rule, bool) {
 	if pbr.Dport != nil {
 		rule.Dport = netlink.NewRulePortRange(pbr.Dport.Lo, pbr.Dport.Hi)
 	}
-	// DSCPSet cannot be represented in RuleList's readback; do not pretend the
-	// desired DSCP value was checked. Type is likewise left at netlink's default
-	// because RuleList does not decode the action.
+	// A PBR lookup rule is installed under RTN_UNICAST (rules.go
+	// buildPBRRules); RuleListFull decodes the kernel action into
+	// Type, so the expected action is part of the comparison. DSCPSet
+	// cannot be represented in a netlink.Rule expectation; it is
+	// compared from the RuleRow sidecar by PBRAppliedStatusLive.
+	rule.Type = unix.RTN_UNICAST
 	return *rule, true
 }
 
 func pbrNetlinkRuleMatches(expected, observed netlink.Rule) bool {
-	// RuleList intentionally does not decode the fib-rule action into Type.
-	// Normalize that single unreadable field before comparing every other
-	// netlink-visible selector and routing attribute.
-	expected.Type = observed.Type
+	// Every netlink-visible selector and routing attribute is
+	// compared, including the fib-rule action: RuleListFull decodes
+	// it into Type (#17078), so no field is normalised away.
 	return reflect.DeepEqual(expected, observed)
 }
 
-// PBRAppliedStatusLive is the production entry point, reading through the
-// live netlink handle. Split from PBRAppliedStatus so band and structural
-// mismatch behavior can be exercised with an in-memory ruleOps fake.
+// fullRuleOps is the ruleOps PBRAppliedStatus needs when the readback
+// must also see each row's FRA_DSCP sidecar: RuleListFullRows returns
+// the decoded rows, RuleList their netlink.Rule projection (what
+// PBRAppliedStatus consumes). The live implementation satisfies it;
+// in-memory fakes that only implement ruleOps take the projection-only
+// path, where a declared DSCP desire is unchecked exactly as before.
+type fullRuleOps interface {
+	ruleOps
+	RuleListFullRows(family int) ([]RuleRow, error)
+}
+
+// PBRAppliedStatusLive is the production entry point, reading through
+// RuleListFull so the fib-rule action and the FRA_DSCP sidecar both
+// reach the mismatch check. Split from PBRAppliedStatus so band and
+// structural mismatch behavior can be exercised with an in-memory
+// ruleOps fake.
 func PBRAppliedStatusLive(desired []PBRRule) (int, int, bool) {
-	return PBRAppliedStatus(netlinkRuleOps{}, desired)
+	return PBRAppliedStatus(netlinkFullRuleOps{}, desired)
 }
 
-// netlinkRuleOps is the live implementation, listing through the package-level
-// netlink functions. Only RuleList is reachable here; the mutating methods
-// satisfy the interface and are never called on this path.
-type netlinkRuleOps struct{}
+// netlinkFullRuleOps is the live implementation, listing through
+// RuleListFull. Only the list methods are reachable here; the mutating
+// methods satisfy the interface and are never called on this path.
+type netlinkFullRuleOps struct{}
 
-func (netlinkRuleOps) RuleAdd(r *netlink.Rule) error { return netlink.RuleAdd(r) }
-func (netlinkRuleOps) RuleDel(r *netlink.Rule) error { return netlink.RuleDel(r) }
-func (netlinkRuleOps) RuleList(family int) ([]netlink.Rule, error) {
-	return netlink.RuleList(family)
+func (netlinkFullRuleOps) RuleAdd(r *netlink.Rule) error { return netlink.RuleAdd(r) }
+func (netlinkFullRuleOps) RuleDel(r *netlink.Rule) error { return netlink.RuleDel(r) }
+func (netlinkFullRuleOps) RuleList(family int) ([]netlink.Rule, error) {
+	rows, err := RuleListFull(family)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]netlink.Rule, 0, len(rows))
+	for _, row := range rows {
+		rules = append(rules, row.Rule)
+	}
+	return rules, nil
 }
-func (netlinkRuleOps) RuleAddDSCP(r *netlink.Rule, dscp uint8) error {
+func (netlinkFullRuleOps) RuleListFullRows(family int) ([]RuleRow, error) {
+	return RuleListFull(family)
+}
+func (netlinkFullRuleOps) RuleAddDSCP(r *netlink.Rule, dscp uint8) error {
 	return dscpRuleOps{}.RuleAddDSCP(r, dscp)
 }
