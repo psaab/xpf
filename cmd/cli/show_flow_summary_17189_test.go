@@ -66,7 +66,8 @@ func TestRemoteFilteredSummaryForwardsSelector17189(t *testing.T) {
 	out := captureStdout(t, func() {
 		if err := c.showFlowSession([]string{
 			"summary", "zone", "trust", "protocol", "tcp",
-			"source-prefix", "10.0.0.0/8", "destination-port", "443",
+			"source-prefix", "10.0.0.0/8", "destination-prefix", "192.0.2.0/24",
+			"source-port", "1024", "destination-port", "443",
 			"nat-only", "application", "junos-https",
 			"interface", "reth1.0", "source-nat-pool", "pool1",
 		}); err != nil {
@@ -81,6 +82,7 @@ func TestRemoteFilteredSummaryForwardsSelector17189(t *testing.T) {
 		t.Errorf("summary zone = %d, want 7 (name trust resolved, not wildcard 0)", req.GetZone())
 	}
 	if req.GetProtocol() != "TCP" || req.GetSourcePrefix() != "10.0.0.0/8" ||
+		req.GetDestinationPrefix() != "192.0.2.0/24" || req.GetSourcePort() != 1024 ||
 		req.GetDestinationPort() != 443 || !req.GetNatOnly() ||
 		req.GetApplication() != "junos-https" || req.GetInterfaceFilter() != "reth1.0" ||
 		req.GetSourceNatPool() != "pool1" {

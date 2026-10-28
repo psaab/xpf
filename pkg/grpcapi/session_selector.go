@@ -11,7 +11,10 @@
 // are built here, and the authz argument reconstruction consumes the same
 // copies. The wire format is unchanged; the reflection guard in
 // session_selector_17189_test.go fails if a selector is ever added to one
-// request without reaching the helper.
+// request without reaching the helper — it enumerates every field of
+// GetSessionSummaryRequest (except include_peer) and of
+// ClearSessionsRequest (interface mapped to interface_filter, zone
+// excluded by name as the separately returned name).
 package grpcapi
 
 import (

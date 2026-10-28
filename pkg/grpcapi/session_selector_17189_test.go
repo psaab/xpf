@@ -10,13 +10,18 @@
 // name/kind match against GetSessionsRequest breaks — makes these tests
 // fail at the field that drifted, instead of silently dropping the new
 // selector at every consumer the way #15236's initial pass dropped the
-// summary leg.
+// summary leg. The same enumeration covers ClearSessionsRequest: every
+// field it declares is reflected over and must reach selectorFromClear
+// (interface→interface_filter by name, zone excluded by name as the
+// separately returned name), because a dropped clear selector widens a
+// destructive clear.
 package grpcapi
 
 import (
 	"testing"
 
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // TestSessionSelectorSummaryFieldsMatchSessions17189 asserts the issue's
@@ -151,6 +156,58 @@ func TestSessionSelectorClearFieldsCopied17189(t *testing.T) {
 	}
 	if empty, zn := selectorFromClear(nil); empty == nil || zn != "" || empty.GetProtocol() != "" {
 		t.Errorf("selectorFromClear(nil) = (%v, %q), want empty selector and empty zone name", empty, zn)
+	}
+
+	// Reflection over ClearSessionsRequest itself: every field it
+	// declares must be accounted for below — by name-mapped copy into
+	// the GetSessionsRequest shape (`interface` lands on
+	// interface_filter), or, for `zone` only, by the separate name
+	// return. Clear is the highest-blast-radius consumer (a dropped
+	// selector widens a destructive clear), so its claim in
+	// session_selector.go is pinned by enumeration, not by the
+	// hand-written list above: a selector added to ClearSessionsRequest
+	// without reaching selectorFromClear fails here naming the field,
+	// exactly as the summary guard above does for its request. Zone is
+	// excluded BY NAME (with its retyping asserted) because it travels
+	// as the returned name, never as the numeric wildcard.
+	clearMD := (&pb.ClearSessionsRequest{}).ProtoReflect().Descriptor()
+	sessMD := (&pb.GetSessionsRequest{}).ProtoReflect().Descriptor()
+	clearMsg := clearReq.ProtoReflect()
+	gotMsg := got.ProtoReflect()
+	zoneFD := clearMD.Fields().ByName("zone")
+	if zoneFD == nil || zoneFD.Kind() != protoreflect.StringKind {
+		t.Fatalf("ClearSessionsRequest.zone = %v, want the string zone NAME field this guard excludes by name", zoneFD)
+	}
+	if sessZoneFD := sessMD.Fields().ByName("zone"); sessZoneFD == nil || sessZoneFD.Kind() == protoreflect.StringKind {
+		t.Fatalf("GetSessionsRequest.zone = %v, want the numeric zone id the clear name must be resolved to, not copied", sessZoneFD)
+	}
+	for i := range clearMD.Fields().Len() {
+		fd := clearMD.Fields().Get(i)
+		name := string(fd.Name())
+		if name == "zone" {
+			// Excluded by name: travels as zoneName (asserted above),
+			// and the numeric GetSessions zone must stay unset.
+			if got.GetZone() != 0 {
+				t.Errorf("selectorFromClear copied clear zone name into numeric Zone=%d; resolution is the caller's job or the wildcard widens", got.GetZone())
+			}
+			continue
+		}
+		sessName := fd.Name()
+		if name == "interface" {
+			sessName = "interface_filter"
+		}
+		sessFD := sessMD.Fields().ByName(sessName)
+		if sessFD == nil {
+			t.Errorf("ClearSessionsRequest.%s has no mapped field in GetSessionsRequest — the selector sets have drifted (#17189)", name)
+			continue
+		}
+		if sessFD.Kind() != fd.Kind() {
+			t.Errorf("field %s (mapped %s): kind drift, clear=%v sessions=%v", name, sessName, fd.Kind(), sessFD.Kind())
+			continue
+		}
+		if gotV, want := gotMsg.Get(sessFD), clearMsg.Get(fd); gotV.String() != want.String() {
+			t.Errorf("selectorFromClear dropped/mismatched %s (mapped %s): got %v, want %v", name, sessName, gotV, want)
+		}
 	}
 }
 
