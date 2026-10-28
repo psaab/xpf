@@ -190,7 +190,9 @@ pub(in crate::afxdp) struct ForwardingState {
     /// empty when the state was assembled without that call (unit
     /// fixtures), in which case callers use the canonical LPM scan
     /// — same answer, old cost. Slot shape:
-    /// `(table_key, winning_ifindex, winning_rg)`; the rebuild keeps
+    /// `(table_key, slot_ifindex, winning_rg)` where `slot_ifindex`
+    /// is the raw winning ifindex for FIB slots and `-ifindex - 1`
+    /// for ledger slots (see below); the rebuild keeps
     /// the LOWEST ifindex at equal (table, len, network) for both
     /// FIB and ledger entries (#17053). Ledger slots store the
     /// ifindex negated as `-ifindex - 1` (always negative, so the

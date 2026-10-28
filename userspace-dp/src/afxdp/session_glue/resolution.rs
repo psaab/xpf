@@ -444,7 +444,6 @@ now_secs: u64,) -> bool {
     true
 }
 
-
 /// #15958b: the RG that owns `target` as a connected destination:
 /// the redundancy group of the interface whose connected prefix
 /// contains the address (per-address ownership, not per-zone —
@@ -478,26 +477,37 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
     // Source 2.
     // #17053 + #16217: when the build-time index is current, its
     // probe IS the canonical RowsThenLedger answer (owner RG at
-    // build time); use it and skip the scan. A stale or absent
-    // index (unit fixtures that push rows after the build) falls
-    // back to the same canonical LPM below — same answer, old cost.
-    if let Some(crate::afxdp::ConnectedOwnerIndex::Hit(rg)) =
-        forwarding.connected_owner_index_lookup(target, table)
-            .filter(|_| forwarding.connected_owner_index_current())
-    {
-        return rg;
-    }
-    // #17053 fold (Rev18099 F1): the dispatcher returns `Option` so a
-    // matched winner is final EVEN when its owner RG is 0 (missing
-    // egress row / RG 0) — exactly the index's `Hit(0)` and the legacy
-    // scan's populated `best`. Only `None` (no match) reaches Source 2.
-    if let Some(ifindex) = crate::afxdp::forwarding::connected_lpm_ifindex(
-        forwarding,
-        target,
-        table,
-        crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
-    ) {
-        return crate::afxdp::forwarding::owner_rg_for_flow(forwarding, ifindex);
+    // build time); use it and skip the scan. A current `Miss` is
+    // likewise authoritative: skip Source 1 entirely and go
+    // straight to Source 2 (the pre-PR shortcut — the common
+    // routed/WAN flow-cache-hit case must not pay a linear
+    // connected scan per hit). A stale or absent index (unit
+    // fixtures that push rows after the build) falls back to the
+    // canonical LPM below — same answer, old scan cost.
+    let index_current = forwarding.connected_owner_index_current();
+    match forwarding.connected_owner_index_lookup(target, table) {
+        Some(crate::afxdp::ConnectedOwnerIndex::Hit(rg)) if index_current => {
+            return rg;
+        }
+        Some(crate::afxdp::ConnectedOwnerIndex::Miss) if index_current => {
+            // Current Miss: no connected prefix contains the target;
+            // skip Source 1, straight to Source 2 below.
+        }
+        _ => {
+            // #17053 fold (Rev18099 F1): the dispatcher returns
+            // `Option` so a matched winner is final EVEN when its
+            // owner RG is 0 (missing egress row / RG 0) — exactly
+            // the index's `Hit(0)` and the legacy scan's populated
+            // `best`. Only `None` (no match) reaches Source 2.
+            if let Some(ifindex) = crate::afxdp::forwarding::connected_lpm_ifindex(
+                forwarding,
+                target,
+                table,
+                crate::afxdp::forwarding::ConnectedSources::RowsThenLedger,
+            ) {
+                return crate::afxdp::forwarding::owner_rg_for_flow(forwarding, ifindex);
+            }
+        }
     }
     // Source 2: the interface-NAT local table (an interface address
     // IS its own connected /32): the target is this node's own
