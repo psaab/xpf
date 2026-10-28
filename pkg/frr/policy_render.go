@@ -1353,10 +1353,11 @@ func (m *Manager) renderPolicyTermSequencesWithDefinitions(po *config.PolicyOpti
 				// "route-map … permit <seq>" with no match clauses, which
 				// FRR treats as match-ALL — flipping "/32 longer" from the
 				// empty set to permit-everything (Copilot #2110).
-				// #16762: renderRouteFilterListGroup re-sequences the
-				// permits longest-match-first and interposes stops; a
-				// zero-entry result keeps the historical undefined-list
-				// NOMATCH behaviour below, so no special-casing here.
+				// #16762: only a group with strict base containment is
+				// sorted/re-sequenced longest-match-first and gets stops.
+				// Groups without containment preserve authored order and
+				// original seq slots; zero entries still keep the
+				// historical undefined-list NOMATCH behaviour below.
 				// First-parseable sets the family hint when nothing
 				// emitted; the first emitted entry overrides it — the
 				// same precedence the pre-#16762 loop used.

@@ -202,13 +202,12 @@ func TestRouteFilterDisjointByteIdentical_16762(t *testing.T) {
 // TestRouteFilterDisjointUnequalLengthsByteIdentical_17824: #16762's
 // acceptance promised single/disjoint lists render byte-identically,
 // but the unconditional descending-plen sort reordered disjoint
-// unequal-length filters and re-assigned their seq numbers (config
-// churn on every FRR reload). Disjoint bases can never fall through
-// to one another, so no longest-match layout is needed: authored
-// order, authored seq slots, and no stop deny — for either authored
-// direction and both families. The nested control proves the
-// longest-match layout still applies where a base truly contains
-// another.
+// unequal-length filters and re-assigned their seq numbers, causing
+// an upgrade-time config diff. Disjoint bases can never fall through to
+// one another, so no longest-match layout is needed: preserve authored
+// order, original sequence slots, and no stop deny in both v4 authoring
+// orders and one v6 case. The nested control proves longest-match
+// layout still applies where a base truly contains another.
 func TestRouteFilterDisjointUnequalLengthsByteIdentical_17824(t *testing.T) {
 	name := inlinePrefixListName("P", "P", "t1", "")
 	cases := []struct {
