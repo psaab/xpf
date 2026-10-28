@@ -1,5 +1,15 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config compiler: parseVRRPGroups now reads every vrrp-group
+    property exactly once. The Keys-packed tail and the child nodes
+    are normalized into one statement list (vrrpGroupStatements)
+    before the single remaining switch, deleting the second reader
+    whose copies had diverged: on the packed hierarchical one-liner
+    a legacy track-priority-cost could overwrite a nested
+    priority-cost by source order, and a bad packed sibling erased
+    a good nested cost to 0 on the lenient path. Nested cost now
+    wins regardless of spelling or order, and a bad sibling is
+    ignored (#17227).
   * Config reads: the rollback slot error now travels inside one
     captured value (configstore.RollbackCapture from CaptureRollback /
     CaptureRollbackSlot) through the REST, gRPC and CLI gates to their
