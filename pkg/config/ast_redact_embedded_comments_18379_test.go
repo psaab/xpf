@@ -122,3 +122,16 @@ func TestRedactEmbeddedCommentPayloads18379(t *testing.T) {
 		}
 	})
 }
+
+func TestRedactQuotedPrefixWithTail18379(t *testing.T) {
+	credential := "set security ike policy p1 pre-shared-key ascii-text " + commentPayloadSecret18379
+	for _, cmd := range []string{
+		strconv.Quote(credential) + " harmless",
+		strconv.Quote("set system host-name preserved") + " # " + credential,
+	} {
+		out, _ := redactEmbeddedCommand(cmd, true)
+		if strings.Contains(out, commentPayloadSecret18379) {
+			t.Errorf("quoted prefix with tail leaked credential: %q -> %q", cmd, out)
+		}
+	}
+}

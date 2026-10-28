@@ -515,6 +515,23 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 		}
 		return cmd, false
 	}
+	// A quoted first token followed by ANY tail (valid token, comment,
+	// or junk) hides the credential inside the opaque quoted sentence:
+	// the outer token judge never marks a token inside quotes, so fail
+	// closed unless the quoted content itself masks cleanly above.
+	if len(tokens) > 1 && quoted[0] {
+		if _, innerChanged := redactEmbeddedCommand(tokens[0], fingerprint); innerChanged {
+			return wholePayloadMask16726(cmd, fingerprint)
+		}
+		if !lexOK || comments {
+			return wholePayloadMask16726(cmd, fingerprint)
+		}
+		// Well-formed tail after a clean quoted sentence: judge the
+		// tail tokens; if none mask, the payload still cannot be
+		// rendered safely token-wise (the quoted sentence stays one
+		// opaque token), so fail closed.
+		return wholePayloadMask16726(cmd, fingerprint)
+	}
 	changed := redactEmbeddedTokens(tokens, fingerprint)
 	if !lexOK && !changed {
 		return wholePayloadMask16726(cmd, fingerprint)
