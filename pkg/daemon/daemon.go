@@ -1491,7 +1491,7 @@ type Daemon struct {
 	// production; reconcileRGStatePass calls the real reconcileRGState.
 	reconcileTickHook func()
 
-// Fabric cross-chassis forwarding state for periodic refresh (#17040):
+	// Fabric cross-chassis forwarding state for periodic refresh (#17040):
 	// the two fabric slots (fab0/fab1) are one parameterized state, not
 	// hand-mirrored field pairs — fab1 drifted into real defects twice
 	// (#15683, #15918) while the copies were maintained by hand.

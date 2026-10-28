@@ -107,10 +107,10 @@ func TestStopClusterCommsClearsFabricSlots17060(t *testing.T) {
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseRefresh) }) }
 	d.store = newConfigStore(t, t.TempDir()+"/config.conf")
-	d.fabricLinkSubscribe = func(chan<- netlink.LinkUpdate, <-chan struct{}) error {
+	d.fabricLinkSubscribe = func(chan<- netlink.LinkUpdate, <-chan struct{}, func(error)) error {
 		return nil
 	}
-	d.fabricNeighSubscribe = func(chan<- netlink.NeighUpdate, <-chan struct{}) error {
+	d.fabricNeighSubscribe = func(chan<- netlink.NeighUpdate, <-chan struct{}, func(error)) error {
 		return nil
 	}
 
