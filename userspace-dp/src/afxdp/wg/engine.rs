@@ -65,6 +65,8 @@ use super::tai64n::Tai64nClock;
 use super::{
     POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES, WG_ZERO_PSK, pad_to_16, padded_len_capped,
 };
+#[cfg(test)]
+use super::WG_SMALL_ORDER_KEYS;
 use arc_swap::ArcSwap;
 use curve25519_dalek::MontgomeryPoint;
 use rustc_hash::FxHashMap;

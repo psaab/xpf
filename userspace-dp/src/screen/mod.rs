@@ -200,6 +200,7 @@ pub(crate) use unresolved::UnresolvedProfileRef;
 // (#2189 removed the last non-test consumer in `afxdp/mod.rs`).
 #[cfg(test)]
 pub(crate) use packet::{FragView, ScreenParseError};
+
 pub(crate) use syncookie::{
     SynCookieAckVerdict, SynCookieChallenge, SynCookieCodec,
     SynCookieClientKey, SynCookieKeyRing, SynCookieTuple,

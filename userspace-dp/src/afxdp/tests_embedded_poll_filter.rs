@@ -5751,7 +5751,7 @@ fn poll_descriptor_snat_outbound_icmp_error_fabric_redirect_judges_pre_snat_src_
             ForwardingDisposition::FabricRedirect
         );
         let fabric_frame = match &local_forward.frame {
-            PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes.clone(),
+            PendingForwardFrame::PrebuiltTransit { frame: bytes, .. } => bytes.buf.clone(),
             _ => panic!("#13772: first pass must hand off a prebuilt frame"),
         };
         let fabric_meta = local_forward.meta;

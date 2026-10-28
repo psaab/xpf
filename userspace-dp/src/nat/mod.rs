@@ -806,3 +806,11 @@ impl NatCounterStore {
         self.source_parse_errors() + self.destination_parse_errors() + self.static_parse_errors()
     }
 }
+
+#[cfg(test)]
+pub(crate) use source::{
+    acquire_persistent_inbound_for_synced, nptv6_owns_wire_identity,
+    release_persistent_inbound_for_session, release_recorded_persistent_inbound,
+    release_source_nat_allocation_for_worker, reserve_synced_source_nat_allocation_for_worker,
+    retained_pool_index_map, SourceNatMatchSnapshot,
+};

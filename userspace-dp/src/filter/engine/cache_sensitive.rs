@@ -30,6 +30,8 @@ pub(crate) use rotation::{
     interface_output_filter_has_dscp_match, interface_output_filter_has_per_packet_l4_match,
     lo0_filter_families_changed,
 };
+#[cfg(test)]
+pub(crate) use rotation::interface_input_filter_varies_per_packet;
 
 pub(crate) fn evaluate_filter_ref_tx_selection_cached(
     filter: &Filter,

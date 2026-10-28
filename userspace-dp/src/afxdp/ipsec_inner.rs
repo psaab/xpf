@@ -41,6 +41,8 @@ pub(crate) static zone_gate_stale_total: AtomicU64 = AtomicU64::new(0);
 pub(crate) static zone_gate_no_generation_total: AtomicU64 = AtomicU64::new(0);
 #[allow(non_upper_case_globals)]
 pub(crate) static ipsec_inner_parse_drops_total: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+pub(crate) use IPSEC_INNER_ECN_ILLEGAL_DROPS as ipsec_inner_ecn_illegal_drops;
 // #9506 counter slice: one storage cell for the IPsec-inner ECN refusal.
 // The lowercase duplicate was a second, never-incremented `AtomicU64` — D13
 // passes only the canonical cell to the shared helper, so reads of the old

@@ -50,6 +50,11 @@ mod tx_inbox;
 // `pub(in crate::afxdp)` to match the existing `mmap::MmapArea` /
 // `profile::Owner|Peer` precedent and to avoid E0364 (documented in
 // `userspace-dp/src/afxdp/tx/mod.rs:38`).
+#[cfg(test)]
+pub(in crate::afxdp) use debug_state::{
+    DEBUG_STATE_PUBLISH_MASK, IDLE_DEBUG_STATE_PUBLISH_INTERVAL_NS,
+    advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
+};
 pub(in crate::afxdp) use debug_state::{
     advance_debug_state_publish_counter, flush_v_min_scratches_into, idle_debug_state_publish_due,
     publish_binding_debug_state_fields, update_binding_debug_state,

@@ -1007,3 +1007,7 @@ pub(in crate::afxdp) use pptp_broadcast::drain_pptp_control_inbox;
 pub(in crate::afxdp) use pptp_broadcast::{
     drain_pptp_control_inbox_at_epoch,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use pptp_broadcast::{
+    broadcast_pptp_forget, broadcast_pptp_install, drain_pptp_control_inbox_for_worker,
+};

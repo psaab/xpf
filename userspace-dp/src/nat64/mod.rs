@@ -189,6 +189,8 @@ use crate::nat::{
     static_owns_wire_identity,
 };
 use crate::prefix::PrefixV6;
+#[cfg(test)]
+use crate::session::SessionDecision;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicUsize, Ordering};

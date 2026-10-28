@@ -10,6 +10,7 @@ pub(in crate::afxdp) use fast_path::{
 // (#17195: their false test-only labels are gone).
 // `enqueue_sampled_mirror_clone_to_live` is dead in every build, so fast_path.rs
 // gates it `#[cfg(test)]`; the re-export follows that gate (#17195).
+
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(in crate::afxdp) use fast_path::{enqueue_mirror_clone, enqueue_mirror_clone_to_live};
 #[cfg(test)]

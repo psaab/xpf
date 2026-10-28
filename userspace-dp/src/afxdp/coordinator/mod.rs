@@ -2288,7 +2288,10 @@ impl Coordinator {
     }
 
     fn store_runtime_view(&mut self, forwarding: Arc<ForwardingState>) {
-        let _previous = self.ha.runtime.load_full();
+        #[cfg(test)]
+        let previous = self.ha.runtime.load_full();
+        #[cfg(not(test))]
+        let _ = self.ha.runtime.load_full();
         self.runtime_view_publication_generation =
             self.runtime_view_publication_generation.saturating_add(1);
         let view = Arc::new(RuntimeView::new_with_ipsec_authority(

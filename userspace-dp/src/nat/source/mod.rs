@@ -2,6 +2,8 @@ mod keys;
 pub(crate) use keys::*;
 mod lease_note_7560;
 pub(crate) use lease_note_7560::report_dropped_leases;
+#[cfg(test)]
+pub(crate) use lease_note_7560::dropped_persistent_lease_note;
 // Source NAT (SNAT) rules + matching + lookup.
 //
 // Owns rule parsing from snapshots, the address/port-pool match

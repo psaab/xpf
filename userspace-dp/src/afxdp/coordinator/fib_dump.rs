@@ -226,7 +226,6 @@ impl super::Coordinator {
 
 #[cfg(test)]
 mod tests {
-    
 
     #[test]
     fn fib_dump_returns_installed_route_and_generation_11370() {

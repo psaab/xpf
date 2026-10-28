@@ -975,6 +975,8 @@ use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_OSPF, PROTO_TCP, PROTO_UDP
 use crate::tcp_flags::{
     has_ack, has_fin, has_rst, has_syn, is_closing, is_initial_syn, is_syn_ack,
 };
+#[cfg(test)]
+use crate::tcp_flags::{TCP_FIN, TCP_RST};
 
 #[allow(unused_macros)]
 macro_rules! debug_log {
@@ -1001,6 +1003,10 @@ mod lookup;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
 pub(crate) use lookup::{ExportWalkOutcome, ForwardNatMatchLookup, SeqVerdict};
+#[cfg(test)]
+pub(crate) use install::PMechInstallPlan;
+#[cfg(test)]
+pub(crate) use lookup::IpsecReplyAliasLookup;
 use lookup::TcpStatePropagation;
 
 /// #7212: the `(config generation, logical ingress interface)` pair a session's

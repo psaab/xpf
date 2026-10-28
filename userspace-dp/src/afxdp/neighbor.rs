@@ -365,24 +365,24 @@ pub(super) fn build_solicit_sockaddr_in6(v6: Ipv6Addr, ifindex: i32) -> libc::so
 }
 
 // Trigger kernel ARP/NDP resolution by sending an ICMP echo via a
-/// kernel socket bound to the egress interface. The kernel's own ARP
-/// stack handles VLAN tagging correctly. No fork/exec overhead.
-///
-/// Primary path: `SOCK_RAW` (needs CAP_NET_RAW — held when xpfd runs as
-/// root, the default). Fallback: an unprivileged `SOCK_DGRAM` ICMP ping
-/// socket (no CAP_NET_RAW, gated by `net.ipv4.ping_group_range`) so
-/// neighbor probing still works under the rootless/container substrate
-/// (#1958, #2482). Either way the egress packet drives the kernel to
-/// ARP/NDP-resolve the next-hop — the echo's reply is irrelevant.
-///
-/// `ifindex` is the egress interface index (available at every call site).
-/// It is threaded into the IPv6 `sockaddr_in6.sin6_scope_id` so a LINK-LOCAL
-/// (`fe80::/10`) next-hop solicit can actually be routed by the kernel
-/// (#2969); a zero scope id silently dropped link-local NDP solicits and
-/// blackholed IPv6 forwarding to those hops. The `sendto` return is checked
-/// in both families and a failure is logged (it fires rarely — only on a
-/// probe send error — so this does not violate the per-tick logging rules)
-/// instead of being swallowed, which previously hid a never-sent solicit.
+// kernel socket bound to the egress interface. The kernel's own ARP
+// stack handles VLAN tagging correctly. No fork/exec overhead.
+//
+// Primary path: `SOCK_RAW` (needs CAP_NET_RAW — held when xpfd runs as
+// root, the default). Fallback: an unprivileged `SOCK_DGRAM` ICMP ping
+// socket (no CAP_NET_RAW, gated by `net.ipv4.ping_group_range`) so
+// neighbor probing still works under the rootless/container substrate
+// (#1958, #2482). Either way the egress packet drives the kernel to
+// ARP/NDP-resolve the next-hop — the echo's reply is irrelevant.
+//
+// `ifindex` is the egress interface index (available at every call site).
+// It is threaded into the IPv6 `sockaddr_in6.sin6_scope_id` so a LINK-LOCAL
+// (`fe80::/10`) next-hop solicit can actually be routed by the kernel
+// (#2969); a zero scope id silently dropped link-local NDP solicits and
+// blackholed IPv6 forwarding to those hops. The `sendto` return is checked
+// in both families and a failure is logged (it fires rarely — only on a
+// probe send error — so this does not violate the per-tick logging rules)
+// instead of being swallowed, which previously hid a never-sent solicit.
 #[cfg(test)]
 thread_local! {
     static KERNEL_ARP_PROBE_TEST_CAPTURE: std::cell::Cell<Option<usize>> =

@@ -13,8 +13,10 @@ use crate::afxdp::umem::MmapArea;
 use super::ecn::{maybe_mark_ecn_ce, maybe_mark_ecn_ce_prepared};
 use super::flow_hash::{cos_flow_hash_seed_from_os, cos_queue_prospective_active_flows};
 use super::cos_effective_burst_bytes;
+#[cfg(test)]
+use super::COS_MIN_BURST_BYTES;
 
-/// Minimum per-flo admission share. Sized so TCP fast-retransmit can
+/// Minimum per-flow admission share. Sized so TCP fast-retransmit can
 /// trigger reliably on a single-packet drop:
 /// - 3 dupacks to trigger fast-retransmit (Linux `tcp_reordering = 3`)
 /// - headroom for in-flight reordering up to ~13 MTU-sized packets

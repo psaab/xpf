@@ -8,6 +8,8 @@ use super::worker_runtime::CoSQueueLeaseUndergrantCounters;
 // Issue 73 step 2: per-poll BindingWorker lifecycle (the central
 // `poll_binding` orchestrator) lives in worker/lifecycle.rs.
 mod lifecycle;
+#[cfg(test)]
+pub(crate) use lifecycle::REVOCATION_FLOW_CACHE_WINDOW_DESCRIPTORS;
 /// #8586: the flat (whole-`bindings`) flow-cache eviction the worker loop's
 /// reconcile uses; the split-borrow sibling stays private to `poll_binding`.
 pub(in crate::afxdp) use lifecycle::invalidate_flow_cache_slots_for_keys;
@@ -86,6 +88,10 @@ pub(crate) use loop_body::worker_loop;
 #[cfg(test)]
 pub(in crate::afxdp) use loop_body::{
     production_rotation_purge_for_test, production_sweep_for_test,
+};
+#[cfg(test)]
+pub(in crate::afxdp) use loop_body::{
+    retry_deferred_conntrack_deletes, retry_deferred_pressure_sheds,
 };
 
 // #9412: the synced session entry and its install mapping live in their own file.

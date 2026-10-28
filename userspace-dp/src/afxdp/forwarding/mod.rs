@@ -35,6 +35,7 @@ pub(in crate::afxdp) use host_inbound::{
     host_inbound_admits_iface_for_destination, zone_host_inbound_from_snapshot,
     zone_host_inbound_from_tokens, zone_host_inbound_from_tokens_except,
 
+
 };
 // #17192: the destination-less iface entry point is a test-only seam
 // delegating to the production destination-aware entry point.

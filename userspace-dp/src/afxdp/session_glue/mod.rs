@@ -8,12 +8,16 @@ mod install_table_purge;
 mod promote;
 
 pub(in crate::afxdp) use delete_drop_sweep::DeleteDropSweep;
+#[cfg(test)]
+pub(in crate::afxdp) use delete_drop_sweep::DELETE_DROP_SWEEP_BUDGET;
 pub(in crate::afxdp) use install_table_purge::{
     InstallTablePurge, install_table_purge_predicate,
 };
 pub(in crate::afxdp) use promote::{
     ConntrackFds, SharedSessionRefs, Tick, maybe_promote_synced_session_with_conntrack, SessionHitVerdict,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use promote::maybe_promote_synced_session;
 /// #10507 Cell 5a test seam: command-driven Demote/Refresh funnels for
 /// cross-module poll tests (unshared map, no BPF). Production `handle_*`
 /// stay `pub(in session_glue)`; these `#[cfg(test)]` delegates widen

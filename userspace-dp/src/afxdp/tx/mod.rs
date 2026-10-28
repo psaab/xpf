@@ -36,6 +36,12 @@ pub(super) use cos_classify::{
     resolve_cached_cos_tx_queue_id, resolve_cached_cos_tx_selection_prenat,
     resolve_cos_tx_selection_at, resolve_cos_tx_selection_at_prenat,
 };
+#[cfg(test)]
+pub(super) use cos_classify::{
+    classify_generated_reply,
+    resolve_cached_cos_tx_selection, resolve_cached_cos_tx_selection_flowless,
+    resolve_cos_queue_id,
+};
 // Private use, not a re-export: a `pub(super) use` of a `pub(super)`
 // item triggers E0364. The drain submodule reaches this through `use super::*;`.
 use cos_classify::enqueue_prepared_into_cos;

@@ -18,6 +18,8 @@ pub(crate) use cache_sensitive::{
     interface_input_filter_has_dscp_match, interface_input_filter_has_per_packet_l4_match, interface_output_filter_has_dscp_match,
     interface_output_filter_has_per_packet_l4_match, lo0_filter_families_changed,
 };
+#[cfg(test)]
+pub(crate) use cache_sensitive::interface_input_filter_varies_per_packet;
 pub(crate) use eval::{
     InputPolicerMeter, NonRoutingCountPolicy, evaluate_filter, evaluate_filter_counted,
     evaluate_filter_ref_routing_instance_event_counted,
@@ -34,6 +36,7 @@ pub(crate) use eval::{
 // `#[cfg(test)]`, so the re-export follows that gate.
 #[cfg(test)]
 pub(crate) use eval::evaluate_lo0_filter;
+
 // #6236 PR-2C: the `(state, ifindex, ..)` routing-instance map-lookup wrappers
 // are test-only now — production shares the `interface_filter_route_lookup_affecting`
 // borrow into the `&Filter` core `evaluate_filter_ref_routing_instance_event_counted`.
@@ -52,6 +55,11 @@ pub(crate) use tx_selection::{
     evaluate_filter_ref_tx_selection_runtime_routing_bearing,
     evaluate_filter_ref_tx_selection_runtime_uncounted, evaluate_filter_ref_tx_selection_uncounted, filter_state_has_input_tx_selection,
     interface_output_filter_needing_tx_eval, routing_bearing_remainder_policer_drop_from,
+};
+#[cfg(test)]
+pub(crate) use tx_selection::{
+    evaluate_interface_filter_tx_selection_counted,
+    evaluate_interface_output_filter_tx_selection_counted,
 };
 // #6236 PR-2C: the `needs_tx_eval` bool is a test-only `.is_some()` view over
 // `interface_output_filter_needing_tx_eval` (production takes the borrow).

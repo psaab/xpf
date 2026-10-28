@@ -114,6 +114,8 @@ pub(super) use mtu::WG_DEFAULT_OUTER_MTU;
 #[cfg(test)]
 use mtu::wg_inner_fits_outer_mtu;
 #[cfg(test)]
+use sock::bind_wg_socket;
+#[cfg(test)]
 use sock::{
     CmsgBuf, V6BindStage, WG_POLL_CAP_MS, parse_outer_ecn_from_cmsg,
     sockaddr_storage_to_socketaddr, v6_bind_can_fallback, wg_send_to,

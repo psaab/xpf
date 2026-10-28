@@ -1,4 +1,6 @@
 use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 
 /// #16561: NAT'd forward removals that fell back to the legacy
 /// O(table) survivor scan under the `shared_sessions` mutex because

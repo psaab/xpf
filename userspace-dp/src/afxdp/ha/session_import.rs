@@ -200,6 +200,7 @@ impl SyncedDeleteMode {
 /// test can rendezvous a publisher here and install a replacement deterministically
 /// instead of relying on scheduler timing. Thread-local storage keeps concurrent
 /// tests isolated and adds no release-build state or call.
+
 #[cfg(test)]
 thread_local! {
     static SYNCED_DELETE_AFTER_CLONE_HOOK:
@@ -227,10 +228,10 @@ impl Drop for SyncedDeleteOutcomeOverrideGuard {
     }
 }
 // Test-only seam for the #13709 race. The hook fires after the candidate
-/// previous-entry snapshot, before the tuple lease is acquired. A test can
-/// publish an intervening replacement deterministically instead of relying on
-/// scheduler timing. Thread-local storage isolates concurrent tests and adds
-/// no release-build state or call.
+// previous-entry snapshot, before the tuple lease is acquired. A test can
+// publish an intervening replacement deterministically instead of relying on
+// scheduler timing. Thread-local storage isolates concurrent tests and adds
+// no release-build state or call.
 #[cfg(test)]
 thread_local! {
     static SYNCED_UPSERT_AFTER_SNAPSHOT_HOOK:

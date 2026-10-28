@@ -5343,7 +5343,7 @@ fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companio
     // empty-table leg produces, for a completely different reason. Without
     // this the control could not distinguish "resolved to a real owner" from
     // "resolved to nothing", which is the whole contrast.
-    healthy.update_ha_state(&[
+    let _ = healthy.update_ha_state(&[
         HAGroupStatus {
             rg_id: 1,
             active: true,
@@ -5460,7 +5460,7 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     // prewarm's reason rather than the replay's. Measured: it did, and only the
     // counter assertion caught it. Activating here, with no sessions yet, makes
     // the prewarm a no-op and leaves the replay as the only repair path.
-    coordinator.update_ha_state(&[
+    let _ = coordinator.update_ha_state(&[
         HAGroupStatus {
             rg_id: 1,
             active: true,

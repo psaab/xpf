@@ -13303,7 +13303,7 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
                 std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" })
                     .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) = (None, false, false);
+            let (mut delivered, mut _unsteered_dropped, mut _degraded_dropped) = (None, false, false);
             // Resend until the thread (which binds asynchronously) accounts for one.
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
@@ -13322,7 +13322,7 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
                     .load(Ordering::Relaxed)
                     > unsteered_before
                 {
-                    unsteered_dropped = true;
+                    _unsteered_dropped = true;
                     break;
                 }
                 if engine
@@ -13331,7 +13331,7 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
                     .load(Ordering::Relaxed)
                     > degraded_before
                 {
-                    degraded_dropped = true;
+                    _degraded_dropped = true;
                     break;
                 }
             }
@@ -13342,7 +13342,7 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
                     delivered
                 );
                 assert!(
-                    degraded_dropped,
+                    _degraded_dropped,
                     "{family}: the steered endpoint never counted its degraded-transit drop"
                 );
                 assert_eq!(
@@ -13363,7 +13363,7 @@ fn wg_unsteered_endpoint_refuses_kernel_transport_end_to_end_9521() {
                 );
             } else {
                 assert!(
-                    unsteered_dropped,
+                    _unsteered_dropped,
                     "{family}: the unsteered endpoint never counted an unsteered-port drop — \
                      either the record never arrived or the thread spawned with the wrong decision"
                 );
@@ -13533,7 +13533,7 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
                 std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" })
                     .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) = (None, false, false);
+            let (mut delivered, mut _unsteered_dropped, mut _degraded_dropped) = (None, false, false);
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
                 let enc = init
@@ -13551,7 +13551,7 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
                     .load(Ordering::Relaxed)
                     > unsteered_before
                 {
-                    unsteered_dropped = true;
+                    _unsteered_dropped = true;
                     break;
                 }
                 if engine
@@ -13560,7 +13560,7 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
                     .load(Ordering::Relaxed)
                     > degraded_before
                 {
-                    degraded_dropped = true;
+                    _degraded_dropped = true;
                     break;
                 }
             }
@@ -13570,7 +13570,7 @@ fn wg_both_steered_endpoints_deliver_end_to_end_9587() {
                 delivered
             );
             assert!(
-                degraded_dropped,
+                _degraded_dropped,
                 "{family}: endpoint {id}'s spawned thread never counted degraded transit"
             );
             assert_eq!(
@@ -13696,7 +13696,7 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                 std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" })
                     .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) = (None, false, false);
+            let (mut delivered, mut _unsteered_dropped, mut _degraded_dropped) = (None, false, false);
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
                 let enc = init
@@ -13714,7 +13714,7 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                     .load(Ordering::Relaxed)
                     > unsteered_before
                 {
-                    unsteered_dropped = true;
+                    _unsteered_dropped = true;
                     break;
                 }
                 if engine
@@ -13723,7 +13723,7 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                     .load(Ordering::Relaxed)
                     > degraded_before
                 {
-                    degraded_dropped = true;
+                    _degraded_dropped = true;
                     break;
                 }
             }
@@ -13733,7 +13733,7 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                 delivered
             );
             assert!(
-                degraded_dropped,
+                _degraded_dropped,
                 "{family}: steered endpoint 1 never counted degraded transit"
             );
             assert_eq!(
@@ -13792,7 +13792,7 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                 std::net::UdpSocket::bind(if outer_v6 { "[::1]:0" } else { "127.0.0.1:0" })
                     .unwrap();
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            let (mut delivered, mut unsteered_dropped, mut degraded_dropped) = (None, false, false);
+            let (mut delivered, mut _unsteered_dropped, mut _degraded_dropped) = (None, false, false);
             while std::time::Instant::now() < deadline {
                 let mut wire = vec![0u8; 2048];
                 let enc = init
@@ -13810,7 +13810,7 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                     .load(Ordering::Relaxed)
                     > unsteered_before
                 {
-                    unsteered_dropped = true;
+                    _unsteered_dropped = true;
                     break;
                 }
                 if engine
@@ -13819,12 +13819,12 @@ fn wg_single_steered_port_second_endpoint_drops_end_to_end_9587() {
                     .load(Ordering::Relaxed)
                     > degraded_before
                 {
-                    degraded_dropped = true;
+                    _degraded_dropped = true;
                     break;
                 }
             }
             assert!(
-                unsteered_dropped,
+                _unsteered_dropped,
                 "{family}: unsteered endpoint 2 never counted the drop"
             );
             assert_eq!(

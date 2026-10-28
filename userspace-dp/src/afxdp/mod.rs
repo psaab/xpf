@@ -16,10 +16,14 @@ use crate::nptv6::Nptv6State;
 use crate::policy::{
     AppCatalog, PolicyAction, PolicyCounterStore, PolicyState, parse_policy_state_with_counters_and_functional,
 };
+#[cfg(test)]
+use crate::policy::evaluate_policy;
 use crate::prefix::{PrefixV4, PrefixV6};
 use crate::screen::{
     UnresolvedProfileRef, ScreenProfile, ScreenState, ScreenVerdict, extract_screen_info,
 };
+#[cfg(test)]
+use crate::session::SessionInstall;
 use crate::session::{
     ForwardSessionMatch, SessionDecision, SessionDelta, SessionDeltaKind, SessionKey, SessionLookup, SessionLookupAux, SessionMetadata, SessionOrigin,
     SessionTable, SessionUpdate, forward_wire_key, reverse_canonical_key, reverse_session_key,
@@ -214,6 +218,8 @@ pub(crate) use self::forwarding_build::neighbor_family_mismatch;
 use self::forwarding_build::*;
 use self::frame::*;
 use self::gre::encapsulate_native_gre_frame;
+#[cfg(test)]
+use self::gre::try_native_gre_decap_from_frame;
 use self::icmp::{
     FABRIC_INGRESS_FLAG, GRE_DECAP_INGRESS_FLAG, build_local_time_exceeded_request, is_icmp_error,
     packet_ttl_would_expire, zero_hop_limit_local_drop,
@@ -246,6 +252,8 @@ use self::icmp_ptb::{
     EgressMtuDecision, build_frag_needed_v4, build_packet_too_big_v6,
     forwarded_egress_mtu_decision, ptb_reply_suppressed,
 };
+#[cfg(test)]
+use self::icmp_embed::finalize_embedded_icmp_resolution;
 use self::icmp_ratelimit::{GeneratedErrorReason, allow_generated_error_zoned};
 use self::mirror::*;
 use self::mpsc_inbox::MpscInbox;
@@ -1927,6 +1935,8 @@ impl BatchCounters {
 }
 
 pub(in crate::afxdp) mod poll_descriptor;
+#[cfg(test)]
+use poll_descriptor::poll_binding_process_descriptor;
 
 // #946 Phase 1: per-packet pipeline stages extracted from the
 // while-let body in `poll_binding_process_descriptor`. See
@@ -1997,6 +2007,8 @@ mod forward_request;
 use forward_request::{
     ForwardRejectReply, build_live_forward_request_from_frame_with_dynamic, should_install_local_reverse_session,
 };
+#[cfg(test)]
+use forward_request::build_live_forward_request_from_frame;
 // `build_live_forward_request` is only referenced by tests in
 // afxdp/frame/tests.rs; gate its import behind cfg(test).
 #[cfg(test)]
