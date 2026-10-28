@@ -117,15 +117,16 @@ func (d *Daemon) syslogCachedClient15231(name, fp string) *logging.SyslogClient 
 // clients are terminally closed or whose identity the EventReader no
 // longer owns (#18368, the stream twin of
 // systemSyslogForgetCachedNotInstalled). The identity check alone is
-// not sufficient: external replacement can leave a cached client open
+// not sufficient: external replacement can leave a cached client open.
 // Eviction removes only this stale cache entry; other stream names are
-// unaffected.
+// unaffected. A displaced open client is closed after releasing syslogBuiltMu.
 func (d *Daemon) syslogForgetCachedNotInstalled15231(installed []*logging.SyslogClient) {
+	var closeAfterUnlock []*logging.SyslogClient
 	d.syslogBuiltMu.Lock()
-	defer d.syslogBuiltMu.Unlock()
 	for name, cached := range d.syslogBuiltByName15231 {
+		open := cached != nil && !cached.Closed()
 		stillInstalled := false
-		if cached != nil && !cached.Closed() {
+		if open {
 			for _, client := range installed {
 				if client == cached {
 					stillInstalled = true
@@ -136,7 +137,23 @@ func (d *Daemon) syslogForgetCachedNotInstalled15231(installed []*logging.Syslog
 		if !stillInstalled {
 			delete(d.syslogBuiltByName15231, name)
 			delete(d.syslogBuiltFP15231, name)
+			if open {
+				duplicate := false
+				for _, alreadyQueued := range closeAfterUnlock {
+					if alreadyQueued == cached {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					closeAfterUnlock = append(closeAfterUnlock, cached)
+				}
+			}
 		}
+	}
+	d.syslogBuiltMu.Unlock()
+	for _, cached := range closeAfterUnlock {
+		_ = cached.Close()
 	}
 }
 

@@ -133,6 +133,12 @@ func TestApplySecurityStreamSyslogRebuildsAfterInstalledSetDrift18368(t *testing
 	t.Cleanup(func() { first[0].Close() })
 	er.SetSyslogClients([]*logging.SyslogClient{foreign})
 	d.applySyslogConfig(er, cfg)
+	if !first[0].Closed() {
+		t.Fatalf("#18368: drift-displaced open client was evicted from the stream cache without being closed: %p", first[0])
+	}
+	if !foreign.Closed() {
+		t.Fatalf("#18368: drift-displaced foreign client was retired without being closed: %p", foreign)
+	}
 
 	current := er.SyslogClients()
 	if *built != 2 {
@@ -170,6 +176,35 @@ func TestApplySecurityStreamSyslogUnchangedOpenClientNoRedial18368(t *testing.T)
 	n, _, err := sink.ReadFromUDP(buf)
 	if err != nil || !strings.Contains(string(buf[:n]), msg) {
 		t.Fatalf("control: unchanged client did not deliver a record: n=%d err=%v data=%q", n, err, buf[:n])
+	}
+}
+
+// Control: reordering open installed clients must not rebuild the stream set;
+// cache validity is based on identity membership, not EventReader slice order.
+func TestApplySecurityStreamSyslogOpenReorderedClientsNoRebuild18368(t *testing.T) {
+	d, er, built := newStreamSyslogApplier18368(t)
+	cfg := streamSyslogCfg18368("audit-a", "audit-b")
+
+	d.applySyslogConfig(er, cfg)
+	first := er.SyslogClients()
+	if len(first) != 2 || *built != 2 || first[0] == first[1] {
+		t.Fatalf("premise: first apply installed %d distinct clients after %d constructions", len(first), *built)
+	}
+	reordered := []*logging.SyslogClient{first[1], first[0]}
+	er.SetSyslogClients(reordered)
+	d.applySyslogConfig(er, cfg)
+
+	current := er.SyslogClients()
+	if *built != 2 {
+		t.Fatalf("control: open reordered apply constructed %d clients, want 2 total", *built)
+	}
+	if len(current) != 2 || current[0] != first[1] || current[1] != first[0] {
+		t.Fatalf("control: open reordered apply did not preserve reordered installed clients: %v", current)
+	}
+	for _, client := range current {
+		if client.Closed() {
+			t.Fatalf("control: open reordered apply closed a preserved client: %v", current)
+		}
 	}
 }
 
