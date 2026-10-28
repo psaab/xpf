@@ -206,3 +206,42 @@ func TestSweepStaleStateTempsRefusesHardlinkedTemp10769(t *testing.T) {
 		}
 	}
 }
+
+// RED on revert (probe inverted, #17171): a symlinked dead-writer temp
+// was unlinked by the hardlink-only copy, verification reported clean,
+// and the target bytes survived. The shared primitive must refuse the
+// link, leave it in place, and leave the target bytes intact; the
+// IncludingLegacy verify must keep seeing the temp afterwards.
+func TestSweepStaleStateTempsIncludingLegacyRefusesSymlinkedTemp17171(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "state.json")
+	target := filepath.Join(dir, "victim.txt")
+	const body = "prior-tenant-session-state"
+	if err := os.WriteFile(target, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "state.json.4250000000_1.1.tmp")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	var symErr *configstore.FactoryResetSymlinkError
+	if _, err := SweepStaleStateTempsIncludingLegacy(dest); !errors.As(err, &symErr) {
+		t.Fatalf("expected FactoryResetSymlinkError, got %v", err)
+	}
+	if len(symErr.Skipped) != 1 || symErr.Skipped[0].Path != link {
+		t.Fatalf("symlink error = %+v, want link %s", symErr.Skipped, link)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("refusal must retain the link: %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != body {
+		t.Fatalf("target bytes must survive refusal: %q err=%v", got, err)
+	}
+	dead, live, err := ListStaleStateTempsIncludingLegacy(dest)
+	if err != nil {
+		t.Fatalf("verify list: %v", err)
+	}
+	if len(dead) != 1 || dead[0] != link || len(live) != 0 {
+		t.Fatalf("verify must still see the refused link as dead residue: dead=%v live=%v", dead, live)
+	}
+}
