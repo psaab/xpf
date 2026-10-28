@@ -73,8 +73,10 @@ func TestRuleDumpDecodesActionAndExtendedTable17078(t *testing.T) {
 
 // TestRuleDumpRejectsMalformedRows17078 pins the validation the old
 // pkg/routing DSCP sidecar lacked: short attributes must fail the
-// decode instead of panicking on an unchecked [0:4] slice, and the
-// FRA_IP_PROTO width rule (1..4 bytes, #14971) must hold both ways.
+// decode instead of panicking on an unchecked [0:4] slice, oversize
+// fixed-width attributes must fail instead of silently truncating to
+// their first bytes, and the FRA_IP_PROTO width rule (1..4 bytes,
+// #14971) must hold both ways.
 func TestRuleDumpRejectsMalformedRows17078(t *testing.T) {
 	build := func(attrs ...*nl.RtAttr) []byte {
 		msg := nl.NewRtMsg()
@@ -104,6 +106,20 @@ func TestRuleDumpRejectsMalformedRows17078(t *testing.T) {
 		{"oversize ip proto", build(nl.NewRtAttr(nl.FRA_IP_PROTO, []byte{1, 2, 3, 4, 5}))},
 		{"bad dst width", build(nl.NewRtAttr(nl.FRA_DST, []byte{1, 2, 3}))},
 		{"empty dscp", build(nl.NewRtAttr(FRA_DSCP, []byte{}))},
+		{"oversize table", build(nl.NewRtAttr(unix.RTA_TABLE, []byte{1, 2, 3, 4, 5}))},
+		{"oversize priority", build(nl.NewRtAttr(nl.FRA_PRIORITY, []byte{1, 2, 3, 4, 5}))},
+		{"oversize mark", build(nl.NewRtAttr(nl.FRA_FWMARK, []byte{1, 2, 3, 4, 5}))},
+		{"oversize mark mask", build(nl.NewRtAttr(nl.FRA_FWMASK, []byte{1, 2, 3, 4, 5}))},
+		{"oversize suppress prefix length", build(nl.NewRtAttr(nl.FRA_SUPPRESS_PREFIXLEN, []byte{1, 2, 3, 4, 5}))},
+		{"oversize suppress interface group", build(nl.NewRtAttr(nl.FRA_SUPPRESS_IFGROUP, []byte{1, 2, 3, 4, 5}))},
+		{"oversize flow", build(nl.NewRtAttr(nl.FRA_FLOW, []byte{1, 2, 3, 4, 5}))},
+		{"oversize goto", build(nl.NewRtAttr(nl.FRA_GOTO, []byte{1, 2, 3, 4, 5}))},
+		{"oversize tun id", build(nl.NewRtAttr(nl.FRA_TUN_ID, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9}))},
+		{"oversize dport range", build(nl.NewRtAttr(nl.FRA_DPORT_RANGE, []byte{1, 2, 3, 4, 5}))},
+		{"oversize sport range", build(nl.NewRtAttr(nl.FRA_SPORT_RANGE, []byte{1, 2, 3, 4, 5}))},
+		{"oversize uid range", build(nl.NewRtAttr(nl.FRA_UID_RANGE, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9}))},
+		{"oversize protocol", build(nl.NewRtAttr(nl.FRA_PROTOCOL, []byte{1, 2}))},
+		{"oversize dscp", build(nl.NewRtAttr(FRA_DSCP, []byte{1, 2}))},
 		{"truncated attribute tail", unpaddedTail},
 	}
 	for _, tc := range cases {

@@ -65,10 +65,11 @@ func RuleListFull(family int) ([]RuleRow, error) {
 // (NewRule, Priority reset to the kernel's 0), same attribute set, same
 // &net.IPNet{IP, Mask} construction — and adds the three things the
 // library cannot do: Rule.Type from fib_rule_hdr, length validation on
-// every attribute (the library slices [0:4]/[0:8] unchecked), and the
-// FRA_DSCP sidecar. FRA_IP_PROTO is width-tolerant
-// (1..4 bytes): the kernel emits it as u8 (#14971) while the library
-// and its encoders emit 4 bytes.
+// every attribute (fixed-width attributes must match their kernel width
+// exactly; the library slices [0:4]/[0:8] unchecked, silently truncating
+// oversize values), and the FRA_DSCP sidecar. FRA_IP_PROTO is
+// width-tolerant (1..4 bytes): the kernel emits it as u8 (#14971) while
+// the library and its encoders emit 4 bytes.
 func ruleRowFromDumpMessage(family int, raw []byte) (RuleRow, error) {
 	var row RuleRow
 	if len(raw) < unix.SizeofRtMsg {
@@ -148,7 +149,10 @@ func ruleRowFromDumpMessage(family int, raw []byte) (RuleRow, error) {
 			if len(attr.Value) < 8 {
 				return row, fmt.Errorf("short policy-rule tunnel id attribute in family %d", family)
 			}
-			rule.TunID = uint(native.Uint64(attr.Value[:8]))
+			if len(attr.Value) > 8 {
+				return row, fmt.Errorf("oversize policy-rule tunnel id attribute length %d in family %d", len(attr.Value), family)
+			}
+			rule.TunID = uint(native.Uint64(attr.Value))
 		case nl.FRA_IIFNAME:
 			rule.IifName = ruleDumpIfName(attr.Value)
 		case nl.FRA_OIFNAME:
@@ -196,25 +200,40 @@ func ruleRowFromDumpMessage(family int, raw []byte) (RuleRow, error) {
 			if len(attr.Value) < 4 {
 				return row, fmt.Errorf("short policy-rule destination-port range in family %d", family)
 			}
+			if len(attr.Value) > 4 {
+				return row, fmt.Errorf("oversize policy-rule destination-port range length %d in family %d", len(attr.Value), family)
+			}
 			rule.Dport = netlink.NewRulePortRange(native.Uint16(attr.Value[:2]), native.Uint16(attr.Value[2:4]))
 		case nl.FRA_SPORT_RANGE:
 			if len(attr.Value) < 4 {
 				return row, fmt.Errorf("short policy-rule source-port range in family %d", family)
+			}
+			if len(attr.Value) > 4 {
+				return row, fmt.Errorf("oversize policy-rule source-port range length %d in family %d", len(attr.Value), family)
 			}
 			rule.Sport = netlink.NewRulePortRange(native.Uint16(attr.Value[:2]), native.Uint16(attr.Value[2:4]))
 		case nl.FRA_UID_RANGE:
 			if len(attr.Value) < 8 {
 				return row, fmt.Errorf("short policy-rule UID range in family %d", family)
 			}
+			if len(attr.Value) > 8 {
+				return row, fmt.Errorf("oversize policy-rule UID range length %d in family %d", len(attr.Value), family)
+			}
 			rule.UIDRange = netlink.NewRuleUIDRange(native.Uint32(attr.Value[:4]), native.Uint32(attr.Value[4:8]))
 		case nl.FRA_PROTOCOL:
 			if len(attr.Value) < 1 {
 				return row, fmt.Errorf("short policy-rule protocol attribute in family %d", family)
 			}
+			if len(attr.Value) > 1 {
+				return row, fmt.Errorf("oversize policy-rule protocol attribute length %d in family %d", len(attr.Value), family)
+			}
 			rule.Protocol = attr.Value[0]
 		case FRA_DSCP:
 			if len(attr.Value) < 1 {
 				return row, fmt.Errorf("short policy-rule DSCP attribute in family %d", family)
+			}
+			if len(attr.Value) > 1 {
+				return row, fmt.Errorf("oversize policy-rule DSCP attribute length %d in family %d", len(attr.Value), family)
 			}
 			row.DSCP = attr.Value[0]
 			row.DSCPSet = true
@@ -235,7 +254,10 @@ func ruleDumpUint32(value []byte, name string) (uint32, error) {
 	if len(value) < 4 {
 		return 0, fmt.Errorf("short policy-rule %s attribute", name)
 	}
-	return nl.NativeEndian().Uint32(value[:4]), nil
+	if len(value) > 4 {
+		return 0, fmt.Errorf("oversize policy-rule %s attribute length %d", name, len(value))
+	}
+	return nl.NativeEndian().Uint32(value), nil
 }
 
 func ruleDumpIfName(value []byte) string {
