@@ -33,9 +33,11 @@ pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
     for cmd in scratch.drain(..) {
         match cmd {
             WorkerCommand::DemoteOwnerRGS { owner_rgs } => {
+                // #9752: a terminal demote arms the purge walk (D8).
                 super::handle_demote_owner_rgs_command(ctx, owner_rgs);
             }
             WorkerCommand::RefreshOwnerRGS { owner_rgs } => {
+                // #9752: a terminal refresh arms the purge walk (D8).
                 super::handle_refresh_owner_rgs_command(ctx, owner_rgs);
             }
             WorkerCommand::ExportOwnerRGSessions {
@@ -160,7 +162,7 @@ pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
             // #941 Work item C: signal the outer poll loop to vacate
             // all shared_exact slots (we don't have BindingWorker
             // access here, so we set the flag and let
-            // `worker.rs:818-822` dispatch.
+            // `worker.rs:818-822` dispatch).
             WorkerCommand::VacateAllSharedExactSlots => {
                 *ctx.vacate_all_shared_exact_slots = true;
             }

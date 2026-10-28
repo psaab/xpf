@@ -13,14 +13,27 @@ pub(in crate::afxdp::session_glue) fn take_worker_command_slice(
     bool,
     usize,
 ) {
-    // Hot path: try_lock avoids blocking when another thread holds the mutex
-    // and avoids lock/unlock on empty queues during steady-state forwarding.
-    // #1807: poisoned mutexes are recovered and processed as normal.
-    // #7201: this takes a BOUNDED PREFIX, not the whole deque: the worker cannot
-    // touch AF_XDP rings until the dispatch loop ends.
-    // #9720: no early returns; debt must step on empty and contended paths.
-    // Scratch enters empty by invariant; the delta remains correct for a
-    // test-reused buffer.
+    // Hot path: try_lock avoids blocking on the mutex when another thread
+    // holds it (rare) and avoids the cost of lock+unlock on empty queues
+    // when there's nothing to do (common case during steady-state forwarding).
+    // #1807: a poisoned mutex is recovered (committed-prefix + clear_poison
+    // policy, worker_queue.rs) and the recovered deque is processed as
+    // normal — treating poison as absence-of-work made the worker
+    // permanently deaf to coordinator commands.
+    //
+    // #7201: this takes a BOUNDED PREFIX, not the whole deque. Every command is
+    // a session-table mutation plus a BPF-map publish syscall, and the worker
+    // does not touch its AF_XDP rings until the loop below finishes — so an
+    // unbounded drain is unserviced ring time. See
+    // `worker_queue::WORKER_COMMAND_DRAIN_BUDGET` for the measurement and the
+    // ring arithmetic that fix the slice size.
+    //
+    // #9720: no early returns — the debt step below must run on every path
+    // (an empty queue still steps a zero-countdown op ready; a contended one
+    // still reports the carry flag), so an empty or contended queue falls
+    // through with an empty scratch (a no-op dispatch) instead of returning.
+    // `scratch_len_before` deltas the drain: scratch enters empty by
+    // invariant, but the delta stays correct even for a test-reused buffer.
     let (mut session_import_repairs, ready_remains_at_start, mut session_import_repair_pending) =
         worker_queue::take_ready_session_import_repairs(
             worker_id,
@@ -53,8 +66,9 @@ pub(in crate::afxdp::session_glue) fn take_worker_command_slice(
                     worker_queue::drain_bounded_into_with_limit(&mut pending, scratch, drain_limit)
                 };
                 let drained = scratch.len() - scratch_len_before;
-                // Capture the drain under the same queue lock importers use to
-                // assign repair positions.
+                // Capture the drain while still holding the same queue lock
+                // used by importers to assign repair positions. A refused
+                // import records its debt after releasing that lock.
                 worker_queue::note_worker_commands_drained(worker_id, drained);
                 let (ready, _, pending_repairs) = worker_queue::take_ready_session_import_repairs(
                     worker_id,
