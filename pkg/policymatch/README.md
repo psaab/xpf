@@ -985,9 +985,11 @@ generated snapshot, a `lenient` case flag (lenient compile, post-quarantine
 snapshot) and a `content-rejected` expected verdict (Go `ContentRejected`,
 Rust snapshot refusal). Cases: `transit-fragment-reject-13705`,
 `unknown-zone-egress-11067`, `unknown-zone-ingress-8318`,
-`unknown-zone-junos-host-global-11369`, `icmp-type-code`, `omitted-selectors`,
-`feed-overlay-12965`, `lenient-quarantine-5649`, `content-rejected-3727`;
-both halves pin them by name (`TestPolicyVerdictCorpusPins17077Cases` /
+`unknown-zone-junos-host-global-11369` (from-any precedence),
+`unknown-zone-junos-host-global-only-11369` (global tier alone),
+`icmp-type-code`, `omitted-selectors`, `feed-overlay-12965`,
+`lenient-quarantine-5649`, `content-rejected-3727`; both halves pin them by
+name (`TestPolicyVerdictCorpusPins17077Cases` /
 `policy_verdict_corpus_pins_17077_cases`), so deleting one reds both sides.
 Measured: reverting the Rust `egress_resolved && to_id == 0` deny arm reds the
 Rust half on `unknown-zone-egress-11067` while the Go half stays green, and

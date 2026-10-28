@@ -1071,6 +1071,42 @@
         }
       ]
     },
+    "unknown-zone-junos-host-global-only-11369": {
+      "default_policy": "permit",
+      "rules": [
+        {
+          "rule_id": "junos-global-\u003ejunos-global/block-global-unzoned",
+          "name": "block-global-unzoned",
+          "from_zone": "junos-global",
+          "to_zone": "junos-global",
+          "source_literals": [
+            "any"
+          ],
+          "destination_literals": [
+            "any"
+          ],
+          "applications": [
+            "any"
+          ],
+          "action": "deny",
+          "match_from_zone": "any",
+          "match_to_zone": "junos-host",
+          "match_from_zones": [
+            "any"
+          ],
+          "match_to_zones": [
+            "junos-host"
+          ]
+        }
+      ],
+      "zones": [
+        {
+          "name": "trust",
+          "id": 2868932339,
+          "host_inbound_configured": true
+        }
+      ]
+    },
     "unscoped-global-applies-everywhere": {
       "default_policy": "permit",
       "rules": [

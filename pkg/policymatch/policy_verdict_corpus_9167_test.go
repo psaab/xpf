@@ -362,6 +362,7 @@ func TestPolicyVerdictCorpusPins17077Cases(t *testing.T) {
 		"unknown-zone-egress-11067":            1,
 		"unknown-zone-ingress-8318":            1,
 		"unknown-zone-junos-host-global-11369": 2,
+		"unknown-zone-junos-host-global-only-11369": 2,
 		"icmp-type-code":                       3,
 		"omitted-selectors":                    3,
 		"feed-overlay-12965":                   2,

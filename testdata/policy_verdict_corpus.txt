@@ -494,9 +494,11 @@ set security policies default-policy permit-all
 q bogus untrust 10.0.1.5 10.0.2.5 tcp 1234 80 deny -
 end
 
-# #11369 unknown-zone junos-host: an unzoned ingress still reaches the
-# from-any and global junos-host tiers. Row 1 is decided by the from-any deny;
-# row 2 falls through to the global junos-host deny.
+# #11369 unknown-zone junos-host, from-any precedence: an unzoned ingress
+# still reaches the from-zone any -> junos-host and global tiers. Both rows
+# here are decided by the from-any deny, so this case pins substitute-name
+# precedence ONLY — the global tier is pinned alone by
+# unknown-zone-junos-host-global-only-11369 below.
 case unknown-zone-junos-host-global-11369
 set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
 set security zones security-zone trust interfaces ge-0/0/0.0
@@ -513,6 +515,26 @@ set security policies global policy block-global-unzoned match application any
 set security policies global policy block-global-unzoned then deny
 q bogus junos-host 10.0.1.5 10.0.1.1 tcp 1234 22 deny block-unzoned
 q trust junos-host 10.0.1.5 10.0.1.1 tcp 1234 22 deny block-unzoned
+end
+
+# #11369 unknown-zone junos-host, GLOBAL TIER ALONE: no from-zone any
+# junos-host rule exists, so both rows can only be decided by the global
+# block-global-unzoned deny. Removing or breaking the global tier in
+# either evaluator falls through to default permit-all and reds both
+# halves on both rows; the from-any (substitute-name) tier is pinned by
+# unknown-zone-junos-host-global-11369 above.
+case unknown-zone-junos-host-global-only-11369
+set interfaces ge-0/0/0 unit 0 family inet address 10.0.1.1/24
+set security zones security-zone trust interfaces ge-0/0/0.0
+set security policies default-policy permit-all
+set security policies global policy block-global-unzoned match from-zone any
+set security policies global policy block-global-unzoned match to-zone junos-host
+set security policies global policy block-global-unzoned match source-address any
+set security policies global policy block-global-unzoned match destination-address any
+set security policies global policy block-global-unzoned match application any
+set security policies global policy block-global-unzoned then deny
+q bogus junos-host 10.0.1.5 10.0.1.1 tcp 1234 22 deny block-global-unzoned
+q trust junos-host 10.0.1.5 10.0.1.1 tcp 1234 22 deny block-global-unzoned
 end
 
 # ICMP type/code: junos-icmp-ping is echo-request (type 8) only. Row 2 (type
