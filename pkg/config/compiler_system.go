@@ -334,18 +334,8 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 	// `case "login"` arm.
 	var loginUserByName map[string]*LoginUser
 
-	// #17239: spans every `ntp` child of this `system` node. A span is the
-	// maximal connected run one normalisation can see (a lone `ntp` child, or
-	// consecutive `ntp` siblings whose bodies merge under one span root);
-	// later `ntp` blocks start a new span, so the #8436 first-occurrence
-	// gate applies per span, exactly as the raw FindChildren reader applied
-	// it per `ntp` node. See compileSystemNTP.
-	var ntpSpan *ntpSpan17239
 	systemChildren := expandResolvingRuns9792(node.Children, systemSchema9792()) // #9792: expand a lenient-path packed run (#9235).
 	for _, child := range systemChildren {                                       // #9792: expand a lenient-path packed run (#9235).
-		if child.Name() != "ntp" {
-			ntpSpan = nil
-		}
 		switch child.Name() {
 		case "host-name":
 			if len(child.Keys) >= 2 {
@@ -387,10 +377,7 @@ func compileSystem(node *Node, sys *SystemConfig, cfg *Config, opts compileOpts,
 			// shapes.
 			sys.NameServers = append(sys.NameServers, firewallMatchValues(child)...)
 		case "ntp":
-			if ntpSpan == nil {
-				ntpSpan = &ntpSpan17239{}
-			}
-			compileSystemNTP(child, sys, cfg, ntpSpan)
+			compileSystemNTP(child, sys, cfg)
 		case "login":
 			// #6957: allocate ONCE. This arm runs per `login` child, and two
 			// sibling `login { … }` blocks under one `system` are legal Junos —
@@ -2632,7 +2619,7 @@ func validateBackupRouterDst(cfg *Config, lenient bool) ([]string, error) {
 // compiled. The single switch below is the acceptance invariant: no
 // `FindChild*` walk of the raw `child` remains in this function, so a future
 // reader cannot re-diverge by choosing the other enumeration.
-func compileSystemNTP(child *Node, sys *SystemConfig, cfg *Config, span *ntpSpan17239) {
+func compileSystemNTP(child *Node, sys *SystemConfig, cfg *Config) {
 	// #6690: read EVERY server a `server` node carries, not just Keys[1].
 	// `system { ntp { server { a; b; } } }` puts one leaf child per server
 	// and leaves the node itself with Keys=["server"] only, so the old
@@ -2677,20 +2664,24 @@ func compileSystemNTP(child *Node, sys *SystemConfig, cfg *Config, span *ntpSpan
 	// `boot-server` heading the run — is unambiguous, and that is the chain
 	// this span covers.
 	stmts := hoistAndSplitRun8939(packedBodyChildren(child, refSystemNTP.resolve()), refSystemNTP.resolve())
-	// Group consecutive non-`multi` statements into a "group" that shares
-	// one first-occurrence scope; a `multi` source statement (`server` /
-	// `peer`) closes the current group and is processed alone, because its
-	// packed followers cannot be promoted (above). Chained statements
-	// hoisted from under a non-multi head (`boot-server`, `threshold` class)
-	// therefore share a span, while a `server` statement's own options are
-	// never gated against an unrelated earlier statement of the same span.
+	// Fresh-per-statement gate (not a span spanning statements): a
+	// `server`/`peer` statement is never gated against an unrelated
+	// earlier statement — each gets a fresh span — while consecutive
+	// non-`multi` statements (a hoisted chain link such as `boot-server`
+	// or `threshold`) share one group span. The per-call threshold
+	// (first `threshold` in this call wins) is unaffected. Within ONE
+	// statement, first-occurrence is computed ONCE per distinct address
+	// from the span state BEFORE the statement is noted, so a duplicate
+	// address inside one bracket list
+	// (`server [ 1.1.1.1 1.1.1.1 ] prefer;`) cannot overwrite its own
+	// first-occurrence flag and silently drop its options.
 	var groupSpan *ntpSpan17239
 	var thresholdNode *Node
 	for _, s := range stmts {
 		if s == nil {
 			continue
 		}
-		grp := span
+		var grp *ntpSpan17239
 		if s.Name() == "server" || s.Name() == "peer" {
 			grp = &ntpSpan17239{}
 			groupSpan = nil
@@ -2703,9 +2694,18 @@ func compileSystemNTP(child *Node, sys *SystemConfig, cfg *Config, span *ntpSpan
 		switch s.Name() {
 		case "server":
 			ntpServers, ntpOpts := ntpServerValues(s)
+			// Compute first-occurrence ONCE per distinct address from
+			// the pre-statement span state, THEN note every address:
+			// noting inside the loop lets a duplicate address in one
+			// statement overwrite its own flag false, skipping the
+			// option merge below and dropping prefer/key/version.
 			firstInSpan := make(map[string]bool, len(ntpServers))
 			for _, addr := range ntpServers {
-				firstInSpan[addr] = !grp.has("server", addr, 0)
+				if _, done := firstInSpan[addr]; !done {
+					firstInSpan[addr] = !grp.has("server", addr, 0)
+				}
+			}
+			for _, addr := range ntpServers {
 				grp.note("server", addr, 0)
 			}
 			for _, addr := range ntpServers {
@@ -2732,9 +2732,16 @@ func compileSystemNTP(child *Node, sys *SystemConfig, cfg *Config, span *ntpSpan
 			// as chrony `peer` directives. Packed tails (`ntp peer X
 			// prefer;`) ride Keys, expanded via ntpSourceValues.
 			peers, peerOpts := ntpSourceValues(s, "peer")
+			// Same once-per-distinct-address computation as the server
+			// arm above: duplicates in one statement must not overwrite
+			// their own first-occurrence flag.
 			firstInSpan := make(map[string]bool, len(peers))
 			for _, addr := range peers {
-				firstInSpan[addr] = !grp.has("peer", addr, 0)
+				if _, done := firstInSpan[addr]; !done {
+					firstInSpan[addr] = !grp.has("peer", addr, 0)
+				}
+			}
+			for _, addr := range peers {
 				grp.note("peer", addr, 0)
 			}
 			for _, addr := range peers {

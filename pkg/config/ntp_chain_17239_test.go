@@ -124,6 +124,45 @@ func TestNTPChainParity17239(t *testing.T) {
 		}
 	}
 
+	// A repeated address inside ONE bracket statement must keep its
+	// options: `server [ 1.1.1.1 1.1.1.1 ] prefer;` collapses to one
+	// server, but the duplicate must not clear its own first-occurrence
+	// flag and drop prefer/key/version (the fold blocker). Assert the
+	// full option + stripped key ids, not just the address.
+	repeatServerCfg := compileHierStrict(t,
+		`system { ntp { server [ 1.1.1.1 1.1.1.1 ] prefer; } }`)
+	if got := repeatServerCfg.System.NTPServers; len(got) != 1 || got[0] != "1.1.1.1" {
+		t.Errorf("repeat-server: NTPServers = %v, want [1.1.1.1]", got)
+	}
+	if opt := repeatServerCfg.System.NTPServerOptions["1.1.1.1"]; !opt.Prefer {
+		t.Errorf("repeat-server: NTPServerOptions[1.1.1.1] = %+v, want Prefer=true", opt)
+	}
+	repeatServerKeyCfg := compileHierStrict(t,
+		`system { ntp { server [ 1.1.1.1 1.1.1.1 ] key 5 version 4; } }`)
+	if opt := repeatServerKeyCfg.System.NTPServerOptions["1.1.1.1"]; opt.Version != 4 || opt.Key != 0 {
+		t.Errorf("repeat-server-key: NTPServerOptions[1.1.1.1] = %+v, want Version=4 Key=0 (stripped)", opt)
+	}
+	if got := repeatServerKeyCfg.System.NTPServerKeyIDs; len(got) != 1 || got[0] != 5 {
+		t.Errorf("repeat-server-key: NTPServerKeyIDs = %v, want [5]", got)
+	}
+	// Same for peer: repeated address in one bracket statement.
+	repeatPeerCfg := compileHierStrict(t,
+		`system { ntp { peer [ 2.2.2.2 2.2.2.2 ] prefer; } }`)
+	if got := repeatPeerCfg.System.NTPPeers; len(got) != 1 || got[0] != "2.2.2.2" {
+		t.Errorf("repeat-peer: NTPPeers = %v, want [2.2.2.2]", got)
+	}
+	if opt := repeatPeerCfg.System.NTPPeerOptions["2.2.2.2"]; !opt.Prefer {
+		t.Errorf("repeat-peer: NTPPeerOptions[2.2.2.2] = %+v, want Prefer=true", opt)
+	}
+	repeatPeerKeyCfg := compileHierStrict(t,
+		`system { ntp { peer [ 2.2.2.2 2.2.2.2 ] key 7 version 3; } }`)
+	if opt := repeatPeerKeyCfg.System.NTPPeerOptions["2.2.2.2"]; opt.Version != 3 || opt.Key != 0 {
+		t.Errorf("repeat-peer-key: NTPPeerOptions[2.2.2.2] = %+v, want Version=3 Key=0 (stripped)", opt)
+	}
+	if got := repeatPeerKeyCfg.System.NTPServerKeyIDs; len(got) != 1 || got[0] != 7 {
+		t.Errorf("repeat-peer-key: NTPServerKeyIDs = %v, want [7]", got)
+	}
+
 	// The prefer cell must also keep its OPTION, not just its address.
 	preferCfg := compileSetStrict(t, "set system ntp boot-server 3.3.3.3 server 1.1.1.1 prefer")
 	if opt := preferCfg.System.NTPServerOptions["1.1.1.1"]; !opt.Prefer {
