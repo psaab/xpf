@@ -42,7 +42,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::server::helpers::{
-    serve_connection_panic_counted, serve_one_catch_unwind, reinject_panic_should_log,
+    reinject_panic_should_log, serve_connection_panic_counted, serve_one_catch_unwind,
     REINJECT_HANDLER_PANICS,
 };
 use crate::server::ServerState;
@@ -164,7 +164,9 @@ pub(crate) use super::lifecycle::{accept_step, AcceptBackoff, AcceptDecision, Ac
 
 #[cfg(test)]
 mod accept_loop_tests_17123 {
-    use super::super::helpers::{serve_connection_panic_counted, REINJECT_HANDLER_PANICS};
+    use super::super::helpers::{
+        reinject_panic_should_log, serve_connection_panic_counted, REINJECT_HANDLER_PANICS,
+    };
     use std::sync::atomic::Ordering;
 
     /// #17123: a panicking reinject-style handler (DropConnection arm)
@@ -179,15 +181,16 @@ mod accept_loop_tests_17123 {
         let mut logged = 0usize;
         let mut last_payload = String::new();
         for _ in 0..20 {
-            // Mirror the loop arm: print only while the post-increment
-            // count is within the first 10.
+            // Mirror the loop arm exactly: the cap decision is the
+            // production helper applied to the post-increment counter,
+            // not a re-implemented `<= 10` comparison.
             match serve_connection_panic_counted(|| -> Result<(), String> {
                 panic!("17123 probe panic")
             }) {
                 Ok(()) => panic!("panicking handler must not return Ok"),
                 Err(payload) => {
                     last_payload = payload;
-                    if REINJECT_HANDLER_PANICS.load(Ordering::Relaxed) - before <= 10 {
+                    if reinject_panic_should_log(REINJECT_HANDLER_PANICS.load(Ordering::Relaxed)) {
                         logged += 1;
                     }
                 }
@@ -233,6 +236,28 @@ mod accept_loop_tests_17123 {
         assert!(
             !reinject_panic_should_log(u64::MAX),
             "far past cap stays silent"
+        );
+    }
+
+    /// #17123 fold (Rev18170Opus-2 F1): the production DropConnection
+    /// arm must actually CALL `reinject_panic_should_log` — the cells
+    /// above only prove the helper and the mirrored loop agree, so
+    /// bypassing the callsite (e.g. an inline `<= 10`) would stay
+    /// green. Textual bind, following the #9172 wiring-cell shape:
+    /// scan accept_loop.rs before its `#[cfg(test)]` module. Patterns
+    /// are built at runtime so this test's own text does not match.
+    #[test]
+    fn production_drop_connection_arm_calls_reinject_panic_should_log_17123() {
+        let file = include_str!("accept_loop.rs");
+        let prod = match file.find("#[cfg(test)]") {
+            Some(i) => &file[..i],
+            None => file,
+        };
+        let call = ["reinject_panic_should_log", "("].concat();
+        assert_eq!(
+            prod.matches(call.as_str()).count(),
+            1,
+            "production accept_loop.rs must call reinject_panic_should_log( exactly once (the DropConnection cap decision)"
         );
     }
 }
