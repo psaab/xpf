@@ -797,28 +797,80 @@ fn lease_join_parity_all_modes_17028() {
 }
 
 /// #17028 divergence-1: the claimed-port BIB cap-fail must bump
-/// `exhaustion_total`, exactly like the full-block branch. Pool of a
-/// single port (max_tracked == 1): mint one BIB, then a second flow
-/// for the SAME BIB hits the claimed-port join cap.
+/// `exhaustion_total`, exactly like the full-block branch. Ports
+/// 1024..=1027 give a tracked-flow cap of 4, but `block_size = 2` /
+/// `blocks_per_ip = 1` confine this subscriber to the block
+/// [1024, 1025]: the mint claims 1024, so every later same-BIB flow
+/// claims the one free port 1025, JOINS the existing lease, and
+/// returns the candidate (flows = 4 = cap). A fifth flow again
+/// claims 1025 and then hits the claimed-port `admit_one` cap-fail
+/// (the divergence-1 bump) — ports 1026/1027 sit outside the block
+/// and are never claimed, so the full-block exhaustion branch
+/// cannot fire instead.
 #[test]
 fn bib_claimed_port_cap_fail_bumps_exhaustion_17028() {
     let params = DeterministicV6 {
-        block_size: 32,
-        blocks_per_ip: 2,
+        block_size: 2,
+        blocks_per_ip: 1,
         ..BIB_PARAMS
     };
-    let alloc = PortAllocator::new(1, 1024, 1024);
+    let alloc = PortAllocator::new(1, 1024, 1027);
     let f1 = bib_flow(40000, "8.8.8.8");
-    alloc
+    let t1 = alloc
         .allocate_deterministic_v6_at(f1, &[POOL], params, SUB, 1_000, NatHolder::Untracked)
-        .expect("BIB mint on single-port pool");
+        .expect("BIB mint on block [1024, 1025]");
+    assert_eq!(t1.port, 1024, "mint claims the first block port");
     let before = alloc.snapshot().exhaustion_total;
-    let f2 = bib_flow(40000, "1.1.1.1");
+    // Three more same-BIB flows (distinct remotes, same subscriber
+    // transport): each claims the free port 1025, joins the lease,
+    // returns the candidate, and raises the tracked-flow count to
+    // the cap of 4 — none of them touches the exhaustion counter.
+    for (i, dst) in ["1.1.1.1", "2.2.2.2", "3.3.3.3"].iter().enumerate() {
+        let joined = alloc
+            .allocate_deterministic_v6_at(
+                bib_flow(40000, dst),
+                &[POOL],
+                params,
+                SUB,
+                2_000 + i as u64,
+                NatHolder::Untracked,
+            )
+            .expect("claimed-port join below the cap");
+        assert_eq!(
+            joined, t1,
+            "claimed-port join returns the lease's translated tuple"
+        );
+        assert!(
+            !alloc.debug_is_port_occupied(0, 1025),
+            "claimed-port join must return its temporary candidate 1025"
+        );
+        assert!(
+            alloc.debug_is_port_occupied(0, 1024),
+            "claimed-port join must leave the BIB's port 1024 occupied"
+        );
+        assert_eq!(
+            alloc.snapshot().exhaustion_total,
+            before,
+            "claimed-port join below the cap must not bump exhaustion_total"
+        );
+    }
+    assert_eq!(
+        snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost).6,
+        4,
+        "lease carries all four admitted flows (tracked-flow cap reached)"
+    );
+    // Fifth flow: claims 1025 again, then the claimed-port
+    // `admit_one` cap-fail refuses it.
+    let f5 = bib_flow(40000, "4.4.4.4");
     let err =
-        alloc.allocate_deterministic_v6_at(f2, &[POOL], params, SUB, 2_000, NatHolder::Untracked);
+        alloc.allocate_deterministic_v6_at(f5, &[POOL], params, SUB, 5_000, NatHolder::Untracked);
     assert!(
         err.is_err(),
-        "second BIB flow at cap must exhaust, got {err:?}"
+        "fifth BIB flow at the claimed-port cap must exhaust, got {err:?}"
+    );
+    assert!(
+        !alloc.debug_is_port_occupied(0, 1025),
+        "cap-failed claimed-port call must return its temporary candidate 1025"
     );
     assert_eq!(
         alloc.snapshot().exhaustion_total,
@@ -828,7 +880,7 @@ fn bib_claimed_port_cap_fail_bumps_exhaustion_17028() {
     // The lease itself is untouched by the refused join.
     assert_eq!(
         snapshot_fields(&alloc, &f1, PersistentNatPermit::AnyRemoteHost).6,
-        1
+        4
     );
 }
 
