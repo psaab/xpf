@@ -113,3 +113,18 @@ func TestSyncAndArmHoldsRecompute17814(t *testing.T) {
 		t.Fatal("overlapping hold weight must still read as monitor-debt-derived")
 	}
 }
+
+func TestReservedHoldKeyExplicit255Resigns17814(t *testing.T) {
+	for _, key := range []string{DataplaneArmMonitorIface, startupSyncHoldMonitorIface} {
+		t.Run(key, func(t *testing.T) {
+			m := newSyncArmCompositionManager17814(t, "")
+			m.SetMonitorWeight(1, key, true, maxRedundancyGroupWeight)
+			if got := m.GroupState(1).Weight; got != 0 {
+				t.Fatalf("explicit 255 debt on reserved key %q: weight = %d, want 0", key, got)
+			}
+			if m.IsLocalPrimary(1) {
+				t.Fatalf("explicit 255 debt on reserved key %q: lone node still primary at weight 0", key)
+			}
+		})
+	}
+}

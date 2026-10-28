@@ -1171,12 +1171,10 @@ func (m *Manager) recalcWeight(rg *RedundancyGroupState) {
 }
 
 // monitorDebtTotalLocked returns effective monitor debt for an RG. The
-// dataplane-arm and startup-sync holds share one floor-sized penalty instead
-// of adding together: both represent the same "not ready to take over" state,
-// and their overlap must not resign an otherwise healthy standalone node.
-// Every other monitor debt remains additive, so a real independent failure
-// (including helper-crash-loop debt) can still drive the effective weight to 0.
-// Caller must hold m.mu.
+// dataplane-arm and startup-sync holds share the larger of their debts instead
+// of adding together: their normal floor-sized costs bottom out at weight 1,
+// while an explicit full debt (255) on either reserved key still resigns the
+// RG. Every other monitor debt remains additive. Caller must hold m.mu.
 func (m *Manager) monitorDebtTotalLocked(rg *RedundancyGroupState) int {
 	totalLost, holdLost := 0, 0
 	for _, iface := range rg.MonitorFails {
@@ -1189,9 +1187,6 @@ func (m *Manager) monitorDebtTotalLocked(rg *RedundancyGroupState) int {
 		default:
 			totalLost += weight
 		}
-	}
-	if holdLost > DataplaneArmMonitorCost {
-		holdLost = DataplaneArmMonitorCost
 	}
 	return totalLost + holdLost
 }
