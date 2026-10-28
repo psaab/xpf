@@ -63,10 +63,6 @@ import (
 // speculative scope that produced the withdrawn false-reject. Leaving it out is
 // a non-regression.
 
-// expandedDupNodeViews is the set of cluster-node `${node}` bindings the gate
-// expands the candidate under. Both are evaluated on both physical nodes.
-var expandedDupNodeViews = []int{0, 1}
-
 // dupNameScannersExpanded is the scanner set re-run on the expanded tree.
 //
 // It is a slice rather than three inline calls so a fourth pre-expansion
@@ -78,22 +74,6 @@ var dupNameScannersExpanded = []func(*ConfigTree, bool) ([]string, error){
 	validateDuplicateNATRuleNamesAST,
 	validateDuplicateNATRuleSetNamesAST,
 	validateSourceNATDuplicateContextAST,
-}
-
-// expandCandidateForNode returns a group-expanded CLONE of tree under the given
-// cluster node's `${node}` binding, or nil when that node's expansion fails.
-//
-// A per-node expansion error is non-fatal here and contributes the empty view:
-// the real path's own ExpandGroups (compiler.go) owns reporting a broken
-// apply-groups reference, and this gate must not turn a diagnostic it does not
-// own into a second, differently-worded rejection.
-func expandCandidateForNode(tree *ConfigTree, nodeID int) *ConfigTree {
-	clone := tree.Clone()
-	vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-	if err := clone.ExpandGroupsWithVars(vars); err != nil {
-		return nil
-	}
-	return clone
 }
 
 // validateDuplicateNamesExpandedAST is the post-expansion half of the
@@ -128,11 +108,14 @@ func validateDuplicateNamesExpandedAST(tree *ConfigTree, lenient bool, preWarnin
 	var warnings []string
 	emitted := map[string]bool{}
 
-	for _, nodeID := range expandedDupNodeViews {
-		clone := expandCandidateForNode(tree, nodeID)
-		if clone == nil {
-			continue
-		}
+	// A per-node expansion error is non-fatal here and contributes the
+	// empty view (effectiveNodeViews / gateNodeView, #17222): the real
+	// path's own ExpandGroups (compiler.go) owns reporting a broken
+	// apply-groups reference, and this gate must not turn a diagnostic
+	// it does not own into a second, differently-worded rejection.
+	// No generic fallback view: the pre-expansion scanners already
+	// cover the raw top-level tree.
+	for _, clone := range effectiveNodeViews(tree, gateNodeViewOpts{}) {
 		for _, scan := range dupNameScannersExpanded {
 			// The scanner is always run in LENIENT mode so it returns EVERY
 			// finding rather than stopping at the first. The strict verdict is

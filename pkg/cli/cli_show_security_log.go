@@ -219,23 +219,21 @@ func (c *CLI) showSecurityAlarms(args []string) error {
 
 	// Screen drop alarms — any non-zero screen counter indicates detected attacks
 	if c.dp != nil && c.dp.IsLoaded() {
-		// #3345: track a counter-read failure so a degraded counter bridge
-		// is reported as a warning rather than masquerading as "no alarms".
-		var readErr error
-		readCtr := func(idx uint32) uint64 {
-			v, err := c.dp.ReadGlobalCounter(idx)
-			if err != nil && readErr == nil {
-				readErr = err
-			}
-			return v
+		// #17193: shared snapshot classification. #3345: a genuine failure
+		// still warns; unavailable screen counters raise no alarm and no
+		// warning.
+		indexes := make([]uint32, 0, len(dataplane.ScreenReasonCounters))
+		for i := range dataplane.ScreenReasonCounters {
+			indexes = append(indexes, dataplane.ScreenReasonCounters[i].Index)
 		}
+		snap := dataplane.ReadGlobalCounters(c.dp, indexes...)
 		// #3343: iterate the shared screen-reason table so port-scan, ip-sweep,
 		// and session-limit raise alarms too (they were omitted before, so an
 		// active scan/sweep/session-limit attack read "No security alarms
 		// currently active"), and the reason set matches the other surfaces.
 		for i := range dataplane.ScreenReasonCounters {
 			rc := &dataplane.ScreenReasonCounters[i]
-			val := readCtr(rc.Index)
+			val, _ := snap.Value(rc.Index)
 			if val > 0 {
 				alarmCount++
 				if detail {
@@ -243,8 +241,8 @@ func (c *CLI) showSecurityAlarms(args []string) error {
 				}
 			}
 		}
-		if readErr != nil {
-			fmt.Printf("warning: screen counter read failed (alarms may be incomplete): %v\n", readErr)
+		if snap.Err != nil {
+			fmt.Printf("warning: screen counter read failed (alarms may be incomplete): %v\n", snap.Err)
 		}
 	}
 

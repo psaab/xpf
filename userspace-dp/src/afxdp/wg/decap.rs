@@ -53,9 +53,8 @@
 
 use super::super::*;
 use super::WG_TYPE_DATA;
-use crate::afxdp::gre::{
-    outer_datagram_end, outer_ecn_bits, packet_trimmed_len, parse_inner_protocol_and_offsets,
-};
+use crate::afxdp::frame::{packet_trimmed_len, parse_inner_protocol_and_offsets};
+use crate::afxdp::gre::{outer_datagram_end, outer_ecn_bits};
 
 /// A decapsulated WireGuard transport-data record, ready to replace its outer
 /// frame for the rest of the worker's pass.
@@ -70,6 +69,7 @@ pub(in crate::afxdp) struct WgDecapPacket {
     /// inferred: `try_decap` demuxes the session from `hdr.receiver_index`
     /// before any AEAD work and the record is authenticated by the time the
     /// outcome is built.
+    #[expect(dead_code, reason = "proven peer identity retained for test assertions (#17212)")]
     pub(in crate::afxdp) peer_pubkey: [u8; 32],
 }
 
@@ -288,7 +288,7 @@ fn wg_endpoint_for_listen_port(
                 cross_family_specific
             };
             if endpoint.wg_listen_port == dst_port
-                && tunnel_mode_kind(&endpoint.mode) == TunnelKind::WireGuard
+                && endpoint.kind == TunnelKind::WireGuard
                 && transport_instance_of_table(&endpoint.transport_table) == ingress_instance
                 && source_matches
                 && wg_outer_zone_matches(forwarding, endpoint, ingress_ifindex, dst_ip)
@@ -434,6 +434,7 @@ pub(in crate::afxdp) fn is_wg_fragment_candidate(
 /// this integration as its consumer since it was written: "No `vec![]` in
 /// encap/decap." Allocating per packet on the decap path would be the hot-path
 /// allocation `docs/engineering-style.md` treats as a defect by default.
+#[cfg(test)]
 pub(in crate::afxdp) fn try_wg_decap_from_frame(
     frame: &[u8],
     meta: UserspaceDpMeta,

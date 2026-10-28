@@ -17,7 +17,7 @@
 
 #![allow(unused_imports)]
 
-use super::super::gre::parse_inner_protocol_and_offsets;
+use super::parse_inner_protocol_and_offsets;
 use super::*;
 use crate::session::SHIM_PROTO_FRAGMENT_NO_L4;
 

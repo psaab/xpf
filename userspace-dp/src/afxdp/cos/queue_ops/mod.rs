@@ -41,10 +41,9 @@ mod push;
 // #1763: `cos_queue_pop_front` / `cos_queue_pop_front_with_cap` are now
 // fused out of production (peek_min_bucket + pop_known_bucket). They are
 // retained as the reference single-pop API used by tests (incl. the
-// fused-vs-reference differential oracle). The symbols still exist in
-// non-test builds — `allow(unused_imports)` only suppresses the dead
-// re-export lint there; it does not conditionally compile them out.
-#[cfg_attr(not(test), allow(unused_imports))]
+// fused-vs-reference differential oracle). #17195: they are `#[cfg(test)]`
+// in pop.rs, so the re-export is test-only too.
+#[cfg(test)]
 pub(in crate::afxdp) use pop::{cos_queue_pop_front, cos_queue_pop_front_with_cap};
 pub(in crate::afxdp) use pop::{cos_queue_pop_front_no_snapshot, cos_queue_pop_known_bucket};
 pub(in crate::afxdp) use push::{cos_queue_push_back, cos_queue_push_front};

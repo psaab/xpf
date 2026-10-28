@@ -45,7 +45,7 @@ use std::sync::atomic::Ordering;
 /// (the four production mutation sites inline the same logic to
 /// share their existing `as_mut` borrow). Future call sites without
 /// such a borrow MUST use this helper.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 #[inline]
 pub(in crate::afxdp) fn bump_active_flow_buckets(queue: &mut CoSQueueRuntime) {
     // Capture worker_id BEFORE the flow_fair_state mutable borrow,
@@ -77,7 +77,7 @@ pub(in crate::afxdp) fn bump_active_flow_buckets(queue: &mut CoSQueueRuntime) {
 /// No-op if the queue has no flow_fair_state.
 ///
 /// See module-level doc for the dead-code rationale.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "#17195: dead in every build checked (release and --tests stripped probes in docs/log/17195.md); retained deliberately, so expect fires if a caller appears and the item should then lose this attribute instead of regaining allow(dead_code)")]
 #[inline]
 pub(in crate::afxdp) fn unbump_active_flow_buckets(queue: &mut CoSQueueRuntime) {
     let worker_id = queue.v_min.worker_id as usize;
