@@ -122,7 +122,7 @@ func pricedPathSet15995(t *testing.T, tree *ConfigTree, path []string, candidate
 	out := map[string]bool{}
 	for cand := range candidates {
 		cfg := cfg15995(t, "", "^"+cand+"$")
-		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", tree); err != nil {
+		if err := AuthorizeConfigShowPathRendered(cfg, "limited", path, "", []*ConfigTree{tree}); err != nil {
 			out[cand] = true
 		}
 	}
