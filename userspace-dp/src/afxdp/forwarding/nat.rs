@@ -97,7 +97,6 @@ pub(in crate::afxdp) fn match_source_nat_for_flow(
 }
 
 #[cfg(test)]
-#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn match_source_nat_for_flow_result(
     forwarding: &ForwardingState,
     ingress_ifindex: i32,
