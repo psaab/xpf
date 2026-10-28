@@ -199,6 +199,94 @@ func TestRouteFilterDisjointByteIdentical_16762(t *testing.T) {
 	}
 }
 
+// TestRouteFilterDisjointUnequalLengthsByteIdentical_17824: #16762's
+// acceptance promised single/disjoint lists render byte-identically,
+// but the unconditional descending-plen sort reordered disjoint
+// unequal-length filters and re-assigned their seq numbers, causing
+// an upgrade-time config diff. Disjoint bases can never fall through to
+// one another, so no longest-match layout is needed: preserve authored
+// order, original sequence slots, and no stop deny in both v4 authoring
+// orders and one v6 case. The nested control proves longest-match
+// layout still applies where a base truly contains another.
+func TestRouteFilterDisjointUnequalLengthsByteIdentical_17824(t *testing.T) {
+	name := inlinePrefixListName("P", "P", "t1", "")
+	cases := []struct {
+		label string
+		rfs   []*config.RouteFilter
+		want  []string
+	}{
+		{
+			label: "v4 broad authored first",
+			rfs: []*config.RouteFilter{
+				{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+				{Prefix: "172.16.0.0/12", MatchType: "exact"},
+				{Prefix: "192.168.0.0/24", MatchType: "exact"},
+			},
+			want: []string{
+				"ip prefix-list " + name + " seq 5 permit 10.0.0.0/8 le 32",
+				"ip prefix-list " + name + " seq 10 permit 172.16.0.0/12",
+				"ip prefix-list " + name + " seq 15 permit 192.168.0.0/24",
+			},
+		},
+		{
+			label: "v4 specific authored first stays authored",
+			rfs: []*config.RouteFilter{
+				{Prefix: "172.16.0.0/12", MatchType: "exact"},
+				{Prefix: "10.0.0.0/8", MatchType: "orlonger"},
+			},
+			want: []string{
+				"ip prefix-list " + name + " seq 5 permit 172.16.0.0/12",
+				"ip prefix-list " + name + " seq 10 permit 10.0.0.0/8 le 32",
+			},
+		},
+		{
+			label: "v6 disjoint unequal lengths",
+			rfs: []*config.RouteFilter{
+				{Prefix: "2001:db8::/32", MatchType: "orlonger"},
+				{Prefix: "2001:db9:1::/48", MatchType: "exact"},
+			},
+			want: []string{
+				"ipv6 prefix-list " + name + " seq 5 permit 2001:db8::/32 le 128",
+				"ipv6 prefix-list " + name + " seq 10 permit 2001:db9:1::/48",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			got := New().generatePolicyOptions(rfPolicy16762(tc.rfs...))
+			lines := prefixListLines16762(t, got, name)
+			if len(lines) != len(tc.want) {
+				t.Fatalf("disjoint list must stay byte-identical (no stop deny): got %d entries, want %d:\n%s", len(lines), len(tc.want), got)
+			}
+			for i := range tc.want {
+				if lines[i] != tc.want[i] {
+					t.Errorf("line %d = %q, want historical %q", i, lines[i], tc.want[i])
+				}
+			}
+		})
+	}
+	t.Run("nested control still longest-match", func(t *testing.T) {
+		got := New().generatePolicyOptions(rfPolicy16762(
+			&config.RouteFilter{Prefix: "192.168.0.0/16", MatchType: "orlonger"},
+			&config.RouteFilter{Prefix: "192.168.100.0/24", MatchType: "exact"},
+		))
+		lines := prefixListLines16762(t, got, name)
+		want := []string{
+			"ip prefix-list " + name + " seq 5 permit 192.168.100.0/24",
+			"ip prefix-list " + name + " seq 10 deny 192.168.100.0/24 le 32",
+			"ip prefix-list " + name + " seq 15 permit 192.168.0.0/16 le 32",
+		}
+		if len(lines) != len(want) {
+			t.Fatalf("nested control: got %d entries, want %d:\n%s", len(lines), len(want), got)
+		}
+		for i := range want {
+			if lines[i] != want[i] {
+				t.Errorf("line %d = %q, want %q", i, lines[i], want[i])
+			}
+		}
+	})
+}
+
 // TestRouteFilterSingleAndSameBaseByteIdentical_16762 pins the
 // no-change cases: a single filter, and two filters on the SAME base
 // (hierarchical `from` condition copies, #11779), render exactly the

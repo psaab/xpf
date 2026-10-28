@@ -33,7 +33,7 @@ code-motion — functions moved verbatim, visibility preserved
 | `ipsec.rs` | IPsec traffic classification + inbound admission (`is_ipsec_traffic` (`#[inline]`), `IpsecAdmissionClass`, `classify_ipsec_admission`, the #6471 live-IKE-exchange table `IkeExchangeTable`/`SharedIkeExchangeTable` + SPI extractors + outbound-seed helper). |
 | `pbr.rs` | Policy-based routing: `ingress_route_table_override` and its `PbrRejectSink` / `RouteOverride` support types. |
 | `local_delivery.rs` | Host-local delivery session caching on session-miss (`should_cache_local_delivery_session_on_miss`, `install_helper_local_session_on_miss`, `ingress_interface_local_resolution*`, the `LOCAL_DELIVERY_IFINDEX0` counter). |
-| `tunnel.rs` | Tunnel outer-header forwarding resolution (`resolve_tunnel_outer`, `resolve_tunnel_forwarding_resolution`, `outer_neighbor_ifindex`) and neighbor-entry lookup/parse (`lookup_neighbor_entry`, `parse_neighbor_entries`). |
+| `tunnel.rs` | Tunnel outer-header forwarding resolution (`resolve_tunnel_outer`, `resolve_tunnel_forwarding_resolution`, `outer_neighbor_ifindex`) and neighbor-entry lookup (`lookup_neighbor_entry`). |
 | `host_inbound.rs` | #3070 host-inbound-traffic admission: classifies a zone's Junos `system-services` / `protocols` tokens into a `ZoneHostInbound` set and provides `host_inbound_admits` for the local-delivery path. |
 | `tests.rs` | Co-located unit tests covering classify, FIB lookup, multi-table next-table leaking. |
 
@@ -319,8 +319,8 @@ next-hops, preference 0). The wire specimen lives in
       skipped AND counted by the `NEIGHBOR_UNKNOWN_STATE_SKIPPED`
       diagnostic atomic (the pre-fix denylist installed every
       unrecognized state that carried a parseable IP+MAC). The
-      snapshot-refresh manager-key set, the `update_neighbors` handler,
-      and `parse_neighbor_entries` share the same gate so an installed
+      snapshot-refresh manager-key set and the `update_neighbors` handler
+      share the same gate so an installed
       neighbor is never pruned as a stale key.
     - **Authoritative empty replace clears (#5864).** An
       `update_neighbors` request with `neighbor_replace=true` is an

@@ -727,7 +727,7 @@ impl CookieChecker {
         self.rng_fail
             .store(fail, std::sync::atomic::Ordering::Relaxed);
         if fail {
-            let mut s = self.secret.lock().unwrap();
+            let mut s = crate::sync_util::lock_tolerant(&self.secret);
             s.secure = false;
             *s.current = [0u8; 32];
             *s.previous = [0u8; 32];
@@ -740,7 +740,7 @@ impl CookieChecker {
     /// currently tracked in the per-source handshake-admission table.
     #[cfg(test)]
     pub(crate) fn handshake_source_table_len_for_test(&self) -> usize {
-        self.per_source.lock().unwrap().handshake_buckets.len()
+        crate::sync_util::lock_tolerant(&self.per_source).handshake_buckets.len()
     }
 
     /// #9908 test hook: whether a specific source has a live handshake

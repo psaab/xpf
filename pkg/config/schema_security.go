@@ -100,7 +100,7 @@ func sessionLogModeLeaf(desc string) *schemaNode {
 		valueExamples: securitySessionLogModes,
 		validator:     ValidateEnum(securitySessionLogModes),
 		placeholder:   "<session-init|session-close>",
-		children:      nil,
+		children:      nil, refuseNonLeafBlockChildren: true,
 	}
 }
 
@@ -534,12 +534,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			"policy": {desc: "Policy name", args: 1, valueHint: ValueHintPolicyName, placeholder: "<policy-name>", children: map[string]*schemaNode{
 				"description": {desc: "Policy description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 				"match": {desc: "Match criteria", children: map[string]*schemaNode{
-					"source-address":               {desc: "Source address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
-					"destination-address":          {desc: "Destination address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
+					"source-address":               {desc: "Source address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil, refuseNonLeafBlockChildren: true},
+					"destination-address":          {desc: "Destination address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil, refuseNonLeafBlockChildren: true},
 					"source-address-excluded":      {desc: "Match all sources except source-address", children: nil},
 					"destination-address-excluded": {desc: "Match all destinations except destination-address", children: nil},
 					"application-excluded":         {desc: "Negate application match", children: nil},
-					"application":                  {desc: "Application", args: 1, multi: true, valueHint: ValueHintPolicyApp, placeholder: "<application>", children: nil},
+					"application":                  {desc: "Application", args: 1, multi: true, valueHint: ValueHintPolicyApp, placeholder: "<application>", children: nil, refuseNonLeafBlockChildren: true},
 				}},
 				"then": {desc: "Action", children: policyThenSchemaChildren()},
 				// #3117: `scheduler-name <name>` binds a class-of-service
@@ -566,12 +566,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			"policy": {desc: "Policy name", args: 1, valueHint: ValueHintPolicyName, placeholder: "<policy-name>", children: map[string]*schemaNode{
 				"description": {desc: "Policy description", args: 1, scalar: true, placeholder: "<text>", children: nil},
 				"match": {desc: "Match criteria", children: map[string]*schemaNode{
-					"source-address":               {desc: "Source address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
-					"destination-address":          {desc: "Destination address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil},
+					"source-address":               {desc: "Source address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil, refuseNonLeafBlockChildren: true},
+					"destination-address":          {desc: "Destination address", args: 1, multi: true, valueHint: ValueHintPolicyAddress, placeholder: "<address>", children: nil, refuseNonLeafBlockChildren: true},
 					"source-address-excluded":      {desc: "Match all sources except source-address", children: nil},
 					"destination-address-excluded": {desc: "Match all destinations except destination-address", children: nil},
 					"application-excluded":         {desc: "Negate application match", children: nil},
-					"application":                  {desc: "Application", args: 1, multi: true, valueHint: ValueHintPolicyApp, placeholder: "<application>", children: nil},
+					"application":                  {desc: "Application", args: 1, multi: true, valueHint: ValueHintPolicyApp, placeholder: "<application>", children: nil, refuseNonLeafBlockChildren: true},
 					// #3148: a Junos global policy can carry optional
 					// from-zone/to-zone match context so one global policy
 					// applies to a chosen zone pair (or one wildcard side)
@@ -591,8 +591,8 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 					// #4415 L12 `scalar: true` fail-closed reject (which
 					// dropped every zone past the first) with real Junos
 					// multi-zone parity.
-					"from-zone": {desc: "Restrict this global policy to packets from these zones", args: 1, multi: true, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: nil},
-					"to-zone":   {desc: "Restrict this global policy to packets to these zones", args: 1, multi: true, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: nil},
+					"from-zone": {desc: "Restrict this global policy to packets from these zones", args: 1, multi: true, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: nil, refuseNonLeafBlockChildren: true},
+					"to-zone":   {desc: "Restrict this global policy to packets to these zones", args: 1, multi: true, valueHint: ValueHintZoneName, placeholder: "<zone-name>", children: nil, refuseNonLeafBlockChildren: true},
 				}},
 				"then": {desc: "Action", children: policyThenSchemaChildren()},
 				// #3117: scheduler-name on global policies — same compiler +
@@ -856,11 +856,11 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"rule": {desc: "Source NAT rule name", args: 1, placeholder: "<rule-name>", children: map[string]*schemaNode{
 					"match": {desc: "Match criteria", closedWorld: true, children: map[string]*schemaNode{
 						"source-address":           {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
-						"source-address-name":      {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil},
+						"source-address-name":      {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
 						"destination-address":      {desc: "Destination address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
-						"destination-address-name": {desc: "Destination address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil},
+						"destination-address-name": {desc: "Destination address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
 						"destination-port":         {desc: "Destination port to match", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"application":              {desc: "Application to match", args: 1, multi: true, placeholder: "<application>", children: nil},
+						"application":              {desc: "Application to match", args: 1, multi: true, placeholder: "<application>", children: nil, refuseNonLeafBlockChildren: true},
 					}},
 					// #14626: the rule-level `then source-nat pool <name>
 					// persistent-nat { permit|inactivity-timeout }` tail is now
@@ -956,12 +956,12 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				"rule": {desc: "Destination NAT rule name", args: 1, placeholder: "<rule-name>", children: map[string]*schemaNode{
 					"match": {desc: "Match criteria", closedWorld: true, children: map[string]*schemaNode{
 						"source-address":           {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
-						"source-address-name":      {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil},
+						"source-address-name":      {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
 						"destination-address":      {desc: "Destination address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
-						"destination-address-name": {desc: "Destination address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil},
+						"destination-address-name": {desc: "Destination address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
 						"destination-port":         {desc: "Destination port or range to match", args: 1, multi: true, groupReplace: true, placeholder: "<port>", children: nil},
-						"protocol":                 {desc: "IP protocol to match", args: 1, multi: true, placeholder: "<protocol>", children: nil},
-						"application":              {desc: "Application to match", args: 1, multi: true, placeholder: "<application>", children: nil},
+						"protocol":                 {desc: "IP protocol to match", args: 1, multi: true, placeholder: "<protocol>", children: nil, refuseNonLeafBlockChildren: true},
+						"application":              {desc: "Application to match", args: 1, multi: true, placeholder: "<application>", children: nil, refuseNonLeafBlockChildren: true},
 					}},
 					// #4313 PR-B — FIRST production closed-world subtree flip.
 					// The destination-NAT rule then-action is LEAF-COMPLETE: the
@@ -1085,7 +1085,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 				}},
 				"match": {desc: "Match criteria", closedWorld: true, children: map[string]*schemaNode{
 					"source-address":      {desc: "Source address prefix to match", args: 1, multi: true, placeholder: "<prefix>", children: nil},
-					"source-address-name": {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil},
+					"source-address-name": {desc: "Source address book entry to match", args: 1, multi: true, placeholder: "<address-name>", children: nil, refuseNonLeafBlockChildren: true},
 				}},
 				"prefix":      {desc: "NAT64 IPv6 prefix (must be /96)", args: 1, placeholder: "<ipv6-prefix>", children: nil},
 				"source-pool": {desc: "Source NAT pool for the translated IPv4 source", args: 1, placeholder: "<pool-name>", children: nil},
@@ -1463,7 +1463,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			// FindChildren (compiler_security.go). `multi: true` keeps each
 			// `set ... flag <flag>` a distinct sibling instead of replacing
 			// the previous one.
-			"flag": {desc: "Trace flag (e.g. basic-datapath, session)", args: 1, multi: true, placeholder: "<flag>", children: nil},
+			"flag": {desc: "Trace flag (e.g. basic-datapath, session)", args: 1, multi: true, placeholder: "<flag>", children: nil, refuseNonLeafBlockChildren: true},
 			"packet-filter": {desc: "Trace packet filter name", args: 1, placeholder: "<filter-name>", children: map[string]*schemaNode{
 				"source-prefix":      {desc: "Source prefix to trace", args: 1, placeholder: "<prefix>", children: nil},
 				"destination-prefix": {desc: "Destination prefix to trace", args: 1, placeholder: "<prefix>", children: nil},
@@ -1577,7 +1577,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			// proposal for phase-1 negotiation. Without multi the flat-set
 			// path strands every reference past the first as a child node and
 			// the compiler dropped them (crypto-negotiation narrowing).
-			"proposals": {desc: "IKE proposal reference(s)", args: 1, multi: true, placeholder: "<proposal-name>", children: nil},
+			"proposals": {desc: "IKE proposal reference(s)", args: 1, multi: true, placeholder: "<proposal-name>", children: nil, refuseNonLeafBlockChildren: true},
 			// #4297 (V-1): predefined IKE proposal-set shorthand. Typed so a
 			// typo (`proposal-set standrd`) fails closed at commit; the
 			// compiler (expandIKEProposalSets) expands a valid keyword into
@@ -1716,7 +1716,7 @@ var schemaSecurity = &schemaNode{desc: "Security configuration", closedWorld: tr
 			}},
 			// multi (#3904): mirror of the IKE proposals leaf — offer every
 			// listed ESP proposal for phase-2 negotiation.
-			"proposals": {desc: "IPsec proposal reference(s)", args: 1, multi: true, placeholder: "<proposal-name>", children: nil},
+			"proposals": {desc: "IPsec proposal reference(s)", args: 1, multi: true, placeholder: "<proposal-name>", children: nil, refuseNonLeafBlockChildren: true},
 			// #4297 (V-1): predefined IPsec (ESP) proposal-set shorthand;
 			// mirror of the IKE policy leaf (expandIPsecProposalSets).
 			"proposal-set": {desc: "Predefined IPsec proposal set", args: 1, placeholder: "<set>",

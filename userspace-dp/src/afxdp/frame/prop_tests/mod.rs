@@ -49,6 +49,7 @@ use proptest::prelude::*;
 
 mod inspect;
 mod oracle;
+mod nat_l4_rule_parity_17250;
 mod rewrite;
 mod segment;
 mod strategies;

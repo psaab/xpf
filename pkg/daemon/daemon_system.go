@@ -298,6 +298,11 @@ func (d *Daemon) systemSyslogCachedClient(key, fp string) *logging.SyslogClient 
 	if d.systemSyslogBuiltFP[key] != fp {
 		return nil
 	}
+	if c == nil || c.Closed() {
+		delete(d.systemSyslogBuiltByKey, key)
+		delete(d.systemSyslogBuiltFP, key)
+		return nil
+	}
 	return c
 }
 
@@ -321,6 +326,28 @@ func (d *Daemon) systemSyslogForgetCached(keep map[string]bool) {
 	defer d.systemSyslogBuiltMu.Unlock()
 	for key := range d.systemSyslogBuiltByKey {
 		if keep == nil || !keep[key] {
+			delete(d.systemSyslogBuiltByKey, key)
+			delete(d.systemSyslogBuiltFP, key)
+		}
+	}
+}
+
+// systemSyslogForgetCachedNotInstalled evicts entries whose clients are
+// terminally closed or whose identity the handler no longer owns. The identity
+// check alone is not sufficient: SetClients closes even pointers reinstalled
+// in the new set, and a closed client's sends can never recover.
+func (d *Daemon) systemSyslogForgetCachedNotInstalled(installed []*logging.SyslogClient) {
+	d.systemSyslogBuiltMu.Lock()
+	defer d.systemSyslogBuiltMu.Unlock()
+	for key, cached := range d.systemSyslogBuiltByKey {
+		stillInstalled := false
+		for _, client := range installed {
+			if client == cached {
+				stillInstalled = true
+				break
+			}
+		}
+		if cached == nil || cached.Closed() || !stillInstalled {
 			delete(d.systemSyslogBuiltByKey, key)
 			delete(d.systemSyslogBuiltFP, key)
 		}
@@ -1797,7 +1824,7 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 			}
 			key := systemSyslogHostKey(host)
 			c, present := d.systemSyslogBuiltByKey[key]
-			if !present || d.systemSyslogBuiltFP[key] == "" {
+			if !present || c == nil || c.Closed() || d.systemSyslogBuiltFP[key] == "" {
 				fpOK = false
 				break
 			}
@@ -1851,6 +1878,9 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 	// on this apply; seeding records the per-host association only
 	// and does not keep a seeded client alive across the swap.
 	d.systemSyslogSeedCacheIfEmpty(cfg)
+	// The gate can fail open after a foreign handler replacement or shutdown
+	// drain. Only still-installed clients are eligible for per-host reuse.
+	d.systemSyslogForgetCachedNotInstalled(d.slogHandler.Clients())
 
 	var clients []*logging.SyslogClient
 	skippedSystem15231 := 0
@@ -1876,15 +1906,13 @@ func (d *Daemon) applySystemSyslog(cfg *config.Config) {
 			skippedSystem15231++
 			slog.Warn("failed to create system syslog client",
 				"host", host.Address, "err", err)
-			// A failed first construction leaves nothing worth
-			// preserving — clear any stale adoption for this key so
-			// the next apply re-dials rather than serving "".
-			keyFP := fp
+			// The failed build omits this key from the preserving install, which
+			// closes any previously cached client for it. Evict that cache entry
+			// regardless of its old fingerprint: a later revert must dial a new
+			// client instead of resurrecting the now-closed pointer.
 			d.systemSyslogBuiltMu.Lock()
-			if d.systemSyslogBuiltFP[key] == keyFP {
-				delete(d.systemSyslogBuiltByKey, key)
-				delete(d.systemSyslogBuiltFP, key)
-			}
+			delete(d.systemSyslogBuiltByKey, key)
+			delete(d.systemSyslogBuiltFP, key)
 			d.systemSyslogBuiltMu.Unlock()
 			continue
 		}
