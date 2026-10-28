@@ -513,7 +513,7 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 		if innerRendered, innerChanged := redactEmbeddedCommand(tokens[0], fingerprint); innerChanged {
 			return innerRendered, true
 		}
-		return tokens[0], false
+		return cmd, false
 	}
 	changed := redactEmbeddedTokens(tokens, fingerprint)
 	if !lexOK && !changed {
