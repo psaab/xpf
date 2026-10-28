@@ -640,7 +640,7 @@ func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
 // link-local NAs and the pool GARPs/NAs that pkg/vrrp never sends (it
 // owns only the VIPs). Gated on continued mastership via rgState.
 // Producers reach this ONLY through convergeLegacyNonVIPAnnounce, which
-// owns the per-epoch exactly-once claim.
+// owns the exactly-once claim for the activation generation.
 func (d *Daemon) sendVRRPModeNonVIPAnnounce(rgID int) {
 	if d.isNoRethVRRP() {
 		return

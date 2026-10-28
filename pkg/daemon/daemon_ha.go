@@ -756,8 +756,9 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// this cluster input may be the one that flipped desired; the
 		// ForceRGMaster above then yields Changed=false in
 		// handleVRRPEvent, so the VRRP-arm announce never fires. Run
-		// the level-triggered converger here too: it claims the epoch
-		// exactly once, and whichever producer runs first wins.
+		// the level-triggered converger here too: it claims the
+		// activation generation exactly once, and whichever producer
+		// runs first wins.
 		d.convergeLegacyNonVIPAnnounce(ev.GroupID)
 	} else {
 		// Demotion: run preflight and resign VRRP BEFORE

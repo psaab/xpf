@@ -459,10 +459,10 @@ func TestNonVIPAnnounceLifecycle17052(t *testing.T) {
 	}
 }
 
-// TestNonVIPAnnounceProducerRace17052 races the three producers
-// (cluster arm, VRRP arm, reconcile converger) plus deactivation clears
-// against one activation: exactly one burst may be claimed/sent for the
-// generation no matter how the producers interleave. Run under -race
+// TestNonVIPAnnounceProducerRace17052 interleaves repeated calls to
+// convergeLegacyNonVIPAnnounce and legacyNonVIPAnnouncePending with
+// same-generation Reconcile calls for one activation. Exactly one burst
+// may be claimed/sent regardless of how those calls interleave. Run under -race
 // (the campaign's named run includes it where configured); even without
 // it, the claim-before-send mutex makes a double burst impossible and
 // this cell asserts that outcome across many interleavings.
