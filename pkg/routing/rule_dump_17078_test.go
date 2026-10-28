@@ -87,6 +87,14 @@ func TestRuleDumpRejectsMalformedRows17078(t *testing.T) {
 		}
 		return raw
 	}
+	// Sub-header residue (#18314 F1): 1-3 trailing bytes after a
+	// complete valid attribute never form an RtAttr header, so a
+	// header-sized walk condition never examines them; the decoder's
+	// whole-read length contract requires them to fail the decode.
+	trailingResidue := func(n int) []byte {
+		raw := build(nl.NewRtAttr(nl.FRA_PRIORITY, nl.Uint32Attr(2500)))
+		return append(raw, make([]byte, n)...)
+	}
 	// An unpadded final attribute: FRA_IP_PROTO carries one byte, so
 	// its header claims 5 bytes but RTA alignment requires 8. Stripping
 	// the padding leaves a tail ParseRouteAttr would advance past the
@@ -120,6 +128,9 @@ func TestRuleDumpRejectsMalformedRows17078(t *testing.T) {
 		{"oversize uid range", build(nl.NewRtAttr(nl.FRA_UID_RANGE, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9}))},
 		{"oversize protocol", build(nl.NewRtAttr(nl.FRA_PROTOCOL, []byte{1, 2}))},
 		{"oversize dscp", build(nl.NewRtAttr(FRA_DSCP, []byte{1, 2}))},
+		{"trailing 1-byte residue", trailingResidue(1)},
+		{"trailing 2-byte residue", trailingResidue(2)},
+		{"trailing 3-byte residue", trailingResidue(3)},
 		{"truncated attribute tail", unpaddedTail},
 	}
 	for _, tc := range cases {
@@ -261,10 +272,11 @@ func TestPBRAppliedStatusChecksDeclaredDSCP17078(t *testing.T) {
 }
 
 // TestRuleListFullRoundTrip17078 is the class-N kernel cell (#17078
-// acceptance: an `unshare -rn` round-trip). It installs a lookup rule
-// and an unreachable shadow in a private netns through the production
-// encoders, then reads them back through RuleListFull and requires
-// the action, table, DSCP sidecar and selectors to survive.
+// acceptance: an `unshare -rn` round-trip). It installs a unicast lookup
+// rule in a private netns through the production encoders, then reads it
+// back through RuleListFull and requires the action, table, DSCP sidecar
+// and selectors to survive. Synthetic unreachable-action coverage stays
+// in TestRuleDumpDecodesActionAndExtendedTable17078.
 //
 // Run: unshare -rn go test ./pkg/routing/ -run '^TestRuleListFullRoundTrip17078$'
 // Outside a private netns it SKIPs (never touches the host rule table).

@@ -81,8 +81,10 @@ func ruleRowFromDumpMessage(family int, raw []byte) (RuleRow, error) {
 	// slices past the end of a truncated final attribute whose
 	// padding is missing (v1.3.1 nl_linux.go), panicking instead of
 	// returning its EINVAL path. Validate the walk here so a
-	// truncated tail fails closed like every other malformed row.
-	for rest := attrRegion; len(rest) >= unix.SizeofRtAttr; {
+	// truncated tail or sub-header residue fails closed like every other
+	// malformed row.
+	rest := attrRegion
+	for len(rest) >= unix.SizeofRtAttr {
 		alen := int(nl.NativeEndian().Uint16(rest[:2]))
 		if alen < unix.SizeofRtAttr || alen > len(rest) {
 			return row, fmt.Errorf("truncated policy-rule attribute in family %d: header claims %d bytes, %d remain", family, alen, len(rest))
@@ -92,6 +94,9 @@ func ruleRowFromDumpMessage(family int, raw []byte) (RuleRow, error) {
 			return row, fmt.Errorf("truncated policy-rule attribute in family %d: header claims %d bytes, %d remain", family, alen, len(rest))
 		}
 		rest = rest[aligned:]
+	}
+	if len(rest) != 0 {
+		return row, fmt.Errorf("truncated policy-rule attribute in family %d: %d trailing bytes remain", family, len(rest))
 	}
 	attrs, err := nl.ParseRouteAttr(attrRegion)
 	if err != nil {
