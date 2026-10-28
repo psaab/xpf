@@ -591,6 +591,11 @@ pub struct Coordinator {
     /// monitor gate. Always false in release builds.
     #[cfg(test)]
     pub(crate) force_ipsec_sa_not_ready: bool,
+    /// #7209: SHARED with the session-domain handle, not copied. The six
+    /// tests that set it do so on this struct after construction; a copied
+    /// `usize` would leave the handle reading 0, so every cap assertion would
+    /// silently measure the production formula instead of the override — a
+    /// test seam that stops seaming without failing.
     /// #5674 test seam (per-instance, NOT a process-global): when nonzero,
     /// `synced_import_cap()` returns TWICE this value (the override expresses a
     /// LOGICAL ceiling; `synced_import_cap()` doubles it) instead of the real
@@ -599,11 +604,6 @@ pub struct Coordinator {
     /// `DEFAULT_MAX_SESSIONS` (131072) entries. Always 0 in release builds
     /// (the field does not exist); per-instance so parallel tests never race.
     #[cfg(test)]
-    /// #7209: SHARED with the session-domain handle, not copied. The six
-    /// tests that set it do so on this struct after construction; a copied
-    /// `usize` would leave the handle reading 0, so every cap assertion would
-    /// silently measure the production formula instead of the override — a
-    /// test seam that stops seaming without failing.
     pub(crate) synced_import_cap_override: Arc<std::sync::atomic::AtomicUsize>,
     /// #5166 test seam (per-instance, NOT a process-global): under
     /// `cfg(test)`, `refresh_runtime_snapshot_inner` records a clone of the
