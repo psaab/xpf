@@ -56,6 +56,16 @@ func TestRedactEmbeddedCommentPayloads18379(t *testing.T) {
 			command:      strconv.Quote("set system host-name preserved # " + credential),
 			keepOrdinary: true,
 		},
+		{
+			name:         "quoted prefix with comment tail credential",
+			command:      strconv.Quote("set system host-name preserved") + " # " + credential,
+			keepOrdinary: true,
+		},
+		{
+			name:            "quoted prefix with junk tail credential",
+			command:         strconv.Quote("set system host-name preserved") + " |" + credential,
+			wantPlaceholder: true,
+		},
 	}
 
 	makeTree := func(command string) *ConfigTree {
@@ -95,7 +105,7 @@ func TestRedactEmbeddedCommentPayloads18379(t *testing.T) {
 		})
 	}
 	t.Run("clean quoted command keeps authored spacing", func(t *testing.T) {
-		clear := makeTree("set system host-name   preserved")
+		clear := makeTree(strconv.Quote("set system host-name   preserved"))
 		redacted := clear.RedactedClone()
 		for _, tc := range []struct {
 			name   string

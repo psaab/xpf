@@ -509,7 +509,7 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 	// text back into the outer token would needlessly re-encode nested
 	// quotes, and the placeholder the inner render produces is exactly
 	// what the outer quotes framed.
-	if len(tokens) == 1 && quoted[0] {
+	if len(tokens) == 1 && quoted[0] && lexOK && !comments {
 		if innerRendered, innerChanged := redactEmbeddedCommand(tokens[0], fingerprint); innerChanged {
 			return innerRendered, true
 		}
