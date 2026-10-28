@@ -222,7 +222,7 @@ fn cos_scheduler_snapshot_literals_carry_an_update_tail_7689() {
 // #17147: that population used to be HAND-KEPT in the table below, and
 // nothing checked the table against its own rule. `ControlResponse`
 // (30 fields) and `ControlRequest` qualified for years while absent, and
-// the dispatcher's one exhaustive 28-field all-default literal in
+// the dispatcher's one exhaustive 30-field all-default literal in
 // `server/handlers/mod.rs` took a forced edit for every new field. The
 // population is now DERIVED mechanically by
 // `qualifying_additive_wire_structs` (scan of `src/protocol/*.rs` for the
@@ -549,13 +549,16 @@ fn additive_wire_structs_in_source(src: &str) -> Vec<AdditiveWireStruct> {
 /// Derive the additive-wire population mechanically: every struct in
 /// `src/protocol/*.rs` meeting the stated rule (Default impl, at least
 /// one `#[serde(default)]` field, >= 8 fields), sorted by name.
-/// Known limitation, stated plainly: generic parameters are not parsed
-/// (no qualifying wire struct carries them today — the census would
-/// treat a future `struct Wire<T> {` as a tuple/unit definition and skip
-/// it), and renamed re-exports of a qualifying struct under a second
-/// name are counted under their definition name only. Both are outside
-/// the stated rule as written; the census fixture and the population-size
-/// floor keep the derivation itself honest.
+/// Known limitation, stated plainly: generic parameters are not
+/// specially parsed — a simple `struct Wire<T> {` IS counted (the
+/// search for the opening brace walks over `<T>`), but a generic
+/// parameter containing `(` (for example `struct Wire<F: Fn(u8)> {`)
+/// trips the tuple/unit early exit and is skipped. No qualifying wire
+/// struct carries such parameters today. Renamed re-exports of a
+/// qualifying struct under a second name are counted under their
+/// definition name only. Both are outside the stated rule as written;
+/// the census fixture and the population-size floor keep the
+/// derivation itself honest.
 fn qualifying_additive_wire_structs(
     protocol_files: &[std::path::PathBuf],
 ) -> Vec<AdditiveWireStruct> {
@@ -602,6 +605,11 @@ fn additive_wire_census_applies_the_stated_rule_17147() {
             "#[derive(Default)] struct Wire { #[serde(rename = \"x\")] a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: Vec<u8, u8> }",
             &[],
             "rename alone is not default, and the comma inside Vec<A, B> must not mint a ninth field",
+        ),
+        (
+            "#[derive(Default)] struct Wire { #[serde(default)] a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: Vec<u8, u8> }",
+            &[],
+            "7 fields with a Vec<A, B> field is below the floor: the angle comma must not mint an eighth field (isolates the angle leg — serde-default is present and Default is derived, unlike the rename case above)",
         ),
         (
             "struct Wire { #[serde(default)] a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8 } impl Default for Wire { fn default() -> Self { todo!() } }",
