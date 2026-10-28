@@ -43,7 +43,6 @@ const IFF_NO_PI: libc::c_short = 0x1000;
 const ADJUDICATED_QUEUE_INDEX: u32 = 0;
 const ADJUDICATED_QUEUE_MAPPING: u32 = ADJUDICATED_QUEUE_INDEX + 1;
 const ADJUDICATED_TRANSIT_MARK: u32 = 0x5846_5001;
-const ADJUDICATED_TRANSIT_MARK_MASK: u32 = 0xffff_ffff;
 const ADJUDICATED_TC_PRIORITY: u32 = 0x7fff;
 
 /// The MTU the kernel assigns a freshly created TUN device. When the
@@ -1054,7 +1053,7 @@ impl SlowPathReinjector {
     /// `mtu()` is retained as the reinjector's "installed MTU" accessor (updated
     /// by `reconcile_mtu`) and is exercised by the #5801/#6097 tests, so it is
     /// no longer read on the production path; keep it compiled without warning.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn mtu(&self) -> i32 {
         self.mtu.load(Ordering::Relaxed) as i32
     }

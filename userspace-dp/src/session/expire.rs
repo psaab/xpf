@@ -23,7 +23,7 @@ pub(super) const HELD_RECHECK_HORIZON_NS: u64 = FAR_FUTURE_OFFSET * WHEEL_TICK_N
 impl SessionTable {
     /// #965: stats from the most-recent `expire_stale_entries` call.
     /// Used by tests to validate K-bounds and entry classification.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn last_pop_stats(&self) -> WheelPopStats {
         self.last_pop_stats
     }
@@ -590,7 +590,7 @@ impl SessionTable {
         expired_entries
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn expire_stale(&mut self, now_ns: u64) -> u64 {
         self.expire_stale_entries(now_ns).len() as u64
     }

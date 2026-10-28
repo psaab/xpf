@@ -69,10 +69,10 @@ default RETH ownership/failover path.
   and **gratuitous-arp-count** also update in-place (no restart or master-down
   gap): the no-change gate compares `AdvertiseInterval` and `GARPCount` so a
   day-2 commit changing only `reth-advertise-interval` or
-  `gratuitous-arp-count` is detected, and `updateConfig` copies both into the
+  `gratuitous-arp-count` is detected, and `updateConfigHeld` copies both into the
   running instance's `cfg` (#5087). Since #15689 the run loop consumes
   `configUpdatedCh` in BOTH states: StateMaster immediately advertises and
-  re-arms `advertTimer` at the new `vi.advertInterval()` when the interval
+  re-arms `advertTimer` via `armAdvertTimer` at the new interval (`armAdvertTimer` snapshots `cfg` under `Lock()` via `advertIntervalFromMS`) when the interval
   or effective priority changed (a shrink left on the old arm starved
   BACKUP peers into a dual-MASTER window, and the undrained token leaked
   into a later BACKUP tenure); StateBackup re-arms `masterDownTimer` when
@@ -168,11 +168,10 @@ default RETH ownership/failover path.
 - `manager.go` — redundancy-group coordinator: `Manager`, instance
   diff/lifecycle, sync-hold, RG force/resign helpers, socket helpers.
 - `instance.go` — per-instance state machine core: the `vrrpInstance`
-  struct, `newInstance`, config/preempt control, advert-interval and
-  master-down/preempt-hold timing, the `run` loop and `stepBackup`,
-  RX-driven state resolution (`handleBackupRx`/`handleMasterRx`/
-  `resolveEqualPriorityMaster`), and the `becomeMaster`/`becomeBackup`
-  transitions. Pure code-motion split (#5661) moved the cohesive
+  struct, `newInstance`, `updateConfigHeld`, the timer arms
+  (`armAdvertTimer`/`armMasterDownTimer`), the `run` loop, `stepBackup`/
+  `stepMaster`, and `clampConfigPriority`. Pure code-motion split
+  (#5661, #8090) moved the cohesive
   sub-responsibilities below into sibling files (same `package vrrp`,
   no symbol renames):
   - `instance_addr.go` — local IPv4/IPv6 + VIP-set address resolution
@@ -190,16 +189,33 @@ default RETH ownership/failover path.
   - `instance_send.go` — advert/event send (`emitEvent`, `sendAdvert`,
     `sendPacket`, `sendPacketIPv6`).
   - `instance_garp.go` — gratuitous-ARP/NA burst + gateway probe
-    (`sendGARP`, `garpSendAllowed`, `garpDampened`, `GatewayProbeTarget`,
+    (`sendGARP`, `garpSendAllowedForOwner`, `garpDampened`, `GatewayProbeTarget`,
     the `arpProbeFn`/`garpBurstFn`/`naBurstFn` seams, `minGARPInterval`).
   - `instance_vip.go` — netlink VIP add/remove actuation +
     stale-VIP reconcile (`addVIPsLocked`, `removeVIPs`,
     `removeVIPsLocked`, `nlLinkByName`/`nlAddrAdd`/`nlAddrDel`,
     `removeVIPsIfBackup`, `scheduleVIPRemoveReconcile`, `surfaceStaleVIP`,
     `vipActuationResult`).
+  - `instance_preempt.go` — preempt policy (`suppressPreempt`,
+    `setDesiredPreempt`, `restorePreempt`, `shouldPreemptObservedMaster`,
+    `preemptHoldDuration`, `armPreemptHold`, `disarmPreemptHold`).
+  - `instance_resign.go` — resign path (`triggerResign`, `beginResign`,
+    `applyPendingResign`, `extractPendingResign`, `commitPendingResign`,
+    `discardPendingResignLocked`, `armResignAck`, `notifyResigned`).
+  - `instance_rx.go` — advertisement receive path (`admitAndRecord`,
+    `masterAdverFloor`, `handleBackupRx`, `handleMasterRx`,
+    `resolveEqualPriorityMaster`, `learnMasterSourceLocked`).
+  - `instance_timing.go` — timing derivation (`advertIntervalLocked`,
+    `advertIntervalFromMS`, `masterDownInterval`, `masterDownLocked`,
+    `skewTimeLocked`, `garpCount`, `advertiseIntervalMS`,
+    `stopAndDrainTimer`).
+  - `instance_transition.go` — state transitions (`getState`, `setState`,
+    `becomeMaster`, `becomeBackup`, `rearmForRetry`, `vipFamilies`).
+  - `instance_vipupdate.go` — in-place VIP-set update (#10780)
+    (`vipsSnapshot`, `vipSetDelta`, `updateVIPs`, `getAdvertCapacityErr`).
 - `advert_capacity.go` — per-family VIP cardinality guard (#6779):
   `splitVIPsByFamily` (the SSOT for how a configured VIP list is counted
-  by family, shared with `sendAdvert`) and `checkAdvertCapacity` (whether
+  by family, shared with `sendAdvert`, over `config.ParseVRRPVIP` #17150) and `checkAdvertCapacity` (whether
   that list can produce a legal advert). See "Advert capacity" below.
 - `packet.go` — VRRPv3 advert parser/builder + IPv4/IPv6 checksums.
 - `track.go` — interface tracking (#1814): the per-instance
@@ -215,12 +231,14 @@ default RETH ownership/failover path.
   interface a VRRP instance is bound to. Distinct from the link-watcher
   (which handles tracked-interface priority demotion) — different latch,
   different concern — but both share `m.watcherStop` cancellation.
+- `resign_barrier.go` — resign acknowledgement barrier (#6177)
+  (`ResignBarrier`, `newResignBarrier`, `ErrStaleVIPOnBackup`).
 - `vrrp.go` — `Instance` config type plus `CollectInstances` /
   `CollectRethInstances` config extraction.
 
 ## The send paths snapshot config under the lock (#8597)
 
-`updateConfig` writes `Priority`, `Preempt`, `PreemptHoldTime`,
+`updateConfigHeld` writes `Priority`, `Preempt`, `PreemptHoldTime`,
 `AdvertiseInterval`, `GARPCount`, `TrackInterface` and `TrackPriorityCost`
 under `vi.mu` on the MANAGER goroutine — the #5087 day-2 path, reached by any
 commit that changes `reth-advertise-interval` or `gratuitous-arp-count`. Every
@@ -245,13 +263,13 @@ pins it deterministically, driving the write from inside the v4 arm through the
 `sendPacketFn` seam rather than racing for the interleaving.
 
 `advertiseIntervalMS` deliberately returns the RAW milliseconds rather than
-reusing `advertInterval()`: the send sink applies
+reusing `advertIntervalFromMS`: the send sink applies
 `normalizeAdvertIntervalMS9914` to that one snapshot, the same normalization
 used by the local timer. This keeps a tolerant negative, sub-quantum, or
 over-range value from making the wire and timer disagree (#9914).
 
 `advertIntervalLocked` is NOT one of these sites despite looking like one — it
-is documented as lock-held-by-caller and is reached from `recordMasterAdvert`
+is documented as lock-held-by-caller and is reached from `admitAndRecord`
 under `vi.mu.Lock`. A census of this class has to read the callers, not the
 call.
 
@@ -267,9 +285,9 @@ hand mastership over (`manager.go` `ResignRG`). The node would advertise
 "take over now" on every advert while believing itself the most preferred
 candidate.
 `clampConfigPriority` bounds the value at both config entry points —
-`newInstance` and `updateConfig`; the day-2 commit path reaches only the
+the `newInstance`-adjacent install clamp in `manager.go`, and `updateConfigHeld`; the day-2 commit path reaches only the
 second, so a clamp on the constructor alone would let a running instance
-acquire the value it was protected from at startup. The internal write in
+acquire the value it was protected from at startup. Production's `updateConfigHeld` preserves a held RETH 0 only under the manager hold (heldRETH), so the clamp invariant is stated against `updateConfigHeld`, not `newInstance`. The internal write in
 `manager.go` (`ResignRG` setting 0) is deliberately NOT clamped: that is the
 runtime resignation sentinel, not config. `UpdateRGPriority` is the opposite:
 it restores a config-derived priority after resignation, so it uses the same
@@ -362,7 +380,7 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   computes `Master_Down_Interval = 3×Master_Adver_Interval + Skew_Time`
   from the interval the **current master advertises**, learned from the
   received advert's Max Adver Int field (centiseconds on the wire, 10 ms
-  units), NOT from its own `cfg.AdvertiseInterval`. `recordMasterAdvert`
+  units), NOT from its own `cfg.AdvertiseInterval`. `admitAndRecord`
   stores it in `masterAdverInterval` for every accepted non-zero-priority
   advert (#14706; see the accepted-master rule below);
   `masterDownInterval()` (and the #2082/#2850 staleness-horizon replicas
@@ -375,7 +393,7 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   mismatch (a rolling `reth-advertise-interval` change, or a misconfig) no
   longer times the master out on the wrong cadence (a shorter local interval
   → premature failover/flapping; a longer one → delayed detection/loss).
-- Learned-interval floor (#4548): `recordMasterAdvert` clamps the learned
+- Learned-interval floor (#4548): `admitAndRecord` clamps the learned
   `Master_Adver_Interval` UP to `masterAdverFloor()` — the node's own
   configured `cfg.AdvertiseInterval`, with a 10 ms absolute backstop
   (`minLearnedMasterAdverInterval`, the schema minimum for
@@ -391,7 +409,7 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   fast-failover default is preserved exactly. Because the floor is the
   node's OWN interval, a legitimately-configured low-interval cluster
   (e.g. `reth-advertise-interval 10` on both nodes) is not over-clamped.
-- Accepted-master learning (#14706): `recordMasterAdvert` overwrites
+- Accepted-master learning (#14706): `admitAndRecord` overwrites
   `lastMasterPriority`/`lastMasterSeen`, the per-family known-master
   source, and `masterAdverInterval` ONLY for an advert accepted as the
   current master: no retained master, a same-source advert (including
@@ -509,7 +527,7 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   path pass `force=false`; `ReconcileVIPs` passes `force=true` because the RETH
   MAC just changed and the correction GARP must not be swallowed by a routine
   burst that fired in the prior 500 ms (#2081). The decision lives in the
-  network-free helper `garpSendAllowed`, which is unit-tested directly.
+  network-free helper `garpSendAllowedForOwner`, which tests reach through the two-argument `garpSendAllowed` seam in `test_helpers_17165_test.go` (production `sendGARP` passes its captured owner generation directly).
   `becomeMaster` records its actuated VIPs as pending under `vipMu` before
   releasing the lock (#14155), so an `updateVIPs` that publishes a newer
   epoch before the deferred failover sender runs carries the still-
@@ -641,7 +659,7 @@ blackholing on takeover. Compiled to `Instance.PreemptHoldTime` (seconds);
   `preemptHoldArmed`, `stepBackup` checks `heldMasterIsStale()`: a stale
   held master (last advert beyond the master-down horizon → it went silent)
   disarms the hold and takes over NOW; a still-live one (accepted adverts
-  keep refreshing `lastMasterSeen` via `recordMasterAdvert`, #14706)
+  keep refreshing `lastMasterSeen` via `admitAndRecord`, #14706)
   re-arms the watchdog and lets the hold run to its natural expiry.
   `heldMasterIsStale` checks ONLY staleness — NOT the
   effective>master priority comparison — so a
@@ -998,12 +1016,22 @@ link-local prepend above, the ceiling on **configured** VIPs is:
 `MaxConfiguredVIPs(isIPv6)` (`packet.go`) derives both from
 `MaxAdvertAddrCount`, so the subtraction lives in one place.
 
-**Canonical VIP-set identity (#11482).** Virtual addresses are an ordered set:
+**Canonical VIP-set identity (#11482, #17150).** Virtual addresses are an ordered set:
 the first spelling of each canonical address/prefix identity is retained, and
 aliases are removed during config collection and in-place updates. Advertisement
 construction, GARP selection, and capacity checks therefore see one entry per
 VIP. Capacity is reevaluated against the canonical set, including on day-2
-updates.
+updates. The parse, identity, and dedupe live in `pkg/config`
+(`ParseVRRPVIP` / `VRRPVIPIdentity` / `DedupeVRRPVIPs`) — the one
+implementation repo-wide — because `pkg/vrrp` imports `pkg/config`; every
+`pkg/vrrp` VIP helper is a one-liner over that parse, so a malformed entry
+such as `10.0.0.1/33` is skipped by the capacity guard, the advert builder,
+the claim check, and the commit-time counter alike. IPv4-mapped spellings
+(`::ffff:10.0.0.1/120`) are IPv4 on every one of those paths (unmapped
+with the /96-offset bit translation in `ParseVRRPVIP`), so `canonAddr`'s
+exclusion key is the `net.IP` lookup form `10.0.0.1` (#2516); a mapped
+prefix below /96 has no v4 prefix equivalent and parses as the same v4
+host identity (`10.0.0.1/32`), so actuation and GARP agree it is IPv4.
 
 **Why an oversized set was more than a malformed packet.** `sendAdvert`
 discards a `Marshal` failure at `slog.Debug`, and `becomeMaster` claimed the
@@ -1160,16 +1188,21 @@ pointer means unresolved). The lazy-resolve semantics are preserved —
 the address still becomes available once it is resolvable — and the
 packet hot path stays lock-free, mirroring the `lastDropWarn` atomic.
 
-`advertInterval()` is a third cross-goroutine hazard (#6230). The
-run-loop goroutine calls it on every advert-timer reset to read
-`cfg.AdvertiseInterval`, while cfg writers (`updateConfig`) mutate `cfg`
+`armAdvertTimer` is a third cross-goroutine hazard (#6230). The
+run-loop goroutine reads `cfg.AdvertiseInterval` on every advert-timer
+reset, while cfg writers (`updateConfigHeld`) mutate `cfg`
 under `vi.mu.Lock()`. The read was unlocked — a data race `go test
 -race` flags — where every sibling accessor (`getState`,
 `masterDownInterval`, `preemptHoldDuration`) already snapshots `cfg`
-under `vi.mu`. It now RLocks like they do. The one caller that already
-holds the write lock, `recordMasterAdvert` → `masterAdverFloor`, reads
-via the lock-free `advertIntervalLocked` variant instead — re-taking the
-RLock under the held `Lock()` would self-deadlock.
+under `vi.mu`. The re-arm path now takes the write lock:
+`armAdvertTimer` reads `cfg` under `Lock()` via
+`advertIntervalFromMS`, so snapshot, `Reset`, and the applied-interval
+note share one hold. `advertiseIntervalMS()` (RLock) serves only the
+send sink — `sendAdvert`'s wire encoding — not the timer. The one
+caller that already holds the write lock, `admitAndRecord` →
+`masterAdverFloor`, reads via the lock-free `advertIntervalLocked`
+variant instead — re-taking the RLock under the held `Lock()` would
+self-deadlock.
 
 #### Source re-resolution on address change (#2528)
 
@@ -1513,7 +1546,7 @@ dataplane reuses this Go walker, and do NOT try to consolidate them.
   `becomeBackup` signals takeover. An already-BACKUP instance applies
   the stash in the `stepBackup` resign arm (its VIPs are already off
   the wire). A superseding priority assignment — `UpdateRGPriority`
-  or `updateConfig` — drops the stash
+  or `updateConfigHeld` — drops the stash
   (`discardPendingResignLocked`, under `mu`) so a later, unrelated
   step-down cannot install the resolved 0. Applying the stash is
   two-phase (`extractPendingResign` under `resignMu`, then

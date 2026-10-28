@@ -38,7 +38,7 @@ import (
 )
 
 // seedDurableCert writes a cert/key pair into dir under the names
-// SetTLSCertDirForTest hands the loader, minted for dnsName plus the loopback
+// Config.TLSSelfSignedDir hands the loader, minted for dnsName plus the loopback
 // SANs and mgmtIP — i.e. the exact shape pkg/api's own mint path produces for a
 // box named dnsName with its HTTPS listener on mgmtIP. The HTTPS leg then LOADS
 // it as-is (the #1916 D6 durable contract), which is what makes the cert stale
@@ -266,8 +266,11 @@ func TestBootHostNameReachesTheDiagnostic_6827(t *testing.T) {
 		stubHostname(t, "new-fw-6827")
 		ctx, cancel := context.WithCancel(context.Background())
 		t.Cleanup(cancel)
-		// HTTP only: no HTTPS leg, so no certificate is served.
-		if err := m.startTo(ctx, cfgFor(reg, "10.0.0.1:8080", false, "", nil)); err != nil {
+		// HTTP only: no HTTPS leg, so no certificate is served. The
+		// self-signed dir is pinned empty at construction (#17213); the
+		// stale pair is seeded into it below, before HTTPS is enabled.
+		dir := t.TempDir()
+		if err := m.startTo(ctx, cfgForDir(reg, dir, "10.0.0.1:8080", false, "", nil)); err != nil {
 			t.Fatalf("start HTTP leg: %v", err)
 		}
 
@@ -282,11 +285,9 @@ func TestBootHostNameReachesTheDiagnostic_6827(t *testing.T) {
 		}
 
 		// HTTPS comes up later carrying the stale durable pair: the debt settles.
-		dir := t.TempDir()
 		seedDurableCert(t, dir, "old-fw-6827", "10.0.0.1")
-		m.srv.SetTLSCertDirForTest(dir)
 		out := captureDaemonWarn(t, func() {
-			if err := m.reconcileTo(cfgFor(reg, "10.0.0.1:8080", true, "10.0.0.1:8443", nil)); err != nil {
+			if err := m.reconcileTo(cfgForDir(reg, dir, "10.0.0.1:8080", true, "10.0.0.1:8443", nil)); err != nil {
 				t.Fatalf("enable HTTPS: %v", err)
 			}
 			d.deliverStaleMgmtCertDiagnosis()
@@ -374,13 +375,12 @@ func serveStaleCert(t *testing.T, d *Daemon, certName string) *managementReconci
 	d.mgmt.Store(m)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	if err := m.startTo(ctx, cfgFor(reg, "10.0.0.1:8080", false, "", nil)); err != nil {
+	dir := t.TempDir()
+	if err := m.startTo(ctx, cfgForDir(reg, dir, "10.0.0.1:8080", false, "", nil)); err != nil {
 		t.Fatalf("start HTTP leg: %v", err)
 	}
-	dir := t.TempDir()
 	seedDurableCert(t, dir, certName, "10.0.0.1")
-	m.srv.SetTLSCertDirForTest(dir)
-	if err := m.reconcileTo(cfgFor(reg, "10.0.0.1:8080", true, "10.0.0.1:8443", nil)); err != nil {
+	if err := m.reconcileTo(cfgForDir(reg, dir, "10.0.0.1:8080", true, "10.0.0.1:8443", nil)); err != nil {
 		t.Fatalf("enable HTTPS: %v", err)
 	}
 	if m.srv.HTTPSCertForTest() == nil {
@@ -604,10 +604,11 @@ func TestDeferredDeliveryIsWiredAtItsRetryPoints_6827(t *testing.T) {
 	t.Run("boot_start_delivers_a_debt_parked_before_the_reconciler_existed", func(t *testing.T) {
 		// No web-management stanza, so the boot start binds only the plain
 		// --api-addr HTTP leg on an ephemeral loopback port. That is deliberate:
-		// startHTTPServer CONSTRUCTS the api.Server itself, and the only cert-dir
-		// injection seam (Server.SetTLSCertDirForTest) exists after construction,
-		// so an in-process boot start cannot be handed a serving HTTPS leg
-		// without driving the production /etc/xpf/tls generator.
+		// startHTTPServer CONSTRUCTS the api.Server itself from the committed
+		// config, which names no HTTPS leg here, so an in-process boot start
+		// cannot be handed a serving HTTPS leg — Config.TLSSelfSignedDir
+		// (#17213) pins WHERE a self-signed pair would load from, but with no
+		// HTTPS desired there is no leg to serve it.
 		//
 		// WHAT THIS CELL PROVES, AND WHAT IT DOES NOT (#6827 round 6 — stated
 		// rather than implied, because the earlier comment read as if it proved
@@ -626,9 +627,7 @@ func TestDeferredDeliveryIsWiredAtItsRetryPoints_6827(t *testing.T) {
 		// Known residual: replacing the production delivery with a bare
 		// osHostname() call would also satisfy this cell. The read is the only
 		// in-process trace a delivery leaves when nothing is served, so no
-		// assertion here can tell those two apart; a genuinely stronger cell
-		// needs a pre-construction certificate seam on api.Config, which is a
-		// production knob added for one test and was declined.
+		// assertion here can tell those two apart.
 		d := newMgmtDeliveryDaemon(t, "system host-name new-fw-6827")
 		d.opts.APIAddr = "127.0.0.1:0"
 
@@ -714,6 +713,10 @@ func TestDeferredDeliveryIsWiredAtItsRetryPoints_6827(t *testing.T) {
 		}
 		httpOnly := want
 		httpOnly.TLS, httpOnly.HTTPSAddr = false, ""
+		// Pin the self-signed dir at construction (#17213); the stale
+		// pair is seeded into it below, before the reconcile binds HTTPS.
+		dir := t.TempDir()
+		httpOnly.TLSSelfSignedDir = dir
 		if err := m.startTo(ctx, httpOnly); err != nil {
 			t.Fatalf("start HTTP leg: %v", err)
 		}
@@ -733,9 +736,7 @@ func TestDeferredDeliveryIsWiredAtItsRetryPoints_6827(t *testing.T) {
 
 		// The stale durable pair the HTTPS leg LOADS when this reconcile binds it
 		// (#1916 D6).
-		dir := t.TempDir()
 		seedDurableCert(t, dir, "old-fw-6827", "127.0.0.1")
-		m.srv.SetTLSCertDirForTest(dir)
 
 		// applyConfigLocked's entry point, not reconcileTo: the wiring under test
 		// is reconcileWebManagement's, and reaching past it would bind the
@@ -805,12 +806,12 @@ func TestADeadHTTPSLegIsRebuiltByTheNextReconcile_6827(t *testing.T) {
 	}
 	httpOnly := want
 	httpOnly.TLS, httpOnly.HTTPSAddr = false, ""
+	dir := t.TempDir()
+	httpOnly.TLSSelfSignedDir = dir
 	if err := m.startTo(ctx, httpOnly); err != nil {
 		t.Fatalf("start HTTP leg: %v", err)
 	}
-	dir := t.TempDir()
 	seedDurableCert(t, dir, "old-fw-6827", "127.0.0.1")
-	m.srv.SetTLSCertDirForTest(dir)
 	captureDaemonWarn(t, func() {
 		if err := d.reconcileWebManagement(d.store.ActiveConfig()); err != nil {
 			t.Fatalf("bring HTTPS up: %v", err)
@@ -993,14 +994,13 @@ func TestDebtClearIsGenerationSafe_6827(t *testing.T) {
 		// so this fixture was measuring the generation property THROUGH the very
 		// defect #7039 fixes. A routable bind restores the observable without
 		// weakening what the cell asserts.
-		want := cfgFor(reg, "10.0.0.1:8080", true, "10.0.0.1:8443", nil)
-		httpOnly := cfgFor(reg, "10.0.0.1:8080", false, "", nil)
+		dir := t.TempDir()
+		want := cfgForDir(reg, dir, "10.0.0.1:8080", true, "10.0.0.1:8443", nil)
+		httpOnly := cfgForDir(reg, dir, "10.0.0.1:8080", false, "", nil)
 		if err := m.startTo(ctx, httpOnly); err != nil {
 			t.Fatalf("start HTTP leg: %v", err)
 		}
-		dir := t.TempDir()
 		seedDurableCert(t, dir, "old-fw-6827", "10.0.0.1")
-		m.srv.SetTLSCertDirForTest(dir)
 
 		// Debt #1, incurred while nothing serves a certificate.
 		stubHostname(t, "first-fw-6827")

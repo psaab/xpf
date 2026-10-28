@@ -5,7 +5,6 @@
 
 use super::super::*;
 
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(in crate::afxdp) struct TunnelEndpoint {
     pub(in crate::afxdp) id: u16,

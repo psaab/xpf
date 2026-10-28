@@ -107,16 +107,13 @@ func validateRethMultiChildAST(tree *ConfigTree, lenient bool) ([]string, error)
 			}
 		}
 	}
-	// Views 2/3: node0 / node1 expansions, so children supplied only
-	// by an applied per-node group (or an interface-range / wildcard
-	// group) are seen even if view 1 missed their concrete names.
-	// Expansion failure contributes nothing (best-effort, #1914).
-	for _, nodeID := range []int{0, 1} {
-		view := tree.Clone()
-		vars := map[string]string{"node": fmt.Sprintf("node%d", nodeID)}
-		if err := view.ExpandGroupsWithVarsTagged(vars); err != nil {
-			continue
-		}
+	// Views 2/3: node0 / node1 tagged expansions via effectiveNodeViews
+	// (#17222), so children supplied only by an applied per-node group
+	// (or an interface-range / wildcard group) are seen even if view 1
+	// missed their concrete names. Expansion failure contributes
+	// nothing (best-effort, #1914); View 1 covers the un-expandable
+	// group, so no generic fallback view.
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{Tagged: true}) {
 		collectExpandedRethMembers(view, add)
 	}
 

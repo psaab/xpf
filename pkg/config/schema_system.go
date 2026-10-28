@@ -139,9 +139,9 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 		// every value at commit; ValueString (not a new ValueType) because
 		// the accepted form is the OpenSSH public-key grammar the shared
 		// validator defines, and the placeholder stays "<key>".
-		"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
-		"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
-		"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
+		"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
+		"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
+		"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
 	}},
 	"archival": {desc: "Configuration archival", children: map[string]*schemaNode{
 		"configuration": {desc: "Configuration archival", children: map[string]*schemaNode{
@@ -425,9 +425,9 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 					"plain-text-password":       plainTextPasswordLeaf15053("plain-text-password"),
 					"plain-text-password-value": plainTextPasswordLeaf15053("plain-text-password-value"),
 					// #16740: same commit-time key gate as root-authentication.
-					"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
-					"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
-					"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, children: nil},
+					"ssh-ed25519": {desc: "SSH ED25519 public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
+					"ssh-rsa":     {desc: "SSH RSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
+					"ssh-dsa":     {desc: "SSH DSA public key", args: 1, multi: true, placeholder: "<key>", valueType: ValueString, validator: ValidateAuthorizedSSHKey, allowEdgeWhitespace: true, allowEdgeWhitespaceReason: "OpenSSH authorized_keys value is '<type> <base64> [comment]' — internal spaces are the grammar, and ValidAuthorizedSSHKey already refuses a leading-space type; trailing comment spacing is part of the authored key line the daemon belt judges identically (#17177)", children: nil},
 				}},
 			}},
 	}},
@@ -503,7 +503,22 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			children:      nil,
 		},
 		"shared-umem": {desc: "AF_XDP shared-UMEM policy override", children: map[string]*schemaNode{
-			"mode":                 {args: 1, desc: "Shared UMEM mode override (auto|off|same-device-debug|cross-nic)", children: nil},
+			// #17149: typed enum mirroring Rust parse_shared_umem_mode.
+			// Previously untyped: a typo (cross-nick) committed clean and
+			// Rust's `_ => Off` silently disabled shared UMEM (private
+			// UMEM + copy path), opposite of the absent-key CrossNic
+			// default. Only these four spellings are accepted; the Rust
+			// aliases (on/enable/enabled/cross_nic/…) are removed, not
+			// kept, so there is one vocabulary.
+			"mode": {
+				args:          1,
+				desc:          "Shared UMEM mode override (auto|off|same-device-debug|cross-nic)",
+				valueType:     ValueEnumOf,
+				valueDesc:     "Shared UMEM mode override (auto | off | same-device-debug | cross-nic)",
+				valueExamples: []string{"auto", "off", "same-device-debug", "cross-nic"},
+				validator:     ValidateEnum([]string{"auto", "off", "same-device-debug", "cross-nic"}),
+				children:      nil,
+			},
 			"interface":            {args: 1, multi: true, desc: "Optional participating Linux interface filter", children: nil},
 			"phase0-artifact-file": {args: 1, desc: "Optional machine-readable Phase 0 audit artifact", children: nil},
 			"artifact-file":        {args: 1, desc: "Alias for phase0-artifact-file", children: nil},

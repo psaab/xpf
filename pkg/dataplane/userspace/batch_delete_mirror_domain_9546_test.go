@@ -16,9 +16,9 @@ import (
 // defect was never in any one function: #9364's batch plumbing and #9146's
 // singular delete were each correct for a value that HAD a domain, and every
 // unprivileged cell proved them correct that way. What was false was the premise
-// that the value a production delete reads ever has one — the conntrack GC takes
+// that the value a production delete reads ever has one — the (now-retired, #17155) conntrack GC took
 // its entries from `store.ForEachV4`, a BatchLookup over the BPF mirror, and the
-// on-map ABI had no slot for the domain. So this cell follows the GC's path
+// on-map ABI had no slot for the domain. So this cell follows that GC path
 // exactly: seed a tenant row in a real map, read it back through ForEachV4, feed
 // THAT to DeleteBatchKnownV4, and read the helper wire.
 //
@@ -74,10 +74,10 @@ func TestBatchDeleteNamesTheMirroredDomainOnTheWire9546(t *testing.T) {
 		t.Fatalf("FIXTURE FAILED: ForEachV4 returned %d forward rows, want 1", len(entries))
 	}
 
-	// THE MECHANISM, observed at the exact read the conntrack GC performs. If this
+	// THE MECHANISM, observed at the exact read the retired conntrack GC performed. If this
 	// fails, the delete below cannot name the domain however correct it is.
 	if got := entries[0].Value.RoutingDomain; got != tenant {
-		t.Fatalf("#9546: the row read back through ForEachV4 — the conntrack GC's own "+
+		t.Fatalf("#9546: the row read back through ForEachV4 — the retired conntrack GC's own "+
 			"source — carries routing_domain=%d, want %d. The BPF mirror is dropping the "+
 			"domain again, so every batch delete goes out bare", got, tenant)
 	}

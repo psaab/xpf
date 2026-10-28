@@ -8,8 +8,8 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
-// #16613: the console read gate discarded RollbackCompareSnapshot /
-// RollbackSnapshot's slotErr and stashed nil arms, so for a classed
+// #16613: the console read gate discarded CaptureRollback /
+// CaptureRollbackSlot's Err and stashed nil arms, so for a classed
 // user a missing rollback slot rendered as an empty compare, a
 // "[no changes]" compare, or "configuration path not found" instead
 // of the slot error the unclassed console, gRPC and REST report.

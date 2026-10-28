@@ -30,8 +30,8 @@ func TestDualStackListenerBindsBothFamilies14583(t *testing.T) {
 		Addrs:      []string{"127.0.0.1:0", "[::1]:0"},
 		TLS:        true,
 		HTTPSAddrs: []string{"127.0.0.1:0", "[::1]:0"},
+		TLSSelfSignedDir: t.TempDir(),
 	})
-	s.SetTLSCertDirForTest(t.TempDir())
 	if err := s.Start(ctx); err != nil {
 		cancel()
 		t.Fatalf("Start: %v", err)

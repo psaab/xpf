@@ -5,15 +5,36 @@
 // wire fields: the forward `SessionKey`, the MAC/next-hop parsing, and
 // the #4565 NAT64 cross-family reverse-translation reconstruction. Pure
 // control-response reconstruction — no packet path, no allocation on the
-// worker loop. Bodies byte-for-byte identical to the pre-split source.
+// worker loop.
 
 use crate::afxdp::{self, SYNCED_IMPORT_REFUSED_PREFIX, SyncedSessionEntry};
 use crate::ip_proto::PROTO_GRE;
 use crate::protocol::SessionSyncRequest;
 use crate::session::{TunnelDiscriminator, WireDiscriminator};
 /// Stable refusal token shared with the session-sync handler's counter.
-pub(crate) const SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX: &str =
-    "synced-import-refused:key-incomplete:";
+/// Built from the single refusal-prefix constant so a prefix rename
+/// moves this token with it (#17116).
+pub(crate) const SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX: &str = {
+    const PREFIX: &[u8] = SYNCED_IMPORT_REFUSED_PREFIX.as_bytes();
+    const SUFFIX: &[u8] = b"key-incomplete:";
+    const BYTES: &[u8; PREFIX.len() + SUFFIX.len()] = &{
+        let mut bytes = [0u8; PREFIX.len() + SUFFIX.len()];
+        let mut i = 0;
+        while i < PREFIX.len() {
+            bytes[i] = PREFIX[i];
+            i += 1;
+        }
+        while i < PREFIX.len() + SUFFIX.len() {
+            bytes[i] = SUFFIX[i - PREFIX.len()];
+            i += 1;
+        }
+        bytes
+    };
+    match core::str::from_utf8(BYTES) {
+        Ok(prefix) => prefix,
+        Err(_) => unreachable!(),
+    }
+};
 
 fn reject_incomplete_synced_key(
     req: &SessionSyncRequest,

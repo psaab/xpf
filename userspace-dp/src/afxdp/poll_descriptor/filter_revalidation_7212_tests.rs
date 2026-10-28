@@ -4731,3 +4731,127 @@ fn plain_accepted_hit_logs_input_source_15949() {
     let hit = hit.expect("plain accepted hit must carry log");
     assert_eq!(hit.log_source, crate::afxdp::event_emit::FilterLogSource::Input);
 }
+
+/// #17038: one PBR-term `then log` flow must name the SAME source on every
+/// path that can emit its record — session-MISS (the `ingress_route_table_override`
+/// cold path, which hard-codes `Pbr` in `forwarding/pbr.rs`), uncached
+/// established hit (`evaluate_input_filter_on_session_hit`), flow-cache seed
+/// capture (`established_input_filter_log`, frozen into the descriptor), and
+/// flow-cache replay (`emit_cached_input_filter_log`). Before #17038 the seed
+/// capture was a second derivation with no source and the replay hard-coded
+/// `Input`, so the reason byte flipped with cache residency.
+///
+/// This cell drives legs (2)-(4) through the production helpers and asserts
+/// one `wire_reason()`; leg (1) is the constant `FilterLogSource::Pbr` the
+/// other three must equal. RED on revert: restore the hard-coded `Input` in
+/// `emit_cached_input_filter_log` (or drop the `source` field) and the
+/// replay leg reports `Input` while the hit leg reports `Pbr`.
+#[test]
+fn pbr_log_source_agrees_across_hit_seed_and_cache_replay_17038() {
+    use crate::afxdp::event_emit::FilterLogSource;
+    // PBR accept term with log: `then { routing-instance blue; log; accept; }`
+    let mut term = pbr_term("pbr-route", "5201", "accept");
+    term.log = true;
+    term.count = String::new();
+    let forwarding = forwarding_with_input_filter(LAN_IFINDEX, false, vec![term]);
+    let flow = v4_flow(5201);
+    let m = meta(LAN_IFINDEX as u32, 0, false);
+
+    // (1) Session-MISS cold path: `forwarding/pbr.rs` emits the routing
+    // walk's log with this constant for the same term.
+    let miss_reason = FilterLogSource::Pbr.wire_reason();
+
+    // (2) Uncached established hit.
+    let mut sessions = table_with_session(&flow, 7, Some(LAN_IFINDEX));
+    let (hit, _) = evaluate_input_filter_on_session_hit(
+        &forwarding,
+        &mut sessions,
+        &flow.forward_key,
+        &frame(),
+        Some(&flow),
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        ForwardingDisposition::ForwardCandidate,
+        0,
+    );
+    let hit = hit.expect("#17038: PBR accepted hit must carry log");
+    let hit_log = hit.eval.cached_log.expect("#17038: hit log present");
+    assert_eq!(hit.log_source, FilterLogSource::Pbr);
+    assert_eq!(hit_log.source, FilterLogSource::Pbr);
+
+    // (3) Flow-cache seed capture: the same single derivation the seed path
+    // (`stage_flow_cache_seed`) freezes into the descriptor.
+    let filter = crate::filter::interface_input_filter(
+        &forwarding.filter_state,
+        LAN_IFINDEX,
+        false,
+    )
+    .expect("input filter attached");
+    let seeded = established_input_filter_log(
+        &forwarding,
+        filter,
+        &flow,
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        LAN_IFINDEX,
+        crate::filter::TermMatchExtra::default(),
+        None,
+    )
+    .expect("#17038: seed capture must carry the PBR term's log");
+    assert_eq!(seeded.source, FilterLogSource::Pbr);
+    // The frozen record is the hit's record: same term, same source.
+    assert_eq!(seeded.log_match, hit_log.log_match);
+    assert_eq!(seeded.source.wire_reason(), miss_reason);
+    assert_eq!(hit.log_source.wire_reason(), miss_reason);
+
+    // (4) Flow-cache replay: emit the seeded descriptor into a real event
+    // stream and read the reason byte off the wire payload.
+    let (handle, rx) = crate::event_stream::test_worker_handle(
+        8,
+        crate::event_stream::DataplaneEventRateLimitConfig {
+            events_per_second: 0,
+            burst: 0,
+            session_close_events_per_second: 0,
+            session_close_burst: 0,
+            session_create_events_per_second: 0,
+            session_create_burst: 0,
+        },
+    );
+    let mut descriptor = crate::afxdp::flow_cache::RewriteDescriptor::default();
+    descriptor.input_filter_log = Some(seeded);
+    emit_cached_input_filter_log(&forwarding, Some(&handle), &flow, m, &descriptor, 0);
+    let mut replay_reason = None;
+    while let Ok(frame) = rx.try_recv() {
+        if let Some(payload) = frame.decode_dataplane_event() {
+            replay_reason = Some(payload.reason);
+        }
+    }
+    assert_eq!(
+        replay_reason,
+        Some(miss_reason),
+        "#17038: cache replay must keep the PBR reason byte, not flip to Input"
+    );
+
+    // Control: a plain (non-PBR) log term stays `Input` on the seed capture,
+    // so the Pbr label is earned by the routing term, not unconditional.
+    let plain_forwarding =
+        forwarding_with_input_filter(LAN_IFINDEX, false, vec![log_term_15949()]);
+    let plain_filter = crate::filter::interface_input_filter(
+        &plain_forwarding.filter_state,
+        LAN_IFINDEX,
+        false,
+    )
+    .expect("plain input filter attached");
+    let plain_seeded = established_input_filter_log(
+        &plain_forwarding,
+        plain_filter,
+        &flow,
+        m,
+        Some(TEST_LAN_ZONE_ID),
+        LAN_IFINDEX,
+        crate::filter::TermMatchExtra::default(),
+        None,
+    )
+    .expect("plain seed capture must carry log");
+    assert_eq!(plain_seeded.source, FilterLogSource::Input);
+}

@@ -1432,7 +1432,6 @@ impl StaticNatTable {
     }
 
     /// Returns true if the table has any entries.
-    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.dnat.is_empty() && self.blocks.is_empty()
     }

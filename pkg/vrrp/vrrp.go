@@ -4,7 +4,6 @@ package vrrp
 import (
 	"fmt"
 	"log/slog"
-	"net"
 	"sort"
 	"strings"
 
@@ -126,7 +125,7 @@ func CollectInstances(cfg *config.Config) []*Instance {
 				if vg == nil {
 					continue
 				}
-				vips := dedupeVIPs(vg.VirtualAddresses)
+				vips := config.DedupeVRRPVIPs(vg.VirtualAddresses)
 				inst := &Instance{
 					Interface:         kernelIf,
 					Family:            vrrpGroupFamily(vips, vgKey),
@@ -182,7 +181,7 @@ func CollectRethInstances(cfg *config.Config, localPriority map[int]int) []*Inst
 	}
 	// When no-reth-vrrp is set, the cluster state machine directly manages
 	// VIPs/GARPs — skip RETH VRRP instance creation.
-	if cc := cfg.Chassis.Cluster; cc != nil && (cc.NoRethVRRP || cc.PrivateRGElection) {
+	if cc := cfg.Chassis.Cluster; cc != nil && !cc.UsesRethVRRP() {
 		return nil
 	}
 
@@ -325,16 +324,12 @@ func vrrpGroupFamily(vips []string, groupKey string) string {
 }
 
 // familyOfAddrs reports the family of the first parseable address in addrs
-// ("inet" for IPv4, "inet6" for IPv6), stripping any /prefix suffix. Returns ""
-// when none parse.
+// ("inet" for IPv4, "inet6" for IPv6), via config.ParseVRRPVIP (#17150).
+// Returns "" when none parse.
 func familyOfAddrs(addrs []string) string {
 	for _, a := range addrs {
-		s := a
-		if idx := strings.Index(s, "/"); idx >= 0 {
-			s = s[:idx]
-		}
-		if ip := net.ParseIP(s); ip != nil {
-			if ip.To4() != nil {
+		if p, ok := config.ParseVRRPVIP(a); ok {
+			if p.Addr().Is4() {
 				return "inet"
 			}
 			return "inet6"

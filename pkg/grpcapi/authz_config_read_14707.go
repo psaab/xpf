@@ -28,6 +28,10 @@ type configReadSnapshots struct {
 	Other   *config.ConfigTree
 	NodeID  int
 	Present bool
+	// SlotErr is the rollback slot error carried inside the gate's
+	// RollbackCapture (#17215); ShowRollback surfaces it before
+	// rendering a nil Primary, with no second live-store read.
+	SlotErr error
 }
 
 type grpcConfigReadSlotError struct {
@@ -163,19 +167,20 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 			// Unscoped: substitute contained+expanded pricing over
 			// both actual arms; op verdict carried by the helper.
 			if r.GetActiveBaseline() || r.GetRollbackN() > 0 {
-				scfg, slot, other, nid, _, slotErr := s.store.RollbackCompareSnapshot(int(r.GetRollbackN()), r.GetActiveBaseline())
-				if scfg != nil {
-					priceCfg = scfg
+				cap := s.store.CaptureRollback(int(r.GetRollbackN()), r.GetActiveBaseline())
+				if cap.Cfg != nil {
+					priceCfg = cap.Cfg
 				}
-				snaps.NodeID = nid
-				snaps.Primary, snaps.Other = slot, other
-				if slotErr != nil {
+				snaps.NodeID = cap.NodeID
+				snaps.Primary, snaps.Other = cap.Slot, cap.Other
+				snaps.SlotErr = cap.Err
+				if cap.Err != nil {
 					if err := config.AuthorizeConfigShowCompareCommand(priceCfg, class, nil); err != nil {
 						return snaps, err
 					}
-					return snaps, grpcConfigReadSlotError{err: slotErr}
+					return snaps, grpcConfigReadSlotError{err: cap.Err}
 				}
-				return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, slot, other)
+				return snaps, config.AuthorizeConfigShowCompareAtTree(priceCfg, class, cap.Slot, cap.Other)
 			}
 			scfg, active, candidate, _ := s.store.CompareSnapshot()
 			if scfg != nil {
@@ -186,18 +191,19 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		}
 		if s.store != nil {
 			if r.GetActiveBaseline() || r.GetRollbackN() > 0 {
-				scfg, slot, other, nid, _, slotErr := s.store.RollbackCompareSnapshot(int(r.GetRollbackN()), r.GetActiveBaseline())
-				if scfg != nil {
-					priceCfg = scfg
+				cap := s.store.CaptureRollback(int(r.GetRollbackN()), r.GetActiveBaseline())
+				if cap.Cfg != nil {
+					priceCfg = cap.Cfg
 				}
-				snaps.NodeID = nid
-				trees = []*config.ConfigTree{slot, other}
-				snaps.Primary, snaps.Other = slot, other
-				if slotErr != nil {
+				snaps.NodeID = cap.NodeID
+				trees = []*config.ConfigTree{cap.Slot, cap.Other}
+				snaps.Primary, snaps.Other = cap.Slot, cap.Other
+				snaps.SlotErr = cap.Err
+				if cap.Err != nil {
 					if err := config.AuthorizeConfigShowCompareCommand(priceCfg, class, r.GetPath()); err != nil {
 						return snaps, err
 					}
-					return snaps, grpcConfigReadSlotError{err: slotErr}
+					return snaps, grpcConfigReadSlotError{err: cap.Err}
 				}
 			} else {
 				scfg, active, candidate, _ := s.store.CompareSnapshot()
@@ -223,23 +229,23 @@ func (s *Server) authorizeRPCConfigRead(cfg *config.Config, class, fullMethod st
 		// Display inheritance prices the expanded slot tree.
 		// Fold 3: atomic capture; an unresolved slot prices as
 		// absent (Primary nil, Present) and the handler surfaces
-		// the slot error from the live store without rendering it.
+		// the captured SlotErr (#17215) without rendering it.
 		var trees []*config.ConfigTree
 		nodeID := -1
 		priceCfg := cfg
 		var slotErr error
 		if s.store != nil {
-			scfg, tree, nid, _, capturedSlotErr := s.store.RollbackSnapshot(int(r.GetN()))
-			slotErr = capturedSlotErr
-			if scfg != nil {
-				priceCfg = scfg
+			cap := s.store.CaptureRollbackSlot(int(r.GetN()))
+			slotErr = cap.Err
+			if cap.Cfg != nil {
+				priceCfg = cap.Cfg
 			}
-			nodeID = nid
-			if tree != nil {
-				trees = []*config.ConfigTree{tree}
+			nodeID = cap.NodeID
+			if cap.Slot != nil {
+				trees = []*config.ConfigTree{cap.Slot}
 			}
 		}
-		snaps := configReadSnapshots{NodeID: nodeID, Present: true}
+		snaps := configReadSnapshots{NodeID: nodeID, Present: true, SlotErr: slotErr}
 		if len(trees) > 0 {
 			snaps.Primary = trees[0]
 		}

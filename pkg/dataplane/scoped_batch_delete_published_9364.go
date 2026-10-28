@@ -7,8 +7,9 @@ package dataplane
 // OPTIONAL capability: a miss does not error, it silently falls back to the
 // key-only `BatchDeleteSessions`. That is a worse failure mode than a hard one.
 // The fallback IS the pre-#9364 bare delete, so a type that stops satisfying the
-// interface restores the exact defect this issue removed — the conntrack GC's
-// deletes go out bare again, the helper probes every routing instance, and it
+// interface restores the exact defect this issue removed — batch deletes
+// (formerly the conntrack GC's, `pkg/conntrack` deleted in #17155) go out
+// bare again, the helper probes every routing instance, and it
 // refuses the ones two tenants match (#8636) — with no error anywhere and every
 // test that supplies its own double still green.
 //

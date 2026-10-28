@@ -323,7 +323,7 @@ pub(crate) struct SessionMetadata {
     /// "use the global per-protocol `SessionTimeouts`" — the historical
     /// behavior, byte-identical for every flow whose application has no custom
     /// `inactivity-timeout`. When `Some`, `session_timeout_ns` uses it as the
-    /// ESTABLISHED/idle expiry for the session, so the conntrack GC ages the
+    /// ESTABLISHED/idle expiry for the session, so the helper's expiry ages the
     /// session out on the app's value instead of the global timeout (closing the
     /// legacy-eBPF `appTimeout` parity regression). It does NOT override the
     /// short TCP closing/RST reap windows, matching Junos (inactivity-timeout is
@@ -592,7 +592,7 @@ pub(crate) enum SessionOrigin {
 
     SharedMaterialize,
     SharedPromote,
-    #[allow(dead_code)] // enum variant for completeness
+    // enum variant for completeness
     WorkerLocalImport,
     /// #10038 (parent-review item 5): firewall-SELF-originated via a local
     /// TUN publisher (WG `tun_origin.rs`, GRE `tunnel.rs`). POSITIVE
