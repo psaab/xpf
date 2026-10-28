@@ -43,16 +43,16 @@ import (
 //     capture ONCE (surfacingIncompleteCapture), on every driver.
 //     The debt survives for a later complete scan; settled retries do
 //     not replay the error (capture.enumerateErr is once-only).
-//   - A fatal apply (applyErrSkipsPeerSync: dataplane disarmed, a
-//     daemon-stop context abort, or a policy READ authority refusal)
-//     skips the discharge on the commit and peer-sync drivers:
-//     either the dataplane is disarmed/tearing down or no safe
-//     session candidate set was captured. The rollback driver is
-//     the deliberate exception (pre-consolidation it had NO fatal
-//     classification): it discharges whenever publication landed,
-//     fatal or not — see finalizePromotedApplyLocked. A non-fatal
-//     error leaves the config active + armed on every driver, so
-//     the discharge still runs (#4234/#4342/#5578: a PARTIAL
+//   - Fatal classification (applyErrSkipsPeerSync) is driver-specific:
+//     commit classifies the surfaced apply + capture error, matching
+//     the original join-before-classify order; peer-sync classifies the
+//     bare apply error before returning the surfaced error. Fatal commit
+//     and peer-sync outcomes skip discharge; commit also skips peer push
+//     and stamp. The rollback driver is the deliberate exception
+//     (pre-consolidation it had NO fatal classification): it discharges
+//     whenever publication landed — see finalizePromotedApplyLocked.
+//     A non-fatal error leaves the config active + armed on every driver,
+//     so the discharge still runs (#4234/#4342/#5578: a PARTIAL
 //     invalidation is surfaced, never swallowed).
 //   - The stamp is gated on the JOINED local outcome (apply +
 //     discharge), never on the peer-push result: a peer failure must
@@ -162,7 +162,9 @@ type promotedApplyOutcome struct {
 	// applyErr is the apply error AFTER the #12072 unpublished-
 	// capture surfacing has been joined in.
 	applyErr error
-	// fatal is applyErrSkipsPeerSync(applyErr): the apply must not
+	// fatal records the driver's decision: commit classifies the
+	// surfaced apply error, while peer-sync and rollback classify the
+	// bare apply error. A fatal commit/peer-sync outcome must not
 	// propagate (no discharge ran, no stamp, and — on drivers that
 	// push — no push).
 	fatal bool
@@ -276,15 +278,21 @@ func (d *Daemon) finalizePromotedApplyLocked(p promotedApply) promotedApplyOutco
 	} else {
 		applyErr = d.applyConfigLocked(p.applyCtx, newCfg)
 	}
-	// Classify the BARE apply error BEFORE the #12072 surfacing joins
-	// the capture error in: a capture readErr wrapping
-	// context.Canceled/ErrPolicyReadAuthority must not flip a
-	// non-fatal apply fatal (the pre-consolidation sync copy
-	// classified the bare error; the capture error is surfaced for
-	// the operator, not re-classified).
-	out.fatal = applyErrSkipsPeerSync(applyErr)
+	// #12072 surfaces the unpublished capture before the drivers make
+	// their fatal decision. The pre-consolidation commit path joined
+	// the capture error first, then classified the joined result; keep
+	// that ordering so a cancel/authority capture failure prevents
+	// commit discharge, peer-push and stamp. Peer-sync deliberately
+	// retains its old bare-apply classification while surfacing the
+	// capture error in its returned result.
+	bareApplyErr := applyErr
 	applyErr = d.surfacingIncompleteCapture(newCfg, applyErr)
 	out.applyErr = applyErr
+	if p.kind == promotedApplyCommit {
+		out.fatal = applyErrSkipsPeerSync(applyErr)
+	} else {
+		out.fatal = applyErrSkipsPeerSync(bareApplyErr)
+	}
 
 	switch p.kind {
 	case promotedApplySync:

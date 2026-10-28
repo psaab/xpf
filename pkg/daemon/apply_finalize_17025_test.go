@@ -15,10 +15,11 @@ package daemon
 //     dedicated rollback cells (newRealApplyRollbackHarness9811 /
 //     newLandedRollbackRun12072) cover clean, non-fatal, fatal,
 //     cancel and the unpublished incomplete capture (ERROR alarm +
-//     latched #9811 debt error); a dedicated sync cell covers
-//     deferred-no-completion x device-map (#1956 alarm); a dedicated
-//     sync cell pins that a capture readErr wrapping
-//     context.Canceled does not flip a non-fatal apply fatal.
+//     latched #9811 debt error); dedicated sync cells cover
+//     deferred-no-completion x device-map (#1956 alarm) and pin
+//     that capture-error surfacing does not reclassify sync's bare
+//     apply error; the commit-composite peer-push cell verifies the
+//     joined error is fatal before commit side effects.
 //   - ACCEPTANCE (c): the #6948 arm comment occurs once.
 //
 // RED pre-fix: the structural cell fails (three arm sites, three
@@ -493,5 +494,38 @@ func TestFinalizeDriversPeerPushShape17025(t *testing.T) {
 			t.Fatalf("fatal commit pushed %d times, want 0", pushes)
 		}
 	}()
+	// (4) Commit composite of (3): a non-fatal apply error whose
+	// unpublished capture readErr wraps context.Canceled must be
+	// classified on the JOINED error, exactly as the pre-consolidation
+	// commit driver did. The joined error is fatal, so the commit must
+	// stop before discharge/peer push/stamp and return the promoted
+	// config with ErrCommittedNotApplied wrapping both components.
+	t.Run("commit/captureCancelFlipsFatalAfterJoin", func(t *testing.T) {
+		r, c0 := newConvergenceRun12072(t, []string{"p-first", "a", "web"})
+		c1 := twoPolicyConfig([]string{"p-first", "web"}, nil)
+		r.dp.readErr = fmt.Errorf("helper READ: %w", context.Canceled)
+		r.dp.invalDebtTestDP12073.script = []invalDebtOutcome12073{{err: transient}}
+		pushes := 0
+		r.h.d.syncPeerForTest = func() { pushes++ }
+		err := r.commitWithPeer("c1", c0, c1, peerSyncAlways)
+		if err == nil {
+			t.Error("commit with joined fatal capture error must return an error")
+		}
+		if !errors.Is(err, configstore.ErrCommittedNotApplied) {
+			t.Errorf("commit err = %v, want ErrCommittedNotApplied wrap after joined fatal classification", err)
+		}
+		if !errors.Is(err, transient) || !errors.Is(err, context.Canceled) {
+			t.Errorf("commit err = %v, want joined apply and capture errors", err)
+		}
+		if !applyErrSkipsPeerSync(err) {
+			t.Errorf("commit err = %v, want fatal joined classification", err)
+		}
+		if pushes != 0 {
+			t.Errorf("joined fatal commit pushed %d times, want 0", pushes)
+		}
+		if r.h.d.store.ActiveApplied() {
+			t.Fatal("joined fatal commit must not stamp")
+		}
+	})
 	_ = cluster.ConfigApplyPendingError{}
 }
