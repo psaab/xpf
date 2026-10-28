@@ -798,7 +798,9 @@ func compileStrict8690(t *testing.T, text string, skipNormalize bool) error {
 	if len(perrs) > 0 {
 		return fmt.Errorf("parse: %v", perrs)
 	}
-	_, err := compileTree(tree, compileOpts{skipCompactNormalize: skipNormalize}, nil)
+	opts := strictCompileOpts()
+	opts.skipCompactNormalize = skipNormalize
+	_, err := compileTree(tree, opts, nil)
 	return err
 }
 
@@ -810,7 +812,9 @@ func compileSeam8690(t *testing.T, text string, skipNormalize bool) *Config {
 	if len(perrs) > 0 {
 		return nil
 	}
-	cfg, err := compileTree(tree, compileOpts{skipCompactNormalize: skipNormalize}, nil)
+	opts := strictCompileOpts()
+	opts.skipCompactNormalize = skipNormalize
+	cfg, err := compileTree(tree, opts, nil)
 	if err != nil || cfg == nil {
 		return nil
 	}
@@ -918,7 +922,9 @@ func TestElidedSSHRootLoginReachesTheDaemon8690(t *testing.T) {
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
 	}
-	off, err := compileTree(tree, compileOpts{skipCompactNormalize: true}, nil)
+	offOpts := strictCompileOpts()
+	offOpts.skipCompactNormalize = true
+	off, err := compileTree(tree, offOpts, nil)
 	if err != nil || off == nil {
 		t.Fatalf("un-normalized compile failed: %v", err)
 	}
@@ -1326,7 +1332,7 @@ func TestArm2CannotSeeATrailingTokenGate8690(t *testing.T) {
 		if len(perrs) > 0 {
 			return nil // a parse failure is not the gate we are probing
 		}
-		_, err := compileTree(tree, compileOpts{}, nil)
+		_, err := compileTree(tree, strictCompileOpts(), nil)
 		return err
 	}
 
@@ -1478,7 +1484,9 @@ func TestTheGateCountsTheSurvivingCriterion8690(t *testing.T) {
 		if len(perrs) > 0 {
 			t.Fatalf("parse: %v", perrs)
 		}
-		_, err := compileTree(tree, compileOpts{skipCompactNormalize: skipPass}, nil)
+		compileOpts8690 := strictCompileOpts()
+		compileOpts8690.skipCompactNormalize = skipPass
+		_, err := compileTree(tree, compileOpts8690, nil)
 		if err == nil {
 			return ""
 		}

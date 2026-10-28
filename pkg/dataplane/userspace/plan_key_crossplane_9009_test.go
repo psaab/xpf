@@ -59,6 +59,37 @@ func TestSharedUMEMReorderDoesNotMoveThePlanKey9009(t *testing.T) {
 	}
 }
 
+// ── #17134 F1: a modeless shared_umem must hash as `cross-nic` ──
+
+func TestModelessSharedUMEMHashesAsCrossNic17134(t *testing.T) {
+	mk := func(mode string) *ConfigSnapshot {
+		s := &ConfigSnapshot{}
+		s.Userspace.SharedUMEM = &config.SharedUMEMConfig{
+			Mode: mode, Interfaces: []string{"ge-0-0-1", "ge-0-0-2"}, Phase0ArtifactFile: "/x.o",
+		}
+		return s
+	}
+	modeless := snapshotBindingPlanKey(mk(""))
+	explicit := snapshotBindingPlanKey(mk("cross-nic"))
+	if modeless != explicit {
+		t.Errorf("#17134 F1: a present shared_umem with no `mode` leaf (Go "+
+			"emits Mode=\"\") hashed differently from an explicit "+
+			"`mode cross-nic`, while Rust canonicalizes missing/empty/null "+
+			"mode to `cross-nic` in deserialize_shared_umem_mode BEFORE its "+
+			"plan hash reads the typed field — so Rust's key does not move. "+
+			"Toggling that explicit leaf therefore moved ONLY Go's key, was "+
+			"classified !samePlan, and forced a full helper restart / AF_XDP "+
+			"teardown instead of a same-plan refresh.\n  modeless=%s\n  explicit=%s", modeless, explicit)
+	}
+	// Only empty normalizes: a REAL mode change must still move the key,
+	// or the fix would be content-blind and re-open #8901.
+	if off := snapshotBindingPlanKey(mk("off")); off == explicit {
+		t.Error("#17134 F1: changing shared_umem mode cross-nic -> off did " +
+			"not move the key — the normalization must map only \"\" to " +
+			"cross-nic, not collapse distinct modes (#8901)")
+	}
+}
+
 // ── D2: a refused fabric parent must move the key ──
 
 func TestRefusedFabricParentMovesThePlanKey9009(t *testing.T) {

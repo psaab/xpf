@@ -9,6 +9,8 @@ import (
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/pkg/config"
 )
 
 // openSocket creates the per-instance raw socket bound to the interface.
@@ -78,12 +80,8 @@ func (vi *vrrpInstance) ensureVIPFamilySocketsWith(
 
 func vipFamiliesIn(vips []string) (hasIPv4, hasIPv6 bool) {
 	for _, vip := range vips {
-		addr := vip
-		if idx := strings.Index(addr, "/"); idx >= 0 {
-			addr = addr[:idx]
-		}
-		if ip := net.ParseIP(addr); ip != nil {
-			if ip.To4() != nil {
+		if p, ok := config.ParseVRRPVIP(vip); ok {
+			if p.Addr().Is4() {
 				hasIPv4 = true
 			} else {
 				hasIPv6 = true

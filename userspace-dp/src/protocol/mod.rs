@@ -39,11 +39,19 @@ mod security;
 pub(crate) mod session_delta_schema;
 // #7160: `ProcessStatus`, split out of `control.rs` to keep it under the
 // modularity floor. Re-exported below, so every existing path is unchanged.
-mod status;
 pub(crate) mod snapshot;
+mod status;
 
 #[cfg(test)]
 mod tests;
+
+// #17152: the crate-wide #16187 `unsafe` ratchet is mounted here, at the
+// `protocol` module that owns no single file's surface, not under
+// `protocol::cos` — it scans the whole `src/` tree, and mounting it
+// under `cos.rs` made a crate-wide gate look like a CoS-file guard.
+#[cfg(test)]
+#[path = "unsafe_ratchet_16187.rs"]
+mod unsafe_ratchet_16187;
 
 pub(crate) use binding::*;
 pub(crate) use control::*;
@@ -51,8 +59,8 @@ pub(crate) use cos::*;
 pub(crate) use nat::*;
 pub(crate) use resolution::*;
 pub(crate) use security::*;
-pub(crate) use status::*;
 pub(crate) use snapshot::*;
+pub(crate) use status::*;
 
 /// Deserialize a `Vec<T>` that tolerates an explicit JSON `null` as an empty
 /// vector (#2214).
@@ -79,4 +87,16 @@ where
 {
     use serde::Deserialize as _;
     Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// #17134: the scalar sibling of `null_tolerant_vec` for `u64` counters
+/// (the typed `UserspaceSnapshot.workers` / `ring_entries`): an explicit
+/// JSON `null` from an older daemon decodes as 0 instead of rejecting the
+/// whole snapshot.
+pub(crate) fn null_tolerant_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize as _;
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_default())
 }

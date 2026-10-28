@@ -413,15 +413,14 @@ func validateDHCPStaticBindingsStrict(cfg *Config) error {
 // requires a /prefix (schema_interfaces.go vrrpGroupSchemaNode), so the VIP is
 // normally CIDR (e.g. 10.0.1.1/24); a bare IP is tolerated here so a leniently-
 // loaded legacy config is still classified. An unparseable value returns nil
-// and is left to the schema validator's concern.
+// and is left to the schema validator's concern. The parse is ParseVRRPVIP
+// (#17150), shared with pkg/vrrp.
 func vrrpVIPHostIP(vip string) net.IP {
-	if vip == "" {
+	p, ok := ParseVRRPVIP(vip)
+	if !ok {
 		return nil
 	}
-	if ip, _, err := net.ParseCIDR(vip); err == nil {
-		return ip
-	}
-	return net.ParseIP(vip)
+	return net.IP(p.Addr().AsSlice())
 }
 
 // validateVRRPVirtualAddressSubnet (#3013) rejects a VRRP virtual-address that

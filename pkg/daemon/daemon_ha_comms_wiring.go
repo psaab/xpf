@@ -635,15 +635,19 @@ func (d *Daemon) wireClusterPeerFailoverHooks(ss *cluster.SessionSync) {
 	// #9569: the untargeted failover and ForceSecondary refuse a peer that did
 	// not apply the newest config this node sent.
 	d.cluster.SetPeerConfigStaleFunc(d.peerConfigStale)
-	d.cluster.SetPeerTimeoutGuard(d.shouldSuppressPeerHeartbeatTimeout)
-	d.cluster.SetPeerHeartbeatRecoveredFunc(d.notePeerHeartbeatRecovered)
-	// #11682: an idle ACK-only peer may have up to one read-deadline cadence
-	// between inbound sync frames. Use the sync layer's full silence window,
-	// not the shorter heartbeat-timeout suppression window, before deciding a
-	// never-seen peer is absent.
-	d.cluster.SetPeerNeverSeenSyncFreshFunc(func() bool {
-		return ss.IsConnected() && ss.PeerRecentlyActiveWithinSilenceWindow()
-	})
+	// #17056: publish the one sync reference the Manager's suppression and
+	// never-seen policies read. This replaces the former timeout-guard,
+	// heartbeat-recovered and never-seen-fresh hooks: the policy, its 5s
+	// cap stamp and the heartbeat-admission reset now live together in
+	// pkg/cluster under Manager.mu (heartbeat_suppress.go). Publishing
+	// resets the cap stamp, and SetPeerSyncSource binds the source's
+	// per-connection reconnect dispatch to the same reset, so a reconnect
+	// on this same SessionSync object also gets a fresh 5s window — the
+	// fresh-connection reset the daemon used to do in
+	// onSessionSyncPeerConnected. #11682's silence
+	// window is preserved inside Manager.peerSyncFreshLocked, which reads
+	// PeerRecentlyActiveWithinSilenceWindow off this same source.
+	d.cluster.SetPeerSyncSource(ss)
 	// #7367: surface the dataplane's view of each RG in the status render.
 	d.cluster.SetRGForwardingFunc(d.rgForwardingStatus)
 	// #1792: while our heartbeat sockets restart (VRF rebind),
