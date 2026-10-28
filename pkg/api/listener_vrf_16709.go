@@ -100,23 +100,32 @@ func (s *Server) BindDevices() map[string]string {
 // Every production bind site (Start, reconcileLegsLocked,
 // bindListeners/Run, HTTPS cert recovery) goes through here so no leg
 // can silently revert to the unscoped bind that #16709 fixes.
-func (s *Server) listenAddr(addr string) (net.Listener, error) {
-	dev := s.bindDeviceFor(addr)
+//
+// The caller owns ln and MUST call recordLegDevice(addr, dev) only
+// after the listener's full leg/startup plan succeeds and its socket
+// is committed to the server lifecycle. reconcileLegsLocked does this
+// after planning and installing the leg; bindListeners does so only
+// after its all-or-nothing bind plan succeeds.
+// listenAddr itself never records: a bind that succeeds but whose
+// plan then fails (HTTPS certificate generation, #7041) is closed by
+// reconcileLegsLocked, and recording at bind time would leave the
+// retained old leg looking scope-converged at the new device.
+// listenAddr returns dev so callers record exactly what was bound.
+func (s *Server) listenAddr(addr string) (ln net.Listener, dev string, err error) {
+	dev = s.bindDeviceFor(addr)
 	if dev == "" || s.listenIsCustom() {
-		ln, err := s.listen("tcp", addr)
+		ln, err = s.listen("tcp", addr)
 		if err != nil {
-			return nil, err
+			return nil, dev, err
 		}
-		s.recordLegDevice(addr, dev)
-		return ln, nil
+		return ln, dev, nil
 	}
 	lc := net.ListenConfig{Control: bindToDeviceControl(dev)}
-	ln, err := lc.Listen(context.Background(), "tcp", addr)
+	ln, err = lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("api: bind %q scoped to device %q: %w", addr, dev, err)
+		return nil, dev, fmt.Errorf("api: bind %q scoped to device %q: %w", addr, dev, err)
 	}
-	s.recordLegDevice(addr, dev)
-	return ln, nil
+	return ln, dev, nil
 }
 
 // listenIsCustom reports whether a test injected Config.ListenFunc.
@@ -159,11 +168,15 @@ func bindToDeviceControl(device string) func(string, string, syscall.RawConn) er
 // safe; entries for retired addresses are pruned when a leg set is
 // replaced.
 
-// recordLegDevice records the scope a just-bound live leg carries.
-// Start/reconcile/cert-recovery callers hold lifeMu. bindListeners
-// (the Run path) binds before the server is shared with any other
-// goroutine, so the unsynchronized write is safe there too; no caller
-// binds concurrently with a reconcile.
+// recordLegDevice records the bound scope for a committed listener.
+// Start, reconcile, and certificate recovery call it after the leg has
+// been installed; Run calls it only after bindListeners has completed
+// its all-or-nothing startup bind plan. A bind whose plan failed never
+// records, so a retained old leg keeps its old recorded scope and the
+// scope change stays retry debt (#17812). Start/reconcile/cert-recovery
+// callers hold lifeMu. bindListeners (the Run path) binds before the
+// server is shared with any other goroutine, so its writes are safe too;
+// no caller binds concurrently with a reconcile.
 func (s *Server) recordLegDevice(addr, dev string) {
 	if s.legDevices == nil {
 		s.legDevices = make(map[string]string)

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,56 @@ func TestBindDeviceSnapshot16709(t *testing.T) {
 	}
 	if got := s.BindDevices(); got != nil {
 		t.Fatalf("BindDevices after clear = %v, want nil", got)
+	}
+}
+
+// TestReconcileHTTPPreservesHTTPSBindScope16709 is the dual-plane
+// control: reconciling HTTP must not erase the still-installed HTTPS
+// leg's recorded bind device. The following HTTPS reconcile must adopt
+// that socket without attempting a colliding same-address bind.
+func TestReconcileHTTPPreservesHTTPSBindScope16709(t *testing.T) {
+	const httpAddr = "192.0.2.5:80"
+	const httpsAddr = "192.0.2.5:443"
+	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("open HTTP fixture listener: %v", err)
+	}
+	defer httpLn.Close()
+	httpsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("open HTTPS fixture listener: %v", err)
+	}
+	defer httpsLn.Close()
+
+	s := &Server{}
+	s.SetBindDevices(map[string]string{httpAddr: "vrf-mgmt", httpsAddr: "vrf-mgmt"})
+	s.httpLegs = []*listenerLeg{{srv: &http.Server{Addr: httpAddr}, ln: httpLn}}
+	s.httpsLegs = []*listenerLeg{{srv: &http.Server{Addr: httpsAddr}, ln: httpsLn}}
+	s.legDevices = map[string]string{httpAddr: "vrf-mgmt", httpsAddr: "vrf-mgmt"}
+	bindAttempts := 0
+	s.listen = func(_, _ string) (net.Listener, error) {
+		bindAttempts++
+		return nil, net.ErrClosed
+	}
+	s.customListen = true
+	if err := s.ReconcileHTTPAddrs([]string{httpAddr}); err != nil {
+		t.Fatalf("reconcile unchanged HTTP leg: %v", err)
+	}
+	if err := s.ReconcileHTTPSAddrs(true, []string{httpsAddr}); err != nil {
+		t.Fatalf("reconcile unchanged HTTPS leg after HTTP: %v", err)
+	}
+	if bindAttempts != 0 {
+		t.Fatalf("HTTP/HTTPS control attempted %d unnecessary binds", bindAttempts)
+	}
+	s.lifeMu.Lock()
+	gotHTTP := s.legDeviceLocked(httpAddr)
+	gotHTTPS := s.legDeviceLocked(httpsAddr)
+	s.lifeMu.Unlock()
+	if gotHTTP != "vrf-mgmt" {
+		t.Fatalf("HTTP scope = %q, want vrf-mgmt", gotHTTP)
+	}
+	if gotHTTPS != "vrf-mgmt" {
+		t.Fatalf("HTTPS scope = %q, want vrf-mgmt", gotHTTPS)
 	}
 }
 
