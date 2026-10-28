@@ -275,7 +275,28 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 		seenText[text] = true
 		entries = append(entries, entry{text, is6})
 	}
-	for _, name := range chain {
+	hasLaterAccept := func(policyIdx, termIdx int) bool {
+		for i := policyIdx; i < len(chain); i++ {
+			later, defined := po.PolicyStatements[chain[i]]
+			if !defined || later == nil {
+				continue
+			}
+			start := 0
+			if i == policyIdx {
+				start = termIdx + 1
+			}
+			for _, laterTerm := range later.Terms[start:] {
+				if laterTerm != nil && (laterTerm.Action == "accept" || laterTerm.NextPolicy) {
+					return true
+				}
+			}
+			if later.DefaultAction == "accept" {
+				return true
+			}
+		}
+		return false
+	}
+	for chainIdx, name := range chain {
 		if name == "" {
 			continue
 		}
@@ -298,7 +319,7 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 		// A `next policy` term anywhere in the statement makes
 		// the default unreachable for matched candidates, in
 		// which case fall-through is correct.
-		for _, term := range ps.Terms {
+		for termIdx, term := range ps.Terms {
 			if term == nil {
 				continue
 			}
@@ -370,6 +391,11 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 				return ripSplitEntries16625(entries)
 			}
 			for _, e := range termEntries {
+				// This marker means the term has no matching route:
+				// continue evaluating the policy chain.
+				if strings.HasPrefix(e.text, "nomatch\x00") {
+					continue
+				}
 				// An empty max-length `longer` boundary is a
 				// representable exact-host exclusion from a
 				// sibling broader permit in this accept term.
@@ -377,7 +403,7 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 				// longest-match stops still require term fallthrough
 				// that this destination-only list cannot express.
 				if strings.HasPrefix(e.text, "boundary\x00") {
-					if !isAccept {
+					if !isAccept || hasLaterAccept(chainIdx, termIdx) {
 						return nil, nil, false
 					}
 					add("deny\x00"+strings.TrimPrefix(e.text, "boundary\x00"), e.v6)
@@ -491,6 +517,7 @@ func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig
 		plen  int
 	}
 	var rfs []rfEntry
+	emptyBoundary := false
 	for _, rf := range term.RouteFilters {
 		if rf == nil {
 			continue
@@ -498,6 +525,9 @@ func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig
 		text, is6, rendered := ripRouteFilterEntryText16625(rf)
 		if !rendered {
 			return nil, false
+		}
+		if text == "" {
+			emptyBoundary = true
 		}
 		ipnet, plen := parseRouteFilterPrefix16762(rf.Prefix)
 		rfs = append(rfs, rfEntry{text: text, base: rf.Prefix, v6: is6, ipnet: ipnet, plen: plen})
@@ -560,6 +590,11 @@ func ripTermEntries16625(term *config.PolicyTerm, po *config.PolicyOptionsConfig
 		} else {
 			entries = append(entries, entry{"deny\x00" + fmt.Sprintf("%s le %d", sanitizeFRRValue(e.base), maxLen), e.v6})
 		}
+	}
+	if len(entries) == 0 && emptyBoundary {
+		// A lone valid empty boundary matches no route; preserve that
+		// fact so the caller can continue to a later policy term.
+		entries = append(entries, entry{"nomatch\x00", false})
 	}
 	return entries, true
 }
