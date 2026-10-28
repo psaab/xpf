@@ -20,11 +20,24 @@ func CarvedSingleExtraSequences16869(carved bool, ps *PolicyStatement) uint64 {
 // CarvedComposedExtraSequences16869 reports the extra carved fall-off sequence
 // beyond the fallback already reserved by ComposedChainSequenceCount.
 func CarvedComposedExtraSequences16869(po *PolicyOptionsConfig, chain []string, carved bool, fallbackAction string) uint64 {
-	if !carved || fallbackAction != "permit" || po == nil {
+	if po == nil {
+		return 0
+	}
+	return CarvedComposedExtraSequencesForStatements16869(po.PolicyStatements, chain, carved, fallbackAction)
+}
+
+// CarvedComposedExtraSequencesForStatements16869 is
+// CarvedComposedExtraSequences16869 over an explicit statement map instead of
+// po.PolicyStatements: callers that render filtered statements reserve
+// against the members they actually render. This is the single termination
+// walk both variants share, so the strict gate and the render belt cannot
+// diverge on whether a chain reaches the carved fall-off pair.
+func CarvedComposedExtraSequencesForStatements16869(pss map[string]*PolicyStatement, chain []string, carved bool, fallbackAction string) uint64 {
+	if !carved || fallbackAction != "permit" {
 		return 0
 	}
 	for _, name := range chain {
-		ps := po.PolicyStatements[name]
+		ps := pss[name]
 		if ps == nil {
 			continue
 		}

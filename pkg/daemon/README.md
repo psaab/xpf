@@ -1915,7 +1915,30 @@ by `reconcileClusterRAServices`. Pinned by
 
 When `no-reth-vrrp` or `private-rg-election` is configured, the daemon owns
 VIP add/remove and the post-failover GARP directly (there are no VRRP
-instances). `directSendGARPs` (`daemon_ha_vip.go`) sends a broadcast GARP
+instances). Since #17052 both modes share one announce engine
+(`pkg/cluster/announce.go`: `AnnounceTargets` + `SendAnnounceTargets`,
+the single `ClampGratuitousARPCount` on the announce path): direct mode
+sends the full set, legacy VRRP mode's `pkg/vrrp` sends the VIPs and the
+daemon sends the non-VIP half (router link-local NAs + pool
+GARPs/NAs) so the announced (iface, IP, kind) set is identical. The
+non-VIP half is level-triggered (`convergeLegacyNonVIPAnnounce`, the
+#16696 pattern): cluster-primary, VRRP MASTER and the reconcile pass
+all funnel through it. The claim is keyed to an activation generation
+(`rgStateMachine.CurrentActivation`) that increments only on
+inactive→active transitions, never on no-change reconcile inputs.
+Deactivation clears claims only through the transition's generation
+when the RG is actually inactive: the cluster-demotion arm checks
+desired state, while VRRP BACKUP and reconcile clear on their inactive
+paths. A demotion that leaves VRRP MASTER active preserves the same claim,
+so the next reconcile pass does not resend; late cleanup from an older
+deactivation cannot erase a newer claim. If `AnnounceResult.FirstErr`
+is non-nil and `Sent` is zero, the claim is released for retry on the next
+producer/reconcile pass; partial success remains claimed to avoid
+duplicating targets already announced. A cluster-first promotion on the
+default userspace dataplane (which consumes the rg-state edge before
+ForceRGMaster) therefore cannot swallow the announce, and a steady-state
+reconcile tick cannot re-send it.
+`directSendGARPs` (`daemon_ha_vip.go`) sends a broadcast GARP
 burst per VIP plus a supplementary **directed** ARP probe to the subnet
 gateway so a router that ignores broadcast gratuitous ARP still re-binds the
 VIP to the new master's MAC. The probe target is derived by the single source

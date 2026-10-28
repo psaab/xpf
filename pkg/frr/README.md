@@ -1300,6 +1300,24 @@ step. Both are required — neither sees the other's case:
   `redistribute_chain_16868_test.go`. Composed-chain QNH metric
   overlay is not applied (single-policy and bare static entries keep
   their metric maps).
+  **Single chain composer (#17026).** Both chain renderers — the BGP
+  composer (#5277) and this redistribute composer (#15156) — are thin
+  adapters over `composeChainRouteMap` in `route_map_chain.go`; there
+  is one render loop and one overflow belt. The belt consults
+  `config.ComposedChainSequenceCount` over the exact statements that
+  will render (authored statements for BGP, per-source/variant
+  filtered statements for redistribute), so it truncates at a
+  terminating member and saturates exactly as the SSOT does.
+  Redistribute chains are **render-belt-only**: unlike BGP composed
+  chains (`validateBGPComposedChainSequenceBoundStrict`), no strict
+  commit gate bounds them, because the rendered count depends on the
+  per-source and per-variant filtered statements, which the
+  config-side gate cannot reproduce without duplicating the
+  renderer's filtering. The belt is the fail-closed backstop on the
+  tolerant load / peer-sync path: an oversized redistribute chain
+  renders the bounded quarantine deny under its composed name
+  instead of an expansion past the FRR sequence ceiling. Parity and
+  regression cells: `route_map_chain_17026_test.go`.
   Both `route-map out` emit sites (ipv4 + ipv6 AF) are guarded by
   `isDefinedPolicyStatement` (#2539, sibling of the #2490 inbound guard):
   `globalExport` is already restricted to defined policy-statements, but a
