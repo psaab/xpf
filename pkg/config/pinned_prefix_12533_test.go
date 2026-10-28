@@ -2,7 +2,6 @@ package config
 
 import (
 	"net/netip"
-	"strings"
 	"testing"
 )
 
@@ -51,6 +50,7 @@ func TestPinnedPrefixSchema12533(t *testing.T) {
 
 func TestPinnedPrefixCompile12533(t *testing.T) {
 	tree := flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client prefix-delegating preferred-prefix-length 56",
 		"set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client prefix-delegating pinned-prefix fd00:1234::1/48",
 		"set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client prefix-delegating pinned-prefix fd00:aaaa::/48",
 		"set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client prefix-delegating pinned-prefix fd00:1234::/48",
@@ -77,13 +77,19 @@ func TestPinnedPrefixCompile12533(t *testing.T) {
 	if ConfigFingerprint(cfg) != ConfigFingerprint(cfg2) {
 		t.Fatal("fingerprint not stable for pinned config")
 	}
-	if !strings.Contains(ConfigFingerprint(cfg), "fd00:1234::/48") {
-		t.Fatal("fingerprint must include pins")
+	// The pin field must change the fingerprint when the rest of the config is
+	// unchanged. The canonical rendering is hashed, so assert semantic equality
+	// rather than searching its internal representation.
+	noPinsTree := flatTreeFromSets(t,
+		"set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client prefix-delegating preferred-prefix-length 56")
+	cfg3, err := CompileConfig(noPinsTree)
+	if err != nil {
+		t.Fatalf("compile unpinned config: %v", err)
 	}
-	// No pins: nil, fingerprint differs.
-	tree2 := flatTreeFromSets(t, "set interfaces ge-0/0/0 unit 0 family inet6 dhcpv6-client prefix-delegating preferred-prefix-length 56")
-	cfg3, _ := CompileConfig(tree2)
 	if got := cfg3.Interfaces.Interfaces["ge-0/0/0"].Units[0].DHCPv6Client.PinnedPrefixes; got != nil {
 		t.Fatalf("unpinned PinnedPrefixes=%v want nil", got)
+	}
+	if ConfigFingerprint(cfg) == ConfigFingerprint(cfg3) {
+		t.Fatal("fingerprint must change when pinned-prefix config is removed")
 	}
 }

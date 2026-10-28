@@ -176,11 +176,9 @@ type SecurityConfig struct {
 	// whole snapshot (#12039). Keeping the source diagnostic here is necessary
 	// because the malformed residue is no longer distinguishable from an
 	// ordinary empty pair after AST compilation.
-	// json:"-" deliberately: this is a COMPILE-TIME DIAGNOSTIC, not part of the
-	// config's semantic content. Serialising it would perturb every fixture and
-	// fingerprint that compares compiled configs -- the #4406 goldens, and the
-	// ConfigFingerprint comparisons the elision censuses run -- for a field
-	// that is nil in every valid config.
+	// `json:"-"` keeps this compile-time diagnostic out of JSON/REST.
+	// fingerprintIgnore separately excludes it from semantic comparisons:
+	// the synthetic carrier and Warnings are the enforcement/diagnostic paths.
 	MalformedZonePairs []string `json:"-"`
 	// UnknownPoliciesChildren records unrecognized or policy-container-valid
 	// non-enforcement direct children of `security policies`, plus qualified
@@ -805,16 +803,15 @@ type Policy struct {
 	// rejection mirror can name the offending shape (#12288). Authored policies
 	// leave it empty.
 	//
-	// `json:"-"` per the #9246 MalformedZonePairs precedent: this is a
-	// COMPILE-TIME diagnostic, not config content, so serializing it would
-	// perturb fixtures and ConfigFingerprint comparisons.
+	// `json:"-"` keeps this compile-time diagnostic out of JSON/REST.
+	// fingerprintIgnore also excludes it from semantic comparisons.
 	MalformedZonePairShapes []string `json:"-"`
 	// UnknownSecurityPoliciesChildren carries the skipped keyword diagnostics
 	// on the synthetic #12217 poison carrier so the userspace rejection mirror
 	// can name the omitted policy-container children. Authored policies leave
 	// it empty.
-	// json:"-" keeps this compile-time diagnostic out of semantic config
-	// fingerprints.
+	// `json:"-"` keeps this compiler diagnostic out of JSON/REST and
+	// fingerprintIgnore excludes it from semantic comparisons.
 	UnknownSecurityPoliciesChildren []string `json:"-"`
 }
 
@@ -1313,17 +1310,11 @@ type NATRule struct {
 	// a rule with a warning (it already publishes no entry for an empty
 	// match, so that half is observability only).
 	//
-	// EXPORTED (unlike matchAuthored) because the snapshot builders and the
-	// show renderers live in other packages and must read it — but tagged
-	// `json:"-"` per the #9246 MalformedZonePairs precedent: it is a
-	// COMPILE-TIME DIAGNOSTIC derived at compile time on every node
-	// (Store.Load / Store.SyncApply / RetainedGeneration all recompile from
-	// the tree), not semantic content, so serializing it would perturb every
-	// golden and fingerprint for a field that is false in every valid
-	// config. CONSEQUENCE, stated plainly: ConfigFingerprint intentionally
-	// ignores this bit, so fingerprint equality cannot validate preservation
-	// of this behavior — assert the marker and the emitted snapshot
-	// directly.
+	// EXPORTED (unlike matchAuthored) because snapshot builders and show
+	// renderers in other packages must read it. `json:"-"` keeps this
+	// compile-time diagnostic out of JSON; fingerprintIgnore intentionally
+	// excludes it, so fingerprint equality cannot validate this behavior.
+	// Assert the marker and emitted snapshot directly.
 	LenientMatchDropped bool `json:"-"`
 	// UnknownMatchLeaves records `match` children the compiler does not read
 	// (#9877) — e.g. a typo'd `soruce-address` beside a valid
@@ -1336,13 +1327,10 @@ type NATRule struct {
 	// warn on the tolerant path) and by the snapshot exclusion predicates
 	// (fail-closed skip). Non-empty is the verdict.
 	//
-	// EXPORTED because the userspace snapshot builders and the show surfaces
-	// (other packages) read the verdict — an unexported field cannot cross
-	// that boundary the way matchAuthored does within this package.
-	// `json:"-"` because it is compile-time diagnostic state recomputed from
-	// the AST on every compile (both HA peers derive it identically from the
-	// synced tree text); it must not join golden JSON, ConfigFingerprint, or
-	// config-sync payloads (the MappedPortRaw/ThenTargetCount precedent).
+	// EXPORTED because snapshot builders and show surfaces in other packages
+	// read the verdict. `json:"-"` keeps this compiler marker out of REST JSON.
+	// ConfigFingerprint includes it: a dropped unknown match changes whether
+	// the rule is installed, even though the synced AST can recompute the marker.
 	UnknownMatchLeaves []string `json:"-"`
 	// rulePersistentNAT records the rule-level `then source-nat pool P
 	// persistent-nat ...` tail (#14626). Per-rule (never mutating the shared

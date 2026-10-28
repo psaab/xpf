@@ -109,17 +109,21 @@ func shapeDigest8892(t *testing.T) (string, int) {
 // acceptable?" question answering no, so the exact-equality gate must REFUSE
 // the pairing rather than let it degrade silently.
 // v10 STANDS (issue 9125): `StaticRoute.HasPreference` was added to the typed
-// config, which moved this digest because ConfigSnapshot embeds the whole
-// Config. It is tagged `json:"-"`, so it is NOT serialized and no helper --
-// old or new -- can observe it. This is the "explain why the change is
-// invisible to a helper" arm the header offers, not a version bump: bumping for
-// a field nothing transmits would spend the one signal that tells a helper the
-// wire actually changed.
-// v36 STANDS (#11328): `StaticRoute.NoInstall` carries compile-time route intent.
-// It is `json:"-"`, and flagged routes are filtered before snapshot construction,
-// so no helper receives the field or the route. ConfigSnapshot embeds Config, so
-// the reflection digest still moves; the serialized shape and ProtocolVersion
-// remain unchanged.
+// Config, which moved that digest because ConfigSnapshot embedded Config. At
+// that time `json:"-"` kept the field out of serialized config, so helpers
+// could not observe it. This is the "explain why the change is invisible to a
+// helper" arm the header offers, not a version bump: bumping for a field
+// nothing transmitted would spend the one signal that tells a helper the wire
+// actually changed.
+// v36 STANDS (#11328): `StaticRoute.NoInstall` carries compile-time route
+// intent. At v36 it was `json:"-"`, and flagged routes were filtered before
+// snapshot-row construction, so helper route rows carried neither the field
+// nor the route. ConfigSnapshot embedded Config, so the reflection digest
+// still moved; the serialized shape and ProtocolVersion remained unchanged.
+// #17249 later removes `json:"-"` from both fields so compiled-config JSON,
+// including the opaque ConfigSnapshot.Config payload, carries them. That
+// payload is excluded from the shape walk under #17244, so this additive
+// visibility change does not move the snapshot-shape digest.
 // v36 -> v37 (#11402): RouteSnapshot.NextHopWeights is a real wire field. A
 // v36 helper silently discards it and keeps uniform selection for unequal
 // learned ECMP, so the shape and protocol version move together intentionally.
