@@ -1923,10 +1923,14 @@ daemon sends the non-VIP half (router link-local NAs + pool
 GARPs/NAs) so the announced (iface, IP, kind) set is identical. The
 non-VIP half is level-triggered (`convergeLegacyNonVIPAnnounce`, the
 #16696 pattern): cluster-primary, VRRP MASTER and the reconcile pass
-all funnel through it and it claims each activation epoch exactly
-once, so a cluster-first promotion on the default userspace dataplane
-(which consumes the rg-state edge before ForceRGMaster) cannot
-swallow the announce. `directSendGARPs` (`daemon_ha_vip.go`) sends a broadcast GARP
+all funnel through it and it claims each activation generation exactly
+once — the generation (`rgStateMachine.CurrentActivation`) increments
+only on inactive→active transitions, never on no-change reconcile
+inputs, and the marker is cleared explicitly on the cluster-demotion,
+VRRP BACKUP and reconcile deactivation arms. A cluster-first promotion
+on the default userspace dataplane (which consumes the rg-state edge
+before ForceRGMaster) therefore cannot swallow the announce, and a
+steady-state reconcile tick cannot re-send it. `directSendGARPs` (`daemon_ha_vip.go`) sends a broadcast GARP
 burst per VIP plus a supplementary **directed** ARP probe to the subnet
 gateway so a router that ignores broadcast gratuitous ARP still re-binds the
 VIP to the new master's MAC. The probe target is derived by the single source

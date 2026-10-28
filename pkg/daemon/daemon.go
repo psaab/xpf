@@ -1456,11 +1456,16 @@ type Daemon struct {
 	rethServicesMu      sync.Mutex
 	rethServicesApplied map[int]bool
 	// nonVIPAnnounceMu / nonVIPAnnounced guard the legacy-VRRP non-VIP
-	// announce (#17052) against duplicate bursts within one activation
-	// epoch. SendAnnounceTargets is edge-triggered, so whichever producer
-	// (cluster event, VRRP MASTER event, or reconcile pass) first observes
-	// an activation claims it here; the marker is cleared on deactivation
-	// so the next failover announces again. Guarded by nonVIPAnnounceMu.
+	// announce (#17052) against duplicate bursts within one activation.
+	// The map value is the rg-state ACTIVATION generation claimed
+	// (rgStateMachine.CurrentActivation — increments only on
+	// inactive->active transitions, never on no-change reconcile
+	// inputs). SendAnnounceTargets is edge-triggered, so whichever
+	// producer (cluster event, VRRP MASTER event, or reconcile pass)
+	// first observes an activation claims its generation here; the
+	// marker is cleared explicitly on the deactivation arms
+	// (clearLegacyNonVIPAnnounce) so the next failover announces again.
+	// Guarded by nonVIPAnnounceMu.
 	nonVIPAnnounceMu sync.Mutex
 	nonVIPAnnounced  map[int]uint64
 

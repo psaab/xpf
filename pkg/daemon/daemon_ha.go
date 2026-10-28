@@ -848,6 +848,13 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// still primary, so it changed nothing); clear the services here
 		// or the old owner keeps its Kea RG groups and RG-anchored SAs.
 		d.driveRethServicesEdge(ev.GroupID, tr, noRethVRRP)
+		// #17052: explicit deactivation arm for the non-VIP announce
+		// marker — drop the claimed activation generation on the cluster
+		// demotion edge (desired may already be inactive here if VRRP
+		// BACKUP flipped it first) so the next activation re-announces.
+		// Clearing is unconditional on this arm (not gated on tr.Active):
+		// the marker must not survive any demotion the daemon acts on.
+		d.clearLegacyNonVIPAnnounce(ev.GroupID)
 	}
 
 	// Strict VIP ownership: suppress GARP on secondary, allow on primary.
@@ -1178,6 +1185,9 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			d.setLocalFailoverCommitReady(rgID, false)
 		}
 		if tr.Changed && !tr.Active {
+			// #17052: explicit deactivation arm — drop the claimed
+			// activation generation so the next MASTER re-announces.
+			d.clearLegacyNonVIPAnnounce(rgID)
 			// Deactivation order: inject blackhole routes FIRST,
 			// then clear rg_active. Re-read desired state to
 			// guard against interleaved cluster goroutine.
@@ -1613,10 +1623,23 @@ func (d *Daemon) reconcileRGState() {
 					d.applyRethServicesForRG(rgID)
 				} else {
 					d.clearRethServicesForRG(rgID)
+					// #17052: reconcile deactivation arm — explicitly
+					// drop the claimed activation generation so the next
+					// activation re-announces.
+					d.clearLegacyNonVIPAnnounce(rgID)
 				}
 			}
 			anyRGChanged = true
 		} else if !noRethVRRP {
+			if !tr.Active {
+				// #17052: reconcile deactivation arm — explicitly drop
+				// the claimed activation generation on any pass that
+				// observes the RG inactive, so a deactivation whose
+				// event arms were lost still re-arms the next
+				// activation's announce. Runs before the converger so
+				// an inactive RG never re-claims.
+				d.clearLegacyNonVIPAnnounce(rgID)
+			}
 			// #16696: level-triggered repair for a service edge no
 			// producer ran — handleClusterEvent's legacy-mode edge
 			// (pre-fix) or a sync-hold mirror refresh whose transition
@@ -1624,7 +1647,9 @@ func (d *Daemon) reconcileRGState() {
 			d.convergeRethServices(rgID)
 			// #17052: same lost-edge repair for the non-VIP announce:
 			// covers sync-hold release and any producer whose edge was
-			// consumed before it could run. No-op once claimed.
+			// consumed before it could run. No-op once claimed; keyed to
+			// the activation generation, so a steady-state tick at the
+			// same activation never re-sends.
 			d.convergeLegacyNonVIPAnnounce(rgID)
 		}
 		// Stable link-local: ensure correct on EVERY reconcile tick.

@@ -5,8 +5,10 @@ import (
 	"net"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/psaab/xpf/pkg/cluster"
@@ -54,6 +56,43 @@ func installAnnounceCapture17052(t *testing.T, calls *[]announceCall17052) {
 		*calls = append(*calls, announceCall17052{iface, ip.String(), "pool-v6", count})
 		return nil
 	}
+	directARPProbeFn = func(string, net.IP, net.IP) error { return nil }
+	t.Cleanup(func() {
+		directGARPBurstFn, directNABurstFn, directProxyNABurstFn, directARPProbeFn = origG, origN, origP, origProbe
+	})
+}
+
+// announceCapture17052 is a mutex-guarded ordered recorder for the
+// producer-race cell, where concurrent converger calls may send from
+// several goroutines. Appends are serialised; reads snapshot under the
+// same mutex.
+type announceCapture17052 struct {
+	mu    sync.Mutex
+	calls []announceCall17052
+}
+
+func (c *announceCapture17052) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.calls)
+}
+
+// installAnnounceCaptureSync17052 is installAnnounceCapture17052 with
+// appends serialised through cap, for concurrent producers.
+func installAnnounceCaptureSync17052(t *testing.T, cap *announceCapture17052) {
+	t.Helper()
+	origG, origN, origP, origProbe := directGARPBurstFn, directNABurstFn, directProxyNABurstFn, directARPProbeFn
+	record := func(kind string) func(string, net.IP, int, cluster.BurstStillValid) error {
+		return func(iface string, ip net.IP, count int, _ cluster.BurstStillValid) error {
+			cap.mu.Lock()
+			cap.calls = append(cap.calls, announceCall17052{iface, ip.String(), kind, count})
+			cap.mu.Unlock()
+			return nil
+		}
+	}
+	directGARPBurstFn = record("garp")
+	directNABurstFn = record("na")
+	directProxyNABurstFn = record("pool-v6")
 	directARPProbeFn = func(string, net.IP, net.IP) error { return nil }
 	t.Cleanup(func() {
 		directGARPBurstFn, directNABurstFn, directProxyNABurstFn, directARPProbeFn = origG, origN, origP, origProbe
@@ -267,6 +306,207 @@ func TestAnnounceModeParity17052(t *testing.T) {
 	}
 }
 
+// nonVIPAnnouncedGen17052 reads the claimed activation generation for
+// rgID (0 = no claim) under the marker mutex.
+func nonVIPAnnouncedGen17052(d *Daemon, rgID int) uint64 {
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	return d.nonVIPAnnounced[rgID]
+}
+
+// TestNonVIPAnnounceLifecycle17052 pins the marker lifecycle the
+// converger is sold on (Rev18310b B1/B2): keyed to the REAL activation
+// generation (inactive->active flips only), claimed atomically, cleared
+// explicitly on deactivation, exactly one re-send per reactivation.
+//
+//	activate (cluster-first) -> claim gen N -> reconcile ticks (NO
+//	re-send, however many epoch bumps they cause) -> VRRP MASTER second
+//	(NO re-send) -> BACKUP (still active via cluster) -> cluster
+//	demotion deactivates (marker cleared explicitly) -> reactivate via
+//	VRRP MASTER (exactly one re-send, gen N+1).
+//
+// RED on the pre-fold code: the marker was keyed to CurrentDesired's
+// epoch, which reconcileLocked bumps on EVERY input, so the first
+// reconcile-style Reconcile below re-owed and re-sent the full burst.
+func TestNonVIPAnnounceLifecycle17052(t *testing.T) {
+	vrrpStore := fenceTestStore(t, paritySetLines(false))
+	vd := clusterFirstDaemon17052(t, vrrpStore)
+	if vd.isNoRethVRRP() {
+		t.Fatal("vrrp fixture must be legacy VRRP mode")
+	}
+	var calls []announceCall17052
+	installAnnounceCapture17052(t, &calls)
+	s := vd.getOrCreateRGState(1)
+
+	burstLen := func() int { return len(calls) }
+
+	// 1. Activate cluster-first: exactly one burst, generation 1 claimed.
+	vd.handleClusterEvent(context.Background(), cluster.ClusterEvent{
+		GroupID: 1, OldState: cluster.StateSecondary, NewState: cluster.StatePrimary,
+	}, nil)
+	if !s.IsActive() {
+		t.Fatal("setup: cluster-first promotion must activate RG1")
+	}
+	active, gen1 := s.CurrentActivation()
+	if !active || gen1 != 1 {
+		t.Fatalf("setup: first activation must be generation 1, got active=%v gen=%d", active, gen1)
+	}
+	first := burstLen()
+	if first == 0 {
+		t.Fatal("cluster-first activation sent no non-VIP burst")
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen1 {
+		t.Fatalf("marker must claim the observed generation %d, got %d", gen1, got)
+	}
+	if vd.legacyNonVIPAnnouncePending(1) {
+		t.Fatal("announce must not be pending right after its claim")
+	}
+
+	// 2. Reconcile ticks: Reconcile bumps the volatile epoch on every
+	// pass (the B1 mechanism) but must NOT move the activation
+	// generation, re-owe, or re-send.
+	epochBefore := s.Epoch()
+	for range 3 {
+		s.Reconcile(true, map[string]bool{"reth0": true})
+		vd.convergeLegacyNonVIPAnnounce(1)
+	}
+	if s.Epoch() == epochBefore {
+		t.Fatal("setup: reconcile passes must bump the volatile epoch (B1 premise)")
+	}
+	if _, gen := s.CurrentActivation(); gen != gen1 {
+		t.Fatalf("reconcile ticks moved the activation generation: %d -> %d", gen1, gen)
+	}
+	if burstLen() != first {
+		t.Fatalf("reconcile ticks re-sent the non-VIP burst: %d calls, want %d (B1: epoch-keyed claim re-fires every tick)", burstLen(), first)
+	}
+	if vd.legacyNonVIPAnnouncePending(1) {
+		t.Fatal("announce re-owed at the same activation generation after reconcile ticks")
+	}
+
+	// 3. VRRP MASTER arrives second (Changed=false): no re-send.
+	vd.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
+		GroupID: 101, Interface: "reth0", State: vrrp.StateMaster,
+	}, rgTransition{})
+	if burstLen() != first {
+		t.Fatalf("VRRP-second event re-sent the non-VIP burst: %d calls, want %d", burstLen(), first)
+	}
+
+	// 4. Deactivate via VRRP BACKUP while cluster is still primary:
+	// desired stays active (clusterPri || master) — the BACKUP arm must
+	// NOT clear yet, and no burst fires. Then cluster demotion flips
+	// desired inactive: the cluster demotion arm clears the marker
+	// explicitly.
+	vd.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
+		GroupID: 101, Interface: "reth0", State: vrrp.StateBackup,
+	}, rgTransition{})
+	if !s.IsActive() {
+		t.Fatal("setup: BACKUP while cluster-primary must keep desired active")
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen1 {
+		t.Fatalf("marker cleared while still active: got %d, want claim %d", got, gen1)
+	}
+	vd.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
+	if timer := vd.handleClusterEvent(context.Background(), cluster.ClusterEvent{
+		GroupID: 1, OldState: cluster.StatePrimary, NewState: cluster.StateSecondary,
+	}, nil); timer != nil {
+		timer.Stop()
+	}
+	if s.IsActive() {
+		t.Fatal("setup: cluster demotion after BACKUP must deactivate RG1")
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != 0 {
+		t.Fatalf("cluster demotion arm must clear the marker explicitly, got claim %d", got)
+	}
+	if burstLen() != first {
+		t.Fatalf("deactivation sent a burst: %d calls, want %d", burstLen(), first)
+	}
+	// A pending check on the inactive RG is a pure read: it must not
+	// (re)create or mutate any claim.
+	if vd.legacyNonVIPAnnouncePending(1) {
+		t.Fatal("inactive RG must not owe the announce")
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != 0 {
+		t.Fatalf("pending check mutated the marker on an inactive RG: claim %d", got)
+	}
+
+	// 5. Reactivate via VRRP MASTER (VRRP-first this time): exactly one
+	// re-send at generation 2, and a following cluster event must not
+	// re-send.
+	vd.handleVRRPEvent(context.Background(), vrrp.VRRPEvent{
+		GroupID: 101, Interface: "reth0", State: vrrp.StateMaster,
+	}, rgTransition{})
+	if !s.IsActive() {
+		t.Fatal("setup: VRRP MASTER must reactivate RG1")
+	}
+	_, gen2 := s.CurrentActivation()
+	if gen2 != gen1+1 {
+		t.Fatalf("reactivation must be generation %d, got %d", gen1+1, gen2)
+	}
+	if burstLen() != 2*first {
+		t.Fatalf("reactivation must re-send exactly one burst: %d calls, want %d", burstLen(), 2*first)
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen2 {
+		t.Fatalf("marker must claim reactivation generation %d, got %d", gen2, got)
+	}
+	vd.cluster.SetGroupStateForTesting(1, cluster.StatePrimary)
+	if timer := vd.handleClusterEvent(context.Background(), cluster.ClusterEvent{
+		GroupID: 1, OldState: cluster.StateSecondary, NewState: cluster.StatePrimary,
+	}, nil); timer != nil {
+		timer.Stop()
+	}
+	if burstLen() != 2*first {
+		t.Fatalf("cluster-second event re-sent after reactivation: %d calls, want %d", burstLen(), 2*first)
+	}
+}
+
+// TestNonVIPAnnounceProducerRace17052 races the three producers
+// (cluster arm, VRRP arm, reconcile converger) plus deactivation clears
+// against one activation: exactly one burst may be claimed/sent for the
+// generation no matter how the producers interleave. Run under -race
+// (the campaign's named run includes it where configured); even without
+// it, the claim-before-send mutex makes a double burst impossible and
+// this cell asserts that outcome across many interleavings.
+func TestNonVIPAnnounceProducerRace17052(t *testing.T) {
+	vrrpStore := fenceTestStore(t, paritySetLines(false))
+	vd := clusterFirstDaemon17052(t, vrrpStore)
+	cap := &announceCapture17052{}
+	installAnnounceCaptureSync17052(t, cap)
+	s := vd.getOrCreateRGState(1)
+
+	// Activate directly on the state machine (no producer has run yet),
+	// then race every producer at the same generation.
+	s.SetCluster(true)
+	active, gen := s.CurrentActivation()
+	if !active || gen != 1 {
+		t.Fatalf("setup: want active generation 1, got active=%v gen=%d", active, gen)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(3)
+		go func() { defer wg.Done(); vd.convergeLegacyNonVIPAnnounce(1) }()
+		go func() { defer wg.Done(); _ = vd.legacyNonVIPAnnouncePending(1) }()
+		go func() { defer wg.Done(); s.Reconcile(true, map[string]bool{"reth0": true}) }()
+	}
+	wg.Wait()
+	// Exactly one burst total: count is the burst length of the first
+	// (and only) send — a second send would at least double the frames
+	// for the shared non-VIP targets.
+	if cap.len() == 0 {
+		t.Fatal("racing producers sent no burst for the activation")
+	}
+	oneBurst := cap.len()
+	// Re-run all producers at the same generation: still no second burst.
+	for range 4 {
+		vd.convergeLegacyNonVIPAnnounce(1)
+	}
+	if cap.len() != oneBurst {
+		t.Fatalf("producer race/replay sent a second burst: %d calls, want %d", cap.len(), oneBurst)
+	}
+	if got := nonVIPAnnouncedGen17052(vd, 1); got != gen {
+		t.Fatalf("marker must claim generation %d after the race, got %d", gen, got)
+	}
+}
+
 // clusterFirstDaemon17052 builds a legacy-mode daemon whose cluster
 // manager agrees RG1 is primary, so handleClusterEvent drives the real
 // cluster-first path (SetCluster consumes the activation edge).
@@ -288,6 +528,7 @@ func clusterFirstDaemon17052(t *testing.T, store *configstore.Store) *Daemon {
 		applySem:            semaphore.NewWeighted(1),
 		nonVIPAnnounced:     make(map[int]uint64),
 		rethServicesApplied: make(map[int]bool),
+		blackholeRoutes:     make(map[int][]netlink.Route),
 	}
 	// applyRethServicesForRG / addStableRethLinkLocal run on these
 	// handlers; keep their netlink side effects out of the hermetic cell.

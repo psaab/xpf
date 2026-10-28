@@ -549,12 +549,14 @@ func clusterClampedCount(cfg *config.Config, rgID int) int {
 }
 
 // legacyNonVIPAnnouncePending reports whether the legacy-VRRP non-VIP
-// announce (#17052) is still owed for rgID at the current activation
-// epoch. It is the level-triggered source of truth shared by every
-// producer (cluster event, VRRP MASTER event, reconcile pass): the
-// announce is owed while the RG is active at an epoch not yet claimed,
-// and ceases to be owed once claimed or once the RG goes inactive
-// (which clears the claim so the next failover re-announces).
+// announce (#17052) is still owed for rgID at the current activation.
+// It is a pure read (no marker mutation): the announce is owed while
+// the RG is active at an activation generation not yet claimed. The
+// generation is the rg-state machine's activationSeq — it increments
+// ONLY on inactive->active transitions, never on no-change inputs —
+// so a reconcile tick at the same activation never re-owes it. The
+// marker is cleared explicitly on the deactivation arms (see
+// clearLegacyNonVIPAnnounce), not as a side effect of this check.
 func (d *Daemon) legacyNonVIPAnnouncePending(rgID int) bool {
 	if d.isNoRethVRRP() {
 		return false
@@ -565,44 +567,70 @@ func (d *Daemon) legacyNonVIPAnnouncePending(rgID int) bool {
 	if s == nil {
 		return false
 	}
-	active, epoch := s.CurrentDesired()
-	d.nonVIPAnnounceMu.Lock()
-	defer d.nonVIPAnnounceMu.Unlock()
+	active, generation := s.CurrentActivation()
 	if !active {
-		delete(d.nonVIPAnnounced, rgID)
 		return false
 	}
-	return d.nonVIPAnnounced[rgID] != epoch
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	return d.nonVIPAnnounced[rgID] != generation
+}
+
+// clearLegacyNonVIPAnnounce drops the per-activation claim for rgID so
+// the next activation re-announces (#17052). Called explicitly from
+// every deactivation arm — cluster demotion, VRRP BACKUP and the
+// reconcile deactivation path in daemon_ha.go — never as a side effect
+// of a pending check, so a producer that merely observes an inactive
+// RG cannot silently consume the lifecycle event.
+func (d *Daemon) clearLegacyNonVIPAnnounce(rgID int) {
+	d.nonVIPAnnounceMu.Lock()
+	defer d.nonVIPAnnounceMu.Unlock()
+	delete(d.nonVIPAnnounced, rgID)
 }
 
 // convergeLegacyNonVIPAnnounce sends the non-VIP announce exactly once
-// per activation epoch when it is still owed (#17052, the #16696
+// per activation generation when it is still owed (#17052, the #16696
 // level-triggered pattern applied to announcements). Every producer
 // that observes an activation -- cluster-primary, VRRP MASTER, and the
 // periodic reconcile -- funnels through here, so cluster-first ordering
 // (the default userspace / non-strict case, where SetCluster consumes
 // the edge and ForceRGMaster then reports Changed=false to the VRRP
 // handler) can no longer swallow the announce, and no producer can
-// double-burst an epoch another producer already claimed. The claim is
-// taken under the mutex BEFORE any frame is sent, so a racing producer
-// cannot interleave a second burst.
+// double-burst a generation another producer already claimed.
+//
+// The claim is atomic: the (active, generation) pair is read in ONE
+// rg-state lock hold (CurrentActivation) and the generation observed
+// there is the one claimed under nonVIPAnnounceMu BEFORE any frame is
+// sent, so a racing producer cannot interleave a second burst and a
+// newer generation arriving between the read and the claim is never
+// silently consumed — it stays unclaimed and the next producer (or the
+// same call's caller on its next pass) sends for it. Keyed to the
+// activation generation, NOT CurrentDesired's epoch: epoch bumps on
+// every reconcileLocked input (every 2s reconcile pass), which would
+// re-send the full burst forever.
 func (d *Daemon) convergeLegacyNonVIPAnnounce(rgID int) {
-	if !d.legacyNonVIPAnnouncePending(rgID) {
+	if d.isNoRethVRRP() {
 		return
 	}
 	d.rgStatesMu.RLock()
 	s := d.rgStates[rgID]
 	d.rgStatesMu.RUnlock()
-	_, epoch := s.CurrentDesired()
+	if s == nil {
+		return
+	}
+	active, generation := s.CurrentActivation()
+	if !active {
+		return
+	}
 	d.nonVIPAnnounceMu.Lock()
 	if d.nonVIPAnnounced == nil {
 		d.nonVIPAnnounced = make(map[int]uint64)
 	}
-	if d.nonVIPAnnounced[rgID] == epoch {
+	if d.nonVIPAnnounced[rgID] == generation {
 		d.nonVIPAnnounceMu.Unlock()
 		return
 	}
-	d.nonVIPAnnounced[rgID] = epoch
+	d.nonVIPAnnounced[rgID] = generation
 	d.nonVIPAnnounceMu.Unlock()
 	d.sendVRRPModeNonVIPAnnounce(rgID)
 }

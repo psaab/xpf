@@ -26,8 +26,11 @@ import (
 // desired rg_active value should be and whether it was successfully applied
 // to the BPF map. The reconciliation loop retries when they diverge.
 //
-// The epoch counter is monotonically incremented on every state change,
-// enabling stale-update detection in the reconciliation loop.
+// The epoch counter is monotonically incremented on every state-machine
+// input (including no-change reconcile passes), enabling stale-update
+// detection in the reconciliation loop. It is NOT an activation
+// identity: activationSeq below is, and exactly-once-per-activation
+// consumers must key to it, never to epoch (#17052).
 type rgStateMachine struct {
 	mu            sync.Mutex
 	clusterPri    bool            // cluster says Primary for this RG
@@ -40,6 +43,13 @@ type rgStateMachine struct {
 	// answerable. Guarded by mu, like every field above.
 	invalidateSeq uint64
 	epoch         uint64 // monotonic counter
+	// activationSeq counts inactive->active transitions of the desired
+	// value only (#17052). It is the REAL activation generation: unlike
+	// epoch (bumped on every reconcileLocked input, including every 2s
+	// reconcile pass), it moves only when desired flips false->true, so
+	// a consumer keyed to it can claim each activation exactly once and
+	// stay claimed across arbitrary no-change inputs. Guarded by mu.
+	activationSeq uint64
 
 	// VRRP posture mismatch tracking (#86): detect when VRRP state
 	// doesn't match cluster expectations and only take corrective action
@@ -96,6 +106,10 @@ type rgTransition struct {
 	Changed bool   // rg_active value changed
 	Active  bool   // new rg_active value
 	Epoch   uint64 // current epoch after this transition
+	// ActivationSeq is the activation generation after this transition
+	// (#17052): it increments ONLY on an inactive->active flip of the
+	// desired value, unlike Epoch which bumps on every input.
+	ActivationSeq uint64
 	// InvalidateSeq is the invalidation counter observed when this transition
 	// was produced (#6799). An apply carries it across its off-lock dataplane
 	// write so RecordApplied can tell whether a SECOND writer re-armed the
@@ -396,6 +410,28 @@ func (s *rgStateMachine) CurrentDesired() (active bool, epoch uint64) {
 	return s.active, s.epoch
 }
 
+// CurrentActivation returns the desired active state and its activation
+// generation atomically in ONE lock hold (#17052). The generation
+// increments only on inactive->active transitions (see activationSeq),
+// so a caller that claims the generation it observed here has claimed
+// exactly one activation — no-change reconcile inputs, sync-hold mirror
+// refreshes and repeated producer events at the same activation all
+// observe the same generation. Use this (never CurrentDesired's epoch)
+// to key exactly-once-per-activation side effects.
+func (s *rgStateMachine) CurrentActivation() (active bool, generation uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active, s.activationSeq
+}
+
+// ActivationSeq returns the current activation generation (#17052):
+// the count of inactive->active desired transitions so far.
+func (s *rgStateMachine) ActivationSeq() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activationSeq
+}
+
 // SetKernelUpgradeHold mirrors the cluster kernel-upgrade hold onto this
 // RG (#14404). While held, reconcileLocked forces desired=false; clearing
 // re-derives desired from the retained cluster/VRRP inputs so a VRRP
@@ -446,6 +482,13 @@ func (s *rgStateMachine) reconcileLocked() rgTransition {
 		desired = s.clusterPri || s.allMasterLocked() // ALL VRRP instances required (#132)
 	}
 	changed := desired != s.active
+	if changed && desired {
+		// #17052: a REAL activation — the only place the activation
+		// generation moves. Epoch above still bumps on every input for
+		// stale-update detection; keying an exactly-once claim to epoch
+		// would re-fire on every 2s reconcile pass.
+		s.activationSeq++
+	}
 	s.active = desired
 	if s.active != s.applied {
 		s.applyPending = true
@@ -454,6 +497,7 @@ func (s *rgStateMachine) reconcileLocked() rgTransition {
 		Changed:       changed,
 		Active:        desired,
 		Epoch:         s.epoch,
+		ActivationSeq: s.activationSeq,
 		InvalidateSeq: s.invalidateSeq,
 	}
 }
