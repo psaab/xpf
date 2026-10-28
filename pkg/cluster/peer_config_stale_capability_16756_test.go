@@ -88,6 +88,19 @@ func TestLegacyPeerWithNackIsStale16756(t *testing.T) {
 	if !strings.Contains(reason, "predates config-apply ACK") {
 		t.Fatalf("reason %q does not name the pre-ACK cause", reason)
 	}
+	// Incarnation retirement clears capability, but the matching NACK is
+	// still debt for the generation this SessionSync sent.
+	s.mu.Lock()
+	s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
+	s.retirePeerIncarnationLocked(nil)
+	s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
+	s.mu.Unlock()
+	if stale, reason := s.PeerConfigStale(); !stale {
+		t.Fatalf("retirement erased the legacy peer's NACK debt: %q", reason)
+	}
+	// Re-learn the legacy successor before sending its newer generation.
+	s.handleMessage(nil, syncMsgPeerCapabilities,
+		capabilityFrame9714(t, capFlagFenceAck|capFlagPeerDeleteOwnership))
 
 	// A newer send supersedes the NACK: pre-ACK semantics clear.
 	s.recordLastSentConfigGen(43)

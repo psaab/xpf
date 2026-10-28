@@ -105,19 +105,15 @@ func (s *SessionSync) PeerConfigStale() (bool, string) {
 		return false, ""
 	}
 	legacyStale := func() (bool, string) {
-		if nacked := s.peerIncarnationState().peerConfigNackedGen16756.Load(); nacked >= sent {
+		if nacked := s.peerConfigNackedGen16756.Load(); nacked >= sent {
 			return true, fmt.Sprintf("peer predates config-apply ACK and reported it did not apply config generation %d (peer nacked %d)", sent, nacked)
 		}
 		return false, ""
 	}
-	if debt.capabilityKnown && !debt.ackCapable {
-		return legacyStale()
-	}
-	// An unknown/disconnected incarnation is NOT proof of a pre-ACK peer:
-	// keep outstanding ACK-capable debt fail-closed until capability
-	// discovery identifies either another ACK-capable peer or an explicit
-	// downgrade. Sample learned state and its capability under s.mu so the
-	// gate cannot observe the capability frame between those publications.
+	// Sample the current incarnation after reading the send-time debt. A
+	// legacy send can use NACK-only semantics while the peer remains legacy
+	// (or disconnected), but a successor that proves ACK capability must
+	// satisfy the still-outstanding generation with a positive ACK.
 	s.mu.Lock()
 	state := s.peerIncarnationState()
 	learned := s.peerSnaps.peerSnapshotProtocol.Load() != 0
@@ -126,6 +122,12 @@ func (s *SessionSync) PeerConfigStale() (bool, string) {
 	if learned && !currentAckCapable {
 		return legacyStale()
 	}
+	if debt.capabilityKnown && !debt.ackCapable && !(learned && currentAckCapable) {
+		return legacyStale()
+	}
+	// An unknown/disconnected incarnation is NOT proof of a pre-ACK peer
+	// when the send itself was ACK-capable: keep that debt fail-closed until
+	// capability discovery identifies a compatible successor.
 	applied := s.peerAppliedConfigGen.Load()
 	if applied < sent {
 		return true, fmt.Sprintf("the standby has not acknowledged applying config generation %d (peer applied %d)", sent, applied)

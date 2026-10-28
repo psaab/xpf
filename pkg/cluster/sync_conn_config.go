@@ -468,10 +468,16 @@ func (s *SessionSync) queueConfigOnConn(
 			return false
 		}
 	} else {
+		// Serialize the capability sample, debt publication, and config write
+		// against peer-incarnation capability changes, as the guarded path
+		// does. Without this, an advertisement could flip legacy to modern
+		// after the debt is recorded but before the config reaches the peer.
+		s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
 		s.writeMu.Lock()
 		s.recordLastSentConfigGen(gen)
 		err = writeMsg(conn, msgType, payload)
 		s.writeMu.Unlock()
+		s.peerSnaps.peerSnapshotProtocolWriteMu.Unlock()
 	}
 	if err != nil {
 		slog.Warn("cluster sync: config send error", "err", err)
@@ -511,11 +517,11 @@ func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
 		capabilityKnown: capabilityKnown,
 		ackCapable:      ackCapable,
 	}
-	s.configApplyDebtMu.Unlock()
-	if hook := s.testAfterLastSentConfigGenPublish; hook != nil {
-		s.testAfterLastSentConfigGenPublish = nil
+	if hook := s.testBeforeLastSentConfigDebtUnlock; hook != nil {
+		s.testBeforeLastSentConfigDebtUnlock = nil
 		hook()
 	}
+	s.configApplyDebtMu.Unlock()
 }
 
 // errConfigApplyQueueFull is the health-debt reason recorded when a config

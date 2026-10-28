@@ -33,7 +33,7 @@ func (s *SessionSync) handleConfigApplyNack(conn net.Conn, payload []byte) bool 
 	// in PeerConfigStale. Only reached for a NACK of the newest send
 	// (the straggler guard above returned otherwise), so a plain store
 	// of the matched generation is the high-water.
-	s.peerIncarnationState().peerConfigNackedGen16756.Store(nackedGen)
+	s.peerConfigNackedGen16756.Store(nackedGen)
 	s.stats.ConfigApplyNacksReceived.Add(1)
 	// #9569: the peer did not apply the config generation. A handover onto it
 	// remains refused until the peer positively acknowledges a successful apply.

@@ -227,6 +227,7 @@ func TestSessionSyncLockOrderGraphPinned16159(t *testing.T) {
 	}
 	edges := []string{
 		"mu -> peerSnapshotProtocolWriteMu",
+		"peerSnapshotProtocolWriteMu -> writeMu",
 		"mu -> fenceAckMu",
 		"bulkSnapshotGenMu -> genSentMu",
 		"bulkSnapshotGenMu -> recvGenMu",
