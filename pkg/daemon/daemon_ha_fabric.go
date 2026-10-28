@@ -45,8 +45,12 @@ func ensureFabricIPVLAN(parent, name string, addrs []string, configuredMTU int) 
 			netlink.LinkSetUp(existing)
 			return nil
 		}
-		// Wrong parent — remove and recreate.
-		netlink.LinkDel(existing)
+		// Wrong parent — remove and recreate. Routed through the helper so
+		// a failed delete is logged as an error and surfaces via the
+		// LinkAdd below (EEXIST) rather than a false "removed" record.
+		if err := (&Daemon{}).deleteFabricOverlay(existing, "wrong parent: remove and recreate"); err != nil {
+			return fmt.Errorf("remove wrong-parent fabric IPVLAN %s: %w", name, err)
+		}
 	}
 
 	// New overlays have no upper-device ordering constraint, so reconcile the
@@ -159,13 +163,32 @@ func reconcileIPVLANAddrs(link netlink.Link, name string, desired []string) {
 // is the quiet one: it would simply never notice the new device had gone stale.
 func fabricOverlayNames() []string { return []string{"fab0", "fab1"} }
 
+// deleteFabricOverlay deletes one fabric IPVLAN through the fabricLinkDel
+// seam (#17224). Info is logged only on success — a failed delete leaves the
+// device in place, so claiming "removed" for it would log a state transition
+// that never happened. On failure it logs Error carrying `reason` and returns
+// the error so callers that can act on it (fail the delete, retry) may.
+func (d *Daemon) deleteFabricOverlay(link netlink.Link, reason string) error {
+	name := ""
+	if link != nil && link.Attrs() != nil {
+		name = link.Attrs().Name
+	}
+	if err := d.fabricLinkDel(link); err != nil {
+		slog.Error("fabric IPVLAN delete failed",
+			"name", name, "reason", reason, "err", err)
+		return err
+	}
+	slog.Info("removed fabric IPVLAN", "name", name, "reason", reason)
+	return nil
+}
+
 // CleanupFabricIPVLANs removes all fabric IPVLAN interfaces (fab0, fab1).
 func CleanupFabricIPVLANs() {
+	d := &Daemon{}
 	for _, name := range fabricOverlayNames() {
 		if link, err := netlink.LinkByName(name); err == nil {
 			if _, ok := link.(*netlink.IPVlan); ok {
-				netlink.LinkDel(link)
-				slog.Info("removed fabric IPVLAN", "name", name)
+				_ = d.deleteFabricOverlay(link, "xpfd cleanup")
 			}
 		}
 	}
