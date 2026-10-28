@@ -13446,6 +13446,84 @@ fn unresolved_screen_profile_audit_flag_survives_the_decode_16006() {
         assert_eq!(got.profile, "bad");
     }
 }
+/// #17243: parity guard for the consolidated `unresolved_profile_refs`
+/// helper. The SAME row sequence, fed through `screen_missing_profile_zones`
+/// and through `screen_inert_profile_zones`, must produce identical maps —
+/// profile text, audit flag, empty-zone skip, duplicate-zone last-wins, and
+/// disjointness of the two state maps all included. Before #17243 the two
+/// builders were verbatim twins, so a fix applied to only one (as #16006 did)
+/// silently diverged the arms; this cell is red if the arms ever diverge
+/// again, e.g. if a future change re-splits the helper and drops a field on
+/// one side.
+#[test]
+fn screen_unresolved_profile_builders_are_in_parity_17243() {
+    let rows = vec![
+        crate::ScreenMissingProfileRef {
+            zone: "trust".into(),
+            profile: "p-a".into(),
+            alarm_without_drop: true,
+        },
+        // Empty zone: skipped by both builders.
+        crate::ScreenMissingProfileRef {
+            zone: String::new(),
+            profile: "nobody".into(),
+            alarm_without_drop: true,
+        },
+        crate::ScreenMissingProfileRef {
+            zone: "untrust".into(),
+            profile: "p-b".into(),
+            alarm_without_drop: false,
+        },
+        // Duplicate zone: the later row wins in both builders.
+        crate::ScreenMissingProfileRef {
+            zone: "trust".into(),
+            profile: "p-a2".into(),
+            alarm_without_drop: false,
+        },
+    ];
+    let missing_state = build_forwarding_state(&ConfigSnapshot {
+        screen_missing_profile_zones: rows.clone(),
+        ..Default::default()
+    });
+    let inert_state = build_forwarding_state(&ConfigSnapshot {
+        screen_inert_profile_zones: rows,
+        ..Default::default()
+    });
+    assert_eq!(
+        missing_state.screen_missing_profiles, inert_state.screen_inert_profiles,
+        "the missing and inert builders must decode identical wire rows into \
+         identical maps (single consolidated `unresolved_profile_refs` body)"
+    );
+    // Pin the expected map exactly, so parity cannot be satisfied by both
+    // builders being wrong in the same new way.
+    let expected: FxHashMap<String, UnresolvedProfileRef> = [
+        (
+            "trust".to_string(),
+            UnresolvedProfileRef {
+                profile: "p-a2".into(),
+                alarm_without_drop: false,
+            },
+        ),
+        (
+            "untrust".to_string(),
+            UnresolvedProfileRef {
+                profile: "p-b".into(),
+                alarm_without_drop: false,
+            },
+        ),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        missing_state.screen_missing_profiles, expected,
+        "exact contents: empty zone skipped, duplicate zone last-wins, profile \
+         and audit flag forwarded verbatim"
+    );
+    // Disjointness: each arm populates only its own state map.
+    assert!(missing_state.screen_inert_profiles.is_empty());
+    assert!(inert_state.screen_missing_profiles.is_empty());
+}
+
 
 /// #9512: kernel-learned IPv6 routes whose next hop is the SAME link-local
 /// address on different links. The Go importer publishes each leg as
