@@ -538,10 +538,19 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				var response ControlResponse
 				response, pollErr = m.requestDetailedAtSocket(ControlRequest{Type: "status"}, controlSocket)
 				if pollErr == nil {
-					pollErr = validateRequiredStatusReply("status", response.Status)
-					if pollErr == nil && response.Status != nil {
+					if verr := validateRequiredStatusReply("status", response.Status); verr != nil {
+						// #18293: the helper answered with a status object Go
+						// cannot use (absent/partial). That is an answered-
+						// but-undecodable poll, not silence.
+						pollErr = &statusDecodeError{cause: verr}
+					} else if response.Status != nil {
 						status = *response.Status
 					}
+				} else if isResponseCapError(pollErr) {
+					// #18293: our cap truncated a status the helper DID
+					// answer (responseCapError text says so). Answered, not
+					// silence. Other verbs keep the bare cap error.
+					pollErr = &statusDecodeError{cause: pollErr}
 				}
 			}
 			m.mu.Lock()
@@ -675,6 +684,12 @@ func (m *Manager) statusLoop(ctx context.Context) {
 				} else if err := m.syncDesiredForwardingStateLocked(); err != nil {
 					slog.Warn("userspace dataplane forwarding sync failed", "err", err)
 				}
+			} else if errors.Is(err, errStatusDecode) {
+				// #18293: answered but undecodable. Surface it as a decode
+				// error (counted in noteStatusPollResultLocked) and never
+				// kill: the helper provably answered.
+				slog.Warn("userspace dataplane status poll decode failed; helper answered but its status could not be decoded (#18293)", "err", err)
+				_ = m.noteStatusPollResultLocked(err, time.Now())
 			} else {
 				slog.Warn("userspace dataplane status poll failed", "err", err)
 				// #9651: a helper that answers nothing for long enough is killed,

@@ -80,6 +80,8 @@ func (c *xpfCollector) emitDataplaneSilentSkips(ch chan<- prometheus.Metric) {
 		prometheus.CounterValue, float64(userspace.NAPIProbeTargetSkips()))
 	c.emitConstMetric(ch, c.bindingWedgeGiveupsTotal,
 		prometheus.CounterValue, float64(userspace.BindingWedgeGiveups()))
+	c.emitConstMetric(ch, c.statusPollDecodeErrorsTotal,
+		prometheus.CounterValue, float64(userspace.StatusPollDecodeErrors()))
 	c.emitConstMetric(ch, c.learnedRouteCapHitsTotal,
 		prometheus.CounterValue, float64(userspace.LearnedRouteCapHits()))
 	protocolHits := userspace.LearnedRouteCapHitsByProtocol()

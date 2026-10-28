@@ -94,6 +94,14 @@ func (c *xpfCollector) initGlobalDescriptors() {
 			"emitted, including at zero (#9043).",
 		nil, nil,
 	)
+	c.statusPollDecodeErrorsTotal = prometheus.NewDesc(
+		"xpf_status_poll_decode_errors_total",
+		"Total status polls the userspace helper ANSWERED but the daemon "+
+			"could not decode (#18293: wire drift, a partial status, or the "+
+			"control-response cap). These never count toward the #9651 wedge "+
+			"kill. Always emitted, including at zero.",
+		nil, nil,
+	)
 	c.learnedRouteCapHitsTotal = prometheus.NewDesc(
 		"xpf_learned_route_cap_hits_total",
 		"Total snapshot builds that declined learned routes at the cap, leaving "+
