@@ -1636,11 +1636,14 @@ impl WgEngine {
         self.encap_inner(peer_pubkey, inner_ip, out, false, PADDED_PLAINTEXT_MAX)
     }
 
-    /// Encap with the §5.4.6 pad capped at `inner_budget` (the largest
-    /// inner packet the caller's outer MTU admits), matching Linux
+    /// Encap with the §5.4.6 pad capped at `inner_budget` (the outer-derived
+    /// byte budget for the inner packet), matching Linux
     /// `calculate_skb_padding` / wireguard-go `calculatePaddingSize`
-    /// (#16499). A full-budget inner packet therefore emits exactly at
-    /// budget instead of up to 15 bytes over the outer MTU. The cap never
+    /// (#16499). When `inner_budget` is at or below the engine ceiling
+    /// (`WG_ENGINE_MAX_INNER_MTU` = 4096), a full-budget inner packet
+    /// emits exactly at budget instead of up to 15 bytes over the outer
+    /// MTU. A larger outer-derived budget cannot be fully encapped because
+    /// the engine rejects inner packets above its ceiling. The cap never
     /// truncates payload (see `padded_len_capped`).
     pub(crate) fn try_encap_capped(
         &self,

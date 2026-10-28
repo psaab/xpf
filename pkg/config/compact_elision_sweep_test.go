@@ -79,8 +79,8 @@ func sweepPairVerdicts8859() (map[string]map[string]string, map[string]string, [
 	// a handled drop is indistinguishable from an unhandled one, which is how
 	// `system login` (#6662/#6706: LoginDroppedByPacking + strict reject +
 	// warning) sat in the candidate set looking exactly like a defect.
-	// firstDiff names the JSON field that differs, so a row can be adjudicated
-	// rather than counted.
+	// ConfigFingerprint is an opaque digest, so firstDiff can report only a
+	// short digest slice, not the field that differed.
 	firstDiff := func(a, b string) string {
 		n := len(a)
 		if len(b) < n {

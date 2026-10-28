@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Logging: keep filter-term syslog routing bound to the applied snapshot
+    generation across partial publishes (#17810).
+  * Daemon: add already-MASTER sync-hold reconcile coverage with an
+    authoritative VRRP manager instance retained through held, release-only,
+    and steady-state passes (#17821).
   * Config: reject redundancy-group node statements without an explicit
     election priority at commit; tolerant loads warn and continue booting
     persisted configurations (#17820, following the #16672 node-shape gate).

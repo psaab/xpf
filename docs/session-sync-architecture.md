@@ -1084,9 +1084,18 @@ config state (`HeartbeatPacket` is node/cluster id, per-RG group state,
 interface monitors, software and protocol version), and `configSyncFailing`
 never leaves the node it is raised on. So `configApplyLoop`'s failure branch
 sends `syncMsgConfigApplyNack` carrying the generation that did not take effect;
-the sender accepts it only when it names `lastSentConfigGen` — the generation it
-most recently put on the wire — and invalidates the push marker, so the next
-ordinary reconcile tick re-sends.
+the sender accepts it only when it names the generation in the coherent
+`lastSentConfigDebt16756` snapshot — the newest generation put on the wire —
+and invalidates the push marker, so the next ordinary reconcile tick re-sends.
+
+#17816 stores each sent generation and its send-time ACK capability in one
+debt snapshot. The legacy NACK marker is peer-lifetime state as well: disconnect
+alone cannot erase a matching rejection. Both guarded and ungated config writes
+hold `peerSnapshotProtocolWriteMu` from capability sampling through the socket
+write, so a capability advertisement cannot split the recorded state from the
+write. If a successor proves ACK capability after a legacy send, its current
+capability overrides the legacy fallback and that outstanding generation still
+needs a positive ACK.
 
 #6778 added a SECOND sender of that frame: `handleConfigPayload`'s queue-full
 drop. When `configApplyCh` is full the non-blocking enqueue discards the

@@ -35,6 +35,7 @@ func ingressDomainSnapshot14842() *ConfigSnapshot {
 func TestBuildUserspaceIngressDomainEntriesPerVLAN14842(t *testing.T) {
 	entries := buildUserspaceIngressDomainEntries(ingressDomainSnapshot14842())
 	want := map[userspaceIngressDomainKey]uint32{
+		{Ifindex: 10, VLANID: 0}:                                    0, // tagged-only priority-tagged VID 0 resolves in the parent domain
 		{Ifindex: 10, VLANID: 50}:                                   ingressDomain14842VID50,
 		{Ifindex: 10, VLANID: 80}:                                   ingressDomain14842VID80,
 		{Ifindex: 10, VLANID: userspaceIngressDomainUntaggedVLANID}: 0,
@@ -67,15 +68,68 @@ func TestBuildUserspaceIngressDomainEntriesConflictingVIDPoisoned14842(t *testin
 	}
 }
 
+// Native-VLAN units own their parent's untagged arrivals (maps_sync.go:220-232),
+// even when they are not valid VID-0 owners. #18322 only adds the distinct
+// {parent, 0} priority-tagged alias; negative cases pin it absent while keeping
+// the pre-existing {parent, 0xffff} untagged row present.
 func TestBuildUserspaceIngressDomainEntriesNativeVLANOwnsUntagged14842(t *testing.T) {
-	snap := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
-		{Name: "ge-0/0/1", LinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 10, NativeVLANID: 50, RoutingDomain: 7},
-		{Name: "ge-0/0/1.50", LinuxName: "ge-0-0-1.50", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 11, ParentIfindex: 10, VLANID: 50, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
-	}}
-	entries := buildUserspaceIngressDomainEntries(snap)
-	key := userspaceIngressDomainKey{Ifindex: 10, VLANID: userspaceIngressDomainUntaggedVLANID}
-	if got := entries[key]; got != ingressDomain14842VID50 {
-		t.Fatalf("native-VLAN untagged entry = %d, want the native unit's domain %d (entries: %v)", got, ingressDomain14842VID50, entries)
+	cases := []struct {
+		name                string
+		snapshot            *ConfigSnapshot
+		checkUntaggedDomain bool
+		wantUntaggedDomain  uint32
+		noVID0Aliases       []uint32
+	}{
+		{
+			name: "zoned native unit owns untagged ingress",
+			snapshot: &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
+				{Name: "ge-0/0/1", LinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 10, NativeVLANID: 50, RoutingDomain: 7},
+				{Name: "ge-0/0/1.50", LinuxName: "ge-0-0-1.50", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 11, ParentIfindex: 10, VLANID: 50, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
+				{Name: "ge-0/0/2", LinuxName: "ge-0-0-2", Zone: "trust", Ifindex: 20, RoutingDomain: 8},
+			}},
+			checkUntaggedDomain: true,
+			wantUntaggedDomain:  ingressDomain14842VID50,
+			noVID0Aliases:       []uint32{10, 20},
+		},
+		{
+			name: "unzoned native unit has no VID0 alias",
+			snapshot: &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
+				{Name: "ge-0/0/1", LinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 10, NativeVLANID: 100, RoutingDomain: 7},
+				{Name: "ge-0/0/1.100", LinuxName: "ge-0-0-1.100", ParentLinuxName: "ge-0-0-1", Ifindex: 11, ParentIfindex: 10, VLANID: 100, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
+				{Name: "ge-0/0/1.200", LinuxName: "ge-0-0-1.200", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 12, ParentIfindex: 10, VLANID: 200, IsUnit: true, RoutingDomain: ingressDomain14842VID80},
+			}},
+			checkUntaggedDomain: true,
+			wantUntaggedDomain:  ingressDomain14842VID50,
+			noVID0Aliases:       []uint32{10},
+		},
+		{
+			name: "ambiguous native units have no VID0 alias",
+			snapshot: &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
+				{Name: "ge-0/0/1", LinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 10, NativeVLANID: 100, RoutingDomain: 7},
+				{Name: "ge-0/0/1.100a", LinuxName: "ge-0-0-1.100a", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 11, ParentIfindex: 10, VLANID: 100, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
+				{Name: "ge-0/0/1.100b", LinuxName: "ge-0-0-1.100b", ParentLinuxName: "ge-0-0-1", Zone: "trust", Ifindex: 12, ParentIfindex: 10, VLANID: 100, IsUnit: true, RoutingDomain: ingressDomain14842VID50},
+			}},
+			checkUntaggedDomain: true,
+			wantUntaggedDomain:  ingressDomain14842VID50,
+			noVID0Aliases:       []uint32{10},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			entries := buildUserspaceIngressDomainEntries(tc.snapshot)
+			if tc.checkUntaggedDomain {
+				key := userspaceIngressDomainKey{Ifindex: 10, VLANID: userspaceIngressDomainUntaggedVLANID}
+				if got, ok := entries[key]; !ok || got != tc.wantUntaggedDomain {
+					t.Fatalf("native-VLAN untagged entry {10, 0xffff} = (%d, %v), want present with the native unit's domain %d (entries: %v)", got, ok, tc.wantUntaggedDomain, entries)
+				}
+			}
+			for _, ifindex := range tc.noVID0Aliases {
+				key := userspaceIngressDomainKey{Ifindex: ifindex, VLANID: 0}
+				if _, ok := entries[key]; ok {
+					t.Fatalf("native/ordinary ifindex %d unexpectedly got a VID-0 row: %v", ifindex, entries)
+				}
+			}
+		})
 	}
 }
 

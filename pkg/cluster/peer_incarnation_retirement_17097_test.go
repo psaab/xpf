@@ -301,7 +301,7 @@ func TestFullDisconnectRetiresEveryIncarnationField17097(t *testing.T) {
 }
 
 // TestIncarnationScopedFieldsLiveInPeerIncarnationState17097 pins what it
-// can: the 16 hardcoded incarnation-scoped names below live on
+// can: the 15 hardcoded incarnation-scoped names below live on
 // peerIncarnationState and none remains directly on SessionSync. A NOVEL
 // incarnation-scoped field added flat under a new name (or in another
 // sub-struct) escapes this pin and must be added to the list by hand; a
@@ -314,7 +314,6 @@ func TestIncarnationScopedFieldsLiveInPeerIncarnationState17097(t *testing.T) {
 	names := []string{
 		"peerCapabilityFlags", "peerCapabilityFlags2", "peerSessionSyncWire",
 		"peerHeartbeatAckEver", "peerClockOffset",
-		"lastSentConfigAckCapable16756", "peerConfigNackedGen16756",
 		"deleteSuppressionWarned", "purgeRetirementSuppressionWarned",
 		"scopedPolicySuppressionWarned", "installTableSuppressionWarned",
 		"ipsecDiscriminatorSuppressionWarned",
@@ -333,6 +332,12 @@ func TestIncarnationScopedFieldsLiveInPeerIncarnationState17097(t *testing.T) {
 			t.Errorf("incarnation-scoped field %s is back directly on SessionSync; it belongs "+
 				"on peerIncarnationState so retirePeerIncarnationLocked resets it at every site", n)
 		}
+	}
+	if _, ok := stateTyp.FieldByName("peerConfigNackedGen16756"); ok {
+		t.Error("peerConfigNackedGen16756 is peer-scoped debt and must not be reset with an incarnation")
+	}
+	if _, ok := flat["peerConfigNackedGen16756"]; !ok {
+		t.Error("SessionSync is missing peer-scoped peerConfigNackedGen16756")
 	}
 	if _, ok := flat["peerIncarnationStatePtr"]; !ok {
 		t.Error("SessionSync has no peerIncarnationStatePtr: the incarnation state is not " +

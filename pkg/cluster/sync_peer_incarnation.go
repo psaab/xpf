@@ -34,7 +34,7 @@ import (
 //     connection when that connection proves the new boot.
 //   - peerSnapshotProtocol and peerSnapshotProtocolGeneration: they live on
 //     peerSnapshotState (#16159) behind peerSnapshotProtocolWriteMu, which
-//     serializes capability-incarnation changes with gated config writes.
+//     serializes capability-incarnation changes with config writes.
 //     Moving them would split that lock domain; retirePeerIncarnationLocked
 //     still clears them at every site beside this state.
 //   - peerIdentity / peerBootIncarnation / bulk-receive state: retired by
@@ -83,18 +83,6 @@ type peerIncarnationState struct {
 	// (#9653/#9915 F-118). Every retirement zeroes it; the boot-ID switch
 	// then re-seeds it from the kept connection's proven offset.
 	peerClockOffset atomic.Int64
-	// lastSentConfigAckCapable16756 records, atomically with
-	// lastSentConfigGen, whether the peer incarnation that was current
-	// when the newest generation was sent advertised config-apply-ACK
-	// support (#16756). It lets PeerConfigStale charge a missing ACK
-	// only to a peer that promised one.
-	lastSentConfigAckCapable16756 atomic.Bool
-	// peerConfigNackedGen16756 is the generation of the newest
-	// current-send NACK (#16756 legacy fallback), or 0. A NACK whose
-	// generation is behind lastSentConfigGen is a straggler and is
-	// ignored by the fallback exactly as handleConfigApplyNack ignores
-	// it for the re-push marker.
-	peerConfigNackedGen16756 atomic.Uint64
 	// deleteSuppressionWarned latches the #9714 F5 operator warning so a
 	// path that can run thousands of times a second logs the episode
 	// ONCE. The warning is about a peer INCARNATION, and a latch that

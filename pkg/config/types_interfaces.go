@@ -18,10 +18,9 @@ type InterfacesConfig struct {
 	// compiled the bad token is gone and the unit looks like one that simply
 	// carries fewer addresses.
 	//
-	// json:"-" deliberately, for the reason MalformedZonePairs carries it:
-	// this is a COMPILE-TIME DIAGNOSTIC, not config content, and serialising
-	// it would perturb every fixture and ConfigFingerprint comparison that
-	// compares compiled configs for a field that is nil in every valid config.
+	// `json:"-"` keeps this compile-time diagnostic out of JSON/REST.
+	// fingerprintIgnore separately excludes it from semantic comparisons:
+	// the fault is reported through Warnings, not by differing config content.
 	MalformedAddresses []string `json:"-"`
 }
 
@@ -54,13 +53,13 @@ type InterfaceConfig struct {
 	// interface whose final unit was quarantined would activate a fallback
 	// endpoint the operator never configured.
 	//
-	// `json:"-"` IS LOAD-BEARING, per the HasPreference precedent
-	// (types_routing.go): ConfigSnapshot embeds the whole typed Config, so an
-	// exported field is on the Go→Rust wire and moves the #9821 golden. This
-	// bit is compiler-internal — the emitter's fallback decision is already
-	// encoded in the emitted endpoint rows, and no Rust consumer reads the
-	// bit itself. Nothing is lost by not persisting it: the config DB stores
-	// the TREE, and compileInterfaces recomputes the bit on every load.
+	// `json:"-"` is load-bearing: ConfigSnapshot serializes the typed Config into
+	// the opaque Rust JSON payload, so this compiler-internal bit would otherwise
+	// be visible on the Go→Rust wire and appear in the #9821 golden.
+	// The bit is compiler-internal — the emitter's fallback decision is already
+	// encoded in the emitted endpoint rows, and no Rust consumer reads the bit
+	// itself. Nothing is lost by not persisting it: the config DB stores the
+	// TREE, and compileInterfaces recomputes the bit on every load.
 	AuthoredUnits bool `json:"-"`
 	// #4308 (fable-review-167 I-3): parity knobs are typed + compiled so
 	// they stop silently vanishing. #11434 enforces native-vlan-id: untagged

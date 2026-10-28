@@ -90,8 +90,8 @@ func TestDHCPChunkReceivedOverTotalRefused16036(t *testing.T) {
 	recv.SetPeerDHCPLeasesForTesting(4, prior)
 
 	one := encodeDHCPLeasePayload([]dhcpserver.SyncLease{dhcpChunkLease15160(7)})
-	c0 := encodeDHCPLeaseChunkPayload(one, 5, 0, 2, 1)
-	c1 := encodeDHCPLeaseChunkPayload(one, 5, 1, 2, 1)
+	c0 := encodeDHCPLeaseChunkPayload(one, 1, 0, 2, 1)
+	c1 := encodeDHCPLeaseChunkPayload(one, 1, 1, 2, 1)
 	recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, appendFullSetSeq(c0, 77, 1))
 	recv.handleMessage(nil, syncMsgDHCPLeaseV4Chunk, appendFullSetSeq(c1, 77, 2))
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/logging"
@@ -101,7 +102,103 @@ func (d *Daemon) syslogCachedClient15231(name, fp string) *logging.SyslogClient 
 	if d.syslogBuiltFP15231[name] != fp {
 		return nil
 	}
-	return d.syslogBuiltByName15231[name]
+	c := d.syslogBuiltByName15231[name]
+	// #18368: a closed client is terminal — Send can never recover
+	// (#4806) — so an unchanged fingerprint must not serve it. Evict
+	// the exact cached pointer and miss, so the caller rebuilds.
+	if c == nil || c.Closed() {
+		delete(d.syslogBuiltByName15231, name)
+		delete(d.syslogBuiltFP15231, name)
+		return nil
+	}
+	return c
+}
+
+// syslogForgetCachedNotInstalled15231 evicts stream-cache entries whose
+// clients are terminally closed or whose identity the EventReader no
+// longer owns (#18368, the stream twin of
+// systemSyslogForgetCachedNotInstalled). The identity check alone is
+// not sufficient: external replacement can leave a cached client open.
+// Eviction removes only this stale cache entry; other stream names are
+// unaffected. A displaced open client is closed after releasing syslogBuiltMu.
+func (d *Daemon) syslogForgetCachedNotInstalled15231(installed []*logging.SyslogClient) {
+	var closeAfterUnlock []*logging.SyslogClient
+	d.syslogBuiltMu.Lock()
+	for name, cached := range d.syslogBuiltByName15231 {
+		open := cached != nil && !cached.Closed()
+		stillInstalled := false
+		if open {
+			for _, client := range installed {
+				if client == cached {
+					stillInstalled = true
+					break
+				}
+			}
+		}
+		if !stillInstalled {
+			delete(d.syslogBuiltByName15231, name)
+			delete(d.syslogBuiltFP15231, name)
+			if open {
+				duplicate := false
+				for _, alreadyQueued := range closeAfterUnlock {
+					if alreadyQueued == cached {
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					closeAfterUnlock = append(closeAfterUnlock, cached)
+				}
+			}
+		}
+	}
+	d.syslogBuiltMu.Unlock()
+	for _, cached := range closeAfterUnlock {
+		_ = cached.Close()
+	}
+}
+
+// syslogCachedClientsInstalled15231 reports whether every configured
+// stream has an open cached client still installed in er, and the
+// installed set has not drifted (#18368). Stream config is a map, so
+// compare set membership rather than order (the apply loop's map order
+// is intentionally unspecified).
+func (d *Daemon) syslogCachedClientsInstalled15231(er *logging.EventReader, cfg *config.Config) bool {
+	if er == nil || cfg == nil {
+		return false
+	}
+	installed := er.SyslogClients()
+	streams := cfg.Security.Log.Streams
+	if len(installed) != len(streams) {
+		return false
+	}
+	d.syslogBuiltMu.Lock()
+	defer d.syslogBuiltMu.Unlock()
+	if len(d.syslogBuiltByName15231) != len(streams) {
+		return false
+	}
+	for _, client := range installed {
+		if client == nil || client.Closed() {
+			return false
+		}
+	}
+	for name := range streams {
+		cached, ok := d.syslogBuiltByName15231[name]
+		if !ok || cached == nil || cached.Closed() {
+			return false
+		}
+		found := false
+		for _, client := range installed {
+			if client == cached {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Daemon) syslogCacheClient15231(name, fp string, c *logging.SyslogClient) {
@@ -130,8 +227,27 @@ func (d *Daemon) syslogForgetCached15231(keep map[string]bool) []*logging.Syslog
 }
 
 func (d *Daemon) syslogClearCache15231() {
+	// Teardown (event mode / zero streams): displaced OPEN cached
+	// clients are not installed, so ReplaceSyslogClients cannot close
+	// them; close them here after the forget releases syslogBuiltMu.
+	var closeAfterUnlock []*logging.SyslogClient
 	for _, c := range d.syslogForgetCached15231(nil) {
-		_ = c
+		if c == nil || c.Closed() {
+			continue
+		}
+		duplicate := false
+		for _, queued := range closeAfterUnlock {
+			if queued == c {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			closeAfterUnlock = append(closeAfterUnlock, c)
+		}
+	}
+	for _, c := range closeAfterUnlock {
+		_ = c.Close()
 	}
 }
 
@@ -461,6 +577,16 @@ func buildIfNamesWithLookup(cfg *config.Config, lookupIfindex func(string) (int,
 	return config.SessionIfNamesByIfindex(cfg, lookupIfindex)
 }
 
+func appliedSnapshotGenerationOf(rt dataplane.RuntimeDataPlane) uint64 {
+	provider, ok := dataplane.Unwrap(rt).(interface {
+		AppliedSnapshotGeneration() uint64
+	})
+	if !ok {
+		return 0
+	}
+	return provider.AppliedSnapshotGeneration()
+}
+
 func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) {
 	if er == nil {
 		return
@@ -470,36 +596,41 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	// collision loser claim the shared id nondeterministically.
 	er.SetZoneNames(config.SyslogZoneNames(cfg))
 
-	// Wire policy names and app names for structured logging.
-	// #2114: ONE cell load inside applyResult (LastApplyResultOf is
-	// nil-safe) — a separate dataplane() guard here would observe a
-	// different publication than the result read (Codex PR #6743 r3-7).
-	if cr := d.applyResult(); cr != nil {
+	// Resolve the published dataplane once: both the full-apply result and the
+	// applied-snapshot identity must describe the same backend (#2114).
+	rt := d.dataplane()
+	cr := dataplane.LastApplyResultOf(rt)
+	appliedGeneration := appliedSnapshotGenerationOf(rt)
+	filterGeneration := appliedGeneration
+	if filterGeneration == 0 && cr != nil {
+		// Non-userspace backends do not expose the retained applied identity;
+		// keep their established LastApplyResult generation as the fallback.
+		filterGeneration = cr.Generation
+	}
+	if cr != nil {
 		er.SetPolicyNamesForGeneration(cr.Generation, cr.PolicyNames)
 		if cr.AppNames != nil {
 			er.SetAppNames(cr.AppNames)
 		}
-		// #16775: install the filter-term syslog projection TOGETHER
-		// with the dataplane publish, generation-bound. cr.Generation is
-		// the generation of the snapshot the dataplane now enforces
-		// (LastApplyResult is set inside ApplyConfig at publish), so a
-		// FILTER_LOG stamped with the new generation resolves against
-		// this map, and a queued old-generation hit whose positional id
-		// now collides is suppressed instead of forwarded. This runs on
-		// every applySyslogConfig call (apply-tail 14b, daemon start,
-		// syslog retry); the generation makes the transient window
-		// fail-closed rather than mis-routed. When SnapshotPublishDeferred
-		// the snapshot has not landed: keep the previous generation's map
-		// (the dataplane still enforces it) and let the deferred-publish
-		// completion install the new one (installDeferredFilterTermSyslog).
-		if !cr.SnapshotPublishDeferred && cr.Generation != 0 {
-			er.SetFilterTermSyslogForGeneration(cr.Generation, dpuserspace.FilterTermSyslogMap(cfg))
+		// #16775: FILTER_LOG terms are positional in the snapshot currently
+		// enforced by the dataplane. LastApplyResult tracks full applies only;
+		// successful partial publishes can advance the applied identity
+		// without replacing it, so syslog retries must use filterGeneration.
+		// SnapshotPublishDeferred remains set on that historical result after
+		// the publish lands. Keep the prior map only while the applied identity
+		// is still older than the deferred full snapshot.
+		snapshotStillDeferred := cr.SnapshotPublishDeferred &&
+			(appliedGeneration == 0 || appliedGeneration < cr.Generation)
+		if !snapshotStillDeferred && filterGeneration != 0 {
+			er.SetFilterTermSyslogForGeneration(filterGeneration, dpuserspace.FilterTermSyslogMap(cfg))
 		} else if cr.Generation == 0 {
 			er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))
 		}
+	} else if appliedGeneration != 0 {
+		er.SetFilterTermSyslogForGeneration(appliedGeneration, dpuserspace.FilterTermSyslogMap(cfg))
 	} else {
-		// No apply result (no dataplane / not yet applied): keep the
-		// unversioned install so the gate is still wired.
+		// No applied or full-apply generation (no dataplane / not yet applied):
+		// keep the unversioned install so the gate is still wired.
 		er.SetFilterTermSyslog(dpuserspace.FilterTermSyslogMap(cfg))
 	}
 
@@ -589,7 +720,8 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 	var pendingHash string
 	var pendingHashOK bool
 	if h, ok := syslogClientFingerprint(cfg); ok {
-		if d.syslogHashSet && h == d.syslogHash {
+		if d.syslogHashSet && h == d.syslogHash &&
+			d.syslogCachedClientsInstalled15231(er, cfg) {
 			d.applyAggregator(er, cfg)
 			return
 		}
@@ -601,6 +733,9 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		// that matters here.
 		d.syslogHashSet = false
 	}
+	// The fingerprint gate can fail open after a closed client or handler drift.
+	// Only still-installed clients are eligible for per-stream reuse (#18368).
+	d.syslogForgetCachedNotInstalled15231(er.SyslogClients())
 
 	var clients []*logging.SyslogClient
 	var freshClients15231 []*logging.SyslogClient

@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,5 +55,17 @@ func TestRescueActionRejectsUncommittedRescueSave_11803(t *testing.T) {
 	}
 	if string(got) != knownGood {
 		t.Fatalf("rescue-save changed existing rescue config: got %q, want %q", got, knownGood)
+	}
+}
+
+// TestRescueDeleteSupersededIsFailedPrecondition_17825 keeps the expected
+// latest-operation-wins race out of the gRPC internal-error class.
+func TestRescueDeleteSupersededIsFailedPrecondition_17825(t *testing.T) {
+	err := fmt.Errorf("delete rescue config: %w", configstore.ErrRescueDeleteSuperseded)
+	if got := status.Code(rescueDeleteRPCError(err)); got != codes.FailedPrecondition {
+		t.Fatalf("superseded rescue delete code = %s, want FailedPrecondition", got)
+	}
+	if got := status.Code(rescueDeleteRPCError(fmt.Errorf("unlink failed"))); got != codes.Internal {
+		t.Fatalf("ordinary rescue delete code = %s, want Internal", got)
 	}
 }

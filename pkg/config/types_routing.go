@@ -486,39 +486,23 @@ type StaticRoute struct {
 	// Null0/blackhole, a silent drop). Both suppress a next-hop; Reject and
 	// Discard are mutually exclusive per route (Junos allows only one action).
 	Reject bool
-	// NoInstall carries Junos `no-install` intent through compile-time install
-	// consumers. It is not serialized to the helper: excluded routes are
-	// omitted before snapshot construction.
-	NoInstall  bool `json:"-"`
+	// NoInstall carries Junos `no-install` intent in the compiled config.
+	// REST and helper config JSON include it so readers can distinguish an
+	// excluded route; route installers omit routes for which it is set.
+	NoInstall  bool `json:"NoInstall"`
 	Preference int  // route preference (admin distance), default 5
+
 	// HasPreference distinguishes an explicitly configured preference --
 	// INCLUDING one equal to the default 5 -- from an absent one (#9125).
 	//
 	// Without it the merge of two hierarchical `route <p> { }` blocks tested
 	// `route.Preference != 5` to decide whether the later block said anything,
 	// so an operator who wrote `preference 5` was indistinguishable from one
-	// who wrote nothing and their statement was silently dropped:
-	//
-	//	route 10.0.0.0/8 { next-hop 192.0.2.1; preference 10; }
-	//	route 10.0.0.0/8 { preference 5; }        -> compiled Preference = 10
-	//
-	// while `preference 7` in the same position compiled to 7. NextHopEntry
-	// already carries HasPreference and HasMetric for exactly this reason; this
-	// is the same bit at the route level, and the sibling's existence is why
-	// the omission was invisible -- the pattern was in the file, one type over.
-	//
-	// `json:"-"` IS LOAD-BEARING. ConfigSnapshot embeds the whole typed Config,
-	// so every exported field on a config struct is on the HELPER WIRE and moves
-	// the #8892 shape digest. This bit is compiler-internal: it exists to let
-	// the merge of two `route <p> { }` blocks tell an authored `preference 5`
-	// from an absent one, and the helper reads Preference. Serializing it would
-	// have forced a ProtocolVersion bump for a value no helper reads --
-	// the same choice LifetimeSecondsInvalidSpec (#9008) made for the same
-	// reason.
-	//
-	// Nothing is lost by not persisting it: the config DB stores the TREE, and
-	// the bit is recomputed by the compiler on every load.
-	HasPreference bool   `json:"-"`
+	// who wrote nothing and their statement was silently dropped.
+	// The field is semantic state and is part of compiled-config JSON; the
+	// config tree remains the persistence source and the compiler recomputes
+	// the bit on every load.
+	HasPreference bool   `json:"HasPreference"`
 	NextTable     string // routing instance name for inter-VRF route leaking (e.g. "Comcast.inet.0" → "Comcast")
 	// NextTableRaw preserves the operator's original next-table token
 	// (e.g. "Comcast.inet.0") before parseNextTableInstance strips the
