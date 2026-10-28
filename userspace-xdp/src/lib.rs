@@ -165,6 +165,7 @@ mod ipv4_key;
 mod ipv4_len_gate;
 mod ipv6_ext_walk;
 mod ipv6_len_gate;
+mod kernel_pass;
 mod land;
 mod tunnel_frag;
 mod wg_classify;
@@ -887,8 +888,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     // disposition change. The tail has no port/type, so this predicate
     // keeps it off every kernel-pass arm and the worker buffers it only
     // against an admitted head.
+    // #17223: the tail-only conjunct is the shared `kernel_pass::wg_tail_fragment`
+    // predicate, also called by the degraded composition, so the healthy
+    // narrowing and its degraded twin cannot diverge again (#16438).
     let wg_fragment = parsed.is_fragment
-        && parsed.protocol == PROTO_FRAGMENT_NO_L4
+        && kernel_pass::wg_tail_fragment(parsed.protocol, PROTO_FRAGMENT_NO_L4)
         && wg_fragment_stays_on_helper(
             parsed.protocol,
             parsed.wire_protocol,
@@ -1017,10 +1021,11 @@ fn try_xdp_userspace(ctx: &XdpContext) -> Result<u32, i64> {
     } else {
         0
     };
-    if wg_steer_candidate
-        && wg_steer_session_action != USERSPACE_SESSION_ACTION_REDIRECT
-        && wg_steer_session_action != USERSPACE_SESSION_ACTION_PASS_TO_KERNEL
-    {
+    if kernel_pass::wg_steer_passes_to_kernel(
+        wg_steer_candidate,
+        wg_steer_session_action == USERSPACE_SESSION_ACTION_REDIRECT,
+        wg_steer_session_action == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL,
+    ) {
         incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_WG_STEER);
         return Ok(cpumap_or_pass(ctrl));
     }
@@ -1924,12 +1929,15 @@ fn is_degraded_local_or_control(
     // drops in degraded mode, and a non-WG tail to a local address
     // was never kernel-reassemblable as a lone fragment either —
     // the head decides the datagram.
-    if wg_degraded_fragment_excluded(
-        parsed.protocol,
-        parsed.wire_protocol,
-        parsed.is_fragment,
-        (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0,
-    ) {
+    let wg_tail = kernel_pass::wg_tail_fragment(parsed.protocol, PROTO_FRAGMENT_NO_L4);
+    if wg_tail
+        && wg_degraded_fragment_excluded(
+            parsed.protocol,
+            parsed.wire_protocol,
+            parsed.is_fragment,
+            (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0,
+        )
+    {
         return false;
     }
     // #16038: never kernel-PASS an unresolved ext chain on the degraded path.
@@ -1939,48 +1947,56 @@ fn is_degraded_local_or_control(
     if parsed.unresolved_ipv6_ext_chain {
         return false;
     }
-    if should_fallback_early(parsed, ingress_domain) {
+    let early_pass = should_fallback_early(parsed, ingress_domain);
+    if early_pass {
         return true;
     }
-    // #10863: NDP is local control only when its destination is local. The
-    // early filter above handles multicast NDP; unicast uses this ownership
-    // check.
+    // #10863: NDP is local control only when its destination is local.
     if is_icmp_to_interface_nat_local(parsed, ingress_domain) {
         return true;
     }
     let destination_is_local = is_local_destination(parsed, ingress_domain);
-    if parsed.protocol == PROTO_ICMPV6
-        && degraded_ndp::is_local_ndp_control(parsed.icmp_type, parsed.hop_limit, destination_is_local)
-    {
+    let local_ndp_control = parsed.protocol == PROTO_ICMPV6
+        && degraded_ndp::is_local_ndp_control(
+            parsed.icmp_type,
+            parsed.hop_limit,
+            destination_is_local,
+        );
+    if local_ndp_control {
         return true;
     }
-    // #15946: degraded twin of healthy NAT-external NDP arm (:1077).
-    if parsed.protocol == PROTO_ICMPV6
+    // #15946: degraded twin of the healthy NAT-external NDP arm
+    // (`degraded_ndp::is_nat_external_ndp_control`).
+    let nat_external_ndp_control = parsed.protocol == PROTO_ICMPV6
         && degraded_ndp::is_nat_external_ndp_control(
             parsed.icmp_type,
             parsed.hop_limit,
             is_interface_nat_destination(parsed, ingress_domain),
-        )
-    {
+        );
+    if nat_external_ndp_control {
         return true;
     }
-    // #16660: degraded twin of the healthy proxy-NDP arm.
-    if parsed.protocol == PROTO_ICMPV6
+    // #16660: degraded twin of the healthy proxy-NDP arm
+    // (`degraded_ndp::is_proxy_ndp_ndp_control`).
+    let proxy_ndp_control = parsed.protocol == PROTO_ICMPV6
         && degraded_ndp::is_proxy_ndp_ndp_control(
             parsed.icmp_type,
             parsed.hop_limit,
             is_proxy_ndp_destination(parsed, ingress_domain),
-        )
-    {
+        );
+    if proxy_ndp_control {
         return true;
     }
-    // #16841: the degraded path must not pass a hop-limit-0 local
-    // packet the knob rejects, via any arm below.
-    if destination_is_local && zero_hop_limit_local_drop_shim(parsed, ctrl.flags) {
+    // #16841: veto via `kernel_pass::zero_hop_limit_vetoes_local_pass`.
+    let zero_hop_limit_drop = zero_hop_limit_local_drop_shim(parsed, ctrl.flags);
+    if kernel_pass::zero_hop_limit_vetoes_local_pass(destination_is_local, zero_hop_limit_drop) {
         return false;
     }
-    // #15946: degraded PASS_TO_KERNEL session + WG steer (healthy :1049/:982).
-    if live_userspace_session_action(parsed) == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL {
+    // #15946: degraded twin of the healthy PASS_TO_KERNEL session arm
+    // (`kernel_pass::session_pass_to_kernel`).
+    let session_is_pass_to_kernel =
+        live_userspace_session_action(parsed) == USERSPACE_SESSION_ACTION_PASS_TO_KERNEL;
+    if kernel_pass::session_pass_to_kernel(session_is_pass_to_kernel) {
         return true;
     }
     if (ctrl.flags & USERSPACE_CTRL_FLAG_WG_RX) != 0
@@ -1988,12 +2004,8 @@ fn is_degraded_local_or_control(
     {
         return true;
     }
-    // #14327: a native-GRE frame's outer destination is the local tunnel
-    // endpoint by construction, so the general local pass must not claim
-    // it — otherwise the #10651 inner gate below is unreachable exactly
-    // for outer-local frames and inner transit reaches the kernel with
-    // no zone policy. Native GRE falls through to that gate; every other
-    // local packet keeps the degraded local pass.
+    // #14327: native GRE declines the general local pass
+    // (`gre_classify::degraded_general_local_pass_applies`).
     let native_gre =
         parsed.protocol == PROTO_GRE && (ctrl.flags & USERSPACE_CTRL_FLAG_NATIVE_GRE) != 0;
     if degraded_general_local_pass_applies(native_gre, destination_is_local) {
@@ -2004,16 +2016,32 @@ fn is_degraded_local_or_control(
     {
         return true;
     }
-    // #10651: the degraded twin of the healthy native-GRE arm's outer-local
-    // gate. An inner PASS_TO_KERNEL hit must not kernel-forward a non-local
-    // outer here either; the degraded path is cold, so the outer predicate
-    // runs before the inner classify.
+    // #10651: degraded twin of the healthy native-GRE inner arm
+    // (`gre_classify::native_gre_inner_pass_steers_to_kernel_typed`),
+    // decided by the shared composition over the facts resolved above.
     if native_gre {
-        return native_gre_inner_pass_steers_to_kernel_typed(
-            OuterDestinationLocal::from_is_local_destination(destination_is_local),
-            InnerSessionAction::from_classifier_action(classify_native_gre_inner(
-                data, data_end, parsed,
-            )),
+        return kernel_pass::degraded_local_or_control(
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            destination_is_local,
+            zero_hop_limit_drop,
+            false,
+            false,
+            false,
+            false,
+            true,
+            native_gre_inner_pass_steers_to_kernel_typed(
+                OuterDestinationLocal::from_is_local_destination(destination_is_local),
+                InnerSessionAction::from_classifier_action(classify_native_gre_inner(
+                    data, data_end, parsed,
+                )),
+            ),
         );
     }
     false

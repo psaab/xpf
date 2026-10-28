@@ -2911,6 +2911,11 @@ mod tests_shim_tunnel_frag_10677;
 #[cfg(test)]
 #[path = "tests_shim_land_13953.rs"]
 mod tests_shim_land_13953;
+// #17223: the shim's shared kernel-pass predicates, degraded composition
+// and DEGRADED_TWIN agreement, executed rather than modelled.
+#[cfg(test)]
+#[path = "tests_shim_kernel_pass_17223.rs"]
+mod tests_shim_kernel_pass_17223;
 // #10661: ATOMIC+real Fragment chain consistency cells (tracker/shim/screens).
 #[cfg(test)]
 #[path = "tests_10661_atomic_chain.rs"]
