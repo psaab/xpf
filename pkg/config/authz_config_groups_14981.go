@@ -2,21 +2,20 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
 // authorizeExpandedCredentialDiff16080 is the #16080 leg of expanded-tree
 // adjudication, scoped to credential-touching diffs: for a class fenced
 // by the surcharge (PermConfig without PermAll, no regex restriction),
-// only diff lines whose resolved path touches a credential fence
-// (at/below it, or an ancestor of it) are adjudicated through
-// AuthorizeConfigMutation. Group-definition spellings are skipped:
-// expansion materializes applied bodies at the apply site, so a
-// surviving `groups …` line is not effective config. See fold (3) in
-// authorizeExpandedTree14981.
-func authorizeExpandedCredentialDiff16080(cfg *Config, class string, lines []string, activeSet map[string]bool) error {
+// only diff lines whose resolved path touches a credential fence are
+// adjudicated through AuthorizeConfigMutation. Group-definition spellings
+// are skipped because expansion materializes applied bodies at the apply
+// site.
+func authorizeExpandedCredentialDiff16080(cfg *Config, class string, lines []string, activeSet map[canonicalCommitLineKey17830]bool) error {
 	for _, line := range lines {
-		if activeSet[line] {
+		if activeSet[canonicalCommitLineIdentity17830(line)] {
 			continue
 		}
 		if expandedLineIsGroupDefinition14981(line) {
@@ -42,6 +41,66 @@ func authorizeExpandedCredentialDiff16080(cfg *Config, class string, lines []str
 		}
 	}
 	return nil
+}
+
+// canonicalCommitLineKey17830 is the structured identity used for commit
+// diff membership: mutation verb, canonical lexed tokens, and the annotation
+// payload when the verb is annotate. Length-prefixing keeps token boundaries
+// unambiguous without relying on display quotes or bracket formatting.
+type canonicalCommitLineKey17830 struct {
+	verb       string
+	tokens     string
+	annotation string
+	opaque     string // Opaque fallback for unchanged lines that cannot be lexed.
+}
+
+// canonicalCommitLineIdentity17830 lexes one rendered set-form line and
+// returns its canonical identity. Annotation payload is retained because
+// annotations are independently authorized mutations, not just paths.
+// Unlexable or unsupported lines use exact-text fallback only for no-op
+// membership; removal path adjudication still fails closed for a changed one.
+func canonicalCommitLineIdentity17830(line string) canonicalCommitLineKey17830 {
+	parts, quoted, lexOK := lexConfigMutationLineStrict15167(line)
+	if !lexOK || len(parts) < 2 {
+		return canonicalCommitLineKey17830{opaque: line}
+	}
+	verb := parts[0]
+	path := parts[1:]
+	annotation := ""
+	switch verb {
+	case "set", "deactivate", "activate":
+	case "annotate":
+		var ok bool
+		path, annotation, ok = splitAnnotateTokens(parts, quoted)
+		if !ok {
+			return canonicalCommitLineKey17830{opaque: line}
+		}
+	default:
+		return canonicalCommitLineKey17830{opaque: line}
+	}
+	var tokenSequence strings.Builder
+	for _, token := range path {
+		tokenSequence.WriteString(strconv.Itoa(len(token)))
+		tokenSequence.WriteByte(':')
+		tokenSequence.WriteString(token)
+	}
+	return canonicalCommitLineKey17830{
+		verb:       verb,
+		tokens:     tokenSequence.String(),
+		annotation: annotation,
+	}
+}
+
+func canonicalCommitSet17830(lines map[string]bool) map[canonicalCommitLineKey17830]bool {
+	set := make(map[canonicalCommitLineKey17830]bool, len(lines))
+	for line := range lines {
+		set[canonicalCommitLineIdentity17830(line)] = true
+	}
+	return set
+}
+
+func canonicalCommitSetsContain17830(canonical map[canonicalCommitLineKey17830]bool, line string) bool {
+	return canonical[canonicalCommitLineIdentity17830(line)]
 }
 
 // #14981: `groups` / `apply-groups` inheritance bypassed deny-configuration
@@ -328,24 +387,30 @@ func authorizeRemovedLines16784(cfg *Config, class string, candidate, active *Co
 	if !restricted && !fenced16080 {
 		return nil
 	}
-	candSet, err := treeSetLines16784(candidate)
+	candLines, err := treeSetLines16784(candidate)
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
 			"the candidate cannot be rendered for removal adjudication: %w", class, err)
 	}
-	activeSet, err := treeSetLines16784(active)
+	activeLines, err := treeSetLines16784(active)
 	if err != nil {
 		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
 			"the active tree cannot be rendered for removal adjudication: %w", class, err)
 	}
-	for line := range activeSet {
-		if candSet[line] {
+	candSet := canonicalCommitSet17830(candLines)
+	for line := range activeLines {
+		if canonicalCommitSetsContain17830(candSet, line) {
 			continue
 		}
 		if expandedLineIsGroupDefinition14981(line) {
 			continue
 		}
-		path := strings.TrimSpace(strings.TrimPrefix(line, "set "))
+		pathTokens, lexOK := canonicalConfigPathTokens17830(line)
+		if !lexOK {
+			return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
+				"a removed path cannot be lexed for adjudication (#17830)", class)
+		}
+		path := strings.Join(pathTokens, " ")
 		if path == "" {
 			continue
 		}
@@ -437,16 +502,23 @@ func authorizeExpandedTree14981(cfg *Config, class string, tree, active *ConfigT
 		return fmt.Errorf("permission denied: login class %q restricts configuration paths, and "+
 			"the group expansion cannot be resolved for adjudication: %w", class, err)
 	}
-	var activeSet map[string]bool
+	// The addition leg's diff membership uses the same structured
+	// identity as the removal leg (#17830 fold): a candidate line that
+	// differs from active only in authored quotes (or a bracketed
+	// container re-set) is already active and must not be re-priced as
+	// a new mutation. Keyed on canonicalCommitLineIdentity17830.
+	var activeSet map[canonicalCommitLineKey17830]bool
 	if active != nil {
-		activeSet = make(map[string]bool)
+		activeSet = make(map[canonicalCommitLineKey17830]bool)
 		if activeLines, aerr := ExpandedMutationLines(active); aerr == nil {
 			for _, l := range activeLines {
-				activeSet[l] = true
+				activeSet[canonicalCommitLineIdentity17830(l)] = true
 			}
 		}
 		for _, l := range strings.Split(active.FormatSet(), "\n") {
-			activeSet[strings.TrimSpace(l)] = true
+			if l = strings.TrimSpace(l); l != "" {
+				activeSet[canonicalCommitLineIdentity17830(l)] = true
+			}
 		}
 	}
 	if !restricted {
@@ -454,7 +526,7 @@ func authorizeExpandedTree14981(cfg *Config, class string, tree, active *ConfigT
 		return authorizeExpandedCredentialDiff16080(cfg, class, lines, activeSet)
 	}
 	for _, line := range lines {
-		if activeSet[line] {
+		if activeSet[canonicalCommitLineIdentity17830(line)] {
 			continue
 		}
 		// A `groups <name> …` line is a definition spelling, not an
