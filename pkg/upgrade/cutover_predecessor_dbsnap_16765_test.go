@@ -353,3 +353,31 @@ func TestResumeUnreadableCommittedStampPreservesOriginal17817(t *testing.T) {
 		})
 	}
 }
+
+// TestUnreadableTargetStampFailsClosedWithoutCurrentLink17817 ensures an
+// unreadable target stamp is not treated as absent just because the current
+// version's readable stamp no longer links to that target.
+func TestUnreadableTargetStampFailsClosedWithoutCurrentLink17817(t *testing.T) {
+	r, cfg, _ := setupCommittedPredecessor14720(t)
+	original := append([]byte(nil), predecessorDBSnap14720(t, cfg, "1.0.0")...)
+
+	if err := os.Remove(r.committedStampPath("2.0.0")); err != nil {
+		t.Fatalf("remove current committed stamp: %v", err)
+	}
+	targetStamp := r.committedStampPath("1.0.0")
+	if err := os.Remove(targetStamp); err != nil {
+		t.Fatalf("remove target committed stamp: %v", err)
+	}
+	if err := os.Mkdir(targetStamp, 0o755); err != nil {
+		t.Fatalf("replace target stamp with directory: %v", err)
+	}
+
+	backup, err := r.backupCommittedPredecessor(&Journal{PreviousVersion: "2.0.0"}, "1.0.0")
+	if err == nil || !strings.Contains(err.Error(), "read committed stamp") {
+		t.Fatalf("backup = (%v, %v), want unreadable target-stamp error without a current link", backup, err)
+	}
+	if backup != nil {
+		t.Fatalf("backup = %v, want nil on unreadable target stamp", backup)
+	}
+	assertPredecessorSnapshotContent14720(t, cfg, original)
+}

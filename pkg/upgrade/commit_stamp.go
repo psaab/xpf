@@ -89,19 +89,17 @@ func (r *Runner) committedPredecessorStamp(j *Journal, target string) (*committe
 	if j == nil || j.PreviousVersion == "" || target == "" || target == j.PreviousVersion {
 		return nil, nil
 	}
-	currentStamp, present, err := r.readCommittedStamp(j.PreviousVersion)
-	if err != nil {
-		return nil, fmt.Errorf("read current committed stamp: %w", err)
-	}
-	if !present || currentStamp == nil || !currentStamp.Committed ||
-		currentStamp.Predecessor != target {
-		return nil, nil
-	}
-	targetStamp, present, err := r.readCommittedStamp(target)
+	targetStamp, targetPresent, err := r.readCommittedStamp(target)
 	if err != nil {
 		return nil, fmt.Errorf("read committed stamp: %w", err)
 	}
-	if !present || targetStamp == nil || !targetStamp.Committed {
+	currentStamp, currentPresent, err := r.readCommittedStamp(j.PreviousVersion)
+	if err != nil {
+		return nil, fmt.Errorf("read current committed stamp: %w", err)
+	}
+	if !targetPresent || targetStamp == nil || !targetStamp.Committed ||
+		!currentPresent || currentStamp == nil || !currentStamp.Committed ||
+		currentStamp.Predecessor != target {
 		return nil, nil
 	}
 	return targetStamp, nil
