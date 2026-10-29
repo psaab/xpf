@@ -36,12 +36,13 @@ var (
 	wipeSSHHostKeyDir         = "/etc/ssh"
 	wipeRootSSHUserDir        = "/root/.ssh"
 	wipeRootBashHistory       = "/root/.bash_history"
-	wipeSNMPEngineIDPath      = "/var/lib/xpf/snmp-engine-id"
-	wipeSNMPEngineBootsPath   = "/var/lib/xpf/snmp-engineboots"
-	wipeUEFIStatePath         = "/var/lib/xpf/uefi-bootorder-front"
-	wipeFeedShrinkHistoryPath = configstore.FeedShrinkHistoryPath
-	wipeSystemdRandomSeed     = "/var/lib/systemd/random-seed"
-	wipeAptListsDir           = "/var/lib/apt/lists"
+	wipeSNMPEngineIDPath           = "/var/lib/xpf/snmp-engine-id"
+	wipeSNMPEngineBootsPath        = "/var/lib/xpf/snmp-engineboots"
+	wipeUEFIStatePath              = "/var/lib/xpf/uefi-bootorder-front"
+	wipeFeedShrinkHistoryPath      = configstore.FeedShrinkHistoryPath
+	wipeEthtoolForcedRegistryPath  = configstore.EthtoolForcedRegistryPath
+	wipeSystemdRandomSeed          = "/var/lib/systemd/random-seed"
+	wipeAptListsDir                = "/var/lib/apt/lists"
 	wipeAptArchiveDir         = "/var/cache/apt/archives"
 	wipeRunUtmpPath           = "/run/utmp"
 	wipeDay0RejectedPath      = "/etc/xpf/.day0-config-rejected"
@@ -253,19 +254,21 @@ func wipeImageSealResidue() error {
 	}
 
 	// xpf-owned identity/state on every host: SNMP engine identity (the
-	// daemon regenerates it), the name-keyed feed-shrink history (tenant
-	// state that must not cross a reset), and the day-0 rejection /
-	// root-grow first-boot markers under /etc/xpf.
+	// daemon regenerates it), forced-NIC state and name-keyed feed-shrink
+	// history (tenant state that must not cross a reset), and the day-0
+	// rejection / root-grow first-boot markers under /etc/xpf.
 	for _, path := range []string{
 		wipeSNMPEngineIDPath,
 		wipeSNMPEngineBootsPath,
 		wipeUEFIStatePath,
+		wipeEthtoolForcedRegistryPath,
 		wipeFeedShrinkHistoryPath,
 		wipeDay0RejectedPath,
 		wipeRootGrownPath,
 	} {
 		fail(wipeRemovePath(path))
 	}
+	fail(wipeEthtoolForcedRegistryCrashTemps(wipeEthtoolForcedRegistryPath))
 	fail(feeds.EraseShrinkHistoryCrashTemps(wipeFeedShrinkHistoryPath))
 
 	// Appliance-only: systemd's persisted random seed and /run/utmp are
@@ -397,6 +400,45 @@ func wipeImageSealResidue() error {
 	return nil
 }
 
+func listEthtoolForcedRegistryCrashTemps(path string) ([]string, error) {
+	dir := filepath.Dir(path)
+	prefix := "." + filepath.Base(path) + ".tmp-"
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("zeroize: inspect forced-interface registry directory for %s: %w", path, err)
+	}
+	var temps []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			temps = append(temps, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return temps, nil
+}
+
+func wipeEthtoolForcedRegistryCrashTemps(path string) error {
+	temps, err := listEthtoolForcedRegistryCrashTemps(path)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, temp := range temps {
+		if err := wipeRemovePath(temp); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	remaining, err := listEthtoolForcedRegistryCrashTemps(path)
+	if err != nil {
+		errs = append(errs, err)
+	} else if len(remaining) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: forced-interface registry crash temps reappeared after sweep: %v", remaining))
+	}
+	return errors.Join(errs...)
+}
+
 // wipeStopKeaAndEraseLeases is a package var (like performWipe) so
 // the final-verification regression can bypass the Kea leg and prove the
 // pre-completion check catches what the bypassed leg missed.
@@ -516,6 +558,16 @@ func wipeFinalEraseVerification(completion Completion) error {
 		} else if !os.IsNotExist(err) {
 			errs = append(errs, fmt.Errorf("zeroize: inspect state file %s: %w", path, err))
 		}
+	}
+	if _, err := os.Lstat(wipeEthtoolForcedRegistryPath); err == nil {
+		errs = append(errs, fmt.Errorf("zeroize: forced-interface registry %s present at final verification", wipeEthtoolForcedRegistryPath))
+	} else if !os.IsNotExist(err) {
+		errs = append(errs, fmt.Errorf("zeroize: inspect forced-interface registry %s: %w", wipeEthtoolForcedRegistryPath, err))
+	}
+	if temps, err := listEthtoolForcedRegistryCrashTemps(wipeEthtoolForcedRegistryPath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: forced-interface registry crash temps present at final verification: %v", temps))
 	}
 	if _, err := os.Lstat(wipeFeedShrinkHistoryPath); err == nil {
 		errs = append(errs, fmt.Errorf("zeroize: feed shrink history %s present at final verification", wipeFeedShrinkHistoryPath))
