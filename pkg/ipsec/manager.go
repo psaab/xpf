@@ -1133,8 +1133,9 @@ func (m *Manager) prevHashFor14589(name string) (string, bool) {
 // refused connections are dropped with their VPN entry, so a restart
 // cannot resurrect their secret.
 func (m *Manager) renderSubsetFile14589(ipsecCfg *config.IPsecConfig, generation string, keep map[string]bool) (string, map[string]string, error) {
-	sub := filterIPsecCfg14589(ipsecCfg, keep)
-	text, rendered, err := m.renderConfig(sub)
+	connectionKeys := gatewayKeysFor(ipsecCfg)
+	sub := filterIPsecCfg14589(ipsecCfg, keep, connectionKeys)
+	text, rendered, _, err := m.renderConfigMembersWithConnectionKeys(sub, true, connectionKeys)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1151,7 +1152,7 @@ func (m *Manager) renderSubsetFile14589(ipsecCfg *config.IPsecConfig, generation
 	return text, hs, nil
 }
 
-func filterIPsecCfg14589(src *config.IPsecConfig, keep map[string]bool) *config.IPsecConfig {
+func filterIPsecCfg14589(src *config.IPsecConfig, keep map[string]bool, connectionKeys map[string]string) *config.IPsecConfig {
 	if src == nil {
 		return &config.IPsecConfig{VPNs: map[string]*config.IPsecVPN{}}
 	}
@@ -1161,8 +1162,7 @@ func filterIPsecCfg14589(src *config.IPsecConfig, keep map[string]bool) *config.
 		// #15024: keep holds CONNECTION names (gateway names for groups).
 		// Keep every VPN whose rendered connection is kept, plus the legacy
 		// raw/sanitized VPN-name match for pre-grouping state.
-		_, _, gw, _ := resolveRemoteAddr(src, vpn)
-		if keep[name] || keep[sanitizeSwanctlValue(name)] || keep[gatewayKeyFor(src, name, vpn, gw)] {
+		if keep[name] || keep[sanitizeSwanctlValue(name)] || keep[connectionKeys[name]] {
 			vpns[name] = vpn
 		}
 	}
@@ -1827,6 +1827,7 @@ func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, cha
 	if _, _, m, err := (&Manager{}).renderConfigMembers(ipsecCfg); err == nil {
 		members = m
 	}
+	connectionKeys := gatewayKeysFor(ipsecCfg)
 	var errs []error
 	done := make(map[string]bool)
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
@@ -1834,8 +1835,7 @@ func (m *Manager) reinitiateChangedConnections(ipsecCfg *config.IPsecConfig, cha
 			continue
 		}
 		vpn := ipsecCfg.VPNs[name]
-		_, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
-		connName := gatewayKeyFor(ipsecCfg, name, vpn, gw)
+		connName := connectionKeys[name]
 		if done[connName] || !changedSet[connName] || !terminatedSet[connName] {
 			continue
 		}
