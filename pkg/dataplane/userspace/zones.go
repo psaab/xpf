@@ -214,18 +214,11 @@ func nativeVLANUnitRefs(cfg *config.Config, snaps []InterfaceSnapshot) map[strin
 		if iface == nil || iface.NativeVlanID <= 0 || iface.NativeVlanID > 4094 {
 			continue
 		}
-		matches := 0
-		var unitRef string
-		for unitNum, unit := range iface.Units {
-			if unit == nil || unit.VlanID != iface.NativeVlanID {
-				continue
-			}
-			matches++
-			unitRef = fmt.Sprintf("%s.%d", name, unitNum)
-		}
-		if matches != 1 {
+		unitNum, ok := config.NativeVLANUnitNumber(iface)
+		if !ok {
 			continue
 		}
+		unitRef := fmt.Sprintf("%s.%d", name, unitNum)
 		unitZone, exists := unitZones[unitRef]
 		if !exists || unitZone == "" {
 			continue
