@@ -137,13 +137,14 @@ zero-length timers for the rest of the daemon's life.
 Parked entries are reconciled on every `Apply` (#16650): the pending maps
 are keyed by policy name (cooldown also by event) with no generation, so
 `Apply` purges any parked cooldown/budget entry whose stamped semantic
-revision no longer matches the live revision (redefined or removed
-policy), decrementing `xpf_event_pending_deferred` by the number removed.
-Without this a predecessor's parked entry survived a same-name redefine,
-occupied the key so the successor's in-cooldown edge was silently
-swallowed, and was then deleted at drain on revision mismatch — the
-successor's only edge was lost. Entries for unchanged policies survive,
-preserving the replay above.
+revision no longer matches the live revision (redefined or removed policy),
+decrementing `xpf_event_pending_deferred` by the number removed. Cooldown
+park insertion also validates its stamped revision under the
+`pendingMu -> e.mu` lock order; during Apply's unlock-before-purge window a
+successor cooldown park replaces a stale predecessor entry at the same key,
+and the purge preserves the successor. This prevents a successor edge from
+being swallowed and then lost at drain (#17709). Entries for unchanged
+policies survive, preserving the replay above.
 The slot is reserved only when the action is ready to commit, and a commit
 that never promotes — a transient `commitFn` returning `(nil, err)`, a
 standalone commit failure, or an `ErrClusterReadOnly` deferral — refunds
