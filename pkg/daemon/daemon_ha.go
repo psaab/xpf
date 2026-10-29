@@ -2926,13 +2926,9 @@ func (d *Daemon) nudgeIPsecSASync() {
 type ipsecFallbackRetryState struct {
 	owed           bool
 	inFlight       bool
-	lastInitiated  time.Time
+	initiated      bool
 	ownershipEpoch uint64
 }
-
-// Keep one successful initiate from being repeated while strongSwan's live
-// SA view catches up; the level-triggered retry reopens it after this interval.
-const ipsecFallbackInitiateGrace = 30 * time.Second
 
 func (d *Daemon) markIPsecFallbackOwed(names []string) {
 	if len(names) == 0 {
@@ -2961,12 +2957,12 @@ func (d *Daemon) claimIPsecFallback(name string, rg int, local map[string]bool, 
 	if state.inFlight {
 		return false
 	}
-	if !state.lastInitiated.IsZero() && state.ownershipEpoch != ownershipEpoch {
+	if state.initiated && state.ownershipEpoch != ownershipEpoch {
 		// A new data-RG tenure must retain the #15194 belt, even if the old
 		// attempt's local SA is still present from the previous ownership.
-		state.lastInitiated = time.Time{}
+		state.initiated = false
 	}
-	if !state.lastInitiated.IsZero() {
+	if state.initiated {
 		if !localKnown {
 			return false
 		}
@@ -2975,9 +2971,9 @@ func (d *Daemon) claimIPsecFallback(name string, rg int, local map[string]bool, 
 			d.ipsecFallbacks[name] = state
 			return false
 		}
-		// Only the level-triggered retry can re-open a completed attempt.
-		// A delayed duplicate ownership edge must not repeat the command.
-		if !state.owed || time.Since(state.lastInitiated) < ipsecFallbackInitiateGrace {
+		// A completed attempt in this ownership epoch is not repeated by a
+		// delayed duplicate edge. A newly owed state can still retry.
+		if !state.owed {
 			return false
 		}
 	}
@@ -2994,10 +2990,10 @@ func (d *Daemon) finishIPsecFallback(name string, err error) {
 	state.inFlight = false
 	if err == nil {
 		state.owed = false
-		state.lastInitiated = time.Now()
+		state.initiated = true
 	} else {
 		state.owed = true
-		state.lastInitiated = time.Time{}
+		state.initiated = false
 	}
 	d.ipsecFallbacks[name] = state
 	d.ipsecFallbackMu.Unlock()
@@ -3023,45 +3019,7 @@ func (d *Daemon) scheduleOwedIPsecFallbackRetry() {
 	}()
 }
 
-func (d *Daemon) refreshOwedIPsecFallbacksAfterGrace() {
-	d.ipsecFallbackMu.Lock()
-	var expired []string
-	for name, state := range d.ipsecFallbacks {
-		if !state.owed && !state.inFlight && !state.lastInitiated.IsZero() &&
-			time.Since(state.lastInitiated) >= ipsecFallbackInitiateGrace {
-			expired = append(expired, name)
-		}
-	}
-	d.ipsecFallbackMu.Unlock()
-	if len(expired) == 0 {
-		return
-	}
-	names, err := d.ipsecActiveNames()
-	if err != nil {
-		return
-	}
-	local := make(map[string]bool, len(names))
-	for _, name := range names {
-		local[name] = true
-	}
-	now := time.Now()
-	d.ipsecFallbackMu.Lock()
-	for _, name := range expired {
-		state, ok := d.ipsecFallbacks[name]
-		if ok && !state.owed && !state.inFlight &&
-			!state.lastInitiated.IsZero() &&
-			now.Sub(state.lastInitiated) >= ipsecFallbackInitiateGrace &&
-			!local[name] {
-			state.owed = true
-			d.ipsecFallbacks[name] = state
-		}
-	}
-	d.ipsecFallbackMu.Unlock()
-}
-
 func (d *Daemon) retryOwedIPsecFallback() {
-	d.refreshOwedIPsecFallbacksAfterGrace()
-
 	d.ipsecFallbackMu.Lock()
 	pending := make([]string, 0, len(d.ipsecFallbacks))
 	hasStates := len(d.ipsecFallbacks) != 0

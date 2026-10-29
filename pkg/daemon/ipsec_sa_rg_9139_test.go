@@ -578,16 +578,17 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 				t.Fatalf("owed fallback retry initiated %v, want [vpn-plain]", initiated)
 			}
 
-			// A late duplicate of the original RG1 edge must not belt and
-			// re-initiate the SA that the convergence retry just raised.
+			// A late duplicate edge must not repeat a completed attempt, even
+			// before the local active-SA view catches up.
+			localNames = nil
 			d.reinitiateIPsecSAsForRG(1)
-			d.retryOwedIPsecFallback()
 			if len(initiated) != 1 || len(terminated) != 0 {
-				t.Fatalf("retry plus late edge initiated=%v terminated=%v, want one initiate and no terminate",
+				t.Fatalf("completed fallback repeated before local SA view caught up: initiated=%v terminated=%v",
 					initiated, terminated)
 			}
 			// A fresh ownership epoch is a new takeover: a leftover local
 			// duplicate must be belt-terminated and initiated again.
+			localNames = []string{"vpn-plain"}
 			d.bumpIPsecRGOwnershipEpoch(1)
 			d.reinitiateIPsecSAsForRG(1)
 			if len(initiated) != 2 || len(terminated) != 1 {
