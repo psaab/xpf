@@ -28,15 +28,6 @@ router bgp 65000
  neighbor 192.0.2.1 bfd
 exit
 !
-ip prefix-list xpf-rip-0-grp-0 seq 5 deny 0.0.0.0/0 le 32
-ipv6 prefix-list xpf-rip-0-grp-0-v6 seq 5 deny ::/0 le 128
-!
-router rip
- distance 100
- network ge-0-0-1
- distribute-list prefix xpf-rip-0-grp-0 out ge-0-0-1
-exit
-!
 router isis xpf
  net 49.0001.0100.0000.0001.00
  is-type level-2-only

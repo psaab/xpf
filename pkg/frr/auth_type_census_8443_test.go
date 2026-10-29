@@ -106,7 +106,6 @@ func TestRecognizedAuthTypesStillRender8443(t *testing.T) {
 		{"text", "area-password clear s3cret", "ip rip authentication mode text"},
 	}
 	for _, tc := range cases {
-		m := New()
 		isis := &config.ISISConfig{
 			NET: "49.0001.0100.0000.0001.00", Level: "level-2",
 			AuthType: tc.authType, AuthKey: config.NewSecret("s3cret"),
@@ -115,11 +114,13 @@ func TestRecognizedAuthTypesStillRender8443(t *testing.T) {
 		rip := &config.RIPConfig{
 			AuthType: tc.authType, AuthKey: config.NewSecret("s3cret"), Interfaces: []string{"trust0"},
 		}
-		got := m.generateProtocols(nil, nil, nil, rip, isis, "", 0, nil, nil)
-		for _, want := range []string{tc.wantISIS, tc.wantRIP} {
-			if !strings.Contains(got, want) {
-				t.Errorf("authentication-type %q: missing %q in:\n%s", tc.authType, want, got)
-			}
+		gotISIS := New().generateProtocols(nil, nil, nil, nil, isis, "", 0, nil, nil)
+		gotRIP := New().generateProtocols(nil, nil, nil, rip, nil, "", 0, nil, nil)
+		if !strings.Contains(gotISIS, tc.wantISIS) {
+			t.Errorf("IS-IS authentication-type %q: missing %q in:\n%s", tc.authType, tc.wantISIS, gotISIS)
+		}
+		if !strings.Contains(gotRIP, tc.wantRIP) {
+			t.Errorf("RIP authentication-type %q: missing %q in:\n%s", tc.authType, tc.wantRIP, gotRIP)
 		}
 	}
 }

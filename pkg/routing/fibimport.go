@@ -78,9 +78,10 @@ import (
 // kernel-selected routes when no same-prefix dynamic protocol distance applies.
 //
 // The snapshot builder compares BGP, OSPF, IS-IS and RIP routes with
-// their effective managed-section distances (#16620 Junos scale:
-// OSPF 10, RIP 100, BGP 170, IS-IS at FRR's fixed 115) when deciding
-// whether a configured route wins. Other
+// their Junos-scale preferences (#16620): OSPF 10, IS-IS conservatively
+// 15 (the kernel protocol metadata does not expose its level), RIP 100,
+// and BGP 170. This is distinct from zebra's IS-IS distance 115; #17735
+// fails closed where FRR cannot preserve the Junos ordering. Other
 // learned routes keep this preference: configured routes at this preference
 // or better remain sole, while a worse configured fallback stays beside the
 // imported route. This value also mirrors FRR's DHCP default distance.

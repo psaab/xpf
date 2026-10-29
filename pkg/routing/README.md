@@ -1315,18 +1315,22 @@ row misleads a human, a missing FIB entry misdirects a packet.
 The snapshot builder uses **preference-aware same-prefix arbitration**. For
 each canonical `(table, family, prefix)`, it finds the best configured route.
 For learned BGP, OSPF, IS-IS, and RIP routes, it compares that preference with
-FRR's default distances: external BGP 20, OSPF 110, IS-IS 115, and RIP 120.
-RTPROT_BGP does not distinguish eBGP from iBGP.
-A configured route at or below that distance remains sole. If the configured
-route is worse, both rows remain: a fallback at preference 200 or better is
-ordered behind the learned route by stamping the learned row with its protocol
-distance; a fallback above 200 already follows the learned row at preference
-200. Static and other learned routes keep the existing rule: config at 200 or
-better remains sole, while a worse configured fallback stays beside the import
-at preference 200. The Rust FIB selects the first live tier by preference, and
-a later live configured backup remains usable if an earlier tier is unresolved
-(#11316). If no tier is live, the preferred tier's existing drivable-member
-fallback preserves neighbor resolution.
+their Junos-scale preferences: BGP 170, OSPF 10 (conservative internal), IS-IS
+15 (the more-preferred level because RTPROT metadata does not distinguish
+L1/L2), and RIP 100. This is intentionally distinct from zebra's FRR distances:
+IS-IS is fixed at 115, so #17735 rejects same-table active RIP+IS-IS and static
+preferences 15..114 with IS-IS at strict commit, and withholds the conflicting
+route on tolerant render. RTPROT_BGP does not distinguish eBGP from iBGP.
+A configured route at or below the Junos-scale distance remains sole. If the
+configured route is worse, both rows remain: a fallback at preference 200 or
+better is ordered behind the learned route by stamping the learned row with
+its Junos-scale preference; a fallback above 200 already follows the learned
+route at preference 200. Static and other learned routes keep the existing
+rule: config at 200 or better remains sole, while a worse configured fallback
+stays beside the import at preference 200. The Rust FIB selects the first live
+tier by preference, and a later live configured backup remains usable if an
+earlier tier is unresolved (#11316). If no tier is live, the preferred tier's
+existing drivable-member fallback preserves neighbor resolution.
 
 ### Known limitation
 
