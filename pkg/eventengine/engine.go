@@ -223,6 +223,9 @@ type plannedAction struct {
 	testOwner string
 	testName  string
 	ops       []plannedOp
+	// checkTriggerUntilCeiling marks a cooldown replay that must recheck its
+	// trigger-until ceiling under staleReason immediately before commit (#17696).
+	checkTriggerUntilCeiling bool
 	// deferredBudgetUsed marks a replay that already consumed its one
 	// budget-deferral (#15021); a second pre-commit denial (e.g. an older slot
 	// pruned between wait-computation and pre-check) drops as global_budget
@@ -1743,6 +1746,9 @@ func staleErr(reason string) error {
 //     races the arm-on-commit timing, so a duplicate can slip into the queue
 //     while the worker is blocked; the cooldown is re-enforced here at commit
 //     time so a within-window duplicate is suppressed, not double-committed.
+//   - "trigger-until ceiling exceeded": a deferred cooldown crossing was
+//     queued below its ceiling, but the live window crossed it while the
+//     worker was blocked.
 //
 // The empty string means the action is safe to commit. Called by applyOnce
 // while it holds the config lock, so the check reflects the last committed Apply
@@ -1760,6 +1766,13 @@ func (e *Engine) staleReason(a plannedAction) string {
 	if rt := e.runtime[a.policyName]; rt != nil && !rt.lastTrigger().IsZero() &&
 		e.now().Sub(rt.lastTrigger()) < policyCooldown {
 		return "cooldown active"
+	}
+	if a.checkTriggerUntilCeiling {
+		pol := e.policyByNameLocked(a.policyName)
+		rt := e.runtime[a.policyName]
+		if !e.withinUntilCeilingsMatch(pol, rt, a.event, e.now()) {
+			return "trigger-until ceiling exceeded"
+		}
 	}
 	return ""
 }
