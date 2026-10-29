@@ -1013,7 +1013,8 @@ func (d *Daemon) beginClusterCommsEpoch(
 // stopClusterComms: if a stop is already tearing down the previous epoch,
 // preparation waits; if that stop was superseded during its join, preparation
 // first joins every registered predecessor constructor, then retires the
-// predecessor session and subsystem handles before the successor constructor
+// predecessor session and subsystem handles and clears its fabric slots,
+// refresh channels, and peer-MAC constraints before the successor constructor
 // publishes or wires its session.
 func (d *Daemon) prepareClusterCommsEpoch(gen uint64) bool {
 	d.clusterCommsLifecycleMu.Lock()
@@ -1041,6 +1042,20 @@ func (d *Daemon) prepareClusterCommsEpoch(gen uint64) bool {
 	if d.cluster != nil {
 		d.cluster.StopHeartbeat()
 	}
+	// Stop may have advanced the generation while subsystem teardown ran.
+	// Only the still-current successor owns the predecessor's fabric cleanup.
+	// Keep the channel reset and slot clear in one clusterCommsMu critical
+	// section; clearFabricSlots then takes fabricMu in the established order.
+	d.clusterCommsMu.Lock()
+	if d.clusterCommsGen != gen {
+		d.clusterCommsMu.Unlock()
+		return false
+	}
+	for slot := range d.fabricSlots {
+		d.fabricSlots[slot].refreshCh = nil
+	}
+	d.clearFabricSlots()
+	d.clusterCommsMu.Unlock()
 	return true
 }
 

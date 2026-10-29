@@ -1888,3 +1888,170 @@ func TestApplyHeartbeatRestartWaitsForLifecycleClaim17060(t *testing.T) {
 		t.Fatal("apply restart left the heartbeat stopped")
 	}
 }
+
+// TestSuccessorPreflightClearsPredecessorFabricSlots18438 drives the
+// superseded-stop interleaving from #18438 as two shapes. The predecessor
+// slots are seeded populated with peer identity/MAC constraints and the old
+// populate join is held while stop starts, a successor epoch begins, and the
+// successor preflight runs; only then is the join released, so the old stop
+// returns through its generation-mismatch early return. Preflight must clear
+// BOTH slots, refresh channels, and both constraints before successor
+// publication — including slot 1 when the successor removed fab1 and has no
+// slot-1 populate loop. This asserts takeover readiness through the real
+// `reconcileRGState` path, not only the slot latch predicate.
+func TestSuccessorPreflightClearsPredecessorFabricSlots18438(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		successorCh [2]chan struct{}
+	}{
+		{name: "bothfabrics", successorCh: [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}},
+		{name: "fab1removed", successorCh: [2]chan struct{}{make(chan struct{}, 1), nil}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := fab1ReadyDaemon(t)
+			d.fabricSlots[0].name, d.fabricSlots[1].name = "fabric", "fabric1"
+			oldCtx, _, oldCancel := d.beginClusterCommsEpoch(context.Background())
+			t.Cleanup(oldCancel)
+
+			// Seed predecessor slots populated with identity and helper
+			// constraints, plus the predecessor refresh channels.
+			seedFabricSlots17060(t, d)
+			// Exercise takeover readiness with a live peer before teardown:
+			// the populated predecessor must make this fully-ready fixture
+			// ready, proving the fabric gate is active in this scenario.
+			d.cluster.HandlePeerHeartbeatForTesting(&cluster.HeartbeatPacket{
+				NodeID:    1,
+				ClusterID: 1,
+				Groups: []cluster.HeartbeatGroup{{
+					GroupID:  0,
+					Priority: 100,
+					Weight:   100,
+					State:    uint8(cluster.StatePrimary),
+				}},
+			})
+			if !d.cluster.PeerAlive() {
+				t.Fatal("precondition: peer must be alive for fabric readiness to be evaluated")
+			}
+			if ready, reasons := rgReadiness(t, d); !ready {
+				t.Fatalf("precondition: populated predecessor should satisfy takeover readiness: %v", reasons)
+			}
+			assertFabricNotReady := func(stage string) {
+				ready, reasons := rgReadiness(t, d)
+				if ready {
+					t.Errorf("%s left stale predecessor fabric ready through reconcileRGState (#18438)", stage)
+					return
+				}
+				for _, reason := range reasons {
+					if reason == "fabric forwarding path not ready" {
+						return
+					}
+				}
+				t.Errorf("%s blocked readiness for another reason, not the fabric gate: %v", stage, reasons)
+			}
+
+			// Block the predecessor populate join.
+			d.clusterCommsMu.Lock()
+			oldEpoch := d.clusterCommsEpoch
+			if oldEpoch == nil {
+				d.clusterCommsMu.Unlock()
+				t.Fatal("predecessor epoch not installed")
+			}
+			oldEpoch.fabricPopulateWG.Add(1)
+			d.clusterCommsMu.Unlock()
+
+			var releaseOnce sync.Once
+			releaseJoin := func() { releaseOnce.Do(func() { oldEpoch.fabricPopulateWG.Done() }) }
+			stopDone := make(chan struct{})
+			go func() {
+				d.stopClusterComms()
+				close(stopDone)
+			}()
+			t.Cleanup(func() {
+				releaseJoin()
+				select {
+				case <-stopDone:
+				case <-time.After(5 * time.Second):
+					t.Error("superseded stop did not return during cleanup")
+				}
+				d.stopClusterComms()
+			})
+			select {
+			case <-oldCtx.Done():
+			case <-time.After(5 * time.Second):
+				releaseJoin()
+				t.Fatal("old stop did not cancel its epoch")
+			}
+
+			// Begin the successor while the old stop is blocked in its
+			// populate join, then run successor preflight before publishing
+			// its own refresh channels. A removed fab1 has no replacement
+			// channel or populate loop.
+			_, newGen, newCancel := d.beginClusterCommsEpoch(context.Background())
+			t.Cleanup(newCancel)
+			if !d.prepareClusterCommsEpoch(newGen) {
+				releaseJoin()
+				t.Fatal("successor preflight failed")
+			}
+
+			// The preflight owns predecessor cleanup; verify it before
+			// successor publication, while the old stop remains blocked.
+			d.fabricMu.RLock()
+			for slot := range d.fabricSlots {
+				s := &d.fabricSlots[slot]
+				if s.iface != "" || s.overlay != "" || s.peerIP != nil ||
+					len(s.peerMAC) != 0 || s.populated {
+					t.Errorf("slot %d predecessor state survived successor preflight: iface=%q overlay=%q peer=%v mac=%v populated=%v (#18438)",
+						slot, s.iface, s.overlay, s.peerIP, s.peerMAC, s.populated)
+				}
+				if !s.lastProbe.IsZero() || s.probePending || !s.lastLog.IsZero() {
+					t.Errorf("slot %d predecessor probe/log state survived successor preflight (#18438)", slot)
+				}
+			}
+			d.fabricMu.RUnlock()
+			// Exercise the production readiness path while the old stop is
+			// still blocked; removed fab1 must no longer keep the RG ready.
+			assertFabricNotReady("successor preflight")
+
+			chans := d.snapshotFabricRefreshChans()
+			if chans[0] != nil || chans[1] != nil {
+				t.Errorf("predecessor refresh channels survived successor preflight: %v %v (#18438)", chans[0], chans[1])
+			}
+			// With each address-matched identity constraint removed, the
+			// ambiguous link-local segment fails closed for both peers.
+			neighs := func(int, int) ([]netlink.Neigh, error) {
+				return []netlink.Neigh{
+					fabPeerNeigh(t, "fe80::dec0", fabPeerTestDecoyMAC),
+					fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
+				}, nil
+			}
+			for _, peer := range []string{"10.99.0.2", "10.99.1.2"} {
+				got := dpuserspace.ResolveFabricPeerWithNeighbours(
+					12, 11, peer, mustMAC(t, fabPeerTestLocalMAC), neighs)
+				if len(got.PeerMAC) != 0 {
+					t.Errorf("predecessor peer-MAC constraint for %s survived: ambiguous segment resolved to %q (#18438)",
+						peer, got.PeerMAC)
+				}
+			}
+
+			// Publish successor-owned channels only after preflight has
+			// withdrawn the predecessor channels and state.
+			if !d.publishFabricRefreshChansIfCurrent(newGen, tc.successorCh) {
+				releaseJoin()
+				t.Fatal("could not publish successor refresh channels")
+			}
+
+			// Release the join: the old stop now returns on its generation
+			// mismatch without reaching its own fabric clear.
+			releaseJoin()
+			select {
+			case <-stopDone:
+			case <-time.After(5 * time.Second):
+				t.Fatal("superseded stop did not return after the join was released")
+			}
+			if got := d.snapshotFabricRefreshChans(); got != tc.successorCh {
+				t.Errorf("superseded stop changed successor refresh channels: got=%v want=%v (#18438)", got, tc.successorCh)
+			}
+			assertFabricNotReady("superseded stop return")
+		})
+	}
+}

@@ -1,6 +1,6 @@
 ! xpf managed config - do not edit
 !
-ip route 0.0.0.0/0 192.0.2.254
+ip route 0.0.0.0/0 192.0.2.254 5
 !
 ip route 0.0.0.0/0 Null0 tag 2500 250
 ipv6 route ::/0 Null0 tag 2500 250
