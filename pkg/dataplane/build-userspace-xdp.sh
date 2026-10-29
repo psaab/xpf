@@ -112,20 +112,67 @@ SHIM_BUILD_DIGEST="$("${GO_BIN}" -C "${REPO_ROOT}" run ./cmd/shim-manifest -repo
 	fail "failed to hash the shim build inputs"
 [[ "${SHIM_BUILD_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || fail "invalid shim build-input digest"
 
-# --- Codegen-env scrub + provenance (#15218, residual #16657) ---
+# --- Codegen-env scrub + provenance (#15218, residual #16657, #17729) ---
 # Cargo honours far more than RUSTFLAGS: CARGO_* config/profile/target
 # overrides, RUSTC/RUSTC_WRAPPER/RUSTDOC*, RUSTFLAGS, target-triple
 # variables, and $CARGO_HOME config.toml/profile/linked config discovered
 # from ancestors. Scrubbing two names therefore cannot make the ambient
 # environment empty. Run cargo under env -i with an explicit allowlist,
 # point CARGO_HOME at a recipe-owned empty directory (fresh mktemp: no
-# config.toml), and force the repo-owned release profile/linker with
-# --config so any residual config cannot steer codegen. The wrapper
-# validator above and the guard below fail closed if a codegen-family
-# variable survives.
+# config.toml), and force every repo-owned release profile/build target/
+# linker setting with --config.
+#
+# #17729: Cargo discovers .cargo/config.toml from the current directory
+# and its ancestors, independently of CARGO_HOME. Running from CRATE_DIR
+# therefore let an unowned ancestor select rustc, wrappers, or rustflags
+# without changing this digest. --config cannot robustly neutralize this:
+# rustflags are merged arrays, and blanking build.rustc makes Cargo try to
+# execute an empty compiler path (verified with real Cargo).
+# Run from a fresh isolated directory with --manifest-path instead.
+# Cargo's hierarchy is anchored at that cwd,
+# not the manifest's directory. Canonicalize the cwd and reject any
+# .cargo/config.toml or legacy .cargo/config from that directory to `/`;
+# this proves Cargo cannot discover ambient hierarchical configuration
+# even when TMPDIR is customized or contains Cargo config.
+# We explicitly pass the crate-local build.target, build-std, and linker
+# settings below because that config is intentionally not discovered.
+# The codegen inputs are therefore exactly the command-line config and
+# env -i allowlist already represented by the canonical digest; no
+# untracked ancestor config input remains.
 CODEGEN_ENV_DIGEST="$(printf 'CARGO_HOME=<repo-controlled-empty>\nCARGO_ENCODED_RUSTFLAGS=\nCARGO_PROFILE_RELEASE_CODEGEN_UNITS=\nCARGO_PROFILE_RELEASE_DEBUG=\nCARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=\nCARGO_PROFILE_RELEASE_INCREMENTAL=\nCARGO_PROFILE_RELEASE_LTO=\nCARGO_PROFILE_RELEASE_OPT_LEVEL=\nCARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=\nCARGO_PROFILE_RELEASE_PANIC=\nCARGO_PROFILE_RELEASE_STRIP=\nCARGO_TARGET_BPFEL_UNKNOWN_NONE_LINKER=\nCARGO_TARGET_BPFEL_UNKNOWN_NONE_RUSTFLAGS=\nMAX_INTERFACES=%s\nRUSTC=\nRUSTC_WRAPPER=\nRUSTC_WORKSPACE_WRAPPER=\nRUSTDOCFLAGS=\nRUSTFLAGS=\nRUSTUP_TOOLCHAIN=%s\n' "${MAX_INTERFACES}" "${TOOLCHAIN}" | sha256sum | awk '{print $1}')"
 [[ "${CODEGEN_ENV_DIGEST}" =~ ^[0-9a-f]{64}$ ]] || fail "failed to compute the codegen-env digest"
 SCRUBBED_CARGO_HOME="$(mktemp -d -t xpf-cargo-home.XXXXXX)" || fail "failed to create scrubbed CARGO_HOME"
+CARGO_BUILD_CWD=""
+SHIMVERIFY=""
+SHIMVERIFY_ATTESTATION=""
+cleanup() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "${SHIMVERIFY}" ]]; then rm -f "${SHIMVERIFY}" || true; fi
+    rm -rf "${SCRUBBED_CARGO_HOME:-}" "${CARGO_BUILD_CWD:-}" || true
+    if [[ -n "${SHIMVERIFY_ATTESTATION}" ]]; then
+        if [[ "$(id -u)" -eq 0 ]]; then
+            rm -f "${SHIMVERIFY_ATTESTATION}" || true
+        else
+            sudo -n rm -f "${SHIMVERIFY_ATTESTATION}" 2>/dev/null || true
+        fi
+    fi
+    return "${status}"
+}
+# Register cleanup before any further setup or cargo invocation, so an
+# early failure cannot leak either fresh temporary directory.
+trap cleanup EXIT
+CARGO_BUILD_CWD="$(mktemp -d -t xpf-cargo-cwd.XXXXXX)" || fail "failed to create isolated cargo cwd"
+CARGO_BUILD_CWD_REAL="$(cd "${CARGO_BUILD_CWD}" && pwd -P)" || fail "failed to canonicalize isolated cargo cwd"
+CARGO_CONFIG_SCAN="${CARGO_BUILD_CWD_REAL}"
+while :; do
+    [[ ! -e "${CARGO_CONFIG_SCAN}/.cargo/config.toml" && ! -e "${CARGO_CONFIG_SCAN}/.cargo/config" ]] || \
+        fail "isolated cargo cwd has an ancestor Cargo config: ${CARGO_CONFIG_SCAN}/.cargo"
+    [[ "${CARGO_CONFIG_SCAN}" == "/" ]] && break
+    CARGO_CONFIG_SCAN="${CARGO_CONFIG_SCAN%/*}"
+    [[ -n "${CARGO_CONFIG_SCAN}" ]] || CARGO_CONFIG_SCAN="/"
+done
+CARGO_BUILD_CWD="${CARGO_BUILD_CWD_REAL}"
 mkdir -p "${SCRUBBED_CARGO_HOME}/bin"
 [[ -x "${SCRUBBED_CARGO_HOME}/bin/cargo" ]] || ln -s "${HOME}/.cargo/bin/cargo" "${SCRUBBED_CARGO_HOME}/bin/cargo" 2>/dev/null || true
 [[ -x "${SCRUBBED_CARGO_HOME}/bin/rustc" ]] || ln -s "${HOME}/.rustup/toolchains/${TOOLCHAIN}-x86_64-unknown-linux-gnu/bin/rustc" "${SCRUBBED_CARGO_HOME}/bin/rustc" 2>/dev/null || true
@@ -135,8 +182,8 @@ SCRUBBED_CARGO_HOME_BIN="${SCRUBBED_CARGO_HOME}/bin"
 
 CARGO_ENV=(env -i "PATH=${SCRUBBED_CARGO_HOME_BIN}:${HOME}/.cargo/bin:/usr/local/bin:/usr/bin:/bin" "HOME=${HOME}" "CARGO_HOME=${SCRUBBED_CARGO_HOME}" "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" "MAX_INTERFACES=${MAX_INTERFACES}" "RUSTUP_HOME=${HOME}/.rustup" "RUSTUP_TOOLCHAIN=${TOOLCHAIN}" "TERM=${TERM:-dumb}")
 (
-	cd "${CRATE_DIR}"
-	"${CARGO_ENV[@]}" "${CARGO_BIN}" "+${TOOLCHAIN}" build --release --config 'profile.release.codegen-units=1' --config 'profile.release.debug=false' --config 'profile.release.debug-assertions=false' --config 'profile.release.incremental=false' --config 'profile.release.lto=false' --config 'profile.release.opt-level=3' --config 'profile.release.overflow-checks=false' --config 'profile.release.panic="unwind"' --config 'profile.release.strip=false' --config 'target.bpfel-unknown-none.linker="bpf-linker"'
+    cd "${CARGO_BUILD_CWD}"
+    "${CARGO_ENV[@]}" "${CARGO_BIN}" "+${TOOLCHAIN}" build --release --manifest-path "${CRATE_DIR}/Cargo.toml" --config 'build.target="bpfel-unknown-none"' --config 'unstable.build-std=["core"]' --config 'profile.release.codegen-units=1' --config 'profile.release.debug=false' --config 'profile.release.debug-assertions=false' --config 'profile.release.incremental=false' --config 'profile.release.lto=false' --config 'profile.release.opt-level=3' --config 'profile.release.overflow-checks=false' --config 'profile.release.panic="unwind"' --config 'profile.release.strip=false' --config 'target.bpfel-unknown-none.linker="bpf-linker"'
 )
 [[ -f "${CANDIDATE}" ]] || fail "cargo build did not produce ${CANDIDATE}"
 
@@ -144,20 +191,6 @@ CARGO_ENV=(env -i "PATH=${SCRUBBED_CARGO_HOME_BIN}:${HOME}/.cargo/bin:/usr/local
 # Static checks cannot substitute: the 2026-06-10 incident objects
 # differed by 7 static insns; the blowup was the verifier state walk.
 SHIMVERIFY="$(mktemp -t shimverify.XXXXXX)"
-SHIMVERIFY_ATTESTATION=""
-cleanup() {
-	rm -f "${SHIMVERIFY}"
-	rm -rf "${SCRUBBED_CARGO_HOME:-}"
-	if [[ -z "${SHIMVERIFY_ATTESTATION}" ]]; then
-		return
-	fi
-	if [[ "$(id -u)" -eq 0 ]]; then
-		rm -f "${SHIMVERIFY_ATTESTATION}"
-	else
-		sudo -n rm -f "${SHIMVERIFY_ATTESTATION}" 2>/dev/null || true
-	fi
-}
-trap cleanup EXIT
 (
 	cd "${REPO_ROOT}"
 	"${GO_BIN}" build -o "${SHIMVERIFY}" ./cmd/shimverify
