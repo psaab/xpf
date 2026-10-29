@@ -203,10 +203,11 @@ running heartbeat onto the defaults just as a changed value does.
   `SetPeerFailoverFunc`, `SetPeerFailoverCommitFunc`,
   `SetPeerFailoverBatchFunc`,
   `SetPeerFailoverCommitBatchFunc`, `SetPeerFenceFunc`) — `hooks.go`.
-- Peer sync source (`SetPeerSyncSource`, `SyncSourceInstalled`) —
-  `heartbeat_suppress.go`. The daemon publishes one SessionSync reference;
-  the suppression policy, 5s cap stamp and heartbeat-admission reset live
-  there under `Manager.mu` (#17056).
+- Peer sync source (`SetPeerSyncSource`, `ClearPeerSyncSourceIfCurrent`,
+  `SyncSourceInstalled`) — `heartbeat_suppress.go`. The daemon publishes one
+  SessionSync reference; conditional clearing prevents a delayed teardown from
+  removing a successor's source. The suppression policy, 5s cap stamp and
+  heartbeat-admission reset live there under `Manager.mu` (#17056).
 - Event-history methods (`RecordEvent`, `EventHistoryFor`) —
   `events_log.go`. Underlying types and `EventHistory` ring
   buffer — `events.go`.

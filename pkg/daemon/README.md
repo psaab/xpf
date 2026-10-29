@@ -1280,7 +1280,9 @@ goes through `getSessionSync()` / `snapshotFabricRefreshChans()` /
 - `beginClusterCommsEpoch` bumps the generation, installs the fresh sub-context,
   and creates a fresh `clusterCommsEpoch` with separate constructor and fabric
   populate-loop WaitGroups; `startClusterComms` hands the generation to the
-  constructor.
+  constructor. Successor preflight serializes with constructor registration,
+  joins all registered predecessors, then retires their published session before
+  the successor wires its Manager callback.
 - The constructor builds the session-sync object in a **local `ss`** and wires
   every callback / cluster reference against it (never re-reading the shared
   field), then calls **`publishSessionSyncIfCurrent(gen, ss)`** — a
@@ -1293,9 +1295,10 @@ goes through `getSessionSync()` / `snapshotFabricRefreshChans()` /
 - `stopClusterComms` bumps the generation (superseding any in-flight
   constructor), detaches the captured epoch's join groups under
   `clusterCommsMu`, cancels the context, and joins only those groups outside
-  the lock. It clears session-sync, refresh channels, and fabric slots only if
-  its stop generation is still current, so a concurrent successor cannot be
-  joined or cleared by the old stop.
+  the lock. It stops a captured predecessor session before removing its Manager
+  callback binding. It clears session-sync, refresh channels, and fabric slots
+  only if its stop generation is still current, so a concurrent successor
+  cannot be joined or cleared by the old stop.
 - Populate loops publish their slot configuration only while holding
   `clusterCommsMu` and matching their captured generation. Peer identity and
   userspace constraint changes remain under `fabricMu`, so a late cancelled
@@ -1783,9 +1786,14 @@ contract** and it is documented on `startClusterComms` itself:
 - `syncRGStrictVIPOwnershipMode` before the heartbeat goroutine, so `rg_active`
   already follows VIP ownership once VRRP starts driving it;
 - `addClusterCommsConstructor` and `registerFabricPopulateLoops` Add on the
-  current epoch while holding `clusterCommsMu`, before their goroutines start;
-  `stopClusterComms` detaches the epoch under the same lock before Wait, so
-  Add cannot race Wait and an old stop cannot join successor work;
+  current epoch while holding `clusterCommsMu`; constructor registration also
+  takes `clusterCommsLifecycleMu`, which serializes its global preflight-join
+  Add with successor `Wait`. `stopClusterComms` detaches the epoch under the
+  same state lock before Wait, so Add cannot race Wait and an old stop cannot
+  join successor work;
+- successor preflight joins any predecessor constructor before retiring the
+  published predecessor session, then resets old DHCP/IPsec handles and
+  heartbeat before the new constructor starts;
 - inside the constructor: resolve → build `ss` → `publishSessionSyncIfCurrent`
   → **all** wiring → `ss.Start`. Every `ss.On*` callback, cluster-Manager hook
   and `SetVRFDevice` must be installed before `Start`, which spawns the

@@ -1,13 +1,14 @@
 package daemon
 
 import (
+	"context"
 	"net"
 	"testing"
 )
 
 func TestRetainFabricFwdOnNeighborMissWithoutCachedEntry(t *testing.T) {
 	d := &Daemon{}
-	if d.retainFabricFwdOnNeighborMiss(0, net.ParseIP("10.99.13.2"), "fab0", false) {
+	if d.retainFabricFwdOnNeighborMiss(context.Background(), d.clusterCommsGen, 0, net.ParseIP("10.99.13.2"), "fab0", false) {
 		t.Fatal("expected missing neighbor without cached fabric state to remain not ready")
 	}
 	if d.fabricEntryPopulated(0) {
@@ -21,7 +22,7 @@ func TestRetainFabricFwdOnNeighborMissWithCachedEntry(t *testing.T) {
 	d.fabricSlots[0].populated = true
 	d.fabricMu.Unlock()
 
-	if !d.retainFabricFwdOnNeighborMiss(0, net.ParseIP("10.99.13.2"), "fab0", false) {
+	if !d.retainFabricFwdOnNeighborMiss(context.Background(), d.clusterCommsGen, 0, net.ParseIP("10.99.13.2"), "fab0", false) {
 		t.Fatal("expected cached fabric entry to survive a transient neighbor miss")
 	}
 	if !d.fabricEntryPopulated(0) {
@@ -35,7 +36,7 @@ func TestRetainFabricFwdOnNeighborMissWithCachedSecondaryEntry(t *testing.T) {
 	d.fabricSlots[1].populated = true
 	d.fabricMu.Unlock()
 
-	if !d.retainFabricFwdOnNeighborMiss(1, net.ParseIP("10.99.13.1"), "fab1", false) {
+	if !d.retainFabricFwdOnNeighborMiss(context.Background(), d.clusterCommsGen, 1, net.ParseIP("10.99.13.1"), "fab1", false) {
 		t.Fatal("expected cached secondary fabric entry to survive a transient neighbor miss")
 	}
 	if !d.fabricEntryPopulated(1) {

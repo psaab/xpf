@@ -10,6 +10,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
@@ -189,7 +190,7 @@ func TestFabricConstraintClearedOnStop17060(t *testing.T) {
 	d.fabricMu.Lock()
 	d.fabricSlots[0].peerIP = net.ParseIP("10.99.13.2")
 	d.fabricMu.Unlock()
-	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
+	d.rememberFabricPeerMAC(context.Background(), d.clusterCommsGen, 0, d.fabricSlots[0].peerIP, mustMAC(t, fabPeerTestPeerMAC))
 	// Seed the slot state stop must clear.
 	d.fabricMu.Lock()
 	d.fabricSlots[0].iface, d.fabricSlots[0].overlay = "ge-0-0-0", "fab0"
@@ -336,21 +337,23 @@ type blockingFabricRecorder17060 struct {
 	syncs   int
 	entered chan struct{}
 	release chan struct{}
+	peerMAC net.HardwareAddr
 	once    sync.Once
 }
 
 func newBlockingFabricRecorder17060() *blockingFabricRecorder17060 {
+	mac, _ := net.ParseMAC(fabPeerTestPeerMAC)
 	return &blockingFabricRecorder17060{
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
+		peerMAC: mac,
 	}
 }
 
 func (r *blockingFabricRecorder17060) ResolveFabricPeer(_ int, _, _ int, _ string, localMAC net.HardwareAddr) dpuserspace.FabricPeerResolution {
 	r.once.Do(func() { close(r.entered) })
 	<-r.release
-	mac, _ := net.ParseMAC(fabPeerTestPeerMAC)
-	return dpuserspace.FabricPeerResolution{PeerMAC: mac, LocalMAC: localMAC}
+	return dpuserspace.FabricPeerResolution{PeerMAC: r.peerMAC, LocalMAC: localMAC}
 }
 
 func (r *blockingFabricRecorder17060) SyncFabricState(_ context.Context) error {
@@ -386,13 +389,13 @@ func (p *blockingFabricDP17060) ResolveFabricPeer(slot int, overlayIfindex, pare
 }
 
 // TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060 covers the periodic
-// wake arms, after the initial populate probe has succeeded. For each slot it
-// holds the initial refresh in the resolver, then makes both ctx.Done() and a
-// buffered refresh poke ready before releasing it. Since select may choose
+// wake arms after the initial populate probe has succeeded. It releases the
+// initial resolver and waits for a successful SyncFabricState before making
+// both ctx.Done() and a buffered refresh poke ready. Since select may choose
 // either arm, retries continue until the wake arm consumed a poke, proving
-// that the cancelled-wake path was exercised. The matching synthetic
-// neighbour keeps every allowed initial probe hermetic; overlay lookup counts
-// prove the cancelled wake did not enter probeFabricNeighbor.
+// that the cancelled-wake path was exercised. Synthetic matching neighbours
+// keep all probe paths hermetic; overlay lookup counts prove the cancelled
+// wake did not enter probeFabricNeighbor.
 func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 	for _, tc := range []struct {
 		name, fabIface, overlay, peer string
@@ -468,10 +471,23 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 					close(rec.release)
 					t.Fatal("populate loop did not reach its initial refresh resolver (#17060)")
 				}
+				close(rec.release)
+				retryDeadline := time.Now().Add(5 * time.Second)
+				for rec.syncCount() == 0 {
+					if time.Now().After(retryDeadline) {
+						cancel()
+						select {
+						case <-done:
+						case <-time.After(5 * time.Second):
+							t.Fatal("populate loop did not exit after failed initial refresh")
+						}
+						t.Fatal("initial populate refresh did not succeed before cancellation")
+					}
+					time.Sleep(time.Millisecond)
+				}
 				mu.Lock()
 				baselineLookups := overlayLookups
 				mu.Unlock()
-
 				d.fabricMu.Lock()
 				slot := 0
 				if tc.name == "fab1" {
@@ -481,7 +497,6 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 				d.fabricMu.Unlock()
 				ch <- struct{}{}
 				cancel()
-				close(rec.release)
 				select {
 				case <-done:
 				case <-time.After(5 * time.Second):
@@ -631,12 +646,39 @@ func TestPopulateLoopJoinedBeforeSlotClear17060(t *testing.T) {
 	}
 }
 
-// TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060: cancellation
-// landing while the fast-retry timer is pending must not emit another
-// probe. The resolver never succeeds, so the loop sits in its 500ms
-// retry sleep; cancelling there and waiting past the timer proves the
-// post-select recheck returns before probeFabricNeighbor (overlay
-// lookups stay at the first attempt's count).
+type retryWaitContext17060 struct {
+	context.Context
+	done      chan struct{}
+	retryWait chan struct{}
+	cancelOne sync.Once
+}
+
+func (c *retryWaitContext17060) Done() <-chan struct{} { return c.done }
+
+func (c *retryWaitContext17060) Err() error {
+	select {
+	case <-c.done:
+		return context.Canceled
+	default:
+	}
+	select {
+	case <-c.retryWait:
+		<-c.done
+		return context.Canceled
+	default:
+		return nil
+	}
+}
+
+func (c *retryWaitContext17060) cancel() {
+	c.cancelOne.Do(func() { close(c.done) })
+}
+
+// TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060 forces a failed
+// first refresh, then synchronizes cancellation with the actual retry timer
+// arm. The synthetic matching neighbour makes probeFabricNeighbor return
+// before any raw socket path; overlay lookup counts make removal of the
+// post-select cancellation check observable.
 func TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060(t *testing.T) {
 	parent := &testLink{attrs: netlink.LinkAttrs{
 		Name: "ge-0-0-0", Index: 111, OperState: netlink.OperUp,
@@ -647,9 +689,15 @@ func TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060(t *testing.T) {
 		OperState: netlink.OperUp, TxQLen: 10000,
 		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
 	}}
+	const peer = "10.99.20.2"
 	links := map[string]*testLink{"ge-0-0-0": parent, "fab0": overlay}
 	var mu sync.Mutex
 	overlayLookups := 0
+	ctx := &retryWaitContext17060{
+		Context: context.Background(),
+		done:    make(chan struct{}), retryWait: make(chan struct{}),
+	}
+	timer := make(chan time.Time)
 	d := &Daemon{
 		linkByNameFn: func(name string) (netlink.Link, error) {
 			mu.Lock()
@@ -663,49 +711,64 @@ func TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060(t *testing.T) {
 			return nil, errors.New("hermetic retry test: unknown link")
 		},
 		neighListFn: func(ifindex, family int) ([]netlink.Neigh, error) {
-			return nil, nil // never resolved: loop keeps retrying
+			if family == netlink.FAMILY_V4 && (ifindex == 111 || ifindex == 112) {
+				return []netlink.Neigh{fabPeerNeigh(t, peer, fabPeerTestPeerMAC)}, nil
+			}
+			return nil, nil
+		},
+		fabricRetryAfterFn: func(time.Duration) <-chan time.Time {
+			close(ctx.retryWait)
+			return timer
 		},
 	}
 	rec := newBlockingFabricRecorder17060()
-	close(rec.release) // resolver never blocks; refresh simply fails
+	rec.peerMAC = nil // the initial refresh genuinely fails
+	close(rec.release)
 	d.setDataplane(&blockingFabricDP17060{rec: rec})
-	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	epoch := &clusterCommsEpoch{}
 	epoch.fabricPopulateWG.Add(1)
 	go func() {
 		defer close(done)
-		d.populateFabricFwdSlot(ctx, epoch, 0, "ge-0-0-0", "fab0", "10.99.20.2", make(chan struct{}, 1))
+		d.populateFabricFwdSlot(ctx, epoch, 0, "ge-0-0-0", "fab0", peer, make(chan struct{}, 1))
 	}()
-	// Wait for the first probe attempt, then cancel during the retry sleep.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		mu.Lock()
-		n := overlayLookups
-		mu.Unlock()
-		if n > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			cancel()
-			t.Fatal("populate loop never probed")
-		}
-		time.Sleep(5 * time.Millisecond)
+
+	t.Cleanup(func() {
+		ctx.cancel()
+		<-done
+		d.clearFabricSlots()
+	})
+
+	select {
+	case <-ctx.retryWait:
+	case <-time.After(5 * time.Second):
+		ctx.cancel()
+		t.Fatal("populate loop did not enter its retry wait after failed refresh")
 	}
-	cancel()
+	if d.fabricEntryPopulated(0) || rec.syncCount() != 0 {
+		ctx.cancel()
+		t.Fatal("initial refresh unexpectedly succeeded; retry cancellation cell is not exercising the failure path")
+	}
+
+	// The retry timer is the only ready select arm while this unbuffered send
+	// completes. Err() blocks after retryWait until cancellation, so the
+	// post-select guard must observe the cancellation before any further probe.
+	timer <- time.Now()
+	ctx.cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
+		ctx.cancel()
 		t.Fatal("populate loop did not exit after cancel during fast retry (#17060)")
 	}
 	mu.Lock()
 	got := overlayLookups
 	mu.Unlock()
 	if got != 2 {
-		t.Fatalf("cancel during fast retry probed again: overlay lookups=%d, want 2 (probe + refresh of attempt 0 only) (#17060)", got)
+		t.Fatalf("cancel during fast retry entered another probe/refresh: overlay lookups=%d, want 2 (initial probe + failed refresh only) (#17060)", got)
 	}
-	d.clearFabricSlots()
 }
+
 // TestStopClusterCommsDoesNotJoinSuccessorFabricEpoch17060 constructs the
 // cross-epoch interleaving directly: an old stop is blocked joining its loop,
 // then a replacement epoch registers a live populate loop. The old stop must
@@ -822,6 +885,161 @@ func TestStopClusterCommsDoesNotJoinSuccessorFabricEpoch17060(t *testing.T) {
 	close(loopRelease)
 	<-newLoopDone
 	d.stopClusterComms()
+}
+
+// TestInFlightOldFabricRefreshCannotOverwriteSuccessor17060 blocks an old
+// epoch in its neighbour scan, starts a successor with distinct identity and
+// readiness, then releases the stale refresh. Its identity registration,
+// readiness latch, and helper sync must all remain fenced to the old epoch.
+func TestInFlightOldFabricRefreshCannotOverwriteSuccessor17060(t *testing.T) {
+	const (
+		parentName = "ge-0-0-0"
+		overlay    = "fab0"
+		oldPeer    = "10.99.40.2"
+		newPeer    = "10.99.41.2"
+	)
+	parent := &testLink{attrs: netlink.LinkAttrs{
+		Name: parentName, Index: 141, OperState: netlink.OperUp, TxQLen: 10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	overlayLink := &testLink{attrs: netlink.LinkAttrs{
+		Name: overlay, Index: 142, ParentIndex: 141, OperState: netlink.OperUp,
+		TxQLen: 10000, HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	oldNeigh := fabPeerNeigh(t, oldPeer, fabPeerTestDecoyMAC)
+	var scanMu sync.Mutex
+	scans := 0
+	scanEntered := make(chan struct{})
+	scanRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseScan := func() { releaseOnce.Do(func() { close(scanRelease) }) }
+	d := &Daemon{
+		fabricSlots: [2]fabricSlot{{name: "fabric"}, {name: "fabric1"}},
+		linkByNameFn: func(name string) (netlink.Link, error) {
+			switch name {
+			case parentName:
+				return parent, nil
+			case overlay:
+				return overlayLink, nil
+			default:
+				return nil, errors.New("hermetic stale-refresh test: unknown interface")
+			}
+		},
+		neighListFn: func(ifindex, family int) ([]netlink.Neigh, error) {
+			if ifindex != 142 || family != netlink.FAMILY_V4 {
+				return nil, nil
+			}
+			scanMu.Lock()
+			scans++
+			call := scans
+			scanMu.Unlock()
+			if call == 2 {
+				close(scanEntered)
+				<-scanRelease
+			}
+			return []netlink.Neigh{oldNeigh}, nil
+		},
+	}
+	rec := newBlockingFabricRecorder17060()
+	close(rec.release)
+	d.setDataplane(&blockingFabricDP17060{rec: rec})
+
+	oldCtx, oldGen, oldCancel := d.beginClusterCommsEpoch(context.Background())
+	oldEpoch := d.registerFabricPopulateLoops(oldGen, 1)
+	if oldEpoch == nil {
+		oldCancel()
+		t.Fatal("could not register old populate loop")
+	}
+	oldLoopDone := make(chan struct{})
+	go func() {
+		defer close(oldLoopDone)
+		d.populateFabricFwdSlot(oldCtx, oldEpoch, 0, parentName, overlay, oldPeer, nil)
+	}()
+	oldStopDone := make(chan struct{})
+	stopStarted := false
+	t.Cleanup(func() {
+		releaseScan()
+		oldCancel()
+		if stopStarted {
+			<-oldStopDone
+		}
+		<-oldLoopDone
+		d.stopClusterComms()
+		dpuserspace.RegisterFabricPeerMACConstraint(oldPeer, nil)
+		dpuserspace.RegisterFabricPeerMACConstraint(newPeer, nil)
+	})
+
+	select {
+	case <-scanEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old refresh did not block in its neighbour scan")
+	}
+	go func() {
+		d.stopClusterComms()
+		close(oldStopDone)
+	}()
+	stopStarted = true
+	select {
+	case <-oldCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("old stop did not cancel its epoch")
+	}
+
+	_, newGen, newCancel := d.beginClusterCommsEpoch(context.Background())
+	newChannels := [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}
+	if !d.publishFabricRefreshChansIfCurrent(newGen, newChannels) {
+		newCancel()
+		t.Fatal("could not publish successor refresh channels")
+	}
+	wantMAC := mustMAC(t, fabPeerTestPeerMAC)
+	d.fabricMu.Lock()
+	d.fabricSlots[0].iface = "ge-0-0-5"
+	d.fabricSlots[0].overlay = "fab1"
+	d.fabricSlots[0].peerIP = net.ParseIP(newPeer)
+	d.fabricSlots[0].peerMAC = wantMAC
+	d.fabricSlots[0].populated = true
+	dpuserspace.RegisterFabricPeerMACConstraint(newPeer, wantMAC)
+	d.fabricMu.Unlock()
+
+	releaseScan()
+	select {
+	case <-oldStopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old stop did not finish after the blocked old refresh returned")
+	}
+	select {
+	case <-oldLoopDone:
+	default:
+		t.Fatal("old populate loop was not joined before old stop completed")
+	}
+
+	d.fabricMu.RLock()
+	successor := d.fabricSlots[0]
+	d.fabricMu.RUnlock()
+	if successor.iface != "ge-0-0-5" || successor.overlay != "fab1" ||
+		successor.peerIP == nil || !successor.peerIP.Equal(net.ParseIP(newPeer)) ||
+		successor.peerMAC == nil || successor.peerMAC.String() != wantMAC.String() ||
+		!successor.populated {
+		t.Fatalf("old refresh overwrote successor slot: iface=%q overlay=%q peer=%v mac=%v populated=%v",
+			successor.iface, successor.overlay, successor.peerIP, successor.peerMAC, successor.populated)
+	}
+	if got := d.snapshotFabricRefreshChans(); got != newChannels {
+		t.Fatalf("old stop cleared successor refresh channels: got=%v want=%v", got, newChannels)
+	}
+	if rec.syncCount() != 0 {
+		t.Fatalf("stale old refresh pushed SyncFabricState %d times", rec.syncCount())
+	}
+	decoy := fabPeerNeigh(t, "fe80::dec0", fabPeerTestDecoyMAC)
+	resolution := dpuserspace.ResolveFabricPeerWithNeighbours(142, 141, newPeer,
+		mustMAC(t, fabPeerTestLocalMAC), func(_ int, family int) ([]netlink.Neigh, error) {
+			if family == netlink.FAMILY_V6 {
+				return []netlink.Neigh{decoy}, nil
+			}
+			return nil, nil
+		})
+	if resolution.PeerMAC != nil {
+		t.Fatalf("old refresh replaced successor identity constraint: sole decoy resolved as %s", resolution.PeerMAC)
+	}
 }
 
 // TestRefreshFabricFwdWakesRealPopulateLoopProbesOnce17060 exercises the
@@ -988,4 +1206,535 @@ func TestCancelledOldFabricLoopCannotClearSuccessorPeer17060(t *testing.T) {
 	if resolution.PeerMAC != nil {
 		t.Fatalf("successor constraint was cleared: sole decoy resolved as %s", resolution.PeerMAC)
 	}
+}
+
+// TestStaleGenerationLiveContextCannotPublishFabricSlot17060 pins the
+// generation check independently of context cancellation: beginClusterCommsEpoch
+// leaves the superseded context live, but its registered loop cannot publish
+// configuration over a successor's slot.
+func TestStaleGenerationLiveContextCannotPublishFabricSlot17060(t *testing.T) {
+	const (
+		oldPeer = "10.99.42.2"
+		newPeer = "10.99.43.2"
+	)
+	d := &Daemon{fabricSlots: [2]fabricSlot{{name: "fabric"}, {name: "fabric1"}}}
+	oldCtx, oldGen, oldCancel := d.beginClusterCommsEpoch(context.Background())
+	oldEpoch := d.registerFabricPopulateLoops(oldGen, 1)
+	if oldEpoch == nil {
+		oldCancel()
+		t.Fatal("could not register old generation's populate loop")
+	}
+	_, newGen, newCancel := d.beginClusterCommsEpoch(context.Background())
+	if oldGen == newGen {
+		t.Fatal("successor begin did not advance the fabric generation")
+	}
+	if oldCtx.Err() != nil {
+		t.Fatal("beginClusterCommsEpoch cancelled the superseded context; generation guard is not independently exercised")
+	}
+	newChannels := [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}
+	if !d.publishFabricRefreshChansIfCurrent(newGen, newChannels) {
+		oldCancel()
+		newCancel()
+		t.Fatal("could not publish successor refresh channels")
+	}
+	wantMAC := mustMAC(t, fabPeerTestPeerMAC)
+	d.fabricMu.Lock()
+	d.fabricSlots[0].iface = "ge-0-0-5"
+	d.fabricSlots[0].overlay = "fab1"
+	d.fabricSlots[0].peerIP = net.ParseIP(newPeer)
+	d.fabricSlots[0].peerMAC = wantMAC
+	d.fabricSlots[0].populated = true
+	dpuserspace.RegisterFabricPeerMACConstraint(newPeer, wantMAC)
+	d.fabricMu.Unlock()
+	t.Cleanup(func() {
+		oldCancel()
+		newCancel()
+		d.stopClusterComms()
+		dpuserspace.RegisterFabricPeerMACConstraint(oldPeer, nil)
+		dpuserspace.RegisterFabricPeerMACConstraint(newPeer, nil)
+	})
+
+	linkLookups := 0
+	d.linkByNameFn = func(string) (netlink.Link, error) {
+		linkLookups++
+		return nil, errors.New("stale-generation test must not reach netlink")
+	}
+	d.populateFabricFwdSlot(oldCtx, oldEpoch, 0, "ge-0-0-0", "fab0", oldPeer, nil)
+	oldEpoch.fabricPopulateWG.Wait()
+	if oldCtx.Err() != nil {
+		t.Fatal("stale generation context was unexpectedly cancelled")
+	}
+	if linkLookups != 0 {
+		t.Fatalf("stale generation entered the initial probe/refresh path %d times", linkLookups)
+	}
+	d.fabricMu.RLock()
+	slot := d.fabricSlots[0]
+	d.fabricMu.RUnlock()
+	if slot.iface != "ge-0-0-5" || slot.overlay != "fab1" ||
+		slot.peerIP == nil || !slot.peerIP.Equal(net.ParseIP(newPeer)) ||
+		slot.peerMAC == nil || slot.peerMAC.String() != wantMAC.String() ||
+		!slot.populated {
+		t.Fatalf("stale-generation loop overwrote successor state: iface=%q overlay=%q peer=%v mac=%v populated=%v",
+			slot.iface, slot.overlay, slot.peerIP, slot.peerMAC, slot.populated)
+	}
+	if got := d.snapshotFabricRefreshChans(); got != newChannels {
+		t.Fatalf("stale-generation loop changed successor channels: got=%v want=%v", got, newChannels)
+	}
+}
+
+// TestStopClusterCommsSerializesLateSuccessorStart17060 holds the first
+// subsystem reset after stop has claimed its generation. A successor begin
+// must wait until DHCP/IPsec handles, heartbeat and the published source are
+// retired, then it may become current without being torn down by the old stop.
+func TestStopClusterCommsSerializesLateSuccessorStart17060(t *testing.T) {
+	manager := cluster.NewManager(0, 1)
+	if err := manager.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "lo"); err != nil {
+		t.Fatalf("start old heartbeat: %v", err)
+	}
+	t.Cleanup(manager.StopHeartbeat)
+	d := &Daemon{cluster: manager}
+	t.Cleanup(d.stopClusterComms)
+	oldCtx, oldGen, _ := d.beginClusterCommsEpoch(context.Background())
+	oldSync := cluster.NewSessionSync("127.0.0.1:4785", "127.0.0.1:4785", nil)
+	d.sessionSync = oldSync
+	manager.SetPeerSyncSource(oldSync)
+
+	_, dhcpCancel := context.WithCancel(context.Background())
+	ipsecCancelled := make(chan struct{})
+	d.dhcpLeaseSync.loopMu.Lock()
+	d.dhcpLeaseSync.loopCancel = dhcpCancel
+	d.ipsecSASync.loopMu.Lock()
+	d.ipsecSASync.loopCancel = func() { close(ipsecCancelled) }
+	d.ipsecSASync.loopMu.Unlock()
+
+	stopDone := make(chan struct{})
+	go func() {
+		d.stopClusterComms()
+		close(stopDone)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.clusterCommsLifecycleMu.TryLock() {
+		d.clusterCommsLifecycleMu.Unlock()
+		if time.Now().After(deadline) {
+			d.dhcpLeaseSync.loopMu.Unlock()
+			t.Fatal("stop did not claim the lifecycle lock before resetting DHCP")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	type epochResult struct {
+		ctx    context.Context
+		gen    uint64
+		cancel context.CancelFunc
+	}
+	beginStarted := make(chan struct{})
+	beginDone := make(chan epochResult, 1)
+	go func() {
+		close(beginStarted)
+		ctx, gen, cancel := d.beginClusterCommsEpoch(context.Background())
+		beginDone <- epochResult{ctx: ctx, gen: gen, cancel: cancel}
+	}()
+	<-beginStarted
+	select {
+	case <-beginDone:
+		d.dhcpLeaseSync.loopMu.Unlock()
+		t.Fatal("successor epoch began between stop's generation check and subsystem teardown")
+	case <-time.After(25 * time.Millisecond):
+	}
+	d.clusterCommsMu.Lock()
+	genWhileTeardown := d.clusterCommsGen
+	d.clusterCommsMu.Unlock()
+	if genWhileTeardown != oldGen+1 {
+		d.dhcpLeaseSync.loopMu.Unlock()
+		t.Fatalf("successor generation became visible during teardown: got=%d want=%d", genWhileTeardown, oldGen+1)
+	}
+
+	d.dhcpLeaseSync.loopMu.Unlock()
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not finish after releasing the DHCP reset lock")
+	}
+	if oldCtx.Err() == nil {
+		t.Fatal("stop did not cancel the previous comms context")
+	}
+	var successor epochResult
+	select {
+	case successor = <-beginDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("successor did not begin after old teardown completed")
+	}
+	t.Cleanup(successor.cancel)
+	if successor.gen <= oldGen+1 {
+		t.Fatalf("successor generation=%d, want after stop generation %d", successor.gen, oldGen+1)
+	}
+	d.dhcpLeaseSync.loopMu.Lock()
+	dhcpHandle := d.dhcpLeaseSync.loopCancel
+	d.dhcpLeaseSync.loopMu.Unlock()
+	d.ipsecSASync.loopMu.Lock()
+	ipsecHandle := d.ipsecSASync.loopCancel
+	d.ipsecSASync.loopMu.Unlock()
+	if dhcpHandle != nil || ipsecHandle != nil {
+		t.Fatalf("old stop did not retire loop handles before successor begin: DHCP=%v IPsec=%v", dhcpHandle != nil, ipsecHandle != nil)
+	}
+	select {
+	case <-ipsecCancelled:
+	default:
+		t.Fatal("old IPsec loop handle was not cancelled")
+	}
+	if manager.HeartbeatRunning() {
+		t.Fatal("old stop did not stop heartbeat before successor begin")
+	}
+	if manager.SyncSourceInstalled() {
+		t.Fatal("old stop left its peer sync source published")
+	}
+	if err := d.startHeartbeatForCommsEpoch(successor.ctx, successor.gen,
+		"127.0.0.1", "127.0.0.1", "", "lo"); err != nil {
+		t.Fatalf("successor heartbeat failed to start after teardown: %v", err)
+	}
+	if !manager.HeartbeatRunning() {
+		t.Fatal("successor heartbeat was not running after its start")
+	}
+	// The cleanup stops the successor heartbeat after the assertion.
+}
+
+// TestSuccessorPreparationRetiresResourcesAfterSupersededStop17060 covers
+// the other ordering: a successor begins while stop is still joining the old
+// epoch, so stale stop must skip destructive effects. The successor's start
+// preflight then retires the old loop handles and heartbeat before launching.
+func TestSuccessorPreparationRetiresResourcesAfterSupersededStop17060(t *testing.T) {
+	manager := cluster.NewManager(0, 1)
+	if err := manager.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "lo"); err != nil {
+		t.Fatalf("start old heartbeat: %v", err)
+	}
+	t.Cleanup(manager.StopHeartbeat)
+	d := &Daemon{cluster: manager}
+	oldCtx, _, oldCancel := d.beginClusterCommsEpoch(context.Background())
+	_, dhcpCancel := context.WithCancel(context.Background())
+	ipsecCancelled := make(chan struct{})
+	d.dhcpLeaseSync.loopMu.Lock()
+	d.dhcpLeaseSync.loopCancel = dhcpCancel
+	d.dhcpLeaseSync.loopMu.Unlock()
+	d.ipsecSASync.loopMu.Lock()
+	d.ipsecSASync.loopCancel = func() { close(ipsecCancelled) }
+	d.ipsecSASync.loopMu.Unlock()
+	d.clusterCommsMu.Lock()
+	oldEpoch := d.clusterCommsEpoch
+	oldEpoch.fabricPopulateWG.Add(1)
+	d.clusterCommsMu.Unlock()
+
+	stopDone := make(chan struct{})
+	go func() {
+		d.stopClusterComms()
+		close(stopDone)
+	}()
+	var releaseOnce sync.Once
+	releaseOld := func() { releaseOnce.Do(func() { oldEpoch.fabricPopulateWG.Done() }) }
+	t.Cleanup(func() {
+		oldCancel()
+		releaseOld()
+		select {
+		case <-stopDone:
+		case <-time.After(5 * time.Second):
+			t.Error("old stop did not return during cleanup")
+		}
+		d.stopClusterComms()
+	})
+	select {
+	case <-oldCtx.Done():
+	case <-time.After(5 * time.Second):
+		oldCancel()
+		releaseOld()
+		t.Fatal("old stop did not cancel its epoch")
+	}
+	_, newGen, newCancel := d.beginClusterCommsEpoch(context.Background())
+	t.Cleanup(newCancel)
+	releaseOld()
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("superseded old stop did not return")
+	}
+	if !manager.HeartbeatRunning() {
+		t.Fatal("superseded stop stopped the successor-window heartbeat before its start preflight")
+	}
+	d.dhcpLeaseSync.loopMu.Lock()
+	dhcpHandle := d.dhcpLeaseSync.loopCancel
+	d.dhcpLeaseSync.loopMu.Unlock()
+	d.ipsecSASync.loopMu.Lock()
+	ipsecHandle := d.ipsecSASync.loopCancel
+	d.ipsecSASync.loopMu.Unlock()
+	if dhcpHandle == nil || ipsecHandle == nil {
+		t.Fatalf("superseded stop prematurely reset handles: DHCP=%v IPsec=%v", dhcpHandle != nil, ipsecHandle != nil)
+	}
+
+	if !d.prepareClusterCommsEpoch(newGen) {
+		t.Fatal("current successor failed its resource preflight")
+	}
+	d.dhcpLeaseSync.loopMu.Lock()
+	dhcpHandle = d.dhcpLeaseSync.loopCancel
+	d.dhcpLeaseSync.loopMu.Unlock()
+	d.ipsecSASync.loopMu.Lock()
+	ipsecHandle = d.ipsecSASync.loopCancel
+	d.ipsecSASync.loopMu.Unlock()
+	if dhcpHandle != nil || ipsecHandle != nil {
+		t.Fatalf("successor preflight left old loop handles: DHCP=%v IPsec=%v", dhcpHandle != nil, ipsecHandle != nil)
+	}
+	select {
+	case <-ipsecCancelled:
+	default:
+		t.Fatal("successor preflight did not cancel the old IPsec loop")
+	}
+	if manager.HeartbeatRunning() {
+		t.Fatal("successor preflight did not retire the old heartbeat")
+	}
+}
+
+// TestSupersededStopRetiresPredecessorSessionSync17060 holds the old stop in
+// its epoch join while a successor publishes and starts a session. When the
+// old stop resumes, it must close only its captured listener and preserve the
+// successor session and Manager source.
+func TestSupersededStopRetiresPredecessorSessionSync17060(t *testing.T) {
+	manager := cluster.NewManager(0, 1)
+	d := &Daemon{cluster: manager}
+	oldCtx, oldGen, oldCancel := d.beginClusterCommsEpoch(context.Background())
+	localAddr := func() string {
+		t.Helper()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve loopback port: %v", err)
+		}
+		addr := listener.Addr().String()
+		if err := listener.Close(); err != nil {
+			t.Fatalf("release loopback port: %v", err)
+		}
+		return addr
+	}
+	oldAddr := localAddr()
+	oldSync := cluster.NewSessionSync(oldAddr, "", nil)
+	t.Cleanup(oldSync.Stop)
+	if !d.publishSessionSyncIfCurrent(oldGen, oldSync) {
+		t.Fatal("could not publish predecessor session")
+	}
+	if err := oldSync.Start(oldCtx); err != nil {
+		t.Fatalf("start predecessor session: %v", err)
+	}
+
+	d.clusterCommsMu.Lock()
+	oldEpoch := d.clusterCommsEpoch
+	oldEpoch.fabricPopulateWG.Add(1)
+	d.clusterCommsMu.Unlock()
+	var releaseOnce sync.Once
+	releaseOld := func() { releaseOnce.Do(func() { oldEpoch.fabricPopulateWG.Done() }) }
+	stopDone := make(chan struct{})
+	go func() {
+		d.stopClusterComms()
+		close(stopDone)
+	}()
+	t.Cleanup(func() {
+		oldCancel()
+		releaseOld()
+		select {
+		case <-stopDone:
+		case <-time.After(5 * time.Second):
+			t.Error("predecessor stop did not return during cleanup")
+		}
+		d.stopClusterComms()
+	})
+	select {
+	case <-oldCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("predecessor stop did not cancel its epoch")
+	}
+
+	newCtx, newGen, newCancel := d.beginClusterCommsEpoch(context.Background())
+	newAddr := localAddr()
+	newSync := cluster.NewSessionSync(newAddr, "", nil)
+	if !d.publishSessionSyncIfCurrent(newGen, newSync) {
+		newCancel()
+		t.Fatal("could not publish successor session")
+	}
+	manager.SetPeerSyncSource(newSync)
+	if err := newSync.Start(newCtx); err != nil {
+		newCancel()
+		t.Fatalf("start successor session: %v", err)
+	}
+	t.Cleanup(newCancel)
+	releaseOld()
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("superseded predecessor stop did not return")
+	}
+	if got := d.getSessionSync(); got != newSync {
+		t.Fatal("predecessor stop replaced the published successor session")
+	}
+	if !manager.SyncSourceInstalled() {
+		t.Fatal("predecessor stop cleared the successor Manager source")
+	}
+
+	conn, err := net.DialTimeout("tcp", oldAddr, 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("predecessor stop left its listener open")
+	}
+	conn, err = net.DialTimeout("tcp", newAddr, time.Second)
+	if err != nil {
+		t.Fatalf("predecessor stop closed the successor listener: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// TestSuccessorPreflightJoinsPausedPredecessorConstructorBeforeRetirement17060
+// holds a predecessor constructor after publication but before Start. Successor
+// preparation must join it, then close its listener before wiring the successor.
+func TestSuccessorPreflightJoinsPausedPredecessorConstructorBeforeRetirement17060(t *testing.T) {
+	manager := cluster.NewManager(0, 1)
+	d := &Daemon{cluster: manager}
+	oldCtx, oldGen, oldCancel := d.beginClusterCommsEpoch(context.Background())
+	reserveAddr := func() string {
+		t.Helper()
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve loopback port: %v", err)
+		}
+		addr := listener.Addr().String()
+		if err := listener.Close(); err != nil {
+			t.Fatalf("release loopback port: %v", err)
+		}
+		return addr
+	}
+	oldAddr := reserveAddr()
+	oldSync := cluster.NewSessionSync(oldAddr, "", nil)
+	t.Cleanup(oldSync.Stop)
+	epoch := d.addClusterCommsConstructor(oldGen)
+	if epoch == nil {
+		t.Fatal("could not register predecessor constructor")
+	}
+	published := make(chan struct{})
+	startRelease := make(chan struct{})
+	constructorDone := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseStart := func() { releaseOnce.Do(func() { close(startRelease) }) }
+	var newCancel context.CancelFunc
+	var preflightDone chan struct{}
+	t.Cleanup(func() {
+		releaseStart()
+		select {
+		case <-constructorDone:
+		case <-time.After(5 * time.Second):
+			t.Error("predecessor constructor did not finish during cleanup")
+		}
+		if preflightDone != nil {
+			select {
+			case <-preflightDone:
+			case <-time.After(5 * time.Second):
+				t.Error("successor preflight did not finish during cleanup")
+			}
+		}
+		oldCancel()
+		if newCancel != nil {
+			newCancel()
+		}
+		d.stopClusterComms()
+	})
+	go func() {
+		defer func() {
+			epoch.constructorWG.Done()
+			d.clusterCommsConstructorsWG.Done()
+			close(constructorDone)
+		}()
+		if !d.publishSessionSyncIfCurrent(oldGen, oldSync) {
+			t.Error("predecessor constructor could not publish its session")
+			close(published)
+			return
+		}
+		manager.SetPeerSyncSource(oldSync)
+		close(published)
+		<-startRelease
+		if err := oldSync.Start(oldCtx); err != nil {
+			t.Errorf("start predecessor session after successor begin: %v", err)
+		}
+	}()
+	select {
+	case <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("predecessor constructor did not publish its session")
+	}
+
+	newCtx, newGen, cancel := d.beginClusterCommsEpoch(context.Background())
+	newCancel = cancel
+	if oldCtx.Err() != nil {
+		t.Fatal("successor begin unexpectedly cancelled the predecessor context")
+	}
+	prepared := make(chan bool, 1)
+	preflightDone = make(chan struct{})
+	preflightStarted := make(chan struct{})
+	go func() {
+		close(preflightStarted)
+		defer close(preflightDone)
+		prepared <- d.prepareClusterCommsEpoch(newGen)
+	}()
+	<-preflightStarted
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		select {
+		case <-prepared:
+			t.Fatal("successor preflight returned while the predecessor constructor was paused")
+		default:
+		}
+		if !d.clusterCommsLifecycleMu.TryLock() {
+			break
+		}
+		d.clusterCommsLifecycleMu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("successor preflight did not claim the lifecycle lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-prepared:
+		t.Fatal("successor preflight returned while the predecessor constructor was paused")
+	case <-time.After(25 * time.Millisecond):
+	}
+	releaseStart()
+	select {
+	case <-constructorDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("predecessor constructor did not finish after Start was released")
+	}
+	select {
+	case ok := <-prepared:
+		if !ok {
+			t.Fatal("successor preflight was rejected")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("successor preflight did not finish after joining the predecessor")
+	}
+	if d.getSessionSync() != nil {
+		t.Fatal("successor preflight left predecessor published")
+	}
+	if manager.SyncSourceInstalled() {
+		t.Fatal("successor preflight left predecessor Manager source installed")
+	}
+	conn, err := net.DialTimeout("tcp", oldAddr, 200*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("successor preflight left predecessor listener open")
+	}
+
+	newAddr := reserveAddr()
+	newSync := cluster.NewSessionSync(newAddr, "", nil)
+	if !d.publishSessionSyncIfCurrent(newGen, newSync) {
+		t.Fatal("could not publish successor session")
+	}
+	manager.SetPeerSyncSource(newSync)
+	if err := newSync.Start(newCtx); err != nil {
+		t.Fatalf("start successor session: %v", err)
+	}
+	conn, err = net.DialTimeout("tcp", newAddr, time.Second)
+	if err != nil {
+		t.Fatalf("successor listener did not remain available: %v", err)
+	}
+	_ = conn.Close()
 }

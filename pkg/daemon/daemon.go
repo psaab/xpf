@@ -1620,6 +1620,12 @@ type Daemon struct {
 	// nil selects the real method; production never sets it.
 	startClusterCommsFn func(context.Context)
 
+	// clusterCommsLifecycleMu serializes epoch creation and successor
+	// preparation with final teardown side effects. It is acquired before
+	// clusterCommsMu when both are needed. Stop joins its captured per-epoch
+	// work outside this lock; successor preparation joins all registered
+	// constructors while holding it, and constructor registration takes it too.
+	clusterCommsLifecycleMu sync.Mutex
 	// clusterCommsMu guards the cluster-comms epoch state that is published
 	// asynchronously by the startClusterComms constructor goroutine and torn
 	// down by stopClusterComms: sessionSync, the fabric slots' refreshCh channels,
@@ -1650,6 +1656,11 @@ type Daemon struct {
 	// current generation. beginClusterCommsEpoch replaces it under this lock;
 	// stopClusterComms captures and detaches it before waiting outside the lock.
 	clusterCommsEpoch *clusterCommsEpoch
+	// clusterCommsConstructorsWG joins constructors from predecessor epochs
+	// before successor preparation retires a published SessionSync. Its Add
+	// operations share clusterCommsLifecycleMu with Wait, preventing an Add
+	// from racing the preflight join.
+	clusterCommsConstructorsWG sync.WaitGroup
 
 	// startupGoodbyeRA tracks whether cold-backup cleanup is complete for each
 	// inactive RG. Distinct router identities must successfully receive a
@@ -1820,6 +1831,10 @@ type Daemon struct {
 	// fabric peer-MAC resolution can be driven against a synthetic
 	// neighbour table.
 	neighListFn func(int, int) ([]netlink.Neigh, error)
+
+	// fabricRetryAfterFn supplies the fast-retry timer. Production uses
+	// time.After; tests can synchronize cancellation with the timer arm.
+	fabricRetryAfterFn func(time.Duration) <-chan time.Time
 
 	// eventStreamConnected is set when the helper's binary event stream
 	// is live. The polling fallback loop uses this to decide its cadence:

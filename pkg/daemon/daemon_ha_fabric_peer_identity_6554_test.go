@@ -193,7 +193,7 @@ func fabPeerTestDaemon(t *testing.T, parentV6 []netlink.Neigh) (*Daemon, *fabric
 
 func fabPeerRefresh(t *testing.T, d *Daemon) bool {
 	t.Helper()
-	return d.refreshFabricFwdSlot(context.Background(), 0, "ge-0-0-0", "fab0",
+	return d.refreshFabricFwdSlot(context.Background(), d.clusterCommsGen, 0, "ge-0-0-0", "fab0",
 		net.ParseIP("10.99.13.2"), false)
 }
 
@@ -209,7 +209,7 @@ func TestFabricPeerNDPFallbackRejectsDecoyWithKnownPeerMAC(t *testing.T) {
 		fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 	})
 	// An earlier address-matched resolution established the peer's identity.
-	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
+	d.rememberFabricPeerMAC(context.Background(), d.clusterCommsGen, 0, net.ParseIP("10.99.13.2"), mustMAC(t, fabPeerTestPeerMAC))
 
 	if !fabPeerRefresh(t, d) {
 		t.Fatal("refreshFabricFwdSlot returned false; expected the real peer to resolve")
@@ -286,7 +286,7 @@ func TestFabricPeerNDPFallbackSolePeerMatchesKnownIdentity(t *testing.T) {
 	d, rec := fabPeerTestDaemon(t, []netlink.Neigh{
 		fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 	})
-	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
+	d.rememberFabricPeerMAC(context.Background(), d.clusterCommsGen, 0, net.ParseIP("10.99.13.2"), mustMAC(t, fabPeerTestPeerMAC))
 
 	if !fabPeerRefresh(t, d) {
 		t.Fatal("refreshFabricFwdSlot returned false for the known peer")
@@ -305,7 +305,7 @@ func TestFabricPeerNDPFallbackRefusesLoneDecoyWhenPeerKnown(t *testing.T) {
 	d, rec := fabPeerTestDaemon(t, []netlink.Neigh{
 		fabPeerNeigh(t, "fe80::dec0", fabPeerTestDecoyMAC),
 	})
-	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
+	d.rememberFabricPeerMAC(context.Background(), d.clusterCommsGen, 0, net.ParseIP("10.99.13.2"), mustMAC(t, fabPeerTestPeerMAC))
 
 	if fabPeerRefresh(t, d) {
 		t.Fatal("refreshFabricFwdSlot accepted a lone non-peer neighbour")
@@ -392,9 +392,9 @@ func TestFabricPeerIdentityClearedOnPeerChange(t *testing.T) {
 		return nil, errors.New("hermetic test: netlink disabled")
 	}
 	d.fabricSlots[0].peerIP = net.ParseIP("10.99.13.2")
-	d.rememberFabricPeerMAC(0, mustMAC(t, fabPeerTestPeerMAC))
+	d.rememberFabricPeerMAC(context.Background(), d.clusterCommsGen, 0, d.fabricSlots[0].peerIP, mustMAC(t, fabPeerTestPeerMAC))
 	d.fabricSlots[1].peerIP = net.ParseIP("10.99.14.2")
-	d.rememberFabricPeerMAC(1, mustMAC(t, fabPeerTestPeerMAC))
+	d.rememberFabricPeerMAC(context.Background(), d.clusterCommsGen, 1, d.fabricSlots[1].peerIP, mustMAC(t, fabPeerTestPeerMAC))
 
 	epoch := &clusterCommsEpoch{generation: d.clusterCommsGen}
 	// Same peer — identity survives.
@@ -663,7 +663,7 @@ func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 				fabPeerNeigh(t, peerIP.String(), fabPeerTestPeerMAC),
 			},
 		})
-		if !d.refreshFabricFwdSlot(context.Background(), 1, "ge-0-0-1", "fab1", peerIP, false) {
+		if !d.refreshFabricFwdSlot(context.Background(), d.clusterCommsGen, 1, "ge-0-0-1", "fab1", peerIP, false) {
 			t.Fatal("refreshFabricFwdSlot(1) returned false; expected parent ARP fallback to resolve the peer (#15683)")
 		}
 		if !d.fabricEntryPopulated(1) {
@@ -690,7 +690,7 @@ func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 			},
 		})
-		if !d.refreshFabricFwdSlot(context.Background(), 1, "ge-0-0-1", "fab1", peerIP, false) {
+		if !d.refreshFabricFwdSlot(context.Background(), d.clusterCommsGen, 1, "ge-0-0-1", "fab1", peerIP, false) {
 			t.Fatal("refreshFabricFwdSlot(1) returned false; expected parent IPv6 link-local fallback to resolve the sole peer (#15683)")
 		}
 		if !d.fabricEntryPopulated(1) {
@@ -716,7 +716,7 @@ func TestRefreshFabricFwd1ParentARPAndLinkLocalFallback(t *testing.T) {
 				fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 			},
 		})
-		if d.refreshFabricFwdSlot(context.Background(), 1, "ge-0-0-1", "fab1", peerIP, false) {
+		if d.refreshFabricFwdSlot(context.Background(), d.clusterCommsGen, 1, "ge-0-0-1", "fab1", peerIP, false) {
 			t.Fatal("refreshFabricFwdSlot(1) reported success on an ambiguous segment; expected fail-closed refusal (#6554/#15683)")
 		}
 		if got := rec.programmedPeerMACs(); len(got) != 0 {
@@ -818,7 +818,7 @@ func TestRefreshFabricFwd1LinkLocalSyncsHelper15918(t *testing.T) {
 			fabPeerNeigh(t, "fe80::b", fabPeerTestPeerMAC),
 		},
 	})
-	if !d.refreshFabricFwdSlot(context.Background(), 1, "ge-0-0-1", "fab1", peerIP, false) {
+	if !d.refreshFabricFwdSlot(context.Background(), d.clusterCommsGen, 1, "ge-0-0-1", "fab1", peerIP, false) {
 		t.Fatal("refreshFabricFwdSlot(1) returned false on sole link-local peer")
 	}
 	rec.mu.Lock()
@@ -878,7 +878,7 @@ func TestFabricSlotParity17040(t *testing.T) {
 			d.fabricSlots[0].peerIP = nil
 			d.fabricSlots[slot].peerIP = peerIP
 			d.fabricMu.Unlock()
-			if !d.refreshFabricFwdSlot(context.Background(), slot, "ge-0-0-0", "fab0", peerIP, false) {
+			if !d.refreshFabricFwdSlot(context.Background(), d.clusterCommsGen, slot, "ge-0-0-0", "fab0", peerIP, false) {
 				t.Fatalf("slot %d: refresh returned false on sole link-local peer", slot)
 			}
 			if !d.fabricEntryPopulated(slot) {
@@ -904,7 +904,7 @@ func TestFabricSlotParity17040(t *testing.T) {
 			// Peer change through the shared populate path clears only
 			// this slot's cached identity. The state-only helper lets an
 			// active current epoch publish before cancelling its lookups.
-			d.rememberFabricPeerMAC(slot, mustMAC(t, fabPeerTestPeerMAC))
+			d.rememberFabricPeerMAC(context.Background(), d.clusterCommsGen, slot, peerIP, mustMAC(t, fabPeerTestPeerMAC))
 			newAddr := "10.99.13.9"
 			if slot == 1 {
 				newAddr = "10.99.14.9"
@@ -920,7 +920,7 @@ func TestFabricSlotParity17040(t *testing.T) {
 			d.fabricSlots[slot].populated = true
 			d.fabricSlots[1-slot].populated = true
 			d.fabricMu.Unlock()
-			d.clearFabricFwdSlot(context.Background(), slot)
+			d.clearFabricFwdSlot(context.Background(), d.clusterCommsGen, slot, net.ParseIP(newAddr))
 			if d.fabricEntryPopulated(slot) {
 				t.Fatalf("slot %d: populated latch survived clearFabricFwdSlot", slot)
 			}

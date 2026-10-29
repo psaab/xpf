@@ -996,6 +996,7 @@ func (d *Daemon) beginClusterCommsEpoch(
 	parent context.Context,
 ) (context.Context, uint64, context.CancelFunc) {
 	commsCtx, commsCancel := context.WithCancel(parent)
+	d.clusterCommsLifecycleMu.Lock()
 	d.clusterCommsMu.Lock()
 	d.clusterCommsGen++
 	gen := d.clusterCommsGen
@@ -1003,14 +1004,52 @@ func (d *Daemon) beginClusterCommsEpoch(
 	d.clusterCommsCancel = commsCancel
 	d.clusterCommsCtx = commsCtx
 	d.clusterCommsMu.Unlock()
+	d.clusterCommsLifecycleMu.Unlock()
 	return commsCtx, gen, commsCancel
 }
 
-// addClusterCommsConstructor registers a constructor on its current epoch
-// while holding the same lock stopClusterComms uses to detach that epoch.
-// A stale constructor cannot Add to a group that a stop may already be
-// waiting on.
+// prepareClusterCommsEpoch retires resources left by any prior epoch before
+// the new epoch launches its loops. It shares the lifecycle claim with
+// stopClusterComms: if a stop is already tearing down the previous epoch,
+// preparation waits; if that stop was superseded during its join, preparation
+// first joins every registered predecessor constructor, then retires the
+// predecessor session and subsystem handles before the successor constructor
+// publishes or wires its session.
+func (d *Daemon) prepareClusterCommsEpoch(gen uint64) bool {
+	d.clusterCommsLifecycleMu.Lock()
+	defer d.clusterCommsLifecycleMu.Unlock()
+	d.clusterCommsMu.Lock()
+	current := d.clusterCommsGen == gen
+	d.clusterCommsMu.Unlock()
+	if !current {
+		return false
+	}
+	// A predecessor can be paused after publishing its SessionSync and still
+	// reach Start. Join constructors before retiring that object; registration
+	// takes this same lifecycle lock, so Add cannot race this Wait.
+	d.clusterCommsConstructorsWG.Wait()
+	d.clusterCommsMu.Lock()
+	current = d.clusterCommsGen == gen
+	predecessorSession := d.sessionSync
+	d.clusterCommsMu.Unlock()
+	if !current {
+		return false
+	}
+	d.retirePredecessorSessionSync(predecessorSession)
+	d.resetDHCPLeaseSyncLoop()
+	d.resetIPsecSASyncLoop()
+	if d.cluster != nil {
+		d.cluster.StopHeartbeat()
+	}
+	return true
+}
+
+// addClusterCommsConstructor registers a constructor on its current epoch.
+// The lifecycle lock serializes its Add with successor preflight's global join;
+// clusterCommsMu also keeps stop from detaching an epoch before this Add.
 func (d *Daemon) addClusterCommsConstructor(gen uint64) *clusterCommsEpoch {
+	d.clusterCommsLifecycleMu.Lock()
+	defer d.clusterCommsLifecycleMu.Unlock()
 	d.clusterCommsMu.Lock()
 	defer d.clusterCommsMu.Unlock()
 	epoch := d.clusterCommsEpoch
@@ -1018,9 +1057,9 @@ func (d *Daemon) addClusterCommsConstructor(gen uint64) *clusterCommsEpoch {
 		return nil
 	}
 	epoch.constructorWG.Add(1)
+	d.clusterCommsConstructorsWG.Add(1)
 	return epoch
 }
-
 
 // publishSessionSyncIfCurrent installs ss as the live session-sync object iff
 // gen still matches the current cluster-comms epoch (#4958). It returns false —
@@ -1107,7 +1146,7 @@ func (d *Daemon) unpublishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSy
 	if removed && d.cluster != nil {
 		// #17056: the Manager must stop reading recency from a sync object
 		// this epoch no longer owns.
-		d.cluster.SetPeerSyncSource(nil)
+		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
 	}
 	return removed
 }
@@ -1282,6 +1321,10 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 		commsCancel()
 		return
 	}
+	if !d.prepareClusterCommsEpoch(commsGen) {
+		commsCancel()
+		return
+	}
 
 	if d.cluster != nil {
 		// Do not let a superseded concurrent start overwrite the live
@@ -1322,7 +1365,10 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 			return
 		}
 		go func() {
-			defer epoch.constructorWG.Done()
+			defer func() {
+				epoch.constructorWG.Done()
+				d.clusterCommsConstructorsWG.Done()
+			}()
 			var syncIP string
 			for i := range syncAddressPollAttempts {
 				syncIP = resolveClusterInterfaceAddr(cfg, syncIface, syncPeerAddr, "")
@@ -1688,6 +1734,24 @@ func (d *Daemon) fenceAllRedundancyGroups(ctx context.Context) cluster.FenceResu
 	return res
 }
 
+// startHeartbeatForCommsEpoch serializes heartbeat publication with teardown
+// and epoch creation. The manager call runs without clusterCommsMu, but the
+// lifecycle lock prevents a successor start/stop from overtaking it.
+func (d *Daemon) startHeartbeatForCommsEpoch(ctx context.Context, generation uint64, localIP, peerAddr, vrfDevice, controlIface string) error {
+	d.clusterCommsLifecycleMu.Lock()
+	defer d.clusterCommsLifecycleMu.Unlock()
+	if ctx.Err() != nil {
+		return cluster.ErrHeartbeatStartSuperseded
+	}
+	d.clusterCommsMu.Lock()
+	current := d.clusterCommsGen == generation
+	d.clusterCommsMu.Unlock()
+	if !current {
+		return cluster.ErrHeartbeatStartSuperseded
+	}
+	return d.cluster.StartHeartbeat(localIP, peerAddr, vrfDevice, controlIface)
+}
+
 // startHeartbeatWithRetryForEpoch resolves the control-link local address and
 // VRF device on every attempt, then starts the cluster heartbeat. Both the
 // address and management-VRF membership may become ready during the startup
@@ -1729,7 +1793,7 @@ func (d *Daemon) startHeartbeatWithRetryForEpoch(ctx context.Context, controlIfa
 		}
 		vrfDevice := d.resolveClusterVRFDevice(controlIface)
 		d.noteClusterTransportBinding(commsGen, vrfDevice)
-		if err := d.cluster.StartHeartbeat(localIP, peerAddr, vrfDevice, controlIface); err != nil {
+		if err := d.startHeartbeatForCommsEpoch(ctx, commsGen, localIP, peerAddr, vrfDevice, controlIface); err != nil {
 			// #7257: a start the teardown superseded is terminal, not a bind
 			// failure. Retrying would race the same teardown again and, on
 			// success, resurrect the heartbeat stopClusterComms exists to
@@ -1791,6 +1855,7 @@ func (d *Daemon) stopClusterComms() {
 	d.clusterCommsCancel = nil
 	d.clusterCommsCtx = nil
 	epoch := d.clusterCommsEpoch
+	stoppingSession := d.sessionSync
 	d.clusterCommsEpoch = nil
 	d.clusterCommsMu.Unlock()
 
@@ -1802,15 +1867,18 @@ func (d *Daemon) stopClusterComms() {
 		epoch.fabricPopulateWG.Wait()
 	}
 
-	// The captured context has already stopped its side loops. If a successor
-	// opened while this epoch was joining, leave daemon-shared handles and
-	// heartbeat state to that successor.
+	// Serialize all daemon-shared teardown effects with successor epoch
+	// creation. Do not hold clusterCommsMu while resetting subsystem loops:
+	// their ensure paths take their own loop mutex before reading comms state.
+	d.clusterCommsLifecycleMu.Lock()
 	d.clusterCommsMu.Lock()
-	stillCurrent := d.clusterCommsGen == stopGen
-	d.clusterCommsMu.Unlock()
-	if !stillCurrent {
+	if d.clusterCommsGen != stopGen {
+		d.clusterCommsMu.Unlock()
+		d.retirePredecessorSessionSync(stoppingSession)
+		d.clusterCommsLifecycleMu.Unlock()
 		return
 	}
+	d.clusterCommsMu.Unlock()
 	d.resetDHCPLeaseSyncLoop()
 	d.resetIPsecSASyncLoop()
 	if d.cluster != nil {
@@ -1820,9 +1888,12 @@ func (d *Daemon) stopClusterComms() {
 	d.clusterCommsMu.Lock()
 	if d.clusterCommsGen != stopGen {
 		d.clusterCommsMu.Unlock()
+		d.retirePredecessorSessionSync(stoppingSession)
+		d.clusterCommsLifecycleMu.Unlock()
 		return
 	}
 	ss := d.sessionSync
+
 	d.sessionSync = nil
 	for slot := range d.fabricSlots {
 		d.fabricSlots[slot].refreshCh = nil
@@ -1865,14 +1936,39 @@ func (d *Daemon) stopClusterComms() {
 	// cell a clear fails) and TestStepTwentyIgnoresANeverStartedNode_7072.
 	d.clusterCommsMu.Unlock()
 
-	// #17056: unpublish the sync source with the sync object, so the
-	// Manager's suppression policy cannot read a stopped connection.
-	if d.cluster != nil {
-		d.cluster.SetPeerSyncSource(nil)
-	}
+	// #17056: stop the session before unpublishing its callback binding. The
+	// listener's handlers read that binding, so it must not be mutated while
+	// an accepted connection can still use it.
 	if ss != nil {
 		d.stopSyncReadyTimer()
 		ss.Stop()
+	}
+	if d.cluster != nil && ss != nil {
+		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
+	}
+	d.clusterCommsLifecycleMu.Unlock()
+}
+
+// retirePredecessorSessionSync detaches and stops a captured session without
+// disturbing a successor. It closes the listener before removing the Manager
+// callback binding, then uses compare-and-clear so a successor's source
+// survives if it was already published.
+func (d *Daemon) retirePredecessorSessionSync(ss *cluster.SessionSync) {
+	if ss == nil {
+		return
+	}
+	d.clusterCommsMu.Lock()
+	removed := d.sessionSync == ss
+	if removed {
+		d.sessionSync = nil
+	}
+	d.clusterCommsMu.Unlock()
+	if removed {
+		d.stopSyncReadyTimer()
+	}
+	ss.Stop()
+	if d.cluster != nil {
+		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
 	}
 }
 
