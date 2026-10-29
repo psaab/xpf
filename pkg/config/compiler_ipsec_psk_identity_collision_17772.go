@@ -992,6 +992,9 @@ func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
 	}
 	return rdns, true
 }
+
+// strongSwan accepts nonminimal BER long-form lengths, including leading zeros,
+// but bounds the length field to eight octets and the value to available input.
 func ipsecReadASN1Raw(encoded []byte) (asn1.RawValue, []byte, bool) {
 	if len(encoded) < 2 {
 		return asn1.RawValue{}, nil, false
@@ -1033,14 +1036,8 @@ func ipsecReadASN1Raw(encoded []byte) (asn1.RawValue, []byte, bool) {
 		if lengthBytes == 0 || lengthBytes > 8 || lengthBytes > len(encoded)-index {
 			return asn1.RawValue{}, nil, false
 		}
-		if lengthBytes > 1 && encoded[index] == 0 {
-			return asn1.RawValue{}, nil, false
-		}
 		for i := 0; i < lengthBytes; i++ {
 			length = length<<8 | uint64(encoded[index+i])
-		}
-		if lengthBytes > 1 && length < uint64(1)<<uint(8*(lengthBytes-1)) {
-			return asn1.RawValue{}, nil, false
 		}
 		index += lengthBytes
 	}

@@ -11530,8 +11530,9 @@ reserved for whole-dataplane selection where a rewrite shim
     equality is pairwise and not reducible to a transitive canonical key.
     DN equality requires constructed SEQUENCE, SET, and attribute-SEQUENCE
     containers; primitive-tag lookalikes compare by exact bytes only.
-    DN length parsing accepts strongSwan's one-octet long form even below 128,
-    while each containing TLV must still match its declared total length.
+    DN parsing accepts bounded long-form lengths (up to eight length octets),
+    including redundant leading zeros; containing TLVs must match their declared
+    total lengths.
     FQDN and RFC822 comparisons fold ASCII letters only; RFC822 IDs fold the
     whole address, and non-ASCII bytes remain byte-sensitive. `@#` and
     `keyid:#` mirror `chunk_from_hex()`: lowercase `0x` is stripped, every

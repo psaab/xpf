@@ -473,6 +473,12 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"nonminimal attribute SEQUENCE length compares DN values", "inet", "asn1dn:#3010310e30810b0603550403130470656572", "inet", "asn1dn:#3010310e30810b0603550403130450454552"},
 			{"nonminimal OID length compares DN values", "inet", "asn1dn:#3010310e300c068103550403130470656572", "inet", "asn1dn:#3010310e300c068103550403130450454552"},
 			{"nonminimal value length compares DN values", "inet", "asn1dn:#3010310e300c060355040313810470656572", "inet", "asn1dn:#3010310e300c060355040313810450454552"},
+			{"nonminimal two-octet outer length compares DN values", "inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "asn1dn:#3082000f310d300b0603550403130450454552"},
+			{"nonminimal two-octet SET length compares DN values", "inet", "asn1dn:#30113182000d300b0603550403130470656572", "inet", "asn1dn:#30113182000d300b0603550403130450454552"},
+			{"nonminimal two-octet attribute SEQUENCE length compares DN values", "inet", "asn1dn:#3011310f3082000b0603550403130470656572", "inet", "asn1dn:#3011310f3082000b0603550403130450454552"},
+			{"nonminimal two-octet OID length compares DN values", "inet", "asn1dn:#3011310f300d06820003550403130470656572", "inet", "asn1dn:#3011310f300d06820003550403130450454552"},
+			{"nonminimal two-octet value length compares DN values", "inet", "asn1dn:#3011310f300d06035504031382000470656572", "inet", "asn1dn:#3011310f300d06035504031382000450454552"},
+			{"maximum eight-octet outer length compares DN values", "inet", "asn1dn:#3088000000000000000f310d300b0603550403130470656572", "inet", "asn1dn:#3088000000000000000f310d300b0603550403130450454552"},
 			{"identical malformed total length remains exact-equal", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130470656572"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
@@ -515,11 +521,12 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130450454552"))
-		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "asn1dn:#3082000f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3011310f300d0682000003550403130470656572", "inet", "asn1dn:#3011310f300d0682000003550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3011310f300d0603550403138200000470656572", "inet", "asn1dn:#3011310f300d0603550403138200000450454552"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b060355040313047065657200", "inet", "asn1dn:#300f310d300b060355040313045045455200"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#308900000000000000000f310d300b0603550403130470656572", "inet", "asn1dn:#308900000000000000000f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
 	})
 
