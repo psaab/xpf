@@ -505,21 +505,26 @@ type rethServicesEdgeStatus struct {
 	inFlight         bool
 }
 
-// beginRethServicesEdge records the ownership of an apply/clear invocation
-// before its service work can block, and returns the generation token used to
-// qualify its eventual completion.
-func (d *Daemon) beginRethServicesEdge(rgID int, active bool) (generation, staleCompletions uint64) {
+// beginRethServicesEdge atomically claims an unapplied ownership edge before
+// service work can block. A duplicate producer (including a stale handler
+// transition after convergence) sees the applied marker under the same lock
+// and is a no-op. Pending tails remain claimable after the previous attempt
+// has finished.
+func (d *Daemon) beginRethServicesEdge(rgID int, active bool) (generation, staleCompletions uint64, claim bool) {
 	d.rethServicesMu.Lock()
 	defer d.rethServicesMu.Unlock()
 	if d.rethServices == nil {
 		d.rethServices = make(map[int]rethServicesEdgeStatus)
 	}
-	state := d.rethServices[rgID]
+	state, exists := d.rethServices[rgID]
+	if exists && state.active == active && (!state.pending || state.inFlight) {
+		return 0, 0, false
+	}
 	state.generation++
 	state.active = active
 	state.inFlight = true
 	d.rethServices[rgID] = state
-	return state.generation, state.staleCompletions
+	return state.generation, state.staleCompletions, true
 }
 
 // finishRethServicesEdge records whether this invocation skipped its service
@@ -560,8 +565,9 @@ func (d *Daemon) rethServicesAppliedFor(rgID int) bool {
 // neither apply nor clear — the edge was lost permanently because the
 // later VRRP/reconcile inputs then report Changed=false. Direct mode
 // (noRethVRRP) owns services inside reconcileDirectVIPOwnership and is
-// excluded. Idempotence when both inputs arrive: the second input reports
-// Changed=false, so the edge runs exactly once.
+// excluded. The service entrypoint atomically checks and advances the
+// applied marker, so a delayed Changed=true handler cannot replay an edge
+// already consumed by the converger.
 func (d *Daemon) driveRethServicesEdge(rgID int, tr rgTransition, noRethVRRP bool) {
 	if noRethVRRP || !tr.Changed {
 		return
@@ -2085,7 +2091,10 @@ func (d *Daemon) reconcileBlackholeRoutes() {
 // transition — these services must only run on the primary to avoid
 // dual-router / dual-DHCP issues.
 func (d *Daemon) applyRethServicesForRG(rgID int) {
-	generation, staleCompletions := d.beginRethServicesEdge(rgID, true)
+	generation, staleCompletions, claimed := d.beginRethServicesEdge(rgID, true)
+	if !claimed {
+		return
+	}
 	d.bumpIPsecRGOwnershipEpoch(rgID)
 	// The VRRP event loop holds no applySem, so a takeover racing factory
 	// reset would otherwise pre-seed prior leases and enqueue Kea applies
@@ -2316,7 +2325,10 @@ func clearRethRASendersWithoutGoodbyePeer(clearer raScopedClearer, cfg, peerCfg 
 // for RETH interfaces belonging to the given RG. Called on VRRP BACKUP
 // transition. If other RGs are still MASTER, their services remain active.
 func (d *Daemon) clearRethServicesForRG(rgID int) {
-	generation, staleCompletions := d.beginRethServicesEdge(rgID, false)
+	generation, staleCompletions, claimed := d.beginRethServicesEdge(rgID, false)
+	if !claimed {
+		return
+	}
 	rgEpoch := d.bumpIPsecRGOwnershipEpoch(rgID)
 	// #9087: nudged FIRST, and before the early returns, because the demote
 	// side of the window is the one that leaves a wrong answerer on the wire.

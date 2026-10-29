@@ -394,19 +394,17 @@ pub(super) fn translate_icmpv4_message_to_icmpv6(
             // a truncated or malformed quote has no usable Total Length and
             // keeps the 1280 floor rather than dropping the error. Non-zero
             // MTUs keep the plain +20 translation below.
-            // #16666 mirror check (RFC 7915 §4.2): the packet in error
-            // here is the OUTER IPv4 packet, whose MF/offset live in
-            // its IP header — not in `src` (the ICMP message) and not
-            // in the embedded quote (a different packet). The outer
-            // translators drop fragmented ICMP before reaching this
-            // arm (#2562: `is_fragment && protocol == PROTO_ICMP`), so
-            // the +28 case is unreachable here today; the quoted
-            // packet's own fragment state is handled independently by
-            // `translate_embedded_v4_to_v6`, which emits the quote's
-            // Fragment Header. The plain +20 below is therefore
-            // correct for every input that can reach this arm; a
-            // future caller admitting fragmented outer ICMP must add
-            // the +8 here.
+            // #16666 mirror check (RFC 7915 §4.2): the packet in error is
+            // the IPv4 datagram quoted in this ICMP error (`src[8..]`),
+            // translated separately by `translate_embedded_v4_to_v6` — not
+            // the outer IPv4 carrier of the ICMP message. For a non-zero
+            // Next-Hop MTU, RFC §4.2 adds 20 to that reported MTU; the quote's
+            // fragment state does not add another 8, and fragmentation of the
+            // carrier is no basis for an adjustment. The fragmented-outer-
+            // ICMP drop (#2562) therefore is not the reason for the +20 rule.
+            // This implementation adds 20 and floors at 1280 below. RFC §4.2
+            // also specifies upper bounds from both next-hop MTUs; this code
+            // does not apply those bounds.
             // The translated v6 datagram is 20 bytes larger than the v4 one, so
             // the v6 path MTU is 20 bytes larger; clamp to the v6 minimum link
             // MTU (1280) so a v6 client is never told to go below it.
