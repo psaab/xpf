@@ -317,7 +317,7 @@ func TestStandaloneRenewFailureRetriesWithoutSecondDHCPNudge17793(t *testing.T) 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		d.standaloneRARenewLoopWithRetryInterval(ctx, 5*time.Millisecond)
+		d.standaloneRARenewLoopWithRetryInterval(ctx, 5*time.Millisecond, nil)
 	}()
 	defer func() {
 		cancel()
@@ -385,11 +385,12 @@ func TestStandaloneRenewMissingStoreKeepsRetryOwed17793(t *testing.T) {
 		t.Fatal("standalone reconcile reported convergence without a store")
 	}
 
+	retryArmed := make(chan struct{}, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		d.standaloneRARenewLoopWithRetryInterval(ctx, 5*time.Millisecond)
+		d.standaloneRARenewLoopWithRetryInterval(ctx, 5*time.Millisecond, retryArmed)
 	}()
 	defer func() {
 		cancel()
@@ -400,7 +401,11 @@ func TestStandaloneRenewMissingStoreKeepsRetryOwed17793(t *testing.T) {
 		}
 	}()
 	d.nudgeStandaloneRARenew()
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-retryArmed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("missing-store wake did not arm the periodic retry")
+	}
 	d.raReconcileMu.Lock()
 	d.store = store
 	d.raReconcileMu.Unlock()
