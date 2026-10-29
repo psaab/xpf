@@ -1,4 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
+
+  * Config: redact bare and case-variant valued `*-key` credentials in
+    embedded commands and AST displays while preserving public exclusions
+    and the intentional non-`-key` suffix residual (#18435).
+
   * Config: compile brace-elided event-policy change-configuration commands
     instead of silently dropping the remediation payload (#18414).
   * Cluster: match installed secondary probe sources to target address family,

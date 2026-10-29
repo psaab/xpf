@@ -56,6 +56,54 @@ func TestRedactEmbeddedNonSetVerbs16726(t *testing.T) {
 	}
 }
 
+// TestEmbeddedValuedKeyFallback18435: commands that start with a valued
+// *-key keyword have no verb to normalize. Redaction must preserve the token
+// and mask its value for direct, flat AST, and hierarchical AST surfaces,
+// including case variants accepted by the open-world fallback.
+func TestEmbeddedValuedKeyFallback18435(t *testing.T) {
+	for _, keyword := range []string{
+		"signing-key", "ssh-key", "master-key",
+		"Signing-Key", "SSH-Key", "Master-Key", "Pre-Shared-Key",
+	} {
+		t.Run(keyword, func(t *testing.T) {
+			secret := "LEAK18435-" + strings.ReplaceAll(strings.ToUpper(keyword), "-", "")
+			cmd := keyword + " " + secret
+			got := RedactEmbeddedChangeConfigCommand(cmd)
+			if strings.Contains(got, secret) || !strings.Contains(got, SecretDataPlaceholder) {
+				t.Fatalf("RedactEmbeddedChangeConfigCommand(%q) = %q; want masked value", cmd, got)
+			}
+
+			flat := buildRedactTree(t, []string{
+				`set event-options policy p1 then change-configuration commands "` + cmd + `"`,
+			})
+			hier, errs := NewParser(`
+event-options {
+    policy p1 {
+        then {
+            change-configuration {
+                commands "` + cmd + `";
+            }
+        }
+    }
+}
+`).Parse()
+			if len(errs) != 0 {
+				t.Fatalf("hierarchical NewParser: %v", errs)
+			}
+			for name, tree := range map[string]*ConfigTree{"flat": flat, "hierarchical": hier} {
+				red := tree.RedactedClone()
+				for format, rendered := range map[string]string{
+					"Format": red.Format(), "FormatSet": red.FormatSet(),
+				} {
+					if strings.Contains(rendered, secret) || !strings.Contains(rendered, SecretDataPlaceholder) {
+						t.Errorf("%s %s rendered %q; want masked value", name, format, rendered)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestRedactEmbeddedNonSecretUnchanged16726(t *testing.T) {
 	// No secret keyword, no URL credential: byte-identical, whatever the verb.
 	for _, in := range []string{
