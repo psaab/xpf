@@ -69,9 +69,32 @@ fw0_is_primary() {
 	return 0
 }
 
+# #18523: `show chassis cluster status` prints sub-lines (Takeover ready,
+# Transfer ready, Forwarding) under the LOCAL node's row, so a fixed
+# `grep -A2` window misses the peer's row. Read a node's state from the
+# RG's own block. awk exits 0 on no match (an empty state), so a missing
+# row is a verdict, not a `set -e` abort.
+rg_node_state() { # <status-text> <rg> <node0|node1>
+	awk -v rg="$2" -v node="$3" '/^Redundancy group:/ {cur = $3} cur == rg && $1 == node {print $3; exit}' <<<"$1"
+}
+
+# Restored means BOTH nodes agree: fw0's own view has node0 primary and
+# fw1's own view has node1 non-owning. fw0's view alone would score a
+# dual-primary split as restored (the ha_rg_owner_verdict rule, #18503).
 rg_on_fw0() {
-	incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null |
-		grep -A2 "Redundancy group: $1 " | grep -q "node0.*primary"
+	local s0 s1
+	s0=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(rg_node_state "$s0" "$1" node0)" == primary ]] || return 1
+	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(rg_node_state "$s1" "$1" node1)" =~ ^secondary(-hold)?$ ]]
+}
+
+# fw1 still claims the RG in its own view (re-requesting a yield from a node
+# that already yielded only re-arms its hold and bumps its failover count).
+rg_on_fw1() {
+	local s1
+	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(rg_node_state "$s1" "$1" node1)" == primary ]]
 }
 
 restore_fw0_primary() {
@@ -88,15 +111,22 @@ restore_fw0_primary() {
 	# out. A single fixed sleep after three blind requests was shorter than
 	# one admission window plus a post-restart bulk (~50 sessions/s), and
 	# swallowed the refusal that said why.
-	deadline=$((SECONDS + ${RESTORE_FW0_WAIT:-60}))
+	local wait="${RESTORE_FW0_WAIT:-60}"
+	if [[ ! "$wait" =~ ^[0-9]+$ ]]; then
+		info "RESTORE_FW0_WAIT=$wait is not a whole number of seconds; using 60"
+		wait=60
+	fi
+	deadline=$((SECONDS + wait))
 	for rg in 0 1 2; do
 		while ! rg_on_fw0 "$rg"; do
 			if ((SECONDS >= deadline)); then
 				break 2
 			fi
-			out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
-			if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
-				last_err="RG$rg: $(head -1 <<<"$out")"
+			if rg_on_fw1 "$rg"; then
+				out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
+				if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
+					last_err="RG$rg: $(head -1 <<<"$out")"
+				fi
 			fi
 			for _ in 1 2 3 4 5; do
 				rg_on_fw0 "$rg" && break
@@ -108,7 +138,7 @@ restore_fw0_primary() {
 		pass "$label: fw0 restored as primary"
 		return 0
 	else
-		fail "$label: could not restore fw0 as primary within ${RESTORE_FW0_WAIT:-60}s${last_err:+ (last refusal: $last_err)}"
+		fail "$label: could not restore fw0 as primary within ${wait}s${last_err:+ (last refusal: $last_err)}"
 		return 1
 	fi
 }

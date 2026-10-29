@@ -162,6 +162,15 @@ else
 	die "iperf3 failed to start — check ${LOG} on ${CLUSTER_LAN_HOST}"
 fi
 
+# #18523: `show chassis cluster status` prints sub-lines (Takeover ready,
+# Transfer ready, Forwarding) under the LOCAL node's row, so a fixed
+# `grep -A2` window misses the peer's row. Read a node's state from the
+# RG's own block. awk exits 0 on no match (an empty state), so a missing
+# row is a verdict, not a `set -e` abort.
+rg_node_state() { # <status-text> <rg> <node0|node1>
+	awk -v rg="$2" -v node="$3" '/^Redundancy group:/ {cur = $3} cur == rg && $1 == node {print $3; exit}' <<<"$1"
+}
+
 # ── Phase 2: Failover RG1 (WAN) to fw1 ──────────────────────────────
 
 info "Phase 2: Failover RG1 (WAN) to node1 — creating active/active split"
@@ -173,9 +182,9 @@ sleep "$SETTLE_WAIT"
 # Verify RG split: RG1 on fw1, RG2 on fw0
 fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 
-rg1_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node0" | awk '{print $3}')
-rg1_node1=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node1" | awk '{print $3}')
-rg2_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 2" | grep "node0" | awk '{print $3}')
+rg1_node0=$(rg_node_state "$fw0_status" 1 node0)
+rg1_node1=$(rg_node_state "$fw0_status" 1 node1)
+rg2_node0=$(rg_node_state "$fw0_status" 2 node0)
 
 # #18523: the untargeted yield parks the old owner in `secondary-hold`
 # (the same rule as ha_rg_owner_verdict, #18503), and a move is only a move
