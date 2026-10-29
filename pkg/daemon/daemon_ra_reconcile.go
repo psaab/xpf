@@ -324,12 +324,12 @@ const standaloneRARenewRetryInterval = 30 * time.Second
 // retry is armed until the desired set converges. Joined by Run's WaitGroup on
 // shutdown.
 func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
-	d.standaloneRARenewLoopWithRetryInterval(ctx, standaloneRARenewRetryInterval)
+	d.standaloneRARenewLoopWithRetryInterval(ctx, standaloneRARenewRetryInterval, nil)
 }
 
 // standaloneRARenewLoopWithRetryInterval is the retry loop with an injected
-// cadence so its retry owner can be tested without waiting 30 seconds.
-func (d *Daemon) standaloneRARenewLoopWithRetryInterval(ctx context.Context, retryInterval time.Duration) {
+// cadence and optional retry-armed signal for deterministic owner tests.
+func (d *Daemon) standaloneRARenewLoopWithRetryInterval(ctx context.Context, retryInterval time.Duration, retryArmed chan<- struct{}) {
 	var retryTicker *time.Ticker
 	var retryC <-chan time.Time
 	for {
@@ -346,6 +346,12 @@ func (d *Daemon) standaloneRARenewLoopWithRetryInterval(ctx context.Context, ret
 			if retryTicker == nil {
 				retryTicker = time.NewTicker(retryInterval)
 				retryC = retryTicker.C
+			}
+			if retryArmed != nil {
+				select {
+				case retryArmed <- struct{}{}:
+				default:
+				}
 			}
 		} else if retryTicker != nil {
 			retryTicker.Stop()
