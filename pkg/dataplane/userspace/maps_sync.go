@@ -1670,12 +1670,15 @@ func pruneNATAddressKeys(
 // nothing: there is no domain to key them under, and guessing domain 0
 // would pass NDP in a foreign domain. Parse failures are skipped
 // exactly as the installer skips them.
-//
 // #17742: clustered proxy entries are filtered by the manager's live
 // local-primary provider using one Config.RefRGIndexFor index, the
 // precomputed form of the config ownership resolver used by the installer.
 // This avoids publishing shim targets for an RG the local node does not own;
 // unknown ownership keeps the installer's existing fail-open behavior.
+//
+// #17743: proxy entries and snapshot rows can spell one kernel interface
+// differently. Resolve both through the same config resolver as the kernel
+// installer; resolve snapshot names once because each call builds tunnel data.
 func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot, primary RGPrimaryProvider) map[userspaceLocalV6Key]struct{} {
 	desired := make(map[userspaceLocalV6Key]struct{})
 	if snapshot == nil || snapshot.Config == nil {
@@ -1685,6 +1688,10 @@ func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot, primary RGPrimary
 	var refRG *config.RefRGIndex
 	if cfg.Chassis.Cluster != nil && primary != nil && len(cfg.Security.NAT.ProxyARP) > 0 {
 		refRG = cfg.RefRGIndexFor()
+	}
+	interfaceKernelNames := make([]string, len(snapshot.Interfaces))
+	for i, iface := range snapshot.Interfaces {
+		interfaceKernelNames[i] = snapshot.Config.ResolveKernelIfName(iface.Name)
 	}
 	for _, entry := range cfg.Security.NAT.ProxyARP {
 		if entry == nil {
@@ -1698,8 +1705,12 @@ func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot, primary RGPrimary
 				}
 			}
 		}
-		for _, iface := range snapshot.Interfaces {
-			if iface.Name != entry.Interface || iface.AdminDisabled {
+		entryKernel := snapshot.Config.ResolveKernelIfName(entry.Interface)
+		if entryKernel == "" {
+			continue
+		}
+		for i, iface := range snapshot.Interfaces {
+			if iface.AdminDisabled || interfaceKernelNames[i] != entryKernel {
 				continue
 			}
 			for _, cidr := range entry.Addresses {

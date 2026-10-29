@@ -76,6 +76,39 @@ func TestBuildDesiredProxyNDPAddressSets16660(t *testing.T) {
 	}
 }
 
+func TestBuildDesiredProxyNDPAddressSetsResolvesInterfaceAliases17743(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/1": {Name: "ge-0/0/1"},
+			"ge-0/0/2": {Name: "ge-0/0/2"},
+		}},
+	}
+	cfg.Security.NAT.ProxyARP = []*config.ProxyARPEntry{{
+		Interface: "ge-0-0-1",
+		Addresses: []string{"2001:db8:1774::1/128"},
+	}}
+	snapshot := &ConfigSnapshot{
+		Config: cfg,
+		Interfaces: []InterfaceSnapshot{
+			{Name: "ge-0/0/1", LinuxName: "ge-0-0-1", RoutingDomain: 17},
+			{Name: "ge-0/0/2", LinuxName: "ge-0-0-2", RoutingDomain: 18},
+		},
+	}
+
+	addr := netip.MustParseAddr("2001:db8:1774::1").As16()
+	got := buildDesiredProxyNDPAddressSets(snapshot, nil)
+	want := userspaceLocalV6Key{Domain: 17, Addr: addr}
+	if len(got) != 1 {
+		t.Fatalf("proxy-NDP desired set = %v, want only the resolved interface's target %+v", got, want)
+	}
+	if _, ok := got[want]; !ok {
+		t.Fatalf("proxy-NDP desired set missing cross-spelled target %+v; got %v", want, got)
+	}
+	if _, ok := got[userspaceLocalV6Key{Domain: 18, Addr: addr}]; ok {
+		t.Fatalf("proxy-NDP target was published for genuinely different interface ge-0/0/2: %v", got)
+	}
+}
+
 func TestSyncProxyNDPAddressMaps16660(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("RemoveMemlock: %v", err)
