@@ -311,9 +311,13 @@ the userspace dataplane admission boundary is in
   state measured in a prior primary epoch (#16734), so the ip debt
   reconciles away and the demoted node becomes promotable again after
   upstream recovery instead of staying frozen at weight 0 for life.
-  A configured secondary address confirmed present on the interface
-  remains measurable, so transient bind/send failures retain neutral
-  treatment.
+  Only a clean address list without the configured address, or a clean
+  link-list confirmation of a missing interface, proves absence. A typed
+  `LinkNotFoundError` from `LinkByName` is confirmed only by a clean
+  `LinkList` because its legacy dump fallback can hide `ErrDumpInterrupted`;
+  lookup errors and interrupted partial dumps remain inconclusive.
+  A clean list containing the address remains measurable, so transient
+  bind/send failures keep the neutral treatment.
   When `global-threshold` is unset (0),
   the historical **independent per-target** behavior is preserved exactly: each
   unreachable target subtracts its own `weight` (or `global-weight` when the

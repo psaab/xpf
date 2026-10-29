@@ -202,6 +202,12 @@ type nlLinkGetter interface {
 	LinkByName(name string) (netlink.Link, error)
 }
 
+// nlLinkLister exposes a complete link enumeration for confirming absence
+// after LinkByName reports not found. An interrupted dump cannot verify absence.
+type nlLinkLister interface {
+	LinkList() ([]netlink.Link, error)
+}
+
 // nlAddressLister abstracts the address query used to determine whether a
 // configured secondary probe source is actually installed on its interface.
 type nlAddressLister interface {
@@ -863,8 +869,9 @@ func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IP
 }
 
 // installedAddress checks whether address is assigned to device in the
-// current kernel address list. A typed LinkNotFoundError confirms the
-// interface is absent; other lookup failures are inconclusive, so callers
+// current kernel address list. LinkByName's typed not-found result is confirmed
+// only by a clean LinkList, since its legacy dump fallback can hide
+// ErrDumpInterrupted. Other lookup failures are inconclusive, so callers
 // preserve state rather than treating inspection failures as absence.
 func (mon *Monitor) installedAddress(device, address string) (present, verified bool) {
 	ip := net.ParseIP(stripCIDR(address))
@@ -876,11 +883,42 @@ func (mon *Monitor) installedAddress(device, address string) (present, verified 
 	link, err := nlh.LinkByName(device)
 	if err != nil {
 		var notFound netlink.LinkNotFoundError
-		if errors.As(err, &notFound) {
+		if !errors.As(err, &notFound) {
+			return false, false
+		}
+
+		linkLister, ok := nlh.(nlLinkLister)
+		if !ok {
+			return false, false
+		}
+		links, err := linkLister.LinkList()
+		if err != nil {
+			return false, false
+		}
+		for _, candidate := range links {
+			attrs := candidate.Attrs()
+			if attrs == nil {
+				continue
+			}
+			if attrs.Name == device {
+				link = candidate
+				break
+			}
+			for _, altName := range attrs.AltNames {
+				if altName == device {
+					link = candidate
+					break
+				}
+			}
+			if link != nil {
+				break
+			}
+		}
+		if link == nil {
 			return false, true
 		}
-		return false, false
 	}
+
 	lister, ok := nlh.(nlAddressLister)
 	if !ok {
 		return false, false
