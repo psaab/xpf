@@ -60,6 +60,8 @@ func preemptEffectivePriority(basePriority, weight int) int {
 // electionResult is the outcome of a per-RG election.
 type electionResult int
 
+const armDebtYieldReason = "Local dataplane not ready; verified peer takes over"
+
 const (
 	electLocalPrimary   electionResult = iota // local node should be primary
 	electLocalSecondary                       // local node should be secondary
@@ -455,7 +457,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// loss, weight > 1) does NOT fire here: that is exactly the Junos
 	// partial-loss case that must keep the incumbent.
 	if rg.Preempt && rg.State == StatePrimary && verifiedArmDebtPeer {
-		return electLocalSecondary, "Local dataplane not ready; verified peer takes over"
+		return electLocalSecondary, armDebtYieldReason
 	}
 
 	// Symmetric takeover: the peer has yielded at the arm-debt floor
@@ -474,9 +476,38 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		return electLocalPrimary, "Peer yielded at arm-debt floor; taking over"
 	}
 
-	// Keep an arm-debt yield in place when the verified peer is now
-	// primary. Do not let raw-priority preempt undo the handoff until
-	// the local debt clears or the peer no longer owns the RG.
+	// A preempt arm-debt handoff must survive the cross-over between the
+	// owner's SECONDARY heartbeat and the peer's first PRIMARY heartbeat.
+	// Keep the sticky hold only while current bidirectional proof exists.
+	// Weight zero and a peer's explicit yield have already been handled
+	// above. If both nodes fall to the arm floor, raw preempt resumes rather
+	// than pinning the lower-priority peer indefinitely.
+	armDebtPeerLive := peerGroup.heartbeatSession == rg.armDebtYieldPeerSession &&
+		peerGroup.heartbeatEchoSession == m.LocalProcessToken() &&
+		peerGroup.heartbeatEchoSequence > 0 &&
+		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil)
+	if rg.Preempt && rg.State != StatePrimary && rg.armDebtYielded && armDebtPeerLive {
+		if peerGroup.State == StatePrimary &&
+			(m.dataplaneArmDebtLocked(rg.GroupID) == 0 || peerWeight > localWeight) {
+			return electNoChange, "Arm-debt yield holds while peer remains primary"
+		}
+		// Until a PRIMARY frame newer than the handoff watermark has been
+		// observed, a fresh SECONDARY frame may still be in flight from
+		// before the peer consumed our demotion. A later SECONDARY frame
+		// (strictly newer than its last PRIMARY) proves a real relinquish.
+		// Keep the floor-tie and cold/unready-peer cases eligible for ordinary
+		// election.
+		if peerGroup.State == StateSecondary && peerGroup.takeoverReady &&
+			(rg.armDebtYieldPeerPrimarySequence == 0 ||
+				peerGroup.heartbeatSequence <= rg.armDebtYieldPeerPrimarySequence) &&
+			peerWeight > localWeight {
+			return electNoChange, "Arm-debt yield awaits peer ownership heartbeat"
+		}
+	}
+
+	// A fresh peer session invalidates the old arm-debt ownership history.
+	// Preserve the verified-primary hold for a fresh PRIMARY report, but do
+	// not pin against a new session's SECONDARY startup frames.
 	if rg.Preempt && rg.State != StatePrimary && verifiedArmDebtPeer &&
 		peerGroup.State == StatePrimary {
 		return electNoChange, "Verified peer owns while local dataplane is not ready"
@@ -574,7 +605,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			peerGroup.heartbeatEchoSession == m.LocalProcessToken() &&
 			peerGroup.heartbeatEchoSequence > 0 &&
 			time.Now().Before(peerGroup.heartbeatEchoLeaseUntil) {
-			return electLocalSecondary, "Local dataplane not ready; verified peer takes over"
+			return electLocalSecondary, armDebtYieldReason
 		}
 		if peerGroup.State == StatePrimary {
 			// DUAL-ACTIVE: resolve by effective priority, then node ID.
@@ -713,6 +744,20 @@ func (m *Manager) runElection() {
 			peerGroup = &pg
 		}
 
+		// A peer restart invalidates the old handoff history. In particular,
+		// do not keep holding on fresh SECONDARY startup frames: the peer has
+		// not claimed ownership in its new session.
+		if rg.armDebtYielded && peerGroup != nil &&
+			peerGroup.heartbeatSession != rg.armDebtYieldPeerSession {
+			rg.armDebtYielded = false
+			rg.armDebtYieldPeerSession = 0
+			rg.armDebtYieldPeerSequence = 0
+			rg.armDebtYieldPeerPrimarySequence = 0
+		} else if rg.armDebtYielded && peerGroup != nil &&
+			peerGroup.State == StatePrimary &&
+			peerGroup.heartbeatSequence > rg.armDebtYieldPeerSequence {
+			rg.armDebtYieldPeerPrimarySequence = peerGroup.heartbeatSequence
+		}
 		result, reason := m.electRG(rg, peerGroup)
 
 		// Readiness gate: block NEW promotions to primary if the RG
@@ -746,6 +791,28 @@ func (m *Manager) runElection() {
 					"reasons", rg.ReadinessReasons)
 				continue
 			}
+		}
+
+		// Record the preempt arm-debt yield only when it is actually applied.
+		// The sticky bit remains through no-change elections until a promoted
+		// local node, a new demotion cause, or the single-node path releases it.
+		if rg.Preempt && result == electLocalSecondary && reason == armDebtYieldReason {
+			rg.armDebtYielded = true
+			rg.armDebtYieldPeerSession = 0
+			rg.armDebtYieldPeerSequence = 0
+			rg.armDebtYieldPeerPrimarySequence = 0
+			if peerGroup != nil {
+				rg.armDebtYieldPeerSession = peerGroup.heartbeatSession
+				rg.armDebtYieldPeerSequence = peerGroup.heartbeatSequence
+				if peerGroup.State == StatePrimary {
+					rg.armDebtYieldPeerPrimarySequence = peerGroup.heartbeatSequence
+				}
+			}
+		} else if result != electNoChange || !rg.Preempt {
+			rg.armDebtYielded = false
+			rg.armDebtYieldPeerSession = 0
+			rg.armDebtYieldPeerSequence = 0
+			rg.armDebtYieldPeerPrimarySequence = 0
 		}
 
 		oldState := rg.State
@@ -848,6 +915,13 @@ func (m *Manager) electSingleNode() {
 		if rg.State == StateDisabled || rg.ManualFailover {
 			continue
 		}
+		// No peer remains to prove the previous arm-debt handoff; do not let
+		// its preempt hold survive a single-node election.
+		rg.armDebtYielded = false
+		rg.armDebtYieldPeerSession = 0
+		rg.armDebtYieldPeerSequence = 0
+		rg.armDebtYieldPeerPrimarySequence = 0
+
 		// Non-preempt in cluster mode: don't claim primary on fresh boot
 		// before hearing from the peer. The peer may be running as
 		// primary — wait for heartbeat timeout to confirm it's truly
