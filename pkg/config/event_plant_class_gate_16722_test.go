@@ -116,6 +116,9 @@ func TestTreeMayHaveEventCommands16722(t *testing.T) {
 			gate16722Hier(t, `event-options policy { p { events e; then { change-configuration { commands "set system host-name x"; } } } }`), true},
 		{"compact one-key policy container in a group body",
 			gate16722Hier(t, `groups { g { event-options policy { p { events e; then { change-configuration { commands "set system host-name x"; } } } } } } apply-groups g;`), true},
+		{"compact one-key policy may be named like a body keyword",
+			gate16722Hier(t, `event-options policy { then { events e; then { change-configuration { commands "set system host-name x"; } } } }`), true},
+
 		{"elided policy-name spelling has no policy commands",
 			gate16722Hier(t, `event-options policy { events e; then { change-configuration { commands "set system host-name x"; } } }`), false},
 
@@ -212,21 +215,60 @@ func TestCompactOneKeyPolicyPlantClassForgeryRestamped17762(t *testing.T) {
 	}
 }
 
+func TestCompactBodyKeywordPolicyNameStillAttributed17762(t *testing.T) {
+	after := gate16722Hier(t, `event-options policy { then { events e; then { change-configuration { commands "set system host-name x"; } } } }`)
+	StampChangedEventPlantClasses(nil, after, "alice")
+	cfg, err := CompileConfigLenient(after)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	for _, policy := range cfg.EventOptions {
+		if policy != nil && policy.Name == "then" {
+			if policy.PlantClass != "alice" {
+				t.Fatalf("keyword-named compact policy PlantClass=%q, want alice", policy.PlantClass)
+			}
+			if len(policy.ThenCommands) != 1 || policy.ThenCommands[0] != "set system host-name x" {
+				t.Fatalf("keyword-named policy commands=%q", policy.ThenCommands)
+			}
+			return
+		}
+	}
+	t.Fatal("compact one-key-container policy named then was not compiled")
+}
+
 func TestCompactOneKeyPolicySuperuserQuarantined17762(t *testing.T) {
 	sources := map[string]string{
 		"top-level": `event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`,
 		"group-body": `groups { g { event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } } } } apply-groups g;`,
+		"keyword-name": `event-options policy { then { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`,
 	}
 	for name, source := range sources {
 		t.Run(name, func(t *testing.T) {
 			tree := gate16722Hier(t, source)
-			if pol := compiledPlantClass9984(t, tree); pol.PlantClass != EventPlantClassSuperuser ||
+			policyName := "p"
+			if name == "keyword-name" {
+				policyName = "then"
+			}
+			compiledPolicy := func() *EventPolicy {
+				cfg, err := CompileConfigLenient(tree)
+				if err != nil {
+					t.Fatalf("CompileConfigLenient: %v", err)
+				}
+				for _, policy := range cfg.EventOptions {
+					if policy != nil && policy.Name == policyName {
+						return policy
+					}
+				}
+				t.Fatalf("compiled config has no event policy %q", policyName)
+				return nil
+			}
+			if pol := compiledPolicy(); pol.PlantClass != EventPlantClassSuperuser ||
 				len(pol.ThenCommands) != 1 {
 				t.Fatalf("fixture PlantClass=%q commands=%q, want executable super-user policy",
 					pol.PlantClass, pol.ThenCommands)
 			}
 			QuarantineUntrustedEventPlantClasses(tree)
-			pol := compiledPlantClass9984(t, tree)
+			pol := compiledPolicy()
 			if pol.PlantClass != "" {
 				t.Fatalf("quarantined PlantClass=%q, want empty marker", pol.PlantClass)
 			}

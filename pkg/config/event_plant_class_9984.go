@@ -223,8 +223,9 @@ type eventPolicyInstance9984 struct {
 
 // compactEventOptionsPolicyInstance9984 resolves the packed raw spellings
 // `event-options policy p ...` and `event-options policy { p { ... } }`.
-// The second spelling is ambiguous with an elided-name policy body, so only
-// children that are not declared policy properties can be named instances.
+// For the one-key container, a named instance may itself be named after a
+// policy keyword, so its body structure—not its name—distinguishes it from
+// an elided-name policy body.
 func compactEventOptionsPolicyInstance9984(container, child *Node) (eventPolicyInstance9984, bool) {
 	if container == nil || container.Name() != "event-options" ||
 		len(container.Keys) < 2 || container.Keys[1] != "policy" {
@@ -237,18 +238,29 @@ func compactEventOptionsPolicyInstance9984(container, child *Node) (eventPolicyI
 		return eventPolicyInstance9984{name: container.Keys[2], node: container}, true
 	}
 	if len(container.Keys) != 2 || child == nil || child.Name() == "" ||
-		eventPolicyBodyKeyword9984(child.Name()) {
+		!eventPolicyInstanceHasPropertyChildren9984(child) {
 		return eventPolicyInstance9984{}, false
 	}
 	return eventPolicyInstance9984{name: child.Name(), node: child}, true
 }
 
-func eventPolicyBodyKeyword9984(name string) bool {
-	if name == "apply-groups" || name == "apply-groups-except" {
-		return true
+func eventPolicyInstanceHasPropertyChildren9984(instance *Node) bool {
+	if instance == nil {
+		return false
 	}
 	policySchema := schemaEventOptions.children["policy"]
-	return policySchema != nil && policySchema.children[name] != nil
+	for _, child := range instance.Children {
+		if child == nil {
+			continue
+		}
+		if child.Name() == "apply-groups" || child.Name() == "apply-groups-except" {
+			return true
+		}
+		if policySchema != nil && policySchema.children[child.Name()] != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func policyMayHaveEventCommands9984(policy *Node) bool {
