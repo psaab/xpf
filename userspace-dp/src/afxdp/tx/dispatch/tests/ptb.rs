@@ -971,7 +971,7 @@ fn unknown_tunnel_kind_mtu_forwards_and_counts_9901() {
 
 /// #10705: fixture's outer-MTU input is 1400. GRE obtains it from
 /// `tunnel_outer_mtu` (tx_ifindex 22 misses, egress ifindex 80 hits); this
-/// peer-less WG fixture takes `wg_selected_peer_outer_with_dynamic`'s
+/// peer-less WG fixture takes `wg_selected_peer_outer`'s
 /// no-peer fallback to `decision.resolution.egress_ifindex` (80)'s MTU.
 /// Thus GRE's inner budget is 1376 (1400 - outer_ip(20) - gre(4)), and WG's
 /// is 1340 (1400 - WG_OVERHEAD_V4(60): outer IP(20) + UDP(8) + WG data
