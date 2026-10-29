@@ -3101,3 +3101,68 @@ fn concurrent_peer_pmtu_notes_converge_to_minimum_17774() {
         worker.join().expect("PMTU note writer must not panic");
     }
 }
+
+/// #17774: writers racing an expired entry must not refresh its stamp
+/// before they agree on the smallest replacement MTU.
+#[test]
+fn expired_concurrent_peer_pmtu_notes_keep_minimum_17774() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    const WRITERS: usize = 8;
+    const ROUNDS: usize = 1000;
+    const OFFERS: [usize; WRITERS] = [1400, 1390, 1380, 1370, 1360, 1350, 1340, 1330];
+    let now_ns = super::super::pmtu::WG_PMTU_AGE_NS + 10;
+    let (local_priv, _) = keypair();
+    let (_, peer_pub) = keypair();
+    let engine = Arc::new(WgEngine::new(WgEngineConfig {
+        local_private_key: local_priv.into(),
+        listen_port: 51820,
+        peers: vec![WgPeerConfig {
+            pubkey: peer_pub,
+            endpoint: Some("192.0.2.2:51820".parse().unwrap()),
+            endpoint_host: None,
+            persistent_keepalive: 0,
+            allowed_ips: vec![],
+            preshared_key: [0u8; 32].into(),
+        }],
+    }));
+    let peer = engine.peer_arc(&peer_pub).expect("configured peer");
+    let start = Arc::new(Barrier::new(WRITERS + 1));
+    let finish = Arc::new(Barrier::new(WRITERS + 1));
+    let mut workers = Vec::with_capacity(WRITERS);
+    for offer in OFFERS {
+        let engine = engine.clone();
+        let start = start.clone();
+        let finish = finish.clone();
+        workers.push(thread::spawn(move || {
+            for _ in 0..ROUNDS {
+                start.wait();
+                engine.note_peer_pmtu(&peer_pub, offer, false, 0, now_ns);
+                finish.wait();
+            }
+        }));
+    }
+
+    for round in 0..ROUNDS {
+        // The stored 1200 has expired. All simultaneous offers become
+        // candidates, so the smallest one must win regardless of ordering.
+        peer.pmtu_mtu.store(1200, Ordering::Relaxed);
+        peer.pmtu_learned_ns.store(1, Ordering::Relaxed);
+        start.wait();
+        finish.wait();
+        assert_eq!(
+            engine.peer_pmtu(&peer_pub, now_ns),
+            Some(1330),
+            "expired concurrent notes lost the smallest offer at round {round}"
+        );
+        assert_eq!(
+            peer.pmtu_learned_ns.load(Ordering::Relaxed),
+            now_ns,
+            "the expired entry's replacement stamp was not published at round {round}"
+        );
+    }
+    for worker in workers {
+        worker.join().expect("expired PMTU note writer must not panic");
+    }
+}
