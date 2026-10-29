@@ -455,6 +455,14 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"IPv4 prefix skips leading whitespace", "inet", "198.51.100.1/ 24", "inet", "198.51.100.1/24"},
 			{"empty IPv4 prefix defaults to zero", "inet", "198.51.100.1/", "inet", "198.51.100.1/0"},
 			{"IPv6 prefix suffix ignores trailing text", "inet", "2001:db8::1/64junk", "inet", "2001:db8::1/64"},
+			{"IPv4 positive int32 subnet wrap", "inet", "198.51.100.1/4294967320", "inet", "198.51.100.1/24"},
+			{"IPv4 negative int32 subnet wrap", "inet", "198.51.100.1/-4294967272", "inet", "198.51.100.1/24"},
+			{"IPv4 subnet wrap to one", "inet", "198.51.100.1/4294967297", "inet", "198.51.100.1/1"},
+			{"IPv4 subnet wrap to zero", "inet", "198.51.100.1/8589934592", "inet", "198.51.100.1/0"},
+			{"IPv6 positive int32 subnet wrap", "inet", "2001:db8::1/4294967360", "inet", "2001:db8::1/64"},
+			{"IPv6 negative int32 subnet wrap", "inet", "2001:db8::1/-4294967232", "inet", "2001:db8::1/64"},
+			{"IPv6 subnet wrap to 128", "inet", "2001:db8::1/4294967424", "inet", "2001:db8::1/128"},
+			{"negative strtol overflow narrows to zero", "inet", "198.51.100.1/-99999999999999999999999999", "inet", "198.51.100.1/0"},
 			{"PrintableString compares through NUL only", "inet", "asn1dn:#300e310c300a06035504031303410042", "inet", "asn1dn:#300e310c300a06035504031303610043"},
 			{"emailAddress compares through NUL only", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011603610043"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
@@ -483,6 +491,9 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.1/-24", "inet", "ipv4net:#c6336400ffffff00"))
 		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.1/33", "inet", "ipv4net:#c6336400ffffff00"))
 		requireNoCollision17772(t, identityPair17772("inet", "2001:db8::1/129", "inet", "ipv6net:#20010db80000000000000000000000ffffffffffffffffffffffffffffffff"))
+		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.1/2147483648", "inet", "198.51.100.1/24"))
+		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.1/4294967295", "inet", "198.51.100.1/24"))
+		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.1/99999999999999999999999999", "inet", "198.51.100.1/24"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300e310c300a06035504031303410042", "inet", "asn1dn:#300e310c300a06035504031303420043"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011603420043"))
 		requireNoCollision17772(t, identityPair17772("inet", "{2}:#410062", "inet", "{2}:#610062"))

@@ -1031,7 +1031,8 @@ all files stay in `package ipsec`, so the public API is unchanged.
   bytes unchanged. Key-id bytes and IP/subnet/range/FQDN selectors follow parser
   semantics. Untyped subnet lengths parse a decimal strtol prefix: leading
   whitespace/sign are accepted, trailing bytes ignored, and no digits means
-  zero, subject to the address-family width. Numeric prefixes use strtoul and
+  zero; strtol saturation narrows to signed 32-bit before address-family range
+  checking. Numeric prefixes use strtoul and
   32-bit ID enum conversion; empty `{}` selects type 0 (ID_ANY), which ignores
   encoded bytes in equality. `uri:` is type 201; `xmppaddr:` encodes a
   GeneralName. Authored output stays raw.

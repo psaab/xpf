@@ -11534,10 +11534,11 @@ reserved for whole-dataplane selection where a rewrite shim
     colon is removed when sizing, decoding fills from the right and skips at
     most one colon before each low nibble, invalid nibbles become zero, and
     odd values are left-padded. For example, `7a::7a` decodes to `a07a`, not
-    `7a7a`. Untyped subnets mask host bits; their decimal lengths parse a
-    `strtol()` prefix (leading whitespace/sign accepted, trailing bytes
-    ignored, no digits means zero) and must fit the address family. Numeric
-    prefixes use `strtoul()` base detection and 32-bit enum conversion; empty
+    `7a7a`. Untyped subnets mask host bits; lengths parse a decimal `strtol()`
+    prefix (leading whitespace/sign accepted, trailing bytes ignored, no digits
+    means zero), saturate at signed 64-bit limits, narrow to signed 32-bit, then
+    must fit the address family. Numeric prefixes use `strtoul()` base
+    detection and 32-bit enum conversion; empty
     `{}` means type 0 (`ID_ANY`), whose equality ignores identity encoding.
     Types 2/3 containing NUL never compare equal; DN PrintableString and
     emailAddress comparisons stop at a matching NUL.

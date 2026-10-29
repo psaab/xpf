@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -613,17 +614,17 @@ func ipsecStrongSwanUntypedSubnet(value string) (netip.Prefix, bool) {
 		return netip.Prefix{}, false
 	}
 	bits := ipsecStrtolDecimalPrefix(prefixValue)
-	if bits < 0 || bits > address.BitLen() {
+	if bits < 0 || bits > int32(address.BitLen()) {
 		return netip.Prefix{}, false
 	}
-	return netip.PrefixFrom(address, bits), true
+	return netip.PrefixFrom(address, int(bits)), true
 }
 
-// ipsecStrtolDecimalPrefix mirrors strtol(..., 10) when its end pointer is
-// ignored: it accepts a signed decimal prefix, ignores trailing bytes, and
-// returns zero when no digits are consumed. Values beyond an address width
-// saturate just above 128 so the caller rejects them without integer overflow.
-func ipsecStrtolDecimalPrefix(value string) int {
+// ipsecStrtolDecimalPrefix mirrors strtol(..., 10) followed by strongSwan's
+// signed 32-bit prefix-length conversion. It accepts a signed decimal prefix,
+// ignores trailing bytes, treats no digits as zero, and uses strtol's
+// saturating 64-bit overflow result before narrowing.
+func ipsecStrtolDecimalPrefix(value string) int32 {
 	index := 0
 	for index < len(value) {
 		switch value[index] {
@@ -635,32 +636,19 @@ func ipsecStrtolDecimalPrefix(value string) int {
 	}
 
 whitespaceDone:
-	sign := 1
-	if index < len(value) {
-		switch value[index] {
-		case '+':
-			index++
-		case '-':
-			sign = -1
-			index++
-		}
-	}
-
-	bits, digits := 0, false
-	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
-		digits = true
-		if bits <= 128 {
-			bits = bits*10 + int(value[index]-'0')
-			if bits > 128 {
-				bits = 129
-			}
-		}
+	numberStart := index
+	if index < len(value) && (value[index] == '+' || value[index] == '-') {
 		index++
 	}
-	if !digits {
+	digitsStart := index
+	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+		index++
+	}
+	if index == digitsStart {
 		return 0
 	}
-	return sign * bits
+	number, _ := strconv.ParseInt(value[numberStart:index], 10, 64)
+	return int32(number)
 }
 
 func ipsecAddressRangeIdentity(value string) (ipsecIKEIdentity, bool) {
