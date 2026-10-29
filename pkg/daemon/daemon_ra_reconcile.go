@@ -137,20 +137,20 @@ func (d *Daemon) syncStandaloneRAHash(desired []*config.RAInterfaceConfig) {
 // The standalone hash is kept separate so a standalone apply never poisons
 // the cluster digest (and vice versa) across a mode transition.
 // lastStandaloneRAHash is guarded by raReconcileMu, like lastRAReconcileHash.
-func (d *Daemon) reconcileStandaloneRAServices(reason string) {
+func (d *Daemon) reconcileStandaloneRAServices(reason string) bool {
 	d.raReconcileMu.Lock()
 	defer d.raReconcileMu.Unlock()
 	if d.store == nil {
-		return
+		return true
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil || cfg.Chassis.Cluster != nil {
-		return
+		return true
 	}
 	apply := d.raApplyFn
 	if apply == nil {
 		if d.ra == nil {
-			return
+			return true
 		}
 		apply = d.ra.Apply
 	}
@@ -165,28 +165,29 @@ func (d *Daemon) reconcileStandaloneRAServices(reason string) {
 	}
 	newHash := raDesiredHash(desired)
 	if newHash == d.lastStandaloneRAHash && !d.raHasDeadSenders() {
-		return
+		return true
 	}
 	if len(desired) == 0 {
 		// No RA desired: withdraw through the applier seam so a test spy
 		// sees the same shape as the cluster empty case. ra.Apply(nil)
 		// retires every sender with a goodbye (#5092).
 		if err := apply(nil); err != nil {
-			slog.Warn("ra: standalone RA renew reconcile failed; will retry on next renewal",
+			slog.Warn("ra: standalone RA renew reconcile failed; retrying periodically",
 				"reason", reason, "err", err)
-			return
+			return false
 		}
 		d.lastStandaloneRAHash = newHash
-		return
+		return true
 	}
 	if err := apply(desired); err != nil {
-		slog.Warn("ra: standalone RA renew reconcile failed; will retry on next renewal",
+		slog.Warn("ra: standalone RA renew reconcile failed; retrying periodically",
 			"reason", reason, "err", err)
-		return
+		return false
 	}
 	slog.Info("ra: standalone RA reconciled after PD renewal",
 		"reason", reason, "interfaces", len(desired))
 	d.lastStandaloneRAHash = newHash
+	return true
 }
 
 // raHasDeadSenders reports whether the RA manager holds a sender whose
@@ -303,23 +304,39 @@ func (d *Daemon) reassertDeadRASendersOnce(ctx context.Context) {
 	}
 }
 
+// standaloneRARenewRetryInterval is the cadence for retrying a failed
+// standalone PD-renew reconcile. The loop below arms this ticker only after
+// an apply failure and stops it as soon as a later reconcile converges.
+var standaloneRARenewRetryInterval = 30 * time.Second
+
 // standaloneRARenewLoop is the #16773 owner for the standalone PD-renewal
 // RA refresh. It wakes promptly on nudgeStandaloneRARenew (fired by every
-// content-identical lease renewal) and otherwise does no periodic work:
-// a renewal is the only event that moves Obtained without a recompile, so
-// no ticker is needed and a healthy box pays nothing between renewals.
-// Each wake runs one digest-gated reconcileStandaloneRAOnce; a v4 or
-// non-PD renewal leaves the digest unchanged, so the wake costs one
-// buildRAConfigs and no sender restart (preserving #15057's no-churn rule
-// and #1777's quiet-renewal rule for the full-compile path). Joined by
-// Run's WaitGroup on shutdown.
+// content-identical lease renewal) and otherwise does no periodic work while
+// converged: a renewal is the only event that moves Obtained without a
+// recompile. After an apply failure, a periodic retry is armed until the
+// desired set converges. Joined by Run's WaitGroup on shutdown.
 func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
+	var retryTicker *time.Ticker
+	var retryC <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
+			if retryTicker != nil {
+				retryTicker.Stop()
+			}
 			return
 		case <-d.raRenewWakeCh:
-			d.reconcileStandaloneRAOnce(ctx)
+		case <-retryC:
+		}
+		if !d.reconcileStandaloneRAOnce(ctx) {
+			if retryTicker == nil {
+				retryTicker = time.NewTicker(standaloneRARenewRetryInterval)
+				retryC = retryTicker.C
+			}
+		} else if retryTicker != nil {
+			retryTicker.Stop()
+			retryTicker = nil
+			retryC = nil
 		}
 	}
 }
@@ -332,15 +349,17 @@ func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
 // landing while this pass waits already applied the fresh RA state via
 // applyServicesReconcile and synced lastStandaloneRAHash, so the pass then
 // finds a matching digest and does nothing (no gratuitous restart).
-func (d *Daemon) reconcileStandaloneRAOnce(ctx context.Context) {
+// It reports whether the desired standalone set is converged; the loop
+// retries periodically only when an apply failed.
+func (d *Daemon) reconcileStandaloneRAOnce(ctx context.Context) bool {
 	if d.applySem == nil {
-		return
+		return false
 	}
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
-		return
+		return ctx.Err() != nil
 	}
 	defer d.applySem.Release(1)
-	d.reconcileStandaloneRAServices("pd-renewal")
+	return d.reconcileStandaloneRAServices("pd-renewal")
 }
 
 // desiredClusterRA returns the desired cluster RA set: buildRAConfigs entries
