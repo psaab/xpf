@@ -984,6 +984,26 @@ fn rotation_sources_v6(n: u16) -> Vec<IpAddr> {
         .map(|iid| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x67, 0, 0, 0, 0, iid)))
         .collect()
 }
+/// #18404: probe IIDs of the rotation /64 (2001:db8:67::/64) for `n`
+/// sources in DISTINCT host-tier slots. Seed-adaptive via `slot_for_test`
+/// (the `distinct_slot_sources` convention), so it never hardcodes a
+/// seed-dependent layout — the per-boot seed (`hot_path_hash_seed`,
+/// drawn once per process) makes any FIXED IID set's slot partition a
+/// fresh lottery in every test process.
+fn distinct_host_slot_rotation_sources_v6(n: usize) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for iid in 1..=10_000u16 {
+        let addr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x67, 0, 0, 0, 0, iid));
+        if seen.insert(ZoneLimiter::slot_for_test(&addr)) {
+            out.push(addr);
+            if out.len() == n {
+                return out;
+            }
+        }
+    }
+    panic!("could not find {n} distinct-host-slot IIDs in one /64 in 10000 probes");
+}
 
 /// #15248 (A67-01): probe `n` DISTINCT-slot IPv4 documentation sources —
 /// genuinely distinct hosts, each entitled to its own per-source budget.
@@ -1010,16 +1030,23 @@ fn distinct_slot_ipv4_sources(n: usize) -> Vec<IpAddr> {
 
 /// #15248 (A67-01) HEADLINE fail-on-revert, IPv6 /64 cell — updated by
 /// #16510: ONE host rotating IIDs inside its own /64 must not drain the
-/// zone aggregate and starve an unrelated victim source. The attacker
-/// cycles 16 IIDs at 10/s each over 10s (1600 attempts at the production
-/// 1000/s aggregate) while the victim asks for one reply at the end.
-/// Pre-#15248 each IID owned a full 100/s slot, so the rotation admitted
-/// ~1008 and the victim was aggregate-denied. #15248 capped the whole
-/// /64 at one 15/s share (163 admitted). #16510 keeps the rotation
-/// bounded — now by the /64 OUTER tier (HOSTS_PER_64=32 host shares =
-/// 480/s + burst 480) behind per-/128 host shares: the 16 IIDs at 10/s
-/// each (160/s aggregate offer, under the 480/s /64 rate) pass in full,
-/// the /64 burst (480) plus refill never binds, and the victim passes.
+/// zone aggregate and starve an unrelated victim source. The attacker offers
+/// 16 IIDs at 10/s each over 10s (1600 attempts at the production 1000/s
+/// aggregate); the victim asks for one reply at the end.
+///
+/// The old fixed-IID fixture's `>=1520` admission assertion was seed-random:
+/// under an iid-uniform approximation to the outputs of the shared per-process
+/// seed (not an exact per-seed probability), a singleton host slot admits 100
+/// attempts in this schedule and any slot shared by 2+ IIDs admits 163. Exact
+/// occupancy enumeration within that model gives a 26.7530457% chance of total
+/// admissions below 1520.
+/// Issue #18404 reports 13/20 pristine-master failures; our isolated
+/// 20-run reproduction failed 8/20 (admitted counts: 1352, 1389, 1489, 1463,
+/// 1352, 1289, 1463, 1426). These are collisions, not a product limit.
+/// Select 16 distinct host slots from the same /64 instead: every 10/s
+/// trickle stays below its host's 15/s + burst-15 budget, and the combined
+/// 160/s offer stays below the /64 outer tier's 480/s + burst-480 budget.
+/// Require all 1600 attempts to pass; the victim-survival assertion remains.
 /// The binding rotation bound is proven with a saturating rotation in
 /// `rotating_v6_iids_saturate_at_prefix64_cap_16510`; removing the /64
 /// tier reds THAT cell (rotation admits the host-tier sum), and removing
@@ -1031,7 +1058,7 @@ fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
     let zone = 15_248u32;
     let t0 = 15_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
-    let attackers = rotation_sources_v6(16);
+    let attackers = distinct_host_slot_rotation_sources_v6(16);
     let victim = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x99, 0, 0, 0, 0, 1));
     assert!(
         attackers
@@ -1039,6 +1066,13 @@ fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
             .all(|a| ZoneLimiter::prefix64_slot_for_test(a)
                 == ZoneLimiter::prefix64_slot_for_test(&attackers[0])),
         "test setup: every IID of one /64 must key the same /64 slot"
+    );
+    let host_slots: std::collections::HashSet<_> =
+        attackers.iter().map(ZoneLimiter::slot_for_test).collect();
+    assert_eq!(
+        host_slots.len(),
+        attackers.len(),
+        "test setup: each IID must key a distinct host slot"
     );
     let mut admitted = 0u32;
     // 100 steps of 100ms: one attempt per IID per step = 10/s per IID.
@@ -1058,13 +1092,9 @@ fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
             }
         }
     }
-    assert!(
-        admitted >= 1520,
-        "16 IIDs at 10/s each stay within their per-/128 shares and the \
-         /64 outer budget (480/s), so >=95% pass (got {admitted}/1600; \
-         the residual is ordinary 64-slot host collisions among 16 \
-         IIDs) — rotation is bounded by the saturating cell, not by \
-         starving this trickle"
+    assert_eq!(
+        admitted, 1600,
+        "16 distinct host slots each admit their 10/s trickle"
     );
     let t_end = t0 + 10_000_000_000;
     assert!(
