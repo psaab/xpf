@@ -816,18 +816,20 @@ func TestDemotionPerNodeSourceNotSilentlyCleared14978(t *testing.T) {
 		if !ok || peerCfg == nil {
 			t.Fatalf("node%d: peer view unavailable, per-node control cannot be exercised", node.id)
 		}
-		if !isSharedRASource(cfg, 1, node.source) {
+		iface := raCfgs[0].Interface
+		peerIface := peerCfg.ResolveKernelIfName("reth0.50")
+		if !isSharedRASource(cfg, 1, iface, node.source) {
 			t.Fatalf("node%d: local isSharedRASource(%s)=false, want true (local VIP)", node.id, node.source)
 		}
-		if isSharedRASource(peerCfg, 1, node.source) {
-			t.Fatalf("node%d: peer view also installs %s - fixture is shared, not per-node", node.id, node.source)
+		if isSharedRASource(peerCfg, 1, peerIface, node.source) {
+			t.Fatalf("node%d: peer view also installs %s on the same logical RETH unit - fixture is shared, not per-node", node.id, node.source)
 		}
-		if isSharedRASourceBothViews(cfg, peerCfg, 1, node.source) {
+		if isSharedRASourceBothViews(cfg, peerCfg, 1, iface, node.source) {
 			t.Fatalf("node%d: per-node source %s classified shared across both views", node.id, node.source)
 		}
 		clearer := &sharedLLClearSpy10779{
 			statuses: []ra.SenderInfo{
-				{Interface: "ge-0-0-0.50", SrcAddr: node.source, State: "active"},
+				{Interface: iface, SrcAddr: node.source, State: "active"},
 			},
 		}
 		if err := clearRethRASendersWithoutGoodbyePeer(clearer, cfg, peerCfg, 1); err != nil {
@@ -866,10 +868,10 @@ func TestDemotionPerNodeSourceNotSilentlyCleared14978(t *testing.T) {
 func TestDemotionNonVIPSourceKeepsGoodbye16624(t *testing.T) {
 	s := raClusterStore(t, "2001:db8:1077:9::/64")
 	cfg := s.ActiveConfig()
-	if isSharedRASource(cfg, 1, "fe80::face") {
+	if isSharedRASource(cfg, 1, "ge-0-0-0.50", "fe80::face") {
 		t.Fatal("isSharedRASource(fe80::face) = true, want false (not VIP, not stable)")
 	}
-	if isSharedRASourceBothViews(cfg, nil, 1, "fe80::face") {
+	if isSharedRASourceBothViews(cfg, nil, 1, "ge-0-0-0.50", "fe80::face") {
 		t.Fatal("isSharedRASourceBothViews(fe80::face) = true, want false")
 	}
 }
@@ -909,7 +911,7 @@ func TestConfiguredSharedLinkLocalSilentlyCleared16624(t *testing.T) {
 	if !foundVIP {
 		t.Fatalf("precondition: fe80::1/64 not in RethVIPsForRG(1)=%v", cfg.RethVIPsForRG(1))
 	}
-	if !isSharedRASource(cfg, 1, "fe80::1") {
+	if !isSharedRASource(cfg, 1, "ge-0-0-0.50", "fe80::1") {
 		t.Fatal("isSharedRASource(fe80::1) = false, want true (RG VIP)")
 	}
 	spy := &raApplySpy{}
@@ -957,5 +959,216 @@ func TestConfiguredSharedLinkLocalSilentlyCleared16624(t *testing.T) {
 	}
 	if !rd.startupGoodbyeRA[1] {
 		t.Fatal("shared-VIP startup suppression did not mark cleanup complete")
+	}
+}
+
+// crossedVLANStore17706 builds a cluster store whose reth0 carries two
+// VLAN units in RG1 with CROSSED per-node link-locals via `groups nodeN`:
+// node0 uses fe80::face on VLAN50 and fe80::beef on VLAN60, node1 the
+// reverse. Every address exists somewhere in BOTH nodes' RG-wide VIP
+// maps, but on DIFFERENT interfaces — link-local identity is
+// (link, address), so neither unit's identity is shared (#17706).
+func crossedVLANStore17706(t *testing.T, nodeID int) *configstore.Store {
+	t.Helper()
+	s, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetNodeID(nodeID)
+	text := `
+groups {
+    node0 {
+        chassis { cluster { node 0; } }
+        interfaces { reth0 {
+            unit 50 { family inet6 { address fe80::face/64; } }
+            unit 60 { family inet6 { address fe80::beef/64; } }
+        } }
+    }
+    node1 {
+        chassis { cluster { node 1; } }
+        interfaces { reth0 {
+            unit 50 { family inet6 { address fe80::beef/64; } }
+            unit 60 { family inet6 { address fe80::face/64; } }
+        } }
+    }
+}
+apply-groups "${node}";
+chassis {
+    cluster {
+        cluster-id 1;
+        authentication-key test-cluster-psk-6611;
+        control-interface em0;
+        peer-address 10.99.0.2;
+        redundancy-group 1 { node 0 priority 200; node 1 priority 100; }
+    }
+}
+interfaces {
+    em0 { unit 0 { family inet address 10.99.0.1/24; } }
+
+    reth0 {
+        vlan-tagging;
+        redundant-ether-options { redundancy-group 1; }
+        unit 50 { vlan-id 50; family inet6 { address 2001:db8:1077:9::1/64; } }
+        unit 60 { vlan-id 60; family inet6 { address 2001:db8:1077:10::1/64; } }
+    }
+    ge-0/0/0 { gigether-options { redundant-parent reth0; } }
+    ge-7/0/0 { gigether-options { redundant-parent reth0; } }
+}
+protocols { router-advertisement {
+    interface reth0.50 { prefix 2001:db8:1077:9::/64; }
+    interface reth0.60 { prefix 2001:db8:1077:10::/64; }
+} }
+`
+	if _, err := s.SyncApply(text, nil); err != nil {
+		t.Fatalf("node%d SyncApply crossed-VLAN fixture: %v", nodeID, err)
+	}
+	return s
+}
+
+// TestCrossedVLANPerNodeSourceNotSilentlyCleared17706 is the #17706
+// regression: with crossed per-node link-locals on two VLANs of one RG,
+// each address exists in BOTH nodes' RG-wide VIP maps but on a different
+// interface. The interface-inclusive shared-identity check must retain
+// the per-node goodbye on every path (predicate, demotion clear,
+// startup filter, full reconcile); an address-only comparison
+// misclassifies both units as shared and silently stops the senders.
+// Control arms: a shared-section fe80::1 on both units is still
+// silently cleared on both interfaces.
+func TestCrossedVLANPerNodeSourceNotSilentlyCleared17706(t *testing.T) {
+	for _, node := range []struct {
+		id         int
+		member     string
+		peerMember string
+		sources    map[string]string // local kernel interface -> per-node source
+	}{
+		{0, "ge-0-0-0", "ge-7-0-0", map[string]string{"ge-0-0-0.50": "fe80::face", "ge-0-0-0.60": "fe80::beef"}},
+		{1, "ge-7-0-0", "ge-0-0-0", map[string]string{"ge-7-0-0.50": "fe80::beef", "ge-7-0-0.60": "fe80::face"}},
+	} {
+		s := crossedVLANStore17706(t, node.id)
+		cfg := s.ActiveConfig()
+		if cfg == nil {
+			t.Fatalf("node%d: nil active config", node.id)
+		}
+		d0 := &Daemon{store: s}
+		raCfgs := d0.buildRAConfigs(cfg)
+		byIface := make(map[string]*config.RAInterfaceConfig, len(raCfgs))
+		for _, c := range raCfgs {
+			byIface[c.Interface] = c
+		}
+		if len(raCfgs) != 2 {
+			t.Fatalf("node%d precondition: RA configs = %+v, want 2 units", node.id, raCfgs)
+		}
+		peerCfg, ok := d0.peerRAConfig(cfg)
+		if !ok || peerCfg == nil {
+			t.Fatalf("node%d: peer view unavailable, crossed-VLAN control cannot be exercised", node.id)
+		}
+		var statuses []ra.SenderInfo
+		for iface, source := range node.sources {
+			cfgRA := byIface[iface]
+			if cfgRA == nil || cfgRA.SourceLinkLocal != source {
+				t.Fatalf("node%d precondition: RA source on %s = %+v, want %s", node.id, iface, cfgRA, source)
+			}
+			// The crossing precondition: the peer installs this node's
+			// address as an RG VIP on the OTHER interface.
+			peerVLAN := ".50"
+			if iface == node.member+".50" {
+				peerVLAN = ".60"
+			}
+			peerIface := node.peerMember + peerVLAN
+			// The source is a local VIP on this link and a peer VIP on
+			// the other VLAN only; neither same-link ownership check may
+			// classify it as shared.
+			if !isSharedRASource(cfg, 1, iface, source) {
+				t.Fatalf("node%d precondition: local view does not install %s on %s", node.id, source, iface)
+			}
+			if !isSharedRASource(peerCfg, 1, peerIface, source) {
+				t.Fatalf("node%d precondition: peer view does not install %s on crossed interface %s", node.id, source, peerIface)
+			}
+			if isSharedRASourceBothViews(cfg, peerCfg, 1, iface, source) {
+				t.Fatalf("node%d: crossed per-node source %s on %s classified shared across both views", node.id, source, iface)
+			}
+			statuses = append(statuses, ra.SenderInfo{Interface: iface, SrcAddr: source, State: "active"})
+		}
+		clearer := &sharedLLClearSpy10779{statuses: statuses}
+		if err := clearRethRASendersWithoutGoodbyePeer(clearer, cfg, peerCfg, 1); err != nil {
+			t.Fatalf("node%d clear demoted RG senders: %v", node.id, err)
+		}
+		if len(clearer.calls) != 0 {
+			t.Fatalf("node%d crossed per-node sources silently cleared %v, want graceful goodbye retained", node.id, clearer.calls)
+		}
+		if got := startupGoodbyeConfigsFiltered(cfg, peerCfg, 1, raCfgs); len(got) != 2 {
+			t.Fatalf("node%d startup goodbye retained %d configs, want 2 (both per-node units)", node.id, len(got))
+		}
+		// The full reconcile path must also retain them: on this node
+		// the RG is inactive, so neither sender may appear in silentStop.
+		spy := &raApplySpy{}
+		var cleared [][]string
+		d := &Daemon{
+			store:      s,
+			rgStates:   make(map[int]*rgStateMachine),
+			raStatusFn: func() []ra.SenderInfo { return nil },
+			raApplyFn:  spy.apply,
+			raClearInterfacesFn: func(names []string) error {
+				cleared = append(cleared, append([]string(nil), names...))
+				return nil
+			},
+		}
+		d.getOrCreateRGState(1).SetVRRP("reth0", false)
+		d.reconcileClusterRAServices("demoted-crossed-vlan")
+		if len(cleared) != 0 {
+			t.Fatalf("node%d reconcile silently cleared crossed per-node sources: %v", node.id, cleared)
+		}
+	}
+}
+
+// TestSharedLinkLocalSameInterfaceStillSilentlyCleared17706 is the
+// #17706 control arm: a shared-section fe80::1 on both VLAN units is a
+// VIP of both views on the SAME interfaces, so the interface-inclusive
+// check must keep the #16624 silent clear on both.
+func TestSharedLinkLocalSameInterfaceStillSilentlyCleared17706(t *testing.T) {
+	s := crossedVLANStore17706(t, 0)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LoadSet(
+		"set interfaces reth0 unit 50 family inet6 address fe80::1/64\n" +
+			"set interfaces reth0 unit 60 family inet6 address fe80::1/64\n"); err != nil {
+		t.Fatalf("LoadSet shared LL: %v", err)
+	}
+	if _, err := s.Commit(); err != nil {
+		t.Fatalf("Commit shared LL: %v", err)
+	}
+	s.ExitConfigure()
+	cfg := s.ActiveConfig()
+	d0 := &Daemon{store: s}
+	raCfgs := d0.buildRAConfigs(cfg)
+	if len(raCfgs) != 2 {
+		t.Fatalf("precondition: RA configs = %+v, want 2 units", raCfgs)
+	}
+	peerCfg, ok := d0.peerRAConfig(cfg)
+	if !ok || peerCfg == nil {
+		t.Fatal("peer view unavailable, shared-same-interface control cannot be exercised")
+	}
+	for _, cfgRA := range raCfgs {
+		if cfgRA.SourceLinkLocal != "fe80::1" {
+			t.Fatalf("precondition: RA source on %s = %q, want fe80::1", cfgRA.Interface, cfgRA.SourceLinkLocal)
+		}
+		if !isSharedRASourceBothViews(cfg, peerCfg, 1, cfgRA.Interface, "fe80::1") {
+			t.Fatalf("shared fe80::1 on %s not classified shared across both views", cfgRA.Interface)
+		}
+	}
+	if got := startupGoodbyeConfigsFiltered(cfg, peerCfg, 1, raCfgs); len(got) != 0 {
+		t.Fatalf("startup goodbye retained %v for shared fe80::1, want nothing", got)
+	}
+	clearer := &sharedLLClearSpy10779{statuses: []ra.SenderInfo{
+		{Interface: "ge-0-0-0.50", SrcAddr: "fe80::1", State: "active"},
+		{Interface: "ge-0-0-0.60", SrcAddr: "fe80::1", State: "active"},
+	}}
+	if err := clearRethRASendersWithoutGoodbyePeer(clearer, cfg, peerCfg, 1); err != nil {
+		t.Fatalf("clear demoted RG senders: %v", err)
+	}
+	want := [][]string{{"ge-0-0-0.50", "ge-0-0-0.60"}}
+	if !reflect.DeepEqual(clearer.calls, want) {
+		t.Fatalf("shared fe80::1 silent clear = %v, want %v", clearer.calls, want)
 	}
 }
