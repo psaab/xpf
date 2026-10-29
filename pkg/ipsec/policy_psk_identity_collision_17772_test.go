@@ -121,6 +121,27 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			t.Fatalf("identical shared credentials may render: rendered=%v\n%s", rendered, text)
 		}
 	})
+
+	t.Run("cross-type rendered-identical owner with the same PSK renders both", func(t *testing.T) {
+		cfg := build(map[string]*config.IPsecGateway{
+			"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: "inet", RemoteIDValue: "peer@corp.example"},
+			"gw-b": {Name: "gw-b", Address: "203.0.113.2", RemoteIDType: "email", RemoteIDValue: "peer@corp.example"},
+		}, map[string]*config.IPsecVPN{
+			"a": {Gateway: "gw-a", PSK: config.NewSecret("same-secret")},
+			"b": {Gateway: "gw-b", PSK: config.NewSecret("same-secret")},
+		})
+		text, rendered, err := manager.renderConfig(cfg)
+		if err != nil || !rendered["gw-a"] || !rendered["gw-b"] {
+			t.Fatalf("same PSK may share an identical rendered owner: rendered=%v err=%v\n%s", rendered, err, text)
+		}
+		blocks := parseSecretBlocks(t, text)
+		for _, name := range []string{"gw-a", "gw-b"} {
+			block, ok := blocks["ike-"+name]
+			if !ok || len(block.ids) != 1 || block.ids[0] != "peer@corp.example" {
+				t.Fatalf("%s secret selectors = %+v, want [peer@corp.example]\n%s", name, block, text)
+			}
+		}
+	})
 	t.Run("RFC822 aliases collide and retain unrelated VPN", func(t *testing.T) {
 		pairs := []struct{ aType, a, bType, b string }{
 			{"rfc822", "peer@corp.example", "user-at-hostname", "peer@CORP.EXAMPLE"},

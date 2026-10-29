@@ -239,6 +239,21 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		}
 	})
 
+	t.Run("cross-type rendered-identical identity with the same PSK commits", func(t *testing.T) {
+		cmds := twoVPN17772([]string{
+			"set security ike gateway gw-a ike-policy ike-pol",
+			"set security ike gateway gw-a address 203.0.113.1",
+			"set security ike gateway gw-a remote-identity inet \"peer@corp.example\"",
+		}, []string{
+			"set security ike gateway gw-b ike-policy ike-pol",
+			"set security ike gateway gw-b address 203.0.113.2",
+			"set security ike gateway gw-b remote-identity email \"peer@corp.example\"",
+		}, "same-secret", "same-secret")
+		if _, err := CompileConfig(buildTree17772(t, cmds)); err != nil {
+			t.Fatalf("same PSK and identical rendered owners must remain allowed across types: %v", err)
+		}
+	})
+
 	t.Run("two VPNs sharing one gateway commit", func(t *testing.T) {
 		cmds := append(base17772(),
 			"set security ike gateway gw-shared ike-policy ike-pol",
