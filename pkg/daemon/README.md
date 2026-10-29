@@ -367,9 +367,10 @@ always stays armed and the check runs twice:
     installed, its callback is deferred instead of re-applying active C2. The
     callback guard is checked again after acquiring `applySem`, so an apply
     already waiting there cannot re-apply C2 after preflight marks the target.
-    Publication debt remains until rollback applies C1 (#17741). The next fire
-    rechecks the snapshot; if the restarted producer still cannot fetch before
-    its bounded retry cap, the normal safe state above applies.
+    The rejected callback leaves publication debt. That debt clears only when
+    a later retry successfully applies the snapshot with C1 active (#17741).
+    The next fire rechecks the snapshot; if the restarted producer still cannot
+    fetch before its bounded retry cap, the normal safe state above applies.
   - Any other refusal, or a feed still unready at the cap, promotes the store to
     the target (persisted as committed, as #6538 does for a recovered target
     that no longer compiles). The daemon then re-syncs the promoted target to

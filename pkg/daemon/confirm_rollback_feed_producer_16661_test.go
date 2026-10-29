@@ -503,3 +503,22 @@ func TestFeedCallbackWaitingOnApplySemRechecksRollbackTargetMarker17741(t *testi
 	h.s.InvokeRollbackTimerForTesting(gen)
 	assertAppliedC1NoBootstrap16661(t, h)
 }
+
+// TestStartupActiveApplyIsNotDeferredByRollbackTargetMarker17741 protects
+// the generic applyActiveConfigResult caller used during daemon bringup:
+// rollback-feed deferral must stay specific to feed callbacks.
+func TestStartupActiveApplyIsNotDeferredByRollbackTargetMarker17741(t *testing.T) {
+	h := setup16661(t, false)
+	gen := h.s.ConfirmGenForTesting()
+	h.d.confirmTargetFeedInstallPending.Store(gen)
+	before := len(*h.applied)
+
+	if err := h.d.applyActiveConfigResult(); err != nil {
+		t.Fatalf("startup-style active apply was deferred: %v", err)
+	}
+	if got := len(*h.applied); got != before+1 || (*h.applied)[got-1] != "c2-abandoned" {
+		t.Fatalf("startup-style apply did not reconcile active C2: before=%v after=%v",
+			(*h.applied)[:before], *h.applied)
+	}
+	h.d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
+}

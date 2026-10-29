@@ -137,8 +137,8 @@ func (d *Daemon) deferActiveConfigApplyIfRollbackTargetPending() error {
 // function while leaving the wiring free to regress back to a pre-captured
 // config (#6716).
 func (d *Daemon) onFeedUpdate() error {
-	// Fast path before config/DNS work. applyActiveConfigResult repeats this
-	// check after acquiring applySem to catch callbacks already waiting there.
+	// Fast path before config/DNS work. The feed-specific active apply repeats
+	// this check after acquiring applySem to catch callbacks already waiting.
 	if err := d.deferActiveConfigApplyIfRollbackTargetPending(); err != nil {
 		return err
 	}
@@ -163,7 +163,7 @@ func (d *Daemon) onFeedUpdate() error {
 	if d.preApplyHookForTest != nil {
 		d.preApplyHookForTest()
 	}
-	return d.applyActiveConfigResult()
+	return d.applyActiveConfigResultForFeedCallback()
 }
 
 // feedsConfigHash returns a stable hash over the feed-SERVER configuration that

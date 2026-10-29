@@ -217,7 +217,8 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(
 		// before the next timer. That callback sees the marker and defers
 		// re-applying active C2, preserving the target producer and snapshot
 		// until the timer re-checks and applies C1 (#17741). Its rejected
-		// publication remains debt until rollback applies the target. The
+		// publication remains debt until a later retry callback successfully
+		// applies that snapshot with C1 active.
 		// deferral counter restarts so a producer that never installs (for
 		// example, because the server is down) still reaches the bounded
 		// #9615 safe state after its own retry window.
