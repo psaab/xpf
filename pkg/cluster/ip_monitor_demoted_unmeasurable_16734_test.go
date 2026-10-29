@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 
@@ -54,11 +55,20 @@ func boundNoSecondaryRG() *config.RedundancyGroup {
 
 type sourceAddressNlHandle17759 struct {
 	*mockNlHandle
-	addresses []netlink.Addr
+	addresses      []netlink.Addr
+	addressListErr error
+	missingLink    bool
+}
+
+func (h *sourceAddressNlHandle17759) LinkByName(name string) (netlink.Link, error) {
+	if h.missingLink {
+		return nil, netlink.LinkNotFoundError{}
+	}
+	return h.mockNlHandle.LinkByName(name)
 }
 
 func (h *sourceAddressNlHandle17759) AddrList(netlink.Link, int) ([]netlink.Addr, error) {
-	return h.addresses, nil
+	return h.addresses, h.addressListErr
 }
 
 func newSourceAddressNlHandle17759(present bool) *sourceAddressNlHandle17759 {
@@ -174,12 +184,12 @@ func TestIPMonitorDemotedNodeReleasesFrozenDebt16734(t *testing.T) {
 }
 
 // TestIPMonitorDemotedGlobalThresholdReleases16734 covers the exact
-// config in the issue (global-threshold aggregate mode): the frozen
-// aggregate debt must clear when the demoted node becomes unmeasurable,
-// both with a configured-but-uninstalled secondary address and with
-// no secondary address.
+// config in the issue (global-threshold aggregate mode): frozen debt
+// releases for a configured-but-uninstalled source or missing interface.
+// A transient address-list query error remains neutral, and no configured
+// secondary source retains the original #16734 release behavior.
 func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
-	run := func(t *testing.T, withSecondary bool) {
+	run := func(t *testing.T, withSecondary, missingInterface, addressQueryFails bool) {
 		rg := boundNoSecondaryRG()
 		if withSecondary {
 			rg.IPMonitoring.Targets[0].SecondaryIPAddress = "10.0.0.3"
@@ -190,7 +200,12 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 		drainEvents(m, 1)
 		m.SetGroupStateForTesting(1, StatePrimary)
 		mon := NewMonitor(m, cfg.RedundancyGroups)
-		mon.nlHandle = newSourceAddressNlHandle17759(false)
+		nlh := newSourceAddressNlHandle17759(false)
+		nlh.missingLink = missingInterface
+		if addressQueryFails {
+			nlh.addressListErr = errors.New("temporary address dump failure")
+		}
+		mon.nlHandle = nlh
 		setNoDampening(mon)
 
 		phase := "primary-down"
@@ -208,8 +223,8 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 		if w := m.GroupStates()[0].Weight; w != 0 {
 			t.Fatalf("withSecondary=%v: weight after measured DOWN = %d, want 0", withSecondary, w)
 		}
-		// Demotion: the configured secondary address is not installed on
-		// the fake interface, so a not-completed probe is unmeasurable.
+		// Demotion: the configured secondary source is absent from the
+		// interface or the interface itself is missing.
 		m.SetGroupStateForTesting(1, StateSecondary)
 		phase = "secondary-unmeasurable"
 		if withSecondary {
@@ -223,6 +238,14 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 			mon.poll()
 		}
 		if withSecondary {
+			if addressQueryFails {
+				// A failed address dump is inconclusive, so retain
+				// the neutral behavior and keep the existing debt.
+				if w := m.GroupStates()[0].Weight; w != 0 {
+					t.Fatalf("withSecondary=true: weight = %d, want 0 after inconclusive address lookup", w)
+				}
+				return
+			}
 			// A configured-but-uninstalled source is not measurable:
 			// the debt must be released, not frozen at weight 0.
 			if w := m.GroupStates()[0].Weight; w != 255 {
@@ -240,8 +263,10 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 			t.Fatalf("withSecondary=%v: MonitorFails = %v, want none (#16734)", withSecondary, st.MonitorFails)
 		}
 	}
-	t.Run("no-secondary-ip", func(t *testing.T) { run(t, false) })
-	t.Run("with-secondary-ip", func(t *testing.T) { run(t, true) })
+	t.Run("no-secondary-ip", func(t *testing.T) { run(t, false, false, false) })
+	t.Run("with-secondary-ip-uninstalled", func(t *testing.T) { run(t, true, false, false) })
+	t.Run("with-secondary-ip-interface-missing", func(t *testing.T) { run(t, true, true, false) })
+	t.Run("with-secondary-ip-address-query-fails", func(t *testing.T) { run(t, true, false, true) })
 }
 
 // TestIPMonitorMeasurableAbortStaysNeutral16734 is the guard against

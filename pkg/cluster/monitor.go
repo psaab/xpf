@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -862,9 +863,9 @@ func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IP
 }
 
 // installedAddress checks whether address is assigned to device in the
-// current kernel address list. verified is false when the interface or its
-// addresses could not be queried, so callers preserve state rather than
-// treating an inspection failure as evidence that a probe source is absent.
+// current kernel address list. A typed LinkNotFoundError confirms the
+// interface is absent; other lookup failures are inconclusive, so callers
+// preserve state rather than treating inspection failures as absence.
 func (mon *Monitor) installedAddress(device, address string) (present, verified bool) {
 	ip := net.ParseIP(stripCIDR(address))
 	if device == "" || ip == nil {
@@ -874,6 +875,10 @@ func (mon *Monitor) installedAddress(device, address string) (present, verified 
 	nlh := mon.getNlHandle()
 	link, err := nlh.LinkByName(device)
 	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if errors.As(err, &notFound) {
+			return false, true
+		}
 		return false, false
 	}
 	lister, ok := nlh.(nlAddressLister)
