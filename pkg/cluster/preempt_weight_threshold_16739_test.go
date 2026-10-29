@@ -339,27 +339,23 @@ func TestPreemptArmDebtCrossedHeartbeats17781(t *testing.T) {
 	}
 }
 
-// #17781 fold: owner→peer heartbeat-loss burst. Capture six fresh
-// peer-SECONDARY frames (strictly increasing sequences) before the owner
-// yields, then deliver them only peer→owner after the peer has taken over.
-// The owner→peer heartbeat direction is silent during the burst; these are
-// in-flight frames, not replayed packets.
+// #17781 fold: owner→peer heartbeat-loss burst. After the owner yields,
+// capture six fresh peer-SECONDARY frames before the peer consumes that
+// demotion, then deliver only those increasing-sequence frames peer→owner
+// after the peer takes over. No owner→peer frames arrive during the burst.
 func TestPreemptArmDebtPeerOnlyBurst17781(t *testing.T) {
 	owner, peer := armDebtYieldPair17781(t, true)
-	peerFrames := make([]*HeartbeatPacket, 0, 6)
-	for range 6 {
-		peer.handlePeerHeartbeat(owner.buildHeartbeat())
-		peerFrames = append(peerFrames, peer.buildHeartbeat())
-	}
-
 	owner.SetMonitorWeight(1, DataplaneArmMonitorIface, true, DataplaneArmMonitorCost)
-	start := 0
 	if owner.IsLocalPrimary(1) {
-		owner.handlePeerHeartbeat(peerFrames[0])
-		start = 1
+		owner.handlePeerHeartbeat(peer.buildHeartbeat())
 	}
 	if owner.IsLocalPrimary(1) {
 		t.Fatal("higher-priority arm-debt owner did not yield")
+	}
+
+	peerFrames := make([]*HeartbeatPacket, 0, 6)
+	for range 6 {
+		peerFrames = append(peerFrames, peer.buildHeartbeat())
 	}
 	peer.handlePeerHeartbeat(owner.buildHeartbeat())
 	if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) {
@@ -368,8 +364,8 @@ func TestPreemptArmDebtPeerOnlyBurst17781(t *testing.T) {
 	fcOwner := owner.GroupState(1).FailoverCount
 	fcPeer := peer.GroupState(1).FailoverCount
 
-	for i := start; i < len(peerFrames); i++ {
-		owner.handlePeerHeartbeat(peerFrames[i])
+	for i, frame := range peerFrames {
+		owner.handlePeerHeartbeat(frame)
 		o, p := owner.IsLocalPrimary(1), peer.IsLocalPrimary(1)
 		if o && p {
 			t.Fatalf("dual-primary during peer-only burst frame %d", i)
