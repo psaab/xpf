@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Userspace dataplane: release an MF=0 fragment association only after
+    admitted fragment ranges cover the datagram prefix through the terminal
+    end, retaining reordered middles for NAT and NAT64 (#17720).
+
   * Routing: authorize rib-group peer returns from the route owner's
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify

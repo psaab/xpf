@@ -147,11 +147,13 @@ pub(super) fn nat64_install_forward_fragment_assoc(
     }
     if let Some(key) = crate::fragment_assoc::first_fragment_key(l3_packet, addr_family, authority)
     {
+        let initial_range =
+            crate::fragment_assoc::fragment_range(l3_packet, addr_family, authority);
         // #5624: stamp the association with the generation of the forwarding
         // state that admitted this first fragment. `build_generation` advances
         // on every config reload, so an association installed here is rejected
         // once a later commit changes deny/NAT64 rules.
-        return forwarding.nat64.frag_assoc.install_with_session(
+        return forwarding.nat64.frag_assoc.install_with_session_and_range(
             key,
             *decision,
             (addr_family == libc::AF_INET)
@@ -162,6 +164,7 @@ pub(super) fn nat64_install_forward_fragment_assoc(
             now_ns,
             forwarding.nat64.build_generation,
             crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, decision.resolution),
+            initial_range,
         );
     }
     false
@@ -189,10 +192,7 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
     now_secs: u64,
 ) -> Option<(SessionDecision, Option<Nat64ReverseInfo>)> {
     let key = crate::fragment_assoc::nonfirst_fragment_key(l3_packet, addr_family, authority)?;
-    // #16593: this fragment completes its datagram (MF=0 tail) \u2014 after a
-    // successful consult the association has no more fragments to serve.
-    let is_final =
-        crate::fragment_assoc::final_fragment_key(l3_packet, addr_family, authority).is_some();
+    let range = crate::fragment_assoc::fragment_range(l3_packet, addr_family, authority);
     // #5624: consult under the CURRENT forwarding state's generation. An
     // association installed under a prior generation (before a config commit
     // changed deny/NAT64 rules) is treated as a miss + evicted here, so the
@@ -213,8 +213,8 @@ pub(super) fn nat64_consult_forward_fragment_assoc(
     if !decision.nat.nat64 {
         return None;
     }
-    if is_final {
-        forwarding.nat64.frag_assoc.release(&key);
+    if let Some(range) = range {
+        forwarding.nat64.frag_assoc.record_fragment(&key, range);
     }
     Some((decision, reverse))
 }
@@ -278,7 +278,9 @@ pub(super) fn same_family_or_plain_install_forward_fragment_assoc(
     }
     if let Some(key) = crate::fragment_assoc::first_fragment_key(l3_packet, addr_family, authority)
     {
-        return forwarding.nat64.frag_assoc.install_with_session(
+        let initial_range =
+            crate::fragment_assoc::fragment_range(l3_packet, addr_family, authority);
+        return forwarding.nat64.frag_assoc.install_with_session_and_range(
             key,
             *decision,
             None,
@@ -287,6 +289,7 @@ pub(super) fn same_family_or_plain_install_forward_fragment_assoc(
             now_ns,
             forwarding.nat64.build_generation,
             crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, decision.resolution),
+            initial_range,
         );
     }
     false
@@ -335,9 +338,7 @@ pub(super) fn same_family_or_plain_consult_forward_fragment_assoc(
     now_secs: u64,
 ) -> Option<SessionDecision> {
     let key = crate::fragment_assoc::nonfirst_fragment_key(l3_packet, addr_family, authority)?;
-    // #16593: MF=0 tail completes the datagram; release after a valid hit.
-    let is_final =
-        crate::fragment_assoc::final_fragment_key(l3_packet, addr_family, authority).is_some();
+    let range = crate::fragment_assoc::fragment_range(l3_packet, addr_family, authority);
     let (decision, _reverse) = forwarding.nat64.frag_assoc.lookup_with_session(
         &key,
         now_ns,
@@ -362,8 +363,8 @@ pub(super) fn same_family_or_plain_consult_forward_fragment_assoc(
     if !plain && !same_family_address_rewrite {
         return None;
     }
-    if is_final {
-        forwarding.nat64.frag_assoc.release(&key);
+    if let Some(range) = range {
+        forwarding.nat64.frag_assoc.record_fragment(&key, range);
     }
     Some(decision)
 }
@@ -395,7 +396,7 @@ pub(super) fn missing_neighbor_install_fragment_assoc(
     else {
         return false;
     };
-    forwarding.nat64.frag_assoc.install_with_session(
+    forwarding.nat64.frag_assoc.install_with_session_and_range(
         key,
         *decision,
         None,
@@ -404,6 +405,7 @@ pub(super) fn missing_neighbor_install_fragment_assoc(
         now_ns,
         forwarding.nat64.build_generation,
         crate::afxdp::forwarding::owner_rg_for_resolution(forwarding, decision.resolution),
+        crate::fragment_assoc::fragment_range(l3_packet, addr_family, authority),
     )
 }
 
