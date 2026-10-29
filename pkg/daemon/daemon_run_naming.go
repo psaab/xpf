@@ -96,8 +96,9 @@ func (d *Daemon) setupInterfaceNaming() error {
 			// #1956: device-map mode (opt-in) renames ONLY mapped NICs by
 			// stable identity and leaves the rest alone. Positional mode
 			// (no device-map) is bit-identical to pre-#1956.
-			if err := applyStartupNamingPolicy(d.store.ActiveConfig(), nodeID, clusterMode,
-				userspaceWorkers, rssEnabled, rssAllowed, d.resolveProtectedInterfaces()); err != nil {
+			if err := applyStartupNamingPolicyForBoot(d.store.ActiveConfig(), nodeID, clusterMode,
+				userspaceWorkers, rssEnabled, rssAllowed, d.resolveProtectedInterfaces(),
+				d.store != nil && d.store.EverCommitted()); err != nil {
 				// #10751/B2: a barrier-gate refusal aborts startup before
 				// any link activation (the phase returns this error and
 				// managers/dataplane never start). Other naming failures
@@ -161,8 +162,9 @@ func (d *Daemon) applyStartupNamingForConfig(cfg *config.Config) error {
 		return nil
 	}
 	nodeID, clusterMode, userspaceWorkers, rssEnabled, rssAllowed := namingParamsFromConfig(cfg)
-	return applyStartupNamingPolicy(cfg, nodeID, clusterMode, userspaceWorkers,
-		rssEnabled, rssAllowed, d.resolveProtectedInterfaces())
+	return applyStartupNamingPolicyForBoot(cfg, nodeID, clusterMode, userspaceWorkers,
+		rssEnabled, rssAllowed, d.resolveProtectedInterfaces(),
+		d.store != nil && d.store.EverCommitted())
 }
 
 // maybeReapplyConfigArrivalNaming re-runs startup naming exactly once when a

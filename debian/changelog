@@ -5,6 +5,11 @@ xpf (0.0.0) unstable; urgency=medium
     operator diagnostic visible without treating DNS quarantine as a whole-
     snapshot refusal for rollback preflight (#17722).
 
+  * Daemon: durably clear a committed lifeline record only when its resolved
+    identity matches the non-management main-table WAN route; keep sane records
+    untouched, prevent committed guard fallback to that route, and fence WAN
+    host addresses after fail-closed boots (#17730).
+
   * Config: include `DNSLookupFailed` in DNS refresh baselines and hybrid
     publication guards, publishing failure-only transitions without
     mistaking them for successful empty answers (#17723).
