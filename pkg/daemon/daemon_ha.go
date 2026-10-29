@@ -2992,15 +2992,17 @@ func (d *Daemon) nudgeIPsecSASync() {
 }
 
 // ipsecFallbackRetryState coalesces peer-fenced fallback retries with ownership
-// edges. ownershipEpoch scopes the retry claim to one data-RG tenure;
-// fallbackInitiated retains provenance for demotion cleanup.
+// edges. ownershipEpoch scopes retry claims; fallbackInitiatedEpoch separately
+// scopes successful fallback provenance to one tenure for demotion cleanup.
 type ipsecFallbackRetryState struct {
-	owed              bool
-	inFlight          bool
-	initiated         bool
-	fallbackInitiated bool
-	seenLive          bool
-	ownershipEpoch    uint64
+	owed                      bool
+	inFlight                  bool
+	initiated                 bool
+	fallbackInitiated         bool
+	fallbackInitiatedEpoch    uint64
+	fallbackInitiatedSeenLive bool
+	seenLive                  bool
+	ownershipEpoch            uint64
 }
 
 func (d *Daemon) markIPsecFallbackOwed(names []string) {
@@ -3070,6 +3072,8 @@ func (d *Daemon) finishIPsecFallback(name string, err error) {
 		state.owed = false
 		state.initiated = true
 		state.fallbackInitiated = true
+		state.fallbackInitiatedEpoch = state.ownershipEpoch
+		state.fallbackInitiatedSeenLive = false
 		state.seenLive = false
 	} else {
 		state.owed = true
@@ -3079,32 +3083,58 @@ func (d *Daemon) finishIPsecFallback(name string, err error) {
 	d.ipsecFallbacks[name] = state
 	d.ipsecFallbackMu.Unlock()
 }
-// fallbackInitiatedIPsecSAs returns live names this node has successfully
-// initiated through the #17784 undeclared-RG0 fallback. The provenance
-// survives retry-state cleanup and failed later retries until a successful
-// demotion terminate or fallback becoming ineligible.
-func (d *Daemon) fallbackInitiatedIPsecSAs(names []string) []string {
+
+// fallbackInitiatedIPsecSAs returns live names successfully initiated through
+// the #17784 undeclared-RG0 fallback in the tenure immediately before the
+// supplied demotion epoch.
+func (d *Daemon) fallbackInitiatedIPsecSAs(names []string, demotionEpoch uint64) []string {
+	if demotionEpoch == 0 {
+		return nil
+	}
+	fallbackEpoch := demotionEpoch - 1
 	d.ipsecFallbackMu.Lock()
 	defer d.ipsecFallbackMu.Unlock()
 	var out []string
 	for _, name := range names {
-		if state, ok := d.ipsecFallbacks[name]; ok && state.fallbackInitiated {
+		if state, ok := d.ipsecFallbacks[name]; ok &&
+			state.fallbackInitiated && state.fallbackInitiatedEpoch == fallbackEpoch {
 			out = append(out, name)
 		}
 	}
 	return out
 }
-func (d *Daemon) clearIPsecFallbackInitiated(name string) {
+
+func (d *Daemon) observeIPsecFallbackLiveness(names []string) {
 	d.ipsecFallbackMu.Lock()
-	state, ok := d.ipsecFallbacks[name]
-	if ok {
-		state.fallbackInitiated = false
+	for name, state := range d.ipsecFallbacks {
+		if !state.fallbackInitiated {
+			continue
+		}
+		if containsIPsecSAName(names, name) {
+			state.fallbackInitiatedSeenLive = true
+		} else if state.fallbackInitiatedSeenLive {
+			// A successful active-SA read observed the fallback SA disappear.
+			// A later SA with the same name may be trap-established instead.
+			state.fallbackInitiated = false
+			state.fallbackInitiatedEpoch = 0
+			state.fallbackInitiatedSeenLive = false
+		}
 		d.ipsecFallbacks[name] = state
 	}
 	d.ipsecFallbackMu.Unlock()
 }
 
-
+func (d *Daemon) clearIPsecFallbackInitiated(name string, expectedEpoch uint64) {
+	d.ipsecFallbackMu.Lock()
+	state, ok := d.ipsecFallbacks[name]
+	if ok && state.fallbackInitiated && state.fallbackInitiatedEpoch == expectedEpoch {
+		state.fallbackInitiated = false
+		state.fallbackInitiatedEpoch = 0
+		state.fallbackInitiatedSeenLive = false
+		d.ipsecFallbacks[name] = state
+	}
+	d.ipsecFallbackMu.Unlock()
+}
 
 // scheduleOwedIPsecFallbackRetry claims one retry pass before launching it so
 // ticker and reconnect nudges coalesce without waiting on swanctl.
@@ -3582,12 +3612,12 @@ func (d *Daemon) ipsecRGOwnershipEpoch(rg int) uint64 {
 // demotion edge re-reads the live set.
 //
 // #18426: on the sole data-RG demotion when RG0 is undeclared, also sweep
-// live names with recorded successful initiation through the #17784
-// undeclared-RG0 fallback. ipsecSAsForRG excludes their rgs=[0] attribution
-// and no RG0 edge exists; only the explicit fallback provenance admits them,
-// never an arbitrary live unanchored name. The #16820 epoch and
-// !IsLocalPrimary(rg) guards apply to these names exactly as to anchored
-// names; RG0 epoch handling is unchanged.
+// live names successfully initiated through the #17784 fallback during the
+// immediately preceding RG tenure. This provenance has its own initiation
+// epoch (distinct from retry ownership), expires after a successful terminate
+// or an active-SA read observes the name disappear, and is admitted only when
+// current config still attributes every candidate to RG0. Arbitrary live
+// unanchored names and names reattributed by config edits remain excluded.
 //
 // #16820: the sweep is launched as a fire-and-forget goroutine and can
 // still be running (the live-SA read and each per-SA terminate shell
@@ -3639,7 +3669,11 @@ func (d *Daemon) terminateDemotedRGIPsecSAs(rg int, epoch uint64) {
 		// live (e.g. trap-initiated) is never swept here.
 		soleDataRG, rg0Declared := undeclaredRG0FallbackTopology(d.clusterConfig())
 		if !rg0Declared && soleDataRG == rg {
-			for _, name := range d.fallbackInitiatedIPsecSAs(names) {
+			fallbackNames := d.fallbackInitiatedIPsecSAs(names, epoch)
+			// Require the current config to still attribute every candidate to
+			// RG0; changed or ambiguous names are not fallback sweep targets.
+			fallbackNames = d.ipsecSAsForRG(fallbackNames, 0)
+			for _, name := range fallbackNames {
 				if !containsIPsecSAName(terminate, name) {
 					terminate = append(terminate, name)
 				}
@@ -3661,8 +3695,9 @@ func (d *Daemon) terminateDemotedRGIPsecSAs(rg int, epoch uint64) {
 		if err != nil {
 			slog.Warn("cluster: failed to terminate demoted RG IPsec SA", "rg", rg, "name", name, "err", err)
 		} else {
-			d.clearIPsecFallbackInitiated(name)
-			slog.Info("cluster: terminated IPsec SA on RG demotion", "rg", rg, "name", name)
+			if epoch > 0 {
+				d.clearIPsecFallbackInitiated(name, epoch-1)
+			}
 		}
 	}
 }
@@ -3684,14 +3719,22 @@ func (d *Daemon) terminateDemotedRGIPsecSAs(rg int, epoch uint64) {
 // itself perfectly correct and fully unit-tested — SURVIVED the suite. Binding
 // a helper is not binding the wiring that calls it, and this seam is what makes
 // the difference falsifiable.
+// Successful snapshots also expire fallback provenance after an SA was seen
+// live and then disappears, so a later same-name trap SA cannot inherit it.
 func (d *Daemon) ipsecActiveNames() ([]string, error) {
+	var (
+		names []string
+		err   error
+	)
 	if fn := d.ipsecActiveNamesFn; fn != nil {
-		return fn()
+		names, err = fn()
+	} else if d.ipsec != nil {
+		names, err = d.ipsec.ActiveConnectionNames()
 	}
-	if d.ipsec == nil {
-		return nil, nil
+	if err == nil {
+		d.observeIPsecFallbackLiveness(names)
 	}
-	return d.ipsec.ActiveConnectionNames()
+	return names, err
 }
 
 func (d *Daemon) ipsecInitiate(name string) error {
