@@ -26,8 +26,8 @@ xpf (0.0.0) unstable; urgency=medium
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
     the deferred VRF-to-VRF forward-import warning (#17705).
   * Natshow: count persistent-binding sessions by translated endpoint,
-    protocol, and routing scope so distinct leases do not share display
-    counts. Preserve endpoint-only totals for legacy bindings (#17737).
+    protocol, and routing scope. Normalize raw default scope 0 and helper
+    wire marker 1 before joining; preserve endpoint-only legacy totals (#17737).
 
   * DDNS: document that manager-side `markerSharedWithSibling` sets
     `KeepSiblingMarker` for `sendRemoveForward`; clarify that `namedMarker`
