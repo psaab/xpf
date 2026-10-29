@@ -485,7 +485,7 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 			d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
 
 			var localNames, initiated, terminated []string
-			initiationDone := make(chan string, 2)
+			initiationDone := make(chan string, 4)
 			var activeReadStarted chan struct{}
 			var releaseActiveRead chan struct{}
 			releasedActiveRead := false
@@ -598,12 +598,22 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 				t.Fatalf("owed fallback retry initiated %v, want [vpn-plain]", initiated)
 			}
 
-			// A late duplicate edge must not repeat a completed attempt, even
-			// before the local active-SA view catches up.
+			// Before the active-SA view has ever shown the first initiate,
+			// a missing name is only view lag and must not repeat it.
 			localNames = nil
 			d.reinitiateIPsecSAsForRG(1)
 			if len(initiated) != 1 || len(terminated) != 0 {
-				t.Fatalf("completed fallback repeated before local SA view caught up: initiated=%v terminated=%v",
+				t.Fatalf("fallback repeated before active-SA view caught up: initiated=%v terminated=%v",
+					initiated, terminated)
+			}
+			// Once the SA is observed live, a later confirmed disappearance
+			// reopens the claim; the initial view-lag phase did not.
+			localNames = []string{"vpn-plain"}
+			d.reinitiateIPsecSAsForRG(1)
+			localNames = nil
+			d.reinitiateIPsecSAsForRG(1)
+			if len(initiated) != 2 || len(terminated) != 0 {
+				t.Fatalf("confirmed SA disappearance initiated=%v terminated=%v, want one retry and no belt",
 					initiated, terminated)
 			}
 			// A fresh ownership epoch is a new takeover: a leftover local
@@ -611,8 +621,8 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 			localNames = []string{"vpn-plain"}
 			d.bumpIPsecRGOwnershipEpoch(1)
 			d.reinitiateIPsecSAsForRG(1)
-			if len(initiated) != 2 || len(terminated) != 1 {
-				t.Fatalf("new RG1 ownership epoch initiated=%v terminated=%v, want second initiate and one belt",
+			if len(initiated) != 3 || len(terminated) != 1 {
+				t.Fatalf("new RG1 ownership epoch initiated=%v terminated=%v, want third initiate and one belt",
 					initiated, terminated)
 			}
 		})

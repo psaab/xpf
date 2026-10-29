@@ -2927,6 +2927,7 @@ type ipsecFallbackRetryState struct {
 	owed           bool
 	inFlight       bool
 	initiated      bool
+	seenLive       bool
 	ownershipEpoch uint64
 }
 
@@ -2961,6 +2962,7 @@ func (d *Daemon) claimIPsecFallback(name string, rg int, local map[string]bool, 
 		// A new data-RG tenure must retain the #15194 belt, even if the old
 		// attempt's local SA is still present from the previous ownership.
 		state.initiated = false
+		state.seenLive = false
 	}
 	if state.initiated {
 		if !localKnown {
@@ -2968,14 +2970,18 @@ func (d *Daemon) claimIPsecFallback(name string, rg int, local map[string]bool, 
 		}
 		if local[name] {
 			state.owed = false
+			state.seenLive = true
 			d.ipsecFallbacks[name] = state
 			return false
 		}
-		// A completed attempt in this ownership epoch is not repeated by a
-		// delayed duplicate edge. A newly owed state can still retry.
-		if !state.owed {
+		// Do not repeat while the active-SA view is still catching up.
+		// Once this attempt has been observed live, its disappearance or a
+		// later peer fence can reopen the claim.
+		if !state.owed && !state.seenLive {
 			return false
 		}
+		state.initiated = false
+		state.seenLive = false
 	}
 	state.inFlight = true
 	state.owed = false
@@ -2991,9 +2997,11 @@ func (d *Daemon) finishIPsecFallback(name string, err error) {
 	if err == nil {
 		state.owed = false
 		state.initiated = true
+		state.seenLive = false
 	} else {
 		state.owed = true
 		state.initiated = false
+		state.seenLive = false
 	}
 	d.ipsecFallbacks[name] = state
 	d.ipsecFallbackMu.Unlock()
