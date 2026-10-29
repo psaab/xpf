@@ -1070,7 +1070,8 @@ fn learn_wg_pmtu(
                 // the encap and PTB consumers do. This local interface /
                 // static-route MTU is the maximum credible outer PMTU;
                 // the peer's learned value must never exceed it.
-                let outer = outer_physical_egress_resolution(forwarding, endpoint, quoted_dst);
+                // Only route/interface MTU is consumed here, not the neighbor MAC.
+                let outer = outer_physical_egress_resolution(forwarding, endpoint, quoted_dst, None);
                 let physical_ifindex = outer_egress_ifindex_for_fallback(
                     endpoint.logical_ifindex,
                     forwarding,
