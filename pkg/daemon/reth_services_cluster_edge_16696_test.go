@@ -305,9 +305,10 @@ func TestConvergerClearsLostDemotionEdge16696(t *testing.T) {
 // applyRethServicesForRG / clearRethServicesForRG, past early returns
 // (factory reset in progress, store nil, ActiveConfig nil) that hit
 // exactly in the degraded states the converger exists for — so a lost
-// edge in one of those states spun forever: repeated Kea apply enqueues,
-// RA reconciles and DDNS/proxy-ARP nudges on apply; repeated IPsec SA
-// termination and ownership-epoch bumps on clear. The marker must be
+// edge in one of those states spun forever: every retry bumped the IPsec
+// ownership epoch, and clear also repeated its proxy-ARP sweep before the
+// store/config guards. If conditions later allowed service work, the stale
+// marker could re-drive those effects on each pass too. The marker must be
 // written at entry so every early return still records the driven
 // ownership. The 16696 fixture always has a committed store, so its six
 // tests never exercised these arms.
