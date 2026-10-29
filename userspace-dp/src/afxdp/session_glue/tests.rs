@@ -7803,10 +7803,10 @@ fn export_owner_rg_command_does_not_overflow_ring_unbounded() {
 /// (capped as ever — the control leg, not the echo, is what the FullResync
 /// ACKs).
 ///
-/// This cell drives that production shape (cursor slices + echo, with NO
-/// interleaved control-thread drain — the control thread collects only
-/// after every worker acks) and asserts the response then yields EVERY
-/// session while the echo leg still fills exactly to its cap.
+/// This cell drives that production shape (cursor slices + ring echo, with NO
+/// interleaved control-thread drain — the control thread collects only after
+/// every worker acks) and asserts the response yields EVERY session. The
+/// CommandExport echoes still traverse ring+flush, but never enter fallback.
 #[test]
 fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
     const BINDING_CAP: usize = 4096; // MAX_PENDING_SESSION_DELTAS (afxdp/mod.rs)
@@ -7840,9 +7840,9 @@ fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
         "precondition: every installed session is an export candidate"
     );
 
-    // The echo leg flushes into `bindings.first()`'s live buffer (as the
-    // production `flush_drained_session_deltas!` does), so one live buffer
-    // is the whole echo path; the control path is the export buffer below.
+    // The worker echo still traverses ring+flush, but CommandExport deltas
+    // never enter the per-binding fallback FIFO. The paged control response
+    // is authoritative; the export buffer below is that delivery leg.
     let live = BindingLiveState::new();
     let ident = BindingIdentity {
         slot: 0,
@@ -7905,7 +7905,14 @@ fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
             },
         );
         for (key, decision, metadata, origin) in echo_batch {
-            sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
+            sessions.emit_open_delta_with_provenance(
+                key,
+                decision,
+                metadata,
+                origin,
+                true,
+                crate::session::ExportProvenance::CommandExport(TOKEN),
+            );
         }
         loop {
             let d = sessions.drain_deltas(256);
@@ -7947,12 +7954,10 @@ fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
         n,
         "every session reaches the response, past the old 4096 binding cap"
     );
-    let echo = live.drain_session_deltas(usize::MAX);
-    assert_eq!(
-        echo.len(),
-        BINDING_CAP,
-        "echo leg unchanged: still capped at {BINDING_CAP} (the control leg, \
-         not the echo, carries the complete window now)"
+    let fallback = live.drain_session_deltas(usize::MAX);
+    assert!(
+        fallback.is_empty(),
+        "CommandExport ring echoes must not be replayable through RPC fallback"
     );
 }
 
@@ -8107,10 +8112,11 @@ fn owner_rg_export_direct_matches_ring_bytes_9856() {
     );
 }
 
-/// #9856 M2c: the echo leg still emits every visited open through the
-/// ring+flush path (today's exact echo bytes) to binding and recent consumers;
-/// #9630 suppresses only its CommandExport event-stream echo. Small n (under
-/// every cap: 8 < 64 recent, 8 < 4096 live) so both counts are exact.
+/// #9856 M2c: the echo leg still emits every visited open through the ring+flush
+/// path (today's exact echo bytes) to the recent-deltas consumer. #9630
+/// suppresses only its CommandExport event-stream echo, and #17751 keeps that
+/// already-delivered control echo out of RPC fallback. Small n is under the
+/// recent ring cap, so the count is exact.
 #[test]
 fn owner_rg_export_echo_still_emits_every_visit_9856() {
     const N: usize = 8;
@@ -8190,7 +8196,14 @@ fn owner_rg_export_echo_still_emits_every_visit_9856() {
             },
         );
         for (key, decision, metadata, origin) in echo_batch {
-            sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
+            sessions.emit_open_delta_with_provenance(
+                key,
+                decision,
+                metadata,
+                origin,
+                true,
+                crate::session::ExportProvenance::CommandExport(TOKEN),
+            );
         }
         loop {
             let d = sessions.drain_deltas(256);
@@ -8234,8 +8247,11 @@ fn owner_rg_export_echo_still_emits_every_visit_9856() {
         let recent = recent_session_deltas.lock().expect("recent deltas");
         assert_eq!(recent.len(), N, "echo reaches the recent-deltas buffer");
     }
-    let echo = live.drain_session_deltas(usize::MAX);
-    assert_eq!(echo.len(), N, "echo reaches the binding fallback buffer");
+    let fallback = live.drain_session_deltas(usize::MAX);
+    assert!(
+        fallback.is_empty(),
+        "CommandExport echoes must not be replayable through the binding fallback"
+    );
 }
 
 #[test]
@@ -26470,7 +26486,9 @@ fn stream_delivered_delta_is_not_left_in_fallback_buffer_16627() {
     // No stream handle at all: fallback carries it.
     let (drained, _) = flush_open_fallback_depth_16627(None, None, false);
     assert_eq!(drained.len(), 1, "with no event stream the fallback buffer must carry the delta");
-    // CommandExport (#9630): never stream-echoed, always mirrored.
+    // CommandExport (#9630): never stream-echoed. Its paged control
+    // response is already authoritative delivery, so Option C (#17751)
+    // never mirrors it into the fallback FIFO either.
     let (handle, rx) = crate::event_stream::test_worker_handle_connected(8, cfg);
     let (drained, frames) = flush_open_with_provenance_16627(
         Some(handle),
@@ -26478,8 +26496,193 @@ fn stream_delivered_delta_is_not_left_in_fallback_buffer_16627() {
         crate::session::ExportProvenance::CommandExport(7),
     );
     assert!(frames.is_empty(), "CommandExport must not echo on the event stream");
-    assert_eq!(drained.len(), 1, "CommandExport deltas ride the fallback/control leg");
-    assert_eq!(drained[0].stream_seq, 0);
+    assert!(
+        drained.is_empty(),
+        "#17751: CommandExport deltas must not mirror into the fallback FIFO; \
+         the paged control leg already delivered them"
+    );
+}
+
+/// #17751 FAIL-ON-REVERT: a CommandExport echo is delivered by its paged
+/// control response, then a later streamed close is authoritative. The echo
+/// must not remain in the RPC-fallback FIFO to be re-stamped as a fresh open.
+#[test]
+fn command_export_echo_does_not_replay_after_streamed_close_17751() {
+    const TOKEN: u64 = 17;
+    let config = crate::event_stream::DataplaneEventRateLimitConfig {
+        events_per_second: 0,
+        burst: 0,
+        session_close_events_per_second: 0,
+        session_close_burst: 0,
+        session_create_events_per_second: 0,
+        session_create_burst: 0,
+    };
+    let (handle, rx) = crate::event_stream::test_worker_handle_connected(8, config);
+    let event_stream = Some(handle);
+    let live = BindingLiveState::new();
+    let ident = BindingIdentity {
+        slot: 0,
+        queue_id: 0,
+        worker_id: 0,
+        interface: Arc::<str>::from("x17751"),
+        ifindex: 0,
+    };
+    let forwarding = ForwardingState::default();
+    let mut sessions = SessionTable::new();
+    let key = test_key();
+    assert!(sessions.install_with_protocol(
+        key.clone(),
+        test_decision(),
+        test_metadata(),
+        1_000_000,
+        PROTO_TCP,
+        0x10,
+    ));
+    while !sessions.drain_deltas(256).is_empty() {}
+
+    let mut exported = None;
+    let outcome = sessions.iter_export_budgeted(
+        0,
+        1,
+        sessions.current_epoch(),
+        &[1],
+        |key, decision, metadata, origin| {
+            exported = Some((key.clone(), decision, metadata.clone(), origin));
+            false
+        },
+    );
+    assert!(
+        matches!(outcome, crate::session::ExportWalkOutcome::ResumeAt(_)),
+        "fixture: export walk yields the selected live session"
+    );
+    let (key, decision, metadata, origin) = exported.expect("live session is an export candidate");
+    let control_open = crate::afxdp::export_open_direct(
+        &sessions,
+        &ident,
+        &forwarding.zone_id_to_name,
+        key.clone(),
+        decision,
+        metadata.clone(),
+        origin,
+        crate::session::ExportProvenance::CommandExport(TOKEN),
+    )
+    .expect("forward export candidate converts to a control delta");
+    let export_buffer = crate::afxdp::binding_state::ExportBufferState::new();
+    export_buffer
+        .push_export_open(TOKEN, control_open)
+        .expect("control export buffer accepts the open");
+    let delivered = export_buffer.drain_export_skipping_foreign(TOKEN, usize::MAX);
+    assert_eq!(delivered.len(), 1, "control leg delivered the export open");
+
+    // The worker export slice also emits its CommandExport-provenance ring
+    // echo, which is consumed by flush_session_deltas below.
+    sessions.emit_open_delta_with_provenance(
+        key.clone(),
+        decision,
+        metadata.clone(),
+        origin,
+        true,
+        crate::session::ExportProvenance::CommandExport(TOKEN),
+    );
+    let mut worker_lossless_wedged = false;
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let recent_session_deltas = Arc::new(Mutex::new(VecDeque::new()));
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    let reader = channel.reader();
+    let open_echo = sessions.drain_deltas(1);
+    assert_eq!(open_echo.len(), 1, "ring echo survives the control delivery");
+    assert_eq!(
+        open_echo[0].provenance,
+        crate::session::ExportProvenance::CommandExport(TOKEN)
+    );
+    flush_session_deltas(
+        &ident,
+        Some(&live),
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &open_echo,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &recent_session_deltas,
+        &peer_worker_commands,
+        crate::afxdp::empty_worker_commands_by_id(),
+        &event_stream,
+        &forwarding,
+        &reader,
+        &mut worker_lossless_wedged,
+        None,
+    );
+    assert!(
+        !worker_lossless_wedged,
+        "CommandExport echo suppression must not arm loss-of-sync"
+    );
+
+    // A later ordinary close is successfully carried by the connected stream.
+    sessions.emit_close_delta_with_origin(
+        key.clone(),
+        decision,
+        metadata,
+        origin,
+        false,
+        0,
+    );
+    let close = sessions.drain_deltas(1);
+    assert_eq!(close.len(), 1, "fixture: one streamed close is pending");
+    flush_session_deltas(
+        &ident,
+        Some(&live),
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &close,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &recent_session_deltas,
+        &peer_worker_commands,
+        crate::afxdp::empty_worker_commands_by_id(),
+        &event_stream,
+        &forwarding,
+        &reader,
+        &mut worker_lossless_wedged,
+        None,
+    );
+    let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert_eq!(frames.len(), 2, "close emits its HA delta and RT_FLOW close");
+    assert_eq!(
+        frames[0].as_bytes()[4],
+        2,
+        "the first frame is the streamed HA SESSION_CLOSE"
+    );
+    assert_eq!(frames[0].seq, 1, "the streamed close receives sequence 1");
+    assert_eq!(
+        frames[1].as_bytes()[4],
+        14,
+        "the second frame is the separate RT_FLOW close"
+    );
+
+    let recent = recent_session_deltas.lock().expect("recent deltas");
+    assert_eq!(recent.len(), 2, "open and close echoes remain in recent ring");
+    assert_eq!(recent[0].event, "open");
+    assert_eq!(recent[0].stream_seq, 0, "CommandExport remains stream-suppressed");
+    assert_eq!(recent[1].event, "close");
+    assert_eq!(recent[1].stream_seq, 1, "close receives the stream sequence");
+    drop(recent);
+
+    let fallback = live.drain_session_deltas(usize::MAX);
+    assert!(
+        fallback.is_empty(),
+        "#17751: the old CommandExport open must not remain in the fallback FIFO \
+         after a streamed close; buffered entries were {fallback:?}"
+    );
 }
 
 /// #17080 acceptance (vq13_p01b shape): a local SNAT forward row with
