@@ -306,6 +306,15 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 				printable.equals(utf8SameBytes), utf8SameBytes.equals(printableUpper), printable.equals(printableUpper))
 		}
 	})
+	t.Run("ID_ANY equality ignores encoding in either direction", func(t *testing.T) {
+		a, _ := ipsecIKEIdentityKey("inet", "{0}:a")
+		b, _ := ipsecIKEIdentityKey("inet", "{0}:b")
+		wrapped, _ := ipsecIKEIdentityKey("inet", "{4294967296}:x")
+		if !a.equals(b) || !b.equals(a) || !wrapped.equals(a) || !a.equals(wrapped) {
+			t.Fatalf("type-0 identity must ignore encoding bytes symmetrically: a/b=%v/%v wrapped/a=%v/%v",
+				a.equals(b), b.equals(a), wrapped.equals(a), a.equals(wrapped))
+		}
+	})
 
 	t.Run("unsupported and byte-sensitive DN cases", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
@@ -419,6 +428,8 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"IPv4 range equals type-7 DER", "inet", "198.51.100.1-198.51.100.2", "inet", "ipv4range:#c6336401c6336402"},
 			{"IPv6 range equals type-8 DER", "inet", "2001:db8::1-2001:db8::2", "inet", "ipv6range:#20010db800000000000000000000000120010db8000000000000000000000002"},
 			{"hyphenated FQDN remains type 2", "inet", "host-a-host-b", "inet", "fqdn:host-a-host-b"},
+			{"ID_ANY equality ignores encoding", "inet", "{0}:a", "inet", "{0}:b"},
+			{"wrapped numeric type is ID_ANY", "inet", "{4294967296}:x", "inet", "{0}:y"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
 		for _, pair := range pairs {
@@ -440,6 +451,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "{08}:peer", "inet", "fqdn:peer"))
 		requireNoCollision17772(t, identityPair17772("inet", "{18446744073709551617}:peer", "inet", "18446744073709551617"))
 		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.2-198.51.100.1", "inet", "ipv4range:#c6336402c6336401"))
+		requireNoCollision17772(t, identityPair17772("inet", "{0}:any", "inet", "fqdn:any"))
 	})
 
 	t.Run("remote identity equal to default gateway local address is refused", func(t *testing.T) {

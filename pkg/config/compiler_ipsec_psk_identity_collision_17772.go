@@ -509,6 +509,8 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 		return false
 	}
 	switch identity.typeID {
+	case 0:
+		return true
 	case 2, 3:
 		return ipsecASCIIEqualFold(identity.encoding, other.encoding)
 	case 9:
