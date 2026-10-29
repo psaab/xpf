@@ -576,10 +576,14 @@ Guard layers (`build-userspace-xdp.sh`):
      the deploy pre-flight refused it (#15645, #15854). So: every
      measurement now NAMES its kernel. The gate verdict (schema 3)
      records `provenance.kernel_release` (`uname -r` of the measuring
-     kernel; consumers fail closed without it), the shimverify banner
-     prints it, and `xpfd verify-dataplane` prints the count/headroom/
-     floor on the RUNNING kernel and enforces the same 15% floor
-     there (exit 4 below floor, 5 unmeasured; no guest-side override).
+     kernel); both the freshness-manifest consumer and release-retention
+     consumer fail closed unless it exactly matches their running
+     `uname -r` (#17768), because a non-empty foreign kernel name does
+     not bind a headroom figure. The shimverify banner prints the
+     measurement kernel, and `xpfd verify-dataplane` independently
+     measures/prints count and headroom on the RUNNING kernel and
+     enforces the same 15% floor there (exit 4 below floor, 5
+     unmeasured; no guest-side override).
      The floor's early warning thus fires on the kernel that will
      actually load the object, not only on the build host. Still true
      from #6884: the 947,188 figure in

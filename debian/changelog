@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: require shim-verdict kernel provenance to exactly
+    match the running kernel before freshness adoption or release retention;
+    fail closed on mismatch or unavailable kernel (#17768).
+
   * Userspace dataplane: pin the #17722 DNS-quarantine snapshot with a
     Go-generated fixture the Rust parser test consumes end to end
     (follow-up to #18485).

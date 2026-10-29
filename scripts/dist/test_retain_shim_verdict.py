@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 from load_subject import load_subject  # noqa: E402
@@ -64,7 +67,7 @@ class RetainShimVerdictTests(unittest.TestCase):
                 "pinned": True,
                 "bpf_linker": "0.10.2",
                 "codegen_env_digest": retain_shim_verdict._well_known_digest(self.root),
-                "kernel_release": "7.2.8+deb14-amd64",
+                "kernel_release": os.uname().release,
             },
         }
 
@@ -145,6 +148,19 @@ class RetainShimVerdictTests(unittest.TestCase):
         self.write_verdict(verdict)
         with self.assertRaisesRegex(ValueError, "no kernel release"):
             retain_shim_verdict.validate_verdict(self.root)
+
+    def test_kernel_release_must_match_running_kernel_17768(self):
+        verdict = self.verdict()
+        verdict["provenance"]["kernel_release"] = "kernel-A"
+        self.write_verdict(verdict)
+        with patch.object(retain_shim_verdict.os, "uname", return_value=SimpleNamespace(release="kernel-B")):
+            with self.assertRaisesRegex(ValueError, "does not match running kernel"):
+                retain_shim_verdict.validate_verdict(self.root)
+
+    def test_matching_kernel_release_is_retained_17768(self):
+        verdict = self.verdict()
+        self.write_verdict(verdict)
+        self.assertEqual(retain_shim_verdict.validate_verdict(self.root), self.verdict_path)
 
 
 if __name__ == "__main__":

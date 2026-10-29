@@ -69,7 +69,7 @@ func writeProvenanceFixture(t *testing.T, buildVerdict func(root string) []byte)
 	return root
 }
 
-// provenanceVerdict renders a schema-2 gate verdict over root's real
+// provenanceVerdict renders a schema-3 gate verdict over root's real
 // object/input hashes (a measured OVERRIDDEN verdict, like the
 // committed one), with the given provenance mutation applied.
 func provenanceVerdict(t *testing.T, root string, mutate func(map[string]any)) []byte {
@@ -85,6 +85,10 @@ func provenanceVerdict(t *testing.T, root string, mutate func(map[string]any)) [
 	entries, err := hashUserspaceXDPInputs(root, paths)
 	if err != nil {
 		t.Fatalf("hash fixture inputs: %v", err)
+	}
+	kernelRelease, err := KernelRelease()
+	if err != nil {
+		t.Fatalf("read running kernel for provenance fixture: %v", err)
 	}
 	v := map[string]any{
 		"schema_version":    3,
@@ -103,7 +107,7 @@ func provenanceVerdict(t *testing.T, root string, mutate func(map[string]any)) [
 			"pinned":             true,
 			"bpf_linker":         "0.10.2",
 			"codegen_env_digest": mustWellKnownDigest(t, root),
-			"kernel_release":     "7.2.8+deb14-amd64",
+			"kernel_release":     kernelRelease,
 		},
 	}
 	if mutate != nil {
@@ -176,6 +180,33 @@ func TestProvenanceAdoption15218(t *testing.T) {
 				t.Fatalf("#15218: verdict with defective provenance was adopted (build_digest=%q); an unpinned or codegen-drifted install must read as stale", m.BuildDigest)
 			}
 		})
+	}
+}
+
+// TestGateVerdictKernelBinding17768 proves a retained verdict's kernel
+// is an equality binding, not merely a non-empty provenance label.
+func TestGateVerdictKernelBinding17768(t *testing.T) {
+	root := writeProvenanceFixture(t, nil)
+	raw := provenanceVerdict(t, root, func(v map[string]any) {
+		prov(v)["kernel_release"] = "kernel-A"
+	})
+	var verdict userspaceXDPGateVerdict
+	if err := json.Unmarshal(raw, &verdict); err != nil {
+		t.Fatalf("decode fixture verdict: %v", err)
+	}
+
+	if !verdictProvenanceCleanOnKernel(root, &verdict, "kernel-A") {
+		t.Fatal("same-kernel verdict was not accepted")
+	}
+	if verdictProvenanceCleanOnKernel(root, &verdict, "kernel-B") {
+		t.Fatal("kernel-A verdict was accepted on kernel-B")
+	}
+	if verdictProvenanceCleanOnKernel(root, &verdict, "") {
+		t.Fatal("verdict was accepted when running kernel release is unavailable")
+	}
+	verdict.Provenance.KernelRelease = ""
+	if verdictProvenanceCleanOnKernel(root, &verdict, "kernel-A") {
+		t.Fatal("verdict with empty measured kernel was accepted")
 	}
 }
 
