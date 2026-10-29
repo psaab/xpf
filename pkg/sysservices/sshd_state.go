@@ -37,8 +37,12 @@ func ProbeSSHDState() SSHDState {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "systemctl", "show", "sshd.service",
-		"--property=LoadState", "--property=ActiveState", "--value").Output()
+	cmd := exec.CommandContext(ctx, "systemctl", "show", "sshd.service",
+		"--property=LoadState", "--property=ActiveState", "--value")
+	// Killing systemctl does not close stdout inherited by its children.
+	// Cap Output's pipe-drain wait as well as the command deadline.
+	cmd.WaitDelay = 500 * time.Millisecond
+	out, err := cmd.Output()
 	if err != nil {
 		return SSHDUnknown
 	}
