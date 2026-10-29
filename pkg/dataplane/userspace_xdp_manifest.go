@@ -71,13 +71,14 @@ const (
 		"run `make generate`. See pkg/dataplane/README.md (#4977)."
 )
 
-// userspaceXDPFixedFreshnessInputs are the non-.rs build inputs that
-// determine the shim object's bytes: the Cargo manifest + locked
-// dependency graph, the pinned Rust toolchain, BOTH the crate-local and
-// the repo-root cargo config (cargo loads ancestor configs too, so a
-// root-level BPF-target rustflags edit could change the .o — currently
-// inert x86_64, hashed for completeness), the build recipe itself
-// (build-userspace-xdp.sh embeds the bpf-linker version pin), and
+// userspaceXDPFixedFreshnessInputs are the non-.rs inputs used by the
+// shim recipe or retained conservatively in its freshness inventory:
+// the Cargo manifest + lockfile, pinned Rust toolchain, both repo-root
+// and crate-local Cargo configs (the recipe builds from an isolated cwd
+// and explicitly passes the required target/build-std/linker settings,
+// so hierarchical configs cannot steer it; hashing both remains
+// conservative and forces restamping after config edits), the recipe
+// itself (which embeds the bpf-linker pin), and
 // bpf/headers/xpf_common.h (whose MAX_INTERFACES #define is awk-extracted
 // by the recipe (build-userspace-xdp.sh) and sizes the shim's
 // binding array + maps). Paths are repo-relative POSIX.

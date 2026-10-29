@@ -545,18 +545,19 @@ func TestCargoAncestorConfigIsolation17729(t *testing.T) {
 // EXIT trap must remove both fresh directories while preserving Cargo's
 // failure status.
 func TestBuildRecipeAncestorConfigAndCleanup17729(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".cargo", "bin", "bpf-linker")); err != nil {
-		t.Skip("bpf-linker not installed on this host")
-	}
 	sourceRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
+	fakeHome := filepath.Join(root, "home")
+	fakeLinker := filepath.Join(fakeHome, ".cargo", "bin", "bpf-linker")
+	if err := os.MkdirAll(filepath.Dir(fakeLinker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fakeLinker, []byte("#!/usr/bin/env bash\necho 'bpf-linker 0.10.2'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	parent := filepath.Join(root, "fixture-parent")
 	repoRoot := filepath.Join(parent, "checkout")
 	crateDir := filepath.Join(repoRoot, "userspace-xdp")
@@ -627,6 +628,7 @@ func TestBuildRecipeAncestorConfigAndCleanup17729(t *testing.T) {
 			envMap[key] = value
 		}
 	}
+	envMap["HOME"] = fakeHome
 	envMap["CARGO"] = cargo
 	envMap["CARGO_TARGET_DIR"] = filepath.Join(root, "target")
 	envMap["GO"] = goStub
