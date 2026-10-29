@@ -47,6 +47,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Event engine: revalidate deferred cooldown replays against live
     `trigger until` ceilings immediately before commit if the worker waited
     on the config lock (#17696).
+
+  * Event engine: immediately re-drain parked budget actions when wake
+    recomputation finds no live slot expiry, so an expired last slot cannot
+    strand ready work after the park nudge was consumed (#17727).
   * Daemon: bind commit-confirmed rollback-target pre-flight to the
     confirmation-window generation under the promotion lock, refusing a nested
     arm if a concurrent ConfirmCommit changed the target. Explicitly identify
