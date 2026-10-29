@@ -215,9 +215,11 @@ func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string
 // refusal check sees the content the compiler drops.
 func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *schemaNode, consumed int) []*Node {
 	if node == nil || nodeSchema == nil || descendSchema == nil ||
-		nodeSchema.packedTail || nodeSchema.packedFlatRun ||
-		len(node.Keys) <= consumed ||
-		!packedRunNestedRefusal(node.Keys, consumed, descendSchema).contains {
+		nodeSchema.packedTail || nodeSchema.packedFlatRun || len(node.Keys) <= consumed {
+		return nil
+	}
+	run := packedRunNestedRefusal(node, consumed, descendSchema)
+	if !run.contains {
 		return nil
 	}
 
@@ -232,23 +234,41 @@ func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *sche
 	// marked terminal leaf's dropped block.
 	packed := *node
 	packed.Children = nil
+	if run.terminal && run.valueEnd > run.valueStart {
+		allBracketed := len(node.KeysBracketed) == len(node.Keys)
+		for i := run.valueStart; allBracketed && i < run.valueEnd; i++ {
+			allBracketed = node.KeysBracketed[i]
+		}
+		if !allBracketed {
+			bracketed := make([]bool, len(node.Keys))
+			copy(bracketed, node.KeysBracketed)
+			for i := run.valueStart; i < run.valueEnd; i++ {
+				bracketed[i] = true
+			}
+			packed.KeysBracketed = bracketed
+		}
+	}
 	expanded = packedBodyChildren(&packed, nodeSchema)
-	if len(node.Children) > 0 && packedRunNestedRefusal(node.Keys, consumed, descendSchema).terminal {
+	if len(node.Children) > 0 && run.terminal {
 		attachNestedRefusalBlock(expanded, descendSchema, node.Children)
 	}
 	return expanded
 }
 
 type packedNestedRefusal struct {
-	contains bool
-	terminal bool
+	contains   bool
+	terminal   bool
+	valueStart int
+	valueEnd   int
 }
 
-func packedRunNestedRefusal(keys []string, start int, parent *schemaNode) packedNestedRefusal {
-	var levels [64]*schemaNode
-	if parent == nil {
+func packedRunNestedRefusal(node *Node, start int, parent *schemaNode) packedNestedRefusal {
+	if node == nil || parent == nil {
 		return packedNestedRefusal{}
 	}
+	keys := node.Keys
+	bracketed := len(node.KeysBracketed) == len(keys)
+	var levels [64]*schemaNode
 	levels[0] = parent
 	depth := 1
 	var result packedNestedRefusal
@@ -270,9 +290,34 @@ func packedRunNestedRefusal(keys []string, start int, parent *schemaNode) packed
 			result.terminal = false
 			return result
 		}
+		end := i + consumed
+		if child.refuseNonLeafBlockChildren && child.multi &&
+			child.children == nil && end > i+1 {
+			result.valueStart = i + 1
+			if bracketed && node.KeysBracketed[end-1] {
+				for end < len(keys) && node.KeysBracketed[end] {
+					end++
+				}
+			} else {
+				for end < len(keys) {
+					sibling := false
+					for level := at; level >= 0; level-- {
+						if resolveSchemaChild(levels[level], keys[end]) != nil {
+							sibling = true
+							break
+						}
+					}
+					if sibling {
+						break
+					}
+					end++
+				}
+			}
+			result.valueEnd = end
+		}
 		result.contains = result.contains || child.refuseNonLeafBlockChildren
 		result.terminal = child.refuseNonLeafBlockChildren
-		i += consumed
+		i = end
 		depth = at + 1
 		if next != nil && depth < len(levels) {
 			levels[depth] = next
@@ -1030,6 +1075,17 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	if !childSchema.packedTail && len(node.Keys) > consumed {
 		if tok, _ := packedTailCredential14412(node, descendSchema, consumed); tok != "" {
 			return schemaPathErrorf(newPath, "packed configuration keyword %q is not a child of this stanza and would be silently dropped — the credential it carries would not take effect; author it under the stanza that declares it, with its exact spelling (#14412)", tok)
+		}
+	}
+	// The shared refusal scan also needs to precede ordinary errors on the
+	// same packed node: a closed-world walk can otherwise report only the
+	// unmodelled grandchild, although the compiler ignores it as content
+	// under the packed value-list leaf.
+	if childClosed && len(node.Children) > 0 && len(node.Keys) > consumed {
+		if packedChildren := nestedRefusalPackedScanChildren(node, childSchema, descendSchema, consumed); len(packedChildren) > 0 {
+			if err := findNestedListContentError(packedChildren, descendSchema, newPath); err != nil {
+				return err
+			}
 		}
 	}
 	return walkSchemaChildren(walkChildren, descendSchema, newPath, vc, childClosed)

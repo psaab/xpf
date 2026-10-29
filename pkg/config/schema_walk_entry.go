@@ -233,15 +233,16 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 		return errs, nil
 	}
 	walkErr := walkSchemaChildren(tree.Children, setSchema, nil, vc, false)
-	nestedErr := findNestedListContentError(tree.Children, setSchema, nil)
 	if walkErr != nil {
-		if nestedErr != nil && !IsNestedListContentSchemaError(walkErr) {
-			return nil, errors.Join(
-				scrubSchemaErrorSecrets(tree, walkErr),
-				scrubSchemaErrorSecrets(tree, nestedErr))
-		}
+		// #17241: SchemaValidate returns the FIRST error. Joining the
+		// nested refusal onto an earlier walk error made the result
+		// classify as nested, hiding the first error's identity from
+		// callers that probe it (the adress-set precondition). The hard
+		// refusal is preserved by the collect path used by tolerant
+		// ingress, which joins the earlier diagnostic with the scan result.
 		return nil, scrubSchemaErrorSecrets(tree, walkErr)
 	}
+	nestedErr := findNestedListContentError(tree.Children, setSchema, nil)
 	if nestedErr != nil {
 		return nil, scrubSchemaErrorSecrets(tree, nestedErr)
 	}
