@@ -3,6 +3,9 @@ xpf (0.0.0) unstable; urgency=medium
     for allocation-free packet-path lookup; serialize PTB shrink updates
     and publish MTU/age pairs coherently (#17774).
 
+  * Dataplane: isolate the userspace XDP shim build from Cargo configs
+    above the checkout, and clean fresh temporary Cargo state on build
+    failure (#17729).
   * Userspace dataplane: exercise WireGuard PTB learning through the RX poll
     path and assert that the next forwarded packet uses the learned MTU
     budget (#17775).

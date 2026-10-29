@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -460,4 +461,274 @@ func TestScrubDigestMatchesRecipe16657(t *testing.T) {
 	if m.BuildDigest != "" {
 		t.Errorf("#16657: freshness gate adopted the old #15218 digest")
 	}
+}
+
+// TestCargoAncestorConfigIsolation17729 exercises Cargo itself rather
+// than a stand-in: a wrapper and rustflags in a checkout ancestor take
+// effect from the crate cwd, but not from an isolated cwd with
+// --manifest-path (the recipe's #17729 invocation shape).
+func TestCargoAncestorConfigIsolation17729(t *testing.T) {
+	cargo, err := exec.LookPath("cargo")
+	if err != nil {
+		t.Skip("cargo is not installed")
+	}
+	root := t.TempDir()
+	ancestor := filepath.Join(root, "checkout-parent")
+	crate := filepath.Join(ancestor, "checkout", "userspace-xdp")
+	if err := os.MkdirAll(filepath.Join(crate, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrapper := filepath.Join(root, "rustc-wrapper.sh")
+	marker := filepath.Join(root, "wrapper-invoked")
+	wrapperScript := "#!/usr/bin/env bash\nprintf invoked >> \"$XPF_TEST_WRAPPER_MARKER\"\nexec \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(wrapperScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(ancestor, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[build]\nrustc-wrapper = " + strconv.Quote(wrapper) +
+		"\nrustflags = [\"--cfg=ancestor_cargo_config_marker\"]\n"
+	if err := os.WriteFile(filepath.Join(ancestor, ".cargo", "config.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(crate, "Cargo.toml"), []byte("[package]\nname = \"ancestor-config-probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(crate, "src", "lib.rs"), []byte("pub fn probe() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cargoHome := filepath.Join(root, "cargo-home")
+	if err := os.Mkdir(cargoHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	makeEnv := func(target string) []string {
+		envMap := make(map[string]string)
+		for _, item := range os.Environ() {
+			key, value, ok := strings.Cut(item, "=")
+			if ok {
+				envMap[key] = value
+			}
+		}
+		for _, key := range []string{
+			"CARGO_BUILD_RUSTC", "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTFLAGS",
+			"CARGO_ENCODED_RUSTFLAGS", "CARGO_HOME", "CARGO_TARGET_DIR",
+			"RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTFLAGS",
+		} {
+			delete(envMap, key)
+		}
+		envMap["CARGO_HOME"] = cargoHome
+		envMap["CARGO_TARGET_DIR"] = target
+		envMap["XPF_TEST_WRAPPER_MARKER"] = marker
+		env := make([]string, 0, len(envMap))
+		for key, value := range envMap {
+			env = append(env, key+"="+value)
+		}
+		return env
+	}
+	run := func(name, cwd string, args ...string) string {
+		t.Helper()
+		cmd := exec.Command(cargo, args...)
+		cmd.Dir = cwd
+		cmd.Env = makeEnv(filepath.Join(root, "target-"+name))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("cargo %s failed: %v\n%s", name, err, out)
+		}
+		return string(out)
+	}
+
+	// Control arm: the same ancestor wrapper and flags do apply when Cargo
+	// starts in the checkout crate, proving the fixture is effective.
+	control := run("control", crate, "build", "--offline", "-vv")
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("ancestor config wrapper did not run in the control arm: %v\n%s", err, control)
+	}
+	if !strings.Contains(control, "ancestor_cargo_config_marker") {
+		t.Fatalf("ancestor rustflags did not reach rustc in the control arm:\n%s", control)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+
+	isolated := filepath.Join(root, "isolated-cargo-cwd")
+	if err := os.Mkdir(isolated, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Treatment arm: this is the production cwd/manifest arrangement.
+	treatment := run("isolated", isolated, "build", "--offline", "-vv", "--manifest-path", filepath.Join(crate, "Cargo.toml"))
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("ancestor config wrapper took effect from isolated cwd (stat=%v):\n%s", err, treatment)
+	}
+	if strings.Contains(treatment, "ancestor_cargo_config_marker") {
+		t.Fatalf("ancestor rustflags reached rustc from isolated cwd:\n%s", treatment)
+	}
+}
+
+// TestBuildRecipeAncestorConfigAndCleanup17729 drives the real build
+// script with a stand-in Cargo that fails. An ancestor config above the
+// fixture checkout would affect the former crate-cwd invocation; the
+// recipe must instead pass an isolated cwd + manifest path, and its
+// EXIT trap must remove both fresh directories while preserving Cargo's
+// failure status.
+func TestBuildRecipeAncestorConfigAndCleanup17729(t *testing.T) {
+	sourceRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	fakeHome := filepath.Join(root, "home")
+	fakeLinker := filepath.Join(fakeHome, ".cargo", "bin", "bpf-linker")
+	if err := os.MkdirAll(filepath.Dir(fakeLinker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fakeLinker, []byte("#!/usr/bin/env bash\necho 'bpf-linker 0.10.2'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "fixture-parent")
+	repoRoot := filepath.Join(parent, "checkout")
+	crateDir := filepath.Join(repoRoot, "userspace-xdp")
+	for _, dir := range []string{
+		filepath.Join(repoRoot, "pkg", "dataplane"),
+		filepath.Join(repoRoot, "bpf", "headers"),
+		filepath.Join(crateDir, ".cargo"),
+		filepath.Join(crateDir, "src"),
+		filepath.Join(parent, ".cargo"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	copyFile := func(src, dst string, mode os.FileMode) {
+		t.Helper()
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dst, data, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	copyFile(filepath.Join(sourceRoot, "pkg", "dataplane", "build-userspace-xdp.sh"), filepath.Join(repoRoot, "pkg", "dataplane", "build-userspace-xdp.sh"), 0o755)
+	copyFile(filepath.Join(sourceRoot, "bpf", "headers", "xpf_common.h"), filepath.Join(repoRoot, "bpf", "headers", "xpf_common.h"), 0o644)
+	copyFile(filepath.Join(sourceRoot, "userspace-xdp", "rust-toolchain.toml"), filepath.Join(crateDir, "rust-toolchain.toml"), 0o644)
+	copyFile(filepath.Join(sourceRoot, "userspace-xdp", ".cargo", "config.toml"), filepath.Join(crateDir, ".cargo", "config.toml"), 0o644)
+	if err := os.WriteFile(filepath.Join(crateDir, "Cargo.toml"), []byte("[package]\nname = \"recipe-config-probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	wrapperMarker := filepath.Join(root, "ancestor-wrapper-invoked")
+	wrapper := filepath.Join(parent, "wrapper.sh")
+	wrapperScript := "#!/usr/bin/env bash\nprintf invoked >> " + strconv.Quote(wrapperMarker) + "\nexec \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(wrapperScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ancestorConfig := "[build]\nrustc-wrapper = " + strconv.Quote(wrapper) +
+		"\nrustflags = [\"--cfg=ancestor_cargo_config_marker\"]\n" +
+		"[target.bpfel-unknown-none]\nrustflags = [\"--cfg=ancestor_target_config_marker\"]\n"
+	if err := os.WriteFile(filepath.Join(parent, ".cargo", "config.toml"), []byte(ancestorConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rel, err := filepath.Rel(parent, crateDir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		t.Fatalf("test ancestor config is not an ancestor of the original crate cwd: rel=%q err=%v", rel, err)
+	}
+
+	record := filepath.Join(root, "cargo-record.txt")
+	cargo := filepath.Join(root, "cargo-fails.sh")
+	cargoScript := "#!/usr/bin/env bash\n" +
+		"if [[ \"${1:-}\" == \"+nightly-2026-05-23\" && \"${2:-}\" == \"--version\" ]]; then echo 'cargo test stub'; exit 0; fi\n" +
+		"{ printf 'cwd=%s\\n' \"$PWD\"; printf 'home=%s\\n' \"$CARGO_HOME\"; printf 'arg=%s\\n' \"$@\"; } > " + strconv.Quote(record) + "\n" +
+		"exit 23\n"
+	if err := os.WriteFile(cargo, []byte(cargoScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	goStub := filepath.Join(root, "go-stub.sh")
+	if err := os.WriteFile(goStub, []byte("#!/usr/bin/env bash\nprintf '%064d\\n' 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", filepath.Join(repoRoot, "pkg", "dataplane", "build-userspace-xdp.sh"))
+	cmd.Dir = repoRoot
+	envMap := make(map[string]string)
+	for _, item := range os.Environ() {
+		key, value, ok := strings.Cut(item, "=")
+		if ok {
+			envMap[key] = value
+		}
+	}
+	envMap["HOME"] = fakeHome
+	envMap["CARGO"] = cargo
+	envMap["CARGO_TARGET_DIR"] = filepath.Join(root, "target")
+	envMap["GO"] = goStub
+	envMap["RUSTUP"] = filepath.Join(root, "no-rustup")
+	cmd.Env = make([]string, 0, len(envMap))
+	for key, value := range envMap {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	output, runErr := cmd.CombinedOutput()
+	exitErr, ok := runErr.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 23 {
+		t.Fatalf("build script exit = %v, want Cargo's status 23:\n%s", runErr, output)
+	}
+	if _, err := os.Stat(wrapperMarker); !os.IsNotExist(err) {
+		t.Fatalf("ancestor rustc-wrapper took effect: stat=%v", err)
+	}
+	recordBytes, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatalf("fake cargo did not receive the build invocation: %v\n%s", err, output)
+	}
+	var cwd, cargoHome string
+	var args []string
+	for _, line := range strings.Split(strings.TrimSpace(string(recordBytes)), "\n") {
+		switch {
+		case strings.HasPrefix(line, "cwd="):
+			cwd = strings.TrimPrefix(line, "cwd=")
+		case strings.HasPrefix(line, "home="):
+			cargoHome = strings.TrimPrefix(line, "home=")
+		case strings.HasPrefix(line, "arg="):
+			args = append(args, strings.TrimPrefix(line, "arg="))
+		}
+	}
+	defer func() {
+		for _, temp := range []struct {
+			path   string
+			prefix string
+		}{{cargoHome, "xpf-cargo-home."}, {cwd, "xpf-cargo-cwd."}} {
+			if temp.path != "" && strings.HasPrefix(filepath.Base(temp.path), temp.prefix) {
+				_ = os.RemoveAll(temp.path)
+			}
+		}
+	}()
+	if rel, err := filepath.Rel(parent, cwd); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		t.Errorf("Cargo cwd %q is still below ancestor config %q", cwd, parent)
+	}
+	if !containsString(args, "--manifest-path") || !containsString(args, filepath.Join(crateDir, "Cargo.toml")) {
+		t.Errorf("Cargo argv lacks manifest-path for the fixture crate: %q", args)
+	}
+	for _, want := range []string{
+		`build.target="bpfel-unknown-none"`,
+		`unstable.build-std=["core"]`,
+		`target.bpfel-unknown-none.linker="bpf-linker"`,
+	} {
+		if !containsString(args, want) {
+			t.Errorf("Cargo argv lacks crate-local config override %q: %q", want, args)
+		}
+	}
+	for _, path := range []string{cargoHome, cwd} {
+		if path == "" {
+			t.Errorf("fake cargo recorded an empty temporary path")
+			continue
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("temporary build path %q survived failed Cargo invocation (stat=%v)", path, err)
+		}
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
