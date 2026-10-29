@@ -44,10 +44,9 @@ func TestHeartbeatRestartAfterRebindReportsOnlyAFailedRestart_9751(t *testing.T)
 	}
 }
 
-// The helper reports nothing unless the apply step uses it and keeps its
-// error. Pinned on the AST of the apply step: a restartHeartbeatAfterRebind
-// call whose error is joined into networkdErr, and no bare, discarded
-// RestartHeartbeat() call left in the file.
+// The helper reports nothing unless the apply step uses the epoch-fenced
+// wrapper and keeps its error. Pin that call on the apply path and reject a
+// bare, discarded RestartHeartbeat() call.
 func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 	f, err := parser.ParseFile(token.NewFileSet(), "daemon_apply_dataplane.go", nil, 0)
 	if err != nil {
@@ -65,7 +64,8 @@ func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 			if !ok {
 				return true
 			}
-			if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "restartHeartbeatAfterRebind" {
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "restartHeartbeatAfterRebindForCurrentCommsEpoch" {
 				return true
 			}
 			for _, st := range s.Body.List {
@@ -73,7 +73,7 @@ func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 				if !ok || len(as.Lhs) != 1 {
 					continue
 				}
-				if l, ok := as.Lhs[0].(*ast.Ident); ok && l.Name == "networkdErr" {
+				if l, ok := as.Lhs[0].(*ast.SelectorExpr); ok && l.Sel.Name == "Networkd" {
 					joined++
 				}
 			}
@@ -87,7 +87,7 @@ func TestVRFRebindApplyJoinsTheHeartbeatRestartError_9751(t *testing.T) {
 		return true
 	})
 	if joined != 1 {
-		t.Errorf("found %d restartHeartbeatAfterRebind calls whose error is joined into networkdErr, want 1", joined)
+		t.Errorf("found %d epoch-fenced heartbeat restart calls whose error is joined into networkdErr, want 1", joined)
 	}
 	if discarded != 0 {
 		t.Errorf("found %d RestartHeartbeat() calls whose result is discarded, want 0", discarded)

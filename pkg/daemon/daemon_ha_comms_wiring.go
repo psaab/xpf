@@ -766,34 +766,57 @@ func (d *Daemon) startClusterSyncAuxLoops(commsCtx context.Context, cc *config.C
 }
 
 // startFabricForwardingLoops starts the fabric peer population loops (fab0 and,
-// when configured, fab1) plus the netlink fabric-state monitor. Extracted
-// verbatim from startClusterComms (#6428) — pure code motion.
+// when configured, fab1) plus the netlink fabric-state monitor. Extracted from
+// startClusterComms (#6428); populate loops register against their epoch here.
 //
 // Order contract: called only after publishFabricRefreshChansIfCurrent
 // succeeded, and each loop is handed its OWN channel by value (#4038/#4958).
-func (d *Daemon) startFabricForwardingLoops(commsCtx context.Context, cc *config.ClusterConfig, fabRefreshChans [2]chan struct{}) {
-	// Resolve the fabric peer for cross-chassis redirect,
-	// then periodically refresh to correct neighbor drift.
-	// Resolve to physical parent (ge-0-0-0) — BPF runs on
-	// the parent, not the IPVLAN overlay. Neighbor resolution
-	// uses the overlay (fab0/fab1) where the sync IP lives (#129).
+func (d *Daemon) startFabricForwardingLoops(
+	commsCtx context.Context,
+	commsGen uint64,
+	cc *config.ClusterConfig,
+	fabRefreshChans [2]chan struct{},
+) {
 	fabParent := d.resolveFabricParent(cc.FabricInterface)
 	fabOverlay := config.LinuxIfName(cc.FabricInterface)
 	if fabOverlay == fabParent {
-		fabOverlay = "" // no overlay — legacy mode
+		fabOverlay = ""
 	}
-	go d.populateFabricFwdSlot(commsCtx, 0, fabParent, fabOverlay, cc.FabricPeerAddress, fabRefreshChans[0])
 
-	// Resolve the secondary fabric peer if fab1 configured.
-	if cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != "" {
-		fab1Parent := d.resolveFabricParent(cc.Fabric1Interface)
-		fab1Overlay := config.LinuxIfName(cc.Fabric1Interface)
+	fab1Parent, fab1Overlay := "", ""
+	hasFab1 := cc.Fabric1Interface != "" && cc.Fabric1PeerAddress != ""
+	if hasFab1 {
+		fab1Parent = d.resolveFabricParent(cc.Fabric1Interface)
+		fab1Overlay = config.LinuxIfName(cc.Fabric1Interface)
 		if fab1Overlay == fab1Parent {
-			fab1Overlay = "" // no overlay
+			fab1Overlay = ""
 		}
-		go d.populateFabricFwdSlot(commsCtx, 1, fab1Parent, fab1Overlay, cc.Fabric1PeerAddress, fabRefreshChans[1])
 	}
 
-	// Monitor fabric link/neighbor state via netlink (#124).
+	count := 1
+	if hasFab1 {
+		count++
+	}
+	epoch := d.registerFabricPopulateLoops(commsGen, count)
+	if epoch == nil {
+		return
+	}
+	go d.populateFabricFwdSlot(commsCtx, epoch, 0,
+		fabParent, fabOverlay, cc.FabricPeerAddress, fabRefreshChans[0])
+	if hasFab1 {
+		go d.populateFabricFwdSlot(commsCtx, epoch, 1,
+			fab1Parent, fab1Overlay, cc.Fabric1PeerAddress, fabRefreshChans[1])
+	}
 	go d.monitorFabricState(commsCtx)
+}
+
+func (d *Daemon) registerFabricPopulateLoops(gen uint64, count int) *clusterCommsEpoch {
+	d.clusterCommsMu.Lock()
+	defer d.clusterCommsMu.Unlock()
+	epoch := d.clusterCommsEpoch
+	if epoch == nil || epoch.generation != gen || d.clusterCommsGen != gen {
+		return nil
+	}
+	epoch.fabricPopulateWG.Add(count)
+	return epoch
 }

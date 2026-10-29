@@ -54,6 +54,16 @@ func (r *vrfBindRecorder9813) addFab0(masterIndex int) {
 // routing manager binds through the recorder.
 func mgmtVRFFabricDaemon9813(t *testing.T) (*Daemon, *vrfBindRecorder9813) {
 	t.Helper()
+	addr, err := netlink.ParseAddr("10.99.0.1/24")
+	if err != nil {
+		t.Fatalf("parse fabric overlay test address: %v", err)
+	}
+	oldAddrList := fabricAddrList17221
+	fabricAddrList17221 = func(netlink.Link) ([]netlink.Addr, error) {
+		return []netlink.Addr{*addr}, nil
+	}
+	t.Cleanup(func() { fabricAddrList17221 = oldAddrList })
+
 	ops := &vrfBindRecorder9813{reconcileFakeLinkOps: newReconcileFakeLinkOps()}
 	ops.links[mgmtVRFDeviceName] = &netlink.Vrf{
 		LinkAttrs: netlink.LinkAttrs{Name: mgmtVRFDeviceName, Index: 77}, Table: 1000,

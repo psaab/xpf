@@ -25,9 +25,9 @@ import (
 //     cluster. That one is worse than the panic: it is silent.
 //
 // Reachable because the daemon's startHeartbeatWithRetryForEpoch runs on a bare
-// `go` goroutine outside clusterCommsWG (unlike the sync constructor), so
-// stopClusterComms never joins it; it only cancels the context and calls
-// StopHeartbeat.
+// `go` goroutine outside the current epoch's constructor and fabric-populate
+// join groups, so stopClusterComms does not join it; it only cancels the
+// context and calls StopHeartbeat.
 //
 // CI has no path to it: make test-go's race gate (test-race-dp) runs -race
 // under a fixed -run filter and nothing in that set drives startClusterComms

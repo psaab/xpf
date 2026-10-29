@@ -706,7 +706,7 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 		if d.cluster != nil {
 			// #9751: a failed restart is reported, not discarded. It leaves the
 			// heartbeat stopped, and the next apply retries it.
-			if err := restartHeartbeatAfterRebind(d.cluster); err != nil {
+			if err := d.restartHeartbeatAfterRebindForCurrentCommsEpoch(); err != nil {
 				result.Phase.Networkd = errors.Join(result.Phase.Networkd, err)
 			}
 		}

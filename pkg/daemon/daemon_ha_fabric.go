@@ -360,10 +360,11 @@ type fabricSlot struct {
 	// resolution (never by the fallback itself, which would let a bad
 	// guess self-confirm) and cleared when the configured peer address
 	// changes, so a re-pointed fabric cannot be pinned to the old peer.
-	peerMAC   net.HardwareAddr
-	refreshCh chan struct{} // wakes this slot's populate loop (#4038); clusterCommsMu-guarded
-	lastProbe time.Time     // rate-limit active neighbor probes
-	lastLog   time.Time     // rate-limit refresh failure logs
+	peerMAC      net.HardwareAddr
+	refreshCh    chan struct{} // wakes this slot's populate loop (#4038); clusterCommsMu-guarded
+	lastProbe    time.Time     // rate-limit active neighbor probes
+	lastLog      time.Time     // rate-limit refresh failure logs
+	probePending bool          // active neighbor probe queued for the epoch loop (#17060)
 }
 
 // fabricSlotLabel returns the operator-facing fabric name stored on the
@@ -375,6 +376,27 @@ func (d *Daemon) fabricSlotLabel(slot int) string {
 	return d.fabricSlots[slot].name
 }
 
+// fabricGenerationCurrent checks an epoch without retaining clusterCommsMu.
+// State writers use lockCurrentFabricGeneration instead so the check and
+// write are one critical section.
+func (d *Daemon) fabricGenerationCurrent(generation uint64) bool {
+	d.clusterCommsMu.Lock()
+	current := d.clusterCommsGen == generation
+	d.clusterCommsMu.Unlock()
+	return current
+}
+
+// lockCurrentFabricGeneration returns with clusterCommsMu held on success.
+// Callers take fabricMu next and release both locks after the slot write.
+func (d *Daemon) lockCurrentFabricGeneration(ctx context.Context, generation uint64) bool {
+	d.clusterCommsMu.Lock()
+	if ctx.Err() != nil || d.clusterCommsGen != generation {
+		d.clusterCommsMu.Unlock()
+		return false
+	}
+	return true
+}
+
 // populateFabricFwdSlot resolves the fabric interface MACs for one slot
 // and populates the fabric peer for cross-chassis redirect during
 // failback (#17044: live resolver in pkg/dataplane/userspace).
@@ -384,11 +406,16 @@ func (d *Daemon) fabricSlotLabel(slot int) string {
 // Attempts immediately on startup with fast 500ms retries (10 attempts),
 // then falls back to 30s periodic refresh.
 // refreshCh is this loop's OWN event-driven refresh channel, handed in by value
-// at launch (#4958). The loop reads it directly rather than the slot's
-// published refreshCh so a comms restart that swaps the shared field cannot
-// race this receive; the sender (triggerFabricRefresh) targets whatever
-// channel the live epoch published.
-func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, overlay, peerAddr string, refreshCh chan struct{}) {
+// at launch (#4958). The WaitGroup belongs to the captured comms epoch, not to
+// the daemon; a successor can never receive this loop's Done.
+func (d *Daemon) populateFabricFwdSlot(
+	ctx context.Context,
+	epoch *clusterCommsEpoch,
+	slot int,
+	fabIface, overlay, peerAddr string,
+	refreshCh chan struct{},
+) {
+	defer epoch.fabricPopulateWG.Done()
 	label := d.fabricSlotLabel(slot)
 	peerIP := net.ParseIP(peerAddr)
 	if peerIP == nil {
@@ -399,7 +426,12 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 		overlay = fabIface
 	}
 
-	// Store slot config for RefreshFabricFwd.
+	// Publish slot configuration only while its generation is current. The
+	// generation check shares clusterCommsMu with begin/stop; the nested
+	// fabricMu protects slot and peer-constraint writes.
+	if !d.lockCurrentFabricGeneration(ctx, epoch.generation) {
+		return
+	}
 	d.fabricMu.Lock()
 	s := &d.fabricSlots[slot]
 	s.iface = fabIface
@@ -407,12 +439,12 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 	peerChanged := !s.peerIP.Equal(peerIP)
 	if peerChanged {
 		s.peerMAC = nil
+		s.populated = false
+		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
 	}
 	s.peerIP = peerIP
 	d.fabricMu.Unlock()
-	if peerChanged {
-		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
-	}
+	d.clusterCommsMu.Unlock()
 
 	// Fast initial population: attempt immediately, then 500ms retries.
 	for i := range 10 {
@@ -422,21 +454,31 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 		// cancelled — shutdown, or a superseded fabric epoch — must not put one
 		// more frame on the wire. Before this the check lived inside the
 		// `i > 0` sleep arm, so iteration 0 probed unconditionally.
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || !d.fabricGenerationCurrent(epoch.generation) {
 			return
 		}
 		if i > 0 {
+			retryAfter := time.After
+			if d.fabricRetryAfterFn != nil {
+				retryAfter = d.fabricRetryAfterFn
+			}
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(500 * time.Millisecond):
+			case <-retryAfter(500 * time.Millisecond):
+			}
+			// select may pick the timer arm even when ctx.Done() is also
+			// ready: recheck before probing so a superseded epoch never
+			// emits one more frame (#17060, mirrors the refreshCh arm).
+			if ctx.Err() != nil || !d.fabricGenerationCurrent(epoch.generation) {
+				return
 			}
 		}
 
 		// Actively probe for neighbor entry on the overlay (#129).
 		d.probeFabricNeighbor(ctx, overlay, peerIP)
 
-		if d.refreshFabricFwdSlot(ctx, slot, fabIface, overlay, peerIP, i == 0) {
+		if d.refreshFabricFwdSlot(ctx, epoch.generation, slot, fabIface, overlay, peerIP, i == 0) {
 			break
 		}
 		if i == 9 {
@@ -458,9 +500,20 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			d.refreshFabricFwdSlot(ctx, slot, fabIface, overlay, peerIP, false)
+			if !d.fabricGenerationCurrent(epoch.generation) {
+				return
+			}
+			d.refreshFabricFwdSlot(ctx, epoch.generation, slot, fabIface, overlay, peerIP, false)
 		case <-refreshCh:
-			d.refreshFabricFwdSlot(ctx, slot, fabIface, overlay, peerIP, false)
+			// select may pick this arm even when ctx.Done() is also ready:
+			// never probe or refresh for an already-cancelled epoch (#17060).
+			if ctx.Err() != nil || !d.fabricGenerationCurrent(epoch.generation) {
+				return
+			}
+			if d.takeFabricProbePending(slot) {
+				d.probeFabricNeighbor(ctx, overlayOrParent(overlay, fabIface), peerIP)
+			}
+			d.refreshFabricFwdSlot(ctx, epoch.generation, slot, fabIface, overlay, peerIP, false)
 		}
 	}
 }
@@ -469,6 +522,11 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 // if no neighbor entry exists. Uses ping (not arping) because arping's
 // PF_PACKET raw sockets don't populate the kernel ARP table with XDP attached.
 func (d *Daemon) probeFabricNeighbor(ctx context.Context, fabIface string, peerIP net.IP) {
+	// This probe belongs to the populate loop's comms epoch. A stop can land
+	// after the caller selects the wake arm but before netlink access begins.
+	if ctx.Err() != nil {
+		return
+	}
 	// Route the reads through the Daemon seams like the rest of the fabric
 	// refresh. These were direct netlink calls, which meant a test that
 	// reached this function bypassed both seams and hit the real kernel —
@@ -570,16 +628,26 @@ func sendIPv6MulticastProbe(iface string, ifindex int) {
 	_ = unix.Sendto(fd, icmp6[:], unix.MSG_DONTWAIT, sa6)
 }
 
-func (d *Daemon) logFabricRefreshFailure(slot int, msg string, args ...any) {
+func (d *Daemon) logFabricRefreshFailure(ctx context.Context, generation uint64, slot int, peerIP net.IP, msg string, args ...any) {
+	if !d.lockCurrentFabricGeneration(ctx, generation) {
+		return
+	}
 	d.fabricMu.Lock()
-	now := time.Now()
 	s := &d.fabricSlots[slot]
+	if peerIP != nil && !s.peerIP.Equal(peerIP) {
+		d.fabricMu.Unlock()
+		d.clusterCommsMu.Unlock()
+		return
+	}
+	now := time.Now()
 	if now.Sub(s.lastLog) < 2*time.Second {
 		d.fabricMu.Unlock()
+		d.clusterCommsMu.Unlock()
 		return
 	}
 	s.lastLog = now
 	d.fabricMu.Unlock()
+	d.clusterCommsMu.Unlock()
 	slog.Info(msg, args...)
 }
 
@@ -635,23 +703,27 @@ func (d *Daemon) fabricPeerMACHint(slot int) net.HardwareAddr {
 // An address-matched observation always overwrites, so a legitimately changed
 // peer MAC (NIC replacement, RETH member swap) self-heals on the next
 // successful ARP/NDP resolution rather than being locked out.
-func (d *Daemon) rememberFabricPeerMAC(slot int, mac net.HardwareAddr) {
-	if len(mac) != 6 {
-		return
+func (d *Daemon) rememberFabricPeerMAC(ctx context.Context, generation uint64, slot int, peerIP net.IP, mac net.HardwareAddr) bool {
+	if len(mac) != 6 || peerIP == nil || !d.lockCurrentFabricGeneration(ctx, generation) {
+		return false
 	}
 	stored := make(net.HardwareAddr, 6)
 	copy(stored, mac)
 	d.fabricMu.Lock()
 	s := &d.fabricSlots[slot]
-	s.peerMAC = stored
-	peerIP := s.peerIP
-	d.fabricMu.Unlock()
-	// #15918: publish the identity to the live userspace resolver so its
-	// link-local fallback is constrained identically even on snapshot builds
-	// that never pass through a daemon refresh.
-	if peerIP != nil {
-		dpuserspace.RegisterFabricPeerMACConstraint(peerIP.String(), stored)
+	if s.peerIP == nil || !s.peerIP.Equal(peerIP) {
+		d.fabricMu.Unlock()
+		d.clusterCommsMu.Unlock()
+		return false
 	}
+	s.peerMAC = stored
+	// The generation lock nests before fabricMu. Registration and every
+	// clear use the same order, so an old refresh cannot bind its MAC to a
+	// successor's peer address.
+	dpuserspace.RegisterFabricPeerMACConstraint(s.peerIP.String(), stored)
+	d.fabricMu.Unlock()
+	d.clusterCommsMu.Unlock()
+	return true
 }
 
 // selectFabricPeerLinkLocalMAC is retained as a thin delegate to the single
@@ -670,20 +742,22 @@ func selectFabricPeerLinkLocalMAC(
 	return dpuserspace.SelectFabricPeerLinkLocalMAC(neighs, localMAC, expected)
 }
 
-func (d *Daemon) retainFabricFwdOnNeighborMiss(slot int, peerIP net.IP, overlay string, logWaiting bool) bool {
+func (d *Daemon) retainFabricFwdOnNeighborMiss(ctx context.Context, generation uint64, slot int, peerIP net.IP, overlay string, logWaiting bool) bool {
 	label := d.fabricSlotLabel(slot)
 	if !d.fabricEntryPopulated(slot) {
 		if logWaiting {
 			slog.Info("cluster: waiting for "+label+" peer neighbor entry",
 				"peer", peerIP, "overlay", overlay)
 		} else {
-			d.logFabricRefreshFailure(slot, "cluster: "+label+" refresh failed (missing peer neighbor)",
+			d.logFabricRefreshFailure(ctx, generation, slot, peerIP,
+				"cluster: "+label+" refresh failed (missing peer neighbor)",
 				"peer", peerIP, "overlay", overlay)
 		}
 		return false
 	}
 
-	d.logFabricRefreshFailure(slot, "cluster: retaining "+label+" peer despite missing peer neighbor",
+	d.logFabricRefreshFailure(ctx, generation, slot, peerIP,
+		"cluster: retaining "+label+" peer despite missing peer neighbor",
 		"peer", peerIP, "overlay", overlay)
 	return true
 }
@@ -694,26 +768,29 @@ func (d *Daemon) retainFabricFwdOnNeighborMiss(slot int, peerIP net.IP, overlay 
 // gates on link state, remembers address-matched identity for the
 // link-local constraint, latches readiness, and pushes SyncFabricState.
 // No fabric_fwd map write remains.
-func (d *Daemon) refreshFabricFwdSlot(ctx context.Context, slot int, fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
+func (d *Daemon) refreshFabricFwdSlot(ctx context.Context, generation uint64, slot int, fabIface, overlay string, peerIP net.IP, logWaiting bool) bool {
+	if !d.fabricGenerationCurrent(generation) {
+		return false
+	}
 	link, err := d.fabricLinkByName(fabIface)
 	if err != nil {
-		d.logFabricRefreshFailure(slot, "cluster: fabric refresh failed (link not found)",
+		d.logFabricRefreshFailure(ctx, generation, slot, peerIP, "cluster: fabric refresh failed (link not found)",
 			"interface", fabIface, "err", err)
-		d.clearFabricFwdSlot(ctx, slot)
+		d.clearFabricFwdSlot(ctx, generation, slot, peerIP)
 		return false
 	}
 	localMAC := link.Attrs().HardwareAddr
 	if len(localMAC) != 6 {
-		d.logFabricRefreshFailure(slot, "cluster: fabric refresh failed (invalid local mac)",
+		d.logFabricRefreshFailure(ctx, generation, slot, peerIP, "cluster: fabric refresh failed (invalid local mac)",
 			"interface", fabIface, "local_mac", localMAC)
-		d.clearFabricFwdSlot(ctx, slot)
+		d.clearFabricFwdSlot(ctx, generation, slot, peerIP)
 		return false
 	}
 	operState := link.Attrs().OperState
 	if operState != netlink.OperUp && operState != netlink.OperUnknown {
-		d.logFabricRefreshFailure(slot, "cluster: fabric refresh failed (link not operational)",
+		d.logFabricRefreshFailure(ctx, generation, slot, peerIP, "cluster: fabric refresh failed (link not operational)",
 			"interface", fabIface, "oper_state", operState)
-		d.clearFabricFwdSlot(ctx, slot)
+		d.clearFabricFwdSlot(ctx, generation, slot, peerIP)
 		return false
 	}
 	if link.Attrs().TxQLen < 10000 {
@@ -749,7 +826,7 @@ scan:
 		}
 		for _, n := range neighs {
 			if n.IP.Equal(peerIP) && dpuserspace.FabricNeighUsable(n) {
-				d.rememberFabricPeerMAC(slot, n.HardwareAddr)
+				d.rememberFabricPeerMAC(ctx, generation, slot, peerIP, n.HardwareAddr)
 				break scan // overlay priority, matching the resolver's order (#17044 fold)
 			}
 		}
@@ -761,26 +838,51 @@ scan:
 	} else {
 		res = dpuserspace.ResolveFabricPeer(overlayIdx, parentIdx, peerIP.String(), localMAC)
 	}
+	// The resolver and the preceding neighbour scan can block. Recheck the
+	// epoch after both before reading or changing shared slot state.
+	if !d.fabricGenerationCurrent(generation) {
+		return false
+	}
 	peerMAC := res.PeerMAC
 	if peerMAC == nil {
-		if d.retainFabricFwdOnNeighborMiss(slot, peerIP, overlay, logWaiting) {
+		if d.retainFabricFwdOnNeighborMiss(ctx, generation, slot, peerIP, overlay, logWaiting) {
 			return true
 		}
-		d.clearFabricFwdSlot(ctx, slot)
+		d.clearFabricFwdSlot(ctx, generation, slot, peerIP)
 		return false
 	}
 	rt := d.dataplane()
 	if rt == nil {
-		d.logFabricRefreshFailure(slot, "cluster: fabric refresh failed (dataplane not ready)")
+		d.logFabricRefreshFailure(ctx, generation, slot, peerIP, "cluster: fabric refresh failed (dataplane not ready)")
+		return false
+	}
+	if !d.lockCurrentFabricGeneration(ctx, generation) {
 		return false
 	}
 	d.fabricMu.Lock()
-	d.fabricSlots[slot].populated = true
+	s := &d.fabricSlots[slot]
+	if s.peerIP == nil || !s.peerIP.Equal(peerIP) {
+		d.fabricMu.Unlock()
+		d.clusterCommsMu.Unlock()
+		return false
+	}
+	s.populated = true
 	d.fabricMu.Unlock()
+	d.clusterCommsMu.Unlock()
+
+	// stopClusterComms joins this epoch-owned populate loop before clearing
+	// shared fabric state; this recheck rejects a stale SyncFabricState call.
+	d.clusterCommsLifecycleMu.Lock()
+	if !d.lockCurrentFabricGeneration(ctx, generation) {
+		d.clusterCommsLifecycleMu.Unlock()
+		return false
+	}
+	d.clusterCommsMu.Unlock()
 	slog.Info("cluster: fabric peer resolved",
 		"interface", fabIface, "ifindex", link.Attrs().Index,
 		"local_mac", localMAC, "peer_mac", peerMAC)
 	rt.HA().SyncFabricState(ctx)
+	d.clusterCommsLifecycleMu.Unlock()
 	return true
 }
 
@@ -812,52 +914,88 @@ func (d *Daemon) fabricPeerResolver() dpuserspace.FabricPeerResolver {
 
 // clearFabricFwdSlot clears the slot's populated latch on path down (#121
 // retained as readiness state; there is no map entry to zero any more).
-func (d *Daemon) clearFabricFwdSlot(_ context.Context, slot int) {
+func (d *Daemon) clearFabricFwdSlot(ctx context.Context, generation uint64, slot int, peerIP net.IP) {
+	if !d.lockCurrentFabricGeneration(ctx, generation) {
+		return
+	}
 	d.fabricMu.Lock()
 	s := &d.fabricSlots[slot]
+	if peerIP != nil && (s.peerIP == nil || !s.peerIP.Equal(peerIP)) {
+		d.fabricMu.Unlock()
+		d.clusterCommsMu.Unlock()
+		return
+	}
 	was := s.populated
 	s.populated = false
 	d.fabricMu.Unlock()
+	d.clusterCommsMu.Unlock()
 	if was {
 		slog.Info("cluster: " + d.fabricSlotLabel(slot) + " peer cleared (path down)")
 	}
 }
 
-// RefreshFabricFwd triggers an immediate fabric peer refresh.
-// Call this on link state changes, neighbor changes, or failover transitions.
-// Refreshes both fab0 (slot 0) and fab1 (slot 1) entries.
+// clearFabricSlots zeroes each configured slot and drops its userspace
+// identity constraint under fabricMu, serializing it with MAC registration.
+// stopClusterComms calls it only after joining all populate loops.
+func (d *Daemon) clearFabricSlots() {
+	d.fabricMu.Lock()
+	defer d.fabricMu.Unlock()
+	var staleConstraints [2]string
+	staleCount := 0
+	for slot := range d.fabricSlots {
+		s := &d.fabricSlots[slot]
+		if s.peerIP != nil {
+			peer := s.peerIP.String()
+			if staleCount == 0 || staleConstraints[0] != peer {
+				staleConstraints[staleCount] = peer
+				staleCount++
+			}
+		}
+		s.iface = ""
+		s.overlay = ""
+		s.peerIP = nil
+		s.peerMAC = nil
+		s.populated = false
+		s.lastProbe = time.Time{}
+		s.lastLog = time.Time{}
+		s.probePending = false
+	}
+	for i := range staleCount {
+		dpuserspace.RegisterFabricPeerMACConstraint(staleConstraints[i], nil)
+	}
+}
+
+// RefreshFabricFwd triggers an immediate fabric peer refresh by waking each
+// configured slot's epoch-owned populate loop. The worker uses its comms
+// context, so stop joins it before clearing state and no background refresh
+// can resurrect a removed slot.
 func (d *Daemon) RefreshFabricFwd() {
-	// Snapshot every slot's config under one read lock, then refresh
-	// each configured slot through the single slot-parameterized path.
-	// Copy only the fabricMu-guarded fields: refreshCh is
-	// clusterCommsMu-guarded, so reading it here would race the
-	// publisher even though the value is unused by this path.
-	d.fabricMu.RLock()
-	var slots [2]fabricSlot
-	for i := range d.fabricSlots {
-		s := &d.fabricSlots[i]
-		slots[i] = fabricSlot{name: s.name, iface: s.iface, overlay: s.overlay, peerIP: s.peerIP, lastProbe: s.lastProbe}
-	}
-	d.fabricMu.RUnlock()
-	for slot := range slots {
-		s := slots[slot]
-		if s.iface == "" || s.peerIP == nil {
-			continue
+	d.queueFabricProbe()
+	d.triggerFabricRefresh()
+}
+
+// queueFabricProbe rate-limits active neighbor probes per configured slot.
+// The probe runs on that slot's epoch-owned populate loop.
+func (d *Daemon) queueFabricProbe() {
+	now := time.Now()
+	d.fabricMu.Lock()
+	defer d.fabricMu.Unlock()
+	for slot := range d.fabricSlots {
+		s := &d.fabricSlots[slot]
+		if s.iface != "" && s.peerIP != nil && now.Sub(s.lastProbe) >= 2*time.Second {
+			s.lastProbe = now
+			s.probePending = true
 		}
-		if time.Since(s.lastProbe) >= 2*time.Second {
-			launch := false
-			d.fabricMu.Lock()
-			if time.Since(d.fabricSlots[slot].lastProbe) >= 2*time.Second {
-				d.fabricSlots[slot].lastProbe = time.Now()
-				launch = true
-			}
-			d.fabricMu.Unlock()
-			if launch {
-				go d.probeFabricNeighbor(context.Background(), overlayOrParent(s.overlay, s.iface), s.peerIP)
-			}
-		}
-		d.refreshFabricFwdSlot(context.Background(), slot, s.iface, s.overlay, s.peerIP, false)
 	}
+}
+
+// takeFabricProbePending consumes one slot's queued probe flag.
+func (d *Daemon) takeFabricProbePending(slot int) bool {
+	d.fabricMu.Lock()
+	defer d.fabricMu.Unlock()
+	pending := d.fabricSlots[slot].probePending
+	d.fabricSlots[slot].probePending = false
+	return pending
 }
 
 func overlayOrParent(overlay, parent string) string {
