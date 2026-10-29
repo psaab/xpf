@@ -1,4 +1,6 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config: compile brace-elided event-policy change-configuration commands
+    instead of silently dropping the remediation payload (#18414).
   * Userspace dataplane: index learned WireGuard PMTUs by endpoint IP
     for allocation-free packet-path lookup; serialize PTB shrink updates
     and publish MTU/age pairs coherently (#17774).
