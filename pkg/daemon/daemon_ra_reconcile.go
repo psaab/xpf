@@ -141,16 +141,19 @@ func (d *Daemon) reconcileStandaloneRAServices(reason string) bool {
 	d.raReconcileMu.Lock()
 	defer d.raReconcileMu.Unlock()
 	if d.store == nil {
-		return true
+		return false
 	}
 	cfg := d.store.ActiveConfig()
-	if cfg == nil || cfg.Chassis.Cluster != nil {
+	if cfg == nil {
+		return false
+	}
+	if cfg.Chassis.Cluster != nil {
 		return true
 	}
 	apply := d.raApplyFn
 	if apply == nil {
 		if d.ra == nil {
-			return true
+			return false
 		}
 		apply = d.ra.Apply
 	}
@@ -304,17 +307,18 @@ func (d *Daemon) reassertDeadRASendersOnce(ctx context.Context) {
 	}
 }
 
-// standaloneRARenewRetryInterval is the cadence for retrying a failed
-// standalone PD-renew reconcile. The loop below arms this ticker only after
-// an apply failure and stops it as soon as a later reconcile converges.
+// standaloneRARenewRetryInterval is the cadence for retrying an unconverged
+// standalone PD-renew reconcile. The loop arms this ticker only while a retry
+// is owed and stops it as soon as a later reconcile converges.
 var standaloneRARenewRetryInterval = 30 * time.Second
 
 // standaloneRARenewLoop is the #16773 owner for the standalone PD-renewal
 // RA refresh. It wakes promptly on nudgeStandaloneRARenew (fired by every
 // content-identical lease renewal) and otherwise does no periodic work while
 // converged: a renewal is the only event that moves Obtained without a
-// recompile. After an apply failure, a periodic retry is armed until the
-// desired set converges. Joined by Run's WaitGroup on shutdown.
+// recompile. After an apply failure or an unavailable prerequisite, a periodic
+// retry is armed until the desired set converges. Joined by Run's WaitGroup on
+// shutdown.
 func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
 	var retryTicker *time.Ticker
 	var retryC <-chan time.Time
@@ -350,7 +354,7 @@ func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
 // applyServicesReconcile and synced lastStandaloneRAHash, so the pass then
 // finds a matching digest and does nothing (no gratuitous restart).
 // It reports whether the desired standalone set is converged; the loop
-// retries periodically only when an apply failed.
+// retries periodically while a reconcile remains unable to converge.
 func (d *Daemon) reconcileStandaloneRAOnce(ctx context.Context) bool {
 	if d.applySem == nil {
 		return false
