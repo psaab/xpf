@@ -323,13 +323,17 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 			strictErrs = append(strictErrs, err)
 		}
 	}
-	if err := validateThreeColorPolicersStrict(cfg.Firewall.ThreeColorPolicers); err != nil {
-		if opts.lenientThreeColorBurstFloor16610 && threeColorBurstFloorError16610(err) {
-			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("three-color-policer burst floor (downgraded to warning on tolerant path; the sub-1518-byte bucket colours every maximum-sized VLAN frame red): %v", err))
-		} else {
-			strictErrs = append(strictErrs, err)
+	if opts.lenientThreeColorBurstFloor16610 {
+		for _, err := range threeColorPolicerErrors(cfg.Firewall.ThreeColorPolicers) {
+			if threeColorBurstFloorError16610(err) {
+				cfg.Warnings = append(cfg.Warnings,
+					fmt.Sprintf("three-color-policer burst floor (downgraded to warning on tolerant path; the sub-1518-byte bucket colours every maximum-sized VLAN frame red): %v", err))
+			} else {
+				strictErrs = append(strictErrs, err)
+			}
 		}
+	} else if err := validateThreeColorPolicersStrict(cfg.Firewall.ThreeColorPolicers); err != nil {
+		strictErrs = append(strictErrs, err)
 	}
 	if err := validatePolicySchedulerReferencesStrict(cfg); err != nil {
 		if opts.lenientPolicySchedulerRef {

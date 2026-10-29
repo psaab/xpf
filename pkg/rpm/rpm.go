@@ -993,7 +993,7 @@ func canonicalizeHTTPTarget(target string) (string, error) {
 		// raw credential-bearing target — and do not quote the raw
 		// target. Render the redacted target plus the inner error class,
 		// as the config gate does (compiler_services.go).
-		return "", fmt.Errorf("%w: invalid http-get target URL %q: %v", ErrProbeSetup, config.RedactURL(target), urlParseErrClass16642(err))
+		return "", fmt.Errorf("%w: invalid http-get target URL %q: %v", ErrProbeSetup, config.RedactURL(target), urlParseErrClass16642(err, target))
 	}
 	switch u.Scheme {
 	case "http", "https":
@@ -1081,7 +1081,7 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 		// #16642: NewRequest's *url.Error re-embeds the full raw target
 		// (userinfo + query). Render the redacted target plus the inner
 		// error class instead of wrapping it.
-		return 0, fmt.Errorf("%w: HTTP request error: %v (target %q)", ErrProbeSetup, urlParseErrClass16642(err), config.RedactURL(url))
+		return 0, fmt.Errorf("%w: HTTP request error: %v (target %q)", ErrProbeSetup, urlParseErrClass16642(err, url), config.RedactURL(url))
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -1146,14 +1146,63 @@ func (m *Manager) probeHTTP(ctx context.Context, test *config.RPMTest, opts prob
 
 // urlParseErrClass16642 renders the inner error of a *url.Error (e.g.
 // `invalid character " " in host name`) without the URL the wrapper
-// re-embeds. Non-*url.Error values render verbatim — they carry no URL
-// by construction in the call sites that use this helper.
-func urlParseErrClass16642(err error) string {
+// re-embeds. If RedactURL would change the input, quoted parser payloads
+// are replaced too: net/url's invalid-port error quotes the entire
+// authority suffix, which can contain a missing-`@` credential (#17725).
+// Clean targets keep their specific parser diagnostic unchanged.
+func urlParseErrClass16642(err error, rawURL string) string {
+	class := err.Error()
 	var ue *url.Error
-	if errors.As(err, &ue) && ue.Err != nil {
-		return ue.Err.Error()
+	if errors.As(err, &ue) {
+		if ue.Err == nil {
+			return "URL parse error"
+		}
+		class = ue.Err.Error()
 	}
-	return err.Error()
+	if config.RedactURL(rawURL) != rawURL {
+		class = redactQuotedParsePayload16642(class)
+	}
+	return class
+}
+
+// redactQuotedParsePayload16642 drops every quoted payload from a parser
+// diagnostic once the corresponding input is credential-capable. The parser
+// uses quoted input for invalid hosts and ports; retaining only the surrounding
+// text preserves the error class without exposing an untrusted substring.
+func redactQuotedParsePayload16642(text string) string {
+	if !strings.ContainsRune(text, '"') {
+		return text
+	}
+	var b strings.Builder
+	for {
+		open := strings.IndexByte(text, '"')
+		if open < 0 {
+			b.WriteString(text)
+			return b.String()
+		}
+		b.WriteString(text[:open])
+		close := -1
+		for i := open + 1; i < len(text); i++ {
+			switch text[i] {
+			case '\\':
+				i++ // skip the escaped byte
+			case '"':
+				close = i
+				break
+			}
+			if close >= 0 {
+				break
+			}
+		}
+		if close < 0 {
+			// Malformed/future diagnostics fail closed: discard the remaining
+			// text rather than risk returning an unbounded quoted payload.
+			b.WriteString("<redacted>")
+			return b.String()
+		}
+		b.WriteString("<redacted>")
+		text = text[close+1:]
+	}
 }
 
 // scrubProbeURLError16642 returns err's text with every URL spelling

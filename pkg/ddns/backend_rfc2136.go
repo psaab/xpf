@@ -180,12 +180,17 @@ type rfc2136Updater struct {
 	// SUCCEEDED under skip-existing/strict-fail in THIS pass (#14995/#16597)
 	// at the current updater lifetime's active name and not yet observed to
 	// be withdrawn by a same-device last-family delete (which clears it so
-	// a later re-claim is not refused). The manager consults namedMarker
-	// (a snapshot of this value) to learn which marker, if any, a pass
-	// actually published, so marker cleanup is driven by ownership state
-	// rather than per-updater lifetime alone. Ghost (unprovoked) marker
-	// deletes are exact-match no-ops, so a delete attempted when no marker
-	// was published is harmless. Nil when no marker has been published in
+	// a later re-claim is not refused). It is retained backend-locally:
+	// siblingDHCIDRR falls back to it and sendRemoveForward's last-family
+	// branch clears it after a successful marker withdraw; no manager
+	// code reads it. Marker cleanup is instead decided manager-side:
+	// the manager's markerSharedWithSibling scan of the ownership store
+	// sets LeaseDNSRecord.KeepSiblingMarker, which DeleteLease passes to
+	// sendRemoveForward — a surviving same-device sibling keeps the
+	// marker, and the last family's delete withdraws it
+	// value-specifically. Ghost (unprovoked) marker deletes are
+	// exact-match no-ops, so a delete attempted when no marker was
+	// published is harmless. Nil when no marker has been published in
 	// this updater's lifetime, after the last last-family withdraw cleared
 	// it, or after a name switch in UpsertLease.
 	siblingMarkerRR *dns.DHCID
@@ -743,15 +748,16 @@ func (u *rfc2136Updater) siblingCandidate(rr dns.RR) bool {
 }
 
 // namedMarker returns the retained proof marker for name, or nil
-// (#16597). The manager consults it after a pass to learn which
-// device marker (if any) was actually published under
-// skip-existing/strict-fail in that pass, so marker cleanup can be
-// driven by ownership state rather than per-updater lifetime alone.
-// UpsertLease resets the retained marker on a name switch so a
-// multi-name updater never leaks name A's proof into name B's
-// siblingDHCIDRR fallback or delete; a same-name different-device
-// delete still recomputes its marker value-specifically from the
-// deleting record's own identity.
+// (#16597). It is used only inside this backend, by
+// sendRemoveForward's last-family branch, to tell whether the marker
+// just withdrawn is the retained one (which is then cleared). No
+// manager code calls it: marker cleanup is decided manager-side by
+// markerSharedWithSibling, whose verdict reaches this backend as
+// LeaseDNSRecord.KeepSiblingMarker on DeleteLease. UpsertLease resets
+// the retained marker on a name switch so a multi-name updater never
+// leaks name A's proof into name B's siblingDHCIDRR fallback or
+// delete; a same-name different-device delete still recomputes its
+// marker value-specifically from the deleting record's own identity.
 func (u *rfc2136Updater) namedMarker(name string) *dns.DHCID {
 	if u == nil || u.siblingMarkerRR == nil {
 		return nil
