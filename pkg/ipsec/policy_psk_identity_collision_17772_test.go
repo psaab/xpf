@@ -268,6 +268,12 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"identical primitive outer sequence equals exact bytes", "inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130470656572"},
 			{"identical primitive SET equals exact bytes", "inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130470656572"},
 			{"identical primitive inner sequence equals exact bytes", "inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130470656572"},
+			{"nonminimal outer length compares DN values", "inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#30810f310d300b0603550403130450454552"},
+			{"nonminimal SET length compares DN values", "inet", "asn1dn:#301031810d300b0603550403130470656572", "inet", "asn1dn:#301031810d300b0603550403130450454552"},
+			{"nonminimal attribute SEQUENCE length compares DN values", "inet", "asn1dn:#3010310e30810b0603550403130470656572", "inet", "asn1dn:#3010310e30810b0603550403130450454552"},
+			{"nonminimal OID length compares DN values", "inet", "asn1dn:#3010310e300c068103550403130470656572", "inet", "asn1dn:#3010310e300c068103550403130450454552"},
+			{"nonminimal value length compares DN values", "inet", "asn1dn:#3010310e300c060355040313810470656572", "inet", "asn1dn:#3010310e300c060355040313810450454552"},
+			{"identical malformed total length remains exact-equal", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130470656572"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -320,6 +326,12 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"primitive outer sequence does not case-fold", "inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130450454552"},
 			{"primitive SET does not case-fold", "inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130450454552"},
 			{"primitive inner sequence does not case-fold", "inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130450454552"},
+			{"nonminimal long length with leading zero remains distinct", "inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "asn1dn:#3082000f310d300b0603550403130450454552"},
+			{"nonminimal OID length with leading zero remains distinct", "inet", "asn1dn:#3011310f300d0682000003550403130470656572", "inet", "asn1dn:#3011310f300d0682000003550403130450454552"},
+			{"nonminimal value length with leading zero remains distinct", "inet", "asn1dn:#3011310f300d0603550403138200000470656572", "inet", "asn1dn:#3011310f300d0603550403138200000450454552"},
+			{"mismatched declared total length remains distinct", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130450454552"},
+			{"trailing bytes remain outside DN total length", "inet", "asn1dn:#300f310d300b060355040313047065657200", "inet", "asn1dn:#300f310d300b060355040313045045455200"},
+			{"nonminimal outer length differs from canonical under total-length gate", "inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
 			{"embedded NUL prevents type-2 comparison", "inet", "{2}:#410062", "inet", "{2}:#410062"},
 			{"embedded NUL prevents type-3 comparison", "inet", "{3}:#410062", "inet", "{3}:#410062"},
 			{"embedded NUL differing type-2 values do not compare", "inet", "{2}:#410062", "inet", "{2}:#610062"},

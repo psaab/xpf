@@ -949,33 +949,29 @@ func ipsecDNIdentityEqual(a, b ipsecIKEIdentity) bool {
 }
 
 func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
-	var sequence asn1.RawValue
-	rest, err := asn1.Unmarshal(encoded, &sequence)
-	if err != nil || len(rest) != 0 || sequence.Class != 0 || sequence.Tag != 16 || !sequence.IsCompound {
+	sequence, rest, ok := ipsecReadASN1Raw(encoded)
+	if !ok || len(rest) != 0 || sequence.Class != 0 || sequence.Tag != 16 || !sequence.IsCompound {
 		return nil, false
 	}
 	sets := sequence.Bytes
 	var rdns []ipsecDNRDN
 	for len(sets) > 0 {
-		var set asn1.RawValue
-		sets, err = asn1.Unmarshal(sets, &set)
-		if err != nil || set.Class != 0 || set.Tag != 17 || !set.IsCompound {
+		set, remainder, ok := ipsecReadASN1Raw(sets)
+		if !ok || set.Class != 0 || set.Tag != 17 || !set.IsCompound {
 			return nil, false
 		}
 		sequences := set.Bytes
 		for len(sequences) > 0 {
-			var rdn asn1.RawValue
-			sequences, err = asn1.Unmarshal(sequences, &rdn)
-			if err != nil || rdn.Class != 0 || rdn.Tag != 16 || !rdn.IsCompound {
+			rdn, remainder, ok := ipsecReadASN1Raw(sequences)
+			if !ok || rdn.Class != 0 || rdn.Tag != 16 || !rdn.IsCompound {
 				return nil, false
 			}
-			var oid, value asn1.RawValue
-			content, err := asn1.Unmarshal(rdn.Bytes, &oid)
-			if err != nil || oid.Class != 0 || oid.Tag != 6 {
+			oid, content, ok := ipsecReadASN1Raw(rdn.Bytes)
+			if !ok || oid.Class != 0 || oid.Tag != 6 {
 				return nil, false
 			}
-			content, err = asn1.Unmarshal(content, &value)
-			if err != nil || len(content) != 0 {
+			value, content, ok := ipsecReadASN1Raw(content)
+			if !ok || len(content) != 0 {
 				return nil, false
 			}
 			tag := byte(value.Tag)
@@ -990,10 +986,77 @@ func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
 				tag:   tag,
 				value: string(value.Bytes),
 			})
+			sequences = remainder
 		}
+		sets = remainder
 	}
 	return rdns, true
 }
+func ipsecReadASN1Raw(encoded []byte) (asn1.RawValue, []byte, bool) {
+	if len(encoded) < 2 {
+		return asn1.RawValue{}, nil, false
+	}
+	identifier := encoded[0]
+	tag := int(identifier & 0x1f)
+	index := 1
+	if tag == 0x1f {
+		tag = 0
+		for {
+			if index >= len(encoded) {
+				return asn1.RawValue{}, nil, false
+			}
+			next := encoded[index]
+			index++
+			maxInt := int(^uint(0) >> 1)
+			if tag > (maxInt-int(next&0x7f))/128 {
+				return asn1.RawValue{}, nil, false
+			}
+			tag = tag*128 + int(next&0x7f)
+			if next&0x80 == 0 {
+				break
+			}
+		}
+		if tag < 31 {
+			return asn1.RawValue{}, nil, false
+		}
+	}
+	if index >= len(encoded) {
+		return asn1.RawValue{}, nil, false
+	}
+	firstLength := encoded[index]
+	index++
+	var length uint64
+	if firstLength&0x80 == 0 {
+		length = uint64(firstLength)
+	} else {
+		lengthBytes := int(firstLength & 0x7f)
+		if lengthBytes == 0 || lengthBytes > 8 || lengthBytes > len(encoded)-index {
+			return asn1.RawValue{}, nil, false
+		}
+		if lengthBytes > 1 && encoded[index] == 0 {
+			return asn1.RawValue{}, nil, false
+		}
+		for i := 0; i < lengthBytes; i++ {
+			length = length<<8 | uint64(encoded[index+i])
+		}
+		if lengthBytes > 1 && length < uint64(1)<<uint(8*(lengthBytes-1)) {
+			return asn1.RawValue{}, nil, false
+		}
+		index += lengthBytes
+	}
+	if length > uint64(len(encoded)-index) {
+		return asn1.RawValue{}, nil, false
+	}
+	end := index + int(length)
+	return asn1.RawValue{
+		Class:      int(identifier >> 6),
+		Tag:        tag,
+		IsCompound: identifier&0x20 != 0,
+		Bytes:      encoded[index:end],
+		FullBytes:  encoded[:end],
+	}, encoded[end:], true
+}
+
 
 func ipsecDERWrap(tag byte, content []byte) []byte {
 	length := len(content)

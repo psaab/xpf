@@ -1040,6 +1040,8 @@ all files stay in `package ipsec`, so the public API is unchanged.
   DN comparisons stop at a matching NUL.
   DN container tags must be constructed at every level; primitive lookalikes
   compare by exact bytes only.
+  DN length parsing accepts strongSwan's one-octet long form even below 128,
+  while each containing TLV must match its declared total length.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct

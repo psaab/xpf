@@ -468,6 +468,12 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"identical primitive outer sequence equals exact bytes", "inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130470656572"},
 			{"identical primitive SET equals exact bytes", "inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130470656572"},
 			{"identical primitive inner sequence equals exact bytes", "inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130470656572"},
+			{"nonminimal outer length compares DN values", "inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#30810f310d300b0603550403130450454552"},
+			{"nonminimal SET length compares DN values", "inet", "asn1dn:#301031810d300b0603550403130470656572", "inet", "asn1dn:#301031810d300b0603550403130450454552"},
+			{"nonminimal attribute SEQUENCE length compares DN values", "inet", "asn1dn:#3010310e30810b0603550403130470656572", "inet", "asn1dn:#3010310e30810b0603550403130450454552"},
+			{"nonminimal OID length compares DN values", "inet", "asn1dn:#3010310e300c068103550403130470656572", "inet", "asn1dn:#3010310e300c068103550403130450454552"},
+			{"nonminimal value length compares DN values", "inet", "asn1dn:#3010310e300c060355040313810470656572", "inet", "asn1dn:#3010310e300c060355040313810450454552"},
+			{"identical malformed total length remains exact-equal", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130470656572"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
 		for _, pair := range pairs {
@@ -509,6 +515,12 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130450454552"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "asn1dn:#3082000f310d300b0603550403130450454552"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3011310f300d0682000003550403130470656572", "inet", "asn1dn:#3011310f300d0682000003550403130450454552"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3011310f300d0603550403138200000470656572", "inet", "asn1dn:#3011310f300d0603550403138200000450454552"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130450454552"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b060355040313047065657200", "inet", "asn1dn:#300f310d300b060355040313045045455200"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
 	})
 
 	t.Run("remote identity equal to default gateway local address is refused", func(t *testing.T) {
