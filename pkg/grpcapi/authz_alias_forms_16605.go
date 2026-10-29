@@ -25,11 +25,11 @@ import (
 // alternative spellings of the same RPC under EvaluateForms unanimity
 // (a deny on any spelling vetoes), EXCEPT that a sibling-spelling tier
 // denial can be rescued only by an affirmative allow with a strictly
-// longer matched extent. If the request discriminates the typed line,
-// an affirmative allow on that exact executed spelling also rescues;
-// otherwise the fixed charge is not evidence of execution. Thus an
-// ambiguous RPC cannot let an allow on a shorter/equal sibling lift a
-// longer/equal deny, while allowlist naming only one alias still admits.
+// longer matched extent. On a nondiscriminating request, an allow on the
+// fixed charge cannot rescue an alias-specific deny: the request does not
+// establish that the charge spelling was executed. If the request does
+// discriminate the typed line, an affirmative allow on that exact
+// executed spelling may rescue a sibling denial.
 //
 // Census (every `c.client.<RPC>(` site in cmd/cli paired with its
 // dispatching line; charged spelling first, aliases after):

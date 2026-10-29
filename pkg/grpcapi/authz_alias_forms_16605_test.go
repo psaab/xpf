@@ -96,9 +96,9 @@ func TestAliasRescueRequiresOutrankingAllow17704(t *testing.T) {
 }
 
 // The issue's empty GetIPsecSA request cannot identify whether the caller
-// typed the IKE or IPsec line. Pin both the cited full-form pair (whose
-// IPsec allow is the longer match) and a shorter charge allow that cannot
-// override the IKE deny.
+// typed the IKE or IPsec line. An allow on the fixed IPsec charge must not
+// rescue the explicit IKE alias denial, even when that allow matches the
+// complete charge spelling.
 func TestIPsecAliasRescueUsesMatchedExtent17704(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -106,9 +106,9 @@ func TestIPsecAliasRescueUsesMatchedExtent17704(t *testing.T) {
 		wantAllow bool
 	}{
 		{
-			name:      "full IPsec allow strictly outranks IKE deny",
+			name:      "cited full IPsec charge allow cannot rescue IKE alias deny",
 			allow:     `^show security ipsec security-associations$`,
-			wantAllow: true,
+			wantAllow: false,
 		},
 		{
 			name:      "short IPsec allow does not outrank IKE deny",
@@ -126,7 +126,28 @@ func TestIPsecAliasRescueUsesMatchedExtent17704(t *testing.T) {
 				DenyLeavesPresent:  []string{"deny-commands"},
 				AllowLeavesPresent: []string{"allow-commands"},
 			}}}
-			err := gateDecide7172(t, cfg, "GetIPsecSA", &pb.GetIPsecSARequest{})
+			fullMethod := "/" + serviceName + "/GetIPsecSA"
+			req := &pb.GetIPsecSARequest{}
+			rules, _, err := config.OperationalLoginRegexesFor(cfg, "ops")
+			if err != nil {
+				t.Fatalf("compile login rules: %v", err)
+			}
+			charge, resolved := rpcCanonicalCommand(fullMethod, req)
+			if !resolved {
+				t.Fatal("GetIPsecSA charge was not resolved")
+			}
+			chargeForms, named := rpcArgumentForms(cfg, fullMethod, req, charge)
+			if !named {
+				t.Fatal("GetIPsecSA forms were not named")
+			}
+			forms := withAliasForms16605("GetIPsecSA", req, chargeForms)
+			if remoteDistinctRescue16472(rules, forms) {
+				t.Fatal("distinct-narrower rescue bypassed the IKE alias deny")
+			}
+			if !aliasChargeAllowCannotRescue16605(rules, "GetIPsecSA", req, chargeForms, forms) {
+				t.Fatal("fixed-charge allow did not identify the alias-specific deny")
+			}
+			err = gateDecide7172(t, cfg, "GetIPsecSA", req)
 			if (err == nil) != tc.wantAllow {
 				t.Errorf("allow %q: err=%v, want allow=%v", tc.allow, err, tc.wantAllow)
 			}
