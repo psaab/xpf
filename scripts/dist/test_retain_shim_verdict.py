@@ -76,8 +76,10 @@ class RetainShimVerdictTests(unittest.TestCase):
 
     def test_checked_in_verdict_matches_tracked_shim_object(self):
         repo_root = _DIST.parents[1]
-        expected = repo_root / retain_shim_verdict._VERDICT
-        self.assertEqual(retain_shim_verdict.validate_verdict(repo_root), expected)
+        verdict_path = repo_root / retain_shim_verdict._VERDICT
+        recorded_kernel = json.loads(verdict_path.read_text(encoding="utf-8"))["provenance"]["kernel_release"]
+        with patch.object(retain_shim_verdict.os, "uname", return_value=SimpleNamespace(release=recorded_kernel)):
+            self.assertEqual(retain_shim_verdict.validate_verdict(repo_root), verdict_path)
 
     def test_valid_pass_is_uploaded_as_release_asset(self):
         self.write_verdict(self.verdict())

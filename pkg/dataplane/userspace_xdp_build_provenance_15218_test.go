@@ -183,30 +183,26 @@ func TestProvenanceAdoption15218(t *testing.T) {
 	}
 }
 
-// TestGateVerdictKernelBinding17768 proves a retained verdict's kernel
-// is an equality binding, not merely a non-empty provenance label.
-func TestGateVerdictKernelBinding17768(t *testing.T) {
-	root := writeProvenanceFixture(t, nil)
-	raw := provenanceVerdict(t, root, func(v map[string]any) {
-		prov(v)["kernel_release"] = "kernel-A"
+// TestManifestFreshnessIgnoresVerifierKernel17768 keeps the manifest's
+// source/object freshness contract independent of the kernel that will
+// later load the shim. Release retention separately compares measured
+// verdicts with its running kernel before accepting them.
+func TestManifestFreshnessIgnoresVerifierKernel17768(t *testing.T) {
+	runningKernel, err := KernelRelease()
+	if err != nil {
+		t.Fatalf("read running kernel: %v", err)
+	}
+	root := writeProvenanceFixture(t, func(r string) []byte {
+		return provenanceVerdict(t, r, func(v map[string]any) {
+			prov(v)["kernel_release"] = runningKernel + "-different"
+		})
 	})
-	var verdict userspaceXDPGateVerdict
-	if err := json.Unmarshal(raw, &verdict); err != nil {
-		t.Fatalf("decode fixture verdict: %v", err)
+	manifest, err := ComputeUserspaceXDPManifest(root)
+	if err != nil {
+		t.Fatalf("compute manifest: %v", err)
 	}
-
-	if !verdictProvenanceCleanOnKernel(root, &verdict, "kernel-A") {
-		t.Fatal("same-kernel verdict was not accepted")
-	}
-	if verdictProvenanceCleanOnKernel(root, &verdict, "kernel-B") {
-		t.Fatal("kernel-A verdict was accepted on kernel-B")
-	}
-	if verdictProvenanceCleanOnKernel(root, &verdict, "") {
-		t.Fatal("verdict was accepted when running kernel release is unavailable")
-	}
-	verdict.Provenance.KernelRelease = ""
-	if verdictProvenanceCleanOnKernel(root, &verdict, "kernel-A") {
-		t.Fatal("verdict with empty measured kernel was accepted")
+	if manifest.BuildDigest == "" {
+		t.Fatal("source/object freshness withheld build digest for a verdict measured on a different kernel")
 	}
 }
 

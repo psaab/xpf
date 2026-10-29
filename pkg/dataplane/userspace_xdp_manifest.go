@@ -289,32 +289,13 @@ func pinnedShimToolchain(path string) (string, error) {
 }
 
 // verdictProvenanceClean reports whether a gate verdict's recorded
-// provenance (#15218, #16657, #17768) proves a pinned build under the
-// scrubbed codegen env with the pinned bpf-linker, AND that its
-// verifier measurement was taken on the running kernel. Anything
-// else — absent provenance, unpinned, wrong toolchain/linker,
-// foreign env digest, no kernel, an unreadable running kernel, or a
-// kernel_release from a different kernel — is not provenance a
-// consumer gate may trust: a headroom figure measured on kernel A
-// does not bind kernel B (#15645, #15854), so a verdict naming a
-// foreign kernel must read as not-clean (the freshness manifest then
-// withholds its build digest, i.e. the object reads as stale) rather
-// than be adopted on a non-empty string alone.
+// provenance (#15218, #16657) proves a pinned build under the scrubbed
+// codegen env with the pinned bpf-linker. The manifest uses this
+// provenance only to adopt the source/object build digest; that
+// freshness property is kernel-independent. Exact kernel equality for
+// accepting a retained headroom verdict belongs to the release
+// retention gate (#17768), not this source/object freshness check.
 func verdictProvenanceClean(repoRoot string, v *userspaceXDPGateVerdict) bool {
-	running, err := KernelRelease()
-	if err != nil {
-		return false
-	}
-	return verdictProvenanceCleanOnKernel(repoRoot, v, running)
-}
-
-// verdictProvenanceCleanOnKernel is verdictProvenanceClean with the
-// running-kernel source injected, so tests can pin the kernel-A /
-// kernel-B discrimination without depending on the host kernel.
-// running must be non-empty; KernelRelease already fails closed on
-// an empty/unreadable release, and an empty injected value is
-// likewise never clean.
-func verdictProvenanceCleanOnKernel(repoRoot string, v *userspaceXDPGateVerdict, running string) bool {
 	p := v.Provenance
 	if p == nil || !p.Pinned {
 		return false
@@ -327,7 +308,7 @@ func verdictProvenanceCleanOnKernel(repoRoot string, v *userspaceXDPGateVerdict,
 	if err != nil {
 		return false
 	}
-	return p.BPFLinker == ShimPinnedBPFLinkerVersion && p.CodegenEnvDigest == want && running != "" && p.KernelRelease == running
+	return p.BPFLinker == ShimPinnedBPFLinkerVersion && p.CodegenEnvDigest == want && p.KernelRelease != ""
 }
 
 // UserspaceXDPBuildDigest returns the canonical digest of all source and
