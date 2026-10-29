@@ -50,6 +50,8 @@ xpf_enter_destructive_cluster_cell "test-ha-crash $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/failover-clock-lib.sh
+source "${SCRIPT_DIR}/failover-clock-lib.sh"
 # #12203: shared scoped per-(node, RG) role reader for dual-active checks.
 # shellcheck source=test/incus/deploy-lib.sh
 source "${SCRIPT_DIR}/deploy-lib.sh"
@@ -436,6 +438,11 @@ start_instance "$FW0" "phase1" || true
 restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 if [[ -n "$restart_time" ]]; then
 	pass "phase1: fw0 xpfd restarted (${restart_time}s)"
+	# #18523 (#11872): the force-stopped VM comes back with its clock behind in
+	# the no-NTP lab, which breaks fabric-auth windows. Resync both nodes from
+	# one host reading, as test-failover and test-double-failover do.
+	failover_resync_node_clocks "$FW0" "$FW1" >/dev/null ||
+		fail "phase1: could not resync both firewall clocks from host UTC"
 else
 	fail "phase1: fw0 xpfd did not restart within ${VM_RESTART_WAIT}s"
 fi
@@ -643,6 +650,8 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase3-cycle${cycle}: fw0 restarted (${restart_time}s)"
+		failover_resync_node_clocks "$FW0" "$FW1" >/dev/null ||
+			fail "phase3-cycle${cycle}: could not resync both firewall clocks from host UTC"
 	else
 		fail "phase3-cycle${cycle}: fw0 did not restart within ${VM_RESTART_WAIT}s"
 		cycle_failures=$((cycle_failures + 1))
