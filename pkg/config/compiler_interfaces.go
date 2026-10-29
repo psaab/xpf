@@ -1281,20 +1281,30 @@ func compileInterfaces(node *Node, ifaces *InterfacesConfig, opts compileOpts, w
 	suppressInvalidRethAddresses(ifaces, invalidRethRG)
 	return nil
 }
+
+// NativeVLANUnitNumber returns the unique logical unit whose vlan-id matches
+// the configured native-vlan-id. A missing or ambiguous match has no selected
+// unit and leaves native ingress unresolved.
+func NativeVLANUnitNumber(ifc *InterfaceConfig) (int, bool) {
+	if ifc == nil || ifc.NativeVlanID <= 0 {
+		return 0, false
+	}
+	matches := 0
+	selected := 0
+	for unitNum, unit := range ifc.Units {
+		if unit != nil && unit.VlanID == ifc.NativeVlanID {
+			matches++
+			selected = unitNum
+		}
+	}
+	return selected, matches == 1
+}
+
 func nativeVLANBindingWarning(ifName string, ifc *InterfaceConfig) string {
 	if ifc == nil || ifc.NativeVlanID <= 0 {
 		return ""
 	}
-	matches := 0
-	for _, unit := range ifc.Units {
-		if unit != nil && unit.VlanID == ifc.NativeVlanID {
-			matches++
-			if matches > 1 {
-				break
-			}
-		}
-	}
-	if matches == 1 {
+	if _, ok := NativeVLANUnitNumber(ifc); ok {
 		return ""
 	}
 	return fmt.Sprintf(
