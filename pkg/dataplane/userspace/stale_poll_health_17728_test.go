@@ -3,6 +3,7 @@ package userspace
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -54,6 +55,9 @@ func TestStaleSeqFencePreservesPollHealthAccounting17728(t *testing.T) {
 			entered := make(chan struct{}, 1)
 			firstRelease := make(chan struct{})
 			secondPollGate := make(chan struct{})
+			var firstOnce, secondOnce sync.Once
+			releaseFirst := func() { firstOnce.Do(func() { close(firstRelease) }) }
+			releaseSecond := func() { secondOnce.Do(func() { close(secondPollGate) }) }
 			var calls atomic.Int32
 			m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
 				if req.Type != "status" {
@@ -93,7 +97,8 @@ func TestStaleSeqFencePreservesPollHealthAccounting17728(t *testing.T) {
 			}()
 			defer func() {
 				cancel()
-				close(secondPollGate)
+				releaseFirst()
+				releaseSecond()
 				<-done
 			}()
 
@@ -118,7 +123,7 @@ func TestStaleSeqFencePreservesPollHealthAccounting17728(t *testing.T) {
 				t.Fatal("premise: disarm did not bump lastStatusSeq")
 			}
 
-			close(firstRelease)
+			releaseFirst()
 			deadline := time.Now().Add(2 * time.Second)
 			for calls.Load() < 2 && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
