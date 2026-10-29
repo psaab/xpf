@@ -11528,8 +11528,10 @@ reserved for whole-dataplane selection where a rewrite shim
     both compared tags are PrintableString; emailAddress IA5 values also fold
     ASCII case. Other values compare bytes, even across differing tags, so DN
     equality is pairwise and not reducible to a transitive canonical key.
-    DN equality requires constructed SEQUENCE, SET, and attribute-SEQUENCE
-    containers; primitive-tag lookalikes compare by exact bytes only.
+    DN parsing requires constructed SEQUENCE, SET, and attribute-SEQUENCE
+    containers plus primitive OIDs. Constructed-OID lookalikes and any empty
+    RDN SET are malformed for structural comparison and use exact-byte equality
+    only.
     DN parsing accepts bounded long-form lengths (up to eight length octets),
     including redundant leading zeros; containing TLVs must match their declared
     total lengths.

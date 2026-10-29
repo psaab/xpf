@@ -1038,8 +1038,9 @@ all files stay in `package ipsec`, so the public API is unchanged.
   GeneralName. Authored output stays raw.
   Types 2/3 containing NUL never compare equal; PrintableString/emailAddress
   DN comparisons stop at a matching NUL.
-  DN container tags must be constructed at every level; primitive lookalikes
-  compare by exact bytes only.
+  DN parsing requires constructed SEQUENCE, SET, and attribute-SEQUENCE
+  containers plus primitive OIDs. Constructed-OID lookalikes and any empty RDN
+  SET are malformed for structural comparison and use exact-byte equality only.
   DN length parsing accepts bounded long-form lengths (up to eight length
   octets), including redundant leading zeros; containing TLVs must match their
   declared total lengths.
