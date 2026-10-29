@@ -572,12 +572,15 @@ caught it:
   held RG0-1;
 - the deploy reassert could not move RG2 back.
 
-The replacement now inherits the END of the grace its predecessor was inside
-(`inheritedHold` = the predecessor's `startedAt` plus its `seenThenLostGrace`,
-read under `m.mu`). `checkTimeout` holds while either the restart grace or the
-inherited hold is running. A steady-state commit restarts a receiver whose
-boot grace ended long ago, so it still holds for only 5s. A failed restart's
-debt (#9751 below) carries the hold into its retry. Cells:
+The replacement inherits the latest grace deadline its predecessor was still
+subject to: the later of `startedAt + seenThenLostGrace()` and the
+predecessor's own `inheritedHold`, read under `m.mu`. `checkTimeout` holds while
+either the replacement's restart grace or that inherited floor is running.
+Repeated restarts therefore cannot shorten the original boot floor (#17764).
+
+A steady-state commit restarts a receiver whose boot grace ended long ago, so
+it still holds for only 5s. A failed restart's debt (#9751 below) carries the
+floor into its retry. Cells:
 `heartbeat_restart_boot_grace_9722_test.go`.
 
 ### A failed heartbeat restart is owed, not latched (#9751)

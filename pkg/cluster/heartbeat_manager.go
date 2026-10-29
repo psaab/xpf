@@ -55,10 +55,11 @@ func heartbeatUDPNetwork(addr string) string {
 func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string) error {
 	// #16745: a comms restart is StopHeartbeat followed by StartHeartbeat in
 	// the same Manager lifetime. StopHeartbeat stashed the outgoing
-	// receiver's lastSeen/grace-end (hbCommsRestartSeed/Hold); seed from it
-	// when the Manager has seen a live peer, so the replacement is armed as
-	// a restart (#9722) instead of a cold start. Without the seed a peer
-	// silent from the restart onward was never declared lost (the
+	// receiver's lastSeen and grace floor (hbCommsRestartSeed/Hold); the
+	// floor is the later of its own grace end and any inherited hold. Seed
+	// from it when the Manager has seen a live peer, so the replacement is
+	// armed as a restart (#9722) instead of a cold start. Without the seed a
+	// peer silent from the restart onward was never declared lost (the
 	// never-seen arm is a no-op once peerEverSeen is set) and a peer heard
 	// once then lost was held for the 30s cold-boot grace. An explicit seed
 	// from RestartHeartbeat still wins: it passes restartSeed != 0 below.
@@ -77,8 +78,8 @@ func (m *Manager) StartHeartbeat(localAddr, peerAddr, vrfDevice, controlIface st
 // (armRestart) with the replaced receiver's last-seen heartbeat and the short
 // restart grace, before the receiver starts. StartHeartbeat passes the
 // comms-restart stash StopHeartbeat left (#16745), or 0 on a true cold start.
-// inheritedHold is the end of any grace the replaced receiver was
-// still inside; the new receiver keeps it (#9722).
+// inheritedHold is the latest grace deadline the replaced receiver was still
+// subject to; the new receiver keeps that floor (#9722, #17764).
 func (m *Manager) startHeartbeat(localAddr, peerAddr, vrfDevice, controlIface string, restartSeed int64, inheritedHold time.Time) error {
 	// Serialize the whole stop-previous + create + install sequence so
 	// concurrent callers cannot interleave and both install a heartbeat.
@@ -301,18 +302,18 @@ func (m *Manager) StopHeartbeat() {
 	m.hbRestartOwed = false
 	m.hbRestartOwedSeed = 0
 	m.hbRestartOwedHold = time.Time{}
-	// #16745: stash the outgoing receiver's peer-liveness seed for the next
-	// StartHeartbeat in this Manager lifetime (the comms-restart pair:
-	// stopClusterComms -> StopHeartbeat, next epoch -> StartHeartbeat).
+	// #16745: stash the outgoing receiver's peer-liveness seed and grace floor
+	// for the next StartHeartbeat in this Manager lifetime (the comms-restart
+	// pair: stopClusterComms -> StopHeartbeat, next epoch -> StartHeartbeat).
 	// Only a receiver that had seen the peer leaves a seed; otherwise clear
-	// any older stash so a later cold start cannot inherit stale liveness.
-	// The internal stopHeartbeat paths (idempotent start teardown,
-	// RestartHeartbeat) do NOT touch the stash — RestartHeartbeat carries
-	// its own seed explicitly.
+	// any older stash so a later cold start cannot inherit stale liveness. The
+	// floor is the later of the receiver's own grace end and any inherited hold.
+	// Internal stopHeartbeat paths (idempotent start teardown, RestartHeartbeat)
+	// do NOT touch the stash — RestartHeartbeat carries its own seed explicitly.
 	if m.hbReceiver != nil {
 		if seed := m.hbReceiver.lastSeen.Load(); seed != 0 {
 			m.hbCommsRestartSeed = seed
-			m.hbCommsRestartHold = m.hbReceiver.startedAt.Add(m.hbReceiver.seenThenLostGrace())
+			m.hbCommsRestartHold = m.hbReceiver.graceEnd()
 		} else {
 			m.hbCommsRestartSeed = 0
 			m.hbCommsRestartHold = time.Time{}
@@ -482,14 +483,14 @@ func (m *Manager) RestartHeartbeat() bool {
 	controlIface := m.hbControlIface
 	notify := m.hbRestartNotifyFn
 	receiver := m.hbReceiver
-	// #9722: the end of the grace the running receiver is still inside, read
-	// under the same lock start() publishes startedAt under. The replacement
-	// inherits it, so a restart never shortens a grace in progress. With no
-	// receiver (a failed restart left the heartbeat stopped), the end that
-	// restart was carrying is inherited instead.
+	// #9722: the replacement keeps the later of the running receiver's own
+	// grace end and its inherited hold. Read both under the same lock start()
+	// publishes them under, so repeated restarts never shorten the original
+	// floor. With no receiver (a failed restart left the heartbeat stopped),
+	// inherit the hold that restart was carrying instead.
 	inheritedHold := m.hbRestartOwedHold
 	if receiver != nil {
-		inheritedHold = receiver.startedAt.Add(receiver.seenThenLostGrace())
+		inheritedHold = receiver.graceEnd()
 	}
 	m.mu.RUnlock()
 
