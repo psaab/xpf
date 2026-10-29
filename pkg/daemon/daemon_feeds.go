@@ -113,6 +113,22 @@ func (d *Daemon) markFeedShrinkHistoryWipeSucceeded() {
 	d.feedHistoryMu.Unlock()
 }
 
+// deferActiveConfigApplyIfRollbackTargetPending keeps a staged rollback-target
+// feed snapshot from being reconciled against the still-active config.
+func (d *Daemon) deferActiveConfigApplyIfRollbackTargetPending() error {
+	gen := d.confirmTargetFeedInstallPending.Load()
+	if gen == 0 {
+		return nil
+	}
+	if d.store != nil {
+		if _, _, pending := d.store.PendingRollbackTarget(gen); pending {
+			return fmt.Errorf("active config apply deferred until rollback target is rechecked (#17741)")
+		}
+	}
+	d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
+	return nil
+}
+
 // onFeedUpdate is the dynamic-address feed manager's publication callback.
 //
 // It is a named method rather than an inline closure so a test can drive the
@@ -121,6 +137,12 @@ func (d *Daemon) markFeedShrinkHistoryWipeSucceeded() {
 // function while leaving the wiring free to regress back to a pre-captured
 // config (#6716).
 func (d *Daemon) onFeedUpdate() error {
+	// Fast path before config/DNS work. The feed-specific active apply repeats
+	// this check after acquiring applySem to catch callbacks already waiting.
+	if err := d.deferActiveConfigApplyIfRollbackTargetPending(); err != nil {
+		return err
+	}
+
 	slog.Info("dynamic-address feed updated, recompiling dataplane")
 	if d.store == nil || d.store.ActiveConfig() == nil {
 		// No active config to apply the feed content against yet (pre-boot
@@ -141,7 +163,7 @@ func (d *Daemon) onFeedUpdate() error {
 	if d.preApplyHookForTest != nil {
 		d.preApplyHookForTest()
 	}
-	return d.applyActiveConfigResult()
+	return d.applyActiveConfigResultForFeedCallback()
 }
 
 // feedsConfigHash returns a stable hash over the feed-SERVER configuration that

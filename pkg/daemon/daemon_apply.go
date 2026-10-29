@@ -303,6 +303,16 @@ func (d *Daemon) applyActiveConfig() {
 // that must not pre-capture a config, so keeping a dead copy would invite the
 // #6716 inversion straight back in.
 func (d *Daemon) applyActiveConfigResult() error {
+	return d.applyActiveConfigResultWithFeedCallbackGuard(false)
+}
+
+// applyActiveConfigResultForFeedCallback applies the current config for a
+// feed update and rechecks rollback-target deferral after acquiring applySem.
+func (d *Daemon) applyActiveConfigResultForFeedCallback() error {
+	return d.applyActiveConfigResultWithFeedCallbackGuard(true)
+}
+
+func (d *Daemon) applyActiveConfigResultWithFeedCallbackGuard(feedCallback bool) error {
 	if d.store == nil {
 		return nil
 	}
@@ -316,6 +326,14 @@ func (d *Daemon) applyActiveConfigResult() error {
 		return nil
 	}
 	defer d.applySem.Release(1)
+	if feedCallback {
+		// #17741: a feed callback can pass its fast-path check before rollback
+		// preflight marks the target install, then wait here for applySem.
+		// Recheck under the semaphore so it cannot re-apply C2 afterward.
+		if err := d.deferActiveConfigApplyIfRollbackTargetPending(); err != nil {
+			return err
+		}
+	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
 		return nil
