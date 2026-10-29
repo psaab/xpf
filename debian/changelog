@@ -1,4 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Dataplane: include live branch-stat and v6 proxy-NDP maps in the
+    retained userspace-XDP shim allowlist with their BPF map types
+    (#18390).
   * CI: Keep the harness-census workflow printable ASCII so its wiring
     self-test remains fail-closed (#18389).
   * Incus HA assurance: accept `secondary-hold` as the peer's non-owner state

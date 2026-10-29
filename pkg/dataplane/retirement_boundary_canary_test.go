@@ -142,6 +142,8 @@ var userspaceShimAllowedMapTypes = map[string]ebpf.MapType{
 	"userspace_cpumap":         ebpf.CPUMap,
 	"userspace_ctrl":           ebpf.Array,
 	"userspace_fallback_stats": ebpf.PerCPUArray, // #4113 (F13): per-CPU, lost-update-free
+	// #16241: per-arm dispatch hit counters.
+	"userspace_branch_stats":   ebpf.PerCPUArray, // Per-CPU for the shim's non-atomic RMW.
 	// #8249: per-CPU, and required to be so — native XDP runs one program
 	// instance per RX queue on distinct CPUs, so a shared array would let one
 	// CPU's fragment sighting decide another CPU's packet.
@@ -154,13 +156,14 @@ var userspaceShimAllowedMapTypes = map[string]ebpf.MapType{
 	"userspace_interface_nat_v6_domain": ebpf.Hash,
 	"userspace_local_v4_domain":         ebpf.Hash,
 	"userspace_local_v6_domain":         ebpf.Hash,
+	"userspace_proxy_ndp_v6_domain":     ebpf.Hash, // #16660: configured per-domain v6 proxy-NDP targets
 	"userspace_sessions":                ebpf.Hash,
 	"userspace_trace":                   ebpf.Hash,
 	// #12119: separate ingress-zone identity from exact listener destination
 	// admission; both are pinned shared maps consumed by the XDP shim.
 	"userspace_wg_ingress_zones":  ebpf.Hash,
 	"userspace_wg_zone_admission": ebpf.Hash,
-	"userspace_land_screen":       ebpf.Hash, // #15789 per-zone LAND disposition
+	"userspace_land_screen":       ebpf.Hash,       // #15789 per-zone LAND disposition
 	"userspace_xsk_map":           ebpf.XSKMap,
 }
 
