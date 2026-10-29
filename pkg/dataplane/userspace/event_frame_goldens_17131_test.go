@@ -93,6 +93,9 @@ func TestEventFrameGoldensDecode17131(t *testing.T) {
 		if d.PolicyID != 777001 || d.PolicyCounterIdx != 888002 || d.AppTimeout != 90 {
 			t.Fatalf("policy = id %d counter %d timeout %d, want 777001/888002/90", d.PolicyID, d.PolicyCounterIdx, d.AppTimeout)
 		}
+		if !d.AppTimeoutLogStated {
+			t.Fatal("#17780: Rust session_update golden must decode its stated app-timeout/log marker")
+		}
 		if d.RTFlowSessionID != 0x5EED1713 {
 			t.Fatalf("RTFlowSessionID = %#x, want 0x5eed1713", d.RTFlowSessionID)
 		}
