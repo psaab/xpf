@@ -101,6 +101,7 @@ func (d *Daemon) stampDigestIfConvergedUnderSem(err error, digest string) bool {
 // to the client rather than hanging the request.
 func (d *Daemon) applyConfig(cfg *config.Config) {
 	cfg = d.resolveDNSBeforeApply(cfg)
+	defer d.consumeDNSResolved(cfg)
 	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "applyConfig") {
 		return
 	}
@@ -269,6 +270,7 @@ func (d *Daemon) applyActiveConfig() {
 	}
 	// Resolve outside applySem on a clone if pre is published (#16601).
 	resolved := d.resolveDNSBeforeApply(pre)
+	defer d.consumeDNSResolved(resolved)
 	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "applyActiveConfig") {
 		return
 	}
@@ -309,6 +311,7 @@ func (d *Daemon) applyActiveConfigResult() error {
 		return nil
 	}
 	resolved := d.resolveDNSBeforeApply(pre)
+	defer d.consumeDNSResolved(resolved)
 	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "applyActiveConfigResult") {
 		return nil
 	}
@@ -405,6 +408,7 @@ func (d *Daemon) applyCancelCtx() context.Context {
 // DHCP / feed and confirmed-rollback callers pass a non-cancellable context so
 // their applies always complete (see applyConfig / executeConfirmedRollback).
 func (d *Daemon) applyConfigLocked(ctx context.Context, cfg *config.Config) (retErr error) {
+	defer d.consumeDNSResolved(cfg)
 	// #9175: a FAILED apply must un-record the #4957 applied marker.
 	//
 	// MarkActiveApplied / MarkAppliedDigest were the marker's ONLY writers, so it

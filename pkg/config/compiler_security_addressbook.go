@@ -438,6 +438,8 @@ func resolveZoneLocalAddressBooks(sec *SecurityConfig) {
 				DNSName:            addr.DNSName,
 				DNSFamily:          addr.DNSFamily,
 				DNSAddresses:       append([]string(nil), addr.DNSAddresses...),
+				DNSLookupFailed:    addr.DNSLookupFailed,
+				DNSUnresolved:      addr.DNSUnresolved,
 				ExpandedPrefixes:   append([]string(nil), addr.ExpandedPrefixes...),
 				RangeSpec:          addr.RangeSpec,
 				WildcardSpec:       addr.WildcardSpec,

@@ -194,8 +194,8 @@ func TestRecoveredDNSStillDownBoundedThenApplies16612(t *testing.T) {
 // TestRecoveredDNSAlarmNamesDNS16612: the boot alarm for a DNS-only
 // refused recovered target names dns-name resolution, not the generic
 // "refused by this build's dataplane" misdiagnosis. It drives the
-// classifier directly on a target whose dns-name failed at Load: the
-// state text is produced by checkRecoveredConfirmTarget only when the
+// classifier directly on a target whose dns-name was unresolved at Load:
+// the state text is produced by checkRecoveredConfirmTarget only when the
 // mirror refuses, so here we pin the classifier half that selects the
 // DNS wording, and the fire-time cells above pin the end-to-end path.
 func TestRecoveredDNSAlarmNamesDNS16612(t *testing.T) {
@@ -205,16 +205,16 @@ func TestRecoveredDNSAlarmNamesDNS16612(t *testing.T) {
 	if !ok || target == nil {
 		t.Fatal("precondition: recovered window must expose its target")
 	}
-	if !targetHasFailedDNSLookup(target) {
-		t.Fatal("precondition: DNS down at Load must leave a lookup-failed entry")
+	if !targetHasUnavailableDNSResolution(target) {
+		t.Fatal("precondition: DNS unavailable at Load must leave an unresolved entry")
 	}
 	if !rollbackTargetRefusedOnlyForDNS(target) {
-		t.Fatal("a lookup-failed target whose refusal is DNS-attributable must be classified DNS-only, so the alarm names dns-name resolution")
+		t.Fatal("an unavailable-DNS target whose refusal is DNS-attributable must be classified DNS-only, so the alarm names dns-name resolution")
 	}
 }
 
 // TestRollbackTargetRefusedOnlyForDNSUnit16612 pins the classifier:
-// a lookup-failed target is DNS-deferred; a healthy or statically
+// a failed or unresolved target is DNS-deferred; a healthy or statically
 // refused target is not.
 func TestRollbackTargetRefusedOnlyForDNSUnit16612(t *testing.T) {
 	failed := &config.Config{}
@@ -222,33 +222,50 @@ func TestRollbackTargetRefusedOnlyForDNSUnit16612(t *testing.T) {
 		Addresses:   map[string]*config.Address{"api": {Name: "api", DNSName: "api.example.com", DNSLookupFailed: true}},
 		AddressSets: map[string]*config.AddressSet{},
 	}
-	if !targetHasFailedDNSLookup(failed) {
+	if !targetHasUnavailableDNSResolution(failed) {
 		t.Fatal("a DNSLookupFailed entry must be detected")
+	}
+	if !failed.Security.AddressBook.DNSEntryLookupFailed("api") {
+		t.Fatal("DNSEntryLookupFailed must remain specific to resolver errors")
+	}
+	unresolved := &config.Config{}
+	unresolved.Security.AddressBook = &config.AddressBook{
+		Addresses:   map[string]*config.Address{"api": {Name: "api", DNSName: "api.example.com", DNSUnresolved: true}},
+		AddressSets: map[string]*config.AddressSet{},
+	}
+	if !targetHasUnavailableDNSResolution(unresolved) {
+		t.Fatal("a cold-cache DNSUnresolved entry must be detected")
+	}
+	if unresolved.Security.AddressBook.DNSEntryLookupFailed("api") {
+		t.Fatal("cold-cache unresolved state must not be reported as a lookup failure")
+	}
+	if !unresolved.Security.AddressBook.DNSEntryResolutionUnavailable("api") {
+		t.Fatal("unresolved entries must be unavailable to strict policy validation")
 	}
 	healthy := &config.Config{}
 	healthy.Security.AddressBook = &config.AddressBook{
 		Addresses:   map[string]*config.Address{"api": {Name: "api", DNSName: "api.example.com", DNSAddresses: []string{"198.51.100.20/32"}}},
 		AddressSets: map[string]*config.AddressSet{},
 	}
-	if targetHasFailedDNSLookup(healthy) {
-		t.Fatal("a resolved entry must not read as lookup-failed")
+	if targetHasUnavailableDNSResolution(healthy) {
+		t.Fatal("a resolved entry must not read as lookup-failed or unresolved")
 	}
 	if rollbackTargetRefusedOnlyForDNS(healthy) {
-		t.Fatal("a target with no failed lookup is never DNS-only")
+		t.Fatal("a target with no failed or unresolved lookup is never DNS-only")
 	}
 	if rollbackTargetRefusedOnlyForDNS(nil) {
 		t.Fatal("nil target is never DNS-only")
 	}
-	// Detection must cover named books too (the Load compile can fail a
-	// lookup in any book the target carries).
+	// Detection must cover named books too (the Load compile can find an
+	// unavailable lookup in any book the target carries).
 	named := &config.Config{}
 	named.Security.NamedAddressBooks = map[string]*config.NamedAddressBook{
 		"eng": {AddressBook: config.AddressBook{Addresses: map[string]*config.Address{
 			"svc": {Name: "svc", DNSName: "svc.example.com", DNSLookupFailed: true},
 		}}},
 	}
-	if !targetHasFailedDNSLookup(named) {
-		t.Fatal("a lookup-failed entry in a named book must be detected")
+	if !targetHasUnavailableDNSResolution(named) {
+		t.Fatal("an unavailable DNS entry in a named book must be detected")
 	}
 }
 

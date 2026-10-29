@@ -78,6 +78,7 @@ func TestConfigSemanticFieldsVisible(t *testing.T) {
 	for _, path := range strings.Fields(`
 Address.DNSAddresses
 Address.DNSLookupFailed
+Address.DNSUnresolved
 Address.DuplicatePrefixes
 Address.ExpandedPrefixes
 Address.OversizedRange

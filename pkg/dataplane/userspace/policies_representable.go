@@ -24,18 +24,18 @@ func allAddressTokensRepresentable(addrRepresentable func(tok string) bool, addr
 	return true
 }
 
-// tokenResolvesViaDNSLookupFailure reports whether a policy address token
-// is runtime-empty ONLY because a dns-name lookup failed (#16595): the
-// name (or a member of its set closure) is a dns-name entry flagged
-// DNSLookupFailed with no usable prefixes. A successful lookup returning
-// zero addresses, a tainted form, and an undefined name are NOT this.
-// Callers treat the token as match-none — per-entry fail-closed — instead
-// of poisoning the whole snapshot with the address sentinel.
-func tokenResolvesViaDNSLookupFailure(cfg *config.Config, tok string) bool {
+// tokenResolvesViaDNSResolutionUnavailable reports whether a policy address
+// token is runtime-empty ONLY because a dns-name resolution is unavailable:
+// the name (or a member of its set closure) is a dns-name entry flagged
+// DNSLookupFailed or DNSUnresolved with no usable prefixes. A successful
+// lookup returning zero addresses, a tainted form, and an undefined name are
+// NOT this. Callers treat the token as match-none — per-entry fail-closed —
+// instead of poisoning the whole snapshot with the address sentinel.
+func tokenResolvesViaDNSResolutionUnavailable(cfg *config.Config, tok string) bool {
 	if cfg == nil || cfg.Security.AddressBook == nil {
 		return false
 	}
-	if !cfg.Security.AddressBook.DNSEntryLookupFailed(tok) {
+	if !cfg.Security.AddressBook.DNSEntryResolutionUnavailable(tok) {
 		return false
 	}
 	// The entry must currently contribute nothing; a stale answer retained
@@ -120,21 +120,22 @@ func nameRepresentable(ab *config.AddressBook, feedOverlay map[string][]string, 
 }
 
 // sideDNSMatchNone reports whether every token on a policy address side
-// that fails representability does so ONLY because a dns-name lookup
-// failed (#16595), and at least one token does. A side that is fully
-// representable, or that fails for any static reason, is not this.
+// that fails representability does so ONLY because dns-name resolution is
+// unavailable (lookup failed or has not run yet), and at least one token does.
+// A side that is fully representable, or that fails for any static reason,
+// is not this.
 func sideDNSMatchNone(cfg *config.Config, addrRepresentable func(string) bool, addrs []string) bool {
-	failed := false
+	unavailable := false
 	for _, tok := range addrs {
 		if addrRepresentable(tok) {
 			continue
 		}
-		if !tokenResolvesViaDNSLookupFailure(cfg, tok) {
+		if !tokenResolvesViaDNSResolutionUnavailable(cfg, tok) {
 			return false
 		}
-		failed = true
+		unavailable = true
 	}
-	return failed
+	return unavailable
 }
 
 // nameRepresentability returns (representable, concrete) for an address-book

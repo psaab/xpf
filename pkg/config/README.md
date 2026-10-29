@@ -859,26 +859,31 @@ Cisco-polarity spelling `.../0.0.0.255`, have no CIDR equivalent and stay
 unimplemented), and `dns-name <fqdn> [ipv4-only|ipv6-only]` is modelled in
 `Address.DNSName`/`DNSFamily` with the current resolution in
 `Address.DNSAddresses`. #16601: compile performs NO network I/O — it
-reads the daemon-owned answer cache (miss = fail-closed empty). A lookup
-FAILURE keeps the last good answer (stale-while-error,
-`Address.DNSLookupFailed`, #16595, retained in the cache) while a
-successful lookup with no usable address matches nothing (fail-closed).
-Resolution (`RefreshDNSAddressBooks`: bounded 8-worker pool, 10s
-aggregate deadline, per-name 5s cap) runs only outside `configstore`
-`s.mu` and the daemon `applySem`: the daemon resolves before acquiring
-`applySem`, and the periodic tick resolves its clone outside the
-semaphore and applies it without re-resolving. `RefreshDNSAddressBooks`
-mutates its argument in place, so it must never be given the published
-active config (#15933); refreshed answers publish as a new store
+reads the daemon-owned answer cache. A cold-cache miss is fail-closed
+empty but marked unresolved (`DNSUnresolved`, #17782), distinct from a
+resolver failure (`DNSLookupFailed`, #16595) or a successful zero-address
+answer. A lookup FAILURE keeps the last good answer (stale-while-error,
+`DNSLookupFailed`, #16595, retained in the cache), while a successful lookup
+with no usable address matches nothing (fail-closed). Resolution (`RefreshDNSAddressBooks`: bounded
+8-worker pool, 10s aggregate deadline, per-name 5s cap) runs outside
+`configstore` `s.mu` and `applySem` for commit, peer-sync, and rollback:
+commits warm the sampled candidate before strict promotion compile (a
+DNS-bearing candidate edited during that lookup is rejected by generation
+binding), peer-sync pre-resolves its text with the local node identity before
+`SyncApply`, and rollback refreshes its frozen target before taking `applySem`.
+The periodic tick resolves its clone outside the semaphore and applies it
+without re-resolving.
+`RefreshDNSAddressBooks` mutates its argument in place, so it must never be
+given the published active config (#15933); refreshed answers publish as a new store
 generation (#16606). #16687: the daemon's pre-apply resolver
 (`resolveDNSBeforeApply`) now resolves EVERY config into a private
 `CloneForDNSRefresh` clone and returns the clone — no arm writes
 through its argument, whatever the caller's provenance (published
 active, frozen rollback target, or owned) — and the #9811 debt retry
 resolves the same way. `policymatch`'s query-snapshot cache keys on
-`DNSAnswersDigest` (scoped identity + prefixes + `DNSLookupFailed`)
-in addition to the config pointer and feed digest, so even a future
-in-place write cannot leave a stale `ContentRejected` verdict
+`DNSAnswersDigest` (scoped identity + prefixes + DNSLookupFailed +
+DNSUnresolved) in addition to the config pointer and feed digest, so even a
+future in-place write cannot leave a stale `ContentRejected` verdict
 resident on the same pointer.
 These expansions live in `Address.ExpandedPrefixes` /
 `DNSAddresses` and are returned by `Address.UsableValues()`, which every

@@ -112,6 +112,11 @@ func TestDNSAnswersDigestDistinguishes16687(t *testing.T) {
 	if config.DNSAnswersDigest(a) == config.DNSAnswersDigest(b) {
 		t.Fatal("DNSLookupFailed change did not change the DNS digest")
 	}
+	b.Security.AddressBook.Addresses["svc"].DNSLookupFailed = false
+	b.Security.AddressBook.Addresses["svc"].DNSUnresolved = true
+	if config.DNSAnswersDigest(a) == config.DNSAnswersDigest(b) {
+		t.Fatal("DNSUnresolved change did not change the DNS digest")
+	}
 	plain := cacheTestConfig11010(config.PolicyPermit)
 	if config.DNSAnswersDigest(plain) != config.DNSAnswersDigest(cacheTestConfig11010(config.PolicyDeny)) {
 		t.Fatal("DNS-less configs with different policies must share the empty DNS digest (policy is not DNS state)")
