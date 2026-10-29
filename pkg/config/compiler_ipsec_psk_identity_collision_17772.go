@@ -758,6 +758,8 @@ func ipsecDNAttributeFor(attribute string) (ipsecDNAttribute, bool) {
 		return ipsecDNAttribute{"\x55\x04\x0a", printable}, true
 	case "ou":
 		return ipsecDNAttribute{"\x55\x04\x0b", printable}, true
+	case "organizationidentifier":
+		return ipsecDNAttribute{"\x55\x04\x61", printable}, true
 	case "t":
 		return ipsecDNAttribute{"\x55\x04\x0c", printable}, true
 	case "d":

@@ -240,6 +240,8 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"octal invalid digit falls back to literal KEY_ID", "inet", "{08}:peer", "key-id", "7b30387d3a70656572"},
 			{"overflowing type falls back to literal KEY_ID", "inet", "{18446744073709551617}:peer", "key-id", "7b31383434363734343037333730393535313631377d3a70656572"},
 			{"identical malformed DN bytes compare equal", "inet", "asn1dn:#3000", "inet", "{9}:#3000"},
+			{"organizationIdentifier PrintableString case folding", "distinguished-name", "organizationIdentifier=Peer", "distinguished-name", "organizationIdentifier=peer"},
+			{"organizationIdentifier equals asn1dn", "distinguished-name", "organizationIdentifier=Peer", "inet", "asn1dn:#300f310d300b0603550461130450656572"},
 		}
 		for _, pair := range pairs {
 			pair := pair
