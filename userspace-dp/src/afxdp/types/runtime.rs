@@ -999,6 +999,12 @@ pub(in crate::afxdp) enum WorkerCommand {
         closed_ns: u64,
     },
     VacateAllSharedExactSlots,
+    /// #18520: a sibling worker observed a handshake transition (validated
+    /// SYN-ACK, or completion) on a pair split across workers; the
+    /// recipient applies it to its own copy of the pair
+    /// (`SessionTable::apply_handshake_relay`). Fanned out once per
+    /// worker-loop pass by `session_glue::fan_out_handshake_relays`.
+    HandshakeRelay(crate::session::HandshakeRelay),
 }
 
 /// One reconcile generation's command queues and their owning worker liveness

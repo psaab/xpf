@@ -30,6 +30,11 @@ are covered by the last bullet):
   standby-gate fields `seen_rg_epoch` / `first_held_ns` plus the #16881
   `held_wheel_tick` and its scheduling-input markers, see "Standby retention"
   below) stays file-private in `mod.rs`, NOT here.
+- `handshake_relay.rs` — #18520 cross-worker TCP handshake relay: the
+  `HandshakeRelay` record, the bounded per-table outbox producers
+  (`queue_synack_promotion_relay` from the post-admission sequence note,
+  `queue_completion_relay` from the HA-Update choke point) and the consumer
+  `apply_handshake_relay`. See "Cross-worker handshake relay (#18520)" below.
 - `expire.rs` — timer-wheel sweeps + eviction: `expire_stale_entries`
   (the per-tick bucket drain / lazy-delete GC pass), the throttled
   `push_to_wheel` scheduler, `wheel_observe`, and the #2120 standby
@@ -677,6 +682,112 @@ be served from the cache for a whole timeout window without its session
 ever being touched, then be reaped while still forwarding (an HA Close
 delta to the peer + BPF redirect-key deletion + a stale flow-cache
 descriptor out-living its session). UDP (60 s) was the most exposed.
+
+## Cross-worker handshake relay (#18520)
+
+Each worker owns its `SessionTable`, and RSS hashes the two directions of a
+flow independently (under SNAT they differ by construction). The SYN installs
+the authoritative pair on worker A and fans `WorkerLocalImport` replicas to
+the siblings; the SYN-ACK lands on worker B, which promotes only ITS replica
+pair; the completing ACK and client data return to A. Before #18520 no
+handshake state crossed between the tables: A's pair stayed pure Opening
+(`established=false, handshake_pending=false`) for the life of the flow, the
+`Timeout:` column read 20, HA sync exported Opening, and every cached payload
+packet on A ran the #16223 evidence scan (`cache_hit_handshake_progress` +
+`node_served_evidence`) only to be refused. The #16223 node-level arms that
+were meant to bridge the gap read `node_served_stamps`, but nothing ever
+merged a sibling's stamps into another table — only the table's own
+completions wrote them (the #16223 tests called `note_node_served_handshake`
+on the replica table directly, a merge production never performs).
+
+The relay carries the two transitions a single worker would have made itself:
+
+| Stage | Produced where | Applied by the receiver when |
+|---|---|---|
+| `Promoted` | `note_tcp_seq_scaled` on an admitted SYN-ACK that just promoted a pair split across workers (replica origin or relayed marker) | the receiver's pair is pure Opening, the relayed SYN-ACK ack equals ITS client SYN end (`tcp_peer_ack_end`, #16042), same forward session id, and the pair serves traffic here. Sets `established && handshake_pending` (the #6752 opening-class gap) and seeds the reverse half's `tcp_peer_ack_end` with the server SYN end, so the client's completing ACK is validated exactly. |
+| `Completed` | `emit_session_state_update_inner` on a transition INTO Established of a split pair — the single choke point every packet-driven completion publishes through, so a deferred cache-hit completion relays only after TX admission, exactly like its HA Update | the receiver's pair is already handshake-pending (a validated SYN-ACK crossed it), same session id, serving. Never applied to a pure Opening pair (#6752/#13679). |
+
+Producers push into a bounded outbox (`HANDSHAKE_RELAY_OUTBOX_CAP` = 256,
+drop-newest + counted); the worker loop drains it once per pass after the
+binding sweep (`session_glue::fan_out_handshake_relays`) into every live
+sibling's command queue (`WorkerCommand::HandshakeRelay`); the receiver applies
+it in `apply_worker_commands`. Nothing runs per packet: an empty outbox costs
+one `is_empty` per loop pass, and only split pairs relay (a flow whose SYN and
+SYN-ACK land on one worker relays nothing). A relayed transition is never
+relayed back (the consumer emits its HA Update with `relay = false`).
+"Serving" is the same served-here proxy `cache_hit_handshake_progress` uses
+(the locally-authored row, or a replica refreshed past its creation), so idle
+replicas on uninvolved workers keep their opening-window reap; carried HA
+counters are deliberately not used.
+
+The relay's evidence is strictly the single-worker evidence: B's replica
+cannot validate a SYN-ACK ack (replicas carry no client ISN, so B fails open
+as before), but the relay carries the ack and A — which seeded the client ISN
+at install — refuses a wrong one, so a forged SYN-ACK on B never promotes the
+authoritative pair.
+
+Two coupled fixes ride with it:
+
+- **Deferred-probe admission key.** A reverse cache hit that completes the
+  forward half via the #16223 companion arm recorded its withheld HA Update
+  and its #16217 stage-transition marker under the FORWARD key, but the
+  flow-cache caller admits/rolls back by the PROBED (reverse) key. The Update
+  was never published (and with 64 such flows the overflow arm forced a full
+  delta-loss resync), the rollback never discarded it, and the stage marker
+  was never taken and accumulated for the life of the worker. Both are now
+  keyed by the probed packet's canonical key (`pending_probe_state_updates`
+  carries `(admission_key, matched_key, …)`).
+- **Steady-state cost.** `probe_hit_inner` armed `companion_progress` for
+  every payload packet, including established ones, and ran
+  `cache_hit_handshake_progress` twice per non-established payload packet —
+  the second call (the #16223 "second failure conjunct" re-stamp arm) could
+  never succeed, because the helper is a pure read and the first call had
+  just returned `None`. The gate now matches `touch_if_stale_with_ack`
+  (`!established || handshake_pending`) and the dead arm is gone. Measured
+  with the test-only `SESSION_KEY_HASHES_FOR_TEST` counter
+  (`afxdp/session_glue/cross_worker_handshake_18520_tests.rs`): see
+  `docs/log/18520.md` for the per-packet hash counts.
+
+**HA replicas (failback).** The completion the relay produces on the
+authoritative row emits its Established HA Update immediately, so the peer
+imports Established (1800 s window) instead of Opening. Two gaps that let a
+replica fall back to Opening are closed with it:
+
+- The worker import (`upsert_synced_with_origin`) now keeps the handshake
+  stage monotonic per incarnation, exactly as `publish_shared_session`
+  already did for the shared map: the coordinator fans the RAW incoming row
+  to the workers, so a later same-session-id import carrying a lower stage
+  (a bulk/export Open built from a sender shared row whose wire the 10 s
+  ct-slice had not yet restamped) regressed an Established replica to
+  Opening. A different session id, a zero id or a stated close class still
+  takes the incoming state. Both merges use the one
+  `TcpHandshakeState::stage_rank` formula.
+- The deferred cache-hit completion publishes on TX admission (the
+  admission-key fix above), including a replica's completion through the
+  #16223 companion arm.
+
+Standby retention ceiling (#2120 HOLD, `stale_ceiling_ns`): a held replica is
+reaped once it has been HELD (counted from the first GC pass that found it
+idle-crossed) longer than `min(STALE_SYNCED_CEILING_MULT x expires_after,
+STALE_SYNCED_CEILING_ABS_NS)` = 3 x window, capped at 7 days. With no hits,
+no state-changing re-import and no primary-liveness renewal (same-id
+same-state re-imports preserve the anchor and the HOLD clock, #16043), an
+Opening replica (20 s window) is idle at 20 s and reaped at about 20 + 60 s;
+an Established one (1800 s) is not even idle for 30 min and is held a
+further 90 min. Note the packet path refuses an idle-crossed row before the
+GC ever reaps it: a held Opening replica older than 20 s misses on the first
+post-failback packet until the activation `RefreshOwnerRGS` re-stamps it.
+
+Cells: `afxdp/session_glue/cross_worker_handshake_18520_tests.rs` (upload and
+download splits establish both tables and A emits an Established HA Update;
+a wrong relayed SYN-ACK ack never promotes A; pure Opening / foreign
+incarnation / idle replica are refused; the established cache hit never
+reaches the evidence helpers; an HA-imported Opening session served
+mid-stream across two workers survives 60 s of production GC passes, also
+after a 30 s standby HOLD and activation; a stale same-incarnation Opening
+import does not regress an Established replica, which stays live through
+60 s of standby and serves the first failback packet; the Opening vs
+Established retention ceiling) and `session/hash_cost_18520_tests.rs`.
 
 ## Flow-cache invalidation on reap (#3776)
 

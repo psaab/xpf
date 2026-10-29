@@ -197,6 +197,13 @@ impl SessionTable {
                 }
             }
         }
+        // #18520: an admitted SYN-ACK that promoted a replica pair (the SYN
+        // was installed on another worker) is relayed to the siblings with
+        // its ack and seq, so the authoritative table can validate and
+        // promote too. This note runs only for Owner-admitted segments that
+        // passed the input filter, after the Owner replay promoted the pair.
+        // Non-SYN-ACK segments return on the first flag test.
+        self.queue_synack_promotion_relay(key, seq, ack, payload_len, tcp_flags);
     }
     /// Seed only the RFC 7323 scale from an admitted initial SYN.
     ///

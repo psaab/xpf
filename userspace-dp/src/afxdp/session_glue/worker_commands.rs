@@ -433,6 +433,46 @@ pub(crate) static SESSION_REPLICATION_QUEUE_DEPTH_SUM: AtomicU64 = AtomicU64::ne
 /// once per enqueue, so the cost is O(1) in the sibling count.
 pub(crate) static SESSION_REPLICATION_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
 
+/// #18520: handshake relays a full sibling queue refused (`push_bounded`).
+/// A refused relay leaves that sibling's pair where it was before #18520
+/// (opening window, #16223 GC retention); it is never retried.
+pub(crate) static HANDSHAKE_RELAY_REFUSED: AtomicU64 = AtomicU64::new(0);
+
+/// #18520: fan this worker's queued cross-worker handshake relays out to
+/// every live sibling queue. The worker loop calls it once per pass, after
+/// the binding sweep — never per packet; with an empty outbox it is one
+/// `Vec::is_empty` test. `scratch` is loop-owned and reused, so a pass that
+/// does relay only allocates the per-sibling `WorkerCommand`s.
+///
+/// Each relay names its incarnation (forward session id) and carries the
+/// segment evidence the receiver re-validates (`apply_handshake_relay`), so
+/// broadcasting to every sibling is safe: a sibling that holds no matching,
+/// serving pair ignores it. One lock acquisition per sibling per pass.
+pub(in crate::afxdp) fn fan_out_handshake_relays(
+    sessions: &mut SessionTable,
+    worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
+    worker_command_queues: &WorkerCommandQueues,
+    scratch: &mut Vec<crate::session::HandshakeRelay>,
+) {
+    if !sessions.has_pending_handshake_relays() {
+        return;
+    }
+    scratch.clear();
+    sessions.drain_handshake_relays_into(scratch);
+    for commands in worker_commands {
+        if worker_command_queues.shed_if_dead(commands) {
+            continue;
+        }
+        let mut pending = worker_queue::lock_recover(commands);
+        for relay in scratch.iter() {
+            if !worker_queue::push_bounded(&mut pending, WorkerCommand::HandshakeRelay(relay.clone())) {
+                HANDSHAKE_RELAY_REFUSED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    scratch.clear();
+}
+
 pub(in crate::afxdp) fn replicate_session_upsert(worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
 worker_command_queues: &WorkerCommandQueues,
 entry: &SyncedSessionEntry,) {

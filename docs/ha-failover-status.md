@@ -326,6 +326,23 @@ later):
    replica fence so a `WorkerLocalImport` expiry cannot evict the
    serving incarnation's cache/NAT state. Pure Opening pairs keep
    the #6752/#13679 refusal; closing pairs keep their fuse.
+   **#18520 residual (intra-node split).** The node-level arms read
+   per-table `node_served_stamps` that no sibling ever wrote, so a
+   flow whose SYN and SYN-ACK land on different workers of ONE node
+   (every SNAT'd flow, by RSS) still never completed on the worker
+   holding the authoritative forward row: `Timeout: 20` for the
+   flow's life, Opening exported over HA sync, and the evidence scan
+   on every cached packet. Fix: a cross-worker handshake relay
+   (`session/handshake_relay.rs`) carries the validated SYN-ACK
+   (with its ack and the server SYN end, re-validated by the
+   receiver, #16042) and the completion between sibling tables
+   through the worker command queues, once per loop pass. The
+   authoritative row now completes on the client's completing ACK
+   and emits the Established HA Update promptly, so a failover
+   imports Established instead of Opening; the worker import keeps
+   the handshake stage monotonic per incarnation, so a stale bulk
+   Open cannot regress that replica back to the 20 s window (whose
+   3 x 20 s standby HOLD ceiling reaped it before a failback).
 5. **Wire-stage / counter carriage (#16217 Wire3–Wire13).** The
    fabric-ingress adoption gate read only the shared synced wire,
    which stayed `HandshakePending` (`w=2`) for exactly the heavy

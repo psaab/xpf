@@ -641,6 +641,8 @@ impl SessionTable {
                 // for the reverse ACK that completes its asymmetric handshake.
                 handshake_pending: syn_ack_first,
                 syn_ack_first,
+                // #18520: no sibling relay has advanced a fresh entry.
+                handshake_relayed: false,
                 // #7212: no static input-filter verdict has been derived for
                 // this ENTRY yet. The forward install's own first packet was
                 // adjudicated by the session-MISS path, but this constructor
@@ -944,6 +946,30 @@ impl SessionTable {
         } else {
             None
         };
+        // #18520: the handshake stage is monotonic per incarnation at the
+        // WORKER import too, exactly as `publish_shared_session` keeps it
+        // for the shared map (#16223). The coordinator fans the RAW incoming
+        // row to the workers, so a later same-incarnation import carrying a
+        // LOWER stage — a bulk/export Open built from a sender shared row
+        // its ct-slice had not yet restamped, landing after the sender's
+        // completion Update — regressed an Established replica to the 20 s
+        // opening window, where the standby HOLD ceiling (3 x 20 s) then
+        // reaps it before a failback. A new incarnation (another session
+        // id), a zero (legacy) id, or a stated close class still takes the
+        // incoming state.
+        let wire_handshake = match (wire_handshake, self.entry_by_key(&key)) {
+            (Some(incoming), Some(existing))
+                if wire_session_id != 0
+                    && wire_close.is_none()
+                    && existing.session_id == wire_session_id
+                    && !existing.closing
+                    && TcpHandshakeState::stage_rank(existing.tcp_handshake_state_wire(protocol))
+                        > TcpHandshakeState::stage_rank(incoming.to_wire()) =>
+            {
+                TcpHandshakeState::from_wire(existing.tcp_handshake_state_wire(protocol))
+            }
+            (incoming, _) => incoming,
+        };
         // Reject peer data that would clobber a locally-owned session
         // unless explicitly allowed (e.g. during HA activation).
         if matches!(self.entry_by_key(&key), Some(existing) if !existing.origin.is_peer_synced())
@@ -1120,6 +1146,8 @@ impl SessionTable {
                 established,
                 handshake_pending,
                 syn_ack_first,
+                // #18520: no sibling relay has advanced a fresh entry.
+                handshake_relayed: false,
                 // #7212: a peer-synced import carries NO locally-derived
                 // input-filter verdict — the peer adjudicated it against the
                 // peer's own interfaces. `UNVALIDATED` makes the first packet
