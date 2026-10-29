@@ -5,12 +5,11 @@
 // whenever the peer's advertised set still listed them.
 //
 // The fix scopes each pass to the transitioning RG (reinitiateIPsecSAsForRG):
-// the RG0 edge handles RG0/unanchored names, a data-RG edge handles that RG's
-// names, and an unanchored RG0 name also reaches ownsIPsecConn's fallback on a
-// data-RG edge when RG0 is undeclared. These cells drive the va35 shape-A wave
-// (progressive RG1-then-RG2 ownership) through the production edges and assert
-// 0 terminates and exactly one initiate per name, plus controls for declared
-// RG0, undeclared RG0, multi-RG names, and the shipped #15194 belt.
+// the RG0 edge handles declared-RG0 names, and a data-RG edge handles that
+// RG's names. In a single-data-RG cluster with undeclared RG0, an unanchored
+// name also reaches ownsIPsecConn's fallback on the one data edge. A
+// multi-data-RG control keeps that name out of every edge to preserve wave
+// idempotency; other cells cover declared RG0, multi-RG names, and the belt.
 
 package daemon
 
@@ -27,21 +26,8 @@ import (
 // waveFixture16710 builds the two-RG store with declared RG0 and every RG
 // secondary, so a test can promote RGs in wave order.
 func waveFixture16710(t *testing.T) (*configstore.Store, *cluster.Manager) {
-	return waveFixtureForRG017784(t, true)
-}
-
-func waveFixtureUndeclaredRG017784(t *testing.T) (*configstore.Store, *cluster.Manager) {
-	return waveFixtureForRG017784(t, false)
-}
-
-func waveFixtureForRG017784(t *testing.T, declareRG0 bool) (*configstore.Store, *cluster.Manager) {
 	t.Helper()
-	var store *configstore.Store
-	if declareRG0 {
-		store = twoRGIPsecStoreWithRG0(t)
-	} else {
-		store = twoRGIPsecStore(t)
-	}
+	store := twoRGIPsecStoreWithRG0(t)
 	cfg := store.ActiveConfig()
 	cm := cluster.NewManager(0, 1)
 	cm.UpdateConfig(cfg.Chassis.Cluster)
@@ -187,37 +173,38 @@ func TestReinitiateRG0EdgeScopesToRG0Names16710(t *testing.T) {
 	}
 }
 
-// A data-RG edge must not touch declared-RG0 or other-RG names. With RG0
-// undeclared, however, a single-candidate unanchored name must reach
-// ownsIPsecConn's fallback on a data-RG edge.
-func TestReinitiateDataRGEdgeAllowsUndeclaredRG0Fallback17784(t *testing.T) {
-	store, cm := waveFixtureUndeclaredRG017784(t)
+// With multiple data RGs and undeclared RG0 there is no unique data edge for
+// the unanchored fallback. Keep the name out of both edges so a later edge
+// cannot belt-terminate the same SA the earlier edge raised.
+func TestUndeclaredRG0FallbackDoesNotFanAcrossDataRGEdges17784(t *testing.T) {
+	store := twoRGIPsecStore(t)
+	cfg := store.ActiveConfig()
+	cm := cluster.NewManager(0, 1)
+	cm.UpdateConfig(cfg.Chassis.Cluster)
 	if _, known := cm.LocalGroupPrimary(0); known {
-		t.Fatal("FIXTURE: this cell requires RG0 to be undeclared")
+		t.Fatal("FIXTURE: RG0 must be undeclared")
 	}
-
+	if _, known := cm.LocalGroupPrimary(2); !known {
+		t.Fatal("FIXTURE: this control requires both RG1 and RG2")
+	}
 	rec := &waveRecorder16710{}
 	d, _ := waveDaemon16710(store, cm, rec)
+
 	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
 	d.reinitiateIPsecSAsForRG(1)
-	terminated, initiated := rec.snapshot()
-	if len(terminated) != 0 {
-		t.Fatalf("#17784: undeclared-RG0 fallback edge terminated %v, want none", terminated)
-	}
-	if got, want := sortedCopy16710(initiated), []string{"vpn-plain", "vpn-rg1"}; !equalNames16710(got, want) {
-		t.Fatalf("#17784: RG1 edge with RG1 primary initiated=%v want %v", initiated, want)
+	_, initiated := rec.snapshot()
+	if got, want := sortedCopy16710(initiated), []string{"vpn-rg1"}; !equalNames16710(got, want) {
+		t.Fatalf("#17784/#16710: first data edge initiated=%v want %v", initiated, want)
 	}
 
-	// CONTROL: with no locally-owned RG, the same unanchored name must not
-	// be initiated even though the edge attribution admits it to ownership.
-	secondaryStore, secondary := waveFixtureUndeclaredRG017784(t)
-	secondaryRec := &waveRecorder16710{}
-	secondaryDaemon, _ := waveDaemon16710(secondaryStore, secondary, secondaryRec)
-	secondaryDaemon.reinitiateIPsecSAsForRG(1)
-	terminated, initiated = secondaryRec.snapshot()
-	if len(terminated) != 0 || len(initiated) != 0 {
-		t.Fatalf("#17784: RG1 edge with no locally-owned RG did work: terminated=%v initiated=%v",
-			terminated, initiated)
+	cm.SetGroupStateForTesting(2, cluster.StatePrimary)
+	d.reinitiateIPsecSAsForRG(2)
+	terminated, initiated := rec.snapshot()
+	if len(terminated) != 0 {
+		t.Fatalf("#17784/#16710: later data edge terminated %v, want none", terminated)
+	}
+	if got, want := sortedCopy16710(initiated), []string{"vpn-rg1", "vpn-rg2"}; !equalNames16710(got, want) {
+		t.Fatalf("#17784/#16710: multi-RG wave initiated=%v want %v", initiated, want)
 	}
 }
 

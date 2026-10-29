@@ -240,6 +240,31 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 				"false, so gating on it would never re-initiate this tunnel — a " +
 				"silent regression on a legal config shape")
 		}
+		if _, known := cm.LocalGroupPrimary(2); known {
+			t.Fatal("FIXTURE: RG2 must be absent; this is the RG1-only topology")
+		}
+
+		var initiated []string
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+			t.Fatalf("#17784: RG1-only edge must initiate the unanchored name, got %v", initiated)
+		}
+
+		// CONTROL: the same RG1-only cluster with no locally-owned group
+		// must not pass ownsIPsecConn's undeclared-RG0 fallback.
+		cm.SetGroupStateForTesting(1, cluster.StateSecondary)
+		initiated = nil
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: RG1 edge with no locally-owned RG initiated %v", initiated)
+		}
 	})
 
 	t.Run("RG0 declared and held by the peer excludes it", func(t *testing.T) {

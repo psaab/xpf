@@ -2160,11 +2160,14 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// charon emits no eager `start_action = start` (the unset default
 	// renders `trap`, #14592), so the tunnel then waits for traffic.
 	//
-	// #16710: scoped to rgID — this leg initiates/belts only names whose
-	// whole RG set is rgID. The RG0 leg handles RG0/unanchored names, and
-	// neither leg touches the other's: a later edge no longer terminates
-	// the healthy SAs an earlier edge of the same takeover sequence just
-	// raised via the #15194 stale-duplicate belt.
+	// #16710: scoped to rgID. Ordinary data-RG names must match this
+	// edge's RG; declared-RG0 names stay on the RG0 edge. #17784 permits
+	// one exception: when RG0 is undeclared and this is the cluster's
+	// only data RG, an unanchored name reaches ownsIPsecConn on that
+	// edge so its existing fallback can decide based on ownership. The
+	// single-data-RG limit avoids offering that same name to each edge
+	// of a multi-data-RG wave, where the #15194 belt would re-terminate
+	// an SA an earlier edge just raised.
 	//
 	// ASYNC for the reason the DHCP lease seed above is async: this runs on the
 	// VRRP event loop, and InitiateConnection shells out to swanctl per
@@ -2971,17 +2974,18 @@ func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 // only declared-RG0/unanchored names, on a data-RG edge only that RG's
 // names — plus the #17784 exception below.
 //
-// #17784: an unanchored (single-candidate RG0) name is NOT confined to
-// the RG0 edge when RG0 is undeclared: no RG0 edge can ever fire for a
-// group the manager does not know, so confining it there loses the eager
-// re-initiation ownsIPsecConn's undeclared-RG0 fallback ("primary for
-// anything", via IsLocalPrimaryAny) exists to provide. On a data-RG edge
-// such a name is therefore admitted to the ownsIPsecConn check, which
-// itself decides: with RG0 declared the fallback is refused and only a
-// genuine RG0 holder passes, so declared-RG0 behaviour is unchanged.
-// A name spanning several RGs is raised by NO single-RG edge: with no
-// further edge its only recovery is strongSwan trap (traffic-triggered)
-// or manual re-initiation. The old code belt-terminated it on every edge.
+// #17784: in a cluster with exactly one data RG and no declared RG0, an
+// unanchored (single-candidate RG0) name has no RG0 edge. The data edge
+// therefore admits it to the ownsIPsecConn check; that existing function
+// applies the undeclared-RG0 fallback (IsLocalPrimaryAny) and initiates
+// only when this node owns a group. Limiting the exception to a single
+// data RG avoids offering the same unanchored name to every edge of a
+// multi-data-RG takeover wave, where the #15194 belt could re-terminate
+// a just-raised SA. When RG0 is declared, the fallback is refused and
+// unanchored names remain on the RG0 edge. A name spanning several RGs
+// has no single-RG initiation edge: with no further edge its only
+// recovery is strongSwan trap (traffic-triggered) or manual
+// re-initiation. The old code belt-terminated it on every edge.
 func (d *Daemon) reinitiateIPsecSAsForRG(rg int) {
 	ss := d.getSessionSync()
 	if ss == nil {
@@ -3073,23 +3077,36 @@ func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
 // ipsecSAsToReinitiateForRG is ipsecSAsToReinitiate additionally scoped to
 // one transitioning redundancy group rg (#16710): a name is in scope only
 // when EVERY candidate group from ipsecConnRedundancyGroups equals rg
-// (the all-candidates rule ipsecSAsForRG uses), with the #17784
-// undeclared-RG0 exception: a single-candidate unanchored (RG0) name on a
-// data-RG edge is admitted to ownsIPsecConn when RG0 is undeclared, since
-// ownsIPsecConn already applies the undeclared-RG0 fallback (and refuses
-// it when RG0 is declared — this admits to the check, never bypasses
-// it). On the RG0 edge only RG0/unanchored names are in scope; on a
-// data-RG edge only that RG's names plus that exception. A multi-RG name
-// is in scope on no edge. Out-of-scope names are neither initiated nor
-// belt-terminated by this edge.
+// (the all-candidates rule ipsecSAsForRG uses), with the #17784 exception:
+// a single-candidate RG0/unanchored name on a data-RG edge is admitted to
+// ownsIPsecConn when RG0 is undeclared AND the cluster has exactly one data
+// RG. This avoids fanning the fallback name across a multi-data-RG wave;
+// ownsIPsecConn remains authoritative, and declared-RG0 names stay on the
+// RG0 edge. A multi-RG name is in scope on no edge. Out-of-scope names are
+// neither initiated nor belt-terminated by this edge.
 func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
 	cfg := d.ipsecAttributionConfig()
 	idx := d.cachedIPsecSANameIndex(cfg)
 	owned := make([]string, 0, len(names))
 	var skipped, outOfScope []string
-	// #17784: RG0 declaredness is a per-pass fact (one manager lookup,
-	// not per name); the fallback branch below is dead without it.
+	// #17784: RG0 declaredness and the number of configured data RGs are
+	// per-pass facts, not per-name lookups. Use the current cluster config
+	// (the attribution config above may be an older loaded IPsec generation).
 	rg0Declared := false
+	singleDataRG := false
+	if cc := d.clusterConfig(); cc != nil {
+		dataRGs := 0
+		for _, group := range cc.RedundancyGroups {
+			if group.ID == 0 {
+				continue
+			}
+			dataRGs++
+			if dataRGs > 1 {
+				break
+			}
+		}
+		singleDataRG = dataRGs == 1
+	}
 	if d.cluster != nil {
 		_, rg0Declared = d.cluster.LocalGroupPrimary(0)
 	}
@@ -3103,10 +3120,9 @@ func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
 			}
 		}
 		if !inScope && rg != 0 && d.cluster != nil && !rg0Declared &&
-			len(rgs) == 1 && rgs[0] == 0 {
-			// #17784: single-candidate unanchored name, RG0 undeclared:
-			// no RG0 edge exists, so let ownsIPsecConn's fallback decide
-			// ("primary for anything") on this data-RG edge.
+			singleDataRG && len(rgs) == 1 && rgs[0] == 0 {
+			// #17784: only data RG, RG0 undeclared; let the existing
+			// ownsIPsecConn fallback decide this single data edge.
 			inScope = true
 		}
 		if !inScope {
