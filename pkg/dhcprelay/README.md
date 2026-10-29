@@ -8,10 +8,11 @@ to the interface name.
 
 - `Manager` — `relay.go`.
 - `NewManager()` — `relay.go`.
-- `Apply(ctx context.Context, cfg *config.DHCPRelayConfig)` — `relay.go`.
+- `Apply(ctx context.Context, cfg *config.DHCPRelayConfig) error` — `relay.go`.
   Reconciles per-interface relay goroutines to the desired config (start
   added, stop removed, restart changed, leave unchanged). Called at boot
-  AND on every day-2 commit (#2348). A nil `cfg` stops all relays.
+  AND on every day-2 commit (#2348). A nil `cfg` stops all relays; a stop
+  join timeout is returned to the caller.
 - `Stats()` — `relay.go`. Per-interface counters.
 - `RelayStats` — `relay.go`.
 - `pendingTable` — `pending.go`. The bounded, expiring outstanding-request
@@ -935,15 +936,13 @@ OFFER/ACK to forward in the first place; clients still dedupe on
   jumbo-MTU link delivering the whole datagram in one frame. Sizing the buffer
   to the UDP maximum ensures the buffer is never the truncation point. (A
   fixed 64 KiB buffer is fine here — the relay read path is not hot.)
-- **Bounded, deterministic `Stop()`.** Reads use the blocking
+- **Prompt cancellation and joined `Stop()`.** Reads use the blocking
   `net.PacketConn.ReadFrom`; a close-on-cancel watcher (started after both
   conns exist) closes BOTH conns when the relay context is cancelled, so a
-  blocked read returns `net.ErrClosed` immediately. The server-response
-  goroutine is tracked with a `WaitGroup` and joined before the relay's
-  `done` channel closes, so `Stop()` (and the `Stop()` inside `Apply()`) is
-  a true join with no packet-dependent wait and no goroutine leak across
-  `Apply`/`Stop` cycles. Both loops cancel the shared context on exit so a
-  one-sided error cannot wedge the join.
+  blocked read normally returns `net.ErrClosed` immediately. The
+  server-response goroutine is tracked with a `WaitGroup` and joined before
+  the relay's `done` channel closes. Both loops cancel the shared context on
+  exit so a one-sided error cannot wedge the usual shutdown join.
 - **Day-2 reconcile (#2348).** `Apply` is invoked at boot (`daemon_run.go`)
   AND on every commit through `daemon.reconcileDHCPRelay` in the
   `applyConfigLocked` pipeline (`daemon_apply.go`, step 16c) — the relay
@@ -959,12 +958,15 @@ OFFER/ACK to forward in the first place; clients still dedupe on
     a change in either tears the old session down and binds a fresh one;
   - leaves an unchanged interface's session running untouched (idempotent —
     a no-op commit causes **no churn**, no socket reopen).
-  The stop/restart teardown reuses the same `Stop()` mechanism (the #2347
-  supervisor + #1915 close-on-cancel + `WaitGroup` join), and the old
-  listener is fully closed before any replacement binds, so a restart never
-  races `EADDRINUSE` and never hangs. The teardown joins run **outside**
-  `m.mu` so a blocked relay's `<-done` does not stall `Stats()` or a
-  concurrent `Apply`.
+  The stop/restart teardown joins run **outside** `m.mu` so `Stats()` remains
+  available while an owner stops. All joins share one `relayStopTimeout`
+  deadline (rather than multiplying the timeout by interface or address
+  family); on timeout `Apply` returns an error, leaves the old relay tracked,
+  and does not start a replacement on that interface. A later reconcile can
+  complete cleanup after the old owner exits. The manager serializes reconcile
+  transactions so a timed-out stop cannot be raced by another `Apply`.
+  Bootstrap rollback includes this error in its DEGRADED aggregation instead
+  of claiming that every DHCP relay was stopped.
 - **Startup readiness retry.** When `Apply` starts a relay (boot or a day-2
   add) and the interface is not yet ready (no IPv4 address, or a dynamic
   VLAN/tunnel not yet created), the relay retries resolving the interface +
