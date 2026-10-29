@@ -1,8 +1,10 @@
 // Package sysservices holds shared operational state used by `show system
 // services`: effective management-listener state and the sshd state probe
-// for unmanaged SSH. It is a LEAF package (imports only the standard library)
-// so the daemon, local CLI, and remote gRPC renderer can all depend on it
-// without an import cycle.
+// for unmanaged SSH. It has a narrow dependency boundary: production code
+// imports the standard library plus pkg/diagcmd for shared diagnostic
+// admission. pkg/diagcmd has no dependency back to sysservices, so the daemon,
+// local CLI, and remote gRPC renderer can all depend on sysservices without an
+// import cycle.
 //
 // The point of this package (#6385/#6401): both `show system services`
 // renderers — the local CLI (pkg/cli/cli_show_system.go) AND the remote gRPC
