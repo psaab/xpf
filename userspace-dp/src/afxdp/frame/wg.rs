@@ -1056,28 +1056,24 @@ fn learn_wg_pmtu(
         let Some(engine) = forwarding.wg_engines.get(id) else {
             continue;
         };
-        for (pubkey, ep) in engine.peer_endpoints() {
-            let Some(ep) = ep else { continue };
-            let canon = crate::afxdp::wg::canonicalize_endpoint(ep);
-            if canon.ip() == quoted_dst && canon.port() == dst_port {
-                // Resolve the quoted peer's physical route exactly as
-                // the encap and PTB consumers do. This local interface /
-                // static-route MTU is the maximum credible outer PMTU;
-                // the peer's learned value must never exceed it.
-                // Only route/interface MTU is consumed here, not the neighbor MAC.
-                let outer = outer_physical_egress_resolution(forwarding, endpoint, quoted_dst, None);
-                let physical_ifindex = outer_egress_ifindex_for_fallback(
-                    endpoint.logical_ifindex,
-                    forwarding,
-                    &outer,
-                );
-                let local_mtu =
-                    outer_physical_egress_base_mtu(forwarding, physical_ifindex, &outer);
-                engine.note_peer_pmtu(&pubkey, advertised, outer_v6, local_mtu, now_ns);
-                crate::afxdp::wg::counters::WgCounters::bump(&engine.counters().pmtu_learned);
-                return WgPtbOutcome::Learned;
-            }
-        }
+        let Some(pubkey) = engine.peer_for_endpoint_ip_port(quoted_dst, dst_port) else {
+            continue;
+        };
+        // Resolve the quoted peer's physical route exactly as
+        // the encap and PTB consumers do. This local interface /
+        // static-route MTU is the maximum credible outer PMTU;
+        // the peer's learned value must never exceed it.
+        // Only route/interface MTU is consumed here, not the neighbor MAC.
+        let outer = outer_physical_egress_resolution(forwarding, endpoint, quoted_dst, None);
+        let physical_ifindex = outer_egress_ifindex_for_fallback(
+            endpoint.logical_ifindex,
+            forwarding,
+            &outer,
+        );
+        let local_mtu = outer_physical_egress_base_mtu(forwarding, physical_ifindex, &outer);
+        engine.note_peer_pmtu(&pubkey, advertised, outer_v6, local_mtu, now_ns);
+        crate::afxdp::wg::counters::WgCounters::bump(&engine.counters().pmtu_learned);
+        return WgPtbOutcome::Learned;
     }
     WgPtbOutcome::Ignored
 }

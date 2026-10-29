@@ -394,6 +394,15 @@ pub(crate) struct PeerEntry {
     pub(crate) config: Arc<PeerConfig>,
 }
 
+/// Endpoint captured with the peer-table position used by the quote-match
+/// path. The IP-keyed bucket keeps packet lookups scoped to peers sharing
+/// that underlay while preserving table order for duplicate endpoints.
+struct EndpointPeerIndexEntry {
+    table_index: u32,
+    endpoint: SocketAddr,
+    peer: Arc<Peer>,
+}
+
 /// Atomically-swappable peer-routing table. The fields are reconciled
 /// together (a new config snapshot rebuilds all of them) and a hot-path
 /// reader must observe them as a unit, or else it can pair a
@@ -497,11 +506,12 @@ pub(crate) struct WgEngine {
     /// Combined peer-routing table behind a single ArcSwap. See
     /// `PeerTable` doc for the atomicity rationale.
     table: ArcSwap<PeerTable>,
-    /// #17774: effective peer endpoints grouped by IP. Control-plane
-    /// endpoint changes and table reconciles update this index; packet-path
-    /// PMTU reads probe only peers sharing the destination IP (no table scan
-    /// or temporary allocation).
-    endpoint_peers_by_ip: RwLock<FxHashMap<IpAddr, Vec<Arc<Peer>>>>,
+    /// #17774: effective peer endpoints grouped by canonical IP. Reconcile
+    /// and live-endpoint changes update the index; packet-path PMTU reads
+    /// probe only peers sharing the destination IP, without allocating or
+    /// scanning the full peer table. Each entry also preserves the endpoint
+    /// port for exact quote-to-peer matching.
+    endpoint_peers_by_ip: RwLock<FxHashMap<IpAddr, Vec<EndpointPeerIndexEntry>>>,
     /// Slow-path serialization lock for peer-table mutation.
     /// `reconcile_peers` and `install_session` both take it to
     /// prevent stale-Arc install races across peer removal. Hot path
@@ -958,12 +968,32 @@ impl WgEngine {
             .read()
             .unwrap_or_else(|e| e.into_inner());
         let mut best: Option<usize> = None;
-        for peer in endpoints.get(&endpoint_ip)? {
-            if let Some(pmtu) = peer.learned_pmtu(now_ns) {
+        for indexed in endpoints.get(&endpoint_ip)? {
+            if let Some(pmtu) = indexed.peer.learned_pmtu(now_ns) {
                 best = Some(best.map_or(pmtu, |current| current.min(pmtu)));
             }
         }
         best
+    }
+
+    /// #17774: resolve the first current peer whose canonical endpoint
+    /// matches an IP/port quote. The shared IP index preserves peer-table
+    /// order for duplicate endpoints and avoids materializing every peer.
+    #[inline]
+    pub(crate) fn peer_for_endpoint_ip_port(
+        &self,
+        endpoint_ip: IpAddr,
+        endpoint_port: u16,
+    ) -> Option<[u8; WG_KEY_LEN]> {
+        let endpoints = self
+            .endpoint_peers_by_ip
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        endpoints
+            .get(&endpoint_ip)?
+            .iter()
+            .find(|indexed| indexed.endpoint.port() == endpoint_port)
+            .map(|indexed| indexed.peer.pubkey)
     }
 
 
@@ -1045,26 +1075,34 @@ impl WgEngine {
         };
         let peer = &entry.peer;
         let old_endpoint = peer.live_endpoint().or(entry.config.endpoint);
-        if old_endpoint.map(|old| old.ip()) != Some(endpoint.ip()) {
+        let old_canonical = old_endpoint.map(super::canonicalize_endpoint);
+        let new_canonical = super::canonicalize_endpoint(endpoint);
+        if old_canonical != Some(new_canonical) {
             let mut endpoints = self
                 .endpoint_peers_by_ip
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(old_ip) = old_endpoint.map(|old| old.ip()) {
-                let remove_key = if let Some(peers) = endpoints.get_mut(&old_ip) {
-                    peers.retain(|candidate| candidate.pubkey != *peer_pubkey);
+            if let Some(old) = old_canonical {
+                let remove_key = if let Some(peers) = endpoints.get_mut(&old.ip()) {
+                    peers.retain(|candidate| candidate.peer.pubkey != *peer_pubkey);
                     peers.is_empty()
                 } else {
                     false
                 };
                 if remove_key {
-                    endpoints.remove(&old_ip);
+                    endpoints.remove(&old.ip());
                 }
             }
-            endpoints
-                .entry(endpoint.ip())
-                .or_default()
-                .push(peer.clone());
+            let peers = endpoints.entry(new_canonical.ip()).or_default();
+            let insert_at = peers.partition_point(|candidate| candidate.table_index < idx);
+            peers.insert(
+                insert_at,
+                EndpointPeerIndexEntry {
+                    table_index: idx,
+                    endpoint: new_canonical,
+                    peer: peer.clone(),
+                },
+            );
             peer.adopt_live_endpoint(endpoint);
         } else {
             peer.adopt_live_endpoint(endpoint);
@@ -1438,14 +1476,19 @@ impl WgEngine {
                 cg.remove(pubkey);
             }
         }
-        let mut endpoint_peers_by_ip: FxHashMap<IpAddr, Vec<Arc<Peer>>> =
+        let mut endpoint_peers_by_ip: FxHashMap<IpAddr, Vec<EndpointPeerIndexEntry>> =
             FxHashMap::default();
-        for entry in &new_peers {
+        for (table_index, entry) in new_peers.iter().enumerate() {
             if let Some(endpoint) = entry.peer.live_endpoint().or(entry.config.endpoint) {
+                let endpoint = super::canonicalize_endpoint(endpoint);
                 endpoint_peers_by_ip
                     .entry(endpoint.ip())
                     .or_default()
-                    .push(entry.peer.clone());
+                    .push(EndpointPeerIndexEntry {
+                        table_index: table_index as u32,
+                        endpoint,
+                        peer: entry.peer.clone(),
+                    });
             }
         }
         *self

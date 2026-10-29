@@ -2930,6 +2930,16 @@ fn wg_pmtu_endpoint_lookup_is_indexed_17774() {
         "packet-path PMTU lookup must not collect/scan peer endpoints"
     );
 
+    let start = frame
+        .find("fn learn_wg_pmtu(")
+        .expect("the PTB learner is present");
+    let body = &frame[start..];
+    let body = &body[..body.find("\n}").expect("the PTB learner body closes")];
+    assert!(
+        body.contains("peer_for_endpoint_ip_port") && !body.contains("peer_endpoints"),
+        "PTB quote matching must use the endpoint index instead of collecting all peers"
+    );
+
     let engine_src = crate::test_support::source_scan::blank_comments_and_strings(
         include_str!("engine.rs"),
     );
@@ -2949,6 +2959,24 @@ fn wg_pmtu_endpoint_lookup_is_indexed_17774() {
             && !accessor.contains(".peers.iter()")
             && !accessor.contains(".collect("),
         "the indexed accessor must not scan the full peer table or allocate"
+    );
+
+    let start = engine_src
+        .find("pub(crate) fn peer_for_endpoint_ip_port(")
+        .expect("the indexed quote-to-peer accessor is present");
+    let accessor = &engine_src[start..];
+    let accessor = &accessor[..accessor
+        .find("\n    }")
+        .expect("the quote-to-peer accessor body closes")];
+    assert!(
+        accessor.contains("endpoint_peers_by_ip") && accessor.contains(".get(&endpoint_ip)"),
+        "quote resolution must hash-probe the endpoint index"
+    );
+    assert!(
+        !accessor.contains("peer_endpoints")
+            && !accessor.contains(".peers.iter()")
+            && !accessor.contains(".collect("),
+        "quote resolution must not scan the full peer table or allocate"
     );
 }
 
@@ -2977,6 +3005,21 @@ fn learned_pmtu_endpoint_index_semantics_17774() {
             peer(unset_pub, None),
         ],
     });
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51820),
+        Some(a_pub),
+        "a quote with the first peer's endpoint port resolves that peer"
+    );
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51821),
+        Some(b_pub),
+        "a quote with the second peer's endpoint port resolves that peer"
+    );
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51822),
+        None,
+        "an unknown endpoint port is not attributed to a peer"
+    );
     assert!(engine.note_peer_pmtu(&a_pub, 1400, false, 0, 100));
     assert!(engine.note_peer_pmtu(&b_pub, 1300, false, 0, 100));
     assert_eq!(
@@ -3014,11 +3057,27 @@ fn learned_pmtu_endpoint_index_semantics_17774() {
         "reconcile indexes a peer's updated configured endpoint"
     );
     assert_eq!(
+        engine.peer_for_endpoint_ip_port("203.0.113.8".parse().unwrap(), 51820),
+        Some(a_pub),
+        "reconcile updates the exact endpoint index"
+    );
+    assert_eq!(
         engine.learned_pmtu_for_endpoint_ip("198.51.100.7".parse().unwrap(), 101),
         Some(1300),
         "reconcile removes a peer from its prior endpoint bucket"
     );
 
+    engine.adopt_live_endpoint(&b_pub, "198.51.100.7:51822".parse().unwrap());
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51822),
+        Some(b_pub),
+        "a same-IP live port change updates quote resolution"
+    );
+    assert_eq!(
+        engine.peer_for_endpoint_ip_port("198.51.100.7".parse().unwrap(), 51821),
+        None,
+        "a same-IP live port change removes the previous quote endpoint"
+    );
     engine.adopt_live_endpoint(&a_pub, "203.0.113.9:51820".parse().unwrap());
     assert_eq!(
         engine.learned_pmtu_for_endpoint_ip("203.0.113.9".parse().unwrap(), 101),
