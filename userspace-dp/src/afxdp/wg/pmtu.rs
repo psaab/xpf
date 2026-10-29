@@ -14,11 +14,12 @@
 //!   - keyed by PEER PUBKEY (the peer's endpoint may roam; the pubkey
 //!     is the stable identity `WgEngine::peer_for_dest` returns);
 //!   - an outer PMTU (the largest outer L3 datagram the underlay now
-//!     admits), floored at the family's protocol minimum — 1280 for an
-//!     IPv6 outer (RFC 8201), 68 for an IPv4 outer (RFC 791) — and
-//!     never raised by a PTB (only a strictly smaller, floored value
-//!     replaces the stored one, so a forged large PTB cannot inflate
-//!     the budget);
+//!     admits), capped at the local egress/route MTU when known and
+//!     floored at the family's protocol minimum — 1280 for an IPv6
+//!     outer (RFC 8201), 68 for an IPv4 outer (RFC 791) — so a large
+//!     advertised MTU cannot record an impossible budget. Only a
+//!     strictly smaller, capped-and-floored offer replaces the stored
+//!     one; the floor still wins if the local MTU is lower;
 //!   - aged: an entry is honoured for `WG_PMTU_AGE_NS` (10 min,
 //!     RFC 8201 §4's suggested probe cadence) after its last accepted
 //!     PTB, then expires so a path that widens again (failover onto a
@@ -78,18 +79,24 @@ pub(crate) fn effective_pmtu(stored_mtu: u64, learned_ns: u64, now_ns: u64) -> O
 }
 
 /// Decide the stored value after an offered PTB. Returns the value to
-/// store, or `None` to leave the store untouched. Only a strictly
-/// smaller (post-floor) offer replaces a fresh stored value; an equal
-/// or larger offer still refreshes the aging stamp at the call site,
-/// so a repeat PTB for the same path keeps the entry alive without
-/// ever raising the budget.
+/// store, or `None` to leave the store untouched. The advertisement is
+/// first capped to the local egress/route MTU (when known), then floored
+/// for the outer family. Only a strictly smaller value replaces a fresh
+/// stored value; an equal or larger offer still refreshes the aging stamp
+/// at the call site.
 #[inline]
 pub(crate) fn pmtu_after_offer(
     current: Option<usize>,
     offered_mtu: usize,
     outer_v6: bool,
+    local_mtu: usize,
 ) -> Option<usize> {
-    let offered = offered_mtu.max(wg_pmtu_floor(outer_v6));
+    let offered = (if local_mtu == 0 {
+        offered_mtu
+    } else {
+        offered_mtu.min(local_mtu)
+    })
+    .max(wg_pmtu_floor(outer_v6));
     match current {
         Some(cur) if offered >= cur => None,
         _ => Some(offered),

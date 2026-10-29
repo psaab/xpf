@@ -1011,7 +1011,8 @@ impl WgEngine {
         self.peer_arc(peer_pubkey)?.learned_pmtu(now_ns)
     }
 
-    /// #16711: record a validated underlay PTB for `peer_pubkey`.
+    /// #17747: record a validated underlay PTB for `peer_pubkey`, capped
+    /// to the local egress/route MTU before the family's mandatory floor.
     /// Returns true when the stored PMTU was lowered. No-op (false)
     /// for an unknown peer.
     pub(crate) fn note_peer_pmtu(
@@ -1019,12 +1020,13 @@ impl WgEngine {
         peer_pubkey: &[u8; WG_KEY_LEN],
         offered_mtu: usize,
         outer_v6: bool,
+        local_mtu: usize,
         now_ns: u64,
     ) -> bool {
         let Some(peer) = self.peer_arc(peer_pubkey) else {
             return false;
         };
-        peer.offer_pmtu(offered_mtu, outer_v6, now_ns)
+        peer.offer_pmtu(offered_mtu, outer_v6, local_mtu, now_ns)
     }
 
     /// Whether the named peer currently has a confirmed (usable for
