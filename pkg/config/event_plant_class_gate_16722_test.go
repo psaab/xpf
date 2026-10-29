@@ -278,3 +278,86 @@ func TestCompactOneKeyPolicySuperuserQuarantined17762(t *testing.T) {
 		})
 	}
 }
+
+func compiledEventPolicyByName17762(t *testing.T, tree *ConfigTree, name string) *EventPolicy {
+	t.Helper()
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("CompileConfigLenient: %v", err)
+	}
+	for _, policy := range cfg.EventOptions {
+		if policy != nil && policy.Name == name {
+			return policy
+		}
+	}
+	t.Fatalf("compiled config has no event policy %q (has %d)", name, len(cfg.EventOptions))
+	return nil
+}
+
+// Fold-2 B1: quoted EMPTY policy names are accepted by the compiler, so
+// attribution must reach them too.
+func TestCompactEmptyPolicyNameAttributed17762(t *testing.T) {
+	direct := `event-options policy "" { events ping_test_failed; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } }`
+	container := `event-options policy { "" { events ping_test_failed; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`
+	for name, source := range map[string]string{"direct": direct, "container": container} {
+		t.Run(name, func(t *testing.T) {
+			tree := gate16722Hier(t, source)
+			if !treeMayHaveEventCommands9984(tree) {
+				t.Fatal("gate missed compiler-accepted empty-named policy")
+			}
+			StampChangedEventPlantClasses(nil, tree, "alice")
+			if pol := compiledEventPolicyByName17762(t, tree, ""); pol.PlantClass != "alice" {
+				t.Fatalf("forged empty-named policy PlantClass=%q, want alice", pol.PlantClass)
+			}
+			quarantineTree := gate16722Hier(t, source)
+			QuarantineUntrustedEventPlantClasses(quarantineTree)
+			pol := compiledEventPolicyByName17762(t, quarantineTree, "")
+			if pol.PlantClass != "" {
+				t.Fatalf("quarantined empty-named PlantClass=%q, want empty marker", pol.PlantClass)
+			}
+			if len(pol.ThenCommands) != 1 || pol.ThenCommands[0] != "set system host-name x" {
+				t.Fatalf("quarantine disturbed commands: %q", pol.ThenCommands)
+			}
+		})
+	}
+}
+
+// Fold-2 B2: an instance literally NAMED policy must not spawn phantom
+// census policies from its own property children.
+func TestCompactPolicyNamedPolicyNoPhantomCensus17762(t *testing.T) {
+	sources := map[string]string{
+		"bare policy name":   `event-options policy { policy { events ping_test_failed; then { change-configuration { commands "set system host-name x"; } } } }`,
+		"quoted policy name": `event-options policy { "policy" { events ping_test_failed; then { change-configuration { commands "set system host-name x"; } } } }`,
+	}
+	for name, source := range sources {
+		t.Run(name, func(t *testing.T) {
+			tree := gate16722Hier(t, source)
+			StampChangedEventPlantClasses(nil, tree, "alice")
+			census := eventPolicyNodes9984(tree)
+			keys := make([]string, 0, len(census))
+			for key := range census {
+				keys = append(keys, key)
+			}
+			if len(census) != 1 {
+				t.Fatalf("census keys=%v, want exactly the real policy", keys)
+			}
+			if _, ok := census["policy"]; !ok {
+				t.Fatalf("real policy missing from census keys=%v", keys)
+			}
+			if pol := compiledEventPolicyByName17762(t, tree, "policy"); pol.PlantClass != "alice" {
+				t.Fatalf("policy-named policy PlantClass=%q, want alice", pol.PlantClass)
+			}
+			if _, err := CompileConfig(tree); err != nil {
+				t.Fatalf("stamped policy-named policy no longer strictly compiles: %v", err)
+			}
+		})
+	}
+}
+
+func TestSetEventPlantClassDoesNotInventEmptyPolicy17762(t *testing.T) {
+	tree := gate16722Hier(t, `event-options { policy p { events ping_test_failed; } }`)
+	setEventPlantClass9984(tree, "", "alice")
+	if _, exists := eventPolicyNodes9984(tree)[""]; exists {
+		t.Fatal("stamping invented an empty-named policy absent from the raw census")
+	}
+}
