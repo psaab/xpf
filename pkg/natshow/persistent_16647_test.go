@@ -170,9 +170,9 @@ func TestRenderPersistentDetailSessionCountsScopedToLeaseIdentity17737(t *testin
 			want: []int{1, 1},
 		},
 		{
-			name:     "single lease control",
+			name:     "single lease raw-default scope control",
 			bindings: []*dataplane.PersistentNATBinding{persistentBinding17737(1111, 6, 0, natIP)},
-			v4:       []dataplane.SessionValue{snatSession17737(natIP, 40000, 1), snatSession17737(natIP, 40000, 1)},
+			v4:       []dataplane.SessionValue{snatSession17737(natIP, 40000, 0), snatSession17737(natIP, 40000, 0)},
 			v4Keys: []dataplane.SessionKey{
 				{Protocol: 6},
 				{Protocol: 6},
@@ -186,8 +186,8 @@ func TestRenderPersistentDetailSessionCountsScopedToLeaseIdentity17737(t *testin
 				persistentBinding17737(2222, 17, 0, natIPV6),
 			},
 			v6: []dataplane.SessionValueV6{
-				snatSessionV617737(natIPV6, 40000, 1),
-				snatSessionV617737(natIPV6, 40000, 1),
+				snatSessionV617737(natIPV6, 40000, 0),
+				snatSessionV617737(natIPV6, 40000, 0),
 			},
 			v6Keys: []dataplane.SessionKeyV6{
 				{Protocol: 6},
