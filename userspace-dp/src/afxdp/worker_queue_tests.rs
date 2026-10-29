@@ -857,7 +857,6 @@ fn worker_queue_13076_below_refactor_ceiling_and_pptp_extracted() {
 // ---------------------------------------------------------------------------
 use super::pptp_broadcast::retry_pending_pptp_call_installs_for_test as retry_pending_pptp_call_installs;
 
-use super::*;
 use crate::session::pptp::PptpCall;
 
 fn queues(n: usize) -> Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> {
@@ -1465,7 +1464,6 @@ fn a_complete_rebroadcast_clears_the_older_install_retry_12133() {
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use super::*;
 
 fn key(index: usize) -> SessionKey {
     SessionKey {

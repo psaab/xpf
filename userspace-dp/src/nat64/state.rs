@@ -2088,7 +2088,7 @@ impl Nat64State {
         // replica to age-reap frees a live `(pool_v4, port)`.
         holder: crate::nat::NatHolder,
         // #7799: see `Nat64OverlapDraining`.
-        draining_rules: &[crate::nat::SourceNatRule],
+        _draining_rules: &[crate::nat::SourceNatRule],
         iface_allocs: Option<&crate::nat::InterfaceNatAllocators>,
     ) -> Result<(Ipv4Addr, u16), SourceNatFailureReason> {
         let prefix = self

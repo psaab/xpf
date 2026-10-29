@@ -51,24 +51,24 @@ fn wg_encapped_size_with_outer_mtu(inner_len: usize, outer_v6: bool, outer_mtu: 
     wg_record_len + outer_ip_len + 8
 }
 
-/// Test-only seam: counts every entry into `outer_physical_egress_resolution`
-/// (each one performs exactly one outer-underlay FIB LPM). `wg_encap_frame`
-/// resolves the outer route ONCE per packet (#3992); a test resets this to 0,
-/// builds one frame, and asserts the count is exactly 1 (it was 2 before the
-/// dedup).
-///
-/// #6294: this counter is THREAD-LOCAL, not a process-global atomic. The
-/// default `cargo test` runs the suite in parallel, and every sibling
-/// `wg_encap_frame` / `outer_*` test bumps this same counter. A process-global
-/// value let a sibling's bump land between #6294's reset and read, corrupting
-/// the exact `== 1` assertion (a load-sensitive flake, not a product bug). A
-/// thread-local counter isolates each test thread's count: a test resets,
-/// bumps, and reads entirely on its own thread, so no parallel sibling can
-/// interfere — strictly stronger than serializing every bumper behind a lock,
-/// and it needs no guard threaded through the ~14 outer-resolution tests. The
-/// single-threaded test flow (reset -> one `wg_encap_frame` -> read) is
-/// bit-identical to the former atomic. See `wg_tests.rs`'s
-/// `outer_route_resolve_count_is_thread_local_isolated` for the fail-on-revert.
+// Test-only seam: counts every entry into `outer_physical_egress_resolution`
+// (each one performs exactly one outer-underlay FIB LPM). `wg_encap_frame`
+// resolves the outer route ONCE per packet (#3992); a test resets this to 0,
+// builds one frame, and asserts the count is exactly 1 (it was 2 before the
+// dedup).
+//
+// #6294: this counter is THREAD-LOCAL, not a process-global atomic. The
+// default `cargo test` runs the suite in parallel, and every sibling
+// `wg_encap_frame` / `outer_*` test bumps this same counter. A process-global
+// value let a sibling's bump land between #6294's reset and read, corrupting
+// the exact `== 1` assertion (a load-sensitive flake, not a product bug). A
+// thread-local counter isolates each test thread's count: a test resets,
+// bumps, and reads entirely on its own thread, so no parallel sibling can
+// interfere — strictly stronger than serializing every bumper behind a lock,
+// and it needs no guard threaded through the ~14 outer-resolution tests. The
+// single-threaded test flow (reset -> one `wg_encap_frame` -> read) is
+// bit-identical to the former atomic. See `wg_tests.rs`'s
+// `outer_route_resolve_count_is_thread_local_isolated` for the fail-on-revert.
 #[cfg(test)]
 thread_local! {
     static OUTER_ROUTE_RESOLVE_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0);

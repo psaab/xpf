@@ -160,7 +160,7 @@ pub(crate) fn run_accept_loop(
     Ok(())
 }
 
-pub(crate) use super::lifecycle::{accept_step, AcceptBackoff, AcceptDecision, AcceptStep};
+pub(crate) use super::lifecycle::{accept_step, AcceptStep};
 
 #[cfg(test)]
 mod accept_loop_tests_17123 {

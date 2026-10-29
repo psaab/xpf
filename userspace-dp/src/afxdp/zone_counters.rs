@@ -378,7 +378,7 @@ mod tests {
         // would drop these. The flat LUT + slot map must count them.
         let store = ZoneCounterStore::default();
         let flood_store = FloodCounterStore::default();
-        let (map, caches) = build_map(&[40000, 7, 65533], &store, &flood_store);
+        let (map, _caches) = build_map(&[40000, 7, 65533], &store, &flood_store);
         assert!(!map.overflow_active);
         // sorted → 7 gets slot 1, 40000 slot 2, 65533 slot 3.
         assert_eq!(map.slot_of(7), 1);
@@ -396,7 +396,7 @@ mod tests {
     fn build_dedups_and_skips_zero() {
         let store = ZoneCounterStore::default();
         let flood_store = FloodCounterStore::default();
-        let (map, caches) = build_map(&[0, 5, 5, 9, 0, 5], &store, &flood_store);
+        let (map, _caches) = build_map(&[0, 5, 5, 9, 0, 5], &store, &flood_store);
         assert_eq!(map.slot_of(5), 1);
         assert_eq!(map.slot_of(9), 2);
         assert_eq!(map.slot_of(0), 0);
@@ -410,7 +410,7 @@ mod tests {
             (1..=(crate::afxdp::zone_slot_counters::ZONE_SLOT_ASSIGNABLE_SLOTS as u32 + 5))
                 .collect();
         let flood_store = FloodCounterStore::default();
-        let (map, caches) = build_map(&ids, &store, &flood_store);
+        let (map, _caches) = build_map(&ids, &store, &flood_store);
         assert!(
             map.overflow_active,
             "exceeding assignable slots must set overflow_active"
@@ -460,7 +460,7 @@ mod tests {
         let configured: FxHashSet<u32> = ids.iter().copied().collect();
         store.reconcile(&configured);
         let flood_store = FloodCounterStore::default();
-        let (map2, caches2) = build_map(&ids, &store, &flood_store);
+        let (map2, _caches2) = build_map(&ids, &store, &flood_store);
 
         assert!(map2.overflow_active, "apply 2 must overflow");
         assert_eq!(map2.slot_of(Z), 0, "Z must have lost its slot in apply 2");

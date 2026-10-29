@@ -1663,6 +1663,7 @@ fn current_generation_install_and_delete_still_apply_on_poisoned_shared_mutex() 
     );
 }
 
+
 // #2962: kicking an export for an EMPTY owner-RG set is a no-op — it must
 // not consume an export sequence and the wait must drain nothing, preserving
 // the pre-split early return semantics.
@@ -2123,7 +2124,8 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
     persistent_lease_hold: None,
         source_nat_static: None,
     };
-    let mut publish = |mut entry: SyncedSessionEntry, port: u16| {
+    let publish = |mut entry: SyncedSessionEntry, port: u16| {
+
         entry.key.src_port = port;
         // test_metadata() is fabric-ingress by default; plain rows clear it,
         // fabric-ingress rows keep it, so both legs are exercised as-is.
@@ -4536,7 +4538,7 @@ fn synced_import_unpublished_counts_the_absent_map_not_the_owner_decision_7209()
 #[test]
 fn no_worker_registered_keeps_a_synced_import_off_the_reservation_path_7209() {
     // --- Leg A: NO worker -> the reservation must not run at all. ----------
-    let mut no_worker = Coordinator::new();
+    let no_worker = Coordinator::new();
     assert!(
         no_worker.workers.records().is_empty(),
         "fixture broken: a fresh Coordinator must have no worker records, or \
@@ -5341,7 +5343,7 @@ fn an_import_under_an_emptied_forwarding_table_publishes_a_dead_reverse_companio
     // empty-table leg produces, for a completely different reason. Without
     // this the control could not distinguish "resolved to a real owner" from
     // "resolved to nothing", which is the whole contrast.
-    healthy.update_ha_state(&[
+    let _ = healthy.update_ha_state(&[
         HAGroupStatus {
             rg_id: 1,
             active: true,
@@ -5458,7 +5460,7 @@ fn the_reconcile_replay_rederives_a_dead_reverse_companion_7209() {
     // prewarm's reason rather than the replay's. Measured: it did, and only the
     // counter assertion caught it. Activating here, with no sessions yet, makes
     // the prewarm a no-op and leaves the replay as the only repair path.
-    coordinator.update_ha_state(&[
+    let _ = coordinator.update_ha_state(&[
         HAGroupStatus {
             rg_id: 1,
             active: true,
@@ -11771,7 +11773,7 @@ fn coord_list_pages_beyond_4096_10512() {
     assert_eq!(page2.len(), 4, "terminal page holds the rest");
     assert!(complete2, "terminal page must complete");
     assert!(cont2.is_empty(), "terminal page continues nothing");
-    let mut ids: std::collections::HashSet<u64> = page1
+    let ids: std::collections::HashSet<u64> = page1
         .iter()
         .chain(page2.iter())
         .map(|r| r.expected_rt_flow_session_id)

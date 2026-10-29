@@ -16,9 +16,9 @@ use super::forwarding_build::build_forwarding_state;
 use super::test_fixtures::nat_snapshot;
 use crate::nat::SourceNatLookup;
 use crate::protocol::{
-    ConfigSnapshot, Nptv6RuleSnapshot, SourceNATRuleSnapshot, StaticNATRuleSnapshot,
+    ConfigSnapshot, Nptv6RuleSnapshot, StaticNATRuleSnapshot,
 };
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 
 const E: &str = "172.16.80.8";
 const SRV: &str = "93.184.216.34";

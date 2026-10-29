@@ -76,7 +76,7 @@ fn flowless_probes_do_not_scale_with_table_size_15116() {
 
     let iters = 2_000usize;
     // Best-of-3 to damp noise; compare per-call.
-    let mut best = |small: &dyn Fn() -> bool, large: &dyn Fn() -> bool| -> (f64, f64) {
+    let best = |small: &dyn Fn() -> bool, large: &dyn Fn() -> bool| -> (f64, f64) {
         let mut bs = f64::MAX; let mut bl = f64::MAX;
         for _ in 0..3 {
             let s = time_n(|| { std::hint::black_box(small()); }, iters).as_nanos() as f64 / iters as f64;

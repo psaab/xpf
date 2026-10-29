@@ -30,6 +30,7 @@ pub(in crate::afxdp) use wg::{
 // the frame bytes — otherwise a specific-peer-route + no-default-route WG flow
 // resolves the egress binding to the logical wgN ifindex (no XSK binding) and
 // the TX dispatcher NO_EGRESS_BINDING-drops it.
+
 // #1440 consolidated outer-header serializers. Re-exported at
 // `frame::write_eth_header`, `frame::write_eth_header_slice`, and
 // `frame::headers::*` to keep existing call sites in icmp.rs,
@@ -119,6 +120,7 @@ pub(in crate::afxdp) use inspect::{
 };
 #[cfg(test)]
 pub(in crate::afxdp) use inspect::parse_session_flow;
+
 pub(super) use inspect::{
     ZoneEncodedFabricStamp, frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset,
     live_frame_ports_bytes, live_frame_ports_from_meta_bytes,

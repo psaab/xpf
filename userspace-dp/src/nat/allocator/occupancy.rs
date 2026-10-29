@@ -520,7 +520,7 @@ impl AddressOccupancy {
         // be claimed at age ~0. Ranges <=256 bound the probe at 256
         // CAS attempts, so the innermost mutex is held only briefly;
         // lock order is unchanged (recycle stays innermost).
-        let mut small_recycle = if self.range <= SMALL_POOL_QUARANTINE_MAX_RANGE {
+        let small_recycle = if self.range <= SMALL_POOL_QUARANTINE_MAX_RANGE {
             Some(self.recycle.lock().unwrap_or_else(|e| e.into_inner()))
         } else {
             None

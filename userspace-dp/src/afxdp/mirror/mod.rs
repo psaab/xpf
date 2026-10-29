@@ -4,17 +4,19 @@ mod fast_path;
 mod resolver;
 
 pub(in crate::afxdp) use fast_path::{
-    commit_staged_mirror_clone, enqueue_admitted_mirror_clone_to_live,
-    enqueue_sampled_mirror_clone, snapshot_staged_mirror_clone, stage_sampled_mirror_clone,
+    commit_staged_mirror_clone, enqueue_admitted_mirror_clone_to_live, snapshot_staged_mirror_clone, stage_sampled_mirror_clone,
 };
 // `enqueue_mirror_clone` and `enqueue_mirror_clone_to_live` are production-live
 // (#17195: their false test-only labels are gone).
 // `enqueue_sampled_mirror_clone_to_live` is dead in every build, so fast_path.rs
 // gates it `#[cfg(test)]`; the re-export follows that gate (#17195).
+
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(in crate::afxdp) use fast_path::{enqueue_mirror_clone, enqueue_mirror_clone_to_live};
 #[cfg(test)]
 pub(in crate::afxdp) use fast_path::enqueue_sampled_mirror_clone_to_live;
+#[cfg(test)]
+pub(in crate::afxdp) use fast_path::enqueue_sampled_mirror_clone;
 pub(in crate::afxdp) use resolver::{
     admit_mirror_clone_to_live, mirror_cos_queue_id, mirror_output_filter_drops,
     record_mirror_clone_result, sample_then_admit_mirror_clone, MirrorSampleAdmission,

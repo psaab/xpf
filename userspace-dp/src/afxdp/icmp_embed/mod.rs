@@ -364,7 +364,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    _shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
 ) -> EmbeddedMatchOutcome<EmbeddedIcmpMatch> {
@@ -392,7 +392,7 @@ pub(super) fn try_embedded_icmp_nat_match_from_frame_with_ingress_zone(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    _shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     now_ns: u64,
     ingress_zone_override: Option<u32>,
@@ -983,7 +983,7 @@ mod return_resolution_15771 {
         "2001:db8:99::50".parse().expect("v6 target")
     }
 
-    fn egress_row(ifindex: i32, src_mac: [u8; 6]) -> EgressInterface {
+    fn egress_row(_ifindex: i32, src_mac: [u8; 6]) -> EgressInterface {
         EgressInterface {
             bind_ifindex: 0,
             vlan_id: 0,

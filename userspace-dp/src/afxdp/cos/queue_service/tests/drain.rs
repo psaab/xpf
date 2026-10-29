@@ -147,7 +147,7 @@ fn equal_flow_cap_reaches_drain_shaped_tx_entry_path() {
         None,
     );
     let queued_before = root.queues[0].hot.queued_bytes;
-    let root_tokens_before = root.tokens;
+    let _root_tokens_before = root.tokens;
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
     let mut shared_recycles = Vec::new();

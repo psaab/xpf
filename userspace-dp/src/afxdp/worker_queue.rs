@@ -21,7 +21,6 @@
 //   `xpf_userspace_worker_command_queue_poison_recoveries_total`.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex, MutexGuard, TryLockError};
 
@@ -286,7 +285,7 @@ impl HaTransitionDebt {
         for rg in demote.iter().chain(refresh.iter()) {
             self.supersede(*rg);
         }
-        let mut deduped = |rgs: &[i32]| {
+        let deduped = |rgs: &[i32]| {
             let mut out = Vec::with_capacity(rgs.len());
             for rg in rgs {
                 if !out.contains(rg) {
@@ -1006,6 +1005,9 @@ pub(in crate::afxdp) mod pptp_broadcast;
 #[cfg(test)]
 pub(in crate::afxdp) use pptp_broadcast::drain_pptp_control_inbox;
 pub(in crate::afxdp) use pptp_broadcast::{
-    broadcast_pptp_call_forget, broadcast_pptp_forget, broadcast_pptp_install,
-    drain_pptp_control_inbox_at_epoch, drain_pptp_control_inbox_for_worker,
+    drain_pptp_control_inbox_at_epoch,
+};
+#[cfg(test)]
+pub(in crate::afxdp) use pptp_broadcast::{
+    broadcast_pptp_forget, broadcast_pptp_install, drain_pptp_control_inbox_for_worker,
 };

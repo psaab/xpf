@@ -2906,7 +2906,7 @@ fn nat64_frag_assoc_hit_reenforces_owner_rg_6927() {
     // One helper run: install an association from a first fragment under the
     // ACTIVE runtime, then replay a non-first fragment under `ha` and report
     // whether it forwarded.
-    let mut run = |ha: &BTreeMap<i32, HAGroupRuntime>, ident: u32| -> u64 {
+    let run = |ha: &BTreeMap<i32, HAGroupRuntime>, ident: u32| -> u64 {
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
         binding.interface = Arc::<str>::from("reth1.0");
         let mut sessions = SessionTable::new();

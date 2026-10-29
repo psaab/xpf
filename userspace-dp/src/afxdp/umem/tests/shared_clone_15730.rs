@@ -22,9 +22,9 @@ fn shared_clone_umem_mut_does_not_panic_15730() {
     // Mutable bindings so this cell panics rather than merely failing to
     // compile when the pre-fix `&mut self` + `Rc::get_mut` accessor is
     // restored: fail-on-revert is the panic, not a type error.
-    let mut owner = WorkerUmem::new_for_test(64).expect("build hermetic worker umem");
-    let mut secondary = owner.clone();
-    let mut tertiary = owner.clone();
+    let owner = WorkerUmem::new_for_test(64).expect("build hermetic worker umem");
+    let secondary = owner.clone();
+    let tertiary = owner.clone();
     assert!(owner.shares_allocation_with(&secondary));
     assert!(owner.shares_allocation_with(&tertiary));
 
@@ -55,8 +55,8 @@ fn shared_clone_umem_mut_does_not_panic_15730() {
 
 #[test]
 fn umem_mut_overlap_is_a_loud_panic_not_an_alias_15730() {
-    let mut umem = WorkerUmem::new_for_test(64).expect("build hermetic worker umem");
-    let mut clone = umem.clone();
+    let umem = WorkerUmem::new_for_test(64).expect("build hermetic worker umem");
+    let clone = umem.clone();
 
     // Two simultaneously-live `&mut Umem` would alias the libxdp ring
     // state. The fix must keep that a loud (RefCell) panic — it must not

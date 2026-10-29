@@ -1093,7 +1093,7 @@ fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
 #[test]
 fn sixteen_distinct_ipv4_sources_do_not_starve_victim_15248() {
     let _g = global_bucket_test_lock();
-    let reason = GeneratedErrorReason::Reject;
+    let _reason = GeneratedErrorReason::Reject;
     let zone = 15_249u32;
     let t0 = 16_000_000_000u64;
     let forwarding = forwarding_with_reject_zones(&[zone]);

@@ -9,8 +9,8 @@ use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
 mod ba;
 use ba::{
     BaIngressTrust, ba_ingress_trust_for_packet, resolve_cos_class_lp_rewrite,
-    resolve_cos_priority_class_lp_rewrite, resolve_cos_queue_lp_rewrite,
-    resolve_trusted_ba_class_queue_id, resolve_trusted_ba_loss_priority,
+    resolve_cos_priority_class_lp_rewrite,
+    resolve_trusted_ba_class_queue_id,
     resolve_trusted_ba_queue_id,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1274,7 +1274,7 @@ fn resolve_cos_tx_selection_internal(
         // #6236 PR-2C: fold the `needs_tx_eval` precheck and the output-filter
         // fetch into ONE lookup (see the cached flowless arm above).
         let mut reject = false;
-        let ingress_is_v6 = meta.addr_family as i32 == libc::AF_INET6;
+        let _ingress_is_v6 = meta.addr_family as i32 == libc::AF_INET6;
         if let Some(output_filter) = crate::filter::interface_output_filter_needing_tx_eval(
             &forwarding.filter_state,
             egress_ifindex,

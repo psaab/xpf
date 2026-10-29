@@ -209,3 +209,5 @@ jobs:
         env:
           CARGO: cargo
         run: make clippy-rust
+      - name: Rust warning ratchet (#17190)
+        run: make lint-rust-baseline

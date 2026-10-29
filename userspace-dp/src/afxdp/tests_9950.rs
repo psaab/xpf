@@ -766,7 +766,7 @@ fn f035_middle_ttl_rewrite_failure_then_terminal_keeps_overlap_anchored_10285() 
         middle_dbg.forward, 1,
         "the non-terminal middle must queue before the rewrite refusal"
     );
-    let mut middle_request = binding
+    let middle_request = binding
         .scratch
         .scratch_forwards
         .pop()

@@ -819,7 +819,7 @@ pub(crate) fn handle_stream(
         if !response.session_deltas.is_empty()
             && (!drained_delta_slots.is_empty() || !drained_delta_workers.is_empty())
         {
-            let mut guard = lock_server_state_recover(&state);
+            let guard = lock_server_state_recover(&state);
             if !guard.quarantined_after_panic {
                 guard.afxdp.arm_delta_loss_for_slots(&drained_delta_slots);
                 guard
