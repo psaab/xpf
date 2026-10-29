@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Routing: authorize rib-group peer returns from the route owner's
+    import-rib destinations in the correct direction. Keep kernel rules
+    and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
+    the deferred VRF-to-VRF forward-import warning (#17705).
+
   * Configstore: render commit summaries as individual set lines without
     cloning either tree or building both complete output strings; reuse
     equal lines so a 50k-line one-line edit stays under 10 MiB allocated
