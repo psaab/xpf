@@ -65,6 +65,9 @@ xpf (0.0.0) unstable; urgency=medium
     state, sets `forcePreemptOnce`, and queues its kick in one `vi.mu`
     critical section, preventing a delayed force from crossing MASTER
     entry/resignation drains and re-promoting a resigned node (#17827).
+  * Docs: correct the #16695 GRE classifier citations with verified
+    definition and tail-call lines for the pinned and current master trees
+    (#17732).
   * Coalesce/ipmon: ipmon actuation is single-flighted — the engine
     tick is the only Tick driver (the loop is started context-only,
     no second sweep goroutine), and Tick itself claims an in-flight
