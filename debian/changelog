@@ -1,4 +1,6 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Cluster: match installed secondary probe sources to target address family,
+    so wrong-family tolerant configs release frozen IP-monitor debt (#18413).
   * API: mark duplicate-membership interfaces unbound in detail output
     (#18446).
 
