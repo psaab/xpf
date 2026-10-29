@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: exercise WireGuard PTB learning through the RX poll
+    path and assert that the next forwarded packet uses the learned MTU
+    budget (#17775).
+
   * Userspace dataplane: pin the #17722 DNS-quarantine snapshot with a
     Go-generated fixture the Rust parser test consumes end to end
     (follow-up to #18485).
