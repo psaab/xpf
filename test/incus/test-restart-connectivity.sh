@@ -69,8 +69,13 @@ fw0_is_primary() {
 	return 0
 }
 
+rg_on_fw0() {
+	incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null |
+		grep -A2 "Redundancy group: $1 " | grep -q "node0.*primary"
+}
+
 restore_fw0_primary() {
-	local label="$1"
+	local label="$1" deadline rg out last_err=""
 	if fw0_is_primary; then
 		return 0
 	fi
@@ -79,15 +84,31 @@ restore_fw0_primary() {
 		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 	done
 	sleep 1
+	# #18523: one RG at a time, polled, re-requested until the budget runs
+	# out. A single fixed sleep after three blind requests was shorter than
+	# one admission window plus a post-restart bulk (~50 sessions/s), and
+	# swallowed the refusal that said why.
+	deadline=$((SECONDS + ${RESTORE_FW0_WAIT:-60}))
 	for rg in 0 1 2; do
-		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
+		while ! rg_on_fw0 "$rg"; do
+			if ((SECONDS >= deadline)); then
+				break 2
+			fi
+			out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
+			if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
+				last_err="RG$rg: $(head -1 <<<"$out")"
+			fi
+			for _ in 1 2 3 4 5; do
+				rg_on_fw0 "$rg" && break
+				sleep 1
+			done
+		done
 	done
-	sleep 5
 	if fw0_is_primary; then
 		pass "$label: fw0 restored as primary"
 		return 0
 	else
-		fail "$label: could not restore fw0 as primary"
+		fail "$label: could not restore fw0 as primary within ${RESTORE_FW0_WAIT:-60}s${last_err:+ (last refusal: $last_err)}"
 		return 1
 	fi
 }

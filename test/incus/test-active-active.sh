@@ -174,12 +174,16 @@ sleep "$SETTLE_WAIT"
 fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 
 rg1_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node0" | awk '{print $3}')
+rg1_node1=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node1" | awk '{print $3}')
 rg2_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 2" | grep "node0" | awk '{print $3}')
 
-if [[ "$rg1_node0" == "secondary" ]]; then
+# #18523: the untargeted yield parks the old owner in `secondary-hold`
+# (the same rule as ha_rg_owner_verdict, #18503), and a move is only a move
+# when node1 actually took the group.
+if [[ "$rg1_node0" =~ ^secondary(-hold)?$ && "$rg1_node1" == "primary" ]]; then
 	pass "RG1 (WAN) moved to fw1"
 else
-	fail "RG1 did not move to fw1 (node0 state: $rg1_node0)"
+	fail "RG1 did not move to fw1 (node0 state: $rg1_node0, node1 state: $rg1_node1)"
 fi
 
 if [[ "$rg2_node0" == "primary" ]]; then

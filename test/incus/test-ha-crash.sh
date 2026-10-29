@@ -109,6 +109,20 @@ instance_running() {
 	[[ "$status" == "RUNNING" ]]
 }
 
+# start_instance <inst> <label> — #18523. `incus start` used to run with its
+# error discarded, so a VM that could not start at all (on tcp: "All virtual
+# functions on parent device mlx1 are already in use") surfaced only as
+# "xpfd did not restart within 90s". Name the start failure itself.
+start_instance() {
+	local inst="$1" label="$2" err
+	if err=$(incus start "$inst" 2>&1); then
+		return 0
+	fi
+	instance_running "$inst" && return 0
+	fail "${label}: incus start ${inst} failed: $(printf '%s' "$err" | head -1)"
+	return 1
+}
+
 wait_for_xpfd() {
 	local inst="$1" max="$2"
 	for i in $(seq 1 "$max"); do
@@ -232,29 +246,47 @@ test_new_tcp() {
 }
 
 # Restore fw0 as primary for all RGs
+rg_on_fw0() {
+	incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null |
+		grep -A2 "Redundancy group: $1 " | grep -q "node0.*primary"
+}
+
 restore_fw0_primary() {
-	local label="$1"
-	# If fw0 is already primary, nothing to do
+	local label="$1" deadline rg out last_err=""
 	if fw0_is_primary; then
 		pass "$label: fw0 already primary"
 		return 0
 	fi
-	# Reset manual failover flags
 	for rg in 0 1 2; do
 		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
 	done
 	sleep 1
-	# Manual failover all RGs to fw0 (from fw1 which is current primary)
+	# #18523: one RG at a time, polled, re-requested until the budget runs
+	# out. A single fixed sleep after three blind requests was shorter than
+	# one admission window plus a post-restart bulk (~50 sessions/s), and
+	# swallowed the refusal that said why.
+	deadline=$((SECONDS + ${RESTORE_FW0_WAIT:-60}))
 	for rg in 0 1 2; do
-		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
+		while ! rg_on_fw0 "$rg"; do
+			if ((SECONDS >= deadline)); then
+				break 2
+			fi
+			out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
+			if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
+				last_err="RG$rg: $(head -1 <<<"$out")"
+			fi
+			for _ in 1 2 3 4 5; do
+				rg_on_fw0 "$rg" && break
+				sleep 1
+			done
+		done
 	done
-	sleep 5
 	if fw0_is_primary; then
 		pass "$label: fw0 restored as primary"
 		return 0
 	else
-		fail "$label: could not restore fw0 as primary"
+		fail "$label: could not restore fw0 as primary within ${RESTORE_FW0_WAIT:-60}s${last_err:+ (last refusal: $last_err)}"
 		return 1
 	fi
 }
@@ -399,7 +431,7 @@ sleep 1
 
 # Restart fw0
 info "Phase 1: Restarting fw0"
-incus start "$FW0" 2>/dev/null || true
+start_instance "$FW0" "phase1" || true
 
 restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 if [[ -n "$restart_time" ]]; then
@@ -607,7 +639,7 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	test_new_tcp "phase3-cycle${cycle}" "$CONN_TIMEOUT" || cycle_failures=$((cycle_failures + 1))
 
 	# Restart fw0
-	incus start "$FW0" 2>/dev/null || true
+	start_instance "$FW0" "phase3-cycle${cycle}" || true
 	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase3-cycle${cycle}: fw0 restarted (${restart_time}s)"
@@ -670,7 +702,7 @@ sleep 3
 for inst in "$FW0" "$FW1"; do
 	if ! instance_running "$inst"; then
 		# Try to start it
-		incus start "$inst" 2>/dev/null || true
+		start_instance "$inst" "final" || true
 		wait_for_xpfd "$inst" "$VM_RESTART_WAIT" >/dev/null 2>&1 || true
 	fi
 	if instance_running "$inst"; then
