@@ -1,7 +1,6 @@
 //! #15102: outer-fragmented WireGuard must reassemble before decap, and a
 //! WG tail must stay on the helper (not the kernel).
 
-use super::tests_support::*;
 use super::*;
 use crate::afxdp::forwarding_build::build_forwarding_state;
 use crate::afxdp::gre_reassembly::{GreReassembler, OfferAdmission, gre_outer_frag_counter_test_lock};

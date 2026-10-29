@@ -151,10 +151,10 @@ impl BindlessIpsecSelectorFence {
         let translated_destination = base.rewrite_dst.unwrap_or(destination);
         self.rows.iter().any(|row| {
             let pool_hits = |pool: AddressRange| {
-                ((row.local.overlaps(pool) && row.remote.contains(translated_destination))
+                (row.local.overlaps(pool) && row.remote.contains(translated_destination))
                     || (row.remote.overlaps(pool) && row.local.contains(translated_destination))
                     || (row.local.overlaps(pool) && row.remote.contains(destination))
-                    || (row.remote.overlaps(pool) && row.local.contains(destination)))
+                    || (row.remote.overlaps(pool) && row.local.contains(destination))
             };
             pool_ranges_v4.iter().any(|&(start, end)| {
                 pool_hits(AddressRange {

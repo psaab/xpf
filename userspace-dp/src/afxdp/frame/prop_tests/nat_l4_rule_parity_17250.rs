@@ -117,7 +117,7 @@ fn reference_l4_delta(flow: &SessionFlow, nat: &NatDecision) -> u16 {
         return 0;
     }
     let mut sum: u32 = 0;
-    let mut addr = |old: IpAddr, new: IpAddr, sum: &mut u32| {
+    let addr = |old: IpAddr, new: IpAddr, sum: &mut u32| {
         match (old, new) {
             (IpAddr::V4(o), IpAddr::V4(n)) => {
                 for (ow, nw) in ipv4_words(o).into_iter().zip(ipv4_words(n)) {

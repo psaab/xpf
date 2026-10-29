@@ -1,4 +1,3 @@
-use super::*;
 use crate::protocol::{FibNextHopWire, FibRouteWire};
 use std::io::Write;
 
@@ -227,7 +226,6 @@ impl super::Coordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn fib_dump_returns_installed_route_and_generation_11370() {

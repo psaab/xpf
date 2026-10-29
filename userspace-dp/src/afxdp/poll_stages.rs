@@ -2077,7 +2077,7 @@ pub(super) fn stage_ipsec_passthrough_check_with_scope(
     ambiguous_zone: Option<u32>,
     ambiguous_scope_ifindex: Option<i32>,
     route_override_table: Option<&str>,
-    binding_live: &BindingLiveState,
+    _binding_live: &BindingLiveState,
     worker_ctx: &WorkerContext,
     now_ns: u64,
     now_secs: u64,

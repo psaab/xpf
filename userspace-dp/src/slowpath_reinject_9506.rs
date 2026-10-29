@@ -11,7 +11,7 @@ use crate::afxdp::ipsec_inner_queue::{
 use crate::io_uring_write::WriteResult;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -883,7 +883,7 @@ impl ReinjectCore {
     /// Validate-only admission. This intentionally never inserts an entry,
     /// touches the worker channel, or reaches any TUN writer.
     pub(crate) fn validate_dry_run(&self, frame: &SubmitFrame) -> AdmitDecision {
-        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let refusal = if frame.flags & !(SUBMIT_FLAG_SHADOW | SUBMIT_FLAG_DRY_RUN | SUBMIT_FLAG_FORWARD) != 0 {
             Some(ADMIT_BAD_LEASE)
         } else if inner.shutdown {
@@ -2440,7 +2440,7 @@ where
             ring_terminal: false,
             demotion_cause: None,
         },
-        WriteResult::NothingWritten(bytes, message) => {
+        WriteResult::NothingWritten(bytes, _message) => {
             let verdict = sync_fallback(bytes);
             LeasedWriteOutcome {
                 ok: matches!(verdict, TransferVerdict::Written { .. }),

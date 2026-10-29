@@ -15,7 +15,6 @@ use super::super::poll_stages::{
     IpsecPassthroughOutcome, stage_ipsec_passthrough_check_with_scope,
 };
 use super::*;
-use crate::afxdp::tests_support::*;
 use std::net::Ipv4Addr;
 
 const VIP: &str = "172.16.80.8";

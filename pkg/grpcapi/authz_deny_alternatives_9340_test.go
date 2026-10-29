@@ -78,6 +78,7 @@ func TestPartialDenyLogsOncePerClassAndPattern9340(t *testing.T) {
 		t.Fatalf("want one partial-enforcement record for five requests, got %d:\n%s", n, out)
 	}
 	if !strings.Contains(out, "show qqq-zzz$") {
+		t.Errorf("the record does not name the alternative:\n%s", out)
 	}
 	if strings.Contains(out, "cannot be enforced on the gRPC surface") {
 		t.Errorf("a pattern that fires as a whole got the whole-pattern record:\n%s", out)

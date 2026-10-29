@@ -455,7 +455,7 @@ mod tests {
         // would drop these.
         let store = FloodCounterStore::default();
         let traffic_store = ZoneCounterStore::default();
-        let (map, caches) = build_map(&[40000, 7, 65533], &store, &traffic_store);
+        let (map, _caches) = build_map(&[40000, 7, 65533], &store, &traffic_store);
         assert!(!map.overflow_active);
         assert_eq!(map.slot_of(7), 1);
         assert_eq!(map.slot_of(40000), 2);
@@ -471,7 +471,7 @@ mod tests {
             (1..=(crate::afxdp::zone_slot_counters::ZONE_SLOT_ASSIGNABLE_SLOTS as u32 + 5))
                 .collect();
         let traffic_store = ZoneCounterStore::default();
-        let (map, caches) = build_map(&ids, &store, &traffic_store);
+        let (map, _caches) = build_map(&ids, &store, &traffic_store);
         assert!(map.overflow_active);
         let assigned = (1..=65535u32).filter(|&z| map.slot_of(z) != 0).count();
         assert_eq!(
@@ -601,7 +601,7 @@ mod tests {
         let configured: FxHashSet<u32> = ids.iter().copied().collect();
         store.reconcile(&configured);
         let traffic_store = ZoneCounterStore::default();
-        let (map2, caches2) = build_map(&ids, &store, &traffic_store);
+        let (map2, _caches2) = build_map(&ids, &store, &traffic_store);
         assert!(map2.overflow_active);
         assert_eq!(map2.slot_of(Z), 0);
 

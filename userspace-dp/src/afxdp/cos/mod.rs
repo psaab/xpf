@@ -12,7 +12,7 @@ pub(super) mod token_bucket;
 pub(super) mod tx_completion;
 
 pub(super) use admission::{
-    apply_cos_admission_ecn_policy, cos_flow_aware_buffer_limit, cos_queue_flow_share_limit,
+    apply_cos_admission_ecn_policy, cos_flow_aware_buffer_limit,
     cos_queue_flow_share_limit_with_active_shards, cos_shared_exact_buffer_limit,
 };
 pub(super) use builders::{ensure_cos_interface_runtime, refresh_cos_runtime_shared_root_leases};
@@ -22,18 +22,14 @@ pub(super) use cross_binding::{
 };
 pub(super) use flow_hash::{cos_flow_bucket_index, cos_item_flow_key};
 pub(super) use queue_ops::{
-    cos_exact_queue_serviceable, cos_item_len, cos_queue_clear_orphan_snapshot_after_drop,
+    cos_item_len, cos_queue_clear_orphan_snapshot_after_drop,
     cos_queue_drain_all, cos_queue_front, cos_queue_front_with_cap, cos_queue_is_empty,
     cos_queue_len, cos_queue_peek_min_bucket, cos_queue_pop_front_no_snapshot,
     cos_queue_pop_known_bucket, cos_queue_push_back, cos_queue_push_front,
     cos_queue_remove_orphan_snapshot_at, cos_queue_restore_front,
     cos_queue_v_min_consume_suspension, cos_queue_v_min_continue, publish_committed_queue_vtime,
 };
-// #1763: reference single-pop API retained for tests (fused out of the
-// production drain paths). #17195: queue_ops gates it `#[cfg(test)]`, so
-// this re-export is test-only too.
-#[cfg(test)]
-pub(super) use queue_ops::{cos_queue_pop_front, cos_queue_pop_front_with_cap};
+
 pub(super) use queue_service::drain_shaped_tx;
 pub(super) use token_bucket::{
     COS_MIN_BURST_BYTES, CoSQueueLeaseAcquireTelemetry, cos_effective_burst_bytes,

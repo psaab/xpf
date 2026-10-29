@@ -2265,7 +2265,7 @@ fn gre_outer_host_inbound_denial_blocks_decap_11054() {
 /// delegate the packet only after a matching SA hit.
 #[test]
 fn gre_inner_ipsec_sa_hit_reaches_delegated_outlet_10516() {
-    let mut forwarding = build_forwarding_state(&gre_to_self_native_untagged_snapshot());
+    let forwarding = build_forwarding_state(&gre_to_self_native_untagged_snapshot());
     forwarding.ipsec_sa.publish_empty_dump_for_test();
     let src = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2));
     let dst = IpAddr::V4(Ipv4Addr::new(10, 255, 0, 1));

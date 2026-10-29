@@ -99,7 +99,7 @@ use attempt::{
 };
 use dispatch::{EncapOutcome, InboundOutcome, dispatch_inbound, encap_and_send};
 use sock::{
-    PollWait, WgRecv, bind_wg_socket, bind_wg_socket_with_device, canonicalize_endpoint,
+    PollWait, WgRecv, bind_wg_socket_with_device, canonicalize_endpoint,
     poll_timeout_ms, set_recv_tos_options, wg_poll_wait, wg_poll_wait_with_wake, wg_recvmsg,
 };
 pub(super) use sock::wg_outer_bind_device_for_transport_table;
@@ -112,7 +112,9 @@ pub(super) use mtu::WG_DEFAULT_OUTER_MTU;
 // Test-only seams named only by wg_control_tests.rs — cfg-gated so
 // non-test builds carry no unused imports (the #6436 gating precedent).
 #[cfg(test)]
-use mtu::{wg_encapped_size, wg_inner_fits_outer_mtu};
+use mtu::wg_inner_fits_outer_mtu;
+#[cfg(test)]
+use sock::bind_wg_socket;
 #[cfg(test)]
 use sock::{
     CmsgBuf, V6BindStage, WG_POLL_CAP_MS, parse_outer_ecn_from_cmsg,
@@ -243,7 +245,7 @@ pub(super) fn wg_control_loop(
 
     // Attach to the persistent wgN TUN (Go pre-created it; open_tun
     // attaches to the existing device by name). Non-blocking.
-    let mut tun = match open_wg_tun(&tunnel_name) {
+    let tun = match open_wg_tun(&tunnel_name) {
         Ok((file, _actual_name)) => file,
         Err(err) => {
             eprintln!(
@@ -569,7 +571,7 @@ fn run_wg_control_loop_with_kernel_path_and_forward(
     // attempt window. Egress TUN packets are LPM-routed to the peer that
     // owns the inner destination's AllowedIPs (cryptokey routing); each
     // peer drives its own keepalive/rekey timers.
-    let (mut peer_pubkeys, mut effective_endpoints, mut last_authenticated_rx) =
+    let (peer_pubkeys, mut effective_endpoints, mut last_authenticated_rx) =
         init_consumer_state(engine);
     // 64 KiB scratch for both directions (max IP packet; WG records are
     // smaller). Single allocation at thread start — no per-packet alloc.

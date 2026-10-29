@@ -330,15 +330,17 @@ func TestRefreshFabricFwdWakesEpochLoops17060(t *testing.T) {
 // blockingFabricRecorder17060 is a FabricPeerResolver whose ResolveFabricPeer
 // blocks until released, so the test can hold a REAL populate loop inside
 // refreshFabricPeer (past resolution, before the populated latch) while
-// stopClusterComms runs concurrently. SyncFabricState records pushes so
-// the test can prove no helper state was pushed for the cleared epoch.
+// stopClusterComms runs concurrently. SyncFabricState records pushes and can
+// optionally hold a caller until syncRelease is closed, so tests can prove no
+// helper state was pushed for the cleared epoch or gate the next loop phase.
 type blockingFabricRecorder17060 struct {
-	mu      sync.Mutex
-	syncs   int
-	entered chan struct{}
-	release chan struct{}
-	peerMAC net.HardwareAddr
-	once    sync.Once
+	mu          sync.Mutex
+	syncs       int
+	entered     chan struct{}
+	release     chan struct{}
+	syncRelease chan struct{}
+	peerMAC     net.HardwareAddr
+	once        sync.Once
 }
 
 func newBlockingFabricRecorder17060() *blockingFabricRecorder17060 {
@@ -360,6 +362,9 @@ func (r *blockingFabricRecorder17060) SyncFabricState(_ context.Context) error {
 	r.mu.Lock()
 	r.syncs++
 	r.mu.Unlock()
+	if r.syncRelease != nil {
+		<-r.syncRelease
+	}
 	return nil
 }
 
@@ -389,13 +394,15 @@ func (p *blockingFabricDP17060) ResolveFabricPeer(slot int, overlayIfindex, pare
 }
 
 // TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060 covers the periodic
-// wake arms after the initial populate probe has succeeded. It releases the
-// initial resolver and waits for a successful SyncFabricState before making
-// both ctx.Done() and a buffered refresh poke ready. Since select may choose
-// either arm, retries continue until the wake arm consumed a poke, proving
-// that the cancelled-wake path was exercised. Synthetic matching neighbours
-// keep all probe paths hermetic; overlay lookup counts prove the cancelled
-// wake did not enter probeFabricNeighbor.
+// wake arms after the initial populate probe has succeeded. It blocks the
+// initial refresh inside SyncFabricState, after the matching-neighbour probe,
+// then makes cancellation and a buffered refresh poke ready before allowing
+// the loop to continue. Since select may choose either arm, retries continue
+// until the wake arm consumed a poke, proving the cancelled-wake path was
+// exercised. Synthetic matching neighbours keep all probe paths hermetic.
+// The lookup oracle catches refreshFabricFwdSlot work if the wake-arm
+// cancellation check is absent; probeFabricNeighbor returns before lookup
+// when its context is already cancelled.
 func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 	for _, tc := range []struct {
 		name, fabIface, overlay, peer string
@@ -456,6 +463,7 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 					},
 				}
 				rec := newBlockingFabricRecorder17060()
+				rec.syncRelease = make(chan struct{})
 				d.setDataplane(&blockingFabricDP17060{rec: rec})
 				ctx, cancel := context.WithCancel(context.Background())
 				ch := make(chan struct{}, 1)
@@ -469,6 +477,7 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 				case <-time.After(5 * time.Second):
 					cancel()
 					close(rec.release)
+					close(rec.syncRelease)
 					t.Fatal("populate loop did not reach its initial refresh resolver (#17060)")
 				}
 				close(rec.release)
@@ -476,6 +485,7 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 				for rec.syncCount() == 0 {
 					if time.Now().After(retryDeadline) {
 						cancel()
+						close(rec.syncRelease)
 						select {
 						case <-done:
 						case <-time.After(5 * time.Second):
@@ -495,8 +505,13 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 				}
 				d.fabricSlots[slot].probePending = true
 				d.fabricMu.Unlock()
-				ch <- struct{}{}
+				// Keep the worker inside SyncFabricState until both
+				// cancellation and the wake are ready. Without this gate,
+				// sending the wake before cancellation lets legal work
+				// refresh in between, invalidating the lookup oracle.
 				cancel()
+				ch <- struct{}{}
+				close(rec.syncRelease)
 				select {
 				case <-done:
 				case <-time.After(5 * time.Second):
@@ -506,7 +521,7 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 				gotLookups := overlayLookups
 				mu.Unlock()
 				if gotLookups != baselineLookups {
-					t.Fatalf("cancelled buffered wake probed %s: overlay lookups=%d, want unchanged %d (#17060)",
+					t.Fatalf("cancelled buffered wake did an overlay lookup for %s: overlay lookups=%d, want unchanged %d (#17060)",
 						tc.name, gotLookups, baselineLookups)
 				}
 				select {

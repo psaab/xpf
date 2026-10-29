@@ -32,7 +32,6 @@
 //! predicate requires before it acts.
 // Use the coordinator's afxdp scope (super::* from coordinator
 // pulls in all afxdp items; we re-use the same pattern here).
-use super::super::*;
 use super::*;
 
 impl Coordinator {

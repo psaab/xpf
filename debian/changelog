@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Event engine: recheck live `trigger until` ceilings when draining recorded
+    cooldown crossings, preventing parked storms from replaying over the
+    ceiling while preserving short-window `trigger on` crossings (#17708).
   * Configstore: render commit summaries as individual set lines without
     cloning either tree or building both complete output strings; reuse
     equal lines so a 50k-line one-line edit stays under 10 MiB allocated

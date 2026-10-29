@@ -13388,7 +13388,7 @@ fn releasing_the_reusing_worker_first_must_not_free_9145() {
 fn recycle_amortization_9327() {
     for (k, f) in [(15usize, 1usize), (12, 4)] {
         let pool_ip: Ipv4Addr = "203.0.113.1".parse().unwrap();
-        let addrs = [pool_ip];
+        let _addrs = [pool_ip];
         let range_lo = 1024u16;
         let range_hi = range_lo + (k + f) as u16 - 1;
         let alloc = PortAllocator::new(1, range_lo, range_hi);

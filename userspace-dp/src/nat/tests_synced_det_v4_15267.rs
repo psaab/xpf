@@ -27,7 +27,7 @@
 
 use super::*;
 use crate::SourceNATRuleSnapshot;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 
 const POOL0: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 1);
 const POOL1: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 2);

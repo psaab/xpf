@@ -15,7 +15,7 @@ pub(super) use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP}
 // values match the wire layout FIN=0x01 SYN=0x02 RST=0x04 PSH=0x08
 // ACK=0x10 URG=0x20). Re-exported at `pub(super)` so the screen
 // submodules keep importing them via `packet::TCP_*`.
-pub(super) use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_RST, TCP_SYN, TCP_URG};
+pub(super) use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_SYN, TCP_URG};
 
 /// #17109: family-agnostic decoded view of a fragment, computed ONCE in
 /// `extract.rs` from the family-overloaded raw fragment word. `offset_bytes`

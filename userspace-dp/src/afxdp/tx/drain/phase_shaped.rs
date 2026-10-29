@@ -12,12 +12,12 @@ use super::super::*;
 use super::DrainCtx;
 use super::should_enter_shaped_drain;
 
-/// #17151: test-only seam between the initial shaped pass and the
-/// re-ingest budget in `drain_phase_drain_cos`. A regression cell arms it
-/// to enqueue a peer arrival into the redirect inbox AFTER the initial
-/// pass has run, so a re-ingest terminating noop cannot be satisfied by
-/// the initial pass. Thread-local storage isolates concurrent tests and
-/// adds no release-build state or call.
+// #17151: test-only seam between the initial shaped pass and the
+// re-ingest budget in `drain_phase_drain_cos`. A regression cell arms it
+// to enqueue a peer arrival into the redirect inbox AFTER the initial
+// pass has run, so a re-ingest terminating noop cannot be satisfied by
+// the initial pass. Thread-local storage isolates concurrent tests and
+// adds no release-build state or call.
 #[cfg(test)]
 thread_local! {
     pub(crate) static AFTER_INITIAL_DRAIN_HOOK:

@@ -126,7 +126,7 @@ fn try_connect(path: &str, shared: &Arc<EventStreamShared>) -> Option<UnixStream
                 &stream,
             ) {
                 Ok(()) => {
-                    warned = false;
+                    let _ = &warned;
                     return Some(stream);
                 }
                 Err(e) => {

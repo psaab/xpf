@@ -10369,13 +10369,13 @@ fn worker_loop_drains_the_pptp_control_inbox_7699() {
     let housekeeping_src = include_str!("../afxdp/worker/loop_body/housekeeping.rs");
     let loop_src = include_str!("../afxdp/worker/loop_body/mod.rs");
 
-    let expiry_at = pptp_drain_line(housekeeping_src, PPTP_EXPIRY_NEEDLE).unwrap_or_else(|| {
+    let _expiry_at = pptp_drain_line(housekeeping_src, PPTP_EXPIRY_NEEDLE).unwrap_or_else(|| {
         panic!(
             "the worker loop's session-expiry call is gone — this guard's \
              position claim is anchored to a line that no longer exists (#7699)"
         )
     });
-    let drain_at = pptp_drain_line(src, PPTP_DRAIN_NEEDLE).unwrap_or_else(|| {
+    let _drain_at = pptp_drain_line(src, PPTP_DRAIN_NEEDLE).unwrap_or_else(|| {
         panic!(
             "the worker loop does not call drain_pptp_control_inbox: control \
              segments the data path copies into the inbox are never parsed, so \

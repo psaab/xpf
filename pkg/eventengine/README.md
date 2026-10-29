@@ -112,13 +112,18 @@ after the 30 s cooldown; a different-direction edge is never suppressed by
 the parked one. Events on an already-parked direction are still appended
 to (and pruned from) the policy's sliding window — only their park/fire
 decision is skipped (#16641) — so a `within W { trigger until N }` window
-keeps filling during a sustained storm, reaches its ceiling, and refuses
-to re-fire after the drain; the sparse case below the ceiling is
+keeps filling during a sustained storm. If that window crosses its ceiling
+while parked, the recorded edge is discarded at drain rather than firing
+over the ceiling (#17708); a sparse parked edge below the ceiling still
+replays.
+
 The parked edge carries the `withinMatches` verdict recorded at park
-time (#16848): the drain replays that verdict under a revision/liveness
-re-check only, so a genuine `trigger on` crossing whose short `within`
-window decays during the 30 s cooldown still replays, while #15945's
-evaluate-time gate (only matched crossings park) and its synthetic-edge
+time (#16848): the drain preserves that verdict under a revision/liveness
+re-check, and adds only a live `trigger until` ceiling check. Thus a genuine
+`trigger on` crossing whose short `within` window decays during the 30 s
+cooldown still replays, but events windowed while parked cannot push a
+`trigger until` policy over its ceiling and then replay the old crossing.
+#15945's evaluate-time gate (only matched crossings park) and synthetic-edge
 live-window re-check keep sub-threshold/latched edges from replaying.
 
 Cooldown parks are captured under `e.mu` and inserted under `pendingMu` only

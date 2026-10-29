@@ -18,7 +18,6 @@ use crate::test_zone_ids::*;
 use arc_swap::ArcSwap;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 
 fn test_forwarding_with_egress_mtu(mtu: usize) -> ForwardingState {

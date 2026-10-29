@@ -1983,7 +1983,7 @@ fn truncated_or_malformed_ipv4_lsrr_ssrr_option_fails_closed_as_ip_malformed_159
         );
     }
     // Garbage after a well-formed LSRR: the walk must reach it.
-    let mut frame_opts = vec![131u8, 7, 4, 0, 0, 0, 0, 0x44, 0x01, 0, 0, 0];
+    let frame_opts = vec![131u8, 7, 4, 0, 0, 0, 0, 0x44, 0x01, 0, 0, 0];
     assert_eq!(
         run(&frame_opts, 8).expect_err("malformed TLV after LSRR must fail closed"),
         ScreenParseError::TruncatedIpv4Header

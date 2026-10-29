@@ -22,16 +22,20 @@ import (
 //
 // Post-fix every matching event is appended+pruned even while parked,
 // so the window reflects the whole storm; once it passes the ceiling
-// the live evaluate path refuses to re-fire. The parked edge itself
-// replays once — it crossed at/inside the ceiling (#16848 recorded
-// verdict, see the #15945 file) — but a sustained storm must never
-// produce a further over-ceiling remediation.
+// the live evaluate path refuses to re-fire, and once the ceiling is
+// crossed the parked edge must not replay at drain either (#17708):
+// #16641's acceptance is literally ZERO over-ceiling fires, counting
+// every commit including the deferred one. Below the ceiling the
+// parked crossing still replays once (sparse control below).
 
 // The DEFECT arm: a sustained storm (an event every 2 s) must
-// contribute ZERO over-ceiling fires. Directed evaluateEvent calls
-// stand in for the live path once the direction is unparked (the
-// drain clears the parked direction); evaluateEvent never arms the
-// cooldown, so these calls expose exactly the windowing half.
+// contribute ZERO over-ceiling fires — including the parked edge's
+// drain replay, which pre-#17708-fix replayed unconditionally from
+// its recorded verdict even after 15 storm events pushed the window
+// past `until 10`. Directed evaluateEvent calls stand in for the
+// live path once the direction is unparked (the drain clears the
+// parked direction); evaluateEvent never arms the cooldown, so these
+// calls expose exactly the windowing half.
 func TestParkedWindowUntilStormNoOverCeiling16641(t *testing.T) {
 	pol := &config.EventPolicy{
 		Name:          "p",
@@ -66,12 +70,20 @@ func TestParkedWindowUntilStormNoOverCeiling16641(t *testing.T) {
 		t.Fatalf("window=%d after parked storm, want 15 (every event windowed while parked; pre-fix starved window held 2)", got)
 	}
 
-	// Drain (past the 30 s cooldown): the single parked crossing
-	// replays exactly once — the operator's first over-ceiling-adjacent
-	// remediation is the recorded one, not a fresh fire.
+	// Drain (past the 30 s cooldown): the window now holds 15 events
+	// against `trigger until 10` — the ceiling was crossed while the
+	// edge was parked, so the recorded crossing must NOT replay.
+	// Pre-#17708-fix the drain replayed `de.matched` unconditionally
+	// and this drain committed a second, over-ceiling remediation.
 	clk.set(40)
 	e.drainDeferred()
-	waitCommitted15945(t, e, 2)
+	time.Sleep(200 * time.Millisecond)
+	if got := e.Stats().Committed; got != 1 {
+		t.Fatalf("commits=%d after over-ceiling drain, want exactly 1 (no replay past the trigger-until ceiling; #16641 zero-over-ceiling acceptance)", got)
+	}
+	if got := e.Stats().PendingDeferred; got != 0 {
+		t.Fatalf("PendingDeferred=%d after drain, want 0 (the parked edge is consumed at drain, replayed or not)", got)
+	}
 
 	// Past the drain the direction is unparked, but the storm has been
 	// windowed past the ceiling: a fresh event must NOT fire, and a
@@ -83,8 +95,8 @@ func TestParkedWindowUntilStormNoOverCeiling16641(t *testing.T) {
 		e.HandleEvent(eventFor("ping_probe_failed"))
 	}
 	time.Sleep(200 * time.Millisecond)
-	if got := e.Stats().Committed; got != 2 {
-		t.Fatalf("commits=%d after sustained storm, want exactly 2 (initial fire + single parked replay; over-ceiling re-fires are the #16641 defect)", got)
+	if got := e.Stats().Committed; got != 1 {
+		t.Fatalf("commits=%d after sustained storm, want exactly 1 (initial fire only; parked replay AND over-ceiling re-fires are the #16641 defect)", got)
 	}
 	if got := e.Stats().PendingDeferred; got != 0 {
 		t.Fatalf("PendingDeferred=%d, want 0 (over-ceiling events must not park a new deferred edge)", got)
