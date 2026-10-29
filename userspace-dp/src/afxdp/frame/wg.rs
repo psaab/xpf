@@ -335,18 +335,12 @@ fn wg_learned_pmtu_for_endpoint(
     endpoint: &TunnelEndpoint,
     outer_dst: IpAddr,
 ) -> Option<usize> {
-    let now_ns = monotonic_nanos();
-    let mut best: Option<usize> = None;
-    if let Some(engine) = forwarding.wg_engines.get(&endpoint.id) {
-        for (pubkey, ep) in engine.peer_endpoints() {
-            if ep.map(|e| e.ip()) == Some(outer_dst) {
-                if let Some(p) = engine.peer_pmtu(&pubkey, now_ns) {
-                    best = Some(best.map_or(p, |b: usize| b.min(p)));
-                }
-            }
-        }
-    }
-    best
+    forwarding
+        .wg_engines
+        .get(&endpoint.id)
+        .and_then(|engine| {
+            engine.learned_pmtu_for_endpoint_ip(outer_dst, monotonic_nanos())
+        })
 }
 
 /// #16711: min of a local/route outer MTU and the selected peer's

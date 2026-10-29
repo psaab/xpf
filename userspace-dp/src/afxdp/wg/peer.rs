@@ -619,18 +619,37 @@ impl Peer {
         local_mtu: usize,
         now_ns: u64,
     ) -> bool {
-        let current = self.learned_pmtu(now_ns);
-        match super::pmtu::pmtu_after_offer(current, offered_mtu, outer_v6, local_mtu) {
-            Some(v) => {
-                self.pmtu_mtu.store(v as u64, Ordering::Relaxed);
-                self.pmtu_learned_ns.store(now_ns, Ordering::Relaxed);
-                true
-            }
-            None => {
-                // Refresh aging on a repeat/equal-or-larger PTB so a
-                // stable narrow path does not expire between PTBs.
-                self.pmtu_learned_ns.store(now_ns, Ordering::Relaxed);
-                false
+        loop {
+            let stored_mtu = self.pmtu_mtu.load(Ordering::Relaxed);
+            let learned_ns = self.pmtu_learned_ns.load(Ordering::Relaxed);
+            let current = super::pmtu::effective_pmtu(stored_mtu, learned_ns, now_ns);
+            match super::pmtu::pmtu_after_offer(current, offered_mtu, outer_v6, local_mtu) {
+                Some(next_mtu) => {
+                    // Refresh before attempting the CAS. Otherwise a second
+                    // writer can observe the new MTU with an expired old stamp
+                    // and replace a concurrent shrink as though the entry
+                    // were still unset. `fetch_max` keeps racing timestamps
+                    // monotonic when older observations finish later.
+                    self.pmtu_learned_ns.fetch_max(now_ns, Ordering::Relaxed);
+                    if self
+                        .pmtu_mtu
+                        .compare_exchange(
+                            stored_mtu,
+                            next_mtu as u64,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                None => {
+                    // Refresh aging on a repeat/equal-or-larger PTB so a
+                    // stable narrow path does not expire between PTBs.
+                    self.pmtu_learned_ns.fetch_max(now_ns, Ordering::Relaxed);
+                    return false;
+                }
             }
         }
     }

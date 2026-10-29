@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: index learned WireGuard PMTUs by endpoint IP
+    for allocation-free packet-path lookup; use CAS updates with monotonic
+    aging stamps so concurrent PTBs cannot lose a shrink (#17774).
+
   * Userspace dataplane: pin the #17722 DNS-quarantine snapshot with a
     Go-generated fixture the Rust parser test consumes end to end
     (follow-up to #18485).
