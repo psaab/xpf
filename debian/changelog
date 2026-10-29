@@ -3,6 +3,11 @@ xpf (0.0.0) unstable; urgency=medium
   * Event engine: recheck live `trigger until` ceilings when draining recorded
     cooldown crossings, preventing parked storms from replaying over the
     ceiling while preserving short-window `trigger on` crossings (#17708).
+  * Daemon: bind commit-confirmed rollback-target pre-flight to the
+    confirmation-window generation under the promotion lock, refusing a nested
+    arm if a concurrent ConfirmCommit changed the target. Explicitly identify
+    first-commit bootstrap targets, including a compiled empty tree after
+    restart, and reject a missing non-first target (#17695).
   * Configstore: render commit summaries as individual set lines without
     cloning either tree or building both complete output strings; reuse
     equal lines so a 50k-line one-line edit stays under 10 MiB allocated
