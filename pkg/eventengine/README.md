@@ -139,6 +139,11 @@ holds on every iteration and stores zero when both maps are empty
 nudge, so a drained deferral never leaves a stale past wake spinning
 zero-length timers for the rest of the daemon's life.
 
+If a budget hold remains parked but pruning finds no live slot expiry (the
+last slot expired after a no-progress drain), the worker schedules an
+immediate re-drain instead of waiting forever for a nudge that was already
+consumed (#17727).
+
 Parked entries are reconciled on every `Apply` (#16650): the pending maps
 are keyed by policy name (cooldown also by event) with no generation, so
 `Apply` purges any parked cooldown/budget entry whose stamped semantic
