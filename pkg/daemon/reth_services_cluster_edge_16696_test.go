@@ -546,6 +546,9 @@ func TestConfiguredApplyClearTailsAdvanceMarker17746(t *testing.T) {
 	if !d.rethServicesAppliedFor(1) {
 		t.Fatal("#17746 control: configured apply left the marker cleared")
 	}
+	if state := d.rethServicesStateFor(1); state.pending {
+		t.Fatalf("#17746 control: missing DHCP applier was misclassified as reset-fenced pending: %+v", state)
+	}
 	if !serviceEdge16696(d) {
 		t.Fatal("#17746 control: configured apply did not reach its tail (no proxy-ARP nudge)")
 	}
@@ -553,6 +556,9 @@ func TestConfiguredApplyClearTailsAdvanceMarker17746(t *testing.T) {
 	d.clearRethServicesForRG(1)
 	if d.rethServicesAppliedFor(1) {
 		t.Fatal("#17746 control: configured clear left the marker applied")
+	}
+	if state := d.rethServicesStateFor(1); state.pending {
+		t.Fatalf("#17746 control: missing DHCP applier was misclassified as reset-fenced pending: %+v", state)
 	}
 	if !serviceEdge16696(d) {
 		t.Fatal("#17746 control: configured clear did not run past its guard (no proxy-ARP nudge)")
@@ -810,4 +816,253 @@ func TestRev18399StaleApplyAfterClearMustBeReconciled(t *testing.T) {
 	if configCount != 2 {
 		t.Fatalf("#18399: recovered clear enqueued DHCP more than once: calls=%d", configCount)
 	}
+}
+
+// FOLD2 shape 1: an apply passes its entry reset check and blocks in the
+// DHCP pre-seed. A factory reset begins (resetting=true) while the apply is
+// blocked; the enqueue is then fenced and returns 0 without enqueueing.
+// The edge must stay PENDING so failed-reset recovery re-drives it exactly
+// once.
+func TestApplyResetFenceDuringPreSeedRetainsPending17746(t *testing.T) {
+	d := twoRGCanonicalDaemon16854(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(2)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	d.sessionSync.SetPeerDHCPLeaseSnapshotForTesting(4, dhcpserver.LeaseSyncSnapshot{
+		Received:   true,
+		Generation: 7,
+		Leases: []dhcpserver.SyncLease{
+			{Family: 4, Address: "10.0.61.77", HWAddress: "bb:77"},
+		},
+		Scopes: []dhcpserver.LeaseScopeAuthority{
+			{Family: 4, CIDR: "10.0.61.0/24", RGID: 2, Generation: 7, Served: true, Applied: true},
+		},
+	})
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePreSeed := func() { releaseOnce.Do(func() { close(release) }) }
+	applyDone := make(chan struct{})
+	t.Cleanup(func() {
+		releasePreSeed()
+		select {
+		case <-applyDone:
+		case <-time.After(5 * time.Second):
+			t.Error("blocked apply did not return after releasing pre-seed")
+		}
+	})
+	rec := &recordingDHCPApplier9349{}
+	blocked := &blockedPreSeedRethApplier17746{
+		recordingDHCPApplier9349: rec,
+		entered:                  make(chan struct{}, 1),
+		release:                  release,
+	}
+	d.dhcpServer = blocked
+
+	go func() {
+		d.applyRethServicesForRG(2)
+		close(applyDone)
+	}()
+	select {
+	case <-blocked.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("apply did not reach the blocked pre-seed")
+	}
+
+	// The pre-seed already captured its session-sync handle. Avoid starting an
+	// unrelated peer-seed worker when the later retry applies.
+	d.sessionSync = nil
+	// The pre-seed's reset check passed before entering its blocking applier.
+	// Reset now begins before the apply can reach the DHCP enqueue.
+	d.enterResetGeneration()
+	// While reset is active, converger must be quiet.
+	d.convergeRethServices(2)
+	rec.mu.Lock()
+	countWhileBlocked := len(rec.authorityAsyncCfg)
+	rec.mu.Unlock()
+	if countWhileBlocked != 0 {
+		t.Fatalf("DHCP enqueue crossed reset during blocked apply: count=%d", countWhileBlocked)
+	}
+
+	releasePreSeed()
+	select {
+	case <-applyDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("apply did not return after releasing the pre-seed")
+	}
+	if !serviceEdge16696(d) {
+		t.Fatal("stale/reset-fenced apply did not complete its proxy-ARP nudge")
+	}
+
+	// Enqueue was reset-fenced: nothing enqueued, pending must be retained.
+	rec.mu.Lock()
+	countAfterFence := len(rec.authorityAsyncCfg)
+	rec.mu.Unlock()
+	if countAfterFence != 0 {
+		t.Fatalf("reset-fenced apply must enqueue nothing, got %d", countAfterFence)
+	}
+	state := d.rethServicesStateFor(2)
+	if !state.pending || !state.active {
+		t.Fatalf("reset-fenced apply must retain pending active edge, got %+v", state)
+	}
+
+	// Converger while resetting must not drive.
+	d.convergeRethServices(2)
+	rec.mu.Lock()
+	if len(rec.authorityAsyncCfg) != 0 {
+		rec.mu.Unlock()
+		t.Fatal("converger drove DHCP while reset active")
+	}
+	rec.mu.Unlock()
+
+	// Failed-reset exit without commit: converger must drive owed apply exactly once.
+	d.exitResetGeneration()
+	epochBefore := d.ipsecRGOwnershipEpoch(2)
+	d.convergeRethServices(2)
+	if !serviceEdge16696(d) {
+		t.Fatal("failed-reset recovery did not drive owed apply")
+	}
+	if got := d.ipsecRGOwnershipEpoch(2); got != epochBefore+1 {
+		t.Fatalf("recovery apply did not run exactly once: epoch %d -> %d", epochBefore, got)
+	}
+	rec.mu.Lock()
+	countRecovery := len(rec.authorityAsyncCfg)
+	var recoveryInterfaces []string
+	if countRecovery > 0 {
+		recoveredConfig := rec.authorityAsyncCfg[countRecovery-1]
+		finalNonNil := recoveredConfig != nil
+		if finalNonNil && recoveredConfig.DHCPLocalServer != nil {
+			if group := recoveredConfig.DHCPLocalServer.Groups["lan-pool"]; group != nil {
+				recoveryInterfaces = append([]string(nil), group.Interfaces...)
+			}
+		}
+	}
+	rec.mu.Unlock()
+	if countRecovery != 1 {
+		t.Fatalf("recovery apply must enqueue exactly one active config, count=%d", countRecovery)
+	}
+	if len(recoveryInterfaces) != 1 || recoveryInterfaces[0] != "ge-0-0-1" {
+		t.Fatalf("recovery apply config does not serve RG2 through its resolved member: interfaces=%v",
+			recoveryInterfaces)
+	}
+	if st := d.rethServicesStateFor(2); st.pending || !st.active {
+		t.Fatalf("pending must clear after recovery apply, got %+v", st)
+	}
+	// Second converge is a no-op.
+	d.convergeRethServices(2)
+	if serviceEdge16696(d) {
+		t.Fatal("converger re-drove after recovery apply")
+	}
+	rec.mu.Lock()
+	if len(rec.authorityAsyncCfg) != 1 {
+		rec.mu.Unlock()
+		t.Fatal("recovery apply enqueued more than once on second converge")
+	}
+	rec.mu.Unlock()
+}
+
+// FOLD2 shape 2: demotion edge arrives while reset is active. The changed
+// edge must run immediately (proxy-ARP sweep), but its DHCP enqueue is
+// fenced so the clear tail stays pending. After failed-reset exit the
+// converger must drive the clear exactly once, enqueueing inactive config.
+func TestClearDemotionDuringResetRetainsPending17746(t *testing.T) {
+	d := twoRGCanonicalDaemon16854(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(2)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	// The test measures the apply/clear enqueue, not the asynchronous peer seed.
+	d.sessionSync = nil
+	rec := &recordingDHCPApplier9349{}
+	d.dhcpServer = rec
+	// Bring services active first so demotion has stale active work to remove.
+	d.applyRethServicesForRG(2)
+	if !serviceEdge16696(d) {
+		t.Fatal("setup: configured apply must nudge proxy-ARP")
+	}
+	rec.mu.Lock()
+	if len(rec.authorityAsyncCfg) != 1 || rec.authorityAsyncCfg[0] == nil {
+		c := len(rec.authorityAsyncCfg)
+		rec.mu.Unlock()
+		t.Fatalf("setup: apply must enqueue one active config, got %d", c)
+	}
+	rec.mu.Unlock()
+	if st := d.rethServicesStateFor(2); st.pending || !st.active {
+		t.Fatalf("setup: apply must be converged active, got %+v", st)
+	}
+
+	if tr := s.SetCluster(false); !tr.Changed || tr.Active {
+		t.Fatalf("setup: SetCluster(false) must flip desired inactive, got %+v", tr)
+	}
+	d.enterResetGeneration()
+	// Changed demotion during reset must run immediately: sweep before guard.
+	d.convergeRethServices(2)
+	if !serviceEdge16696(d) {
+		t.Fatal("demotion during reset did not run immediate proxy-ARP sweep")
+	}
+	if d.rethServicesAppliedFor(2) {
+		t.Fatal("demotion during reset did not record inactive ownership")
+	}
+	// DHCP enqueue was fenced: still only setup apply enqueued, pending retained.
+	rec.mu.Lock()
+	if len(rec.authorityAsyncCfg) != 1 {
+		c := len(rec.authorityAsyncCfg)
+		rec.mu.Unlock()
+		t.Fatalf("clear DHCP enqueue crossed reset fence, configs=%d", c)
+	}
+	rec.mu.Unlock()
+	state := d.rethServicesStateFor(2)
+	if !state.pending || state.active {
+		t.Fatalf("reset-fenced clear must retain pending inactive edge, got %+v", state)
+	}
+	// Anti-churn: repeated converge while resetting drives nothing.
+	epochDegraded := d.ipsecRGOwnershipEpoch(2)
+	d.convergeRethServices(2)
+	d.convergeRethServices(2)
+	if serviceEdge16696(d) {
+		t.Fatal("converger re-drove clear while reset active")
+	}
+	if got := d.ipsecRGOwnershipEpoch(2); got != epochDegraded {
+		t.Fatalf("converger re-bumped epoch while reset active: %d -> %d", epochDegraded, got)
+	}
+	rec.mu.Lock()
+	if len(rec.authorityAsyncCfg) != 1 {
+		rec.mu.Unlock()
+		t.Fatal("converger enqueued DHCP while reset active")
+	}
+	rec.mu.Unlock()
+
+	// Failed-reset exit: owed clear runs exactly once with inactive (nil) final config.
+	d.exitResetGeneration()
+	epochBefore := d.ipsecRGOwnershipEpoch(2)
+	d.convergeRethServices(2)
+	if !serviceEdge16696(d) {
+		t.Fatal("failed-reset recovery did not drive owed clear")
+	}
+	if got := d.ipsecRGOwnershipEpoch(2); got != epochBefore+1 {
+		t.Fatalf("recovery clear did not run exactly once: epoch %d -> %d", epochBefore, got)
+	}
+	rec.mu.Lock()
+	count := len(rec.authorityAsyncCfg)
+	finalNil := count > 0 && rec.authorityAsyncCfg[count-1] == nil
+	rec.mu.Unlock()
+	if count != 2 || !finalNil {
+		t.Fatalf("recovery clear must enqueue inactive config exactly once, count=%d finalNil=%v", count, finalNil)
+	}
+	if st := d.rethServicesStateFor(2); st.pending || st.active {
+		t.Fatalf("pending must clear after recovery clear, got %+v", st)
+	}
+	d.convergeRethServices(2)
+	if serviceEdge16696(d) {
+		t.Fatal("converger re-drove after recovery clear")
+	}
+	rec.mu.Lock()
+	if len(rec.authorityAsyncCfg) != 2 {
+		rec.mu.Unlock()
+		t.Fatal("recovery clear enqueued more than once")
+	}
+	rec.mu.Unlock()
 }

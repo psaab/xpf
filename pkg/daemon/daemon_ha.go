@@ -2109,6 +2109,8 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// cannot race a concurrent commit/demotion; the state machine already
 	// marked rgID active before this call, so the snapshot includes it.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-master-rg%d", rgID))
+	var applyGen uint64
+	resetFenced := false
 	if d.dhcpServer != nil {
 		// Snapshot ownership once and use it for both the filtered Kea config
 		// and its lease-authority proof. A transition racing either derivation
@@ -2154,8 +2156,10 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// block this VRRP event loop. Latest-wins coalescing in
 			// the manager keeps final state correct; failures are
 			// logged by the worker with this reason.
-			applyGen := d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
-			slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
+			applyGen, resetFenced = d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
+			if applyGen != 0 {
+				slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
+			}
 			// #2239: after the async Kea start, seed the held peer
 			// leases via lease{4,6}-add (the reinitiateIPsecSAs
 			// precedent). Async so it never blocks this VRRP event
@@ -2169,7 +2173,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// #16854: skipped when this edge moves no DHCP scope.
 			// The seed wait uses applyCancelCtx so daemon shutdown can cancel
 			// an unapplied generation instead of leaving a goroutine behind.
-			if takeoverWork {
+			if takeoverWork && applyGen != 0 {
 				if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
 					d.spawnDHCPLeaseSeed(d.applyCancelCtx(), applyGen, dhcpLeaseSeedApplyWaitWarnAfter)
 					d.nudgeDHCPLeaseSync()
@@ -2221,7 +2225,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.getSessionSync() != nil {
 		go d.reinitiateIPsecSAsForRG(rgID)
 	}
-	d.finishRethServicesEdge(rgID, generation, staleCompletions, false)
+	d.finishRethServicesEdge(rgID, generation, staleCompletions, resetFenced)
 }
 
 type raScopedClearer interface {
@@ -2353,13 +2357,14 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// Reconcile the union for any RGs this node still owns. Explicitly configured
 	// per-node sources are removed by Apply's normal graceful-withdraw path.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-backup-rg%d", rgID))
+	resetFenced := false
 	if d.dhcpServer != nil {
 		// ApplyAsync keeps this VRRP event loop off the 15s-bounded systemctl
 		// path and funnels every desired state through the latest-wins mailbox.
 		// Derive the desired config from the SSOT even when no RG remains master:
 		// it preserves node-local DHCP groups while filtering all inactive RETHs.
 		dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
-		d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
+		_, resetFenced = d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
 			fmt.Sprintf("vrrp BACKUP rg%d", rgID), cfg, masters)
 	}
 	// #2691 P1b / #2664: nudge the DDNS reconcile loop after a (partial)
@@ -2388,7 +2393,7 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// governs peer advertisement/re-initiation, not local SA hygiene on a
 	// node-local demotion edge.
 	go d.terminateDemotedRGIPsecSAs(rgID, rgEpoch)
-	d.finishRethServicesEdge(rgID, generation, staleCompletions, false)
+	d.finishRethServicesEdge(rgID, generation, staleCompletions, resetFenced)
 }
 
 // stripUntaggedUnitSuffix normalizes a resolved Linux interface name by
