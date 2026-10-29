@@ -9,18 +9,26 @@ package dataplane
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // ethtoolRecorder16787 installs a fake runEthtool that records every call.
 // failOn, when non-nil, is consulted per call and may fail specific calls.
 func ethtoolRecorder16787(t *testing.T, failOn func(args []string) error) *[][]string {
 	t.Helper()
+	oldRegistryPath := configstore.EthtoolForcedRegistryPath
+	configstore.EthtoolForcedRegistryPath = filepath.Join(t.TempDir(), "state", "ethtool-forced.json")
 	resetEthtoolForcedForTest()
-	t.Cleanup(resetEthtoolForcedForTest)
+	t.Cleanup(func() {
+		resetEthtoolForcedForTest()
+		configstore.EthtoolForcedRegistryPath = oldRegistryPath
+	})
 	var calls [][]string
 	mockEthtool(t, func(args ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), args...))
@@ -177,5 +185,75 @@ func TestEthtoolPerInterfaceForcedTracking_16787(t *testing.T) {
 	want = append(want, []string{"-s", "ge-0-0-3", "autoneg", "on"})
 	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("calls = %v, want %v", *calls, want)
+	}
+}
+
+func TestEthtoolForcedRegistryPersistsAcrossRestart17790(t *testing.T) {
+	calls := ethtoolRecorder16787(t, nil)
+	const iface = "ge-0-0-3"
+	newEthtoolResult16787().applyEthtool(iface, &config.InterfaceConfig{Speed: "100m"})
+
+	resetEthtoolForcedForTest()
+	ethtoolForcedMu.Lock()
+	ethtoolForcedLive = readEthtoolForcedRegistry()
+	ethtoolForcedMu.Unlock()
+	if !ethtoolForcedContains(iface) {
+		t.Fatal("fresh registry instance did not load the forced interface")
+	}
+	newEthtoolResult16787().applyEthtool(iface, &config.InterfaceConfig{})
+	newEthtoolResult16787().applyEthtool(iface, &config.InterfaceConfig{Speed: "100m"})
+	if err := os.Remove(configstore.EthtoolForcedRegistryPath); err != nil {
+		t.Fatalf("simulate factory-reset registry erase: %v", err)
+	}
+
+	resetEthtoolForcedForTest()
+	ethtoolForcedMu.Lock()
+	ethtoolForcedLive = readEthtoolForcedRegistry()
+	ethtoolForcedMu.Unlock()
+	if ethtoolForcedContains(iface) {
+		t.Fatal("fresh registry instance loaded an interface after factory reset")
+	}
+	newEthtoolResult16787().applyEthtool(iface, &config.InterfaceConfig{})
+
+	want := [][]string{
+		{"-s", iface, "speed", "100"},
+		{"-s", iface, "autoneg", "on"},
+		{"-s", iface, "speed", "100"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("simulated restart/reset calls = %v, want %v", *calls, want)
+	}
+}
+
+func TestEthtoolForcedRegistryPersistenceFailureIsSoft17790(t *testing.T) {
+	calls := ethtoolRecorder16787(t, nil)
+	blocker := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configstore.EthtoolForcedRegistryPath = filepath.Join(blocker, "registry.json")
+	const iface = "ge-0-0-3"
+
+	newEthtoolResult16787().applyEthtool(iface, &config.InterfaceConfig{Speed: "100m"})
+	newEthtoolResult16787().applyEthtool(iface, &config.InterfaceConfig{})
+	want := [][]string{
+		{"-s", iface, "speed", "100"},
+		{"-s", iface, "autoneg", "on"},
+	}
+	if !reflect.DeepEqual(*calls, want) {
+		t.Fatalf("persistence failure changed in-memory behavior: calls = %v, want %v", *calls, want)
+	}
+}
+
+func TestEthtoolForcedRegistryCorruptFileFailsSoft17790(t *testing.T) {
+	ethtoolRecorder16787(t, nil)
+	if err := os.MkdirAll(filepath.Dir(configstore.EthtoolForcedRegistryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configstore.EthtoolForcedRegistryPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if loaded := readEthtoolForcedRegistry(); len(loaded) != 0 {
+		t.Fatalf("corrupt registry loaded entries %v, want empty in-memory state", loaded)
 	}
 }

@@ -18,6 +18,8 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	oldMachine, oldApplianceMarker, oldSSH, oldRootSSHUser, oldHistory := wipeMachineIDPath, wipeApplianceMarkerPath, wipeSSHHostKeyDir, wipeRootSSHUserDir, wipeRootBashHistory
 	oldEngineID, oldBoots, oldUEFI, oldSeed := wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeUEFIStatePath, wipeSystemdRandomSeed
 	oldFeedShrinkHistoryPath := wipeFeedShrinkHistoryPath
+	oldEthtoolForcedRegistryPath := wipeEthtoolForcedRegistryPath
+	oldConfigstoreEthtoolForcedRegistryPath := configstore.EthtoolForcedRegistryPath
 	oldAptLists, oldAptArchive, oldUtmp := wipeAptListsDir, wipeAptArchiveDir, wipeRunUtmpPath
 	oldDay0Reject, oldRootGrown := wipeDay0RejectedPath, wipeRootGrownPath
 	oldDDNSLease, oldDDNSSurface := wipeDDNSLeaseStatePath, wipeDDNSSurfaceAPath
@@ -52,6 +54,8 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	wipeSNMPEngineBootsPath = filepath.Join(root, "var", "lib", "xpf", "snmp-engineboots")
 	wipeUEFIStatePath = filepath.Join(root, "var", "lib", "xpf", "uefi-bootorder-front")
 	wipeFeedShrinkHistoryPath = filepath.Join(root, "var", "lib", "xpf", "feed-shrink-history.json")
+	wipeEthtoolForcedRegistryPath = filepath.Join(root, "var", "lib", "xpf", "ethtool-forced.json")
+	configstore.EthtoolForcedRegistryPath = wipeEthtoolForcedRegistryPath
 	wipeSystemdRandomSeed = filepath.Join(root, "var", "lib", "systemd", "random-seed")
 	wipeAptListsDir = filepath.Join(root, "var", "lib", "apt", "lists")
 	wipeAptArchiveDir = filepath.Join(root, "var", "cache", "apt", "archives")
@@ -130,6 +134,8 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 		wipeMachineIDPath, wipeApplianceMarkerPath, wipeSSHHostKeyDir, wipeRootSSHUserDir, wipeRootBashHistory = oldMachine, oldApplianceMarker, oldSSH, oldRootSSHUser, oldHistory
 		wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeUEFIStatePath, wipeSystemdRandomSeed = oldEngineID, oldBoots, oldUEFI, oldSeed
 		wipeFeedShrinkHistoryPath = oldFeedShrinkHistoryPath
+		wipeEthtoolForcedRegistryPath = oldEthtoolForcedRegistryPath
+		configstore.EthtoolForcedRegistryPath = oldConfigstoreEthtoolForcedRegistryPath
 		wipeAptListsDir, wipeAptArchiveDir, wipeRunUtmpPath = oldAptLists, oldAptArchive, oldUtmp
 		wipeDay0RejectedPath, wipeRootGrownPath = oldDay0Reject, oldRootGrown
 		wipeDDNSLeaseStatePath, wipeDDNSSurfaceAPath = oldDDNSLease, oldDDNSSurface
