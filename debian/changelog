@@ -11,6 +11,12 @@ xpf (0.0.0) unstable; urgency=medium
     producer restarts. Recheck after acquiring applySem, preserve the target
     snapshot for the next rollback timer, and prevent an unbounded C2 reapply
     loop (#17741).
+
+  * Userspace dataplane: correct the reverse NAT64 ICMPv4 Fragmentation-
+    Needed comment to identify the embedded IPv4 datagram as the packet in
+    error and explain the +20 MTU adjustment independently of outer-ICMP
+    fragmentation (#17757).
+
   * Userspace dataplane: gate refresh-time XDP attaches on RX-VLAN quarantine
     and offload preconditions, retaining configured VLAN ownership when an
     absent child row is dropped during refresh (#17736).
