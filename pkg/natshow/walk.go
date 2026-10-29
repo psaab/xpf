@@ -24,7 +24,7 @@ import (
 // count reads as a measurement.
 var ErrSessionWalkCancelled = errors.New("session walk cancelled")
 
-// walkSessionValues is the ONE session-walk authority for this package.
+// walkSessionEntries is the ONE session-walk authority for this package.
 //
 // Every NAT renderer that tallies live sessions (persistent-NAT detail,
 // source-rule detail, destination-rule detail) drove its own hand-copied
@@ -56,17 +56,30 @@ var ErrSessionWalkCancelled = errors.New("session walk cancelled")
 // count, not the tally, is what distinguishes "stopped early" from "never
 // started" — the tally is 0 in both cases — so the #7315 probes count visits.
 //
-// The visitors take only the session VALUE because all three renderers
-// classify on Flags/IsReverse/zone ids and none reads the key; widen the
-// signature when a renderer needs it rather than passing a key nobody uses.
-//
-// A nil or not-loaded Reader walks nothing and returns nil, reproducing the
-// pre-existing "not loaded" branch each renderer guarded for itself.
+// Most renderers need only the session VALUE; persistent-NAT detail also
+// needs the session key's protocol to join counts to lease identity. Keep
+// both forms on this one walk so cancellation and scan-error handling cannot
+// drift between renderers.
+
+// walkSessionValues adapts the shared keyed walk for renderers that classify
+// sessions from their values alone.
 func walkSessionValues(
 	ctx context.Context,
 	dp Reader,
 	v4 func(dataplane.SessionValue),
 	v6 func(dataplane.SessionValueV6),
+) error {
+	return walkSessionEntries(ctx, dp,
+		func(_ dataplane.SessionKey, val dataplane.SessionValue) { v4(val) },
+		func(_ dataplane.SessionKeyV6, val dataplane.SessionValueV6) { v6(val) },
+	)
+}
+
+func walkSessionEntries(
+	ctx context.Context,
+	dp Reader,
+	v4 func(dataplane.SessionKey, dataplane.SessionValue),
+	v6 func(dataplane.SessionKeyV6, dataplane.SessionValueV6),
 ) error {
 	if dp == nil || !dp.IsLoaded() {
 		return nil
@@ -75,22 +88,22 @@ func walkSessionValues(
 
 	var scanErr error
 	stoppedEarly := false
-	if err := dp.IterateSessions(func(_ dataplane.SessionKey, val dataplane.SessionValue) bool {
+	if err := dp.IterateSessions(func(key dataplane.SessionKey, val dataplane.SessionValue) bool {
 		if cancelled() {
 			stoppedEarly = true // client gone / lease cancelled — stop the walk
 			return false
 		}
-		v4(val)
+		v4(key, val)
 		return true
 	}); err != nil {
 		scanErr = err
 	}
-	if err := dp.IterateSessionsV6(func(_ dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
+	if err := dp.IterateSessionsV6(func(key dataplane.SessionKeyV6, val dataplane.SessionValueV6) bool {
 		if cancelled() {
 			stoppedEarly = true
 			return false
 		}
-		v6(val)
+		v6(key, val)
 		return true
 	}); err != nil && scanErr == nil {
 		scanErr = err
