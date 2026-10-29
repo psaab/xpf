@@ -2,10 +2,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Userspace dataplane: pin the #17722 DNS-quarantine snapshot with a
     Go-generated fixture the Rust parser test consumes end to end
     (follow-up to #18485).
-  * IPsec: align commit admission with runtime capture ownership; enforce
-    the 32-VPN claimant ceiling and reject multiple VPNs claiming one
-    XFRM if_id before the capture plan quarantines the generation as
-    OwnerContested (#17779).
+  * IPsec: align admission with runtime capture ownership; count each VPN's
+    effective last-wins bind against the 32-claimant ceiling and reject
+    multiple installed VPN owners on one XFRM if_id before the capture plan
+    quarantines the generation as OwnerContested (#17779).
 
   * IPsec: assign gateway and inline connection names from one collision-free
     namespace so tolerant renders preserve every peer even when a gateway is

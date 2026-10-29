@@ -101,12 +101,12 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 	type invalidBind struct{ vpn, iface string }
 	var invalid []invalidBind
 
-	// #10638: union of VPN names carrying at least one bind-bearing
-	// instance. The typed compiler MERGES duplicate VPN stanzas across
-	// blocks (compiler_ipsec.go: vpn := sec.IPsec.VPNs[inst.name]), so a
-	// bind-interface in ANY instance satisfies the VPN and missing is
-	// decided after the walk (vpnNames minus hasBind), not per instance.
+	// #10638: the typed compiler MERGES duplicate VPN stanzas across
+	// blocks. Presence and runtime ownership use each merged VPN's effective
+	// final bind-interface value, matching the last-wins assignment in
+	// compiler_ipsec.go.
 	hasBind := map[string]bool{}
+	lastBindByVPN := map[string]string{}
 	var vpnNames []string
 	seenVPN := map[string]bool{}
 
@@ -149,27 +149,21 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 				// enough for the same reason ipsecTrafficSelectorSchema8939
 				// gives one file over, pointed the other way: the admission
 				// gate walks the same children and needs the same segmentation.
-				// #14451: validate EVERY bind-interface occurrence, not
-				// only the first. The typed compiler assigns per
-				// occurrence (compiler_ipsec.go: bind-interface ->
-				// vpn.BindInterface = v), so it installs the LAST
-				// value; a first-only gate passes V1 `st0.1; st0;`
-				// against V2 `st0.0` while the installed V1 `st0`
-				// collides with V2 on the same XFRM if_id. Iterating
-				// every occurrence means the #5297 invalid-name arm
-				// and the #2933 collision arm both see the installed
-				// set, and presence (#10638) is decided over the
-				// same set.
+				// #14451: validate EVERY bind-interface occurrence for the
+				// existing #5297 invalid-name and #2933 alias checks. The typed
+				// compiler assigns vpn.BindInterface per occurrence, so the
+				// installed value is the last one, including across merged
+				// duplicate VPN stanzas. #10638 presence and #17779 capture
+				// ownership use that effective final value; preserve it
+				// separately while all-occurrence checks remain intact.
 				biNodes := findChildrenInRun9088(inst.node, "bind-interface")
 				for _, biNode := range biNodes {
 					bindIface := nodeVal(biNode)
+					lastBindByVPN[inst.name] = bindIface
+					hasBind[inst.name] = bindIface != ""
 					if bindIface == "" {
 						continue
 					}
-					// #10638: presence (even an invalid name) satisfies "has a
-					// bind-interface"; a bad value is the #5297 arm's subject, not
-					// the missing arm's.
-					hasBind[inst.name] = true
 					_, ifID := XFRMIfNameAndID(bindIface)
 					if ifID == 0 {
 						// #5297: not a recognizable st<N>[.unit] secure-tunnel
@@ -294,41 +288,31 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 			return nil, err
 		}
 	}
-	// #16699/#17779: fail closed when the config exceeds what the
-	// runtime capture plan can represent. The plan
-	// (pkg/daemon: buildIpsecCaptureQueuePlan, aliased bound
-	// ipsecCaptureMaxTunnels = MaxRouteBasedVPNCaptureTunnels) emits
-	// four NFQUEUE provenance keys PER VPN CLAIMANT -- one per VPN
-	// name, not per if_id -- so its unit is the per-VPN claimant, and
-	// it quarantines the whole generation OwnerContested (QuarantineAll,
-	// nil stage error) whenever MORE THAN ONE VPN claims one if_id,
-	// even for the same bind-interface string with disjoint selectors
-	// (#11380 sharing is an XFRM-SA property, not a capture-plan one).
-	// The commit gate must therefore count the same unit the runtime
-	// uses: distinct VPN claimants per if_id, and total distinct VPN
-	// claimants with a valid (non-zero if_id) bind. Counting distinct
-	// if_ids alone (the pre-#17779 gate) let a strict-valid 33-VPN /
-	// 32-if_id shared-bind config commit and then silently quarantine
-	// on every apply. Strict hard-rejects naming the runtime limit;
-	// lenient warns so a persisted/peer-synced config still BOOTS
-	// (#1960); the runtime quarantine behavior itself is unchanged.
+	// #16699/#17779: fail closed when the config exceeds what the runtime
+	// capture plan can represent. It emits four NFQUEUE provenance keys per
+	// VPN claimant, and owns the final compiled bind-interface for each VPN.
+	// Multiple final VPN owners on one if_id cause OwnerContested /
+	// QuarantineAll, even when selectors are disjoint (#11380 is a separate
+	// XFRM-SA property). Count the same installed VPN claimants per if_id and
+	// across the generation; counting distinct if_ids alone let a strict-valid
+	// 33-VPN / 32-if_id config commit and then quarantine on every apply.
+	// Strict hard-rejects naming the runtime limit; lenient warns so persisted
+	// configs still BOOT (#1960). Runtime quarantine behavior is unchanged.
 	claimantsByID := make(map[uint32][]string, len(byID))
-	generationClaimants := make(map[string]bool)
 	totalClaimants := 0
-	for _, ifID := range order {
-		seenClaimant := map[string]bool{}
-		for _, ref := range byID[ifID] {
-			for _, vpn := range ref.vpns {
-				if !seenClaimant[vpn] {
-					seenClaimant[vpn] = true
-					claimantsByID[ifID] = append(claimantsByID[ifID], vpn)
-					if !generationClaimants[vpn] {
-						generationClaimants[vpn] = true
-						totalClaimants++
-					}
-				}
-			}
+	for _, vpn := range vpnNames {
+		bindIface := lastBindByVPN[vpn]
+		if bindIface == "" {
+			continue
 		}
+		_, ifID := XFRMIfNameAndID(bindIface)
+		if ifID == 0 {
+			continue
+		}
+		claimantsByID[ifID] = append(claimantsByID[ifID], vpn)
+		totalClaimants++
+	}
+	for _, ifID := range order {
 		sort.Strings(claimantsByID[ifID])
 	}
 	for _, ifID := range order {
@@ -336,20 +320,25 @@ func validateSecureTunnelBindInterfaceAST(nodes []*Node, lenient bool) ([]string
 		if len(claimants) < 2 {
 			continue
 		}
-		bindNames := make([]string, 0, len(byID[ifID]))
-		for bindName := range byID[ifID] {
-			bindNames = append(bindNames, bindName)
+		bindNames := make([]string, 0, len(claimants))
+		seenBindNames := make(map[string]bool, len(claimants))
+		for _, vpn := range claimants {
+			bindName := lastBindByVPN[vpn]
+			if !seenBindNames[bindName] {
+				seenBindNames[bindName] = true
+				bindNames = append(bindNames, bindName)
+			}
 		}
 		sort.Strings(bindNames)
 		if err := emit(
 			"route-based IPsec VPNs %s share secure-tunnel bind-interface(s) "+
 				"%s on if_id %d: the capture plan assigns four NFQUEUE "+
-				"provenance keys per VPN claimant and admits at most %d VPN "+
-				"claimants per generation with at most one claimant per if_id, "+
-				"so %d claimants exceed the runtime limit and every apply "+
-				"would install a box-wide OwnerContested capture quarantine "+
-				"dropping all non-loopback traffic. Bind each VPN to a distinct "+
-				"secure-tunnel unit (#17779)",
+				"provenance keys per VPN claimant, with a runtime limit of %d "+
+				"VPN claimants per generation and at most one claimant per if_id; "+
+				"these %d claimants violate the per-if_id runtime limit; every "+
+				"apply would install a box-wide OwnerContested "+
+				"capture quarantine dropping all non-loopback traffic. Bind "+
+				"each VPN to a distinct secure-tunnel unit (#17779)",
 			strings.Join(claimants, ", "), strings.Join(bindNames, ", "), ifID,
 			MaxRouteBasedVPNCaptureTunnels, len(claimants)); err != nil {
 			return nil, err

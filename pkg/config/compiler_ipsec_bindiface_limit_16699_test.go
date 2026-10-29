@@ -144,3 +144,37 @@ func TestSecureTunnelCaptureLimitRejectsSharedBindClaimants17779(t *testing.T) {
 		}
 	}
 }
+
+// TestSecureTunnelCaptureOwnersUseInstalledBind17779 ensures an overwritten
+// AST occurrence is not counted as a runtime owner. The compiler installs
+// V00's last bind-interface (st0.1), so its earlier st0.0 occurrence does not
+// contest V01's installed st0.0.
+func TestSecureTunnelCaptureOwnersUseInstalledBind17779(t *testing.T) {
+	tree := parseHierText(t, `
+security {
+    ipsec {
+        vpn V00 {
+            gateway 192.0.2.10;
+            pre-shared-key ascii-text fixture-secret-00;
+            bind-interface st0.0;
+            bind-interface st0.1;
+        }
+        vpn V01 {
+            gateway 192.0.2.11;
+            pre-shared-key ascii-text fixture-secret-01;
+            bind-interface st0.0;
+        }
+    }
+}
+`)
+	cfg, err := CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("strict compile rejected distinct installed capture owners: %v", err)
+	}
+	if got := cfg.Security.IPsec.VPNs["V00"].BindInterface; got != "st0.1" {
+		t.Fatalf("V00 installed bind-interface = %q, want st0.1", got)
+	}
+	if got := cfg.Security.IPsec.VPNs["V01"].BindInterface; got != "st0.0" {
+		t.Fatalf("V01 installed bind-interface = %q, want st0.0", got)
+	}
+}

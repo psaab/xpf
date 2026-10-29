@@ -2010,14 +2010,15 @@ fail-closed backstop for an if_id collision.
 The same gate also enforces the route-based VPN capture bounds (#16699,
 #17779). The daemon capture plan emits four NFQUEUE provenance keys PER
 valid VPN claimant (one per VPN name), and supports at most **32 VPN
-claimants per generation** (`MaxRouteBasedVPNCaptureTunnels`). It also
-marks the entire generation `OwnerContested` / `QuarantineAll` whenever
-more than one VPN name claims any one `bind-interface` XFRM if_id, even
-when those VPNs share the same bind-interface and have disjoint traffic
-selectors (#11380 only protects XFRM SA selection). Strict commit /
-commit-check rejects both a 33rd claimant and any shared-if_id claimants,
-naming the runtime limit; the tolerant load / peer-sync path warns and
-still boots (#1960). The daemon runtime quarantine behavior is unchanged.
+claimants per generation** (`MaxRouteBasedVPNCaptureTunnels`). Ownership is
+derived from each VPN's final compiled (last-wins) bind-interface; separate
+#2933/#5297 checks still validate every authored occurrence. The plan marks the
+whole generation `OwnerContested` / `QuarantineAll` whenever multiple VPN names
+claim one `bind-interface` XFRM if_id, even when those VPNs share the same
+bind-interface and have disjoint selectors (#11380 only protects XFRM SA
+selection). Strict commit/commit-check rejects a 33rd claimant or any shared
+if_id owners, naming the runtime limit; tolerant load / peer-sync warns and
+still boots (#1960). Runtime quarantine behavior is unchanged.
 
 The same gate carries a DISTINCT `bind-interface` fail-closed arm (#5297): a
 NON-EMPTY bind-interface that `XFRMIfNameAndID` resolves to **if_id 0** (any name

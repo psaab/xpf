@@ -56,8 +56,9 @@ func selectorCommands11380(vpn, name, local, remote string) []string {
 
 func TestSharedSt0BindRejectedRegardlessOfSelectors17779(t *testing.T) {
 	cases := []struct {
-		name  string
-		extra []string
+		name                 string
+		extra                []string
+		wantSelectorOverlap  bool
 	}{
 		{
 			name: "disjoint remote prefixes",
@@ -74,14 +75,16 @@ func TestSharedSt0BindRejectedRegardlessOfSelectors17779(t *testing.T) {
 			),
 		},
 		{
-			name: "nested ranges overlap on both selector sides",
+			name:                "nested ranges overlap on both selector sides",
+			wantSelectorOverlap: true,
 			extra: append(
 				selectorCommands11380("site-a", "to-a", "10.0.0.0/24", "198.51.100.0/24"),
 				selectorCommands11380("site-b", "to-b", "10.0.0.128/25", "198.51.100.128/25")...,
 			),
 		},
 		{
-			name: "IPv6 overlap rejects despite disjoint IPv4 children",
+			name:                "IPv6 overlap rejects despite disjoint IPv4 children",
+			wantSelectorOverlap: true,
 			extra: append(
 				append(
 					selectorCommands11380("site-a", "v4", "10.0.0.0/24", "192.0.2.0/24"),
@@ -101,14 +104,16 @@ func TestSharedSt0BindRejectedRegardlessOfSelectors17779(t *testing.T) {
 			),
 		},
 		{
-			name: "inclusive IP range endpoints overlap",
+			name:                "inclusive IP range endpoints overlap",
+			wantSelectorOverlap: true,
 			extra: append(
 				selectorCommands11380("site-a", "to-a", "10.0.0.1-10.0.0.10", "198.51.100.1-198.51.100.10"),
 				selectorCommands11380("site-b", "to-b", "10.0.0.10-10.0.0.20", "198.51.100.10-198.51.100.20")...,
 			),
 		},
 		{
-			name: "omitted selector side is not provably disjoint",
+			name:                "omitted selector side is not provably disjoint",
+			wantSelectorOverlap: true,
 			extra: append(
 				selectorCommands11380("site-a", "to-a", "10.0.0.0/24", ""),
 				selectorCommands11380("site-b", "to-b", "10.0.0.0/24", "198.51.100.0/24")...,
@@ -129,6 +134,19 @@ func TestSharedSt0BindRejectedRegardlessOfSelectors17779(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "#17779") ||
 				!strings.Contains(err.Error(), "OwnerContested") {
 				t.Fatalf("strict commit error = %v, want #17779 OwnerContested rejection", err)
+			}
+
+			cfg, err := CompileConfigLenient(sharedSt0BindTree11380(t, tc.extra...))
+			if err != nil {
+				t.Fatalf("lenient compile rejected shared-bind selector fixture: %v", err)
+			}
+			selectorErr := validateIPsecBindTrafficSelectorOverlapStrict(cfg)
+			if tc.wantSelectorOverlap {
+				if selectorErr == nil || !strings.Contains(selectorErr.Error(), "#11380") {
+					t.Fatalf("selector validator error = %v, want independent #11380 overlap verdict", selectorErr)
+				}
+			} else if selectorErr != nil {
+				t.Fatalf("selector validator rejected disjoint selectors: %v", selectorErr)
 			}
 		})
 	}

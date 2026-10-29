@@ -101,3 +101,47 @@ func TestSharedBindSelectorUnionRejectedByCaptureOwner17779(t *testing.T) {
 		t.Fatalf("strict commit error = %v, want #17779 capture-owner rejection for the shared-bind route", err)
 	}
 }
+
+// TestSharedBindSelectorUnionStillControlsRouteValidation11422 preserves the
+// #12909 route-union behavior independently of #17779 strict admission.
+func TestSharedBindSelectorUnionStillControlsRouteValidation11422(t *testing.T) {
+	cases := []struct {
+		name       string
+		route      string
+		aRemote    string
+		bRemote    string
+		wantReject bool
+	}{
+		{
+			name:    "complementary selectors cover route",
+			route:   "10.2.0.0/24 next-hop 192.0.2.1 interface st0.0",
+			aRemote: "10.2.0.0/25",
+			bRemote: "10.2.0.128/25",
+		},
+		{
+			name:       "route remains outside selector union",
+			route:      "10.3.0.0/24 next-hop 192.0.2.1 interface st0.0",
+			aRemote:    "10.2.0.0/25",
+			bRemote:    "10.2.0.128/25",
+			wantReject: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := CompileConfigLenient(sharedBindRouteTree11422(
+				t, tc.route, tc.aRemote, tc.bRemote))
+			if err != nil {
+				t.Fatalf("lenient compile rejected shared-bind route fixture: %v", err)
+			}
+			routeErr := validateIPsecRouteTrafficSelectorsStrict(cfg)
+			if tc.wantReject {
+				if routeErr == nil || !strings.Contains(routeErr.Error(), "#11422") ||
+					!strings.Contains(routeErr.Error(), "10.3.0.0/24") {
+					t.Fatalf("route validator error = %v, want #11422 outside-union rejection", routeErr)
+				}
+			} else if routeErr != nil {
+				t.Fatalf("route validator rejected a route covered by the selector union: %v", routeErr)
+			}
+		})
+	}
+}
