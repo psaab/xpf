@@ -1272,13 +1272,14 @@ constructor may still be resolving; that exposed two data-race failure modes:
 
 The lifecycle is now **epoch-guarded** by `clusterCommsMu` + a `clusterCommsGen`
 generation counter (all comms-epoch fields — `sessionSync`,
-`fabricRefreshCh{,1}`, `clusterCommsCtx`/`Cancel`, `activeClusterTransport` —
-are read/written only under that lock; every reader goes through
-`getSessionSync()` / `snapshotFabricRefreshChans()` / `getClusterCommsCtx()` /
-`activeTransport()`, capturing the value once):
+`fabricRefreshCh{,1}`, `clusterCommsCtx`/`Cancel`, `clusterCommsEpoch`,
+`activeClusterTransport` — are read/written only under that lock; every reader
+goes through `getSessionSync()` / `snapshotFabricRefreshChans()` /
+`getClusterCommsCtx()` / `activeTransport()`, capturing the value once):
 
-- `beginClusterCommsEpoch` bumps the generation and installs the fresh
-  sub-context; `startClusterComms` hands the post-bump generation to the
+- `beginClusterCommsEpoch` bumps the generation, installs the fresh sub-context,
+  and creates a fresh `clusterCommsEpoch` with separate constructor and fabric
+  populate-loop WaitGroups; `startClusterComms` hands the generation to the
   constructor.
 - The constructor builds the session-sync object in a **local `ss`** and wires
   every callback / cluster reference against it (never re-reading the shared
@@ -1290,10 +1291,11 @@ are read/written only under that lock; every reader goes through
   `populateFabricFwd{,1}` loop receives its channel **by value** at launch, so a
   restart's field swap cannot race the receive.
 - `stopClusterComms` bumps the generation (superseding any in-flight
-  constructor), cancels the context, **joins the constructor** via
-  `clusterCommsWG`, then nils the shared state and `Stop()`s the old session
-  sync. The join runs outside the lock (the constructor's publish path also
-  takes it), so there is no deadlock.
+  constructor), detaches the captured epoch's join groups under
+  `clusterCommsMu`, cancels the context, and joins only those groups outside
+  the lock. It clears session-sync, refresh channels, and fabric slots only if
+  its stop generation is still current, so a concurrent successor cannot be
+  joined or cleared by the old stop.
 
 - `activeClusterTransport` joined the epoch in **#6290** and publishes the same
   way, via `setActiveTransportIfCurrent(gen, key)`. It had been written by
@@ -1776,8 +1778,10 @@ contract** and it is documented on `startClusterComms` itself:
   transport (and an active secondary fabric);
 - `syncRGStrictVIPOwnershipMode` before the heartbeat goroutine, so `rg_active`
   already follows VIP ownership once VRRP starts driving it;
-- `clusterCommsWG.Add(1)` on the caller's stack, never inside the goroutine, so
-  `stopClusterComms` cannot `Wait()` past an unregistered constructor;
+- `addClusterCommsConstructor` and `registerFabricPopulateLoops` Add on the
+  current epoch while holding `clusterCommsMu`, before their goroutines start;
+  `stopClusterComms` detaches the epoch under the same lock before Wait, so
+  Add cannot race Wait and an old stop cannot join successor work;
 - inside the constructor: resolve → build `ss` → `publishSessionSyncIfCurrent`
   → **all** wiring → `ss.Start`. Every `ss.On*` callback, cluster-Manager hook
   and `SetVRFDevice` must be installed before `Start`, which spawns the
@@ -1795,17 +1799,16 @@ escapes into sentinel returns is exactly the rewrite that can change which
 later phases still run — the `ss.Start` loop must fall through to the auxiliary
 loops when all 30 attempts fail, but must NOT when the context was cancelled.
 
-**Goroutine lifecycle: only ONE of eleven is joined.** `clusterCommsWG.Add(1)`
-appears exactly once in the tree — it tracks the session-sync constructor
-goroutine, and `stopClusterComms` joins only that one. The other ten goroutines
-this path spawns (`startHeartbeatWithRetryForEpoch`, the HA watchdog ticker, the gRPC
+**Goroutine lifecycle:** `stopClusterComms` joins the session-sync constructor
+and the epoch's fabric populate loops. The other comms-owned goroutines
+(`startHeartbeatWithRetryForEpoch`, the HA watchdog ticker, the gRPC
 fabric-listener poller and its inner listener, `eventStreamFallbackLoop` /
 `runUserspaceEventStream`, `syncIPsecSAPeriodic`, `configSyncReconcileLoop`,
-`populateFabricFwd{,1}`, `monitorFabricState`) are context-cancelled only,
-never joined. That asymmetry is the structural reason **#7257** is reachable:
-`stopClusterComms` cancels the context, joins only the constructor, and then
-calls `d.cluster.StopHeartbeat()` — which nils the heartbeat handles under
-`m.mu` while an unjoined `startHeartbeatWithRetryForEpoch` goroutine may still be
+and `monitorFabricState`) are context-cancelled only. That asymmetry still
+matters for **#7257**: `stopClusterComms` cancels the context, joins only the
+constructor and fabric populate loops, and then calls `d.cluster.StopHeartbeat()`
+— which nils heartbeat handles under `m.mu` while an unjoined
+`startHeartbeatWithRetryForEpoch` goroutine may still be
 inside `StartHeartbeat` dereferencing them unlocked. #6428 did not move
 `startHeartbeatWithRetryForEpoch` and did not change the lifecycle; #7257 needs a
 lifecycle fix, not a code move.

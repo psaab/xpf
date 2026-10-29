@@ -981,10 +981,11 @@ func (d *Daemon) snapshotFabricRefreshChans() [2]chan struct{} {
 
 // beginClusterCommsEpoch opens a new cluster-comms epoch (#4958): it bumps
 // clusterCommsGen, installs a fresh independently-cancellable sub-context, and
-// returns the context plus the epoch generation the constructor goroutine must
-// present at publish time. Bumping the counter here means a constructor from a
-// prior epoch (still resolving addresses) is already superseded before this
-// call returns, so its later publish is dropped.
+// creates a fresh clusterCommsEpoch join group for its constructor and fabric
+// populate loops. It returns the context plus the epoch generation the
+// constructor goroutine must present at publish time. Bumping the counter here
+// means a constructor from a prior epoch (still resolving addresses) is already
+// superseded before this call returns, so its later publish is dropped.
 //
 // #7071: the cancel func is returned as well, so a caller that discovers its
 // epoch was superseded before it wired anything can release the sub-context it
@@ -998,11 +999,28 @@ func (d *Daemon) beginClusterCommsEpoch(
 	d.clusterCommsMu.Lock()
 	d.clusterCommsGen++
 	gen := d.clusterCommsGen
+	d.clusterCommsEpoch = &clusterCommsEpoch{generation: gen}
 	d.clusterCommsCancel = commsCancel
 	d.clusterCommsCtx = commsCtx
 	d.clusterCommsMu.Unlock()
 	return commsCtx, gen, commsCancel
 }
+
+// addClusterCommsConstructor registers a constructor on its current epoch
+// while holding the same lock stopClusterComms uses to detach that epoch.
+// A stale constructor cannot Add to a group that a stop may already be
+// waiting on.
+func (d *Daemon) addClusterCommsConstructor(gen uint64) *clusterCommsEpoch {
+	d.clusterCommsMu.Lock()
+	defer d.clusterCommsMu.Unlock()
+	epoch := d.clusterCommsEpoch
+	if epoch == nil || epoch.generation != gen || d.clusterCommsGen != gen {
+		return nil
+	}
+	epoch.constructorWG.Add(1)
+	return epoch
+}
+
 
 // publishSessionSyncIfCurrent installs ss as the live session-sync object iff
 // gen still matches the current cluster-comms epoch (#4958). It returns false —
@@ -1218,8 +1236,9 @@ func (d *Daemon) retireUnstartedSessionSync(gen uint64, ss *cluster.SessionSync)
 //     Heartbeat restarts after apply step 2.7 also resolve afresh.
 //   - syncRGStrictVIPOwnershipMode runs before the heartbeat goroutine: once
 //     VRRP starts driving rg_active it must already follow VIP ownership.
-//   - clusterCommsWG.Add(1) executes on THIS stack, never inside the goroutine,
-//     so stopClusterComms cannot Wait() past an unregistered constructor.
+//   - addClusterCommsConstructor registers the constructor in its current
+//     epoch while holding clusterCommsMu, before the goroutine starts. A
+//     concurrent stop detaches and waits only on that epoch's join group.
 //   - inside the constructor goroutine: address resolution -> ss construction ->
 //     publishSessionSyncIfCurrent -> ALL wiring -> ss.Start. Every ss.On*
 //     callback, cluster-Manager hook and SetVRFDevice must be installed before
@@ -1298,9 +1317,12 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 		// Track the constructor goroutine so stopClusterComms can join it
 		// before tearing the epoch down (#4958): a cancelled constructor must
 		// finish (or drop its publish) before stop nils the shared state.
-		d.clusterCommsWG.Add(1)
+		epoch := d.addClusterCommsConstructor(commsGen)
+		if epoch == nil {
+			return
+		}
 		go func() {
-			defer d.clusterCommsWG.Done()
+			defer epoch.constructorWG.Done()
 			var syncIP string
 			for i := range syncAddressPollAttempts {
 				syncIP = resolveClusterInterfaceAddr(cfg, syncIface, syncPeerAddr, "")
@@ -1337,7 +1359,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				d.startClusterSyncAuxLoops(commsCtx, cc)
 				fabRefreshChans := [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}
 				if d.publishFabricRefreshChansIfCurrent(commsGen, fabRefreshChans) {
-					d.startFabricForwardingLoops(commsCtx, cc, fabRefreshChans)
+					d.startFabricForwardingLoops(commsCtx, commsGen, cc, fabRefreshChans)
 				}
 				d.markClusterCommsAddressDebt(commsGen)
 				return
@@ -1580,7 +1602,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				return
 			}
 
-			d.startFabricForwardingLoops(commsCtx, cc, fabRefreshChans)
+			d.startFabricForwardingLoops(commsCtx, commsGen, cc, fabRefreshChans)
 		}()
 	}
 }
@@ -1755,68 +1777,59 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // (which stops retry loops, fabric peer refresh, IPsec SA sync, sync sweep)
 // and explicitly stops heartbeat + session sync listeners/connections.
 //
-// #4958: the teardown is epoch-safe. Under clusterCommsMu it first bumps
-// clusterCommsGen — superseding any in-flight startClusterComms constructor so
-// that constructor's publish is dropped (publishSessionSyncIfCurrent) — and
-// captures/clears the cancel handle and comms context. It then cancels the
-// context and JOINS the constructor goroutine (clusterCommsWG.Wait) so a
-// cancelled-but-still-running constructor finishes (or drops) before the shared
-// session-sync/fabric state is nilled. Only after the join does it clear
-// sessionSync and the fabric refresh channels and Stop() the session sync. The
-// join runs OUTSIDE the lock (the constructor's publish path also takes the
-// lock), so there is no deadlock.
-//
-// #17060 fold: after the constructor join it also joins the fabric
-// populate loops (fabricPopulateWG.Wait) BEFORE clearFabricSlots, so the
-// clear is the last writer of slot state — an in-flight refresh cannot
-// latch populated after it, and a not-yet-scheduled loop cannot store
-// its config after it.
+// The teardown advances the generation under clusterCommsMu and detaches the
+// epoch's join groups. The epoch's constructor and populate-loop Adds are
+// performed under that same lock, so Wait can only join work registered to
+// the captured epoch; a concurrent beginClusterCommsEpoch installs an entirely
+// separate group. Wait runs outside the lock because both constructors and
+// populate loops may need it to finish publishing or updating fabric state.
 func (d *Daemon) stopClusterComms() {
 	d.clusterCommsMu.Lock()
 	d.clusterCommsGen++
+	stopGen := d.clusterCommsGen
 	cancel := d.clusterCommsCancel
 	d.clusterCommsCancel = nil
 	d.clusterCommsCtx = nil
+	epoch := d.clusterCommsEpoch
+	d.clusterCommsEpoch = nil
 	d.clusterCommsMu.Unlock()
 
 	if cancel != nil {
 		cancel()
 	}
-	// Join the constructor goroutine before nilling shared state so its
-	// publish (if it still owned the just-superseded epoch it will drop; if it
-	// published before the generation bump it finishes wiring) cannot race the
-	// teardown below.
-	d.clusterCommsWG.Wait()
-	// #17060 fold: join the fabric populate loops BEFORE clearFabricSlots
-	// below. clusterCommsWG tracks only the constructor goroutine, which
-	// can return while its populate loops are still in-flight (or not yet
-	// scheduled). The loops exit via the cancel above: a fast-retry loop
-	// exits at its next ctx check (an in-flight refresh always returns),
-	// and a periodic loop exits on ctx.Done. Runs outside
-	// clusterCommsMu, like the constructor join, so a loop finishing its
-	// last fabricMu write cannot deadlock the teardown.
-	d.fabricPopulateWG.Wait()
+	if epoch != nil {
+		epoch.constructorWG.Wait()
+		epoch.fabricPopulateWG.Wait()
+	}
 
-	// #4647: the lease-sync loop is scoped to the comms context just
-	// cancelled, so it is already stopping; clear the cancel handle so the
-	// next comms session's connect-time launch starts a fresh loop.
+	// The captured context has already stopped its side loops. If a successor
+	// opened while this epoch was joining, leave daemon-shared handles and
+	// heartbeat state to that successor.
+	d.clusterCommsMu.Lock()
+	stillCurrent := d.clusterCommsGen == stopGen
+	d.clusterCommsMu.Unlock()
+	if !stillCurrent {
+		return
+	}
 	d.resetDHCPLeaseSyncLoop()
-	// #9176: the IPsec sibling. Its absence left `loopCancel` set across a
-	// comms teardown, so the next `ensureIPsecSASyncLoop` took its
-	// already-running early return against a dead context.
 	d.resetIPsecSASyncLoop()
 	if d.cluster != nil {
 		d.cluster.StopHeartbeat()
 	}
 
 	d.clusterCommsMu.Lock()
+	if d.clusterCommsGen != stopGen {
+		d.clusterCommsMu.Unlock()
+		return
+	}
 	ss := d.sessionSync
 	d.sessionSync = nil
 	for slot := range d.fabricSlots {
 		d.fabricSlots[slot].refreshCh = nil
 	}
-	// The populate loops are joined above, so clearing epoch state is the
-	// final slot-state write for this comms epoch.
+	// The captured epoch's populate loops are joined above. Checking the
+	// generation under this lock makes the clear the final slot-state write
+	// only when no successor epoch has replaced it.
 	d.clearFabricSlots()
 	// #7072: activeClusterTransport is DELIBERATELY NOT cleared here, and the
 	// issue that asked for it is refuted by measurement rather than argument.

@@ -83,6 +83,15 @@ const nodeIDFile = "/etc/xpf/node-id"
 // torn multiword interface read.
 type dpSlot struct{ v dataplane.RuntimeDataPlane }
 
+// clusterCommsEpoch owns joins for work launched by one communications
+// generation. The pointer is published and captured under clusterCommsMu;
+// Adds for either group happen under the same lock before workers start.
+type clusterCommsEpoch struct {
+	generation       uint64
+	constructorWG    sync.WaitGroup
+	fabricPopulateWG sync.WaitGroup
+}
+
 // Daemon is the main xpf daemon.
 type Daemon struct {
 	opts  Options
@@ -1506,13 +1515,6 @@ type Daemon struct {
 	// constructor publishes it and stopClusterComms nils it under that
 	// lock, while populate loops receive their channel by value.
 	fabricSlots [2]fabricSlot
-	// fabricPopulateWG tracks the live populateFabricFwdSlot loops
-	// (#17060). startFabricForwardingLoops Adds on its own stack before
-	// each go statement (never inside the loop goroutine), and
-	// stopClusterComms joins it BEFORE clearFabricSlots, so no in-flight
-	// refresh or not-yet-scheduled loop can write slot state after the clear.
-	fabricPopulateWG sync.WaitGroup
-
 	// vipWarnedIfaces tracks interfaces that already emitted a
 	// "directAddVIPs: interface not found" warning to avoid log spam
 	// from the reconcile ticker. Reset on config commit.
@@ -1621,14 +1623,15 @@ type Daemon struct {
 	// clusterCommsMu guards the cluster-comms epoch state that is published
 	// asynchronously by the startClusterComms constructor goroutine and torn
 	// down by stopClusterComms: sessionSync, the fabric slots' refreshCh channels,
-	// clusterCommsCtx/clusterCommsCancel, clusterCommsGen (#4958), and
-	// activeClusterTransport, which joined the epoch in #6290. Before
-	// #4958 the constructor wrote sessionSync (and re-dereferenced it) and the
-	// fabric channels from an untracked goroutine with no lock, so a
-	// stop→start restart could nil-deref (stop nils sessionSync between the
-	// goroutine's write and its next read) or let a stale constructor overwrite
-	// a newer epoch's session/endpoints. The mutex makes every read/write of
-	// these fields race-free; clusterCommsGen provides publish-if-current.
+	// clusterCommsCtx/clusterCommsCancel, clusterCommsGen (#4958), the current
+	// clusterCommsEpoch and its constructor/fabric join groups, and
+	// activeClusterTransport, which joined the epoch in #6290. Before #4958 the
+	// constructor wrote sessionSync (and re-dereferenced it) and the fabric
+	// channels from an untracked goroutine with no lock, so a stop→start restart
+	// could nil-deref (stop nils sessionSync between the goroutine's write and its
+	// next read) or let a stale constructor overwrite a newer epoch's
+	// session/endpoints. The mutex makes every read/write of these fields
+	// race-free; clusterCommsGen provides publish-if-current.
 	clusterCommsMu sync.Mutex
 	// sessionSyncTimeoutProfile is the latest applied timeout profile. The
 	// atomic snapshot bridges apply callbacks and asynchronous sync publication.
@@ -1643,11 +1646,10 @@ type Daemon struct {
 	// instead of clobbering the live epoch's state.
 	clusterCommsGen uint64
 
-	// clusterCommsWG tracks the in-flight startClusterComms constructor
-	// goroutine(s) so stopClusterComms can join them before nilling the shared
-	// comms state (#4958). Without the join a cancelled constructor could still
-	// be mid-publish while stop tore the epoch down.
-	clusterCommsWG sync.WaitGroup
+	// clusterCommsEpoch owns the constructor and fabric-loop joins for the
+	// current generation. beginClusterCommsEpoch replaces it under this lock;
+	// stopClusterComms captures and detaches it before waiting outside the lock.
+	clusterCommsEpoch *clusterCommsEpoch
 
 	// startupGoodbyeRA tracks whether cold-backup cleanup is complete for each
 	// inactive RG. Distinct router identities must successfully receive a

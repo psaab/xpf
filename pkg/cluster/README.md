@@ -36,11 +36,10 @@ locating any symbol below is now a matter of opening the named file.
   teardown exists to remove; the daemon's `startHeartbeatWithRetryForEpoch` does.
 
   This is the same shape `publishSessionSyncIfCurrent` uses for the session-sync
-  constructor, and for the same reason: the daemon's cluster-comms teardown
-  cancels a context and joins exactly one goroutine (`clusterCommsWG`), so every
-  OTHER comms-scoped goroutine that publishes shared state needs a generation
-  gate of its own. The heartbeat retry loop runs on a bare `go` and is not in
-  that WaitGroup.
+  constructor. The daemon's cluster-comms teardown cancels a context and joins
+  the current epoch's constructor and fabric-populate loops; other comms-scoped
+  goroutines that publish shared state still need generation gates of their own.
+  The heartbeat retry loop runs on a bare `go` and is not in either join group.
 - `HeartbeatPacket`, `MarshalHeartbeat`,
   `UnmarshalHeartbeat`, the #4107 control-channel auth wire codec
   (`MarshalHeartbeatAuth`, `marshalHeartbeatAuthEpoch`,

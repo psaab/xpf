@@ -140,7 +140,7 @@ func TestStopClusterCommsClearsFabricSlots17060(t *testing.T) {
 	if !d.publishFabricRefreshChansIfCurrent(gen, [2]chan struct{}{ch0, ch1}) {
 		t.Fatal("could not publish restarted fabric channels (#17060)")
 	}
-	d.startFabricForwardingLoops(ctx, cc, [2]chan struct{}{ch0, ch1})
+	d.startFabricForwardingLoops(ctx, gen, cc, [2]chan struct{}{ch0, ch1})
 	t.Cleanup(func() {
 		release()
 		d.stopClusterComms()
@@ -403,16 +403,18 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 			name: "fab0", fabIface: "ge-0-0-0", overlay: "fab0",
 			peer: "10.99.20.2", parentIdx: 111, overlayIdx: 112,
 			run: func(d *Daemon, ctx context.Context, ch chan struct{}) {
-				d.fabricPopulateWG.Add(1)
-				d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", "10.99.20.2", ch)
+				epoch := &clusterCommsEpoch{}
+				epoch.fabricPopulateWG.Add(1)
+				d.populateFabricFwdSlot(ctx, epoch, 0, "ge-0-0-0", "fab0", "10.99.20.2", ch)
 			},
 		},
 		{
 			name: "fab1", fabIface: "ge-0-0-5", overlay: "fab1",
 			peer: "10.99.21.2", parentIdx: 121, overlayIdx: 122,
 			run: func(d *Daemon, ctx context.Context, ch chan struct{}) {
-				d.fabricPopulateWG.Add(1)
-				d.populateFabricFwdSlot(ctx, 1, "ge-0-0-5", "fab1", "10.99.21.2", ch)
+				epoch := &clusterCommsEpoch{}
+				epoch.fabricPopulateWG.Add(1)
+				d.populateFabricFwdSlot(ctx, epoch, 1, "ge-0-0-5", "fab1", "10.99.21.2", ch)
 			},
 		},
 	} {
@@ -561,22 +563,21 @@ func TestPopulateLoopJoinedBeforeSlotClear17060(t *testing.T) {
 
 	// Wire the comms-epoch plumbing stopClusterComms drives: a live
 	// epoch context + cancel, and published refresh channels. The
-	// loops are registered on fabricPopulateWG exactly as
-	// startFabricForwardingLoops registers them (Add on this stack).
-	ctx, cancel := context.WithCancel(context.Background())
-	d.clusterCommsMu.Lock()
-	d.clusterCommsCtx = ctx
-	d.clusterCommsCancel = cancel
+	// epoch owns both populate loops, which are registered under
+	// clusterCommsMu before their goroutines start.
+	ctx, gen, _ := d.beginClusterCommsEpoch(context.Background())
 	ch0 := make(chan struct{}, 1)
 	ch1 := make(chan struct{}, 1)
-	d.fabricSlots[0].refreshCh = ch0
-	d.fabricSlots[1].refreshCh = ch1
+	if !d.publishFabricRefreshChansIfCurrent(gen, [2]chan struct{}{ch0, ch1}) {
+		t.Fatal("could not publish epoch refresh channels")
+	}
+	d.clusterCommsMu.Lock()
+	epoch := d.clusterCommsEpoch
+	epoch.fabricPopulateWG.Add(2)
 	d.clusterCommsMu.Unlock()
 
-	d.fabricPopulateWG.Add(1)
-	go d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", sharedPeer, ch0)
-	d.fabricPopulateWG.Add(1)
-	go d.populateFabricFwdSlot(ctx, 1, "ge-0-0-5", "fab1", sharedPeer, ch1)
+	go d.populateFabricFwdSlot(ctx, epoch, 0, "ge-0-0-0", "fab0", sharedPeer, ch0)
+	go d.populateFabricFwdSlot(ctx, epoch, 1, "ge-0-0-5", "fab1", sharedPeer, ch1)
 
 	// Wait until a loop is parked inside the blocking resolver: it has
 	// already stored its config and (via the address-matched neighbour)
@@ -670,10 +671,11 @@ func TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060(t *testing.T) {
 	d.setDataplane(&blockingFabricDP17060{rec: rec})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	d.fabricPopulateWG.Add(1)
+	epoch := &clusterCommsEpoch{}
+	epoch.fabricPopulateWG.Add(1)
 	go func() {
 		defer close(done)
-		d.populateFabricFwdSlot(ctx, 0, "ge-0-0-0", "fab0", "10.99.20.2", make(chan struct{}, 1))
+		d.populateFabricFwdSlot(ctx, epoch, 0, "ge-0-0-0", "fab0", "10.99.20.2", make(chan struct{}, 1))
 	}()
 	// Wait for the first probe attempt, then cancel during the retry sleep.
 	deadline := time.Now().Add(5 * time.Second)
@@ -703,4 +705,229 @@ func TestPopulateLoopCancelDuringFastRetryDoesNotProbe17060(t *testing.T) {
 		t.Fatalf("cancel during fast retry probed again: overlay lookups=%d, want 2 (probe + refresh of attempt 0 only) (#17060)", got)
 	}
 	d.clearFabricSlots()
+}
+// TestStopClusterCommsDoesNotJoinSuccessorFabricEpoch17060 constructs the
+// cross-epoch interleaving directly: an old stop is blocked joining its loop,
+// then a replacement epoch registers a live populate loop. The old stop must
+// neither wait on nor clear the successor's channels.
+func TestStopClusterCommsDoesNotJoinSuccessorFabricEpoch17060(t *testing.T) {
+	d := &Daemon{
+		fabricSlots: [2]fabricSlot{{name: "fabric"}, {name: "fabric1"}},
+	}
+	var blockOnce sync.Once
+	loopEntered := make(chan struct{})
+	loopRelease := make(chan struct{})
+	d.linkByNameFn = func(string) (netlink.Link, error) {
+		blockOnce.Do(func() {
+			close(loopEntered)
+			<-loopRelease
+		})
+		return nil, errors.New("hermetic epoch test")
+	}
+
+	oldCtx, _, _ := d.beginClusterCommsEpoch(context.Background())
+	oldRelease := make(chan struct{})
+	d.clusterCommsMu.Lock()
+	oldEpoch := d.clusterCommsEpoch
+	oldEpoch.fabricPopulateWG.Add(1)
+	d.clusterCommsMu.Unlock()
+	go func() {
+		defer oldEpoch.fabricPopulateWG.Done()
+		<-oldRelease
+	}()
+	oldStopDone := make(chan struct{})
+	go func() {
+		d.stopClusterComms()
+		close(oldStopDone)
+	}()
+	select {
+	case <-oldCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("old stop did not cancel its epoch")
+	}
+
+	newCtx, newGen, newCancel := d.beginClusterCommsEpoch(context.Background())
+	newChannels := [2]chan struct{}{make(chan struct{}, 1), make(chan struct{}, 1)}
+	if !d.publishFabricRefreshChansIfCurrent(newGen, newChannels) {
+		newCancel()
+		close(oldRelease)
+		t.Fatal("could not publish successor refresh channels")
+	}
+	newEpoch := d.registerFabricPopulateLoops(newGen, 1)
+	if newEpoch == nil {
+		newCancel()
+		close(oldRelease)
+		t.Fatal("could not register successor populate loop")
+	}
+	newLoopDone := make(chan struct{})
+	go func() {
+		defer close(newLoopDone)
+		d.populateFabricFwdSlot(newCtx, newEpoch, 0, "ge-0-0-5", "", "10.99.31.2", newChannels[0])
+	}()
+	select {
+	case <-loopEntered:
+	case <-time.After(5 * time.Second):
+		newCancel()
+		close(loopRelease)
+		close(oldRelease)
+		<-oldStopDone
+		t.Fatal("successor populate loop did not enter its hermetic link lookup")
+	}
+
+	d.fabricMu.RLock()
+	published := d.fabricSlots[0].iface == "ge-0-0-5" &&
+		d.fabricSlots[0].peerIP.Equal(net.ParseIP("10.99.31.2"))
+	d.fabricMu.RUnlock()
+	if !published {
+		newCancel()
+		close(loopRelease)
+		close(oldRelease)
+		<-oldStopDone
+		t.Fatal("successor populate loop did not publish slot state")
+	}
+
+	// The old loop is still blocked, but its stop must finish as soon as that
+	// loop exits even while the new epoch's populate loop is live.
+	close(oldRelease)
+	select {
+	case <-oldStopDone:
+	case <-time.After(5 * time.Second):
+		newCancel()
+		close(loopRelease)
+		<-oldStopDone
+		<-newLoopDone
+		d.stopClusterComms()
+		t.Fatal("old stop waited for a successor epoch's populate loop")
+	}
+	if got := d.snapshotFabricRefreshChans(); got != newChannels {
+		newCancel()
+		close(loopRelease)
+		<-newLoopDone
+		d.stopClusterComms()
+		t.Fatalf("old stop cleared successor refresh channels: got=%v want=%v", got, newChannels)
+	}
+	d.fabricMu.RLock()
+	survived := d.fabricSlots[0].iface == "ge-0-0-5" &&
+		d.fabricSlots[0].peerIP.Equal(net.ParseIP("10.99.31.2"))
+	d.fabricMu.RUnlock()
+	if !survived {
+		newCancel()
+		close(loopRelease)
+		<-newLoopDone
+		d.stopClusterComms()
+		t.Fatal("old stop cleared successor fabric slot state")
+	}
+
+	newCancel()
+	close(loopRelease)
+	<-newLoopDone
+	d.stopClusterComms()
+}
+
+// TestRefreshFabricFwdWakesRealPopulateLoopProbesOnce17060 exercises the
+// actual epoch populate loop end to end. The initial pass reaches its
+// periodic/event-driven select, RefreshFabricFwd queues and wakes it, and the
+// queued probe is consumed once before the event-driven refresh completes.
+// Synthetic matching neighbors make both probes hermetic (no raw socket
+// transmission or host netlink access).
+func TestRefreshFabricFwdWakesRealPopulateLoopProbesOnce17060(t *testing.T) {
+	const (
+		parentName = "ge-0-0-0"
+		overlay    = "fab0"
+		peer       = "10.99.32.2"
+	)
+	parent := &testLink{attrs: netlink.LinkAttrs{
+		Name: parentName, Index: 131, OperState: netlink.OperUp, TxQLen: 10000,
+		HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	overlayLink := &testLink{attrs: netlink.LinkAttrs{
+		Name: overlay, Index: 132, ParentIndex: 131, OperState: netlink.OperUp,
+		TxQLen: 10000, HardwareAddr: mustMAC(t, fabPeerTestLocalMAC),
+	}}
+	neigh := fabPeerNeigh(t, peer, fabPeerTestPeerMAC)
+	var mu sync.Mutex
+	neighScans := 0
+	d := &Daemon{
+		fabricSlots: [2]fabricSlot{{name: "fabric"}, {name: "fabric1"}},
+		linkByNameFn: func(name string) (netlink.Link, error) {
+			switch name {
+			case parentName:
+				return parent, nil
+			case overlay:
+				return overlayLink, nil
+			default:
+				return nil, errors.New("hermetic populate-loop test: unknown interface")
+			}
+		},
+		neighListFn: func(ifindex, family int) ([]netlink.Neigh, error) {
+			mu.Lock()
+			neighScans++
+			mu.Unlock()
+			if family == netlink.FAMILY_V4 && (ifindex == 131 || ifindex == 132) {
+				return []netlink.Neigh{neigh}, nil
+			}
+			return nil, nil
+		},
+	}
+	rec := newBlockingFabricRecorder17060()
+	close(rec.release)
+	d.setDataplane(&blockingFabricDP17060{rec: rec})
+
+	ctx, gen, cancel := d.beginClusterCommsEpoch(context.Background())
+	defer cancel()
+	refresh := make(chan struct{}, 1)
+	if !d.publishFabricRefreshChansIfCurrent(gen, [2]chan struct{}{refresh, nil}) {
+		t.Fatal("could not publish fabric refresh channel")
+	}
+	epoch := d.registerFabricPopulateLoops(gen, 1)
+	if epoch == nil {
+		t.Fatal("could not register real populate loop")
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.populateFabricFwdSlot(ctx, epoch, 0, parentName, overlay, peer, refresh)
+	}()
+	t.Cleanup(func() {
+		d.stopClusterComms()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("real populate loop did not stop")
+		}
+	})
+
+	waitForSync := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for rec.syncCount() < want {
+			if time.Now().After(deadline) {
+				t.Fatalf("populate loop SyncFabricState count=%d, want %d", rec.syncCount(), want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitForSync(1)
+	mu.Lock()
+	initialScans := neighScans
+	mu.Unlock()
+	if initialScans != 2 {
+		t.Fatalf("initial probe + refresh neighbor scans=%d, want 2", initialScans)
+	}
+
+	d.RefreshFabricFwd()
+	waitForSync(2)
+	mu.Lock()
+	totalScans := neighScans
+	mu.Unlock()
+	if totalScans != 4 {
+		t.Fatalf("initial + event probe/refresh neighbor scans=%d, want 4 (one probe consumed once)",
+			totalScans)
+	}
+	d.fabricMu.RLock()
+	pending := d.fabricSlots[0].probePending
+	d.fabricMu.RUnlock()
+	if pending {
+		t.Fatal("real populate loop did not consume the queued probe")
+	}
 }

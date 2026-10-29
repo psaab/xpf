@@ -385,9 +385,16 @@ func (d *Daemon) fabricSlotLabel(slot int) string {
 // Attempts immediately on startup with fast 500ms retries (10 attempts),
 // then falls back to 30s periodic refresh.
 // refreshCh is this loop's OWN event-driven refresh channel, handed in by value
-// at launch (#4958). The loop reads its own channel by value; the live slot's channel is only read by the sender under clusterCommsMu.
-func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, overlay, peerAddr string, refreshCh chan struct{}) {
-	defer d.fabricPopulateWG.Done()
+// at launch (#4958). The WaitGroup belongs to the captured comms epoch, not to
+// the daemon; a successor can never receive this loop's Done.
+func (d *Daemon) populateFabricFwdSlot(
+	ctx context.Context,
+	epoch *clusterCommsEpoch,
+	slot int,
+	fabIface, overlay, peerAddr string,
+	refreshCh chan struct{},
+) {
+	defer epoch.fabricPopulateWG.Done()
 	label := d.fabricSlotLabel(slot)
 	peerIP := net.ParseIP(peerAddr)
 	if peerIP == nil {
@@ -411,6 +418,7 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 	peerChanged := !s.peerIP.Equal(peerIP)
 	if peerChanged {
 		s.peerMAC = nil
+		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
 	}
 	if !cancelled {
 		s.peerIP = peerIP
@@ -418,9 +426,6 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 	d.fabricMu.Unlock()
 	if cancelled {
 		return
-	}
-	if peerChanged {
-		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
 	}
 
 	// Fast initial population: attempt immediately, then 500ms retries.
@@ -492,6 +497,11 @@ func (d *Daemon) populateFabricFwdSlot(ctx context.Context, slot int, fabIface, 
 // if no neighbor entry exists. Uses ping (not arping) because arping's
 // PF_PACKET raw sockets don't populate the kernel ARP table with XDP attached.
 func (d *Daemon) probeFabricNeighbor(ctx context.Context, fabIface string, peerIP net.IP) {
+	// This probe belongs to the populate loop's comms epoch. A stop can land
+	// after the caller selects the wake arm but before netlink access begins.
+	if ctx.Err() != nil {
+		return
+	}
 	// Route the reads through the Daemon seams like the rest of the fabric
 	// refresh. These were direct netlink calls, which meant a test that
 	// reached this function bypassed both seams and hit the real kernel —
