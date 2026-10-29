@@ -1,4 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Upgrade lock test: check pre-existing temp-path traversability as nobody
+    and skip only the root cross-UID flock arm when those ancestors are
+    inaccessible. Keep chmod confinement and lock-mode assertions for
+    traversable runs (#17756).
+
   * Userspace dataplane: pin the #17722 DNS-quarantine snapshot with a
     Go-generated fixture the Rust parser test consumes end to end
     (follow-up to #18485).

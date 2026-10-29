@@ -2,6 +2,7 @@ package lock
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -520,6 +521,81 @@ func TestAcquireTightensPermissiveModes16050(t *testing.T) {
 	})
 }
 
+// firstUntraversableAncestor reports the first pre-existing ancestor,
+// from filesystem root toward root, that the nobody probe cannot traverse.
+// It tests execute access as the actual probe identity because ownership,
+// group membership, and ACLs can make mode-bit-only checks inaccurate.
+func firstUntraversableAncestor(root, setpriv string) (string, error) {
+	testPath, err := exec.LookPath("test")
+	if err != nil {
+		return "", fmt.Errorf("find test command for nobody traversal probe: %w", err)
+	}
+	var ancestors []string
+	for anc := root; ; anc = filepath.Dir(anc) {
+		ancestors = append(ancestors, anc)
+		if filepath.Dir(anc) == anc {
+			break
+		}
+	}
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		out, err := exec.Command(setpriv, "--reuid=nobody", "--regid=nogroup",
+			"--clear-groups", testPath, "-x", ancestors[i]).CombinedOutput()
+		if err == nil {
+			continue
+		}
+		if i == len(ancestors)-1 {
+			return "", fmt.Errorf("nobody traversal probe failed for filesystem root (%v, %q)", err, out)
+		}
+		return ancestors[i], nil
+	}
+	return "", nil
+}
+
+func skipIfUntraversableAncestor(t *testing.T, root, setpriv string) {
+	t.Helper()
+	ancestor, err := firstUntraversableAncestor(root, setpriv)
+	if err != nil {
+		t.Fatalf("check pre-existing ancestor traversability: %v", err)
+	}
+	if ancestor != "" {
+		t.Skipf("root/nobody flock probe skipped: pre-existing ancestor %s is not traversable by nobody (#17756)", ancestor)
+	}
+}
+
+// TestSkipRootProbeForUntraversableAncestor17756 pins the root-arm
+// guard: the same skip helper used by the confinement test must skip when
+// a pre-existing ancestor blocks nobody, rather than fataling in the
+// permissive control probe.
+func TestSkipRootProbeForUntraversableAncestor17756(t *testing.T) {
+	setpriv, err := exec.LookPath("setpriv")
+	if err != nil || os.Geteuid() != 0 {
+		t.Skip("requires root and setpriv to exercise the nobody probe")
+	}
+	root, err := os.MkdirTemp("/tmp", "xpf-lock-17756-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ancestor, err := firstUntraversableAncestor(root, setpriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ancestor != root {
+		t.Fatalf("untraversable test root: got %q, want %q", ancestor, root)
+	}
+	skipped := false
+	t.Run("guard skips", func(t *testing.T) {
+		defer func() { skipped = t.Skipped() }()
+		skipIfUntraversableAncestor(t, root, setpriv)
+	})
+	if !skipped {
+		t.Fatal("guard did not skip the nobody probe for an untraversable pre-existing ancestor")
+	}
+}
+
 // openTestOwnedAncestors makes the directories this test created under
 // its dedicated temp root traversable (0755). It walks from base up to,
 // but NOT including, root — both created by t.TempDir()/os.MkdirTemp
@@ -529,9 +605,10 @@ func TestAcquireTightensPermissiveModes16050(t *testing.T) {
 // "/tmp" as a stop word, rewriting shared 0775/1777 ancestors to 0755
 // and failing on the first root-owned one (e.g. /var/tmp) under any
 // GOTMPDIR/TMPDIR other than /tmp. If a pre-existing ancestor is not
-// already traversable by the probe uid, the root-arm control probe in
-// the caller fails loudly — that is the correct signal, not a reason
-// to rewrite host state.
+// already traversable by the probe uid, the caller skips only the
+// root (nobody-probe) arm (#17756, per #16720): an inaccessible
+// ancestor reports an environment limitation, not a lock defect,
+// and it is never a reason to rewrite host state.
 func openTestOwnedAncestors(t *testing.T, root, base string) {
 	t.Helper()
 	rel, err := filepath.Rel(root, base)
@@ -637,6 +714,10 @@ func TestUnprivilegedCannotFlockUpgradeLock16050(t *testing.T) {
 		}
 		return
 	}
+	// Skip only the cross-uid arm when a pre-existing ancestor prevents
+	// nobody from reaching the test root. This is an environmental
+	// limitation, not a lock-mode failure (#17756).
+	skipIfUntraversableAncestor(t, filepath.Dir(tempRoot), setpriv)
 	// Control first: with the modes loosened to the pre-fix 0755/0644
 	// and our own flock released, the same nobody probe MUST succeed —
 	// otherwise a failure below would prove only that the probe cannot
