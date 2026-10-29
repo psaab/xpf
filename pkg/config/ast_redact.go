@@ -664,12 +664,45 @@ func isSecretKeywordToken16726(k string) bool {
 		"endpoint", "archive-sites":
 		return true
 	}
+	// #18435 (F1): a bare valued *-key spelling (`signing-key <v>`,
+	// `ssh-key <v>`, `master-key <v>` in an embedded change-configuration
+	// command with no verb) carries its credential exactly as the
+	// valued-*-key fallback in secretIndices masks it mid-path; without
+	// this arm embeddedJudgedTokens16726 rewrote the keyword to `set`
+	// and the value rendered clear. Classification is case-insensitive
+	// (#18435 F2) and keeps the documented public exclusions.
+	if isValuedKeyCredentialFallback18435(k) {
+		return true
+	}
 	// A bare command whose first token is credential-shaped (#16731:
 	// *password*/*secret*, auth-token, community-name) carries its
 	// value at index 1; judging it as a verb would rewrite it to
 	// `set` and drop the keyword before secretIndices could fire
 	// (#18384 fold, Rev18384FoldKimi).
 	return isCredentialShapedKeyword16731(k)
+}
+
+// isValuedKeyCredentialFallback18435 is shared by ordinary and embedded
+// command classification so they preserve the same valued-*key boundary,
+// case handling and public identifier exclusions. The lower-case
+// `pre-shared-key` exclusion keeps its qualifier-preserving dedicated arm;
+// mixed-case variants are still credentials. Deliberate residual: suffixed
+// forms NOT ending in -key (signing-keys, signing-key-v2, rsa-key-2048) still
+// leak; Contains(-key) would wrongly catch public authentication-key-chain
+// names.
+func isValuedKeyCredentialFallback18435(k string) bool {
+	lowerK := strings.ToLower(k)
+	if !strings.HasSuffix(lowerK, "-key") {
+		return false
+	}
+	switch lowerK {
+	case "pre-shared-key":
+		return k != lowerK
+	case "trusted-key", "tsig-key", "aws-access-key":
+		return false
+	default:
+		return true
+	}
 }
 
 // redactEmbeddedCommands14413 applies embedded-command redaction to the
@@ -1315,12 +1348,13 @@ func secretIndices(fp []string) []int {
 		// valued *-key schema keyword, or open-world token, as secret only
 		// after the specific arms above; the structural public-key exclusion
 		// below preserves known SSH host-key material.
+		// #18435 (F2): the shared classifier lowercases before checking the
+		// suffix and public exclusions, so accepted spellings such as
+		// `Signing-Key` / `SSH-Key` cannot leak for casing alone.
 		if len(out) == outStart && !valuePosition &&
-			(schemaKeyword || !positionKnown) &&
-			strings.HasSuffix(k, "-key") && i+1 < len(fp) &&
+			(schemaKeyword || !positionKnown) && i+1 < len(fp) &&
 			!isSSHKnownHostKeyPath17787(fp, i) &&
-			k != "pre-shared-key" &&
-			k != "trusted-key" && k != "tsig-key" && k != "aws-access-key" {
+			isValuedKeyCredentialFallback18435(k) {
 			for j := i + 1; j < len(fp); j++ {
 				out = append(out, j)
 			}

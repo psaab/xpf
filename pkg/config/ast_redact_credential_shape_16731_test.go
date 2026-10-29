@@ -125,6 +125,102 @@ func TestCredentialShapedNonSecretsRender16731(t *testing.T) {
 	}
 }
 
+// TestValuedKeyFallbackCaseAndPublicControls18435 pins the case-insensitive
+// valued-*key fallback on both flat and hierarchical ASTs, without widening
+// it past the `-key` suffix or masking public key identifiers.
+func TestValuedKeyFallbackCaseAndPublicControls18435(t *testing.T) {
+	rows := []struct {
+		keyword string
+		secret  string
+	}{
+		{"Signing-Key", "LEAK18435-SIGNING"},
+		{"SSH-Key", "LEAK18435-SSH"},
+		{"Master-Key", "LEAK18435-MASTER"},
+		{"Pre-Shared-Key", "LEAK18435-PSK"},
+	}
+	var flatLines []string
+	var hierarchical strings.Builder
+	hierarchical.WriteString("services {\n    foo {\n")
+	for _, row := range rows {
+		flatLines = append(flatLines, "set services foo "+row.keyword+" "+row.secret)
+		hierarchical.WriteString("        " + row.keyword + " " + row.secret + ";\n")
+	}
+	hierarchical.WriteString("    }\n}\n")
+
+	flat := buildRedactTree(t, flatLines).RedactedClone()
+	hier, errs := NewParser(hierarchical.String()).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("hierarchical NewParser: %v", errs)
+	}
+	for name, tree := range map[string]*ConfigTree{"flat": flat, "hierarchical": hier.RedactedClone()} {
+		for format, rendered := range map[string]string{"Format": tree.Format(), "FormatSet": tree.FormatSet()} {
+			for _, row := range rows {
+				if strings.Contains(rendered, row.secret) {
+					t.Errorf("%s %s leaked %s:\n%s", name, format, row.keyword, rendered)
+				}
+			}
+			if !strings.Contains(rendered, SecretDataPlaceholder) {
+				t.Errorf("%s %s emitted no redaction placeholder:\n%s", name, format, rendered)
+			}
+		}
+	}
+
+	controls := []string{
+		"set system ntp Trusted-Key 18435",
+		"set system services dhcp-local-server dynamic-dns TSIG-Key xpf-key-18435",
+		"set system services dynamic-dns provider p1 AWS-Access-Key AKIA18435PUBLIC",
+		"set services foo authentication-key-chain chain18435",
+		"set services foo signing-keys signing-keys-value18435",
+		"set services foo signing-key-v2 signing-v2-value18435",
+		"set services foo rsa-key-2048 rsa-value18435",
+	}
+	controlOut := buildRedactTree(t, controls).RedactedClone().FormatSet()
+	for _, keep := range []string{
+		"18435", "xpf-key-18435", "AKIA18435PUBLIC", "chain18435",
+		"signing-keys-value18435", "signing-v2-value18435", "rsa-value18435",
+	} {
+		if !strings.Contains(controlOut, keep) {
+			t.Errorf("control %q was masked or dropped:\n%s", keep, controlOut)
+		}
+	}
+	if strings.Contains(controlOut, SecretDataPlaceholder) {
+		t.Errorf("public/residual controls emitted a redaction placeholder:\n%s", controlOut)
+	}
+
+	hierControls, errs := NewParser(`
+system {
+    ntp { Trusted-Key 18435; }
+    services {
+        dhcp-local-server { dynamic-dns { TSIG-Key xpf-key-18435; } }
+        dynamic-dns { provider p1 { AWS-Access-Key AKIA18435PUBLIC; } }
+    }
+}
+services {
+    foo {
+        authentication-key-chain chain18435;
+        signing-keys signing-keys-value18435;
+        signing-key-v2 signing-v2-value18435;
+        rsa-key-2048 rsa-value18435;
+    }
+}
+`).Parse()
+	if len(errs) != 0 {
+		t.Fatalf("hierarchical controls NewParser: %v", errs)
+	}
+	hierControlOut := hierControls.RedactedClone().Format()
+	for _, keep := range []string{
+		"18435", "xpf-key-18435", "AKIA18435PUBLIC", "chain18435",
+		"signing-keys-value18435", "signing-v2-value18435", "rsa-value18435",
+	} {
+		if !strings.Contains(hierControlOut, keep) {
+			t.Errorf("hierarchical control %q was masked or dropped:\n%s", keep, hierControlOut)
+		}
+	}
+	if strings.Contains(hierControlOut, SecretDataPlaceholder) {
+		t.Errorf("hierarchical public/residual controls emitted a redaction placeholder:\n%s", hierControlOut)
+	}
+}
+
 // TestCredentialShapedSSHKnownHostKeysStayPublic17787 pins SSH known-host
 // key material as public data in its schema-defined host context. Include
 // every currently supported key type so new variants do not get caught by
