@@ -455,6 +455,25 @@ func TestConfirmedLifelineRenameClearsSidecar17755(t *testing.T) {
 	if err != nil || string(remaining) != string(matchingSidecar) {
 		t.Fatalf("confirm removed or changed sidecar without embedded snapshot provenance: got %q, err=%v", remaining, err)
 	}
+	if err := os.WriteFile(snapshot,
+		[]byte(`{"generation":"confirmed-generation","lifeline_kernel_name":"enp6s0","lifeline_logical_name":"ge-0-0-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	embeddedMismatchDaemon := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	embeddedMismatchDaemon.clearBootstrapLifelineNetwork()
+	remaining, err = os.ReadFile(sidecar)
+	if err != nil || string(remaining) != string(matchingSidecar) {
+		t.Fatalf("confirm removed or changed sidecar when embedded rename pair differed: got %q, err=%v", remaining, err)
+	}
+	if err := os.WriteFile(snapshot, []byte(`{"generation":"confirmed-generation"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	embeddedEmptyDaemon := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	embeddedEmptyDaemon.clearBootstrapLifelineNetwork()
+	remaining, err = os.ReadFile(sidecar)
+	if err != nil || string(remaining) != string(matchingSidecar) {
+		t.Fatalf("confirm removed or changed sidecar when embedded rename pair was empty: got %q, err=%v", remaining, err)
+	}
 }
 
 // TestConfirmedLifelineRenameCrashBeforeResolutionRetainsSidecar17755
