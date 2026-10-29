@@ -1113,9 +1113,19 @@ func (e *Engine) deferredWorker() {
 				if cand := e.budgetWakeAtFn(now); wake.IsZero() || cand.Before(wake) {
 					wake = cand
 				}
-			} else if exp, ok := e.oldestBudgetExpiryLocked(now); ok {
-				if wake.IsZero() || exp.Before(wake) {
-					wake = exp
+			} else {
+				exp, ok := e.oldestBudgetExpiryLocked(now)
+				if ok {
+					if wake.IsZero() || exp.Before(wake) {
+						wake = exp
+					}
+				} else if wake.IsZero() || now.Before(wake) {
+					// The last budget slot may expire after a
+					// no-progress drain but before this recomputation.
+					// Pruning then returns no expiry even though the
+					// parked action is now ready; ensure another drain
+					// runs without requiring a new external nudge.
+					wake = now
 				}
 			}
 		}

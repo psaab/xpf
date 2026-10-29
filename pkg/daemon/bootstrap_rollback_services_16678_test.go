@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sync/semaphore"
@@ -228,5 +229,33 @@ func TestEnterBootstrapModeWithoutServices16678(t *testing.T) {
 	}
 	if !d.inBootstrap() {
 		t.Fatal("daemon must be in bootstrap mode")
+	}
+}
+
+// TestBootstrapRelayStopFailureDegrades17693 proves the relay's bounded
+// reconcile failure reaches bootstrap's shared DEGRADED aggregation instead
+// of being discarded after the service-stop attempt.
+func TestBootstrapRelayStopFailureDegrades17693(t *testing.T) {
+	relayErr := errors.New("DHCP relay stop timed out")
+	d := &Daemon{
+		applySem: semaphore.NewWeighted(1),
+		dhcpRelayReconcileForTest: func(cfg *config.Config) error {
+			if cfg == nil || cfg.ForwardingOptions.DHCPRelay != nil {
+				t.Fatal("bootstrap must reconcile the relay with an empty config")
+			}
+			return relayErr
+		},
+	}
+	d.applyBodyForTest = func(*config.Config) {}
+
+	err := d.enterBootstrapMode()
+	if !errors.Is(err, relayErr) {
+		t.Fatalf("bootstrap error = %v, want joined DHCP relay stop failure", err)
+	}
+	if !strings.Contains(err.Error(), "stop DHCP relay") {
+		t.Fatalf("bootstrap error %q does not identify the failed relay step", err)
+	}
+	if !d.inBootstrap() {
+		t.Fatal("daemon must still enter bootstrap mode after a partial service stop")
 	}
 }
