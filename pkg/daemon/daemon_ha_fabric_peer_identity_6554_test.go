@@ -359,15 +359,32 @@ func TestFabricPeerAddressMatchRecordsIdentity(t *testing.T) {
 // TestFabricPeerIdentityClearedOnPeerChange proves a re-pointed fabric drops
 // the cached identity: the new peer chassis has a different MAC, and pinning
 // the old one would refuse the new peer forever.
+// populateFabricSlotStateOnly6554 lets a current epoch publish its slot state,
+// then cancels at the first hermetic link lookup so no probes or retry sleeps
+// occur.
+func populateFabricSlotStateOnly6554(
+	d *Daemon,
+	epoch *clusterCommsEpoch,
+	slot int,
+	fabIface, overlay, peerAddr string,
+) {
+	ctx, cancel := context.WithCancel(context.Background())
+	oldLinkByName := d.linkByNameFn
+	d.linkByNameFn = func(string) (netlink.Link, error) {
+		cancel()
+		return nil, errors.New("hermetic slot-state test")
+	}
+	epoch.fabricPopulateWG.Add(1)
+	d.populateFabricFwdSlot(ctx, epoch, slot, fabIface, overlay, peerAddr, nil)
+	cancel()
+	d.linkByNameFn = oldLinkByName
+}
+
 func TestFabricPeerIdentityClearedOnPeerChange(t *testing.T) {
 	d := &Daemon{}
-	// Hermetic by construction (#6595). populateFabricFwdSlot now checks ctx before
-	// the first probe, so a cancelled context returns without touching netlink —
-	// but do not let this test's SAFETY depend on that check surviving. Pin the
-	// netlink seams to hard errors so a regression in the cancellation guard
-	// fails as an assertion here rather than dumping the kernel neighbour table
-	// and transmitting an ICMP / ff02::1 probe on whatever real interface
-	// happens to be named ge-0-0-0 on the machine running the suite.
+	// This cell must not touch real netlink: a live lookup of a physical
+	// interface could otherwise probe it. The state-only helper cancels at
+	// the first lookup, after the current epoch has published its config.
 	d.linkByNameFn = func(string) (netlink.Link, error) {
 		return nil, errors.New("hermetic test: netlink disabled")
 	}
@@ -379,27 +396,22 @@ func TestFabricPeerIdentityClearedOnPeerChange(t *testing.T) {
 	d.fabricSlots[1].peerIP = net.ParseIP("10.99.14.2")
 	d.rememberFabricPeerMAC(1, mustMAC(t, fabPeerTestPeerMAC))
 
+	epoch := &clusterCommsEpoch{generation: d.clusterCommsGen}
 	// Same peer — identity survives.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	epoch := &clusterCommsEpoch{}
-	epoch.fabricPopulateWG.Add(1)
-	d.populateFabricFwdSlot(ctx, epoch, 0, "ge-0-0-0", "fab0", "10.99.13.2", nil)
+	populateFabricSlotStateOnly6554(d, epoch, 0, "ge-0-0-0", "fab0", "10.99.13.2")
 	if d.fabricPeerMACHint(0) == nil {
 		t.Fatal("peer identity cleared even though the peer address is unchanged")
 	}
 
 	// Different peer — identity must be dropped.
-	epoch.fabricPopulateWG.Add(1)
-	d.populateFabricFwdSlot(ctx, epoch, 0, "ge-0-0-0", "fab0", "10.99.13.3", nil)
+	populateFabricSlotStateOnly6554(d, epoch, 0, "ge-0-0-0", "fab0", "10.99.13.3")
 	if hint := d.fabricPeerMACHint(0); hint != nil {
 		t.Fatalf("stale peer identity %v retained across a fabric peer change", hint)
 	}
 
-	epoch.fabricPopulateWG.Add(1)
-	d.populateFabricFwdSlot(ctx, epoch, 1, "ge-0-0-0", "fab1", "10.99.14.3", nil)
+	populateFabricSlotStateOnly6554(d, epoch, 1, "ge-0-0-0", "fab1", "10.99.14.3")
 	if hint := d.fabricPeerMACHint(1); hint != nil {
-		t.Fatalf("stale fab1 peer identity %v retained across a peer change", hint)
+		t.Fatalf("stale fab1 identity %v retained across a peer change", hint)
 	}
 }
 
@@ -890,17 +902,15 @@ func TestFabricSlotParity17040(t *testing.T) {
 			}
 
 			// Peer change through the shared populate path clears only
-			// this slot's cached identity (cancelled ctx: hermetic).
+			// this slot's cached identity. The state-only helper lets an
+			// active current epoch publish before cancelling its lookups.
 			d.rememberFabricPeerMAC(slot, mustMAC(t, fabPeerTestPeerMAC))
-			ctx, cancel := context.WithCancel(context.Background())
-			cancel()
 			newAddr := "10.99.13.9"
 			if slot == 1 {
 				newAddr = "10.99.14.9"
 			}
-			epoch := &clusterCommsEpoch{}
-			epoch.fabricPopulateWG.Add(1)
-			d.populateFabricFwdSlot(ctx, epoch, slot, "ge-0-0-0", "fab0", newAddr, nil)
+			epoch := &clusterCommsEpoch{generation: d.clusterCommsGen}
+			populateFabricSlotStateOnly6554(d, epoch, slot, "ge-0-0-0", "fab0", newAddr)
 			if hint := d.fabricPeerMACHint(slot); hint != nil {
 				t.Fatalf("slot %d: stale identity %v retained across peer change", slot, hint)
 			}

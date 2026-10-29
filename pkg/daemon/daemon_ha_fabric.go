@@ -405,28 +405,26 @@ func (d *Daemon) populateFabricFwdSlot(
 		overlay = fabIface
 	}
 
-	// Store slot config for RefreshFabricFwd. A cancelled loop must not store
-	// after clearFabricSlots; stop joins this loop first. Still clear a changed
-	// peer's identity when a superseded loop was already cancelled.
-	cancelled := ctx.Err() != nil
+	// Publish slot configuration only while its generation is current. The
+	// generation check shares clusterCommsMu with begin/stop; the nested
+	// fabricMu protects slot and peer-constraint writes.
+	d.clusterCommsMu.Lock()
+	if ctx.Err() != nil || d.clusterCommsGen != epoch.generation {
+		d.clusterCommsMu.Unlock()
+		return
+	}
 	d.fabricMu.Lock()
 	s := &d.fabricSlots[slot]
-	if !cancelled {
-		s.iface = fabIface
-		s.overlay = overlay
-	}
+	s.iface = fabIface
+	s.overlay = overlay
 	peerChanged := !s.peerIP.Equal(peerIP)
 	if peerChanged {
 		s.peerMAC = nil
 		dpuserspace.RegisterFabricPeerMACConstraint(peerAddr, nil)
 	}
-	if !cancelled {
-		s.peerIP = peerIP
-	}
+	s.peerIP = peerIP
 	d.fabricMu.Unlock()
-	if cancelled {
-		return
-	}
+	d.clusterCommsMu.Unlock()
 
 	// Fast initial population: attempt immediately, then 500ms retries.
 	for i := range 10 {

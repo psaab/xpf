@@ -1296,6 +1296,10 @@ goes through `getSessionSync()` / `snapshotFabricRefreshChans()` /
   the lock. It clears session-sync, refresh channels, and fabric slots only if
   its stop generation is still current, so a concurrent successor cannot be
   joined or cleared by the old stop.
+- Populate loops publish their slot configuration only while holding
+  `clusterCommsMu` and matching their captured generation. Peer identity and
+  userspace constraint changes remain under `fabricMu`, so a late cancelled
+  loop cannot clear or overwrite its successor's slot state.
 
 - `activeClusterTransport` joined the epoch in **#6290** and publishes the same
   way, via `setActiveTransportIfCurrent(gen, key)`. It had been written by

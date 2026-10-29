@@ -931,3 +931,61 @@ func TestRefreshFabricFwdWakesRealPopulateLoopProbesOnce17060(t *testing.T) {
 		t.Fatal("real populate loop did not consume the queued probe")
 	}
 }
+
+// TestCancelledOldFabricLoopCannotClearSuccessorPeer17060 proves an old
+// cancelled populate loop cannot mutate slot identity published by a newer
+// generation, including the userspace peer-MAC constraint.
+func TestCancelledOldFabricLoopCannotClearSuccessorPeer17060(t *testing.T) {
+	const (
+		oldPeer = "10.99.31.2"
+		newPeer = "10.99.32.2"
+	)
+	d := &Daemon{fabricSlots: [2]fabricSlot{{name: "fabric"}, {name: "fabric1"}}}
+	_, newGen, _ := d.beginClusterCommsEpoch(context.Background())
+	oldCtx, cancelOld := context.WithCancel(context.Background())
+	cancelOld()
+	oldEpoch := &clusterCommsEpoch{generation: newGen - 1}
+	oldEpoch.fabricPopulateWG.Add(1)
+
+	wantMAC := mustMAC(t, fabPeerTestPeerMAC)
+	d.fabricMu.Lock()
+	d.fabricSlots[0].iface = "ge-0-0-5"
+	d.fabricSlots[0].overlay = "fab0"
+	d.fabricSlots[0].peerIP = net.ParseIP(newPeer)
+	d.fabricSlots[0].peerMAC = wantMAC
+	dpuserspace.RegisterFabricPeerMACConstraint(newPeer, wantMAC)
+	d.fabricMu.Unlock()
+	t.Cleanup(func() {
+		d.stopClusterComms()
+		dpuserspace.RegisterFabricPeerMACConstraint(oldPeer, nil)
+		dpuserspace.RegisterFabricPeerMACConstraint(newPeer, nil)
+	})
+
+	d.populateFabricFwdSlot(oldCtx, oldEpoch, 0,
+		"ge-0-0-0", "fab0", oldPeer, nil)
+
+	d.fabricMu.RLock()
+	slot := d.fabricSlots[0]
+	d.fabricMu.RUnlock()
+	if slot.iface != "ge-0-0-5" || slot.overlay != "fab0" ||
+		!slot.peerIP.Equal(net.ParseIP(newPeer)) ||
+		slot.peerMAC == nil || slot.peerMAC.String() != wantMAC.String() {
+		t.Fatalf("cancelled old epoch changed successor slot identity: iface=%q overlay=%q peer=%v mac=%v",
+			slot.iface, slot.overlay, slot.peerIP, slot.peerMAC)
+	}
+
+	// A sole decoy link-local neighbour is usable only if the successor's
+	// address-matched identity constraint survived the stale loop.
+	decoy := fabPeerNeigh(t, "fe80::dec0", fabPeerTestDecoyMAC)
+	resolution := dpuserspace.ResolveFabricPeerWithNeighbours(132, 131, newPeer,
+		mustMAC(t, fabPeerTestLocalMAC),
+		func(_ int, family int) ([]netlink.Neigh, error) {
+			if family == netlink.FAMILY_V6 {
+				return []netlink.Neigh{decoy}, nil
+			}
+			return nil, nil
+		})
+	if resolution.PeerMAC != nil {
+		t.Fatalf("successor constraint was cleared: sole decoy resolved as %s", resolution.PeerMAC)
+	}
+}
