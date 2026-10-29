@@ -11,6 +11,7 @@
 package grpcapi
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -152,7 +153,7 @@ func TestShowSystemServicesParity_13245(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	for _, want := range []string{
 		"SSH:            enabled (root-login: deny)",

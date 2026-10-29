@@ -189,7 +189,7 @@ func TestSeedWaitsForTakeoverApply16855(t *testing.T) {
 	// Model the takeover apply: the restart is in flight (old Kea still
 	// serving) and completes only when released; completion publishes the
 	// authority generation as applied, which is what the seed waits on.
-	gen := d.enqueueDHCPApplyWithAuthorityState(
+	gen, _ := d.enqueueDHCPApplyWithAuthorityState(
 		d.desiredClusterDHCPConfigWithMasters(d.store.ActiveConfig(), map[int]bool{1: true}), "vrrp MASTER rg-test", d.store.ActiveConfig(), nil)
 	if gen == 0 {
 		t.Fatal("enqueue returned generation 0")
@@ -263,7 +263,7 @@ func TestSeedWaitDoesNotFailOpenOrReanchorOldSnapshot17884(t *testing.T) {
 	releaseRestart := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(releaseRestart)
 
-	gen := d.enqueueDHCPApplyWithAuthorityState(
+	gen, _ := d.enqueueDHCPApplyWithAuthorityState(
 		d.desiredClusterDHCPConfigWithMasters(d.store.ActiveConfig(), map[int]bool{1: true}),
 		"vrrp MASTER rg-test", d.store.ActiveConfig(), nil)
 	if gen == 0 {
@@ -405,7 +405,7 @@ func TestSeedFamiliesApplyIndependently17884(t *testing.T) {
 				{Family: 6, Address: "2001:db8:62::151", DUID: "00:01:00:01:aa:bb:cc:dd:ee:97",
 					IAID: 97, LeaseType: "IA_NA", SubnetID: 1, Remaining: 3600, PreferredRemaining: 3600, State: 0},
 			})
-			gen := d.enqueueDHCPApplyWithAuthorityState(
+			gen, _ := d.enqueueDHCPApplyWithAuthorityState(
 				d.desiredClusterDHCPConfigWithMasters(d.store.ActiveConfig(), map[int]bool{1: true}),
 				"vrrp MASTER rg-test", d.store.ActiveConfig(), nil)
 			if gen == 0 {

@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/sysservices"
 )
 
 func TestShowSystemServicesCountsNamedAPIKeys10826(t *testing.T) {
@@ -47,7 +49,7 @@ func TestShowSystemServicesCountsNamedAPIKeys10826(t *testing.T) {
 				t.Fatalf("Commit(): %v", err)
 			}
 
-			c := &CLI{store: store}
+			c := &CLI{store: store, sshdStateFn: func() sysservices.SSHDState { return sysservices.SSHDRunning }}
 			out := captureStdout(t, func() {
 				if err := c.showSystemServices(); err != nil {
 					t.Fatalf("showSystemServices(): %v", err)

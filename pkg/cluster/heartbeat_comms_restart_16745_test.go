@@ -242,3 +242,175 @@ func TestNeverSeenArmRoutesSeenAlivePeerToTimeout16745(t *testing.T) {
 		t.Fatal("seen-peer loss must not be recorded as cold-boot confirmed-absent")
 	}
 }
+
+// #17764: a SECOND comms restart inside the same boot epoch must not drop
+// the cold-boot floor the first restart inherited. Sequence: cold receiver
+// starts at t=0 and hears its peer (protection until t0+30s); Stop+Start at
+// ~t=1 installs a receiver with 5s own grace and inheritedHold t0+30;
+// Stop+Start again at ~t=2 must install a receiver whose inheritedHold is
+// still t0+30. Pre-fix, the second StopHeartbeat stashes only
+// startedAt+seenThenLostGrace() (~t1+5s), so the floor drops ~23s early and
+// checkTimeout past the second receiver's own 5s grace declares a live
+// (but silent-since-restart) peer lost.
+// Controls: expired inherited floor is not resurrected; never-seen second
+// restart stays a cold start; a fresh peer heartbeat stays alive.
+func TestSecondCommsRestartInheritsColdBootGrace17764(t *testing.T) {
+	m := commsManager16745(t)
+	if err := m.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("StartHeartbeat: %v", err)
+	}
+	r0 := installedReceiver16745(t, m)
+	// Cold receiver: no seen grace, started now — inside the 30s boot grace.
+	seed := markPeerSeen16745(m, r0, 250*time.Millisecond)
+	floor := r0.startedAt.Add(heartbeatStartupGrace)
+	if r0.seenGrace != 0 {
+		t.Fatalf("fixture: cold receiver seenGrace = %v, want 0", r0.seenGrace)
+	}
+
+	// First comms restart (~1s into the epoch, by backdating not sleeping).
+	m.StopHeartbeat()
+	if err := m.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("first restart StartHeartbeat: %v", err)
+	}
+	r1 := installedReceiver16745(t, m)
+	if r1 == r0 {
+		t.Fatal("first restart did not replace the receiver")
+	}
+	if got := r1.lastSeen.Load(); got != seed {
+		t.Fatalf("first restart lastSeen = %d, want %d", got, seed)
+	}
+	if r1.seenGrace != heartbeatRestartGrace {
+		t.Fatalf("first restart seenGrace = %v, want %v", r1.seenGrace, heartbeatRestartGrace)
+	}
+	if !r1.inheritedHold.Equal(floor) {
+		t.Fatalf("first restart inheritedHold = %v, want cold-boot floor %v", r1.inheritedHold, floor)
+	}
+	// Simulate ~1s elapsed since the first restart without sleeping: its
+	// own 5s grace end is now far before the inherited floor.
+	r1.startedAt = time.Now().Add(-time.Second)
+
+	// Second comms restart — the defect site.
+	m.StopHeartbeat()
+	if err := m.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("second restart StartHeartbeat: %v", err)
+	}
+	defer m.StopHeartbeat()
+	r2 := installedReceiver16745(t, m)
+	if r2 == r1 || r2 == r0 {
+		t.Fatal("second restart did not replace the receiver")
+	}
+	if got := r2.lastSeen.Load(); got != seed {
+		t.Fatalf("#17764: second restart lastSeen = %d, want %d", got, seed)
+	}
+	if r2.seenGrace != heartbeatRestartGrace {
+		t.Fatalf("#17764: second restart seenGrace = %v, want %v", r2.seenGrace, heartbeatRestartGrace)
+	}
+	if !r2.inheritedHold.Equal(floor) {
+		t.Fatalf("#17764 DEFECT: second restart inheritedHold = %v, want original cold-boot floor %v — the second comms restart dropped the inherited grace", r2.inheritedHold, floor)
+	}
+
+	// Behavioural: past the second receiver's own 5s grace but still
+	// inside the inherited floor, a peer silent since the restart (stale
+	// lastSeen) must NOT be declared lost.
+	r2.lastSeen.Store(MonotonicNanos() - staleAge9722.Nanoseconds())
+	r2.startedAt = time.Now().Add(-(heartbeatRestartGrace + 500*time.Millisecond))
+	r2.checkTimeout()
+	if !m.PeerAlive() {
+		t.Fatal("#17764 DEFECT: peer declared lost inside the inherited cold-boot floor after the second comms restart")
+	}
+
+	// CONTROL expired floor: once the inherited floor has passed, the same
+	// stale peer IS declared lost (no resurrection, no permanent hold).
+	r2.inheritedHold = time.Now().Add(-time.Millisecond)
+	r2.checkTimeout()
+	if m.PeerAlive() {
+		t.Fatal("control: stale peer still alive after the inherited floor expired")
+	}
+	if !m.IsLocalPrimary(1) {
+		t.Fatal("control: local did not take over after the inherited floor expired and the peer went stale")
+	}
+
+	// CONTROL never-seen: two restarts of a never-seen receiver stay cold.
+	m2 := commsManager16745(t)
+	if err := m2.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("control StartHeartbeat: %v", err)
+	}
+	m2.StopHeartbeat()
+	if err := m2.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("control first restart: %v", err)
+	}
+	m2.StopHeartbeat()
+	if err := m2.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("control second restart: %v", err)
+	}
+	defer m2.StopHeartbeat()
+	rn := installedReceiver16745(t, m2)
+	if rn.seenGrace != 0 || rn.lastSeen.Load() != 0 || !rn.inheritedHold.IsZero() {
+		t.Fatalf("control never-seen: second restart armed seenGrace=%v lastSeen=%d inheritedHold=%v, want cold start", rn.seenGrace, rn.lastSeen.Load(), rn.inheritedHold)
+	}
+
+	// CONTROL resumed peer: heard after the second restart, stays alive
+	// past its own restart grace.
+	m3 := commsManager16745(t)
+	if err := m3.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("control StartHeartbeat: %v", err)
+	}
+	c0 := installedReceiver16745(t, m3)
+	markPeerSeen16745(m3, c0, 250*time.Millisecond)
+	m3.StopHeartbeat()
+	if err := m3.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("control first restart: %v", err)
+	}
+	m3.StopHeartbeat()
+	if err := m3.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("control second restart: %v", err)
+	}
+	defer m3.StopHeartbeat()
+	c2 := installedReceiver16745(t, m3)
+	c2.lastSeen.Store(MonotonicNanos())
+	c2.startedAt = time.Now().Add(-(heartbeatRestartGrace + 500*time.Millisecond))
+	c2.inheritedHold = time.Now().Add(-time.Millisecond)
+	c2.checkTimeout()
+	if !m3.PeerAlive() {
+		t.Fatal("control: a peer heard after the second restart was declared lost")
+	}
+}
+
+// #17764: an ordinary heartbeat restart must also carry forward the
+// predecessor's inherited boot floor, even when that receiver's own 5s
+// restart grace has already expired.
+func TestRestartHeartbeatKeepsInheritedBootGrace17764(t *testing.T) {
+	m := commsManager16745(t)
+	if err := m.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "em0"); err != nil {
+		t.Fatalf("StartHeartbeat: %v", err)
+	}
+	defer m.StopHeartbeat()
+
+	r0 := installedReceiver16745(t, m)
+	seed := markPeerSeen16745(m, r0, 250*time.Millisecond)
+	floor := r0.startedAt.Add(heartbeatStartupGrace)
+	// Model a first replacement receiver: it has a short own grace and an
+	// inherited cold-boot floor that outlives that grace.
+	r0.armRestart(seed, floor)
+	r0.startedAt = time.Now().Add(-(heartbeatRestartGrace + 500*time.Millisecond))
+
+	if !m.RestartHeartbeat() {
+		t.Fatal("RestartHeartbeat returned false while running")
+	}
+	r1 := installedReceiver16745(t, m)
+	if r1 == r0 {
+		t.Fatal("RestartHeartbeat did not replace the receiver")
+	}
+	if !r1.inheritedHold.Equal(floor) {
+		t.Fatalf("#17764 DEFECT: RestartHeartbeat inheritedHold = %v, want prior inherited cold-boot floor %v", r1.inheritedHold, floor)
+	}
+
+	// Past the replacement's own restart grace but inside the inherited
+	// floor, a silent peer must remain protected.
+	r1.lastSeen.Store(MonotonicNanos() - staleAge9722.Nanoseconds())
+	r1.startedAt = time.Now().Add(-(heartbeatRestartGrace + 500*time.Millisecond))
+	r1.checkTimeout()
+	if !m.PeerAlive() {
+		t.Fatal("#17764 DEFECT: RestartHeartbeat declared the peer lost inside the inherited cold-boot floor")
+	}
+}

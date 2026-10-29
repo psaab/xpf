@@ -120,6 +120,9 @@ type CLI struct {
 	// / unit test): showSystemServices falls back to the documented loopback
 	// defaults.
 	listenersFn func() sysservices.Listeners
+	// sshdStateFn is a test seam for the unmanaged-SSH state row. Production
+	// reads sshd through the shared sysservices probe.
+	sshdStateFn func() sysservices.SSHDState
 	// bootstrapImportFn returns the recorded day-0 / bootstrap config-import
 	// outcome for `show system bootstrap-import` (#6496). The daemon wires it
 	// to Daemon.BootstrapImportSnapshot — the SAME snapshot /health and the

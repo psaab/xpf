@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/sysservices"
 )
 
 // TestShowSystemServicesSNMPCommunityRedactsPerClass pins `show system
@@ -31,7 +32,7 @@ func TestShowSystemServicesSNMPCommunityRedactsPerClass(t *testing.T) {
 	store := newCLISecretStore(t)
 	for _, tc := range classWantsRedaction {
 		t.Run(tc.class, func(t *testing.T) {
-			c := &CLI{store: store, userClass: tc.class}
+			c := &CLI{store: store, userClass: tc.class, sshdStateFn: func() sysservices.SSHDState { return sysservices.SSHDRunning }}
 			out := captureStdout(t, func() {
 				if err := c.showSystemServices(); err != nil {
 					t.Fatalf("showSystemServices(): %v", err)
