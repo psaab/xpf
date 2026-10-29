@@ -1,5 +1,16 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: translate aggregated-Ethernet media MTUs to protocol MTUs with
+    the existing 14-byte overhead for untagged Ethernet. `ae0 mtu 1514` now
+    compiles to protocol MTU 1500 (#17719).
+
+  * Dataplane: release both blocked status polls from the #17728 regression
+    harness cleanup so a fatal before the first release cannot strand the
+    status loop (test-only follow-up to #18463).
+  * RPM: sanitize quoted inner URL parse-error payloads on credential-bearing
+    targets, retaining the error class without leaking malformed-authority
+    tokens (#17725).
+
   * Dataplane: reconcile VLAN child MTUs for unzoned bridge-domain members
     against the parent's planned MTU, reusing the #9757/#16633 helper
     semantics (#17726).
