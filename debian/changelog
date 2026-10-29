@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: compare duplicate source-NAT contexts after applied groups so
+    inherited scopes, not raw inline fragments, decide effective from/to
+    equality (#17712).
+
   * Config compiler: retain hard three-color policer structural errors on
     tolerant loads even when an independent burst-floor defect is downgraded
     to a warning (#17715).
