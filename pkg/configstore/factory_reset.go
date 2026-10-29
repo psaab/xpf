@@ -35,6 +35,12 @@ var DefaultArchiveDir = "/var/lib/xpf/archive"
 // top-level name sweep below.
 const FeedShrinkHistoryPath = "/var/lib/xpf/feed-shrink-history.json"
 
+// NoRedirectsCapturePath persists the original redirect sysctl values while
+// `system no-redirects` is active. It must survive daemon restarts so deleting
+// the posture restores the pre-xpf values, and the factory-reset wipe erases
+// it so a new tenant cannot inherit the prior tenant's sysctl capture.
+const NoRedirectsCapturePath = "/var/lib/xpf/no-redirects-capture.json"
+
 // RescueConfigBase is the fixed base name of the xpf rescue configuration file
 // the daemon writes alongside the live config (Store.rescuePath ->
 // "<configDir>/rescue.conf"). It is the full active-config TEXT with cleartext

@@ -1,13 +1,18 @@
 package daemon
 
 import (
-	"github.com/psaab/xpf/pkg/fsatomic"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/fsatomic"
 )
 
 // redirectSysctlRoot is the procfs root used for sysctl posture; overridable
@@ -55,6 +60,27 @@ func writeRedirectKnobs(value string) {
 	}
 }
 
+// redirectKnobSnapshotFile is the durable copy of capturedRedirects
+// (#17792). The capture is taken on the inactive->active transition,
+// but the knobs stay asserted until the stanza is deleted — possibly
+// after one or more daemon restarts — so the capture must outlive
+// the process. The path is fixed on /var/lib/xpf (same state root as
+// the transit ownership record) and deliberately NOT derived from
+// redirectSysctlRoot: tests redirect the sysctl root into a temp tree
+// while production must keep the snapshot on disk across restarts.
+// A test seam so hermetic fixtures can redirect it into a temp tree.
+var redirectKnobSnapshotFile = configstore.NoRedirectsCapturePath
+
+// redirectKnobSnapshotVersion rejects snapshot files written by a
+// different format generation: load fails soft (warn + recapture)
+// rather than restoring values the current decoder cannot vouch for.
+const redirectKnobSnapshotVersion = 1
+
+type redirectKnobSnapshot struct {
+	Version int               `json:"version"`
+	Values  map[string]string `json:"values"` // key: path relative to redirectSysctlRoot
+}
+
 // capturedRedirects holds the per-path values observed on the
 // inactive->active transition (#16779), restored verbatim on the
 // active->inactive transition. Guarded by redirectCaptureMu.
@@ -63,27 +89,209 @@ var (
 	capturedRedirects map[string]string
 )
 
-// captureRedirectKnobs snapshots the current value of every enumerated
-// knob. Must be called before writeRedirectKnobs("0") overwrites them.
+// redirectKnobRelPath renders an enumerated knob path relative to the
+// sysctl root so snapshots do not embed the (test-redirectable) root.
+func redirectKnobRelPath(path string) (string, bool) {
+	rel, err := filepath.Rel(redirectSysctlRoot, path)
+	if err != nil || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
+// redirectKnobAbsPath validates that a snapshot key names one of the
+// supported boolean redirect knobs under a sysctl interface directory.
+func redirectKnobAbsPath(rel string) (string, bool) {
+	if rel == "" || filepath.IsAbs(rel) || filepath.Clean(rel) != rel {
+		return "", false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) != 4 || parts[1] != "conf" || parts[2] == "." || parts[2] == ".." {
+		return "", false
+	}
+	for _, family := range redirectFamilies {
+		if parts[0] != family.name {
+			continue
+		}
+		for _, knob := range family.knobs {
+			if parts[3] == knob {
+				return filepath.Join(redirectSysctlRoot, rel), true
+			}
+		}
+	}
+	return "", false
+}
+
+// validRedirectKnobValue restricts snapshot values to the boolean
+// sysctl domain the capture itself can observe.
+func validRedirectKnobValue(v string) bool { return v == "0" || v == "1" }
+
+// persistCapturedRedirectKnobs durably writes capturedRedirects under
+// redirectCaptureMu. Best-effort: a failed write is logged and the
+// in-memory capture still drives this process; the posture itself
+// must not depend on the snapshot landing.
+func persistCapturedRedirectKnobs() {
+	snap := redirectKnobSnapshot{Version: redirectKnobSnapshotVersion, Values: make(map[string]string, len(capturedRedirects))}
+	for path, v := range capturedRedirects {
+		rel, ok := redirectKnobRelPath(path)
+		if !ok || !validRedirectKnobValue(v) {
+			slog.Warn("skipping invalid captured redirect knob", "path", path, "value", v)
+			continue
+		}
+		snap.Values[rel] = v
+	}
+	if len(snap.Values) == 0 {
+		return
+	}
+	data, err := json.Marshal(snap)
+	if err != nil {
+		slog.Warn("failed to encode captured redirect knobs", "err", err)
+		return
+	}
+	if err := fsatomic.MkdirAllDurable(filepath.Dir(redirectKnobSnapshotFile), 0o700); err != nil {
+		slog.Warn("failed to create redirect knob snapshot directory", "path", redirectKnobSnapshotFile, "err", err)
+		return
+	}
+	if err := fsatomic.WriteFileDurable(redirectKnobSnapshotFile, data, 0o600); err != nil {
+		slog.Warn("failed to persist captured redirect knobs", "path", redirectKnobSnapshotFile, "err", err)
+	}
+}
+
+// parseRedirectKnobSnapshot validates decoded snapshot bytes: version,
+// non-empty values in the boolean domain, and keys that stay under
+// the sysctl root. Any defect rejects the whole snapshot.
+func parseRedirectKnobSnapshot(data []byte) (map[string]string, error) {
+	var snap redirectKnobSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	if snap.Version != redirectKnobSnapshotVersion {
+		return nil, fmt.Errorf("unsupported version %d", snap.Version)
+	}
+	if len(snap.Values) == 0 {
+		return nil, errors.New("empty values")
+	}
+	out := make(map[string]string, len(snap.Values))
+	for rel, v := range snap.Values {
+		abs, ok := redirectKnobAbsPath(rel)
+		if !ok {
+			return nil, fmt.Errorf("key %q escapes the sysctl root", rel)
+		}
+		if !validRedirectKnobValue(v) {
+			return nil, fmt.Errorf("value %q for %q is not a boolean sysctl value", v, rel)
+		}
+		out[abs] = v
+	}
+	return out, nil
+}
+
+// loadPersistedRedirectKnobsLocked reads and validates the durable
+// snapshot (#17792). The caller holds redirectCaptureMu. It reports
+// (nil, false) when no usable snapshot exists; an unreadable or
+// invalid snapshot warns and is treated as absent (fail soft: the
+// caller recaptures the live knobs, matching pre-#17792 behaviour)
+// — never as a successful capture.
+func loadPersistedRedirectKnobsLocked() (map[string]string, bool) {
+	data, err := os.ReadFile(redirectKnobSnapshotFile)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("failed to read persisted redirect knob capture; recapturing", "path", redirectKnobSnapshotFile, "err", err)
+		}
+		return nil, false
+	}
+	values, err := parseRedirectKnobSnapshot(data)
+	if err != nil {
+		slog.Warn("invalid persisted redirect knob capture; recapturing", "path", redirectKnobSnapshotFile, "err", err)
+		return nil, false
+	}
+	return values, true
+}
+
+// clearPersistedRedirectKnobs removes the durable snapshot after a
+// fully successful restore and fsyncs its parent so the removal itself
+// is durable. A missing file or state directory is already clear.
+func clearPersistedRedirectKnobs() error {
+	if err := os.Remove(redirectKnobSnapshotFile); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove persisted redirect knob capture %s: %w", redirectKnobSnapshotFile, err)
+	}
+	if _, err := os.Stat(filepath.Dir(redirectKnobSnapshotFile)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect redirect knob snapshot directory: %w", err)
+	}
+	if err := fsatomic.SyncDir(filepath.Dir(redirectKnobSnapshotFile)); err != nil {
+		return fmt.Errorf("sync redirect knob snapshot directory: %w", err)
+	}
+	return nil
+}
+
+// captureRedirectKnobs establishes a capture for an activating posture.
+// It adopts a valid persisted capture before sampling live knobs, so a
+// restart cannot replace the original values with the asserted zeroes.
 func captureRedirectKnobs() {
 	redirectCaptureMu.Lock()
 	defer redirectCaptureMu.Unlock()
-	capturedRedirects = make(map[string]string)
+	ensureRedirectCaptureLocked()
+}
+
+// ensureRedirectCaptureLocked loads and validates a prior snapshot before
+// capturing any newly enumerated paths. The caller holds redirectCaptureMu.
+func ensureRedirectCaptureLocked() {
+	needsPersist := false
+	if capturedRedirects == nil {
+		if persisted, ok := loadPersistedRedirectKnobsLocked(); ok {
+			capturedRedirects = persisted
+		} else {
+			capturedRedirects = make(map[string]string)
+			needsPersist = true
+		}
+	}
 	for _, path := range redirectKnobPaths() {
+		if _, ok := capturedRedirects[path]; ok {
+			continue
+		}
 		b, err := os.ReadFile(path)
 		if err != nil {
 			continue
 		}
-		capturedRedirects[path] = strings.TrimSpace(string(b))
+		value := strings.TrimSpace(string(b))
+		if !validRedirectKnobValue(value) {
+			slog.Warn("ignoring invalid redirect knob value in capture", "path", path, "value", value)
+			continue
+		}
+		capturedRedirects[path] = value
+		needsPersist = true
+	}
+	if needsPersist {
+		persistCapturedRedirectKnobs()
 	}
 }
 
-func takeCapturedRedirectKnobs() map[string]string {
+// loadCapturedRedirectKnobsLocked loads the durable capture when this
+// process has no in-memory copy. The caller holds redirectCaptureMu.
+func loadCapturedRedirectKnobsLocked() {
+	if capturedRedirects != nil {
+		return
+	}
+	if persisted, ok := loadPersistedRedirectKnobsLocked(); ok {
+		capturedRedirects = persisted
+	}
+}
+
+// redirectCapturePending reports whether an inactive reconcile still has
+// a capture to restore, including a file left by a previous process.
+func redirectCapturePending() bool {
 	redirectCaptureMu.Lock()
 	defer redirectCaptureMu.Unlock()
-	m := capturedRedirects
-	capturedRedirects = nil
-	return m
+	if capturedRedirects != nil {
+		return true
+	}
+	_, err := os.Lstat(redirectKnobSnapshotFile)
+	if err == nil {
+		return true
+	}
+	return !errors.Is(err, os.ErrNotExist)
 }
 
 // isIPv4AcceptRedirects reports whether path is an ipv4
@@ -116,17 +324,18 @@ func restoreValueForRedirectKnob(path string) string {
 
 // restoreRedirectKnobs writes back the captured per-path values. For
 // ipv4 accept_redirects paths the restored value is additionally
-// capped by the forwarding-dependent router default: when ip_forward
-// is 1 a forwarding device accepts redirects only when both all and
-// the device are 1, and the kernel sets all = !forwarding, so a
-// captured 1 must not be restored above 0 while forwarding stays on
-// (#16779). Paths with no captured value fall back to
-// restoreValueForRedirectKnob.
-func restoreRedirectKnobs() {
-	captured := takeCapturedRedirectKnobs()
+// capped by the forwarding-dependent router default. Failed writes keep
+// both the in-memory capture and the persisted snapshot for a later
+// inactive reconcile; ownership is cleared only after every knob and
+// the durable snapshot removal succeed.
+func restoreRedirectKnobs() bool {
+	redirectCaptureMu.Lock()
+	defer redirectCaptureMu.Unlock()
+	loadCapturedRedirectKnobsLocked()
 	forwarding := ipv4ForwardingEnabled()
+	success := true
 	for _, path := range redirectKnobPaths() {
-		value, ok := captured[path]
+		value, ok := capturedRedirects[path]
 		if !ok {
 			value = restoreValueForRedirectKnob(path)
 		} else if forwarding && isIPv4AcceptRedirects(path) && value == "1" {
@@ -134,8 +343,18 @@ func restoreRedirectKnobs() {
 		}
 		if _, err := fsatomic.WriteKernelKnob(path, value); err != nil {
 			slog.Warn("failed to restore ICMP redirects", "path", path, "value", value, "err", err)
+			success = false
 		}
 	}
+	if !success {
+		return false
+	}
+	if err := clearPersistedRedirectKnobs(); err != nil {
+		slog.Warn("failed to clear restored redirect knob capture", "path", redirectKnobSnapshotFile, "err", err)
+		return false
+	}
+	capturedRedirects = nil
+	return true
 }
 
 func applyNoRedirectsPosture() {
@@ -164,7 +383,7 @@ func reconcileNoRedirects(active bool) {
 			captureRedirectKnobs()
 		}
 		writeRedirectKnobs("0")
-	case wasActive:
+	case wasActive || redirectCapturePending():
 		restoreRedirectKnobs()
 	}
 }

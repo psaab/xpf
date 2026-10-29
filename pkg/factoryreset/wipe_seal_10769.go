@@ -31,26 +31,27 @@ import (
 // Tests point them at a disposable tree; production values
 // remain the image paths whose previous-tenant state must not survive reset.
 var (
-	wipeMachineIDPath         = "/etc/machine-id"
-	wipeApplianceMarkerPath   = "/etc/xpf/appliance"
-	wipeSSHHostKeyDir         = "/etc/ssh"
-	wipeRootSSHUserDir        = "/root/.ssh"
-	wipeRootBashHistory       = "/root/.bash_history"
-	wipeSNMPEngineIDPath      = "/var/lib/xpf/snmp-engine-id"
-	wipeSNMPEngineBootsPath   = "/var/lib/xpf/snmp-engineboots"
-	wipeUEFIStatePath         = "/var/lib/xpf/uefi-bootorder-front"
-	wipeFeedShrinkHistoryPath = configstore.FeedShrinkHistoryPath
-	wipeSystemdRandomSeed     = "/var/lib/systemd/random-seed"
-	wipeAptListsDir           = "/var/lib/apt/lists"
-	wipeAptArchiveDir         = "/var/cache/apt/archives"
-	wipeRunUtmpPath           = "/run/utmp"
-	wipeDay0RejectedPath      = "/etc/xpf/.day0-config-rejected"
-	wipeRootGrownPath         = "/etc/xpf/.root-grown"
-	wipeDDNSLeaseStatePath    = ddns.DefaultLeaseStatePath()
-	wipeDDNSSurfaceAPath      = ddns.DefaultSurfaceAStatePath()
-	wipePasswdBackupPaths     = []string{"/etc/passwd-", "/etc/shadow-", "/etc/group-", "/etc/gshadow-"}
-	wipeManagedHostKeysPath   = "/etc/ssh/ssh_known_hosts"
-	wipeManagedDropins        = []string{
+	wipeMachineIDPath          = "/etc/machine-id"
+	wipeApplianceMarkerPath    = "/etc/xpf/appliance"
+	wipeSSHHostKeyDir          = "/etc/ssh"
+	wipeRootSSHUserDir         = "/root/.ssh"
+	wipeRootBashHistory        = "/root/.bash_history"
+	wipeSNMPEngineIDPath       = "/var/lib/xpf/snmp-engine-id"
+	wipeSNMPEngineBootsPath    = "/var/lib/xpf/snmp-engineboots"
+	wipeUEFIStatePath          = "/var/lib/xpf/uefi-bootorder-front"
+	wipeFeedShrinkHistoryPath  = configstore.FeedShrinkHistoryPath
+	wipeNoRedirectsCapturePath = configstore.NoRedirectsCapturePath
+	wipeSystemdRandomSeed      = "/var/lib/systemd/random-seed"
+	wipeAptListsDir            = "/var/lib/apt/lists"
+	wipeAptArchiveDir          = "/var/cache/apt/archives"
+	wipeRunUtmpPath            = "/run/utmp"
+	wipeDay0RejectedPath       = "/etc/xpf/.day0-config-rejected"
+	wipeRootGrownPath          = "/etc/xpf/.root-grown"
+	wipeDDNSLeaseStatePath     = ddns.DefaultLeaseStatePath()
+	wipeDDNSSurfaceAPath       = ddns.DefaultSurfaceAStatePath()
+	wipePasswdBackupPaths      = []string{"/etc/passwd-", "/etc/shadow-", "/etc/group-", "/etc/gshadow-"}
+	wipeManagedHostKeysPath    = "/etc/ssh/ssh_known_hosts"
+	wipeManagedDropins         = []string{
 		"/etc/ssh/sshd_config.d/00-xpf.conf",
 		"/etc/ssh/sshd_config.d/xpf.conf",
 		"/etc/chrony/sources.d/xpf.sources",
@@ -253,14 +254,15 @@ func wipeImageSealResidue() error {
 	}
 
 	// xpf-owned identity/state on every host: SNMP engine identity (the
-	// daemon regenerates it), the name-keyed feed-shrink history (tenant
-	// state that must not cross a reset), and the day-0 rejection /
-	// root-grow first-boot markers under /etc/xpf.
+	// daemon regenerates it), the name-keyed feed-shrink history and
+	// no-redirects capture (tenant state that must not cross a reset),
+	// and the day-0 rejection / root-grow first-boot markers under /etc/xpf.
 	for _, path := range []string{
 		wipeSNMPEngineIDPath,
 		wipeSNMPEngineBootsPath,
 		wipeUEFIStatePath,
 		wipeFeedShrinkHistoryPath,
+		wipeNoRedirectsCapturePath,
 		wipeDay0RejectedPath,
 		wipeRootGrownPath,
 	} {
@@ -510,7 +512,7 @@ func wipeFinalEraseVerification(completion Completion) error {
 			}
 		}
 	}
-	for _, path := range []string{wipeDDNSLeaseStatePath, wipeDDNSSurfaceAPath, wipeIPsecStatePath} {
+	for _, path := range []string{wipeDDNSLeaseStatePath, wipeDDNSSurfaceAPath, wipeIPsecStatePath, wipeNoRedirectsCapturePath} {
 		if _, err := os.Lstat(path); err == nil {
 			errs = append(errs, fmt.Errorf("zeroize: state file %s present at final verification", path))
 		} else if !os.IsNotExist(err) {
