@@ -3851,9 +3851,9 @@ never lock an operator out of a remote box it manages.
   **#16737:** that independence is a documented divergence from Junos —
   deleting `system services ssh` removes only the managed drop-in, it
   does NOT stop sshd. `show system services` therefore always prints an
-  SSH row (`running (not managed — no system services ssh; …)` when the
-  stanza is absent), and a commit whose zone host-inbound admits
-  `ssh`/`all`/`any-service` without the stanza carries a commit
+  SSH row with the observed `running`, `stopped`, or `unknown` state when
+  the stanza is absent (#17770), and a commit whose zone host-inbound
+  admits `ssh`/`all`/`any-service` without the stanza carries a commit
   advisory (`pkg/config/ssh_unmanaged_advisory_16737.go`). Owning sshd
   enablement (stop/disable/mask) was deliberately not taken: lifeline
   recovery depends on sshd existing outside xpf's config lifecycle.
