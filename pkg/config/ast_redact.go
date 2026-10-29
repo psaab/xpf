@@ -66,11 +66,15 @@ import (
 //	                          path left the modelled grammar, so they are
 //	                          not in a value slot) stay fail-closed: an
 //	                          unmodelled *password*/*secret* leaf masks
-//	                          (#18384 review fold). Valued `*-key` is
-//	                          deliberately NOT shape-masked:
-//	                          trusted-key/tsig-key/aws-access-key are
-//	                          public identifiers and GRE/chassis `key`
-//	                          stays gated on the OSPF md5 pair below.
+//	                          its value (#18384). Valued `*-key` is not
+//	                          classified as credential-shaped because
+//	                          `trusted-key`, `tsig-key`, and
+//	                          `aws-access-key` are public identifiers. The
+//	                          fallback also preserves exact
+//	                          `security ssh-known-hosts host <name>
+//	                          <type>` public trust-anchor paths, the
+//	                          OSPF-gated GRE/chassis bare `key`, and the
+//	                          `pre-shared-key` format qualifier.
 
 // SecretDataPlaceholder is the mask emitted in place of a secret leaf value on
 // the raw-AST render/display paths. It mirrors the Junos SECRET-DATA idiom and
@@ -1146,6 +1150,7 @@ func secretIndices(fp []string) []int {
 	var out []int
 	positionWalker := credentialShapePositionWalker17806{schema: credentialShapeSchemaRoot17806}
 	for i, k := range fp {
+		outStart := len(out)
 		schemaKeyword, valuePosition, positionKnown := positionWalker.position(fp, i)
 		// The broad shape classifier applies only to schema keywords.
 		// In the open world (path left the modelled grammar) a
@@ -1305,8 +1310,46 @@ func secretIndices(fp []string) []int {
 				out = append(out, i+1)
 			}
 		}
+		// #17787: the closed secret-keyword switch cannot anticipate every
+		// unmodeled credential leaf (e.g. ssh-key or master-key). Treat a
+		// valued *-key schema keyword, or open-world token, as secret only
+		// after the specific arms above; the structural public-key exclusion
+		// below preserves known SSH host-key material.
+		if len(out) == outStart && !valuePosition &&
+			(schemaKeyword || !positionKnown) &&
+			strings.HasSuffix(k, "-key") && i+1 < len(fp) &&
+			!isSSHKnownHostKeyPath17787(fp, i) &&
+			k != "pre-shared-key" &&
+			k != "trusted-key" && k != "tsig-key" && k != "aws-access-key" {
+			for j := i + 1; j < len(fp); j++ {
+				out = append(out, j)
+			}
+		}
 	}
 	return out
+}
+
+// isSSHKnownHostKeyPath17787 recognizes a host-key type inside the exact
+// public SSH known-hosts branch. The opaque schema body intentionally admits
+// supported algorithm names (including future vendor extensions), whose key
+// blobs are trust anchors rather than credentials to redact. Allow an
+// optional set verb and config-group definition prefix, but no looser
+// ancestor match.
+func isSSHKnownHostKeyPath17787(fp []string, i int) bool {
+	if i < 0 || i+1 >= len(fp) {
+		return false
+	}
+	off := 0
+	if fp[off] == "set" {
+		off++
+	}
+	if off+1 < len(fp) && fp[off] == "groups" {
+		off += 2
+	}
+	return i == off+4 &&
+		fp[off] == "security" &&
+		fp[off+1] == "ssh-known-hosts" &&
+		fp[off+2] == "host"
 }
 
 // isSNMPTrapGroupIdentity reports whether fp[i] (a `trap-group` token) is
