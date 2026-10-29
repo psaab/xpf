@@ -175,3 +175,130 @@ func TestPreemptArmDebtFloorStillLoses12164_16739(t *testing.T) {
 			owner.GroupState(1).Weight, peer.GroupState(1).Weight)
 	}
 }
+
+// #17781: the first arm-debt yield must be the LAST transition. On the
+// defective code the yielded owner is secondary with positive arm debt
+// while rg.Ready stays true, so the raw-priority preempt arm re-promotes
+// it on the next heartbeat, the yield arm demotes it again, and the pair
+// flaps at heartbeat rate with dual-primary windows and growing
+// failover counts. The acceptance is exchange-level: after the first
+// yield, 6+ further election exchanges produce zero transitions, zero
+// dual-primary observations, and zero failover-count growth.
+func armDebtYieldPair17781(t *testing.T, preempt bool) (owner, peer *Manager) {
+	t.Helper()
+	cfg := &config.ClusterConfig{
+		ControlInterface: "em0",
+		RedundancyGroups: []*config.RedundancyGroup{{
+			ID: 1, Preempt: preempt, NodePriorities: map[int]int{0: 200, 1: 100},
+		}},
+	}
+	owner, peer = NewManager(0, 1), NewManager(1, 1)
+	owner.UpdateConfig(cfg)
+	peer.UpdateConfig(cfg)
+	owner.takeoverHoldTime, peer.takeoverHoldTime = 0, 0
+	for _, m := range []*Manager{owner, peer} {
+		m.SetRGReady(1, true, nil)
+		m.SetMonitorWeight(1, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
+	}
+	exchangeElection12164(owner, peer)
+	if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
+		t.Fatalf("precondition: owner primary=%v peer primary=%v, want owner only",
+			owner.IsLocalPrimary(1), peer.IsLocalPrimary(1))
+	}
+	t.Cleanup(func() { owner.Stop(); peer.Stop() })
+	return owner, peer
+}
+
+func assertArmDebtYieldStable17781(t *testing.T, owner, peer *Manager) {
+	t.Helper()
+
+	// Install arm debt on the higher-priority owner while it stays
+	// Ready: arm debt and rg.Ready are independent signals, and it is
+	// exactly this combination that flapped.
+	owner.SetMonitorWeight(1, DataplaneArmMonitorIface, true, DataplaneArmMonitorCost)
+	if got := owner.GroupState(1).Weight; got != 1 {
+		t.Fatalf("arm-debt weight = %d, want floor 1", got)
+	}
+
+	// First yield: let the incumbent observe the peer, then relay its
+	// demotion so the peer can take over. SetMonitorWeight may itself
+	// run election, so only send the incumbent's heartbeat if it still
+	// owns the RG.
+	if owner.IsLocalPrimary(1) {
+		owner.handlePeerHeartbeat(peer.buildHeartbeat())
+	}
+	if owner.IsLocalPrimary(1) {
+		t.Fatal("higher-priority arm-debt owner did not yield")
+	}
+	peer.handlePeerHeartbeat(owner.buildHeartbeat())
+	if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) {
+		t.Fatalf("first arm-debt yield did not hand over: owner=%v peer=%v",
+			owner.IsLocalPrimary(1), peer.IsLocalPrimary(1))
+	}
+	fcOwner := owner.GroupState(1).FailoverCount
+	fcPeer := peer.GroupState(1).FailoverCount
+
+	// Eight further exchanges (32 heartbeat rounds), sampling after
+	// every single heartbeat so transient dual-primary windows and
+	// mid-exchange re-promotions are observed, not just endpoints.
+	prevOwner, prevPeer := owner.IsLocalPrimary(1), peer.IsLocalPrimary(1)
+	transitions := 0
+	observe := func(step string) {
+		o, p := owner.IsLocalPrimary(1), peer.IsLocalPrimary(1)
+		if o && p {
+			t.Fatalf("dual-primary observed at %s (owner and peer both primary)", step)
+		}
+		if o != prevOwner {
+			transitions++
+		}
+		if p != prevPeer {
+			transitions++
+		}
+		prevOwner, prevPeer = o, p
+	}
+	for range 8 {
+		for range 4 {
+			owner.handlePeerHeartbeat(peer.buildHeartbeat())
+			observe("owner heartbeat")
+			peer.handlePeerHeartbeat(owner.buildHeartbeat())
+			observe("peer heartbeat")
+		}
+	}
+	if transitions != 0 {
+		t.Fatalf("transitions after first yield = %d, want 0 (owner=%v peer=%v)",
+			transitions, owner.IsLocalPrimary(1), peer.IsLocalPrimary(1))
+	}
+	if got := owner.GroupState(1).FailoverCount; got != fcOwner {
+		t.Fatalf("owner failover count grew after first yield: %d -> %d", fcOwner, got)
+	}
+	if got := peer.GroupState(1).FailoverCount; got != fcPeer {
+		t.Fatalf("peer failover count grew after first yield: %d -> %d", fcPeer, got)
+	}
+	if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) {
+		t.Fatalf("steady state lost: owner=%v peer=%v, want peer only",
+			owner.IsLocalPrimary(1), peer.IsLocalPrimary(1))
+	}
+}
+
+func TestPreemptArmDebtYieldDoesNotFlap17781(t *testing.T) {
+	owner, peer := armDebtYieldPair17781(t, true)
+	assertArmDebtYieldStable17781(t, owner, peer)
+
+	// Clearing the arm debt must restore ordinary preempt ordering:
+	// the higher-priority owner takes the RG back. This pins that the
+	// anti-flap hold is debt-scoped, not a permanent demotion.
+	owner.SetMonitorWeight(1, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
+	exchangeElection12164(owner, peer)
+	if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
+		t.Fatalf("arm-debt recovery did not fail back under preempt: owner=%v peer=%v",
+			owner.IsLocalPrimary(1), peer.IsLocalPrimary(1))
+	}
+}
+
+// Control: the identical fixture with preempt=false (pre-#17538
+// semantics) yields once and is stable. Guards against a fix that
+// "stabilises" by breaking the non-preempt yield itself.
+func TestNonPreemptArmDebtYieldStable17781(t *testing.T) {
+	owner, peer := armDebtYieldPair17781(t, false)
+	assertArmDebtYieldStable17781(t, owner, peer)
+}

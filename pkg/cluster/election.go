@@ -427,6 +427,21 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// (#12164's arm-debt yield), so both sides agree on what weight 1
 	// means.
 	peerCannotTakeOver := peerGroup.State != StatePrimary && !peerGroup.takeoverReady
+	// A verified healthier peer that won the #12164 arm-debt handoff must
+	// retain ownership while this node remains at the arm floor. Readiness
+	// and arm debt are independent signals: rg.Ready may still be true even
+	// though the dataplane arm monitor keeps this node at weight 1. Without
+	// this receiver-side hold, the raw-priority preempt arm below immediately
+	// re-promotes the yielded higher-priority node on the next heartbeat,
+	// causing a primary/secondary flap and dual-primary window.
+	verifiedArmDebtPeer := rg.GroupID != 0 &&
+		m.dataplaneArmDebtLocked(rg.GroupID) > 0 &&
+		(peerGroup.State == StatePrimary || peerGroup.State == StateSecondary) &&
+		peerWeight > localWeight &&
+		(peerEff > localEff || (peerEff == localEff && m.peerNodeID < m.nodeID)) &&
+		peerGroup.heartbeatEchoSession == m.LocalProcessToken() &&
+		peerGroup.heartbeatEchoSequence > 0 &&
+		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil)
 
 	// #12164 arm-debt exception under preempt: a primary whose dataplane
 	// is not ready (positive arm debt, weight at the floor) must yield
@@ -439,14 +454,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// arm-debt rule" half of #16739. Ordinary monitor debt (partial
 	// loss, weight > 1) does NOT fire here: that is exactly the Junos
 	// partial-loss case that must keep the incumbent.
-	if rg.Preempt && rg.State == StatePrimary && rg.GroupID != 0 &&
-		m.dataplaneArmDebtLocked(rg.GroupID) > 0 &&
-		(peerGroup.State == StatePrimary || peerGroup.State == StateSecondary) &&
-		peerWeight > localWeight &&
-		(peerEff > localEff || (peerEff == localEff && m.peerNodeID < m.nodeID)) &&
-		peerGroup.heartbeatEchoSession == m.LocalProcessToken() &&
-		peerGroup.heartbeatEchoSequence > 0 &&
-		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil) {
+	if rg.Preempt && rg.State == StatePrimary && verifiedArmDebtPeer {
 		return electLocalSecondary, "Local dataplane not ready; verified peer takes over"
 	}
 
@@ -464,6 +472,14 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		peerGroup.heartbeatEchoSequence > 0 &&
 		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil) {
 		return electLocalPrimary, "Peer yielded at arm-debt floor; taking over"
+	}
+
+	// Keep an arm-debt yield in place when the verified peer is now
+	// primary. Do not let raw-priority preempt undo the handoff until
+	// the local debt clears or the peer no longer owns the RG.
+	if rg.Preempt && rg.State != StatePrimary && verifiedArmDebtPeer &&
+		peerGroup.State == StatePrimary {
+		return electNoChange, "Verified peer owns while local dataplane is not ready"
 	}
 
 	// Preempt enabled: higher priority wins. While both weights are
