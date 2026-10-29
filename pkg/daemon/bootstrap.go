@@ -953,7 +953,7 @@ func (d *Daemon) persistBootstrapLifelineRenamePreExit(kernel, logical string) e
 		return fmt.Errorf("bootstrap exit: durably persist lifeline rename provenance at %s: %w", path, err)
 	}
 	d.bootstrapLifelineMu.Lock()
-	d.bootstrapLifelineGeneration = generation
+	d.bootstrapLifelineRenameGeneration = generation
 	d.bootstrapLifelineMu.Unlock()
 	return nil
 }
@@ -1067,7 +1067,7 @@ func (d *Daemon) clearBootstrapLifelineNetwork() {
 
 func (d *Daemon) clearBootstrapLifelineRenameForCurrentGeneration() {
 	d.bootstrapLifelineMu.Lock()
-	generation := d.bootstrapLifelineGeneration
+	generation := d.bootstrapLifelineRenameGeneration
 	d.bootstrapLifelineMu.Unlock()
 	d.clearBootstrapLifelineRename(generation)
 }
@@ -1426,8 +1426,10 @@ func (d *Daemon) clearBootstrapLifelineRename(generation string) {
 	path := filepath.Join(linkDir, bootstrapLifelineRenameBase)
 	data, err := readBootstrapLifelineSnapshot(path)
 	if errors.Is(err, os.ErrNotExist) {
+		d.clearBootstrapLifelineRenameGeneration(generation)
 		return
 	}
+
 	if err != nil {
 		slog.Warn("could not read cleared bootstrap lifeline rename record",
 			"path", path, "err", err, "issue", "#17755")
@@ -1447,6 +1449,15 @@ func (d *Daemon) clearBootstrapLifelineRename(generation string) {
 			"path", path, "err", err, "issue", "#17755")
 		return
 	}
+	d.clearBootstrapLifelineRenameGeneration(generation)
+}
+
+func (d *Daemon) clearBootstrapLifelineRenameGeneration(generation string) {
+	d.bootstrapLifelineMu.Lock()
+	if d.bootstrapLifelineRenameGeneration == generation {
+		d.bootstrapLifelineRenameGeneration = ""
+	}
+	d.bootstrapLifelineMu.Unlock()
 }
 
 func (d *Daemon) runBootstrapTeardownSteps(restoreLifeline bool) []bootstrapTeardownStep {

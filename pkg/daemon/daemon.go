@@ -1922,9 +1922,14 @@ type Daemon struct {
 	bootstrapLifelineKernelName  string
 	bootstrapLifelineLogicalName string
 
-	// bootstrapLifelineGeneration binds the persisted snapshot to the config
-	// that took over the bootstrap lifeline.
+	// bootstrapLifelineGeneration binds the persisted network snapshot to the
+	// config that took over the bootstrap lifeline.
 	bootstrapLifelineGeneration string
+	// bootstrapLifelineRenameGeneration independently binds the early #17755
+	// sidecar to the config that captured the rename pair. It must not stand
+	// in for the network snapshot generation: repeated FIRST windows rebind
+	// the network snapshot even when rename provenance was just persisted.
+	bootstrapLifelineRenameGeneration string
 
 	// firstCommitNetworkdReloadOwed records downstream networkd reload debt
 	// independently of the filesystem scan. The durable store teardown marker

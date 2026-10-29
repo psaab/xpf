@@ -25,7 +25,7 @@ func TestFirstCommitRollbackEntersBootstrap(t *testing.T) {
 	}
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: s}
 	renameGeneration := "live-first-commit-generation"
-	d.bootstrapLifelineGeneration = renameGeneration
+	d.bootstrapLifelineRenameGeneration = renameGeneration
 	networkDir := withTempLinkDir(t)
 	sidecar := filepath.Join(networkDir, ".xpf-first-commit-lifeline-rename.json")
 	if err := os.WriteFile(sidecar, []byte(

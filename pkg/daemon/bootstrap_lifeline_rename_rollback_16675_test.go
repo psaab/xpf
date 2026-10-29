@@ -424,7 +424,7 @@ func TestConfirmedLifelineRenameClearsSidecar17755(t *testing.T) {
 	if err := os.WriteFile(snapshot, []byte(`{"generation":"confirmed-generation"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	d := &Daemon{bootstrapLifelineGeneration: generation}
+	d := &Daemon{bootstrapLifelineRenameGeneration: generation}
 	d.clearBootstrapLifelineNetwork()
 	if _, err := os.Stat(sidecar); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("confirmed generation kept early rename sidecar: %v", err)
