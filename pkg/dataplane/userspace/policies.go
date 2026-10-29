@@ -18,11 +18,14 @@ import (
 // by both appid.ProtocolNumber and userspace-dp parse_protocol.
 const unsupportedApplicationSentinel = "__unsupported__"
 
-// dnsUnavailableApplicationSentinel marks one rule for Rust-side
-// fail-closed quarantine when its DNS address constraint is unavailable.
-// Unlike unsupportedApplicationSentinel, Rust recognizes this marker, drops
-// only the marker term, and enforces the containing rule as deny.
-const dnsUnavailableApplicationSentinel = "__dns_unavailable__"
+// DNS-unavailable address sides use distinct markers so Rust can quarantine
+// only those sides while preserving every representable address constraint.
+// Unlike unsupportedApplicationSentinel, Rust recognizes and drops these
+// control terms, forcing only the containing rule's action to deny.
+const (
+	dnsUnavailableSourceApplicationSentinel      = "__dns_unavailable_source__"
+	dnsUnavailableDestinationApplicationSentinel = "__dns_unavailable_destination__"
+)
 
 // lenientDroppedConstraintToken is the synthetic offending-token label recorded
 // for a policy the lenient / HA-sync compile path poisons because the compiler

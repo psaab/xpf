@@ -221,11 +221,11 @@ func buildOneRuleSnapshot(
 			Protocol: unsupportedApplicationSentinel,
 		}}
 	}
-	// #17722: a DENY/REJECT (or excluded-side) rule with an unavailable DNS
-	// address side carries a dedicated term. Rust recognizes it, normalizes
-	// address matching for this rule, and forces its action to deny; unlike the
-	// generic unsupported-application sentinel, it does not reject siblings.
-	// Preserve generic sentinels for every independent representability cause.
+	// #17722: a DENY/REJECT (or excluded-side) rule with unavailable DNS
+	// carries a side-specific control term. Rust forces the rule to deny and
+	// neutralizes only unavailable sides, preserving representable matches and
+	// siblings. Preserve generic sentinels for independent representability
+	// causes.
 	dnsRuleQuarantined := dnsFailClosed && ok && !srcUnrepresentable && !dstUnrepresentable &&
 		!pol.LenientContentDropped && len(pol.MalformedZonePairShapes) == 0 &&
 		len(pol.UnknownSecurityPoliciesChildren) == 0
@@ -290,14 +290,18 @@ func buildOneRuleSnapshot(
 	if dnsRuleQuarantined {
 		if srcDNSMatchNone {
 			rejectedSrc = offendingAddressTokens(addrRepresentable, pol.Match.SourceAddresses)
+			applicationTerms = append(applicationTerms, PolicyApplicationSnapshot{
+				Name:     dnsUnavailableSourceApplicationSentinel,
+				Protocol: dnsUnavailableSourceApplicationSentinel,
+			})
 		}
 		if dstDNSMatchNone {
 			rejectedDst = offendingAddressTokens(addrRepresentable, pol.Match.DestinationAddresses)
+			applicationTerms = append(applicationTerms, PolicyApplicationSnapshot{
+				Name:     dnsUnavailableDestinationApplicationSentinel,
+				Protocol: dnsUnavailableDestinationApplicationSentinel,
+			})
 		}
-		applicationTerms = append(applicationTerms, PolicyApplicationSnapshot{
-			Name:     dnsUnavailableApplicationSentinel,
-			Protocol: dnsUnavailableApplicationSentinel,
-		})
 	}
 	// #2508: carry the per-policy `then log session-init`/`session-close`
 	// selection into the snapshot so the dataplane can gate the per-policy

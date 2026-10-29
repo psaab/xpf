@@ -112,14 +112,15 @@ func TestDNSNeverResolvedDenyPerRuleFailClosed16595(t *testing.T) {
 			}
 			for _, r := range rules {
 				raw, _ := json.Marshal(r)
-				if r.Name == "block-bad" && !strings.Contains(string(raw), dnsUnavailableApplicationSentinel) {
-					t.Fatalf("deny with unavailable DNS must carry the per-rule quarantine marker, got %s", raw)
+				if r.Name == "block-bad" && !strings.Contains(string(raw), dnsUnavailableDestinationApplicationSentinel) {
+					t.Fatalf("deny with unavailable destination DNS must carry its per-side quarantine marker, got %s", raw)
 				}
 				if r.Name == "block-bad" && strings.Contains(string(raw), unsupportedApplicationSentinel) {
 					t.Fatalf("DNS quarantine must not use the whole-snapshot sentinel, got %s", raw)
 				}
 				if r.Name == "permit-good" && (strings.Contains(string(raw), unsupportedApplicationSentinel) ||
-					strings.Contains(string(raw), dnsUnavailableApplicationSentinel)) {
+					strings.Contains(string(raw), dnsUnavailableSourceApplicationSentinel) ||
+					strings.Contains(string(raw), dnsUnavailableDestinationApplicationSentinel)) {
 					t.Fatalf("sibling permit-good must stay clean, got %s", raw)
 				}
 			}
@@ -210,9 +211,9 @@ func TestDNSExcludedNeverResolvedFailsClosed16595(t *testing.T) {
 				t.Fatalf("excluded DNS must emit no address sentinel, got %s", mustJSON16595(rules))
 			}
 			raw, _ := json.Marshal(rules[0])
-			if !strings.Contains(string(raw), dnsUnavailableApplicationSentinel) ||
+			if !strings.Contains(string(raw), dnsUnavailableDestinationApplicationSentinel) ||
 				strings.Contains(string(raw), unsupportedApplicationSentinel) {
-				t.Fatalf("excluded unavailable side must carry only the per-rule DNS quarantine marker, got %s", raw)
+				t.Fatalf("excluded unavailable destination must carry only its per-side DNS quarantine marker, got %s", raw)
 			}
 			if rules[0].Action != string(policyActionPermit) {
 				t.Fatalf("Go preserves configured action for Rust quarantine handling, got %q", rules[0].Action)

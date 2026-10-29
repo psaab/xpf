@@ -444,8 +444,8 @@ type PolicyRuleSnapshot struct {
 	unknownSecurityPoliciesChildren []string
 	// dnsUnavailableFailClosed marks a rule whose otherwise-representable
 	// address constraint is empty only because DNS has not resolved (cold cache
-	// or resolver failure; #16595/#17782/#17722). Build-time only; the wire
-	// marker is dnsUnavailableApplicationSentinel. Used to surface the
-	// operator-facing per-rule quarantine diagnostic.
+	// or resolver failure; #16595/#17782/#17722). Build-time only; side-specific
+	// application-term markers carry the quarantine to Rust. Used to surface
+	// the operator-facing per-rule quarantine diagnostic.
 	dnsUnavailableFailClosed bool
 }

@@ -1635,17 +1635,18 @@ fn dns_unresolved_rule_quarantines_to_deny_and_keeps_siblings() {
         from_zone: "trust".to_string(),
         to_zone: "untrust".to_string(),
         source_book_ids: vec![42],
-        destination_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["172.16.80.0/24".to_string()],
         applications: vec!["any".to_string()],
         application_terms: vec![PolicyApplicationSnapshot {
-            name: DNS_UNAVAILABLE_QUARANTINE_SENTINEL.to_string(),
-            protocol: DNS_UNAVAILABLE_QUARANTINE_SENTINEL.to_string(),
+            name: DNS_UNAVAILABLE_SOURCE_QUARANTINE_SENTINEL.to_string(),
+            protocol: DNS_UNAVAILABLE_SOURCE_QUARANTINE_SENTINEL.to_string(),
             ..Default::default()
         }],
         // Go leaves the configured action in the snapshot; the quarantine
         // marker must still force deny at the helper boundary.
         action: "permit".to_string(),
         source_address_excluded: true,
+        destination_address_excluded: true,
         ..Default::default()
     };
     let sibling = PolicyRuleSnapshot {
@@ -1700,13 +1701,15 @@ fn dns_unresolved_rule_quarantines_to_deny_and_keeps_siblings() {
     assert_eq!(state.rules.len(), 2, "the sibling policy must be retained");
     assert_eq!(state.rules[0].action, PolicyAction::Deny);
     assert!(!state.rules[0].source_excluded);
+    assert!(state.rules[0].destination_excluded);
     assert!(state.rules[0].source_v4_match_any && state.rules[0].source_v6_match_any);
+    assert!(!state.rules[0].destination_v4_match_any);
     let denied = evaluate_policy_result_with_len(
         &state,
         TEST_TRUST_ZONE_ID,
         TEST_UNTRUST_ZONE_ID,
         "10.0.61.100".parse().expect("src"),
-        "172.16.80.200".parse().expect("dst"),
+        "172.16.81.200".parse().expect("dst outside preserved exclusion"),
         PROTO_TCP,
         40000,
         443,
@@ -1727,6 +1730,117 @@ fn dns_unresolved_rule_quarantines_to_deny_and_keeps_siblings() {
     );
     assert_eq!(permitted.action, PolicyAction::Permit);
     assert_eq!(permitted.policy_id, 72, "the sibling rule must match");
+    let excluded_destination = evaluate_policy_result_with_len(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        "10.0.61.100".parse().expect("src"),
+        "172.16.80.200".parse().expect("dst within preserved exclusion"),
+        PROTO_TCP,
+        40000,
+        443,
+        64,
+    );
+    assert_eq!(excluded_destination.action, PolicyAction::Deny);
+    assert_ne!(
+        excluded_destination.policy_id, 71,
+        "the preserved destination exclusion must keep the quarantined rule from matching"
+    );
+
+    // A destination-only marker must preserve the source literal constraint.
+    let mut destination_snapshot = snapshot.clone();
+    let destination_rule = &mut destination_snapshot.policies[0];
+    destination_rule.source_book_ids.clear();
+    destination_rule.source_addresses.clear();
+    destination_rule.source_literals = vec!["10.0.61.0/24".to_string()];
+    destination_rule.source_address_excluded = false;
+    destination_rule.destination_book_ids = vec![42];
+    destination_rule.destination_addresses.clear();
+    destination_rule.destination_literals.clear();
+    destination_rule.destination_address_excluded = true;
+    destination_rule.application_terms = vec![PolicyApplicationSnapshot {
+        name: DNS_UNAVAILABLE_DESTINATION_QUARANTINE_SENTINEL.to_string(),
+        protocol: DNS_UNAVAILABLE_DESTINATION_QUARANTINE_SENTINEL.to_string(),
+        ..Default::default()
+    }];
+    let mut prepared = PreparedPolicyState::parse_snapshot(
+        &destination_snapshot,
+        &PolicyCounterStore::default(),
+        std::sync::Arc::new(SchedulerHeartbeatLease::default()),
+    )
+    .expect("destination DNS quarantine must retain the valid source constraint");
+    let destination_state = prepared.take_state();
+    assert!(!destination_state.rules[0].source_v4_match_any);
+    assert!(
+        destination_state.rules[0].destination_v4_match_any
+            && destination_state.rules[0].destination_v6_match_any
+    );
+    assert!(!destination_state.rules[0].destination_excluded);
+    let destination_denied = evaluate_policy_result_with_len(
+        &destination_state,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        "10.0.61.100".parse().expect("src within preserved source"),
+        "172.16.80.200".parse().expect("dst"),
+        PROTO_TCP,
+        40000,
+        443,
+        64,
+    );
+    assert_eq!(destination_denied.action, PolicyAction::Deny);
+    assert_eq!(destination_denied.policy_id, 71);
+    let source_miss = evaluate_policy_result_with_len(
+        &destination_state,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        "10.0.62.100".parse().expect("src outside preserved source"),
+        "172.16.80.200".parse().expect("dst"),
+        PROTO_TCP,
+        40000,
+        443,
+        64,
+    );
+    assert_eq!(source_miss.action, PolicyAction::Deny);
+    assert_ne!(
+        source_miss.policy_id, 71,
+        "the source address constraint must not be broadened"
+    );
+
+    // Both missing DNS sides are independently normalized when either one
+    // makes the rule fail closed.
+    let mut both_snapshot = snapshot.clone();
+    let both_rule = &mut both_snapshot.policies[0];
+    both_rule.destination_book_ids = vec![42];
+    both_rule.destination_addresses.clear();
+    both_rule.destination_literals.clear();
+    both_rule.application_terms = vec![
+        PolicyApplicationSnapshot {
+            name: DNS_UNAVAILABLE_SOURCE_QUARANTINE_SENTINEL.to_string(),
+            protocol: DNS_UNAVAILABLE_SOURCE_QUARANTINE_SENTINEL.to_string(),
+            ..Default::default()
+        },
+        PolicyApplicationSnapshot {
+            name: DNS_UNAVAILABLE_DESTINATION_QUARANTINE_SENTINEL.to_string(),
+            protocol: DNS_UNAVAILABLE_DESTINATION_QUARANTINE_SENTINEL.to_string(),
+            ..Default::default()
+        },
+    ];
+    let mut prepared = PreparedPolicyState::parse_snapshot(
+        &both_snapshot,
+        &PolicyCounterStore::default(),
+        std::sync::Arc::new(SchedulerHeartbeatLease::default()),
+    )
+    .expect("both unavailable DNS sides must be neutralized");
+    let both_state = prepared.take_state();
+    assert!(
+        both_state.rules[0].source_v4_match_any
+            && both_state.rules[0].source_v6_match_any
+            && both_state.rules[0].destination_v4_match_any
+            && both_state.rules[0].destination_v6_match_any
+    );
+    assert!(!both_state.rules[0].source_excluded);
+    assert!(!both_state.rules[0].destination_excluded);
+
 
     // A genuinely unsupported application remains a whole-snapshot integrity
     // error even when a valid sibling follows it.
