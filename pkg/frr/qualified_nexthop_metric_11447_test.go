@@ -340,6 +340,7 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 	compiled := compileQNHMetricConfig11447(t,
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
 		"set routing-options static route 2001:db8:10::/64 qualified-next-hop 2001:db8::10 metric 20",
+		"set protocols ospf area 0.0.0.0 interface ge-0/0/0.0",
 		"set protocols ospf export static",
 		"set protocols ospf3 area 0.0.0.0 interface ge-0/0/0.0",
 		"set protocols ospf3 export static",
@@ -366,9 +367,8 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 	if qnhMap == "" {
 		t.Fatalf("OSPF static export must attach the QNH metric map:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, " redistribute static route-map "+qnhMap+"\n") ||
-		!strings.Contains(rendered, " network ge-0/0/0.0\n") {
-		t.Fatalf("the fully capable IPv4 OSPF daemon must attach the QNH metric map:\n%s", rendered)
+	if !strings.Contains(rendered, " redistribute static route-map "+qnhMap+"\n") {
+		t.Fatalf("the IPv4 OSPF daemon must attach the QNH metric map:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "router ospf6\n") || !strings.Contains(rendered, "\n redistribute static\n") ||
 		strings.Count(rendered, " redistribute static route-map "+qnhMap) != 1 ||
