@@ -112,10 +112,15 @@ func TestDNSNeverResolvedDenyPerRuleFailClosed16595(t *testing.T) {
 			}
 			for _, r := range rules {
 				raw, _ := json.Marshal(r)
-				if r.Name == "block-bad" && !strings.Contains(string(raw), unsupportedApplicationSentinel) {
-					t.Fatalf("deny with unavailable DNS must be per-rule fail-closed, got %s", raw)
+				if r.Name == "block-bad" && !strings.Contains(string(raw), dnsUnavailableDestinationApplicationSentinel) {
+					t.Fatalf("deny with unavailable destination DNS must carry its per-side quarantine marker, got %s", raw)
 				}
-				if r.Name == "permit-good" && strings.Contains(string(raw), unsupportedApplicationSentinel) {
+				if r.Name == "block-bad" && strings.Contains(string(raw), unsupportedApplicationSentinel) {
+					t.Fatalf("DNS quarantine must not use the whole-snapshot sentinel, got %s", raw)
+				}
+				if r.Name == "permit-good" && (strings.Contains(string(raw), unsupportedApplicationSentinel) ||
+					strings.Contains(string(raw), dnsUnavailableSourceApplicationSentinel) ||
+					strings.Contains(string(raw), dnsUnavailableDestinationApplicationSentinel)) {
 					t.Fatalf("sibling permit-good must stay clean, got %s", raw)
 				}
 			}
@@ -123,10 +128,20 @@ func TestDNSNeverResolvedDenyPerRuleFailClosed16595(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildSnapshot: %v", err)
 			}
+			var sawDNSQuarantineDiagnostic bool
 			for _, reason := range snap.Capabilities.PolicyContentRejected {
-				if strings.Contains(reason, "bad") {
-					t.Fatalf("DNS cause must not be a PolicyContentRejected entry: %v", snap.Capabilities.PolicyContentRejected)
+				if strings.Contains(reason, "unavailable DNS address resolution") &&
+					strings.Contains(reason, `destination-address "bad"`) &&
+					strings.Contains(reason, "quarantined to deny") &&
+					strings.Contains(reason, "sibling rules remain active") {
+					sawDNSQuarantineDiagnostic = true
 				}
+			}
+			if !sawDNSQuarantineDiagnostic {
+				t.Fatalf("Go DNS quarantine diagnostic must stay visible, got %v", snap.Capabilities.PolicyContentRejected)
+			}
+			if reasons := PolicyContentRejectionReasons(cfg, nil); len(reasons) != 0 {
+				t.Fatalf("DNS per-rule quarantine must not block snapshot operations: %v", reasons)
 			}
 		})
 	}
@@ -196,8 +211,12 @@ func TestDNSExcludedNeverResolvedFailsClosed16595(t *testing.T) {
 				t.Fatalf("excluded DNS must emit no address sentinel, got %s", mustJSON16595(rules))
 			}
 			raw, _ := json.Marshal(rules[0])
-			if !strings.Contains(string(raw), unsupportedApplicationSentinel) {
-				t.Fatalf("excluded unavailable side must be per-rule fail-closed, got %s", raw)
+			if !strings.Contains(string(raw), dnsUnavailableDestinationApplicationSentinel) ||
+				strings.Contains(string(raw), unsupportedApplicationSentinel) {
+				t.Fatalf("excluded unavailable destination must carry only its per-side DNS quarantine marker, got %s", raw)
+			}
+			if rules[0].Action != string(policyActionPermit) {
+				t.Fatalf("Go preserves configured action for Rust quarantine handling, got %q", rules[0].Action)
 			}
 		})
 	}

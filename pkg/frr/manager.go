@@ -777,7 +777,7 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	// 1. Global static routes
 	if len(fc.StaticRoutes) > 0 {
 		for _, sr := range fc.StaticRoutes {
-			b.WriteString(m.generateStaticRoute(sr, "", fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
+			b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, "", 0, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, fc.ISIS))
 		}
 		b.WriteString("!\n")
 	}
@@ -788,7 +788,7 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	// 3. IPv6 RIB static routes (rib inet6.0)
 	if len(fc.Inet6StaticRoutes) > 0 {
 		for _, sr := range fc.Inet6StaticRoutes {
-			b.WriteString(m.generateStaticRoute(sr, "", fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
+			b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, "", 0, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, fc.ISIS))
 		}
 		b.WriteString("!\n")
 	}
@@ -806,12 +806,16 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	// TableID > 0) render into their dedicated kernel table instead of
 	// the default one (#1827 PR-2 divergence fix).
 	for _, inst := range fc.Instances {
+		isis := inst.ISIS
+		if inst.VRFName == "" && inst.TableID > 0 {
+			isis = nil
+		}
 		if len(inst.StaticRoutes) > 0 || len(inst.Inet6StaticRoutes) > 0 {
 			for _, sr := range inst.StaticRoutes {
-				b.WriteString(m.generateStaticRouteInTable(sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
+				b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, isis))
 			}
 			for _, sr := range inst.Inet6StaticRoutes {
-				b.WriteString(m.generateStaticRouteInTable(sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs))
+				b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, isis))
 			}
 			b.WriteString("!\n")
 		}

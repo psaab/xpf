@@ -525,11 +525,11 @@ type compileOpts struct {
 	// already-persisted or peer-synced config still boots (warn), no more
 	// ambiguous than before. Same doctrine as lenientIPsecEndpoints.
 	lenientIPsecSANameCollision bool
-	// lenientIPsecGatewayNameCollision (#16676) downgrades the gateway-name
-	// collision reject (validateIPsecGatewayNameCollisionStrict) to a
-	// warning on tolerant paths; the render belt separates the two
-	// connections ("inline-" prefix) so a persisted config still boots
-	// with each VPN negotiating its own peer.
+	// lenientIPsecGatewayNameCollision (#16676/#17731) downgrades the
+	// gateway-name collision reject (validateIPsecGatewayNameCollisionStrict)
+	// to a warning on tolerant paths. The renderer reserves gateway keys
+	// before assigning inline names and adds prefixes until each distinct
+	// connection has its own key, so the prefix namespace cannot drop a peer.
 	lenientIPsecGatewayNameCollision bool
 	// lenientIPsecBindTSOverlap (#11380) downgrades the shared-bind traffic
 	// selector overlap gate from a hard commit error to a warning on tolerant
@@ -876,6 +876,11 @@ type compileOpts struct {
 	// paths. A persisted config must still BOOT (#1960); the FRR
 	// renderer withholds the contested interfaces instead.
 	lenientRIPGroupExport16625 bool
+	// lenientISISDistanceOrdering17735 downgrades the #17735 RIP/IS-IS and
+	// static/IS-IS distance-ordering refusal on tolerant loads. The FRR
+	// renderer withholds the conflicting route rather than silently letting
+	// zebra select a different protocol/static than Junos.
+	lenientISISDistanceOrdering17735 bool
 	// lenientMultiLeafSelfRepeat downgrades the #9027 ambiguity rejection to a
 	// warning on the tolerant paths. A config an older binary accepted must
 	// still BOOT; on that path the existing readers keep their behaviour and
@@ -4055,6 +4060,7 @@ func lenientCompileOpts() (o compileOpts) {
 	o.lenientRIPAuthTypeWithoutKey = true
 	o.lenientRIPAuthKeyLength15013 = true
 	o.lenientRIPGroupExport16625 = true
+	o.lenientISISDistanceOrdering17735 = true
 	o.lenientMultiLeafSelfRepeat = true
 	o.lenientDynamicAddressFeedRef = true
 	o.lenientDuplicateNamedBlock = true

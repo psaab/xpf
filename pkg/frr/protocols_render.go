@@ -269,6 +269,15 @@ func (m *Manager) generateProtocolsCluster15158(ospf *config.OSPFConfig, ospfv3 
 	}
 
 	m.renderBGP16125(&b, bgp, validNeighbors, vrfName, vrfSuffix, ecmpMaxPaths, policyOptions, bgpAcceptDefault, qnhMetrics, clusterMode, bfd)
+	// #17735: zebra fixes IS-IS at 115 while the managed RIP stanza is
+	// pinned to 100. Junos prefers IS-IS (15/18) over RIP (100), so a
+	// tolerant-loaded same-table pair would install the wrong protocol.
+	// Strict commit rejects this pair; withhold RIP on the no-brick path
+	// and retain IS-IS, the Junos-preferred protocol.
+	if config.RIPISISDistanceConflict(rip, isis) {
+		slog.Warn("frr: withholding RIP because its distance 100 would beat fixed-distance IS-IS 115, reversing Junos IS-IS 15/18 < RIP 100 (#17735)")
+		rip = nil
+	}
 
 	m.renderRIP16125(&b, rip, vrfSuffix, policyOptions, clusterMode, qnhMetrics)
 
