@@ -162,14 +162,6 @@ else
 	die "iperf3 failed to start — check ${LOG} on ${CLUSTER_LAN_HOST}"
 fi
 
-# #18523: `show chassis cluster status` prints sub-lines (Takeover ready,
-# Transfer ready, Forwarding) under the LOCAL node's row, so a fixed
-# `grep -A2` window misses the peer's row. Read a node's state from the
-# RG's own block. awk exits 0 on no match (an empty state), so a missing
-# row is a verdict, not a `set -e` abort.
-rg_node_state() { # <status-text> <rg> <node0|node1>
-	awk -v rg="$2" -v node="$3" '/^Redundancy group:/ {cur = $3} cur == rg && $1 == node {print $3; exit}' <<<"$1"
-}
 
 # ── Phase 2: Failover RG1 (WAN) to fw1 ──────────────────────────────
 
@@ -182,17 +174,26 @@ sleep "$SETTLE_WAIT"
 # Verify RG split: RG1 on fw1, RG2 on fw0
 fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
 
-rg1_node0=$(rg_node_state "$fw0_status" 1 node0)
-rg1_node1=$(rg_node_state "$fw0_status" 1 node1)
-rg2_node0=$(rg_node_state "$fw0_status" 2 node0)
+fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+
+# #18523: read each (node, RG) role from the RG's own block with the tested
+# deploy_node_rg_role reader. `grep -A2` missed the peer row: the status
+# prints Takeover/Transfer/Forwarding sub-lines under the local node's row,
+# and the failed grep aborted the script under `set -euo pipefail`. A missing
+# row reads as empty (a FAIL verdict), never an abort. Both nodes' own views
+# must agree, the ha_rg_owner_verdict rule.
+rg1_node0=$(deploy_node_rg_role node0 1 <<<"$fw0_status" || true)
+rg1_node1=$(deploy_node_rg_role node1 1 <<<"$fw0_status" || true)
+rg1_fw1_node1=$(deploy_node_rg_role node1 1 <<<"$fw1_status" || true)
+rg2_node0=$(deploy_node_rg_role node0 2 <<<"$fw0_status" || true)
 
 # #18523: the untargeted yield parks the old owner in `secondary-hold`
 # (the same rule as ha_rg_owner_verdict, #18503), and a move is only a move
 # when node1 actually took the group.
-if [[ "$rg1_node0" =~ ^secondary(-hold)?$ && "$rg1_node1" == "primary" ]]; then
+if [[ "$rg1_node0" =~ ^secondary(-hold)?$ && "$rg1_node1" == "primary" && "$rg1_fw1_node1" == "primary" ]]; then
 	pass "RG1 (WAN) moved to fw1"
 else
-	fail "RG1 did not move to fw1 (node0 state: $rg1_node0, node1 state: $rg1_node1)"
+	fail "RG1 did not move to fw1 (fw0 view: node0=${rg1_node0:-missing} node1=${rg1_node1:-missing}; fw1 view: node1=${rg1_fw1_node1:-missing})"
 fi
 
 if [[ "$rg2_node0" == "primary" ]]; then

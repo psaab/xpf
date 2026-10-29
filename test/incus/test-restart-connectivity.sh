@@ -33,6 +33,8 @@ xpf_enter_destructive_cluster_cell "test-restart-connectivity $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/deploy-lib.sh
+source "${SCRIPT_DIR}/deploy-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 RESTART_CYCLES="${RESTART_CYCLES:-3}"
@@ -58,25 +60,16 @@ instance_running() {
 	[[ "$status" == "RUNNING" ]]
 }
 
+# #18523: fw0 owns every RG only when both nodes' own views agree; see
+# rg_on_fw0 below (defined before the first call).
 fw0_is_primary() {
-	local status
-	status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	local rg
 	for rg in 0 1 2; do
-		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node0.*primary"; then
-			return 1
-		fi
+		rg_on_fw0 "$rg" || return 1
 	done
 	return 0
 }
 
-# #18523: `show chassis cluster status` prints sub-lines (Takeover ready,
-# Transfer ready, Forwarding) under the LOCAL node's row, so a fixed
-# `grep -A2` window misses the peer's row. Read a node's state from the
-# RG's own block. awk exits 0 on no match (an empty state), so a missing
-# row is a verdict, not a `set -e` abort.
-rg_node_state() { # <status-text> <rg> <node0|node1>
-	awk -v rg="$2" -v node="$3" '/^Redundancy group:/ {cur = $3} cur == rg && $1 == node {print $3; exit}' <<<"$1"
-}
 
 # Restored means BOTH nodes agree: fw0's own view has node0 primary and
 # fw1's own view has node1 non-owning. fw0's view alone would score a
@@ -84,9 +77,9 @@ rg_node_state() { # <status-text> <rg> <node0|node1>
 rg_on_fw0() {
 	local s0 s1
 	s0=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	[[ "$(rg_node_state "$s0" "$1" node0)" == primary ]] || return 1
+	[[ "$(deploy_node_rg_role node0 "$1" <<<"$s0" || true)" == primary ]] || return 1
 	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	[[ "$(rg_node_state "$s1" "$1" node1)" =~ ^secondary(-hold)?$ ]]
+	[[ "$(deploy_node_rg_role node1 "$1" <<<"$s1" || true)" =~ ^secondary(-hold)?$ ]]
 }
 
 # fw1 still claims the RG in its own view (re-requesting a yield from a node
@@ -94,11 +87,11 @@ rg_on_fw0() {
 rg_on_fw1() {
 	local s1
 	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	[[ "$(rg_node_state "$s1" "$1" node1)" == primary ]]
+	[[ "$(deploy_node_rg_role node1 "$1" <<<"$s1" || true)" == primary ]]
 }
 
 restore_fw0_primary() {
-	local label="$1" deadline rg out last_err=""
+	local label="$1" deadline rg out last_err="" started=$SECONDS requests=0 refusals=0
 	if fw0_is_primary; then
 		return 0
 	fi
@@ -124,7 +117,9 @@ restore_fw0_primary() {
 			fi
 			if rg_on_fw1 "$rg"; then
 				out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
+				requests=$((requests + 1))
 				if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
+					refusals=$((refusals + 1))
 					last_err="RG$rg: $(head -1 <<<"$out")"
 				fi
 			fi
@@ -135,7 +130,10 @@ restore_fw0_primary() {
 		done
 	done
 	if fw0_is_primary; then
-		pass "$label: fw0 restored as primary"
+		# #18523: the elapsed time and refusal count are part of the verdict;
+		# a bare PASS after a long polled retry would hide exactly the
+		# deferral (a half-open sync, a fence) this restore is waiting out.
+		pass "$label: fw0 restored as primary in $((SECONDS - started))s (${requests} request(s), ${refusals} refused${last_err:+; last refusal: $last_err})"
 		return 0
 	else
 		fail "$label: could not restore fw0 as primary within ${wait}s${last_err:+ (last refusal: $last_err)}"

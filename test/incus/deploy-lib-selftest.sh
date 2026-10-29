@@ -2449,6 +2449,38 @@ node0   200
 	fi
 }
 
+# #18523: `show chassis cluster status` prints Takeover/Transfer/Forwarding
+# sub-lines under the LOCAL node's row, so on fw0 the node1 row sits four
+# lines below the header. The HA smokes read every (node, RG) through
+# deploy_node_rg_role; the control proves the `grep -A2` window they used
+# misses exactly this row.
+test_rg_role_reader_skips_local_sublines_18523() {
+	local split='Redundancy group: 1 , Failover count: 1
+node0  200      secondary-hold no       yes      None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=inactive vrrp-master=none
+node1  100      primary        no       no       None
+
+Redundancy group: 2 , Failover count: 0
+node0  200      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active vrrp-master=none
+node1  100      secondary      no       no       None
+'
+	local old_window
+	old_window=$(printf '%s' "$split" | grep -A2 "Redundancy group: 1" | grep node1 | awk '{print $3}' || true)
+	if [[ $(printf '%s' "$split" | deploy_node_rg_role node1 1) == primary ]] &&
+		[[ $(printf '%s' "$split" | deploy_node_rg_role node0 1) == secondary-hold ]] &&
+		[[ $(printf '%s' "$split" | deploy_node_rg_role node1 2) == secondary ]] &&
+		[[ -z "$old_window" ]]; then
+		ok "RG role reader: peer row below local sub-lines is read; grep -A2 misses it (#18523)"
+	else
+		bad "RG role reader: peer row below local sub-lines (#18523) not read, or the grep -A2 control no longer misses it"
+	fi
+}
+
 test_dual_active_committed_rows() {
 	local allp='0=primary 1=primary 2=primary'
 	local alls='0=secondary 1=secondary 2=secondary'
@@ -2518,6 +2550,7 @@ test_dual_active_smoke_site_pins() {
 	fi
 }
 test_dual_active_scoped_reader
+test_rg_role_reader_skips_local_sublines_18523
 test_dual_active_committed_rows
 test_dual_active_retired_grep_counterfactual
 test_dual_active_smoke_site_pins
