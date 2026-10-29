@@ -2,6 +2,7 @@ xpf (0.0.0) unstable; urgency=medium
   * Incus HA assurance: accept `secondary-hold` as the peer's non-owner state
     in the RG owner oracle while requiring both status views to show the
     expected primary (#18503).
+  * Docs: add the missing File(s) label to the #17242 merge log (#18391).
 
   * Daemon: sweep fallback-initiated unanchored IPsec SAs only on the
     matching sole-data-RG demotion and initiating tenure. Expire provenance
