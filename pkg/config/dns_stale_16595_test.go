@@ -211,7 +211,9 @@ func TestStrictCommitWarnsNotRejectsWhenDNSDown16595(t *testing.T) {
 	}
 	// The existing dns-name warning is asserted via ValidateConfig; compile
 	// warnings are a separate channel, either satisfies the operator signal.
-	_ = warned
+	if !warned {
+		t.Fatalf("failed DNS lookup must keep the match-nothing warning; warnings=%v compile=%v", ValidateConfig(cfg), cfg.Warnings)
+	}
 	a := cfg.Security.AddressBook.Addresses["bad"]
 	if a == nil || !a.DNSLookupFailed {
 		t.Fatalf("bad entry must carry DNSLookupFailed, got %+v", a)
@@ -235,5 +237,90 @@ func TestStrictCommitStillRejectsSuccessfulEmptyDNS16595(t *testing.T) {
 	_, err := CompileConfig(tree)
 	if err == nil || !strings.Contains(err.Error(), "does not fully resolve") {
 		t.Fatalf("successful-empty dns-name must still reject strict, got %v", err)
+	}
+}
+
+// #17721: a successful lookup that returns only addresses outside the
+// entry's family (AAAA-only for an ipv4-only entry) is a runtime-empty
+// success, distinct from a resolver failure. It contributes no prefixes
+// and must not withdraw sibling static junos-host denies.
+func TestJunosHostSiblingStaticSurvivesRuntimeEmptyDNS17721(t *testing.T) {
+	stubLookup16595(t, func(string) ([]string, error) { return []string{"2001:db8::10"}, nil })
+	cfg := jhTestConfig()
+	cfg.Security.AddressBook.Addresses["dns-v4"] = &Address{Name: "dns-v4", DNSName: "v6only.example.com", DNSFamily: "ipv4-only"}
+	refresh := &Config{}
+	refresh.Security.AddressBook = cfg.Security.AddressBook
+	RefreshDNSAddressBooks(refresh)
+	a := cfg.Security.AddressBook.Addresses["dns-v4"]
+	if a.DNSLookupFailed || a.DNSUnresolved || len(a.DNSAddresses) != 0 {
+		t.Fatalf("runtime-empty success state = %+v, want no failed/unresolved flags and no prefixes", a)
+	}
+	var runtimeEmptyWarning bool
+	for _, warning := range ValidateConfig(cfg) {
+		if strings.Contains(warning, `"dns-v4"`) &&
+			strings.Contains(warning, "currently resolves to no addresses") {
+			runtimeEmptyWarning = true
+		}
+	}
+	if !runtimeEmptyWarning {
+		t.Fatalf("runtime-empty success diagnostic missing; warnings=%v", ValidateConfig(cfg))
+	}
+	cfg.Security.Policies = []*ZonePairPolicies{
+		{FromZone: "untrust", ToZone: "junos-host", Policies: []*Policy{
+			jhDeny("block-dns", []string{"dns-v4"}, []string{"any"}),
+			jhDeny("block-static", []string{"bad-net"}, []string{"any"}),
+		}},
+	}
+	// Successful empty answers without a family filter retain the existing
+	// fail-closed whole-program representability gate.
+	a.DNSFamily = ""
+	unfiltered := BuildJunosHostDenyProjection(cfg)
+	if len(unfiltered.Programs) != 1 || unfiltered.Programs[0].Representable {
+		t.Fatalf("unfiltered successful-empty DNS must remain unrepresentable: %+v", unfiltered.Programs)
+	}
+	a.DNSFamily = "ipv4-only"
+	proj := BuildJunosHostDenyProjection(cfg)
+	if len(proj.Programs) != 1 || !proj.Programs[0].Representable {
+		t.Fatalf("runtime-empty DNS must not withdraw the zone program: %+v", proj.Programs)
+	}
+	prog := proj.Programs[0]
+	foundStatic := false
+	for _, rules := range [][]JunosHostDenyRule{prog.RulesV4, prog.RulesV6} {
+		for _, r := range rules {
+			for _, s := range r.Src {
+				if s == "10.0.0.0/8" {
+					foundStatic = true
+				}
+				if strings.Contains(s, "2001:db8") {
+					t.Fatalf("family-empty DNS answer leaked into family rules: %+v", prog)
+				}
+			}
+		}
+	}
+	if !foundStatic {
+		t.Fatalf("sibling static deny missing after runtime-empty DNS: %+v", prog.RulesV4)
+	}
+	if proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("untrust", "block-dns")] {
+		t.Fatal("runtime-empty DNS deny emitted no rule and must retain its warning (not rendered)")
+	}
+	if !proj.RenderedPolicyKeys[JunosHostZonePairPolicyKey("untrust", "block-static")] {
+		t.Fatal("sibling static deny must be rendered")
+	}
+	// Failed-lookup control: unchanged.
+	a.DNSLookupFailed = true
+	proj = BuildJunosHostDenyProjection(cfg)
+	if len(proj.Programs) != 1 || !proj.Programs[0].Representable {
+		t.Fatalf("failed-lookup control changed: %+v", proj.Programs)
+	}
+	foundStatic = false
+	for _, r := range proj.Programs[0].RulesV4 {
+		for _, s := range r.Src {
+			if s == "10.0.0.0/8" {
+				foundStatic = true
+			}
+		}
+	}
+	if !foundStatic {
+		t.Fatalf("failed-lookup control lost sibling static deny: %+v", proj.Programs[0].RulesV4)
 	}
 }

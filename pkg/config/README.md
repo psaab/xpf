@@ -864,8 +864,12 @@ empty but marked unresolved (`DNSUnresolved`, #17782), distinct from a
 resolver failure (`DNSLookupFailed`, #16595) or a successful zero-address
 answer. A lookup FAILURE keeps the last good answer (stale-while-error,
 `DNSLookupFailed`, #16595, retained in the cache), while a successful lookup
-with no usable address matches nothing (fail-closed). Resolution (`RefreshDNSAddressBooks`: bounded
-8-worker pool, 10s aggregate deadline, per-name 5s cap) runs outside
+with no usable address matches nothing (fail-closed). A successful
+family-scoped answer with only opposite-family addresses is also runtime-empty:
+it remains a successful answer and matches nothing, but junos-host projection
+omits only that term and preserves sibling static denies (#17721). This does
+not exempt the successful-empty answer from strict validation. Resolution
+(`RefreshDNSAddressBooks`: bounded
 `configstore` `s.mu` and `applySem` for commit, peer-sync, and rollback:
 commits warm the sampled candidate before strict promotion compile (a
 DNS-bearing candidate edited during that lookup is rejected by generation
