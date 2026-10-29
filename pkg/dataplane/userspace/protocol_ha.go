@@ -418,6 +418,10 @@ type SessionDeltaInfo struct {
 	PolicyCounterIdx uint32 `json:"policy_counter_idx,omitempty"`
 	PolicyRuleID     string `json:"policy_rule_id,omitempty"`
 	AppTimeout       uint32 `json:"app_timeout,omitempty"`
+	// AppTimeoutLogStated (#17780) marks the app-timeout/log-flags pair as
+	// explicitly supplied, including (0,0). Absent/unknown legacy markers
+	// remain stamp-less so the cluster memo preserves its recorded values.
+	AppTimeoutLogStated bool `json:"app_timeout_log_stated,omitempty"`
 	// #4565: NAT64 cross-family marker (open-frame flags bit 1<<5) + the
 	// translated pool SOURCE (trailing 4 bytes). Stamped onto the synced
 	// SessionValueV6 as Nat64SnatV4 ONLY (no flag is stamped — zero

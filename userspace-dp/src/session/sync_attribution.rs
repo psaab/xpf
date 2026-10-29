@@ -30,7 +30,7 @@
 //! `SessionSyncAttribution` exhaustively (without `..`), adding a field is enforced
 //! by the compiler at both sites. The lifetime-tolerant
 //! `sync_attribution_exhaustive_destructure_6949` guard also checks that both
-//! producers bind all seven current fields. The behavioral
+//! producers bind all nine current fields. The behavioral
 //! `session_delta_json_and_binary_agree_on_policy_attribution_6949` test compares
 //! actual JSON and binary outputs for one non-default session.
 
@@ -61,6 +61,11 @@ pub(crate) struct SessionSyncAttribution<'a> {
     /// `SessionValue.AppTimeout`, `SessionSyncRequest.inactivity_timeout`)
     /// carry seconds. `0` = "use the global per-protocol timeout".
     pub(crate) inactivity_timeout_secs: u32,
+    /// #17780: the pair is explicitly supplied by this helper even when
+    /// both values are zero. Older helpers omit the presence marker, letting
+    /// Go distinguish a corrected global-timeout/no-log binding from a lost
+    /// mirror value.
+    pub(crate) app_timeout_log_stated: bool,
     /// #4565: this is a NAT64 cross-family session. The binary frame encodes
     /// it as `FLAG_NAT64` (1<<5); the JSON leg as the `nat64` key.
     pub(crate) nat64: bool,
@@ -98,6 +103,7 @@ impl<'a> SessionSyncAttribution<'a> {
                 Some(ns) => u32::try_from(ns / 1_000_000_000).unwrap_or(u32::MAX),
                 None => 0,
             },
+            app_timeout_log_stated: true,
             nat64: decision.nat.nat64,
             nat64_snat_v4: match (decision.nat.nat64, decision.nat.rewrite_src) {
                 (true, Some(IpAddr::V4(v4))) => Some(v4),

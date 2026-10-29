@@ -32,6 +32,10 @@ xpf (0.0.0) unstable; urgency=medium
     multiple installed VPN owners on one XFRM if_id before the capture plan
     quarantines the generation as OwnerContested (#17779).
 
+  * Cluster: carry app-timeout/log pair presence separately from the values so
+    a stated (0,0) correction remains authoritative across stamp-less resends,
+    and refresh the shared SessionUpdate codec goldens (#17780).
+
   * IPsec: assign gateway and inline connection names from one collision-free
     namespace so tolerant renders preserve every peer even when a gateway is
     named `inline-<name>`; keep non-colliding connection names stable (#17731).

@@ -684,6 +684,7 @@ func userspaceSessionFromDeltaV4(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	val.PolicyID = delta.PolicyID
 	val.PolicyCounterIdx = delta.PolicyCounterIdx
 	val.AppTimeout = delta.AppTimeout
+	val.AppTimeoutLogStated = delta.AppTimeoutLogStated
 	val.PolicyRuleID = delta.PolicyRuleID
 	// #7188: carry the helper's tunnel session-identity discriminator so the
 	// peer helper folds it back into the key it reconstructs. Opaque here.
@@ -847,6 +848,7 @@ func userspaceSessionFromDeltaV6(delta dpuserspace.SessionDeltaInfo, zoneIDs map
 	val.PolicyID = delta.PolicyID
 	val.PolicyCounterIdx = delta.PolicyCounterIdx
 	val.AppTimeout = delta.AppTimeout
+	val.AppTimeoutLogStated = delta.AppTimeoutLogStated
 	val.PolicyRuleID = delta.PolicyRuleID
 	// #4565: stamp the NAT64 translated pool SOURCE so the cluster wire + peer
 	// helper carry it, letting a peer-PROMOTED NAT64 session rebuild its reverse

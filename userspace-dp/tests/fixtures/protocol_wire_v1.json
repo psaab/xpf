@@ -1074,6 +1074,7 @@
       {
         "addr_family": 0,
         "app_timeout": 0,
+        "app_timeout_log_stated": false,
         "disposition": "",
         "dst_ip": "",
         "dst_port": 0,
@@ -4329,6 +4330,7 @@
   "session_delta_info": {
     "addr_family": 0,
     "app_timeout": 0,
+    "app_timeout_log_stated": false,
     "disposition": "",
     "dst_ip": "",
     "dst_port": 0,
@@ -4391,6 +4393,7 @@
   "session_delta_info_populated": {
     "addr_family": 42,
     "app_timeout": 17142016,
+    "app_timeout_log_stated": true,
     "disposition": "disposition-17142",
     "dst_ip": "10.171.42.2",
     "dst_port": 4202,

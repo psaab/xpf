@@ -135,6 +135,9 @@ func encodeSessionV4Payload(key dataplane.SessionKey, val dataplane.SessionValue
 	// three bytes for the optional rule-ID prefix plus handshake state.
 	payloadSize := keySize + valSize + 8 + 8 + 8 + 8 + 4 + 8 + 4 + 1 + 8 + 1 + 3 + 3
 	payloadCapacity := payloadSize
+	if val.AppTimeoutLogStated {
+		payloadCapacity += appTimeoutLogStatedTailLen
+	}
 	if val.PrimaryLiveness {
 		payloadCapacity += primaryLivenessTailLen
 	}
@@ -407,6 +410,36 @@ func appendPptpCallIDs(payload []byte, callIDs uint64) []byte {
 	return append(payload, pair[:]...)
 }
 
+const appTimeoutLogStatedTailLen = 9
+
+var appTimeoutLogStatedTailMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'A', 'T', 'L'}
+
+func appendAppTimeoutLogStatedMarker(payload []byte, stated bool) []byte {
+	if !stated {
+		return payload
+	}
+	payload = append(payload, appTimeoutLogStatedTailMagic[:]...)
+	return append(payload, 1)
+}
+
+// stripAppTimeoutLogStatedMarker treats unknown and malformed markers as
+// stamp-less. The magic makes the optional byte unambiguous beside legacy
+// variable metadata and PPTP tails.
+func stripAppTimeoutLogStatedMarker(payload []byte) ([]byte, bool) {
+	if len(payload) < appTimeoutLogStatedTailLen {
+		return payload, false
+	}
+	start := len(payload) - appTimeoutLogStatedTailLen
+	if !bytes.Equal(payload[start:start+len(appTimeoutLogStatedTailMagic)], appTimeoutLogStatedTailMagic[:]) {
+		return payload, false
+	}
+	flag := payload[len(payload)-1]
+	if flag > 1 {
+		return payload[:start], false
+	}
+	return payload[:start], flag == 1
+}
+
 const primaryLivenessTailLen = 9
 
 var primaryLivenessTailMagic = [8]byte{0x00, 0xff, 'x', 'p', 'f', 'P', 'L', 'V'}
@@ -460,6 +493,7 @@ type sessionTail struct {
 	EgressIfaceFold     uint32
 	PptpCallIDs         uint64
 	NatScopeFold        uint32
+	AppTimeoutLogStated bool
 }
 
 type sessionTailView interface {
@@ -482,6 +516,7 @@ func (w sessionValueTailView) sessionTail() sessionTail {
 		SourceNatICMPCode: v.SourceNatICMPCode, PolicyRuleID: v.PolicyRuleID,
 		TCPHandshakeState: v.TCPHandshakeState, EgressIfaceFold: v.EgressIfaceFold,
 		PptpCallIDs: v.PptpCallIDs, NatScopeFold: v.NatScopeFold,
+		AppTimeoutLogStated: v.AppTimeoutLogStated,
 	}
 }
 
@@ -496,6 +531,7 @@ func (w sessionValueTailView) setSessionTail(t sessionTail) {
 	v.SourceNatICMPValid, v.SourceNatICMPType, v.SourceNatICMPCode = t.SourceNatICMPValid, t.SourceNatICMPType, t.SourceNatICMPCode
 	v.PolicyRuleID, v.TCPHandshakeState = t.PolicyRuleID, t.TCPHandshakeState
 	v.EgressIfaceFold, v.PptpCallIDs, v.NatScopeFold = t.EgressIfaceFold, t.PptpCallIDs, t.NatScopeFold
+	v.AppTimeoutLogStated = t.AppTimeoutLogStated
 }
 
 type sessionValueV6TailView struct{ v *dataplane.SessionValueV6 }
@@ -513,6 +549,7 @@ func (w sessionValueV6TailView) sessionTail() sessionTail {
 		SourceNatICMPCode: v.SourceNatICMPCode, PolicyRuleID: v.PolicyRuleID,
 		TCPHandshakeState: v.TCPHandshakeState, EgressIfaceFold: v.EgressIfaceFold,
 		PptpCallIDs: v.PptpCallIDs, NatScopeFold: v.NatScopeFold,
+		AppTimeoutLogStated: v.AppTimeoutLogStated,
 	}
 }
 
@@ -527,6 +564,7 @@ func (w sessionValueV6TailView) setSessionTail(t sessionTail) {
 	v.SourceNatICMPValid, v.SourceNatICMPType, v.SourceNatICMPCode = t.SourceNatICMPValid, t.SourceNatICMPType, t.SourceNatICMPCode
 	v.PolicyRuleID, v.TCPHandshakeState = t.PolicyRuleID, t.TCPHandshakeState
 	v.EgressIfaceFold, v.PptpCallIDs, v.NatScopeFold = t.EgressIfaceFold, t.PptpCallIDs, t.NatScopeFold
+	v.AppTimeoutLogStated = t.AppTimeoutLogStated
 }
 
 // encodeSessionTailPreNat64 writes the tail fields that precede the
@@ -590,8 +628,8 @@ func encodeSessionTailPostNat64(buf []byte, off int, t sessionTail) []byte {
 	off++
 	buf[off] = t.SourceNatICMPCode
 	off++
-	// #11070/#10888/#12075: rule-ID / handshake / egress-fold tail.
-	return appendSessionSyncMetadataTail(buf[:off], t.PolicyRuleID, t.TCPHandshakeState, t.EgressIfaceFold, t.PptpCallIDs, t.NatScopeFold)
+	payload := appendSessionSyncMetadataTail(buf[:off], t.PolicyRuleID, t.TCPHandshakeState, t.EgressIfaceFold, t.PptpCallIDs, t.NatScopeFold)
+	return appendAppTimeoutLogStatedMarker(payload, t.AppTimeoutLogStated)
 }
 
 // decodeSessionTailPreNat64 reads the tail fields preceding the V6-only
@@ -616,8 +654,11 @@ func decodeSessionTailPreNat64(payload []byte, off int, t *sessionTail) int {
 	return off
 }
 
+// decodeSessionTailPostNat64 reads the common trailing fields after the
+// v6-only NAT64 slot. The optional presence marker is removed before parsing
+// the legacy variable metadata tail.
 func decodeSessionTailPostNat64(payload []byte, off int, t *sessionTail) {
-	// #5274: admitting config epoch (length-gated; absent → 0).
+	payload, t.AppTimeoutLogStated = stripAppTimeoutLogStatedMarker(payload)
 	if off+8 <= len(payload) {
 		t.ConfigEpoch = binary.LittleEndian.Uint64(payload[off:])
 		off += 8

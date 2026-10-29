@@ -41,3 +41,22 @@ func TestConvertCarriesPacketCounters16217(t *testing.T) {
 	}
 	_ = dpuserspace.SessionDeltaInfo{}
 }
+
+func TestConvertCarriesStatedZeroAppTimeoutLog17780(t *testing.T) {
+	zoneIDs := map[string]uint32{"lan": 1, "wan": 2}
+	d4 := closeClassDelta9412(t, "open", 0)
+	d4.AppTimeoutLogStated = true
+	_, v4, ok := userspaceSessionFromDeltaV4(d4, zoneIDs)
+	if !ok || !v4.AppTimeoutLogStated || v4.AppTimeout != 0 || v4.LogFlags != 0 {
+		t.Fatalf("v4 stated zero pair: ok=%v stated=%v pair=%d/%d", ok, v4.AppTimeoutLogStated, v4.AppTimeout, v4.LogFlags)
+	}
+
+	d6 := closeClassDelta9412(t, "open", 0)
+	d6.AddrFamily = dataplane.AFInet6
+	d6.SrcIP, d6.DstIP = "2001:db8::1", "2001:db8::2"
+	d6.AppTimeoutLogStated = true
+	_, v6, ok := userspaceSessionFromDeltaV6(d6, zoneIDs)
+	if !ok || !v6.AppTimeoutLogStated || v6.AppTimeout != 0 || v6.LogFlags != 0 {
+		t.Fatalf("v6 stated zero pair: ok=%v stated=%v pair=%d/%d", ok, v6.AppTimeoutLogStated, v6.AppTimeout, v6.LogFlags)
+	}
+}
