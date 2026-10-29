@@ -1,6 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
   * Cluster: match installed secondary probe sources to target address family,
     so wrong-family tolerant configs release frozen IP-monitor debt (#18413).
+  * API: mark duplicate-membership interfaces unbound in detail output
+    (#18446).
 
   * Userspace dataplane: index learned WireGuard PMTUs by endpoint IP
     for allocation-free packet-path lookup; serialize PTB shrink updates

@@ -236,11 +236,19 @@ func (s *Server) writeInterfacesDetail(w http.ResponseWriter, cfg *config.Config
 		b.WriteString("\n")
 
 		if zone, ok := ifaceZoneName[ifName]; ok {
-			qualifier := ""
-			if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
-				qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+			// #18446: a member claimed by two zones is bound to NEITHER.
+			// The predicate is row-global (it ignores the zone argument),
+			// so never print the map-order-chosen claimant as bound.
+			if config.ZoneInterfaceQuarantineReason(cfg, zone, ifName) != "" {
+				claimants := config.ZoneInterfaceQuarantineClaimants(cfg, ifName)
+				fmt.Fprintf(&b, "  Zone: (none) %s\n", config.ZoneInterfaceQuarantineUnboundQualifierFor(claimants))
+			} else {
+				qualifier := ""
+				if config.ZoneQuarantineExcludedReason(zone, cfg) != "" {
+					qualifier = " " + config.ZoneQuarantineInterfacesQualifier
+				}
+				fmt.Fprintf(&b, "  Zone: %s%s\n", zone, qualifier)
 			}
-			fmt.Fprintf(&b, "  Zone: %s%s\n", zone, qualifier)
 		}
 
 		if s.dp != nil && s.dp.IsLoaded() {
