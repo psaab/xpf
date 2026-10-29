@@ -1029,9 +1029,9 @@ all files stay in `package ipsec`, so the public API is unchanged.
   comparison follows DER RDN order and tag-sensitive value rules; FQDN and
   whole-address RFC822 comparisons fold ASCII letters only, leaving non-ASCII
   bytes unchanged. Key-id bytes and IP/subnet/range/FQDN selectors follow parser
-  semantics. Numeric ID prefixes use strtoul and 32-bit ID enum conversion;
-  type 0 (ID_ANY) ignores encoded bytes in equality. `uri:` is type 201 and
-  `xmppaddr:` encodes a GeneralName. Authored output stays raw.
+  semantics. Numeric prefixes use strtoul and 32-bit ID enum conversion;
+  empty `{}` selects type 0 (ID_ANY), which ignores encoded bytes in equality.
+  `uri:` is type 201; `xmppaddr:` encodes a GeneralName. Authored output stays raw.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct

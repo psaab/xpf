@@ -315,6 +315,13 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 				a.equals(b), b.equals(a), wrapped.equals(a), a.equals(wrapped))
 		}
 	})
+	t.Run("empty numeric prefix is ID_ANY", func(t *testing.T) {
+		a, _ := ipsecIKEIdentityKey("inet", "{}:a")
+		b, _ := ipsecIKEIdentityKey("inet", "{0}:b")
+		if a.typeID != 0 || !a.equals(b) {
+			t.Fatalf("empty numeric type must be type-0 ID_ANY: type=%d equal=%v", a.typeID, a.equals(b))
+		}
+	})
 
 	t.Run("unsupported and byte-sensitive DN cases", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
@@ -430,6 +437,8 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"hyphenated FQDN remains type 2", "inet", "host-a-host-b", "inet", "fqdn:host-a-host-b"},
 			{"ID_ANY equality ignores encoding", "inet", "{0}:a", "inet", "{0}:b"},
 			{"wrapped numeric type is ID_ANY", "inet", "{4294967296}:x", "inet", "{0}:y"},
+			{"empty numeric type equals zero", "inet", "{}:a", "inet", "{0}:a"},
+			{"empty numeric type ignores encoding", "inet", "{}:a", "inet", "{}:b"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
 		for _, pair := range pairs {
@@ -452,6 +461,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "{18446744073709551617}:peer", "inet", "18446744073709551617"))
 		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.2-198.51.100.1", "inet", "ipv4range:#c6336402c6336401"))
 		requireNoCollision17772(t, identityPair17772("inet", "{0}:any", "inet", "fqdn:any"))
+		requireNoCollision17772(t, identityPair17772("inet", "{}:a", "inet", "{ }:a"))
 	})
 
 	t.Run("remote identity equal to default gateway local address is refused", func(t *testing.T) {

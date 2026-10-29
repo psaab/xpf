@@ -247,6 +247,8 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"hyphenated FQDN remains type 2", "inet", "host-a-host-b", "inet", "fqdn:host-a-host-b"},
 			{"ID_ANY equality ignores encoding", "inet", "{0}:a", "inet", "{0}:b"},
 			{"wrapped numeric type is ID_ANY", "inet", "{4294967296}:x", "inet", "{0}:y"},
+			{"empty numeric type equals zero", "inet", "{}:a", "inet", "{0}:a"},
+			{"empty numeric type ignores encoding", "inet", "{}:a", "inet", "{}:b"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -286,6 +288,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"overflowing numeric type remains literal KEY_ID", "inet", "{18446744073709551617}:peer", "inet", "18446744073709551617"},
 			{"reversed IPv4 range is not type 7", "inet", "198.51.100.2-198.51.100.1", "inet", "ipv4range:#c6336402c6336401"},
 			{"ID_ANY remains distinct from FQDN", "inet", "{0}:any", "inet", "fqdn:any"},
+			{"empty numeric type remains distinct from whitespace", "inet", "{}:a", "inet", "{ }:a"},
 		}
 		for _, pair := range pairs {
 			pair := pair

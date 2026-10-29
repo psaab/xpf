@@ -431,12 +431,16 @@ func ipsecStrongSwanNumericTypeIdentity(selector string) (ipsecIKEIdentity, bool
 		return ipsecIKEIdentity{}, false
 	}
 	close := strings.IndexByte(selector, '}')
-	if close < 2 || close+1 >= len(selector) || selector[close+1] != ':' {
+	if close < 1 || close+1 >= len(selector) || selector[close+1] != ':' {
 		return ipsecIKEIdentity{}, false
 	}
-	typeID, ok := ipsecParseStrtoul32(selector[1:close])
-	if !ok {
-		return ipsecIKEIdentity{}, false
+	var typeID uint32
+	if close > 1 {
+		parsedTypeID, ok := ipsecParseStrtoul32(selector[1:close])
+		if !ok {
+			return ipsecIKEIdentity{}, false
+		}
+		typeID = parsedTypeID
 	}
 	value := selector[close+2:]
 	if strings.HasPrefix(value, "#") {

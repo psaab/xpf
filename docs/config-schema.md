@@ -11534,10 +11534,11 @@ reserved for whole-dataplane selection where a rewrite shim
     colon is removed when sizing, decoding fills from the right and skips at
     most one colon before each low nibble, invalid nibbles become zero, and
     odd values are left-padded. For example, `7a::7a` decodes to `a07a`, not
-    `7a7a`. Untyped subnets mask host bits. Numeric type IDs use `strtoul()`
-    base detection and 32-bit enum conversion; type 0 (`ID_ANY`) equality
-    ignores identity encoding. `uri:` is type 201 and `xmppaddr:` is encoded as an ASN.1 GeneralName. FQDN and selector spellings
-    remain authored in rendered output.
+    `7a7a`. Untyped subnets mask host bits. Numeric prefixes use `strtoul()`
+    base detection and 32-bit enum conversion; empty `{}` means type 0
+    (`ID_ANY`), whose equality ignores identity encoding. `uri:` is type 201;
+    `xmppaddr:` is an ASN.1 GeneralName. FQDN and selector spellings remain
+    authored in rendered output.
     A mixed hostname/IP gateway requires a discriminating `remote-identity`
     for every dial target; IP selectors cannot cover a hostname's eventual
     peer identity. Tolerant loads warn
