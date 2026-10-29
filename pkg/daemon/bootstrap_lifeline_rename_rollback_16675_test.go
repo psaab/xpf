@@ -331,6 +331,109 @@ func TestLifelineRenameCaptureWriteFailureDropsMemory17755(t *testing.T) {
 	}
 }
 
+func TestStaleLifelineRenameSidecarFallsThroughToEmbedded17755(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      []byte
+		unreadable bool
+		wantPair  bool
+	}{
+		{
+			name: "generation-mismatch",
+			data: []byte(`{"generation":"stale-generation","kernel_name":"enp9s0","logical_name":"ge-0-0-9"}`),
+			wantPair: true,
+		},
+		{name: "corrupt-content", data: []byte(`{`), wantPair: true},
+		{name: "oversized-content", data: []byte(strings.Repeat("x", (1<<20)+1)), wantPair: true},
+		{name: "unreadable-sidecar", unreadable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := withTempLinkDir(t)
+			store, _ := lifelineRenameStoreWithDebt16675(t, dir, "enp6s0", "ge-0-0-0")
+			sidecar := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
+			if tt.unreadable {
+				if err := os.Mkdir(sidecar, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(sidecar, tt.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			d := &Daemon{store: store}
+			kernel, logical := d.loadBootstrapLifelineRename()
+			if tt.wantPair {
+				if kernel != "enp6s0" || logical != "ge-0-0-0" {
+					t.Fatalf("pair = (%q,%q), want embedded (enp6s0,ge-0-0-0)", kernel, logical)
+				}
+			} else if kernel != "" || logical != "" {
+				t.Fatalf("unreadable sidecar fell through to untrusted embedded record (%q,%q)", kernel, logical)
+			}
+		})
+	}
+}
+
+func TestBootstrapExitAbortsWhenRenameProvenanceWriteFails17755(t *testing.T) {
+	dir := withTempLinkDir(t)
+	fab := stubLifelineRename16675(t, "enp6s0")
+	oldEnum := enumeratePCINICsFn
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{name: "enp5s0"}, {name: "enp6s0"}}, nil
+	}
+	t.Cleanup(func() { enumeratePCINICsFn = oldEnum })
+
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	commitConfirmedText12154(t, store,
+		"interfaces { fxp0 { unit 0 { family inet { address 192.0.2.99/24; } } } }")
+	store.CancelConfirmTimerForTesting()
+	cfg := store.ActiveConfig()
+	if cfg == nil || store.ActiveConfigGeneration() == "" {
+		t.Fatal("premise: first commit did not promote a generation")
+	}
+	sidecar := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
+	if err := os.Mkdir(sidecar, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{store: store}
+	d.bootstrapMode.Store(true)
+	err := d.maybeExitBootstrapOnFirstConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "durably persist lifeline rename provenance") {
+		t.Fatalf("bootstrap exit error = %v, want durable sidecar write failure", err)
+	}
+	if !d.inBootstrap() {
+		t.Fatal("failed durable capture exited bootstrap before naming")
+	}
+	if kernel, logical := d.bootstrapLifelineRenamePair(); kernel != "" || logical != "" {
+		t.Fatalf("failed durable capture retained memory-only pair (%q,%q)", kernel, logical)
+	}
+	if len(fab.renames) != 0 {
+		t.Fatalf("failed durable capture issued destructive renames: %v", fab.renames)
+	}
+}
+
+func TestConfirmedLifelineRenameClearsSidecar17755(t *testing.T) {
+	dir := withTempLinkDir(t)
+	generation := "confirmed-generation"
+	sidecar := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
+	if err := os.WriteFile(sidecar,
+		[]byte(`{"generation":"confirmed-generation","kernel_name":"enp6s0","logical_name":"ge-0-0-0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := filepath.Join(dir, bootstrapLifelineSnapshotBase)
+	if err := os.WriteFile(snapshot, []byte(`{"generation":"confirmed-generation"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{bootstrapLifelineGeneration: generation}
+	d.clearBootstrapLifelineNetwork()
+	if _, err := os.Stat(sidecar); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmed generation kept early rename sidecar: %v", err)
+	}
+	if _, err := os.Stat(snapshot); err != nil {
+		t.Fatalf("confirm removed #12155 durable snapshot: %v", err)
+	}
+}
+
 // lifelineRenameStoreWithDebt16675 builds an expired-FIRST store (via
 // the shared 12155 fixture) and writes a durable lifeline record that
 // carries the #16675 rename pair under the teardown generation. The

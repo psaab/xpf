@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -23,6 +24,14 @@ func TestFirstCommitRollbackEntersBootstrap(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: s}
+	renameGeneration := "live-first-commit-generation"
+	d.bootstrapLifelineGeneration = renameGeneration
+	networkDir := withTempLinkDir(t)
+	sidecar := filepath.Join(networkDir, ".xpf-first-commit-lifeline-rename.json")
+	if err := os.WriteFile(sidecar, []byte(
+		`{"generation":"live-first-commit-generation","kernel_name":"enp6s0","logical_name":"ge-0-0-0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Body seam: the dataplane apply must NEVER be called on the first-commit
 	// rollback (prevCfg==nil) — enterBootstrapMode handles teardown, not a
@@ -60,6 +69,9 @@ func TestFirstCommitRollbackEntersBootstrap(t *testing.T) {
 	}
 	if s.EverCommitted() {
 		t.Fatal("after first-commit rollback, store must read never-committed")
+	}
+	if _, err := os.Stat(sidecar); !os.IsNotExist(err) {
+		t.Fatalf("successful in-process rollback kept early rename sidecar: %v", err)
 	}
 }
 

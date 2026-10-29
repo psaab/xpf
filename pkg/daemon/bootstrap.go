@@ -952,6 +952,9 @@ func (d *Daemon) persistBootstrapLifelineRenamePreExit(kernel, logical string) e
 	if err := fsatomic.WriteFileDurable(path, record, 0o600); err != nil {
 		return fmt.Errorf("bootstrap exit: durably persist lifeline rename provenance at %s: %w", path, err)
 	}
+	d.bootstrapLifelineMu.Lock()
+	d.bootstrapLifelineGeneration = generation
+	d.bootstrapLifelineMu.Unlock()
 	return nil
 }
 
@@ -1048,9 +1051,10 @@ func (d *Daemon) persistAbsentBootstrapLifelineSnapshotLocked(generation string)
 	}
 }
 func (d *Daemon) clearBootstrapLifelineNetwork() {
-	// Live-path only: drop the in-memory snapshot. The durable file is
-	// #12155's (it clears its own debt on teardown completion); removing it
-	// here would steal #12155's crash-recovery evidence on confirm.
+	// Drop the in-memory snapshot but retain #12155's durable network file:
+	// confirmation resolves the commit window without consuming that
+	// independent crash-recovery evidence. The early rename sidecar is no
+	// longer needed for a confirmed generation and is removed durably below.
 	d.bootstrapLifelineMu.Lock()
 	d.bootstrapLifelineCaptured = false
 	d.bootstrapLifelinePresent = false
@@ -1058,6 +1062,14 @@ func (d *Daemon) clearBootstrapLifelineNetwork() {
 	d.bootstrapLifelineKernelName = ""
 	d.bootstrapLifelineLogicalName = ""
 	d.bootstrapLifelineMu.Unlock()
+	d.clearBootstrapLifelineRenameForCurrentGeneration()
+}
+
+func (d *Daemon) clearBootstrapLifelineRenameForCurrentGeneration() {
+	d.bootstrapLifelineMu.Lock()
+	generation := d.bootstrapLifelineGeneration
+	d.bootstrapLifelineMu.Unlock()
+	d.clearBootstrapLifelineRename(generation)
 }
 
 // loadBootstrapLifelineSnapshot reads the durable pre-takeover record
@@ -1092,31 +1104,43 @@ func (d *Daemon) loadBootstrapLifelineSnapshot() (snapshot []byte, generation st
 
 // loadBootstrapLifelineRename reads the early #17755 record first, then the
 // embedded #16675 pair written by older daemon versions. Both are bound to
-// the generation whose first-commit teardown is being recovered.
+// the generation whose first-commit teardown is being recovered. An early
+// record that is present but invalid (stale generation, corrupt, oversized)
+// must not shadow the embedded pair: a PostRenameSyncError can leave a
+// durable sidecar whose generation a restart no longer accepts, while the
+// later snapshot persisted the pair under the teardown generation. An
+// UNREADABLE early record (non-ErrNotExist read failure) stays fail-closed.
+func (d *Daemon) validLifelineRenamePair(generation, kernel, logical string) (string, string) {
+	if generation == "" || generation != d.store.FirstCommitTeardownGeneration() ||
+		kernel == "" || logical == "" || kernel == logical {
+		return "", ""
+	}
+	return kernel, logical
+}
+
+// loadBootstrapLifelineRename resolves the #16675 rename pair for this
+// teardown from the early #17755 record, falling back to the embedded pair
+// in the durable snapshot on any absence or validation failure of the early
+// record. Returns ("","") when neither yields an authentic pair.
 func (d *Daemon) loadBootstrapLifelineRename() (kernel, logical string) {
 	if d.store == nil || !d.store.FirstCommitTeardownOwed() {
 		return "", ""
 	}
 	path := filepath.Join(linkDir, bootstrapLifelineRenameBase)
 	data, err := readBootstrapLifelineSnapshot(path)
-	if err == nil {
-		if len(data) > maxBootstrapLifelineSnapshotSize {
-			return "", ""
-		}
+	if err == nil && len(data) <= maxBootstrapLifelineSnapshotSize {
 		var record bootstrapLifelineRenameRecord
-		if json.Unmarshal(data, &record) != nil ||
-			record.Generation == "" ||
-			record.Generation != d.store.FirstCommitTeardownGeneration() ||
-			record.KernelName == "" || record.LogicalName == "" ||
-			record.KernelName == record.LogicalName {
-			return "", ""
+		if json.Unmarshal(data, &record) == nil {
+			if k, l := d.validLifelineRenamePair(record.Generation, record.KernelName, record.LogicalName); k != "" {
+				return k, l
+			}
 		}
-		return record.KernelName, record.LogicalName
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Unreadable sidecar stays fail-closed: no fallback guess.
 		return "", ""
 	}
-	// Backward compatibility for durable snapshots written before #17755.
+	// Absent, oversized, corrupt, or generation-mismatched sidecar: fall
+	// through to the embedded pair in the durable snapshot.
 	data, err = readBootstrapLifelineSnapshot(filepath.Join(linkDir, bootstrapLifelineSnapshotBase))
 	if err != nil || len(data) > maxBootstrapLifelineSnapshotSize {
 		return "", ""
@@ -1125,14 +1149,7 @@ func (d *Daemon) loadBootstrapLifelineRename() (kernel, logical string) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		return "", ""
 	}
-	if record.Generation == "" || record.Generation != d.store.FirstCommitTeardownGeneration() {
-		return "", ""
-	}
-	if record.LifelineKernelName == "" || record.LifelineLogicalName == "" ||
-		record.LifelineKernelName == record.LifelineLogicalName {
-		return "", ""
-	}
-	return record.LifelineKernelName, record.LifelineLogicalName
+	return d.validLifelineRenamePair(record.Generation, record.LifelineKernelName, record.LifelineLogicalName)
 }
 
 // bootstrapLifelineRenameForTeardown resolves the rename pair for this
@@ -1403,6 +1420,9 @@ func (d *Daemon) clearBootstrapLifelineSnapshot(generation string) {
 // clearBootstrapLifelineRename removes only a matching generation's early
 // provenance. Its directory removal is synced before the record is forgotten.
 func (d *Daemon) clearBootstrapLifelineRename(generation string) {
+	if generation == "" {
+		return
+	}
 	path := filepath.Join(linkDir, bootstrapLifelineRenameBase)
 	data, err := readBootstrapLifelineSnapshot(path)
 	if errors.Is(err, os.ErrNotExist) {

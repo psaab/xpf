@@ -1225,10 +1225,16 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		// re-surface it once at the rollback-decision layer so the DEGRADED
 		// state is attributable to THIS first-commit-timeout event and an
 		// operator scraping for the timeout sees the box did not come back clean.
-		if err := d.enterBootstrapModeWithLifeline(firstCommitRollback); err != nil {
+		rollbackErr := d.enterBootstrapModeWithLifeline(firstCommitRollback)
+		if rollbackErr != nil {
 			slog.Error("commit-confirmed first-commit rollback to bootstrap mode is DEGRADED: "+
 				"teardown did not fully converge (see the teardown step errors above); "+
-				"config-driven takeover state may remain partially live", "err", err)
+				"config-driven takeover state may remain partially live", "err", rollbackErr)
+		} else if firstCommitRollback {
+			// The live rollback has fully retired the abandoned takeover;
+			// release its generation-bound rename sidecar. Recovered FIRST
+			// debt retains the sidecar until completeRecovered... clears it.
+			d.clearBootstrapLifelineRenameForCurrentGeneration()
 		}
 		// #6718: the store has promoted the empty tree to active, but this
 		// branch returns without ever entering applyConfigLocked — the only
