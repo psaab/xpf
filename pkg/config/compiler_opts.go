@@ -378,10 +378,10 @@ type compileOpts struct {
 	// (#1960); commit / commit-check stay strict.
 	lenientSchedulerDateRange15695 bool
 	// lenientThreeColorBurstFloor16610 downgrades only the #16610
-	// one-frame burst-floor violation in validateThreeColorPolicersStrict
-	// to a warning on tolerant load / peer-sync paths. A sub-frame bucket
+	// one-frame burst-floor violations returned by threeColorPolicerErrors
+	// to warnings on tolerant load / peer-sync paths. A sub-frame bucket
 	// persisted by an older binary (which accepted any positive burst)
-	// must still boot (#1960); every other three-color defect stays
+	// must still boot (#1960); every structural three-color defect stays
 	// strict, and commit / commit-check stay strict.
 	lenientThreeColorBurstFloor16610 bool
 	// lenientSingleRateBurstFloor16714 downgrades only the #16714
