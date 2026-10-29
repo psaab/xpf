@@ -26,8 +26,9 @@
 //!     broader underlay) is re-probed at the full local MTU rather
 //!     than pinned forever at the stale small value.
 //!
-//! Both writers and readers are lock-free per peer: the value and its
-//! learn stamp live in packed `AtomicU64`s on `Peer` (mirroring the
+//! Writers serialize with a per-peer atomic sequence word; readers use
+//! an optimistic sequence check to consume the MTU and age stamp as one
+//! coherent snapshot. The PMTU atomics live on `Peer` (mirroring the
 //! `live_endpoint` slot's per-peer, `Arc`-survives-reconcile posture —
 //! same pubkey reuses the same `Arc<Peer>`, so the learned PMTU
 //! survives config commits that do not touch the peer's identity and
