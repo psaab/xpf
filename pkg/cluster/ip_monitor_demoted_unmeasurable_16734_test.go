@@ -2,9 +2,11 @@ package cluster
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink"
 )
 
 // #16734 (R3-A21-01, #15038 residual): #15038 made a probe that cannot be
@@ -18,14 +20,18 @@ import (
 // weight 0; losing the new primary then left the RG ownerless, and an
 // outage long enough to demote both nodes left zero owners at once.
 //
-// The fix: probeSourceFor reports canMeasure=false only for a bound
-// target on a non-primary with no secondary-ip-address. On a
-// not-completed probe for such a target, pollCycle releases the
-// dampened state (releaseIPTargetState) so reconcileRGIPDebts removes
-// the debt and the node is promotable again. Measurable nodes (primary,
-// unbound, or holding a secondary address) keep the #15038/#5301
-// neutral treatment, so deadline/Stop aborts and transient dial/send
-// failures never clear a real DOWN state.
+// The fix: probeSourceFor reports canMeasure=false for a bound
+// target on a non-primary that has no source address installed on
+// the resolved target interface — either no secondary-ip-address is
+// configured or the configured address is not present. Production
+// checks the live interface address list through netlink; tests use a
+// fake address list. On a not-completed probe for such a target,
+// pollCycle releases the dampened state (releaseIPTargetState) so
+// reconcileRGIPDebts removes the debt and the node is promotable
+// again. A secondary address that is present on its interface (and
+// primaries or unbound targets) keeps the #15038/#5301 neutral
+// treatment, so deadline/Stop aborts and transient dial/send failures
+// never clear a real DOWN state.
 
 // boundNoSecondaryRG is the issue's production shape: global-weight /
 // global-threshold 255, one bound target of weight 255, and NO
@@ -44,6 +50,30 @@ func boundNoSecondaryRG() *config.RedundancyGroup {
 			},
 		},
 	}
+}
+
+type sourceAddressNlHandle17759 struct {
+	*mockNlHandle
+	addresses []netlink.Addr
+}
+
+func (h *sourceAddressNlHandle17759) AddrList(netlink.Link, int) ([]netlink.Addr, error) {
+	return h.addresses, nil
+}
+
+func newSourceAddressNlHandle17759(present bool) *sourceAddressNlHandle17759 {
+	links := newMockNlHandle()
+	links.setLink("reth0", true)
+	h := &sourceAddressNlHandle17759{mockNlHandle: links}
+	if present {
+		h.addresses = []netlink.Addr{{
+			IPNet: &net.IPNet{
+				IP:   net.ParseIP("10.0.0.3"),
+				Mask: net.CIDRMask(32, 32),
+			},
+		}}
+	}
+	return h
 }
 
 func newDemotionNode(t *testing.T, nodeID int, rg *config.RedundancyGroup, probeFn func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool)) (*Manager, *Monitor) {
@@ -146,9 +176,8 @@ func TestIPMonitorDemotedNodeReleasesFrozenDebt16734(t *testing.T) {
 // TestIPMonitorDemotedGlobalThresholdReleases16734 covers the exact
 // config in the issue (global-threshold aggregate mode): the frozen
 // aggregate debt must clear when the demoted node becomes unmeasurable,
-// in both the with-secondary-address production row (address configured
-// but never installed, so the dial cannot bind it) and the
-// no-secondary-address row.
+// both with a configured-but-uninstalled secondary address and with
+// no secondary address.
 func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 	run := func(t *testing.T, withSecondary bool) {
 		rg := boundNoSecondaryRG()
@@ -161,7 +190,7 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 		drainEvents(m, 1)
 		m.SetGroupStateForTesting(1, StatePrimary)
 		mon := NewMonitor(m, cfg.RedundancyGroups)
-		injectFakeNl(mon)
+		mon.nlHandle = newSourceAddressNlHandle17759(false)
 		setNoDampening(mon)
 
 		phase := "primary-down"
@@ -179,15 +208,13 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 		if w := m.GroupStates()[0].Weight; w != 0 {
 			t.Fatalf("withSecondary=%v: weight after measured DOWN = %d, want 0", withSecondary, w)
 		}
-		// Demotion: node becomes secondary. With a configured secondary
-		// address the probe is classified measurable, so emulate the
-		// production bind failure via the real probe path instead.
+		// Demotion: the configured secondary address is not installed on
+		// the fake interface, so a not-completed probe is unmeasurable.
 		m.SetGroupStateForTesting(1, StateSecondary)
 		phase = "secondary-unmeasurable"
 		if withSecondary {
-			// Configured secondary address: modelled as measurable via
-			// probeFn returning not-completed (transient bind/send
-			// failure). Per the documented boundary this stays neutral.
+			// Configured secondary address is not present in the fake
+			// kernel address list, so it is not a usable source.
 			mon.probeFn = func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool) {
 				return false, false
 			}
@@ -196,13 +223,13 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 			mon.poll()
 		}
 		if withSecondary {
-			// Documented boundary: a configured secondary-ip-address is
-			// treated as measurable (the operator asserts the node holds
-			// it); transient bind/send failures on it stay neutral per
-			// #15038, so the DOWN state is retained here. The
-			// no-secondary row below is the frozen-debt fix.
-			if w := m.GroupStates()[0].Weight; w != 0 {
-				t.Fatalf("withSecondary=true: weight = %d, want 0 (configured secondary stays measurable/neutral)", w)
+			// A configured-but-uninstalled source is not measurable:
+			// the debt must be released, not frozen at weight 0.
+			if w := m.GroupStates()[0].Weight; w != 255 {
+				t.Fatalf("withSecondary=true: weight = %d, want 255 (uninstalled secondary releases aggregate debt, #17759)", w)
+			}
+			if st := m.GroupStates()[0]; len(st.MonitorFails) != 0 {
+				t.Fatalf("withSecondary=true: MonitorFails = %v, want none after releasing uninstalled secondary debt", st.MonitorFails)
 			}
 			return
 		}
@@ -262,7 +289,7 @@ func TestIPMonitorMeasurableAbortStaysNeutral16734(t *testing.T) {
 	drainEvents(m2, 1)
 	m2.SetGroupStateForTesting(1, StateSecondary)
 	mon2 := NewMonitor(m2, cfg.RedundancyGroups)
-	injectFakeNl(mon2)
+	mon2.nlHandle = newSourceAddressNlHandle17759(true)
 	setNoDampening(mon2)
 	completed2 := true
 	mon2.probeFn = func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool) {

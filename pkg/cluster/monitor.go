@@ -201,6 +201,12 @@ type nlLinkGetter interface {
 	LinkByName(name string) (netlink.Link, error)
 }
 
+// nlAddressLister abstracts the address query used to determine whether a
+// configured secondary probe source is actually installed on its interface.
+type nlAddressLister interface {
+	AddrList(link netlink.Link, family int) ([]netlink.Addr, error)
+}
+
 // nlHandleCloser is a queryable netlink handle that can also be closed.
 // *netlink.Handle satisfies it; tests inject a counting fake to verify the
 // lazy-creation path creates exactly one handle and closes it on Stop.
@@ -560,8 +566,9 @@ func (mon *Monitor) pollCycleMode(ctx context.Context, includeIP bool) {
 		// Phase 1: immutable IP-target snapshot in stable order. Each task
 		// carries the resolved probe source/device/measurability for its
 		// RG+target (#15038, #16734): the primary probes from the RG's VIP
-		// on the target interface, the secondary from secondary-ip-address;
-		// unbound targets keep src="" and stay measurable.
+		// on the target interface, the secondary from its configured source
+		// only if that address is present there; unbound targets keep src=""
+		// and stay measurable.
 		for _, rg := range groups {
 			if rg.IPMonitoring == nil || len(rg.IPMonitoring.Targets) == 0 {
 				continue
@@ -773,10 +780,10 @@ type ipProbeTask struct {
 	device string
 	// canMeasure is true when this node holds a source it can probe
 	// from for this target (#16734): it is primary for the RG, the
-	// target is unbound (legacy, kernel chooses), or it holds a
-	// secondary-ip-address. When false the node cannot measure the
-	// target at all, so a not-completed outcome must release any
-	// dampened DOWN state rather than leave it frozen.
+	// target is unbound (legacy, kernel chooses), or the configured
+	// secondary source is present on the interface. An inconclusive
+	// address lookup preserves the neutral treatment; a confirmed
+	// absence makes the target unmeasurable.
 	canMeasure bool
 }
 
@@ -815,9 +822,11 @@ func (mon *Monitor) ipCycleTimeout(numTargets int) time.Duration {
 //     leniently-loaded one probes source-free (the kernel picks a
 //     same-family source) rather than binding the wrong family's
 //     address and never completing.
-//   - Otherwise with secondary-ip-address: (secondary, device, true) —
-//     an address the secondary actually holds, so it can measure.
-//   - Otherwise (bound target, not primary, no secondary address):
+//   - Otherwise with secondary-ip-address: (secondary, device, true) only
+//     when netlink confirms the source is present on that local interface.
+//     A confirmed absence returns canMeasure=false; an inconclusive query
+//     preserves the neutral treatment instead of releasing state.
+//   - Otherwise (bound target, not primary, no installed secondary source):
 //     ("", device, false) — the node holds no source for this target
 //     and cannot measure it at all. A not-completed probe for such a
 //     target must release any dampened DOWN state (#16734) instead of
@@ -844,9 +853,43 @@ func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IP
 		return "", device, true
 	}
 	if target.SecondaryIPAddress != "" {
-		return target.SecondaryIPAddress, device, true
+		present, verified := mon.installedAddress(device, target.SecondaryIPAddress)
+		// An inconclusive netlink lookup is not proof the source is absent;
+		// preserve the neutral treatment until presence can be determined.
+		return target.SecondaryIPAddress, device, present || !verified
 	}
 	return "", device, false
+}
+
+// installedAddress checks whether address is assigned to device in the
+// current kernel address list. verified is false when the interface or its
+// addresses could not be queried, so callers preserve state rather than
+// treating an inspection failure as evidence that a probe source is absent.
+func (mon *Monitor) installedAddress(device, address string) (present, verified bool) {
+	ip := net.ParseIP(stripCIDR(address))
+	if device == "" || ip == nil {
+		return false, true
+	}
+
+	nlh := mon.getNlHandle()
+	link, err := nlh.LinkByName(device)
+	if err != nil {
+		return false, false
+	}
+	lister, ok := nlh.(nlAddressLister)
+	if !ok {
+		return false, false
+	}
+	addrs, err := lister.AddrList(link, netlink.FAMILY_ALL)
+	if err != nil {
+		return false, false
+	}
+	for _, addr := range addrs {
+		if addr.IPNet != nil && addr.IP.Equal(ip) {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // firstAddrOfFamily returns the address part of the first entry of addrs

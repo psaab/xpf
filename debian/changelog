@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Cluster: release frozen IP-monitor debt when a configured secondary
+    source address is not installed on its target interface (#17759).
+    Confirmed absence releases stale debt; unconfirmed lookups preserve
+    neutral treatment.
   * Config: fail closed for nonempty embedded change-configuration
     payloads that lex to no tokens or lose content to comments; recursively
     mask quoted comment-shaped command payloads and preserve the whole-payload
