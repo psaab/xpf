@@ -185,6 +185,7 @@ func newUpgradeConfig(flags upgradeFlags) upgrade.Config {
 		ConfigDBDir:         flags.configDBDir,
 		JournalPath:         flags.journalPath,
 		Unit:                flags.unit,
+		RejoinDeadline:      flags.rejoinDeadline,
 		StartHealthDeadline: flags.healthDeadline,
 		Sys:                 buildUpgradeSystem(flags),
 		Logf:                func(format string, a ...any) { fmt.Printf(format+"\n", a...) },
@@ -296,6 +297,7 @@ type upgradeFlags struct {
 	target                                                                        string
 	stagedDir, versionsDir, stagedGenDir, sbinDir, configDBDir, journalPath, unit string
 	healthDeadline                                                                time.Duration
+	rejoinDeadline                                                                time.Duration
 }
 
 // parseUpgradeArgs parses the `xpfd upgrade [--rolling] [flags]` argument set.
@@ -325,6 +327,8 @@ func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 	unit := fs.String("unit", upgrade.DefaultUnit, "systemd unit name")
 	healthDeadline := fs.Duration("health-deadline", 30*time.Second,
 		"post-start helper-health deadline before auto-rollback (standalone)")
+	rejoinDeadline := fs.Duration("rejoin-deadline", upgrade.DefaultRejoinDeadline,
+		"HA rolling post-cut rejoin deadline, including inbound session-sync bulk prime")
 	if err := fs.Parse(args); err != nil {
 		return upgradeFlags{}, err
 	}
@@ -348,5 +352,6 @@ func parseUpgradeArgs(args []string) (upgradeFlags, error) {
 		journalPath:    *journalPath,
 		unit:           *unit,
 		healthDeadline: *healthDeadline,
+		rejoinDeadline: *rejoinDeadline,
 	}, nil
 }
