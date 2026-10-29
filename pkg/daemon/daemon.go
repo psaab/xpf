@@ -1131,6 +1131,11 @@ type Daemon struct {
 	// the wiring re-reads under the semaphore — which is how a first version of
 	// the #6716 guard stayed green against a reverted call site.
 	preApplyHookForTest func()
+	// beforeCommitConfirmedPromotionForTest fires after the rollback-target
+	// pre-flight and before the store atomically checks the captured window
+	// generation and promotes. It lets the #17695 test confirm the pending
+	// window at the exact time-of-check/time-of-use boundary.
+	beforeCommitConfirmedPromotionForTest func()
 
 	// bootstrapTeardownForTest, when non-nil, replaces the real per-step
 	// teardown executed inside enterBootstrapMode (#5868). Test-only seam:
@@ -1139,6 +1144,10 @@ type Daemon struct {
 	// steps) to exercise the failure-aggregation and honest DEGRADED/complete
 	// reporting without faking the concrete netlink/FRR/dataplane owners.
 	bootstrapTeardownForTest func() []bootstrapTeardownStep
+
+	// dhcpRelayReconcileForTest substitutes the relay reconcile result so
+	// bootstrap's degraded aggregation can be tested without a live relay.
+	dhcpRelayReconcileForTest func(*config.Config) error
 
 	// applyErrForTest is the error the applyBodyForTest seam returns from
 	// applyConfigLocked (default nil = success). Test-only: lets a test drive

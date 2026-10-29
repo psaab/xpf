@@ -3,6 +3,7 @@ package dhcprelay
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -233,6 +234,7 @@ type dhcpV6Relay struct {
 	spec       dhcpV6RelaySpec
 	cancel     context.CancelFunc
 	done       chan struct{}
+	stopping   bool // accessed under m.mu; set when a bounded join times out
 	linkAddr   net.IP
 
 	// maxPacketRate is the resolved per-interface ingress rate limit in
@@ -334,9 +336,9 @@ func (m *dhcpV6Manager) replyDispatcherSnapshot() *dhcpV6ReplyDispatcher {
 	return dispatcher
 }
 
-func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config, resolveIfName func(string) string, shouldRelay func(string) bool) {
+func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config, resolveIfName func(string) string, shouldRelay func(string) bool, stopDeadline time.Time) error {
 	if m == nil {
-		return
+		return nil
 	}
 	desired := computeDHCPV6Desired(cfg, resolveIfName)
 	m.mu.Lock()
@@ -344,7 +346,7 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 	replaced := make(map[string]*dhcpV6Relay)
 	for name, relay := range m.relays {
 		d, ok := desired[name]
-		if !ok || !relay.spec.equal(d.spec) {
+		if relay.stopping || !ok || !relay.spec.equal(d.spec) {
 			stop = append(stop, relay)
 			replaced[name] = relay
 			delete(m.relays, name)
@@ -377,14 +379,38 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 	}
 	m.mu.Unlock()
 
+	var applyErrs []error
+	timedOut := make(map[string]struct{})
 	for _, relay := range stop {
 		relay.cancel()
-		<-relay.done
+		if err := waitRelayStopped(relay.ifaceName, relay.done, stopDeadline); err != nil {
+			applyErrs = append(applyErrs, fmt.Errorf("dhcpv6-relay: %w", err))
+			timedOut[relay.ifaceName] = struct{}{}
+			m.mu.Lock()
+			relay.stopping = true
+			current := m.relays[relay.ifaceName]
+			var pending *dhcpV6Relay
+			if current != relay {
+				if current != nil {
+					delete(m.relays, relay.ifaceName)
+					pending = current
+				}
+				m.relays[relay.ifaceName] = relay
+			}
+			m.mu.Unlock()
+			if pending != nil {
+				pending.cancel()
+				close(pending.done)
+			}
+		}
 	}
 
 	// Keep outstanding bindings across a configuration restart: replies for
 	// already-forwarded requests can still arrive on the replacement socket.
 	for _, s := range start {
+		if _, failed := timedOut[s.relay.ifaceName]; failed {
+			continue
+		}
 		if old := replaced[s.relay.ifaceName]; old != nil {
 			s.relay.adoptCountersFrom(old)
 			carried := old.pending.snapshot()
@@ -393,6 +419,9 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 		}
 	}
 	for _, s := range start {
+		if _, failed := timedOut[s.relay.ifaceName]; failed {
+			continue
+		}
 		go func(s startRelay) {
 			defer func() {
 				m.mu.Lock()
@@ -407,6 +436,7 @@ func (m *dhcpV6Manager) apply(ctx context.Context, cfg *config.DHCPRelayV6Config
 		slog.Info("dhcpv6-relay: started", "interface", s.desired.ifaceName,
 			"group", s.desired.groupName, "servers", s.desired.spec.servers)
 	}
+	return errors.Join(applyErrs...)
 }
 
 func (m *dhcpV6Manager) stop() {

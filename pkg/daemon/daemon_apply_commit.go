@@ -975,8 +975,10 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// rollback-time abort). The pre-flight and the promotion are now bound to one
 	// candidate generation, so a concurrent candidate edit cannot slip a different
 	// candidate into the promotion after the pre-flight cleared the examined one.
-	// The rollback target is stable across the transaction: it changes
-	// only under d.applySem, held here from pre-flight through the commit.
+	// Active config mutations are serialized by d.applySem, but the pending
+	// confirmation window can also be cleared by ConfirmCommit outside that
+	// semaphore. Carry the rollback-window generation captured atomically with
+	// the target and bind it at promotion, refusing a stale pre-flight.
 	// #16668: on a NESTED arm (a window already pending) the store retains
 	// the ORIGINAL rollback target, not the unconfirmed active config, so
 	// the gates below resolve the target via RollbackTargetForArm rather
@@ -984,6 +986,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// refuses an extension whose unconfirmed config is not yet appliable
 	// and falsely clears one whose true target is unappliable.
 	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
+	var rollbackConfirmGen uint64
 	oldActive, compiled, err := d.commitWithGenBinding(
 		discardGen,
 		func(cand *config.Config) error {
@@ -1044,7 +1047,24 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// nothing has been promoted.
 			// #9588: the Go refusal mirror decides, with the LIVE feed overlay
 			// for this target (representability is feed-aware).
-			rollbackTarget, _, _ := d.store.RollbackTargetForArm()
+			rollbackTarget, rollbackPending, rollbackFirst, confirmGen := d.store.RollbackTargetForArm()
+			rollbackConfirmGen = confirmGen
+			if !rollbackFirst && rollbackTarget == nil {
+				switch {
+				case rollbackPending:
+					return fmt.Errorf("commit confirmed rollback target invariant: pending non-first window has no retained target")
+				default:
+					return fmt.Errorf("commit confirmed rollback target invariant: active non-first config is absent")
+				}
+			}
+			// A first-commit rollback returns to bootstrap, even when Store.Load
+			// compiled the empty never-committed tree into a non-nil config
+			// (#7291). Target-specific gates have no policy snapshot to validate
+			// in that case; the candidate's device-map gate still runs below.
+			targetForPreflight := rollbackTarget
+			if rollbackFirst {
+				targetForPreflight = nil
+			}
 			// #16665: while in the #9615 refused-target bootstrap safe
 			// state the active config IS the refused target, so this gate
 			// would refuse every `commit confirmed` and leave no commit
@@ -1055,15 +1075,18 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// too. Outside that provenance the gate is unchanged. On a
 			// nested arm the #16668 target resolution above stands: the
 			// refused target is the retained one, not the active config.
-			if !(d.inBootstrap() && d.bootstrapFromRefusedRollback.Load()) {
+			if !rollbackFirst && !(d.inBootstrap() && d.bootstrapFromRefusedRollback.Load()) {
 				if rerr := rollbackTargetAppliablePreflight(rollbackTarget, d.feedSnapshotsForConfig(rollbackTarget)); rerr != nil {
 					return rerr
 				}
 			}
-			return d.deviceMapCommitPreflight(cand, rollbackTarget)
+			return d.deviceMapCommitPreflight(cand, targetForPreflight)
 		},
 		func(gen uint64) (*config.Config, error) {
-			return d.store.CommitConfirmedGenAs(authority, minutes, gen)
+			if d.beforeCommitConfirmedPromotionForTest != nil {
+				d.beforeCommitConfirmedPromotionForTest()
+			}
+			return d.store.CommitConfirmedGenAndConfirmAs(authority, minutes, gen, rollbackConfirmGen)
 		},
 	)
 	if err != nil {
