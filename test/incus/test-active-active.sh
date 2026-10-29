@@ -117,7 +117,7 @@ done
 sleep 2
 
 # Ensure all RGs are on fw0 (request peer failover if needed)
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 for rg in 0 1 2; do
 	rg_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
 	if [[ "$rg_primary" -ne 1 ]]; then
@@ -172,7 +172,7 @@ incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1
 sleep "$SETTLE_WAIT"
 
 # Verify RG split: RG1 on fw1, RG2 on fw0
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 
 fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 
@@ -202,22 +202,30 @@ else
 	fail "RG2 unexpectedly moved (node0 state: $rg2_node0)"
 fi
 
-# Verify VRRP states match cluster state
-fw0_vrrp=$(incus exec "$FW0" -- cli -c 'show security vrrp' 2>/dev/null)
+# Verify VRRP states match cluster state. The compiler default since #12173
+# is private-RG election with RETH VRRP suppressed, where the CLI prints
+# "No VRRP groups configured" and the RG rows above are the authority
+# (#18523: the old greps found no "101" row, and `set -euo pipefail`
+# aborted the smoke here, before any traffic verdict).
+fw0_vrrp=$(incus exec "$FW0" -- cli -c 'show security vrrp' 2>/dev/null || true)
 
-vrrp_101=$(echo "$fw0_vrrp" | grep "101" | head -1)
-vrrp_102=$(echo "$fw0_vrrp" | grep "102" | head -1)
-
-if echo "$vrrp_101" | grep -qi "BACKUP"; then
-	pass "VRRP 101 (WAN) is BACKUP on fw0"
+if grep -qi "No VRRP groups configured" <<<"$fw0_vrrp"; then
+	info "RETH VRRP suppressed (private-RG election); RG ownership above is the authority"
 else
-	fail "VRRP 101 (WAN) not BACKUP on fw0: $vrrp_101"
-fi
+	vrrp_101=$(grep "101" <<<"$fw0_vrrp" | head -1 || true)
+	vrrp_102=$(grep "102" <<<"$fw0_vrrp" | head -1 || true)
 
-if echo "$vrrp_102" | grep -qi "MASTER"; then
-	pass "VRRP 102 (LAN) is MASTER on fw0"
-else
-	fail "VRRP 102 (LAN) not MASTER on fw0: $vrrp_102"
+	if grep -qi "BACKUP" <<<"$vrrp_101"; then
+		pass "VRRP 101 (WAN) is BACKUP on fw0"
+	else
+		fail "VRRP 101 (WAN) not BACKUP on fw0: ${vrrp_101:-no row}"
+	fi
+
+	if grep -qi "MASTER" <<<"$vrrp_102"; then
+		pass "VRRP 102 (LAN) is MASTER on fw0"
+	else
+		fail "VRRP 102 (LAN) not MASTER on fw0: ${vrrp_102:-no row}"
+	fi
 fi
 
 # ── Phase 3: Verify iperf3 survives the split ────────────────────────
@@ -268,7 +276,7 @@ incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1
 sleep "$SETTLE_WAIT"
 
 # Verify all RGs back on fw0
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 
 if printf '%s\n' "$fw0_status" | deploy_node_role_every_rg_ok node0 primary; then
 	pass "all RGs returned to fw0 after reunification"
