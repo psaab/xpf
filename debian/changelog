@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * RPM: sanitize quoted inner URL parse-error payloads on credential-bearing
+    targets, retaining the error class without leaking malformed-authority
+    tokens (#17725).
+
   * Dataplane: reconcile VLAN child MTUs for unzoned bridge-domain members
     against the parent's planned MTU, reusing the #9757/#16633 helper
     semantics (#17726).
