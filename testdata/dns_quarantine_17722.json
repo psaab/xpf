@@ -1,0 +1,509 @@
+{
+  "version": 77,
+  "generation": 1,
+  "generated_at": "0001-01-01T00:00:00Z",
+  "summary": {
+    "host_name": "",
+    "dataplane_type": "",
+    "interface_count": 0,
+    "zone_count": 3,
+    "policy_count": 2,
+    "scheduler_count": 0,
+    "ha_enabled": false
+  },
+  "capabilities": {
+    "forwarding_supported": true,
+    "policy_content_rejected": [
+      "policy trust-\u003euntrust/block-bad has unavailable DNS address resolution for destination-address \"bad\"; rule quarantined to deny while sibling rules remain active"
+    ]
+  },
+  "map_pins": {
+    "ctrl": "/sys/fs/bpf/xpf/userspace_ctrl",
+    "bindings": "/sys/fs/bpf/xpf/userspace_bindings",
+    "heartbeat": "/sys/fs/bpf/xpf/userspace_heartbeat",
+    "xsk": "/sys/fs/bpf/xpf/userspace_xsk_map",
+    "local_v4": "/sys/fs/bpf/xpf/userspace_local_v4_domain",
+    "local_v6": "/sys/fs/bpf/xpf/userspace_local_v6_domain",
+    "sessions": "/sys/fs/bpf/xpf/userspace_sessions",
+    "conntrack_v4": "/sys/fs/bpf/xpf/sessions",
+    "conntrack_v6": "/sys/fs/bpf/xpf/sessions_v6",
+    "trace": "/sys/fs/bpf/xpf/userspace_trace"
+  },
+  "zones": [
+    {
+      "name": "dmz",
+      "id": 1053679769,
+      "host_inbound_configured": true
+    },
+    {
+      "name": "trust",
+      "id": 2868932339,
+      "host_inbound_configured": true
+    },
+    {
+      "name": "untrust",
+      "id": 1929257543,
+      "host_inbound_configured": true
+    }
+  ],
+  "zone_set_validated": true,
+  "route_table_identities": [
+    {
+      "name": "inet.0",
+      "domain": 0,
+      "table": 254
+    },
+    {
+      "name": "inet6.0",
+      "domain": 0,
+      "table": 254
+    }
+  ],
+  "flow": {},
+  "default_policy": "deny",
+  "policies": [
+    {
+      "rule_id": "trust-\u003euntrust/block-bad",
+      "name": "block-bad",
+      "from_zone": "trust",
+      "to_zone": "untrust",
+      "destination_book_ids": [
+        440890831
+      ],
+      "source_literals": [
+        "any"
+      ],
+      "applications": [
+        "any"
+      ],
+      "application_terms": [
+        {
+          "name": "__dns_unavailable_destination__",
+          "protocol": "__dns_unavailable_destination__"
+        }
+      ],
+      "action": "deny"
+    },
+    {
+      "rule_id": "trust-\u003edmz/permit-good",
+      "policy_id": 1,
+      "name": "permit-good",
+      "from_zone": "trust",
+      "to_zone": "dmz",
+      "destination_book_ids": [
+        1545543325
+      ],
+      "source_literals": [
+        "any"
+      ],
+      "applications": [
+        "good-tcp"
+      ],
+      "application_terms": [
+        {
+          "name": "good-tcp",
+          "protocol": "tcp",
+          "destination_port": "443"
+        }
+      ],
+      "action": "permit"
+    }
+  ],
+  "address_books": [
+    {
+      "id": 440890831,
+      "name": "bad"
+    },
+    {
+      "id": 1545543325,
+      "name": "good",
+      "prefixes_v4": [
+        "10.0.0.5/32"
+      ]
+    }
+  ],
+  "app_catalog": [
+    {
+      "app_id": 4080,
+      "protocol": 6,
+      "dst_port_low": 443,
+      "dst_port_high": 443
+    }
+  ],
+  "config": {
+    "Security": {
+      "Zones": {
+        "dmz": {
+          "Name": "dmz",
+          "Description": "",
+          "Interfaces": [
+            "reth0.81"
+          ],
+          "ScreenProfile": "",
+          "HostInboundTraffic": null,
+          "InterfaceHostInbound": null,
+          "DHCPScopeWithheld": null,
+          "ResolvedInterfaceOverrides": null,
+          "ResolvedInterfaceDeclared": null,
+          "TCPRst": false,
+          "ApplicationTracking": false,
+          "SourceIdentityLog": false,
+          "EnableReverseReroute": false,
+          "UnidirectionalRefresh": false,
+          "AdvancePBRProfile": "",
+          "AdvancedConnectionTracking": null,
+          "WhiteList": null,
+          "AddressBook": null
+        },
+        "trust": {
+          "Name": "trust",
+          "Description": "",
+          "Interfaces": [
+            "reth1"
+          ],
+          "ScreenProfile": "",
+          "HostInboundTraffic": null,
+          "InterfaceHostInbound": null,
+          "DHCPScopeWithheld": null,
+          "ResolvedInterfaceOverrides": null,
+          "ResolvedInterfaceDeclared": null,
+          "TCPRst": false,
+          "ApplicationTracking": false,
+          "SourceIdentityLog": false,
+          "EnableReverseReroute": false,
+          "UnidirectionalRefresh": false,
+          "AdvancePBRProfile": "",
+          "AdvancedConnectionTracking": null,
+          "WhiteList": null,
+          "AddressBook": null
+        },
+        "untrust": {
+          "Name": "untrust",
+          "Description": "",
+          "Interfaces": [
+            "reth0.80"
+          ],
+          "ScreenProfile": "",
+          "HostInboundTraffic": null,
+          "InterfaceHostInbound": null,
+          "DHCPScopeWithheld": null,
+          "ResolvedInterfaceOverrides": null,
+          "ResolvedInterfaceDeclared": null,
+          "TCPRst": false,
+          "ApplicationTracking": false,
+          "SourceIdentityLog": false,
+          "EnableReverseReroute": false,
+          "UnidirectionalRefresh": false,
+          "AdvancePBRProfile": "",
+          "AdvancedConnectionTracking": null,
+          "WhiteList": null,
+          "AddressBook": null
+        }
+      },
+      "Policies": [
+        {
+          "FromZone": "trust",
+          "ToZone": "untrust",
+          "Policies": [
+            {
+              "Name": "block-bad",
+              "Description": "",
+              "Match": {
+                "SourceAddresses": [
+                  "any"
+                ],
+                "DestinationAddresses": [
+                  "bad"
+                ],
+                "Applications": [
+                  "any"
+                ],
+                "SourceAddressExcluded": false,
+                "DestinationAddressExcluded": false,
+                "FromZones": null,
+                "ToZones": null
+              },
+              "Action": 1,
+              "Log": null,
+              "Count": false,
+              "SchedulerName": "",
+              "UnknownChildren": null,
+              "LenientContentDropped": false
+            }
+          ]
+        },
+        {
+          "FromZone": "trust",
+          "ToZone": "dmz",
+          "Policies": [
+            {
+              "Name": "permit-good",
+              "Description": "",
+              "Match": {
+                "SourceAddresses": [
+                  "any"
+                ],
+                "DestinationAddresses": [
+                  "good"
+                ],
+                "Applications": [
+                  "good-tcp"
+                ],
+                "SourceAddressExcluded": false,
+                "DestinationAddressExcluded": false,
+                "FromZones": null,
+                "ToZones": null
+              },
+              "Action": 0,
+              "Log": null,
+              "Count": false,
+              "SchedulerName": "",
+              "UnknownChildren": null,
+              "LenientContentDropped": false
+            }
+          ]
+        }
+      ],
+      "GlobalPolicies": null,
+      "DefaultPolicy": 1,
+      "NAT": {
+        "Source": null,
+        "SourcePools": null,
+        "AddressPersistent": false,
+        "Destination": null,
+        "Static": null,
+        "NAT64": null,
+        "NATv6v4": null,
+        "PoolUtilizationAlarm": null,
+        "ProxyARP": null,
+        "SourceInterfacePortOverloadingOff": false
+      },
+      "Screen": null,
+      "AddressBook": {
+        "Description": "",
+        "Addresses": {
+          "bad": {
+            "Name": "bad",
+            "Value": "",
+            "Description": "",
+            "TrailingTokens": null,
+            "UnimplementedForms": null,
+            "DNSName": "bad.example.com",
+            "DNSFamily": ""
+          },
+          "good": {
+            "Name": "good",
+            "Value": "10.0.0.5/32",
+            "Description": "",
+            "TrailingTokens": null,
+            "UnimplementedForms": null,
+            "DNSName": "",
+            "DNSFamily": ""
+          }
+        },
+        "AddressSets": null
+      },
+      "Log": {
+        "Mode": "",
+        "Format": "",
+        "SourceInterface": "",
+        "SourceAddress": "",
+        "Streams": null,
+        "Report": false,
+        "Profiles": null
+      },
+      "Flow": {
+        "TCPSession": null,
+        "UDPSessionTimeout": 0,
+        "ICMPSessionTimeout": 0,
+        "TCPMSSAllTCP": 0,
+        "TCPMSSIPsecVPN": 0,
+        "TCPMSSGreIn": 0,
+        "TCPMSSGreOut": 0,
+        "AllowDNSReply": false,
+        "AllowEmbeddedICMP": false,
+        "AllowUnstampedFabricIngress": false,
+        "RequireAuthenticatedFabricStamps": false,
+        "DropForeignSessionHits": false,
+        "GREPerformanceAcceleration": false,
+        "PowerModeDisable": false,
+        "SynFloodProtectionMode": "",
+        "Traceoptions": null,
+        "AgingEarlyAgeout": 0,
+        "AgingHighWatermark": 0,
+        "AgingLowWatermark": 0,
+        "AgingUnknownLeaves": null,
+        "RouteChangeTimeout": 0,
+        "SyncICMPSession": false,
+        "ForceIPReassembly": false,
+        "MulticastSessionLifetime": 0,
+        "PreserveIncomingFragmentSize": false
+      },
+      "ALG": {
+        "DNSDisable": false,
+        "FTPDisable": false,
+        "SIPDisable": false,
+        "TFTPDisable": false,
+        "PPTPDisable": false,
+        "UnsupportedProtos": null
+      },
+      "IPsec": {
+        "IKEProposals": null,
+        "IKEPolicies": null,
+        "Gateways": null,
+        "Proposals": null,
+        "Policies": null,
+        "VPNs": null
+      },
+      "PKI": null,
+      "DynamicAddress": {
+        "FeedServers": null,
+        "AddressBindings": null
+      },
+      "SSHKnownHosts": null,
+      "PolicyStatsEnabled": false,
+      "PreIDDefaultPolicy": null,
+      "DefaultPolicyLogSessionInit": false,
+      "DefaultPolicyLogSessionClose": false,
+      "PolicyRematch": false,
+      "PolicyRematchExtensive": false
+    },
+    "Interfaces": {
+      "Interfaces": null
+    },
+    "Applications": {
+      "Applications": {
+        "good-tcp": {
+          "Name": "good-tcp",
+          "Protocol": "tcp",
+          "DestinationPort": "443",
+          "SourcePort": "",
+          "InactivityTimeout": 0,
+          "InactivityTimeoutNever": false,
+          "ALG": "",
+          "Description": "",
+          "ICMPType": null,
+          "ICMPCode": null,
+          "UnknownTimeouts": null,
+          "UnknownICMP": null,
+          "UnknownTermLeaves": null,
+          "IncompleteTermLeaves": null,
+          "DuplicateTermLeaves": null,
+          "DuplicateDirectLeaves": null,
+          "IncompleteDirectLeaves": null,
+          "UnknownDirectLeaves": null,
+          "UnknownDirectTokens": null
+        }
+      },
+      "ApplicationSets": null,
+      "MixedDirectTermApps": null
+    },
+    "RoutingOptions": {
+      "StaticRoutes": null,
+      "Inet6StaticRoutes": null,
+      "UnhandledRibs": null,
+      "GenerateRoutes": null,
+      "ForwardingTableExport": "",
+      "ForwardingTableExports": null,
+      "AutonomousSystem": 0,
+      "RibGroups": null,
+      "InterfaceRoutesRibGroup": "",
+      "InterfaceRoutesRibGroupV6": ""
+    },
+    "Protocols": {
+      "OSPF": null,
+      "OSPFv3": null,
+      "BGP": null,
+      "RIP": null,
+      "ISIS": null,
+      "RouterAdvertisement": null,
+      "LLDP": null
+    },
+    "RoutingInstances": null,
+    "Firewall": {
+      "FiltersInet": null,
+      "FiltersInet6": null,
+      "Policers": null,
+      "ThreeColorPolicers": null
+    },
+    "ClassOfService": null,
+    "Services": {
+      "FlowMonitoring": null,
+      "RPM": null,
+      "IPMonitoring": null,
+      "ApplicationIdentification": false
+    },
+    "ForwardingOptions": {
+      "Sampling": null,
+      "DHCPRelay": null,
+      "FamilyInet6Mode": "",
+      "PortMirroring": null,
+      "AllowDataplaneSleep": false
+    },
+    "System": {
+      "HostName": "",
+      "DomainName": "",
+      "DomainSearch": null,
+      "TimeZone": "",
+      "NameServers": null,
+      "NTPServers": null,
+      "NTPServerOptions": null,
+      "NTPPeers": null,
+      "NTPPeerOptions": null,
+      "NTPServerKeyIDs": null,
+      "NTPThreshold": 0,
+      "NTPThresholdAction": "",
+      "NoRedirects": false,
+      "BackupRouter": "",
+      "BackupRouterDst": "",
+      "BackupRouterDsts": null,
+      "Lo0FilterInputV4": "",
+      "Lo0FilterInputV6": "",
+      "DataplaneType": "",
+      "UserspaceDataplane": null,
+      "InternetOptions": null,
+      "Services": null,
+      "Syslog": null,
+      "DHCPServer": {
+        "DHCPLocalServer": null,
+        "DHCPv6LocalServer": null,
+        "DynamicDNS": null,
+        "DynamicDNSv6": null
+      },
+      "SNMP": null,
+      "Login": null,
+      "LoginDroppedByPacking": false,
+      "RootAuthentication": null,
+      "Archival": null,
+      "MasterPassword": "",
+      "LicenseAutoUpdate": "",
+      "LicenseAutoUpdateURLs": null,
+      "DisabledProcesses": null,
+      "PersistGroupsInheritance": false,
+      "ManagementInterface": ""
+    },
+    "PolicyOptions": {
+      "PrefixLists": null,
+      "Communities": null,
+      "ASPaths": null,
+      "PolicyStatements": null
+    },
+    "Schedulers": null,
+    "Chassis": {
+      "Cluster": null,
+      "DeviceMap": null
+    },
+    "EventOptions": null,
+    "BridgeDomains": null,
+    "Warnings": null,
+    "LenientNATTerminalActionRules": null
+  },
+  "userspace": {
+    "binary": "",
+    "control_socket": "",
+    "state_file": "",
+    "workers": 0,
+    "ring_entries": 0,
+    "poll_mode": ""
+  }
+}
