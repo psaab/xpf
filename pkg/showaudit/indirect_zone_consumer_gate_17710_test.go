@@ -13,6 +13,8 @@ import (
 // finding. Its collection reads live in exempt helpers (interfaceZoneMap and
 // allInterfaceNames), so direct-range admission silently omitted the renderer
 // before this regression.
+// #17691 also pins interfaceZoneMap as an explicitly registered reader of the
+// security-zone collection, so deleting its admission fails this control.
 func TestInterfaceDetailQualifierDeletionRedsCensus17710(t *testing.T) {
 	pkg := parsePackage(t, "pkg/api")
 	key := "writeInterfacesDetail"
@@ -23,12 +25,28 @@ func TestInterfaceDetailQualifierDeletionRedsCensus17710(t *testing.T) {
 	f := families[7] // security zone: Security.Zones / ZoneIDs
 	id, member, annotated := surfaceEntry(pkg, key, "pkg/api", f)
 	if !member {
-		t.Fatalf("control: %s is absent from the security-zone census; "+
-			"the census does not follow collection reads through helpers", id)
+		t.Fatalf("control: pkg/api/interfaces.go:%s is absent from the security-zone census; "+
+			"the census does not follow collection reads through helpers", key)
 	}
 	if !annotated {
 		t.Fatalf("control: %s is unannotated before mutation; the qualifier "+
 			"is not recognized by the census", id)
+	}
+	const zoneMapID = "pkg/api/api.go:interfaceZoneMap"
+	zoneMap := pkg.funcs["interfaceZoneMap"]
+	callsZoneMap := false
+	for _, callee := range samePackageCalleeNames(pkg, rec.fd) {
+		if callee == "interfaceZoneMap" {
+			callsZoneMap = true
+			break
+		}
+	}
+	if !collectionReaderHelpers[zoneMapID] {
+		t.Fatalf("control: %s is absent from collectionReaderHelpers", zoneMapID)
+	}
+	if !callsZoneMap || zoneMap == nil || !rangesOverAny(pkg.fset, zoneMap.fd, f.Collections) {
+		t.Fatalf("control: %s must call registered %s that ranges %v",
+			key, zoneMapID, f.Collections)
 	}
 
 	original, err := os.ReadFile(rec.file)
