@@ -1,4 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Upgrade lock test: check pre-existing temp-path traversability as nobody
+    and skip only the root cross-UID flock arm when those ancestors are
+    inaccessible. Keep chmod confinement and lock-mode assertions for
+    traversable runs (#17756).
+
   * Daemon tests: synchronize the connected-RG republish positive control
     with the fake dataplane's mutex-protected call log and wait for both
     publish and FIB bump calls (#17754).
