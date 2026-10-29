@@ -19,8 +19,6 @@
 //! plain-forward path.
 
 use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, padded_len_capped};
-#[cfg(test)]
-use super::super::wg::pad_to_16;
 use super::super::*;
 use super::checksum::checksum16_ipv6;
 use super::headers::{

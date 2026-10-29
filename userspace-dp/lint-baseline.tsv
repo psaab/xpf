@@ -35,11 +35,6 @@ release	dead_code	src/afxdp/forwarding/ha.rs	3
 release	dead_code	src/afxdp/forwarding/host_inbound.rs	4
 release	dead_code	src/afxdp/forwarding/mod.rs	2
 release	dead_code	src/afxdp/forwarding_build/fib.rs	3
-release	dead_code	src/afxdp/frame/addr_class.rs	3
-release	dead_code	src/afxdp/frame/headers.rs	2
-release	dead_code	src/afxdp/frame/mod.rs	8
-release	dead_code	src/afxdp/frame/tcp_segmentation.rs	3
-release	dead_code	src/afxdp/frame/wg.rs	12
 release	dead_code	src/afxdp/gre.rs	1
 release	dead_code	src/afxdp/gre_reassembly.rs	1
 release	dead_code	src/afxdp/ha/export.rs	1
@@ -48,7 +43,6 @@ release	dead_code	src/afxdp/ha/session_import.rs	8
 release	dead_code	src/afxdp/icmp_embed/builders.rs	1
 release	dead_code	src/afxdp/icmp_embed/mod.rs	4
 release	dead_code	src/afxdp/icmp_embed/parse.rs	2
-release	dead_code	src/afxdp/icmp_ptb.rs	2
 release	dead_code	src/afxdp/ipsec_inner.rs	6
 release	dead_code	src/afxdp/ipsec_inner_queue.rs	106
 release	dead_code	src/afxdp/mirror/fast_path.rs	2
@@ -174,15 +168,10 @@ tests	dead_code	src/afxdp/frame/../../../../userspace-xdp/src/ipv6_ext_walk.rs	2
 tests	dead_code	src/afxdp/frame/../../../../userspace-xdp/src/ipv6_len_gate.rs	2
 tests	dead_code	src/afxdp/frame/../../../../userspace-xdp/src/land.rs	4
 tests	dead_code	src/afxdp/frame/../../../../userspace-xdp/src/wg_classify.rs	1
-tests	dead_code	src/afxdp/frame/addr_class.rs	3
-tests	dead_code	src/afxdp/frame/mod.rs	1
-tests	dead_code	src/afxdp/frame/tcp_segmentation.rs	1
 tests	dead_code	src/afxdp/frame/tests_shim_gre_inner_14954.rs	1
-tests	dead_code	src/afxdp/frame/wg.rs	4
 tests	dead_code	src/afxdp/ha/../ha_tests.rs	2
 tests	dead_code	src/afxdp/ha/session_domain.rs	1
 tests	dead_code	src/afxdp/icmp_embed/parse.rs	1
-tests	dead_code	src/afxdp/icmp_ptb.rs	1
 tests	dead_code	src/afxdp/ipsec_inner.rs	4
 tests	dead_code	src/afxdp/ipsec_inner_queue.rs	22
 tests	dead_code	src/afxdp/mirror/fast_path.rs	1
