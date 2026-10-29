@@ -2188,6 +2188,15 @@ fn wg_ptb_learning_through_rx_poll_affects_forwarded_mtu_17775() {
     // packet length track the on-wire 802.1Q header.
     let mut ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 1400, 51820, 51820);
     ptb.splice(12..12, [0x81, 0x00, 0x00, 0x50]);
+    let router: std::net::Ipv6Addr = "2001:559:8585:80::1".parse().unwrap();
+    let local_outer: std::net::Ipv6Addr = "2001:559:8585:80::8".parse().unwrap();
+    let icmpv6_checksum = crate::afxdp::frame::checksum::checksum16_ipv6(
+        router,
+        local_outer,
+        PROTO_ICMPV6,
+        &ptb[58..],
+    );
+    ptb[60..62].copy_from_slice(&icmpv6_checksum.to_be_bytes());
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
