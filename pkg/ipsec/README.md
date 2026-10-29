@@ -1026,11 +1026,12 @@ all files stay in `package ipsec`, so the public API is unchanged.
   the exact swanctl selector rather than its declared Junos identity type,
   distinct types that render one owner share a collision class. Per rendered
   strongSwan identity equality, not a transitive normalized key: ordered DN
-  comparison follows DER RDN order and tag-sensitive value rules, RFC822
-  comparisons fold the whole address, and key-id bytes and IP/subnet/FQDN
-  selectors follow parser semantics. Numeric ID prefixes use strtoul and the
-  32-bit ID enum; `uri:` is type 201 and `xmppaddr:` encodes a GeneralName.
-  Authored output stays raw.
+  comparison follows DER RDN order and tag-sensitive value rules; FQDN and
+  whole-address RFC822 comparisons fold ASCII letters only, leaving non-ASCII
+  bytes unchanged. Key-id bytes and IP/subnet/FQDN selectors follow parser
+  semantics. Numeric ID prefixes use strtoul and 32-bit ID enum conversion;
+  `uri:` is type 201 and `xmppaddr:` encodes a GeneralName. Authored output
+  stays raw.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct

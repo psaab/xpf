@@ -520,7 +520,7 @@ func ipsecASCIIEqualFold(a, b string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i := range a {
+	for i := 0; i < len(a); i++ {
 		left, right := a[i], b[i]
 		if left >= 'A' && left <= 'Z' {
 			left += 'a' - 'A'

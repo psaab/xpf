@@ -419,6 +419,8 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 
 	t.Run("cross-type distinct rendered owners commit", func(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("email", "peer@corp.example", "hostname", "peer@corp.example"))
+		requireNoCollision17772(t, identityPair17772("hostname", "é.example", "hostname", "ê.example"))
+		requireNoCollision17772(t, identityPair17772("rfc822", "user@é.example", "rfc822", "user@ê.example"))
 		requireNoCollision17772(t, identityPair17772("hostname", "zz", "key-id", "zz"))
 		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer.example.com", "inet", "peer.example.com"))
 		requireNoCollision17772(t, identityPair17772("inet", "uri:Peer", "inet", "{12}:Peer"))

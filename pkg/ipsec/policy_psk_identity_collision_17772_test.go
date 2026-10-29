@@ -253,6 +253,8 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 	t.Run("distinct strongSwan identities render both secrets", func(t *testing.T) {
 		pairs := []struct{ name, aType, a, bType, b string }{
 			{"one zero byte versus two", "key-id", "zz", "key-id", "0000"},
+			{"FQDN non-ASCII bytes remain distinct", "hostname", "é.example", "hostname", "ê.example"},
+			{"RFC822 non-ASCII bytes remain distinct", "rfc822", "user@é.example", "rfc822", "user@ê.example"},
 			{"odd padded bytes versus ASCII hex text", "key-id", "7a7", "key-id", "376137"},
 			{"unknown DN attribute case", "distinguished-name", "broken=peer", "distinguished-name", "BROKEN=PEER"},
 			{"double separator differs from plain hex", "key-id", "7a::7a", "key-id", "7a7a"},

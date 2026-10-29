@@ -11528,7 +11528,8 @@ reserved for whole-dataplane selection where a rewrite shim
     both compared tags are PrintableString; emailAddress IA5 values also fold
     ASCII case. Other values compare bytes, even across differing tags, so DN
     equality is pairwise and not reducible to a transitive canonical key.
-    RFC822 IDs fold the whole address with ASCII case-insensitivity. `@#` and
+    FQDN and RFC822 comparisons fold ASCII letters only; RFC822 IDs fold the
+    whole address, and non-ASCII bytes remain byte-sensitive. `@#` and
     `keyid:#` mirror `chunk_from_hex()`: lowercase `0x` is stripped, every
     colon is removed when sizing, decoding fills from the right and skips at
     most one colon before each low nibble, invalid nibbles become zero, and
