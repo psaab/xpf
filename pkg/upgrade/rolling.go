@@ -179,12 +179,21 @@ type RollingCluster interface {
 	LocalRejoinComplete() (bool, error)
 }
 
+// DefaultRejoinDeadline bounds the post-cut wait for session sync to
+// re-establish (including the inbound bulk prime) when the operator does
+// not override it. The daemon's bulk-prime attempt schedule is 10s + 20s
+// + 30s×4 ≈ 150s and the bulk-retry ACK bound is 35s, so the pre-#18415
+// 60s default could abort a roll whose prime would still have completed;
+// 180s is the 150s schedule plus 30s of grace, still a hard bound.
+const DefaultRejoinDeadline = 180 * time.Second
+
 // RollingConfig tunes the rolling driver timing.
 type RollingConfig struct {
 	// DrainDeadline bounds the wait for the strong drain predicate.
 	DrainDeadline time.Duration
 	// RejoinDeadline bounds the wait for session-sync to re-establish
-	// after the cut.
+	// after the cut. Zero selects DefaultRejoinDeadline; an explicit
+	// value (including a short test override) is honored exactly.
 	RejoinDeadline time.Duration
 	// PollInterval is the predicate poll cadence.
 	PollInterval time.Duration
@@ -199,7 +208,7 @@ func (c *RollingConfig) withDefaults() {
 		c.DrainDeadline = 30 * time.Second
 	}
 	if c.RejoinDeadline == 0 {
-		c.RejoinDeadline = 60 * time.Second
+		c.RejoinDeadline = DefaultRejoinDeadline
 	}
 	if c.PollInterval == 0 {
 		c.PollInterval = 500 * time.Millisecond
@@ -246,7 +255,7 @@ func RunRolling(r *Runner, cfg Config) error {
 		return fmt.Errorf("upgrade --rolling: %w", err)
 	}
 	return RunWithSignalGuard(r.logf, func(g *SignalGuard) error {
-		return runRollingWith(r, cl, RollingConfig{SignalGuard: g})
+		return runRollingWith(r, cl, RollingConfig{RejoinDeadline: cfg.RejoinDeadline, SignalGuard: g})
 	})
 }
 
@@ -265,7 +274,7 @@ func RunRollingRollback(r *Runner, cfg Config, target string) error {
 		return fmt.Errorf("upgrade --rollback --rolling: %w", err)
 	}
 	return RunWithSignalGuard(r.logf, func(g *SignalGuard) error {
-		return runRollingRollbackWith(r, cl, RollingConfig{SignalGuard: g}, target)
+		return runRollingRollbackWith(r, cl, RollingConfig{RejoinDeadline: cfg.RejoinDeadline, SignalGuard: g}, target)
 	})
 }
 
@@ -378,7 +387,7 @@ func runRollingRollbackWith(r *Runner, cl RollingCluster, rc RollingConfig, targ
 		return fmt.Errorf("rolling rollback: rolled-back node did not re-establish session sync within %s: %w", rc.RejoinDeadline, err)
 	}
 	r.logf("rolling: rolled-back node re-synced")
-	if err := RejoinAndConfirm(cl, rc.RejoinDeadline); err != nil {
+	if err := rejoinAndConfirm(cl, rc.RejoinDeadline, rc.PollInterval); err != nil {
 		return fmt.Errorf("rolling rollback: local node did not rejoin election after rollback within %s: %w", rc.RejoinDeadline, err)
 	}
 	r.logf("rolling: local node rejoined election, confirmed for every configured RG; rollback complete for this node")
@@ -634,16 +643,16 @@ func runRollingWith(r *Runner, cl RollingCluster, rc RollingConfig) (err error) 
 	//    whose ForceSecondary then leaves that RG with NO PRIMARY ON EITHER
 	//    NODE until the peer's DrainDeadline expires.
 	//
-	//    RejoinAndConfirm is the #5138 readback, and it was already declared on
-	//    the RollingCluster interface right here in this file — it was simply
-	//    never wired into this, its other caller. Reusing it (rather than
-	//    open-coding a poll) also keeps the binary rolling cut and the LANE-1
-	//    kernel roll on ONE definition of "rejoined", which is the property the
-	//    external driver's never-both-down gate depends on.
+	//    The shared rejoinAndConfirm state machine supplies the #5138
+	//    readback; the exported RejoinAndConfirm used by the LANE-1 kernel
+	//    roll wraps the same core with its drain polling cadence. This path
+	//    supplies RollingConfig.PollInterval, keeping both rolling waits
+	//    on one definition of "rejoined", which the external driver's
+	//    never-both-down gate depends on.
 	//
 	//    The forward-verify is the natural post-promotion check the external
 	//    driver runs (controlled promotion, never while passive).
-	if err := RejoinAndConfirm(cl, rc.RejoinDeadline); err != nil {
+	if err := rejoinAndConfirm(cl, rc.RejoinDeadline, rc.PollInterval); err != nil {
 		return fmt.Errorf("rolling: local node did not rejoin election after the cut "+
 			"within %s — leaving it secondary; the driver MUST NOT advance to the peer "+
 			"(draining it would leave a redundancy group with no primary on either "+

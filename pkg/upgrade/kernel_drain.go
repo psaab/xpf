@@ -179,7 +179,18 @@ func sleepBounded(dl time.Time, interval time.Duration) {
 // table is incomplete: resetting first would let election promote it before
 // #10261's late bulk flow arrives.
 func RejoinAndConfirm(cl RollingCluster, deadline time.Duration) error {
+	return rejoinAndConfirm(cl, deadline, drainPollInterval)
+}
+
+// rejoinAndConfirm shares the bounded rejoin state machine with rolling
+// upgrades, whose RollingConfig supplies a testable and operator-selected poll
+// cadence. The deadline begins once and bounds both the bulk-prime wait and
+// the post-reset per-RG confirmation.
+func rejoinAndConfirm(cl RollingCluster, deadline, pollInterval time.Duration) error {
 	dl := time.Now().Add(deadline)
+	if pollInterval <= 0 {
+		pollInterval = drainPollInterval
+	}
 	var lastAErr, lastSErr, lastBErr, lastRErr error
 	timeout := func(alive, synced, bulkPrimed, rejoined bool) error {
 		base := fmt.Errorf("rejoin not confirmed within %s "+
@@ -208,10 +219,15 @@ func RejoinAndConfirm(cl RollingCluster, deadline time.Duration) error {
 	// transport, and the actual inbound BulkEnd before allowing election to
 	// resume. LocalRejoinComplete is intentionally not queried yet: reset has
 	// not been requested and false is expected.
+	var alive, synced, bulkPrimed bool
 	for {
-		alive, aerr := cl.PeerAlive()
-		synced, serr := cl.SyncEstablished()
-		bulkPrimed, berr := cl.SessionSyncBulkPrimed()
+		if !time.Now().Before(dl) {
+			return timeout(alive, synced, bulkPrimed, false)
+		}
+		var aerr, serr, berr error
+		alive, aerr = cl.PeerAlive()
+		synced, serr = cl.SyncEstablished()
+		bulkPrimed, berr = cl.SessionSyncBulkPrimed()
 		if aerr == nil && serr == nil && berr == nil && alive && synced && bulkPrimed {
 			break
 		}
@@ -226,10 +242,7 @@ func RejoinAndConfirm(cl RollingCluster, deadline time.Duration) error {
 		} else if !bulkPrimed {
 			lastBErr = fmt.Errorf("session-sync inbound bulk prime not complete")
 		}
-		if time.Now().After(dl) {
-			return timeout(alive, synced, bulkPrimed, false)
-		}
-		sleepBounded(dl, drainPollInterval)
+		sleepBounded(dl, pollInterval)
 	}
 
 	// Phase 2: only now clear the hold, then confirm every configured RG has
@@ -237,11 +250,16 @@ func RejoinAndConfirm(cl RollingCluster, deadline time.Duration) error {
 	if err := cl.ResetFailover(); err != nil {
 		return fmt.Errorf("reset failover: %w", err)
 	}
+	var rejoined bool
 	for {
-		alive, aerr := cl.PeerAlive()
-		synced, serr := cl.SyncEstablished()
-		bulkPrimed, berr := cl.SessionSyncBulkPrimed()
-		rejoined, rerr := cl.LocalRejoinComplete()
+		if !time.Now().Before(dl) {
+			return timeout(alive, synced, bulkPrimed, rejoined)
+		}
+		var aerr, serr, berr, rerr error
+		alive, aerr = cl.PeerAlive()
+		synced, serr = cl.SyncEstablished()
+		bulkPrimed, berr = cl.SessionSyncBulkPrimed()
+		rejoined, rerr = cl.LocalRejoinComplete()
 		if aerr == nil && serr == nil && berr == nil && rerr == nil &&
 			alive && synced && bulkPrimed && rejoined {
 			return nil
@@ -260,9 +278,6 @@ func RejoinAndConfirm(cl RollingCluster, deadline time.Duration) error {
 		if rerr != nil {
 			lastRErr = rerr
 		}
-		if time.Now().After(dl) {
-			return timeout(alive, synced, bulkPrimed, rejoined)
-		}
-		sleepBounded(dl, drainPollInterval)
+		sleepBounded(dl, pollInterval)
 	}
 }

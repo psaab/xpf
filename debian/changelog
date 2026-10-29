@@ -1,4 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Upgrade: configure the HA rolling rejoin deadline, defaulting to 180s
+    to cover the inbound session-sync bulk-prime retry window (#18415).
+
   * Dataplane: include live branch-stat and v6 proxy-NDP maps in the
     retained userspace-XDP shim allowlist with their BPF map types
     (#18390).

@@ -804,10 +804,12 @@ state machines are untouched.
    including any failure while resuming a ROLLINGBACK journal, which counts
    as stop-attempted even when this run has not STOPped yet (#12175).
 6. wait for session sync to re-establish, bounded by `RejoinDeadline`
-   (60s default). The cut just restarted xpfd, so the local gRPC socket
-   refuses connections for the first few seconds — that `connection
-   refused` is the EXPECTED transient, treated as "not ready yet" and
-   re-polled until the deadline (NOT a hard abort on the first dial
+   (180s default, adjustable with `--rejoin-deadline`). The daemon can
+   retry inbound bulk prime for about 150s (10s, 20s, then 30s four more
+   times); the default adds 30s of grace. The cut just restarted xpfd, so
+   the local gRPC socket refuses connections for the first few seconds —
+   that `connection refused` is the EXPECTED transient, treated as "not ready
+   yet" and re-polled until the deadline (NOT a hard abort on the first dial
    error). Only the deadline aborts, surfacing the last observed error;
    the node is then left secondary for the operator to inspect.
 7. `ResetFailover()` to rejoin election, then a **per-RG rejoin confirm**

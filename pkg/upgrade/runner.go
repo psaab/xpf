@@ -136,6 +136,9 @@ type Config struct {
 	// binary channel. Defaults to /var/lib/xpf/binary-floor.
 	BinaryFloorPath string
 	Unit            string
+	// RejoinDeadline bounds the HA rolling rejoin wait, including inbound
+	// session-sync bulk prime. Zero uses DefaultRejoinDeadline.
+	RejoinDeadline time.Duration
 	// NodeIDPath is the cluster-identity marker file (#5284). Its PRESENCE
 	// gates the uncoordinated standalone cut: a clustered node must be
 	// upgraded via RunRolling, so Runner.Run refuses the standalone
@@ -183,6 +186,9 @@ func (c *Config) withDefaults() {
 	}
 	if c.Unit == "" {
 		c.Unit = DefaultUnit
+	}
+	if c.RejoinDeadline == 0 {
+		c.RejoinDeadline = DefaultRejoinDeadline
 	}
 	if c.NodeIDPath == "" {
 		c.NodeIDPath = DefaultNodeIDFile
