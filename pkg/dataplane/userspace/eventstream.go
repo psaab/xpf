@@ -1934,10 +1934,17 @@ func decodeSessionEvent(payload []byte) (SessionDeltaInfo, bool) {
 							off += 4
 							// #16217: trailing per-direction packet
 							// counters (u64 LE each), length-gated.
-							// An old helper omits them => 0 (no evidence).
 							if off+16 <= len(payload) {
 								d.FwdPackets = binary.LittleEndian.Uint64(payload[off : off+8])
 								d.RevPackets = binary.LittleEndian.Uint64(payload[off+8 : off+16])
+								off += 16
+								// #17780: a trailing byte explicitly states
+								// the app-timeout/log pair. Only the known
+								// value 1 is present; absent or unknown values
+								// remain stamp-less for backward compatibility.
+								if off < len(payload) {
+									d.AppTimeoutLogStated = payload[off] == 1
+								}
 							}
 						}
 					}

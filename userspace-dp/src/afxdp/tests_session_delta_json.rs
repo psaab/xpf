@@ -141,10 +141,21 @@ fn session_delta_info_carries_rt_flow_session_id_6312() {
 #[test]
 fn session_delta_info_carries_live_counters_16217() {
     let mut delta = delta_with_session_id(42);
-    delta.counters = SessionCounters { fwd_packets: 111, fwd_bytes: 0, rev_packets: 222, rev_bytes: 0 };
+    delta.counters = SessionCounters {
+        fwd_packets: 111,
+        fwd_bytes: 0,
+        rev_packets: 222,
+        rev_bytes: 0,
+    };
     let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
-    assert_eq!(info.fwd_packets, 111, "#16217: JSON leg must carry fwd count");
-    assert_eq!(info.rev_packets, 222, "#16217: JSON leg must carry rev count");
+    assert_eq!(
+        info.fwd_packets, 111,
+        "#16217: JSON leg must carry fwd count"
+    );
+    assert_eq!(
+        info.rev_packets, 222,
+        "#16217: JSON leg must carry rev count"
+    );
     let wire = serde_json::to_value(&info).expect("serialize delta info");
     assert_eq!(wire["fwd_packets"], 111);
     assert_eq!(wire["rev_packets"], 222);
@@ -281,6 +292,8 @@ struct BinaryAttribution {
     ingress_vlan_id: u16,
     policy_counter_idx: u32,
     app_timeout: u32,
+    app_timeout_log_stated: bool,
+    log_flags: u8,
     nat64: bool,
     nat64_snat_v4: String,
     /// #7188: session-identity discriminator, carried before routing domain
@@ -306,12 +319,10 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
     let payload = &frame.as_bytes()[FRAME_HEADER_SIZE..];
     // The fixed close/install/ICMP/ingress tail precedes the length-prefixed
     // rule ID. After the ID the encoder appends handshake (1), provenance (1),
-    // the PPTP pair (8), the #15176 NAT-scope ifindex (4) and the #16217
-    // packet counters (8+8) — 30 trailer bytes in total (#16215 extended the
-    // #14839 reservation; the stale `- 6` here predates it and read the
-    // provenance byte as the length prefix). The sibling codec tests
-    // (`session_open_rule_id_at_capacity_boundary_14839`) pin the same 30.
-    const RULE_ID_TRAILER_BYTES: usize = 30;
+    // the PPTP pair (8), #15176 NAT-scope ifindex (4), #16217 packet counters
+    // (8+8), and #17780's explicit app-timeout/log presence byte — 31 trailer
+    // bytes in total.
+    const RULE_ID_TRAILER_BYTES: usize = 1 + 1 + 8 + 4 + 8 + 8 + 1;
     let expected_rule_id = delta
         .metadata
         .policy_counter
@@ -365,6 +376,8 @@ fn binary_attribution(delta: &SessionDelta) -> BinaryAttribution {
         ),
         policy_counter_idx: u32_at(n - 32),
         app_timeout: u32_at(n - 28),
+        app_timeout_log_stated: payload[payload.len() - 1] == 1,
+        log_flags: payload[26] & ((1 << 3) | (1 << 4)),
         nat64: payload[26] & FLAG_NAT64 != 0,
         nat64_snat_v4: if snat == [0, 0, 0, 0] {
             String::new()
@@ -477,6 +490,11 @@ fn session_delta_json_and_binary_agree_on_policy_attribution_6949() {
          ages on the global per-protocol timeout instead"
     );
     assert_eq!(
+        v.get("app_timeout_log_stated").and_then(|x| x.as_bool()),
+        Some(want.app_timeout_log_stated),
+        "the JSON and binary legs disagree on explicit app-timeout/log presence"
+    );
+    assert_eq!(
         v.get("nat64").and_then(|x| x.as_bool()).unwrap_or(false),
         want.nat64,
         "the two legs disagree on the NAT64 cross-family marker (#4565): {v}"
@@ -528,6 +546,10 @@ fn session_delta_json_and_binary_agree_on_policy_attribution_6949() {
          `not carried` tag and would make this agreement vacuous (#7188)"
     );
     assert_eq!(want.app_timeout, 1800, "binary leg converted ns -> s");
+    assert!(
+        want.app_timeout_log_stated,
+        "binary leg explicitly marked the pair"
+    );
     assert_eq!(want.nat64_snat_v4, "203.0.113.5", "binary leg carried snat");
     // ...and this really is the delta -> JSON conversion of THAT session.
     assert_eq!(info.src_port, 5001, "conversion produced the delta's tuple");
@@ -543,13 +565,19 @@ fn session_delta_json_and_binary_agree_on_policy_attribution_6949() {
 /// RED AT MASTER: the keys are absent, so `get()` returns `None`.
 #[test]
 fn session_delta_info_zero_attribution_is_present_not_absent_6949() {
-    // delta_with_session_id leaves policy_id / policy_counter_idx 0,
-    // inactivity_timeout_ns None and the NatDecision default (no NAT64).
-    let info = session_delta_info(
-        &test_binding_identity(),
-        &delta_with_session_id(1),
-        &zone_names(),
+    // delta_with_session_id leaves policy metadata and the app timeout at 0.
+    let delta = delta_with_session_id(1);
+    let want = binary_attribution(&delta);
+    assert_eq!(want.app_timeout, 0);
+    assert_eq!(
+        want.log_flags, 0,
+        "binary leg carries stated zero log flags"
     );
+    assert!(
+        want.app_timeout_log_stated,
+        "binary leg explicitly marked the zero pair"
+    );
+    let info = session_delta_info(&test_binding_identity(), &delta, &zone_names());
     let v: serde_json::Value = serde_json::to_value(&info).expect("serialize SessionDeltaInfo");
     // #7188 is deliberately NOT in this list: its `0` is the RESERVED
     // "not carried" tag, not a legitimate value, so it is asserted NON-zero by
@@ -563,6 +591,19 @@ fn session_delta_info_zero_attribution_is_present_not_absent_6949() {
              absent — absent is indistinguishable from the dropped-field defect: {v}"
         );
     }
+    assert_eq!(
+        v.get("app_timeout_log_stated").and_then(|x| x.as_bool()),
+        Some(want.app_timeout_log_stated),
+        "the zero app-timeout/log pair must have an explicit presence marker on both legs"
+    );
+    assert_eq!(
+        v.get("log_session_init").and_then(|x| x.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        v.get("log_session_close").and_then(|x| x.as_bool()),
+        Some(false)
+    );
     assert_eq!(
         v.get("nat64").and_then(|x| x.as_bool()),
         Some(false),
@@ -629,8 +670,8 @@ fn sync_attribution_exhaustive_destructure_6949() {
     expected.sort();
     assert_eq!(
         expected.len(),
-        8,
-        "expected the seven HA-carried attribution fields, parsed {expected:?}"
+        9,
+        "expected the eight HA-carried attribution fields plus the #17780 pair-presence marker, parsed {expected:?}"
     );
 
     for producer in [

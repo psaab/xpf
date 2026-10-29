@@ -493,6 +493,10 @@ type SessionValue struct {
 	// PrimaryLiveness marks a low-rate liveness refresh of an existing
 	// session. It is sync-only and never part of the BPF/C conntrack ABI.
 	PrimaryLiveness bool `json:"-"`
+	// AppTimeoutLogStated (#17780) marks the app-timeout/log-flags pair as
+	// explicitly carried by the source, including a stated (0,0). It is
+	// sync-only, length-gated on the HA wire, and never part of the BPF/C ABI.
+	AppTimeoutLogStated bool `json:"-"`
 }
 
 // SessionKeyV6 mirrors the C struct session_key_v6 (5-tuple with 128-bit IPs).
@@ -907,6 +911,9 @@ type SessionValueV6 struct {
 	PolicyRuleID string `json:"-"`
 	// PrimaryLiveness is the sync-only v6 twin of the v4 liveness marker.
 	PrimaryLiveness bool `json:"-"`
+	// AppTimeoutLogStated (#17780) is the v6 twin of the sync-only presence
+	// marker on SessionValue; never part of the BPF/C ABI.
+	AppTimeoutLogStated bool `json:"-"`
 }
 
 // ZoneConfig mirrors the C struct zone_config.

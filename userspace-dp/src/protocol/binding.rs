@@ -1627,6 +1627,11 @@ pub(crate) struct SessionDeltaInfo {
     /// quantity on the install leg.
     #[serde(rename = "app_timeout", default)]
     pub app_timeout: u32,
+    /// #17780: explicitly states that both app-timeout and log flags are
+    /// carried, even when both are zero. Missing from old helpers; Go treats
+    /// absent or unknown markers as stamp-less for backward compatibility.
+    #[serde(rename = "app_timeout_log_stated", default)]
+    pub app_timeout_log_stated: bool,
     /// #4565 NAT64 cross-family marker + the translated pool SOURCE (dotted
     /// quad, "" when not NAT64). `nat64_snat_v4` is the one datum the standby
     /// cannot reconstruct from the synced forward v6 key, so without it a NAT64

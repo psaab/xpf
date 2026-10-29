@@ -3,6 +3,10 @@ xpf (0.0.0) unstable; urgency=medium
     Go-generated fixture the Rust parser test consumes end to end
     (follow-up to #18485).
 
+  * Cluster: carry app-timeout/log pair presence separately from the values so
+    a stated (0,0) correction remains authoritative across stamp-less resends
+    (#17780).
+
   * IPsec: assign gateway and inline connection names from one collision-free
     namespace so tolerant renders preserve every peer even when a gateway is
     named `inline-<name>`; keep non-colliding connection names stable (#17731).

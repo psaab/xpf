@@ -353,6 +353,7 @@ pub(in crate::afxdp) fn session_delta_info(
         policy_rule_id,
         policy_counter_idx,
         inactivity_timeout_secs,
+        app_timeout_log_stated,
         nat64,
         nat64_snat_v4,
         source_nat_icmp,
@@ -463,9 +464,10 @@ pub(in crate::afxdp) fn session_delta_info(
         // id 0 is skipped there), no per-rule hit counter, and the global idle
         // timeout instead of its per-application one.
         policy_id,
-        policy_counter_idx,
         policy_rule_id: policy_rule_id.to_string(),
+        policy_counter_idx,
         app_timeout: inactivity_timeout_secs,
+        app_timeout_log_stated,
         // #6949/#4565: without the pool source a NAT64 session promoted from
         // this leg cannot rebuild its reverse v4->v6 BIB at all — the standby
         // cannot derive it from the synced forward v6 key.
@@ -1167,7 +1169,10 @@ pub(super) fn flush_session_deltas(
             }
         }
         if !telemetry_only_seed {
-            push_recent_session_delta(&mut crate::sync_util::lock_tolerant(recent_session_deltas), info);
+            push_recent_session_delta(
+                &mut crate::sync_util::lock_tolerant(recent_session_deltas),
+                info,
+            );
         }
     }
     // #5468: propagate this batch's wedge into the per-drain-cycle latch so the

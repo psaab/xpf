@@ -856,7 +856,7 @@ type sessionStampView interface {
 	stampInstallTable() (*uint32, *uint32)
 	stampSourceNatICMP() (*bool, *uint8, *uint8)
 	stampPolicyIdentity() (*string, *uint32)
-	stampAppTimeoutLog() (*uint32, *uint8)
+	stampAppTimeoutLog() (*uint32, *uint8, *bool)
 }
 
 type sessionValueView struct{ v *dataplane.SessionValue }
@@ -874,8 +874,8 @@ func (w sessionValueView) stampSourceNatICMP() (*bool, *uint8, *uint8) {
 func (w sessionValueView) stampPolicyIdentity() (*string, *uint32) {
 	return &w.v.PolicyRuleID, &w.v.PolicyCounterIdx
 }
-func (w sessionValueView) stampAppTimeoutLog() (*uint32, *uint8) {
-	return &w.v.AppTimeout, &w.v.LogFlags
+func (w sessionValueView) stampAppTimeoutLog() (*uint32, *uint8, *bool) {
+	return &w.v.AppTimeout, &w.v.LogFlags, &w.v.AppTimeoutLogStated
 }
 
 type sessionValueV6View struct{ v *dataplane.SessionValueV6 }
@@ -893,8 +893,8 @@ func (w sessionValueV6View) stampSourceNatICMP() (*bool, *uint8, *uint8) {
 func (w sessionValueV6View) stampPolicyIdentity() (*string, *uint32) {
 	return &w.v.PolicyRuleID, &w.v.PolicyCounterIdx
 }
-func (w sessionValueV6View) stampAppTimeoutLog() (*uint32, *uint8) {
-	return &w.v.AppTimeout, &w.v.LogFlags
+func (w sessionValueV6View) stampAppTimeoutLog() (*uint32, *uint8, *bool) {
+	return &w.v.AppTimeout, &w.v.LogFlags, &w.v.AppTimeoutLogStated
 }
 
 // scopedKeyOf/scopedKeyOfV6 build the scoped sender keys; plain
@@ -1025,19 +1025,20 @@ func stampInstallGen[K comparable, SK comparable](
 		}
 		s.genState.recvGenMu.Unlock()
 	}
-	// #16700: per-app timeout (incl. 86401 never) and then-log flags;
-	// restore last sent / received on a stamp-less mirror resend.
-	appTimeout, logFlags := view.stampAppTimeoutLog()
+	// #16700/#17780: preserve the per-app timeout and then-log pair. A
+	// presence marker distinguishes stated (0,0) from a legacy stamp-less
+	// resend; non-zero values remain self-describing for old peers.
+	appTimeout, logFlags, stated := view.stampAppTimeoutLog()
 	if *appTimeoutLogSent == nil {
 		*appTimeoutLogSent = make(map[K]appTimeoutLogMemo)
 	}
-	if !stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, s.sentCap()) && s.growSentCap() {
-		stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, s.sentCap())
+	if !stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, stated, s.sentCap()) && s.growSentCap() {
+		stampAppTimeoutLogLocked(*appTimeoutLogSent, key, sessionID, appTimeout, logFlags, stated, s.sentCap())
 	}
-	if *appTimeout == 0 && *logFlags == 0 && sessionID != 0 {
+	if *appTimeout == 0 && *logFlags == 0 && !*stated && sessionID != 0 {
 		s.genState.recvGenMu.Lock()
-		if at, lf, ok := lookupAppTimeoutLogLocked(*appTimeoutLogRecv, key, sessionID); ok {
-			*appTimeout, *logFlags = at, lf
+		if at, lf, ok, recorded := lookupAppTimeoutLogLocked(*appTimeoutLogRecv, key, sessionID); ok {
+			*appTimeout, *logFlags, *stated = at, lf, recorded
 		}
 		s.genState.recvGenMu.Unlock()
 	}
@@ -1803,8 +1804,8 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	if s.genState.appTimeoutLogRecvV4 == nil {
 		s.genState.appTimeoutLogRecvV4 = make(map[dataplane.SessionKey]appTimeoutLogMemo)
 	}
-	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap()) && s.growRecvCap() {
-		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap())
+	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, &val.AppTimeoutLogStated, s.recvCap()) && s.growRecvCap() {
+		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV4, key, val.SessionID, &val.AppTimeout, &val.LogFlags, &val.AppTimeoutLogStated, s.recvCap())
 	}
 	s.genState.recvGenMu.Unlock()
 	err := s.sessions.PutClusterSyncedV4(key, val)
@@ -1871,8 +1872,8 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	if s.genState.appTimeoutLogRecvV6 == nil {
 		s.genState.appTimeoutLogRecvV6 = make(map[dataplane.SessionKeyV6]appTimeoutLogMemo)
 	}
-	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap()) && s.growRecvCap() {
-		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, s.recvCap())
+	if !stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, &val.AppTimeoutLogStated, s.recvCap()) && s.growRecvCap() {
+		stampAppTimeoutLogLocked(s.genState.appTimeoutLogRecvV6, key, val.SessionID, &val.AppTimeout, &val.LogFlags, &val.AppTimeoutLogStated, s.recvCap())
 	}
 	s.genState.recvGenMu.Unlock()
 	err := s.sessions.PutClusterSyncedV6(key, val)
