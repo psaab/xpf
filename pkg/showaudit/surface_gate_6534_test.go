@@ -32,6 +32,11 @@ type family struct {
 	// PortMirroring; for ... range pm.Instances` matches
 	// "PortMirroring.Instances").
 	Collections []string
+	// CollectionHelpers are exact function IDs for map builders that iterate a
+	// family collection without emitting a surface value. Callers of only
+	// these declared helpers can join the census; arbitrary call-graph
+	// traversal would admit unrelated command and metrics entry points.
+	CollectionHelpers []string
 
 	// BuilderPredicates are the pkg/config drop predicates the SNAPSHOT
 	// BUILDER consults. TestEveryBuilderDropPredicateIsRegistered6534 asserts
@@ -107,6 +112,7 @@ var exemptRenderers = map[string]string{
 	"pkg/grpcapi/server_show_security_text.go:showSecurityLog":           "#10530 — event-time zone names are historical; current config must not rewrite them",
 	"pkg/api/api.go:interfaceZoneMap":                                    "#16556 adjacency — internal interface->zone lookup emits no zone value; consumers annotate",
 	"pkg/api/metrics_counters.go:collectZoneCounters":                    "#16556 adjacency — per-zone counter gauge emits no interface membership",
+	"pkg/api/metrics_counters.go:collectInterfaceCounters":             "#17691 adjacency — per-interface metrics enumerate links but emit no zone disposition",
 	"pkg/cli/cli_show_nat.go:showNATDestinationSummary":                  "#16556 adjacency — NAT summary resolves zone IDs to names, emits no interface membership",
 	"pkg/cli/cli_show_nat.go:showNATSourceSummary":                       "#16556 adjacency — NAT summary resolves zone IDs to names, emits no interface membership",
 	"pkg/cli/cli_show_security_screen.go:showScreen":                     "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
@@ -240,6 +246,10 @@ var families = []family{
 		// surfaces so either representation cannot silently lie.
 		Name:              "security zone",
 		Collections:       []string{"Security.Zones", "ZoneIDs"},
+		CollectionHelpers: []string{
+			"pkg/api/api.go:allInterfaceNames",
+			"pkg/api/api.go:interfaceZoneMap",
+		},
 		BuilderPredicates: []string{"ZoneQuarantineExclusions"},
 		SurfacePredicates: []string{"ZoneQuarantineExclusions", "ZoneQuarantineExcludedReason"},
 		Unannotated:       nil, // every remaining census member is annotated or exempted above
@@ -410,14 +420,23 @@ func TestSurfaceAnnotationCensusIsExact6534(t *testing.T) {
 				for _, key := range pkg.order {
 					rec := pkg.funcs[key]
 					// Population = every non-test function in a surface package
-					// that ITERATES this family's config collection. There is
-					// deliberately no "and prints text" filter: the REST and
-					// gRPC handlers serve the same objects as JSON and protobuf,
-					// and a rule serialised without a not-installed field is the
-					// same lie as one printed without an annotation. Anything
-					// that touches the collection for a non-enforcement reason
-					// belongs in exemptRenderers, with the reason written down.
-					if !rangesOverAny(pkg.fset, rec.fd, f.Collections) {
+					// that ITERATES this family's config collection, directly
+					// or through a same-package helper it calls (#17691).
+					// There is deliberately no "and prints text" filter: the
+					// REST and gRPC handlers serve the same objects as JSON
+					// and protobuf, and a rule serialised without a
+					// not-installed field is the same lie as one printed
+					// without an annotation. Anything that touches the
+					// collection for a non-enforcement reason belongs in
+					// exemptRenderers, with the reason written down.
+					//
+					// The helper hop matters: writeInterfacesDetail obtains
+					// zones only via interfaceZoneMap/allInterfaceNames, so
+					// an own-AST-only scan never admitted it and deleting
+					// its ZoneQuarantineExcludedReason qualifier could not
+					// red this census (#16659's named mutation).
+					if !rangesOverAny(pkg.fset, rec.fd, f.Collections) &&
+						!callsCollectionBuildingHelper(pkg, key, dir, f.CollectionHelpers, f.Collections) {
 						continue
 					}
 					id := dir + "/" + filepath.Base(rec.file) + ":" + rec.fd.Name.Name
@@ -769,6 +788,28 @@ func sortedKeys[V any](m map[string]V) []string {
 func contains(hay []string, needle string) bool {
 	for _, h := range hay {
 		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// callsCollectionBuildingHelper recognizes callers of the explicitly listed
+// map-building helpers that iterate a family's config collections. This narrow
+// bridge admits writeInterfacesDetail without treating every call to a
+// collection reader as a renderer.
+func callsCollectionBuildingHelper(p *parsedPkg, key, dir string, helperIDs, collections []string) bool {
+	rec := p.funcs[key]
+	if rec == nil {
+		return false
+	}
+	for _, callee := range calleeNames(rec.fd) {
+		helper := p.funcs[callee]
+		if helper == nil {
+			continue
+		}
+		id := dir + "/" + filepath.Base(helper.file) + ":" + helper.fd.Name.Name
+		if contains(helperIDs, id) && rangesOverAny(p.fset, helper.fd, collections) {
 			return true
 		}
 	}

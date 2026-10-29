@@ -61,6 +61,23 @@ func TestRenderSourceRuleDetailInterfaceQuarantinePair16659(t *testing.T) {
 		t.Fatalf("contested pair rendered measured count:\n%s", out)
 	}
 
+	// Mixed: the contested member is unusable, but each zone retains a
+	// uniquely claimed interface through which the zone-pair tally is measured.
+	mixed := mk(map[string][]string{
+		"trust":   {"ge-0/0/0.0", "ge-0/0/2.0"},
+		"untrust": {"ge-0/0/0.0", "ge-0/0/1.0"},
+	})
+	if got := config.ZoneInterfaceQuarantineReason(mixed, "trust", "ge-0/0/0.0"); got == "" {
+		t.Fatalf("premise: mixed contested member reason empty, want quarantine verdict")
+	}
+	var m strings.Builder
+	RenderSourceRuleDetail(context.Background(), &m, mixed, dp, func() *dataplane.ApplyResult { return cr })
+	if !strings.Contains(m.String(), "Rule-set rs-src: sessions for this zone pair: 1") {
+		t.Fatalf("mixed pair lost measured count:\n%s", m.String())
+	}
+	if strings.Contains(m.String(), config.ZoneQuarantineLiveCountersUnavailable) {
+		t.Fatalf("mixed pair rendered UNAVAILABLE despite healthy members:\n%s", m.String())
+	}
 	// Control: each interface claimed by exactly one zone.
 	control := mk(map[string][]string{
 		"trust":   {"ge-0/0/0.0"},

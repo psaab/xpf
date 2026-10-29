@@ -274,22 +274,27 @@ func renderSourceRuleDetail(ctx context.Context, w io.Writer, cfg *config.Config
 		// would claim an idle rule-set that was never measured; render
 		// n/a instead. Zone-scoped pairs keep the measured number.
 		zoneScoped := NATRuleSetZoneScoped(rs, false)
-		// #16659/#16556: a duplicate-membership quarantined interface is
-		// bound to neither claimant, so sessions through it never carry
-		// this zone pair; the measured count would present an unmeasured
-		// pair as idle. Inline the per-member verdict here (not a helper
-		// ranging Security.Zones) so this renderer itself consults it.
+		// #17691: duplicate-membership members bind to neither claimant, but
+		// a zone pair can still carry measured sessions through its surviving
+		// members. Suppress the tally only when either zone has no surviving
+		// member; marking a mixed healthy/quarantined zone pair UNAVAILABLE
+		// hides a real zone-pair aggregate.
 		interfaceQuarantinedPair := false
 		if zoneScoped {
 			for _, zoneName := range []string{rs.FromZone, rs.ToZone} {
 				zone := cfg.Security.Zones[zoneName]
-				if zone == nil {
+				if zone == nil || len(zone.Interfaces) == 0 {
 					continue
 				}
+				allInterfacesQuarantined := true
 				for _, ifName := range zone.Interfaces {
-					if config.ZoneInterfaceQuarantineReason(cfg, zoneName, ifName) != "" {
-						interfaceQuarantinedPair = true
+					if config.ZoneInterfaceQuarantineReason(cfg, zoneName, ifName) == "" {
+						allInterfacesQuarantined = false
+						break
 					}
+				}
+				if allInterfacesQuarantined {
+					interfaceQuarantinedPair = true
 				}
 			}
 		}
