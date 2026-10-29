@@ -647,7 +647,18 @@ func cloneBookForDNSRefresh(b *AddressBook) *AddressBook {
 	return &out
 }
 
-// DNSAnswersSnapshot returns identity->prefixes for every dns-name entry,
+// DNSAnswerState is one dns-name entry's runtime DNS state: its current
+// prefixes (in order) and whether the latest resolution attempt failed
+// (DNSLookupFailed). Both consumers that compare runtime DNS state MUST
+// see the failure flag: a successful empty answer and a failed lookup
+// retaining an empty (or stale) answer have different enforcement
+// semantics (#16595, #17723).
+type DNSAnswerState struct {
+	Prefixes        []string
+	DNSLookupFailed bool
+}
+
+// DNSAnswersSnapshot returns identity->DNS state for every dns-name entry,
 // using the same scoped identities as the daemon refresher (#16606): the
 // global book, each named book, and each zone-local book (including the
 // folded zone-local/<zone>/<name> copies in the global book, which carry
@@ -657,9 +668,12 @@ func cloneBookForDNSRefresh(b *AddressBook) *AddressBook {
 // two cannot drift on scope or ordering. Prefix slices are copied.
 // Ordering within an entry is preserved (resolver order); callers that
 // compare snapshots must treat order as significant, matching the
-// refresher's change detection.
-func DNSAnswersSnapshot(cfg *Config) map[string][]string {
-	out := map[string][]string{}
+// refresher's change detection. The DNSLookupFailed flag is part of the
+// compared state (#17723): dropping it would make a failure-only
+// transition (successful empty -> SERVFAIL, or SERVFAIL -> successful
+// empty, with unchanged prefixes) compare equal and never publish.
+func DNSAnswersSnapshot(cfg *Config) map[string]DNSAnswerState {
+	out := map[string]DNSAnswerState{}
 	if cfg == nil {
 		return out
 	}
@@ -669,7 +683,10 @@ func DNSAnswersSnapshot(cfg *Config) map[string][]string {
 		}
 		for name, a := range b.Addresses {
 			if a != nil && a.DNSName != "" {
-				out[dnsIdentityKey(scope, name)] = append([]string(nil), a.DNSAddresses...)
+				out[dnsIdentityKey(scope, name)] = DNSAnswerState{
+					Prefixes:        append([]string(nil), a.DNSAddresses...),
+					DNSLookupFailed: a.DNSLookupFailed,
+				}
 			}
 		}
 	}

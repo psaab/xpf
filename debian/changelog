@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: include `DNSLookupFailed` in DNS refresh baselines and hybrid
+    publication guards, publishing failure-only transitions without
+    mistaking them for successful empty answers (#17723).
+
   * Config: compare duplicate source-NAT contexts after applied groups so
     inherited scopes, not raw inline fragments, decide effective from/to
     equality (#17712).
