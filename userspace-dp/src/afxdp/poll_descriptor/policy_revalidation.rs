@@ -1347,7 +1347,7 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     {
         return None;
     }
-    // #16215 (third shape): a peer-synced row whose STORED resolution is
+    // #16215 (third shape): a row whose STORED resolution is
     // FabricRedirect names the fabric pseudo-egress (the fabric parent
     // ifindex, e.g. 4 for fab0@ge-0-0-0) as its egress. That ifindex has
     // no EgressInterface row, zone pair, or SNAT geometry, so judging it
@@ -1357,19 +1357,31 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // provenance Some(false)). The fabric leg's NAT validity is judged
     // on the egress owner when the packet arrives there; here the row
     // carries no local egress verdict to judge against, so DECLINE like
-    // the terminal decline above. This covers rows demoted/retagged to
-    // SyncImport by DemoteOwnerRGS as well as true peer imports, and it
-    // applies regardless of failover timing (the live revocations fired
-    // in the pre-failover demote/republish window). A genuinely
-    // withdrawn SNAT rule still revokes once the row gains a real
-    // egress resolution (live or re-resolved) and runs the full
-    // geometry check below; locally-authored rows are judged as before.
-    if forward_origin.is_peer_synced()
-        && matches!(
-            forward_decision.resolution.disposition,
-            ForwardingDisposition::FabricRedirect
-        )
-    {
+    // the terminal decline above. It applies regardless of failover
+    // timing (the live revocations fired in the pre-failover
+    // demote/republish window). A genuinely withdrawn SNAT rule still
+    // revokes once the row gains a real egress resolution (live or
+    // re-resolved) and runs the full geometry check below, and the
+    // egress owner's synced copy (real egress) is judged on every
+    // redirected packet that reaches it.
+    //
+    // #18531: keyed on the RESOLUTION, not the origin. #16215 gated it on
+    // `is_peer_synced()`, but the stored FabricRedirect means the same
+    // thing whoever authored the row. The live miss: a split-RG failback
+    // (RG1/WAN to the peer, RG2/LAN kept). `update_ha_state` publishes the
+    // inactive RG1 before the workers drain `DemoteOwnerRGS`. So the
+    // serving worker's first LAN packet after the RG epoch bump hits its
+    // crash-takeover `SharedPromote` row before the demote retags it to
+    // `SyncImport`, re-resolves and persists FabricRedirect (#12265),
+    // and finds the SNAT judgment Stale. Each kernel neighbor batch
+    // advances the #16109 generation while the flow cache serves the row.
+    // The origin gate sent that established flow to the egress-miss
+    // revocation. The pair and its Close went to the new WAN owner, which
+    // deleted its live copy.
+    if matches!(
+        forward_decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect
+    ) {
         return None;
     }
     // #16215: judge the packet's re-resolved decision, not a stored

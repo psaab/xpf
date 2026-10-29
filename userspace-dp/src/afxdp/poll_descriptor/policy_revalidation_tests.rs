@@ -7664,13 +7664,18 @@ fn demoted_local_snat_terminal_row_declines_on_old_owner_16215() {
 /// absent from `forwarding.egress`) must DECLINE on a forward hit — the
 /// fabric leg's NAT validity is judged on the egress owner, not here.
 /// Pre-fix the first validator check (`forwarding.egress.get(&4)` miss)
-/// revoked unconditionally. A locally-authored FabricRedirect row keeps
-/// the old fail-closed answer, and a peer-synced row that gains a REAL
-/// egress resolution still revokes when its SNAT rule is withdrawn.
+/// revoked unconditionally. A peer-synced row that gains a REAL egress
+/// resolution still revokes when its SNAT rule is withdrawn.
+///
+/// #18531: the decline is keyed on the stored resolution, not the origin.
+/// A locally-authored (`SharedPromote`) row with the same stored
+/// FabricRedirect declines too: it is the split-RG failback shape, a
+/// crash-takeover promotion hit after the RG1 demotion published and
+/// before `DemoteOwnerRGS` retagged it.
 ///
 /// RED-on-revert: removing the FabricRedirect decline revokes the first
-/// cell (fabric-ifindex egress miss); widening it to local origins
-/// revokes the control the wrong way (it must stay Some).
+/// cell (fabric-ifindex egress miss); re-gating it on `is_peer_synced()`
+/// revokes the `SharedPromote` cell (#18531).
 #[test]
 fn peer_synced_fabric_redirect_snat_declines_16215() {
     let zones = rustc_hash::FxHashMap::from_iter([("lan".to_string(), 1), ("wan".to_string(), 2)]);
@@ -7746,14 +7751,45 @@ fn peer_synced_fabric_redirect_snat_declines_16215() {
         "the peer-synced FabricRedirect row must survive its forward hit"
     );
 
-    // Control (scope guard): the decline is peer-synced-only. Pin the
-    // predicate the validator reads (entry origin) directly: local
-    // origins must NOT satisfy it, so a locally-authored row with this
-    // shape can never take the new decline.
-    assert!(origin.is_peer_synced());
-    assert!(!SessionOrigin::ForwardFlow.is_peer_synced());
-    assert!(!SessionOrigin::LocalMiss.is_peer_synced());
-    assert!(!SessionOrigin::ReverseFlow.is_peer_synced());
+    // #18531: the same stored FabricRedirect on a locally-authored row
+    // (the crash-takeover `SharedPromote` on the LAN node at a split-RG
+    // failback) names no local egress either, so it declines too.
+    let mut local_sessions = SessionTable::new();
+    local_sessions.set_forwarding_revalidation_gen(1, 1);
+    assert!(local_sessions.upsert_synced_with_origin(
+        SyncedSessionEntry {
+            decision: fabric_decision,
+            origin: SessionOrigin::SharedPromote,
+            ..synced.clone()
+        }
+        .into_session_install(1),
+        true
+    ));
+    let (_, _, local_origin) = local_sessions
+        .entry_with_origin(&key)
+        .expect("fixture: local FabricRedirect row installed");
+    assert!(
+        !local_origin.is_peer_synced(),
+        "fixture: the row must be locally authored, got {local_origin:?}"
+    );
+    assert!(
+        source_nat_revocation_on_session_hit(
+            &forwarding,
+            &mut local_sessions,
+            &key,
+            &metadata,
+            fabric_decision,
+            &flow,
+            local_origin,
+            source_nat_static,
+            None,
+            1_000_000_000,
+            None,
+        )
+        .is_none(),
+        "a locally-authored FabricRedirect stored row must decline, not revoke (#18531)"
+    );
+    assert!(local_sessions.entry_with_origin(&key).is_some());
 
     // Withdrawn rule on a REAL-egress row still revokes: give the stored
     // row the real egress 12 resolution (the RefreshOwnerRGS rewrite

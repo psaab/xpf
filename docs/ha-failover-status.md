@@ -388,6 +388,34 @@ revocation only on a fresh decision's withdrawn translation, and
 as `xpf_userspace_snat_revoked_sessions_total`. Reverse hits never
 substitute the reply decision for the stored forward decision.
 
+**#18531: the `FabricRedirect` decline applies to every origin.** It was
+gated on `is_peer_synced()`, and a split-RG failback reaches it with a
+locally-authored row:
+
+1. RG1 (WAN) moves to the peer and RG2 (LAN) stays.
+2. `update_ha_state` publishes the inactive RG1 before the workers drain
+   `DemoteOwnerRGS`.
+3. The serving worker's first LAN packet after the RG-epoch flow-cache
+   invalidation hits its crash-takeover `SharedPromote` row. That row
+   has not been retagged yet.
+4. The packet re-resolves to `FabricRedirect` and persists it.
+5. The row's SNAT judgment is Stale. While the flow cache served the
+   row, every kernel neighbor batch advanced the #16109 neighbor
+   generation.
+
+The origin gate revoked the established pair. Its Close passed the
+daemon's fabric-redirect sync branch and deleted the new WAN owner's live
+copy.
+
+The decline now keys on the stored resolution alone. The egress owner's
+synced copy has a real egress and is still judged on every redirected
+packet, so a withdrawn translation still revokes there. The terminal
+(`DiscardRoute` / `ClusterTerminalHAInactive`) decline is still gated on
+peer-synced origin. Pinned by
+`afxdp::tests_split_rg_failback_18531` (production poll pipeline on the
+captured fw1 snapshot) and the `SharedPromote` cell of
+`peer_synced_fabric_redirect_snat_declines_16215`.
+
 ### Never-again gates
 
 - **Aged cell, not young cell.** The harness gate is

@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: keep established SNAT flows across a split-RG
+    failback. The source-NAT revalidation decline for a stored
+    FabricRedirect resolution now applies to locally-authored rows too
+    (#18531).
   * Dataplane: include live branch-stat and v6 proxy-NDP maps in the
     retained userspace-XDP shim allowlist with their BPF map types
     (#18390).
