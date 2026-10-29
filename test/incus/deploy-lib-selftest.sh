@@ -881,11 +881,11 @@ test_preflight_cleans_up_on_reject() {
 	rm -f "$lb"; teardown_fake_vm
 }
 
-# #9558: the two refusal arms must print DIFFERENT remediation. verify-dataplane
-# exits 3 ONLY for the #1864 kernel-verifier reject; every other refusal (for
-# example a live pinned-map ABI mismatch) exits 1, and "make generate" cannot fix
-# it. A presence check alone would pass the pre-fix wrapper, which printed the
-# #1864 text for BOTH, so the exit-1 cell asserts that remediation is ABSENT.
+# #9558: exit 3 is the #1864 kernel-verifier reject; legacy other refusals
+# (for example a live pinned-map ABI mismatch) exit 1, and "make generate"
+# cannot fix those. A presence check alone would pass the pre-fix wrapper,
+# which printed the #1864 text for BOTH, so the exit-1 cell asserts that
+# remediation is absent. #17769 adds distinct code-4/5 remediation cells below.
 test_preflight_verifier_reject_prescribes_1864_remediation() {
 	setup_fake_vm
 	local lb; lb=$(mktemp); make_local_bin "$lb" "BAD-SHIM"
@@ -898,6 +898,46 @@ test_preflight_verifier_reject_prescribes_1864_remediation() {
 		bad "preflight #9558: exit 3 must print the #1864 make-generate remediation; got: $out"
 	else
 		ok "preflight #9558: exit 3 (kernel-verifier REJECT) prints the #1864 make-generate remediation"
+	fi
+	rm -f "$lb"; teardown_fake_vm
+}
+
+test_preflight_low_headroom_prescribes_budget_remediation() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "LOW-HEADROOM-SHIM"
+	FAKE_VERIFY_RC=4
+	local out rc=0
+	out=$( ( deploy_verify_dataplane_preflight vm "$lb" ) 2>&1 ) || rc=$?
+	if [[ $rc -eq 0 ]]; then
+		bad "preflight #17769: exit 4 (LOW-HEADROOM) must hard-fail"
+	elif [[ "$out" != *"(exit 4)"* || "$out" != *"LOW-HEADROOM"* ||
+		"$out" != *"Free verifier headroom"* || "$out" != *"sufficient measured headroom"* ]]; then
+		bad "preflight #17769: exit 4 must prescribe measured headroom remediation; got: $out"
+	elif [[ "$out" == *"rebuilding the shim will not help"* || "$out" == *"stale pin cleared"* ]]; then
+		bad "preflight #17769: exit 4 received the unrelated generic/pinned-map remediation; got: $out"
+	else
+		ok "preflight #17769: exit 4 refuses with low-headroom remediation, not stale-pin advice"
+	fi
+	rm -f "$lb"; teardown_fake_vm
+}
+
+test_preflight_unmeasured_headroom_prescribes_measurement_remediation() {
+	setup_fake_vm
+	local lb; lb=$(mktemp); make_local_bin "$lb" "UNMEASURED-HEADROOM-SHIM"
+	FAKE_VERIFY_RC=5
+	local out rc=0
+	out=$( ( deploy_verify_dataplane_preflight vm "$lb" ) 2>&1 ) || rc=$?
+	if [[ $rc -eq 0 ]]; then
+		bad "preflight #17769: exit 5 (UNMEASURED-HEADROOM) must hard-fail"
+	elif [[ "$out" != *"(exit 5)"* || "$out" != *"UNMEASURED-HEADROOM"* ||
+		"$out" != *"processed-instruction count was unavailable"* ||
+		"$out" != *"kernel that reports processed-instruction counts"* ]]; then
+		bad "preflight #17769: exit 5 must prescribe restoring measurement; got: $out"
+	elif [[ "$out" == *"LOW-HEADROOM:"* || "$out" == *"Free verifier headroom"* ||
+		"$out" == *"rebuilding the shim will not help"* || "$out" == *"stale pin cleared"* ]]; then
+		bad "preflight #17769: exit 5 was confused with measured low headroom or generic refusal; got: $out"
+	else
+		ok "preflight #17769: exit 5 refuses with measurement remediation, not low-headroom/stale-pin advice"
 	fi
 	rm -f "$lb"; teardown_fake_vm
 }
@@ -2881,6 +2921,8 @@ test_preflight_cleans_up_on_reject
 test_preflight_verifier_reject_prescribes_1864_remediation
 test_preflight_other_refusal_prescribes_no_make_generate
 test_preflight_missing_local_binary_hardfails
+test_preflight_low_headroom_prescribes_budget_remediation
+test_preflight_unmeasured_headroom_prescribes_measurement_remediation
 test_preflight_precedes_destructive_steps_standalone
 test_preflight_precedes_destructive_steps_cluster
 

@@ -2154,6 +2154,112 @@ fn wg_pmtu_ptb_learns_and_caps_encap_16711() {
     assert!(wg_encap_frame(&big, inner_v6_meta(), &decision, &state, None).map(|(frame, _)| frame).is_none(),
         "1321 inner must drop after PTB(1400): outer 1401 > learned 1400");
 }
+/// #17775: a host-bound PTB received by RX polling must learn the live
+/// WireGuard peer's PMTU, and the next forwarded inner must use that budget.
+///
+/// Fail-on-revert: removing the `consume_wg_outer_ptb` call from the poll
+/// hook leaves the PMTU unknown; the 1321-byte inner still encapsulates and
+/// the post-transform MTU remains at the physical-link budget.
+#[test]
+fn wg_ptb_learning_through_rx_poll_affects_forwarded_mtu_17775() {
+    use crate::afxdp::tests_support::{txn_ha_state, txn_run_descriptor};
+
+    let (state, peer_ep, _small) = pmtu_v6_state();
+    let decision = wg_encap_decision();
+    let engine = state.wg_engines.get(&1).unwrap();
+    let peer_pubkey = engine.peer_endpoints()[0].0;
+
+    let mtu_before = crate::afxdp::icmp_ptb::post_transform_inner_mtu(
+        &decision,
+        &state,
+        false,
+        libc::AF_INET6 as u8,
+        0,
+        Some("fd00:123::9".parse().unwrap()),
+        None,
+    );
+    assert_eq!(
+        mtu_before, 1420,
+        "control: before a PTB, the 1500-byte underlay permits a 1420-byte inner"
+    );
+    assert_eq!(engine.peer_pmtu(&peer_pubkey, monotonic_nanos()), None);
+
+    // Model the actual VLAN-80 RX frame on reth0.80. Metadata offsets and
+    // packet length track the on-wire 802.1Q header.
+    let mut ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 1400, 51820, 51820);
+    ptb.splice(12..12, [0x81, 0x00, 0x00, 0x50]);
+    let router: std::net::Ipv6Addr = "2001:559:8585:80::1".parse().unwrap();
+    let local_outer: std::net::Ipv6Addr = "2001:559:8585:80::8".parse().unwrap();
+    let icmpv6_checksum = crate::afxdp::frame::checksum::checksum16_ipv6(
+        router,
+        local_outer,
+        PROTO_ICMPV6,
+        &ptb[58..],
+    );
+    ptb[60..62].copy_from_slice(&icmpv6_checksum.to_be_bytes());
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 12,
+        ingress_vlan_id: 80,
+        ingress_vlan_present: 1,
+        l3_offset: 18,
+        l4_offset: 58,
+        payload_offset: 66,
+        pkt_len: ptb.len() as u16,
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_ICMPV6,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    binding.interface = std::sync::Arc::<str>::from("reth0.80");
+    let mut sessions = SessionTable::new();
+    let (batch, dbg) = txn_run_descriptor(
+        &mut binding,
+        &mut sessions,
+        &state,
+        &txn_ha_state(),
+        &ptb,
+        meta,
+    );
+    assert_eq!(dbg.rx, 1, "the PTB must traverse the native RX poll path");
+    assert_eq!(batch.metadata_packets, 1);
+    assert_eq!(
+        engine.peer_pmtu(&peer_pubkey, monotonic_nanos()),
+        Some(1400),
+        "#17775: valid received PTB must learn 1400 through the poll hook"
+    );
+
+    let mtu_after = crate::afxdp::icmp_ptb::post_transform_inner_mtu(
+        &decision,
+        &state,
+        false,
+        libc::AF_INET6 as u8,
+        0,
+        Some("fd00:123::9".parse().unwrap()),
+        None,
+    );
+    assert_eq!(
+        mtu_after, 1320,
+        "subsequent forwarded packets must use wg_inner_mtu(v6, learned 1400)"
+    );
+
+    // The forwarded packet's WG encap MTU guard admits exactly the learned
+    // inner budget and rejects the first byte beyond it.
+    let fits = inner_v6_frame_sized(mtu_after);
+    assert!(
+        wg_encap_frame(&fits, inner_v6_meta(), &decision, &state, None).is_some(),
+        "the 1320-byte inner at the learned PMTU must be forwarded"
+    );
+    let exceeds = inner_v6_frame_sized(mtu_after + 1);
+    assert!(
+        wg_encap_frame(&exceeds, inner_v6_meta(), &decision, &state, None).is_none(),
+        "the 1321-byte inner must be rejected by the learned 1400-byte outer budget"
+    );
+}
 
 #[test]
 fn wg_pmtu_forged_ptb_ignored_16711() {
