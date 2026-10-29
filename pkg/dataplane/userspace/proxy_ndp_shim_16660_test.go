@@ -96,7 +96,7 @@ func TestBuildDesiredProxyNDPAddressSetsResolvesInterfaceAliases17743(t *testing
 	}
 
 	addr := netip.MustParseAddr("2001:db8:1774::1").As16()
-	got := buildDesiredProxyNDPAddressSets(snapshot)
+	got := buildDesiredProxyNDPAddressSets(snapshot, nil)
 	want := userspaceLocalV6Key{Domain: 17, Addr: addr}
 	if len(got) != 1 {
 		t.Fatalf("proxy-NDP desired set = %v, want only the resolved interface's target %+v", got, want)
