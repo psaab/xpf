@@ -20,22 +20,15 @@ fn run_prebuilt_dispatch(
     wire_frame: Vec<u8>,
     ingress_frame: Vec<u8>,
     is_v6_wire: bool,
+    reject_output: bool,
 ) -> (Vec<BindingWorker>, DebugPollCounters) {
     let mut bindings = vec![
         BindingWorker::new_for_mirror_test(0, 0, 11, 0),
         BindingWorker::new_for_mirror_test(1, 0, 22, 0),
         BindingWorker::new_for_mirror_test(2, 0, 33, 0),
     ];
-    // The received bytes live in the ingress UMEM at desc.addr, as in
-    // production (recycle runs after the mirror commit).
-    unsafe {
-        bindings[0]
-            .umem
-            .area()
-            .slice_mut_unchecked(0, ingress_frame.len())
-    }
-    .expect("ingress frame")
-    .copy_from_slice(&ingress_frame);
+    // This fixture carries ingress bytes in the request's Owned source;
+    // dispatch does not read mirror bytes from the UMEM descriptor.
     let mut forwarding = test_forwarding_with_egress_mtu(1500);
     forwarding.mirror_configs.insert(
         11,
@@ -44,6 +37,30 @@ fn run_prebuilt_dispatch(
             rate: 0,
         },
     );
+    if reject_output {
+        forwarding.filter_state = crate::filter::parse_filter_state(
+            &[crate::FirewallFilterSnapshot {
+                name: "analyzer-discard".into(),
+                family: "inet".into(),
+                terms: vec![crate::FirewallTermSnapshot {
+                    name: "discard-all".into(),
+                    action: "discard".into(),
+                    ..Default::default()
+                }],
+            }],
+            &[],
+            &[crate::InterfaceSnapshot {
+                name: "analyzer".into(),
+                ifindex: 33,
+                filter_output_v4: "analyzer-discard".into(),
+                ..Default::default()
+            }],
+            "",
+            "",
+        )
+        .expect("filter state compiles");
+        forwarding.tx_selection_enabled_v4 = true;
+    }
     let lookup = WorkerBindingLookup::from_bindings(&bindings);
     let mirror_targets = MirrorTargetMap::default();
     let mut request = test_live_forward_request_for_frame(
@@ -75,7 +92,7 @@ fn run_prebuilt_dispatch(
     }
     request.frame = PendingForwardFrame::PrebuiltTransit {
         frame: wire_frame.clone().into(),
-        ingress_frame: ingress_frame.clone(),
+        ingress_source: PrebuiltTransitIngress::Owned(ingress_frame.clone()),
         ingress_meta,
     };
     request.desc.len = ingress_frame.len() as u32;
@@ -149,7 +166,7 @@ fn prebuilt_transit_frame_is_mirrored_15251() {
     wire_frame[26..30].copy_from_slice(&[10, 0, 0, 1]);
     wire_frame[30..34].copy_from_slice(&[10, 0, 0, 2]);
     wire_frame[22] = 56;
-    let (bindings, dbg) = run_prebuilt_dispatch(wire_frame, ingress_frame.clone(), false);
+    let (bindings, dbg) = run_prebuilt_dispatch(wire_frame, ingress_frame.clone(), false, false);
     assert_eq!(dbg.enqueue_ok, 1, "the prebuilt frame itself must forward");
     assert_eq!(
         bindings[0].live.mirrored_packets.load(Ordering::Relaxed),
@@ -180,7 +197,7 @@ fn prebuilt_nat64_frame_is_mirrored_15251() {
     ingress_frame[26..30].copy_from_slice(&[198, 51, 100, 9]);
     ingress_frame[30..34].copy_from_slice(&[192, 0, 2, 9]);
     let wire_frame = build_ipv6_test_packet(0);
-    let (bindings, dbg) = run_prebuilt_dispatch(wire_frame, ingress_frame.clone(), true);
+    let (bindings, dbg) = run_prebuilt_dispatch(wire_frame, ingress_frame.clone(), true, false);
     assert_eq!(
         dbg.enqueue_ok, 1,
         "the NAT64 prebuilt frame itself must forward"
@@ -216,7 +233,7 @@ fn prebuilt_nat64_v6_ingress_frame_is_mirrored_16603() {
     // generic helper with wire=v4 would stamp v4 ingress meta. The
     // mirror filter tuple is not under test here (no output filter is
     // configured), so only bytes/counts are asserted.
-    let (bindings, dbg) = run_prebuilt_dispatch(wire_frame, ingress_frame.clone(), false);
+    let (bindings, dbg) = run_prebuilt_dispatch(wire_frame, ingress_frame.clone(), false, false);
     assert_eq!(dbg.enqueue_ok, 1);
     assert_eq!(
         mirrored_bytes(&bindings),
@@ -268,7 +285,7 @@ fn prebuilt_sampled_out_frame_forwards_without_mirror_15947() {
     ingress_meta.flow_dst_addr[..4].copy_from_slice(&ingress_frame[30..34]);
     request.frame = PendingForwardFrame::PrebuiltTransit {
         frame: frame.clone().into(),
-        ingress_frame,
+        ingress_source: PrebuiltTransitIngress::Owned(ingress_frame),
         ingress_meta,
     };
     request.desc.len = frame.len() as u32;
@@ -322,18 +339,15 @@ fn prebuilt_sampled_out_frame_forwards_without_mirror_15947() {
 
 #[test]
 fn prebuilt_transit_no_mirror_no_extra_alloc_16603() {
-    // #16603 acceptance: with NO mirror row matching the ingress unit, a
-    // PrebuiltTransit dispatch must not allocate for mirroring. The wire
-    // frame, ingress copy, pending Vec and counters are all built BEFORE
-    // the measured window; inside it only `enqueue_pending_forwards`
-    // runs. This is a relative gate (primary TX copy-path may allocate
-    // its TxRequest plumbing identically in both arms), so compare a
-    // no-mirror dispatch against a mirror-configured-but-sampled-out
-    // dispatch and require no ADDITIONAL allocations in the no-mirror
-    // arm beyond the shared forward path — and, decisively, that the
-    // ingress bytes are never cloned: the count must equal the plain
-    // Prebuilt (generated-reply) dispatch count.
-    fn dispatch(mirror: Option<MirrorRuntimeConfig>) -> (u64, DebugPollCounters) {
+    // #17718: count the full dispatch mirror shape against the unchanged
+    // plain-Prebuilt path. Ingress bytes are seeded in UMEM and the wire
+    // fixture is built before the measured window; this exercises the
+    // production descriptor source rather than a test-only owned clone.
+    fn dispatch(
+        transit: bool,
+        mirror: Option<MirrorRuntimeConfig>,
+        sample_counter: u64,
+    ) -> (u64, DebugPollCounters, Option<bool>) {
         let mut bindings = vec![
             BindingWorker::new_for_mirror_test(0, 0, 11, 0),
             BindingWorker::new_for_mirror_test(1, 0, 22, 0),
@@ -342,31 +356,45 @@ fn prebuilt_transit_no_mirror_no_extra_alloc_16603() {
         let mut forwarding = test_forwarding_with_egress_mtu(1500);
         if let Some(cfg) = mirror {
             forwarding.mirror_configs.insert(11, cfg);
-            // Rate-3 sampler selects counters divisible by 3; start at 1
-            // so this arm is genuinely sampled out.
-            bindings[0].mirror_sample_counter = 1;
         }
+        bindings[0].mirror_sample_counter = sample_counter;
+        // The mirror target's queue growth is unrelated to the ingress copy;
+        // reserve outside the measured window so the selected delta is the
+        // single staged frame snapshot.
+        bindings[2].tx_pipeline.pending_tx_prepared.reserve(1);
         let mut wire_frame = build_ipv4_test_packet(0);
         wire_frame[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
         wire_frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, 0x16, 0x00, 0x01]);
         let mut ingress_frame = build_ipv4_test_packet(0);
         ingress_frame[26..30].copy_from_slice(&[198, 51, 100, 4]);
         ingress_frame[30..34].copy_from_slice(&[192, 0, 2, 4]);
+        unsafe {
+            bindings[0]
+                .umem
+                .area()
+                .slice_mut_unchecked(0, ingress_frame.len())
+        }
+        .expect("ingress frame")
+        .copy_from_slice(&ingress_frame);
         let lookup = WorkerBindingLookup::from_bindings(&bindings);
         let mirror_targets = MirrorTargetMap::default();
         let mut request = test_live_forward_request_for_frame(
             wire_frame.len(),
             test_forwarding_decision_to_bound_ifindex(22),
         );
-        let mut ingress_meta = request.meta;
-        ingress_meta.flow_src_addr[..4].copy_from_slice(&ingress_frame[26..30]);
-        ingress_meta.flow_dst_addr[..4].copy_from_slice(&ingress_frame[30..34]);
         request.meta.flow_src_addr[..4].copy_from_slice(&wire_frame[26..30]);
         request.meta.flow_dst_addr[..4].copy_from_slice(&wire_frame[30..34]);
-        request.frame = PendingForwardFrame::PrebuiltTransit {
-            frame: wire_frame.into(),
-            ingress_frame,
-            ingress_meta,
+        request.frame = if transit {
+            let mut ingress_meta = request.meta;
+            ingress_meta.flow_src_addr[..4].copy_from_slice(&ingress_frame[26..30]);
+            ingress_meta.flow_dst_addr[..4].copy_from_slice(&ingress_frame[30..34]);
+            PendingForwardFrame::PrebuiltTransit {
+                frame: wire_frame.into(),
+                ingress_source: PrebuiltTransitIngress::Descriptor,
+                ingress_meta,
+            }
+        } else {
+            PendingForwardFrame::Prebuilt(wire_frame.into())
         };
         request.desc.len = 34;
         request.flow_key = None;
@@ -407,26 +435,87 @@ fn prebuilt_transit_no_mirror_no_extra_alloc_16603() {
                 &worker_commands_by_id,
             );
         });
-        assert_eq!(
-            bindings[0].live.mirrored_packets.load(Ordering::Relaxed),
-            0,
-            "no-mirror / sampled-out dispatch must not mirror"
-        );
-        (allocs, dbg)
+        let mirrored_matches_ingress = bindings[2]
+            .tx_pipeline
+            .pending_tx_prepared
+            .front()
+            .map(|mirror_req| {
+                assert!(mirror_req.mirror_clone);
+                bindings[2]
+                    .umem
+                    .area()
+                    .slice(mirror_req.offset as usize, mirror_req.len as usize)
+                    .is_some_and(|frame| frame == ingress_frame.as_slice())
+            });
+        (allocs, dbg, mirrored_matches_ingress)
     }
-    let (no_mirror_allocs, no_mirror_dbg) = dispatch(None);
-    let (sampled_out_allocs, sampled_out_dbg) = dispatch(Some(MirrorRuntimeConfig {
-        output_ifindex: 33,
-        rate: 3,
-    }));
-    // Both arms forward exactly once and (per the inner assert) mirror
-    // zero times, so the allocation counts are comparable.
+
+    let (plain_prebuilt_allocs, plain_dbg, plain_mirrored) = dispatch(false, None, 0);
+    let (no_mirror_allocs, no_mirror_dbg, no_mirror) = dispatch(true, None, 0);
+    let (sampled_out_allocs, sampled_out_dbg, sampled_out) = dispatch(
+        true,
+        Some(MirrorRuntimeConfig {
+            output_ifindex: 33,
+            rate: 3,
+        }),
+        1,
+    );
+    let (selected_allocs, selected_dbg, selected) = dispatch(
+        true,
+        Some(MirrorRuntimeConfig {
+            output_ifindex: 33,
+            rate: 3,
+        }),
+        0,
+    );
+
+    assert_eq!(plain_dbg.enqueue_ok, 1);
     assert_eq!(no_mirror_dbg.enqueue_ok, 1);
     assert_eq!(sampled_out_dbg.enqueue_ok, 1);
+    assert_eq!(selected_dbg.enqueue_ok, 1);
+    assert_eq!(plain_mirrored, None);
+    assert_eq!(no_mirror, None);
+    assert_eq!(sampled_out, None);
+    assert_eq!(selected, Some(true));
     assert_eq!(
-        no_mirror_allocs, sampled_out_allocs,
-        "#16603: no-mirror PrebuiltTransit dispatch must perform no extra \
-         allocation versus the sampled-out mirror dispatch (ingress clone \
-         must not happen when no mirror row matches)"
+        no_mirror_allocs, plain_prebuilt_allocs,
+        "#17718: a no-mirror PrebuiltTransit must not allocate/copy ingress \
+         bytes versus the plain Prebuilt control arm"
+    );
+    assert_eq!(
+        sampled_out_allocs, plain_prebuilt_allocs,
+        "#17718: a sampled-out PrebuiltTransit must not allocate/copy ingress \
+         bytes versus the plain Prebuilt control arm"
+    );
+    assert_eq!(
+        selected_allocs,
+        plain_prebuilt_allocs + 1,
+        "#17718: a selected PrebuiltTransit must allocate exactly one staged \
+         ingress copy, not copy once in the producer and again in dispatch"
+    );
+}
+
+#[test]
+fn prebuilt_transit_oversize_owned_mirror_is_no_frame_17718() {
+    let ingress_frame = vec![0; crate::afxdp::tx_frame_capacity() + 1];
+    let (bindings, dbg) = run_prebuilt_dispatch(
+        build_ipv4_test_packet(0),
+        ingress_frame,
+        false,
+        true,
+    );
+
+    assert_eq!(dbg.enqueue_ok, 1, "oversize mirror must not block forwarding");
+    assert!(
+        bindings[2].tx_pipeline.pending_tx_prepared.is_empty(),
+        "oversize ingress must not enqueue an empty analyzer frame"
+    );
+    assert_eq!(
+        bindings[0]
+            .live
+            .mirror_drops_no_frame
+            .load(Ordering::Relaxed),
+        1,
+        "oversize ingress must retain the NoFrame mirror outcome"
     );
 }

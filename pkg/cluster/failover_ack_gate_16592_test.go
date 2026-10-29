@@ -146,13 +146,7 @@ func TestAckGateRequestAckFailureDoesNotPromote16592(t *testing.T) {
 				// Marker lifetime control (mirrors #15164): once the peer
 				// stops advertising the aborted hold, a later legitimate
 				// transfer-out promotes normally again.
-				requester.handlePeerHeartbeat(&HeartbeatPacket{
-					NodeID:    1,
-					ClusterID: 1,
-					Groups: []HeartbeatGroup{
-						{GroupID: 0, Priority: 200, Weight: 255, State: uint8(StatePrimary)},
-					},
-				})
+				requester.handlePeerHeartbeat(owner.buildHeartbeat())
 				holdHeartbeat16592(requester)
 				if !requester.IsLocalPrimary(0) {
 					t.Fatalf("%s: legitimate transfer-out after aborted hold ended must promote", mode)

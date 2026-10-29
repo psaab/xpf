@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -268,6 +269,17 @@ func dnsIPsToPrefixes(ips []string, family string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// hasSuccessfulFamilyEmptyDNS reports an untainted, family-scoped DNS entry
+// whose successful resolution currently has no usable prefixes.
+func (a *Address) hasSuccessfulFamilyEmptyDNS() bool {
+	return a != nil && a.DNSName != "" &&
+		(a.DNSFamily == "ipv4-only" || a.DNSFamily == "ipv6-only") &&
+		!a.DNSLookupFailed && !a.DNSUnresolved && a.Value == "" &&
+		len(a.DNSAddresses) == 0 && len(a.ExpandedPrefixes) == 0 &&
+		len(a.UnimplementedForms) == 0 && len(a.DuplicatePrefixes) == 0 &&
+		len(a.TrailingTokens) == 0 && a.OversizedRange == ""
 }
 
 // resolveDNSAddressEntry populates one entry FROM THE CACHE ONLY
@@ -576,75 +588,22 @@ func RefreshDNSForPreflight(cfg *Config) *Config {
 	return clone
 }
 
-// CloneForDNSRefresh returns a copy of cfg that shares everything with the
-// original EXCEPT the mutable DNS-resolution state: every dns-name Address
-// (global, named, and zone-local books, including the folded
-// zone-local/<zone>/<name> copies in the global book) is a fresh *Address
-// with its own DNSAddresses slice. RefreshDNSAddressBooks may therefore
-// write into the clone without touching the published generation it was
-// cloned from (#15933).
+// CloneForDNSRefresh returns a private deep copy of cfg for DNS resolution
+// and apply. Every exported pointer, map, and slice in the config graph is
+// cloned, not just the DNS-resolution state. In particular, a later
+// apply-path mutation to a non-DNS object cannot write through to the
+// published generation (#17734). Compiler-private metadata is copied with
+// its containing value; it is immutable after compilation.
 //
-// The address maps themselves are copied (not aliased) wherever a cloned
-// entry is installed, so a writer cannot add/remove entries in the
-// original's maps through the clone. Non-DNS entries are shared —
-// nothing in the refresh path mutates them. Cost is O(zones + named
-// books + all address-book entries), not a deep copy of the whole
-// config.
+// The copy preserves pointer sharing inside the config graph. Its cost is
+// O(config size), which is required for the returned config to be safe for
+// independent apply-time mutation.
 func (cfg *Config) CloneForDNSRefresh() *Config {
 	if cfg == nil {
 		return nil
 	}
-	out := *cfg
-	out.Security.AddressBook = cloneBookForDNSRefresh(cfg.Security.AddressBook)
-	if cfg.Security.NamedAddressBooks != nil {
-		named := make(map[string]*NamedAddressBook, len(cfg.Security.NamedAddressBooks))
-		for name, nb := range cfg.Security.NamedAddressBooks {
-			if nb == nil {
-				named[name] = nil
-				continue
-			}
-			cp := *nb
-			if cloned := cloneBookForDNSRefresh(&nb.AddressBook); cloned != nil {
-				cp.AddressBook = *cloned
-			}
-			named[name] = &cp
-		}
-		out.Security.NamedAddressBooks = named
-	}
-	if cfg.Security.Zones != nil {
-		zones := make(map[string]*ZoneConfig, len(cfg.Security.Zones))
-		for name, z := range cfg.Security.Zones {
-			if z == nil {
-				zones[name] = nil
-				continue
-			}
-			cp := *z
-			cp.AddressBook = cloneBookForDNSRefresh(z.AddressBook)
-			zones[name] = &cp
-		}
-		out.Security.Zones = zones
-	}
-	return &out
-}
-
-func cloneBookForDNSRefresh(b *AddressBook) *AddressBook {
-	if b == nil {
-		return nil
-	}
-	out := *b
-	if b.Addresses != nil {
-		addrs := make(map[string]*Address, len(b.Addresses))
-		for name, a := range b.Addresses {
-			if a != nil && a.DNSName != "" {
-				cp := *a
-				cp.DNSAddresses = append([]string(nil), a.DNSAddresses...)
-				a = &cp
-			}
-			addrs[name] = a
-		}
-		out.Addresses = addrs
-	}
-	return &out
+	cloned := cloneConfigValue(reflect.ValueOf(cfg), make(map[configCloneVisit]reflect.Value))
+	return cloned.Interface().(*Config)
 }
 
 // DNSAnswerState is one dns-name entry's runtime DNS state: its current

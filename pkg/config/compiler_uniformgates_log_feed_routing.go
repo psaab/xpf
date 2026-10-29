@@ -68,6 +68,16 @@ func runUniformGatesLogFeedRouting(tree *ConfigTree, cfg *Config, opts compileOp
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
+	// #17735: FRR's fixed IS-IS distance 115 and configured RIP distance 100
+	// reverse Junos IS-IS 15/18 < RIP 100. Likewise, no static distance can
+	// represent Junos preferences 15..114 against fixed-distance IS-IS. Strict
+	// commit refuses these combinations; tolerant loads warn and the FRR
+	// renderer withholds the conflicting route.
+	if w, err := validateISISDistanceOrderingStrict17735(cfg, opts.lenientISISDistanceOrdering17735); err != nil {
+		return err
+	} else {
+		cfg.Warnings = append(cfg.Warnings, w...)
+	}
 	// #2008 H7 security log profile -> stream cross-reference. A
 	// `security log profile <name> stream-name <stream>` that names a
 	// stream which is not configured would route to nowhere — the operator
