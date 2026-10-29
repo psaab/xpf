@@ -3186,11 +3186,16 @@ func eventMultiWordLeafValues(n *Node, from int) []string {
 // classifyPlan trims them itself. A `commands;` with no value slot still
 // contributes nothing.
 func eventChangeConfigCommands(cmdsNode *Node) []string {
-	// Block: each child carries one command — or, on the flat-set path, a
-	// whole bracketed LIST of them. eventMultiWordLeafValues decides which,
-	// so an unquoted command survives whole instead of truncating to its first
-	// word AND a bracket list stops fusing into one string. The node's own tail
-	// is the identifier slot master discarded — do not promote it.
+	return eventChangeConfigCommandValues(cmdsNode, 1)
+}
+
+// eventChangeConfigCommandValues reads either a packed `commands <values>`
+// tail (from identifies the first value) or a block body. Children win over
+// tails, matching eventChangeConfigCommands' historical selection rule.
+func eventChangeConfigCommandValues(cmdsNode *Node, from int) []string {
+	if cmdsNode == nil {
+		return nil
+	}
 	if len(cmdsNode.Children) > 0 {
 		cmds := make([]string, 0, len(cmdsNode.Children))
 		for _, cmdChild := range cmdsNode.Children {
@@ -3198,13 +3203,91 @@ func eventChangeConfigCommands(cmdsNode *Node) []string {
 		}
 		return cmds
 	}
-	// Packed: the tail is a bracketed list of quoted commands, or the bare
-	// words of exactly one unquoted command. Same discriminator.
-	if len(cmdsNode.Keys) < 2 {
+	if from < 0 || from >= len(cmdsNode.Keys) {
 		return nil
 	}
-	return eventMultiWordLeafValues(cmdsNode, 1)
+	return eventMultiWordLeafValues(cmdsNode, from)
 }
+
+// eventThenChangeConfigCommands reads the one action `then` carries in both
+// parser shapes. A bare `then` has change-configuration child nodes; an
+// elided `then change-configuration` packs the action on then.Keys and its
+// Children (if any) are that action's body. In either case, commands can be
+// packed on that node's tail or stored as children.
+func eventThenChangeConfigCommands(thenNode *Node) []string {
+	if thenNode == nil {
+		return nil
+	}
+	var commands []string
+	if len(thenNode.Keys) >= 2 {
+		if thenNode.Keys[1] != "change-configuration" {
+			return nil
+		}
+		if len(thenNode.Keys) >= 3 {
+			if thenNode.Keys[2] == "commands" {
+				commands = append(commands, eventChangeConfigCommandValues(thenNode, 3)...)
+			}
+			return commands
+		}
+		for _, commandsNode := range thenNode.FindChildren("commands") {
+			commands = append(commands, eventChangeConfigCommands(commandsNode)...)
+		}
+		return commands
+	}
+	for _, changeConfigNode := range thenNode.FindChildren("change-configuration") {
+		if changeConfigNode == nil {
+			continue
+		}
+		if len(changeConfigNode.Keys) >= 2 {
+			if changeConfigNode.Keys[1] == "commands" {
+				commands = append(commands,
+					eventChangeConfigCommandValues(changeConfigNode, 2)...)
+			}
+			continue
+		}
+		for _, commandsNode := range changeConfigNode.FindChildren("commands") {
+			commands = append(commands, eventChangeConfigCommands(commandsNode)...)
+		}
+	}
+	return commands
+}
+
+// eventOptionsPackedPolicySchema is a compiler-only view: packedBody needs
+// the one-token arity of events and quoted commands to split a fully packed
+// policy run. Keep these hints off schemaEventOptions itself so flat-set
+// SetPath behavior for the existing list leaves is unchanged.
+var eventOptionsPackedPolicySchema = func() *schemaNode {
+	base := schemaEventOptions.children["policy"]
+	if base == nil {
+		return nil
+	}
+	cloneChildren := func(children map[string]*schemaNode) map[string]*schemaNode {
+		cloned := make(map[string]*schemaNode, len(children))
+		for name, child := range children {
+			cloned[name] = child
+		}
+		return cloned
+	}
+	policy := *base
+	policy.children = cloneChildren(base.children)
+
+	events := *policy.children["events"]
+	events.args = 1
+	events.multi = true
+	policy.children["events"] = &events
+
+	then := *policy.children["then"]
+	then.children = cloneChildren(then.children)
+	changeConfig := *then.children["change-configuration"]
+	changeConfig.children = cloneChildren(changeConfig.children)
+	commands := *changeConfig.children["commands"]
+	commands.args = 1
+	commands.multi = true
+	changeConfig.children["commands"] = &commands
+	then.children["change-configuration"] = &changeConfig
+	policy.children["then"] = &then
+	return &policy
+}()
 
 func compileEventOptions(node *Node, policies *[]*EventPolicy) error {
 	// #4423 L1: two same-named policy stanzas must MERGE into one policy, not
@@ -3227,7 +3310,19 @@ func compileEventOptions(node *Node, policies *[]*EventPolicy) error {
 			*policies = append(*policies, ep)
 		}
 
-		for _, child := range pInst.node.Children {
+		// #18414: a fully packed `policy p events ... then ...` stores
+		// the property run on its own Keys. Normalize it through packedBody
+		// so ordinary property readers handle it exactly like a braced
+		// policy. If a command-bearing run leaves the schema grammar before
+		// expansion, reject it by name rather than compiling a silent no-op.
+		policyNode := packedBody(pInst.node, eventOptionsPackedPolicySchema)
+		if eventOptionsKeysMayHaveCommands9984(pInst.node.Keys) &&
+			policyNode == pInst.node {
+			return fmt.Errorf("policy %q: fully packed change-configuration commands "+
+				"could not be bound safely; use a braced policy body (#18414)",
+				pInst.name)
+		}
+		for _, child := range policyNode.Children {
 			switch child.Name() {
 			case "events":
 				// `events` is the trigger set of the policy, so a lost value is
@@ -3324,11 +3419,19 @@ func compileEventOptions(node *Node, policies *[]*EventPolicy) error {
 				// dropped — and the gate does not compare the repeated
 				// spellings here at all, because setSchema marks `commands`
 				// scalar (see docs/config-schema.md).
-				for _, ccNode := range child.FindChildren("change-configuration") {
-					for _, cmdsNode := range ccNode.FindChildren("commands") {
-						ep.ThenCommands = append(ep.ThenCommands, eventChangeConfigCommands(cmdsNode)...)
-					}
-				}
+				// #18414: a brace-elided `then` packs its action onto the
+				// then node's own Keys and, when the action body is elided
+				// too, the whole `change-configuration commands "..."` run
+				// rides on that same tail:
+				//   then change-configuration commands "...";
+				//   then change-configuration { commands "..."; }
+				//   then { change-configuration commands "..."; }
+				// FindChildren only sees the bare-then shape, so the packed
+				// spellings silently compiled to zero ThenCommands — a policy
+				// that triggers and does nothing. Keep the same child-first
+				// and token-boundary rules as eventChangeConfigCommands and
+				// eventMultiWordLeafValues; only the location differs.
+				ep.ThenCommands = append(ep.ThenCommands, eventThenChangeConfigCommands(child)...)
 			}
 		}
 	}
