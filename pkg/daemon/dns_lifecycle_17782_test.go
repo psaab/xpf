@@ -442,3 +442,67 @@ func TestRecoveredRollbackDNSRefreshRunsOutsideApplySem17782(t *testing.T) {
 		t.Fatal("recovered rollback did not apply the refreshed target")
 	}
 }
+
+func TestSupersededDNSRefreshConsumesResolvedMarker17782(t *testing.T) {
+	d, store := dnsDaemon15933(t)
+	base := store.ActiveConfig()
+	if base == nil {
+		t.Fatal("DNS refresher premise has no active config")
+	}
+	promoted := base.CloneForDNSRefresh()
+	resolverStarted := make(chan struct{})
+	releaseResolver := make(chan struct{})
+	var resolverStart sync.Once
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseResolver) }) }
+	defer release()
+	restoreLookup := config.SetLookupAddressDNSNameForTest(func(fqdn string) ([]string, error) {
+		resolverStart.Do(func() {
+			close(resolverStarted)
+			<-releaseResolver
+		})
+		if fqdn == "global.example.com" {
+			return []string{"10.9.9.9"}, nil
+		}
+		return []string{"10.0.0.2"}, nil
+	})
+	defer restoreLookup()
+
+	done := make(chan struct{})
+	go func() {
+		d.refreshDNSOnce()
+		close(done)
+	}()
+	select {
+	case <-resolverStarted:
+	case <-done:
+		t.Fatal("DNS refresh finished before entering its resolver")
+	case <-time.After(5 * time.Second):
+		t.Fatal("DNS refresh did not start resolving")
+	}
+	if !d.applySem.TryAcquire(1) {
+		release()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+		t.Fatal("DNS refresh held applySem while resolving")
+	}
+	store.SetCompiledForTesting(promoted)
+	release()
+	d.applySem.Release(1)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("superseded DNS refresh did not finish")
+	}
+	if store.ActiveConfig() != promoted {
+		t.Fatal("superseded refresh replaced the newer active config")
+	}
+	d.dnsRefreshMu.Lock()
+	markers := len(d.dnsResolvedConfigs)
+	d.dnsRefreshMu.Unlock()
+	if markers != 0 {
+		t.Fatalf("resolved-config markers after superseded refresh = %d, want 0", markers)
+	}
+}

@@ -161,14 +161,14 @@ func buildOneRuleSnapshot(
 	dstDropExcludedEmpty := pol.Match.DestinationAddressExcluded &&
 		len(dstDroppedFeedRefs) > 0 &&
 		!policyAddressSideHasConcretePrefix(cfg, feedOverlay, nameToID, pol.Match.DestinationAddresses)
-	// #16595: a side that is empty ONLY because a dns-name lookup failed
-	// (never resolved) must not carry the address sentinel. For a positive
-	// PERMIT side the empty book row is already match-none: the permit
-	// simply never matches (fail-closed for that rule), so no sentinel is
-	// needed and the rest of the snapshot loads. For a DENY / REJECT rule,
-	// or an excluded side, match-none would fall through to a later permit
-	// or invert to match-all, so just this rule is poisoned below via its
-	// application terms (dnsFailClosed).
+	// #16595/#17782: a side that is empty ONLY because DNS resolution is
+	// unavailable (lookup failed or has not run yet) must not carry the
+	// address sentinel. For a positive PERMIT side the empty book row is
+	// already match-none: the permit simply never matches (fail-closed for
+	// that rule), so no sentinel is needed and the rest of the snapshot loads.
+	// For a DENY / REJECT rule, or an excluded side, match-none would fall
+	// through to a later permit or invert to match-all, so just this rule is
+	// poisoned below via its application terms (dnsFailClosed).
 	srcDNSMatchNone := sideDNSMatchNone(cfg, addrRepresentable, ruleSideAddressTokens(pol, false))
 	dstDNSMatchNone := sideDNSMatchNone(cfg, addrRepresentable, ruleSideAddressTokens(pol, true))
 	denyClass := pol.Action == config.PolicyDeny || pol.Action == config.PolicyReject
@@ -345,7 +345,7 @@ func buildOneRuleSnapshot(
 		// build-time-only rejection metadata.
 		unknownSecurityPoliciesChildren: pol.UnknownSecurityPoliciesChildren,
 		rejectedScheduler:               rejectedScheduler,
-		dnsLookupFailClosed:             dnsFailClosed,
+		dnsUnavailableFailClosed:        dnsFailClosed,
 	}
 }
 

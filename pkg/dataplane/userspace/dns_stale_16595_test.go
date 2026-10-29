@@ -8,10 +8,10 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #16595 — SERVFAIL arm: no address sentinel, stale prefix retained, sibling
-// rules unmarked; never-resolved deny is per-rule fail-closed (application
-// sentinel, no address sentinel / no PolicyContentRejected); never-resolved
-// positive permit is match-none and the snapshot loads.
+// #16595/#17782 — stale SERVFAIL answers stay concrete; empty failed and
+// cold-cache-unresolved names get no address sentinel. Deny and excluded
+// rules fail closed per rule, while a positive permit with unavailable DNS
+// matches none and keeps the snapshot loadable.
 
 func dnsCfg16595(bad *config.Address) *config.Config {
 	cfg := &config.Config{}
@@ -85,79 +85,114 @@ func TestDNSStaleRetainedNoSentinel16595(t *testing.T) {
 	}
 }
 
+func dnsUnavailableAddressCases16595() []struct {
+	name    string
+	address *config.Address
+} {
+	return []struct {
+		name    string
+		address *config.Address
+	}{
+		{"lookup-failed", &config.Address{Name: "bad", DNSName: "bad.example.com", DNSLookupFailed: true}},
+		{"unresolved", &config.Address{Name: "bad", DNSName: "bad.example.com", DNSUnresolved: true}},
+	}
+}
+
 func TestDNSNeverResolvedDenyPerRuleFailClosed16595(t *testing.T) {
-	cfg := dnsCfg16595(&config.Address{Name: "bad", DNSName: "bad.example.com", DNSLookupFailed: true})
-	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
-	if err != nil || len(rules) != 2 {
-		t.Fatalf("rules=%d err=%v", len(rules), err)
-	}
-	addr, _ := countSentinels16595(rules)
-	if addr != 0 {
-		t.Fatalf("never-resolved DNS must emit NO address sentinel (sentinelRules), got %d in %s", addr, mustJSON16595(rules))
-	}
-	// The deny rule is poisoned per-rule (application sentinel); sibling is clean.
-	for _, r := range rules {
-		raw, _ := json.Marshal(r)
-		if r.Name == "block-bad" && !strings.Contains(string(raw), unsupportedApplicationSentinel) {
-			t.Fatalf("deny with never-resolved DNS must be per-rule fail-closed, got %s", raw)
-		}
-		if r.Name == "permit-good" && strings.Contains(string(raw), unsupportedApplicationSentinel) {
-			t.Fatalf("sibling permit-good must stay clean, got %s", raw)
-		}
-	}
-	snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
-	if err != nil {
-		t.Fatalf("buildSnapshot: %v", err)
-	}
-	for _, reason := range snap.Capabilities.PolicyContentRejected {
-		if strings.Contains(reason, "bad") {
-			t.Fatalf("DNS cause must not be a PolicyContentRejected entry: %v", snap.Capabilities.PolicyContentRejected)
-		}
+	for _, tc := range dnsUnavailableAddressCases16595() {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := dnsCfg16595(tc.address)
+			rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+			if err != nil || len(rules) != 2 {
+				t.Fatalf("rules=%d err=%v", len(rules), err)
+			}
+			addr, _ := countSentinels16595(rules)
+			if addr != 0 {
+				t.Fatalf("unavailable DNS must emit NO address sentinel, got %d in %s", addr, mustJSON16595(rules))
+			}
+			for _, r := range rules {
+				raw, _ := json.Marshal(r)
+				if r.Name == "block-bad" && !strings.Contains(string(raw), unsupportedApplicationSentinel) {
+					t.Fatalf("deny with unavailable DNS must be per-rule fail-closed, got %s", raw)
+				}
+				if r.Name == "permit-good" && strings.Contains(string(raw), unsupportedApplicationSentinel) {
+					t.Fatalf("sibling permit-good must stay clean, got %s", raw)
+				}
+			}
+			snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
+			if err != nil {
+				t.Fatalf("buildSnapshot: %v", err)
+			}
+			for _, reason := range snap.Capabilities.PolicyContentRejected {
+				if strings.Contains(reason, "bad") {
+					t.Fatalf("DNS cause must not be a PolicyContentRejected entry: %v", snap.Capabilities.PolicyContentRejected)
+				}
+			}
+		})
 	}
 }
 
 func TestDNSNeverResolvedPermitMatchNoneLoads16595(t *testing.T) {
-	cfg := dnsCfg16595(&config.Address{Name: "bad", DNSName: "bad.example.com", DNSLookupFailed: true})
-	// Flip roles: bad is the permit destination, good is a deny sibling.
-	cfg.Security.Policies = []*config.ZonePairPolicies{
-		{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
-			{Name: "permit-bad", Match: config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"bad"}, Applications: []string{"any"}}, Action: config.PolicyPermit},
-			{Name: "block-good", Match: config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"good"}, Applications: []string{"any"}}, Action: config.PolicyDeny},
-		}},
-	}
-	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
-	if err != nil || len(rules) != 2 {
-		t.Fatalf("rules=%d err=%v", len(rules), err)
-	}
-	addr, app := countSentinels16595(rules)
-	if addr != 0 || app != 0 {
-		t.Fatalf("positive permit match-none must emit no sentinel, addr=%d app=%d", addr, app)
-	}
-	// Book row for bad is empty (match-none).
-	_, nameToID, _ := buildAddressBookTable(cfg)
-	if _, ok := nameToID["bad"]; !ok {
-		t.Fatal("bad must still route as a book reference")
+	for _, tc := range dnsUnavailableAddressCases16595() {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := dnsCfg16595(tc.address)
+			cfg.Security.Policies = []*config.ZonePairPolicies{
+				{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
+					{Name: "permit-bad", Match: config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"bad"}, Applications: []string{"any"}}, Action: config.PolicyPermit},
+					{Name: "block-good", Match: config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"good"}, Applications: []string{"any"}}, Action: config.PolicyDeny},
+				}},
+			}
+			rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+			if err != nil || len(rules) != 2 {
+				t.Fatalf("rules=%d err=%v", len(rules), err)
+			}
+			addr, app := countSentinels16595(rules)
+			if addr != 0 || app != 0 {
+				t.Fatalf("positive permit match-none must emit no sentinel, addr=%d app=%d", addr, app)
+			}
+			books, nameToID, err := buildAddressBookTable(cfg)
+			if err != nil {
+				t.Fatalf("address book: %v", err)
+			}
+			id, ok := nameToID["bad"]
+			if !ok {
+				t.Fatal("bad must still route as a book reference")
+			}
+			for _, book := range books {
+				if book.ID == id {
+					if len(book.PrefixesV4) != 0 || len(book.PrefixesV6) != 0 {
+						t.Fatalf("unavailable DNS row must be empty, got %+v", book)
+					}
+					return
+				}
+			}
+			t.Fatal("bad address book row missing")
+		})
 	}
 }
 
 func TestDNSExcludedNeverResolvedFailsClosed16595(t *testing.T) {
-	cfg := dnsCfg16595(&config.Address{Name: "bad", DNSName: "bad.example.com", DNSLookupFailed: true})
-	cfg.Security.Policies = []*config.ZonePairPolicies{
-		{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
-			{Name: "permit-not-bad", Match: config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"bad"}, DestinationAddressExcluded: true, Applications: []string{"any"}}, Action: config.PolicyPermit},
-		}},
-	}
-	rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
-	if err != nil || len(rules) != 1 {
-		t.Fatalf("rules=%d err=%v", len(rules), err)
-	}
-	addr, _ := countSentinels16595(rules)
-	if addr != 0 {
-		t.Fatalf("excluded DNS must emit no address sentinel, got %s", mustJSON16595(rules))
-	}
-	raw, _ := json.Marshal(rules[0])
-	if !strings.Contains(string(raw), unsupportedApplicationSentinel) {
-		t.Fatalf("excluded never-resolved side must be per-rule fail-closed, got %s", raw)
+	for _, tc := range dnsUnavailableAddressCases16595() {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := dnsCfg16595(tc.address)
+			cfg.Security.Policies = []*config.ZonePairPolicies{
+				{FromZone: "trust", ToZone: "untrust", Policies: []*config.Policy{
+					{Name: "permit-not-bad", Match: config.PolicyMatch{SourceAddresses: []string{"any"}, DestinationAddresses: []string{"bad"}, DestinationAddressExcluded: true, Applications: []string{"any"}}, Action: config.PolicyPermit},
+				}},
+			}
+			rules, err := buildPolicySnapshotsWithSchedulerStateAndFeeds(cfg, nil, nil)
+			if err != nil || len(rules) != 1 {
+				t.Fatalf("rules=%d err=%v", len(rules), err)
+			}
+			addr, _ := countSentinels16595(rules)
+			if addr != 0 {
+				t.Fatalf("excluded DNS must emit no address sentinel, got %s", mustJSON16595(rules))
+			}
+			raw, _ := json.Marshal(rules[0])
+			if !strings.Contains(string(raw), unsupportedApplicationSentinel) {
+				t.Fatalf("excluded unavailable side must be per-rule fail-closed, got %s", raw)
+			}
+		})
 	}
 }
 

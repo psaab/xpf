@@ -338,9 +338,17 @@ func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string][
 // exactly the same answers. The baseline is keyed to the published clone.
 func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, error) {
 	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "dnsAddressRefresh") {
+		// The refresh clone is marked before this call; admission refusal
+		// must not retain that marker.
+		d.consumeDNSResolved(refreshed)
 		return false, nil
 	}
-	defer d.applySem.Release(1)
+	defer func() {
+		// Consume before releasing applySem so a superseded clone cannot
+		// remain marked for the next serialized apply.
+		d.consumeDNSResolved(refreshed)
+		d.applySem.Release(1)
+	}()
 	if d.store == nil || d.store.ActiveConfig() != base {
 		return false, nil
 	}

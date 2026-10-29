@@ -153,7 +153,6 @@ func targetHasUnavailableDNSResolution(cfg *config.Config) bool {
 	return found
 }
 
-
 // confirmRollbackTargetHandledAtFire runs the appliability pre-flight on the
 // pending rollback target before anything is promoted. It returns false when the
 // normal rollback should proceed (the target is appliable, or there is no
