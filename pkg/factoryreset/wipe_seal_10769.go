@@ -160,6 +160,54 @@ var wipeSealMapping = map[string]wipeSealDisposition{
 	"/var/lib/apt/lists/*": {leg: true},
 }
 
+// listNoRedirectsCaptureCrashTemps returns fsatomic staging files that
+// were left beside the durable redirect capture by a process that crashed
+// before rename. These files contain the same prior-tenant snapshot bytes
+// as the canonical state and must not survive factory reset.
+func listNoRedirectsCaptureCrashTemps(path string) ([]string, error) {
+	dir := filepath.Dir(path)
+	prefix := "." + filepath.Base(path) + ".tmp-"
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("zeroize: inspect no-redirects capture directory for %s: %w", path, err)
+	}
+	var temps []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			temps = append(temps, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return temps, nil
+}
+
+// eraseNoRedirectsCaptureCrashTemps erases only fsatomic temp siblings for
+// the redirect capture, refuses symlinks and hardlinks through the shared
+// reset primitive, and verifies the synced directory after the sweep.
+func eraseNoRedirectsCaptureCrashTemps(path string) error {
+	listErr, err := configstore.SweepCrashTempsWithListError(func() ([]string, error) {
+		return listNoRedirectsCaptureCrashTemps(path)
+	})
+	if listErr != nil {
+		return listErr
+	}
+	if err != nil {
+		return fmt.Errorf("zeroize: erase no-redirects capture crash temps for %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	if err := fsatomic.SyncDir(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("zeroize: sync no-redirects capture directory %s: %w", dir, err)
+	}
+	if temps, err := listNoRedirectsCaptureCrashTemps(path); err != nil {
+		return err
+	} else if len(temps) != 0 {
+		return fmt.Errorf("zeroize: no-redirects capture crash temps reappeared for %s: %v", path, temps)
+	}
+	return nil
+}
+
 const wipeManagedHostKeysHeader = "# Managed by xpfd — do not edit\n"
 
 // wipeEraseSSHHostKeys removes the sealed ssh_host_* key files. The
@@ -271,6 +319,7 @@ func wipeImageSealResidue() error {
 		fail(wipeRemovePath(path))
 	}
 	fail(wipeEthtoolForcedRegistryCrashTemps(wipeEthtoolForcedRegistryPath))
+	fail(eraseNoRedirectsCaptureCrashTemps(wipeNoRedirectsCapturePath))
 	fail(feeds.EraseShrinkHistoryCrashTemps(wipeFeedShrinkHistoryPath))
 
 	// Appliance-only: systemd's persisted random seed and /run/utmp are
@@ -570,6 +619,11 @@ func wipeFinalEraseVerification(completion Completion) error {
 		errs = append(errs, err)
 	} else if len(temps) != 0 {
 		errs = append(errs, fmt.Errorf("zeroize: forced-interface registry crash temps present at final verification: %v", temps))
+	}
+	if temps, err := listNoRedirectsCaptureCrashTemps(wipeNoRedirectsCapturePath); err != nil {
+		errs = append(errs, err)
+	} else if len(temps) != 0 {
+		errs = append(errs, fmt.Errorf("zeroize: no-redirects capture crash temps present at final verification: %v", temps))
 	}
 	if _, err := os.Lstat(wipeFeedShrinkHistoryPath); err == nil {
 		errs = append(errs, fmt.Errorf("zeroize: feed shrink history %s present at final verification", wipeFeedShrinkHistoryPath))
