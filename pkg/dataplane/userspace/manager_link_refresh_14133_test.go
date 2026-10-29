@@ -125,6 +125,11 @@ func TestInterfaceLinkRefreshStampsFreshXfrmDumpFailed14133(t *testing.T) {
 // leaves attaches empty and this goes RED. The hook replaces
 // bpfShim.AttachXDP (unloaded in tests, would error "not loaded").
 func TestInterfaceLinkRefreshAttachesRecreatedIfindex14133(t *testing.T) {
+	prevLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = prevLookup })
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name, EncapType: "ether"}}, nil
+	}
 	cfg := interfaceLinkRefreshConfig11530()
 	m, _, setLink := interfaceLinkRefreshManager11530(t, cfg, "ge-0-0-0", 17, 1500)
 	var attaches []int
@@ -216,6 +221,7 @@ func TestRefreshAttachAdmission16637(t *testing.T) {
 		{Name: "ge-0/0/9", LinuxName: "ge-0-0-9", Ifindex: 90, Zone: "trust"},
 	}}
 	m := New()
+	m.rxVlanPreconditionCheck = safeRxVlanPreconditionsForTest
 	var attaches []int
 	m.attachInterfaceXDPHook = func(ifindex int, forceGeneric bool) error {
 		attaches = append(attaches, ifindex)
@@ -282,7 +288,7 @@ func TestRefreshAttachAdmission17701(t *testing.T) {
 	} {
 		snap := &ConfigSnapshot{Interfaces: tc.rows}
 		owner := interfaceOwnerRowForIfindex(snap, 50)
-		if !refreshAttachAdmission(50, &tc.rows[0], owner) {
+		if !refreshStructuralAttachAdmission(50, &tc.rows[0], owner) {
 			t.Errorf("%s: disabled unit-0 sibling vetoed enabled base; admission must be row-order independent (#17701)", tc.name)
 		}
 	}
@@ -300,6 +306,7 @@ func TestRefreshAttachAdmission17701(t *testing.T) {
 	} {
 		snap := &ConfigSnapshot{Interfaces: tc.rows}
 		m := New()
+		m.rxVlanPreconditionCheck = safeRxVlanPreconditionsForTest
 		attached := false
 		var gotForceGeneric bool
 		m.attachInterfaceXDPHook = func(ifindex int, forceGeneric bool) error {
@@ -336,8 +343,96 @@ func TestRefreshAttachAdmission17701(t *testing.T) {
 	} {
 		snap := &ConfigSnapshot{Interfaces: tc.rows}
 		owner := interfaceOwnerRowForIfindex(snap, 50)
-		if refreshAttachAdmission(50, &tc.rows[0], owner) {
+		if refreshStructuralAttachAdmission(50, &tc.rows[0], owner) {
 			t.Errorf("%s: AdminDisabled base admitted; want refused (#17701)", tc.name)
 		}
+	}
+}
+
+// TestInterfaceLinkRefreshPreservesRxVlanQuarantine17736 pins RX-VLAN's
+// interaction with #14133/#17701 attachment reconciliation. A parent already
+// detached by the audit must remain detached after an unrelated refresh, while
+// an otherwise healthy parent is still reattached.
+//
+// FAIL-ON-REVERT: removing the quarantine check from refresh admission attaches
+// ifindex 17 again; removing the healthy arm's admission path leaves ifindex 29
+// unattached.
+func TestInterfaceLinkRefreshPreservesRxVlanQuarantine17736(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/0": {},
+			"ge-0/0/1": {},
+		}},
+		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
+			"trust": {Name: "trust", Interfaces: []string{"ge-0/0/0", "ge-0/0/1"}},
+		}},
+	}
+	m, _, _ := interfaceLinkRefreshManager11530(t, cfg, "ge-0-0-0", 17, 1500)
+	oldBuild := buildLinkSnapshot
+	t.Cleanup(func() { buildLinkSnapshot = oldBuild })
+	indexByName := map[string]int{"ge-0-0-0": 17, "ge-0-0-1": 29}
+	buildLinkSnapshot = func(name string) (int, int, string, []InterfaceAddressSnapshot) {
+		if index := indexByName[name]; index != 0 {
+			return index, 1500, "02:00:00:00:17:36", nil
+		}
+		return 0, 0, "", nil
+	}
+	oldLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = oldLookup })
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name, EncapType: "ether"}}, nil
+	}
+
+	m.SetRxVlanParentQuarantined("ge-0-0-0", true)
+	m.rxVlanPreconditionCheck = safeRxVlanPreconditionsForTest
+	var attaches []int
+	m.attachInterfaceXDPHook = func(ifindex int, _ bool) error {
+		attaches = append(attaches, ifindex)
+		return nil
+	}
+	published, err := m.RefreshInterfaceRowsForLink(cfg, "ge-0-0-0")
+	if err != nil || !published {
+		t.Fatalf("refresh = (%t, %v), want publish", published, err)
+	}
+	attached := map[int]bool{}
+	for _, ifindex := range attaches {
+		attached[ifindex] = true
+	}
+	if attached[17] {
+		t.Fatalf("quarantined parent ifindex 17 was reattached across refresh: %v", attaches)
+	}
+	if !attached[29] {
+		t.Fatalf("healthy control parent ifindex 29 was not reattached: %v", attaches)
+	}
+}
+
+// TestRefreshAttachAdmissionRefusesRxVlanPreconditionFailure17736 pins the
+// Compile-equivalent offload gate: an unresolvable S-tag precondition fails
+// closed for every parent, even when the RX-VLAN audit has not yet quarantined
+// it.
+//
+// FAIL-ON-REVERT: dropping the ensureRxVlanParsePreconditions-equivalent check
+// causes ifindex 17 to attach.
+func TestRefreshAttachAdmissionRefusesRxVlanPreconditionFailure17736(t *testing.T) {
+	snap := &ConfigSnapshot{Interfaces: []InterfaceSnapshot{
+		{Name: "ge-0/0/0", LinuxName: "ge-0-0-0", Ifindex: 17, Zone: "trust"},
+	}}
+	oldLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = oldLookup })
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name, EncapType: "ether"}}, nil
+	}
+	m := New()
+	m.rxVlanPreconditionCheck = func(string) (error, error) {
+		return nil, errors.New("S-tag offload cannot be disabled")
+	}
+	var attaches []int
+	m.attachInterfaceXDPHook = func(ifindex int, _ bool) error {
+		attaches = append(attaches, ifindex)
+		return nil
+	}
+	m.reconcileInterfaceAttachmentsForRefreshLocked(snap)
+	if len(attaches) != 0 {
+		t.Fatalf("parent attached despite failed S-tag precondition: %v", attaches)
 	}
 }
