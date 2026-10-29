@@ -649,7 +649,7 @@ func (d *Daemon) reconcileDHCPRelay(cfg *config.Config) error {
 	//
 	// This is the SOLE production Apply site on purpose: the boot path
 	// (daemon_run.go) routes through here rather than calling Apply itself, so
-	// there is one place to wire rather than two to remember.
+	d.dhcpRelay.SetIfNameResolver(cfg.ResolveKernelIfName)
 	return d.dhcpRelay.Apply(ctx, cfg.ForwardingOptions.DHCPRelay)
 }
 
