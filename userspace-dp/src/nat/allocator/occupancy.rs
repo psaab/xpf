@@ -79,10 +79,6 @@ pub(in crate::nat::allocator) fn occupancy_next_probe(attempt: u64) -> u64 {
 /// translated port learns nothing about the next flow's port without
 /// the secret. `range == 0` yields 0 (callers guard range first).
 
-/// RFC 6056 Algorithm 3/5 keyed offset: hash the flow tuple under the
-/// per-boot secret, reduced modulo `range`. An observer who sees one
-/// translated port learns nothing about the next flow's port without
-/// the secret. `range == 0` yields 0 (callers guard range first).
 #[inline]
 pub(in crate::nat) fn pat_keyed_offset(secret: u64, key: u64, range: u32) -> u32 {
     if range == 0 {

@@ -1253,7 +1253,7 @@ impl SessionTable {
     /// Returns true only when the first RST or a FIN in a previously un-FINed
     /// direction advances the close state; repeated FIN/RST packets do not
     /// refresh the close window.
-    fn stamp_tcp_close(entry: &mut SessionEntry, _key: &SessionKey, tcp_flags: u8) -> bool {
+    fn stamp_tcp_close(entry: &mut SessionEntry, key: &SessionKey, tcp_flags: u8) -> bool {
         let progressed =
             !entry.reset && (has_rst(tcp_flags) || (has_fin(tcp_flags) && !entry.fin_own));
         if !entry.closing {
@@ -1267,6 +1267,7 @@ impl SessionTable {
                 entry.metadata.is_reverse,
                 tcp_flags,
             );
+            let _ = key;
         }
         entry.closing = true;
         entry.reset |= has_rst(tcp_flags);

@@ -180,12 +180,13 @@ fn retry_pending_pptp_call_installs(
                             retry.learned_ns,
                             queue_id,
                         ),
-                        Err(_e) => {
+                        Err(e) => {
                             if install_collision_is_transient(sessions, inbox, &retry, self_worker_commands, peer_worker_commands) {
                                 debug_log!("PPTP association refused; retaining retry: {:?}", e);
                             } else {
                                 inbox.drop_call_install(retry.call, retry.control, retry.learned_ns);
                             }
+                            let _ = &e;
                         }
                     }
                 }
@@ -401,12 +402,13 @@ pub(in crate::afxdp) fn drain_pptp_control_inbox_at_epoch(
                 );
                 let local_install = sessions.pptp_mut().install(call, control, seg.captured_ns);
                 let local_install_failed = local_install.is_err();
-                if let Err(_e) = &local_install {
+                if let Err(e) = &local_install {
                     debug_log!(
                         "PPTP association refused on the local worker; \
                          broadcasting and recording retry: {:?}",
                         e
                     );
+                    let _ = e;
                 }
                 let (accepted, mut unsent) =
                     broadcast_pptp_install(peer_worker_commands, call, control, seg.captured_ns);

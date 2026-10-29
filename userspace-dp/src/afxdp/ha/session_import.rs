@@ -814,6 +814,8 @@ impl crate::afxdp::ha::SessionDomain {
         // mirror refuses, so the unaccepted replacement does not displace the
         // still-authoritative entry. A failed restore is observable; refusal
         // handling remains best-effort and never changes its outcome.
+        let mut previous_snat_restored = None;
+        let mut previous_nat64_restored = None;
         if let Some(previous) = previous_entry
             && !previous.metadata.is_reverse
         {
@@ -890,6 +892,8 @@ impl crate::afxdp::ha::SessionDomain {
                     }
                 }
             }
+            previous_snat_restored = Some(snat_restored);
+            previous_nat64_restored = Some(nat64_restored);
             if !snat_restored {
                 self.sessions
                     .mirror_restore_failed
@@ -912,6 +916,8 @@ impl crate::afxdp::ha::SessionDomain {
             previous_snat_restored,
             previous_nat64_restored
         );
+        // `debug_log!` expands away in non-debug builds.
+        let _ = (&previous_snat_restored, &previous_nat64_restored);
     }
 
     fn restore_rejected_forward_mirror(
