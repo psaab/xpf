@@ -273,12 +273,25 @@ falsely refused an extension whenever that config was not yet appliable (for
 example it binds a feed that has not fetched yet) and named a binding the
 timer would never restore, and it never re-checked the true target at all.
 
+The accessor returns the rollback-window generation with the target under the
+same store read lock. The daemon carries that token through pre-flight and
+`CommitConfirmedGenAndConfirmAs` checks it under the promotion lock. This is
+required because `ConfirmCommit` runs outside the daemon apply semaphore: if it
+clears a pending window after target validation, the nested arm is refused
+instead of silently saving the newly-active, unexamined config as its rollback
+target. The `first` flag, not whether the compiled target pointer is nil,
+identifies a bootstrap rollback; after a first-commit rollback and restart,
+`Store.Load` can compile the never-committed empty tree to a non-nil config
+(#7291). Such a first-commit target is omitted from rollback-specific gates,
+while the candidate's device-map gate still runs. A missing target is refused
+for any non-first transaction.
+
 The rollback-target refusal is deliberately narrow: only `commit confirmed` is
 subject to it. Plain `commit` remains available to make a correction permanent.
 Gating the plain path would remove the only route OFF a poisoned active config.
-A nil rollback target (the first commit on a fresh store) is also unaffected:
-that timeout path reverts to bootstrap mode (#1922 Item 1b) rather than to a
-compiled config, so there is nothing to validate.
+A nil rollback target on a fresh store is also unaffected: that timeout path
+reverts to bootstrap mode (#1922 Item 1b) rather than to a compiled config, so
+there is nothing to validate.
 
 Regression coverage: `rollback_target_appliable_6707_test.go` (gate behaviour
 plus an AST wiring guard that the call is reached from `commitConfirmedAndApply`
@@ -287,6 +300,11 @@ and absent from the plain-commit entry points),
 unconfirmed feed-bound config succeeds against the healthy retained target,
 and a nested arm whose retained target is unappliable is refused naming that
 target),
+`nested_commit_confirmed_concurrent_confirm_17695_test.go` deterministically
+confirms through the same session between the retained-target pre-flight and
+promotion, and covers both fresh-store nil and post-restart non-nil first-commit
+bootstrap targets; the configstore-level generation refusal is pinned in
+`pkg/configstore/confirm_target_17695_test.go`,
 `peer_snapshot_commit_confirmed_10782_test.go` (incompatible-peer refusal
 before promotion plus capable-peer and disconnected-peer controls),
 `rollback_target_mirror_9588_test.go` (one tolerant-compiled row per refusal

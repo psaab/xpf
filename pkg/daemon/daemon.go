@@ -1131,6 +1131,11 @@ type Daemon struct {
 	// the wiring re-reads under the semaphore — which is how a first version of
 	// the #6716 guard stayed green against a reverted call site.
 	preApplyHookForTest func()
+	// beforeCommitConfirmedPromotionForTest fires after the rollback-target
+	// pre-flight and before the store atomically checks the captured window
+	// generation and promotes. It lets the #17695 test confirm the pending
+	// window at the exact time-of-check/time-of-use boundary.
+	beforeCommitConfirmedPromotionForTest func()
 
 	// bootstrapTeardownForTest, when non-nil, replaces the real per-step
 	// teardown executed inside enterBootstrapMode (#5868). Test-only seam:

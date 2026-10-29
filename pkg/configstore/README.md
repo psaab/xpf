@@ -805,7 +805,10 @@ the generation:
   replaces `EnsureConfigHolder`, which had no remaining callers once every
   commit path was converted.
 - **`CommitWithDescriptionGenAs` / `CommitConfirmedGenAs`** — verify the
-  authority AND the generation under one `s.mu`, immediately before promotion.
+  authority AND candidate generation under one `s.mu`, immediately before
+  promotion. The daemon's `CommitConfirmedGenAndConfirmAs` additionally checks
+  the rollback-window generation captured with `RollbackTargetForArm`, so a
+  concurrent `ConfirmCommit` cannot substitute an un-preflighted target.
 - **`ErrConfigHolderTurnover`** — a sentinel deliberately DISTINCT from
   `ErrCandidateGenerationConflict`, because the correct reaction is opposite: a
   generation conflict means "re-examine and retry"; a turnover means "the
