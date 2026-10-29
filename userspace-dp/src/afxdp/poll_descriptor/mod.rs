@@ -9269,6 +9269,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
                                 }
+                                if let Some(inner_frame) = owned_packet_frame.take() {
+                                    let forward = binding
+                                        .scratch
+                                        .scratch_forwards
+                                        .last_mut()
+                                        .expect("queued embedded ICMP forward");
+                                    let PendingForwardFrame::PrebuiltTransit {
+                                        ingress_source,
+                                        ..
+                                    } = &mut forward.frame
+                                    else {
+                                        unreachable!("embedded ICMP must queue PrebuiltTransit");
+                                    };
+                                    *ingress_source = PrebuiltTransitIngress::Owned(inner_frame);
+                                }
                                 telemetry.counters.touched = true;
                                 continue;
                             }
@@ -9417,6 +9432,21 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                     );
                                     binding.scratch.scratch_recycle.push(desc.addr);
                                     continue;
+                                }
+                                if let Some(inner_frame) = owned_packet_frame.take() {
+                                    let forward = binding
+                                        .scratch
+                                        .scratch_forwards
+                                        .last_mut()
+                                        .expect("queued embedded ICMP forward");
+                                    let PendingForwardFrame::PrebuiltTransit {
+                                        ingress_source,
+                                        ..
+                                    } = &mut forward.frame
+                                    else {
+                                        unreachable!("embedded ICMP must queue PrebuiltTransit");
+                                    };
+                                    *ingress_source = PrebuiltTransitIngress::Owned(inner_frame);
                                 }
                                 telemetry.counters.touched = true;
                                 continue;

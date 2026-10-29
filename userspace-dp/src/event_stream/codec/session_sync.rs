@@ -43,7 +43,10 @@ impl EventFrame {
         )
     }
 
-    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "#17200: wide dataplane signature; census in docs/log/17200.md"
+    )]
     pub(crate) fn encode_session_open_with_handshake_state(
         seq: u64,
         key: &SessionKey,
@@ -106,7 +109,10 @@ impl EventFrame {
         )
     }
 
-    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "#17200: wide dataplane signature; census in docs/log/17200.md"
+    )]
     pub(crate) fn encode_session_update_with_handshake_state(
         seq: u64,
         key: &SessionKey,
@@ -140,7 +146,10 @@ impl EventFrame {
         )
     }
 
-    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "#17200: wide dataplane signature; census in docs/log/17200.md"
+    )]
     fn encode_session_record(
         msg_type: u8,
         seq: u64,
@@ -171,6 +180,7 @@ impl EventFrame {
             policy_rule_id,
             policy_counter_idx,
             inactivity_timeout_secs,
+            app_timeout_log_stated,
             nat64,
             nat64_snat_v4,
             source_nat_icmp,
@@ -427,15 +437,16 @@ impl EventFrame {
         // stable position even when no rule identity is carried.
         let rule_id = policy_rule_id.as_bytes();
         // #14839: reserve the whole remaining trailer, not just the rule_id:
-        // after the rule_id come the #10888 handshake byte (1), the #12187
-        // provenance byte (1), and the #13965 PPTP call-id pair (8). The old
-        // guard reserved only `+ 2` past the rule_id (the length prefix reads
-        // as the other 2 at a glance, but those bytes are before the rule_id),
-        // so a rule_id sized to fit exactly under the old guard passed it and
-        // then panicked past the 512-byte frame when the 8-byte pair was
-        // written. Reserving all 10 tail bytes makes the fallback correct:
+        // after the rule_id come handshake (1), provenance (1), the #13965
+        // PPTP pair (8), #15176 NAT-scope ifindex (4), #16217 packet counters
+        // (8+8), and #17780's pair-presence byte (1), for 31 bytes total.
+        // The old guard reserved only `+ 2` past the rule_id (the length
+        // prefix reads as the other 2 at a glance, but those bytes are before
+        // the rule_id), so a rule_id sized to fit exactly under the old guard
+        // passed it and then panicked past the 512-byte frame when the trailer
+        // was written. Reserving the whole trailer makes the fallback correct:
         // either the full trailer fits and is written, or rule_id_len is 0.
-        const RULE_ID_TRAILER_BYTES: usize = 1 + 1 + 8 + 4 + 8 + 8;
+        const RULE_ID_TRAILER_BYTES: usize = 1 + 1 + 8 + 4 + 8 + 8 + 1;
         let rule_id_len = if rule_id.len() <= u16::MAX as usize
             && pos + 2 + rule_id.len() + RULE_ID_TRAILER_BYTES <= buf.len()
         {
@@ -473,6 +484,11 @@ impl EventFrame {
         pos += 8;
         buf[pos..pos + 8].copy_from_slice(&rev_packets.to_le_bytes());
         pos += 8;
+        // #17780: the helper explicitly carries the app-timeout/log pair,
+        // including when both values are zero. Older event frames omit this
+        // length-gated byte; unknown values fail safe on the Go side.
+        buf[pos] = u8::from(app_timeout_log_stated);
+        pos += 1;
 
         // Write header
         let payload_len = (pos - FRAME_HEADER_SIZE) as u32;

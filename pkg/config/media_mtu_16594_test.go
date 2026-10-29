@@ -143,10 +143,6 @@ func TestMediaMTUExemptDevicesPassThrough_16594(t *testing.T) {
 			"set interfaces reth0 mtu 9000",
 			"set interfaces reth0 unit 0 family inet address 10.0.0.1/24",
 		},
-		"ae": {
-			"set interfaces ae0 mtu 9000",
-			"set interfaces ae0 unit 0 family inet address 10.0.0.1/24",
-		},
 	}
 	for name, sets := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -167,6 +163,25 @@ func TestMediaMTUExemptDevicesPassThrough_16594(t *testing.T) {
 				t.Fatalf("%s: no interface carried the authored MTU: %+v", name, cfg.Interfaces.Interfaces)
 			}
 		})
+	}
+}
+
+// #17719: aggregated Ethernet still has a media MTU distinct from its
+// protocol MTU. ae0 authored `mtu 1514` must compile to L3 1500, the
+// same -14 translation as ordinary Ethernet (not pass through at 1514).
+// FAIL-ON-REVERT: restore the `ae` term in isMediaMTUExempt16594 and
+// this compiles 1514 verbatim.
+func TestMediaMTUAggregatedEthernet1514Yields1500_17719(t *testing.T) {
+	cfg := assertCommitAccepts(t, flatTreeFromSets(t,
+		"set interfaces ae0 mtu 1514",
+		"set interfaces ae0 unit 0 family inet address 10.0.0.1/24",
+	))
+	ifc := cfg.Interfaces.Interfaces["ae0"]
+	if ifc == nil || ifc.MTU != 1500 {
+		t.Fatalf("ae0 mtu 1514: ifc.MTU = %+v, want 1500", ifc)
+	}
+	if got := ifc.NetdevMTU(); got != 1500 {
+		t.Fatalf("ae0 NetdevMTU = %d, want 1500", got)
 	}
 }
 

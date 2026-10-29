@@ -74,16 +74,12 @@ type ProcessStatus struct {
 	Enabled                bool                  `json:"enabled"`
 	ForwardingArmed        bool                  `json:"forwarding_armed,omitempty"`
 	Capabilities           UserspaceCapabilities `json:"capabilities"`
-	// LastSnapshotRejectReasons is the manager-owned (#3261) diagnostic
-	// recording why the most recent snapshot build carries unrepresentable
-	// policy content that the helper integrity preflight rejects (previous-good
-	// retained / fresh-boot default-deny — never fail-open). It is STAMPED by
-	// recordHelperStatusLocked from m.lastSnapshotRejectReasons, NOT reported
-	// by the helper (which strips the unknown PolicyContentRejected field on
-	// round-trip). Empty means the last build was fully representable. Surfaced
-	// as xpf_userspace_policy_content_rejected so the Go/Rust status skew
-	// (ForwardingSupported=true while the helper rejected the snapshot) is
-	// observable.
+	// LastSnapshotRejectReasons carries the manager-owned Go-side policy
+	// diagnostic: whole-snapshot refusal reasons and per-rule DNS quarantine
+	// warnings. It is stamped by recordHelperStatusLocked because the helper
+	// strips the unknown PolicyContentRejected field on round-trip. DNS warning
+	// entries describe rules the helper accepted as deny while siblings loaded;
+	// generic refusal entries describe previous-good/default-deny retention.
 	LastSnapshotRejectReasons []string `json:"last_snapshot_reject_reasons,omitempty"`
 	// ZoneIDCollisions is the manager-owned (#3719) diagnostic listing every
 	// security zone the last snapshot build QUARANTINED because its StableZoneID

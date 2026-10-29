@@ -42,15 +42,10 @@ func offendingApplicationTokens(cfg *config.Config, apps []string) []string {
 	return bad
 }
 
-// collectPolicyContentRejections scans the BUILT policy rules for the #3261
-// fail-closed sentinels and returns a human-readable reason per offending rule.
-// This is the ACCURATE, feed-aware signal that the published snapshot will be
-// rejected by the helper integrity preflight (the application __unsupported__
-// term or the __unsupported_address__ literal) — unlike the cfg-only capability
-// gate, it sees the feed overlay already folded into the rules, so a healthy
-// dynamic-address feed policy does NOT false-positive. A non-empty result means
-// the helper keeps the previous-good state (or fresh-boot default-deny) and
-// stays armed; an empty result means every rule is representable.
+// collectPolicyContentRejections scans built rules for whole-snapshot
+// fail-closed sentinels and returns a human-readable reason per refusal.
+// It is feed-aware: a healthy dynamic-address feed policy does not
+// false-positive after its overlay is folded into the rules.
 func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 	var reasons []string
 	for i := range policies {
@@ -92,13 +87,9 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 			len(rule.rejectedApplications) == 0 {
 			appBad = false
 		}
-		// #16595/#17782: a rule poisoned only because DNS resolution is
-		// unavailable is not rejected content — the config is representable,
-		// and previous-good/default-deny is the enforcement state.
-		if rule.dnsUnavailableFailClosed && !srcBad && !dstBad && !schedulerBad &&
-			len(rule.malformedZonePairShapes) == 0 && len(rule.unknownSecurityPoliciesChildren) == 0 {
-			continue
-		}
+		// DNS quarantines are accepted by Rust, so they are not snapshot
+		// rejection reasons. collectPolicyContentDiagnostics adds their
+		// operator-facing warning separately.
 		if !appBad && !srcBad && !dstBad && !schedulerBad {
 			continue
 		}
@@ -122,6 +113,33 @@ func collectPolicyContentRejections(policies []PolicyRuleSnapshot) []string {
 		}
 		reasons = append(reasons, fmt.Sprintf("policy %s names content the userspace matcher cannot represent: %s",
 			policyRejectionScope(rule), strings.Join(causes, "; ")))
+	}
+	return reasons
+}
+
+// collectPolicyContentDiagnostics combines whole-snapshot refusal reasons with
+// per-rule quarantine warnings for the operator-facing snapshot diagnostics.
+// DNS quarantine warnings are intentionally absent from
+// PolicyContentRejectionReasons, which gates operations such as rollback.
+func collectPolicyContentDiagnostics(policies []PolicyRuleSnapshot) []string {
+	reasons := collectPolicyContentRejections(policies)
+	for i := range policies {
+		rule := &policies[i]
+		if rule.dnsUnavailableFailClosed {
+			var causes []string
+			if len(rule.rejectedSourceAddresses) > 0 {
+				causes = append(causes, rejectionCause("source-address", rule.rejectedSourceAddresses))
+			}
+			if len(rule.rejectedDestAddresses) > 0 {
+				causes = append(causes, rejectionCause("destination-address", rule.rejectedDestAddresses))
+			}
+			reason := "address"
+			if len(causes) > 0 {
+				reason = strings.Join(causes, "; ")
+			}
+			reasons = append(reasons, fmt.Sprintf("policy %s has unavailable DNS address resolution for %s; rule quarantined to deny while sibling rules remain active",
+				policyRejectionScope(rule), reason))
+		}
 	}
 	return reasons
 }

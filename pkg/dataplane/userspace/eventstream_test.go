@@ -2815,3 +2815,37 @@ func TestEventStreamPolicyDenyGenerationAcrossBacklogAndReplay10978(t *testing.T
 		})
 	}
 }
+
+func TestDecodeSessionEventAppTimeoutLogStated17780(t *testing.T) {
+	// The v4 fixed SessionOpen payload is 64 bytes. Its extended tail through
+	// packet counters is 86 bytes; #17780's marker is the next byte.
+	payload := make([]byte, 64+86+1)
+	payload[0] = 4
+	for _, tc := range []struct {
+		name       string
+		present    bool
+		flag       byte
+		wantStated bool
+	}{
+		{name: "legacy omitted", present: false},
+		{name: "explicit false", present: true, flag: 0},
+		{name: "explicit true", present: true, flag: 1, wantStated: true},
+		{name: "unknown fails closed", present: true, flag: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wire := append([]byte(nil), payload...)
+			if tc.present {
+				wire[len(wire)-1] = tc.flag
+			} else {
+				wire = wire[:len(wire)-1]
+			}
+			got, ok := decodeSessionEvent(wire)
+			if !ok {
+				t.Fatal("session frame did not decode")
+			}
+			if got.AppTimeoutLogStated != tc.wantStated {
+				t.Fatalf("AppTimeoutLogStated=%v, want %v", got.AppTimeoutLogStated, tc.wantStated)
+			}
+		})
+	}
+}

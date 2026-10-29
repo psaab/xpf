@@ -931,21 +931,14 @@ func (m *Manager) configHasDataRGLocked() bool {
 // helper integrity preflight can reject — so the dataplane genuinely cannot
 // forward and the legitimate disarm still applies.
 //
-// CLASS (i) — unrepresentable policy CONTENT (caps.PolicyContentRejected is
-// non-empty: a policy names an application protocol/port or address the matcher
-// cannot represent). buildOneRuleSnapshot emits the `__unsupported__` sentinel
-// for such a rule, and a CURRENT helper rejects it via its non-mutating
-// integrity preflight while staying armed (keeping previous-good, or leaving
-// the default-deny PolicyState on a fresh boot). Disarming here would XDP_PASS
-// transit to the kernel and bypass that reject — the fail-OPEN #3261 closes —
-// so we KEEP the helper armed. The ONLY exception is an OLDER local helper that
-// predates the preflight: it would silently drop the sentinel and process the
-// resulting match-any rule with forwarding armed. We disarm just that narrow
-// case, keyed on the helper's reported snapshot protocol version (the helper
-// ships in the same .deb as the daemon, so this is only a transient
-// helper-upgrade-lag window on a single node), NOT on the content being
-// unrepresentable.
-//
+// CLASS (i) — policy content requiring fail-closed handling. Generic
+// unrepresentable content carries `__unsupported__` and the current helper
+// rejects the whole snapshot, retaining previous-good (fresh boot: default-
+// deny). DNS-only rules carry `__dns_unavailable__`; a current helper accepts
+// the snapshot but quarantines that rule to deny while siblings enforce. An
+// older local helper does not recognize the DNS marker, so the same
+// PolicyContentRejected diagnostic triggers the narrow compatibility disarm
+// below rather than risking it silently dropping the marker.
 // caps are read from the snapshot being published (snap.Capabilities), NOT
 // re-derived from cfg: only the snapshot value is feed-aware (#2049) and
 // reflects the ACTUAL per-rule sentinels, so a healthy dynamic-address feed

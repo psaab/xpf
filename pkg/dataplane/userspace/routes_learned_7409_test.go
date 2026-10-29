@@ -354,11 +354,11 @@ func TestLearnedRouteOutranksWorsePreferenceConfigRoute(t *testing.T) {
 	}
 }
 
-// Dynamic routes use their protocol's effective distance (#16620 Junos
-// scale: OSPF 10, RIP 100, BGP 170, IS-IS at FRR's fixed 115) when a
-// configured static is a worse fallback. The helper must retain both
-// rows and order the learned route first, rather than comparing every
-// protocol against DHCP's fixed import preference of 200.
+// Dynamic routes use their Junos-scale preference (#16620) when the helper
+// FIB gap-fills a configured static. IS-IS uses 15 conservatively because
+// rtnetlink does not identify its level; this avoids using zebra's fixed
+// 115 to let a static shadow a Junos-preferred IS-IS route.
+// Other learned protocols retain DHCP's fallback preference of 200.
 func TestDynamicLearnedRouteGapFillUsesProtocolDistance12037(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -372,9 +372,9 @@ func TestDynamicLearnedRouteGapFillUsesProtocolDistance12037(t *testing.T) {
 		{"ospf-11", "ospf", 11, 10},
 		{"ospf-150", "ospf", 150, 10},
 		{"ospf-200", "ospf", 200, 10},
-		{"isis-116", "isis", 116, 115},
-		{"isis-150", "isis", 150, 115},
-		{"isis-200", "isis", 200, 115},
+		{"isis-116", "isis", 116, 15},
+		{"isis-150", "isis", 150, 15},
+		{"isis-200", "isis", 200, 15},
 		{"rip-101", "rip", 101, 100},
 		{"rip-150", "rip", 150, 100},
 		{"rip-200", "rip", 200, 100},
@@ -464,7 +464,7 @@ func TestDynamicLearnedRouteDoesNotOverrideEqualDistanceConfigRoute12037(t *test
 	}{
 		{"bgp", 170},
 		{"ospf", 10},
-		{"isis", 115},
+		{"isis", 15},
 		{"rip", 100},
 	}
 	for _, tc := range tests {

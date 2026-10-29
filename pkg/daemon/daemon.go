@@ -1070,20 +1070,25 @@ type Daemon struct {
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
 	// dnsRefreshMu guards the published-answer baseline.
-	// lastDNSRefreshAnswers holds the DNS answers last actually APPLIED
-	// for lastDNSRefreshBase (store generation + config pointer identity,
-	// read back after apply-time re-resolution under applySem, never a
-	// pre-apply proposal). Every writer holds applySem and records
-	// unconditionally — inside the hold it IS the newest applied state;
-	// failed applies invalidate. (Round-4: digest CAS removed, it only
+	// lastDNSRefreshAnswers holds the DNS state (prefixes and resolver failure
+	// flag) last actually APPLIED for lastDNSRefreshBase (store generation +
+	// config pointer identity, read back after apply-time re-resolution under
+	// applySem, never a pre-apply proposal). Every writer holds applySem and
+	// records unconditionally — inside the hold it IS the newest applied
+	// state; failed applies invalidate. (Round-4: digest CAS removed, it only
 	// ever dropped the newest record.)
 	dnsRefreshMu          sync.Mutex
 	lastDNSRefreshBase    *config.Config
-	lastDNSRefreshAnswers map[string][]string
-	// dnsResolvedConfigs marks configs already resolved outside applySem
-	// (#16601) — notably the DNS refresher's clone — so the pre-apply
-	// resolver does not resolve them again. Guarded by dnsRefreshMu.
-	dnsResolvedConfigs map[*config.Config]struct{}
+	lastDNSRefreshAnswers map[string]config.DNSAnswerState
+	// dnsRefreshApplying identifies the periodic refresher clone while its
+	// apply runs under applySem. The ordinary-apply baseline defer must not
+	// publish it; applyDNSRefreshedConfig owns its generation-CAS publication.
+	dnsRefreshApplying *config.Config
+	// dnsResolvedConfigs maps resolved clones to their exact source config
+	// (#16601); map membership also marks DNS already resolved outside
+	// applySem, so the pre-apply resolver does not resolve it again.
+	// Guarded by dnsRefreshMu.
+	dnsResolvedConfigs map[*config.Config]*config.Config
 	// relayRefRGIndex is the per-packet DHCP-relay gate's precomputed
 	// ref→RG index (#17086), keyed by config pointer identity: rebuilt
 	// only when the active config pointer changes, so the per-packet
@@ -1115,6 +1120,11 @@ type Daemon struct {
 	// after management-VRF rebind and before the final terminator reassertion.
 	// It models late networkd cleanup without replacing the apply pipeline.
 	beforeFinalVRFMissReassertForTest func()
+	// confirmTargetFeedInstallPending marks a rollback-target producer set
+	// temporarily installed while C2 remains active. Its callback must not
+	// re-apply C2 and tear the target feed back down before the next rollback
+	// timer fire (#17741). Zero means no such installation is pending.
+	confirmTargetFeedInstallPending atomic.Uint64
 	// confirmFeedDeferrals counts, per commit-confirmed generation, how often a
 	// timed-out rollback was deferred because its target waits on a
 	// dynamic-address feed (#9615). Read and written only by

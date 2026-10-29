@@ -153,6 +153,16 @@ func (r *CompileResult) ensureRxVlanParsePreconditions(iface string) (rxvlanErr,
 	return rxvlanErr, stagErr
 }
 
+// EnsureRxVlanParsePreconditions confirms the same RX tag-strip preconditions
+// Compile uses before activating XDP. It is used when a recreated netdev is
+// attached by the userspace link-refresh path, which has no CompileResult to
+// carry the compile-time cache. The C-tag and S-tag errors retain their
+// separate activation scopes at the caller.
+func EnsureRxVlanParsePreconditions(iface string) (rxvlanErr, stagErr error) {
+	r := &CompileResult{rxTagStripOffCache: make(map[string]bool)}
+	return r.ensureRxVlanParsePreconditions(iface)
+}
+
 // rxVlanStagHwParseActivationError decides whether a failure to disable the
 // S-tag HW-parse offload on physName must FAIL ACTIVATION CLOSED (#10915).
 // Like rxVlanOffloadActivationError, it passes nil through and wraps a

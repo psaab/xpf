@@ -2931,6 +2931,7 @@ fn wire_invariant_default_specimens() {
             policy_counter_idx: 17142015,
             policy_rule_id: "policy-rule-17142".into(),
             app_timeout: 17142016,
+            app_timeout_log_stated: true,
             nat64: true,
             nat64_snat_v4: "10.171.42.6".into(),
             source_nat_icmp_valid: true,

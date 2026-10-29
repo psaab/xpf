@@ -64,16 +64,12 @@ import (
 // a non-regression.
 
 // dupNameScannersExpanded is the scanner set re-run on the expanded tree.
-//
-// It is a slice rather than three inline calls so a fourth pre-expansion
-// duplicate-name gate cannot be added to the family without a decision about
-// this view. #16607 adds validateSourceNATDuplicateContextAST as the fourth
-// scanner (the duplicate-context axis, not a name axis).
+// Source-NAT context duplicates use their separate #16607 leniency and
+// diagnostics and are checked by validateSourceNATDuplicateContextExpandedAST.
 var dupNameScannersExpanded = []func(*ConfigTree, bool) ([]string, error){
 	validateDuplicateNamedBlockAST,
 	validateDuplicateNATRuleNamesAST,
 	validateDuplicateNATRuleSetNamesAST,
-	validateSourceNATDuplicateContextAST,
 }
 
 // validateDuplicateNamesExpandedAST is the post-expansion half of the

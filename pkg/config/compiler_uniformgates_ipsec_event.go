@@ -131,7 +131,8 @@ func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) 
 	// gateway object referenced by another VPN. Since #15024 both key
 	// one swanctl connection namespace; folding them drops one peer
 	// silently and negotiates its children with the wrong peer. Strict
-	// on commit; lenient warns (the render belt separates them).
+	// commit rejects it; lenient paths warn while the renderer assigns
+	// distinct connection keys (#17731).
 	if err := validateIPsecGatewayNameCollisionStrict(cfg); err != nil {
 		if opts.lenientIPsecGatewayNameCollision {
 			cfg.Warnings = append(cfg.Warnings,

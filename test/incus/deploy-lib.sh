@@ -1215,14 +1215,27 @@ deploy_verify_dataplane_preflight() {
 	if (( verify_rc != 0 )); then
 		deploy_preflight_cleanup "$rinst"
 		# #9558: verify-dataplane exits 3 ONLY for the #1864 kernel-verifier
-		# reject (dataplane.ErrUserspaceShimVerifierReject). Every other refusal
-		# exits 1, including a live pinned-map ABI mismatch, and rebuilding the
-		# shim cannot fix those. Print the #1864 remediation for exit 3 only;
-		# for anything else, point at verify-dataplane's own message.
+		# reject (dataplane.ErrUserspaceShimVerifierReject). The legacy other
+		# refusal class exits 1, including a live pinned-map ABI mismatch.
+		# Print the #1864 remediation for exit 3 only; for anything else,
+		# point at verify-dataplane's own message.
 		if (( verify_rc == 3 )); then
 			die "verify-dataplane REJECTED the new binary's embedded shim on $rinst — deploy aborted, old daemon untouched.
   This is the #1864 failure mode. Rebuild with the pinned toolchain (make generate) or restore the tracked object:
     git checkout -- pkg/dataplane/userspace_xdp_bpfel.o && make build"
+		fi
+		# #17769: route both #16701 headroom refusal codes to remediation
+		# matching their distinct meanings. Neither is a kernel REJECT or a
+		# pinned-map ABI mismatch, and neither honors a guest-side override.
+		if (( verify_rc == 4 )); then
+			die "verify-dataplane refused the new binary on $rinst (exit 4) — deploy aborted, old daemon untouched.
+  LOW-HEADROOM: the shim LOADS on this kernel but measured verifier headroom is below the 15% floor (see verify-dataplane's counts, kernel and floor above).
+  Free verifier headroom by reducing the shim's verifier cost (for example, trim the hot parsing paths described in pkg/dataplane/README.md), then rebuild and rerun the pre-flight. Alternatively, use a kernel with sufficient measured headroom; retry deployment only after this check passes. No guest-side override is honored."
+		fi
+		if (( verify_rc == 5 )); then
+			die "verify-dataplane refused the new binary on $rinst (exit 5) — deploy aborted, old daemon untouched.
+  UNMEASURED-HEADROOM: the shim LOADS on this kernel, but its processed-instruction count was unavailable, so the 15% floor could not be applied (see verify-dataplane's message above).
+  Do not treat this as measured headroom or clear live pins. Resolve the verifier-stat reporting incompatibility or use a kernel that reports processed-instruction counts, then rerun the pre-flight and deploy only after it passes. No guest-side override is honored."
 		fi
 		die "verify-dataplane refused the new binary on $rinst (exit $verify_rc) — deploy aborted, old daemon untouched.
   This is NOT the #1864 kernel-verifier reject (that exits 3), so rebuilding the shim will not help.

@@ -648,6 +648,25 @@ fn udp_frag_frame_5689(frag_off: u16, id: u16) -> Vec<u8> {
     f
 }
 
+/// Three-fragment SNAT train with fragmentable byte ranges [0,16), [16,32),
+/// and [32,40). The first fragment keeps a real UDP header; non-first
+/// fragments carry only opaque payload.
+fn udp_frag_range_frame_17720(frag_off: u16, id: u16, payload_len: usize) -> Vec<u8> {
+    let mut frame = udp_frag_frame_5689(frag_off, id);
+    frame.truncate(34); // Ethernet + IPv4 header.
+    let total_len = 20 + payload_len;
+    frame[16..18].copy_from_slice(&(total_len as u16).to_be_bytes());
+    let mut payload = vec![0u8; payload_len];
+    if frag_off & 0x1FFF == 0 {
+        payload[..8].copy_from_slice(&[
+            0x82, 0x35, 0x01, 0xBB, // ports 33333 -> 443
+            0x00, 0x28, 0x00, 0x00, // UDP length 40; checksum omitted in fixture
+        ]);
+    }
+    frame.extend_from_slice(&payload);
+    frame
+}
+
 fn udp_frag_meta_5689() -> UserspaceDpMeta {
     UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
@@ -790,6 +809,79 @@ fn flowless_non_first_fragment_inherits_ordinary_snat_translation_5689() {
         dbg2.nat_applied_none, 0,
         "#5689: the non-first fragment must NOT be forwarded untranslated"
     );
+}
+
+// #17720: exercise the ordinary-NAT consult path with actual fragment trains.
+// RED on revert: releasing every MF=0 consult drops the reordered middle; not
+// recording successful consult ranges leaves the completed train resident.
+#[test]
+fn ordinary_snat_fragment_coverage_is_arrival_order_independent_17720() {
+    let run = |id: u16, tail_first: bool| {
+        let mut snapshot = policy_deny_snapshot();
+        snapshot.default_policy = "permit".to_string();
+        snapshot.policies.clear();
+        snapshot.neighbors = vec![frag_transit_wan_neighbor()];
+        snapshot.source_nat_rules = vec![SourceNATRuleSnapshot {
+            name: "snat-lan-wan".to_string(),
+            from_zone: "lan".to_string(),
+            to_zone: "wan".to_string(),
+            source_addresses: vec!["0.0.0.0/0".to_string()],
+            interface_mode: true,
+            ..Default::default()
+        }];
+        let forwarding = build_forwarding_state(&snapshot);
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+        binding.interface = Arc::<str>::from("reth1.0");
+        let mut sessions = SessionTable::new();
+        let ha_state = BTreeMap::new();
+
+        let first = udp_frag_range_frame_17720(0x2000, id, 16);
+        let mut first_meta = udp_frag_meta_5689();
+        first_meta.pkt_len = first.len() as u16;
+        let (_batch, first_dbg) = txn_run_descriptor_checked(
+            &mut binding,
+            &mut sessions,
+            &forwarding,
+            &ha_state,
+            &first,
+            first_meta,
+            true,
+        );
+        assert_eq!(first_dbg.forward, 1, "the admitted head must forward");
+        assert_eq!(first_dbg.nat_applied_snat, 1, "the head must be SNAT-translated");
+        assert_eq!(forwarding.nat64.frag_assoc.len(), 1);
+
+        let order = if tail_first {
+            [("tail", 0x0004, 8, 1), ("middle", 0x2002, 16, 0)]
+        } else {
+            [("middle", 0x2002, 16, 1), ("tail", 0x0004, 8, 0)]
+        };
+        for (name, frag_off, payload_len, expected_len) in order {
+            let fragment = udp_frag_range_frame_17720(frag_off, id, payload_len);
+            let mut meta = udp_native_frag_meta_5689();
+            meta.pkt_len = fragment.len() as u16;
+            let (batch, dbg) = txn_run_descriptor_checked(
+                &mut binding,
+                &mut sessions,
+                &forwarding,
+                &ha_state,
+                &fragment,
+                meta,
+                true,
+            );
+            assert_eq!(dbg.forward, 1, "the {name} fragment must inherit the SNAT decision");
+            assert_eq!(dbg.nat_applied_snat, 1, "the {name} fragment must be translated");
+            assert_eq!(batch.nat_frag_untranslated_dropped, 0);
+            assert_eq!(
+                forwarding.nat64.frag_assoc.len(),
+                expected_len,
+                "association state after {name} in tail_first={tail_first}"
+            );
+        }
+    };
+
+    run(0x1772, true); // head, tail, middle retains the association for the middle
+    run(0x1773, false); // head, middle, tail releases only after completion
 }
 
 fn plain_fragment_policy_snapshot_11412(

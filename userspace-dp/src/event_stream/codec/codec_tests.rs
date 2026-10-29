@@ -1009,7 +1009,7 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
     );
     // #4565 snat_v4 precedes the session id, tunnel discriminator and routing
     // domain. `n` excludes every trailer added after the routing domain.
-    let n = payload.len() - 50; // Exclude the #13965 pair, then close class, table pair, ICMP/ingress identity, rule-ID length, handshake state, and provenance.
+    let n = payload.len() - 51; // Exclude the #13965 pair, close class, table pair, ICMP/ingress identity, rule-ID length, handshake state, provenance, and #17780 stated marker.
     assert_eq!(
         &payload[n - 24..n - 20],
         &[203, 0, 113, 5],
@@ -1034,7 +1034,7 @@ fn test_encode_session_open_carries_nat64_flag_and_snat_v4() {
         0,
         "non-nat64 must leave the flag clear"
     );
-    let m = pp.len() - 50; // Same empty-rule-ID session-open suffix as above.
+    let m = pp.len() - 51; // Same empty-rule-ID session-open suffix as above.
     assert_eq!(&pp[m - 24..m - 20], &[0, 0, 0, 0], "non-nat64 snat is zero");
 }
 
@@ -1060,7 +1060,7 @@ fn test_encode_session_open_carries_session_id_5212() {
         0, // #9412: tcp_close_class
     );
     let payload = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
-    let n = payload.len() - 50; // Exclude the #13965 pair, then close class, table pair, ICMP/ingress identity, rule-ID length, handshake state, and provenance.
+    let n = payload.len() - 51; // Exclude the #13965 pair, close class, table pair, ICMP/ingress identity, rule-ID length, handshake state, provenance, and #17780 stated marker.
     // The session id is now THIRD from last: #7188 appended an 8-byte
     // discriminator behind it and #7239 a 4-byte routing domain behind that, so
     // it sits at [n-20 .. n-12]. The 4 bytes before it are the #4565 snat_v4
@@ -1090,7 +1090,7 @@ fn test_encode_session_open_carries_session_id_5212() {
         0, // #9412: tcp_close_class
     );
     let p0 = &frame0.data[FRAME_HEADER_SIZE..frame0.len as usize];
-    let n0 = p0.len() - 50; // Same empty-rule-ID session-open suffix as above.
+    let n0 = p0.len() - 51; // Same empty-rule-ID session-open suffix as above.
     assert_eq!(
         u64::from_le_bytes(p0[n0 - 20..n0 - 12].try_into().unwrap()),
         0,
@@ -1123,8 +1123,9 @@ fn test_encode_session_open_carries_policy_fields_3301() {
     let p = &frame.data[FRAME_HEADER_SIZE..frame.len as usize];
     // #3301 attribution fields precede the #4565 pool address, #5212 session
     // id, #7188 discriminator and #7239 domain. `n` excludes the later
-    // close-class/install-table/ICMP/ingress/rule-ID/handshake/provenance trailer.
-    let n = p.len() - 50; // Exclude the #13965 pair, then close class, table pair, ICMP/ingress identity, rule-ID length, handshake state, and provenance.
+    // close-class/install-table/ICMP/ingress/rule-ID/handshake/provenance and
+    // #17780 stated marker trailers.
+    let n = p.len() - 51; // Exclude the #13965 pair, close class, table pair, ICMP/ingress identity, rule-ID length, handshake state, provenance, and #17780 stated marker.
     let policy_id = u32::from_le_bytes(p[n - 36..n - 32].try_into().unwrap());
     let counter_idx = u32::from_le_bytes(p[n - 32..n - 28].try_into().unwrap());
     let inact_secs = u32::from_le_bytes(p[n - 28..n - 24].try_into().unwrap());
@@ -1150,7 +1151,7 @@ fn test_encode_session_open_carries_policy_fields_3301() {
         0, // #9412: tcp_close_class
     );
     let pn = &frame_none.data[FRAME_HEADER_SIZE..frame_none.len as usize];
-    let m = pn.len() - 50; // Same empty-rule-ID session-open suffix as above.
+    let m = pn.len() - 51; // Same empty-rule-ID session-open suffix as above.
     // Each default attribution value is zero in the same order as the
     // non-zero control above.
     assert_eq!(
@@ -1188,7 +1189,7 @@ fn test_encode_session_open_carries_ingress_and_stable_policy_rule_id11070() {
     );
     let end = frame.len as usize;
     let rule_id = b"lan->wan/allow-web";
-    let id_end = end - 30; // Handshake, provenance, PPTP pair, NAT-scope and #16217 counters follow the rule ID.
+    let id_end = end - 31; // Handshake, provenance, PPTP pair, NAT-scope, #16217 counters, and #17780 stated marker follow the rule ID.
     let id_start = id_end - rule_id.len();
     let len_start = id_start - 2;
     let ingress_start = len_start - 6;
@@ -1216,11 +1217,12 @@ fn test_encode_session_open_carries_ingress_and_stable_policy_rule_id11070() {
 }
 
 /// #14839: the rule_id capacity guard must reserve the whole trailer that
-/// follows the rule_id (handshake 1B + provenance 1B + PPTP pair 8B = 10B),
+/// follows the rule_id (handshake 1B + provenance 1B + PPTP pair 8B +
+/// NAT-scope 4B + #16217 counters 16B + #17780 stated marker 1B = 31B),
 /// not just 2 bytes. A rule_id sized to fit exactly under the old guard
 /// passed it and then panicked when the 8-byte PPTP pair was written past
 /// the 512-byte frame. These cells pin the boundary: the longest rule_id
-/// that fits with the full trailer is carried verbatim; 1-10 bytes longer
+/// that fits with the full trailer is carried verbatim; 1-31 bytes longer
 /// than that falls back to the zero-length (unattributed) prefix — and no
 /// length ever panics the worker.
 ///
@@ -1233,8 +1235,8 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
     let zones = test_zone_map();
     // Bytes from the END of the rule_id field to the end of the frame:
     // handshake (1) + provenance (1) + PPTP pair (8) + NAT-scope (4)
-    // + #16217 counters (16) = 30.
-    const TRAILER: usize = 30;
+    // + #16217 counters (16) + #17780 stated marker (1) = 31.
+    const TRAILER: usize = 31;
     for key in [test_key_v4(), test_key_v6()] {
         // Baseline: no counter -> rule_id_len 0. The rule_id field's start
         // (where the u16 length prefix sits) is len - 2 - TRAILER.
@@ -1296,21 +1298,20 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
                 .all(|&b| b == b'x')
         );
         // Trailer intact after the id: handshake, provenance, PPTP pair.
-        assert_eq!(fit.data[fit.len as usize - 30], 3);
-        assert_eq!(fit.data[fit.len as usize - 29], 2);
+        assert_eq!(fit.data[fit.len as usize - 31], 3);
+        assert_eq!(fit.data[fit.len as usize - 30], 2);
         assert_eq!(
             u64::from_le_bytes(
-                fit.data[fit.len as usize - 28..fit.len as usize - 20]
+                fit.data[fit.len as usize - 29..fit.len as usize - 21]
                     .try_into()
                     .unwrap()
             ),
             0x0102_0304_0506_0708
         );
 
-        // 1..=10 bytes past the fit: the old guard admits lengths in this
-        // window (it reserved only 2 tail bytes, so up to 8 of them pass
-        // and panic on the PPTP write; the rest raced the handshake /
-        // provenance writes). Every one must now fall back to zero-length.
+        // 1..=TRAILER bytes past the fit: an undersized guard can let these
+        // lengths overrun or overwrite later trailer fields. Every one must
+        // now fall back to zero-length.
         for over in 1..=TRAILER {
             let frame = frame_with_id(max_id_len + over);
             assert_eq!(
@@ -1326,11 +1327,11 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
             // The frame is then byte-identical in length to the baseline and
             // the trailer still lands at its baseline position.
             assert_eq!(frame.len, base.len);
-            assert_eq!(frame.data[frame.len as usize - 30], 3);
-            assert_eq!(frame.data[frame.len as usize - 29], 2);
+            assert_eq!(frame.data[frame.len as usize - 31], 3);
+            assert_eq!(frame.data[frame.len as usize - 30], 2);
             assert_eq!(
                 u64::from_le_bytes(
-                    frame.data[frame.len as usize - 28..frame.len as usize - 20]
+                    frame.data[frame.len as usize - 29..frame.len as usize - 21]
                         .try_into()
                         .unwrap()
                 ),
@@ -1371,7 +1372,7 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
         );
         assert_eq!(
             u64::from_le_bytes(
-                update.data[update.len as usize - 28..update.len as usize - 20]
+                update.data[update.len as usize - 29..update.len as usize - 21]
                     .try_into()
                     .unwrap()
             ),
@@ -1385,15 +1386,14 @@ fn session_open_rule_id_at_capacity_boundary_14839() {
 /// acceptance criterion named for Y22-01: every rule_id length in
 /// 0..=600, for v4 and v6, on both the OPEN and UPDATE paths, must
 /// encode without panicking, must stay within the 512-byte frame, and
-/// must round-trip the handshake/provenance/PPTP trailer exactly as Go
-/// decodeSessionEvent reads it (length-prefixed id, then 1+1+8 bytes).
-/// A mutation restoring the old `+ 2` reservation turns the cells that
-/// overflow the trailer window (v6: 307..=314, v4: 367..=374) red with
-/// a range-out-of-bounds panic on the PPTP write.
+/// must round-trip the handshake/provenance/PPTP and #17780 stated-marker
+/// trailer exactly as Go decodeSessionEvent reads it.
+/// A mutation restoring the old `+ 2` reservation turns near-capacity
+/// cells red with a range-out-of-bounds panic on the PPTP write.
 #[test]
 fn session_open_update_rule_id_len_sweep_never_panics_14621() {
     let zones = test_zone_map();
-    const TRAILER: usize = 30; // handshake 1 + provenance 1 + PPTP 8 + scope 4 + counters 16
+    const TRAILER: usize = 31; // handshake 1 + provenance 1 + PPTP 8 + scope 4 + counters 16 + #17780 marker 1
     const PPTP: u64 = 0x0102_0304_0506_0708;
     for key in [test_key_v4(), test_key_v6()] {
         // Baseline empty-id frame: rule_id prefix sits TRAILER + 2 bytes
@@ -1766,7 +1766,7 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
     let second = encode(200);
 
     let tail = |frame: &EventFrame| {
-        let end = frame.len as usize - 50; // Exclude scope+counters, then PPTP pair, close class, table pair, ICMP/ingress, rule-ID len, handshake, provenance.
+        let end = frame.len as usize - 51; // Exclude scope+counters, then PPTP pair, close class, table pair, ICMP/ingress, rule-ID len, handshake, provenance, and #17780 stated marker.
         u64::from_le_bytes(frame.data[end - 12..end - 4].try_into().unwrap())
     };
     assert_eq!(
@@ -1784,7 +1784,7 @@ fn session_open_frames_carry_distinct_tunnel_discriminators_7188() {
     // The discriminator precedes the routing domain and all following
     // close-class/install-table/ICMP/ingress/rule-ID/handshake/provenance
     // trailers; the common prefix stops 34 bytes before the #13965 pair trailer.
-    let body = |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 62].to_vec();
+    let body = |frame: &EventFrame| frame.data[FRAME_HEADER_SIZE..frame.len as usize - 63].to_vec();
     assert_eq!(
         body(&first),
         body(&second),
@@ -1813,7 +1813,7 @@ fn session_open_frames_carry_the_routing_domain_7239() {
         0,
         0, // #9412: tcp_close_class
     );
-    let end = frame.len as usize - 50; // Exclude scope+counters, then PPTP pair, close class, table pair, ICMP/ingress, rule-ID len, handshake, provenance.
+    let end = frame.len as usize - 51; // Exclude scope+counters, then PPTP pair, close class, table pair, ICMP/ingress, rule-ID len, handshake, provenance, and #17780 stated marker.
     assert_eq!(
         u32::from_le_bytes(frame.data[end - 4..end].try_into().unwrap()),
         100_007,
@@ -1874,7 +1874,7 @@ fn session_open_frames_state_none_explicitly_for_non_tunnel_protocols_7188() {
         0,
         0, // #9412: tcp_close_class
     );
-    let end = frame.len as usize - 50; // Exclude scope+counters, then PPTP pair, close class, table pair, ICMP/ingress, rule-ID len, handshake, provenance.
+    let end = frame.len as usize - 51; // Exclude scope+counters, then PPTP pair, close class, table pair, ICMP/ingress, rule-ID len, handshake, provenance, and #17780 stated marker.
     let tail = u64::from_le_bytes(frame.data[end - 12..end - 4].try_into().unwrap());
     assert_ne!(
         tail, 0,
@@ -1940,13 +1940,13 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
     assert_eq!(frame.data[4], MSG_SESSION_UPDATE);
     let bytes = &frame.data[..frame.len as usize];
     assert_eq!(
-        bytes[bytes.len() - 50],
+        bytes[bytes.len() - 51],
         2,
         "#9412: the close class precedes the session-sync trailers"
     );
     assert_eq!(
         u32::from_le_bytes(
-            bytes[bytes.len() - 49..bytes.len() - 45]
+            bytes[bytes.len() - 50..bytes.len() - 46]
                 .try_into()
                 .unwrap()
         ),
@@ -1955,7 +1955,7 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
     );
     assert_eq!(
         u32::from_le_bytes(
-            bytes[bytes.len() - 45..bytes.len() - 41]
+            bytes[bytes.len() - 46..bytes.len() - 42]
                 .try_into()
                 .unwrap()
         ),
@@ -1963,17 +1963,17 @@ fn test_encode_session_update_matches_the_shared_golden_9412() {
         "#9752: the golden tail carries the check"
     );
     assert_eq!(
-        &bytes[bytes.len() - 41..bytes.len() - 38],
+        &bytes[bytes.len() - 42..bytes.len() - 39],
         &[1, 13, 0],
         "#11064: the golden tail carries a valid ICMP type/code pair"
     );
     assert_eq!(
-        &bytes[bytes.len() - 38..bytes.len() - 32],
+        &bytes[bytes.len() - 39..bytes.len() - 33],
         &[0, 0, 0, 0, 0, 0],
         "#11070: the golden fixture carries a zero ingress identity"
     );
     assert_eq!(
-        &bytes[bytes.len() - 32..bytes.len() - 28],
+        &bytes[bytes.len() - 33..bytes.len() - 29],
         &[0, 0, 3, 2],
         "#10888/#12187: the golden fixture carries an empty rule ID, handshake state 3, and static provenance"
     );
@@ -2009,7 +2009,7 @@ fn test_encode_session_open_carries_the_close_class_9412() {
         1,
     );
     assert_eq!(frame.data[4], MSG_SESSION_OPEN);
-    assert_eq!(frame.data[frame.len as usize - 50], 1); // Close class precedes the session-sync trailer.
+    assert_eq!(frame.data[frame.len as usize - 51], 1); // Close class precedes the session-sync trailer.
 }
 
 #[test]
@@ -2033,12 +2033,12 @@ fn session_update_carries_tcp_handshake_state_10888() {
     let bytes = &frame.data[..frame.len as usize];
     assert_eq!(bytes[4], MSG_SESSION_UPDATE);
     assert_eq!(
-        &bytes[bytes.len() - 32..bytes.len() - 28],
+        &bytes[bytes.len() - 33..bytes.len() - 29],
         &[0, 0, 3, 0],
         "#10888 handshake state precedes #12187's unknown provenance byte"
     );
     assert_eq!(
-        &bytes[bytes.len() - 28..bytes.len() - 20],
+        &bytes[bytes.len() - 29..bytes.len() - 21],
         &[0, 0, 0, 0, 0, 0, 0, 0],
         "#13965: a non-PPTP frame carries the absent pair"
     );
@@ -2080,8 +2080,8 @@ fn session_open_and_update_carry_source_nat_provenance_12187() {
         );
         for frame in [&open, &update] {
             let bytes = &frame.data[..frame.len as usize];
-            assert_eq!(bytes[bytes.len() - 30], 3);
-            assert_eq!(bytes[bytes.len() - 29], expected);
+            assert_eq!(bytes[bytes.len() - 31], 3);
+            assert_eq!(bytes[bytes.len() - 30], expected);
         }
     }
 }
@@ -2124,12 +2124,12 @@ fn session_frames_carry_the_install_table_identity_9752() {
         // Install-table bytes precede ICMP, ingress, rule-ID length, handshake
         // state, and provenance.
         assert_eq!(
-            u32::from_le_bytes(frame.data[end - 49..end - 45].try_into().unwrap()),
+            u32::from_le_bytes(frame.data[end - 50..end - 46].try_into().unwrap()),
             525_590,
             "frame {i}: domain must trail the close class"
         );
         assert_eq!(
-            u32::from_le_bytes(frame.data[end - 45..end - 41].try_into().unwrap()),
+            u32::from_le_bytes(frame.data[end - 46..end - 42].try_into().unwrap()),
             3_318_534_811,
             "frame {i}: check precedes the ICMP and ingress identity tails"
         );
@@ -2148,7 +2148,7 @@ fn session_frames_carry_the_install_table_identity_9752() {
     );
     let end = frame.len as usize;
     assert_eq!(
-        u64::from_le_bytes(frame.data[end - 41..end - 33].try_into().unwrap()),
+        u64::from_le_bytes(frame.data[end - 42..end - 34].try_into().unwrap()),
         0
     );
 }

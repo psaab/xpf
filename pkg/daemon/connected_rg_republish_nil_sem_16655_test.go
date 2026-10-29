@@ -61,26 +61,32 @@ func TestConnectedRGRepublishSyncNilApplySem16655(t *testing.T) {
 // control: with a real semaphore the async scheduler still reaches the
 // routes-only publisher, so the nil guard did not neuter the feature.
 func TestConnectedRGRepublishWithApplySemPublishes16655(t *testing.T) {
-	dp := &fakeOverlayDP{}
+	dp := &fakeOverlayDP{callsChanged: make(chan struct{}, 2)}
 	d := routeListenerBumpDaemon11565(t, dp)
 	if d.applySem == nil {
 		t.Fatal("fixture precondition: routeListenerBumpDaemon11565 must set applySem")
 	}
 	d.scheduleConnectedRGRepublish("cluster-state")
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(dp.calls) > 0 {
-			break
+
+	// The fake sends one notification after each mutex-protected call-log
+	// append. Wait for both calls instead of racing on the slice header or
+	// treating a sleep/first call as proof that publication is complete.
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	for range 2 {
+		select {
+		case <-dp.callsChanged:
+		case <-timer.C:
+			t.Fatalf("timed out waiting for publish and bump; calls = %v", dp.callsSnapshot())
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
-	requireRouteListenerCalls11565(t, dp.calls, "publish", "bump")
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(), "publish", "bump")
 
 	// And the sync twin publishes inline under the semaphore.
 	dp2 := &fakeOverlayDP{}
 	d2 := routeListenerBumpDaemon11565(t, dp2)
 	d2.republishConnectedRGSync(context.Background(), "cluster-state")
-	requireRouteListenerCalls11565(t, dp2.calls, "publish", "bump")
+	requireRouteListenerCalls11565(t, dp2.callsSnapshot(), "publish", "bump")
 }
 
 // TestConnectedRGRepublishNilDaemonAndStore16655 keeps the pre-existing

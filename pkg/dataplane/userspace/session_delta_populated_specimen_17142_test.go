@@ -107,6 +107,7 @@ func TestSessionDeltaPopulatedSpecimenValues17142(t *testing.T) {
 		{"PolicyCounterIdx", delta.PolicyCounterIdx, uint32(17142015)},
 		{"PolicyRuleID", delta.PolicyRuleID, "policy-rule-17142"},
 		{"AppTimeout", delta.AppTimeout, uint32(17142016)},
+		{"AppTimeoutLogStated", delta.AppTimeoutLogStated, true},
 		{"Nat64", delta.Nat64, true},
 		{"Nat64SnatV4", delta.Nat64SnatV4, "10.171.42.6"},
 		{"SourceNatICMPValid", delta.SourceNatICMPValid, true},

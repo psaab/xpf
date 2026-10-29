@@ -44,6 +44,7 @@ func dropSyncOnly9752(v *dataplane.SessionValue) {
 	v.TCPCloseClass = 0
 	v.InstallTableDomain = 0
 	v.InstallTableCheck = 0
+	v.AppTimeoutLogStated = false
 }
 
 func dropSyncOnlyV69752(v *dataplane.SessionValueV6) {
@@ -59,6 +60,7 @@ func dropSyncOnlyV69752(v *dataplane.SessionValueV6) {
 	v.TCPCloseClass = 0
 	v.InstallTableDomain = 0
 	v.InstallTableCheck = 0
+	v.AppTimeoutLogStated = false
 }
 
 func (f *lossyMirrorDP9752) Sessions() dataplane.SessionStore {

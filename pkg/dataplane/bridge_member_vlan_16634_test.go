@@ -127,6 +127,11 @@ func irbConfig16634(memberZoned bool) *config.Config {
 // the parent link is seeded in ifCache exactly as the fixture does for
 // zone refs, plus bridge-member parents the zone loop never visits.
 func runZoneMaps16634(t *testing.T, cfg *config.Config, initialMTU map[string]int, dp *recordingDP16634) *CompileResult {
+	result, _ := runZoneMapsWithHost16634(t, cfg, initialMTU, dp)
+	return result
+}
+
+func runZoneMapsWithHost16634(t *testing.T, cfg *config.Config, initialMTU map[string]int, dp *recordingDP16634) (*CompileResult, *fakeHost8119) {
 	t.Helper()
 	// Index assignment mirrors applyWithKernelMTU9845 (sorted, 4300+).
 	names := make([]string, 0, len(initialMTU))
@@ -207,7 +212,48 @@ func runZoneMaps16634(t *testing.T, cfg *config.Config, initialMTU map[string]in
 	if _, err := programZoneMaps(dp, cfg, result); err != nil {
 		t.Fatalf("programZoneMaps: %v", err)
 	}
-	return result
+	return result, h
+}
+
+func TestUnzonedBridgeMemberMTUFollowsPlannedParent17726(t *testing.T) {
+	for _, memberZoned := range []bool{false, true} {
+		name := "unzoned member"
+		if memberZoned {
+			name = "zoned control"
+		}
+		t.Run(name, func(t *testing.T) {
+			cfg := irbConfig16634(memberZoned)
+			phys := cfg.Interfaces.Interfaces["ge-0/0/1"]
+			phys.MTU = 3000
+			phys.Units[200] = &config.InterfaceUnit{Number: 200, VlanID: 200}
+			cfg.Security.Zones["trust"].Interfaces = []string{"irb.0", "ge-0/0/1.200"}
+			if memberZoned {
+				cfg.Security.Zones["trust"].Interfaces = append(cfg.Security.Zones["trust"].Interfaces, "ge-0/0/1.100")
+			}
+			if pd := planPhysDesired(cfg)["ge-0-0-1"]; pd == nil || pd.mtu != 3000 {
+				t.Fatalf("parent plan = %+v, want MTU 3000 from zoned tagged sibling", pd)
+			}
+
+			dp := &recordingDP16634{}
+			index := map[string]int{
+				"br-bd0": 4300, "ge-0-0-1": 4301,
+				"ge-0-0-1.100": 4302, "ge-0-0-1.200": 4303,
+			}
+			installEnsureRecorder16634(t, index, nil)
+			_, host := runZoneMapsWithHost16634(t, cfg, map[string]int{
+				"br-bd0": 1500, "ge-0-0-1": 1500,
+				"ge-0-0-1.100": 1500, "ge-0-0-1.200": 1500,
+			}, dp)
+			for _, child := range []string{"ge-0-0-1.100", "ge-0-0-1.200"} {
+				if got := host.mtu[child]; got != 3000 {
+					t.Errorf("%s MTU = %d, want planned parent MTU 3000", child, got)
+				}
+			}
+			if memberZoned && host.mtuWrites["ge-0-0-1.100"] != 1 {
+				t.Errorf("zoned member MTU writes = %d, want exactly one zone-loop write", host.mtuWrites["ge-0-0-1.100"])
+			}
+		})
+	}
 }
 
 func TestUnzonedBridgeMemberVLANCreated16634(t *testing.T) {

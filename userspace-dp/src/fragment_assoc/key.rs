@@ -102,20 +102,56 @@ pub(crate) fn nonfirst_fragment_key(
     let (key, _more, offset_units) = fragment_fields(packet, addr_family, authority)?;
     if offset_units != 0 { Some(key) } else { None }
 }
-
-/// #16593: association key for the FINAL fragment of a datagram
-/// (offset > 0, MF=0) \u2014 the fragment whose arrival completes the
-/// datagram, so the caller can release the association instead of letting
-/// it spend quota until its idle TTL. Returns `None` for a first fragment,
-/// a non-final non-first fragment (MF=1), or a non-fragmented packet, so
-/// an ordinary mid-train consult never releases early: a fragmented
-/// datagram has exactly one MF=0 non-first fragment, and it is last by
-/// definition (no fragment can follow the one that ends the datagram).
-pub(crate) fn final_fragment_key(
+/// #17720: derive a fragment's byte-range contribution from its network-layer
+/// length, not the receive-buffer extent (which may include padding). Unknown,
+/// truncated, or malformed geometry is deliberately not accumulated, so it can
+/// never make the association appear complete.
+pub(crate) fn fragment_range(
     packet: &[u8],
     addr_family: i32,
     authority: FragAuthority,
-) -> Option<FragKey> {
-    let (key, more, offset_units) = fragment_fields(packet, addr_family, authority)?;
-    if !more && offset_units != 0 { Some(key) } else { None }
+) -> Option<FragmentRange> {
+    let (_key, more, offset_units) = fragment_fields(packet, addr_family, authority)?;
+    if offset_units == 0 && !more {
+        return None;
+    }
+    let start = u32::from(offset_units) * 8;
+    let payload_len = match addr_family {
+        libc::AF_INET => {
+            let ihl = u32::from(*packet.first()? & 0x0F) * 4;
+            let total_len = u32::from(u16::from_be_bytes([*packet.get(2)?, *packet.get(3)?]));
+            if ihl < 20 || total_len < ihl || total_len as usize > packet.len() {
+                return None;
+            }
+            total_len - ihl
+        }
+        libc::AF_INET6 => {
+            let total_len = 40u32
+                .checked_add(u32::from(u16::from_be_bytes([*packet.get(4)?, *packet.get(5)?])))?;
+            let walk = crate::afxdp::frame::walk_ipv6_ext_chain(packet, 0);
+            if walk.fragment_truncated {
+                return None;
+            }
+            let fragment = walk.first_non_atomic_fragment.or(walk.fragment)?;
+            let fragment_end = fragment.header_offset.checked_add(8)?;
+            if fragment_end > total_len as usize || total_len as usize > packet.len() {
+                return None;
+            }
+            total_len - fragment_end as u32
+        }
+        _ => return None,
+    };
+    // RFC 791 / RFC 8200 require non-final fragment data lengths to be a
+    // multiple of eight. Treat malformed geometry as unknown rather than
+    // rounding it into coverage.
+    if more && payload_len % 8 != 0 {
+        return None;
+    }
+    let end = start.checked_add(payload_len)?;
+    if end > u32::from(u16::MAX) {
+        return None;
+    }
+    Some(FragmentRange { start, end, more })
 }
+
+

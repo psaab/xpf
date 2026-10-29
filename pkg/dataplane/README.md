@@ -573,12 +573,17 @@ Guard layers (`build-userspace-xdp.sh`):
      therefore overstates guest headroom by roughly that spread — the
      recorded 14.34% was roughly 9% on the deployment kernel — and
      twice a passing/overridden host verdict hid a guest REJECT until
-     the deploy pre-flight refused it (#15645, #15854). So: every
-     measurement now NAMES its kernel. The gate verdict (schema 3)
-     records `provenance.kernel_release` (`uname -r` of the measuring
-     kernel; consumers fail closed without it), the shimverify banner
-     prints it, and `xpfd verify-dataplane` prints the count/headroom/
-     floor on the RUNNING kernel and enforces the same 15% floor
+     deploy pre-flight refused it (#15645, #15854). Every measurement
+     now NAMES its kernel. The gate verdict (schema 3) records
+     `provenance.kernel_release` (`uname -r` of the measuring kernel).
+     Release retention requires an exact match to its running
+     `uname -r` (#17768), because a non-empty foreign kernel name does
+     not bind a headroom figure. The freshness manifest's `build_digest`
+     establishes source/object freshness and remains kernel-independent;
+     it does not claim that the recorded headroom applies to the current
+     kernel. The shimverify banner prints the measurement kernel, and
+     `xpfd verify-dataplane` independently measures/prints count and
+     headroom on the RUNNING kernel and enforces the same 15% floor
      there (exit 4 below floor, 5 unmeasured; no guest-side override).
      The floor's early warning thus fires on the kernel that will
      actually load the object, not only on the build host. Still true

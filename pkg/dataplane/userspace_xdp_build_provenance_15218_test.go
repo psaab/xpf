@@ -70,7 +70,7 @@ func writeProvenanceFixture(t *testing.T, buildVerdict func(root string) []byte)
 	return root
 }
 
-// provenanceVerdict renders a schema-2 gate verdict over root's real
+// provenanceVerdict renders a schema-3 gate verdict over root's real
 // object/input hashes (a measured OVERRIDDEN verdict, like the
 // committed one), with the given provenance mutation applied.
 func provenanceVerdict(t *testing.T, root string, mutate func(map[string]any)) []byte {
@@ -86,6 +86,10 @@ func provenanceVerdict(t *testing.T, root string, mutate func(map[string]any)) [
 	entries, err := hashUserspaceXDPInputs(root, paths)
 	if err != nil {
 		t.Fatalf("hash fixture inputs: %v", err)
+	}
+	kernelRelease, err := KernelRelease()
+	if err != nil {
+		t.Fatalf("read running kernel for provenance fixture: %v", err)
 	}
 	v := map[string]any{
 		"schema_version":    3,
@@ -104,7 +108,7 @@ func provenanceVerdict(t *testing.T, root string, mutate func(map[string]any)) [
 			"pinned":             true,
 			"bpf_linker":         "0.10.2",
 			"codegen_env_digest": mustWellKnownDigest(t, root),
-			"kernel_release":     "7.2.8+deb14-amd64",
+			"kernel_release":     kernelRelease,
 		},
 	}
 	if mutate != nil {
@@ -177,6 +181,29 @@ func TestProvenanceAdoption15218(t *testing.T) {
 				t.Fatalf("#15218: verdict with defective provenance was adopted (build_digest=%q); an unpinned or codegen-drifted install must read as stale", m.BuildDigest)
 			}
 		})
+	}
+}
+
+// TestManifestFreshnessIgnoresVerifierKernel17768 keeps the manifest's
+// source/object freshness contract independent of the kernel that will
+// later load the shim. Release retention separately compares measured
+// verdicts with its running kernel before accepting them.
+func TestManifestFreshnessIgnoresVerifierKernel17768(t *testing.T) {
+	runningKernel, err := KernelRelease()
+	if err != nil {
+		t.Fatalf("read running kernel: %v", err)
+	}
+	root := writeProvenanceFixture(t, func(r string) []byte {
+		return provenanceVerdict(t, r, func(v map[string]any) {
+			prov(v)["kernel_release"] = runningKernel + "-different"
+		})
+	})
+	manifest, err := ComputeUserspaceXDPManifest(root)
+	if err != nil {
+		t.Fatalf("compute manifest: %v", err)
+	}
+	if manifest.BuildDigest == "" {
+		t.Fatal("source/object freshness withheld build digest for a verdict measured on a different kernel")
 	}
 }
 
