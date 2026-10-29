@@ -144,6 +144,7 @@ func setup16661(t *testing.T, rename bool) *harness16661 {
 	s := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
 	applied := &[]string{}
 	targetCallbackSettled := make(chan struct{}, 1)
+	initialFeedCallbackSettled := make(chan struct{}, 1)
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: s, daemonCtx: context.Background()}
 	// Keep the real onFeedUpdate path and signal only after it returns. The
 	// timer loop waits for that signal before its next fire, so the test cannot
@@ -158,6 +159,11 @@ func setup16661(t *testing.T, rename bool) *harness16661 {
 		if targetFeedCallback {
 			select {
 			case targetCallbackSettled <- struct{}{}:
+			default:
+			}
+		} else {
+			select {
+			case initialFeedCallbackSettled <- struct{}{}:
 			default:
 			}
 		}
@@ -203,6 +209,23 @@ func setup16661(t *testing.T, rename bool) *harness16661 {
 			t.Fatalf("C1 feed never installed: overlay=%v feeds=%v", d.feedSnapshotsForConfig(s.ActiveConfig()), d.feeds.AllFeeds())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case <-initialFeedCallbackSettled:
+		callbackDeadline := time.Now().Add(2 * time.Second)
+		for {
+			info, ok := d.feeds.AllFeeds()["malware"]
+			if ok && info.HasPublished && !info.PublicationDebt {
+				break
+			}
+			if time.Now().After(callbackDeadline) {
+				t.Fatalf("C1 initial callback did not settle: feed=%+v present=%v",
+					info, ok)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("C1 initial feed callback did not settle")
 	}
 	*applied = nil // discard the C1 setup apply; assertions count from the window
 
