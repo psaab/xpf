@@ -1,4 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon tests: synchronize the connected-RG republish positive control
+    with the fake dataplane's mutex-protected call log and wait for both
+    publish and FIB bump calls (#17754).
   * Userspace dataplane: pin the #17722 DNS-quarantine snapshot with a
     Go-generated fixture the Rust parser test consumes end to end
     (follow-up to #18485).
