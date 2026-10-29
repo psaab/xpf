@@ -961,6 +961,9 @@ func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
 			return nil, false
 		}
 		sequences := set.Bytes
+		if len(sequences) == 0 {
+			return nil, false
+		}
 		for len(sequences) > 0 {
 			rdn, remainder, ok := ipsecReadASN1Raw(sequences)
 			if !ok || rdn.Class != 0 || rdn.Tag != 16 || !rdn.IsCompound {

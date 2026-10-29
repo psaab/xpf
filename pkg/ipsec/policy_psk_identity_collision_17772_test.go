@@ -281,6 +281,8 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"maximum eight-octet outer length compares DN values", "inet", "asn1dn:#3088000000000000000f310d300b0603550403130470656572", "inet", "asn1dn:#3088000000000000000f310d300b0603550403130450454552"},
 			{"identical malformed total length remains exact-equal", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130470656572"},
 			{"identical constructed OID remains exact-byte equal", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b2603550403130470656572"},
+			{"identical leading empty SET equals exact bytes", "inet", "asn1dn:#30113100310d300b0603550403130470656572", "inet", "asn1dn:#30113100310d300b0603550403130470656572"},
+			{"identical trailing empty SET equals exact bytes", "inet", "asn1dn:#3011310d300b06035504031304706565723100", "inet", "asn1dn:#3011310d300b06035504031304706565723100"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -336,6 +338,13 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"constructed OID does not match canonical OID", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
 			{"constructed OID does not fold against canonical DN", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"},
 			{"constructed OID case variant stays distinct", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b2603550403130450454552"},
+			{"leading empty SET does not compare padded valid DN", "inet", "asn1dn:#30113100310d300b0603550403130470656572", "inet", "asn1dn:#3082000f310d300b0603550403130470656572"},
+			{"leading empty SET case variant remains distinct", "inet", "asn1dn:#30113100310d300b0603550403130470656572", "inet", "asn1dn:#30113100310d300b0603550403130450454552"},
+			{"leading empty SET does not compare uppercase padded DN", "inet", "asn1dn:#30113100310d300b0603550403130470656572", "inet", "asn1dn:#3082000f310d300b0603550403130450454552"},
+			{"trailing empty SET does not compare padded valid DN", "inet", "asn1dn:#3011310d300b06035504031304706565723100", "inet", "asn1dn:#3082000f310d300b0603550403130470656572"},
+			{"trailing empty SET case variant remains distinct", "inet", "asn1dn:#3011310d300b06035504031304706565723100", "inet", "asn1dn:#3011310d300b06035504031304504545523100"},
+			{"trailing empty SET does not compare uppercase padded DN", "inet", "asn1dn:#3011310d300b06035504031304706565723100", "inet", "asn1dn:#3082000f310d300b0603550403130450454552"},
+			{"leading and trailing empty SET forms remain distinct", "inet", "asn1dn:#30113100310d300b0603550403130470656572", "inet", "asn1dn:#3011310d300b06035504031304706565723100"},
 			{"zero-length OID with leftover bytes remains malformed", "inet", "asn1dn:#3011310f300d0682000003550403130470656572", "inet", "asn1dn:#3011310f300d0682000003550403130450454552"},
 			{"zero-length value with extra TLV remains malformed", "inet", "asn1dn:#3011310f300d0603550403138200000470656572", "inet", "asn1dn:#3011310f300d0603550403138200000450454552"},
 			{"mismatched declared total length remains distinct", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130450454552"},
