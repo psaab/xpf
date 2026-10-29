@@ -3,12 +3,15 @@ package daemon
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sync/semaphore"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/dhcpserver"
 )
 
 // #16696 (R3-A34-04): in legacy non-strict mode rg-state desired =
@@ -413,6 +416,74 @@ func TestConvergerApplyNilConfigAdvancesMarker17746(t *testing.T) {
 	}
 }
 
+// If desired ownership changes again while an apply tail is pending, the new
+// edge still has immediate work: clear's proxy-ARP sweep is before its config
+// guard. A pending retry must be suppressed only when its marker matches the
+// current desired state; suppressing this changed edge delays the safety sweep.
+func TestPendingApplyDemotionWithNilConfigDrivesClearEdge17746(t *testing.T) {
+	d := legacyServicesDaemon16696(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(1)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	healthy := d.store
+	d.store = nilConfigStore17746(t)
+
+	d.convergeRethServices(1)
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("setup: degraded apply must record active ownership")
+	}
+	if serviceEdge16696(d) {
+		t.Fatal("setup: apply before its nil-config guard must not reach the proxy-ARP nudge")
+	}
+	epochAfterApply := d.ipsecRGOwnershipEpoch(1)
+
+	if tr := s.SetCluster(false); !tr.Changed || tr.Active {
+		t.Fatalf("setup: SetCluster(false) must flip desired inactive, got %+v", tr)
+	}
+	d.convergeRethServices(1)
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746: pending apply suppressed the changed demotion edge's immediate proxy-ARP sweep")
+	}
+	if d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746: changed demotion edge did not advance the marker to inactive")
+	}
+	epochAfterDemotion := d.ipsecRGOwnershipEpoch(1)
+	if epochAfterDemotion != epochAfterApply+1 {
+		t.Fatalf("#17746: changed demotion edge did not run exactly once: apply epoch=%d demotion epoch=%d",
+			epochAfterApply, epochAfterDemotion)
+	}
+
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger repeated the degraded clear sweep while config remained unavailable")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochAfterDemotion {
+		t.Fatalf("#17746: pending clear repeated its ownership-epoch bump: before=%d after=%d",
+			epochAfterDemotion, got)
+	}
+
+	d.store = healthy
+	epochBeforeRecovery := d.ipsecRGOwnershipEpoch(1)
+	d.convergeRethServices(1)
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746: pending clear tail was not driven after config recovery")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
+		t.Fatalf("#17746: recovered clear tail did not run exactly once: before=%d after=%d",
+			epochBeforeRecovery, got)
+	}
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger repeated the recovered clear tail")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
+		t.Fatalf("#17746: converger repeated the recovered clear epoch bump: before=%d after=%d",
+			epochBeforeRecovery, got)
+	}
+}
+
 // Apply side, first guard: factory reset in progress. After the reset
 // exits, the converger must drive the deferred apply tail exactly once
 // even though the marker already reads applied.
@@ -594,5 +665,149 @@ func TestConvergerClearNilConfigAdvancesMarker17746(t *testing.T) {
 	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
 		t.Fatalf("#17746: converger re-drove recovery clear: epoch before=%d after=%d",
 			epochBeforeRecovery, got)
+	}
+}
+
+// blockedPreSeedRethApplier17746 holds applyRethServicesForRG after it has
+// captured active ownership but before it enqueues the DHCP config.
+type blockedPreSeedRethApplier17746 struct {
+	*recordingDHCPApplier9349
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (b *blockedPreSeedRethApplier17746) PreSeedMemfileMerged4WithAuthority(
+	ctx context.Context,
+	snapshot dhcpserver.LeaseSyncSnapshot,
+	now time.Time,
+	stillMastering bool,
+	authority dhcpserver.LeaseSyncAuthority,
+) error {
+	b.entered <- struct{}{}
+	<-b.release
+	return b.recordingDHCPApplier9349.PreSeedMemfileMerged4WithAuthority(
+		ctx, snapshot, now, stillMastering, authority)
+}
+
+// #18399: an apply may capture active RETH ownership and block in the
+// pre-seed before enqueuing Kea. If a newer degraded clear marks the RG
+// inactive and returns, the stale apply must not erase its pending retry
+// when it later enqueues the old active config.
+//
+// RED on revert: entry-marker-only completion clears pending after the
+// stale apply enqueues, leaving desired=false == marker=false. Recovery
+// then skips clear and the stale active config remains the final enqueue.
+func TestRev18399StaleApplyAfterClearMustBeReconciled(t *testing.T) {
+	d := twoRGCanonicalDaemon16854(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(2)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	healthy := d.store
+	d.sessionSync.SetPeerDHCPLeaseSnapshotForTesting(4, dhcpserver.LeaseSyncSnapshot{
+		Received:   true,
+		Generation: 7,
+		Leases: []dhcpserver.SyncLease{
+			{Family: 4, Address: "10.0.61.77", HWAddress: "bb:77"},
+		},
+		Scopes: []dhcpserver.LeaseScopeAuthority{
+			{Family: 4, CIDR: "10.0.61.0/24", RGID: 2, Generation: 7, Served: true, Applied: true},
+		},
+	})
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releasePreSeed := func() { releaseOnce.Do(func() { close(release) }) }
+	applyDone := make(chan struct{})
+	t.Cleanup(func() {
+		releasePreSeed()
+		select {
+		case <-applyDone:
+		case <-time.After(5 * time.Second):
+			t.Error("blocked apply did not return after releasing pre-seed")
+		}
+	})
+
+	rec := &recordingDHCPApplier9349{}
+	blocked := &blockedPreSeedRethApplier17746{
+		recordingDHCPApplier9349: rec,
+		entered:                  make(chan struct{}, 1),
+		release:                  release,
+	}
+	d.dhcpServer = blocked
+
+	go func() {
+		d.applyRethServicesForRG(2)
+		close(applyDone)
+	}()
+	select {
+	case <-blocked.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("apply did not reach the blocked pre-seed")
+	}
+
+	d.store = nil
+	if tr := s.SetCluster(false); !tr.Changed || tr.Active {
+		t.Fatalf("setup: SetCluster(false) must flip desired inactive, got %+v", tr)
+	}
+	d.clearRethServicesForRG(2)
+	if !serviceEdge16696(d) {
+		t.Fatal("degraded clear did not sweep proxy-ARP before its config guard")
+	}
+	if d.rethServicesAppliedFor(2) {
+		t.Fatal("degraded clear did not record inactive ownership")
+	}
+
+	releasePreSeed()
+	select {
+	case <-applyDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("apply did not return after releasing the pre-seed")
+	}
+	if !serviceEdge16696(d) {
+		t.Fatal("stale apply did not complete its proxy-ARP reassert nudge")
+	}
+
+	pending := d.rethServicesStateFor(2).pending
+	if !pending {
+		t.Fatal("#18399: stale apply completion cleared the newer degraded clear's pending tail")
+	}
+	rec.mu.Lock()
+	if len(rec.authorityAsyncCfg) != 1 || rec.authorityAsyncCfg[0] == nil {
+		got := len(rec.authorityAsyncCfg)
+		rec.mu.Unlock()
+		t.Fatalf("blocked apply did not enqueue its captured active DHCP config: calls=%d", got)
+	}
+	rec.mu.Unlock()
+
+	d.store = healthy
+	d.convergeRethServices(2)
+	if !serviceEdge16696(d) {
+		t.Fatal("#18399: converger did not drive clear after the stale apply completed")
+	}
+	if d.rethServicesAppliedFor(2) {
+		t.Fatal("#18399: converger did not retain inactive ownership after recovery")
+	}
+	pending = d.rethServicesStateFor(2).pending
+	if pending {
+		t.Fatal("#18399: pending tail remained after the recovered clear completed")
+	}
+	rec.mu.Lock()
+	configCount := len(rec.authorityAsyncCfg)
+	finalConfigIsNil := configCount > 0 && rec.authorityAsyncCfg[configCount-1] == nil
+	rec.mu.Unlock()
+	if configCount != 2 || !finalConfigIsNil {
+		t.Fatalf("#18399: stale active DHCP config remained last after recovery; configs=%v", rec.authorityAsyncCfg)
+	}
+	d.convergeRethServices(2)
+	if serviceEdge16696(d) {
+		t.Fatal("#18399: converger re-drove the recovered clear")
+	}
+	rec.mu.Lock()
+	configCount = len(rec.authorityAsyncCfg)
+	rec.mu.Unlock()
+	if configCount != 2 {
+		t.Fatalf("#18399: recovered clear enqueued DHCP more than once: calls=%d", configCount)
 	}
 }

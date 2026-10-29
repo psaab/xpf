@@ -1446,14 +1446,12 @@ type Daemon struct {
 	// stale-update detection.
 	rgStatesMu sync.RWMutex
 	rgStates   map[int]*rgStateMachine
-	// rethServicesApplied tracks the last RETH ownership edge driven by the
-	// daemon per RG in VRRP mode (#16696). It can advance before service
-	// work if reset/config guards make an edge a no-op; rethServicesPending
-	// then records that the edge's service tail must run after recovery.
-	// Both maps are guarded by rethServicesMu.
-	rethServicesMu      sync.Mutex
-	rethServicesApplied map[int]bool
-	rethServicesPending map[int]bool
+	// rethServices tracks the last RETH ownership edge driven per RG and
+	// whether its service tail needs recovery (#16696). Generation fencing
+	// prevents stale apply/clear completions from overwriting newer edges.
+	// Guarded by rethServicesMu.
+	rethServicesMu sync.Mutex
+	rethServices   map[int]rethServicesEdgeStatus
 	// nonVIPAnnounceMu / nonVIPAnnounced guard the legacy-VRRP non-VIP
 	// announce (#17052) against duplicate bursts within one activation.
 	// The map value is the rg-state ACTIVATION generation claimed
@@ -2307,8 +2305,7 @@ func New(opts Options) (*Daemon, error) {
 		neighListFn:                netlink.NeighList,
 		directAnnounceSchedule:     []time.Duration{0, 250 * time.Millisecond, 1 * time.Second, 2 * time.Second, 4 * time.Second, 6 * time.Second},
 		directVIPOwned:             make(map[int]bool),
-		rethServicesApplied:        make(map[int]bool),
-		rethServicesPending:        make(map[int]bool),
+		rethServices:               make(map[int]rethServicesEdgeStatus),
 		localFailoverCommitReady:   make(map[int]bool),
 		localFailoverCommitTimeout: 3 * time.Second,
 		nonVIPAnnounced:            make(map[int]uint64),

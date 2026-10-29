@@ -805,14 +805,14 @@ func clusterFirstDaemon17052(t *testing.T, store *configstore.Store) *Daemon {
 	})
 	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
 	d := &Daemon{
-		store:               store,
-		cluster:             cm,
-		rgStates:            make(map[int]*rgStateMachine),
-		proxyARPNudgeCh:     make(chan struct{}, 1),
-		applySem:            semaphore.NewWeighted(1),
-		nonVIPAnnounced:     make(map[int]uint64),
-		rethServicesApplied: make(map[int]bool),
-		blackholeRoutes:     make(map[int][]netlink.Route),
+		store:           store,
+		cluster:         cm,
+		rgStates:        make(map[int]*rgStateMachine),
+		proxyARPNudgeCh: make(chan struct{}, 1),
+		applySem:        semaphore.NewWeighted(1),
+		nonVIPAnnounced: make(map[int]uint64),
+		rethServices:    make(map[int]rethServicesEdgeStatus),
+		blackholeRoutes: make(map[int][]netlink.Route),
 	}
 	// applyRethServicesForRG / addStableRethLinkLocal run on these
 	// handlers; keep their netlink side effects out of the hermetic cell.
