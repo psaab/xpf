@@ -3,10 +3,17 @@ xpf (0.0.0) unstable; urgency=medium
   * Dataplane: account status-poll health before discarding a stale-sequence
     reply, while keeping status publication fenced (#17728).
 
+  * Bootstrap: suppress stale cluster RA reconciliation and serialize final
+    withdrawal against in-flight passes. Bound DHCP relay stop joins and report
+    timeout failures in the bootstrap DEGRADED result (#17693).
   * Routing: authorize rib-group peer returns from the route owner's
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
     the deferred VRF-to-VRF forward-import warning (#17705).
+
+  * DDNS: document that manager-side `markerSharedWithSibling` sets
+    `KeepSiblingMarker` for `sendRemoveForward`; clarify that `namedMarker`
+    only checks backend-local retained marker state (#17724).
 
   * Event engine: recheck live `trigger until` ceilings when draining recorded
     cooldown crossings, preventing parked storms from replaying over the
@@ -61,6 +68,9 @@ xpf (0.0.0) unstable; urgency=medium
     state, sets `forcePreemptOnce`, and queues its kick in one `vi.mu`
     critical section, preventing a delayed force from crossing MASTER
     entry/resignation drains and re-promoting a resigned node (#17827).
+  * Docs: correct the #16695 GRE classifier citations with verified
+    definition and tail-call lines for the pinned and current master trees
+    (#17732).
   * Coalesce/ipmon: ipmon actuation is single-flighted — the engine
     tick is the only Tick driver (the loop is started context-only,
     no second sweep goroutine), and Tick itself claims an in-flight

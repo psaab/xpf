@@ -643,26 +643,32 @@ func summarizeBootstrapTeardown(steps []bootstrapTeardownStep) (err error, degra
 // factory-reset quiesce uses — the Kea units outlive xpfd, so they must
 // be stopped explicitly (pkg/dhcpserver README, #6787). Shutdown() is
 // NOT used because it latches and would prevent a corrected commit
-// from restarting Kea without an xpfd restart. The relay is reconciled
-// through the usual reconcileDHCPRelay with an empty config, which
-// stops every relay.
+// from restarting Kea without an xpfd restart.
+//
+// Relay: reconciled through the usual helper with an empty config; a bounded
+// join timeout is returned and joined into the bootstrap DEGRADED steps.
 //
 // Each failure is returned as a teardown step so the caller reports the
 // rollback DEGRADED instead of claiming "config-driven takeover removed".
 // Runs under the caller's d.applySem.
 func (d *Daemon) withdrawAbandonedServicesForBootstrap() []bootstrapTeardownStep {
 	var steps []bootstrapTeardownStep
+	var raErr error
+	d.raReconcileMu.Lock()
 	if d.ra != nil {
-		if err := d.ra.Withdraw(); err != nil {
-			steps = append(steps, bootstrapTeardownStep{
-				name: "withdraw router advertisements",
-				err:  err,
-			})
-		}
-		d.raReconcileMu.Lock()
-		d.lastRAReconcileHash = ""
-		d.lastStandaloneRAHash = ""
-		d.raReconcileMu.Unlock()
+		// Serialize the final withdrawal with cluster/standalone reconciles.
+		// Since bootstrapMode is already set, a waiting cluster pass will
+		// observe the gate and return instead of re-adding the retained target.
+		raErr = d.ra.Withdraw()
+	}
+	d.lastRAReconcileHash = ""
+	d.lastStandaloneRAHash = ""
+	d.raReconcileMu.Unlock()
+	if raErr != nil {
+		steps = append(steps, bootstrapTeardownStep{
+			name: "withdraw router advertisements",
+			err:  raErr,
+		})
 	}
 	if d.dhcpServer != nil {
 		d.dhcpServer.SetLeaseSyncEnabled(false)
@@ -673,8 +679,11 @@ func (d *Daemon) withdrawAbandonedServicesForBootstrap() []bootstrapTeardownStep
 			})
 		}
 	}
-	if d.dhcpRelay != nil {
-		d.reconcileDHCPRelay(&config.Config{})
+	if err := d.reconcileDHCPRelay(&config.Config{}); err != nil {
+		steps = append(steps, bootstrapTeardownStep{
+			name: "stop DHCP relay",
+			err:  err,
+		})
 	}
 	return steps
 }
