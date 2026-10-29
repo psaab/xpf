@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -395,6 +396,28 @@ func TestPreemptArmDebtHoldRelease17781(t *testing.T) {
 		owner.handlePeerTimeout()
 		if !owner.IsLocalPrimary(1) {
 			t.Fatal("yielded owner did not promote after peer death")
+		}
+	})
+	t.Run("secondary_echo_lease_expired_promotes", func(t *testing.T) {
+		owner, peer := armDebtYieldPair17781(t, true)
+		yieldArmDebtToPeer17781(t, owner, peer)
+
+		// The peer has relinquished but its last SECONDARY frame no longer
+		// proves bidirectional liveness. An expired lease must not pin the
+		// yielded owner secondary indefinitely.
+		peer.mu.Lock()
+		peer.groups[1].State = StateSecondary
+		peer.mu.Unlock()
+		owner.mu.Lock()
+		pg := owner.peerGroups[1]
+		pg.State = StateSecondary
+		pg.heartbeatEchoLeaseUntil = time.Now().Add(-time.Millisecond)
+		owner.peerGroups[1] = pg
+		owner.runElection()
+		owner.mu.Unlock()
+		if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
+			t.Fatalf("expired peer echo did not release ownership safely: owner=%v peer=%v",
+				owner.IsLocalPrimary(1), peer.IsLocalPrimary(1))
 		}
 	})
 	t.Run("peer_restart_secondary_releases", func(t *testing.T) {
