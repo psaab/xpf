@@ -138,3 +138,88 @@ func TestPolicerBurstFloor16714LenientWarns(t *testing.T) {
 		t.Fatalf("lenient compile should warn on missing limits, warnings: %v", cfg2.Warnings)
 	}
 }
+
+func TestPolicerLimitsLenientClassifiesAllDefectClasses17761(t *testing.T) {
+	type defect struct {
+		name string
+		kind string
+	}
+	cases := []struct {
+		name    string
+		defects []defect
+	}{
+		{
+			name: "floor error sorts first",
+			defects: []defect{
+				{name: "a", kind: "floor"},
+				{name: "b", kind: "missing-bandwidth"},
+				{name: "c", kind: "missing-burst"},
+			},
+		},
+		{
+			name: "missing bandwidth sorts first",
+			defects: []defect{
+				{name: "a", kind: "missing-bandwidth"},
+				{name: "b", kind: "floor"},
+				{name: "c", kind: "missing-burst"},
+			},
+		},
+		{
+			name: "missing burst sorts first",
+			defects: []defect{
+				{name: "a", kind: "missing-burst"},
+				{name: "b", kind: "missing-bandwidth"},
+				{name: "c", kind: "floor"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var lines []string
+			for _, d := range tc.defects {
+				switch d.kind {
+				case "floor":
+					lines = append(lines,
+						"set firewall policer "+d.name+" if-exceeding bandwidth-limit 1m",
+						"set firewall policer "+d.name+" if-exceeding burst-size-limit 1500",
+					)
+				case "missing-bandwidth":
+					lines = append(lines,
+						"set firewall policer "+d.name+" if-exceeding burst-size-limit 1518",
+					)
+				case "missing-burst":
+					lines = append(lines,
+						"set firewall policer "+d.name+" if-exceeding bandwidth-limit 1m",
+					)
+				default:
+					t.Fatalf("unknown test defect class %q", d.kind)
+				}
+				lines = append(lines, "set firewall policer "+d.name+" then discard")
+			}
+			cfg, err := CompileConfigLenient(buildTree(t, lines))
+			if err != nil {
+				t.Fatalf("lenient compile must warn instead of bricking on all three defects: %v", err)
+			}
+			if len(cfg.Warnings) != len(tc.defects) {
+				t.Fatalf("lenient compile should report all %d defects, warnings: %v", len(tc.defects), cfg.Warnings)
+			}
+			for _, d := range tc.defects {
+				class := "missing limits"
+				if d.kind == "floor" {
+					class = "burst floor"
+				}
+				found := false
+				for _, warning := range cfg.Warnings {
+					if strings.Contains(warning, class) &&
+						strings.Contains(warning, `firewall policer "`+d.name+`"`) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("lenient compile should report %s defect for policer %q; warnings: %v", d.kind, d.name, cfg.Warnings)
+				}
+			}
+		})
+	}
+}

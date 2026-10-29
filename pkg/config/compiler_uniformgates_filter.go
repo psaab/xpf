@@ -330,19 +330,24 @@ func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) erro
 	// intent is already uncharacterized and is reported first.
 	// #17760: the same gate enforces the 1518-byte floor, so a bucket that
 	// cannot admit the maximum-size VLAN frame is also downgraded on tolerant
-	// paths.
-	if err := validateFirewallPolicerLimitsStrict(cfg); err != nil {
-		isFloor := policerBurstFloorError16714(err)
-		switch {
-		case isFloor && opts.lenientSingleRateBurstFloor16714:
-			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("firewall policer burst floor (downgraded to warning on tolerant path; the sub-1518-byte bucket drops every maximum-sized VLAN frame): %v", err))
-		case !isFloor && opts.lenientPolicerMissingLimits:
-			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("firewall policer missing limits (downgraded to warning on tolerant path): %v", err))
-		default:
-			return err
+	// paths. #17761: classify every sorted per-policer diagnostic separately
+	// so one warning cannot mask another policer's missing-limit or floor error.
+	if opts.lenientSingleRateBurstFloor16714 || opts.lenientPolicerMissingLimits {
+		for _, err := range firewallPolicerLimitErrors(cfg) {
+			isFloor := policerBurstFloorError16714(err)
+			switch {
+			case isFloor && opts.lenientSingleRateBurstFloor16714:
+				cfg.Warnings = append(cfg.Warnings,
+					fmt.Sprintf("firewall policer burst floor (downgraded to warning on tolerant path; the sub-1518-byte bucket drops every maximum-sized VLAN frame): %v", err))
+			case !isFloor && opts.lenientPolicerMissingLimits:
+				cfg.Warnings = append(cfg.Warnings,
+					fmt.Sprintf("firewall policer missing limits (downgraded to warning on tolerant path): %v", err))
+			default:
+				return err
+			}
 		}
+	} else if err := validateFirewallPolicerLimitsStrict(cfg); err != nil {
+		return err
 	}
 
 	// #3309 firewall-filter DSCP / traffic-class range gate. Strict on commit /

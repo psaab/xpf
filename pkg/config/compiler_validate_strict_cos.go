@@ -123,29 +123,61 @@ func validateFirewallPolicerLimitsStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
 	}
-	names := make([]string, 0, len(cfg.Firewall.Policers))
-	for name := range cfg.Firewall.Policers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := sortedFirewallPolicerNames(cfg)
 	for _, name := range names {
 		pol := cfg.Firewall.Policers[name]
 		if pol == nil {
 			continue
 		}
-		displayName := pol.Name
-		if displayName == "" {
-			displayName = name
+		if err := firewallPolicerLimitError(name, pol); err != nil {
+			return err
 		}
-		if pol.BandwidthLimit == 0 {
-			return fmt.Errorf("firewall policer %q requires `if-exceeding bandwidth-limit` (missing bandwidth-limit compiles to a 0-rate policer that drops all policed traffic)", displayName)
+	}
+	return nil
+}
+
+// firewallPolicerLimitErrors returns every single-rate limits defect in
+// deterministic policer-name order. Missing limits take precedence over a
+// burst-floor violation on the same policer, preserving the strict gate's
+// first-error behavior.
+func firewallPolicerLimitErrors(cfg *Config) []error {
+	if cfg == nil {
+		return nil
+	}
+	names := sortedFirewallPolicerNames(cfg)
+	var errs []error
+	for _, name := range names {
+		if pol := cfg.Firewall.Policers[name]; pol != nil {
+			if err := firewallPolicerLimitError(name, pol); err != nil {
+				errs = append(errs, err)
+			}
 		}
-		if pol.BurstSizeLimit == 0 {
-			return fmt.Errorf("firewall policer %q requires `if-exceeding burst-size-limit` (missing burst-size-limit compiles to a 0-burst policer that drops all policed traffic)", displayName)
-		}
-		if pol.BurstSizeLimit < minPolicerBurstBytes16714 {
-			return fmt.Errorf("firewall policer %q burst-size-limit must be at least one maximum-sized frame (%d bytes: 1500-byte MTU + 14-byte Ethernet header + 4-byte VLAN tag), got %d", displayName, minPolicerBurstBytes16714, pol.BurstSizeLimit)
-		}
+	}
+	return errs
+}
+
+func sortedFirewallPolicerNames(cfg *Config) []string {
+	names := make([]string, 0, len(cfg.Firewall.Policers))
+	for name := range cfg.Firewall.Policers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func firewallPolicerLimitError(name string, pol *PolicerConfig) error {
+	displayName := pol.Name
+	if displayName == "" {
+		displayName = name
+	}
+	if pol.BandwidthLimit == 0 {
+		return fmt.Errorf("firewall policer %q requires `if-exceeding bandwidth-limit` (missing bandwidth-limit compiles to a 0-rate policer that drops all policed traffic)", displayName)
+	}
+	if pol.BurstSizeLimit == 0 {
+		return fmt.Errorf("firewall policer %q requires `if-exceeding burst-size-limit` (missing burst-size-limit compiles to a 0-burst policer that drops all policed traffic)", displayName)
+	}
+	if pol.BurstSizeLimit < minPolicerBurstBytes16714 {
+		return fmt.Errorf("firewall policer %q burst-size-limit must be at least one maximum-sized frame (%d bytes: 1500-byte MTU + 14-byte Ethernet header + 4-byte VLAN tag), got %d", displayName, minPolicerBurstBytes16714, pol.BurstSizeLimit)
 	}
 	return nil
 }
