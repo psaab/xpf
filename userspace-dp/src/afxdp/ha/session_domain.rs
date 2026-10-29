@@ -2268,23 +2268,26 @@ mod session_domain_tests_7209 {
     fn helper_mutation_eviction_wrap_safe_replay_sequence_18397() {
         let coordinator = Coordinator::new();
         let domain = coordinator.session_domain();
-        seed_wrap_store(
+        seed_helper_mutation_store(
             domain,
-            u64::MAX,
-            &[("A", 1), ("B", 2), ("C", 3)],
+            [(7, "A", 1), (7, "B", 2), (7, "C", 3)],
+            &[],
+            false,
         );
+        domain.helper_mutations.lock().unwrap().seq = u64::MAX;
 
         replay_helper_mutation(domain, "C");
         replay_helper_mutation(domain, "C");
         replay_helper_mutation(domain, "A");
         replay_helper_mutation(domain, "C");
 
+        complete_helper_mutation(domain, 50, "incoming");
         assert_eviction_index_matches_records(domain);
         let store = domain.helper_mutations.lock().unwrap();
-        assert_eq!(
-            store.eviction.first_key_value().unwrap().1,
-            &(7, "B".to_string())
-        );
+        assert!(!store.records.contains_key(&(7, "B".to_string())));
+        assert!(store.records.contains_key(&(7, "A".to_string())));
+        assert!(store.records.contains_key(&(7, "C".to_string())));
+        assert_eq!(store.eviction.len(), store.records.len());
     }
 
     #[test]
@@ -2333,8 +2336,9 @@ mod session_domain_tests_7209 {
         assert_eq!(store.eviction.len(), store.records.len());
     }
 
-    /// FAIL-ON-REVERT: the completed-record index must choose the minimum
-    /// `(epoch, last_used)` pair, not HashMap order, epoch alone, or LRU alone.
+    /// FAIL-ON-REVERT: choose the minimum `(epoch, sequence_era, last_used)`
+    /// tuple, with record id breaking exact ties—not HashMap order, epoch
+    /// alone, or LRU alone.
     #[test]
     fn helper_mutation_eviction_prefers_oldest_epoch_then_lru_18396() {
         let coordinator = Coordinator::new();
