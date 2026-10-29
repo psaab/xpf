@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: exercise WireGuard PTB learning through the RX poll
+    path and assert that the next forwarded packet uses the learned MTU
+    budget (#17775).
+
   * Incus deploy: distinguish verify-dataplane exit codes 4/5, prescribing
     reduced verifier cost for measured low headroom and restoring verifier
     measurement for unmeasured headroom instead of stale-pin cleanup (#17769).
