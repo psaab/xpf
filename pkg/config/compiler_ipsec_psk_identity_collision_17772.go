@@ -967,7 +967,7 @@ func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
 				return nil, false
 			}
 			oid, content, ok := ipsecReadASN1Raw(rdn.Bytes)
-			if !ok || oid.Class != 0 || oid.Tag != 6 {
+			if !ok || oid.Class != 0 || oid.Tag != 6 || oid.IsCompound {
 				return nil, false
 			}
 			value, content, ok := ipsecReadASN1Raw(content)

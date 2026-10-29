@@ -468,6 +468,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"identical primitive outer sequence equals exact bytes", "inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130470656572"},
 			{"identical primitive SET equals exact bytes", "inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130470656572"},
 			{"identical primitive inner sequence equals exact bytes", "inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130470656572"},
+			{"identical constructed OID equals exact bytes", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b2603550403130470656572"},
 			{"nonminimal outer length compares DN values", "inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#30810f310d300b0603550403130450454552"},
 			{"nonminimal SET length compares DN values", "inet", "asn1dn:#301031810d300b0603550403130470656572", "inet", "asn1dn:#301031810d300b0603550403130450454552"},
 			{"nonminimal attribute SEQUENCE length compares DN values", "inet", "asn1dn:#3010310e30810b0603550403130470656572", "inet", "asn1dn:#3010310e30810b0603550403130450454552"},
@@ -520,6 +521,9 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130450454552"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b2603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3011310f300d0682000003550403130470656572", "inet", "asn1dn:#3011310f300d0682000003550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3011310f300d0603550403138200000470656572", "inet", "asn1dn:#3011310f300d0603550403138200000450454552"))

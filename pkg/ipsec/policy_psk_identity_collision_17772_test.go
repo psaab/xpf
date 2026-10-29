@@ -280,6 +280,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"nonminimal two-octet value length compares DN values", "inet", "asn1dn:#3011310f300d06035504031382000470656572", "inet", "asn1dn:#3011310f300d06035504031382000450454552"},
 			{"maximum eight-octet outer length compares DN values", "inet", "asn1dn:#3088000000000000000f310d300b0603550403130470656572", "inet", "asn1dn:#3088000000000000000f310d300b0603550403130450454552"},
 			{"identical malformed total length remains exact-equal", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130470656572"},
+			{"identical constructed OID remains exact-byte equal", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b2603550403130470656572"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -332,6 +333,9 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"primitive outer sequence does not case-fold", "inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130450454552"},
 			{"primitive SET does not case-fold", "inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130450454552"},
 			{"primitive inner sequence does not case-fold", "inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130450454552"},
+			{"constructed OID does not match canonical OID", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"constructed OID does not fold against canonical DN", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"},
+			{"constructed OID case variant stays distinct", "inet", "asn1dn:#300f310d300b2603550403130470656572", "inet", "asn1dn:#300f310d300b2603550403130450454552"},
 			{"zero-length OID with leftover bytes remains malformed", "inet", "asn1dn:#3011310f300d0682000003550403130470656572", "inet", "asn1dn:#3011310f300d0682000003550403130450454552"},
 			{"zero-length value with extra TLV remains malformed", "inet", "asn1dn:#3011310f300d0603550403138200000470656572", "inet", "asn1dn:#3011310f300d0603550403138200000450454552"},
 			{"mismatched declared total length remains distinct", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130450454552"},
