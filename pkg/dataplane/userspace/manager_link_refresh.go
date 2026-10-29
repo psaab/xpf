@@ -400,12 +400,42 @@ func snapshotHasRxVlanChild(snap *ConfigSnapshot, parentIfindex uint32, parentLi
 	if snap == nil {
 		return false
 	}
+	// The fresh snapshot may have had its configured VLAN child dropped by
+	// revalidation because the child netdev is absent. Compile scopes the
+	// C-tag failure from config, not from surviving rows; preserve that same
+	// authority here, including a RETH member whose VLAN units live on the
+	// logical parent.
+	if configHasRxVlanChildForParent(snap.Config, parentLinuxName) {
+		return true
+	}
 	for i := range snap.Interfaces {
 		row := &snap.Interfaces[i]
 		if row.VLANID <= 0 || row.ParentIfindex <= 0 {
 			continue
 		}
 		if uint32(row.ParentIfindex) == parentIfindex || row.ParentLinuxName == parentLinuxName {
+			return true
+		}
+	}
+	return false
+}
+
+func configHasRxVlanChildForParent(cfg *config.Config, parentLinuxName string) bool {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return false
+	}
+	for name, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil || config.LinuxIfName(name) != parentLinuxName {
+			continue
+		}
+		if config.InterfaceHasVlanSubinterface(iface) ||
+			config.InterfaceHasVlanSubinterface(cfg.Interfaces.Interfaces[iface.RedundantParent]) {
+			return true
+		}
+	}
+	for reth, physical := range cfg.RethToPhysical() {
+		if config.LinuxIfName(physical) == parentLinuxName &&
+			config.InterfaceHasVlanSubinterface(cfg.Interfaces.Interfaces[reth]) {
 			return true
 		}
 	}

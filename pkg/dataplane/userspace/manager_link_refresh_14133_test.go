@@ -360,8 +360,12 @@ func TestRefreshAttachAdmission17701(t *testing.T) {
 func TestInterfaceLinkRefreshPreservesRxVlanQuarantine17736(t *testing.T) {
 	cfg := &config.Config{
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
-			"ge-0/0/0": {},
-			"ge-0/0/1": {},
+			"ge-0/0/0": {Name: "ge-0/0/0", VlanTagging: true, Units: map[int]*config.InterfaceUnit{
+				100: {Number: 100, VlanID: 100},
+			}},
+			"ge-0/0/1": {Name: "ge-0/0/1", VlanTagging: true, Units: map[int]*config.InterfaceUnit{
+				200: {Number: 200, VlanID: 200},
+			}},
 		}},
 		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
 			"trust": {Name: "trust", Interfaces: []string{"ge-0/0/0", "ge-0/0/1"}},
@@ -434,5 +438,67 @@ func TestRefreshAttachAdmissionRefusesRxVlanPreconditionFailure17736(t *testing.
 	m.reconcileInterfaceAttachmentsForRefreshLocked(snap)
 	if len(attaches) != 0 {
 		t.Fatalf("parent attached despite failed S-tag precondition: %v", attaches)
+	}
+}
+
+// TestRefreshAttachAdmissionUsesConfiguredVlanAfterChildDrop17736 pins the
+// Compile scope when revalidation removes a missing VLAN child row. The parent
+// must still be refused on an RX-VLAN disable failure based on desired config,
+// including when VLAN units are authored on a RETH rather than its physical
+// member.
+//
+// FAIL-ON-REVERT: using only surviving snapshot rows admits both unsafe parent
+// interfaces because the child rows are absent.
+func TestRefreshAttachAdmissionUsesConfiguredVlanAfterChildDrop17736(t *testing.T) {
+	vlanUnit := func() *config.InterfaceUnit {
+		return &config.InterfaceUnit{Number: 100, VlanID: 100}
+	}
+	cases := []struct {
+		name string
+		cfg  *config.Config
+	}{
+		{
+			name: "base VLAN child absent",
+			cfg: &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+				"ge-0/0/0": {Name: "ge-0/0/0", Units: map[int]*config.InterfaceUnit{100: vlanUnit()}},
+			}}},
+		},
+		{
+			name: "RETH VLAN child absent on physical member",
+			cfg: &config.Config{Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+				"reth0":    {Name: "reth0", RedundancyGroup: 1, Units: map[int]*config.InterfaceUnit{100: vlanUnit()}},
+				"ge-0/0/0": {Name: "ge-0/0/0", RedundantParent: "reth0"},
+			}}},
+		},
+	}
+	oldLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = oldLookup })
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name, EncapType: "ether"}}, nil
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// This snapshot is the post-revalidation shape: the parent survives,
+			// but the configured VLAN child netdev has no row.
+			snap := &ConfigSnapshot{
+				Config: tc.cfg,
+				Interfaces: []InterfaceSnapshot{
+					{Name: "ge-0/0/0", LinuxName: "ge-0-0-0", Ifindex: 17, Zone: "trust"},
+				},
+			}
+			m := New()
+			m.rxVlanPreconditionCheck = func(string) (error, error) {
+				return errors.New("C-tag offload cannot be disabled"), nil
+			}
+			var attaches []int
+			m.attachInterfaceXDPHook = func(ifindex int, _ bool) error {
+				attaches = append(attaches, ifindex)
+				return nil
+			}
+			m.reconcileInterfaceAttachmentsForRefreshLocked(snap)
+			if len(attaches) != 0 {
+				t.Fatalf("parent attached despite configured VLAN child and failed C-tag precondition: %v", attaches)
+			}
+		})
 	}
 }
