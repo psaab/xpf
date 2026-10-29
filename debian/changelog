@@ -38,6 +38,11 @@ xpf (0.0.0) unstable; urgency=medium
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
     the deferred VRF-to-VRF forward-import warning (#17705).
+  * Daemon: deep-copy the DNS pre-apply config clone's full exported object
+    graph so in-place apply mutations to policies, interfaces, NAT, and IPsec
+    cannot write through to the published generation; preserve pointer aliases
+    inside the clone and cover non-DNS policy mutation under a concurrent reader
+    (#17734).
   * Natshow: count persistent-binding sessions by translated endpoint,
     protocol, and routing scope. Normalize raw default scope 0 and helper
     wire marker 1 before joining; preserve endpoint-only legacy totals (#17737).

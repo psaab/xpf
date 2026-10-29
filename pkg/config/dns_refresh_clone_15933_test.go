@@ -61,6 +61,12 @@ func TestCloneForDNSRefreshIsolatesPublishedConfig15933(t *testing.T) {
 	if got := cfg.Security.AddressBook.Addresses[folded].UsableValues(); !reflect.DeepEqual(got, []string{"10.0.0.2/32"}) {
 		t.Fatalf("premise folded %s = %v", folded, got)
 	}
+	cfg.Security.Policies = []*ZonePairPolicies{{
+		FromZone: "trust",
+		ToZone:   "untrust",
+		Policies: []*Policy{{Name: "apply", Match: PolicyMatch{SourceAddresses: []string{"any"}}}},
+	}}
+	cfg.Security.GlobalPolicies = []*Policy{cfg.Security.Policies[0].Policies[0]}
 
 	clone := cfg.CloneForDNSRefresh()
 	if clone == cfg {
@@ -97,10 +103,29 @@ func TestCloneForDNSRefreshIsolatesPublishedConfig15933(t *testing.T) {
 	} else if got := z.AddressBook.Addresses["svc"].UsableValues(); !reflect.DeepEqual(got, []string{"10.0.0.2/32"}) {
 		t.Errorf("PUBLISHED zone-local svc mutated by clone refresh: %v", got)
 	}
-	// Non-DNS entries are shared by design; the clone must not mint copies
-	// that could diverge.
-	if clone.Security.AddressBook.Addresses["plain"] != cfg.Security.AddressBook.Addresses["plain"] {
-		t.Errorf("non-DNS entry was cloned; want shared")
+	// Non-DNS state is private too: apply may mutate it without writing
+	// through to a published generation.
+	originalPlain := cfg.Security.AddressBook.Addresses["plain"]
+	clonedPlain := clone.Security.AddressBook.Addresses["plain"]
+	if clonedPlain == originalPlain {
+		t.Fatal("non-DNS address aliases the published config")
+	}
+	clonedPlain.Value = "198.51.100.1/32"
+	if originalPlain.Value != "192.0.2.1/32" {
+		t.Errorf("published non-DNS address mutated by clone: %q", originalPlain.Value)
+	}
+	originalPolicy := cfg.Security.Policies[0].Policies[0]
+	clonedPolicy := clone.Security.Policies[0].Policies[0]
+	if clonedPolicy == originalPolicy ||
+		&clonedPolicy.Match.SourceAddresses[0] == &originalPolicy.Match.SourceAddresses[0] {
+		t.Fatal("policy or its source-address slice aliases the published config")
+	}
+	clonedPolicy.Match.SourceAddresses[0] = "10.9.9.9/32"
+	if got := originalPolicy.Match.SourceAddresses[0]; got != "any" {
+		t.Errorf("published policy mutated by clone: source-address = %q", got)
+	}
+	if clone.Security.GlobalPolicies[0] != clonedPolicy {
+		t.Fatal("clone did not preserve shared policy identity across config fields")
 	}
 	if got := cfg.CloneForDNSRefresh(); got == nil {
 		t.Error("clone of valid cfg is nil")

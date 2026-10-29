@@ -880,13 +880,15 @@ binding), peer-sync pre-resolves its text with the local node identity before
 The periodic tick resolves its clone outside the semaphore and applies it
 without re-resolving.
 `RefreshDNSAddressBooks` mutates its argument in place, so it must never be
-given the published active config (#15933); refreshed answers publish as a new store
-generation (#16606). #16687: the daemon's pre-apply resolver
-(`resolveDNSBeforeApply`) now resolves EVERY config into a private
-`CloneForDNSRefresh` clone and returns the clone — no arm writes
-through its argument, whatever the caller's provenance (published
-active, frozen rollback target, or owned) — and the #9811 debt retry
-resolves the same way. `policymatch`'s query-snapshot cache keys on
+given the published active config (#15933); refreshed answers publish as
+a new store generation (#16606).
+`resolveDNSBeforeApply` now resolves EVERY config into a private
+`CloneForDNSRefresh` clone and returns it. The clone deep-copies the full
+config graph, not just DNS answer state, so apply-time writes to non-DNS
+policies, interfaces, NAT, IPsec, or maps cannot reach through to the
+published generation (#17734). No arm writes through its argument,
+whatever the caller's provenance (published active, frozen rollback
+target, or owned); the #9811 debt retry resolves the same way.
 `DNSAnswersDigest` (scoped identity + prefixes + DNSLookupFailed +
 DNSUnresolved) in addition to the config pointer and feed digest, so even a
 future in-place write cannot leave a stale `ContentRejected` verdict
