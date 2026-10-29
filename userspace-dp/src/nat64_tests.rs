@@ -6516,6 +6516,41 @@ fn frag_assoc_mf0_tail_releases_after_middle_coverage_17720() {
 }
 
 #[test]
+fn frag_range_uses_non_atomic_ipv6_header_after_atomic_prefix_17720() {
+    // A leading atomic Fragment header must not shift the payload start used
+    // for the following real fragmented datagram.
+    let mut packet = vec![0u8; 72];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&32u16.to_be_bytes());
+    packet[6] = 44;
+    packet[7] = 64;
+
+    // Atomic prefix header: its Next Header points at the actual fragment.
+    packet[40] = 44;
+    packet[44..48].copy_from_slice(&0x1111_1111u32.to_be_bytes());
+    // Non-atomic head: 16 bytes of fragmentable payload follow this header.
+    packet[48] = PROTO_UDP;
+    packet[50..52].copy_from_slice(&1u16.to_be_bytes());
+    packet[52..56].copy_from_slice(&0x2222_2222u32.to_be_bytes());
+
+    let range = crate::fragment_assoc::fragment_range(
+        &packet,
+        libc::AF_INET6,
+        frag_test_authority(),
+    )
+    .expect("real fragment range after atomic prefix");
+    assert_eq!(
+        range,
+        crate::fragment_assoc::FragmentRange {
+            start: 0,
+            end: 16,
+            more: true,
+        },
+        "geometry must start after the selected non-atomic Fragment header"
+    );
+}
+
+#[test]
 fn nat64_frag_assoc_ttl_evicts() {
     // The association expires after the short TTL and is pruned on the next
     // consult. RED-on-revert: dropping the `retain(deadline > now)` prune (or the

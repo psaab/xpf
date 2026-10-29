@@ -129,7 +129,10 @@ pub(crate) fn fragment_range(
             let total_len = 40u32
                 .checked_add(u32::from(u16::from_be_bytes([*packet.get(4)?, *packet.get(5)?])))?;
             let walk = crate::afxdp::frame::walk_ipv6_ext_chain(packet, 0);
-            let fragment = walk.fragment?;
+            if walk.fragment_truncated {
+                return None;
+            }
+            let fragment = walk.first_non_atomic_fragment.or(walk.fragment)?;
             let fragment_end = fragment.header_offset.checked_add(8)?;
             if fragment_end > total_len as usize || total_len as usize > packet.len() {
                 return None;
