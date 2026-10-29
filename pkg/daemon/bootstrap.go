@@ -1051,10 +1051,12 @@ func (d *Daemon) persistAbsentBootstrapLifelineSnapshotLocked(generation string)
 	}
 }
 func (d *Daemon) clearBootstrapLifelineNetwork() {
-	// Drop the in-memory snapshot but retain #12155's durable network file:
-	// confirmation resolves the commit window without consuming that
-	// independent crash-recovery evidence. The early rename sidecar is no
-	// longer needed for a confirmed generation and is removed durably below.
+	// Drop the in-memory snapshot but retain #12155's durable network file.
+	// The confirmation hook runs before confirm.json removal is durable, so
+	// that file can still resurrect the FIRST rollback after a crash. Remove
+	// early rename provenance only when an exact generation-matched pair is
+	// already durable in the embedded snapshot; otherwise the sidecar remains
+	// the only crash-recovery record.
 	d.bootstrapLifelineMu.Lock()
 	d.bootstrapLifelineCaptured = false
 	d.bootstrapLifelinePresent = false
@@ -1062,7 +1064,7 @@ func (d *Daemon) clearBootstrapLifelineNetwork() {
 	d.bootstrapLifelineKernelName = ""
 	d.bootstrapLifelineLogicalName = ""
 	d.bootstrapLifelineMu.Unlock()
-	d.clearBootstrapLifelineRenameForCurrentGeneration()
+	d.clearConfirmedBootstrapLifelineRename()
 }
 
 func (d *Daemon) clearBootstrapLifelineRenameForCurrentGeneration() {
@@ -1070,6 +1072,48 @@ func (d *Daemon) clearBootstrapLifelineRenameForCurrentGeneration() {
 	generation := d.bootstrapLifelineRenameGeneration
 	d.bootstrapLifelineMu.Unlock()
 	d.clearBootstrapLifelineRename(generation)
+}
+
+func (d *Daemon) clearConfirmedBootstrapLifelineRename() {
+	d.bootstrapLifelineMu.Lock()
+	generation := d.bootstrapLifelineRenameGeneration
+	d.bootstrapLifelineMu.Unlock()
+	if !d.hasMatchingDurableLifelineRenameSnapshot(generation) {
+		slog.Debug("bootstrap confirmation: retaining lifeline rename sidecar without matching embedded provenance",
+			"generation", generation, "issue", "#17755")
+		return
+	}
+	d.clearBootstrapLifelineRename(generation)
+}
+
+func (d *Daemon) hasMatchingDurableLifelineRenameSnapshot(generation string) bool {
+	if generation == "" {
+		return false
+	}
+	sidecarPath := filepath.Join(linkDir, bootstrapLifelineRenameBase)
+	sidecarData, err := readBootstrapLifelineSnapshot(sidecarPath)
+	if err != nil || len(sidecarData) > maxBootstrapLifelineSnapshotSize {
+		return false
+	}
+	var sidecar bootstrapLifelineRenameRecord
+	if err := json.Unmarshal(sidecarData, &sidecar); err != nil ||
+		sidecar.Generation != generation ||
+		sidecar.KernelName == "" || sidecar.LogicalName == "" ||
+		sidecar.KernelName == sidecar.LogicalName {
+		return false
+	}
+	snapshotPath := filepath.Join(linkDir, bootstrapLifelineSnapshotBase)
+	snapshotData, err := readBootstrapLifelineSnapshot(snapshotPath)
+	if err != nil || len(snapshotData) > maxBootstrapLifelineSnapshotSize {
+		return false
+	}
+	var snapshot bootstrapLifelineSnapshotRecord
+	if err := json.Unmarshal(snapshotData, &snapshot); err != nil {
+		return false
+	}
+	return snapshot.Generation == generation &&
+		snapshot.LifelineKernelName == sidecar.KernelName &&
+		snapshot.LifelineLogicalName == sidecar.LogicalName
 }
 
 // loadBootstrapLifelineSnapshot reads the durable pre-takeover record

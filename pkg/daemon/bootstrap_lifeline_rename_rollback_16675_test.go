@@ -416,12 +416,13 @@ func TestConfirmedLifelineRenameClearsSidecar17755(t *testing.T) {
 	dir := withTempLinkDir(t)
 	generation := "confirmed-generation"
 	sidecar := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
-	if err := os.WriteFile(sidecar,
-		[]byte(`{"generation":"confirmed-generation","kernel_name":"enp6s0","logical_name":"ge-0-0-0"}`), 0o600); err != nil {
+	matchingSidecar := []byte(`{"generation":"confirmed-generation","kernel_name":"enp6s0","logical_name":"ge-0-0-0"}`)
+	if err := os.WriteFile(sidecar, matchingSidecar, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := filepath.Join(dir, bootstrapLifelineSnapshotBase)
-	if err := os.WriteFile(snapshot, []byte(`{"generation":"confirmed-generation"}`), 0o600); err != nil {
+	if err := os.WriteFile(snapshot,
+		[]byte(`{"generation":"confirmed-generation","lifeline_kernel_name":"enp6s0","lifeline_logical_name":"ge-0-0-0"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	d := &Daemon{bootstrapLifelineRenameGeneration: generation}
@@ -441,6 +442,96 @@ func TestConfirmedLifelineRenameClearsSidecar17755(t *testing.T) {
 	}
 	if _, err := os.Stat(snapshot); err != nil {
 		t.Fatalf("mismatched confirmation removed #12155 durable snapshot: %v", err)
+	}
+	if err := os.Remove(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecar, matchingSidecar, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingSnapshotDaemon := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	missingSnapshotDaemon.clearBootstrapLifelineNetwork()
+	remaining, err = os.ReadFile(sidecar)
+	if err != nil || string(remaining) != string(matchingSidecar) {
+		t.Fatalf("confirm removed or changed sidecar without embedded snapshot provenance: got %q, err=%v", remaining, err)
+	}
+}
+
+// TestConfirmedLifelineRenameCrashBeforeResolutionRetainsSidecar17755
+// witnesses the ordering in which the daemon confirmation hook runs before
+// confirm.json is durably removed. With no embedded snapshot, a crash at that
+// boundary must leave the only rename pair available to the expired-FIRST
+// restart rollback.
+func TestConfirmedLifelineRenameCrashBeforeResolutionRetainsSidecar17755(t *testing.T) {
+	dir := firstCommit12155FilesAndCommands(t)
+	installFakeNetworkctl(t)
+	cfgPath := filepath.Join(t.TempDir(), "xpf.conf")
+	store := newConfigStore(t, cfgPath)
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	commitConfirmedText12154(t, store, "system { host-name crash-window; }\n")
+	generation := store.ActiveConfigGeneration()
+	fab := stubLifelineRename16675(t, "ge-0-0-0")
+	writeTakeoverLink16675(t, dir, "ge-0-0-0", "enp6s0")
+
+	sidecarPath := filepath.Join(dir, bootstrapLifelineRenameBase)
+	sidecarData, err := json.Marshal(bootstrapLifelineRenameRecord{
+		Generation: generation, KernelName: "enp6s0", LogicalName: "ge-0-0-0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecarPath, append(sidecarData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(dir, bootstrapLifelineSnapshotBase)
+	if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("premise: embedded snapshot exists before confirmation: %v", err)
+	}
+	if err := expireConfirmWindow12155(t, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{store: store, bootstrapLifelineRenameGeneration: generation}
+	hookCalled := false
+	store.SetFirstCommitConfirmedHook(func() {
+		hookCalled = true
+		d.clearBootstrapLifelineNetwork()
+		panic("simulated process crash before durable confirm.json resolution")
+	})
+	var crash any
+	func() {
+		defer func() { crash = recover() }()
+		if err := store.ConfirmCommit(); err != nil {
+			t.Fatalf("confirm before simulated crash: %v", err)
+		}
+	}()
+	if !hookCalled || crash == nil {
+		t.Fatal("confirmation did not crash in the pre-resolution hook window")
+	}
+	confirmPath := filepath.Join(filepath.Dir(cfgPath), ".configdb", "confirm.json")
+	if _, err := os.Stat(confirmPath); err != nil {
+		t.Fatalf("simulated crash did not preserve pending confirm.json: %v", err)
+	}
+	if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("premise: snapshot appeared before restart: %v", err)
+	}
+
+	restarted := newConfigStore(t, cfgPath)
+	if err := restarted.Load(); err != nil {
+		t.Fatalf("restart load: %v", err)
+	}
+	if !restarted.FirstCommitTeardownOwed() {
+		t.Fatal("expired pending FIRST window did not re-arm rollback teardown")
+	}
+	if got := restarted.FirstCommitTeardownGeneration(); got != generation {
+		t.Fatalf("restart teardown generation=%q, want %q", got, generation)
+	}
+	recovered := &Daemon{store: restarted, opts: Options{NoDataplane: true}}
+	recovered.teardownRecoveredFirstCommitBeforeDataplane()
+	if len(fab.renames) != 1 || fab.renames[0] != [2]string{"ge-0-0-0", "enp6s0"} {
+		t.Fatalf("restart lost the only durable rename pair: renames=%v live=%q", fab.renames, fab.live)
 	}
 }
 
