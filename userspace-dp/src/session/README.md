@@ -704,27 +704,52 @@ The relay carries the two transitions a single worker would have made itself:
 
 | Stage | Produced where | Applied by the receiver when |
 |---|---|---|
-| `Promoted` | `note_tcp_seq_scaled` on an admitted SYN-ACK that just promoted a pair split across workers (replica origin or relayed marker) | the receiver's pair is pure Opening, the relayed SYN-ACK ack equals ITS client SYN end (`tcp_peer_ack_end`, #16042), same forward session id, and the pair serves traffic here. Sets `established && handshake_pending` (the #6752 opening-class gap) and seeds the reverse half's `tcp_peer_ack_end` with the server SYN end, so the client's completing ACK is validated exactly. |
-| `Completed` | `emit_session_state_update_inner` on a transition INTO Established of a split pair — the single choke point every packet-driven completion publishes through, so a deferred cache-hit completion relays only after TX admission, exactly like its HA Update | the receiver's pair is already handshake-pending (a validated SYN-ACK crossed it), same session id, serving. Never applied to a pure Opening pair (#6752/#13679). |
+| `Promoted` | `note_tcp_seq_scaled` on an admitted SYN-ACK that just promoted a pair split across workers (replica origin or relayed marker); targets the author worker named by the forward session id when it is on this node | the receiver's pair is pure Opening, the relayed SYN-ACK ack equals ITS client SYN end (`tcp_peer_ack_end`, #16042), same forward session id, and the pair serves traffic here. Sets `established && handshake_pending` (the #6752 opening-class gap) and seeds the reverse half's `tcp_peer_ack_end` with the server SYN end, so a bare completing ACK is validated exactly as on a single worker. A DATA segment completes a pending pair through the #16223 companion arm, which checks no ack — on a relayed pair exactly as on a single worker (#18528). |
+| `Completed` | `emit_session_state_update_inner` on a transition INTO Established of a split pair — the single choke point every packet-driven completion publishes through, so a deferred cache-hit completion relays only after TX admission, exactly like its HA Update; fans out to every sibling | the receiver's pair is already handshake-pending — a SYN-ACK was seen on it (validated, for a SYN-first pair; the installing segment itself, for a SYN-ACK-first pickup) — same session id, serving. Never applied to a pure Opening pair (#6752/#13679). |
 
 Producers push into a bounded outbox (`HANDSHAKE_RELAY_OUTBOX_CAP` = 256,
-drop-newest + counted); the worker loop drains it once per pass after the
-binding sweep (`session_glue::fan_out_handshake_relays`) into every live
-sibling's command queue (`WorkerCommand::HandshakeRelay`); the receiver applies
-it in `apply_worker_commands`. Nothing runs per packet: an empty outbox costs
-one `is_empty` per loop pass, and only split pairs relay (a flow whose SYN and
-SYN-ACK land on one worker relays nothing). A relayed transition is never
-relayed back (the consumer emits its HA Update with `relay = false`).
+drop-newest, counted in `HANDSHAKE_RELAY_OUTBOX_DROPS`); the worker loop
+drains it once per pass after the binding sweep
+(`session_glue::fan_out_handshake_relays`) into the recipient command queues
+(`WorkerCommand::HandshakeRelay`), one counted lock per recipient
+(`HANDSHAKE_RELAY_LOCK_ATTEMPTS`/`_CONTENDED`, kept apart from the #4800
+replication pair so its fan-out ratio stays exact; a refused push counts in
+`HANDSHAKE_RELAY_REFUSED`; none of the four is exported yet, #18529). The
+receiver applies it in `apply_worker_commands`. Nothing runs per packet: an
+empty outbox costs one `is_empty` per loop pass, and only split pairs relay (a
+flow whose SYN and SYN-ACK land on one worker relays nothing). A relayed
+transition is never relayed back, and the receiver publishes no HA Update for
+it — the sender already published the same transition for the same session id
+from its own row (a replica announces with the installer's carried id, #9582;
+a stage advance to Established always announces), so one completion yields
+one Established Update node-wide.
 "Serving" is the same served-here proxy `cache_hit_handshake_progress` uses
 (the locally-authored row, or a replica refreshed past its creation), so idle
 replicas on uninvolved workers keep their opening-window reap; carried HA
 counters are deliberately not used.
 
-The relay's evidence is strictly the single-worker evidence: B's replica
-cannot validate a SYN-ACK ack (replicas carry no client ISN, so B fails open
-as before), but the relay carries the ack and A — which seeded the client ISN
-at install — refuses a wrong one, so a forged SYN-ACK on B never promotes the
+The relay's evidence is the single-worker evidence: B's replica cannot
+validate a SYN-ACK ack (replicas carry no client ISN, so B fails open as
+before), but the relay carries the ack and A — which seeded the client ISN at
+install — refuses a wrong one, so a forged SYN-ACK on B never promotes the
 authoritative pair.
+
+Limits (the relay narrows the split gap, it does not erase it):
+
+- **Ordering race.** The relay crosses on the next loop pass of each worker.
+  If the client's completing ACK reaches A before B's `Promoted` relay is
+  applied, A cannot complete on it; A then completes on a later client
+  segment (a bare ACK whose ack still equals the server SYN end, or any data
+  segment through the companion arm) or on B's `Completed` relay when B
+  completes. A connection that goes idle right after its handshake with that
+  race lost (no further segment in either direction) still reaps on the 20 s
+  opening window, as it did before #18520.
+- **Missing forward replica.** The `Promoted` producer reads the session id
+  from B's forward replica. A SYN-ACK that B serves before applying the
+  `UpsertSynced` replica (materialized from the shared map) or from the flow
+  cache relays nothing; that flow behaves as before #18520.
+- **Delivery.** A relay refused by a full outbox or a full sibling queue is
+  counted and dropped, never retried (same fallback).
 
 Two coupled fixes ride with it:
 
@@ -736,7 +761,11 @@ Two coupled fixes ride with it:
   delta-loss resync), the rollback never discarded it, and the stage marker
   was never taken and accumulated for the life of the worker. Both are now
   keyed by the probed packet's canonical key (`pending_probe_state_updates`
-  carries `(admission_key, matched_key, …)`).
+  carries `(admission_key, matched_key, …)`). The stage marker also carries
+  the FORWARD pair and NAT, which `take_probe_stage_transition_forward`
+  hands the flow-cache caller for its shared-map restamps: a reverse hit
+  completes the pair too, and restamping on the reverse tuple cloned the
+  reverse shared row into a forward-wire alias.
 - **Steady-state cost.** `probe_hit_inner` armed `companion_progress` for
   every payload packet, including established ones, and ran
   `cache_hit_handshake_progress` twice per non-established payload packet —

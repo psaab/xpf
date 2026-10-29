@@ -438,16 +438,29 @@ pub(crate) static SESSION_REPLICATION_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::ne
 /// (opening window, #16223 GC retention); it is never retried.
 pub(crate) static HANDSHAKE_RELAY_REFUSED: AtomicU64 = AtomicU64::new(0);
 
-/// #18520: fan this worker's queued cross-worker handshake relays out to
-/// every live sibling queue. The worker loop calls it once per pass, after
-/// the binding sweep — never per packet; with an empty outbox it is one
-/// `Vec::is_empty` test. `scratch` is loop-owned and reused, so a pass that
-/// does relay only allocates the per-sibling `WorkerCommand`s.
+/// #18520: sibling-queue lock acquisitions made by
+/// [`fan_out_handshake_relays`], counted before each attempt, and the ones
+/// that found the queue held. The same contended/attempted shape as the
+/// #4800 replication pair, kept SEPARATE from it: folding relay locks into
+/// `SESSION_REPLICATION_ENQUEUED` would break that analyzer's
+/// `enqueued / upserts` fan-out ratio. Not yet exported (#18529).
+pub(crate) static HANDSHAKE_RELAY_LOCK_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static HANDSHAKE_RELAY_LOCK_CONTENDED: AtomicU64 = AtomicU64::new(0);
+
+/// #18520: fan this worker's queued cross-worker handshake relays out to the
+/// sibling queues. The worker loop calls it once per pass, after the binding
+/// sweep — never per packet; with an empty outbox it is one `Vec::is_empty`
+/// test. `scratch` is loop-owned and reused, so a pass that does relay only
+/// allocates the per-recipient `WorkerCommand`s.
 ///
-/// Each relay names its incarnation (forward session id) and carries the
-/// segment evidence the receiver re-validates (`apply_handshake_relay`), so
-/// broadcasting to every sibling is safe: a sibling that holds no matching,
-/// serving pair ignores it. One lock acquisition per sibling per pass.
+/// Routing: a relay naming a `target_worker` (a `Promoted` relay whose
+/// forward session id names the author worker on this node) goes only to
+/// that worker's queue when the queue map resolves it; otherwise (and for
+/// every `Completed` relay) it goes to every live sibling. Each relay names
+/// its incarnation (forward session id) and carries the segment evidence the
+/// receiver re-validates (`apply_handshake_relay`), so a sibling holding no
+/// matching, serving pair ignores it. At most one lock acquisition per
+/// recipient queue per pass, counted in the `HANDSHAKE_RELAY_LOCK_*` pair.
 pub(in crate::afxdp) fn fan_out_handshake_relays(
     sessions: &mut SessionTable,
     worker_commands: &[Arc<Mutex<VecDeque<WorkerCommand>>>],
@@ -459,12 +472,28 @@ pub(in crate::afxdp) fn fan_out_handshake_relays(
     }
     scratch.clear();
     sessions.drain_handshake_relays_into(scratch);
+    // A target the queue map cannot resolve falls back to the broadcast.
+    let routed_to = |relay: &crate::session::HandshakeRelay| {
+        relay
+            .target_worker
+            .filter(|worker| worker_command_queues.get(worker).is_some())
+    };
     for commands in worker_commands {
         if worker_command_queues.shed_if_dead(commands) {
             continue;
         }
-        let mut pending = worker_queue::lock_recover(commands);
-        for relay in scratch.iter() {
+        let queue_worker = worker_command_queues.worker_id_for_queue(commands);
+        let wants = |relay: &crate::session::HandshakeRelay| match routed_to(relay) {
+            Some(target) => queue_worker == Some(target),
+            None => true,
+        };
+        if !scratch.iter().any(|relay| wants(relay)) {
+            continue;
+        }
+        HANDSHAKE_RELAY_LOCK_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+        let mut pending =
+            worker_queue::lock_recover_counting(commands, &HANDSHAKE_RELAY_LOCK_CONTENDED);
+        for relay in scratch.iter().filter(|relay| wants(relay)) {
             if !worker_queue::push_bounded(&mut pending, WorkerCommand::HandshakeRelay(relay.clone())) {
                 HANDSHAKE_RELAY_REFUSED.fetch_add(1, Ordering::Relaxed);
             }

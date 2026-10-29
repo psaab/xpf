@@ -954,21 +954,24 @@ impl SessionTable {
         // its ct-slice had not yet restamped, landing after the sender's
         // completion Update — regressed an Established replica to the 20 s
         // opening window, where the standby HOLD ceiling (3 x 20 s) then
-        // reaps it before a failback. A new incarnation (another session
-        // id), a zero (legacy) id, or a stated close class still takes the
-        // incoming state.
-        let wire_handshake = match (wire_handshake, self.entry_by_key(&key)) {
-            (Some(incoming), Some(existing))
-                if wire_session_id != 0
-                    && wire_close.is_none()
-                    && existing.session_id == wire_session_id
-                    && !existing.closing
-                    && TcpHandshakeState::stage_rank(existing.tcp_handshake_state_wire(protocol))
-                        > TcpHandshakeState::stage_rank(incoming.to_wire()) =>
-            {
-                TcpHandshakeState::from_wire(existing.tcp_handshake_state_wire(protocol))
-            }
-            (incoming, _) => incoming,
+        // reaps it before a failback. Same rule as the shared map: the
+        // stage alone is kept; a stated close class still applies (it
+        // drives `closing` and the close window independently of the
+        // stage). A new incarnation (another session id) or a zero (legacy)
+        // id takes the incoming state. TCP with a carried id only, so other
+        // imports pay no extra lookup.
+        let wire_handshake = match wire_handshake {
+            Some(incoming) if wire_session_id != 0 => match self.entry_by_key_quiet(&key) {
+                Some(existing)
+                    if existing.session_id == wire_session_id
+                        && TcpHandshakeState::stage_rank(existing.tcp_handshake_state_wire(protocol))
+                            > TcpHandshakeState::stage_rank(incoming.to_wire()) =>
+                {
+                    TcpHandshakeState::from_wire(existing.tcp_handshake_state_wire(protocol))
+                }
+                _ => Some(incoming),
+            },
+            other => other,
         };
         // Reject peer data that would clobber a locally-owned session
         // unless explicitly allowed (e.g. during HA activation).

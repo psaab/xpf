@@ -318,6 +318,10 @@ fn update_wires(table: &mut SessionTable, key: &SessionKey) -> Vec<u8> {
         .collect()
 }
 
+fn count_wire(wires: &[u8], state: TcpHandshakeState) -> usize {
+    wires.iter().filter(|w| **w == state.to_wire()).count()
+}
+
 /// Upload (`iperf3 -c`) through completion.
 fn upload_established() -> Node {
     let mut node = syn_on_a();
@@ -356,11 +360,18 @@ fn split_handshake_upload_establishes_both_workers_18520() {
     let fwd = node.forward_key.clone();
     assert_pair_established(&node.a.table, &node, "worker A (authoritative forward)");
     assert_pair_established(&node.b.table, &node, "worker B (SYN-ACK worker replicas)");
-    // The HA/synced view: A's authoritative forward row announces the
-    // completion to the peer.
-    assert!(
-        update_wires(&mut node.a.table, &fwd).contains(&TcpHandshakeState::Established.to_wire()),
-        "#18520: A must emit an Established HA Update for the forward row"
+    // The HA/synced view: A (the completer) announces the completion once;
+    // B, which only APPLIED the relayed completion, announces nothing more
+    // (its own promotion Update stays the only Pending one).
+    let a_wires = update_wires(&mut node.a.table, &fwd);
+    let b_wires = update_wires(&mut node.b.table, &fwd);
+    assert_eq!(count_wire(&a_wires, TcpHandshakeState::Established), 1, "#18520: A must emit one Established Update");
+    assert_eq!(count_wire(&b_wires, TcpHandshakeState::Established), 0, "#18520: the relay consumer must not re-publish");
+    assert_eq!(
+        count_wire(&a_wires, TcpHandshakeState::HandshakePending)
+            + count_wire(&b_wires, TcpHandshakeState::HandshakePending),
+        1,
+        "#18520: one Pending Update node-wide (B's own promotion), none from the relay consumer"
     );
 }
 
@@ -388,17 +399,18 @@ fn split_handshake_download_establishes_both_workers_18520() {
     }
     assert_pair_established(&node.b.table, &node, "worker B (SYN-ACK worker replicas)");
     assert_pair_established(&node.a.table, &node, "worker A (authoritative forward)");
-    assert!(
-        update_wires(&mut node.a.table, &fwd).contains(&TcpHandshakeState::Established.to_wire()),
-        "#18520: A must emit an Established HA Update for the forward row"
-    );
     // B completed on a DEFERRED (flow-cache) reverse hit through the #16223
     // companion arm; its Update must be published on TX admission (its
-    // replica carries the installer's id, so it announces, #9582).
-    assert!(
-        update_wires(&mut node.b.table, &fwd).contains(&TcpHandshakeState::Established.to_wire()),
-        "#18520: B's deferred cache-hit completion must publish its Established Update"
+    // replica carries the installer's id, so it announces, #9582). A only
+    // applied the relayed completion and must not publish it again.
+    let a_wires = update_wires(&mut node.a.table, &fwd);
+    let b_wires = update_wires(&mut node.b.table, &fwd);
+    assert_eq!(
+        count_wire(&b_wires, TcpHandshakeState::Established),
+        1,
+        "#18520: B's deferred cache-hit completion must publish its Established Update once"
     );
+    assert_eq!(count_wire(&a_wires, TcpHandshakeState::Established), 0, "#18520: the relay consumer must not re-publish");
 }
 
 /// #16042 across workers: B's replica cannot validate the SYN-ACK ack (the
@@ -453,6 +465,7 @@ fn relay_consumer_refuses_pure_opening_completion_and_foreign_incarnation_18520(
         forward_key: fwd.clone(),
         session_id,
         stage: HandshakeRelayStage::Completed,
+        target_worker: None,
         synack_ack: None,
         server_ack_end: None,
     };
@@ -464,6 +477,7 @@ fn relay_consumer_refuses_pure_opening_completion_and_foreign_incarnation_18520(
         forward_key: fwd.clone(),
         session_id,
         stage: HandshakeRelayStage::Promoted,
+        target_worker: None,
         synack_ack: Some(CLIENT_ISN + 1),
         server_ack_end: Some(SERVER_ISN + 1),
     };
@@ -964,4 +978,334 @@ fn split_handshake_cache_served_completing_ack_publishes_update_18520() {
     pump(&mut node);
     assert_pair_established(&node.a.table, &node, "worker A");
     assert_pair_established(&node.b.table, &node, "worker B");
+}
+
+/// #16042 scope, with payload: a DATA segment with a wrong ack completes a
+/// handshake-pending pair through the #16223 companion arm, which checks no
+/// ack (#18528; the same gap reds the three master `bad_ack_*` cells). The
+/// relay must be neither weaker nor stronger than a single worker: a relayed
+/// pair and a pair whose SYN-ACK landed on the same worker end in the same
+/// state on the same wrong-ack data segment, on the cache-hit and slow paths.
+#[test]
+fn relayed_pair_matches_single_worker_on_wrong_ack_data_16042_18520() {
+    let wrong = SERVER_ISN + 999;
+    for cached in [true, false] {
+        // Relayed: SYN on A, SYN-ACK on B, relay to A.
+        let mut node = syn_on_a();
+        let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+        let t0 = node.t0;
+        slow_hit(&mut node.b.table, &rev, t0 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+        pump(&mut node);
+        // Single worker: the SYN-ACK lands on A itself.
+        let mut single = syn_on_a();
+        let t1 = single.t0;
+        slow_hit(&mut single.a.table, &rev, t1 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+        for (table, now) in [(&mut node.a.table, t0 + 2 * MS), (&mut single.a.table, t1 + 2 * MS)] {
+            assert_eq!(
+                table.handshake_state_wire_for(&fwd),
+                TcpHandshakeState::HandshakePending.to_wire(),
+                "premise: pending before the data segment"
+            );
+            if cached {
+                assert!(cache_hit(table, &fwd, now, TCP_FLAG_ACK | TCP_PSH, MSS, wrong));
+            } else {
+                slow_hit(table, &fwd, now, TCP_FLAG_ACK | TCP_PSH, MSS, CLIENT_ISN + 1, wrong);
+            }
+        }
+        assert_eq!(
+            node.a.table.handshake_state_wire_for(&fwd),
+            single.a.table.handshake_state_wire_for(&fwd),
+            "#18520: a relayed pair must react to a wrong-ack data segment exactly as a single worker \\
+             (cached={cached}; the shared gap is #18528)"
+        );
+    }
+}
+
+/// Consumer closing refusals: a relay never advances a pair whose forward
+/// or reverse half is closing (#14630: a closing pair is never promoted off
+/// its close window).
+#[test]
+fn relay_consumer_refuses_closing_pairs_18520() {
+    for close_reverse in [false, true] {
+        let mut node = syn_on_a();
+        let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+        let t0 = node.t0;
+        let session_id = node.a.table.session_id_for(&fwd);
+        // A RST on one half of A's pair (FIN/RST propagation closes both
+        // halves, so close the target half directly through its own hit).
+        let (key, seq, ack) = if close_reverse {
+            (&rev, SERVER_ISN, CLIENT_ISN + 1)
+        } else {
+            (&fwd, CLIENT_ISN + 1, SERVER_ISN + 1)
+        };
+        slow_hit(&mut node.a.table, key, t0 + MS, crate::tcp_flags::TCP_RST | TCP_FLAG_ACK, 0, seq, ack);
+        let promoted = HandshakeRelay {
+            forward_key: fwd.clone(),
+            session_id,
+            stage: HandshakeRelayStage::Promoted,
+            target_worker: None,
+            synack_ack: Some(CLIENT_ISN + 1),
+            server_ack_end: Some(SERVER_ISN + 1),
+        };
+        assert!(
+            !node.a.table.apply_handshake_relay(&promoted, t0 + 2 * MS),
+            "#18520: a Promoted relay must not advance a closing pair (close_reverse={close_reverse})"
+        );
+        assert_ne!(node.a.table.handshake_state_wire_for(&fwd), TcpHandshakeState::HandshakePending.to_wire());
+    }
+    // Promoted against a pair whose FORWARD half alone is closing (a real
+    // FIN/RST closes both halves, which the reverse refusal already covers).
+    let mut node = syn_on_a();
+    let fwd = node.forward_key.clone();
+    let t0 = node.t0;
+    let session_id = node.a.table.session_id_for(&fwd);
+    node.a.table.mark_closing_for_test(&fwd);
+    let promoted = HandshakeRelay {
+        forward_key: fwd.clone(),
+        session_id,
+        stage: HandshakeRelayStage::Promoted,
+        target_worker: None,
+        synack_ack: Some(CLIENT_ISN + 1),
+        server_ack_end: Some(SERVER_ISN + 1),
+    };
+    assert!(
+        !node.a.table.apply_handshake_relay(&promoted, t0 + MS),
+        "#18520: a Promoted relay must not advance a pair whose forward half is closing"
+    );
+    assert_ne!(node.a.table.handshake_state_wire_for(&fwd), TcpHandshakeState::HandshakePending.to_wire());
+    // Completed against a pending pair whose reverse half alone is closing.
+    let mut node = syn_on_a();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    let session_id = node.a.table.session_id_for(&fwd);
+    let promoted = HandshakeRelay {
+        forward_key: fwd.clone(),
+        session_id,
+        stage: HandshakeRelayStage::Promoted,
+        target_worker: None,
+        synack_ack: Some(CLIENT_ISN + 1),
+        server_ack_end: Some(SERVER_ISN + 1),
+    };
+    assert!(node.a.table.apply_handshake_relay(&promoted, t0 + MS), "premise: promoted");
+    node.a.table.mark_closing_for_test(&rev);
+    let completed = HandshakeRelay {
+        stage: HandshakeRelayStage::Completed,
+        target_worker: None,
+        synack_ack: None,
+        server_ack_end: None,
+        ..promoted
+    };
+    assert!(
+        !node.a.table.apply_handshake_relay(&completed, t0 + 2 * MS),
+        "#18520: a Completed relay must not complete a pair whose reverse half is closing"
+    );
+    assert_ne!(node.a.table.handshake_state_wire_for(&fwd), TcpHandshakeState::Established.to_wire());
+}
+
+/// Producer split gates: a handshake that stays on ONE worker relays
+/// nothing (no SYN-ACK relay from the author's own rows, no completion
+/// relay for an unsplit pair), so unsplit flows add no queue traffic.
+#[test]
+fn unsplit_handshake_queues_no_relay_18520() {
+    let mut node = syn_on_a();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    slow_hit(&mut node.a.table, &rev, t0 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+    assert_eq!(node.a.table.handshake_state_wire_for(&fwd), TcpHandshakeState::HandshakePending.to_wire());
+    assert!(
+        !node.a.table.has_pending_handshake_relays(),
+        "#18520: a SYN-ACK on the author's own pair must not queue a Promoted relay"
+    );
+    slow_hit(&mut node.a.table, &fwd, t0 + 2 * MS, TCP_FLAG_ACK, 0, CLIENT_ISN + 1, SERVER_ISN + 1);
+    assert_pair_established(&node.a.table, &node, "worker A");
+    assert!(
+        !node.a.table.has_pending_handshake_relays(),
+        "#18520: completing an unsplit pair must not queue a Completed relay"
+    );
+}
+
+/// Producer: a SYN-ACK on the reverse half of a SYN-ACK-FIRST replica pair
+/// (simultaneous-open shape) is not a SYN-first promotion and relays
+/// nothing.
+#[test]
+fn synack_first_replica_queues_no_promoted_relay_18520() {
+    let node = fresh_node();
+    let rev = node.reverse_key.clone();
+    let t0 = 1_000 * SEC;
+    let mut b = SessionTable::new();
+    b.set_session_id_namespace(0, 1);
+    // Replicas of worker 0's SYN-ACK-first pickup (carried id, worker 0).
+    let author_id = (0u64 << 48) | 7;
+    for forward in [true, false] {
+        let (key, decision, metadata) = if forward {
+            (node.forward_key.clone(), node.decision, test_metadata())
+        } else {
+            (node.reverse_key.clone(), node.reverse_decision, reverse_metadata())
+        };
+        assert!(b.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key,
+                decision,
+                metadata,
+                source_nat_static: None,
+                origin: SessionOrigin::WorkerLocalImport,
+                now_ns: t0,
+                protocol: PROTO_TCP,
+                tcp_flags: 0,
+                session_id: if forward { author_id } else { 0 },
+                tcp_close_class: 0,
+                tcp_handshake_state: TcpHandshakeState::SynAckFirstPending.to_wire(),
+                persistent_lease_hold: None,
+                fwd_packets: 0,
+                rev_packets: 0,
+            },
+            false,
+        ));
+    }
+    slow_hit(&mut b, &rev, t0 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+    assert!(
+        !b.has_pending_handshake_relays(),
+        "#18520: a SYN-ACK-first pair's SYN-ACK must not queue a Promoted relay"
+    );
+}
+
+/// Routing: a Promoted relay goes only to the author worker named by the
+/// forward session id; a Completed relay goes to every sibling. The outbox
+/// is bounded: overflow drops the newest relay and counts it.
+#[test]
+fn promoted_relay_targets_the_author_and_outbox_overflow_counts_18520() {
+    let mut node = syn_on_a();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    let queue_c = Arc::new(Mutex::new(VecDeque::new()));
+    let mut by_id = BTreeMap::new();
+    by_id.insert(0u32, Arc::clone(&node.a.queue));
+    by_id.insert(1u32, Arc::clone(&node.b.queue));
+    by_id.insert(2u32, Arc::clone(&queue_c));
+    let queues = WorkerCommandQueues::new(by_id);
+    slow_hit(&mut node.b.table, &rev, t0 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+    let mut scratch = Vec::new();
+    fan_out_handshake_relays(
+        &mut node.b.table,
+        &[Arc::clone(&node.a.queue), Arc::clone(&queue_c)],
+        &queues,
+        &mut scratch,
+    );
+    let relays_in = |queue: &Arc<Mutex<VecDeque<WorkerCommand>>>| {
+        queue
+            .lock()
+            .expect("queue")
+            .iter()
+            .filter(|cmd| matches!(cmd, WorkerCommand::HandshakeRelay(_)))
+            .count()
+    };
+    assert_eq!(relays_in(&node.a.queue), 1, "#18520: the Promoted relay reaches the author worker");
+    assert_eq!(relays_in(&queue_c), 0, "#18520: an uninvolved sibling receives no Promoted relay");
+    pump(&mut node);
+    slow_hit(&mut node.a.table, &fwd, t0 + 2 * MS, TCP_FLAG_ACK, 0, CLIENT_ISN + 1, SERVER_ISN + 1);
+    fan_out_handshake_relays(
+        &mut node.a.table,
+        &[Arc::clone(&node.b.queue), Arc::clone(&queue_c)],
+        &queues,
+        &mut scratch,
+    );
+    assert_eq!(relays_in(&node.b.queue), 1, "#18520: the Completed relay reaches the SYN-ACK worker");
+    assert_eq!(relays_in(&queue_c), 1, "#18520: a Completed relay fans out to every sibling");
+    // Overflow: drop-newest, counted.
+    let drops_before = crate::session::handshake_relay_outbox_drops_this_thread_for_test();
+    let mut table = SessionTable::new();
+    for i in 0..=crate::session::HANDSHAKE_RELAY_OUTBOX_CAP_FOR_TEST {
+        let mut key = fwd.clone();
+        key.src_port = 10_000 + i as u16;
+        table.push_handshake_relay_for_test(HandshakeRelay {
+            forward_key: key,
+            session_id: 1,
+            stage: HandshakeRelayStage::Completed,
+            target_worker: None,
+            synack_ack: None,
+            server_ack_end: None,
+        });
+    }
+    let mut drained = Vec::new();
+    table.drain_handshake_relays_into(&mut drained);
+    assert_eq!(drained.len(), crate::session::HANDSHAKE_RELAY_OUTBOX_CAP_FOR_TEST);
+    assert_eq!(drained.last().map(|r| r.forward_key.src_port), Some(10_000 + crate::session::HANDSHAKE_RELAY_OUTBOX_CAP_FOR_TEST as u16 - 1), "drop-newest");
+    assert_eq!(crate::session::handshake_relay_outbox_drops_this_thread_for_test() - drops_before, 1);
+}
+
+/// The import guard keeps the STAGE monotonic but never swallows a stated
+/// close: a stale same-incarnation Opening import that carries a close
+/// class closes the Established replica on the close window, with the
+/// stage kept.
+#[test]
+fn monotonic_import_stage_still_applies_a_stated_close_18520() {
+    let node = fresh_node();
+    let fwd = node.forward_key.clone();
+    let t0 = 1_000 * SEC;
+    let peer_id = (1u64 << 63) | 0x47;
+    let mut table = SessionTable::new();
+    import_synced(&mut table, &node, true, TcpHandshakeState::Established, peer_id, t0);
+    assert!(table.upsert_synced_with_origin(
+        crate::session::SessionInstall {
+            key: fwd.clone(),
+            decision: node.decision,
+            metadata: test_metadata(),
+            source_nat_static: None,
+            origin: SessionOrigin::SyncImport,
+            now_ns: t0 + SEC,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id: peer_id,
+            tcp_close_class: crate::session::TcpCloseClass::Closing.to_wire(),
+            tcp_handshake_state: TcpHandshakeState::Opening.to_wire(),
+            persistent_lease_hold: None,
+            fwd_packets: 0,
+            rev_packets: 0,
+        },
+        false,
+    ));
+    assert_eq!(table.handshake_state_wire_for(&fwd), TcpHandshakeState::Established.to_wire());
+    assert_eq!(
+        table.close_class_wire_for(&fwd),
+        crate::session::TcpCloseClass::Closing.to_wire(),
+        "#18520: the stated close still applies"
+    );
+    assert_eq!(
+        u64::from(table.timeout_secs_for(&fwd)),
+        crate::session::SessionTimeouts::default().tcp_closing_ns / SEC
+    );
+}
+
+/// A reverse cache hit that completes the pair (here B's reverse data hit
+/// through the #16223 companion arm, admitted under the REVERSE key) hands
+/// the flow-cache caller the FORWARD pair for its shared-map restamps.
+/// Restamping on the reverse tuple cloned the reverse shared row into a
+/// forward-wire alias under the un-NAT'd reverse tuple.
+#[test]
+fn reverse_hit_completion_names_the_forward_pair_for_restamps_18520() {
+    let mut node = syn_on_a();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    slow_hit(&mut node.b.table, &rev, t0 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+    assert!(node.b.table.probe_hit_deferring_state_update_with_ack(
+        &rev,
+        t0 + 2 * MS,
+        u64::from(MSS) + 52,
+        TCP_FLAG_ACK | TCP_PSH,
+        MSS,
+        0,
+        Some(CLIENT_ISN + 1),
+    ));
+    node.b.table.emit_probe_hit_state_update(&rev);
+    assert_eq!(
+        node.b.table.handshake_state_wire_for(&fwd),
+        TcpHandshakeState::Established.to_wire(),
+        "premise: the reverse data hit completed B's pair"
+    );
+    assert_eq!(
+        node.b.table.take_probe_stage_transition_forward(&rev),
+        Some((fwd.clone(), node.decision.nat)),
+        "#18520: the stage transition taken under the reverse key must name the forward pair"
+    );
+    assert!(node.b.table.take_probe_stage_transition_forward(&rev).is_none(), "consumed once");
 }

@@ -337,9 +337,13 @@ later):
    (with its ack and the server SYN end, re-validated by the
    receiver, #16042) and the completion between sibling tables
    through the worker command queues, once per loop pass. The
-   authoritative row now completes on the client's completing ACK
-   and emits the Established HA Update promptly, so a failover
-   imports Established instead of Opening; the worker import keeps
+   authoritative row normally completes on the client's completing
+   ACK (or, if that ACK beats the relay, on a later client segment
+   or the SYN-ACK worker's relayed completion) and emits the
+   Established HA Update then, so a failover imports Established
+   instead of Opening. A connection idle right after its handshake
+   with that race lost still sits on the opening window (see
+   `userspace-dp/src/session/README.md`, "Limits"); the worker import keeps
    the handshake stage monotonic per incarnation, so a stale bulk
    Open cannot regress that replica back to the 20 s window (whose
    3 x 20 s standby HOLD ceiling reaped it before a failback).

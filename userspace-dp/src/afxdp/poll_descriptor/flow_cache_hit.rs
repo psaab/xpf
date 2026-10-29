@@ -915,7 +915,14 @@ pub(super) fn stage_flow_cache_hit(
         // shared-map locks per packet. The ct-slice (10 s cadence) is
         // the backstop for completions that never take a completing
         // cache hit.
-        if sessions.take_probe_stage_transition(&flow.forward_key) {
+        // #18520: restamp the FORWARD pair the transition completed — a
+        // reverse cache hit (the #16223 companion arm, a SYN-ACK-first
+        // reverse ACK) completes it too, and keying these restamps on the
+        // reverse tuple cloned the reverse shared row into a forward-wire
+        // alias.
+        if let Some((stage_forward_key, stage_forward_nat)) =
+            sessions.take_probe_stage_transition_forward(&flow.forward_key)
+        {
             // #16217: snapshot the serving pair's ACTUAL forward +
             // reverse packet counts onto the shared rows — the
             // adoption gate's completed-handshake evidence for a
@@ -924,18 +931,18 @@ pub(super) fn stage_flow_cache_hit(
             crate::afxdp::shared_ops::restamp_shared_packet_counts(
                 worker_ctx.shared_sessions,
                 worker_ctx.shared_forward_wire_sessions,
-                &flow.forward_key,
-                cached_decision.nat,
-                sessions.fwd_packets_for(&flow.forward_key),
-                sessions.rev_packets_for(&flow.forward_key),
+                &stage_forward_key,
+                stage_forward_nat,
+                sessions.fwd_packets_for(&stage_forward_key),
+                sessions.rev_packets_for(&stage_forward_key),
             );
             // Legacy reverse-count snapshot (same transition bound).
-            let rev = sessions.rev_packets_for(&flow.forward_key);
+            let rev = sessions.rev_packets_for(&stage_forward_key);
             if rev > 0 {
                 crate::afxdp::shared_ops::restamp_shared_rev_packets(
                     worker_ctx.shared_sessions,
-                    &flow.forward_key,
-                    cached_decision.nat,
+                    &stage_forward_key,
+                    stage_forward_nat,
                     rev,
                 );
             }
@@ -945,8 +952,8 @@ pub(super) fn stage_flow_cache_hit(
             // Opening/syn_ack_first flags.
             crate::afxdp::shared_ops::restamp_shared_handshake_established(
                 worker_ctx.shared_sessions,
-                &flow.forward_key,
-                cached_decision.nat,
+                &stage_forward_key,
+                stage_forward_nat,
             );
             // #16217 (wire-cadence residual): the ct-slice restamp only
             // runs on the 10 s conntrack-refresh cadence, so advance
@@ -957,7 +964,7 @@ pub(super) fn stage_flow_cache_hit(
             crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
                 worker_ctx.shared_sessions,
                 worker_ctx.shared_forward_wire_sessions,
-                &[(flow.forward_key.clone(), cached_decision.nat)],
+                &[(stage_forward_key.clone(), stage_forward_nat)],
             );
         }
         // #3778/#11430/#11679: BA queue and LP inputs are packet-dependent,

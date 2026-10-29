@@ -19,20 +19,33 @@
 //
 // * `Promoted` — B admitted a SYN-ACK on a replica pair. Carries the SYN-ACK's
 //   ack (the receiver validates it against ITS client SYN end, #16042) and the
-//   server SYN end (the receiver's completing ACK is then validated exactly).
-//   Applied only to a pure Opening SYN-first pair; the receiver moves to
-//   `established && handshake_pending` — the #6752 opening-class gap — so the
-//   client's completing ACK, not the relay, completes it.
+//   server SYN end, seeded on the receiver's reverse half so a bare completing
+//   ACK is validated exactly as on a single worker. Applied only to a pure
+//   Opening SYN-first pair; the receiver moves to `established &&
+//   handshake_pending` — the #6752 opening-class gap — so a client segment,
+//   not the relay, completes it. Scope of the #16042 claim: a DATA segment
+//   completes a pending pair through the #16223 companion arm
+//   (`cache_hit_handshake_progress`), which checks no ack — on a relayed pair
+//   exactly as on a single worker (#18528).
 // * `Completed` — a worker completed a split pair. Applied only to a pair the
-//   receiver already holds as handshake-pending (a validated SYN-ACK crossed
-//   it), never to a pure Opening pair (#6752/#13679).
+//   receiver already holds as handshake-pending (a SYN-ACK was seen on it:
+//   validated for a SYN-first pair, or the installing segment of a
+//   SYN-ACK-first pickup), never to a pure Opening pair (#6752/#13679).
 //
 // Producers queue into a bounded per-table outbox; the worker loop drains it
 // once per pass (`session_glue::fan_out_handshake_relays`), never per packet.
-// A receiver applies a relay only to the same incarnation (forward session id)
+// A `Promoted` relay targets only the author worker when its id is in the
+// forward session id's namespace on this node; a `Completed` relay goes to
+// every sibling (the SYN-ACK worker's id is not recorded anywhere). A
+// receiver applies a relay only to the same incarnation (forward session id)
 // and only to a pair that serves traffic on its table (the author, or a
-// replica that has forwarded a packet), so idle replicas keep reaping on the
-// opening window exactly as before. A relay is never re-relayed.
+// replica a hit here refreshed past its creation), so idle replicas keep
+// reaping on the opening window exactly as before. A relay is never
+// re-relayed, and the receiver publishes NO HA Update for it: the sender
+// already published the same transition for the same session id from its own
+// row (a replica announces with the installer's carried id, #9582, and a
+// stage advance to Established always announces), so a consumer emit only
+// duplicated it.
 
 use super::*;
 
@@ -41,6 +54,22 @@ use super::*;
 /// split flows; overflow drops the newest relay and is counted — the flow then
 /// behaves exactly as it did before #18520.
 pub(crate) const HANDSHAKE_RELAY_OUTBOX_CAP: usize = 256;
+
+/// Relays refused by a full outbox, process-wide (cold path: one relaxed
+/// add per refused relay). Not yet on the status/metrics surface (#18529).
+pub(crate) static HANDSHAKE_RELAY_OUTBOX_DROPS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    /// Test mirror of `HANDSHAKE_RELAY_OUTBOX_DROPS` for the calling thread,
+    /// so a cell is not raced by parallel tests bumping the global.
+    static OUTBOX_DROPS_THIS_THREAD: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn handshake_relay_outbox_drops_this_thread_for_test() -> u64 {
+    OUTBOX_DROPS_THIS_THREAD.with(std::cell::Cell::get)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HandshakeRelayStage {
@@ -58,6 +87,10 @@ pub(crate) struct HandshakeRelay {
     /// does not match the receiver's forward row is dropped.
     pub(crate) session_id: u64,
     pub(crate) stage: HandshakeRelayStage,
+    /// The worker that should receive it, when known: for `Promoted`, the
+    /// author worker named by a same-node forward session id. `None` fans
+    /// out to every sibling.
+    pub(crate) target_worker: Option<u32>,
     /// `Promoted` only: the SYN-ACK segment's ack field.
     pub(crate) synack_ack: Option<u32>,
     /// `Promoted` only: the server's SYN end (SYN-ACK seq + 1 + payload) —
@@ -97,7 +130,9 @@ impl SessionTable {
             return;
         }
         if self.handshake_relay_outbox.len() >= HANDSHAKE_RELAY_OUTBOX_CAP {
-            self.handshake_relay_drops = self.handshake_relay_drops.saturating_add(1);
+            HANDSHAKE_RELAY_OUTBOX_DROPS.fetch_add(1, AtomicOrdering::Relaxed);
+            #[cfg(test)]
+            OUTBOX_DROPS_THIS_THREAD.with(|drops| drops.set(drops.get() + 1));
             return;
         }
         self.handshake_relay_outbox.push(relay);
@@ -142,10 +177,12 @@ impl SessionTable {
             return;
         }
         let session_id = forward.session_id;
+        let target_worker = self.same_node_author_worker(session_id);
         self.push_handshake_relay(HandshakeRelay {
             forward_key,
             session_id,
             stage: HandshakeRelayStage::Promoted,
+            target_worker,
             synack_ack: Some(ack),
             server_ack_end: Some(seq.wrapping_add(1).wrapping_add(payload_len)),
         });
@@ -181,6 +218,7 @@ impl SessionTable {
             forward_key: forward_key.clone(),
             session_id,
             stage: HandshakeRelayStage::Completed,
+            target_worker: None,
             synack_ack: None,
             server_ack_end: None,
         });
@@ -198,9 +236,34 @@ impl SessionTable {
         out.extend(self.handshake_relay_outbox.drain(..));
     }
 
-    /// Relays refused by the bounded outbox since start.
-    pub(crate) fn handshake_relay_drops(&self) -> u64 {
-        self.handshake_relay_drops
+    /// The worker that minted `session_id`, when it is ANOTHER worker of
+    /// THIS node (namespace = node bit | worker id in the high 16 bits,
+    /// #6311). A peer-node id (HA import) or this worker's own id is `None`.
+    fn same_node_author_worker(&self, session_id: u64) -> Option<u32> {
+        if !self.session_id_carried_from_another_worker(session_id) {
+            return None;
+        }
+        let namespace = session_id >> 48;
+        let own_namespace = self.session_id_worker_hi >> 48;
+        let node_bit = 1u64 << SESSION_ID_NODE_BIT_SHIFT;
+        if namespace & node_bit != own_namespace & node_bit {
+            return None;
+        }
+        Some((namespace & SESSION_ID_MAX_WORKER) as u32)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_handshake_relay_for_test(&mut self, relay: HandshakeRelay) {
+        self.push_handshake_relay(relay);
+    }
+
+    /// Test seam: close ONE half without the companion propagation a real
+    /// FIN/RST performs, to reach the receiver's per-half closing refusal.
+    #[cfg(test)]
+    pub(crate) fn mark_closing_for_test(&mut self, key: &SessionKey) {
+        if let Some(entry) = self.entry_by_key_mut(key) {
+            entry.closing = true;
+        }
     }
 
     /// Consumer: apply a sibling's relay to this table's copy of the pair.
@@ -221,8 +284,6 @@ impl SessionTable {
             return false;
         }
         let nat = forward.decision.nat;
-        let handshake_before = forward.tcp_handshake_state_wire(PROTO_TCP);
-        let class_before = forward.tcp_close_class_wire();
         let forward_serves = forward.serves_handshake_relay();
         let reverse_key = reverse_session_key(forward_key, nat);
         let reverse = self.entry_by_key_quiet(&reverse_key);
@@ -238,8 +299,9 @@ impl SessionTable {
         match relay.stage {
             HandshakeRelayStage::Promoted => {
                 // Only a pure Opening SYN-first pair: anything further along
-                // already saw (or was relayed) its own SYN-ACK.
-                if forward.established || forward.handshake_pending || forward.syn_ack_first {
+                // already saw (or was relayed) its own SYN-ACK. (A SYN-ACK-first
+                // pickup is always `handshake_pending`, so it is refused here.)
+                if forward.established || forward.handshake_pending {
                     return false;
                 }
                 // #16042: the relayed SYN-ACK must ack THIS table's client
@@ -264,8 +326,10 @@ impl SessionTable {
                 }
             }
             HandshakeRelayStage::Completed => {
-                // Only a pair a validated SYN-ACK already crossed here; a pure
-                // Opening pair is never established by a relay (#6752/#13679).
+                // Only a pair a SYN-ACK already crossed here (validated, for a
+                // SYN-first pair; the installing segment of a SYN-ACK-first
+                // pickup); a pure Opening pair is never established by a
+                // relay (#6752/#13679).
                 if !forward.handshake_pending {
                     return false;
                 }
@@ -307,8 +371,8 @@ impl SessionTable {
                 );
             }
         }
-        // HA Update for the transition, without re-relaying it.
-        self.emit_session_state_update_inner(forward_key, class_before, handshake_before, None, false);
+        // No HA Update here: the sender published this transition for the
+        // same session id from its own row (see the module header).
         true
     }
 }
