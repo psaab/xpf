@@ -4188,10 +4188,14 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   already cleared the lease so a late abort cannot undo it. (2) The
   requester records the aborted reqID (`abortedPeerTransferReqID`) and
   `electRG` refuses "Peer transfer out" while the peer still advertises
-  that hold; the marker expires when the peer stops advertising
-  secondary-hold, on commit, on `ResetFailover`, on peer loss, and on RG
-  removal, so a later legitimate transfer-out still promotes. The abort
-  send is best-effort and never masks the original failover error.
+  that hold. Post-commit abort markers expire when the peer stops advertising
+  secondary-hold. Failed pre-commit fence markers (#17713) also survive owner
+  restoration heartbeats that report ordinary secondary: that state does not
+  prove the owner reclaimed primary after aborting to ordinary election. A
+  session/sequence-newer primary report after an observed hold, a later
+  acknowledged transfer, or reset, peer loss, or RG removal resolves that
+  transfer epoch. The abort send is best-effort and never masks the original
+  failover error.
 - **An aborted node-targeted failover must demote the requester it
   already promoted (#16818, R3-F08-01 — #15164 residual).** The marker
   above only refuses FUTURE promotion; it did not undo a promotion the
