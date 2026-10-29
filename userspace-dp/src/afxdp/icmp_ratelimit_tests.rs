@@ -1035,10 +1035,12 @@ fn distinct_slot_ipv4_sources(n: usize) -> Vec<IpAddr> {
 /// aggregate); the victim asks for one reply at the end.
 ///
 /// The old fixed-IID fixture's `>=1520` admission assertion was seed-random:
-/// under the uniform 64-slot model, a singleton host slot admits 100 attempts
-/// in this schedule and any slot shared by 2+ IIDs admits 163. Exhaustive
-/// occupancy enumeration gives a 26.7530457% chance of total admissions below
-/// 1520. Issue #18404 reports 13/20 pristine-master failures; our isolated
+/// under an iid-uniform approximation to the outputs of the shared per-process
+/// seed (not an exact per-seed probability), a singleton host slot admits 100
+/// attempts in this schedule and any slot shared by 2+ IIDs admits 163. Exact
+/// occupancy enumeration within that model gives a 26.7530457% chance of total
+/// admissions below 1520.
+/// Issue #18404 reports 13/20 pristine-master failures; our isolated
 /// 20-run reproduction failed 8/20 (admitted counts: 1352, 1389, 1489, 1463,
 /// 1352, 1289, 1463, 1426). These are collisions, not a product limit.
 /// Select 16 distinct host slots from the same /64 instead: every 10/s
