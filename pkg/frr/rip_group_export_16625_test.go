@@ -567,3 +567,46 @@ func TestRIPPerGroupMatchAllAcceptPermits17688(t *testing.T) {
 		t.Errorf("match-all accept must not render deny-all:\n%s", got)
 	}
 }
+
+// #17688: independently grouped chains still use ripd's IPv4 policy
+// variant when joined in the OR-composed redistribution pool.
+func TestRIPPerGroupUnionPoolUsesRIPFamilyVariant17688(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"V4": {Name: "V4", Terms: []*config.PolicyTerm{
+				{Name: "v4", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: "192.168.50.0/24", MatchType: "exact"}}, Action: "accept"},
+			}},
+			"V6": {Name: "V6", Terms: []*config.PolicyTerm{
+				{Name: "v6", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: "2001:db8:50::/48", MatchType: "exact"}}, Action: "accept"},
+			}},
+		},
+	}
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1", "ge-0-0-2"},
+		Redistribute: []string{"V4", "V6"},
+		Groups: []*config.RIPGroup{
+			{Name: "V4", Interfaces: []string{"ge-0-0-1"}, Export: []string{"V4"}},
+			{Name: "V6", Interfaces: []string{"ge-0-0-2"}, Export: []string{"V6"}},
+		},
+	}
+	got := New().buildManagedSection(&FullConfig{RIP: rip, PolicyOptions: po})
+	mapName := ""
+	for _, line := range strings.Split(got, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 4 && fields[0] == "redistribute" && fields[1] == "static" && fields[2] == "route-map" {
+			mapName = fields[3]
+		}
+	}
+	if mapName == "" {
+		t.Fatalf("missing grouped static redistribution map:\n%s", got)
+	}
+	seqs := redistSeqs16864(t, got, mapName)
+	joined := strings.Join(seqs, "\n")
+	if strings.Contains(joined, "match ipv6") {
+		t.Errorf("grouped OR map must use ripd's IPv4 variant, not include v6 terms:\n%s", joined)
+	}
+	if !strings.Contains(joined, "match ip address prefix-list") {
+		t.Errorf("grouped OR map lost its IPv4 route-filter term:\n%s", joined)
+	}
+	mustNoEmptyPermit16864(t, got, mapName)
+}
