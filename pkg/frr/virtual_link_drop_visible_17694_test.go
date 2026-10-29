@@ -115,4 +115,27 @@ func TestVirtualLinkDropReasonControls17694(t *testing.T) {
 	if strings.Contains(logsStr, "auth_rejected=true") {
 		t.Errorf("interfaceless drop wrongly claims auth rejection:\n%s", logsStr)
 	}
+	// Duplicate-area control: the transit interface is eligible for HA
+	// retention, but its first membership is the backbone and so the
+	// renderer cannot activate it in the transit area.
+	got, logsStr = capture(&config.OSPFConfig{Areas: []*config.OSPFArea{
+		{ID: "0.0.0.0", Interfaces: []*config.OSPFInterface{{Name: "ge-0/0/0.0"}}},
+		{ID: "0.0.0.1", Interfaces: []*config.OSPFInterface{{Name: "ge-0/0/0.0"}},
+			VirtualLinks: []*config.OSPFVirtualLink{{NeighborID: "10.0.0.2", TransitArea: "0.0.0.1"}}},
+	}})
+	if strings.Contains(got, "virtual-link") {
+		t.Fatalf("duplicate-suppressed transit VL rendered:\n%s", got)
+	}
+	for _, want := range []string{
+		"reason=transit-area-not-emitted",
+		"ha_kept=true",
+		"transit_interface_present=true",
+	} {
+		if !strings.Contains(logsStr, want) {
+			t.Errorf("duplicate-suppressed transit drop warn missing %q:\n%s", want, logsStr)
+		}
+	}
+	if strings.Contains(logsStr, "auth_rejected=true") {
+		t.Errorf("duplicate-suppressed transit wrongly claims auth rejection:\n%s", logsStr)
+	}
 }

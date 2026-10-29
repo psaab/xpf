@@ -173,9 +173,10 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 		// Track actual activations, after duplicate-area and authentication
 		// omissions, rather than configured interface membership (#16631).
 		var activatedAreas16631 map[string]bool
-		// Keep the HA filter's enabled-interface predicate and auth-gate
-		// outcome so a dropped link's warning explains why the renderer
-		// disagreed with HA retention.
+		// Match the HA filter's enabled-interface retention eligibility on
+		// this renderer input; this does not observe whether HA filtering ran.
+		// Track auth-gate outcomes so a dropped link's warning explains why
+		// an eligible link was not activated by the renderer.
 		type transitAreaRenderState16631 struct {
 			interfacePresent bool
 			authRejected      bool
