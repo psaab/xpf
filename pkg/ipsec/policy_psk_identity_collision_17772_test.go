@@ -142,6 +142,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			}
 		}
 	})
+
 	t.Run("RFC822 aliases collide and retain unrelated VPN", func(t *testing.T) {
 		pairs := []struct{ aType, a, bType, b string }{
 			{"rfc822", "peer@corp.example", "user-at-hostname", "peer@CORP.EXAMPLE"},
@@ -171,9 +172,8 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 	t.Run("canonical atodn spellings skip both secrets", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"separator spacing and case", "CN=peer, O=Org", "cn=PEER,o=ORG"},
-			{"RDN order", "CN=peer,O=Org", "O=ORG,CN=PEER"},
-			{"slash separator", "/CN=peer/O=Org", "O=ORG,CN=PEER"},
-			{"trailing delimiter with whitespace", "CN=peer,O=Org, ", "O=ORG,CN=PEER"},
+			{"slash separator", "/CN=peer/O=Org", "CN=PEER,O=ORG"},
+			{"trailing delimiter with whitespace", "CN=peer,O=Org, ", "CN=PEER,O=ORG"},
 			{"PrintableString case", "SN=Smith", "sn=SMITH"},
 			{"email attribute aliases", "E=Peer@corp.example,O=Org", "emailAddress=PEER@CORP.EXAMPLE,o=ORG"},
 			{"employeeNumber aliases", "EN=12345", "employeeNumber=12345"},
@@ -242,6 +242,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"one zero byte versus two", "key-id", "zz", "key-id", "0000"},
 			{"odd padded bytes versus ASCII hex text", "key-id", "7a7", "key-id", "376137"},
 			{"unknown DN attribute case", "distinguished-name", "broken=peer", "distinguished-name", "BROKEN=PEER"},
+			{"RDN order is significant", "distinguished-name", "CN=peer,O=Org", "distinguished-name", "O=ORG,CN=PEER"},
 			{"internal DN whitespace", "distinguished-name", "CN=Peer   Name", "distinguished-name", "CN=peer name"},
 			{"UTF8 DN sharp-s", "distinguished-name", "CN=Straße", "distinguished-name", "CN=STRASSE"},
 			{"plus remains in DN value", "distinguished-name", "CN=peer+OU=VPN", "distinguished-name", "OU=vpn+CN=PEER"},

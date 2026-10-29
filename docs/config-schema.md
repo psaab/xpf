@@ -11523,7 +11523,8 @@ reserved for whole-dataplane selection where a rewrite shim
     KEY_ID bytes). DN keys mirror `atodn()` for recognized attribute names and
     aliases: PrintableString values and emailAddress compare ASCII-case-
     insensitively, UTF8String and other IA5 values remain byte-sensitive, and
-    RDN order is ignored. A leading slash selects `/` as the DN delimiter;
+    RDN order is significant and preserved. A leading slash selects `/` as
+    the DN delimiter;
     `+` and backslash are not separators or escapes, internal spaces remain
     significant, and a dangling terminal backslash, unknown attribute, or
     numeric-OID DN attribute falls back to literal KEY_ID bytes. RFC822

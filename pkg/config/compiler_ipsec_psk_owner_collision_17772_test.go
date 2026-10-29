@@ -271,9 +271,8 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 	t.Run("atodn DN spellings canonicalize", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"separator spacing and case", "CN=peer, O=Org", "cn=PEER,o=ORG"},
-			{"RDN order", "CN=peer,O=Org", "O=ORG,CN=PEER"},
-			{"slash separator", "/CN=peer/O=Org", "O=ORG,CN=PEER"},
-			{"trailing delimiter with whitespace", "CN=peer,O=Org, ", "O=ORG,CN=PEER"},
+			{"slash separator", "/CN=peer/O=Org", "CN=PEER,O=ORG"},
+			{"trailing delimiter with whitespace", "CN=peer,O=Org, ", "CN=PEER,O=ORG"},
 			{"SN PrintableString case", "SN=Smith", "sn=SMITH"},
 			{"G PrintableString case", "G=Jane", "g=JANE"},
 			{"T PrintableString case", "T=Manager", "t=MANAGER"},
@@ -290,6 +289,10 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 				requireCollision17772(t, identityPair17772("distinguished-name", pair.a, "distinguished-name", pair.b))
 			})
 		}
+	})
+
+	t.Run("DN RDN order remains significant", func(t *testing.T) {
+		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer,O=Org", "distinguished-name", "O=ORG,CN=PEER"))
 	})
 
 	t.Run("unsupported DN syntax falls back to literal key-id bytes", func(t *testing.T) {

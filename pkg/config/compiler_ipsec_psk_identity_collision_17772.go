@@ -566,11 +566,9 @@ func ipsecCanonicalDNIdentity(value string) (string, bool) {
 		canonicalRDNs = append(canonicalRDNs,
 			attribute+":"+valueType+":"+strconv.Quote(dnValue))
 	}
-	// strongSwan matches individual RDNs independent of their order. Sorting
-	// only these parsed values mirrors that behavior; '+' and backslash are
-	// ordinary value bytes, not escape/multi-value separators. The dangling
-	// terminal backslash fallback is handled above as malformed.
-	sort.Strings(canonicalRDNs)
+	// strongSwan compare_dn() compares RDNs in source order. The '+' and
+	// backslash bytes stay in values rather than becoming AVA/escape syntax;
+	// the dangling terminal backslash fallback is handled above as malformed.
 	return strings.Join(canonicalRDNs, "/"), true
 }
 
