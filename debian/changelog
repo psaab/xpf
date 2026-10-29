@@ -1,4 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
+  * IPsec: assign gateway and inline connection names from one collision-free
+    namespace so tolerant renders preserve every peer even when a gateway is
+    named `inline-<name>`; keep non-colliding connection names stable (#17731).
 
   * Userspace dataplane: release MF=0 associations only after range coverage,
     retaining reordered middles across NAT64 and same-family consult paths

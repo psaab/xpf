@@ -79,18 +79,18 @@ func validateIPsecSANameCollisionsStrict(cfg *Config) error {
 //
 // Since #15024 a VPN referencing a defined gateway renders under the
 // gateway name, while an inline VPN renders under its own name. Both
-// share one swanctl connection namespace. When an inline VPN named
-// "siteA" coexists with gateway "siteA" referenced by VPN "zzz", the
-// two would fold into one connection "siteA": the first sorted member
-// supplies remote_addrs/auth/proposals and the other's peer is dropped
-// silently, so its children (including the st0 if_id) negotiate with
-// the wrong peer. The render belt (gatewayKeyFor's "inline-" prefix
-// in pkg/ipsec) separates them by construction on tolerant load; this
-// gate makes strict commit reject the ambiguous naming so the
-// operator renames one object. VPNs sharing the SAME gateway object
-// intentionally share a connection (#15024) and are not rejected; a
-// gateway object no VPN references, and a VPN whose name equals its
-// OWN referenced gateway, fold with no second peer and are accepted.
+// share one swanctl connection namespace. Before #16676, an inline VPN
+// named "siteA" beside gateway "siteA" referenced by VPN "zzz" folded
+// into one connection; the first sorted member supplied the peer and
+// the other's children negotiated with the wrong endpoint. #16676
+// introduced the tolerant-path inline escape; #17731 made it
+// config-wide, reserving gateway keys and adding prefixes as needed so
+// even a gateway named "inline-<name>" cannot collide. This gate still
+// rejects the ambiguous naming at commit so the operator renames one
+// object. VPNs sharing the SAME gateway object intentionally share a
+// connection (#15024) and are not rejected; an unreferenced gateway,
+// and a VPN whose name equals its OWN referenced gateway, fold without
+// a second peer.
 func validateIPsecGatewayNameCollisionStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -134,10 +134,10 @@ func validateIPsecGatewayNameCollisionStrict(cfg *Config) error {
 		key := ipsecname.SwanctlValue(name)
 		if gwName, clash := referenced[key]; clash {
 			return fmt.Errorf("security ipsec vpn %q has an inline ike gateway endpoint but its name "+
-				"collides with ike gateway %q referenced by another vpn: both would render as the "+
-				"single swanctl connection %q, so one peer would be dropped and its traffic "+
-				"negotiated with the wrong peer — rename the vpn or the gateway (#16676)",
-				name, gwName, key)
+				"collides with ike gateway %q referenced by another vpn: strict commit rejects this "+
+				"ambiguous naming even though tolerant rendering assigns distinct connection keys "+
+				"(#16676/#17731) — rename the vpn or the gateway",
+				name, gwName)
 		}
 	}
 	return nil
