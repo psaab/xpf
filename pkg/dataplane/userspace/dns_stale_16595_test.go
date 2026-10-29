@@ -150,6 +150,13 @@ func TestDNSNeverResolvedPermitMatchNoneLoads16595(t *testing.T) {
 			if addr != 0 || app != 0 {
 				t.Fatalf("positive permit match-none must emit no sentinel, addr=%d app=%d", addr, app)
 			}
+			snap, err := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
+			if err != nil {
+				t.Fatalf("buildSnapshot: %v", err)
+			}
+			if len(snap.Capabilities.PolicyContentRejected) != 0 {
+				t.Fatalf("DNS match-none permit must keep the snapshot loadable, got %v", snap.Capabilities.PolicyContentRejected)
+			}
 			books, nameToID, err := buildAddressBookTable(cfg)
 			if err != nil {
 				t.Fatalf("address book: %v", err)

@@ -444,6 +444,10 @@ func TestRecoveredRollbackDNSRefreshRunsOutsideApplySem17782(t *testing.T) {
 }
 
 func TestSupersededDNSRefreshConsumesResolvedMarker17782(t *testing.T) {
+	stubDNS15933(t, map[string][]string{
+		"global.example.com": {"10.0.0.1"},
+		"local.example.com":  {"10.0.0.2"},
+	})
 	d, store := dnsDaemon15933(t)
 	base := store.ActiveConfig()
 	if base == nil {
