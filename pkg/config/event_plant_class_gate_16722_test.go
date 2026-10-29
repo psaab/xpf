@@ -106,6 +106,19 @@ func TestTreeMayHaveEventCommands16722(t *testing.T) {
 
 		{"compact event-options policy inside a group",
 			gate16722Hier(t, `groups { g { event-options policy p { events e; then { change-configuration { commands "set system host-name x"; } } } } } apply-groups g;`), true},
+		{"compact event-options policy pack is first sibling",
+			gate16722Hier(t, `system { host-name a; } event-options policy p { events e; then { change-configuration { commands "set system host-name x"; } } }`), true},
+		{"compact event-options policy in group body",
+			gate16722Hier(t, `groups { g { event-options policy p { events e; then { change-configuration { commands "set system host-name x"; } } } } } apply-groups g;`), true},
+		{"packed policy identity must not mask unrelated policy commands",
+			gate16722Hier(t, `event-options { policy q { events e; } } event-options policy p { events e; then { change-configuration { commands "set system host-name x"; } } }`), true},
+		{"compact one-key policy container with commands",
+			gate16722Hier(t, `event-options policy { p { events e; then { change-configuration { commands "set system host-name x"; } } } }`), true},
+		{"compact one-key policy container in a group body",
+			gate16722Hier(t, `groups { g { event-options policy { p { events e; then { change-configuration { commands "set system host-name x"; } } } } } } apply-groups g;`), true},
+		{"elided policy-name spelling has no policy commands",
+			gate16722Hier(t, `event-options policy { events e; then { change-configuration { commands "set system host-name x"; } } }`), false},
+
 
 	}
 	for _, tc := range cases {
@@ -183,5 +196,43 @@ func TestMalformedCompactEventOptionsGateDoesNotPanic17762(t *testing.T) {
 	tree := &ConfigTree{Children: []*Node{malformed}}
 	if treeMayHaveEventCommands9984(tree) {
 		t.Fatal("malformed compact policy identity must not be attributed")
+	}
+}
+
+func TestCompactOneKeyPolicyPlantClassForgeryRestamped17762(t *testing.T) {
+	before := gate16722Hier(t, `event-options policy { p { events e; plant-class alice; then { change-configuration { commands "set system host-name x"; } } } }`)
+	after := gate16722Hier(t, `event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`)
+	StampChangedEventPlantClasses(before, after, "alice")
+	if pol := compiledPlantClass9984(t, after); pol.PlantClass != "alice" {
+		t.Fatalf("forged one-key-container PlantClass=%q, want alice", pol.PlantClass)
+	}
+	if pol := compiledPlantClass9984(t, after); len(pol.ThenCommands) != 1 ||
+		pol.ThenCommands[0] != "set system host-name x" {
+		t.Fatalf("restamping disturbed one-key-container commands: %q", pol.ThenCommands)
+	}
+}
+
+func TestCompactOneKeyPolicySuperuserQuarantined17762(t *testing.T) {
+	sources := map[string]string{
+		"top-level": `event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } }`,
+		"group-body": `groups { g { event-options policy { p { events e; plant-class super-user; then { change-configuration { commands "set system host-name x"; } } } } } } apply-groups g;`,
+	}
+	for name, source := range sources {
+		t.Run(name, func(t *testing.T) {
+			tree := gate16722Hier(t, source)
+			if pol := compiledPlantClass9984(t, tree); pol.PlantClass != EventPlantClassSuperuser ||
+				len(pol.ThenCommands) != 1 {
+				t.Fatalf("fixture PlantClass=%q commands=%q, want executable super-user policy",
+					pol.PlantClass, pol.ThenCommands)
+			}
+			QuarantineUntrustedEventPlantClasses(tree)
+			pol := compiledPlantClass9984(t, tree)
+			if pol.PlantClass != "" {
+				t.Fatalf("quarantined PlantClass=%q, want empty marker", pol.PlantClass)
+			}
+			if len(pol.ThenCommands) != 1 || pol.ThenCommands[0] != "set system host-name x" {
+				t.Fatalf("quarantine disturbed commands: %q", pol.ThenCommands)
+			}
+		})
 	}
 }

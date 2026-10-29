@@ -191,14 +191,17 @@ func nodesMayHaveEventCommands9984(nodes []*Node, depth int) bool {
 }
 
 func eventOptionsMayHaveEventCommands9984(node *Node) bool {
-	// #17762: the compact `event-options policy p { ... }` parser shape keeps
-	// the policy identity on this node rather than under a `policy` child.
-	// Reuse the policy predicate on that node, but only after confirming the
-	// direct packed policy identity so unrelated event-options keys/children
-	// do not widen the gate.
-	if len(node.Keys) >= 3 && node.Keys[1] == "policy" &&
-		policyMayHaveEventCommands9984(node) {
+	if inst, ok := compactEventOptionsPolicyInstance9984(node, nil); ok &&
+		policyMayHaveEventCommands9984(inst.node) {
 		return true
+	}
+	if len(node.Keys) == 2 && node.Keys[1] == "policy" {
+		for _, child := range node.Children {
+			if inst, ok := compactEventOptionsPolicyInstance9984(node, child); ok &&
+				policyMayHaveEventCommands9984(inst.node) {
+				return true
+			}
+		}
 	}
 	for _, child := range node.Children {
 		if child == nil || child.Name() != "policy" {
@@ -211,6 +214,41 @@ func eventOptionsMayHaveEventCommands9984(node *Node) bool {
 		}
 	}
 	return false
+}
+
+type eventPolicyInstance9984 struct {
+	name string
+	node *Node
+}
+
+// compactEventOptionsPolicyInstance9984 resolves the packed raw spellings
+// `event-options policy p ...` and `event-options policy { p { ... } }`.
+// The second spelling is ambiguous with an elided-name policy body, so only
+// children that are not declared policy properties can be named instances.
+func compactEventOptionsPolicyInstance9984(container, child *Node) (eventPolicyInstance9984, bool) {
+	if container == nil || container.Name() != "event-options" ||
+		len(container.Keys) < 2 || container.Keys[1] != "policy" {
+		return eventPolicyInstance9984{}, false
+	}
+	if len(container.Keys) >= 3 {
+		if container.Keys[2] == "" {
+			return eventPolicyInstance9984{}, false
+		}
+		return eventPolicyInstance9984{name: container.Keys[2], node: container}, true
+	}
+	if len(container.Keys) != 2 || child == nil || child.Name() == "" ||
+		eventPolicyBodyKeyword9984(child.Name()) {
+		return eventPolicyInstance9984{}, false
+	}
+	return eventPolicyInstance9984{name: child.Name(), node: child}, true
+}
+
+func eventPolicyBodyKeyword9984(name string) bool {
+	if name == "apply-groups" || name == "apply-groups-except" {
+		return true
+	}
+	policySchema := schemaEventOptions.children["policy"]
+	return policySchema != nil && policySchema.children[name] != nil
 }
 
 func policyMayHaveEventCommands9984(policy *Node) bool {
@@ -257,14 +295,17 @@ func eventPolicyNodes9984(tree *ConfigTree) map[string][]*Node {
 				continue
 			}
 			inSection := inEventOptions || node.Name() == "event-options"
-			if inSection && node.Name() == "event-options" &&
-				len(node.Keys) >= 3 && node.Keys[1] == "policy" {
-				// #17762: a compact event-options/policy stanza keeps the
-				// policy name and body on the event-options node itself.
-				// Record that node as the policy so restamping and quarantine
-				// update the authored instance rather than inventing a sibling.
-				name := node.Keys[2]
-				out[name] = append(out[name], node)
+			if inSection && node.Name() == "event-options" {
+				if inst, ok := compactEventOptionsPolicyInstance9984(node, nil); ok {
+					out[inst.name] = append(out[inst.name], inst.node)
+				}
+				if len(node.Keys) == 2 && node.Keys[1] == "policy" {
+					for _, child := range node.Children {
+						if inst, ok := compactEventOptionsPolicyInstance9984(node, child); ok {
+							out[inst.name] = append(out[inst.name], inst.node)
+						}
+					}
+				}
 			}
 			if inSection && node.Name() == "policy" {
 				// Mirror namedInstances, used by compileEventOptions: a
