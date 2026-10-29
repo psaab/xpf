@@ -429,8 +429,18 @@ func TestConfirmedLifelineRenameClearsSidecar17755(t *testing.T) {
 	if _, err := os.Stat(sidecar); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("confirmed generation kept early rename sidecar: %v", err)
 	}
+	mismatchedGeneration := []byte(`{"generation":"newer-confirmed-generation","kernel_name":"eno1","logical_name":"ge-0-0-1"}`)
+	if err := os.WriteFile(sidecar, mismatchedGeneration, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleDaemon := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	staleDaemon.clearBootstrapLifelineNetwork()
+	remaining, err := os.ReadFile(sidecar)
+	if err != nil || string(remaining) != string(mismatchedGeneration) {
+		t.Fatalf("confirm removed or changed sidecar for another generation: got %q, err=%v", remaining, err)
+	}
 	if _, err := os.Stat(snapshot); err != nil {
-		t.Fatalf("confirm removed #12155 durable snapshot: %v", err)
+		t.Fatalf("mismatched confirmation removed #12155 durable snapshot: %v", err)
 	}
 }
 
@@ -489,6 +499,69 @@ func TestBootstrapRollbackRestoresRenameFromDurableRecord16675(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"ge-0-0-0.link")); !os.IsNotExist(err) {
 		t.Fatalf("durable rollback kept the takeover .link; stat err=%v", err)
+	}
+}
+
+// TestRecoveredLifelineRenameClearsSidecar17755 drives a successful recovered
+// first-commit teardown without the in-process applyBodyForTest seam. Recovery
+// restores the embedded network snapshot, then completion clears both durable
+// records, including the matching early rename sidecar.
+func TestRecoveredLifelineRenameClearsSidecar17755(t *testing.T) {
+	dir := withTempLinkDir(t)
+	installFakeNetworkctl(t)
+	fab := stubLifelineRename16675(t, "ge-0-0-0")
+	writeTakeoverLink16675(t, dir, "ge-0-0-0", "enp6s0")
+
+	store, generation := lifelineRenameStoreWithDebt16675(t, dir, "enp6s0", "ge-0-0-0")
+	original := []byte(bootstrapLifelineNetworkMarker +
+		" (recovered snapshot)\n[Match]\nName=fxp0\n\n[Network]\nAddress=192.0.2.1/24\n")
+	snapshotData, err := json.Marshal(bootstrapLifelineSnapshotRecord{
+		Generation:          generation,
+		Network:             original,
+		Present:             true,
+		LifelineKernelName:  "enp6s0",
+		LifelineLogicalName: "ge-0-0-0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(dir, bootstrapLifelineSnapshotBase)
+	if err := os.WriteFile(snapshotPath, append(snapshotData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sidecarPath := filepath.Join(dir, bootstrapLifelineRenameBase)
+	sidecarData, err := json.Marshal(bootstrapLifelineRenameRecord{
+		Generation: generation, KernelName: "enp6s0", LogicalName: "ge-0-0-0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecarPath, append(sidecarData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{store: store, opts: Options{NoDataplane: true}}
+	filesystemDone := d.teardownRecoveredFirstCommitBeforeDataplane()
+	if !filesystemDone {
+		t.Fatal("recovered filesystem teardown did not converge")
+	}
+	d.completeRecoveredFirstCommitTeardown(filesystemDone)
+
+	networkPath := filepath.Join(dir, linkPrefix+"fxp0.network")
+	got, err := os.ReadFile(networkPath)
+	if err != nil || string(got) != string(original) {
+		t.Fatalf("recovered network snapshot = %q, err=%v; want %q", got, err, original)
+	}
+	if len(fab.renames) != 1 || fab.renames[0] != [2]string{"ge-0-0-0", "enp6s0"} {
+		t.Fatalf("recovered lifeline renames = %v, want [ge-0-0-0 -> enp6s0]", fab.renames)
+	}
+	if store.FirstCommitTeardownOwed() {
+		t.Fatal("recovered teardown debt remains after completion")
+	}
+	for _, path := range []string{snapshotPath, sidecarPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("recovered teardown left durable record %s: %v", path, err)
+		}
 	}
 }
 
