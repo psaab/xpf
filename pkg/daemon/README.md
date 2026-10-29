@@ -362,12 +362,15 @@ always stays armed and the check runs twice:
     cancelled the producer (#16661) — is not a late feed: nobody will
     install the snapshot while the abandoned config stays enforced. The
     fire reconciles the feed producers FOR THE TARGET
-    (`reconcileFeeds(target)`, the same step a normal target apply runs),
-    restarts the bounded deferral, and lets the async fetch converge
-    through `onUpdate` / the next deferred fire. Bootstrap is never
-    reached for a feed-only refusal whose producer was absent; a producer
-    that exists but never installs (server down) still takes the bounded
-    safe state above.
+    (`reconcileFeeds(target)`, the same step a normal target apply runs)
+    and restarts the bounded deferral. While that target producer is being
+    installed, its callback is deferred instead of re-applying active C2. The
+    callback guard is checked again after acquiring `applySem`, so an apply
+    already waiting there cannot re-apply C2 after preflight marks the target.
+    The rejected callback leaves publication debt. That debt clears only when
+    a later retry successfully applies the snapshot with C1 active (#17741).
+    The next fire rechecks the snapshot; if the restarted producer still cannot
+    fetch before its bounded retry cap, the normal safe state above applies.
   - Any other refusal, or a feed still unready at the cap, promotes the store to
     the target (persisted as committed, as #6538 does for a recovered target
     that no longer compiles). The daemon then re-syncs the promoted target to

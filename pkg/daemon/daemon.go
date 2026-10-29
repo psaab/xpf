@@ -1115,6 +1115,11 @@ type Daemon struct {
 	// after management-VRF rebind and before the final terminator reassertion.
 	// It models late networkd cleanup without replacing the apply pipeline.
 	beforeFinalVRFMissReassertForTest func()
+	// confirmTargetFeedInstallPending marks a rollback-target producer set
+	// temporarily installed while C2 remains active. Its callback must not
+	// re-apply C2 and tear the target feed back down before the next rollback
+	// timer fire (#17741). Zero means no such installation is pending.
+	confirmTargetFeedInstallPending atomic.Uint64
 	// confirmFeedDeferrals counts, per commit-confirmed generation, how often a
 	// timed-out rollback was deferred because its target waits on a
 	// dynamic-address feed (#9615). Read and written only by

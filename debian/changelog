@@ -7,6 +7,10 @@ xpf (0.0.0) unstable; urgency=medium
     namespace so tolerant renders preserve every peer even when a gateway is
     named `inline-<name>`; keep non-colliding connection names stable (#17731).
 
+  * Daemon: defer active-config feed re-applies while a rollback-target
+    producer restarts. Recheck after acquiring applySem, preserve the target
+    snapshot for the next rollback timer, and prevent an unbounded C2 reapply
+    loop (#17741).
   * Userspace dataplane: gate refresh-time XDP attaches on RX-VLAN quarantine
     and offload preconditions, retaining configured VLAN ownership when an
     absent child row is dropped during refresh (#17736).
