@@ -46,6 +46,10 @@ xpf (0.0.0) unstable; urgency=medium
     `KeepSiblingMarker` for `sendRemoveForward`; clarify that `namedMarker`
     only checks backend-local retained marker state (#17724).
 
+  * Config: keep junos-host sibling static denies in the projected program
+    when a family-scoped DNS answer resolves successfully but has no usable
+    address for that family; preserve failed/unresolved diagnostics (#17721).
+
   * Event engine: recheck live `trigger until` ceilings when draining recorded
     cooldown crossings, preventing parked storms from replaying over the
     ceiling while preserving short-window `trigger on` crossings (#17708).
