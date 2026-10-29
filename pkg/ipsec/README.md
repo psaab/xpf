@@ -1022,10 +1022,11 @@ all files stay in `package ipsec`, so the public API is unchanged.
   by distinct PSK connections with different keys, or a peer selector equal
   to another gateway's effective local identity (configured `local-identity`,
   otherwise its effective local IP address); tolerant rendering skips only
-  colliding connection groups. Identity comparison canonicalizes DN case-ignore
-  attributes and RDN/AVA ordering, unifies `user-at-hostname`/`email`/`rfc822`
-  with a case-insensitive domain, and compares key-id hex/literal spellings by
-  strongSwan-effective bytes; rendered identity values stay in authored spelling.
+  colliding connection groups. Since #18428 comparison derives the key from
+  the exact swanctl selector rather than its declared Junos identity type,
+  distinct types that render one owner share a collision class. Per rendered
+  form it canonicalizes DN case-ignore attributes and RDN/AVA order, RFC822
+  domain case, key-id bytes and IP/FQDN spelling; authored output stays raw.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct

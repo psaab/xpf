@@ -293,44 +293,76 @@ func ipsecForEachPSKPeerIdentity(endpointList string, gw *IPsecGateway, visit fu
 	}
 }
 
-func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
-	value := strings.TrimSpace(idValue)
+// FormatIPsecIdentity renders an IKE identity exactly as swanctl emits it.
+// Both pkg/ipsec's formatIdentity wrapper and collision-key construction
+// use this function so the comparison never drifts from the rendered owner.
+func FormatIPsecIdentity(idType, idValue string) string {
 	switch idType {
 	case "hostname", "fqdn":
-		return "fqdn:" + strings.ToLower(value), "@" + idValue
-	case "user-at-hostname", "email", "rfc822":
-		// strongSwan renders all three aliases as one RFC822 identity. Its
-		// domain compares case-insensitively, while the local part remains
-		// case-sensitive.
-		if at := strings.LastIndex(value, "@"); at >= 0 {
-			return "rfc822:" + value[:at] + "@" + cases.Fold().String(value[at+1:]), idValue
-		}
-		return "rfc822:" + value, idValue
+		return "@" + idValue
 	case "key-id":
+		// KEY_ID: @#<value> (strongSwan treats the tail as hex when it
+		// decodes, else the literal bytes via the quoted swanctl string).
+		if idValue == "" {
+			return ""
+		}
+		return "@#" + idValue
+	default: // "distinguished-name", "inet", "inet6", "user-at-hostname", "email", etc.
+		// DN as-is (contains '='); empty = cert-derived DN, caller omits id.
+		return idValue
+	}
+}
+
+func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
+	selector := FormatIPsecIdentity(idType, idValue)
+	if selector == "" {
+		return "", selector
+	}
+	// StrongSwan identifies the owner from the rendered selector, not from
+	// the Junos-declared type. Keep this dispatch coupled to the shared
+	// formatter above so a new rendered spelling cannot reopen a collision.
+	if strings.HasPrefix(selector, "@#") {
 		// swanctl's @# spelling decodes valid even-length hex; otherwise
-		// strongSwan compares the literal bytes. Canonicalize both forms
-		// through those effective bytes, including odd-length hex as text.
-		identityBytes := []byte(idValue)
-		if decoded, err := hex.DecodeString(idValue); err == nil {
+		// strongSwan compares the literal bytes (including odd hex text).
+		identityBytes := []byte(selector[2:])
+		if decoded, err := hex.DecodeString(selector[2:]); err == nil {
 			identityBytes = decoded
 		}
-		return "key-id-bytes:" + hex.EncodeToString(identityBytes), "@#" + idValue
-	case "distinguished-name":
-		if canonical, ok := ipsecCanonicalDNIdentity(value); ok {
-			return "distinguished-name:" + canonical, idValue
-		}
-		// Malformed DN syntax falls back to exact raw matching;
-		// never guess a normalized identity from a partial parse.
-		return "distinguished-name:" + idValue, idValue
-	case "inet", "inet6":
-		if addr, err := netip.ParseAddr(value); err == nil {
-			if addr.Is4() {
-				return "ipv4:" + addr.String(), idValue
-			}
-			return "ipv6:" + addr.String(), idValue
-		}
+		return "key-id-bytes:" + hex.EncodeToString(identityBytes), selector
 	}
-	return idType + ":" + value, idValue
+	if strings.HasPrefix(selector, "@@") {
+		return ipsecRFC822IdentityKey(selector[2:]), selector
+	}
+	if strings.HasPrefix(selector, "@") {
+		return "fqdn:" + strings.ToLower(strings.TrimSpace(selector[1:])), selector
+	}
+	if strings.Contains(selector, "=") {
+		if canonical, ok := ipsecCanonicalDNIdentity(selector); ok {
+			return "distinguished-name:" + canonical, selector
+		}
+		// Malformed DN syntax falls back to exact raw-selector matching;
+		// never guess a normalized identity from a partial parse.
+		return "raw-selector:" + selector, selector
+	}
+	if strings.Contains(selector, "@") {
+		return ipsecRFC822IdentityKey(selector), selector
+	}
+	if addr, err := netip.ParseAddr(strings.TrimSpace(selector)); err == nil {
+		if addr.Is4() {
+			return "ipv4:" + addr.String(), selector
+		}
+		return "ipv6:" + addr.String(), selector
+	}
+	// A bare, unadorned identity with no DN/RFC822/IP syntax is parsed by
+	// strongSwan as an FQDN identity.
+	return "fqdn:" + strings.ToLower(strings.TrimSpace(selector)), selector
+}
+
+func ipsecRFC822IdentityKey(value string) string {
+	if at := strings.LastIndex(value, "@"); at >= 0 {
+		return "rfc822:" + value[:at] + "@" + cases.Fold().String(value[at+1:])
+	}
+	return "rfc822:" + value
 }
 
 func ipsecCanonicalDNIdentity(value string) (string, bool) {

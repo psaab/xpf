@@ -240,6 +240,60 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		}
 	})
 
+	t.Run("cross-type rendered-identical owners skip both secrets", func(t *testing.T) {
+		pairs := []struct{ name, aType, a, bType, b string }{
+			{"inet and inet6 same value", "inet", "198.51.100.7", "inet6", "198.51.100.7"},
+			{"inet and email same user-at-host", "inet", "peer@corp.example", "email", "peer@corp.example"},
+			{"inet and DN same string", "inet", "CN=peer", "distinguished-name", "CN=peer"},
+			{"email and DN same string", "email", "CN=peer", "distinguished-name", "CN=peer"},
+			{"inet and email same IP string", "inet", "198.51.100.7", "email", "198.51.100.7"},
+			{"hostname adorned equals inet literal @fqdn", "hostname", "peer.example", "inet", "@peer.example"},
+			{"key-id rendered equals inet literal @#zz", "key-id", "zz", "inet", "@#zz"},
+			{"hostname starting hash equals key-id rendered", "hostname", "#zz", "key-id", "zz"},
+		}
+		for _, pair := range pairs {
+			pair := pair
+			t.Run(pair.name, func(t *testing.T) {
+				cfg := build(map[string]*config.IPsecGateway{
+					"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: pair.aType, RemoteIDValue: pair.a},
+					"gw-b": {Name: "gw-b", Address: "203.0.113.2", RemoteIDType: pair.bType, RemoteIDValue: pair.b},
+					"gw-c": {Name: "gw-c", Address: "203.0.113.3"},
+				}, map[string]*config.IPsecVPN{
+					"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
+					"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
+					"c": {Gateway: "gw-c", PSK: config.NewSecret("secret-c")},
+				})
+				text, rendered := assertSkipped(t, cfg, "gw-a", "gw-b")
+				if !rendered["gw-c"] {
+					t.Fatalf("unrelated VPN must render alongside rendered-form skips:\n%s", text)
+				}
+			})
+		}
+	})
+
+	t.Run("cross-type distinct rendered owners render both", func(t *testing.T) {
+		pairs := []struct{ name, aType, a, bType, b string }{
+			{"email and hostname render differently", "email", "peer@corp.example", "hostname", "peer@corp.example"},
+			{"hostname and key-id render differently", "hostname", "zz", "key-id", "zz"},
+		}
+		for _, pair := range pairs {
+			pair := pair
+			t.Run(pair.name, func(t *testing.T) {
+				cfg := build(map[string]*config.IPsecGateway{
+					"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: pair.aType, RemoteIDValue: pair.a},
+					"gw-b": {Name: "gw-b", Address: "203.0.113.2", RemoteIDType: pair.bType, RemoteIDValue: pair.b},
+				}, map[string]*config.IPsecVPN{
+					"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
+					"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
+				})
+				text, rendered, err := manager.renderConfig(cfg)
+				if err != nil || !rendered["gw-a"] || !rendered["gw-b"] {
+					t.Fatalf("distinct rendered owners must both render: rendered=%v err=%v\n%s", rendered, err, text)
+				}
+			})
+		}
+	})
+
 	t.Run("DN and FQDN remain distinct in rendered owners", func(t *testing.T) {
 		cfg := build(map[string]*config.IPsecGateway{
 			"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: "distinguished-name", RemoteIDValue: "CN=peer.example.com"},

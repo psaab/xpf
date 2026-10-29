@@ -313,6 +313,30 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("user-at-hostname", "Peer@corp.example", "rfc822", "peer@CORP.EXAMPLE"))
 	})
 
+	t.Run("cross-type rendered-identical owners collide", func(t *testing.T) {
+		pairs := []struct{ name, aType, a, bType, b string }{
+			{"inet and inet6 same value", "inet", "198.51.100.7", "inet6", "198.51.100.7"},
+			{"inet and email same user-at-host", "inet", "peer@corp.example", "email", "peer@corp.example"},
+			{"inet and DN same string", "inet", "CN=peer", "distinguished-name", "CN=peer"},
+			{"email and DN same string", "email", "CN=peer", "distinguished-name", "CN=peer"},
+			{"inet and email same IP string", "inet", "198.51.100.7", "email", "198.51.100.7"},
+			{"hostname adorned equals inet literal @fqdn", "hostname", "peer.example", "inet", "@peer.example"},
+			{"key-id rendered equals inet literal @#zz", "key-id", "zz", "inet", "@#zz"},
+			{"hostname starting hash equals key-id rendered", "hostname", "#zz", "key-id", "zz"},
+		}
+		for _, pair := range pairs {
+			t.Run(pair.name, func(t *testing.T) {
+				requireCollision17772(t, identityPair17772(pair.aType, pair.a, pair.bType, pair.b))
+			})
+		}
+	})
+
+	t.Run("cross-type distinct rendered owners commit", func(t *testing.T) {
+		requireNoCollision17772(t, identityPair17772("email", "peer@corp.example", "hostname", "peer@corp.example"))
+		requireNoCollision17772(t, identityPair17772("hostname", "zz", "key-id", "zz"))
+		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer.example.com", "inet", "peer.example.com"))
+	})
+
 	t.Run("remote identity equal to default gateway local address is refused", func(t *testing.T) {
 		cmds := identityPair17772("inet", "198.51.100.7", "hostname", "gw-b.example.com", "set security ike gateway gw-b local-address 198.51.100.7")
 		requireCollision17772(t, cmds)

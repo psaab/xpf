@@ -1490,26 +1490,10 @@ func defaultRemoteID(gw *config.IPsecGateway) string {
 	return addrs[0]
 }
 
-// formatIdentity formats an IKE identity for strongSwan (#15752, G18-03;
-// strongSwan identity parsing: @ = FQDN, @# = KEY_ID hex/literal, a DN
-// containing '=' parses as ASN.1 DN as-is, @@/bare user@host = RFC822).
+// formatIdentity delegates to the shared identity renderer so collision
+// validation and emitted swanctl owners use identical spellings.
 func formatIdentity(idType, idValue string) string {
-	switch idType {
-	case "hostname", "fqdn":
-		return "@" + idValue
-	case "key-id":
-		// KEY_ID: @#<value> (strongSwan treats the tail as hex when it
-		// decodes, else the literal bytes via the quoted swanctl string).
-		if idValue == "" {
-			return ""
-		}
-		return "@#" + idValue
-	case "distinguished-name":
-		// DN as-is (contains '='); empty = cert-derived DN, caller omits id.
-		return idValue
-	default: // "inet", "inet6", "user-at-hostname", "email", etc.
-		return idValue
-	}
+	return config.FormatIPsecIdentity(idType, idValue)
 }
 
 func authMethodToSwan(method string) (string, error) {
