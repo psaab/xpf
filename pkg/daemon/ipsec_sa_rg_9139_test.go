@@ -261,6 +261,58 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 		}
 	})
 
+	t.Run("RG0 addition waits for local manager update", func(t *testing.T) {
+		store := testStoreWithSetConfig(t, base)
+		initial := store.ActiveConfig()
+		cm := cluster.NewManager(0, 1)
+		cm.UpdateConfig(initial.Chassis.Cluster)
+		cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+		if _, known := cm.LocalGroupPrimary(0); known {
+			t.Fatal("FIXTURE: manager must initially lack RG0")
+		}
+
+		if _, err := store.LoadSet("set chassis cluster redundancy-group 0 node 0 priority 1"); err != nil {
+			t.Fatalf("add RG0 to candidate: %v", err)
+		}
+		current, err := store.Commit()
+		if err != nil {
+			t.Fatalf("commit RG0 addition: %v", err)
+		}
+		hasRG0 := false
+		for _, group := range current.Chassis.Cluster.RedundancyGroups {
+			if group.ID == 0 {
+				hasRG0 = true
+				break
+			}
+		}
+		if !hasRG0 {
+			t.Fatal("FIXTURE: committed config must declare RG0")
+		}
+		if _, known := cm.LocalGroupPrimary(0); known {
+			t.Fatal("FIXTURE: apply tail must not have updated the manager yet")
+		}
+
+		d := &Daemon{cluster: cm, store: store}
+		if !d.ownsIPsecConn(current, ipsecSANameIndex(current), "vpn-plain") {
+			t.Fatal("FIXTURE: stale manager's undeclared-RG0 fallback must own via RG1")
+		}
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		var initiated []string
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+
+		// applyRethServicesForRG queued this RG1 edge before the apply tail
+		// publishes RG0 to Manager. The current config snapshot must win.
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: declared RG0 reached RG1 edge during apply lag: %v", initiated)
+		}
+	})
+
 	t.Run("RG0 declared and held by the peer excludes it", func(t *testing.T) {
 		store := testStoreWithSetConfig(t, append(append([]string{}, base...),
 			"set chassis cluster redundancy-group 0 node 0 priority 1"))
