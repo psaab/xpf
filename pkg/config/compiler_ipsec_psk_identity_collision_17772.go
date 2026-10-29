@@ -4,7 +4,12 @@ import (
 	"encoding/hex"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/cases"
 )
 
 // IPsecPSKIdentityConflict describes a peer-only selector collision between
@@ -23,21 +28,22 @@ type IPsecPSKIdentityConflict struct {
 }
 
 type ipsecPSKIdentityGroup struct {
-	key           string
-	gateway       string
-	members       []string
-	psks          map[string]struct{}
-	peerSelectors map[string]string
-	localIdentity string
-	mixedHostname string
+	key             string
+	gateway         string
+	members         []string
+	psks            map[string]struct{}
+	peerSelectors   map[string]string
+	localIdentities map[string]struct{}
+	mixedHostname   string
 }
 
 // IPsecPSKIdentityConflicts finds cross-connection peer-identity collisions
 // that would make strongSwan enumerate one PSK for another connection. The
 // selectors mirror the renderer: explicit remote-identity, dynamic-hostname
-// identity, or concrete IP gateway addresses. Configured local-identity is
-// checked only against another connection's peer selector; local identities
-// are never added to secret owners. Equal effective PSK sets under the same
+// identity, or concrete IP gateway addresses. Configured local-identity, or
+// the effective local IP address when none is configured, is checked only
+// against another connection's peer selector; local identities are never
+// added to secret owners. Equal effective PSK sets under the same
 // identity are one credential repeated, not a cross-key collision.
 //
 // Only VPN-referenced PSK connections with an effective key participate.
@@ -84,10 +90,11 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 		group := groupsByKey[key]
 		if group == nil {
 			group = &ipsecPSKIdentityGroup{
-				key:           key,
-				gateway:       vpn.Gateway,
-				psks:          make(map[string]struct{}),
-				peerSelectors: make(map[string]string),
+				key:             key,
+				gateway:         vpn.Gateway,
+				psks:            make(map[string]struct{}),
+				peerSelectors:   make(map[string]string),
+				localIdentities: make(map[string]struct{}),
 			}
 			groupsByKey[key] = group
 		}
@@ -97,8 +104,22 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 		endpointList := vpn.Gateway
 		if gw != nil {
 			endpointList = gw.Address
-			if gw.LocalIDValue != "" {
-				group.localIdentity, _ = ipsecIKEIdentityKey(gw.LocalIDType, gw.LocalIDValue)
+		}
+		if gw != nil && gw.LocalIDValue != "" {
+			identity, _ := ipsecIKEIdentityKey(gw.LocalIDType, gw.LocalIDValue)
+			group.localIdentities[identity] = struct{}{}
+		} else {
+			localAddress := vpn.LocalAddr
+			if localAddress == "" && gw != nil {
+				localAddress = gw.LocalAddress
+			}
+			for _, endpoint := range SplitIPsecEndpointList(localAddress) {
+				addr, err := netip.ParseAddr(strings.TrimSpace(endpoint))
+				if err != nil {
+					continue
+				}
+				identity, _ := ipsecIKEIdentityKey("inet", addr.String())
+				group.localIdentities[identity] = struct{}{}
 			}
 		}
 		if mixedHostname, mixed := ipsecMixedHostnameAndIP(endpointList); mixed &&
@@ -150,7 +171,7 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 					conflict = ipsecPSKIdentityConflict(a, b, rendered, "shared-peer-selector")
 					break
 				}
-				if identity == b.localIdentity {
+				if _, ok := b.localIdentities[identity]; ok {
 					conflict = ipsecPSKIdentityConflict(a, b, rendered, "peer-selector-is-other-local-identity")
 					break
 				}
@@ -158,7 +179,7 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			if conflict.Kind == "" {
 				for _, identity := range ipsecSortedIdentityKeys(b.peerSelectors) {
 					rendered := b.peerSelectors[identity]
-					if identity == a.localIdentity {
+					if _, ok := a.localIdentities[identity]; ok {
 						conflict = ipsecPSKIdentityConflict(b, a, rendered, "peer-selector-is-other-local-identity")
 						break
 					}
@@ -277,11 +298,30 @@ func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
 	switch idType {
 	case "hostname", "fqdn":
 		return "fqdn:" + strings.ToLower(value), "@" + idValue
-	case "key-id":
-		if decoded, err := hex.DecodeString(value); err == nil {
-			return "key-id-hex:" + hex.EncodeToString(decoded), "@#" + idValue
+	case "user-at-hostname", "email", "rfc822":
+		// strongSwan renders all three aliases as one RFC822 identity. Its
+		// domain compares case-insensitively, while the local part remains
+		// case-sensitive.
+		if at := strings.LastIndex(value, "@"); at >= 0 {
+			return "rfc822:" + value[:at] + "@" + cases.Fold().String(value[at+1:]), idValue
 		}
-		return "key-id-literal:" + value, "@#" + idValue
+		return "rfc822:" + value, idValue
+	case "key-id":
+		// swanctl's @# spelling decodes valid even-length hex; otherwise
+		// strongSwan compares the literal bytes. Canonicalize both forms
+		// through those effective bytes, including odd-length hex as text.
+		identityBytes := []byte(idValue)
+		if decoded, err := hex.DecodeString(idValue); err == nil {
+			identityBytes = decoded
+		}
+		return "key-id-bytes:" + hex.EncodeToString(identityBytes), "@#" + idValue
+	case "distinguished-name":
+		if canonical, ok := ipsecCanonicalDNIdentity(value); ok {
+			return "distinguished-name:" + canonical, idValue
+		}
+		// Malformed DN syntax falls back to exact raw matching;
+		// never guess a normalized identity from a partial parse.
+		return "distinguished-name:" + idValue, idValue
 	case "inet", "inet6":
 		if addr, err := netip.ParseAddr(value); err == nil {
 			if addr.Is4() {
@@ -291,6 +331,178 @@ func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
 		}
 	}
 	return idType + ":" + value, idValue
+}
+
+func ipsecCanonicalDNIdentity(value string) (string, bool) {
+	rdns, ok := splitIPsecDNComponents(value, ',')
+	if !ok || len(rdns) == 0 {
+		return "", false
+	}
+	canonicalRDNs := make([]string, 0, len(rdns))
+	for _, rawRDN := range rdns {
+		avas, ok := splitIPsecDNComponents(rawRDN, '+')
+		if !ok || len(avas) == 0 {
+			return "", false
+		}
+		canonicalAVAs := make([]string, 0, len(avas))
+		for _, rawAVA := range avas {
+			eq, ok := indexUnescapedIPsecDNByte(rawAVA, '=')
+			if !ok || eq <= 0 {
+				return "", false
+			}
+			attribute := canonicalIPsecDNAttribute(trimUnescapedIPsecDNPadding(rawAVA[:eq]))
+			if attribute == "" {
+				return "", false
+			}
+			rawValue := trimUnescapedIPsecDNPadding(rawAVA[eq+1:])
+			decoded, ok := decodeIPsecDNValue(rawValue)
+			if !ok {
+				return "", false
+			}
+			if ipsecDNAttributeCaseIgnore(attribute) {
+				decoded = cases.Fold().String(strings.Join(strings.Fields(decoded), " "))
+			}
+			canonicalAVAs = append(canonicalAVAs, attribute+"="+strconv.Quote(decoded))
+		}
+		sort.Strings(canonicalAVAs)
+		canonicalRDNs = append(canonicalRDNs, strings.Join(canonicalAVAs, "+"))
+	}
+	// Treat equivalent RDN orderings and multi-valued AVA orderings as
+	// the same peer identity. Quoted values keep escaped separators from
+	// becoming structural delimiters in this collision-only key.
+	sort.Strings(canonicalRDNs)
+	return strings.Join(canonicalRDNs, "/"), true
+}
+
+func splitIPsecDNComponents(value string, separator byte) ([]string, bool) {
+	parts := make([]string, 0, 2)
+	start := 0
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\\' {
+			if i+1 >= len(value) {
+				return nil, false
+			}
+			i++
+			continue
+		}
+		if value[i] == separator {
+			parts = append(parts, value[start:i])
+			start = i + 1
+		}
+	}
+	parts = append(parts, value[start:])
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			return nil, false
+		}
+	}
+	return parts, true
+}
+
+func indexUnescapedIPsecDNByte(value string, target byte) (int, bool) {
+	for i := 0; i < len(value); i++ {
+		if value[i] == '\\' {
+			if i+1 >= len(value) {
+				return -1, false
+			}
+			i++
+			continue
+		}
+		if value[i] == target {
+			return i, true
+		}
+	}
+	return -1, false
+}
+
+func trimUnescapedIPsecDNPadding(value string) string {
+	start, end := 0, len(value)
+	for start < end {
+		r, size := utf8.DecodeRuneInString(value[start:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		start += size
+	}
+	for end > start {
+		r, size := utf8.DecodeLastRuneInString(value[start:end])
+		if !unicode.IsSpace(r) {
+			break
+		}
+		slashes := 0
+		for i := end - size - 1; i >= start && value[i] == '\\'; i-- {
+			slashes++
+		}
+		if slashes%2 != 0 {
+			break
+		}
+		end -= size
+	}
+	return value[start:end]
+}
+
+func decodeIPsecDNValue(value string) (string, bool) {
+	var decoded strings.Builder
+	for i := 0; i < len(value); {
+		if value[i] != '\\' {
+			decoded.WriteByte(value[i])
+			i++
+			continue
+		}
+		if i+1 >= len(value) {
+			return "", false
+		}
+		if i+2 < len(value) {
+			if b, err := hex.DecodeString(value[i+1 : i+3]); err == nil {
+				decoded.WriteByte(b[0])
+				i += 3
+				continue
+			}
+		}
+		if !strings.ContainsRune(" \\\"#+,;<>\\=", rune(value[i+1])) {
+			return "", false
+		}
+		decoded.WriteByte(value[i+1])
+		i += 2
+	}
+	return decoded.String(), true
+}
+
+func canonicalIPsecDNAttribute(attribute string) string {
+	attribute = strings.ToUpper(strings.TrimSpace(attribute))
+	switch attribute {
+	case "S":
+		return "ST"
+	case "E":
+		return "EMAILADDRESS"
+	case "2.5.4.3":
+		return "CN"
+	case "2.5.4.6":
+		return "C"
+	case "2.5.4.7":
+		return "L"
+	case "2.5.4.8":
+		return "ST"
+	case "2.5.4.9":
+		return "STREET"
+	case "2.5.4.10":
+		return "O"
+	case "2.5.4.11":
+		return "OU"
+	case "1.2.840.113549.1.9.1":
+		return "EMAILADDRESS"
+	default:
+		return attribute
+	}
+}
+
+func ipsecDNAttributeCaseIgnore(attribute string) bool {
+	switch attribute {
+	case "CN", "O", "OU", "C", "L", "ST", "STREET", "EMAILADDRESS", "DC", "UID":
+		return true
+	default:
+		return false
+	}
 }
 
 func ipsecMixedHostnameAndIP(endpointList string) (string, bool) {
