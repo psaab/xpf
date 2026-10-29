@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -139,18 +141,34 @@ func TestPolicerBurstFloor16714LenientWarns(t *testing.T) {
 	}
 }
 
-func TestPolicerLimitsLenientClassifiesAllDefectClasses17761(t *testing.T) {
-	type defect struct {
-		name string
-		kind string
+type policerDefect17761 struct {
+	name string
+	kind string
+}
+
+func expectedLenientPolicerWarning17761(d policerDefect17761) string {
+	switch d.kind {
+	case "floor":
+		return fmt.Sprintf("firewall policer burst floor (downgraded to warning on tolerant path; the sub-1518-byte bucket drops every maximum-sized VLAN frame): firewall policer %q burst-size-limit must be at least one maximum-sized frame (1518 bytes: 1500-byte MTU + 14-byte Ethernet header + 4-byte VLAN tag), got 1500", d.name)
+	case "missing-bandwidth":
+		return fmt.Sprintf("firewall policer missing limits (downgraded to warning on tolerant path): firewall policer %q requires `if-exceeding bandwidth-limit` (missing bandwidth-limit compiles to a 0-rate policer that drops all policed traffic)", d.name)
+	case "missing-burst":
+		return fmt.Sprintf("firewall policer missing limits (downgraded to warning on tolerant path): firewall policer %q requires `if-exceeding burst-size-limit` (missing burst-size-limit compiles to a 0-burst policer that drops all policed traffic)", d.name)
+	default:
+		panic("unexpected policer defect class: " + d.kind)
 	}
+}
+
+func TestPolicerLimitsLenientClassifiesAllDefectClasses17761(t *testing.T) {
+	// Each defect list is in sorted policer-name order, which pins the exact
+	// warning sequence independently of which defect class sorts first.
 	cases := []struct {
 		name    string
-		defects []defect
+		defects []policerDefect17761
 	}{
 		{
 			name: "floor error sorts first",
-			defects: []defect{
+			defects: []policerDefect17761{
 				{name: "a", kind: "floor"},
 				{name: "b", kind: "missing-bandwidth"},
 				{name: "c", kind: "missing-burst"},
@@ -158,7 +176,7 @@ func TestPolicerLimitsLenientClassifiesAllDefectClasses17761(t *testing.T) {
 		},
 		{
 			name: "missing bandwidth sorts first",
-			defects: []defect{
+			defects: []policerDefect17761{
 				{name: "a", kind: "missing-bandwidth"},
 				{name: "b", kind: "floor"},
 				{name: "c", kind: "missing-burst"},
@@ -166,7 +184,7 @@ func TestPolicerLimitsLenientClassifiesAllDefectClasses17761(t *testing.T) {
 		},
 		{
 			name: "missing burst sorts first",
-			defects: []defect{
+			defects: []policerDefect17761{
 				{name: "a", kind: "missing-burst"},
 				{name: "b", kind: "missing-bandwidth"},
 				{name: "c", kind: "floor"},
@@ -200,25 +218,12 @@ func TestPolicerLimitsLenientClassifiesAllDefectClasses17761(t *testing.T) {
 			if err != nil {
 				t.Fatalf("lenient compile must warn instead of bricking on all three defects: %v", err)
 			}
-			if len(cfg.Warnings) != len(tc.defects) {
-				t.Fatalf("lenient compile should report all %d defects, warnings: %v", len(tc.defects), cfg.Warnings)
-			}
+			wantWarnings := make([]string, 0, len(tc.defects))
 			for _, d := range tc.defects {
-				class := "missing limits"
-				if d.kind == "floor" {
-					class = "burst floor"
-				}
-				found := false
-				for _, warning := range cfg.Warnings {
-					if strings.Contains(warning, class) &&
-						strings.Contains(warning, `firewall policer "`+d.name+`"`) {
-						found = true
-						break
-					}
-				}
-				if !found {
-					t.Errorf("lenient compile should report %s defect for policer %q; warnings: %v", d.kind, d.name, cfg.Warnings)
-				}
+				wantWarnings = append(wantWarnings, expectedLenientPolicerWarning17761(d))
+			}
+			if !slices.Equal(cfg.Warnings, wantWarnings) {
+				t.Fatalf("lenient compile warning sequence mismatch:\nwant: %q\ngot:  %q", wantWarnings, cfg.Warnings)
 			}
 		})
 	}
@@ -232,20 +237,11 @@ func TestPolicerLimitsLenientReportsSamePolicerFloorAndMissingBandwidth17761(t *
 	if err != nil {
 		t.Fatalf("lenient compile must warn instead of bricking: %v", err)
 	}
-	if len(cfg.Warnings) != 2 {
-		t.Fatalf("lenient compile should report both independent defects, warnings: %v", cfg.Warnings)
+	wantWarnings := []string{
+		expectedLenientPolicerWarning17761(policerDefect17761{name: "a", kind: "missing-bandwidth"}),
+		expectedLenientPolicerWarning17761(policerDefect17761{name: "a", kind: "floor"}),
 	}
-	foundMissingBandwidth, foundFloor := false, false
-	for _, warning := range cfg.Warnings {
-		if strings.Contains(warning, "missing limits") && strings.Contains(warning, `firewall policer "a"`) {
-			foundMissingBandwidth = true
-		}
-		if strings.Contains(warning, "burst floor") &&
-			strings.Contains(warning, `firewall policer "a"`) {
-			foundFloor = true
-		}
-	}
-	if !foundMissingBandwidth || !foundFloor {
-		t.Fatalf("lenient compile should report both missing-bandwidth and floor defects, warnings: %v", cfg.Warnings)
+	if !slices.Equal(cfg.Warnings, wantWarnings) {
+		t.Fatalf("lenient compile warning sequence mismatch:\nwant: %q\ngot:  %q", wantWarnings, cfg.Warnings)
 	}
 }
