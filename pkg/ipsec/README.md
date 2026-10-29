@@ -1025,10 +1025,35 @@ all files stay in `package ipsec`, so the public API is unchanged.
   by distinct PSK connections with different keys, or a peer selector equal
   to another gateway's effective local identity (configured `local-identity`,
   otherwise its effective local IP address); tolerant rendering skips only
-  colliding connection groups. Identity comparison canonicalizes DN case-ignore
-  attributes and RDN/AVA ordering, unifies `user-at-hostname`/`email`/`rfc822`
-  with a case-insensitive domain, and compares key-id hex/literal spellings by
-  strongSwan-effective bytes; rendered identity values stay in authored spelling.
+  colliding connection groups. Since #18428 comparison derives the key from
+  the exact swanctl selector rather than its declared Junos identity type,
+  distinct types that render one owner share a collision class. Per rendered
+  strongSwan identity equality, not a transitive normalized key: ordered DN
+  comparison follows DER RDN order and tag-sensitive value rules; FQDN and
+  whole-address RFC822 comparisons fold ASCII letters only, leaving non-ASCII
+  bytes unchanged. DN value tags follow strongSwan's one-octet rule: `0x1f` is
+  literal tag 31, not a high-tag-number prefix or a PrintableString alias.
+  Key-id bytes and IP/subnet/range/FQDN selectors follow parser semantics.
+  Untyped subnet lengths parse a decimal strtol prefix: leading
+  whitespace/sign are accepted, trailing bytes ignored, and no digits means
+  zero; strtol saturation narrows to signed 32-bit before address-family range
+  checking. Numeric prefixes use strtoul and
+  32-bit ID enum conversion; empty `{}` selects type 0 (ID_ANY), which ignores
+  encoded bytes in equality. `uri:` is type 201; `xmppaddr:` encodes a
+  GeneralName. Authored output stays raw.
+  Types 2/3 containing NUL never compare equal; PrintableString/emailAddress
+  DN comparisons stop at a matching NUL.
+  DN parsing requires constructed SEQUENCE, SET, and attribute-SEQUENCE
+  containers plus primitive OIDs. Constructed-OID lookalikes and any empty RDN
+  SET are malformed for structural comparison and use exact-byte equality only.
+  DN length parsing accepts bounded long-form lengths (up to eight length
+  octets), including redundant leading zeros; containing TLVs must match their
+  declared total lengths.
+  Cross-type DN comparison is directional: a type-9 left identity compares the
+  right raw encoding with `compare_dn()` semantics, including KEY_ID or other
+  identity types, while the reverse type order stays type-gated. Exact identical
+  bytes still match even for malformed DN encodings; structural folding
+  requires comparable nonempty DNs of the same encoded length.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct
