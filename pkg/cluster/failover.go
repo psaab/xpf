@@ -508,7 +508,7 @@ func (m *Manager) ResetFailover(rgID int) error {
 	// entry (reqID + peer snapshot together, #17125), so a later abort
 	// restore for a pre-reset reqID then no-ops on reqID mismatch.
 	m.clearPeerTransferOutOverrideLocked(rgID)
-	delete(m.abortedPeerTransferReqID, rgID)
+	m.clearAbortedPeerTransferLocked(rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	delete(m.localTransferOutHoldUntil, rgID)
 	// Drop any armed remote transfer-out lease for this RG, mirroring the
@@ -564,6 +564,8 @@ type operatorHoldSnapshot struct {
 	hasOverride     bool
 	abortedReqID    uint64
 	hasAborted      bool
+	abortedFence    abortedPeerTransferFence
+	hasAbortedFence bool
 	generation      uint64
 }
 
@@ -596,6 +598,7 @@ func (m *Manager) snapshotOperatorHoldLocked(rgID int) operatorHoldSnapshot {
 	}
 	if reqID, ok := m.abortedPeerTransferReqID[rgID]; ok {
 		snap.abortedReqID, snap.hasAborted = reqID, true
+		snap.abortedFence, snap.hasAbortedFence = m.abortedPeerTransferFence[rgID]
 	}
 	return snap
 }
@@ -669,6 +672,11 @@ func (m *Manager) restoreOperatorHoldLocked(rgID int, snapshot operatorHoldSnaps
 	}
 	if snapshot.hasAborted {
 		m.abortedPeerTransferReqID[rgID] = snapshot.abortedReqID
+		if snapshot.hasAbortedFence {
+			m.abortedPeerTransferFence[rgID] = snapshot.abortedFence
+		} else {
+			delete(m.abortedPeerTransferFence, rgID)
+		}
 	}
 	if !snapshot.armed {
 		return
@@ -689,6 +697,13 @@ func (m *Manager) restoreOperatorHoldLocked(rgID int, snapshot operatorHoldSnaps
 	if oldState != rg.State {
 		m.sendEvent(rg.GroupID, oldState, rg.State, eventReason)
 	}
+}
+
+// clearAbortedPeerTransferLocked clears the request marker and its lifetime
+// mode together. Caller holds m.mu.
+func (m *Manager) clearAbortedPeerTransferLocked(rgID int) {
+	delete(m.abortedPeerTransferReqID, rgID)
+	delete(m.abortedPeerTransferFence, rgID)
 }
 
 // RequestPeerFailover asks the peer to transfer the given RG out of primary,
@@ -770,7 +785,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// fence. Retain the abort marker before releasing our reservation
 		// and send the bound abort. The local manual hold is unchanged.
 		if reqID != 0 {
-			m.abortRequestedPeerFailover(rgID, reqID, operatorHoldSnapshot{}, abortFn)
+			m.abortRequestedPeerFailover(rgID, reqID, operatorHoldSnapshot{}, abortFn, true)
 		}
 		return err
 	}
@@ -792,6 +807,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// caller and must not replay here.
 		hold.override, hold.hasOverride = transferOverride{}, false
 		hold.abortedReqID, hold.hasAborted = 0, false
+		hold.abortedFence, hold.hasAbortedFence = abortedPeerTransferFence{}, false
 		rg.ManualFailover = false
 		rg.forcedSecondary = false
 		rg.ManualFailoverAt = time.Time{}
@@ -802,17 +818,17 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 		// The commit applies the transfer override before running the
 		// election. Roll back the reqID-matched override and restore the
 		// preexisting local manual-failover hold on every commit failure.
-		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
+		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn, false)
 		return err
 	}
 	if localCommitReadyFn != nil {
 		if err := localCommitReadyFn([]int{rgID}); err != nil {
-			m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
+			m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn, false)
 			return err
 		}
 	}
 	if err := commitFn(rgID, reqID); err != nil {
-		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn)
+		m.abortRequestedPeerFailover(rgID, reqID, hold, abortFn, false)
 		return err
 	}
 	m.notePeerTransferCommitted(rgID)
@@ -842,7 +858,7 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	}
 
 	m.applyPeerTransferOutOverrideLocked(rgID, reqID)
-	delete(m.abortedPeerTransferReqID, rgID)
+	m.clearAbortedPeerTransferLocked(rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	delete(m.localTransferOutHoldUntil, rgID)
 	peerGroup := m.peerGroups[rgID]
@@ -861,12 +877,20 @@ func (m *Manager) commitRequestedPeerFailover(rgID int, reqID uint64) error {
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold operatorHoldSnapshot, abortFn func(rgID int, reqID uint64) error) {
+func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold operatorHoldSnapshot, abortFn func(rgID int, reqID uint64) error, fenceUntilOwnerPrimary bool) {
 	// #15164: record the aborted reqID BEFORE any election can re-run, so a
 	// heartbeat that still advertises the owner's secondary-hold under this
 	// request cannot re-promote us via "Peer transfer out". Then notify the
 	// owner (best-effort, outside m.mu) so it restores promptly; its lease
 	// remains the fallback if the frame is lost.
+	// #17713: a failed pre-commit request retains its promotion fence through
+	// ordinary-secondary owner-restoration heartbeats. Those heartbeats do not
+	// prove ownership restoration when ordinary election leaves a higher-
+	// priority requester as the only eligible primary. The marker resolves
+	// only after a newer PRIMARY heartbeat follows an observed hold, a later
+	// transfer is acknowledged, or reset/peer loss/RG removal ends the epoch.
+	// Post-commit aborts use the legacy hold-only expiry because they belong to
+	// a different transfer epoch.
 	//
 	// #16818: the election below must run UNCONDITIONALLY. The commit may
 	// already have promoted this node, and the #16592 aborted-marker arm in
@@ -878,11 +902,22 @@ func (m *Manager) abortRequestedPeerFailover(rgID int, reqID uint64, hold operat
 	// ran no election at all — so RequestPeerFailover reported failure
 	// while this node kept the RG. Demoting here, under the marker and
 	// before the abort frame can restore the owner, also closes the race
-	// where the owner's restored (non-hold) heartbeat expires the marker
-	// in applyTransferCommitOverridesOnPeerStateLocked before any election
-	// has applied it.
+	// where the restored heartbeat arrives before any election applied it.
 	m.mu.Lock()
 	m.abortedPeerTransferReqID[rgID] = reqID
+	if fenceUntilOwnerPrimary {
+		peerFence := abortedPeerTransferFence{}
+		if peerGroup, ok := m.peerGroups[rgID]; ok {
+			peerFence = abortedPeerTransferFence{
+				heartbeatSession:  peerGroup.heartbeatSession,
+				heartbeatSequence: peerGroup.heartbeatSequence,
+				sawHold:           peerGroup.State == StateSecondaryHold,
+			}
+		}
+		m.abortedPeerTransferFence[rgID] = peerFence
+	} else {
+		delete(m.abortedPeerTransferFence, rgID)
+	}
 	if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 		delete(m.peerTransferCommitGraceUntil, rgID)
 	}
@@ -901,7 +936,7 @@ func (m *Manager) notePeerTransferCommitted(rgID int) {
 	defer m.mu.Unlock()
 
 	m.clearPeerTransferOutOverrideLocked(rgID)
-	delete(m.abortedPeerTransferReqID, rgID)
+	m.clearAbortedPeerTransferLocked(rgID)
 	if rg := m.groups[rgID]; rg != nil {
 		rg.transferCommitRolePinned = true
 		rg.transferCommitRole = StatePrimary
@@ -1090,7 +1125,7 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 	// secondary-hold here, the next heartbeat can immediately re-elect the
 	// old owner during rapid failback/failover sequences.
 	m.clearPeerTransferOutOverrideLocked(rgID)
-	delete(m.abortedPeerTransferReqID, rgID)
+	m.clearAbortedPeerTransferLocked(rgID)
 	delete(m.peerTransferCommitGraceUntil, rgID)
 	m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
 	if oldState != rg.State {
@@ -1347,7 +1382,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	if err != nil {
 		// #16592: batch form of the single-RG request-ack failure above.
 		if reqID != 0 {
-			m.abortRequestedPeerFailoverBatch(ids, reqID, nil, abortFn)
+			m.abortRequestedPeerFailoverBatch(ids, reqID, nil, abortFn, true)
 		}
 		return err
 	}
@@ -1363,6 +1398,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 			// override/aborted arms must not replay here.
 			snap.override, snap.hasOverride = transferOverride{}, false
 			snap.abortedReqID, snap.hasAborted = 0, false
+			snap.abortedFence, snap.hasAbortedFence = abortedPeerTransferFence{}, false
 			holdSnapshots[rgID] = snap
 			rg.ManualFailover = false
 			rg.forcedSecondary = false
@@ -1373,17 +1409,17 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	m.mu.Unlock()
 
 	if err := m.commitRequestedPeerFailoverBatch(ids, reqID); err != nil {
-		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
+		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn, false)
 		return err
 	}
 	if localCommitReadyFn != nil {
 		if err := localCommitReadyFn(ids); err != nil {
-			m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
+			m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn, false)
 			return err
 		}
 	}
 	if err := commitFn(ids, reqID); err != nil {
-		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn)
+		m.abortRequestedPeerFailoverBatch(ids, reqID, holdSnapshots, abortFn, false)
 		return err
 	}
 	m.notePeerTransferCommittedBatch(ids)
@@ -1416,7 +1452,7 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 
 	for _, rgID := range rgIDs {
 		m.applyPeerTransferOutOverrideLocked(rgID, reqID)
-		delete(m.abortedPeerTransferReqID, rgID)
+		m.clearAbortedPeerTransferLocked(rgID)
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		delete(m.localTransferOutHoldUntil, rgID)
 	}
@@ -1441,13 +1477,29 @@ func (m *Manager) commitRequestedPeerFailoverBatch(rgIDs []int, reqID uint64) er
 	return nil
 }
 
-func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]operatorHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error) {
+func (m *Manager) abortRequestedPeerFailoverBatch(rgIDs []int, reqID uint64, holds map[int]operatorHoldSnapshot, abortFn func(rgIDs []int, reqID uint64) error, fenceUntilOwnerPrimary bool) {
 	// #16818: batch form of abortRequestedPeerFailover — the election must
 	// run unconditionally so the aborted-marker arm demotes every RG the
 	// batch commit promoted, whatever snapshot the override restore left.
+	// #17713: only failed pre-commit requests retain the marker through
+	// restored secondary heartbeats; post-commit aborts use the legacy
+	// hold-only expiry.
 	m.mu.Lock()
 	for _, rgID := range rgIDs {
 		m.abortedPeerTransferReqID[rgID] = reqID
+		if fenceUntilOwnerPrimary {
+			peerFence := abortedPeerTransferFence{}
+			if peerGroup, ok := m.peerGroups[rgID]; ok {
+				peerFence = abortedPeerTransferFence{
+					heartbeatSession:  peerGroup.heartbeatSession,
+					heartbeatSequence: peerGroup.heartbeatSequence,
+					sawHold:           peerGroup.State == StateSecondaryHold,
+				}
+			}
+			m.abortedPeerTransferFence[rgID] = peerFence
+		} else {
+			delete(m.abortedPeerTransferFence, rgID)
+		}
 		if m.restorePeerTransferOutOverrideLocked(rgID, reqID) {
 			delete(m.peerTransferCommitGraceUntil, rgID)
 		}
@@ -1470,7 +1522,7 @@ func (m *Manager) notePeerTransferCommittedBatch(rgIDs []int) {
 
 	for _, rgID := range rgIDs {
 		m.clearPeerTransferOutOverrideLocked(rgID)
-		delete(m.abortedPeerTransferReqID, rgID)
+		m.clearAbortedPeerTransferLocked(rgID)
 		if rg := m.groups[rgID]; rg != nil {
 			rg.transferCommitRolePinned = true
 			rg.transferCommitRole = StatePrimary
@@ -1523,7 +1575,7 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 		// heartbeat can still force the peer into secondary-hold and snap the
 		// RG back during rapid alternating moves.
 		m.clearPeerTransferOutOverrideLocked(rgID)
-		delete(m.abortedPeerTransferReqID, rgID)
+		m.clearAbortedPeerTransferLocked(rgID)
 		delete(m.peerTransferCommitGraceUntil, rgID)
 		m.localTransferOutHoldUntil[rgID] = time.Now().Add(m.transferCommitGracePeriodLocked())
 		if oldState != rg.State {
@@ -1674,15 +1726,35 @@ func (m *Manager) suppressPeerTimeoutForTransferCommitLocked(now time.Time) (boo
 // read/mutated through the *Manager receiver as before. Caller must hold
 // m.mu write-locked (matching the existing handlePeerHeartbeat protocol).
 func (m *Manager) applyTransferCommitOverridesOnPeerStateLocked(newPeerGroups map[int]PeerGroupState, now time.Time) {
-	// #15164: an aborted-request marker lives only while the peer still
-	// advertises the hold it was recorded against (raw wire state, before
-	// the override/grace rewrites below). Once the peer reports any other
-	// state the abort has taken effect (or been superseded) and a later,
-	// legitimate transfer-out must promote normally again.
+	// #15164: post-commit abort markers live only while the peer still
+	// advertises the hold they were recorded against. #17713 distinguishes a
+	// failed pre-commit fence: an ordinary-secondary owner-restoration
+	// heartbeat does not prove the owner reclaimed PRIMARY, so that marker
+	// remains until a newer PRIMARY follows an observed hold, a committed new
+	// transfer, reset, peer loss, or RG removal resolves the epoch.
 	for rgID := range m.abortedPeerTransferReqID {
 		peerGroup, ok := newPeerGroups[rgID]
+		fence, fenced := m.abortedPeerTransferFence[rgID]
+		if fenced {
+			if ok && peerGroup.heartbeatSession != 0 &&
+				(peerGroup.heartbeatSession != fence.heartbeatSession ||
+					peerGroup.heartbeatSequence > fence.heartbeatSequence) {
+				switch peerGroup.State {
+				case StateSecondaryHold:
+					fence.heartbeatSession = peerGroup.heartbeatSession
+					fence.heartbeatSequence = peerGroup.heartbeatSequence
+					fence.sawHold = true
+					m.abortedPeerTransferFence[rgID] = fence
+				case StatePrimary:
+					if fence.sawHold {
+						m.clearAbortedPeerTransferLocked(rgID)
+					}
+				}
+			}
+			continue
+		}
 		if !ok || peerGroup.State != StateSecondaryHold {
-			delete(m.abortedPeerTransferReqID, rgID)
+			m.clearAbortedPeerTransferLocked(rgID)
 		}
 	}
 	for rgID := range m.transferOverrides {

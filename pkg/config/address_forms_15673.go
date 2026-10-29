@@ -271,6 +271,17 @@ func dnsIPsToPrefixes(ips []string, family string) []string {
 	return out
 }
 
+// hasSuccessfulFamilyEmptyDNS reports an untainted, family-scoped DNS entry
+// whose successful resolution currently has no usable prefixes.
+func (a *Address) hasSuccessfulFamilyEmptyDNS() bool {
+	return a != nil && a.DNSName != "" &&
+		(a.DNSFamily == "ipv4-only" || a.DNSFamily == "ipv6-only") &&
+		!a.DNSLookupFailed && !a.DNSUnresolved && a.Value == "" &&
+		len(a.DNSAddresses) == 0 && len(a.ExpandedPrefixes) == 0 &&
+		len(a.UnimplementedForms) == 0 && len(a.DuplicatePrefixes) == 0 &&
+		len(a.TrailingTokens) == 0 && a.OversizedRange == ""
+}
+
 // resolveDNSAddressEntry populates one entry FROM THE CACHE ONLY
 // (#16601): no network I/O, safe under any lock. Cache hit (key present,
 // even with a failed-flag) stamps the cached prefixes and the cached
