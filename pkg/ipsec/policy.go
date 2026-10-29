@@ -69,12 +69,11 @@ type pskValue struct {
 
 // gatewayKeysFor assigns every VPN's connection key as one set. VPNs
 // referencing the same defined gateway share its sanitized gateway name;
-// other VPNs start with their sanitized VPN name. When an inline name
-// collides with an already-claimed connection key, repeated "inline-"
-// prefixes move it out of the occupied namespace. Considering all
-// gateway keys first makes the escape injective even when a gateway is
-// itself named "inline-<name>". With no key collision every connection
-// retains its legacy name.
+// other VPNs start with their sanitized VPN name. It reserves both all
+// named-gateway keys and all inline VPNs' preferred names before assigning
+// escapes. If an inline name is already claimed, repeated "inline-"
+// prefixes move it out of every reserved or assigned key. With no key
+// collision every connection retains its legacy name.
 //
 // The mapping is config-wide: consumers that render a filtered subset
 // must pass the original mapping through rather than recomputing it on
@@ -84,8 +83,13 @@ func gatewayKeysFor(ipsecCfg *config.IPsecConfig) map[string]string {
 	if ipsecCfg == nil {
 		return nil
 	}
+	type inlineKeyOwner struct {
+		name      string
+		duplicate bool
+	}
 	keys := make(map[string]string, len(ipsecCfg.VPNs))
 	used := make(map[string]bool, len(ipsecCfg.VPNs))
+	inlineBases := make(map[string]inlineKeyOwner, len(ipsecCfg.VPNs))
 	var inlineNames []string
 	for name, vpn := range ipsecCfg.VPNs {
 		if vpn == nil {
@@ -100,11 +104,22 @@ func gatewayKeysFor(ipsecCfg *config.IPsecConfig) map[string]string {
 			}
 		}
 		inlineNames = append(inlineNames, name)
+		base := sanitizeSwanctlValue(name)
+		if owner, ok := inlineBases[base]; ok {
+			owner.duplicate = true
+			inlineBases[base] = owner
+		} else {
+			inlineBases[base] = inlineKeyOwner{name: name}
+		}
 	}
 	sort.Strings(inlineNames)
 	for _, name := range inlineNames {
 		key := sanitizeSwanctlValue(name)
-		for used[key] {
+		for {
+			owner, isInlineBase := inlineBases[key]
+			if !used[key] && (!isInlineBase || (!owner.duplicate && owner.name == name)) {
+				break
+			}
 			key = "inline-" + key
 		}
 		keys[name] = key

@@ -209,6 +209,21 @@ func TestGatewayNameCollisionInlinePrefixedGateway17731(t *testing.T) {
 	} else if !renderedMembers["zzz"] || !renderedMembers["w"] || !renderedMembers["siteA"] {
 		t.Fatalf("renderedMembers = %v, want all three VPNs", renderedMembers)
 	}
+
+	// A partial load keeping gateway connection siteA must not retain the
+	// refused inline VPN siteA merely because its VPN name matches that key.
+	subsetText, _, err := m.renderSubsetFile14589(cfg, "subset-generation", map[string]bool{"siteA": true})
+	if err != nil {
+		t.Fatalf("renderSubsetFile14589: %v", err)
+	}
+	for _, refused := range []string{"inline-secret", "w-secret", "10.200.0.1", "10.200.0.4"} {
+		if strings.Contains(subsetText, refused) {
+			t.Fatalf("subset retaining only siteA also contains refused value %q:\n%s", refused, subsetText)
+		}
+	}
+	if !strings.Contains(subsetText, "zzz-secret") || !strings.Contains(subsetText, "10.200.0.3") {
+		t.Fatalf("subset must retain only gateway siteA's VPN zzz:\n%s", subsetText)
+	}
 	loaded, err := ExpectedLoadedConns(full)
 	if err != nil {
 		t.Fatalf("ExpectedLoadedConns: %v", err)
@@ -274,5 +289,32 @@ func TestGatewaySingleGatewayRenderByteIdentical17731(t *testing.T) {
 	const want = "# xpf managed config - do not edit\n\nconnections {\n  siteA {\n    remote_addrs = 10.200.0.3\n    local {\n      auth = psk\n    }\n    remote {\n      auth = psk\n      id = \"10.200.0.3\"\n    }\n    proposals = aes256-sha256-modp2048\n    children {\n      zzz-ts1 {\n        local_ts = 10.1.0.0/24\n        remote_ts = 10.9.1.0/24\n        esp_proposals = aes256-sha256\n        start_action = trap\n        if_id_in = 1\n        if_id_out = 1\n      }\n    }\n  }\n}\n\nsecrets {\n  ike-siteA {\n    secret = \"zzz-secret\"\n    id-1 = \"10.200.0.3\"\n  }\n}\n"
 	if text != want {
 		t.Fatalf("single-gateway render not byte-identical:\n got: %q\nwant: %q", text, want)
+	}
+}
+
+// Reserve every inline VPN's preferred name before assigning escapes. An
+// escaped collision must not steal another inline VPN's ordinary key.
+func TestGatewayKeysReserveInlineNames17731(t *testing.T) {
+	cfg := &config.IPsecConfig{
+		Gateways: map[string]*config.IPsecGateway{
+			"alpha":        {Name: "alpha", Address: "10.200.0.3"},
+			"inline-alpha": {Name: "inline-alpha", Address: "10.200.0.4"},
+		},
+		VPNs: map[string]*config.IPsecVPN{
+			"gateway-alpha":        {Name: "gateway-alpha", Gateway: "alpha"},
+			"gateway-inline-alpha": {Name: "gateway-inline-alpha", Gateway: "inline-alpha"},
+			"alpha":                {Name: "alpha", Gateway: "10.200.0.1"},
+			"inline-inline-alpha":  {Name: "inline-inline-alpha", Gateway: "10.200.0.2"},
+		},
+	}
+	keys := gatewayKeysFor(cfg)
+	want := map[string]string{
+		"gateway-alpha":        "alpha",
+		"gateway-inline-alpha": "inline-alpha",
+		"alpha":                "inline-inline-inline-alpha",
+		"inline-inline-alpha":  "inline-inline-alpha",
+	}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("gatewayKeysFor = %v, want %v", keys, want)
 	}
 }

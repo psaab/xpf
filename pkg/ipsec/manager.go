@@ -1159,10 +1159,10 @@ func filterIPsecCfg14589(src *config.IPsecConfig, keep map[string]bool, connecti
 	out := *src
 	vpns := make(map[string]*config.IPsecVPN, len(keep))
 	for name, vpn := range src.VPNs {
-		// #15024: keep holds CONNECTION names (gateway names for groups).
-		// Keep every VPN whose rendered connection is kept, plus the legacy
-		// raw/sanitized VPN-name match for pre-grouping state.
-		if keep[name] || keep[sanitizeSwanctlValue(name)] || keep[connectionKeys[name]] {
+		// keep contains names from the candidate render; select each VPN
+		// only by its assigned connection so a retained gateway name cannot
+		// accidentally re-admit a refused VPN with the same raw name.
+		if keep[connectionKeys[name]] {
 			vpns[name] = vpn
 		}
 	}
