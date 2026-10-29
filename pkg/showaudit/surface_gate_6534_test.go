@@ -449,6 +449,13 @@ func TestSurfaceAnnotationCensusIsExact6534(t *testing.T) {
 						"hide inside it.", f.Name, w)
 				}
 			}
+			for _, actual := range unannotated {
+				if !contains(f.Unannotated, actual) {
+					t.Errorf("%s: renderer %s is unexpectedly unannotated; "+
+						"add it to the exact census or annotate the surface",
+						f.Name, actual)
+				}
+			}
 			if len(unannotated) > 0 && f.Successor == "" {
 				t.Errorf("%s: %d render functions still do not annotate and the "+
 					"registry names no successor issue tracking them: %v",
