@@ -527,7 +527,7 @@ func (m *Manager) syncUserspaceClassifierMapsLocked(snapshot *ConfigSnapshot) er
 	if err := checkInterfaceNATAddressCapacity(len(natV4), len(natV6)); err != nil {
 		return err
 	}
-	proxyV6 := buildDesiredProxyNDPAddressSets(snapshot)
+	proxyV6 := buildDesiredProxyNDPAddressSets(snapshot, m.rgPrimaryProvider)
 	if err := checkProxyNDPAddressCapacity(len(proxyV6)); err != nil {
 		return err
 	}
@@ -1670,14 +1670,29 @@ func pruneNATAddressKeys(
 // nothing: there is no domain to key them under, and guessing domain 0
 // would pass NDP in a foreign domain. Parse failures are skipped
 // exactly as the installer skips them.
-func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot) map[userspaceLocalV6Key]struct{} {
+//
+// #17742: clustered proxy entries are filtered by the manager's live
+// local-primary provider using Config.RefRG, the config ownership resolver
+// also used by the installer. This avoids publishing shim targets for an RG
+// the local node does not own; unknown ownership keeps the installer’s
+// existing fail-open behavior.
+func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot, primary RGPrimaryProvider) map[userspaceLocalV6Key]struct{} {
 	desired := make(map[userspaceLocalV6Key]struct{})
 	if snapshot == nil || snapshot.Config == nil {
 		return desired
 	}
-	for _, entry := range snapshot.Config.Security.NAT.ProxyARP {
+	cfg := snapshot.Config
+	for _, entry := range cfg.Security.NAT.ProxyARP {
 		if entry == nil {
 			continue
+		}
+		if cfg.Chassis.Cluster != nil && primary != nil {
+			if rgID := cfg.RefRG(entry.Interface); rgID > 0 {
+				localPrimary, known := primary(rgID)
+				if known && !localPrimary {
+					continue
+				}
+			}
 		}
 		for _, iface := range snapshot.Interfaces {
 			if iface.Name != entry.Interface || iface.AdminDisabled {
