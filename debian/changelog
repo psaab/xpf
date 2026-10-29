@@ -1,4 +1,6 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Docs: add the missing File(s) label to the #17242 merge log (#18391).
+
   * Daemon: sweep fallback-initiated unanchored IPsec SAs only on the
     matching sole-data-RG demotion and initiating tenure. Expire provenance
     after observed SA loss or successful termination; preserve current RG0
