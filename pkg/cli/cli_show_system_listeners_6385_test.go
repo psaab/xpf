@@ -33,7 +33,7 @@ func newCLIActiveConfigStore(t *testing.T) *CLI {
 	if _, err := store.Commit(); err != nil {
 		t.Fatalf("Commit(): %v", err)
 	}
-	return &CLI{store: store}
+	return &CLI{store: store, sshdStateFn: func() sysservices.SSHDState { return sysservices.SSHDRunning }}
 }
 
 // TestShowSystemServicesEffectiveListenersLocal pins the local console renderer

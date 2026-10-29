@@ -5,14 +5,15 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/sysservices"
 )
 
-// #16737 (R3-A45-03): with no `system services ssh` stanza, sshd keeps
-// serving under base-image defaults (removing the stanza only removes
-// the xpf drop-in). The local CLI must state that instead of dropping
-// the SSH row. RED pre-fix: no SSH row was printed at all.
+// #16737 (R3-A45-03): with no `system services ssh` stanza, the local
+// CLI must retain an SSH row with the observed host state. RED pre-fix:
+// no SSH row was printed.
 func TestShowSystemServicesSSHNotManaged16737(t *testing.T) {
 	c := newCLIActiveConfigStore(t)
+	c.sshdStateFn = func() sysservices.SSHDState { return sysservices.SSHDRunning }
 	cfg := c.store.ActiveConfig()
 	cfg.System.Services = &config.SystemServicesConfig{}
 

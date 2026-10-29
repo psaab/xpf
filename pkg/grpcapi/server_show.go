@@ -495,7 +495,7 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 
 	case "system-services":
 		// #1043 Phase 7: case body extracted to server_show_system.go
-		s.showSystemServices(&buf)
+		s.showSystemServices(ctx, &buf)
 
 	case "ntp":
 		// #1043 Phase 7: case body extracted to server_show_system.go

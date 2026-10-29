@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -403,10 +404,14 @@ func (c *CLI) showSystemServices() error {
 		fmt.Printf("  SSH:            enabled (root-login: %s)\n",
 			config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
 	} else {
-		// #16737: sshd is not owned by the stanza — removing it only
-		// removes the xpf drop-in and sshd keeps serving under
-		// base-image defaults. Never drop the row silently.
-		fmt.Println("  SSH:            running (not managed — no system services ssh; sshd serves under base-image defaults)")
+		var state sysservices.SSHDState
+		if c.sshdStateFn != nil {
+			state = c.sshdStateFn()
+		} else {
+			// Local command dispatch has no request context to propagate.
+			state = sysservices.ProbeSSHDState(context.Background())
+		}
+		fmt.Println(sysservices.UnmanagedSSHLine(state))
 	}
 	if cfg.System.Services != nil && cfg.System.Services.NetconfSSH {
 		fmt.Println("  NETCONF SSH:    configured but NOT served (no NETCONF daemon; tcp/830 not served)")
