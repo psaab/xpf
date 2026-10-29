@@ -521,11 +521,10 @@ fn poll_loop_exits_on_tun_teardown() {
 
 /// #5291 fail-on-revert: TUN-origin egress to a NON-first peer must
 /// size the encap MTU guard against THAT peer's underlay, not the
-/// first-peer scalar. This mirrors the AF_XDP transit path, which
-/// already resolves the outer MTU per peer (#2845/#3219,
-/// `wg_endpoint_physical_outer_mtu`/`wg_peer_outer_dst`); before this
-/// fix the control thread captured ONE first-peer scalar at spawn and
-/// applied it to every peer.
+/// first-peer scalar. This mirrors the AF_XDP transit path, which already
+/// resolves the outer MTU per peer (#2845/#3219,
+/// `wg_selected_peer_outer`/`wg_peer_outer_dst`); before this fix the control
+/// thread captured ONE first-peer scalar at spawn and applied it to every peer.
 ///
 /// Scenario: a multi-peer WG tunnel with asymmetric underlays — peer A
 /// @1500 (the first-peer scalar), peer B @1400. An inner packet

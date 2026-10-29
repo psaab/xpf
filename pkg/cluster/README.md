@@ -193,8 +193,10 @@ running heartbeat onto the defaults just as a changed value does.
   forwarded-failover outcome reconciliation),
   `IsLocalPrimaryAny`, `LocalPriorities`) — `group_state.go`.
 - Peer-state accessors (`PeerAlive`, `PeerNodeID`,
-  `PeerGroupStates`, software/HA-protocol version,
+  `PeerGroupStates`, `PeerGroupPrimary`, software/HA-protocol version,
   `PeerMonitorStatuses`) — `peer_state.go`.
+  `PeerGroupPrimary`'s `known` result is heartbeat-liveness-qualified; retained
+  offline group history is not a current ownership fence.
 - Sync state (`SetSyncReady`, `IsSyncReady`,
   `SetSyncTransport`, `SyncTransport`, `SetSyncStats`,
   `GetSyncStats`, `IsSyncConnected`) — `sync_state.go`.

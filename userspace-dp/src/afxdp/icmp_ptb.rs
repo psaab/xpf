@@ -282,18 +282,19 @@ pub(in crate::afxdp) fn post_transform_needs_inner_dst(
 ///   - GRE: the #2300 SSOT `native_gre_inner_mtu` (transport MTU minus the
 ///     outer IP + GRE[+key] header) — the SAME value the #2331 encap drop
 ///     guard enforces, so this site and that drop site agree.
-///   - WireGuard: `wg::mss::wg_inner_mtu` for the PHYSICAL underlay egress
-///     MTU (`frame::wg_endpoint_physical_outer_mtu`, the #2680 SSOT) minus
-///     WG outer overhead only — no worst-case pad term. #16499 caps the
-///     §5.4.6 pad at the inner budget, so for the UNCLAMPED
-///     outer-derived budget a full-budget inner packet encapps to exactly
-///     the outer MTU. `wg_inner_mtu` additionally clamps that budget to
-///     the engine ceiling `WG_ENGINE_MAX_INNER_MTU` (4096, #2457): when
-///     the clamp binds (e.g. outer 9000/v4: 8940 -> 4096) the clamped
-///     4096-byte inner encapps to 4156, NOT to the 9000-byte outer MTU.
-///     This is the inverse of the guard's outer-MTU-fit threshold; the
-///     engine ceiling is an independent bound, so the advertised inner
-///     MTU matches their combined limit (#2684), not the frame guard alone.
+///   - WireGuard: `wg::mss::wg_inner_mtu` for the selected peer's
+///     PHYSICAL underlay egress MTU (`frame::wg_selected_peer_outer`,
+///     the #2680 SSOT) minus WG outer overhead only — no worst-case pad
+///     term. #16499 caps the §5.4.6 pad at the inner budget, so for the
+///     UNCLAMPED outer-derived budget a full-budget inner packet encapps
+///     to exactly the outer MTU. `wg_inner_mtu` additionally clamps that
+///     budget to the engine ceiling `WG_ENGINE_MAX_INNER_MTU` (4096,
+///     #2457): when the clamp binds (e.g. outer 9000/v4: 8940 -> 4096)
+///     the clamped 4096-byte inner encapps to 4156, NOT to the 9000-byte
+///     outer MTU. This is the inverse of the guard's outer-MTU-fit
+///     threshold; the engine ceiling is an independent bound, so the
+///     advertised inner MTU matches their combined limit (#2684), not
+///     the frame guard alone.
 ///     NOT `tunnel_outer_mtu`: for a WG flow
 ///     `endpoint.destination` is zeroed, so that helper falls back to
 ///     the LOGICAL ifindex MTU (already underlay − encap) and
@@ -308,32 +309,13 @@ pub(in crate::afxdp) fn post_transform_needs_inner_dst(
 /// row is missing, the tunnel kind is unknown, or the computed inner MTU is
 /// below the usable minimum (the per-kind inner-MTU helper returns 0). Note:
 /// the outer/transport MTU itself always resolves — both `tunnel_outer_mtu`
-/// (GRE) and `wg_endpoint_physical_outer_mtu` (WG) fall back to a non-zero
-/// MTU — so a 0 return reflects a missing/unknown endpoint or an
-/// unusably-small inner budget, never an unresolved outer MTU.
+/// (GRE) and `wg_selected_peer_outer` (WG) fall back to a non-zero MTU — so
+/// a 0 return reflects a missing/unknown endpoint or an unusably-small inner
+/// budget, never an unresolved outer MTU.
 /// `egress_mtu` is the effective plain-forward MTU (minimum known interface
 /// and selected-route MTU); used only for the NAT64-only arm (tunnel arms
 /// resolve physical transport MTUs separately).
 pub(in crate::afxdp) fn post_transform_inner_mtu(
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    is_nat64: bool,
-    inner_addr_family: u8,
-    egress_mtu: usize,
-    inner_dst: Option<std::net::IpAddr>,
-) -> usize {
-    post_transform_inner_mtu_with_dynamic(
-        decision,
-        forwarding,
-        is_nat64,
-        inner_addr_family,
-        egress_mtu,
-        inner_dst,
-        None,
-    )
-}
-
-pub(in crate::afxdp) fn post_transform_inner_mtu_with_dynamic(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     is_nat64: bool,
@@ -365,7 +347,7 @@ pub(in crate::afxdp) fn post_transform_inner_mtu_with_dynamic(
     // the RFC 7915 header delta on top of that, in the same direction the
     // NAT64-only arm uses.
     if is_nat64 && decision.resolution.tunnel_endpoint_id != 0 {
-        let tunnel_inner = tunnel_inner_mtu_with_dynamic(
+        let tunnel_inner = tunnel_inner_mtu(
             decision,
             forwarding,
             inner_dst,
@@ -407,7 +389,7 @@ pub(in crate::afxdp) fn post_transform_inner_mtu_with_dynamic(
     if decision.resolution.tunnel_endpoint_id == 0 {
         return 0;
     }
-    let tunnel_inner = tunnel_inner_mtu_with_dynamic(
+    let tunnel_inner = tunnel_inner_mtu(
         decision,
         forwarding,
         inner_dst,
@@ -427,14 +409,6 @@ pub(in crate::afxdp) fn post_transform_inner_mtu_with_dynamic(
 /// it. Returns 0 for a missing endpoint row or an unknown mode, matching the
 /// §2327 fail-closed posture the frame builders use.
 fn tunnel_inner_mtu(
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    inner_dst: Option<std::net::IpAddr>,
-) -> usize {
-    tunnel_inner_mtu_with_dynamic(decision, forwarding, inner_dst, None)
-}
-
-fn tunnel_inner_mtu_with_dynamic(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     inner_dst: Option<std::net::IpAddr>,
@@ -475,7 +449,7 @@ fn tunnel_inner_mtu_with_dynamic(
             // charges the wrong overhead (20B) for a peer of the other
             // family, mis-sizing the advertised inner MTU.
             let (outer_family, outer_mtu) =
-                crate::afxdp::frame::wg_selected_peer_outer_with_dynamic(
+                crate::afxdp::frame::wg_selected_peer_outer(
                     decision,
                     forwarding,
                     endpoint,
@@ -635,7 +609,7 @@ pub(in crate::afxdp) fn ptb_reply_suppressed(
         None
     };
     if meta.addr_family as i32 == libc::AF_INET
-        && crate::afxdp::frame::src_is_directed_broadcast_in_table(
+        && crate::afxdp::frame::src_is_directed_broadcast(
             forwarding,
             packet,
             icmp_table,
@@ -647,7 +621,7 @@ pub(in crate::afxdp) fn ptb_reply_suppressed(
         return true;
     }
     if meta.addr_family as i32 == libc::AF_INET
-        && crate::afxdp::frame::dest_is_directed_broadcast_in_table(
+        && crate::afxdp::frame::dest_is_directed_broadcast(
             forwarding,
             packet,
             icmp_table,

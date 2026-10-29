@@ -19,6 +19,8 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	oldEngineID, oldBoots, oldUEFI, oldSeed := wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeUEFIStatePath, wipeSystemdRandomSeed
 	oldFeedShrinkHistoryPath := wipeFeedShrinkHistoryPath
 	oldNoRedirectsCapturePath := wipeNoRedirectsCapturePath
+	oldEthtoolForcedRegistryPath := wipeEthtoolForcedRegistryPath
+	oldConfigstoreEthtoolForcedRegistryPath := configstore.EthtoolForcedRegistryPath
 	oldAptLists, oldAptArchive, oldUtmp := wipeAptListsDir, wipeAptArchiveDir, wipeRunUtmpPath
 	oldDay0Reject, oldRootGrown := wipeDay0RejectedPath, wipeRootGrownPath
 	oldDDNSLease, oldDDNSSurface := wipeDDNSLeaseStatePath, wipeDDNSSurfaceAPath
@@ -54,6 +56,8 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 	wipeUEFIStatePath = filepath.Join(root, "var", "lib", "xpf", "uefi-bootorder-front")
 	wipeFeedShrinkHistoryPath = filepath.Join(root, "var", "lib", "xpf", "feed-shrink-history.json")
 	wipeNoRedirectsCapturePath = filepath.Join(root, "var", "lib", "xpf", "no-redirects-capture.json")
+	wipeEthtoolForcedRegistryPath = filepath.Join(root, "var", "lib", "xpf", "ethtool-forced.json")
+	configstore.EthtoolForcedRegistryPath = wipeEthtoolForcedRegistryPath
 	wipeSystemdRandomSeed = filepath.Join(root, "var", "lib", "systemd", "random-seed")
 	wipeAptListsDir = filepath.Join(root, "var", "lib", "apt", "lists")
 	wipeAptArchiveDir = filepath.Join(root, "var", "cache", "apt", "archives")
@@ -133,6 +137,8 @@ func RedirectWipePathsForTesting(root string) (restore func()) {
 		wipeSNMPEngineIDPath, wipeSNMPEngineBootsPath, wipeUEFIStatePath, wipeSystemdRandomSeed = oldEngineID, oldBoots, oldUEFI, oldSeed
 		wipeFeedShrinkHistoryPath = oldFeedShrinkHistoryPath
 		wipeNoRedirectsCapturePath = oldNoRedirectsCapturePath
+		wipeEthtoolForcedRegistryPath = oldEthtoolForcedRegistryPath
+		configstore.EthtoolForcedRegistryPath = oldConfigstoreEthtoolForcedRegistryPath
 		wipeAptListsDir, wipeAptArchiveDir, wipeRunUtmpPath = oldAptLists, oldAptArchive, oldUtmp
 		wipeDay0RejectedPath, wipeRootGrownPath = oldDay0Reject, oldRootGrown
 		wipeDDNSLeaseStatePath, wipeDDNSSurfaceAPath = oldDDNSLease, oldDDNSSurface
