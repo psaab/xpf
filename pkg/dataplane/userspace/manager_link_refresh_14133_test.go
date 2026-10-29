@@ -246,3 +246,98 @@ func TestRefreshAttachAdmission16637(t *testing.T) {
 		t.Error("ShimAttachRefused(unresolvable) = true, want false (unknown keeps prior behaviour)")
 	}
 }
+
+// TestRefreshAttachAdmission17701 pins #17701 (opus LOW on PR #17446):
+// both admission and XDP attach mode must be independent of row order when
+// an enabled base and disabled unit 0 share an ifindex. The structural base
+// row (the !IsUnit row) owns the ifindex and must govern admission and mode:
+// a disabled sibling cannot veto its attach or force the base to generic.
+// Snapshot construction normally emits base rows first, but helper
+// revalidation, hand-built fixtures, or future compaction may reorder them.
+//
+// FAIL-ON-REVERT: first-match owner selection makes unit-first admission
+// RED; using the first contributing row for mode classification makes the
+// unit-first attach generic while base-first remains native-capable, also
+// RED. Disabled-base controls preserve the real administrative veto.
+func TestRefreshAttachAdmission17701(t *testing.T) {
+	prevLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = prevLookup })
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		if name == "ge-0-0-5" {
+			return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name, EncapType: "ether"}}, nil
+		}
+		return nil, errors.New("no such link")
+	}
+
+	baseRow := InterfaceSnapshot{Name: "ge-0/0/5", LinuxName: "ge-0-0-5", Ifindex: 50, Zone: "trust", IsUnit: false}
+	unitRow := InterfaceSnapshot{Name: "ge-0/0/5.0", LinuxName: "ge-0-0-5", Ifindex: 50, ParentIfindex: 50, Zone: "trust", AdminDisabled: true, IsUnit: true}
+
+	// Admission must be identical for both snapshot row orders.
+	for _, tc := range []struct {
+		name string
+		rows []InterfaceSnapshot
+	}{
+		{"base-first", []InterfaceSnapshot{baseRow, unitRow}},
+		{"unit-first", []InterfaceSnapshot{unitRow, baseRow}},
+	} {
+		snap := &ConfigSnapshot{Interfaces: tc.rows}
+		owner := interfaceOwnerRowForIfindex(snap, 50)
+		if !refreshAttachAdmission(50, &tc.rows[0], owner) {
+			t.Errorf("%s: disabled unit-0 sibling vetoed enabled base; admission must be row-order independent (#17701)", tc.name)
+		}
+	}
+
+	// End-to-end: the reconcile must attach 50 with the same attach mode
+	// regardless of which shared-ifindex row appears first. The enabled
+	// base is plain Ethernet, so neither ordering should force generic mode.
+	modesByOrder := make(map[string]bool)
+	for _, tc := range []struct {
+		name string
+		rows []InterfaceSnapshot
+	}{
+		{"base-first", []InterfaceSnapshot{baseRow, unitRow}},
+		{"unit-first", []InterfaceSnapshot{unitRow, baseRow}},
+	} {
+		snap := &ConfigSnapshot{Interfaces: tc.rows}
+		m := New()
+		attached := false
+		var gotForceGeneric bool
+		m.attachInterfaceXDPHook = func(ifindex int, forceGeneric bool) error {
+			if ifindex == 50 {
+				attached = true
+				gotForceGeneric = forceGeneric
+			}
+			return nil
+		}
+		m.reconcileInterfaceAttachmentsForRefreshLocked(snap)
+		if !attached {
+			t.Errorf("reconcile with %s snapshot did not attach enabled base ifindex 50 (#17701)", tc.name)
+		}
+		modesByOrder[tc.name] = gotForceGeneric
+	}
+	if modesByOrder["unit-first"] != modesByOrder["base-first"] {
+		t.Errorf("forceGeneric depends on shared-ifindex row order: base-first=%t unit-first=%t (#17701)",
+			modesByOrder["base-first"], modesByOrder["unit-first"])
+	}
+	if modesByOrder["unit-first"] {
+		t.Error("unit-first snapshot attached plain Ethernet base in generic mode; want native-capable admission (#17701)")
+	}
+
+	// Control arm: a genuinely AdminDisabled base row (with its disabled
+	// unit sibling) must still be refused in either order — the fix must
+	// not turn the sibling-veto removal into an attach-everything.
+	disabledBase := InterfaceSnapshot{Name: "ge-0/0/5", LinuxName: "ge-0-0-5", Ifindex: 50, Zone: "trust", AdminDisabled: true, IsUnit: false}
+	for _, tc := range []struct {
+		name string
+		rows []InterfaceSnapshot
+	}{
+		{"disabled-base-first", []InterfaceSnapshot{disabledBase, unitRow}},
+		{"disabled-unit-first", []InterfaceSnapshot{unitRow, disabledBase}},
+	} {
+		snap := &ConfigSnapshot{Interfaces: tc.rows}
+		owner := interfaceOwnerRowForIfindex(snap, 50)
+		if refreshAttachAdmission(50, &tc.rows[0], owner) {
+			t.Errorf("%s: AdminDisabled base admitted; want refused (#17701)", tc.name)
+		}
+	}
+}
