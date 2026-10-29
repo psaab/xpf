@@ -38,7 +38,7 @@ func newActiveConfigServer(t *testing.T) *Server {
 	if _, err := store.Commit(); err != nil {
 		t.Fatalf("Commit(): %v", err)
 	}
-	return &Server{store: store}
+	return &Server{store: store, sshdStateFn: func() sysservices.SSHDState { return sysservices.SSHDRunning }}
 }
 
 // TestShowSystemServicesEffectiveListenersGRPC pins that the gRPC renderer
