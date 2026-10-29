@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Configstore: render commit summaries as individual set lines without
+    cloning either tree or building both complete output strings; reuse
+    equal lines so a 50k-line one-line edit stays under 10 MiB allocated
+    (#17773).
   * Cluster: release frozen IP-monitor debt when a configured secondary
     source address is not installed on its target interface (#17759).
     Confirmed absence releases stale debt; unconfirmed lookups preserve

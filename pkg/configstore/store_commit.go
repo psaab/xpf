@@ -1862,12 +1862,12 @@ func (s *Store) CommitDiffSummary() string {
 		s.mu.RUnlock()
 		return ""
 	}
-	active := s.active.Clone()
-	candidate := s.candidate.Clone()
+	// Render while the store read lock protects tree traversal. Returned line
+	// strings remain valid after unlock, so diffing can run without cloning
+	// either tree or building the full formatted strings.
+	activeLines := s.active.FormatSetLines(nil)
+	candidateLines := s.candidate.FormatSetLines(activeLines)
 	s.mu.RUnlock()
-
-	activeLines := splitLines(active.FormatSet())
-	candidateLines := splitLines(candidate.FormatSet())
 
 	// Order-aware sequence diff (#15168, B24-01): the previous code sorted
 	// both line lists, so a pure reorder of first-match policies counted as
