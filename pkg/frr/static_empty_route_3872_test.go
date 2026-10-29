@@ -21,7 +21,7 @@ func TestZeroNextHopRouteNotBlackholed_3872(t *testing.T) {
 func TestExplicitDiscardStillNull0_3872(t *testing.T) {
 	m := New()
 	sr := &config.StaticRoute{Destination: "10.0.99.0/24", Discard: true}
-	want := "ip route 10.0.99.0/24 Null0\n"
+	want := "ip route 10.0.99.0/24 Null0 5\n"
 	if got := m.generateStaticRoute(sr, "", nil, nil, nil); got != want {
 		t.Fatalf("discard route = %q, want %q", got, want)
 	}

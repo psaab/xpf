@@ -79,12 +79,39 @@ func TestStaticRoutePreferenceRenderRange12060(t *testing.T) {
 			want: "ip route 10.7.0.0/16 192.0.2.7 254\n",
 		},
 		{
-			name: "omitted preference keeps FRR default",
+			name: "omitted preference renders Junos distance 5",
 			sr: &config.StaticRoute{
 				Destination: "10.6.0.0/16",
 				NextHops:    []config.NextHopEntry{{Address: "192.0.2.6"}},
 			},
-			want: "ip route 10.6.0.0/16 192.0.2.6\n",
+			want: "ip route 10.6.0.0/16 192.0.2.6 5\n",
+		},
+		{
+			name: "explicit preference remains unchanged",
+			sr: &config.StaticRoute{
+				Destination: "10.10.0.0/16",
+				Preference:  20,
+				NextHops:    []config.NextHopEntry{{Address: "192.0.2.10"}},
+			},
+			want: "ip route 10.10.0.0/16 192.0.2.10 20\n",
+		},
+		{
+			name: "omitted IPv6 preference renders Junos distance 5",
+			sr: &config.StaticRoute{
+				Destination: "::/0",
+				NextHops:    []config.NextHopEntry{{Address: "2001:db8::6"}},
+			},
+			want: "ipv6 route ::/0 2001:db8::6 5\n",
+		},
+		{
+			name: "omitted discard preference renders Junos distance 5",
+			sr:   &config.StaticRoute{Destination: "10.8.0.0/16", Discard: true},
+			want: "ip route 10.8.0.0/16 Null0 5\n",
+		},
+		{
+			name: "omitted reject preference renders Junos distance 5",
+			sr:   &config.StaticRoute{Destination: "10.9.0.0/16", Reject: true},
+			want: "ip route 10.9.0.0/16 reject 5\n",
 		},
 	}
 
@@ -105,5 +132,11 @@ func TestStaticRoutePreferenceRenderRange12060(t *testing.T) {
 		!strings.Contains(logs.String(), "preference=255") ||
 		!strings.Contains(logs.String(), "maximum=254") {
 		t.Fatalf("clamping an out-of-range preference must warn with its value and limit; logs: %s", logs.String())
+	}
+}
+
+func TestEffectiveStaticRouteDistanceOmittedPreference17699(t *testing.T) {
+	if got := effectiveStaticRouteDistance(0); got != 5 {
+		t.Fatalf("omitted static preference distance = %d, want Junos default 5", got)
 	}
 }

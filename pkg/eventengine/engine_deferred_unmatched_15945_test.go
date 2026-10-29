@@ -359,3 +359,69 @@ func TestDeferredTriggerOnShortWindowFlapReplays16848(t *testing.T) {
 		})
 	}
 }
+
+// A single policy combines a short trigger-on window with a longer
+// trigger-until ceiling. The recorded crossing must survive decay of the
+// short window at drain when the long window is still at its inclusive
+// ceiling, but it must not replay after a parked event pushes that same
+// long window over the ceiling.
+func TestDeferredTriggerOnAndUntilCeilingReplay17708(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		overCeiling bool
+		wantCommits uint64
+	}{
+		{name: "decayed trigger-on crossing replays at inclusive until ceiling", wantCommits: 2},
+		{name: "decayed trigger-on crossing does not replay over until ceiling", overCeiling: true, wantCommits: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pol := &config.EventPolicy{
+				Name:   "p",
+				Events: []string{"ping_test_failed"},
+				WithinClauses: []*config.EventWithin{
+					{Seconds: 10, TriggerOn: 2},
+					{Seconds: 60, TriggerUntil: 4},
+				},
+				ThenCommands: []string{"set system host-name recovered"},
+			}
+			e, cur := setupCooldown15945(t, pol)
+
+			// The initial two-event trigger-on crossing commits at t=1.
+			cur.set(0)
+			e.HandleEvent(eventFor("ping_test_failed"))
+			cur.set(1)
+			e.HandleEvent(eventFor("ping_test_failed"))
+			waitCommitted15945(t, e, 1)
+			waitCooldownArmed15945(t, e)
+
+			// The short window decays; the second event at t=21 is a fresh
+			// trigger-on crossing during cooldown and parks at long-window
+			// count 4 (the inclusive trigger-until ceiling).
+			for _, sec := range []int64{20, 21} {
+				cur.set(sec)
+				e.HandleEvent(eventFor("ping_test_failed"))
+			}
+			if got := e.Stats().PendingDeferred; got != 1 {
+				t.Fatalf("PendingDeferred=%d after recorded crossing, want 1", got)
+			}
+			if tc.overCeiling {
+				cur.set(22)
+				e.HandleEvent(eventFor("ping_test_failed")) // parked event raises long-window count to 5
+			}
+
+			cur.set(51) // after cooldown; short trigger-on window has decayed
+			e.drainDeferred()
+			if tc.wantCommits == 2 {
+				waitCommitted15945(t, e, tc.wantCommits)
+			} else {
+				time.Sleep(200 * time.Millisecond)
+			}
+			if got := e.Stats().Committed; got != tc.wantCommits {
+				t.Fatalf("commits=%d after drain, want %d (recorded trigger-on crossing must replay only at/below the live trigger-until ceiling)", got, tc.wantCommits)
+			}
+			if got := e.Stats().PendingDeferred; got != 0 {
+				t.Fatalf("PendingDeferred=%d after drain, want 0", got)
+			}
+		})
+	}
+}

@@ -121,3 +121,83 @@ func TestSplitSetLineCredentialSurcharge16598(t *testing.T) {
 		t.Error("split root-authentication ALLOWED for PermConfig class without PermAll (#16598/#16080)")
 	}
 }
+
+// #17689: decoded escaped quotes are legal token data. Scratch-tree
+// reconstruction must preserve that data so every executed statement is
+// still adjudicated, including on flat-load surfaces.
+const splitLineEscapedQuote17689 = `set system domain-search example.net login class NEW permissions all deny-configuration "\""`
+const splitLineEscapedQuoteFirstStatement17689 = `set system domain-search "example\".net" login class NEW permissions all`
+
+func TestSplitSetLineEscapedQuoteDenied17689(t *testing.T) {
+	cfg := classWithConfigRegex9154(t, "", `^system login`)
+	// Premise: the lone second statement is denied.
+	if err := AuthorizeConfigMutation(cfg, "limited", nil, "set system login class NEW permissions all"); err == nil {
+		t.Fatal("premise failed, lone login class NEW allowed")
+	}
+	for _, line := range []string{splitLineEscapedQuote17689, splitLineEscapedQuoteFirstStatement17689} {
+		if err := AuthorizeConfigMutation(cfg, "limited", nil, line); err == nil {
+			t.Errorf("split line %q ALLOWED though it executes a denied system login statement (#17689)", line)
+		} else if strings.Contains(err.Error(), "example") {
+			t.Errorf("error leaked operator path data: %v", err)
+		}
+	}
+}
+
+func TestSplitSetLineEscapedQuoteCredentialSurcharge17689(t *testing.T) {
+	cfg := classWithConfigRegex9154(t, "", "")
+	allowed := `set system domain-search "example\".net"`
+	if err := AuthorizeConfigMutation(cfg, "limited", nil, allowed); err != nil {
+		t.Errorf("allowed domain-search with escaped quote refused for no-regex class: %v", err)
+	}
+	line := `set system domain-search "example\".net" root-authentication plain-text-password-value x`
+	if err := AuthorizeConfigMutation(cfg, "limited", nil, line); err == nil {
+		t.Error("split root-authentication ALLOWED for PermConfig class without PermAll (#17689/#16080)")
+	}
+}
+
+func TestSplitSetLineEscapedQuoteLoad17689(t *testing.T) {
+	cfg := classWithConfigRegex9154(t, "", `^system login`)
+	lines := []string{splitLineEscapedQuote17689, splitLineEscapedQuoteFirstStatement17689}
+	for _, line := range lines {
+		for _, mode := range []string{"set", "merge"} {
+			if err := AuthorizeConfigLoad(cfg, "limited", mode, line); err == nil {
+				t.Errorf("load %s: flat split line %q with escaped quote ALLOWED (#17689)", mode, line)
+			}
+			if err := AuthorizeConfigLoad(cfg, "limited", mode, "set system domain-search example.net"); err != nil {
+				t.Errorf("load %s: allowed domain-search refused: %v", mode, err)
+			}
+		}
+	}
+	allowCfg := classWithConfigRegex9154(t, `^system domain-search`, "")
+	if err := AuthorizeConfigLoad(allowCfg, "limited", "set", splitLineEscapedQuote17689); err == nil {
+		t.Error("allow ^system domain-search: flat load split line with escaped quote ALLOWED (#17689)")
+	}
+	rendered, err := LoadMutationLines(splitLineEscapedQuote17689)
+	if err != nil {
+		t.Fatalf("LoadMutationLines: %v", err)
+	}
+	joined := strings.Join(rendered, "\n")
+	if !strings.Contains(joined, "set system login class NEW") {
+		t.Errorf("LoadMutationLines did not render executed login statement: %q", rendered)
+	}
+	if !strings.Contains(joined, "set system domain-search example.net") {
+		t.Errorf("LoadMutationLines did not render executed domain-search statement: %q", rendered)
+	}
+}
+
+func TestEscapedQuoteDataValueAllowed17689(t *testing.T) {
+	cfg := classWithConfigRegex9154(t, "", `^system login`)
+	for _, line := range []string{
+		`set system host-name "fw\"1"`,
+		`set system host-name "fw\\\"1"`,
+		`set system domain-search "exa\"mple.net"`,
+	} {
+		if err := AuthorizeConfigMutation(cfg, "limited", nil, line); err != nil {
+			t.Errorf("legit escaped-quote data value %q refused: %v", line, err)
+		}
+		if err := AuthorizeConfigLoad(cfg, "limited", "set", line); err != nil {
+			t.Errorf("legit escaped-quote load value %q refused: %v", line, err)
+		}
+	}
+}
+
