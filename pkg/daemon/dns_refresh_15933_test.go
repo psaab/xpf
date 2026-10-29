@@ -556,6 +556,42 @@ security {
 	if _, err := s.SyncApply(cfgText, nil); err != nil {
 		t.Fatalf("SyncApply premise: %v", err)
 	}
+	active := s.ActiveConfig()
+	if active == nil || active.Security.AddressBook == nil {
+		t.Fatal("compiled collision premise is missing its global address book")
+	}
+	global := active.Security.AddressBook.Addresses["address-book/eng-book/svc"]
+	namedBook := active.Security.NamedAddressBooks["eng-book"]
+	if namedBook == nil {
+		t.Fatal("compiled collision premise is missing the named address book")
+	}
+	named := namedBook.AddressBook.Addresses["svc"]
+	if global == nil || named == nil {
+		t.Fatalf("compiled collision premise missing entries: global=%v named=%v", global, named)
+	}
+	if got := global.UsableValues(); !reflect.DeepEqual(got, []string{"10.0.0.1/32"}) {
+		t.Fatalf("compiled global collision entry = %v, want initial A", got)
+	}
+	if got := named.UsableValues(); !reflect.DeepEqual(got, []string{"10.0.0.3/32"}) {
+		t.Fatalf("compiled named-book entry = %v, want unchanged answer", got)
+	}
+	initial := snapshotDNSAnswers(active)
+	if len(initial) != 2 {
+		t.Fatalf("compiled DNS snapshot has %d identities, want separate global and named-book entries: %v", len(initial), initial)
+	}
+	initialPrefixes := make(map[string]bool, len(initial))
+	for _, answer := range initial {
+		if answer.DNSLookupFailed {
+			t.Fatalf("initial compiled DNS snapshot is failed: %v", initial)
+		}
+		if len(answer.Prefixes) != 1 {
+			t.Fatalf("initial DNS answer has unexpected prefixes: %v", answer)
+		}
+		initialPrefixes[answer.Prefixes[0]] = true
+	}
+	if !initialPrefixes["10.0.0.1/32"] || !initialPrefixes["10.0.0.3/32"] {
+		t.Fatalf("initial snapshot lost one collision-scoped answer: %v", initial)
+	}
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: s, opts: Options{NoDataplane: true}}
 	var applied []*config.Config
 	d.applyBodyForTest = func(cfg *config.Config) { applied = append(applied, cfg) }
