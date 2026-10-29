@@ -100,6 +100,34 @@ func TestDNSLookupFailedDistinctFromEmpty16595(t *testing.T) {
 	}
 }
 
+func TestDNSColdCacheUnresolvedDistinctFromFailure17782(t *testing.T) {
+	a := &Address{Name: "cold", DNSName: "cold-17782.example.invalid"}
+	cfg := &Config{}
+	cfg.Security.AddressBook = &AddressBook{Addresses: map[string]*Address{"cold": a}}
+	resolveDNSAddressEntry(a)
+	if !a.DNSUnresolved || a.DNSLookupFailed {
+		t.Fatalf("cold cache state: unresolved=%t failed=%t, want unresolved only", a.DNSUnresolved, a.DNSLookupFailed)
+	}
+	if cfg.Security.AddressBook.DNSEntryLookupFailed("cold") {
+		t.Fatal("cold-cache miss must not masquerade as a resolver failure")
+	}
+	if !cfg.Security.AddressBook.DNSEntryResolutionUnavailable("cold") {
+		t.Fatal("cold-cache miss must remain unavailable to strict validation")
+	}
+	unresolvedDigest := DNSAnswersDigest(cfg)
+	a.DNSUnresolved = false
+	if DNSAnswersDigest(cfg) == unresolvedDigest {
+		t.Fatal("unresolved-state change did not change the DNS answer digest")
+	}
+	a.DNSUnresolved = true
+
+	stubLookup16595(t, func(string) ([]string, error) { return nil, nil })
+	RefreshDNSAddressBooks(cfg)
+	if a.DNSUnresolved || a.DNSLookupFailed {
+		t.Fatalf("successful empty result: unresolved=%t failed=%t, want neither", a.DNSUnresolved, a.DNSLookupFailed)
+	}
+}
+
 func TestStrictCommitWarnsNotRejectsWhenDNSDown16595(t *testing.T) {
 	stubLookup16595(t, func(string) ([]string, error) { return nil, errDNSDown16595 })
 	tree := buildTree(t, []string{

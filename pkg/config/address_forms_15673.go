@@ -28,10 +28,11 @@ import (
 //     have no single CIDR equivalent and stay unimplemented.
 //   - `dns-name <fqdn> [ipv4-only|ipv6-only]` — modelled in Address.DNSName /
 //     DNSFamily; the current resolution lives in Address.DNSAddresses and is
-//     refreshed by the daemon (RefreshDNSAddressBooks). A lookup FAILURE
-//     keeps the last good answer (stale-while-error, #16595, flagged by
-//     DNSLookupFailed); a successful lookup with no usable address is
-//     match-none (fail-closed). Neither is an error.
+//     refreshed by the daemon (RefreshDNSAddressBooks). A cold-cache compile
+//     marks DNSUnresolved without claiming a lookup failure (#17782). A
+//     lookup FAILURE keeps the last good answer (stale-while-error, #16595,
+//     flagged by DNSLookupFailed); a successful lookup with no usable address
+//     is match-none (fail-closed). Neither is an error.
 //
 // Unknown/future forms and any entry mixing a prefix with another form stay
 // in UnimplementedForms (#9524) and are unusable.
@@ -46,8 +47,8 @@ const dnsPerNameTimeout = 5 * time.Second
 
 // dnsAnswerCache is the daemon-owned answer cache compile reads
 // (#16601). Compile performs NO network I/O: applyDNSName populates
-// DNSAddresses only from this cache (miss => fail-closed empty, exactly
-// like an unresolvable name). Resolution happens only in
+// DNSAddresses only from this cache (miss => fail-closed empty marked
+// DNSUnresolved). Resolution happens only in
 // RefreshDNSAddressBooks, which callers must invoke OUTSIDE
 // configstore s.mu and daemon applySem.
 var dnsAnswerCache = struct {
@@ -273,8 +274,11 @@ func dnsIPsToPrefixes(ips []string, family string) []string {
 // (#16601): no network I/O, safe under any lock. Cache hit (key present,
 // even with a failed-flag) stamps the cached prefixes and the cached
 // DNSLookupFailed state (#16595 stale-while-error is preserved because
-// the cache retains the last good answer on failure). Cache miss
-// leaves no usable prefixes (fail-closed), same as unresolvable.
+// the cache retains the last good answer on failure) and clears
+// DNSUnresolved. Cache miss leaves no usable prefixes and marks only
+// DNSUnresolved (#17782): "not yet resolved" must not read as a successful
+// resolution to zero addresses. RefreshDNSAddressBooks clears the unresolved
+// marker after the live attempt, preserving resolver failure separately.
 func resolveDNSAddressEntry(a *Address) {
 	if a == nil || a.DNSName == "" {
 		return
@@ -282,10 +286,12 @@ func resolveDNSAddressEntry(a *Address) {
 	if prefixes, ok := dnsCacheGet(a.DNSName, a.DNSFamily); ok {
 		a.DNSAddresses = prefixes
 		a.DNSLookupFailed = dnsCacheFailed(a.DNSName, a.DNSFamily)
+		a.DNSUnresolved = false
 		return
 	}
 	a.DNSAddresses = nil
 	a.DNSLookupFailed = false
+	a.DNSUnresolved = true
 }
 
 type dnsEntryRef struct {
@@ -393,8 +399,10 @@ func resolveDNSEntriesParallel(entries []dnsEntryRef) {
 				e.addr.DNSAddresses = nil
 			}
 			e.addr.DNSLookupFailed = false
+			e.addr.DNSUnresolved = false
 		} else {
 			e.addr.DNSLookupFailed = true
+			e.addr.DNSUnresolved = false
 			if prefixes, has := dnsCacheGet(e.fqdn, e.family); has && len(prefixes) > 0 {
 				e.addr.DNSAddresses = prefixes
 			} else if len(prior[e.addr]) > 0 {
@@ -411,8 +419,20 @@ func resolveDNSEntriesParallel(entries []dnsEntryRef) {
 
 // DNSEntryLookupFailed reports whether a (possibly nested) address-book
 // name's closure contains a dns-name entry whose latest resolution FAILED
-// (#16595). Cycle-safe; mirrors the strict resolver's closure walks.
+// (#16595). It excludes names not yet looked up because the compile cache
+// was cold.
 func (ab *AddressBook) DNSEntryLookupFailed(name string) bool {
+	return ab.dnsEntryResolutionState(name, false)
+}
+
+// DNSEntryResolutionUnavailable reports whether a (possibly nested)
+// address-book name's closure contains a dns-name entry whose answer is
+// unavailable because lookup failed or has not run yet (#17782).
+func (ab *AddressBook) DNSEntryResolutionUnavailable(name string) bool {
+	return ab.dnsEntryResolutionState(name, true)
+}
+
+func (ab *AddressBook) dnsEntryResolutionState(name string, includeUnresolved bool) bool {
 	if ab == nil {
 		return false
 	}
@@ -424,7 +444,7 @@ func (ab *AddressBook) DNSEntryLookupFailed(name string) bool {
 		}
 		seen[ref] = true
 		if a, ok := ab.Addresses[ref]; ok && a != nil {
-			return a.DNSName != "" && a.DNSLookupFailed
+			return a.DNSName != "" && (a.DNSLookupFailed || (includeUnresolved && a.DNSUnresolved))
 		}
 		if set, ok := ab.AddressSets[ref]; ok && set != nil {
 			for _, m := range set.Addresses {
@@ -511,8 +531,8 @@ func HasDNSNames(cfg *Config) bool {
 	return has
 }
 
-// PopulateDNSFromCache fills DNSAddresses/DNSLookupFailed from the
-// answer cache only (no network) (#16601).
+// PopulateDNSFromCache fills DNSAddresses/DNSLookupFailed/DNSUnresolved
+// from the answer cache only (no network) (#16601/#17782).
 func PopulateDNSFromCache(cfg *Config) {
 	if cfg == nil {
 		return
@@ -669,10 +689,10 @@ func DNSAnswersSnapshot(cfg *Config) map[string][]string {
 
 // DNSAnswersDigest returns a content digest of cfg's runtime DNS state:
 // every dns-name entry's scoped identity, its current prefixes (in order),
-// and its DNSLookupFailed flag (#16687). Derived caches that build from a
-// config's DNS answers (policymatch's query snapshot) key on this digest
-// in addition to the config pointer, so an in-place answer change on the
-// same published pointer cannot leave a stale verdict resident. A config
+// and its failed/unresolved flags (#16687/#17782). Derived caches that build
+// from a config's DNS answers (policymatch's query snapshot) key on this
+// digest in addition to the config pointer, so an in-place answer change on
+// the same published pointer cannot leave a stale verdict resident. A config
 // with no dns-name entries digests to the empty-config digest.
 func DNSAnswersDigest(cfg *Config) [sha256.Size]byte {
 	h := sha256.New()
@@ -691,9 +711,10 @@ func DNSAnswersDigest(cfg *Config) [sha256.Size]byte {
 		return digest
 	}
 	type dnsEntry struct {
-		key      string
-		prefixes []string
-		failed   bool
+		key        string
+		prefixes   []string
+		failed     bool
+		unresolved bool
 	}
 	var entries []dnsEntry
 	scan := func(scope string, b *AddressBook) {
@@ -703,9 +724,10 @@ func DNSAnswersDigest(cfg *Config) [sha256.Size]byte {
 		for name, a := range b.Addresses {
 			if a != nil && a.DNSName != "" {
 				entries = append(entries, dnsEntry{
-					key:      dnsIdentityKey(scope, name),
-					prefixes: append([]string(nil), a.DNSAddresses...),
-					failed:   a.DNSLookupFailed,
+					key:        dnsIdentityKey(scope, name),
+					prefixes:   append([]string(nil), a.DNSAddresses...),
+					failed:     a.DNSLookupFailed,
+					unresolved: a.DNSUnresolved,
 				})
 			}
 		}
@@ -730,6 +752,11 @@ func DNSAnswersDigest(cfg *Config) [sha256.Size]byte {
 			write(p)
 		}
 		if e.failed {
+			_, _ = h.Write([]byte{1})
+		} else {
+			_, _ = h.Write([]byte{0})
+		}
+		if e.unresolved {
 			_, _ = h.Write([]byte{1})
 		} else {
 			_, _ = h.Write([]byte{0})

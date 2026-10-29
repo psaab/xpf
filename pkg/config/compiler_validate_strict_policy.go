@@ -483,7 +483,10 @@ func validatePolicyMatchAddressSetMembersStrict(cfg *Config) error {
 		if err := policyMatchAddressBookResolves(ab, tok); err != nil {
 			// #16595: runtime-empty because the resolver failed is not a
 			// static shape — warn-only (the compile warning names it).
-			if ab.DNSEntryLookupFailed(tok) {
+			// #17782: a cold-cache entry is unresolved, not a successful
+			// zero-answer result. The daemon warms it outside applySem before
+			// commit and repeats this gate against the resulting answers.
+			if ab.DNSEntryResolutionUnavailable(tok) {
 				return nil
 			}
 			return policyMatchAddressSetError(scope, policyName, field, displayPolicyAddressBookName(tok), err)
