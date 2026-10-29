@@ -210,14 +210,18 @@ func TestBuildDesiredProxyNDPAddressSetsSuppressesNotOwnedRG17742(t *testing.T) 
 	snapshot := &ConfigSnapshot{
 		Config: cfg,
 		Interfaces: []InterfaceSnapshot{
-			{Name: "reth1", RoutingDomain: 101, RedundancyGroup: 1},
-			{Name: "reth2", RoutingDomain: 202, RedundancyGroup: 2},
+			// These deliberately disagree with the config's resolved RGs:
+			// target ownership must come from the config reference resolver,
+			// not an authored or stale snapshot label.
+			{Name: "reth1", RoutingDomain: 101, RedundancyGroup: 2},
+			{Name: "reth2", RoutingDomain: 202, RedundancyGroup: 1},
 		},
 	}
+	var queriedRGs []int
 	primary := RGPrimaryProvider(func(rgID int) (bool, bool) {
+		queriedRGs = append(queriedRGs, rgID)
 		return rgID == 1, true
 	})
-
 	got := buildDesiredProxyNDPAddressSets(snapshot, primary)
 	owned := userspaceLocalV6Key{
 		Domain: 101,
@@ -232,5 +236,18 @@ func TestBuildDesiredProxyNDPAddressSetsSuppressesNotOwnedRG17742(t *testing.T) 
 	}
 	if _, ok := got[peerOwned]; ok {
 		t.Fatalf("peer-owned RG target published to desired set: %+v", peerOwned)
+	}
+
+	if len(queriedRGs) != 2 || queriedRGs[0] != 1 || queriedRGs[1] != 2 {
+		t.Fatalf("primary provider queried for RGs %v, want config-resolved [1 2]", queriedRGs)
+	}
+	unknown := buildDesiredProxyNDPAddressSets(snapshot, func(int) (bool, bool) {
+		return false, false
+	})
+	if _, ok := unknown[owned]; !ok {
+		t.Fatalf("unknown-owner RG target missing from desired set: %+v (got %v)", owned, unknown)
+	}
+	if _, ok := unknown[peerOwned]; !ok {
+		t.Fatalf("unknown-owner RG target suppressed from desired set: %+v", peerOwned)
 	}
 }
