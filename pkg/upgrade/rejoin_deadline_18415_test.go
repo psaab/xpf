@@ -100,3 +100,27 @@ func TestRollingRejoinDeadlineTimesOutStuckBulkPrime18415(t *testing.T) {
 		t.Fatal("stuck bulk prime must keep the local node held secondary without ResetFailover")
 	}
 }
+
+type finalBulkQueryCrossesDeadline18415 struct {
+	*fakeCluster
+	delay time.Duration
+}
+
+func (f *finalBulkQueryCrossesDeadline18415) SessionSyncBulkPrimed() (bool, error) {
+	time.Sleep(f.delay)
+	return true, nil
+}
+
+func TestRejoinAndConfirmDoesNotResetAfterDeadline18415(t *testing.T) {
+	cluster := &finalBulkQueryCrossesDeadline18415{
+		fakeCluster: &fakeCluster{peerAlive: true, synced: true},
+		delay:       40 * time.Millisecond,
+	}
+	err := rejoinAndConfirm(cluster, 20*time.Millisecond, time.Millisecond)
+	if err == nil {
+		t.Fatal("rejoin succeeded after predicate RPC crossed the deadline")
+	}
+	if cluster.resetCalled {
+		t.Fatal("ResetFailover must not run after the deadline expires")
+	}
+}

@@ -247,6 +247,11 @@ func rejoinAndConfirm(cl RollingCluster, deadline, pollInterval time.Duration) e
 
 	// Phase 2: only now clear the hold, then confirm every configured RG has
 	// actually resumed election eligibility before the caller advances.
+	// The predicate RPCs above can consume the remaining deadline. Never clear
+	// the ForceSecondary hold after the caller's rejoin bound has expired.
+	if !time.Now().Before(dl) {
+		return timeout(alive, synced, bulkPrimed, false)
+	}
 	if err := cl.ResetFailover(); err != nil {
 		return fmt.Errorf("reset failover: %w", err)
 	}
