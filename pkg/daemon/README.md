@@ -331,20 +331,14 @@ always stays armed and the check runs twice:
   - A target refused only because a feed has no snapshot (the refusal
     disappears once every binding resolves) is deferred: `Store.DeferConfirmTimer`
     re-arms the same generation for 5 s, at most 24 times.
-  - A target refused only because a dns-name resolution failed when the
-    target was compiled at `Store.Load` (#16612) is deferred the same
-    way: `rollbackTargetRefusedOnlyForDNS` re-resolves a private clone
-    (`config.RefreshDNSForPreflight`, never mutating the frozen target)
-    and attributes the refusal to DNS when the clone passes or still
-    fails only with lookup-failed entries. At the cap the rollback
-    *proceeds* instead of taking the safe state — promotion returns the
-    target object and `executeConfirmedRollback` resolves its dns-name
-    entries into a private clone before the apply (#16687; published
-    configs are never written in place), so a recovered resolver yields
-    the fresh answer and a still-down resolver yields the per-entry
-    fail-closed rendering (#16595). The boot alarm names this class as
-    waiting on dns-name resolution rather than "refused by this build's
-    dataplane".
+  - A target refused only because its frozen dns-name answers were
+    unresolved at `Store.Load` (#16612/#17782) is refreshed before
+    `applySem`. A healthy refreshed clone is applied immediately, without
+    entering bootstrap or waiting through the DNS retry cap; if DNS is
+    still failing, the refusal is deferred for bounded retries and then
+    rollback proceeds using the latest fail-closed answers. The boot
+    alarm names this class as waiting on dns-name resolution rather than
+    "refused by this build's dataplane".
   - A target refused only because its feed producer is *absent* — the
     abandoned commit removed or renamed the feed, so its own apply
     cancelled the producer (#16661) — is not a late feed: nobody will

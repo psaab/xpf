@@ -267,6 +267,13 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	// fence inside commitWithGenBinding; sampling after Acquire
 	// would read the post-rollback value and fence nothing.
 	discardGen := d.store.RollbackDiscardGen()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// #17782: warm the candidate's DNS cache before applySem. The exact
+	// candidate generation is checked again by the preflight below so a
+	// concurrent edit cannot promote DNS names this pass did not refresh.
+	dnsRefreshGen := d.resolveCandidateDNSBeforeApply()
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -319,6 +326,9 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	oldActive, compiled, err := d.commitWithGenBinding(
 		discardGen,
 		func(cand *config.Config) error {
+			if config.HasDNSNames(cand) && d.store.CandidateGeneration() != dnsRefreshGen {
+				return fmt.Errorf("candidate changed after DNS refresh: %w", configstore.ErrCandidateGenerationConflict)
+			}
 			// #5840: reject a standalone<->cluster topology change BEFORE store
 			// promotion + any dataplane mutation — the boot-only cluster runtime
 			// cannot be constructed/torn down live. Runs first (no hardware probe)
@@ -617,18 +627,16 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	chassisPreserve func(*config.ConfigTree),
 	ancestry []configstore.RenameDescriptor,
 ) (compiled *config.Config, retErr error) {
-	// #16601: resolve DNS outside applySem/s.mu without touching the
-	// store. Parse+compile here is cache-only (compile never does
-	// network I/O); only unresolved names are then resolved with the
-	// bounded pool. The real SyncApply below recompiles under s.mu
-	// reading the warmed cache (0 lookups under the lock). Parse or
-	// compile failures fall through — the real call reports them.
+	// #16601/#17782: refresh DNS outside applySem/s.mu without touching
+	// the store. Compile the parsed tree for this node (matching SyncApply's
+	// ${node} expansion), then refresh its private snapshot with the bounded
+	// pool so the real SyncApply compile under s.mu and finalizer under
+	// applySem only read the warmed cache. Parse or compile failures fall
+	// through — the real call reports them.
 	if d.store != nil && strings.Contains(configText, "dns-name") {
 		if tree, perrs := config.NewParser(configText).Parse(); len(perrs) == 0 && tree != nil {
-			if peekCfg, cerr := config.CompileConfigLenient(tree); cerr == nil {
-				if pairs := config.PeekDNSNames(peekCfg); len(pairs) > 0 {
-					config.ResolveDNSNames(pairs)
-				}
+			if peekCfg, cerr := compileDNSRefreshTree(tree, d.store.NodeID()); cerr == nil {
+				config.RefreshDNSAddressBooks(peekCfg)
 			}
 		}
 	}
@@ -933,6 +941,12 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	// commit-confirmed is parked must refuse it, not let it re-arm
 	// a window over the rollback-reset candidate.
 	discardGen := d.store.RollbackDiscardGen()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// #17782: resolve before applySem, preserving the rollback-discard
+	// sample above so a rollback during DNS work still fences this commit.
+	dnsRefreshGen := d.resolveCandidateDNSBeforeApply()
 	if err := d.applySem.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -973,6 +987,9 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	oldActive, compiled, err := d.commitWithGenBinding(
 		discardGen,
 		func(cand *config.Config) error {
+			if config.HasDNSNames(cand) && d.store.CandidateGeneration() != dnsRefreshGen {
+				return fmt.Errorf("candidate changed after DNS refresh: %w", configstore.ErrCandidateGenerationConflict)
+			}
 			// #5840: same standalone<->cluster topology guard as commitAndApply,
 			// keyed on the ACTUAL HA runtime (d.cluster != nil), not the old
 			// config. The rollback target on a confirm timeout is the current
@@ -1091,22 +1108,22 @@ func (d *Daemon) commitConfirmedAndApplyOperator(ctx context.Context, authority 
 // executeConfirmedRollback is the daemon-owned commit-confirmed timeout
 // rollback transaction (#1922 Item 1a). The configstore confirm timer
 // fires this (via SetRollbackExecutor) on its own goroutine, NOT under
-// the store lock. It acquires d.applySem FIRST, then promotes the store
-// state (PromoteRollback) and re-applies the rolled-back config to the
-// dataplane inside that single critical section, so a concurrent commit
-// (which also holds d.applySem via commitAndApply / commitConfirmedAndApply)
-// cannot interleave between store promotion and dataplane re-apply. This
-// fixes both bugs the old CLI-registered centralRollbackFn callback had:
-// the non-atomic promote-then-apply split-brain window, and service-mode
-// (gRPC/REST/remote-cli) timeouts that never re-applied the dataplane
-// because no interactive CLI.Run had registered the callback.
+// the store lock. It resolves the sampled rollback target before acquiring
+// d.applySem, then atomically rechecks the window, promotes the store state
+// (PromoteRollback), and re-applies the rolled-back config inside that single
+// critical section, so a concurrent commit cannot interleave between store
+// promotion and dataplane re-apply.
 //
-// Lock order is applySem -> s.mu (matches commitAndApply / syncAndApplyWithAncestry):
-// every store call made while applySem is held (PromoteRollback, and the
-// store calls inside applyConfigLocked such as SetArchiveConfig) takes and
-// releases s.mu internally — applySem is always acquired FIRST and s.mu is
-// never held across an applySem acquisition, so there is no inversion.
+// DNS refresh is deliberately outside applySem: a blocked resolver must not
+// hold up another transaction's apply admission. Lock order for the promotion
+// and apply remains applySem -> s.mu; every store call made under applySem
+// takes and releases s.mu internally, so there is no inversion.
 func (d *Daemon) executeConfirmedRollback(gen uint64) {
+	sampledTarget, _, pending := d.store.PendingRollbackTarget(gen)
+	var refreshedTarget *config.Config
+	if pending && config.HasDNSNames(sampledTarget) {
+		refreshedTarget = config.RefreshDNSForPreflight(sampledTarget)
+	}
 	_ = d.applySem.Acquire(context.Background(), 1)
 	defer d.applySem.Release(1)
 
@@ -1137,7 +1154,7 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	// #9615: a window recovered across a restart, possibly by a newer build,
 	// was never pre-flighted here, and a feed-bound target may simply not be
 	// ready yet. Decide before PromoteRollback, while nothing is promoted.
-	if d.confirmRollbackTargetHandledAtFire(gen) {
+	if d.confirmRollbackTargetHandledAtFire(gen, sampledTarget, refreshedTarget) {
 		return
 	}
 	// #12169: capture the rollback origin and pending-window flag before
@@ -1174,6 +1191,10 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 		// Superseded (nested CommitConfirmed / ConfirmCommit) or no
 		// pending rollback target — nothing happened, nothing to apply.
 		return
+	}
+	applyTarget := prevCfg
+	if prevCfg != nil && prevCfg == sampledTarget && refreshedTarget != nil {
+		applyTarget = refreshedTarget
 	}
 	// #12154 MAJOR-1: a genuine first-commit rollback takes the bootstrap
 	// path whether or not the compiled target is nil. After an Item-1b
@@ -1317,7 +1338,7 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 	out := d.finalizePromotedApplyLocked(promotedApply{
 		kind:            promotedApplyRollback,
 		oldActive:       oldActive,
-		newCfg:          prevCfg,
+		newCfg:          applyTarget,
 		armKind:         promotedArmRollback,
 		applyCtx:        context.Background(),
 		logDischargeErr: true,
