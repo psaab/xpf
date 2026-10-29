@@ -1213,24 +1213,19 @@ func (e *Engine) drainDeferred() {
 				// parked early in the cooldown with a `within`
 				// window shorter than the 30 s cooldown decayed
 				// below its trigger-on threshold before the drain
-				// and was silently discarded; conversely (#16641)
-				// events windowed while parked can push a
-				// trigger-until window past its ceiling — the
-				// parked crossing still fired before/at the
-				// ceiling and must replay. #15945's live-window
-				// re-check is therefore narrowed to a
-				// revision/liveness re-check (policy still
-				// present at the same semantic revision);
-				// staleReason remains the commit-time backstop.
-				// Synthetic edges with no recorded verdict
-				// (hasMatched=false, test-only) keep the #15945
-				// live-window re-check so a synthetically parked
-				// decayed edge still cannot replay.
+				// and was silently discarded (#16848). But while
+				// events windowed during parking preserve a trigger-until
+				// ceiling (#16641), a recorded crossing cannot replay
+				// once the live window has crossed that ceiling (#17708).
+				// The drain preserves the recorded verdict except for
+				// that upper-bound check; synthetic edges with no
+				// recorded verdict (hasMatched=false, test-only) keep the
+				// full #15945 live-window re-check.
 				replay := false
 				if rt != nil && e.semRev[de.action.policyName] == de.action.semRev {
 					if pol := e.policyByNameLocked(de.action.policyName); pol != nil {
 						if de.hasMatched {
-							replay = de.matched
+							replay = de.matched && e.withinUntilCeilingsMatch(pol, rt, de.evName, now)
 						} else {
 							replay = e.withinMatches(pol, rt, de.evName, now)
 						}

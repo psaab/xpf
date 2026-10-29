@@ -116,10 +116,10 @@ type deferredCooldownPark struct {
 // interleave and pair the old policy's commands/plant class with the new
 // semantic revision.
 // matched records the evaluate-time withinMatches verdict for this exact event
-// (#16848/#15945): the drain must replay the crossing verdict, not re-decide it
-// against a window that may have decayed (short window < cooldown) or filled
-// past the trigger-until ceiling (events windowed while parked, #16641) in the
-// 30 s wait. The drain still re-checks revision / liveness only.
+// (#16848/#15945). The drain preserves that crossing when a short trigger-on
+// window decays, but rechecks live trigger-until ceilings because events
+// windowed while parked can cross the ceiling before drain (#16641/#17708);
+// revision and liveness are checked there as well.
 func (e *Engine) captureDeferCooldownLocked(pol *config.EventPolicy, rt *policyRuntime, ev rpm.Event, now time.Time, matched bool) *deferredCooldownPark {
 	e.counters.cooldownSuppressed.Add(1)
 	if rt.suppressedDirection == nil {
@@ -422,6 +422,40 @@ func policyHasTriggerOn(pol *config.EventPolicy) bool {
 		}
 	}
 	return false
+}
+
+// withinUntilCeilingsMatch checks only the live `trigger until` upper bounds.
+// A cooldown edge's recorded verdict must survive decay of a short `trigger
+// on` window (#16848), but a parked storm can cross a `trigger until` ceiling
+// before the drain (#17708). Re-evaluate those ceilings without changing the
+// recorded trigger-on crossing decision.
+func (e *Engine) withinUntilCeilingsMatch(pol *config.EventPolicy, rt *policyRuntime, eventName string, now time.Time) bool {
+	if pol == nil || rt == nil {
+		return false
+	}
+	timestamps := rt.windows[eventName]
+	for _, wc := range pol.WithinClauses {
+		if wc == nil {
+			return false
+		}
+		if wc.TriggerUntil <= 0 {
+			continue
+		}
+		window, ok := withinWindow(wc.Seconds)
+		if !ok {
+			return false
+		}
+		count := 0
+		for _, ts := range timestamps {
+			if now.Sub(ts) <= window {
+				count++
+			}
+		}
+		if count > wc.TriggerUntil {
+			return false
+		}
+	}
+	return true
 }
 
 // withinMatches evaluates temporal trigger clauses against the policy's runtime
