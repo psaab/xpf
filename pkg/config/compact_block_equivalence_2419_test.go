@@ -329,10 +329,10 @@ func contextForStanza(parent []string, stanza string) string {
 	// (9 sites).
 	case "firewall three-color-policer xpfarg":
 		if stanza == "two-rate" {
-			return "two-rate { committed-information-rate 1m; committed-burst-size 1514; " +
+			return "two-rate { committed-information-rate 1m; committed-burst-size 1518; " +
 				"peak-information-rate 2m; peak-burst-size 2k; } "
 		}
-		return "single-rate { committed-information-rate 1m; committed-burst-size 1514; " +
+		return "single-rate { committed-information-rate 1m; committed-burst-size 1518; " +
 			"excess-burst-size 2k; } "
 
 	// `security nat source pool <p> port deterministic` needs a host address, a

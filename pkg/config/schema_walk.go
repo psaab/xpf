@@ -102,6 +102,12 @@ func findNestedMultiValueContentError(nodes []*Node, parent *schemaNode, path []
 		} else if childSchema.packedFlatRun && len(node.Children) > 0 {
 			walkChildren = expandFlatRun(node.Children, childSchema)
 		}
+		if packedChildren := nestedRefusalPackedScanChildren(node, childSchema, descendSchema, consumed); len(packedChildren) > 0 {
+			if err := findNestedMultiValueContentError(packedChildren, descendSchema, path); err != nil {
+				path = path[:pathLen]
+				return err
+			}
+		}
 		err := findNestedMultiValueContentError(walkChildren, descendSchema, path)
 		path = path[:pathLen]
 		if err != nil {
@@ -189,11 +195,195 @@ func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string
 		} else if childSchema.packedFlatRun && len(node.Children) > 0 {
 			walkChildren = expandFlatRun(node.Children, childSchema)
 		}
+		if packedChildren := nestedRefusalPackedScanChildren(node, childSchema, descendSchema, consumed); len(packedChildren) > 0 {
+			if err := findNestedListContentError(packedChildren, descendSchema, newPath); err != nil {
+				return err
+			}
+		}
 		if err := findNestedListContentError(walkChildren, descendSchema, newPath); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// nestedRefusalPackedScanChildren exposes marked refusal leaves embedded in a
+// compiler-consumed packed run. Unlike packedTail, these compiler readers
+// consume selected tails without the schema walk's packedTail opt-in. For a
+// bracketed marked run with an opaque postfix, the scan-only projection
+// materializes the values and associates any authored block with that leaf.
+func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *schemaNode, consumed int) []*Node {
+	if node == nil || nodeSchema == nil || descendSchema == nil ||
+		nodeSchema.packedTail || nodeSchema.packedFlatRun || len(node.Keys) <= consumed {
+		return nil
+	}
+	run := packedRunNestedRefusal(node, consumed, descendSchema)
+	if !run.contains {
+		return nil
+	}
+
+	expanded := packedBodyChildren(node, nodeSchema)
+	// Only the unchanged slice means packedBodyChildren did not expand valid
+	// container siblings; only fallback results may use raw children.
+	fallbackExpansion := sameNodeSlice(expanded, node.Children)
+	if fallbackExpansion {
+		// The normal packed expansion conservatively returns authored children
+		// unchanged when their shape cannot be merged. Scan the packed key run
+		// independently, preserving the compiler's boundary without losing a
+		// marked terminal leaf's dropped block.
+		packed := *node
+		packed.Children = nil
+		if run.terminal && run.valueEnd > run.valueStart {
+			allBracketed := len(node.KeysBracketed) == len(node.Keys)
+			for i := run.valueStart; allBracketed && i < run.valueEnd; i++ {
+				allBracketed = node.KeysBracketed[i]
+			}
+			if !allBracketed {
+				bracketed := make([]bool, len(node.Keys))
+				copy(bracketed, node.KeysBracketed)
+				for i := run.valueStart; i < run.valueEnd; i++ {
+					bracketed[i] = true
+				}
+				packed.KeysBracketed = bracketed
+			}
+		}
+		if run.trailingNonSibling {
+			// The trailing tokens are compiler-owned or otherwise unresolved
+			// in this schema context. Exclude them from this scan-only
+			// projection so the marked leaf's complete value run can be
+			// materialized.
+			packed.Keys = packed.Keys[:run.valueEnd]
+			if len(packed.KeysQuoted) == len(node.Keys) {
+				packed.KeysQuoted = packed.KeysQuoted[:run.valueEnd]
+			}
+			if len(packed.KeysBracketed) == len(node.Keys) {
+				packed.KeysBracketed = packed.KeysBracketed[:run.valueEnd]
+			}
+		}
+		expanded = packedBodyChildren(&packed, nodeSchema)
+	}
+	if run.terminal {
+		if run.trailingNonSibling && !node.IsLeaf {
+			// Preserve an authored postfix block, including an empty or
+			// leaf-only body that has no AST child nodes of its own.
+			postfix := &Node{
+				Keys:     node.Keys[run.valueEnd:],
+				Children: node.Children,
+				IsLeaf:   false,
+			}
+			attachNestedRefusalBlock(expanded, descendSchema, []*Node{postfix})
+		} else if fallbackExpansion && len(node.Children) > 0 {
+			attachNestedRefusalBlock(expanded, descendSchema, node.Children)
+		}
+	}
+	return expanded
+}
+
+type packedNestedRefusal struct {
+	contains           bool
+	terminal           bool
+	valueStart         int
+	valueEnd           int
+	trailingNonSibling bool
+}
+
+func packedRunNestedRefusal(node *Node, start int, parent *schemaNode) packedNestedRefusal {
+	if node == nil || parent == nil {
+		return packedNestedRefusal{}
+	}
+	keys := node.Keys
+	bracketed := len(node.KeysBracketed) == len(keys)
+	var levels [64]*schemaNode
+	levels[0] = parent
+	depth := 1
+	var result packedNestedRefusal
+	for i := start; i < len(keys); {
+		at := -1
+		var child *schemaNode
+		for level := depth - 1; level >= 0; level-- {
+			if candidate := resolveSchemaChild(levels[level], keys[i]); candidate != nil {
+				at, child = level, candidate
+				break
+			}
+		}
+		if child == nil {
+			// Preserve a marked bracketed run when unresolved tokens follow
+			// the values. Schema siblings resolve above and keep their boundary.
+			if result.terminal && result.valueStart > 0 &&
+				result.valueEnd == i && bracketed && i > 0 &&
+				node.KeysBracketed[i-1] && !node.KeysBracketed[i] {
+				result.trailingNonSibling = true
+				return result
+			}
+			result.terminal = false
+			return result
+		}
+		consumed, next := consumeNodeKeys(keys[i:], child)
+		if consumed <= 0 {
+			result.terminal = false
+			return result
+		}
+		end := i + consumed
+		if child.refuseNonLeafBlockChildren && child.multi &&
+			child.children == nil && end > i+1 {
+			result.valueStart = i + 1
+			if bracketed && node.KeysBracketed[end-1] {
+				for end < len(keys) && node.KeysBracketed[end] {
+					end++
+				}
+			} else {
+				for end < len(keys) {
+					sibling := false
+					for level := at; level >= 0; level-- {
+						if resolveSchemaChild(levels[level], keys[end]) != nil {
+							sibling = true
+							break
+						}
+					}
+					if sibling {
+						break
+					}
+					end++
+				}
+			}
+			result.valueEnd = end
+		}
+		result.contains = result.contains || child.refuseNonLeafBlockChildren
+		result.terminal = child.refuseNonLeafBlockChildren
+		i = end
+		depth = at + 1
+		if next != nil && depth < len(levels) {
+			levels[depth] = next
+			depth++
+		}
+	}
+	return result
+}
+
+func attachNestedRefusalBlock(nodes []*Node, parent *schemaNode, body []*Node) bool {
+	for i := len(nodes) - 1; i >= 0; i-- {
+		node := nodes[i]
+		if node == nil || len(node.Keys) == 0 {
+			continue
+		}
+		child := resolveSchemaChild(parent, node.Keys[0])
+		if child == nil {
+			continue
+		}
+		if child.refuseNonLeafBlockChildren {
+			node.Children = body
+			return true
+		}
+		_, descend := consumeNodeKeys(node.Keys, child)
+		if attachNestedRefusalBlock(node.Children, descend, body) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameNodeSlice(a, b []*Node) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
 }
 
 // findNestedListContentInInstances peels hierarchical named-instance keys
@@ -918,6 +1108,17 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 	if !childSchema.packedTail && len(node.Keys) > consumed {
 		if tok, _ := packedTailCredential14412(node, descendSchema, consumed); tok != "" {
 			return schemaPathErrorf(newPath, "packed configuration keyword %q is not a child of this stanza and would be silently dropped — the credential it carries would not take effect; author it under the stanza that declares it, with its exact spelling (#14412)", tok)
+		}
+	}
+	// The shared refusal scan also needs to precede ordinary errors on the
+	// same packed node: a closed-world walk can otherwise report only the
+	// unmodelled grandchild, although the compiler ignores it as content
+	// under the packed value-list leaf.
+	if childClosed && len(node.Children) > 0 && len(node.Keys) > consumed {
+		if packedChildren := nestedRefusalPackedScanChildren(node, childSchema, descendSchema, consumed); len(packedChildren) > 0 {
+			if err := findNestedListContentError(packedChildren, descendSchema, newPath); err != nil {
+				return err
+			}
 		}
 	}
 	return walkSchemaChildren(walkChildren, descendSchema, newPath, vc, childClosed)

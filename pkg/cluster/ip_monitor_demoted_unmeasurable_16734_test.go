@@ -2,9 +2,12 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"net"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/vishvananda/netlink"
 )
 
 // #16734 (R3-A21-01, #15038 residual): #15038 made a probe that cannot be
@@ -18,14 +21,18 @@ import (
 // weight 0; losing the new primary then left the RG ownerless, and an
 // outage long enough to demote both nodes left zero owners at once.
 //
-// The fix: probeSourceFor reports canMeasure=false only for a bound
-// target on a non-primary with no secondary-ip-address. On a
-// not-completed probe for such a target, pollCycle releases the
-// dampened state (releaseIPTargetState) so reconcileRGIPDebts removes
-// the debt and the node is promotable again. Measurable nodes (primary,
-// unbound, or holding a secondary address) keep the #15038/#5301
-// neutral treatment, so deadline/Stop aborts and transient dial/send
-// failures never clear a real DOWN state.
+// The fix: probeSourceFor reports canMeasure=false for a bound
+// target on a non-primary only when netlink confirms no usable secondary
+// source exists on the resolved interface. A clean address list without
+// the configured address or a typed LinkNotFoundError followed by a clean
+// LinkList confirms absence; the latter is required because LinkByName's
+// legacy dump fallback can hide ErrDumpInterrupted. Other lookup errors,
+// including interrupted partial dumps, preserve neutral handling. On a
+// not-completed probe after confirmed absence, pollCycle releases the
+// dampened state (releaseIPTargetState) so reconcileRGIPDebts removes the
+// debt and the node becomes promotable again. A present secondary address
+// (and primaries or unbound targets) keeps the #15038/#5301 neutral
+// treatment, so transient bind/send failures never clear a real DOWN state.
 
 // boundNoSecondaryRG is the issue's production shape: global-weight /
 // global-threshold 255, one bound target of weight 255, and NO
@@ -42,6 +49,54 @@ func boundNoSecondaryRG() *config.RedundancyGroup {
 			Targets: []*config.IPMonitorTarget{
 				{Address: "10.0.0.1", Weight: 255, Interface: "reth0.0"},
 			},
+		},
+	}
+}
+
+type sourceAddressNlHandle17759 struct {
+	*mockNlHandle
+	addresses      map[string][]netlink.Addr
+	addressListErr error
+	linkByNameErr  error
+	linkListErr    error
+}
+
+func (h *sourceAddressNlHandle17759) LinkByName(name string) (netlink.Link, error) {
+	if h.linkByNameErr != nil {
+		return nil, h.linkByNameErr
+	}
+	return h.mockNlHandle.LinkByName(name)
+}
+
+func (h *sourceAddressNlHandle17759) LinkList() ([]netlink.Link, error) {
+	links := make([]netlink.Link, 0, len(h.mockNlHandle.links))
+	for _, link := range h.mockNlHandle.links {
+		links = append(links, link)
+	}
+	return links, h.linkListErr
+}
+
+func (h *sourceAddressNlHandle17759) AddrList(link netlink.Link, _ int) ([]netlink.Addr, error) {
+	return h.addresses[link.Attrs().Name], h.addressListErr
+}
+func newSourceAddressNlHandle17759(present bool) *sourceAddressNlHandle17759 {
+	links := newMockNlHandle()
+	links.setLink("reth0", true)
+	h := &sourceAddressNlHandle17759{
+		mockNlHandle: links,
+		addresses:    make(map[string][]netlink.Addr),
+	}
+	if present {
+		h.addresses["reth0"] = []netlink.Addr{sourceAddress17759()}
+	}
+	return h
+}
+
+func sourceAddress17759() netlink.Addr {
+	return netlink.Addr{
+		IPNet: &net.IPNet{
+			IP:   net.ParseIP("10.0.0.3"),
+			Mask: net.CIDRMask(32, 32),
 		},
 	}
 }
@@ -144,13 +199,14 @@ func TestIPMonitorDemotedNodeReleasesFrozenDebt16734(t *testing.T) {
 }
 
 // TestIPMonitorDemotedGlobalThresholdReleases16734 covers the exact
-// config in the issue (global-threshold aggregate mode): the frozen
-// aggregate debt must clear when the demoted node becomes unmeasurable,
-// in both the with-secondary-address production row (address configured
-// but never installed, so the dial cannot bind it) and the
-// no-secondary-address row.
+// config in the issue (global-threshold aggregate mode): frozen debt
+// releases for configured-but-uninstalled sources, cleanly confirmed
+// missing interfaces, and addresses present only on another interface.
+// Link/address lookup errors, including interrupted partial dumps, retain
+// the existing debt; no configured secondary source retains #16734 behavior.
 func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
-	run := func(t *testing.T, withSecondary bool) {
+	run := func(t *testing.T, withSecondary bool, configureNl func(*sourceAddressNlHandle17759), wantWeight int, wantDebt bool) {
+		t.Helper()
 		rg := boundNoSecondaryRG()
 		if withSecondary {
 			rg.IPMonitoring.Targets[0].SecondaryIPAddress = "10.0.0.3"
@@ -161,17 +217,19 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 		drainEvents(m, 1)
 		m.SetGroupStateForTesting(1, StatePrimary)
 		mon := NewMonitor(m, cfg.RedundancyGroups)
-		injectFakeNl(mon)
+		nlh := newSourceAddressNlHandle17759(false)
+		if configureNl != nil {
+			configureNl(nlh)
+		}
+		mon.nlHandle = nlh
 		setNoDampening(mon)
 
-		phase := "primary-down"
+		primary := true
 		mon.probeFn = func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool) {
-			switch phase {
-			case "primary-down":
+			if primary {
 				return false, true // primary measures the outage
-			default:
-				return false, false // secondary cannot send: not completed
 			}
+			return false, false // secondary cannot send: not completed
 		}
 		for range 5 {
 			mon.poll()
@@ -179,42 +237,81 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 		if w := m.GroupStates()[0].Weight; w != 0 {
 			t.Fatalf("withSecondary=%v: weight after measured DOWN = %d, want 0", withSecondary, w)
 		}
-		// Demotion: node becomes secondary. With a configured secondary
-		// address the probe is classified measurable, so emulate the
-		// production bind failure via the real probe path instead.
-		m.SetGroupStateForTesting(1, StateSecondary)
-		phase = "secondary-unmeasurable"
-		if withSecondary {
-			// Configured secondary address: modelled as measurable via
-			// probeFn returning not-completed (transient bind/send
-			// failure). Per the documented boundary this stays neutral.
-			mon.probeFn = func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool) {
-				return false, false
-			}
+		if fails := m.GroupStates()[0].MonitorFails; len(fails) == 0 {
+			t.Fatalf("withSecondary=%v: measured DOWN installed no debt", withSecondary)
 		}
+
+		// Demotion: query behavior now controls whether the existing DOWN
+		// debt is released or kept neutral.
+		m.SetGroupStateForTesting(1, StateSecondary)
+		primary = false
 		for range 5 {
 			mon.poll()
 		}
-		if withSecondary {
-			// Documented boundary: a configured secondary-ip-address is
-			// treated as measurable (the operator asserts the node holds
-			// it); transient bind/send failures on it stay neutral per
-			// #15038, so the DOWN state is retained here. The
-			// no-secondary row below is the frozen-debt fix.
-			if w := m.GroupStates()[0].Weight; w != 0 {
-				t.Fatalf("withSecondary=true: weight = %d, want 0 (configured secondary stays measurable/neutral)", w)
-			}
-			return
+		if w := m.GroupStates()[0].Weight; w != wantWeight {
+			t.Fatalf("withSecondary=%v: weight after unmeasurable probe = %d, want %d", withSecondary, w, wantWeight)
 		}
-		if w := m.GroupStates()[0].Weight; w != 255 {
-			t.Fatalf("withSecondary=%v: weight after becoming unmeasurable = %d, want 255 (aggregate debt released, #16734)", withSecondary, w)
+		fails := m.GroupStates()[0].MonitorFails
+		if wantDebt && len(fails) == 0 {
+			t.Fatalf("withSecondary=%v: DOWN debt was not retained after inconclusive lookup", withSecondary)
 		}
-		if st := m.GroupStates()[0]; len(st.MonitorFails) != 0 {
-			t.Fatalf("withSecondary=%v: MonitorFails = %v, want none (#16734)", withSecondary, st.MonitorFails)
+		if !wantDebt && len(fails) != 0 {
+			t.Fatalf("withSecondary=%v: MonitorFails = %v, want none after confirmed absence", withSecondary, fails)
 		}
 	}
-	t.Run("no-secondary-ip", func(t *testing.T) { run(t, false) })
-	t.Run("with-secondary-ip", func(t *testing.T) { run(t, true) })
+
+	t.Run("no-secondary-ip", func(t *testing.T) { run(t, false, nil, 255, false) })
+	t.Run("with-secondary-ip-uninstalled", func(t *testing.T) { run(t, true, nil, 255, false) })
+	t.Run("with-secondary-ip-interface-missing-clean-link-list", func(t *testing.T) {
+		run(t, true, func(nlh *sourceAddressNlHandle17759) {
+			nlh.linkByNameErr = netlink.LinkNotFoundError{}
+			delete(nlh.mockNlHandle.links, "reth0")
+		}, 255, false)
+	})
+	t.Run("with-secondary-ip-on-different-interface", func(t *testing.T) {
+		run(t, true, func(nlh *sourceAddressNlHandle17759) {
+			nlh.mockNlHandle.setLink("reth1", true)
+			nlh.addresses["reth1"] = []netlink.Addr{sourceAddress17759()}
+		}, 255, false)
+	})
+	t.Run("with-secondary-ip-link-query-fails", func(t *testing.T) {
+		run(t, true, func(nlh *sourceAddressNlHandle17759) {
+			nlh.linkByNameErr = errors.New("temporary link lookup failure")
+		}, 0, true)
+	})
+	t.Run("with-secondary-ip-link-list-fails", func(t *testing.T) {
+		run(t, true, func(nlh *sourceAddressNlHandle17759) {
+			nlh.linkByNameErr = netlink.LinkNotFoundError{}
+			delete(nlh.mockNlHandle.links, "reth0")
+			nlh.linkListErr = errors.New("temporary link dump failure")
+		}, 0, true)
+	})
+	t.Run("with-secondary-ip-interrupted-link-dump", func(t *testing.T) {
+		run(t, true, func(nlh *sourceAddressNlHandle17759) {
+			nlh.linkByNameErr = netlink.LinkNotFoundError{}
+			nlh.mockNlHandle.setLink("reth1", true)
+			delete(nlh.mockNlHandle.links, "reth0")
+			nlh.linkListErr = netlink.ErrDumpInterrupted
+		}, 0, true)
+	})
+	t.Run("with-secondary-ip-address-query-fails", func(t *testing.T) {
+		run(t, true, func(nlh *sourceAddressNlHandle17759) {
+			nlh.addressListErr = errors.New("temporary address dump failure")
+		}, 0, true)
+	})
+	t.Run("with-secondary-ip-interrupted-partial-address-dump", func(t *testing.T) {
+		run(t, true, func(nlh *sourceAddressNlHandle17759) {
+			// The partial dump omits configured 10.0.0.3 but returns
+			// another address before reporting interruption.
+			nlh.addresses["reth0"] = []netlink.Addr{{
+				IPNet: &net.IPNet{
+					IP:   net.ParseIP("10.0.0.4"),
+					Mask: net.CIDRMask(32, 32),
+				},
+			}}
+			nlh.addressListErr = netlink.ErrDumpInterrupted
+		}, 0, true)
+	})
 }
 
 // TestIPMonitorMeasurableAbortStaysNeutral16734 is the guard against
@@ -262,7 +359,7 @@ func TestIPMonitorMeasurableAbortStaysNeutral16734(t *testing.T) {
 	drainEvents(m2, 1)
 	m2.SetGroupStateForTesting(1, StateSecondary)
 	mon2 := NewMonitor(m2, cfg.RedundancyGroups)
-	injectFakeNl(mon2)
+	mon2.nlHandle = newSourceAddressNlHandle17759(true)
 	setNoDampening(mon2)
 	completed2 := true
 	mon2.probeFn = func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool) {
@@ -283,6 +380,45 @@ func TestIPMonitorMeasurableAbortStaysNeutral16734(t *testing.T) {
 	}
 	if w := m2.GroupStates()[0].Weight; w != 0 {
 		t.Fatalf("secondary-with-address abort weight = %d, want 0: measurable aborts must stay neutral (#16734 guard)", w)
+	}
+
+	// An inconclusive address query still makes the secondary measurable.
+	// Turning `present || !verified` into `present` would release this
+	// DOWN debt when the later probe aborts.
+	m3 := NewManager(1, 1)
+	m3.UpdateConfig(cfg)
+	drainEvents(m3, 1)
+	m3.SetGroupStateForTesting(1, StateSecondary)
+	mon3 := NewMonitor(m3, cfg.RedundancyGroups)
+	nlh3 := newSourceAddressNlHandle17759(false)
+	nlh3.addressListErr = errors.New("temporary address dump failure")
+	mon3.nlHandle = nlh3
+	setNoDampening(mon3)
+	completed3 := true
+	mon3.probeFn = func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool) {
+		if !completed3 {
+			return false, false
+		}
+		return false, true
+	}
+	for range 5 {
+		mon3.poll()
+	}
+	if w := m3.GroupStates()[0].Weight; w != 0 {
+		t.Fatalf("secondary-with-inconclusive-lookup measured-DOWN weight = %d, want 0", w)
+	}
+	if len(m3.GroupStates()[0].MonitorFails) == 0 {
+		t.Fatalf("secondary-with-inconclusive-lookup measured DOWN installed no debt")
+	}
+	completed3 = false
+	for range 5 {
+		mon3.poll()
+	}
+	if w := m3.GroupStates()[0].Weight; w != 0 {
+		t.Fatalf("secondary-with-inconclusive-lookup abort weight = %d, want 0: inconclusive lookup must stay neutral (#16734 guard)", w)
+	}
+	if len(m3.GroupStates()[0].MonitorFails) == 0 {
+		t.Fatalf("secondary-with-inconclusive-lookup abort cleared DOWN debt")
 	}
 }
 

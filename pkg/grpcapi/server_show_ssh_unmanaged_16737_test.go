@@ -1,17 +1,20 @@
 package grpcapi
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/sysservices"
 )
 
-// #16737 (R3-A45-03): the gRPC renderer must state the effective SSH
-// state when no `system services ssh` stanza exists — sshd keeps
-// serving under base-image defaults. RED pre-fix: no SSH row printed.
+// #16737 (R3-A45-03): the gRPC renderer must retain the SSH row when
+// `system services ssh` is absent, with the observed host state.
+// RED pre-fix: no SSH row printed.
 func TestShowSystemServicesSSHNotManaged16737(t *testing.T) {
 	s := newActiveConfigServer(t)
+	s.sshdStateFn = func() sysservices.SSHDState { return sysservices.SSHDRunning }
 	cfg := s.store.ActiveConfig()
 	if cfg == nil {
 		t.Fatal("no active config")
@@ -19,7 +22,7 @@ func TestShowSystemServicesSSHNotManaged16737(t *testing.T) {
 	cfg.System.Services = &config.SystemServicesConfig{}
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	if !strings.Contains(out, "SSH:            running (not managed") {
 		t.Errorf("gRPC renderer dropped the SSH row with no stanza; want the not-managed row:\n%s", out)
@@ -29,6 +32,7 @@ func TestShowSystemServicesSSHNotManaged16737(t *testing.T) {
 // #16737: the row must also appear when System.Services itself is nil.
 func TestShowSystemServicesSSHNotManagedNilServices16737(t *testing.T) {
 	s := newActiveConfigServer(t)
+	s.sshdStateFn = func() sysservices.SSHDState { return sysservices.SSHDRunning }
 	cfg := s.store.ActiveConfig()
 	if cfg == nil {
 		t.Fatal("no active config")
@@ -36,7 +40,7 @@ func TestShowSystemServicesSSHNotManagedNilServices16737(t *testing.T) {
 	cfg.System.Services = nil
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	if out := buf.String(); !strings.Contains(out, "SSH:            running (not managed") {
 		t.Errorf("gRPC renderer dropped the SSH row with nil services:\n%s", out)
 	}
@@ -54,7 +58,7 @@ func TestShowSystemServicesSSHManagedControl16737(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	if !strings.Contains(out, "SSH:            enabled (root-login: deny)") {
 		t.Errorf("gRPC managed SSH row changed:\n%s", out)

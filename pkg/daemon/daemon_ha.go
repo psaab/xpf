@@ -493,26 +493,64 @@ func (d *Daemon) snapshotRethMasterState() map[int]bool {
 	return out
 }
 
-// markRethServicesApplied records that rgID's RETH services were driven to
-// the given ownership (#16696). Called at the tail of
-// applyRethServicesForRG / clearRethServicesForRG so every edge producer
-// (VRRP event, direct-VIP, cluster event, reconcile converger) advances the
-// same marker the converger compares against.
-func (d *Daemon) markRethServicesApplied(rgID int, active bool) {
-	d.rethServicesMu.Lock()
-	defer d.rethServicesMu.Unlock()
-	if d.rethServicesApplied == nil {
-		d.rethServicesApplied = make(map[int]bool)
-	}
-	d.rethServicesApplied[rgID] = active
+// rethServicesEdgeStatus is per-RG convergence state, guarded by
+// Daemon.rethServicesMu. A generation identifies the latest apply/clear
+// invocation; stale completions re-arm pending so they cannot erase newer
+// work after enqueueing or otherwise finishing late.
+type rethServicesEdgeStatus struct {
+	active           bool
+	generation       uint64
+	staleCompletions uint64
+	pending          bool
+	inFlight         bool
 }
 
-// rethServicesAppliedFor reports the last service ownership applied for
-// rgID; absent reads false (never applied / last cleared).
-func (d *Daemon) rethServicesAppliedFor(rgID int) bool {
+// beginRethServicesEdge records the ownership of an apply/clear invocation
+// before its service work can block, and returns the generation token used to
+// qualify its eventual completion.
+func (d *Daemon) beginRethServicesEdge(rgID int, active bool) (generation, staleCompletions uint64) {
 	d.rethServicesMu.Lock()
 	defer d.rethServicesMu.Unlock()
-	return d.rethServicesApplied[rgID]
+	if d.rethServices == nil {
+		d.rethServices = make(map[int]rethServicesEdgeStatus)
+	}
+	state := d.rethServices[rgID]
+	state.generation++
+	state.active = active
+	state.inFlight = true
+	d.rethServices[rgID] = state
+	return state.generation, state.staleCompletions
+}
+
+// finishRethServicesEdge records whether this invocation skipped its service
+// tail. A completion from an older generation always re-arms pending; a
+// current completion may clear pending only if no stale invocation completed
+// during its service work.
+func (d *Daemon) finishRethServicesEdge(rgID int, generation, staleCompletionsAtStart uint64, tailSkipped bool) {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	state := d.rethServices[rgID]
+	if state.generation != generation {
+		state.staleCompletions++
+		state.pending = true
+		d.rethServices[rgID] = state
+		return
+	}
+	state.inFlight = false
+	state.pending = tailSkipped || state.staleCompletions != staleCompletionsAtStart
+	d.rethServices[rgID] = state
+}
+
+func (d *Daemon) rethServicesStateFor(rgID int) rethServicesEdgeStatus {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	return d.rethServices[rgID]
+}
+
+// rethServicesAppliedFor reports the last ownership edge driven for rgID;
+// absent reads false (never driven / last edge cleared).
+func (d *Daemon) rethServicesAppliedFor(rgID int) bool {
+	return d.rethServicesStateFor(rgID).active
 }
 
 // driveRethServicesEdge runs the per-RG service edge for a transition this
@@ -535,16 +573,23 @@ func (d *Daemon) driveRethServicesEdge(rgID int, tr rgTransition, noRethVRRP boo
 	}
 }
 
-// convergeRethServices repairs a lost per-RG service edge (#16696): when
-// the desired ownership (snapshotRethMasterState, i.e. rgStateMachine
-// IsActive) disagrees with the last-applied service ownership, re-drive
-// the edge. Level-triggered, so it also covers edges swallowed by the
-// #15258 sync-hold mirror refresh (R3-A34-03 class) whose transitions no
-// caller consumes. A converged RG costs one map read per pass.
+// convergeRethServices repairs a lost per-RG service edge (#16696), retries
+// an edge whose service tail was skipped by a reset/config guard, and
+// re-drives current desired ownership after a stale completion. A pending
+// tail with unchanged ownership is retried only when its prerequisites are
+// healthy and no latest-generation invocation is still in flight. A changed
+// ownership edge still runs while degraded so clear's proxy-ARP sweep is not
+// delayed behind config recovery.
 func (d *Daemon) convergeRethServices(rgID int) {
 	desired := d.snapshotRethMasterState()[rgID]
-	if desired == d.rethServicesAppliedFor(rgID) {
+	state := d.rethServicesStateFor(rgID)
+	if desired == state.active && !state.pending {
 		return
+	}
+	if state.pending && desired == state.active {
+		if state.inFlight || d.isResetting() || d.store == nil || d.store.ActiveConfig() == nil {
+			return
+		}
 	}
 	if desired {
 		d.applyRethServicesForRG(rgID)
@@ -2039,19 +2084,23 @@ func (d *Daemon) reconcileBlackholeRoutes() {
 // transition — these services must only run on the primary to avoid
 // dual-router / dual-DHCP issues.
 func (d *Daemon) applyRethServicesForRG(rgID int) {
+	generation, staleCompletions := d.beginRethServicesEdge(rgID, true)
 	d.bumpIPsecRGOwnershipEpoch(rgID)
 	// The VRRP event loop holds no applySem, so a takeover racing factory
 	// reset would otherwise pre-seed prior leases and enqueue Kea applies
 	// against a half-wiped box. The enqueue is fenced itself; this guard
 	// covers the direct memfile pre-seed and the peer-seed goroutine.
 	if d.isResetting() {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 	if d.store == nil {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 	// RA senders (#5861): converge to the union of RA configs for every RG
@@ -2060,6 +2109,8 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// cannot race a concurrent commit/demotion; the state machine already
 	// marked rgID active before this call, so the snapshot includes it.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-master-rg%d", rgID))
+	var applyGen uint64
+	resetFenced := false
 	if d.dhcpServer != nil {
 		// Snapshot ownership once and use it for both the filtered Kea config
 		// and its lease-authority proof. A transition racing either derivation
@@ -2105,8 +2156,10 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// block this VRRP event loop. Latest-wins coalescing in
 			// the manager keeps final state correct; failures are
 			// logged by the worker with this reason.
-			applyGen := d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
-			slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
+			applyGen, resetFenced = d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
+			if applyGen != 0 {
+				slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
+			}
 			// #2239: after the async Kea start, seed the held peer
 			// leases via lease{4,6}-add (the reinitiateIPsecSAs
 			// precedent). Async so it never blocks this VRRP event
@@ -2120,7 +2173,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// #16854: skipped when this edge moves no DHCP scope.
 			// The seed wait uses applyCancelCtx so daemon shutdown can cancel
 			// an unapplied generation instead of leaving a goroutine behind.
-			if takeoverWork {
+			if takeoverWork && applyGen != 0 {
 				if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
 					d.spawnDHCPLeaseSeed(d.applyCancelCtx(), applyGen, dhcpLeaseSeedApplyWaitWarnAfter)
 					d.nudgeDHCPLeaseSync()
@@ -2172,7 +2225,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.getSessionSync() != nil {
 		go d.reinitiateIPsecSAsForRG(rgID)
 	}
-	d.markRethServicesApplied(rgID, true)
+	d.finishRethServicesEdge(rgID, generation, staleCompletions, resetFenced)
 }
 
 type raScopedClearer interface {
@@ -2260,6 +2313,7 @@ func clearRethRASendersWithoutGoodbyePeer(clearer raScopedClearer, cfg, peerCfg 
 // for RETH interfaces belonging to the given RG. Called on VRRP BACKUP
 // transition. If other RGs are still MASTER, their services remain active.
 func (d *Daemon) clearRethServicesForRG(rgID int) {
+	generation, staleCompletions := d.beginRethServicesEdge(rgID, false)
 	rgEpoch := d.bumpIPsecRGOwnershipEpoch(rgID)
 	// #9087: nudged FIRST, and before the early returns, because the demote
 	// side of the window is the one that leaves a wrong answerer on the wire.
@@ -2271,10 +2325,12 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// config-less paths where the stale entry still sits in the kernel.
 	d.nudgeProxyARPReassert()
 	if d.store == nil {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 
@@ -2301,13 +2357,14 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// Reconcile the union for any RGs this node still owns. Explicitly configured
 	// per-node sources are removed by Apply's normal graceful-withdraw path.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-backup-rg%d", rgID))
+	resetFenced := false
 	if d.dhcpServer != nil {
 		// ApplyAsync keeps this VRRP event loop off the 15s-bounded systemctl
 		// path and funnels every desired state through the latest-wins mailbox.
 		// Derive the desired config from the SSOT even when no RG remains master:
 		// it preserves node-local DHCP groups while filtering all inactive RETHs.
 		dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
-		d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
+		_, resetFenced = d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
 			fmt.Sprintf("vrrp BACKUP rg%d", rgID), cfg, masters)
 	}
 	// #2691 P1b / #2664: nudge the DDNS reconcile loop after a (partial)
@@ -2336,7 +2393,7 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// governs peer advertisement/re-initiation, not local SA hygiene on a
 	// node-local demotion edge.
 	go d.terminateDemotedRGIPsecSAs(rgID, rgEpoch)
-	d.markRethServicesApplied(rgID, false)
+	d.finishRethServicesEdge(rgID, generation, staleCompletions, resetFenced)
 }
 
 // stripUntaggedUnitSuffix normalizes a resolved Linux interface name by

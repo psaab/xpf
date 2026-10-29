@@ -240,7 +240,7 @@ func (s *Server) effectiveListeners() sysservices.Listeners {
 	}
 }
 
-func (s *Server) showSystemServices(buf *strings.Builder) {
+func (s *Server) showSystemServices(ctx context.Context, buf *strings.Builder) {
 	cfg := s.store.ActiveConfig()
 	if cfg == nil {
 		fmt.Fprintln(buf, "No active configuration")
@@ -265,10 +265,13 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 		fmt.Fprintf(buf, "  SSH:            enabled (root-login: %s)\n",
 			config.SSHRootLoginDisplayName(cfg.System.Services.SSH.RootLogin))
 	} else {
-		// #16737: sshd is not owned by the stanza — removing it only
-		// removes the xpf drop-in and sshd keeps serving under
-		// base-image defaults. Never drop the row silently.
-		fmt.Fprintln(buf, "  SSH:            running (not managed — no system services ssh; sshd serves under base-image defaults)")
+		var state sysservices.SSHDState
+		if s.sshdStateFn != nil {
+			state = s.sshdStateFn()
+		} else {
+			state = sysservices.ProbeSSHDState(ctx)
+		}
+		fmt.Fprintln(buf, sysservices.UnmanagedSSHLine(state))
 	}
 	if cfg.System.Services != nil {
 		if cfg.System.Services.NetconfSSH {

@@ -7,8 +7,10 @@ import (
 
 // #16610: three-color burst buckets below one maximum-sized frame commit
 // clean and colour every full-size frame Red (the meter charges frame
-// bytes, meta.pkt_len). The schema validator and the strict compiler gate
-// share the 1514-byte floor; tolerant load warns instead of bricking.
+// bytes, meta.pkt_len). #17760: a maximum-size VLAN frame at a 1500 MTU
+// costs 1500 + 14-byte Ethernet header + 4-byte 802.1Q tag = 1518.
+// The schema validator and strict compiler gate share the 1518-byte
+// floor; tolerant load warns instead of bricking.
 //
 // FAIL-ON-REVERT: reverting the floor in
 // validateThreeColorPolicerBurstSize11827 makes the SchemaValidate
@@ -29,24 +31,24 @@ func TestThreeColorBurstFloor16610SchemaRejectsSubFrame(t *testing.T) {
 		{"two-rate", "peak-burst-size"},
 	}
 	for _, tc := range leaves {
-		for _, value := range []string{"64", "1000", "1500", "1513", "1k"} {
+		for _, value := range []string{"64", "1000", "1500", "1513", "1514", "1517", "1k"} {
 			tree := flatTreeFromSets(t, threeColorPolicerSet11827(tc.mode, tc.leaf, value))
 			err := SchemaValidate(tree)
 			if err == nil {
 				t.Errorf("%s %s %s: SchemaValidate accepted sub-frame burst", tc.mode, tc.leaf, value)
 				continue
 			}
-			if !strings.Contains(err.Error(), "maximum-sized frame") || !strings.Contains(err.Error(), "1514") {
-				t.Errorf("%s %s %s: error should name the 1514-byte frame floor, got: %v", tc.mode, tc.leaf, value, err)
+			if !strings.Contains(err.Error(), "maximum-sized frame") || !strings.Contains(err.Error(), "1518") {
+				t.Errorf("%s %s %s: error should name the 1518-byte frame floor, got: %v", tc.mode, tc.leaf, value, err)
 			}
 			if !strings.Contains(err.Error(), "firewall three-color-policer p1 "+tc.mode+" "+tc.leaf) {
 				t.Errorf("%s %s %s: error should name leaf path, got: %v", tc.mode, tc.leaf, value, err)
 			}
 		}
 		// Twin at the floor is accepted.
-		tree := flatTreeFromSets(t, threeColorPolicerSet11827(tc.mode, tc.leaf, "1514"))
+		tree := flatTreeFromSets(t, threeColorPolicerSet11827(tc.mode, tc.leaf, "1518"))
 		if err := SchemaValidate(tree); err != nil {
-			t.Errorf("%s %s 1514: SchemaValidate rejected floor twin: %v", tc.mode, tc.leaf, err)
+			t.Errorf("%s %s 1518: SchemaValidate rejected floor twin: %v", tc.mode, tc.leaf, err)
 		}
 	}
 }
@@ -81,7 +83,7 @@ func TestThreeColorBurstFloor16610StrictGate(t *testing.T) {
 			name: "two-rate peak below floor (probe row: 1k PBS)",
 			lines: []string{
 				"set firewall three-color-policer p1 two-rate committed-information-rate 1m",
-				"set firewall three-color-policer p1 two-rate committed-burst-size 1514",
+				"set firewall three-color-policer p1 two-rate committed-burst-size 1518",
 				"set firewall three-color-policer p1 two-rate peak-information-rate 2m",
 				"set firewall three-color-policer p1 two-rate peak-burst-size 1k",
 				"set firewall three-color-policer p1 then discard",
@@ -109,8 +111,8 @@ func TestThreeColorBurstFloor16610StrictGate(t *testing.T) {
 			name: "single-rate twin at floor",
 			lines: []string{
 				"set firewall three-color-policer p1 single-rate committed-information-rate 1m",
-				"set firewall three-color-policer p1 single-rate committed-burst-size 1514",
-				"set firewall three-color-policer p1 single-rate excess-burst-size 1514",
+				"set firewall three-color-policer p1 single-rate committed-burst-size 1518",
+				"set firewall three-color-policer p1 single-rate excess-burst-size 1518",
 				"set firewall three-color-policer p1 then discard",
 			},
 		},
@@ -123,9 +125,9 @@ func TestThreeColorBurstFloor16610StrictGate(t *testing.T) {
 			name: "two-rate twin at floor",
 			lines: []string{
 				"set firewall three-color-policer p1 two-rate committed-information-rate 1m",
-				"set firewall three-color-policer p1 two-rate committed-burst-size 1514",
+				"set firewall three-color-policer p1 two-rate committed-burst-size 1518",
 				"set firewall three-color-policer p1 two-rate peak-information-rate 2m",
-				"set firewall three-color-policer p1 two-rate peak-burst-size 1514",
+				"set firewall three-color-policer p1 two-rate peak-burst-size 1518",
 				"set firewall three-color-policer p1 then discard",
 			},
 		},
@@ -144,7 +146,7 @@ func TestThreeColorBurstFloor16610StrictGate(t *testing.T) {
 		t.Fatalf("single-rate CBS<EBS with EBS above floor must pass strict gate, got: %v", err)
 	}
 	// Direct gate: two-rate PBS below floor fails even with CBS at floor.
-	pol2 := &ThreeColorPolicerConfig{Name: "p1", TwoRate: true, CIR: 125000, CBS: 1514, PIR: 250000, PBS: 1000}
+	pol2 := &ThreeColorPolicerConfig{Name: "p1", TwoRate: true, CIR: 125000, CBS: 1518, PIR: 250000, PBS: 1000}
 	if err := validateThreeColorPolicersStrict(map[string]*ThreeColorPolicerConfig{"p1": pol2}); err == nil ||
 		!strings.Contains(err.Error(), "peak-burst-size") {
 		t.Fatalf("two-rate sub-frame PBS must fail strict gate, got: %v", err)
