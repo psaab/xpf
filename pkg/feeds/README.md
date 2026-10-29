@@ -79,12 +79,12 @@ to equal the possibly-rotated count hash would drop exactly the rotated
 epochs. A set whose digest mismatches a present `epoch_hash` (or a
 non-canonical set) is dropped fail-closed; the count epoch still restores.
 Records written before the epoch set was persisted restore the count epoch
-only; the content epoch then re-bootstraps on the first install that passes
-every guard including the restored count high-water (#16651), still guarded
-by the restored count high-water. The same re-bootstrap applies when a
-record's epoch set was dropped on restore (digest mismatch or non-canonical
-set): the first guarded install establishes and persists the epoch, so churn
-is epoch-anchored from then on rather than predecessor-only forever.
+only; when the record passes every guard, including the restored count
+high-water, its content epoch is re-established and persisted (#16651).
+The same guarded re-bootstrap applies when a record's epoch set was dropped
+on restore (digest mismatch or non-canonical set). It is authorized only for
+these restored epoch-less records: an ordinary unacknowledged install does
+not rebase another empty epoch (#17690, preserving #14395).
 Factory reset erases this file and any crash-leaked `.<base>.tmp-*` snapshots
 after fencing and draining the daemon's in-flight persistence callback, so a
 re-tenanted device does not inherit a prior tenant's same-named feed baseline.

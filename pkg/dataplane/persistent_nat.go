@@ -189,10 +189,15 @@ func (t *PersistentNATTable) LookupPool(natIP netip.Addr) (string, PersistentNAT
 // or if the binding has expired. It scans the (SrcIP, SrcPort, Pool) matches
 // regardless of protocol/scope, for legacy callers that hold no lease
 // identity; LookupScoped is the exact-match form new callers should use.
+// Ambiguous matches are chosen by lowest protocol, then lowest routing scope,
+// so protocol-less legacy records are preferred independent of map iteration.
 // It returns a copy so callers cannot alias table state.
 func (t *PersistentNATTable) Lookup(srcIP netip.Addr, srcPort uint16, pool string) *PersistentNATBinding {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
+
+	var winner *PersistentNATBinding
+	var winnerKey persistentNATKey
 	for key, b := range t.bindings {
 		if key.SrcIP != srcIP || key.SrcPort != srcPort || key.Pool != pool {
 			continue
@@ -200,30 +205,40 @@ func (t *PersistentNATTable) Lookup(srcIP netip.Addr, srcPort uint16, pool strin
 		if time.Since(b.LastSeen) > b.Timeout {
 			continue
 		}
-		cp := *b
-		if b.PermittedRemotes != nil {
-			cp.PermittedRemotes = append([]PersistentNATRemote(nil), b.PermittedRemotes...)
+		if winner != nil && (key.Protocol > winnerKey.Protocol ||
+			(key.Protocol == winnerKey.Protocol && key.RoutingScope >= winnerKey.RoutingScope)) {
+			continue
 		}
-		return &cp
+		winnerKey = key
+		winner = b
 	}
-	return nil
+	if winner == nil {
+		return nil
+	}
+	return copyPersistentNATBinding(winner)
 }
 
 // LookupScoped finds a binding by its full #16647 identity, including
-// protocol and routing scope, so overlapping tenants stay distinct.
+// protocol and routing scope, so overlapping tenants stay distinct. It
+// returns a detached copy, including a deep copy of the grants.
 func (t *PersistentNATTable) LookupScoped(srcIP netip.Addr, srcPort uint16, pool string, protocol uint8, routingScope uint32) *PersistentNATBinding {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
 	key := persistentNATKey{SrcIP: srcIP, SrcPort: srcPort, Pool: pool, Protocol: protocol, RoutingScope: routingScope}
 	b, ok := t.bindings[key]
-	if !ok {
+	if !ok || time.Since(b.LastSeen) > b.Timeout {
 		return nil
 	}
-	if time.Since(b.LastSeen) > b.Timeout {
-		return nil
+	return copyPersistentNATBinding(b)
+}
+
+func copyPersistentNATBinding(b *PersistentNATBinding) *PersistentNATBinding {
+	cp := *b
+	if b.PermittedRemotes != nil {
+		cp.PermittedRemotes = append([]PersistentNATRemote(nil), b.PermittedRemotes...)
 	}
-	return b
+	return &cp
 }
 
 // Save stores a persistent NAT binding, refreshing an existing entry for the
@@ -390,11 +405,7 @@ func (t *PersistentNATTable) All() []*PersistentNATBinding {
 
 	result := make([]*PersistentNATBinding, 0, len(t.bindings))
 	for _, b := range t.bindings {
-		cp := *b
-		if b.PermittedRemotes != nil {
-			cp.PermittedRemotes = append([]PersistentNATRemote(nil), b.PermittedRemotes...)
-		}
-		result = append(result, &cp)
+		result = append(result, copyPersistentNATBinding(b))
 	}
 	return result
 }

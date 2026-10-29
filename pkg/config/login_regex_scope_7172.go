@@ -116,3 +116,16 @@ func (c CompiledLoginRegexes) DenySource() (string, bool) {
 func (c CompiledLoginRegexes) AllowSource() (string, bool) {
 	return c.allowSrc, c.allowSet
 }
+
+// AllowOutranksDeny reports whether the allow leaf matches more of allowForm
+// than the deny leaf matches of denyForm. #17704 uses this only for a
+// cross-spelling alias rescue: an affirmative allow on one alias must beat,
+// not merely coexist with, a sibling spelling's tier-deny.
+func (c CompiledLoginRegexes) AllowOutranksDeny(allowForm, denyForm string) bool {
+	if !c.allowSet || !c.denySet {
+		return false
+	}
+	allowLen := longestMatchLen(c.allow, allowForm)
+	denyLen := longestMatchLen(c.deny, denyForm)
+	return allowLen >= 0 && denyLen >= 0 && allowLen > denyLen
+}
