@@ -89,9 +89,13 @@ func TestDeferredWorkerDrainsReadyBudgetHoldAfterLastSlotExpires17727(t *testing
 	elapsed.Store(2)
 	close(release)
 
-	waitFor(t, "ready budget hold drained without external nudge", func() bool {
-		return e.Stats().PendingDeferred == 0
-	})
+	drainDeadline := time.Now().Add(5 * time.Second)
+	for e.Stats().PendingDeferred != 0 && time.Now().Before(drainDeadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := e.Stats().PendingDeferred; got != 0 {
+		t.Fatalf("PendingDeferred=%d after 5s with no external nudge; ready budget hold was stranded", got)
+	}
 	if got := checks.Load(); got < 2 {
 		t.Fatalf("budget checks=%d, want at least 2 (no-progress drain then replay)", got)
 	}
