@@ -19,6 +19,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"path/filepath"
 	"sync"
@@ -281,6 +282,143 @@ func TestStandaloneRenewLoopTicks16773(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("standaloneRARenewLoop did not stop on ctx cancel")
+	}
+}
+
+// TestStandaloneRenewFailureRetriesWithoutSecondDHCPNudge17793 pins the
+// standalone renewal retry owner to an actual failed applier call: the
+// first renewal apply fails, a periodic retry converges without another
+// DHCP wake, and success stops the periodic retry.
+func TestStandaloneRenewFailureRetriesWithoutSecondDHCPNudge17793(t *testing.T) {
+	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
+	d, mgr, spy := standalonePDDaemon16773(t, t0, 3600*time.Second, 7200*time.Second)
+	var mu sync.Mutex
+	attempts := 0
+	d.raApplyFn = func(cfgs []*config.RAInterfaceConfig) error {
+		mu.Lock()
+		attempts++
+		attempt := attempts
+		mu.Unlock()
+		if attempt == 2 {
+			return errors.New("injected first-renewal apply failure")
+		}
+		return spy.apply(cfgs)
+	}
+	d.reconcileStandaloneRAServices("initial")
+	if got := spy.count(); got != 1 {
+		t.Fatalf("initial applies = %d, want 1", got)
+	}
+
+	t1 := t0.Add(time.Hour)
+	mgr.ReplaceDelegatedPrefixesForTesting("ge-0/0/3", []dhcp.DelegatedPrefix{pdAt16773(t1, 3600*time.Second, 7200*time.Second)})
+	d.nudgeStandaloneRARenew()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.standaloneRARenewLoopWithRetryInterval(ctx, 5*time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("standalone RA renew loop did not stop on cancellation")
+		}
+	}()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		mu.Lock()
+		got := attempts
+		mu.Unlock()
+		if got >= 3 && spy.count() == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("renew failure was not retried without another DHCP nudge: apply attempts = %d, successful applies = %d, want 3/2",
+				got, spy.count())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := spy.count(); got != 2 {
+		t.Fatalf("successful applies after retry = %d, want 2 (initial + retry)", got)
+	}
+	p := onlyAppliedPrefix16773(t, spy.lastApplied())
+	if want := t1.Add(7200 * time.Second).UnixNano(); p.ValidExpiresAt != want {
+		t.Fatalf("retry ValidExpiresAt = %d, want %d", p.ValidExpiresAt, want)
+	}
+
+	t2 := t1.Add(time.Minute)
+	mgr.ReplaceDelegatedPrefixesForTesting("ge-0/0/3", []dhcp.DelegatedPrefix{pdAt16773(t2, 3600*time.Second, 7200*time.Second)})
+	select {
+	case <-d.raRenewWakeCh:
+		t.Fatal("test fixture unexpectedly queued a second DHCP nudge")
+	default:
+	}
+	// A still-armed periodic retry would observe the changed desired digest and
+	// call the applier again. No second nudge means only an incorrectly retained
+	// retry timer can produce that apply.
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	got := attempts
+	mu.Unlock()
+	if got != 3 {
+		t.Fatalf("retry remained armed after successful convergence: apply attempts = %d, want 3", got)
+	}
+	if got := spy.count(); got != 2 {
+		t.Fatalf("successful applier calls after a no-nudge desired-set change = %d, want 2 (initial + retry)", got)
+	}
+}
+
+// TestStandaloneRenewMissingStoreKeepsRetryOwed17793 pins unavailable
+// standalone prerequisites to the retry owner: after a wake observes no
+// store, restoring it without another nudge must still converge.
+func TestStandaloneRenewMissingStoreKeepsRetryOwed17793(t *testing.T) {
+	d, _, spy := standalonePDDaemon16773(t, time.Now().Add(-time.Hour), 3600*time.Second, 7200*time.Second)
+	store := d.store
+	d.raReconcileMu.Lock()
+	d.store = nil
+	d.raReconcileMu.Unlock()
+	if d.reconcileStandaloneRAServices("missing-store") {
+		t.Fatal("standalone reconcile reported convergence without a store")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.standaloneRARenewLoopWithRetryInterval(ctx, 5*time.Millisecond)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("standalone RA renew loop did not stop on cancellation")
+		}
+	}()
+	d.nudgeStandaloneRARenew()
+	time.Sleep(50 * time.Millisecond)
+	d.raReconcileMu.Lock()
+	d.store = store
+	d.raReconcileMu.Unlock()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for spy.count() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("standalone store restoration did not converge through periodic retry without another DHCP nudge")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if got := spy.count(); got != 1 {
+		t.Fatalf("applies after restoring standalone store = %d, want 1", got)
+	}
+	select {
+	case <-d.raRenewWakeCh:
+		t.Fatal("store recovery unexpectedly queued a second DHCP nudge")
+	default:
 	}
 }
 
