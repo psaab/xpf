@@ -37,13 +37,14 @@ type applyPhaseErrors struct {
 	VRF         error
 	Fabric      error
 	FRR         error
+	DHCPRelay   error
 }
 
 // join returns one flat errors.Join in exactly the production tail order
 // (#1778/#2987/#4433/#5083/#5310/#5679/#5696/#5700/#6790/#6792/#9947):
 // Networkd, Dataplane, DHCPServer, [hostInbound, lo0, dns], [login,
 // sudoers, absentUsers, sshConfig, rootAuth], IPsec, Iface, RouteLeak,
-// RoutingRule, MgmtRoute, VRF, Fabric, [vrrp], FRR. The tail-local errors
+// RoutingRule, MgmtRoute, VRF, Fabric, [vrrp], FRR, DHCPRelay. The tail-local errors
 // (hostInboundErr/lo0Err/dnsErr from steps 9/9.5, the five host-credential
 // errors from steps 11-13, vrrpErr from step 8) are supplied by the caller
 // via applyTailLocals so this method is the SINGLE registration point:
@@ -78,7 +79,7 @@ func (e applyPhaseErrors) join(locals applyTailLocals) error {
 		locals.hostInbound, locals.lo0, locals.dns,
 		locals.login, locals.sudoers, locals.absentUsers, locals.sshConfig, locals.rootAuth,
 		e.IPsec, e.Iface, e.RouteLeak, e.RoutingRule, e.MgmtRoute, e.VRF, e.Fabric,
-		locals.vrrp, e.FRR,
+		locals.vrrp, e.FRR, e.DHCPRelay,
 	)
 }
 
@@ -358,7 +359,7 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 	// per interface (start added, stop removed, restart changed, leave
 	// unchanged) and a nil relay config stops all relays. Bound to
 	// d.daemonCtx so the relay goroutines outlive this apply call.
-	d.reconcileDHCPRelay(cfg)
+	phase.DHCPRelay = errors.Join(phase.DHCPRelay, d.reconcileDHCPRelay(cfg))
 
 	// 16d. Reconcile the LLDP service (#2372). Before this, LLDP was applied
 	// only at boot (daemon_run.go), so a day-2 commit that enabled, disabled,
@@ -627,9 +628,12 @@ func (d *Daemon) reconcileClusterTransportBinding(cfg *config.Config, restartOwe
 // survive past this apply call and are torn down only at daemon stop. Guarded
 // on d.dhcpRelay so a daemon constructed without a relay Manager (e.g. a test
 // harness or NoDataplane boot that skipped the boot wiring) is a safe no-op.
-func (d *Daemon) reconcileDHCPRelay(cfg *config.Config) {
+func (d *Daemon) reconcileDHCPRelay(cfg *config.Config) error {
+	if d.dhcpRelayReconcileForTest != nil {
+		return d.dhcpRelayReconcileForTest(cfg)
+	}
 	if d.dhcpRelay == nil {
-		return
+		return nil
 	}
 	ctx := d.daemonCtx
 	if ctx == nil {
@@ -646,8 +650,7 @@ func (d *Daemon) reconcileDHCPRelay(cfg *config.Config) {
 	// This is the SOLE production Apply site on purpose: the boot path
 	// (daemon_run.go) routes through here rather than calling Apply itself, so
 	// there is one place to wire rather than two to remember.
-	d.dhcpRelay.SetIfNameResolver(cfg.ResolveKernelIfName)
-	d.dhcpRelay.Apply(ctx, cfg.ForwardingOptions.DHCPRelay)
+	return d.dhcpRelay.Apply(ctx, cfg.ForwardingOptions.DHCPRelay)
 }
 
 // effectiveLLDPConfig translates the typed `protocols lldp` stanza into the
