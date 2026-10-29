@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Dataplane: reconcile VLAN child MTUs for unzoned bridge-domain members
+    against the parent's planned MTU, reusing the #9757/#16633 helper
+    semantics (#17726).
+
   * Routing: authorize rib-group peer returns from the route owner's
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
