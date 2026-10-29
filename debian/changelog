@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon: sweep successfully fallback-initiated unanchored IPsec SAs on
+    the matching sole-data-RG demotion only. Preserve anchored-SA scoping
+    and clear fallback provenance after successful termination (#18426).
+
   * Userspace dataplane: index learned WireGuard PMTUs by endpoint IP
     for allocation-free packet-path lookup; serialize PTB shrink updates
     and publish MTU/age pairs coherently (#17774).
