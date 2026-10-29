@@ -530,12 +530,14 @@ same family and priority and does not validate DSCP/action fields.
   because it is a LOOKUP rule: a lookup that misses the VRF's table moves on
   down this list.
 - `1001–1999`: rib-group **return rules** (#9819, narrowed by #11062,
-  LPM-ordered by #14975, authorized by #16616). For each family in which a
-  source instance leaked, install an iif/oif pair per prefix leaked by a
-  different instance — but only when the source's own rib-group for that
-  family names the peer's rib (`<peer>.inet.0` / `<peer>.inet6.0`) in its
-  import-rib list. Tenants leaking only into main get no tenant->tenant
-  return. Priority is `pref = config.RibGroupReturnRulePriority(prefix-len, addr-bits)`
+  LPM-ordered by #14975, authorized by #16616/#17705). For each family in
+  which a lookup-source instance leaked, install an iif/oif pair per prefix
+  leaked by a different instance — but only when the destination owner's
+  rib-group for that family names the lookup-source rib
+  (`<source>.inet.0` / `<source>.inet6.0`) in `import-rib`. Thus A's group
+  naming `b.inet.0` authorizes B-context returns to A's prefixes, not A->B.
+  Tenants leaking only into main get no tenant->tenant return. Priority is
+  `pref = config.RibGroupReturnRulePriority(prefix-len, addr-bits)`
   (1001 + (bits−len)×28 for IPv4, ×7 for IPv6; longer prefixes first):
   `to <peer-prefix> iif vrf-<instance> lookup <peer-table>` and
   `to <peer-prefix> oif vrf-<instance> lookup <peer-table>`. The pre-#14975

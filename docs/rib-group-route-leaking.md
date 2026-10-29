@@ -126,23 +126,24 @@ existing `rule.Dst != nil` + table→instance loop auto-captures each as a
 `NextTable` leak into the main table (`pkg/dataplane/userspace/routes.go`) —
 putting the leak into the **userspace FIB** as well as the kernel FIB.
 
-### VRF misses and authorized peer returns (#9819/#11062/#16616)
+### VRF misses and authorized peer returns (#9819/#11062/#16616/#17705)
 
 The kernel's `l3mdev` rule at priority 1000 is a lookup: when a VRF's own
 table misses, processing continues down the RPDB. Without the #9819
 `l3mdev unreachable` terminator, that miss can reach arbitrary routes in `main`.
 The terminator at priority 2000 makes unmatched VRF misses fail closed.
 
-For a source instance whose own rib-group leak installed, #11062 adds
-destination-scoped return rules — but only for peer prefixes the source is
-authorized to reach (#16616). A peer prefix qualifies only when the
-source's own interface-routes rib-group for that family names the peer's
-rib in its `import-rib` list (for example `import-rib [ src.inet.0
-b.inet.0 inet.0 ]` on src authorizes src->b), and the peer itself leaks
-into main for that family. Since #14975 the priority is derived from the
-peer prefix length (longest prefix first) instead of the former flat
-1500, staying inside (1000, 2000) so the rules still run after `l3mdev`
-and before the miss terminator:
+For a lookup source instance whose own rib-group leak installed, #11062 adds
+destination-scoped return rules to peer prefixes — only when the peer
+(destination owner)'s own interface-routes rib-group for that family names
+the lookup source's rib in `import-rib`. Import-rib describes where the
+peer's routes are installed: for example, if A uses `import-rib [ a.inet.0
+b.inet.0 inet.0 ]`, A's routes are designated for B, so B-context lookups
+may return to A's leaked prefixes; this does not authorize A-context lookups
+to B. The peer must also leak into main for that family. Since #14975 the
+priority is derived from the peer prefix length (longest prefix first)
+instead of the former flat 1500, staying inside (1000, 2000) so the rules
+still run after `l3mdev` and before the miss terminator:
 
 ```
 ip rule add pref <1001+(bits-len)*28|7> to <peer-prefix> iif vrf-<instance> lookup <peer-table>
@@ -161,17 +162,18 @@ in-place upgrade sweeps/mirrors them; a pre-existing identical rule
 
 Tenants that each leak only their own interface routes into `inet.0`
 (`import-rib [ <self>.inet.0 inet.0 ]`) do NOT thereby become reachable
-from each other: neither source names the other's rib, so no return rule
-is installed in either direction and a VRF-context lookup for the other
-tenant's prefix hits the terminator (`Network is unreachable`). This is
-the shared-services contract at the top of this document: B's routes go
-into `b.inet.0` and `inet.0` only, never into `a.inet.0`. Main->tenant
-still resolves via the per-prefix leak rules in the 30000 band; only the
-tenant->tenant return requires the explicit peer-rib import. Note the
-VRF->VRF forward leak itself remains Phase-2 deferred (warned at commit,
-not installed as a 30000-band rule); naming a peer rib today authorizes
-only this destination-scoped return, scoped to the peer's leaked
-connected prefixes.
+from each other: neither peer's rib-group names the other's rib, so no
+return rule is installed in either direction and a VRF-context lookup for
+the other tenant's prefix hits the terminator (`Network is unreachable`).
+This is the shared-services contract at the top of this document: B's
+routes go into `b.inet.0` and `inet.0` only, never into `a.inet.0`.
+Main->tenant still resolves via the per-prefix leak rules in the 30000 band.
+For an asymmetric import, if A's import-rib names `b.inet.0`, B-context
+traffic can reach A's leaked connected prefixes; the reverse is not
+authorized unless B's import-rib also names `a.inet.0`. The VRF->VRF
+forward leak itself remains Phase-2 deferred (warned at commit, not
+installed as a 30000-band rule); naming a peer rib authorizes only this
+destination-scoped return to the peer's leaked connected prefixes.
 
 The peer-prefix set comes from the existing interface-routes rib-group
 configuration and the same static connected-prefix derivation used by the
@@ -237,8 +239,8 @@ and rejected at commit; do not rely on it as a substitute.
 | Lookup | Result |
 |---|---|
 | VRF miss to a main-only destination | `Network is unreachable` |
-| VRF miss to a prefix leaked by another instance, no peer-rib import | `Network is unreachable` (#16616) |
-| VRF miss to a prefix leaked by another instance, source imports peer rib | Peer instance table |
+| VRF miss to a prefix leaked by another instance, no importing peer-rib | `Network is unreachable` (#16616) |
+| VRF miss to a prefix leaked by another instance, its owner imports the lookup-source rib | Peer instance table |
 | Main lookup to a leaked prefix | The leaking source instance table |
 | VRF lookup to its connected/static route | Resolves in that VRF |
 | Next-table/PBR target return with no peer route | `Network is unreachable`; commit warns |
@@ -246,11 +248,13 @@ and rejected at commit; do not rely on it as a substitute.
 
 The real-kernel regression is `TestVRFMissTerminatorOnRealKernel9819` in
 `pkg/routing/vrf_miss_terminator_9819_test.go`. It checks that the
-other-instance peer-prefix lookup is now terminated in IPv4/IPv6 (both
-tenants leak only into main) and the negative main-only destination lookup
-in the same network namespace, alongside the ordinary connected/static/default
-and main-to-leak controls. The authorized direction is pinned by
-`TestRibGroupReturnRulesAuthorizedPeer16616` and the FIB mirror cells in
+other-instance peer-prefix lookup is terminated in IPv4/IPv6 (both tenants
+leak only into main), and the negative main-only destination lookup in the
+same network namespace, alongside ordinary connected/static/default and
+main-to-leak controls. Directional authorization is pinned by
+`TestRibGroupReturnRulesAsymmetric17705` and
+`TestRibGroupReturnRulesAuthorizedPeer16616`; FIB mirroring, including
+stale-rule refusal, is covered in
 `pkg/dataplane/userspace/routes_ribgroup_leak_3876_test.go`.
 
 ## Why the pre-#3876 behavior was a no-op

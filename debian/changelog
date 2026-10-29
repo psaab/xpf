@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Routing: authorize rib-group peer returns from the route owner's
+    import-rib destinations in the correct direction. Keep kernel rules
+    and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
+    the deferred VRF-to-VRF forward-import warning (#17705).
+
   * Event engine: recheck live `trigger until` ceilings when draining recorded
     cooldown crossings, preventing parked storms from replaying over the
     ceiling while preserving short-window `trigger on` crossings (#17708).

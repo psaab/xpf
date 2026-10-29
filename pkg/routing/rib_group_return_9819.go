@@ -21,11 +21,11 @@ import (
 //	ip rule add pref <derived> to <peer-prefix> oif vrf-<instance> lookup <peer-table>
 //
 // Looking up the peer table avoids falling through to main's default route.
-// Since #16616 such a rule is installed (and mirrored) only when the
-// source instance's rib-group names the peer's rib in import-rib; leaking
-// into main alone does not authorize tenant->tenant reach. The userspace
-// FIB mirrors authorized rules as reverse NextTable routes between the
-// source and peer tables.
+// Since #16616/#17705 such a rule is installed (and mirrored) only when the
+// destination peer's own rib-group names the lookup-source instance's rib
+// in import-rib; leaking into main alone does not authorize tenant->tenant
+// reach. The userspace FIB mirrors authorized rules as reverse NextTable
+// routes from the lookup-source table to the destination peer table.
 const RibGroupReturnRulePriority = config.LegacyRibGroupReturnRulePriority
 
 // IsRibGroupReturnRulePriority reports whether priority belongs to a
