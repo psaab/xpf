@@ -142,7 +142,7 @@ func TestDHCPV6ApplyPreservesCounters(t *testing.T) {
 		},
 	}
 	m.v6.apply(context.Background(), cfg, func(name string) string { return name },
-		func(string) bool { return true })
+		func(string) bool { return true }, time.Now().Add(relayStopTimeout))
 	stats := m.Stats()
 	if len(stats) != 1 {
 		t.Fatalf("stats rows = %d, want 1: %+v", len(stats), stats)
