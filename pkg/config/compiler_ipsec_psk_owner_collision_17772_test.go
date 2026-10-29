@@ -439,6 +439,12 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"wrapped numeric type is ID_ANY", "inet", "{4294967296}:x", "inet", "{0}:y"},
 			{"empty numeric type equals zero", "inet", "{}:a", "inet", "{0}:a"},
 			{"empty numeric type ignores encoding", "inet", "{}:a", "inet", "{}:b"},
+			{"IPv4 prefix suffix ignores trailing text", "inet", "198.51.100.1/24junk", "inet", "198.51.100.1/24"},
+			{"IPv4 prefix accepts leading zero", "inet", "198.51.100.1/024", "inet", "198.51.100.1/24"},
+			{"IPv4 prefix accepts leading plus", "inet", "198.51.100.1/+24", "inet", "198.51.100.1/24"},
+			{"IPv4 prefix skips leading whitespace", "inet", "198.51.100.1/ 24", "inet", "198.51.100.1/24"},
+			{"empty IPv4 prefix defaults to zero", "inet", "198.51.100.1/", "inet", "198.51.100.1/0"},
+			{"IPv6 prefix suffix ignores trailing text", "inet", "2001:db8::1/64junk", "inet", "2001:db8::1/64"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
 		for _, pair := range pairs {
@@ -462,6 +468,9 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.2-198.51.100.1", "inet", "ipv4range:#c6336402c6336401"))
 		requireNoCollision17772(t, identityPair17772("inet", "{0}:any", "inet", "fqdn:any"))
 		requireNoCollision17772(t, identityPair17772("inet", "{}:a", "inet", "{ }:a"))
+		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.1/-24", "inet", "ipv4net:#c6336400ffffff00"))
+		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.1/33", "inet", "ipv4net:#c6336400ffffff00"))
+		requireNoCollision17772(t, identityPair17772("inet", "2001:db8::1/129", "inet", "ipv6net:#20010db80000000000000000000000ffffffffffffffffffffffffffffffff"))
 	})
 
 	t.Run("remote identity equal to default gateway local address is refused", func(t *testing.T) {

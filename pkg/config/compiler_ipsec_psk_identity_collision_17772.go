@@ -367,6 +367,9 @@ func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
 	if prefix, err := netip.ParsePrefix(selector); err == nil {
 		return ipsecSubnetIdentity(prefix), selector
 	}
+	if prefix, ok := ipsecStrongSwanUntypedSubnet(selector); ok {
+		return ipsecSubnetIdentity(prefix), selector
+	}
 	if identity, ok := ipsecAddressRangeIdentity(selector); ok {
 		return identity, selector
 	}
@@ -575,6 +578,66 @@ func ipsecSubnetIdentity(prefix netip.Prefix) ipsecIKEIdentity {
 	encoding = append(encoding, mask...)
 	return ipsecTypedIdentity(typeID, encoding)
 }
+func ipsecStrongSwanUntypedSubnet(value string) (netip.Prefix, bool) {
+	addressValue, prefixValue, ok := strings.Cut(value, "/")
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	address, err := netip.ParseAddr(addressValue)
+	if err != nil || address.Zone() != "" {
+		return netip.Prefix{}, false
+	}
+	bits := ipsecStrtolDecimalPrefix(prefixValue)
+	if bits < 0 || bits > address.BitLen() {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(address, bits), true
+}
+
+// ipsecStrtolDecimalPrefix mirrors strtol(..., 10) when its end pointer is
+// ignored: it accepts a signed decimal prefix, ignores trailing bytes, and
+// returns zero when no digits are consumed. Values beyond an address width
+// saturate just above 128 so the caller rejects them without integer overflow.
+func ipsecStrtolDecimalPrefix(value string) int {
+	index := 0
+	for index < len(value) {
+		switch value[index] {
+		case ' ', '\t', '\n', '\v', '\f', '\r':
+			index++
+		default:
+			goto whitespaceDone
+		}
+	}
+
+whitespaceDone:
+	sign := 1
+	if index < len(value) {
+		switch value[index] {
+		case '+':
+			index++
+		case '-':
+			sign = -1
+			index++
+		}
+	}
+
+	bits, digits := 0, false
+	for index < len(value) && value[index] >= '0' && value[index] <= '9' {
+		digits = true
+		if bits <= 128 {
+			bits = bits*10 + int(value[index]-'0')
+			if bits > 128 {
+				bits = 129
+			}
+		}
+		index++
+	}
+	if !digits {
+		return 0
+	}
+	return sign * bits
+}
+
 func ipsecAddressRangeIdentity(value string) (ipsecIKEIdentity, bool) {
 	first, second, ok := strings.Cut(value, "-")
 	if !ok {
