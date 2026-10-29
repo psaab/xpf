@@ -231,8 +231,18 @@ func TestCommittedBootClearsWANPoisonedLifelineAndFencesWAN17730(t *testing.T) {
 	var hostSpecs []xnft.FenceSpec
 	fake.coldBootFence = func(s xnft.FenceSpec) error { hostSpecs = append(hostSpecs, s); return nil }
 	fake.lo0ColdBootFence = func(xnft.FenceSpec) error { return nil }
+	// Re-poison immediately before fence installation so this caller's
+	// protected-set resolution must reject the record itself.
+	if err := writeLifelineRecordAt(recordPath, lifelineRecord{
+		PCIAddr: "0000:67:00.2", MAC: "02:00:00:00:00:02",
+	}); err != nil {
+		t.Fatalf("re-seed WAN-poisoned record for fence path: %v", err)
+	}
 
 	d.installFailClosedBootHostFences(true)
+	if _, ok := readLifelineRecordAt(recordPath); ok {
+		t.Fatal("fail-closed fence resolver retained the WAN-poisoned record")
+	}
 
 	if len(hostSpecs) != 1 {
 		t.Fatalf("fail-closed fence must install exactly one host fence, got %d", len(hostSpecs))
