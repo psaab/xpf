@@ -577,3 +577,59 @@ func TestCommitHistoryLabelsDuplicateTrees17748(t *testing.T) {
 	}
 	assertLabels17748(t, s)
 }
+
+// RED-on-revert: if the auto_rollback suppression is removed, the reverted
+// confirmed row's duplicate A hash steals slot 2 from the surviving set-one
+// row. Expected labels are confirmed=-1, set-one=2, set-two=0.
+func TestCommitHistoryAutoRollbackSuppressesDuplicateHash17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	commitHost16721(t, s, "two", "set-two")
+	if err := s.SetFromInput("system host-name one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConfirmed(5); err != nil {
+		t.Fatal(err)
+	}
+	s.performAutoRollback(s.ConfirmGenForTesting())
+	if got := s.ActiveConfig().System.HostName; got != "two" {
+		t.Fatalf("premise: timeout must restore set-two, got %q", got)
+	}
+	if got := len(s.ListHistory()); got != 3 {
+		t.Fatalf("premise: ladder depth = %d, want 3", got)
+	}
+
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-one"); got != 2 {
+		t.Errorf("#17748: surviving set-one row = %d, want slot 2", got)
+	}
+	if got := slotOf16721(rows, "set-two"); got != 0 {
+		t.Errorf("#17748: live set-two row = %d, want slot 0", got)
+	}
+	foundConfirmed := false
+	for _, row := range rows {
+		if row.Entry.Action == "commit_confirmed" {
+			foundConfirmed = true
+			if row.RollbackSlot != -1 {
+				t.Errorf("reverted commit_confirmed row got slot %d, want -1", row.RollbackSlot)
+			}
+		}
+	}
+	if !foundConfirmed {
+		t.Fatal("missing reverted commit_confirmed row")
+	}
+	assertLabels17748(t, s)
+
+	if err := s.Rollback(1); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name two") {
+		t.Errorf("rollback 1 staged %q, want host two", staged)
+	}
+}
