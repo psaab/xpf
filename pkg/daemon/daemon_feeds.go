@@ -121,6 +121,20 @@ func (d *Daemon) markFeedShrinkHistoryWipeSucceeded() {
 // function while leaving the wiring free to regress back to a pre-captured
 // config (#6716).
 func (d *Daemon) onFeedUpdate() error {
+	// #17741: a feed fetch started by the rollback-target pre-flight is a
+	// staged input for C1, not a reason to re-apply the still-active C2. The
+	// callback runs after the snapshot is installed; let the next confirm timer
+	// consume it and apply C1 instead. Returning an error preserves the feed
+	// manager's publication debt until that rollback apply succeeds.
+	if gen := d.confirmTargetFeedInstallPending.Load(); gen != 0 {
+		if d.store != nil {
+			if _, _, pending := d.store.PendingRollbackTarget(gen); pending {
+				return fmt.Errorf("feed publication deferred until rollback target is rechecked (#17741)")
+			}
+		}
+		d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
+	}
+
 	slog.Info("dynamic-address feed updated, recompiling dataplane")
 	if d.store == nil || d.store.ActiveConfig() == nil {
 		// No active config to apply the feed content against yet (pre-boot
