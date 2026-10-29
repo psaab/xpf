@@ -1129,26 +1129,32 @@ pub(super) fn flush_session_deltas(
             }
         }
         // #16627: mirror into the per-binding RPC-fallback buffer ONLY
-        // when the lossless stream enqueue did not succeed. The two legs
-        // are alternatives, never both authoritative for one delta
-        // (docs/session-sync-architecture.md: steady state is the stream,
-        // DrainSessionDeltas is its fallback poll "when the stream is
-        // down"). Mirroring a stream-carried delta leaves a duplicate in
-        // this FIFO; the Go connected drain would later pop it and
-        // re-stamp it with a FRESH generation, so a replayed open
-        // out-ranks the stream's earlier close and resurrects a closed
-        // session on the standby, and a replayed close transiently
-        // deletes a live same-tuple successor. A mere `is_connected`
-        // check is not enough: a connected-but-full channel fails the
-        // enqueue, and that delta must still be mirrored (with
-        // stream_seq 0) so the fallback leg carries it. CommandExport
-        // deltas never attempt the stream (#9630), so they always mirror.
-        // The failure also latches loss-of-sync above, so the #2442
-        // owner-RG resync re-exports table truth — deliver-or-resync.
+        // when the lossless stream enqueue did not succeed. Stream-carried
+        // deltas must not leave a duplicate here: the Go connected drain
+        // would later re-stamp it with a FRESH generation, letting a replayed
+        // open out-rank a streamed close or a replayed close delete a live
+        // same-tuple successor.
+        //
+        // CommandExport is the other non-fallback case (#17751). Its stream
+        // echo is intentionally suppressed (#9630), but the complete paged
+        // control response is already authoritative delivery. The provenance
+        // is stripped before the wire, so a seq-0 echo left in this FIFO would
+        // be treated as a fresh fallback delta after a later streamed close.
+        // For all other non-stream-carried deltas, including a connected but
+        // full stream queue, fallback mirroring remains required. Keep the
+        // push routing on `bulk_resync` so only incremental drops arm loss of
+        // sync (#8593). A failed lossless enqueue also latches loss-of-sync
+        // above, so the #2442 owner-RG resync re-exports table truth.
         if streamed_seq != 0 {
             info.stream_seq = streamed_seq;
         }
-        if !telemetry_only_seed && streamed_seq == 0 {
+        if !telemetry_only_seed
+            && streamed_seq == 0
+            && !matches!(
+                delta.provenance,
+                crate::session::ExportProvenance::CommandExport(_)
+            )
+        {
             if let Some(live) = live {
                 // #8593: route on the DELTA, not on a flag the call site chose.
                 // A bulk owner-RG export delta whose push is refused must not
