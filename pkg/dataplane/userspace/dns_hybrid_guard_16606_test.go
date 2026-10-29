@@ -71,3 +71,30 @@ func TestHybridGuardSeesDNSAnswerChange16606(t *testing.T) {
 		t.Fatal("named-book DNS divergence not seen by hybrid guard")
 	}
 }
+
+// #17723: the resolver-failed bit is runtime DNS state even when the
+// successful-empty and failed states have identical prefixes.
+// FAIL-ON-REVERT: dropping DNSLookupFailed from DNSAnswersSnapshot makes
+// these configs compare equal and allows routeOnlyPublishHybrid to accept
+// different enforced states. The identical-failure control must still pass.
+func TestHybridGuardSeesDNSLookupFailureChange17723(t *testing.T) {
+	successfulEmpty := dnsGuardConfig16606(nil)
+	servfail := dnsGuardConfig16606(nil)
+	servfail.Security.AddressBook.Addresses["svc"].DNSLookupFailed = true
+
+	if !routeOnlyPublishHybrid(successfulEmpty, servfail) {
+		t.Fatal("routeOnlyPublishHybrid(successful-empty, SERVFAIL) = false, want true")
+	}
+	if configsContentEqual(successfulEmpty, servfail) {
+		t.Fatal("configsContentEqual(successful-empty, SERVFAIL) = true, want false")
+	}
+
+	sameFailure := dnsGuardConfig16606(nil)
+	sameFailure.Security.AddressBook.Addresses["svc"].DNSLookupFailed = true
+	if routeOnlyPublishHybrid(sameFailure, servfail) {
+		t.Fatal("routeOnlyPublishHybrid(identical SERVFAIL state) = true, want false")
+	}
+	if !configsContentEqual(sameFailure, servfail) {
+		t.Fatal("configsContentEqual(identical SERVFAIL state) = false, want true")
+	}
+}
