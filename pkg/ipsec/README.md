@@ -1017,8 +1017,20 @@ all files stay in `package ipsec`, so the public API is unchanged.
   initiator lookup still hits: the pinned `remote.id` carries the peer
   as `other_id` (IKEv2 build and IKEv1 configured-identity/address
   fallbacks), re-measured in the charon netns lab for both directions
-  (`docs/log/16708.md`). No selector value is shared between two
-  secrets in a render. Pubkey connections and responder-only gateways
+  (`docs/log/16708.md`). For distinct effective PSK sets, no peer selector
+  is shared across separate secret blocks. #17772 rejects selectors reused
+  by distinct PSK connections with different keys, or a peer selector equal
+  to another gateway's effective local identity (configured `local-identity`,
+  otherwise its effective local IP address); tolerant rendering skips only
+  colliding connection groups. Identity comparison canonicalizes DN case-ignore
+  attributes and RDN/AVA ordering, unifies `user-at-hostname`/`email`/`rfc822`
+  with a case-insensitive domain, and compares key-id hex/literal spellings by
+  strongSwan-effective bytes; rendered identity values stay in authored spelling.
+  A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
+  selectors cannot cover a
+  hostname's resolved peer identity, so without that identity the correct
+  PSK cannot be selected for every dial target. Pubkey connections and
+  responder-only gateways
   render their connection shape unchanged (responder-only secrets were
   always peer-only). A dynamic responder-only peer
   (`remote_addrs = %any`) with no `remote-id` and no dynamic hostname
