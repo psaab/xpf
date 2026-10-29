@@ -22,9 +22,13 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // unescapeSanitizedLabel17753 is the test-local inverse of the sanitized
@@ -176,5 +180,60 @@ func TestMetricsScrapeSanitizeLiteralEscapeCollision17753(t *testing.T) {
 	}
 	if n := collector.gatherErrors.Load(); n != 0 {
 		t.Errorf("gatherErrors = %d, want 0: injective sanitization must not drop any series", n)
+	}
+}
+
+// TestSanitizeLabelValuesRepeatedEmit17753 pins the copy-on-write
+// contract: production collectors build a label slice once and spread it
+// into many emits. Sanitizing must never mutate that caller slice —
+// otherwise its own escaped backslash is re-escaped on later emits, so
+// the same entity appears under a different label value in each family.
+func TestSanitizeLabelValuesRepeatedEmit17753(t *testing.T) {
+	desc := prometheus.NewDesc("xpf_sanitize_repeat_17753", "repeat-emit regression", []string{"from", "to", "rule"}, nil)
+	extractRule := func(t *testing.T, m prometheus.Metric) string {
+		t.Helper()
+		var pb dto.Metric
+		if err := m.Write(&pb); err != nil {
+			t.Fatalf("write metric: %v", err)
+		}
+		for _, l := range pb.GetLabel() {
+			if l.GetName() == "rule" {
+				return l.GetValue()
+			}
+		}
+		t.Fatal("emitted metric has no rule label")
+		return ""
+	}
+	cases := []struct {
+		raw  string
+		want string
+	}{
+		{"run\xff", `run\xff`},
+		{"run\\xff\xff", `run\x5cxff\xff`},
+		{`run\xff`, `run\x5cxff`},
+		{"clean", "clean"},
+	}
+	for _, tc := range cases {
+		labels := []string{"trust", "untrust", tc.raw}
+		original := slices.Clone(labels)
+		collector := &xpfCollector{}
+		var spellings []string
+		for range 3 {
+			for _, c := range []*xpfCollector{collector, nil} {
+				m, err := newConstMetric(c, desc, prometheus.GaugeValue, 1, labels...)
+				if err != nil {
+					t.Fatalf("newConstMetric: %v", err)
+				}
+				spellings = append(spellings, extractRule(t, m))
+			}
+		}
+		for i, got := range spellings {
+			if got != tc.want {
+				t.Errorf("raw %q emit %d: spelling %q, want %q (re-escaped or under-escaped)", tc.raw, i, got, tc.want)
+			}
+		}
+		if !slices.Equal(labels, original) {
+			t.Errorf("caller slice mutated for raw %q: got %#q, want unchanged %#q", tc.raw, labels, original)
+		}
 	}
 }

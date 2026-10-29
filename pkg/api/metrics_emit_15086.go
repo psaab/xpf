@@ -90,15 +90,20 @@ func sanitizeMetricLabelValue(s string) (out string, ok bool) {
 	return b.String(), valid
 }
 
-// sanitizeMetricLabelValues sanitizes values in place when the collector
-// can count invalid UTF-8 values. It allocates only when a value contains
-// a backslash or invalid byte; clean values reuse the caller's slice.
-func (c *xpfCollector) sanitizeMetricLabelValues(values []string) {
+// sanitizeMetricLabelValues returns values unchanged when no rewrite is
+// needed. It clones the caller's slice on the first rewrite, so repeated
+// metric emits never mutate a reusable label slice. Invalid UTF-8 values
+// are counted when a collector is present.
+func (c *xpfCollector) sanitizeMetricLabelValues(values []string) []string {
 	invalid := 0
+	var sanitized []string
 	for i, v := range values {
 		s, ok := sanitizeMetricLabelValue(v)
 		if s != v {
-			values[i] = s
+			if sanitized == nil {
+				sanitized = append([]string(nil), values...)
+			}
+			sanitized[i] = s
 		}
 		if !ok {
 			invalid++
@@ -107,22 +112,17 @@ func (c *xpfCollector) sanitizeMetricLabelValues(values []string) {
 	if invalid > 0 && c != nil {
 		c.invalidLabelValues.Add(uint64(invalid))
 	}
+	if sanitized == nil {
+		return values
+	}
+	return sanitized
 }
 
 // newConstMetric builds one const metric with sanitized label values.
 // Nil-collector safe: standalone helpers (emitHistogram) call it without
 // a collector; sanitization still applies, only the counting is skipped.
 func newConstMetric(c *xpfCollector, desc *prometheus.Desc, valueType prometheus.ValueType, value float64, labelValues ...string) (prometheus.Metric, error) {
-	if c != nil {
-		c.sanitizeMetricLabelValues(labelValues)
-	} else {
-		for i, v := range labelValues {
-			s, _ := sanitizeMetricLabelValue(v)
-			if s != v {
-				labelValues[i] = s
-			}
-		}
-	}
+	labelValues = c.sanitizeMetricLabelValues(labelValues)
 	return prometheus.NewConstMetric(desc, valueType, value, labelValues...)
 }
 

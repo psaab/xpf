@@ -2478,7 +2478,7 @@ the drop fails loudly instead of going quietly vacuous.
     injective (#16707, #17753): the original U+FFFD fold mapped
     `web\xffallow` and `web\xfeallow` to the same series; escaping the
     backslash also distinguishes raw byte `0xff` from a valid literal
-    `\xFF` spelling. Each invalid-UTF-8 label value bumps
+    `\xff` spelling. Each invalid-UTF-8 label value bumps
     `xpf_metrics_invalid_label_values_total`; backslash-only rewrites do
     not. Any residual construction error (arity, invalid descriptor) skips
     the sample and bumps `xpf_counter_read_errors_total` under the
