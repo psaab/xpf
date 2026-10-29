@@ -47,7 +47,7 @@ func proxyNDPSnapshot16660() *ConfigSnapshot {
 }
 
 func TestBuildDesiredProxyNDPAddressSets16660(t *testing.T) {
-	got := buildDesiredProxyNDPAddressSets(proxyNDPSnapshot16660())
+	got := buildDesiredProxyNDPAddressSets(proxyNDPSnapshot16660(), nil)
 	ext := netip.MustParseAddr("2001:db8:0:1::10")
 	vr := netip.MustParseAddr("2001:db8:0:9::10")
 	want := map[userspaceLocalV6Key]struct{}{
@@ -68,11 +68,44 @@ func TestBuildDesiredProxyNDPAddressSets16660(t *testing.T) {
 		t.Fatalf("external keyed under foreign domain 100042: %+v", got)
 	}
 	// Nil / config-less snapshots yield an empty (prune-all) set, never a panic.
-	if s := buildDesiredProxyNDPAddressSets(nil); len(s) != 0 {
+	if s := buildDesiredProxyNDPAddressSets(nil, nil); len(s) != 0 {
 		t.Fatalf("nil snapshot desired = %v, want empty", s)
 	}
-	if s := buildDesiredProxyNDPAddressSets(&ConfigSnapshot{}); len(s) != 0 {
+	if s := buildDesiredProxyNDPAddressSets(&ConfigSnapshot{}, nil); len(s) != 0 {
 		t.Fatalf("config-less snapshot desired = %v, want empty", s)
+	}
+}
+
+func TestBuildDesiredProxyNDPAddressSetsResolvesInterfaceAliases17743(t *testing.T) {
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/1": {Name: "ge-0/0/1"},
+			"ge-0/0/2": {Name: "ge-0/0/2"},
+		}},
+	}
+	cfg.Security.NAT.ProxyARP = []*config.ProxyARPEntry{{
+		Interface: "ge-0-0-1",
+		Addresses: []string{"2001:db8:1774::1/128"},
+	}}
+	snapshot := &ConfigSnapshot{
+		Config: cfg,
+		Interfaces: []InterfaceSnapshot{
+			{Name: "ge-0/0/1", LinuxName: "ge-0-0-1", RoutingDomain: 17},
+			{Name: "ge-0/0/2", LinuxName: "ge-0-0-2", RoutingDomain: 18},
+		},
+	}
+
+	addr := netip.MustParseAddr("2001:db8:1774::1").As16()
+	got := buildDesiredProxyNDPAddressSets(snapshot, nil)
+	want := userspaceLocalV6Key{Domain: 17, Addr: addr}
+	if len(got) != 1 {
+		t.Fatalf("proxy-NDP desired set = %v, want only the resolved interface's target %+v", got, want)
+	}
+	if _, ok := got[want]; !ok {
+		t.Fatalf("proxy-NDP desired set missing cross-spelled target %+v; got %v", want, got)
+	}
+	if _, ok := got[userspaceLocalV6Key{Domain: 18, Addr: addr}]; ok {
+		t.Fatalf("proxy-NDP target was published for genuinely different interface ge-0/0/2: %v", got)
 	}
 }
 
@@ -94,7 +127,7 @@ func TestSyncProxyNDPAddressMaps16660(t *testing.T) {
 	if err := proxyMap.Update(stale, uint8(1), ebpf.UpdateAny); err != nil {
 		t.Fatalf("seed stale proxy entry: %v", err)
 	}
-	if err := m.syncProxyNDPAddressMapsWithSetsLocked(buildDesiredProxyNDPAddressSets(proxyNDPSnapshot16660())); err != nil {
+	if err := m.syncProxyNDPAddressMapsWithSetsLocked(buildDesiredProxyNDPAddressSets(proxyNDPSnapshot16660(), nil)); err != nil {
 		t.Fatalf("syncProxyNDPAddressMapsWithSetsLocked: %v", err)
 	}
 	ext := userspaceLocalV6Key{Domain: 0, Addr: netip.MustParseAddr("2001:db8:0:1::10").As16()}
@@ -188,5 +221,66 @@ func TestUserspaceXDPProxyNDP16660(t *testing.T) {
 				assertXDPBranchStatAbsent(t, coll, absent)
 			}
 		})
+	}
+}
+
+// TestBuildDesiredProxyNDPAddressSetsSuppressesNotOwnedRG17742 exercises the
+// same per-RG primary source wired by the daemon. A proxy-NDP target on a
+// peer-owned RETH must never reach the shim's domain/address set.
+func TestBuildDesiredProxyNDPAddressSetsSuppressesNotOwnedRG17742(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Chassis.Cluster = &config.ClusterConfig{
+		RedundancyGroups: []*config.RedundancyGroup{{ID: 1}, {ID: 2}},
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"reth1": {Name: "reth1", RedundancyGroup: 1},
+		"reth2": {Name: "reth2", RedundancyGroup: 2},
+	}
+	cfg.Security.NAT.ProxyARP = []*config.ProxyARPEntry{
+		{Interface: "reth1", Addresses: []string{"2001:db8:1::10/128"}},
+		{Interface: "reth2", Addresses: []string{"2001:db8:2::10/128"}},
+	}
+	snapshot := &ConfigSnapshot{
+		Config: cfg,
+		Interfaces: []InterfaceSnapshot{
+			// These deliberately disagree with the config's resolved RGs:
+			// target ownership must come from the config reference resolver,
+			// not an authored or stale snapshot label.
+			{Name: "reth1", RoutingDomain: 101, RedundancyGroup: 2},
+			{Name: "reth2", RoutingDomain: 202, RedundancyGroup: 1},
+		},
+	}
+	var queriedRGs []int
+	primary := RGPrimaryProvider(func(rgID int) (bool, bool) {
+		queriedRGs = append(queriedRGs, rgID)
+		return rgID == 1, true
+	})
+	got := buildDesiredProxyNDPAddressSets(snapshot, primary)
+	owned := userspaceLocalV6Key{
+		Domain: 101,
+		Addr:   netip.MustParseAddr("2001:db8:1::10").As16(),
+	}
+	peerOwned := userspaceLocalV6Key{
+		Domain: 202,
+		Addr:   netip.MustParseAddr("2001:db8:2::10").As16(),
+	}
+	if _, ok := got[owned]; !ok {
+		t.Fatalf("locally-owned RG target missing from desired set: %+v (got %v)", owned, got)
+	}
+	if _, ok := got[peerOwned]; ok {
+		t.Fatalf("peer-owned RG target published to desired set: %+v", peerOwned)
+	}
+
+	if len(queriedRGs) != 2 || queriedRGs[0] != 1 || queriedRGs[1] != 2 {
+		t.Fatalf("primary provider queried for RGs %v, want config-resolved [1 2]", queriedRGs)
+	}
+	unknown := buildDesiredProxyNDPAddressSets(snapshot, func(int) (bool, bool) {
+		return false, false
+	})
+	if _, ok := unknown[owned]; !ok {
+		t.Fatalf("unknown-owner RG target missing from desired set: %+v (got %v)", owned, unknown)
+	}
+	if _, ok := unknown[peerOwned]; !ok {
+		t.Fatalf("unknown-owner RG target suppressed from desired set: %+v", peerOwned)
 	}
 }

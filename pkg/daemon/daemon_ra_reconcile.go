@@ -48,6 +48,13 @@ import (
 func (d *Daemon) reconcileClusterRAServices(reason string) {
 	d.raReconcileMu.Lock()
 	defer d.raReconcileMu.Unlock()
+	// #17693: a retained refused rollback target is not authorized to publish
+	// RA while the daemon is in bootstrap. Entry sets this gate before taking
+	// the same mutex to withdraw, so an in-flight reconcile finishes before
+	// the final withdrawal and no later periodic pass can recreate its senders.
+	if d.inBootstrap() {
+		return
+	}
 
 	if d.store == nil {
 		return

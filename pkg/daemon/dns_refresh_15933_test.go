@@ -478,7 +478,7 @@ func TestDNSRefreshInterleavedSameGenApplyFlapBack15962(t *testing.T) {
 	base := d.dnsBaselineFor(cfg)
 	foundP := false
 	for _, vs := range base {
-		for _, v := range vs {
+		for _, v := range vs.Prefixes {
 			if v == "10.8.8.8/32" {
 				foundP = true
 			}

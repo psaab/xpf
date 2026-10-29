@@ -590,9 +590,10 @@ compile time (`media_mtu_16594.go`): the compiled `InterfaceConfig.MTU`
 Junos peer with the same configured value. An unset `mtu` still
 materialises the 1500 L3 default; a media value at or below the header
 size clamps to L3 1 rather than collapsing to "unset". Tunnel,
-loopback, `fab*`, `reth*`, `ae*` and `irb*` devices have no Ethernet
-media on the named device and pass through untranslated; their
-physical parents translate on their own stanzas. Family `mtu` is
+loopback, `fab*`, `reth*` and `irb*` devices have no Ethernet media on
+the named device and pass through untranslated; their physical parents
+translate on their own stanzas. Aggregated Ethernet has a media MTU and
+uses the same overhead translation as other Ethernet. Family `mtu` is
 already L3 and is never translated. Operators migrating a Junos
 config should keep the Junos number: copying `mtu 1514` now means
 the same thing on both boxes (before #16594 xpf applied it verbatim

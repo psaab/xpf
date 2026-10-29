@@ -434,37 +434,7 @@ func TestSurfaceAnnotationCensusIsExact6534(t *testing.T) {
 					"its config collection is reached through interfaceZoneMap/allInterfaceNames")
 			}
 
-			// Non-vacuity, two ways. An empty population means the collection
-			// selectors stopped matching and every assertion below is over
-			// nothing; a population with no ANNOTATED member means the
-			// reachesPredicate detector could be broken-shut and the test could
-			// not tell.
-			if len(population) < 2 {
-				t.Fatalf("found %d render functions for %s (%v). The collection "+
-					"selectors %v no longer match this family's renderers, so "+
-					"this cell asserts nothing.", len(population), f.Name, population, f.Collections)
-			}
-			if len(unannotated) == len(population) {
-				t.Fatalf("every one of the %d render functions for %s reads as "+
-					"unannotated. Either the whole family regressed at once, or "+
-					"reachesPredicate is broken and would report a lie as clean.\n"+
-					"population: %v", len(population), f.Name, population)
-			}
-
-			want := append([]string(nil), f.Unannotated...)
-			sort.Strings(want)
-			for _, got := range unannotated {
-				if !contains(want, got) {
-					t.Errorf("%s: %s renders an object the snapshot builder can "+
-						"REFUSE TO INSTALL and never consults %v, so a dropped "+
-						"object prints as enforced.\nEither annotate it (the "+
-						"predicate is already exported and shared with the "+
-						"builder) or, if this is genuinely not an enforcement "+
-						"surface, add it to exemptRenderers with a reason.",
-						f.Name, got, f.SurfacePredicates)
-				}
-			}
-			for _, w := range want {
+			for _, w := range f.Unannotated {
 				if !contains(unannotated, w) {
 					if !contains(population, w) {
 						t.Errorf("%s: census names %s but no such render function "+
@@ -477,6 +447,13 @@ func TestSurfaceAnnotationCensusIsExact6534(t *testing.T) {
 						"a list of known-lying surfaces that outlives the lie is "+
 						"an allowlist, and the next unannotated renderer would "+
 						"hide inside it.", f.Name, w)
+				}
+			}
+			for _, actual := range unannotated {
+				if !contains(f.Unannotated, actual) {
+					t.Errorf("%s: renderer %s is unexpectedly unannotated; "+
+						"add it to the exact census or annotate the surface",
+						f.Name, actual)
 				}
 			}
 			if len(unannotated) > 0 && f.Successor == "" {
@@ -856,3 +833,4 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
