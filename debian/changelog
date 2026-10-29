@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: compare duplicate source-NAT contexts after applied groups so
+    inherited scopes, not raw inline fragments, decide effective from/to
+    equality (#17712).
+
   * Routing: authorize rib-group peer returns from the route owner's
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
