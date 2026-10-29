@@ -28,9 +28,9 @@ func bindIfaceLimitCmds(tunnels int) []string {
 	for i := range tunnels {
 		cmds = append(cmds,
 			fmt.Sprintf("set security ipsec vpn V%02d bind-interface st%d.0", i, i),
-			fmt.Sprintf("set security ipsec vpn V%02d gateway 203.0.113.1", i),
-			// Per-VPN PSK so the unrelated #14139 missing-secret gate
-			// stays silent and the strict control measures only #16699.
+			fmt.Sprintf("set security ipsec vpn V%02d gateway 203.0.113.%d", i, i+1),
+			// Per-VPN PSK and peer IP keep the unrelated #14139 / #17772
+			// identity gates silent; the control measures only #16699.
 			fmt.Sprintf("set security ipsec vpn V%02d pre-shared-key ascii-text fixture-secret-%02d", i, i))
 	}
 	return cmds
@@ -95,14 +95,15 @@ func TestSecureTunnelCaptureLimitLenientWarns16699(t *testing.T) {
 // stanzas: 33 VPNs sharing 32 distinct bind-interfaces stay within the
 // capture bound (the shared-bind shape is governed by #11380, not this
 // gate), so no #16699 rejection fires. The strict compile may still
-// reject for other reasons (e.g. shared-bind selector overlap); this
+// reject for other reasons; this
 // test only asserts the #16699 limit is not the rejection reason.
 func TestSecureTunnelCaptureLimitCountsDistinctTunnels16699(t *testing.T) {
 	cmds := bindIfaceLimitCmds(32)
-	// 33rd VPN shares V00's tunnel st0.0: still 32 distinct if_ids.
+	// 33rd VPN shares V00's tunnel st0.0 but has its own peer IP and
+	// PSK identity: still 32 distinct if_ids, without a #17772 collision.
 	cmds = append(cmds,
 		"set security ipsec vpn V32 bind-interface st0.0",
-		"set security ipsec vpn V32 gateway 203.0.113.1",
+		"set security ipsec vpn V32 gateway 203.0.113.33",
 		"set security ipsec vpn V32 pre-shared-key ascii-text fixture-secret-32")
 	tree := buildBindIfaceTree(t, cmds...)
 	_, err := CompileConfig(tree)

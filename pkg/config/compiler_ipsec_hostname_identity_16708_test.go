@@ -11,7 +11,8 @@ import (
 // identity the peer presents (#16680). Pre-#16708 the secret carried only
 // the box-shared local owner, which every peer matches. Commit refuses
 // the shape (the tolerant path warns and the render belt skips it);
-// a remote-identity, an IP literal, or a mixed hostname+IP list commits.
+// a remote-identity or an IP literal commits; a mixed hostname+IP list
+// additionally needs an explicit remote-identity (#17772).
 func TestIPsecHostnameIdentity16708(t *testing.T) {
 	build := func(t *testing.T, commands []string) *ConfigTree {
 		t.Helper()
@@ -86,9 +87,10 @@ func TestIPsecHostnameIdentity16708(t *testing.T) {
 			"set security ike gateway mix-gw ike-policy ike-pol",
 			"set security ike gateway mix-gw address peer.example.test",
 			"set security ike gateway mix-gw address 203.0.113.1",
+			"set security ike gateway mix-gw remote-identity hostname peer.example.test",
 		}, "mix-gw")
 		if _, err := CompileConfig(build(t, cmds)); err != nil {
-			t.Fatalf("mixed hostname+IP gateway must commit (IP scopes the secret): %v", err)
+			t.Fatalf("mixed hostname+IP gateway with a remote-identity must commit: %v", err)
 		}
 	})
 
