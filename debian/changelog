@@ -1,8 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * Config compiler: retain every deterministic, name-sorted single-rate
-    policer-limit diagnostic on tolerant loads. A policer's missing-limit or
-    1518-byte burst-floor error no longer hides later policer warnings (#17761).
+  * Config compiler: retain every independent single-rate policer-limit
+    diagnostic in deterministic name order, including coexisting missing-limit
+    and burst-floor defects on one policer (#17761).
 
   * Config: raise the shared two-/three-color policer burst floor to 1518
     bytes so a bucket admits a maximum-size VLAN frame at the default MTU

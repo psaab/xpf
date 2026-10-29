@@ -223,3 +223,29 @@ func TestPolicerLimitsLenientClassifiesAllDefectClasses17761(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicerLimitsLenientReportsSamePolicerFloorAndMissingBandwidth17761(t *testing.T) {
+	cfg, err := CompileConfigLenient(buildTree(t, []string{
+		"set firewall policer a if-exceeding burst-size-limit 1500",
+		"set firewall policer a then discard",
+	}))
+	if err != nil {
+		t.Fatalf("lenient compile must warn instead of bricking: %v", err)
+	}
+	if len(cfg.Warnings) != 2 {
+		t.Fatalf("lenient compile should report both independent defects, warnings: %v", cfg.Warnings)
+	}
+	foundMissingBandwidth, foundFloor := false, false
+	for _, warning := range cfg.Warnings {
+		if strings.Contains(warning, "missing limits") && strings.Contains(warning, `firewall policer "a"`) {
+			foundMissingBandwidth = true
+		}
+		if strings.Contains(warning, "burst floor") &&
+			strings.Contains(warning, `firewall policer "a"`) {
+			foundFloor = true
+		}
+	}
+	if !foundMissingBandwidth || !foundFloor {
+		t.Fatalf("lenient compile should report both missing-bandwidth and floor defects, warnings: %v", cfg.Warnings)
+	}
+}
