@@ -223,7 +223,10 @@ func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *sche
 	}
 
 	expanded := packedBodyChildren(node, nodeSchema)
-	if sameNodeSlice(expanded, node.Children) {
+	// Only the unchanged slice means packedBodyChildren did not expand valid
+	// container siblings; only fallback results may use raw children.
+	fallbackExpansion := sameNodeSlice(expanded, node.Children)
+	if fallbackExpansion {
 		// The normal packed expansion conservatively returns authored children
 		// unchanged when their shape cannot be merged. Scan the packed key run
 		// independently, preserving the compiler's boundary without losing a
@@ -269,7 +272,7 @@ func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *sche
 				IsLeaf:   false,
 			}
 			attachNestedRefusalBlock(expanded, descendSchema, []*Node{postfix})
-		} else if len(node.Children) > 0 {
+		} else if fallbackExpansion && len(node.Children) > 0 {
 			attachNestedRefusalBlock(expanded, descendSchema, node.Children)
 		}
 	}

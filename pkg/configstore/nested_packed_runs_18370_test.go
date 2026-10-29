@@ -229,9 +229,9 @@ firewall { family inet { filter f { term t {
 	}
 }
 
-func TestSyncApplyNoBlockExceptNameGroupDoesNotBecomeNestedRefusal18370(t *testing.T) {
+func TestSyncApplyAcceptsNoBlockExceptNameGroup18370(t *testing.T) {
 	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
-	_, err := s.SyncApply(`policy-options {
+	cfg, err := s.SyncApply(`policy-options {
     prefix-list pl1 { 10.0.0.0/8; }
     prefix-list pl2 { 10.1.0.0/16; }
 }
@@ -239,7 +239,24 @@ firewall { family inet { filter f { term t {
     from source-prefix-list [ pl1 ] except pl2;
     then accept;
 } } } }`, nil)
-	if config.IsNestedListContentSchemaError(err) {
-		t.Fatalf("SyncApply misclassified no-block except name group as nested content: %v", err)
+	if err != nil || cfg == nil {
+		t.Fatalf("SyncApply rejected valid no-block except name group: cfg=%v err=%v", cfg, err)
+	}
+}
+
+func TestSyncApplyAcceptsPackedNATMatchWithBracedThenSibling18370(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	cfg, err := s.SyncApply(`security {
+    zones { security-zone trust; security-zone untrust; }
+    nat { source { rule-set rs {
+        from zone trust;
+        to zone untrust;
+        rule r match source-address [ 10.0.0.0/8 ] {
+            then { source-nat interface; }
+        }
+    } } }
+}`, nil)
+	if err != nil || cfg == nil {
+		t.Fatalf("SyncApply rejected valid packed NAT match with braced then sibling: cfg=%v err=%v", cfg, err)
 	}
 }

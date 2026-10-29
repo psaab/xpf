@@ -193,6 +193,19 @@ firewall { family inet { filter f { term t from source-prefix-list [ pl1 pl2 ] t
 }`,
 		},
 		{
+			name: "NAT packed match with braced then sibling",
+			text: `security {
+    zones { security-zone trust; security-zone untrust; }
+    nat { source { rule-set rs {
+        from zone trust;
+        to zone untrust;
+        rule r match source-address [ 10.0.0.0/8 ] {
+            then { source-nat interface; }
+        }
+    } } }
+}`,
+		},
+		{
 			name: "firewall bracketed prefix-list with except modifier",
 			text: `policy-options {
     prefix-list pl1 { 10.0.0.0/8; }
@@ -242,8 +255,8 @@ firewall { family inet { filter f { term t {
 	if strictErr == nil || IsNestedListContentSchemaError(strictErr) {
 		t.Fatalf("strict compile changed no-block except boundary: %v", strictErr)
 	}
-	_, lenientErr := CompileConfigLenient(tree)
-	if IsNestedListContentSchemaError(lenientErr) {
-		t.Fatalf("lenient compile misclassified no-block except name group: %v", lenientErr)
+	lenient, lenientErr := CompileConfigLenient(tree)
+	if lenientErr != nil || lenient == nil {
+		t.Fatalf("lenient compile rejected no-block except name group: cfg=%v err=%v", lenient, lenientErr)
 	}
 }
