@@ -532,9 +532,11 @@ PY
 	return 2
 }
 
-# Both node queries must independently report the exact requested RG owner.
-# Well-formed but unsettled/wrong ownership is measured FAIL; blind status or
-# provenance is VOID.
+# Both node queries must independently report the expected owner as primary
+# and its peer as non-owning (`secondary` or `secondary-hold`). A
+# non-committal manual failover can legitimately leave the peer in
+# `secondary-hold`. Well-formed but unsettled/wrong ownership is measured FAIL;
+# blind status or provenance is VOID.
 ha_rg_owner_verdict() {
 	if [[ $# -ne 5 ]]; then
 		printf 'RG owner: expected <node0|node1> <rg> <phase> <node0-status> <node1-status>\n' >&2
@@ -591,7 +593,11 @@ def read_rg_owner(path):
 
 statuses = [read_rg_owner(path) for path in paths]
 peer = "node1" if expected_node == "node0" else "node0"
-if all(status[expected_node] == "primary" and status[peer] == "secondary" for status in statuses):
+if all(
+    status[expected_node] == "primary"
+    and status[peer] in {"secondary", "secondary-hold"}
+    for status in statuses
+):
     raise SystemExit(0)
 details = "; ".join(
     f"query{index}: node0={status['node0']} node1={status['node1']}"

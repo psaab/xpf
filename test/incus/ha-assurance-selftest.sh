@@ -1069,6 +1069,19 @@ write_ha_owner_snapshot "$OWNER1" owner-poll-01 node1 1 primary secondary
 assert_helper_status 0 ha_snapshot_identity_verdict "$OWNER0" manual-rg1-failback owner-poll-01 node0 1
 assert_helper_status 2 ha_snapshot_identity_verdict "$OWNER0" manual-rg1-failback phase-pre node0 1
 assert_helper_status 0 ha_rg_owner_verdict node0 1 owner-poll-01 "$OWNER0" "$OWNER1"
+# An untargeted manual failover parks the old owner in secondary-hold
+# (Manual yes) until reset; that is the correct non-committal end-state,
+# not an unsettled stall (#18503).
+write_ha_owner_snapshot "$OWNER1" owner-poll-01 node1 1 primary secondary-hold
+assert_helper_status 0 ha_rg_owner_verdict node0 1 owner-poll-01 "$OWNER0" "$OWNER1"
+write_ha_owner_snapshot "$OWNER1" owner-poll-01 node1 1 primary primary
+assert_helper_status 1 ha_rg_owner_verdict node0 1 owner-poll-01 "$OWNER0" "$OWNER1"
+write_ha_owner_snapshot "$OWNER0" owner-poll-01 node0 1 secondary secondary-hold
+write_ha_owner_snapshot "$OWNER1" owner-poll-01 node1 1 secondary secondary-hold
+assert_helper_status 1 ha_rg_owner_verdict node0 1 owner-poll-01 "$OWNER0" "$OWNER1"
+write_ha_owner_snapshot "$OWNER0" owner-poll-01 node0 1 primary secondary
+write_ha_owner_snapshot "$OWNER1" owner-poll-01 node1 1 primary secondary
+assert_helper_status 0 ha_rg_owner_verdict node0 1 owner-poll-01 "$OWNER0" "$OWNER1"
 write_ha_owner_snapshot "$OWNER1" owner-poll-01 node1 1 secondary primary
 assert_helper_status 1 ha_rg_owner_verdict node0 1 owner-poll-01 "$OWNER0" "$OWNER1"
 printf 'Redundancy group: 1 , Failover count: 1\nnode0 200 primary no no None\n' >>"$OWNER1"
