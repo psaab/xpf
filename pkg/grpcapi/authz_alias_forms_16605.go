@@ -22,14 +22,14 @@ import (
 // attacker-controlled authz input (see authz_command_table.go). Instead
 // the gate judges the RPC under EVERY canonical line that performs it:
 // the registry charge plus the typed-line aliases below. The aliases are
-// alternative spellings of the same executed command under
-// EvaluateForms unanimity (a deny on any spelling vetoes), EXCEPT that a
-// tier denial whose ONLY denying form is an alias/charge spelling while
-// another spelling carries an affirmative, strictly-longer allow is the
-// deny-with-exceptions geometry and does not veto (see
-// aliasOnlyDenyRescued16605) — that is what admits the over-deny row
-// (allowlist naming only the typed line, or only the charge) without
-// letting an allow on one spelling lift a deny on another.
+// alternative spellings of the same RPC under EvaluateForms unanimity
+// (a deny on any spelling vetoes), EXCEPT that a sibling-spelling tier
+// denial can be rescued only by an affirmative allow with a strictly
+// longer matched extent. If the request discriminates the typed line,
+// an affirmative allow on that exact executed spelling also rescues;
+// otherwise the fixed charge is not evidence of execution. Thus an
+// ambiguous RPC cannot let an allow on a shorter/equal sibling lift a
+// longer/equal deny, while allowlist naming only one alias still admits.
 //
 // Census (every `c.client.<RPC>(` site in cmd/cli paired with its
 // dispatching line; charged spelling first, aliases after):
@@ -186,18 +186,20 @@ func addCanonicalFormsOf16605(add func(string), cmd string) {
 	}
 }
 
-// executedSpellings16605 returns the spellings that name the executed
-// line itself for the rescue geometry: the typed line when the request
-// discriminates it, plus forms[0] (the reconstructed executed spelling
-// from rpcArgumentForms). Charge/alias spellings not in this set are
-// sibling spellings of the same RPC.
+// executedSpellings16605 returns the spellings that identify the executed
+// line for the rescue geometry. Only request-discriminated RPCs provide
+// that evidence: forms[0] then carries the reconstructed executed spelling
+// and rpcTypedCommand16605 adds its typed-line family. For nondiscriminating
+// requests forms[0] is just the fixed charge, not evidence of execution.
 func executedSpellings16605(method string, req any, forms []string) map[string]bool {
 	out := map[string]bool{}
+	typed := rpcTypedCommand16605(method, req)
+	if typed == "" {
+		return out
+	}
+	out[typed] = true
 	if len(forms) > 0 {
 		out[forms[0]] = true
-	}
-	if typed := rpcTypedCommand16605(method, req); typed != "" {
-		out[typed] = true
 	}
 	return out
 }

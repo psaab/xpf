@@ -204,17 +204,18 @@ func remoteDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string
 // beside allow `^show interfaces$` is an operator excepting the bare
 // line from the detail spelling, and the reverse pair excepts the
 // charge spelling. The rescue fires only when some form is
-// affirmatively allowed (DecidedBy==Allow, Allowed), no executed
-// spelling (forms[0] / the request-discriminated typed line) is
-// tier-denied — a deny naming what was actually executed always
-// vetoes — and every tier-denied form is a sibling spelling answered
-// by that affirmative allow. A denied form's own allow that lost its
-// tier comparison does not count: Evaluate(f) is that comparison and
-// it denied.
+// affirmatively allowed (DecidedBy==Allow), no executed spelling
+// (forms[0] / the request-discriminated typed line) is tier-denied — a
+// deny naming what was actually executed always vetoes — and every
+// tier-denied sibling spelling is answered by an affirmative allow
+// whose matched extent strictly exceeds that deny's extent, unless the
+// request identifies the allowed spelling as the line actually executed.
+// An ambiguous RPC cannot treat its fixed charge as executed evidence.
 func aliasFormsDenyRescued16605(rules config.CompiledLoginRegexes, method string, req any, forms []string) bool {
 	if _, ok := rpcAliasCommands16605[method]; !ok {
 		return false
 	}
+	typed := rpcTypedCommand16605(method, req)
 	executed := executedSpellings16605(method, req, forms)
 	anyAllowed := false
 	for _, f := range forms {
@@ -238,7 +239,9 @@ func aliasFormsDenyRescued16605(rules config.CompiledLoginRegexes, method string
 			if g == f {
 				continue
 			}
-			if gd := rules.Evaluate(g); gd.Allowed && gd.DecidedBy == config.LoginRegexAllow {
+			if gd := rules.Evaluate(g); gd.Allowed &&
+				gd.DecidedBy == config.LoginRegexAllow &&
+				((typed != "" && executed[g]) || rules.AllowOutranksDeny(g, f)) {
 				rescued = true
 				break
 			}

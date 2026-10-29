@@ -49,6 +49,52 @@ func TestTypedLineDenyFires16605(t *testing.T) {
 	}
 }
 
+// #17704: an allow on another alias rescues a sibling deny only when its
+// matched extent strictly outranks that deny, preserving the precedence
+// tiers used for one spelling.
+func TestAliasRescueRequiresOutrankingAllow17704(t *testing.T) {
+	cases := []struct {
+		name  string
+		deny  string
+		allow string
+		want  bool
+	}{
+		{
+			name:  "longer alias deny is not rescued by shorter charge allow",
+			deny:  `^show security nat source summary$`,
+			allow: `^show security nat source pool$`,
+			want:  false,
+		},
+		{
+			name:  "longer alias allow rescues shorter charge deny",
+			deny:  `^show security nat source pool$`,
+			allow: `^show security nat source summary$`,
+			want:  true,
+		},
+		{
+			name:  "equal extent alias allow does not rescue",
+			deny:  `^show security nat source sum`,
+			allow: `^show security nat source poo`,
+			want:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.System.Login = &config.LoginConfig{Classes: []*config.LoginClass{{
+				Name: "ops", DenyCommands: tc.deny, AllowCommands: tc.allow,
+				DenyLeavesPresent:  []string{"deny-commands"},
+				AllowLeavesPresent: []string{"allow-commands"},
+			}}}
+			err := gateDecide7172(t, cfg, "GetNATPoolStats", &pb.GetNATPoolStatsRequest{})
+			if (err == nil) != tc.want {
+				t.Errorf("deny %q with allow %q: err=%v, want allow=%v",
+					tc.deny, tc.allow, err, tc.want)
+			}
+		})
+	}
+}
+
 // Controls: unrelated deny must not fire; charge-spelling deny still fires.
 func TestTypedLineDenyControls16605(t *testing.T) {
 	cfg := gateCfg7172(t, `show security ike`, true)
