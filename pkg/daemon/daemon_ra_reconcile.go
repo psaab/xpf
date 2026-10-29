@@ -137,6 +137,10 @@ func (d *Daemon) syncStandaloneRAHash(desired []*config.RAInterfaceConfig) {
 // The standalone hash is kept separate so a standalone apply never poisons
 // the cluster digest (and vice versa) across a mode transition.
 // lastStandaloneRAHash is guarded by raReconcileMu, like lastRAReconcileHash.
+// The bool is scoped to this standalone renewal retry owner: true means it
+// owes no further work, including a cluster-mode no-op. It is not a live-sender
+// health report; a digest match can coexist with an asynchronous sender failure,
+// which raDeadSenderReassertLoop owns (#6793).
 func (d *Daemon) reconcileStandaloneRAServices(reason string) bool {
 	d.raReconcileMu.Lock()
 	defer d.raReconcileMu.Unlock()
@@ -310,7 +314,7 @@ func (d *Daemon) reassertDeadRASendersOnce(ctx context.Context) {
 // standaloneRARenewRetryInterval is the cadence for retrying an unconverged
 // standalone PD-renew reconcile. The loop arms this ticker only while a retry
 // is owed and stops it as soon as a later reconcile converges.
-var standaloneRARenewRetryInterval = 30 * time.Second
+const standaloneRARenewRetryInterval = 30 * time.Second
 
 // standaloneRARenewLoop is the #16773 owner for the standalone PD-renewal
 // RA refresh. It wakes promptly on nudgeStandaloneRARenew (fired by every
@@ -320,6 +324,12 @@ var standaloneRARenewRetryInterval = 30 * time.Second
 // retry is armed until the desired set converges. Joined by Run's WaitGroup on
 // shutdown.
 func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
+	d.standaloneRARenewLoopWithRetryInterval(ctx, standaloneRARenewRetryInterval)
+}
+
+// standaloneRARenewLoopWithRetryInterval is the retry loop with an injected
+// cadence so its retry owner can be tested without waiting 30 seconds.
+func (d *Daemon) standaloneRARenewLoopWithRetryInterval(ctx context.Context, retryInterval time.Duration) {
 	var retryTicker *time.Ticker
 	var retryC <-chan time.Time
 	for {
@@ -334,7 +344,7 @@ func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
 		}
 		if !d.reconcileStandaloneRAOnce(ctx) {
 			if retryTicker == nil {
-				retryTicker = time.NewTicker(standaloneRARenewRetryInterval)
+				retryTicker = time.NewTicker(retryInterval)
 				retryC = retryTicker.C
 			}
 		} else if retryTicker != nil {
@@ -353,8 +363,9 @@ func (d *Daemon) standaloneRARenewLoop(ctx context.Context) {
 // landing while this pass waits already applied the fresh RA state via
 // applyServicesReconcile and synced lastStandaloneRAHash, so the pass then
 // finds a matching digest and does nothing (no gratuitous restart).
-// It reports whether the desired standalone set is converged; the loop
-// retries periodically while a reconcile remains unable to converge.
+// The return value is scoped to this retry owner: a cluster-mode no-op or
+// matching digest is settled here, not an assertion that an asynchronous
+// sender remains alive (#6793's dead-sender loop owns that independent retry).
 func (d *Daemon) reconcileStandaloneRAOnce(ctx context.Context) bool {
 	if d.applySem == nil {
 		return false

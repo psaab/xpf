@@ -1907,11 +1907,14 @@ against `lastStandaloneRAHash` (kept in sync by `applyServicesReconcile` on
 every successful standalone apply). Only a renewal that actually moves the
 expiry re-applies; cluster mode is a no-op there and remains owned solely
 by `reconcileClusterRAServices`. `reconcileStandaloneRAServices` reports
-convergence to the loop: failed applies or unavailable prerequisites arm a
-30-second periodic retry, stopped after successful convergence. Healthy
-renewals remain event-driven and digest-gated. Pinned by
-`ra_pd_renew_standalone_16773_test.go`, including fail-first recovery without
-a second DHCP nudge and a control that no retry remains armed after success.
+whether this standalone retry owner still owes work: cluster-mode no-op and
+matching-digest results stop its retry, but do not assert that an asynchronous
+sender is healthy (`raDeadSenderReassertLoop` owns that recovery). Failed
+applies or unavailable prerequisites arm a 30-second periodic retry, stopped
+after successful convergence. Healthy renewals remain event-driven and
+digest-gated. Pinned by `ra_pd_renew_standalone_16773_test.go`, including
+fail-first and unavailable-store recovery without a second DHCP nudge, plus
+a no-retry-after-success control.
 
 ### Direct-mode VIP failover (private-rg-election / no-reth-vrrp)
 
