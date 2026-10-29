@@ -129,8 +129,8 @@ func TestNoKillInsideTheRGActivationGrace9651(t *testing.T) {
 	}
 }
 
-// TestStatusLoopWiresTheLivenessCount9651 binds the wiring: statusLoop's
-// answered branch resets the count, and its failed branch feeds it and kills.
+// TestStatusLoopWiresTheLivenessCount9651 binds the wiring: a status result
+// updates poll health before the stale-sequence publication fence.
 func TestStatusLoopWiresTheLivenessCount9651(t *testing.T) {
 	f, err := parser.ParseFile(token.NewFileSet(), "process_status.go", nil, 0)
 	if err != nil {
@@ -145,46 +145,53 @@ func TestStatusLoopWiresTheLivenessCount9651(t *testing.T) {
 	if loop == nil {
 		t.Fatal("statusLoop not found")
 	}
-	var ifStmt *ast.IfStmt
+
+	var healthStmt, sequenceFence *ast.IfStmt
 	ast.Inspect(loop, func(n ast.Node) bool {
 		s, ok := n.(*ast.IfStmt)
-		if !ok || s.Init == nil || s.Else == nil {
+		if !ok {
 			return true
 		}
-		found := false
-		ast.Inspect(s.Init, func(x ast.Node) bool {
-			if id, ok := x.(*ast.Ident); ok && id.Name == "pollErr" {
-				found = true
+		if expr, ok := s.Cond.(*ast.BinaryExpr); ok {
+			if left, ok := expr.X.(*ast.Ident); ok && left.Name == "pollErr" {
+				if expr.Op == token.EQL && lenExprCalls(s.Body, "noteStatusPollResultLocked") != 0 {
+					healthStmt = s
+				}
 			}
-			return true
-		})
-		if found {
-			ifStmt = s
-			return false
+			if left, ok := expr.X.(*ast.SelectorExpr); ok &&
+				left.Sel.Name == "lastStatusSeq" && expr.Op == token.NEQ {
+				if right, ok := expr.Y.(*ast.Ident); ok && right.Name == "pollStatusSeq" {
+					sequenceFence = s
+				}
+			}
 		}
 		return true
 	})
-	if ifStmt == nil {
-		t.Fatal("the status request branch in statusLoop was not found")
+	if healthStmt == nil || sequenceFence == nil {
+		t.Fatal("status poll-health branch or stale-sequence fence not found")
 	}
-	calls := func(n ast.Node, name string) bool {
-		hit := false
-		ast.Inspect(n, func(x ast.Node) bool {
-			if c, ok := x.(*ast.CallExpr); ok {
-				if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
-					hit = true
-				}
+	if healthStmt.Pos() >= sequenceFence.Pos() {
+		t.Error("status poll-health accounting must run before the #16653 sequence fence")
+	}
+	if got := lenExprCalls(healthStmt, "noteStatusPollResultLocked"); got != 3 {
+		t.Errorf("status poll-health branch has %d note calls, want success, decode-answer, and failure accounting", got)
+	}
+	if got := lenExprCalls(healthStmt, "killWedgedHelperLocked"); got != 1 {
+		t.Errorf("status poll-health branch has %d wedge kills, want 1 on a counted failure", got)
+	}
+}
+
+func lenExprCalls(n ast.Node, name string) int {
+	count := 0
+	ast.Inspect(n, func(x ast.Node) bool {
+		if c, ok := x.(*ast.CallExpr); ok {
+			if sel, ok := c.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
+				count++
 			}
-			return true
-		})
-		return hit
-	}
-	if !calls(ifStmt.Body, "noteStatusPollResultLocked") {
-		t.Error("an answered status poll no longer resets the #9651 wedge count")
-	}
-	if !calls(ifStmt.Else, "noteStatusPollResultLocked") || !calls(ifStmt.Else, "killWedgedHelperLocked") {
-		t.Error("a failed status poll no longer feeds the #9651 wedge count or kills a wedged helper")
-	}
+		}
+		return true
+	})
+	return count
 }
 
 // --- #18293: decode failures are answers, not silence ---

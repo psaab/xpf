@@ -203,3 +203,28 @@ func TestClearInterfacesWithoutGoodbye10779(t *testing.T) {
 	}
 	_ = m.Clear()
 }
+
+func TestWithdrawEmitsLiveInterfaceGoodbye17693(t *testing.T) {
+	if _, err := net.InterfaceByName("lo"); err != nil {
+		t.Skip("lo interface unavailable")
+	}
+	fl := newFakeListen(t)
+	m := New()
+	if err := m.Apply([]*config.RAInterfaceConfig{testCfg("lo")}); err != nil {
+		t.Fatalf("initial Apply: %v", err)
+	}
+	loConn := waitConn(t, fl.getConn, "lo")
+	waitWrites(t, loConn, 1)
+
+	if err := m.Withdraw(); err != nil {
+		t.Fatalf("Withdraw: %v", err)
+	}
+	if total, conns := fl.goodbyeStats("lo"); conns != 1 || total == 0 {
+		t.Fatalf("Withdraw emitted no live-interface goodbye (%d conns / %d writes)",
+			conns, total)
+	}
+	assertGoodbyeIsLast(t, loConn.snapshot())
+	if got := len(m.Status()); got != 0 {
+		t.Fatalf("senders after Withdraw = %d, want none", got)
+	}
+}
