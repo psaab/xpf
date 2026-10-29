@@ -1,8 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
   * Daemon: defer active-config feed re-applies while a rollback-target
-    producer restarts, preserving its snapshot for the next commit-confirmed
-    rollback timer and preventing an unbounded C2 reapply loop (#17741).
+    producer restarts. Recheck after acquiring applySem, preserve the target
+    snapshot for the next rollback timer, and prevent an unbounded C2 reapply
+    loop (#17741).
   * Bootstrap: suppress stale cluster RA reconciliation and serialize final
     withdrawal against in-flight passes. Bound DHCP relay stop joins and report
     timeout failures in the bootstrap DEGRADED result (#17693).

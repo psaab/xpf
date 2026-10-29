@@ -316,6 +316,12 @@ func (d *Daemon) applyActiveConfigResult() error {
 		return nil
 	}
 	defer d.applySem.Release(1)
+	// #17741: a callback can pass its fast-path check before rollback
+	// preflight marks the target install, then wait here for applySem. Recheck
+	// under the semaphore so that waiter cannot re-apply C2 afterward.
+	if err := d.deferActiveConfigApplyIfRollbackTargetPending(); err != nil {
+		return err
+	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
 		return nil

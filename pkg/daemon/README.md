@@ -364,10 +364,12 @@ always stays armed and the check runs twice:
     fire reconciles the feed producers FOR THE TARGET
     (`reconcileFeeds(target)`, the same step a normal target apply runs)
     and restarts the bounded deferral. While that target producer is being
-    installed, its callback is deferred instead of re-applying active C2;
-    the publication debt remains until rollback applies C1 (#17741). The
-    next fire rechecks the snapshot. If the restarted producer still cannot
-    fetch before its bounded retry cap, the normal safe state above applies.
+    installed, its callback is deferred instead of re-applying active C2. The
+    callback guard is checked again after acquiring `applySem`, so an apply
+    already waiting there cannot re-apply C2 after preflight marks the target.
+    Publication debt remains until rollback applies C1 (#17741). The next fire
+    rechecks the snapshot; if the restarted producer still cannot fetch before
+    its bounded retry cap, the normal safe state above applies.
   - Any other refusal, or a feed still unready at the cap, promotes the store to
     the target (persisted as committed, as #6538 does for a recovered target
     that no longer compiles). The daemon then re-syncs the promoted target to

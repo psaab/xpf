@@ -113,6 +113,22 @@ func (d *Daemon) markFeedShrinkHistoryWipeSucceeded() {
 	d.feedHistoryMu.Unlock()
 }
 
+// deferActiveConfigApplyIfRollbackTargetPending keeps a staged rollback-target
+// feed snapshot from being reconciled against the still-active config.
+func (d *Daemon) deferActiveConfigApplyIfRollbackTargetPending() error {
+	gen := d.confirmTargetFeedInstallPending.Load()
+	if gen == 0 {
+		return nil
+	}
+	if d.store != nil {
+		if _, _, pending := d.store.PendingRollbackTarget(gen); pending {
+			return fmt.Errorf("active config apply deferred until rollback target is rechecked (#17741)")
+		}
+	}
+	d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
+	return nil
+}
+
 // onFeedUpdate is the dynamic-address feed manager's publication callback.
 //
 // It is a named method rather than an inline closure so a test can drive the
@@ -121,18 +137,10 @@ func (d *Daemon) markFeedShrinkHistoryWipeSucceeded() {
 // function while leaving the wiring free to regress back to a pre-captured
 // config (#6716).
 func (d *Daemon) onFeedUpdate() error {
-	// #17741: a feed fetch started by the rollback-target pre-flight is a
-	// staged input for C1, not a reason to re-apply the still-active C2. The
-	// callback runs after the snapshot is installed; let the next confirm timer
-	// consume it and apply C1 instead. Returning an error preserves the feed
-	// manager's publication debt until that rollback apply succeeds.
-	if gen := d.confirmTargetFeedInstallPending.Load(); gen != 0 {
-		if d.store != nil {
-			if _, _, pending := d.store.PendingRollbackTarget(gen); pending {
-				return fmt.Errorf("feed publication deferred until rollback target is rechecked (#17741)")
-			}
-		}
-		d.confirmTargetFeedInstallPending.CompareAndSwap(gen, 0)
+	// Fast path before config/DNS work. applyActiveConfigResult repeats this
+	// check after acquiring applySem to catch callbacks already waiting there.
+	if err := d.deferActiveConfigApplyIfRollbackTargetPending(); err != nil {
+		return err
 	}
 
 	slog.Info("dynamic-address feed updated, recompiling dataplane")

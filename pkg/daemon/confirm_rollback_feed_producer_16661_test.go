@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -245,6 +246,34 @@ func mustPendingTarget16661(t *testing.T, s *configstore.Store) *config.Config {
 	return target
 }
 
+func waitForTargetFeedCallback16661(t *testing.T, h *harness16661) {
+	t.Helper()
+	select {
+	case <-h.targetCallbackSettled:
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			feed, ok := h.d.feeds.AllFeeds()["malware"]
+			if !ok || feed.Prefixes == 0 {
+				t.Fatalf("rollback-target callback settled without preserving C1 feed: feed=%+v present=%v",
+					feed, ok)
+			}
+			if feed.PublicationDebt {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("feed manager did not settle the deferred callback as publication debt")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if got := len(h.d.feedSnapshotsForConfig(mustPendingTarget16661(t, h.s))["dyn1"]); got != 1 {
+			t.Fatalf("target callback settled without a C1 snapshot: overlay size=%d", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("rollback-target feed callback did not settle: feeds=%v applied=%v",
+			h.d.feeds.AllFeeds(), *h.applied)
+	}
+}
+
 func fireUntilApplied16661(t *testing.T, h *harness16661) {
 	t.Helper()
 	gen := h.s.ConfirmGenForTesting()
@@ -255,30 +284,7 @@ func fireUntilApplied16661(t *testing.T, h *harness16661) {
 		if !h.s.IsConfirmPending() {
 			return
 		}
-		select {
-		case <-h.targetCallbackSettled:
-			deadline := time.Now().Add(2 * time.Second)
-			for {
-				feed, ok := h.d.feeds.AllFeeds()["malware"]
-				if !ok || feed.Prefixes == 0 {
-					t.Fatalf("rollback-target callback settled without preserving C1 feed: feed=%+v present=%v",
-						feed, ok)
-				}
-				if feed.PublicationDebt {
-					break
-				}
-				if time.Now().After(deadline) {
-					t.Fatal("feed manager did not settle the deferred callback as publication debt")
-				}
-				time.Sleep(time.Millisecond)
-			}
-			if got := len(h.d.feedSnapshotsForConfig(mustPendingTarget16661(t, h.s))["dyn1"]); got != 1 {
-				t.Fatalf("target callback settled without a C1 snapshot: overlay size=%d", got)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("rollback-target feed callback did not settle before next timer fire: "+
-				"feeds=%v applied=%v", h.d.feeds.AllFeeds(), *h.applied)
-		}
+		waitForTargetFeedCallback16661(t, h)
 	}
 	t.Fatalf("rollback never resolved after %d fires: pending=%v applied=%v bootstrap=%v active=%q",
 		confirmRollbackFeedRetryMax+10, h.s.IsConfirmPending(), *h.applied, h.d.inBootstrap(), hostName9615(h.s))
@@ -445,4 +451,55 @@ func TestFeedStillDownAfterProducerRestartStillBounded16661(t *testing.T) {
 			t.Fatalf("refused feed-down target was applied: %v", *applied)
 		}
 	}
+}
+
+// TestFeedCallbackWaitingOnApplySemRechecksRollbackTargetMarker17741 closes
+// the check-before-acquire race: the feed callback passes its fast check and
+// pauses, rollback preflight marks/restarts C1 under applySem, then the callback
+// resumes and must recheck the marker after it acquires that semaphore.
+func TestFeedCallbackWaitingOnApplySemRechecksRollbackTargetMarker17741(t *testing.T) {
+	h := setup16661(t, false)
+	appliedBefore := len(*h.applied)
+	hookReached := make(chan struct{})
+	resumeCallback := make(chan struct{})
+	var hookOnce, releaseOnce sync.Once
+	releaseCallback := func() { releaseOnce.Do(func() { close(resumeCallback) }) }
+	t.Cleanup(releaseCallback)
+	h.d.preApplyHookForTest = func() {
+		hookOnce.Do(func() {
+			close(hookReached)
+			<-resumeCallback
+		})
+	}
+	callbackDone := make(chan error, 1)
+	go func() { callbackDone <- h.d.onFeedUpdate() }()
+	select {
+	case <-hookReached:
+	case <-time.After(10 * time.Second):
+		t.Fatal("feed callback did not pass its marker check and reach the pre-apply hook")
+	}
+
+	gen := h.s.ConfirmGenForTesting()
+	h.s.InvokeRollbackTimerForTesting(gen)
+	if got := h.d.confirmTargetFeedInstallPending.Load(); got != gen {
+		releaseCallback()
+		t.Fatalf("rollback preflight marker = %d, want pending generation %d", got, gen)
+	}
+	releaseCallback()
+	select {
+	case err := <-callbackDone:
+		if err == nil {
+			t.Fatal("callback waiting on applySem re-applied active C2 instead of deferring")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("callback did not settle after rollback preflight released applySem")
+	}
+	if got := len(*h.applied); got != appliedBefore {
+		t.Fatalf("waiting feed callback applied another config: before=%v after=%v",
+			(*h.applied)[:appliedBefore], *h.applied)
+	}
+
+	waitForTargetFeedCallback16661(t, h)
+	h.s.InvokeRollbackTimerForTesting(gen)
+	assertAppliedC1NoBootstrap16661(t, h)
 }
