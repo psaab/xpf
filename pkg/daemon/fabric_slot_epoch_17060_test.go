@@ -399,9 +399,10 @@ func (p *blockingFabricDP17060) ResolveFabricPeer(slot int, overlayIfindex, pare
 // then makes cancellation and a buffered refresh poke ready before allowing
 // the loop to continue. Since select may choose either arm, retries continue
 // until the wake arm consumed a poke, proving the cancelled-wake path was
-// exercised. Synthetic matching neighbours keep all probe paths hermetic;
-// overlay lookup counts prove the cancelled wake did not enter
-// probeFabricNeighbor.
+// exercised. Synthetic matching neighbours keep all probe paths hermetic.
+// The lookup oracle catches refreshFabricFwdSlot work if the wake-arm
+// cancellation check is absent; probeFabricNeighbor returns before lookup
+// when its context is already cancelled.
 func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 	for _, tc := range []struct {
 		name, fabIface, overlay, peer string
@@ -520,7 +521,7 @@ func TestPopulateLoopCancelledBufferedWakeDoesNotProbe17060(t *testing.T) {
 				gotLookups := overlayLookups
 				mu.Unlock()
 				if gotLookups != baselineLookups {
-					t.Fatalf("cancelled buffered wake probed %s: overlay lookups=%d, want unchanged %d (#17060)",
+					t.Fatalf("cancelled buffered wake did an overlay lookup for %s: overlay lookups=%d, want unchanged %d (#17060)",
 						tc.name, gotLookups, baselineLookups)
 				}
 				select {
