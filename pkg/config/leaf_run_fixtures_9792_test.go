@@ -61,7 +61,7 @@ var leafRunFixtures9156 = map[string]leafRunFixture9156{
 	// The `then` comparison needs a complete rate set now that strict schema
 	// validation checks the rate leaves before compiling the action.
 	"firewall three-color-policer xpfarg then [forwarding-class -> loss-priority]": {
-		preamble: "firewall { three-color-policer { xpfarg { single-rate { committed-information-rate 1m; committed-burst-size 1514; excess-burst-size 1514; } } } } ",
+		preamble: "firewall { three-color-policer { xpfarg { single-rate { committed-information-rate 1m; committed-burst-size 1518; excess-burst-size 1518; } } } } ",
 	},
 	// ORACLE did not compile: `references undefined scheduler "xpfaaa"`.
 	// scheduler-name names a top-level scheduler; #8690's preambleFor defines it.

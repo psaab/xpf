@@ -1,5 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: raise the shared two-/three-color policer burst floor to 1518
+    bytes so a bucket admits a maximum-size VLAN frame at the default MTU
+    (1500 MTU + 14-byte Ethernet header + 4-byte 802.1Q tag = 1518).
+    Schema guidance and regression coverage now pin the tagged-frame floor
+    (#17760).
+
   * Config: fail closed for nonempty embedded change-configuration
     payloads that lex to no tokens or lose content to comments; recursively
     mask quoted comment-shaped command payloads and preserve the whole-payload

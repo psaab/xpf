@@ -70,7 +70,7 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 func validateThreeColorBurstFloor16610(displayName string, pol *ThreeColorPolicerConfig) error {
 	if pol.TwoRate {
 		if pol.PBS != 0 && pol.PBS < minPolicerBurstBytes16714 {
-			return fmt.Errorf("firewall three-color-policer %q peak-burst-size must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d", displayName, minPolicerBurstBytes16714, pol.PBS)
+			return fmt.Errorf("firewall three-color-policer %q peak-burst-size must be at least one maximum-sized frame (%d bytes: 1500-byte MTU + 14-byte Ethernet header + 4-byte VLAN tag), got %d", displayName, minPolicerBurstBytes16714, pol.PBS)
 		}
 		return nil
 	}
@@ -81,7 +81,7 @@ func validateThreeColorBurstFloor16610(displayName string, pol *ThreeColorPolice
 		ceilingLeaf = "excess-burst-size"
 	}
 	if ceiling != 0 && ceiling < minPolicerBurstBytes16714 {
-		return fmt.Errorf("firewall three-color-policer %q %s must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit) when it is the larger of committed-burst-size/excess-burst-size, got %d (committed-burst-size %d, excess-burst-size %d)", displayName, ceilingLeaf, minPolicerBurstBytes16714, ceiling, pol.CBS, pol.PBS)
+		return fmt.Errorf("firewall three-color-policer %q %s must be at least one maximum-sized frame (%d bytes: 1500-byte MTU + 14-byte Ethernet header + 4-byte VLAN tag) when it is the larger of committed-burst-size/excess-burst-size, got %d (committed-burst-size %d, excess-burst-size %d)", displayName, ceilingLeaf, minPolicerBurstBytes16714, ceiling, pol.CBS, pol.PBS)
 	}
 	return nil
 }
@@ -144,7 +144,7 @@ func validateFirewallPolicerLimitsStrict(cfg *Config) error {
 			return fmt.Errorf("firewall policer %q requires `if-exceeding burst-size-limit` (missing burst-size-limit compiles to a 0-burst policer that drops all policed traffic)", displayName)
 		}
 		if pol.BurstSizeLimit < minPolicerBurstBytes16714 {
-			return fmt.Errorf("firewall policer %q burst-size-limit must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d", displayName, minPolicerBurstBytes16714, pol.BurstSizeLimit)
+			return fmt.Errorf("firewall policer %q burst-size-limit must be at least one maximum-sized frame (%d bytes: 1500-byte MTU + 14-byte Ethernet header + 4-byte VLAN tag), got %d", displayName, minPolicerBurstBytes16714, pol.BurstSizeLimit)
 		}
 	}
 	return nil

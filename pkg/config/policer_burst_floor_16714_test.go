@@ -9,24 +9,26 @@ import (
 // bytes, #10310) while the userspace meter charges the full Ethernet
 // frame (1500-byte MTU payload + 14-byte header = 1514 untagged, #8581).
 // burst-size-limit 1500..1513 therefore committed clean and dropped
-// every full-size frame. The floor is now the shared
-// minPolicerBurstBytes16714 (1514) enforced by the schema validator and
+// every full-size frame. #17760: the floor must also admit a maximum
+// 802.1Q-tagged frame at the default MTU: 1500 MTU + 14-byte Ethernet
+// header + 4-byte VLAN tag = 1518 bytes. The floor is now the shared
+// minPolicerBurstBytes16714 (1518) enforced by the schema validator and
 // the strict compiled-config gate; tolerant load warns.
 //
-// FAIL-ON-REVERT: reverting minPolicerBurstBytes16714 to 1500 (or
+// FAIL-ON-REVERT: reverting minPolicerBurstBytes16714 to 1514 (or
 // dropping the floor check in ValidatePolicerBurstSize /
-// validateFirewallPolicerLimitsStrict) makes the sub-frame rows pass.
+// validateFirewallPolicerLimitsStrict) makes the 1514..1517 rows pass.
 
 func TestPolicerBurstFloor16714SchemaRejectsSubFrame(t *testing.T) {
-	for _, value := range []string{"1500", "1513", "1k"} {
+	for _, value := range []string{"1500", "1513", "1514", "1517", "1k"} {
 		err := policer5299SchemaCheck(t,
 			"set firewall policer p1 if-exceeding burst-size-limit "+value)
 		if err == nil {
 			t.Errorf("burst-size-limit %s: SchemaValidate accepted sub-frame burst", value)
 			continue
 		}
-		if !strings.Contains(err.Error(), "maximum-sized frame") || !strings.Contains(err.Error(), "1514") {
-			t.Errorf("burst-size-limit %s: error should name the 1514-byte frame floor, got: %v", value, err)
+		if !strings.Contains(err.Error(), "maximum-sized frame") || !strings.Contains(err.Error(), "1518") {
+			t.Errorf("burst-size-limit %s: error should name the 1518-byte frame floor, got: %v", value, err)
 		}
 		if !strings.Contains(err.Error(), "burst-size-limit") {
 			t.Errorf("burst-size-limit %s: error should name leaf path, got: %v", value, err)
@@ -34,20 +36,20 @@ func TestPolicerBurstFloor16714SchemaRejectsSubFrame(t *testing.T) {
 	}
 	// Twin at the floor is accepted.
 	if err := policer5299SchemaCheck(t,
-		"set firewall policer p1 if-exceeding burst-size-limit 1514"); err != nil {
-		t.Errorf("burst-size-limit 1514: SchemaValidate rejected floor twin: %v", err)
+		"set firewall policer p1 if-exceeding burst-size-limit 1518"); err != nil {
+		t.Errorf("burst-size-limit 1518: SchemaValidate rejected floor twin: %v", err)
 	}
 	// Shared constant: the three-color validator rejects the same values.
 	if err := validateThreeColorPolicerBurstSize11827("1500"); err == nil {
 		t.Errorf("three-color burst 1500: expected shared-floor rejection")
 	}
-	if got := minPolicerBurstBytes16714; got != 1514 {
-		t.Errorf("minPolicerBurstBytes16714 = %d, want 1514 (shared frame floor)", got)
+	if got := minPolicerBurstBytes16714; got != 1518 {
+		t.Errorf("minPolicerBurstBytes16714 = %d, want 1518 (shared frame floor)", got)
 	}
 }
 
 func TestPolicerBurstFloor16714StrictGate(t *testing.T) {
-	reject := []string{"1500", "1513", "1000", "64"}
+	reject := []string{"1500", "1513", "1514", "1517", "1000", "64"}
 	for _, burst := range reject {
 		t.Run("reject/"+burst, func(t *testing.T) {
 			_, err := CompileConfig(buildTree(t, []string{
@@ -63,17 +65,17 @@ func TestPolicerBurstFloor16714StrictGate(t *testing.T) {
 			}
 		})
 	}
-	t.Run("accept/1514", func(t *testing.T) {
+	t.Run("accept/1518", func(t *testing.T) {
 		cfg, err := CompileConfig(buildTree(t, []string{
 			"set firewall policer p1 if-exceeding bandwidth-limit 1m",
-			"set firewall policer p1 if-exceeding burst-size-limit 1514",
+			"set firewall policer p1 if-exceeding burst-size-limit 1518",
 			"set firewall policer p1 then discard",
 		}))
 		if err != nil {
 			t.Fatalf("CompileConfig rejected floor twin: %v", err)
 		}
 		pol := cfg.Firewall.Policers["p1"]
-		if pol == nil || pol.BurstSizeLimit != 1514 {
+		if pol == nil || pol.BurstSizeLimit != 1518 {
 			t.Fatalf("floor twin compiled changed: %+v", pol)
 		}
 	})

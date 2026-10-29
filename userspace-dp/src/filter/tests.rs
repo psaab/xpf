@@ -1684,21 +1684,21 @@ fn single_rate_policer_discard_is_enforced() {
     assert!(status[0].drop_packets >= 1, "a drop must be counted");
 }
 
-// #16714: burst = the shared one-frame floor (1514) must admit a
-// maximum-sized frame for BOTH the two-color (legacy single-rate
-// `firewall policer`, CBS=EBS=burst with yellow+red drop, as
-// build_single_rate_policer_state lowers it) and the three-color
-// paths. The meter charges the full Ethernet frame (meta.pkt_len):
-// a 1500-byte MTU payload is a 1514-byte untagged frame. Pre-fix the
-// Go floor was 1500, so a burst-1500 two-color policer dropped this
-// frame at any rate (now rejected at commit by the shared 1514
-// floor). FAIL-ON-REVERT (Go side): lowering
-// minPolicerBurstBytes16714 below 1514 re-admits the dropping config;
-// this cell pins the meter semantics the floor is expressed in.
+// #16714 / #17760: burst = the shared one-frame floor (1518) must admit
+// a maximum-sized 802.1Q-tagged frame for BOTH the two-color (legacy
+// single-rate `firewall policer`, CBS=EBS=burst with yellow+red drop,
+// as build_single_rate_policer_state lowers it) and three-color paths.
+// The meter charges the full Ethernet frame (meta.pkt_len): at a 1500
+// MTU, a VLAN frame costs 1500 + 14-byte Ethernet header + 4-byte tag
+// = 1518. Pre-fix the Go floor was 1514, so a burst-1514 two-color
+// policer dropped this frame at any rate (now rejected at commit).
+// FAIL-ON-REVERT (Go side): lowering minPolicerBurstBytes16714 below
+// 1518 re-admits the dropping configuration; this cell pins the meter
+// semantics the floor is expressed in.
 #[test]
 fn policer_burst_floor_16714_admits_max_frame_both_paths() {
-    const FLOOR: u64 = 1514; // 1500 MTU + 14 Ethernet header (untagged)
-    const MAX_FRAME: u64 = 1514;
+    const FLOOR: u64 = 1518; // 1500 MTU + 14 Ethernet header + 4-byte VLAN tag
+    const MAX_FRAME: u64 = 1518;
     let drop_treatments = ThreeColorTreatments {
         green: ColorTreatment::default(),
         yellow: ColorTreatment::drop(),
@@ -1716,8 +1716,8 @@ fn policer_burst_floor_16714_admits_max_frame_both_paths() {
     let d = two.meter(0, MAX_FRAME, PacketColor::Green);
     assert_eq!(d.color, PacketColor::Green, "two-color floor must admit max frame as Green");
     assert!(!d.drop, "two-color floor must not drop max frame");
-    // Two-color at the old 1500 floor drops the same frame (the defect
-    // #16714 now rejects at commit; meter semantics unchanged).
+    // Two-color at the old 1514 floor drops the same tagged frame
+    // (#17760 now rejects it at commit; meter semantics are unchanged).
     let old = ThreeColorPolicerState::sr_tcm_with_treatments(
         100_000_000,
         1500,
@@ -1727,7 +1727,7 @@ fn policer_burst_floor_16714_admits_max_frame_both_paths() {
     )
     .expect("old two-color policer");
     let d_old = old.meter(0, MAX_FRAME, PacketColor::Green);
-    assert!(d_old.drop, "1500 burst must drop a 1514-byte frame (pre-#16714 defect)");
+    assert!(d_old.drop, "1514 burst must drop a 1518-byte VLAN frame (pre-#17760 defect)");
     // Three-color single-rate: CBS=EBS=floor admits the max frame.
     let three = ThreeColorPolicerState::sr_tcm_with_treatments(
         100_000_000,
