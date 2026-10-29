@@ -304,15 +304,20 @@ the userspace dataplane admission boundary is in
   not a measurement — it installs no debt and leaves dampening untouched,
   so the survivor stays promotable instead of being pinned at weight 0
   with the RG ownerless after a primary loss. That neutrality holds only
-  while the node can measure in principle: for a bound target on a
-  non-primary with no `secondary-ip-address`, the node cannot measure
-  the target at all, so a not-completed probe instead RELEASES any
-  dampened down state measured in a prior primary epoch (#16734) — the
-  ip debt reconciles away and the demoted node becomes promotable again
-  after the upstream recovers, instead of staying frozen at weight 0
-  for the life of the process. A configured `secondary-ip-address` is
-  treated as held (measurable), so transient bind/send failures on it
-  keep the neutral treatment.
+  while the node can use its configured source: a bound target on a
+  non-primary with no `secondary-ip-address`, or with a configured
+  secondary source absent from the live target interface (#17759), is
+  unmeasurable. A not-completed probe then RELEASES any dampened down
+  state measured in a prior primary epoch (#16734), so the ip debt
+  reconciles away and the demoted node becomes promotable again after
+  upstream recovery instead of staying frozen at weight 0 for life.
+  Only a clean address list without the configured address, or a clean
+  link-list confirmation of a missing interface, proves absence. A typed
+  `LinkNotFoundError` from `LinkByName` is confirmed only by a clean
+  `LinkList` because its legacy dump fallback can hide `ErrDumpInterrupted`;
+  lookup errors and interrupted partial dumps remain inconclusive.
+  A clean list containing the address remains measurable, so transient
+  bind/send failures keep the neutral treatment.
   When `global-threshold` is unset (0),
   the historical **independent per-target** behavior is preserved exactly: each
   unreachable target subtracts its own `weight` (or `global-weight` when the
