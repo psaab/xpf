@@ -430,6 +430,95 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 	})
 }
 
+func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
+	base := []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster authentication-key test-cluster-psk-17784",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 gigether-options redundant-parent reth1",
+		"set interfaces ge-0/0/3 unit 0 family inet address 10.0.3.1/24",
+		"set security ike gateway gw-plain address 198.51.100.3",
+		"set security ike gateway gw-plain external-interface ge-0/0/3.0",
+		"set security ipsec vpn vpn-plain ike gateway gw-plain",
+		"set security ipsec vpn vpn-plain bind-interface st0",
+		"set security ipsec vpn vpn-plain pre-shared-key fixture-secret",
+	}
+	for _, tc := range []struct {
+		name  string
+		clear func(*cluster.Manager)
+	}{
+		{
+			name:  "heartbeat prunes peer RG0",
+			clear: func(cm *cluster.Manager) { cm.ClearPeerGroupStateForTesting(0) },
+		},
+		{
+			name:  "peer heartbeat liveness expires",
+			clear: func(cm *cluster.Manager) { cm.ClearPeerHeartbeatLiveness() },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStoreWithSetConfig(t, base)
+			cm := cluster.NewManager(0, 1)
+			cm.UpdateConfig(store.ActiveConfig().Chassis.Cluster)
+			cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+			cm.SetPeerGroupStateForTesting(0, cluster.StatePrimary)
+			d := &Daemon{cluster: cm, store: store}
+			d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+			d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+
+			var localNames, initiated, terminated []string
+			d.ipsecActiveNamesFn = func() ([]string, error) {
+				return append([]string(nil), localNames...), nil
+			}
+			d.ipsecInitiateFn = func(name string) error {
+				initiated = append(initiated, name)
+				localNames = append(localNames, name)
+				return nil
+			}
+			d.ipsecTerminateFn = func(name string) error {
+				terminated = append(terminated, name)
+				return nil
+			}
+
+			d.reinitiateIPsecSAsForRG(1)
+			if len(initiated) != 0 {
+				t.Fatalf("live peer RG0 fence initiated %v", initiated)
+			}
+			d.ipsecFallbackMu.Lock()
+			state := d.ipsecFallbacks["vpn-plain"]
+			d.ipsecFallbackMu.Unlock()
+			if !state.owed {
+				t.Fatal("peer-fenced fallback was not retained as owed")
+			}
+
+			tc.clear(cm)
+			if primary, known := cm.PeerGroupPrimary(0); primary || known {
+				t.Fatalf("cleared peer RG0 fence = (%v, %v), want (false, false)",
+					primary, known)
+			}
+			d.retryOwedIPsecFallback()
+			if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+				t.Fatalf("owed fallback retry initiated %v, want [vpn-plain]", initiated)
+			}
+
+			// A late duplicate of the original RG1 edge must not belt and
+			// re-initiate the SA that the convergence retry just raised.
+			d.reinitiateIPsecSAsForRG(1)
+			d.retryOwedIPsecFallback()
+			if len(initiated) != 1 || len(terminated) != 0 {
+				t.Fatalf("retry plus late edge initiated=%v terminated=%v, want one initiate and no terminate",
+					initiated, terminated)
+			}
+		})
+	}
+}
+
 // ── WIRING ─────────────────────────────────────────────────────────────────
 //
 // Measured on the first pass: with only the cells above, the three mutations

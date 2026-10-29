@@ -262,6 +262,13 @@ func TestUndeclaredRG0FallbackBindsToSoleDataRG17784(t *testing.T) {
 		t.Fatalf("#17784/#16710: stale RG2 edge acted after removal: terminated=%v initiated=%v",
 			terminated, initiated)
 	}
+	// RG0 is not declared in the current config, so an unanchored candidate
+	// cannot bypass the sole-data-edge binding through a stale RG0 pass.
+	d.reinitiateIPsecSAsForRG(0)
+	if terminated, initiated := rec.snapshot(); len(terminated) != 0 || len(initiated) != 0 {
+		t.Fatalf("#17784/#16710: undeclared RG0 edge acted: terminated=%v initiated=%v",
+			terminated, initiated)
+	}
 
 	d.reinitiateIPsecSAsForRG(1)
 	terminated, initiated := rec.snapshot()
