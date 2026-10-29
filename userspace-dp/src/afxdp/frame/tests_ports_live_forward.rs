@@ -1488,8 +1488,7 @@ fn build_forwarded_frame_applies_nat_on_fabric_when_requested() {
         &decision,
         &forwarding,
         false,
-        Some((5201, 44278)),
-    )
+        Some((5201, 44278)), None).map(|(frame, _)| frame)
     .expect("frame without nat");
     assert_eq!(&no_nat[30..34], &[172, 16, 80, 8]);
 
@@ -1499,8 +1498,7 @@ fn build_forwarded_frame_applies_nat_on_fabric_when_requested() {
         &decision,
         &forwarding,
         true,
-        Some((5201, 44278)),
-    )
+        Some((5201, 44278)), None).map(|(frame, _)| frame)
     .expect("frame with nat");
     assert_eq!(&nat[30..34], &[10, 0, 61, 102]);
     assert!(tcp_checksum_ok_ipv4(&nat[14..]));

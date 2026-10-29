@@ -100,6 +100,81 @@ func TestDNSLookupFailedDistinctFromEmpty16595(t *testing.T) {
 	}
 }
 
+func TestDNSColdCacheUnresolvedDistinctFromFailure17782(t *testing.T) {
+	a := &Address{Name: "cold", DNSName: "cold-17782.example.invalid"}
+	cfg := &Config{}
+	cfg.Security.AddressBook = &AddressBook{Addresses: map[string]*Address{"cold": a}}
+	resolveDNSAddressEntry(a)
+	if !a.DNSUnresolved || a.DNSLookupFailed {
+		t.Fatalf("cold cache state: unresolved=%t failed=%t, want unresolved only", a.DNSUnresolved, a.DNSLookupFailed)
+	}
+	if cfg.Security.AddressBook.DNSEntryLookupFailed("cold") {
+		t.Fatal("cold-cache miss must not masquerade as a resolver failure")
+	}
+	if !cfg.Security.AddressBook.DNSEntryResolutionUnavailable("cold") {
+		t.Fatal("cold-cache miss must remain unavailable to strict validation")
+	}
+	unresolvedDigest := DNSAnswersDigest(cfg)
+	a.DNSUnresolved = false
+	if DNSAnswersDigest(cfg) == unresolvedDigest {
+		t.Fatal("unresolved-state change did not change the DNS answer digest")
+	}
+	a.DNSUnresolved = true
+
+	stubLookup16595(t, func(string) ([]string, error) { return nil, nil })
+	RefreshDNSAddressBooks(cfg)
+	if a.DNSUnresolved || a.DNSLookupFailed {
+		t.Fatalf("successful empty result: unresolved=%t failed=%t, want neither", a.DNSUnresolved, a.DNSLookupFailed)
+	}
+}
+
+func TestZoneLocalFoldPreservesDNSUnresolved17782(t *testing.T) {
+	tree := buildTree(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security zones security-zone trust address-book address api dns-name cold-fold-17782.example.invalid",
+	})
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("cold zone-local compile: %v", err)
+	}
+	folded := cfg.Security.AddressBook.Addresses["zone-local/trust/api"]
+	if folded == nil || !folded.DNSUnresolved || folded.DNSLookupFailed {
+		t.Fatalf("folded cold entry state = %+v, want unresolved without resolver-failed", folded)
+	}
+	if !cfg.Security.AddressBook.DNSEntryResolutionUnavailable("zone-local/trust/api") {
+		t.Fatal("folded cold entry must remain unavailable to strict validation")
+	}
+	if cfg.Security.AddressBook.DNSEntryLookupFailed("zone-local/trust/api") {
+		t.Fatal("folded cold entry must not be reported as a resolver failure")
+	}
+}
+
+func TestZoneLocalFoldPreservesDNSLookupFailed17782(t *testing.T) {
+	fqdn := "failed-fold-17782.example.invalid"
+	seeded := &Address{Name: "failed", DNSName: fqdn}
+	seedCfg := &Config{}
+	seedCfg.Security.AddressBook = &AddressBook{Addresses: map[string]*Address{"failed": seeded}}
+	stubLookup16595(t, func(string) ([]string, error) { return nil, errDNSDown16595 })
+	RefreshDNSAddressBooks(seedCfg)
+	if !seeded.DNSLookupFailed {
+		t.Fatalf("seed failed lookup state = %+v, want lookup failed", seeded)
+	}
+	tree := buildTree(t, []string{
+		"set security zones security-zone trust",
+		"set security zones security-zone untrust",
+		"set security zones security-zone trust address-book address api dns-name " + fqdn,
+	})
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("failed zone-local compile: %v", err)
+	}
+	folded := cfg.Security.AddressBook.Addresses["zone-local/trust/api"]
+	if folded == nil || !folded.DNSLookupFailed || folded.DNSUnresolved {
+		t.Fatalf("folded failed entry state = %+v, want lookup failed without unresolved", folded)
+	}
+}
+
 func TestStrictCommitWarnsNotRejectsWhenDNSDown16595(t *testing.T) {
 	stubLookup16595(t, func(string) ([]string, error) { return nil, errDNSDown16595 })
 	tree := buildTree(t, []string{

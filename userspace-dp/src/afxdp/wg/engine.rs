@@ -63,9 +63,10 @@ use super::peer::{Peer, PeerConfig, encode_roam_endpoint};
 use super::session::{REJECT_AFTER_MESSAGES, ReplayDecision, WgSession};
 use super::tai64n::Tai64nClock;
 use super::{
-    POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES,
-    WG_SMALL_ORDER_KEYS, WG_ZERO_PSK, pad_to_16, padded_len_capped,
+    POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, WG_KEY_LEN, WG_NOISE_PATTERN, WG_PROTOCOL_ID_BYTES, WG_ZERO_PSK, pad_to_16, padded_len_capped,
 };
+#[cfg(test)]
+use super::WG_SMALL_ORDER_KEYS;
 use arc_swap::ArcSwap;
 use curve25519_dalek::MontgomeryPoint;
 use rustc_hash::FxHashMap;
@@ -1011,7 +1012,8 @@ impl WgEngine {
         self.peer_arc(peer_pubkey)?.learned_pmtu(now_ns)
     }
 
-    /// #16711: record a validated underlay PTB for `peer_pubkey`.
+    /// #17747: record a validated underlay PTB for `peer_pubkey`, capped
+    /// to the local egress/route MTU before the family's mandatory floor.
     /// Returns true when the stored PMTU was lowered. No-op (false)
     /// for an unknown peer.
     pub(crate) fn note_peer_pmtu(
@@ -1019,12 +1021,13 @@ impl WgEngine {
         peer_pubkey: &[u8; WG_KEY_LEN],
         offered_mtu: usize,
         outer_v6: bool,
+        local_mtu: usize,
         now_ns: u64,
     ) -> bool {
         let Some(peer) = self.peer_arc(peer_pubkey) else {
             return false;
         };
-        peer.offer_pmtu(offered_mtu, outer_v6, now_ns)
+        peer.offer_pmtu(offered_mtu, outer_v6, local_mtu, now_ns)
     }
 
     /// Whether the named peer currently has a confirmed (usable for
@@ -1636,11 +1639,14 @@ impl WgEngine {
         self.encap_inner(peer_pubkey, inner_ip, out, false, PADDED_PLAINTEXT_MAX)
     }
 
-    /// Encap with the §5.4.6 pad capped at `inner_budget` (the largest
-    /// inner packet the caller's outer MTU admits), matching Linux
+    /// Encap with the §5.4.6 pad capped at `inner_budget` (the outer-derived
+    /// byte budget for the inner packet), matching Linux
     /// `calculate_skb_padding` / wireguard-go `calculatePaddingSize`
-    /// (#16499). A full-budget inner packet therefore emits exactly at
-    /// budget instead of up to 15 bytes over the outer MTU. The cap never
+    /// (#16499). When `inner_budget` is at or below the engine ceiling
+    /// (`WG_ENGINE_MAX_INNER_MTU` = 4096), a full-budget inner packet
+    /// emits exactly at budget instead of up to 15 bytes over the outer
+    /// MTU. A larger outer-derived budget cannot be fully encapped because
+    /// the engine rejects inner packets above its ceiling. The cap never
     /// truncates payload (see `padded_len_capped`).
     pub(crate) fn try_encap_capped(
         &self,

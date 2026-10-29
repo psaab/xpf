@@ -201,12 +201,113 @@ func TestCommitDiffSummary16718LargeConfig(t *testing.T) {
 	if want := "2 statement(s) changed (1 added, 1 removed)"; got != want {
 		t.Fatalf("CommitDiffSummary large = %q, want %q", got, want)
 	}
-	// Old implementation allocated ~1.1 GiB at 12k lines; the fixed path
-	// (clone + FormatSet + linear diff) must stay far below that. Bound
-	// is generous to cover clone/format, tight enough to catch a
-	// quadratic table.
+	// #16718's historical end-to-end 12k bound remains unchanged; #17773
+	// adds the stricter 50k <10 MiB acceptance below.
 	if alloc >= 64<<20 {
 		t.Fatalf("CommitDiffSummary 12k allocated %d bytes, want < 64MiB", alloc)
 	}
 	t.Logf("CommitDiffSummary 12k alloc = %d bytes", alloc)
+}
+
+// TestCommitDiffSummary17773EndToEnd50K is the #17773 acceptance: the
+// REAL CommitDiffSummary over a 50k-line config with a one-line edit
+// (not just the sequenceLineDiffCounts helper over pre-made strings)
+// must stay under 10 MiB and return (1,1). The 12k control keeps the
+// old pre-LCS table scale visible; identical trees must be (0,0).
+func TestCommitDiffSummary17773EndToEnd50K(t *testing.T) {
+	build := func(n int, changed bool) *config.ConfigTree {
+		children := make([]*config.Node, 0, n)
+		for i := range n {
+			name := fmt.Sprintf("addr-%d", i)
+			if changed && i == n/2 {
+				name = "addr-changed"
+			}
+			children = append(children, &config.Node{
+				Keys:   []string{"address", name, fmt.Sprintf("10.0.%d.%d", i/256%256, i%256)},
+				IsLeaf: true,
+			})
+		}
+		return &config.ConfigTree{Children: []*config.Node{
+			{Keys: []string{"security", "address-book", "global"}, Children: children},
+		}}
+	}
+
+	s := newTestStore(t)
+	s.active = build(50000, false)
+	s.candidate = build(50000, true)
+	var got string
+	alloc := allocFor16718(t, func() {
+		got = s.CommitDiffSummary()
+	})
+	if want := "2 statement(s) changed (1 added, 1 removed)"; got != want {
+		t.Fatalf("CommitDiffSummary 50k = %q, want %q", got, want)
+	}
+	const limit = 10 << 20
+	if alloc >= limit {
+		t.Fatalf("CommitDiffSummary 50k allocated %d bytes, want < %d", alloc, limit)
+	}
+	t.Logf("CommitDiffSummary 50k alloc = %d bytes", alloc)
+
+	// Identical control: same trees, no edit.
+	s.candidate = build(50000, false)
+	allocIdent := allocFor16718(t, func() {
+		got = s.CommitDiffSummary()
+	})
+	if got != "" {
+		t.Fatalf("CommitDiffSummary identical 50k = %q, want empty", got)
+	}
+	if allocIdent >= limit {
+		t.Fatalf("CommitDiffSummary identical 50k allocated %d bytes, want < %d", allocIdent, limit)
+	}
+	t.Logf("CommitDiffSummary identical 50k alloc = %d bytes", allocIdent)
+
+	// 12k control at the same bound (not the old 64 MiB).
+	s.active = build(12000, false)
+	s.candidate = build(12000, true)
+	alloc12k := allocFor16718(t, func() {
+		got = s.CommitDiffSummary()
+	})
+	if want := "2 statement(s) changed (1 added, 1 removed)"; got != want {
+		t.Fatalf("CommitDiffSummary 12k = %q, want %q", got, want)
+	}
+	if alloc12k >= limit {
+		t.Fatalf("CommitDiffSummary 12k allocated %d bytes, want < %d", alloc12k, limit)
+	}
+	t.Logf("CommitDiffSummary 12k alloc = %d bytes", alloc12k)
+}
+
+func TestFormatSetLines17773MatchesFormatSet(t *testing.T) {
+	tree := &config.ConfigTree{Children: []*config.Node{
+		{Keys: []string{"policy-options"}, Children: []*config.Node{
+			{Keys: []string{"policy-statement", "P"}, Children: []*config.Node{
+				{Keys: []string{"then", "reject"}, IsLeaf: true},
+				{Keys: []string{"from", "protocol", "bgp"}, IsLeaf: true},
+			}},
+		}},
+		{Keys: []string{"system"}, Children: []*config.Node{
+			{Keys: []string{"host-name", `café "router`}, KeysQuoted: []bool{false, true}, IsLeaf: true},
+		}, Annotation: `owner "ops" café\nbackup`, Inactive: true},
+		{Keys: []string{"security-zone", "trusted"}, KeysBracketed: []bool{true, true}, Children: []*config.Node{
+			{Keys: []string{"interfaces"}, Children: []*config.Node{
+				{Keys: []string{"ge-0/0/0.0"}, IsLeaf: true},
+			}},
+		}},
+		{Keys: []string{"foo", "then"}, KeysQuoted: []bool{false, true}, KeysBracketed: []bool{true, true}},
+	}}
+	want := splitLines(tree.FormatSet())
+	got := tree.FormatSetLines(nil)
+	if len(got) != len(want) {
+		t.Fatalf("FormatSetLines returned %d lines, FormatSet has %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("FormatSetLines line %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	reused := tree.FormatSetLines(got)
+	for i := range got {
+		if reused[i] != got[i] {
+			t.Fatalf("FormatSetLines reuse line %d = %q, want %q", i, reused[i], got[i])
+		}
+	}
 }

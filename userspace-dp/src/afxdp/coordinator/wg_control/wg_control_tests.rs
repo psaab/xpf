@@ -521,11 +521,10 @@ fn poll_loop_exits_on_tun_teardown() {
 
 /// #5291 fail-on-revert: TUN-origin egress to a NON-first peer must
 /// size the encap MTU guard against THAT peer's underlay, not the
-/// first-peer scalar. This mirrors the AF_XDP transit path, which
-/// already resolves the outer MTU per peer (#2845/#3219,
-/// `wg_endpoint_physical_outer_mtu`/`wg_peer_outer_dst`); before this
-/// fix the control thread captured ONE first-peer scalar at spawn and
-/// applied it to every peer.
+/// first-peer scalar. This mirrors the AF_XDP transit path, which already
+/// resolves the outer MTU per peer (#2845/#3219,
+/// `wg_selected_peer_outer`/`wg_peer_outer_dst`); before this fix the control
+/// thread captured ONE first-peer scalar at spawn and applied it to every peer.
 ///
 /// Scenario: a multi-peer WG tunnel with asymmetric underlays — peer A
 /// @1500 (the first-peer scalar), peer B @1400. An inner packet
@@ -867,9 +866,10 @@ fn poll_timeout_ms_clamps_and_converts() {
     assert_eq!(poll_timeout_ms(now - 1, now), 0);
 }
 
-/// #16499: with the pad capped at the inner budget, a full-budget inner
-/// packet encapps to exactly the outer MTU. Budget v6/1500 = 1420,
-/// v4/1500 = 1440, v4/1492 = 1432, v4/1450 = 1390, v6/1450 = 1370.
+/// #16499: for these standard-MTU budgets (all below the engine ceiling),
+/// the capped pad lets a full-budget inner packet encap to exactly the
+/// outer MTU. Budget v6/1500 = 1420, v4/1500 = 1440, v4/1492 = 1432,
+/// v4/1450 = 1390, v6/1450 = 1370.
 #[test]
 fn encapped_size_capped_pad_fits_standard_formula_rows_16499() {
     use super::mtu::{wg_encapped_size_with_outer_mtu, wg_inner_budget};

@@ -105,6 +105,15 @@ func (a *LegacyDataPlaneAdapter) AppliedConfig() *config.Config {
 	return nil
 }
 
+// AppliedSnapshotGeneration forwards the manager's helper-applied snapshot
+// identity, which can advance on retained-snapshot partial publishes.
+func (a *LegacyDataPlaneAdapter) AppliedSnapshotGeneration() uint64 {
+	if m := a.Manager(); m != nil {
+		return m.AppliedSnapshotGeneration()
+	}
+	return 0
+}
+
 // AppliedNATView exposes the manager's last-applied NAT view through the
 // adapter so the gRPC/REST/CLI deterministic-mapping lookup (#5794) can
 // reach it via a single narrow interface (no packet-path I/O). Returns an

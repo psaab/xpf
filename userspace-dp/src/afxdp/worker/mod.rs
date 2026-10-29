@@ -8,9 +8,7 @@ use super::worker_runtime::CoSQueueLeaseUndergrantCounters;
 // Issue 73 step 2: per-poll BindingWorker lifecycle (the central
 // `poll_binding` orchestrator) lives in worker/lifecycle.rs.
 mod lifecycle;
-/// #8114 item 3: the derived size of the same-worker flow-cache revocation
-/// window. Re-exported so the decision's figure is nameable from outside the
-/// module that computes it.
+#[cfg(test)]
 pub(crate) use lifecycle::REVOCATION_FLOW_CACHE_WINDOW_DESCRIPTORS;
 /// #8586: the flat (whole-`bindings`) flow-cache eviction the worker loop's
 /// reconcile uses; the split-borrow sibling stays private to `poll_binding`.
@@ -76,13 +74,9 @@ pub(crate) use xsk_rings::WorkerXskRings;
 mod cos;
 pub(in crate::afxdp) use cos::COS_SHARED_EXACT_MIN_RATE_BYTES;
 pub(crate) use cos::merge_cos_queue_owner_profile_sum;
-pub(in crate::afxdp) use cos::{
-    OwnerProfileSnapshot, merge_binding_scoped_owner_profile, merge_owner_profile_sum,
-    owner_profile_snapshot,
-};
 use cos::{
     build_worker_cos_fast_interfaces, build_worker_cos_owner_live_by_tx_ifindex,
-    build_worker_cos_statuses, cos_runtime_config_changed, reset_binding_cos_runtime,
+    build_worker_cos_statuses, cos_runtime_config_changed,
     reset_worker_cos_runtimes, vacate_all_shared_exact_slots_for_binding,
 };
 
@@ -95,6 +89,7 @@ pub(crate) use loop_body::worker_loop;
 pub(in crate::afxdp) use loop_body::{
     production_rotation_purge_for_test, production_sweep_for_test,
 };
+#[cfg(test)]
 pub(in crate::afxdp) use loop_body::{
     retry_deferred_conntrack_deletes, retry_deferred_pressure_sheds,
 };
@@ -1235,7 +1230,7 @@ fn fallback_shared_group_to_private(
     let mut all_slots_recovered = true;
     for mut plan in plans {
         let live = plan.live.clone();
-        let slot = plan.status.slot;
+        let _slot = plan.status.slot;
         // #7497: captured before `plan` is moved into the bind call, like slot.
         let coord = BindingCoordinate::of(&plan.status);
         let mode = plan.shared_umem.mode;

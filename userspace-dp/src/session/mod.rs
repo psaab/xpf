@@ -973,8 +973,10 @@ use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_OSPF, PROTO_TCP, PROTO_UDP
 // TCP_FIN/TCP_RST via `super::*`. The session-closing test is the shared
 // `is_closing` predicate.
 use crate::tcp_flags::{
-    TCP_FIN, TCP_RST, has_ack, has_fin, has_rst, has_syn, is_closing, is_initial_syn, is_syn_ack,
+    has_ack, has_fin, has_rst, has_syn, is_closing, is_initial_syn, is_syn_ack,
 };
+#[cfg(test)]
+use crate::tcp_flags::{TCP_FIN, TCP_RST};
 
 #[allow(unused_macros)]
 macro_rules! debug_log {
@@ -998,12 +1000,13 @@ macro_rules! debug_log {
 mod expire;
 mod install;
 mod lookup;
-pub(crate) use install::PMechInstallPlan;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
-pub(crate) use lookup::{
-    Defer, ExportWalkOutcome, ForwardNatMatchLookup, IpsecReplyAliasLookup, SeqVerdict, SessionQuery,
-};
+pub(crate) use lookup::{ExportWalkOutcome, ForwardNatMatchLookup, SeqVerdict};
+#[cfg(test)]
+pub(crate) use install::PMechInstallPlan;
+#[cfg(test)]
+pub(crate) use lookup::IpsecReplyAliasLookup;
 use lookup::TcpStatePropagation;
 
 /// #7212: the `(config generation, logical ingress interface)` pair a session's
@@ -5887,6 +5890,7 @@ impl SessionTable {
         // must be the live pair — the hand copy omitted it and the next
         // hit re-resolved. Origin, the #10507 policy-kind reset, and the
         // TCP/timeout rewrite stay caller-specific below.
+
         {
             let record = self
                 .entries
@@ -5927,7 +5931,7 @@ impl SessionTable {
                 let handshake_completed;
                 // #16489: set inside the borrow block when this update is the
                 // pair's first transition into CLOSING.
-                let mut update_became_closing = false;
+                let update_became_closing;
                 // #15947 (H29-04): pre-mutation wire state for the HA Update.
                 let close_class_before = self
                     .entries

@@ -167,37 +167,37 @@ func TestPolicer5299_Reject_BurstSizeLimit(t *testing.T) {
 	}
 }
 
-// #10310 / #16714: a policer burst smaller than one maximum-sized frame
-// cannot admit any ordinary MTU frame. The meter charges the full
-// Ethernet frame (1500-byte MTU payload + 14-byte header = 1514 untagged;
-// 1518 tagged), so the strict commit gate must reject 1500..1513 rather
-// than installing a bucket that silently marks every full-size packet
-// yellow/red. The floor is shared with the three-color leaves
-// (minPolicerBurstBytes16714).
+// #10310 / #16714 / #17760: a policer burst smaller than one
+// maximum-sized VLAN frame cannot admit a 1500-byte MTU packet. The
+// meter charges the full Ethernet frame (1500-byte MTU + 14-byte
+// Ethernet header + 4-byte 802.1Q tag = 1518), so the strict commit
+// gate must reject 1500..1517 rather than installing a bucket that
+// silently marks every full-size tagged packet yellow/red. The floor
+// is shared with the three-color leaves (minPolicerBurstBytes16714).
 func TestPolicer10310_RejectsSubPacketBurst(t *testing.T) {
-	for _, value := range []string{"1", "100", "1499", "1500", "1513", "1k"} {
+	for _, value := range []string{"1", "100", "1499", "1500", "1513", "1514", "1517", "1k"} {
 		t.Run(value, func(t *testing.T) {
 			err := policer5299SchemaCheck(t,
 				"set firewall policer p-subpacket if-exceeding burst-size-limit "+value)
 			if err == nil {
 				t.Fatalf(
-					"burst-size-limit %q: expected rejection below one maximum-sized frame (1514 bytes)",
+					"burst-size-limit %q: expected rejection below one maximum-sized frame (1518 bytes)",
 					value,
 				)
 			}
 			if !strings.Contains(err.Error(), "burst-size-limit") {
 				t.Fatalf("burst-size-limit %q: error should name the leaf: %v", value, err)
 			}
-			if !strings.Contains(err.Error(), "maximum-sized frame") || !strings.Contains(err.Error(), "1514") {
-				t.Fatalf("burst-size-limit %q: error should name the 1514-byte frame floor: %v", value, err)
+			if !strings.Contains(err.Error(), "maximum-sized frame") || !strings.Contains(err.Error(), "1518") {
+				t.Fatalf("burst-size-limit %q: error should name the 1518-byte frame floor: %v", value, err)
 			}
 		})
 	}
 	if err := policer5299SchemaCheck(
 		t,
-		"set firewall policer p-one-packet if-exceeding burst-size-limit 1514",
+		"set firewall policer p-one-packet if-exceeding burst-size-limit 1518",
 	); err != nil {
-		t.Fatalf("exactly one maximum-sized frame (1514 bytes) must remain valid: %v", err)
+		t.Fatalf("exactly one maximum-sized tagged frame (1518 bytes) must remain valid: %v", err)
 	}
 }
 

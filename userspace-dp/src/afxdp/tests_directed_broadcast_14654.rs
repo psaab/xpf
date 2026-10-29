@@ -297,50 +297,39 @@ fn icmp_directed_broadcast_suppression_is_table_scoped_14654() {
         });
     }
     let addr = Ipv4Addr::new(10, 0, 0, 255);
-    assert!(
-        crate::afxdp::frame::v4_addr_is_directed_broadcast_in_table(
-            &state,
-            addr,
-            Some("red.inet.0")
-        ),
-        "10.0.0.255 is red's /24 directed broadcast"
-    );
-    assert!(
-        !crate::afxdp::frame::v4_addr_is_directed_broadcast_in_table(
-            &state,
-            addr,
-            Some("blue.inet.0")
-        ),
-        "10.0.0.255 is a host in blue's /16, not its broadcast"
-    );
-    assert!(
-        crate::afxdp::frame::v4_addr_is_directed_broadcast_in_table(
-            &state,
-            Ipv4Addr::new(10, 0, 255, 255),
-            Some("blue.inet.0")
-        ),
-        "10.0.255.255 is blue's /16 directed broadcast"
-    );
     let mut packet = vec![0u8; 20];
     packet[16..20].copy_from_slice(&addr.octets());
-    assert!(crate::afxdp::frame::dest_is_directed_broadcast_in_table(
+    assert!(crate::afxdp::frame::dest_is_directed_broadcast(
         &state,
         &packet,
         Some("red.inet.0")
     ));
-    assert!(!crate::afxdp::frame::dest_is_directed_broadcast_in_table(
+    assert!(!crate::afxdp::frame::dest_is_directed_broadcast(
         &state,
         &packet,
         Some("blue.inet.0")
     ));
     let mut spacket = vec![0u8; 20];
     spacket[12..16].copy_from_slice(&addr.octets());
-    assert!(crate::afxdp::frame::src_is_directed_broadcast_in_table(
+    assert!(crate::afxdp::frame::src_is_directed_broadcast(
         &state,
         &spacket,
         Some("red.inet.0")
     ));
-    assert!(!crate::afxdp::frame::src_is_directed_broadcast_in_table(
+    assert!(!crate::afxdp::frame::src_is_directed_broadcast(
+        &state,
+        &spacket,
+        Some("blue.inet.0")
+    ));
+    let blue_broadcast = Ipv4Addr::new(10, 0, 255, 255);
+    packet[16..20].copy_from_slice(&blue_broadcast.octets());
+    assert!(crate::afxdp::frame::dest_is_directed_broadcast(
+        &state,
+        &packet,
+        Some("blue.inet.0")
+    ));
+    spacket[12..16].copy_from_slice(&blue_broadcast.octets());
+    assert!(crate::afxdp::frame::src_is_directed_broadcast(
         &state,
         &spacket,
         Some("blue.inet.0")

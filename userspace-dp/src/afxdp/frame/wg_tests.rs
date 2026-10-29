@@ -7,6 +7,7 @@
 
 use super::super::super::test_fixtures::*;
 use super::*;
+use crate::afxdp::wg::pad_to_16;
 
 #[test]
 fn pad_to_16_rounds_up() {
@@ -84,7 +85,7 @@ fn outer_mtu_uses_physical_egress_not_tunnel_logical() {
     // The fix: the guard MTU is the physical underlay (1500). Reverting
     // to the logical-ifindex lookup would return 1420 → this fails red.
     assert_eq!(
-        outer_physical_egress_mtu(&decision, &state, endpoint, WG_PEER_OUTER_DST),
+        outer_physical_egress_mtu(&decision, &state, endpoint, WG_PEER_OUTER_DST, None),
         1500,
         "outer guard must use the PHYSICAL underlay MTU (reth0.80=1500), \
          not the tunnel LOGICAL ifindex MTU (wg0.0=1420)"
@@ -101,7 +102,7 @@ fn fits_physical_but_exceeds_logical_inner_is_not_dropped() {
     let endpoint = state.tunnel_endpoints.get(&1).expect("wg endpoint present");
     let decision = wg_tunnel_decision(400, 1);
     let physical_mtu =
-        outer_physical_egress_mtu(&decision, &state, endpoint, WG_PEER_OUTER_DST);
+        outer_physical_egress_mtu(&decision, &state, endpoint, WG_PEER_OUTER_DST, None);
     let logical_mtu = 1420usize;
 
     // 1400-byte inner → ~1460-ish outer (v4): fits 1500, exceeds 1420.
@@ -131,7 +132,7 @@ fn genuinely_oversized_outer_still_drops_against_physical() {
     let endpoint = state.tunnel_endpoints.get(&1).expect("wg endpoint present");
     let decision = wg_tunnel_decision(400, 1);
     let physical_mtu =
-        outer_physical_egress_mtu(&decision, &state, endpoint, WG_PEER_OUTER_DST);
+        outer_physical_egress_mtu(&decision, &state, endpoint, WG_PEER_OUTER_DST, None);
     assert_eq!(physical_mtu, 1500);
     // 1480-byte inner pads to 1488; record 1488+16+16=1520; +20+8 = 1548
     // > 1500 → drop.
@@ -153,7 +154,7 @@ fn outer_mtu_falls_back_to_logical_when_outer_unresolvable() {
     // (400, the logical, MTU 1420).
     let unrouted = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 9));
     assert_eq!(
-        outer_physical_egress_mtu(&decision, &state, endpoint, unrouted),
+        outer_physical_egress_mtu(&decision, &state, endpoint, unrouted, None),
         1420
     );
 }
@@ -184,7 +185,7 @@ fn outer_source_uses_physical_egress_not_tunnel_logical() {
     // its WAN primary. Reverting to `decision.resolution.egress_ifindex`
     // (400) would read the tunnel address → this fails red.
     let physical =
-        outer_physical_egress_ifindex(&decision, &state, endpoint, WG_PEER_OUTER_DST);
+        outer_physical_egress_ifindex(&decision, &state, endpoint, WG_PEER_OUTER_DST, None);
     assert_eq!(physical, 12, "outer source must follow the PHYSICAL egress");
     assert_eq!(
         state.egress.get(&physical).and_then(|e| e.primary_v4),
@@ -204,7 +205,7 @@ fn outer_source_falls_back_to_logical_when_outer_unresolvable() {
     let decision = wg_tunnel_decision(400, 1);
     let unrouted = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 9));
     assert_eq!(
-        outer_physical_egress_ifindex(&decision, &state, endpoint, unrouted),
+        outer_physical_egress_ifindex(&decision, &state, endpoint, unrouted, None),
         400,
         "unresolvable outer with no stored tx_ifindex falls back to the \
          logical egress_ifindex"
@@ -263,7 +264,7 @@ fn outer_egress_returns_physical_for_dynamic_learned_underlay_neighbor() {
 
     let decision = wg_tunnel_decision(400, 1);
     assert_eq!(
-        outer_physical_egress_ifindex(&decision, &state, endpoint, WG_PEER_OUTER_DST),
+        outer_physical_egress_ifindex(&decision, &state, endpoint, WG_PEER_OUTER_DST, None),
         12,
         "the first arm returns the PHYSICAL underlay (12) for a \
          dynamic-learned underlay neighbor, NOT the logical wg ifindex (400)"
@@ -314,7 +315,7 @@ fn outer_egress_falls_back_to_logical_when_peer_genuinely_unrouted() {
     let decision = wg_tunnel_decision(400, 1);
     let unrouted = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 9));
     assert_eq!(
-        outer_physical_egress_ifindex(&decision, &state, endpoint, unrouted),
+        outer_physical_egress_ifindex(&decision, &state, endpoint, unrouted, None),
         400,
         "a genuinely unrouted peer endpoint falls back to the logical ifindex"
     );
@@ -583,7 +584,7 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v4() {
 
     let decision = wg_encap_decision();
     let frame = inner_v4_frame();
-    let out = wg_encap_frame(&frame, inner_v4_meta(), &decision, &state)
+    let out = wg_encap_frame(&frame, inner_v4_meta(), &decision, &state, None).map(|(frame, _)| frame)
         .expect("wg_encap_frame must build (established session, routed peer)");
 
     // #5292: the outer now correctly carries reth0.80's VLAN 80 tag (the
@@ -628,7 +629,7 @@ fn wg_encap_native_vlan_underlay_egress_is_untagged_13979() {
         .insert(1, Arc::new(established_initiator_engine(peer_ep, "10.123.0.0/24")));
     state.native_vlan_egress_ifindexes.insert(12);
 
-    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &wg_encap_decision(), &state)
+    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &wg_encap_decision(), &state, None).map(|(frame, _)| frame)
         .expect("WG encap must build against the selected peer underlay");
 
     assert_eq!(&out[12..14], &[0x08, 0x00], "native underlay must emit untagged IPv4");
@@ -640,7 +641,7 @@ fn wg_encap_native_vlan_underlay_egress_is_untagged_13979() {
 #[test]
 fn wg_encap_frame_resolves_outer_route_once_v4() {
     // #3992 RED-on-revert: `wg_encap_frame` must resolve the outer underlay
-    // route (a FIB LPM via `outer_physical_egress_ifindex`) EXACTLY once
+    // route (a FIB LPM via `outer_physical_egress_resolution`) EXACTLY once
     // per encapped packet. Pre-#3992 the outer-MTU guard and the outer IP
     // SOURCE lookup each ran the IDENTICAL resolution (same peer endpoint,
     // same transport table) → 2 FIB LPMs per packet on the encrypt hot
@@ -662,7 +663,7 @@ fn wg_encap_frame_resolves_outer_route_once_v4() {
     // Count only the resolutions performed INSIDE wg_encap_frame: reset
     // immediately before the single call, read immediately after.
     outer_route_resolve_count_reset();
-    let out = wg_encap_frame(&frame, inner_v4_meta(), &decision, &state)
+    let out = wg_encap_frame(&frame, inner_v4_meta(), &decision, &state, None).map(|(frame, _)| frame)
         .expect("wg_encap_frame must build (established session, routed peer)");
     let resolves = outer_route_resolve_count();
     assert_eq!(
@@ -790,7 +791,7 @@ fn wg_encap_outer_l2_vlan_follows_selected_peer_not_zeroed_decision() {
     );
 
     let decision = wg_decision_with_wrong_default_adjacency();
-    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state)
+    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state, None).map(|(frame, _)| frame)
         .expect("wg_encap_frame must build against the SELECTED peer's underlay");
 
     // Outer eth (802.1Q): dst[0..6], src[6..12], TPID[12..14]=0x8100,
@@ -848,7 +849,7 @@ fn wg_encap_builds_when_zeroed_decision_has_no_l2() {
     decision.resolution.src_mac = None;
     decision.resolution.tx_vlan_id = 0;
 
-    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state)
+    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state, None).map(|(frame, _)| frame)
         .expect("wg_encap_frame must build against the peer even when the \
                  zeroed-endpoint decision.resolution has no L2 (no blackhole)");
 
@@ -879,7 +880,7 @@ fn wg_encap_outer_dst_mac_never_borrows_unresolved_peer_nexthop_13978() {
     ));
     // No state.neighbors entry for (12, 172.16.80.1).
     let decision = wg_decision_with_wrong_default_adjacency();
-    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state);
+    let out = wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state, None).map(|(frame, _)| frame);
     assert!(out.is_none(), "#13978: unresolved peer next hop must fail closed, \
         not borrow the default adjacency's dst MAC onto the peer egress");
 }
@@ -910,16 +911,17 @@ fn wg_encap_dynamic_only_neighbor_resolves_outer_dst_mac_14657() {
     // RED on pre-fix: the old signature had no dynamic map to pass, so this
     // call resolved with `None` and returned `None`.
     assert!(
-        wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state).is_none(),
+        wg_encap_frame(&inner_v4_frame(), inner_v4_meta(), &decision, &state, None).map(|(frame, _)| frame).is_none(),
         "without the dynamic map the dynamic-only neighbor must fail closed (#13978 preserved)"
     );
-    let out = wg_encap_frame_with_dynamic(
+    let out = wg_encap_frame(
         &inner_v4_frame(),
         inner_v4_meta(),
         &decision,
         &state,
         Some(&dynamic),
     )
+    .map(|(frame, _)| frame)
     .expect("dynamic-only underlay neighbor must resolve the WG outer dst MAC");
     assert_eq!(
         &out[0..6], &DYNAMIC_MAC,
@@ -934,7 +936,7 @@ fn wg_encap_dynamic_only_neighbor_resolves_outer_dst_mac_14657() {
 #[test]
 fn wg_encap_dynamic_only_neighbor_via_forwarded_builder_14657() {
     // Same mechanism through the production builder wiring
-    // (`build_forwarded_frame_from_frame_with_dynamic`), so deleting the
+    // (`build_forwarded_frame_from_frame`), so deleting the
     // dynamic threading at the frame/mod.rs dispatch arm reds here too.
     let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
     let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
@@ -948,7 +950,7 @@ fn wg_encap_dynamic_only_neighbor_via_forwarded_builder_14657() {
         crate::afxdp::types::NeighborEntry { mac: DYNAMIC_MAC },
     );
     let decision = wg_encap_decision();
-    let built = crate::afxdp::frame::build_forwarded_frame_from_frame_with_dynamic(
+    let built = crate::afxdp::frame::build_forwarded_frame_from_frame(
         &inner_v4_frame(),
         inner_v4_meta(),
         &decision,
@@ -957,6 +959,7 @@ fn wg_encap_dynamic_only_neighbor_via_forwarded_builder_14657() {
         None,
         Some(&dynamic),
     )
+    .map(|(frame, _)| frame)
     .expect("forwarded builder must encapsulate when the peer next hop is dynamic-only");
     assert_eq!(
         &built[0..6], &DYNAMIC_MAC,
@@ -1015,31 +1018,38 @@ fn wg_encap_dynamic_only_neighbor_via_nat64_builder_14657() {
     synthetic_dst[12..].copy_from_slice(&peer_b_dst.octets());
     nat64_frame[38..54].copy_from_slice(&synthetic_dst);
     // RED on pre-fix: the selected peer (B) resolves only via the dynamic
-    // map, so the None-wrapper must fail closed (#13978 preserved).
+    // map is absent here, so the production builder must fail closed (#13978).
     assert!(
-        crate::afxdp::frame::build_nat64_forwarded_frame(
+        crate::afxdp::frame::build_nat64_forwarded_frames(
             &nat64_frame,
             nat64_meta,
             &decision,
             None,
             false,
             &state,
+            0,
+            0,
+            None,
         )
         .is_none(),
         "NAT64 encap must fail closed when the selected peer's next hop is dynamic-only and no map is threaded"
     );
-    let built = crate::afxdp::frame::build_nat64_forwarded_frame_with_dynamic(
+    let built = crate::afxdp::frame::build_nat64_forwarded_frames(
         &nat64_frame,
         nat64_meta,
         &decision,
         None,
         false,
         &state,
+        0,
+        0,
         Some(&dynamic),
     )
     .expect("NAT64 builder must encapsulate with the dynamic map threaded");
+    assert_eq!(built.len(), 1);
     assert_eq!(
-        &built[0..6], &DYNAMIC_MAC,
+        &built[0].0[0..6],
+        &DYNAMIC_MAC,
         "NAT64 outer dst MAC must be peer B's dynamic neighbor MAC"
     );
 }
@@ -1095,8 +1105,7 @@ fn wg_transit_egress_dispatch_specific_peer_no_default_6308() {
             &state,
             &frame,
             meta.addr_family,
-            meta.l3_offset,
-        ),
+            meta.l3_offset, None),
         Some(12),
         "WG dispatch must resolve the SELECTED peer's physical egress \
          (reth0.80 ifindex 12), not the logical wgN ifindex (400)"
@@ -1162,8 +1171,7 @@ fn wg_transit_egress_dispatch_specific_peer_no_default_6308() {
             &state,
             &frame,
             meta.addr_family,
-            meta.l3_offset,
-        ),
+            meta.l3_offset, None),
         None,
         "a non-WG decision must not trigger the WG dispatch resolution"
     );
@@ -1258,8 +1266,7 @@ fn wg_transit_egress_dispatch_follows_post_nat_peer_6308() {
             &state,
             &frame,
             meta.addr_family,
-            meta.l3_offset,
-        ),
+            meta.l3_offset, None),
         Some(peer_a_egress),
         "without DNAT the frame egresses peer A (reth0.80 ifindex 12)"
     );
@@ -1274,8 +1281,7 @@ fn wg_transit_egress_dispatch_follows_post_nat_peer_6308() {
             &state,
             &frame,
             meta.addr_family,
-            meta.l3_offset,
-        ),
+            meta.l3_offset, None),
         Some(peer_b_egress),
         "DNAT-across-peers: dispatch must follow the POST-NAT dst to peer B's \
          physical egress (reth0.50 ifindex 13), NOT the pre-NAT peer A (12)"
@@ -1359,8 +1365,7 @@ fn nat64_wg_dispatch_follows_translated_peer_14117() {
             &state,
             &frame,
             meta.addr_family,
-            meta.l3_offset,
-        ),
+            meta.l3_offset, None),
         Some(peer_b_egress),
         "NAT64 dispatch must resolve the translated destination's peer-B \
          physical egress (reth0.50 ifindex 13), not the logical wgN fallback"
@@ -1408,8 +1413,7 @@ fn nat64_wg_dispatch_follows_translated_peer_14117() {
         &decision,
         None,
         false,
-        &state,
-    )
+        &state, None)
     .expect("NAT64->WG encapsulation must build for the translated peer");
     // Peer B egresses reth0.50 (VLAN 50), so the outer carries its 802.1Q tag.
     let outer_l3 = if &built[12..14] == [0x81, 0x00] { 18 } else { 14 };
@@ -1448,8 +1452,7 @@ fn nat64_wg_dispatch_reverse_keeps_logical_fallback_14117() {
             &state,
             &frame,
             meta.addr_family,
-            meta.l3_offset,
-        ),
+            meta.l3_offset, None),
         None,
         "reverse NAT64 must not guess a peer from the pre-translation destination"
     );
@@ -1466,8 +1469,7 @@ fn nat64_wg_dispatch_reverse_keeps_logical_fallback_14117() {
             &state,
             &v6frame,
             v6meta.addr_family,
-            v6meta.l3_offset,
-        ),
+            v6meta.l3_offset, None),
         None,
         "forward NAT64 without rewrite_dst must fail closed to the logical fallback"
     );
@@ -1548,7 +1550,7 @@ fn wg_encap_frame_sources_outer_from_physical_wan_primary_v6() {
 
     let decision = wg_encap_decision();
     let frame = inner_v6_frame();
-    let out = wg_encap_frame(&frame, inner_v6_meta(), &decision, &state)
+    let out = wg_encap_frame(&frame, inner_v6_meta(), &decision, &state, None).map(|(frame, _)| frame)
         .expect("wg_encap_frame must build a v6 outer (established session, routed peer)");
 
     // #5292: the outer now carries reth0.80's VLAN 80 tag, so the layout is
@@ -1602,7 +1604,7 @@ fn wg_encap_in_place_matches_separate_buffer() {
         packet_trimmed_len(inner_packet, libc::AF_INET as u8).unwrap();
     let expected_inner = inner_packet[..inner_len].to_vec();
 
-    let out = wg_encap_frame(&frame, inner_v4_meta(), &decision, &state)
+    let out = wg_encap_frame(&frame, inner_v4_meta(), &decision, &state, None).map(|(frame, _)| frame)
         .expect("wg_encap_frame must build (established session, routed peer)");
 
     // Outer framing: #5292 tags reth0.80's VLAN 80, so eth(18, 802.1Q) +
@@ -1947,8 +1949,7 @@ fn build_forwarded_frame_from_frame_encapsulates_wireguard_7167() {
         &decision,
         &state,
         false,
-        None,
-    )
+        None, None).map(|(frame, _)| frame)
     .expect(
         "the tunnel-kind dispatcher must route TunnelKind::WireGuard to wg_encap_frame; \
          `None` here means the arm was deleted and every WG packet now fail-closed drops",
@@ -1998,6 +1999,12 @@ fn build_forwarded_frame_from_frame_encapsulates_wireguard_7167() {
 /// The v6 WG fixture from `wg_encap_frame_sources_outer_from_physical_wan_primary_v6`,
 /// plus the local outer source in `local_v6` so a PTB addressed to it is ours.
 fn pmtu_v6_state() -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
+    pmtu_v6_state_with_route_mtu(0)
+}
+
+fn pmtu_v6_state_with_route_mtu(
+    route_mtu: i32,
+) -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
     let mut snap = wg_outer_mtu_snapshot();
     snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
     snap.interfaces[1].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00:dead::1/64".to_string(), scope: 0, ..Default::default() });
@@ -2009,7 +2016,7 @@ fn pmtu_v6_state() -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
     discard: false,
     next_table: String::new(),
     preference: 0,
-    rule_priority: 0, mtu: 0, next_table_route: false });
+    rule_priority: 0, mtu: route_mtu, next_table_route: false });
     snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
     snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
     snap.tunnel_endpoints[0].source = "2001:559:8585:80::8".to_string();
@@ -2051,6 +2058,54 @@ fn ptb_v6_frame(outer_src: &str, peer_ep: std::net::SocketAddr, mtu: u32, src_po
     f
 }
 
+fn pmtu_v4_state() -> (ForwardingState, std::net::SocketAddr) {
+    let snap = wg_outer_mtu_snapshot();
+    let mut state = build_forwarding_state(&snap);
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    state.wg_engines.insert(
+        1,
+        Arc::new(established_initiator_engine(peer_ep, "10.123.0.0/24")),
+    );
+    (state, peer_ep)
+}
+
+fn ptb_v4_frame(
+    outer_src: &str,
+    peer_ep: std::net::SocketAddr,
+    mtu: u16,
+    src_port: u16,
+    dst_port: u16,
+) -> Vec<u8> {
+    let src: std::net::Ipv4Addr = outer_src.parse().unwrap();
+    let dst = match peer_ep.ip() {
+        IpAddr::V4(v4) => v4,
+        _ => panic!("v4 peer"),
+    };
+    let mut quote = vec![0x45, 0];
+    quote.extend_from_slice(&28u16.to_be_bytes());
+    quote.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    quote.extend_from_slice(&src.octets());
+    quote.extend_from_slice(&dst.octets());
+    quote.extend_from_slice(&src_port.to_be_bytes());
+    quote.extend_from_slice(&dst_port.to_be_bytes());
+    quote.extend_from_slice(&[0u8; 4]);
+
+    let router: std::net::Ipv4Addr = "172.16.80.1".parse().unwrap();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+    frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    frame.extend_from_slice(&[0x08, 0x00]);
+    frame.extend_from_slice(&[0x45, 0]);
+    frame.extend_from_slice(&((20 + 8 + quote.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0, 0, 0, 64, 1, 0, 0]);
+    frame.extend_from_slice(&router.octets());
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&[3, 4, 0, 0, 0, 0]);
+    frame.extend_from_slice(&mtu.to_be_bytes());
+    frame.extend_from_slice(&quote);
+    frame
+}
+
 /// Inner v6 frame with a UDP payload of `total_inner_len` L3 bytes.
 fn inner_v6_frame_sized(total_inner_len: usize) -> Vec<u8> {
     let src_ip: std::net::Ipv6Addr = "fd00:61::50".parse().unwrap();
@@ -2082,21 +2137,21 @@ fn wg_pmtu_ptb_learns_and_caps_encap_16711() {
     let decision = wg_encap_decision();
     // Pre-PTB: a 1320-byte inner fits the 1500 local MTU (outer 1400).
     let inner = inner_v6_frame_sized(1320);
-    assert!(wg_encap_frame(&inner, inner_v6_meta(), &decision, &state).is_some(),
+    assert!(wg_encap_frame(&inner, inner_v6_meta(), &decision, &state, None).map(|(frame, _)| frame).is_some(),
         "pre-PTB 1320 inner must encap at local 1500");
     // Valid PTB(1400) quoting the live peer outer (src port = listen 51820).
     let ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 1400, 51820, 51820);
     assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
     // Post-PTB: post_transform inner MTU advertises wg_inner_mtu(v6,1400)=1320.
-    let inner_mtu = crate::afxdp::icmp_ptb::post_transform_inner_mtu(&decision, &state, false, libc::AF_INET6 as u8, 0, Some("fd00:123::9".parse().unwrap()));
+    let inner_mtu = crate::afxdp::icmp_ptb::post_transform_inner_mtu(&decision, &state, false, libc::AF_INET6 as u8, 0, Some("fd00:123::9".parse().unwrap()), None);
     assert_eq!(inner_mtu, crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET6, 1400));
     assert_eq!(inner_mtu, 1320);
     // Next 1321-byte inner now exceeds the learned budget (encap guard drops).
     // (1320 exactly fits: outer = 1320+80 = 1400.)
-    assert!(wg_encap_frame(&inner, inner_v6_meta(), &decision, &state).is_some(),
+    assert!(wg_encap_frame(&inner, inner_v6_meta(), &decision, &state, None).map(|(frame, _)| frame).is_some(),
         "1320 inner must still encap after PTB(1400) (outer exactly 1400)");
     let big = inner_v6_frame_sized(1321);
-    assert!(wg_encap_frame(&big, inner_v6_meta(), &decision, &state).is_none(),
+    assert!(wg_encap_frame(&big, inner_v6_meta(), &decision, &state, None).map(|(frame, _)| frame).is_none(),
         "1321 inner must drop after PTB(1400): outer 1401 > learned 1400");
 }
 
@@ -2128,9 +2183,97 @@ fn wg_pmtu_forged_ptb_ignored_16711() {
 fn wg_pmtu_floor_and_aging_16711() {
     // Pure store rules: sub-floor v6 PTB clamps to 1280; aged entry expires.
     assert_eq!(crate::afxdp::wg::pmtu::wg_pmtu_floor(true), 1280);
-    assert_eq!(crate::afxdp::wg::pmtu::pmtu_after_offer(None, 1000, true), Some(1280));
-    assert_eq!(crate::afxdp::wg::pmtu::pmtu_after_offer(Some(1400), 1500, true), None);
+    assert_eq!(
+        crate::afxdp::wg::pmtu::pmtu_after_offer(None, 1000, true, 1500),
+        Some(1280)
+    );
+    assert_eq!(
+        crate::afxdp::wg::pmtu::pmtu_after_offer(Some(1400), 1500, true, 1500),
+        None
+    );
     let t0 = 1_000_000u64;
     assert_eq!(crate::afxdp::wg::pmtu::effective_pmtu(1400, t0, t0 + 1000), Some(1400));
-    assert_eq!(crate::afxdp::wg::pmtu::effective_pmtu(1400, t0, t0 + crate::afxdp::wg::pmtu::WG_PMTU_AGE_NS + 1), None);
+    assert_eq!(
+        crate::afxdp::wg::pmtu::effective_pmtu(
+            1400,
+            t0,
+            t0 + crate::afxdp::wg::pmtu::WG_PMTU_AGE_NS + 1
+        ),
+        None
+    );
 }
+
+#[test]
+fn wg_pmtu_ceiling_clamps_offer_and_preserves_floor_shrink_17747() {
+    use crate::afxdp::wg::pmtu::pmtu_after_offer as offer;
+    assert_eq!(offer(None, 9000, true, 1500), Some(1500));
+    assert_eq!(offer(None, 1400, true, 1500), Some(1400));
+    // The family floor still wins if the local MTU is smaller than it.
+    assert_eq!(offer(None, 9000, true, 1000), Some(1280));
+    // The capped result remains shrink-only against a fresh stored value.
+    assert_eq!(offer(Some(1400), 9000, true, 1500), None);
+    assert_eq!(offer(Some(1500), 1400, true, 1500), Some(1400));
+    // Unknown local MTU keeps the previous unbounded offer behavior.
+    assert_eq!(offer(None, 9000, true, 0), Some(9000));
+    // The IPv4 twin obeys its 68-byte floor and the same local ceiling.
+    assert_eq!(offer(None, 9000, false, 1500), Some(1500));
+    assert_eq!(offer(None, 10, false, 1500), Some(68));
+}
+
+#[test]
+fn wg_pmtu_ptb_clamps_to_local_egress_budget_17747() {
+    let (state, peer_ep, _s) = pmtu_v6_state();
+    let engine = state.wg_engines.get(&1).unwrap();
+    let pk = engine.peer_endpoints()[0].0;
+    // Valid first PTB advertising 9000 on a 1500 local egress: the store
+    // must carry the local budget, not the unbound advertised value.
+    let ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 9000, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
+    assert_eq!(engine.peer_pmtu(&pk, monotonic_nanos()), Some(1500),
+        "oversized validated PTB must be clamped to the 1500 local egress budget");
+    // Control: a normal 1400 PTB on a fresh peer still learns 1400.
+    let (state2, peer_ep2, _s2) = pmtu_v6_state();
+    let engine2 = state2.wg_engines.get(&1).unwrap();
+    let pk2 = engine2.peer_endpoints()[0].0;
+    let ptb2 = ptb_v6_frame("2001:559:8585:80::8", peer_ep2, 1400, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state2, &ptb2, 14), WgPtbOutcome::Learned);
+    assert_eq!(engine2.peer_pmtu(&pk2, monotonic_nanos()), Some(1400));
+    // Control: a forged quote advertising 9000 is still ignored.
+    let (state3, peer_ep3, _s3) = pmtu_v6_state();
+    let engine3 = state3.wg_engines.get(&1).unwrap();
+    let pk3 = engine3.peer_endpoints()[0].0;
+    let forged = ptb_v6_frame("2001:559:8585:80::8", peer_ep3, 9000, 51820, 9999);
+    assert_eq!(consume_wg_outer_ptb(&state3, &forged, 14), WgPtbOutcome::Ignored);
+    assert_eq!(engine3.peer_pmtu(&pk3, monotonic_nanos()), None);
+}
+
+#[test]
+fn wg_pmtu_v4_ptb_clamps_to_local_egress_budget_17747() {
+    let (state, peer_ep) = pmtu_v4_state();
+    let engine = state.wg_engines.get(&1).unwrap();
+    let pk = engine.peer_endpoints()[0].0;
+    let ptb = ptb_v4_frame("172.16.80.8", peer_ep, 9000, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
+    assert_eq!(
+        engine.peer_pmtu(&pk, monotonic_nanos()),
+        Some(1500),
+        "IPv4 oversized PTB must be clamped to the 1500 local egress budget"
+    );
+}
+
+#[test]
+fn wg_pmtu_ptb_clamps_to_static_route_mtu_17747() {
+    // The selected route is tighter than the physical interface: the
+    // learned offer must use min(interface MTU, static route MTU).
+    let (state, peer_ep, _s) = pmtu_v6_state_with_route_mtu(1400);
+    let engine = state.wg_engines.get(&1).unwrap();
+    let pk = engine.peer_endpoints()[0].0;
+    let ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 9000, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
+    assert_eq!(
+        engine.peer_pmtu(&pk, monotonic_nanos()),
+        Some(1400),
+        "static route MTU must cap an oversized PTB below the 1500 interface MTU"
+    );
+}
+

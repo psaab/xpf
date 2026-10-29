@@ -595,26 +595,257 @@ pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
     .unwrap_or(0)
 }
 
+/// #17047: the connected owner of a stored session's destination,
+/// computed ONCE inside `reresolve_stored_session`. `Unknown` is
+/// `dest_rg <= 0` (no connected prefix serves the target — a
+/// gateway-routed destination); it is NOT peer ownership, so the
+/// #16524 routed re-home applies. `Active`/`Inactive` carry the
+/// known owner RG. This replaces the per-caller boolean owner
+/// spelling that
+/// was duplicated at four session_glue sites (and, with opposite
+/// polarity, in reverse synthesis).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) enum DestinationOwner {
+    Unknown,
+    Active(i32),
+    Inactive(i32),
+}
+
+impl DestinationOwner {
+    pub(in crate::afxdp) fn from_dest_rg(
+        dest_rg: i32,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        now_secs: u64,
+    ) -> Self {
+        if dest_rg <= 0 {
+            return DestinationOwner::Unknown;
+        }
+        if ha_state
+            .get(&dest_rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs))
+        {
+            DestinationOwner::Active(dest_rg)
+        } else {
+            DestinationOwner::Inactive(dest_rg)
+        }
+    }
+
+    /// Legacy boolean view used by the retention decision:
+    /// unknown counts as "keep the candidate" (no redirect), a
+    /// known owner counts only when forwarding-active.
+    pub(in crate::afxdp) fn is_active_or_unknown(self) -> bool {
+        matches!(self, DestinationOwner::Unknown | DestinationOwner::Active(_))
+    }
+
+    pub(in crate::afxdp) fn is_unknown(self) -> bool {
+        matches!(self, DestinationOwner::Unknown)
+    }
+}
+
+/// #17047: typed re-resolution context for the stored-session pipeline.
+/// `Packet` carries packet-time facts used by the session enforcement
+/// path (tunnel bypass and fabric adoption); `Command` is the no-packet
+/// HA transition shape, using the stored `fabric_ingress` flag and plain
+/// snapshot enforcement.
+///
+/// Compile-fail note: the enforcement and arrival axes are encoded
+/// together, so `Session` + `Command` and `Snapshot` + `Packet` have
+/// no representable value. The `Command` match arm below explicitly
+/// applies snapshot enforcement.
+#[derive(Clone, Copy)]
+pub(in crate::afxdp) enum FabricArrival<'a> {
+    Packet {
+        fabric_ingress: bool,
+        fabric_link_ingress: bool,
+        ingress_ifindex: i32,
+        ha_startup_grace_until_secs: u64,
+        fabric_adopted: bool,
+        adopted_recovery: Option<&'a AdoptedRecovery>,
+    },
+    Command {
+        fabric_ingress: bool,
+    },
+}
+
+impl FabricArrival<'_> {
+    fn fabric_ingress(self) -> bool {
+        match self {
+            FabricArrival::Packet { fabric_ingress, .. } => fabric_ingress,
+            FabricArrival::Command { fabric_ingress } => fabric_ingress,
+        }
+    }
+    /// Anti-loop flag for the fabric re-redirect composition:
+    /// packet arms use the fabric-LINK arrival; commands pass the
+    /// stored metadata flag, as refresh/demote did.
+    fn redirect_fabric_flag(self) -> bool {
+        match self {
+            FabricArrival::Packet {
+                fabric_link_ingress, ..
+            } => fabric_link_ingress,
+            FabricArrival::Command { fabric_ingress } => fabric_ingress,
+        }
+    }
+    /// Whether the rehome-or-retain verdict is skipped. Packet arms
+    /// skip it on a fabric-LINK arrival (anti-loop); command arms
+    /// NEVER skip it — refresh/demote always ran the verdict, even
+    /// for fabric-ingress companions (the #15958b refresh cells pin
+    /// exactly that shape).
+    fn rehome_skipped(self) -> bool {
+        match self {
+            FabricArrival::Packet {
+                fabric_link_ingress, ..
+            } => fabric_link_ingress,
+            FabricArrival::Command { .. } => false,
+        }
+    }
+}
+
+/// #17047: the ONE stored-session re-resolution pipeline, formerly
+/// spelled out at four session_glue sites (session-hit arm,
+/// reverse-synthesis arm, RefreshOwnerRGS, DemoteOwnerRGS). Every
+/// stage runs exactly as the copies did, in the same order:
+/// fresh lookup (the caller supplies it — hit arms choose cached /
+/// synced / leak-revoked variants the helper must not hide), then
+/// `prefer_local_forward_candidate_for_fabric_ingress`, then HA
+/// enforcement selected by `fabric` (`Packet` uses session enforcement;
+/// `Command` uses snapshot enforcement), then — only for a stored
+/// FabricRedirect — the fabric re-redirect composition and the
+/// rehome-or-retain decision (#15958b + #16524, with
+/// `DestinationOwner` computed inside from the installing table).
+/// Non-redirect stored decisions keep the per-arm fabric redirect:
+/// `_at` (HA-aware DiscardRoute rescue) for packet arms, the plain
+/// wrapper for commands — matching each copy's original else arm.
+///
+/// Returns the final resolution; callers keep their own
+/// post-processing (reverse-hit departed conversion, purge flags,
+/// publish). `install_table` is evaluated once here and shared by
+/// the prefer/owner/rehome stages (the copies evaluated it up to
+/// three times with identical inputs).
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn reresolve_stored_session(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    stored: &SessionDecision,
+    stored_metadata: &SessionMetadata,
+    target: IpAddr,
+    looked_up: ForwardingResolution,
+    fabric: FabricArrival<'_>,
+) -> ForwardingResolution {
+    let install_table = install_table_name_for_session(forwarding, *stored, target);
+    let looked_up = super::prefer_local_forward_candidate_for_fabric_ingress(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        fabric.fabric_ingress(),
+        target,
+        install_table,
+        looked_up,
+    );
+    let enforced = match fabric {
+        FabricArrival::Packet {
+            ingress_ifindex,
+            ha_startup_grace_until_secs,
+            fabric_adopted,
+            adopted_recovery,
+            ..
+        } => {
+            let enforced = enforce_session_ha_resolution(
+                forwarding,
+                ha_state,
+                now_secs,
+                looked_up,
+                ingress_ifindex,
+                ha_startup_grace_until_secs,
+            );
+            if fabric_adopted {
+                fabric_adopted_resolution(
+                    forwarding,
+                    ha_state,
+                    now_secs,
+                    looked_up,
+                    enforced,
+                    dynamic_neighbors,
+                    target,
+                    adopted_recovery,
+                )
+            } else {
+                enforced
+            }
+        }
+        FabricArrival::Command { .. } => {
+            enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up)
+        }
+    };
+    if stored.resolution.disposition == ForwardingDisposition::FabricRedirect {
+        let owner = DestinationOwner::from_dest_rg(
+            connected_owner_rg_for_target_in_table(forwarding, target, install_table),
+            ha_state,
+            now_secs,
+        );
+        let enforced = redirect_session_via_fabric_if_needed(
+            forwarding,
+            enforced,
+            fabric.redirect_fabric_flag(),
+            stored_metadata.ingress_zone,
+        );
+        if fabric.rehome_skipped() {
+            enforced
+        } else {
+            rehome_or_retain_fabric_redirect(
+                forwarding,
+                stored.resolution,
+                enforced,
+                stored_metadata.egress_zone,
+                owner,
+                Some(target),
+                install_table,
+            )
+        }
+    } else {
+        match fabric {
+            FabricArrival::Packet { .. } => redirect_session_via_fabric_if_needed_at(
+                forwarding,
+                ha_state,
+                now_secs,
+                enforced,
+                fabric.redirect_fabric_flag(),
+                stored_metadata.ingress_zone,
+            ),
+            FabricArrival::Command { .. } => redirect_session_via_fabric_if_needed(
+                forwarding,
+                enforced,
+                fabric.redirect_fabric_flag(),
+                stored_metadata.ingress_zone,
+            ),
+        }
+    }
+}
+
 /// RI-scoped re-home (round-5): the connected-interface test runs
 /// in the session's installing table.
 ///
 /// #16524: when the destination has no connected owner
-/// (`dest_rg == 0`, encoded by callers as
-/// `destination_owner_active == true`), a non-fabric local
+/// (`DestinationOwner::Unknown`), a non-fabric local
 /// ForwardCandidate is not a gateway-route mis-resolution of a
 /// connected LAN destination — it is the correct routed egress
 /// (e.g. an Internet destination via the default gateway). Re-home
-/// it unconditionally. With a known connected owner
-/// (`dest_rg > 0`, also encoded as active), keep the
+/// it unconditionally. With a known connected owner, keep the
 /// connected-interface equality test so a transient split FIB that
 /// still answers via the WAN gateway does not launder the reply
 /// onto WAN egress (#15958b transient-mixed-state).
-pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_scoped_15958b(
+///
+/// #17047: single entry point — the former
+/// `..._scoped_15958b` / `..._16524` boolean twins are gone; the
+/// owner classification is the typed `DestinationOwner`.
+pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect(
     forwarding: &ForwardingState,
     stored: ForwardingResolution,
     candidate: ForwardingResolution,
     destination_zone: u32,
-    destination_owner_active: bool,
+    owner: DestinationOwner,
     target: Option<IpAddr>,
     table: Option<&str>,
 ) -> ForwardingResolution {
@@ -623,37 +854,8 @@ pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_scoped_15958b(
         stored,
         candidate,
         destination_zone,
-        destination_owner_active,
-        // Legacy boolean-only callers cannot distinguish unknown
-        // owner from known-active; preserve their connected test.
-        destination_owner_active && target.is_some(),
-        target,
-        table,
-    )
-}
-
-/// #16524 twin carrying the explicit unknown-owner bit so the
-/// five production callers (which compute `dest_rg` themselves)
-/// can re-home routed destinations. `destination_owner_unknown`
-/// is `dest_rg == 0`.
-#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
-pub(in crate::afxdp) fn rehome_or_retain_fabric_redirect_16524(
-    forwarding: &ForwardingState,
-    stored: ForwardingResolution,
-    candidate: ForwardingResolution,
-    destination_zone: u32,
-    destination_owner_active: bool,
-    destination_owner_unknown: bool,
-    target: Option<IpAddr>,
-    table: Option<&str>,
-) -> ForwardingResolution {
-    rehome_or_retain_fabric_redirect_inner(
-        forwarding,
-        stored,
-        candidate,
-        destination_zone,
-        destination_owner_active,
-        destination_owner_unknown,
+        owner.is_active_or_unknown(),
+        owner.is_unknown(),
         target,
         table,
     )

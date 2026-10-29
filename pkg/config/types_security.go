@@ -2005,14 +2005,18 @@ type Address struct {
 	DNSName      string   `json:"DNSName"`
 	DNSFamily    string   `json:"DNSFamily"`
 	DNSAddresses []string `json:"-"`
-	// DNSLookupFailed records that the latest (re)resolution attempt
-	// FAILED (resolver error) rather than returning an answer — possibly
-	// an empty one. It keeps "resolver failed" distinct from "name has
-	// no addresses" (#16595): on failure DNSAddresses retains the last
-	// good answer (stale-while-error), so a transient outage neither
-	// poisons the policy snapshot nor withdraws a junos-host program.
-	// Runtime state, never persisted.
+	// DNSLookupFailed records that the latest resolution attempt FAILED
+	// (resolver error) rather than returning an answer — possibly an empty
+	// one. It keeps "resolver failed" distinct from "name has no addresses"
+	// (#16595): on failure DNSAddresses retains the last good answer
+	// (stale-while-error), so a transient outage neither poisons the policy
+	// snapshot nor withdraws a junos-host program.
 	DNSLookupFailed bool `json:"-"`
+	// DNSUnresolved marks a dns-name populated from a cold answer cache:
+	// no lookup has run for it yet, so its empty value is not a successful
+	// resolution to zero addresses (#17782). A refresh clears it after either
+	// a successful or failed resolver attempt.
+	DNSUnresolved bool `json:"-"`
 	// ExpandedPrefixes holds the native expansion of `range-address` /
 	// `wildcard-address` (#15673): the minimal CIDR cover of the range
 	// (#16563; at most 62 IPv4 / 254 IPv6 prefixes, no host-count cap)

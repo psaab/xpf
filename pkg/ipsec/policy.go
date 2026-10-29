@@ -217,6 +217,16 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 	// (#2074) so the secrets block below emits no orphan secret for a
 	// connection that was never written.
 	skipped := make(map[string]bool)
+	// #17772: the compiler rejects colliding peer-only PSK selectors, and this
+	// render belt applies the same check to tolerant / peer-synced configs.
+	// Skip every member of an ambiguous connection group so no colliding
+	// secret or connection reaches strongSwan; unrelated VPNs still render.
+	pskIdentityConflicts := make(map[string]config.IPsecPSKIdentityConflict)
+	for _, conflict := range config.IPsecPSKIdentityConflicts(ipsecCfg) {
+		for _, vpnName := range conflict.AffectedVPNs {
+			pskIdentityConflicts[vpnName] = conflict
+		}
+	}
 
 	// renderedMembers accumulates the names of VPNs that survived every
 	// skip check and contributed a child (see renderConfigMembers).
@@ -244,6 +254,12 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 	// Connections are collected first, then emitted grouped by gateway.
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
 		vpn := ipsecCfg.VPNs[name]
+		if conflict, unsafe := pskIdentityConflicts[name]; unsafe {
+			skipped[name] = true
+			slog.Warn("skipping IPsec VPN: peer-only PSK identity collides with another connection or leaves a mixed hostname endpoint without an identity — configure distinct peer identities before loading",
+				"vpn", name, "gateway", conflict.Gateway, "other_vpn", conflict.OtherVPN, "identity", conflict.Identity)
+			continue
+		}
 		// Expand once before writing the connection so an explicit selector set
 		// with no renderable children skips this VPN rather than loading a
 		// connection whose malformed local_ts/remote_ts made charon discard it.
@@ -595,8 +611,9 @@ func (m *Manager) renderConfigMembersWithExternalInterfaceFailClosed(
 		// Fail closed exactly like the responder-only shape above:
 		// commit rejects (validateIPsecResponderIdentityStrict) and
 		// this belt skips the VPN on tolerant load / peer sync. A
-		// mixed hostname+IP list keeps rendering: its IP literals
-		// still scope the secret. Pubkey VPNs are unaffected.
+		// mixed hostname+IP list without a discriminating remote identity
+		// is skipped too: IP selectors cannot cover the resolved hostname
+		// endpoint (#17772). Pubkey VPNs are unaffected.
 		// #16845: an unspecified-only address (0.0.0.0/::) or an
 		// ID_ANY remote-identity likewise yields no selector here
 		// (pskPeerSelectors drops unspecified entries and ID_ANY
@@ -1424,59 +1441,11 @@ func pskIDSelectorsLocal(remoteAddr, _ string, gw *config.IPsecGateway) []string
 	return pskPeerSelectors(remoteAddr, gw)
 }
 
-// pskPeerSelectors is the peer-identity discriminator described on
-// pskIDSelectors: explicit remote-id, else the dynamic-hostname @FQDN,
-// else one selector per IP-literal gateway address.
+// pskPeerSelectors delegates the shared peer-identity selector calculation
+// to config. That same calculation drives #17772 cross-connection collision
+// validation, so rendered owners and validated identities cannot drift.
 func pskPeerSelectors(remoteAddr string, gw *config.IPsecGateway) []string {
-	var ids []string
-	seen := make(map[string]bool)
-	add := func(v string) {
-		if v == "" || seen[v] {
-			return
-		}
-		seen[v] = true
-		ids = append(ids, v)
-	}
-	// Remote peer identity — the discriminator. Prefer the explicit
-	// remote-id (the identity the peer presents / we expect), else the
-	// concrete remote gateway address. remoteAddr may be a comma-
-	// separated multi-address list (the same list rendered verbatim
-	// into remote_addrs): emit one selector per address (#14139,
-	// D5-06). The whole comma-joined string is not an IKE identity —
-	// it matches no peer, silently leaving the secret unscoped for
-	// every address in the list.
-	if gw != nil && gw.RemoteIDValue != "" && !config.IsAnyIPsecRemoteIdentity(gw.RemoteIDType, gw.RemoteIDValue) {
-		add(formatIdentity(gw.RemoteIDType, gw.RemoteIDValue))
-	} else if gw != nil && gw.DynamicHostname != "" {
-		// #14590: a dynamic-hostname peer is matched by its presented
-		// FQDN identity, so the PSK is scoped by @FQDN — never by the
-		// bare hostname as a dial address.
-		add(formatIdentity("hostname", gw.DynamicHostname))
-	} else {
-		// #16680: a hostname dial target is not an IKE identity. Junos
-		// defaults the peer identity to the resolved IP, and strongSwan
-		// likewise presents its IP when no id is negotiated, so a
-		// hostname string can never match the peer that actually
-		// presents. Skip non-IP entries here. IP literals keep the
-		// #3952/#14139 per-address discriminator. A hostname-only
-		// gateway with no remote-identity yields no selector: #16708
-		// skips/rejects that shape rather than scoping the secret by
-		// a box-shared local owner (see pskIDSelectors).
-		for _, addr := range strings.Split(remoteAddr, ",") {
-			addr = strings.TrimSpace(addr)
-			// #16845: an unspecified address (0.0.0.0/::) is ID_ANY,
-			// not a peer selector — emitting it would scope the
-			// secret to any peer.
-			if config.IsAnyIPsecSelector(addr) {
-				continue
-			}
-			if _, err := netip.ParseAddr(addr); err != nil {
-				continue
-			}
-			add(addr)
-		}
-	}
-	return ids
+	return config.IPsecPSKPeerSelectors(remoteAddr, gw)
 }
 
 // defaultRemoteID returns the implicit remote identity for a PSK gateway

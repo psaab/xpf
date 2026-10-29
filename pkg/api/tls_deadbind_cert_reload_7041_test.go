@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"net"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -218,6 +220,93 @@ func TestHTTPSCertFailureAfterBindClosesTheListener_7041(t *testing.T) {
 	}
 	if s.HTTPSServing() {
 		t.Fatal("a cert failure must not leave HTTPS serving")
+	}
+}
+
+// TestHTTPSCertFailureAfterBindKeepsScopeRetryDebt_7041 combines the
+// bind-before-plan certificate failure with a same-address VRF transition.
+// The just-bound B socket must close while the serving A leg and its scope
+// record remain installed; the next reconcile must therefore bind B again.
+func TestHTTPSCertFailureAfterBindKeepsScopeRetryDebt_7041(t *testing.T) {
+	dir := t.TempDir()
+	certErr := errors.New("cert: transient unreadable key material")
+	certCalls := 0
+	var bindAttempts int
+	var bound []*countingLn
+	s := &Server{
+		customListen: true,
+		listen: func(string, string) (net.Listener, error) {
+			bindAttempts++
+			ln := newCountingLn()
+			bound = append(bound, ln)
+			return ln, nil
+		},
+		certGen: func(hosts []string) (tls.Certificate, *x509.Certificate, error) {
+			certCalls++
+			if certCalls == 2 {
+				return tls.Certificate{}, nil, certErr
+			}
+			return generateSelfSignedCertAtWithStatusHosts(
+				dir, filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"), hosts)
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.rootCtx = ctx
+	t.Cleanup(func() {
+		cancel()
+		s.Wait()
+	})
+
+	const addr = addr7041
+	s.SetBindDevices(map[string]string{addr: "vrf-a"})
+	oldPlan, err := s.planHTTPSLeg(addr)
+	if err != nil {
+		t.Fatalf("build scope-A HTTPS plan: %v", err)
+	}
+	oldLn := newCountingLn()
+	oldLeg := s.serveLegLocked(oldPlan, oldLn, true)
+	s.httpsLegs = []*listenerLeg{oldLeg}
+	s.httpsServers = []*http.Server{oldPlan.srv}
+	s.httpsSlots = []*authSlot{oldPlan.slot}
+	s.legDevices = map[string]string{addr: "vrf-a"}
+
+	s.SetBindDevices(map[string]string{addr: "vrf-b"})
+	err = s.ReconcileHTTPS(true, addr)
+	if err == nil || !errors.Is(err, certErr) {
+		t.Fatalf("first scope-B reconcile error = %v, want cert error %v", err, certErr)
+	}
+	if !oldLeg.serving() {
+		t.Fatal("certificate failure must retain the old scope-A HTTPS leg")
+	}
+	if got := bound[0].closeCount(); got != 1 {
+		t.Fatalf("failed scope-B socket closed %d times, want exactly once", got)
+	}
+	s.lifeMu.Lock()
+	gotScope := s.legDeviceLocked(addr)
+	retained := len(s.httpsLegs) == 1 && s.httpsLegs[0] == oldLeg
+	s.lifeMu.Unlock()
+	if gotScope != "vrf-a" {
+		t.Fatalf("scope record after cert failure = %q, want retained live scope vrf-a", gotScope)
+	}
+	if !retained {
+		t.Fatal("certificate failure replaced the old HTTPS leg")
+	}
+
+	if err := s.ReconcileHTTPS(true, addr); err != nil {
+		t.Fatalf("retry scope-B reconcile: %v", err)
+	}
+	if bindAttempts != 2 {
+		t.Fatalf("scope-change retry made %d binds, want a fresh B bind after the failed plan", bindAttempts)
+	}
+	s.lifeMu.Lock()
+	gotScope = s.legDeviceLocked(addr)
+	replaced := len(s.httpsLegs) == 1 && s.httpsLegs[0] != oldLeg && s.httpsLegs[0].ln == bound[1]
+	s.lifeMu.Unlock()
+	if gotScope != "vrf-b" {
+		t.Fatalf("successful retry scope record = %q, want vrf-b", gotScope)
+	}
+	if !replaced {
+		t.Fatal("successful retry did not install the newly bound scope-B leg")
 	}
 }
 

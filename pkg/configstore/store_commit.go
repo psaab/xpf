@@ -609,13 +609,7 @@ func (s *Store) CommitConfirmedAs(principal string, minutes int) (*config.Config
 // generation (#5848), the commit-confirmed analogue of CommitWithDescriptionGen.
 // It promotes+arms the auto-rollback timer ONLY if the candidate generation
 // still equals expectedGen, else returns ErrCandidateGenerationConflict without
-// mutating state. The rollback TARGET (the current active config the daemon
-// pre-flighted) is stable across the transaction: the daemon holds its apply
-// semaphore from pre-flight through this call, and every path that mutates the
-// active config (commit, commit-confirmed, peer SyncApply, confirm-timeout
-// rollback) runs under that same semaphore — so binding the (racy, semaphore-
-// free) candidate generation is sufficient to keep both the promoted candidate
-// and the stashed rollback target bound to what was examined.
+// mutating state.
 func (s *Store) CommitConfirmedGen(minutes int, expectedGen uint64) (*config.Config, error) {
 	return s.CommitConfirmedGenAs(InternalCommitter(), minutes, expectedGen)
 }
@@ -632,14 +626,35 @@ func (s *Store) CommitConfirmedGen(minutes int, expectedGen uint64) (*config.Con
 func (s *Store) CommitConfirmedGenAs(
 	authority CommitAuthority, minutes int, expectedGen uint64,
 ) (*config.Config, error) {
+	return s.commitConfirmedGenAs(authority, minutes, expectedGen, 0, false)
+}
+
+// CommitConfirmedGenAndConfirmAs additionally binds the rollback-window
+// generation captured with the daemon's rollback-target pre-flight. A
+// concurrent ConfirmCommit can clear that window without taking the daemon's
+// apply semaphore; rejecting a stale window here ensures the arm cannot save a
+// replacement target that the daemon did not examine.
+func (s *Store) CommitConfirmedGenAndConfirmAs(
+	authority CommitAuthority, minutes int, expectedCandidateGen, expectedConfirmGen uint64,
+) (*config.Config, error) {
+	return s.commitConfirmedGenAs(authority, minutes, expectedCandidateGen, expectedConfirmGen, true)
+}
+
+func (s *Store) commitConfirmedGenAs(
+	authority CommitAuthority, minutes int, expectedCandidateGen, expectedConfirmGen uint64, bindConfirmGen bool,
+) (*config.Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.verifyCommitAuthorityLocked(authority); err != nil {
 		return nil, err
 	}
-	if s.candidateGen != expectedGen {
+	if s.candidateGen != expectedCandidateGen {
 		return nil, fmt.Errorf("%w (examined generation %d, current %d)",
-			ErrCandidateGenerationConflict, expectedGen, s.candidateGen)
+			ErrCandidateGenerationConflict, expectedCandidateGen, s.candidateGen)
+	}
+	if bindConfirmGen && s.confirmGen != expectedConfirmGen {
+		return nil, fmt.Errorf("%w (examined rollback-window generation %d, current %d)",
+			ErrRollbackTargetChanged, expectedConfirmGen, s.confirmGen)
 	}
 	return s.commitConfirmedLocked(minutes, authority.JournalPrincipal())
 }
@@ -1731,7 +1746,9 @@ type CommitHistoryRow struct {
 // fewer than `limit` commits can come back when other actions
 // interleave. limit <= 0 reads everything subject to the per-segment
 // byte cap (persist_failure_test relies on it).
-// No Store.mu needed: the journal serializes Log/Tail internally.
+// ListCommitHistory obtains the rows from ListCommitHistoryRows, which holds
+// Store.mu while pairing the journal tail with the active tree and retained
+// ladder, so concurrent commits cannot mix generations across those sources.
 func (s *Store) ListCommitHistory(limit int) ([]*JournalEntry, error) {
 	rows, err := s.ListCommitHistoryRows(limit)
 	if err != nil {
@@ -1748,84 +1765,89 @@ func (s *Store) ListCommitHistory(limit int) ([]*JournalEntry, error) {
 // label of each row (#16721). Rows stay in journal order (most recent
 // last); rendering most-recent-first is the renderer's job.
 //
-// Label derivation is positional, not hash-based. Every
-// history-pushing commit (commit / commit_confirmed promotion)
-// appends exactly one journal row and pushes exactly one history
-// entry in the same critical section. The entry a commit pushes is
-// its displaced active tree — i.e. the PREVIOUS commit's promoted
-// tree, keeping its identity as it moves into slot 1, then slot 2,
-// and so on. Slot k therefore holds the tree produced by the commit
-// that is k steps older than the live one, and `rollback k` restores
-// exactly that tree. So the acceptance property — row label k names
-// the commit that `rollback k` restores — is satisfied by labelling
-// the live (newest) commit 0 (`rollback 0` = its active tree) and
-// counting 1,2,... newest-first. Equivalently in slot terms:
-// `rollback k` undoes the (k+1) newest commits, landing on the
-// k-labelled commit's tree. A label k>=1 is printed only while that
-// commit's tree is still retained (history depth >= k).
-// commit_confirm and auto_rollback rows push no history entry and
-// never get a label. Positional alignment stays exact for
-// duplicate-content commits where hash matching would alias. An
-// auto_rollback row also suppresses the label of the
-// commit_confirmed commit it reverted (that tree exists in no
-// slot); labelling resumes at the restored generation.
+// Labels are reconciled against the actual active tree and retained ladder
+// using each commit row's ConfigHash, the hash of the same Format() text
+// stored in rollback slots. Rows with no matching active/retained tree stay
+// unlabelled. Matching is one-to-one and newest-first per hash, preserving
+// distinct commit rows even when consecutive commits have identical trees.
+// commit_confirm and auto_rollback rows never receive labels. An
+// auto_rollback row also suppresses the nearest earlier commit row it
+// reverted before the remaining rows are matched to the restored active
+// generation and ladder.
 //
-// Caveat (auto-rollback): PromoteRollback reverts the active tree
-// without popping the ladder and without re-running
-// saveRollbackFiles, so the on-disk slots — what `rollback N` reads
-// via the reloaded ladder — still hold the pushed trees; positional
-// labels stay aligned with the slots after a timeout revert as well.
-//
-// Known positional skew: a history-pushing commit cut off by the
-// bounded Tail(limit) window, or a SyncApply that pushed a history
-// entry without a commit journal row (it journals config_sync, which
-// is filtered out), shifts the alignment of older rows in the window.
-// A skewed label can at worst name a neighbouring generation —
-// `rollback` only stages into the candidate and `show | compare`
-// exposes the staged tree before any commit.
+// A config_sync that changes the active hash is a generation barrier: its
+// active generation has no commit row, so older same-hash commit rows may
+// match retained slots but cannot claim live slot 0. An equivalent sync
+// creates no barrier. This also avoids positional skew after sync pushes
+// without commit rows or journal-tail truncation. The rows remain limited
+// to the bounded journal tail; generations with no matching row stay
+// unlabelled.
 func (s *Store) ListCommitHistoryRows(limit int) ([]CommitHistoryRow, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	entries, err := s.journal.Tail(limit)
 	if err != nil {
 		return nil, err
 	}
-	// Retained ladder depth bounds which pre-images still exist.
-	s.mu.RLock()
-	ladder := s.history.Len()
-	s.mu.RUnlock()
 	var rows []CommitHistoryRow
+	syncBoundary := 0
+	activeHash := ""
 	for _, e := range entries {
 		switch e.Action {
-		case "commit", "commit_confirmed", "auto_rollback", "commit_confirm":
+		case "commit", "commit_confirmed", "auto_rollback":
 			rows = append(rows, CommitHistoryRow{Entry: e, RollbackSlot: -1})
+			activeHash = e.ConfigHash
+		case "commit_confirm":
+			rows = append(rows, CommitHistoryRow{Entry: e, RollbackSlot: -1})
+		case "config_sync":
+			if e.ConfigHash == "" || activeHash == "" || e.ConfigHash != activeHash {
+				syncBoundary = len(rows)
+			}
+			activeHash = e.ConfigHash
 		}
 	}
-	// Assign labels newest-first among history-pushing rows: the
-	// newest is 0 (live), the next is 1, etc. Label k names the
-	// commit whose tree `rollback k` restores; it is printed only
-	// while that tree is retained (k <= ladder). An auto_rollback
-	// row marks a timeout revert: the commit_confirmed commit it
-	// undid (the newest not-yet-labelled history-pushing row older
-	// than it) had its tree reverted away, so it consumes no label —
-	// labelling resumes with the generation the revert restored.
-	label := 0
-	reverted := 0 // rolled-back commits still to skip (from auto_rollback rows)
+
+	// Index eligible commit rows newest-first by their post-commit tree
+	// hash. A timeout-reverted commit is no longer present in either the
+	// active tree or the retained ladder, so omit it before matching.
+	byHash := make(map[string][]int)
+	reverted := 0
 	for i := len(rows) - 1; i >= 0; i-- {
-		a := rows[i].Entry.Action
-		if a == "auto_rollback" {
+		e := rows[i].Entry
+		switch e.Action {
+		case "auto_rollback":
 			reverted++
-			continue
+		case "commit", "commit_confirmed":
+			if reverted > 0 {
+				reverted--
+				continue
+			}
+			if e.ConfigHash != "" {
+				byHash[e.ConfigHash] = append(byHash[e.ConfigHash], i)
+			}
 		}
-		if a != "commit" && a != "commit_confirmed" {
-			continue
+	}
+
+	// Consume one matching row per real config generation. An active-tree
+	// match must be at or after the latest changed-sync boundary; older
+	// rows cannot stand in for a sync-produced active generation.
+	// Empty hashes and unreadable tombstone slots cannot be labeled.
+	labelTree := func(tree *config.ConfigTree, slot, minimumRow int) {
+		hash := journalConfigHash(tree)
+		matches := byHash[hash]
+		if hash == "" || len(matches) == 0 || matches[0] < minimumRow {
+			return
 		}
-		if reverted > 0 {
-			reverted--
-			continue // this commit's tree was reverted away: no label
+		rows[matches[0]].RollbackSlot = slot
+		byHash[hash] = matches[1:]
+	}
+	labelTree(s.active, 0, syncBoundary)
+	for slot := 1; slot <= s.history.Len(); slot++ {
+		entry, err := s.history.Get(slot - 1)
+		if err == nil && entry != nil {
+			labelTree(entry.Config, slot, 0)
 		}
-		if label == 0 || label <= ladder {
-			rows[i].RollbackSlot = label
-		}
-		label++
 	}
 	return rows, nil
 }
@@ -1855,12 +1877,12 @@ func (s *Store) CommitDiffSummary() string {
 		s.mu.RUnlock()
 		return ""
 	}
-	active := s.active.Clone()
-	candidate := s.candidate.Clone()
+	// Render while the store read lock protects tree traversal. Returned line
+	// strings remain valid after unlock, so diffing can run without cloning
+	// either tree or building the full formatted strings.
+	activeLines := s.active.FormatSetLines(nil)
+	candidateLines := s.candidate.FormatSetLines(activeLines)
 	s.mu.RUnlock()
-
-	activeLines := splitLines(active.FormatSet())
-	candidateLines := splitLines(candidate.FormatSet())
 
 	// Order-aware sequence diff (#15168, B24-01): the previous code sorted
 	// both line lists, so a pure reorder of first-match policies counted as

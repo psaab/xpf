@@ -417,9 +417,9 @@ func (d *Daemon) applyTailReconciles(cfg *config.Config, phase applyPhaseErrors)
 		// effect — but heartbeat timing is not part of clusterTransportKey, so a
 		// timing-only commit never reaches that branch. This is a direct
 		// consequence of the UpdateConfig on the line above, and belongs with
-		// it. The call is a no-op when the timing is unchanged or no heartbeat
-		// is running, so an ordinary commit costs one lock and two comparisons.
-		d.cluster.ApplyCommittedHeartbeatTiming()
+		// with it. The epoch wrapper serializes any restart with teardown and
+		// no-ops if this apply no longer belongs to live comms.
+		d.applyCommittedHeartbeatTimingForCurrentCommsEpoch()
 		// #17132: NO interface-monitor feed here. pkg/cluster.Monitor is the
 		// only producer of interface-monitor debt; UpdateConfig above runs
 		// one immediate interface-only dampened poll (Monitor.PollNow —

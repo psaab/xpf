@@ -20,7 +20,7 @@
 
 use super::*;
 use crate::afxdp::types::EqualFlowTargetPolicy;
-use crate::afxdp::cos::flow_hash::{cos_flow_bucket_index, cos_item_flow_key};
+use crate::afxdp::cos::flow_hash::cos_item_flow_key;
 use crate::afxdp::cos::queue_ops::{
     cos_queue_drain_all, cos_queue_front, cos_queue_front_with_cap, cos_queue_peek_min_bucket,
     cos_queue_pop_front, cos_queue_pop_front_no_snapshot, cos_queue_pop_front_with_cap,

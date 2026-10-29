@@ -263,7 +263,7 @@ func TestCaptureBootstrapLifelineRenamePreExit16675(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			withTempLinkDir(t)
+			dir := withTempLinkDir(t)
 			_ = stubLifelineRename16675(t, tt.live)
 			oldEnum := enumeratePCINICsFn
 			enumeratePCINICsFn = func() ([]pciNIC, error) { return tt.nics, nil }
@@ -275,13 +275,282 @@ func TestCaptureBootstrapLifelineRenamePreExit16675(t *testing.T) {
 					Entries: []config.DeviceMapEntry{{LogicalName: "ge-0/0/0", PCIAddr: "0000:06:00.0"}},
 				}
 			}
-			d := &Daemon{}
+			var store *configstore.Store
+			if tt.wantKernel != "" {
+				store = newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+				commitConfirmedText12154(t, store, "system { host-name capture-test; }")
+				store.CancelConfirmTimerForTesting()
+			}
+			d := &Daemon{store: store}
 			d.captureBootstrapLifelineRenamePreExit(cfg)
 			k, l := d.bootstrapLifelineRenamePair()
 			if k != tt.wantKernel || l != tt.wantLogical {
 				t.Fatalf("captured pair = (%q,%q), want (%q,%q)", k, l, tt.wantKernel, tt.wantLogical)
 			}
+			if tt.wantKernel != "" {
+				data, err := os.ReadFile(filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json"))
+				if err != nil {
+					t.Fatalf("successful capture did not persist durable rename provenance: %v", err)
+				}
+				var record struct {
+					Generation  string `json:"generation"`
+					KernelName  string `json:"kernel_name"`
+					LogicalName string `json:"logical_name"`
+				}
+				if err := json.Unmarshal(data, &record); err != nil {
+					t.Fatalf("decode durable rename provenance: %v", err)
+				}
+				if record.Generation != store.ActiveConfigGeneration() ||
+					record.KernelName != tt.wantKernel || record.LogicalName != tt.wantLogical {
+					t.Fatalf("durable record = %+v, want active generation and (%q,%q)",
+						record, tt.wantKernel, tt.wantLogical)
+				}
+			}
 		})
+	}
+}
+
+func TestLifelineRenameCaptureWriteFailureDropsMemory17755(t *testing.T) {
+	dir := withTempLinkDir(t)
+	_ = stubLifelineRename16675(t, "enp6s0")
+	oldEnum := enumeratePCINICsFn
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{name: "enp5s0"}, {name: "enp6s0"}}, nil
+	}
+	t.Cleanup(func() { enumeratePCINICsFn = oldEnum })
+
+	// No active Store generation means the durable write cannot be
+	// authenticated. Do not leave a memory-only pair that rollback might use.
+	d := &Daemon{}
+	d.captureBootstrapLifelineRenamePreExit(&config.Config{})
+	if kernel, logical := d.bootstrapLifelineRenamePair(); kernel != "" || logical != "" {
+		t.Fatalf("failed durable capture retained memory-only provenance (%q,%q)", kernel, logical)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed durable capture left a rename record: %v", err)
+	}
+}
+
+func TestStaleLifelineRenameSidecarFallsThroughToEmbedded17755(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      []byte
+		unreadable bool
+		wantPair  bool
+	}{
+		{
+			name: "generation-mismatch",
+			data: []byte(`{"generation":"stale-generation","kernel_name":"enp9s0","logical_name":"ge-0-0-9"}`),
+			wantPair: true,
+		},
+		{name: "corrupt-content", data: []byte(`{`), wantPair: true},
+		{name: "oversized-content", data: []byte(strings.Repeat("x", (1<<20)+1)), wantPair: true},
+		{name: "unreadable-sidecar", unreadable: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := withTempLinkDir(t)
+			store, _ := lifelineRenameStoreWithDebt16675(t, dir, "enp6s0", "ge-0-0-0")
+			sidecar := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
+			if tt.unreadable {
+				if err := os.Mkdir(sidecar, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(sidecar, tt.data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			d := &Daemon{store: store}
+			kernel, logical := d.loadBootstrapLifelineRename()
+			if tt.wantPair {
+				if kernel != "enp6s0" || logical != "ge-0-0-0" {
+					t.Fatalf("pair = (%q,%q), want embedded (enp6s0,ge-0-0-0)", kernel, logical)
+				}
+			} else if kernel != "" || logical != "" {
+				t.Fatalf("unreadable sidecar fell through to untrusted embedded record (%q,%q)", kernel, logical)
+			}
+		})
+	}
+}
+
+func TestBootstrapExitAbortsWhenRenameProvenanceWriteFails17755(t *testing.T) {
+	dir := withTempLinkDir(t)
+	fab := stubLifelineRename16675(t, "enp6s0")
+	oldEnum := enumeratePCINICsFn
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{name: "enp5s0"}, {name: "enp6s0"}}, nil
+	}
+	t.Cleanup(func() { enumeratePCINICsFn = oldEnum })
+
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	commitConfirmedText12154(t, store,
+		"interfaces { fxp0 { unit 0 { family inet { address 192.0.2.99/24; } } } }")
+	store.CancelConfirmTimerForTesting()
+	cfg := store.ActiveConfig()
+	if cfg == nil || store.ActiveConfigGeneration() == "" {
+		t.Fatal("premise: first commit did not promote a generation")
+	}
+	sidecar := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
+	if err := os.Mkdir(sidecar, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{store: store}
+	d.bootstrapMode.Store(true)
+	err := d.maybeExitBootstrapOnFirstConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "durably persist lifeline rename provenance") {
+		t.Fatalf("bootstrap exit error = %v, want durable sidecar write failure", err)
+	}
+	if !d.inBootstrap() {
+		t.Fatal("failed durable capture exited bootstrap before naming")
+	}
+	if kernel, logical := d.bootstrapLifelineRenamePair(); kernel != "" || logical != "" {
+		t.Fatalf("failed durable capture retained memory-only pair (%q,%q)", kernel, logical)
+	}
+	if len(fab.renames) != 0 {
+		t.Fatalf("failed durable capture issued destructive renames: %v", fab.renames)
+	}
+}
+
+func TestConfirmedLifelineRenameClearsSidecar17755(t *testing.T) {
+	dir := withTempLinkDir(t)
+	generation := "confirmed-generation"
+	sidecar := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
+	matchingSidecar := []byte(`{"generation":"confirmed-generation","kernel_name":"enp6s0","logical_name":"ge-0-0-0"}`)
+	if err := os.WriteFile(sidecar, matchingSidecar, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := filepath.Join(dir, bootstrapLifelineSnapshotBase)
+	if err := os.WriteFile(snapshot,
+		[]byte(`{"generation":"confirmed-generation","lifeline_kernel_name":"enp6s0","lifeline_logical_name":"ge-0-0-0"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	d.clearBootstrapLifelineNetwork()
+	if _, err := os.Stat(sidecar); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("confirmed generation kept early rename sidecar: %v", err)
+	}
+	mismatchedGeneration := []byte(`{"generation":"newer-confirmed-generation","kernel_name":"eno1","logical_name":"ge-0-0-1"}`)
+	if err := os.WriteFile(sidecar, mismatchedGeneration, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleDaemon := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	staleDaemon.clearBootstrapLifelineNetwork()
+	remaining, err := os.ReadFile(sidecar)
+	if err != nil || string(remaining) != string(mismatchedGeneration) {
+		t.Fatalf("confirm removed or changed sidecar for another generation: got %q, err=%v", remaining, err)
+	}
+	if _, err := os.Stat(snapshot); err != nil {
+		t.Fatalf("mismatched confirmation removed #12155 durable snapshot: %v", err)
+	}
+	if err := os.Remove(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecar, matchingSidecar, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingSnapshotDaemon := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	missingSnapshotDaemon.clearBootstrapLifelineNetwork()
+	remaining, err = os.ReadFile(sidecar)
+	if err != nil || string(remaining) != string(matchingSidecar) {
+		t.Fatalf("confirm removed or changed sidecar without embedded snapshot provenance: got %q, err=%v", remaining, err)
+	}
+	if err := os.WriteFile(snapshot,
+		[]byte(`{"generation":"confirmed-generation","lifeline_kernel_name":"enp6s0","lifeline_logical_name":"ge-0-0-1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	embeddedMismatchDaemon := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	embeddedMismatchDaemon.clearBootstrapLifelineNetwork()
+	remaining, err = os.ReadFile(sidecar)
+	if err != nil || string(remaining) != string(matchingSidecar) {
+		t.Fatalf("confirm removed or changed sidecar when embedded rename pair differed: got %q, err=%v", remaining, err)
+	}
+	if err := os.WriteFile(snapshot, []byte(`{"generation":"confirmed-generation"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	embeddedEmptyDaemon := &Daemon{bootstrapLifelineRenameGeneration: generation}
+	embeddedEmptyDaemon.clearBootstrapLifelineNetwork()
+	remaining, err = os.ReadFile(sidecar)
+	if err != nil || string(remaining) != string(matchingSidecar) {
+		t.Fatalf("confirm removed or changed sidecar when embedded rename pair was empty: got %q, err=%v", remaining, err)
+	}
+}
+
+// TestConfirmedLifelineRenameCrashBeforeResolutionRetainsSidecar17755
+// witnesses the ordering in which the daemon confirmation hook runs before
+// confirm.json is durably removed. With no embedded snapshot, a crash at that
+// boundary must leave the only rename pair available to the expired-FIRST
+// restart rollback.
+func TestConfirmedLifelineRenameCrashBeforeResolutionRetainsSidecar17755(t *testing.T) {
+	dir := firstCommit12155FilesAndCommands(t)
+	installFakeNetworkctl(t)
+	cfgPath := filepath.Join(t.TempDir(), "xpf.conf")
+	store := newConfigStore(t, cfgPath)
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	commitConfirmedText12154(t, store, "system { host-name crash-window; }\n")
+	generation := store.ActiveConfigGeneration()
+	fab := stubLifelineRename16675(t, "ge-0-0-0")
+	writeTakeoverLink16675(t, dir, "ge-0-0-0", "enp6s0")
+
+	sidecarPath := filepath.Join(dir, bootstrapLifelineRenameBase)
+	sidecarData, err := json.Marshal(bootstrapLifelineRenameRecord{
+		Generation: generation, KernelName: "enp6s0", LogicalName: "ge-0-0-0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecarPath, append(sidecarData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(dir, bootstrapLifelineSnapshotBase)
+	if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("premise: embedded snapshot exists before confirmation: %v", err)
+	}
+	if err := expireConfirmWindow12155(t, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{store: store, bootstrapLifelineRenameGeneration: generation}
+	hookCalled := false
+	store.SetFirstCommitConfirmedHook(func() {
+		hookCalled = true
+		d.clearBootstrapLifelineNetwork()
+		panic("simulated process crash before durable confirm.json resolution")
+	})
+	var crash any
+	func() {
+		defer func() { crash = recover() }()
+		if err := store.ConfirmCommit(); err != nil {
+			t.Fatalf("confirm before simulated crash: %v", err)
+		}
+	}()
+	if !hookCalled || crash == nil {
+		t.Fatal("confirmation did not crash in the pre-resolution hook window")
+	}
+	confirmPath := filepath.Join(filepath.Dir(cfgPath), ".configdb", "confirm.json")
+	if _, err := os.Stat(confirmPath); err != nil {
+		t.Fatalf("simulated crash did not preserve pending confirm.json: %v", err)
+	}
+	if _, err := os.Stat(snapshotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("premise: snapshot appeared before restart: %v", err)
+	}
+
+	restarted := newConfigStore(t, cfgPath)
+	if err := restarted.Load(); err != nil {
+		t.Fatalf("restart load: %v", err)
+	}
+	if !restarted.FirstCommitTeardownOwed() {
+		t.Fatal("expired pending FIRST window did not re-arm rollback teardown")
+	}
+	if got := restarted.FirstCommitTeardownGeneration(); got != generation {
+		t.Fatalf("restart teardown generation=%q, want %q", got, generation)
+	}
+	recovered := &Daemon{store: restarted, opts: Options{NoDataplane: true}}
+	recovered.teardownRecoveredFirstCommitBeforeDataplane()
+	if len(fab.renames) != 1 || fab.renames[0] != [2]string{"ge-0-0-0", "enp6s0"} {
+		t.Fatalf("restart lost the only durable rename pair: renames=%v live=%q", fab.renames, fab.live)
 	}
 }
 
@@ -343,6 +612,69 @@ func TestBootstrapRollbackRestoresRenameFromDurableRecord16675(t *testing.T) {
 	}
 }
 
+// TestRecoveredLifelineRenameClearsSidecar17755 drives a successful recovered
+// first-commit teardown without the in-process applyBodyForTest seam. Recovery
+// restores the embedded network snapshot, then completion clears both durable
+// records, including the matching early rename sidecar.
+func TestRecoveredLifelineRenameClearsSidecar17755(t *testing.T) {
+	dir := withTempLinkDir(t)
+	installFakeNetworkctl(t)
+	fab := stubLifelineRename16675(t, "ge-0-0-0")
+	writeTakeoverLink16675(t, dir, "ge-0-0-0", "enp6s0")
+
+	store, generation := lifelineRenameStoreWithDebt16675(t, dir, "enp6s0", "ge-0-0-0")
+	original := []byte(bootstrapLifelineNetworkMarker +
+		" (recovered snapshot)\n[Match]\nName=fxp0\n\n[Network]\nAddress=192.0.2.1/24\n")
+	snapshotData, err := json.Marshal(bootstrapLifelineSnapshotRecord{
+		Generation:          generation,
+		Network:             original,
+		Present:             true,
+		LifelineKernelName:  "enp6s0",
+		LifelineLogicalName: "ge-0-0-0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(dir, bootstrapLifelineSnapshotBase)
+	if err := os.WriteFile(snapshotPath, append(snapshotData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sidecarPath := filepath.Join(dir, bootstrapLifelineRenameBase)
+	sidecarData, err := json.Marshal(bootstrapLifelineRenameRecord{
+		Generation: generation, KernelName: "enp6s0", LogicalName: "ge-0-0-0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sidecarPath, append(sidecarData, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{store: store, opts: Options{NoDataplane: true}}
+	filesystemDone := d.teardownRecoveredFirstCommitBeforeDataplane()
+	if !filesystemDone {
+		t.Fatal("recovered filesystem teardown did not converge")
+	}
+	d.completeRecoveredFirstCommitTeardown(filesystemDone)
+
+	networkPath := filepath.Join(dir, linkPrefix+"fxp0.network")
+	got, err := os.ReadFile(networkPath)
+	if err != nil || string(got) != string(original) {
+		t.Fatalf("recovered network snapshot = %q, err=%v; want %q", got, err, original)
+	}
+	if len(fab.renames) != 1 || fab.renames[0] != [2]string{"ge-0-0-0", "enp6s0"} {
+		t.Fatalf("recovered lifeline renames = %v, want [ge-0-0-0 -> enp6s0]", fab.renames)
+	}
+	if store.FirstCommitTeardownOwed() {
+		t.Fatal("recovered teardown debt remains after completion")
+	}
+	for _, path := range []string{snapshotPath, sidecarPath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("recovered teardown left durable record %s: %v", path, err)
+		}
+	}
+}
+
 // TestBootstrapRollbackDurableGenerationMismatch16675: a durable pair
 // bound to a DIFFERENT generation is not provenance for this teardown —
 // no rename is issued from it (the scoped unprovenanced check then
@@ -384,5 +716,108 @@ func TestBootstrapRollbackDurableGenerationMismatch16675(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"ge-0-0-0.link")); err != nil {
 		t.Fatalf("mismatched-generation .link must be retained: %v", err)
+	}
+}
+
+// TestCrashWindowLifelineRenameProvenance17755 pins #17755: the rename pair
+// must be durable BEFORE the destructive bootstrap-exit naming runs. The
+// pre-fix path captures it only in memory and persists it only in
+// captureBootstrapLifelineNetwork, which runs after naming + dataplane arm;
+// a crash in between loses it. This cell drives production pre-exit capture,
+// simulates that crash (no captureBootstrapLifelineNetwork), expires the
+// first commit, restarts, and requires rename-back from the durable record.
+func TestCrashWindowLifelineRenameProvenance17755(t *testing.T) {
+	firstCommit12155FilesAndCommands(t)
+	dir := linkDir
+	installFakeNetworkctl(t)
+
+	fab := stubLifelineRename16675(t, "enp6s0")
+	oldEnum := enumeratePCINICsFn
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{name: "enp5s0"}, {name: "enp6s0"}}, nil
+	}
+	t.Cleanup(func() { enumeratePCINICsFn = oldEnum })
+
+	cfgPath := filepath.Join(t.TempDir(), "xpf.conf")
+	store := newConfigStore(t, cfgPath)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride("interfaces { fxp0 { unit 0 { family inet { address 192.0.2.99/24; } } } }"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitConfirmed(10); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+	store.CancelConfirmTimerForTesting()
+	cfg := store.ActiveConfig()
+	if cfg == nil || store.ActiveConfigGeneration() == "" {
+		t.Fatal("premise: first commit did not promote a generation")
+	}
+
+	d := &Daemon{store: store}
+	// This statement intentionally discards the current helper's error return:
+	// the test must also compile on the pre-fix head, where the helper had no
+	// return value. The observable contract is the durable record itself.
+	d.captureBootstrapLifelineRenamePreExit(cfg)
+	if k, l := d.bootstrapLifelineRenamePair(); k != "enp6s0" || l != "ge-0-0-0" {
+		t.Fatalf("pre-exit capture = (%q,%q), want (enp6s0,ge-0-0-0)", k, l)
+	}
+	durablePath := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
+	durable, err := readBootstrapLifelineSnapshot(durablePath)
+	if err != nil {
+		t.Fatalf("rename provenance was not persisted before naming: %v", err)
+	}
+	var record struct {
+		Generation  string `json:"generation"`
+		KernelName  string `json:"kernel_name"`
+		LogicalName string `json:"logical_name"`
+	}
+	if err := json.Unmarshal(durable, &record); err != nil {
+		t.Fatalf("decode pre-naming provenance: %v", err)
+	}
+	if record.Generation != store.ActiveConfigGeneration() ||
+		record.KernelName != "enp6s0" || record.LogicalName != "ge-0-0-0" {
+		t.Fatalf("durable pre-naming record = %+v, want active generation and (enp6s0,ge-0-0-0)", record)
+	}
+	if _, err := os.Stat(filepath.Join(dir, bootstrapLifelineSnapshotBase)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("premise: pre-naming durable record is not the only lifeline record; stat err=%v", err)
+	}
+
+	// CRASH WINDOW: takeover naming runs and renames the lifeline, then the
+	// daemon dies before captureBootstrapLifelineNetwork can persist.
+	if err := renameInterfaceFn("enp6s0", "ge-0-0-0"); err != nil {
+		t.Fatal(err)
+	}
+	writeTakeoverLink16675(t, dir, "ge-0-0-0", "enp6s0")
+	// d is abandoned; nothing else runs in the old process.
+
+	if err := expireConfirmWindow12155(t, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	restartedStore := newConfigStore(t, cfgPath)
+	if err := restartedStore.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !restartedStore.FirstCommitTeardownOwed() {
+		t.Fatal("restart did not re-arm FIRST teardown debt")
+	}
+	restarted := &Daemon{store: restartedStore}
+	steps := restarted.runBootstrapTeardownSteps(true)
+	for _, s := range steps {
+		if s.name == "restore lifeline kernel name" && s.err != nil {
+			t.Fatalf("crash-window rename-back failed: %v (steps=%+v)", s.err, steps)
+		}
+	}
+	if len(fab.renames) != 2 || fab.renames[0] != [2]string{"enp6s0", "ge-0-0-0"} ||
+		fab.renames[1] != [2]string{"ge-0-0-0", "enp6s0"} {
+		t.Fatalf("renames = %v, want takeover then rollback rename-back", fab.renames)
+	}
+	if fab.live != "enp6s0" {
+		t.Fatalf("lifeline live name = %q, want enp6s0 after crash-window rollback", fab.live)
+	}
+	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"ge-0-0-0.link")); !os.IsNotExist(err) {
+		t.Fatalf("crash-window rollback kept takeover .link; stat err=%v", err)
 	}
 }

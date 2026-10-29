@@ -80,6 +80,37 @@ func (d *Daemon) resolveDNSBeforeApply(cfg *config.Config) *config.Config {
 	return clone
 }
 
+func compileDNSRefreshTree(tree *config.ConfigTree, nodeID int) (*config.Config, error) {
+	if nodeID >= 0 {
+		return config.CompileConfigForNodeLenient(tree, nodeID)
+	}
+	return config.CompileConfigLenient(tree)
+}
+
+// resolveCandidateDNSBeforeApply refreshes the current candidate's DNS
+// answers before a commit acquires applySem. CandidateGateSample returns an
+// immutable tree and its generation together; this pass expands node groups
+// with the local node ID before DNS extraction. The commit preflight checks
+// that generation before promoting a DNS-bearing candidate, so a concurrent
+// edit cannot introduce names that this pass did not refresh.
+func (d *Daemon) resolveCandidateDNSBeforeApply() uint64 {
+	if d == nil || d.store == nil {
+		return 0
+	}
+	tree, generation, _ := d.store.CandidateGateSample()
+	if tree == nil {
+		return generation
+	}
+	cfg, err := compileDNSRefreshTree(tree, d.store.NodeID())
+	if err != nil {
+		return generation
+	}
+	if config.HasDNSNames(cfg) {
+		config.RefreshDNSAddressBooks(cfg)
+	}
+	return generation
+}
+
 // dnsBookHasNames reports whether cfg carries any dns-name entry.
 func dnsBookHasNames(cfg *config.Config) bool {
 	if cfg == nil {
@@ -307,9 +338,17 @@ func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string][
 // exactly the same answers. The baseline is keyed to the published clone.
 func (d *Daemon) applyDNSRefreshedConfig(base, refreshed *config.Config) (bool, error) {
 	if !d.beginBackgroundApply(d.backgroundApplyCtx(), "dnsAddressRefresh") {
+		// The refresh clone is marked before this call; admission refusal
+		// must not retain that marker.
+		d.consumeDNSResolved(refreshed)
 		return false, nil
 	}
-	defer d.applySem.Release(1)
+	defer func() {
+		// Consume before releasing applySem so a superseded clone cannot
+		// remain marked for the next serialized apply.
+		d.consumeDNSResolved(refreshed)
+		d.applySem.Release(1)
+	}()
 	if d.store == nil || d.store.ActiveConfig() != base {
 		return false, nil
 	}

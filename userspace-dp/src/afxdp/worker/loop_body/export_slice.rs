@@ -25,8 +25,8 @@ use super::*;
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
 pub(super) fn run_export_slice(
-    mut sessions: &mut crate::session::SessionTable,
-    mut bindings: &mut [BindingWorker],
+    sessions: &mut crate::session::SessionTable,
+    bindings: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
     forwarding: &ForwardingState,
     worker_export: &mut Option<WorkerExportState>,
@@ -40,7 +40,7 @@ pub(super) fn run_export_slice(
         crate::session::SessionMetadata,
         crate::session::SessionOrigin,
     )>,
-    mut shared_recycles: &mut Vec<(u32, u64)>,
+    shared_recycles: &mut Vec<(u32, u64)>,
     shared_runtime: &RuntimeViewReader,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,

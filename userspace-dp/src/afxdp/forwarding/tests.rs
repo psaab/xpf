@@ -1979,7 +1979,6 @@ fn zone_encoded_fabric_stamp_rejected_for_zone_without_rg_members_6458() {
 // #6458 preservation pin: the legitimate split-RG shape — claimed zone
 // `lan` (RG 2) is NOT forwarding-active locally while a DIFFERENT RG (1)
 // is — plus the unicast fabric dst MAC — keeps the override working.
-#[test]
 // #16023 decisive regression (unit half): with require-authenticated set,
 // the byte-identical forged stamp that the split-RG cell below honours
 // (remote-RG zone, unicast dst) is Invalid on an unauthenticated link, in
@@ -2991,7 +2990,7 @@ fn reconcile_build_cannot_launder_refused_neighbor_mac_16555() {
     let original = NeighborEntry {
         mac: [0x02, 0, 0, 0, 0, 1],
     };
-    let spoofed = NeighborEntry {
+    let _spoofed = NeighborEntry {
         mac: [0x02, 0, 0, 0, 0, 2],
     };
     assert!(coordinator.apply_manager_neighbors(true, 1, &[(7, target, original)]));
@@ -5320,7 +5319,7 @@ fn canonical_route_table_borrows_default_and_owns_vrf() {
     // pre-#4674 `String` return type cannot match the `Cow::Borrowed` /
     // `Cow::Owned` patterns, so this test fails to compile against the
     // reverted signature.
-    use crate::afxdp::forwarding::fib::{DEFAULT_V4_TABLE, DEFAULT_V6_TABLE};
+
     use std::borrow::Cow;
 
     // v4 -> v6 default remap: borrowed (zero alloc), equals inet6.0.

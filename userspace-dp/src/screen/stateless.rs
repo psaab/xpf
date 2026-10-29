@@ -9,8 +9,8 @@
 //! the bodies back into the caller. No allocations.
 
 use super::packet::{
-    PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, ScreenPacketInfo, ScreenProfile, TCP_ACK, TCP_FIN,
-    TCP_SYN, TCP_URG,
+    FragView, PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, ScreenPacketInfo, ScreenProfile, TCP_ACK,
+    TCP_FIN, TCP_SYN, TCP_URG,
 };
 
 /// LAND attack: `src_ip == dst_ip`.
@@ -95,9 +95,11 @@ pub(super) fn check_tcp_flag_screens(
 /// fragment offset plus this fragment's total length:
 ///
 /// ```text
-///   offset_bytes = (frag_off & 0x1FFF) << 3   // 8-byte fragment units
-///   if offset_bytes + ip_total_len > 65535 -> drop
+///   if offset_bytes + pod_extent > 65535 -> drop
 /// ```
+///
+/// (`offset_bytes` / `pod_extent` are the decoded `FragView` fields —
+/// see `packet::ip_frag` for the per-family wire layouts.)
 ///
 /// Applies to ANY IPv4 protocol (not just ICMP) and only to fragmented
 /// packets, exactly matching the BPF reference. The pre-#2215 userspace
@@ -113,51 +115,29 @@ pub(super) fn check_tcp_flag_screens(
 /// only drops actual LSRR/SSRR options after #2973, so it no longer
 /// blanket-drops every IHL>5 packet as a side defense here.)
 ///
-/// #2293: the IPv6 path applies the same per-fragment oversize formula.
-/// The dataplane does not reassemble, so for an IPv6 fragment we size
-/// the reassembled end-byte this fragment implies:
+/// #2293: the IPv6 path applies the same per-fragment oversize formula
+/// (byte offset plus this fragment's data contribution, vs the same
+/// 65535 ceiling — see `packet::ip_frag::frag_view_v6`). A
+/// maximal-offset last fragment that pushes the reassembled datagram
+/// past the 65535 IPv6-payload ceiling is dropped — the IPv6 analogue
+/// of the classic ping-of-death. Like the IPv4 path this fires on ANY
+/// IPv6 protocol, only for fragments, and inherits the same
+/// per-fragment (non-reassembling) approximation limit.
 ///
-/// ```text
-///   offset_bytes = (frag_off & 0xFFF8) >> 3 << 3 == frag_off & 0xFFF8
-///   frag_data    = ip_payload_len - frag_data_off   // L4/data bytes
-///   if offset_bytes + frag_data > 65535 -> drop
-/// ```
-///
-/// `frag_off & 0xFFF8` is already the byte offset (the IPv6 fragment
-/// offset field is the upper 13 bits and counts 8-byte units, so masking
-/// the low 3 bits yields the offset directly in bytes). `frag_data_off`
-/// is the payload-region bytes consumed by extension headers up to and
-/// including the fragment header (captured in `extract.rs`), so
-/// `ip_payload_len - frag_data_off` is this fragment's data contribution.
-/// A maximal-offset last fragment that pushes the reassembled datagram
-/// past the 65535 IPv6-payload ceiling is dropped — the IPv6 analogue of
-/// the classic ping-of-death. Like the IPv4 path this fires on ANY IPv6
-/// protocol, only for fragments, and inherits the same per-fragment
-/// (non-reassembling) approximation limit.
+/// #17109: family-agnostic — the per-family decode now happens ONCE in
+/// `extract.rs` (`ip_frag::frag_view_v4` / `frag_view_v6`); this screen
+/// only compares `frag.offset_bytes + frag.pod_extent` to the ceiling.
 #[inline]
 pub(super) fn check_ping_of_death(
     profile: &ScreenProfile,
     pkt: &ScreenPacketInfo,
 ) -> Option<&'static str> {
-    if !profile.ping_death || !pkt.is_fragment {
+    if !profile.ping_death {
         return None;
     }
-    if pkt.addr_family == libc::AF_INET as u8 {
-        let offset_bytes = ((pkt.ip_frag_off & 0x1FFF) as u32) << 3;
-        if offset_bytes + pkt.ip_total_len as u32 > 65535 {
-            return Some("ping-of-death");
-        }
-    } else if pkt.addr_family == libc::AF_INET6 as u8 {
-        // IPv6 fragment offset is the upper 13 bits (8-byte units) of the
-        // fragment header's frag_off field; `& 0xFFF8` is the byte offset.
-        let offset_bytes = (pkt.ip_frag_off & 0xFFF8) as u32;
-        // This fragment's data bytes = payload_len minus the ext-header
-        // bytes preceding the fragment data. saturating_sub guards a
-        // hostile payload_len shorter than the headers actually walked.
-        let frag_data = pkt.ip_payload_len.saturating_sub(pkt.frag_data_off) as u32;
-        if offset_bytes + frag_data > 65535 {
-            return Some("ping-of-death");
-        }
+    let frag: FragView = pkt.frag?;
+    if frag.offset_bytes + frag.pod_extent > 65535 {
+        return Some("ping-of-death");
     }
     None
 }
@@ -185,11 +165,10 @@ pub(super) fn check_ping_of_death(
 /// size of one fragmented packet differs from that of the next") and says
 /// nothing about tiny tails, so xpf was dropping traffic SRX does not.
 ///
-/// The discriminator was already in the struct and unused: `ip_frag_off` is the
-/// raw field, so the More-Fragments bit is in hand at this check (IPv4 0x2000;
-/// IPv6 the Fragment header's low bit). MF = 0 IS the last fragment and is the
-/// one that may legally carry 1-7 bytes; MF = 1 with a sub-8-byte payload
-/// really is malformed. The check now tests it.
+/// The discriminator is the decoded More-Fragments bit (`frag.more`,
+/// #17109): MF/M = 0 IS the last fragment and is the one that may legally
+/// carry 1-7 bytes; MF/M = 1 with a sub-8-byte payload really is
+/// malformed. The check now tests it.
 ///
 /// What did NOT change: a fragment with ZERO or under-length payload is
 /// malformed whatever MF says — a last fragment that contributes no data is
@@ -215,17 +194,12 @@ pub(super) fn check_ping_of_death(
 /// #3119: this check was IPv4-only while the sibling `check_ping_of_death`
 /// already screened both families. An IPv6 teardrop (a Fragment
 /// extension-header fragment with a tiny data contribution) therefore
-/// bypassed the screen entirely. The IPv6 arm mirrors the
-/// `check_ping_of_death` IPv6 sizing: the Fragment header's offset field
-/// is the upper 13 bits (8-byte units), so `ip_frag_off & 0xFFF8` is the
-/// byte offset, and this fragment's data bytes are
-/// `ip_payload_len - frag_data_off` (the L4/data region after the
-/// extension headers up to and including the 8-byte fragment header).
-/// `saturating_sub` collapses a hostile under-length (`frag_data_off`
-/// larger than the declared `ip_payload_len`) to 0, which is treated as the
-/// malformed zero/under-length teardrop case — the IPv6
-/// analogue of the #3027 IPv4 fix. Junos vSRX applies teardrop screening
-/// to both families.
+/// bypassed the screen entirely. The IPv6 sizing mirrors
+/// `check_ping_of_death` (`packet::ip_frag::frag_view_v6`): a hostile
+/// under-length collapses to a 0 data contribution, which is treated as
+/// the malformed zero/under-length teardrop case — the IPv6 analogue of
+/// the #3027 IPv4 fix. Junos vSRX applies teardrop screening to both
+/// families.
 ///
 /// #16030: the pre-fix check gated BOTH arms on `frag_offset > 0`, so a
 /// non-last FIRST fragment (offset 0, MF/M=1) with a payload that is not a
@@ -239,50 +213,31 @@ pub(super) fn check_ping_of_death(
 /// Legal short LAST fragments (MF/M=0, 1-7 bytes, #9426) stay admitted
 /// because the `% 8` test remains MF-gated; a legal 8-byte (or any
 /// multiple-of-8) first fragment also passes.
+///
+/// #17109: family-agnostic — `frag.data_len` / `frag.more` are decoded
+/// ONCE in `extract.rs`; the zero-payload arm is `data_len == 0` for both
+/// families (IPv4 under-length saturates to 0 in `frag_view_v4`, the
+/// #3027 case; IPv6 likewise in `frag_view_v6`).
 #[inline]
 pub(super) fn check_teardrop(
     profile: &ScreenProfile,
     pkt: &ScreenPacketInfo,
 ) -> Option<&'static str> {
-    if !profile.teardrop || !pkt.is_fragment {
+    if !profile.teardrop {
         return None;
     }
-    if pkt.addr_family == libc::AF_INET as u8 {
-        let hdr_len = (pkt.ip_ihl as u16) * 4;
-        if pkt.ip_total_len <= hdr_len {
-            // No / negative payload — malformed whatever MF says (#3027,
-            // #16030: also at offset 0). A last fragment contributing zero
-            // data is not a legal tail.
-            return Some("teardrop");
-        }
-        let payload = pkt.ip_total_len - hdr_len;
-        // #9426 + #16030: only a NON-LAST fragment must carry a multiple
-        // of 8 bytes, at ANY offset including the first fragment. MF=0
-        // is the last fragment and may legally carry 1-7 bytes.
-        let more_fragments = (pkt.ip_frag_off & 0x2000) != 0;
-        if more_fragments && payload % 8 != 0 {
-            return Some("teardrop");
-        }
-    } else if pkt.addr_family == libc::AF_INET6 as u8 {
-        // This fragment's data bytes = payload_len minus the ext-header
-        // bytes preceding the fragment data. saturating_sub collapses a
-        // hostile under-length to 0, the IPv6 analogue of the #3027
-        // zero/negative-payload case.
-        let frag_data = pkt.ip_payload_len.saturating_sub(pkt.frag_data_off);
-        if frag_data == 0 {
-            // Zero / under-length contribution — malformed whatever M says
-            // (#3119's IPv6 analogue of the #3027 case, #16030: also at
-            // offset 0). The v4 arm above reaches the same state through
-            // `ip_total_len <= hdr_len`.
-            return Some("teardrop");
-        }
-        // #9426 + #16030: as in the v4 arm, only a NON-LAST fragment must
-        // carry a multiple of 8 bytes, at ANY offset including the first
-        // fragment. The Fragment header's M bit is the low bit.
-        let more_fragments = (pkt.ip_frag_off & 0x1) != 0;
-        if more_fragments && frag_data % 8 != 0 {
-            return Some("teardrop");
-        }
+    let frag: FragView = pkt.frag?;
+    if frag.data_len == 0 {
+        // Zero / under-length contribution — malformed whatever MF/M
+        // says (#3027, #3119's IPv6 analogue, #16030: also at offset 0).
+        // A last fragment contributing zero data is not a legal tail.
+        return Some("teardrop");
+    }
+    // #9426 + #16030: only a NON-LAST fragment must carry a multiple of
+    // 8 bytes, at ANY offset including the first fragment. MF/M=0 is the
+    // last fragment and may legally carry 1-7 bytes.
+    if frag.more && frag.data_len % 8 != 0 {
+        return Some("teardrop");
     }
     None
 }

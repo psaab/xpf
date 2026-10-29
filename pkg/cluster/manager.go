@@ -74,6 +74,13 @@ type RedundancyGroupState struct {
 	// establishes a new ownership decision.
 	transferCommitRolePinned bool
 	transferCommitRole       NodeState
+	// armDebtYielded pins a preempt-enabled owner secondary across the
+	// ownership handoff. The peer heartbeat sequence watermarks distinguish
+	// in-flight pre-handoff SECONDARY frames from a later relinquish.
+	armDebtYielded                  bool
+	armDebtYieldPeerSession         uint64
+	armDebtYieldPeerSequence        uint64
+	armDebtYieldPeerPrimarySequence uint64
 
 	// Readiness gate: blocks promotion to primary until interfaces + VRRP
 	// are confirmed ready. TakeoverHoldTime is an optional extra delay.

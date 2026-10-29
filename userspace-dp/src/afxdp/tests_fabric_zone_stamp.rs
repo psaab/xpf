@@ -3164,7 +3164,7 @@ mod pressure_shed_matrix_17012 {
     #[test]
     fn gc_pressure_shed_retry_evicts_sibling_cache_17012() {
         let forwarding = build_forwarding_state(&nat_snapshot());
-        let ha_state = txn_ha_state();
+        let _ha_state = txn_ha_state();
         let mut sessions = SessionTable::new();
         sessions.set_max_sessions_for_test(2);
         let victim_key = crate::session::SessionKey {
@@ -6543,8 +6543,10 @@ fn split_rg_punt_origin_wan_reverse_icmp_fabric_tx_15958b() {
         &frame,
         meta,
     );
-    for (i, b) in bindings.iter().enumerate() {}
-    if let Some(e) = &egress {
+    for (_i, _b) in bindings.iter().enumerate() {
+    }
+    if let Some(_e) = &egress {
+
     } else {
     }
     assert_eq!(batch.forward_candidate_packets, 1);
@@ -6595,7 +6597,7 @@ fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
     let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
     sessions.set_forwarding_revalidation_gen(7, 9);
-    let mut frame = build_txn_tcp_syn_frame_v4(
+    let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(172, 16, 80, 200),
         Ipv4Addr::new(172, 16, 80, 8),
         443,
@@ -6612,29 +6614,16 @@ fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
     meta.flow_dst_port = 12345;
     let mut bindings = wan_lan_bindings_fw0_15958b();
     for pkt in 0..2 {
-        let (batch, dbg, egress) = txn_run_multi_binding_15958(
-            &mut bindings,
-            0,
-            &mut sessions,
-            &forwarding,
-            &ha_state,
-            &frame,
-            meta,
+        let (_batch, _dbg, egress) = txn_run_multi_binding_15958(
+            &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta,
         );
-        for (i, b) in bindings.iter().enumerate() {}
-        if let Some(e) = &egress {}
-        assert!(
-            egress.is_some(),
-            "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX"
-        );
-        assert_eq!(
-            bindings[0]
-                .live
-                .tx_packets
-                .load(std::sync::atomic::Ordering::Relaxed),
-            0,
-            "WAN must not TX TCP return"
-        );
+        for (_i, _b) in bindings.iter().enumerate() {
+        }
+        if let Some(_e) = &egress {
+        }
+        assert!(egress.is_some(), "fw0 WAN TCP reverse hit pkt{pkt} must emit fabric TX");
+        assert_eq!(bindings[0].live.tx_packets.load(std::sync::atomic::Ordering::Relaxed), 0, "WAN must not TX TCP return");
+
     }
 }
 
@@ -7404,7 +7393,7 @@ fn split_rg_transient_mixed_state_retains_redirect_15958b() {
     });
     sessions.set_forwarding_revalidation_gen(7, 9);
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
-    let mut frame = build_txn_tcp_syn_frame_v4(
+    let frame = build_txn_tcp_syn_frame_v4(
         Ipv4Addr::new(172, 16, 80, 200),
         Ipv4Addr::new(172, 16, 80, 8),
         443,
@@ -8259,13 +8248,12 @@ fn failback_routed_destination_rehomes_16524() {
         crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, routed_target),
         0
     );
-    let out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
+    let out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
         &forwarding,
         stored,
         wan_candidate,
         13098,
-        true,
-        true,
+        crate::afxdp::session_glue::DestinationOwner::Unknown,
         Some(routed_target),
         None,
     );
@@ -8291,13 +8279,12 @@ fn failback_routed_destination_rehomes_16524() {
         route_mtu: 0,
         transport_route_mtu: 0,
     };
-    let out2 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
+    let out2 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
         &forwarding,
         stored,
         lan_candidate,
         21230,
-        true,
-        false,
+        crate::afxdp::session_glue::DestinationOwner::Active(2),
         Some(lan_target),
         None,
     );
@@ -8317,13 +8304,12 @@ fn failback_routed_destination_rehomes_16524() {
     // zone for a LAN-target reply, here modelled with the WAN
     // candidate to prove the connected test, not zone knowledge,
     // is what retains).
-    let out3 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
+    let out3 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
         &forwarding,
         stored,
         wan_candidate,
         13098,
-        true,
-        false,
+        crate::afxdp::session_glue::DestinationOwner::Active(2),
         Some(lan_target),
         None,
     );
@@ -8369,13 +8355,12 @@ fn failback_routed_destination_rehomes_16524() {
         route_mtu: 0,
         transport_route_mtu: 0,
     };
-    let out4 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
+    let out4 = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
         &forwarding,
         stored,
         zero_candidate,
         13098,
-        true,
-        true,
+        crate::afxdp::session_glue::DestinationOwner::Unknown,
         Some(routed_target),
         None,
     );
@@ -8386,20 +8371,12 @@ fn failback_routed_destination_rehomes_16524() {
     let _ = fabric_candidate;
 }
 
-/// #16524 production-path cell: demote then refresh through the
-/// real command collectors, mirroring the issue probe. A forward
-/// session to a gateway-routed destination (8.8.8.8 via default
-/// route on the split fixture's WAN) demoted to FabricRedirect
-/// must re-home to ForwardCandidate on refresh when its owner RG
-/// is active again. Uses the direct helper + refresh collector
-/// composition on a routed target so the cell is self-contained
-/// without a full FIB for 8.8.8.8.
+/// #16524/#17047 refresh cell: the typed `DestinationOwner::Unknown`
+/// entry re-homes a gateway-routed destination on failback. (The
+/// pre-#17047 boolean twins are gone; this cell pins the surviving
+/// typed entry directly.)
 #[test]
 fn failback_routed_refresh_rehomes_16524() {
-    // The helper cell above is the executed probe equivalent for
-    // the routed branch; this cell pins that the OLD boolean-only
-    // entry point does NOT re-home routed destinations (it cannot
-    // distinguish dest_rg==0), documenting why callers migrated.
     let mut forwarding = ForwardingState::default();
     forwarding.egress.insert(
         14,
@@ -8452,32 +8429,178 @@ fn failback_routed_refresh_rehomes_16524() {
         transport_route_mtu: 0,
     };
     let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
-    // New entry: re-homes.
-    let new_out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_16524(
+    // Typed Unknown entry: re-homes the routed destination.
+    let new_out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
         &forwarding,
         stored,
         candidate,
         13098,
-        true,
-        true,
+        crate::afxdp::session_glue::DestinationOwner::Unknown,
         Some(target),
         None,
     );
     assert_eq!(new_out.disposition, ForwardingDisposition::ForwardCandidate);
-    // Legacy entry with unknown=true encoded as active+target:
-    // also re-homes (it passes unknown=active&&target.is_some()).
-    let legacy_out = crate::afxdp::session_glue::rehome_or_retain_fabric_redirect_scoped_15958b(
-        &forwarding,
-        stored,
-        candidate,
-        13098,
-        true,
-        Some(target),
-        None,
-    );
-    assert_eq!(
-        legacy_out.disposition,
-        ForwardingDisposition::ForwardCandidate,
-        "legacy wrapper must preserve routed re-home via its unknown encoding"
-    );
+    assert_eq!(new_out.egress_ifindex, 14);
+}
+
+/// #17047 table: `DestinationOwner` x `FabricArrival` through the
+/// ONE `reresolve_stored_session` pipeline. Fixture mirrors the
+/// #16524 cell: LAN 10.0.61.0/24 on ifindex 5 (RG2), WAN on
+/// ifindex 14 (RG1, zone 13098), fabric parent 4. Stored decision
+/// is FabricRedirect; the supplied lookup is the WAN candidate.
+/// Packet rows use fabric_link=false so the rehome decision runs;
+/// the on-link row pins the anti-loop (candidate kept verbatim).
+#[test]
+fn reresolve_destination_owner_fabric_table_17047() {
+    use crate::afxdp::session_glue::{DestinationOwner, FabricArrival};
+    let now_secs = 1_000u64;
+    let mut forwarding = ForwardingState::default();
+    forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net("10.0.61.0/24".parse::<ipnet::Ipv4Net>().expect("net")),
+        host: Ipv4Addr::new(10, 0, 61, 1),
+        ifindex: 5,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    forwarding.egress.insert(5, crate::afxdp::EgressInterface {
+        bind_ifindex: 5, vlan_id: 0, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03], zone_id: 21230,
+        redundancy_group: 2, primary_v4: Some(Ipv4Addr::new(10, 0, 61, 1)), primary_v6: None,
+    });
+    forwarding.egress.insert(14, crate::afxdp::EgressInterface {
+        bind_ifindex: 14, vlan_id: 80, mtu: 1500,
+        src_mac: [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01], zone_id: 13098,
+        redundancy_group: 1, primary_v4: Some(Ipv4Addr::new(172, 16, 80, 8)), primary_v6: None,
+    });
+    forwarding.ifindex_unambiguous_zone_id.insert(5, 21230);
+    forwarding.ifindex_unambiguous_zone_id.insert(14, 13098);
+    forwarding.fabrics.push(crate::afxdp::FabricLink {
+        parent_ifindex: 4,
+        overlay_ifindex: 176,
+        peer_addr: IpAddr::V4(Ipv4Addr::new(10, 99, 13, 2)),
+        peer_mac: [0x10, 0x66, 0x6a, 0x3f, 0x67, 0x60],
+        local_mac: [0x10, 0x66, 0x6a, 0xfe, 0xd9, 0x55],
+        up: true,
+        link_authenticated: false,
+    });
+    let stored = SessionDecision {
+        resolution: ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            local_ifindex: 0, egress_ifindex: 4, tx_ifindex: 4, tunnel_endpoint_id: 0,
+            next_hop: None, neighbor_mac: None, src_mac: None, tx_vlan_id: 0,
+            source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+        },
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let metadata = SessionMetadata {
+        ingress_zone: 21230,
+        egress_zone: 21230,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 5,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 2,
+        fabric_ingress: false,
+        is_reverse: false,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None,
+    };
+    let wan = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0, egress_ifindex: 14, tx_ifindex: 6, tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+        neighbor_mac: None, src_mac: None, tx_vlan_id: 80,
+        source_ifindex: 0, route_mtu: 0, transport_route_mtu: 0,
+    };
+    let lan = ForwardingResolution { egress_ifindex: 5, tx_ifindex: 5, tx_vlan_id: 0, next_hop: None, ..wan };
+    let ha_both_active = BTreeMap::from([(1, active_rg(now_secs)), (2, active_rg(now_secs))]);
+    let ha_rg2_inactive = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let neighbors = Arc::new(ShardedNeighborMap::default());
+    let routed = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
+    let lan_target = IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102));
+    // Owner classification is computed inside the pipeline; pin it directly too.
+    assert_eq!(DestinationOwner::from_dest_rg(0, &ha_both_active, now_secs), DestinationOwner::Unknown);
+    assert_eq!(DestinationOwner::from_dest_rg(2, &ha_both_active, now_secs), DestinationOwner::Active(2));
+    assert_eq!(DestinationOwner::from_dest_rg(2, &ha_rg2_inactive, now_secs), DestinationOwner::Inactive(2));
+    // (owner-shape, arrival, candidate, target, ha, want-disposition, want-egress)
+    let packet = |link: bool| FabricArrival::Packet {
+        fabric_ingress: false,
+        fabric_link_ingress: link,
+        ingress_ifindex: 5,
+        ha_startup_grace_until_secs: 0,
+        fabric_adopted: false,
+        adopted_recovery: None,
+    };
+    let rows: Vec<(&str, FabricArrival, ForwardingResolution, IpAddr, &BTreeMap<i32, HAGroupRuntime>, ForwardingDisposition, i32)> = vec![
+        ("Unknown x Packet(off-link): routed re-homes (#16524)", packet(false), wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
+        ("Unknown x Packet(on-link): anti-loop keeps candidate", packet(true), wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
+        ("Unknown x Command: routed re-homes", FabricArrival::Command { fabric_ingress: false }, wan, routed, &ha_both_active, ForwardingDisposition::ForwardCandidate, 14),
+        ("Active x Packet: connected candidate re-homes", packet(false), lan, lan_target, &ha_both_active, ForwardingDisposition::ForwardCandidate, 5),
+        ("Active x Command: connected candidate re-homes", FabricArrival::Command { fabric_ingress: false }, lan, lan_target, &ha_both_active, ForwardingDisposition::ForwardCandidate, 5),
+        ("Active x Packet: WAN candidate retained (transient)", packet(false), wan, lan_target, &ha_both_active, ForwardingDisposition::FabricRedirect, 4),
+        ("Inactive x Packet: WAN candidate retained", packet(false), wan, lan_target, &ha_rg2_inactive, ForwardingDisposition::FabricRedirect, 4),
+        ("Inactive x Command: WAN candidate retained", FabricArrival::Command { fabric_ingress: false }, wan, lan_target, &ha_rg2_inactive, ForwardingDisposition::FabricRedirect, 4),
+    ];
+    for (name, fabric, candidate, target, ha, want_disp, want_egress) in rows {
+        let out = crate::afxdp::session_glue::reresolve_stored_session(
+            &forwarding, ha, &neighbors, now_secs, &stored, &metadata, target, candidate, fabric,
+        );
+        assert_eq!(out.disposition, want_disp, "{name}: got {out:?}");
+        if want_disp == ForwardingDisposition::ForwardCandidate {
+            assert_eq!(out.egress_ifindex, want_egress, "{name}: egress");
+        } else {
+            assert_eq!(out.disposition, ForwardingDisposition::FabricRedirect, "{name}: retained");
+            assert_eq!(out.egress_ifindex, want_egress, "{name}: retained egress");
+        }
+    }
+}
+
+/// #17047 parity guard: the duplicated pipeline spelling must not
+/// return. Non-test production sources under session_glue/ and
+/// shared_ops/ may not spell the old boolean owner computation,
+/// may not call the removed boolean twins, and
+/// `rehome_or_retain_fabric_redirect` may have exactly one
+/// non-test caller (inside `reresolve_stored_session`, plus the
+/// reverse-synthesis known-owner site).
+#[test]
+fn reresolve_single_source_guard_17047() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp");
+    let mut files = Vec::new();
+    let mut stack = vec![root.join("session_glue"), root.join("shared_ops")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && !path.file_name().unwrap().to_string_lossy().contains("test")
+            {
+                files.push(path);
+            }
+        }
+    }
+    assert!(!files.is_empty());
+    let mut rehome_callers = 0usize;
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("read rs");
+        let rel = path.strip_prefix(&root).unwrap().display().to_string();
+        assert!(!src.contains("rehome_or_retain_fabric_redirect_16524"), "{rel}: removed 16524 twin referenced");
+        assert!(!src.contains("rehome_or_retain_fabric_redirect_scoped_15958b"), "{rel}: removed 15958b twin referenced");
+        // The helper definition itself is the one allowed spelling site.
+        if !rel.ends_with("resolution.rs") {
+            assert!(!src.contains("dest_rg == 0 ||"), "{rel}: duplicated owner-boolean spelling returned");
+        }
+        rehome_callers += src.matches("rehome_or_retain_fabric_redirect(").count();
+    }
+    // resolution.rs: 1 def + 1 call in reresolve; reverse_synth.rs: 1 call.
+    assert_eq!(rehome_callers, 3, "rehome entry must have exactly its consolidated callers (def + reresolve + reverse_synth)");
 }

@@ -1502,7 +1502,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
         // (per-packet, pre-#2620 behavior), even when the filter is
         // route-lookup-affecting.
         // #10566: the counted evaluator ran — the seed must not charge again.
-        let mut eval = evaluate_non_pbr_input_filter(
+        let eval = evaluate_non_pbr_input_filter(
             forwarding,
             extra,
             Some(flow),
@@ -1512,7 +1512,7 @@ pub(super) fn evaluate_input_filter_on_session_hit(
             meter,
             now_ns,
         );
-        let mut log_source = FilterLogSource::Input;
+        let log_source = FilterLogSource::Input;
         // A mixed filter still has packet-varying decisions; revoke only when
         // the winning terminal deny itself is flow-invariant and this entry's
         // verdict is stale. `filter_ref_deny_is_flow_invariant` walks the same

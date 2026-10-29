@@ -32,9 +32,9 @@ import (
 //     REQUIRED for hostname gateways to render at all.
 //   - IPv6 literal control keeps its pin (the IP check is
 //     family-agnostic, not v4-only).
-//   - mixed multi-address list (hostname + IP): only the IP element
-//     becomes a peer selector; the hostname element contributes none,
-//     and the VPN still renders on the strength of the IP selector.
+//   - mixed multi-address list (hostname + IP): requires a discriminating
+//     remote-identity so the one PSK remains selectable across every dial
+//     target; without it, the render belt skips the VPN (#17772).
 //
 // FAIL-ON-REVERT: reverting the netip.ParseAddr gate in
 // defaultRemoteID, the inline arm, or pskPeerSelectors restores the
@@ -164,21 +164,23 @@ func TestHostnameAddressNoRemoteID16680(t *testing.T) {
 		}
 	})
 
-	t.Run("mixed hostname and ip list scopes ip only", func(t *testing.T) {
+	t.Run("mixed hostname and IP list uses explicit remote identity", func(t *testing.T) {
 		cfg := initiatorCfg15193(&config.IPsecGateway{
 			Name: "gw", Address: "peer.example.test, 203.0.113.1",
+			RemoteIDType: "hostname", RemoteIDValue: "peer.example.test",
 		}, "site-secret")
-		text := m.generateConfig(cfg)
-		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
-		// Multi-address: no single remote.id pin (#15766), and the
-		// hostname element must not become a selector either.
-		conn.at(t, "remote").hasNoSetting(t, "id")
-		blk := parseSecretBlocks(t, text)["ike-gw"]
-		if containsStr(blk.ids, "peer.example.test") {
-			t.Errorf("id selectors %v contain hostname selector from mixed list", blk.ids)
+		text, rendered, err := m.renderConfig(cfg)
+		if err != nil {
+			t.Fatalf("renderConfig: %v", err)
 		}
-		if !containsStr(blk.ids, "203.0.113.1") {
-			t.Errorf("id selectors %v missing IP selector 203.0.113.1 from mixed list", blk.ids)
+		if !rendered["gw"] {
+			t.Fatalf("mixed gateway with explicit remote identity must render:\n%s", text)
+		}
+		conn := parseSwanctlDoc(t, text).at(t, "connections", "gw")
+		conn.at(t, "remote").requireSetting(t, "id", "\"@peer.example.test\"")
+		blk := parseSecretBlocks(t, text)["ike-gw"]
+		if len(blk.ids) != 1 || blk.ids[0] != "@peer.example.test" {
+			t.Errorf("id selectors %v, want the explicit remote identity", blk.ids)
 		}
 	})
 

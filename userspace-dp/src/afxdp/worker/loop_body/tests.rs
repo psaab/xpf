@@ -35,7 +35,7 @@ mod flow_cache_invalidation_tests {
         ExpiredSession, SessionDecision, SessionKey, SessionMetadata, SessionOrigin,
     };
     use std::net::{IpAddr, Ipv4Addr};
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
 
     const REAP_INGRESS_IF: i32 = 24;
 

@@ -763,7 +763,6 @@ pub(crate) fn sync_interface_overlap_peers(
     } else {
         // Build from scratch: views for distinct pool + NAT64 + iface (shared only).
         let distinct_src = distinct_source_owners(rules);
-        let mut views: Vec<OwnerView<'_>> = Vec::new();
         // We cannot easily build views with iface allocators owned here (lifetimes).
         // Instead construct owners manually for shared addrs.
         let mut owners = PoolAddressOwners::default();

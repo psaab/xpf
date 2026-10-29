@@ -6,9 +6,10 @@ use crate::session::PMechWaiterRef;
 // continues to find them as `super::types::SharedCoS*`.
 mod shared_cos_lease;
 pub(super) use shared_cos_lease::{
-    AcquireV8ShortfallCause, ExactDemandQueueMask, NOT_PARTICIPATING, PaddedVtimeSlot,
+    AcquireV8ShortfallCause, ExactDemandQueueMask,
     SharedCoSExactBacklog, SharedCoSQueueLease, SharedCoSQueueVtimeFloor, SharedCoSRootLease,
     V8RateMode,
+
 };
 
 // Issue 68.1: CoS shaper / queue / flow-fair / runtime types extracted
@@ -21,13 +22,13 @@ pub(in crate::afxdp) use cos::*;
 // #17207: `pub(in crate::afxdp)` so afxdp/mod.rs can name
 // `types::forwarding::{...}` directly, breaking the glob cycle.
 pub(in crate::afxdp) mod forwarding;
+
 pub(in crate::afxdp) use forwarding::*;
 // Three forwarding types had wider-than-pub(super) visibility in the original
 // types/mod.rs and are re-exported at their original surface so afxdp.rs's
 // `pub(crate) use self::types::{...};` and external pub callers continue to
 // resolve them.
 pub use forwarding::NeighborEntry;
-pub(crate) use forwarding::{ForwardingDisposition, ForwardingResolution};
 
 // Issue 68.3: TX-request types extracted into types/tx.rs.
 mod tx;
@@ -46,8 +47,8 @@ mod session_index;
 #[cfg(test)]
 pub(super) use session_index::WIRE_KEY_CAP_OVERRIDE;
 pub(super) use session_index::{
-    FastMap, FastSet, OwnerRgSessionIndex, SharedNatAmbiguityIndex, SharedSessionBareTupleIndex,
-    SharedSessionOwnerRgIndexes, WireOwnerMultiset, WireOwnerRoster,
+    FastMap, FastSet, OwnerRgSessionIndex, SharedNatAmbiguityIndex,
+    SharedSessionOwnerRgIndexes,
 };
 
 /// Packet buffered while waiting for ARP/NDP neighbor resolution.

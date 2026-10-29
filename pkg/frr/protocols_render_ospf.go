@@ -173,8 +173,37 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 		// Track actual activations, after duplicate-area and authentication
 		// omissions, rather than configured interface membership (#16631).
 		var activatedAreas16631 map[string]bool
+		// Match the HA filter's enabled-interface retention eligibility on
+		// this renderer input; this does not observe whether HA filtering ran.
+		// Track auth-gate outcomes so a dropped link's warning explains why
+		// an eligible link was not activated by the renderer.
+		type transitAreaRenderState16631 struct {
+			interfacePresent bool
+			authRejected      bool
+		}
+		var transitAreaState16631 map[string]transitAreaRenderState16631
 		if len(virtualLinks15016) != 0 {
 			activatedAreas16631 = make(map[string]bool)
+			transitAreaState16631 = make(map[string]transitAreaRenderState16631)
+			for _, area := range ospf.Areas {
+				areaKey := ospfAreaIdentity11400(area.ID)
+				for _, iface := range area.Interfaces {
+					if iface.Disable {
+						continue
+					}
+					state := transitAreaState16631[areaKey]
+					state.interfacePresent = true
+					transitAreaState16631[areaKey] = state
+				}
+			}
+		}
+		noteAuthenticationRejection16631 := func(areaKey string) {
+			state, ok := transitAreaState16631[areaKey]
+			if !ok {
+				return
+			}
+			state.authRejected = true
+			transitAreaState16631[areaKey] = state
 		}
 		for _, name := range interfaceOrder {
 			state := renderedAreaByInterface[name]
@@ -233,6 +262,7 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 				if !authEmitted {
 					slog.Warn("frr: omitting OSPF interface with MD5 authentication but no renderable MD5 key (#14388)",
 						"interface", sanitizeFRRValue(iface.Name), "area", sanitizeFRRValue(state.area.id))
+					noteAuthenticationRejection16631(state.area.key)
 					continue
 				}
 			}
@@ -262,12 +292,14 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 				if iface.AuthKey.Reveal() == "" {
 					slog.Warn("frr: omitting OSPF interface with simple authentication configured but no key; refusing to activate it unauthenticated (#14397)",
 						"interface", sanitizeFRRValue(iface.Name), "authentication_type", iface.AuthType)
+					noteAuthenticationRejection16631(state.area.key)
 					continue
 				}
 				tok, ok := authTokenOrOmit("ospf-simple", &iface.AuthKey)
 				if !ok {
 					slog.Warn("frr: omitting OSPF interface with an unrenderable simple authentication key; refusing to activate it unauthenticated (#14977)",
 						"interface", sanitizeFRRValue(iface.Name))
+					noteAuthenticationRejection16631(state.area.key)
 					continue
 				}
 				// #16628/#17680: ospfd truncates a simple-password
@@ -282,16 +314,19 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 					slog.Warn("frr: omitting OSPF interface with a simple-password exceeding the 8-byte maximum accepted by ospfd; ospfd would truncate it and every reload would delete and re-add it (#16628)",
 						"interface", sanitizeFRRValue(iface.Name),
 						"key_len", n, "max", config.MaxOSPFSimplePasswordLen)
+					noteAuthenticationRejection16631(state.area.key)
 					continue
 				}
 				ospfSimpleTok14977 = tok
 			} else if iface.AuthType != "" && iface.AuthType != "md5" {
 				slog.Warn("frr: omitting OSPF interface with an unrecognized authentication-type; refusing to activate it unauthenticated (#14977)",
 					"interface", sanitizeFRRValue(iface.Name), "authentication_type", sanitizeFRRValue(iface.AuthType))
+				noteAuthenticationRejection16631(state.area.key)
 				continue
 			} else if iface.AuthType == "" && iface.AuthKey.Reveal() != "" {
 				slog.Warn("frr: omitting OSPF interface with an authentication key but no authentication-type; refusing to activate it unauthenticated (#14977)",
 					"interface", sanitizeFRRValue(iface.Name))
+				noteAuthenticationRejection16631(state.area.key)
 				continue
 			}
 			fmt.Fprintf(b, "interface %s\n", iface.Name)
@@ -358,8 +393,13 @@ func (m *Manager) renderOSPF16125(b *strings.Builder, ospf *config.OSPFConfig, v
 		keptVirtualLinks16631 := virtualLinks15016[:0]
 		for _, e := range virtualLinks15016 {
 			if !activatedAreas16631[ospfAreaIdentity11400(e.vl.TransitArea)] {
+				dropState := transitAreaState16631[ospfAreaIdentity11400(e.vl.TransitArea)]
 				slog.Warn("frr: omitting an OSPF virtual-link whose transit area renders no interface (#16631)",
-					"neighbor", sanitizeFRRValue(e.vl.NeighborID), "transit_area", sanitizeFRRValue(e.vl.TransitArea))
+					"neighbor", sanitizeFRRValue(e.vl.NeighborID), "transit_area", sanitizeFRRValue(e.vl.TransitArea),
+					"reason", "transit-area-not-emitted",
+					"ha_kept", dropState.interfacePresent,
+					"transit_interface_present", dropState.interfacePresent,
+					"auth_rejected", dropState.authRejected)
 				continue
 			}
 			keptVirtualLinks16631 = append(keptVirtualLinks16631, e)

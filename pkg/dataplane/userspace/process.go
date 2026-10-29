@@ -337,19 +337,27 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 	entryGen := m.procGen
 	defer func() {
 		if retErr != nil {
-			// NM-1: a FAILED supervisor retry is a NEW crash-loop data
-			// point, not a preserved one — schedule (Restarts++) so a
-			// helper that never starts escalates to crash-looping. Only
-			// the Compile path re-arms at the same count (MAJOR-3a):
-			// Compile bring-up retires the generation carrying an armed
-			// retry without proving anything about the helper.
+			// Clear the in-progress marker on every failure return so a
+			// failed supervisor retry cannot leave bringUpGen naming a
+			// generation that is no longer being brought up (#18242
+			// stale-marker hazard).
+			m.bringUpGen = 0
 			if restartAttempt && pendingCrashRetry && m.proc == nil {
-				// NM-2: a failed retry is observed helper failure, not quiet
-				// time — refresh the anchor so a run of failures cannot age
-				// the window out and journal the next landing as recovered.
-				m.helperCrashLastAt = time.Now()
-				m.scheduleHelperRestartLocked(m.procGen)
-				m.notifyHelperSupervisorLocked()
+				// A failed retry is a new crash-loop data point (NM-1):
+				// unless its published child exit was already routed
+				// through the crash handler by stopLocked (marked via
+				// retryChildExitCountedLocked), charge it here so
+				// a helper that never starts keeps escalating and the
+				// operator is notified. If the child was already
+				// counted, its schedule emitted exactly one timer and
+				// charging again would double-count the attempt.
+				if !m.retryChildExitCountedLocked {
+					m.helperCrashLastAt = time.Now()
+					m.scheduleHelperRestartLocked(m.procGen)
+					m.notifyHelperSupervisorLocked()
+				} else {
+					m.retryChildExitCountedLocked = false
+				}
 				return
 			}
 			if pendingCrashRetry && m.proc == nil &&
@@ -489,6 +497,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 	// triggering NAPI which consumes fill ring entries and posts WQEs for
 	// zero-copy.
 	m.scheduleStartupNAPIBootstrapLocked()
+	m.bringUpGen = m.procGen
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(cfg.ControlSocket); err == nil {
@@ -498,6 +507,7 @@ func (m *Manager) ensureProcessLocked(cfg config.UserspaceConfig) (retErr error)
 					m.setLastStatusLocked(status)
 				}
 				slog.Info("userspace dataplane helper started", "pid", cmd.Process.Pid, "socket", cfg.ControlSocket)
+				m.bringUpGen = 0
 				m.notifyHelperSupervisorLocked()
 				return nil
 			}
@@ -962,7 +972,46 @@ func (m *Manager) stopLocked() {
 	// debt. The bump is compatible with that path by construction: it already
 	// re-fences its next attempt on whatever `m.procGen` reads after the failed
 	// spawn.
-	m.procGen++
+	// #18213: retire this generation before any helper shutdown request or
+	// signal below. The supervisor's generation fence then recognizes the
+	// resulting exit as part of this planned stop. xpfd.service uses
+	// KillMode=mixed so systemd's initial stop signal lets xpfd reach this
+	// fence before it signals the helper.
+	// Account an exit already published by the active generation's waiter
+	// before retiring its fence. For a planned stop, the generation bump below
+	// cancels the crash handler's timer. During a failed supervisor retry,
+	// however, the helper is already gone and the handler's same-generation
+	// timer must remain live; its one schedule also owns this failed attempt's
+	// crash-loop accounting.
+	preRetirementCrash := false
+	if m.proc != nil {
+		if g := m.procSup; g != nil && g.gen == m.procGen {
+			select {
+			case <-g.exited:
+				if g.gen == m.bringUpGen && !m.restartAttemptInProgress {
+					// #18394: this child was spawned by the in-progress
+					// ordinary (non-retry) bring-up and never proved
+					// ready, so its exit is that bring-up's own failure —
+					// not a fresh unexpected exit of a helper that
+					// reached readiness. Do not crash-charge it here;
+					// the deferred failure path preserves any older
+					// pending retry (MAJOR-3a). Supervisor retries are
+					// excluded: their pre-ready published exit IS a real
+					// crash-loop data point and stays counted.
+				} else {
+					m.handleUnexpectedHelperExitLocked(g)
+					if g.gen == m.bringUpGen {
+						m.retryChildExitCountedLocked = true
+					}
+					preRetirementCrash = true
+				}
+			default:
+			}
+		}
+	}
+	if !preRetirementCrash || !m.restartAttemptInProgress {
+		m.procGen++
+	}
 	// This record bit describes a currently running supervisor retry, not
 	// durable episode history; an intentional stop makes that claim stale.
 	m.helperCrash.RecoveredSinceCrash = false

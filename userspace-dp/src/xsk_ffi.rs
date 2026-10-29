@@ -1468,7 +1468,7 @@ fn create_xsk_binding_impl(
     } else {
         None
     };
-    let (diag_fill, diag_comp): (&XskRingProd, &XskRingCons) = match &borrowed {
+    let (diag_fill, _diag_comp): (&XskRingProd, &XskRingCons) = match &borrowed {
         Some((fill, comp)) => (&**fill, &**comp),
         None => (&*fill_ring, &*comp_ring),
     };

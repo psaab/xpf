@@ -57,17 +57,24 @@ import (
 //	                          client secret (#16731, unmodelled Junos leaf)
 //	user-password              AD bind credential under active-directory-access
 //	                          (#15996; unmodelled stanza, AST-side only)
-//	credential-shaped keywords (#16731 fail-closed): any keyword containing
-//	                          `secret` or `password`, equal to `auth-token`, or
-//	                          equal to `community-name` masks every trailing
-//	                          token in ANY context. This covers the unmodelled
-//	                          Junos leaves default-chap-secret, local-password,
-//	                          auth-token, community-name and dhcp/dhcp-relay
-//	                          `authentication password` without enumerating
-//	                          their ancestors. Valued `*-key` is deliberately
-//	                          NOT shape-masked: trusted-key/tsig-key/aws-access-key
-//	                          are public identifiers and GRE/chassis `key`
-//	                          stays gated on the OSPF md5 pair below.
+//	credential-shaped keywords (#16731): schema keyword-position tokens
+//	                          containing `secret` or `password`, or equal
+//	                          to `auth-token` / `community-name`, mask
+//	                          every trailing token. Schema arguments and
+//	                          wildcard instance names never arm this
+//	                          classifier (#17806). Open-world tokens (the
+//	                          path left the modelled grammar, so they are
+//	                          not in a value slot) stay fail-closed: an
+//	                          unmodelled *password*/*secret* leaf masks
+//	                          its value (#18384). Valued `*-key` is not
+//	                          classified as credential-shaped because
+//	                          `trusted-key`, `tsig-key`, and
+//	                          `aws-access-key` are public identifiers. The
+//	                          fallback also preserves exact
+//	                          `security ssh-known-hosts host <name>
+//	                          <type>` public trust-anchor paths, the
+//	                          OSPF-gated GRE/chassis bare `key`, and the
+//	                          `pre-shared-key` format qualifier.
 
 // SecretDataPlaceholder is the mask emitted in place of a secret leaf value on
 // the raw-AST render/display paths. It mirrors the Junos SECRET-DATA idiom and
@@ -457,8 +464,10 @@ func fingerprintCompareNodes(nodes []*Node, base []string) {
 // a secret keyword are masked regardless of the leading verb. When the
 // command does not lex cleanly end-to-end, the lenient lexer's prefix is
 // judged; if it marks nothing, the credential may sit in the dropped tail,
-// so the whole payload is replaced by SecretDataPlaceholder. An empty
-// command is returned unchanged (there is no payload to mask).
+// so the whole payload is replaced by SecretDataPlaceholder. A nonempty
+// payload that lexes to zero tokens (for example, a comment-only command) is
+// also replaced whole. Only an actually empty or whitespace-only command is
+// returned unchanged.
 // Masked tokens are replaced by SecretDataPlaceholder; tokens are re-joined
 // with quoteKey so a multi-word value stays one re-parseable token.
 func RedactEmbeddedChangeConfigCommand(cmd string) string {
@@ -477,17 +486,71 @@ func RedactEmbeddedChangeConfigCommand(cmd string) string {
 // credential URL — `@` is not an identifier char, so every bare URL lexes
 // as a prefix), that token is masked and the command renders from the
 // masked prefix: the raw credential tail is never re-joined. Only when the
-// prefix marks NOTHING but the line still does not lex cleanly — the
-// credential may sit in the dropped tail (`… ascii-text "<secret>`) — is
-// the whole payload replaced (fingerprinted as one unit in compare mode,
-// so two different unjudgeable credentials still diff as changed).
+// prefix marks NOTHING and the payload is nonempty — either because the line
+// does not lex cleanly and the credential may sit in the dropped tail
+// (`… ascii-text "<secret>`), or because the lexer discarded a comment-only
+// command — is the whole payload replaced (fingerprinted as one unit in
+// compare mode, so two different unjudgeable credentials still diff as
+// changed). Empty and whitespace-only commands alone stay unchanged.
 func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
-	tokens, _, lexOK := lexConfigMutationLineStrict15167(cmd)
+	tokens, quoted, lexOK, comments := lexConfigMutationLineStrict15167WithComments(cmd)
 	if len(tokens) == 0 {
-		if lexOK || strings.TrimSpace(cmd) == "" {
+		if strings.TrimSpace(cmd) == "" {
 			return cmd, false
 		}
 		return wholePayloadMask16726(cmd, fingerprint)
+	}
+	// The outer config lexer unwraps a quoted commands value as one opaque
+	// token (tokens[0] is the unwrapped text). Lex those contents as an
+	// embedded command too, for ANY such token: a quoted whole-command
+	// (`"set ... pre-shared-key ascii-text SECRET"`) or a value whose text
+	// turns the credential into a trailing comment
+	// (`"set system host-name harmless # pre-shared-key ... SENTINEL"`) is
+	// otherwise one harmless-looking token and its credential survives.
+	// Recursion cannot loop: the inner text replays the same grammar with
+	// strictly fewer quote characters. When the inner command masks
+	// nothing, return it with changed=false so the caller keeps the
+	// authored (quoted) token byte-identical — no churn, and the inner
+	// render is never substituted for clean text. When it does mask,
+	// return the FINGERPRINTED inner render verbatim: embedding the masked
+	// text back into the outer token would needlessly re-encode nested
+	// quotes, and the placeholder the inner render produces is exactly
+	// what the outer quotes framed.
+	if len(tokens) == 1 && quoted[0] && lexOK {
+		if innerRendered, innerChanged := redactEmbeddedCommand(tokens[0], fingerprint); innerChanged {
+			return innerRendered, true
+		}
+		if comments {
+			return wholePayloadMask16726(cmd, fingerprint)
+		}
+		return cmd, false
+	}
+	// A quoted first token followed by ANY tail (valid token, comment,
+	// or junk) hides the credential inside the opaque quoted sentence:
+	// the outer token judge never marks a token inside quotes, so fail
+	// closed unless the quoted content itself masks cleanly above.
+	if len(tokens) > 1 && quoted[0] {
+		if _, innerChanged := redactEmbeddedCommand(tokens[0], fingerprint); innerChanged {
+			return wholePayloadMask16726(cmd, fingerprint)
+		}
+		if !lexOK || comments {
+			return wholePayloadMask16726(cmd, fingerprint)
+		}
+		// Well-formed tail after a clean quoted sentence: judge the
+		// tail tokens; if none mask, the payload still cannot be
+		// rendered safely token-wise (the quoted sentence stays one
+		// opaque token), so fail closed.
+		return wholePayloadMask16726(cmd, fingerprint)
+	}
+	// A quoted credential sentence at ANY token position (not just
+	// first) is one opaque token to the judge below; recurse into it
+	// and fail closed when its content masks.
+	for i, tok := range tokens {
+		if i < len(quoted) && quoted[i] {
+			if _, innerChanged := redactEmbeddedCommand(tok, fingerprint); innerChanged {
+				return wholePayloadMask16726(cmd, fingerprint)
+			}
+		}
 	}
 	changed := redactEmbeddedTokens(tokens, fingerprint)
 	if !lexOK && !changed {
@@ -497,7 +560,8 @@ func redactEmbeddedCommand(cmd string, fingerprint bool) (string, bool) {
 	for i, tok := range tokens {
 		parts[i] = quoteKey(tok)
 	}
-	return strings.Join(parts, " "), changed
+	rendered := strings.Join(parts, " ")
+	return rendered, changed || (comments && rendered != cmd)
 }
 
 func wholePayloadMask16726(cmd string, fingerprint bool) (string, bool) {
@@ -600,7 +664,12 @@ func isSecretKeywordToken16726(k string) bool {
 		"endpoint", "archive-sites":
 		return true
 	}
-	return false
+	// A bare command whose first token is credential-shaped (#16731:
+	// *password*/*secret*, auth-token, community-name) carries its
+	// value at index 1; judging it as a verb would rewrite it to
+	// `set` and drop the keyword before secretIndices could fire
+	// (#18384 fold, Rev18384FoldKimi).
+	return isCredentialShapedKeyword16731(k)
 }
 
 // redactEmbeddedCommands14413 applies embedded-command redaction to the
@@ -701,6 +770,12 @@ func redactJoinedTail14413(n *Node, tailStart int) {
 	}
 	tokens, _ := lexConfigMutationLine9938(redacted)
 	if len(tokens) == 0 {
+		// Whole-payload masks begin with `#`, so the config lexer treats the
+		// placeholder itself as a comment. Preserve it as one AST key rather
+		// than dropping the replacement with the empty token list.
+		n.Keys = append(n.Keys[:tailStart], redacted)
+		n.KeysQuoted = nil
+		n.KeysBracketed = nil
 		return
 	}
 	keys := make([]string, 0, tailStart+len(tokens))
@@ -722,6 +797,9 @@ func redactJoinedTail14413(n *Node, tailStart int) {
 func applyRedactedJoin14413(child *Node, redacted string) {
 	tokens, _ := lexConfigMutationLine9938(redacted)
 	if len(tokens) == 0 {
+		child.Keys = []string{redacted}
+		child.KeysQuoted = nil
+		child.KeysBracketed = nil
 		return
 	}
 	child.Keys = tokens
@@ -775,6 +853,11 @@ func fingerprintEmbeddedCommands14413(n *Node, full, base []string) {
 	if redacted, changed := redactEmbeddedCommand(joined, true); changed {
 		tokens, _ := lexConfigMutationLine9938(redacted)
 		if len(tokens) == 0 {
+			// See redactJoinedTail14413: whole-payload masks lex as comments,
+			// but still need to replace the stored joined tail.
+			n.Keys = append(n.Keys[:tailStart], redacted)
+			n.KeysQuoted = nil
+			n.KeysBracketed = nil
 			return
 		}
 		keys := make([]string, 0, tailStart+len(tokens))
@@ -927,21 +1010,28 @@ func redactNodes(nodes []*Node, base []string) {
 // required ancestor context so a GRE tunnel `key`, a chassis identity `key` or
 // a routing-policy `community` (all non-secret) are never masked.
 //
-// #16731 fail-closed arm: credential-SHAPED keywords mask in any context.
+// #16731 fail-closed arm: credential-SHAPED keywords mask in any context,
+// but only when the token occupies a schema keyword position. The
+// classifier must not inspect schema argument slots or dynamic instance
+// names: those are identifiers/values, even when they contain `secret` or
+// `password` (`system login user password-admin class read-only`, #17806).
+// The keyword-position walker follows the live schema and skips each
+// recognized keyword's declared arguments. Open-world tokens (schema
+// position lost) are still substring-classified fail-closed, so an
+// unmodelled *password*/*secret* leaf masks instead of leaking
+// (#18384 review fold).
 // The closed enumeration kept missing unmodelled Junos credential leaves
 // (default-chap-secret, local-password, auth-token, community-name,
 // dhcp/dhcp-relay `authentication password`, outbound-ssh `secret`) that
 // commit clean on open-world/inert paths and are live credentials on
-// external systems. Shape, not ancestor enumeration, is the fix: a keyword
-// containing `secret`/`password`, or exactly `auth-token`/`community-name`,
-// has no non-secret valued use in the Junos grammar xpf accepts. Three
-// exact-name exemptions keep non-credentials legible: bare `secret` (a
-// generic token, gated below to api-auth/AAA/outbound-ssh), and the
-// value-less spellings `master-password` (closed container),
-// `no-password-authentication` / `no-passwords` (flags) — masking their
-// trailing tokens would hide the PRF name / sibling statements packed on
-// the same flattened path. Valued `*-key` is NOT shape-masked:
-// `trusted-key`/`tsig-key`/`aws-access-key` are public identifiers.
+// external systems. Three exact-name exemptions keep non-credentials
+// legible: bare `secret` (a generic token, gated below to api-auth/AAA/
+// outbound-ssh), and the value-less spellings `master-password` (closed
+// container), `no-password-authentication` / `no-passwords` (flags) —
+// masking their trailing tokens would hide the PRF name / sibling
+// statements packed on the same flattened path. Valued `*-key` is NOT
+// shape-masked: `trusted-key`/`tsig-key`/`aws-access-key` are public
+// identifiers.
 func isCredentialShapedKeyword16731(k string) bool {
 	switch k {
 	case "auth-token", "community-name":
@@ -955,14 +1045,122 @@ func isCredentialShapedKeyword16731(k string) bool {
 	return strings.Contains(k, "secret") || strings.Contains(k, "password")
 }
 
+// credentialShapeSchemaRoot17806 is assigned by schema initialization after
+// the groups wildcard is wired. Keeping this as a pointer populated in init
+// avoids a package-initialization dependency cycle through schemaErrorf,
+// which also uses secretIndices.
+var credentialShapeSchemaRoot17806 *schemaNode
+
+// credentialShapePositionWalker17806 follows schema keyword slots once over
+// a flattened path. It avoids allocating a per-token position map and skips
+// declared argument spans as a unit.
+type credentialShapePositionWalker17806 struct {
+	schema    *schemaNode
+	skipUntil int
+	// inMultiValueRun: inside a childless multi leaf's value run —
+	// every remaining token is a value of that leaf until the walk
+	// would resolve a token as a sibling keyword (a container/leaf
+	// with children); such a sibling ends the run.
+	inMultiValueRun bool
+	multiParent     *schemaNode
+}
+
+// position reports whether fp[index] is a schema child keyword or a value/
+// identifier slot. The remaining false/false case is an open-world token.
+func (w *credentialShapePositionWalker17806) position(fp []string, index int) (schemaKeyword, valuePosition, positionKnown bool) {
+	if w.inMultiValueRun {
+		// A compound credential token (password-admin, secret-agent)
+		// is a VALUE, not a keyword — it never ends the run. A bare
+		// credential keyword (password, pre-shared-key, ...) DOES
+		// end the run so its gated/distinctive arm can fire —
+		// `archive-sites <url> password <v>` must mask (verified by
+		// TestRedactEmbeddedNonSetVerbs16726/gated_password). A
+		// sibling child with children of its own also ends the run.
+		// Either way the walker resumes at the leaf's PARENT schema
+		// so the run-ending token classifies normally.
+		k := fp[index]
+		endRun := k == "pre-shared-key" ||
+			(!strings.Contains(k, "-") && isCredentialShapedKeyword16731(k))
+		if !endRun {
+			if _, ok := w.multiParent.children[k]; ok {
+				// ANY resolvable sibling ends the run: containers,
+				// plain leaves, and wildcard-only siblings (groups)
+				// alike start a new statement whose tokens must
+				// classify through the schema (Rev18384FinalKimi:
+				// apply-groups -> groups leak).
+				endRun = true
+			}
+		}
+		if endRun {
+			w.schema = w.multiParent
+			w.inMultiValueRun = false
+			w.multiParent = nil
+		} else {
+			return false, true, true
+		}
+	}
+	if index < w.skipUntil {
+		return false, true, true
+	}
+	if index == 0 {
+		switch fp[index] {
+		case "set", "delete", "activate", "deactivate", "insert",
+			"rename", "copy", "replace", "annotate", "protect",
+			"unprotect":
+			w.skipUntil = index + 1
+			return false, true, true
+		}
+	}
+	if w.schema == nil {
+		return false, false, false
+	}
+	child, ok := w.schema.children[fp[index]]
+	if !ok {
+		if w.schema.wildcard != nil {
+			// The token occupies a dynamic name slot; descend into that
+			// instance's schema for the next token.
+			w.schema = w.schema.wildcard
+			w.skipUntil = index + 1
+			return false, true, true
+		}
+		// Open-world token: the path has left the known grammar.
+		w.schema = nil
+		return false, false, false
+	}
+	consumed, next := consumeNodeKeys(fp[index:], child)
+	if child.multi && len(child.children) == 0 {
+		// A multi-value leaf (e.g. domain-search, args:1 multi:true):
+		// every remaining token is a value of this leaf until a
+		// sibling keyword (above) ends the run — consumeNodeKeys
+		// counts only args, so later values must not fall into the
+		// open-world arm (#18384 fold, Rev18384FoldR2Kimi).
+		parent := w.schema
+		w.inMultiValueRun = true
+		w.multiParent = parent
+		w.schema = nil
+		w.skipUntil = index + consumed
+		return true, false, true
+	}
+	w.schema = next
+	w.skipUntil = index + consumed
+	return true, false, true
+}
+
 func secretIndices(fp []string) []int {
 	var out []int
+	positionWalker := credentialShapePositionWalker17806{schema: credentialShapeSchemaRoot17806}
 	for i, k := range fp {
-		// #16731: fail closed on credential-shaped keywords in any context.
-		// Checked before the switch so gated keywords (password, secret via
-		// outbound-ssh, user-password) cannot fall through unmasked when
-		// their ancestor gate misses an unmodelled subtree.
-		if isCredentialShapedKeyword16731(k) {
+		outStart := len(out)
+		schemaKeyword, valuePosition, positionKnown := positionWalker.position(fp, i)
+		// The broad shape classifier applies only to schema keywords.
+		// In the open world (path left the modelled grammar) a
+		// credential-shaped token is not a value position, so it
+		// stays fail-closed (#16731): an unmodelled *password*/
+		// *secret* leaf masks its value rather than leaking it
+		// (#18384 review fold; unmodelled spellings need no
+		// enumeration — the fail-closed arm covers them).
+		if isCredentialShapedKeyword16731(k) && !valuePosition &&
+			(schemaKeyword || !positionKnown) {
 			for j := i + 1; j < len(fp); j++ {
 				out = append(out, j)
 			}
@@ -1048,7 +1246,7 @@ func secretIndices(fp []string) []int {
 			// `password` directly under `services authentication-source` /
 			// `device-information` (or the `security` spellings below)
 			// matched no scope and rendered in cleartext.
-			if containsAnyOf(fp[:i], "api-auth", "dynamic-dns", "archive-sites", "user-identification", "access",
+			if !valuePosition && containsAnyOf(fp[:i], "api-auth", "dynamic-dns", "archive-sites", "user-identification", "access",
 				"active-directory-access", "identity-management", "local-authentication-table",
 				"authentication-source", "device-information") {
 				for j := i + 1; j < len(fp); j++ {
@@ -1063,7 +1261,7 @@ func secretIndices(fp []string) []int {
 			// (#16731: `system services outbound-ssh client <c> secret <s>`
 			// is an unmodelled Junos leaf whose value is live on the
 			// management server).
-			if isAPIAuthNamedKeySecretPath(fp[:i]) || isAAASecretPath(fp[:i]) || containsAnyOf(fp[:i], "outbound-ssh") {
+			if !valuePosition && (isAPIAuthNamedKeySecretPath(fp[:i]) || isAAASecretPath(fp[:i]) || containsAnyOf(fp[:i], "outbound-ssh")) {
 				for j := i + 1; j < len(fp); j++ {
 					out = append(out, j)
 				}
@@ -1112,8 +1310,46 @@ func secretIndices(fp []string) []int {
 				out = append(out, i+1)
 			}
 		}
+		// #17787: the closed secret-keyword switch cannot anticipate every
+		// unmodeled credential leaf (e.g. ssh-key or master-key). Treat a
+		// valued *-key schema keyword, or open-world token, as secret only
+		// after the specific arms above; the structural public-key exclusion
+		// below preserves known SSH host-key material.
+		if len(out) == outStart && !valuePosition &&
+			(schemaKeyword || !positionKnown) &&
+			strings.HasSuffix(k, "-key") && i+1 < len(fp) &&
+			!isSSHKnownHostKeyPath17787(fp, i) &&
+			k != "pre-shared-key" &&
+			k != "trusted-key" && k != "tsig-key" && k != "aws-access-key" {
+			for j := i + 1; j < len(fp); j++ {
+				out = append(out, j)
+			}
+		}
 	}
 	return out
+}
+
+// isSSHKnownHostKeyPath17787 recognizes a host-key type inside the exact
+// public SSH known-hosts branch. The opaque schema body intentionally admits
+// supported algorithm names (including future vendor extensions), whose key
+// blobs are trust anchors rather than credentials to redact. Allow an
+// optional set verb and config-group definition prefix, but no looser
+// ancestor match.
+func isSSHKnownHostKeyPath17787(fp []string, i int) bool {
+	if i < 0 || i+1 >= len(fp) {
+		return false
+	}
+	off := 0
+	if fp[off] == "set" {
+		off++
+	}
+	if off+1 < len(fp) && fp[off] == "groups" {
+		off += 2
+	}
+	return i == off+4 &&
+		fp[off] == "security" &&
+		fp[off+1] == "ssh-known-hosts" &&
+		fp[off+2] == "host"
 }
 
 // isSNMPTrapGroupIdentity reports whether fp[i] (a `trap-group` token) is

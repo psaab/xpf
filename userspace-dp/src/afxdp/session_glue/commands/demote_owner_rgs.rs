@@ -80,51 +80,21 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 decision,
             )
             .resolution;
-            let looked_up_resolution = super::super::prefer_local_forward_candidate_for_fabric_ingress(
+            // #17047: single consolidated pipeline (lookup supplied
+            // above); #15958b/#16524 verdicts unchanged.
+            let resolution = super::super::reresolve_stored_session(
                 forwarding,
                 ha_state,
                 dynamic_neighbors,
                 now_secs,
-                metadata.fabric_ingress,
+                &decision,
+                &metadata,
                 resolution_target,
-            install_table_name_for_session(forwarding, decision, resolution_target),
                 looked_up_resolution,
+                super::super::FabricArrival::Command {
+                    fabric_ingress: metadata.fabric_ingress,
+                },
             );
-            let enforced_resolution =
-                enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, looked_up_resolution);
-            // #15958b (fold): same shared zone-egress rule as refresh.
-            let resolution = if decision.resolution.disposition == ForwardingDisposition::FabricRedirect {
-                let dest_rg = super::super::connected_owner_rg_for_target_in_table(forwarding, resolution_target, install_table_name_for_session(forwarding, decision, resolution_target));
-                // Unknown owner (dest_rg==0) is NOT peer-ownership: keep the candidate (no redirect).
-            let destination_owner_active = dest_rg == 0 || (dest_rg > 0
-                    && ha_state
-                        .get(&dest_rg)
-                        .is_some_and(|group| group.is_forwarding_active(now_secs)));
-                let enforced_resolution = redirect_session_via_fabric_if_needed(
-                    forwarding,
-                    enforced_resolution,
-                    metadata.fabric_ingress,
-                    metadata.ingress_zone,
-                );
-                let resolution2 = super::super::rehome_or_retain_fabric_redirect_16524(
-                forwarding,
-                decision.resolution,
-                enforced_resolution,
-                metadata.egress_zone,
-                destination_owner_active,
-                dest_rg == 0,
-                Some(resolution_target),
-                install_table_name_for_session(forwarding, decision, resolution_target),
-            );
-            resolution2
-            } else {
-                redirect_session_via_fabric_if_needed(
-                    forwarding,
-                    enforced_resolution,
-                    metadata.fabric_ingress,
-                    metadata.ingress_zone,
-                )
-            };
             let refreshed_decision = SessionDecision {
                 resolution,
                 ..decision

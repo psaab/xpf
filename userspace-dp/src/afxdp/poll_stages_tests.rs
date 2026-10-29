@@ -2674,7 +2674,7 @@ fn two_vlan_distinct_zone_snapshot() -> crate::ConfigSnapshot {
 /// assert fails RED.
 #[test]
 fn forwarding_zone_pair_uses_logical_ingress_ifindex_3021() {
-    use crate::test_zone_ids::{TEST_LAN_ZONE_ID, TEST_WAN_ZONE_ID};
+    use crate::test_zone_ids::TEST_LAN_ZONE_ID;
     let forwarding = build_forwarding_state(&two_vlan_distinct_zone_snapshot());
 
     // Fixture sanity: parent 11 / VID 50 -> logical 13 (zone lan);

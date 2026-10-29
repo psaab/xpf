@@ -36,11 +36,10 @@ locating any symbol below is now a matter of opening the named file.
   teardown exists to remove; the daemon's `startHeartbeatWithRetryForEpoch` does.
 
   This is the same shape `publishSessionSyncIfCurrent` uses for the session-sync
-  constructor, and for the same reason: the daemon's cluster-comms teardown
-  cancels a context and joins exactly one goroutine (`clusterCommsWG`), so every
-  OTHER comms-scoped goroutine that publishes shared state needs a generation
-  gate of its own. The heartbeat retry loop runs on a bare `go` and is not in
-  that WaitGroup.
+  constructor. The daemon's cluster-comms teardown cancels a context and joins
+  the current epoch's constructor and fabric-populate loops; other comms-scoped
+  goroutines that publish shared state still need generation gates of their own.
+  The heartbeat retry loop runs on a bare `go` and is not in either join group.
 - `HeartbeatPacket`, `MarshalHeartbeat`,
   `UnmarshalHeartbeat`, the #4107 control-channel auth wire codec
   (`MarshalHeartbeatAuth`, `marshalHeartbeatAuthEpoch`,
@@ -193,8 +192,10 @@ running heartbeat onto the defaults just as a changed value does.
   forwarded-failover outcome reconciliation),
   `IsLocalPrimaryAny`, `LocalPriorities`) — `group_state.go`.
 - Peer-state accessors (`PeerAlive`, `PeerNodeID`,
-  `PeerGroupStates`, software/HA-protocol version,
+  `PeerGroupStates`, `PeerGroupPrimary`, software/HA-protocol version,
   `PeerMonitorStatuses`) — `peer_state.go`.
+  `PeerGroupPrimary`'s `known` result is heartbeat-liveness-qualified; retained
+  offline group history is not a current ownership fence.
 - Sync state (`SetSyncReady`, `IsSyncReady`,
   `SetSyncTransport`, `SyncTransport`, `SetSyncStats`,
   `GetSyncStats`, `IsSyncConnected`) — `sync_state.go`.
@@ -204,10 +205,11 @@ running heartbeat onto the defaults just as a changed value does.
   `SetPeerFailoverFunc`, `SetPeerFailoverCommitFunc`,
   `SetPeerFailoverBatchFunc`,
   `SetPeerFailoverCommitBatchFunc`, `SetPeerFenceFunc`) — `hooks.go`.
-- Peer sync source (`SetPeerSyncSource`, `SyncSourceInstalled`) —
-  `heartbeat_suppress.go`. The daemon publishes one SessionSync reference;
-  the suppression policy, 5s cap stamp and heartbeat-admission reset live
-  there under `Manager.mu` (#17056).
+- Peer sync source (`SetPeerSyncSource`, `ClearPeerSyncSourceIfCurrent`,
+  `SyncSourceInstalled`) — `heartbeat_suppress.go`. The daemon publishes one
+  SessionSync reference; conditional clearing prevents a delayed teardown from
+  removing a successor's source. The suppression policy, 5s cap stamp and
+  heartbeat-admission reset live there under `Manager.mu` (#17056).
 - Event-history methods (`RecordEvent`, `EventHistoryFor`) —
   `events_log.go`. Underlying types and `EventHistory` ring
   buffer — `events.go`.
@@ -572,12 +574,15 @@ caught it:
   held RG0-1;
 - the deploy reassert could not move RG2 back.
 
-The replacement now inherits the END of the grace its predecessor was inside
-(`inheritedHold` = the predecessor's `startedAt` plus its `seenThenLostGrace`,
-read under `m.mu`). `checkTimeout` holds while either the restart grace or the
-inherited hold is running. A steady-state commit restarts a receiver whose
-boot grace ended long ago, so it still holds for only 5s. A failed restart's
-debt (#9751 below) carries the hold into its retry. Cells:
+The replacement inherits the latest grace deadline its predecessor was still
+subject to: the later of `startedAt + seenThenLostGrace()` and the
+predecessor's own `inheritedHold`, read under `m.mu`. `checkTimeout` holds while
+either the replacement's restart grace or that inherited floor is running.
+Repeated restarts therefore cannot shorten the original boot floor (#17764).
+
+A steady-state commit restarts a receiver whose boot grace ended long ago, so
+it still holds for only 5s. A failed restart's debt (#9751 below) carries the
+floor into its retry. Cells:
 `heartbeat_restart_boot_grace_9722_test.go`.
 
 ### A failed heartbeat restart is owed, not latched (#9751)

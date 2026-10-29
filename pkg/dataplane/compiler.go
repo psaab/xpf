@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	cryptorand "crypto/rand"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,6 +23,8 @@ import (
 	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/appid"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
+	"github.com/psaab/xpf/pkg/fsatomic"
 	"github.com/psaab/xpf/pkg/netname"
 	"github.com/psaab/xpf/pkg/networkd"
 	"github.com/vishvananda/netlink"
@@ -34,52 +38,110 @@ var (
 	rssHashKeyErr  error
 )
 
-// ethtoolForcedLive is the process-lifetime set of netdevs xpf has
-// successfully forced a link mode on (#16787). It must survive the
-// per-compile CompileResult: deleting speed/duplex on a later commit is
-// compiled into a fresh result, so only state outside it can record that
-// the earlier force is still owed an `autoneg on` revert. Process lifetime
-// is the right bound — a daemon restart does not clear the NIC's forced
-// mode, but the next auto-shaped compile after a restart cannot know the
-// force was xpf's; that residual is accepted (see docs/log/16787.md)
-// because probing live autoneg state misses the restricted-advertisement
-// state a forced write can leave behind. Guarded by its own mutex; the
-// only writers/readers run under the daemon's applySem, but tests drive
-// applyEthtool directly.
+// ethtoolForcedLive records netdevs xpf has successfully forced a link mode
+// on (#16787). The state survives compile results and daemon restarts so a
+// later auto-shaped commit can return a previously-forced interface to
+// autonegotiation. Persistence is advisory: any read/write failure is warned
+// and the current process continues with the same in-memory behavior.
 var (
-	ethtoolForcedMu   sync.Mutex
-	ethtoolForcedLive = make(map[string]bool)
+	ethtoolForcedMu     sync.Mutex
+	ethtoolForcedLive   = make(map[string]bool)
+	ethtoolForcedLoaded bool
 )
+
+func readEthtoolForcedRegistry() map[string]bool {
+	live := make(map[string]bool)
+	data, err := os.ReadFile(configstore.EthtoolForcedRegistryPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return live
+	}
+	if err != nil {
+		slog.Warn("failed to read persisted ethtool forced-interface registry",
+			"path", configstore.EthtoolForcedRegistryPath, "err", err)
+		return live
+	}
+	var interfaces []string
+	if err := json.Unmarshal(data, &interfaces); err != nil {
+		slog.Warn("invalid persisted ethtool forced-interface registry",
+			"path", configstore.EthtoolForcedRegistryPath, "err", err)
+		return live
+	}
+	for _, ifaceName := range interfaces {
+		if ifaceName != "" {
+			live[ifaceName] = true
+		}
+	}
+	return live
+}
+
+// loadEthtoolForcedLocked reads the registry once, on first use. Lazy loading
+// lets tests redirect the durable path before any registry access.
+func loadEthtoolForcedLocked() {
+	if ethtoolForcedLoaded {
+		return
+	}
+	ethtoolForcedLive = readEthtoolForcedRegistry()
+	ethtoolForcedLoaded = true
+}
+
+// persistEthtoolForcedLocked saves a deterministic snapshot. The caller holds
+// ethtoolForcedMu; persistence errors never change the caller's in-memory
+// update or prevent the dataplane from applying the requested interface mode.
+func persistEthtoolForcedLocked() {
+	interfaces := make([]string, 0, len(ethtoolForcedLive))
+	for ifaceName := range ethtoolForcedLive {
+		interfaces = append(interfaces, ifaceName)
+	}
+	sort.Strings(interfaces)
+	data, err := json.Marshal(interfaces)
+	if err != nil {
+		slog.Warn("failed to encode ethtool forced-interface registry",
+			"path", configstore.EthtoolForcedRegistryPath, "err", err)
+		return
+	}
+	data = append(data, '\n')
+	if err := fsatomic.MkdirAllDurable(filepath.Dir(configstore.EthtoolForcedRegistryPath), 0o700); err != nil {
+		slog.Warn("failed to create ethtool forced-interface registry directory",
+			"path", configstore.EthtoolForcedRegistryPath, "err", err)
+		return
+	}
+	if err := fsatomic.WriteFileDurable(configstore.EthtoolForcedRegistryPath, data, 0o600); err != nil {
+		slog.Warn("failed to persist ethtool forced-interface registry",
+			"path", configstore.EthtoolForcedRegistryPath, "err", err)
+	}
+}
 
 func markEthtoolForced(ifaceName string) {
 	ethtoolForcedMu.Lock()
 	defer ethtoolForcedMu.Unlock()
+	loadEthtoolForcedLocked()
 	ethtoolForcedLive[ifaceName] = true
+	persistEthtoolForcedLocked()
 }
 
 func forgetEthtoolForced(ifaceName string) {
 	ethtoolForcedMu.Lock()
 	defer ethtoolForcedMu.Unlock()
+	loadEthtoolForcedLocked()
 	delete(ethtoolForcedLive, ifaceName)
+	persistEthtoolForcedLocked()
 }
 
-func ethtoolForcedSnapshot() map[string]bool {
+func ethtoolForcedContains(ifaceName string) bool {
 	ethtoolForcedMu.Lock()
 	defer ethtoolForcedMu.Unlock()
-	out := make(map[string]bool, len(ethtoolForcedLive))
-	for k, v := range ethtoolForcedLive {
-		out[k] = v
-	}
-	return out
+	loadEthtoolForcedLocked()
+	return ethtoolForcedLive[ifaceName]
 }
 
 // resetEthtoolForcedForTest clears the #16787 forced registry. Tests that
-// drive applyEthtool through successive compiles must start from a clean
-// process set; production code never calls this.
+// drive applyEthtool through successive compiles must start from a clean set;
+// production code never calls this.
 func resetEthtoolForcedForTest() {
 	ethtoolForcedMu.Lock()
 	defer ethtoolForcedMu.Unlock()
 	ethtoolForcedLive = make(map[string]bool)
+	ethtoolForcedLoaded = true
 }
 
 // readRSSHashKey is separated from the CSPRNG source so tests can supply a
@@ -2294,7 +2356,7 @@ func (r *CompileResult) applyEthtool(ifaceName string, ifCfg *config.InterfaceCo
 	speed := parseSpeed(ifCfg.Speed)
 	duplex := parseDuplex(ifCfg.Duplex)
 	if speed == "" && duplex == "" {
-		if !ethtoolForcedSnapshot()[ifaceName] {
+		if !ethtoolForcedContains(ifaceName) {
 			return
 		}
 		if out, err := runEthtool("-s", ifaceName, "autoneg", "on"); err != nil {

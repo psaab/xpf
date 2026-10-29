@@ -15,25 +15,31 @@ pub(crate) use cache_sensitive::{
     evaluate_interface_input_filter_counters_cached,
     evaluate_interface_input_filter_policers_cached, filter_term_counter_shape_matches,
     input_dscp_filter_ifindexes_changed, input_per_packet_l4_filter_ifindexes_changed,
-    interface_input_filter_has_dscp_match, interface_input_filter_has_per_packet_l4_match,
-    interface_input_filter_varies_per_packet, interface_output_filter_has_dscp_match,
+    interface_input_filter_has_dscp_match, interface_input_filter_has_per_packet_l4_match, interface_output_filter_has_dscp_match,
     interface_output_filter_has_per_packet_l4_match, lo0_filter_families_changed,
 };
+
+#[cfg(test)]
+pub(crate) use cache_sensitive::interface_input_filter_varies_per_packet;
 pub(crate) use eval::{
-    InputPolicerMeter, NonRoutingCountPolicy, evaluate_filter, evaluate_filter_counted,
-    evaluate_filter_ref_routing_instance_event_counted,
-    evaluate_filter_ref_routing_instance_uncounted, evaluate_interface_filter,
-    evaluate_interface_filter_counted, evaluate_interface_filter_log_match,
-    evaluate_interface_filter_non_routing_counted, evaluate_interface_output_filter,
-    evaluate_interface_output_filter_counted, evaluate_lo0_filter_counted,
-    evaluate_lo0_filter_log_match, filter_ref_deny_is_flow_invariant, filter_ref_static_verdict,
+    InputPolicerMeter, NonRoutingCountPolicy, evaluate_filter_ref_routing_instance_event_counted,
+    evaluate_filter_ref_routing_instance_uncounted, evaluate_interface_filter_log_match,
+    evaluate_interface_filter_non_routing_counted, evaluate_lo0_filter_counted,
+    filter_ref_deny_is_flow_invariant, filter_ref_static_verdict,
     interface_filter_affects_route_lookup, interface_filter_route_lookup_affecting,
     interface_input_filter,
+};
+#[cfg(test)]
+pub(crate) use eval::{
+    evaluate_filter, evaluate_filter_counted, evaluate_interface_filter,
+    evaluate_interface_filter_counted, evaluate_interface_output_filter,
+    evaluate_interface_output_filter_counted,
 };
 // #17195: `evaluate_lo0_filter` is dead in every build; eval.rs gates it
 // `#[cfg(test)]`, so the re-export follows that gate.
 #[cfg(test)]
 pub(crate) use eval::evaluate_lo0_filter;
+
 // #6236 PR-2C: the `(state, ifindex, ..)` routing-instance map-lookup wrappers
 // are test-only now — production shares the `interface_filter_route_lookup_affecting`
 // borrow into the `&Filter` core `evaluate_filter_ref_routing_instance_event_counted`.
@@ -50,10 +56,13 @@ pub(crate) use tx_selection::{
     evaluate_filter_ref_tx_selection_deferred,
     evaluate_filter_ref_tx_selection_runtime_counted,
     evaluate_filter_ref_tx_selection_runtime_routing_bearing,
-    evaluate_filter_ref_tx_selection_runtime_uncounted, evaluate_filter_ref_tx_selection_uncounted,
-    evaluate_interface_filter_tx_selection_counted,
-    evaluate_interface_output_filter_tx_selection_counted, filter_state_has_input_tx_selection,
+    evaluate_filter_ref_tx_selection_runtime_uncounted, evaluate_filter_ref_tx_selection_uncounted, filter_state_has_input_tx_selection,
     interface_output_filter_needing_tx_eval, routing_bearing_remainder_policer_drop_from,
+};
+#[cfg(test)]
+pub(crate) use tx_selection::{
+    evaluate_interface_filter_tx_selection_counted,
+    evaluate_interface_output_filter_tx_selection_counted,
 };
 // #6236 PR-2C: the `needs_tx_eval` bool is a test-only `.is_some()` view over
 // `interface_output_filter_needing_tx_eval` (production takes the borrow).

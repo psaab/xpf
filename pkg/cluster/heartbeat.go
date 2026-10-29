@@ -1107,6 +1107,18 @@ func (r *heartbeatReceiver) seenThenLostGrace() time.Duration {
 	return heartbeatStartupGrace
 }
 
+// graceEnd returns the latest deadline that suppresses a seen-then-lost
+// timeout: this receiver's own grace end or the inherited floor from its
+// predecessor. Replacements must carry the later deadline across restart
+// chains, not recompute from only the immediate receiver's short grace.
+func (r *heartbeatReceiver) graceEnd() time.Time {
+	end := r.startedAt.Add(r.seenThenLostGrace())
+	if r.inheritedHold.After(end) {
+		return r.inheritedHold
+	}
+	return end
+}
+
 func (r *heartbeatReceiver) start() {
 	r.startedAt = time.Now()
 	r.wg.Add(2)

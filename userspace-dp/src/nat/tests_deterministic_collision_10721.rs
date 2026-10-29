@@ -8,7 +8,6 @@
 
 use super::allocator::{DeterministicV4, DeterministicV6, NatHolder, PortAllocator};
 use super::source::{SourceNatFailureReason, SourceNatFlowKey};
-use super::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const POOL_IP: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 1);

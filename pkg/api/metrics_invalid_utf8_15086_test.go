@@ -9,10 +9,10 @@
 //  1. Label values are sanitized at the single emit choke point
 //     (emitConstMetric -> sanitizeMetricLabelValues): the bad sample is
 //     still published, with each invalid byte escaped as \xNN (#16707;
-//     the original U+FFFD fold was many-to-one and collided distinct
-//     identifiers into duplicate series), and counted in
-//     xpf_metrics_invalid_label_values_total. Legitimate values pass
-//     through byte-identical (control below).
+//     literal backslashes are escaped as \x5c to reserve that form
+//     (#17753)), and counted in
+//     xpf_metrics_invalid_label_values_total. Values without backslashes
+//     and with valid UTF-8 pass through byte-identical (control below).
 //  2. metricsLane.Collect recovers any residual collector panic, counts
 //     it in xpf_metrics_collector_panics_total, and returns the lane to
 //     the pool, so a scrape fails instead of crashing the process.
@@ -121,9 +121,8 @@ func TestCollectPolicyCountersInvalidUTF8RuleName15086(t *testing.T) {
 	}
 }
 
-// CONTROL: a legitimate rule name passes through byte-identical and does
-// not touch the invalid-label counter — sanitization must not rewrite
-// healthy config.
+// CONTROL: a valid plain rule name (without backslashes) passes through
+// byte-identical and does not touch the invalid-label counter.
 func TestCollectPolicyCountersValidRuleNameUnchanged15086(t *testing.T) {
 	c, got := collectPolicyMetrics15086(t, "web-allow")
 

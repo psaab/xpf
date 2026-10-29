@@ -1414,7 +1414,7 @@ mod scan_tests {
         // this O(few) instead of filling 4096 cap entries.) Each set is
         // NON-EMPTY and the window is FRESH so the expired-or-empty branch
         // never fires — the victim choice is decided purely by window_start.
-        let mut nonempty = |p: u16| {
+        let nonempty = |p: u16| {
             let mut s = FxHashSet::default();
             s.insert(p);
             s

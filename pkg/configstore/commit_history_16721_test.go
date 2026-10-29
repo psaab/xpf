@@ -117,9 +117,8 @@ func TestCommitConfirmJournaledWithPrincipal16721(t *testing.T) {
 		t.Fatal("premise: window must be pending")
 	}
 
-	// While pending, the renderer shows <rollback pending> and the
-	// commit_confirmed row carries NO rollback slot of its own beyond
-	// the positional one (it did push history, so it is the live slot 0).
+	// While pending, the renderer shows <rollback pending>; the
+	// commit_confirmed row matches the active-tree hash and has label 0.
 	rows, err := s.ListCommitHistoryRows(50)
 	if err != nil {
 		t.Fatal(err)
@@ -299,5 +298,338 @@ func TestCommitHistorySlotSkipsAutoRollback16721(t *testing.T) {
 		if strings.Contains(line, "auto_rollback") && !strings.HasPrefix(line, "     ") {
 			t.Errorf("auto_rollback row must have blank label, got %q", line)
 		}
+	}
+}
+
+// assertLabels17748 verifies that each emitted label resolves to the
+// config tree recorded by that commit row and that Rollback(label) stages
+// the same tree. Unlabelled rows are allowed when their generation was
+// synced or has rotated out of the journal/ladder intersection.
+func assertLabels17748(t *testing.T, s *Store) {
+	t.Helper()
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[int]bool{}
+	for _, row := range rows {
+		k := row.RollbackSlot
+		if k < 0 {
+			continue
+		}
+		if row.Entry.ConfigHash == "" {
+			t.Errorf("labelled row %q has empty ConfigHash", row.Entry.Detail)
+			continue
+		}
+		if seen[k] {
+			t.Errorf("duplicate rollback label %d", k)
+		}
+		seen[k] = true
+		var gotHash string
+		if k == 0 {
+			gotHash = journalConfigHash(s.ActiveTree())
+		} else {
+			if err := s.Rollback(k); err != nil {
+				t.Errorf("label %d is dangling: Rollback(%d): %v", k, k, err)
+				continue
+			}
+			gotHash = journalConfigHash(s.candidate)
+			if err := s.Rollback(0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if gotHash != row.Entry.ConfigHash {
+			t.Errorf("label %d names %q hash %s, but rollback %d restores hash %s",
+				k, row.Entry.Detail, row.Entry.ConfigHash, k, gotHash)
+		}
+	}
+}
+
+// #17748 RED-1: the timeout reverts active from confirmed C to B but
+// leaves the deeper ladder [B,A,...] intact. B is still the live commit
+// (label 0); rollback 1 also restores B, so A belongs to retained slot 2,
+// not to the positional label 1. The old labeler emits A=1.
+func TestCommitHistoryLabelsAutoRollbackDeepLadder17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	commitHost16721(t, s, "two", "set-two")
+	if err := s.SetFromInput("system host-name three"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConfirmed(5); err != nil {
+		t.Fatal(err)
+	}
+	gen := s.ConfirmGenForTesting()
+	s.performAutoRollback(gen)
+	if got := s.ActiveConfig().System.HostName; got != "two" {
+		t.Fatalf("premise: active must revert to two, got %q", got)
+	}
+	if got := len(s.ListHistory()); got != 3 {
+		t.Fatalf("premise: ladder depth = %d, want 3", got)
+	}
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-two"); got != 0 {
+		t.Errorf("#17748: slot(set-two) = %d, want 0 (active)", got)
+	}
+	if got := slotOf16721(rows, "set-one"); got != 2 {
+		t.Errorf("#17748: slot(set-one) = %d, want 2", got)
+	}
+	assertLabels17748(t, s)
+	if err := s.Rollback(1); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name two") {
+		t.Errorf("rollback 1 staged %q, want host two", staged)
+	}
+}
+
+// #17748 RED-2: SyncApply pushes the prior active tree without a commit
+// row. The remaining commit rows must retain their real ladder slots,
+// not shift to 0/1 because the config_sync journal action is filtered.
+func TestCommitHistoryLabelsSyncPush17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	commitHost16721(t, s, "two", "set-two")
+	if _, err := s.SyncApply("system {\n    host-name synced;\n}\n", nil); err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	if got := len(s.ListHistory()); got != 3 {
+		t.Fatalf("premise: ladder depth = %d, want 3", got)
+	}
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-two"); got != 1 {
+		t.Errorf("#17748: slot(set-two) = %d, want 1 (sync tree is live)", got)
+	}
+	if got := slotOf16721(rows, "set-one"); got != 2 {
+		t.Errorf("#17748: slot(set-one) = %d, want 2", got)
+	}
+	assertLabels17748(t, s)
+	if err := s.Rollback(1); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name two") {
+		t.Errorf("rollback 1 staged %q, want host two (set-two is label 1)", staged)
+	}
+	if err := s.Rollback(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rollback(2); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name one") {
+		t.Errorf("rollback 2 staged %q, want host one (set-one is label 2)", staged)
+	}
+	if err := s.Rollback(0); err != nil {
+		t.Fatal(err)
+	}
+	// Control: applying the identical sync again must not push another slot.
+	if _, err := s.SyncApply("system {\n    host-name synced;\n}\n", nil); err != nil {
+		t.Fatalf("SyncApply control: %v", err)
+	}
+	if got := len(s.ListHistory()); got != 3 {
+		t.Fatalf("control: ladder depth = %d, want 3 (equivalent sync pushes none)", got)
+	}
+	assertLabels17748(t, s)
+}
+
+// #17748 RED: after A, B, then a real SyncApply back to A's content,
+// active A was produced by sync, not by the older commit row. That row
+// belongs to retained slot 2; only the post-sync B row labels slot 1.
+func TestCommitHistoryLabelsSyncRestoresOldHash17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	commitHost16721(t, s, "two", "set-two")
+	if _, err := s.SyncApply("system {\n    host-name one;\n}\n", nil); err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	if got := s.ActiveConfig().System.HostName; got != "one" {
+		t.Fatalf("premise: synced active host = %q, want one", got)
+	}
+	if got := len(s.ListHistory()); got != 3 {
+		t.Fatalf("premise: changed sync ladder depth = %d, want 3", got)
+	}
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-one"); got != 2 {
+		t.Errorf("#17748: pre-sync set-one row = %d, want retained slot 2 (not active 0)", got)
+	}
+	if got := slotOf16721(rows, "set-two"); got != 1 {
+		t.Errorf("#17748: set-two row = %d, want retained slot 1", got)
+	}
+	assertLabels17748(t, s)
+	if err := s.Rollback(1); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name two") {
+		t.Errorf("rollback 1 staged %q, want host two", staged)
+	}
+	if err := s.Rollback(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rollback(2); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name one") {
+		t.Errorf("rollback 2 staged %q, want host one", staged)
+	}
+}
+
+// A same-content SyncApply is a control: it does not create a new rollback
+// generation and must not prevent the matching commit row from labeling 0.
+func TestCommitHistoryLabelsEquivalentSync17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	depth := len(s.ListHistory())
+	if _, err := s.SyncApply("system {\n    host-name one;\n}\n", nil); err != nil {
+		t.Fatalf("SyncApply control: %v", err)
+	}
+	if got := len(s.ListHistory()); got != depth {
+		t.Fatalf("control: ladder depth = %d, want %d (equivalent sync pushes none)", got, depth)
+	}
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-one"); got != 0 {
+		t.Errorf("control: set-one label = %d, want 0", got)
+	}
+	assertLabels17748(t, s)
+}
+
+// #17748 Tail(3) control: the sync-pushed generation between B and D
+// is absent from commit rows, and A is outside the bounded journal tail.
+// B must keep its actual retained slot 2 rather than being relabelled 1.
+func TestCommitHistoryLabelsBoundedWindow17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	commitHost16721(t, s, "two", "set-two")
+	if _, err := s.SyncApply("system {\n    host-name synced;\n}\n", nil); err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	commitHost16721(t, s, "four", "set-four")
+	rows, err := s.ListCommitHistoryRows(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("tail window rows = %d, want 2 (config_sync is filtered)", len(rows))
+	}
+	if got := slotOf16721(rows, "set-four"); got != 0 {
+		t.Errorf("#17748: slot(set-four) = %d, want 0", got)
+	}
+	if got := slotOf16721(rows, "set-two"); got != 2 {
+		t.Errorf("#17748: slot(set-two) = %d, want 2", got)
+	}
+	assertLabels17748(t, s)
+	if err := s.Rollback(2); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name two") {
+		t.Errorf("rollback 2 staged %q, want host two (set-two is label 2)", staged)
+	}
+}
+
+// Repeated config hashes still map one-to-one in generation order: the
+// newest matching commit is live and the older one is the retained slot 2.
+func TestCommitHistoryLabelsDuplicateTrees17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one-first")
+	commitHost16721(t, s, "two", "set-two")
+	commitHost16721(t, s, "one", "set-one-again")
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-one-again"); got != 0 {
+		t.Errorf("#17748: newest duplicate hash label = %d, want 0", got)
+	}
+	if got := slotOf16721(rows, "set-two"); got != 1 {
+		t.Errorf("#17748: middle hash label = %d, want 1", got)
+	}
+	if got := slotOf16721(rows, "set-one-first"); got != 2 {
+		t.Errorf("#17748: older duplicate hash label = %d, want 2", got)
+	}
+	assertLabels17748(t, s)
+}
+
+// RED-on-revert: if the auto_rollback suppression is removed, the reverted
+// confirmed row's duplicate A hash steals slot 2 from the surviving set-one
+// row. Expected labels are confirmed=-1, set-one=2, set-two=0.
+func TestCommitHistoryAutoRollbackSuppressesDuplicateHash17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	commitHost16721(t, s, "two", "set-two")
+	if err := s.SetFromInput("system host-name one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CommitConfirmed(5); err != nil {
+		t.Fatal(err)
+	}
+	s.performAutoRollback(s.ConfirmGenForTesting())
+	if got := s.ActiveConfig().System.HostName; got != "two" {
+		t.Fatalf("premise: timeout must restore set-two, got %q", got)
+	}
+	if got := len(s.ListHistory()); got != 3 {
+		t.Fatalf("premise: ladder depth = %d, want 3", got)
+	}
+
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-one"); got != 2 {
+		t.Errorf("#17748: surviving set-one row = %d, want slot 2", got)
+	}
+	if got := slotOf16721(rows, "set-two"); got != 0 {
+		t.Errorf("#17748: live set-two row = %d, want slot 0", got)
+	}
+	foundConfirmed := false
+	for _, row := range rows {
+		if row.Entry.Action == "commit_confirmed" {
+			foundConfirmed = true
+			if row.RollbackSlot != -1 {
+				t.Errorf("reverted commit_confirmed row got slot %d, want -1", row.RollbackSlot)
+			}
+		}
+	}
+	if !foundConfirmed {
+		t.Fatal("missing reverted commit_confirmed row")
+	}
+	assertLabels17748(t, s)
+
+	if err := s.Rollback(1); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name two") {
+		t.Errorf("rollback 1 staged %q, want host two", staged)
 	}
 }

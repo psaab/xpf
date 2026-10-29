@@ -339,7 +339,7 @@ mod new_flow_session_limit_tests {
 #[cfg(test)]
 mod tcp_syn_check_tests {
     use super::*;
-    use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
+    use crate::ip_proto::PROTO_TCP;
     use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionOrigin};
     use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_PSH, TCP_RST, TCP_SYN};
     use std::net::{IpAddr, Ipv4Addr};
@@ -994,7 +994,7 @@ mod persistent_pressure_shed_17683_tests {
                 ..crate::SourceNATRuleSnapshot::default()
             }]);
 
-        let mut mint_scoped = |scope: u32, now_ns: u64| {
+        let mint_scoped = |scope: u32, now_ns: u64| {
             let mut counter = None;
             let decision = match crate::nat::match_source_nat_result_for_tuple(
                 &crate::nat::InterfaceNatAllocators::default(),

@@ -105,7 +105,7 @@ pub(in crate::afxdp) fn resolve_forward_target_ifindex_with_dynamic(
     // bytes and the dispatch NIC, so it wins over the stored resolution
     // whenever it resolves — including when `tx_ifindex > 0`.
     if let Some(peer_egress) =
-        crate::afxdp::frame::wg_transit_egress_physical_egress_ifindex_with_dynamic(
+        crate::afxdp::frame::wg_transit_egress_physical_egress_ifindex(
             decision,
             forwarding,
             frame,

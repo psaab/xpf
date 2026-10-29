@@ -802,32 +802,33 @@ func ribGroupReturnRuleInstance(rule netlink.Rule, instanceTableIDs map[string]i
 	return instanceName, instanceName != ""
 }
 
-// ribGroupReturnAuthorized reports whether sourceName's interface-routes
-// rib-group for family names peerName's rib in its import-rib list — the
-// #16616 authorization for a rib-group return. It mirrors the kernel
-// applier's authorization against the compiled config so a stale kernel
-// return rule left by an older binary cannot republish an unauthorized
-// tenant->tenant row into the userspace FIB. A source with no matching
-// instance or rib-group is unauthorized (fail-closed).
+// ribGroupReturnAuthorized reports whether peerName's interface-routes
+// rib-group for family names sourceName's rib in its import-rib list — the
+// #16616/#17705 authorization for a rib-group return. Import-rib describes
+// where the peer's routes are installed: naming sourceName's rib therefore
+// authorizes a return from that lookup source to the peer's prefixes. It
+// mirrors the kernel applier's authorization so a stale kernel rule from
+// an older binary cannot republish an unauthorized tenant->tenant row.
+// Missing instances or rib-groups fail closed.
 func ribGroupReturnAuthorized(cfg *config.Config, sourceName, peerName string, family int) bool {
 	if cfg == nil || sourceName == "" || peerName == "" || sourceName == peerName {
 		return false
 	}
-	var source *config.RoutingInstanceConfig
+	var peer *config.RoutingInstanceConfig
 	for _, inst := range cfg.RoutingInstances {
-		if inst != nil && inst.Name == sourceName {
-			source = inst
+		if inst != nil && inst.Name == peerName {
+			peer = inst
 			break
 		}
 	}
-	if source == nil {
+	if peer == nil {
 		return false
 	}
-	groupName := source.InterfaceRoutesRibGroup
-	want := peerName + ".inet.0"
+	groupName := peer.InterfaceRoutesRibGroup
+	want := sourceName + ".inet.0"
 	if family == syscall.AF_INET6 {
-		groupName = source.InterfaceRoutesRibGroupV6
-		want = peerName + ".inet6.0"
+		groupName = peer.InterfaceRoutesRibGroupV6
+		want = sourceName + ".inet6.0"
 	}
 	if groupName == "" {
 		return false

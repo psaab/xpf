@@ -6060,7 +6060,7 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
         nat_scope_ifindex: None,
     };
     let decision = {
-        let mut sessions = SessionTable::new();
+        let sessions = SessionTable::new();
         let _ = sessions;
         crate::session::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
@@ -6130,7 +6130,7 @@ fn cross_worker_reply_evidence_retains_victim_16019() {
         crate::ip_proto::PROTO_UDP,
         0,
     ));
-    let mut rev_meta = meta.clone();
+    let rev_meta = meta.clone();
     assert!(worker_b.install_with_protocol(
         reverse_key.clone(),
         decision,

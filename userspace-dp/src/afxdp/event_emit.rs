@@ -438,10 +438,9 @@ pub(super) fn screen_parse_error_info(
         is_fragment: false,
         is_first_fragment: false,
         ip_ihl: 5,
-        ip_frag_off: 0,
+        frag: None,
         ip_total_len: 0,
         ip_payload_len: 0,
-        frag_data_off: 0,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     }
@@ -494,10 +493,9 @@ pub(super) fn screen_parse_error_info_flowless(
         is_fragment: false,
         is_first_fragment: false,
         ip_ihl: 5,
-        ip_frag_off: 0,
+        frag: None,
         ip_total_len: 0,
         ip_payload_len: 0,
-        frag_data_off: 0,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     }

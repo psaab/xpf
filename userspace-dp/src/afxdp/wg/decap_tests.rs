@@ -19,7 +19,7 @@
 
 use super::super::test_fixtures::wg_outer_mtu_snapshot;
 use super::super::tests_support::{
-    txn_ha_state, txn_run_descriptor, txn_run_descriptor_checked, txn_run_descriptor_inner,
+    txn_ha_state, txn_run_descriptor_checked, txn_run_descriptor_inner,
     txn_run_descriptor_with_event_stream,
 };
 use super::super::*;
@@ -715,7 +715,7 @@ fn poll_loop_adjudicates_wg_inner_plaintext_under_the_tunnel_zone_8274() {
     binding.interface = std::sync::Arc::<str>::from("ge-0-0-2.80");
     let ha_state = txn_ha_state();
     let mut sessions = SessionTable::new();
-    let (batch, dbg) = txn_run_descriptor_checked(
+    let (batch, _dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
         &forwarding,

@@ -40,7 +40,9 @@ mod vtime;
 // continue to resolve every symbol exactly as before the split.
 pub(in crate::afxdp) use backlog::{ExactDemandQueueMask, SharedCoSExactBacklog};
 pub(in crate::afxdp) use lease::{SharedCoSQueueLease, SharedCoSRootLease};
-pub(in crate::afxdp) use vtime::{NOT_PARTICIPATING, PaddedVtimeSlot, SharedCoSQueueVtimeFloor};
+pub(in crate::afxdp) use vtime::SharedCoSQueueVtimeFloor;
+#[cfg(test)]
+pub(in crate::afxdp) use vtime::{NOT_PARTICIPATING, PaddedVtimeSlot};
 
 // `pub(super)` lease internals reached only by the co-located `tests`
 // module. Imported PRIVATELY into module scope so the `#[path]`-nested

@@ -201,18 +201,16 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 		var errs []error
 		cvc := &walkContext{refs: refs, collectErrs: &errs, collectMax: MaxCollectedTypedLeafViolations16012}
 		walkErr := walkSchemaChildren(tree.Children, setSchema, nil, cvc, false)
-		// #17241: the collect cap and a non-typed structural error can stop
-		// the ordinary walk before it reaches a nested-list refusal. On those
-		// error paths only, run the narrow schema-aware scan so neither a
-		// flood of unrelated typed errors nor a tolerated structural finding
-		// can hide values that the compiler will silently drop.
-		var nestedErr error
-		if walkErr != nil || len(errs) >= MaxCollectedTypedLeafViolations16012 {
-			nestedErr = findNestedListContentError(tree.Children, setSchema, nil)
-			if nestedErr != nil && (walkErr == nil || IsNestedListContentSchemaError(walkErr)) {
-				walkErr = nestedErr
-				nestedErr = nil
-			}
+		// #17241: scan the schema-owned refusal leaves even when the ordinary
+		// walk succeeds. Compiler readers consume some packed tails that are
+		// intentionally not admitted by packedTail, and their leaf keywords are
+		// absent from Children until the shared refusal scan expands the run.
+		// The scan also preserves the prior fallback guarantee when structural
+		// errors or the collect cap stop the ordinary walk early.
+		nestedErr := findNestedListContentError(tree.Children, setSchema, nil)
+		if nestedErr != nil && (walkErr == nil || IsNestedListContentSchemaError(walkErr)) {
+			walkErr = nestedErr
+			nestedErr = nil
 		}
 		for i, e := range errs {
 			errs[i] = scrubSchemaErrorSecrets(tree, e)
@@ -234,8 +232,19 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect bool) ([]error, er
 		}
 		return errs, nil
 	}
-	if err := walkSchemaChildren(tree.Children, setSchema, nil, vc, false); err != nil {
-		return nil, scrubSchemaErrorSecrets(tree, err)
+	walkErr := walkSchemaChildren(tree.Children, setSchema, nil, vc, false)
+	if walkErr != nil {
+		// #17241: SchemaValidate returns the FIRST error. Joining the
+		// nested refusal onto an earlier walk error made the result
+		// classify as nested, hiding the first error's identity from
+		// callers that probe it (the adress-set precondition). The hard
+		// refusal is preserved by the collect path used by tolerant
+		// ingress, which joins the earlier diagnostic with the scan result.
+		return nil, scrubSchemaErrorSecrets(tree, walkErr)
+	}
+	nestedErr := findNestedListContentError(tree.Children, setSchema, nil)
+	if nestedErr != nil {
+		return nil, scrubSchemaErrorSecrets(tree, nestedErr)
 	}
 	return nil, nil
 }

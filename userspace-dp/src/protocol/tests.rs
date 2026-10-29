@@ -5580,7 +5580,7 @@ fn wire_fixture_completeness_16132() {
             i = j + 1;
         }
     }
-    let total_fields: usize = census.values().map(|v| v.len()).sum();
+    let _total_fields: usize = census.values().map(|v| v.len()).sum();
     // --- Fixture specimens, grouped by Rust type ------------------------
     let fixture_path = proto_dir
         .parent()

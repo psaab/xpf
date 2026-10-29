@@ -25,11 +25,12 @@ import (
 //   - The caller MUST hold d.applySem. The stamp helpers are
 //     …UnderSem precisely because stamping outside the semaphore lets
 //     a competing promotion inherit this apply's success (#6296).
-//   - DNS resolution happens BEFORE arming, so the plan, the debt
-//     checks and the apply all key on the same (cloned) pointer the
-//     dataplane will publish (#16687). Arming with the pre-resolve
-//     pointer makes capturePolicyInvalidationLocked drop the plan as
-//     stale (plan.newCfg != cfg).
+//   - DNS network resolution happens BEFORE the driver acquires applySem.
+//     Finalization only consumes an already-resolved private clone or
+//     clones the promoted config and populates it from the DNS cache; no
+//     resolver call can extend the commit/sync/rollback critical section.
+//     The applied pointer still keys the plan and dataplane publication
+//     (#16687).
 //   - #6948: the session-invalidation plan is armed BEFORE the apply.
 //     Only the caller holds the pre-commit active config — the store
 //     promoted the new one upstream — and the invalidation's
@@ -110,9 +111,10 @@ const (
 // already-promoted config plus the obligations of its driver.
 type promotedApply struct {
 	kind promotedApplyKind
-	// oldActive is the pre-promotion active config (the #6948 arm's
-	// old side and the discharge's old side). newCfg is the promoted
-	// config to apply; the helper resolves DNS on it and the caller
+	// oldActive is the pre-promotion config, for the invalidation arm and
+	// discharge. newCfg is the promoted config to apply; finalization
+	// clones and populates DNS from cache after transaction drivers warm it
+	// before acquiring applySem.
 	oldActive, newCfg *config.Config
 	// armKind selects which armPolicyInvalidation* helper the
 	// finalize step calls (see promotedArmKind below). Keeping the
@@ -247,10 +249,14 @@ func (d *Daemon) surfacingIncompleteCapture(newCfg *config.Config, applyErr erro
 //     retErr could carry it.
 func (d *Daemon) finalizePromotedApplyLocked(p promotedApply) promotedApplyOutcome {
 	var out promotedApplyOutcome
-	// #16687: resolve DNS into a private clone BEFORE arming (see the
-	// file doc). Every driver resolves the same way; the applied
-	// pointer is carried in the outcome.
-	newCfg := d.resolveDNSBeforeApply(p.newCfg)
+	// #17782: all driver DNS network work is complete before applySem.
+	// Consume a privately marked refresher clone when one was supplied;
+	// otherwise create a private clone and read only the warmed cache.
+	newCfg := p.newCfg
+	if config.HasDNSNames(p.newCfg) && !d.consumeDNSResolved(p.newCfg) {
+		newCfg = p.newCfg.CloneForDNSRefresh()
+		config.PopulateDNSFromCache(newCfg)
+	}
 	out.newCfg = newCfg
 	// #6948: arm the commit-time session-invalidation plan BEFORE the apply.
 	// Only this caller holds the pre-commit active config — the store promoted

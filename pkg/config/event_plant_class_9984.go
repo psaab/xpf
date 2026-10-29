@@ -191,6 +191,18 @@ func nodesMayHaveEventCommands9984(nodes []*Node, depth int) bool {
 }
 
 func eventOptionsMayHaveEventCommands9984(node *Node) bool {
+	if inst, ok := compactEventOptionsPolicyInstance9984(node, nil); ok &&
+		policyMayHaveEventCommands9984(inst.node) {
+		return true
+	}
+	if len(node.Keys) == 2 && node.Keys[1] == "policy" {
+		for _, child := range node.Children {
+			if inst, ok := compactEventOptionsPolicyInstance9984(node, child); ok &&
+				policyMayHaveEventCommands9984(inst.node) {
+				return true
+			}
+		}
+	}
 	for _, child := range node.Children {
 		if child == nil || child.Name() != "policy" {
 			continue
@@ -199,6 +211,50 @@ func eventOptionsMayHaveEventCommands9984(node *Node) bool {
 			if inst.node != nil && policyMayHaveEventCommands9984(inst.node) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+type eventPolicyInstance9984 struct {
+	name string
+	node *Node
+}
+
+// compactEventOptionsPolicyInstance9984 resolves the packed raw spellings
+// `event-options policy p ...` and `event-options policy { p { ... } }`.
+// For the one-key container, a named instance may itself be named after a
+// policy keyword, so its body structure—not its name—distinguishes it from
+// an elided-name policy body.
+func compactEventOptionsPolicyInstance9984(container, child *Node) (eventPolicyInstance9984, bool) {
+	if container == nil || container.Name() != "event-options" ||
+		len(container.Keys) < 2 || container.Keys[1] != "policy" {
+		return eventPolicyInstance9984{}, false
+	}
+	if len(container.Keys) >= 3 {
+		return eventPolicyInstance9984{name: container.Keys[2], node: container}, true
+	}
+	if len(container.Keys) != 2 || child == nil ||
+		!eventPolicyInstanceHasPropertyChildren9984(child) {
+		return eventPolicyInstance9984{}, false
+	}
+	return eventPolicyInstance9984{name: child.Name(), node: child}, true
+}
+
+func eventPolicyInstanceHasPropertyChildren9984(instance *Node) bool {
+	if instance == nil {
+		return false
+	}
+	policySchema := schemaEventOptions.children["policy"]
+	for _, child := range instance.Children {
+		if child == nil {
+			continue
+		}
+		if child.Name() == "apply-groups" || child.Name() == "apply-groups-except" {
+			return true
+		}
+		if policySchema != nil && policySchema.children[child.Name()] != nil {
+			return true
 		}
 	}
 	return false
@@ -248,17 +304,30 @@ func eventPolicyNodes9984(tree *ConfigTree) map[string][]*Node {
 				continue
 			}
 			inSection := inEventOptions || node.Name() == "event-options"
+			if inSection && node.Name() == "event-options" &&
+				len(node.Keys) >= 2 && node.Keys[1] == "policy" {
+				if inst, ok := compactEventOptionsPolicyInstance9984(node, nil); ok {
+					out[inst.name] = append(out[inst.name], inst.node)
+				}
+				if len(node.Keys) == 2 {
+					for _, child := range node.Children {
+						if inst, ok := compactEventOptionsPolicyInstance9984(node, child); ok {
+							out[inst.name] = append(out[inst.name], inst.node)
+						}
+					}
+				}
+				continue
+			}
 			if inSection && node.Name() == "policy" {
-				// Mirror namedInstances, used by compileEventOptions: a
-				// direct policy carries its name in Keys[1]; the
-				// one-key-container shape `policy { p { ... } }` files
-				// each named instance as a child of the policy node.
-				// Indexing only Keys>=2 made a solely nested plant-class
-				// invisible to stamping/quarantine while the compiler
-				// still honoured it (#14142).
+				// A policy node is either the direct named instance or the
+				// one-key container holding named instances. Do not descend
+				// into its body: an instance named `policy` would otherwise
+				// be re-read as a container and its properties become phantom
+				// policies in the census.
 				for _, inst := range namedInstances([]*Node{node}) {
 					out[inst.name] = append(out[inst.name], inst.node)
 				}
+				continue
 			}
 			walk(node.Children, inSection)
 		}
@@ -349,7 +418,7 @@ func writeNodeSignature9984(b *strings.Builder, n *Node) {
 }
 
 func clearEventPlantClass9984(tree *ConfigTree, name string) {
-	if tree == nil || name == "" {
+	if tree == nil {
 		return
 	}
 	clearEventPlantClassNodes9984(eventPolicyNodes9984(tree)[name])
@@ -371,7 +440,7 @@ func clearEventPlantClassNodes9984(policies []*Node) {
 }
 
 func setEventPlantClass9984(tree *ConfigTree, name, class string) {
-	if tree == nil || name == "" {
+	if tree == nil {
 		return
 	}
 	policies := eventPolicyNodes9984(tree)[name]
@@ -388,6 +457,11 @@ func setEventPlantClass9984(tree *ConfigTree, name, class string) {
 		policy.Children = append(filtered, &Node{Keys: []string{"plant-class", class}, IsLeaf: true})
 	}
 	if len(policies) > 0 {
+		return
+	}
+	if name == "" {
+		// Empty-named policies are supported when they already exist, but
+		// never invent one when the raw census found no instance.
 		return
 	}
 	var eventOptions *Node

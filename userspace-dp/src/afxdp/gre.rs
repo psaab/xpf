@@ -460,7 +460,7 @@ pub(in crate::afxdp) fn outer_head_admits_gre_endpoint(
     let gre_offset = meta.l4_offset as usize;
     let Some(base) = frame
         .get(gre_offset..gre_offset.saturating_add(4))
-        .filter(|b| gre_offset + 4 <= datagram_end)
+        .filter(|_b| gre_offset + 4 <= datagram_end)
         .and_then(|b| <[u8; 4]>::try_from(b).ok())
     else {
         return false;

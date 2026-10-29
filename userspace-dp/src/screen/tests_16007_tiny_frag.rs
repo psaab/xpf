@@ -11,7 +11,7 @@
 //! `tcp_flags_unknown` packets drop the same way.
 
 use super::extract::extract_screen_info;
-use super::packet::ScreenParseError;
+use super::packet::{FragView, ScreenParseError};
 use super::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -191,10 +191,9 @@ fn hand_built_unknown_flags_first_fragment_drops_syn_frag_not_no_flag_16007() {
         is_fragment: true,
         is_first_fragment: true,
         ip_ihl: 5,
-        ip_frag_off: 0x2000,
+        frag: Some(FragView { offset_bytes: 0, more: true, data_len: 8, pod_extent: 28 }),
         ip_total_len: 28,
         ip_payload_len: 0,
-        frag_data_off: 0,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     };
