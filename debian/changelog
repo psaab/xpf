@@ -1,4 +1,6 @@
 xpf (0.0.0) unstable; urgency=medium
+  * CI: Keep the harness-census workflow printable ASCII so its wiring
+    self-test remains fail-closed (#18389).
   * Incus HA assurance: accept `secondary-hold` as the peer's non-owner state
     in the RG owner oracle while requiring both status views to show the
     expected primary (#18503).
