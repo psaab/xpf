@@ -607,10 +607,11 @@ func configsContentEqual(a, b *config.Config) bool {
 	return helperVisibleSecretDigest9161(a) == helperVisibleSecretDigest9161(b)
 }
 
-// dnsAnswersContentEqual16606 compares the runtime DNS answers of two
-// configs by scoped identity (#16606). Order within an entry is
+// dnsAnswersContentEqual16606 compares the runtime DNS state of two
+// configs by scoped identity (#16606/#17723). Order within an entry is
 // significant, matching the refresher's change detection: a reordered
-// answer set is a different enforced prefix order.
+// answer set or a different lookup-failed flag is a different enforced
+// state.
 func dnsAnswersContentEqual16606(a, b *config.Config) bool {
 	sa := config.DNSAnswersSnapshot(a)
 	sb := config.DNSAnswersSnapshot(b)
@@ -619,7 +620,7 @@ func dnsAnswersContentEqual16606(a, b *config.Config) bool {
 	}
 	for k, va := range sa {
 		vb, ok := sb[k]
-		if !ok || !slices.Equal(va, vb) {
+		if !ok || va.DNSLookupFailed != vb.DNSLookupFailed || !slices.Equal(va.Prefixes, vb.Prefixes) {
 			return false
 		}
 	}

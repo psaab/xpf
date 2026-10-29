@@ -129,3 +129,192 @@ func TestGatewayNameCollision16676(t *testing.T) {
 		t.Fatalf("CONTROL rendered = %v, want {gw}\n%s", crendered, ctext)
 	}
 }
+
+// #17731: the single "inline-" escape is NOT injective. Config:
+//   - gateway siteA (10.200.0.3) <- zzz
+//   - gateway inline-siteA (10.200.0.4) <- w
+//   - inline VPN siteA -> 10.200.0.1
+//
+// Inline siteA collides with gateway siteA, so legacy code keys it
+// inline-siteA — exactly the bare key of gateway inline-siteA. On the
+// tolerant path the render belt then silently skips one distinct peer.
+// Desired: three distinct connections/gateway groups: siteA (zzz),
+// inline-siteA (w), inline-inline-siteA (inline siteA), with children and
+// projections agreeing, so no peer is silently skipped.
+func TestGatewayNameCollisionInlinePrefixedGateway17731(t *testing.T) {
+	cfg := gatewayGroupCfg15024()
+	cfg.Gateways = map[string]*config.IPsecGateway{
+		"siteA":        {Name: "siteA", Address: "10.200.0.3", IKEPolicy: "ike-pol"},
+		"inline-siteA": {Name: "inline-siteA", Address: "10.200.0.4", IKEPolicy: "ike-pol"},
+	}
+	cfg.VPNs = map[string]*config.IPsecVPN{
+		"zzz": {PSK: config.NewSecret("zzz-secret"), Name: "zzz", Gateway: "siteA", IPsecPolicy: "ipsec-pol", BindInterface: "st0.0",
+			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
+				"ts1": {Name: "ts1", LocalIP: "10.1.0.0/24", RemoteIP: "10.9.1.0/24"},
+			}},
+		"w": {PSK: config.NewSecret("w-secret"), Name: "w", Gateway: "inline-siteA", IPsecPolicy: "ipsec-pol", BindInterface: "st0.1",
+			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
+				"ts1": {Name: "ts1", LocalIP: "10.2.0.0/24", RemoteIP: "10.9.2.0/24"},
+			}},
+		"siteA": {PSK: config.NewSecret("inline-secret"), Name: "siteA", Gateway: "10.200.0.1", IPsecPolicy: "ipsec-pol", BindInterface: "st0.2",
+			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
+				"ts1": {Name: "ts1", LocalIP: "10.3.0.0/24", RemoteIP: "10.9.3.0/24"},
+			}},
+	}
+	wantInlineKey := "inline-inline-siteA"
+	m := &Manager{}
+	text, rendered, err := m.renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	if len(rendered) != 3 || !rendered["siteA"] || !rendered["inline-siteA"] || !rendered[wantInlineKey] {
+		t.Fatalf("rendered = %v, want {siteA inline-siteA %s} (three connections)\n%s", rendered, wantInlineKey, text)
+	}
+	doc := parseSwanctlDoc(t, text)
+	conns := doc.at(t, "connections")
+	if got := conns.childNames(); !reflect.DeepEqual(got, []string{wantInlineKey, "inline-siteA", "siteA"}) {
+		t.Fatalf("connections = %v, want [%s inline-siteA siteA]\n%s", got, wantInlineKey, text)
+	}
+	gwConn := conns.at(t, "siteA")
+	gwConn.requireSetting(t, "remote_addrs", "10.200.0.3")
+	if got := gwConn.at(t, "children").childNames(); !reflect.DeepEqual(got, []string{"zzz-ts1"}) {
+		t.Fatalf("siteA children = %v, want [zzz-ts1]\n%s", got, text)
+	}
+	inlineGwConn := conns.at(t, "inline-siteA")
+	inlineGwConn.requireSetting(t, "remote_addrs", "10.200.0.4")
+	if got := inlineGwConn.at(t, "children").childNames(); !reflect.DeepEqual(got, []string{"w-ts1"}) {
+		t.Fatalf("inline-siteA children = %v, want [w-ts1]\n%s", got, text)
+	}
+	wChild := inlineGwConn.at(t, "children", "w-ts1")
+	wChild.requireSetting(t, "if_id_in", "2")
+	wChild.requireSetting(t, "if_id_out", "2")
+	inlineConn := conns.at(t, wantInlineKey)
+	inlineConn.requireSetting(t, "remote_addrs", "10.200.0.1")
+	if got := inlineConn.at(t, "children").childNames(); !reflect.DeepEqual(got, []string{"siteA-ts1"}) {
+		t.Fatalf("%s children = %v, want [siteA-ts1]\n%s", wantInlineKey, got, text)
+	}
+	siteChild := inlineConn.at(t, "children", "siteA-ts1")
+	siteChild.requireSetting(t, "if_id_in", "3")
+	siteChild.requireSetting(t, "if_id_out", "3")
+	full := &config.Config{Security: config.SecurityConfig{IPsec: *cfg}}
+	cm := ConnectionNamesForVPN(full)
+	if cm["zzz"] != "siteA" || cm["w"] != "inline-siteA" || cm["siteA"] != wantInlineKey {
+		t.Fatalf("ConnectionNamesForVPN = %v, want zzz->siteA w->inline-siteA siteA->%s", cm, wantInlineKey)
+	}
+	if got := RenderedVPNSet(full); !got["zzz"] || !got["w"] || !got["siteA"] {
+		t.Fatalf("RenderedVPNSet = %v, want all three VPNs", got)
+	}
+	if _, _, renderedMembers, err := m.renderConfigMembers(cfg); err != nil {
+		t.Fatalf("renderConfigMembers: %v", err)
+	} else if !renderedMembers["zzz"] || !renderedMembers["w"] || !renderedMembers["siteA"] {
+		t.Fatalf("renderedMembers = %v, want all three VPNs", renderedMembers)
+	}
+
+	// A partial load keeping gateway connection siteA must not retain the
+	// refused inline VPN siteA merely because its VPN name matches that key.
+	subsetText, _, err := m.renderSubsetFile14589(cfg, "subset-generation", map[string]bool{"siteA": true})
+	if err != nil {
+		t.Fatalf("renderSubsetFile14589: %v", err)
+	}
+	for _, refused := range []string{"inline-secret", "w-secret", "10.200.0.1", "10.200.0.4"} {
+		if strings.Contains(subsetText, refused) {
+			t.Fatalf("subset retaining only siteA also contains refused value %q:\n%s", refused, subsetText)
+		}
+	}
+	if !strings.Contains(subsetText, "zzz-secret") || !strings.Contains(subsetText, "10.200.0.3") {
+		t.Fatalf("subset must retain only gateway siteA's VPN zzz:\n%s", subsetText)
+	}
+	loaded, err := ExpectedLoadedConns(full)
+	if err != nil {
+		t.Fatalf("ExpectedLoadedConns: %v", err)
+	}
+	if len(loaded) != 3 {
+		t.Fatalf("ExpectedLoadedConns = %v, want 3 conns", loaded)
+	}
+	if lc := loaded["siteA"]; lc == nil || !reflect.DeepEqual(lc.Children, []string{"zzz-ts1"}) || !reflect.DeepEqual(lc.RemoteAddrs, []string{"10.200.0.3"}) {
+		t.Fatalf("loaded siteA = %+v, want children [zzz-ts1] remote [10.200.0.3]", lc)
+	}
+	if lc := loaded["inline-siteA"]; lc == nil || !reflect.DeepEqual(lc.Children, []string{"w-ts1"}) || !reflect.DeepEqual(lc.RemoteAddrs, []string{"10.200.0.4"}) {
+		t.Fatalf("loaded inline-siteA = %+v, want children [w-ts1] remote [10.200.0.4]", lc)
+	}
+	if lc := loaded[wantInlineKey]; lc == nil || !reflect.DeepEqual(lc.Children, []string{"siteA-ts1"}) || !reflect.DeepEqual(lc.RemoteAddrs, []string{"10.200.0.1"}) {
+		t.Fatalf("loaded %s = %+v, want children [siteA-ts1] remote [10.200.0.1]", wantInlineKey, lc)
+	}
+	idx := BuildSANameIndex(cfg)
+	if got := idx.VPNs("siteA"); !reflect.DeepEqual(got, []string{"zzz"}) {
+		t.Errorf("index siteA = %v, want [zzz]", got)
+	}
+	if got := idx.VPNs("inline-siteA"); !reflect.DeepEqual(got, []string{"w"}) {
+		t.Errorf("index inline-siteA = %v, want [w]", got)
+	}
+	if got := idx.VPNs(wantInlineKey); !reflect.DeepEqual(got, []string{"siteA"}) {
+		t.Errorf("index %s = %v, want [siteA]", wantInlineKey, got)
+	}
+	if cols := idx.Collisions(); len(cols) != 0 {
+		t.Errorf("index collisions = %v, want none after separation", cols)
+	}
+	secrets := doc.at(t, "secrets")
+	wantSecrets := []string{"ike-" + wantInlineKey, "ike-inline-siteA", "ike-siteA"}
+	if got := secrets.childNames(); !reflect.DeepEqual(got, wantSecrets) {
+		t.Fatalf("secrets = %v, want %v\n%s", got, wantSecrets, text)
+	}
+	for _, peer := range []string{"10.200.0.1", "10.200.0.3", "10.200.0.4"} {
+		if !strings.Contains(text, peer) {
+			t.Fatalf("peer %s must appear in render:\n%s", peer, text)
+		}
+	}
+}
+
+// #17731 control: one named gateway + one referencing VPN renders
+// byte-identically to the pristine origin/master output captured before
+// the production change. This pins stable names for non-colliding configs.
+func TestGatewaySingleGatewayRenderByteIdentical17731(t *testing.T) {
+	cfg := gatewayGroupCfg15024()
+	cfg.Gateways = map[string]*config.IPsecGateway{
+		"siteA": {Name: "siteA", Address: "10.200.0.3", IKEPolicy: "ike-pol"},
+	}
+	cfg.VPNs = map[string]*config.IPsecVPN{
+		"zzz": {PSK: config.NewSecret("zzz-secret"), Name: "zzz", Gateway: "siteA", IPsecPolicy: "ipsec-pol", BindInterface: "st0.0",
+			TrafficSelectors: map[string]*config.IPsecTrafficSelector{
+				"ts1": {Name: "ts1", LocalIP: "10.1.0.0/24", RemoteIP: "10.9.1.0/24"},
+			}},
+	}
+	text, rendered, err := (&Manager{}).renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	if len(rendered) != 1 || !rendered["siteA"] {
+		t.Fatalf("rendered = %v, want {siteA}\n%s", rendered, text)
+	}
+	const want = "# xpf managed config - do not edit\n\nconnections {\n  siteA {\n    remote_addrs = 10.200.0.3\n    local {\n      auth = psk\n    }\n    remote {\n      auth = psk\n      id = \"10.200.0.3\"\n    }\n    proposals = aes256-sha256-modp2048\n    children {\n      zzz-ts1 {\n        local_ts = 10.1.0.0/24\n        remote_ts = 10.9.1.0/24\n        esp_proposals = aes256-sha256\n        start_action = trap\n        if_id_in = 1\n        if_id_out = 1\n      }\n    }\n  }\n}\n\nsecrets {\n  ike-siteA {\n    secret = \"zzz-secret\"\n    id-1 = \"10.200.0.3\"\n  }\n}\n"
+	if text != want {
+		t.Fatalf("single-gateway render not byte-identical:\n got: %q\nwant: %q", text, want)
+	}
+}
+
+// Reserve every inline VPN's preferred name before assigning escapes. An
+// escaped collision must not steal another inline VPN's ordinary key.
+func TestGatewayKeysReserveInlineNames17731(t *testing.T) {
+	cfg := &config.IPsecConfig{
+		Gateways: map[string]*config.IPsecGateway{
+			"alpha":        {Name: "alpha", Address: "10.200.0.3"},
+			"inline-alpha": {Name: "inline-alpha", Address: "10.200.0.4"},
+		},
+		VPNs: map[string]*config.IPsecVPN{
+			"gateway-alpha":        {Name: "gateway-alpha", Gateway: "alpha"},
+			"gateway-inline-alpha": {Name: "gateway-inline-alpha", Gateway: "inline-alpha"},
+			"alpha":                {Name: "alpha", Gateway: "10.200.0.1"},
+			"inline-inline-alpha":  {Name: "inline-inline-alpha", Gateway: "10.200.0.2"},
+		},
+	}
+	keys := gatewayKeysFor(cfg)
+	want := map[string]string{
+		"gateway-alpha":        "alpha",
+		"gateway-inline-alpha": "inline-alpha",
+		"alpha":                "inline-inline-inline-alpha",
+		"inline-inline-alpha":  "inline-inline-alpha",
+	}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("gatewayKeysFor = %v, want %v", keys, want)
+	}
+}

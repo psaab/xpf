@@ -38,13 +38,17 @@ import (
 // absent protection, not on observability failure (the subsequent barrier
 // operations fail loudly on their own).
 func ensureEarlyInputProtectionForNaming(cfg *config.Config) bool {
+	return ensureEarlyInputProtectionForNamingForBoot(cfg, false)
+}
+
+func ensureEarlyInputProtectionForNamingForBoot(cfg *config.Config, everCommitted bool) bool {
 	present, err := nftInstaller.EarlyInputBarrierPresent()
 	if err != nil {
 		slog.Warn("cannot attest early host-input barrier before link activation; proceeding",
 			"err", tagNftInstallErr(err))
 		return true
 	}
-	lifelines := resolveEarlyInputGuardLifelines(cfg)
+	lifelines := resolveEarlyInputGuardLifelinesForBoot(cfg, everCommitted)
 	if !present {
 		// Bind to a named var: the refusal log below sits outside the
 		// if/else-if chain, so an if-scoped shadow would read the outer
@@ -97,13 +101,12 @@ var lifelineRecordNameFn = resolveLifelineCurrentName
 //   - Verified protected set (B6): the persisted lifeline record plus the
 //     explicit management-interface leaf, via the same pure core the fence
 //     builders use — record/leaf over name guesses.
-//   - Detected default-route NIC: recovery fallback ONLY when no verified
-//     distinct identity exists (no leaf and no resolved record). Otherwise
-//     an unlisted detected NIC is data until proven management and stays
-//     closed. With zero identity the NIC is the only recovery hint; admit
-//     it whole and document the caveat (a static-default-via-data boot
-//     opens that NIC for the bootstrap window — inherent without config;
-//     the first commit converges to configured policy).
+//   - Detected default-route NIC: on a never-committed host it is a recovery
+//     fallback only when no verified distinct identity exists (no leaf and no
+//     resolved record). Otherwise an unlisted detected NIC is data until
+//     proven management and stays closed. On a committed host the main-table
+//     default is not a fallback: a record that resolves to it is poisoned and
+//     cleared, rather than trusted or re-admitted through route detection.
 //
 // The returned set is sorted and deduplicated, contains member names only
 // (never a VRF master), and feeds BOTH the iifname and sdifname admits.
@@ -112,10 +115,30 @@ var lifelineRecordNameFn = resolveLifelineCurrentName
 // to tell revenue IPs from management IPs on one NIC — interface identity
 // plus narrowing is the finest verifiable boundary available pre-config.
 func resolveEarlyInputGuardLifelines(cfg *config.Config) []string {
+	return resolveEarlyInputGuardLifelinesForBoot(cfg, false)
+}
+
+func (d *Daemon) resolveEarlyInputGuardLifelines(cfg *config.Config) []string {
+	everCommitted := d != nil && d.store != nil && d.store.EverCommitted()
+	return resolveEarlyInputGuardLifelinesForBoot(cfg, everCommitted)
+}
+
+func resolveEarlyInputGuardLifelinesForBoot(cfg *config.Config, everCommitted bool) []string {
 	mgmtLeaf := ""
 	if cfg != nil {
 		mgmtLeaf = cfg.System.ManagementInterface
 	}
+	recordName, recordOK := "", false
+	if name, ok := lifelineRecordNameFn(); ok && name != "" {
+		recordName, recordOK = name, true
+	}
+	routeName, found, routeErr := detectLifelineInterfaceFn()
+	if poisonedLifelineRecord(mgmtLeaf, recordName, recordOK,
+		routeName, found, routeErr) && everCommitted {
+		clearPoisonedLifelineRecord(recordName)
+		recordName, recordOK = "", false
+	}
+
 	set := map[string]bool{}
 	for _, d := range []string{"em0", "fab0", "fab1"} {
 		set[d] = true
@@ -123,21 +146,17 @@ func resolveEarlyInputGuardLifelines(cfg *config.Config) []string {
 	if mgmtLeaf == "" || mgmtLeaf == defaultMgmtInterface {
 		set[defaultMgmtInterface] = true
 	}
-	recordName, recordOK := "", false
-	if name, ok := lifelineRecordNameFn(); ok && name != "" {
-		recordName, recordOK = name, true
-	}
 	for name := range protectedInterfacesWith(mgmtLeaf, recordName) {
 		set[name] = true
 	}
-	if name, found, err := detectLifelineInterfaceFn(); err != nil {
-		slog.Warn("lifeline detection failed; guard admits resolved identities and defaults only", "err", err)
-	} else if found && name != "" && !set[name] {
-		if mgmtLeaf == "" && !recordOK {
-			set[name] = true
+	if routeErr != nil {
+		slog.Warn("lifeline detection failed; guard admits resolved identities and defaults only", "err", routeErr)
+	} else if found && routeName != "" && !set[routeName] {
+		if mgmtLeaf == "" && !recordOK && !everCommitted {
+			set[routeName] = true
 		} else {
 			slog.Info("default-route NIC is not a verified management identity; excluding it from the input guard",
-				"interface", name)
+				"interface", routeName)
 		}
 	}
 	out := make([]string, 0, len(set))
@@ -161,7 +180,7 @@ func (d *Daemon) requireEarlyInputProtectionPreApply(cfg *config.Config) error {
 	// stale marker from a previous process so the CLI guard stays accurate.
 	clearEarlyInputHandoffMarker()
 
-	if err := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(resolveEarlyInputGuardLifelines(cfg)); err != nil {
+	if err := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(d.resolveEarlyInputGuardLifelines(cfg)); err != nil {
 		err = tagNftInstallErr(err)
 		d.noteHostInboundApplyFailed(time.Now())
 		return fmt.Errorf("install early host-input guard before first handoff: %w", err)
@@ -187,7 +206,7 @@ func (d *Daemon) ensureEarlyInputBootstrapGuard() {
 	if d.store != nil {
 		cfg = d.store.ActiveConfig()
 	}
-	lifelines := resolveEarlyInputGuardLifelines(cfg)
+	lifelines := d.resolveEarlyInputGuardLifelines(cfg)
 	// Bootstrap runs once per process start, always pre-handoff: drop any
 	// stale marker for the same invariant as above.
 	clearEarlyInputHandoffMarker()
@@ -436,7 +455,7 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTa
 				slog.Warn("enforcement table missing after barrier removal (concurrent flush?); guard reinstalled, handoff refused",
 					"table", table)
 			}
-			if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
+			if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(d.resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
 				return fmt.Errorf("reinstall early guard at handoff: %w", tagNftInstallErr(installErr))
 			}
 			if readErr != nil {
@@ -456,7 +475,7 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTa
 		if drift := hostInboundCoverageNewcomers(cfg, installedCovered, sampleHostInboundSnapshots(cfg)); len(drift) > 0 {
 			slog.Warn("fresh addresses not covered by installed enforcement after barrier removal; reinstalling guard and refusing handoff",
 				"newcomers", strings.Join(drift, ","))
-			if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
+			if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(d.resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
 				return fmt.Errorf("reinstall early guard at handoff: %w", tagNftInstallErr(installErr))
 			}
 			return fmt.Errorf("host-inbound addresses changed after barrier removal; retry: %s", strings.Join(drift, ","))
@@ -469,7 +488,7 @@ func (d *Daemon) removeEarlyInputBarrierAtHandoff(cfg *config.Config, expectedTa
 	} else {
 		slog.Warn("early barrier missing at handoff (concurrent flush wiped enforcement?); guard reinstalled, handoff refused")
 	}
-	if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
+	if installErr := nftInstaller.InstallEarlyInputBarrierWithLifelineAdmit(d.resolveEarlyInputGuardLifelines(cfg)); installErr != nil {
 		return fmt.Errorf("reinstall early guard at handoff: %w", tagNftInstallErr(installErr))
 	}
 	if err != nil {

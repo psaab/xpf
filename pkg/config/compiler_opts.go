@@ -378,10 +378,10 @@ type compileOpts struct {
 	// (#1960); commit / commit-check stay strict.
 	lenientSchedulerDateRange15695 bool
 	// lenientThreeColorBurstFloor16610 downgrades only the #16610
-	// one-frame burst-floor violation in validateThreeColorPolicersStrict
-	// to a warning on tolerant load / peer-sync paths. A sub-frame bucket
+	// one-frame burst-floor violations returned by threeColorPolicerErrors
+	// to warnings on tolerant load / peer-sync paths. A sub-frame bucket
 	// persisted by an older binary (which accepted any positive burst)
-	// must still boot (#1960); every other three-color defect stays
+	// must still boot (#1960); every structural three-color defect stays
 	// strict, and commit / commit-check stay strict.
 	lenientThreeColorBurstFloor16610 bool
 	// lenientSingleRateBurstFloor16714 downgrades only the #16714
@@ -525,11 +525,11 @@ type compileOpts struct {
 	// already-persisted or peer-synced config still boots (warn), no more
 	// ambiguous than before. Same doctrine as lenientIPsecEndpoints.
 	lenientIPsecSANameCollision bool
-	// lenientIPsecGatewayNameCollision (#16676) downgrades the gateway-name
-	// collision reject (validateIPsecGatewayNameCollisionStrict) to a
-	// warning on tolerant paths; the render belt separates the two
-	// connections ("inline-" prefix) so a persisted config still boots
-	// with each VPN negotiating its own peer.
+	// lenientIPsecGatewayNameCollision (#16676/#17731) downgrades the
+	// gateway-name collision reject (validateIPsecGatewayNameCollisionStrict)
+	// to a warning on tolerant paths. The renderer reserves gateway keys
+	// before assigning inline names and adds prefixes until each distinct
+	// connection has its own key, so the prefix namespace cannot drop a peer.
 	lenientIPsecGatewayNameCollision bool
 	// lenientIPsecBindTSOverlap (#11380) downgrades the shared-bind traffic
 	// selector overlap gate from a hard commit error to a warning on tolerant

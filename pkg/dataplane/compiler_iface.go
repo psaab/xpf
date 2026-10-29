@@ -1010,14 +1010,15 @@ func programZoneMaps(dp DataPlane, cfg *config.Config, result *CompileResult) (*
 
 // bridgeMemberVLAN identifies one explicit bridge-domain member's VLAN
 // child: the Linux parent name, its VLAN ID, the member's config identity
-// (for disable resolution), and the bridge it joins.
+// (for disable resolution), authored reference (for MTU records), and bridge.
 type bridgeMemberVLAN struct {
-	physName string
-	cfgName  string
-	unitNum  int
-	vlanID   int
-	subName  string
-	bridge   string
+	physName  string
+	cfgName   string
+	unitNum   int
+	vlanID    int
+	subName   string
+	memberRef string
+	bridge    string
 }
 
 // bridgeDomainMemberVLANs enumerates the explicit bridge-domain members
@@ -1092,12 +1093,13 @@ func bridgeDomainMemberVLANs(cfg *config.Config) []bridgeMemberVLAN {
 				continue
 			}
 			bySub[subName] = bridgeMemberVLAN{
-				physName: physName,
-				cfgName:  effectiveName,
-				unitNum:  unitNumber,
-				vlanID:   vid,
-				subName:  subName,
-				bridge:   bridgeName,
+				physName:  physName,
+				cfgName:   effectiveName,
+				unitNum:   unitNumber,
+				vlanID:    vid,
+				subName:   subName,
+				memberRef: raw,
+				bridge:    bridgeName,
 			}
 		}
 	}
@@ -1173,6 +1175,18 @@ func (st *zoneMapState) ensureBridgeDomainMemberVLANs(dp DataPlane, cfg *config.
 			return fmt.Errorf("set vlan_iface_info %s: %w", m.subName, err)
 		}
 		st.writtenVlanIface[uint32(subIfindex)] = true
+		// The zone loop does not visit unzoned bridge members. Apply the same
+		// VLAN-unit MTU reconcile it uses, so a statement-less child follows
+		// the parent's planned MTU (not merely its pre-apply cached value).
+		// Zoned members already ran this helper in mapZoneInterface; the
+		// written-set guard above keeps that path unchanged.
+		parentWant := 0
+		if pd := st.physDesired[m.physName]; pd != nil {
+			parentWant = pd.mtu
+		}
+		applyVLANSubInterfaceMTU9757(cfg, result, m.memberRef, m.cfgName, m.unitNum, m.physName, m.subName, vlanMTUContext9841{
+			parentWant: parentWant, parentIfindex: physIface.Index, subIfindex: subIfindex,
+		})
 		slog.Info("bridge-domain member VLAN sub-interface ensured",
 			"parent", m.physName, "vlan_id", m.vlanID,
 			"sub_ifindex", subIfindex, "bridge", m.bridge)
