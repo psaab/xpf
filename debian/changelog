@@ -27,6 +27,9 @@ xpf (0.0.0) unstable; urgency=medium
     source address is not installed on its target interface (#17759).
     Confirmed absence releases stale debt; unconfirmed lookups preserve
     neutral treatment.
+  * Cluster: keep the requester fenced after a failed pre-commit transfer
+    through ordinary-secondary owner-restoration heartbeats, until primary
+    ownership or another transfer-epoch boundary resolves the fence (#17713).
   * Config compiler: retain every independent single-rate policer-limit
     diagnostic in deterministic name order, including coexisting missing-limit
     and burst-floor defects on one policer (#17761).

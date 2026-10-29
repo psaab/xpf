@@ -267,3 +267,133 @@ func TestHigherPriorityRequesterHoldsAfterAbort16592(t *testing.T) {
 		})
 	}
 }
+
+// A failed fence must keep the requester blocked after the owner restores to
+// ordinary secondary: a higher-priority requester would otherwise win the
+// neither-primary election after the hold-only abort marker is cleared.
+func TestFailedFenceRestorationKeepsHigherPriorityRequesterFenced17713(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		name, ids := "single", []int{1}
+		if batch {
+			name, ids = "batch", []int{1, 2}
+		}
+		t.Run(name, func(t *testing.T) {
+			requester, owner := ackWireManagers16592(t, ids, true)
+			const reqID = uint64(17713)
+			staleOwnerPrimary := owner.buildHeartbeat()
+			failRequest := func(rgs []int) (uint64, error) {
+				if batch {
+					if _, err := owner.ManualFailoverBatch(rgs); err != nil {
+						return 0, err
+					}
+				} else if _, err := owner.ManualFailover(rgs[0]); err != nil {
+					return 0, err
+				}
+				owner.ArmRemoteTransferOutLease(rgs, reqID)
+				requester.handlePeerHeartbeat(owner.buildHeartbeat())
+				return reqID, failoverAckError(rgs, failoverAck{status: failoverAckFailed})
+			}
+			requester.SetPeerFailoverFunc(func(rgID int) (uint64, error) {
+				return failRequest([]int{rgID})
+			})
+			requester.SetPeerFailoverBatchFunc(failRequest)
+			requester.SetPeerFailoverAbortFunc(func(rgID int, id uint64) error {
+				return owner.AbortRemoteTransferOut(rgID, id)
+			})
+			requester.SetPeerFailoverAbortBatchFunc(func(rgs []int, id uint64) error {
+				return owner.AbortRemoteTransferOutBatch(rgs, id)
+			})
+			requester.SetPeerFailoverCommitFunc(func(int, uint64) error {
+				t.Fatal("commit must not be sent after a failed fence ACK")
+				return nil
+			})
+			requester.SetPeerFailoverCommitBatchFunc(func([]int, uint64) error {
+				t.Fatal("batch commit must not be sent after a failed fence ACK")
+				return nil
+			})
+			var err error
+			if batch {
+				err = requester.RequestPeerFailoverBatch(ids)
+			} else {
+				err = requester.RequestPeerFailover(ids[0])
+			}
+			if err == nil {
+				t.Fatal("failed fence ACK must fail the requester operation")
+			}
+			// A delayed primary frame from before the failed transfer is not
+			// proof that the owner reclaimed the RG after its hold.
+			requester.handlePeerHeartbeat(staleOwnerPrimary)
+			for _, id := range ids {
+				if requester.IsLocalPrimary(id) {
+					t.Fatalf("stale pre-transfer primary heartbeat promoted rg %d", id)
+				}
+				requester.mu.RLock()
+				_, marker := requester.abortedPeerTransferReqID[id]
+				requester.mu.RUnlock()
+				if !marker {
+					t.Fatalf("stale pre-transfer primary heartbeat cleared rg %d fence", id)
+				}
+			}
+			for _, id := range ids {
+				if owner.IsLocalPrimary(id) {
+					t.Fatalf("fixture rg %d: lower-priority owner must restore to ordinary secondary", id)
+				}
+			}
+			for range 3 {
+				restored := owner.buildHeartbeat()
+				peerStates := make(map[int]NodeState, len(restored.Groups))
+				for _, group := range restored.Groups {
+					peerStates[int(group.GroupID)] = NodeState(group.State)
+				}
+				for _, id := range ids {
+					if peerStates[id] != StateSecondary {
+						t.Fatalf("restoration heartbeat reports rg %d=%s, want ordinary secondary", id, peerStates[id])
+					}
+				}
+				requester.handlePeerHeartbeat(restored)
+				for _, id := range ids {
+					if requester.IsLocalPrimary(id) {
+						t.Fatalf("higher-priority requester promoted on owner restoration heartbeat for rg %d", id)
+					}
+					requester.mu.RLock()
+					gotReqID, marker := requester.abortedPeerTransferReqID[id]
+					fence, fenced := requester.abortedPeerTransferFence[id]
+					requester.mu.RUnlock()
+					if !marker || gotReqID != reqID || !fenced || !fence.sawHold {
+						t.Fatalf("restoration heartbeat cleared rg %d failed-transfer fence: reqID=%d marker=%v fenced=%v saw_hold=%v", id, gotReqID, marker, fenced, fence.sawHold)
+					}
+				}
+			}
+
+			// An owner-primary heartbeat resolves the failed transfer epoch. A
+			// later explicit transfer-out is then allowed to promote normally.
+			owner.mu.Lock()
+			for _, id := range ids {
+				owner.groups[id].State = StatePrimary
+			}
+			owner.mu.Unlock()
+			requester.handlePeerHeartbeat(owner.buildHeartbeat())
+			for _, id := range ids {
+				requester.mu.RLock()
+				_, marker := requester.abortedPeerTransferReqID[id]
+				requester.mu.RUnlock()
+				if marker {
+					t.Fatalf("fresh owner-primary heartbeat must resolve rg %d failed transfer epoch", id)
+				}
+			}
+			if batch {
+				if _, err := owner.ManualFailoverBatch(ids); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := owner.ManualFailover(ids[0]); err != nil {
+				t.Fatal(err)
+			}
+			requester.handlePeerHeartbeat(owner.buildHeartbeat())
+			for _, id := range ids {
+				if !requester.IsLocalPrimary(id) {
+					t.Fatalf("requester must promote rg %d after the failed epoch resolves and a new transfer-out is advertised", id)
+				}
+			}
+		})
+	}
+}
