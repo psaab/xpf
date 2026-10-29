@@ -113,12 +113,12 @@ func TestFirstCommitTeardownUnreadableRecordStaysDegraded12155(t *testing.T) {
 	}
 }
 
-// TestFirstCommitTeardownDoubleWindowRepersistConverges12155 pins P1: two FIRST
-// windows in one process; window 1 rolls back live, window 2 expires across a
-// restart. Bootstrap exit re-persists the same marked bytes under window 2's
-// generation, so the boot debt gates authentic bytes — teardown CONVERGES
-// (lifeline restored, debt cleared). Without the re-persist the gate rejects
-// authentic bytes and the box sticks DEGRADED every boot.
+// TestFirstCommitTeardownDoubleWindowRepersistConverges12155 pins P1 and the
+// #17755 generation split: two FIRST windows in one process; window 1 rolls
+// back live, window 2 expires across a restart. Window 2's early non-index
+// rename sidecar must not make network-snapshot re-persist look complete.
+// Bootstrap exit binds the same marked bytes to window 2, so recovery restores
+// the lifeline and clears debt instead of sticking DEGRADED every boot.
 func TestFirstCommitTeardownDoubleWindowRepersistConverges12155(t *testing.T) {
 	dir := firstCommit12155FilesAndCommands(t)
 	installFakeNetworkctl(t)
@@ -134,9 +134,53 @@ func TestFirstCommitTeardownDoubleWindowRepersistConverges12155(t *testing.T) {
 	managed := []networkd.InterfaceConfig{{Name: "fxp0", Addresses: []string{"192.0.2.99/24"}}}
 	dA := lifelineDaemon12154(t, storeA, dir, managed)
 	dA.bootstrapMode.Store(true)
-
+	_ = stubLifelineRename16675(t, "enp6s0")
+	oldEnum := enumeratePCINICsFn
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{
+			{sortKey: 0, busAddr: "0000:05:00.0", name: "enp5s0"},
+			{sortKey: 1, busAddr: "0000:06:00.0", name: "enp6s0"},
+		}, nil
+	}
+	t.Cleanup(func() { enumeratePCINICsFn = oldEnum })
+	captureRename := func(wantSnapshotGeneration string) {
+		t.Helper()
+		noDataplane := dA.opts.NoDataplane
+		dA.opts.NoDataplane = false
+		err := dA.captureBootstrapLifelineRenamePreExit(storeA.ActiveConfig())
+		dA.opts.NoDataplane = noDataplane
+		if err != nil {
+			t.Fatalf("capture non-index lifeline rename: %v", err)
+		}
+		generation := storeA.ActiveConfigGeneration()
+		dA.bootstrapLifelineMu.Lock()
+		renameGeneration := dA.bootstrapLifelineRenameGeneration
+		snapshotGeneration := dA.bootstrapLifelineGeneration
+		dA.bootstrapLifelineMu.Unlock()
+		if renameGeneration != generation {
+			t.Fatalf("rename provenance generation=%q, want %q", renameGeneration, generation)
+		}
+		if snapshotGeneration != wantSnapshotGeneration {
+			t.Fatalf("network snapshot generation changed during early rename persistence: got %q, want %q", snapshotGeneration, wantSnapshotGeneration)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, bootstrapLifelineRenameBase))
+		if err != nil {
+			t.Fatalf("read durable rename provenance: %v", err)
+		}
+		var record bootstrapLifelineRenameRecord
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatalf("decode durable rename provenance: %v", err)
+		}
+		if record.Generation != generation || record.KernelName != "enp6s0" || record.LogicalName != "ge-0-0-0" {
+			t.Fatalf("durable rename provenance=%+v, want generation=%q kernel=enp6s0 logical=ge-0-0-0", record, generation)
+		}
+	}
+	// Emulate each FIRST window's pre-exit rename capture. The second sidecar
+	// is durable before the network snapshot can rebind; its generation must
+	// not stand in for the independent snapshot generation.
 	commitConfirmedText12154(t, storeA, "interfaces { fxp0 { unit 0 { family inet { address 192.0.2.99/24; } } } }\n")
 	g1 := storeA.ActiveConfigGeneration()
+	captureRename("")
 	if err := dA.applyConfigLocked(context.Background(), storeA.ActiveConfig()); err != nil {
 		t.Fatal(err)
 	}
@@ -147,12 +191,16 @@ func TestFirstCommitTeardownDoubleWindowRepersistConverges12155(t *testing.T) {
 
 	commitConfirmedText12154(t, storeA, "system { host-name second; }\ninterfaces { fxp0 { unit 0 { family inet { address 192.0.2.99/24; } } } }\n")
 	g2 := storeA.ActiveConfigGeneration()
+	captureRename(g1)
 	if err := dA.applyConfigLocked(context.Background(), storeA.ActiveConfig()); err != nil {
 		t.Fatal(err)
 	}
 	storeA.CancelConfirmTimerForTesting()
 	recGen, ok := pmReadRecord12155(t, dir)
-	t.Logf("g1=%.12s g2=%.12s durableRecordGen=%.12s ok=%v (record==g1:%v)", g1, g2, recGen, ok, recGen == g1)
+	t.Logf("g1=%.12s g2=%.12s durableRecordGen=%.12s ok=%v (record==g2:%v)", g1, g2, recGen, ok, recGen == g2)
+	if !ok || recGen != g2 {
+		t.Fatalf("durable network snapshot generation=%q ok=%v, want %q", recGen, ok, g2)
+	}
 	if err := expireConfirmWindow12155(t, cfgPath); err != nil {
 		t.Fatal(err)
 	}
