@@ -478,7 +478,7 @@ func TestDNSRefreshInterleavedSameGenApplyFlapBack15962(t *testing.T) {
 	base := d.dnsBaselineFor(cfg)
 	foundP := false
 	for _, vs := range base {
-		for _, v := range vs {
+		for _, v := range vs.Prefixes {
 			if v == "10.8.8.8/32" {
 				foundP = true
 			}
@@ -535,6 +535,10 @@ func TestDNSRefreshNamedBookIdentityCollision15962(t *testing.T) {
 		"global.example.com": {"10.0.0.1"},
 		"book.example.com":   {"10.0.0.3"},
 	})
+	restoreGlobal := config.SeedDNSAnswerCacheForTest("global.example.com", "", []string{"10.0.0.1/32"})
+	restoreBook := config.SeedDNSAnswerCacheForTest("book.example.com", "", []string{"10.0.0.3/32"})
+	t.Cleanup(restoreGlobal)
+	t.Cleanup(restoreBook)
 	s := newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))
 	cfgText := `
 security {
@@ -587,9 +591,9 @@ func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
 		}
 		n := callIdx.Add(1)
 		// Call 1: compile-time (inside dnsRealDaemon15962) — answer A.
-		// Call 2: tick lookup — answer B (success).
-		// Call 3: apply-time re-lookup — fail (stale-while-error keeps B).
-		// Later: healthy B.
+		// Call 2: first tick — answer B (success).
+		// Call 3: second tick — SERVFAIL, retaining B and setting its flag.
+		// Later: healthy B clears the failure flag.
 		switch n {
 		case 1:
 			return []string{"10.0.0.1"}, nil
@@ -602,23 +606,61 @@ func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
 	t.Cleanup(restore)
 
 	d, dp, _ := dnsRealDaemon15962(t)
-	// First tick: proposal B, apply-time lookup fails but stale-while-error
-	// retains B, so B is actually applied.
+	// First tick resolves B successfully and publishes it.
 	d.refreshDNSOnce()
 	if dp.applyCalls != 1 {
 		t.Fatalf("first tick applies = %d, want 1 (real apply)", dp.applyCalls)
 	}
-	// The baseline recorded the actually-applied B, so a healthy tick
-	// resolving the same B is steady state — no redundant republish.
+	baseline := d.dnsBaselineFor(d.store.ActiveConfig())
+	if baseline == nil {
+		t.Fatal("baseline vanished after the first tick")
+	}
+	for _, answer := range baseline {
+		if answer.DNSLookupFailed {
+			t.Fatalf("successful first tick recorded a failed DNS baseline: %v", baseline)
+		}
+	}
+
+	// The next lookup fails but stale-while-error retains B. #17723 makes
+	// the failure-state transition publishable even though its prefixes match.
 	d.refreshDNSOnce()
-	if dp.applyCalls != 1 {
-		t.Fatalf("steady tick after stale-retained apply republished: applies = %d, want 1", dp.applyCalls)
+	if dp.applyCalls != 2 {
+		t.Fatalf("failed-state transition applies = %d, want 2", dp.applyCalls)
+	}
+	baseline = d.dnsBaselineFor(d.store.ActiveConfig())
+	if baseline == nil {
+		t.Fatal("baseline vanished after the failed lookup")
+	}
+	failedState := false
+	for _, answer := range baseline {
+		if answer.DNSLookupFailed {
+			failedState = true
+			if len(answer.Prefixes) != 1 || answer.Prefixes[0] != "10.9.9.9/32" {
+				t.Fatalf("failed baseline did not retain B: %+v", answer)
+			}
+		}
+	}
+	if !failedState {
+		t.Fatalf("baseline = %v, want the applied DNSLookupFailed state", baseline)
+	}
+
+	// A healthy lookup of B clears DNSLookupFailed, so publish that distinct
+	// state once and then quiesce.
+	d.refreshDNSOnce()
+	if dp.applyCalls != 3 {
+		t.Fatalf("healthy recovery applies = %d, want 3 (clear DNSLookupFailed)", dp.applyCalls)
+	}
+	baseline = d.dnsBaselineFor(d.store.ActiveConfig())
+	if baseline == nil {
+		t.Fatal("baseline vanished after the healthy recovery")
+	}
+	for _, answer := range baseline {
+		if answer.DNSLookupFailed {
+			t.Fatalf("baseline retained DNSLookupFailed after healthy recovery: %v", baseline)
+		}
 	}
 	d.refreshDNSOnce()
-	if dp.applyCalls != 1 {
-		t.Fatalf("steady-state tick republished: applies = %d", dp.applyCalls)
-	}
-	if got := d.dnsBaselineFor(d.store.ActiveConfig()); got == nil {
-		t.Fatal("baseline vanished in steady state")
+	if dp.applyCalls != 3 {
+		t.Fatalf("steady-state healthy tick republished: applies = %d, want 3", dp.applyCalls)
 	}
 }

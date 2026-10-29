@@ -19,9 +19,9 @@ func TestPublishRefreshedDNS16606(t *testing.T) {
 	g1, _ := s.ActiveSnapshot()
 
 	refreshed := base.CloneForDNSRefresh()
-	// CloneForDNSRefresh on a dns-less config shares everything; give the
-	// clone a distinguishable runtime answer by installing a dns entry
-	// copy (production clones are made before RefreshDNSAddressBooks).
+	// CloneForDNSRefresh returns an independent config graph; install a
+	// distinguishable runtime answer on the clone (production refreshes
+	// before publication).
 	if !s.PublishRefreshedDNS(base, refreshed) {
 		t.Fatal("PublishRefreshedDNS(base, refreshed) = false, want true")
 	}

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 
@@ -254,5 +255,51 @@ func TestPromotedDNSApplyRetainsSourceAndPublishesClone17744(t *testing.T) {
 	d.dnsRefreshMu.Unlock()
 	if markers != 0 {
 		t.Fatalf("resolved-config markers after promoted apply = %d, want 0", markers)
+	}
+}
+
+// #17723: a successful empty DNS answer and SERVFAIL have the same prefix
+// snapshot but different enforcement semantics. The refresher must publish
+// the failure-only transition, then skip an identical failed state.
+// FAIL-ON-REVERT: dropping DNSLookupFailed from DNSAnswersSnapshot leaves
+// applied empty and this first publication assertion RED; the unchanged
+// failure control detects needless repeat applications.
+func TestDNSRefreshPublishesLookupFailureChange17723(t *testing.T) {
+	failed := false
+	restore := config.SetLookupAddressDNSNameForTest(func(string) ([]string, error) {
+		if failed {
+			return nil, errors.New("SERVFAIL")
+		}
+		return nil, nil
+	})
+	t.Cleanup(restore)
+
+	d, s := dnsDaemon15933(t)
+	base := s.ActiveConfig()
+	baseEntry := base.Security.AddressBook.Addresses["svc"]
+	if baseEntry == nil || len(baseEntry.DNSAddresses) != 0 || baseEntry.DNSLookupFailed {
+		t.Fatalf("initial successful-empty DNS state = %+v, want empty and not failed", baseEntry)
+	}
+
+	var applied []*config.Config
+	d.applyBodyForTest = func(cfg *config.Config) { applied = append(applied, cfg) }
+	failed = true
+	d.refreshDNSOnce()
+	if len(applied) != 1 {
+		t.Fatalf("failure-only refresh applies = %d, want 1", len(applied))
+	}
+	active := s.ActiveConfig()
+	entry := active.Security.AddressBook.Addresses["svc"]
+	if active == base || entry == nil || len(entry.DNSAddresses) != 0 || !entry.DNSLookupFailed {
+		t.Fatalf("published SERVFAIL state = cfgChanged:%t entry:%+v, want empty prefixes with DNSLookupFailed", active != base, entry)
+	}
+
+	// Identical failed state is a control: do not reapply or churn generation.
+	d.refreshDNSOnce()
+	if len(applied) != 1 {
+		t.Fatalf("unchanged failed-state refresh applies = %d, want 1", len(applied))
+	}
+	if s.ActiveConfig() != active {
+		t.Fatal("unchanged failed-state refresh churned the published generation")
 	}
 }

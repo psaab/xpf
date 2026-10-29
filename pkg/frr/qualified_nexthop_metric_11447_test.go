@@ -333,15 +333,17 @@ func TestQualifiedNextHopMetricSupportsHostAndIPv6Routes11447(t *testing.T) {
 	})
 }
 
+// RIP is exercised independently by TestQNHMetricRIPKeepsDefaultMetric11447:
+// #17735 refuses same-RIB RIP+IS-IS because their rendered distances invert
+// Junos's protocol ordering.
 func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 	compiled := compileQNHMetricConfig11447(t,
 		"set routing-options static route 203.0.113.0/24 qualified-next-hop 192.0.2.10 metric 10",
 		"set routing-options static route 2001:db8:10::/64 qualified-next-hop 2001:db8::10 metric 20",
+		"set protocols ospf area 0.0.0.0 interface ge-0/0/0.0",
 		"set protocols ospf export static",
 		"set protocols ospf3 area 0.0.0.0 interface ge-0/0/0.0",
 		"set protocols ospf3 export static",
-		"set protocols rip group g neighbor ge-0/0/0.0",
-		"set protocols rip redistribute static",
 		"set protocols isis net 49.0001.0100.0000.0001.00",
 		"set protocols isis interface ge-0/0/0.0",
 		"set protocols isis export static",
@@ -349,7 +351,6 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 	rendered, overlays := New().buildManagedSectionWithQNH11447(&FullConfig{
 		OSPF:          compiled.Protocols.OSPF,
 		OSPFv3:        compiled.Protocols.OSPFv3,
-		RIP:           compiled.Protocols.RIP,
 		ISIS:          compiled.Protocols.ISIS,
 		StaticRoutes:  compiled.RoutingOptions.StaticRoutes,
 		PolicyOptions: &compiled.PolicyOptions,
@@ -366,12 +367,11 @@ func TestQualifiedNextHopMetricGatesIGPsByMatchCapability12071(t *testing.T) {
 	if qnhMap == "" {
 		t.Fatalf("OSPF static export must attach the QNH metric map:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, " redistribute static route-map "+qnhMap+"\n") ||
-		!strings.Contains(rendered, " network ge-0/0/0.0\n") {
-		t.Fatalf("the fully capable IPv4 daemons must attach the shared QNH metric map:\n%s", rendered)
+	if !strings.Contains(rendered, " redistribute static route-map "+qnhMap+"\n") {
+		t.Fatalf("the IPv4 OSPF daemon must attach the QNH metric map:\n%s", rendered)
 	}
 	if !strings.Contains(rendered, "router ospf6\n") || !strings.Contains(rendered, "\n redistribute static\n") ||
-		strings.Count(rendered, " redistribute static route-map "+qnhMap) != 2 ||
+		strings.Count(rendered, " redistribute static route-map "+qnhMap) != 1 ||
 		!strings.Contains(rendered, "redistribute ipv4 static level-2\n") ||
 		strings.Contains(rendered, "redistribute ipv4 static level-2 route-map "+qnhMap) ||
 		strings.Contains(rendered, "redistribute ipv6 static level-2 route-map "+qnhMap) {

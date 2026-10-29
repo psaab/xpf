@@ -157,6 +157,7 @@ func expectedLoadedConns(ipsecCfg *config.IPsecConfig, runtime map[string]bool) 
 	if err != nil {
 		return nil, err
 	}
+	connectionKeys := gatewayKeysFor(ipsecCfg)
 	for _, name := range sortedVPNNames(ipsecCfg.VPNs) {
 		vpn := ipsecCfg.VPNs[name]
 		// Per-VPN membership (#15989 fold), never rendered[conn] alone:
@@ -165,8 +166,7 @@ func expectedLoadedConns(ipsecCfg *config.IPsecConfig, runtime map[string]bool) 
 		if !members[name] {
 			continue
 		}
-		_, _, gw, _ := resolveRemoteAddr(ipsecCfg, vpn)
-		conn := gatewayKeyFor(ipsecCfg, name, vpn, gw)
+		conn := connectionKeys[name]
 		if vpn.LocalAddr == "" && runtime[vpn.Gateway] {
 			return nil, fmt.Errorf("%w: vpn %q, gateway %q", ErrGenerationUnvalidatable, name, vpn.Gateway)
 		}

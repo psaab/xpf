@@ -374,8 +374,19 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 				continue
 			}
 			if entry.DNSName != "" && len(entry.UsableValues()) == 0 {
-				warnings = append(warnings, fmt.Sprintf(
-					"address-book %q: dns-name %q currently resolves to no addresses; it will match nothing until DNS resolves", name, entry.DNSName))
+				switch {
+				case entry.DNSLookupFailed:
+					warnings = append(warnings, fmt.Sprintf(
+						"address-book %q: dns-name %q lookup failed and no last-good address is available; it will match nothing until DNS resolves",
+						name, entry.DNSName))
+				case entry.hasSuccessfulFamilyEmptyDNS():
+					warnings = append(warnings, fmt.Sprintf(
+						"address-book %q: dns-name %q resolved successfully but returned no usable addresses for %q; it will match nothing until DNS returns a usable address",
+						name, entry.DNSName, entry.DNSFamily))
+				default:
+					warnings = append(warnings, fmt.Sprintf(
+						"address-book %q: dns-name %q currently resolves to no addresses; it will match nothing until DNS resolves", name, entry.DNSName))
+				}
 				continue
 			}
 			if entry.Value == "" && len(entry.ExpandedPrefixes) == 0 && entry.DNSName == "" {

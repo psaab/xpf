@@ -35,11 +35,13 @@ package config
 // operator asked the kernel to judge. The kernel/driver still owns the
 // real floor and rejects loudly at write time.
 //
-// Tunnel/loopback-class names (gr-/ip-/st/fti/lo) and fab/reth/ae/irb
+// Tunnel/loopback-class names (gr-/ip-/st/fti/lo) and fab/reth/irb
 // logical devices have no Ethernet media on the named device itself:
 // their MTU is already an L3/device MTU in Junos terms, so the authored
 // value passes through untranslated. Their underlying physical parents,
-// when separately configured, translate on their own stanzas.
+// when separately configured, translate on their own stanzas. Aggregated
+// Ethernet has a media MTU and is translated by the same Ethernet overhead
+// rules as other Ethernet.
 
 const (
 	ethernetHeaderBytes16594 = 14
@@ -58,8 +60,8 @@ func mediaMTUOverhead16594(ifc *InterfaceConfig) int {
 // isMediaMTUExempt16594 reports whether the named interface has no
 // Ethernet media MTU to translate: tunnel/loopback-class names (via the
 // canonical #6731 lexical predicate, plus the authoritative Tunnel
-// stanza), fabric overlays, redundant ethernet, aggregated ethernet and
-// IRB logical devices. Exempt values are already L3/device MTUs.
+// stanza), fabric overlays, redundant ethernet and IRB logical devices.
+// Exempt values are already L3/device MTUs.
 func isMediaMTUExempt16594(name string, ifc *InterfaceConfig) bool {
 	if ifc == nil {
 		return true
@@ -75,8 +77,8 @@ func isMediaMTUExempt16594(name string, ifc *InterfaceConfig) bool {
 		return true
 	}
 	switch {
-	case ifNameNumericSuffix(base, "reth"), ifNameNumericSuffix(base, "ae"),
-		ifNameNumericSuffix(base, "irb"), ifNameNumericSuffix(base, "fab"),
+	case ifNameNumericSuffix(base, "reth"), ifNameNumericSuffix(base, "irb"),
+		ifNameNumericSuffix(base, "fab"),
 		ifNameNumericSuffix(base, "lo"):
 		return true
 	}

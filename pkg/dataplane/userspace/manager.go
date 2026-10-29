@@ -336,14 +336,12 @@ type Manager struct {
 	deferredReplayRebinds  []PolicySessionRebind
 	deferredReplayReady    bool
 	deferredReplayInFlight bool
-	// lastSnapshotRejectReasons holds the #3261 diagnostic: the reasons the
-	// most recently built snapshot carries unrepresentable policy content that
-	// the helper integrity preflight rejects (previous-good retained, or
-	// fresh-boot default-deny — never fail-open). Set under m.mu at every full
-	// snapshot build, surfaced via ProcessStatus.LastSnapshotRejectReasons and
-	// the xpf_userspace_policy_content_rejected gauge so the Go/Rust skew
-	// (ForwardingSupported=true while the helper rejected the snapshot) is
-	// observable. nil/empty means the last build was fully representable.
+	// lastSnapshotRejectReasons holds the most recent Go-side policy-content
+	// diagnostics: whole-snapshot refusal reasons and per-rule DNS quarantine
+	// warnings. Set under m.mu for each full snapshot build and surfaced via
+	// ProcessStatus.LastSnapshotRejectReasons plus the established content
+	// diagnostic gauge. A DNS quarantine does not mean the snapshot was rejected;
+	// current Rust helpers enforce the affected rule as deny and load siblings.
 	lastSnapshotRejectReasons []string
 	// lastZoneIDCollisions holds the #3719 diagnostic: the zones the most
 	// recent snapshot build QUARANTINED because their StableZoneID collided
@@ -822,6 +820,14 @@ type Manager struct {
 	// nil pointer ⇒ omit the field from the wire (userspace-dp
 	// defaults to 0xff per #1620 plan §4.3).
 	coldPathSampleMask *uint64
+
+	// #17736: Linux names of parents quarantined by the RX-VLAN audit.
+	// refreshAttachAdmission refuses these until the audit confirms that
+	// the tag-strip hazard is gone. Guarded by mu.
+	rxVlanQuarantinedParents map[string]bool
+	// rxVlanPreconditionCheck is a test seam. Production uses
+	// dataplane.EnsureRxVlanParsePreconditions directly.
+	rxVlanPreconditionCheck func(string) (error, error)
 }
 
 // #1620: set the cold-path sample mask. Called by the daemon at
@@ -832,6 +838,26 @@ func (m *Manager) SetColdPathSampleMask(mask *uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.coldPathSampleMask = mask
+}
+
+// SetRxVlanParentQuarantined records whether the RX-VLAN audit has detached
+// parentLinuxName because its RX tag-strip precondition could not be met.
+// The link-refresh reconciler consults this state before attempting an XDP
+// attach; clearing it is safe only after the audit has confirmed recovery.
+func (m *Manager) SetRxVlanParentQuarantined(parentLinuxName string, quarantined bool) {
+	if m == nil || parentLinuxName == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if quarantined {
+		if m.rxVlanQuarantinedParents == nil {
+			m.rxVlanQuarantinedParents = make(map[string]bool)
+		}
+		m.rxVlanQuarantinedParents[parentLinuxName] = true
+		return
+	}
+	delete(m.rxVlanQuarantinedParents, parentLinuxName)
 }
 
 // RGPrimaryProvider reports whether this node is primary for rgID and

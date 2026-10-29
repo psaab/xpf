@@ -280,6 +280,37 @@ func clampFRRStaticRouteDistance(preference int) int {
 	return preference
 }
 
+func renderStaticRouteWithISISDistanceGuard17735(m *Manager, sr *config.StaticRoute, vrfName string, tableID int, rethMap map[string]string, ipv6NextHopInterfaces map[string]map[string]string, declaredNetdevs map[string]string, isis *config.ISISConfig) string {
+	if sr == nil {
+		return ""
+	}
+	if sr.NoInstall || sr.NextTable != "" {
+		return ""
+	}
+	if config.ISISDistanceActive(isis) {
+		if len(sr.NextHops) == 0 {
+			if config.ISISStaticDistanceConflict(sr.Preference) {
+				slog.Warn("frr: withholding static route whose Junos preference cannot be represented against FRR's fixed IS-IS distance (#17735)",
+					"destination", sr.Destination, "preference", sr.Preference)
+				return ""
+			}
+		} else {
+			for _, hop := range sr.NextHops {
+				effective := sr.Preference
+				if hop.HasPreference {
+					effective = hop.Preference
+				}
+				if config.ISISStaticDistanceConflict(effective) {
+					slog.Warn("frr: withholding static route whose Junos preference cannot be represented against FRR's fixed IS-IS distance (#17735)",
+						"destination", sr.Destination, "preference", effective)
+					return ""
+				}
+			}
+		}
+	}
+	return m.generateStaticRouteInTable(sr, vrfName, tableID, rethMap, ipv6NextHopInterfaces, declaredNetdevs)
+}
+
 // dhcpClasslessCoveredByStatic reports the rendered static route that contains
 // a DHCP-learned classless prefix in the same FRR table. A static route only
 // suppresses a learned prefix when it is at least as broad and its effective

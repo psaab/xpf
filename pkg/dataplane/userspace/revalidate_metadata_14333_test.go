@@ -126,6 +126,7 @@ func TestRevalidateChangedIfindexAttachesXDP14333(t *testing.T) {
 	built := buildInterfaceSnapshotsFrom(cfg, map[string]bool{})
 	snap := &ConfigSnapshot{Config: cfg, Interfaces: built}
 	m := New()
+	m.rxVlanPreconditionCheck = safeRxVlanPreconditionsForTest
 	var attaches []int
 	m.attachInterfaceXDPHook = func(ifindex int, forceGeneric bool) error {
 		attaches = append(attaches, ifindex)

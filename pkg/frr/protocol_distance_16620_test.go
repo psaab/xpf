@@ -8,19 +8,18 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #16620 (R3-A10-04): Junos static preferences rendered verbatim as FRR
-// static distances arbitrated against FRR's DEFAULT protocol
-// distances (OSPF 110, IS-IS 115, RIP 120, iBGP 200), inverting Junos
-// floating-static designs. The fix pins every protocol that has an FRR
-// distance knob to its Junos preference, per instance and globally:
+// #16620 (R3-A10-04): Junos static preferences render verbatim as FRR static
+// distances, so every protocol with an FRR distance knob is pinned to its
+// Junos preference, per instance and globally:
 //
 //	distance ospf intra-area 10 inter-area 10 external 150
 //	distance ospf6 intra-area 10 inter-area 10 external 150
 //	distance bgp 170 170 170
 //	distance 100            (RIP)
 //
-// IS-IS has no FRR distance knob (stable/10.6), so zebra keeps 115;
-// see TestJunosArbitration16620 for the bounded residual window.
+// FRR has no IS-IS distance knob and zebra keeps 115. #17735 therefore
+// rejects same-table RIP+IS-IS and static preferences 15..114 with IS-IS;
+// tolerant rendering withholds the conflicting routes.
 
 func TestProtocolDistancesRenderJunosScale16620(t *testing.T) {
 	m := New()
@@ -107,30 +106,27 @@ func zebraWinner16620(staticPref, protocolDist int) string {
 	return "protocol"
 }
 
-// TestJunosArbitration16620 is the table-driven acceptance proof: for
-// every installable static preference 1..254, the zebra winner under
-// the rendered distances must equal the Junos winner, for every
-// protocol Junos defines a preference for. The only tolerated
-// divergences are the IS-IS windows FRR cannot express (no IS-IS
-// distance knob; zebra fixed at 115 vs Junos 15/18), which are counted
-// and bounded explicitly rather than silently allowed.
+// TestJunosArbitration16620 compares every Junos static preference against
+// independently stated Junos preferences and the actual rendered FRR
+// distances. IS-IS's unrepresentable window is not accepted as a live
+// divergence: #17735's config gate rejects it, and its tolerant renderer
+// withholds the conflicting route.
 func TestJunosArbitration16620(t *testing.T) {
 	type proto struct {
-		name       string
-		junos      int
-		rendered   int // effective distance in the managed section
-		divergence func(staticPref int) bool
+		name     string
+		junos    int
+		rendered int // effective distance in the managed section
 	}
 	protos := []proto{
-		{"ospf-internal", junosPreferenceOSPFInternal, junosPreferenceOSPFInternal, nil},
-		{"ospf-external", junosPreferenceOSPFExternal, junosPreferenceOSPFExternal, nil},
-		{"ospfv3-internal", junosPreferenceOSPFInternal, junosPreferenceOSPFInternal, nil},
-		{"ospfv3-external", junosPreferenceOSPFExternal, junosPreferenceOSPFExternal, nil},
-		{"bgp-external", junosPreferenceBGP, junosPreferenceBGP, nil},
-		{"bgp-internal", junosPreferenceBGP, junosPreferenceBGP, nil},
-		{"rip", junosPreferenceRIP, junosPreferenceRIP, nil},
-		{"isis-level-1", junosPreferenceISISLevel1, frrISISFixedDistance, nil},
-		{"isis-level-2", junosPreferenceISISLevel2, frrISISFixedDistance, nil},
+		{"ospf-internal", 10, junosPreferenceOSPFInternal},
+		{"ospf-external", 150, junosPreferenceOSPFExternal},
+		{"ospfv3-internal", 10, junosPreferenceOSPFInternal},
+		{"ospfv3-external", 150, junosPreferenceOSPFExternal},
+		{"bgp-external", 170, junosPreferenceBGP},
+		{"bgp-internal", 170, junosPreferenceBGP},
+		{"rip", 100, junosPreferenceRIP},
+		{"isis-level-1", 15, frrISISFixedDistance},
+		{"isis-level-2", 18, frrISISFixedDistance},
 	}
 	for _, p := range protos {
 		t.Run(p.name, func(t *testing.T) {
@@ -141,12 +137,12 @@ func TestJunosArbitration16620(t *testing.T) {
 				if junosWinner == frrWinner {
 					continue
 				}
-				// IS-IS residual: Junos 15/18 vs FRR-fixed 115.
-				// Diverges exactly on pref in [junos, 115]: at the
-				// tie (pref == junos) zebra keeps the protocol
-				// route on Junos but the static wins in FRR, and
-				// above it a static that should lose to IS-IS wins.
-				if strings.HasPrefix(p.name, "isis-") && pref >= p.junos && pref <= frrISISFixedDistance {
+				// The renderer still cannot express this Junos winner.
+				// It is counted only because strict config validation
+				// rejects this preference and tolerant rendering omits it.
+				if strings.HasPrefix(p.name, "isis-") &&
+					pref >= p.junos && pref < frrISISFixedDistance &&
+					config.ISISStaticDistanceConflict(pref) {
 					divergent++
 					continue
 				}
@@ -156,9 +152,8 @@ func TestJunosArbitration16620(t *testing.T) {
 			if strings.HasPrefix(p.name, "isis-") {
 				want := frrISISFixedDistance - p.junos
 				if divergent != want {
-					t.Fatalf("IS-IS residual window = %d preferences, want %d (115-%d+1)", divergent, want, p.junos)
+					t.Fatalf("IS-IS preferences explicitly refused = %d, want %d", divergent, want)
 				}
-				t.Logf("IS-IS residual: %d static preferences (Junos %d..115) order differently vs IS-IS; FRR has no IS-IS distance knob", divergent, p.junos)
 			} else if divergent != 0 {
 				t.Fatalf("unexpected divergences: %d", divergent)
 			}
@@ -217,10 +212,11 @@ func TestRenderedStaticKeepsVerbatimPreference16620(t *testing.T) {
 	}
 }
 
-// JunosProtocolDistance must agree with the rendered lines.
+// JunosProtocolDistance is the helper-FIB comparison scale; IS-IS is
+// intentionally Junos 15 rather than zebra's unconfigurable distance 115.
 func TestJunosProtocolDistanceTable16620(t *testing.T) {
 	cases := map[string]int{
-		"ospf": 10, "ospf6": 10, "isis": 115, "rip": 100, "bgp": 170,
+		"ospf": 10, "ospf6": 10, "isis": 15, "rip": 100, "bgp": 170,
 	}
 	for proto, want := range cases {
 		if got, ok := JunosProtocolDistance(proto); !ok || got != want {

@@ -150,27 +150,27 @@ func dnsBookHasNames(cfg *config.Config) bool {
 	return has
 }
 
-// snapshotDNSAnswers captures identity->prefixes for every dns-name entry,
-// for change detection across a refresh (#15933, #15962 fold). Published
-// configs are immutable (#16687): their DNS fields change only by
-// publishing a new generation, so readers need no applySem. The
-// enumeration itself lives in config.DNSAnswersSnapshot so the
-// userspace hybrid guard compares exactly the same identities (#16606).
-func snapshotDNSAnswers(cfg *config.Config) map[string][]string {
+// snapshotDNSAnswers captures scoped DNS state (prefixes and failure flag)
+// for every dns-name entry (#17723). Published configs are immutable
+// (#16687): their DNS fields change only by publishing a new generation, so
+// readers need no applySem. The enumeration itself lives in
+// config.DNSAnswersSnapshot so the userspace hybrid guard compares exactly
+// the same identities and enforcement-relevant fields (#16606).
+func snapshotDNSAnswers(cfg *config.Config) map[string]config.DNSAnswerState {
 	return config.DNSAnswersSnapshot(cfg)
 }
 
-func dnsAnswersEqual(a, b map[string][]string) bool {
+func dnsAnswersEqual(a, b map[string]config.DNSAnswerState) bool {
 	if len(a) != len(b) {
 		return false
 	}
 	for k, va := range a {
 		vb, ok := b[k]
-		if !ok || len(va) != len(vb) {
+		if !ok || va.DNSLookupFailed != vb.DNSLookupFailed || len(va.Prefixes) != len(vb.Prefixes) {
 			return false
 		}
-		for i := range va {
-			if va[i] != vb[i] {
+		for i := range va.Prefixes {
+			if va.Prefixes[i] != vb.Prefixes[i] {
 				return false
 			}
 		}
@@ -179,10 +179,11 @@ func dnsAnswersEqual(a, b map[string][]string) bool {
 }
 
 // cloneDNSAnswers deep-copies an answer snapshot for baseline storage.
-func cloneDNSAnswers(in map[string][]string) map[string][]string {
-	out := make(map[string][]string, len(in))
+func cloneDNSAnswers(in map[string]config.DNSAnswerState) map[string]config.DNSAnswerState {
+	out := make(map[string]config.DNSAnswerState, len(in))
 	for k, v := range in {
-		out[k] = append([]string(nil), v...)
+		v.Prefixes = append([]string(nil), v.Prefixes...)
+		out[k] = v
 	}
 	return out
 }
@@ -255,7 +256,7 @@ func (d *Daemon) refreshDNSOnce() {
 // but a baseline exists. Generation changes record a new baseline or
 // clear it, so the fallback cannot cross generations in practice
 // (commits record/clear under applySem before the next tick reads).
-func (d *Daemon) dnsBaselineFor(cfg *config.Config) map[string][]string {
+func (d *Daemon) dnsBaselineFor(cfg *config.Config) map[string]config.DNSAnswerState {
 	d.dnsRefreshMu.Lock()
 	defer d.dnsRefreshMu.Unlock()
 	if d.lastDNSRefreshAnswers == nil {
@@ -360,7 +361,7 @@ func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 
 // recordDNSBaselineForce unconditionally sets the baseline (under
 // applySem at a real apply exit, where the writer IS the newest).
-func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string][]string) {
+func (d *Daemon) recordDNSBaselineForce(cfg *config.Config, answers map[string]config.DNSAnswerState) {
 	d.dnsRefreshMu.Lock()
 	d.lastDNSRefreshBase = cfg
 	d.lastDNSRefreshAnswers = cloneDNSAnswers(answers)

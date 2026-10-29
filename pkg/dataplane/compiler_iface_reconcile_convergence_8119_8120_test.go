@@ -38,9 +38,10 @@ import (
 // refreshed the object would hide the defect entirely, and every assertion here
 // would pass on the broken code.
 type fakeHost8119 struct {
-	mtu   map[string]int
-	addrs map[string]map[string]bool
-	index map[string]int
+	mtu       map[string]int
+	mtuWrites map[string]int
+	addrs     map[string]map[string]bool
+	index     map[string]int
 }
 
 func (h *fakeHost8119) link(name string) netlink.Link {
@@ -82,7 +83,12 @@ func (h *fakeHost8119) install(t *testing.T) {
 
 	linkSetMTUSeam = func(l netlink.Link, mtu int) error {
 		// Deliberately does NOT update l.Attrs().MTU — see the type comment.
-		h.mtu[l.Attrs().Name] = mtu
+		name := l.Attrs().Name
+		h.mtu[name] = mtu
+		if h.mtuWrites == nil {
+			h.mtuWrites = map[string]int{}
+		}
+		h.mtuWrites[name]++
 		return nil
 	}
 	addrLinkByNameSeam = func(name string) (netlink.Link, error) {

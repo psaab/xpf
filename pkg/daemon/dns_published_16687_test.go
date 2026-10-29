@@ -104,6 +104,58 @@ func TestResolveDNSBeforeApplyNeverMutatesPublished16687(t *testing.T) {
 	}
 }
 
+// TestDNSApplyCloneIsolatesNonDNSPolicy17734 is the #17734 fail-on-revert
+// mutation cell. The writer mutates an apply clone's policy slice while a
+// lock-free reader walks the published policy. A shallow DNS-only clone
+// aliases that slice, changing published state and reporting a race under
+// -race.
+func TestDNSApplyCloneIsolatesNonDNSPolicy17734(t *testing.T) {
+	d, published := dnsDaemon16687(t)
+	applied := d.resolveDNSBeforeApply(published)
+	if applied == published {
+		t.Fatal("resolve returned the published config, want an apply clone")
+	}
+	d.consumeDNSResolved(applied)
+
+	publishedPolicy := published.Security.Policies[0].Policies[0]
+	appliedPolicy := applied.Security.Policies[0].Policies[0]
+	if len(publishedPolicy.Match.SourceAddresses) == 0 ||
+		len(appliedPolicy.Match.SourceAddresses) == 0 {
+		t.Fatal("premise: policy has no source-address field to mutate")
+	}
+	want := publishedPolicy.Match.SourceAddresses[0]
+	query := policymatch.Query{
+		FromZone: "trust", ToZone: "untrust", Protocol: "tcp",
+		SrcIP: net.ParseIP("10.0.1.5"), DstIP: net.ParseIP("10.0.0.1"),
+		DstPort: policymatch.PortPtr(443),
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 10000 {
+			_ = publishedPolicy.Match.SourceAddresses[0]
+			_ = policymatch.Match(published, query)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 10000 {
+			appliedPolicy.Match.SourceAddresses[0] = "198.51.100.1/32"
+			appliedPolicy.Match.SourceAddresses[0] = want
+		}
+	}()
+	close(start)
+	wg.Wait()
+
+	if got := publishedPolicy.Match.SourceAddresses[0]; got != want {
+		t.Fatalf("published policy source-address mutated by apply clone: got %q, want %q", got, want)
+	}
+}
+
 // TestDNSApplyResolveRacesMatchPoliciesReader16687 is the race probe
 // from the issue, driven through the production arms: the writer
 // repeatedly resolves the published config (the background apply path)

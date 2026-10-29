@@ -131,6 +131,24 @@ func TestEnsureRxVlanStagHwParse_10915(t *testing.T) {
 	})
 }
 
+func TestExportedRxVlanPreconditionCheck17736(t *testing.T) {
+	calls := 0
+	mockEthtool(t, func(args ...string) ([]byte, error) {
+		calls++
+		if len(args) != 2 || args[0] != "-k" || args[1] != "ge-0-0-0" {
+			t.Fatalf("already-safe features must not be toggled: ethtool %v", args)
+		}
+		return []byte("rx-vlan-offload: off\nrx-vlan-stag-hw-parse: off\n"), nil
+	})
+	rxErr, stagErr := EnsureRxVlanParsePreconditions("ge-0-0-0")
+	if rxErr != nil || stagErr != nil {
+		t.Fatalf("safe features returned errors: rx=%v stag=%v", rxErr, stagErr)
+	}
+	if calls != 1 {
+		t.Fatalf("ethtool calls = %d, want one state query", calls)
+	}
+}
+
 func TestRxVlanStagHwParseActivationError_10915(t *testing.T) {
 	if err := rxVlanStagHwParseActivationError("ge-0-0-0", nil); err != nil {
 		t.Fatalf("no disable failure must not fail activation: %v", err)
