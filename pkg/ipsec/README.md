@@ -1028,7 +1028,7 @@ all files stay in `package ipsec`, so the public API is unchanged.
   strongSwan identity equality, not a transitive normalized key: ordered DN
   comparison follows DER RDN order and tag-sensitive value rules; FQDN and
   whole-address RFC822 comparisons fold ASCII letters only, leaving non-ASCII
-  bytes unchanged. Key-id bytes and IP/subnet/FQDN selectors follow parser
+  bytes unchanged. Key-id bytes and IP/subnet/range/FQDN selectors follow parser
   semantics. Numeric ID prefixes use strtoul and 32-bit ID enum conversion;
   `uri:` is type 201 and `xmppaddr:` encodes a GeneralName. Authored output
   stays raw.

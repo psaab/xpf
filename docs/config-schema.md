@@ -11518,7 +11518,7 @@ reserved for whole-dataplane selection where a rewrite shim
     not the declared Junos identity type, so distinct types that render one owner
     share a collision class.
     Selector parsing first honors named and numeric strongSwan type prefixes,
-    then DN syntax, `@#`/`@` forms, and untyped IP/subnet/FQDN/KEY_ID parsing.
+    then DN syntax, `@#`/`@` forms, and untyped IP/subnet/range/FQDN/KEY_ID parsing.
     Invalid colon-containing untyped selectors and unsupported DN attributes
     are literal KEY_ID bytes. Textual `atodn()` values are encoded as type-9
     DER with source-order RDNs. Only supported named attributes are accepted;

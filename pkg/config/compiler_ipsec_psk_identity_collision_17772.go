@@ -367,6 +367,9 @@ func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
 	if prefix, err := netip.ParsePrefix(selector); err == nil {
 		return ipsecSubnetIdentity(prefix), selector
 	}
+	if identity, ok := ipsecAddressRangeIdentity(selector); ok {
+		return identity, selector
+	}
 	if addr, err := netip.ParseAddr(selector); err == nil && addr.Zone() == "" {
 		typeID := uint32(1)
 		if addr.Is6() {
@@ -565,6 +568,29 @@ func ipsecSubnetIdentity(prefix netip.Prefix) ipsecIKEIdentity {
 	}
 	encoding = append(encoding, mask...)
 	return ipsecTypedIdentity(typeID, encoding)
+}
+func ipsecAddressRangeIdentity(value string) (ipsecIKEIdentity, bool) {
+	first, second, ok := strings.Cut(value, "-")
+	if !ok {
+		return ipsecIKEIdentity{}, false
+	}
+	start, err := netip.ParseAddr(first)
+	if err != nil || start.Zone() != "" {
+		return ipsecIKEIdentity{}, false
+	}
+	end, err := netip.ParseAddr(second)
+	if err != nil || end.Zone() != "" || start.Is4() != end.Is4() || start.Compare(end) > 0 {
+		return ipsecIKEIdentity{}, false
+	}
+	typeID := uint32(7)
+	if !start.Is4() {
+		typeID = 8
+	}
+	startBytes, endBytes := start.AsSlice(), end.AsSlice()
+	encoded := make([]byte, len(startBytes)+len(endBytes))
+	copy(encoded, startBytes)
+	copy(encoded[len(startBytes):], endBytes)
+	return ipsecIKEIdentity{typeID: typeID, encoding: string(encoded)}, true
 }
 
 func ipsecXMPPGeneralName(value []byte) []byte {

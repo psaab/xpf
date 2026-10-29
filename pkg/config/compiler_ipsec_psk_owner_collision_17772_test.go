@@ -416,6 +416,9 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"identical malformed DN bytes compare equal", "inet", "asn1dn:#3000", "inet", "{9}:#3000"},
 			{"organizationIdentifier PrintableString case folding", "distinguished-name", "organizationIdentifier=Peer", "distinguished-name", "organizationIdentifier=peer"},
 			{"organizationIdentifier equals asn1dn", "distinguished-name", "organizationIdentifier=Peer", "inet", "asn1dn:#300f310d300b0603550461130450656572"},
+			{"IPv4 range equals type-7 DER", "inet", "198.51.100.1-198.51.100.2", "inet", "ipv4range:#c6336401c6336402"},
+			{"IPv6 range equals type-8 DER", "inet", "2001:db8::1-2001:db8::2", "inet", "ipv6range:#20010db800000000000000000000000120010db8000000000000000000000002"},
+			{"hyphenated FQDN remains type 2", "inet", "host-a-host-b", "inet", "fqdn:host-a-host-b"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
 		for _, pair := range pairs {
@@ -436,6 +439,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3000", "inet", "asn1dn:#3001"))
 		requireNoCollision17772(t, identityPair17772("inet", "{08}:peer", "inet", "fqdn:peer"))
 		requireNoCollision17772(t, identityPair17772("inet", "{18446744073709551617}:peer", "inet", "18446744073709551617"))
+		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.2-198.51.100.1", "inet", "ipv4range:#c6336402c6336401"))
 	})
 
 	t.Run("remote identity equal to default gateway local address is refused", func(t *testing.T) {
