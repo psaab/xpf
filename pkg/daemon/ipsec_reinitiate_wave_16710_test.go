@@ -6,10 +6,11 @@
 //
 // The fix scopes each pass to the transitioning RG (reinitiateIPsecSAsForRG):
 // the RG0 edge handles declared-RG0 names, and a data-RG edge handles that
-// RG's names. In a single-data-RG cluster with undeclared RG0, an unanchored
-// name also reaches ownsIPsecConn's fallback on the one data edge. A
-// multi-data-RG control keeps that name out of every edge to preserve wave
-// idempotency; other cells cover declared RG0, multi-RG names, and the belt.
+// RG's names. The undeclared-RG0 fallback is admitted only when one current
+// config snapshot has a sole data RG matching this edge and the peer's last
+// heartbeat has no RG0 entry. A multi-data-RG control and a stale edge for a
+// removed RG keep that name out to preserve wave idempotency; other cells
+// cover peer/config declarations, multi-RG names, and the belt.
 
 package daemon
 
@@ -208,8 +209,73 @@ func TestUndeclaredRG0FallbackDoesNotFanAcrossDataRGEdges17784(t *testing.T) {
 	}
 }
 
-// A data-RG edge with undeclared RG0 admits its unique unanchored name, while
-// a spanning name still belongs to no single edge (#9511/#16710).
+// A queued RG2 pass may run after a commit removes RG2. It must not mistake
+// the new RG1-only config for proof that the stale RG2 edge is the sole edge.
+func TestUndeclaredRG0FallbackBindsToSoleDataRG17784(t *testing.T) {
+	store := twoRGIPsecStore(t)
+	initial := store.ActiveConfig()
+	cm := cluster.NewManager(0, 1)
+	cm.UpdateConfig(initial.Chassis.Cluster)
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+	cm.SetGroupStateForTesting(2, cluster.StatePrimary)
+
+	if _, err := store.LoadSet(
+		"delete chassis cluster redundancy-group 2\n" +
+			"delete interfaces reth2\n" +
+			"delete interfaces ge-0/0/1\n" +
+			"delete security ike gateway gw-rg2\n" +
+			"delete security ipsec vpn vpn-rg2",
+	); err != nil {
+		t.Fatalf("remove RG2 from candidate: %v", err)
+	}
+	current, err := store.Commit()
+	if err != nil {
+		t.Fatalf("commit RG2 removal: %v", err)
+	}
+	if len(current.Chassis.Cluster.RedundancyGroups) != 1 ||
+		current.Chassis.Cluster.RedundancyGroups[0].ID != 1 {
+		t.Fatalf("FIXTURE: current config data RGs = %v, want only RG1",
+			current.Chassis.Cluster.RedundancyGroups)
+	}
+	cm.UpdateConfig(current.Chassis.Cluster)
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+
+	rec := &waveRecorder16710{}
+	ss := cluster.NewSessionSync(":0", "", nil)
+	ss.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+	d := &Daemon{
+		cluster:     cm,
+		store:       store,
+		sessionSync: ss,
+		ipsecActiveNamesFn: func() ([]string, error) {
+			_, initiated := rec.snapshot()
+			return initiated, nil
+		},
+		ipsecTerminateFn: rec.recordTerminated,
+		ipsecInitiateFn:  rec.recordInitiated,
+	}
+
+	// This queued edge belongs to the removed RG2. Only the surviving RG1
+	// edge may offer the current config's unanchored fallback.
+	d.reinitiateIPsecSAsForRG(2)
+	if terminated, initiated := rec.snapshot(); len(terminated) != 0 || len(initiated) != 0 {
+		t.Fatalf("#17784/#16710: stale RG2 edge acted after removal: terminated=%v initiated=%v",
+			terminated, initiated)
+	}
+
+	d.reinitiateIPsecSAsForRG(1)
+	terminated, initiated := rec.snapshot()
+	if len(terminated) != 0 {
+		t.Fatalf("#17784/#15194: sole RG1 edge terminated %v", terminated)
+	}
+	if got, want := sortedCopy16710(initiated), []string{"vpn-plain"}; !equalNames16710(got, want) {
+		t.Fatalf("#17784: surviving sole RG1 edge initiated=%v want exactly one %v",
+			initiated, want)
+	}
+}
+
+// A one-data-RG edge with no peer RG0 heartbeat entry admits its unanchored
+// name, while a spanning name still belongs to no single edge (#9511/#16710).
 func TestReinitiateDataRGEdgeExcludesMultiRGName17784(t *testing.T) {
 	store := syncedStore9511(t, []string{
 		"set chassis cluster cluster-id 1",

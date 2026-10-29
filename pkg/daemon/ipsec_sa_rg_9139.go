@@ -191,8 +191,8 @@ func (d *Daemon) cachedIPsecSANameIndex(cfg *config.Config) ipsec.SANameIndex {
 	}
 	if coll := idx.Collisions(); len(coll) > 0 {
 		slog.Warn("cluster: IPsec SA names rendered by more than one VPN; a name whose "+
-			"candidates span several redundancy groups is re-initiated only by a node "+
-			"that owns every one of them (and a declared RG0 for an unanchored candidate)",
+			"candidates span several redundancy groups is excluded from per-RG "+
+			"re-initiation and relies on strongSwan trap/traffic or manual re-initiation",
 			"collisions", coll)
 	}
 	d.ipsecSAIndex.Store(&ipsecSAIndexCache{cfg: cfg, idx: idx})

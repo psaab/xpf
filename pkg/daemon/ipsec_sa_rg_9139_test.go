@@ -189,18 +189,12 @@ func TestIPsecConnRedundancyGroupNilConfig9139(t *testing.T) {
 	}
 }
 
-// RG0 IS NOT NECESSARILY DECLARED, and the two cases must answer differently.
-//
-// cluster.Manager.UpdateConfig creates a group only for an RG the config
-// declares, so IsLocalPrimary(0) is permanently FALSE on a config that omits
-// `redundancy-group 0` — an unanchored connection gated on it would NEVER be
-// re-initiated, which is worse than the behaviour this change extends. Where
-// RG0 IS declared the honest answer is the narrower one: a node taking only a
-// data RG while the peer keeps RG0 must not initiate a tunnel bound to an
-// interface the peer still holds.
-//
-// The two cells differ ONLY in whether the config declares RG0, which is what
-// makes the branch observable rather than assumed.
+// RG0 IS NOT NECESSARILY DECLARED locally. With an RG1-only current config,
+// the existing undeclared-RG0 fallback is needed to re-initiate an unanchored
+// name when this node owns RG1 and the peer has not advertised RG0. But local
+// config-sync can lag a peer generation that declares RG0, so peer heartbeat
+// group presence must also fence the fallback. Declared-RG0 controls pin that
+// such a name remains on the RG0 edge even when RG0 is locally primary.
 func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 	base := []string{
 		"set chassis cluster cluster-id 1",
@@ -302,6 +296,84 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 		d.reinitiateIPsecSAsForRG(0)
 		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
 			t.Fatalf("#17784: declared RG0 name was not initiated on its RG0 edge: %v", initiated)
+		}
+	})
+
+	t.Run("declared RG0 primary does not enter the data edge", func(t *testing.T) {
+		store := testStoreWithSetConfig(t, append(append([]string{}, base...),
+			"set chassis cluster redundancy-group 0 node 0 priority 1"))
+		cfg := store.ActiveConfig()
+		cm := cluster.NewManager(0, 1)
+		cm.UpdateConfig(cfg.Chassis.Cluster)
+		cm.SetGroupStateForTesting(0, cluster.StatePrimary)
+		cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+		d := &Daemon{cluster: cm, store: store}
+		if !d.ownsIPsecConn(cfg, ipsecSANameIndex(cfg), "vpn-plain") {
+			t.Fatal("FIXTURE: local primary RG0 must own the declared unanchored name")
+		}
+		var initiated []string
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: declared RG0 name reached data edge despite local RG0 ownership: %v",
+				initiated)
+		}
+		d.reinitiateIPsecSAsForRG(0)
+		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+			t.Fatalf("#17784: declared RG0 name was not initiated on RG0 edge: %v", initiated)
+		}
+	})
+
+	t.Run("peer declares RG0 blocks the local undeclared fallback", func(t *testing.T) {
+		store := testStoreWithSetConfig(t, base)
+		cfg := store.ActiveConfig()
+		cm := cluster.NewManager(0, 1)
+		cm.UpdateConfig(cfg.Chassis.Cluster)
+		cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+		if _, known := cm.LocalGroupPrimary(0); known {
+			t.Fatal("FIXTURE: local RG0 must be undeclared for this cell")
+		}
+		// Model the peer's latest heartbeat after it has declared RG0
+		// and reports it primary, while local config-sync still lacks it.
+		cm.SetPeerGroupStateForTesting(0, cluster.StatePrimary)
+		var initiated []string
+		d := &Daemon{cluster: cm, store: store}
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: peer-declared RG0 primary must block the local "+
+				"undeclared-RG0 fallback, initiated %v", initiated)
+		}
+		// Presence of the RG0 heartbeat entry fences the fallback even
+		// when the peer currently reports RG0 secondary.
+		cm.SetPeerGroupStateForTesting(0, cluster.StateSecondary)
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: peer-declared secondary RG0 must block fallback, initiated %v",
+				initiated)
+		}
+		// CONTROL: with no peer RG0 entry at all, the same owned RG1
+		// edge still initiates the unanchored name.
+		cm2 := cluster.NewManager(0, 1)
+		cm2.UpdateConfig(cfg.Chassis.Cluster)
+		cm2.SetGroupStateForTesting(1, cluster.StatePrimary)
+		d.cluster = cm2
+		initiated = nil
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+			t.Fatalf("#17784: peer-undeclared control must initiate on owned RG1, got %v", initiated)
 		}
 	})
 }

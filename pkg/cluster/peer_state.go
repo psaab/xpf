@@ -96,6 +96,20 @@ func (m *Manager) PeerGroupStates() map[int]PeerGroupState {
 	return cp
 }
 
+// PeerGroupPrimary reports the peer's last advertised state for rgID.
+// `known` distinguishes a peer that reports the group from one whose
+// heartbeat has no entry for it. PeerGroupStates owns this same snapshot but
+// allocates the whole map; this accessor keeps single-group consumers cheap.
+func (m *Manager) PeerGroupPrimary(rgID int) (primary bool, known bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	pg, ok := m.peerGroups[rgID]
+	if !ok {
+		return false, false
+	}
+	return pg.State == StatePrimary, true
+}
+
 // SetSoftwareVersion records the local software version advertised to the peer.
 func (m *Manager) SetSoftwareVersion(version string) {
 	m.mu.Lock()

@@ -2162,12 +2162,11 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	//
 	// #16710: scoped to rgID. Ordinary data-RG names must match this
 	// edge's RG; declared-RG0 names stay on the RG0 edge. #17784 permits
-	// one exception: when RG0 is undeclared and this is the cluster's
-	// only data RG, an unanchored name reaches ownsIPsecConn on that
-	// edge so its existing fallback can decide based on ownership. The
-	// single-data-RG limit avoids offering that same name to each edge
-	// of a multi-data-RG wave, where the #15194 belt would re-terminate
-	// an SA an earlier edge just raised.
+	// one exception only when the current cluster-config snapshot has no
+	// RG0 and exactly one data RG, this is that RG's edge, and the peer's
+	// last heartbeat has no RG0 entry. The topology facts come from one
+	// snapshot; the peer heartbeat entry fences config-sync lag, while
+	// ownsIPsecConn remains the local ownership authority.
 	//
 	// ASYNC for the reason the DHCP lease seed above is async: this runs on the
 	// VRRP event loop, and InitiateConnection shells out to swanctl per
@@ -2974,18 +2973,21 @@ func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 // only declared-RG0/unanchored names, on a data-RG edge only that RG's
 // names — plus the #17784 exception below.
 //
-// #17784: in a cluster with exactly one data RG and no declared RG0, an
-// unanchored (single-candidate RG0) name has no RG0 edge. The data edge
-// therefore admits it to the ownsIPsecConn check; that existing function
-// applies the undeclared-RG0 fallback (IsLocalPrimaryAny) and initiates
-// only when this node owns a group. Limiting the exception to a single
-// data RG avoids offering the same unanchored name to every edge of a
-// multi-data-RG takeover wave, where the #15194 belt could re-terminate
-// a just-raised SA. When RG0 is declared, the fallback is refused and
-// unanchored names remain on the RG0 edge. A name spanning several RGs
-// has no single-RG initiation edge: with no further edge its only
-// recovery is strongSwan trap (traffic-triggered) or manual
-// re-initiation. The old code belt-terminated it on every edge.
+// #17784: only when one current cluster-config snapshot has no RG0 and
+// exactly one data RG does that RG's edge admit an unanchored
+// (single-candidate RG0) name to ownsIPsecConn. The edge ID must equal the
+// sole data-RG ID, so an already-queued edge for a removed RG cannot admit
+// the same name after a commit. This exception is also fenced by the peer's
+// last heartbeat: an RG0 entry means the peer declares the group (and a
+// primary entry means it owns it), even if local config-sync has not caught
+// up. ownsIPsecConn applies the undeclared-RG0 fallback only after those
+// topology and peer checks. Limiting admission to one edge avoids offering
+// the name to every edge of a multi-data-RG takeover wave, where the #15194
+// belt could re-terminate a just-raised SA. When current config declares
+// RG0, unanchored names remain on the RG0 edge. A name spanning several RGs
+// has no single-RG initiation edge: its only recovery is strongSwan trap
+// (traffic-triggered) or manual re-initiation. The old code belt-terminated
+// it on every edge.
 func (d *Daemon) reinitiateIPsecSAsForRG(rg int) {
 	ss := d.getSessionSync()
 	if ss == nil {
@@ -3078,37 +3080,41 @@ func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
 // one transitioning redundancy group rg (#16710): a name is in scope only
 // when EVERY candidate group from ipsecConnRedundancyGroups equals rg
 // (the all-candidates rule ipsecSAsForRG uses), with the #17784 exception:
-// a single-candidate RG0/unanchored name on a data-RG edge is admitted to
-// ownsIPsecConn when RG0 is undeclared AND the cluster has exactly one data
-// RG. This avoids fanning the fallback name across a multi-data-RG wave;
-// ownsIPsecConn remains authoritative, and declared-RG0 names stay on the
-// RG0 edge. A multi-RG name is in scope on no edge. Out-of-scope names are
-// neither initiated nor belt-terminated by this edge.
+// only the matching sole-data-RG edge admits a single-candidate RG0 name
+// when the same current config snapshot has no RG0 and the peer heartbeat
+// has no RG0 entry. The existing ownsIPsecConn fallback remains authoritative;
+// a multi-RG name is in scope on no edge. Out-of-scope names are neither
+// initiated nor belt-terminated by this edge.
 func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
 	cfg := d.ipsecAttributionConfig()
 	idx := d.cachedIPsecSANameIndex(cfg)
 	owned := make([]string, 0, len(names))
 	var skipped, outOfScope []string
-	// #17784: RG0 declaredness and the number of configured data RGs are
-	// per-pass facts, not per-name lookups. Use the current cluster config
-	// (the attribution config above may be an older loaded IPsec generation).
+	// Derive RG0 declaration and the sole data-RG identity from ONE current
+	// config snapshot. The attribution config above may be an older loaded
+	// IPsec generation, and the cluster Manager's local groups are published
+	// later in the apply tail.
 	rg0Declared := false
-	singleDataRG := false
+	soleDataRG := 0
 	if cc := d.clusterConfig(); cc != nil {
-		dataRGs := 0
 		for _, group := range cc.RedundancyGroups {
 			if group.ID == 0 {
+				rg0Declared = true
 				continue
 			}
-			dataRGs++
-			if dataRGs > 1 {
+			if soleDataRG != 0 {
+				soleDataRG = 0
 				break
 			}
+			soleDataRG = group.ID
 		}
-		singleDataRG = dataRGs == 1
 	}
+	// PeerGroupPrimary's known bit is presence in the peer's most recent
+	// heartbeat, which advertises every configured RG. Retain its primary
+	// result explicitly as the ownership fence for an RG0-primary peer.
+	peerRG0Primary, peerRG0Known := false, false
 	if d.cluster != nil {
-		_, rg0Declared = d.cluster.LocalGroupPrimary(0)
+		peerRG0Primary, peerRG0Known = d.cluster.PeerGroupPrimary(0)
 	}
 	for _, name := range names {
 		rgs := ipsecConnRedundancyGroups(cfg, idx, name)
@@ -3119,10 +3125,12 @@ func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
 				break
 			}
 		}
-		if !inScope && rg != 0 && d.cluster != nil && !rg0Declared &&
-			singleDataRG && len(rgs) == 1 && rgs[0] == 0 {
-			// #17784: only data RG, RG0 undeclared; let the existing
-			// ownsIPsecConn fallback decide this single data edge.
+		if !inScope && d.cluster != nil && !rg0Declared &&
+			soleDataRG != 0 && rg == soleDataRG &&
+			!peerRG0Known && !peerRG0Primary &&
+			len(rgs) == 1 && rgs[0] == 0 {
+			// #17784: only the current sole data edge, with no RG0 in
+			// the config snapshot or the peer's last heartbeat.
 			inScope = true
 		}
 		if !inScope {
