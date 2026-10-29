@@ -748,8 +748,9 @@ pub(in crate::afxdp) fn resolve_zone_encoded_fabric_redirect_by_id(
         return None;
     }
     // #16557: the fabric MAC stamp has only two bytes; ids above u16::MAX
-    // stamp their low 16 bits (the peer's zone override is advisory and
-    // owner-RG gated; policy still evaluates the full local id).
+    // stamp their low 16 bits. #18518: the receiver resolves them back to the
+    // full id (`ForwardingState::zone_id_for_stamp`); an ambiguous value is
+    // an Invalid stamp there, not a guessed zone.
     let [_, _, hi, lo] = zone_id.to_be_bytes();
     resolution.src_mac = Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     Some(resolution)

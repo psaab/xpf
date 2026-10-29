@@ -1548,3 +1548,75 @@ Decisive regression: `forged_stamp_drops_when_link_authentication_required_16023
 plus `zone_encoded_fabric_stamp_requires_link_authentication_16023`
 (unit dispositions incl. attested controls). Live-cluster third-host proof
 on a switched fabric VLAN is still owed before acceptance.
+
+## Split node keeps statics whose gateway is peer-owned (#18517)
+
+On a split node (the WAN RG is peer-owned, the LAN RG is local) a new flow
+toward the WAN has no local egress. Before #18517 the path was the cluster
+terminal: the cluster-mode Null0 default (`renderClusterModeDefaults`, tag 2500,
+kernel metric 20) is the terminal row; `select_source_ifindex_v4/v6` stamps it
+with the would-be egress by resolving the CONFIGURED default's gateway through
+the helper's by-ifindex connected ledger (where peer-owned prefixes live);
+`enforce_ha_resolution_snapshot` keeps it `ClusterTerminalHAInactive` because
+that egress RG is peer-owned; and `redirect_via_fabric_if_needed_at` sends it
+across the fabric. Since #18517 the configured default's own member is bound to
+that egress instead (below), so the forwarding row is selected and demoted to
+`HAInactive`.
+
+Either way, the chain needs the configured default in the helper snapshot.
+`buildRouteSnapshotsWithRGPrimary` withholds a peer-owned RETH unit's
+connected prefix from the transit FIB (#15742), and before #18517 it also left
+it out of the gateway coverage the #11317 recursive-static filter consults, so
+`route 0.0.0.0/0 next-hop <WAN gateway>` was dropped as "recursive". With no
+forwarding row covering the destination the stamp was 0, the terminal demoted
+to an unstamped `DiscardRoute`, and every new flow from the split node to the
+WAN was discarded (`show route fib` showed only `discard cluster-terminal`).
+
+The peer-owned prefix now counts as gateway coverage (`gatewayNetworks`) while
+staying out of the transit rows, so the split node keeps the configured default
+and fabric-redirects new WAN flows to the owner. A gateway covered by no prefix
+is still filtered exactly as #11317 intends.
+
+Keeping the static is only half of it. A configured static at least as
+preferred as a learned same-prefix route suppresses that learned route
+(`addLearnedRouteSnapshots`), and Go emits configured gateways bare. On the
+split node the bare gateway matches no transit row, so the member would stay at
+ifindex 0. For the default that falls back to the terminal path above, but a
+NON-default static (`10.30.0.0/24 next-hop <WAN gateway>`) has no terminal at
+its prefix and ended in `NoRoute`, with the learned route that used to carry it
+suppressed. The FIB build (`resolve_next_hop_target_v4/v6`) therefore binds a
+bare gateway that no transit row covers through the same by-ifindex ledger the
+terminal attribution uses (`connected_lpm_ifindex_*`, table-scoped; v6
+link-local gateways excluded). The member gets the peer-owned RETH egress, HA
+enforcement demotes the row to `HAInactive` because that RG is peer-owned, and
+the fabric helper redirects it. Once the RG is local again, the same row
+forwards out the local member. With the gateway bound, the configured default
+is selected over the terminal on the split node (pref 5 over 200), which
+matches Junos, where a static via a RETH is active on both nodes. The terminal
+path now serves only prefixes with no resolvable forwarding row, for example a
+split node with no configured default, where a destination inside a peer-owned
+prefix is attributed through the destination's own ledger entry
+(`demoted_cluster_terminal_discard_route_rescues_via_fabric_16216`). The
+gateway-owner arm of `select_source_ifindex_v4/v6` is now reached only by
+explicit-interface members that fail table resolution.
+
+### V1 zone stamps carry the zone id's low 16 bits (#18518)
+
+The V1 zone-encoded fabric stamp (`02:bf:72:fe:HH:LL` source MAC) has two
+bytes for the zone. Since #16557 zone ids are u32 `StableZoneID` hashes, so the
+stamp carries only their low 16 bits. Before #18518 the receiver decoded
+`u32::from(u16)` and required an exact `zone_id_to_name` hit, so every stamped
+redirect for a zone id above 0xFFFF was `Invalid` and dropped — which is every
+new flow a split node fabric-redirects (above). `populate_zones` now builds
+`zone_low16_to_id` and `ForwardingState::zone_id_for_stamp` resolves the stamp
+to the unique admitted zone with those low bits; two zones sharing low 16 bits
+make the stamp ambiguous, and an ambiguous stamp stays `Invalid` (never a
+guessed tenant identity). The build logs each colliding pair once
+(`zones [...] share V1 fabric-stamp bits`). The receiver resolves the bits
+against its OWN admitted zones, so both nodes must admit the same zone set. A
+zone present only on the sender, for example during config-sync skew, decodes
+as unknown and its punts drop until the receiver commits it, or, if a receiver
+zone shares its low 16 bits, as that receiver zone. A zone whose id has low 16
+bits 0 cannot be stamped at all; the build logs both cases. V2 NAT-scope
+stamps already carried a 24-bit scope id resolved to a full-width identity and
+are unchanged.

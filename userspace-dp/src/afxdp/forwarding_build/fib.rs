@@ -1407,6 +1407,12 @@ fn resolve_next_hop_target_v4(
     if let Some((ifindex, endpoint)) = infer_connected_route_target_v4(state, ip, table) {
         return vec![(Some(ip), ifindex, endpoint, 1)];
     }
+    if let Some(target) = peer_owned_connected_target(
+        state,
+        crate::afxdp::forwarding::connected_lpm_ifindex_v4(state, ip, table),
+    ) {
+        return vec![(Some(ip), target.0, target.1, 1)];
+    }
     let expanded = recursive_gateway_target_v4(
         state,
         recursive_routes,
@@ -1468,6 +1474,12 @@ fn resolve_next_hop_target_v6(
     if ip.is_unicast_link_local() {
         return vec![(Some(ip), 0, 0, 1)];
     }
+    if let Some(target) = peer_owned_connected_target(
+        state,
+        crate::afxdp::forwarding::connected_lpm_ifindex_v6(state, ip, table),
+    ) {
+        return vec![(Some(ip), target.0, target.1, 1)];
+    }
     let expanded = recursive_gateway_target_v6(
         state,
         recursive_routes,
@@ -1507,6 +1519,28 @@ fn resolve_ifindex(
         .get(name)
         .copied()
         .or_else(|| linux_names.get(name).copied())
+}
+
+/// #18517: a bare gateway that no transit connected row covers may still be
+/// directly connected on a PEER-OWNED RETH unit: #15742 withholds that prefix
+/// from the transit rows on the split node, but the by-ifindex ledger keeps
+/// it. Binding the gateway there gives the member its real egress, so HA
+/// enforcement sees the peer-owned RG (HAInactive) and fabric-redirects the
+/// flow to the owner. Without it the member stayed at ifindex 0: the row
+/// resolved to NoRoute (never rescued) and, as a configured static, shadowed
+/// any kernel route for the same prefix. `ledger_ifindex` is the
+/// `connected_lpm_ifindex_*` answer (0 = no ledger prefix covers the gateway).
+fn peer_owned_connected_target(state: &ForwardingState, ledger_ifindex: i32) -> Option<(i32, u16)> {
+    (ledger_ifindex > 0).then(|| {
+        (
+            ledger_ifindex,
+            state
+                .tunnel_endpoint_by_ifindex
+                .get(&ledger_ifindex)
+                .copied()
+                .unwrap_or(0),
+        )
+    })
 }
 
 // #16130 NOT genericized: `infer_connected_route_target_v6` carries the

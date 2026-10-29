@@ -173,4 +173,29 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
             state.zone_tcp_rst.insert(zone.id, true);
         }
     }
+    // #18518: V1 fabric stamps name a zone by its low 16 bits.
+    state.rebuild_zone_low16_index();
+    // Two admitted zones sharing low 16 bits cannot be told apart in a V1
+    // stamp, so their stamped split-RG punts drop as Invalid. Report it
+    // once per build rather than leaving only a per-packet drop counter.
+    for (&low, _) in state.zone_low16_to_id.iter().filter(|(_, id)| **id == 0) {
+        let names: Vec<&str> = state
+            .zone_id_to_name
+            .iter()
+            .filter(|(id, _)| **id as u16 == low)
+            .map(|(_, name)| name.as_str())
+            .collect();
+        eprintln!(
+            "xpf-userspace-dp: zones {names:?} share V1 fabric-stamp bits {low:#06x}; their stamped fabric punts cannot be attributed and will drop"
+        );
+    }
+    // A zone whose id has low 16 bits 0 stamps 0x0000, which decodes as no
+    // zone: its stamped punts drop the same way.
+    for (&id, name) in &state.zone_id_to_name {
+        if id as u16 == 0 {
+            eprintln!(
+                "xpf-userspace-dp: zone {name:?} (id {id:#010x}) has V1 fabric-stamp bits 0x0000; its stamped fabric punts cannot be attributed and will drop"
+            );
+        }
+    }
 }

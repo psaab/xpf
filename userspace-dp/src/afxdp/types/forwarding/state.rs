@@ -391,6 +391,11 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) ifindex_unambiguous_zone_id: FastMap<i32, u32>,
     pub(in crate::afxdp) zone_name_to_id: FastMap<String, u32>,
     pub(in crate::afxdp) zone_id_to_name: FastMap<u32, String>,
+    /// #18518: low 16 bits -> full zone id over `zone_id_to_name`'s keys,
+    /// `0` when two admitted ids share their low 16 bits. A V1 fabric zone
+    /// stamp carries only those 16 bits (two MAC bytes) since #16557 made
+    /// zone ids full u32 hashes; built by `populate_zones`.
+    pub(in crate::afxdp) zone_low16_to_id: FastMap<u16, u32>,
     /// The zone maps passed the snapshot-level duplicate/collision validator.
     /// Hand-built test states leave this false, so removed-zone purging is
     /// fail-closed unless the maps came from the real forwarding builder.
@@ -795,6 +800,49 @@ pub(in crate::afxdp) enum ConnectedOwnerIndex {
 }
 
 impl ForwardingState {
+    /// #18518: (re)build `zone_low16_to_id` from `zone_id_to_name`.
+    pub(in crate::afxdp) fn rebuild_zone_low16_index(&mut self) {
+        self.zone_low16_to_id.clear();
+        for &id in self.zone_id_to_name.keys() {
+            self.zone_low16_to_id
+                .entry(id as u16)
+                .and_modify(|full| {
+                    if *full != id {
+                        *full = 0;
+                    }
+                })
+                .or_insert(id);
+        }
+    }
+
+    /// #18518: the full zone id a V1 fabric stamp's 16 bits name, or `None`
+    /// when no admitted zone has those low bits or two do (ambiguous —
+    /// never guess a tenant identity). Hand-built test states that fill
+    /// `zone_id_to_name` without running `populate_zones` take the scan arm.
+    pub(in crate::afxdp) fn zone_id_for_stamp(&self, low: u16) -> Option<u32> {
+        if low == 0 {
+            return None;
+        }
+        if !self.zone_low16_to_id.is_empty() {
+            return self
+                .zone_low16_to_id
+                .get(&low)
+                .copied()
+                .filter(|id| *id != 0);
+        }
+        let mut found = None;
+        for &id in self.zone_id_to_name.keys() {
+            if id as u16 != low {
+                continue;
+            }
+            if found.is_some_and(|prior| prior != id) {
+                return None;
+            }
+            found = Some(id);
+        }
+        found
+    }
+
     /// #17053: (re)build the connected-owner longest-prefix indexes
     /// from `connected_v4`/`connected_v6` plus the by-ifindex ledger
     /// rows. Called once per forwarding-state build (after the
