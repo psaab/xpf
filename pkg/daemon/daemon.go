@@ -1145,6 +1145,10 @@ type Daemon struct {
 	// reporting without faking the concrete netlink/FRR/dataplane owners.
 	bootstrapTeardownForTest func() []bootstrapTeardownStep
 
+	// dhcpRelayReconcileForTest substitutes the relay reconcile result so
+	// bootstrap's degraded aggregation can be tested without a live relay.
+	dhcpRelayReconcileForTest func(*config.Config) error
+
 	// applyErrForTest is the error the applyBodyForTest seam returns from
 	// applyConfigLocked (default nil = success). Test-only: lets a test drive
 	// commitAndApply / commitConfirmedAndApply through the real apply→sync
