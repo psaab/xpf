@@ -862,29 +862,32 @@ func (mon *Monitor) probeSourceFor(rg *config.RedundancyGroup, target *config.IP
 	}
 	if target.SecondaryIPAddress != "" {
 		present, verified := mon.installedAddress(device, target.SecondaryIPAddress, target.Address)
-		// An inconclusive netlink lookup is not proof the source is absent;
-		// preserve the neutral treatment until presence can be determined.
+		// For a same-family source, an inconclusive netlink lookup is not
+		// proof of absence; preserve the neutral treatment.
 		return target.SecondaryIPAddress, device, present || !verified
 	}
 	return "", device, false
 }
 
-// installedAddress checks whether address is assigned to device in the
-// current kernel address list with the same family as target. LinkByName's
-// typed not-found result is confirmed only by a clean LinkList, since its
-// legacy dump fallback can hide ErrDumpInterrupted. Other lookup failures
-// are inconclusive, so callers preserve state rather than treating
-// inspection failures as absence.
+// installedAddress reports whether the configured secondary source is
+// installed on device and matches target's family. A family mismatch is
+// deterministically unbindable, so it is absence even if netlink is
+// unavailable. For compatible families, LinkByName's typed not-found result
+// is confirmed only by a clean LinkList, since its legacy dump fallback can
+// hide ErrDumpInterrupted. Other lookup failures are inconclusive, so callers
+// preserve state rather than treating inspection failures as absence.
 func (mon *Monitor) installedAddress(device, address, target string) (present, verified bool) {
 	ip := net.ParseIP(stripCIDR(address))
 	targetIP := net.ParseIP(target)
 	if device == "" || ip == nil {
 		return false, true
 	}
-	wantV4 := ip.To4() != nil
-	if targetIP != nil {
-		wantV4 = targetIP.To4() != nil
+	// A family-mismatched source can never bind the probe socket, even if
+	// netlink cannot confirm whether it is installed.
+	if targetIP != nil && (ip.To4() != nil) != (targetIP.To4() != nil) {
+		return false, true
 	}
+	wantV4 := ip.To4() != nil
 
 	nlh := mon.getNlHandle()
 	link, err := nlh.LinkByName(device)

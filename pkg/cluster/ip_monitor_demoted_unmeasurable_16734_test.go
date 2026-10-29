@@ -315,23 +315,29 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 }
 
 // TestIPMonitorWrongFamilySecondaryReleasesFrozenDebt18413 covers a tolerant
-// v4 target whose configured secondary is installed only as IPv6: that
-// address cannot bind the probeICMP udp4 socket, so the source is absent for
-// measurement purposes and a previously measured DOWN debt must release.
-// The matched-family control remains measurable and keeps the #16734 neutral
-// treatment when its probe does not complete.
+// v4 target whose configured secondary is installed only as IPv6. That source
+// cannot bind probeICMP's udp4 socket and is unmeasurable even when netlink's
+// address query fails. The matched-family control remains measurable and keeps
+// the #16734 neutral treatment when its probe does not complete.
 func TestIPMonitorWrongFamilySecondaryReleasesFrozenDebt18413(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		source      string
-		wantMeasure bool
-		wantWeight  int
-		wantDebt    bool
+		name           string
+		source         string
+		addressListErr error
+		wantMeasure    bool
+		wantWeight     int
+		wantDebt       bool
 	}{
 		{
 			name:       "installed IPv6 source for IPv4 target is unmeasurable",
 			source:     "2001:db8::3",
 			wantWeight: 255,
+		},
+		{
+			name:           "wrong-family source is unmeasurable despite netlink error",
+			source:         "2001:db8::3",
+			addressListErr: errors.New("temporary address dump failure"),
+			wantWeight:     255,
 		},
 		{
 			name:        "installed IPv4 source for IPv4 target remains measurable",
@@ -361,6 +367,7 @@ func TestIPMonitorWrongFamilySecondaryReleasesFrozenDebt18413(t *testing.T) {
 					Mask: net.CIDRMask(bits, bits),
 				},
 			}}
+			nlh.addressListErr = tc.addressListErr
 			mon.nlHandle = nlh
 			setNoDampening(mon)
 
