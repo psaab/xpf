@@ -29,8 +29,9 @@ func allAddressTokensRepresentable(addrRepresentable func(tok string) bool, addr
 // the name (or a member of its set closure) is a dns-name entry flagged
 // DNSLookupFailed or DNSUnresolved with no usable prefixes. A successful
 // lookup returning zero addresses, a tainted form, and an undefined name are
-// NOT this. Callers treat the token as match-none — per-entry fail-closed —
-// instead of poisoning the whole snapshot with the address sentinel.
+// NOT this. A deny/reject or excluded-side rule uses the dedicated quarantine
+// marker so Rust can fail closed on that rule without refusing its siblings;
+// a positive permit still keeps the address match-none.
 func tokenResolvesViaDNSResolutionUnavailable(cfg *config.Config, tok string) bool {
 	if cfg == nil || cfg.Security.AddressBook == nil {
 		return false

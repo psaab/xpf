@@ -11,6 +11,11 @@ xpf (0.0.0) unstable; urgency=medium
     retaining reordered middles across NAT64 and same-family consult paths
     (#17720).
 
+  * Userspace dataplane: quarantine never-resolved DNS policy rules to deny
+    in Rust while accepting and enforcing sibling rules. Keep the Go-side
+    operator diagnostic visible without treating DNS quarantine as a whole-
+    snapshot refusal for rollback preflight (#17722).
+
   * Daemon: durably clear a committed lifeline record only when its resolved
     identity matches the non-management main-table WAN route; keep sane records
     untouched, prevent committed guard fallback to that route, and fence WAN
