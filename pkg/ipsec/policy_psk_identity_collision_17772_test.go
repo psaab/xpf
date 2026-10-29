@@ -255,6 +255,8 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"IPv4 prefix skips leading whitespace", "inet", "198.51.100.1/ 24", "inet", "198.51.100.1/24"},
 			{"empty IPv4 prefix defaults to zero", "inet", "198.51.100.1/", "inet", "198.51.100.1/0"},
 			{"IPv6 prefix suffix ignores trailing text", "inet", "2001:db8::1/64junk", "inet", "2001:db8::1/64"},
+			{"PrintableString compares through NUL only", "inet", "asn1dn:#300e310c300a06035504031303410042", "inet", "asn1dn:#300e310c300a06035504031303610043"},
+			{"emailAddress compares through NUL only", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011603610043"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -298,6 +300,12 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"negative subnet length remains literal", "inet", "198.51.100.1/-24", "inet", "ipv4net:#c6336400ffffff00"},
 			{"out-of-range IPv4 prefix remains literal", "inet", "198.51.100.1/33", "inet", "ipv4net:#c6336400ffffff00"},
 			{"out-of-range IPv6 prefix remains literal", "inet", "2001:db8::1/129", "inet", "ipv6net:#20010db80000000000000000000000ffffffffffffffffffffffffffffffff"},
+			{"embedded NUL prevents type-2 comparison", "inet", "{2}:#410062", "inet", "{2}:#410062"},
+			{"embedded NUL prevents type-3 comparison", "inet", "{3}:#410062", "inet", "{3}:#410062"},
+			{"embedded NUL differing type-2 values do not compare", "inet", "{2}:#410062", "inet", "{2}:#610062"},
+			{"embedded NUL differing type-3 values do not compare", "inet", "{3}:#410062", "inet", "{3}:#610062"},
+			{"PrintableString differing before NUL stays distinct", "inet", "asn1dn:#300e310c300a06035504031303410042", "inet", "asn1dn:#300e310c300a06035504031303420043"},
+			{"emailAddress differing before NUL stays distinct", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011603420043"},
 		}
 		for _, pair := range pairs {
 			pair := pair

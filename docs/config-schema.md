@@ -11539,6 +11539,8 @@ reserved for whole-dataplane selection where a rewrite shim
     ignored, no digits means zero) and must fit the address family. Numeric
     prefixes use `strtoul()` base detection and 32-bit enum conversion; empty
     `{}` means type 0 (`ID_ANY`), whose equality ignores identity encoding.
+    Types 2/3 containing NUL never compare equal; DN PrintableString and
+    emailAddress comparisons stop at a matching NUL.
     `uri:` is type 201; `xmppaddr:` is an ASN.1 GeneralName. FQDN and selector
     spellings remain authored in rendered output.
     A mixed hostname/IP gateway requires a discriminating `remote-identity`

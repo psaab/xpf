@@ -519,6 +519,9 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 	case 0:
 		return true
 	case 2, 3:
+		if strings.IndexByte(identity.encoding, 0) >= 0 || strings.IndexByte(other.encoding, 0) >= 0 {
+			return false
+		}
 		return ipsecASCIIEqualFold(identity.encoding, other.encoding)
 	case 9:
 		return ipsecDNIdentityEqual(identity, other)
@@ -542,6 +545,28 @@ func ipsecASCIIEqualFold(a, b string) bool {
 		}
 		if left != right {
 			return false
+		}
+	}
+	return true
+}
+
+func ipsecASCIIEqualFoldUntilNUL(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		left, right := a[i], b[i]
+		if left >= 'A' && left <= 'Z' {
+			left += 'a' - 'A'
+		}
+		if right >= 'A' && right <= 'Z' {
+			right += 'a' - 'A'
+		}
+		if left != right {
+			return false
+		}
+		if left == 0 {
+			return true
 		}
 	}
 	return true
@@ -925,7 +950,7 @@ func ipsecDNIdentityEqual(a, b ipsecIKEIdentity) bool {
 			return false
 		}
 		if x.tag == y.tag && (x.tag == 0x13 || (x.tag == 0x16 && x.oid == emailAddressOID)) {
-			if !ipsecASCIIEqualFold(x.value, y.value) {
+			if !ipsecASCIIEqualFoldUntilNUL(x.value, y.value) {
 				return false
 			}
 		} else if x.value != y.value {
