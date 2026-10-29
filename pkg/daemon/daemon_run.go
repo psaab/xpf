@@ -567,7 +567,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// box that boots with a relay configured never sees a commit. d.daemonCtx
 	// is already set (line 72) and is the ctx this call passed anyway.
 	if cfg := d.store.ActiveConfig(); cfg != nil {
-		d.reconcileDHCPRelay(cfg)
+		if err := d.reconcileDHCPRelay(cfg); err != nil {
+			return fmt.Errorf("reconcile DHCP relay on boot: %w", err)
+		}
 	}
 
 	// Port mirroring
