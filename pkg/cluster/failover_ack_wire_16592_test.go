@@ -397,3 +397,51 @@ func TestFailedFenceRestorationKeepsHigherPriorityRequesterFenced17713(t *testin
 		})
 	}
 }
+
+// Peer loss is an epoch boundary that must discard a failed-transfer fence.
+func TestFailedFencePeerLossClearsFence17713(t *testing.T) {
+	requester, owner := ackWireManagers16592(t, []int{1}, true)
+	const reqID = uint64(17713)
+	requester.SetPeerFailoverFunc(func(rgID int) (uint64, error) {
+		if _, err := owner.ManualFailover(rgID); err != nil {
+			return 0, err
+		}
+		owner.ArmRemoteTransferOutLease([]int{rgID}, reqID)
+		requester.handlePeerHeartbeat(owner.buildHeartbeat())
+		return reqID, failoverAckError([]int{rgID}, failoverAck{status: failoverAckFailed})
+	})
+	requester.SetPeerFailoverAbortFunc(func(rgID int, id uint64) error {
+		return owner.AbortRemoteTransferOut(rgID, id)
+	})
+	requester.SetPeerFailoverCommitFunc(func(int, uint64) error {
+		t.Fatal("commit must not be sent after a failed fence ACK")
+		return nil
+	})
+	if err := requester.RequestPeerFailover(1); err == nil {
+		t.Fatal("failed fence ACK must fail the requester operation")
+	}
+	requester.mu.RLock()
+	_, marker := requester.abortedPeerTransferReqID[1]
+	_, fenced := requester.abortedPeerTransferFence[1]
+	requester.mu.RUnlock()
+	if !marker || !fenced {
+		t.Fatalf("failed transfer did not leave a fence before peer loss: marker=%v fenced=%v", marker, fenced)
+	}
+
+	requester.mu.Lock()
+	requester.peerHeartbeatFreshFn = func() bool { return false }
+	requester.mu.Unlock()
+	requester.handlePeerTimeout()
+
+	requester.mu.RLock()
+	_, marker = requester.abortedPeerTransferReqID[1]
+	_, fenced = requester.abortedPeerTransferFence[1]
+	peerAlive := requester.peerAlive
+	requester.mu.RUnlock()
+	if peerAlive {
+		t.Fatal("peer-loss control did not mark peer lost")
+	}
+	if marker || fenced {
+		t.Fatalf("peer loss retained failed-transfer fence: marker=%v fenced=%v", marker, fenced)
+	}
+}
