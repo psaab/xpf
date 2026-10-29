@@ -228,10 +228,12 @@ func (d *Daemon) maybeExitBootstrapOnFirstConfig(cfg *config.Config) error {
 	if !d.inBootstrap() || cfg == nil || len(cfg.Interfaces.Interfaces) == 0 {
 		return nil
 	}
-	// #16675: capture the non-fxp0 lifeline's pre-takeover kernel name
-	// BEFORE the exit naming renames it — afterwards the lifeline record
-	// resolves to the logical name and the kernel name is unrecoverable.
-	d.captureBootstrapLifelineRenamePreExit(cfg)
+	// #16675/#17755: capture and durably persist the non-fxp0 lifeline's
+	// pre-takeover kernel name BEFORE bootstrap exit changes state or runs
+	// destructive naming. After rename the old kernel name is unrecoverable.
+	if err := d.captureBootstrapLifelineRenamePreExit(cfg); err != nil {
+		return err
+	}
 	d.exitBootstrapMode("first non-empty config applied")
 	if err := d.runBootstrapExitStartup(cfg); err != nil {
 		d.bootstrapMode.Store(true)

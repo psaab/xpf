@@ -386,3 +386,101 @@ func TestBootstrapRollbackDurableGenerationMismatch16675(t *testing.T) {
 		t.Fatalf("mismatched-generation .link must be retained: %v", err)
 	}
 }
+
+// TestCrashWindowLifelineRenameProvenance17755 pins #17755: the rename pair
+// must be durable BEFORE the destructive bootstrap-exit naming runs. The
+// pre-fix path captures it only in memory and persists it only in
+// captureBootstrapLifelineNetwork, which runs after naming + dataplane arm;
+// a crash in between loses it. This cell drives production pre-exit capture,
+// simulates that crash (no captureBootstrapLifelineNetwork), expires the
+// first commit, restarts, and requires rename-back from the durable record.
+func TestCrashWindowLifelineRenameProvenance17755(t *testing.T) {
+	firstCommit12155FilesAndCommands(t)
+	dir := linkDir
+	installFakeNetworkctl(t)
+
+	fab := stubLifelineRename16675(t, "enp6s0")
+	oldEnum := enumeratePCINICsFn
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{name: "enp5s0"}, {name: "enp6s0"}}, nil
+	}
+	t.Cleanup(func() { enumeratePCINICsFn = oldEnum })
+
+	cfgPath := filepath.Join(t.TempDir(), "xpf.conf")
+	store := newConfigStore(t, cfgPath)
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.LoadOverride("interfaces { fxp0 { unit 0 { family inet { address 192.0.2.99/24; } } } }"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CommitConfirmed(10); err != nil {
+		t.Fatal(err)
+	}
+	store.ExitConfigure()
+	store.CancelConfirmTimerForTesting()
+	cfg := store.ActiveConfig()
+	if cfg == nil || store.ActiveConfigGeneration() == "" {
+		t.Fatal("premise: first commit did not promote a generation")
+	}
+
+	d := &Daemon{store: store}
+	if err := d.captureBootstrapLifelineRenamePreExit(cfg); err != nil {
+		t.Fatalf("pre-exit capture failed before naming: %v", err)
+	}
+	if k, l := d.bootstrapLifelineRenamePair(); k != "enp6s0" || l != "ge-0-0-0" {
+		t.Fatalf("pre-exit capture = (%q,%q), want (enp6s0,ge-0-0-0)", k, l)
+	}
+	durablePath := filepath.Join(dir, bootstrapLifelineRenameBase)
+	durable, err := readBootstrapLifelineSnapshot(durablePath)
+	if err != nil {
+		t.Fatalf("rename provenance was not persisted before naming: %v", err)
+	}
+	var record bootstrapLifelineRenameRecord
+	if err := json.Unmarshal(durable, &record); err != nil {
+		t.Fatalf("decode pre-naming provenance: %v", err)
+	}
+	if record.Generation != store.ActiveConfigGeneration() ||
+		record.KernelName != "enp6s0" || record.LogicalName != "ge-0-0-0" {
+		t.Fatalf("durable pre-naming record = %+v, want active generation and (enp6s0,ge-0-0-0)", record)
+	}
+	if _, err := os.Stat(filepath.Join(dir, bootstrapLifelineSnapshotBase)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("premise: pre-naming durable record is not the only lifeline record; stat err=%v", err)
+	}
+
+	// CRASH WINDOW: takeover naming runs and renames the lifeline, then the
+	// daemon dies before captureBootstrapLifelineNetwork can persist.
+	if err := renameInterfaceFn("enp6s0", "ge-0-0-0"); err != nil {
+		t.Fatal(err)
+	}
+	writeTakeoverLink16675(t, dir, "ge-0-0-0", "enp6s0")
+	// d is abandoned; nothing else runs in the old process.
+
+	if err := expireConfirmWindow12155(t, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	restartedStore := newConfigStore(t, cfgPath)
+	if err := restartedStore.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !restartedStore.FirstCommitTeardownOwed() {
+		t.Fatal("restart did not re-arm FIRST teardown debt")
+	}
+	restarted := &Daemon{store: restartedStore}
+	steps := restarted.runBootstrapTeardownSteps(true)
+	for _, s := range steps {
+		if s.name == "restore lifeline kernel name" && s.err != nil {
+			t.Fatalf("crash-window rename-back failed: %v (steps=%+v)", s.err, steps)
+		}
+	}
+	if len(fab.renames) != 2 || fab.renames[0] != [2]string{"enp6s0", "ge-0-0-0"} ||
+		fab.renames[1] != [2]string{"ge-0-0-0", "enp6s0"} {
+		t.Fatalf("renames = %v, want takeover then rollback rename-back", fab.renames)
+	}
+	if fab.live != "enp6s0" {
+		t.Fatalf("lifeline live name = %q, want enp6s0 after crash-window rollback", fab.live)
+	}
+	if _, err := os.Stat(filepath.Join(dir, linkPrefix+"ge-0-0-0.link")); !os.IsNotExist(err) {
+		t.Fatalf("crash-window rollback kept takeover .link; stat err=%v", err)
+	}
+}

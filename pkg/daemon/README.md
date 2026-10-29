@@ -2476,12 +2476,13 @@ never lock an operator out of a remote box it manages.
   rebuilt fresh on a corrected re-arm because it is not restartable after
   `Stop`), stops the abandoned config's DHCP clients, and retires
   config-driven `.network` files while keeping `.link` rename files — with
-  one exception (#16675): bootstrap exit first captures the pre-takeover
-  kernel name of a non-index-0 lifeline that positional naming is about to
-  rename (`captureBootstrapLifelineRenamePreExit`, persisted in the same
-  generation-bound record), and the first-commit rollback removes that
-  NIC's takeover `.link` and renames it back, so the host's own
-  kernel-name-keyed configuration matches again. Without that, the
+  one exception (#16675): bootstrap exit durably records the pre-takeover
+  kernel name and positional logical name of a non-index-0 lifeline in a
+  generation-bound sidecar BEFORE naming can change the NIC (#17755). The
+  later snapshot also carries the pair; first-commit rollback consumes the
+  early record across a crash, removes the takeover `.link`, and renames
+  the NIC back, so the host's kernel-name-keyed configuration matches
+  again. Before #17755, a crash in the naming-to-snapshot window meant the
   rollback reported success while the management NIC stayed renamed and
   unaddressed across reboots — console-only. The rename restore is
   fail-closed on provenance (a `.link` whose `OriginalName=` disagrees
