@@ -23,7 +23,7 @@ use super::*;
 #[inline(never)]
 pub(super) fn run_delta_recovery(
     mut sessions: &mut crate::session::SessionTable,
-    mut bindings: &mut [BindingWorker],
+    bindings: &mut [BindingWorker],
     binding_lookup: &WorkerBindingLookup,
     forwarding: &ForwardingState,
     validation_fib_generation: u32,
@@ -41,7 +41,7 @@ pub(super) fn run_delta_recovery(
     last_delete_drop_epoch: &mut u64,
     delete_drop_sweep: &mut crate::afxdp::session_glue::DeleteDropSweep,
     install_table_purge: &mut crate::afxdp::session_glue::InstallTablePurge,
-    mut shared_recycles: &mut Vec<(u32, u64)>,
+    shared_recycles: &mut Vec<(u32, u64)>,
     shared_runtime: &RuntimeViewReader,
     worker_lossless_wedged: &mut bool,
     flush_deltas: &mut dyn FnMut(

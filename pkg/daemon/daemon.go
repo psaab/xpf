@@ -83,6 +83,15 @@ const nodeIDFile = "/etc/xpf/node-id"
 // torn multiword interface read.
 type dpSlot struct{ v dataplane.RuntimeDataPlane }
 
+// clusterCommsEpoch owns joins for work launched by one communications
+// generation. The pointer is published and captured under clusterCommsMu;
+// Adds for either group happen under the same lock before workers start.
+type clusterCommsEpoch struct {
+	generation       uint64
+	constructorWG    sync.WaitGroup
+	fabricPopulateWG sync.WaitGroup
+}
+
 // Daemon is the main xpf daemon.
 type Daemon struct {
 	opts  Options
@@ -419,6 +428,12 @@ type Daemon struct {
 	// be toggled from the apply path like its three sibling loops.
 	ipsecSASync    ipsecSASyncState
 	ipsecSANudgeCh chan struct{} // nudge: peer (re)connect -> IPsec SA re-advertise (#4385)
+	// #17784 retry state coalesces peer-fenced fallback names; the same mutex
+	// guards one asynchronous retry pass so fallback initiation never runs in
+	// the IPsec advertisement loop.
+	ipsecFallbackMu           sync.Mutex
+	ipsecFallbacks            map[string]ipsecFallbackRetryState
+	ipsecFallbackRetryRunning bool
 	// #4899 DHCP-lease-change IPsec rebind recovery state. When a DHCP
 	// renewal moves the kernel address an IPsec gateway is dynamically bound
 	// to (external-interface, no explicit local-address), the management-only
@@ -1446,16 +1461,12 @@ type Daemon struct {
 	// stale-update detection.
 	rgStatesMu sync.RWMutex
 	rgStates   map[int]*rgStateMachine
-	// rethServicesApplied tracks the last RETH service ownership applied
-	// per RG in VRRP mode (#16696): true after applyRethServicesForRG,
-	// false/absent after clearRethServicesForRG. reconcileRGState compares
-	// it against snapshotRethMasterState every pass (level-triggered
-	// converger), so a service edge lost because the rg-state transition
-	// was produced by handleClusterEvent or a discarded sync-hold mirror
-	// refresh — neither of which runs the edge — is repaired on the next
-	// pass. Guarded by rethServicesMu.
-	rethServicesMu      sync.Mutex
-	rethServicesApplied map[int]bool
+	// rethServices tracks the last RETH ownership edge driven per RG and
+	// whether its service tail needs recovery (#16696). Generation fencing
+	// prevents stale apply/clear completions from overwriting newer edges.
+	// Guarded by rethServicesMu.
+	rethServicesMu sync.Mutex
+	rethServices   map[int]rethServicesEdgeStatus
 	// nonVIPAnnounceMu / nonVIPAnnounced guard the legacy-VRRP non-VIP
 	// announce (#17052) against duplicate bursts within one activation.
 	// The map value is the rg-state ACTIVATION generation claimed
@@ -1495,14 +1506,17 @@ type Daemon struct {
 	// the two fabric slots (fab0/fab1) are one parameterized state, not
 	// hand-mirrored field pairs — fab1 drifted into real defects twice
 	// (#15683, #15918) while the copies were maintained by hand.
+	//
+	// Epoch-scoped (#17060): slot state is (re)installed by the populate
+	// loops each comms epoch and zeroed by clearFabricSlots during
+	// stopClusterComms or successor preflight.
 	fabricMu sync.RWMutex
 	// fabricSlots holds both slots under fabricMu, EXCEPT refreshCh,
 	// which is guarded by clusterCommsMu exactly as the former
-	// per-slot refresh-channel fields were (#4958): the
-	// constructor publishes it and stopClusterComms nils it under that
-	// lock, while populate loops receive their channel by value.
+	// per-slot refresh-channel fields were (#4958): the constructor
+	// publishes it and teardown/preflight nil it under that lock, while
+	// populate loops receive their channel by value.
 	fabricSlots [2]fabricSlot
-
 	// vipWarnedIfaces tracks interfaces that already emitted a
 	// "directAddVIPs: interface not found" warning to avoid log spam
 	// from the reconcile ticker. Reset on config commit.
@@ -1608,17 +1622,24 @@ type Daemon struct {
 	// nil selects the real method; production never sets it.
 	startClusterCommsFn func(context.Context)
 
+	// clusterCommsLifecycleMu serializes epoch creation and successor
+	// preparation with final teardown side effects. It is acquired before
+	// clusterCommsMu when both are needed. Stop joins its captured per-epoch
+	// work outside this lock; successor preparation joins all registered
+	// constructors while holding it, and constructor registration takes it too.
+	clusterCommsLifecycleMu sync.Mutex
 	// clusterCommsMu guards the cluster-comms epoch state that is published
 	// asynchronously by the startClusterComms constructor goroutine and torn
 	// down by stopClusterComms: sessionSync, the fabric slots' refreshCh channels,
-	// clusterCommsCtx/clusterCommsCancel, clusterCommsGen (#4958), and
-	// activeClusterTransport, which joined the epoch in #6290. Before
-	// #4958 the constructor wrote sessionSync (and re-dereferenced it) and the
-	// fabric channels from an untracked goroutine with no lock, so a
-	// stop→start restart could nil-deref (stop nils sessionSync between the
-	// goroutine's write and its next read) or let a stale constructor overwrite
-	// a newer epoch's session/endpoints. The mutex makes every read/write of
-	// these fields race-free; clusterCommsGen provides publish-if-current.
+	// clusterCommsCtx/clusterCommsCancel, clusterCommsGen (#4958), the current
+	// clusterCommsEpoch and its constructor/fabric join groups, and
+	// activeClusterTransport, which joined the epoch in #6290. Before #4958 the
+	// constructor wrote sessionSync (and re-dereferenced it) and the fabric
+	// channels from an untracked goroutine with no lock, so a stop→start restart
+	// could nil-deref (stop nils sessionSync between the goroutine's write and its
+	// next read) or let a stale constructor overwrite a newer epoch's
+	// session/endpoints. The mutex makes every read/write of these fields
+	// race-free; clusterCommsGen provides publish-if-current.
 	clusterCommsMu sync.Mutex
 	// sessionSyncTimeoutProfile is the latest applied timeout profile. The
 	// atomic snapshot bridges apply callbacks and asynchronous sync publication.
@@ -1633,11 +1654,15 @@ type Daemon struct {
 	// instead of clobbering the live epoch's state.
 	clusterCommsGen uint64
 
-	// clusterCommsWG tracks the in-flight startClusterComms constructor
-	// goroutine(s) so stopClusterComms can join them before nilling the shared
-	// comms state (#4958). Without the join a cancelled constructor could still
-	// be mid-publish while stop tore the epoch down.
-	clusterCommsWG sync.WaitGroup
+	// clusterCommsEpoch owns the constructor and fabric-loop joins for the
+	// current generation. beginClusterCommsEpoch replaces it under this lock;
+	// stopClusterComms captures and detaches it before waiting outside the lock.
+	clusterCommsEpoch *clusterCommsEpoch
+	// clusterCommsConstructorsWG joins constructors from predecessor epochs
+	// before successor preparation retires a published SessionSync. Its Add
+	// operations share clusterCommsLifecycleMu with Wait, preventing an Add
+	// from racing the preflight join.
+	clusterCommsConstructorsWG sync.WaitGroup
 
 	// startupGoodbyeRA tracks whether cold-backup cleanup is complete for each
 	// inactive RG. Distinct router identities must successfully receive a
@@ -1809,6 +1834,10 @@ type Daemon struct {
 	// neighbour table.
 	neighListFn func(int, int) ([]netlink.Neigh, error)
 
+	// fabricRetryAfterFn supplies the fast-retry timer. Production uses
+	// time.After; tests can synchronize cancellation with the timer arm.
+	fabricRetryAfterFn func(time.Duration) <-chan time.Time
+
 	// eventStreamConnected is set when the helper's binary event stream
 	// is live. The polling fallback loop uses this to decide its cadence:
 	// 5s reconciliation when connected, 100ms fast-poll when disconnected.
@@ -1922,9 +1951,14 @@ type Daemon struct {
 	bootstrapLifelineKernelName  string
 	bootstrapLifelineLogicalName string
 
-	// bootstrapLifelineGeneration binds the persisted snapshot to the config
-	// that took over the bootstrap lifeline.
+	// bootstrapLifelineGeneration binds the persisted network snapshot to the
+	// config that took over the bootstrap lifeline.
 	bootstrapLifelineGeneration string
+	// bootstrapLifelineRenameGeneration independently binds the early #17755
+	// sidecar to the config that captured the rename pair. It must not stand
+	// in for the network snapshot generation: repeated FIRST windows rebind
+	// the network snapshot even when rename provenance was just persisted.
+	bootstrapLifelineRenameGeneration string
 
 	// firstCommitNetworkdReloadOwed records downstream networkd reload debt
 	// independently of the filesystem scan. The durable store teardown marker
@@ -2309,7 +2343,7 @@ func New(opts Options) (*Daemon, error) {
 		neighListFn:                netlink.NeighList,
 		directAnnounceSchedule:     []time.Duration{0, 250 * time.Millisecond, 1 * time.Second, 2 * time.Second, 4 * time.Second, 6 * time.Second},
 		directVIPOwned:             make(map[int]bool),
-		rethServicesApplied:        make(map[int]bool),
+		rethServices:               make(map[int]rethServicesEdgeStatus),
 		localFailoverCommitReady:   make(map[int]bool),
 		localFailoverCommitTimeout: 3 * time.Second,
 		nonVIPAnnounced:            make(map[int]uint64),

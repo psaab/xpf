@@ -1197,7 +1197,9 @@ func compileProtocols(node *Node, proto *ProtocolsConfig, opts compileOpts, warn
 			case "passive-interface":
 				proto.RIP.Passive = append(proto.RIP.Passive, firewallMatchValues(child)...)
 			case "redistribute":
-				proto.RIP.Redistribute = append(proto.RIP.Redistribute, firewallMatchValues(child)...)
+				vals := firewallMatchValues(child)
+				proto.RIP.Redistribute = append(proto.RIP.Redistribute, vals...)
+				proto.RIP.GlobalRedistribute = append(proto.RIP.GlobalRedistribute, vals...)
 			case "authentication-key":
 				if v := nodeVal(child); v != "" {
 					proto.RIP.AuthKey = NewSecret(v)

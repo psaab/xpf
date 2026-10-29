@@ -81,9 +81,15 @@ func trackVRFBindingLink12168(d *Daemon, master *atomic.Int32) *atomic.Int32 {
 
 func waitVRFCommsConstructor12168(t *testing.T, d *Daemon) {
 	t.Helper()
+	d.clusterCommsMu.Lock()
+	epoch := d.clusterCommsEpoch
+	d.clusterCommsMu.Unlock()
+	if epoch == nil {
+		t.Fatal("no cluster communications epoch is active")
+	}
 	done := make(chan struct{})
 	go func() {
-		d.clusterCommsWG.Wait()
+		epoch.constructorWG.Wait()
 		close(done)
 	}()
 	select {

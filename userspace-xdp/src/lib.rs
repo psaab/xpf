@@ -1728,8 +1728,7 @@ fn degraded_ctrl_disabled_action(ctx: &XdpContext, ctrl: &UserspaceCtrl) -> Resu
         return drop_degraded_transit(ctrl, USERSPACE_FALLBACK_REASON_LAND_DROP);
     }
     let local_or_control = is_degraded_local_or_control(ctrl, data, data_end, &parsed, ingress_domain, ingress_ifindex);
-    match degraded_ctrl_disabled::ctrl_disabled_action(ingress_iface_flags, false, local_or_control)
-    {
+    match degraded_ctrl_disabled::local_control_or_drop(local_or_control) {
         degraded_ctrl_disabled::DegradedCtrlDisabledDisposition::PassLocalControl => {
             incr_branch_stat(ctrl.flags, USERSPACE_BRANCH_ARM_CTRL_DISABLED_LOCAL);
             pass_local_control(ctrl, USERSPACE_FALLBACK_REASON_CTRL_DISABLED)

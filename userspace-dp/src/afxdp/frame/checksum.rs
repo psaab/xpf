@@ -335,19 +335,17 @@ mod x86_avx2 {
     unsafe fn horizontal_sum_u32_avx2(v: __m256i) -> u32 {
         // SAFETY: AVX2 intrinsics; gated by target_feature on the
         // function and proved by the calling pathway.
-        unsafe {
-            // Reduce 256 → 128: low half + high half.
-            let hi128 = _mm256_extracti128_si256(v, 1);
-            let lo128 = _mm256_castsi256_si128(v);
-            let sum128 = _mm_add_epi32(lo128, hi128);
-            // Reduce 128 → 64: shuffle high u64 down and add.
-            let shuf = _mm_shuffle_epi32(sum128, 0b1110); // [hi64, _]
-            let sum64 = _mm_add_epi32(sum128, shuf);
-            // Reduce 64 → 32: shuffle high u32 down and add.
-            let shuf2 = _mm_shuffle_epi32(sum64, 0b0001); // [u32_1, _]
-            let sum32 = _mm_add_epi32(sum64, shuf2);
-            _mm_cvtsi128_si32(sum32) as u32
-        }
+        // Reduce 256 → 128: low half + high half.
+        let hi128 = _mm256_extracti128_si256(v, 1);
+        let lo128 = _mm256_castsi256_si128(v);
+        let sum128 = _mm_add_epi32(lo128, hi128);
+        // Reduce 128 → 64: shuffle high u64 down and add.
+        let shuf = _mm_shuffle_epi32(sum128, 0b1110); // [hi64, _]
+        let sum64 = _mm_add_epi32(sum128, shuf);
+        // Reduce 64 → 32: shuffle high u32 down and add.
+        let shuf2 = _mm_shuffle_epi32(sum64, 0b0001); // [u32_1, _]
+        let sum32 = _mm_add_epi32(sum64, shuf2);
+        _mm_cvtsi128_si32(sum32) as u32
     }
 }
 

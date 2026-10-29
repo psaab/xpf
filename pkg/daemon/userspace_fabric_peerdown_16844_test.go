@@ -52,6 +52,7 @@ func fabricPeerDaemon16844(t *testing.T) *Daemon {
 		"set chassis cluster authentication-key test-cluster-psk-16844",
 		"set chassis cluster node 0",
 		"set chassis cluster no-reth-vrrp",
+		"set chassis cluster no-private-rg-election",
 		"set chassis cluster redundancy-group 1 node 0 priority 200",
 		"set interfaces reth0 redundant-ether-options redundancy-group 1",
 		"set interfaces reth0 unit 0 family inet address 10.0.1.1/24",

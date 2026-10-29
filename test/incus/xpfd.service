@@ -5,6 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# #18213: xpfd must begin its ordered shutdown before systemd signals child
+# helpers. In control-group mode a helper's SIGTERM can race ahead of xpfd's
+# shutdown path and be accounted as an unexpected crash. `mixed` sends the
+# initial stop signal to MainPID (xpfd); remaining cgroup processes receive
+# SIGKILL only after xpfd exits or TimeoutStopSec expires, giving xpfd's
+# orderly shutdown a chance to mark and reap its helper generation first.
+KillMode=mixed
 # #16050: /run/xpf holds flock files (upgrade.lock, xpfd.lock, markers)
 # an exclusive flock can be taken on via a readable O_RDONLY fd, so the
 # runtime dir must not be world-traversable and the service umask must

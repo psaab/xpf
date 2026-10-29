@@ -1054,7 +1054,7 @@ fn sampled_live_mirror_resolves_snapshot_logical_ingress_and_output() {
     };
     let forwarding = build_forwarding_state(&snapshot);
     let mut sample_counter = 0;
-    let frame = vec![0x88; 80];
+    let _frame = vec![0x88; 80];
     // #15114: real Ethernet IPv4 frame; the VID-90 output tag is pushed, so
     // compare against the pushed expectation instead of the raw sample.
     let frame = tagged_mirror_frame(None);
@@ -1134,7 +1134,7 @@ fn mirror_vlan_snapshot(ingress_frame_vid: Option<u16>) -> (ConfigSnapshot, Vec<
     (snapshot, tagged_mirror_frame(ingress_frame_vid))
 }
 
-fn assert_mirror_frame_vid90(frame: &[u8], original_payload_len: usize) {
+fn assert_mirror_frame_vid90(frame: &[u8], _original_payload_len: usize) {
     assert_eq!(
         &frame[12..14],
         &[0x81, 0x00],
@@ -1883,7 +1883,7 @@ fn accepting_analyzer_counter_packets(forwarding: &ForwardingState) -> u64 {
 #[test]
 fn mirror_output_filter_accept_counter_counts_once_13656() {
     let frame = crate::afxdp::tx::test_support::build_ipv4_test_packet(0);
-    let mut forwarding = accepting_counted_mirror_filter_forwarding();
+    let forwarding = accepting_counted_mirror_filter_forwarding();
     let meta = ForwardPacketMeta {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,

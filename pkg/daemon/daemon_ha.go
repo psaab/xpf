@@ -493,26 +493,64 @@ func (d *Daemon) snapshotRethMasterState() map[int]bool {
 	return out
 }
 
-// markRethServicesApplied records that rgID's RETH services were driven to
-// the given ownership (#16696). Called at the tail of
-// applyRethServicesForRG / clearRethServicesForRG so every edge producer
-// (VRRP event, direct-VIP, cluster event, reconcile converger) advances the
-// same marker the converger compares against.
-func (d *Daemon) markRethServicesApplied(rgID int, active bool) {
-	d.rethServicesMu.Lock()
-	defer d.rethServicesMu.Unlock()
-	if d.rethServicesApplied == nil {
-		d.rethServicesApplied = make(map[int]bool)
-	}
-	d.rethServicesApplied[rgID] = active
+// rethServicesEdgeStatus is per-RG convergence state, guarded by
+// Daemon.rethServicesMu. A generation identifies the latest apply/clear
+// invocation; stale completions re-arm pending so they cannot erase newer
+// work after enqueueing or otherwise finishing late.
+type rethServicesEdgeStatus struct {
+	active           bool
+	generation       uint64
+	staleCompletions uint64
+	pending          bool
+	inFlight         bool
 }
 
-// rethServicesAppliedFor reports the last service ownership applied for
-// rgID; absent reads false (never applied / last cleared).
-func (d *Daemon) rethServicesAppliedFor(rgID int) bool {
+// beginRethServicesEdge records the ownership of an apply/clear invocation
+// before its service work can block, and returns the generation token used to
+// qualify its eventual completion.
+func (d *Daemon) beginRethServicesEdge(rgID int, active bool) (generation, staleCompletions uint64) {
 	d.rethServicesMu.Lock()
 	defer d.rethServicesMu.Unlock()
-	return d.rethServicesApplied[rgID]
+	if d.rethServices == nil {
+		d.rethServices = make(map[int]rethServicesEdgeStatus)
+	}
+	state := d.rethServices[rgID]
+	state.generation++
+	state.active = active
+	state.inFlight = true
+	d.rethServices[rgID] = state
+	return state.generation, state.staleCompletions
+}
+
+// finishRethServicesEdge records whether this invocation skipped its service
+// tail. A completion from an older generation always re-arms pending; a
+// current completion may clear pending only if no stale invocation completed
+// during its service work.
+func (d *Daemon) finishRethServicesEdge(rgID int, generation, staleCompletionsAtStart uint64, tailSkipped bool) {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	state := d.rethServices[rgID]
+	if state.generation != generation {
+		state.staleCompletions++
+		state.pending = true
+		d.rethServices[rgID] = state
+		return
+	}
+	state.inFlight = false
+	state.pending = tailSkipped || state.staleCompletions != staleCompletionsAtStart
+	d.rethServices[rgID] = state
+}
+
+func (d *Daemon) rethServicesStateFor(rgID int) rethServicesEdgeStatus {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	return d.rethServices[rgID]
+}
+
+// rethServicesAppliedFor reports the last ownership edge driven for rgID;
+// absent reads false (never driven / last edge cleared).
+func (d *Daemon) rethServicesAppliedFor(rgID int) bool {
+	return d.rethServicesStateFor(rgID).active
 }
 
 // driveRethServicesEdge runs the per-RG service edge for a transition this
@@ -535,16 +573,23 @@ func (d *Daemon) driveRethServicesEdge(rgID int, tr rgTransition, noRethVRRP boo
 	}
 }
 
-// convergeRethServices repairs a lost per-RG service edge (#16696): when
-// the desired ownership (snapshotRethMasterState, i.e. rgStateMachine
-// IsActive) disagrees with the last-applied service ownership, re-drive
-// the edge. Level-triggered, so it also covers edges swallowed by the
-// #15258 sync-hold mirror refresh (R3-A34-03 class) whose transitions no
-// caller consumes. A converged RG costs one map read per pass.
+// convergeRethServices repairs a lost per-RG service edge (#16696), retries
+// an edge whose service tail was skipped by a reset/config guard, and
+// re-drives current desired ownership after a stale completion. A pending
+// tail with unchanged ownership is retried only when its prerequisites are
+// healthy and no latest-generation invocation is still in flight. A changed
+// ownership edge still runs while degraded so clear's proxy-ARP sweep is not
+// delayed behind config recovery.
 func (d *Daemon) convergeRethServices(rgID int) {
 	desired := d.snapshotRethMasterState()[rgID]
-	if desired == d.rethServicesAppliedFor(rgID) {
+	state := d.rethServicesStateFor(rgID)
+	if desired == state.active && !state.pending {
 		return
+	}
+	if state.pending && desired == state.active {
+		if state.inFlight || d.isResetting() || d.store == nil || d.store.ActiveConfig() == nil {
+			return
+		}
 	}
 	if desired {
 		d.applyRethServicesForRG(rgID)
@@ -734,7 +779,7 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// when the rg_state machine has already drifted inactive.
 		if noRethVRRP {
 			d.reconcileDirectVIPOwnership(ev.GroupID, "cluster-primary")
-			go d.RefreshFabricFwd()
+			d.RefreshFabricFwd()
 		}
 		if noRethVRRP && d.cluster != nil && d.cluster.IsLocalPrimary(ev.GroupID) && (d.dataplane() == nil || !s.NeedsApply()) {
 			d.setLocalFailoverCommitReady(ev.GroupID, true)
@@ -1161,7 +1206,7 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			} else {
 				recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
 			}
-			go d.RefreshFabricFwd()
+			d.RefreshFabricFwd()
 		}
 		// Only remove blackholes and apply services when ALL
 		// VRRP instances in the RG are MASTER (#132).
@@ -1207,7 +1252,7 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 				} else {
 					recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
 				}
-				go d.RefreshFabricFwd()
+				d.RefreshFabricFwd()
 			}
 			d.removeStableRethLinkLocal(rgID)
 			d.clearRethServicesForRG(rgID)
@@ -1817,7 +1862,8 @@ func (d *Daemon) runStartupGoodbye(rgID int, rgRA []*config.RAInterfaceConfig) {
 // goodbye set when no config is available to consult for VIP membership
 // (rgID <= 0 / nil cfg): only the auto stable pattern is suppressed. The
 // production path uses startupGoodbyeConfigsForRG, which also suppresses
-// a configured RETH-unit link-local installed as an RG VIP (#16624).
+// a configured RETH-unit link-local installed as an RG VIP on that same
+// interface (#16624).
 func startupGoodbyeConfigs(rgRA []*config.RAInterfaceConfig) []*config.RAInterfaceConfig {
 	return startupGoodbyeConfigsFiltered(nil, nil, 0, rgRA)
 }
@@ -1838,7 +1884,7 @@ func startupGoodbyeConfigsFiltered(cfg, peerCfg *config.Config, rgID int, rgRA [
 	}
 	filtered := make([]*config.RAInterfaceConfig, 0, len(rgRA))
 	for _, cfgRA := range rgRA {
-		if cfgRA == nil || isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.SourceLinkLocal) {
+		if cfgRA == nil || isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.Interface, cfgRA.SourceLinkLocal) {
 			continue
 		}
 		filtered = append(filtered, cfgRA)
@@ -2039,19 +2085,23 @@ func (d *Daemon) reconcileBlackholeRoutes() {
 // transition — these services must only run on the primary to avoid
 // dual-router / dual-DHCP issues.
 func (d *Daemon) applyRethServicesForRG(rgID int) {
+	generation, staleCompletions := d.beginRethServicesEdge(rgID, true)
 	d.bumpIPsecRGOwnershipEpoch(rgID)
 	// The VRRP event loop holds no applySem, so a takeover racing factory
 	// reset would otherwise pre-seed prior leases and enqueue Kea applies
 	// against a half-wiped box. The enqueue is fenced itself; this guard
 	// covers the direct memfile pre-seed and the peer-seed goroutine.
 	if d.isResetting() {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 	if d.store == nil {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 	// RA senders (#5861): converge to the union of RA configs for every RG
@@ -2060,6 +2110,8 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// cannot race a concurrent commit/demotion; the state machine already
 	// marked rgID active before this call, so the snapshot includes it.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-master-rg%d", rgID))
+	var applyGen uint64
+	resetFenced := false
 	if d.dhcpServer != nil {
 		// Snapshot ownership once and use it for both the filtered Kea config
 		// and its lease-authority proof. A transition racing either derivation
@@ -2105,8 +2157,10 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// block this VRRP event loop. Latest-wins coalescing in
 			// the manager keeps final state correct; failures are
 			// logged by the worker with this reason.
-			applyGen := d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
-			slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
+			applyGen, resetFenced = d.enqueueDHCPApplyWithAuthorityState(dhcpCfg, fmt.Sprintf("vrrp MASTER rg%d", rgID), cfg, masters)
+			if applyGen != 0 {
+				slog.Info("vrrp: DHCP server apply enqueued (MASTER)", "rg", rgID)
+			}
 			// #2239: after the async Kea start, seed the held peer
 			// leases via lease{4,6}-add (the reinitiateIPsecSAs
 			// precedent). Async so it never blocks this VRRP event
@@ -2120,7 +2174,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 			// #16854: skipped when this edge moves no DHCP scope.
 			// The seed wait uses applyCancelCtx so daemon shutdown can cancel
 			// an unapplied generation instead of leaving a goroutine behind.
-			if takeoverWork {
+			if takeoverWork && applyGen != 0 {
 				if cc := d.clusterConfig(); cc != nil && cc.DHCPLeaseSync && d.getSessionSync() != nil {
 					d.spawnDHCPLeaseSeed(d.applyCancelCtx(), applyGen, dhcpLeaseSeedApplyWaitWarnAfter)
 					d.nudgeDHCPLeaseSync()
@@ -2160,11 +2214,13 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// charon emits no eager `start_action = start` (the unset default
 	// renders `trap`, #14592), so the tunnel then waits for traffic.
 	//
-	// #16710: scoped to rgID — this leg initiates/belts only names whose
-	// whole RG set is rgID. The RG0 leg handles RG0/unanchored names, and
-	// neither leg touches the other's: a later edge no longer terminates
-	// the healthy SAs an earlier edge of the same takeover sequence just
-	// raised via the #15194 stale-duplicate belt.
+	// #16710: scoped to rgID. Ordinary data-RG names must match this
+	// edge's RG; declared-RG0 names stay on the RG0 edge. #17784 permits
+	// one exception only when the current cluster-config snapshot has no
+	// RG0 and exactly one data RG, this is that RG's edge, and the peer's
+	// last heartbeat has no RG0 entry. The topology facts come from one
+	// snapshot; the peer heartbeat entry fences config-sync lag, while
+	// ownsIPsecConn remains the local ownership authority.
 	//
 	// ASYNC for the reason the DHCP lease seed above is async: this runs on the
 	// VRRP event loop, and InitiateConnection shells out to swanctl per
@@ -2172,7 +2228,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.getSessionSync() != nil {
 		go d.reinitiateIPsecSAsForRG(rgID)
 	}
-	d.markRethServicesApplied(rgID, true)
+	d.finishRethServicesEdge(rgID, generation, staleCompletions, resetFenced)
 }
 
 type raScopedClearer interface {
@@ -2192,12 +2248,12 @@ func configuredRASource(allRA []*config.RAInterfaceConfig, iface string) string 
 }
 
 // sharedStableRAInterfaces returns the subset of ifaces whose RA source is
-// a shared router identity for cfg's rgID — the auto stable pattern or a
-// configured RETH-unit link-local installed as an RG VIP (#16624) — judged
-// on the CONFIGURED source whenever one exists. Status reports an empty
-// SrcAddr until a sender's conn opens, so a source check on Status alone
-// misses an unopened shared-identity sender and leaves Apply to withdraw
-// the peer's router with a graceful goodbye (D34-01).
+// a shared router identity on that interface for cfg's rgID — the auto
+// stable pattern or a configured RETH-unit link-local installed as an RG
+// VIP there (#16624). Status reports an empty SrcAddr until a sender's
+// conn opens, so a source check on Status alone misses an unopened shared-
+// identity sender and leaves Apply to withdraw the peer's router with a
+// graceful goodbye (D34-01).
 func sharedStableRAInterfaces(cfg, peerCfg *config.Config, rgID int, ifaces map[string]bool, senders []ra.SenderInfo, allRA []*config.RAInterfaceConfig) []string {
 	var names []string
 	seen := make(map[string]bool)
@@ -2210,7 +2266,7 @@ func sharedStableRAInterfaces(cfg, peerCfg *config.Config, rgID int, ifaces map[
 		if cfg := configuredRASource(allRA, sender.Interface); cfg != "" {
 			source = cfg
 		}
-		if isSharedRASourceBothViews(cfg, peerCfg, rgID, source) {
+		if isSharedRASourceBothViews(cfg, peerCfg, rgID, sender.Interface, source) {
 			names = append(names, sender.Interface)
 		}
 	}
@@ -2218,7 +2274,7 @@ func sharedStableRAInterfaces(cfg, peerCfg *config.Config, rgID int, ifaces map[
 		if cfgRA == nil || !ifaces[cfgRA.Interface] || seen[cfgRA.Interface] {
 			continue
 		}
-		if isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.SourceLinkLocal) {
+		if isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.Interface, cfgRA.SourceLinkLocal) {
 			names = append(names, cfgRA.Interface)
 		}
 	}
@@ -2260,6 +2316,7 @@ func clearRethRASendersWithoutGoodbyePeer(clearer raScopedClearer, cfg, peerCfg 
 // for RETH interfaces belonging to the given RG. Called on VRRP BACKUP
 // transition. If other RGs are still MASTER, their services remain active.
 func (d *Daemon) clearRethServicesForRG(rgID int) {
+	generation, staleCompletions := d.beginRethServicesEdge(rgID, false)
 	rgEpoch := d.bumpIPsecRGOwnershipEpoch(rgID)
 	// #9087: nudged FIRST, and before the early returns, because the demote
 	// side of the window is the one that leaves a wrong answerer on the wire.
@@ -2271,10 +2328,12 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// config-less paths where the stale entry still sits in the kernel.
 	d.nudgeProxyARPReassert()
 	if d.store == nil {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
+		d.finishRethServicesEdge(rgID, generation, staleCompletions, true)
 		return
 	}
 
@@ -2301,13 +2360,14 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// Reconcile the union for any RGs this node still owns. Explicitly configured
 	// per-node sources are removed by Apply's normal graceful-withdraw path.
 	d.reconcileClusterRAServices(fmt.Sprintf("vrrp-backup-rg%d", rgID))
+	resetFenced := false
 	if d.dhcpServer != nil {
 		// ApplyAsync keeps this VRRP event loop off the 15s-bounded systemctl
 		// path and funnels every desired state through the latest-wins mailbox.
 		// Derive the desired config from the SSOT even when no RG remains master:
 		// it preserves node-local DHCP groups while filtering all inactive RETHs.
 		dhcpCfg := d.desiredClusterDHCPConfigWithMasters(cfg, masters)
-		d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
+		_, resetFenced = d.enqueueDHCPApplyWithAuthorityState(dhcpCfg,
 			fmt.Sprintf("vrrp BACKUP rg%d", rgID), cfg, masters)
 	}
 	// #2691 P1b / #2664: nudge the DDNS reconcile loop after a (partial)
@@ -2336,7 +2396,7 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// governs peer advertisement/re-initiation, not local SA hygiene on a
 	// node-local demotion edge.
 	go d.terminateDemotedRGIPsecSAs(rgID, rgEpoch)
-	d.markRethServicesApplied(rgID, false)
+	d.finishRethServicesEdge(rgID, generation, staleCompletions, resetFenced)
 }
 
 // stripUntaggedUnitSuffix normalizes a resolved Linux interface name by
@@ -2919,6 +2979,223 @@ func (d *Daemon) nudgeIPsecSASync() {
 	}
 }
 
+// ipsecFallbackRetryState coalesces peer-fenced fallback retries with ownership
+// edges. ownershipEpoch scopes a successful attempt to one data-RG tenure.
+type ipsecFallbackRetryState struct {
+	owed           bool
+	inFlight       bool
+	initiated      bool
+	seenLive       bool
+	ownershipEpoch uint64
+}
+
+func (d *Daemon) markIPsecFallbackOwed(names []string) {
+	if len(names) == 0 {
+		return
+	}
+	d.ipsecFallbackMu.Lock()
+	if d.ipsecFallbacks == nil {
+		d.ipsecFallbacks = make(map[string]ipsecFallbackRetryState)
+	}
+	for _, name := range names {
+		state := d.ipsecFallbacks[name]
+		state.owed = true
+		d.ipsecFallbacks[name] = state
+	}
+	d.ipsecFallbackMu.Unlock()
+}
+
+func (d *Daemon) claimIPsecFallback(name string, rg int, local map[string]bool, localKnown bool) bool {
+	ownershipEpoch := d.ipsecRGOwnershipEpoch(rg)
+	d.ipsecFallbackMu.Lock()
+	defer d.ipsecFallbackMu.Unlock()
+	if d.ipsecFallbacks == nil {
+		d.ipsecFallbacks = make(map[string]ipsecFallbackRetryState)
+	}
+	state := d.ipsecFallbacks[name]
+	if state.inFlight {
+		return false
+	}
+	if state.initiated && state.ownershipEpoch != ownershipEpoch {
+		// A new data-RG tenure must retain the #15194 belt, even if the old
+		// attempt's local SA is still present from the previous ownership.
+		state.initiated = false
+		state.seenLive = false
+	}
+	if state.initiated {
+		if !localKnown {
+			return false
+		}
+		if local[name] {
+			state.owed = false
+			state.seenLive = true
+			d.ipsecFallbacks[name] = state
+			return false
+		}
+		// Do not repeat while the active-SA view is still catching up.
+		// Once this attempt has been observed live, its disappearance or a
+		// later peer fence can reopen the claim.
+		if !state.owed && !state.seenLive {
+			return false
+		}
+		state.initiated = false
+		state.seenLive = false
+	}
+	state.inFlight = true
+	state.owed = false
+	state.ownershipEpoch = ownershipEpoch
+	d.ipsecFallbacks[name] = state
+	return true
+}
+
+func (d *Daemon) finishIPsecFallback(name string, err error) {
+	d.ipsecFallbackMu.Lock()
+	state := d.ipsecFallbacks[name]
+	state.inFlight = false
+	if err == nil {
+		state.owed = false
+		state.initiated = true
+		state.seenLive = false
+	} else {
+		state.owed = true
+		state.initiated = false
+		state.seenLive = false
+	}
+	d.ipsecFallbacks[name] = state
+	d.ipsecFallbackMu.Unlock()
+}
+
+// scheduleOwedIPsecFallbackRetry claims one retry pass before launching it so
+// ticker and reconnect nudges coalesce without waiting on swanctl.
+func (d *Daemon) scheduleOwedIPsecFallbackRetry() {
+	d.ipsecFallbackMu.Lock()
+	if d.ipsecFallbackRetryRunning || len(d.ipsecFallbacks) == 0 {
+		d.ipsecFallbackMu.Unlock()
+		return
+	}
+	d.ipsecFallbackRetryRunning = true
+	d.ipsecFallbackMu.Unlock()
+	go func() {
+		defer func() {
+			d.ipsecFallbackMu.Lock()
+			d.ipsecFallbackRetryRunning = false
+			d.ipsecFallbackMu.Unlock()
+		}()
+		d.retryOwedIPsecFallback()
+	}()
+}
+
+func (d *Daemon) retryOwedIPsecFallback() {
+	d.ipsecFallbackMu.Lock()
+	pending := make([]string, 0, len(d.ipsecFallbacks))
+	hasStates := len(d.ipsecFallbacks) != 0
+	for name, state := range d.ipsecFallbacks {
+		if state.owed && !state.inFlight {
+			pending = append(pending, name)
+		}
+	}
+	d.ipsecFallbackMu.Unlock()
+	if !hasStates {
+		return
+	}
+
+	soleDataRG, rg0Declared := undeclaredRG0FallbackTopology(d.clusterConfig())
+	if d.cluster == nil || soleDataRG == 0 || rg0Declared {
+		d.clearIPsecFallbackStates()
+		return
+	}
+	ss := d.getSessionSync()
+	if ss == nil {
+		return
+	}
+	peerNames := ss.PeerIPsecSAs()
+	owedNames := pending
+	pending = pending[:0]
+	for _, name := range owedNames {
+		if !containsIPsecSAName(peerNames, name) {
+			continue
+		}
+		d.ipsecFallbackMu.Lock()
+		state, ok := d.ipsecFallbacks[name]
+		d.ipsecFallbackMu.Unlock()
+		if ok && state.owed && !state.inFlight {
+			pending = append(pending, name)
+		}
+	}
+	d.clearIPsecFallbackStatesExceptPeerNames(peerNames)
+	if len(pending) == 0 {
+		return
+	}
+	_, fallbackOwned, fallbackBlocked := d.ipsecSAsToReinitiateForRGDetails(pending, soleDataRG)
+	d.clearOwedIPsecFallbackExceptHeld(pending, fallbackOwned, fallbackBlocked)
+	d.reinitiateIPsecSAsForSelection(fallbackOwned, fallbackOwned, fallbackBlocked, soleDataRG)
+}
+
+func (d *Daemon) clearIPsecFallbackStatesExceptPeerNames(peerNames []string) {
+	d.ipsecFallbackMu.Lock()
+	for name, state := range d.ipsecFallbacks {
+		if !state.inFlight && !containsIPsecSAName(peerNames, name) {
+			delete(d.ipsecFallbacks, name)
+		}
+	}
+	d.ipsecFallbackMu.Unlock()
+}
+func (d *Daemon) clearIPsecFallbackStates() {
+	d.ipsecFallbackMu.Lock()
+	for name, state := range d.ipsecFallbacks {
+		if !state.inFlight {
+			delete(d.ipsecFallbacks, name)
+		}
+	}
+	d.ipsecFallbackMu.Unlock()
+}
+func (d *Daemon) clearOwedIPsecFallbackExceptHeld(names, owned, blocked []string) {
+	d.ipsecFallbackMu.Lock()
+	for _, name := range names {
+		if containsIPsecSAName(owned, name) || containsIPsecSAName(blocked, name) {
+			continue
+		}
+		state, ok := d.ipsecFallbacks[name]
+		if ok && state.owed && !state.inFlight {
+			delete(d.ipsecFallbacks, name)
+		}
+	}
+	d.ipsecFallbackMu.Unlock()
+}
+
+func containsIPsecSAName(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
+}
+
+// undeclaredRG0FallbackTopology reports the sole data-RG edge eligible for
+// an unanchored RG0 fallback, using facts from one cluster-config snapshot.
+func undeclaredRG0FallbackTopology(cc *config.ClusterConfig) (soleDataRG int, rg0Declared bool) {
+	if cc == nil {
+		return 0, false
+	}
+	multipleDataRGs := false
+	for _, group := range cc.RedundancyGroups {
+		if group.ID == 0 {
+			rg0Declared = true
+			continue
+		}
+		if soleDataRG != 0 {
+			multipleDataRGs = true
+			continue
+		}
+		soleDataRG = group.ID
+	}
+	if multipleDataRGs {
+		return 0, rg0Declared
+	}
+	return soleDataRG, rg0Declared
+}
+
 // syncIPsecSAPeriodic runs on the primary node, periodically syncing active IPsec
 // connection names to the secondary via the session sync channel. It advertises
 // the current active set every tick when non-empty (heartbeat re-push) and, per
@@ -2926,6 +3203,11 @@ func (d *Daemon) nudgeIPsecSASync() {
 // standby does not resurrect an administratively-downed tunnel on takeover. A
 // peer-connect nudge forces a re-advertise of the current set (empty or not) so
 // a reconnected standby converges even if it missed the one-shot empty.
+// The same loop retries an unanchored-RG0 name that was held back by a live
+// peer RG0 declaration; it is level-triggered so heartbeat pruning or liveness
+// expiry need not race a one-shot edge callback.
+// Fallback re-initiation is scheduled through a single-flight goroutine, so
+// per-name swanctl commands do not block this publisher loop.
 func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -2941,11 +3223,13 @@ func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 			return
 		case <-ticker.C:
 			lastFP = d.advertiseIPsecSAOnce(lastFP, false)
+			d.scheduleOwedIPsecFallbackRetry()
 		case <-d.ipsecSANudgeCh:
 			// A peer sync connection was (re)established: force a re-advertise
 			// of the CURRENT set so a standby that missed the one-shot empty
 			// during the gap (or retained a stale set across a blip) converges.
 			lastFP = d.advertiseIPsecSAOnce(lastFP, true)
+			d.scheduleOwedIPsecFallbackRetry()
 		}
 	}
 }
@@ -2967,21 +3251,45 @@ func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 // sequence had just raised, whenever the peer's advertised set still
 // listed them. Now each edge initiates/belts only names whose whole RG
 // set (ipsecConnRedundancyGroups — every candidate must match, the same
-// all-candidates rule ipsecSAsForRG uses) is that rg: on the RG0 edge
-// only RG0/unanchored names, on a data-RG edge only that RG's names.
-// A name spanning several RGs is raised by no single-RG edge until an
-// edge for one of its groups fires while this node owns every candidate
-// (the ownsIPsecConn rule); the old code belt-terminated it on every edge.
+// all-candidates rule ipsecSAsForRG uses) equals that rg. On the RG0 edge,
+// only names whose current config declares RG0 may run (including unanchored
+// names); on a data-RG edge, only that RG's anchored names run, plus the
+// #17784 sole-data-edge exception below.
+//
+// #17784: only when one current cluster-config snapshot has no RG0 and
+// exactly one data RG does that RG's edge admit an unanchored
+// (single-candidate RG0) name to ownsIPsecConn. The edge ID must equal the
+// sole data-RG ID, so an already-queued edge for a removed RG cannot admit
+// the same name after a commit. This exception is also fenced by the peer's
+// live heartbeat: an RG0 entry means the peer declares the group (and a
+// primary entry means it owns it), even if local config-sync has not caught
+// up. Liveness expiry makes retained peer-group history cease to be a fence.
+// ownsIPsecConn applies the undeclared-RG0 fallback only after those topology
+// and peer checks. Limiting admission to one edge avoids offering the name to
+// every edge of a multi-data-RG takeover wave, where the #15194 belt could
+// re-terminate a just-raised SA. When current config declares RG0, unanchored
+// names remain on the RG0 edge. A name spanning several RGs has no single-RG
+// initiation edge: its only recovery is strongSwan trap (traffic-triggered)
+// or manual re-initiation. The old code belt-terminated it on every edge.
+
 func (d *Daemon) reinitiateIPsecSAsForRG(rg int) {
 	ss := d.getSessionSync()
 	if ss == nil {
 		return
 	}
-	names := ss.PeerIPsecSAs()
+	d.reinitiateIPsecSAsForNamesForRG(ss.PeerIPsecSAs(), rg)
+}
+
+func (d *Daemon) reinitiateIPsecSAsForNamesForRG(names []string, rg int) {
 	if len(names) == 0 {
 		return
 	}
-	owned := d.ipsecSAsToReinitiateForRG(names, rg)
+	owned, fallbackOwned, fallbackBlocked := d.ipsecSAsToReinitiateForRGDetails(names, rg)
+	d.reinitiateIPsecSAsForSelection(owned, fallbackOwned, fallbackBlocked, rg)
+}
+
+func (d *Daemon) reinitiateIPsecSAsForSelection(owned, fallbackOwned, fallbackBlocked []string, rg int) {
+	d.markIPsecFallbackOwed(fallbackBlocked)
 	if len(owned) == 0 {
 		return
 	}
@@ -2992,15 +3300,32 @@ func (d *Daemon) reinitiateIPsecSAsForRG(rg int) {
 	// CHILD_SA ... due to existing duplicate" — the failback black hole.
 	// Only names present in the LOCAL live set are terminated; a name with
 	// no local SA initiates directly. A failed live read skips the belt
-	// (initiate proceeds as before) rather than guessing. #16710: the belt
-	// inherits the edge scope above — it can only touch this edge's names.
+	// (initiate proceeds as before) rather than guessing.
 	local := map[string]bool{}
+	localKnown := false
 	if names2, err := d.ipsecActiveNames(); err == nil {
+		localKnown = true
 		for _, n := range names2 {
 			local[n] = true
 		}
 	} else {
 		slog.Warn("cluster: failed to list local IPsec SAs before re-initiation; duplicate belt skipped", "err", err)
+	}
+	// An owed fallback can be picked up by the periodic retry and by a late
+	// copy of the original ownership edge. The claim suppresses a completed
+	// attempt for this data-RG epoch even before the local active-SA view
+	// catches up; a later fence event or new epoch can reopen the claim.
+	runnable := owned[:0]
+	for _, name := range owned {
+		if containsIPsecSAName(fallbackOwned, name) &&
+			!d.claimIPsecFallback(name, rg, local, localKnown) {
+			continue
+		}
+		runnable = append(runnable, name)
+	}
+	owned = runnable
+	if len(owned) == 0 {
+		return
 	}
 	slog.Info("cluster: re-initiating IPsec SAs after failover", "count", len(owned), "rg", rg)
 	initiate := d.ipsecInitiate
@@ -3010,7 +3335,11 @@ func (d *Daemon) reinitiateIPsecSAsForRG(rg int) {
 				slog.Warn("cluster: failed to terminate stale local IPsec SA before re-initiation", "name", name, "err", err)
 			}
 		}
-		if err := initiate(name); err != nil {
+		err := initiate(name)
+		if containsIPsecSAName(fallbackOwned, name) {
+			d.finishIPsecFallback(name, err)
+		}
+		if err != nil {
 			slog.Warn("cluster: failed to initiate IPsec SA", "name", name, "err", err)
 		} else {
 			slog.Info("cluster: IPsec SA initiated", "name", name)
@@ -3063,15 +3392,34 @@ func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
 // ipsecSAsToReinitiateForRG is ipsecSAsToReinitiate additionally scoped to
 // one transitioning redundancy group rg (#16710): a name is in scope only
 // when EVERY candidate group from ipsecConnRedundancyGroups equals rg
-// (the all-candidates rule ipsecSAsForRG uses). On the RG0 edge only
-// RG0/unanchored names are in scope; on a data-RG edge only that RG's
-// names. Out-of-scope names are neither initiated nor belt-terminated by
-// this edge.
+// (the all-candidates rule ipsecSAsForRG uses), with the #17784 exception:
+// only the matching sole-data-RG edge admits a single-candidate RG0 name
+// when the same current config snapshot has no RG0 and the peer heartbeat
+// has no RG0 entry. The existing ownsIPsecConn fallback remains authoritative;
+// a multi-RG name is in scope on no edge. Out-of-scope names are neither
+// initiated nor belt-terminated by this edge.
 func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
+	owned, _, _ := d.ipsecSAsToReinitiateForRGDetails(names, rg)
+	return owned
+}
+
+func (d *Daemon) ipsecSAsToReinitiateForRGDetails(names []string, rg int) (owned, fallbackOwned, fallbackBlocked []string) {
 	cfg := d.ipsecAttributionConfig()
 	idx := d.cachedIPsecSANameIndex(cfg)
-	owned := make([]string, 0, len(names))
+	owned = make([]string, 0, len(names))
 	var skipped, outOfScope []string
+	// Derive RG0 declaration and the sole data-RG identity from ONE current
+	// config snapshot. The attribution config above may be an older loaded
+	// IPsec generation, and the cluster Manager's local groups are published
+	// later in the apply tail.
+	soleDataRG, rg0Declared := undeclaredRG0FallbackTopology(d.clusterConfig())
+	// PeerGroupPrimary's known bit is presence in a live peer heartbeat,
+	// which advertises every configured RG. Retain its primary result
+	// explicitly as the ownership fence for an RG0-primary peer.
+	peerRG0Primary, peerRG0Known := false, false
+	if d.cluster != nil {
+		peerRG0Primary, peerRG0Known = d.cluster.PeerGroupPrimary(0)
+	}
 	for _, name := range names {
 		rgs := ipsecConnRedundancyGroups(cfg, idx, name)
 		inScope := len(rgs) > 0
@@ -3081,12 +3429,40 @@ func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
 				break
 			}
 		}
+		// An undeclared RG0 candidate is not a normal RG0-edge name. It
+		// can only enter through the matching sole-data-edge fallback below.
+		if !rg0Declared && len(rgs) == 1 && rgs[0] == 0 {
+			inScope = false
+		}
+		fallback := false
+		fallbackCandidate := !inScope && d.cluster != nil && !rg0Declared &&
+			soleDataRG != 0 && rg == soleDataRG &&
+			len(rgs) == 1 && rgs[0] == 0
+		if fallbackCandidate {
+			if peerRG0Known || peerRG0Primary {
+				// Only locally owned names need a retry after the peer fence
+				// clears; do not retain someone else's IPsec name.
+				if d.ownsIPsecConn(cfg, idx, name) {
+					fallbackBlocked = append(fallbackBlocked, name)
+				} else {
+					skipped = append(skipped, name)
+				}
+				continue
+			}
+			// #17784: only the current sole data edge, with no RG0 in
+			// the config snapshot or the live peer heartbeat.
+			inScope = true
+			fallback = true
+		}
 		if !inScope {
 			outOfScope = append(outOfScope, name)
 			continue
 		}
 		if d.ownsIPsecConn(cfg, idx, name) {
 			owned = append(owned, name)
+			if fallback {
+				fallbackOwned = append(fallbackOwned, name)
+			}
 		} else {
 			skipped = append(skipped, name)
 		}
@@ -3099,7 +3475,7 @@ func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
 		slog.Info("cluster: skipping peer IPsec SAs whose redundancy group this "+
 			"node does not own", "skipped", skipped)
 	}
-	return owned
+	return owned, fallbackOwned, fallbackBlocked
 }
 
 // ipsecSAsForRG filters SA names to those whose connection is attributed

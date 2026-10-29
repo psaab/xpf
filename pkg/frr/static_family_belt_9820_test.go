@@ -107,7 +107,7 @@ func TestStaticFamilyBeltKeepsNegativeRouteWithUnusedCrossFamilyGateway11421(t *
 				NextHops:    []config.NextHopEntry{{Address: "2001:db8::1"}},
 				Discard:     true,
 			},
-			want: "ip route 10.0.0.0/8 Null0\n",
+			want: "ip route 10.0.0.0/8 Null0 5\n",
 		},
 		{
 			name: "reject",
@@ -116,7 +116,7 @@ func TestStaticFamilyBeltKeepsNegativeRouteWithUnusedCrossFamilyGateway11421(t *
 				NextHops:    []config.NextHopEntry{{Address: "2001:db8::1"}},
 				Reject:      true,
 			},
-			want: "ip route 10.0.0.0/8 reject\n",
+			want: "ip route 10.0.0.0/8 reject 5\n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

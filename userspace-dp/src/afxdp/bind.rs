@@ -677,7 +677,7 @@ pub(super) fn shared_umem_group_key_for_device(
 // complete undo. Hermetically tested below (`new_for_test` fixtures make
 // the delete a null-handle no-op while exercising the real drop path).
 fn fail_identity_mismatched_bind(
-    user: User,
+    _user: User,
     rx: RingRx,
     tx: RingTx,
     device: DeviceQueue,

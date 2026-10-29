@@ -145,9 +145,11 @@ mod tests_deterministic_vectors_17124;
 mod tests_occupancy_seam_16135;
 
 pub(crate) use deterministic::{
-    DeterministicV4, DeterministicV6, PoolReverseIndex, build_pool_reverse_index,
-    deterministic_indices_v4, deterministic_indices_v6, reverse_deterministic_v4,
-    reverse_deterministic_v6,
+    DeterministicV4, DeterministicV6, deterministic_indices_v4, deterministic_indices_v6,
+};
+#[cfg(test)]
+pub(crate) use deterministic::{
+    build_pool_reverse_index, reverse_deterministic_v4, reverse_deterministic_v6,
 };
 #[cfg(test)]
 pub(crate) const LIVE_SHARDS_FOR_TEST: usize = flows::LIVE_SHARDS;
@@ -165,9 +167,10 @@ impl PortAllocator {
     }
 }
 use occupancy::{
-    AddressOccupancy, PAT_PORT_QUARANTINE_NS, RecycleRing, SMALL_POOL_QUARANTINE_MAX_RANGE,
-    occupancy_next_probe, pat_keyed_offset, pat_mix, pat_secret,
+    AddressOccupancy, occupancy_next_probe, pat_keyed_offset, pat_mix, pat_secret,
 };
+#[cfg(test)]
+use occupancy::{PAT_PORT_QUARANTINE_NS, RecycleRing, SMALL_POOL_QUARANTINE_MAX_RANGE};
 #[cfg(test)]
 pub(super) const PAT_PORT_QUARANTINE_NS_FOR_TEST: u64 = PAT_PORT_QUARANTINE_NS;
 #[cfg(test)]
@@ -179,12 +182,12 @@ pub(super) use occupancy::{
 
 use super::source::{PersistentNatPermit, SourceNatFlowKey};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::hash::Hasher;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, RwLock};
 use std::sync::{MutexGuard, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 
 pub(super) const NS_PER_SEC: u64 = 1_000_000_000;
@@ -331,7 +334,7 @@ pub(super) fn persistent_egress_scope_v2(
         packet_to_zone,
     ];
     let mut hash = EGRESS_SCOPE_OFFSET_BASIS;
-    let mut feed = |byte: u8, hash: &mut u32| {
+    let feed = |byte: u8, hash: &mut u32| {
         *hash ^= u32::from(byte);
         *hash = hash.wrapping_mul(EGRESS_SCOPE_PRIME);
     };
@@ -2195,30 +2198,30 @@ impl Default for PortAllocator {
     }
 }
 
-/// Test-only PortAllocator CONSTRUCTION counter (#6812 F3 round 4).
-///
-/// The #6812 guards previously asserted only on the FINAL allocator a rule
-/// carries — its identity, or its occupancy-word count. Both are end-state
-/// assertions, and both are blind to the exact defect the reuse-before-build
-/// and no-bitmap-for-a-failed-pool rules exist to prevent: a `PortAllocator::
-/// new` that is built and then discarded. A throwaway construction immediately
-/// before the reuse lookup restores the pre-#6812 build-then-discard behaviour
-/// with every one of those assertions still green.
-///
-/// THREAD-LOCAL, deliberately. A process-global counter is shared by every test
-/// `cargo test` runs in parallel and produced a master-red flake once already
-/// (#6819). `resolve_pool_allocators` and everything it calls are synchronous
-/// on the caller's thread, so a thread-local counts exactly the constructions
-/// the test under it caused, with no serialisation and no cross-test coupling.
+// Test-only PortAllocator CONSTRUCTION counter (#6812 F3 round 4).
+//
+// The #6812 guards previously asserted only on the FINAL allocator a rule
+// carries — its identity, or its occupancy-word count. Both are end-state
+// assertions, and both are blind to the exact defect the reuse-before-build
+// and no-bitmap-for-a-failed-pool rules exist to prevent: a `PortAllocator::
+// new` that is built and then discarded. A throwaway construction immediately
+// before the reuse lookup restores the pre-#6812 build-then-discard behaviour
+// with every one of those assertions still green.
+//
+// THREAD-LOCAL, deliberately. A process-global counter is shared by every test
+// `cargo test` runs in parallel and produced a master-red flake once already
+// (#6819). `resolve_pool_allocators` and everything it calls are synchronous
+// on the caller's thread, so a thread-local counts exactly the constructions
+// the test under it caused, with no serialisation and no cross-test coupling.
 #[cfg(test)]
 thread_local! {
     static PORT_ALLOCATOR_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// #16713 test seam: thread-local count of contention-helper visits
-/// (full `persistent_by_source` scans and indexed owner-set walks).
-/// Thread-local (like `PORT_ALLOCATOR_BUILDS`) so parallel
-/// `cargo test` threads cannot flake each other's counts (#6819).
+// #16713 test seam: thread-local count of contention-helper visits
+// (full `persistent_by_source` scans and indexed owner-set walks).
+// Thread-local (like `PORT_ALLOCATOR_BUILDS`) so parallel
+// `cargo test` threads cannot flake each other's counts (#6819).
 #[cfg(test)]
 thread_local! {
     static PERSISTENT_BY_SOURCE_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -4568,6 +4571,7 @@ impl PortAllocator {
                 live.record_pat_owner(&flow, translated);
                 self.shared.reuses_total.fetch_add(1, Ordering::Relaxed);
                 return LeaseReuse::Reused(translated);
+
             }
             Some(lease)
                 if lease.address_only
@@ -5161,7 +5165,7 @@ impl PortAllocator {
                 // No usable free port remains in the subscriber's block. A live
                 // flow may own its only occupied port, so check idempotent reuse
                 // before reporting exhaustion.
-                let mut live = self.lock_live();
+                let _live = self.lock_live();
                 let mut __shard = self.shared.flows.get_mut_shard(&flow);
                 if let Some(slot) = __shard.map.get_mut(&flow) {
                     let existing = self.reenter_existing_locked(slot, holder, ReuseCount::Counted);
@@ -7659,6 +7663,7 @@ impl PortAllocator {
                 if let Some((addr_index, port)) = retired.freed_port {
                     self.free_translated_port_at(addr_index, port, now_ns);
                 }
+
             }
         }
 

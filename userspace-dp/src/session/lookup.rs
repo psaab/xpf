@@ -1267,6 +1267,7 @@ impl SessionTable {
                 entry.metadata.is_reverse,
                 tcp_flags,
             );
+            let _ = key;
         }
         entry.closing = true;
         entry.reset |= has_rst(tcp_flags);

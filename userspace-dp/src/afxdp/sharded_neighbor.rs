@@ -1270,11 +1270,11 @@ impl ShardedNeighborMap {
     /// it does not require a single atomic cross-shard snapshot.
     #[inline]
     pub(crate) fn len(&self) -> usize {
-        self.len_each_shard(|index| {
+        self.len_each_shard(|_index| {
             #[cfg(test)]
             LEN_AFTER_SHARD_HOOK.with(|hook| {
                 if let Some(hook) = hook.borrow_mut().as_mut() {
-                    hook(index);
+                    hook(_index);
                 }
             });
         })

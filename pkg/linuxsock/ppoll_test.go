@@ -55,3 +55,39 @@ func TestPpollRecvWakesOnSignalStop17231(t *testing.T) {
 	// Idempotent close must not panic / double-close.
 	p.Close()
 }
+
+// TestPpollRecvConsumesRXErrorReadiness17692: POLLERR-only readiness on
+// the RX fd must break to Recvfrom (which surfaces the pending socket
+// error) instead of looping in ppoll. The fake poll records its call
+// count; more than one call means the loop spun.
+func TestPpollRecvConsumesRXErrorReadiness17692(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET, 0)
+	if err != nil {
+		t.Fatalf("socketpair: %v", err)
+	}
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+	wakeFD, err := unix.Eventfd(0, unix.EFD_NONBLOCK|unix.EFD_CLOEXEC)
+	if err != nil {
+		t.Fatalf("eventfd: %v", err)
+	}
+	p := NewPpollRecvForTest(fds[0], wakeFD)
+	defer p.Close()
+	calls := 0
+	p.AttachPollFnForTest(func(fds []unix.PollFd, timeout *unix.Timespec, sigmask *unix.Sigset_t) (int, error) {
+		calls++
+		fds[0].Revents = unix.POLLERR
+		return 1, nil
+	})
+	// No data queued: Recvfrom on the empty socketpair returns EAGAIN,
+	// which is the error surfacing this test wants (not a spin, not nil).
+	unix.SetNonblock(fds[0], true)
+	buf := make([]byte, 64)
+	_, _, recvErr := p.Recv(buf)
+	if recvErr == nil {
+		t.Fatal("Recv returned nil error on POLLERR-only readiness with no data")
+	}
+	if calls != 1 {
+		t.Fatalf("ppoll called %d times, want exactly 1 (no busy-spin)", calls)
+	}
+}

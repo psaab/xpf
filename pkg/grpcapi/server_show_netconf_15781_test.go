@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestShowSystemServicesNetconfNotServed15781(t *testing.T) {
 		NetconfSSH: true,
 	}
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	if !strings.Contains(out, "NETCONF SSH:    configured but NOT served") {
 		t.Errorf("gRPC renderer omitted NETCONF not-served row:\n%s", out)
@@ -35,7 +36,7 @@ func TestShowSystemServicesNetconfAbsent15781(t *testing.T) {
 		SSH: &config.SSHServiceConfig{RootLogin: "deny"},
 	}
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	if out := buf.String(); strings.Contains(out, "NETCONF") {
 		t.Errorf("gRPC renderer showed NETCONF row without netconf ssh:\n%s", out)
 	}

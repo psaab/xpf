@@ -11510,7 +11510,18 @@ reserved for whole-dataplane selection where a rewrite shim
     commit (#16708, extending `validateIPsecResponderIdentityStrict`):
     the hostname is a dial target, never the presented identity, so no
     peer selector exists; tolerant loads warn and the renderer skips
-    the VPN. No new configuration knob is introduced.
+    the VPN. #17772 also rejects distinct PSK connection groups with
+    different effective keys when their peer-only selectors overlap, or
+    when one connection's remote identity matches another gateway's effective
+    local identity (configured `local-identity`, otherwise its effective local IP
+    address). Identity comparison canonicalizes DN case-ignore attributes and
+    RDN/AVA ordering, unifies `user-at-hostname`/`email`/`rfc822` aliases with
+    case-insensitive domains, and compares key-id spellings by strongSwan-effective
+    bytes while keeping rendered values raw. A mixed hostname/IP gateway requires
+    a discriminating `remote-identity` for every dial target; IP selectors cannot
+    cover a hostname's eventual peer identity. Tolerant loads warn
+    and skip the affected connection groups. No new configuration knob is
+    introduced.
   - `security nat static rule-set rule match` — declared the
     `source-address` / `destination-address` children the static-NAT
     compiler reads (the subtree was previously unreachable by the walker).

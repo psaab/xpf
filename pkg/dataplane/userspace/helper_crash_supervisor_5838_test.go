@@ -636,6 +636,9 @@ func TestRestartUsesTheCurrentConfigNotTheDeadGeneration5838(t *testing.T) {
 	if crash.Restarts != loopAttempt {
 		t.Errorf("restart attempts = %d, want %d", crash.Restarts, loopAttempt)
 	}
+	if crash.LastRestartAttempt.IsZero() {
+		t.Error("failed retry wiped LastRestartAttempt: the attempt was recorded before its outcome (#7967) and must survive the crash-record rebuild")
+	}
 	if running, looping := m.HelperSupervisorState(); running || !looping {
 		t.Fatalf("failed readiness at retry cap state = (running=%v, looping=%v), want (false,true)",
 			running, looping)

@@ -18,7 +18,7 @@
 //! `&str` already loaded for the GRE lookup — no new branch on the
 //! plain-forward path.
 
-use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, pad_to_16, padded_len_capped};
+use super::super::wg::{EncapError, POLY1305_TAG_LEN, WG_DATA_HEADER_LEN, padded_len_capped};
 use super::super::*;
 use super::checksum::checksum16_ipv6;
 use super::headers::{
@@ -33,12 +33,11 @@ fn wg_inner_budget(outer_mtu: usize, outer_v6: bool) -> usize {
     outer_mtu.saturating_sub(overhead)
 }
 
-/// The exact encapped wire size for an `inner_len`-byte inner packet
-/// plus the outer L3/L4 (IP + UDP), pad capped at the inner budget for
-/// `outer_mtu` (#16499). Used by the MTU guard so a frame that would
-/// exceed the egress MTU is dropped rather than forcing outer IP
-/// fragmentation (plan §7, Codex r3). Pulled out of `wg_encap_frame` so
-/// the arithmetic is unit-testable in isolation.
+/// Test helper for the uncapped exact wire-size arithmetic used by the WG MTU
+/// guard. The production guard calls `wg_encapped_size_with_outer_mtu` with
+/// the selected physical MTU; this wrapper uses `usize::MAX` to isolate the
+/// arithmetic in unit tests.
+#[cfg(test)]
 #[inline]
 fn wg_encapped_size(inner_len: usize, outer_v6: bool) -> usize {
     wg_encapped_size_with_outer_mtu(inner_len, outer_v6, usize::MAX)
@@ -52,24 +51,24 @@ fn wg_encapped_size_with_outer_mtu(inner_len: usize, outer_v6: bool, outer_mtu: 
     wg_record_len + outer_ip_len + 8
 }
 
-/// Test-only seam: counts every entry into `outer_physical_egress_resolution`
-/// (each one performs exactly one outer-underlay FIB LPM). `wg_encap_frame`
-/// resolves the outer route ONCE per packet (#3992); a test resets this to 0,
-/// builds one frame, and asserts the count is exactly 1 (it was 2 before the
-/// dedup).
-///
-/// #6294: this counter is THREAD-LOCAL, not a process-global atomic. The
-/// default `cargo test` runs the suite in parallel, and every sibling
-/// `wg_encap_frame` / `outer_*` test bumps this same counter. A process-global
-/// value let a sibling's bump land between #6294's reset and read, corrupting
-/// the exact `== 1` assertion (a load-sensitive flake, not a product bug). A
-/// thread-local counter isolates each test thread's count: a test resets,
-/// bumps, and reads entirely on its own thread, so no parallel sibling can
-/// interfere — strictly stronger than serializing every bumper behind a lock,
-/// and it needs no guard threaded through the ~14 outer-resolution tests. The
-/// single-threaded test flow (reset -> one `wg_encap_frame` -> read) is
-/// bit-identical to the former atomic. See `wg_tests.rs`'s
-/// `outer_route_resolve_count_is_thread_local_isolated` for the fail-on-revert.
+// Test-only seam: counts every entry into `outer_physical_egress_resolution`
+// (each one performs exactly one outer-underlay FIB LPM). `wg_encap_frame`
+// resolves the outer route ONCE per packet (#3992); a test resets this to 0,
+// builds one frame, and asserts the count is exactly 1 (it was 2 before the
+// dedup).
+//
+// #6294: this counter is THREAD-LOCAL, not a process-global atomic. The
+// default `cargo test` runs the suite in parallel, and every sibling
+// `wg_encap_frame` / `outer_*` test bumps this same counter. A process-global
+// value let a sibling's bump land between #6294's reset and read, corrupting
+// the exact `== 1` assertion (a load-sensitive flake, not a product bug). A
+// thread-local counter isolates each test thread's count: a test resets,
+// bumps, and reads entirely on its own thread, so no parallel sibling can
+// interfere — strictly stronger than serializing every bumper behind a lock,
+// and it needs no guard threaded through the ~14 outer-resolution tests. The
+// single-threaded test flow (reset -> one `wg_encap_frame` -> read) is
+// bit-identical to the former atomic. See `wg_tests.rs`'s
+// `outer_route_resolve_count_is_thread_local_isolated` for the fail-on-revert.
 #[cfg(test)]
 thread_local! {
     static OUTER_ROUTE_RESOLVE_COUNT: std::cell::Cell<usize> = std::cell::Cell::new(0);
@@ -96,8 +95,8 @@ pub(super) fn outer_route_resolve_count_bump() {
     OUTER_ROUTE_RESOLVE_COUNT.with(|c| c.set(c.get().wrapping_add(1)));
 }
 
-/// Resolve the PHYSICAL underlay egress ifindex the OUTER (WG/UDP) datagram
-/// actually leaves on, for a tunnel-resolved encap decision (#2680/#2701).
+/// Test helper mirroring the physical underlay egress-ifindex selection for
+/// the outer WG/UDP datagram in a tunnel-resolved encap decision (#2680/#2701).
 ///
 /// The interface that matters here is the PHYSICAL underlay egress — the one
 /// the outer WG/UDP datagram leaves on — NOT
@@ -164,18 +163,9 @@ pub(super) fn outer_route_resolve_count_bump() {
 /// an unresolvable outer is no worse than before. This case is only reached
 /// when the peer endpoint genuinely has no route (undeliverable), so the
 /// choice of ifindex here cannot rescue the packet.
+#[cfg(test)]
 #[inline]
 fn outer_physical_egress_ifindex(
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    endpoint: &TunnelEndpoint,
-    outer_dst: IpAddr,
-) -> i32 {
-    outer_physical_egress_ifindex_with_dynamic(decision, forwarding, endpoint, outer_dst, None)
-}
-
-#[inline]
-fn outer_physical_egress_ifindex_with_dynamic(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
@@ -187,7 +177,7 @@ fn outer_physical_egress_ifindex_with_dynamic(
     // outer L2/VLAN). `outer_physical_egress_resolution` performs the single
     // FIB LPM and bumps the per-packet count; a second resolution per packet
     // is the redundant lookup #3992 removed.
-    let outer = outer_physical_egress_resolution_with_dynamic(
+    let outer = outer_physical_egress_resolution(
         forwarding,
         endpoint,
         outer_dst,
@@ -213,21 +203,12 @@ fn outer_physical_egress_ifindex_with_dynamic(
 /// resolution, so it MUST thread the runtime `dynamic_neighbors` map
 /// (#14657): after #13978 removed the session-neighbor fallback, a next hop
 /// learned only into `ShardedNeighborMap` resolved to `neighbor_mac = None`
-/// here and `wg_encap_frame_with_commit` failed closed on every transit
+/// here and `wg_encap_frame` failed closed on every transit
 /// packet — a permanent blackhole, with no MissingNeighbor requeue. The
 /// caller must not substitute a neighbor MAC from the session's unrelated
 /// resolution.
 #[inline]
 fn outer_physical_egress_resolution(
-    forwarding: &ForwardingState,
-    endpoint: &TunnelEndpoint,
-    outer_dst: IpAddr,
-) -> ForwardingLookupResult {
-    outer_physical_egress_resolution_with_dynamic(forwarding, endpoint, outer_dst, None)
-}
-
-#[inline]
-fn outer_physical_egress_resolution_with_dynamic(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
     outer_dst: IpAddr,
@@ -262,12 +243,20 @@ fn outer_physical_egress_resolution_with_dynamic(
 /// The physical underlay egress ifindex from a resolved outer resolution,
 /// with the conservative fallback to the decision's own `egress_ifindex` (the
 /// tunnel LOGICAL ifindex) when the peer endpoint is genuinely unrouted /
-/// non-positive / resolves onto a tunnel interface. See
-/// `outer_physical_egress_ifindex`'s doc for the full #2837 analysis of why
-/// the route-derived egress survives an unresolved (dynamic-learned) neighbor.
+/// non-positive / resolves onto a tunnel interface. A route-derived egress
+/// remains available for an unresolved (dynamic-learned) neighbor.
 #[inline]
 fn outer_egress_ifindex_or_fallback(
     decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    outer: &ForwardingLookupResult,
+) -> i32 {
+    outer_egress_ifindex_for_fallback(decision.resolution.egress_ifindex, forwarding, outer)
+}
+
+#[inline]
+fn outer_egress_ifindex_for_fallback(
+    fallback_ifindex: i32,
     forwarding: &ForwardingState,
     outer: &ForwardingLookupResult,
 ) -> i32 {
@@ -278,13 +267,13 @@ fn outer_egress_ifindex_or_fallback(
     {
         outer.egress_ifindex
     } else {
-        decision.resolution.egress_ifindex
+        fallback_ifindex
     }
 }
 
-/// The PHYSICAL underlay egress MTU the OUTER (WG/UDP) datagram must fit
-/// (#2680). Thin wrapper over `outer_physical_egress_ifindex` so the MTU
-/// guard and the outer-source lookup resolve the SAME physical egress.
+/// (#2680). Derived from the same `outer_physical_egress_resolution` used for
+/// the outer-source lookup, so the MTU guard and source resolve the SAME
+/// physical egress.
 ///
 /// The inner packet's own logical/PMTUD MTU is a SEPARATE concern handled
 /// by the WG inner-MTU clamp / post-transform PMTUD on the TX dispatcher
@@ -296,32 +285,16 @@ fn outer_physical_egress_mtu(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
     outer_dst: IpAddr,
-) -> usize {
-    outer_physical_egress_mtu_with_dynamic(decision, forwarding, endpoint, outer_dst, None)
-}
-
-#[inline]
-fn outer_physical_egress_mtu_with_dynamic(
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    endpoint: &TunnelEndpoint,
-    outer_dst: IpAddr,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> usize {
-    let outer = outer_physical_egress_resolution_with_dynamic(
+    let outer = outer_physical_egress_resolution(
         forwarding,
         endpoint,
         outer_dst,
         dynamic_neighbors,
     );
     let physical_ifindex = outer_egress_ifindex_or_fallback(decision, forwarding, &outer);
-    let interface_mtu = forwarding
-        .egress
-        .get(&physical_ifindex)
-        .map(|e| e.mtu)
-        .filter(|m| *m > 0)
-        .unwrap_or(1500);
-    let base = crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, outer.resolution.route_mtu as usize);
+    let base = outer_physical_egress_base_mtu(forwarding, physical_ifindex, &outer);
     // #16711: a learned per-peer outer PMTU (validated underlay PTB)
     // caps the local/route budget. Resolved by peer endpoint address
     // so every consumer of this SSOT (encap guard via its inline twin,
@@ -330,6 +303,24 @@ fn outer_physical_egress_mtu_with_dynamic(
         Some(pmtu) => crate::afxdp::forwarding::min_nonzero_mtu(base, pmtu),
         None => base,
     }
+}
+
+#[inline]
+fn outer_physical_egress_base_mtu(
+    forwarding: &ForwardingState,
+    physical_ifindex: i32,
+    outer: &ForwardingLookupResult,
+) -> usize {
+    let interface_mtu = forwarding
+        .egress
+        .get(&physical_ifindex)
+        .map(|e| e.mtu)
+        .filter(|m| *m > 0)
+        .unwrap_or(1500);
+    crate::afxdp::forwarding::min_nonzero_mtu(
+        interface_mtu,
+        outer.resolution.route_mtu as usize,
+    )
 }
 
 /// #16711: the fresh learned outer PMTU of the peer whose live
@@ -401,15 +392,6 @@ fn cap_outer_mtu_with_peer_pmtu(
 /// then uses the conservative logical-ifindex fallback rather than borrowing a
 /// DIFFERENT peer's underlay (which would reintroduce the #2845 mismatch). The
 /// encap path drops such a packet anyway, so the PTB value is moot.
-#[inline]
-fn wg_peer_outer_dst(
-    forwarding: &ForwardingState,
-    endpoint: &TunnelEndpoint,
-    inner_dst: Option<IpAddr>,
-) -> Option<IpAddr> {
-    wg_peer_outer_dst_with_table(forwarding, endpoint, inner_dst, None)
-}
-
 /// `wg_peer_outer_dst` with an optional caller-loaded engine table
 /// snapshot (#15250): a caller that selects the peer more than once
 /// for one packet loads the table ONCE via `WgEngine::table_snapshot`
@@ -417,7 +399,7 @@ fn wg_peer_outer_dst(
 /// selection observes the same atomic snapshot. `None` loads afresh
 /// (single-selection callers).
 #[inline]
-fn wg_peer_outer_dst_with_table(
+fn wg_peer_outer_dst(
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
     inner_dst: Option<IpAddr>,
@@ -445,83 +427,6 @@ fn wg_peer_outer_dst_with_table(
         .find_map(|peer| peer.endpoint.map(|ep| ep.ip()))
 }
 
-/// The PHYSICAL underlay egress MTU for a WireGuard endpoint, for the
-/// post-transform PTB inner-MTU derivation (#2684, per-peer #2845).
-///
-/// This is the SAME physical-underlay SSOT (`outer_physical_egress_mtu`,
-/// #2680) the encap drop guard uses, exposed so the TX dispatcher's
-/// `post_transform_inner_mtu` advertises an inner MTU consistent with what
-/// the encap guard actually admits.
-///
-/// #2845: the PTB path runs BEFORE the per-packet peer LPM in the builder, but
-/// the dispatcher already holds the pre-encap inner frame and threads the inner
-/// destination here. We select the SAME peer the encap path will
-/// (`wg_peer_outer_dst` → `engine.peer_for_dest`) and resolve the underlay via
-/// THAT peer's endpoint, so two peers of one wg interface with asymmetric
-/// underlay MTUs each get the PTB derived from their OWN underlay — not an
-/// arbitrary first peer's. When the inner destination is unavailable or no peer
-/// covers it, this falls back to the first peer with an endpoint (the pre-#2845
-/// per-interface behaviour, byte-identical when all peers share one underlay).
-/// The fallback inside `outer_physical_egress_mtu` (route unresolvable → the
-/// resolution's own `egress_ifindex` MTU = the tunnel LOGICAL MTU) preserves
-/// the conservative pre-#2684 behaviour, never tighter.
-///
-/// Returns the logical-ifindex MTU fallback when the selected peer has no
-/// learned/configured endpoint address (no outer hop to route to) — the same
-/// value `tunnel_outer_mtu` would have produced, so the PTB is no worse than
-/// before in that degenerate case.
-///
-/// # Why not `tunnel_outer_mtu`
-/// For a WG transit flow `endpoint.destination` is `0.0.0.0`/`::`
-/// (`forwarding_build::tunnels` zeroes it — the peer carries the real outer
-/// hop), so `tunnel_outer_mtu`'s `tx_ifindex` resolution NoRoutes and the
-/// chain falls through to the LOGICAL `egress_ifindex` MTU (~1420). Feeding
-/// that to `wg_inner_mtu` subtracts the WG encap overhead a SECOND time
-/// (the logical MTU is already underlay − encap), under-advertising the
-/// inner PMTU by ~one encap (~75-95B). GRE is unaffected: its
-/// `endpoint.destination` is the real outer hop, so `tunnel_outer_mtu`
-/// resolves to the physical underlay correctly.
-#[inline]
-pub(in crate::afxdp) fn wg_endpoint_physical_outer_mtu(
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    endpoint: &TunnelEndpoint,
-    inner_dst: Option<IpAddr>,
-) -> usize {
-    wg_endpoint_physical_outer_mtu_with_dynamic(decision, forwarding, endpoint, inner_dst, None)
-}
-
-#[inline]
-pub(in crate::afxdp) fn wg_endpoint_physical_outer_mtu_with_dynamic(
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    endpoint: &TunnelEndpoint,
-    inner_dst: Option<IpAddr>,
-    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> usize {
-    // #2845: resolve the outer hop of the SAME peer the encap path selects
-    // for this inner destination (per-peer underlay), with the pre-#2845
-    // first-peer behaviour as the fallback.
-    let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst);
-    match outer_dst {
-        Some(dst) => outer_physical_egress_mtu_with_dynamic(
-            decision,
-            forwarding,
-            endpoint,
-            dst,
-            dynamic_neighbors,
-        ),
-        // No peer endpoint to route to: fall back to the resolution's own
-        // egress (the logical ifindex), exactly what `tunnel_outer_mtu`
-        // would have yielded — no regression in the degenerate case.
-        None => forwarding
-            .egress
-            .get(&decision.resolution.egress_ifindex)
-            .map(|e| e.mtu)
-            .filter(|m| *m > 0)
-            .unwrap_or(1500),
-    }
-}
 
 /// #14118: the (outer family, physical outer MTU) of the peer the encap
 /// path will SELECT for `inner_dst` — the family/MTU pair a pre-encap
@@ -530,24 +435,14 @@ pub(in crate::afxdp) fn wg_endpoint_physical_outer_mtu_with_dynamic(
 /// (canonicalized, so a v4-mapped learned endpoint charges the v4
 /// overhead), NOT `endpoint.outer_family`: a WG row's outer family
 /// describes its placeholder transport, while peers of one interface may
-/// mix v4 and v6 endpoints on different underlays. The MTU is the same
-/// `wg_endpoint_physical_outer_mtu` the PTB path uses (per-peer route MTU
+/// mix v4 and v6 endpoints on different underlays. The MTU comes from the
+/// same `outer_physical_egress_mtu` used by the PTB path (per-peer route MTU
 /// included). When no peer endpoint resolves, the family falls back to
-/// the endpoint row's and the MTU to the logical fallback inside
-/// `wg_endpoint_physical_outer_mtu` — the encap path drops such a packet
-/// anyway, so the budget value is moot beyond staying conservative.
+/// the endpoint row's family and the MTU to the logical-ifindex fallback;
+/// the encap path drops such a packet anyway, so the budget value is moot
+/// beyond staying conservative.
 #[inline]
 pub(in crate::afxdp) fn wg_selected_peer_outer(
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    endpoint: &TunnelEndpoint,
-    inner_dst: Option<IpAddr>,
-) -> (i32, usize) {
-    wg_selected_peer_outer_with_dynamic(decision, forwarding, endpoint, inner_dst, None)
-}
-
-#[inline]
-pub(in crate::afxdp) fn wg_selected_peer_outer_with_dynamic(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     endpoint: &TunnelEndpoint,
@@ -558,9 +453,9 @@ pub(in crate::afxdp) fn wg_selected_peer_outer_with_dynamic(
     // answer (including a covering peer with NO endpoint, which must
     // NOT borrow another peer) mirrors `wg_peer_outer_dst`; without an
     // engine answer, fall back to its first-peer rule.
-    let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst);
+    let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst, None);
     let outer_mtu = match outer_dst {
-        Some(dst) => outer_physical_egress_mtu_with_dynamic(
+        Some(dst) => outer_physical_egress_mtu(
             decision,
             forwarding,
             endpoint,
@@ -640,24 +535,8 @@ pub(in crate::afxdp) fn wg_selected_peer_outer_with_dynamic(
 /// resolves it once more for the BYTES. Both firings happen ONLY on the
 /// tx_ifindex == 0 (no-default-route) path — the previously-DROPPED case — so
 /// no working (default-route) traffic pays a second FIB LPM.
-pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex(
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    inner_frame: &[u8],
-    inner_addr_family: u8,
-    inner_l3_offset: u16,
-) -> Option<i32> {
-    wg_transit_egress_physical_egress_ifindex_with_dynamic(
-        decision,
-        forwarding,
-        inner_frame,
-        inner_addr_family,
-        inner_l3_offset,
-        None,
-    )
-}
 
-pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex_with_dynamic(
+pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex(
     decision: &SessionDecision,
     forwarding: &ForwardingState,
     inner_frame: &[u8],
@@ -733,8 +612,8 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex_with_dynamic(
     if decision.nat.nat64 && inner_dst.is_none() {
         return None;
     }
-    let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst)?;
-    let outer = outer_physical_egress_resolution_with_dynamic(
+    let outer_dst = wg_peer_outer_dst(forwarding, endpoint, inner_dst, None)?;
+    let outer = outer_physical_egress_resolution(
         forwarding,
         endpoint,
         outer_dst,
@@ -750,43 +629,10 @@ pub(in crate::afxdp) struct WgEncapCommit {
     pub(in crate::afxdp) outcome: crate::afxdp::wg::EncapOutcome,
 }
 
+
+
+
 pub(super) fn wg_encap_frame(
-    inner_frame: &[u8],
-    inner_meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-) -> Option<Vec<u8>> {
-    wg_encap_frame_with_commit(inner_frame, inner_meta, decision, forwarding)
-        .map(|(frame, _)| frame)
-}
-
-pub(super) fn wg_encap_frame_with_dynamic(
-    inner_frame: &[u8],
-    inner_meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<Vec<u8>> {
-    wg_encap_frame_with_commit_and_dynamic(
-        inner_frame,
-        inner_meta,
-        decision,
-        forwarding,
-        dynamic_neighbors,
-    )
-    .map(|(frame, _)| frame)
-}
-
-pub(super) fn wg_encap_frame_with_commit(
-    inner_frame: &[u8],
-    inner_meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-) -> Option<(Vec<u8>, WgEncapCommit)> {
-    wg_encap_frame_with_commit_and_dynamic(inner_frame, inner_meta, decision, forwarding, None)
-}
-
-pub(super) fn wg_encap_frame_with_commit_and_dynamic(
     inner_frame: &[u8],
     inner_meta: impl Into<ForwardPacketMeta>,
     decision: &SessionDecision,
@@ -863,10 +709,10 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
     //
     // #3992: `outer_physical_egress_resolution` performs the single FIB LPM
     // (pre-#3992 the identical route was resolved twice — MTU guard + source).
-    // `outer_physical_egress_mtu` remains the SSOT used by the PTB path
-    // (`wg_endpoint_physical_outer_mtu`); here we read the MTU straight off the
+    // `outer_physical_egress_mtu` remains the SSOT used by PTB through
+    // `wg_selected_peer_outer`; here we read the MTU straight off the
     // single shared `egress` row so the guard MTU is byte-identical.
-    let outer_resolution = outer_physical_egress_resolution_with_dynamic(
+    let outer_resolution = outer_physical_egress_resolution(
         forwarding,
         endpoint,
         peer_endpoint.ip(),
@@ -1005,7 +851,7 @@ pub(super) fn wg_encap_frame_with_commit_and_dynamic(
     // whose primary is a tunnel address or absent → wrong source / None
     // drop). #3992: reuse the `physical_egress_ifindex` / `egress` row
     // resolved ONCE above (both the guard and this source share the single
-    // `outer_physical_egress_ifindex` FIB LPM) rather than re-resolving.
+    // `outer_physical_egress_resolution` FIB LPM) rather than re-resolving.
     let src_port = endpoint.wg_listen_port;
     let dst_port = peer_endpoint.port();
 
@@ -1220,7 +1066,20 @@ fn learn_wg_pmtu(
             let Some(ep) = ep else { continue };
             let canon = crate::afxdp::wg::canonicalize_endpoint(ep);
             if canon.ip() == quoted_dst && canon.port() == dst_port {
-                engine.note_peer_pmtu(&pubkey, advertised, outer_v6, now_ns);
+                // Resolve the quoted peer's physical route exactly as
+                // the encap and PTB consumers do. This local interface /
+                // static-route MTU is the maximum credible outer PMTU;
+                // the peer's learned value must never exceed it.
+                // Only route/interface MTU is consumed here, not the neighbor MAC.
+                let outer = outer_physical_egress_resolution(forwarding, endpoint, quoted_dst, None);
+                let physical_ifindex = outer_egress_ifindex_for_fallback(
+                    endpoint.logical_ifindex,
+                    forwarding,
+                    &outer,
+                );
+                let local_mtu =
+                    outer_physical_egress_base_mtu(forwarding, physical_ifindex, &outer);
+                engine.note_peer_pmtu(&pubkey, advertised, outer_v6, local_mtu, now_ns);
                 crate::afxdp::wg::counters::WgCounters::bump(&engine.counters().pmtu_learned);
                 return WgPtbOutcome::Learned;
             }

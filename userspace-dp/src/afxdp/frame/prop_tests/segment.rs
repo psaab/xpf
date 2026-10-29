@@ -263,8 +263,7 @@ proptest! {
             NatDecision::default(),
         );
         let _ = segment_forwarded_tcp_frames_from_frame(
-            &frame, meta, &decision, &forwarding, false, expected,
-        );
+            &frame, meta, &decision, &forwarding, false, expected, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
     }
 
     /// P-T2 + P-T3: no NAT — split, then verify reassembly identity
@@ -277,8 +276,7 @@ proptest! {
         let forwarding = seg_fixture(mtu, tx_vlan);
         let decision = seg_decision(pkt.dst_ip, tx_vlan, NatDecision::default());
         let result = segment_forwarded_tcp_frames_from_frame(
-            &pkt.frame, pkt.meta, &decision, &forwarding, false, None,
-        );
+            &pkt.frame, pkt.meta, &decision, &forwarding, false, None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
         // #5148: a fragmented datagram must NEVER be TCP-segmented. The
         // packet strategy's IPv6 ext chain includes Fragment headers (type
         // 44), so some generated packets are fragments; the splitter now
@@ -320,8 +318,7 @@ proptest! {
             &decision,
             &forwarding,
             false,
-            Some((pkt.src_port, pkt.dst_port)),
-        );
+            Some((pkt.src_port, pkt.dst_port)), None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
         // #5148: fragments (incl. the strategy's IPv6 Fragment-header ext
         // chain) are declined by the splitter — NAT composition applies only
         // to WHOLE over-MTU datagrams.
@@ -364,8 +361,7 @@ proptest! {
         let decision = seg_decision(pkt.dst_ip, tx_vlan, NatDecision::default());
         prop_assert_eq!(
             segment_forwarded_tcp_frames_from_frame(
-                &pkt.frame, pkt.meta, &decision, &forwarding, false, None,
-            ),
+                &pkt.frame, pkt.meta, &decision, &forwarding, false, None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>()),
             None
         );
     }
@@ -392,8 +388,7 @@ proptest! {
         let decision = seg_decision(pkt.dst_ip, tx_vlan, nat);
         let want = expected_tuple(&pkt, nat);
         let result = segment_forwarded_tcp_frames_from_frame(
-            &pkt.frame, pkt.meta, &decision, &forwarding, false, None,
-        );
+            &pkt.frame, pkt.meta, &decision, &forwarding, false, None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>());
         if is_any_fragment(&pkt.frame[pkt.l3..], pkt.addr_family)
             || ipv6_ah_sighted(&pkt.frame, pkt.addr_family, pkt.l3)
         {
@@ -455,8 +450,7 @@ fn pin_segmentation_v6_ext_chain_segments_valid() {
         &forwarding,
         false,
         // #9782: pre-NAT arrival tuple (enforce runs before apply_nat).
-        Some((pkt.src_port, pkt.dst_port)),
-    )
+        Some((pkt.src_port, pkt.dst_port)), None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
     .expect("ext-headered oversized v6 TCP must segment");
     assert!(segs.len() > 1, "splitter engaged");
     check_segments(&segs, &pkt, mtu, 0, &want).expect("per-segment invariants hold");

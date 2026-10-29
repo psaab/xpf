@@ -606,14 +606,21 @@ impl Peer {
         )
     }
 
-    /// #16711: offer a validated PTB's advertised outer MTU. Only a
-    /// strictly smaller (floored) value lowers the store; every
+    /// #17747: cap a validated PTB's advertised outer MTU to the
+    /// local egress/route budget before applying the family floor.
+    /// Only a strictly smaller result lowers the store; every
     /// accepted offer refreshes the aging stamp. Returns true when
     /// the stored MTU changed.
     #[inline]
-    pub(crate) fn offer_pmtu(&self, offered_mtu: usize, outer_v6: bool, now_ns: u64) -> bool {
+    pub(crate) fn offer_pmtu(
+        &self,
+        offered_mtu: usize,
+        outer_v6: bool,
+        local_mtu: usize,
+        now_ns: u64,
+    ) -> bool {
         let current = self.learned_pmtu(now_ns);
-        match super::pmtu::pmtu_after_offer(current, offered_mtu, outer_v6) {
+        match super::pmtu::pmtu_after_offer(current, offered_mtu, outer_v6, local_mtu) {
             Some(v) => {
                 self.pmtu_mtu.store(v as u64, Ordering::Relaxed);
                 self.pmtu_learned_ns.store(now_ns, Ordering::Relaxed);

@@ -34,6 +34,18 @@ var DefaultArchiveDir = "/var/lib/xpf/archive"
 // must be erased by the coordinated zeroize path, not by the config-root
 // top-level name sweep below.
 const FeedShrinkHistoryPath = "/var/lib/xpf/feed-shrink-history.json"
+// EthtoolForcedRegistryPath is the xpf-owned registry of interfaces whose
+// link mode xpf has forced. It is outside configDir and must be erased by
+// the coordinated zeroize path.
+//
+// Tests redirect it with the other factory-reset-owned paths.
+var EthtoolForcedRegistryPath = "/var/lib/xpf/ethtool-forced.json"
+
+// NoRedirectsCapturePath persists the original redirect sysctl values while
+// `system no-redirects` is active. It must survive daemon restarts so deleting
+// the posture restores the pre-xpf values, and the factory-reset wipe erases
+// it so a new tenant cannot inherit the prior tenant's sysctl capture.
+const NoRedirectsCapturePath = "/var/lib/xpf/no-redirects-capture.json"
 
 // RescueConfigBase is the fixed base name of the xpf rescue configuration file
 // the daemon writes alongside the live config (Store.rescuePath ->

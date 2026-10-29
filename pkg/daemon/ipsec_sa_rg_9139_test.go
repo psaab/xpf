@@ -26,8 +26,16 @@ import (
 // twoRGIPsecStore builds a cluster config with TWO data RGs, an IPsec gateway
 // anchored on each one's reth, and a third gateway on a plain physical port.
 func twoRGIPsecStore(t *testing.T) *configstore.Store {
+	return twoRGIPsecStoreVariant(t, false)
+}
+
+func twoRGIPsecStoreWithRG0(t *testing.T) *configstore.Store {
+	return twoRGIPsecStoreVariant(t, true)
+}
+
+func twoRGIPsecStoreVariant(t *testing.T, declareRG0 bool) *configstore.Store {
 	t.Helper()
-	return testStoreWithSetConfig(t, []string{
+	lines := []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9139",
@@ -67,7 +75,11 @@ func twoRGIPsecStore(t *testing.T) *configstore.Store {
 		"set security ipsec vpn vpn-plain ike gateway gw-plain",
 		"set security ipsec vpn vpn-plain pre-shared-key fixture-secret",
 		"set security ipsec vpn vpn-plain bind-interface st2",
-	})
+	}
+	if declareRG0 {
+		lines = append(lines, "set chassis cluster redundancy-group 0 node 0 priority 1")
+	}
+	return testStoreWithSetConfig(t, lines)
 }
 
 // The attribution itself: a connection's RG is the one that owns the reth its
@@ -177,18 +189,12 @@ func TestIPsecConnRedundancyGroupNilConfig9139(t *testing.T) {
 	}
 }
 
-// RG0 IS NOT NECESSARILY DECLARED, and the two cases must answer differently.
-//
-// cluster.Manager.UpdateConfig creates a group only for an RG the config
-// declares, so IsLocalPrimary(0) is permanently FALSE on a config that omits
-// `redundancy-group 0` — an unanchored connection gated on it would NEVER be
-// re-initiated, which is worse than the behaviour this change extends. Where
-// RG0 IS declared the honest answer is the narrower one: a node taking only a
-// data RG while the peer keeps RG0 must not initiate a tunnel bound to an
-// interface the peer still holds.
-//
-// The two cells differ ONLY in whether the config declares RG0, which is what
-// makes the branch observable rather than assumed.
+// RG0 IS NOT NECESSARILY DECLARED locally. With an RG1-only current config,
+// the existing undeclared-RG0 fallback is needed to re-initiate an unanchored
+// name when this node owns RG1 and the peer has not advertised RG0. But local
+// config-sync can lag a peer generation that declares RG0, so peer heartbeat
+// group presence must also fence the fallback. Declared-RG0 controls pin that
+// such a name remains on the RG0 edge even when RG0 is locally primary.
 func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 	base := []string{
 		"set chassis cluster cluster-id 1",
@@ -228,6 +234,83 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 				"false, so gating on it would never re-initiate this tunnel — a " +
 				"silent regression on a legal config shape")
 		}
+		if _, known := cm.LocalGroupPrimary(2); known {
+			t.Fatal("FIXTURE: RG2 must be absent; this is the RG1-only topology")
+		}
+
+		var initiated []string
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+			t.Fatalf("#17784: RG1-only edge must initiate the unanchored name, got %v", initiated)
+		}
+
+		// CONTROL: the same RG1-only cluster with no locally-owned group
+		// must not pass ownsIPsecConn's undeclared-RG0 fallback.
+		cm.SetGroupStateForTesting(1, cluster.StateSecondary)
+		initiated = nil
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: RG1 edge with no locally-owned RG initiated %v", initiated)
+		}
+	})
+
+	t.Run("RG0 addition waits for local manager update", func(t *testing.T) {
+		store := testStoreWithSetConfig(t, base)
+		initial := store.ActiveConfig()
+		cm := cluster.NewManager(0, 1)
+		cm.UpdateConfig(initial.Chassis.Cluster)
+		cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+		if _, known := cm.LocalGroupPrimary(0); known {
+			t.Fatal("FIXTURE: manager must initially lack RG0")
+		}
+
+		if _, err := store.LoadSet("set chassis cluster redundancy-group 0 node 0 priority 1"); err != nil {
+			t.Fatalf("add RG0 to candidate: %v", err)
+		}
+		current, err := store.Commit()
+		if err != nil {
+			t.Fatalf("commit RG0 addition: %v", err)
+		}
+		hasRG0 := false
+		for _, group := range current.Chassis.Cluster.RedundancyGroups {
+			if group.ID == 0 {
+				hasRG0 = true
+				break
+			}
+		}
+		if !hasRG0 {
+			t.Fatal("FIXTURE: committed config must declare RG0")
+		}
+		if _, known := cm.LocalGroupPrimary(0); known {
+			t.Fatal("FIXTURE: apply tail must not have updated the manager yet")
+		}
+
+		d := &Daemon{cluster: cm, store: store}
+		if !d.ownsIPsecConn(current, ipsecSANameIndex(current), "vpn-plain") {
+			t.Fatal("FIXTURE: stale manager's undeclared-RG0 fallback must own via RG1")
+		}
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		var initiated []string
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+
+		// applyRethServicesForRG queued this RG1 edge before the apply tail
+		// publishes RG0 to Manager. The current config snapshot must win.
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: declared RG0 reached RG1 edge during apply lag: %v", initiated)
+		}
 	})
 
 	t.Run("RG0 declared and held by the peer excludes it", func(t *testing.T) {
@@ -247,7 +330,303 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 				"only a data RG must not initiate a tunnel bound to an interface " +
 				"the peer still holds")
 		}
+
+		var initiated []string
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: declared RG0 name reached data-RG edge: %v", initiated)
+		}
+
+		cm.SetGroupStateForTesting(0, cluster.StatePrimary)
+		d.reinitiateIPsecSAsForRG(0)
+		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+			t.Fatalf("#17784: declared RG0 name was not initiated on its RG0 edge: %v", initiated)
+		}
 	})
+
+	t.Run("declared RG0 primary does not enter the data edge", func(t *testing.T) {
+		store := testStoreWithSetConfig(t, append(append([]string{}, base...),
+			"set chassis cluster redundancy-group 0 node 0 priority 1"))
+		cfg := store.ActiveConfig()
+		cm := cluster.NewManager(0, 1)
+		cm.UpdateConfig(cfg.Chassis.Cluster)
+		cm.SetGroupStateForTesting(0, cluster.StatePrimary)
+		cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+		d := &Daemon{cluster: cm, store: store}
+		if !d.ownsIPsecConn(cfg, ipsecSANameIndex(cfg), "vpn-plain") {
+			t.Fatal("FIXTURE: local primary RG0 must own the declared unanchored name")
+		}
+		var initiated []string
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: declared RG0 name reached data edge despite local RG0 ownership: %v",
+				initiated)
+		}
+		d.reinitiateIPsecSAsForRG(0)
+		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+			t.Fatalf("#17784: declared RG0 name was not initiated on RG0 edge: %v", initiated)
+		}
+	})
+
+	t.Run("peer declares RG0 blocks the local undeclared fallback", func(t *testing.T) {
+		store := testStoreWithSetConfig(t, base)
+		cfg := store.ActiveConfig()
+		cm := cluster.NewManager(0, 1)
+		cm.UpdateConfig(cfg.Chassis.Cluster)
+		cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+		if _, known := cm.LocalGroupPrimary(0); known {
+			t.Fatal("FIXTURE: local RG0 must be undeclared for this cell")
+		}
+		// Model the peer's latest heartbeat after it has declared RG0
+		// and reports it primary, while local config-sync still lacks it.
+		cm.SetPeerGroupStateForTesting(0, cluster.StatePrimary)
+		var initiated []string
+		d := &Daemon{cluster: cm, store: store}
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: peer-declared RG0 primary must block the local "+
+				"undeclared-RG0 fallback, initiated %v", initiated)
+		}
+		// Presence of the RG0 heartbeat entry fences the fallback even
+		// when the peer currently reports RG0 secondary.
+		cm.SetPeerGroupStateForTesting(0, cluster.StateSecondary)
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: peer-declared secondary RG0 must block fallback, initiated %v",
+				initiated)
+		}
+		// CONTROL: with no peer RG0 entry at all, the same owned RG1
+		// edge still initiates the unanchored name.
+		cm2 := cluster.NewManager(0, 1)
+		cm2.UpdateConfig(cfg.Chassis.Cluster)
+		cm2.SetGroupStateForTesting(1, cluster.StatePrimary)
+		d.cluster = cm2
+		initiated = nil
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+			t.Fatalf("#17784: peer-undeclared control must initiate on owned RG1, got %v", initiated)
+		}
+	})
+}
+
+func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
+	base := []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster authentication-key test-cluster-psk-17784",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 gigether-options redundant-parent reth1",
+		"set interfaces ge-0/0/3 unit 0 family inet address 10.0.3.1/24",
+		"set security ike gateway gw-plain address 198.51.100.3",
+		"set security ike gateway gw-plain external-interface ge-0/0/3.0",
+		"set security ipsec vpn vpn-plain ike gateway gw-plain",
+		"set security ipsec vpn vpn-plain bind-interface st0",
+		"set security ipsec vpn vpn-plain pre-shared-key fixture-secret",
+	}
+	for _, tc := range []struct {
+		name          string
+		clear         func(*cluster.Manager)
+		async         bool
+		loseOwnership bool
+	}{
+		{
+			name:  "heartbeat prunes peer RG0",
+			clear: func(cm *cluster.Manager) { cm.ClearPeerGroupStateForTesting(0) },
+		},
+		{
+			name:  "peer heartbeat liveness expires",
+			clear: func(cm *cluster.Manager) { cm.ClearPeerHeartbeatLiveness() },
+		},
+		{
+			name:  "scheduled retry is asynchronous and coalesced",
+			clear: func(cm *cluster.Manager) { cm.ClearPeerGroupStateForTesting(0) },
+			async: true,
+		},
+		{
+			name:          "local ownership loss consumes owed fallback",
+			clear:         func(cm *cluster.Manager) { cm.ClearPeerGroupStateForTesting(0) },
+			loseOwnership: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStoreWithSetConfig(t, base)
+			cm := cluster.NewManager(0, 1)
+			cm.UpdateConfig(store.ActiveConfig().Chassis.Cluster)
+			cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+			cm.SetPeerGroupStateForTesting(0, cluster.StatePrimary)
+			d := &Daemon{cluster: cm, store: store}
+			d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+			d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+
+			var localNames, initiated, terminated []string
+			initiationDone := make(chan string, 4)
+			var activeReadStarted chan struct{}
+			var releaseActiveRead chan struct{}
+			releasedActiveRead := false
+			if tc.async {
+				activeReadStarted = make(chan struct{}, 2)
+				releaseActiveRead = make(chan struct{})
+				defer func() {
+					if !releasedActiveRead {
+						close(releaseActiveRead)
+					}
+				}()
+				d.ipsecActiveNamesFn = func() ([]string, error) {
+					select {
+					case activeReadStarted <- struct{}{}:
+					default:
+					}
+					<-releaseActiveRead
+					return append([]string(nil), localNames...), nil
+				}
+			} else {
+				d.ipsecActiveNamesFn = func() ([]string, error) {
+					return append([]string(nil), localNames...), nil
+				}
+			}
+			d.ipsecInitiateFn = func(name string) error {
+				initiated = append(initiated, name)
+				initiationDone <- name
+				localNames = append(localNames, name)
+				return nil
+			}
+			d.ipsecTerminateFn = func(name string) error {
+				terminated = append(terminated, name)
+				return nil
+			}
+
+			d.reinitiateIPsecSAsForRG(1)
+			if len(initiated) != 0 {
+				t.Fatalf("live peer RG0 fence initiated %v", initiated)
+			}
+			d.ipsecFallbackMu.Lock()
+			state := d.ipsecFallbacks["vpn-plain"]
+			d.ipsecFallbackMu.Unlock()
+			if !state.owed {
+				t.Fatal("peer-fenced fallback was not retained as owed")
+			}
+
+			tc.clear(cm)
+			if primary, known := cm.PeerGroupPrimary(0); primary || known {
+				t.Fatalf("cleared peer RG0 fence = (%v, %v), want (false, false)",
+					primary, known)
+			}
+			if tc.loseOwnership {
+				cm.SetGroupStateForTesting(1, cluster.StateSecondary)
+				d.retryOwedIPsecFallback()
+				if len(initiated) != 0 {
+					t.Fatalf("ownership-lost retry initiated %v", initiated)
+				}
+				d.ipsecFallbackMu.Lock()
+				_, stillOwed := d.ipsecFallbacks["vpn-plain"]
+				d.ipsecFallbackMu.Unlock()
+				if stillOwed {
+					t.Fatal("ownership-lost fallback remained owed")
+				}
+				return
+			}
+			if tc.async {
+				d.scheduleOwedIPsecFallbackRetry()
+				select {
+				case <-activeReadStarted:
+				case <-time.After(time.Second):
+					t.Fatal("scheduled fallback retry did not start")
+				}
+				d.scheduleOwedIPsecFallbackRetry()
+				select {
+				case <-activeReadStarted:
+					t.Fatal("a second retry pass started before the first completed")
+				case <-time.After(50 * time.Millisecond):
+				}
+				close(releaseActiveRead)
+				releasedActiveRead = true
+				select {
+				case name := <-initiationDone:
+					if name != "vpn-plain" {
+						t.Fatalf("scheduled retry initiated %q, want vpn-plain", name)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("scheduled fallback retry did not initiate")
+				}
+				ticker := time.NewTicker(time.Millisecond)
+				defer ticker.Stop()
+				deadline := time.NewTimer(time.Second)
+				defer deadline.Stop()
+				for {
+					d.ipsecFallbackMu.Lock()
+					running := d.ipsecFallbackRetryRunning
+					d.ipsecFallbackMu.Unlock()
+					if !running {
+						break
+					}
+					select {
+					case <-ticker.C:
+					case <-deadline.C:
+						t.Fatal("scheduled fallback retry did not finish")
+					}
+				}
+			} else {
+				d.retryOwedIPsecFallback()
+			}
+			if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+				t.Fatalf("owed fallback retry initiated %v, want [vpn-plain]", initiated)
+			}
+
+			// Before the active-SA view has ever shown the first initiate,
+			// a missing name is only view lag and must not repeat it.
+			localNames = nil
+			d.reinitiateIPsecSAsForRG(1)
+			if len(initiated) != 1 || len(terminated) != 0 {
+				t.Fatalf("fallback repeated before active-SA view caught up: initiated=%v terminated=%v",
+					initiated, terminated)
+			}
+			// Once the SA is observed live, a later confirmed disappearance
+			// reopens the claim; the initial view-lag phase did not.
+			localNames = []string{"vpn-plain"}
+			d.reinitiateIPsecSAsForRG(1)
+			localNames = nil
+			d.reinitiateIPsecSAsForRG(1)
+			if len(initiated) != 2 || len(terminated) != 0 {
+				t.Fatalf("confirmed SA disappearance initiated=%v terminated=%v, want one retry and no belt",
+					initiated, terminated)
+			}
+			// A fresh ownership epoch is a new takeover: a leftover local
+			// duplicate must be belt-terminated and initiated again.
+			localNames = []string{"vpn-plain"}
+			d.bumpIPsecRGOwnershipEpoch(1)
+			d.reinitiateIPsecSAsForRG(1)
+			if len(initiated) != 3 || len(terminated) != 1 {
+				t.Fatalf("new RG1 ownership epoch initiated=%v terminated=%v, want third initiate and one belt",
+					initiated, terminated)
+			}
+		})
+	}
 }
 
 // ── WIRING ─────────────────────────────────────────────────────────────────

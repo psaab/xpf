@@ -2162,7 +2162,7 @@ fn run_stage11_frame_poll_on_snapshot_with_options_and_park_witness_10516(
     u64,
     Option<Stage11PendingNeighWitness10516>,
 ) {
-    let mut forwarding = build_forwarding_state(snapshot);
+    let forwarding = build_forwarding_state(snapshot);
     forwarding.ipsec_sa.publish_empty_dump_for_test();
     if let Some(sa_key) = sa_key {
         forwarding.ipsec_sa.upsert(sa_key);
@@ -2270,7 +2270,7 @@ fn run_stage11_frame_poll_with_seeded_ike_10516(
     usize,
     Vec<bool>,
 ) {
-    let mut forwarding = build_forwarding_state(snapshot);
+    let forwarding = build_forwarding_state(snapshot);
     forwarding.ipsec_sa.publish_empty_dump_for_test();
     if stale {
         forwarding.ipsec_sa.mark_stale();

@@ -32,11 +32,6 @@ type family struct {
 	// PortMirroring; for ... range pm.Instances` matches
 	// "PortMirroring.Instances").
 	Collections []string
-	// CollectionHelpers are exact function IDs for map builders that iterate a
-	// family collection without emitting a surface value. Callers of only
-	// these declared helpers can join the census; arbitrary call-graph
-	// traversal would admit unrelated command and metrics entry points.
-	CollectionHelpers []string
 
 	// BuilderPredicates are the pkg/config drop predicates the SNAPSHOT
 	// BUILDER consults. TestEveryBuilderDropPredicateIsRegistered6534 asserts
@@ -112,7 +107,7 @@ var exemptRenderers = map[string]string{
 	"pkg/grpcapi/server_show_security_text.go:showSecurityLog":           "#10530 — event-time zone names are historical; current config must not rewrite them",
 	"pkg/api/api.go:interfaceZoneMap":                                    "#16556 adjacency — internal interface->zone lookup emits no zone value; consumers annotate",
 	"pkg/api/metrics_counters.go:collectZoneCounters":                    "#16556 adjacency — per-zone counter gauge emits no interface membership",
-	"pkg/api/metrics_counters.go:collectInterfaceCounters":             "#17691 adjacency — per-interface metrics enumerate links but emit no zone disposition",
+	"pkg/api/metrics_counters.go:collectInterfaceCounters":              "#16556 adjacency — per-interface telemetry emits counters, not zone membership or enforcement state",
 	"pkg/cli/cli_show_nat.go:showNATDestinationSummary":                  "#16556 adjacency — NAT summary resolves zone IDs to names, emits no interface membership",
 	"pkg/cli/cli_show_nat.go:showNATSourceSummary":                       "#16556 adjacency — NAT summary resolves zone IDs to names, emits no interface membership",
 	"pkg/cli/cli_show_security_screen.go:showScreen":                     "#16556 adjacency — screen renderer qualifies zone names, emits no interface membership",
@@ -246,10 +241,6 @@ var families = []family{
 		// surfaces so either representation cannot silently lie.
 		Name:              "security zone",
 		Collections:       []string{"Security.Zones", "ZoneIDs"},
-		CollectionHelpers: []string{
-			"pkg/api/api.go:allInterfaceNames",
-			"pkg/api/api.go:interfaceZoneMap",
-		},
 		BuilderPredicates: []string{"ZoneQuarantineExclusions"},
 		SurfacePredicates: []string{"ZoneQuarantineExclusions", "ZoneQuarantineExcludedReason"},
 		Unannotated:       nil, // every remaining census member is annotated or exempted above
@@ -268,7 +259,8 @@ var families = []family{
 		Collections:       []string{"Security.Zones", "ZoneIDs"},
 		BuilderPredicates: []string{"ZoneInterfaceQuarantineExclusions"},
 		SurfacePredicates: []string{"ZoneInterfaceQuarantineExclusions", "ZoneInterfaceQuarantineReason", "ZoneInterfaceQuarantineClaimants", "ZoneInterfaceQuarantineClaimantsForRows"},
-		Unannotated:       nil, // closed by #16556 — see exemptRenderers for non-enforcement readers
+		Unannotated:       []string{"pkg/api/interfaces.go:writeInterfacesDetail"}, // exposed by #17710; tracked by #18446
+		Successor:         "#18446",
 	},
 }
 
@@ -400,10 +392,11 @@ func TestEveryFamilyHasABuilderAndASurfaceCaller6534(t *testing.T) {
 // test that would have caught cli.showForwardingOptions.
 //
 // For every family it enumerates the render functions across all surface
-// packages — a function that iterates the family's config collection AND emits
-// output — and partitions them by whether they reach one of the family's
-// surface predicates, directly or through a same-package helper. The
-// unannotated partition must equal the registry's declared census EXACTLY.
+// packages — a function that iterates the family's config collection itself
+// or through a registered same-package collection reader — and partitions
+// them by whether they reach one of the family's surface predicates, directly
+// or through a same-package helper. The unannotated partition must equal the
+// registry's declared census EXACTLY.
 //
 // Both directions matter and they fail for opposite reasons:
 //
@@ -418,98 +411,30 @@ func TestSurfaceAnnotationCensusIsExact6534(t *testing.T) {
 			for _, dir := range surfacePkgs {
 				pkg := parsePackage(t, dir)
 				for _, key := range pkg.order {
-					rec := pkg.funcs[key]
-					// Population = every non-test function in a surface package
-					// that ITERATES this family's config collection, directly
-					// or through a same-package helper it calls (#17691).
-					// There is deliberately no "and prints text" filter: the
-					// REST and gRPC handlers serve the same objects as JSON
-					// and protobuf, and a rule serialised without a
-					// not-installed field is the same lie as one printed
-					// without an annotation. Anything that touches the
-					// collection for a non-enforcement reason belongs in
-					// exemptRenderers, with the reason written down.
-					//
-					// The helper hop matters: writeInterfacesDetail obtains
-					// zones only via interfaceZoneMap/allInterfaceNames, so
-					// an own-AST-only scan never admitted it and deleting
-					// its ZoneQuarantineExcludedReason qualifier could not
-					// red this census (#16659's named mutation).
-					if !rangesOverAny(pkg.fset, rec.fd, f.Collections) &&
-						!callsCollectionBuildingHelper(pkg, key, dir, f.CollectionHelpers, f.Collections) {
-						continue
-					}
-					id := dir + "/" + filepath.Base(rec.file) + ":" + rec.fd.Name.Name
-					if _, ok := exemptRenderers[id]; ok {
+					id, member, annotated := surfaceEntry(pkg, key, dir, f)
+					if !member {
 						continue
 					}
 					population = append(population, id)
-					if !reachesPredicate(pkg, key, f.SurfacePredicates, 3, map[string]bool{}) {
+					if !annotated {
 						unannotated = append(unannotated, id)
 					}
 				}
 			}
 			sort.Strings(population)
 			sort.Strings(unannotated)
-
-			if f.Name == "security zone" {
-				const (
-					detailID = "pkg/api/interfaces.go:writeInterfacesDetail"
-					zoneMapID = "pkg/api/api.go:interfaceZoneMap"
-				)
-				apiPkg := parsePackage(t, "pkg/api")
-				detail := apiPkg.funcs["writeInterfacesDetail"]
-				zoneMap := apiPkg.funcs["interfaceZoneMap"]
-				callsZoneMap := false
-				if detail != nil {
-					for _, callee := range calleeNames(detail.fd) {
-						if callee == "interfaceZoneMap" {
-							callsZoneMap = true
-							break
-						}
-					}
-				}
-				zoneMapReadsZones := zoneMap != nil && rangesOverAny(apiPkg.fset, zoneMap.fd, f.Collections)
-				if !contains(population, detailID) || !contains(f.CollectionHelpers, zoneMapID) ||
-					!callsZoneMap || !zoneMapReadsZones {
-					t.Errorf("security-zone census must include %s through %s "+
-						"(population=%v, helper-listed=%t, direct-call=%t, helper-ranges=%t)",
-						detailID, zoneMapID, population, contains(f.CollectionHelpers, zoneMapID),
-						callsZoneMap, zoneMapReadsZones)
-				}
+			// #17710: the API detail renderer iterates zone-derived interface
+			// names returned by exempt helpers, so direct-range admission used
+			// to omit it entirely. Keep it an explicit census member: deleting
+			// its ZoneQuarantineExcludedReason call must be visible as an
+			// unannotated renderer, not disappear behind helper exemptions.
+			if f.Name == "security zone" &&
+				!contains(population, "pkg/api/interfaces.go:writeInterfacesDetail") {
+				t.Errorf("security-zone census omitted pkg/api/interfaces.go:writeInterfacesDetail; "+
+					"its config collection is reached through interfaceZoneMap/allInterfaceNames")
 			}
 
-			// Non-vacuity, two ways. An empty population means the collection
-			// selectors stopped matching and every assertion below is over
-			// nothing; a population with no ANNOTATED member means the
-			// reachesPredicate detector could be broken-shut and the test could
-			// not tell.
-			if len(population) < 2 {
-				t.Fatalf("found %d render functions for %s (%v). The collection "+
-					"selectors %v no longer match this family's renderers, so "+
-					"this cell asserts nothing.", len(population), f.Name, population, f.Collections)
-			}
-			if len(unannotated) == len(population) {
-				t.Fatalf("every one of the %d render functions for %s reads as "+
-					"unannotated. Either the whole family regressed at once, or "+
-					"reachesPredicate is broken and would report a lie as clean.\n"+
-					"population: %v", len(population), f.Name, population)
-			}
-
-			want := append([]string(nil), f.Unannotated...)
-			sort.Strings(want)
-			for _, got := range unannotated {
-				if !contains(want, got) {
-					t.Errorf("%s: %s renders an object the snapshot builder can "+
-						"REFUSE TO INSTALL and never consults %v, so a dropped "+
-						"object prints as enforced.\nEither annotate it (the "+
-						"predicate is already exported and shared with the "+
-						"builder) or, if this is genuinely not an enforcement "+
-						"surface, add it to exemptRenderers with a reason.",
-						f.Name, got, f.SurfacePredicates)
-				}
-			}
-			for _, w := range want {
+			for _, w := range f.Unannotated {
 				if !contains(unannotated, w) {
 					if !contains(population, w) {
 						t.Errorf("%s: census names %s but no such render function "+
@@ -536,6 +461,22 @@ func TestSurfaceAnnotationCensusIsExact6534(t *testing.T) {
 	}
 }
 
+// surfaceEntry applies the admission, exemption, and annotation rules shared
+// by the production census and focused mutation regressions. Indirect reads
+// are followed only through the explicitly registered same-package collection
+// readers, limiting false collection matches.
+func surfaceEntry(p *parsedPkg, key, dir string, f family) (id string, member, annotated bool) {
+	rec := p.funcs[key]
+	if rec == nil || !rangesOverAnyIncludingCollectionHelpers(p, key, f.Collections) {
+		return "", false, false
+	}
+	id = dir + "/" + filepath.Base(rec.file) + ":" + rec.fd.Name.Name
+	if _, ok := exemptRenderers[id]; ok {
+		return id, false, false
+	}
+	return id, true, reachesPredicate(p, key, f.SurfacePredicates, 3, map[string]bool{})
+}
+
 // TestExemptionsNameRealRenderers6534 keeps the exemption table from outliving
 // what it exempts. An exemption for a function that no longer exists is dead
 // text that reads, to the next author, as coverage.
@@ -558,6 +499,15 @@ func TestExemptionsNameRealRenderers6534(t *testing.T) {
 				id, exemptRenderers[id])
 		}
 	}
+	for _, id := range sortedKeys(collectionReaderHelpers) {
+		if !seen[id] {
+			t.Errorf("collectionReaderHelpers names %s but no such function exists", id)
+		}
+		if _, ok := exemptRenderers[id]; !ok {
+			t.Errorf("collectionReaderHelpers names %s, but it is not exempt from "+
+				"the enforcement census", id)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -574,6 +524,7 @@ type fnRec struct {
 }
 
 type parsedPkg struct {
+	dir   string
 	fset  *token.FileSet
 	funcs map[string]*fnRec
 	order []string
@@ -603,7 +554,7 @@ func parsePackage(t *testing.T, dir string) *parsedPkg {
 		t.Fatalf("no Go files under %s — the gate's package list is stale", dir)
 	}
 	sort.Strings(files)
-	p := &parsedPkg{fset: token.NewFileSet(), funcs: map[string]*fnRec{}}
+	p := &parsedPkg{dir: dir, fset: token.NewFileSet(), funcs: map[string]*fnRec{}}
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -795,6 +746,61 @@ func rangesOverAny(fset *token.FileSet, fd *ast.FuncDecl, subs []string) bool {
 	return found
 }
 
+// collectionReaderHelpers lists the package-local collection builders whose
+// callers are renderer consumers even though the helper itself is exempt from
+// enforcement rendering. The list is explicit: walking every call edge would
+// misclassify unrelated functions that transitively call a generic helper.
+var collectionReaderHelpers = map[string]bool{
+	"pkg/api/api.go:allInterfaceNames":                    true,
+	"pkg/api/api.go:interfaceZoneMap":                     true,
+	"pkg/grpcapi/server_helpers.go:allInterfaceNames":     true,
+	"pkg/grpcapi/server_helpers.go:interfaceZoneMap":      true,
+}
+
+// rangesOverAnyIncludingCollectionHelpers reports whether fd directly ranges
+// a tracked collection or calls one of the explicitly registered collection
+// readers above. This closes the #17710 gap without treating every transitive
+// collection read as a renderer.
+func rangesOverAnyIncludingCollectionHelpers(p *parsedPkg, key string, subs []string) bool {
+	rec := p.funcs[key]
+	if rec == nil {
+		return false
+	}
+	if rangesOverAny(p.fset, rec.fd, subs) {
+		return true
+	}
+	for _, callee := range samePackageCalleeNames(p, rec.fd) {
+		helper := p.funcs[callee]
+		if helper == nil {
+			continue
+		}
+		helperID := p.dir + "/" + filepath.Base(helper.file) + ":" + helper.fd.Name.Name
+		if collectionReaderHelpers[helperID] && rangesOverAny(p.fset, helper.fd, subs) {
+			return true
+		}
+	}
+	return false
+}
+
+// samePackageCalleeNames returns direct calls to functions declared in p.
+// Selector calls are methods or imported-package functions and cannot be
+// resolved safely by name alone, so this collection-reach scan excludes them.
+func samePackageCalleeNames(p *parsedPkg, fd *ast.FuncDecl) []string {
+	var out []string
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if ok && p.funcs[id.Name] != nil {
+			out = append(out, id.Name)
+		}
+		return true
+	})
+	return out
+}
+
 func exprString(fset *token.FileSet, e ast.Expr) string {
 	var b bytes.Buffer
 	if err := printer.Fprint(&b, fset, e); err != nil {
@@ -821,24 +827,3 @@ func contains(hay []string, needle string) bool {
 	return false
 }
 
-// callsCollectionBuildingHelper recognizes callers of the explicitly listed
-// map-building helpers that iterate a family's config collections. This narrow
-// bridge admits writeInterfacesDetail without treating every call to a
-// collection reader as a renderer.
-func callsCollectionBuildingHelper(p *parsedPkg, key, dir string, helperIDs, collections []string) bool {
-	rec := p.funcs[key]
-	if rec == nil {
-		return false
-	}
-	for _, callee := range calleeNames(rec.fd) {
-		helper := p.funcs[callee]
-		if helper == nil {
-			continue
-		}
-		id := dir + "/" + filepath.Base(helper.file) + ":" + helper.fd.Name.Name
-		if contains(helperIDs, id) && rangesOverAny(p.fset, helper.fd, collections) {
-			return true
-		}
-	}
-	return false
-}

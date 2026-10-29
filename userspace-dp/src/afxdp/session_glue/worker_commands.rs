@@ -216,6 +216,7 @@ pub(in crate::afxdp) fn apply_worker_commands(
             vacate_all_shared_exact_slots: &mut vacate_all_shared_exact_slots,
         };
         commands::dispatch_worker_commands(&mut dispatch_context, scratch);
+
     }
     // #9720: step the refused-transition debt by the drained slice and
     // dispatch the ops whose position is reached — AFTER the slice. The

@@ -389,8 +389,6 @@ type flowFamily struct {
 	err    error
 
 	exporters []flowExporter
-	cancel    context.CancelFunc
-	wg        *sync.WaitGroup
 
 	configured     atomic.Int64
 	excluded       atomic.Int64
@@ -660,14 +658,6 @@ func (ff *flowFamily) reconcile(cfg *config.Config) bool {
 	allExps = append(allExps, retainedExps...)
 	allExps = append(allExps, newExps...)
 	ff.exporters = allExps
-	if len(published) > 0 {
-		last := published[len(published)-1]
-		ff.cancel = last.cancel
-		ff.wg = last.wg
-	} else {
-		ff.cancel = nil
-		ff.wg = nil
-	}
 	d.flowStateMu.Lock()
 	ff.carryFlowStateLocked(published)
 	if ff.stateCarryTestHook != nil {
@@ -816,41 +806,26 @@ func liveGroups(b *flowBundle) []flowGroup {
 
 // teardownGroupsLocked retires exactly groups (#4963 + #16752).
 func (ff *flowFamily) teardownGroupsLocked(groups []flowGroup) {
-	if len(groups) == 0 {
-		for _, exp := range ff.exporters {
-			exp.Retire()
+	seen := make(map[flowExporter]bool)
+	var live []flowGroup
+	for _, g := range groups {
+		if g.exp == nil || seen[g.exp] {
+			continue
 		}
-		if ff.cancel != nil {
-			ff.cancel()
+		seen[g.exp] = true
+		live = append(live, g)
+	}
+	for _, g := range live {
+		g.exp.Retire()
+	}
+	for _, g := range live {
+		if g.cancel != nil {
+			g.cancel()
 		}
-		joinWithBudget(ff.wg, ff.name)
-		for _, exp := range ff.exporters {
-			exp.Close()
-		}
-	} else {
-		seen := make(map[flowExporter]bool)
-		var live []flowGroup
-		for _, g := range groups {
-			if g.exp == nil || seen[g.exp] {
-				continue
-			}
-			seen[g.exp] = true
-			live = append(live, g)
-		}
-		for _, g := range live {
-			g.exp.Retire()
-		}
-		for _, g := range live {
-			if g.cancel != nil {
-				g.cancel()
-			}
-			joinWithBudget(g.wg, ff.name)
-			g.exp.Close()
-		}
+		joinWithBudget(g.wg, ff.name)
+		g.exp.Close()
 	}
 	ff.exporters = nil
-	ff.cancel = nil
-	ff.wg = nil
 }
 
 // exportError returns this family's last build error.

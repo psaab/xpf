@@ -5,15 +5,13 @@
 
 use super::*;
 use crate::afxdp::PROTO_TCP;
-use crate::afxdp::TX_BATCH_SIZE;
 use crate::afxdp::cos::queue_service::{
     select_cos_guarantee_batch, select_exact_cos_guarantee_queue_with_fast_path,
 };
 use crate::afxdp::cos::token_bucket::COS_MIN_BURST_BYTES;
 use crate::afxdp::tx::test_support::*;
 use crate::afxdp::types::{
-    COS_FLOW_FAIR_BUCKETS, CoSQueueDropCounters, CoSQueueOwnerProfile, CoSQueueWaterfillCounters,
-    FlowRrRing, PreparedTxRecycle, SharedCoSExactBacklog, SharedCoSQueueLease,
+    CoSQueueDropCounters, CoSQueueOwnerProfile, CoSQueueWaterfillCounters, PreparedTxRecycle, SharedCoSExactBacklog, SharedCoSQueueLease,
 };
 use std::sync::Arc;
 use std::sync::atomic::Ordering;

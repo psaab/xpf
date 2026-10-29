@@ -1810,9 +1810,11 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 	}
 	staged.spec = installSpec
 	oldRetired := false
+	drainAttempted := false
 	guarded, canGuard := nftInstaller.(ipsecCaptureGuardedInstaller)
 	if old != nil && canGuard {
 		err := guarded.InstallIpsecDivertWithDrain(staged.spec, func() error {
+			drainAttempted = true
 			err := old.close()
 			if err == nil {
 				oldRetired = true
@@ -1820,19 +1822,12 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 			return err
 		})
 		if err != nil {
-			// The guarded installer retains its deny authority on every
-			// post-ACK failure. Never restore old as an authority after the
-			// transition has been touched.
-			//
-			// #16703: that contract holds only when a guard table
-			// actually exists. If the guard install itself failed (the
-			// #14696 bridge sdifname EOPNOTSUPP class), no guard was
-			// ever installed, so re-verify before retiring the old
-			// actor. When no guard verifies, attempt one explicit
-			// guard install from the staged spec; only if that also
-			// fails is there no deny authority to retain, and the old
-			// actor is still retired (its divert table stays orphaned
-			// and the failure is reported, never silent).
+			// A failed initial guard setup can return before the drain
+			// callback, leaving the old actor and divert generation
+			// untouched. If neither readback nor the explicit fallback
+			// install verifies a guard, retain that prior authority; once
+			// drain starts, actor teardown may be partial and the
+			// quarantine/orphan path is needed.
 			guardVerified := false
 			if verifier, ok := nftInstaller.(ipsecCaptureGuardVerifier); ok {
 				if verifyErr := verifier.VerifyIpsecQuarantineGuard(); verifyErr == nil {
@@ -1847,6 +1842,10 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 				} else {
 					guardVerified = true
 				}
+			}
+			if !guardVerified && !drainAttempted {
+				_ = d.rollbackIpsecCaptureStage(old, staged)
+				return fmt.Errorf("ipsec capture: guarded divert transition: %w (no quarantine guard verified)", err)
 			}
 			if !oldRetired {
 				_ = old.close()

@@ -1,4 +1,5 @@
 use super::*;
+use crate::screen::FragView;
 use crate::event_stream::codec::DataplaneEventKind;
 use crate::event_stream::{DataplaneEventRateLimitConfig, EventStreamWorkerHandle};
 use crate::session::SessionKey;
@@ -308,10 +309,9 @@ fn screen_drop_event_emit_uses_screen_reason_flag() {
         is_fragment: false,
         is_first_fragment: false,
         ip_ihl: 5,
-        ip_frag_off: 0,
+        frag: None,
         ip_total_len: 60,
         ip_payload_len: 0,
-        frag_data_off: 0,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     };
@@ -368,10 +368,9 @@ fn screen_alarm_event_is_permit_not_deny() {
         is_fragment: false,
         is_first_fragment: false,
         ip_ihl: 5,
-        ip_frag_off: 0,
+        frag: None,
         ip_total_len: 60,
         ip_payload_len: 0,
-        frag_data_off: 0,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     };
@@ -443,10 +442,14 @@ fn screen_reason_id_maps_icmp_fragment() {
         is_fragment: true,
         is_first_fragment: false,
         ip_ihl: 5,
-        ip_frag_off: 0x2000,
+        frag: Some(FragView {
+            offset_bytes: 0,
+            more: true,
+            data_len: 40,
+            pod_extent: 60,
+        }),
         ip_total_len: 60,
         ip_payload_len: 0,
-        frag_data_off: 0,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     };

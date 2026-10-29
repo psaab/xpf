@@ -1623,7 +1623,12 @@ func (d *Daemon) installDeferredFilterTermSyslog(generation uint64) {
 	if cfg == nil {
 		return
 	}
-	if cr := d.applyResult(); cr != nil && cr.Generation != 0 && generation < cr.Generation {
+	rt := d.dataplane()
+	cr := dataplane.LastApplyResultOf(rt)
+	if cr != nil && cr.Generation != 0 && generation < cr.Generation {
+		return
+	}
+	if applied := appliedSnapshotGenerationOf(rt); applied != 0 && generation < applied {
 		return
 	}
 	d.eventReader.SetFilterTermSyslogForGeneration(generation, dpuserspace.FilterTermSyslogMap(cfg))

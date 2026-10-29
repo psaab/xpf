@@ -249,20 +249,22 @@ func (c *xpfCollector) initGlobalDescriptors() {
 		"Total NAT64 (IPv6<->IPv4) packet translations.",
 		nil, nil,
 	)
-	// #15086/#16707: scrape-health signals. Always emitted, including at
+	// #15086/#16707/#17753: scrape-health signals. Always emitted, including at
 	// zero, so an alert on `> 0` distinguishes "bad label values are
 	// reaching the exporter" from "the exporter stopped reporting".
-	// invalidLabelValuesTotal counts label VALUES sanitized (one per
-	// value, not per byte); collectorPanicsTotal counts collector
-	// passes the metrics lane recovered — a nonzero value is always a
-	// bug, since sanitization should make panics unreachable.
+	// invalidLabelValuesTotal counts label VALUES with invalid UTF-8 that
+	// were sanitized (one per value, not per byte); backslash-only rewrites
+	// do not affect the count. collectorPanicsTotal counts collector
+	// passes the metrics lane recovered — a nonzero value is always a bug,
+	// since sanitization should make panics unreachable.
 	c.invalidLabelValuesTotal = prometheus.NewDesc(
 		"xpf_metrics_invalid_label_values_total",
 		"Total Prometheus label values that carried invalid UTF-8 and "+
-			"were escaped as \\xNN at emit time (#15086, #16707). The "+
-			"sample is still published with the sanitized value; a "+
-			"nonzero count means a committed config identifier holds "+
-			"raw non-UTF-8 bytes.",
+			"were escaped as \\xNN at emit time (#15086, #16707). Literal "+
+			"backslashes are encoded as \\x5c to reserve the escape "+
+			"introducer (#17753). The sample is still published with the "+
+			"sanitized value; a nonzero count means a committed config "+
+			"identifier holds raw non-UTF-8 bytes.",
 		nil, nil,
 	)
 	c.collectorPanicsTotal = prometheus.NewDesc(

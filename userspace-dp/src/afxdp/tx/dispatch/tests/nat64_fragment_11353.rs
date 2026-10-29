@@ -106,8 +106,7 @@ fn assert_nat64_v6_packet_fragments_for_ipv4_egress_mtu(protocol: u8) {
         &request.decision,
         None,
         false,
-        &forwarding,
-    )
+        &forwarding, None)
     .expect("unfragmented NAT64 translation");
     assert_eq!(u16::from_be_bytes([expected[16], expected[17]]), 1260);
 
@@ -247,8 +246,7 @@ fn nat64_v6_nonfirst_fragment_fragments_for_ipv4_egress_mtu_11353() {
         &request.decision,
         None,
         false,
-        &forwarding,
-    )
+        &forwarding, None)
     .expect("unfragmented non-first NAT64 translation");
     assert_eq!(u16::from_be_bytes([expected[16], expected[17]]), 1252);
 

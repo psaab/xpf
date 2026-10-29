@@ -88,6 +88,7 @@ impl TxVlanTag {
     /// Build a present tag from its parts. `pcp` low 3 bits, `dei` low
     /// bit, `vid` low 12 bits are packed into the TCI. Used by the
     /// reflected-local-error path to preserve the inbound priority bits.
+    #[cfg(test)]
     #[inline]
     pub(in crate::afxdp) fn from_parts(tpid: u16, pcp: u8, dei: bool, vid: u16) -> TxVlanTag {
         let tci = (((pcp & 0x07) as u16) << 13)
@@ -132,6 +133,7 @@ impl From<u16> for TxVlanTag {
 }
 
 /// Length of an outer L2 header with optional 802.1Q tag.
+#[cfg(test)]
 #[inline]
 pub(in crate::afxdp) fn eth_header_len(vlan_id: u16) -> usize {
     TxVlanTag::from(vlan_id).header_len()

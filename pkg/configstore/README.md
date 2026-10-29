@@ -1971,11 +1971,17 @@ owned by the `journal/` subpackage.
   remote syslog — not on-box journal survival. `system_action` is deliberately
   EXCLUDED from `ListCommitHistory` (`show system commit` shows config commits
   only).
-- **Commit-history rows (#16721)** — `ListCommitHistoryRows` pairs each
-  filtered journal row with its Junos rollback label (live commit = 0
-  /`rollback 0`; k>=1 names the commit whose tree `rollback k`
-  restores, only while retained in the history ladder;
-  `commit_confirm` and `auto_rollback` rows have no label). Every
+- **Commit-history rows (#16721, #17748)** — `ListCommitHistoryRows`
+  reconciles each filtered commit row's `ConfigHash` against the active
+  tree and retained rollback ladder; it emits a label only for a matching
+  generation. This keeps labels aligned after history pushes without
+  commit rows (such as `SyncApply`), timeout rollback, and bounded journal
+  tails. A changed `config_sync` hash is a live-generation barrier so an
+  older identical-content commit cannot claim a sync-produced active tree;
+  a same-hash sync creates no barrier. The live commit is 0 /`rollback 0`;
+  k>=1 names the commit whose tree `rollback k` stages. `commit_confirm`
+  and `auto_rollback` rows
+  have no label. Every
   confirmation path (explicit confirm, plain commit, HA sync
   supersede, RG demotion) journals one `commit_confirm` row with its
   redacted principal. The shared `RenderCommitHistory` prints

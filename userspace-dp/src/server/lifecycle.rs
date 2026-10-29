@@ -741,7 +741,7 @@ pub(crate) fn run() -> Result<(), String> {
     };
     let main_session_domain = session_domain.clone();
 
-    let reinject_fallback = reinject_core.clone();
+    let _reinject_fallback = reinject_core.clone();
     let reinject_servers: ReinjectSocketServers = spawn_reinject_socket_servers(
         &args.control_socket,
         reinject_core.clone(),

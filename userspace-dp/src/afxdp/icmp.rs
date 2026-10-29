@@ -141,13 +141,13 @@ pub(super) fn can_generate_icmp_error_reply(
                 meta.ingress_vlan_id,
             );
             if source_is_invalid_for_icmp_error(meta.addr_family, packet)
-                || crate::afxdp::frame::src_is_directed_broadcast_in_table(
+                || crate::afxdp::frame::src_is_directed_broadcast(
                     forwarding,
                     packet,
                     icmp_table,
                 )
                 || dest_is_multicast_or_broadcast(meta.addr_family, packet)
-                || crate::afxdp::frame::dest_is_directed_broadcast_in_table(
+                || crate::afxdp::frame::dest_is_directed_broadcast(
                     forwarding,
                     packet,
                     icmp_table,

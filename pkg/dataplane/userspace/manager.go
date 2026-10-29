@@ -197,6 +197,16 @@ type Manager struct {
 	// restartAttemptInProgress distinguishes a supervisor retry from ordinary
 	// Compile bring-up, which is allowed to end a prior crash episode.
 	restartAttemptInProgress bool
+	// bringUpGen is the generation spawned by the in-progress
+	// ensureProcessLocked bring-up (0 = none). A child that dies
+	// before proving ready is that bring-up's failure, not a fresh
+	// unexpected exit: stopLocked must not crash-charge it (#18394).
+	bringUpGen uint64
+	// retryChildExitCountedLocked records that stopLocked already
+	// routed the current supervisor retry's published child exit
+	// through the crash handler (counted + charged), so
+	// ensureProcessLocked's deferred NM-1 charge must not fire again.
+	retryChildExitCountedLocked bool
 	// helperSupervisorObserver is a wake-only callback notified when the
 	// supervised helper changes between running and stopped. It is called
 	// under m.mu and MUST NOT call back into Manager; the daemon observer only
@@ -572,18 +582,13 @@ type Manager struct {
 	// latch is set; generation inequality alone is not sufficient because FIB
 	// bumps advance lastSnapshot.Generation without publishing a full snapshot.
 	pendingFullSnapshotMetadata bool
-	// appliedSnapshot is the config + generation the helper has
-	// ACTUALLY applied via a successful full apply_snapshot — the
-	// generation the helper echoes back as
-	// status.LastSnapshotGeneration (userspace-dp snapshot.rs sets
-	// last_snapshot_generation only on a full apply). It is captured
-	// ONLY at the apply_snapshot publish/catch-up sites via
-	// markAppliedSnapshotLocked, NOT on FIB-bump / neighbor-regen /
-	// content-dedup-skip paths (which advance publishedSnapshot or
-	// lastSnapshot.Generation without the helper accepting a new
-	// snapshot generation). It is the generation-coherent source for
-	// the #2079 NAT pool-utilization-alarm monitor: AppliedNATView
-	// pairs this Config with the same-generation pool counters.
+	// appliedSnapshot is the config + generation the helper is currently
+	// enforcing, as tracked by successful full or retained-snapshot publishes
+	// and status-loop catch-up via markAppliedSnapshotLocked. It is NOT the
+	// last full ApplyResult: partial snapshot publishes advance this identity
+	// without replacing m.lastApply. FIB-bump / neighbor-regen / dedup-only
+	// paths do not advance it, so it remains the generation-coherent source
+	// for AppliedNATView's config and counters.
 	appliedSnapshot       appliedSnapshot
 	sessionMirrorFailed   bool
 	sessionMirrorErr      string

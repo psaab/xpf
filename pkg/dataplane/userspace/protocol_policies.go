@@ -442,10 +442,11 @@ type PolicyRuleSnapshot struct {
 	// unknownSecurityPoliciesChildren carries #12217 compile-time diagnostics
 	// for the skipped children that caused whole-snapshot refusal.
 	unknownSecurityPoliciesChildren []string
-	// dnsLookupFailClosed marks a rule poisoned only because a dns-name
-	// lookup failed before any answer was obtained (#16595). Build-time
-	// only, never on the wire. collectPolicyContentRejections suppresses
-	// the content-rejection diagnostic for this cause: the config is
-	// representable, DNS is merely down, and the compile warning names it.
-	dnsLookupFailClosed bool
+	// dnsUnavailableFailClosed marks a rule poisoned only because DNS
+	// resolution was unavailable before an answer existed (cold-cache
+	// unresolved or resolver failure; #16595/#17782). Build-time only, never
+	// on the wire. collectPolicyContentRejections suppresses the content-
+	// rejection diagnostic for this cause: the config is representable and
+	// previous-good/default-deny is the enforcement state.
+	dnsUnavailableFailClosed bool
 }

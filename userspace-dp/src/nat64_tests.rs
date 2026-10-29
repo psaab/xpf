@@ -3094,7 +3094,7 @@ fn nat64_v6_to_v4_icmp_error_restores_embedded_dst_port_6472() {
     // RED-on-revert pin: the data-packet entry leaves the ORIGINAL client
     // port verbatim (unassociable — the pre-#6472 behavior).
     let mut buf2 = vec![0u8; v6_pkt.len() + 64];
-    let w2 = write_v6_to_v4_into(&mut buf2, &v6_pkt, pool_v4, server_v4, false)
+    let _w2 = write_v6_to_v4_into(&mut buf2, &v6_pkt, pool_v4, server_v4, false)
         .expect("data-packet entry translates");
     assert_eq!(
         &buf2[28 + 22..28 + 24],
@@ -10642,7 +10642,7 @@ fn nat64_15956_into_builders_byte_identical_with_poisoned_dst() {
         let mut frame = vec![0xaau8; 12];
         frame.extend_from_slice(&0x86ddu16.to_be_bytes());
         frame.extend_from_slice(&pkt);
-        let mut want = build_nat64_v6_to_v4_frame(&frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("ref v6to4");
+        let want = build_nat64_v6_to_v4_frame(&frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("ref v6to4");
         let mut dst = vec![0xEEu8; frame.len() + 4];
         let n = build_nat64_v6_to_v4_frame_into(&mut dst, &frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("into v6to4");
         // Identification (L3 bytes 4..6) + header checksum (10..12) are

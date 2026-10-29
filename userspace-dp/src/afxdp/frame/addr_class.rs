@@ -117,18 +117,10 @@ pub(in crate::afxdp) fn icmp_error_table_for_meta<'a>(
         .and_then(|row| row.v4.as_deref())
 }
 
+/// #14654: `table = None` keeps the any-table behaviour; a caller
+/// with a routing domain threads its table explicitly (#17246).
 #[inline]
 pub(in crate::afxdp) fn dest_is_directed_broadcast(
-    forwarding: &ForwardingState,
-    packet: &[u8],
-) -> bool {
-    dest_is_directed_broadcast_in_table(forwarding, packet, None)
-}
-
-/// #14654: table-scoped variant of [`dest_is_directed_broadcast`];
-/// `table = None` keeps the any-table behaviour.
-#[inline]
-pub(in crate::afxdp) fn dest_is_directed_broadcast_in_table(
     forwarding: &ForwardingState,
     packet: &[u8],
     table: Option<&str>,
@@ -139,7 +131,7 @@ pub(in crate::afxdp) fn dest_is_directed_broadcast_in_table(
         return true;
     };
     let dst = Ipv4Addr::new(dst[0], dst[1], dst[2], dst[3]);
-    v4_addr_is_directed_broadcast_in_table(forwarding, dst, table)
+    v4_addr_is_directed_broadcast(forwarding, dst, table)
 }
 
 /// Shared connected-table directed-broadcast test for a single IPv4
@@ -159,14 +151,9 @@ pub(in crate::afxdp) fn dest_is_directed_broadcast_in_table(
 /// directed broadcast: a /31 (RFC 3021) has no broadcast and a /32's
 /// host-all-ones value equals the host itself, so both are skipped to
 /// avoid mis-classifying a legitimate unicast to a /32 connected host.
+/// #14654: directed-broadcast test; `table = None` is any-table.
 #[inline]
-fn v4_addr_is_directed_broadcast(forwarding: &ForwardingState, addr: Ipv4Addr) -> bool {
-    v4_addr_is_directed_broadcast_in_table(forwarding, addr, None)
-}
-
-/// #14654: table-scoped directed-broadcast test; `None` is any-table.
-#[inline]
-pub(in crate::afxdp) fn v4_addr_is_directed_broadcast_in_table(
+pub(in crate::afxdp) fn v4_addr_is_directed_broadcast(
     forwarding: &ForwardingState,
     addr: Ipv4Addr,
     table: Option<&str>,
@@ -199,18 +186,10 @@ pub(in crate::afxdp) fn v4_addr_is_directed_broadcast_in_table(
 /// (no new infrastructure), scanned only on the cold error-generation
 /// path. The /31 and /32 prefix-length guards match
 /// [`dest_is_directed_broadcast`].
+/// #14654: `table = None` keeps the any-table behaviour; a caller
+/// with a routing domain threads its table explicitly (#17246).
 #[inline]
 pub(in crate::afxdp) fn src_is_directed_broadcast(
-    forwarding: &ForwardingState,
-    packet: &[u8],
-) -> bool {
-    src_is_directed_broadcast_in_table(forwarding, packet, None)
-}
-
-/// #14654: table-scoped variant of [`src_is_directed_broadcast`];
-/// `table = None` keeps the any-table behaviour.
-#[inline]
-pub(in crate::afxdp) fn src_is_directed_broadcast_in_table(
     forwarding: &ForwardingState,
     packet: &[u8],
     table: Option<&str>,
@@ -221,7 +200,7 @@ pub(in crate::afxdp) fn src_is_directed_broadcast_in_table(
         return true;
     };
     let src = Ipv4Addr::new(src[0], src[1], src[2], src[3]);
-    v4_addr_is_directed_broadcast_in_table(forwarding, src, table)
+    v4_addr_is_directed_broadcast(forwarding, src, table)
 }
 
 /// #2367: RFC 1812 §4.3.2.7 / RFC 4443 §2.4(e) — a router MUST NOT

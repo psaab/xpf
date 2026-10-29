@@ -19,12 +19,10 @@ use crate::afxdp::worker::BindingWorker;
 
 use super::exact_demand::{exact_demand_rate_bytes_for_mask, serviceable_exact_demand_mask};
 use super::queue_ops::{
-    cos_exact_queue_serviceable, cos_item_len, cos_queue_front, cos_queue_is_empty,
+    cos_exact_queue_serviceable, cos_queue_is_empty,
     cos_queue_push_front, maybe_demote_drained_best_effort,
 };
-use super::token_bucket::{
-    maybe_top_up_cos_root_lease, release_cos_root_lease, release_cos_root_lease_on_cos,
-};
+use super::token_bucket::{maybe_top_up_cos_root_lease, release_cos_root_lease_on_cos};
 
 // ============================================================================
 // Service phase + park-reason types

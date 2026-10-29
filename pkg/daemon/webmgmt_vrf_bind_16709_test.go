@@ -248,6 +248,159 @@ func TestMgmtEndpointScopeTriggersRebind16709(t *testing.T) {
 	_ = m.reconcileTo(scoped)
 }
 
+// TestMgmtFailedVRFRebindKeepsFingerprintAndRetries17812 pins #17812:
+// a failed same-address VRF rebind must leave the old live-scope
+// fingerprint intact so the next reconcile retries. The injected
+// factory fails the first A->B bind, then succeeds on the retry.
+// Control arm: unchanged A is a no-op and does not call the factory.
+func TestMgmtFailedVRFRebindKeepsFingerprintAndRetries17812(t *testing.T) {
+	addr := "10.0.0.1:8080"
+	attempts := 0
+	var first, retried *fakeLn
+	listen := func(_, bindAddr string) (net.Listener, error) {
+		attempts++
+		switch attempts {
+		case 1:
+			first = &fakeLn{addr: bindAddr, closed: make(chan struct{})}
+			return first, nil
+		case 2:
+			return nil, fmt.Errorf("injected transient bind failure")
+		case 3:
+			retried = &fakeLn{addr: bindAddr, closed: make(chan struct{})}
+			return retried, nil
+		default:
+			return nil, fmt.Errorf("unexpected bind attempt %d", attempts)
+		}
+	}
+	m := newManagementReconciler(&Daemon{}, api.Config{ListenFunc: listen})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); m.wait() }()
+
+	cfgA := api.Config{Addr: addr, ListenFunc: listen, BindDevices: map[string]string{addr: "vrf-a"}}
+	if err := m.startTo(ctx, cfgA); err != nil {
+		t.Fatalf("startTo scope A: %v", err)
+	}
+	if first == nil || !first.isOpen() {
+		t.Fatal("scope-A leg not serving after start")
+	}
+	if got := m.cur.bindDevices[addr]; got != "vrf-a" {
+		t.Fatalf("after start fingerprint = %q, want vrf-a", got)
+	}
+
+	// Control: unchanged A does not need to bind again.
+	if err := m.reconcileTo(cfgA); err != nil {
+		t.Fatalf("control unchanged-A reconcile: %v", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("control made %d bind attempts, want only initial bind", attempts)
+	}
+
+	cfgB := api.Config{Addr: addr, ListenFunc: listen, BindDevices: map[string]string{addr: "vrf-b"}}
+	if err := m.reconcileTo(cfgB); err == nil {
+		t.Fatal("A->B rebind should surface the injected bind failure")
+	}
+	if !first.isOpen() {
+		t.Fatal("old scope-A leg should be retained after failed B bind")
+	}
+	if got := m.cur.bindDevices[addr]; got != "vrf-a" {
+		t.Fatalf("failed rebind advanced fingerprint: got %q, want vrf-a retry debt", got)
+	}
+
+	// The next commit must retry B, and the second factory call succeeds.
+	if err := m.reconcileTo(cfgB); err != nil {
+		t.Fatalf("retry scope-B reconcile: %v", err)
+	}
+	if attempts != 3 || retried == nil || retried == first || !retried.isOpen() {
+		t.Fatalf("retry did not install replacement: attempts=%d first=%p retried=%p", attempts, first, retried)
+	}
+	if got := m.cur.bindDevices[addr]; got != "vrf-b" {
+		t.Fatalf("successful retry fingerprint = %q, want vrf-b", got)
+	}
+	waitClosed(t, first)
+}
+
+// TestMgmtHTTPSCertFailureAfterScopeChangeKeepsFingerprintAndRetries17812
+// joins the API-side #7041 plan failure to the daemon's retry fingerprint.
+// The desired VRF B is published before rebinding, but a certificate-plan
+// failure after the B bind must leave both the serving A socket and m.cur at A.
+// Restoring the certificate source and reconciling again must bind and commit B.
+func TestMgmtHTTPSCertFailureAfterScopeChangeKeepsFingerprintAndRetries17812(t *testing.T) {
+	const httpAddr = "127.0.0.1:8080"
+	const httpsAddr = "10.0.0.1:8443"
+	tlsDir := t.TempDir()
+	attempts := map[string]int{}
+	listeners := map[string][]*fakeLn{}
+	listen := func(_, addr string) (net.Listener, error) {
+		attempts[addr]++
+		ln := &fakeLn{addr: addr, closed: make(chan struct{})}
+		listeners[addr] = append(listeners[addr], ln)
+		return ln, nil
+	}
+	m := newManagementReconciler(&Daemon{}, api.Config{ListenFunc: listen})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() { cancel(); m.wait() }()
+
+	cfgA := api.Config{
+		Addr: httpAddr, HTTPSAddr: httpsAddr, TLS: true,
+		TLSSelfSignedDir: tlsDir, ListenFunc: listen,
+		BindDevices: map[string]string{httpsAddr: "vrf-a"},
+	}
+	if err := m.startTo(ctx, cfgA); err != nil {
+		t.Fatalf("start with scope A: %v", err)
+	}
+	if len(listeners[httpsAddr]) != 1 || !listeners[httpsAddr][0].isOpen() {
+		t.Fatalf("initial scope-A HTTPS listener = %v, want one serving listener", listeners[httpsAddr])
+	}
+	oldHTTPS := listeners[httpsAddr][0]
+	if got := m.cur.bindDevices[httpsAddr]; got != "vrf-a" {
+		t.Fatalf("initial scope fingerprint = %q, want vrf-a", got)
+	}
+
+	// Make the production self-signed-certificate source fail after bind:
+	// a regular file cannot serve as the configured certificate directory.
+	savedDir := tlsDir + "-saved"
+	if err := os.Rename(tlsDir, savedDir); err != nil {
+		t.Fatalf("move valid certificate directory: %v", err)
+	}
+	if err := os.WriteFile(tlsDir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("block certificate directory path: %v", err)
+	}
+	restoreCertDir := func() {
+		_ = os.Remove(tlsDir)
+		_ = os.Rename(savedDir, tlsDir)
+	}
+	t.Cleanup(restoreCertDir)
+
+	cfgB := cfgA
+	cfgB.BindDevices = map[string]string{httpsAddr: "vrf-b"}
+	if err := m.reconcileTo(cfgB); err == nil {
+		t.Fatal("scope-B reconcile with unavailable certificate source must fail")
+	}
+	if !oldHTTPS.isOpen() {
+		t.Fatal("certificate-plan failure must retain the old scope-A HTTPS listener")
+	}
+	if got := m.cur.bindDevices[httpsAddr]; got != "vrf-a" {
+		t.Fatalf("certificate failure advanced daemon fingerprint to %q, want vrf-a retry debt", got)
+	}
+	if attempts[httpsAddr] != 2 || len(listeners[httpsAddr]) != 2 || listeners[httpsAddr][1].isOpen() {
+		t.Fatalf("failed scope-B plan did not close its candidate while retaining A: attempts=%d listeners=%v",
+			attempts[httpsAddr], listeners[httpsAddr])
+	}
+
+	restoreCertDir()
+	if err := m.reconcileTo(cfgB); err != nil {
+		t.Fatalf("retry scope-B reconcile after certificate source recovers: %v", err)
+	}
+	if attempts[httpsAddr] != 3 || len(listeners[httpsAddr]) != 3 || !listeners[httpsAddr][2].isOpen() {
+		t.Fatalf("retry did not bind a new scope-B listener: attempts=%d listeners=%v",
+			attempts[httpsAddr], listeners[httpsAddr])
+	}
+	if got := m.cur.bindDevices[httpsAddr]; got != "vrf-b" {
+		t.Fatalf("successful retry fingerprint = %q, want vrf-b", got)
+	}
+	waitClosed(t, oldHTTPS)
+}
+
 // --- real-kernel netns acceptance ------------------------------------
 
 const netnsChild16709 = "XPF_16709_NETNS_CHILD"

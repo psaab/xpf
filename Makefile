@@ -558,7 +558,8 @@ test-race-dp:
 # is what gates these cells, and a second release-feature build
 # would double the cold cost for no additional oracle.
 DEBUG_LOG_CELLS_16439 := afxdp::worker::loop_body::debug_report::policy_revoked_sessions_fold_tests::accumulate_carries_policy_revoked_sessions_10021 afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_tuple_mismatch_recycles_frame_exactly_once afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_pat_translation_is_not_a_tuple_mismatch_9782 afxdp::tx::dispatch::tests::segmentation::segmentation_pat_translation_survives_expected_ports_9782
-test-rust: check-userspace-dt-needed
+test-rust: lint-rust-baseline check-userspace-dt-needed
+
 	# Leg 0: compile bench invariants only; benches are never executed.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
 	# Leg 1: full release suite; overflow checks remain off by design.
@@ -570,6 +571,7 @@ test-rust: check-userspace-dt-needed
 		--bins --tests -- --test-threads=1 --exact $$(cut -f2 userspace-dp/debug-leg.tests | tr '\n' ' ')
 	# Leg 3 (#16439): debug-log-only cells, exact-named and listed first.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp sh -c 'set -eu; listed="$$("$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --list)"; for cell in $(DEBUG_LOG_CELLS_16439); do count=$$(printf "%s\n" "$$listed" | grep -c -F -x "$$cell: test" || true); if [ "$$count" != "1" ]; then echo "test-rust Leg 3 (#16439): expected exactly one listed debug-log cell $$cell, found $$count" >&2; exit 1; fi; done; "$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --test-threads=1 --exact $(DEBUG_LOG_CELLS_16439)' "$(CARGO)" "$$pinned"
+
 
 # #17200: clippy gate for the userspace dataplane. Clippy could not
 # complete on this crate until #17200 (deny-by-default
@@ -594,6 +596,15 @@ test-rust: check-userspace-dt-needed
 clippy-rust:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D unfulfilled_lint_expectations
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned clippy --manifest-path userspace-dp/Cargo.toml --workspace --all-targets -- -D clippy::correctness -D clippy::suspicious -A clippy::duplicate_mod
+# #17190: rustc warning ratchet — fail on any new/increased (profile,lint,file) warning
+# vs userspace-dp/lint-baseline.tsv. Mechanical lints are also #![deny] in
+# src/main.rs and src/bin/fairness-eval.rs. Runs the pinned toolchain via
+# RUSTUP_TOOLCHAIN (the census script invokes cargo in argv form, so a
+# `cargo +<pinned>` string would not survive as an executable name).
+.PHONY: lint-rust-baseline
+lint-rust-baseline:
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp CARGO=$(CARGO) RUSTUP_TOOLCHAIN=$$pinned python3 scripts/rust-lint-baseline.py
+
 
 # #10204: prove the release helper's static snapshot provenance and dynamic
 # dependency boundary on every Rust gate. The map must come from a fresh

@@ -48,6 +48,7 @@ func TestClassifyPlanLogsRedactedCmd16726(t *testing.T) {
 		{"unsupported verb", "frobnicate security ike policy p1 pre-shared-key ascii-text " + secret},
 		{"mis-cased Set", "Set security ike policy p1 pre-shared-key ascii-text " + secret},
 		{"delete-shaped secret via unsupported case", "DELETE security ike policy p1 pre-shared-key ascii-text " + secret},
+		{"comment-only command", "# set security ike policy p1 pre-shared-key ascii-text " + secret},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -561,10 +561,17 @@ func executedMutationPaths16598(editPath, parts []string, quoted []bool) []strin
 				q = quoted[idx]
 			}
 		}
-		if strings.Contains(tok, `"`) {
+		if !q && strings.Contains(tok, `"`) {
 			return nil
 		}
-		if q || strings.ContainsAny(tok, " \t\n") {
+		// #17689: escaped double quotes are legal string data. Preserve
+		// the quoted token by escaping it symmetrically with readString
+		// instead of treating its decoded quote as a re-parse failure.
+		if q {
+			b.WriteByte('"')
+			b.WriteString(keyEscaper.Replace(tok))
+			b.WriteByte('"')
+		} else if strings.ContainsAny(tok, " \t\n") {
 			b.WriteByte('"')
 			b.WriteString(tok)
 			b.WriteByte('"')
@@ -636,17 +643,44 @@ func lexConfigMutationLine9938(line string) (tokens []string, quoted []bool) {
 // and executors use ParseConfigMutationLine so they act on exactly the
 // tokens the gate judged.
 func lexConfigMutationLineStrict15167(line string) (tokens []string, quoted []bool, ok bool) {
+	tokens, quoted, ok, _ = lexConfigMutationLineStrict15167WithComments(line)
+	return tokens, quoted, ok
+}
+
+// lexConfigMutationLineStrict15167WithComments also reports whether the
+// lexer skipped a comment in a token gap, without scanning the input twice.
+func lexConfigMutationLineStrict15167WithComments(line string) (tokens []string, quoted []bool, ok, comments bool) {
 	lex := NewLexer(line)
+	previousEnd, lineStart, currentLine := 0, 0, 1
 	for {
 		tok := lex.Next()
+		for currentLine < tok.Line {
+			for lineStart < len(line) && line[lineStart] != '\n' {
+				lineStart++
+			}
+			if lineStart < len(line) {
+				lineStart++
+			}
+			currentLine++
+		}
+		tokenStart := lineStart + tok.Column - 1
+		if tokenStart > len(line) {
+			tokenStart = len(line)
+		}
+		if tokenStart >= previousEnd {
+			gap := line[previousEnd:tokenStart]
+			comments = comments || strings.Contains(gap, "#") ||
+				strings.Contains(gap, "/*") || strings.Contains(gap, "//")
+		}
 		switch tok.Type {
 		case TokenEOF:
-			return tokens, quoted, true
+			return tokens, quoted, true, comments
 		case TokenIdentifier, TokenString:
 			tokens = append(tokens, tok.Value)
 			quoted = append(quoted, tok.Type == TokenString)
+			previousEnd = lex.Position()
 		default:
-			return tokens, quoted, false
+			return tokens, quoted, false, comments
 		}
 	}
 }

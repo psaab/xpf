@@ -207,9 +207,17 @@ fn atomic_then_real_nonfirst_screen_sees_nonfirst_10661() {
         info.is_fragment && !info.is_first_fragment,
         "#10661: screens must report the real non-first header"
     );
-    assert_eq!(info.ip_frag_off, WORD_NONFIRST_O8);
+    // #17109: the decoded view replaces the raw word / frag_data_off
+    // assertions. payload_len is 36 (two 8-byte headers + 20 TCP bytes);
+    // governing header is the second, so data = 36 - 16 = 20.
     assert_eq!(
-        info.frag_data_off, 16,
+        info.frag,
+        Some(crate::screen::FragView {
+            offset_bytes: 8,
+            more: false,
+            data_len: 20,
+            pod_extent: 20
+        }),
         "#10661: screen sizing (both headers) must match the tracker fix"
     );
     assert_eq!(
@@ -345,7 +353,11 @@ fn real_first_then_atomic_sticky_10661_14129() {
         info.is_fragment && info.is_first_fragment,
         "#14129: screens must retain the real first header (syn-frag eligible)"
     );
-    assert_eq!(info.ip_frag_off, WORD_FIRST);
+    assert_eq!(
+        info.frag.map(|f| (f.offset_bytes, f.more)),
+        Some((0, true)),
+        "#14129: screens must retain the real first header"
+    );
     assert_eq!(
         raw_shim_walk(&pkt, 0).map(|w| w.non_first_fragment),
         Some(false)

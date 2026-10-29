@@ -30,10 +30,10 @@ func ribGroupLeakConfig(importRibs, addrs []string) *Config {
 	return cfg
 }
 
-// TestRibGroupLeakWarnsVRFtoVRF is the #3876 fail-on-revert warn guard: an
-// interface-routes rib-group whose import target is another instance's rib
-// (a VRF→VRF import, not main) must WARN at commit that Phase 1 does not
-// install it — a fail-loud diagnostic rather than a silent no-op.
+// TestRibGroupLeakWarnsVRFtoVRF verifies that an interface-routes rib-group
+// importing another instance's rib warns that the direct forward VRF-to-VRF
+// route import is not installed. A peer-rib name may still authorize a
+// scoped return.
 //
 // RED-on-revert: dropping validateRibGroupLeakWarnings (or its vrf-target
 // branch) removes the warning.
@@ -47,6 +47,10 @@ func TestRibGroupLeakWarnsVRFtoVRF(t *testing.T) {
 	joined := strings.Join(warns, "\n")
 	if !strings.Contains(joined, "VRF→VRF") || !strings.Contains(joined, "other-vr.inet.0") {
 		t.Fatalf("expected a VRF→VRF import warning naming other-vr.inet.0, got: %q", joined)
+	}
+	if !strings.Contains(joined, "direct VRF-to-VRF route import is not installed") ||
+		!strings.Contains(joined, "destination-scoped return") {
+		t.Fatalf("expected warning to distinguish the deferred forward import from peer returns, got: %q", joined)
 	}
 }
 

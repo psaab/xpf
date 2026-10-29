@@ -167,20 +167,21 @@ func TestSharedOwner16708(t *testing.T) {
 		}
 	})
 
-	t.Run("mixed hostname and IP gateway renders scoped by IP only", func(t *testing.T) {
+	t.Run("mixed hostname and IP gateway requires remote identity", func(t *testing.T) {
 		cfg := initiatorCfg15193(&config.IPsecGateway{
 			Name: "gw", Address: "peer.example.test, 203.0.113.1",
+			RemoteIDType: "hostname", RemoteIDValue: "peer.example.test",
 		}, "site-secret")
 		text, rendered, err := m.renderConfig(cfg)
 		if err != nil {
 			t.Fatalf("renderConfig: %v", err)
 		}
 		if !rendered["gw"] {
-			t.Fatalf("mixed hostname+IP VPN must render on its IP selector, rendered=%v:\n%s", rendered, text)
+			t.Fatalf("mixed hostname+IP VPN with remote-identity must render, rendered=%v:\n%s", rendered, text)
 		}
 		blk := parseSecretBlocks(t, text)["ike-gw"]
-		if len(blk.ids) != 1 || blk.ids[0] != "203.0.113.1" {
-			t.Errorf("ike-gw selectors %v, want exactly [203.0.113.1]", blk.ids)
+		if len(blk.ids) != 1 || blk.ids[0] != "@peer.example.test" {
+			t.Errorf("ike-gw selectors %v, want exactly [@peer.example.test]", blk.ids)
 		}
 	})
 

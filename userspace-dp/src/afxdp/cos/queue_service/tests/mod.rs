@@ -26,7 +26,7 @@ use std::sync::Arc;
 // Relocated from a mid-file `use` that sat beside the drain TX-progress
 // tests in the pre-split tests.rs (verbatim).
 use crate::afxdp::types::{
-    COS_FLOW_FAIR_BUCKETS, CoSQueueConfig, CoSQueueDropCounters, CoSQueueOwnerProfile, FlowRrRing,
+    CoSQueueConfig, CoSQueueDropCounters, CoSQueueOwnerProfile,
 };
 
 const TEST_EPOCH_DURATION_NS: u64 = 200_000;

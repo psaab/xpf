@@ -866,13 +866,16 @@ func TestPerformZeroizeErasesStateCrashTemps10769(t *testing.T) {
 	mustWriteFile(t, wipeIPsecStatePath, []byte(`{"loaded":[],"pending_terminate":[]}`))
 	ipsecTemp := filepath.Join(filepath.Dir(wipeIPsecStatePath), ".ipsec-conn-state.json.tmp-999")
 	mustWriteFile(t, ipsecTemp, []byte(`{"loaded":["site-a"]}`))
+	mustWriteFile(t, wipeEthtoolForcedRegistryPath, []byte(`["ge-0-0-3"]`))
+	ethtoolTemp := filepath.Join(filepath.Dir(wipeEthtoolForcedRegistryPath), "."+filepath.Base(wipeEthtoolForcedRegistryPath)+".tmp-999")
+	mustWriteFile(t, ethtoolTemp, []byte(`["ge-0-0-4"]`))
 
 	if err := PerformZeroizeWipe(configDir, "xpf.conf", ""); err != nil {
 		t.Fatalf("PerformZeroizeWipe: %v", err)
 	}
-	for _, path := range []string{ddnsTemp, ipsecTemp} {
+	for _, path := range []string{ddnsTemp, ipsecTemp, wipeEthtoolForcedRegistryPath, ethtoolTemp} {
 		if _, err := os.Lstat(path); !os.IsNotExist(err) {
-			t.Errorf("crash temp %s survived a reported-success reset: %v", path, err)
+			t.Errorf("crash temp or forced-NIC registry %s survived a reported-success reset: %v", path, err)
 		}
 	}
 }

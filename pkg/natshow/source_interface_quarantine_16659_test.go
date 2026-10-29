@@ -9,16 +9,15 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
-// #16659/#16556: RenderSourceRuleDetail must consult the duplicate-
-// membership interface quarantine verdict. A rule-set whose zone pair
-// claims a quarantined interface (bound to NEITHER claimant) has no
-// measured zone-pair sessions; rendering the armed tally (here 1,
-// seeded under the pair's zone IDs) would present an unmeasured pair
-// as measured. It must render UNAVAILABLE instead. The control pair
-// (single claimant) keeps its measured count.
+// #17691: Duplicate-membership interfaces bind to neither claimant.
+// Source-NAT sessions are aggregated by zone pair, so a partially quarantined
+// pair with surviving members still has a meaningful count. Render UNAVAILABLE
+// only if either zone has no surviving interface; fully and one-sidedly
+// quarantined pairs remain unavailable, while mixed and single-claimant
+// controls keep their seeded count.
 //
-// Fail-on-revert: drop the ZoneInterfaceQuarantineReason consultation
-// in renderSourceRuleDetail and the contested case renders "1".
+// Fail-on-revert: dropping the ZoneInterfaceQuarantineReason consultation in
+// renderSourceRuleDetail makes the fully contested case render "1".
 
 func TestRenderSourceRuleDetailInterfaceQuarantinePair16659(t *testing.T) {
 	mk := func(interfaces map[string][]string) *config.Config {

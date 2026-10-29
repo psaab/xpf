@@ -169,7 +169,7 @@ pub(super) fn worker_loop_setup(
         let live = plan.live.clone();
         // #6245: capture the slot BEFORE `plan` is moved into the bind call so
         // a failure can be reported explicitly (was lost with the moved plan).
-        let slot = plan.status.slot;
+        let _slot = plan.status.slot;
         // #7497: the NIC coordinate, captured at the same moment and for the
         // same reason — `plan` is moved into the bind call below.
         let coord = BindingCoordinate::of(&plan.status);

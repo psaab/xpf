@@ -187,23 +187,52 @@ impl HelperMutationOutcome {
 struct HelperMutationRecord {
     mutation_id: String,
     outcome: HelperMutationOutcome,
+    last_used_era: u128,
     last_used: u64,
+    eviction_id: u64,
 }
 
-/// #10512 (F-D): epoch-scoped LRU mutation store.
+/// Ordered oldest-epoch / least-recently-used index for completed records.
 ///
-/// Replaces the random `HashMap::iter().next()` eviction, which could drop a
-/// live in-flight retry's record while retaining stale epochs forever.
-/// Eviction removes the oldest epoch first, then the least-recently-used
-/// record within that epoch — and never an in-flight operation (one that
-/// passed `helper_mutation_begin` but has not recorded its outcome yet).
+/// The sequence era preserves recency across `last_used` wrapping; the stable
+/// per-record id makes every index key unique, including equal timestamps.
+///
+/// A completed record is always evictable: `helper_mutation_begin` only marks
+/// absent keys in-flight, while an existing record is replayed without a
+/// lease. Consequently this index contains no in-flight keys; if it is empty,
+/// completion inserts over capacity rather than choosing an in-flight record.
+type HelperMutationEvictionIndex =
+    std::collections::BTreeMap<(u64, u128, u64, u64), (u64, String)>;
+const HELPER_MUTATION_CAPACITY: usize = 16_384;
+
+/// #10512 (F-D), #18396: epoch-scoped LRU mutation store.
+///
+/// An ordered index keeps the eviction candidate available without rescanning
+/// the record map on every completion. Eviction removes the oldest epoch
+/// first, then the least-recently-used record within that epoch. Only
+/// completed records are indexed, so in-flight operations cannot be selected;
+/// when no candidate is available, completion is allowed above capacity.
 #[derive(Default)]
 pub(crate) struct HelperMutationStore {
     records: std::collections::HashMap<(u64, String), HelperMutationRecord>,
     in_flight: std::collections::HashMap<(u64, String), String>,
+    eviction: HelperMutationEvictionIndex,
+    used_eviction_ids: std::collections::HashSet<u64>,
     seq: u64,
+    sequence_era: u128,
+    next_eviction_id: u64,
 }
 
+
+fn next_helper_mutation_recency(store: &mut HelperMutationStore) -> (u128, u64) {
+    if store.seq == u64::MAX {
+        store.seq = 0;
+        store.sequence_era = store.sequence_era.wrapping_add(1);
+    } else {
+        store.seq += 1;
+    }
+    (store.sequence_era, store.seq)
+}
 /// Outcome of `SessionDomain::helper_mutation_begin`.
 pub(crate) enum HelperMutationBegin {
     /// The exact triple already ran: replay this outcome without executing.
@@ -233,29 +262,35 @@ impl HelperMutationLease {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         store.in_flight.remove(&self.key);
-        const MAX_MUTATIONS: usize = 16_384;
-        if store.records.len() >= MAX_MUTATIONS {
-            let victim = store
-                .records
-                .iter()
-                .filter(|(key, _)| !store.in_flight.contains_key(*key))
-                .min_by_key(|((epoch, _), record)| (*epoch, record.last_used))
-                .map(|(key, _)| key.clone());
-            if let Some(victim) = victim {
-                store.records.remove(&victim);
+        if store.records.len() >= HELPER_MUTATION_CAPACITY {
+            if let Some((_, victim)) = store.eviction.pop_first() {
+                if let Some(record) = store.records.remove(&victim) {
+                    store.used_eviction_ids.remove(&record.eviction_id);
+                }
             }
         }
-        store.seq = store.seq.wrapping_add(1);
-        let seq = store.seq;
+        let (sequence_era, seq) = next_helper_mutation_recency(&mut store);
+        let mut eviction_id = store.next_eviction_id;
+        while store.used_eviction_ids.contains(&eviction_id) {
+            eviction_id = eviction_id.wrapping_add(1);
+        }
+        store.next_eviction_id = eviction_id.wrapping_add(1);
+        store.used_eviction_ids.insert(eviction_id);
         let mutation_id = std::mem::take(&mut self.mutation_id);
+        let key = std::mem::take(&mut self.key);
         store.records.insert(
-            self.key.clone(),
+            key.clone(),
             HelperMutationRecord {
                 mutation_id,
                 outcome,
+                last_used_era: sequence_era,
                 last_used: seq,
+                eviction_id,
             },
         );
+        store
+            .eviction
+            .insert((key.0, sequence_era, seq, eviction_id), key);
         self.completed = true;
     }
 }
@@ -338,11 +373,32 @@ impl SessionDomain {
             if recorded_mutation != mutation_id {
                 return Err("operation-id-reused");
             }
-            store.seq = store.seq.wrapping_add(1);
-            let seq = store.seq;
+            let (old_last_used_era, old_last_used, eviction_id) = store
+                .records
+                .get(&key)
+                .map(|record| {
+                    (
+                        record.last_used_era,
+                        record.last_used,
+                        record.eviction_id,
+                    )
+                })
+                .expect("replayed mutation record remains present");
+            store
+                .eviction
+                .remove(&(epoch, old_last_used_era, old_last_used, eviction_id))
+                .expect("completed mutation record is eviction-indexed");
+            let (sequence_era, seq) = next_helper_mutation_recency(&mut store);
+            debug_assert!(!store
+                .eviction
+                .contains_key(&(epoch, sequence_era, seq, eviction_id)));
             if let Some(record) = store.records.get_mut(&key) {
+                record.last_used_era = sequence_era;
                 record.last_used = seq;
             }
+            store
+                .eviction
+                .insert((epoch, sequence_era, seq, eviction_id), key);
             return Ok(HelperMutationBegin::Replay(outcome));
         }
         store.in_flight.insert(key.clone(), mutation_id.to_string());
@@ -2080,6 +2136,318 @@ mod session_domain_tests_7209 {
             }
             Ok(_) => panic!("a completed op must not re-execute under a new mutation id"),
         }
+    }
+    const HELPER_MUTATION_CAPACITY: usize = super::HELPER_MUTATION_CAPACITY;
+
+    fn seed_helper_mutation_store(
+        domain: &super::SessionDomain,
+        first: [(u64, &str, u64); 3],
+        in_flight: &[&str],
+        all_in_flight: bool,
+    ) {
+        let mut store = domain
+            .helper_mutations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for index in 0..HELPER_MUTATION_CAPACITY {
+            let (epoch, operation_id, last_used) = if index < first.len() {
+                first[index]
+            } else {
+                (10, "", 100 + index as u64)
+            };
+            let operation_id = if operation_id.is_empty() {
+                format!("padding-{index}")
+            } else {
+                operation_id.to_string()
+            };
+            let key = (epoch, operation_id.clone());
+            let mutation_id = format!("mutation-{operation_id}");
+            let is_in_flight =
+                all_in_flight || in_flight.contains(&operation_id.as_str());
+            let eviction_id = index as u64;
+            store.used_eviction_ids.insert(eviction_id);
+            if is_in_flight {
+                store.in_flight.insert(key.clone(), mutation_id.clone());
+            } else {
+                store.eviction.insert((epoch, 0, last_used, eviction_id), key.clone());
+            }
+            store.records.insert(
+                key,
+                super::HelperMutationRecord {
+                    mutation_id,
+                    outcome: super::HelperMutationOutcome::default(),
+                    last_used_era: 0,
+                    last_used,
+                    eviction_id,
+                },
+            );
+        }
+        store.seq = 20_000;
+    }
+
+    fn complete_helper_mutation(domain: &super::SessionDomain, epoch: u64, operation_id: &str) {
+        let lease = match domain.helper_mutation_begin(epoch, operation_id, "new-mutation") {
+            Ok(super::HelperMutationBegin::Proceed(lease)) => lease,
+            Ok(super::HelperMutationBegin::Replay(_)) => {
+                panic!("fresh eviction-test operation must proceed")
+            }
+            Err(reason) => panic!("fresh eviction-test operation must proceed: {reason}"),
+        };
+        lease.complete(super::HelperMutationOutcome::default());
+    }
+
+    fn seed_wrap_store(
+        domain: &super::SessionDomain,
+        seq: u64,
+        records: &[(&str, u64)],
+    ) {
+        let mut store = domain
+            .helper_mutations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (index, (operation_id, last_used)) in records.iter().enumerate() {
+            let key = (7, (*operation_id).to_string());
+            let mutation_id = format!("mutation-{operation_id}");
+            let eviction_id = index as u64;
+            assert!(store.used_eviction_ids.insert(eviction_id));
+            store.records.insert(
+                key.clone(),
+                super::HelperMutationRecord {
+                    mutation_id,
+                    outcome: super::HelperMutationOutcome::default(),
+                    last_used_era: 0,
+                    last_used: *last_used,
+                    eviction_id,
+                },
+            );
+            store.eviction.insert((7, 0, *last_used, eviction_id), key);
+        }
+        store.seq = seq;
+    }
+
+    fn replay_helper_mutation(domain: &super::SessionDomain, operation_id: &str) {
+        match domain.helper_mutation_begin(
+            7,
+            operation_id,
+            &format!("mutation-{operation_id}"),
+        ) {
+            Ok(super::HelperMutationBegin::Replay(_)) => {}
+            Ok(super::HelperMutationBegin::Proceed(_)) => {
+                panic!("a completed mutation must replay")
+            }
+            Err(reason) => panic!("a completed mutation must replay: {reason}"),
+        }
+    }
+
+    fn assert_eviction_index_matches_records(domain: &super::SessionDomain) {
+        let store = domain.helper_mutations.lock().unwrap();
+        let completed_count = store
+            .records
+            .keys()
+            .filter(|key| !store.in_flight.contains_key(*key))
+            .count();
+        assert_eq!(store.eviction.len(), completed_count);
+        for (key, record) in &store.records {
+            if !store.in_flight.contains_key(key) {
+                assert_eq!(
+                    store
+                        .eviction
+                        .get(&(
+                            key.0,
+                            record.last_used_era,
+                            record.last_used,
+                            record.eviction_id
+                        )),
+                    Some(key),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn helper_mutation_eviction_wrap_safe_replay_sequence_18397() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        seed_helper_mutation_store(
+            domain,
+            [(7, "A", 1), (7, "B", 2), (7, "C", 3)],
+            &[],
+            false,
+        );
+        domain.helper_mutations.lock().unwrap().seq = u64::MAX;
+
+        replay_helper_mutation(domain, "C");
+        replay_helper_mutation(domain, "C");
+        replay_helper_mutation(domain, "A");
+        replay_helper_mutation(domain, "C");
+
+        complete_helper_mutation(domain, 50, "incoming");
+        assert_eviction_index_matches_records(domain);
+        let store = domain.helper_mutations.lock().unwrap();
+        assert!(!store.records.contains_key(&(7, "B".to_string())));
+        assert!(store.records.contains_key(&(7, "A".to_string())));
+        assert!(store.records.contains_key(&(7, "C".to_string())));
+        assert_eq!(store.eviction.len(), store.records.len());
+    }
+
+    #[test]
+    fn helper_mutation_eviction_wrap_safe_completion_insert_18397() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        seed_wrap_store(
+            domain,
+            u64::MAX,
+            &[("A", 1), ("B", 2), ("C", 3)],
+        );
+
+        complete_helper_mutation(domain, 7, "new-0");
+        complete_helper_mutation(domain, 7, "new-1");
+
+        assert_eviction_index_matches_records(domain);
+        let store = domain.helper_mutations.lock().unwrap();
+        assert_eq!(
+            store.eviction.first_key_value().unwrap().1,
+            &(7, "A".to_string())
+        );
+    }
+
+    #[test]
+    fn helper_mutation_eviction_tied_lru_keeps_epoch_and_sequence_order_18397() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        seed_helper_mutation_store(
+            domain,
+            [
+                (1, "tie-first", 1),
+                (1, "tie-second", 1),
+                (1, "true-lru", 0),
+            ],
+            &[],
+            false,
+        );
+
+        complete_helper_mutation(domain, 50, "incoming-1");
+        complete_helper_mutation(domain, 50, "incoming-2");
+
+        let store = domain.helper_mutations.lock().unwrap();
+        assert!(!store.records.contains_key(&(1, "true-lru".to_string())));
+        assert!(!store.records.contains_key(&(1, "tie-first".to_string())));
+        assert!(store.records.contains_key(&(1, "tie-second".to_string())));
+        assert_eq!(store.eviction.len(), store.records.len());
+    }
+
+    /// FAIL-ON-REVERT: choose the minimum `(epoch, sequence_era, last_used)`
+    /// tuple, with record id breaking exact ties—not HashMap order, epoch
+    /// alone, or LRU alone.
+    #[test]
+    fn helper_mutation_eviction_prefers_oldest_epoch_then_lru_18396() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        seed_helper_mutation_store(
+            domain,
+            [
+                (1, "old-epoch-lru", 2),
+                (1, "old-epoch-newer", 3),
+                (2, "new-epoch-old-seq", 1),
+            ],
+            &[],
+            false,
+        );
+
+        complete_helper_mutation(domain, 50, "incoming");
+
+        let store = domain.helper_mutations.lock().unwrap();
+        assert!(!store.records.contains_key(&(1, "old-epoch-lru".to_string())));
+        assert!(store.records.contains_key(&(1, "old-epoch-newer".to_string())));
+        assert!(store.records.contains_key(&(2, "new-epoch-old-seq".to_string())));
+        assert_eq!(store.records.len(), HELPER_MUTATION_CAPACITY);
+        assert_eq!(store.eviction.len(), store.records.len());
+    }
+
+    /// FAIL-ON-REVERT: replay refreshes the record's LRU position in both maps,
+    /// so the next completion evicts the next-oldest record instead.
+    #[test]
+    fn helper_mutation_eviction_replay_refreshes_lru_18396() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        seed_helper_mutation_store(
+            domain,
+            [
+                (1, "replayed", 1),
+                (1, "next-oldest", 2),
+                (2, "newer-epoch", 0),
+            ],
+            &[],
+            false,
+        );
+
+        assert!(matches!(
+            domain.helper_mutation_begin(1, "replayed", "mutation-replayed"),
+            Ok(super::HelperMutationBegin::Replay(_))
+        ));
+        complete_helper_mutation(domain, 50, "incoming");
+
+        let store = domain.helper_mutations.lock().unwrap();
+        assert!(store.records.contains_key(&(1, "replayed".to_string())));
+        assert!(!store.records.contains_key(&(1, "next-oldest".to_string())));
+        let replayed = store
+            .records
+            .get(&(1, "replayed".to_string()))
+            .expect("replayed record remains");
+        assert_eq!(replayed.last_used_era, 0);
+        assert_eq!(replayed.last_used, 20_001);
+        assert!(store.eviction.contains_key(&(
+            1,
+            replayed.last_used_era,
+            replayed.last_used,
+            replayed.eviction_id
+        )));
+    }
+
+    /// In-flight records are absent from the eviction index; if all indexed
+    /// candidates are in-flight, completion inserts over capacity instead.
+    #[test]
+    fn helper_mutation_eviction_protects_in_flight_and_overflows_when_all_flight_18396() {
+        let coordinator = Coordinator::new();
+        let domain = coordinator.session_domain();
+        seed_helper_mutation_store(
+            domain,
+            [
+                (1, "protected", 1),
+                (1, "eligible", 2),
+                (2, "later-epoch", 0),
+            ],
+            &["protected"],
+            false,
+        );
+        complete_helper_mutation(domain, 50, "incoming");
+        {
+            let store = domain.helper_mutations.lock().unwrap();
+            assert!(store.records.contains_key(&(1, "protected".to_string())));
+            assert!(!store.records.contains_key(&(1, "eligible".to_string())));
+            assert!(store.in_flight.contains_key(&(1, "protected".to_string())));
+        }
+
+        let all_flight_coordinator = Coordinator::new();
+        let all_flight_domain = all_flight_coordinator.session_domain();
+        seed_helper_mutation_store(
+            all_flight_domain,
+            [
+                (1, "flight-1", 1),
+                (1, "flight-2", 2),
+                (2, "flight-3", 0),
+            ],
+            &[],
+            true,
+        );
+        complete_helper_mutation(all_flight_domain, 50, "incoming");
+
+        let store = all_flight_domain.helper_mutations.lock().unwrap();
+        assert_eq!(store.records.len(), HELPER_MUTATION_CAPACITY + 1);
+        assert_eq!(store.eviction.len(), 1);
+        assert!(store.records.contains_key(&(1, "flight-1".to_string())));
+        assert!(store.records.contains_key(&(1, "flight-2".to_string())));
+        assert!(store.records.contains_key(&(2, "flight-3".to_string())));
     }
 }
 

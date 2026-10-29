@@ -199,10 +199,11 @@ pub(crate) use unresolved::UnresolvedProfileRef;
 // from `extract_screen_info`, so the crate-wide re-export is test-only
 // (#2189 removed the last non-test consumer in `afxdp/mod.rs`).
 #[cfg(test)]
-pub(crate) use packet::ScreenParseError;
+pub(crate) use packet::{FragView, ScreenParseError};
+
 pub(crate) use syncookie::{
-    SYN_COOKIE_MSS_VALUES, SynCookieAckVerdict, SynCookieChallenge, SynCookieCodec,
-    SynCookieClientKey, SynCookieKeyRing, SynCookieTuple, SynCookieValidation,
+    SynCookieAckVerdict, SynCookieChallenge, SynCookieCodec,
+    SynCookieClientKey, SynCookieKeyRing, SynCookieTuple,
 };
 
 // Test-only re-exports — screen/tests.rs constructs SipHash24 and
@@ -215,7 +216,8 @@ pub(crate) use syncookie::{
 #[cfg(test)]
 pub(crate) use syncookie::{
     SYN_COOKIE_EPOCH_MASK, SYN_COOKIE_EPOCH_SHIFT, SYN_COOKIE_ISN_BITS, SYN_COOKIE_LAYOUT_BITS,
-    SYN_COOKIE_MSS_MASK, SYN_COOKIE_MSS_SHIFT, SipHash24, SynCookieValidatedCache,
+    SYN_COOKIE_MSS_MASK, SYN_COOKIE_MSS_SHIFT, SYN_COOKIE_MSS_VALUES, SipHash24,
+    SynCookieValidatedCache,
 };
 
 /// #3343: number of per-screen-reason DROP counters published to the Go

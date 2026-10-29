@@ -59,24 +59,18 @@ func ValidateByteSize(raw string) error {
 // `if-exceeding burst-size-limit` and the four three-color
 // `committed-burst-size` / `excess-burst-size` / `peak-burst-size`
 // leaves. The userspace meter charges the full Ethernet frame
-// (meta.pkt_len is the buffer length, L3 + 14 untagged / 18 tagged,
-// #8581), so a bucket below one maximum-sized frame
-// (1500-byte MTU payload + 14-byte Ethernet header, 1514 untagged;
-// 1518 tagged) can never admit that frame: it colours Red at any
-// offered rate and `then discard` drops it, silently turning the
-// meter into a frame-size filter. Junos gives 1500 as the minimum
-// in L3 bytes; the charged cost here is frame bytes, so the floor
-// is expressed in that unit.
+// (meta.pkt_len is the buffer length, L3 + 14-byte Ethernet header +
+// 4-byte 802.1Q tag, #8581), so a 1500-byte MTU packet on a VLAN costs
+// 1518 bytes. A bucket below one maximum-sized VLAN frame colours it
+// Red at any offered rate and `then discard` drops it, silently
+// turning the meter into a frame-size filter.
 //
-// The floor is the untagged frame (1514), matching #16610: a single
-// 802.1Q tag adds 4 bytes, so a tagged maximum frame needs 1518 and
-// jumbo MTUs need proportionally more. Raising the committed floor
-// to 1518 would reject the untagged floor twin that #16610 pinned;
-// operators policing tagged or jumbo traffic must configure a
-// burst at least their interface MTU + L2 overhead. This constant
-// is the one shared source both validators and the strict
-// compiled-config gates enforce; do not fork it per leaf.
-const minPolicerBurstBytes16714 uint64 = 1514
+// The floor covers the default 1500-byte MTU with one 802.1Q tag:
+// 1500 + 14-byte Ethernet header + 4-byte tag = 1518. Untagged frames
+// cost 1514 bytes; jumbo MTUs and additional tags need proportionally
+// more. This constant is the one shared source both validators and the
+// strict compiled-config gates enforce; do not fork it per leaf.
+const minPolicerBurstBytes16714 uint64 = 1518
 
 // ValidatePolicerBurstSize validates a legacy firewall policer
 // `if-exceeding burst-size-limit` value (#5299). Junos accepts a byte
@@ -92,15 +86,15 @@ const minPolicerBurstBytes16714 uint64 = 1514
 func ValidatePolicerBurstSize(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return fmt.Errorf("missing value (expected a burst size in bytes, e.g. 1514, 15k, 100000, 1m)")
+		return fmt.Errorf("missing value (expected a burst size in bytes, e.g. 1518, 15k, 100000, 1m)")
 	}
 	n, err := parseBurstSizeLimitStrict(trimmed)
 	if err != nil {
-		return fmt.Errorf("not a valid burst-size-limit (expected bytes, optionally with a k/m/g suffix, e.g. 1514 or 15k): %w", err)
+		return fmt.Errorf("not a valid burst-size-limit (expected bytes, optionally with a k/m/g suffix, e.g. 1518 or 15k): %w", err)
 	}
 	if n < minPolicerBurstBytes16714 {
 		return fmt.Errorf(
-			"burst-size-limit must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d",
+			"burst-size-limit must be at least one maximum-sized frame (%d bytes: 1500-byte MTU + 14-byte Ethernet header + 4-byte VLAN tag), got %d",
 			minPolicerBurstBytes16714,
 			n,
 		)
@@ -115,18 +109,18 @@ func ValidatePolicerBurstSize(raw string) error {
 func validateThreeColorPolicerBurstSize11827(raw string) error {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return fmt.Errorf("missing value (expected a burst size in bytes, e.g. 1514, 15k)")
+		return fmt.Errorf("missing value (expected a burst size in bytes, e.g. 1518, 15k)")
 	}
 	n, err := parseBurstSizeLimitStrict(trimmed)
 	if err != nil {
-		return fmt.Errorf("not a valid burst size (expected bytes, optionally with a k/m/g suffix, e.g. 1514 or 15k): %w", err)
+		return fmt.Errorf("not a valid burst size (expected bytes, optionally with a k/m/g suffix, e.g. 1518 or 15k): %w", err)
 	}
 	if n == 0 {
 		return fmt.Errorf("burst size must be positive (at least one byte)")
 	}
 	if n < minPolicerBurstBytes16714 {
 		return fmt.Errorf(
-			"burst size must be at least one maximum-sized frame (%d bytes: 1500-byte packet plus 14-byte Ethernet header, the meter's frame-byte cost unit), got %d",
+			"burst size must be at least one maximum-sized frame (%d bytes: 1500-byte MTU + 14-byte Ethernet header + 4-byte VLAN tag), got %d",
 			minPolicerBurstBytes16714,
 			n,
 		)

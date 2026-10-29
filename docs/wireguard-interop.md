@@ -222,7 +222,7 @@ the transit path, so on a wg interface whose peers ride DIFFERENT underlay
 paths a TUN inner packet to peer B was size-checked against peer A's MTU —
 fragmentation/underlay drop if A>B, over-conservative `encap_mtu_drops` if
 A<B; reordering the peers flipped the behaviour. This is the SAME defect
-#2845 fixed for the transit/PTB path (`wg_endpoint_physical_outer_mtu` /
+#2845 fixed for the transit/PTB path (`wg_selected_peer_outer` /
 `wg_peer_outer_dst`), left open on the TUN-origin path because #2921 kept
 the first-peer scalar. The fix resolves the underlay MTU PER PEER at spawn
 (`Coordinator::resolve_wg_per_peer_outer_mtus`, keyed by public key, using
@@ -284,13 +284,19 @@ capped at the inner budget (`outer_mtu − overhead`), matching Linux
 16-byte multiple with no cap, so an operator `mtu` set by the standard
 underlay-minus-overhead formula (1420 on IPv6/1500, 1432 on IPv4
 PPPoE 1492) made every full-size TUN-origin packet up to 15 bytes too
-big and it was dropped at `encap_mtu_drops` with no PTB. With the cap
-a full-budget inner packet encapps to exactly the outer MTU on both
-encap sites (TUN-origin `wg_control` and transit `frame/wg.rs`), the
-size models (`wg_control/mtu.rs`, `frame/wg.rs`) and the advertised
-inner MTU (`wg::mss::wg_inner_mtu`, now `outer − overhead` with no
-worst-pad subtraction) all agree. `wg_tcp_mss` stays worst-pad
-conservative (its contract is any sender alignment). The Go default
+big and it was dropped at `encap_mtu_drops` with no PTB. With the cap,
+a full outer-derived-budget inner packet encapps to exactly the outer
+MTU only when that budget is at or below the engine ceiling (4096).
+The encap sites (TUN-origin `wg_control` and transit `frame/wg.rs`) and
+size models (`wg_control/mtu.rs`, `frame/wg.rs`) use the outer-derived
+budget; the advertised inner MTU (`wg::mss::wg_inner_mtu`) is
+`min(outer − overhead, 4096)`. If the engine ceiling binds, the
+advertised inner packet is smaller than the outer-derived budget and
+does not fill the outer MTU: for outer 9000/v4, 9000 − 60 = 8940 is
+clamped to 4096, whose encapped size is 4096 + 60 = 4156, not 9000.
+At ordinary underlay MTUs where the ceiling does not bind, the full
+advertised budget still encapps exactly to the outer MTU. `wg_tcp_mss`
+stays worst-pad conservative (its contract is any sender alignment). The Go default
 wgN MTU likewise drops the worst-pad subtraction, and an operator
 `mtu` above the default-underlay budget logs a warning (the value is
 still honored; the Rust per-peer guard remains authoritative).
@@ -314,16 +320,21 @@ IPv6 inner in the band `(wg_inner_mtu(logical), wg_inner_mtu(physical)]` got
 a PTB clamping the sender ~100B too low (over-conservative — safe, no drops,
 but unnecessary fragmentation pressure / throughput loss).
 
-The WG arm now derives the outer MTU from the PHYSICAL underlay via
-`frame::wg_endpoint_physical_outer_mtu`, a thin wrapper over the same #2680
-`outer_physical_egress_mtu` SSOT the encap guard uses.
-Corrected formula: advertised inner MTU = `wg_inner_mtu(outer_family,
-physical_underlay_mtu)` = `physical_mtu − WG_OVERHEAD_{V4,V6}` (the
-§5.4.6 pad is capped at that budget since #16499, so no worst-pad term)
-— EXACTLY the inverse of `wg_encapped_size` the encap guard
-admits against, so the PTB and the guard now agree. GRE is unaffected:
-its `endpoint.destination` is the real outer hop, so `tunnel_outer_mtu`
-already resolves to the physical underlay for `native_gre_inner_mtu`.
+The WG arm derives the selected peer's outer family and physical underlay
+MTU through `frame::wg_selected_peer_outer`, which selects the peer by the
+inner destination and resolves that peer endpoint's route. The helper uses
+the same `outer_physical_egress_mtu` SSOT as the encap path.
+Corrected formula: advertised inner MTU =
+`wg_inner_mtu(outer_family, physical_underlay_mtu)` =
+`physical_mtu − WG_OVERHEAD_{V4,V6}` (the §5.4.6 pad is capped at that budget
+since #16499, so no worst-pad term), additionally clamped by
+`WG_ENGINE_MAX_INNER_MTU = 4096` (#2457). This is the combined limit of the
+outer-MTU fit checked by `wg_encapped_size` and the engine ceiling; when the
+ceiling binds (e.g. outer 9000/v4), the PTB advertises 4096 rather than the
+guard's outer-fit budget of 8940, so the PTB and guard agree. GRE is
+unaffected: its `endpoint.destination` is the real outer hop, so
+`tunnel_outer_mtu` already resolves to the physical underlay for
+`native_gre_inner_mtu`.
 
 **#2845 (per-peer underlay — the #2684 follow-up).** #2684 originally
 resolved the physical egress via the FIRST peer that carried an endpoint
@@ -336,17 +347,16 @@ used the first peer's endpoint. So a PTB for traffic to peer B could quote
 peer A's underlay MTU — over-advertising (next packet dropped by peer B's
 encap guard) or under-advertising (needless throughput loss). The dispatcher
 now threads the pre-encap inner destination into `post_transform_inner_mtu`,
-which passes it to `wg_endpoint_physical_outer_mtu`. The helper selects the
-SAME peer the encap path will (`engine.peer_for_dest` on the inner
-destination — the live engine owns the AllowedIPs LPM and the per-snapshot
-endpoint binding, #2836) and resolves the underlay via THAT peer's endpoint
-route. Conservative fallback (no inner destination available, no live engine,
-or no peer covers the destination) reverts to the first peer with an endpoint
-— byte-identical when all peers share one underlay; the pre-#2684 logical
-`egress_ifindex` MTU when even that has no endpoint. A covering peer with NO
-endpoint resolves to the logical fallback rather than borrowing a different
-peer's underlay (the encap path drops such a packet anyway, so the PTB value
-is moot).
+which uses `wg_selected_peer_outer`. That helper selects the SAME peer the
+encap path will (`engine.peer_for_dest` on the inner destination — the live
+engine owns the AllowedIPs LPM and the per-snapshot endpoint binding, #2836)
+and resolves the underlay via THAT peer's endpoint route. Conservative
+fallback (no inner destination available, no live engine, or no peer covers
+the destination) reverts to the first peer with an endpoint — byte-identical
+when all peers share one underlay; the pre-#2684 logical `egress_ifindex` MTU
+when even that has no endpoint. A covering peer with NO endpoint resolves to
+the logical fallback rather than borrowing a different peer's underlay (the
+encap path drops such a packet anyway, so the PTB value is moot).
 
 **#2457 (advertised/configured inner MTU clamped to the engine ceiling).**
 The WG engine encrypts at most `PADDED_PLAINTEXT_MAX = 4096` bytes of
@@ -418,27 +428,22 @@ source primary. So the outer UDP is always sourced from the physical WAN
 primary, not the tunnel-logical address. Same conservative fallback: an
 unresolvable outer falls back to `egress_ifindex` (no worse than pre-#2701).
 
-**#3992 (single outer-route resolution per packet).** #2680 and #2701 shared
-one CONCEPT — the physical underlay egress via the route to the selected peer
-endpoint — but `wg_encap_frame` computed it TWICE per packet: once via
-`outer_physical_egress_mtu` for the MTU guard, then again via a second
-`outer_physical_egress_ifindex` call at the outer-source-write site. Both used
-the same `peer_endpoint.ip()` and the same `endpoint.transport_table`, so the
-two FIB LPMs always returned the identical ifindex — the second was pure
-redundant per-packet work on the encrypt hot path (FIB LPM cost is non-trivial
-at line rate over a tunnel). `wg_encap_frame` now resolves
-`outer_physical_egress_ifindex` ONCE, caches the ifindex + the `state.egress`
-row, and reuses both for the MTU guard (inlining `outer_physical_egress_mtu`'s
-body against the shared row — byte-identical guard MTU) AND the outer-source
-lookup. The emitted outer header is byte-identical (the dedup does not change
-WHICH route is chosen); `outer_physical_egress_mtu` remains the SSOT for the
-PTB path (`wg_endpoint_physical_outer_mtu`), which is a separate call site.
-RED-on-revert: `wg_encap_frame_resolves_outer_route_once_v4` counts entries to
-`outer_physical_egress_ifindex` per encap (test-only `OUTER_ROUTE_RESOLVE_COUNT`
-seam) and asserts exactly 1 (2 before the fix) plus outer-header byte-identity.
-(Post-#5292 the single resolution is `outer_physical_egress_resolution`; the
-`outer_physical_egress_ifindex` wrapper is retained for the PTB path and the
-helper tests.)
+**#3992 (single outer-route resolution per packet).** Before #3992, the
+outer-MTU guard resolved the route via `outer_physical_egress_mtu`, then the
+outer-source write performed another FIB LPM via
+`outer_physical_egress_ifindex`. Both used the same `peer_endpoint.ip()` and
+`endpoint.transport_table`, so the two lookups always returned the identical
+ifindex — redundant per-packet work on the encrypt hot path. The current
+`wg_encap_frame` resolves `outer_physical_egress_resolution` ONCE, caches the
+ifindex and `state.egress` row, and reuses both for the MTU guard (inlining
+`outer_physical_egress_mtu` against the shared row, byte-identical) and the
+outer-source lookup. The emitted outer header is byte-identical; the
+PTB path separately uses `wg_selected_peer_outer` to select its peer and
+derive the same route MTU.
+RED-on-revert: `wg_encap_frame_resolves_outer_route_once_v4` asserts exactly
+one `OUTER_ROUTE_RESOLVE_COUNT` bump per encap (2 before #3992), plus
+outer-header byte-identity. The `outer_physical_egress_ifindex` wrapper is
+test-only and retained for focused helper tests.
 
 **#5292 (transit-egress OUTER L2/VLAN — peer before route/connected admission).**
 #2680/#2701/#3992 made the outer MTU + IP SOURCE follow the selected peer's

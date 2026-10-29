@@ -161,17 +161,60 @@ func (s *Server) authorizeRPCCommand(cfg *config.Config, class, fullMethod strin
 	// only the fixed charge — the typed-line aliases are alternative
 	// spellings of the same executed command.
 	_, method16605, _ := splitFullMethod(fullMethod)
+	chargeForms := forms
 	forms = withAliasForms16605(method16605, req, forms)
-	if decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...); !decision.Allowed {
+	decision := rules.EvaluateForms(forms[0], forms[0], forms[1:]...)
+	if aliasChargeAllowCannotRescue16605(rules, method16605, req, chargeForms, forms) {
+		return fmt.Errorf(
+			"login class %q denies %q (an alias-specific deny cannot be rescued by "+
+				"an allow on the fixed charge)", class, cmd)
+	}
+	if !decision.Allowed {
 		if remoteDistinctRescue16472(rules, forms) {
 			return nil
 		}
-		if aliasFormsDenyRescued16605(rules, method16605, req, forms) {
+		if aliasFormsDenyRescued16605(rules, method16605, req, chargeForms, forms) {
 			return nil
 		}
 		return fmt.Errorf("login class %q denies %q (%s)", class, cmd, decision.Reason)
 	}
 	return nil
+}
+
+// aliasChargeAllowCannotRescue16605 prevents EvaluateForms' general
+// cross-form exception logic from treating an ambiguous RPC's fixed-charge
+// allow as an exception to a deny on another typed alias. Only a request
+// that reconstructs the typed line can establish that the allow's spelling
+// was executed.
+func aliasChargeAllowCannotRescue16605(
+	rules config.CompiledLoginRegexes, method string, req any, chargeForms, forms []string,
+) bool {
+	if _, ok := rpcAliasCommands16605[method]; !ok ||
+		rpcTypedCommand16605(method, req) != "" {
+		return false
+	}
+	for _, deniedForm := range forms {
+		if containsCommandForm16605(chargeForms, deniedForm) ||
+			!isTierDeny(rules.Evaluate(deniedForm)) {
+			continue
+		}
+		for _, chargeForm := range chargeForms {
+			d := rules.Evaluate(chargeForm)
+			if d.Allowed && d.DecidedBy == config.LoginRegexAllow {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsCommandForm16605(forms []string, command string) bool {
+	for _, form := range forms {
+		if form == command {
+			return true
+		}
+	}
+	return false
 }
 
 // remoteDistinctRescue16472 applies the #14687 distinct-narrower
@@ -204,18 +247,29 @@ func remoteDistinctRescue16472(rules config.CompiledLoginRegexes, forms []string
 // beside allow `^show interfaces$` is an operator excepting the bare
 // line from the detail spelling, and the reverse pair excepts the
 // charge spelling. The rescue fires only when some form is
-// affirmatively allowed (DecidedBy==Allow, Allowed), no executed
-// spelling (forms[0] / the request-discriminated typed line) is
-// tier-denied — a deny naming what was actually executed always
-// vetoes — and every tier-denied form is a sibling spelling answered
-// by that affirmative allow. A denied form's own allow that lost its
-// tier comparison does not count: Evaluate(f) is that comparison and
-// it denied.
-func aliasFormsDenyRescued16605(rules config.CompiledLoginRegexes, method string, req any, forms []string) bool {
+// affirmatively allowed (DecidedBy==Allow), no executed spelling
+// (forms[0] / the request-discriminated typed line) is tier-denied — a
+// deny naming what was actually executed always vetoes — and every
+// rescued sibling denial has a strictly longer affirmative allow.
+// Without an identifiable typed line, an allow on the fixed charge
+// cannot rescue an alias-specific deny; it does not prove that the
+// caller executed the charge spelling. An identifiable exact execution
+// can still be excepted by its affirmative allow.
+func aliasFormsDenyRescued16605(rules config.CompiledLoginRegexes, method string, req any, chargeForms, forms []string) bool {
 	if _, ok := rpcAliasCommands16605[method]; !ok {
 		return false
 	}
+	typed := rpcTypedCommand16605(method, req)
 	executed := executedSpellings16605(method, req, forms)
+
+	isChargeForm := func(form string) bool {
+		for _, chargeForm := range chargeForms {
+			if chargeForm == form {
+				return true
+			}
+		}
+		return false
+	}
 	anyAllowed := false
 	for _, f := range forms {
 		if d := rules.Evaluate(f); d.Allowed && d.DecidedBy == config.LoginRegexAllow {
@@ -238,7 +292,15 @@ func aliasFormsDenyRescued16605(rules config.CompiledLoginRegexes, method string
 			if g == f {
 				continue
 			}
-			if gd := rules.Evaluate(g); gd.Allowed && gd.DecidedBy == config.LoginRegexAllow {
+			// On a nondiscriminating RPC, a charge-side allow is not an
+			// exception to an explicit deny of another typed alias: the
+			// request cannot show that the charge spelling was executed.
+			if typed == "" && !isChargeForm(f) && isChargeForm(g) {
+				continue
+			}
+			if gd := rules.Evaluate(g); gd.Allowed &&
+				gd.DecidedBy == config.LoginRegexAllow &&
+				((typed != "" && executed[g]) || rules.AllowOutranksDeny(g, f)) {
 				rescued = true
 				break
 			}

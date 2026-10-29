@@ -961,7 +961,7 @@ fn nat64_4381_forward_frame_translates_l4_source_port() {
 
     let frame = build_ipv6_tcp_syn_with_mss(client, synthetic, orig_sport, 443, 1460);
     let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, translated));
-    let out = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default())
+    let out = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None)
         .expect("forward NAT64 frame");
 
     // Output is IPv4 (eth 14 + ip 20 => L4 at 34); src IP @26..30, TCP src
@@ -1021,7 +1021,7 @@ fn nat64_2562_forward_nonfirst_fragment_frame_translates_l3_only() {
     frame[62..].copy_from_slice(payload);
 
     let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
-    let out = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default())
+    let out = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None)
         .expect("#2562: non-first v6 fragment L3-translates, not dropped");
 
     // Output is eth(14) + IPv4(20) + payload; NO L4 rewrite.
@@ -1078,8 +1078,7 @@ fn nat64_4381_reverse_frame_restores_each_clients_original_port() {
             &decision,
             Some(&info),
             false,
-            &ForwardingState::default(),
-        )
+            &ForwardingState::default(), None)
         .expect("reverse NAT64 frame");
 
         // Output is IPv6 (eth 14 + ip 40 => L4 at 54); dst IP @38..54, TCP
@@ -1148,7 +1147,7 @@ fn nat64_5606_reverse_frame_requires_reverse_info_or_drops() {
     // WITH reverse info: a correct IPv6 reply addressed to the original client.
     // Output is IPv6 (eth 14 + ip 40): ethertype @12..14, src IP @22..38,
     // dst IP @38..54.
-    let out = build_nat64_forwarded_frame(&reply, nat64_reverse_meta(), &decision, Some(&info), false, &ForwardingState::default())
+    let out = build_nat64_forwarded_frame(&reply, nat64_reverse_meta(), &decision, Some(&info), false, &ForwardingState::default(), None)
         .expect("#5606: reverse info present -> IPv6 reply built");
     assert_eq!(
         u16::from_be_bytes([out[12], out[13]]),
@@ -1169,7 +1168,7 @@ fn nat64_5606_reverse_frame_requires_reverse_info_or_drops() {
     // WITHOUT reverse info: the builder cannot reconstruct the v6 tuple and
     // fails closed (None) — the pre-#5606 dropped-reply symptom.
     assert!(
-        build_nat64_forwarded_frame(&reply, nat64_reverse_meta(), &decision, None, false, &ForwardingState::default()).is_none(),
+        build_nat64_forwarded_frame(&reply, nat64_reverse_meta(), &decision, None, false, &ForwardingState::default(), None).is_none(),
         "#5606: missing reverse info must fail closed (None) — the dropped-reply symptom"
     );
 }
@@ -1600,8 +1599,7 @@ fn nat64_8890_tunnel_marked_decision_is_not_emitted_plaintext() {
         &control_decision,
         None,
         false,
-        &ForwardingState::default(),
-    )
+        &ForwardingState::default(), None)
     .expect(
         "NON-VACUITY: the untunnelled control MUST translate. If this fixture \
          cannot produce a frame, the `is_none()` assertion below is satisfied by \
@@ -1645,8 +1643,7 @@ fn nat64_8890_tunnel_marked_decision_is_not_emitted_plaintext() {
         &tunnel_decision,
         None,
         false,
-        &ForwardingState::default(),
-    );
+        &ForwardingState::default(), None);
 
     assert!(
         subject.is_none(),
@@ -1713,8 +1710,7 @@ fn nat64_8890_gate_holds_in_the_reverse_v4_to_v6_direction() {
         &control_decision,
         Some(&info),
         false,
-        &ForwardingState::default(),
-    )
+        &ForwardingState::default(), None)
     .expect(
         "NON-VACUITY: the untunnelled reverse control MUST build. The reverse arm          already fails closed without reverse info (#5606), so a broken fixture          here would satisfy the is_none() below for the wrong reason entirely",
     );
@@ -1737,8 +1733,7 @@ fn nat64_8890_gate_holds_in_the_reverse_v4_to_v6_direction() {
         &tunnel_decision,
         Some(&info),
         false,
-        &ForwardingState::default(),
-    );
+        &ForwardingState::default(), None);
 
     assert!(
         subject.is_none(),
@@ -1826,8 +1821,7 @@ fn nat64_8896_tunnel_marked_decision_is_encapsulated_not_plaintext() {
         &control_decision,
         None,
         false,
-        &ForwardingState::default(),
-    )
+        &ForwardingState::default(), None)
     .expect(
         "NON-VACUITY: the untunnelled control MUST translate, or every comparison \
          below is against an absent frame",
@@ -1847,8 +1841,7 @@ fn nat64_8896_tunnel_marked_decision_is_encapsulated_not_plaintext() {
             &tunnel_decision,
             None,
             false,
-            &fwd,
-        )
+            &fwd, None)
         .unwrap_or_else(|| {
             panic!(
                 "#8896: a NAT64 decision routed through a RESOLVED native-GRE \
@@ -1921,8 +1914,7 @@ fn nat64_8896_unknown_mode_and_missing_row_still_fail_closed() {
                 &decision,
                 None,
                 false,
-                &ForwardingState::default(),
-            )
+                &ForwardingState::default(), None)
             .is_none(),
             "#2327: a tunnel id resolving to NO endpoint row must fail closed. id={id}"
         );
@@ -1939,8 +1931,7 @@ fn nat64_8896_unknown_mode_and_missing_row_still_fail_closed() {
                 &decision,
                 None,
                 false,
-                &fwd,
-            )
+                &fwd, None)
             .is_none(),
             "#2327: an UNKNOWN tunnel mode must fail closed, not fall back to GRE. id={id}"
         );
@@ -1966,7 +1957,7 @@ fn nat64_8896_encap_ignores_every_meta_field_but_family_and_l3() {
     decision.resolution.tunnel_endpoint_id = 7;
 
     let clean =
-        build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &fwd)
+        build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &fwd, None)
             .expect("NON-VACUITY: the clean arm must encapsulate or there is nothing to compare");
 
     let mut poisoned = nat64_forward_meta();
@@ -1983,7 +1974,7 @@ fn nat64_8896_encap_ignores_every_meta_field_but_family_and_l3() {
     poisoned.flow_src_port = 0xFFFF;
     poisoned.flow_dst_port = 0xFFFF;
 
-    let out = build_nat64_forwarded_frame(&frame, poisoned, &decision, None, false, &fwd)
+    let out = build_nat64_forwarded_frame(&frame, poisoned, &decision, None, false, &fwd, None)
         .expect("the poisoned arm must still encapsulate — only unread fields were changed");
 
     fn inner_ipv4_l3_offset(frame: &[u8]) -> usize {
@@ -2078,8 +2069,7 @@ fn nat64_8896_encapsulates_the_reverse_v4_to_v6_direction() {
         &icmp_test_decision(rev.clone()),
         Some(&info),
         false,
-        &ForwardingState::default(),
-    )
+        &ForwardingState::default(), None)
     .expect("NON-VACUITY: the untunnelled reverse control MUST build");
     assert_eq!(
         u16::from_be_bytes([control[12], control[13]]),
@@ -2101,8 +2091,7 @@ fn nat64_8896_encapsulates_the_reverse_v4_to_v6_direction() {
         &tunnel_decision,
         Some(&info),
         false,
-        &gre,
-    )
+        &gre, None)
     .expect(
         "#8896: the REVERSE (v4->v6) NAT64 direction through a resolved native-GRE \
          endpoint must encapsulate. If this is None while the forward cells pass, \
@@ -2155,8 +2144,7 @@ fn nat64_v4_reply_fragments_at_ipv6_egress_mtu_13943() {
     let reverse = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
     let frames = build_nat64_forwarded_frames(
         &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(), 0, 1500,
-    ).expect("NAT64 reverse frames");
+        &ForwardingState::default(), 0, 1500, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>()).expect("NAT64 reverse frames");
     assert!(frames.len() >= 2, "oversize DF-clear v4 reply must be fragmented");
     for frame in &frames {
         let ip = &frame[14..];
@@ -2188,14 +2176,12 @@ fn nat64_v4_fragment_accounts_for_ipv6_fragment_header_budget_13943() {
     let reverse = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
     let full = build_nat64_forwarded_frame(
         &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(),
-    ).expect("single translated IPv6 fragment before MTU split");
+        &ForwardingState::default(), None).expect("single translated IPv6 fragment before MTU split");
     assert_eq!(full[20], 44, "IPv4 first fragment must translate with Fragment Header");
     assert_eq!(u32::from_be_bytes(full[58..62].try_into().unwrap()), 0x4242);
     let frames = build_nat64_forwarded_frames(
         &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(), 0, 1500,
-    ).expect("re-fragmented translated IPv6 frames");
+        &ForwardingState::default(), 0, 1500, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>()).expect("re-fragmented translated IPv6 frames");
     assert_eq!(frames.len(), 2, "a 1476-byte IPv4 fragment grows to 1504 bytes");
 
     let mut reassembled = Vec::new();
@@ -2222,8 +2208,7 @@ fn nat64_v4_fragment_accounts_for_ipv6_fragment_header_budget_13943() {
     fitting[24..26].copy_from_slice(&ip_sum.to_be_bytes());
     let fitting_frames = build_nat64_forwarded_frames(
         &fitting, nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(), 0, 1500,
-    ).expect("within-budget translated reply");
+        &ForwardingState::default(), 0, 1500, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>()).expect("within-budget translated reply");
     assert_eq!(fitting_frames.len(), 1);
     assert_eq!(fitting_frames[0][20], crate::ip_proto::PROTO_TCP);
     assert_eq!(
@@ -2262,14 +2247,12 @@ fn nat64_v4_reply_fragments_at_sub1280_ipv6_egress_mtu_14658() {
     let reply = make_reply(1220);
     let full = build_nat64_forwarded_frame(
         &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(),
-    ).expect("single translated IPv6 packet before MTU split");
+        &ForwardingState::default(), None).expect("single translated IPv6 packet before MTU split");
     assert_eq!(full.len(), 14 + 1240);
     assert_eq!(full[20], crate::ip_proto::PROTO_TCP);
     let frames = build_nat64_forwarded_frames(
         &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(), 0, 1200,
-    ).expect("NAT64 reverse frames at sub-1280 MTU");
+        &ForwardingState::default(), 0, 1200, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>()).expect("NAT64 reverse frames at sub-1280 MTU");
     assert_eq!(frames.len(), 2, "1240-byte translated packet must split at 1200");
     let mut reassembled = Vec::new();
     let mut ident = None;
@@ -2293,8 +2276,7 @@ fn nat64_v4_reply_fragments_at_sub1280_ipv6_egress_mtu_14658() {
     let large = make_reply(1480);
     let large_frames = build_nat64_forwarded_frames(
         &large, nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(), 0, 1200,
-    ).expect("large NAT64 reverse frames at sub-1280 MTU");
+        &ForwardingState::default(), 0, 1200, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>()).expect("large NAT64 reverse frames at sub-1280 MTU");
     assert_eq!(large_frames.len(), 2);
     for (index, frame) in large_frames.iter().enumerate() {
         let ip = &frame[14..];
@@ -2306,8 +2288,7 @@ fn nat64_v4_reply_fragments_at_sub1280_ipv6_egress_mtu_14658() {
     // unfragmented packet (no gratuitous fragment header).
     let fitting_frames = build_nat64_forwarded_frames(
         &make_reply(1100), nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(), 0, 1200,
-    ).expect("within-budget translated reply at sub-1280 MTU");
+        &ForwardingState::default(), 0, 1200, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>()).expect("within-budget translated reply at sub-1280 MTU");
     assert_eq!(fitting_frames.len(), 1);
     assert_eq!(fitting_frames[0][20], crate::ip_proto::PROTO_TCP);
     assert_eq!(
@@ -2339,8 +2320,7 @@ fn nat64_v4_reply_too_small_ipv6_egress_mtu_fails_closed_14658() {
     // sibling instead of looping on a zero-length chunk.
     assert!(build_nat64_forwarded_frames(
         &reply, nat64_reverse_meta(), &decision, Some(&reverse), false,
-        &ForwardingState::default(), 0, 48,
-    ).is_none());
+        &ForwardingState::default(), 0, 48, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>()).is_none());
 }
 
 // #10729 X2-F6 RED cell 6: MSS clamp must not rewrite through AH. A v6+AH+TCP
@@ -2466,14 +2446,14 @@ fn nat64_14115_reverse_nonfirst_decapped_payload_not_treated_as_ports() {
     let decision = icmp_test_decision(rev);
     let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
     let (frame, meta) = build_frame(PROTO_UDP);
-    let out = build_nat64_forwarded_frame(&frame, meta, &decision, Some(&info), false, &ForwardingState::default())
+    let out = build_nat64_forwarded_frame(&frame, meta, &decision, Some(&info), false, &ForwardingState::default(), None)
         .expect("#14115: reverse non-first fragment L3-translates");
     assert_eq!(out[20], 44, "output carries an IPv6 Fragment Header");
     assert_eq!(&out[22..38], &synthetic.octets(), "src restored to synthetic server");
     assert_eq!(&out[38..54], &client.octets(), "dst restored to original client");
     assert_eq!(&out[62..], payload, "#14115: non-first payload must be verbatim, not overwritten as UDP ports/checksum");
     let (frame2, meta2) = build_frame(255);
-    let out2 = build_nat64_forwarded_frame(&frame2, meta2, &decision, Some(&info), false, &ForwardingState::default())
+    let out2 = build_nat64_forwarded_frame(&frame2, meta2, &decision, Some(&info), false, &ForwardingState::default(), None)
         .expect("#14115: sentinel reverse non-first fragment L3-translates");
     assert_eq!(&out2[62..], payload, "#14115: sentinel control payload verbatim");
 }
@@ -2506,7 +2486,7 @@ fn nat64_14115_forward_nonfirst_and_slow_path_do_not_touch_payload() {
     let mut meta = nat64_forward_meta();
     meta.protocol = PROTO_UDP;
     let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
-    let out = build_nat64_forwarded_frame(&frame, meta, &decision, None, false, &ForwardingState::default())
+    let out = build_nat64_forwarded_frame(&frame, meta, &decision, None, false, &ForwardingState::default(), None)
         .expect("forward non-first translates");
     assert_eq!(&out[34..], payload, "forward non-first payload verbatim");
     // #14114: v6->v4 preserve-TTL L3-only translation. Input: 40B v6 +
@@ -2649,8 +2629,7 @@ fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
     let frame = build_ipv6_tcp_syn_with_mss(client, synthetic, 5000, 443, 1460);
     let decision = icmp_test_decision(Nat64State::forward_decision(pool, server, 40001));
     let mut want = build_nat64_forwarded_frame(
-        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
-    )
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None)
     .expect("zero-filled forward build");
     // Poison the pool: recycle a 0xEE-filled buffer at the build capacity,
     // then rebuild. The published prefix must not contain the poison. The
@@ -2661,8 +2640,7 @@ fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
     let capacity = frame.len() + 4;
     redirect_pool::recycle_vec(vec![0xEEu8; capacity]);
     let mut got = build_nat64_forwarded_frame(
-        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
-    )
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None)
     .expect("spare-capacity forward build");
     want[18..20].fill(0);
     want[24..26].fill(0);
@@ -2678,13 +2656,11 @@ fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
     let info = Nat64ReverseInfo { orig_src_v6: client, orig_dst_v6: synthetic };
     let reply = build_ipv4_tcp_frame(server, pool, 443, 40001, 1, 1, 0x10);
     let want_rev = build_nat64_forwarded_frame(
-        &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(),
-    )
+        &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(), None)
     .expect("zero-filled reverse build");
     redirect_pool::recycle_vec(vec![0xEEu8; reply.len() + 44]);
     let got_rev = build_nat64_forwarded_frame(
-        &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(),
-    )
+        &reply, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(), None)
     .expect("spare-capacity reverse build");
     assert_eq!(got_rev, want_rev, "#15956: reverse build leaked unwritten spare-capacity bytes");
 }
@@ -2719,12 +2695,12 @@ fn nat64_15956_build_bench() {
         recompute_l4_checksum_ipv6(&mut frame[14..], 40, PROTO_TCP).expect("v6 sum");
         let iters = 50_000u32;
         for _ in 0..1000 {
-            let _ = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default());
+            let _ = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None);
         }
         let t0 = Instant::now();
         let mut sink = 0usize;
         for _ in 0..iters {
-            let out = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default()).expect("build");
+            let out = build_nat64_forwarded_frame(&frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None).expect("build");
             sink = sink.wrapping_add(out.len());
             std::hint::black_box(&out);
             crate::afxdp::cos::redirect_pool::recycle(out);
@@ -2745,12 +2721,12 @@ fn nat64_15956_build_bench() {
         frame4.extend_from_slice(&vec![0x5au8; payload_len]);
         recompute_l4_checksum_ipv4(&mut frame4[14..], 20, PROTO_TCP, false).expect("v4 sum");
         for _ in 0..1000 {
-            let _ = build_nat64_forwarded_frame(&frame4, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default());
+            let _ = build_nat64_forwarded_frame(&frame4, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(), None);
         }
         let t0 = Instant::now();
         let mut sink = 0usize;
         for _ in 0..iters {
-            let out = build_nat64_forwarded_frame(&frame4, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default()).expect("rbuild");
+            let out = build_nat64_forwarded_frame(&frame4, nat64_reverse_meta(), &rdecision, Some(&info), false, &ForwardingState::default(), None).expect("rbuild");
             sink = sink.wrapping_add(out.len());
             std::hint::black_box(&out);
             crate::afxdp::cos::redirect_pool::recycle(out);
@@ -2856,8 +2832,7 @@ fn nat64_15956_cold_and_growth_checkouts_stay_initialized() {
     // (a) Cold: empty pool -> fresh allocation. Exactly one delta
     // zero-fill (the whole window), correct output.
     let cold = build_nat64_forwarded_frame(
-        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
-    )
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None)
     .expect("cold build");
     assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "cold checkout pays one full delta");
     let cold_bytes = cold.clone();
@@ -2866,8 +2841,7 @@ fn nat64_15956_cold_and_growth_checkouts_stay_initialized() {
     // Warm same-size rebuild: recycle restored the extent to the
     // filled window (max with published length), so no re-fill.
     let warm = build_nat64_forwarded_frame(
-        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
-    )
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None)
     .expect("warm build");
     assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "same-size rebuild pays NO re-fill: recycle restored max(extent, published) = the filled window");
     assert_eq!(warm[34..], cold_bytes[34..], "cold and warm builds agree past the frag-ID header");
@@ -2881,8 +2855,7 @@ fn nat64_15956_cold_and_growth_checkouts_stay_initialized() {
     let dirty = vec![0xEEu8; 10];
     redirect_pool::recycle_vec(dirty);
     let grown = build_nat64_forwarded_frame(
-        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(),
-    )
+        &frame, nat64_forward_meta(), &decision, None, false, &ForwardingState::default(), None)
     .expect("growth build over dirty buffer");
     assert_eq!(redirect_pool::growth_zerofills_for_test(), 1, "growth checkout pays one delta");
     assert!(!grown.contains(&0xEE), "growth build leaked dirty spare bytes");
@@ -3032,8 +3005,7 @@ fn nat64_mss_clamped_both_directions_15948() {
         &icmp_test_decision(fwd_nat),
         None,
         false,
-        &forwarding,
-    )
+        &forwarding, None)
     .expect("NAT64 forward SYN must build");
     assert_eq!(built_ipv4_mss(&built), 1300, "forward NAT64 SYN MSS must clamp 1440 -> 1300");
     assert!(tcp_checksum_ok_ipv4(&built[14..]), "clamped forward checksum valid");
@@ -3049,8 +3021,7 @@ fn nat64_mss_clamped_both_directions_15948() {
         &icmp_test_decision(rev_nat),
         Some(&info),
         false,
-        &forwarding,
-    )
+        &forwarding, None)
     .expect("NAT64 reverse SYN-ACK must build");
     assert_eq!(built_ipv6_mss(&rbuilt), 1300, "reverse NAT64 SYN-ACK MSS must clamp 1460 -> 1300");
 }
@@ -3097,8 +3068,7 @@ fn nat64_gre_mss_uses_translated_family_16511() {
         &fwd_decision,
         None,
         false,
-        &fwd,
-    )
+        &fwd, None)
     .expect("NAT64 forward SYN through GRE must build");
     assert_eq!(
         gre_inner_mss(&fbuilt, false),
@@ -3119,8 +3089,7 @@ fn nat64_gre_mss_uses_translated_family_16511() {
         &rev_decision,
         Some(&info),
         false,
-        &fwd,
-    )
+        &fwd, None)
     .expect("NAT64 reverse SYN-ACK through GRE must build");
     // The encapsulated inner is IPv6: bytes 14+20+4 .. carry a 0x86dd
     // GRE payload type, and the inner header version is 6.

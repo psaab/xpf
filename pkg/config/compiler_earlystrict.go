@@ -326,7 +326,7 @@ func runEarlyStrictAndFolds(cfg *Config, opts compileOpts) error {
 	if err := validateThreeColorPolicersStrict(cfg.Firewall.ThreeColorPolicers); err != nil {
 		if opts.lenientThreeColorBurstFloor16610 && threeColorBurstFloorError16610(err) {
 			cfg.Warnings = append(cfg.Warnings,
-				fmt.Sprintf("three-color-policer burst floor (downgraded to warning on tolerant path; the sub-frame bucket colours every maximum-sized frame red): %v", err))
+				fmt.Sprintf("three-color-policer burst floor (downgraded to warning on tolerant path; the sub-1518-byte bucket colours every maximum-sized VLAN frame red): %v", err))
 		} else {
 			strictErrs = append(strictErrs, err)
 		}

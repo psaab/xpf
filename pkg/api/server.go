@@ -208,9 +208,9 @@ type Config struct {
 	// lands on the interface address.
 	HTTPBindDegraded  bool
 	HTTPSBindDegraded bool
-	TLS               bool        // enable HTTPS with a management certificate
-	TLSCertificate    string      // optional PEM certificate-chain path
-	TLSPrivateKey     string      // optional PEM private-key path; pair must be configured together
+	TLS               bool   // enable HTTPS with a management certificate
+	TLSCertificate    string // optional PEM certificate-chain path
+	TLSPrivateKey     string // optional PEM private-key path; pair must be configured together
 	// TLSSelfSignedDir is the directory the durable self-signed management
 	// pair (cert.pem/key.pem) is loaded from or minted into when no custom
 	// pair is configured (#17213). Empty defaults to the production
@@ -220,7 +220,7 @@ type Config struct {
 	// post-construction hook that re-implemented per-leg certificate
 	// installation in parallel with production (#17213).
 	TLSSelfSignedDir string
-	Auth              *AuthConfig // nil = no authentication; MetricsRequireAuth inside it opts loopback /metrics into credential gating (#16072)
+	Auth             *AuthConfig // nil = no authentication; MetricsRequireAuth inside it opts loopback /metrics into credential gating (#16072)
 	// MetricsRequireAuth opts loopback /metrics into api-auth credential
 	// gating (#16072). The daemon copies it from
 	// `web-management api-auth metrics-require-auth`; the management
@@ -1728,13 +1728,14 @@ func (s *Server) bindListeners() (httpLn, httpsLn net.Listener, err error) {
 	if hs == nil {
 		return nil, nil, fmt.Errorf("api: no HTTP listener configured")
 	}
-	httpLn, err = s.listenAddr(hs.Addr)
+	var httpDev, httpsDev string
+	httpLn, httpDev, err = s.listenAddr(hs.Addr)
 	if err != nil {
 		return nil, nil, fmt.Errorf("api: bind HTTP listener %q: %w", hs.Addr, err)
 	}
 	httpLn = s.boundListener(httpLn)
 	if ss := s.httpsServer(); ss != nil {
-		httpsLn, err = s.listenAddr(ss.Addr)
+		httpsLn, httpsDev, err = s.listenAddr(ss.Addr)
 		if err != nil {
 			// The HTTP listener already bound — close it so a failed startup
 			// leaves no orphaned socket behind (#5058).
@@ -1742,6 +1743,12 @@ func (s *Server) bindListeners() (httpLn, httpsLn net.Listener, err error) {
 			return nil, nil, fmt.Errorf("api: bind HTTPS listener %q: %w", ss.Addr, err)
 		}
 		httpsLn = s.boundListener(httpsLn)
+	}
+	// bindListeners commits the scopes only after its all-or-nothing plan
+	// succeeds; on an HTTPS bind failure, neither unused socket is a live leg.
+	s.recordLegDevice(hs.Addr, httpDev)
+	if ss := s.httpsServer(); ss != nil {
+		s.recordLegDevice(ss.Addr, httpsDev)
 	}
 	return httpLn, httpsLn, nil
 }

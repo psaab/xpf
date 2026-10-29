@@ -897,16 +897,23 @@ func (d *Daemon) nextDHCPLeaseApplyAuthority(cfg *config.Config, masterState ...
 	}
 }
 
-func (d *Daemon) enqueueDHCPApplyWithAuthorityState(cfg *config.DHCPServerConfig, reason string, fullCfg *config.Config, masters map[int]bool) uint64 {
+// enqueueDHCPApplyWithAuthorityState reports the apply generation and whether
+// the reset fence skipped the enqueue. Callers that track service convergence
+// must keep their tail pending when resetFenced is true; a zero generation
+// caused by a missing DHCP applier is not itself a reset-fenced skip.
+func (d *Daemon) enqueueDHCPApplyWithAuthorityState(cfg *config.DHCPServerConfig, reason string, fullCfg *config.Config, masters map[int]bool) (generation uint64, resetFenced bool) {
 	d.ddnsResetMu.Lock()
 	defer d.ddnsResetMu.Unlock()
-	if d.isResetting() || d.dhcpServer == nil {
-		return 0
+	if d.isResetting() {
+		return 0, true
+	}
+	if d.dhcpServer == nil {
+		return 0, false
 	}
 	if cfg == nil {
 		fullCfg = nil
 	}
 	authority := d.nextDHCPLeaseApplyAuthority(fullCfg, masters)
 	d.dhcpServer.ApplyAsyncWithLeaseAuthority(cfg, reason, authority)
-	return authority.Generation
+	return authority.Generation, false
 }

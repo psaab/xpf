@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // expandForInheritance prepares the display clone (strip inactive, then
@@ -241,6 +243,47 @@ func (t *ConfigTree) FormatSet() string {
 	return b.String()
 }
 
+// FormatSetLines renders the same ordered flat commands as FormatSet without
+// materializing the complete output string. Each returned string is one
+// non-empty, trimmed line, matching splitLines(FormatSet()). If reuse contains
+// an equal line at the same position, that existing string is reused.
+//
+// CommitDiffSummary uses this to avoid allocating both whole-tree clones,
+// full formatted strings, and split-line copies just to compare statements.
+func (t *ConfigTree) FormatSetLines(reuse []string) []string {
+	lines := make([]string, 0, countFormatSetLines(t.Children))
+	lineBuffer := make([]byte, 0, 128)
+	walker := newFormatSetLineWalker(nil, nil, nil, false,
+		func(verb string, path []string, forceQuote, group []bool, annotation string, _ int) {
+			lineBuffer = appendFormatSetLine(lineBuffer[:0], verb, path, forceQuote, group, annotation)
+			if index := len(lines); index < len(reuse) && equalFormatSetLine(lineBuffer, reuse[index]) {
+				lines = append(lines, reuse[index])
+				return
+			}
+			lines = append(lines, string(lineBuffer))
+		})
+	walker.walk(t.Children)
+	return lines
+}
+
+func countFormatSetLines(nodes []*Node) int {
+	lines := 0
+	for _, n := range nodes {
+		if n.IsLeaf || len(n.Children) == 0 {
+			lines++
+		} else {
+			lines += countFormatSetLines(n.Children)
+		}
+		if n.Annotation != "" {
+			lines++
+		}
+		if n.Inactive {
+			lines++
+		}
+	}
+	return lines
+}
+
 // FormatSetForLoadMerge renders hierarchical input as replayable flat `set`
 // commands for LoadMerge. It is deliberately separate from FormatSet:
 // operator-visible `display set` output must keep the #6668 zero-churn rule
@@ -347,67 +390,248 @@ func policyStatementTermPath12598(path []string) bool {
 }
 
 func formatSetNodesMode(b *strings.Builder, nodes []*Node, prefix []string, prefixQuote, prefixGroup []bool, preserveLeafBrackets bool) {
+	walker := newFormatSetLineWalker(prefix, prefixQuote, prefixGroup, preserveLeafBrackets,
+		func(verb string, path []string, forceQuote, group []bool, annotation string, singleBracketFrom int) {
+			pathText := joinKeysProvGroupedFrom(path, forceQuote, group, singleBracketFrom)
+			switch verb {
+			case "annotate":
+				fmt.Fprintf(b, "annotate %s %s\n", pathText, EscapedAnnotation(annotation))
+			default:
+				fmt.Fprintf(b, "%s %s\n", verb, pathText)
+			}
+		})
+	walker.walk(nodes)
+}
+
+type formatSetLineWalker struct {
+	path                 []string
+	pathQuote            []bool
+	pathGroup            []bool
+	preserveLeafBrackets bool
+	emit                 func(verb string, path []string, forceQuote, group []bool, annotation string, singleBracketFrom int)
+}
+
+func newFormatSetLineWalker(prefix []string, prefixQuote, prefixGroup []bool, preserveLeafBrackets bool, emit func(verb string, path []string, forceQuote, group []bool, annotation string, singleBracketFrom int)) formatSetLineWalker {
+	walker := formatSetLineWalker{
+		path:                 append([]string(nil), prefix...),
+		pathQuote:            make([]bool, len(prefix)),
+		pathGroup:            make([]bool, len(prefix)),
+		preserveLeafBrackets: preserveLeafBrackets,
+		emit:                 emit,
+	}
+	copy(walker.pathQuote, prefixQuote)
+	copy(walker.pathGroup, prefixGroup)
+	return walker
+}
+
+func (w *formatSetLineWalker) appendNodeKeys(n *Node) {
+	baseLen := len(w.path)
+	w.path = append(w.path[:baseLen], n.Keys...)
+	w.pathQuote = w.pathQuote[:baseLen]
+	w.pathGroup = w.pathGroup[:baseLen]
+	bracket := nodeKeyBracketMask(n)
+	if w.preserveLeafBrackets && n.IsLeaf && len(n.KeysBracketed) == len(n.Keys) {
+		bracket = n.KeysBracketed
+	}
+	for i := range n.Keys {
+		w.pathQuote = append(w.pathQuote, n.KeyQuoted(i))
+		w.pathGroup = append(w.pathGroup, i < len(bracket) && bracket[i])
+	}
+}
+
+func (w *formatSetLineWalker) walk(nodes []*Node) {
+	baseLen := len(w.path)
 	for _, n := range canonicalOrder(nodes) {
-		path, pathQuote, pathGroup := appendNodeKeysGroupedMode(prefix, prefixQuote, prefixGroup, n, preserveLeafBrackets)
-		pathText := joinKeysProvGrouped(path, pathQuote, pathGroup)
-		if preserveLeafBrackets && n.IsLeaf {
-			pathText = joinKeysProvGroupedFrom(path, pathQuote, pathGroup, len(path)-len(n.Keys))
+		w.path = w.path[:baseLen]
+		w.pathQuote = w.pathQuote[:baseLen]
+		w.pathGroup = w.pathGroup[:baseLen]
+		w.appendNodeKeys(n)
+
+		singleBracketFrom := -1
+		if w.preserveLeafBrackets && n.IsLeaf {
+			singleBracketFrom = len(w.path) - len(n.Keys)
 		}
-		switch {
-		case n.IsLeaf:
-			fmt.Fprintf(b, "set %s\n", pathText)
-		case len(n.Children) == 0:
-			// #9126: AN EMPTY CONTAINER MUST STILL EMIT ITS OWN `set` LINE.
-			//
-			// Recursing into no children emits nothing, so the container
-			// vanished from `show | display set` and the round trip lost it.
-			// When it was ALSO deactivated the output was actively broken: a
-			// bare `deactivate <path>` with no preceding `set`, which
-			// setInactiveAtPath rejects with `container %q does not exist`.
-			// LoadSet and LoadMerge are atomic, so that one line aborts the
-			// WHOLE restore -- it fails loudly and closed, but it costs the
-			// transaction.
-			//
-			// Emitting the container is what Junos does and what makes the
-			// deactivate replayable; there is no other line that could carry
-			// it, because a container with no children has no leaf to hang it
-			// off.
-			fmt.Fprintf(b, "set %s\n", pathText)
-		default:
-			formatSetNodesMode(b, n.Children, path, pathQuote, pathGroup, preserveLeafBrackets)
+		if n.IsLeaf || len(n.Children) == 0 {
+			w.emit("set", w.path, w.pathQuote, w.pathGroup, "", singleBracketFrom)
+		} else {
+			w.walk(n.Children)
 		}
 		if n.Annotation != "" {
-			fmt.Fprintf(b, "annotate %s %s\n", pathText, EscapedAnnotation(n.Annotation))
+			w.emit("annotate", w.path, w.pathQuote, w.pathGroup, n.Annotation, singleBracketFrom)
 		}
-		if n.Inactive {
-			// A one-key routing-policy term has no authored name. Flattening
-			// its body makes each immediate body statement a replayed term
-			// keyed by that statement's first token. A bare `deactivate ...
-			// term` prefix-matches a named sibling instead.
-			if preserveLeafBrackets && policyStatementTermPath12598(path) &&
-				len(n.Keys) == 1 && n.Keys[0] == "term" && len(n.Children) > 0 {
-				for _, child := range n.Children {
-					if len(child.Keys) == 0 {
-						continue
-					}
-					firstChildKey := *child
-					firstChildKey.Keys = firstChildKey.Keys[:1]
-					if len(firstChildKey.KeysQuoted) > 0 {
-						firstChildKey.KeysQuoted = firstChildKey.KeysQuoted[:1]
-					}
-					if len(firstChildKey.KeysBracketed) > 0 {
-						firstChildKey.KeysBracketed = firstChildKey.KeysBracketed[:1]
-					}
-					deactivatePath, deactivateQuote, deactivateGroup :=
-						appendNodeKeysGroupedMode(path, pathQuote, pathGroup, &firstChildKey, preserveLeafBrackets)
-					fmt.Fprintf(b, "deactivate %s\n",
-						joinKeysProvGrouped(deactivatePath, deactivateQuote, deactivateGroup))
+		if !n.Inactive {
+			continue
+		}
+		if w.preserveLeafBrackets && policyStatementTermPath12598(w.path) &&
+			len(n.Keys) == 1 && n.Keys[0] == "term" && len(n.Children) > 0 {
+			for _, child := range n.Children {
+				if len(child.Keys) == 0 {
+					continue
 				}
-			} else {
-				fmt.Fprintf(b, "deactivate %s\n", pathText)
+				firstChildKey := *child
+				firstChildKey.Keys = firstChildKey.Keys[:1]
+				if len(firstChildKey.KeysQuoted) > 0 {
+					firstChildKey.KeysQuoted = firstChildKey.KeysQuoted[:1]
+				}
+				if len(firstChildKey.KeysBracketed) > 0 {
+					firstChildKey.KeysBracketed = firstChildKey.KeysBracketed[:1]
+				}
+				w.appendNodeKeys(&firstChildKey)
+				w.emit("deactivate", w.path, w.pathQuote, w.pathGroup, "", -1)
+				w.path = w.path[:baseLen+len(n.Keys)]
+				w.pathQuote = w.pathQuote[:baseLen+len(n.Keys)]
+				w.pathGroup = w.pathGroup[:baseLen+len(n.Keys)]
 			}
+		} else {
+			w.emit("deactivate", w.path, w.pathQuote, w.pathGroup, "", singleBracketFrom)
 		}
 	}
+	w.path = w.path[:baseLen]
+	w.pathQuote = w.pathQuote[:baseLen]
+	w.pathGroup = w.pathGroup[:baseLen]
+}
+
+func appendFormatSetLine(line []byte, verb string, path []string, forceQuote, group []bool, annotation string) []byte {
+	line = append(line, verb...)
+	line = append(line, ' ')
+	line = appendFormatSetKeys(line, path, forceQuote, group)
+	if annotation != "" {
+		line = append(line, ' ')
+		line = appendFormatSetAnnotation(line, annotation)
+	}
+	return trimFormatSetLine(line)
+}
+
+func appendFormatSetKeys(line []byte, keys []string, forceQuote, group []bool) []byte {
+	first := true
+	if len(group) != len(keys) {
+		for i := range keys {
+			line = appendFormatSetKeyToken(line, &first, keys, forceQuote, i)
+		}
+		return line
+	}
+	for i := 0; i < len(keys); {
+		if !group[i] {
+			line = appendFormatSetKeyToken(line, &first, keys, forceQuote, i)
+			i++
+			continue
+		}
+		run := 0
+		for i+run < len(keys) && group[i+run] {
+			run++
+		}
+		if run < 2 {
+			line = appendFormatSetKeyToken(line, &first, keys, forceQuote, i)
+			i++
+			continue
+		}
+		line = appendFormatSetToken(line, &first, "[")
+		for j := i; j < i+run; j++ {
+			line = appendFormatSetGroupedKeyToken(line, &first, keys, forceQuote, j)
+		}
+		line = appendFormatSetToken(line, &first, "]")
+		i += run
+	}
+	return line
+}
+
+func appendFormatSetKeyToken(line []byte, first *bool, keys []string, forceQuote []bool, i int) []byte {
+	if !*first {
+		line = append(line, ' ')
+	}
+	*first = false
+	return appendQuoteKeyProv(line, keys, forceQuote, i)
+}
+
+func appendFormatSetGroupedKeyToken(line []byte, first *bool, keys []string, forceQuote []bool, i int) []byte {
+	if !*first {
+		line = append(line, ' ')
+	}
+	*first = false
+	return appendQuoteKeyProvGrouped(line, keys, forceQuote, i)
+}
+
+func appendFormatSetToken(line []byte, first *bool, token string) []byte {
+	if !*first {
+		line = append(line, ' ')
+	}
+	line = append(line, token...)
+	*first = false
+	return line
+}
+
+func appendQuoteKeyProv(dst []byte, keys []string, forceQuote []bool, i int) []byte {
+	key := keys[i]
+	if i < len(forceQuote) && forceQuote[i] &&
+		(i < len(keys)-1 || policyTermInlineKeywords[key]) {
+		dst = append(dst, '"')
+		dst = appendFormatSetEscaped(dst, key)
+		return append(dst, '"')
+	}
+	return appendFormatSetQuotedKey(dst, key)
+}
+
+// appendQuoteKeyProvGrouped mirrors the public grouped renderer: an authored
+// quote on the path's terminal key is suppressed inside a bracket group.
+func appendQuoteKeyProvGrouped(dst []byte, keys []string, forceQuote []bool, i int) []byte {
+	if i < len(forceQuote) && forceQuote[i] && i < len(keys)-1 {
+		dst = append(dst, '"')
+		dst = appendFormatSetEscaped(dst, keys[i])
+		return append(dst, '"')
+	}
+	return appendFormatSetQuotedKey(dst, keys[i])
+}
+
+func appendFormatSetQuotedKey(dst []byte, key string) []byte {
+	if bareKeySafe(key) {
+		return append(dst, key...)
+	}
+	dst = append(dst, '"')
+	dst = appendFormatSetEscaped(dst, key)
+	return append(dst, '"')
+}
+
+func appendFormatSetEscaped(dst []byte, value string) []byte {
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\', '"':
+			dst = append(dst, '\\', value[i])
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		default:
+			dst = append(dst, value[i])
+		}
+	}
+	return dst
+}
+
+func appendFormatSetAnnotation(dst []byte, annotation string) []byte {
+	dst = append(dst, '"')
+	dst = appendFormatSetEscaped(dst, annotation)
+	return append(dst, '"')
+}
+
+func trimFormatSetLine(line []byte) []byte {
+	for len(line) > 0 {
+		r, size := utf8.DecodeLastRune(line)
+		if !unicode.IsSpace(r) {
+			return line
+		}
+		line = line[:len(line)-size]
+	}
+	return line
+}
+
+func equalFormatSetLine(line []byte, previous string) bool {
+	if len(line) != len(previous) {
+		return false
+	}
+	for i := range line {
+		if line[i] != previous[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // joinQuotedKeys joins keys with spaces, quoting any that contain special characters.

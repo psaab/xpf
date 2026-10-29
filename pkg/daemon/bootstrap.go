@@ -130,6 +130,8 @@ const defaultMgmtInterface = "fxp0"
 
 const bootstrapLifelineNetworkMarker = "# Managed by xpfd — #1922 bootstrap lifeline"
 
+const bootstrapLifelineRenameBase = ".xpf-first-commit-lifeline-rename.json"
+
 const bootstrapLifelineSnapshotBase = ".xpf-first-commit-lifeline.snapshot"
 
 // maxBootstrapLifelineSnapshotSize bounds the boot-path snapshot reads: the
@@ -170,6 +172,16 @@ type bootstrapLifelineSnapshotRecord struct {
 	// (that path is covered by the .network restore above).
 	LifelineKernelName  string `json:"lifeline_kernel_name,omitempty"`
 	LifelineLogicalName string `json:"lifeline_logical_name,omitempty"`
+}
+
+// bootstrapLifelineRenameRecord is written before bootstrap-exit naming
+// changes the live lifeline name. It is separate from the later .network
+// snapshot: encoding a premature Present=false snapshot would falsely
+// authenticate an absent fxp0.network during rollback.
+type bootstrapLifelineRenameRecord struct {
+	Generation  string `json:"generation"`
+	KernelName  string `json:"kernel_name"`
+	LogicalName string `json:"logical_name"`
 }
 
 // applianceMarkerFile marks a host that was PROVISIONED FROM THE XPF APPLIANCE
@@ -768,10 +780,10 @@ func isBootstrapLifelineNetwork(content []byte) bool {
 // bootstrapLifelineMu — the confirm hook takes this mutex under Store.mu, and
 // reversing that order deadlocked the daemon (NEW-MAJOR-A).
 //
-// #16675: the non-fxp0 lifeline rename pair is captured BEFORE exit by
-// captureBootstrapLifelineRenamePreExit and persisted in the same
-// generation-bound record, so the first-commit rollback can remove the
-// takeover .link and rename back.
+// #16675/#17755: the non-fxp0 lifeline rename pair is captured and
+// durably persisted in a dedicated generation-bound record BEFORE exit.
+// The later network snapshot also carries the pair for older recovery
+// consumers, but the early record closes the post-rename crash window.
 func (d *Daemon) captureBootstrapLifelineNetwork() {
 	// NEW-MAJOR-A: read the Store generation BEFORE taking
 	// bootstrapLifelineMu (the confirm hook takes this mutex under
@@ -842,11 +854,12 @@ func (d *Daemon) captureBootstrapLifelineNetwork() {
 		"path", path)
 }
 
-// captureBootstrapLifelineRenamePreExit records, BEFORE bootstrap-exit
-// naming runs, whether the recorded lifeline NIC will be renamed to a
-// non-fxp0 logical name by positional naming (#16675). It must be called
-// before runBootstrapExitStartup: after the rename the lifeline record
-// resolves to the logical name and the pre-takeover kernel name is lost.
+// captureBootstrapLifelineRenamePreExit records and durably persists,
+// BEFORE bootstrap-exit naming runs, whether the recorded lifeline NIC will
+// be renamed to a non-fxp0 logical name by positional naming (#16675/#17755).
+// It must be called before runBootstrapExitStartup: after the rename the
+// lifeline record resolves to the logical name and the kernel name is
+// unrecoverable.
 //
 // Only positional mode is captured: device-map mode never claims an
 // unmapped lifeline, and its strand pre-flight already refuses a rename
@@ -854,24 +867,25 @@ func (d *Daemon) captureBootstrapLifelineNetwork() {
 // covered by the fxp0 .network restore, so they record nothing.
 //
 // The logical name is computed with the same assignName the positional
-// pass will use (same nodeID/clusterMode derivation), so the recorded
-// pair matches the .link the takeover actually writes. Any observation
-// failure records nothing — the exit then proceeds exactly as before and
-// the rollback keeps its prior (fxp0-only) behaviour rather than guessing.
-func (d *Daemon) captureBootstrapLifelineRenamePreExit(cfg *config.Config) {
+// pass will use (same nodeID/clusterMode derivation), so the recorded pair
+// matches the .link the takeover actually writes. Observation failure
+// records nothing and retains historical behavior. Once a pair is observed,
+// however, failure to durably persist it aborts bootstrap exit before any
+// destructive naming.
+func (d *Daemon) captureBootstrapLifelineRenamePreExit(cfg *config.Config) error {
 	if d.opts.NoDataplane || cfg == nil || deviceMapNamingActive(cfg) {
-		return
+		return nil
 	}
 	kernelName, ok := resolveLifelineCurrentNameFn()
 	if !ok || kernelName == "" || kernelName == defaultMgmtInterface {
-		return
+		return nil
 	}
 	if isPositionalLogicalName(kernelName) {
-		return
+		return nil
 	}
 	nics, err := enumeratePCINICsFn()
 	if err != nil || len(nics) == 0 {
-		return
+		return nil
 	}
 	idx := -1
 	for i, nic := range nics {
@@ -881,7 +895,7 @@ func (d *Daemon) captureBootstrapLifelineRenamePreExit(cfg *config.Config) {
 		}
 	}
 	if idx <= 0 {
-		return
+		return nil
 	}
 	nodeID, clusterMode, _, _, _ := namingParamsFromConfig(cfg)
 	fpc := 0
@@ -890,14 +904,58 @@ func (d *Daemon) captureBootstrapLifelineRenamePreExit(cfg *config.Config) {
 	}
 	logical := assignName(idx, fpc, clusterMode)
 	if logical == "" || logical == kernelName || logical == defaultMgmtInterface {
-		return
+		return nil
 	}
 	d.bootstrapLifelineMu.Lock()
 	d.bootstrapLifelineKernelName = kernelName
 	d.bootstrapLifelineLogicalName = logical
 	d.bootstrapLifelineMu.Unlock()
-	slog.Info("bootstrap exit: recorded non-fxp0 lifeline rename for first-commit rollback",
-		"kernel", kernelName, "logical", logical, "issue", "#16675")
+	if err := d.persistBootstrapLifelineRenamePreExit(kernelName, logical); err != nil {
+		d.bootstrapLifelineMu.Lock()
+		if d.bootstrapLifelineKernelName == kernelName &&
+			d.bootstrapLifelineLogicalName == logical {
+			d.bootstrapLifelineKernelName = ""
+			d.bootstrapLifelineLogicalName = ""
+		}
+		d.bootstrapLifelineMu.Unlock()
+		return err
+	}
+	slog.Info("bootstrap exit: durably recorded non-fxp0 lifeline rename before takeover",
+		"kernel", kernelName, "logical", logical, "issue", "#17755")
+	return nil
+}
+
+// persistBootstrapLifelineRenamePreExit writes the generation-bound pair
+// with file and directory fsync before startup naming can mutate the NIC.
+// The caller captures these names under bootstrapLifelineMu and passes local
+// values; ActiveConfigGeneration is read after releasing that mutex because
+// the confirm hook takes it under Store.mu.
+func (d *Daemon) persistBootstrapLifelineRenamePreExit(kernel, logical string) error {
+	var generation string
+	if d.store != nil {
+		generation = d.store.ActiveConfigGeneration()
+	}
+	if generation == "" {
+		return errors.New("bootstrap exit: cannot persist lifeline rename provenance without an active config generation")
+	}
+	if kernel == "" || logical == "" || kernel == logical {
+		return errors.New("bootstrap exit: refusing to persist incomplete lifeline rename provenance")
+	}
+	record, err := json.Marshal(bootstrapLifelineRenameRecord{
+		Generation: generation, KernelName: kernel, LogicalName: logical,
+	})
+	if err != nil {
+		return fmt.Errorf("bootstrap exit: marshal lifeline rename provenance: %w", err)
+	}
+	record = append(record, '\n')
+	path := filepath.Join(linkDir, bootstrapLifelineRenameBase)
+	if err := fsatomic.WriteFileDurable(path, record, 0o600); err != nil {
+		return fmt.Errorf("bootstrap exit: durably persist lifeline rename provenance at %s: %w", path, err)
+	}
+	d.bootstrapLifelineMu.Lock()
+	d.bootstrapLifelineRenameGeneration = generation
+	d.bootstrapLifelineMu.Unlock()
+	return nil
 }
 
 // isPositionalLogicalName reports whether name is one positional naming
@@ -993,9 +1051,12 @@ func (d *Daemon) persistAbsentBootstrapLifelineSnapshotLocked(generation string)
 	}
 }
 func (d *Daemon) clearBootstrapLifelineNetwork() {
-	// Live-path only: drop the in-memory snapshot. The durable file is
-	// #12155's (it clears its own debt on teardown completion); removing it
-	// here would steal #12155's crash-recovery evidence on confirm.
+	// Drop the in-memory snapshot but retain #12155's durable network file.
+	// The confirmation hook runs before confirm.json removal is durable, so
+	// that file can still resurrect the FIRST rollback after a crash. Remove
+	// early rename provenance only when an exact generation-matched pair is
+	// already durable in the embedded snapshot; otherwise the sidecar remains
+	// the only crash-recovery record.
 	d.bootstrapLifelineMu.Lock()
 	d.bootstrapLifelineCaptured = false
 	d.bootstrapLifelinePresent = false
@@ -1003,6 +1064,56 @@ func (d *Daemon) clearBootstrapLifelineNetwork() {
 	d.bootstrapLifelineKernelName = ""
 	d.bootstrapLifelineLogicalName = ""
 	d.bootstrapLifelineMu.Unlock()
+	d.clearConfirmedBootstrapLifelineRename()
+}
+
+func (d *Daemon) clearBootstrapLifelineRenameForCurrentGeneration() {
+	d.bootstrapLifelineMu.Lock()
+	generation := d.bootstrapLifelineRenameGeneration
+	d.bootstrapLifelineMu.Unlock()
+	d.clearBootstrapLifelineRename(generation)
+}
+
+func (d *Daemon) clearConfirmedBootstrapLifelineRename() {
+	d.bootstrapLifelineMu.Lock()
+	generation := d.bootstrapLifelineRenameGeneration
+	d.bootstrapLifelineMu.Unlock()
+	if !d.hasMatchingDurableLifelineRenameSnapshot(generation) {
+		slog.Debug("bootstrap confirmation: retaining lifeline rename sidecar without matching embedded provenance",
+			"generation", generation, "issue", "#17755")
+		return
+	}
+	d.clearBootstrapLifelineRename(generation)
+}
+
+func (d *Daemon) hasMatchingDurableLifelineRenameSnapshot(generation string) bool {
+	if generation == "" {
+		return false
+	}
+	sidecarPath := filepath.Join(linkDir, bootstrapLifelineRenameBase)
+	sidecarData, err := readBootstrapLifelineSnapshot(sidecarPath)
+	if err != nil || len(sidecarData) > maxBootstrapLifelineSnapshotSize {
+		return false
+	}
+	var sidecar bootstrapLifelineRenameRecord
+	if err := json.Unmarshal(sidecarData, &sidecar); err != nil ||
+		sidecar.Generation != generation ||
+		sidecar.KernelName == "" || sidecar.LogicalName == "" ||
+		sidecar.KernelName == sidecar.LogicalName {
+		return false
+	}
+	snapshotPath := filepath.Join(linkDir, bootstrapLifelineSnapshotBase)
+	snapshotData, err := readBootstrapLifelineSnapshot(snapshotPath)
+	if err != nil || len(snapshotData) > maxBootstrapLifelineSnapshotSize {
+		return false
+	}
+	var snapshot bootstrapLifelineSnapshotRecord
+	if err := json.Unmarshal(snapshotData, &snapshot); err != nil {
+		return false
+	}
+	return snapshot.Generation == generation &&
+		snapshot.LifelineKernelName == sidecar.KernelName &&
+		snapshot.LifelineLogicalName == sidecar.LogicalName
 }
 
 // loadBootstrapLifelineSnapshot reads the durable pre-takeover record
@@ -1035,18 +1146,46 @@ func (d *Daemon) loadBootstrapLifelineSnapshot() (snapshot []byte, generation st
 	return append([]byte(nil), record.Network...), record.Generation, record.Present, true, false
 }
 
-// loadBootstrapLifelineRename reads ONLY the #16675 rename pair from the
-// durable record, with the same generation binding the .network restore
-// enforces. Returns ("","") when there is no authentic pair: no record,
-// unreadable record, generation mismatch, or a half-empty pair. The
-// caller treats "" as "no rename to undo" — but see
-// restoreBootstrapLifelineRename, which fails closed when a takeover
-// .link for the lifeline exists without provenance.
+// loadBootstrapLifelineRename reads the early #17755 record first, then the
+// embedded #16675 pair written by older daemon versions. Both are bound to
+// the generation whose first-commit teardown is being recovered. An early
+// record that is present but invalid (stale generation, corrupt, oversized)
+// must not shadow the embedded pair: a PostRenameSyncError can leave a
+// durable sidecar whose generation a restart no longer accepts, while the
+// later snapshot persisted the pair under the teardown generation. An
+// UNREADABLE early record (non-ErrNotExist read failure) stays fail-closed.
+func (d *Daemon) validLifelineRenamePair(generation, kernel, logical string) (string, string) {
+	if generation == "" || generation != d.store.FirstCommitTeardownGeneration() ||
+		kernel == "" || logical == "" || kernel == logical {
+		return "", ""
+	}
+	return kernel, logical
+}
+
+// loadBootstrapLifelineRename resolves the #16675 rename pair for this
+// teardown from the early #17755 record, falling back to the embedded pair
+// in the durable snapshot on any absence or validation failure of the early
+// record. Returns ("","") when neither yields an authentic pair.
 func (d *Daemon) loadBootstrapLifelineRename() (kernel, logical string) {
 	if d.store == nil || !d.store.FirstCommitTeardownOwed() {
 		return "", ""
 	}
-	data, err := readBootstrapLifelineSnapshot(filepath.Join(linkDir, bootstrapLifelineSnapshotBase))
+	path := filepath.Join(linkDir, bootstrapLifelineRenameBase)
+	data, err := readBootstrapLifelineSnapshot(path)
+	if err == nil && len(data) <= maxBootstrapLifelineSnapshotSize {
+		var record bootstrapLifelineRenameRecord
+		if json.Unmarshal(data, &record) == nil {
+			if k, l := d.validLifelineRenamePair(record.Generation, record.KernelName, record.LogicalName); k != "" {
+				return k, l
+			}
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Unreadable sidecar stays fail-closed: no fallback guess.
+		return "", ""
+	}
+	// Absent, oversized, corrupt, or generation-mismatched sidecar: fall
+	// through to the embedded pair in the durable snapshot.
+	data, err = readBootstrapLifelineSnapshot(filepath.Join(linkDir, bootstrapLifelineSnapshotBase))
 	if err != nil || len(data) > maxBootstrapLifelineSnapshotSize {
 		return "", ""
 	}
@@ -1054,14 +1193,7 @@ func (d *Daemon) loadBootstrapLifelineRename() (kernel, logical string) {
 	if err := json.Unmarshal(data, &record); err != nil {
 		return "", ""
 	}
-	if record.Generation == "" || record.Generation != d.store.FirstCommitTeardownGeneration() {
-		return "", ""
-	}
-	if record.LifelineKernelName == "" || record.LifelineLogicalName == "" ||
-		record.LifelineKernelName == record.LifelineLogicalName {
-		return "", ""
-	}
-	return record.LifelineKernelName, record.LifelineLogicalName
+	return d.validLifelineRenamePair(record.Generation, record.LifelineKernelName, record.LifelineLogicalName)
 }
 
 // bootstrapLifelineRenameForTeardown resolves the rename pair for this
@@ -1298,6 +1430,7 @@ func (d *Daemon) restoreBootstrapLifelineNetwork() (bool, error) {
 }
 
 func (d *Daemon) clearBootstrapLifelineSnapshot(generation string) {
+	defer d.clearBootstrapLifelineRename(generation)
 	path := filepath.Join(linkDir, bootstrapLifelineSnapshotBase)
 	data, err := readBootstrapLifelineSnapshot(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1326,6 +1459,49 @@ func (d *Daemon) clearBootstrapLifelineSnapshot(generation string) {
 	d.bootstrapLifelineGeneration = ""
 	d.bootstrapLifelineKernelName = ""
 	d.bootstrapLifelineLogicalName = ""
+}
+
+// clearBootstrapLifelineRename removes only a matching generation's early
+// provenance. Its directory removal is synced before the record is forgotten.
+func (d *Daemon) clearBootstrapLifelineRename(generation string) {
+	if generation == "" {
+		return
+	}
+	path := filepath.Join(linkDir, bootstrapLifelineRenameBase)
+	data, err := readBootstrapLifelineSnapshot(path)
+	if errors.Is(err, os.ErrNotExist) {
+		d.clearBootstrapLifelineRenameGeneration(generation)
+		return
+	}
+
+	if err != nil {
+		slog.Warn("could not read cleared bootstrap lifeline rename record",
+			"path", path, "err", err, "issue", "#17755")
+		return
+	}
+	var record bootstrapLifelineRenameRecord
+	if err := json.Unmarshal(data, &record); err != nil || record.Generation != generation {
+		return
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("could not remove cleared bootstrap lifeline rename record",
+			"path", path, "err", err, "issue", "#17755")
+		return
+	}
+	if err := fsatomic.SyncDir(filepath.Dir(path)); err != nil {
+		slog.Warn("could not durably remove bootstrap lifeline rename record",
+			"path", path, "err", err, "issue", "#17755")
+		return
+	}
+	d.clearBootstrapLifelineRenameGeneration(generation)
+}
+
+func (d *Daemon) clearBootstrapLifelineRenameGeneration(generation string) {
+	d.bootstrapLifelineMu.Lock()
+	if d.bootstrapLifelineRenameGeneration == generation {
+		d.bootstrapLifelineRenameGeneration = ""
+	}
+	d.bootstrapLifelineMu.Unlock()
 }
 
 func (d *Daemon) runBootstrapTeardownSteps(restoreLifeline bool) []bootstrapTeardownStep {

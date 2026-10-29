@@ -31,14 +31,16 @@ pub(in crate::afxdp) use cos_classify::{
     cos_queue_dscp_rewrite, FILTER_FORWARDING_CLASS_FALLBACKS_TOTAL,
 };
 pub(super) use cos_classify::{
-    CoSTxSelection, GeneratedReplyVerdict, classify_generated_reply,
-    classify_generated_reply_deferred, enqueue_local_into_cos,
+    CoSTxSelection, classify_generated_reply_deferred, enqueue_local_into_cos,
     reclassify_cached_ba_queue_and_lp_rewrite, reclassify_cached_cos_lp_rewrite,
-    resolve_cached_cos_tx_queue_id,
+    resolve_cached_cos_tx_queue_id, resolve_cached_cos_tx_selection_prenat,
+    resolve_cos_tx_selection_at, resolve_cos_tx_selection_at_prenat,
+};
+#[cfg(test)]
+pub(super) use cos_classify::{
+    classify_generated_reply,
     resolve_cached_cos_tx_selection, resolve_cached_cos_tx_selection_flowless,
-    resolve_cached_cos_tx_selection_prenat, resolve_cos_queue_id,
-    resolve_cos_tx_selection, resolve_cos_tx_selection_at,
-    resolve_cos_tx_selection_at_prenat,
+    resolve_cos_queue_id,
 };
 // Private use, not a re-export: a `pub(super) use` of a `pub(super)`
 // item triggers E0364. The drain submodule reaches this through `use super::*;`.
@@ -51,7 +53,7 @@ pub(in crate::afxdp) mod test_support;
 use super::cos::COS_MIN_BURST_BYTES;
 use super::cos::{
     LocalRoutingDecision, Step1Action, apply_cos_admission_ecn_policy, cos_flow_aware_buffer_limit,
-    cos_flow_bucket_index, cos_item_flow_key, cos_queue_drain_all, cos_queue_flow_share_limit,
+    cos_flow_bucket_index, cos_item_flow_key, cos_queue_drain_all,
     cos_queue_flow_share_limit_with_active_shards, cos_queue_is_empty, cos_queue_push_back,
     cos_queue_restore_front, cos_shared_exact_buffer_limit,
     drain_shaped_tx, ensure_cos_interface_runtime, mark_cos_queue_runnable,

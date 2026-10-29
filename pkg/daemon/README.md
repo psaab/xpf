@@ -331,20 +331,14 @@ always stays armed and the check runs twice:
   - A target refused only because a feed has no snapshot (the refusal
     disappears once every binding resolves) is deferred: `Store.DeferConfirmTimer`
     re-arms the same generation for 5 s, at most 24 times.
-  - A target refused only because a dns-name resolution failed when the
-    target was compiled at `Store.Load` (#16612) is deferred the same
-    way: `rollbackTargetRefusedOnlyForDNS` re-resolves a private clone
-    (`config.RefreshDNSForPreflight`, never mutating the frozen target)
-    and attributes the refusal to DNS when the clone passes or still
-    fails only with lookup-failed entries. At the cap the rollback
-    *proceeds* instead of taking the safe state — promotion returns the
-    target object and `executeConfirmedRollback` resolves its dns-name
-    entries into a private clone before the apply (#16687; published
-    configs are never written in place), so a recovered resolver yields
-    the fresh answer and a still-down resolver yields the per-entry
-    fail-closed rendering (#16595). The boot alarm names this class as
-    waiting on dns-name resolution rather than "refused by this build's
-    dataplane".
+  - A target refused only because its frozen dns-name answers were
+    unresolved at `Store.Load` (#16612/#17782) is refreshed before
+    `applySem`. A healthy refreshed clone is applied immediately, without
+    entering bootstrap or waiting through the DNS retry cap; if DNS is
+    still failing, the refusal is deferred for bounded retries and then
+    rollback proceeds using the latest fail-closed answers. The boot
+    alarm names this class as waiting on dns-name resolution rather than
+    "refused by this build's dataplane".
   - A target refused only because its feed producer is *absent* — the
     abandoned commit removed or renamed the feed, so its own apply
     cancelled the producer (#16661) — is not a late feed: nobody will
@@ -928,13 +922,17 @@ explicit-config test seam.
     `liveLegsSanctionedLocked` / `liveAllLoopbackLocked` now ask
     `api.Server.ServingLegAddrs` (the requested address of every serving
     leg) and fall back to the fingerprint only when no server exists;
-    `syncCurFromLiveLocked` rewrites `m.cur` from the serving legs after
-    each HTTP/HTTPS reconcile — the exact desired fingerprint on full
-    success, the converged-plus-retained union on partial failure, with
-    a plane that bound nothing keeping its previous fingerprint as retry
-    debt. The nil-direction gate (`publishNilDirectionLocked`) judges
-    loopback-ness against the same live set, so a retained off-loopback
-    leg can never be published nil by a fingerprint that dropped it.
+    `syncCurFromLiveLocked` rewrites the address/TLS fields in `m.cur`
+    from serving legs after each HTTP/HTTPS reconcile — the exact
+    desired endpoint on full success, the converged-plus-retained union
+    on partial failure, with a plane that bound nothing keeping its
+    previous endpoint as retry debt. The separate bind-device scope
+    fingerprint is copied from the desired snapshot only after every
+    scope-driven plane reconcile succeeds (#17812), so a failed rebind
+    keeps the old scope as retry debt. The nil-direction gate
+    (`publishNilDirectionLocked`) judges loopback-ness against the same
+    live set, so a retained off-loopback leg can never be published nil
+    by a fingerprint that dropped it.
 
     Both exits rest on the unnamed address being one a committed config CAN
     name. Round 13's predicate quietly assumed HTTP was always live at
@@ -1268,14 +1266,17 @@ constructor may still be resolving; that exposed two data-race failure modes:
 
 The lifecycle is now **epoch-guarded** by `clusterCommsMu` + a `clusterCommsGen`
 generation counter (all comms-epoch fields — `sessionSync`,
-`fabricRefreshCh{,1}`, `clusterCommsCtx`/`Cancel`, `activeClusterTransport` —
-are read/written only under that lock; every reader goes through
-`getSessionSync()` / `snapshotFabricRefreshChans()` / `getClusterCommsCtx()` /
-`activeTransport()`, capturing the value once):
+`fabricRefreshCh{,1}`, `clusterCommsCtx`/`Cancel`, `clusterCommsEpoch`,
+`activeClusterTransport` — are read/written only under that lock; every reader
+goes through `getSessionSync()` / `snapshotFabricRefreshChans()` /
+`getClusterCommsCtx()` / `activeTransport()`, capturing the value once):
 
-- `beginClusterCommsEpoch` bumps the generation and installs the fresh
-  sub-context; `startClusterComms` hands the post-bump generation to the
-  constructor.
+- `beginClusterCommsEpoch` bumps the generation, installs the fresh sub-context,
+  and creates a fresh `clusterCommsEpoch` with separate constructor and fabric
+  populate-loop WaitGroups; `startClusterComms` hands the generation to the
+  constructor. Successor preflight serializes with constructor registration,
+  joins all registered predecessors, then retires their published session before
+  the successor wires its Manager callback.
 - The constructor builds the session-sync object in a **local `ss`** and wires
   every callback / cluster reference against it (never re-reading the shared
   field), then calls **`publishSessionSyncIfCurrent(gen, ss)`** — a
@@ -1286,10 +1287,16 @@ are read/written only under that lock; every reader goes through
   `populateFabricFwd{,1}` loop receives its channel **by value** at launch, so a
   restart's field swap cannot race the receive.
 - `stopClusterComms` bumps the generation (superseding any in-flight
-  constructor), cancels the context, **joins the constructor** via
-  `clusterCommsWG`, then nils the shared state and `Stop()`s the old session
-  sync. The join runs outside the lock (the constructor's publish path also
-  takes it), so there is no deadlock.
+  constructor), detaches the captured epoch's join groups under
+  `clusterCommsMu`, cancels the context, and joins only those groups outside
+  the lock. It stops a captured predecessor session before removing its Manager
+  callback binding. It clears session-sync, refresh channels, and fabric slots
+  only if its stop generation is still current, so a concurrent successor
+  cannot be joined or cleared by the old stop.
+- Populate loops publish their slot configuration only while holding
+  `clusterCommsMu` and matching their captured generation. Peer identity and
+  userspace constraint changes remain under `fabricMu`, so a late cancelled
+  loop cannot clear or overwrite its successor's slot state.
 
 - `activeClusterTransport` joined the epoch in **#6290** and publishes the same
   way, via `setActiveTransportIfCurrent(gen, key)`. It had been written by
@@ -1772,8 +1779,15 @@ contract** and it is documented on `startClusterComms` itself:
   transport (and an active secondary fabric);
 - `syncRGStrictVIPOwnershipMode` before the heartbeat goroutine, so `rg_active`
   already follows VIP ownership once VRRP starts driving it;
-- `clusterCommsWG.Add(1)` on the caller's stack, never inside the goroutine, so
-  `stopClusterComms` cannot `Wait()` past an unregistered constructor;
+- `addClusterCommsConstructor` and `registerFabricPopulateLoops` Add on the
+  current epoch while holding `clusterCommsMu`; constructor registration also
+  takes `clusterCommsLifecycleMu`, which serializes its global preflight-join
+  Add with successor `Wait`. `stopClusterComms` detaches the epoch under the
+  same state lock before Wait, so Add cannot race Wait and an old stop cannot
+  join successor work;
+- successor preflight joins any predecessor constructor before retiring the
+  published predecessor session, then resets old DHCP/IPsec handles and
+  heartbeat before the new constructor starts;
 - inside the constructor: resolve → build `ss` → `publishSessionSyncIfCurrent`
   → **all** wiring → `ss.Start`. Every `ss.On*` callback, cluster-Manager hook
   and `SetVRFDevice` must be installed before `Start`, which spawns the
@@ -1791,20 +1805,19 @@ escapes into sentinel returns is exactly the rewrite that can change which
 later phases still run — the `ss.Start` loop must fall through to the auxiliary
 loops when all 30 attempts fail, but must NOT when the context was cancelled.
 
-**Goroutine lifecycle: only ONE of eleven is joined.** `clusterCommsWG.Add(1)`
-appears exactly once in the tree — it tracks the session-sync constructor
-goroutine, and `stopClusterComms` joins only that one. The other ten goroutines
-this path spawns (`startHeartbeatWithRetryForEpoch`, the HA watchdog ticker, the gRPC
+**Goroutine lifecycle:** `stopClusterComms` joins the session-sync constructor
+and the epoch's fabric populate loops. The other comms-owned goroutines
+(`startHeartbeatWithRetryForEpoch`, the HA watchdog ticker, the gRPC
 fabric-listener poller and its inner listener, `eventStreamFallbackLoop` /
 `runUserspaceEventStream`, `syncIPsecSAPeriodic`, `configSyncReconcileLoop`,
-`populateFabricFwd{,1}`, `monitorFabricState`) are context-cancelled only,
-never joined. That asymmetry is the structural reason **#7257** is reachable:
-`stopClusterComms` cancels the context, joins only the constructor, and then
-calls `d.cluster.StopHeartbeat()` — which nils the heartbeat handles under
-`m.mu` while an unjoined `startHeartbeatWithRetryForEpoch` goroutine may still be
-inside `StartHeartbeat` dereferencing them unlocked. #6428 did not move
-`startHeartbeatWithRetryForEpoch` and did not change the lifecycle; #7257 needs a
-lifecycle fix, not a code move.
+and `monitorFabricState`) are context-cancelled, not joined. Heartbeat safety
+does not depend on joining the retry goroutine: every `StartHeartbeat` install,
+VRF-rebind `RestartHeartbeat`, and committed-timing restart runs through
+`runForCurrentClusterCommsEpoch`, which serializes the manager operation with
+teardown and checks the captured context/generation. Stop therefore waits for
+an in-flight manager operation before calling `StopHeartbeat`; an operation
+carrying a previous epoch's context/generation is rejected after teardown
+invalidates that owner.
 
 **The wiring was unbound when #6428 measured it.** `go tool cover -func` over
 `./pkg/daemon/` reported **0.0% statement coverage** for all ten builders that
@@ -1894,9 +1907,9 @@ Relatedly, `buildRAConfigs` is a pure builder the periodic reconcile now re-runs
 every tick, so its per-PD-prefix "advertising prefix via RA" line logs at
 `slog.Debug`, not `Info` — an `Info` there would be per-poll-tick spam (#6036).
 
-**Standalone PD renewal (#16773).** Standalone has no periodic RA reconcile:
-RA is applied only from `applyServicesReconcile` on a config apply. Since
-#15057 the desired set carries the absolute expiry (Obtained+granted), and a
+**Standalone PD renewal (#16773).** Standalone has no always-on periodic RA reconcile.
+RA is applied on config apply or by its event-driven renewal loop. Since
+#15057 the desired set carries the absolute expiry (Obtained+granted); a
 fixed-lifetime PD renewal moves only Obtained — `delegatedPrefixesChanged`
 excludes it, so `commitLease` fired only the unchanged-lease hook and no RA
 applier ran. The live sender then deprecated the LAN PIO at the first
@@ -1908,8 +1921,15 @@ takes `applySem` and runs the digest-gated `reconcileStandaloneRAServices`
 against `lastStandaloneRAHash` (kept in sync by `applyServicesReconcile` on
 every successful standalone apply). Only a renewal that actually moves the
 expiry re-applies; cluster mode is a no-op there and remains owned solely
-by `reconcileClusterRAServices`. Pinned by
-`ra_pd_renew_standalone_16773_test.go`.
+by `reconcileClusterRAServices`. `reconcileStandaloneRAServices` reports
+whether this standalone retry owner still owes work: cluster-mode no-op and
+matching-digest results stop its retry, but do not assert that an asynchronous
+sender is healthy (`raDeadSenderReassertLoop` owns that recovery). Failed
+applies or unavailable prerequisites arm a 30-second periodic retry, stopped
+after successful convergence. Healthy renewals remain event-driven and
+digest-gated. Pinned by `ra_pd_renew_standalone_16773_test.go`, including
+fail-first and unavailable-store recovery without a second DHCP nudge, plus
+a no-retry-after-success control.
 
 ### Direct-mode VIP failover (private-rg-election / no-reth-vrrp)
 
@@ -2472,12 +2492,13 @@ never lock an operator out of a remote box it manages.
   rebuilt fresh on a corrected re-arm because it is not restartable after
   `Stop`), stops the abandoned config's DHCP clients, and retires
   config-driven `.network` files while keeping `.link` rename files — with
-  one exception (#16675): bootstrap exit first captures the pre-takeover
-  kernel name of a non-index-0 lifeline that positional naming is about to
-  rename (`captureBootstrapLifelineRenamePreExit`, persisted in the same
-  generation-bound record), and the first-commit rollback removes that
-  NIC's takeover `.link` and renames it back, so the host's own
-  kernel-name-keyed configuration matches again. Without that, the
+  one exception (#16675): bootstrap exit durably records the pre-takeover
+  kernel name and positional logical name of a non-index-0 lifeline in a
+  generation-bound sidecar BEFORE naming can change the NIC (#17755). The
+  later snapshot also carries the pair; first-commit rollback consumes the
+  early record across a crash, removes the takeover `.link`, and renames
+  the NIC back, so the host's kernel-name-keyed configuration matches
+  again. Before #17755, a crash in the naming-to-snapshot window meant the
   rollback reported success while the management NIC stayed renamed and
   unaddressed across reboots — console-only. The rename restore is
   fail-closed on provenance (a `.link` whose `OriginalName=` disagrees
@@ -3847,9 +3868,9 @@ never lock an operator out of a remote box it manages.
   **#16737:** that independence is a documented divergence from Junos —
   deleting `system services ssh` removes only the managed drop-in, it
   does NOT stop sshd. `show system services` therefore always prints an
-  SSH row (`running (not managed — no system services ssh; …)` when the
-  stanza is absent), and a commit whose zone host-inbound admits
-  `ssh`/`all`/`any-service` without the stanza carries a commit
+  SSH row with the observed `running`, `stopped`, or `unknown` state when
+  the stanza is absent (#17770), and a commit whose zone host-inbound
+  admits `ssh`/`all`/`any-service` without the stanza carries a commit
   advisory (`pkg/config/ssh_unmanaged_advisory_16737.go`). Owning sshd
   enablement (stop/disable/mask) was deliberately not taken: lifeline
   recovery depends on sshd existing outside xpf's config lifecycle.

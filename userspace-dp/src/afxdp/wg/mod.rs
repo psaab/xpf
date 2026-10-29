@@ -136,7 +136,7 @@ mod roam_snapshot_tests;
 mod poison_tests;
 
 pub(crate) use engine::{
-    DecapError, DecapOutcome, EncapError, EncapOutcome, InitiationAction, InstallSessionError,
+    DecapError, EncapError, EncapOutcome, InitiationAction,
     PeerTable, WgEngine, WgEngineConfig, WgPeerConfig,
 };
 pub(crate) use scratch::WgWorkerScratch;
@@ -342,13 +342,14 @@ pub(crate) const fn pad_to_16(n: usize) -> usize {
 /// §5.4.6 padded length capped at the inner budget, matching Linux
 /// `calculate_skb_padding` (`min(mtu, ALIGN(last, 16))`) and
 /// wireguard-go `calculatePaddingSize` (`if padded > mtu { padded = mtu }`).
-/// `mtu` is the largest inner packet the caller will emit (the outer-MTU-
-/// derived inner budget, or the engine ceiling when unbounded). The cap
-/// never truncates payload: when `len > mtu` the packet is oversize for
-/// other reasons and keeps its full rounded length so size guards still
-/// reject it; when `len <= mtu` the padded length is at most `mtu`, so a
-/// full-MTU inner packet emits exactly at budget instead of up to 15 bytes
-/// over (#16499).
+/// `mtu` is the padding budget passed by the caller (the outer-MTU-derived
+/// inner budget, or the engine ceiling when unbounded). The cap never
+/// truncates payload: when `len > mtu` the packet is oversize for other
+/// reasons and keeps its full rounded length so size guards still reject it;
+/// when `len <= mtu` the padded length is at most `mtu`, and `len == mtu`
+/// returns exactly `mtu` (#16499). This describes padding only: the engine
+/// rejects inner packets above `WG_ENGINE_MAX_INNER_MTU` (4096), even if an
+/// outer-derived budget is larger.
 #[inline]
 pub(crate) const fn padded_len_capped(len: usize, mtu: usize) -> usize {
     let padded = pad_to_16(len);

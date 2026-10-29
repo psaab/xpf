@@ -4,7 +4,7 @@
 
 use std::net::IpAddr;
 
-use super::packet::{PROTO_TCP, ScreenPacketInfo, ScreenParseError};
+use super::packet::{PROTO_TCP, ScreenPacketInfo, ScreenParseError, ip_frag};
 use crate::afxdp::frame::{ExtChainOutcome, walk_ipv6_ext_chain};
 
 /// Extract screen-relevant fields from raw packet bytes and metadata.
@@ -90,10 +90,9 @@ pub(crate) fn extract_screen_info(
         is_fragment: false,
         is_first_fragment: false,
         ip_ihl: 5,
-        ip_frag_off: 0,
+        frag: None,
         ip_total_len: 0,
         ip_payload_len: 0,
-        frag_data_off: 0,
         saw_ipv4_source_route: false,
         saw_ipv6_routing_header: false,
     };
@@ -124,12 +123,15 @@ pub(crate) fn extract_screen_info(
         let ip_hdr = &frame[l3_offset..];
         info.ip_ihl = ip_hdr[0] & 0x0F;
         info.ip_total_len = u16::from_be_bytes([ip_hdr[2], ip_hdr[3]]);
-        info.ip_frag_off = u16::from_be_bytes([ip_hdr[6], ip_hdr[7]]);
-        // Fragment if MF bit (0x2000) set OR fragment offset (0x1FFF) > 0.
-        // First fragment: MF=1 AND offset==0 (#1137, mirrors BPF #866).
-        info.is_fragment = (info.ip_frag_off & 0x3FFF) != 0;
-        info.is_first_fragment =
-            (info.ip_frag_off & 0x2000) != 0 && (info.ip_frag_off & 0x1FFF) == 0;
+        let raw_frag_off = u16::from_be_bytes([ip_hdr[6], ip_hdr[7]]);
+        // #17109: decode ONCE into the family-agnostic view. Fragment iff
+        // the view exists; first fragment iff MF=1 AND offset==0 (#1137,
+        // mirrors BPF #866 — `frag.more && frag.offset_bytes == 0`).
+        info.frag = ip_frag::frag_view_v4(raw_frag_off, info.ip_total_len, info.ip_ihl);
+        info.is_fragment = info.frag.is_some();
+        info.is_first_fragment = info
+            .frag
+            .is_some_and(|f| f.more && f.offset_bytes == 0);
         // #9114: RECOVER the real protocol when the caller handed us the shim's
         // non-first-fragment sentinel.
         //
@@ -333,9 +335,8 @@ pub(crate) fn extract_screen_info(
         }
         // #2293: IPv6 payload-length field (bytes 4-5 of the 40-byte base
         // header) — the length of everything after the base header
-        // (extension headers + L4 + data). The ping-of-death check uses
-        // it with `frag_data_off` to size a fragment's contribution to
-        // the reassembled datagram.
+        // (extension headers + L4 + data). #17109: consumed via
+        // `frag_view_v6` below to size a fragment's contribution.
         info.ip_payload_len = u16::from_be_bytes([frame[l3_offset + 4], frame[l3_offset + 5]]);
         let walk = walk_ipv6_ext_chain(frame, l3_offset);
         // Outcome mapping first: Truncated and OverLimit fail closed
@@ -374,12 +375,14 @@ pub(crate) fn extract_screen_info(
                 .bytes
                 .map(|b| u16::from_be_bytes([b[2], b[3]]))
                 .unwrap_or(0);
-            info.ip_frag_off = frag_off;
+            // #2293/#17109: payload-region bytes that precede THIS
+            // (governing) fragment's data, folded into the decoded view.
+            let frag_data_off =
+                ((frag.header_offset + 8).saturating_sub(l3_offset + 40)) as u16;
+            let view = ip_frag::frag_view_v6(frag_off, info.ip_payload_len, frag_data_off);
+            info.frag = Some(view);
             info.is_fragment = true;
-            info.is_first_fragment = (frag_off & 0x1) != 0 && (frag_off & 0xFFF8) == 0;
-            // #2293: payload-region bytes that precede THIS (governing)
-            // fragment's data.
-            info.frag_data_off = ((frag.header_offset + 8).saturating_sub(l3_offset + 40)) as u16;
+            info.is_first_fragment = view.more && view.offset_bytes == 0;
             // #9114: a NON-FIRST fragment carries no L4 header here, so
             // recover the real protocol from the governing Fragment
             // header's own NextHdr byte (present on every fragment).
@@ -387,7 +390,7 @@ pub(crate) fn extract_screen_info(
             // protocol keeps it. Only the governing (first non-ATOMIC)
             // header names it — for [ATOMIC][real-non-first] that is the
             // real header, exactly as the old walk's break did.
-            if (frag_off & 0xFFF8) != 0 && info.protocol == SHIM_PROTO_FRAGMENT_NO_L4 {
+            if view.offset_bytes != 0 && info.protocol == SHIM_PROTO_FRAGMENT_NO_L4 {
                 if let Some(b) = frag.bytes {
                     info.protocol = b[0];
                 }

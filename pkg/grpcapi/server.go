@@ -278,6 +278,8 @@ type Server struct {
 	// `show system services` (#6385). Wired from Config.ListenersFn; nil in a
 	// no-daemon unit-test build.
 	listenersFn func() sysservices.Listeners
+	// sshdStateFn overrides the shared sshd probe in renderer tests.
+	sshdStateFn func() sysservices.SSHDState
 	// kernelUpgradeStatusFn backs the `kernel-upgrade` ShowText topic (#6495).
 	// Wired from Config.KernelUpgradeStatusFn; nil in a no-daemon unit build.
 	kernelUpgradeStatusFn func() upgrade.ChannelStatus

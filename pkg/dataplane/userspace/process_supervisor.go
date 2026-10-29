@@ -301,16 +301,9 @@ func (m *Manager) superviseHelper(g *helperGeneration) {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// Generation fence, and the ONLY thing that distinguishes an expected exit
-	// from a crash.
-	//
-	// An INTENTIONAL teardown clears procSup under m.mu before releasing it,
-	// and this goroutine cannot acquire m.mu until that release — so a stop is
-	// already `m.procSup != g` by the time we get here and takes the same exit
-	// as a stale generation. An earlier draft also carried a `stoppingHelper`
-	// flag for that case; it was removed because no input made it decide
-	// anything the fence had not already decided, and a branch whose condition
-	// never varies is untestable code pretending to be a safeguard.
+	// A planned stop retires its generation under m.mu before sending helper
+	// shutdown requests or signals. Only exits from the still-current
+	// generation are unexpected and enter crash accounting.
 	if m.procSup != g || m.procGen != g.gen {
 		return
 	}
@@ -388,17 +381,19 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	// test in the package — takeoverReadyLocked's first gate among them — reads
 	// the truth.
 	m.proc = nil
+	m.procSup = nil
 	m.resetAfterHelperGoneLocked()
 
 	exitCode, signal := g.exitCodeAndSignal()
 	m.helperCrash = HelperCrashRecord{
-		LastExitWasCrash: true,
-		Detail:           detail,
-		ExitCode:         exitCode,
-		Signal:           signal,
-		PID:              pid,
-		At:               now,
-		Restarts:         m.helperCrash.Restarts,
+		LastExitWasCrash:   true,
+		Detail:             detail,
+		ExitCode:           exitCode,
+		Signal:             signal,
+		PID:                pid,
+		At:                 now,
+		Restarts:           m.helperCrash.Restarts,
+		LastRestartAttempt: m.helperCrash.LastRestartAttempt,
 		// #7250: the generation this retry is fenced on, so
 		// HelperCrashState() can tell an armed restart from an orphaned one.
 		restartGen: g.gen,

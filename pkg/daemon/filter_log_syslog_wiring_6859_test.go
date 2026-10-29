@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"encoding/binary"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -192,5 +195,102 @@ func TestFilterTermSyslogMapAgreesWithTheSnapshot6859(t *testing.T) {
 	if len(got) != syslogTerms {
 		t.Fatalf("map holds %d entries for %d syslog terms — it carries keys for "+
 			"terms the snapshot does not have: %v", len(got), syslogTerms, got)
+	}
+}
+
+type appliedSnapshotRetryTestDP struct {
+	*runtimeOnlyApplyTestDP
+	appliedSnapshotGeneration uint64
+}
+
+func (d *appliedSnapshotRetryTestDP) AppliedSnapshotGeneration() uint64 {
+	return d.appliedSnapshotGeneration
+}
+
+// #17810 retry regressions model a full generation G whose last-apply result
+// remains unchanged after a retained-snapshot partial publish advances the
+// applied identity to H.
+const (
+	fullFilterGeneration17810    uint64 = 41
+	partialFilterGeneration17810 uint64 = 42
+)
+
+// TestSyslogRetryKeepsFilterMapAtAppliedSnapshotGeneration17810 confirms that
+// retry does not replace an already-H map with stale G.
+func TestSyslogRetryKeepsFilterMapAtAppliedSnapshotGeneration17810(t *testing.T) {
+	// The completed partial publish has already installed H. The retry must
+	// not overwrite it with LastApplyResult's stale G.
+	checkSyslogRetryAppliedGeneration17810(t, false, partialFilterGeneration17810)
+}
+
+// TestDeferredSyslogRetryUsesAppliedSnapshotGeneration17810 confirms the
+// sticky deferred flag does not block installation once H is applied.
+func TestDeferredSyslogRetryUsesAppliedSnapshotGeneration17810(t *testing.T) {
+	// The full G publish was initially deferred and installed under G when it
+	// landed. A later partial H publish advances the applied identity, but the
+	// historical LastApplyResult keeps SnapshotPublishDeferred=true.
+	checkSyslogRetryAppliedGeneration17810(t, true, fullFilterGeneration17810)
+}
+
+func checkSyslogRetryAppliedGeneration17810(t *testing.T, wasDeferred bool, previousGeneration uint64) {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+
+	cfg := filterCfg6859()
+	cfg.Security.Log.Streams["s1"].Port = pc.LocalAddr().(*net.UDPAddr).Port
+	er := logging.NewEventReader(nil, logging.NewEventBuffer(4))
+	er.SetFilterTermSyslogForGeneration(previousGeneration, dpuserspace.FilterTermSyslogMap(cfg))
+	dp := &appliedSnapshotRetryTestDP{
+		runtimeOnlyApplyTestDP: &runtimeOnlyApplyTestDP{
+			gen: fullFilterGeneration17810,
+			lastApply: &dataplane.ApplyResult{
+				Generation:              fullFilterGeneration17810,
+				SnapshotPublishDeferred: wasDeferred,
+			},
+		},
+		appliedSnapshotGeneration: partialFilterGeneration17810,
+	}
+	d := &Daemon{eventReader: er}
+	d.setDataplane(dp)
+	d.setSyslogRetryOwed(true)
+	d.reassertSyslogOnceForTest(cfg)
+
+	installedGeneration, versioned := er.FilterTermSyslogGeneration()
+	if !versioned || installedGeneration != partialFilterGeneration17810 {
+		t.Fatalf("retry installed filter map at generation %d,%v; want applied partial generation %d (last full apply is %d, deferred=%v)",
+			installedGeneration, versioned, partialFilterGeneration17810, fullFilterGeneration17810, wasDeferred)
+	}
+	if !er.FilterTermSyslog()[logging.FilterTermSyslogKey(0, 1)] {
+		t.Fatal("retry's filter projection lost the `then syslog` term at (0,1)")
+	}
+	if got := er.SyslogClientCount(); got != 1 {
+		t.Fatalf("retry installed %d stream clients, want 1", got)
+	}
+
+	frame := make([]byte, 152)
+	frame[40], frame[41] = 0x30, 0x39
+	frame[42], frame[43] = 0x01, 0xbb
+	frame[52] = dataplane.EventTypeFilterLog
+	frame[53] = 6
+	frame[55] = 2 // AF_INET
+	copy(frame[8:12], net.ParseIP("10.0.1.1").To4())
+	copy(frame[24:28], net.ParseIP("10.0.2.1").To4())
+	binary.LittleEndian.PutUint32(frame[60:64], 1)
+	frame[135] = 1
+	binary.LittleEndian.PutUint32(frame[140:144], 0x314e4547)
+	binary.LittleEndian.PutUint64(frame[144:152], partialFilterGeneration17810)
+	if !er.ProcessRawEvent(frame) {
+		t.Fatal("EventReader rejected a valid H-stamped FILTER_LOG frame")
+	}
+	if err := pc.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4096)
+	if _, _, err := pc.ReadFrom(buf); err != nil {
+		t.Fatalf("H-stamped `then syslog` event was not forwarded after retry: %v", err)
 	}
 }

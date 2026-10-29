@@ -162,7 +162,7 @@ struct QueueMarkClassifier {
 
 impl Drop for QueueMarkClassifier {
     fn drop(&mut self) {
-        let mut opts = libbpf_sys::bpf_tc_opts {
+        let opts = libbpf_sys::bpf_tc_opts {
             sz: std::mem::size_of::<libbpf_sys::bpf_tc_opts>() as u64,
             handle: self.handle,
             priority: self.priority,
@@ -772,6 +772,7 @@ fn ipsec_inner_descriptor(
         match crate::afxdp::frame::parse_inner_protocol_and_offsets(bytes, inner_family) {
             Some((protocol, rel_l4_offset, payload_offset)) => {
                 (rel_l4_offset, protocol, payload_offset)
+
             }
             None => (0, 0, 0),
         }

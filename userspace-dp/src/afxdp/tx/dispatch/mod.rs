@@ -33,7 +33,7 @@ use super::*;
 use smallvec::SmallVec;
 
 use super::tcp_segmentation::segment_forwarded_tcp_frames_into_prepared;
-use crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic;
+use crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame;
 
 mod cos;
 mod shared_recycle;
@@ -58,14 +58,14 @@ use shared_recycle::{
     shared_recycle_target_index, shared_recycle_target_index_for_split,
 };
 pub(in crate::afxdp) use slow_path::{
-    SlowPathOutlet, extract_l3_packet_with_nat, handle_forward_build_failure,
-    maybe_reinject_slow_path, maybe_reinject_slow_path_from_frame,
+    SlowPathOutlet, handle_forward_build_failure,
     maybe_reinject_slow_path_from_frame_with_outlet, reinject_host_authorized, slow_path_admit,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use slow_path::{extract_l3_packet_with_nat, maybe_reinject_slow_path, maybe_reinject_slow_path_from_frame};
 // pub(in crate::afxdp::tx) was previously pub(super) on the
 // extract_l3_packet[_from_frame] family; the re-export keeps the
 // pre-split sibling-tx/ visibility verbatim.
-pub(in crate::afxdp::tx) use slow_path::{extract_l3_packet, extract_l3_packet_from_frame};
 
 // #2208: test-only fault injection for the oversized-frame control flow.
 // A built copy-path frame larger than `tx_frame_capacity()` (4096) cannot
@@ -230,7 +230,7 @@ pub(in crate::afxdp) fn compute_forwarded_egress_ptb_with_dynamic(
         crate::afxdp::icmp_ptb::post_transform_needs_inner_dst(decision, forwarding),
     );
     let mtu = if is_nat64 || uses_native_tunnel {
-        crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
+        crate::afxdp::icmp_ptb::post_transform_inner_mtu(
             decision,
             forwarding,
             is_nat64,
@@ -532,7 +532,7 @@ fn build_sub1280_tunnel_outer_fragments(
         return None;
     }
     let (built, wg_commit) =
-        crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit_and_dynamic(
+        crate::afxdp::frame::build_forwarded_frame_from_frame(
             source_frame,
             meta,
             decision,
@@ -791,7 +791,7 @@ fn enqueue_copy_fallback_frame(
                 },
             )
         };
-        crate::afxdp::frame::build_nat64_forwarded_frames_with_commit_and_dynamic(
+        crate::afxdp::frame::build_nat64_forwarded_frames(
             source_frame,
             request.meta,
             &request.decision,
@@ -803,7 +803,7 @@ fn enqueue_copy_fallback_frame(
             inputs.dynamic_neighbors,
         )
     } else {
-        crate::afxdp::frame::build_forwarded_frame_from_frame_with_commit_and_dynamic(
+        crate::afxdp::frame::build_forwarded_frame_from_frame(
             source_frame,
             request.meta,
             &request.decision,
@@ -1616,7 +1616,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
                         );
                     }
                 } else if let Some(segmented) =
-                    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+                    segment_forwarded_tcp_frames_from_frame(
                         source_frame,
                         request.meta,
                         &request.decision,
@@ -2193,7 +2193,7 @@ pub(in crate::afxdp) fn enqueue_pending_forwards_with_dynamic(
             } else {
                 build_failed = true;
             }
-            copied_source_frame = true;
+            let _ = &copied_source_frame;
         }
         if build_failed {
             handle_forward_build_failure(
@@ -2415,7 +2415,7 @@ fn nat64_v4_egress_mtu_with_dynamic(
     forwarding: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> usize {
-    crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
+    crate::afxdp::icmp_ptb::post_transform_inner_mtu(
         decision,
         forwarding,
         true,
@@ -2455,7 +2455,7 @@ fn nat64_v6_egress_mtu_with_dynamic(
     forwarding: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> usize {
-    let mtu = crate::afxdp::icmp_ptb::post_transform_inner_mtu_with_dynamic(
+    let mtu = crate::afxdp::icmp_ptb::post_transform_inner_mtu(
         decision,
         forwarding,
         true,

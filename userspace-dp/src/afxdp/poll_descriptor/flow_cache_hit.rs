@@ -218,7 +218,7 @@ pub(super) fn stage_flow_cache_hit(
     // egress supersedes despite a live mark and re-resolves toward
     // FabricRedirect. Unmarked entries compute `false` and are
     // bit-identical.
-    let (adopted_mark, adopted_mark_revalidated) = {
+    let (_adopted_mark, adopted_mark_revalidated) = {
         let peek_lookup = FlowCacheLookup::for_packet(meta, validation, worker_ctx.forwarding);
         match flow_state
             .flow_cache
@@ -1261,7 +1261,7 @@ pub(super) fn stage_flow_cache_hit(
                     // completion recycles to the ingress slot via the
                     // shared-recycle path. Bound the target queue exactly
                     // as the dispatcher does.
-                    let Some(mut target_tx) =
+                    let Some(target_tx) =
                         inline_target.and_then(|target_bi| tx.get_mut(target_bi, binding_index))
                     else {
                         unreachable!("inline_target resolved above");

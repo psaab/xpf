@@ -91,7 +91,7 @@ use blake2::Blake2sMac;
 use blake2::digest::consts::U16;
 use blake2::digest::{Digest, FixedOutput, KeyInit, Update};
 use chacha20poly1305::aead::AeadInPlace;
-use chacha20poly1305::{Key, KeyInit as AeadKeyInit, XChaCha20Poly1305, XNonce};
+use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use zeroize::Zeroizing;
 
 use super::{WG_KEY_LEN, WG_LABEL_COOKIE, WG_MAC_LEN, WG_MSG_INIT_LEN, WG_TYPE_COOKIE};

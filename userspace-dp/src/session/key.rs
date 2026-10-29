@@ -202,7 +202,7 @@ impl std::hash::Hash for SessionKey {
         let mut img = [0u8; 49];
         img[0] = self.addr_family;
         img[1] = self.protocol;
-        let mut put_ip = |slot: &mut [u8], ip: &IpAddr| match ip {
+        let put_ip = |slot: &mut [u8], ip: &IpAddr| match ip {
             IpAddr::V4(v4) => {
                 slot[0] = 4;
                 slot[1..5].copy_from_slice(&v4.octets());

@@ -569,8 +569,6 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) tcp_no_sequence_check: bool,
     pub(in crate::afxdp) tcp_rst_sequence_check: bool,
     pub(in crate::afxdp) tcp_maximum_window: u32,
-    pub(in crate::afxdp) tcp_time_wait_session_ageout: bool,
-    pub(in crate::afxdp) tcp_time_wait_apply_to_half_closed: bool,
     /// #3527: per-ingress-zone override (zone id → ns) of the global half-open
     /// (`tcp_opening_ns`) TCP window, built from each screened zone's
     /// `syn-flood timeout`. Pushed onto the worker `SessionTable` via

@@ -7653,7 +7653,7 @@ fn seed_recorded_permit_revoked_after_activation_10507() {
     let key = flow_key_to(DMZ_DST_10507);
     let mut sessions = SessionTable::new();
     sessions.set_policy_revalidation_gen(7);
-    let mut md = syncimport_recorded_metadata_10507();
+    let md = syncimport_recorded_metadata_10507();
     assert!(
         sessions.install_with_protocol_with_origin(
             key.clone(),

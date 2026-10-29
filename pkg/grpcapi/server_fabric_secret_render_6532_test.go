@@ -59,6 +59,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/sysservices"
 	"google.golang.org/grpc"
 )
 
@@ -332,7 +333,7 @@ func newFabricSecretServer(t *testing.T) *Server {
 	if _, err := store.Commit(); err != nil {
 		t.Fatalf("Commit(): %v", err)
 	}
-	return &Server{store: store}
+	return &Server{store: store, sshdStateFn: func() sysservices.SSHDState { return sysservices.SSHDRunning }}
 }
 
 func fabricAPIAuthVerifierSentinels(t *testing.T, s *Server) []string {

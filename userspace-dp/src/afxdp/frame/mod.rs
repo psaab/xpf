@@ -16,14 +16,12 @@ mod wg;
 // classifier in `tx/cos_classify.rs` (a sibling afxdp module) can reach it.
 pub(in crate::afxdp) use generated::generated_reply_session_key;
 
-// #2684: the WG physical-underlay outer MTU SSOT, re-exported so the TX
-// dispatcher's `post_transform_inner_mtu` (icmp_ptb.rs) derives the PTB
-// inner MTU from the SAME physical underlay the encap drop guard admits
-// against (the `mod wg` submodule itself is private to `frame`).
+// #2684: the WG selected-peer outer-family/physical-MTU helper is re-exported
+// so TX dispatch's `post_transform_inner_mtu` derives PTB from the same peer
+// route that the encap drop guard admits against (`mod wg` is private).
 pub(in crate::afxdp) use wg::{
-    WgPtbOutcome, consume_wg_outer_ptb, wg_endpoint_physical_outer_mtu,
-    wg_endpoint_physical_outer_mtu_with_dynamic, wg_selected_peer_outer,
-    wg_selected_peer_outer_with_dynamic, wg_transit_egress_physical_egress_ifindex_with_dynamic,
+    WgPtbOutcome, consume_wg_outer_ptb, wg_selected_peer_outer,
+    wg_transit_egress_physical_egress_ifindex,
 };
 
 // #6308: the WG transit-egress DISPATCH physical-egress SSOT, re-exported so
@@ -32,7 +30,6 @@ pub(in crate::afxdp) use wg::{
 // the frame bytes — otherwise a specific-peer-route + no-default-route WG flow
 // resolves the egress binding to the logical wgN ifindex (no XSK binding) and
 // the TX dispatcher NO_EGRESS_BINDING-drops it.
-pub(in crate::afxdp) use wg::wg_transit_egress_physical_egress_ifindex;
 
 // #1440 consolidated outer-header serializers. Re-exported at
 // `frame::write_eth_header`, `frame::write_eth_header_slice`, and
@@ -41,12 +38,14 @@ pub(in crate::afxdp) use wg::wg_transit_egress_physical_egress_ifindex;
 // paths. The previous in-place definitions in this file were
 // moved verbatim into headers.rs.
 pub(in crate::afxdp) use headers::{
-    TPID_8021AD, TPID_8021Q, TxVlanTag, eth_header_len, write_eth_header, write_eth_header_tagged,
-    write_ipv4_header, write_ipv4_tunnel_header, write_ipv6_header, write_udp_header,
+    TPID_8021AD, TPID_8021Q, TxVlanTag, write_eth_header, write_eth_header_tagged,
+    write_ipv4_header, write_ipv4_tunnel_header, write_ipv6_header,
 };
 // #2844: re-exported `pub(crate)` so the top-level `crate::nat64`
 // module (outside `crate::afxdp`) can use the one SSOT Ethernet writer.
 pub(crate) use headers::write_eth_header_slice;
+#[cfg(test)]
+pub(in crate::afxdp) use headers::eth_header_len;
 // #17164: the shared tunnel-inner L4 parser (GRE/WG/IPsec), re-exported
 // `pub(crate)` so `crate::slowpath`'s IPsec-inner descriptor builder
 // reaches the same single source as the afxdp decap paths.
@@ -69,12 +68,14 @@ use checksum::{
 };
 pub(in crate::afxdp) use checksum::{
     adjust_ipv4_header_checksum, adjust_l4_checksum_ipv4, adjust_l4_checksum_ipv4_dst,
-    adjust_l4_checksum_ipv4_src, adjust_l4_checksum_ipv4_words, adjust_l4_checksum_ipv6_words,
-    checksum16, checksum16_add_bytes, checksum16_adjust, checksum16_finish, checksum16_ipv4,
-    checksum16_ipv6, compute_ip_csum_delta, compute_l4_csum_delta, ipv6_words_from_octets,
-    ipv6_words_from_slice, nat_folds_l4_checksum, recompute_l4_checksum_ipv4,
-    recompute_l4_checksum_ipv6, saturate_len16,
+    adjust_l4_checksum_ipv4_src, adjust_l4_checksum_ipv6_words,
+    checksum16, checksum16_add_bytes, checksum16_adjust, checksum16_finish,
+    checksum16_ipv6, compute_ip_csum_delta, compute_l4_csum_delta,
+    ipv6_words_from_octets, ipv6_words_from_slice, nat_folds_l4_checksum,
+    recompute_l4_checksum_ipv4, recompute_l4_checksum_ipv6, saturate_len16,
 };
+#[cfg(test)]
+pub(in crate::afxdp) use checksum::checksum16_ipv4;
 
 // Phase 2: header inspection / parsing helpers extracted to `inspect`.
 // `frame_has_tcp_rst`, `decode_frame_summary`, `try_parse_metadata`,
@@ -101,35 +102,39 @@ pub(crate) use inspect::{
 };
 pub(in crate::afxdp) use inspect::{
     L3_CTX_NONE_UNSPECIFIED_ADDR, authoritative_forward_ports, declared_l3_end,
-    decode_frame_summary, dest_is_directed_broadcast, dest_is_directed_broadcast_in_table,
+    decode_frame_summary, dest_is_directed_broadcast,
     dest_is_multicast_or_broadcast, flowless_effective_protocol, forward_tuple_mismatch_reason,
     fragment_protocol_from_frame, icmp_error_table_for_meta, icmp_reply_type,
-    ipv4_is_any_fragment, ipv4_is_non_first_fragment, is_term_fragment,
+    ipv4_is_any_fragment, ipv4_is_non_first_fragment,
     ipv6_addr_is_v4_mapped_or_compat, ipv6_ext_chain_over_limit,
     ipv6_frame_has_v4_mapped_or_compat, ipv6_is_any_fragment, ipv6_is_non_first_fragment,
     is_ndp_hop255_frame,
     ipv6_is_nonatomically_fragmented, is_any_fragment, is_non_first_fragment,
     l2_dst_is_group_or_broadcast, l3_enforcement_flow_from_frame, l3_enforcement_flow_from_meta,
-    l3_session_flow_from_meta, meta_icmp_identifier_bearing, meta_l4_ports_in_declared_end,
+    meta_icmp_identifier_bearing, meta_l4_ports_in_declared_end,
     neighbor_ip_is_learnable, neighbor_mac_is_learnable,
-    post_nat_expected_ports, source_is_invalid_for_icmp_error, src_is_directed_broadcast,
-    src_is_directed_broadcast_in_table, term_match_extra_from_frame,
+    post_nat_expected_ports, source_is_invalid_for_icmp_error, src_is_directed_broadcast, term_match_extra_from_frame,
     term_match_extra_from_meta, term_match_extra_from_meta_and_frame, transit_dst_is_martian,
     transit_src_is_martian,
-    try_parse_metadata, v4_addr_is_directed_broadcast_in_table,
+    try_parse_metadata,
 };
 #[cfg(test)]
 pub(in crate::afxdp) use inspect::parse_session_flow;
+
 pub(super) use inspect::{
     ZoneEncodedFabricStamp, frame_is_non_first_fragment, frame_l3_offset, frame_l4_offset,
-    live_frame_ports, live_frame_ports_bytes, live_frame_ports_from_meta_bytes,
-    metadata_tuple_complete, nibble_checked_l3, nibble_trusted_stamp, packet_rel_l4_offset,
-    packet_rel_l4_offset_and_protocol, parse_flow_ports, parse_ipv4_session_flow_from_frame,
+    live_frame_ports_bytes, live_frame_ports_from_meta_bytes,
+    nibble_checked_l3, nibble_trusted_stamp, packet_rel_l4_offset,
+    packet_rel_l4_offset_and_protocol,
     parse_packet_destination_from_frame, parse_packet_source_from_frame,
     frame_l4_flags_unknown, local_origin_flowless_eligible,
     parse_session_flow_from_bytes, parse_session_flow_from_frame, parse_session_flow_from_meta,
     parse_zone_encoded_fabric_ingress_from_frame,
     verified_l3_or_stamp,
+};
+#[cfg(test)]
+pub(super) use inspect::{
+    metadata_tuple_complete, parse_flow_ports, parse_ipv4_session_flow_from_frame,
 };
 #[cfg(test)]
 pub(super) use inspect::parse_zone_encoded_fabric_ingress;
@@ -147,12 +152,10 @@ pub(in crate::afxdp) use tcp::{
     extract_tcp_seq_ack_window, extract_tcp_seq_ack_window_scale, frame_has_tcp_rst,
     tcp_payload_offset, tcp_payload_offset_from_l3,
 };
-pub(super) use tcp::{extract_tcp_flags_and_window, extract_tcp_window, tcp_flags_str};
+pub(super) use tcp::{extract_tcp_flags_and_window, tcp_flags_str};
 // #15119: segmentation builders and the dispatch admission gate decline
 // TCP-MD5/TCP-AO datagrams via this shared option walk.
-pub(in crate::afxdp) use tcp::{
-    TCP_OPTION_KIND_AO, TCP_OPTION_KIND_MD5, tcp_header_has_auth_option,
-};
+pub(in crate::afxdp) use tcp::tcp_header_has_auth_option;
 // #4074: the ICMP identifier-bearing query-type gate shared with the quoted
 // ICMP parser and NAT identifier rewriter.
 pub(in crate::afxdp) use inspect::icmp_identifier_bearing;
@@ -165,10 +168,7 @@ pub(in crate::afxdp) use inspect::icmp_identifier_bearing;
 // continues to surface them at the same call sites in tx/dispatch.rs.
 mod tcp_segmentation;
 pub(in crate::afxdp) use tcp_segmentation::{
-    finalize_tcp_segment_headers,
-    segment_forwarded_tcp_frames_from_frame, segment_forwarded_tcp_frames_from_frame_with_commit,
-    segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic,
-    segment_forwarded_tcp_frames_from_frame_with_dynamic,
+    finalize_tcp_segment_headers, segment_forwarded_tcp_frames_from_frame,
 };
 #[cfg(test)]
 pub(in crate::afxdp) use tcp_segmentation::segment_forwarded_tcp_frames;
@@ -347,26 +347,9 @@ pub(super) fn build_injected_packet(
 /// no longer part of the unsupported set.
 ///
 /// `nat64_tunnel_encap_unsupported` now counts only that genuine residue.
-pub(super) fn build_nat64_forwarded_frame(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    nat64_reverse: Option<&Nat64ReverseInfo>,
-    no_v6_frag_header: bool,
-    forwarding: &ForwardingState,
-) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
-    build_nat64_forwarded_frame_with_dynamic(
-        frame,
-        meta,
-        decision,
-        nat64_reverse,
-        no_v6_frag_header,
-        forwarding,
-        None,
-    )
-}
 
-pub(super) fn build_nat64_forwarded_frame_with_dynamic(
+#[cfg(test)]
+pub(super) fn build_nat64_forwarded_frame(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,
     decision: &SessionDecision,
@@ -375,7 +358,7 @@ pub(super) fn build_nat64_forwarded_frame_with_dynamic(
     forwarding: &ForwardingState,
     dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
 ) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
-    let mut frames = build_nat64_forwarded_frames_with_dynamic(
+    let mut frames = build_nat64_forwarded_frames(
         frame,
         meta,
         decision,
@@ -386,83 +369,16 @@ pub(super) fn build_nat64_forwarded_frame_with_dynamic(
         0,
         dynamic_neighbors,
     )?;
-    (frames.len() == 1).then(|| frames.pop()).flatten()
+    (frames.len() == 1)
+        .then(|| frames.pop())
+        .flatten()
+        .map(|(frame, _)| frame)
 }
 
 /// Build one or more frames for a NAT64 forward. MTUs are for the translated
 /// family; zero means unknown and preserves the historical whole-frame path.
+
 pub(super) fn build_nat64_forwarded_frames(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    nat64_reverse: Option<&Nat64ReverseInfo>,
-    no_v6_frag_header: bool,
-    forwarding: &ForwardingState,
-    v4_egress_mtu: usize,
-    v6_egress_mtu: usize,
-) -> Option<SmallVec<[crate::afxdp::cos::redirect_pool::PooledBuffer; 1]>> {
-    build_nat64_forwarded_frames_with_dynamic(
-        frame,
-        meta,
-        decision,
-        nat64_reverse,
-        no_v6_frag_header,
-        forwarding,
-        v4_egress_mtu,
-        v6_egress_mtu,
-        None,
-    )
-}
-
-pub(super) fn build_nat64_forwarded_frames_with_dynamic(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    nat64_reverse: Option<&Nat64ReverseInfo>,
-    no_v6_frag_header: bool,
-    forwarding: &ForwardingState,
-    v4_egress_mtu: usize,
-    v6_egress_mtu: usize,
-    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<SmallVec<[crate::afxdp::cos::redirect_pool::PooledBuffer; 1]>> {
-    build_nat64_forwarded_frames_with_commit_and_dynamic(
-        frame,
-        meta,
-        decision,
-        nat64_reverse,
-        no_v6_frag_header,
-        forwarding,
-        v4_egress_mtu,
-        v6_egress_mtu,
-        dynamic_neighbors,
-    )
-    .map(|frames| frames.into_iter().map(|(frame, _)| frame).collect())
-}
-
-pub(super) fn build_nat64_forwarded_frames_with_commit(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    nat64_reverse: Option<&Nat64ReverseInfo>,
-    no_v6_frag_header: bool,
-    forwarding: &ForwardingState,
-    v4_egress_mtu: usize,
-    v6_egress_mtu: usize,
-) -> Option<SmallVec<[(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>); 1]>> {
-    build_nat64_forwarded_frames_with_commit_and_dynamic(
-        frame,
-        meta,
-        decision,
-        nat64_reverse,
-        no_v6_frag_header,
-        forwarding,
-        v4_egress_mtu,
-        v6_egress_mtu,
-        None,
-    )
-}
-
-pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,
     decision: &SessionDecision,
@@ -510,7 +426,7 @@ pub(super) fn build_nat64_forwarded_frames_with_commit_and_dynamic(
     let mut frames: SmallVec<[(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>); 1]> = SmallVec::new();
     for inner in inner_frames {
         let encapsulated = match kind {
-            Some(TunnelKind::WireGuard) => wg::wg_encap_frame_with_commit_and_dynamic(
+            Some(TunnelKind::WireGuard) => wg::wg_encap_frame(
                 &inner,
                 inner_meta,
                 decision,
@@ -1037,66 +953,10 @@ fn apply_nat64_port_translation_at(
     Some(())
 }
 
+
+
+
 pub(super) fn build_forwarded_frame_from_frame(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    apply_nat_on_fabric: bool,
-    expected_ports: Option<(u16, u16)>,
-) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
-    build_forwarded_frame_from_frame_with_commit(
-        frame,
-        meta,
-        decision,
-        forwarding,
-        apply_nat_on_fabric,
-        expected_ports,
-    )
-    .map(|(frame, _)| frame)
-}
-
-pub(super) fn build_forwarded_frame_from_frame_with_dynamic(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    apply_nat_on_fabric: bool,
-    expected_ports: Option<(u16, u16)>,
-    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
-) -> Option<crate::afxdp::cos::redirect_pool::PooledBuffer> {
-    build_forwarded_frame_from_frame_with_commit_and_dynamic(
-        frame,
-        meta,
-        decision,
-        forwarding,
-        apply_nat_on_fabric,
-        expected_ports,
-        dynamic_neighbors,
-    )
-    .map(|(frame, _)| frame)
-}
-
-pub(super) fn build_forwarded_frame_from_frame_with_commit(
-    frame: &[u8],
-    meta: impl Into<ForwardPacketMeta>,
-    decision: &SessionDecision,
-    forwarding: &ForwardingState,
-    apply_nat_on_fabric: bool,
-    expected_ports: Option<(u16, u16)>,
-) -> Option<(crate::afxdp::cos::redirect_pool::PooledBuffer, Option<wg::WgEncapCommit>)> {
-    build_forwarded_frame_from_frame_with_commit_and_dynamic(
-        frame,
-        meta,
-        decision,
-        forwarding,
-        apply_nat_on_fabric,
-        expected_ports,
-        None,
-    )
-}
-
-pub(super) fn build_forwarded_frame_from_frame_with_commit_and_dynamic(
     frame: &[u8],
     meta: impl Into<ForwardPacketMeta>,
     decision: &SessionDecision,
@@ -1134,7 +994,7 @@ pub(super) fn build_forwarded_frame_from_frame_with_commit_and_dynamic(
             .get(&decision.resolution.tunnel_endpoint_id)
             .map(|e| e.kind);
         return match kind {
-            Some(TunnelKind::WireGuard) => wg::wg_encap_frame_with_commit_and_dynamic(
+            Some(TunnelKind::WireGuard) => wg::wg_encap_frame(
                 &out,
                 meta,
                 decision,
@@ -1161,8 +1021,8 @@ pub(super) fn build_forwarded_frame(
     expected_ports: Option<(u16, u16)>,
 ) -> Option<Vec<u8>> {
     let frame = area.slice(desc.addr as usize, desc.len as usize)?;
-    build_forwarded_frame_from_frame(frame, meta, decision, forwarding, false, expected_ports)
-        .map(|w| w.buf)
+    build_forwarded_frame_from_frame(frame, meta, decision, forwarding, false, expected_ports, None)
+        .map(|(w, _)| w.buf)
 }
 
 #[cfg(test)]

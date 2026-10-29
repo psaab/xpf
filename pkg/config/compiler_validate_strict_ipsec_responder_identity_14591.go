@@ -99,8 +99,9 @@ func validateIPsecResponderIdentityStrict(cfg *Config) error {
 		// inline hostname endpoint, gw == nil with a hostname remote) and
 		// no remote-identity — has nothing to scope its secret by. The
 		// hostname is a dial target, never the presented identity
-		// (#16680); a mixed hostname+IP list keeps its IP selectors and
-		// is unaffected, as are pubkey VPNs.
+		// (#16680); a mixed hostname+IP list needs a discriminating
+		// remote-identity for every dial target (#17772); pubkey VPNs are
+		// unaffected.
 		if !ipsecVPNAuthNeedsPSK(ipsec, gw) {
 			continue
 		}
@@ -155,6 +156,20 @@ func validateIPsecResponderIdentityStrict(cfg *Config) error {
 				"`security ike gateway <name>` with a remote-identity, "+
 				"or use an IP-literal endpoint (#16708)", name, vpn.Gateway)
 		}
+	}
+	// #17772: peer-only selectors must not expose a different credential to
+	// another connection. Compare complete effective peer selector sets
+	// (including IP-address defaults) against configured local-identity or
+	// the default local IP identity; diagnostics never expose PSK values.
+	if conflicts := IPsecPSKIdentityConflicts(ipsec); len(conflicts) != 0 {
+		c := conflicts[0]
+		if c.Kind == "mixed-hostname-ip" {
+			return fmt.Errorf("security ipsec vpn %q: ike gateway %q has mixed hostname/IP endpoints including %q but no discriminating remote-identity; peer-only PSK selectors cover IP literals, not the hostname's resolved peer identity — configure `security ike gateway %s remote-identity <type> <value>` (#17772)", c.VPN, c.Gateway, c.Identity, c.Gateway)
+		}
+		if c.Kind == "peer-selector-is-other-local-identity" {
+			return fmt.Errorf("security ipsec vpn %q and %q: peer-only PSK selector %q on ike gateway %q equals the effective local identity on ike gateway %q; distinct PSK connections with different effective keys must not share an owner identity — configure distinct gateway identities or local addresses (#17772)", c.VPN, c.OtherVPN, c.Identity, c.Gateway, c.OtherGateway)
+		}
+		return fmt.Errorf("security ipsec vpn %q and %q: peer-only PSK selector %q is shared by distinct ike gateways %q and %q using different effective keys; configure distinct remote-identity values so each PSK is selectable only for its intended peer (#17772)", c.VPN, c.OtherVPN, c.Identity, c.Gateway, c.OtherGateway)
 	}
 	return nil
 }

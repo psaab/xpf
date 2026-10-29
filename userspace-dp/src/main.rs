@@ -1,4 +1,22 @@
 #![deny(future_incompatible)]
+#![deny(
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unused_assignments,
+    unused_parens,
+    unused_unsafe,
+    unused_macros,
+    unused_attributes,
+    unused_doc_comments,
+    unused_must_use,
+    unreachable_patterns,
+    duplicate_macro_attributes
+)]
+// #17190: mechanical rustc lints are denied crate-wide; dead_code and
+// private_interfaces remain ratcheted by userspace-dp/lint-baseline.tsv
+// (make lint-rust-baseline) until their burn-down completes.
+
 
 mod afxdp;
 mod event_stream;

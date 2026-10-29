@@ -642,7 +642,7 @@ fn clamp_tcp_mss_no_op_on_ipv6_ah_syn_15119() {
     packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
     // TCP header skeleton with SYN and data_offset covering opts.
     let mut tcp = vec![0u8; tcp_len];
-    tcp[..20].copy_from_slice(&tcp_header_skeleton(TCP_FLAG_SYN, ((tcp_len / 4) as u8)));
+    tcp[..20].copy_from_slice(&tcp_header_skeleton(TCP_FLAG_SYN, (tcp_len / 4) as u8));
     tcp[20..].copy_from_slice(&tcp_opts);
     packet.extend_from_slice(&tcp);
     let pre = packet.clone();

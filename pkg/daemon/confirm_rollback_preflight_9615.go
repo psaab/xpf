@@ -83,42 +83,38 @@ func (d *Daemon) rollbackTargetFeedProducersAbsent(target *config.Config) bool {
 }
 
 // rollbackTargetRefusedOnlyForDNS reports whether target's refusal is
-// attributable to dns-name entries whose resolution failed when the
-// target was compiled at Store.Load (#16612). It re-resolves a private
-// clone with current DNS. When DNS has recovered, the refreshed clone
-// carries usable answers; when DNS is still failing, the refreshed clone
-// still carries DNSLookupFailed entries. Either way the refusal is tied
-// to the frozen answer — but ONLY if the refreshed clone's refusal is
-// itself DNS-caused. A refreshed clone that carries a refusal while its
-// dns-name entries resolved successfully (or that still refuses for an
-// unrelated static reason, e.g. a lenient-dropped constraint that fresh
-// DNS does not repair) is NOT DNS-only, so a genuinely refused target
-// whose dns-name happens to have failed is not smuggled past the gate.
+// attributable to dns-name entries whose resolution failed or had not yet
+// run when the target was compiled at Store.Load (#16612/#17782). It
+// re-resolves a private clone with current DNS. An unavailable DNS name is
+// DNS-only only when the refreshed clone has no whole-snapshot rejection.
+// PolicyContentRejectionReasons deliberately omits per-rule fail-closed
+// refusals caused solely by unavailable DNS, so any remaining rejection is
+// independent and must take the refused-target safe state.
 func rollbackTargetRefusedOnlyForDNS(target *config.Config) bool {
-	if target == nil || !targetHasFailedDNSLookup(target) {
+	if target == nil || !targetHasUnavailableDNSResolution(target) {
 		return false
 	}
-	refreshed := config.RefreshDNSForPreflight(target)
-	if refreshed == nil {
+	return rollbackTargetRefusedOnlyForDNSRefreshed(target, config.RefreshDNSForPreflight(target))
+}
+
+// rollbackTargetRefusedOnlyForDNSRefreshed classifies a frozen refusal against
+// an already-refreshed private clone. Timer-fire callers prepare this clone
+// before taking applySem so DNS cannot block another transaction's apply.
+func rollbackTargetRefusedOnlyForDNSRefreshed(target, refreshed *config.Config) bool {
+	if target == nil || !targetHasUnavailableDNSResolution(target) || refreshed == nil {
 		return false
 	}
 	if len(dpuserspace.PolicyContentRejectionReasons(refreshed, nil)) == 0 {
 		return true
 	}
-	// Still refused after refresh. DNS-only iff the refreshed refusal is
-	// itself attributable to a still-failing lookup: the refreshed clone
-	// still carries a failed lookup. When DNS is still down this cannot
-	// distinguish a co-incident static refusal, so the caller defers
-	// (bounded) and, at the cap, proceeds so the apply path's own
-	// re-resolution renders each entry fail-closed (#16595) rather than
-	// entering bootstrap on the frozen answer. A target whose refreshed
-	// clone resolved successfully but still refuses never reaches here.
-	return targetHasFailedDNSLookup(refreshed)
+	// Any reason that remains is an independent policy/snapshot refusal;
+	// do not let an unrelated failed dns-name defer this target.
+	return false
 }
 
-// targetHasFailedDNSLookup reports whether cfg carries any dns-name
-// entry whose latest resolution failed (#16595).
-func targetHasFailedDNSLookup(cfg *config.Config) bool {
+// targetHasUnavailableDNSResolution reports whether cfg carries a dns-name
+// entry whose latest attempt failed or whose cache had not yet been populated.
+func targetHasUnavailableDNSResolution(cfg *config.Config) bool {
 	if cfg == nil {
 		return false
 	}
@@ -128,7 +124,7 @@ func targetHasFailedDNSLookup(cfg *config.Config) bool {
 			return
 		}
 		for _, a := range b.Addresses {
-			if a != nil && a.DNSName != "" && a.DNSLookupFailed {
+			if a != nil && a.DNSName != "" && (a.DNSLookupFailed || a.DNSUnresolved) {
 				found = true
 			}
 		}
@@ -151,16 +147,19 @@ func targetHasFailedDNSLookup(cfg *config.Config) bool {
 // pending rollback target before anything is promoted. It returns false when the
 // normal rollback should proceed (the target is appliable, or there is no
 // non-nil target to check). It returns true when it handled the fire itself:
-//   - a target that waits only on a feed, or only on a dns-name resolution
-//     that failed when the target was compiled at Store.Load (#16612), is
-//     deferred, up to confirmRollbackFeedRetryMax attempts, without
-//     promoting; at the DNS cap the rollback proceeds (return false) so
-//     the normal promotion + apply path re-resolves and decides each
-//     entry, while at the feed cap the safe state is taken — EXCEPT when
-//     the target's feed producer is absent because the abandoned config
-//     removed/renamed it (#16661): the producers are then reconciled FOR
-//     THE TARGET and the deferral restarts, so bootstrap is never reached
-//     for a refusal whose producer nobody was running;
+//   - a target refused only because a dns-name lookup failed or was still
+//     unresolved at load (#16612/#17782) is refreshed before applySem is
+//     acquired. If the refreshed clone is healthy, rollback proceeds with that
+//     clone; if DNS is still failing it is deferred up to
+//     confirmRollbackFeedRetryMax attempts, then proceeds with the current
+//     fail-closed answers;
+//   - a target that waits only on a feed is deferred, up to
+//     confirmRollbackFeedRetryMax attempts, without promoting. At the feed
+//     cap the safe state is taken — EXCEPT when the target's feed producer is
+//     absent because the abandoned config removed/renamed it (#16661): the
+//     producers are then reconciled FOR THE TARGET and the deferral restarts,
+//     so bootstrap is never reached for a refusal whose producer nobody was
+//     running;
 //   - any other refusal, or a feed still unready at the cap (with its
 //     producer running), promotes the store to the target (persisted as
 //     committed, as #6538 does for a recovered target that no longer
@@ -177,11 +176,20 @@ func targetHasFailedDNSLookup(cfg *config.Config) bool {
 // before the push so a multi-zone target is still refused for an incapable
 // peer at the queue boundary rather than silently narrowed there.
 //
-// Caller holds applySem.
-func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
+// Caller holds applySem. DNS was refreshed into refreshedTarget before the
+// caller acquired it; this function performs no network I/O.
+func (d *Daemon) confirmRollbackTargetHandledAtFire(
+	gen uint64,
+	sampledTarget, refreshedTarget *config.Config,
+) bool {
 	target, _, ok := d.store.PendingRollbackTarget(gen)
 	if !ok || target == nil {
 		return false
+	}
+	if target != sampledTarget {
+		// The generation was superseded between DNS sampling and applySem
+		// acquisition. Do not classify a different target from stale answers.
+		refreshedTarget = nil
 	}
 	rerr := rollbackTargetAppliablePreflight(target, d.feedSnapshotsForConfig(target))
 	if rerr == nil {
@@ -189,7 +197,14 @@ func (d *Daemon) confirmRollbackTargetHandledAtFire(gen uint64) bool {
 		return false
 	}
 	feedOnly := rollbackTargetRefusedOnlyForFeeds(target)
-	dnsOnly := !feedOnly && rollbackTargetRefusedOnlyForDNS(target)
+	dnsOnly := !feedOnly && rollbackTargetRefusedOnlyForDNSRefreshed(target, refreshedTarget)
+	if dnsOnly && len(dpuserspace.PolicyContentRejectionReasons(refreshedTarget, nil)) == 0 {
+		// DNS is healthy now. The frozen compiled target is stale, but the
+		// refreshed clone is appliable; proceed with rollback immediately
+		// and use this same clone for the apply.
+		delete(d.confirmFeedDeferrals, gen)
+		return false
+	}
 	if feedOnly && d.rollbackTargetFeedProducersAbsent(target) {
 		// #16661: the abandoned config's apply cancelled the target's feed
 		// producer (feed removed or renamed by C2). Deferring would wait

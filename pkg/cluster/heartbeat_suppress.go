@@ -91,6 +91,25 @@ func (m *Manager) SetPeerSyncSource(ss *SessionSync) {
 	m.resetSyncSuppressionLocked()
 }
 
+// ClearPeerSyncSourceIfCurrent removes ss only when it is still this
+// Manager's published source. A delayed teardown must not unpublish a
+// successor's source after the daemon has already replaced the session.
+func (m *Manager) ClearPeerSyncSourceIfCurrent(ss *SessionSync) bool {
+	if ss == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.peerSync.(*SessionSync)
+	if !ok || current != ss {
+		return false
+	}
+	clearPeerReconnectBinding(ss, m)
+	m.peerSync = nil
+	m.resetSyncSuppressionLocked()
+	return true
+}
+
 // resetPeerSyncSuppression is the per-connection reset bound to
 // SessionSync.OnPeerReconnected at publish time (#17056). It runs on the
 // SessionSync goroutine that dispatches OnPeerConnected, outside any
