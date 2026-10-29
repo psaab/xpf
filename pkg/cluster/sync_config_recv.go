@@ -66,13 +66,30 @@ func (s *SessionSync) handleConfigApplyAck(conn net.Conn, payload []byte) bool {
 			"applied_gen", appliedGen, "last_sent_gen", lastSent)
 		return false
 	}
+	// #18521: attribute the ACK to the peer boot that delivered it, so a
+	// later BulkStart announcing that same boot does not discard it (see
+	// notePeerBootIncarnation). The capabilities frame carrying the identity
+	// precedes any ACK on the same ordered stream; a legacy peer that
+	// announces none leaves the ACK unattributed, which keeps the old
+	// reset-on-reboot behaviour.
+	var ackBoot bootIncarnation
+	if id, known := s.connPeerIdentityLocked(conn); known {
+		ackBoot = id.boot
+	}
 	advanced := false
 	for {
 		old := s.peerAppliedConfigGen.Load()
-		if appliedGen <= old {
+		if appliedGen < old {
+			break
+		}
+		if appliedGen == old {
+			if ackBoot.known() {
+				s.peerAppliedConfigBoot = ackBoot
+			}
 			break
 		}
 		if s.peerAppliedConfigGen.CompareAndSwap(old, appliedGen) {
+			s.peerAppliedConfigBoot = ackBoot
 			advanced = true
 			break
 		}

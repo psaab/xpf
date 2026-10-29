@@ -1768,6 +1768,10 @@ type SessionSync struct {
 	// Highest config generation the peer positively acknowledged as applied.
 	// PeerConfigStale compares this with lastSentConfigDebt16756.generation.
 	peerAppliedConfigGen atomic.Uint64
+	// peerAppliedConfigBoot is the peer boot incarnation that delivered
+	// peerAppliedConfigGen (zero when unattributed). Guarded by mu. A reboot
+	// discards the ACK only when a DIFFERENT boot delivered it (#18521).
+	peerAppliedConfigBoot bootIncarnation
 
 	configGenCounter     atomic.Uint64
 	lastAppliedConfigGen atomic.Uint64

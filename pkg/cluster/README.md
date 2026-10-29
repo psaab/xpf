@@ -4070,6 +4070,19 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     The legacy refusal names the real cause ("peer predates config-apply ACK").
     With no session sync there is no push that could have failed, so
     handover proceeds as before. Crash takeover stays ungated.
+  - A peer reboot voids only the ACK its PREVIOUS boot delivered (#18521).
+    The applied mark is attributed to the boot that delivered it (the
+    connection's #9818 capability identity, which precedes any ACK on the
+    same ordered stream), and the BulkStart announcing a new boot
+    (`notePeerBootIncarnation`) zeroes it only when a different boot — or an
+    unattributed legacy peer — delivered it. The BulkStart is not ordered
+    against the new boot's ACK: a restarted standby can apply and ACK the
+    peer-connect push seconds before its first bulk starts, and zeroing that
+    ACK left the debt standing with nothing to re-push an in-sync config, so
+    failover onto the restarted standby was refused ("peer applied 0") until
+    the next commit (`config_ack_reboot_order_18521_test.go`). An ACK the
+    standby skips because the delivering connection is no longer active is
+    now logged instead of silent.
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
 - **A committed requested transfer wins over `preempt` (#10776).** Once the

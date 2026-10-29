@@ -545,6 +545,14 @@ func (s *SessionSync) sendConfigApplyAck(conn net.Conn, gen uint64) {
 	current := s.activeConnLocked() == conn
 	s.mu.Unlock()
 	if !current {
+		// #18521: this skip used to be silent, and the peer's stale-config
+		// gate then refused failover with no trace of why. The peer accepts
+		// an ACK only on its own active connection, so one for a connection
+		// that has since been replaced cannot be delivered; the peer's
+		// reconnect push asks again. One line per applied config, not per
+		// frame.
+		slog.Info("cluster sync: not sending config-apply ack: the connection that delivered the config is no longer active",
+			"gen", gen, "remote", connRemoteAddrString(conn))
 		return
 	}
 	var payload [8]byte

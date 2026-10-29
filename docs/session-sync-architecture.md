@@ -1110,6 +1110,16 @@ write. If a successor proves ACK capability after a legacy send, its current
 capability overrides the legacy fallback and that outstanding generation still
 needs a positive ACK.
 
+#18521: the positive-ACK mark (`peerAppliedConfigGen`) is attributed to the
+peer boot that delivered it, read from the delivering connection's #9818
+capability identity. A BulkStart announcing a different boot zeroes the mark
+only when a different boot (or an unattributed legacy peer) delivered it. Before
+this it zeroed unconditionally, and that BulkStart is not ordered against the
+NEW boot's ACK on the same connection: a VM-restarted standby applied and ACKed
+the peer-connect push, its cold-prime bulk started seconds later, and the ACK
+was discarded. With the config already in sync nothing re-pushed, so manual
+failover onto the standby was refused until the next commit.
+
 #6778 added a SECOND sender of that frame: `handleConfigPayload`'s queue-full
 drop. When `configApplyCh` is full the non-blocking enqueue discards the
 INCOMING payload — the newest generation — and no apply ever runs, so
