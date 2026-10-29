@@ -96,6 +96,33 @@ func (m *Manager) PeerGroupStates() map[int]PeerGroupState {
 	return cp
 }
 
+// PeerGroupPrimary reports the peer's last advertised state for rgID.
+// Primary is authoritative only while the retained heartbeat is live: once
+// liveness is cleared the entry remains history, not a current fence. For the
+// same reason `known` means present while liveness is live; offline history
+// must not fence a consumer forever.
+func (m *Manager) PeerGroupPrimary(rgID int) (primary bool, known bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.peerAlive {
+		return false, false
+	}
+	pg, ok := m.peerGroups[rgID]
+	if !ok {
+		return false, false
+	}
+	return pg.State == StatePrimary, true
+}
+
+// ClearPeerGroupStateForTesting removes one retained peer heartbeat entry
+// without replacing the whole peer snapshot. It simulates the next heartbeat
+// pruning an RG after a config change.
+func (m *Manager) ClearPeerGroupStateForTesting(rgID int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.peerGroups, rgID)
+}
+
 // SetSoftwareVersion records the local software version advertised to the peer.
 func (m *Manager) SetSoftwareVersion(version string) {
 	m.mu.Lock()
