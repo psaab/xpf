@@ -11517,22 +11517,26 @@ reserved for whole-dataplane selection where a rewrite shim
     address). #18428 derives collision keys from the exact swanctl selector,
     not the declared Junos identity type, so distinct types that render one owner
     share a collision class.
-    Selector parsing first honors explicit strongSwan type prefixes such as
-    `fqdn:`, `keyid:`, and `{n}:`, then DN syntax, `@#`/`@` forms, and finally
-    untyped IP/FQDN/KEY_ID parsing (invalid colon-containing values are literal
-    KEY_ID bytes). DN keys mirror `atodn()` for recognized attribute names and
-    aliases: PrintableString values and emailAddress compare ASCII-case-
-    insensitively, UTF8String and other IA5 values remain byte-sensitive, and
-    RDN order is significant and preserved. A leading slash selects `/` as
-    the DN delimiter;
-    `+` and backslash are not separators or escapes, internal spaces remain
-    significant, and a dangling terminal backslash, unknown attribute, or
-    numeric-OID DN attribute falls back to literal KEY_ID bytes. RFC822
-    comparisons fold the whole address with ASCII case-insensitivity. `@#`
-    and `keyid:#` selectors use `chunk_from_hex()` bytes (lowercase `0x`
-    stripped, colons ignored, invalid nibbles zeroed, odd nibbles left-padded;
-    byte length matters). IP and FQDN keys follow the parsed rendered selector
-    while rendered values stay in authored spelling.
+    Selector parsing first honors named and numeric strongSwan type prefixes,
+    then DN syntax, `@#`/`@` forms, and untyped IP/subnet/FQDN/KEY_ID parsing.
+    Invalid colon-containing untyped selectors and unsupported DN attributes
+    are literal KEY_ID bytes. Textual `atodn()` values are encoded as type-9
+    DER with source-order RDNs. Only supported named attributes are accepted;
+    numeric OIDs are not aliases. Leading spaces do not prevent slash-delimiter
+    selection, spaces terminate the attribute token, and `+`/backslash are
+    ordinary value bytes. PrintableString values fold ASCII case only when
+    both compared tags are PrintableString; emailAddress IA5 values also fold
+    ASCII case. Other values compare bytes, even across differing tags, so DN
+    equality is pairwise and not reducible to a transitive canonical key.
+    RFC822 IDs fold the whole address with ASCII case-insensitivity. `@#` and
+    `keyid:#` mirror `chunk_from_hex()`: lowercase `0x` is stripped, every
+    colon is removed when sizing, decoding fills from the right and skips at
+    most one colon before each low nibble, invalid nibbles become zero, and
+    odd values are left-padded. For example, `7a::7a` decodes to `a07a`, not
+    `7a7a`. Untyped subnets mask host bits. Numeric type IDs use `strtoul()`
+    base detection and 32-bit enum conversion; `uri:` is type 201 and
+    `xmppaddr:` is encoded as an ASN.1 GeneralName. FQDN and selector spellings
+    remain authored in rendered output.
     A mixed hostname/IP gateway requires a discriminating `remote-identity`
     for every dial target; IP selectors cannot cover a hostname's eventual
     peer identity. Tolerant loads warn

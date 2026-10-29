@@ -173,7 +173,9 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"separator spacing and case", "CN=peer, O=Org", "cn=PEER,o=ORG"},
 			{"slash separator", "/CN=peer/O=Org", "CN=PEER,O=ORG"},
+			{"leading whitespace still selects slash delimiter", " /CN=peer/O=Org", "/CN=PEER/O=ORG"},
 			{"trailing delimiter with whitespace", "CN=peer,O=Org, ", "CN=PEER,O=ORG"},
+			{"space terminates attribute token", "CN=peer,O other=thing", "CN=PEER,O=other=thing"},
 			{"PrintableString case", "SN=Smith", "sn=SMITH"},
 			{"email attribute aliases", "E=Peer@corp.example,O=Org", "emailAddress=PEER@CORP.EXAMPLE,o=ORG"},
 			{"employeeNumber aliases", "EN=12345", "employeeNumber=12345"},
@@ -198,6 +200,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"invalid nibble maps to zero", "zz", "00"},
 			{"hex case", "7a7a", "7A7A"},
 			{"0x prefix and colon separators", "0x7a7a", "7a:7a"},
+			{"single separator skip per low nibble", "7a::7a", "a07a"},
 			{"odd nibble is left padded", "7a7", "07A7"},
 			{"two zero bytes with separators", "0000", "00:00"},
 		}
@@ -216,11 +219,21 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		}
 	})
 
-	t.Run("DN syntax precedes @ forms and malformed DNs use raw KEY_ID bytes", func(t *testing.T) {
+	t.Run("typed DER identities and syntax fallbacks collide", func(t *testing.T) {
 		pairs := []struct{ name, aType, a, bType, b string }{
 			{"hostname selector falls back to literal KEY_ID", "hostname", "CN=peer", "key-id", "40434e3d70656572"},
 			{"unsupported DN falls back to literal KEY_ID", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
-			{"trailing backslash DN falls back to literal KEY_ID", "distinguished-name", "CN=peer\\", "key-id", "434e3d706565725c"},
+			{"textual DN equals asn1dn DER", "distinguished-name", "CN=peer", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"textual DN equals numeric type-9 DER", "distinguished-name", "CN=peer", "inet", "{9}:#300f310d300b0603550403130470656572"},
+			{"cross-tag exact DN value equals", "distinguished-name", "CN=Peer", "inet", "asn1dn:#300f310d300b06035504030c0450656572"},
+			{"xmppaddr wraps into asn1gn DER", "inet", "xmppaddr:peer", "inet", "asn1gn:#a01206082b06010505070805a0060c0470656572"},
+			{"untyped subnet masks host bits", "inet", "198.51.100.0/24", "inet", "198.51.100.1/24"},
+			{"untyped subnet equals ipv4net bytes", "inet", "198.51.100.0/24", "inet", "ipv4net:#c6336400ffffff00"},
+			{"URI prefix is type 201", "inet", "uri:Peer", "inet", "{201}:Peer"},
+			{"positive numeric type prefix", "inet", "{+2}:peer", "inet", "fqdn:peer"},
+			{"space-prefixed numeric type", "inet", "{ 2}:peer", "inet", "fqdn:peer"},
+			{"numeric type truncates to 32 bits", "inet", "{4294967298}:peer", "inet", "fqdn:peer"},
+			{"wide type truncates to ID_IPV4", "inet", "{4294967297}:peer", "inet", "{1}:peer"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -242,6 +255,12 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"one zero byte versus two", "key-id", "zz", "key-id", "0000"},
 			{"odd padded bytes versus ASCII hex text", "key-id", "7a7", "key-id", "376137"},
 			{"unknown DN attribute case", "distinguished-name", "broken=peer", "distinguished-name", "BROKEN=PEER"},
+			{"double separator differs from plain hex", "key-id", "7a::7a", "key-id", "7a7a"},
+			{"URI and numeric ID 12 are distinct", "inet", "uri:Peer", "inet", "{12}:Peer"},
+			{"subnet differs from host IP", "inet", "198.51.100.0/24", "inet", "198.51.100.0"},
+			{"UTF8 DN differs from uppercase bytes", "distinguished-name", "CN=Peer", "inet", "asn1dn:#300f310d300b06035504030c0450454552"},
+			{"backslash DN is not raw KEY_ID", "distinguished-name", "CN=peer\\", "key-id", "434e3d706565725c"},
+			{"non-Printable DN keeps case", "distinguished-name", "CN=peer\\", "distinguished-name", "CN=PEER\\"},
 			{"RDN order is significant", "distinguished-name", "CN=peer,O=Org", "distinguished-name", "O=ORG,CN=PEER"},
 			{"internal DN whitespace", "distinguished-name", "CN=Peer   Name", "distinguished-name", "CN=peer name"},
 			{"UTF8 DN sharp-s", "distinguished-name", "CN=Straße", "distinguished-name", "CN=STRASSE"},

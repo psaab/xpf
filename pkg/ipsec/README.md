@@ -1025,8 +1025,12 @@ all files stay in `package ipsec`, so the public API is unchanged.
   colliding connection groups. Since #18428 comparison derives the key from
   the exact swanctl selector rather than its declared Junos identity type,
   distinct types that render one owner share a collision class. Per rendered
-  form it canonicalizes DN case-ignore attributes and RDN/AVA order, RFC822
-  domain case, key-id bytes and IP/FQDN spelling; authored output stays raw.
+  strongSwan identity equality, not a transitive normalized key: ordered DN
+  comparison follows DER RDN order and tag-sensitive value rules, RFC822
+  comparisons fold the whole address, and key-id bytes and IP/subnet/FQDN
+  selectors follow parser semantics. Numeric ID prefixes use strtoul and the
+  32-bit ID enum; `uri:` is type 201 and `xmppaddr:` encodes a GeneralName.
+  Authored output stays raw.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct

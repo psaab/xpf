@@ -1,10 +1,10 @@
 package config
 
 import (
+	"encoding/asn1"
 	"encoding/hex"
 	"net/netip"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -23,13 +23,18 @@ type IPsecPSKIdentityConflict struct {
 	AffectedVPNs []string
 }
 
+type ipsecPSKPeerSelector struct {
+	identity ipsecIKEIdentity
+	rendered string
+}
+
 type ipsecPSKIdentityGroup struct {
 	key             string
 	gateway         string
 	members         []string
 	psks            map[string]struct{}
-	peerSelectors   map[string]string
-	localIdentities map[string]struct{}
+	peerSelectors   []ipsecPSKPeerSelector
+	localIdentities []ipsecIKEIdentity
 	mixedHostname   string
 }
 
@@ -86,11 +91,9 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 		group := groupsByKey[key]
 		if group == nil {
 			group = &ipsecPSKIdentityGroup{
-				key:             key,
-				gateway:         vpn.Gateway,
-				psks:            make(map[string]struct{}),
-				peerSelectors:   make(map[string]string),
-				localIdentities: make(map[string]struct{}),
+				key:     key,
+				gateway: vpn.Gateway,
+				psks:    make(map[string]struct{}),
 			}
 			groupsByKey[key] = group
 		}
@@ -103,7 +106,7 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 		}
 		if gw != nil && gw.LocalIDValue != "" {
 			identity, _ := ipsecIKEIdentityKey(gw.LocalIDType, gw.LocalIDValue)
-			group.localIdentities[identity] = struct{}{}
+			group.localIdentities = append(group.localIdentities, identity)
 		} else {
 			localAddress := vpn.LocalAddr
 			if localAddress == "" && gw != nil {
@@ -115,7 +118,7 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 					continue
 				}
 				identity, _ := ipsecIKEIdentityKey("inet", addr.String())
-				group.localIdentities[identity] = struct{}{}
+				group.localIdentities = append(group.localIdentities, identity)
 			}
 		}
 		if mixedHostname, mixed := ipsecMixedHostnameAndIP(endpointList); mixed &&
@@ -124,8 +127,11 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 				group.mixedHostname = mixedHostname
 			}
 		}
-		ipsecForEachPSKPeerIdentity(endpointList, gw, func(identity, rendered string) {
-			group.peerSelectors[identity] = rendered
+		ipsecForEachPSKPeerIdentity(endpointList, gw, func(identity ipsecIKEIdentity, rendered string) {
+			group.peerSelectors = append(group.peerSelectors, ipsecPSKPeerSelector{
+				identity: identity,
+				rendered: rendered,
+			})
 		})
 	}
 
@@ -138,6 +144,9 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 	for _, key := range keys {
 		group := groupsByKey[key]
 		sort.Strings(group.members)
+		sort.Slice(group.peerSelectors, func(i, j int) bool {
+			return group.peerSelectors[i].rendered < group.peerSelectors[j].rendered
+		})
 		groups = append(groups, group)
 	}
 
@@ -161,22 +170,39 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 				continue
 			}
 			conflict := IPsecPSKIdentityConflict{}
-			for _, identity := range ipsecSortedIdentityKeys(a.peerSelectors) {
-				rendered := a.peerSelectors[identity]
-				if _, ok := b.peerSelectors[identity]; ok {
-					conflict = ipsecPSKIdentityConflict(a, b, rendered, "shared-peer-selector")
-					break
+			for _, peer := range a.peerSelectors {
+				for _, other := range b.peerSelectors {
+					if peer.identity.equals(other.identity) {
+						conflict = ipsecPSKIdentityConflict(a, b, peer.rendered, "shared-peer-selector")
+						break
+					}
 				}
-				if _, ok := b.localIdentities[identity]; ok {
-					conflict = ipsecPSKIdentityConflict(a, b, rendered, "peer-selector-is-other-local-identity")
+				if conflict.Kind != "" {
 					break
 				}
 			}
 			if conflict.Kind == "" {
-				for _, identity := range ipsecSortedIdentityKeys(b.peerSelectors) {
-					rendered := b.peerSelectors[identity]
-					if _, ok := a.localIdentities[identity]; ok {
-						conflict = ipsecPSKIdentityConflict(b, a, rendered, "peer-selector-is-other-local-identity")
+				for _, peer := range a.peerSelectors {
+					for _, local := range b.localIdentities {
+						if peer.identity.equals(local) {
+							conflict = ipsecPSKIdentityConflict(a, b, peer.rendered, "peer-selector-is-other-local-identity")
+							break
+						}
+					}
+					if conflict.Kind != "" {
+						break
+					}
+				}
+			}
+			if conflict.Kind == "" {
+				for _, peer := range b.peerSelectors {
+					for _, local := range a.localIdentities {
+						if peer.identity.equals(local) {
+							conflict = ipsecPSKIdentityConflict(b, a, peer.rendered, "peer-selector-is-other-local-identity")
+							break
+						}
+					}
+					if conflict.Kind != "" {
 						break
 					}
 				}
@@ -205,14 +231,6 @@ func ipsecPSKIdentityConflict(a, b *ipsecPSKIdentityGroup, identity, kind string
 	}
 }
 
-func ipsecSortedIdentityKeys(selectors map[string]string) []string {
-	keys := make([]string, 0, len(selectors))
-	for identity := range selectors {
-		keys = append(keys, identity)
-	}
-	sort.Strings(keys)
-	return keys
-}
 
 func ipsecPSKSetsEqual(a, b map[string]struct{}) bool {
 	if len(a) != len(b) {
@@ -243,22 +261,24 @@ func ipsecVPNPSKIsHex(ipsec *IPsecConfig, vpn *IPsecVPN, gw *IPsecGateway) bool 
 // classification so selectors cannot drift between validation and output.
 func IPsecPSKPeerSelectors(endpointList string, gw *IPsecGateway) []string {
 	var selectors []string
-	ipsecForEachPSKPeerIdentity(endpointList, gw, func(_, selector string) {
+	ipsecForEachPSKPeerIdentity(endpointList, gw, func(_ ipsecIKEIdentity, selector string) {
 		selectors = append(selectors, selector)
 	})
 	return selectors
 }
 
-func ipsecForEachPSKPeerIdentity(endpointList string, gw *IPsecGateway, visit func(string, string)) {
-	var seen map[string]bool
-	add := func(identity, selector string) {
-		if seen != nil && seen[identity] {
-			return
+func ipsecForEachPSKPeerIdentity(endpointList string, gw *IPsecGateway, visit func(ipsecIKEIdentity, string)) {
+	var seen map[string]struct{}
+	add := func(identity ipsecIKEIdentity, selector string) {
+		if seen != nil {
+			if _, ok := seen[selector]; ok {
+				return
+			}
 		}
 		if seen == nil {
-			seen = make(map[string]bool)
+			seen = make(map[string]struct{})
 		}
-		seen[identity] = true
+		seen[selector] = struct{}{}
 		visit(identity, selector)
 	}
 	addIdentity := func(idType, idValue string) {
@@ -308,54 +328,61 @@ func FormatIPsecIdentity(idType, idValue string) string {
 	}
 }
 
-func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
+type ipsecIKEIdentity struct {
+	typeID   uint32
+	encoding string
+	rdns     []ipsecDNRDN
+	dnValid  bool
+}
+
+func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
 	selector := FormatIPsecIdentity(idType, idValue)
 	if selector == "" {
-		return "", selector
+		return ipsecIKEIdentity{}, selector
 	}
-	// identification_create_from_string() recognizes explicit types before
-	// trying DN syntax, then the @ forms, then untyped IP/FQDN/KEY_ID parsing.
-	if identity, ok := ipsecStrongSwanExplicitTypeKey(selector); ok {
+	if identity, ok := ipsecStrongSwanExplicitTypeIdentity(selector); ok {
 		return identity, selector
 	}
-	if identity, ok := ipsecStrongSwanNumericTypeKey(selector); ok {
+	if identity, ok := ipsecStrongSwanNumericTypeIdentity(selector); ok {
 		return identity, selector
 	}
 	if strings.Contains(selector, "=") {
-		if canonical, ok := ipsecCanonicalDNIdentity(selector); ok {
-			return "distinguished-name:" + canonical, selector
+		if encoded, ok := ipsecEncodeTextualDN(selector); ok {
+			return ipsecTypedIdentity(9, encoded), selector
 		}
-		return ipsecKeyIDBytesKey([]byte(selector)), selector
+		return ipsecIKEIdentity{typeID: 11, encoding: selector}, selector
 	}
 	if strings.HasPrefix(selector, "@#") {
-		return ipsecKeyIDBytesKey(ipsecChunkFromHex(selector[2:])), selector
+		return ipsecIKEIdentity{typeID: 11, encoding: string(ipsecChunkFromHex(selector[2:]))}, selector
 	}
 	if strings.HasPrefix(selector, "@@") {
-		return ipsecRFC822IdentityKey(selector[2:]), selector
+		return ipsecIKEIdentity{typeID: 3, encoding: selector[2:]}, selector
 	}
 	if strings.HasPrefix(selector, "@") {
-		return "fqdn:" + ipsecASCIILower(selector[1:]), selector
+		return ipsecIKEIdentity{typeID: 2, encoding: selector[1:]}, selector
 	}
 	if strings.Contains(selector, "@") {
-		return ipsecRFC822IdentityKey(selector), selector
+		return ipsecIKEIdentity{typeID: 3, encoding: selector}, selector
+	}
+	if prefix, err := netip.ParsePrefix(selector); err == nil {
+		return ipsecSubnetIdentity(prefix), selector
 	}
 	if addr, err := netip.ParseAddr(selector); err == nil && addr.Zone() == "" {
-		if addr.Is4() {
-			return ipsecTypedIdentityBytesKey(1, addr.AsSlice()), selector
+		typeID := uint32(1)
+		if addr.Is6() {
+			typeID = 5
 		}
-		return ipsecTypedIdentityBytesKey(5, addr.AsSlice()), selector
+		return ipsecIKEIdentity{typeID: typeID, encoding: string(addr.AsSlice())}, selector
 	}
 	if strings.Contains(selector, ":") {
-		return ipsecKeyIDBytesKey([]byte(selector)), selector
+		return ipsecIKEIdentity{typeID: 11, encoding: selector}, selector
 	}
-	// A bare, unadorned identity with no DN/RFC822/IP syntax is parsed by
-	// strongSwan as an FQDN identity. Preserve its exact length and whitespace.
-	return "fqdn:" + ipsecASCIILower(selector), selector
+	return ipsecIKEIdentity{typeID: 2, encoding: selector}, selector
 }
 
 var ipsecStrongSwanIdentityPrefixes = [...]struct {
 	text   string
-	typeID uint64
+	typeID uint32
 	class  string
 }{
 	{"ipv4:", 1, ""},
@@ -373,10 +400,10 @@ var ipsecStrongSwanIdentityPrefixes = [...]struct {
 	{"asn1gn:", 10, ""},
 	{"xmppaddr:", 10, "xmppaddr"},
 	{"keyid:", 11, ""},
-	{"uri:", 12, ""},
+	{"uri:", 201, ""},
 }
 
-func ipsecStrongSwanExplicitTypeKey(selector string) (string, bool) {
+func ipsecStrongSwanExplicitTypeIdentity(selector string) (ipsecIKEIdentity, bool) {
 	for _, prefix := range ipsecStrongSwanIdentityPrefixes {
 		if !ipsecASCIIHasPrefix(selector, prefix.text) {
 			continue
@@ -388,44 +415,124 @@ func ipsecStrongSwanExplicitTypeKey(selector string) (string, bool) {
 		} else {
 			encoded = []byte(value)
 		}
-		if prefix.class != "" {
-			return prefix.class + "-bytes:" + hex.EncodeToString(encoded), true
+		if prefix.class == "xmppaddr" {
+			encoded = ipsecXMPPGeneralName(encoded)
 		}
-		return ipsecTypedIdentityBytesKey(prefix.typeID, encoded), true
+		return ipsecTypedIdentity(prefix.typeID, encoded), true
 	}
-	return "", false
+	return ipsecIKEIdentity{}, false
 }
 
-func ipsecStrongSwanNumericTypeKey(selector string) (string, bool) {
+func ipsecStrongSwanNumericTypeIdentity(selector string) (ipsecIKEIdentity, bool) {
 	if !strings.HasPrefix(selector, "{") {
-		return "", false
+		return ipsecIKEIdentity{}, false
 	}
 	close := strings.IndexByte(selector, '}')
 	if close < 2 || close+1 >= len(selector) || selector[close+1] != ':' {
-		return "", false
+		return ipsecIKEIdentity{}, false
 	}
-	typeID, err := strconv.ParseUint(selector[1:close], 0, 64)
-	if err != nil {
-		return "", false
+	typeID, ok := ipsecParseStrtoul32(selector[1:close])
+	if !ok {
+		return ipsecIKEIdentity{}, false
 	}
 	value := selector[close+2:]
 	if strings.HasPrefix(value, "#") {
-		return ipsecTypedIdentityBytesKey(typeID, ipsecChunkFromHex(value[1:])), true
+		return ipsecTypedIdentity(typeID, ipsecChunkFromHex(value[1:])), true
 	}
-	return ipsecTypedIdentityBytesKey(typeID, []byte(value)), true
+	return ipsecTypedIdentity(typeID, []byte(value)), true
 }
 
-func ipsecTypedIdentityBytesKey(typeID uint64, value []byte) string {
-	switch typeID {
-	case 2: // ID_FQDN
-		return "fqdn:" + ipsecASCIILower(string(value))
-	case 3: // ID_RFC822_ADDR
-		return ipsecRFC822IdentityKey(string(value))
-	case 11: // ID_KEY_ID
-		return ipsecKeyIDBytesKey(value)
-	default:
-		return "strongswan-id:" + strconv.FormatUint(typeID, 10) + ":" + hex.EncodeToString(value)
+func ipsecParseStrtoul32(value string) (uint32, bool) {
+	i := 0
+	for i < len(value) && strings.ContainsRune(" \t\n\v\f\r", rune(value[i])) {
+		i++
 	}
+	negative := false
+	if i < len(value) && (value[i] == '+' || value[i] == '-') {
+		negative = value[i] == '-'
+		i++
+	}
+	base := uint64(10)
+	if i < len(value) && value[i] == '0' {
+		base = 8
+		if i+1 < len(value) && (value[i+1] == 'x' || value[i+1] == 'X') {
+			base = 16
+			i += 2
+		}
+	}
+	start := i
+	var number uint64
+	for i < len(value) {
+		char := value[i]
+		digit := uint64(255)
+		switch {
+		case char >= '0' && char <= '9':
+			digit = uint64(char - '0')
+		case char >= 'a' && char <= 'f':
+			digit = uint64(char-'a') + 10
+		case char >= 'A' && char <= 'F':
+			digit = uint64(char-'A') + 10
+		default:
+			break
+		}
+		if digit >= base {
+			break
+		}
+		if number > (^uint64(0)-digit)/base {
+			return 0, false
+		}
+		number = number*base + digit
+		i++
+	}
+	if i == start || i != len(value) {
+		return 0, false
+	}
+	if negative {
+		number = 0 - number
+	}
+	return uint32(number), true
+}
+
+func ipsecTypedIdentity(typeID uint32, value []byte) ipsecIKEIdentity {
+	identity := ipsecIKEIdentity{typeID: typeID, encoding: string(value)}
+	if typeID == 9 {
+		identity.rdns, identity.dnValid = ipsecParseDNEncoding(value)
+	}
+	return identity
+}
+
+func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
+	if identity.typeID != other.typeID {
+		return false
+	}
+	switch identity.typeID {
+	case 2, 3:
+		return ipsecASCIIEqualFold(identity.encoding, other.encoding)
+	case 9:
+		return ipsecDNIdentityEqual(identity, other)
+	default:
+		return identity.encoding == other.encoding
+	}
+}
+
+
+func ipsecASCIIEqualFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		left, right := a[i], b[i]
+		if left >= 'A' && left <= 'Z' {
+			left += 'a' - 'A'
+		}
+		if right >= 'A' && right <= 'Z' {
+			right += 'a' - 'A'
+		}
+		if left != right {
+			return false
+		}
+	}
+	return true
 }
 
 func ipsecASCIIHasPrefix(value, prefix string) bool {
@@ -444,44 +551,68 @@ func ipsecASCIIHasPrefix(value, prefix string) bool {
 	return true
 }
 
-func ipsecRFC822IdentityKey(value string) string {
-	return "rfc822:" + ipsecASCIILower(value)
+func ipsecSubnetIdentity(prefix netip.Prefix) ipsecIKEIdentity {
+	prefix = prefix.Masked()
+	address := prefix.Addr()
+	typeID := uint32(4)
+	if address.Is6() {
+		typeID = 6
+	}
+	encoding := address.AsSlice()
+	mask := make([]byte, len(encoding))
+	for bit := 0; bit < prefix.Bits(); bit++ {
+		mask[bit/8] |= 1 << (7 - uint(bit%8))
+	}
+	encoding = append(encoding, mask...)
+	return ipsecTypedIdentity(typeID, encoding)
 }
 
-func ipsecKeyIDBytesKey(value []byte) string {
-	return "key-id-bytes:" + hex.EncodeToString(value)
+func ipsecXMPPGeneralName(value []byte) []byte {
+	oid := []byte{0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x08, 0x05}
+	utf8 := ipsecDERWrap(0x0c, value)
+	otherNameValue := ipsecDERWrap(0xa0, utf8)
+	return ipsecDERWrap(0xa0, append(oid, otherNameValue...))
 }
-
-// ipsecChunkFromHex mirrors strongSwan's chunk_from_hex() spelling: lowercase
-// 0x and colons are ignored, invalid nibbles become zero, and odd values are
-// left-padded with a zero nibble before bytewise identity comparison.
+// ipsecChunkFromHex mirrors chunk_from_hex(): it sizes after removing every
+// colon, then fills bytes from the right while skipping at most one colon
+// before each low nibble.
 func ipsecChunkFromHex(value string) []byte {
-	if strings.HasPrefix(value, "0x") {
+	if len(value) > 1 && value[0] == '0' && value[1] == 'x' {
 		value = value[2:]
 	}
-	nibbleCount := 0
+	nibbleCount := len(value)
 	for i := 0; i < len(value); i++ {
-		if value[i] != ':' {
-			nibbleCount++
+		if value[i] == ':' {
+			nibbleCount--
 		}
 	}
-	decoded := make([]byte, (nibbleCount+1)/2)
-	i, out := 0, 0
-	nextNibble := func() byte {
-		for i < len(value) && value[i] == ':' {
-			i++
+	odd := nibbleCount%2 != 0
+	if odd {
+		nibbleCount++
+	}
+	decoded := make([]byte, nibbleCount/2)
+	position := len(value)
+	next := func() (byte, bool) {
+		if position == 0 {
+			return 0, false
 		}
-		nibble := ipsecHexNibble(value[i])
-		i++
-		return nibble
+		position--
+		return value[position], true
 	}
-	if nibbleCount%2 != 0 {
-		decoded[out] = nextNibble()
-		out++
-	}
-	for out < len(decoded) {
-		decoded[out] = nextNibble()<<4 | nextNibble()
-		out++
+	for i := len(decoded) - 1; i >= 0; i-- {
+		nibble, ok := next()
+		if ok && nibble == ':' {
+			nibble, ok = next()
+		}
+		if ok {
+			decoded[i] = ipsecHexNibble(nibble)
+		}
+		if i > 0 || !odd {
+			nibble, ok = next()
+			if ok {
+				decoded[i] |= ipsecHexNibble(nibble) << 4
+			}
+		}
 	}
 	return decoded
 }
@@ -496,6 +627,171 @@ func ipsecHexNibble(value byte) byte {
 		return value - 'A' + 10
 	default:
 		return 0
+	}
+}
+
+type ipsecDNAttribute struct {
+	oid      string
+	valueTag byte
+}
+
+type ipsecDNRDN struct {
+	oid   string
+	tag   byte
+	value string
+}
+
+func ipsecEncodeTextualDN(value string) ([]byte, bool) {
+	const (
+		searchOID = iota
+		readOID
+		searchName
+		readName
+	)
+	state := searchOID
+	var separator byte
+	oidStart, nameStart := 0, 0
+	var attribute ipsecDNAttribute
+	var rdns []byte
+	rdnCount := 0
+	appendRDN := func(name string) bool {
+		if rdnCount == 20 {
+			return false
+		}
+		tag := attribute.valueTag
+		if tag == 0x13 && !ipsecIsPrintableString(name) {
+			tag = 0x0c
+		}
+		oid := ipsecDERWrap(0x06, []byte(attribute.oid))
+		valueDER := ipsecDERWrap(tag, []byte(name))
+		sequence := ipsecDERWrap(0x30, append(oid, valueDER...))
+		rdns = append(rdns, ipsecDERWrap(0x31, sequence)...)
+		rdnCount++
+		return true
+	}
+	for i := 0; i <= len(value); i++ {
+		var char byte
+		if i < len(value) {
+			char = value[i]
+		}
+		switch state {
+		case searchOID:
+			if separator == 0 && char == '/' {
+				separator = '/'
+				continue
+			}
+			if char != ' ' && char != 0 {
+				if separator == 0 {
+					separator = ','
+				}
+				oidStart = i
+				state = readOID
+			}
+		case readOID:
+			if char != ' ' && char != '=' {
+				continue
+			}
+			var ok bool
+			attribute, ok = ipsecDNAttributeFor(value[oidStart:i])
+			if !ok {
+				return nil, false
+			}
+			state = searchName
+		case searchName:
+			if char == ' ' || char == '=' {
+				continue
+			}
+			if char != separator && char != 0 {
+				nameStart = i
+				state = readName
+				continue
+			}
+			if !appendRDN("") {
+				return nil, false
+			}
+			state = searchOID
+		case readName:
+			if char != separator && char != 0 {
+				continue
+			}
+			end := i
+			for end > nameStart && value[end-1] == ' ' {
+				end--
+			}
+			if !appendRDN(value[nameStart:end]) {
+				return nil, false
+			}
+			state = searchOID
+		}
+	}
+	if state == readOID {
+		return nil, false
+	}
+	return ipsecDERWrap(0x30, rdns), true
+}
+
+func ipsecDNAttributeFor(attribute string) (ipsecDNAttribute, bool) {
+	printable := byte(0x13)
+	ia5 := byte(0x16)
+	switch ipsecASCIILower(attribute) {
+	case "nd":
+		return ipsecDNAttribute{"\x82\x06\x01\x0a\x07\x14", printable}, true
+	case "uid":
+		return ipsecDNAttribute{"\x09\x92\x26\x89\x93\xf2\x2c\x64\x01\x01", printable}, true
+	case "dc":
+		return ipsecDNAttribute{"\x09\x92\x26\x89\x93\xf2\x2c\x64\x01\x19", printable}, true
+	case "cn":
+		return ipsecDNAttribute{"\x55\x04\x03", printable}, true
+	case "sn":
+		return ipsecDNAttribute{"\x55\x04\x04", printable}, true
+	case "serialnumber":
+		return ipsecDNAttribute{"\x55\x04\x05", printable}, true
+	case "c":
+		return ipsecDNAttribute{"\x55\x04\x06", printable}, true
+	case "l":
+		return ipsecDNAttribute{"\x55\x04\x07", printable}, true
+	case "st":
+		return ipsecDNAttribute{"\x55\x04\x08", printable}, true
+	case "street":
+		return ipsecDNAttribute{"\x55\x04\x09", printable}, true
+	case "o":
+		return ipsecDNAttribute{"\x55\x04\x0a", printable}, true
+	case "ou":
+		return ipsecDNAttribute{"\x55\x04\x0b", printable}, true
+	case "t":
+		return ipsecDNAttribute{"\x55\x04\x0c", printable}, true
+	case "d":
+		return ipsecDNAttribute{"\x55\x04\x0d", printable}, true
+	case "postaladdress":
+		return ipsecDNAttribute{"\x55\x04\x10", printable}, true
+	case "postalcode":
+		return ipsecDNAttribute{"\x55\x04\x11", printable}, true
+	case "n":
+		return ipsecDNAttribute{"\x55\x04\x29", printable}, true
+	case "g":
+		return ipsecDNAttribute{"\x55\x04\x2a", printable}, true
+	case "i":
+		return ipsecDNAttribute{"\x55\x04\x2b", printable}, true
+	case "dnqualifier":
+		return ipsecDNAttribute{"\x55\x04\x2e", printable}, true
+	case "dmdname":
+		return ipsecDNAttribute{"\x55\x04\x36", printable}, true
+	case "pseudonym":
+		return ipsecDNAttribute{"\x55\x04\x41", printable}, true
+	case "id":
+		return ipsecDNAttribute{"\x55\x04\x2d", printable}, true
+	case "en", "employeenumber":
+		return ipsecDNAttribute{"\x60\x86\x48\x01\x86\xf8\x42\x03\x01\x03", printable}, true
+	case "e", "email", "emailaddress":
+		return ipsecDNAttribute{"\x2a\x86\x48\x86\xf7\x0d\x01\x09\x01", ia5}, true
+	case "un", "unstructuredname":
+		return ipsecDNAttribute{"\x2a\x86\x48\x86\xf7\x0d\x01\x09\x02", ia5}, true
+	case "ua", "unstructuredaddress":
+		return ipsecDNAttribute{"\x2a\x86\x48\x86\xf7\x0d\x01\x09\x08", printable}, true
+	case "tcgid":
+		return ipsecDNAttribute{"\x2b\x06\x01\x04\x01\x89\x31\x01\x01\x02\x02\x4b", printable}, true
+	default:
+		return ipsecDNAttribute{}, false
 	}
 }
 
@@ -515,98 +811,101 @@ func ipsecASCIILower(value string) string {
 	return string(lowered)
 }
 
-func ipsecCanonicalDNIdentity(value string) (string, bool) {
-	separator := byte(',')
-	if strings.HasPrefix(value, "/") {
-		separator = '/'
-		value = value[1:]
+func ipsecDNIdentityEqual(a, b ipsecIKEIdentity) bool {
+	if len(a.encoding) != len(b.encoding) {
+		return false
 	}
-	end := len(value)
-	for end > 0 && value[end-1] == ' ' {
-		end--
+	if a.encoding == b.encoding {
+		return true
 	}
-	trailingBackslashes := 0
-	for end > 0 && value[end-1] == '\\' {
-		trailingBackslashes++
-		end--
+	if !a.dnValid || !b.dnValid || len(a.rdns) == 0 || len(a.rdns) != len(b.rdns) {
+		return false
 	}
-	if trailingBackslashes%2 != 0 {
-		return "", false
-	}
-	if end > 0 && value[end-1] == separator {
-		value = value[:end-1]
-	}
-	rawRDNs := strings.Split(value, string(separator))
-	if len(rawRDNs) > 20 {
-		return "", false
-	}
-	canonicalRDNs := make([]string, 0, len(rawRDNs))
-	for _, rawRDN := range rawRDNs {
-		eq := strings.IndexByte(rawRDN, '=')
-		if eq < 0 {
-			return "", false
+	const emailAddressOID = "\x2a\x86\x48\x86\xf7\x0d\x01\x09\x01"
+	for i := range a.rdns {
+		x, y := a.rdns[i], b.rdns[i]
+		if x.oid != y.oid || len(x.value) != len(y.value) {
+			return false
 		}
-		attribute := canonicalIPsecDNAttribute(strings.Trim(rawRDN[:eq], " "))
-		if attribute == "" {
-			return "", false
-		}
-		dnValue := strings.TrimRight(strings.TrimLeft(rawRDN[eq+1:], " ="), " ")
-		valueType := "printable"
-		switch attribute {
-		case "EMAILADDRESS", "UNSTRUCTUREDNAME":
-			valueType = "ia5"
-		default:
-			if !ipsecIsPrintableString(dnValue) {
-				valueType = "utf8"
+		if x.tag == y.tag && (x.tag == 0x13 || (x.tag == 0x16 && x.oid == emailAddressOID)) {
+			if !ipsecASCIIEqualFold(x.value, y.value) {
+				return false
 			}
+		} else if x.value != y.value {
+			return false
 		}
-		if valueType == "printable" || attribute == "EMAILADDRESS" {
-			dnValue = ipsecASCIILower(dnValue)
-		}
-		canonicalRDNs = append(canonicalRDNs,
-			attribute+":"+valueType+":"+strconv.Quote(dnValue))
 	}
-	// strongSwan compare_dn() compares RDNs in source order. The '+' and
-	// backslash bytes stay in values rather than becoming AVA/escape syntax;
-	// the dangling terminal backslash fallback is handled above as malformed.
-	return strings.Join(canonicalRDNs, "/"), true
+	return true
 }
 
-func canonicalIPsecDNAttribute(attribute string) string {
-	upper := ipsecASCIIUpper(attribute)
-	switch upper {
-	case "ND", "UID", "DC", "CN", "SN", "SERIALNUMBER", "C", "L", "ST",
-		"STREET", "O", "OU", "ORGANIZATIONIDENTIFIER", "T", "D",
-		"POSTALADDRESS", "POSTALCODE", "N", "G", "I", "DNQUALIFIER",
-		"DMDNAME", "PSEUDONYM", "ID", "TCGID":
-		return upper
-	case "E", "EMAIL", "EMAILADDRESS":
-		return "EMAILADDRESS"
-	case "EN", "EMPLOYEENUMBER":
-		return "EMPLOYEENUMBER"
-	case "UN", "UNSTRUCTUREDNAME":
-		return "UNSTRUCTUREDNAME"
-	case "UA", "UNSTRUCTUREDADDRESS":
-		return "UNSTRUCTUREDADDRESS"
-	default:
-		return ""
+func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
+	var sequence asn1.RawValue
+	rest, err := asn1.Unmarshal(encoded, &sequence)
+	if err != nil || len(rest) != 0 || sequence.Class != 0 || sequence.Tag != 16 {
+		return nil, false
 	}
-}
-
-func ipsecASCIIUpper(value string) string {
-	var upper []byte
-	for i := 0; i < len(value); i++ {
-		if value[i] >= 'a' && value[i] <= 'z' {
-			if upper == nil {
-				upper = []byte(value)
+	sets := sequence.Bytes
+	var rdns []ipsecDNRDN
+	for len(sets) > 0 {
+		var set asn1.RawValue
+		sets, err = asn1.Unmarshal(sets, &set)
+		if err != nil || set.Class != 0 || set.Tag != 17 {
+			return nil, false
+		}
+		sequences := set.Bytes
+		for len(sequences) > 0 {
+			var rdn asn1.RawValue
+			sequences, err = asn1.Unmarshal(sequences, &rdn)
+			if err != nil || rdn.Class != 0 || rdn.Tag != 16 {
+				return nil, false
 			}
-			upper[i] -= 'a' - 'A'
+			var oid, value asn1.RawValue
+			content, err := asn1.Unmarshal(rdn.Bytes, &oid)
+			if err != nil || oid.Class != 0 || oid.Tag != 6 {
+				return nil, false
+			}
+			content, err = asn1.Unmarshal(content, &value)
+			if err != nil || len(content) != 0 {
+				return nil, false
+			}
+			tag := byte(value.Tag)
+			if value.Class != 0 {
+				tag |= byte(value.Class << 6)
+			}
+			if value.IsCompound {
+				tag |= 0x20
+			}
+			rdns = append(rdns, ipsecDNRDN{
+				oid:   string(oid.Bytes),
+				tag:   tag,
+				value: string(value.Bytes),
+			})
 		}
 	}
-	if upper == nil {
-		return value
+	return rdns, true
+}
+
+func ipsecDERWrap(tag byte, content []byte) []byte {
+	length := len(content)
+	lengthBytes := 0
+	if length >= 128 {
+		for size := length; size > 0; size >>= 8 {
+			lengthBytes++
+		}
 	}
-	return string(upper)
+	headerLength := 2 + lengthBytes
+	encoded := make([]byte, headerLength+length)
+	encoded[0] = tag
+	if lengthBytes == 0 {
+		encoded[1] = byte(length)
+	} else {
+		encoded[1] = 0x80 | byte(lengthBytes)
+		for i := 0; i < lengthBytes; i++ {
+			encoded[2+i] = byte(length >> (8 * (lengthBytes - 1 - i)))
+		}
+	}
+	copy(encoded[headerLength:], content)
+	return encoded
 }
 
 func ipsecIsPrintableString(value string) bool {

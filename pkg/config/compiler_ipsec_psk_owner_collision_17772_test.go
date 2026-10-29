@@ -272,7 +272,9 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"separator spacing and case", "CN=peer, O=Org", "cn=PEER,o=ORG"},
 			{"slash separator", "/CN=peer/O=Org", "CN=PEER,O=ORG"},
+			{"leading whitespace still selects slash delimiter", " /CN=peer/O=Org", "/CN=PEER/O=ORG"},
 			{"trailing delimiter with whitespace", "CN=peer,O=Org, ", "CN=PEER,O=ORG"},
+			{"space terminates attribute token", "CN=peer,O other=thing", "CN=PEER,O=other=thing"},
 			{"SN PrintableString case", "SN=Smith", "sn=SMITH"},
 			{"G PrintableString case", "G=Jane", "g=JANE"},
 			{"T PrintableString case", "T=Manager", "t=MANAGER"},
@@ -295,7 +297,17 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer,O=Org", "distinguished-name", "O=ORG,CN=PEER"))
 	})
 
-	t.Run("unsupported DN syntax falls back to literal key-id bytes", func(t *testing.T) {
+	t.Run("DER DN comparison preserves non-transitive tag rules", func(t *testing.T) {
+		printable, _ := ipsecIKEIdentityKey("distinguished-name", "CN=Peer")
+		utf8SameBytes, _ := ipsecIKEIdentityKey("inet", "asn1dn:#300f310d300b06035504030c0450656572")
+		printableUpper, _ := ipsecIKEIdentityKey("distinguished-name", "CN=PEER")
+		if !printable.equals(utf8SameBytes) || utf8SameBytes.equals(printableUpper) || !printable.equals(printableUpper) {
+			t.Fatalf("DN equality must compare values according to both ASN.1 tags: printable/UTF8=%v, UTF8/upper-printable=%v, printable-case=%v",
+				printable.equals(utf8SameBytes), utf8SameBytes.equals(printableUpper), printable.equals(printableUpper))
+		}
+	})
+
+	t.Run("unsupported and byte-sensitive DN cases", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"numeric OID is not an atodn attribute", "2.5.4.3=peer", "CN=peer"},
 			{"numeric OID is not an atodn attribute anywhere", "CN=peer,2.5.4.4=Smith", "CN=peer,SN=Smith"},
@@ -306,13 +318,17 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"internal whitespace is significant", "CN=Peer   Name,O=Org", "CN=peer name,O=ORG"},
 			{"UTF8String values do not expand sharp-s", "CN=Straße", "CN=STRASSE"},
 			{"UTF8String values remain case-sensitive", "CN=straße", "CN=STRAßE"},
-			{"trailing backslash fallback remains literal", "CN=peer\\", "CN=PEER\\"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {
 				requireNoCollision17772(t, identityPair17772("distinguished-name", pair.a, "distinguished-name", pair.b))
 			})
 		}
+	})
+
+	t.Run("backslash stays in DN and does not become raw KEY_ID", func(t *testing.T) {
+		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer\\", "key-id", "434e3d706565725c"))
+		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer\\", "distinguished-name", "CN=PEER\\"))
 	})
 
 	t.Run("DN and FQDN namespaces stay distinct", func(t *testing.T) {
@@ -323,6 +339,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"invalid nibbles map to zero", "zz", "00"},
 			{"0x prefix is stripped", "0x7a7a", "7A7A"},
+			{"single separator skip per low nibble", "7a::7a", "a07a"},
 			{"colon separators are stripped", "7a:7a", "7A7A"},
 			{"odd nibble is left padded", "7a7", "07A7"},
 			{"two zero bytes with separators", "0000", "00:00"},
@@ -338,6 +355,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"one zero byte versus two", "zz", "0000"},
 			{"odd padded hex versus literal-looking hex", "7a7", "376137"},
+			{"repeated separators do not merge plain hex", "7a::7a", "7a7a"},
 			{"invalid whitespace nibbles versus hex", " 6162 ", "6162"},
 		}
 		for _, pair := range pairs {
@@ -380,7 +398,16 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"explicit keyid prefix decodes chunk bytes", "inet", "keyid:#7a7a", "key-id", "7a7a"},
 			{"invalid IPv6-like value falls back to literal KEY_ID", "inet", "7a:7a", "key-id", "37613a3761"},
 			{"numeric FQDN prefix matches untyped FQDN", "inet", "{2}:peer.example", "inet", "peer.example"},
-			{"malformed DN fallback matches raw KEY_ID bytes", "distinguished-name", "CN=peer\\", "key-id", "434e3d706565725c"},
+			{"textual DN equals asn1dn DER", "distinguished-name", "CN=peer", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"textual DN equals numeric type-9 DER", "distinguished-name", "CN=peer", "inet", "{9}:#300f310d300b0603550403130470656572"},
+			{"xmppaddr wraps into asn1gn DER", "inet", "xmppaddr:peer", "inet", "asn1gn:#a01206082b06010505070805a0060c0470656572"},
+			{"untyped subnet masks host bits", "inet", "198.51.100.0/24", "inet", "198.51.100.1/24"},
+			{"untyped subnet equals ipv4net bytes", "inet", "198.51.100.0/24", "inet", "ipv4net:#c6336400ffffff00"},
+			{"URI prefix is type 201", "inet", "uri:Peer", "inet", "{201}:Peer"},
+			{"positive numeric type prefix", "inet", "{+2}:peer", "inet", "fqdn:peer"},
+			{"space-prefixed numeric type", "inet", "{ 2}:peer", "inet", "fqdn:peer"},
+			{"numeric type truncates to 32 bits", "inet", "{4294967298}:peer", "inet", "fqdn:peer"},
+			{"wide type truncates to ID_IPV4", "inet", "{4294967297}:peer", "inet", "{1}:peer"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
 		for _, pair := range pairs {
@@ -394,6 +421,8 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("email", "peer@corp.example", "hostname", "peer@corp.example"))
 		requireNoCollision17772(t, identityPair17772("hostname", "zz", "key-id", "zz"))
 		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer.example.com", "inet", "peer.example.com"))
+		requireNoCollision17772(t, identityPair17772("inet", "uri:Peer", "inet", "{12}:Peer"))
+		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.0/24", "inet", "198.51.100.0"))
 	})
 
 	t.Run("remote identity equal to default gateway local address is refused", func(t *testing.T) {
