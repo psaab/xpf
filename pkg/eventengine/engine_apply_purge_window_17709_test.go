@@ -37,6 +37,13 @@ func TestApplyPurgeWindowKeepsSuccessorPark17709(t *testing.T) {
 		t.Fatalf("R1 edge not parked: PendingDeferred=%d, want 1", got)
 	}
 
+	e.pendingMu.Lock()
+	r1Park, ok := e.pending.cooldown["p\x00ping_test_failed"]
+	e.pendingMu.Unlock()
+	if !ok {
+		t.Fatal("R1 cooldown entry disappeared before redefinition")
+	}
+
 	// Pause Apply after it publishes R2 and releases e.mu, but before
 	// acquiring pendingMu to purge the predecessor entry.
 	polR2 := &config.EventPolicy{Name: "p", Events: []string{"ping_test_failed"}, ThenCommands: []string{"set system host-name r2"}}
@@ -50,7 +57,6 @@ func TestApplyPurgeWindowKeepsSuccessorPark17709(t *testing.T) {
 			close(resumePurge)
 		}
 	}
-	defer releasePurge()
 	e.beforePendingPurgeFn = func() {
 		close(purgeWindow)
 		<-resumePurge
@@ -59,6 +65,14 @@ func TestApplyPurgeWindowKeepsSuccessorPark17709(t *testing.T) {
 	go func() {
 		defer close(applyDone)
 		applyPolicies9984(e, []*config.EventPolicy{polR2})
+	}()
+	defer func() {
+		releasePurge()
+		select {
+		case <-applyDone:
+		case <-time.After(10 * time.Second):
+			t.Error("Apply did not finish during test cleanup")
+		}
 	}()
 
 	select {
@@ -75,38 +89,46 @@ func TestApplyPurgeWindowKeepsSuccessorPark17709(t *testing.T) {
 	waitFor(t, "R2 commit in purge window", func() bool { return e.Stats().Committed >= 2 })
 	waitCooldown16650(t, e)
 
-	// Successor's in-cooldown edge must park. Pre-fix the predecessor's
-	// stale entry still occupies the key, so this park is dropped.
-	cur.set(15)
-	suppressed := e.Stats().CooldownSuppressed
-	edgeDone := make(chan struct{})
-	go func() {
-		defer close(edgeDone)
-		e.HandleEvent(eventFor("ping_test_failed"))
-	}()
-	waitFor(t, "successor cooldown edge evaluated", func() bool {
-		return e.Stats().CooldownSuppressed > suppressed
-	})
+	// The deferred worker may drain a stale R1 entry after Apply publishes
+	// R2's fresh runtime (whose cooldown anchor is still zero). Keep the
+	// collision deterministic by restoring that captured R1 entry if needed;
+	// R2's committed cooldown below prevents it from draining during this arm.
+	key := "p\x00ping_test_failed"
+	e.pendingMu.Lock()
+	if _, exists := e.pending.cooldown[key]; !exists {
+		e.pending.cooldown[key] = r1Park
+		e.counters.pendingDeferred.Add(1)
+	}
+	stale, exists := e.pending.cooldown[key]
+	e.pendingMu.Unlock()
+	if !exists || stale.action.semRev == rev16650(e, "p") {
+		t.Fatalf("expected a stale R1 park before successor edge, exists=%t semRev=%q live=%q", exists, stale.action.semRev, rev16650(e, "p"))
+	}
 
-	// Resume the purge; it removes the predecessor entry after the
-	// successor insertion had an opportunity to replace it.
+	// Successor's in-cooldown edge must replace the guaranteed stale R1 key.
+	// Synchronous HandleEvent ensures insertion completes before Apply resumes.
+	cur.set(15)
+	e.HandleEvent(eventFor("ping_test_failed"))
+	e.pendingMu.Lock()
+	de, ok := e.pending.cooldown[key]
+	e.pendingMu.Unlock()
+	if !ok || de.action.semRev != rev16650(e, "p") {
+		t.Fatalf("successor park not installed before purge: exists=%t semRev=%q live=%q", ok, de.action.semRev, rev16650(e, "p"))
+	}
+
+	// Resume the purge; it must preserve the already-installed successor park.
 	releasePurge()
 	select {
 	case <-applyDone:
 	case <-time.After(10 * time.Second):
 		t.Fatal("redefining Apply did not finish after purge release")
 	}
-	select {
-	case <-edgeDone:
-	case <-time.After(10 * time.Second):
-		t.Fatal("successor cooldown park did not finish")
-	}
 
 	if got := e.Stats().PendingDeferred; got != 1 {
 		t.Fatalf("successor edge swallowed in purge window: PendingDeferred=%d, want 1 (successor park survives purge); stats=%+v", got, e.Stats())
 	}
 	e.pendingMu.Lock()
-	de, ok := e.pending.cooldown["p\x00ping_test_failed"]
+	de, ok = e.pending.cooldown[key]
 	e.pendingMu.Unlock()
 	if !ok {
 		t.Fatalf("no parked cooldown entry for successor after purge")
@@ -114,6 +136,7 @@ func TestApplyPurgeWindowKeepsSuccessorPark17709(t *testing.T) {
 	if de.action.semRev != rev16650(e, "p") {
 		t.Fatalf("parked entry semRev is stale (predecessor), want successor rev")
 	}
+
 
 	// Drain after cooldown: successor edge replays exactly once.
 	cur.set(50)
