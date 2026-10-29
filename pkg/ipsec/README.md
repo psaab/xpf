@@ -1038,6 +1038,8 @@ all files stay in `package ipsec`, so the public API is unchanged.
   GeneralName. Authored output stays raw.
   Types 2/3 containing NUL never compare equal; PrintableString/emailAddress
   DN comparisons stop at a matching NUL.
+  DN container tags must be constructed at every level; primitive lookalikes
+  compare by exact bytes only.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct

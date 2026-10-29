@@ -265,6 +265,9 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"negative strtol overflow narrows to zero", "inet", "198.51.100.1/-99999999999999999999999999", "inet", "198.51.100.1/0"},
 			{"PrintableString compares through NUL only", "inet", "asn1dn:#300e310c300a06035504031303410042", "inet", "asn1dn:#300e310c300a06035504031303610043"},
 			{"emailAddress compares through NUL only", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011603610043"},
+			{"identical primitive outer sequence equals exact bytes", "inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130470656572"},
+			{"identical primitive SET equals exact bytes", "inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130470656572"},
+			{"identical primitive inner sequence equals exact bytes", "inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130470656572"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -311,6 +314,12 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"positive int32 overflow remains invalid", "inet", "198.51.100.1/2147483648", "inet", "198.51.100.1/24"},
 			{"int32 minus one remains invalid", "inet", "198.51.100.1/4294967295", "inet", "198.51.100.1/24"},
 			{"positive strtol overflow remains invalid", "inet", "198.51.100.1/99999999999999999999999999", "inet", "198.51.100.1/24"},
+			{"primitive outer sequence does not normalize as constructed", "inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"primitive SET does not normalize as constructed", "inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"primitive inner sequence does not normalize as constructed", "inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"primitive outer sequence does not case-fold", "inet", "asn1dn:#100f310d300b0603550403130470656572", "inet", "asn1dn:#100f310d300b0603550403130450454552"},
+			{"primitive SET does not case-fold", "inet", "asn1dn:#300f110d300b0603550403130470656572", "inet", "asn1dn:#300f110d300b0603550403130450454552"},
+			{"primitive inner sequence does not case-fold", "inet", "asn1dn:#300f310d100b0603550403130470656572", "inet", "asn1dn:#300f310d100b0603550403130450454552"},
 			{"embedded NUL prevents type-2 comparison", "inet", "{2}:#410062", "inet", "{2}:#410062"},
 			{"embedded NUL prevents type-3 comparison", "inet", "{3}:#410062", "inet", "{3}:#410062"},
 			{"embedded NUL differing type-2 values do not compare", "inet", "{2}:#410062", "inet", "{2}:#610062"},

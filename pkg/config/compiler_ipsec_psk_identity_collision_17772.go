@@ -951,7 +951,7 @@ func ipsecDNIdentityEqual(a, b ipsecIKEIdentity) bool {
 func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
 	var sequence asn1.RawValue
 	rest, err := asn1.Unmarshal(encoded, &sequence)
-	if err != nil || len(rest) != 0 || sequence.Class != 0 || sequence.Tag != 16 {
+	if err != nil || len(rest) != 0 || sequence.Class != 0 || sequence.Tag != 16 || !sequence.IsCompound {
 		return nil, false
 	}
 	sets := sequence.Bytes
@@ -959,14 +959,14 @@ func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
 	for len(sets) > 0 {
 		var set asn1.RawValue
 		sets, err = asn1.Unmarshal(sets, &set)
-		if err != nil || set.Class != 0 || set.Tag != 17 {
+		if err != nil || set.Class != 0 || set.Tag != 17 || !set.IsCompound {
 			return nil, false
 		}
 		sequences := set.Bytes
 		for len(sequences) > 0 {
 			var rdn asn1.RawValue
 			sequences, err = asn1.Unmarshal(sequences, &rdn)
-			if err != nil || rdn.Class != 0 || rdn.Tag != 16 {
+			if err != nil || rdn.Class != 0 || rdn.Tag != 16 || !rdn.IsCompound {
 				return nil, false
 			}
 			var oid, value asn1.RawValue
