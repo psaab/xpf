@@ -450,9 +450,10 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 		"set security ipsec vpn vpn-plain pre-shared-key fixture-secret",
 	}
 	for _, tc := range []struct {
-		name  string
-		clear func(*cluster.Manager)
-		async bool
+		name          string
+		clear         func(*cluster.Manager)
+		async         bool
+		loseOwnership bool
 	}{
 		{
 			name:  "heartbeat prunes peer RG0",
@@ -466,6 +467,11 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 			name:  "scheduled retry is asynchronous and coalesced",
 			clear: func(cm *cluster.Manager) { cm.ClearPeerGroupStateForTesting(0) },
 			async: true,
+		},
+		{
+			name:          "local ownership loss consumes owed fallback",
+			clear:         func(cm *cluster.Manager) { cm.ClearPeerGroupStateForTesting(0) },
+			loseOwnership: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -530,6 +536,20 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 			if primary, known := cm.PeerGroupPrimary(0); primary || known {
 				t.Fatalf("cleared peer RG0 fence = (%v, %v), want (false, false)",
 					primary, known)
+			}
+			if tc.loseOwnership {
+				cm.SetGroupStateForTesting(1, cluster.StateSecondary)
+				d.retryOwedIPsecFallback()
+				if len(initiated) != 0 {
+					t.Fatalf("ownership-lost retry initiated %v", initiated)
+				}
+				d.ipsecFallbackMu.Lock()
+				_, stillOwed := d.ipsecFallbacks["vpn-plain"]
+				d.ipsecFallbackMu.Unlock()
+				if stillOwed {
+					t.Fatal("ownership-lost fallback remained owed")
+				}
+				return
 			}
 			if tc.async {
 				d.scheduleOwedIPsecFallbackRetry()

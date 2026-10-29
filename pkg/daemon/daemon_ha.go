@@ -3060,9 +3060,8 @@ func (d *Daemon) retryOwedIPsecFallback() {
 	if len(pending) == 0 {
 		return
 	}
-	_, fallbackOwned, fallbackBlocked, fallbackCandidates :=
-		d.ipsecSAsToReinitiateForRGDetails(pending, soleDataRG)
-	d.clearOwedIPsecFallbackExceptCandidates(pending, fallbackCandidates)
+	_, fallbackOwned, fallbackBlocked := d.ipsecSAsToReinitiateForRGDetails(pending, soleDataRG)
+	d.clearOwedIPsecFallbackExceptHeld(pending, fallbackOwned, fallbackBlocked)
 	d.reinitiateIPsecSAsForSelection(fallbackOwned, fallbackOwned, fallbackBlocked, soleDataRG)
 }
 
@@ -3084,10 +3083,10 @@ func (d *Daemon) clearIPsecFallbackStates() {
 	}
 	d.ipsecFallbackMu.Unlock()
 }
-func (d *Daemon) clearOwedIPsecFallbackExceptCandidates(names, candidates []string) {
+func (d *Daemon) clearOwedIPsecFallbackExceptHeld(names, owned, blocked []string) {
 	d.ipsecFallbackMu.Lock()
 	for _, name := range names {
-		if containsIPsecSAName(candidates, name) {
+		if containsIPsecSAName(owned, name) || containsIPsecSAName(blocked, name) {
 			continue
 		}
 		state, ok := d.ipsecFallbacks[name]
@@ -3219,7 +3218,7 @@ func (d *Daemon) reinitiateIPsecSAsForNamesForRG(names []string, rg int) {
 	if len(names) == 0 {
 		return
 	}
-	owned, fallbackOwned, fallbackBlocked, _ := d.ipsecSAsToReinitiateForRGDetails(names, rg)
+	owned, fallbackOwned, fallbackBlocked := d.ipsecSAsToReinitiateForRGDetails(names, rg)
 	d.reinitiateIPsecSAsForSelection(owned, fallbackOwned, fallbackBlocked, rg)
 }
 
@@ -3247,9 +3246,9 @@ func (d *Daemon) reinitiateIPsecSAsForSelection(owned, fallbackOwned, fallbackBl
 		slog.Warn("cluster: failed to list local IPsec SAs before re-initiation; duplicate belt skipped", "err", err)
 	}
 	// An owed fallback can be picked up by the periodic retry and by a late
-	// copy of the original ownership edge. Claim it once, and suppress a
-	// second belt while the just-initiated SA is live or still in its
-	// negotiation grace period.
+	// copy of the original ownership edge. The claim suppresses a completed
+	// attempt for this data-RG epoch even before the local active-SA view
+	// catches up; a later fence event or new epoch can reopen the claim.
 	runnable := owned[:0]
 	for _, name := range owned {
 		if containsIPsecSAName(fallbackOwned, name) &&
@@ -3334,11 +3333,11 @@ func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
 // a multi-RG name is in scope on no edge. Out-of-scope names are neither
 // initiated nor belt-terminated by this edge.
 func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
-	owned, _, _, _ := d.ipsecSAsToReinitiateForRGDetails(names, rg)
+	owned, _, _ := d.ipsecSAsToReinitiateForRGDetails(names, rg)
 	return owned
 }
 
-func (d *Daemon) ipsecSAsToReinitiateForRGDetails(names []string, rg int) (owned, fallbackOwned, fallbackBlocked, fallbackCandidates []string) {
+func (d *Daemon) ipsecSAsToReinitiateForRGDetails(names []string, rg int) (owned, fallbackOwned, fallbackBlocked []string) {
 	cfg := d.ipsecAttributionConfig()
 	idx := d.cachedIPsecSANameIndex(cfg)
 	owned = make([]string, 0, len(names))
@@ -3374,15 +3373,20 @@ func (d *Daemon) ipsecSAsToReinitiateForRGDetails(names []string, rg int) (owned
 			soleDataRG != 0 && rg == soleDataRG &&
 			len(rgs) == 1 && rgs[0] == 0
 		if fallbackCandidate {
-			fallbackCandidates = append(fallbackCandidates, name)
 			if peerRG0Known || peerRG0Primary {
-				fallbackBlocked = append(fallbackBlocked, name)
-			} else {
-				// #17784: only the current sole data edge, with no RG0 in
-				// the config snapshot or the live peer heartbeat.
-				inScope = true
-				fallback = true
+				// Only locally owned names need a retry after the peer fence
+				// clears; do not retain someone else's IPsec name.
+				if d.ownsIPsecConn(cfg, idx, name) {
+					fallbackBlocked = append(fallbackBlocked, name)
+				} else {
+					skipped = append(skipped, name)
+				}
+				continue
 			}
+			// #17784: only the current sole data edge, with no RG0 in
+			// the config snapshot or the live peer heartbeat.
+			inScope = true
+			fallback = true
 		}
 		if !inScope {
 			outOfScope = append(outOfScope, name)
@@ -3405,7 +3409,7 @@ func (d *Daemon) ipsecSAsToReinitiateForRGDetails(names []string, rg int) (owned
 		slog.Info("cluster: skipping peer IPsec SAs whose redundancy group this "+
 			"node does not own", "skipped", skipped)
 	}
-	return owned, fallbackOwned, fallbackBlocked, fallbackCandidates
+	return owned, fallbackOwned, fallbackBlocked
 }
 
 // ipsecSAsForRG filters SA names to those whose connection is attributed
