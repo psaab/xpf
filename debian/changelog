@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: pin the #17722 DNS-quarantine snapshot with a
+    Go-generated fixture the Rust parser test consumes end to end
+    (follow-up to #18485).
+
   * IPsec: assign gateway and inline connection names from one collision-free
     namespace so tolerant renders preserve every peer even when a gateway is
     named `inline-<name>`; keep non-colliding connection names stable (#17731).
@@ -7,6 +11,9 @@ xpf (0.0.0) unstable; urgency=medium
     producer restarts. Recheck after acquiring applySem, preserve the target
     snapshot for the next rollback timer, and prevent an unbounded C2 reapply
     loop (#17741).
+  * Userspace dataplane: gate refresh-time XDP attaches on RX-VLAN quarantine
+    and offload preconditions, retaining configured VLAN ownership when an
+    absent child row is dropped during refresh (#17736).
   * FRR: reject same-table active RIP and IS-IS, plus static preferences that
     cannot be ordered against fixed-distance IS-IS. The helper FIB compares
     IS-IS on the Junos scale; tolerant renders withhold conflicting routes
@@ -14,6 +21,11 @@ xpf (0.0.0) unstable; urgency=medium
   * Userspace dataplane: release MF=0 associations only after range coverage,
     retaining reordered middles across NAT64 and same-family consult paths
     (#17720).
+
+  * Userspace dataplane: quarantine never-resolved DNS policy rules to deny
+    in Rust while accepting and enforcing sibling rules. Keep the Go-side
+    operator diagnostic visible without treating DNS quarantine as a whole-
+    snapshot refusal for rollback preflight (#17722).
 
   * Daemon: durably clear a committed lifeline record only when its resolved
     identity matches the non-management main-table WAN route; keep sane records

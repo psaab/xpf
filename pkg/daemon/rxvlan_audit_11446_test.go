@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,6 +26,8 @@ func storeWithPlainVLANParents11446(t *testing.T) *configstore.Store {
 		t.Fatalf("EnterConfigure: %v", err)
 	}
 	for _, line := range []string{
+		"interfaces ge-0/0/0 vlan-tagging",
+		"interfaces ge-0/0/1 vlan-tagging",
 		"interfaces ge-0/0/0 unit 100 vlan-id 100",
 		"interfaces ge-0/0/0 unit 100 family inet address 192.0.2.1/24",
 		"interfaces ge-0/0/1 unit 200 vlan-id 200",
@@ -204,7 +207,7 @@ func TestRxVlanAuditQuarantinesFailedDisableBehindClosedFence11446(t *testing.T)
 		if err != nil {
 			t.Fatalf("read %s: %v", path, err)
 		}
-		if string(got) != "0" {
+		if strings.TrimSpace(string(got)) != "0" {
 			t.Errorf("%s = %q after XDP quarantine, want forwarding closed", path, got)
 		}
 	}

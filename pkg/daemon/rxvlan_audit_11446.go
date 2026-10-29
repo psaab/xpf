@@ -218,9 +218,6 @@ func (d *Daemon) rxVlanAuditOnce(ctx context.Context, onlyName string, state *rx
 
 		attached, attachmentKnown := rxVlanXDPAttached(d.dataplane(), attrs.Index)
 		alreadyQuarantined := state.quarantined[parent] && attachmentKnown && !attached && !state.forcedDown[parent]
-		if attached {
-			delete(state.quarantined, parent)
-		}
 
 		out, queryErr := runCommandTimeout("ethtool", "-k", parent)
 		offloadState := dataplane.ClassifyRxVlanOffload(out, queryErr)
@@ -231,6 +228,10 @@ func (d *Daemon) rxVlanAuditOnce(ctx context.Context, onlyName string, state *rx
 				} else {
 					allSafe = false
 				}
+			}
+			if !state.forcedDown[parent] {
+				delete(state.quarantined, parent)
+				d.setRxVlanParentQuarantined(parent, false)
 			}
 			continue
 		}
@@ -243,6 +244,10 @@ func (d *Daemon) rxVlanAuditOnce(ctx context.Context, onlyName string, state *rx
 				} else {
 					allSafe = false
 				}
+			}
+			if !state.forcedDown[parent] {
+				delete(state.quarantined, parent)
+				d.setRxVlanParentQuarantined(parent, false)
 			}
 			continue
 		}
@@ -258,9 +263,10 @@ func (d *Daemon) rxVlanAuditOnce(ctx context.Context, onlyName string, state *rx
 
 		quarantined, quarantineErr := d.quarantineRxVlanBinding(ctx, parent, state)
 		if quarantined {
-			if !state.forcedDown[parent] {
-				state.quarantined[parent] = true
-			}
+			state.quarantined[parent] = true
+			// quarantineRxVlanBinding publishes this before releasing
+			// applySem; keep the audit state and Manager mirror aligned.
+			d.setRxVlanParentQuarantined(parent, true)
 			if state.transitSuppressed {
 				allSafe = false
 			}
@@ -304,6 +310,13 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 		return false, fmt.Errorf("rxvlan quarantine: acquire apply semaphore: %w", err)
 	}
 	defer d.applySem.Release(1)
+	markQuarantined := func() {
+		if state.quarantined == nil {
+			state.quarantined = make(map[string]bool)
+		}
+		state.quarantined[parent] = true
+		d.setRxVlanParentQuarantined(parent, true)
+	}
 
 	current := d.rxVlanAuditParentsLocked()
 	if !current[parent] {
@@ -345,6 +358,7 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 		downErr := rxVlanAuditLinkSetDown(link)
 		if downErr == nil {
 			state.forcedDown[parent] = true
+			markQuarantined()
 			return true, fmt.Errorf("rxvlan quarantine: barrier install failed; %s administratively down: %w", parent, barrierErr)
 		}
 		return false, errors.Join(fmt.Errorf("rxvlan quarantine: barrier install failed: %w", barrierErr),
@@ -360,6 +374,7 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 		_, crashLooping := d.helperSupervisorState()
 		d.applyTransitElectionDebt(false, crashLooping)
 		state.transitSuppressed = true
+		markQuarantined()
 		return true, errors.New("rxvlan quarantine: dataplane has no XDP detach capability; transit remains closed")
 	}
 	detachErr := detacher.DetachXDP(attrs.Index)
@@ -369,6 +384,7 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 		_, crashLooping := d.helperSupervisorState()
 		d.applyTransitElectionDebt(false, crashLooping)
 		state.transitSuppressed = true
+		markQuarantined()
 		return true, fmt.Errorf("rxvlan quarantine: detach %s failed and transit remains closed: %w", parent, detachErr)
 	}
 	if detachErr == nil && known && attached {
@@ -376,9 +392,11 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 		_, crashLooping := d.helperSupervisorState()
 		d.applyTransitElectionDebt(false, crashLooping)
 		state.transitSuppressed = true
+		markQuarantined()
 		return true, fmt.Errorf("rxvlan quarantine: detach %s returned success but the XDP census still includes ifindex %d; transit remains closed",
 			parent, attrs.Index)
 	}
+	markQuarantined()
 
 	kernelReady := d.dataplaneArmed.Load() && d.attachedXDPLinks() > 0
 	helperRunning, crashLooping := d.helperSupervisorState()
@@ -396,6 +414,15 @@ func (d *Daemon) quarantineRxVlanBinding(ctx context.Context, parent string, sta
 		return true, fmt.Errorf("rxvlan quarantine: %s detached; transit remains closed while the remaining fence is retried", parent)
 	}
 	return true, nil
+}
+
+func (d *Daemon) setRxVlanParentQuarantined(parent string, quarantined bool) {
+	if d == nil {
+		return
+	}
+	if manager := d.interfaceLinkSnapshotManager(); manager != nil {
+		manager.SetRxVlanParentQuarantined(parent, quarantined)
+	}
 }
 
 // rxVlanAuditParentsLocked requires d.applySem and includes both the promoted
