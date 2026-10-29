@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Config: include `DNSLookupFailed` in DNS refresh baselines and hybrid
+    publication guards, publishing failure-only transitions without
+    mistaking them for successful empty answers (#17723).
+
   * Routing: authorize rib-group peer returns from the route owner's
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
