@@ -198,3 +198,61 @@ func TestExplicitDNSApplyDoesNotPublishUnrelatedConfig17744(t *testing.T) {
 			s.ActiveConfig(), gen, snapshotCfg, base, baseGen)
 	}
 }
+
+func TestPromotedDNSApplyRetainsSourceAndPublishesClone17744(t *testing.T) {
+	set := stubDNS15933(t, map[string][]string{
+		"global.example.com": {"10.0.0.1"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	d, s := dnsDaemon15933(t)
+	base := s.ActiveConfig()
+	baseGen, _ := s.ActiveSnapshot()
+	set(map[string][]string{
+		"global.example.com": {"10.9.9.9"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	resolved := d.resolveDNSBeforeApply(base)
+	if resolved == base {
+		t.Fatal("promoted apply resolution reused the active pointer")
+	}
+	if err := d.applySem.Acquire(t.Context(), 1); err != nil {
+		t.Fatalf("acquire applySem: %v", err)
+	}
+	defer d.applySem.Release(1)
+	var applied *config.Config
+	d.applyBodyForTest = func(cfg *config.Config) {
+		applied = cfg
+		d.applyBodyForTest = nil
+	}
+	out := d.finalizePromotedApplyLocked(promotedApply{
+		kind:       promotedApplyCommit,
+		oldActive:  base,
+		newCfg:     resolved,
+		armKind:    promotedArmPlain,
+		applyCtx:   t.Context(),
+		commitOnly: true,
+	})
+	if out.applyErr != nil {
+		t.Fatalf("finalize promoted DNS apply: %v", out.applyErr)
+	}
+	if applied != resolved || out.newCfg != resolved {
+		t.Fatalf("promoted apply = %p, outcome = %p; want resolved clone %p", applied, out.newCfg, resolved)
+	}
+	active := s.ActiveConfig()
+	if active != resolved {
+		t.Fatalf("promoted ActiveConfig = %p, want resolved clone %p", active, resolved)
+	}
+	if got := globalSvc15933(t, active); !reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
+		t.Fatalf("promoted active DNS answer = %v, want B [10.9.9.9/32]", got)
+	}
+	gen, snapshotCfg := s.ActiveSnapshot()
+	if gen <= baseGen || snapshotCfg != active {
+		t.Fatalf("promoted active snapshot = (%d, %p), want published clone after generation %d", gen, snapshotCfg, baseGen)
+	}
+	d.dnsRefreshMu.Lock()
+	markers := len(d.dnsResolvedConfigs)
+	d.dnsRefreshMu.Unlock()
+	if markers != 0 {
+		t.Fatalf("resolved-config markers after promoted apply = %d, want 0", markers)
+	}
+}

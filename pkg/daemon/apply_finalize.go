@@ -250,10 +250,12 @@ func (d *Daemon) surfacingIncompleteCapture(newCfg *config.Config, applyErr erro
 func (d *Daemon) finalizePromotedApplyLocked(p promotedApply) promotedApplyOutcome {
 	var out promotedApplyOutcome
 	// #17782: all driver DNS network work is complete before applySem.
-	// Consume a privately marked refresher clone when one was supplied;
-	// otherwise create a private clone and read only the warmed cache.
+	// Keep an already-resolved clone's source marker until
+	// applyConfigLocked's deferred baseline has used it. If the promoted
+	// config was not pre-resolved, clone it from the promoted pointer and
+	// bind that exact source for the same publication check.
 	newCfg := p.newCfg
-	if config.HasDNSNames(p.newCfg) && !d.consumeDNSResolved(p.newCfg) {
+	if config.HasDNSNames(p.newCfg) && !d.isDNSResolved(p.newCfg) {
 		newCfg = p.newCfg.CloneForDNSRefresh()
 		config.PopulateDNSFromCache(newCfg)
 		d.markDNSResolved(newCfg, p.newCfg)
