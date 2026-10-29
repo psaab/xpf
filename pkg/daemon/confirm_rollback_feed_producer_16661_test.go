@@ -308,6 +308,9 @@ func fireUntilApplied16661(t *testing.T, h *harness16661) {
 			return
 		}
 		waitForTargetFeedCallback16661(t, h)
+		if got := h.d.confirmFeedDeferrals[gen]; got != 1 {
+			t.Fatalf("target callback changed deferral count before next timer: got=%d, want 1", got)
+		}
 	}
 	t.Fatalf("rollback never resolved after %d fires: pending=%v applied=%v bootstrap=%v active=%q",
 		confirmRollbackFeedRetryMax+10, h.s.IsConfirmPending(), *h.applied, h.d.inBootstrap(), hostName9615(h.s))
@@ -320,6 +323,9 @@ func assertAppliedC1NoBootstrap16661(t *testing.T, h *harness16661) {
 	}
 	if got := hostName9615(h.s); got != "c1-feed-target" {
 		t.Fatalf("store must roll back to c1-feed-target, got %q (applied=%v)", got, *h.applied)
+	}
+	if got := h.d.confirmFeedDeferrals[h.s.ConfirmGenForTesting()]; got != 0 {
+		t.Fatalf("successful rollback left deferral count=%d, want cleared", got)
 	}
 	found := false
 	for _, a := range *h.applied {
@@ -523,6 +529,9 @@ func TestFeedCallbackWaitingOnApplySemRechecksRollbackTargetMarker17741(t *testi
 	}
 
 	waitForTargetFeedCallback16661(t, h)
+	if got := h.d.confirmFeedDeferrals[gen]; got != 1 {
+		t.Fatalf("callback completion changed deferral count before next timer: got=%d, want 1", got)
+	}
 	h.s.InvokeRollbackTimerForTesting(gen)
 	assertAppliedC1NoBootstrap16661(t, h)
 }
