@@ -55,6 +55,77 @@ func TestSyncApplyRefusesPackedNestedValueListRuns18370(t *testing.T) {
 			leaf: "destination-prefix-list",
 		},
 		{
+			name: "firewall bracketed prefix-list with bogus postfix block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from source-prefix-list [ pl1 ] bogus { unexpected { 10.0.0.0/8; } }
+                then accept; } } } }`,
+			leaf: "source-prefix-list",
+		},
+		{
+			name: "firewall bracketed prefix-list except name group with block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from source-prefix-list [ pl1 ] except pl2 { unexpected { 10.0.0.0/8; } }
+                then accept; } } } }`,
+			leaf: "source-prefix-list",
+		},
+		{
+			name: "firewall bracketed prefix-list except destination-list group with block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from source-prefix-list [ pl1 ] except destination-prefix-list [ pl2 ] { unexpected { 10.0.0.0/8; } }
+                then accept; } } } }`,
+			leaf: "source-prefix-list",
+		},
+		{
+			name: "firewall bracketed destination prefix-list with bogus postfix block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from destination-prefix-list [ pl1 ] bogus { unexpected { 10.0.0.0/8; } }
+                then accept; } } } }`,
+			leaf: "destination-prefix-list",
+		},
+		{
+			name: "firewall bracketed prefix-list except payload block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from source-prefix-list [ pl1 ] except { 10.0.0.0/8; }
+                then accept; } } } }`,
+			leaf: "source-prefix-list",
+		},
+		{
+			name: "firewall bracketed prefix-list except leaf-only block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from source-prefix-list [ pl1 ] except { unexpected; }
+                then accept; } } } }`,
+			leaf: "source-prefix-list",
+		},
+		{
+			name: "firewall bracketed prefix-list except empty block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from source-prefix-list [ pl1 ] except { }
+                then accept; } } } }`,
+			leaf: "source-prefix-list",
+		},
+		{
+			name: "NAT bracketed address with bogus postfix block",
+			text: fmtNATPrefix18370(natPrefix, "[ 10.0.0.0/8 ] bogus"),
+			leaf: "source-address",
+		},
+		{
+			name: "NAT bracketed source-address with except postfix block",
+			text: fmtNATPrefix18370(natPrefix, "[ 10.0.0.0/8 ] except"),
+			leaf: "source-address",
+		},
+		{
+			name: "NAT bracketed destination-address with except postfix block",
+			text: `security {
+    zones { security-zone trust; security-zone untrust; }
+    nat { source { rule-set rs {
+        from zone trust;
+        to zone untrust;
+        rule r match destination-address [ 10.0.0.0/8 ] except { unexpected { 192.0.2.0/24; } }
+    } } }
+}`,
+			leaf: "destination-address",
+		},
+		{
 			name: "NAT bracketed address run",
 			text: fmtNATPrefix18370(natPrefix, "[ 10.0.0.0/8 192.168.0.0/16 ]"),
 			leaf: "source-address",
@@ -155,5 +226,20 @@ firewall { family inet { filter f { term t {
 } } } }`, nil)
 	if err != nil || cfg == nil {
 		t.Fatalf("SyncApply rejected valid bracketed prefix-list except: cfg=%v err=%v", cfg, err)
+	}
+}
+
+func TestSyncApplyNoBlockExceptNameGroupDoesNotBecomeNestedRefusal18370(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	_, err := s.SyncApply(`policy-options {
+    prefix-list pl1 { 10.0.0.0/8; }
+    prefix-list pl2 { 10.1.0.0/16; }
+}
+firewall { family inet { filter f { term t {
+    from source-prefix-list [ pl1 ] except pl2;
+    then accept;
+} } } }`, nil)
+	if config.IsNestedListContentSchemaError(err) {
+		t.Fatalf("SyncApply misclassified no-block except name group as nested content: %v", err)
 	}
 }

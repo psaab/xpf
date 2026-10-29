@@ -209,10 +209,9 @@ func findNestedListContentError(nodes []*Node, parent *schemaNode, path []string
 
 // nestedRefusalPackedScanChildren exposes marked refusal leaves embedded in a
 // compiler-consumed packed run. Unlike packedTail, these compiler readers
-// consume selected tails without the schema walk's packedTail opt-in. When the
-// run ends at a marked leaf and its authored block made packedBodyChildren
-// decline expansion, attach that block to the synthesized leaf so the shared
-// refusal check sees the content the compiler drops.
+// consume selected tails without the schema walk's packedTail opt-in. For a
+// bracketed marked run with an opaque postfix, the scan-only projection
+// materializes the values and associates any authored block with that leaf.
 func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *schemaNode, consumed int) []*Node {
 	if node == nil || nodeSchema == nil || descendSchema == nil ||
 		nodeSchema.packedTail || nodeSchema.packedFlatRun || len(node.Keys) <= consumed {
@@ -224,57 +223,65 @@ func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *sche
 	}
 
 	expanded := packedBodyChildren(node, nodeSchema)
-	if !sameNodeSlice(expanded, node.Children) {
-		return expanded
-	}
-
-	// The normal packed expansion conservatively returns authored children
-	// unchanged when their shape cannot be merged. Scan the packed key run
-	// independently, preserving the compiler's boundary without losing a
-	// marked terminal leaf's dropped block.
-	packed := *node
-	packed.Children = nil
-	if run.terminal && run.valueEnd > run.valueStart {
-		allBracketed := len(node.KeysBracketed) == len(node.Keys)
-		for i := run.valueStart; allBracketed && i < run.valueEnd; i++ {
-			allBracketed = node.KeysBracketed[i]
-		}
-		if !allBracketed {
-			bracketed := make([]bool, len(node.Keys))
-			copy(bracketed, node.KeysBracketed)
-			for i := run.valueStart; i < run.valueEnd; i++ {
-				bracketed[i] = true
+	if sameNodeSlice(expanded, node.Children) {
+		// The normal packed expansion conservatively returns authored children
+		// unchanged when their shape cannot be merged. Scan the packed key run
+		// independently, preserving the compiler's boundary without losing a
+		// marked terminal leaf's dropped block.
+		packed := *node
+		packed.Children = nil
+		if run.terminal && run.valueEnd > run.valueStart {
+			allBracketed := len(node.KeysBracketed) == len(node.Keys)
+			for i := run.valueStart; allBracketed && i < run.valueEnd; i++ {
+				allBracketed = node.KeysBracketed[i]
 			}
-			packed.KeysBracketed = bracketed
+			if !allBracketed {
+				bracketed := make([]bool, len(node.Keys))
+				copy(bracketed, node.KeysBracketed)
+				for i := run.valueStart; i < run.valueEnd; i++ {
+					bracketed[i] = true
+				}
+				packed.KeysBracketed = bracketed
+			}
 		}
+		if run.trailingNonSibling {
+			// The trailing tokens are compiler-owned or otherwise unresolved
+			// in this schema context. Exclude them from this scan-only
+			// projection so the marked leaf's complete value run can be
+			// materialized.
+			packed.Keys = packed.Keys[:run.valueEnd]
+			if len(packed.KeysQuoted) == len(node.Keys) {
+				packed.KeysQuoted = packed.KeysQuoted[:run.valueEnd]
+			}
+			if len(packed.KeysBracketed) == len(node.Keys) {
+				packed.KeysBracketed = packed.KeysBracketed[:run.valueEnd]
+			}
+		}
+		expanded = packedBodyChildren(&packed, nodeSchema)
 	}
-	if run.terminal && run.valueEnd > run.valueStart &&
-		run.valueEnd < len(packed.Keys) && run.valueEnd+1 == len(packed.Keys) &&
-		packed.Keys[run.valueEnd] == "except" {
-		// Prefix-list `except` is a compiler-owned postfix modifier, not a
-		// schema child. Trim it from this scan-only projection so the shared
-		// packed expander can materialize the marked leaf; the original node,
-		// including its modifier, remains untouched for compilation.
-		if len(packed.KeysQuoted) == len(packed.Keys) {
-			packed.KeysQuoted = packed.KeysQuoted[:run.valueEnd]
+	if run.terminal {
+		if run.trailingNonSibling && !node.IsLeaf {
+			// Preserve an authored postfix block, including an empty or
+			// leaf-only body that has no AST child nodes of its own.
+			postfix := &Node{
+				Keys:     node.Keys[run.valueEnd:],
+				Children: node.Children,
+				IsLeaf:   false,
+			}
+			attachNestedRefusalBlock(expanded, descendSchema, []*Node{postfix})
+		} else if len(node.Children) > 0 {
+			attachNestedRefusalBlock(expanded, descendSchema, node.Children)
 		}
-		if len(packed.KeysBracketed) == len(packed.Keys) {
-			packed.KeysBracketed = packed.KeysBracketed[:run.valueEnd]
-		}
-		packed.Keys = packed.Keys[:run.valueEnd]
-	}
-	expanded = packedBodyChildren(&packed, nodeSchema)
-	if len(node.Children) > 0 && run.terminal {
-		attachNestedRefusalBlock(expanded, descendSchema, node.Children)
 	}
 	return expanded
 }
 
 type packedNestedRefusal struct {
-	contains   bool
-	terminal   bool
-	valueStart int
-	valueEnd   int
+	contains           bool
+	terminal           bool
+	valueStart         int
+	valueEnd           int
+	trailingNonSibling bool
 }
 
 func packedRunNestedRefusal(node *Node, start int, parent *schemaNode) packedNestedRefusal {
@@ -297,14 +304,12 @@ func packedRunNestedRefusal(node *Node, start int, parent *schemaNode) packedNes
 			}
 		}
 		if child == nil {
-			// Prefix-list leaves accept a compiler-owned trailing `except`
-			// outside the bracketed values; retain the terminal refusal leaf
-			// so its authored block is checked.
+			// Preserve a marked bracketed run when unresolved tokens follow
+			// the values. Schema siblings resolve above and keep their boundary.
 			if result.terminal && result.valueStart > 0 &&
-				(keys[result.valueStart-1] == "source-prefix-list" ||
-					keys[result.valueStart-1] == "destination-prefix-list") &&
-				result.valueEnd == i && keys[i] == "except" &&
-				bracketed && i > 0 && node.KeysBracketed[i-1] && !node.KeysBracketed[i] {
+				result.valueEnd == i && bracketed && i > 0 &&
+				node.KeysBracketed[i-1] && !node.KeysBracketed[i] {
+				result.trailingNonSibling = true
 				return result
 			}
 			result.terminal = false
