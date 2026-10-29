@@ -911,6 +911,13 @@ func (d *Daemon) captureBootstrapLifelineRenamePreExit(cfg *config.Config) error
 	d.bootstrapLifelineLogicalName = logical
 	d.bootstrapLifelineMu.Unlock()
 	if err := d.persistBootstrapLifelineRenamePreExit(kernelName, logical); err != nil {
+		d.bootstrapLifelineMu.Lock()
+		if d.bootstrapLifelineKernelName == kernelName &&
+			d.bootstrapLifelineLogicalName == logical {
+			d.bootstrapLifelineKernelName = ""
+			d.bootstrapLifelineLogicalName = ""
+		}
+		d.bootstrapLifelineMu.Unlock()
 		return err
 	}
 	slog.Info("bootstrap exit: durably recorded non-fxp0 lifeline rename before takeover",

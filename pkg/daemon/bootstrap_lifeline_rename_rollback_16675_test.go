@@ -263,7 +263,7 @@ func TestCaptureBootstrapLifelineRenamePreExit16675(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			withTempLinkDir(t)
+			dir := withTempLinkDir(t)
 			_ = stubLifelineRename16675(t, tt.live)
 			oldEnum := enumeratePCINICsFn
 			enumeratePCINICsFn = func() ([]pciNIC, error) { return tt.nics, nil }
@@ -275,13 +275,59 @@ func TestCaptureBootstrapLifelineRenamePreExit16675(t *testing.T) {
 					Entries: []config.DeviceMapEntry{{LogicalName: "ge-0/0/0", PCIAddr: "0000:06:00.0"}},
 				}
 			}
-			d := &Daemon{}
+			var store *configstore.Store
+			if tt.wantKernel != "" {
+				store = newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+				commitConfirmedText12154(t, store, "system { host-name capture-test; }")
+				store.CancelConfirmTimerForTesting()
+			}
+			d := &Daemon{store: store}
 			d.captureBootstrapLifelineRenamePreExit(cfg)
 			k, l := d.bootstrapLifelineRenamePair()
 			if k != tt.wantKernel || l != tt.wantLogical {
 				t.Fatalf("captured pair = (%q,%q), want (%q,%q)", k, l, tt.wantKernel, tt.wantLogical)
 			}
+			if tt.wantKernel != "" {
+				data, err := os.ReadFile(filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json"))
+				if err != nil {
+					t.Fatalf("successful capture did not persist durable rename provenance: %v", err)
+				}
+				var record struct {
+					Generation  string `json:"generation"`
+					KernelName  string `json:"kernel_name"`
+					LogicalName string `json:"logical_name"`
+				}
+				if err := json.Unmarshal(data, &record); err != nil {
+					t.Fatalf("decode durable rename provenance: %v", err)
+				}
+				if record.Generation != store.ActiveConfigGeneration() ||
+					record.KernelName != tt.wantKernel || record.LogicalName != tt.wantLogical {
+					t.Fatalf("durable record = %+v, want active generation and (%q,%q)",
+						record, tt.wantKernel, tt.wantLogical)
+				}
+			}
 		})
+	}
+}
+
+func TestLifelineRenameCaptureWriteFailureDropsMemory17755(t *testing.T) {
+	dir := withTempLinkDir(t)
+	_ = stubLifelineRename16675(t, "enp6s0")
+	oldEnum := enumeratePCINICsFn
+	enumeratePCINICsFn = func() ([]pciNIC, error) {
+		return []pciNIC{{name: "enp5s0"}, {name: "enp6s0"}}, nil
+	}
+	t.Cleanup(func() { enumeratePCINICsFn = oldEnum })
+
+	// No active Store generation means the durable write cannot be
+	// authenticated. Do not leave a memory-only pair that rollback might use.
+	d := &Daemon{}
+	d.captureBootstrapLifelineRenamePreExit(&config.Config{})
+	if kernel, logical := d.bootstrapLifelineRenamePair(); kernel != "" || logical != "" {
+		t.Fatalf("failed durable capture retained memory-only provenance (%q,%q)", kernel, logical)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed durable capture left a rename record: %v", err)
 	}
 }
 
@@ -425,18 +471,23 @@ func TestCrashWindowLifelineRenameProvenance17755(t *testing.T) {
 	}
 
 	d := &Daemon{store: store}
-	if err := d.captureBootstrapLifelineRenamePreExit(cfg); err != nil {
-		t.Fatalf("pre-exit capture failed before naming: %v", err)
-	}
+	// This statement intentionally discards the current helper's error return:
+	// the test must also compile on the pre-fix head, where the helper had no
+	// return value. The observable contract is the durable record itself.
+	d.captureBootstrapLifelineRenamePreExit(cfg)
 	if k, l := d.bootstrapLifelineRenamePair(); k != "enp6s0" || l != "ge-0-0-0" {
 		t.Fatalf("pre-exit capture = (%q,%q), want (enp6s0,ge-0-0-0)", k, l)
 	}
-	durablePath := filepath.Join(dir, bootstrapLifelineRenameBase)
+	durablePath := filepath.Join(dir, ".xpf-first-commit-lifeline-rename.json")
 	durable, err := readBootstrapLifelineSnapshot(durablePath)
 	if err != nil {
 		t.Fatalf("rename provenance was not persisted before naming: %v", err)
 	}
-	var record bootstrapLifelineRenameRecord
+	var record struct {
+		Generation  string `json:"generation"`
+		KernelName  string `json:"kernel_name"`
+		LogicalName string `json:"logical_name"`
+	}
 	if err := json.Unmarshal(durable, &record); err != nil {
 		t.Fatalf("decode pre-naming provenance: %v", err)
 	}
