@@ -44,22 +44,22 @@ func TestGenerateStaticRoute_DeclaredDotted_9821(t *testing.T) {
 	}{
 		// Authored dotted declaration renders its kernel device (the issue
 		// probe: legacy mis-stripped this to slash-broken `ge-0/0/5`).
-		{"authored slash-spelled dotted", "ge-0/0/5.0", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-5.0\n"},
+		{"authored slash-spelled dotted", "ge-0/0/5.0", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-5.0 5\n"},
 		// Both spellings are keyed.
-		{"authored dash-spelled dotted", "ge-0-0-5.0", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-5.0\n"},
+		{"authored dash-spelled dotted", "ge-0-0-5.0", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-5.0 5\n"},
 		// D7: authored slash-spelled UNDOTTED operands newly render kernel
 		// names instead of FRR-choking verbatim slashes (intended repair).
-		{"D7 undotted slash repair", "ge-0/0/1", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-1\n"},
-		{"undotted dash", "ge-0-0-1", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-1\n"},
+		{"D7 undotted slash repair", "ge-0/0/1", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-1 5\n"},
+		{"undotted dash", "ge-0-0-1", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-1 5\n"},
 		// Unit refs are NOT declarations: legacy strip, unchanged.
-		{"unit-zero strip", "wan0.0", "ip route 10.99.0.0/16 10.0.0.1 wan0\n"},
+		{"unit-zero strip", "wan0.0", "ip route 10.99.0.0/16 10.0.0.1 wan0 5\n"},
 		// VLAN suffixes are real kernel names: verbatim, unchanged.
-		{"vlan suffix verbatim", "wan0.50", "ip route 10.99.0.0/16 10.0.0.1 wan0.50\n"},
+		{"vlan suffix verbatim", "wan0.50", "ip route 10.99.0.0/16 10.0.0.1 wan0.50 5\n"},
 		// Inferred/undeclared operands miss the map: verbatim, unchanged.
-		{"inferred verbatim", "ge-0-0-9.50", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-9.50\n"},
+		{"inferred verbatim", "ge-0-0-9.50", "ip route 10.99.0.0/16 10.0.0.1 ge-0-0-9.50 5\n"},
 		// Junos UNIT refs keep the legacy strip (still slash-broken —
 		// pre-existing, follow-up, NOT fixed here). Characterization pin.
-		{"junos unit ref legacy strip", "ge-0/0/1.0", "ip route 10.99.0.0/16 10.0.0.1 ge-0/0/1\n"},
+		{"junos unit ref legacy strip", "ge-0/0/1.0", "ip route 10.99.0.0/16 10.0.0.1 ge-0/0/1 5\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,10 +78,10 @@ func TestGenerateStaticRoute_DeclaredNilMapLegacy_9821(t *testing.T) {
 		iface string
 		want  string
 	}{
-		{"ge-0/0/5.0", "ip route 10.99.0.0/16 10.0.0.1 ge-0/0/5\n"},
-		{"ge-0/0/1", "ip route 10.99.0.0/16 10.0.0.1 ge-0/0/1\n"},
-		{"wan0.0", "ip route 10.99.0.0/16 10.0.0.1 wan0\n"},
-		{"wan0.50", "ip route 10.99.0.0/16 10.0.0.1 wan0.50\n"},
+		{"ge-0/0/5.0", "ip route 10.99.0.0/16 10.0.0.1 ge-0/0/5 5\n"},
+		{"ge-0/0/1", "ip route 10.99.0.0/16 10.0.0.1 ge-0/0/1 5\n"},
+		{"wan0.0", "ip route 10.99.0.0/16 10.0.0.1 wan0 5\n"},
+		{"wan0.50", "ip route 10.99.0.0/16 10.0.0.1 wan0.50 5\n"},
 	}
 	for _, tc := range cases {
 		if got := m.generateStaticRoute(staticRoute9821Iface(tc.iface), "", nil, nil, nil); got != tc.want {
@@ -98,11 +98,11 @@ func TestGenerateStaticRoute_DeclaredRethUnchanged_9821(t *testing.T) {
 	// themselves (bare `reth0` → `reth0`); the reth translation below the
 	// probe then behaves exactly as before.
 	if got, want := m.generateStaticRoute(staticRoute9821Iface("reth0.50"), "", rethMap, nil, declared),
-		"ip route 10.99.0.0/16 10.0.0.1 ge-0-0-2.50\n"; got != want {
+		"ip route 10.99.0.0/16 10.0.0.1 ge-0-0-2.50 5\n"; got != want {
 		t.Errorf("reth vlan = %q, want %q", got, want)
 	}
 	if got, want := m.generateStaticRoute(staticRoute9821Iface("reth0"), "", rethMap, nil, declared),
-		"ip route 10.99.0.0/16 10.0.0.1 ge-0-0-2\n"; got != want {
+		"ip route 10.99.0.0/16 10.0.0.1 ge-0-0-2 5\n"; got != want {
 		t.Errorf("reth bare = %q, want %q", got, want)
 	}
 }
@@ -117,7 +117,7 @@ func TestGenerateStaticRoute_DeclaredInferredV6Unchanged_9821(t *testing.T) {
 	nhIfaces := map[string]map[string]string{"": {"fe80::1": "ge-0-0-3.50"}}
 	// The inferred operand is undeclared: misses the map, renders verbatim.
 	if got, want := m.generateStaticRoute(sr, "", nil, nhIfaces, declared),
-		"ipv6 route ::/0 fe80::1 ge-0-0-3.50\n"; got != want {
+		"ipv6 route ::/0 fe80::1 ge-0-0-3.50 5\n"; got != want {
 		t.Fatalf("inferred v6 = %q, want %q", got, want)
 	}
 }
@@ -147,10 +147,10 @@ func TestBuildManagedSection_DeclaredNetdevsThreaded_9821(t *testing.T) {
 	}
 	got := m.buildManagedSection(fc)
 	for _, want := range []string{
-		"ip route 10.99.0.0/16 10.0.0.1 ge-0-0-5.0\n",
-		"ipv6 route 2001:db8::/32 fe80::1 ge-0-0-1\n",
-		"ip route 10.98.0.0/16 10.0.0.2 ge-0-0-5.0 vrf vrf-BLUE\n",
-		"ipv6 route 2001:db8:1::/48 fe80::2 wan0 vrf vrf-BLUE\n",
+		"ip route 10.99.0.0/16 10.0.0.1 ge-0-0-5.0 5\n",
+		"ipv6 route 2001:db8::/32 fe80::1 ge-0-0-1 5\n",
+		"ip route 10.98.0.0/16 10.0.0.2 ge-0-0-5.0 5 vrf vrf-BLUE\n",
+		"ipv6 route 2001:db8:1::/48 fe80::2 wan0 5 vrf vrf-BLUE\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("managed section missing %q:\n%s", want, got)
@@ -187,21 +187,40 @@ func TestGenerateStaticRoute_OperandsPassTheBelt_9821(t *testing.T) {
 	if len(lines) != 3 {
 		t.Fatalf("rendered %d lines, want 3 (one per next-hop):\n%s", len(lines), got)
 	}
+	checkInterface := func(iface string) string {
+		if strings.Contains(iface, "/") {
+			return "carries a slash — FRR chokes on Junos spellings"
+		}
+		if !validFRRInterfaceOperand(iface) {
+			return "fails the interface belt"
+		}
+		if !devices[iface] {
+			return "is not a declared device"
+		}
+		return ""
+	}
 	for _, line := range lines {
-		// `ip route <dst> <gw> <iface>`
+		// `ip route <dst> <gw> <iface> [distance]`
 		fields := strings.Fields(line)
-		if len(fields) != 5 || fields[0] != "ip" || fields[1] != "route" {
+		if (len(fields) != 5 && len(fields) != 6) || fields[0] != "ip" || fields[1] != "route" {
 			t.Fatalf("unparseable render line %q — the belt cannot validate what it cannot parse", line)
+		}
+		if len(fields) == 6 && fields[5] != "5" {
+			t.Fatalf("unexpected static route distance in %q, want optional 5", line)
 		}
 		if !validFRRNextHopAddress(fields[3]) {
 			t.Errorf("line %q: gateway %q fails the next-hop belt", line, fields[3])
 		}
 		iface := fields[4]
-		if strings.Contains(iface, "/") {
-			t.Errorf("line %q: interface operand %q carries a slash — FRR chokes on Junos spellings", line, iface)
+		if reason := checkInterface(iface); reason != "" {
+			t.Errorf("line %q: interface operand %q %s", line, iface, reason)
 		}
-		if !devices[iface] {
-			t.Errorf("line %q: interface operand %q is not a declared device", line, iface)
-		}
+	}
+	const undeclaredDevice = "ge-0-0-99"
+	if !validFRRInterfaceOperand(undeclaredDevice) {
+		t.Fatalf("negative-control device %q should be syntactically valid", undeclaredDevice)
+	}
+	if reason := checkInterface(undeclaredDevice); reason != "is not a declared device" {
+		t.Errorf("negative-control device %q was not rejected by the declared-device check: %q", undeclaredDevice, reason)
 	}
 }

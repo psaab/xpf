@@ -561,10 +561,17 @@ func executedMutationPaths16598(editPath, parts []string, quoted []bool) []strin
 				q = quoted[idx]
 			}
 		}
-		if strings.Contains(tok, `"`) {
+		if !q && strings.Contains(tok, `"`) {
 			return nil
 		}
-		if q || strings.ContainsAny(tok, " \t\n") {
+		// #17689: escaped double quotes are legal string data. Preserve
+		// the quoted token by escaping it symmetrically with readString
+		// instead of treating its decoded quote as a re-parse failure.
+		if q {
+			b.WriteByte('"')
+			b.WriteString(keyEscaper.Replace(tok))
+			b.WriteByte('"')
+		} else if strings.ContainsAny(tok, " \t\n") {
 			b.WriteByte('"')
 			b.WriteString(tok)
 			b.WriteByte('"')

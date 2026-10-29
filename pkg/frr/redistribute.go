@@ -305,6 +305,135 @@ func redistChainKey15156(chain []string, proto string) string {
 	return strings.Join(chain, "\x00") + "\x01" + proto
 }
 
+type ripGroupPool17688 struct {
+	entries []redistEntry
+	ors     map[string]redistComposedReq15156
+}
+
+// ripIndependentRedistributionChains17688 separates the global chain
+// from the group chains. Compiled configs retain GlobalRedistribute;
+// the multiset fallback supports older in-memory configs that only
+// carry the legacy flattened union.
+func ripIndependentRedistributionChains17688(rip *config.RIPConfig) [][]string {
+	if rip == nil {
+		return nil
+	}
+	var chains [][]string
+	seen := make(map[string]bool)
+	add := func(chain []string) {
+		if len(chain) == 0 {
+			return
+		}
+		key := strings.Join(chain, "\x00")
+		if !seen[key] {
+			seen[key] = true
+			chains = append(chains, append([]string(nil), chain...))
+		}
+	}
+	for _, group := range rip.Groups {
+		if group != nil {
+			add(group.Export)
+		}
+	}
+	global := rip.GlobalRedistribute
+	if global == nil {
+		global = append([]string(nil), rip.Redistribute...)
+		groupCounts := make(map[string]int)
+		for _, group := range rip.Groups {
+			if group == nil {
+				continue
+			}
+			for _, name := range group.Export {
+				groupCounts[name]++
+			}
+		}
+		remaining := global[:0]
+		for _, name := range global {
+			if groupCounts[name] > 0 {
+				groupCounts[name]--
+				continue
+			}
+			remaining = append(remaining, name)
+		}
+		global = remaining
+	}
+	add(global)
+	return chains
+}
+
+func ripGroupORRouteMapName17688(chains [][]string, proto string) string {
+	structural := redistOrStructuralName16868(chains)
+	sum := sha256.Sum256([]byte(structural))
+	var digest [16]byte
+	hex.Encode(digest[:], sum[:8])
+	return config.ReservedOrPrefix16868 + "rip-" + string(digest[:]) +
+		config.ReservedOrMarker16868 + ReservedChainSuffix + "-" +
+		normalizedRedistProtocol(proto) + config.ReservedRedistSuffix + "-rip"
+}
+
+func (m *Manager) ripGroupPool17688(rip *config.RIPConfig, po *config.PolicyOptionsConfig, metrics *qnhMetricScope11447) ripGroupPool17688 {
+	type sourceProgram struct {
+		bare   bool
+		chains [][]string
+		seen   map[string]bool
+		entry  redistEntry
+	}
+	byProto := make(map[string]*sourceProgram)
+	for _, chain := range ripIndependentRedistributionChains17688(rip) {
+		for _, entry := range m.redistChainEntries15156(chain, po, "rip", "rip") {
+			program := byProto[entry.proto]
+			if program == nil {
+				program = &sourceProgram{seen: make(map[string]bool)}
+				byProto[entry.proto] = program
+			}
+			if entry.routeMap == "" {
+				program.bare = true
+				continue
+			}
+			policies, _, ok := m.redistChainForSource15156(chain, po, "rip", "rip", entry.proto)
+			if !ok || len(policies) == 0 {
+				continue
+			}
+			key := strings.Join(policies, "\x00")
+			if program.seen[key] {
+				continue
+			}
+			program.seen[key] = true
+			program.chains = append(program.chains, append([]string(nil), policies...))
+			if len(program.chains) == 1 {
+				program.entry = entry
+				single := []redistEntry{program.entry}
+				m.applyQNHChain15156(policies, metrics, single)
+				program.entry = single[0]
+			}
+		}
+	}
+	protos := make([]string, 0, len(byProto))
+	for proto := range byProto {
+		protos = append(protos, proto)
+	}
+	sort.Strings(protos)
+	result := ripGroupPool17688{ors: make(map[string]redistComposedReq15156)}
+	for _, proto := range protos {
+		program := byProto[proto]
+		switch {
+		case program.bare:
+			result.entries = append(result.entries, redistEntry{proto: proto})
+		case len(program.chains) == 1:
+			result.entries = append(result.entries, program.entry)
+		case len(program.chains) > 1:
+			name := ripGroupORRouteMapName17688(program.chains, proto)
+			result.ors[name] = redistComposedReq15156{
+				chains: program.chains,
+				proto:  proto,
+				ctx:    redistVariantRIP16864,
+			}
+			result.entries = append(result.entries, redistEntry{proto: proto, routeMap: name})
+		}
+	}
+	return result
+}
+
 // redistComposedChains15156 collects every composed per-source map the
 // section needs: IGP export chains of >=2 policies sharing a source, and
 // the BGP origination union (sorted distinct defined policies per source).
@@ -411,7 +540,16 @@ func redistComposedChains15156(fc *FullConfig) map[string]redistComposedReq15156
 			addChain(ospfv3.Export, "ospf6", "ospf6")
 		}
 		if rip != nil {
-			addChain(rip.Redistribute, "rip", "rip")
+			if len(rip.Groups) == 0 {
+				addChain(rip.Redistribute, "rip", "rip")
+			} else {
+				for _, chain := range ripIndependentRedistributionChains17688(rip) {
+					addChain(chain, "rip", "rip")
+				}
+				for name, req := range m.ripGroupPool17688(rip, po, nil).ors {
+					redistReqPut16868(out, name, req)
+				}
+			}
 		}
 		if isis != nil {
 			addChain(isis.Export, "isis", "isis")

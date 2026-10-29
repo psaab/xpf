@@ -49,6 +49,146 @@ func TestTypedLineDenyFires16605(t *testing.T) {
 	}
 }
 
+// #17704: an allow on another alias rescues a sibling deny only when its
+// matched extent strictly outranks that deny, preserving the precedence
+// tiers used for one spelling.
+func TestAliasRescueRequiresOutrankingAllow17704(t *testing.T) {
+	cases := []struct {
+		name  string
+		deny  string
+		allow string
+		want  bool
+	}{
+		{
+			name:  "longer alias deny is not rescued by shorter charge allow",
+			deny:  `^show security nat source summary$`,
+			allow: `^show security nat source pool$`,
+			want:  false,
+		},
+		{
+			name:  "longer alias allow rescues shorter charge deny",
+			deny:  `^show security nat source pool$`,
+			allow: `^show security nat source summary$`,
+			want:  true,
+		},
+		{
+			name:  "equal extent alias allow does not rescue",
+			deny:  `^show security nat source sum`,
+			allow: `^show security nat source poo`,
+			want:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.System.Login = &config.LoginConfig{Classes: []*config.LoginClass{{
+				Name: "ops", DenyCommands: tc.deny, AllowCommands: tc.allow,
+				DenyLeavesPresent:  []string{"deny-commands"},
+				AllowLeavesPresent: []string{"allow-commands"},
+			}}}
+			err := gateDecide7172(t, cfg, "GetNATPoolStats", &pb.GetNATPoolStatsRequest{})
+			if (err == nil) != tc.want {
+				t.Errorf("deny %q with allow %q: err=%v, want allow=%v",
+					tc.deny, tc.allow, err, tc.want)
+			}
+		})
+	}
+}
+
+// The issue's empty GetIPsecSA request cannot identify whether the caller
+// typed the IKE or IPsec line. An allow on the fixed IPsec charge must not
+// rescue the explicit IKE alias denial, even when that allow matches the
+// complete charge spelling.
+func TestIPsecAliasRescueUsesMatchedExtent17704(t *testing.T) {
+	cases := []struct {
+		name      string
+		allow     string
+		wantAllow bool
+	}{
+		{
+			name:      "cited full IPsec charge allow cannot rescue IKE alias deny",
+			allow:     `^show security ipsec security-associations$`,
+			wantAllow: false,
+		},
+		{
+			name:      "short IPsec allow does not outrank IKE deny",
+			allow:     `^show security ipsec`,
+			wantAllow: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.System.Login = &config.LoginConfig{Classes: []*config.LoginClass{{
+				Name:               "ops",
+				DenyCommands:       `^show security ike security-associations$`,
+				AllowCommands:      tc.allow,
+				DenyLeavesPresent:  []string{"deny-commands"},
+				AllowLeavesPresent: []string{"allow-commands"},
+			}}}
+			fullMethod := "/" + serviceName + "/GetIPsecSA"
+			req := &pb.GetIPsecSARequest{}
+			rules, _, err := config.OperationalLoginRegexesFor(cfg, "ops")
+			if err != nil {
+				t.Fatalf("compile login rules: %v", err)
+			}
+			charge, resolved := rpcCanonicalCommand(fullMethod, req)
+			if !resolved {
+				t.Fatal("GetIPsecSA charge was not resolved")
+			}
+			chargeForms, named := rpcArgumentForms(cfg, fullMethod, req, charge)
+			if !named {
+				t.Fatal("GetIPsecSA forms were not named")
+			}
+			forms := withAliasForms16605("GetIPsecSA", req, chargeForms)
+			if remoteDistinctRescue16472(rules, forms) {
+				t.Fatal("distinct-narrower rescue bypassed the IKE alias deny")
+			}
+			if !aliasChargeAllowCannotRescue16605(rules, "GetIPsecSA", req, chargeForms, forms) {
+				t.Fatal("fixed-charge allow did not identify the alias-specific deny")
+			}
+			err = gateDecide7172(t, cfg, "GetIPsecSA", req)
+			if (err == nil) != tc.wantAllow {
+				t.Errorf("allow %q: err=%v, want allow=%v", tc.allow, err, tc.wantAllow)
+			}
+		})
+	}
+}
+
+// A charge-derived distinct-narrower rescue must not hide an additional
+// alias denial that the typed RPC cannot identify.
+func TestAliasDenySurvivesDistinctNarrowerRescue17704(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.System.Login = &config.LoginConfig{Classes: []*config.LoginClass{{
+		Name:               "ops",
+		DenyCommands:       `(^show security nat source$)|(^show security nat source summary$)`,
+		AllowCommands:      `^show security nat source pool$`,
+		DenyLeavesPresent:  []string{"deny-commands"},
+		AllowLeavesPresent: []string{"allow-commands"},
+	}}}
+	fullMethod := "/" + serviceName + "/GetNATPoolStats"
+	req := &pb.GetNATPoolStatsRequest{}
+	rules, _, err := config.OperationalLoginRegexesFor(cfg, "ops")
+	if err != nil {
+		t.Fatalf("compile login rules: %v", err)
+	}
+	cmd, resolved := rpcCanonicalCommand(fullMethod, req)
+	if !resolved {
+		t.Fatal("GetNATPoolStats charge was not resolved")
+	}
+	forms, named := rpcArgumentForms(cfg, fullMethod, req, cmd)
+	if !named {
+		t.Fatal("GetNATPoolStats forms were not named")
+	}
+	forms = withAliasForms16605("GetNATPoolStats", req, forms)
+	if remoteDistinctRescue16472(rules, forms) {
+		t.Fatal("charge-only distinct-narrower rescue would bypass the alias denial")
+	}
+	if err := gateDecide7172(t, cfg, "GetNATPoolStats", req); err == nil {
+		t.Error("charge-only distinct-narrower rescue must not override a denied alias")
+	}
+}
+
 // Controls: unrelated deny must not fire; charge-spelling deny still fires.
 func TestTypedLineDenyControls16605(t *testing.T) {
 	cfg := gateCfg7172(t, `show security ike`, true)

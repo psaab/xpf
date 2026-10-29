@@ -1508,14 +1508,14 @@ type Daemon struct {
 	// (#15683, #15918) while the copies were maintained by hand.
 	//
 	// Epoch-scoped (#17060): slot state is (re)installed by the populate
-	// loops each comms epoch and zeroed by clearFabricSlots in
-	// stopClusterComms.
+	// loops each comms epoch and zeroed by clearFabricSlots during
+	// stopClusterComms or successor preflight.
 	fabricMu sync.RWMutex
 	// fabricSlots holds both slots under fabricMu, EXCEPT refreshCh,
 	// which is guarded by clusterCommsMu exactly as the former
-	// per-slot refresh-channel fields were (#4958): the
-	// constructor publishes it and stopClusterComms nils it under that
-	// lock, while populate loops receive their channel by value.
+	// per-slot refresh-channel fields were (#4958): the constructor
+	// publishes it and teardown/preflight nil it under that lock, while
+	// populate loops receive their channel by value.
 	fabricSlots [2]fabricSlot
 	// vipWarnedIfaces tracks interfaces that already emitted a
 	// "directAddVIPs: interface not found" warning to avoid log spam

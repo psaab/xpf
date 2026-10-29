@@ -432,6 +432,11 @@ type Engine struct {
 	// Injectable clock for tests; nil means time.Now.
 	nowFn func() time.Time
 
+	// beforePendingPurgeFn is a test-only seam immediately before Apply takes
+	// pendingMu for the #16650 parked-entry purge. It permits deterministic
+	// coverage of event insertion in the unlocked publication/purge window.
+	beforePendingPurgeFn func()
+
 	// afterDrainFn is a test-only seam (#5062). When non-nil, supersede invokes
 	// it exactly at the drain->re-enqueue boundary (after the queue has been
 	// drained into the private survivor slice, before the survivors are
@@ -757,31 +762,29 @@ func (e *Engine) apply(policies []*config.EventPolicy, cfg *config.Config, enfor
 
 	// #16650: reconcile parked deferred edges against the new live set.
 	// The pending maps are keyed by policy name (cooldown also by event)
-	// with no generation, so without this a predecessor's parked entry
-	// survives a same-name redefine: it occupies the key, a successor's
-	// in-cooldown edge finds the key taken when its cooldown park is
-	// inserted and is silently dropped, and drainDeferred then deletes
-	// the stale entry on semRev mismatch without ever replaying the
-	// successor. The budget map has the same shape - deferBudget returns
-	// false when a stale hold occupies the policy key. Purge every parked
-	// entry whose stamped semRev no longer matches the live revision
-	// (redefined or removed policies), decrementing the gauge by the
-	// number removed. Entries for unchanged policies keep their stamp
-	// == live rev and survive, preserving the #15021 replay.
+	// with no generation, so predecessor entries can occupy a key across a
+	// same-name redefine. Purge every parked entry whose stamped semRev no
+	// longer matches the live revision (redefined or removed policies),
+	// decrementing the gauge by the number removed. Cooldown insertion also
+	// validates its captured revision and replaces a stale same-key entry,
+	// closing the unlock-before-purge lost-successor-edge window (#17709).
+	// Entries for unchanged policies keep their stamp == live rev and
+	// survive, preserving the #15021 replay.
 	// Lock order: pendingMu -> e.mu is the deferred worker's order, so
 	// taking pendingMu while holding e.mu would invert it and can
 	// deadlock against drainDeferred/deferredWorker (which hold
-	// pendingMu while taking e.mu). Bound the purge to an unlock/
-	// relock window instead: snapshot the live revisions under e.mu,
-	// drop e.mu, purge under pendingMu alone, then relock. apply's
-	// caller contract does not promise atomicity across that window -
-	// an event evaluated in the gap still sees the predecessor's entry,
-	// exactly as if the purge had not yet run, and the next Apply (or
-	// drain) converges. nextRev is a fresh local map, so reading it
-	// after unlocking is race-free.
+	// pendingMu while taking e.mu). Bound the purge to an unlock/relock
+	// window instead, preserving that order. A cooldown park inserted there
+	// must compare its stamped revision to the live generation and replace a
+	// stale same-key entry; the purge then preserves the successor park while
+	// removing any remaining predecessor entries. nextRev is a fresh local
+	// map, so reading it after unlocking is race-free.
 	func() {
 		e.mu.Unlock()
 		defer e.mu.Lock()
+		if e.beforePendingPurgeFn != nil {
+			e.beforePendingPurgeFn()
+		}
 		e.pendingMu.Lock()
 		defer e.pendingMu.Unlock()
 		var purged int64
