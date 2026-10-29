@@ -313,9 +313,14 @@ func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
 	if selector == "" {
 		return "", selector
 	}
-	// identification_create_from_string() tries DN syntax before the @ and
-	// @# forms. A malformed DN falls back to a literal KEY_ID, so preserve
-	// those bytes before considering any rendered prefix.
+	// identification_create_from_string() recognizes explicit types before
+	// trying DN syntax, then the @ forms, then untyped IP/FQDN/KEY_ID parsing.
+	if identity, ok := ipsecStrongSwanExplicitTypeKey(selector); ok {
+		return identity, selector
+	}
+	if identity, ok := ipsecStrongSwanNumericTypeKey(selector); ok {
+		return identity, selector
+	}
 	if strings.Contains(selector, "=") {
 		if canonical, ok := ipsecCanonicalDNIdentity(selector); ok {
 			return "distinguished-name:" + canonical, selector
@@ -336,9 +341,9 @@ func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
 	}
 	if addr, err := netip.ParseAddr(selector); err == nil && addr.Zone() == "" {
 		if addr.Is4() {
-			return "ipv4:" + addr.String(), selector
+			return ipsecTypedIdentityBytesKey(1, addr.AsSlice()), selector
 		}
-		return "ipv6:" + addr.String(), selector
+		return ipsecTypedIdentityBytesKey(5, addr.AsSlice()), selector
 	}
 	if strings.Contains(selector, ":") {
 		return ipsecKeyIDBytesKey([]byte(selector)), selector
@@ -346,6 +351,97 @@ func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
 	// A bare, unadorned identity with no DN/RFC822/IP syntax is parsed by
 	// strongSwan as an FQDN identity. Preserve its exact length and whitespace.
 	return "fqdn:" + ipsecASCIILower(selector), selector
+}
+
+var ipsecStrongSwanIdentityPrefixes = [...]struct {
+	text   string
+	typeID uint64
+	class  string
+}{
+	{"ipv4:", 1, ""},
+	{"ipv6:", 5, ""},
+	{"ipv4net:", 4, ""},
+	{"ipv6net:", 6, ""},
+	{"ipv4range:", 7, ""},
+	{"ipv6range:", 8, ""},
+	{"rfc822:", 3, ""},
+	{"email:", 3, ""},
+	{"userfqdn:", 3, ""},
+	{"fqdn:", 2, ""},
+	{"dns:", 2, ""},
+	{"asn1dn:", 9, ""},
+	{"asn1gn:", 10, ""},
+	{"xmppaddr:", 10, "xmppaddr"},
+	{"keyid:", 11, ""},
+	{"uri:", 12, ""},
+}
+
+func ipsecStrongSwanExplicitTypeKey(selector string) (string, bool) {
+	for _, prefix := range ipsecStrongSwanIdentityPrefixes {
+		if !ipsecASCIIHasPrefix(selector, prefix.text) {
+			continue
+		}
+		value := selector[len(prefix.text):]
+		var encoded []byte
+		if strings.HasPrefix(value, "#") {
+			encoded = ipsecChunkFromHex(value[1:])
+		} else {
+			encoded = []byte(value)
+		}
+		if prefix.class != "" {
+			return prefix.class + "-bytes:" + hex.EncodeToString(encoded), true
+		}
+		return ipsecTypedIdentityBytesKey(prefix.typeID, encoded), true
+	}
+	return "", false
+}
+
+func ipsecStrongSwanNumericTypeKey(selector string) (string, bool) {
+	if !strings.HasPrefix(selector, "{") {
+		return "", false
+	}
+	close := strings.IndexByte(selector, '}')
+	if close < 2 || close+1 >= len(selector) || selector[close+1] != ':' {
+		return "", false
+	}
+	typeID, err := strconv.ParseUint(selector[1:close], 0, 64)
+	if err != nil {
+		return "", false
+	}
+	value := selector[close+2:]
+	if strings.HasPrefix(value, "#") {
+		return ipsecTypedIdentityBytesKey(typeID, ipsecChunkFromHex(value[1:])), true
+	}
+	return ipsecTypedIdentityBytesKey(typeID, []byte(value)), true
+}
+
+func ipsecTypedIdentityBytesKey(typeID uint64, value []byte) string {
+	switch typeID {
+	case 2: // ID_FQDN
+		return "fqdn:" + ipsecASCIILower(string(value))
+	case 3: // ID_RFC822_ADDR
+		return ipsecRFC822IdentityKey(string(value))
+	case 11: // ID_KEY_ID
+		return ipsecKeyIDBytesKey(value)
+	default:
+		return "strongswan-id:" + strconv.FormatUint(typeID, 10) + ":" + hex.EncodeToString(value)
+	}
+}
+
+func ipsecASCIIHasPrefix(value, prefix string) bool {
+	if len(value) < len(prefix) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		char := value[i]
+		if char >= 'A' && char <= 'Z' {
+			char += 'a' - 'A'
+		}
+		if char != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func ipsecRFC822IdentityKey(value string) string {
@@ -425,7 +521,25 @@ func ipsecCanonicalDNIdentity(value string) (string, bool) {
 		separator = '/'
 		value = value[1:]
 	}
+	end := len(value)
+	for end > 0 && value[end-1] == ' ' {
+		end--
+	}
+	trailingBackslashes := 0
+	for end > 0 && value[end-1] == '\\' {
+		trailingBackslashes++
+		end--
+	}
+	if trailingBackslashes%2 != 0 {
+		return "", false
+	}
+	if end > 0 && value[end-1] == separator {
+		value = value[:end-1]
+	}
 	rawRDNs := strings.Split(value, string(separator))
+	if len(rawRDNs) > 20 {
+		return "", false
+	}
 	canonicalRDNs := make([]string, 0, len(rawRDNs))
 	for _, rawRDN := range rawRDNs {
 		eq := strings.IndexByte(rawRDN, '=')
@@ -453,8 +567,9 @@ func ipsecCanonicalDNIdentity(value string) (string, bool) {
 			attribute+":"+valueType+":"+strconv.Quote(dnValue))
 	}
 	// strongSwan matches individual RDNs independent of their order. Sorting
-	// only these parsed values mirrors that behavior; '+' and backslash stay
-	// ordinary value bytes because atodn() does not parse them specially.
+	// only these parsed values mirrors that behavior; '+' and backslash are
+	// ordinary value bytes, not escape/multi-value separators. The dangling
+	// terminal backslash fallback is handled above as malformed.
 	sort.Strings(canonicalRDNs)
 	return strings.Join(canonicalRDNs, "/"), true
 }

@@ -273,6 +273,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"separator spacing and case", "CN=peer, O=Org", "cn=PEER,o=ORG"},
 			{"RDN order", "CN=peer,O=Org", "O=ORG,CN=PEER"},
 			{"slash separator", "/CN=peer/O=Org", "O=ORG,CN=PEER"},
+			{"trailing delimiter with whitespace", "CN=peer,O=Org, ", "O=ORG,CN=PEER"},
 			{"SN PrintableString case", "SN=Smith", "sn=SMITH"},
 			{"G PrintableString case", "G=Jane", "g=JANE"},
 			{"T PrintableString case", "T=Manager", "t=MANAGER"},
@@ -294,6 +295,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 	t.Run("unsupported DN syntax falls back to literal key-id bytes", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"numeric OID is not an atodn attribute", "2.5.4.3=peer", "CN=peer"},
+			{"numeric OID is not an atodn attribute anywhere", "CN=peer,2.5.4.4=Smith", "CN=peer,SN=Smith"},
 			{"unknown attribute is not an atodn attribute", "custom=peer", "CN=peer"},
 			{"unknown attribute case remains literal", "broken=peer", "BROKEN=PEER"},
 			{"plus is part of the value, not a multi-valued RDN", "CN=peer+OU=VPN,O=Org", "OU=vpn+CN=PEER,O=ORG"},
@@ -301,7 +303,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"internal whitespace is significant", "CN=Peer   Name,O=Org", "CN=peer name,O=ORG"},
 			{"UTF8String values do not expand sharp-s", "CN=Straße", "CN=STRASSE"},
 			{"UTF8String values remain case-sensitive", "CN=straße", "CN=STRAßE"},
-			{"trailing backslash is an ordinary UTF8String byte", "CN=peer\\", "CN=PEER\\"},
+			{"trailing backslash fallback remains literal", "CN=peer\\", "CN=PEER\\"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {
@@ -371,6 +373,12 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"key-id rendered equals inet literal @#zz", "key-id", "zz", "inet", "@#zz"},
 			{"hostname containing DN syntax falls back to matching key-id bytes", "hostname", "CN=peer", "key-id", "40434e3d70656572"},
 			{"hostname key-id spelling shares @# owner", "hostname", "#zz", "key-id", "zz"},
+			{"explicit FQDN prefix matches untyped FQDN", "inet", "fqdn:peer.example", "inet", "peer.example"},
+			{"explicit keyid prefix decodes chunk bytes", "inet", "keyid:#7a7a", "key-id", "7a7a"},
+			{"invalid IPv6-like value falls back to literal KEY_ID", "inet", "7a:7a", "key-id", "37613a3761"},
+			{"numeric FQDN prefix matches untyped FQDN", "inet", "{2}:peer.example", "inet", "peer.example"},
+			{"malformed DN fallback matches raw KEY_ID bytes", "distinguished-name", "CN=peer\\", "key-id", "434e3d706565725c"},
+			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {

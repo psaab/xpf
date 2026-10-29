@@ -173,6 +173,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"separator spacing and case", "CN=peer, O=Org", "cn=PEER,o=ORG"},
 			{"RDN order", "CN=peer,O=Org", "O=ORG,CN=PEER"},
 			{"slash separator", "/CN=peer/O=Org", "O=ORG,CN=PEER"},
+			{"trailing delimiter with whitespace", "CN=peer,O=Org, ", "O=ORG,CN=PEER"},
 			{"PrintableString case", "SN=Smith", "sn=SMITH"},
 			{"email attribute aliases", "E=Peer@corp.example,O=Org", "emailAddress=PEER@CORP.EXAMPLE,o=ORG"},
 			{"employeeNumber aliases", "EN=12345", "employeeNumber=12345"},
@@ -215,10 +216,11 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		}
 	})
 
-	t.Run("DN syntax is checked before rendered identity prefixes", func(t *testing.T) {
+	t.Run("DN syntax precedes @ forms and malformed DNs use raw KEY_ID bytes", func(t *testing.T) {
 		pairs := []struct{ name, aType, a, bType, b string }{
 			{"hostname selector falls back to literal KEY_ID", "hostname", "CN=peer", "key-id", "40434e3d70656572"},
 			{"unsupported DN falls back to literal KEY_ID", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
+			{"trailing backslash DN falls back to literal KEY_ID", "distinguished-name", "CN=peer\\", "key-id", "434e3d706565725c"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -243,6 +245,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"internal DN whitespace", "distinguished-name", "CN=Peer   Name", "distinguished-name", "CN=peer name"},
 			{"UTF8 DN sharp-s", "distinguished-name", "CN=Straße", "distinguished-name", "CN=STRASSE"},
 			{"plus remains in DN value", "distinguished-name", "CN=peer+OU=VPN", "distinguished-name", "OU=vpn+CN=PEER"},
+			{"numeric OID is not an atodn attribute", "distinguished-name", "CN=peer,2.5.4.4=Smith", "distinguished-name", "CN=peer,SN=Smith"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -323,6 +326,10 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"key-id rendered equals inet literal @#zz", "key-id", "zz", "inet", "@#zz"},
 			{"hostname starting hash equals key-id rendered", "hostname", "#zz", "key-id", "zz"},
 			{"hostname containing DN syntax falls back to matching key-id bytes", "hostname", "CN=peer", "key-id", "40434e3d70656572"},
+			{"explicit FQDN prefix matches untyped FQDN", "inet", "fqdn:peer.example", "inet", "peer.example"},
+			{"explicit keyid prefix decodes chunk bytes", "inet", "keyid:#7a7a", "key-id", "7a7a"},
+			{"invalid IPv6-like value falls back to literal KEY_ID", "inet", "7a:7a", "key-id", "37613a3761"},
+			{"numeric FQDN prefix matches untyped FQDN", "inet", "{2}:peer.example", "inet", "peer.example"},
 		}
 		for _, pair := range pairs {
 			pair := pair
