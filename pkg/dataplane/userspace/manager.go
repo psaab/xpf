@@ -820,6 +820,14 @@ type Manager struct {
 	// nil pointer ⇒ omit the field from the wire (userspace-dp
 	// defaults to 0xff per #1620 plan §4.3).
 	coldPathSampleMask *uint64
+
+	// #17736: Linux names of parents quarantined by the RX-VLAN audit.
+	// refreshAttachAdmission refuses these until the audit confirms that
+	// the tag-strip hazard is gone. Guarded by mu.
+	rxVlanQuarantinedParents map[string]bool
+	// rxVlanPreconditionCheck is a test seam. Production uses
+	// dataplane.EnsureRxVlanParsePreconditions directly.
+	rxVlanPreconditionCheck func(string) (error, error)
 }
 
 // #1620: set the cold-path sample mask. Called by the daemon at
@@ -830,6 +838,26 @@ func (m *Manager) SetColdPathSampleMask(mask *uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.coldPathSampleMask = mask
+}
+
+// SetRxVlanParentQuarantined records whether the RX-VLAN audit has detached
+// parentLinuxName because its RX tag-strip precondition could not be met.
+// The link-refresh reconciler consults this state before attempting an XDP
+// attach; clearing it is safe only after the audit has confirmed recovery.
+func (m *Manager) SetRxVlanParentQuarantined(parentLinuxName string, quarantined bool) {
+	if m == nil || parentLinuxName == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if quarantined {
+		if m.rxVlanQuarantinedParents == nil {
+			m.rxVlanQuarantinedParents = make(map[string]bool)
+		}
+		m.rxVlanQuarantinedParents[parentLinuxName] = true
+		return
+	}
+	delete(m.rxVlanQuarantinedParents, parentLinuxName)
 }
 
 // RGPrimaryProvider reports whether this node is primary for rgID and

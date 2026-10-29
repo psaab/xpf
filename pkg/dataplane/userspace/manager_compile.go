@@ -1461,7 +1461,7 @@ func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snap
 		if row == nil {
 			row = interfaceRowForIfindex(snapshot, uint32(ifindex))
 		}
-		if !refreshAttachAdmission(uint32(ifindex), row, owner) {
+		if !refreshStructuralAttachAdmission(uint32(ifindex), row, owner) {
 			delete(allowed, ifindex)
 		}
 	}

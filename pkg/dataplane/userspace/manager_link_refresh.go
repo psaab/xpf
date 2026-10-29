@@ -259,10 +259,11 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 // attachment set in line with next before next is published (#14133).
 // Caller holds m.mu.
 //
-// Attach half: every ingress ifindex in next that passes
-// refreshAttachAdmission and is not already tracked is attached now. A
-// recreated link has a new ifindex, so it lands here; an unchanged link
-// keeps its existing tracked link. The forceGeneric classification
+// Attach half: every ingress ifindex in next that passes the structural
+// refreshAttachAdmission predicate and the RX-VLAN quarantine/precondition
+// gate, and is not already tracked, is attached now. A recreated link has a
+// new ifindex, so it lands here; an unchanged link keeps its existing tracked
+// link. The forceGeneric classification
 // mirrors Compile's attachUserspaceShimXDP: a tunnel netdev (SecureTunnel
 // row) or a VLAN child (ParentIfindex > 0) goes generic, everything else
 // tries native first with a generic fallback. An attach failure is logged
@@ -307,7 +308,7 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 			row = interfaceRowForIfindex(next, ifindex)
 		}
 		forceGeneric := row != nil && (row.SecureTunnel || row.ParentIfindex > 0 || row.Tunnel)
-		if !refreshAttachAdmission(ifindex, row, owner) {
+		if !m.refreshAttachAdmission(next, ifindex, row, owner) {
 			continue
 		}
 		var attach func(int, bool) error
@@ -337,29 +338,125 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 	}
 }
 
-// refreshAttachAdmission is the single attach-admission predicate shared
-// by the refresh/revalidate reconcile and, by construction, Compile
-// (#16637). It refuses exactly what compileZones refuses to queue in
-// pendingXDP, so a link event or revalidating publish can never attach
-// the shim where Compile would not:
+// refreshRxVlanAttachAdmissionLocked adds the RX-VLAN activation precondition
+// and audit quarantine to the structural admission predicate. Caller holds
+// m.mu (the same lock held by the refresh/revalidate reconcile).
+func (m *Manager) refreshRxVlanAttachAdmissionLocked(
+	snap *ConfigSnapshot,
+	ifindex uint32,
+	row, owner *InterfaceSnapshot,
+) bool {
+	name := refreshAttachParentLinuxName(ifindex, row, owner)
+	if name == "" {
+		for i := range snap.Fabrics {
+			if uint32(snap.Fabrics[i].ParentIfindex) == ifindex {
+				name = snap.Fabrics[i].ParentLinuxName
+				break
+			}
+		}
+	}
+	if name == "" {
+		// Unlike a failed RTNL framing lookup, a missing parent identity
+		// means the offload/quarantine verdict cannot be tied to a device.
+		return false
+	}
+	if m.rxVlanQuarantinedParents[name] {
+		return false
+	}
+	check := m.rxVlanPreconditionCheck
+	if check == nil {
+		check = dataplane.EnsureRxVlanParsePreconditions
+	}
+	rxvlanErr, stagErr := check(name)
+	if stagErr != nil {
+		return false
+	}
+	return rxvlanErr == nil || !snapshotHasRxVlanChild(snap, ifindex, name)
+}
+
+func (m *Manager) refreshAttachAdmission(snap *ConfigSnapshot, ifindex uint32, row, owner *InterfaceSnapshot) bool {
+	if m == nil || snap == nil || !refreshStructuralAttachAdmission(ifindex, row, owner) {
+		return false
+	}
+	return m.refreshRxVlanAttachAdmissionLocked(snap, ifindex, row, owner)
+}
+
+func refreshAttachParentLinuxName(ifindex uint32, row, owner *InterfaceSnapshot) string {
+	if owner != nil {
+		return owner.LinuxName
+	}
+	if row != nil {
+		if uint32(row.Ifindex) == ifindex {
+			return row.LinuxName
+		}
+		if uint32(row.ParentIfindex) == ifindex {
+			return row.ParentLinuxName
+		}
+	}
+	return ""
+}
+
+func snapshotHasRxVlanChild(snap *ConfigSnapshot, parentIfindex uint32, parentLinuxName string) bool {
+	if snap == nil {
+		return false
+	}
+	// The fresh snapshot may have had its configured VLAN child dropped by
+	// revalidation because the child netdev is absent. Compile scopes the
+	// C-tag failure from config, not from surviving rows; preserve that same
+	// authority here, including a RETH member whose VLAN units live on the
+	// logical parent.
+	if configHasRxVlanChildForParent(snap.Config, parentLinuxName) {
+		return true
+	}
+	for i := range snap.Interfaces {
+		row := &snap.Interfaces[i]
+		if row.VLANID <= 0 || row.ParentIfindex <= 0 {
+			continue
+		}
+		if uint32(row.ParentIfindex) == parentIfindex || row.ParentLinuxName == parentLinuxName {
+			return true
+		}
+	}
+	return false
+}
+
+func configHasRxVlanChildForParent(cfg *config.Config, parentLinuxName string) bool {
+	if cfg == nil || cfg.Interfaces.Interfaces == nil {
+		return false
+	}
+	for name, iface := range cfg.Interfaces.Interfaces {
+		if iface == nil || config.LinuxIfName(name) != parentLinuxName {
+			continue
+		}
+		if config.InterfaceHasVlanSubinterface(iface) ||
+			config.InterfaceHasVlanSubinterface(cfg.Interfaces.Interfaces[iface.RedundantParent]) {
+			return true
+		}
+	}
+	for reth, physical := range cfg.RethToPhysical() {
+		if config.LinuxIfName(physical) == parentLinuxName &&
+			config.InterfaceHasVlanSubinterface(cfg.Interfaces.Interfaces[reth]) {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshStructuralAttachAdmission is the structural portion shared by the
+// refresh/revalidate reconcile and Compile (#16637). The refresh-specific
+// Manager.refreshAttachAdmission additionally refuses RX-VLAN-quarantined
+// parents and rechecks the same tag-strip preconditions Compile uses.
 //
-//   - a VLAN child (its own ifindex contributed with ParentIfindex > 0 and
-//     VLANID > 0): attachUserspaceShimXDP skips non-tunnel VLAN children —
-//     the parent handles VLAN traffic. Tunnel rows keep the generic
-//     attach, mirroring that function's tunnel carve-out.
-//   - an administratively disabled row (AdminDisabled): compileZones skips
-//     XDP/TC for disabled interfaces — they should not process traffic.
-//     Only a row that OWNS the ifindex can veto it; a disabled sibling
-//     sharing the netdev (a disabled unit on an enabled base, the
-//     canonical wgN.0 shape) must not strip the owner's attach.
-//   - a netdev whose framing is affirmatively known non-Ethernet
-//     (dataplane.ShimAttachRefused, #8279): raw-L3 TUNs such as wgN.
-//     An unresolvable link keeps the pre-existing attach behaviour.
+// This structural predicate refuses:
+//   - non-tunnel VLAN children, which Compile leaves delegated to the parent;
+//   - an administratively disabled owning row, but not a disabled sibling
+//     sharing the base ifindex (#17701);
+//   - a netdev affirmatively known to use non-Ethernet framing (#8279).
 //
-// An ifindex with no owning row (a fabric parent contribution) has only
-// the framing gate to pass. The caller supplies the resolved owner so
-// admission and attachment-mode selection use the same structural row.
-func refreshAttachAdmission(ifindex uint32, row, owner *InterfaceSnapshot) bool {
+// An unresolvable RTNL lookup keeps the previous attach behaviour. The
+// refresh-specific RX-VLAN gate independently requires a resolvable parent
+// name, including a FabricSnapshot parent when no interface row owns it.
+func refreshStructuralAttachAdmission(ifindex uint32, row, owner *InterfaceSnapshot) bool {
 	if owner != nil {
 		if owner.VLANID > 0 && owner.ParentIfindex > 0 && !owner.Tunnel && !owner.SecureTunnel {
 			return false

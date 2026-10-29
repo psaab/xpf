@@ -13,6 +13,10 @@ import (
 	"github.com/vishvananda/netns"
 )
 
+func safeRxVlanPreconditionsForTest(string) (error, error) {
+	return nil, nil
+}
+
 func interfaceLinkRefreshConfig11530() *config.Config {
 	return &config.Config{
 		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
@@ -37,6 +41,7 @@ func interfaceLinkRefreshManager11530(t *testing.T, cfg *config.Config, linuxNam
 	t.Cleanup(func() { buildLinkSnapshot = oldBuild })
 
 	m := New()
+	m.rxVlanPreconditionCheck = safeRxVlanPreconditionsForTest
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.generation = 7
 	m.lastSnapshot = mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0)
