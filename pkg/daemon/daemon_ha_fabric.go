@@ -936,7 +936,9 @@ func (d *Daemon) clearFabricFwdSlot(ctx context.Context, generation uint64, slot
 
 // clearFabricSlots zeroes each configured slot and drops its userspace
 // identity constraint under fabricMu, serializing it with MAC registration.
-// stopClusterComms calls it only after joining all populate loops.
+// Production callers hold clusterCommsMu first: stopClusterComms joins the
+// captured loops before clearing, while successor preflight clears after the
+// predecessor generation has been fenced out.
 func (d *Daemon) clearFabricSlots() {
 	d.fabricMu.Lock()
 	defer d.fabricMu.Unlock()
