@@ -314,6 +314,92 @@ func TestIPMonitorDemotedGlobalThresholdReleases16734(t *testing.T) {
 	})
 }
 
+// TestIPMonitorWrongFamilySecondaryReleasesFrozenDebt18413 covers a tolerant
+// v4 target whose configured secondary is installed only as IPv6: that
+// address cannot bind the probeICMP udp4 socket, so the source is absent for
+// measurement purposes and a previously measured DOWN debt must release.
+// The matched-family control remains measurable and keeps the #16734 neutral
+// treatment when its probe does not complete.
+func TestIPMonitorWrongFamilySecondaryReleasesFrozenDebt18413(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		source      string
+		wantMeasure bool
+		wantWeight  int
+		wantDebt    bool
+	}{
+		{
+			name:       "installed IPv6 source for IPv4 target is unmeasurable",
+			source:     "2001:db8::3",
+			wantWeight: 255,
+		},
+		{
+			name:        "installed IPv4 source for IPv4 target remains measurable",
+			source:      "10.0.0.3",
+			wantMeasure: true,
+			wantWeight:  0,
+			wantDebt:    true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rg := boundNoSecondaryRG()
+			rg.IPMonitoring.Targets[0].SecondaryIPAddress = tc.source
+			cfg := &config.ClusterConfig{RedundancyGroups: []*config.RedundancyGroup{rg}}
+			m := NewManager(0, 1)
+			m.UpdateConfig(cfg)
+			drainEvents(m, 1)
+			m.SetGroupStateForTesting(1, StatePrimary)
+			mon := NewMonitor(m, cfg.RedundancyGroups)
+			nlh := newSourceAddressNlHandle17759(false)
+			bits := 128
+			if net.ParseIP(tc.source).To4() != nil {
+				bits = 32
+			}
+			nlh.addresses["reth0"] = []netlink.Addr{{
+				IPNet: &net.IPNet{
+					IP:   net.ParseIP(tc.source),
+					Mask: net.CIDRMask(bits, bits),
+				},
+			}}
+			mon.nlHandle = nlh
+			setNoDampening(mon)
+
+			primary := true
+			mon.probeFn = func(context.Context, *config.IPMonitorTarget, string, string) (bool, bool) {
+				if primary {
+					return false, true // primary measures the outage
+				}
+				return false, false // secondary probe cannot bind/send
+			}
+			for range 5 {
+				mon.poll()
+			}
+			if w := m.GroupStates()[0].Weight; w != 0 {
+				t.Fatalf("weight after measured DOWN = %d, want 0", w)
+			}
+			if len(m.GroupStates()[0].MonitorFails) == 0 {
+				t.Fatal("measured DOWN installed no election debt")
+			}
+
+			m.SetGroupStateForTesting(1, StateSecondary)
+			primary = false
+			_, _, canMeasure := mon.probeSourceFor(rg, rg.IPMonitoring.Targets[0])
+			if canMeasure != tc.wantMeasure {
+				t.Fatalf("canMeasure = %v, want %v", canMeasure, tc.wantMeasure)
+			}
+			for range 5 {
+				mon.poll()
+			}
+			if w := m.GroupStates()[0].Weight; w != tc.wantWeight {
+				t.Fatalf("weight after uncompleted probe = %d, want %d", w, tc.wantWeight)
+			}
+			if gotDebt := len(m.GroupStates()[0].MonitorFails) != 0; gotDebt != tc.wantDebt {
+				t.Fatalf("DOWN debt present = %v, want %v", gotDebt, tc.wantDebt)
+			}
+		})
+	}
+}
+
 // TestIPMonitorMeasurableAbortStaysNeutral16734 is the guard against
 // over-clearing: on a node that CAN measure (primary seeing deadline
 // aborts, or a secondary holding a secondary address seeing transient
