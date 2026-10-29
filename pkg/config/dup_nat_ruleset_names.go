@@ -31,12 +31,11 @@ import (
 // #6454 gate which runs first on the strict path and would otherwise double
 // report. An empty (quoted) name is skipped here; #6454 owns it too.
 //
-// Like the #6454 gate this runs PRE-expansion on top-level `security`
-// stanzas only; validateDuplicateNamesExpandedAST re-runs it on the
-// group-expanded clone (#6455 Finding 1 mechanism) so a duplicate-context
-// pair authored entirely inside an applied group is caught as well.
-// Strict rejects on the commit / commit-check path naming BOTH rule-sets;
-// lenient (Load / peer-sync, #1960) warns and keeps the historical
+// The compiler invokes this scanner only on effective group-expanded views
+// (#17712), after inline and inherited scopes have merged. This ensures an
+// absent scope in a raw inline fragment is not mistaken for an effective
+// wildcard. Strict rejects on the commit / commit-check path naming BOTH
+// rule-sets; lenient (Load / peer-sync, #1960) warns and keeps the historical
 // concatenated behaviour.
 func validateSourceNATDuplicateContextAST(tree *ConfigTree, lenient bool) ([]string, error) {
 	if tree == nil {
@@ -108,6 +107,40 @@ func validateSourceNATDuplicateContextAST(tree *ConfigTree, lenient bool) ([]str
 	warnings := make([]string, 0, len(pairs))
 	for _, p := range pairs {
 		warnings = append(warnings, format(p))
+	}
+	return warnings, nil
+}
+
+// validateSourceNATDuplicateContextExpandedAST checks effective source-NAT
+// contexts after group inheritance. It inspects both per-node views so
+// `${node}`-selected scopes cannot make the verdict depend on which cluster
+// member commits. If neither node view expands, it uses the generic fallback
+// view that the standalone compile path can consume.
+func validateSourceNATDuplicateContextExpandedAST(tree *ConfigTree, lenient bool) ([]string, error) {
+	if tree == nil {
+		return nil, nil
+	}
+	seen := make(map[string]bool)
+	var warnings []string
+	for _, view := range effectiveNodeViews(tree, gateNodeViewOpts{Fallback: true}) {
+		found, err := validateSourceNATDuplicateContextAST(view, true)
+		if err != nil {
+			continue
+		}
+		for _, warning := range found {
+			if seen[warning] {
+				continue
+			}
+			seen[warning] = true
+			warnings = append(warnings, warning)
+		}
+	}
+	if len(warnings) == 0 {
+		return nil, nil
+	}
+	sort.Strings(warnings)
+	if !lenient {
+		return nil, fmt.Errorf("%s", warnings[0])
 	}
 	return warnings, nil
 }

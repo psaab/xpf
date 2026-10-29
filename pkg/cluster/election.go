@@ -97,8 +97,10 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// #16592: an aborted transfer is not authority to promote through ANY
 	// election arm. Skipping only "Peer transfer out" lets a higher-priority
 	// non-preempt requester win the subsequent "neither is primary" election
-	// on the same stale hold. Peer loss, a fresh non-hold heartbeat, reset,
-	// or a new acknowledged transfer clears this marker.
+	// on the same stale hold. Failed pre-commit fences (#17713) survive owner
+	// restoration heartbeats that report ordinary secondary and resolve only
+	// when a newer owner-primary heartbeat follows an observed hold, a later
+	// transfer commits, or an explicit reset/peer loss/RG removal ends epoch.
 	if _, aborted := m.abortedPeerTransferReqID[rg.GroupID]; aborted {
 		if rg.State == StatePrimary {
 			return electLocalSecondary, "Peer transfer aborted"

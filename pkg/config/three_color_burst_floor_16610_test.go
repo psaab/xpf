@@ -179,3 +179,69 @@ func TestThreeColorBurstFloor16610LenientWarns(t *testing.T) {
 		t.Fatalf("lenient compile should preserve sub-frame bursts, got: %+v", pol)
 	}
 }
+
+func TestThreeColorBurstFloor16610LenientKeepsStructuralErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		lines []string
+		want  string
+	}{
+		{
+			name: "absent PIR",
+			lines: []string{
+				"set firewall three-color-policer p1 two-rate committed-information-rate 1m",
+				"set firewall three-color-policer p1 two-rate committed-burst-size 1000",
+				"set firewall three-color-policer p1 two-rate peak-burst-size 1000",
+				"set firewall three-color-policer p1 then discard",
+			},
+			want: `"p1" requires positive peak-information-rate`,
+		},
+		{
+			name: "PIR below CIR",
+			lines: []string{
+				"set firewall three-color-policer p1 two-rate committed-information-rate 2m",
+				"set firewall three-color-policer p1 two-rate committed-burst-size 1000",
+				"set firewall three-color-policer p1 two-rate peak-information-rate 1m",
+				"set firewall three-color-policer p1 two-rate peak-burst-size 1000",
+				"set firewall three-color-policer p1 then discard",
+			},
+			want: "peak-information-rate must be >= committed-information-rate",
+		},
+		{
+			name: "PBS below CBS",
+			lines: []string{
+				"set firewall three-color-policer p1 two-rate committed-information-rate 1m",
+				"set firewall three-color-policer p1 two-rate committed-burst-size 1518",
+				"set firewall three-color-policer p1 two-rate peak-information-rate 2m",
+				"set firewall three-color-policer p1 two-rate peak-burst-size 1000",
+				"set firewall three-color-policer p1 then discard",
+			},
+			want: "peak-burst-size must be >= committed-burst-size",
+		},
+		{
+			name: "floor-only policer before structural defect",
+			lines: []string{
+				"set firewall three-color-policer a-floor-only two-rate committed-information-rate 1m",
+				"set firewall three-color-policer a-floor-only two-rate committed-burst-size 1000",
+				"set firewall three-color-policer a-floor-only two-rate peak-information-rate 2m",
+				"set firewall three-color-policer a-floor-only two-rate peak-burst-size 1000",
+				"set firewall three-color-policer a-floor-only then discard",
+				"set firewall three-color-policer z-invalid two-rate committed-information-rate 1m",
+				"set firewall three-color-policer z-invalid two-rate committed-burst-size 1000",
+				"set firewall three-color-policer z-invalid two-rate peak-burst-size 1000",
+				"set firewall three-color-policer z-invalid then discard",
+			},
+			want: `"z-invalid" requires positive peak-information-rate`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// FAIL-ON-REVERT: the old first-error downgrade accepted these
+			// cases with only a floor warning and never surfaced the structural defect.
+			_, err := CompileConfigLenient(buildTree(t, tc.lines))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("lenient compile must preserve structural error %q despite the burst-floor violation, got: %v", tc.want, err)
+			}
+		})
+	}
+}
