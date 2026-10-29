@@ -140,8 +140,11 @@ func (e *Engine) captureDeferCooldownLocked(pol *config.EventPolicy, rt *policyR
 
 // insertDeferredCooldownParks inserts edges captured under e.mu into
 // pending.cooldown under pendingMu. Called after evaluateEventMode has
-// released e.mu. The first park for a (policy,event) key wins, matching the
-// pre-#16645 semantics.
+// released e.mu. The pendingMu -> e.mu order is also used by drainDeferred and
+// deferredWorker; validating the captured revision here lets a successor park
+// replace a stale same-key predecessor entry during Apply's purge window.
+// Within one semantic revision, the first park for a (policy,event) key wins,
+// matching the pre-#16645 semantics.
 func (e *Engine) insertDeferredCooldownParks(parks []*deferredCooldownPark) {
 	if len(parks) == 0 {
 		return
@@ -154,10 +157,20 @@ func (e *Engine) insertDeferredCooldownParks(parks []*deferredCooldownPark) {
 		if p == nil {
 			continue
 		}
-		if _, exists := e.pending.cooldown[p.key]; !exists {
-			e.pending.cooldown[p.key] = p.edge
+		e.mu.Lock()
+		liveRev, live := e.semRev[p.edge.action.policyName]
+		e.mu.Unlock()
+		if !live || liveRev != p.edge.action.semRev {
+			continue
+		}
+		if old, exists := e.pending.cooldown[p.key]; exists {
+			if old.action.semRev == p.edge.action.semRev {
+				continue
+			}
+		} else {
 			e.counters.pendingDeferred.Add(1)
 		}
+		e.pending.cooldown[p.key] = p.edge
 	}
 	e.pendingMu.Unlock()
 	e.startDeferredWorker()
