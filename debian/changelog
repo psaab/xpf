@@ -2,6 +2,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Dataplane: include live branch-stat and v6 proxy-NDP maps in the
     retained userspace-XDP shim allowlist with their BPF map types
     (#18390).
+  * Userspace dataplane tests: select distinct live-seed host slots in the
+    IPv6 /64 ICMP-rate-limit victim regression, replacing its collision-
+    dependent admission threshold with an exact 1600/1600 expectation
+    (#18404).
   * CI: Keep the harness-census workflow printable ASCII so its wiring
     self-test remains fail-closed (#18389).
   * Incus HA assurance: accept `secondary-hold` as the peer's non-owner state
