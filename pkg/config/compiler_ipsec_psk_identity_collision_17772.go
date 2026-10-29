@@ -351,19 +351,19 @@ func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
 		if encoded, ok := ipsecEncodeTextualDN(selector); ok {
 			return ipsecTypedIdentity(9, encoded), selector
 		}
-		return ipsecIKEIdentity{typeID: 11, encoding: selector}, selector
+		return ipsecTypedIdentityString(11, selector), selector
 	}
 	if strings.HasPrefix(selector, "@#") {
-		return ipsecIKEIdentity{typeID: 11, encoding: string(ipsecChunkFromHex(selector[2:]))}, selector
+		return ipsecTypedIdentity(11, ipsecChunkFromHex(selector[2:])), selector
 	}
 	if strings.HasPrefix(selector, "@@") {
-		return ipsecIKEIdentity{typeID: 3, encoding: selector[2:]}, selector
+		return ipsecTypedIdentityString(3, selector[2:]), selector
 	}
 	if strings.HasPrefix(selector, "@") {
-		return ipsecIKEIdentity{typeID: 2, encoding: selector[1:]}, selector
+		return ipsecTypedIdentityString(2, selector[1:]), selector
 	}
 	if strings.Contains(selector, "@") {
-		return ipsecIKEIdentity{typeID: 3, encoding: selector}, selector
+		return ipsecTypedIdentityString(3, selector), selector
 	}
 	if prefix, err := netip.ParsePrefix(selector); err == nil {
 		return ipsecSubnetIdentity(prefix), selector
@@ -379,12 +379,12 @@ func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
 		if addr.Is6() {
 			typeID = 5
 		}
-		return ipsecIKEIdentity{typeID: typeID, encoding: string(addr.AsSlice())}, selector
+		return ipsecTypedIdentity(typeID, addr.AsSlice()), selector
 	}
 	if strings.Contains(selector, ":") {
-		return ipsecIKEIdentity{typeID: 11, encoding: selector}, selector
+		return ipsecTypedIdentityString(11, selector), selector
 	}
-	return ipsecIKEIdentity{typeID: 2, encoding: selector}, selector
+	return ipsecTypedIdentityString(2, selector), selector
 }
 
 var ipsecStrongSwanIdentityPrefixes = [...]struct {
@@ -506,13 +506,26 @@ func ipsecParseStrtoul32(value string) (uint32, bool) {
 
 func ipsecTypedIdentity(typeID uint32, value []byte) ipsecIKEIdentity {
 	identity := ipsecIKEIdentity{typeID: typeID, encoding: string(value)}
-	if typeID == 9 {
+	if typeID == 9 || (len(value) > 0 && value[0] == 0x30) {
+		// Type-9 left operands interpret any right identity's raw encoding as a DN.
 		identity.rdns, identity.dnValid = ipsecParseDNEncoding(value)
 	}
 	return identity
 }
 
+func ipsecTypedIdentityString(typeID uint32, value string) ipsecIKEIdentity {
+	identity := ipsecIKEIdentity{typeID: typeID, encoding: value}
+	if typeID == 9 || (len(value) > 0 && value[0] == 0x30) {
+		// Keep normal text encodings zero-copy; only parse possible DN bytes.
+		identity.rdns, identity.dnValid = ipsecParseDNEncoding([]byte(value))
+	}
+	return identity
+}
+
 func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
+	if identity.typeID == 9 {
+		return ipsecDNIdentityEqual(identity, other)
+	}
 	if identity.typeID != other.typeID {
 		return false
 	}
@@ -524,13 +537,10 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 			return false
 		}
 		return ipsecASCIIEqualFold(identity.encoding, other.encoding)
-	case 9:
-		return ipsecDNIdentityEqual(identity, other)
 	default:
 		return identity.encoding == other.encoding
 	}
 }
-
 
 func ipsecASCIIEqualFold(a, b string) bool {
 	if len(a) != len(b) {
@@ -672,7 +682,7 @@ func ipsecAddressRangeIdentity(value string) (ipsecIKEIdentity, bool) {
 	encoded := make([]byte, len(startBytes)+len(endBytes))
 	copy(encoded, startBytes)
 	copy(encoded[len(startBytes):], endBytes)
-	return ipsecIKEIdentity{typeID: typeID, encoding: string(encoded)}, true
+	return ipsecTypedIdentity(typeID, encoded), true
 }
 
 func ipsecXMPPGeneralName(value []byte) []byte {

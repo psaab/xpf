@@ -1044,6 +1044,11 @@ all files stay in `package ipsec`, so the public API is unchanged.
   DN length parsing accepts bounded long-form lengths (up to eight length
   octets), including redundant leading zeros; containing TLVs must match their
   declared total lengths.
+  Cross-type DN comparison is directional: a type-9 left identity compares the
+  right raw encoding with `compare_dn()` semantics, including KEY_ID or other
+  identity types, while the reverse type order stays type-gated. Exact identical
+  bytes still match even for malformed DN encodings; structural folding
+  requires comparable nonempty DNs of the same encoded length.
   A mixed hostname/IP gateway requires a discriminating `remote-identity`: IP
   selectors cannot cover a
   hostname's resolved peer identity, so without that identity the correct

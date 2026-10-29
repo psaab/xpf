@@ -11528,6 +11528,12 @@ reserved for whole-dataplane selection where a rewrite shim
     both compared tags are PrintableString; emailAddress IA5 values also fold
     ASCII case. Other values compare bytes, even across differing tags, so DN
     equality is pairwise and not reducible to a transitive canonical key.
+    Comparison is directional across type tags: a type-9 left identity checks
+    the right raw encoding with `compare_dn()` semantics, including KEY_ID or
+    another identity type, while the reverse cross-type order remains type-gated.
+    The exact-byte shortcut still matches identical malformed DN/KEY_ID bytes;
+    structural folding requires nonempty comparable DN structures with equal
+    total encoded lengths.
     DN parsing requires constructed SEQUENCE, SET, and attribute-SEQUENCE
     containers plus primitive OIDs. Constructed-OID lookalikes and any empty
     RDN SET are malformed for structural comparison and use exact-byte equality
