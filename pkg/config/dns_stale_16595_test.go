@@ -200,19 +200,20 @@ func TestStrictCommitWarnsNotRejectsWhenDNSDown16595(t *testing.T) {
 	}
 	warned := false
 	for _, w := range ValidateConfig(cfg) {
-		if strings.Contains(w, "bad") && strings.Contains(w, "match nothing until DNS resolves") {
+		if strings.Contains(w, "bad") && strings.Contains(w, "lookup failed") &&
+			strings.Contains(w, "no last-good address") {
 			warned = true
 		}
 	}
 	for _, w := range cfg.Warnings {
-		if strings.Contains(w, "match nothing until DNS resolves") {
+		if strings.Contains(w, "lookup failed") && strings.Contains(w, "no last-good address") {
 			warned = true
 		}
 	}
-	// The existing dns-name warning is asserted via ValidateConfig; compile
-	// warnings are a separate channel, either satisfies the operator signal.
+	// ValidateConfig and compile warnings both preserve the resolver-failure
+	// diagnostic rather than reporting a successful empty answer.
 	if !warned {
-		t.Fatalf("failed DNS lookup must keep the match-nothing warning; warnings=%v compile=%v", ValidateConfig(cfg), cfg.Warnings)
+		t.Fatalf("failed DNS lookup must retain its distinct no-last-good warning; warnings=%v compile=%v", ValidateConfig(cfg), cfg.Warnings)
 	}
 	a := cfg.Security.AddressBook.Addresses["bad"]
 	if a == nil || !a.DNSLookupFailed {
@@ -258,8 +259,12 @@ func TestJunosHostSiblingStaticSurvivesRuntimeEmptyDNS17721(t *testing.T) {
 	var runtimeEmptyWarning bool
 	for _, warning := range ValidateConfig(cfg) {
 		if strings.Contains(warning, `"dns-v4"`) &&
-			strings.Contains(warning, "currently resolves to no addresses") {
+			strings.Contains(warning, "resolved successfully") &&
+			strings.Contains(warning, `"ipv4-only"`) {
 			runtimeEmptyWarning = true
+		}
+		if strings.Contains(warning, "lookup failed") {
+			t.Fatalf("successful family-empty DNS must not diagnose resolver failure: %s", warning)
 		}
 	}
 	if !runtimeEmptyWarning {

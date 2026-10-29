@@ -178,12 +178,7 @@ func junosHostNameUnrepresentable(ab *AddressBook, feedBound map[string]bool, na
 		// unrepresentable; their strict/diagnostic semantics are unchanged.
 		if a, ok := ab.Addresses[name]; ok && a != nil && len(a.UsableValues()) == 0 {
 			runtimeEmptyDNS := a.DNSName != "" && (a.DNSLookupFailed || a.DNSUnresolved)
-			familyEmptyDNS := a.DNSName != "" && a.DNSFamily != "" &&
-				!a.DNSLookupFailed && !a.DNSUnresolved && a.Value == "" &&
-				len(a.ExpandedPrefixes) == 0 && len(a.UnimplementedForms) == 0 &&
-				len(a.DuplicatePrefixes) == 0 && len(a.TrailingTokens) == 0 &&
-				a.OversizedRange == ""
-			if !runtimeEmptyDNS && !familyEmptyDNS {
+			if !runtimeEmptyDNS && !a.hasSuccessfulFamilyEmptyDNS() {
 				return true
 			}
 		}
