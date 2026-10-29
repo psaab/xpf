@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -135,10 +136,24 @@ def validate_verdict(repo_root: Path) -> Path:
         raise ValueError("shim gate verdict bpf-linker does not match the pin")
     if provenance.get("codegen_env_digest") != _well_known_digest(repo_root):
         raise ValueError("shim gate verdict was built under an unscrubbed codegen environment")
-    # #16701: the measurement must name its kernel — guest kernels
-    # charge the same object materially more than the build host.
-    if not isinstance(provenance.get("kernel_release"), str) or not provenance["kernel_release"].strip():
+    # #16701 / #17768: a kernel name alone is not a binding. The
+    # retention decision accepts the measured verdict as release
+    # provenance, so require the running release to be the exact
+    # kernel that produced its headroom figure.
+    measured_kernel = provenance.get("kernel_release")
+    try:
+        running_kernel = os.uname().release
+    except (AttributeError, OSError) as exc:
+        raise ValueError("cannot determine running kernel release") from exc
+    if not isinstance(measured_kernel, str) or not measured_kernel.strip():
         raise ValueError("shim gate verdict records no kernel release")
+    if not isinstance(running_kernel, str) or not running_kernel.strip():
+        raise ValueError("running kernel release is empty")
+    if measured_kernel != running_kernel:
+        raise ValueError(
+            f"shim gate verdict kernel release {measured_kernel!r} "
+            f"does not match running kernel {running_kernel!r}"
+        )
 
     stats = verdict.get("stats")
     if not isinstance(stats, dict) or not isinstance(stats.get("measured"), bool):

@@ -79,6 +79,185 @@ func TestDNSRefreshPublishesStoreGeneration16606(t *testing.T) {
 	}
 }
 
+// ordinaryDNSApply17744 drives applyConfigLocked's normal deferred baseline
+// hook through the test apply-body seam, then lets the production defer run.
+// Clearing the seam inside the body keeps this an observed successful apply
+// while exercising the same publication decision as the real apply path.
+func ordinaryDNSApply17744(t *testing.T, d *Daemon, cfg *config.Config) *config.Config {
+	t.Helper()
+	if err := d.applySem.Acquire(t.Context(), 1); err != nil {
+		t.Fatalf("acquire applySem: %v", err)
+	}
+	defer d.applySem.Release(1)
+	var applied *config.Config
+	d.applyBodyForTest = func(cfg *config.Config) {
+		applied = cfg
+		d.applyBodyForTest = nil
+	}
+	d.applyConfigUnderSem(cfg)
+	return applied
+}
+
+func TestOrdinaryDNSApplyPublishesResolvedClone17744(t *testing.T) {
+	set := stubDNS15933(t, map[string][]string{
+		"global.example.com": {"10.0.0.1"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	d, s := dnsDaemon15933(t)
+	base := s.ActiveConfig()
+	baseGen, _ := s.ActiveSnapshot()
+
+	set(map[string][]string{
+		"global.example.com": {"10.9.9.9"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	resolved := d.resolveDNSBeforeApply(base)
+	if resolved == base {
+		t.Fatal("ordinary apply resolution reused the published pointer")
+	}
+	applied := ordinaryDNSApply17744(t, d, resolved)
+	if applied != resolved {
+		t.Fatalf("ordinary apply used %p, want resolved clone %p", applied, resolved)
+	}
+	active := s.ActiveConfig()
+	if active != resolved {
+		t.Fatalf("store active = %p, want applied DNS clone %p", active, resolved)
+	}
+	if got := globalSvc15933(t, active); !reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
+		t.Fatalf("store active DNS answer = %v, want B [10.9.9.9/32]", got)
+	}
+	gen, snapshotCfg := s.ActiveSnapshot()
+	if gen <= baseGen || snapshotCfg != active {
+		t.Fatalf("active snapshot = (%d, %p), want published clone after generation %d", gen, snapshotCfg, baseGen)
+	}
+	if got := d.dnsBaselineFor(active); got == nil || !dnsAnswersEqual(got, snapshotDNSAnswers(active)) {
+		t.Fatalf("baseline = %v, want answers keyed to the published clone", got)
+	}
+
+	// The next identical refresh used to compare B against the baseline
+	// while the store still held A, suppressing the publication needed to
+	// repair the active config. Now both store and baseline carry B.
+	d.refreshDNSOnce()
+	if s.ActiveConfig() != active {
+		t.Fatal("unchanged refresh churned the published clone")
+	}
+	if got := globalSvc15933(t, s.ActiveConfig()); !reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
+		t.Fatalf("active DNS answer after refresh = %v, want B [10.9.9.9/32]", got)
+	}
+}
+
+func TestOrdinaryDNSApplyUnchangedAnswersSkipsRepublish17744(t *testing.T) {
+	stubDNS15933(t, map[string][]string{
+		"global.example.com": {"10.0.0.1"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	d, s := dnsDaemon15933(t)
+	base := s.ActiveConfig()
+	baseGen, _ := s.ActiveSnapshot()
+	resolved := d.resolveDNSBeforeApply(base)
+	if resolved == base {
+		t.Fatal("ordinary apply resolution reused the published pointer")
+	}
+	if applied := ordinaryDNSApply17744(t, d, resolved); applied != resolved {
+		t.Fatalf("ordinary apply used %p, want resolved clone %p", applied, resolved)
+	}
+	gen, snapshotCfg := s.ActiveSnapshot()
+	if s.ActiveConfig() != base || snapshotCfg != base || gen != baseGen {
+		t.Fatalf("unchanged-DNS apply republished store generation: active=%p snapshot=(%d,%p), want base=%p generation=%d",
+			s.ActiveConfig(), gen, snapshotCfg, base, baseGen)
+	}
+}
+
+func TestExplicitDNSApplyDoesNotPublishUnrelatedConfig17744(t *testing.T) {
+	set := stubDNS15933(t, map[string][]string{
+		"global.example.com": {"10.0.0.1"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	d, s := dnsDaemon15933(t)
+	base := s.ActiveConfig()
+	baseGen, _ := s.ActiveSnapshot()
+	unrelated := base.CloneForDNSRefresh()
+	set(map[string][]string{
+		"global.example.com": {"10.9.9.9"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	var applied *config.Config
+	d.applyBodyForTest = func(cfg *config.Config) {
+		applied = cfg
+		d.applyBodyForTest = nil
+	}
+	d.applyConfig(unrelated)
+	if applied == nil || applied == unrelated {
+		t.Fatal("explicit DNS apply did not use its own resolved clone")
+	}
+	if got := globalSvc15933(t, applied); !reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
+		t.Fatalf("explicit apply DNS answer = %v, want B [10.9.9.9/32]", got)
+	}
+	gen, snapshotCfg := s.ActiveSnapshot()
+	if s.ActiveConfig() != base || snapshotCfg != base || gen != baseGen {
+		t.Fatalf("explicit unrelated apply replaced active config: active=%p snapshot=(%d,%p), want base=%p generation=%d",
+			s.ActiveConfig(), gen, snapshotCfg, base, baseGen)
+	}
+}
+
+func TestPromotedDNSApplyRetainsSourceAndPublishesClone17744(t *testing.T) {
+	set := stubDNS15933(t, map[string][]string{
+		"global.example.com": {"10.0.0.1"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	d, s := dnsDaemon15933(t)
+	base := s.ActiveConfig()
+	baseGen, _ := s.ActiveSnapshot()
+	set(map[string][]string{
+		"global.example.com": {"10.9.9.9"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	resolved := d.resolveDNSBeforeApply(base)
+	if resolved == base {
+		t.Fatal("promoted apply resolution reused the active pointer")
+	}
+	if err := d.applySem.Acquire(t.Context(), 1); err != nil {
+		t.Fatalf("acquire applySem: %v", err)
+	}
+	defer d.applySem.Release(1)
+	var applied *config.Config
+	d.applyBodyForTest = func(cfg *config.Config) {
+		applied = cfg
+		d.applyBodyForTest = nil
+	}
+	out := d.finalizePromotedApplyLocked(promotedApply{
+		kind:       promotedApplyCommit,
+		oldActive:  base,
+		newCfg:     resolved,
+		armKind:    promotedArmPlain,
+		applyCtx:   t.Context(),
+		commitOnly: true,
+	})
+	if out.applyErr != nil {
+		t.Fatalf("finalize promoted DNS apply: %v", out.applyErr)
+	}
+	if applied != resolved || out.newCfg != resolved {
+		t.Fatalf("promoted apply = %p, outcome = %p; want resolved clone %p", applied, out.newCfg, resolved)
+	}
+	active := s.ActiveConfig()
+	if active != resolved {
+		t.Fatalf("promoted ActiveConfig = %p, want resolved clone %p", active, resolved)
+	}
+	if got := globalSvc15933(t, active); !reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
+		t.Fatalf("promoted active DNS answer = %v, want B [10.9.9.9/32]", got)
+	}
+	gen, snapshotCfg := s.ActiveSnapshot()
+	if gen <= baseGen || snapshotCfg != active {
+		t.Fatalf("promoted active snapshot = (%d, %p), want published clone after generation %d", gen, snapshotCfg, baseGen)
+	}
+	d.dnsRefreshMu.Lock()
+	markers := len(d.dnsResolvedConfigs)
+	d.dnsRefreshMu.Unlock()
+	if markers != 0 {
+		t.Fatalf("resolved-config markers after promoted apply = %d, want 0", markers)
+	}
+}
+
 // #17723: a successful empty DNS answer and SERVFAIL have the same prefix
 // snapshot but different enforcement semantics. The refresher must publish
 // the failure-only transition, then skip an identical failed state.

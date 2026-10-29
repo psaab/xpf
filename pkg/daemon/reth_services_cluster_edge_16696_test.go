@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dhcpserver"
 )
@@ -35,7 +36,8 @@ import (
 // (idempotence rows fail).
 
 func legacyServicesDaemon16696(t *testing.T) *Daemon {
-	t.Helper()
+	restoreEpochPath := cluster.SetPeerEpochStatePathForTesting(filepath.Join(t.TempDir(), "ha-peer-epoch"))
+	t.Cleanup(restoreEpochPath)
 	d := newRethFenceDaemon(t, &actuationHA{}, newFakeVIPRelease())
 	d.proxyARPNudgeCh = make(chan struct{}, 1)
 	// handleClusterEvent's promotion arm republishes connected routes
@@ -1065,4 +1067,94 @@ func TestClearDemotionDuringResetRetainsPending17746(t *testing.T) {
 		t.Fatal("recovery clear enqueued more than once")
 	}
 	rec.mu.Unlock()
+}
+
+// blockedRouteOverlay17771 holds a real cluster handler after its state
+// transition but before driveRethServicesEdge.
+type blockedRouteOverlay17771 struct {
+	*actuationDP
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (d *blockedRouteOverlay17771) PublishRouteOverlaySnapshotWithLatch(
+	*config.Config, []config.RouteOverlayEntry, map[string]bool, bool,
+) (bool, error) {
+	d.entered <- struct{}{}
+	<-d.release
+	return false, nil
+}
+
+func (d *blockedRouteOverlay17771) BumpFIBGeneration() (uint32, error) {
+	return 0, nil
+}
+
+// #17771: the channel-gated publisher parks the production cluster handler
+// after it consumes the activation transition but before its service-edge
+// tail. The independent converger runs in that window; when the handler
+// resumes, its stale Changed=true edge must be a no-op.
+func TestClusterHandlerAndConvergerDoNotDoubleApply17771(t *testing.T) {
+	d := legacyServicesDaemon16696(t)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	d.setDataplane(&blockedRouteOverlay17771{
+		actuationDP: &actuationDP{ha: &actuationHA{}},
+		entered:     entered,
+		release:     release,
+	})
+
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		if timer := d.handleClusterEvent(context.Background(), cluster.ClusterEvent{
+			GroupID: 1, OldState: cluster.StateSecondary, NewState: cluster.StatePrimary,
+		}, nil); timer != nil {
+			timer.Stop()
+		}
+	}()
+	t.Cleanup(func() {
+		releaseHandler()
+		select {
+		case <-handlerDone:
+		case <-time.After(5 * time.Second):
+			t.Error("in-flight cluster handler did not finish after release")
+		}
+	})
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cluster handler did not reach the gated route publication")
+	}
+	if !d.getOrCreateRGState(1).IsActive() {
+		t.Fatal("setup: handler must consume the cluster promotion before route publication")
+	}
+
+	// The handler is definitely in flight at the service-tail boundary. Let
+	// the independent reconcile producer consume the same desired edge first.
+	d.convergeRethServices(1)
+	if !serviceEdge16696(d) {
+		t.Fatal("#17771: converger did not apply the consumed cluster edge")
+	}
+
+	releaseHandler()
+	select {
+	case <-handlerDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight cluster handler did not finish")
+	}
+	if serviceEdge16696(d) {
+		t.Fatal("#17771: stale handler transition applied the already-converged service edge twice")
+	}
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("#17771: converged activation marker was lost")
+	}
+
+	// Explicit stale-edge control: Changed=true alone cannot replay a marker
+	// already advanced by either producer.
+	d.driveRethServicesEdge(1, rgTransition{Changed: true, Active: true}, false)
+	if serviceEdge16696(d) {
+		t.Fatal("#17771: already-converged Changed=true edge was not a no-op")
+	}
 }

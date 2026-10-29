@@ -38,8 +38,18 @@ func vpn9624(name string, selectors ...string) []string {
 	return lines
 }
 
+// vpn9624OnInterface keeps each VPN on its own capture owner so this fixture
+// reaches the independent rendered-SA-name collision gate (#9624).
+func vpn9624OnInterface(name, bind string, selectors ...string) []string {
+	lines := vpn9624(name, selectors...)
+	lines[1] = "set security ipsec vpn " + name + " bind-interface " + bind
+	return lines
+}
+
 func TestIPsecSANameCollisionsFailCommit9624(t *testing.T) {
-	distinctNames := append(vpn9624("east", "lan"), vpn9624("west", "lan")...)
+	distinctNames := append(
+		vpn9624OnInterface("east", "st0.0", "lan"),
+		vpn9624OnInterface("west", "st0.1", "lan")...)
 	distinctNames = append(distinctNames, "set security ipsec vpn west traffic-selector lan remote-ip 10.9.2.0/24")
 	for _, tc := range []struct {
 		name    string
@@ -49,9 +59,9 @@ func TestIPsecSANameCollisionsFailCommit9624(t *testing.T) {
 		saName  string
 		vpnList string
 	}{
-		{"child/child: a+b-c vs a-b+c", append(vpn9624("a", "b-c"), vpn9624("a-b", "c")...),
+		{"child/child: a+b-c vs a-b+c", append(vpn9624("a", "b-c"), vpn9624OnInterface("a-b", "st0.1", "c")...),
 			[]string{"a", "a-b"}, true, "a-b-c", `"a", "a-b"`},
-		{"connection/child: blue+red vs blue-red", append(vpn9624("blue", "red"), vpn9624("blue-red")...),
+		{"connection/child: blue+red vs blue-red", append(vpn9624("blue", "red"), vpn9624OnInterface("blue-red", "st0.1")...),
 			[]string{"blue", "blue-red"}, true, "blue-red", `"blue", "blue-red"`},
 		{"distinct names", distinctNames, []string{"east", "west"}, false, "", ""},
 		{"within-VPN #5122 collision is disambiguated, not rejected", vpn9624("site", "x/a", "x:a"),
