@@ -191,6 +191,15 @@ func nodesMayHaveEventCommands9984(nodes []*Node, depth int) bool {
 }
 
 func eventOptionsMayHaveEventCommands9984(node *Node) bool {
+	// #17762: the compact `event-options policy p { ... }` parser shape keeps
+	// the policy identity on this node rather than under a `policy` child.
+	// Reuse the policy predicate on that node, but only after confirming the
+	// direct packed policy identity so unrelated event-options keys/children
+	// do not widen the gate.
+	if len(node.Keys) >= 3 && node.Keys[1] == "policy" &&
+		policyMayHaveEventCommands9984(node) {
+		return true
+	}
 	for _, child := range node.Children {
 		if child == nil || child.Name() != "policy" {
 			continue
@@ -248,6 +257,15 @@ func eventPolicyNodes9984(tree *ConfigTree) map[string][]*Node {
 				continue
 			}
 			inSection := inEventOptions || node.Name() == "event-options"
+			if inSection && node.Name() == "event-options" &&
+				len(node.Keys) >= 3 && node.Keys[1] == "policy" {
+				// #17762: a compact event-options/policy stanza keeps the
+				// policy name and body on the event-options node itself.
+				// Record that node as the policy so restamping and quarantine
+				// update the authored instance rather than inventing a sibling.
+				name := node.Keys[2]
+				out[name] = append(out[name], node)
+			}
 			if inSection && node.Name() == "policy" {
 				// Mirror namedInstances, used by compileEventOptions: a
 				// direct policy carries its name in Keys[1]; the

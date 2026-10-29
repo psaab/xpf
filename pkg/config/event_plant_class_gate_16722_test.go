@@ -93,6 +93,20 @@ func TestTreeMayHaveEventCommands16722(t *testing.T) {
 				"set interfaces ge-0/0/0 description change-configuration commands"), false},
 		{"inactive policy still counts (compiled prunes, raw fallback does not)",
 			gate16722Hier(t, `event-options { inactive: policy p { events e; then { change-configuration { commands "set system host-name x"; } } } }`), true},
+		{"compact event-options policy with commands",
+			gate16722Hier(t, `event-options policy p { events e; then { change-configuration { commands "set system host-name x"; } } }`), true},
+		{"compact event-options policy without commands",
+			gate16722Hier(t, `event-options policy p { events e; }`), false},
+		{"compact event-options policy with only plant-class",
+			gate16722Hier(t, `event-options policy p { events e; plant-class alice; }`), false},
+		{"compact event-options policy with packed commands",
+			gate16722Hier(t, `event-options policy p then change-configuration commands "set system host-name x";`), true},
+		{"event-options without a policy does not count",
+			gate16722Hier(t, `event-options then change-configuration commands "set system host-name x";`), false},
+
+		{"compact event-options policy inside a group",
+			gate16722Hier(t, `groups { g { event-options policy p { events e; then { change-configuration { commands "set system host-name x"; } } } } } apply-groups g;`), true},
+
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,5 +155,33 @@ func TestStampGateSkipsOnlyCommandless16722(t *testing.T) {
 	StampChangedEventPlantClasses(before3, after3, "mallory")
 	if strings.Contains(after3.FormatSet(), "event-options") {
 		t.Fatalf("stamp after policy deletion invented event-options:\n%s", after3.FormatSet())
+	}
+}
+
+// #17762: compact event-options/policy spelling carries its identity on the
+// event-options node, so the raw gate must still run the stamper before
+// normalization turns it into the ordinary hierarchical shape.
+func TestCompactEventOptionsPolicyPlantClass17762(t *testing.T) {
+	after := gate16722Hier(t, `event-options policy p { events e; then { change-configuration { commands "set system host-name x"; } } }`)
+	if !treeMayHaveEventCommands9984(after) {
+		t.Fatal("compact event-options policy with commands was skipped by the planting-class gate")
+	}
+	StampChangedEventPlantClasses(nil, after, "alice")
+	if pol := compiledPlantClass9984(t, after); pol.PlantClass != "alice" {
+		t.Fatalf("compact policy PlantClass=%q, want alice", pol.PlantClass)
+	}
+}
+
+func TestMalformedCompactEventOptionsGateDoesNotPanic17762(t *testing.T) {
+	malformed := &Node{Keys: []string{"event-options", "policy"}}
+	then := &Node{Keys: []string{"then"}}
+	changeConfig := &Node{Keys: []string{"change-configuration"}}
+	commands := &Node{Keys: []string{"commands", "set system host-name x"}, IsLeaf: true}
+	changeConfig.Children = []*Node{commands}
+	then.Children = []*Node{changeConfig}
+	malformed.Children = []*Node{then}
+	tree := &ConfigTree{Children: []*Node{malformed}}
+	if treeMayHaveEventCommands9984(tree) {
+		t.Fatal("malformed compact policy identity must not be attributed")
 	}
 }
