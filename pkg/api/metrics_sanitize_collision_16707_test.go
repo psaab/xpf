@@ -80,9 +80,8 @@ func countSeries16707(body, prefix string) int {
 	return n
 }
 
-// TestSanitizeMetricLabelValueInjective16707 pins the unit contract:
-// distinct raw byte strings differing only in invalid bytes map to
-// distinct sanitized spellings; valid values are byte-identical.
+// TestSanitizeMetricLabelValueInjective16707 pins the original invalid-byte
+// spelling contract; the #17753 test below covers valid escape lookalikes.
 func TestSanitizeMetricLabelValueInjective16707(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"web\xffallow", "web\\xffallow"},
@@ -108,10 +107,10 @@ func TestSanitizeMetricLabelValueInjective16707(t *testing.T) {
 	if got, ok := sanitizeMetricLabelValue("web-allow"); !ok || got != "web-allow" {
 		t.Errorf("valid value rewritten: got %q ok=%v, want byte-identical", got, ok)
 	}
-	// A valid value that literally spells \xNN is healthy config and must
-	// pass through unchanged (never rewritten on the fast path).
-	if got, ok := sanitizeMetricLabelValue(`web\xffallow`); !ok || got != `web\xffallow` {
-		t.Errorf("valid literal-escape value rewritten: got %q ok=%v", got, ok)
+	// A valid literal escape remains valid UTF-8 but has its backslash
+	// escaped, making it distinct from the invalid byte's \xNN spelling.
+	if got, ok := sanitizeMetricLabelValue(`web\xffallow`); !ok || got != `web\x5cxffallow` {
+		t.Errorf("valid literal-escape value = %q ok=%v, want escaped backslash", got, ok)
 	}
 	// Truncated multi-byte sequence: the stray lead byte is escaped.
 	if got, _ := sanitizeMetricLabelValue("x\xc3y"); got != "x\\xc3y" {

@@ -259,10 +259,11 @@ func (c *xpfCollector) initGlobalDescriptors() {
 	c.invalidLabelValuesTotal = prometheus.NewDesc(
 		"xpf_metrics_invalid_label_values_total",
 		"Total Prometheus label values that carried invalid UTF-8 and "+
-			"were escaped as \\xNN at emit time (#15086, #16707). The "+
-			"sample is still published with the sanitized value; a "+
-			"nonzero count means a committed config identifier holds "+
-			"raw non-UTF-8 bytes.",
+			"were escaped as \\xNN at emit time (#15086, #16707). Literal "+
+			"backslashes are encoded as \\x5c to reserve the escape "+
+			"introducer (#17753). The sample is still published with the "+
+			"sanitized value; a nonzero count means a committed config "+
+			"identifier holds raw non-UTF-8 bytes.",
 		nil, nil,
 	)
 	c.collectorPanicsTotal = prometheus.NewDesc(

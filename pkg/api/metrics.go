@@ -1153,12 +1153,14 @@ type xpfCollector struct {
 	flowExportLiveFeedMissesTotal      *prometheus.Desc
 	flowExportSamplingSelectedTotal    *prometheus.Desc
 	flowExportZoneFilteredTotal        *prometheus.Desc
-	// #15086/#16707: scrape-health counters for the label-sanitize choke
+	// #15086/#16707/#17753: scrape-health counters for the label-sanitize choke
 	// point (metrics_emit_15086.go) and the lane recover (metrics_handler.go).
 	// invalidLabelValuesTotal counts label values that carried invalid
-	// UTF-8 and were escaped as \xNN; collectorPanicsTotal counts
-	// collector passes the lane recovered. Both samples are emitted via
-	// defers at the TOP of collectContext, so they appear on every return
+	// UTF-8 and were escaped as \xNN; literal backslashes are also encoded
+	// as \x5c to reserve that escape form, but do not affect this count.
+	// collectorPanicsTotal counts collector passes recovered by the lane.
+	// Both samples are emitted via defers at the TOP of collectContext,
+	// so they appear on every return
 	// path — and, for a recovered panic, on the NEXT scrape, since a
 	// panicking pass cannot reliably emit after the panic point. The
 	// atomic fields are the collectors' cumulative state; literal-
