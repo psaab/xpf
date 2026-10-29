@@ -1711,10 +1711,10 @@ func sessionHAStateForView(view sessionView, inIf, outIf string, inZone, outZone
 	return config.SessionHAState(view.cfg, inIf, outIf, inZone, outZone, view.zoneNames, view.haActiveRGFn)
 }
 
-// sessionHAActiveForView derives ha_active from sessionHAStateForView for
-// compat; it is meaningful only when the state is Active/Backup.
-func sessionHAActiveForView(view sessionView, inIf, outIf string, inZone, outZone uint16) bool {
-	return sessionHAStateForView(view, inIf, outIf, inZone, outZone) == "Active"
+// sessionHAForView derives both REST HA fields from one ownership sample.
+func sessionHAForView(view sessionView, inIf, outIf string, inZone, outZone uint16) (bool, string) {
+	state := sessionHAStateForView(view, inIf, outIf, inZone, outZone)
+	return state == "Active", state
 }
 
 // sessionOriginLabel renders a row's stored provenance (#16110), mirroring
@@ -1753,6 +1753,7 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 	if outIf == "" {
 		outIf = view.zoneNames[val.EgressZone]
 	}
+	haActive, haState := sessionHAForView(view, inIf, outIf, val.IngressZone, val.EgressZone)
 	se := SessionEntry{
 		SrcAddr:  net.IP(key.SrcIP[:]).String(),
 		DstAddr:  net.IP(key.DstIP[:]).String(),
@@ -1776,8 +1777,8 @@ func sessionEntryV4(key dataplane.SessionKey, val dataplane.SessionValue, now ui
 		RevBytes:         val.RevBytes,
 		Timeout:          val.Timeout,
 		SessionID:        val.SessionID,
-		HAActive:         sessionHAActiveForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
-		HAState:          sessionHAStateForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
+		HAActive:         haActive,
+		HAState:          haState,
 		Origin:           sessionOriginLabel(val.Flags),
 	}
 	if val.Created > 0 && now > val.Created {
@@ -1812,6 +1813,7 @@ func sessionEntryV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, no
 	if outIf == "" {
 		outIf = view.zoneNames[val.EgressZone]
 	}
+	haActive, haState := sessionHAForView(view, inIf, outIf, val.IngressZone, val.EgressZone)
 	se := SessionEntry{
 		SrcAddr:  net.IP(key.SrcIP[:]).String(),
 		DstAddr:  net.IP(key.DstIP[:]).String(),
@@ -1835,8 +1837,8 @@ func sessionEntryV6(key dataplane.SessionKeyV6, val dataplane.SessionValueV6, no
 		RevBytes:         val.RevBytes,
 		Timeout:          val.Timeout,
 		SessionID:        val.SessionID,
-		HAActive:         sessionHAActiveForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
-		HAState:          sessionHAStateForView(view, inIf, outIf, val.IngressZone, val.EgressZone),
+		HAActive:         haActive,
+		HAState:          haState,
 		Origin:           sessionOriginLabel(val.Flags),
 	}
 	if val.Created > 0 && now > val.Created {
