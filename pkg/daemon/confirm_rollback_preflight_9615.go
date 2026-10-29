@@ -85,12 +85,11 @@ func (d *Daemon) rollbackTargetFeedProducersAbsent(target *config.Config) bool {
 // rollbackTargetRefusedOnlyForDNS reports whether target's refusal is
 // attributable to dns-name entries whose resolution failed or had not yet
 // run when the target was compiled at Store.Load (#16612/#17782). It
-// re-resolves a private clone with current DNS. A refreshed target that no
-// longer refuses is DNS-only when the frozen target had an unavailable name.
-// If the refreshed clone still refuses while DNS remains unavailable, the
-// refusal is DNS-only only when making unavailable entries usable clears every
-// rejection. A refusal that persists after that causal probe is not DNS-only,
-// so a target with an unrelated static refusal is not smuggled past the gate.
+// re-resolves a private clone with current DNS. An unavailable DNS name is
+// DNS-only only when the refreshed clone has no whole-snapshot rejection.
+// PolicyContentRejectionReasons deliberately omits per-rule fail-closed
+// refusals caused solely by unavailable DNS, so any remaining rejection is
+// independent and must take the refused-target safe state.
 func rollbackTargetRefusedOnlyForDNS(target *config.Config) bool {
 	if target == nil || !targetHasUnavailableDNSResolution(target) {
 		return false
@@ -108,62 +107,9 @@ func rollbackTargetRefusedOnlyForDNSRefreshed(target, refreshed *config.Config) 
 	if len(dpuserspace.PolicyContentRejectionReasons(refreshed, nil)) == 0 {
 		return true
 	}
-	// Still refused after refresh. Establish causality by re-checking a second
-	// private clone with each unavailable, empty dns-name entry made usable.
-	// DNS is the sole cause only when this removes every refusal; any static
-	// policy/snapshot refusal remains and takes the refused-target safe state.
-	// Leave refreshed untouched because the fire path may use it for apply.
-	dnsNeutralized := rollbackTargetWithDNSFailuresNeutralized(refreshed)
-	return dnsNeutralized != nil &&
-		len(dpuserspace.PolicyContentRejectionReasons(dnsNeutralized, nil)) == 0
-}
-
-// rollbackTargetWithDNSFailuresNeutralized returns a private clone where
-// unavailable dns-name entries with no stale answer are given valid
-// documentation-only prefixes. It is a causal-probe input for the
-// DNS-only rollback classifier, never an apply target.
-func rollbackTargetWithDNSFailuresNeutralized(cfg *config.Config) *config.Config {
-	if cfg == nil {
-		return nil
-	}
-	clone := cfg.CloneForDNSRefresh()
-	if clone == nil {
-		return nil
-	}
-	makeAvailable := func(book *config.AddressBook) {
-		if book == nil {
-			return
-		}
-		for _, addr := range book.Addresses {
-			if addr == nil || addr.DNSName == "" ||
-				(!addr.DNSLookupFailed && !addr.DNSUnresolved) ||
-				len(addr.DNSAddresses) != 0 {
-				continue
-			}
-			switch addr.DNSFamily {
-			case "ipv4-only":
-				addr.DNSAddresses = []string{"192.0.2.1/32"}
-			case "ipv6-only":
-				addr.DNSAddresses = []string{"2001:db8::1/128"}
-			default:
-				addr.DNSAddresses = []string{"192.0.2.1/32", "2001:db8::1/128"}
-			}
-			addr.DNSLookupFailed = false
-			addr.DNSUnresolved = false
-		}
-	}
-	makeAvailable(clone.Security.AddressBook)
-	for _, named := range clone.Security.NamedAddressBooks {
-		if named != nil {
-			makeAvailable(&named.AddressBook)
-		}
-	}
-	for _, zone := range clone.Security.Zones {
-		if zone != nil {
-			makeAvailable(zone.AddressBook)
-		}
-	}
-	return clone
+	// Any reason that remains is an independent policy/snapshot refusal;
+	// do not let an unrelated failed dns-name defer this target.
+	return false
 }
 
 // targetHasUnavailableDNSResolution reports whether cfg carries a dns-name

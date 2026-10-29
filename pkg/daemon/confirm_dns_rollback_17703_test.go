@@ -125,9 +125,6 @@ func TestRollbackTargetRefusedOnlyForDNSMixedRefusal17703(t *testing.T) {
 		if rollbackTargetRefusedOnlyForDNS(target) {
 			t.Fatal("rollbackTargetRefusedOnlyForDNS must not classify the mixed refusal as DNS-only")
 		}
-		if addr := refreshed.Security.AddressBook.Addresses["api"]; !addr.DNSLookupFailed || len(addr.DNSAddresses) != 0 {
-			t.Fatalf("DNS attribution probe must not mutate the refreshed clone: %+v", addr)
-		}
 	})
 
 	t.Run("dns-unavailable target retains dns classification", func(t *testing.T) {
