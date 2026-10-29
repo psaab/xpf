@@ -26,7 +26,7 @@ func TestNoInstallStaticRouteIsNotRendered11328(t *testing.T) {
 	control := *noInstall
 	control.NoInstall = false
 	if got, want := m.generateStaticRoute(&control, "", nil, nil, nil),
-		"ip route 10.99.0.0/16 10.0.0.1\nip route 10.99.0.0/16 10.0.0.2\n"; got != want {
+		"ip route 10.99.0.0/16 10.0.0.1 5\nip route 10.99.0.0/16 10.0.0.2 5\n"; got != want {
 		t.Fatalf("ordinary ECMP control render = %q, want %q", got, want)
 	}
 }

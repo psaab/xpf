@@ -221,8 +221,9 @@ func validateLinkAggregationWarnings(cfg *Config) []string {
 //     interfaces): the leak installs no ip rule because there is no static
 //     prefix to enumerate at commit. (Runtime route-copy for dynamically
 //     learned addresses is the deferred Phase-2 mechanism.)
-//   - A rib-group importing a NON-MAIN (VRF→VRF) rib: Phase 1 leaks only into
-//     the main table; a VRF→VRF import target is not yet installed (Phase 2).
+//   - A rib-group importing a NON-MAIN (VRF→VRF) rib: the direct forward
+//     route import is not installed (Phase 2), though naming a peer rib can
+//     authorize a destination-scoped return from that peer to this instance.
 //
 // Strict commits reject undefined selectors via
 // validatePerInstanceInterfaceRoutesRibGroupStrict; tolerant loads retain
@@ -290,9 +291,10 @@ func validateRibGroupLeakWarnings(cfg *Config) []string {
 			sort.Strings(vrfTargets)
 			warnings = append(warnings, fmt.Sprintf(
 				"routing-instance %q: interface-routes rib-group imports non-main "+
-					"rib(s) [%s] (VRF→VRF import); this is not yet installed and takes "+
-					"no effect — only imports into the main table (inet.0/inet6.0) leak "+
-					"interface routes today (Phase 2 deferral).",
+					"rib(s) [%s] (VRF→VRF import); direct VRF-to-VRF route import is "+
+					"not installed (Phase 2). Naming a peer rib can authorize only "+
+					"a destination-scoped return from that peer to this instance's "+
+					"leaked connected prefixes when both instances leak into main.",
 				ri.Name, strings.Join(vrfTargets, ", ")))
 		}
 	}

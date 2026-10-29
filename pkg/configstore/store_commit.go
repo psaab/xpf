@@ -609,13 +609,7 @@ func (s *Store) CommitConfirmedAs(principal string, minutes int) (*config.Config
 // generation (#5848), the commit-confirmed analogue of CommitWithDescriptionGen.
 // It promotes+arms the auto-rollback timer ONLY if the candidate generation
 // still equals expectedGen, else returns ErrCandidateGenerationConflict without
-// mutating state. The rollback TARGET (the current active config the daemon
-// pre-flighted) is stable across the transaction: the daemon holds its apply
-// semaphore from pre-flight through this call, and every path that mutates the
-// active config (commit, commit-confirmed, peer SyncApply, confirm-timeout
-// rollback) runs under that same semaphore — so binding the (racy, semaphore-
-// free) candidate generation is sufficient to keep both the promoted candidate
-// and the stashed rollback target bound to what was examined.
+// mutating state.
 func (s *Store) CommitConfirmedGen(minutes int, expectedGen uint64) (*config.Config, error) {
 	return s.CommitConfirmedGenAs(InternalCommitter(), minutes, expectedGen)
 }
@@ -632,14 +626,35 @@ func (s *Store) CommitConfirmedGen(minutes int, expectedGen uint64) (*config.Con
 func (s *Store) CommitConfirmedGenAs(
 	authority CommitAuthority, minutes int, expectedGen uint64,
 ) (*config.Config, error) {
+	return s.commitConfirmedGenAs(authority, minutes, expectedGen, 0, false)
+}
+
+// CommitConfirmedGenAndConfirmAs additionally binds the rollback-window
+// generation captured with the daemon's rollback-target pre-flight. A
+// concurrent ConfirmCommit can clear that window without taking the daemon's
+// apply semaphore; rejecting a stale window here ensures the arm cannot save a
+// replacement target that the daemon did not examine.
+func (s *Store) CommitConfirmedGenAndConfirmAs(
+	authority CommitAuthority, minutes int, expectedCandidateGen, expectedConfirmGen uint64,
+) (*config.Config, error) {
+	return s.commitConfirmedGenAs(authority, minutes, expectedCandidateGen, expectedConfirmGen, true)
+}
+
+func (s *Store) commitConfirmedGenAs(
+	authority CommitAuthority, minutes int, expectedCandidateGen, expectedConfirmGen uint64, bindConfirmGen bool,
+) (*config.Config, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.verifyCommitAuthorityLocked(authority); err != nil {
 		return nil, err
 	}
-	if s.candidateGen != expectedGen {
+	if s.candidateGen != expectedCandidateGen {
 		return nil, fmt.Errorf("%w (examined generation %d, current %d)",
-			ErrCandidateGenerationConflict, expectedGen, s.candidateGen)
+			ErrCandidateGenerationConflict, expectedCandidateGen, s.candidateGen)
+	}
+	if bindConfirmGen && s.confirmGen != expectedConfirmGen {
+		return nil, fmt.Errorf("%w (examined rollback-window generation %d, current %d)",
+			ErrRollbackTargetChanged, expectedConfirmGen, s.confirmGen)
 	}
 	return s.commitConfirmedLocked(minutes, authority.JournalPrincipal())
 }

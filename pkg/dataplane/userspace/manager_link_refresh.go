@@ -298,9 +298,16 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 		if _, ok := tracked[int(ifindex)]; ok {
 			continue
 		}
-		row := interfaceRowForIfindex(next, ifindex)
+		// Use the structural owner for both admission and attach mode. A
+		// unit sharing the base ifindex must not force its base generic;
+		// ownerless parent contributions use their contributing row (#17701).
+		owner := interfaceOwnerRowForIfindex(next, ifindex)
+		row := owner
+		if row == nil {
+			row = interfaceRowForIfindex(next, ifindex)
+		}
 		forceGeneric := row != nil && (row.SecureTunnel || row.ParentIfindex > 0 || row.Tunnel)
-		if !refreshAttachAdmission(next, ifindex, row) {
+		if !refreshAttachAdmission(ifindex, row, owner) {
 			continue
 		}
 		var attach func(int, bool) error
@@ -350,9 +357,9 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 //     An unresolvable link keeps the pre-existing attach behaviour.
 //
 // An ifindex with no owning row (a fabric parent contribution) has only
-// the framing gate to pass.
-func refreshAttachAdmission(snap *ConfigSnapshot, ifindex uint32, row *InterfaceSnapshot) bool {
-	owner := interfaceOwnerRowForIfindex(snap, ifindex)
+// the framing gate to pass. The caller supplies the resolved owner so
+// admission and attachment-mode selection use the same structural row.
+func refreshAttachAdmission(ifindex uint32, row, owner *InterfaceSnapshot) bool {
 	if owner != nil {
 		if owner.VLANID > 0 && owner.ParentIfindex > 0 && !owner.Tunnel && !owner.SecureTunnel {
 			return false
@@ -382,18 +389,29 @@ func refreshAttachAdmission(snap *ConfigSnapshot, ifindex uint32, row *Interface
 	return !dataplane.ShimAttachRefused(l, err)
 }
 
-// interfaceOwnerRowForIfindex returns the snapshot row whose OWN ifindex
-// is ifindex (not a parent contribution), or nil when no row owns it.
+// interfaceOwnerRowForIfindex returns the structural base/interface row
+// owning ifindex when present, independent of snapshot row order. A disabled
+// logical unit may share its parent's ifindex (notably unit 0) but cannot
+// veto the base row's attachment. Unit-only ifindexes fall back to their
+// first owning unit row. No parent contribution is returned.
 func interfaceOwnerRowForIfindex(snap *ConfigSnapshot, ifindex uint32) *InterfaceSnapshot {
 	if snap == nil {
 		return nil
 	}
+	var firstUnitOwner *InterfaceSnapshot
 	for i := range snap.Interfaces {
-		if uint32(snap.Interfaces[i].Ifindex) == ifindex {
-			return &snap.Interfaces[i]
+		row := &snap.Interfaces[i]
+		if uint32(row.Ifindex) != ifindex {
+			continue
+		}
+		if !row.IsUnit {
+			return row
+		}
+		if firstUnitOwner == nil {
+			firstUnitOwner = row
 		}
 	}
-	return nil
+	return firstUnitOwner
 }
 
 // attachErrIsAlreadyAttached reports whether an AttachXDP error is the

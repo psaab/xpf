@@ -1,9 +1,19 @@
 package configstore
 
 import (
+	"errors"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+)
+
+// ErrRollbackTargetChanged is returned when a commit-confirmed arm reaches
+// promotion after the rollback-window state it pre-flighted was confirmed or
+// otherwise replaced. It is deliberately not ErrCandidateGenerationConflict:
+// retrying without re-running the rollback-target gates could arm against an
+// unchecked target.
+var ErrRollbackTargetChanged = errors.New(
+	"commit-confirmed rollback target changed during preparation; re-validate and retry",
 )
 
 // #9615: a commit-confirmed window re-armed at boot (recoverPendingConfirmLocked)
@@ -14,8 +24,8 @@ import (
 
 // PendingRollbackTarget returns the compiled rollback target of the pending
 // window armed with gen WITHOUT promoting it. ok is false when gen is stale or
-// no window is pending. first reports the never-committed first-commit target,
-// whose compiled config is nil by design.
+// no window is pending. first reports a never-committed rollback; target can be
+// nil on a fresh store or the compiled empty tree after a restart (#7291).
 func (s *Store) PendingRollbackTarget(gen uint64) (target *config.Config, first bool, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -26,23 +36,27 @@ func (s *Store) PendingRollbackTarget(gen uint64) (target *config.Config, first 
 }
 
 // RollbackTargetForArm returns the config a NEW `commit confirmed` arm would
-// actually restore on timeout (#16668). When a window is already pending
-// this is the retained original target (confirmPrevCfg), NOT the current
-// unconfirmed active config: a nested CommitConfirmed cancels the timer
-// but keeps confirmPrevCfg (store_commit.go). When nothing is pending it
-// is the current active config, which the new arm would snapshot as its
-// target. first is true only for the never-committed first-commit pending
-// target, whose compiled config is nil by design. The PendingRollbackTarget
-// generation check is folded in (the current confirmGen is read under the
-// same lock), so the caller cannot race a nested arm or a confirmation
-// between reading the generation and reading the target.
-func (s *Store) RollbackTargetForArm() (target *config.Config, pending bool, first bool) {
+// actually restore on timeout (#16668), and the confirm-window generation
+// observed atomically with it. When a window is already pending this is the
+// retained original target (confirmPrevCfg), NOT the current unconfirmed active
+// config: a nested CommitConfirmed keeps that original target. When nothing is
+// pending, it is the current active config, which the new arm would snapshot as
+// its target. first identifies the explicit bootstrap rollback case: either a
+// pending first-commit window or a store whose durable marker says no commit has
+// ever completed. In that case target may be a compiled empty config after a
+// restart even though rollback semantics are still bootstrap (#7291).
+//
+// The returned generation MUST be passed to CommitConfirmedGenAndConfirmAs.
+// That method compares it under the promotion lock so a concurrent
+// ConfirmCommit cannot replace this checked target with the previously-active
+// config.
+func (s *Store) RollbackTargetForArm() (target *config.Config, pending bool, first bool, confirmGen uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.confirmTimer != nil && s.confirmPrevTree != nil {
-		return s.confirmPrevCfg, true, s.confirmPrevFirst
+		return s.confirmPrevCfg, true, s.confirmPrevFirst, s.confirmGen
 	}
-	return s.compiled, false, false
+	return s.compiled, false, !s.everCommitted, s.confirmGen
 }
 
 // DeferConfirmTimer re-arms the pending window armed with gen to fire again
