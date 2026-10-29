@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -5028,7 +5029,10 @@ func TestReceiveLoopDisconnectsSilentConnectionAfterAckCapableReconnect(t *testi
 	if got := ss.getActiveConn(); got != nil {
 		t.Fatalf("expected active conn to be cleared, got %v", got)
 	}
-	if err := <-serverDone; err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "use of closed network connection") && !strings.Contains(err.Error(), "EOF") {
+	// #18521: the teardown is abortive (SO_LINGER 0), so the peer's read now
+	// ends in ECONNRESET rather than EOF — the RST is what reaches a peer whose
+	// receive window is closed, where a FIN would queue behind unsent bytes.
+	if err := <-serverDone; err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "use of closed network connection") && !strings.Contains(err.Error(), "EOF") && !errors.Is(err, syscall.ECONNRESET) {
 		t.Fatalf("server loop failed: %v", err)
 	}
 }

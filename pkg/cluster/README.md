@@ -891,7 +891,18 @@ partial drop, or when the preferred fabric connects with no fault.
   daemon wraps the refusal as `demotion peer barrier failed`, a
   `RetryablePreFailoverError`.
 - **Recovery.** A move releases pending barrier waiters and starts one
-  single-flight re-prime (`doBulkSync`); every refused barrier re-kicks it.
+  single-flight re-prime (`doBulkSync`); every refused barrier re-kicks it —
+  unless a pending bulk that captured the CURRENT epoch is still inside
+  `BulkAckPendingRetryAfter` (`fenceDischargeAwaited`, #18521). Without that
+  check each 0.5s manual-failover admission retry started a new full bulk the
+  moment the previous one finished writing; each replaced
+  `pendingBulkAckEpoch`, so the peer's eventual ack matched nothing and the
+  fence never discharged.
+- **Skipped receiver reconcile (#18521).** A receiver whose reconcile was
+  skipped because its zone map moved mid-bulk withholds the BulkAck the fence
+  waits on; it now queues a `BulkRequest` once the map has been stable for 1s
+  (cap 30s), so the replacement bulk does not wait for the sender's 35s retry
+  (`sync_bulk_rerequest_18521.go`).
 - **Discharge.** Only a BulkAck for a bulk that captured the epoch BEFORE reading its
   session source advances `cleared`. `doBulkSync` captures before
   `BulkSnapshotSource`; the store walk captures at BulkStart; `BulkSyncSnapshot`
@@ -4173,6 +4184,22 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   the lease. reqID is threaded
   into `OnRemoteFailover`/`OnRemoteFailoverBatch`/`OnRemoteFailoverCommit`/
   `OnRemoteFailoverCommitBatch` (`sync.go`) to arm/clear it.
+- **An in-flight peer-requested transfer owns the owner's hold (#18521).**
+  While the reqID-bound transfer-out lease is LIVE, `electRG` does not run the
+  2s dual-resign / peer-yielded clear ("clearing manual failover (peer also
+  yielded)"); only the matching commit, the matching abort, lease expiry, peer
+  loss or an operator reset release the hold. The 2s timer runs from the
+  owner's demotion, but the requester legitimately advertises secondary-hold
+  until the owner's applied-ACK reaches it (its own pre-request hold is
+  released only then, and the ACK waits on the owner's demotion actuation) and
+  then spends up to `localFailoverCommitTimeout` (3s) in its local commit
+  settle. A demotion that took >2s to actuate cleared the hold mid-transfer,
+  ordinary election re-promoted a higher-priority owner, and the commit failed
+  with "still primary locally". A requester advertising PRIMARY during its
+  commit window never tripped the timer (no peer-yield predicate matches), so
+  the race needs the requester's pre-request hold or weight 0. An operator
+  hold (no lease) keeps the 2s rescue. Cells:
+  `failover_inflight_hold_18521_test.go`.
 - **A requester-side abort must not re-promote the requester (#15164,
   B22-01).** The lease above restores the OWNER, but it did nothing for the
   requester: after `abortRequestedPeerFailover` the requester had reported
@@ -5219,3 +5246,24 @@ it.
   refusals, stale full-set, absolute-deadline junk-stream teardown,
   header-only cap refusal, cap-table census over all 44 dispatched
   labels).
+
+  **Session-sync teardown is abortive and names its cause; a stalled
+  receive loop is watched (#18521).** A peer whose receive loop stopped
+  draining (a synchronous helper install behind the userspace Manager's
+  mutex) made this node's 2s-deadline writer tear the connection down, and
+  the graceful FIN then queued behind ~1 MB of unsent bytes the stalled peer
+  could not accept — the dial side, the only side that redials, stayed
+  ESTABLISHED for 56s. Every teardown now closes with `SO_LINGER 0`
+  (`abortSyncConn`, including `handleDisconnect`'s stale branch, which used
+  to leave its socket open); a per-connection watchdog tears the connection
+  down when the kernel reports the peer reset it while the loop is behind;
+  `fabric N disconnected` carries `reason`/`err`/per-connection summary;
+  `receive loop exited` is logged once per connection; and a handler that
+  holds the loop for 1s is logged with its message type, while blocked and
+  on return. Full mechanism: `docs/session-sync-architecture.md`
+  "Connection teardown and the half-open window". Cells:
+  `sync_conn_halfopen_18521_test.go` (loopback TCP: the RST reaches a
+  non-reading peer, the watchdog clears a stalled slot, stale-branch close,
+  exit reasons, slow-handler Warn, `syncMsgName` census against
+  `handleMessage`), `sync_reprime_storm_18521_test.go` (one fence re-prime
+  per epoch, receiver re-request after a skipped reconcile).

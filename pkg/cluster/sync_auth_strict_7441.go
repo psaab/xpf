@@ -262,7 +262,7 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 				"remote", connRemoteAddrString(c), "grace", strictSessionAuthGrace)
 		}
 		s.stats.PreKeyAuthEvictions.Add(1)
-		s.handleDisconnect(c)
+		s.disconnectConn(c, "pre-key connection never authenticated within the grace", nil)
 	}
 	return len(doomed)
 }

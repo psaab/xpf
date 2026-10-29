@@ -482,7 +482,7 @@ func (s *SessionSync) queueConfigOnConn(
 	if err != nil {
 		slog.Warn("cluster sync: config send error", "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "config write failed", err)
 		return false
 	}
 	// Record-before-write closes the response race: the receiver may apply and
@@ -555,7 +555,7 @@ func (s *SessionSync) sendConfigApplyAck(conn net.Conn, gen uint64) {
 	if err != nil {
 		slog.Debug("cluster sync: config-apply ack send error", "gen", gen, "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "config-apply ack write failed", err)
 	}
 }
 
@@ -587,7 +587,7 @@ func (s *SessionSync) sendConfigApplyNack(gen uint64) {
 	if err != nil {
 		slog.Debug("cluster sync: config-apply nack send error", "gen", gen, "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "config-apply nack write failed", err)
 		return
 	}
 	slog.Info("cluster sync: told peer its config generation did not apply here", "gen", gen)

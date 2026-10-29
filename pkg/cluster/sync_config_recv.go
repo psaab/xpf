@@ -95,7 +95,7 @@ func (s *SessionSync) handleHeartbeat(conn net.Conn, payload []byte) bool {
 	if err != nil {
 		slog.Debug("cluster sync: heartbeat ack send error", "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "heartbeat ack write failed", err)
 	}
 	return true
 }

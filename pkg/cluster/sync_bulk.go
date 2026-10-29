@@ -413,7 +413,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	}
 	if err != nil {
 		s.clearPendingBulkAck()
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "bulk start write failed", err)
 		return err
 	}
 	if releaseBulkStart {
@@ -465,7 +465,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		err := writeMsg(conn, syncMsgSessionV4, msg)
 		s.writeMu.Unlock()
 		if err != nil {
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "bulk sync v4 session write failed", err)
 			slog.Warn("bulk sync v4 write error", "err", err)
 			return false
 		}
@@ -530,7 +530,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 		err := writeMsg(conn, syncMsgSessionV6, msg)
 		s.writeMu.Unlock()
 		if err != nil {
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "bulk sync v6 session write failed", err)
 			slog.Warn("bulk sync v6 write error", "err", err)
 			return false
 		}
@@ -606,7 +606,7 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	s.writeMu.Unlock()
 	if err != nil {
 		s.clearPendingBulkAck()
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "bulk end write failed", err)
 		return err
 	}
 	s.stats.BulkSyncs.Add(1)

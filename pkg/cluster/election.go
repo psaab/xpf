@@ -149,6 +149,27 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			m.manualFailoverRestoreWeightLocked(rg)
 			clearedManualFailover = true
 			// Fall through to normal priority/tie-break election below.
+		} else if leased {
+			// #18521: a LIVE lease means a peer-requested transfer this node
+			// demoted for is still in flight: the requester has not yet sent
+			// its commit or abort. That hold belongs to the transfer protocol,
+			// and only the protocol releases it — the matching commit
+			// (FinalizePeerTransferOut), the matching abort
+			// (AbortRemoteTransferOut), the lease expiry above, peer loss, or
+			// an operator reset. The 2s dual-resign timer below must not:
+			// it is measured from OUR demotion, while the requester can
+			// legitimately advertise secondary-hold (its own pre-request hold
+			// is released only after our applied-ACK, which waits on our
+			// demotion actuation) and then spends up to its local
+			// commit-ready window (localFailoverCommitTimeout, 3s) before the
+			// commit. A demotion that took >2s to actuate, or a commit window
+			// >2s, cleared this hold mid-transfer and let normal election
+			// re-promote the owner the requester was about to commit away
+			// from. The lease is sized above the requester's whole post-ACK
+			// window (SetRemoteTransferOutLeaseDuration), so it is the
+			// "outlives the commit window" bound, and the abort frame is the
+			// prompt path when the requester gives up.
+			return electNoChange, ""
 		} else {
 			peerResigned := peerGroup != nil && peerGroup.Weight <= 0
 			peerTransferOut := peerGroup != nil && peerGroup.State == StateSecondaryHold

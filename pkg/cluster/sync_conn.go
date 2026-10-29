@@ -623,7 +623,7 @@ func (s *SessionSync) noteConnPeerCapabilities(conn net.Conn, id peerProcessIden
 	drop := s.resolvePendingPeerIdentityLocked(ac)
 	s.mu.Unlock()
 	if drop {
-		s.handleDisconnect(ac)
+		s.disconnectConn(ac, "capabilities identified a retired peer process", nil)
 	}
 }
 
@@ -666,7 +666,8 @@ func (s *SessionSync) expirePendingPeerIdentity(ac *authConn, gen uint64) {
 	ac.pendingRetirement = false
 	ac.pendingRetirementTimer = nil
 	s.mu.Unlock()
-	ac.Close()
+	syncConnDiagFor(ac).noteDrop("pending peer identity expired", nil)
+	abortSyncConn(ac)
 	s.handleDisconnect(ac)
 }
 
@@ -770,7 +771,8 @@ func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int, identities .
 		case staleConnEvict:
 			slog.Warn("cluster sync: evicting fabric 0 connection from a retired peer incarnation",
 				"remote", connRemoteAddrString(s.conn0), "conn_incarnation", s.conn0Gen, "peer_incarnation", s.peerIncarnation)
-			s.conn0.Close()
+			syncConnDiagFor(s.conn0).noteDrop("evicted: retired peer incarnation", nil)
+			abortSyncConn(s.conn0)
 			s.conn0 = nil
 			s.conn0Gen = 0
 			evicted = true
@@ -783,7 +785,8 @@ func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int, identities .
 		case staleConnEvict:
 			slog.Warn("cluster sync: evicting fabric 1 connection from a retired peer incarnation",
 				"remote", connRemoteAddrString(s.conn1), "conn_incarnation", s.conn1Gen, "peer_incarnation", s.peerIncarnation)
-			s.conn1.Close()
+			syncConnDiagFor(s.conn1).noteDrop("evicted: retired peer incarnation", nil)
+			abortSyncConn(s.conn1)
 			s.conn1 = nil
 			s.conn1Gen = 0
 			evicted = true
@@ -1079,7 +1082,8 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	case 0:
 		if s.conn0 != nil {
 			supersededCurrent = s.conn0Gen == s.peerIncarnation
-			s.conn0.Close()
+			syncConnDiagFor(s.conn0).noteDrop("superseded by a new fabric 0 connection", nil)
+			abortSyncConn(s.conn0)
 		}
 		s.conn0 = conn
 		// #6629: a FRESH ephemeral keypair per install. Replacing (never
@@ -1090,7 +1094,8 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 	case 1:
 		if s.conn1 != nil {
 			supersededCurrent = s.conn1Gen == s.peerIncarnation
-			s.conn1.Close()
+			syncConnDiagFor(s.conn1).noteDrop("superseded by a new fabric 1 connection", nil)
+			abortSyncConn(s.conn1)
 		}
 		s.conn1 = conn
 		s.configCrypto1 = newConfigCryptoState()
@@ -1261,6 +1266,7 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 
 func (s *SessionSync) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
+	s.runDone = ctx.Done()
 	lc := vrfListenConfig(s.vrfDevice)
 	ln, err := lc.Listen(ctx, "tcp", s.localAddr)
 	if err != nil {
@@ -1481,7 +1487,10 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 	}
 	switch {
 	case s.conn0 != nil && s.conn0 == conn:
-		s.conn0.Close()
+		// #18521: abortive, so the peer's kernel learns at once even when its
+		// receive window is closed; a graceful FIN queues behind every unsent
+		// byte and reached a stalled peer ~56 s late.
+		abortSyncConn(s.conn0)
 		s.conn0 = nil
 		// #6629: drop the connection's ephemeral config key with the
 		// connection. Nothing may seal or open a payload with a key that
@@ -1496,16 +1505,26 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// #9915 F-118 review: the offset belongs to the connection's
 		// incarnation — a dead conn keeps no clock state behind.
 		clearConnClockState(conn)
-		slog.Info("cluster sync: fabric 0 disconnected")
+		// #18521: name the cause. This line used to be bare, so a teardown
+		// driven by a writer's Debug-only error was indistinguishable from
+		// one the receive loop detected.
+		slog.Info("cluster sync: fabric 0 disconnected", disconnectAttrs(conn)...)
 	case s.conn1 != nil && s.conn1 == conn:
-		s.conn1.Close()
+		abortSyncConn(s.conn1)
 		s.conn1 = nil
 		s.configCrypto1 = nil
 		s.conn1Gen = 0
 		clearConnClockState(conn)
-		slog.Info("cluster sync: fabric 1 disconnected")
+		slog.Info("cluster sync: fabric 1 disconnected", disconnectAttrs(conn)...)
 	default:
-		slog.Debug("cluster sync: ignoring stale disconnect", "stale", fmt.Sprintf("%p", conn))
+		// #18521: a stale disconnect still owns a socket. Every path that
+		// empties a slot closes the conn it removes, so this is normally a
+		// no-op on an already-closed socket — but "normally" is a property of
+		// today's callers, and a stale branch that returns with the socket
+		// open is exactly a half-open connection: this node no longer counts
+		// it while the peer's kernel still believes it is ESTABLISHED.
+		abortSyncConn(conn)
+		slog.Debug("cluster sync: ignoring stale disconnect", append([]any{"stale", fmt.Sprintf("%p", conn)}, disconnectAttrs(conn)...)...)
 		return
 	}
 	connected := s.conn0 != nil || s.conn1 != nil

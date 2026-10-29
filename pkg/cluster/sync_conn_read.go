@@ -45,8 +45,19 @@ func (d *malformedRecordWarnDetector) observeV6(nbytes int, droppedTotal uint64)
 }
 
 func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
+	// #18521: every return below names itself. exit is logged ONCE per
+	// connection and becomes the disconnect reason; before this, three of
+	// the exits (a non-timeout header read error at Debug, a payload read
+	// error and a heartbeat-probe write error with no log at all) left the
+	// journal with a bare "fabric N disconnected".
+	exit := recvExit{reason: "unknown"}
+	diag := syncConnDiagFor(conn)
+	watchDone := make(chan struct{})
+	s.startConnWatch(ctx, conn, watchDone)
 	defer func() {
-		s.handleDisconnect(conn)
+		close(watchDone)
+		s.logReceiveLoopExit(conn, exit)
+		s.disconnectConn(conn, "receive loop: "+exit.reason, exit.err)
 	}()
 	hdrBuf := make([]byte, syncHeaderSize)
 	readDeadline := s.readDeadlineDuration()
@@ -67,12 +78,14 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 	for {
 		select {
 		case <-ctx.Done():
+			exit = recvExit{reason: recvExitContextDone}
 			return
 		default:
 		}
 		conn.SetReadDeadline(nextReadDeadline)
 		if _, err := io.ReadFull(conn, hdrBuf); err != nil {
 			if ctx.Err() != nil {
+				exit = recvExit{reason: recvExitContextDone}
 				return
 			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
@@ -87,12 +100,14 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 				}
 				if missedHeartbeats >= 2 {
 					slog.Warn("cluster sync: heartbeat ack timeout, closing stale connection", "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn), "missed_heartbeats", missedHeartbeats)
+					exit = recvExit{reason: "heartbeat ack timeout"}
 					return
 				}
 				s.writeMu.Lock()
 				err := writeMsg(conn, syncMsgHeartbeat, nil)
 				s.writeMu.Unlock()
 				if err != nil {
+					exit = recvExit{reason: "heartbeat probe write failed", err: err}
 					return
 				}
 				// The probe earns the peer one fresh absolute window to
@@ -102,6 +117,7 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 				continue
 			}
 			slog.Debug("cluster sync: read header error", "err", err)
+			exit = classifyRecvReadErr("header", err)
 			return
 		}
 		var hdr syncHeader
@@ -111,6 +127,7 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 		if hdr.Magic != syncMagic {
 			slog.Warn("cluster sync: bad magic")
 			s.stats.Errors.Add(1)
+			exit = recvExit{reason: "bad magic"}
 			return
 		}
 		// #16041: per-type payload cap, decided from the header BEFORE the
@@ -121,6 +138,7 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 		// newer peer's additive type must stay forward-compatible.
 		if cap, known := syncPayloadCap(hdr.Type); known && hdr.Length > uint32(cap) {
 			s.refuseOversizeFrame(hdr.Type, hdr.Length, cap)
+			exit = recvExit{reason: "oversize frame for type " + syncMsgName(hdr.Type)}
 			return
 		}
 		var payload []byte
@@ -128,10 +146,16 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 			if hdr.Length > maxSyncPayload {
 				s.stats.Errors.Add(1)
 				slog.Warn("cluster sync: payload too large", "len", hdr.Length)
+				exit = recvExit{reason: "payload too large"}
 				return
 			}
 			payload = make([]byte, hdr.Length)
 			if _, err := io.ReadFull(conn, payload); err != nil {
+				if ctx.Err() != nil {
+					exit = recvExit{reason: recvExitContextDone}
+					return
+				}
+				exit = classifyRecvReadErr("payload", err)
 				return
 			}
 		}
@@ -143,15 +167,18 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 			trailer := make([]byte, syncAuthFrameTrailerSize)
 			if _, err := io.ReadFull(conn, trailer); err != nil {
 				if ctx.Err() != nil {
+					exit = recvExit{reason: recvExitContextDone}
 					return
 				}
 				slog.Debug("cluster sync: read auth trailer error", "err", err)
+				exit = classifyRecvReadErr("auth trailer", err)
 				return
 			}
 			if err := ac.verifyFrame(hdrBuf, payload, trailer); err != nil {
 				slog.Warn("cluster sync: frame authentication failed, dropping connection",
 					"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn), "err", err)
 				s.stats.Errors.Add(1)
+				exit = recvExit{reason: "frame authentication failed", err: err}
 				return
 			}
 		}
@@ -161,11 +188,37 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 		// missed-heartbeat count, the last-receive stamp, or the
 		// absolute read deadline, or a faulty keyed peer sending junk
 		// forever would mask its own failover trigger.
-		if s.handleMessage(conn, hdr.Type, payload) {
+		if s.handleFrame(conn, diag, hdr.Type, payload) {
 			s.notePeerLiveness(&missedHeartbeats)
 			nextReadDeadline = time.Now().Add(readDeadline)
 		}
 	}
+}
+
+// handleFrame runs one handleMessage call with the #18521 instrumentation:
+// frame/byte/handler-time counters for the per-connection summary, the
+// in-flight marker the watchdog reports a stuck call from, and ONE Warn per
+// call that kept the loop off the socket for the slow threshold. Nothing here
+// logs per message.
+func (s *SessionSync) handleFrame(conn net.Conn, diag *syncConnDiag, msgType uint8, payload []byte) bool {
+	if diag == nil {
+		return s.handleMessage(conn, msgType, payload)
+	}
+	diag.framesRead.Add(1)
+	diag.bytesRead.Add(uint64(syncHeaderSize + len(payload)))
+	start := MonotonicNanos()
+	diag.beginHandler(msgType, start)
+	accepted := s.handleMessage(conn, msgType, payload)
+	elapsed, stallWarned := diag.endHandler(msgType, start)
+	if elapsed >= s.slowHandlerThreshold() {
+		slog.Warn("cluster sync: slow message handler held the receive loop off the socket (#18521)",
+			"msg_type", syncMsgName(msgType),
+			"elapsed", elapsed.Round(time.Millisecond).String(),
+			"reported_while_blocked", stallWarned,
+			"peer_write_deadline", syncWriteDeadline.String(),
+			"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+	}
+	return accepted
 }
 
 // bulkReceiveProgress reports whether this session record is bulk

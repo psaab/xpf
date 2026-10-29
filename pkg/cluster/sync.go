@@ -1655,6 +1655,22 @@ type SessionSync struct {
 	// testBulkRecvNow overrides the wall clock read for the window
 	// deadline. Test-only; production never sets it.
 	testBulkRecvNow func() time.Time
+	// testSlowHandlerThreshold / testConnWatchInterval shrink the #18521
+	// slow-handler threshold and watchdog tick. Test-only; zero means the
+	// production syncHandlerSlowThreshold / syncConnWatchInterval.
+	testSlowHandlerThreshold time.Duration
+	testConnWatchInterval    time.Duration
+	// bulkRerequestInFlight single-flights the #18521 (D) re-request of a
+	// bulk whose reconcile was skipped because the zone map changed mid-bulk.
+	bulkRerequestInFlight atomic.Bool
+	// runDone is Start's context Done channel, so background waits end with
+	// the SessionSync. Nil for an object that was never started (tests);
+	// such waits are bounded on their own.
+	runDone <-chan struct{}
+	// testZoneMapSettle / testZoneMapSettleMax shrink the (D) settle window
+	// and its cap. Test-only; zero means zoneMapSettleWindow/zoneMapSettleMax.
+	testZoneMapSettle    time.Duration
+	testZoneMapSettleMax time.Duration
 	// bulkInstallFailedV4/V6 retain only transient helper-install failures for
 	// the active authoritative bulk. They are separate from the received-key
 	// set because a failed transport write must not make that snapshot complete;
@@ -2752,6 +2768,12 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, b
 	if mapGen != zoneSnap.mapGen {
 		slog.Info("cluster sync: reconcile stale sessions skipped (zone map changed during the bulk)",
 			"snapshot_map_gen", zoneSnap.mapGen, "map_gen", mapGen)
+		// #18521 (D): "the next bulk reconciles" — but nothing asked for one.
+		// The BulkAck is withheld, so the sender's only retry was its 35s
+		// BulkAckPendingRetryAfter bound, and a barrier fence waiting on this
+		// ack refused every manual failover meanwhile. Ask for a fresh bulk
+		// once the map stops moving; its BulkStart snapshots the settled map.
+		s.scheduleSettledBulkRerequest(zoneSnap.mapGen)
 		return false, inventoryGeneration, inventoryRequested
 	}
 	// #9655: judged by the zone answers this bulk started with. A zone the map
@@ -2831,7 +2853,7 @@ func (s *SessionSync) QueueIPsecSA(connectionNames []string) bool {
 		if err != nil {
 			slog.Warn("cluster sync: IPsec SA send error", "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "IPsec SA write failed", err)
 			return false
 		}
 		s.stats.IPsecSASent.Add(1)
@@ -2875,7 +2897,7 @@ func (s *SessionSync) QueueIPsecSA(connectionNames []string) bool {
 		if err != nil {
 			slog.Warn("cluster sync: IPsec SA chunk send error", "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "IPsec SA chunk write failed", err)
 			return false
 		}
 	}
@@ -3074,7 +3096,7 @@ func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.Lea
 		if err != nil {
 			slog.Warn("cluster sync: DHCP lease send error", "family", family, "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "DHCP lease write failed", err)
 			return
 		}
 		s.stats.DHCPLeasesSent.Add(1)
@@ -3132,7 +3154,7 @@ func (s *SessionSync) queueDHCPLeaseSnapshot(family int, snapshot dhcpserver.Lea
 		if err != nil {
 			slog.Warn("cluster sync: DHCP lease chunk send error", "family", family, "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "DHCP lease chunk write failed", err)
 			return
 		}
 	}

@@ -930,6 +930,19 @@ On `BulkEnd` the receiver:
 3. sends `BulkAck(epoch)`
 4. fires `OnBulkSyncReceived`
 
+If step 2 is skipped because the zone-ownership map changed while the bulk was
+in flight (#9655: the old map's answers could delete sessions this node now
+owns), steps 3 and 4 are withheld (#11070) — the ack certifies a reconciled
+table and this one was not. Since #18521 the receiver then asks for the
+replacement itself: once the map has been unchanged for 1s (capped at 30s of
+continuous churn) it queues a `BulkRequest`, and the sender answers with an
+ordinary authoritative bulk whose snapshot is taken under the settled map.
+Before that, the only retry was the sender's 35s `BulkAckPendingRetryAfter`
+bound, and a barrier fence waiting on the ack refused every manual failover in
+between. One request per skipped bulk, single-flighted; a peer that predates
+`BulkRequest` ignores the frame and keeps the 35s retry
+(`pkg/cluster/sync_bulk_rerequest_18521.go`).
+
 ### Stale Session Reconciliation
 
 After a bulk completes, the receiver deletes sessions that are still present
@@ -1727,6 +1740,50 @@ On disconnect:
 - cluster sync readiness is forced false
 - the readiness timeout is invalidated with a generation guard so a stale timer
   callback cannot flip readiness back to true after disconnect
+
+### Connection teardown and the half-open window (#18521)
+
+A sync connection is torn down by whichever path first sees it fail: a writer
+whose 2s `syncWriteDeadline` expires (`sendLoop`, the bulk writer, every ack
+writer), the receive loop (read error, heartbeat-ack timeout, protocol
+refusal), supersession or incarnation eviction, or the per-connection
+watchdog. The accept side never dials (`shouldInitiateFabricDial`), so after a
+teardown the pair heals only when the DIAL side notices and its
+`fabricConnectLoop` finds the slot empty.
+
+The 56s outage this section exists for: the receive loop reads the next frame
+only after `handleMessage` returns, and session installs run synchronously
+through the userspace helper (the Manager's global mutex plus a control-socket
+round trip). A receive loop slower than its peer's writer stops draining the
+socket; once the 256 KiB buffers fill, the peer's next write misses its 2s
+deadline and the peer closes. A graceful close queues the FIN behind the
+unsent bytes, and with the slow side's window closed it is not transmitted, so
+the slow side stays ESTABLISHED until it has consumed the whole backlog
+(~1 MB measured on loopback). Rules since #18521
+(`pkg/cluster/sync_conn_teardown_18521.go`):
+
+- **Every teardown is abortive** (`SO_LINGER 0`): the RST is not gated by the
+  window, so the peer's kernel moves the socket to `TCP_CLOSE` at once. The
+  stream is already unusable (a timed-out write may have left half a frame),
+  so dropping the unsent queue loses nothing a reconnect's cold-prime bulk does
+  not re-send. This includes `handleDisconnect`'s stale branch, which used to
+  return with its socket open.
+- **A per-connection watchdog** (1s tick) tears the connection down as soon as
+  the kernel reports the peer reset it while the receive loop is behind (unread
+  bytes queued, or a handler in flight), instead of draining the dead
+  connection's backlog first.
+- **Every teardown names itself.** `fabric N disconnected` carries `reason`,
+  `err` and a per-connection summary (`conn_age`, `frames_read`, `bytes_read`,
+  `handler_time`, `handler_max`, `handler_max_type`); the receive loop logs
+  `receive loop exited` once per connection with its reason (Warn when the loop
+  itself detected the failure, Info when another path closed the socket first);
+  a handler that keeps the loop off the socket for 1s (half the peer's write
+  deadline) is logged with its message type while still blocked (watchdog) and
+  when it returns. Nothing logs per message.
+
+Not changed, and the next things to look at if the diagnostics implicate them:
+the synchronous install path in the receive loop, and the 2s write deadline
+that turns backpressure from a slow-but-alive peer into a teardown.
 
 ### What cluster sync readiness does NOT do (#7102)
 
@@ -3212,6 +3269,17 @@ Current sequence (`prepareUserspaceRGDemotionWithTimeout()`):
      re-prime; every refused barrier re-kicks it. This cannot be left to the
      daemon, whose prime-retry loop restarts after a failed barrier only while
      the peer is still unprimed.
+   - At most ONE discharge-capable re-prime is outstanding (#18521). The
+     single-flight flag covers only WRITING the bulk, and the fence is
+     discharged by the BulkAck, which comes after the peer has installed the
+     whole table. A refused barrier therefore does not re-kick while a pending
+     bulk that captured the current epoch is younger than
+     `BulkAckPendingRetryAfter` (`fenceDischargeAwaited`). Before this, manual
+     failover admission (one barrier every 0.5s) started a new full bulk each
+     time the previous one finished writing; each new bulk replaced
+     `pendingBulkAckEpoch`, so the peer's ack for the earlier one was dropped
+     by the exact-match rule and the fence could never discharge, while every
+     extra bulk deepened the receiver's backlog.
    - Only the ack of a bulk that captured the current epoch BEFORE reading its
      session source discharges the fence. A snapshot read after the move holds
      every delta written before it, on either connection. `doBulkSync` captures

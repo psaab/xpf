@@ -286,7 +286,7 @@ func (s *SessionSync) SendFailover(rgID int) (uint64, error) {
 	case failoverTripSendFailed:
 		slog.Warn("cluster sync: failover send error", "err", res.Err, "rg", rgID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(res.UsedConn)
+		s.disconnectConn(res.UsedConn, "failover request write failed", res.Err)
 		return 0, fmt.Errorf("failed to send failover request: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: failover request sent to peer", "rg", rgID)
@@ -321,7 +321,7 @@ func (s *SessionSync) SendFailoverBatch(rgIDs []int) (uint64, error) {
 	case failoverTripSendFailed:
 		slog.Warn("cluster sync: batch failover send error", "err", res.Err, "rgs", ids)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(res.UsedConn)
+		s.disconnectConn(res.UsedConn, "batch failover request write failed", res.Err)
 		return 0, fmt.Errorf("failed to send batch failover request: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: batch failover request sent to peer", "rgs", ids)
@@ -371,7 +371,7 @@ func (s *SessionSync) SendFailoverCommit(rgID int, reqID uint64) error {
 	case failoverTripSendFailed:
 		slog.Warn("cluster sync: failover commit send error", "err", res.Err, "rg", rgID, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(res.UsedConn)
+		s.disconnectConn(res.UsedConn, "failover commit write failed", res.Err)
 		return fmt.Errorf("failed to send failover commit: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: failover commit sent to peer", "rg", rgID, "req_id", reqID)
@@ -406,7 +406,7 @@ func (s *SessionSync) SendFailoverCommitBatch(rgIDs []int, reqID uint64) error {
 	case failoverTripSendFailed:
 		slog.Warn("cluster sync: batch failover commit send error", "err", res.Err, "rgs", ids, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(res.UsedConn)
+		s.disconnectConn(res.UsedConn, "batch failover commit write failed", res.Err)
 		return fmt.Errorf("failed to send batch failover commit: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: batch failover commit sent to peer", "rgs", ids, "req_id", reqID)
@@ -472,7 +472,7 @@ func (s *SessionSync) SendFence() error {
 	if err != nil {
 		slog.Warn("cluster sync: fence send error", "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "fence write failed", err)
 		return fmt.Errorf("failed to send fence message: %w", err)
 	}
 	s.stats.FencesSent.Add(1)
@@ -596,7 +596,7 @@ func (s *SessionSync) SendFailoverAbort(rgID int, reqID uint64) error {
 	if err != nil {
 		slog.Warn("cluster sync: failover abort send error", "err", err, "rg", rgID, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "failover abort write failed", err)
 		return fmt.Errorf("failed to send failover abort: %w", err)
 	}
 	slog.Info("cluster sync: failover abort sent to peer", "rg", rgID, "req_id", reqID)
@@ -629,7 +629,7 @@ func (s *SessionSync) SendFailoverAbortBatch(rgIDs []int, reqID uint64) error {
 	if err != nil {
 		slog.Warn("cluster sync: batch failover abort send error", "err", err, "rgs", ids, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "batch failover abort write failed", err)
 		return fmt.Errorf("failed to send batch failover abort: %w", err)
 	}
 	slog.Info("cluster sync: batch failover abort sent to peer", "rgs", ids, "req_id", reqID)
@@ -712,7 +712,7 @@ func (s *SessionSync) sendFailoverAckFrame(conn net.Conn, msgType uint8, rgIDs [
 	}
 	s.writeMu.Unlock()
 	if firstErr != nil && ackConn != nil && ackConn != conn {
-		s.handleDisconnect(ackConn)
+		s.disconnectConn(ackConn, "failover result write failed", firstErr)
 	}
 	if err != nil {
 		if single {
@@ -724,7 +724,7 @@ func (s *SessionSync) sendFailoverAckFrame(conn net.Conn, msgType uint8, rgIDs [
 			slog.Warn("cluster sync: batch failover result send error", "err", err, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
 		}
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "failover result write failed", err)
 		return
 	}
 	if single {
