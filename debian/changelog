@@ -1,5 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Dataplane: account status-poll health before discarding a stale-sequence
+    reply, while keeping status publication fenced (#17728).
+
   * Routing: authorize rib-group peer returns from the route owner's
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
