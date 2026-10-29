@@ -408,6 +408,12 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"space-prefixed numeric type", "inet", "{ 2}:peer", "inet", "fqdn:peer"},
 			{"numeric type truncates to 32 bits", "inet", "{4294967298}:peer", "inet", "fqdn:peer"},
 			{"wide type truncates to ID_IPV4", "inet", "{4294967297}:peer", "inet", "{1}:peer"},
+			{"hexadecimal base-0 numeric type", "inet", "{0x2}:peer", "inet", "fqdn:peer"},
+			{"negative type wraps to uint32", "inet", "{-1}:peer", "inet", "{4294967295}:peer"},
+			{"negative type truncates to type 2", "inet", "{-4294967294}:peer", "inet", "fqdn:peer"},
+			{"octal invalid digit falls back to literal KEY_ID", "inet", "{08}:peer", "key-id", "7b30387d3a70656572"},
+			{"overflowing type falls back to literal KEY_ID", "inet", "{18446744073709551617}:peer", "key-id", "7b31383434363734343037333730393535313631377d3a70656572"},
+			{"identical malformed DN bytes compare equal", "inet", "asn1dn:#3000", "inet", "{9}:#3000"},
 			{"unknown DN fallback matches raw KEY_ID bytes", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
 		}
 		for _, pair := range pairs {
@@ -425,6 +431,9 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer.example.com", "inet", "peer.example.com"))
 		requireNoCollision17772(t, identityPair17772("inet", "uri:Peer", "inet", "{12}:Peer"))
 		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.0/24", "inet", "198.51.100.0"))
+		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3000", "inet", "asn1dn:#3001"))
+		requireNoCollision17772(t, identityPair17772("inet", "{08}:peer", "inet", "fqdn:peer"))
+		requireNoCollision17772(t, identityPair17772("inet", "{18446744073709551617}:peer", "inet", "18446744073709551617"))
 	})
 
 	t.Run("remote identity equal to default gateway local address is refused", func(t *testing.T) {

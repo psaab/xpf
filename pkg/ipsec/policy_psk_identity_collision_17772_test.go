@@ -234,6 +234,12 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"space-prefixed numeric type", "inet", "{ 2}:peer", "inet", "fqdn:peer"},
 			{"numeric type truncates to 32 bits", "inet", "{4294967298}:peer", "inet", "fqdn:peer"},
 			{"wide type truncates to ID_IPV4", "inet", "{4294967297}:peer", "inet", "{1}:peer"},
+			{"hexadecimal base-0 numeric type", "inet", "{0x2}:peer", "inet", "fqdn:peer"},
+			{"negative type wraps to uint32", "inet", "{-1}:peer", "inet", "{4294967295}:peer"},
+			{"negative type truncates to type 2", "inet", "{-4294967294}:peer", "inet", "fqdn:peer"},
+			{"octal invalid digit falls back to literal KEY_ID", "inet", "{08}:peer", "key-id", "7b30387d3a70656572"},
+			{"overflowing type falls back to literal KEY_ID", "inet", "{18446744073709551617}:peer", "key-id", "7b31383434363734343037333730393535313631377d3a70656572"},
+			{"identical malformed DN bytes compare equal", "inet", "asn1dn:#3000", "inet", "{9}:#3000"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -268,6 +274,9 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"UTF8 DN sharp-s", "distinguished-name", "CN=Straße", "distinguished-name", "CN=STRASSE"},
 			{"plus remains in DN value", "distinguished-name", "CN=peer+OU=VPN", "distinguished-name", "OU=vpn+CN=PEER"},
 			{"numeric OID is not an atodn attribute", "distinguished-name", "CN=peer,2.5.4.4=Smith", "distinguished-name", "CN=peer,SN=Smith"},
+			{"different malformed DN bytes remain distinct", "inet", "asn1dn:#3000", "inet", "asn1dn:#3001"},
+			{"octal invalid digit remains literal KEY_ID", "inet", "{08}:peer", "inet", "fqdn:peer"},
+			{"overflowing numeric type remains literal KEY_ID", "inet", "{18446744073709551617}:peer", "inet", "18446744073709551617"},
 		}
 		for _, pair := range pairs {
 			pair := pair
