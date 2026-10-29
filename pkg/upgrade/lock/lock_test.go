@@ -562,13 +562,12 @@ func skipIfUntraversableAncestor(t *testing.T, root, setpriv string) {
 	}
 }
 
-// TestSkipRootProbeForUntraversableAncestor17756 pins the root-arm
-// guard: the same skip helper used by the confinement test must skip when
-// a pre-existing ancestor blocks nobody, rather than fataling in the
-// permissive control probe.
+// TestSkipRootProbeForUntraversableAncestor17756 runs the actual #16050
+// test in a child test process whose temp root is intentionally private.
+// Removing the skip call from that test makes the child fail in the
+// permissive control probe instead of reporting the expected skip.
 func TestSkipRootProbeForUntraversableAncestor17756(t *testing.T) {
-	setpriv, err := exec.LookPath("setpriv")
-	if err != nil || os.Geteuid() != 0 {
+	if _, err := exec.LookPath("setpriv"); err != nil || os.Geteuid() != 0 {
 		t.Skip("requires root and setpriv to exercise the nobody probe")
 	}
 	root, err := os.MkdirTemp("/tmp", "xpf-lock-17756-")
@@ -579,20 +578,32 @@ func TestSkipRootProbeForUntraversableAncestor17756(t *testing.T) {
 	if err := os.Chmod(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	ancestor, err := firstUntraversableAncestor(root, setpriv)
+
+	env := make([]string, 0, len(os.Environ())+2)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "TMPDIR=") || strings.HasPrefix(entry, "GOTMPDIR=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "TMPDIR="+root, "GOTMPDIR="+root)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestUnprivilegedCannotFlockUpgradeLock16050$", "-test.v")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("root-arm child failed instead of skipping (%v, %q)", err, out)
+	}
+	output := string(out)
+	if !strings.Contains(output, "--- SKIP: TestUnprivilegedCannotFlockUpgradeLock16050") ||
+		!strings.Contains(output, "root/nobody flock probe skipped: pre-existing ancestor "+root) {
+		t.Fatalf("root-arm child did not report the expected skip for %s: %q", root, output)
+	}
+	fi, err := os.Stat(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ancestor != root {
-		t.Fatalf("untraversable test root: got %q, want %q", ancestor, root)
-	}
-	skipped := false
-	t.Run("guard skips", func(t *testing.T) {
-		defer func() { skipped = t.Skipped() }()
-		skipIfUntraversableAncestor(t, root, setpriv)
-	})
-	if !skipped {
-		t.Fatal("guard did not skip the nobody probe for an untraversable pre-existing ancestor")
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("pre-existing temp root mode changed: got %04o, want 0700", fi.Mode().Perm())
 	}
 }
 
