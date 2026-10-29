@@ -516,6 +516,7 @@ func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
 		generation:      gen,
 		capabilityKnown: capabilityKnown,
 		ackCapable:      ackCapable,
+		sentMono:        s.nowMono(),
 	}
 	if hook := s.testBeforeLastSentConfigDebtUnlock; hook != nil {
 		s.testBeforeLastSentConfigDebtUnlock = nil
@@ -551,6 +552,7 @@ func (s *SessionSync) sendConfigApplyAck(conn net.Conn, gen uint64) {
 		// that has since been replaced cannot be delivered; the peer's
 		// reconnect push asks again. One line per applied config, not per
 		// frame.
+		s.stats.ConfigApplyAcksUnsent.Add(1)
 		slog.Info("cluster sync: not sending config-apply ack: the connection that delivered the config is no longer active",
 			"gen", gen, "remote", connRemoteAddrString(conn))
 		return
@@ -564,7 +566,9 @@ func (s *SessionSync) sendConfigApplyAck(conn net.Conn, gen uint64) {
 		slog.Debug("cluster sync: config-apply ack send error", "gen", gen, "err", err)
 		s.stats.Errors.Add(1)
 		s.disconnectConn(conn, "config-apply ack write failed", err)
+		return
 	}
+	s.stats.ConfigApplyAcksSent.Add(1)
 }
 
 // sendConfigApplyNack tells the SENDER that this node did not apply the config

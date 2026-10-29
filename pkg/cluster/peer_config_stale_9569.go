@@ -3,6 +3,7 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // #9569: the #5563 config-stale gate used to guard only the node-targeted
@@ -56,6 +57,10 @@ type configApplyDebt16756 struct {
 	generation      uint64
 	capabilityKnown bool
 	ackCapable      bool
+	// sentMono is when generation was put on the wire (nowMono), for the
+	// #18521 overdue-ACK re-push. Zero for a debt recorded by a test seam
+	// without a time.
+	sentMono int64
 }
 
 func (s *SessionSync) configApplyDebtSnapshot16756() configApplyDebt16756 {
@@ -142,4 +147,36 @@ func (s *SessionSync) PeerAppliedConfigGen() uint64 {
 		return 0
 	}
 	return s.peerAppliedConfigGen.Load()
+}
+
+// PeerConfigAckOverdue reports whether a CONNECTED, ACK-capable peer has gone
+// longer than after without positively acknowledging the newest config
+// generation this node sent (#18521). The stale-config gate is otherwise
+// satisfied only by that ACK, and the only events that re-push a config are a
+// NACK, a reconnect and a new commit. An ACK that never gets credited — skipped
+// on the standby because its delivering connection was replaced, lost with a
+// torn-down connection, or discarded by a reboot reset — therefore left the
+// gate refusing failover onto an in-sync standby until the next commit. The
+// daemon uses this to re-push, which the standby (already holding the config)
+// answers with a fresh ACK.
+//
+// A legacy peer (no ACK advertisement) is never overdue: its gate is
+// NACK-driven and a NACK already re-arms the push.
+func (s *SessionSync) PeerConfigAckOverdue(after time.Duration) (gen uint64, age time.Duration, overdue bool) {
+	if s == nil || !s.stats.Connected.Load() {
+		return 0, 0, false
+	}
+	debt := s.configApplyDebtSnapshot16756()
+	if debt.generation == 0 || debt.sentMono == 0 {
+		return 0, 0, false
+	}
+	known, ackCapable := s.peerConfigAckCapabilitySnapshot16756()
+	if !known || !ackCapable {
+		return 0, 0, false
+	}
+	if s.peerAppliedConfigGen.Load() >= debt.generation {
+		return 0, 0, false
+	}
+	age = time.Duration(s.nowMono() - debt.sentMono)
+	return debt.generation, age, age >= after
 }

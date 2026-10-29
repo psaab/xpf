@@ -1120,6 +1120,17 @@ the peer-connect push, its cold-prime bulk started seconds later, and the ACK
 was discarded. With the config already in sync nothing re-pushed, so manual
 failover onto the standby was refused until the next commit.
 
+Independently of why an ACK goes uncredited (skipped on the standby because its
+delivering connection was replaced, lost with a torn-down connection, refused on
+receipt, or discarded as above), the authority now recovers it: when a
+connected ACK-capable peer has left the newest send unacknowledged for 10s,
+`repushIfConfigAckOverdue` (`pkg/daemon/daemon_ha_sync.go`) re-arms the
+(epoch x generation) push marker and re-pushes. It runs on the 30s reconcile
+tick and when the stale-config gate refuses a failover, at most once per 10s.
+The standby answers from its "already matches active" fast path with an ACK
+for the new generation. The `Config apply-acks sent/unsent/credited/ignored`
+counters show where a future ACK went.
+
 #6778 added a SECOND sender of that frame: `handleConfigPayload`'s queue-full
 drop. When `configApplyCh` is full the non-blocking enqueue discards the
 INCOMING payload — the newest generation — and no apply ever runs, so

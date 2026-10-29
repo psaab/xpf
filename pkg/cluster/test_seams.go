@@ -409,3 +409,31 @@ func (s *SessionSync) StampIngressFoldForTesting(ifindex uint32, vlan uint16) ui
 func (s *SessionSync) StampNatScopeFoldForTesting(ifindex int32) uint32 {
 	return s.stampNatScopeFold(ifindex)
 }
+
+// SetOverdueConfigApplyDebtForTesting models a connected, ACK-capable peer
+// that has not acknowledged config generation gen, sent age ago (#18521).
+func (s *SessionSync) SetOverdueConfigApplyDebtForTesting(gen uint64, age time.Duration) {
+	if s == nil {
+		return
+	}
+	s.stats.Connected.Store(true)
+	s.peerSnaps.peerSnapshotProtocol.Store(8)
+	s.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2ConfigApplyAck))
+	s.configApplyDebtMu.Lock()
+	s.lastSentConfigDebt16756 = configApplyDebt16756{
+		generation: gen, capabilityKnown: true, ackCapable: true,
+		sentMono: s.nowMono() - int64(age),
+	}
+	s.configApplyDebtMu.Unlock()
+}
+
+// AckConfigApplyForTesting credits a positive config-apply ACK for gen as
+// the receive path would on the active connection (#18521).
+func (s *SessionSync) AckConfigApplyForTesting(gen uint64) {
+	if s == nil {
+		return
+	}
+	var p [8]byte
+	binary.LittleEndian.PutUint64(p[:], gen)
+	s.handleConfigApplyAck(nil, p[:])
+}

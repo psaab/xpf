@@ -57,15 +57,20 @@ func (s *SessionSync) handleConfigApplyAck(conn net.Conn, payload []byte) bool {
 	s.mu.Lock()
 	if conn != nil && s.activeConnLocked() != conn {
 		s.mu.Unlock()
+		s.stats.ConfigApplyAcksIgnored.Add(1)
+		slog.Debug("cluster sync: ignoring config-apply ack on a connection that is not the active one",
+			"applied_gen", appliedGen, "remote", connRemoteAddrString(conn))
 		return false
 	}
 	lastSent := s.configApplyDebtSnapshot16756().generation
 	if lastSent == 0 || appliedGen > lastSent {
 		s.mu.Unlock()
+		s.stats.ConfigApplyAcksIgnored.Add(1)
 		slog.Debug("cluster sync: ignoring config-apply ack for an unsent generation",
 			"applied_gen", appliedGen, "last_sent_gen", lastSent)
 		return false
 	}
+	s.stats.ConfigApplyAcksCredited.Add(1)
 	// #18521: attribute the ACK to the peer boot that delivered it, so a
 	// later BulkStart announcing that same boot does not discard it (see
 	// notePeerBootIncarnation). The capabilities frame carrying the identity

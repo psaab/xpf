@@ -481,8 +481,19 @@ type SyncStats struct {
 	// failing to apply what this node sends; pair it with the peer's own
 	// ConfigsApplyFailed to see why.
 	ConfigApplyNacksReceived atomic.Uint64
-	IPsecSASent              atomic.Uint64
-	IPsecSAReceived          atomic.Uint64
+	// #18521: the positive config-apply ACK, end to end. On the standby,
+	// ConfigApplyAcksSent counts ACKs written and ConfigApplyAcksUnsent the
+	// ones skipped because the delivering connection was no longer active.
+	// On the authority, ConfigApplyAcksCredited counts ACKs accepted against
+	// the newest send and ConfigApplyAcksIgnored the ones refused (wrong
+	// connection, unsent generation). A stale-config refusal with a sent
+	// ACK on one side and no credited ACK on the other names the drop.
+	ConfigApplyAcksSent     atomic.Uint64
+	ConfigApplyAcksUnsent   atomic.Uint64
+	ConfigApplyAcksCredited atomic.Uint64
+	ConfigApplyAcksIgnored  atomic.Uint64
+	IPsecSASent             atomic.Uint64
+	IPsecSAReceived         atomic.Uint64
 	// IPsecSAStaleIgnored counts IPsec SA full-sets dropped by the #5706
 	// ordering guard: an incoming (incarnation, seq) that was NOT strictly
 	// newer than the last-applied pair — a full-set reordered across the
@@ -730,6 +741,10 @@ type SyncStatsSnapshot struct {
 	// generation). Both are rendered only when nonzero.
 	ConfigsQueueFullDropped              uint64
 	ConfigApplyNacksReceived             uint64
+	ConfigApplyAcksSent                  uint64
+	ConfigApplyAcksUnsent                uint64
+	ConfigApplyAcksCredited              uint64
+	ConfigApplyAcksIgnored               uint64
 	IPsecSASent                          uint64
 	IPsecSAReceived                      uint64
 	IPsecSAStaleIgnored                  uint64

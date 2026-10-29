@@ -823,9 +823,68 @@ func (d *Daemon) configSyncReconcileLoop(ctx context.Context) {
 			t.Stop()
 			return
 		case <-t.C:
-			d.reconcileConfigSyncToPeer("reconcile-loop")
+			d.configSyncReconcileTick()
 		}
 	}
+}
+
+// configSyncReconcileTick is one reconcile-loop wake. An ACK-capable peer
+// that has not acknowledged the newest send for configAckOverdueAfter gets a
+// re-push (#18521); otherwise the ordinary level-triggered reconcile runs.
+func (d *Daemon) configSyncReconcileTick() {
+	if d.repushIfConfigAckOverdue("reconcile-loop") {
+		return
+	}
+	d.reconcileConfigSyncToPeer("reconcile-loop")
+}
+
+// configAckOverdueAfter is how long an ACK-capable peer may leave the newest
+// config send unacknowledged before the authority re-pushes it (#18521). A
+// standby holding the config answers a duplicate push in milliseconds; the
+// bound is generous so a deferred publication still in flight is not crowded,
+// and it is also the minimum spacing between re-pushes.
+const configAckOverdueAfter = 10 * time.Second
+
+// repushIfConfigAckOverdue re-arms and re-runs the config push when the peer
+// has not positively acknowledged the newest generation this node sent
+// (#18521). Before this, the stale-config gate could only be satisfied by that
+// one ACK, and nothing re-pushed an in-sync config except a NACK, a reconnect
+// or a new commit — so an ACK that was never credited (skipped on the standby
+// because its delivering connection was replaced, lost with a torn-down
+// connection, or discarded by a reboot reset) refused every failover onto an
+// in-sync standby until the next commit. The standby answers the re-push from
+// its "config already matches active" fast path with a fresh ACK.
+//
+// Bounded: only for a connected ACK-capable peer, only once the send is
+// configAckOverdueAfter old, at most once per configAckOverdueAfter, and the
+// re-push itself still passes every reconcileConfigSyncToPeer gate (RG0
+// authority, stability, config-sync enabled, snapshot-protocol
+// authorization). Reports whether it re-pushed.
+func (d *Daemon) repushIfConfigAckOverdue(trigger string) bool {
+	ss := d.getSessionSync()
+	if ss == nil {
+		return false
+	}
+	gen, age, overdue := ss.PeerConfigAckOverdue(configAckOverdueAfter)
+	if !overdue {
+		return false
+	}
+	if !rg0ConfigSyncAuthority(d.cluster) {
+		return false
+	}
+	now := cluster.MonotonicNanos()
+	last := d.configAckRepushAtMono.Load()
+	if last != 0 && time.Duration(now-last) < configAckOverdueAfter {
+		return false
+	}
+	if !d.configAckRepushAtMono.CompareAndSwap(last, now) {
+		return false
+	}
+	slog.Warn("cluster: peer has not acknowledged applying the newest config generation; re-pushing so it can ACK (#18521)",
+		"gen", gen, "unacked_for", age.Round(time.Second).String(), "trigger", trigger)
+	d.invalidateConfigSyncPushed()
+	d.reconcileConfigSyncToPeer("config-ack-overdue")
+	return true
 }
 
 // errConfigSyncRejectedPrimary is returned by handleConfigSync when this node

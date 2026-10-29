@@ -4083,6 +4083,17 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     the next commit (`config_ack_reboot_order_18521_test.go`). An ACK the
     standby skips because the delivering connection is no longer active is
     now logged instead of silent.
+  - An uncredited ACK no longer sticks (#18521). Only the newest send's ACK
+    clears the gate, and only a NACK, a reconnect or a commit re-pushed —
+    so a lost, skipped or discarded ACK refused failover onto an in-sync
+    standby until the next commit. `PeerConfigAckOverdue` reports a
+    connected ACK-capable peer that has left the newest send unacknowledged
+    for 10s, and the daemon (`repushIfConfigAckOverdue`: reconcile tick, and
+    on a stale-gate refusal) re-arms the push marker and re-pushes, at most
+    once per 10s and only as RG0 authority. The standby answers from its
+    "config already matches active" path with a fresh ACK. Counters
+    `Config apply-acks sent / unsent` (standby) and `credited / ignored`
+    (authority) name a future drop end to end.
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
 - **A committed requested transfer wins over `preempt` (#10776).** Once the

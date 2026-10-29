@@ -922,6 +922,9 @@ type Daemon struct {
 	configSyncHasPushed   bool
 	configSyncPushedEpoch uint64
 	configSyncPushedGen   uint64
+	// configAckRepushAtMono rate-limits the #18521 overdue-ACK re-push
+	// (cluster.MonotonicNanos of the last one; 0 = never).
+	configAckRepushAtMono atomic.Int64
 	// #15212: configSyncPushedDigest is the digest of the text carried by
 	// configSyncPushedWireGen, so a late ACK can be matched to the exact
 	// marked content it applied. configSyncAppliedGen is the highest wire

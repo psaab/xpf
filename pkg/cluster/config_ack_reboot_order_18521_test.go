@@ -5,6 +5,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // #18521 follow-up (loss cluster, test-ha-crash phase 3): after fw0's VM was
@@ -111,5 +112,43 @@ func TestUnattributedAckKeepsFailClosedResetOnReboot18521(t *testing.T) {
 	}
 	if stale, _ := s.PeerConfigStale(); !stale {
 		t.Fatal("an unattributed ACK survived a peer reboot")
+	}
+}
+
+// PeerConfigAckOverdue is the daemon's re-push trigger: overdue only for a
+// connected, ACK-capable peer whose newest send is unacknowledged past the
+// bound — never for a legacy peer (NACK-driven), a disconnected one, or an
+// acknowledged send.
+func TestPeerConfigAckOverdueBounds18521(t *testing.T) {
+	var now int64 = 1_000_000_000_000
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	s.nowMonoFn = func() int64 { return now }
+	s.stats.Connected.Store(true)
+	s.peerSnaps.peerSnapshotProtocol.Store(8)
+	s.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2ConfigApplyAck))
+	s.recordLastSentConfigGen(99)
+	const after = 10 * time.Second
+
+	if _, _, overdue := s.PeerConfigAckOverdue(after); overdue {
+		t.Fatal("a send just made is overdue")
+	}
+	now += int64(11 * time.Second)
+	gen, age, overdue := s.PeerConfigAckOverdue(after)
+	if !overdue || gen != 99 || age != 11*time.Second {
+		t.Fatalf("PeerConfigAckOverdue = (%d, %v, %v), want (99, 11s, true)", gen, age, overdue)
+	}
+	s.stats.Connected.Store(false)
+	if _, _, overdue := s.PeerConfigAckOverdue(after); overdue {
+		t.Fatal("a disconnected peer is overdue (the reconnect push owns it)")
+	}
+	s.stats.Connected.Store(true)
+	s.peerIncarnationState().peerCapabilityFlags2.Store(0)
+	if _, _, overdue := s.PeerConfigAckOverdue(after); overdue {
+		t.Fatal("a legacy peer is overdue (its gate is NACK-driven)")
+	}
+	s.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2ConfigApplyAck))
+	ack18521(t, s, nil, 99)
+	if _, _, overdue := s.PeerConfigAckOverdue(after); overdue {
+		t.Fatal("an acknowledged send is overdue")
 	}
 }
