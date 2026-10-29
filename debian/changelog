@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Daemon: durably clear a committed lifeline record only when its resolved
+    identity matches the non-management main-table WAN route; keep sane records
+    untouched, prevent committed guard fallback to that route, and fence WAN
+    host addresses after fail-closed boots (#17730).
+
   * Bootstrap: suppress stale cluster RA reconciliation and serialize final
     withdrawal against in-flight passes. Bound DHCP relay stop joins and report
     timeout failures in the bootstrap DEGRADED result (#17693).

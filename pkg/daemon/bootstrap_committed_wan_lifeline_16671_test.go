@@ -93,6 +93,10 @@ func TestBootstrapCommittedDoesNotOverwriteLifeline16671(t *testing.T) {
 
 	daemon := &Daemon{store: committedStore16671(t, dir)}
 	daemon.setupBootstrapLifeline()
+	protected := daemon.resolveProtectedInterfaces()
+	if !protected["eno2"] || protected["eno3"] {
+		t.Errorf("sane committed record must protect eno2 and leave WAN eno3 unprotected: %v", protected)
+	}
 
 	after, err := os.ReadFile(recordPath)
 	if err != nil {
@@ -146,6 +150,103 @@ func TestBootstrapNeverCommittedStillRecordsRouteLifeline16671(t *testing.T) {
 	d.setupBootstrapLifeline()
 	if _, err := os.Stat(filepath.Join(st.linkDir, linkPrefix+"fxp0.network")); err != nil {
 		t.Fatalf("never-committed lifeline must still write the bootstrap .network: %v", err)
+	}
+}
+
+// TestCommittedBootClearsWANPoisonedLifelineAndFencesWAN17730 reproduces
+// an upgrade from the old #16671 implementation: a committed boot previously
+// overwrote the stable management record with the main-table WAN NIC. The
+// committed bootstrap path must clear that unverified identity before the
+// fail-closed fence resolves its protected set, then fence both WAN families.
+func TestCommittedBootClearsWANPoisonedLifelineAndFencesWAN17730(t *testing.T) {
+	dir := t.TempDir()
+	recordPath := filepath.Join(dir, "lifeline-interface")
+	oldRecord, oldRecordName := lifelineRecordFileForTest, lifelineRecordNameFn
+	lifelineRecordFileForTest = recordPath
+	lifelineRecordNameFn = func() (string, bool) { return "eno3", true }
+	t.Cleanup(func() {
+		lifelineRecordFileForTest, lifelineRecordNameFn = oldRecord, oldRecordName
+	})
+	if err := writeLifelineRecordAt(recordPath, lifelineRecord{
+		PCIAddr: "0000:67:00.2", MAC: "02:00:00:00:00:02",
+	}); err != nil {
+		t.Fatalf("seed WAN-poisoned record: %v", err)
+	}
+
+	committed := committedStore16671(t, dir)
+	oldNetworkd := networkdActiveFn
+	networkdActiveFn = func() error { return nil }
+	t.Cleanup(func() { networkdActiveFn = oldNetworkd })
+	withFailClosedBootDetect(t, func() (string, bool, error) { return "eno3", true, nil })
+	setupFake := &fakeNftInstaller{}
+	withFailClosedBootNft(t, setupFake)
+	d := &Daemon{store: committed}
+	protected := d.resolveProtectedInterfaces()
+	if protected["eno3"] {
+		t.Fatalf("resolveProtectedInterfaces trusted WAN-poisoned record: %v", protected)
+	}
+	if !protected["fxp0"] {
+		t.Fatalf("resolveProtectedInterfaces omitted default management fxp0: %v", protected)
+	}
+	if _, ok := readLifelineRecordAt(recordPath); ok {
+		t.Fatal("resolveProtectedInterfaces did not clear the WAN-poisoned record")
+	}
+	if err := writeLifelineRecordAt(recordPath, lifelineRecord{
+		PCIAddr: "0000:67:00.2", MAC: "02:00:00:00:00:02",
+	}); err != nil {
+		t.Fatalf("re-seed WAN-poisoned record for setup path: %v", err)
+	}
+
+	d.setupBootstrapLifeline()
+	if len(setupFake.earlyInputBarrierLifelineSpecs) != 1 {
+		t.Fatalf("committed bootstrap must install one lifeline guard, got %v", setupFake.earlyInputBarrierLifelineSpecs)
+	}
+	for _, name := range setupFake.earlyInputBarrierLifelineSpecs[0] {
+		if name == "eno3" {
+			t.Fatalf("committed bootstrap guard admits WAN eno3 from a poisoned record: %v",
+				setupFake.earlyInputBarrierLifelineSpecs[0])
+		}
+	}
+
+	if _, ok := readLifelineRecordAt(recordPath); ok {
+		t.Fatal("committed boot retained a lifeline record that resolves to the WAN; poisoned record is not verified management")
+	}
+
+	fxp0 := failClosedBootTestLink("fxp0", false)
+	wan := failClosedBootTestLink("eno3", false)
+	lo := failClosedBootTestLink("lo", true)
+	withFailClosedBootLinkList(t, func() ([]netlink.Link, error) {
+		return []netlink.Link{fxp0, wan, lo}, nil
+	})
+	addrs := map[string][]netlink.Addr{
+		"fxp0": {failClosedBootTestAddr(t, "10.0.0.1/24")},
+		"eno3": {failClosedBootTestAddr(t, "192.0.2.10/24"), failClosedBootTestAddr(t, "2001:db8::10/64")},
+		"lo":   {failClosedBootTestAddr(t, "127.0.0.1/8")},
+	}
+	withFailClosedBootAddrList(t, func(link netlink.Link, _ int) ([]netlink.Addr, error) {
+		return addrs[link.Attrs().Name], nil
+	})
+	fake := &fakeNftInstaller{}
+	withFailClosedBootNft(t, fake)
+	var hostSpecs []xnft.FenceSpec
+	fake.coldBootFence = func(s xnft.FenceSpec) error { hostSpecs = append(hostSpecs, s); return nil }
+	fake.lo0ColdBootFence = func(xnft.FenceSpec) error { return nil }
+
+	d.installFailClosedBootHostFences(true)
+
+	if len(hostSpecs) != 1 {
+		t.Fatalf("fail-closed fence must install exactly one host fence, got %d", len(hostSpecs))
+	}
+	v4 := fenceViewAddrs(hostSpecs[0], false)
+	v6 := fenceViewAddrs(hostSpecs[0], true)
+	if !sliceContains(v4, "192.0.2.10") {
+		t.Errorf("WAN v4 192.0.2.10 must be fenced after clearing the poisoned record; fenced v4: %v", v4)
+	}
+	if !sliceContains(v6, "2001:db8::10") {
+		t.Errorf("WAN v6 2001:db8::10 must be fenced after clearing the poisoned record; fenced v6: %v", v6)
+	}
+	if sliceContains(v4, "10.0.0.1") {
+		t.Errorf("management 10.0.0.1 must NOT be fenced; fenced v4: %v", v4)
 	}
 }
 
