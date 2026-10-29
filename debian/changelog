@@ -280,4 +280,7 @@ xpf (0.0.0) unstable; urgency=medium
     sorted shared collision set in the session-scope folder as in the
     interface snapshot builder, preserving imported NAT scope identity
     when synthetic hash slots collide (#17876).
+  * Userspace dataplane: select mirrors before copying PrebuiltTransit
+    ingress bytes; no-mirror and sampled-out packets skip copies, selected
+    frames take one snapshot, and oversize samples stay NoFrame (#17718).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000
