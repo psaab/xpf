@@ -77,7 +77,7 @@ func natPrefixConfig18370(template, values string) string {
 	return strings.Replace(template, "%s", values, 1)
 }
 
-func TestValidBracketedMultiValueControls18370(t *testing.T) {
+func TestValidPackedMultiValueControls18370(t *testing.T) {
 	controls := []struct {
 		name, text string
 	}{
@@ -100,18 +100,25 @@ firewall { family inet { filter f { term t from source-prefix-list [ pl1 pl2 ] t
     } } }
 }`,
 		},
+		{
+			name: "firewall unbracketed prefix-list before then sibling",
+			text: `policy-options {
+    prefix-list pl1 { 10.0.0.0/8; }
+}
+firewall { family inet { filter f { term t from source-prefix-list pl1 then accept; } } }`,
+		},
 	}
 	for _, tc := range controls {
 		t.Run(tc.name, func(t *testing.T) {
 			tree := parseHierText(t, tc.text)
 			if err := SchemaValidate(tree); err != nil {
-				t.Fatalf("SchemaValidate rejected valid bracketed list: %v", err)
+				t.Fatalf("SchemaValidate rejected valid packed list: %v", err)
 			}
 			if _, err := CompileConfig(tree); err != nil {
-				t.Fatalf("strict compile rejected valid bracketed list: %v", err)
+				t.Fatalf("strict compile rejected valid packed list: %v", err)
 			}
 			if _, err := CompileConfigLenient(tree); err != nil {
-				t.Fatalf("lenient compile rejected valid bracketed list: %v", err)
+				t.Fatalf("lenient compile rejected valid packed list: %v", err)
 			}
 		})
 	}

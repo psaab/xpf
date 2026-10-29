@@ -111,3 +111,14 @@ func TestSyncApplyAcceptsValidBracketedNATSourceAddresses18370(t *testing.T) {
 		t.Fatalf("SyncApply rejected valid bracketed NAT source-address list: cfg=%v err=%v", cfg, err)
 	}
 }
+
+func TestSyncApplyAcceptsValidUnbracketedPrefixListBeforeThen18370(t *testing.T) {
+	s := newTestStoreAt(t, filepath.Join(t.TempDir(), "config"))
+	cfg, err := s.SyncApply(`policy-options {
+    prefix-list pl1 { 10.0.0.0/8; }
+}
+firewall { family inet { filter f { term t from source-prefix-list pl1 then accept; } } }`, nil)
+	if err != nil || cfg == nil {
+		t.Fatalf("SyncApply rejected valid unbracketed prefix-list before then sibling: cfg=%v err=%v", cfg, err)
+	}
+}
