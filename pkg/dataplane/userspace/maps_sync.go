@@ -1672,22 +1672,26 @@ func pruneNATAddressKeys(
 // exactly as the installer skips them.
 //
 // #17742: clustered proxy entries are filtered by the manager's live
-// local-primary provider using Config.RefRG, the config ownership resolver
-// also used by the installer. This avoids publishing shim targets for an RG
-// the local node does not own; unknown ownership keeps the installer’s
-// existing fail-open behavior.
+// local-primary provider using one Config.RefRGIndexFor index, the
+// precomputed form of the config ownership resolver used by the installer.
+// This avoids publishing shim targets for an RG the local node does not own;
+// unknown ownership keeps the installer's existing fail-open behavior.
 func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot, primary RGPrimaryProvider) map[userspaceLocalV6Key]struct{} {
 	desired := make(map[userspaceLocalV6Key]struct{})
 	if snapshot == nil || snapshot.Config == nil {
 		return desired
 	}
 	cfg := snapshot.Config
+	var refRG *config.RefRGIndex
+	if cfg.Chassis.Cluster != nil && primary != nil && len(cfg.Security.NAT.ProxyARP) > 0 {
+		refRG = cfg.RefRGIndexFor()
+	}
 	for _, entry := range cfg.Security.NAT.ProxyARP {
 		if entry == nil {
 			continue
 		}
-		if cfg.Chassis.Cluster != nil && primary != nil {
-			if rgID := cfg.RefRG(entry.Interface); rgID > 0 {
+		if refRG != nil {
+			if rgID, owned := refRG.Lookup(entry.Interface); owned && rgID > 0 {
 				localPrimary, known := primary(rgID)
 				if known && !localPrimary {
 					continue

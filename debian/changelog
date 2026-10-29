@@ -15,7 +15,7 @@ xpf (0.0.0) unstable; urgency=medium
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
     the deferred VRF-to-VRF forward-import warning (#17705).
   * Dataplane: suppress peer-owned proxy-NDP targets in the shim set using
-    live RG-primary ownership resolved through Config.RefRG; preserve the
+    live RG-primary ownership resolved with Config.RefRGIndexFor; preserve the
     kernel installer's unknown-ownership behavior (#17742).
 
   * DDNS: document that manager-side `markerSharedWithSibling` sets
