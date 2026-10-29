@@ -889,10 +889,11 @@ policies, interfaces, NAT, IPsec, or maps cannot reach through to the
 published generation (#17734). No arm writes through its argument,
 whatever the caller's provenance (published active, frozen rollback
 target, or owned); the #9811 debt retry resolves the same way.
+`policymatch`'s query-snapshot cache keys on
 `DNSAnswersDigest` (scoped identity + prefixes + DNSLookupFailed +
-DNSUnresolved) in addition to the config pointer and feed digest, so even a
-future in-place write cannot leave a stale `ContentRejected` verdict
-resident on the same pointer.
+`DNSUnresolved`) in addition to the config pointer and feed digest, so even a
+future in-place write cannot leave a stale `ContentRejected` verdict resident
+on the same pointer.
 These expansions live in `Address.ExpandedPrefixes` /
 `DNSAddresses` and are returned by `Address.UsableValues()`, which every
 resolver (policy, NAT, junos-host, userspace book table) now consumes so a
