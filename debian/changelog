@@ -3,6 +3,41 @@ xpf (0.0.0) unstable; urgency=medium
     namespace so tolerant renders preserve every peer even when a gateway is
     named `inline-<name>`; keep non-colliding connection names stable (#17731).
 
+  * Userspace dataplane: release MF=0 associations only after range coverage,
+    retaining reordered middles across NAT64 and same-family consult paths
+    (#17720).
+
+  * Daemon: durably clear a committed lifeline record only when its resolved
+    identity matches the non-management main-table WAN route; keep sane records
+    untouched, prevent committed guard fallback to that route, and fence WAN
+    host addresses after fail-closed boots (#17730).
+
+  * Config: include `DNSLookupFailed` in DNS refresh baselines and hybrid
+    publication guards, publishing failure-only transitions without
+    mistaking them for successful empty answers (#17723).
+
+  * Config: compare duplicate source-NAT contexts after applied groups so
+    inherited scopes, not raw inline fragments, decide effective from/to
+    equality (#17712).
+
+  * Config compiler: retain hard three-color policer structural errors on
+    tolerant loads even when an independent burst-floor defect is downgraded
+    to a warning (#17715).
+  * Config: translate aggregated-Ethernet media MTUs to protocol MTUs with
+    the existing 14-byte overhead for untagged Ethernet. `ae0 mtu 1514` now
+    compiles to protocol MTU 1500 (#17719).
+  * Dataplane: release both blocked status polls from the #17728 regression
+    harness cleanup so a fatal before the first release cannot strand the
+    status loop (test-only follow-up to #18463).
+  * RPM: sanitize quoted inner URL parse-error payloads on credential-bearing
+    targets, retaining the error class without leaking malformed-authority
+    tokens (#17725).
+
+  * Dataplane: reconcile VLAN child MTUs for unzoned bridge-domain members
+    against the parent's planned MTU, reusing the #9757/#16633 helper
+    semantics (#17726).
+  * Dataplane: account status-poll health before discarding a stale-sequence
+    reply, while keeping status publication fenced (#17728).
   * Bootstrap: suppress stale cluster RA reconciliation and serialize final
     withdrawal against in-flight passes. Bound DHCP relay stop joins and report
     timeout failures in the bootstrap DEGRADED result (#17693).
@@ -10,10 +45,28 @@ xpf (0.0.0) unstable; urgency=medium
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
     the deferred VRF-to-VRF forward-import warning (#17705).
+  * Dataplane: resolve proxy-NDP entry and snapshot interface aliases through
+    ResolveKernelIfName before publishing shim targets, while retaining
+    routing-domain isolation for genuinely different interfaces (#17743).
+  * Dataplane: suppress peer-owned proxy-NDP targets in the shim set using
+    live RG-primary ownership resolved with Config.RefRGIndexFor; preserve the
+    kernel installer's unknown-ownership behavior (#17742).
+  * Daemon: deep-copy the DNS pre-apply config clone's full exported object
+    graph so in-place apply mutations to policies, interfaces, NAT, and IPsec
+    cannot write through to the published generation; preserve pointer aliases
+    inside the clone and cover non-DNS policy mutation under a concurrent reader
+    (#17734).
+  * Natshow: count persistent-binding sessions by translated endpoint,
+    protocol, and routing scope. Normalize raw default scope 0 and helper
+    wire marker 1 before joining; preserve endpoint-only legacy totals (#17737).
 
   * DDNS: document that manager-side `markerSharedWithSibling` sets
     `KeepSiblingMarker` for `sendRemoveForward`; clarify that `namedMarker`
     only checks backend-local retained marker state (#17724).
+
+  * Config: keep junos-host sibling static denies in the projected program
+    when a family-scoped DNS answer resolves successfully but has no usable
+    address for that family; preserve failed/unresolved diagnostics (#17721).
 
   * Event engine: recheck live `trigger until` ceilings when draining recorded
     cooldown crossings, preventing parked storms from replaying over the
@@ -21,6 +74,10 @@ xpf (0.0.0) unstable; urgency=medium
   * Event engine: revalidate deferred cooldown replays against live
     `trigger until` ceilings immediately before commit if the worker waited
     on the config lock (#17696).
+
+  * Event engine: immediately re-drain parked budget actions when wake
+    recomputation finds no live slot expiry, so an expired last slot cannot
+    strand ready work after the park nudge was consumed (#17727).
   * Daemon: bind commit-confirmed rollback-target pre-flight to the
     confirmation-window generation under the promotion lock, refusing a nested
     arm if a concurrent ConfirmCommit changed the target. Explicitly identify
@@ -37,6 +94,9 @@ xpf (0.0.0) unstable; urgency=medium
     source address is not installed on its target interface (#17759).
     Confirmed absence releases stale debt; unconfirmed lookups preserve
     neutral treatment.
+  * Cluster: keep the requester fenced after a failed pre-commit transfer
+    through ordinary-secondary owner-restoration heartbeats, until primary
+    ownership or another transfer-epoch boundary resolves the fence (#17713).
   * Config compiler: retain every independent single-rate policer-limit
     diagnostic in deterministic name order, including coexisting missing-limit
     and burst-floor defects on one policer (#17761).
@@ -68,6 +128,9 @@ xpf (0.0.0) unstable; urgency=medium
     state, sets `forcePreemptOnce`, and queues its kick in one `vi.mu`
     critical section, preventing a delayed force from crossing MASTER
     entry/resignation drains and re-promoting a resigned node (#17827).
+  * Docs: correct the #16695 GRE classifier citations with verified
+    definition and tail-call lines for the pinned and current master trees
+    (#17732).
   * Coalesce/ipmon: ipmon actuation is single-flighted — the engine
     tick is the only Tick driver (the loop is started context-only,
     no second sweep goroutine), and Tick itself claims an in-flight
@@ -220,4 +283,7 @@ xpf (0.0.0) unstable; urgency=medium
     sorted shared collision set in the session-scope folder as in the
     interface snapshot builder, preserving imported NAT scope identity
     when synthetic hash slots collide (#17876).
+  * Userspace dataplane: select mirrors before copying PrebuiltTransit
+    ingress bytes; no-mirror and sampled-out packets skip copies, selected
+    frames take one snapshot, and oversize samples stay NoFrame (#17718).
  -- xpf maintainers <noreply@anthropic.com>  Mon, 26 Oct 2026 00:00:00 +0000

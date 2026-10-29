@@ -120,7 +120,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 mod key;
-pub(crate) use key::{final_fragment_key, first_fragment_key, nonfirst_fragment_key};
+pub(crate) use key::{first_fragment_key, fragment_range, nonfirst_fragment_key};
 
 /// Number of independent shards. Power of two so the shard index is a mask.
 /// #7056 (#5798 required-fix #5): fragment-association misses caused by the
@@ -180,10 +180,9 @@ pub(crate) static FRAG_MAX_LIFETIME_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 pub(crate) const FRAG_SHARDS: usize = 16;
 const _: () = assert!(FRAG_SHARDS >= 2 && FRAG_SHARDS.is_power_of_two());
 /// Fixed per-shard entry cap. Total ceiling is
-/// `FRAG_SHARDS * FRAG_CAP_PER_SHARD` = 1024 entries; each entry is
-/// a `Copy` `SessionDecision` + an optional `Nat64ReverseInfo` + a deadline —
-/// a few hundred bytes, so a few hundred KB fixed ceiling. No payload bytes are
-/// stored (no amplification by datagram size).
+/// `FRAG_SHARDS * FRAG_CAP_PER_SHARD` = 1024 entries. Each entry carries a fixed
+/// 1 KiB fragment-coverage bitmap, so coverage state adds at most 1 MiB without
+/// per-fragment allocations or attacker-controlled table growth.
 pub(crate) const FRAG_CAP_PER_SHARD: usize = 64;
 /// Maximum associations charged to one admitted session in a shard. Session
 /// identity includes its tuple and incarnation; packet source addresses are
@@ -377,6 +376,78 @@ pub(crate) struct FragKey {
     pub(crate) authority: FragAuthority,
 }
 
+/// The byte range contributed by one fragment. `start` is 8-byte aligned by
+/// the IP fragment-offset encoding; a terminal range may end between blocks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FragmentRange {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) more: bool,
+}
+
+const FRAG_COVERAGE_BLOCKS: usize = (u16::MAX as usize + 8) / 8;
+
+/// Bounded, allocation-free coverage state. One bit represents one complete
+/// 8-byte block; `contiguous_blocks` is the covered prefix from byte zero.
+#[derive(Clone)]
+struct FragmentCoverage {
+    blocks: [u64; FRAG_COVERAGE_BLOCKS.div_ceil(64)],
+    contiguous_blocks: u32,
+    max_end: u32,
+    terminal_end: Option<u32>,
+    invalid: bool,
+}
+
+impl Default for FragmentCoverage {
+    fn default() -> Self {
+        Self {
+            blocks: [0; FRAG_COVERAGE_BLOCKS.div_ceil(64)],
+            contiguous_blocks: 0,
+            max_end: 0,
+            terminal_end: None,
+            invalid: false,
+        }
+    }
+}
+
+impl FragmentCoverage {
+    fn add(&mut self, range: FragmentRange) -> bool {
+        if range.start > range.end || range.end > u32::from(u16::MAX) || range.start % 8 != 0 {
+            self.invalid = true;
+            return false;
+        }
+        if self.terminal_end.is_some_and(|end| range.end > end) {
+            self.invalid = true;
+        }
+        if !range.more {
+            if self.terminal_end.is_some_and(|end| end != range.end) || self.max_end > range.end {
+                self.invalid = true;
+            }
+            self.terminal_end = Some(range.end);
+        }
+        self.max_end = self.max_end.max(range.end);
+
+        let first = (range.start / 8) as usize;
+        let end = (range.end / 8) as usize;
+        for block in first..end {
+            self.blocks[block / 64] |= 1u64 << (block % 64);
+        }
+        while (self.contiguous_blocks as usize) < FRAG_COVERAGE_BLOCKS {
+            let block = self.contiguous_blocks as usize;
+            if self.blocks[block / 64] & (1u64 << (block % 64)) == 0 {
+                break;
+            }
+            self.contiguous_blocks += 1;
+        }
+
+        !self.invalid
+            && self
+                .terminal_end
+                .is_some_and(|end| self.contiguous_blocks >= end / 8)
+    }
+}
+
+
 #[derive(Clone)]
 struct FragEntry {
     key: FragKey,
@@ -414,6 +485,8 @@ struct FragEntry {
     /// outright for the non-HA deployment. Only a POSITIVE owner RG is checked
     /// against `is_forwarding_active`.
     owner_rg: i32,
+    /// Fixed bitmap of fragment blocks already observed for this datagram.
+    coverage: FragmentCoverage,
 }
 
 /// Cross-family fragment-association cache (#2562). Cheap to `Clone` (shares the
@@ -504,16 +577,7 @@ impl FragAssoc {
         }
     }
 
-    /// Install (or refresh) an association for a committed FIRST fragment.
-    /// Within a shard, the cap is charged to the admitting session tuple and
-    /// incarnation, not the untrusted packet source claim.
-    ///
-    /// Returns `true` iff this install evicted a still-LIVE association
-    /// (#7054): either the installing session's own oldest entry recycled at
-    /// its per-session quota (#16593), or \u2014 for a foreign fill \u2014 never.
-    /// Zone/shard refusals return `false` and bump `FRAG_QUOTA_REFUSALS`
-    /// instead, so callers counting only the bool keep the #7054
-    /// live-eviction signal without conflating it with a refusal.
+    #[cfg(test)]
     #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn install_with_session(
         &self,
@@ -526,6 +590,41 @@ impl FragAssoc {
         generation: u64,
         owner_rg: i32,
     ) -> bool {
+        self.install_with_session_and_range(
+            key,
+            decision,
+            reverse,
+            admitting_session,
+            admitting_session_id,
+            now_ns,
+            generation,
+            owner_rg,
+            None,
+        )
+    }
+
+    /// Install (or refresh) an association for a committed FIRST fragment,
+    /// seeding its coverage with the head's payload range.
+    ///
+    /// Returns `true` iff this install evicted a still-LIVE association
+    /// (#7054): either the installing session's own oldest entry recycled at
+    /// its per-session quota (#16593), or — for a foreign fill — never.
+    /// Zone/shard refusals return `false` and bump `FRAG_QUOTA_REFUSALS`
+    /// instead, so callers counting only the bool keep the #7054
+    /// live-eviction signal without conflating it with a refusal.
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    pub(crate) fn install_with_session_and_range(
+        &self,
+        key: FragKey,
+        decision: SessionDecision,
+        reverse: Option<Nat64ReverseInfo>,
+        admitting_session: SessionKey,
+        admitting_session_id: u64,
+        now_ns: u64,
+        generation: u64,
+        owner_rg: i32,
+        initial_range: Option<FragmentRange>,
+    ) -> bool {
         let deadline_ns = now_ns.saturating_add(FRAG_TTL_NS);
         let idx = frag_shard_index(&key);
         let mut shard = self.shards[idx]
@@ -536,6 +635,10 @@ impl FragAssoc {
             e.decision = decision;
             e.reverse = reverse;
             e.deadline_ns = deadline_ns;
+            e.coverage = FragmentCoverage::default();
+            if let Some(range) = initial_range {
+                e.coverage.add(range);
+            }
             // Re-stamp: a fresh first fragment re-admitted under the current
             // config owns this association now, so it adopts the current
             // generation. A stale-generation refresh would otherwise resurrect
@@ -616,6 +719,10 @@ impl FragAssoc {
                 return false;
             }
         }
+        let mut coverage = FragmentCoverage::default();
+        if let Some(range) = initial_range {
+            coverage.add(range);
+        }
         shard.push(FragEntry {
             key,
             decision,
@@ -626,9 +733,29 @@ impl FragAssoc {
             created_ns: now_ns,
             generation,
             owner_rg,
+            coverage,
         });
         evicted_live
     }
+    /// Accumulate a successfully consulted fragment's range. Once a terminal
+    /// end is known and the prefix `[0, terminal_end)` is covered, remove the
+    /// association while holding its shard lock. Returns true iff it released.
+    pub(crate) fn record_fragment(&self, key: &FragKey, range: FragmentRange) -> bool {
+        let idx = frag_shard_index(key);
+        let mut shard = self.shards[idx]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(pos) = shard.iter().position(|e| e.key == *key) else {
+            return false;
+        };
+        if shard[pos].coverage.add(range) {
+            shard.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
 
     #[cfg(test)]
     pub(crate) fn install(
@@ -768,15 +895,11 @@ impl FragAssoc {
         Some(value)
     }
 
-    /// #16593: release the association for `key` because its datagram is
-    /// complete (the MF=0 tail has been seen). A completed datagram will
-    /// send no more fragments, so holding the entry until its idle TTL only
-    /// spends the admitting session's quota against newer datagrams.
-    /// Removes at most the exact-key entry; returns whether one was present.
-    /// This is an optimisation on top of own-oldest recycling, not a
-    /// correctness gate: a tail that arrives before its head, or a release
-    /// racing a re-install of the same key, simply leaves quota recycling
-    /// to handle capacity.
+    /// Test-only direct removal hook used by the #16593 quota harness to
+    /// contrast explicit completion eviction with own-oldest recycling. The
+    /// production consult paths use `record_fragment`, which releases only
+    /// after a terminal end is observed and the datagram prefix is covered.
+    #[cfg(test)]
     pub(crate) fn release(&self, key: &FragKey) -> bool {
         let idx = frag_shard_index(key);
         let mut shard = self.shards[idx]

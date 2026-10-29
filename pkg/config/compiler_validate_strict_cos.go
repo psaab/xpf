@@ -10,10 +10,35 @@ import (
 // validateThreeColorPolicersStrict rejects three-color policers that are
 // structurally incomplete or whose burst buckets fall below the one-frame
 // floor (#16610). Strict on commit / commit-check; on tolerant load /
-// peer-sync the caller downgrades the burst-floor violation to a warning
-// (#1960 no-brick) — see validateThreeColorBurstFloor16610.
+// peer-sync the caller downgrades only the burst-floor violation to a
+// warning (#1960 no-brick) — see threeColorPolicerErrors, which keeps
+// every defect class separate so a floor downgrade can never mask a
+// structural defect (#17715).
 func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConfig) error {
-	for name, pol := range policers {
+	if errs := threeColorPolicerErrors(policers); len(errs) > 0 {
+		return errs[0]
+	}
+	return nil
+}
+
+// threeColorPolicerErrors returns every three-color policer defect in
+// deterministic policer-name order (#17715). All checks on a policer are
+// evaluated even when an earlier one fails, and the burst-floor violation
+// is returned as its own error so the tolerant path can downgrade only
+// that entry while every structural defect (missing rates, PIR < CIR,
+// PBS < CBS, conflicting modes) stays a hard error. Within a policer the
+// order matches the previous fail-fast order, so the strict gate's
+// first error is unchanged except that a floor error no longer hides a
+// structural defect on the same or a later policer.
+func threeColorPolicerErrors(policers map[string]*ThreeColorPolicerConfig) []error {
+	names := make([]string, 0, len(policers))
+	for name := range policers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var errs []error
+	for _, name := range names {
+		pol := policers[name]
 		if pol == nil {
 			continue
 		}
@@ -22,39 +47,40 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 			displayName = name
 		}
 		if pol.SingleRateConfigured && pol.TwoRateConfigured {
-			return fmt.Errorf("firewall three-color-policer %q cannot configure both single-rate and two-rate", displayName)
+			errs = append(errs, fmt.Errorf("firewall three-color-policer %q cannot configure both single-rate and two-rate", displayName))
 		}
 		if pol.ColorBlindConfigured && pol.ColorAwareConfigured {
-			return fmt.Errorf("firewall three-color-policer %q cannot configure both color-blind and color-aware", displayName)
+			errs = append(errs, fmt.Errorf("firewall three-color-policer %q cannot configure both color-blind and color-aware", displayName))
 		}
 		if pol.CIR == 0 {
-			return fmt.Errorf("firewall three-color-policer %q requires positive committed-information-rate", displayName)
+			errs = append(errs, fmt.Errorf("firewall three-color-policer %q requires positive committed-information-rate", displayName))
 		}
 		if pol.CBS == 0 {
-			return fmt.Errorf("firewall three-color-policer %q requires positive committed-burst-size", displayName)
+			errs = append(errs, fmt.Errorf("firewall three-color-policer %q requires positive committed-burst-size", displayName))
 		}
 		if pol.PBS == 0 {
 			if pol.TwoRate {
-				return fmt.Errorf("firewall three-color-policer %q requires positive peak-burst-size", displayName)
+				errs = append(errs, fmt.Errorf("firewall three-color-policer %q requires positive peak-burst-size", displayName))
+			} else {
+				errs = append(errs, fmt.Errorf("firewall three-color-policer %q requires positive excess-burst-size", displayName))
 			}
-			return fmt.Errorf("firewall three-color-policer %q requires positive excess-burst-size", displayName)
 		}
 		if err := validateThreeColorBurstFloor16610(displayName, pol); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 		if pol.TwoRate {
 			if pol.PIR == 0 {
-				return fmt.Errorf("firewall three-color-policer %q requires positive peak-information-rate", displayName)
+				errs = append(errs, fmt.Errorf("firewall three-color-policer %q requires positive peak-information-rate", displayName))
 			}
 			if pol.PIR < pol.CIR {
-				return fmt.Errorf("firewall three-color-policer %q peak-information-rate must be >= committed-information-rate", displayName)
+				errs = append(errs, fmt.Errorf("firewall three-color-policer %q peak-information-rate must be >= committed-information-rate", displayName))
 			}
 			if pol.PBS < pol.CBS {
-				return fmt.Errorf("firewall three-color-policer %q peak-burst-size must be >= committed-burst-size", displayName)
+				errs = append(errs, fmt.Errorf("firewall three-color-policer %q peak-burst-size must be >= committed-burst-size", displayName))
 			}
 		}
 	}
-	return nil
+	return errs
 }
 
 // validateThreeColorBurstFloor16610 enforces the shared one-frame floor
@@ -65,8 +91,8 @@ func validateThreeColorPolicersStrict(policers map[string]*ThreeColorPolicerConf
 // (RFC 2698 trTCM; PBS >= CBS is separately gated, so PBS is the
 // ceiling). A ceiling below minPolicerBurstBytes16714 colours every
 // full-size frame Red at any rate. Zero buckets are the caller's
-// "requires positive ..." case and are skipped here. Sorted iteration is
-// unnecessary: the caller returns the first policer error.
+// "requires positive ..." case and are skipped here. Policers are
+// visited in stable name order by threeColorPolicerErrors.
 func validateThreeColorBurstFloor16610(displayName string, pol *ThreeColorPolicerConfig) error {
 	if pol.TwoRate {
 		if pol.PBS != 0 && pol.PBS < minPolicerBurstBytes16714 {

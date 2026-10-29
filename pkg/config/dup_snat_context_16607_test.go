@@ -192,3 +192,78 @@ apply-groups G;`
 		t.Fatalf("group-authored error must carry #16607, got: %v", err)
 	}
 }
+const snatCtx17712GroupInheritedScopes = `groups { SCOPES { security { nat { source {
+        rule-set A { from zone trust; to zone untrust; }
+        rule-set B { from zone dmz; to zone dmz2; }
+    } } } } }
+security { nat { source {
+    rule-set A { rule R1 { then { source-nat { interface; } } } }
+    rule-set B { rule R2 { then { source-nat { off; } } } }
+} } }
+apply-groups SCOPES;`
+
+// TestSourceNATDuplicateContextGroupInheritedDistinctAccepted17712: two
+// inline rule-sets whose ONLY scopes arrive via an applied group still have
+// distinct EFFECTIVE contexts and must compile.
+func TestSourceNATDuplicateContextGroupInheritedDistinctAccepted17712(t *testing.T) {
+	cfg, err := CompileConfig(parse16607(t, snatCtx17712GroupInheritedScopes))
+	if err != nil {
+		t.Fatalf("distinct effective contexts inherited from an applied group must commit, got: %v", err)
+	}
+	if len(cfg.Security.NAT.Source) != 2 {
+		t.Fatalf("want both inherited source rule-sets, got %d", len(cfg.Security.NAT.Source))
+	}
+	scopes := make(map[string][2]string, len(cfg.Security.NAT.Source))
+	for _, rs := range cfg.Security.NAT.Source {
+		scopes[rs.Name] = [2]string{rs.FromZone, rs.ToZone}
+	}
+	for name, want := range map[string][2]string{
+		"A": {"trust", "untrust"},
+		"B": {"dmz", "dmz2"},
+	} {
+		if got := scopes[name]; got != want {
+			t.Errorf("rule-set %s effective scopes = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestSourceNATDuplicateContextGroupInheritedDistinctLenientClean17712 is the
+// tolerant-path counterpart: the group-inherited distinct shape must boot
+// with NO duplicate-context warning at all.
+func TestSourceNATDuplicateContextGroupInheritedDistinctLenientClean17712(t *testing.T) {
+	cfg, err := CompileConfigLenient(parse16607(t, snatCtx17712GroupInheritedScopes))
+	if err != nil {
+		t.Fatalf("lenient must boot the group-inherited distinct shape, got: %v", err)
+	}
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, "16607") {
+			t.Fatalf("lenient must not warn a false duplicate context for distinct effective contexts, warnings: %v", cfg.Warnings)
+		}
+	}
+	if len(cfg.Security.NAT.Source) != 2 {
+		t.Fatalf("lenient must keep both inherited rule-sets, got %d", len(cfg.Security.NAT.Source))
+	}
+}
+
+// TestSourceNATDuplicateContextGroupInheritedDuplicateRejected17712 is the
+// control arm: contexts that remain equal after inheritance must still reject.
+func TestSourceNATDuplicateContextGroupInheritedDuplicateRejected17712(t *testing.T) {
+	cfgText := `groups { SCOPES { security { nat { source {
+        rule-set A { from zone trust; to zone untrust; }
+        rule-set B { from zone trust; to zone untrust; }
+    } } } } }
+security { nat { source {
+    rule-set A { rule R1 { then { source-nat { interface; } } } }
+    rule-set B { rule R2 { then { source-nat { off; } } } }
+} } }
+apply-groups SCOPES;`
+	_, err := CompileConfig(parse16607(t, cfgText))
+	if err == nil {
+		t.Fatal("duplicate effective contexts after group inheritance must reject")
+	}
+	for _, want := range []string{`"A"`, `"B"`, "16607"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should mention %q, got: %v", want, err)
+		}
+	}
+}

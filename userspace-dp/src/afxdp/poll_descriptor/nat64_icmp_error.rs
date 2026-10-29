@@ -186,7 +186,6 @@ pub(super) fn try_translate_nat64_icmp_error(
             let queued = queue_prebuilt_embedded_icmp_error(
                 desc,
                 meta,
-                packet_frame,
                 binding_index,
                 worker_ctx,
                 scratch_forwards,
@@ -308,7 +307,6 @@ pub(super) fn try_translate_nat64_icmp_error(
             let queued = queue_prebuilt_embedded_icmp_error(
                 desc,
                 meta,
-                packet_frame,
                 binding_index,
                 worker_ctx,
                 scratch_forwards,
