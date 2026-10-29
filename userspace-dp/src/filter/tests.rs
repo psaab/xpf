@@ -1720,8 +1720,8 @@ fn policer_burst_floor_16714_admits_max_frame_both_paths() {
     // (#17760 now rejects it at commit; meter semantics are unchanged).
     let old = ThreeColorPolicerState::sr_tcm_with_treatments(
         100_000_000,
-        1500,
-        1500,
+        1514,
+        1514,
         true,
         drop_treatments,
     )
