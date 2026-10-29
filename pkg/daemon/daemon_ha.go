@@ -1862,7 +1862,8 @@ func (d *Daemon) runStartupGoodbye(rgID int, rgRA []*config.RAInterfaceConfig) {
 // goodbye set when no config is available to consult for VIP membership
 // (rgID <= 0 / nil cfg): only the auto stable pattern is suppressed. The
 // production path uses startupGoodbyeConfigsForRG, which also suppresses
-// a configured RETH-unit link-local installed as an RG VIP (#16624).
+// a configured RETH-unit link-local installed as an RG VIP on that same
+// interface (#16624).
 func startupGoodbyeConfigs(rgRA []*config.RAInterfaceConfig) []*config.RAInterfaceConfig {
 	return startupGoodbyeConfigsFiltered(nil, nil, 0, rgRA)
 }
@@ -1883,7 +1884,7 @@ func startupGoodbyeConfigsFiltered(cfg, peerCfg *config.Config, rgID int, rgRA [
 	}
 	filtered := make([]*config.RAInterfaceConfig, 0, len(rgRA))
 	for _, cfgRA := range rgRA {
-		if cfgRA == nil || isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.SourceLinkLocal) {
+		if cfgRA == nil || isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.Interface, cfgRA.SourceLinkLocal) {
 			continue
 		}
 		filtered = append(filtered, cfgRA)
@@ -2247,12 +2248,12 @@ func configuredRASource(allRA []*config.RAInterfaceConfig, iface string) string 
 }
 
 // sharedStableRAInterfaces returns the subset of ifaces whose RA source is
-// a shared router identity for cfg's rgID — the auto stable pattern or a
-// configured RETH-unit link-local installed as an RG VIP (#16624) — judged
-// on the CONFIGURED source whenever one exists. Status reports an empty
-// SrcAddr until a sender's conn opens, so a source check on Status alone
-// misses an unopened shared-identity sender and leaves Apply to withdraw
-// the peer's router with a graceful goodbye (D34-01).
+// a shared router identity on that interface for cfg's rgID — the auto
+// stable pattern or a configured RETH-unit link-local installed as an RG
+// VIP there (#16624). Status reports an empty SrcAddr until a sender's
+// conn opens, so a source check on Status alone misses an unopened shared-
+// identity sender and leaves Apply to withdraw the peer's router with a
+// graceful goodbye (D34-01).
 func sharedStableRAInterfaces(cfg, peerCfg *config.Config, rgID int, ifaces map[string]bool, senders []ra.SenderInfo, allRA []*config.RAInterfaceConfig) []string {
 	var names []string
 	seen := make(map[string]bool)
@@ -2265,7 +2266,7 @@ func sharedStableRAInterfaces(cfg, peerCfg *config.Config, rgID int, ifaces map[
 		if cfg := configuredRASource(allRA, sender.Interface); cfg != "" {
 			source = cfg
 		}
-		if isSharedRASourceBothViews(cfg, peerCfg, rgID, source) {
+		if isSharedRASourceBothViews(cfg, peerCfg, rgID, sender.Interface, source) {
 			names = append(names, sender.Interface)
 		}
 	}
@@ -2273,7 +2274,7 @@ func sharedStableRAInterfaces(cfg, peerCfg *config.Config, rgID int, ifaces map[
 		if cfgRA == nil || !ifaces[cfgRA.Interface] || seen[cfgRA.Interface] {
 			continue
 		}
-		if isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.SourceLinkLocal) {
+		if isSharedRASourceBothViews(cfg, peerCfg, rgID, cfgRA.Interface, cfgRA.SourceLinkLocal) {
 			names = append(names, cfgRA.Interface)
 		}
 	}
