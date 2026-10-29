@@ -222,7 +222,7 @@ the transit path, so on a wg interface whose peers ride DIFFERENT underlay
 paths a TUN inner packet to peer B was size-checked against peer A's MTU —
 fragmentation/underlay drop if A>B, over-conservative `encap_mtu_drops` if
 A<B; reordering the peers flipped the behaviour. This is the SAME defect
-#2845 fixed for the transit/PTB path (`wg_endpoint_physical_outer_mtu` /
+#2845 fixed for the transit/PTB path (`wg_selected_peer_outer` /
 `wg_peer_outer_dst`), left open on the TUN-origin path because #2921 kept
 the first-peer scalar. The fix resolves the underlay MTU PER PEER at spawn
 (`Coordinator::resolve_wg_per_peer_outer_mtus`, keyed by public key, using
