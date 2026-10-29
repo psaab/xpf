@@ -167,7 +167,7 @@ type state struct {
 	authorityGeneration uint64
 }
 
-func (d *Daemon) enqueueDHCPApplyWithAuthorityState() uint64 { return 1 }
+func (d *Daemon) enqueueDHCPApplyWithAuthorityState() (uint64, bool) { return 1, false }
 `
 	if err := os.WriteFile(filepath.Join(dir, "synthetic.go"), []byte(clean), 0o644); err != nil {
 		t.Fatal(err)
