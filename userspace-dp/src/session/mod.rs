@@ -1020,7 +1020,10 @@ mod lookup;
 // another). Producers queue into the table's bounded outbox; the worker loop
 // fans it out to sibling command queues once per pass.
 mod handshake_relay;
-pub(crate) use handshake_relay::{HandshakeRelay, HandshakeRelayStage};
+pub(crate) use handshake_relay::HandshakeRelay;
+// Only the cross-worker tests name the stage outside this module.
+#[cfg(test)]
+pub(crate) use handshake_relay::HandshakeRelayStage;
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
 pub(crate) use lookup::{ExportWalkOutcome, ForwardNatMatchLookup, SeqVerdict};
