@@ -137,6 +137,9 @@ func TestGuardedFailureBeforeDrainKeepsOldActor17750(t *testing.T) {
 	if d.ipsecCaptureStaged != nil || d.ipsecCaptureStagePending {
 		t.Fatalf("staged = %p pending=%v, want staged state cleared", d.ipsecCaptureStaged, d.ipsecCaptureStagePending)
 	}
+	if d.ipsecKernelQuarantineOrphaned() {
+		t.Fatal("orphan flag set although the old divert still points at live listeners")
+	}
 }
 
 func TestGuardedFailureAfterDrainStillRetiresOldActor17750(t *testing.T) {
@@ -159,5 +162,39 @@ func TestGuardedFailureAfterDrainStillRetiresOldActor17750(t *testing.T) {
 	}
 	if !d.ipsecKernelQuarantineOrphaned() {
 		t.Fatal("orphan flag not set after drained guarded failure")
+	}
+}
+
+// #17750 drained+unverified control: the drain callback ran, then both
+// guard readback and the explicit fallback install fail. Retention is
+// no longer sound (the old actor is mid/fully torn down), so the old
+// actor is retired, the published runtime is cleared, and orphaned
+// kernel tables are recorded — the pre-#17750 drained semantics. This
+// cell discriminates the drain gate directly: weakening the retention
+// condition to !guardVerified alone flips it.
+func TestGuardedFailureAfterDrainUnverifiedStillRetiresOldActor17750(t *testing.T) {
+	fake := &guardedFake14696{guardedErr: errors.New("guarded transition failed")}
+	fake.quarantineVerify = func() error { return errors.New("guard table missing") }
+	fake.quarantineGuard = func(xnft.IpsecDivertSpec) error { return errors.New("guard install failed") }
+	d, old, staged := newGuardedDaemon16703(t, fake)
+	old.actor = stagedIpsecCaptureRuntime9506(t).actor
+	if err := old.actor.Start(); err != nil {
+		t.Fatalf("start old actor: %v", err)
+	}
+	err := d.commitIpsecCaptureStage(old, staged)
+	if err == nil || !strings.Contains(err.Error(), "no quarantine guard verified") {
+		t.Fatalf("err = %v, want unverified-guard marker", err)
+	}
+	if len(fake.quarantineCalls) != 1 {
+		t.Fatalf("quarantine installs = %v, want one explicit install attempt", fake.quarantineCalls)
+	}
+	if old.actor.Status().Active {
+		t.Fatal("old actor remains active although the drain callback retired it")
+	}
+	if d.ipsecCapture != nil {
+		t.Fatalf("active = %p, want nil after drained unverified failure", d.ipsecCapture)
+	}
+	if !d.ipsecKernelQuarantineOrphaned() {
+		t.Fatal("orphan flag not set after drained unverified failure")
 	}
 }

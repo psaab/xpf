@@ -1844,9 +1844,7 @@ func (d *Daemon) commitIpsecCaptureStage(old, staged *ipsecCaptureRuntime) error
 				}
 			}
 			if !guardVerified && !drainAttempted {
-				d.markIpsecKernelQuarantineOrphaned()
-				d.restoreIpsecCaptureRuntime(old)
-				_ = staged.close()
+				_ = d.rollbackIpsecCaptureStage(old, staged)
 				return fmt.Errorf("ipsec capture: guarded divert transition: %w (no quarantine guard verified)", err)
 			}
 			if !oldRetired {
