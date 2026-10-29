@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Incus deploy: distinguish verify-dataplane exit codes 4/5, prescribing
+    reduced verifier cost for measured low headroom and restoring verifier
+    measurement for unmeasured headroom instead of stale-pin cleanup (#17769).
+
   * Daemon: atomically claim per-RG RETH service edges across event and
     reconcile producers so a stale handler transition cannot replay
     non-idempotent Kea takeover work after convergence (#17771).
