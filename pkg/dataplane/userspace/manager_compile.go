@@ -1462,7 +1462,11 @@ func (m *Manager) syncInterfaceAttachments(result *dataplane.CompileResult, snap
 		if owner != nil && owner.VLANID > 0 && owner.ParentIfindex > 0 {
 			continue
 		}
-		if !refreshAttachAdmission(snapshot, uint32(ifindex), interfaceRowForIfindex(snapshot, uint32(ifindex))) {
+		row := owner
+		if row == nil {
+			row = interfaceRowForIfindex(snapshot, uint32(ifindex))
+		}
+		if !refreshAttachAdmission(uint32(ifindex), row, owner) {
 			delete(allowed, ifindex)
 		}
 	}
