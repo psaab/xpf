@@ -1070,16 +1070,16 @@ type Daemon struct {
 	// / commitAndApply paths without standing up the full dataplane.
 	applyBodyForTest func(*config.Config)
 	// dnsRefreshMu guards the published-answer baseline.
-	// lastDNSRefreshAnswers holds the DNS answers last actually APPLIED
-	// for lastDNSRefreshBase (store generation + config pointer identity,
-	// read back after apply-time re-resolution under applySem, never a
-	// pre-apply proposal). Every writer holds applySem and records
-	// unconditionally — inside the hold it IS the newest applied state;
-	// failed applies invalidate. (Round-4: digest CAS removed, it only
+	// lastDNSRefreshAnswers holds the DNS state (prefixes and resolver failure
+	// flag) last actually APPLIED for lastDNSRefreshBase (store generation +
+	// config pointer identity, read back after apply-time re-resolution under
+	// applySem, never a pre-apply proposal). Every writer holds applySem and
+	// records unconditionally — inside the hold it IS the newest applied
+	// state; failed applies invalidate. (Round-4: digest CAS removed, it only
 	// ever dropped the newest record.)
 	dnsRefreshMu          sync.Mutex
 	lastDNSRefreshBase    *config.Config
-	lastDNSRefreshAnswers map[string][]string
+	lastDNSRefreshAnswers map[string]config.DNSAnswerState
 	// dnsResolvedConfigs marks configs already resolved outside applySem
 	// (#16601) — notably the DNS refresher's clone — so the pre-apply
 	// resolver does not resolve them again. Guarded by dnsRefreshMu.
@@ -1144,6 +1144,10 @@ type Daemon struct {
 	// steps) to exercise the failure-aggregation and honest DEGRADED/complete
 	// reporting without faking the concrete netlink/FRR/dataplane owners.
 	bootstrapTeardownForTest func() []bootstrapTeardownStep
+
+	// dhcpRelayReconcileForTest substitutes the relay reconcile result so
+	// bootstrap's degraded aggregation can be tested without a live relay.
+	dhcpRelayReconcileForTest func(*config.Config) error
 
 	// applyErrForTest is the error the applyBodyForTest seam returns from
 	// applyConfigLocked (default nil = success). Test-only: lets a test drive
