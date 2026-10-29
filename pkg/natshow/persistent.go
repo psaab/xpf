@@ -86,9 +86,9 @@ func RenderPersistentDetail(ctx context.Context, w io.Writer, dp Reader) {
 	// one map. v4 sessions are stored via `netip.AddrFrom4` and v6
 	// sessions via `netip.AddrFrom16` — matching the producer side
 	// in conntrack/gc.go (Save calls). Persistent-NAT bindings store
-	// `netip.Addr` directly. Protocol comes from the session 5-tuple,
-	// and RoutingDomain in session values uses the helper's wire form
-	// (default domain 0 is encoded as 1).
+	// `netip.Addr` directly. Protocol comes from the session 5-tuple;
+	// session RoutingDomain 0 and helper wire marker 1 both represent
+	// the default scope and are normalized before joining.
 	type natKey struct {
 		addr          netip.Addr
 		port          uint16
@@ -130,7 +130,7 @@ func RenderPersistentDetail(ctx context.Context, w io.Writer, dp Reader) {
 					addr:          addr,
 					port:          val.NATSrcPort,
 					protocol:      key.Protocol,
-					routingDomain: val.RoutingDomain,
+					routingDomain: persistentRoutingScopeWire(val.RoutingDomain),
 				}]++
 			}
 		},
@@ -146,7 +146,7 @@ func RenderPersistentDetail(ctx context.Context, w io.Writer, dp Reader) {
 					addr:          addr,
 					port:          val.NATSrcPort,
 					protocol:      key.Protocol,
-					routingDomain: val.RoutingDomain,
+					routingDomain: persistentRoutingScopeWire(val.RoutingDomain),
 				}]++
 			}
 		})
@@ -201,9 +201,9 @@ func RenderPersistentDetail(ctx context.Context, w io.Writer, dp Reader) {
 	}
 }
 
-// persistentRoutingScopeWire maps the unencoded lease scope to the domain
-// representation stored in session values. Rust uses 1 for the stated default
-// instance because zero means "scope absent" on the wire.
+// persistentRoutingScopeWire maps raw and helper-wire routing domains to the
+// representation used in the join. The Go session store carries default scope
+// 0 while the Rust helper states the default as wire marker 1.
 func persistentRoutingScopeWire(scope uint32) uint32 {
 	if scope == 0 {
 		return 1
