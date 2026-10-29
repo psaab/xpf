@@ -42,7 +42,7 @@ func TestRouteListenerBumpsAfterLearnedRoutePublish11565(t *testing.T) {
 	if !d.actuateLearnedRouteRefresh(context.Background()) {
 		t.Fatal("successful publish and FIB bump did not converge")
 	}
-	requireRouteListenerCalls11565(t, dp.calls, "publish", "bump")
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(), "publish", "bump")
 	if d.pendingFIBBump {
 		t.Fatal("pendingFIBBump remains set after a confirmed FIB bump")
 	}
@@ -106,7 +106,7 @@ func TestRouteListenerRetriesPendingBumpAfterDuplicatePublish11565(t *testing.T)
 	if d.actuateLearnedRouteRefresh(context.Background()) {
 		t.Fatal("failed publish reported convergence")
 	}
-	requireRouteListenerCalls11565(t, dp.calls, "publish")
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(), "publish")
 	if d.pendingFIBBump {
 		t.Fatal("failed publish created a pending FIB bump")
 	}
@@ -117,7 +117,7 @@ func TestRouteListenerRetriesPendingBumpAfterDuplicatePublish11565(t *testing.T)
 	if d.actuateLearnedRouteRefresh(context.Background()) {
 		t.Fatal("failed FIB bump reported convergence")
 	}
-	requireRouteListenerCalls11565(t, dp.calls, "publish", "publish", "bump")
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(), "publish", "publish", "bump")
 	if !d.pendingFIBBump {
 		t.Fatal("pendingFIBBump not set after a published overlay's bump failed")
 	}
@@ -127,7 +127,7 @@ func TestRouteListenerRetriesPendingBumpAfterDuplicatePublish11565(t *testing.T)
 	if d.actuateLearnedRouteRefresh(context.Background()) {
 		t.Fatal("failed retry publish reported convergence")
 	}
-	requireRouteListenerCalls11565(t, dp.calls, "publish", "publish", "bump", "publish")
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(), "publish", "publish", "bump", "publish")
 	if !d.pendingFIBBump {
 		t.Fatal("pendingFIBBump lost across a failed retry publish")
 	}
@@ -138,7 +138,7 @@ func TestRouteListenerRetriesPendingBumpAfterDuplicatePublish11565(t *testing.T)
 	if d.actuateLearnedRouteRefresh(context.Background()) {
 		t.Fatal("failed duplicate-skip bump reported convergence")
 	}
-	requireRouteListenerCalls11565(t, dp.calls,
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(),
 		"publish", "publish", "bump", "publish", "publish", "bump")
 	if !d.pendingFIBBump {
 		t.Fatal("pendingFIBBump cleared while the retried bump still failed")
@@ -148,7 +148,7 @@ func TestRouteListenerRetriesPendingBumpAfterDuplicatePublish11565(t *testing.T)
 	if !d.actuateLearnedRouteRefresh(context.Background()) {
 		t.Fatal("successful duplicate-skip bump did not converge")
 	}
-	requireRouteListenerCalls11565(t, dp.calls,
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(),
 		"publish", "publish", "bump", "publish", "publish", "bump", "publish", "bump")
 	if d.pendingFIBBump {
 		t.Fatal("pendingFIBBump remains set after the retry succeeded")
@@ -158,6 +158,6 @@ func TestRouteListenerRetriesPendingBumpAfterDuplicatePublish11565(t *testing.T)
 	if !d.actuateLearnedRouteRefresh(context.Background()) {
 		t.Fatal("confirmed duplicate-skip did not converge")
 	}
-	requireRouteListenerCalls11565(t, dp.calls,
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(),
 		"publish", "publish", "bump", "publish", "publish", "bump", "publish", "bump", "publish")
 }

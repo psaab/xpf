@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,10 +21,13 @@ import (
 )
 
 // fakeOverlayDP records the actuator's call order against the
-// routes-only publish surface.
+// routes-only publish surface. The mutex-protected log and snapshot
+// accessor synchronize the connected-RG async positive control (#17754).
 type fakeOverlayDP struct {
 	dataplane.RuntimeDataPlane // nil embed: only the overlay surface is used
+	callsMu                    sync.Mutex
 	calls                      []string
+	callsChanged               chan struct{} // optional buffered notification channel
 	publishErr                 error
 	publishSkipped             bool // simulate the duplicate-skip (published=false)
 	bumpErr                    error
@@ -36,8 +40,26 @@ func (f *fakeOverlayDP) PublishRouteOverlaySnapshot(cfg *config.Config, overlay 
 	return f.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, false)
 }
 
+func (f *fakeOverlayDP) recordCall(call string) {
+	f.callsMu.Lock()
+	f.calls = append(f.calls, call)
+	f.callsMu.Unlock()
+	if f.callsChanged != nil {
+		select {
+		case f.callsChanged <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (f *fakeOverlayDP) callsSnapshot() []string {
+	f.callsMu.Lock()
+	defer f.callsMu.Unlock()
+	return append([]string(nil), f.calls...)
+}
+
 func (f *fakeOverlayDP) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (bool, error) {
-	f.calls = append(f.calls, "publish")
+	f.recordCall("publish")
 	f.lastOverlay = overlay
 	f.lastSchedulerState = make(map[string]bool, len(schedulerState))
 	for name, active := range schedulerState {
@@ -51,7 +73,7 @@ func (f *fakeOverlayDP) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config,
 }
 
 func (f *fakeOverlayDP) BumpFIBGeneration() (uint32, error) {
-	f.calls = append(f.calls, "bump")
+	f.recordCall("bump")
 	return 1, f.bumpErr
 }
 
@@ -91,8 +113,9 @@ func TestActuatorPublishesBeforeFIBBump(t *testing.T) {
 	d.setDataplane(dp) // #2114: publish through the cell
 	d.actuateRouteOverlayLocked(&config.Config{})
 
-	if len(dp.calls) != 2 || dp.calls[0] != "publish" || dp.calls[1] != "bump" {
-		t.Fatalf("calls = %v, want [publish bump]", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 2 || calls[0] != "publish" || calls[1] != "bump" {
+		t.Fatalf("calls = %v, want [publish bump]", calls)
 	}
 	if len(dp.lastOverlay) != 1 || dp.lastOverlay[0].NextHop != "172.16.80.1" {
 		t.Fatalf("published overlay = %+v", dp.lastOverlay)
@@ -146,9 +169,9 @@ func TestActuatorSkipsBumpOnPublishFailure(t *testing.T) {
 	d.setDataplane(dp) // #2114: publish through the cell
 	d.actuateRouteOverlayLocked(&config.Config{})
 
-	for _, c := range dp.calls {
+	for _, c := range dp.callsSnapshot() {
 		if c == "bump" {
-			t.Fatalf("calls = %v: FIB generation bumped after failed publish", dp.calls)
+			t.Fatalf("calls = %v: FIB generation bumped after failed publish", dp.callsSnapshot())
 		}
 	}
 }
@@ -372,8 +395,9 @@ func TestActuatorSkipsBumpOnDuplicatePublish(t *testing.T) {
 	d.setDataplane(dp) // #2114: publish through the cell
 	d.actuateRouteOverlayLocked(&config.Config{})
 
-	if len(dp.calls) != 1 || dp.calls[0] != "publish" {
-		t.Fatalf("calls = %v, want [publish] only (no bump on duplicate-skip)", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "publish" {
+		t.Fatalf("calls = %v, want [publish] only (no bump on duplicate-skip)", calls)
 	}
 }
 
@@ -393,8 +417,9 @@ func TestActuatorRetriesUnconfirmedBump(t *testing.T) {
 
 	// Actuation 1: publish OK, bump fails → pending.
 	d.actuateRouteOverlayLocked(&config.Config{})
-	if len(dp.calls) != 2 || dp.calls[1] != "bump" {
-		t.Fatalf("calls = %v, want [publish bump]", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 2 || calls[1] != "bump" {
+		t.Fatalf("calls = %v, want [publish bump]", calls)
 	}
 	if !d.pendingFIBBump {
 		t.Fatal("pendingFIBBump not set after bump failure")
@@ -404,8 +429,9 @@ func TestActuatorRetriesUnconfirmedBump(t *testing.T) {
 	// the bump IS retried and stays pending.
 	dp.publishSkipped = true
 	d.actuateRouteOverlayLocked(&config.Config{})
-	if len(dp.calls) != 4 || dp.calls[3] != "bump" {
-		t.Fatalf("calls = %v, want retried bump on duplicate publish", dp.calls)
+	calls = dp.callsSnapshot()
+	if len(calls) != 4 || calls[3] != "bump" {
+		t.Fatalf("calls = %v, want retried bump on duplicate publish", calls)
 	}
 	if !d.pendingFIBBump {
 		t.Fatal("pendingFIBBump cleared while bump still failing")
@@ -414,8 +440,9 @@ func TestActuatorRetriesUnconfirmedBump(t *testing.T) {
 	// Actuation 3: bump recovers → retried once more, then confirmed.
 	dp.bumpErr = nil
 	d.actuateRouteOverlayLocked(&config.Config{})
-	if len(dp.calls) != 6 || dp.calls[5] != "bump" {
-		t.Fatalf("calls = %v, want final retry bump", dp.calls)
+	calls = dp.callsSnapshot()
+	if len(calls) != 6 || calls[5] != "bump" {
+		t.Fatalf("calls = %v, want final retry bump", calls)
 	}
 	if d.pendingFIBBump {
 		t.Fatal("pendingFIBBump not cleared after confirmed bump")
@@ -424,8 +451,9 @@ func TestActuatorRetriesUnconfirmedBump(t *testing.T) {
 	// Actuation 4: duplicate publish with NO pending bump → no bump
 	// (the plan's named no-churn test).
 	d.actuateRouteOverlayLocked(&config.Config{})
-	if len(dp.calls) != 7 || dp.calls[6] != "publish" {
-		t.Fatalf("calls = %v, want trailing [publish] only", dp.calls)
+	calls = dp.callsSnapshot()
+	if len(calls) != 7 || calls[6] != "publish" {
+		t.Fatalf("calls = %v, want trailing [publish] only", calls)
 	}
 }
 
@@ -442,8 +470,9 @@ func TestActuatorPublishFailureKeepsPendingBump(t *testing.T) {
 	d.setDataplane(dp) // #2114: publish through the cell
 	d.actuateRouteOverlayLocked(&config.Config{})
 
-	if len(dp.calls) != 1 || dp.calls[0] != "publish" {
-		t.Fatalf("calls = %v, want [publish] only", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "publish" {
+		t.Fatalf("calls = %v, want [publish] only", calls)
 	}
 	if !d.pendingFIBBump {
 		t.Fatal("pendingFIBBump lost across a failed publish")
@@ -485,8 +514,8 @@ func (hardFailFRRExec) VtyshStream(context.Context, string) (io.ReadCloser, func
 // (kernel on the old route, dataplane on the failover route). It must
 // abort before the dataplane consumer, report failure so the ipmon
 // engine keeps the state dirty and retries, and leave pendingFIBBump
-// untouched. On revert (publish regardless of the FRR outcome) dp.calls
-// contains "publish" and this goes RED.
+// untouched. On revert (publish regardless of the FRR outcome), the
+// synchronized call log contains "publish" and this goes RED.
 func TestActuatorAbortsPublishOnHardFRRError(t *testing.T) {
 	dp := &fakeOverlayDP{}
 	d := &Daemon{
@@ -499,8 +528,9 @@ func TestActuatorAbortsPublishOnHardFRRError(t *testing.T) {
 	if ok := d.actuateRouteOverlayLocked(&config.Config{}); ok {
 		t.Fatal("actuator reported success on a hard FRR reload failure")
 	}
-	if len(dp.calls) != 0 {
-		t.Fatalf("calls = %v, want none: a divergent snapshot was published after a hard FRR failure (split FIB)", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 0 {
+		t.Fatalf("calls = %v, want none: a divergent snapshot was published after a hard FRR failure (split FIB)", calls)
 	}
 	if d.pendingFIBBump {
 		t.Fatal("pendingFIBBump set by an aborted actuation")
@@ -525,8 +555,9 @@ func TestActuatorPublishesOnDegradedFRR(t *testing.T) {
 	if ok := d.actuateRouteOverlayLocked(&config.Config{}); !ok {
 		t.Fatal("actuator reported failure on a DEGRADED (additive-applied) reload")
 	}
-	if len(dp.calls) != 2 || dp.calls[0] != "publish" || dp.calls[1] != "bump" {
-		t.Fatalf("calls = %v, want [publish bump] on a degraded reload", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 2 || calls[0] != "publish" || calls[1] != "bump" {
+		t.Fatalf("calls = %v, want [publish bump] on a degraded reload", calls)
 	}
 }
 
@@ -542,8 +573,8 @@ func TestActuatorPublishesOnDegradedFRR(t *testing.T) {
 // wiped/stopped, so the retry never fires).
 //
 // RED on revert: removing the isResetting gate lets the actuator render frr.conf
-// (RecordingExecutor.ReloadCalls == 1) and publish (dp.calls != nil) — this test
-// then fails.
+// (RecordingExecutor.ReloadCalls == 1) and makes the synchronized call log
+// non-empty — this test then fails.
 func TestActuateRouteOverlaySkipsWhenResetting(t *testing.T) {
 	exec := &frr.RecordingExecutor{} // clean reload — the ungated path WOULD render+publish
 	dp := &fakeOverlayDP{}
@@ -561,8 +592,9 @@ func TestActuateRouteOverlaySkipsWhenResetting(t *testing.T) {
 	if exec.ReloadCalls != 0 {
 		t.Fatalf("frr.conf was re-rendered during a factory reset (ReloadCalls=%d): erased routing-auth keys re-materialized", exec.ReloadCalls)
 	}
-	if len(dp.calls) != 0 {
-		t.Fatalf("dataplane actuated during a factory reset: calls = %v (must be none)", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 0 {
+		t.Fatalf("dataplane actuated during a factory reset: calls = %v (must be none)", calls)
 	}
 }
 
