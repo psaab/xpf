@@ -157,8 +157,9 @@ func TestNestedCommitConfirmedConcurrentConfirmRace17695(t *testing.T) {
 	}()
 	_, armErr := d.commitConfirmedAndApply(context.Background(), authority, 5, peerSyncNever)
 
-	if cerr := <-confirmDone; cerr != nil {
-		t.Logf("concurrent ConfirmCommitPrincipalAs: %v (no pending window by the time it ran is acceptable)", cerr)
+	confirmErr := <-confirmDone
+	if confirmErr != nil {
+		t.Logf("concurrent ConfirmCommitPrincipalAs: %v (no pending window by the time it ran is acceptable)", confirmErr)
 	}
 
 	target, pending, _, _ := s.RollbackTargetForArm()
@@ -166,31 +167,28 @@ func TestNestedCommitConfirmedConcurrentConfirmRace17695(t *testing.T) {
 	if target != nil {
 		targetHost = target.System.HostName
 	}
+	if confirmErr != nil {
+		t.Fatalf("concurrent ConfirmCommitPrincipalAs: %v", confirmErr)
+	}
 	if armErr == nil {
-		// A successful arm must be backed by a pending window whose
-		// rollback target was actually pre-flighted: healthy C1,
-		// never the un-preflighted feed-bound C2.
-		if !pending {
-			t.Fatalf("nested arm succeeded but no window is pending; confirm-cleared state was silently re-armed against %q", targetHost)
+		if pending {
+			t.Fatalf("nested arm succeeded but concurrent confirmation left a pending rollback window for %q", targetHost)
 		}
-		if targetHost == "c2-feed" {
-			t.Fatal("nested arm saved un-preflighted C2 (feed-bound, refused naming dyn1) as its rollback target; " +
-				"the daemon pre-flighted only the retained C1 that a concurrent confirm discarded (#17695)")
+		if got := s.ActiveConfig().System.HostName; got != "c3-extend" {
+			t.Fatalf("nested arm succeeded with no pending window but active config is %q, want c3-extend", got)
 		}
-		if targetHost != "c1-healthy" {
-			t.Fatalf("nested arm succeeded with rollback target %q, want retained healthy c1-healthy", targetHost)
-		}
+		t.Log("nested arm promoted before confirmation; confirmation cleared the window")
 		return
 	}
-	// A refused arm is the other safe outcome, provided nothing was
-	// promoted and no window was armed against C2.
+	// Confirmation before promotion may refuse the arm, but it must leave the
+	// active config unchanged and the old window cleared.
 	if got := s.ActiveConfig().System.HostName; got != "c2-feed" {
 		t.Fatalf("refused nested arm promoted %q, want active unchanged at c2-feed (arm error: %v)", got, armErr)
 	}
-	if pending && targetHost == "c2-feed" {
-		t.Fatalf("refused nested arm still left a window saving un-preflighted C2 (arm error: %v)", armErr)
+	if pending {
+		t.Fatalf("nested arm was refused but left a pending rollback window for %q (arm error: %v)", targetHost, armErr)
 	}
-	t.Logf("nested arm refused under concurrent confirm (safe outcome): %v", armErr)
+	t.Logf("nested arm refused before promotion; confirmation completed: %v", armErr)
 }
 
 // TestNestedCommitConfirmedFirstCommitNilTarget17695 pins the fresh-store
