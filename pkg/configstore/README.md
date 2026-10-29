@@ -1978,8 +1978,9 @@ owned by the `journal/` subpackage.
   commit rows (such as `SyncApply`), timeout rollback, and bounded journal
   tails. A changed `config_sync` hash is a live-generation barrier so an
   older identical-content commit cannot claim a sync-produced active tree;
-  an equivalent sync creates no barrier. The live commit is 0 /`rollback 0`;
-  tree `rollback k` restores. `commit_confirm` and `auto_rollback` rows
+  a same-hash sync creates no barrier. The live commit is 0 /`rollback 0`;
+  k>=1 names the commit whose tree `rollback k` stages. `commit_confirm`
+  and `auto_rollback` rows
   have no label. Every
   confirmation path (explicit confirm, plain commit, HA sync
   supersede, RG demotion) journals one `commit_confirm` row with its
