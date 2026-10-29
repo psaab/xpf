@@ -452,6 +452,7 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		clear func(*cluster.Manager)
+		async bool
 	}{
 		{
 			name:  "heartbeat prunes peer RG0",
@@ -460,6 +461,11 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 		{
 			name:  "peer heartbeat liveness expires",
 			clear: func(cm *cluster.Manager) { cm.ClearPeerHeartbeatLiveness() },
+		},
+		{
+			name:  "scheduled retry is asynchronous and coalesced",
+			clear: func(cm *cluster.Manager) { cm.ClearPeerGroupStateForTesting(0) },
+			async: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -473,11 +479,34 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 			d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
 
 			var localNames, initiated, terminated []string
-			d.ipsecActiveNamesFn = func() ([]string, error) {
-				return append([]string(nil), localNames...), nil
+			initiationDone := make(chan string, 2)
+			var activeReadStarted chan struct{}
+			var releaseActiveRead chan struct{}
+			releasedActiveRead := false
+			if tc.async {
+				activeReadStarted = make(chan struct{}, 2)
+				releaseActiveRead = make(chan struct{})
+				defer func() {
+					if !releasedActiveRead {
+						close(releaseActiveRead)
+					}
+				}()
+				d.ipsecActiveNamesFn = func() ([]string, error) {
+					select {
+					case activeReadStarted <- struct{}{}:
+					default:
+					}
+					<-releaseActiveRead
+					return append([]string(nil), localNames...), nil
+				}
+			} else {
+				d.ipsecActiveNamesFn = func() ([]string, error) {
+					return append([]string(nil), localNames...), nil
+				}
 			}
 			d.ipsecInitiateFn = func(name string) error {
 				initiated = append(initiated, name)
+				initiationDone <- name
 				localNames = append(localNames, name)
 				return nil
 			}
@@ -502,7 +531,49 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 				t.Fatalf("cleared peer RG0 fence = (%v, %v), want (false, false)",
 					primary, known)
 			}
-			d.retryOwedIPsecFallback()
+			if tc.async {
+				d.scheduleOwedIPsecFallbackRetry()
+				select {
+				case <-activeReadStarted:
+				case <-time.After(time.Second):
+					t.Fatal("scheduled fallback retry did not start")
+				}
+				d.scheduleOwedIPsecFallbackRetry()
+				select {
+				case <-activeReadStarted:
+					t.Fatal("a second retry pass started before the first completed")
+				case <-time.After(50 * time.Millisecond):
+				}
+				close(releaseActiveRead)
+				releasedActiveRead = true
+				select {
+				case name := <-initiationDone:
+					if name != "vpn-plain" {
+						t.Fatalf("scheduled retry initiated %q, want vpn-plain", name)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("scheduled fallback retry did not initiate")
+				}
+				ticker := time.NewTicker(time.Millisecond)
+				defer ticker.Stop()
+				deadline := time.NewTimer(time.Second)
+				defer deadline.Stop()
+				for {
+					d.ipsecFallbackMu.Lock()
+					running := d.ipsecFallbackRetryRunning
+					d.ipsecFallbackMu.Unlock()
+					if !running {
+						break
+					}
+					select {
+					case <-ticker.C:
+					case <-deadline.C:
+						t.Fatal("scheduled fallback retry did not finish")
+					}
+				}
+			} else {
+				d.retryOwedIPsecFallback()
+			}
 			if len(initiated) != 1 || initiated[0] != "vpn-plain" {
 				t.Fatalf("owed fallback retry initiated %v, want [vpn-plain]", initiated)
 			}
@@ -513,6 +584,14 @@ func TestUndeclaredRG0FallbackRetriesAfterPeerFenceClears17784(t *testing.T) {
 			d.retryOwedIPsecFallback()
 			if len(initiated) != 1 || len(terminated) != 0 {
 				t.Fatalf("retry plus late edge initiated=%v terminated=%v, want one initiate and no terminate",
+					initiated, terminated)
+			}
+			// A fresh ownership epoch is a new takeover: a leftover local
+			// duplicate must be belt-terminated and initiated again.
+			d.bumpIPsecRGOwnershipEpoch(1)
+			d.reinitiateIPsecSAsForRG(1)
+			if len(initiated) != 2 || len(terminated) != 1 {
+				t.Fatalf("new RG1 ownership epoch initiated=%v terminated=%v, want second initiate and one belt",
 					initiated, terminated)
 			}
 		})

@@ -419,10 +419,12 @@ type Daemon struct {
 	// be toggled from the apply path like its three sibling loops.
 	ipsecSASync    ipsecSASyncState
 	ipsecSANudgeCh chan struct{} // nudge: peer (re)connect -> IPsec SA re-advertise (#4385)
-	// #17784 retains single-data-RG fallback names fenced by a live peer
-	// RG0 declaration until the IPsec sync loop can retry after that fence clears.
-	ipsecFallbackMu sync.Mutex
-	ipsecFallbacks  map[string]ipsecFallbackRetryState
+	// #17784 retry state coalesces peer-fenced fallback names; the same mutex
+	// guards one asynchronous retry pass so fallback initiation never runs in
+	// the IPsec advertisement loop.
+	ipsecFallbackMu           sync.Mutex
+	ipsecFallbacks            map[string]ipsecFallbackRetryState
+	ipsecFallbackRetryRunning bool
 	// #4899 DHCP-lease-change IPsec rebind recovery state. When a DHCP
 	// renewal moves the kernel address an IPsec gateway is dynamically bound
 	// to (external-interface, no explicit local-address), the management-only

@@ -2921,12 +2921,17 @@ func (d *Daemon) nudgeIPsecSASync() {
 	}
 }
 
+// ipsecFallbackRetryState coalesces peer-fenced fallback retries with ownership
+// edges. ownershipEpoch scopes a successful attempt to one data-RG tenure.
 type ipsecFallbackRetryState struct {
-	owed          bool
-	inFlight      bool
-	lastInitiated time.Time
+	owed           bool
+	inFlight       bool
+	lastInitiated  time.Time
+	ownershipEpoch uint64
 }
 
+// Keep one successful initiate from being repeated while strongSwan's live
+// SA view catches up; the level-triggered retry reopens it after this interval.
 const ipsecFallbackInitiateGrace = 30 * time.Second
 
 func (d *Daemon) markIPsecFallbackOwed(names []string) {
@@ -2945,7 +2950,8 @@ func (d *Daemon) markIPsecFallbackOwed(names []string) {
 	d.ipsecFallbackMu.Unlock()
 }
 
-func (d *Daemon) claimIPsecFallback(name string, local map[string]bool, localKnown bool) bool {
+func (d *Daemon) claimIPsecFallback(name string, rg int, local map[string]bool, localKnown bool) bool {
+	ownershipEpoch := d.ipsecRGOwnershipEpoch(rg)
 	d.ipsecFallbackMu.Lock()
 	defer d.ipsecFallbackMu.Unlock()
 	if d.ipsecFallbacks == nil {
@@ -2954,6 +2960,11 @@ func (d *Daemon) claimIPsecFallback(name string, local map[string]bool, localKno
 	state := d.ipsecFallbacks[name]
 	if state.inFlight {
 		return false
+	}
+	if !state.lastInitiated.IsZero() && state.ownershipEpoch != ownershipEpoch {
+		// A new data-RG tenure must retain the #15194 belt, even if the old
+		// attempt's local SA is still present from the previous ownership.
+		state.lastInitiated = time.Time{}
 	}
 	if !state.lastInitiated.IsZero() {
 		if !localKnown {
@@ -2972,6 +2983,7 @@ func (d *Daemon) claimIPsecFallback(name string, local map[string]bool, localKno
 	}
 	state.inFlight = true
 	state.owed = false
+	state.ownershipEpoch = ownershipEpoch
 	d.ipsecFallbacks[name] = state
 	return true
 }
@@ -2989,6 +3001,26 @@ func (d *Daemon) finishIPsecFallback(name string, err error) {
 	}
 	d.ipsecFallbacks[name] = state
 	d.ipsecFallbackMu.Unlock()
+}
+
+// scheduleOwedIPsecFallbackRetry claims one retry pass before launching it so
+// ticker and reconnect nudges coalesce without waiting on swanctl.
+func (d *Daemon) scheduleOwedIPsecFallbackRetry() {
+	d.ipsecFallbackMu.Lock()
+	if d.ipsecFallbackRetryRunning || len(d.ipsecFallbacks) == 0 {
+		d.ipsecFallbackMu.Unlock()
+		return
+	}
+	d.ipsecFallbackRetryRunning = true
+	d.ipsecFallbackMu.Unlock()
+	go func() {
+		defer func() {
+			d.ipsecFallbackMu.Lock()
+			d.ipsecFallbackRetryRunning = false
+			d.ipsecFallbackMu.Unlock()
+		}()
+		d.retryOwedIPsecFallback()
+	}()
 }
 
 func (d *Daemon) refreshOwedIPsecFallbacksAfterGrace() {
@@ -3151,6 +3183,8 @@ func undeclaredRG0FallbackTopology(cc *config.ClusterConfig) (soleDataRG int, rg
 // The same loop retries an unanchored-RG0 name that was held back by a live
 // peer RG0 declaration; it is level-triggered so heartbeat pruning or liveness
 // expiry need not race a one-shot edge callback.
+// Fallback re-initiation is scheduled through a single-flight goroutine, so
+// per-name swanctl commands do not block this publisher loop.
 func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -3166,13 +3200,13 @@ func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 			return
 		case <-ticker.C:
 			lastFP = d.advertiseIPsecSAOnce(lastFP, false)
-			d.retryOwedIPsecFallback()
+			d.scheduleOwedIPsecFallbackRetry()
 		case <-d.ipsecSANudgeCh:
 			// A peer sync connection was (re)established: force a re-advertise
 			// of the CURRENT set so a standby that missed the one-shot empty
 			// during the gap (or retained a stale set across a blip) converges.
 			lastFP = d.advertiseIPsecSAOnce(lastFP, true)
-			d.retryOwedIPsecFallback()
+			d.scheduleOwedIPsecFallbackRetry()
 		}
 	}
 }
@@ -3261,7 +3295,7 @@ func (d *Daemon) reinitiateIPsecSAsForSelection(owned, fallbackOwned, fallbackBl
 	runnable := owned[:0]
 	for _, name := range owned {
 		if containsIPsecSAName(fallbackOwned, name) &&
-			!d.claimIPsecFallback(name, local, localKnown) {
+			!d.claimIPsecFallback(name, rg, local, localKnown) {
 			continue
 		}
 		runnable = append(runnable, name)
