@@ -3,6 +3,9 @@ xpf (0.0.0) unstable; urgency=medium
   * Config compiler: retain hard three-color policer structural errors on
     tolerant loads even when an independent burst-floor defect is downgraded
     to a warning (#17715).
+  * Config: translate aggregated-Ethernet media MTUs to protocol MTUs with
+    the existing 14-byte overhead for untagged Ethernet. `ae0 mtu 1514` now
+    compiles to protocol MTU 1500 (#17719).
   * Dataplane: release both blocked status polls from the #17728 regression
     harness cleanup so a fatal before the first release cannot strand the
     status loop (test-only follow-up to #18463).
@@ -22,6 +25,9 @@ xpf (0.0.0) unstable; urgency=medium
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
     the deferred VRF-to-VRF forward-import warning (#17705).
+  * Natshow: count persistent-binding sessions by translated endpoint,
+    protocol, and routing scope so distinct leases do not share display
+    counts. Preserve endpoint-only totals for legacy bindings (#17737).
 
   * DDNS: document that manager-side `markerSharedWithSibling` sets
     `KeepSiblingMarker` for `sendRemoveForward`; clarify that `namedMarker`
