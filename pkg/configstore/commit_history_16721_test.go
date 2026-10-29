@@ -444,6 +444,78 @@ func TestCommitHistoryLabelsSyncPush17748(t *testing.T) {
 	assertLabels17748(t, s)
 }
 
+// #17748 RED: after A, B, then a real SyncApply back to A's content,
+// active A was produced by sync, not by the older commit row. That row
+// belongs to retained slot 2; only the post-sync B row labels slot 1.
+func TestCommitHistoryLabelsSyncRestoresOldHash17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	commitHost16721(t, s, "two", "set-two")
+	if _, err := s.SyncApply("system {\n    host-name one;\n}\n", nil); err != nil {
+		t.Fatalf("SyncApply: %v", err)
+	}
+	if got := s.ActiveConfig().System.HostName; got != "one" {
+		t.Fatalf("premise: synced active host = %q, want one", got)
+	}
+	if got := len(s.ListHistory()); got != 3 {
+		t.Fatalf("premise: changed sync ladder depth = %d, want 3", got)
+	}
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-one"); got != 2 {
+		t.Errorf("#17748: pre-sync set-one row = %d, want retained slot 2 (not active 0)", got)
+	}
+	if got := slotOf16721(rows, "set-two"); got != 1 {
+		t.Errorf("#17748: set-two row = %d, want retained slot 1", got)
+	}
+	assertLabels17748(t, s)
+	if err := s.Rollback(1); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name two") {
+		t.Errorf("rollback 1 staged %q, want host two", staged)
+	}
+	if err := s.Rollback(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Rollback(2); err != nil {
+		t.Fatal(err)
+	}
+	if staged := s.ShowCandidate(); !strings.Contains(staged, "host-name one") {
+		t.Errorf("rollback 2 staged %q, want host one", staged)
+	}
+}
+
+// A same-content SyncApply is a control: it does not create a new rollback
+// generation and must not prevent the matching commit row from labeling 0.
+func TestCommitHistoryLabelsEquivalentSync17748(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.EnterConfigure(); err != nil {
+		t.Fatal(err)
+	}
+	commitHost16721(t, s, "one", "set-one")
+	depth := len(s.ListHistory())
+	if _, err := s.SyncApply("system {\n    host-name one;\n}\n", nil); err != nil {
+		t.Fatalf("SyncApply control: %v", err)
+	}
+	if got := len(s.ListHistory()); got != depth {
+		t.Fatalf("control: ladder depth = %d, want %d (equivalent sync pushes none)", got, depth)
+	}
+	rows, err := s.ListCommitHistoryRows(50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := slotOf16721(rows, "set-one"); got != 0 {
+		t.Errorf("control: set-one label = %d, want 0", got)
+	}
+	assertLabels17748(t, s)
+}
+
 // #17748 Tail(3) control: the sync-pushed generation between B and D
 // is absent from commit rows, and A is outside the bounded journal tail.
 // B must keep its actual retained slot 2 rather than being relabelled 1.

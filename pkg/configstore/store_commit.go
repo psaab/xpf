@@ -1760,10 +1760,13 @@ func (s *Store) ListCommitHistory(limit int) ([]*JournalEntry, error) {
 // reverted before the remaining rows are matched to the restored active
 // generation and ladder.
 //
-// This avoids positional skew from history pushes without commit rows
-// (SyncApply), journal tail truncation, or auto-rollback's unchanged ladder.
-// The rows still represent only a bounded journal tail; a generation with
-// no retained journal row cannot be labeled.
+// A config_sync that changes the active hash is a generation barrier: its
+// active generation has no commit row, so older same-hash commit rows may
+// match retained slots but cannot claim live slot 0. An equivalent sync
+// creates no barrier. This also avoids positional skew after sync pushes
+// without commit rows or journal-tail truncation. The rows remain limited
+// to the bounded journal tail; generations with no matching row stay
+// unlabelled.
 func (s *Store) ListCommitHistoryRows(limit int) ([]CommitHistoryRow, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1773,10 +1776,20 @@ func (s *Store) ListCommitHistoryRows(limit int) ([]CommitHistoryRow, error) {
 		return nil, err
 	}
 	var rows []CommitHistoryRow
+	syncBoundary := 0
+	activeHash := ""
 	for _, e := range entries {
 		switch e.Action {
-		case "commit", "commit_confirmed", "auto_rollback", "commit_confirm":
+		case "commit", "commit_confirmed", "auto_rollback":
 			rows = append(rows, CommitHistoryRow{Entry: e, RollbackSlot: -1})
+			activeHash = e.ConfigHash
+		case "commit_confirm":
+			rows = append(rows, CommitHistoryRow{Entry: e, RollbackSlot: -1})
+		case "config_sync":
+			if e.ConfigHash == "" || activeHash == "" || e.ConfigHash != activeHash {
+				syncBoundary = len(rows)
+			}
+			activeHash = e.ConfigHash
 		}
 	}
 
@@ -1801,22 +1814,24 @@ func (s *Store) ListCommitHistoryRows(limit int) ([]CommitHistoryRow, error) {
 		}
 	}
 
-	// Consume one matching row per real config generation. Empty hashes
-	// and unreadable tombstone slots deliberately cannot acquire labels.
-	labelTree := func(tree *config.ConfigTree, slot int) {
+	// Consume one matching row per real config generation. An active-tree
+	// match must be at or after the latest changed-sync boundary; older
+	// rows cannot stand in for a sync-produced active generation.
+	// Empty hashes and unreadable tombstone slots cannot be labeled.
+	labelTree := func(tree *config.ConfigTree, slot, minimumRow int) {
 		hash := journalConfigHash(tree)
 		matches := byHash[hash]
-		if hash == "" || len(matches) == 0 {
+		if hash == "" || len(matches) == 0 || matches[0] < minimumRow {
 			return
 		}
 		rows[matches[0]].RollbackSlot = slot
 		byHash[hash] = matches[1:]
 	}
-	labelTree(s.active, 0)
+	labelTree(s.active, 0, syncBoundary)
 	for slot := 1; slot <= s.history.Len(); slot++ {
 		entry, err := s.history.Get(slot - 1)
 		if err == nil && entry != nil {
-			labelTree(entry.Config, slot)
+			labelTree(entry.Config, slot, 0)
 		}
 	}
 	return rows, nil

@@ -1976,7 +1976,9 @@ owned by the `journal/` subpackage.
   tree and retained rollback ladder; it emits a label only for a matching
   generation. This keeps labels aligned after history pushes without
   commit rows (such as `SyncApply`), timeout rollback, and bounded journal
-  tails. The live commit is 0 /`rollback 0`; k>=1 names the commit whose
+  tails. A changed `config_sync` hash is a live-generation barrier so an
+  older identical-content commit cannot claim a sync-produced active tree;
+  an equivalent sync creates no barrier. The live commit is 0 /`rollback 0`;
   tree `rollback k` restores. `commit_confirm` and `auto_rollback` rows
   have no label. Every
   confirmation path (explicit confirm, plain commit, HA sync
