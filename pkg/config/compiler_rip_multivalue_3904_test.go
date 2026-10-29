@@ -37,6 +37,9 @@ func TestRIPMultiValueFlat(t *testing.T) {
 	if got, want := rip.Redistribute, []string{"static", "connected", "pa", "pb"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("RIP.Redistribute = %v, want %v (bracket list truncated)", got, want)
 	}
+	if got, want := rip.GlobalRedistribute, []string{"static", "connected"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("RIP.GlobalRedistribute = %v, want only top-level exports %v", got, want)
+	}
 	// neighbor [ge-0/0/1 ge-0/0/2] + group neighbor [ge-0/0/5 ge-0/0/6] both
 	// feed RIP.Interfaces.
 	if got, want := rip.Interfaces, []string{"ge-0/0/1", "ge-0/0/2", "ge-0/0/5", "ge-0/0/6"}; !reflect.DeepEqual(got, want) {
@@ -79,6 +82,9 @@ protocols {
 	}
 	if got, want := rip.Redistribute, []string{"static", "connected", "pa", "pb"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("hierarchical RIP.Redistribute = %v, want %v", got, want)
+	}
+	if got, want := rip.GlobalRedistribute, []string{"static", "connected"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("hierarchical RIP.GlobalRedistribute = %v, want only top-level exports %v", got, want)
 	}
 	if got, want := rip.Interfaces, []string{"ge-0/0/1", "ge-0/0/2"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("hierarchical RIP.Interfaces = %v, want %v", got, want)

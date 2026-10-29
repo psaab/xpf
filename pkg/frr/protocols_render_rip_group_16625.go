@@ -179,9 +179,25 @@ func (m *Manager) nextRIPGroupIndex16625() int {
 // deny-all (fail closed, no leak of native routes). Connected
 // enrolment itself comes from the ordinary union chain above
 // (resolveRedistributeChainCluster15158 on rip.Redistribute).
+// #17688: grouped redistribution is the UNION of independently
+// evaluated group export chains, not a single ordered chain. The
+// compiler also preserves top-level exports separately so their
+// legacy chain remains independent from group exports. With no
+// groups, Redistribute keeps its existing ordered-chain semantics.
+func (m *Manager) renderRIPGroupPool17688(rip *config.RIPConfig, po *config.PolicyOptionsConfig, clusterMode bool, metrics *qnhMetricScope11447) string {
+	if len(rip.Groups) == 0 {
+		return m.resolveRedistributeChainCluster15158(rip.Redistribute, po, "rip", clusterMode, qnhMetricScopeForDaemon11447(metrics, "rip"))
+	}
+	pool := m.ripGroupPool17688(rip, po, qnhMetricScopeForDaemon11447(metrics, "rip"))
+	for i := range pool.entries {
+		pool.entries[i].clusterMode = clusterMode
+	}
+	return formatRedistEntries(pool.entries)
+}
+
 func (m *Manager) renderRIPPerGroup16625(rip *config.RIPConfig, enrolled []string, policyOptions *config.PolicyOptionsConfig, clusterMode bool, qnhMetrics *qnhMetricScope11447, instanceIdx int) (defs string, body string) {
 	var db, bb strings.Builder
-	bb.WriteString(m.resolveRedistributeChainCluster15158(rip.Redistribute, policyOptions, "rip", clusterMode, qnhMetricScopeForDaemon11447(qnhMetrics, "rip")))
+	bb.WriteString(m.renderRIPGroupPool17688(rip, policyOptions, clusterMode, qnhMetrics))
 	chains := ripGroupChains16625(rip, enrolled)
 	for idx, cg := range chains {
 		var v4, v6 []string
@@ -466,7 +482,12 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 			if len(termEntries) == 0 {
 				// Terminal term matching EVERYTHING.
 				if isAccept {
-					return nil, nil, false
+					// A match-all accept is exactly representable:
+					// retain prior terminal denies/permits, then
+					// permit the rest of each address family.
+					add("0.0.0.0/0 le 32", false)
+					add("::/0 le 128", true)
+					return ripSplitEntries16625(entries)
 				}
 				// Reject-all: truncates the chain. Entries so
 				// far stand; nothing later can accept (first
@@ -529,7 +550,9 @@ func ripGroupAcceptedPrefixes16625(chain []string, po *config.PolicyOptionsConfi
 		}
 		// Statement default action.
 		if ps.DefaultAction == "accept" {
-			return nil, nil, false
+			add("0.0.0.0/0 le 32", false)
+			add("::/0 le 128", true)
+			return ripSplitEntries16625(entries)
 		}
 		if ps.DefaultAction == "reject" {
 			// F1: explicit reject terminates the chain —

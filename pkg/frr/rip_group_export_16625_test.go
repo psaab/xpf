@@ -415,3 +415,155 @@ func TestRIPPerGroupBoundaryWithDisjointLaterAcceptPreservesSibling16625(t *test
 		t.Errorf("disjoint later accept must not deny-all the group:\n%s", got)
 	}
 }
+
+// #17688 defect 1: group exports are independent chains unioned, not
+// one flattened ordered chain. CUSTOMERS' export is
+// prefix-restricted with a downstream accept in its own policy? No:
+// CUSTOMERS = [GUARD (default-reject, accepts nothing for static),
+// DEFAULT-ONLY]; CORE = [ALL-STATIC]. A flattened ordered chain
+// terminates at GUARD's default reject and starves ALL-STATIC, so
+// 192.168.50.0/24 never enters the pool and CORE loses it. Each
+// group's chain must be evaluated independently: GUARD's reject
+// terminates only CUSTOMERS' evaluation.
+func TestRIPPerGroupIndependentChainsUnionBothOrders17688(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"GUARD": {Name: "GUARD", DefaultAction: "reject"},
+			"DEFAULT-ONLY": {Name: "DEFAULT-ONLY", Terms: []*config.PolicyTerm{
+				{Name: "t1", RouteFilters: []*config.RouteFilter{{Prefix: "0.0.0.0/0", MatchType: "exact"}}, Action: "accept"},
+			}},
+			"ALL-STATIC": {Name: "ALL-STATIC", Terms: []*config.PolicyTerm{
+				{Name: "t1", RouteFilters: []*config.RouteFilter{{Prefix: "192.168.50.0/24", MatchType: "exact"}}, Action: "accept"},
+			}},
+		},
+	}
+	mk := func(customersFirst bool) *config.RIPConfig {
+		cust := &config.RIPGroup{Name: "CUSTOMERS", Interfaces: []string{"ge-0-0-1"}, Export: []string{"GUARD", "DEFAULT-ONLY"}}
+		core := &config.RIPGroup{Name: "CORE", Interfaces: []string{"ge-0-0-2"}, Export: []string{"ALL-STATIC"}}
+		rip := &config.RIPConfig{
+			Interfaces:   []string{"ge-0-0-1", "ge-0-0-2"},
+			Redistribute: []string{"GUARD", "DEFAULT-ONLY", "ALL-STATIC"},
+		}
+		if customersFirst {
+			rip.Groups = []*config.RIPGroup{cust, core}
+		} else {
+			rip.Groups = []*config.RIPGroup{core, cust}
+			rip.Redistribute = []string{"ALL-STATIC", "GUARD", "DEFAULT-ONLY"}
+		}
+		return rip
+	}
+	for _, customersFirst := range []bool{true, false} {
+		m := New()
+		got := m.generateProtocols(nil, nil, nil, mk(customersFirst), nil, "", 0, po, nil)
+		custList := listForIface16625(t, got, "ge-0-0-1")
+		coreList := listForIface16625(t, got, "ge-0-0-2")
+		if permits := listPermits16625(got, coreList); len(permits) != 1 || permits[0] != "192.168.50.0/24" {
+			t.Errorf("customersFirst=%v: CORE permits=%v, want [192.168.50.0/24] — earlier group's default-reject starved the pool:\n%s", customersFirst, permits, got)
+		}
+		// GUARD default-rejects before DEFAULT-ONLY runs inside
+		// CUSTOMERS' own chain, so CUSTOMERS accepts nothing.
+		if permits := listPermits16625(got, custList); len(permits) != 0 {
+			t.Errorf("customersFirst=%v: CUSTOMERS permits=%v, want none (its own chain rejects) — never 192.168.50.0/24:\n%s", customersFirst, permits, got)
+		}
+	}
+}
+
+// #17688 defect 1 route-admission witness: through the real managed
+// section (which defines the composed/OR route-maps), the static
+// route-map admitted set must contain 192.168.50.0/24 in both orders.
+// Textual prefix-list permits alone do not prove the route enters
+// the pool, so evaluate the attached map's sequences semantically.
+func TestRIPPerGroupUnionPoolAdmitsCORE17688(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"GUARD": {Name: "GUARD", DefaultAction: "reject"},
+			"DEFAULT-ONLY": {Name: "DEFAULT-ONLY", Terms: []*config.PolicyTerm{
+				{Name: "t1", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: "0.0.0.0/0", MatchType: "exact"}}, Action: "accept"},
+			}},
+			"ALL-STATIC": {Name: "ALL-STATIC", Terms: []*config.PolicyTerm{
+				{Name: "t1", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: "192.168.50.0/24", MatchType: "exact"}}, Action: "accept"},
+			}},
+		},
+	}
+	for _, customersFirst := range []bool{true, false} {
+		cust := &config.RIPGroup{Name: "CUSTOMERS", Interfaces: []string{"ge-0-0-1"}, Export: []string{"GUARD", "DEFAULT-ONLY"}}
+		core := &config.RIPGroup{Name: "CORE", Interfaces: []string{"ge-0-0-2"}, Export: []string{"ALL-STATIC"}}
+		rip := &config.RIPConfig{
+			Interfaces:   []string{"ge-0-0-1", "ge-0-0-2"},
+			Redistribute: []string{"GUARD", "DEFAULT-ONLY", "ALL-STATIC"},
+		}
+		if customersFirst {
+			rip.Groups = []*config.RIPGroup{cust, core}
+		} else {
+			rip.Groups = []*config.RIPGroup{core, cust}
+			rip.Redistribute = []string{"ALL-STATIC", "GUARD", "DEFAULT-ONLY"}
+		}
+		fc := &FullConfig{PolicyOptions: po, RIP: rip}
+		got := New().buildManagedSection(fc)
+		mapName := ""
+		for _, line := range strings.Split(got, "\n") {
+			f := strings.Fields(strings.TrimSpace(line))
+			if len(f) == 4 && f[0] == "redistribute" && f[1] == "static" && f[2] == "route-map" {
+				mapName = f[3]
+			}
+		}
+		if mapName == "" {
+			t.Fatalf("customersFirst=%v: no static redistribute route-map in managed section:\n%s", customersFirst, got)
+		}
+		seqs := parseOrSeqs16868(t, got, mapName)
+		if v := evalRoute16868(t, seqs, "192.168.50.0/24", false); v != "permit" {
+			t.Errorf("customersFirst=%v: pool route-map %s verdict for 192.168.50.0/24 = %q, want permit (CORE route starved):\n%s", customersFirst, mapName, v, got)
+		}
+	}
+}
+
+// #17688: protocol-qualified accepts remain fail-closed. FRR's RIP
+// outbound distribute-list accepts prefix/access lists only; a
+// prefix-only gate would also admit connected and RIP-learned native
+// routes that bypass the redistribution route-map.
+func TestRIPPerGroupProtocolQualifiedAcceptFailsClosed17688(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "t1", FromProtocols: []string{"static"}, RouteFilters: []*config.RouteFilter{{Prefix: "192.168.50.0/24", MatchType: "exact"}}, Action: "accept"},
+			}},
+		},
+	}
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P"}}},
+	}
+	got := New().generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	if permits := listPermits16625(got, list); len(permits) != 0 {
+		t.Errorf("protocol-qualified accept must stay fail-closed, permits=%v:\n%s", permits, got)
+	}
+	if !strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("protocol-qualified accept must render explicit deny-all:\n%s", got)
+	}
+}
+
+func TestRIPPerGroupMatchAllAcceptPermits17688(t *testing.T) {
+	po := &config.PolicyOptionsConfig{
+		PolicyStatements: map[string]*config.PolicyStatement{
+			"P": {Name: "P", Terms: []*config.PolicyTerm{
+				{Name: "t1", Action: "accept"},
+			}},
+		},
+	}
+	m := New()
+	rip := &config.RIPConfig{
+		Interfaces:   []string{"ge-0-0-1"},
+		Redistribute: []string{"P"},
+		Groups:       []*config.RIPGroup{{Name: "G", Interfaces: []string{"ge-0-0-1"}, Export: []string{"P"}}},
+	}
+	got := m.generateProtocols(nil, nil, nil, rip, nil, "", 0, po, nil)
+	list := listForIface16625(t, got, "ge-0-0-1")
+	if permits := listPermits16625(got, list); len(permits) != 1 || permits[0] != "0.0.0.0/0 le 32" {
+		t.Errorf("match-all accept must permit any prefix (0.0.0.0/0 le 32), permits=%v:\n%s", permits, got)
+	}
+	if strings.Contains(got, "ip prefix-list "+list+" seq 5 deny 0.0.0.0/0 le 32") {
+		t.Errorf("match-all accept must not render deny-all:\n%s", got)
+	}
+}
