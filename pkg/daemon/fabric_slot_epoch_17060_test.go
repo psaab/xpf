@@ -1882,8 +1882,8 @@ func TestApplyHeartbeatRestartWaitsForLifecycleClaim17060(t *testing.T) {
 // returns through its generation-mismatch early return. Preflight must clear
 // BOTH slots, refresh channels, and both constraints before successor
 // publication — including slot 1 when the successor removed fab1 and has no
-// slot-1 populate loop. This also pins the daemon_ha.go fabric readiness
-// predicate, which must not treat a stale predecessor slot as ready.
+// slot-1 populate loop. This asserts takeover readiness through the real
+// `reconcileRGState` path, not only the slot latch predicate.
 func TestSuccessorPreflightClearsPredecessorFabricSlots18438(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -1893,15 +1893,46 @@ func TestSuccessorPreflightClearsPredecessorFabricSlots18438(t *testing.T) {
 		{name: "fab1removed", successorCh: [2]chan struct{}{make(chan struct{}, 1), nil}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			d := &Daemon{
-				fabricSlots: [2]fabricSlot{{name: "fabric"}, {name: "fabric1"}},
-			}
+			d := fab1ReadyDaemon(t)
+			d.fabricSlots[0].name, d.fabricSlots[1].name = "fabric", "fabric1"
 			oldCtx, _, oldCancel := d.beginClusterCommsEpoch(context.Background())
 			t.Cleanup(oldCancel)
 
 			// Seed predecessor slots populated with identity and helper
 			// constraints, plus the predecessor refresh channels.
 			seedFabricSlots17060(t, d)
+			// Exercise takeover readiness with a live peer before teardown:
+			// the populated predecessor must make this fully-ready fixture
+			// ready, proving the fabric gate is active in this scenario.
+			d.cluster.HandlePeerHeartbeatForTesting(&cluster.HeartbeatPacket{
+				NodeID:    1,
+				ClusterID: 1,
+				Groups: []cluster.HeartbeatGroup{{
+					GroupID:  0,
+					Priority: 100,
+					Weight:   100,
+					State:    uint8(cluster.StatePrimary),
+				}},
+			})
+			if !d.cluster.PeerAlive() {
+				t.Fatal("precondition: peer must be alive for fabric readiness to be evaluated")
+			}
+			if ready, reasons := rgReadiness(t, d); !ready {
+				t.Fatalf("precondition: populated predecessor should satisfy takeover readiness: %v", reasons)
+			}
+			assertFabricNotReady := func(stage string) {
+				ready, reasons := rgReadiness(t, d)
+				if ready {
+					t.Errorf("%s left stale predecessor fabric ready through reconcileRGState (#18438)", stage)
+					return
+				}
+				for _, reason := range reasons {
+					if reason == "fabric forwarding path not ready" {
+						return
+					}
+				}
+				t.Errorf("%s blocked readiness for another reason, not the fabric gate: %v", stage, reasons)
+			}
 
 			// Block the predecessor populate join.
 			d.clusterCommsMu.Lock()
@@ -1961,13 +1992,10 @@ func TestSuccessorPreflightClearsPredecessorFabricSlots18438(t *testing.T) {
 					t.Errorf("slot %d predecessor probe/log state survived successor preflight (#18438)", slot)
 				}
 			}
-			// This is the fabric-ready expression used by the takeover gate
-			// in daemon_ha.go; no stale slot may satisfy it.
-			populated := d.fabricSlots[0].populated || d.fabricSlots[1].populated
 			d.fabricMu.RUnlock()
-			if populated {
-				t.Error("stale predecessor slot still satisfies the takeover fabric readiness gate (#18438)")
-			}
+			// Exercise the production readiness path while the old stop is
+			// still blocked; removed fab1 must no longer keep the RG ready.
+			assertFabricNotReady("successor preflight")
 
 			chans := d.snapshotFabricRefreshChans()
 			if chans[0] != nil || chans[1] != nil {
@@ -2008,12 +2036,7 @@ func TestSuccessorPreflightClearsPredecessorFabricSlots18438(t *testing.T) {
 			if got := d.snapshotFabricRefreshChans(); got != tc.successorCh {
 				t.Errorf("superseded stop changed successor refresh channels: got=%v want=%v (#18438)", got, tc.successorCh)
 			}
-			d.fabricMu.RLock()
-			populated = d.fabricSlots[0].populated || d.fabricSlots[1].populated
-			d.fabricMu.RUnlock()
-			if populated {
-				t.Error("superseded stop left a stale slot satisfying takeover fabric readiness (#18438)")
-			}
+			assertFabricNotReady("superseded stop return")
 		})
 	}
 }
