@@ -145,8 +145,9 @@ func TestReconcileRouteLeakSnapshotRepublishesOnChange(t *testing.T) {
 
 	d.reconcileRouteLeakSnapshot(&config.Config{}, nil)
 
-	if len(dp.calls) != 2 || dp.calls[0] != "publish" || dp.calls[1] != "bump" {
-		t.Fatalf("calls = %v, want [publish bump]", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 2 || calls[0] != "publish" || calls[1] != "bump" {
+		t.Fatalf("calls = %v, want [publish bump]", calls)
 	}
 }
 
@@ -161,12 +162,13 @@ func TestReconcileRouteLeakSnapshotSkipsBumpOnDuplicate(t *testing.T) {
 
 	d.reconcileRouteLeakSnapshot(&config.Config{}, nil)
 
-	if len(dp.calls) != 1 || dp.calls[0] != "publish" {
-		t.Fatalf("calls = %v, want exactly [publish]", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "publish" {
+		t.Fatalf("calls = %v, want exactly [publish]", calls)
 	}
-	for _, c := range dp.calls {
+	for _, c := range calls {
 		if c == "bump" {
-			t.Fatalf("calls = %v: FIB generation bumped after a duplicate-skip", dp.calls)
+			t.Fatalf("calls = %v: FIB generation bumped after a duplicate-skip", calls)
 		}
 	}
 }
