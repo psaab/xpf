@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,8 +71,10 @@ func withRedirectSysctlRoot(t *testing.T, initial string) (root, v4Fwd, v6Fwd st
 	origNoRedirects := noRedirectsActive.Load()
 	noRedirectsActive.Store(false)
 	origRoot, origV4, origV6 := redirectSysctlRoot, ipv4ForwardSysctlPath, ipv6ForwardSysctlPath
+	origSnapshot := redirectKnobSnapshotFile
 	origMarker := applianceMarkerFile
 	redirectSysctlRoot = root
+	redirectKnobSnapshotFile = filepath.Join(dir, "var", "lib", "xpf", "no-redirects-capture.json")
 	ipv4ForwardSysctlPath, ipv6ForwardSysctlPath = v4Fwd, v6Fwd
 	applianceMarkerFile = filepath.Join(dir, "appliance")
 	if err := os.WriteFile(applianceMarkerFile, []byte("appliance\n"), 0o644); err != nil {
@@ -78,6 +82,7 @@ func withRedirectSysctlRoot(t *testing.T, initial string) (root, v4Fwd, v6Fwd st
 	}
 	t.Cleanup(func() {
 		redirectSysctlRoot, ipv4ForwardSysctlPath, ipv6ForwardSysctlPath = origRoot, origV4, origV6
+		redirectKnobSnapshotFile = origSnapshot
 		applianceMarkerFile = origMarker
 		noRedirectsActive.Store(origNoRedirects)
 		redirectCaptureMu.Lock()
@@ -358,4 +363,168 @@ func TestNoRedirectsRestorePreservesForeignHardening16779(t *testing.T) {
 	assertKnobs(t, []string{filepath.Join(root, "ipv4", "conf", "r0", "send_redirects")}, "0", "r0 send")
 	assertKnobs(t, []string{filepath.Join(root, "ipv6", "conf", "all", "accept_redirects")}, "1", "ipv6 all restored to captured 1")
 	assertKnobs(t, []string{filepath.Join(root, "ipv4", "conf", "all", "send_redirects")}, "1", "ipv4 send restored to captured 1")
+}
+
+func simulateRedirectDaemonRestart() {
+	redirectCaptureMu.Lock()
+	capturedRedirects = nil
+	redirectCaptureMu.Unlock()
+	noRedirectsActive.Store(false)
+}
+
+func persistedRedirectCapture(t *testing.T) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(redirectKnobSnapshotFile)
+	if err != nil {
+		t.Fatalf("read persisted redirect capture: %v", err)
+	}
+	values, err := parseRedirectKnobSnapshot(data)
+	if err != nil {
+		t.Fatalf("validate persisted redirect capture: %v", err)
+	}
+	return values
+}
+
+// The load-bearing restart sequence is restart -> active re-assert -> delete:
+// the second active reconcile must load the original snapshot before it sees
+// the already-zeroed live knobs and must not replace that snapshot.
+func TestNoRedirectsCaptureSurvivesRestart17792(t *testing.T) {
+	root, _, _ := withRedirectSysctlRoot(t, "1")
+	r0Send := filepath.Join(root, "ipv4", "conf", "r0", "send_redirects")
+	r0V6Accept := filepath.Join(root, "ipv6", "conf", "r0", "accept_redirects")
+	for path, value := range map[string]string{r0Send: "0", r0V6Accept: "0"} {
+		if err := os.WriteFile(path, []byte(value+"\n"), 0o644); err != nil {
+			t.Fatalf("seed foreign hardening at %s: %v", path, err)
+		}
+	}
+
+	reconcileNoRedirects(true)
+	assertKnobs(t, noRedirectKnobPaths(root), "0", "after first active assertion")
+	if got := persistedRedirectCapture(t); got[r0Send] != "0" || got[r0V6Accept] != "0" {
+		t.Fatalf("persisted capture lost foreign values: send=%q ipv6-accept=%q", got[r0Send], got[r0V6Accept])
+	}
+
+	simulateRedirectDaemonRestart()
+	reconcileNoRedirects(true)
+	assertKnobs(t, noRedirectKnobPaths(root), "0", "after restart active re-assert")
+	if got := persistedRedirectCapture(t); got[r0Send] != "0" || got[r0V6Accept] != "0" {
+		t.Fatalf("active re-assert replaced original capture: send=%q ipv6-accept=%q", got[r0Send], got[r0V6Accept])
+	}
+
+	reconcileNoRedirects(false)
+	for _, path := range noRedirectKnobPaths(root) {
+		want := "1"
+		if isIPv4AcceptRedirects(path) {
+			want = "0"
+		}
+		if path == r0Send || path == r0V6Accept {
+			want = "0"
+		}
+		assertKnobs(t, []string{path}, want, "after restart -> re-assert -> delete")
+	}
+	if _, err := os.Lstat(redirectKnobSnapshotFile); !os.IsNotExist(err) {
+		t.Fatalf("successful delete left persisted capture: %v", err)
+	}
+	redirectCaptureMu.Lock()
+	stillCaptured := capturedRedirects != nil
+	redirectCaptureMu.Unlock()
+	if stillCaptured {
+		t.Fatal("successful delete retained the in-memory capture")
+	}
+}
+
+func TestNoRedirectsDeleteAfterRestartLoadsCapture17792(t *testing.T) {
+	root, _, _ := withRedirectSysctlRoot(t, "1")
+	r0Send := filepath.Join(root, "ipv4", "conf", "r0", "send_redirects")
+	if err := os.WriteFile(r0Send, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reconcileNoRedirects(true)
+	simulateRedirectDaemonRestart()
+
+	reconcileNoRedirects(false)
+	assertKnobs(t, []string{r0Send}, "0", "after direct restart -> delete")
+	if _, err := os.Lstat(redirectKnobSnapshotFile); !os.IsNotExist(err) {
+		t.Fatalf("successful direct delete left persisted capture: %v", err)
+	}
+}
+
+func TestNoRedirectsCorruptCaptureWarnsAndRecaptures17792(t *testing.T) {
+	root, _, _ := withRedirectSysctlRoot(t, "1")
+	r0Send := filepath.Join(root, "ipv4", "conf", "r0", "send_redirects")
+	if err := os.WriteFile(r0Send, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(redirectKnobSnapshotFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(redirectKnobSnapshotFile, []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	priorLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(priorLogger) })
+
+	reconcileNoRedirects(true)
+	if !strings.Contains(logs.String(), "invalid persisted redirect knob capture; recapturing") {
+		t.Fatalf("corrupt capture did not warn before recapture: %s", logs.String())
+	}
+	reconcileNoRedirects(false)
+	assertKnobs(t, []string{r0Send}, "0", "after corrupt-snapshot recapture and delete")
+	if _, err := os.Lstat(redirectKnobSnapshotFile); !os.IsNotExist(err) {
+		t.Fatalf("successful delete left recaptured snapshot: %v", err)
+	}
+}
+
+func TestNoRedirectsFailedRestoreRetainsCaptureForRetry17792(t *testing.T) {
+	root, _, _ := withRedirectSysctlRoot(t, "1")
+	r0Send := filepath.Join(root, "ipv4", "conf", "r0", "send_redirects")
+	if err := os.WriteFile(r0Send, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reconcileNoRedirects(true)
+	backup := r0Send + ".saved"
+	if err := os.Rename(r0Send, backup); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(r0Send, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reconcileNoRedirects(false)
+	if _, err := os.Stat(redirectKnobSnapshotFile); err != nil {
+		t.Fatalf("failed restore cleared the persisted capture: %v", err)
+	}
+	redirectCaptureMu.Lock()
+	stillCaptured := capturedRedirects != nil
+	redirectCaptureMu.Unlock()
+	if !stillCaptured {
+		t.Fatal("failed restore cleared the in-memory capture")
+	}
+
+	if err := os.Remove(r0Send); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backup, r0Send); err != nil {
+		t.Fatal(err)
+	}
+	reconcileNoRedirects(false)
+	assertKnobs(t, []string{r0Send}, "0", "after retried restore")
+	if _, err := os.Lstat(redirectKnobSnapshotFile); !os.IsNotExist(err) {
+		t.Fatalf("successful retried restore left persisted capture: %v", err)
+	}
+}
+
+func TestParseRedirectKnobSnapshotRejectsInvalid17792(t *testing.T) {
+	for _, input := range []string{
+		`{"version":2,"values":{"ipv4/conf/r0/send_redirects":"1"}}`,
+		`{"version":1,"values":{"../../outside":"1"}}`,
+		`{"version":1,"values":{"ipv4/conf/r0/send_redirects":"2"}}`,
+		`{"version":1,"values":{}}`,
+	} {
+		if _, err := parseRedirectKnobSnapshot([]byte(input)); err == nil {
+			t.Errorf("parseRedirectKnobSnapshot(%q) unexpectedly succeeded", input)
+		}
+	}
 }
