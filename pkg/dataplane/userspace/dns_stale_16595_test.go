@@ -1,9 +1,12 @@
 package userspace
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
@@ -266,5 +269,43 @@ func TestJunosHostProgramSurvivesDNSFailure16595(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("stale dns prefix 10.0.0.9/32 must render in the junos-host program")
+	}
+}
+
+const dnsQuarantineFixture17722 = "../../../testdata/dns_quarantine_17722.json"
+
+// TestDNSQuarantineSnapshotFixtureFresh17722 pins the full ConfigSnapshot that
+// Rust parses in policy_tests.rs, so the cross-language regression exercises
+// the exact Go builder wire rather than a hand-transcribed snapshot.
+func TestDNSQuarantineSnapshotFixtureFresh17722(t *testing.T) {
+	cfg := dnsCfg16595(&config.Address{
+		Name:            "bad",
+		DNSName:         "bad.example.com",
+		DNSLookupFailed: true,
+	})
+	snapshot, err := buildSnapshot(cfg, config.UserspaceConfig{}, 1, 0)
+	if err != nil {
+		t.Fatalf("buildSnapshot: %v", err)
+	}
+	// GeneratedAt is an envelope timestamp ignored by policy parsing.
+	snapshot.GeneratedAt = time.Time{}
+	got, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got = append(got, '\n')
+	if os.Getenv("UPDATE_17722") == "1" {
+		if err := os.WriteFile(dnsQuarantineFixture17722, got, 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+		return
+	}
+	want, err := os.ReadFile(dnsQuarantineFixture17722)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("Go builder DNS quarantine snapshot drifted from %s; regenerate with UPDATE_17722=1 and rerun Go/Rust cells",
+			dnsQuarantineFixture17722)
 	}
 }

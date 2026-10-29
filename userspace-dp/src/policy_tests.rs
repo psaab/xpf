@@ -1625,6 +1625,75 @@ fn all_unparseable_terms_fail_closed_with_integrity_error() {
 }
 
 #[test]
+fn go_emitted_dns_quarantine_snapshot_accepts_and_enforces_sibling_17722() {
+    const WIRE: &str = include_str!("../../testdata/dns_quarantine_17722.json");
+    let snapshot: ConfigSnapshot = serde_json::from_str(WIRE).expect("Go-built snapshot decodes");
+    assert_eq!(snapshot.policies.len(), 2, "fixture must contain deny and sibling");
+    let quarantine_index = snapshot
+        .policies
+        .iter()
+        .position(|rule| rule.name == "block-bad")
+        .expect("Go fixture contains unresolved-DNS deny");
+    let sibling_index = snapshot
+        .policies
+        .iter()
+        .position(|rule| rule.name == "permit-good")
+        .expect("Go fixture contains valid sibling permit");
+    assert!(snapshot.policies[quarantine_index].application_terms.iter().any(
+        |term| term.name == DNS_UNAVAILABLE_DESTINATION_QUARANTINE_SENTINEL
+            && term.protocol == DNS_UNAVAILABLE_DESTINATION_QUARANTINE_SENTINEL
+    ));
+    let quarantine_policy_id = snapshot.policies[quarantine_index].policy_id;
+    let sibling_policy_id = snapshot.policies[sibling_index].policy_id;
+    let zone_id = |name: &str| {
+        snapshot
+            .zones
+            .iter()
+            .find(|zone| zone.name == name)
+            .unwrap_or_else(|| panic!("Go fixture lacks zone {name}"))
+            .id
+    };
+    let trust_zone = zone_id("trust");
+    let untrust_zone = zone_id("untrust");
+    let dmz_zone = zone_id("dmz");
+
+    let mut prepared = PreparedPolicyState::parse_snapshot(
+        &snapshot,
+        &PolicyCounterStore::default(),
+        std::sync::Arc::new(SchedulerHeartbeatLease::default()),
+    )
+    .expect("the Go-built DNS marker must quarantine one rule, not reject its snapshot");
+    let state = prepared.take_state();
+    assert_eq!(state.rules.len(), 2, "Rust must retain both Go-built rules");
+    let denied = evaluate_policy_result_with_len(
+        &state,
+        trust_zone,
+        untrust_zone,
+        "10.0.61.100".parse().expect("src"),
+        "203.0.113.55".parse().expect("unresolved destination"),
+        PROTO_TCP,
+        40000,
+        443,
+        64,
+    );
+    assert_eq!(denied.action, PolicyAction::Deny);
+    assert_eq!(denied.policy_id, quarantine_policy_id);
+    let permitted = evaluate_policy_result_with_len(
+        &state,
+        trust_zone,
+        dmz_zone,
+        "10.0.61.100".parse().expect("src"),
+        "10.0.0.5".parse().expect("sibling destination"),
+        PROTO_TCP,
+        40000,
+        443,
+        64,
+    );
+    assert_eq!(permitted.action, PolicyAction::Permit);
+    assert_eq!(permitted.policy_id, sibling_policy_id);
+}
+
+#[test]
 fn dns_unresolved_rule_quarantines_to_deny_and_keeps_siblings() {
     // RED-on-revert: the prior parse_snapshot treated this marker as an
     // unrepresentable application term and rejected every sibling in the
