@@ -134,6 +134,11 @@ destination rule`, unknown selectors deny), matching the gRPC charges for
     UID. `/health` is unaffected either way.
 - `GET /api/v1/...` — REST mirrors of the gRPC API: sessions, routes,
   NAT, DHCP, IPsec, VRRP, OSPF, BGP, etc.
+  - `GET /api/v1/interfaces/detail` reports interface security-zone
+    membership. A duplicate membership leaves the interface unbound in both
+    zones and renders `Zone: (none) [UNBOUND — claimed by zones ...]`, never
+    `Zone: <name>`; an uncontested binding keeps its existing zone output
+    (#18446).
   - `GET /api/v1/security/policies` enumerates zone-pair policies AND
     global policies (#3045). Global rules are emitted as a single
     trailing `PolicyInfo` row with `from_zone="*"`/`to_zone="*"`,

@@ -3252,6 +3252,43 @@ func eventThenChangeConfigCommands(thenNode *Node) []string {
 	return commands
 }
 
+// eventOptionsPackedPolicySchema is a compiler-only view: packedBody needs
+// the one-token arity of events and quoted commands to split a fully packed
+// policy run. Keep these hints off schemaEventOptions itself so flat-set
+// SetPath behavior for the existing list leaves is unchanged.
+var eventOptionsPackedPolicySchema = func() *schemaNode {
+	base := schemaEventOptions.children["policy"]
+	if base == nil {
+		return nil
+	}
+	cloneChildren := func(children map[string]*schemaNode) map[string]*schemaNode {
+		cloned := make(map[string]*schemaNode, len(children))
+		for name, child := range children {
+			cloned[name] = child
+		}
+		return cloned
+	}
+	policy := *base
+	policy.children = cloneChildren(base.children)
+
+	events := *policy.children["events"]
+	events.args = 1
+	events.multi = true
+	policy.children["events"] = &events
+
+	then := *policy.children["then"]
+	then.children = cloneChildren(then.children)
+	changeConfig := *then.children["change-configuration"]
+	changeConfig.children = cloneChildren(changeConfig.children)
+	commands := *changeConfig.children["commands"]
+	commands.args = 1
+	commands.multi = true
+	changeConfig.children["commands"] = &commands
+	then.children["change-configuration"] = &changeConfig
+	policy.children["then"] = &then
+	return &policy
+}()
+
 func compileEventOptions(node *Node, policies *[]*EventPolicy) error {
 	// #4423 L1: two same-named policy stanzas must MERGE into one policy, not
 	// coexist as duplicates. Flat-set / display-set config already merges (the
@@ -3273,7 +3310,19 @@ func compileEventOptions(node *Node, policies *[]*EventPolicy) error {
 			*policies = append(*policies, ep)
 		}
 
-		for _, child := range pInst.node.Children {
+		// #18414: a fully packed `policy p events ... then ...` stores
+		// the property run on its own Keys. Normalize it through packedBody
+		// so ordinary property readers handle it exactly like a braced
+		// policy. If a command-bearing run leaves the schema grammar before
+		// expansion, reject it by name rather than compiling a silent no-op.
+		policyNode := packedBody(pInst.node, eventOptionsPackedPolicySchema)
+		if eventOptionsKeysMayHaveCommands9984(pInst.node.Keys) &&
+			policyNode == pInst.node {
+			return fmt.Errorf("policy %q: fully packed change-configuration commands "+
+				"could not be bound safely; use a braced policy body (#18414)",
+				pInst.name)
+		}
+		for _, child := range policyNode.Children {
 			switch child.Name() {
 			case "events":
 				// `events` is the trigger set of the policy, so a lost value is

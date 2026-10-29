@@ -259,8 +259,8 @@ var families = []family{
 		Collections:       []string{"Security.Zones", "ZoneIDs"},
 		BuilderPredicates: []string{"ZoneInterfaceQuarantineExclusions"},
 		SurfacePredicates: []string{"ZoneInterfaceQuarantineExclusions", "ZoneInterfaceQuarantineReason", "ZoneInterfaceQuarantineClaimants", "ZoneInterfaceQuarantineClaimantsForRows"},
-		Unannotated:       []string{"pkg/api/interfaces.go:writeInterfacesDetail"}, // exposed by #17710; tracked by #18446
-		Successor:         "#18446",
+		Unannotated:       nil,
+		Successor:         "",
 	},
 }
 

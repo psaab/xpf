@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -10,12 +11,25 @@ func TestEventPolicyThenChangeConfigurationElided18414(t *testing.T) {
 		name           string
 		text           string
 		want           []string
+		wantEvents     []string
 		wantPlantClass string
+		wantErr        string
 	}{
 		{
 			name: "issue deeply elided spelling",
 			text: `event-options policy p { then change-configuration commands "set system host-name deeply-elided"; }`,
 			want: []string{"set system host-name deeply-elided"},
+		},
+		{
+			name:      "fully packed policy without braces",
+			text:      `event-options { policy p events ping_test_completed then change-configuration commands "set system host-name fully-packed"; }`,
+			want:      []string{"set system host-name fully-packed"},
+			wantEvents: []string{"ping_test_completed"},
+		},
+		{
+			name:    "unsupported fully packed command fails by name",
+			text:    `event-options { policy p events ping_test_completed then change-configuration commands set system host-name unquoted; }`,
+			wantErr: "#18414",
 		},
 		{
 			name: "single-line packed policy",
@@ -72,13 +86,26 @@ func TestEventPolicyThenChangeConfigurationElided18414(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := CompileConfig(parseHierText(t, tc.text))
 			if err != nil {
-				t.Fatalf("strict compile: %v", err)
+				if tc.wantErr == "" {
+					t.Fatalf("strict compile: %v", err)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("compile error = %v, want it to name %q", err, tc.wantErr)
+				}
+				return
+			}
+			if tc.wantErr != "" {
+				t.Fatalf("strict compile succeeded, want named error containing %q", tc.wantErr)
 			}
 			if len(cfg.EventOptions) != 1 {
 				t.Fatalf("policies = %d, want 1", len(cfg.EventOptions))
 			}
 			if got := cfg.EventOptions[0].ThenCommands; !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("ThenCommands = %q, want %q", got, tc.want)
+			}
+			if tc.wantEvents != nil &&
+				!reflect.DeepEqual(cfg.EventOptions[0].Events, tc.wantEvents) {
+				t.Fatalf("Events = %q, want %q", cfg.EventOptions[0].Events, tc.wantEvents)
 			}
 			if got := cfg.EventOptions[0].PlantClass; got != tc.wantPlantClass {
 				t.Fatalf("PlantClass = %q, want %q", got, tc.wantPlantClass)
