@@ -7,6 +7,9 @@ xpf (0.0.0) unstable; urgency=medium
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
     the deferred VRF-to-VRF forward-import warning (#17705).
+  * Dataplane: resolve proxy-NDP entry and snapshot interface aliases through
+    ResolveKernelIfName before publishing shim targets, while retaining
+    routing-domain isolation for genuinely different interfaces (#17743).
 
   * Event engine: recheck live `trigger until` ceilings when draining recorded
     cooldown crossings, preventing parked storms from replaying over the

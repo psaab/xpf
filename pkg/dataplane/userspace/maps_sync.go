@@ -1670,17 +1670,28 @@ func pruneNATAddressKeys(
 // nothing: there is no domain to key them under, and guessing domain 0
 // would pass NDP in a foreign domain. Parse failures are skipped
 // exactly as the installer skips them.
+// #17743: proxy entries and snapshot rows can spell one kernel interface
+// differently. Resolve both through the same config resolver as the kernel
+// installer; resolve snapshot names once because each call builds tunnel data.
 func buildDesiredProxyNDPAddressSets(snapshot *ConfigSnapshot) map[userspaceLocalV6Key]struct{} {
 	desired := make(map[userspaceLocalV6Key]struct{})
 	if snapshot == nil || snapshot.Config == nil {
 		return desired
 	}
+	interfaceKernelNames := make([]string, len(snapshot.Interfaces))
+	for i, iface := range snapshot.Interfaces {
+		interfaceKernelNames[i] = snapshot.Config.ResolveKernelIfName(iface.Name)
+	}
 	for _, entry := range snapshot.Config.Security.NAT.ProxyARP {
 		if entry == nil {
 			continue
 		}
-		for _, iface := range snapshot.Interfaces {
-			if iface.Name != entry.Interface || iface.AdminDisabled {
+		entryKernel := snapshot.Config.ResolveKernelIfName(entry.Interface)
+		if entryKernel == "" {
+			continue
+		}
+		for i, iface := range snapshot.Interfaces {
+			if iface.AdminDisabled || interfaceKernelNames[i] != entryKernel {
 				continue
 			}
 			for _, cidr := range entry.Addresses {
