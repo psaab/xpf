@@ -14,18 +14,27 @@ import (
 // the normal apply path when an answer changes.
 var dnsAddressRefreshInterval = 5 * time.Minute
 
-// markDNSResolved records cfg as already resolved outside applySem
-// (#16601) so resolveDNSBeforeApply does not resolve it again.
-func (d *Daemon) markDNSResolved(cfg *config.Config) {
+// markDNSResolved records cfg as already resolved from base outside
+// applySem (#16601) so resolveDNSBeforeApply does not resolve it again.
+func (d *Daemon) markDNSResolved(cfg, base *config.Config) {
 	if cfg == nil {
 		return
 	}
 	d.dnsRefreshMu.Lock()
 	defer d.dnsRefreshMu.Unlock()
 	if d.dnsResolvedConfigs == nil {
-		d.dnsResolvedConfigs = make(map[*config.Config]struct{})
+		d.dnsResolvedConfigs = make(map[*config.Config]*config.Config)
 	}
-	d.dnsResolvedConfigs[cfg] = struct{}{}
+	d.dnsResolvedConfigs[cfg] = base
+}
+
+func (d *Daemon) resolvedDNSBase(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	d.dnsRefreshMu.Lock()
+	defer d.dnsRefreshMu.Unlock()
+	return d.dnsResolvedConfigs[cfg]
 }
 
 func (d *Daemon) isDNSResolved(cfg *config.Config) bool {
@@ -65,18 +74,18 @@ func (d *Daemon) consumeDNSResolved(cfg *config.Config) bool {
 // no-write-through-published-pointer contract hold by construction,
 // independent of caller provenance. Callers that need the caller's
 // pointer identity (digest/stamp keying) already tolerate a DNS clone:
-// recordAppliedDNSBaseline re-keys a clone of the active config onto
-// the active pointer, and text digests hash the tree, not the pointer.
+// recordAppliedDNSBaseline uses the recorded source pointer to determine
+// whether the clone belongs to the currently published generation.
 func (d *Daemon) resolveDNSBeforeApply(cfg *config.Config) *config.Config {
 	if cfg == nil || !config.HasDNSNames(cfg) {
 		return cfg
 	}
-	if d.consumeDNSResolved(cfg) {
+	if d.isDNSResolved(cfg) {
 		return cfg
 	}
 	clone := cfg.CloneForDNSRefresh()
 	config.RefreshDNSAddressBooks(clone)
-	d.markDNSResolved(clone)
+	d.markDNSResolved(clone, cfg)
 	return clone
 }
 
@@ -220,7 +229,7 @@ func (d *Daemon) refreshDNSOnce() {
 	d.applySem.Release(1)
 
 	config.RefreshDNSAddressBooks(refreshed)
-	d.markDNSResolved(refreshed)
+	d.markDNSResolved(refreshed, cfg)
 	if dnsAnswersEqual(before, snapshotDNSAnswers(refreshed)) {
 		// No change: drop the marker; the clone is discarded.
 		d.consumeDNSResolved(refreshed)
@@ -307,7 +316,9 @@ func (d *Daemon) recordAppliedDNSBaseline(cfg *config.Config, applyErr error) {
 	base := cfg
 	isCloneOfActive := false
 	if d.store != nil {
-		if active := d.store.ActiveConfig(); active != nil && active != cfg && dnsBookHasNames(cfg) {
+		active := d.store.ActiveConfig()
+		if active != nil && active != cfg && dnsBookHasNames(cfg) &&
+			d.resolvedDNSBase(cfg) == active {
 			base = active
 			isCloneOfActive = true
 		}

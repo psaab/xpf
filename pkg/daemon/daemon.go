@@ -1084,10 +1084,10 @@ type Daemon struct {
 	// apply runs under applySem. The ordinary-apply baseline defer must not
 	// publish it; applyDNSRefreshedConfig owns its base-CAS publication.
 	dnsRefreshApplying *config.Config
-	// dnsResolvedConfigs marks configs already resolved outside applySem
-	// (#16601) — notably the DNS refresher's clone — so the pre-apply
-	// resolver does not resolve them again. Guarded by dnsRefreshMu.
-	dnsResolvedConfigs map[*config.Config]struct{}
+	// dnsResolvedConfigs maps resolved clones to their exact source
+	// config (#16601), so publication can prove the clone came from the
+	// currently active pointer. Guarded by dnsRefreshMu.
+	dnsResolvedConfigs map[*config.Config]*config.Config
 	// relayRefRGIndex is the per-packet DHCP-relay gate's precomputed
 	// ref→RG index (#17086), keyed by config pointer identity: rebuilt
 	// only when the active config pointer changes, so the per-packet

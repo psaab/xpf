@@ -256,6 +256,7 @@ func (d *Daemon) finalizePromotedApplyLocked(p promotedApply) promotedApplyOutco
 	if config.HasDNSNames(p.newCfg) && !d.consumeDNSResolved(p.newCfg) {
 		newCfg = p.newCfg.CloneForDNSRefresh()
 		config.PopulateDNSFromCache(newCfg)
+		d.markDNSResolved(newCfg, p.newCfg)
 	}
 	out.newCfg = newCfg
 	// #6948: arm the commit-time session-invalidation plan BEFORE the apply.

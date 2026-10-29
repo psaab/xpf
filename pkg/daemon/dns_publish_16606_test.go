@@ -166,3 +166,35 @@ func TestOrdinaryDNSApplyUnchangedAnswersSkipsRepublish17744(t *testing.T) {
 			s.ActiveConfig(), gen, snapshotCfg, base, baseGen)
 	}
 }
+
+func TestExplicitDNSApplyDoesNotPublishUnrelatedConfig17744(t *testing.T) {
+	set := stubDNS15933(t, map[string][]string{
+		"global.example.com": {"10.0.0.1"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	d, s := dnsDaemon15933(t)
+	base := s.ActiveConfig()
+	baseGen, _ := s.ActiveSnapshot()
+	unrelated := base.CloneForDNSRefresh()
+	set(map[string][]string{
+		"global.example.com": {"10.9.9.9"},
+		"local.example.com":  {"10.0.0.2"},
+	})
+	var applied *config.Config
+	d.applyBodyForTest = func(cfg *config.Config) {
+		applied = cfg
+		d.applyBodyForTest = nil
+	}
+	d.applyConfig(unrelated)
+	if applied == nil || applied == unrelated {
+		t.Fatal("explicit DNS apply did not use its own resolved clone")
+	}
+	if got := globalSvc15933(t, applied); !reflect.DeepEqual(got, []string{"10.9.9.9/32"}) {
+		t.Fatalf("explicit apply DNS answer = %v, want B [10.9.9.9/32]", got)
+	}
+	gen, snapshotCfg := s.ActiveSnapshot()
+	if s.ActiveConfig() != base || snapshotCfg != base || gen != baseGen {
+		t.Fatalf("explicit unrelated apply replaced active config: active=%p snapshot=(%d,%p), want base=%p generation=%d",
+			s.ActiveConfig(), gen, snapshotCfg, base, baseGen)
+	}
+}
