@@ -193,9 +193,11 @@ func TestEthtoolForcedRegistryPersistsAcrossRestart17790(t *testing.T) {
 	const iface = "ge-0-0-3"
 	newEthtoolResult16787().applyEthtool(iface, &config.InterfaceConfig{Speed: "100m"})
 
-	resetEthtoolForcedForTest()
+	// Simulate a new process: clear only memory and force production's lazy
+	// loader to read the path the shared test recorder redirected.
 	ethtoolForcedMu.Lock()
-	ethtoolForcedLive = readEthtoolForcedRegistry()
+	ethtoolForcedLive = make(map[string]bool)
+	ethtoolForcedLoaded = false
 	ethtoolForcedMu.Unlock()
 	if !ethtoolForcedContains(iface) {
 		t.Fatal("fresh registry instance did not load the forced interface")
@@ -206,9 +208,10 @@ func TestEthtoolForcedRegistryPersistsAcrossRestart17790(t *testing.T) {
 		t.Fatalf("simulate factory-reset registry erase: %v", err)
 	}
 
-	resetEthtoolForcedForTest()
+	// Repeat the fresh-process load after the factory-reset erase.
 	ethtoolForcedMu.Lock()
-	ethtoolForcedLive = readEthtoolForcedRegistry()
+	ethtoolForcedLive = make(map[string]bool)
+	ethtoolForcedLoaded = false
 	ethtoolForcedMu.Unlock()
 	if ethtoolForcedContains(iface) {
 		t.Fatal("fresh registry instance loaded an interface after factory reset")
