@@ -90,3 +90,74 @@ func TestGuardedFailureReportsUnverifiedGuard16703(t *testing.T) {
 		t.Fatalf("active = %p, want nil after guarded failure", d.ipsecCapture)
 	}
 }
+
+// #17750: when the guarded install fails before invoking drain, the
+// old divert table and its actor are still the active authority. A
+// failed guard readback plus failed explicit install must not stop that
+// actor or clear the published runtime. The post-drain control below
+// continues to pin retirement after the old actor has been drained.
+type preDrainGuardFailureInstaller17750 struct {
+	fakeNftInstaller
+	guardedErr error
+}
+
+func (g *preDrainGuardFailureInstaller17750) InstallIpsecDivertWithDrain(_ xnft.IpsecDivertSpec, _ func() error) error {
+	g.divertCalls = append(g.divertCalls, "guarded")
+	return g.guardedErr
+}
+
+func TestGuardedFailureBeforeDrainKeepsOldActor17750(t *testing.T) {
+	fake := &preDrainGuardFailureInstaller17750{guardedErr: errors.New("quarantine guard install failed")}
+	fake.quarantineVerify = func() error { return errors.New("guard table missing") }
+	fake.quarantineGuard = func(xnft.IpsecDivertSpec) error { return errors.New("guard install failed") }
+	orig := nftInstaller
+	t.Cleanup(func() { nftInstaller = orig })
+	nftInstaller = fake
+
+	old := stagedIpsecCaptureRuntime9506(t)
+	if err := old.actor.Start(); err != nil {
+		t.Fatalf("start old actor: %v", err)
+	}
+	t.Cleanup(func() { _ = old.close() })
+	staged := stagedIpsecCaptureRuntime9506(t)
+	d := &Daemon{ipsecCapture: old, ipsecCaptureStaged: staged, ipsecCaptureStagePending: true}
+	err := d.commitIpsecCaptureStage(old, staged)
+	if err == nil || !strings.Contains(err.Error(), "no quarantine guard verified") {
+		t.Fatalf("err = %v, want unverified-guard marker", err)
+	}
+	if len(fake.quarantineCalls) != 1 {
+		t.Fatalf("quarantine installs = %v, want one explicit install attempt", fake.quarantineCalls)
+	}
+	if !old.actor.Status().Active {
+		t.Fatal("old actor stopped after a pre-drain failure without a verified guard")
+	}
+	if d.ipsecCapture != old {
+		t.Fatalf("active = %p, want retained old runtime %p", d.ipsecCapture, old)
+	}
+	if d.ipsecCaptureStaged != nil || d.ipsecCaptureStagePending {
+		t.Fatalf("staged = %p pending=%v, want staged state cleared", d.ipsecCaptureStaged, d.ipsecCaptureStagePending)
+	}
+}
+
+func TestGuardedFailureAfterDrainStillRetiresOldActor17750(t *testing.T) {
+	fake := &guardedFake14696{guardedErr: errors.New("guarded transition failed")}
+	fake.quarantineVerify = func() error { return nil }
+	d, old, staged := newGuardedDaemon16703(t, fake)
+	old.actor = stagedIpsecCaptureRuntime9506(t).actor
+	if err := old.actor.Start(); err != nil {
+		t.Fatalf("start old actor: %v", err)
+	}
+	err := d.commitIpsecCaptureStage(old, staged)
+	if err == nil || !strings.Contains(err.Error(), "guarded divert transition") {
+		t.Fatalf("err = %v, want guarded transition failure", err)
+	}
+	if old.actor.Status().Active {
+		t.Fatal("old actor remains active although the drain callback retired it")
+	}
+	if d.ipsecCapture != nil {
+		t.Fatalf("active = %p, want nil after drained guarded failure", d.ipsecCapture)
+	}
+	if !d.ipsecKernelQuarantineOrphaned() {
+		t.Fatal("orphan flag not set after drained guarded failure")
+	}
+}
