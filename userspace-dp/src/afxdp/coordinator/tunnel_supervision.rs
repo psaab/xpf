@@ -783,8 +783,7 @@ impl super::Coordinator {
     /// (`peer_for_dest`, cryptokey routing) and encaps toward THAT peer's
     /// endpoint, so its MTU guard must size against THAT peer's underlay
     /// — mirroring how the AF_XDP transit path already resolves per-peer
-    /// (`wg_endpoint_physical_outer_mtu` / `wg_peer_outer_dst`, #2845/
-    /// #3219). Before this the control thread captured ONE first-peer
+    /// (`wg_selected_peer_outer` / `wg_peer_outer_dst`, #2845/#3219).
     /// scalar (`resolve_wg_outer_mtu`) at spawn and applied it to every
     /// peer, so multi-peer tunnels with asymmetric underlay MTUs sized
     /// non-first-peer egress against the wrong underlay (frag or

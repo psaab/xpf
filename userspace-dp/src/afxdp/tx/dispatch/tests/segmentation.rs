@@ -954,8 +954,7 @@ fn tcp_auth_options_decline_segmentation_and_reach_ptb_15119() {
                 &decision,
                 &forwarding,
                 false,
-                None
-            )
+                None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
             .is_none(),
             "{name}: copy-path builder must decline authenticated TCP"
         );
@@ -1041,8 +1040,7 @@ fn tcp_auth_options_decline_segmentation_and_reach_ptb_15119() {
         &decision,
         &forwarding,
         false,
-        None,
-    )
+        None, None).map(|frames| frames.into_iter().map(|(frame, _)| frame).collect::<Vec<_>>())
     .expect("NOP-only control must segment");
     assert!(
         segmented.len() > 1,

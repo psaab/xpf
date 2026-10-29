@@ -237,8 +237,7 @@ fn build_forwarded_frame_from_frame_encapsulates_native_gre() {
         &decision,
         &state,
         false,
-        Some((0x1234, 0)),
-    )
+        Some((0x1234, 0)), None).map(|(frame, _)| frame)
     .expect("encapsulated gre frame");
     assert_eq!(&built[12..16], &[0x81, 0x00, 0x00, 0x50]);
     assert_eq!(&built[16..18], &[0x86, 0xdd]);
@@ -332,8 +331,7 @@ fn native_gre_ipv4_outer_copies_or_clears_inner_df() {
             &decision,
             &state,
             false,
-            Some((0x1234, 0)),
-        )
+            Some((0x1234, 0)), None).map(|(frame, _)| frame)
         .expect("encapsulated GRE frame")
     };
 
@@ -1129,8 +1127,7 @@ fn build_forwarded_frame_from_frame_encapsulates_native_gre_after_ipv4_snat() {
         &decision,
         &state,
         false,
-        Some((0x1234, 0)),
-    )
+        Some((0x1234, 0)), None).map(|(frame, _)| frame)
     .expect("encapsulated native gre frame with snat");
     assert_eq!(&built[12..16], &[0x81, 0x00, 0x00, 0x50]);
     assert_eq!(&built[16..18], &[0x86, 0xdd]);
@@ -1210,8 +1207,7 @@ fn build_forwarded_frame_from_frame_recomputes_tcp_checksum_for_native_gre_snat(
         &decision,
         &state,
         false,
-        Some((src_port, dst_port)),
-    )
+        Some((src_port, dst_port)), None).map(|(frame, _)| frame)
     .expect("encapsulated native gre frame with tcp snat");
     let inner = &built[62..];
     assert_eq!(&inner[12..16], &snat_ip.octets());
@@ -1307,8 +1303,7 @@ fn build_forwarded_frame_from_frame_clamps_tcp_mss_for_native_gre() {
         &decision,
         &state,
         false,
-        Some((src_port, dst_port)),
-    )
+        Some((src_port, dst_port)), None).map(|(frame, _)| frame)
     .expect("encapsulated native gre frame with tcp syn");
     let inner = &built[62..];
     assert_eq!(&inner[40..44], &[0x02, 0x04, 0x05, 0x88]);

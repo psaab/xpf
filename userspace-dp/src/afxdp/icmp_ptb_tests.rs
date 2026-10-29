@@ -1231,7 +1231,7 @@ fn post_transform_inner_mtu_gre_subtracts_outer_and_gre_header() {
     let mut fwd = forwarding_with_egress(1400);
     insert_tunnel_endpoint(&mut fwd, "gre", libc::AF_INET, 0);
     let decision = tunnel_decision();
-    let inner = post_transform_inner_mtu(&decision, &fwd, false, libc::AF_INET as u8, 1400, None);
+    let inner = post_transform_inner_mtu(&decision, &fwd, false, libc::AF_INET as u8, 1400, None, None);
     assert_eq!(
         inner, 1376,
         "GRE inner MTU = transport - outer_ip(20) - gre(4)"
@@ -1260,7 +1260,7 @@ fn gre_logical_mtu_caps_inner_mtu_and_mss_16514() {
         "#16514: logical MTU 1400 must cap the physical-derived 1476"
     );
     assert_eq!(
-        post_transform_inner_mtu(&decision, &fwd, false, libc::AF_INET as u8, 1500, None),
+        post_transform_inner_mtu(&decision, &fwd, false, libc::AF_INET as u8, 1500, None, None),
         1400,
         "#16514: PTB inner MTU must advertise the logical MTU"
     );
@@ -1273,7 +1273,7 @@ fn gre_logical_mtu_caps_inner_mtu_and_mss_16514() {
     // interface MTU for tunnel decisions; the NAT64+tunnel arm
     // composes on the tunnel budget, so it must see the same cap.
     assert_eq!(
-        post_transform_inner_mtu(&decision, &fwd, true, libc::AF_INET as u8, 1400, None),
+        post_transform_inner_mtu(&decision, &fwd, true, libc::AF_INET as u8, 1400, None, None),
         1380,
         "#16514: NAT64-over-GRE composes the RFC 7915 delta on the logical-capped budget"
     );
@@ -1328,8 +1328,7 @@ fn post_transform_gre_converts_outer_route_mtu_once_11411() {
         false,
         libc::AF_INET as u8,
         1500,
-        None,
-    );
+        None, None);
     assert_eq!(
         inner, 1376,
         "outer route MTU 1400 is constrained by interface 1500, then GRE overhead is subtracted once"
@@ -1344,8 +1343,7 @@ fn post_transform_gre_converts_outer_route_mtu_once_11411() {
             false,
             libc::AF_INET as u8,
             1500,
-            None,
-        ),
+            None, None),
         1350,
         "the overlay route MTU is an inner constraint, distinct from the outer route"
     );
@@ -1362,8 +1360,7 @@ fn post_transform_inner_mtu_gre_counts_key_word() {
         false,
         libc::AF_INET as u8,
         1400,
-        None,
-    );
+        None, None);
     assert_eq!(
         inner, 1372,
         "key-present GRE counts the extra 4-byte key word"
@@ -1385,8 +1382,7 @@ fn post_transform_inner_mtu_wireguard_is_pad_aware() {
         false,
         libc::AF_INET as u8,
         1400,
-        None,
-    );
+        None, None);
     assert_eq!(
         inner, 1340,
         "WG inner MTU = outer_mtu - WG_OVERHEAD_V4 (capped pad, #16499)"
@@ -1411,8 +1407,7 @@ fn post_transform_inner_mtu_unknown_tunnel_kind_fails_open() {
             false,
             libc::AF_INET as u8,
             1400,
-            None
-        ),
+            None, None),
         0,
         "unknown tunnel mode -> 0 (fail-open)"
     );
@@ -1429,8 +1424,7 @@ fn post_transform_inner_mtu_nat64_v6_to_v4_adds_header_delta() {
         true,
         libc::AF_INET6 as u8,
         1400,
-        None,
-    );
+        None, None);
     assert_eq!(inner, 1420, "NAT64 v6->v4 inner MTU = egress + 20");
 }
 
@@ -1445,8 +1439,7 @@ fn post_transform_inner_mtu_nat64_v4_to_v6_subtracts_header_delta() {
         true,
         libc::AF_INET as u8,
         1400,
-        None,
-    );
+        None, None);
     assert_eq!(inner, 1380, "NAT64 v4->v6 inner MTU = egress - 20");
 }
 
@@ -1461,7 +1454,7 @@ fn post_transform_gre_oversized_v4_df_emits_inner_ptb() {
     let mut fwd = forwarding_with_egress(1400);
     insert_tunnel_endpoint(&mut fwd, "gre", libc::AF_INET, 0);
     let decision = tunnel_decision();
-    let inner_mtu = post_transform_inner_mtu(&decision, &fwd, false, meta.addr_family, 1400, None);
+    let inner_mtu = post_transform_inner_mtu(&decision, &fwd, false, meta.addr_family, 1400, None, None);
     assert_eq!(inner_mtu, 1376);
 
     // Source-vs-egress (the WRONG pre-#2330 comparison) would advertise 1400;
@@ -1513,8 +1506,7 @@ fn post_transform_wireguard_oversized_v6_emits_inner_ptb() {
         false,
         meta.addr_family,
         1400,
-        None,
-    );
+        None, None);
     assert_eq!(inner_mtu, 1340);
     let next_hop_mtu = match forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner_mtu)
     {
@@ -1549,8 +1541,7 @@ fn post_transform_nat64_v6_oversized_emits_inner_ptb() {
         true,
         meta.addr_family,
         1400,
-        None,
-    );
+        None, None);
     assert_eq!(inner_mtu, 1420, "NAT64 v6->v4 inner MTU = egress + 20");
     let next_hop_mtu = match forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner_mtu)
     {
@@ -1582,8 +1573,7 @@ fn post_transform_in_mtu_forwards_no_ptb() {
         false,
         meta.addr_family,
         1400,
-        None,
-    );
+        None, None);
     assert_eq!(
         forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner_mtu),
         EgressMtuDecision::Forward,
@@ -1749,7 +1739,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v4() {
 
     let decision = wg_logical_tunnel_decision(400, 1);
     let inner_mtu =
-        post_transform_inner_mtu(&decision, &state, false, libc::AF_INET as u8, 0, None);
+        post_transform_inner_mtu(&decision, &state, false, libc::AF_INET as u8, 0, None, None);
     assert_eq!(
         inner_mtu, 1440,
         "WG PTB inner MTU MUST be wg_inner_mtu(physical 1500) = 1440, NOT \
@@ -1842,7 +1832,7 @@ fn post_transform_wg_inner_mtu_uses_physical_underlay_not_logical_v6() {
 
     let decision = wg_logical_tunnel_decision(400, 1);
     let inner_mtu =
-        post_transform_inner_mtu(&decision, &state, false, libc::AF_INET6 as u8, 0, None);
+        post_transform_inner_mtu(&decision, &state, false, libc::AF_INET6 as u8, 0, None, None);
     assert_eq!(
         inner_mtu, 1420,
         "WG PTB inner MTU (v6 outer) MUST be wg_inner_mtu(physical 1500) = 1420, \
@@ -1896,7 +1886,7 @@ fn post_transform_wg_inner_mtu_falls_back_to_logical_when_no_peer_endpoint() {
     let state = build_forwarding_state(&snap);
     let decision = wg_logical_tunnel_decision(400, 1);
     let inner_mtu =
-        post_transform_inner_mtu(&decision, &state, false, libc::AF_INET as u8, 0, None);
+        post_transform_inner_mtu(&decision, &state, false, libc::AF_INET as u8, 0, None, None);
     // Logical egress (400) MTU 1420 → wg_inner_mtu(1420) = 1360 (#16499).
     assert_eq!(
         inner_mtu, 1360,
@@ -2009,8 +1999,7 @@ fn post_transform_wg_inner_mtu_is_per_peer_underlay() {
         false,
         libc::AF_INET as u8,
         0,
-        Some(peer_a_dst),
-    );
+        Some(peer_a_dst), None);
     // Inner destination covered by peer B → its underlay is reth0.50 (1400).
     let peer_b_dst = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 124, 0, 9));
     let mtu_b = post_transform_inner_mtu(
@@ -2019,8 +2008,7 @@ fn post_transform_wg_inner_mtu_is_per_peer_underlay() {
         false,
         libc::AF_INET as u8,
         0,
-        Some(peer_b_dst),
-    );
+        Some(peer_b_dst), None);
 
     assert_eq!(
         mtu_a,
@@ -2066,8 +2054,7 @@ fn post_transform_wg_inner_mtu_is_per_peer_underlay() {
             true,
             source_meta.addr_family,
             0,
-            nat64_dst,
-        ),
+            nat64_dst, None),
         crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET, 1400) + 20,
         "the original IPv6 destination must not fall back to peer A's 1500-byte underlay"
     );
@@ -2126,8 +2113,7 @@ fn post_transform_wg_inner_mtu_charges_selected_peer_family_14118() {
         false,
         libc::AF_INET as u8,
         0,
-        Some(inner_dst),
-    );
+        Some(inner_dst), None);
     assert_eq!(
         mtu,
         crate::afxdp::wg::mss::wg_inner_mtu(libc::AF_INET6, 1500),
@@ -2157,7 +2143,7 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
 
     // CONTROL: tunnel only, no NAT64. 1400 - 20 (IPv4 outer) - 4 (GRE) = 1376.
     let tunnel_only =
-        post_transform_inner_mtu(&decision, &fwd, false, libc::AF_INET6 as u8, 1400, None);
+        post_transform_inner_mtu(&decision, &fwd, false, libc::AF_INET6 as u8, 1400, None, None);
     assert_eq!(
         tunnel_only, 1376,
         "CONTROL: the tunnel-only inner MTU must be the underlay less the GRE \
@@ -2168,7 +2154,7 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
     // SUBJECT v6->v4: the inner is IPv6, the translated IPv4 is 20 bytes
     // SMALLER, so an IPv6 inner up to tunnel_inner + 20 still fits.
     let composed_v6 =
-        post_transform_inner_mtu(&decision, &fwd, true, libc::AF_INET6 as u8, 1400, None);
+        post_transform_inner_mtu(&decision, &fwd, true, libc::AF_INET6 as u8, 1400, None, None);
     assert_eq!(
         composed_v6,
         tunnel_only + 20,
@@ -2182,7 +2168,7 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
     // SUBJECT v4->v6: the translated IPv6 is 20 bytes LARGER, so the IPv4
     // inner must be 20 bytes smaller than the tunnel budget.
     let composed_v4 =
-        post_transform_inner_mtu(&decision, &fwd, true, libc::AF_INET as u8, 1400, None);
+        post_transform_inner_mtu(&decision, &fwd, true, libc::AF_INET as u8, 1400, None, None);
     assert_eq!(
         composed_v4,
         tunnel_only - 20,
@@ -2209,8 +2195,7 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
             false,
             libc::AF_INET6 as u8,
             1400,
-            None,
-        ),
+            None, None),
         1200,
         "known GRE mode must apply selected route MTU 1200",
     );
@@ -2226,8 +2211,7 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
             true,
             libc::AF_INET6 as u8,
             1400,
-            None,
-        ),
+            None, None),
         0,
         "#2327: an unknown tunnel mode must yield no budget, not the NAT64-only one"
     );
@@ -2238,8 +2222,7 @@ fn post_transform_inner_mtu_8896_nat64_through_gre_applies_both_budgets() {
             false,
             libc::AF_INET6 as u8,
             1400,
-            None,
-        ),
+            None, None),
         0,
         "#2327: an unknown tunnel mode must remain closed without NAT64 too",
     );
@@ -2343,8 +2326,7 @@ fn gre1300_ipv6_1280_ptb_is_unactionable_without_diversion_16512() {
         false,
         meta.addr_family,
         1300,
-        None,
-    );
+        None, None);
     assert_eq!(inner, 1276, "GRE-1300 inner budget = 1300 - 20 - 4");
     assert!(
         crate::afxdp::icmp_ptb::ipv6_tunnel_inner_below_link_minimum(
@@ -2366,8 +2348,7 @@ fn gre1300_ipv6_1280_ptb_is_unactionable_without_diversion_16512() {
         false,
         meta.addr_family,
         1400,
-        None,
-    );
+        None, None);
     assert_eq!(
         forwarded_egress_mtu_decision(&frame, l3, meta.addr_family, inner1400),
         EgressMtuDecision::Forward,

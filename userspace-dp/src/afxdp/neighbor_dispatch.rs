@@ -968,7 +968,7 @@ pub(super) fn retry_pending_neigh(
         // when the ordinary dispatcher can split it to the egress MTU.
         if pkt.meta.protocol == PROTO_TCP && !decision.nat.nat64 {
             if let Some(segments) =
-                crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame_with_commit_and_dynamic(
+                crate::afxdp::frame::segment_forwarded_tcp_frames_from_frame(
                     source_frame,
                     pkt.meta,
                     &decision,

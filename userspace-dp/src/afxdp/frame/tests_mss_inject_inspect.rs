@@ -196,8 +196,7 @@ fn all_tcp_clamps_plain_forwarded_ipv4_syn() {
         &plain_forward_decision_v4(dst),
         &forwarding,
         false,
-        None,
-    )
+        None, None).map(|(frame, _)| frame)
     .expect("plain forward build");
     assert_eq!(
         built_ipv4_mss(&built),
@@ -245,7 +244,7 @@ fn all_tcp_clamps_plain_forwarded_ipv6_syn() {
         route_mtu: 0,
         transport_route_mtu: 0,
     }, nat: NatDecision::default(), install_table_domain: 0, install_table_check: 0 };
-    let built = build_forwarded_frame_from_frame(&frame, meta, &decision, &forwarding, false, None)
+    let built = build_forwarded_frame_from_frame(&frame, meta, &decision, &forwarding, false, None, None).map(|(frame, _)| frame)
         .expect("plain forward v6 build");
     assert_eq!(
         built_ipv6_mss(&built),
@@ -271,8 +270,7 @@ fn all_tcp_leaves_smaller_mss_unchanged() {
         &plain_forward_decision_v4(dst),
         &forwarding,
         false,
-        None,
-    )
+        None, None).map(|(frame, _)| frame)
     .expect("plain forward build");
     assert_eq!(
         built_ipv4_mss(&built),
@@ -305,8 +303,7 @@ fn all_tcp_leaves_non_syn_untouched() {
         &plain_forward_decision_v4(dst),
         &forwarding,
         false,
-        None,
-    )
+        None, None).map(|(frame, _)| frame)
     .expect("plain forward build");
     assert_eq!(
         built_ipv4_mss(&built),
@@ -329,8 +326,7 @@ fn all_tcp_no_op_when_unset() {
         &plain_forward_decision_v4(dst),
         &ForwardingState::default(),
         false,
-        None,
-    )
+        None, None).map(|(frame, _)| frame)
     .expect("plain forward build");
     assert_eq!(built_ipv4_mss(&built), 1460, "no clamp when all-tcp unset");
 }
@@ -356,8 +352,7 @@ fn gre_in_clamps_decapped_ingress_syn() {
         &plain_forward_decision_v4(dst),
         &forwarding,
         false,
-        None,
-    )
+        None, None).map(|(frame, _)| frame)
     .expect("gre-in forward build");
     assert_eq!(
         built_ipv4_mss(&built),
@@ -386,8 +381,7 @@ fn gre_in_marker_required_for_gre_in_clamp() {
         &plain_forward_decision_v4(dst),
         &forwarding,
         false,
-        None,
-    )
+        None, None).map(|(frame, _)| frame)
     .expect("plain forward build");
     assert_eq!(
         built_ipv4_mss(&built),
@@ -415,8 +409,7 @@ fn gre_in_falls_back_to_all_tcp() {
         &plain_forward_decision_v4(dst),
         &forwarding,
         false,
-        None,
-    )
+        None, None).map(|(frame, _)| frame)
     .expect("gre-in fallback build");
     assert_eq!(
         built_ipv4_mss(&built),
