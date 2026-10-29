@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -29,6 +30,8 @@ func inflightOwner18521(t *testing.T) *Manager {
 	// The owner OUTRANKS the requester, so a hold cleared mid-transfer is
 	// observable: ordinary election hands RG 2 straight back to the owner.
 	m.UpdateConfig(makeConfig(makeRG(2, false, map[int]int{0: 100, 1: 200})))
+	// Session sync up: the channel the requester's commit/abort will use.
+	m.SetFakePeerSyncSourceForTesting(true, 0, true, true)
 	m.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1, Groups: []HeartbeatGroup{
 		{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondary)},
 	}})
@@ -155,6 +158,7 @@ func TestOperatorHoldKeepsDualResignTimer18521(t *testing.T) {
 // ("still primary locally").
 func TestSlowTransferCommitsAgainstHigherPriorityOwner18521(t *testing.T) {
 	requester, owner := ackWireManagers16592(t, []int{2}, false)
+	owner.SetFakePeerSyncSourceForTesting(true, 0, true, true)
 	// The requester carries a hold from an earlier push-away.
 	requester.mu.Lock()
 	rg := requester.groups[2]
@@ -214,5 +218,63 @@ func TestSlowTransferCommitsAgainstHigherPriorityOwner18521(t *testing.T) {
 	if !requester.IsLocalPrimary(2) || owner.IsLocalPrimary(2) {
 		t.Fatalf("after commit: requester primary=%v owner primary=%v, want true/false",
 			requester.IsLocalPrimary(2), owner.IsLocalPrimary(2))
+	}
+}
+
+// Review of #18525 (finding 1): commit AND abort both lost because session
+// sync went down. The requester's commit write fails (disconnectConn leaves a
+// single-fabric pair with no connection), so its abort has nothing to travel
+// on; it restores its own pre-request hold and will not promote. Holding the
+// owner for the rest of the lease then leaves the RG with NO primary for up to
+// 26s. With sync down no commit or abort can arrive, so the pre-#18521 2s
+// rescue must apply again. RED with the hold not gated on sync.
+func TestLostCommitAndAbortWithSyncDownReelectsOwner18521(t *testing.T) {
+	requester, owner := ackWireManagers16592(t, []int{2}, false)
+	owner.SetFakePeerSyncSourceForTesting(true, 0, true, true)
+	requester.mu.Lock()
+	rg := requester.groups[2]
+	rg.ManualFailover = true
+	rg.ManualFailoverAt = time.Now().Add(-time.Minute)
+	rg.State = StateSecondaryHold
+	requester.mu.Unlock()
+	owner.handlePeerHeartbeat(requester.buildHeartbeat())
+
+	const reqID = 18525
+	requester.SetPeerFailoverFunc(func(id int) (uint64, error) {
+		if _, err := owner.ManualFailover(id); err != nil {
+			return 0, err
+		}
+		owner.ArmRemoteTransferOutLease([]int{id}, reqID)
+		requester.handlePeerHeartbeat(owner.buildHeartbeat())
+		return reqID, nil
+	})
+	requester.SetPeerFailoverCommitFunc(func(int, uint64) error {
+		// The commit write fails; the sender tears the only connection down.
+		owner.SetFakePeerSyncSourceForTesting(false, 0, false, false)
+		return errors.New("failed to send failover commit: write: broken pipe")
+	})
+	requester.SetPeerFailoverAbortFunc(func(int, uint64) error {
+		return errors.New("session sync not connected")
+	})
+	if err := requester.RequestPeerFailover(2); err == nil {
+		t.Fatal("fixture: the request must fail when its commit is lost")
+	}
+	// The requester restored its pre-request hold and stays out.
+	requester.handlePeerHeartbeat(owner.buildHeartbeat())
+	if requester.IsLocalPrimary(2) {
+		t.Fatal("fixture: the aborted requester must not promote")
+	}
+
+	// A few seconds later, with sync still down, the owner must be primary
+	// again — not wait out the 26s lease.
+	owner.mu.Lock()
+	owner.groups[2].ManualFailoverAt = owner.groups[2].ManualFailoverAt.Add(-3 * time.Second)
+	owner.mu.Unlock()
+	owner.handlePeerHeartbeat(requester.buildHeartbeat())
+	if !owner.IsLocalPrimary(2) {
+		held, state := ownerHold18521(owner)
+		t.Fatalf("commit and abort were both lost with session sync down, the requester is back in "+
+			"its hold, and the owner is still held (held=%v state=%s): the RG has no primary until "+
+			"the lease expires (review of #18525)", held, state)
 	}
 }

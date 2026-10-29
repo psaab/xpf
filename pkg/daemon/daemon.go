@@ -945,6 +945,9 @@ type Daemon struct {
 	// SessionSync.QueueConfig push so a unit test can count pushes without a
 	// live TCP sync transport (mirrors syncPeerForTest for the commit path).
 	configSyncPushForTest func()
+	// configResendForTest replaces the #18521 same-generation re-send's
+	// queue call with a capture of the text and wire generation. Test-only.
+	configResendForTest func(text string, gen uint64)
 
 	// #9530: configPeerStateForTest, when non-nil, replaces the cluster-derived
 	// (peer reachable, peer reads RG0 secondary) answer config sync uses to mark

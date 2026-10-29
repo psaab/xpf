@@ -492,8 +492,11 @@ type SyncStats struct {
 	ConfigApplyAcksUnsent   atomic.Uint64
 	ConfigApplyAcksCredited atomic.Uint64
 	ConfigApplyAcksIgnored  atomic.Uint64
-	IPsecSASent             atomic.Uint64
-	IPsecSAReceived         atomic.Uint64
+	// BulkRerequestsSent counts the #18521 (D) BulkRequests this receiver
+	// queued after withholding a BulkAck.
+	BulkRerequestsSent atomic.Uint64
+	IPsecSASent        atomic.Uint64
+	IPsecSAReceived    atomic.Uint64
 	// IPsecSAStaleIgnored counts IPsec SA full-sets dropped by the #5706
 	// ordering guard: an incoming (incarnation, seq) that was NOT strictly
 	// newer than the last-applied pair — a full-set reordered across the
@@ -745,6 +748,7 @@ type SyncStatsSnapshot struct {
 	ConfigApplyAcksUnsent                uint64
 	ConfigApplyAcksCredited              uint64
 	ConfigApplyAcksIgnored               uint64
+	BulkRerequestsSent                   uint64
 	IPsecSASent                          uint64
 	IPsecSAReceived                      uint64
 	IPsecSAStaleIgnored                  uint64
@@ -1686,6 +1690,12 @@ type SessionSync struct {
 	// and its cap. Test-only; zero means zoneMapSettleWindow/zoneMapSettleMax.
 	testZoneMapSettle    time.Duration
 	testZoneMapSettleMax time.Duration
+	// bulkRerequestStreak counts consecutive withheld BulkAcks for the (D)
+	// re-request backoff; a reconciled bulk resets it. testBulkRerequestBackoff
+	// replaces the computed backoff in tests.
+	bulkRerequestStreak      atomic.Uint64
+	bulkRerequestSerial      atomic.Uint64
+	testBulkRerequestBackoff time.Duration
 	// bulkInstallFailedV4/V6 retain only transient helper-install failures for
 	// the active authoritative bulk. They are separate from the received-key
 	// set because a failed transport write must not make that snapshot complete;
@@ -2787,12 +2797,8 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, b
 	if mapGen != zoneSnap.mapGen {
 		slog.Info("cluster sync: reconcile stale sessions skipped (zone map changed during the bulk)",
 			"snapshot_map_gen", zoneSnap.mapGen, "map_gen", mapGen)
-		// #18521 (D): "the next bulk reconciles" — but nothing asked for one.
-		// The BulkAck is withheld, so the sender's only retry was its 35s
-		// BulkAckPendingRetryAfter bound, and a barrier fence waiting on this
-		// ack refused every manual failover meanwhile. Ask for a fresh bulk
-		// once the map stops moving; its BulkStart snapshots the settled map.
-		s.scheduleSettledBulkRerequest(zoneSnap.mapGen)
+		// #18521 (D): "the next bulk reconciles" — handleBulkEnd now asks the
+		// peer for it (scheduleBulkRerequest), after the map settles.
 		return false, inventoryGeneration, inventoryRequested
 	}
 	// #9655: judged by the zone answers this bulk started with. A zone the map

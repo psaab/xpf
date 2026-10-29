@@ -3423,7 +3423,7 @@ func TestPendingBulkAckClearedOnDisconnect(t *testing.T) {
 	ss.conn0 = localConn
 	ss.stats.Connected.Store(true)
 	ss.pendingBulkAckEpoch.Store(7)
-	ss.pendingBulkAckSince.Store(time.Now().UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos())
 
 	ss.handleDisconnect(localConn)
 
@@ -3436,7 +3436,7 @@ func TestTransferReadinessReportsPendingBulkAckAndBulkReceive(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	ss.stats.Connected.Store(true)
 	ss.pendingBulkAckEpoch.Store(9)
-	ss.pendingBulkAckSince.Store(time.Now().Add(-1500 * time.Millisecond).UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos() - int64(1500*time.Millisecond))
 	ss.bulkMu.Lock()
 	ss.bulkInProgress = true
 	ss.bulkRecvEpoch = 4
@@ -5564,7 +5564,7 @@ func TestBulkAckNoPendingIgnored(t *testing.T) {
 	// Regression guard: an ack for a genuinely pending outbound bulk MUST still
 	// complete — set the flags, fire the callback, and clear the pending epoch.
 	ss.pendingBulkAckEpoch.Store(7)
-	ss.pendingBulkAckSince.Store(time.Now().UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos())
 	var pendingBuf [8]byte
 	binary.LittleEndian.PutUint64(pendingBuf[:], 7)
 	ss.handleMessage(nil, syncMsgBulkAck, pendingBuf[:])

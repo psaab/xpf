@@ -149,7 +149,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			m.manualFailoverRestoreWeightLocked(rg)
 			clearedManualFailover = true
 			// Fall through to normal priority/tie-break election below.
-		} else if leased {
+		} else if leased && m.transferSyncUpLocked() {
 			// #18521: a LIVE lease means a peer-requested transfer this node
 			// demoted for is still in flight: the requester has not yet sent
 			// its commit or abort. That hold belongs to the transfer protocol,
@@ -169,6 +169,17 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			// window (SetRemoteTransferOutLeaseDuration), so it is the
 			// "outlives the commit window" bound, and the abort frame is the
 			// prompt path when the requester gives up.
+			//
+			// ONLY while session sync is up. Commit and abort both travel on
+			// it, so with sync fully down neither can arrive: a requester
+			// whose commit write failed (and whose abort then had no
+			// connection) restores its own hold, and holding here would leave
+			// the RG with no primary for the rest of the lease (review of
+			// #18525). Without sync the pre-#18521 2s rescue below applies
+			// again; a commit cannot race it on a fresh connection, because
+			// commit frames are written once on the connection of the
+			// request and never re-sent, and FinalizePeerTransferOut refuses
+			// an owner that is primary again anyway.
 			return electNoChange, ""
 		} else {
 			peerResigned := peerGroup != nil && peerGroup.Weight <= 0
@@ -1682,4 +1693,11 @@ func (m *Manager) clearDegradedStateLocked(rg *RedundancyGroupState) {
 		rg.degradedTimer.Stop()
 		rg.degradedTimer = nil
 	}
+}
+
+// transferSyncUpLocked reports whether the session-sync channel that carries
+// transfer commit and abort frames is connected (#18521). An unpublished
+// source counts as down. Lock-free read of an atomic; caller holds m.mu.
+func (m *Manager) transferSyncUpLocked() bool {
+	return m.peerSync != nil && m.peerSync.IsConnected()
 }

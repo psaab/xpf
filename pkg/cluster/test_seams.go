@@ -208,7 +208,7 @@ func (s *SessionSync) SetPendingColdPrimeForTesting() bool {
 	epoch := s.bulkSendNext.Add(1)
 	s.pendingBulkOwed.Store(owed)
 	s.pendingBulkAckEpoch.Store(epoch)
-	s.pendingBulkAckSince.Store(time.Now().UnixNano())
+	s.pendingBulkAckSince.Store(MonotonicNanos())
 	return true
 }
 

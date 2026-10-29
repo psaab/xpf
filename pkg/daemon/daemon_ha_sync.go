@@ -845,21 +845,28 @@ func (d *Daemon) configSyncReconcileTick() {
 // and it is also the minimum spacing between re-pushes.
 const configAckOverdueAfter = 10 * time.Second
 
-// repushIfConfigAckOverdue re-arms and re-runs the config push when the peer
-// has not positively acknowledged the newest generation this node sent
-// (#18521). Before this, the stale-config gate could only be satisfied by that
-// one ACK, and nothing re-pushed an in-sync config except a NACK, a reconnect
-// or a new commit — so an ACK that was never credited (skipped on the standby
-// because its delivering connection was replaced, lost with a torn-down
-// connection, or discarded by a reboot reset) refused every failover onto an
-// in-sync standby until the next commit. The standby answers the re-push from
-// its "config already matches active" fast path with a fresh ACK.
+// repushIfConfigAckOverdue re-sends the last pushed config when the peer has
+// not positively acknowledged it (#18521). Before this, the stale-config gate
+// could only be satisfied by that one ACK, and nothing re-pushed an in-sync
+// config except a NACK, a reconnect or a new commit — so an ACK that was never
+// credited (skipped on the standby because its delivering connection was
+// replaced, lost with a torn-down connection, or discarded by a reboot reset)
+// refused every failover onto an in-sync standby until the next commit.
+//
+// The re-send carries the SAME text at the SAME wire generation. That is what
+// the standby's duplicate path exists for: a payload whose generation equals
+// its applied high-water is not applied again, it is re-ACKed (configApplyLoop);
+// one not yet applied is applied once and ACKed. A NEW generation (the first
+// cut of this fix) made the standby apply again and moved its config-epoch
+// barrier on every re-push, and the epoch guard then refuses synced session
+// installs stamped with the older epoch — churn that can leave the standby
+// without sessions at a crash takeover. If the config moved on since the push,
+// or the push was not recorded, nothing is re-sent here: the ordinary
+// reconcile owns a changed config.
 //
 // Bounded: only for a connected ACK-capable peer, only once the send is
-// configAckOverdueAfter old, at most once per configAckOverdueAfter, and the
-// re-push itself still passes every reconcileConfigSyncToPeer gate (RG0
-// authority, stability, config-sync enabled, snapshot-protocol
-// authorization). Reports whether it re-pushed.
+// configAckOverdueAfter old, at most once per configAckOverdueAfter, and only
+// as RG0 authority. Reports whether it re-sent.
 func (d *Daemon) repushIfConfigAckOverdue(trigger string) bool {
 	ss := d.getSessionSync()
 	if ss == nil {
@@ -880,11 +887,42 @@ func (d *Daemon) repushIfConfigAckOverdue(trigger string) bool {
 	if !d.configAckRepushAtMono.CompareAndSwap(last, now) {
 		return false
 	}
-	slog.Warn("cluster: peer has not acknowledged applying the newest config generation; re-pushing so it can ACK (#18521)",
-		"gen", gen, "unacked_for", age.Round(time.Second).String(), "trigger", trigger)
-	d.invalidateConfigSyncPushed()
-	d.reconcileConfigSyncToPeer("config-ack-overdue")
-	return true
+	resent := d.resendPushedConfig(ss, gen)
+	slog.Warn("cluster: peer has not acknowledged applying the newest config generation; re-sending it unchanged so it can ACK (#18521)",
+		"gen", gen, "unacked_for", age.Round(time.Second).String(), "trigger", trigger, "resent", resent)
+	return resent
+}
+
+// resendPushedConfig re-queues the last pushed config text at its own wire
+// generation, when that is still the generation the peer owes an ACK for, the
+// push belongs to the current peer connection, and the active config has not
+// moved on. Reports whether it queued.
+func (d *Daemon) resendPushedConfig(ss *cluster.SessionSync, debtGen uint64) bool {
+	d.configSyncMu.Lock()
+	text, wireGen, epoch := d.configSyncPushedDigest, d.configSyncPushedWireGen, d.configSyncPushedEpoch
+	d.configSyncMu.Unlock()
+	if text == "" || wireGen == 0 || wireGen != debtGen ||
+		epoch != d.syncPeerConnEpoch.Load() || !d.syncPeerConnected.Load() {
+		return false
+	}
+	cfg, activeText, ancestry := d.activeConfigSnapshotForPeer()
+	if cfg == nil || activeText != text {
+		return false
+	}
+	if d.configResendForTest != nil {
+		d.configResendForTest(text, wireGen)
+		return true
+	}
+	auth, err := d.peerSnapshotProtocolAuthorizationForConfig(cfg)
+	if err != nil {
+		return false
+	}
+	if auth != nil {
+		return ss.QueueConfigWithPeerSnapshotProtocolAtGeneration(
+			text, ancestry, wireGen, auth.state, auth.minProtocol, auth.peerConnEpoch,
+			func() uint64 { return d.syncPeerConnEpoch.Load() })
+	}
+	return ss.QueueConfigWithAncestryAtGeneration(text, ancestry, wireGen)
 }
 
 // errConfigSyncRejectedPrimary is returned by handleConfigSync when this node

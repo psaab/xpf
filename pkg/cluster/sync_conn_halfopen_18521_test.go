@@ -206,6 +206,13 @@ func TestSendWriteTimeoutTeardownReachesStalledPeer18521(t *testing.T) {
 // redials — until the handler returns AND the loop drains the dead backlog.
 // RED: the slot is still installed after the budget.
 func TestPeerResetWhileReceiveLoopStalledTearsDown18521(t *testing.T) {
+	// Review of #18525 (finding 7): the handler-in-flight arm must tear down
+	// on its own, with NOTHING queued behind the stuck handler (unread 0).
+	t.Run("backlog queued", func(t *testing.T) { peerResetWhileStalled18521(t, true) })
+	t.Run("no unread bytes", func(t *testing.T) { peerResetWhileStalled18521(t, false) })
+}
+
+func peerResetWhileStalled18521(t *testing.T, backlog bool) {
 	logs := captureSyncLogs18521(t)
 	local, peer := tcpPair18521(t)
 	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
@@ -252,7 +259,7 @@ func TestPeerResetWhileReceiveLoopStalledTearsDown18521(t *testing.T) {
 	}
 	// Queue a backlog behind the stuck handler, as fw1's sendLoop did.
 	filler := encodeRawMessage(250, make([]byte, 16*1024))
-	for i := 0; i < 32; i++ {
+	for i := 0; backlog && i < 32; i++ {
 		_ = peer.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
 		if _, err := peer.Write(filler); err != nil {
 			break
@@ -509,5 +516,77 @@ func TestSyncMsgNameCoversHandleMessage18521(t *testing.T) {
 	names := labels("sync_conn_teardown_18521.go", "syncMsgName")
 	if strings.Join(dispatch, ",") != strings.Join(names, ",") {
 		t.Fatalf("syncMsgName labels differ from handleMessage dispatch:\n dispatch=%v\n names=%v", dispatch, names)
+	}
+}
+
+// Review of #18525 (finding 4): Stop closed its connections GRACEFULLY, so a
+// restart of this node while the peer's receive loop is behind left the peer
+// ESTABLISHED behind the unsent bytes — the half-open shape again. RED with
+// Stop's graceful Close.
+func TestStopTeardownReachesStalledPeer18521(t *testing.T) {
+	local, peer := tcpPair18521(t)
+	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	ss.installConn(0, &authConn{Conn: local})
+	// Fill the send path: the peer is not reading.
+	chunk := make([]byte, 64*1024)
+	for {
+		_ = local.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+		if _, err := local.Write(chunk); err != nil {
+			break
+		}
+	}
+	ss.Stop()
+	var state uint8
+	if !waitFor18521(t, time.Second, func() bool {
+		state = kernelState18521(t, peer)
+		return state == linuxTCPStateClose
+	}) {
+		t.Fatalf("after Stop the stalled peer's socket is in TCP state %d (1 = ESTABLISHED): "+
+			"the stop-time close was graceful and its FIN sits behind the unsent bytes", state)
+	}
+}
+
+// The receiver's side of the same-generation re-send (#18521): an exact
+// duplicate of the applied generation is re-ACKed without applying again and
+// without moving the config-epoch barrier.
+func TestDuplicateAppliedConfigIsReackedWithoutApply18521(t *testing.T) {
+	s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+	conn := &captureConn{}
+	s.mu.Lock()
+	s.conn0 = conn
+	s.mu.Unlock()
+	const gen = uint64(1890891765099)
+	s.lastAppliedConfigGen.Store(gen)
+	var applies int
+	s.OnConfigReceived = func(string) error { applies++; return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.configApplyLoop(ctx)
+	}()
+	s.configApplyCh <- configApplyItem{gen: gen, text: "set system host-name standby", conn: conn}
+	acked := waitFor18521(t, 2*time.Second, func() bool {
+		for _, f := range conn.frames() {
+			if f.msgType == syncMsgConfigApplyAck && len(f.payload) >= 8 &&
+				binary.LittleEndian.Uint64(f.payload[:8]) == gen {
+				return true
+			}
+		}
+		return false
+	})
+	cancel()
+	<-done
+	if !acked {
+		t.Fatal("a re-sent, already-applied generation was not re-ACKed")
+	}
+	if applies != 0 {
+		t.Fatalf("the duplicate was applied again (%d applies)", applies)
+	}
+	if got := s.applyingConfigGen.Load(); got != 0 {
+		t.Fatalf("the duplicate raised the apply fence to %d", got)
+	}
+	if got := s.lastAppliedConfigGen.Load(); got != gen {
+		t.Fatalf("applied high-water moved to %d", got)
 	}
 }

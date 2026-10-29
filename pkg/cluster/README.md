@@ -898,11 +898,14 @@ partial drop, or when the preferred fabric connects with no fault.
   moment the previous one finished writing; each replaced
   `pendingBulkAckEpoch`, so the peer's eventual ack matched nothing and the
   fence never discharged.
-- **Skipped receiver reconcile (#18521).** A receiver whose reconcile was
-  skipped because its zone map moved mid-bulk withholds the BulkAck the fence
-  waits on; it now queues a `BulkRequest` once the map has been stable for 1s
-  (cap 30s), so the replacement bulk does not wait for the sender's 35s retry
-  (`sync_bulk_rerequest_18521.go`).
+- **Withheld receiver BulkAck (#18521).** A receiver that withholds the
+  BulkAck the fence waits on — reconcile skipped (zone map moved mid-bulk, no
+  zone snapshot, no dataplane) or failed, window aborted, transient helper
+  install failures — queues one `BulkRequest` after a backoff (1s doubling,
+  cap 30s, reset by a reconciled bulk) and a stable zone map, single-flighted,
+  for the newest withheld bulk, and dropped if a newer bulk was accepted
+  meanwhile (`sync_bulk_rerequest_18521.go`, `Bulk re-requests sent`). The
+  pending-bulk age behind every 35s retry decision is monotonic.
 - **Discharge.** Only a BulkAck for a bulk that captured the epoch BEFORE reading its
   session source advances `cleared`. `doBulkSync` captures before
   `BulkSnapshotSource`; the store walk captures at BulkStart; `BulkSyncSnapshot`
@@ -4089,9 +4092,11 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     standby until the next commit. `PeerConfigAckOverdue` reports a
     connected ACK-capable peer that has left the newest send unacknowledged
     for 10s, and the daemon (`repushIfConfigAckOverdue`: reconcile tick, and
-    on a stale-gate refusal) re-arms the push marker and re-pushes, at most
-    once per 10s and only as RG0 authority. The standby answers from its
-    "config already matches active" path with a fresh ACK. Counters
+    on a stale-gate refusal) re-sends the last pushed config at its SAME wire
+    generation, at most once per 10s and only as RG0 authority. The standby's
+    duplicate path re-ACKs it without applying again, so neither node's config
+    epoch moves (a new generation would re-apply and make the epoch guard
+    refuse synced installs stamped with the older epoch). Counters
     `Config apply-acks sent / unsent` (standby) and `credited / ignored`
     (authority) name a future drop end to end.
 - `TakeoverHoldTime` adds extra delay before election when this node would
@@ -4222,7 +4227,14 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   with "still primary locally". A requester advertising PRIMARY during its
   commit window never tripped the timer (no peer-yield predicate matches), so
   the race needs the requester's pre-request hold or weight 0. An operator
-  hold (no lease) keeps the 2s rescue. Cells:
+  hold (no lease) keeps the 2s rescue. The hold applies only while session
+  sync is CONNECTED (`transferSyncUpLocked`): commit and abort both travel on
+  it, so with sync fully down (a failed commit write tears down a
+  single-fabric pair, and the abort then has nothing to travel on) the owner
+  falls back to the 2s rescue instead of leaving the RG ownerless for the
+  rest of the lease. A commit cannot race that rescue on a fresh connection:
+  commit frames are written once on the request's connection, and
+  `FinalizePeerTransferOut` refuses an owner that is primary again. Cells:
   `failover_inflight_hold_18521_test.go`.
 - **A requester-side abort must not re-promote the requester (#15164,
   B22-01).** The lease above restores the OWNER, but it did nothing for the

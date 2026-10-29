@@ -1348,11 +1348,19 @@ func (s *SessionSync) Stop() {
 		s.listener1.Close()
 	}
 	s.mu.Lock()
+	// #18521 review: abortive, like every other teardown. A graceful FIN
+	// from a stopping daemon queues behind the unsent bytes, so a peer whose
+	// receive loop is behind (the dial side, the only one that redials)
+	// stayed ESTABLISHED on a restart of this node until it drained them —
+	// the same half-open shape. The process is going away; nothing queued
+	// would have been processed by it anyway.
 	if s.conn0 != nil {
-		s.conn0.Close()
+		syncConnDiagFor(s.conn0).noteDrop("session sync stopping", nil)
+		abortSyncConn(s.conn0)
 	}
 	if s.conn1 != nil {
-		s.conn1.Close()
+		syncConnDiagFor(s.conn1).noteDrop("session sync stopping", nil)
+		abortSyncConn(s.conn1)
 	}
 	s.mu.Unlock()
 	// #5303: close every connection still in its pre-auth setup window so a

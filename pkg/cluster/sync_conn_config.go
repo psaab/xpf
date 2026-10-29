@@ -765,11 +765,18 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 			}
 			if !s.shouldApplyConfigGen(item.gen) {
 				s.stats.ConfigsStaleIgnored.Add(1)
+				if item.gen != 0 && item.gen == s.lastAppliedConfigGen.Load() {
+					// #18521: an exact duplicate of the applied generation is
+					// the authority re-sending a config whose ACK it never
+					// credited. Re-ACK it; nothing is applied again and no
+					// config epoch moves.
+					slog.Info("cluster sync: re-acknowledging an already-applied config generation",
+						"gen", item.gen, "size", len(item.text))
+					go s.sendConfigApplyAck(item.conn, item.gen)
+					continue
+				}
 				slog.Warn("cluster sync: dropping out-of-order config sync (stale generation) — standby retains newer config",
 					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text))
-				if item.gen != 0 && item.gen == s.lastAppliedConfigGen.Load() {
-					go s.sendConfigApplyAck(item.conn, item.gen)
-				}
 				continue
 			}
 			if s.OnConfigReceivedWithProvenance == nil &&

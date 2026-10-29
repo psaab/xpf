@@ -580,7 +580,11 @@ func (s *SessionSync) bulkSyncWindow(walk *bulkWalk) error {
 	s.pendingBulkOwed.Store(owed)
 	s.pendingBulkAckEpoch.Store(epoch)
 	s.fence.pendingBulk.Store(walk.fence) // #9508: AFTER the epoch; see barrierFence.pendingBulk
-	s.pendingBulkAckSince.Store(time.Now().UnixNano())
+	// #18521 review: MONOTONIC. Every reader computes an age against
+	// BulkAckPendingRetryAfter; a wall-clock stamp made a backward clock step
+	// of D read as a younger ack (negative ages clamp to 0) and suppressed
+	// retries and fence re-primes for D + 35s.
+	s.pendingBulkAckSince.Store(s.nowMono())
 	// This new pending bulk now carries the retry obligation. Readiness remains
 	// blocked by its ack epoch rather than the separate retry latch.
 	s.bulkAckRetryOwed.Store(false)
@@ -678,7 +682,7 @@ func (s *SessionSync) PendingBulkAck() (epoch uint64, age time.Duration, ok bool
 	if since == 0 {
 		return epoch, 0, true
 	}
-	age = time.Since(time.Unix(0, since))
+	age = time.Duration(s.nowMono() - since)
 	if age < 0 {
 		age = 0
 	}

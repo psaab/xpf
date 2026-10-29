@@ -75,6 +75,7 @@ var syncStatFields = []syncStatField{
 	{name: "ConfigApplyAcksUnsent", label: "Config apply-acks unsent", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigApplyAcksUnsent })},
 	{name: "ConfigApplyAcksCredited", label: "Config apply-acks credited", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigApplyAcksCredited })},
 	{name: "ConfigApplyAcksIgnored", label: "Config apply-acks ignored", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.ConfigApplyAcksIgnored })},
+	{name: "BulkRerequestsSent", label: "Bulk re-requests sent", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.BulkRerequestsSent })},
 	{name: "IPsecSASent", label: "IPsec SAs sent", mode: RenderAlways, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.IPsecSASent })},
 	{name: "IPsecSAReceived", label: "IPsec SAs received", mode: RenderAlways, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.IPsecSAReceived })},
 	{name: "IPsecSAStaleIgnored", label: "IPsec SAs stale-ignored", mode: RenderNonzero, get: u64(func(s *SyncStatsSnapshot) uint64 { return s.IPsecSAStaleIgnored })},
@@ -230,6 +231,8 @@ func loadSyncStat(s *SessionSync, name string) uint64 {
 		return s.stats.ConfigApplyAcksCredited.Load()
 	case "ConfigApplyAcksIgnored":
 		return s.stats.ConfigApplyAcksIgnored.Load()
+	case "BulkRerequestsSent":
+		return s.stats.BulkRerequestsSent.Load()
 	case "IPsecSASent":
 		return s.stats.IPsecSASent.Load()
 	case "IPsecSAReceived":
@@ -408,6 +411,8 @@ func setSyncStatUint(snap *SyncStatsSnapshot, name string, v uint64) {
 		snap.ConfigApplyAcksCredited = v
 	case "ConfigApplyAcksIgnored":
 		snap.ConfigApplyAcksIgnored = v
+	case "BulkRerequestsSent":
+		snap.BulkRerequestsSent = v
 	case "IPsecSASent":
 		snap.IPsecSASent = v
 	case "IPsecSAReceived":

@@ -30,7 +30,7 @@ func fencedSender18521(t *testing.T) (*SessionSync, *atomic.Uint64) {
 		n := bulks.Add(1)
 		ss.pendingBulkAckEpoch.Store(n)
 		ss.fence.pendingBulk.Store(ss.fence.epoch.Load() + 1)
-		ss.pendingBulkAckSince.Store(time.Now().UnixNano())
+		ss.pendingBulkAckSince.Store(MonotonicNanos())
 		return nil
 	}
 	if !ss.barrierFenced() {
@@ -83,12 +83,12 @@ func TestReprimeStillRunsWhenThePendingBulkCannotDischarge18521(t *testing.T) {
 		{"pending bulk captured before the stream moved", func(ss *SessionSync) {
 			ss.pendingBulkAckEpoch.Store(41)
 			ss.fence.pendingBulk.Store(ss.fence.epoch.Load()) // capture of epoch-1
-			ss.pendingBulkAckSince.Store(time.Now().UnixNano())
+			ss.pendingBulkAckSince.Store(MonotonicNanos())
 		}},
 		{"pending ack older than BulkAckPendingRetryAfter", func(ss *SessionSync) {
 			ss.pendingBulkAckEpoch.Store(41)
 			ss.fence.pendingBulk.Store(ss.fence.epoch.Load() + 1)
-			ss.pendingBulkAckSince.Store(time.Now().Add(-BulkAckPendingRetryAfter - time.Second).UnixNano())
+			ss.pendingBulkAckSince.Store(MonotonicNanos() - int64(BulkAckPendingRetryAfter+time.Second))
 		}},
 	}
 	for _, row := range rows {
@@ -103,70 +103,127 @@ func TestReprimeStillRunsWhenThePendingBulkCannotDischarge18521(t *testing.T) {
 	}
 }
 
-// (D) receiver: a bulk whose reconcile was skipped because the zone map moved
-// mid-bulk withholds its BulkAck (#9655/#11070, unchanged). It must ask the
-// peer for a replacement once the map settles. RED before the fix: nothing is
-// ever queued, and the sender's only retry is its 35s ack bound.
-func TestSkippedReconcileRequestsAFreshBulk18521(t *testing.T) {
+// (D) receiver cells. A completed bulk window whose BulkAck is withheld must
+// ask the peer for a replacement; otherwise the sender's barrier fence waits
+// out its 35s retry. RED before the fix for every withholding branch.
+
+func rerequestReceiver18521(t *testing.T) *SessionSync {
+	t.Helper()
 	rx, _ := receiver9655(t, false, map[uint16]int{1: 1, 5: 5})
 	rx.stats.Connected.Store(true)
-	rx.testZoneMapSettle = 20 * time.Millisecond
+	rx.testZoneMapSettle = 10 * time.Millisecond
+	rx.testBulkRerequestBackoff = 20 * time.Millisecond
+	return rx
+}
 
-	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
-	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
-	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
-	if rx.BulkEverCompleted() {
-		t.Fatal("#11070 contract: the skipped bulk must still not complete")
-	}
-	// A second skipped BulkEnd while the first re-request is still settling
-	// must not queue a second request.
-	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(2, nil))
-	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 5})
-	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(2, nil))
-
+// drainRerequests waits for the re-request machinery to go idle, then counts
+// queued BulkRequest frames.
+func drainRerequests18521(t *testing.T, rx *SessionSync) int {
+	t.Helper()
 	if !waitFor18521(t, 5*time.Second, func() bool { return !rx.bulkRerequestInFlight.Load() }) {
-		t.Fatal("the re-request never left its settle wait")
+		t.Fatal("the re-request never left its wait")
 	}
 	rx.wg.Wait()
-	var requests int
+	requests := 0
 	for len(rx.sendCh) > 0 {
 		msg := <-rx.sendCh
 		if len(msg) >= syncHeaderSize && msg[4] == syncMsgBulkRequest {
 			requests++
 		}
 	}
-	if requests == 0 {
-		t.Fatal("a reconcile skipped for a zone-map change withheld its BulkAck and asked for no " +
-			"replacement bulk: the sender's barrier fence waits on that ack, so every manual " +
-			"failover is refused until the sender's 35s retry (#18521)")
+	return requests
+}
+
+func TestWithheldBulkAckRequestsAReplacement18521(t *testing.T) {
+	rows := []struct {
+		name   string
+		during func(rx *SessionSync)
+	}{
+		{"zone map changed mid-bulk (reconcile skipped)", func(rx *SessionSync) {
+			rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
+		}},
+		{"transient helper install failure", func(rx *SessionSync) {
+			rx.bulkMu.Lock()
+			rx.bulkInstallFailedV4[staleUnmapped9655] = struct{}{}
+			rx.bulkMu.Unlock()
+		}},
+		{"aborted receive window", func(rx *SessionSync) {
+			rx.bulkMu.Lock()
+			rx.bulkRecvInvalid = true
+			rx.bulkMu.Unlock()
+		}},
 	}
-	if requests > 2 {
-		t.Fatalf("queued %d bulk requests for two skipped bulks", requests)
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			rx := rerequestReceiver18521(t)
+			rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+			row.during(rx)
+			rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+			if rx.BulkEverCompleted() {
+				t.Fatal("fixture: the withheld bulk must not complete")
+			}
+			if n := drainRerequests18521(t, rx); n != 1 {
+				t.Fatalf("a withheld BulkAck queued %d bulk re-requests, want exactly 1: without "+
+					"it the sender's fence waits out its 35s retry (#18521)", n)
+			}
+			if got := rx.Stats().BulkRerequestsSent; got != 1 {
+				t.Fatalf("BulkRerequestsSent = %d, want 1", got)
+			}
+		})
 	}
 }
 
-// A receiver that lost the connection while settling asks for nothing: the
-// reconnect re-primes.
-func TestSkippedReconcileRerequestDropsWhenDisconnected18521(t *testing.T) {
-	rx, _ := receiver9655(t, false, map[uint16]int{1: 1, 5: 5})
-	rx.testZoneMapSettle = 20 * time.Millisecond
+// Two withheld bulks back to back produce ONE request (single-flight), for
+// the latest of them. RED with the single-flight CAS removed (two requests),
+// and with the latest-serial tracking removed (zero: the first request sees
+// its bulk superseded and drops while the second lost the race).
+func TestBackToBackWithheldBulksRequestOnce18521(t *testing.T) {
+	rx := rerequestReceiver18521(t)
+	rx.testBulkRerequestBackoff = 300 * time.Millisecond
 	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
 	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
 	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
-	if !waitFor18521(t, 5*time.Second, func() bool { return !rx.bulkRerequestInFlight.Load() }) {
-		t.Fatal("the re-request never left its settle wait")
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(2, nil))
+	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 5})
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(2, nil))
+	if n := drainRerequests18521(t, rx); n != 1 {
+		t.Fatalf("two back-to-back withheld bulks queued %d requests, want exactly 1", n)
 	}
-	rx.wg.Wait()
-	if n := len(rx.sendCh); n != 0 {
-		t.Fatalf("a disconnected receiver queued %d frames", n)
+}
+
+// A newer bulk accepted while the request waits is the replacement; asking
+// again would only replace its pending epoch on the sender. RED with the
+// serial check removed.
+func TestRerequestDroppedWhenANewerBulkWasAccepted18521(t *testing.T) {
+	rx := rerequestReceiver18521(t)
+	rx.testBulkRerequestBackoff = 200 * time.Millisecond
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+	// The sender's own retry starts a fresh bulk; it is still streaming.
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(2, nil))
+	if n := drainRerequests18521(t, rx); n != 0 {
+		t.Fatalf("queued %d re-requests although a newer bulk was already accepted", n)
+	}
+}
+
+// A receiver that lost the connection while waiting asks for nothing: the
+// reconnect re-primes.
+func TestSkippedReconcileRerequestDropsWhenDisconnected18521(t *testing.T) {
+	rx := rerequestReceiver18521(t)
+	rx.stats.Connected.Store(false)
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+	if n := drainRerequests18521(t, rx); n != 0 {
+		t.Fatalf("a disconnected receiver queued %d requests", n)
 	}
 }
 
 // The settle wait is capped: a map that never stops moving still gets its
 // request once zoneMapSettleMax passes.
 func TestSkippedReconcileRerequestIsCappedUnderChurn18521(t *testing.T) {
-	rx, _ := receiver9655(t, false, map[uint16]int{1: 1, 5: 5})
-	rx.stats.Connected.Store(true)
+	rx := rerequestReceiver18521(t)
 	rx.testZoneMapSettle = time.Hour
 	rx.testZoneMapSettleMax = 50 * time.Millisecond
 	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
@@ -176,4 +233,54 @@ func TestSkippedReconcileRerequestIsCappedUnderChurn18521(t *testing.T) {
 		t.Fatal("a settle wait that never settles must still request after its cap")
 	}
 	rx.wg.Wait()
+}
+
+// Backoff: 1s doubling per consecutive withheld bulk, capped at 30s; a
+// reconciled bulk resets the streak.
+func TestBulkRerequestBackoff18521(t *testing.T) {
+	for streak, want := range map[uint64]time.Duration{
+		1: time.Second, 2: 2 * time.Second, 3: 4 * time.Second, 5: 16 * time.Second,
+		6: bulkRerequestMax, 100: bulkRerequestMax,
+	} {
+		if got := bulkRerequestDelay(streak); got != want {
+			t.Errorf("bulkRerequestDelay(%d) = %v, want %v", streak, got, want)
+		}
+	}
+	rx := rerequestReceiver18521(t)
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+	drainRerequests18521(t, rx)
+	if rx.bulkRerequestStreak.Load() == 0 {
+		t.Fatal("fixture: a withheld bulk must advance the streak")
+	}
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(2, nil))
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(2, nil))
+	if !rx.BulkEverCompleted() {
+		t.Fatal("fixture: the second bulk must reconcile")
+	}
+	if got := rx.bulkRerequestStreak.Load(); got != 0 {
+		t.Fatalf("a reconciled bulk left the backoff streak at %d", got)
+	}
+}
+
+// Finding 2 of the review: the pending-bulk stamp is monotonic, so a
+// wall-clock step cannot make an old ack look young (or a young one old).
+// Driven through a real bulk, with the monotonic clock advanced by the seam.
+// RED with the stamp back on time.Now().UnixNano().
+func TestPendingBulkAckAgeIsMonotonic18521(t *testing.T) {
+	sender, _ := newBulk6031Primary(t)
+	receiver, _ := newBulk6031Standby(t)
+	base := MonotonicNanos()
+	now := base
+	sender.nowMonoFn = func() int64 { return now }
+	sender.BulkSnapshotSource = func() (BulkSnapshot, error) { return BulkSnapshot{}, nil }
+	pumpBulk(t, sender, receiver)
+	if _, age, ok := sender.PendingBulkAck(); !ok || age != 0 {
+		t.Fatalf("fixture: want a pending bulk aged 0, got ok=%v age=%v", ok, age)
+	}
+	now = base + int64(BulkAckPendingRetryAfter+time.Second)
+	if _, age, _ := sender.PendingBulkAck(); age != BulkAckPendingRetryAfter+time.Second {
+		t.Fatalf("pending bulk age = %v, want %v from the monotonic clock", age, BulkAckPendingRetryAfter+time.Second)
+	}
 }

@@ -149,6 +149,7 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 			"aborted_total", s.stats.BulkRecvAborted.Load(),
 			"capped_total", s.stats.BulkRecvCapped.Load(),
 			"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+		s.scheduleBulkRerequest("bulk receive window aborted", bulkSerial)
 		return false
 	}
 	if failedV4+failedV6 > 0 {
@@ -159,14 +160,17 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 		// sets and retain their intentional-ACK behavior.
 		slog.Warn("cluster sync: bulk contains transient helper install failures; withholding BulkAck and failover release",
 			"epoch", epoch, "failed_v4", failedV4, "failed_v6", failedV6)
+		s.scheduleBulkRerequest("transient helper install failures", bulkSerial)
 		return false
 	}
 	reconciled, inventoryGen, inventoryRequested := s.reconcileStaleSessions(bulkSerial)
 	if !reconciled {
 		slog.Warn("cluster sync: bulk reconcile did not complete; withholding BulkAck and failover release",
 			"epoch", epoch)
+		s.scheduleBulkRerequest("bulk reconcile did not complete", bulkSerial)
 		return false
 	}
+	s.noteBulkReconciled()
 	s.stats.BulkSyncEndTime.Store(time.Now().UnixNano())
 	slog.Info("cluster sync: bulk transfer complete", "epoch", epoch, "sessions", s.stats.BulkSyncSessions.Load(), "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 	s.sendBulkAck(conn, epoch)

@@ -901,7 +901,10 @@ permanently blocks manual failover, because the readiness gate waits on an
 outbound bulk ack that already arrived. Recording first (mirroring the
 #2170/#2198 gen-guard record-then-send discipline) guarantees an early ack can
 only ever observe the pending epoch already in place, so it clears it
-regardless of arrival timing. On a `BulkEnd` write failure the epoch is reset
+regardless of arrival timing. Its age (`pendingBulkAckSince`, read by every
+`BulkAckPendingRetryAfter` decision) is stamped from the MONOTONIC clock since
+#18521; a wall-clock stamp let a backward clock step read as a younger ack and
+suppress retries and fence re-primes for the size of the step. On a `BulkEnd` write failure the epoch is reset
 to 0 (and `handleDisconnect` also clears it), so a failed send cannot leave the
 pending state falsely armed. The same ordering applies to the empty-marker
 `sendBulkMarkers` path used after event-stream export.
@@ -930,18 +933,25 @@ On `BulkEnd` the receiver:
 3. sends `BulkAck(epoch)`
 4. fires `OnBulkSyncReceived`
 
-If step 2 is skipped because the zone-ownership map changed while the bulk was
-in flight (#9655: the old map's answers could delete sessions this node now
-owns), steps 3 and 4 are withheld (#11070) — the ack certifies a reconciled
-table and this one was not. Since #18521 the receiver then asks for the
-replacement itself: once the map has been unchanged for 1s (capped at 30s of
-continuous churn) it queues a `BulkRequest`, and the sender answers with an
-ordinary authoritative bulk whose snapshot is taken under the settled map.
-Before that, the only retry was the sender's 35s `BulkAckPendingRetryAfter`
-bound, and a barrier fence waiting on the ack refused every manual failover in
-between. One request per skipped bulk, single-flighted; a peer that predates
-`BulkRequest` ignores the frame and keeps the 35s retry
-(`pkg/cluster/sync_bulk_rerequest_18521.go`).
+When the receiver withholds steps 3 and 4 — the ack certifies a reconciled
+table — it now asks for the replacement itself (#18521). Every withholding
+outcome of a completed window qualifies: the reconcile was skipped (the
+zone-ownership map changed mid-bulk, #9655; no zone snapshot; no dataplane) or
+failed, the window was aborted (cap or deadline, #16039), or rows hit transient
+helper-install failures (expected right after a restart). An ignored BulkEnd
+does not: it closes no window, and its bulk is still streaming or superseded.
+The receiver queues one `BulkRequest` after an exponential backoff (1s doubling
+per consecutive withheld bulk, capped at 30s, reset by the next reconciled
+bulk) and once the zone map has been stable for 1s (capped at 30s of churn).
+The request is single-flighted, tracks the newest withheld bulk so
+back-to-back withholds still produce exactly one request, and is dropped when
+a newer bulk was accepted meanwhile (that bulk is the replacement; asking again
+would only replace its pending epoch on the sender). Before this, the only
+retry was the sender's 35s `BulkAckPendingRetryAfter` bound, and a barrier fence
+waiting on the ack refused every manual failover (5s admission window) in
+between. A peer that predates `BulkRequest` ignores the frame and keeps the 35s
+retry (`pkg/cluster/sync_bulk_rerequest_18521.go`, counter
+`Bulk re-requests sent`).
 
 ### Stale Session Reconciliation
 
@@ -1124,12 +1134,19 @@ Independently of why an ACK goes uncredited (skipped on the standby because its
 delivering connection was replaced, lost with a torn-down connection, refused on
 receipt, or discarded as above), the authority now recovers it: when a
 connected ACK-capable peer has left the newest send unacknowledged for 10s,
-`repushIfConfigAckOverdue` (`pkg/daemon/daemon_ha_sync.go`) re-arms the
-(epoch x generation) push marker and re-pushes. It runs on the 30s reconcile
-tick and when the stale-config gate refuses a failover, at most once per 10s.
-The standby answers from its "already matches active" fast path with an ACK
-for the new generation. The `Config apply-acks sent/unsent/credited/ignored`
-counters show where a future ACK went.
+`repushIfConfigAckOverdue` (`pkg/daemon/daemon_ha_sync.go`) re-sends the last
+pushed config UNCHANGED — same text, same wire generation — when that is still
+the generation owed, the push belongs to the current peer connection and the
+active config has not moved on. It runs on the 30s reconcile tick and when the
+stale-config gate refuses a failover, at most once per 10s, RG0 authority only.
+The standby's duplicate path re-ACKs a generation equal to its applied
+high-water without applying again (logged as "re-acknowledging an
+already-applied config generation"), and applies a not-yet-applied one once. A
+new generation would make the standby re-apply and move its config-epoch
+barrier, and the epoch guard then refuses synced session installs stamped with
+the older epoch; the same-generation re-send moves nothing. The
+`Config apply-acks sent/unsent/credited/ignored` counters show where a future
+ACK went.
 
 #6778 added a SECOND sender of that frame: `handleConfigPayload`'s queue-full
 drop. When `configApplyCh` is full the non-blocking enqueue discards the
@@ -1788,7 +1805,9 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
   stream is already unusable (a timed-out write may have left half a frame),
   so dropping the unsent queue loses nothing a reconnect's cold-prime bulk does
   not re-send. This includes `handleDisconnect`'s stale branch, which used to
-  return with its socket open.
+  return with its socket open, and `Stop()`: a stopping daemon's graceful FIN
+  reproduced the half-open shape on a restart of this node while the peer was
+  behind.
 - **A per-connection watchdog** (1s tick) tears the connection down as soon as
   the kernel reports the peer reset it while the receive loop is behind (unread
   bytes queued, or a handler in flight), instead of draining the dead
