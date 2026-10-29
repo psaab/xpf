@@ -493,11 +493,11 @@ func (d *Daemon) snapshotRethMasterState() map[int]bool {
 	return out
 }
 
-// markRethServicesApplied records that rgID's RETH services were driven to
-// the given ownership (#16696). Called at the tail of
-// applyRethServicesForRG / clearRethServicesForRG so every edge producer
-// (VRRP event, direct-VIP, cluster event, reconcile converger) advances the
-// same marker the converger compares against.
+// markRethServicesApplied records that rgID's RETH service edge was driven
+// to the given ownership (#16696). Apply/clear call this at entry, before
+// any early returns, so every edge producer (VRRP event, direct-VIP, cluster
+// event, reconcile converger) advances the same marker the converger compares
+// against even when service work cannot run.
 func (d *Daemon) markRethServicesApplied(rgID int, active bool) {
 	d.rethServicesMu.Lock()
 	defer d.rethServicesMu.Unlock()
@@ -2040,6 +2040,7 @@ func (d *Daemon) reconcileBlackholeRoutes() {
 // dual-router / dual-DHCP issues.
 func (d *Daemon) applyRethServicesForRG(rgID int) {
 	d.bumpIPsecRGOwnershipEpoch(rgID)
+	d.markRethServicesApplied(rgID, true)
 	// The VRRP event loop holds no applySem, so a takeover racing factory
 	// reset would otherwise pre-seed prior leases and enqueue Kea applies
 	// against a half-wiped box. The enqueue is fenced itself; this guard
@@ -2172,7 +2173,6 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.getSessionSync() != nil {
 		go d.reinitiateIPsecSAsForRG(rgID)
 	}
-	d.markRethServicesApplied(rgID, true)
 }
 
 type raScopedClearer interface {
@@ -2261,6 +2261,7 @@ func clearRethRASendersWithoutGoodbyePeer(clearer raScopedClearer, cfg, peerCfg 
 // transition. If other RGs are still MASTER, their services remain active.
 func (d *Daemon) clearRethServicesForRG(rgID int) {
 	rgEpoch := d.bumpIPsecRGOwnershipEpoch(rgID)
+	d.markRethServicesApplied(rgID, false)
 	// #9087: nudged FIRST, and before the early returns, because the demote
 	// side of the window is the one that leaves a wrong answerer on the wire.
 	// This node no longer owns rgID, so the #8297 gate will now suppress its
@@ -2336,7 +2337,6 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// governs peer advertisement/re-initiation, not local SA hygiene on a
 	// node-local demotion edge.
 	go d.terminateDemotedRGIPsecSAs(rgID, rgEpoch)
-	d.markRethServicesApplied(rgID, false)
 }
 
 // stripUntaggedUnitSuffix normalizes a resolved Linux interface name by

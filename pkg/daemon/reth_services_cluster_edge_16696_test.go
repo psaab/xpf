@@ -2,11 +2,13 @@ package daemon
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"golang.org/x/sync/semaphore"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // #16696 (R3-A34-04): in legacy non-strict mode rg-state desired =
@@ -294,5 +296,220 @@ func TestConvergerClearsLostDemotionEdge16696(t *testing.T) {
 	d.reconcileRGState()
 	if serviceEdge16696(d) {
 		t.Fatal("#16696: converger re-cleared services on a converged RG (not idempotent)")
+	}
+}
+
+// #17746: the #16696 converger compares desired ownership against
+// rethServicesApplied and re-drives apply/clear on every reconcile pass
+// until the marker advances. The marker was written only at the TAIL of
+// applyRethServicesForRG / clearRethServicesForRG, past early returns
+// (factory reset in progress, store nil, ActiveConfig nil) that hit
+// exactly in the degraded states the converger exists for — so a lost
+// edge in one of those states spun forever: repeated Kea apply enqueues,
+// RA reconciles and DDNS/proxy-ARP nudges on apply; repeated IPsec SA
+// termination and ownership-epoch bumps on clear. The marker must be
+// written at entry so every early return still records the driven
+// ownership. The 16696 fixture always has a committed store, so its six
+// tests never exercised these arms.
+//
+// RED on revert: restore the tail-only marker writes and the first-converge
+// marker assertions below fail. Clear also sends a fresh proxy-ARP sweep
+// nudge before its store guard on every pass; apply returns before its
+// nudge, so its marker assertion is the RED signal.
+func resizeNudge17746(d *Daemon) {
+	d.proxyARPNudgeCh = make(chan struct{}, 8)
+}
+
+// nilConfigStore17746 returns a real configstore.Store whose
+// ActiveConfig() is nil (nothing committed yet) — apply/clear's last
+// early-return arm, distinct from a nil store.
+func nilConfigStore17746(t *testing.T) *configstore.Store {
+	t.Helper()
+	s, err := configstore.New(filepath.Join(t.TempDir(), "xpf.conf"))
+	if err != nil {
+		t.Fatalf("configstore.New: %v", err)
+	}
+	if s.ActiveConfig() != nil {
+		t.Fatal("setup: fresh store must have a nil ActiveConfig")
+	}
+	return s
+}
+
+// Apply side: desired active (SetCluster flips the state machine, the
+// discarded-edge shape) but the store is nil. The converge pass must
+// advance the marker to applied and then go quiet.
+func TestConvergerApplyNilStoreAdvancesMarker17746(t *testing.T) {
+	d := legacyServicesDaemon16696(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(1)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	d.store = nil
+
+	d.convergeRethServices(1)
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746: apply hit the nil-store early return without advancing the marker; " +
+			"the converger will re-drive it on every reconcile pass")
+	}
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger re-drove apply on a degraded-converged RG")
+	}
+}
+
+// Apply side, last guard: store present but ActiveConfig() nil.
+func TestConvergerApplyNilConfigAdvancesMarker17746(t *testing.T) {
+	d := legacyServicesDaemon16696(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(1)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	d.store = nilConfigStore17746(t)
+
+	d.convergeRethServices(1)
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746: apply hit the nil-config early return without advancing the marker; " +
+			"the converger will re-drive it on every reconcile pass")
+	}
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger re-drove apply on a degraded-converged RG")
+	}
+}
+
+// Apply side, first guard: factory reset in progress. isResetting is
+// Daemon state, so this arm is NOT store-gated; restoring the store
+// below is the control proving the retry requirement survives.
+func TestConvergerApplyResettingAdvancesMarker17746(t *testing.T) {
+	d := legacyServicesDaemon16696(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(1)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	d.enterResetGeneration()
+
+	// Edge-producer invocation (VRRP/cluster path): the marker advances
+	// even though no service work runs against the half-wiped box.
+	d.applyRethServicesForRG(1)
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746: apply skipped its marker write while resetting; " +
+			"the converger will re-drive it on every reconcile pass")
+	}
+
+	// Once the reset finishes, a normal configured apply must still reach
+	// its nudge/tail. Reset the marker to model a distinct unapplied edge
+	// and isolate that control from the reset early return.
+	d.exitResetGeneration()
+	d.markRethServicesApplied(1, false)
+	d.applyRethServicesForRG(1)
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746 control: configured apply did not run the full tail " +
+			"(no proxy-ARP nudge) once the store returned")
+	}
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746 control: configured apply left the marker cleared")
+	}
+}
+
+// Configured control: with the committed store present, apply and clear
+// both proceed through their service work and record the corresponding
+// ownership markers.
+func TestConfiguredApplyClearTailsAdvanceMarker17746(t *testing.T) {
+	d := legacyServicesDaemon16696(t)
+	resizeNudge17746(d)
+
+	d.applyRethServicesForRG(1)
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746 control: configured apply left the marker cleared")
+	}
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746 control: configured apply did not reach its tail (no proxy-ARP nudge)")
+	}
+
+	d.clearRethServicesForRG(1)
+	if d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746 control: configured clear left the marker applied")
+	}
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746 control: configured clear did not run past its guard (no proxy-ARP nudge)")
+	}
+}
+
+// Clear side: services applied, desired drops via a discarded mirror
+// transition (SetCluster(false) with no handler), store now nil. The
+// clear edge sends the proxy-ARP sweep nudge BEFORE its store guard, so
+// a non-advancing marker is observable as a fresh nudge on every
+// converge pass.
+func TestConvergerClearNilStoreAdvancesMarker17746(t *testing.T) {
+	d := legacyServicesDaemon16696(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(1)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	d.applyRethServicesForRG(1)
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("setup: configured apply must set the marker")
+	}
+	if !serviceEdge16696(d) {
+		t.Fatal("setup: configured apply must nudge proxy-ARP")
+	}
+	if tr := s.SetCluster(false); !tr.Changed || tr.Active {
+		t.Fatalf("setup: SetCluster(false) must flip desired inactive, got %+v", tr)
+	}
+	d.store = nil
+
+	d.convergeRethServices(1)
+	if d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746: clear hit the nil-store early return without advancing the marker; " +
+			"the converger will re-drive it on every reconcile pass")
+	}
+	// Exactly one edge fired for this degrade: drain it, and a second
+	// converge must then be a no-op (no fresh nudge).
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746: degraded clear sent no proxy-ARP sweep nudge")
+	}
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger re-drove clear on a degraded-converged RG " +
+			"(fresh proxy-ARP nudge on the second pass)")
+	}
+}
+
+// Clear side, last guard: store present but ActiveConfig() nil.
+func TestConvergerClearNilConfigAdvancesMarker17746(t *testing.T) {
+	d := legacyServicesDaemon16696(t)
+	resizeNudge17746(d)
+	s := d.getOrCreateRGState(1)
+	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
+		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
+	}
+	d.applyRethServicesForRG(1)
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("setup: configured apply must set the marker")
+	}
+	if !serviceEdge16696(d) {
+		t.Fatal("setup: configured apply must nudge proxy-ARP")
+	}
+	if tr := s.SetCluster(false); !tr.Changed || tr.Active {
+		t.Fatalf("setup: SetCluster(false) must flip desired inactive, got %+v", tr)
+	}
+	d.store = nilConfigStore17746(t)
+
+	d.convergeRethServices(1)
+	if d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746: clear hit the nil-config early return without advancing the marker; " +
+			"the converger will re-drive it on every reconcile pass")
+	}
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746: degraded clear sent no proxy-ARP sweep nudge")
+	}
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger re-drove clear on a degraded-converged RG " +
+			"(fresh proxy-ARP nudge on the second pass)")
 	}
 }
