@@ -234,10 +234,10 @@ const (
 )
 
 // staticRouteBeatsDHCP reports whether an emitted static route has an
-// effective distance no worse than the DHCP route. FRR's default distance is
-// 1 when the preference operand is omitted. Qualified next-hops override the
-// route-level preference, so any emitted next-hop at or below the DHCP
-// preference can suppress the DHCP route.
+// effective distance no worse than the DHCP route. An omitted Junos static
+// preference is 5 and is rendered explicitly, so DHCP's distance 200 remains
+// less preferred. Qualified next-hops override the route-level preference;
+// any emitted next-hop at or below the DHCP preference can suppress DHCP.
 func staticRouteBeatsDHCP(sr *config.StaticRoute) bool {
 	if !staticRouteRendersFIB(sr) {
 		return false
@@ -258,8 +258,8 @@ func staticRouteBeatsDHCP(sr *config.StaticRoute) bool {
 }
 
 func effectiveStaticRouteDistance(preference int) int {
-	if preference <= 0 {
-		return 1
+	if preference == 0 {
+		return 5
 	}
 	if preference > frrStaticRouteDistanceMax {
 		return frrStaticRouteDistanceMax
@@ -272,6 +272,10 @@ func clampFRRStaticRouteDistance(preference int) int {
 		slog.Warn("static route preference exceeds FRR's installable distance; clamping (#12060)",
 			"preference", preference, "maximum", frrStaticRouteDistanceMax)
 		return frrStaticRouteDistanceMax
+	}
+	// Zero is an omitted Junos preference; render its default distance 5.
+	if preference == 0 {
+		return 5
 	}
 	return preference
 }

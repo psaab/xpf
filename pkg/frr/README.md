@@ -893,6 +893,8 @@ step. Both are required — neither sees the other's case:
   scale without moving: DHCP 200 and cluster Null0 250 remain worse
   than a default static (5), and the ip-monitoring overlay at 1 still
   beats everything.
+  Zero (an omitted preference) uses Junos's default 5 and renders explicitly
+  as distance 5 rather than FRR's implicit distance 1 (#17699).
 - **FRR static-distance range (#12060).** Route-level and qualified-next-hop
 - **Floating static via `qualified-next-hop` (#3871).** A static route's
   `qualified-next-hop <gw> { preference N; metric M; }` is the Junos floating-
