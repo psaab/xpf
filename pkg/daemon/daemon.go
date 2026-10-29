@@ -1080,6 +1080,10 @@ type Daemon struct {
 	dnsRefreshMu          sync.Mutex
 	lastDNSRefreshBase    *config.Config
 	lastDNSRefreshAnswers map[string][]string
+	// dnsRefreshApplying identifies the periodic refresher clone while its
+	// apply runs under applySem. The ordinary-apply baseline defer must not
+	// publish it; applyDNSRefreshedConfig owns its base-CAS publication.
+	dnsRefreshApplying *config.Config
 	// dnsResolvedConfigs marks configs already resolved outside applySem
 	// (#16601) — notably the DNS refresher's clone — so the pre-apply
 	// resolver does not resolve them again. Guarded by dnsRefreshMu.

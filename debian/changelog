@@ -19,6 +19,9 @@ xpf (0.0.0) unstable; urgency=medium
     arm if a concurrent ConfirmCommit changed the target. Explicitly identify
     first-commit bootstrap targets, including a compiled empty tree after
     restart, and reject a missing non-first target (#17695).
+  * Daemon: publish successful ordinary-apply DNS clones through the
+    generation-checked active-config swap before recording refresh baselines,
+    while unchanged answers keep the current store generation (#17744).
   * Configstore: render commit summaries as individual set lines without
     cloning either tree or building both complete output strings; reuse
     equal lines so a 50k-line one-line edit stays under 10 MiB allocated
