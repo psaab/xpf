@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: index learned WireGuard PMTUs by endpoint IP
+    for allocation-free packet-path lookup; serialize PTB shrink updates
+    and publish MTU/age pairs coherently (#17774).
+
   * Userspace dataplane: exercise WireGuard PTB learning through the RX poll
     path and assert that the next forwarded packet uses the learned MTU
     budget (#17775).
