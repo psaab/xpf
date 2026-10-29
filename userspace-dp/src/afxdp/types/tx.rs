@@ -79,6 +79,16 @@ impl TxRequest {
     }
 }
 
+/// Where dispatch can read the original ingress bytes for a prebuilt
+/// transit frame without eagerly cloning them.
+pub(in crate::afxdp) enum PrebuiltTransitIngress {
+    /// The descriptor still points at the unmodified ingress bytes in UMEM.
+    Descriptor,
+    /// The packet was decapsulated (for example native GRE); this is the
+    /// already-owned inner frame, moved from the poll path.
+    Owned(Vec<u8>),
+}
+
 pub(in crate::afxdp) enum PendingForwardFrame {
     Live,
     Owned(Vec<u8>),
@@ -87,16 +97,21 @@ pub(in crate::afxdp) enum PendingForwardFrame {
     /// reversal) together with the original ingress identity needed to
     /// mirror the RECEIVED frame, not the translated egress frame.
     /// `frame` is the already-rewritten wire frame to forward;
-    /// `ingress_frame`/`ingress_meta` describe the packet as it arrived
-    /// (pre-reversal addresses, ingress L2/VLAN, original family/TTL),
-    /// which is what the plan-1376 mirror contract requires the analyzer
-    /// to receive ("full original Ethernet frame"). Device-generated
-    /// replies (Time-Exceeded) have no such original transit frame and
-    /// stay plain `Prebuilt`, mirroring their generated wire bytes as
-    /// before (#15947 deliberate choice).
+    /// `ingress_meta` describes the packet as it arrived (pre-reversal
+    /// addresses, ingress L2/VLAN, original family/TTL), which is what
+    /// the plan-1376 mirror contract requires the analyzer to receive
+    /// ("full original Ethernet frame"). Device-generated replies
+    /// (Time-Exceeded) have no such original transit frame and stay
+    /// plain `Prebuilt`, mirroring their generated wire bytes as before
+    /// (#15947 deliberate choice).
+    ///
+    /// #17718: dispatch resolves the mirror row and sampling decision
+    /// before copying the original ingress bytes. `ingress_source` is
+    /// either the untouched descriptor in UMEM or an already-owned
+    /// decapsulated frame.
     PrebuiltTransit {
         frame: crate::afxdp::cos::redirect_pool::PooledBuffer,
-        ingress_frame: Vec<u8>,
+        ingress_source: PrebuiltTransitIngress,
         ingress_meta: ForwardPacketMeta,
     },
 }

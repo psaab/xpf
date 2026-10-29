@@ -650,8 +650,9 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 	//
 	// PREFERENCE-AWARE GAP-FILL. Keep a config-derived route when its
 	// preference is at least as good as the imported route's learned
-	// protocol distance (#16620 Junos scale: OSPF 10, IS-IS 115 (FRR
-	// fixed), RIP 100, BGP 170; other protocols 200). When the config
+	// protocol distance (#16620 Junos scale: OSPF 10, IS-IS conservatively
+	// 15 because RTPROT does not identify its level, RIP 100, BGP 170;
+	// other protocols 200). When the config
 	// route is a worse-preference fallback (for example preference
 	// 250), publish both: the Rust FIB's ascending-preference
 	// tie-break then selects the kernel's already-selected learned
@@ -1842,16 +1843,14 @@ func addLearnedRouteSnapshots(cfg *config.Config, existing []RouteSnapshot, addS
 	return capped, suppressedMTUs, nil
 }
 
-// learnedRouteProtocolDistance returns the effective distance the
-// managed section assigns (#16620) for dynamic routes whose kernel
-// protocol identifies their routing daemon, so the helper FIB orders
-// an imported learned route against Junos-scale config preferences
-// exactly as zebra does. Delegates to pkg/frr's table (the renderer's
-// own constants) so the two can never drift: OSPF 10 (internal),
-// RIP 100, BGP 170, IS-IS at FRR's fixed 115. RTPROT_BGP does not
-// distinguish eBGP from iBGP, and Junos has a single BGP preference
-// (170), so 170 is correct for both. The kernel-selected row itself
-// is the source of truth that the route is active.
+// learnedRouteProtocolDistance returns the Junos-scale preference used by the
+// helper FIB to arbitrate imported kernel-selected routes against configured
+// routes. It delegates to pkg/frr's shared table, not zebra's rendered
+// distance: for IS-IS it chooses the more-preferred Junos L1 value 15 because
+// rtnetlink exposes only `isis`, not its L1/L2 level. FRR itself still fixes
+// IS-IS at 115; #17735's compile/render belts reject configurations whose
+// static or RIP distance cannot preserve Junos ordering there. RTPROT_BGP
+// does not distinguish eBGP from iBGP, and Junos has one BGP preference (170).
 func learnedRouteProtocolDistance(protocol string) (int, bool) {
 	return frr.JunosProtocolDistance(protocol)
 }

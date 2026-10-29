@@ -336,14 +336,12 @@ type Manager struct {
 	deferredReplayRebinds  []PolicySessionRebind
 	deferredReplayReady    bool
 	deferredReplayInFlight bool
-	// lastSnapshotRejectReasons holds the #3261 diagnostic: the reasons the
-	// most recently built snapshot carries unrepresentable policy content that
-	// the helper integrity preflight rejects (previous-good retained, or
-	// fresh-boot default-deny — never fail-open). Set under m.mu at every full
-	// snapshot build, surfaced via ProcessStatus.LastSnapshotRejectReasons and
-	// the xpf_userspace_policy_content_rejected gauge so the Go/Rust skew
-	// (ForwardingSupported=true while the helper rejected the snapshot) is
-	// observable. nil/empty means the last build was fully representable.
+	// lastSnapshotRejectReasons holds the most recent Go-side policy-content
+	// diagnostics: whole-snapshot refusal reasons and per-rule DNS quarantine
+	// warnings. Set under m.mu for each full snapshot build and surfaced via
+	// ProcessStatus.LastSnapshotRejectReasons plus the established content
+	// diagnostic gauge. A DNS quarantine does not mean the snapshot was rejected;
+	// current Rust helpers enforce the affected rule as deny and load siblings.
 	lastSnapshotRejectReasons []string
 	// lastZoneIDCollisions holds the #3719 diagnostic: the zones the most
 	// recent snapshot build QUARANTINED because their StableZoneID collided

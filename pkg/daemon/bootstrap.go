@@ -2042,13 +2042,46 @@ func protectedInterfacesWith(mgmtLeaf, lifeline string) map[string]bool {
 	return set
 }
 
+// poisonedLifelineRecord reports the known pre-#16671 corruption shape: the
+// persisted identity resolves to the non-management main-table default-route
+// NIC on a committed box. That route is the WAN when fxp0 is in vrf-mgmt, so
+// it is not evidence that the record names verified management.
+func poisonedLifelineRecord(mgmtLeaf, recordName string, recordOK bool,
+	routeName string, found bool, routeErr error) bool {
+	if !recordOK || recordName == "" || routeErr != nil || !found || routeName == "" ||
+		recordName != routeName {
+		return false
+	}
+	if recordName == defaultMgmtInterface || config.IsManagementIfName(recordName) {
+		return false
+	}
+	return mgmtLeaf == "" || recordName != mgmtLeaf
+}
+
+// clearPoisonedLifelineRecord durably clears a record known to name the WAN.
+// The identity cannot be replaced from route detection: committed boots must
+// not infer management from the main-table default route. fxp0 and an explicit
+// management leaf remain protected independently.
+func clearPoisonedLifelineRecord(recordName string) {
+	if err := writeLifelineRecordAt(lifelinePath(), lifelineRecord{}); err != nil {
+		slog.Error("bootstrap lifeline: POISONED lifeline record names the WAN interface and could not be cleared; it must not be trusted as verified management",
+			"interface", recordName, "record", lifelinePath(), "err", err)
+		return
+	}
+	slog.Error("bootstrap lifeline: POISONED lifeline record named the WAN interface as management (written by pre-#16671 route detection); cleared it so the WAN is not trusted as verified management",
+		"interface", recordName, "record", lifelinePath())
+}
+
 // setupBootstrapLifeline runs the Item-3 lifeline-gated path in place of the
 // full rename loop when the daemon boots into bootstrap mode. It first refuses
 // all interface changes unless systemd-networkd is active, then:
 //
-//  1. detects the management lifeline NIC (default-route interface),
-//  2. records its PCI identity to /etc/xpf/lifeline-interface so the
-//     protected set survives rename/restart/rollback,
+//  1. on never-committed boots, detects the management lifeline NIC from the
+//     default route; on committed boots, treats that route as the WAN and
+//     clears only a record positively resolving to that interface,
+//  2. records a never-committed lifeline's PCI identity to
+//     /etc/xpf/lifeline-interface so the protected set survives
+//     rename/restart/rollback,
 //  3. if (and only if) that NIC is enumeration index 0 — i.e. it WOULD
 //     become fxp0 in a normal rename — renames JUST that NIC to fxp0 and
 //     writes a lifeline-aware bootstrap .network that snapshots its current
@@ -2080,9 +2113,30 @@ func (d *Daemon) setupBootstrapLifeline() {
 	if d.store != nil {
 		bootstrapCfg = d.store.ActiveConfig()
 	}
-	_ = ensureEarlyInputProtectionForNaming(bootstrapCfg)
+	everCommitted := d.store != nil && d.store.EverCommitted()
+	var routeIface string
+	var routeFound bool
+	var routeErr error
+	if everCommitted {
+		// A prior buggy boot may have persisted the WAN as the lifeline.
+		// Resolve and clear that exact poison shape before the early guard
+		// reads the record; a committed main-table route is not management.
+		routeIface, routeFound, routeErr = detectLifelineInterfaceFn()
+		mgmtLeaf := ""
+		if bootstrapCfg != nil {
+			mgmtLeaf = bootstrapCfg.System.ManagementInterface
+		}
+		recordName, recordOK := lifelineRecordNameFn()
+		if poisonedLifelineRecord(mgmtLeaf, recordName, recordOK,
+			routeIface, routeFound, routeErr) {
+			clearPoisonedLifelineRecord(recordName)
+		}
+	}
+	_ = ensureEarlyInputProtectionForNamingForBoot(bootstrapCfg, everCommitted)
 
-	routeIface, _, routeErr := detectLifelineInterfaceFn()
+	if !everCommitted {
+		routeIface, routeFound, routeErr = detectLifelineInterfaceFn()
+	}
 	if routeIface == "" && routeErr != nil {
 		// #6789: the route observation FAILED, so "which NIC carries the
 		// default route" is UNKNOWN — not "there is none". The distinction is
@@ -2142,12 +2196,10 @@ func (d *Daemon) setupBootstrapLifeline() {
 			"interface", lifeline, "marker", applianceMarkerFile)
 	}
 
-	// #16671: on a committed box the main-table default route is the WAN
-	// (fxp0 lives in vrf-mgmt, which networkd renders without a main-table
-	// gateway), so route detection must NEVER overwrite the verified
-	// persisted lifeline record — nor rename the WAN to fxp0. Only a
-	// never-committed box may learn its lifeline from route detection.
-	everCommitted := d.store != nil && d.store.EverCommitted()
+	// #16671/#17730: on a committed box the main-table default route is the
+	// WAN (fxp0 lives in vrf-mgmt, which networkd renders without a main-table
+	// gateway). It may invalidate a record known to name the WAN, but must
+	// never overwrite a sane record or rename the WAN to fxp0.
 	if everCommitted {
 		slog.Warn("bootstrap lifeline: box has committed before; refusing to overwrite the "+
 			"persisted lifeline record or rename from main-table default-route detection "+
@@ -2438,13 +2490,25 @@ func writeBootstrapLifelineNetwork(lifeline string, hasRouteEvidence bool) (bool
 // provider, registered with the dataplane compiler via
 // SetProtectedInterfaceResolver. It returns the union of fxp0 (the default),
 // the explicit `system management-interface` leaf when set, and the
-// lifeline-recorded NIC resolved to its current name. Config-independent: it
-// reads the persisted lifeline record + the active config's optional leaf,
-// so the protection holds under an empty/absent/rolled-back config.
+// lifeline-recorded NIC resolved to its current name. On committed boxes it
+// validates that name against the main-table route before trusting the record:
+// a resolved non-management record that matches that WAN is durably cleared.
 func (d *Daemon) resolveProtectedInterfaces() map[string]bool {
 	mgmtLeaf := ""
-	if cfg := d.store.ActiveConfig(); cfg != nil {
-		mgmtLeaf = cfg.System.ManagementInterface
+	if d != nil && d.store != nil {
+		if cfg := d.store.ActiveConfig(); cfg != nil {
+			mgmtLeaf = cfg.System.ManagementInterface
+		}
+	}
+	if d != nil && d.store != nil && d.store.EverCommitted() {
+		recordName, recordOK := lifelineRecordNameFn()
+		routeName, found, routeErr := detectLifelineInterfaceFn()
+		if poisonedLifelineRecord(mgmtLeaf, recordName, recordOK,
+			routeName, found, routeErr) {
+			clearPoisonedLifelineRecord(recordName)
+			recordName = ""
+		}
+		return protectedInterfacesWith(mgmtLeaf, recordName)
 	}
 	return protectedInterfaces(mgmtLeaf)
 }

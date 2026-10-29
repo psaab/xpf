@@ -169,16 +169,18 @@ func junosHostNameUnrepresentable(ab *AddressBook, feedBound map[string]bool, na
 		}
 		// #15673: an address with no usable prefixes (tainted mixed form,
 		// unresolved dns-name, oversized range) cannot be projected.
-		// #16595: a dns-name whose latest lookup FAILED is runtime-empty,
+		// #16595/#17782: a failed or cold-cache dns-name is runtime-empty,
 		// not statically unresolvable — it must not withdraw the zone's
-		// whole program. A cold-cache dns-name is likewise unresolved, not a
-		// successful empty answer. Either contributes no prefixes (match-none
-		// for that entry) while sibling static terms keep rendering.
-		// A name that resolved successfully to zero addresses still cannot
-		// be projected.
-		if a, ok := ab.Addresses[name]; ok && a != nil && len(a.UsableValues()) == 0 &&
-			!(a.DNSName != "" && (a.DNSLookupFailed || a.DNSUnresolved)) {
-			return true
+		// whole program. A successful family-scoped DNS answer can also be
+		// runtime-empty after family filtering (#17721). These states
+		// contribute no prefixes for that entry, while sibling static terms
+		// keep rendering. Successful unscoped empty answers remain
+		// unrepresentable; their strict/diagnostic semantics are unchanged.
+		if a, ok := ab.Addresses[name]; ok && a != nil && len(a.UsableValues()) == 0 {
+			runtimeEmptyDNS := a.DNSName != "" && (a.DNSLookupFailed || a.DNSUnresolved)
+			if !runtimeEmptyDNS && !a.hasSuccessfulFamilyEmptyDNS() {
+				return true
+			}
 		}
 	}
 	if feedBound[name] {

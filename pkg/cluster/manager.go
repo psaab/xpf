@@ -179,6 +179,14 @@ type monitorKey struct {
 	iface string
 }
 
+// abortedPeerTransferFence holds the latest owner heartbeat watermark seen
+// while a failed transfer epoch remains fenced.
+type abortedPeerTransferFence struct {
+	heartbeatSession  uint64
+	heartbeatSequence uint64
+	sawHold           bool
+}
+
 // Manager manages cluster redundancy group states.
 type Manager struct {
 	nodeID         int
@@ -293,10 +301,15 @@ type Manager struct {
 	// request this node aborted, including failed/timed-out ACKs (#16592).
 	// While present, electRG blocks all promotion paths: skipping only
 	// "Peer transfer out" would let a higher-priority requester promote
-	// through ordinary election. The entry is cleared when the peer
-	// stops advertising secondary-hold, on a committed transfer, on
-	// ResetFailover, on peer loss, and on RG removal. Read/written under m.mu.
+	// through ordinary election. It is cleared on transfer-epoch resolution,
+	// commit, ResetFailover, peer loss, and RG removal. Read/written under m.mu.
 	abortedPeerTransferReqID map[int]uint64
+	// abortedPeerTransferFence stores the owner's session/sequence watermark
+	// for failed pre-commit requests. Their abort marker survives ordinary-
+	// secondary restoration heartbeats and resolves only after a newer PRIMARY
+	// heartbeat follows an observed hold. Post-commit aborts retain non-hold-
+	// heartbeat expiry. Read under m.mu.
+	abortedPeerTransferFence map[int]abortedPeerTransferFence
 	peerMonitors             []InterfaceMonitorInfo
 
 	// lastDupNodeIDWarn rate-limits the duplicate-node-id warning (#4549 F11).
@@ -895,6 +908,7 @@ func NewManager(nodeID, clusterID int) *Manager {
 		remoteTransferOutLeaseUntil:    make(map[int]time.Time),
 		remoteTransferOutLeaseReqID:    make(map[int]uint64),
 		abortedPeerTransferReqID:       make(map[int]uint64),
+		abortedPeerTransferFence:       make(map[int]abortedPeerTransferFence),
 		remoteTransferOutLease:         DefaultRemoteTransferOutLease,
 		localHAProtocolVersion:         CurrentHAProtocolVersion,
 		hbInterval:                     DefaultHeartbeatInterval,

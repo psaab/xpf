@@ -368,11 +368,11 @@ func buildSnapshotWithSchedulerStateAndNATCountersAndFailClosedProvider(cfg *con
 	// published set reduced, so Rust must not mistake that reduction for a
 	// committed zone removal.
 	snap.ZoneSetValidated = len(snap.Zones) > 0 && len(snap.zoneIDCollisions) == 0
-	// Compute policy refusal reasons from the exact post-quarantine policy/zone
-	// sets published to the helper, not intermediates that may contain removed
-	// rules or resolvable zones that were omitted.
+	// Compute policy refusal reasons and per-rule quarantine diagnostics from
+	// the exact post-quarantine policy/zone sets published to the helper, not
+	// intermediates that may contain removed rules or resolvable zones omitted.
 	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
-		collectPolicyContentRejections(snap.Policies)...)
+		collectPolicyContentDiagnostics(snap.Policies)...)
 	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,
 		collectPolicyZoneRejections(snap.Policies, snap.Zones)...)
 	snap.Capabilities.PolicyContentRejected = append(snap.Capabilities.PolicyContentRejected,

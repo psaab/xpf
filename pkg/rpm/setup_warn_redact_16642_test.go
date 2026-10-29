@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -163,5 +164,75 @@ func TestSetupWarnPlainTargetUnchanged16642(t *testing.T) {
 	}
 	if strings.Contains(out, "<redacted>") {
 		t.Errorf("plain-target WARN should be unchanged (no redaction marker):\n%s", out)
+	}
+}
+
+// #17725: the missing-'@' typo. Schemeless `user:TOKEN/check?token=...`
+// canonicalizes to `http://user:TOKEN/check?...`; url.Parse then fails with
+// `invalid port ":TOKEN" after host`, whose quoted substring IS the
+// credential. Returning ue.Err verbatim (the old urlParseErrClass16642)
+// leaks it into ErrProbeSetup / the WARN line even though the adjacent
+// RedactURL(target) renders `<redacted>` (secret.go host:port rule). The
+// sanitized class must keep the error class ("invalid port") and drop the
+// quoted payload entirely; neither token may survive on any surface.
+func TestSetupWarnRedactsMissingAtInnerError17725(t *testing.T) {
+	target := "user:" + secretUserinfo16642 + "/check?token=" + secretQuery16642
+
+	// Returned error surface (probeHTTP path: canonicalize stays lenient,
+	// NewRequest re-parse fails).
+	m := New()
+	_, err := m.probeHTTP(context.Background(), &config.RPMTest{
+		Name: "t", ProbeType: "http-get", Target: target,
+	}, probeSockOpts{})
+	if !errors.Is(err, ErrProbeSetup) {
+		t.Fatalf("probeHTTP err = %v, want ErrProbeSetup", err)
+	}
+	for _, secret := range []string{secretUserinfo16642, secretQuery16642} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("probeHTTP error leaked credential %q: %v", secret, err)
+		}
+	}
+	if !strings.Contains(err.Error(), "invalid port") {
+		t.Errorf("probeHTTP error must retain error class %q, got: %v", "invalid port", err)
+	}
+	if strings.Contains(err.Error(), `":`+secretUserinfo16642+`"`) {
+		t.Errorf("probeHTTP error retained quoted credential-bearing port substring: %v", err)
+	}
+
+	// Direct canonicalize surface (schemed missing-'@' form reaches the
+	// url.Parse error arm in canonicalizeHTTPTarget).
+	_, cerr := canonicalizeHTTPTarget("http://" + target)
+	if !errors.Is(cerr, ErrProbeSetup) {
+		t.Fatalf("canonicalize err = %v, want ErrProbeSetup", cerr)
+	}
+	for _, secret := range []string{secretUserinfo16642, secretQuery16642} {
+		if strings.Contains(cerr.Error(), secret) {
+			t.Errorf("canonicalize error leaked credential %q: %v", secret, cerr)
+		}
+	}
+	if !strings.Contains(cerr.Error(), "invalid port") {
+		t.Errorf("canonicalize error must retain error class %q, got: %v", "invalid port", cerr)
+	}
+
+	// Helper-level: the raw inner text must never pass through.
+	_, parseErr := url.Parse("http://" + target)
+	if parseErr == nil {
+		t.Fatal("url.Parse unexpectedly accepted missing-@ target")
+	}
+	if got := urlParseErrClass16642(parseErr, "http://"+target); strings.Contains(got, secretUserinfo16642) || !strings.Contains(got, "invalid port") {
+		t.Errorf("urlParseErrClass16642 = %q, want sanitized invalid-port class without credential", got)
+	}
+
+	// WARN surface through the real runSingleTest path.
+	out := captureRPMSetupWarn16642(t, &config.RPMTest{
+		Name: "t1", ProbeType: "http-get", Target: target,
+	})
+	for _, secret := range []string{secretUserinfo16642, secretQuery16642} {
+		if strings.Contains(out, secret) {
+			t.Errorf("WARN leaked credential %q in WARN line:\n%s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "invalid port") {
+		t.Errorf("WARN must retain error class %q, got:\n%s", "invalid port", out)
 	}
 }
