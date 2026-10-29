@@ -1,8 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
 
-  * DHCP relay: bound reconcile joins and return timeout errors while leaving
-    unfinished relays tracked and suppressing their replacements. Bootstrap
-    rollback now includes relay stop failures in its DEGRADED report (#17693).
+  * Bootstrap: suppress stale cluster RA reconciliation and serialize final
+    withdrawal against in-flight passes. Bound DHCP relay stop joins and report
+    timeout failures in the bootstrap DEGRADED result (#17693).
   * Daemon: add already-MASTER sync-hold reconcile coverage with an
     authoritative VRRP manager instance retained through held, release-only,
     and steady-state passes (#17821).

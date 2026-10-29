@@ -641,17 +641,22 @@ func summarizeBootstrapTeardown(steps []bootstrapTeardownStep) (err error, degra
 // Runs under the caller's d.applySem.
 func (d *Daemon) withdrawAbandonedServicesForBootstrap() []bootstrapTeardownStep {
 	var steps []bootstrapTeardownStep
+	var raErr error
+	d.raReconcileMu.Lock()
 	if d.ra != nil {
-		if err := d.ra.Withdraw(); err != nil {
-			steps = append(steps, bootstrapTeardownStep{
-				name: "withdraw router advertisements",
-				err:  err,
-			})
-		}
-		d.raReconcileMu.Lock()
-		d.lastRAReconcileHash = ""
-		d.lastStandaloneRAHash = ""
-		d.raReconcileMu.Unlock()
+		// Serialize the final withdrawal with cluster/standalone reconciles.
+		// Since bootstrapMode is already set, a waiting cluster pass will
+		// observe the gate and return instead of re-adding the retained target.
+		raErr = d.ra.Withdraw()
+	}
+	d.lastRAReconcileHash = ""
+	d.lastStandaloneRAHash = ""
+	d.raReconcileMu.Unlock()
+	if raErr != nil {
+		steps = append(steps, bootstrapTeardownStep{
+			name: "withdraw router advertisements",
+			err:  raErr,
+		})
 	}
 	if d.dhcpServer != nil {
 		d.dhcpServer.SetLeaseSyncEnabled(false)

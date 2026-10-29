@@ -1861,6 +1861,14 @@ to `Apply`'s graceful goodbye (#14978). If both nodes are BACKUP, a stale
 host route may remain until Router Lifetime expiry; a later MASTER's RA
 refresh repairs it.
 
+**Bootstrap withdrawal gate (#17693).** A refused-target rollback retains its
+clustered `ActiveConfig`, so the periodic cluster pass must not treat that
+target as permission to recreate node-local RA after bootstrap withdrawal.
+Bootstrap entry sets the gate before taking `raReconcileMu` for the final
+`Withdraw`: an already-running reconcile completes before that withdrawal, and
+later passes observe bootstrap mode under the same mutex and return. An
+authorized bootstrap exit clears the gate so ordinary reconciliation resumes.
+
 **Stable-LL placement (#16686, #17049).** Placement is the single
 definition `Config.StableRethLinkLocalPlacements` in `pkg/config`
 (#17049); `addStableRethLinkLocal`, `removeStableRethLinkLocal`
