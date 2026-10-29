@@ -271,18 +271,19 @@ impl EventFrame {
         buf[pos] = flags;
         pos += 1;
 
-        // [27:29] IngressZoneID u32 LE (#3075: widened from u8).
-        // SessionMetadata.ingress_zone is u32; the event-stream now carries the
-        // full u32 so a stable name-hash zone id > 255 (#3075) round-trips
-        // instead of truncating. This is same-host same-version IPC — xpfd
-        // spawns the helper as a child and the #1917 STOP->FLIP->START kills the
-        // helper before the new daemon starts (socket unlinked+recreated, a
-        // FullResync drains the stream), so no frame straddles the width change
-        // and no record-version negotiation is required.
+        // [27:29] IngressZoneID u16 LE: the LOW 16 bits of the u32
+        // SessionMetadata.ingress_zone. #3075 widened the field from u8, but
+        // the frame (like the BPF session value and the HA wire) still holds
+        // only 16 bits since #16557 made zone ids full u32 hashes; the Go
+        // session-sync import recovers the full id from the published zones
+        // (#18515). Same-host same-version IPC — xpfd spawns the helper as a
+        // child and the #1917 STOP->FLIP->START kills the helper before the
+        // new daemon starts — so a future widening needs no record-version
+        // negotiation.
         buf[pos..pos + 2].copy_from_slice(&(metadata.ingress_zone as u16).to_le_bytes());
         pos += 2;
 
-        // [29:31] EgressZoneID u32 LE (#3075).
+        // [29:31] EgressZoneID u16 LE: low 16 bits, as above.
         buf[pos..pos + 2].copy_from_slice(&(metadata.egress_zone as u16).to_le_bytes());
         pos += 2;
 

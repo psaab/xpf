@@ -512,8 +512,10 @@ pub(crate) fn build_synced_session_entry(
         },
         ingress_vlan_id: req.ingress_vlan_id,
         forward_ingress_vlan_id: None,
-        // #919: prefer the wire u16 IDs when populated; fall back
-        // to name lookup for older peers that only sent strings.
+        // #919: prefer the wire IDs when populated; fall back to name
+        // lookup for older peers that only sent strings. #18515: the Go
+        // sender recovers the full u32 StableZoneID from the u16 session
+        // value; an ambiguous value arrives as 0 and resolves no zone.
         ingress_zone: if req.ingress_zone_id != 0 {
             req.ingress_zone_id
         } else {
@@ -530,11 +532,15 @@ pub(crate) fn build_synced_session_entry(
                 .copied()
                 .unwrap_or(0)
         },
-        // #10620: stamp the vintage from the WIRE names (the origin's
-        // generation), not the local map: stamping from the local map
-        // would launder a stale peer row with the current generation.
-        // Empty name (id-only peer) stamps 0 = unknown, failing open
-        // to the #10612 stateless arms on that leg.
+        // #10620: stamp the vintage from the WIRE names, not the local
+        // map: stamping from the local map would launder a stale peer row
+        // with the current generation. #18515: the Go sender fills the
+        // name only when the peer's (truncated) zone id matches exactly one
+        // zone this node publishes. That is the origin's name unless the
+        // origin's zone exists only on the sender and shares low 16 bits
+        // with a local zone (~1/65536 per pair). A renamed, unknown or ambiguous zone
+        // still arrives empty and stamps 0 = unknown, failing open to the
+        // #10612 stateless arms on that leg.
         ingress_zone_check: if req.ingress_zone.is_empty() {
             0
         } else {
