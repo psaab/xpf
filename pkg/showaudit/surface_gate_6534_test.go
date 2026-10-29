@@ -452,6 +452,33 @@ func TestSurfaceAnnotationCensusIsExact6534(t *testing.T) {
 			sort.Strings(population)
 			sort.Strings(unannotated)
 
+			if f.Name == "security zone" {
+				const (
+					detailID = "pkg/api/interfaces.go:writeInterfacesDetail"
+					zoneMapID = "pkg/api/api.go:interfaceZoneMap"
+				)
+				apiPkg := parsePackage(t, "pkg/api")
+				detail := apiPkg.funcs["writeInterfacesDetail"]
+				zoneMap := apiPkg.funcs["interfaceZoneMap"]
+				callsZoneMap := false
+				if detail != nil {
+					for _, callee := range calleeNames(detail.fd) {
+						if callee == "interfaceZoneMap" {
+							callsZoneMap = true
+							break
+						}
+					}
+				}
+				zoneMapReadsZones := zoneMap != nil && rangesOverAny(apiPkg.fset, zoneMap.fd, f.Collections)
+				if !contains(population, detailID) || !contains(f.CollectionHelpers, zoneMapID) ||
+					!callsZoneMap || !zoneMapReadsZones {
+					t.Errorf("security-zone census must include %s through %s "+
+						"(population=%v, helper-listed=%t, direct-call=%t, helper-ranges=%t)",
+						detailID, zoneMapID, population, contains(f.CollectionHelpers, zoneMapID),
+						callsZoneMap, zoneMapReadsZones)
+				}
+			}
+
 			// Non-vacuity, two ways. An empty population means the collection
 			// selectors stopped matching and every assertion below is over
 			// nothing; a population with no ANNOTATED member means the
