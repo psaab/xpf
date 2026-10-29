@@ -58,5 +58,5 @@ func TestRouteListenerActuationRefreshesCarveouts17971(t *testing.T) {
 	if !d.actuateLearnedRouteRefresh(context.Background()) {
 		t.Fatal("actuation with nil routing manager did not converge")
 	}
-	requireRouteListenerCalls11565(t, dp.calls, "publish", "bump")
+	requireRouteListenerCalls11565(t, dp.callsSnapshot(), "publish", "bump")
 }
