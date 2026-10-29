@@ -1,5 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * Userspace dataplane: quarantine never-resolved DNS policy rules to deny
+    in Rust while accepting and enforcing sibling rules. Keep the Go-side
+    operator diagnostic visible without treating DNS quarantine as a whole-
+    snapshot refusal for rollback preflight (#17722).
+
   * Routing: authorize rib-group peer returns from the route owner's
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify

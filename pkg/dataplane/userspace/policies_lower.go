@@ -221,22 +221,14 @@ func buildOneRuleSnapshot(
 			Protocol: unsupportedApplicationSentinel,
 		}}
 	}
-	// #16595: a DENY/REJECT (or excluded-side) rule whose address side is
-	// empty only because DNS never resolved must fail closed, not fall
-	// through to a later permit (deny) and not invert to match-all
-	// (excluded). Poison this rule's application terms: the current Rust
-	// helper rejects such a snapshot and retains previous-good (fresh-boot
-	// default-deny), so the rule can never be enforced as a permit — while
-	// the Go builder emits NO address sentinel and NO PolicyContentRejected
-	// entry for the DNS cause. Positive PERMIT sides instead take the
-	// empty book row (match-none) and need no poison, so their snapshot
-	// loads and enforces every sibling rule.
-	if dnsFailClosed {
-		applicationTerms = []PolicyApplicationSnapshot{{
-			Name:     unsupportedApplicationSentinel,
-			Protocol: unsupportedApplicationSentinel,
-		}}
-	}
+	// #17722: a DENY/REJECT (or excluded-side) rule with an unavailable DNS
+	// address side carries a dedicated term. Rust recognizes it, normalizes
+	// address matching for this rule, and forces its action to deny; unlike the
+	// generic unsupported-application sentinel, it does not reject siblings.
+	// Preserve generic sentinels for every independent representability cause.
+	dnsRuleQuarantined := dnsFailClosed && ok && !srcUnrepresentable && !dstUnrepresentable &&
+		!pol.LenientContentDropped && len(pol.MalformedZonePairShapes) == 0 &&
+		len(pol.UnknownSecurityPoliciesChildren) == 0
 	schedulerName := pol.SchedulerName
 	// #5575 / #11013 / #11014 / #12234: a policy the tolerant load / peer-sync
 	// compile path accepted only by DOWNGRADING a reject for dropped
@@ -278,6 +270,9 @@ func buildOneRuleSnapshot(
 			}
 		}
 	}
+	if rejectedScheduler != "" {
+		dnsRuleQuarantined = false
+	}
 	// #1606 v3 fields classify each address token as a named book reference or
 	// a free-form literal.
 	// #3261: force the unrepresentable-address sentinel onto BOTH the v3
@@ -291,6 +286,18 @@ func buildOneRuleSnapshot(
 	}
 	if dstUnrepresentable {
 		dstBookIDs, dstLiterals = nil, []string{unsupportedAddressSentinel}
+	}
+	if dnsRuleQuarantined {
+		if srcDNSMatchNone {
+			rejectedSrc = offendingAddressTokens(addrRepresentable, pol.Match.SourceAddresses)
+		}
+		if dstDNSMatchNone {
+			rejectedDst = offendingAddressTokens(addrRepresentable, pol.Match.DestinationAddresses)
+		}
+		applicationTerms = append(applicationTerms, PolicyApplicationSnapshot{
+			Name:     dnsUnavailableApplicationSentinel,
+			Protocol: dnsUnavailableApplicationSentinel,
+		})
 	}
 	// #2508: carry the per-policy `then log session-init`/`session-close`
 	// selection into the snapshot so the dataplane can gate the per-policy
@@ -345,7 +352,7 @@ func buildOneRuleSnapshot(
 		// build-time-only rejection metadata.
 		unknownSecurityPoliciesChildren: pol.UnknownSecurityPoliciesChildren,
 		rejectedScheduler:               rejectedScheduler,
-		dnsUnavailableFailClosed:        dnsFailClosed,
+		dnsUnavailableFailClosed:        dnsRuleQuarantined,
 	}
 }
 

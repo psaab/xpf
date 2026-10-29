@@ -1625,6 +1625,129 @@ fn all_unparseable_terms_fail_closed_with_integrity_error() {
 }
 
 #[test]
+fn dns_unresolved_rule_quarantines_to_deny_and_keeps_siblings() {
+    // RED-on-revert: the prior parse_snapshot treated this marker as an
+    // unrepresentable application term and rejected every sibling in the
+    // snapshot. This test requires acceptance and live enforcement instead.
+    let dns_rule = PolicyRuleSnapshot {
+        policy_id: 71,
+        name: "block-unresolved-dns".to_string(),
+        from_zone: "trust".to_string(),
+        to_zone: "untrust".to_string(),
+        source_book_ids: vec![42],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: vec![PolicyApplicationSnapshot {
+            name: DNS_UNAVAILABLE_QUARANTINE_SENTINEL.to_string(),
+            protocol: DNS_UNAVAILABLE_QUARANTINE_SENTINEL.to_string(),
+            ..Default::default()
+        }],
+        // Go leaves the configured action in the snapshot; the quarantine
+        // marker must still force deny at the helper boundary.
+        action: "permit".to_string(),
+        source_address_excluded: true,
+        ..Default::default()
+    };
+    let sibling = PolicyRuleSnapshot {
+        policy_id: 72,
+        name: "permit-sibling".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        action: "permit".to_string(),
+        ..Default::default()
+    };
+    let rules = [dns_rule, sibling];
+    let books = [book(42, "never-resolved", &[], &[])];
+    let snapshot = ConfigSnapshot {
+        default_policy: "deny".to_string(),
+        zones: vec![
+            ZoneSnapshot {
+                name: "trust".to_string(),
+                id: TEST_TRUST_ZONE_ID,
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "untrust".to_string(),
+                id: TEST_UNTRUST_ZONE_ID,
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "lan".to_string(),
+                id: TEST_LAN_ZONE_ID,
+                ..Default::default()
+            },
+            ZoneSnapshot {
+                name: "wan".to_string(),
+                id: TEST_WAN_ZONE_ID,
+                ..Default::default()
+            },
+        ],
+        policies: rules.to_vec(),
+        address_books: books.to_vec(),
+        ..Default::default()
+    };
+    let store = PolicyCounterStore::default();
+    let mut prepared = PreparedPolicyState::parse_snapshot(
+        &snapshot,
+        &store,
+        std::sync::Arc::new(SchedulerHeartbeatLease::default()),
+    )
+    .expect("DNS quarantine is a per-rule denial, not a snapshot integrity error");
+    let state = prepared.take_state();
+    assert_eq!(state.rules.len(), 2, "the sibling policy must be retained");
+    assert_eq!(state.rules[0].action, PolicyAction::Deny);
+    assert!(!state.rules[0].source_excluded);
+    assert!(state.rules[0].source_v4_match_any && state.rules[0].source_v6_match_any);
+    let denied = evaluate_policy_result_with_len(
+        &state,
+        TEST_TRUST_ZONE_ID,
+        TEST_UNTRUST_ZONE_ID,
+        "10.0.61.100".parse().expect("src"),
+        "172.16.80.200".parse().expect("dst"),
+        PROTO_TCP,
+        40000,
+        443,
+        64,
+    );
+    assert_eq!(denied.action, PolicyAction::Deny);
+    assert_eq!(denied.policy_id, 71, "the quarantine rule must match");
+    let permitted = evaluate_policy_result_with_len(
+        &state,
+        TEST_LAN_ZONE_ID,
+        TEST_WAN_ZONE_ID,
+        "10.0.61.100".parse().expect("src"),
+        "172.16.80.200".parse().expect("dst"),
+        PROTO_TCP,
+        40000,
+        443,
+        64,
+    );
+    assert_eq!(permitted.action, PolicyAction::Permit);
+    assert_eq!(permitted.policy_id, 72, "the sibling rule must match");
+
+    // A genuinely unsupported application remains a whole-snapshot integrity
+    // error even when a valid sibling follows it.
+    let mut unsupported_snapshot = snapshot.clone();
+    unsupported_snapshot.policies[0].application_terms = vec![PolicyApplicationSnapshot {
+        name: "__unsupported__".to_string(),
+        protocol: "__unsupported__".to_string(),
+        ..Default::default()
+    }];
+    let result = PreparedPolicyState::parse_snapshot(
+        &unsupported_snapshot,
+        &PolicyCounterStore::default(),
+        std::sync::Arc::new(SchedulerHeartbeatLease::default()),
+    );
+    assert!(matches!(
+        result,
+        Err(SnapshotIntegrityError::UnrepresentableApplicationProtocol { .. })
+    ));
+}
+
+#[test]
 fn malformed_legacy_source_address_fails_closed_with_integrity_error() {
     // #3367 RED-on-revert: a rule whose LEGACY `source_addresses` field carries a
     // token that is non-empty, non-`any`, non-family-wildcard, and unparseable as

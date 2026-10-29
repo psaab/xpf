@@ -442,11 +442,10 @@ type PolicyRuleSnapshot struct {
 	// unknownSecurityPoliciesChildren carries #12217 compile-time diagnostics
 	// for the skipped children that caused whole-snapshot refusal.
 	unknownSecurityPoliciesChildren []string
-	// dnsUnavailableFailClosed marks a rule poisoned only because DNS
-	// resolution was unavailable before an answer existed (cold-cache
-	// unresolved or resolver failure; #16595/#17782). Build-time only, never
-	// on the wire. collectPolicyContentRejections suppresses the content-
-	// rejection diagnostic for this cause: the config is representable and
-	// previous-good/default-deny is the enforcement state.
+	// dnsUnavailableFailClosed marks a rule whose otherwise-representable
+	// address constraint is empty only because DNS has not resolved (cold cache
+	// or resolver failure; #16595/#17782/#17722). Build-time only; the wire
+	// marker is dnsUnavailableApplicationSentinel. Used to surface the
+	// operator-facing per-rule quarantine diagnostic.
 	dnsUnavailableFailClosed bool
 }

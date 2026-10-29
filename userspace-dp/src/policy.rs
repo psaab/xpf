@@ -28,6 +28,11 @@ pub(crate) use snapshot_error::SnapshotIntegrityError;
 /// drops it to `MatchNone` and never matches real traffic.
 pub(crate) const UNREPRESENTABLE_ADDRESS_SENTINEL: &str = "__unsupported_address__";
 
+/// Go marks a DNS-only rule quarantine with this application term. The helper
+/// keeps the remaining valid application terms, normalizes address matching,
+/// and enforces the containing rule as deny instead of refusing all siblings.
+const DNS_UNAVAILABLE_QUARANTINE_SENTINEL: &str = "__dns_unavailable__";
+
 /// A scheduler publication remains authoritative for its window disposition
 /// for at most five minutes without a dataplane heartbeat. On expiry, scheduled
 /// permits become ineligible and scheduled denies/rejects remain eligible.
@@ -2864,7 +2869,7 @@ pub(crate) fn parse_policy_state_with_counters_and_functional(
         // deny fall through to default-permit).
         let mut legacy_malformed: Option<String> = None;
         let mut v3_malformed: Option<String> = None;
-        let (source_literal_v4, source_literal_v6) = if source_is_v3_shaped {
+        let (mut source_literal_v4, mut source_literal_v6) = if source_is_v3_shaped {
             let (v4, v6, malformed) = parse_v3_literal_set(&snap.source_literals);
             if v3_malformed.is_none() {
                 v3_malformed = malformed;
@@ -2877,7 +2882,7 @@ pub(crate) fn parse_policy_state_with_counters_and_functional(
             }
             (v4, v6)
         };
-        let (destination_literal_v4, destination_literal_v6) = if destination_is_v3_shaped {
+        let (mut destination_literal_v4, mut destination_literal_v6) = if destination_is_v3_shaped {
             let (v4, v6, malformed) = parse_v3_literal_set(&snap.destination_literals);
             if v3_malformed.is_none() {
                 v3_malformed = malformed;
@@ -2935,10 +2940,26 @@ pub(crate) fn parse_policy_state_with_counters_and_functional(
 
         // Resolve book IDs to dense indices. Sort + dedup + hard
         // fail on unknown.
-        let source_book_idxs =
+        let mut source_book_idxs =
             resolve_book_idxs(&state.book_id_to_idx, &snap.source_book_ids, &rule_id)?;
-        let destination_book_idxs =
+        let mut destination_book_idxs =
             resolve_book_idxs(&state.book_id_to_idx, &snap.destination_book_ids, &rule_id)?;
+        let dns_unavailable_quarantine = snap
+            .application_terms
+            .iter()
+            .any(is_dns_unavailable_quarantine_term);
+        if dns_unavailable_quarantine {
+            // #17722: an unresolved address must not narrow a deny rule or
+            // invert an excluded side. Quarantine only this rule by removing
+            // address constraints and excluded-side inversion; valid
+            // application terms and siblings continue to enforce normally.
+            source_literal_v4 = PrefixSetV4::MatchAny;
+            source_literal_v6 = PrefixSetV6::MatchAny;
+            destination_literal_v4 = PrefixSetV4::MatchAny;
+            destination_literal_v6 = PrefixSetV6::MatchAny;
+            source_book_idxs.clear();
+            destination_book_idxs.clear();
+        }
 
         // Precompute match-any flags. True iff EITHER the literal
         // set OR any cited book's v4/v6 is MatchAny.
@@ -3006,7 +3027,7 @@ pub(crate) fn parse_policy_state_with_counters_and_functional(
         // is the backstop for that sentinel and for any corrupt/non-Go
         // snapshot. Genuinely-empty terms (`application any`) drop nothing, so
         // `dropped_any == false` and the rule stays match-any.
-        let parsed = parse_applications(&snap.application_terms);
+        let parsed = parse_applications(&snap.application_terms, dns_unavailable_quarantine);
         if parsed.dropped_any {
             return Err(SnapshotIntegrityError::UnrepresentableApplicationProtocol {
                 rule_id: rule_id.clone(),
@@ -3046,6 +3067,18 @@ pub(crate) fn parse_policy_state_with_counters_and_functional(
         }
         let applications = parsed.matches;
         let compiled_apps = CompiledApplications::from_matches(&applications);
+        // #3365: validate the configured action before the DNS marker can
+        // override it to Deny. Unknown/empty actions remain whole-snapshot
+        // errors rather than silently taking a fail-closed default.
+        let mut action = parse_action(&snap.action).ok_or_else(|| {
+            SnapshotIntegrityError::UnknownPolicyAction {
+                context: format!("rule {:?}", rule_id),
+                action: snap.action.clone(),
+            }
+        })?;
+        if dns_unavailable_quarantine {
+            action = PolicyAction::Deny;
+        }
 
         let rule = PolicyRule {
             rule_id: rule_id.clone(),
@@ -3080,23 +3113,15 @@ pub(crate) fn parse_policy_state_with_counters_and_functional(
             source_v6_match_any,
             destination_v4_match_any,
             destination_v6_match_any,
-            source_excluded: snap.source_address_excluded,
-            destination_excluded: snap.destination_address_excluded,
+            source_excluded: snap.source_address_excluded && !dns_unavailable_quarantine,
+            destination_excluded: snap.destination_address_excluded && !dns_unavailable_quarantine,
             source_v4_empty,
             source_v6_empty,
             destination_v4_empty,
             destination_v6_empty,
             applications,
             compiled_apps,
-            // #3365: every configured rule carries a concrete action; an unknown
-            // (or empty) action is rejected fail-closed rather than silently
-            // mapped to Deny (which would fail-OPEN an unrecognized reject).
-            action: parse_action(&snap.action).ok_or_else(|| {
-                SnapshotIntegrityError::UnknownPolicyAction {
-                    context: format!("rule {:?}", rule_id),
-                    action: snap.action.clone(),
-                }
-            })?,
+            action,
             // #2508: carry the per-policy SYSLOG log selection.
             log_session_init: snap.log_session_init,
             log_session_close: snap.log_session_close,
@@ -5162,12 +5187,34 @@ struct ParsedApplications {
     invalid_port_protocol: Option<(String, &'static str, u8)>,
 }
 
-fn parse_applications(terms: &[PolicyApplicationSnapshot]) -> ParsedApplications {
-    let mut out = Vec::with_capacity(terms.len());
+fn is_dns_unavailable_quarantine_term(term: &PolicyApplicationSnapshot) -> bool {
+    term.name == DNS_UNAVAILABLE_QUARANTINE_SENTINEL
+        && term.protocol == DNS_UNAVAILABLE_QUARANTINE_SENTINEL
+        && term.source_port.is_empty()
+        && term.destination_port.is_empty()
+        && term.icmp_type.is_none()
+        && term.icmp_code.is_none()
+        && term.inactivity_timeout.is_none()
+}
+
+fn parse_applications(
+    terms: &[PolicyApplicationSnapshot],
+    dns_unavailable_quarantine: bool,
+) -> ParsedApplications {
+    let mut out = Vec::with_capacity(
+        terms.len()
+            .saturating_sub(dns_unavailable_quarantine as usize),
+    );
     let mut dropped_any = false;
     let mut invalid_icmp: Option<(String, &'static str)> = None;
     let mut invalid_port_protocol: Option<(String, &'static str, u8)> = None;
     for term in terms {
+        // #17722: a dedicated Go marker is control metadata, not an
+        // application matcher term. Other unrepresentable terms still set
+        // dropped_any and reject the whole snapshot.
+        if dns_unavailable_quarantine && is_dns_unavailable_quarantine_term(term) {
+            continue;
+        }
         let Some(protocol) = parse_protocol(&term.protocol) else {
             dropped_any = true;
             continue;
