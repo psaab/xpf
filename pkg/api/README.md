@@ -2465,22 +2465,25 @@ the drop fails loudly instead of going quietly vacuous.
     report 0/stale while `show firewall filter` shows real hits (#3461); the
     per-term counter-slot stride is the shared
     `config.FilterTermExpansionCount` SSOT (#3459).
-  - **Invalid-UTF-8 label values cannot crash a scrape** (#15086, #16707): every
-    const-metric emit in this package goes through the single choke point
-    `emitConstMetric` (`metrics_emit_15086.go`), which escapes each invalid
-    byte in a label value as `\xNN` before calling the error-returning
-    `prometheus.NewConstMetric` — never the panicking `Must*` form. A
-    committed identifier with raw non-UTF-8 bytes (the A44-01 probe's
-    `web\xffallow` policy name) is therefore still published, sanitized,
-    instead of panicking inside `Registry.Gather`'s goroutine and killing
-    the daemon. The `\xNN` spelling is injective (#16707): the original
-    U+FFFD fold mapped `web\xffallow` and `web\xfeallow` to the same
-    series, and the resulting duplicate made every scrape answer 500.
-    Each sanitized value bumps `xpf_metrics_invalid_label_values_total`;
-    any residual construction error (arity, invalid descriptor) skips the
-    sample and bumps `xpf_counter_read_errors_total` under the
-    omit-plus-error contract above. Legitimate values pass through
-    byte-identical. As a systemic backstop for any remaining
+  - **Invalid-UTF-8 label values cannot crash a scrape**
+    (#15086, #16707, #17753): every const-metric emit in this package goes
+    through the single choke point `emitConstMetric`
+    (`metrics_emit_15086.go`), which escapes each invalid byte in a label
+    value as `\xNN` and each literal backslash as `\x5c` before calling the
+    error-returning `prometheus.NewConstMetric` — never the panicking
+    `Must*` form. A committed identifier with raw non-UTF-8 bytes (the
+    A44-01 probe's `web\xffallow` policy name) is therefore still
+    published, sanitized, instead of panicking inside `Registry.Gather`'s
+    goroutine and killing the daemon. The spelling is
+    injective (#16707, #17753): the original U+FFFD fold mapped
+    `web\xffallow` and `web\xfeallow` to the same series; escaping the
+    backslash also distinguishes raw byte `0xff` from a valid literal
+    `\xff` spelling. Each invalid-UTF-8 label value bumps
+    `xpf_metrics_invalid_label_values_total`; backslash-only rewrites do
+    not. Any residual construction error (arity, invalid descriptor) skips
+    the sample and bumps `xpf_counter_read_errors_total` under the
+    omit-plus-error contract above. Valid values without backslashes pass
+    through byte-identical. As a systemic backstop for any remaining
     duplicate-series source (e.g. a zone-pair rule and a scoped global
     with the same name in the same zone pair), the metrics handler now
     serves with `promhttp.ContinueOnError` (#16707): the offending series
@@ -2492,8 +2495,9 @@ the drop fails loudly instead of going quietly vacuous.
     the lane to the pool, and lets that scrape fail instead of crashing
     the process; the bumped count is certified by the next scrape's
     sample. All health counters are always emitted, including at zero.
-    Pinned by `metrics_invalid_utf8_15086_test.go` and
-    `metrics_sanitize_collision_16707_test.go`.
+    Pinned by `metrics_invalid_utf8_15086_test.go`,
+    `metrics_sanitize_collision_16707_test.go`, and
+    `metrics_sanitize_escape_injective_17753_test.go`.
   - **Text commands** print a `warning: ... counter read failed ...` line
     instead of a clean zero: `show security screen` / `show security
     alarms` / `show security flow statistics` / `show chassis cluster
