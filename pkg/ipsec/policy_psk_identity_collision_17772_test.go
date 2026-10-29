@@ -145,8 +145,8 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 	t.Run("RFC822 aliases collide and retain unrelated VPN", func(t *testing.T) {
 		pairs := []struct{ aType, a, bType, b string }{
 			{"rfc822", "peer@corp.example", "user-at-hostname", "peer@CORP.EXAMPLE"},
-			{"email", "peer@corp.example", "user-at-hostname", "peer@Corp.Example"},
-			{"email", "peer@corp.example", "rfc822", "peer@CORP.EXAMPLE"},
+			{"email", "peer@corp.example", "user-at-hostname", "Peer@Corp.Example"},
+			{"email", "peer@corp.example", "rfc822", "PEER@CORP.EXAMPLE"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -168,12 +168,14 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		}
 	})
 
-	t.Run("canonical DN spellings skip both secrets", func(t *testing.T) {
+	t.Run("canonical atodn spellings skip both secrets", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"separator spacing and case", "CN=peer, O=Org", "cn=PEER,o=ORG"},
 			{"RDN order", "CN=peer,O=Org", "O=ORG,CN=PEER"},
-			{"multi-valued RDN order", "CN=peer+OU=VPN,O=Org", "OU=vpn+CN=PEER,O=ORG"},
-			{"escaped separator", "CN=peer\\,east,O=Org", "O=ORG,CN=PEER\\,EAST"},
+			{"slash separator", "/CN=peer/O=Org", "O=ORG,CN=PEER"},
+			{"PrintableString case", "SN=Smith", "sn=SMITH"},
+			{"email attribute aliases", "E=Peer@corp.example,O=Org", "emailAddress=PEER@CORP.EXAMPLE,o=ORG"},
+			{"employeeNumber aliases", "EN=12345", "employeeNumber=12345"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -190,11 +192,13 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		}
 	})
 
-	t.Run("key-id literal and equivalent hex keys skip both secrets", func(t *testing.T) {
+	t.Run("key-id spellings compare chunk_from_hex bytes", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
-			{"literal and hex bytes", "zz", "7a7a"},
+			{"invalid nibble maps to zero", "zz", "00"},
 			{"hex case", "7a7a", "7A7A"},
-			{"odd-length literal and hex bytes", "7a7", "376137"},
+			{"0x prefix and colon separators", "0x7a7a", "7a:7a"},
+			{"odd nibble is left padded", "7a7", "07A7"},
+			{"two zero bytes with separators", "0000", "00:00"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -207,6 +211,53 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 					"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
 				})
 				assertSkipped(t, cfg, "gw-a", "gw-b")
+			})
+		}
+	})
+
+	t.Run("DN syntax is checked before rendered identity prefixes", func(t *testing.T) {
+		pairs := []struct{ name, aType, a, bType, b string }{
+			{"hostname selector falls back to literal KEY_ID", "hostname", "CN=peer", "key-id", "40434e3d70656572"},
+			{"unsupported DN falls back to literal KEY_ID", "distinguished-name", "broken=peer", "key-id", "62726f6b656e3d70656572"},
+		}
+		for _, pair := range pairs {
+			pair := pair
+			t.Run(pair.name, func(t *testing.T) {
+				cfg := build(map[string]*config.IPsecGateway{
+					"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: pair.aType, RemoteIDValue: pair.a},
+					"gw-b": {Name: "gw-b", Address: "203.0.113.2", RemoteIDType: pair.bType, RemoteIDValue: pair.b},
+				}, map[string]*config.IPsecVPN{
+					"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
+					"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
+				})
+				assertSkipped(t, cfg, "gw-a", "gw-b")
+			})
+		}
+	})
+
+	t.Run("distinct strongSwan identities render both secrets", func(t *testing.T) {
+		pairs := []struct{ name, aType, a, bType, b string }{
+			{"one zero byte versus two", "key-id", "zz", "key-id", "0000"},
+			{"odd padded bytes versus ASCII hex text", "key-id", "7a7", "key-id", "376137"},
+			{"unknown DN attribute case", "distinguished-name", "broken=peer", "distinguished-name", "BROKEN=PEER"},
+			{"internal DN whitespace", "distinguished-name", "CN=Peer   Name", "distinguished-name", "CN=peer name"},
+			{"UTF8 DN sharp-s", "distinguished-name", "CN=Straße", "distinguished-name", "CN=STRASSE"},
+			{"plus remains in DN value", "distinguished-name", "CN=peer+OU=VPN", "distinguished-name", "OU=vpn+CN=PEER"},
+		}
+		for _, pair := range pairs {
+			pair := pair
+			t.Run(pair.name, func(t *testing.T) {
+				cfg := build(map[string]*config.IPsecGateway{
+					"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: pair.aType, RemoteIDValue: pair.a},
+					"gw-b": {Name: "gw-b", Address: "203.0.113.2", RemoteIDType: pair.bType, RemoteIDValue: pair.b},
+				}, map[string]*config.IPsecVPN{
+					"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
+					"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
+				})
+				text, rendered, err := manager.renderConfig(cfg)
+				if err != nil || !rendered["gw-a"] || !rendered["gw-b"] {
+					t.Fatalf("distinct strongSwan identities must both render: rendered=%v err=%v\n%s", rendered, err, text)
+				}
 			})
 		}
 	})
@@ -271,6 +322,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"hostname adorned equals inet literal @fqdn", "hostname", "peer.example", "inet", "@peer.example"},
 			{"key-id rendered equals inet literal @#zz", "key-id", "zz", "inet", "@#zz"},
 			{"hostname starting hash equals key-id rendered", "hostname", "#zz", "key-id", "zz"},
+			{"hostname containing DN syntax falls back to matching key-id bytes", "hostname", "CN=peer", "key-id", "40434e3d70656572"},
 		}
 		for _, pair := range pairs {
 			pair := pair

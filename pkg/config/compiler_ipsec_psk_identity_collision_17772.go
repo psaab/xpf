@@ -6,10 +6,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
-
-	"golang.org/x/text/cases"
 )
 
 // IPsecPSKIdentityConflict describes a peer-only selector collision between
@@ -301,8 +297,7 @@ func FormatIPsecIdentity(idType, idValue string) string {
 	case "hostname", "fqdn":
 		return "@" + idValue
 	case "key-id":
-		// KEY_ID: @#<value> (strongSwan treats the tail as hex when it
-		// decodes, else the literal bytes via the quoted swanctl string).
+		// KEY_ID: @#<value>, decoded by strongSwan's chunk_from_hex().
 		if idValue == "" {
 			return ""
 		}
@@ -318,223 +313,201 @@ func ipsecIKEIdentityKey(idType, idValue string) (string, string) {
 	if selector == "" {
 		return "", selector
 	}
-	// StrongSwan identifies the owner from the rendered selector, not from
-	// the Junos-declared type. Keep this dispatch coupled to the shared
-	// formatter above so a new rendered spelling cannot reopen a collision.
-	if strings.HasPrefix(selector, "@#") {
-		// swanctl's @# spelling decodes valid even-length hex; otherwise
-		// strongSwan compares the literal bytes (including odd hex text).
-		identityBytes := []byte(selector[2:])
-		if decoded, err := hex.DecodeString(selector[2:]); err == nil {
-			identityBytes = decoded
+	// identification_create_from_string() tries DN syntax before the @ and
+	// @# forms. A malformed DN falls back to a literal KEY_ID, so preserve
+	// those bytes before considering any rendered prefix.
+	if strings.Contains(selector, "=") {
+		if canonical, ok := ipsecCanonicalDNIdentity(selector); ok {
+			return "distinguished-name:" + canonical, selector
 		}
-		return "key-id-bytes:" + hex.EncodeToString(identityBytes), selector
+		return ipsecKeyIDBytesKey([]byte(selector)), selector
+	}
+	if strings.HasPrefix(selector, "@#") {
+		return ipsecKeyIDBytesKey(ipsecChunkFromHex(selector[2:])), selector
 	}
 	if strings.HasPrefix(selector, "@@") {
 		return ipsecRFC822IdentityKey(selector[2:]), selector
 	}
 	if strings.HasPrefix(selector, "@") {
-		return "fqdn:" + strings.ToLower(strings.TrimSpace(selector[1:])), selector
-	}
-	if strings.Contains(selector, "=") {
-		if canonical, ok := ipsecCanonicalDNIdentity(selector); ok {
-			return "distinguished-name:" + canonical, selector
-		}
-		// Malformed DN syntax falls back to exact raw-selector matching;
-		// never guess a normalized identity from a partial parse.
-		return "raw-selector:" + selector, selector
+		return "fqdn:" + ipsecASCIILower(selector[1:]), selector
 	}
 	if strings.Contains(selector, "@") {
 		return ipsecRFC822IdentityKey(selector), selector
 	}
-	if addr, err := netip.ParseAddr(strings.TrimSpace(selector)); err == nil {
+	if addr, err := netip.ParseAddr(selector); err == nil && addr.Zone() == "" {
 		if addr.Is4() {
 			return "ipv4:" + addr.String(), selector
 		}
 		return "ipv6:" + addr.String(), selector
 	}
+	if strings.Contains(selector, ":") {
+		return ipsecKeyIDBytesKey([]byte(selector)), selector
+	}
 	// A bare, unadorned identity with no DN/RFC822/IP syntax is parsed by
-	// strongSwan as an FQDN identity.
-	return "fqdn:" + strings.ToLower(strings.TrimSpace(selector)), selector
+	// strongSwan as an FQDN identity. Preserve its exact length and whitespace.
+	return "fqdn:" + ipsecASCIILower(selector), selector
 }
 
 func ipsecRFC822IdentityKey(value string) string {
-	if at := strings.LastIndex(value, "@"); at >= 0 {
-		return "rfc822:" + value[:at] + "@" + cases.Fold().String(value[at+1:])
+	return "rfc822:" + ipsecASCIILower(value)
+}
+
+func ipsecKeyIDBytesKey(value []byte) string {
+	return "key-id-bytes:" + hex.EncodeToString(value)
+}
+
+// ipsecChunkFromHex mirrors strongSwan's chunk_from_hex() spelling: lowercase
+// 0x and colons are ignored, invalid nibbles become zero, and odd values are
+// left-padded with a zero nibble before bytewise identity comparison.
+func ipsecChunkFromHex(value string) []byte {
+	if strings.HasPrefix(value, "0x") {
+		value = value[2:]
 	}
-	return "rfc822:" + value
+	nibbleCount := 0
+	for i := 0; i < len(value); i++ {
+		if value[i] != ':' {
+			nibbleCount++
+		}
+	}
+	decoded := make([]byte, (nibbleCount+1)/2)
+	i, out := 0, 0
+	nextNibble := func() byte {
+		for i < len(value) && value[i] == ':' {
+			i++
+		}
+		nibble := ipsecHexNibble(value[i])
+		i++
+		return nibble
+	}
+	if nibbleCount%2 != 0 {
+		decoded[out] = nextNibble()
+		out++
+	}
+	for out < len(decoded) {
+		decoded[out] = nextNibble()<<4 | nextNibble()
+		out++
+	}
+	return decoded
+}
+
+func ipsecHexNibble(value byte) byte {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0'
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10
+	default:
+		return 0
+	}
+}
+
+func ipsecASCIILower(value string) string {
+	var lowered []byte
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 'A' && value[i] <= 'Z' {
+			if lowered == nil {
+				lowered = []byte(value)
+			}
+			lowered[i] += 'a' - 'A'
+		}
+	}
+	if lowered == nil {
+		return value
+	}
+	return string(lowered)
 }
 
 func ipsecCanonicalDNIdentity(value string) (string, bool) {
-	rdns, ok := splitIPsecDNComponents(value, ',')
-	if !ok || len(rdns) == 0 {
-		return "", false
+	separator := byte(',')
+	if strings.HasPrefix(value, "/") {
+		separator = '/'
+		value = value[1:]
 	}
-	canonicalRDNs := make([]string, 0, len(rdns))
-	for _, rawRDN := range rdns {
-		avas, ok := splitIPsecDNComponents(rawRDN, '+')
-		if !ok || len(avas) == 0 {
+	rawRDNs := strings.Split(value, string(separator))
+	canonicalRDNs := make([]string, 0, len(rawRDNs))
+	for _, rawRDN := range rawRDNs {
+		eq := strings.IndexByte(rawRDN, '=')
+		if eq < 0 {
 			return "", false
 		}
-		canonicalAVAs := make([]string, 0, len(avas))
-		for _, rawAVA := range avas {
-			eq, ok := indexUnescapedIPsecDNByte(rawAVA, '=')
-			if !ok || eq <= 0 {
-				return "", false
-			}
-			attribute := canonicalIPsecDNAttribute(trimUnescapedIPsecDNPadding(rawAVA[:eq]))
-			if attribute == "" {
-				return "", false
-			}
-			rawValue := trimUnescapedIPsecDNPadding(rawAVA[eq+1:])
-			decoded, ok := decodeIPsecDNValue(rawValue)
-			if !ok {
-				return "", false
-			}
-			if ipsecDNAttributeCaseIgnore(attribute) {
-				decoded = cases.Fold().String(strings.Join(strings.Fields(decoded), " "))
-			}
-			canonicalAVAs = append(canonicalAVAs, attribute+"="+strconv.Quote(decoded))
+		attribute := canonicalIPsecDNAttribute(strings.Trim(rawRDN[:eq], " "))
+		if attribute == "" {
+			return "", false
 		}
-		sort.Strings(canonicalAVAs)
-		canonicalRDNs = append(canonicalRDNs, strings.Join(canonicalAVAs, "+"))
+		dnValue := strings.TrimRight(strings.TrimLeft(rawRDN[eq+1:], " ="), " ")
+		valueType := "printable"
+		switch attribute {
+		case "EMAILADDRESS", "UNSTRUCTUREDNAME":
+			valueType = "ia5"
+		default:
+			if !ipsecIsPrintableString(dnValue) {
+				valueType = "utf8"
+			}
+		}
+		if valueType == "printable" || attribute == "EMAILADDRESS" {
+			dnValue = ipsecASCIILower(dnValue)
+		}
+		canonicalRDNs = append(canonicalRDNs,
+			attribute+":"+valueType+":"+strconv.Quote(dnValue))
 	}
-	// Treat equivalent RDN orderings and multi-valued AVA orderings as
-	// the same peer identity. Quoted values keep escaped separators from
-	// becoming structural delimiters in this collision-only key.
+	// strongSwan matches individual RDNs independent of their order. Sorting
+	// only these parsed values mirrors that behavior; '+' and backslash stay
+	// ordinary value bytes because atodn() does not parse them specially.
 	sort.Strings(canonicalRDNs)
 	return strings.Join(canonicalRDNs, "/"), true
 }
 
-func splitIPsecDNComponents(value string, separator byte) ([]string, bool) {
-	parts := make([]string, 0, 2)
-	start := 0
-	for i := 0; i < len(value); i++ {
-		if value[i] == '\\' {
-			if i+1 >= len(value) {
-				return nil, false
-			}
-			i++
-			continue
-		}
-		if value[i] == separator {
-			parts = append(parts, value[start:i])
-			start = i + 1
-		}
-	}
-	parts = append(parts, value[start:])
-	for _, part := range parts {
-		if strings.TrimSpace(part) == "" {
-			return nil, false
-		}
-	}
-	return parts, true
-}
-
-func indexUnescapedIPsecDNByte(value string, target byte) (int, bool) {
-	for i := 0; i < len(value); i++ {
-		if value[i] == '\\' {
-			if i+1 >= len(value) {
-				return -1, false
-			}
-			i++
-			continue
-		}
-		if value[i] == target {
-			return i, true
-		}
-	}
-	return -1, false
-}
-
-func trimUnescapedIPsecDNPadding(value string) string {
-	start, end := 0, len(value)
-	for start < end {
-		r, size := utf8.DecodeRuneInString(value[start:end])
-		if !unicode.IsSpace(r) {
-			break
-		}
-		start += size
-	}
-	for end > start {
-		r, size := utf8.DecodeLastRuneInString(value[start:end])
-		if !unicode.IsSpace(r) {
-			break
-		}
-		slashes := 0
-		for i := end - size - 1; i >= start && value[i] == '\\'; i-- {
-			slashes++
-		}
-		if slashes%2 != 0 {
-			break
-		}
-		end -= size
-	}
-	return value[start:end]
-}
-
-func decodeIPsecDNValue(value string) (string, bool) {
-	var decoded strings.Builder
-	for i := 0; i < len(value); {
-		if value[i] != '\\' {
-			decoded.WriteByte(value[i])
-			i++
-			continue
-		}
-		if i+1 >= len(value) {
-			return "", false
-		}
-		if i+2 < len(value) {
-			if b, err := hex.DecodeString(value[i+1 : i+3]); err == nil {
-				decoded.WriteByte(b[0])
-				i += 3
-				continue
-			}
-		}
-		if !strings.ContainsRune(" \\\"#+,;<>\\=", rune(value[i+1])) {
-			return "", false
-		}
-		decoded.WriteByte(value[i+1])
-		i += 2
-	}
-	return decoded.String(), true
-}
-
 func canonicalIPsecDNAttribute(attribute string) string {
-	attribute = strings.ToUpper(strings.TrimSpace(attribute))
-	switch attribute {
-	case "S":
-		return "ST"
-	case "E":
+	upper := ipsecASCIIUpper(attribute)
+	switch upper {
+	case "ND", "UID", "DC", "CN", "SN", "SERIALNUMBER", "C", "L", "ST",
+		"STREET", "O", "OU", "ORGANIZATIONIDENTIFIER", "T", "D",
+		"POSTALADDRESS", "POSTALCODE", "N", "G", "I", "DNQUALIFIER",
+		"DMDNAME", "PSEUDONYM", "ID", "TCGID":
+		return upper
+	case "E", "EMAIL", "EMAILADDRESS":
 		return "EMAILADDRESS"
-	case "2.5.4.3":
-		return "CN"
-	case "2.5.4.6":
-		return "C"
-	case "2.5.4.7":
-		return "L"
-	case "2.5.4.8":
-		return "ST"
-	case "2.5.4.9":
-		return "STREET"
-	case "2.5.4.10":
-		return "O"
-	case "2.5.4.11":
-		return "OU"
-	case "1.2.840.113549.1.9.1":
-		return "EMAILADDRESS"
+	case "EN", "EMPLOYEENUMBER":
+		return "EMPLOYEENUMBER"
+	case "UN", "UNSTRUCTUREDNAME":
+		return "UNSTRUCTUREDNAME"
+	case "UA", "UNSTRUCTUREDADDRESS":
+		return "UNSTRUCTUREDADDRESS"
 	default:
-		return attribute
+		return ""
 	}
 }
 
-func ipsecDNAttributeCaseIgnore(attribute string) bool {
-	switch attribute {
-	case "CN", "O", "OU", "C", "L", "ST", "STREET", "EMAILADDRESS", "DC", "UID":
-		return true
-	default:
+func ipsecASCIIUpper(value string) string {
+	var upper []byte
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 'a' && value[i] <= 'z' {
+			if upper == nil {
+				upper = []byte(value)
+			}
+			upper[i] -= 'a' - 'A'
+		}
+	}
+	if upper == nil {
+		return value
+	}
+	return string(upper)
+}
+
+func ipsecIsPrintableString(value string) bool {
+	for i := 0; i < len(value); i++ {
+		char := value[i]
+		if (char >= 'A' && char <= 'Z') ||
+			(char >= 'a' && char <= 'z') ||
+			(char >= '0' && char <= '9') ||
+			strings.ContainsRune(" '()+,-./:=?", rune(char)) {
+			continue
+		}
 		return false
 	}
+	return true
 }
 
 func ipsecMixedHostnameAndIP(endpointList string) (string, bool) {

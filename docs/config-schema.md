@@ -11515,10 +11515,19 @@ reserved for whole-dataplane selection where a rewrite shim
     when one connection's remote identity matches another gateway's effective
     local identity (configured `local-identity`, otherwise its effective local IP
     address). #18428 derives collision keys from the exact swanctl selector,
-    not the declared Junos identity type, so distinct types that render one
-    owner share a collision class. Canonicalization follows rendered form for
-    DN case-ignore attributes and RDN/AVA order, RFC822 domain case, key-id
-    bytes and IP/FQDN spelling; rendered values stay in authored spelling.
+    not the declared Junos identity type, so distinct types that render one owner
+    share a collision class.
+    DN keys mirror strongSwan `atodn()` for its recognized attribute names and
+    aliases: PrintableString values and emailAddress compare ASCII-case-
+    insensitively, UTF8String and other IA5 values remain case-sensitive, and
+    RDN order is ignored. Only a leading slash selects `/` as the DN delimiter;
+    `+` and backslash remain value bytes, internal spaces are significant, and
+    unknown/numeric-OID attributes fall back to literal key-id bytes. RFC822
+    comparisons fold the whole address using ASCII case-insensitivity. `@#`
+    selectors use `chunk_from_hex()` bytes (lowercase `0x` stripped, colons
+    ignored, invalid nibbles zeroed, odd nibbles left-padded; byte length
+    matters). IP and FQDN keys follow the parsed rendered selector while
+    rendered values stay in authored spelling.
     A mixed hostname/IP gateway requires a discriminating `remote-identity`
     for every dial target; IP selectors cannot cover a hostname's eventual
     peer identity. Tolerant loads warn

@@ -268,14 +268,21 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		}
 	})
 
-	t.Run("DN canonical spellings collide", func(t *testing.T) {
+	t.Run("atodn DN spellings canonicalize", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
 			{"separator spacing and case", "CN=peer, O=Org", "cn=PEER,o=ORG"},
 			{"RDN order", "CN=peer,O=Org", "O=ORG,CN=PEER"},
-			{"multi-valued RDN order", "CN=peer+OU=VPN,O=Org", "OU=vpn+CN=PEER,O=ORG"},
-			{"escaped separator", "CN=peer\\,east,O=Org", "O=ORG,CN=PEER\\,EAST"},
-			{"case-ignore whitespace", "CN=Peer   Name,O=Org", "cn=peer name,o=org"},
-			{"Unicode full case fold", "CN=Straße,O=Org", "cn=STRASSE,o=org"},
+			{"slash separator", "/CN=peer/O=Org", "O=ORG,CN=PEER"},
+			{"SN PrintableString case", "SN=Smith", "sn=SMITH"},
+			{"G PrintableString case", "G=Jane", "g=JANE"},
+			{"T PrintableString case", "T=Manager", "t=MANAGER"},
+			{"D PrintableString case", "D=Notes", "d=NOTES"},
+			{"serialNumber PrintableString case", "serialNumber=AbC123", "serialnumber=aBc123"},
+			{"E and Email aliases", "E=peer@corp.example", "Email=PEER@CORP.EXAMPLE"},
+			{"emailAddress and E aliases", "emailAddress=peer@corp.example", "E=PEER@CORP.EXAMPLE"},
+			{"EN and employeeNumber aliases", "EN=12345", "employeeNumber=12345"},
+			{"UN and unstructuredName aliases", "UN=peer", "unstructuredName=peer"},
+			{"UA and unstructuredAddress aliases", "UA=peer", "unstructuredAddress=peer"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {
@@ -284,48 +291,73 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		}
 	})
 
-	t.Run("malformed DN escape falls back to raw identity", func(t *testing.T) {
-		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer\\", "distinguished-name", "cn=PEER"))
-	})
-
-	t.Run("RFC822 and FQDN namespaces stay distinct", func(t *testing.T) {
-		requireNoCollision17772(t, identityPair17772("email", "peer@corp.example", "hostname", "peer@corp.example"))
+	t.Run("unsupported DN syntax falls back to literal key-id bytes", func(t *testing.T) {
+		pairs := []struct{ name, a, b string }{
+			{"numeric OID is not an atodn attribute", "2.5.4.3=peer", "CN=peer"},
+			{"unknown attribute is not an atodn attribute", "custom=peer", "CN=peer"},
+			{"unknown attribute case remains literal", "broken=peer", "BROKEN=PEER"},
+			{"plus is part of the value, not a multi-valued RDN", "CN=peer+OU=VPN,O=Org", "OU=vpn+CN=PEER,O=ORG"},
+			{"backslash does not escape comma", "CN=peer\\,east,O=Org", "O=ORG,CN=PEER\\,EAST"},
+			{"internal whitespace is significant", "CN=Peer   Name,O=Org", "CN=peer name,O=ORG"},
+			{"UTF8String values do not expand sharp-s", "CN=Straße", "CN=STRASSE"},
+			{"UTF8String values remain case-sensitive", "CN=straße", "CN=STRAßE"},
+			{"trailing backslash is an ordinary UTF8String byte", "CN=peer\\", "CN=PEER\\"},
+		}
+		for _, pair := range pairs {
+			t.Run(pair.name, func(t *testing.T) {
+				requireNoCollision17772(t, identityPair17772("distinguished-name", pair.a, "distinguished-name", pair.b))
+			})
+		}
 	})
 
 	t.Run("DN and FQDN namespaces stay distinct", func(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer.example.com", "hostname", "peer.example.com"))
 	})
 
-	t.Run("key-id spellings compare strongSwan identity bytes", func(t *testing.T) {
+	t.Run("key-id selectors compare chunk_from_hex bytes", func(t *testing.T) {
 		pairs := []struct{ name, a, b string }{
-			{"literal bytes and equivalent hex", "zz", "7a7a"},
-			{"hex digits are case-insensitive", "7a7a", "7A7A"},
-			{"odd-length input is literal bytes", "7a7", "376137"},
+			{"invalid nibbles map to zero", "zz", "00"},
+			{"0x prefix is stripped", "0x7a7a", "7A7A"},
+			{"colon separators are stripped", "7a:7a", "7A7A"},
+			{"odd nibble is left padded", "7a7", "07A7"},
+			{"two zero bytes with separators", "0000", "00:00"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {
 				requireCollision17772(t, identityPair17772("key-id", pair.a, "key-id", pair.b))
 			})
 		}
-		requireNoCollision17772(t, identityPair17772("key-id", " 6162 ", "key-id", "6162"))
 	})
 
-	t.Run("RFC822 aliases and case-folded domains share one namespace", func(t *testing.T) {
+	t.Run("different chunk_from_hex bytes remain distinct", func(t *testing.T) {
+		pairs := []struct{ name, a, b string }{
+			{"one zero byte versus two", "zz", "0000"},
+			{"odd padded hex versus literal-looking hex", "7a7", "376137"},
+			{"invalid whitespace nibbles versus hex", " 6162 ", "6162"},
+		}
+		for _, pair := range pairs {
+			t.Run(pair.name, func(t *testing.T) {
+				requireNoCollision17772(t, identityPair17772("key-id", pair.a, "key-id", pair.b))
+			})
+		}
+	})
+
+	t.Run("RFC822 and FQDN namespaces stay distinct", func(t *testing.T) {
+		requireNoCollision17772(t, identityPair17772("email", "peer@corp.example", "hostname", "peer@corp.example"))
+	})
+
+	t.Run("RFC822 aliases and whole-address case folding share one namespace", func(t *testing.T) {
 		pairs := []struct{ name, aType, a, bType, b string }{
-			{"user-at-hostname and rfc822", "user-at-hostname", "peer@corp.example", "rfc822", "peer@CORP.EXAMPLE"},
-			{"email and user-at-hostname", "email", "peer@corp.example", "user-at-hostname", "peer@Corp.Example"},
-			{"email and rfc822", "email", "peer@corp.example", "rfc822", "peer@CORP.EXAMPLE"},
-			{"rfc822 domain case", "rfc822", "peer@corp.example", "rfc822", "peer@CORP.EXAMPLE"},
+			{"user-at-hostname and rfc822", "user-at-hostname", "Peer@corp.example", "rfc822", "peer@CORP.EXAMPLE"},
+			{"email and user-at-hostname", "email", "peer@corp.example", "user-at-hostname", "Peer@Corp.Example"},
+			{"email and rfc822", "email", "peer@corp.example", "rfc822", "PEER@CORP.EXAMPLE"},
+			{"rfc822 whole address case", "rfc822", "peer@corp.example", "rfc822", "PEER@CORP.EXAMPLE"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {
 				requireCollision17772(t, identityPair17772(pair.aType, pair.a, pair.bType, pair.b))
 			})
 		}
-	})
-
-	t.Run("RFC822 local part remains case-sensitive", func(t *testing.T) {
-		requireNoCollision17772(t, identityPair17772("user-at-hostname", "Peer@corp.example", "rfc822", "peer@CORP.EXAMPLE"))
 	})
 
 	t.Run("cross-type rendered-identical owners collide", func(t *testing.T) {
@@ -337,7 +369,8 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			{"inet and email same IP string", "inet", "198.51.100.7", "email", "198.51.100.7"},
 			{"hostname adorned equals inet literal @fqdn", "hostname", "peer.example", "inet", "@peer.example"},
 			{"key-id rendered equals inet literal @#zz", "key-id", "zz", "inet", "@#zz"},
-			{"hostname starting hash equals key-id rendered", "hostname", "#zz", "key-id", "zz"},
+			{"hostname containing DN syntax falls back to matching key-id bytes", "hostname", "CN=peer", "key-id", "40434e3d70656572"},
+			{"hostname key-id spelling shares @# owner", "hostname", "#zz", "key-id", "zz"},
 		}
 		for _, pair := range pairs {
 			t.Run(pair.name, func(t *testing.T) {
