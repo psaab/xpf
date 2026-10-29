@@ -292,6 +292,7 @@ func TestFormatSetLines17773MatchesFormatSet(t *testing.T) {
 				{Keys: []string{"ge-0/0/0.0"}, IsLeaf: true},
 			}},
 		}},
+		{Keys: []string{"foo", "then"}, KeysQuoted: []bool{false, true}, KeysBracketed: []bool{true, true}},
 	}}
 	want := splitLines(tree.FormatSet())
 	got := tree.FormatSetLines(nil)

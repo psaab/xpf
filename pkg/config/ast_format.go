@@ -527,7 +527,7 @@ func appendFormatSetKeys(line []byte, keys []string, forceQuote, group []bool) [
 		}
 		line = appendFormatSetToken(line, &first, "[")
 		for j := i; j < i+run; j++ {
-			line = appendFormatSetKeyToken(line, &first, keys, forceQuote, j)
+			line = appendFormatSetGroupedKeyToken(line, &first, keys, forceQuote, j)
 		}
 		line = appendFormatSetToken(line, &first, "]")
 		i += run
@@ -541,6 +541,14 @@ func appendFormatSetKeyToken(line []byte, first *bool, keys []string, forceQuote
 	}
 	*first = false
 	return appendQuoteKeyProv(line, keys, forceQuote, i)
+}
+
+func appendFormatSetGroupedKeyToken(line []byte, first *bool, keys []string, forceQuote []bool, i int) []byte {
+	if !*first {
+		line = append(line, ' ')
+	}
+	*first = false
+	return appendQuoteKeyProvGrouped(line, keys, forceQuote, i)
 }
 
 func appendFormatSetToken(line []byte, first *bool, token string) []byte {
@@ -561,6 +569,17 @@ func appendQuoteKeyProv(dst []byte, keys []string, forceQuote []bool, i int) []b
 		return append(dst, '"')
 	}
 	return appendFormatSetQuotedKey(dst, key)
+}
+
+// appendQuoteKeyProvGrouped mirrors the public grouped renderer: an authored
+// quote on the path's terminal key is suppressed inside a bracket group.
+func appendQuoteKeyProvGrouped(dst []byte, keys []string, forceQuote []bool, i int) []byte {
+	if i < len(forceQuote) && forceQuote[i] && i < len(keys)-1 {
+		dst = append(dst, '"')
+		dst = appendFormatSetEscaped(dst, keys[i])
+		return append(dst, '"')
+	}
+	return appendFormatSetQuotedKey(dst, keys[i])
 }
 
 func appendFormatSetQuotedKey(dst []byte, key string) []byte {

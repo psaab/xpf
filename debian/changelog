@@ -4,6 +4,9 @@ xpf (0.0.0) unstable; urgency=medium
     cloning either tree or building both complete output strings; reuse
     equal lines so a 50k-line one-line edit stays under 10 MiB allocated
     (#17773).
+  * API: derive REST session `ha_active` and `ha_state` from one HA ownership
+    sample per row, preventing contradictory fields across a failover
+    (#17752).
   * Config: fail closed for nonempty embedded change-configuration
     payloads that lex to no tokens or lose content to comments; recursively
     mask quoted comment-shaped command payloads and preserve the whole-payload
