@@ -1998,6 +1998,12 @@ fn build_forwarded_frame_from_frame_encapsulates_wireguard_7167() {
 /// The v6 WG fixture from `wg_encap_frame_sources_outer_from_physical_wan_primary_v6`,
 /// plus the local outer source in `local_v6` so a PTB addressed to it is ours.
 fn pmtu_v6_state() -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
+    pmtu_v6_state_with_route_mtu(0)
+}
+
+fn pmtu_v6_state_with_route_mtu(
+    route_mtu: i32,
+) -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
     let mut snap = wg_outer_mtu_snapshot();
     snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
     snap.interfaces[1].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00:dead::1/64".to_string(), scope: 0, ..Default::default() });
@@ -2009,7 +2015,7 @@ fn pmtu_v6_state() -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
     discard: false,
     next_table: String::new(),
     preference: 0,
-    rule_priority: 0, mtu: 0, next_table_route: false });
+    rule_priority: 0, mtu: route_mtu, next_table_route: false });
     snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
     snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
     snap.tunnel_endpoints[0].source = "2001:559:8585:80::8".to_string();
@@ -2049,6 +2055,54 @@ fn ptb_v6_frame(outer_src: &str, peer_ep: std::net::SocketAddr, mtu: u32, src_po
     f.extend_from_slice(&mtu.to_be_bytes());
     f.extend_from_slice(&quote);
     f
+}
+
+fn pmtu_v4_state() -> (ForwardingState, std::net::SocketAddr) {
+    let snap = wg_outer_mtu_snapshot();
+    let mut state = build_forwarding_state(&snap);
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    state.wg_engines.insert(
+        1,
+        Arc::new(established_initiator_engine(peer_ep, "10.123.0.0/24")),
+    );
+    (state, peer_ep)
+}
+
+fn ptb_v4_frame(
+    outer_src: &str,
+    peer_ep: std::net::SocketAddr,
+    mtu: u16,
+    src_port: u16,
+    dst_port: u16,
+) -> Vec<u8> {
+    let src: std::net::Ipv4Addr = outer_src.parse().unwrap();
+    let dst = match peer_ep.ip() {
+        IpAddr::V4(v4) => v4,
+        _ => panic!("v4 peer"),
+    };
+    let mut quote = vec![0x45, 0];
+    quote.extend_from_slice(&28u16.to_be_bytes());
+    quote.extend_from_slice(&[0, 0, 0, 0, 64, 17, 0, 0]);
+    quote.extend_from_slice(&src.octets());
+    quote.extend_from_slice(&dst.octets());
+    quote.extend_from_slice(&src_port.to_be_bytes());
+    quote.extend_from_slice(&dst_port.to_be_bytes());
+    quote.extend_from_slice(&[0u8; 4]);
+
+    let router: std::net::Ipv4Addr = "172.16.80.1".parse().unwrap();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&[0x02, 0xbf, 0x72, 0x00, 0x50, 0x08]);
+    frame.extend_from_slice(&[0x00, 0x11, 0x22, 0x33, 0x44, 0x55]);
+    frame.extend_from_slice(&[0x08, 0x00]);
+    frame.extend_from_slice(&[0x45, 0]);
+    frame.extend_from_slice(&((20 + 8 + quote.len()) as u16).to_be_bytes());
+    frame.extend_from_slice(&[0, 0, 0, 0, 64, 1, 0, 0]);
+    frame.extend_from_slice(&router.octets());
+    frame.extend_from_slice(&src.octets());
+    frame.extend_from_slice(&[3, 4, 0, 0, 0, 0]);
+    frame.extend_from_slice(&mtu.to_be_bytes());
+    frame.extend_from_slice(&quote);
+    frame
 }
 
 /// Inner v6 frame with a UDP payload of `total_inner_len` L3 bytes.
@@ -2128,9 +2182,97 @@ fn wg_pmtu_forged_ptb_ignored_16711() {
 fn wg_pmtu_floor_and_aging_16711() {
     // Pure store rules: sub-floor v6 PTB clamps to 1280; aged entry expires.
     assert_eq!(crate::afxdp::wg::pmtu::wg_pmtu_floor(true), 1280);
-    assert_eq!(crate::afxdp::wg::pmtu::pmtu_after_offer(None, 1000, true), Some(1280));
-    assert_eq!(crate::afxdp::wg::pmtu::pmtu_after_offer(Some(1400), 1500, true), None);
+    assert_eq!(
+        crate::afxdp::wg::pmtu::pmtu_after_offer(None, 1000, true, 1500),
+        Some(1280)
+    );
+    assert_eq!(
+        crate::afxdp::wg::pmtu::pmtu_after_offer(Some(1400), 1500, true, 1500),
+        None
+    );
     let t0 = 1_000_000u64;
     assert_eq!(crate::afxdp::wg::pmtu::effective_pmtu(1400, t0, t0 + 1000), Some(1400));
-    assert_eq!(crate::afxdp::wg::pmtu::effective_pmtu(1400, t0, t0 + crate::afxdp::wg::pmtu::WG_PMTU_AGE_NS + 1), None);
+    assert_eq!(
+        crate::afxdp::wg::pmtu::effective_pmtu(
+            1400,
+            t0,
+            t0 + crate::afxdp::wg::pmtu::WG_PMTU_AGE_NS + 1
+        ),
+        None
+    );
 }
+
+#[test]
+fn wg_pmtu_ceiling_clamps_offer_and_preserves_floor_shrink_17747() {
+    use crate::afxdp::wg::pmtu::pmtu_after_offer as offer;
+    assert_eq!(offer(None, 9000, true, 1500), Some(1500));
+    assert_eq!(offer(None, 1400, true, 1500), Some(1400));
+    // The family floor still wins if the local MTU is smaller than it.
+    assert_eq!(offer(None, 9000, true, 1000), Some(1280));
+    // The capped result remains shrink-only against a fresh stored value.
+    assert_eq!(offer(Some(1400), 9000, true, 1500), None);
+    assert_eq!(offer(Some(1500), 1400, true, 1500), Some(1400));
+    // Unknown local MTU keeps the previous unbounded offer behavior.
+    assert_eq!(offer(None, 9000, true, 0), Some(9000));
+    // The IPv4 twin obeys its 68-byte floor and the same local ceiling.
+    assert_eq!(offer(None, 9000, false, 1500), Some(1500));
+    assert_eq!(offer(None, 10, false, 1500), Some(68));
+}
+
+#[test]
+fn wg_pmtu_ptb_clamps_to_local_egress_budget_17747() {
+    let (state, peer_ep, _s) = pmtu_v6_state();
+    let engine = state.wg_engines.get(&1).unwrap();
+    let pk = engine.peer_endpoints()[0].0;
+    // Valid first PTB advertising 9000 on a 1500 local egress: the store
+    // must carry the local budget, not the unbound advertised value.
+    let ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 9000, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
+    assert_eq!(engine.peer_pmtu(&pk, monotonic_nanos()), Some(1500),
+        "oversized validated PTB must be clamped to the 1500 local egress budget");
+    // Control: a normal 1400 PTB on a fresh peer still learns 1400.
+    let (state2, peer_ep2, _s2) = pmtu_v6_state();
+    let engine2 = state2.wg_engines.get(&1).unwrap();
+    let pk2 = engine2.peer_endpoints()[0].0;
+    let ptb2 = ptb_v6_frame("2001:559:8585:80::8", peer_ep2, 1400, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state2, &ptb2, 14), WgPtbOutcome::Learned);
+    assert_eq!(engine2.peer_pmtu(&pk2, monotonic_nanos()), Some(1400));
+    // Control: a forged quote advertising 9000 is still ignored.
+    let (state3, peer_ep3, _s3) = pmtu_v6_state();
+    let engine3 = state3.wg_engines.get(&1).unwrap();
+    let pk3 = engine3.peer_endpoints()[0].0;
+    let forged = ptb_v6_frame("2001:559:8585:80::8", peer_ep3, 9000, 51820, 9999);
+    assert_eq!(consume_wg_outer_ptb(&state3, &forged, 14), WgPtbOutcome::Ignored);
+    assert_eq!(engine3.peer_pmtu(&pk3, monotonic_nanos()), None);
+}
+
+#[test]
+fn wg_pmtu_v4_ptb_clamps_to_local_egress_budget_17747() {
+    let (state, peer_ep) = pmtu_v4_state();
+    let engine = state.wg_engines.get(&1).unwrap();
+    let pk = engine.peer_endpoints()[0].0;
+    let ptb = ptb_v4_frame("172.16.80.8", peer_ep, 9000, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
+    assert_eq!(
+        engine.peer_pmtu(&pk, monotonic_nanos()),
+        Some(1500),
+        "IPv4 oversized PTB must be clamped to the 1500 local egress budget"
+    );
+}
+
+#[test]
+fn wg_pmtu_ptb_clamps_to_static_route_mtu_17747() {
+    // The selected route is tighter than the physical interface: the
+    // learned offer must use min(interface MTU, static route MTU).
+    let (state, peer_ep, _s) = pmtu_v6_state_with_route_mtu(1400);
+    let engine = state.wg_engines.get(&1).unwrap();
+    let pk = engine.peer_endpoints()[0].0;
+    let ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 9000, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
+    assert_eq!(
+        engine.peer_pmtu(&pk, monotonic_nanos()),
+        Some(1400),
+        "static route MTU must cap an oversized PTB below the 1500 interface MTU"
+    );
+}
+

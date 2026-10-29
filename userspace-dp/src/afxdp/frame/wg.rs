@@ -271,6 +271,15 @@ fn outer_egress_ifindex_or_fallback(
     forwarding: &ForwardingState,
     outer: &ForwardingLookupResult,
 ) -> i32 {
+    outer_egress_ifindex_for_fallback(decision.resolution.egress_ifindex, forwarding, outer)
+}
+
+#[inline]
+fn outer_egress_ifindex_for_fallback(
+    fallback_ifindex: i32,
+    forwarding: &ForwardingState,
+    outer: &ForwardingLookupResult,
+) -> i32 {
     let outer = &outer.resolution;
     if outer.egress_ifindex > 0
         && outer.disposition != ForwardingDisposition::NoRoute
@@ -278,7 +287,7 @@ fn outer_egress_ifindex_or_fallback(
     {
         outer.egress_ifindex
     } else {
-        decision.resolution.egress_ifindex
+        fallback_ifindex
     }
 }
 
@@ -315,13 +324,7 @@ fn outer_physical_egress_mtu_with_dynamic(
         dynamic_neighbors,
     );
     let physical_ifindex = outer_egress_ifindex_or_fallback(decision, forwarding, &outer);
-    let interface_mtu = forwarding
-        .egress
-        .get(&physical_ifindex)
-        .map(|e| e.mtu)
-        .filter(|m| *m > 0)
-        .unwrap_or(1500);
-    let base = crate::afxdp::forwarding::min_nonzero_mtu(interface_mtu, outer.resolution.route_mtu as usize);
+    let base = outer_physical_egress_base_mtu(forwarding, physical_ifindex, &outer);
     // #16711: a learned per-peer outer PMTU (validated underlay PTB)
     // caps the local/route budget. Resolved by peer endpoint address
     // so every consumer of this SSOT (encap guard via its inline twin,
@@ -330,6 +333,24 @@ fn outer_physical_egress_mtu_with_dynamic(
         Some(pmtu) => crate::afxdp::forwarding::min_nonzero_mtu(base, pmtu),
         None => base,
     }
+}
+
+#[inline]
+fn outer_physical_egress_base_mtu(
+    forwarding: &ForwardingState,
+    physical_ifindex: i32,
+    outer: &ForwardingLookupResult,
+) -> usize {
+    let interface_mtu = forwarding
+        .egress
+        .get(&physical_ifindex)
+        .map(|e| e.mtu)
+        .filter(|m| *m > 0)
+        .unwrap_or(1500);
+    crate::afxdp::forwarding::min_nonzero_mtu(
+        interface_mtu,
+        outer.resolution.route_mtu as usize,
+    )
 }
 
 /// #16711: the fresh learned outer PMTU of the peer whose live
@@ -1220,7 +1241,19 @@ fn learn_wg_pmtu(
             let Some(ep) = ep else { continue };
             let canon = crate::afxdp::wg::canonicalize_endpoint(ep);
             if canon.ip() == quoted_dst && canon.port() == dst_port {
-                engine.note_peer_pmtu(&pubkey, advertised, outer_v6, now_ns);
+                // Resolve the quoted peer's physical route exactly as
+                // the encap and PTB consumers do. This local interface /
+                // static-route MTU is the maximum credible outer PMTU;
+                // the peer's learned value must never exceed it.
+                let outer = outer_physical_egress_resolution(forwarding, endpoint, quoted_dst);
+                let physical_ifindex = outer_egress_ifindex_for_fallback(
+                    endpoint.logical_ifindex,
+                    forwarding,
+                    &outer,
+                );
+                let local_mtu =
+                    outer_physical_egress_base_mtu(forwarding, physical_ifindex, &outer);
+                engine.note_peer_pmtu(&pubkey, advertised, outer_v6, local_mtu, now_ns);
                 crate::afxdp::wg::counters::WgCounters::bump(&engine.counters().pmtu_learned);
                 return WgPtbOutcome::Learned;
             }
