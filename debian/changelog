@@ -3,6 +3,10 @@ xpf (0.0.0) unstable; urgency=medium
     namespace so tolerant renders preserve every peer even when a gateway is
     named `inline-<name>`; keep non-colliding connection names stable (#17731).
 
+  * FRR: reject same-table active RIP and IS-IS, plus static preferences that
+    cannot be ordered against fixed-distance IS-IS. The helper FIB compares
+    IS-IS on the Junos scale; tolerant renders withhold conflicting routes
+    rather than silently inverting Junos's IS-IS/RIP order (#17735).
   * Userspace dataplane: release MF=0 associations only after range coverage,
     retaining reordered middles across NAT64 and same-family consult paths
     (#17720).
