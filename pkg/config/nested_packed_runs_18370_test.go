@@ -32,6 +32,27 @@ func TestPackedNestedValueListRunsRejected18370(t *testing.T) {
 			leaf: "source-prefix-list",
 		},
 		{
+			name: "firewall bracketed single prefix-list with except block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from source-prefix-list [ pl1 ] except { unexpected { 10.0.0.0/8; } }
+                then accept; } } } }`,
+			leaf: "source-prefix-list",
+		},
+		{
+			name: "firewall bracketed prefix-list run with except block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from source-prefix-list [ pl1 pl2 ] except { unexpected { 10.0.0.0/8; } }
+                then accept; } } } }`,
+			leaf: "source-prefix-list",
+		},
+		{
+			name: "firewall bracketed destination prefix-list with except block",
+			text: lists + ` firewall { family inet { filter f { term t {
+                from destination-prefix-list [ pl1 ] except { unexpected { 10.0.0.0/8; } }
+                then accept; } } } }`,
+			leaf: "destination-prefix-list",
+		},
+		{
 			name: "NAT bracketed address run",
 			text: natPrefixConfig18370(natPrefix, "[ 10.0.0.0/8 192.168.0.0/16 ]"),
 			leaf: "source-address",
@@ -99,6 +120,16 @@ firewall { family inet { filter f { term t from source-prefix-list [ pl1 pl2 ] t
         rule r match source-address [ 10.0.0.0/8 192.168.0.0/16 ] then source-nat interface;
     } } }
 }`,
+		},
+		{
+			name: "firewall bracketed prefix-list with except modifier",
+			text: `policy-options {
+    prefix-list pl1 { 10.0.0.0/8; }
+}
+firewall { family inet { filter f { term t {
+    from { source-prefix-list [ pl1 ] except; }
+    then accept;
+} } } }`,
 		},
 		{
 			name: "firewall unbracketed prefix-list before then sibling",

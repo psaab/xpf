@@ -248,6 +248,21 @@ func nestedRefusalPackedScanChildren(node *Node, nodeSchema, descendSchema *sche
 			packed.KeysBracketed = bracketed
 		}
 	}
+	if run.terminal && run.valueEnd > run.valueStart &&
+		run.valueEnd < len(packed.Keys) && run.valueEnd+1 == len(packed.Keys) &&
+		packed.Keys[run.valueEnd] == "except" {
+		// Prefix-list `except` is a compiler-owned postfix modifier, not a
+		// schema child. Trim it from this scan-only projection so the shared
+		// packed expander can materialize the marked leaf; the original node,
+		// including its modifier, remains untouched for compilation.
+		if len(packed.KeysQuoted) == len(packed.Keys) {
+			packed.KeysQuoted = packed.KeysQuoted[:run.valueEnd]
+		}
+		if len(packed.KeysBracketed) == len(packed.Keys) {
+			packed.KeysBracketed = packed.KeysBracketed[:run.valueEnd]
+		}
+		packed.Keys = packed.Keys[:run.valueEnd]
+	}
 	expanded = packedBodyChildren(&packed, nodeSchema)
 	if len(node.Children) > 0 && run.terminal {
 		attachNestedRefusalBlock(expanded, descendSchema, node.Children)
@@ -282,6 +297,16 @@ func packedRunNestedRefusal(node *Node, start int, parent *schemaNode) packedNes
 			}
 		}
 		if child == nil {
+			// Prefix-list leaves accept a compiler-owned trailing `except`
+			// outside the bracketed values; retain the terminal refusal leaf
+			// so its authored block is checked.
+			if result.terminal && result.valueStart > 0 &&
+				(keys[result.valueStart-1] == "source-prefix-list" ||
+					keys[result.valueStart-1] == "destination-prefix-list") &&
+				result.valueEnd == i && keys[i] == "except" &&
+				bracketed && i > 0 && node.KeysBracketed[i-1] && !node.KeysBracketed[i] {
+				return result
+			}
 			result.terminal = false
 			return result
 		}
