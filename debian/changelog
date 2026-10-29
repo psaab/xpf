@@ -1,5 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
 
+  * RPM: sanitize quoted inner URL parse-error payloads on credential-bearing
+    targets, retaining the error class without leaking malformed-authority
+    tokens (#17725).
+
   * Routing: authorize rib-group peer returns from the route owner's
     import-rib destinations in the correct direction. Keep kernel rules
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
