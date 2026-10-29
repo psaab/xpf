@@ -41,9 +41,9 @@ func TestRouteLeakReconcileFailsCommitOnPublishError(t *testing.T) {
 		t.Fatalf("returned error must wrap the publish failure; got %v", err)
 	}
 	// Publish failed → the helper does not have the new routes, so no bump.
-	for _, c := range dp.calls {
+	for _, c := range dp.callsSnapshot() {
 		if c == "bump" {
-			t.Fatalf("calls = %v: bumped FIB generation after a failed publish", dp.calls)
+			t.Fatalf("calls = %v: bumped FIB generation after a failed publish", dp.callsSnapshot())
 		}
 	}
 }
@@ -67,8 +67,9 @@ func TestRouteLeakReconcileFailsCommitOnBumpError(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("returned error must wrap the bump failure; got %v", err)
 	}
-	if len(dp.calls) != 2 || dp.calls[0] != "publish" || dp.calls[1] != "bump" {
-		t.Fatalf("calls = %v, want [publish bump]", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 2 || calls[0] != "publish" || calls[1] != "bump" {
+		t.Fatalf("calls = %v, want [publish bump]", calls)
 	}
 }
 
@@ -83,9 +84,9 @@ func TestRouteLeakReconcileDuplicateSkipStaysSuccess(t *testing.T) {
 	if err := d.reconcileRouteLeakSnapshot(&config.Config{}, nil); err != nil {
 		t.Fatalf("duplicate-skip must stay a successful commit; got %v", err)
 	}
-	for _, c := range dp.calls {
+	for _, c := range dp.callsSnapshot() {
 		if c == "bump" {
-			t.Fatalf("calls = %v: bumped FIB generation on a duplicate-skip", dp.calls)
+			t.Fatalf("calls = %v: bumped FIB generation on a duplicate-skip", dp.callsSnapshot())
 		}
 	}
 }
@@ -100,8 +101,9 @@ func TestRouteLeakReconcileSuccessStaysSuccess(t *testing.T) {
 	if err := d.reconcileRouteLeakSnapshot(&config.Config{}, nil); err != nil {
 		t.Fatalf("clean republish+bump must be a successful commit; got %v", err)
 	}
-	if len(dp.calls) != 2 || dp.calls[0] != "publish" || dp.calls[1] != "bump" {
-		t.Fatalf("calls = %v, want [publish bump]", dp.calls)
+	calls := dp.callsSnapshot()
+	if len(calls) != 2 || calls[0] != "publish" || calls[1] != "bump" {
+		t.Fatalf("calls = %v, want [publish bump]", calls)
 	}
 }
 
