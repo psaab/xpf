@@ -1,4 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon tests: synchronize the connected-RG republish positive control
+    with the fake dataplane's mutex-protected call log and wait for both
+    publish and FIB bump calls (#17754).
+  * Userspace dataplane: require shim-verdict kernel provenance to match
+    the running kernel before release retention, while preserving
+    kernel-independent source/object freshness checks (#17768).
   * Userspace dataplane: pin the #17722 DNS-quarantine snapshot with a
     Go-generated fixture the Rust parser test consumes end to end
     (follow-up to #18485).
@@ -109,6 +115,11 @@ xpf (0.0.0) unstable; urgency=medium
     arm if a concurrent ConfirmCommit changed the target. Explicitly identify
     first-commit bootstrap targets, including a compiled empty tree after
     restart, and reject a missing non-first target (#17695).
+  * Daemon: publish changed ordinary DNS clones only when their recorded source
+    pointer is still active; unchanged answers skip the store swap. Refresh
+    ticks publish against the active operator-tree identity, so a same-
+    generation clone cannot suppress an in-flight tick and a changed operator
+    tree cannot be overwritten (#17744).
   * Configstore: render commit summaries as individual set lines without
     cloning either tree or building both complete output strings; reuse
     equal lines so a 50k-line one-line edit stays under 10 MiB allocated

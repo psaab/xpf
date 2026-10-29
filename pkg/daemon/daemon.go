@@ -1080,10 +1080,15 @@ type Daemon struct {
 	dnsRefreshMu          sync.Mutex
 	lastDNSRefreshBase    *config.Config
 	lastDNSRefreshAnswers map[string]config.DNSAnswerState
-	// dnsResolvedConfigs marks configs already resolved outside applySem
-	// (#16601) — notably the DNS refresher's clone — so the pre-apply
-	// resolver does not resolve them again. Guarded by dnsRefreshMu.
-	dnsResolvedConfigs map[*config.Config]struct{}
+	// dnsRefreshApplying identifies the periodic refresher clone while its
+	// apply runs under applySem. The ordinary-apply baseline defer must not
+	// publish it; applyDNSRefreshedConfig owns its generation-CAS publication.
+	dnsRefreshApplying *config.Config
+	// dnsResolvedConfigs maps resolved clones to their exact source config
+	// (#16601); map membership also marks DNS already resolved outside
+	// applySem, so the pre-apply resolver does not resolve it again.
+	// Guarded by dnsRefreshMu.
+	dnsResolvedConfigs map[*config.Config]*config.Config
 	// relayRefRGIndex is the per-packet DHCP-relay gate's precomputed
 	// ref→RG index (#17086), keyed by config pointer identity: rebuilt
 	// only when the active config pointer changes, so the per-packet
