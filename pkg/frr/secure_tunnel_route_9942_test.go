@@ -18,7 +18,7 @@ func TestGenerateStaticRouteSecureTunnelUnit9942(t *testing.T) {
 		NextHops:    []config.NextHopEntry{{Interface: "st0.0"}},
 	}
 	got := m.generateStaticRoute(sr, "", nil, nil, declared)
-	want := "ip route 10.99.0.0/16 st0.0\n"
+	want := "ip route 10.99.0.0/16 st0.0 5\n"
 	if got != want {
 		t.Fatalf("rendered route = %q, want %q", got, want)
 	}
@@ -99,9 +99,9 @@ func TestGenerateStaticRouteNonTunnelUnitControls9942(t *testing.T) {
 		iface string
 		want  string
 	}{
-		{"bare secure tunnel", "st0", "ip route 10.99.0.0/16 st0\n"},
-		{"ordinary unit zero", "wan0.0", "ip route 10.99.0.0/16 wan0\n"},
-		{"ordinary vlan unit", "wan0.50", "ip route 10.99.0.0/16 wan0.50\n"},
+		{"bare secure tunnel", "st0", "ip route 10.99.0.0/16 st0 5\n"},
+		{"ordinary unit zero", "wan0.0", "ip route 10.99.0.0/16 wan0 5\n"},
+		{"ordinary vlan unit", "wan0.50", "ip route 10.99.0.0/16 wan0.50 5\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

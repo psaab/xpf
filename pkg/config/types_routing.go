@@ -587,14 +587,16 @@ type RIPGroup struct {
 
 // RIPConfig holds RIP routing configuration.
 type RIPConfig struct {
-	Interfaces   []string // interfaces participating in RIP
-	Passive      []string // passive interfaces (receive only)
-	Redistribute []string // "connected", "static", "ospf"
-	AuthKey      Secret   // authentication key/password; redacted on marshal (#2053)
-	AuthType     string   // "md5" or "simple"
+	Interfaces         []string // interfaces participating in RIP
+	Passive            []string // passive interfaces, receive only
+	Redistribute       []string // union of "connected", "static", "ospf" exports
+	GlobalRedistribute []string // top-level export chain, excluding per-group exports (#17688)
+	AuthKey            Secret   // authentication key/password; redacted on marshal (#2053)
+	AuthType           string   // "md5" or "simple"
 	// Groups (#16625): per-group neighbor/export association.
-	// Interfaces/Redistribute remain the union for legacy
-	// consumers; renderers MUST use Groups when non-empty.
+	// Redistribute remains the union for legacy consumers;
+	// GlobalRedistribute retains the separate top-level chain (#17688).
+	// Renderers MUST use Groups and GlobalRedistribute when Groups is non-empty.
 	Groups []*RIPGroup
 	// Disable (#16572): `protocols rip disable` shuts the protocol.
 	Disable bool

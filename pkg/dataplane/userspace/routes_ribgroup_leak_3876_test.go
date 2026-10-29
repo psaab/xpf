@@ -147,22 +147,22 @@ func TestBuildRouteSnapshotsSkipsSourceOnlyReturnRule(t *testing.T) {
 }
 
 // TestBuildRouteSnapshotsMirrorsRibGroupReturnRules pins the authorized
-// mirror: src's rib-group names b.inet.0, so the kernel return pair mirrors
-// as one src.inet.0 -> b.inet.0 row.
+// mirror: src's rib-group names b.inet.0, so b's lookup context can reach
+// src's prefix via src's table and mirrors as b.inet.0 -> src.inet.0.
 func TestBuildRouteSnapshotsMirrorsRibGroupReturnRules(t *testing.T) {
 	orig := ruleListFn
 	t.Cleanup(func() { ruleListFn = orig })
 	ruleListFn = func(family int) ([]netlink.Rule, error) {
 		if family == syscall.AF_INET {
-			dst := mustCIDR(t, "10.40.0.0/24")
+			dst := mustCIDR(t, "10.30.0.0/24")
 			return []netlink.Rule{
 				{
-					Dst: dst, IifName: "vrf-src",
-					Table: 300, Priority: routing.RibGroupReturnRulePriority,
+					Dst: dst, IifName: "vrf-b",
+					Table: 200, Priority: routing.RibGroupReturnRulePriority,
 				},
 				{
-					Dst: dst, OifName: "vrf-src",
-					Table: 300, Priority: routing.RibGroupReturnRulePriority,
+					Dst: dst, OifName: "vrf-b",
+					Table: 200, Priority: routing.RibGroupReturnRulePriority,
 				},
 			}, nil
 		}
@@ -171,11 +171,12 @@ func TestBuildRouteSnapshotsMirrorsRibGroupReturnRules(t *testing.T) {
 	cfg := &config.Config{
 		RoutingInstances: []*config.RoutingInstanceConfig{
 			{Name: "src", TableID: 200, InterfaceRoutesRibGroup: "src-auth"},
-			{Name: "b", TableID: 300},
+			{Name: "b", TableID: 300, InterfaceRoutesRibGroup: "b-auth"},
 		},
 	}
 	cfg.RoutingOptions.RibGroups = map[string]*config.RibGroup{
 		"src-auth": {Name: "src-auth", ImportRibs: []string{"src.inet.0", "b.inet.0", "inet.0"}},
+		"b-auth":   {Name: "b-auth", ImportRibs: []string{"b.inet.0", "inet.0"}},
 	}
 	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
@@ -185,10 +186,10 @@ func TestBuildRouteSnapshotsMirrorsRibGroupReturnRules(t *testing.T) {
 		t.Fatalf("the iif/oif kernel pair must dedupe to one reverse leak, got %+v", routes)
 	}
 	got := routes[0]
-	if got.Table != "src.inet.0" || got.Family != "inet" ||
-		got.Destination != "10.40.0.0/24" || got.NextTable != "b.inet.0" ||
+	if got.Table != "b.inet.0" || got.Family != "inet" ||
+		got.Destination != "10.30.0.0/24" || got.NextTable != "src.inet.0" ||
 		got.RulePriority != uint32(routing.RibGroupReturnRulePriority) {
-		t.Fatalf("reverse return snapshot = %+v, want src.inet.0 to b.inet.0 for peer prefix 10.40.0.0/24", got)
+		t.Fatalf("reverse return snapshot = %+v, want b.inet.0 to src.inet.0 for src prefix 10.30.0.0/24", got)
 	}
 }
 
@@ -232,6 +233,57 @@ func TestBuildRouteSnapshotsSkipsUnauthorizedRibGroupReturn16616(t *testing.T) {
 	}
 }
 
+// TestBuildRouteSnapshotsOneWayRibGroupReturn17705 pins the FIB mirror
+// direction for #17705: a's rib-group names b.inet.0 (a's routes are
+// designated for import into b), so a b-context row reaching a's prefix
+// is authorized, but an a.inet.0 -> b.inet.0 row is NOT. A stale kernel
+// return rule in the unauthorized a->b direction must be skipped, and
+// the separate authorized b->a rule must still mirror.
+func TestBuildRouteSnapshotsOneWayRibGroupReturn17705(t *testing.T) {
+	orig := ruleListFn
+	t.Cleanup(func() { ruleListFn = orig })
+	ruleListFn = func(family int) ([]netlink.Rule, error) {
+		if family == syscall.AF_INET {
+			return []netlink.Rule{
+				// Unauthorized a->b return (a is lookup source).
+				{Dst: mustCIDR(t, "10.40.0.0/24"), IifName: "vrf-a", Table: 300, Priority: routing.RibGroupReturnRulePriority},
+				{Dst: mustCIDR(t, "10.40.0.0/24"), OifName: "vrf-a", Table: 300, Priority: routing.RibGroupReturnRulePriority},
+				// Authorized b->a return (b is lookup source).
+				{Dst: mustCIDR(t, "10.30.0.0/24"), IifName: "vrf-b", Table: 200, Priority: routing.RibGroupReturnRulePriority},
+				{Dst: mustCIDR(t, "10.30.0.0/24"), OifName: "vrf-b", Table: 200, Priority: routing.RibGroupReturnRulePriority},
+			}, nil
+		}
+		return nil, nil
+	}
+	cfg := &config.Config{
+		RoutingInstances: []*config.RoutingInstanceConfig{
+			{Name: "a", TableID: 200, InterfaceRoutesRibGroup: "a-x"},
+			{Name: "b", TableID: 300, InterfaceRoutesRibGroup: "b-x"},
+		},
+	}
+	cfg.RoutingOptions.RibGroups = map[string]*config.RibGroup{
+		"a-x": {Name: "a-x", ImportRibs: []string{"a.inet.0", "b.inet.0", "inet.0"}},
+		"b-x": {Name: "b-x", ImportRibs: []string{"b.inet.0", "inet.0"}},
+	}
+	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
+	if err != nil {
+		t.Fatalf("buildRouteSnapshots: %v", err)
+	}
+	for _, r := range routes {
+		if r.Table == "a.inet.0" && r.NextTable == "b.inet.0" {
+			t.Fatalf("one-way a->b row must not be mirrored (#17705): %+v (all %+v)", r, routes)
+		}
+	}
+	if len(routes) != 1 {
+		t.Fatalf("want exactly the authorized b->a row, got %+v", routes)
+	}
+	got := routes[0]
+	if got.Table != "b.inet.0" || got.NextTable != "a.inet.0" ||
+		got.Destination != "10.30.0.0/24" {
+		t.Fatalf("authorized return snapshot = %+v, want b.inet.0 -> a.inet.0 for 10.30.0.0/24", got)
+	}
+}
+
 // TestBuildRouteSnapshotsMirrorsRibGroupReturnRulesLPM14975 pins #14975 in
 // the userspace FIB: return rules at LPM-derived priorities (not only legacy
 // 1500) are mirrored, and overlapping returns keep kernel LPM order via
@@ -262,12 +314,14 @@ func TestBuildRouteSnapshotsMirrorsRibGroupReturnRulesLPM14975(t *testing.T) {
 	cfg := &config.Config{
 		RoutingInstances: []*config.RoutingInstanceConfig{
 			{Name: "src", TableID: 200, InterfaceRoutesRibGroup: "src-auth"},
-			{Name: "broad", TableID: 300},
-			{Name: "narrow", TableID: 400},
+			{Name: "broad", TableID: 300, InterfaceRoutesRibGroup: "broad-auth"},
+			{Name: "narrow", TableID: 400, InterfaceRoutesRibGroup: "narrow-auth"},
 		},
 	}
 	cfg.RoutingOptions.RibGroups = map[string]*config.RibGroup{
-		"src-auth": {Name: "src-auth", ImportRibs: []string{"src.inet.0", "broad.inet.0", "narrow.inet.0", "inet.0"}},
+		"src-auth":    {Name: "src-auth", ImportRibs: []string{"src.inet.0", "inet.0"}},
+		"broad-auth":  {Name: "broad-auth", ImportRibs: []string{"broad.inet.0", "src.inet.0", "inet.0"}},
+		"narrow-auth": {Name: "narrow-auth", ImportRibs: []string{"narrow.inet.0", "src.inet.0", "inet.0"}},
 	}
 	routes, _, err := buildRouteSnapshots(cfg, nil, nil)
 	if err != nil {
