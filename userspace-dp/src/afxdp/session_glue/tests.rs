@@ -13434,7 +13434,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
     let _ = sessions.drain_deltas(RING_CAP);
     let expired = sessions.expire_stale_entries(EXPIRE_NS);
     assert_eq!(expired.len(), N);
-    let mut ring_deltas = sessions.drain_deltas(usize::MAX);
+    let ring_deltas = sessions.drain_deltas(usize::MAX);
     let overflow_deltas: Vec<_> = expired
         .iter()
         .filter_map(|entry| entry.overflow_close.clone())
@@ -18554,7 +18554,7 @@ fn a_refused_deletesynced_releases_the_siblings_reservation_8114() {
 /// is the cheap-looking version of this fix and it is worse than the bug.
 #[test]
 fn a_queued_deletesynced_leaves_the_release_to_its_worker_8114() {
-    
+
 
     let forwarding = drop8114_forwarding();
     let nat = drop8114_reserve(&forwarding, 3);
@@ -18603,7 +18603,7 @@ fn a_queued_deletesynced_leaves_the_release_to_its_worker_8114() {
 /// Fires on: falling back to "release for some worker" when the lookup misses.
 #[test]
 fn an_unattributable_refused_delete_is_counted_but_not_repaired_8114() {
-    
+
 
     let forwarding = drop8114_forwarding();
     let nat = drop8114_reserve(&forwarding, 3);

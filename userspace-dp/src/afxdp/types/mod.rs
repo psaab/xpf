@@ -11,11 +11,6 @@ pub(super) use shared_cos_lease::{
     V8RateMode,
 
 };
-// #17190 fold: NOT_PARTICIPATING/PaddedVtimeSlot are #[cfg(test)] in
-// shared_cos_lease (consumed only by tests); the re-export follows that gate,
-// matching master's ungated view only under cfg(test).
-#[cfg(test)]
-pub(super) use shared_cos_lease::{NOT_PARTICIPATING, PaddedVtimeSlot};
 
 // Issue 68.1: CoS shaper / queue / flow-fair / runtime types extracted
 // into types/cos.rs. Re-exported here so call sites that reach

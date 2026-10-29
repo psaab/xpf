@@ -122,7 +122,7 @@ pub(super) fn build_install_table_registry(state: &mut ForwardingState) {
 #[cfg(test)]
 mod tests {
     use super::super::build_forwarding_state;
-    
+
     use crate::protocol::snapshot::InterfaceAddressSnapshot;
 
     fn blue_iface() -> crate::InterfaceSnapshot {

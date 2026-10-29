@@ -75,7 +75,6 @@ mod rx_telemetry;
 pub(in crate::afxdp) mod session_admission;
 mod session_hit_authority;
 
-use crate::nat::PersistentInbound;
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
 pub(in crate::afxdp) use embedded_icmp::{
     EmbeddedIcmpReversal, enforce_queued_embedded_icmp_policy, queued_embedded_icmp_identity,
@@ -119,9 +118,9 @@ use session_hit_authority::{
 
 use super::poll_stages::{
     FabricIngressOutcome, IpsecPassthroughOutcome, ScreenCheckOutcome, StageOutcome,
-    SynCookieAckOutcome, ike_host_inbound_gate_context,
-    ike_host_inbound_gate_context_with_ambiguous, reinject_ipsec_passthrough, screen_zone_roles,
-    stage_classify_fabric_ingress, stage_ipsec_passthrough_check,
+    SynCookieAckOutcome, stage_classify_fabric_ingress,
+    ike_host_inbound_gate_context_with_ambiguous,
+    reinject_ipsec_passthrough, screen_zone_roles,
     stage_ipsec_passthrough_check_with_scope, stage_link_layer_classify, stage_native_gre_decap,
     stage_parse_flow_and_learn, stage_screen_check_with_ambiguous,
     stage_screen_syn_cookie_ack_on_session_miss_with_ambiguous, stage_wg_decap,

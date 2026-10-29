@@ -194,12 +194,12 @@ impl SyncedDeleteMode {
     }
 }
 
-/// Test-only seam for the #9960 race. The hook fires after the initial clone and
+// Test-only seam for the #9960 race. The hook fires after the initial clone and
 
-/// #9714 early checks, but immediately before the under-lock removal decision. A
-/// test can rendezvous a publisher here and install a replacement deterministically
-/// instead of relying on scheduler timing. Thread-local storage keeps concurrent
-/// tests isolated and adds no release-build state or call.
+// #9714 early checks, but immediately before the under-lock removal decision. A
+// test can rendezvous a publisher here and install a replacement deterministically
+// instead of relying on scheduler timing. Thread-local storage keeps concurrent
+// tests isolated and adds no release-build state or call.
 
 #[cfg(test)]
 thread_local! {

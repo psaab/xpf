@@ -1214,7 +1214,7 @@ fn settle_miss_local_fifo_records_prefix_no_suffix_recycle_17186() {
         ExactLocalScratchTxRequest { offset: 192, len: 10 },
     ];
     let mut untracked = crate::afxdp::FastSet::default();
-    let mut free_frames: VecDeque<u64> = VecDeque::new();
+    let free_frames: VecDeque<u64> = VecDeque::new();
     settle_exact_local_fifo_submission_queue_gone(&mut scratch, &mut untracked, 1);
     assert!(scratch.is_empty(), "miss must clear the scratch");
     assert!(untracked.contains(&64), "kernel-owned prefix must be tracked");

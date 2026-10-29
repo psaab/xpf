@@ -5931,7 +5931,7 @@ impl SessionTable {
                 let handshake_completed;
                 // #16489: set inside the borrow block when this update is the
                 // pair's first transition into CLOSING.
-                let mut update_became_closing = false;
+                let update_became_closing;
                 // #15947 (H29-04): pre-mutation wire state for the HA Update.
                 let close_class_before = self
                     .entries

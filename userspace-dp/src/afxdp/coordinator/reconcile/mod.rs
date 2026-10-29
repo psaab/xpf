@@ -351,7 +351,7 @@ impl Coordinator {
         // rebinding — pass `will_rebind = false` so it skips the 500ms
         // stall.
         let will_rebind = snapshot.is_some();
-        let mut preserved = teardown::tear_down(self, will_rebind);
+        let preserved = teardown::tear_down(self, will_rebind);
         let Some(snapshot) = snapshot else {
             self.policy_counters.reconcile_rules(&[]);
             // #2218: no snapshot -> no active NAT rules -> drop all counters.

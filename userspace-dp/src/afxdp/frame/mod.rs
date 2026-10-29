@@ -124,6 +124,13 @@ pub(in crate::afxdp) use inspect::{
 };
 #[cfg(test)]
 pub(in crate::afxdp) use inspect::parse_session_flow;
+#[cfg(test)]
+pub(in crate::afxdp) use inspect::v4_addr_is_directed_broadcast_in_table;
+#[cfg(test)]
+pub(super) use inspect::{
+    metadata_tuple_complete, parse_flow_ports,
+    parse_ipv4_session_flow_from_frame,
+};
 
 
 pub(super) use inspect::{
@@ -177,7 +184,9 @@ pub(in crate::afxdp) use tcp_segmentation::{
     finalize_tcp_segment_headers, segment_forwarded_tcp_frames_from_frame,
 };
 #[cfg(test)]
-pub(in crate::afxdp) use tcp_segmentation::segment_forwarded_tcp_frames;
+pub(in crate::afxdp) use tcp_segmentation::{
+    segment_forwarded_tcp_frames, segment_forwarded_tcp_frames_from_frame,
+};
 
 
 // #1352 — extracted build orchestrator + per-address-family helpers.

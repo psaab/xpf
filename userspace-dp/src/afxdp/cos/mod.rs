@@ -29,11 +29,6 @@ pub(super) use queue_ops::{
     cos_queue_remove_orphan_snapshot_at, cos_queue_restore_front,
     cos_queue_v_min_consume_suspension, cos_queue_v_min_continue, publish_committed_queue_vtime,
 };
-// #1763: reference single-pop API retained for tests (fused out of the
-// production drain paths). #17195: queue_ops gates it `#[cfg(test)]`, so
-// this re-export is test-only too.
-#[cfg(test)]
-pub(super) use queue_ops::{cos_queue_pop_front, cos_queue_pop_front_with_cap};
 
 pub(super) use queue_service::drain_shaped_tx;
 pub(super) use token_bucket::{

@@ -585,7 +585,7 @@ fn wg_endpoint_host_is_dns_name(host: &str) -> bool {
 #[cfg(test)]
 mod wg_endpoint_shape_7158_tests {
     use super::*;
-    
+
 
     /// #7158: the dataplane half of the cross-language agreement.
     ///

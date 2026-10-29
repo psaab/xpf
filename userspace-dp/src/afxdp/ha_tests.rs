@@ -2124,7 +2124,7 @@ fn bulk_export_preserves_fabric_flag_session_id_and_failover_sessions_14960() {
     persistent_lease_hold: None,
         source_nat_static: None,
     };
-    let mut publish = |mut entry: SyncedSessionEntry, port: u16| {
+    let publish = |mut entry: SyncedSessionEntry, port: u16| {
 
         entry.key.src_port = port;
         // test_metadata() is fabric-ingress by default; plain rows clear it,

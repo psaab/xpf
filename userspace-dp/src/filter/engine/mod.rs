@@ -22,16 +22,18 @@ pub(crate) use cache_sensitive::{
 #[cfg(test)]
 pub(crate) use cache_sensitive::interface_input_filter_varies_per_packet;
 pub(crate) use eval::{
-    InputPolicerMeter, NonRoutingCountPolicy, evaluate_filter, evaluate_filter_counted,
-    evaluate_filter_ref_routing_instance_event_counted,
-    evaluate_filter_ref_routing_instance_uncounted, evaluate_interface_filter,
-    evaluate_interface_filter_counted, evaluate_interface_filter_log_match,
-    evaluate_interface_filter_non_routing_counted, evaluate_interface_output_filter,
-    evaluate_interface_output_filter_counted, evaluate_lo0_filter_counted,
-    evaluate_lo0_filter_log_match, filter_ref_deny_is_flow_invariant, filter_ref_static_verdict,
-
+    InputPolicerMeter, NonRoutingCountPolicy, evaluate_filter_ref_routing_instance_event_counted,
+    evaluate_filter_ref_routing_instance_uncounted, evaluate_interface_filter_log_match,
+    evaluate_interface_filter_non_routing_counted, evaluate_lo0_filter_counted,
+    filter_ref_deny_is_flow_invariant, filter_ref_static_verdict,
     interface_filter_affects_route_lookup, interface_filter_route_lookup_affecting,
     interface_input_filter,
+};
+#[cfg(test)]
+pub(crate) use eval::{
+    evaluate_filter, evaluate_filter_counted, evaluate_interface_filter,
+    evaluate_interface_filter_counted, evaluate_interface_output_filter,
+    evaluate_interface_output_filter_counted,
 };
 // #17195: `evaluate_lo0_filter` is dead in every build; eval.rs gates it
 // `#[cfg(test)]`, so the re-export follows that gate.

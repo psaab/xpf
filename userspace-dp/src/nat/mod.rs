@@ -393,8 +393,6 @@ pub(crate) use source::{
     nat64_rollback_idle_import,
     nat64_refuse_if_peer_owns,
     nat64_refuse_if_static_owns,
-    nptv6_owns_wire_identity,
-    parse_source_nat_rules,
     parse_source_nat_rules_with_previous,
     peer_owns_identity_in,
     release_nat64_pool_port,
@@ -410,10 +408,6 @@ pub(crate) use source::{
     reserve_synced_source_nat_allocation_untracked_preserving_persistent_hold,
     reserve_synced_source_nat_allocation_untracked_with_hold,
     reserve_synced_source_nat_allocation_untracked_with_holder_snapshot_and_hold,
-    // #6600: the coordinator's pre-publish reservation and its rollback. NOT
-    // test-only, unlike the untracked entry points below — these are the
-    // production import path.
-    reserve_synced_source_nat_allocation_untracked,
     persistent_inbound_hold_owner_for_synced,
     retained_pool_index_map_v4,
     rollback_source_nat_allocation_for_worker,
@@ -812,5 +806,6 @@ pub(crate) use source::{
     acquire_persistent_inbound_for_synced, nptv6_owns_wire_identity,
     release_persistent_inbound_for_session, release_recorded_persistent_inbound,
     release_source_nat_allocation_for_worker, reserve_synced_source_nat_allocation_for_worker,
-    retained_pool_index_map, SourceNatMatchSnapshot,
+    reserve_synced_source_nat_allocation_untracked, retained_pool_index_map,
+    SourceNatMatchSnapshot,
 };

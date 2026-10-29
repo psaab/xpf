@@ -216,7 +216,8 @@ pub(crate) use syncookie::{
 #[cfg(test)]
 pub(crate) use syncookie::{
     SYN_COOKIE_EPOCH_MASK, SYN_COOKIE_EPOCH_SHIFT, SYN_COOKIE_ISN_BITS, SYN_COOKIE_LAYOUT_BITS,
-    SYN_COOKIE_MSS_MASK, SYN_COOKIE_MSS_SHIFT, SipHash24, SynCookieValidatedCache,
+    SYN_COOKIE_MSS_MASK, SYN_COOKIE_MSS_SHIFT, SYN_COOKIE_MSS_VALUES, SipHash24,
+    SynCookieValidatedCache,
 };
 
 /// #3343: number of per-screen-reason DROP counters published to the Go

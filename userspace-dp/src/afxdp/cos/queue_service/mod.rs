@@ -93,9 +93,10 @@ use settle::{
     settle_exact_prepared_fifo_submission_queue_gone,
     settle_exact_prepared_scratch_submission_flow_fair,
     settle_exact_prepared_scratch_submission_flow_fair_queue_gone, submit_cos_batch,
-    subtract_direct_cos_queue_bytes, COS_GUARANTEE_QUANTUM_MAX_BYTES,
-    COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS, COS_SURPLUS_ROUND_QUANTUM_BYTES,
+    subtract_direct_cos_queue_bytes, COS_GUARANTEE_QUANTUM_MIN_BYTES, COS_GUARANTEE_VISIT_NS,
 };
+#[cfg(test)]
+use settle::{COS_GUARANTEE_QUANTUM_MAX_BYTES, COS_SURPLUS_ROUND_QUANTUM_BYTES};
 pub(in crate::afxdp) use settle::{
     settle_exact_local_fifo_submission, settle_exact_local_scratch_submission_flow_fair,
     settle_exact_prepared_fifo_submission,
@@ -116,9 +117,9 @@ use selectors::{select_cos_surplus_batch, select_nonexact_cos_guarantee_batch};
 use waterfill::apply_phase1_waterfill_honor_refund;
 
 use super::tx_completion::{
-    apply_cos_prepared_result, apply_cos_send_result, apply_direct_exact_send_result,
-    apply_direct_exact_send_result_fields, cos_root_can_service_after_prime, cos_tick_for_ns,
+    apply_cos_prepared_result, apply_cos_send_result, apply_direct_exact_send_result_fields,
     count_park_reason, count_tx_ring_full_submit_stall,
+    cos_root_can_service_after_prime, cos_tick_for_ns,
     count_tx_ring_full_submit_stall_on_interfaces, park_cos_queue, prime_cos_root_for_service,
     publish_cos_exact_backlog_on_cos, refresh_cos_interface_activity,
     refresh_cos_interface_activity_on_cos, restore_cos_local_items_inner,
@@ -128,8 +129,8 @@ use super::tx_completion::{
 // prepared-frame primitives — primitives that own the kernel ring
 // state and are hosted there for that reason.
 use crate::afxdp::tx::{
-    cos_queue_dscp_rewrite, maybe_wake_tx, maybe_wake_tx_fields, reap_tx_completions,
-    reap_tx_completions_fields, recycle_cancelled_prepared_offset_with_shared,
+    cos_queue_dscp_rewrite, maybe_wake_tx_fields, reap_tx_completions_fields,
+    recycle_cancelled_prepared_offset_with_shared,
     remember_prepared_recycle, stamp_submits, transmit_batch, transmit_prepared_queue, TxError,
     TxRetryReason,
 };

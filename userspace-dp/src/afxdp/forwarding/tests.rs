@@ -5319,7 +5319,7 @@ fn canonical_route_table_borrows_default_and_owns_vrf() {
     // pre-#4674 `String` return type cannot match the `Cow::Borrowed` /
     // `Cow::Owned` patterns, so this test fails to compile against the
     // reverted signature.
-    
+
     use std::borrow::Cow;
 
     // v4 -> v6 default remap: borrowed (zero alloc), equals inet6.0.

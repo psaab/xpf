@@ -4158,7 +4158,6 @@ fn refresh_fabric_links_replacement_leaves_other_parent_untouched_5686() {
     assert_eq!(res.egress_ifindex, y);
 }
 
-#[test]
 // #16023: revoking `fabric-interface-authenticated` must force
 // link_authenticated=false on the surviving fabric entry even when the
 // new build cannot re-resolve the link (preserve path) — and on the
