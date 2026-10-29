@@ -1,4 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Daemon: sweep fallback-initiated unanchored IPsec SAs only on the
+    matching sole-data-RG demotion and initiating tenure. Expire provenance
+    after observed SA loss or successful termination; preserve current RG0
+    attribution (#18426).
+
 
   * Config: redact bare and case-variant valued `*-key` credentials in
     embedded commands and AST displays while preserving public exclusions
