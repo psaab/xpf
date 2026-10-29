@@ -1738,3 +1738,138 @@ func TestSuccessorPreflightJoinsPausedPredecessorConstructorBeforeRetirement1706
 	}
 	_ = conn.Close()
 }
+
+// TestApplyHeartbeatRestartWaitsForCommsStop17060 pins the production
+// VRF-rebind restart path against teardown. The restart may not pass a stop's
+// lifecycle claim and install a heartbeat for an epoch whose context has been
+// cancelled.
+func TestApplyHeartbeatRestartCannotReviveStoppedComms17060(t *testing.T) {
+	manager := cluster.NewManager(0, 1)
+	if err := manager.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "lo"); err != nil {
+		t.Fatalf("start old heartbeat: %v", err)
+	}
+	t.Cleanup(manager.StopHeartbeat)
+
+	d := &Daemon{cluster: manager}
+	commsCtx, commsGen, cancel := d.beginClusterCommsEpoch(context.Background())
+	t.Cleanup(cancel)
+	if commsCtx.Err() != nil {
+		t.Fatal("setup: comms epoch is already cancelled")
+	}
+
+	restartObserved := make(chan struct{}, 1)
+	manager.SetHeartbeatRestartNotifyFunc(func() {
+		select {
+		case restartObserved <- struct{}{}:
+		default:
+		}
+	})
+
+	// Freeze stop after its generation check and before StopHeartbeat.
+	d.dhcpLeaseSync.loopMu.Lock()
+	stopDone := make(chan struct{})
+	go func() {
+		d.stopClusterComms()
+		close(stopDone)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.clusterCommsLifecycleMu.TryLock() {
+		d.clusterCommsLifecycleMu.Unlock()
+		if time.Now().After(deadline) {
+			d.dhcpLeaseSync.loopMu.Unlock()
+			t.Fatal("stop did not claim lifecycle before resetting DHCP")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	restartDone := make(chan error, 1)
+	go func() {
+		restartDone <- d.restartHeartbeatAfterRebindForEpoch(commsCtx, commsGen)
+	}()
+	earlyRestart := false
+	select {
+	case <-restartObserved:
+		earlyRestart = true
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	d.dhcpLeaseSync.loopMu.Unlock()
+	select {
+	case <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not finish after the DHCP reset unblocked")
+	}
+	select {
+	case err := <-restartDone:
+		if err != nil {
+			t.Fatalf("superseded apply restart returned an error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("apply heartbeat restart did not return after teardown")
+	}
+	if earlyRestart {
+		t.Fatal("VRF-rebind apply restarted heartbeat while stop held the lifecycle claim")
+	}
+	if manager.HeartbeatRunning() {
+		t.Fatal("apply restart installed a heartbeat after comms teardown")
+	}
+}
+
+func TestApplyHeartbeatRestartWaitsForLifecycleClaim17060(t *testing.T) {
+	manager := cluster.NewManager(0, 1)
+	if err := manager.StartHeartbeat("127.0.0.1", "127.0.0.1", "", "lo"); err != nil {
+		t.Fatalf("start heartbeat: %v", err)
+	}
+	t.Cleanup(manager.StopHeartbeat)
+
+	d := &Daemon{cluster: manager}
+	t.Cleanup(d.stopClusterComms)
+	_, _, cancel := d.beginClusterCommsEpoch(context.Background())
+	t.Cleanup(cancel)
+	restartObserved := make(chan struct{}, 1)
+	manager.SetHeartbeatRestartNotifyFunc(func() {
+		select {
+		case restartObserved <- struct{}{}:
+		default:
+		}
+	})
+
+	// A live epoch may be restarted only after the same lifecycle claim used
+	// by teardown has been released.
+	d.clusterCommsLifecycleMu.Lock()
+	restartDone := make(chan error, 1)
+	go func() {
+		restartDone <- d.restartHeartbeatAfterRebindForCurrentCommsEpoch()
+	}()
+	select {
+	case <-restartObserved:
+		d.clusterCommsLifecycleMu.Unlock()
+		<-restartDone
+		t.Fatal("apply restart entered Manager while teardown held the lifecycle claim")
+	case err := <-restartDone:
+		d.clusterCommsLifecycleMu.Unlock()
+		if err != nil {
+			t.Fatalf("apply restart returned %v before the lifecycle claim was released", err)
+		}
+		t.Fatal("apply restart completed before the lifecycle claim was released")
+	case <-time.After(25 * time.Millisecond):
+		d.clusterCommsLifecycleMu.Unlock()
+	}
+
+	select {
+	case err := <-restartDone:
+		if err != nil {
+			t.Fatalf("apply restart after lifecycle release: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("apply restart did not resume after lifecycle release")
+	}
+	select {
+	case <-restartObserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("apply restart did not reach the Manager after lifecycle release")
+	}
+	if !manager.HeartbeatRunning() {
+		t.Fatal("apply restart left the heartbeat stopped")
+	}
+}

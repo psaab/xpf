@@ -1816,14 +1816,14 @@ and the epoch's fabric populate loops. The other comms-owned goroutines
 (`startHeartbeatWithRetryForEpoch`, the HA watchdog ticker, the gRPC
 fabric-listener poller and its inner listener, `eventStreamFallbackLoop` /
 `runUserspaceEventStream`, `syncIPsecSAPeriodic`, `configSyncReconcileLoop`,
-and `monitorFabricState`) are context-cancelled only. That asymmetry still
-matters for **#7257**: `stopClusterComms` cancels the context, joins only the
-constructor and fabric populate loops, and then calls `d.cluster.StopHeartbeat()`
-— which nils heartbeat handles under `m.mu` while an unjoined
-`startHeartbeatWithRetryForEpoch` goroutine may still be
-inside `StartHeartbeat` dereferencing them unlocked. #6428 did not move
-`startHeartbeatWithRetryForEpoch` and did not change the lifecycle; #7257 needs a
-lifecycle fix, not a code move.
+and `monitorFabricState`) are context-cancelled, not joined. Heartbeat safety
+does not depend on joining the retry goroutine: every `StartHeartbeat` install,
+VRF-rebind `RestartHeartbeat`, and committed-timing restart runs through
+`runForCurrentClusterCommsEpoch`, which serializes the manager operation with
+teardown and checks the captured context/generation. Stop therefore waits for
+an in-flight manager operation before calling `StopHeartbeat`; an operation
+carrying a previous epoch's context/generation is rejected after teardown
+invalidates that owner.
 
 **The wiring was unbound when #6428 measured it.** `go tool cover -func` over
 `./pkg/daemon/` reported **0.0% statement coverage** for all ten builders that

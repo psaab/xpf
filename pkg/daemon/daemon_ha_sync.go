@@ -1734,22 +1734,67 @@ func (d *Daemon) fenceAllRedundancyGroups(ctx context.Context) cluster.FenceResu
 	return res
 }
 
-// startHeartbeatForCommsEpoch serializes heartbeat publication with teardown
-// and epoch creation. The manager call runs without clusterCommsMu, but the
-// lifecycle lock prevents a successor start/stop from overtaking it.
-func (d *Daemon) startHeartbeatForCommsEpoch(ctx context.Context, generation uint64, localIP, peerAddr, vrfDevice, controlIface string) error {
+// runForCurrentClusterCommsEpoch serializes effects that may install or
+// replace heartbeat state with comms teardown and successor creation.
+func (d *Daemon) runForCurrentClusterCommsEpoch(ctx context.Context, generation uint64, effect func()) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
 	d.clusterCommsLifecycleMu.Lock()
 	defer d.clusterCommsLifecycleMu.Unlock()
 	if ctx.Err() != nil {
-		return cluster.ErrHeartbeatStartSuperseded
+		return false
 	}
 	d.clusterCommsMu.Lock()
-	current := d.clusterCommsGen == generation
+	current := d.clusterCommsGen == generation && d.clusterCommsCtx == ctx
 	d.clusterCommsMu.Unlock()
 	if !current {
+		return false
+	}
+	effect()
+	return true
+}
+
+// startHeartbeatForCommsEpoch installs the heartbeat only while its owning
+// epoch remains current under the lifecycle claim.
+func (d *Daemon) startHeartbeatForCommsEpoch(ctx context.Context, generation uint64, localIP, peerAddr, vrfDevice, controlIface string) error {
+	var startErr error
+	if !d.runForCurrentClusterCommsEpoch(ctx, generation, func() {
+		startErr = d.cluster.StartHeartbeat(localIP, peerAddr, vrfDevice, controlIface)
+	}) {
 		return cluster.ErrHeartbeatStartSuperseded
 	}
-	return d.cluster.StartHeartbeat(localIP, peerAddr, vrfDevice, controlIface)
+	return startErr
+}
+
+func (d *Daemon) restartHeartbeatAfterRebindForEpoch(ctx context.Context, generation uint64) error {
+	if d.cluster == nil {
+		return nil
+	}
+	var restartErr error
+	d.runForCurrentClusterCommsEpoch(ctx, generation, func() {
+		restartErr = restartHeartbeatAfterRebind(d.cluster)
+	})
+	return restartErr
+}
+
+func (d *Daemon) restartHeartbeatAfterRebindForCurrentCommsEpoch() error {
+	d.clusterCommsMu.Lock()
+	ctx, generation := d.clusterCommsCtx, d.clusterCommsGen
+	d.clusterCommsMu.Unlock()
+	return d.restartHeartbeatAfterRebindForEpoch(ctx, generation)
+}
+
+func (d *Daemon) applyCommittedHeartbeatTimingForCurrentCommsEpoch() {
+	if d.cluster == nil {
+		return
+	}
+	d.clusterCommsMu.Lock()
+	ctx, generation := d.clusterCommsCtx, d.clusterCommsGen
+	d.clusterCommsMu.Unlock()
+	d.runForCurrentClusterCommsEpoch(ctx, generation, func() {
+		d.cluster.ApplyCommittedHeartbeatTiming()
+	})
 }
 
 // startHeartbeatWithRetryForEpoch resolves the control-link local address and
@@ -1867,33 +1912,57 @@ func (d *Daemon) stopClusterComms() {
 		epoch.fabricPopulateWG.Wait()
 	}
 
-	// Serialize all daemon-shared teardown effects with successor epoch
-	// creation. Do not hold clusterCommsMu while resetting subsystem loops:
-	// their ensure paths take their own loop mutex before reading comms state.
+	// Serialize shared teardown effects with successor epoch creation and
+	// heartbeat restarts from apply. Do not hold clusterCommsMu while resetting
+	// subsystem loops: their ensure paths take their own loop mutex before
+	// reading comms state.
 	d.clusterCommsLifecycleMu.Lock()
+	// Re-capture the session with the generation check. Teardown below owns
+	// only this pointer and stops if either identity or generation changes.
 	d.clusterCommsMu.Lock()
-	if d.clusterCommsGen != stopGen {
-		d.clusterCommsMu.Unlock()
+	current := d.clusterCommsGen == stopGen && d.sessionSync == stoppingSession
+	ss := d.sessionSync
+	d.clusterCommsMu.Unlock()
+	if !current {
 		d.retirePredecessorSessionSync(stoppingSession)
 		d.clusterCommsLifecycleMu.Unlock()
 		return
 	}
-	d.clusterCommsMu.Unlock()
+
+	stopStillCurrent := func() bool {
+		d.clusterCommsMu.Lock()
+		current := d.clusterCommsGen == stopGen && d.sessionSync == ss
+		d.clusterCommsMu.Unlock()
+		return current
+	}
+	if !stopStillCurrent() {
+		d.retirePredecessorSessionSync(stoppingSession)
+		d.clusterCommsLifecycleMu.Unlock()
+		return
+	}
 	d.resetDHCPLeaseSyncLoop()
+	if !stopStillCurrent() {
+		d.retirePredecessorSessionSync(stoppingSession)
+		d.clusterCommsLifecycleMu.Unlock()
+		return
+	}
 	d.resetIPsecSASyncLoop()
+	if !stopStillCurrent() {
+		d.retirePredecessorSessionSync(stoppingSession)
+		d.clusterCommsLifecycleMu.Unlock()
+		return
+	}
 	if d.cluster != nil {
 		d.cluster.StopHeartbeat()
 	}
 
 	d.clusterCommsMu.Lock()
-	if d.clusterCommsGen != stopGen {
+	if d.clusterCommsGen != stopGen || d.sessionSync != ss {
 		d.clusterCommsMu.Unlock()
 		d.retirePredecessorSessionSync(stoppingSession)
 		d.clusterCommsLifecycleMu.Unlock()
 		return
 	}
-	ss := d.sessionSync
-
 	d.sessionSync = nil
 	for slot := range d.fabricSlots {
 		d.fabricSlots[slot].refreshCh = nil

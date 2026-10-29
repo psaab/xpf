@@ -870,8 +870,8 @@ scan:
 	d.fabricMu.Unlock()
 	d.clusterCommsMu.Unlock()
 
-	// Keep a successor from starting between the final generation check and
-	// SyncFabricState. stopClusterComms waits this loop before final teardown.
+	// stopClusterComms joins this epoch-owned populate loop before clearing
+	// shared fabric state; this recheck rejects a stale SyncFabricState call.
 	d.clusterCommsLifecycleMu.Lock()
 	if !d.lockCurrentFabricGeneration(ctx, generation) {
 		d.clusterCommsLifecycleMu.Unlock()
