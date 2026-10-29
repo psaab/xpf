@@ -4,13 +4,13 @@
 // tunnels an earlier edge of the same takeover sequence had just restored,
 // whenever the peer's advertised set still listed them.
 //
-// The fix scopes each pass to the transitioning RG
-// (reinitiateIPsecSAsForRG): the RG0 edge handles only RG0/unanchored
-// names, a data-RG edge only that RG's names. These cells drive the
-// va35 shape-A wave (progressive RG1-then-RG2 ownership) through the
-// production edges and assert 0 terminates and exactly one initiate per
-// name, plus the scoping cells that keep the shipped #15194 belt and the
-// #9139/C02-02 scope expectation green.
+// The fix scopes each pass to the transitioning RG (reinitiateIPsecSAsForRG):
+// the RG0 edge handles RG0/unanchored names, a data-RG edge handles that RG's
+// names, and an unanchored RG0 name also reaches ownsIPsecConn's fallback on a
+// data-RG edge when RG0 is undeclared. These cells drive the va35 shape-A wave
+// (progressive RG1-then-RG2 ownership) through the production edges and assert
+// 0 terminates and exactly one initiate per name, plus controls for declared
+// RG0, undeclared RG0, multi-RG names, and the shipped #15194 belt.
 
 package daemon
 
@@ -24,11 +24,24 @@ import (
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
-// waveFixture16710 builds the two-RG store/cluster with every RG
+// waveFixture16710 builds the two-RG store with declared RG0 and every RG
 // secondary, so a test can promote RGs in wave order.
 func waveFixture16710(t *testing.T) (*configstore.Store, *cluster.Manager) {
+	return waveFixtureForRG017784(t, true)
+}
+
+func waveFixtureUndeclaredRG017784(t *testing.T) (*configstore.Store, *cluster.Manager) {
+	return waveFixtureForRG017784(t, false)
+}
+
+func waveFixtureForRG017784(t *testing.T, declareRG0 bool) (*configstore.Store, *cluster.Manager) {
 	t.Helper()
-	store := twoRGIPsecStore(t)
+	var store *configstore.Store
+	if declareRG0 {
+		store = twoRGIPsecStoreWithRG0(t)
+	} else {
+		store = twoRGIPsecStore(t)
+	}
 	cfg := store.ActiveConfig()
 	cm := cluster.NewManager(0, 1)
 	cm.UpdateConfig(cfg.Chassis.Cluster)
@@ -174,8 +187,106 @@ func TestReinitiateRG0EdgeScopesToRG0Names16710(t *testing.T) {
 	}
 }
 
-// A data-RG edge must not touch RG0/unanchored or other-RG names, even
-// when this node owns them all (the C02-02 scope expectation).
+// A data-RG edge must not touch declared-RG0 or other-RG names. With RG0
+// undeclared, however, a single-candidate unanchored name must reach
+// ownsIPsecConn's fallback on a data-RG edge.
+func TestReinitiateDataRGEdgeAllowsUndeclaredRG0Fallback17784(t *testing.T) {
+	store, cm := waveFixtureUndeclaredRG017784(t)
+	if _, known := cm.LocalGroupPrimary(0); known {
+		t.Fatal("FIXTURE: this cell requires RG0 to be undeclared")
+	}
+
+	rec := &waveRecorder16710{}
+	d, _ := waveDaemon16710(store, cm, rec)
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+	d.reinitiateIPsecSAsForRG(1)
+	terminated, initiated := rec.snapshot()
+	if len(terminated) != 0 {
+		t.Fatalf("#17784: undeclared-RG0 fallback edge terminated %v, want none", terminated)
+	}
+	if got, want := sortedCopy16710(initiated), []string{"vpn-plain", "vpn-rg1"}; !equalNames16710(got, want) {
+		t.Fatalf("#17784: RG1 edge with RG1 primary initiated=%v want %v", initiated, want)
+	}
+
+	// CONTROL: with no locally-owned RG, the same unanchored name must not
+	// be initiated even though the edge attribution admits it to ownership.
+	secondaryStore, secondary := waveFixtureUndeclaredRG017784(t)
+	secondaryRec := &waveRecorder16710{}
+	secondaryDaemon, _ := waveDaemon16710(secondaryStore, secondary, secondaryRec)
+	secondaryDaemon.reinitiateIPsecSAsForRG(1)
+	terminated, initiated = secondaryRec.snapshot()
+	if len(terminated) != 0 || len(initiated) != 0 {
+		t.Fatalf("#17784: RG1 edge with no locally-owned RG did work: terminated=%v initiated=%v",
+			terminated, initiated)
+	}
+}
+
+// A data-RG edge with undeclared RG0 admits its unique unanchored name, while
+// a spanning name still belongs to no single edge (#9511/#16710).
+func TestReinitiateDataRGEdgeExcludesMultiRGName17784(t *testing.T) {
+	store := syncedStore9511(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster authentication-key test-cluster-psk-17784",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set interfaces em0 unit 0 family inet address 10.99.0.1/24",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 unit 0 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/0 gigether-options redundant-parent reth1",
+		"set interfaces ge-0/0/3 unit 0 family inet address 10.0.3.1/24",
+		"set security ike gateway gw-rg1 address 198.51.100.1",
+		"set security ike gateway gw-rg1 external-interface reth1.0",
+		"set security ike gateway gw-plain address 198.51.100.3",
+		"set security ike gateway gw-plain external-interface ge-0/0/3.0",
+		"set security ipsec vpn blue ike gateway gw-rg1",
+		"set security ipsec vpn blue pre-shared-key fixture-secret",
+		"set security ipsec vpn blue bind-interface st0",
+		"set security ipsec vpn blue traffic-selector red local-ip 10.0.1.0/24",
+		"set security ipsec vpn blue traffic-selector red remote-ip 10.9.1.0/24",
+		"set security ipsec vpn blue-red ike gateway gw-plain",
+		"set security ipsec vpn blue-red pre-shared-key fixture-secret",
+		"set security ipsec vpn blue-red bind-interface st1",
+		"set security ipsec vpn lone ike gateway gw-plain",
+		"set security ipsec vpn lone pre-shared-key fixture-secret",
+		"set security ipsec vpn lone bind-interface st2",
+	})
+	cfg := store.ActiveConfig()
+	cm := cluster.NewManager(0, 1)
+	cm.UpdateConfig(cfg.Chassis.Cluster)
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+	if _, known := cm.LocalGroupPrimary(0); known {
+		t.Fatal("FIXTURE: this cell requires RG0 to be undeclared")
+	}
+	rec := &waveRecorder16710{}
+	ss := cluster.NewSessionSync(":0", "", nil)
+	ss.SetPeerIPsecSAsForTesting([]string{"blue-red", "lone"})
+	d := &Daemon{
+		cluster:     cm,
+		store:       store,
+		sessionSync: ss,
+		ipsecActiveNamesFn: func() ([]string, error) {
+			return nil, nil
+		},
+		ipsecTerminateFn: rec.recordTerminated,
+		ipsecInitiateFn:  rec.recordInitiated,
+	}
+	if got := ipsecConnRedundancyGroups(cfg, ipsecSANameIndex(cfg), "blue-red"); len(got) != 2 {
+		t.Fatalf("FIXTURE: blue-red must span two candidate RGs, got %v", got)
+	}
+	d.reinitiateIPsecSAsForRG(1)
+	terminated, initiated := rec.snapshot()
+	if len(terminated) != 0 {
+		t.Fatalf("#17784: scoped edge terminated %v, want none", terminated)
+	}
+	if got, want := sortedCopy16710(initiated), []string{"lone"}; !equalNames16710(got, want) {
+		t.Fatalf("#17784: RG1 edge initiated=%v want %v (must exclude spanning blue-red)", initiated, want)
+	}
+}
+
+// The data-RG edge handles that RG's names while excluding declared-RG0 and
+// other-RG names.
 func TestReinitiateDataRGEdgeScopesToThatRG16710(t *testing.T) {
 	store, cm := waveFixture16710(t)
 	rec := &waveRecorder16710{}
@@ -189,10 +300,11 @@ func TestReinitiateDataRGEdgeScopesToThatRG16710(t *testing.T) {
 		t.Fatalf("#16710: RG1 edge terminated %v, want nothing", terminated)
 	}
 	if got, want := sortedCopy16710(initiated), []string{"vpn-rg1"}; !equalNames16710(got, want) {
-		t.Fatalf("#16710: RG1 edge initiated=%v want %v", initiated, want)
+		t.Fatalf("#16710: RG1 edge initiated=%v want %v (declared RG0 stays on RG0 edge)", initiated, want)
 	}
 
-	// Decision-level: the scoped filter on an RG2 edge yields only vpn-rg2.
+	// Decision-level: RG2 remains scoped to its own name, and RG0's declared
+	// name remains on that edge despite RG1/RG2 ownership.
 	if got := d.ipsecSAsToReinitiateForRG([]string{"vpn-rg1", "vpn-rg2", "vpn-plain"}, 2); len(got) != 1 || got[0] != "vpn-rg2" {
 		t.Fatalf("#16710: RG2-scoped filter = %v, want [vpn-rg2]", got)
 	}

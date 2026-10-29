@@ -26,8 +26,16 @@ import (
 // twoRGIPsecStore builds a cluster config with TWO data RGs, an IPsec gateway
 // anchored on each one's reth, and a third gateway on a plain physical port.
 func twoRGIPsecStore(t *testing.T) *configstore.Store {
+	return twoRGIPsecStoreVariant(t, false)
+}
+
+func twoRGIPsecStoreWithRG0(t *testing.T) *configstore.Store {
+	return twoRGIPsecStoreVariant(t, true)
+}
+
+func twoRGIPsecStoreVariant(t *testing.T, declareRG0 bool) *configstore.Store {
 	t.Helper()
-	return testStoreWithSetConfig(t, []string{
+	lines := []string{
 		"set chassis cluster cluster-id 1",
 		"set chassis cluster node 0",
 		"set chassis cluster authentication-key test-cluster-psk-9139",
@@ -67,7 +75,11 @@ func twoRGIPsecStore(t *testing.T) *configstore.Store {
 		"set security ipsec vpn vpn-plain ike gateway gw-plain",
 		"set security ipsec vpn vpn-plain pre-shared-key fixture-secret",
 		"set security ipsec vpn vpn-plain bind-interface st2",
-	})
+	}
+	if declareRG0 {
+		lines = append(lines, "set chassis cluster redundancy-group 0 node 0 priority 1")
+	}
+	return testStoreWithSetConfig(t, lines)
 }
 
 // The attribution itself: a connection's RG is the one that owns the reth its
@@ -246,6 +258,25 @@ func TestOwnsIPsecConnRG0DeclaredVsNot9139(t *testing.T) {
 			t.Error("with RG0 declared and held by the LIVE peer, a node that took " +
 				"only a data RG must not initiate a tunnel bound to an interface " +
 				"the peer still holds")
+		}
+
+		var initiated []string
+		d.sessionSync = cluster.NewSessionSync(":0", "", nil)
+		d.sessionSync.SetPeerIPsecSAsForTesting([]string{"vpn-plain"})
+		d.ipsecActiveNamesFn = func() ([]string, error) { return nil, nil }
+		d.ipsecInitiateFn = func(name string) error {
+			initiated = append(initiated, name)
+			return nil
+		}
+		d.reinitiateIPsecSAsForRG(1)
+		if len(initiated) != 0 {
+			t.Fatalf("#17784: declared RG0 name reached data-RG edge: %v", initiated)
+		}
+
+		cm.SetGroupStateForTesting(0, cluster.StatePrimary)
+		d.reinitiateIPsecSAsForRG(0)
+		if len(initiated) != 1 || initiated[0] != "vpn-plain" {
+			t.Fatalf("#17784: declared RG0 name was not initiated on its RG0 edge: %v", initiated)
 		}
 	})
 }

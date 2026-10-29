@@ -2968,10 +2968,20 @@ func (d *Daemon) syncIPsecSAPeriodic(ctx context.Context) {
 // listed them. Now each edge initiates/belts only names whose whole RG
 // set (ipsecConnRedundancyGroups — every candidate must match, the same
 // all-candidates rule ipsecSAsForRG uses) is that rg: on the RG0 edge
-// only RG0/unanchored names, on a data-RG edge only that RG's names.
-// A name spanning several RGs is raised by no single-RG edge until an
-// edge for one of its groups fires while this node owns every candidate
-// (the ownsIPsecConn rule); the old code belt-terminated it on every edge.
+// only declared-RG0/unanchored names, on a data-RG edge only that RG's
+// names — plus the #17784 exception below.
+//
+// #17784: an unanchored (single-candidate RG0) name is NOT confined to
+// the RG0 edge when RG0 is undeclared: no RG0 edge can ever fire for a
+// group the manager does not know, so confining it there loses the eager
+// re-initiation ownsIPsecConn's undeclared-RG0 fallback ("primary for
+// anything", via IsLocalPrimaryAny) exists to provide. On a data-RG edge
+// such a name is therefore admitted to the ownsIPsecConn check, which
+// itself decides: with RG0 declared the fallback is refused and only a
+// genuine RG0 holder passes, so declared-RG0 behaviour is unchanged.
+// A name spanning several RGs is raised by NO single-RG edge: with no
+// further edge its only recovery is strongSwan trap (traffic-triggered)
+// or manual re-initiation. The old code belt-terminated it on every edge.
 func (d *Daemon) reinitiateIPsecSAsForRG(rg int) {
 	ss := d.getSessionSync()
 	if ss == nil {
@@ -3063,15 +3073,26 @@ func (d *Daemon) ipsecSAsToReinitiate(names []string) []string {
 // ipsecSAsToReinitiateForRG is ipsecSAsToReinitiate additionally scoped to
 // one transitioning redundancy group rg (#16710): a name is in scope only
 // when EVERY candidate group from ipsecConnRedundancyGroups equals rg
-// (the all-candidates rule ipsecSAsForRG uses). On the RG0 edge only
-// RG0/unanchored names are in scope; on a data-RG edge only that RG's
-// names. Out-of-scope names are neither initiated nor belt-terminated by
-// this edge.
+// (the all-candidates rule ipsecSAsForRG uses), with the #17784
+// undeclared-RG0 exception: a single-candidate unanchored (RG0) name on a
+// data-RG edge is admitted to ownsIPsecConn when RG0 is undeclared, since
+// ownsIPsecConn already applies the undeclared-RG0 fallback (and refuses
+// it when RG0 is declared — this admits to the check, never bypasses
+// it). On the RG0 edge only RG0/unanchored names are in scope; on a
+// data-RG edge only that RG's names plus that exception. A multi-RG name
+// is in scope on no edge. Out-of-scope names are neither initiated nor
+// belt-terminated by this edge.
 func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
 	cfg := d.ipsecAttributionConfig()
 	idx := d.cachedIPsecSANameIndex(cfg)
 	owned := make([]string, 0, len(names))
 	var skipped, outOfScope []string
+	// #17784: RG0 declaredness is a per-pass fact (one manager lookup,
+	// not per name); the fallback branch below is dead without it.
+	rg0Declared := false
+	if d.cluster != nil {
+		_, rg0Declared = d.cluster.LocalGroupPrimary(0)
+	}
 	for _, name := range names {
 		rgs := ipsecConnRedundancyGroups(cfg, idx, name)
 		inScope := len(rgs) > 0
@@ -3080,6 +3101,13 @@ func (d *Daemon) ipsecSAsToReinitiateForRG(names []string, rg int) []string {
 				inScope = false
 				break
 			}
+		}
+		if !inScope && rg != 0 && d.cluster != nil && !rg0Declared &&
+			len(rgs) == 1 && rgs[0] == 0 {
+			// #17784: single-candidate unanchored name, RG0 undeclared:
+			// no RG0 edge exists, so let ownsIPsecConn's fallback decide
+			// ("primary for anything") on this data-RG edge.
+			inScope = true
 		}
 		if !inScope {
 			outOfScope = append(outOfScope, name)
