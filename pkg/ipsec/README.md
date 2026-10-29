@@ -1028,8 +1028,10 @@ all files stay in `package ipsec`, so the public API is unchanged.
   strongSwan identity equality, not a transitive normalized key: ordered DN
   comparison follows DER RDN order and tag-sensitive value rules; FQDN and
   whole-address RFC822 comparisons fold ASCII letters only, leaving non-ASCII
-  bytes unchanged. Key-id bytes and IP/subnet/range/FQDN selectors follow parser
-  semantics. Untyped subnet lengths parse a decimal strtol prefix: leading
+  bytes unchanged. DN value tags follow strongSwan's one-octet rule: `0x1f` is
+  literal tag 31, not a high-tag-number prefix or a PrintableString alias.
+  Key-id bytes and IP/subnet/range/FQDN selectors follow parser semantics.
+  Untyped subnet lengths parse a decimal strtol prefix: leading
   whitespace/sign are accepted, trailing bytes ignored, and no digits means
   zero; strtol saturation narrows to signed 32-bit before address-family range
   checking. Numeric prefixes use strtoul and

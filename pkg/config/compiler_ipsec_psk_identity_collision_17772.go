@@ -232,7 +232,6 @@ func ipsecPSKIdentityConflict(a, b *ipsecPSKIdentityGroup, identity, kind string
 	}
 }
 
-
 func ipsecPSKSetsEqual(a, b map[string]struct{}) bool {
 	if len(a) != len(b) {
 		return false
@@ -691,6 +690,7 @@ func ipsecXMPPGeneralName(value []byte) []byte {
 	otherNameValue := ipsecDERWrap(0xa0, utf8)
 	return ipsecDERWrap(0xa0, append(oid, otherNameValue...))
 }
+
 // ipsecChunkFromHex mirrors chunk_from_hex(): it sizes after removing every
 // colon, then fills bytes from the right while skipping at most one colon
 // before each low nibble.
@@ -983,7 +983,7 @@ func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
 			if !ok || oid.Class != 0 || oid.Tag != 6 || oid.IsCompound {
 				return nil, false
 			}
-			value, content, ok := ipsecReadASN1Raw(content)
+			value, content, ok := ipsecReadASN1RawValue(content)
 			if !ok || len(content) != 0 {
 				return nil, false
 			}
@@ -1006,16 +1006,26 @@ func ipsecParseDNEncoding(encoded []byte) ([]ipsecDNRDN, bool) {
 	return rdns, true
 }
 
+func ipsecReadASN1Raw(encoded []byte) (asn1.RawValue, []byte, bool) {
+	return ipsecReadASN1RawWithHighTag(encoded, true)
+}
+
+// strongSwan's atodn reads a value tag as one raw octet; 0x1f is tag 31,
+// not the start of a multi-octet identifier.
+func ipsecReadASN1RawValue(encoded []byte) (asn1.RawValue, []byte, bool) {
+	return ipsecReadASN1RawWithHighTag(encoded, false)
+}
+
 // strongSwan accepts nonminimal BER long-form lengths, including leading zeros,
 // but bounds the length field to eight octets and the value to available input.
-func ipsecReadASN1Raw(encoded []byte) (asn1.RawValue, []byte, bool) {
+func ipsecReadASN1RawWithHighTag(encoded []byte, parseHighTag bool) (asn1.RawValue, []byte, bool) {
 	if len(encoded) < 2 {
 		return asn1.RawValue{}, nil, false
 	}
 	identifier := encoded[0]
 	tag := int(identifier & 0x1f)
 	index := 1
-	if tag == 0x1f {
+	if parseHighTag && tag == 0x1f {
 		tag = 0
 		for {
 			if index >= len(encoded) {
@@ -1066,7 +1076,6 @@ func ipsecReadASN1Raw(encoded []byte) (asn1.RawValue, []byte, bool) {
 		FullBytes:  encoded[:end],
 	}, encoded[end:], true
 }
-
 
 func ipsecDERWrap(tag byte, content []byte) []byte {
 	length := len(content)

@@ -11524,7 +11524,10 @@ reserved for whole-dataplane selection where a rewrite shim
     DER with source-order RDNs. Only supported named attributes are accepted;
     numeric OIDs are not aliases. Leading spaces do not prevent slash-delimiter
     selection, spaces terminate the attribute token, and `+`/backslash are
-    ordinary value bytes. PrintableString values fold ASCII case only when
+    ordinary value bytes. DN value tags are consumed as one raw octet, so
+    `0x1f` is tag 31 rather than a high-tag-number prefix or a
+    PrintableString alias.
+    PrintableString values fold ASCII case only when
     both compared tags are PrintableString; emailAddress IA5 values also fold
     ASCII case. Other values compare bytes, even across differing tags, so DN
     equality is pairwise and not reducible to a transitive canonical key.

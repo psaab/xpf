@@ -292,6 +292,16 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"DN left compares exact FQDN type DER bytes", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "{2}:#300f310d300b0603550403130470656572"},
 			{"DN left folds rendered KEY_ID DER case", "distinguished-name", "CN=peer", "key-id", "300f310d300b0603550403130450454552"},
 			{"DN left folds FQDN type raw DER case", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "{2}:#300f310d300b0603550403130450454552"},
+			{"raw high-tag value equals same PrintableString bytes", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"raw high-tag DN left compares canonical KEY_ID bytes", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "keyid:#300f310d300b0603550403130470656572"},
+			{"raw high-tag equals other raw tag with same content", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403040470656572"},
+			{"raw tags 1f and 0c compare same content", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b06035504030c0470656572"},
+			{"raw tags 1f and 16 compare same content", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403160470656572"},
+			{"OCTET STRING and UTF8String compare exact content", "inet", "asn1dn:#300f310d300b0603550403040470656572", "inet", "asn1dn:#300f310d300b06035504030c0470656572"},
+			{"OCTET STRING and IA5String compare exact content", "inet", "asn1dn:#300f310d300b0603550403040470656572", "inet", "asn1dn:#300f310d300b0603550403160470656572"},
+			{"UTF8String and IA5String compare exact content", "inet", "asn1dn:#300f310d300b06035504030c0470656572", "inet", "asn1dn:#300f310d300b0603550403160470656572"},
+			{"emailAddress IA5 and raw tag compare identical NUL bytes", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011f03410042"},
+			{"identical raw high-tag value compares exact bytes", "inet", "asn1dn:#300e310c300a06035504031f026100", "inet", "asn1dn:#300e310c300a06035504031f026100"},
 		}
 		for _, pair := range pairs {
 			pair := pair
@@ -384,6 +394,20 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"embedded NUL differing type-3 values do not compare", "inet", "{3}:#410062", "inet", "{3}:#610062"},
 			{"PrintableString differing before NUL stays distinct", "inet", "asn1dn:#300e310c300a06035504031303410042", "inet", "asn1dn:#300e310c300a06035504031303420043"},
 			{"emailAddress differing before NUL stays distinct", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011603420043"},
+			{"high tag 275 case variants remain distinct", "inet", "asn1dn:#3011310f300d06035504031f82130470656572", "inet", "asn1dn:#3011310f300d06035504031f82130450454552"},
+			{"high tag 275 differs from canonical PrintableString", "inet", "asn1dn:#3011310f300d06035504031f82130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
+			{"raw high-tag case variant remains distinct", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b06035504031f0450454552"},
+			{"raw high-tag does not fold with PrintableString", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"},
+			{"raw high-tag does not fold with OCTET STRING", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403040450454552"},
+			{"raw high-tag does not fold with UTF8String", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b06035504030c0450454552"},
+			{"raw high-tag does not fold with IA5String", "inet", "asn1dn:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403160450454552"},
+			{"OCTET STRING case variant remains distinct", "inet", "asn1dn:#300f310d300b0603550403040470656572", "inet", "asn1dn:#300f310d300b0603550403040450454552"},
+			{"UTF8String case variant remains distinct", "inet", "asn1dn:#300f310d300b06035504030c0470656572", "inet", "asn1dn:#300f310d300b06035504030c0450454552"},
+			{"IA5String non-email case variant remains distinct", "inet", "asn1dn:#300f310d300b0603550403160470656572", "inet", "asn1dn:#300f310d300b0603550403160450454552"},
+			{"PrintableString does not fold against raw high-tag", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b06035504031f0450454552"},
+			{"emailAddress does not fold against raw high-tag", "inet", "asn1dn:#30143112301006092a864886f70d010901160350656572", "inet", "asn1dn:#30143112301006092a864886f70d0109011f0350454552"},
+			{"emailAddress raw-tag content differs after NUL", "inet", "asn1dn:#30143112301006092a864886f70d0109011603410042", "inet", "asn1dn:#30143112301006092a864886f70d0109011f03410043"},
+			{"reverse KEY_ID does not compare raw high-tag DN", "inet", "keyid:#300f310d300b06035504031f0470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
 		}
 		for _, pair := range pairs {
 			pair := pair
