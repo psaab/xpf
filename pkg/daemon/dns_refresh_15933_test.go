@@ -535,6 +535,10 @@ func TestDNSRefreshNamedBookIdentityCollision15962(t *testing.T) {
 		"global.example.com": {"10.0.0.1"},
 		"book.example.com":   {"10.0.0.3"},
 	})
+	restoreGlobal := config.SeedDNSAnswerCacheForTest("global.example.com", "", []string{"10.0.0.1/32"})
+	restoreBook := config.SeedDNSAnswerCacheForTest("book.example.com", "", []string{"10.0.0.3/32"})
+	t.Cleanup(restoreGlobal)
+	t.Cleanup(restoreBook)
 	s := newConfigStore(t, filepath.Join(t.TempDir(), "config.db"))
 	cfgText := `
 security {
@@ -551,6 +555,42 @@ security {
 `
 	if _, err := s.SyncApply(cfgText, nil); err != nil {
 		t.Fatalf("SyncApply premise: %v", err)
+	}
+	active := s.ActiveConfig()
+	if active == nil || active.Security.AddressBook == nil {
+		t.Fatal("compiled collision premise is missing its global address book")
+	}
+	global := active.Security.AddressBook.Addresses["address-book/eng-book/svc"]
+	namedBook := active.Security.NamedAddressBooks["eng-book"]
+	if namedBook == nil {
+		t.Fatal("compiled collision premise is missing the named address book")
+	}
+	named := namedBook.AddressBook.Addresses["svc"]
+	if global == nil || named == nil {
+		t.Fatalf("compiled collision premise missing entries: global=%v named=%v", global, named)
+	}
+	if got := global.UsableValues(); !reflect.DeepEqual(got, []string{"10.0.0.1/32"}) {
+		t.Fatalf("compiled global collision entry = %v, want initial A", got)
+	}
+	if got := named.UsableValues(); !reflect.DeepEqual(got, []string{"10.0.0.3/32"}) {
+		t.Fatalf("compiled named-book entry = %v, want unchanged answer", got)
+	}
+	initial := snapshotDNSAnswers(active)
+	if len(initial) != 2 {
+		t.Fatalf("compiled DNS snapshot has %d identities, want separate global and named-book entries: %v", len(initial), initial)
+	}
+	initialPrefixes := make(map[string]bool, len(initial))
+	for _, answer := range initial {
+		if answer.DNSLookupFailed {
+			t.Fatalf("initial compiled DNS snapshot is failed: %v", initial)
+		}
+		if len(answer.Prefixes) != 1 {
+			t.Fatalf("initial DNS answer has unexpected prefixes: %v", answer)
+		}
+		initialPrefixes[answer.Prefixes[0]] = true
+	}
+	if !initialPrefixes["10.0.0.1/32"] || !initialPrefixes["10.0.0.3/32"] {
+		t.Fatalf("initial snapshot lost one collision-scoped answer: %v", initial)
 	}
 	d := &Daemon{applySem: semaphore.NewWeighted(1), store: s, opts: Options{NoDataplane: true}}
 	var applied []*config.Config
@@ -587,9 +627,9 @@ func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
 		}
 		n := callIdx.Add(1)
 		// Call 1: compile-time (inside dnsRealDaemon15962) — answer A.
-		// Call 2: tick lookup — answer B (success).
-		// Call 3: apply-time re-lookup — fail (stale-while-error keeps B).
-		// Later: healthy B.
+		// Call 2: first tick — answer B (success).
+		// Call 3: second tick — SERVFAIL, retaining B and setting its flag.
+		// Later: healthy B clears the failure flag.
 		switch n {
 		case 1:
 			return []string{"10.0.0.1"}, nil
@@ -602,23 +642,61 @@ func TestDNSRefreshBaselineRecordsActuallyApplied15962(t *testing.T) {
 	t.Cleanup(restore)
 
 	d, dp, _ := dnsRealDaemon15962(t)
-	// First tick: proposal B, apply-time lookup fails but stale-while-error
-	// retains B, so B is actually applied.
+	// First tick resolves B successfully and publishes it.
 	d.refreshDNSOnce()
 	if dp.applyCalls != 1 {
 		t.Fatalf("first tick applies = %d, want 1 (real apply)", dp.applyCalls)
 	}
-	// The baseline recorded the actually-applied B, so a healthy tick
-	// resolving the same B is steady state — no redundant republish.
+	baseline := d.dnsBaselineFor(d.store.ActiveConfig())
+	if baseline == nil {
+		t.Fatal("baseline vanished after the first tick")
+	}
+	for _, answer := range baseline {
+		if answer.DNSLookupFailed {
+			t.Fatalf("successful first tick recorded a failed DNS baseline: %v", baseline)
+		}
+	}
+
+	// The next lookup fails but stale-while-error retains B. #17723 makes
+	// the failure-state transition publishable even though its prefixes match.
 	d.refreshDNSOnce()
-	if dp.applyCalls != 1 {
-		t.Fatalf("steady tick after stale-retained apply republished: applies = %d, want 1", dp.applyCalls)
+	if dp.applyCalls != 2 {
+		t.Fatalf("failed-state transition applies = %d, want 2", dp.applyCalls)
+	}
+	baseline = d.dnsBaselineFor(d.store.ActiveConfig())
+	if baseline == nil {
+		t.Fatal("baseline vanished after the failed lookup")
+	}
+	failedState := false
+	for _, answer := range baseline {
+		if answer.DNSLookupFailed {
+			failedState = true
+			if len(answer.Prefixes) != 1 || answer.Prefixes[0] != "10.9.9.9/32" {
+				t.Fatalf("failed baseline did not retain B: %+v", answer)
+			}
+		}
+	}
+	if !failedState {
+		t.Fatalf("baseline = %v, want the applied DNSLookupFailed state", baseline)
+	}
+
+	// A healthy lookup of B clears DNSLookupFailed, so publish that distinct
+	// state once and then quiesce.
+	d.refreshDNSOnce()
+	if dp.applyCalls != 3 {
+		t.Fatalf("healthy recovery applies = %d, want 3 (clear DNSLookupFailed)", dp.applyCalls)
+	}
+	baseline = d.dnsBaselineFor(d.store.ActiveConfig())
+	if baseline == nil {
+		t.Fatal("baseline vanished after the healthy recovery")
+	}
+	for _, answer := range baseline {
+		if answer.DNSLookupFailed {
+			t.Fatalf("baseline retained DNSLookupFailed after healthy recovery: %v", baseline)
+		}
 	}
 	d.refreshDNSOnce()
-	if dp.applyCalls != 1 {
-		t.Fatalf("steady-state tick republished: applies = %d", dp.applyCalls)
-	}
-	if got := d.dnsBaselineFor(d.store.ActiveConfig()); got == nil {
-		t.Fatal("baseline vanished in steady state")
+	if dp.applyCalls != 3 {
+		t.Fatalf("steady-state healthy tick republished: applies = %d, want 3", dp.applyCalls)
 	}
 }
