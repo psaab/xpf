@@ -8,6 +8,10 @@ xpf (0.0.0) unstable; urgency=medium
     and the AF_XDP mirror aligned, cover asymmetric imports, and clarify
     the deferred VRF-to-VRF forward-import warning (#17705).
 
+  * DDNS: document that manager-side `markerSharedWithSibling` sets
+    `KeepSiblingMarker` for `sendRemoveForward`; clarify that `namedMarker`
+    only checks backend-local retained marker state (#17724).
+
   * Event engine: recheck live `trigger until` ceilings when draining recorded
     cooldown crossings, preventing parked storms from replaying over the
     ceiling while preserving short-window `trigger on` crossings (#17708).
