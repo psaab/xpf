@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -24,7 +25,7 @@ func TestShowSystemServicesSSHRootLoginUnsetDefault_16735(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	if !strings.Contains(out, "SSH:            enabled (root-login: deny-password (default))") {
 		t.Errorf("unset root-login must render the effective deny-password default (#16735):\n%s", out)
@@ -56,7 +57,7 @@ func TestShowSystemServicesSSHRootLoginExplicit_16735(t *testing.T) {
 				SSH: &config.SSHServiceConfig{RootLogin: tc.rootLogin},
 			}
 			var buf strings.Builder
-			s.showSystemServices(&buf)
+			s.showSystemServices(context.Background(), &buf)
 			out := buf.String()
 			if !strings.Contains(out, tc.want) {
 				t.Errorf("explicit %q must render as authored:\n%s", tc.rootLogin, out)

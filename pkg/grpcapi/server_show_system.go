@@ -240,7 +240,7 @@ func (s *Server) effectiveListeners() sysservices.Listeners {
 	}
 }
 
-func (s *Server) showSystemServices(buf *strings.Builder) {
+func (s *Server) showSystemServices(ctx context.Context, buf *strings.Builder) {
 	cfg := s.store.ActiveConfig()
 	if cfg == nil {
 		fmt.Fprintln(buf, "No active configuration")
@@ -269,7 +269,7 @@ func (s *Server) showSystemServices(buf *strings.Builder) {
 		if s.sshdStateFn != nil {
 			state = s.sshdStateFn()
 		} else {
-			state = sysservices.ProbeSSHDState()
+			state = sysservices.ProbeSSHDState(ctx)
 		}
 		fmt.Fprintln(buf, sysservices.UnmanagedSSHLine(state))
 	}

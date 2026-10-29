@@ -1,6 +1,7 @@
 package grpcapi
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -21,7 +22,7 @@ func TestShowSystemServicesSSHNotManaged16737(t *testing.T) {
 	cfg.System.Services = &config.SystemServicesConfig{}
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	if !strings.Contains(out, "SSH:            running (not managed") {
 		t.Errorf("gRPC renderer dropped the SSH row with no stanza; want the not-managed row:\n%s", out)
@@ -39,7 +40,7 @@ func TestShowSystemServicesSSHNotManagedNilServices16737(t *testing.T) {
 	cfg.System.Services = nil
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	if out := buf.String(); !strings.Contains(out, "SSH:            running (not managed") {
 		t.Errorf("gRPC renderer dropped the SSH row with nil services:\n%s", out)
 	}
@@ -57,7 +58,7 @@ func TestShowSystemServicesSSHManagedControl16737(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	if !strings.Contains(out, "SSH:            enabled (root-login: deny)") {
 		t.Errorf("gRPC managed SSH row changed:\n%s", out)

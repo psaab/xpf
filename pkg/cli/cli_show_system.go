@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -407,7 +408,8 @@ func (c *CLI) showSystemServices() error {
 		if c.sshdStateFn != nil {
 			state = c.sshdStateFn()
 		} else {
-			state = sysservices.ProbeSSHDState()
+			// Local command dispatch has no request context to propagate.
+			state = sysservices.ProbeSSHDState(context.Background())
 		}
 		fmt.Println(sysservices.UnmanagedSSHLine(state))
 	}

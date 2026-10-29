@@ -25,6 +25,7 @@ func TestShowSystemUnmanagedSSHReportsObservedState17770(t *testing.T) {
 	}{
 		{"running observed", sysservices.SSHDRunning, "SSH:            running (not managed"},
 		{"stopped observed", sysservices.SSHDStopped, "SSH:            stopped (not managed"},
+		{"socket activated", sysservices.SSHDRunningSocketActivated, "SSH:            running (socket-activated)"},
 		{"unknown observed", sysservices.SSHDUnknown, "SSH:            unknown (not managed"},
 	}
 	for _, cell := range cells {
@@ -44,7 +45,8 @@ func TestShowSystemUnmanagedSSHReportsObservedState17770(t *testing.T) {
 				t.Errorf("CLI unmanaged SSH row = %q, want substring %q (probe=%v)\nfull output:\n%s",
 					row, cell.want, cell.state, out)
 			}
-			if cell.state != sysservices.SSHDRunning && strings.Contains(row, "running") {
+			running := cell.state == sysservices.SSHDRunning || cell.state == sysservices.SSHDRunningSocketActivated
+			if !running && strings.Contains(row, "running") {
 				t.Errorf("CLI unmanaged SSH row claims running while probe=%v: %s", cell.state, row)
 			}
 		})

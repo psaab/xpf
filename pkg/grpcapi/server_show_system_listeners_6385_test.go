@@ -56,7 +56,7 @@ func TestShowSystemServicesEffectiveListenersGRPC(t *testing.T) {
 	}
 
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 
 	if !strings.Contains(out, "gRPC:           127.0.0.1:50055") {
@@ -118,9 +118,9 @@ func TestShowSystemServicesAPIAuthCredentialCounts10826(t *testing.T) {
 			if _, err := store.Commit(); err != nil {
 				t.Fatalf("Commit(): %v", err)
 			}
-			s := &Server{store: store}
+			s := &Server{store: store, sshdStateFn: func() sysservices.SSHDState { return sysservices.SSHDRunning }}
 			var buf strings.Builder
-			s.showSystemServices(&buf)
+			s.showSystemServices(context.Background(), &buf)
 			if out := buf.String(); !strings.Contains(out, tc.want) {
 				t.Fatalf("remote API-auth credential counts = %q, want %q:\n%s", out, tc.want, out)
 			}
@@ -140,7 +140,7 @@ func TestShowSystemServicesFailedHTTPGRPC(t *testing.T) {
 		}
 	}
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	if !strings.Contains(out, "HTTP REST:      192.0.2.1:8080 (bind failed)") {
 		t.Errorf("failed HTTP bind not reported as (bind failed):\n%s", out)
@@ -157,7 +157,7 @@ func TestShowSystemServicesFailedHTTPGRPC(t *testing.T) {
 func TestShowSystemServicesListenersFnNilFallbackGRPC(t *testing.T) {
 	s := newActiveConfigServer(t) // listenersFn left nil
 	var buf strings.Builder
-	s.showSystemServices(&buf)
+	s.showSystemServices(context.Background(), &buf)
 	out := buf.String()
 	if !strings.Contains(out, "gRPC:           127.0.0.1:50051") {
 		t.Errorf("nil-fn fallback dropped the default gRPC listener:\n%s", out)
