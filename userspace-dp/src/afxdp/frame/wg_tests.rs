@@ -1998,6 +1998,12 @@ fn build_forwarded_frame_from_frame_encapsulates_wireguard_7167() {
 /// The v6 WG fixture from `wg_encap_frame_sources_outer_from_physical_wan_primary_v6`,
 /// plus the local outer source in `local_v6` so a PTB addressed to it is ours.
 fn pmtu_v6_state() -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
+    pmtu_v6_state_with_route_mtu(0)
+}
+
+fn pmtu_v6_state_with_route_mtu(
+    route_mtu: i32,
+) -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
     let mut snap = wg_outer_mtu_snapshot();
     snap.interfaces[0].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "2001:559:8585:80::8/64".to_string(), scope: 0, ..Default::default() });
     snap.interfaces[1].addresses.push(crate::InterfaceAddressSnapshot { family: "inet6".to_string(), address: "fd00:dead::1/64".to_string(), scope: 0, ..Default::default() });
@@ -2009,7 +2015,7 @@ fn pmtu_v6_state() -> (ForwardingState, std::net::SocketAddr, Vec<u8>) {
     discard: false,
     next_table: String::new(),
     preference: 0,
-    rule_priority: 0, mtu: 0, next_table_route: false });
+    rule_priority: 0, mtu: route_mtu, next_table_route: false });
     snap.tunnel_endpoints[0].outer_family = "inet6".to_string();
     snap.tunnel_endpoints[0].transport_table = "inet6.0".to_string();
     snap.tunnel_endpoints[0].source = "2001:559:8585:80::8".to_string();
@@ -2251,6 +2257,22 @@ fn wg_pmtu_v4_ptb_clamps_to_local_egress_budget_17747() {
         engine.peer_pmtu(&pk, monotonic_nanos()),
         Some(1500),
         "IPv4 oversized PTB must be clamped to the 1500 local egress budget"
+    );
+}
+
+#[test]
+fn wg_pmtu_ptb_clamps_to_static_route_mtu_17747() {
+    // The selected route is tighter than the physical interface: the
+    // learned offer must use min(interface MTU, static route MTU).
+    let (state, peer_ep, _s) = pmtu_v6_state_with_route_mtu(1400);
+    let engine = state.wg_engines.get(&1).unwrap();
+    let pk = engine.peer_endpoints()[0].0;
+    let ptb = ptb_v6_frame("2001:559:8585:80::8", peer_ep, 9000, 51820, 51820);
+    assert_eq!(consume_wg_outer_ptb(&state, &ptb, 14), WgPtbOutcome::Learned);
+    assert_eq!(
+        engine.peer_pmtu(&pk, monotonic_nanos()),
+        Some(1400),
+        "static route MTU must cap an oversized PTB below the 1500 interface MTU"
     );
 }
 
