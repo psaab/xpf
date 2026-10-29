@@ -225,8 +225,8 @@ func TestClusterDemotionWhileVRRPMasterKeepsServices16696(t *testing.T) {
 
 // Converger, promotion: an rg-state edge produced outside every service
 // driver (the #15258 sync-hold mirror class — syncRGSyncHold discards the
-// transition) leaves desired != last-applied. The next reconcile pass
-// must apply services exactly once.
+// transition) leaves desired != the last driven ownership edge. The next
+// reconcile pass must apply services exactly once.
 func TestConvergerAppliesLostPromotionEdge16696(t *testing.T) {
 	d := legacyServicesDaemon16696(t)
 	s := d.getOrCreateRGState(1)
@@ -299,24 +299,20 @@ func TestConvergerClearsLostDemotionEdge16696(t *testing.T) {
 	}
 }
 
-// #17746: the #16696 converger compares desired ownership against
-// rethServicesApplied and re-drives apply/clear on every reconcile pass
-// until the marker advances. The marker was written only at the TAIL of
-// applyRethServicesForRG / clearRethServicesForRG, past early returns
-// (factory reset in progress, store nil, ActiveConfig nil) that hit
-// exactly in the degraded states the converger exists for — so a lost
-// edge in one of those states spun forever: every retry bumped the IPsec
-// ownership epoch, and clear also repeated its proxy-ARP sweep before the
-// store/config guards. If conditions later allowed service work, the stale
-// marker could re-drive those effects on each pass too. The marker must be
-// written at entry so every early return still records the driven
-// ownership. The 16696 fixture always has a committed store, so its six
-// tests never exercised these arms.
+// #17746: the #16696 converger compares desired ownership against the last
+// driven edge. Previously apply/clear wrote that marker only at the tail,
+// so reset/store/config early returns left the marker stale. Every degraded
+// pass then repeated the ownership-epoch bump; clear also repeated its
+// pre-guard proxy-ARP sweep. Entry marking stops that churn, while a pending
+// bit keeps the skipped service tail owed. The converger waits while reset
+// or config is unhealthy, then drives the tail once on recovery and clears
+// pending. The existing #16696 fixture always has committed config and did
+// not cover either the degraded or recovery paths.
 //
-// RED on revert: restore the tail-only marker writes and the first-converge
-// marker assertions below fail. Clear also sends a fresh proxy-ARP sweep
-// nudge before its store guard on every pass; apply returns before its
-// nudge, so its marker assertion is the RED signal.
+// RED on reverting to tail-only markers: degraded marker assertions fail.
+// RED on entry markers without pending recovery: the apply/reset/config and
+// clear/config recovery assertions below fail after health returns. Epoch
+// assertions prove later degraded passes do not repeat the epoch bump.
 func resizeNudge17746(d *Daemon) {
 	d.proxyARPNudgeCh = make(chan struct{}, 8)
 }
@@ -336,9 +332,9 @@ func nilConfigStore17746(t *testing.T) *configstore.Store {
 	return s
 }
 
-// Apply side: desired active (SetCluster flips the state machine, the
-// discarded-edge shape) but the store is nil. The converge pass must
-// advance the marker to applied and then go quiet.
+// Apply side: desired active is set through the state machine's discarded
+// edge, but the store is nil. Convergence must advance the marker and set a
+// pending tail, then stay quiet without repeating the ownership-epoch bump.
 func TestConvergerApplyNilStoreAdvancesMarker17746(t *testing.T) {
 	d := legacyServicesDaemon16696(t)
 	resizeNudge17746(d)
@@ -353,13 +349,20 @@ func TestConvergerApplyNilStoreAdvancesMarker17746(t *testing.T) {
 		t.Fatal("#17746: apply hit the nil-store early return without advancing the marker; " +
 			"the converger will re-drive it on every reconcile pass")
 	}
+	degradedEpoch := d.ipsecRGOwnershipEpoch(1)
 	d.convergeRethServices(1)
 	if serviceEdge16696(d) {
 		t.Fatal("#17746: converger re-drove apply on a degraded-converged RG")
 	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != degradedEpoch {
+		t.Fatalf("#17746: degraded apply re-bumped ownership epoch on a later pass: before=%d after=%d",
+			degradedEpoch, got)
+	}
 }
 
-// Apply side, last guard: store present but ActiveConfig() nil.
+// Apply side, last guard: store present but ActiveConfig() nil. Once the
+// committed store is available again, the marker-converged RG must still get
+// deferred tail driven exactly once by the converger.
 func TestConvergerApplyNilConfigAdvancesMarker17746(t *testing.T) {
 	d := legacyServicesDaemon16696(t)
 	resizeNudge17746(d)
@@ -367,6 +370,7 @@ func TestConvergerApplyNilConfigAdvancesMarker17746(t *testing.T) {
 	if tr := s.SetCluster(true); !tr.Changed || !tr.Active {
 		t.Fatalf("setup: SetCluster(true) must flip desired active, got %+v", tr)
 	}
+	healthy := d.store
 	d.store = nilConfigStore17746(t)
 
 	d.convergeRethServices(1)
@@ -374,15 +378,44 @@ func TestConvergerApplyNilConfigAdvancesMarker17746(t *testing.T) {
 		t.Fatal("#17746: apply hit the nil-config early return without advancing the marker; " +
 			"the converger will re-drive it on every reconcile pass")
 	}
+	degradedEpoch := d.ipsecRGOwnershipEpoch(1)
 	d.convergeRethServices(1)
 	if serviceEdge16696(d) {
 		t.Fatal("#17746: converger re-drove apply on a degraded-converged RG")
 	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != degradedEpoch {
+		t.Fatalf("#17746: apply re-bumped ownership epoch while config was degraded: before=%d after=%d",
+			degradedEpoch, got)
+	}
+
+	// Recovery: restore the committed store. The converger must drive the
+	// apply tail exactly once for the RG that was degraded.
+	d.store = healthy
+	epochBeforeRecovery := d.ipsecRGOwnershipEpoch(1)
+	d.convergeRethServices(1)
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746: converger did not drive the deferred apply tail after config recovery")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
+		t.Fatalf("#17746: recovery apply did not run exactly once: epoch before=%d after=%d",
+			epochBeforeRecovery, got)
+	}
+	if !d.rethServicesAppliedFor(1) {
+		t.Fatal("#17746: marker must remain applied after the recovery drive")
+	}
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger re-drove the apply tail after the recovery drive")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
+		t.Fatalf("#17746: converger re-drove recovery apply: epoch before=%d after=%d",
+			epochBeforeRecovery, got)
+	}
 }
 
-// Apply side, first guard: factory reset in progress. isResetting is
-// Daemon state, so this arm is NOT store-gated; restoring the store
-// below is the control proving the retry requirement survives.
+// Apply side, first guard: factory reset in progress. After the reset
+// exits, the converger must drive the deferred apply tail exactly once
+// even though the marker already reads applied.
 func TestConvergerApplyResettingAdvancesMarker17746(t *testing.T) {
 	d := legacyServicesDaemon16696(t)
 	resizeNudge17746(d)
@@ -392,26 +425,42 @@ func TestConvergerApplyResettingAdvancesMarker17746(t *testing.T) {
 	}
 	d.enterResetGeneration()
 
-	// Edge-producer invocation (VRRP/cluster path): the marker advances
-	// even though no service work runs against the half-wiped box.
-	d.applyRethServicesForRG(1)
+	// The converger drives the degraded edge: the marker advances, so it
+	// does not re-fire every pass, but the tail still owes a recovery drive.
+	d.convergeRethServices(1)
 	if !d.rethServicesAppliedFor(1) {
-		t.Fatal("#17746: apply skipped its marker write while resetting; " +
+		t.Fatal("#17746: apply hit the reset early return without advancing the marker; " +
 			"the converger will re-drive it on every reconcile pass")
 	}
-
-	// Once the reset finishes, a normal configured apply must still reach
-	// its nudge/tail. Reset the marker to model a distinct unapplied edge
-	// and isolate that control from the reset early return.
-	d.exitResetGeneration()
-	d.markRethServicesApplied(1, false)
-	d.applyRethServicesForRG(1)
-	if !serviceEdge16696(d) {
-		t.Fatal("#17746 control: configured apply did not run the full tail " +
-			"(no proxy-ARP nudge) once the store returned")
+	degradedEpoch := d.ipsecRGOwnershipEpoch(1)
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger re-drove apply while the reset is still in progress")
 	}
-	if !d.rethServicesAppliedFor(1) {
-		t.Fatal("#17746 control: configured apply left the marker cleared")
+	if got := d.ipsecRGOwnershipEpoch(1); got != degradedEpoch {
+		t.Fatalf("#17746: apply re-bumped ownership epoch while reset was active: before=%d after=%d",
+			degradedEpoch, got)
+	}
+
+	// Recovery: the reset exits, store untouched (committed throughout).
+	// Converge must now drive the apply tail exactly once.
+	d.exitResetGeneration()
+	epochBeforeRecovery := d.ipsecRGOwnershipEpoch(1)
+	d.convergeRethServices(1)
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746: converger did not drive the deferred apply tail after reset recovery")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
+		t.Fatalf("#17746: reset recovery apply did not run exactly once: epoch before=%d after=%d",
+			epochBeforeRecovery, got)
+	}
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger re-drove the apply tail after the recovery drive")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
+		t.Fatalf("#17746: converger re-drove reset recovery apply: epoch before=%d after=%d",
+			epochBeforeRecovery, got)
 	}
 }
 
@@ -440,10 +489,10 @@ func TestConfiguredApplyClearTailsAdvanceMarker17746(t *testing.T) {
 }
 
 // Clear side: services applied, desired drops via a discarded mirror
-// transition (SetCluster(false) with no handler), store now nil. The
-// clear edge sends the proxy-ARP sweep nudge BEFORE its store guard, so
-// a non-advancing marker is observable as a fresh nudge on every
-// converge pass.
+// transition (SetCluster(false) with no handler), store now nil. The clear
+// edge sends its proxy-ARP sweep before the store guard. Pending state must
+// suppress another sweep while the store is unavailable; the ActiveConfig
+// recovery cell below proves the owed clear tail runs once config returns.
 func TestConvergerClearNilStoreAdvancesMarker17746(t *testing.T) {
 	d := legacyServicesDaemon16696(t)
 	resizeNudge17746(d)
@@ -473,10 +522,15 @@ func TestConvergerClearNilStoreAdvancesMarker17746(t *testing.T) {
 	if !serviceEdge16696(d) {
 		t.Fatal("#17746: degraded clear sent no proxy-ARP sweep nudge")
 	}
+	degradedEpoch := d.ipsecRGOwnershipEpoch(1)
 	d.convergeRethServices(1)
 	if serviceEdge16696(d) {
 		t.Fatal("#17746: converger re-drove clear on a degraded-converged RG " +
 			"(fresh proxy-ARP nudge on the second pass)")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != degradedEpoch {
+		t.Fatalf("#17746: degraded clear re-bumped ownership epoch: before=%d after=%d",
+			degradedEpoch, got)
 	}
 }
 
@@ -498,6 +552,7 @@ func TestConvergerClearNilConfigAdvancesMarker17746(t *testing.T) {
 	if tr := s.SetCluster(false); !tr.Changed || tr.Active {
 		t.Fatalf("setup: SetCluster(false) must flip desired inactive, got %+v", tr)
 	}
+	healthy := d.store
 	d.store = nilConfigStore17746(t)
 
 	d.convergeRethServices(1)
@@ -508,9 +563,36 @@ func TestConvergerClearNilConfigAdvancesMarker17746(t *testing.T) {
 	if !serviceEdge16696(d) {
 		t.Fatal("#17746: degraded clear sent no proxy-ARP sweep nudge")
 	}
+	degradedEpoch := d.ipsecRGOwnershipEpoch(1)
 	d.convergeRethServices(1)
 	if serviceEdge16696(d) {
 		t.Fatal("#17746: converger re-drove clear on a degraded-converged RG " +
 			"(fresh proxy-ARP nudge on the second pass)")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != degradedEpoch {
+		t.Fatalf("#17746: clear re-bumped ownership epoch while config was degraded: before=%d after=%d",
+			degradedEpoch, got)
+	}
+
+	// Recovery: restore the committed store. The converger must drive the
+	// clear tail exactly once (first observable: a fresh proxy-ARP nudge).
+	d.store = healthy
+	epochBeforeRecovery := d.ipsecRGOwnershipEpoch(1)
+	d.convergeRethServices(1)
+	if !serviceEdge16696(d) {
+		t.Fatal("#17746: converger did not drive the deferred clear tail after config recovery")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
+		t.Fatalf("#17746: recovery clear did not run exactly once: epoch before=%d after=%d",
+			epochBeforeRecovery, got)
+	}
+	d.convergeRethServices(1)
+	if serviceEdge16696(d) {
+		t.Fatal("#17746: converger re-drove clear after the recovery drive " +
+			"(fresh proxy-ARP nudge on the second pass)")
+	}
+	if got := d.ipsecRGOwnershipEpoch(1); got != epochBeforeRecovery+1 {
+		t.Fatalf("#17746: converger re-drove recovery clear: epoch before=%d after=%d",
+			epochBeforeRecovery, got)
 	}
 }

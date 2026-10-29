@@ -493,11 +493,9 @@ func (d *Daemon) snapshotRethMasterState() map[int]bool {
 	return out
 }
 
-// markRethServicesApplied records that rgID's RETH service edge was driven
-// to the given ownership (#16696). Apply/clear call this at entry, before
-// any early returns, so every edge producer (VRRP event, direct-VIP, cluster
-// event, reconcile converger) advances the same marker the converger compares
-// against even when service work cannot run.
+// markRethServicesApplied records the ownership edge driven for rgID
+// (#16696). Apply/clear call this at entry, even when service-specific work
+// is skipped; the pending bit tracks whether the skipped tail needs recovery.
 func (d *Daemon) markRethServicesApplied(rgID int, active bool) {
 	d.rethServicesMu.Lock()
 	defer d.rethServicesMu.Unlock()
@@ -507,8 +505,31 @@ func (d *Daemon) markRethServicesApplied(rgID int, active bool) {
 	d.rethServicesApplied[rgID] = active
 }
 
-// rethServicesAppliedFor reports the last service ownership applied for
-// rgID; absent reads false (never applied / last cleared).
+// markRethServicesPending records that an edge's service tail was skipped and
+// must be re-driven once reset/config prerequisites recover.
+func (d *Daemon) markRethServicesPending(rgID int, pending bool) {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	if pending {
+		if d.rethServicesPending == nil {
+			d.rethServicesPending = make(map[int]bool)
+		}
+		d.rethServicesPending[rgID] = true
+		return
+	}
+	delete(d.rethServicesPending, rgID)
+}
+
+// rethServicesStateFor reads the last driven ownership and any pending tail
+// under one lock for the converger.
+func (d *Daemon) rethServicesStateFor(rgID int) (applied, pending bool) {
+	d.rethServicesMu.Lock()
+	defer d.rethServicesMu.Unlock()
+	return d.rethServicesApplied[rgID], d.rethServicesPending[rgID]
+}
+
+// rethServicesAppliedFor reports the last ownership edge driven for rgID;
+// absent reads false (never driven / last edge cleared).
 func (d *Daemon) rethServicesAppliedFor(rgID int) bool {
 	d.rethServicesMu.Lock()
 	defer d.rethServicesMu.Unlock()
@@ -535,16 +556,23 @@ func (d *Daemon) driveRethServicesEdge(rgID int, tr rgTransition, noRethVRRP boo
 	}
 }
 
-// convergeRethServices repairs a lost per-RG service edge (#16696): when
-// the desired ownership (snapshotRethMasterState, i.e. rgStateMachine
-// IsActive) disagrees with the last-applied service ownership, re-drive
-// the edge. Level-triggered, so it also covers edges swallowed by the
-// #15258 sync-hold mirror refresh (R3-A34-03 class) whose transitions no
-// caller consumes. A converged RG costs one map read per pass.
+// convergeRethServices repairs a lost per-RG service edge (#16696) and
+// retries an edge whose service tail was skipped by a reset/config guard.
+// The desired ownership (snapshotRethMasterState) is compared against the
+// last driven edge. A pending tail is retried only when reset and committed
+// config prerequisites are healthy; once its apply/clear tail runs, the
+// pending bit is cleared so steady-state passes read desired ownership and
+// the applied/pending marker pair once.
 func (d *Daemon) convergeRethServices(rgID int) {
 	desired := d.snapshotRethMasterState()[rgID]
-	if desired == d.rethServicesAppliedFor(rgID) {
+	applied, pending := d.rethServicesStateFor(rgID)
+	if desired == applied && !pending {
 		return
+	}
+	if pending {
+		if d.isResetting() || d.store == nil || d.store.ActiveConfig() == nil {
+			return
+		}
 	}
 	if desired {
 		d.applyRethServicesForRG(rgID)
@@ -2046,13 +2074,16 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	// against a half-wiped box. The enqueue is fenced itself; this guard
 	// covers the direct memfile pre-seed and the peer-seed goroutine.
 	if d.isResetting() {
+		d.markRethServicesPending(rgID, true)
 		return
 	}
 	if d.store == nil {
+		d.markRethServicesPending(rgID, true)
 		return
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
+		d.markRethServicesPending(rgID, true)
 		return
 	}
 	// RA senders (#5861): converge to the union of RA configs for every RG
@@ -2173,6 +2204,7 @@ func (d *Daemon) applyRethServicesForRG(rgID int) {
 	if cc := d.clusterConfig(); cc != nil && cc.IPsecSASync && d.getSessionSync() != nil {
 		go d.reinitiateIPsecSAsForRG(rgID)
 	}
+	d.markRethServicesPending(rgID, false)
 }
 
 type raScopedClearer interface {
@@ -2272,10 +2304,12 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// config-less paths where the stale entry still sits in the kernel.
 	d.nudgeProxyARPReassert()
 	if d.store == nil {
+		d.markRethServicesPending(rgID, true)
 		return
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
+		d.markRethServicesPending(rgID, true)
 		return
 	}
 
@@ -2337,6 +2371,7 @@ func (d *Daemon) clearRethServicesForRG(rgID int) {
 	// governs peer advertisement/re-initiation, not local SA hygiene on a
 	// node-local demotion edge.
 	go d.terminateDemotedRGIPsecSAs(rgID, rgEpoch)
+	d.markRethServicesPending(rgID, false)
 }
 
 // stripUntaggedUnitSuffix normalizes a resolved Linux interface name by
