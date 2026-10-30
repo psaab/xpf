@@ -706,6 +706,7 @@ The relay carries the two transitions a single worker would have made itself:
 |---|---|---|
 | `Promoted` | `note_tcp_seq_scaled` on an admitted SYN-ACK that just promoted a pair split across workers (replica origin or relayed marker); targets the author worker named by the forward session id when it is on this node | the receiver's pair is pure Opening, the relayed SYN-ACK ack equals ITS client SYN end (`tcp_peer_ack_end`, #16042), same forward session id, and the pair serves traffic here. Sets `established && handshake_pending` (the #6752 opening-class gap) and seeds the reverse half's `tcp_peer_ack_end` with the server SYN end, so a bare completing ACK is validated exactly as on a single worker. A DATA segment completes a pending pair through the #16223 companion arm, which checks no ack — on a relayed pair exactly as on a single worker (#18528). |
 | `Completed` | `emit_session_state_update_inner` on a transition INTO Established of a split pair — the single choke point every packet-driven completion publishes through, so a deferred cache-hit completion relays only after TX admission, exactly like its HA Update; fans out to every sibling | the receiver's pair is already handshake-pending — a SYN-ACK was seen on it (validated, for a SYN-first pair; the installing segment itself, for a SYN-ACK-first pickup) — same session id, serving. Never applied to a pure Opening pair (#6752/#13679). |
+| `Closed` | the same choke point on a close-CLASS transition (first FIN, second FIN, RST) of a split pair, carrying the pair's close bits (RST, FIN forward, FIN reverse); fans out to every sibling | same session id, serving. ORs the bits into both halves exactly as a local FIN/RST stamps them, puts them on the shared close window (`tcp_close_window_for_entry`: 2 s RST, closing, TIME_WAIT once one FIN per direction has been seen on ANY worker) and re-stamps from now (close progress, #10885); a relay that adds nothing changes nothing. Whatever a relay can establish, a relay can close: before it, a server RST that RSS delivered only to B left A's relay-established authoritative row Established for 1800 s, pinning its SNAT port, slot and limit-session count (a replica's close announces only to the HA peer, #9582, and replica expiry sends no Close). |
 
 Producers push into a bounded outbox (`HANDSHAKE_RELAY_OUTBOX_CAP` = 256,
 drop-newest, counted in `HANDSHAKE_RELAY_OUTBOX_DROPS`); the worker loop
@@ -723,10 +724,25 @@ it — the sender already published the same transition for the same session id
 from its own row (a replica announces with the installer's carried id, #9582;
 a stage advance to Established always announces), so one completion yields
 one Established Update node-wide.
-"Serving" is the same served-here proxy `cache_hit_handshake_progress` uses
-(the locally-authored row, or a replica refreshed past its creation), so idle
-replicas on uninvolved workers keep their opening-window reap; carried HA
-counters are deliberately not used.
+"Serving" is the locally-authored row, or a row with the per-entry
+`served_here` bit, which every admitted packet hit on THIS table sets
+(slow-path Owner replay, flow-cache probe) and a same-incarnation re-import
+keeps. It is a flag on purpose: a worker-loop pass samples the packet clock
+(`loop_now_ns`) BEFORE `apply_worker_commands` stamps a replica's
+`created_ns` with a later read, so a timestamp test (`last_seen > created`)
+was false for a replica imported and hit in the same pass — the common case
+under load, where B then refused A's completion and stayed on the opening
+window for the life of an upload. Idle replicas on uninvolved workers never
+set the bit, so they keep their opening-window reap; carried HA counters are
+not used.
+
+Relays share the bounded worker command queue (4096) with HA-correctness
+commands, so a relay is never queued once the recipient queue holds
+`HANDSHAKE_RELAY_QUEUE_WATERMARK` (half the cap); refused relays count in
+`HANDSHAKE_RELAY_REFUSED`. A `Completed` or `Closed` relay is broadcast (the
+SYN-ACK worker's id is recorded nowhere), so a split flow costs at most one
+targeted `Promoted` plus N-1 `Completed` and, at close, N-1 `Closed`
+commands, on top of the 2(N-1) replica upserts its install already sends.
 
 The relay's evidence is the single-worker evidence: B's replica cannot
 validate a SYN-ACK ack (replicas carry no client ISN, so B fails open as
@@ -748,8 +764,28 @@ Limits (the relay narrows the split gap, it does not erase it):
   from B's forward replica. A SYN-ACK that B serves before applying the
   `UpsertSynced` replica (materialized from the shared map) or from the flow
   cache relays nothing; that flow behaves as before #18520.
-- **Delivery.** A relay refused by a full outbox or a full sibling queue is
-  counted and dropped, never retried (same fallback).
+- **Delivery.** A relay refused by a full outbox or at the queue watermark
+  is counted and dropped, never retried (same fallback). A `Promoted` relay
+  whose target worker resolves is delivered only there: if that worker no
+  longer holds the serving forward row (an RSS indirection change or a
+  reconcile mid-handshake), the relay is refused and nobody else gets it.
+- **Pending stage on a replica in its own namespace.** A `WorkerLocalImport`
+  replica carrying THIS worker's own id (re-imported after a reconcile, or
+  re-materialized) does not announce its `Promoted` transition, and its
+  receiver stays silent too, so the HA peer sees Opening until the
+  completion (which always announces). Both stages are opening-class, so the
+  peer's window is the same.
+- **Session-id reuse across a helper restart.** Session ids restart at 1 on
+  every helper start (`next_session_id`), and the incarnation fence is
+  (key, session id). A new connection that reuses a 5-tuple a sibling or the
+  standby still holds from the previous lifetime, on the same worker index,
+  can carry the old id; the import guard then keeps the old stage, and a
+  relay may apply to the old row. Rare (same tuple, same worker, same
+  counter value) and permissive (Established where Opening is due); the same
+  class already exists for the shared map (#16223) and the import anchor
+  (#16043). A per-boot epoch in the id is not added here: the id is a wire
+  and RT_FLOW correlation field whose consumers assume the
+  node/worker/counter layout.
 
 Two coupled fixes ride with it:
 
@@ -788,8 +824,10 @@ replica fall back to Opening are closed with it:
   to the workers, so a later same-session-id import carrying a lower stage
   (a bulk/export Open built from a sender shared row whose wire the 10 s
   ct-slice had not yet restamped) regressed an Established replica to
-  Opening. A different session id, a zero id or a stated close class still
-  takes the incoming state. Both merges use the one
+  Opening. A different session id or a zero id takes the incoming state; for
+  the same incarnation the stage is kept and a stated close class still
+  applies (it drives `closing` and the close window independently of the
+  stage). Both merges use the one
   `TcpHandshakeState::stage_rank` formula.
 - The deferred cache-hit completion publishes on TX admission (the
   admission-key fix above), including a replica's completion through the

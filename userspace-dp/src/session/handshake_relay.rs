@@ -31,6 +31,12 @@
 //   receiver already holds as handshake-pending (a SYN-ACK was seen on it:
 //   validated for a SYN-first pair, or the installing segment of a
 //   SYN-ACK-first pickup), never to a pure Opening pair (#6752/#13679).
+// * `Closed` — a worker's pair took close progress (first FIN, second FIN,
+//   RST). Carries the pair's close bits; the receiver ORs them in exactly as
+//   a local FIN/RST stamps them. Whatever a relay can establish, a relay can
+//   close: a FIN/RST that RSS delivered to one worker otherwise reaches no
+//   sibling (a replica close announces only to the HA peer, #9582), so a
+//   relay-established authoritative row outlived a server RST by 1800 s.
 //
 // Producers queue into a bounded per-table outbox; the worker loop drains it
 // once per pass (`session_glue::fan_out_handshake_relays`), never per packet.
@@ -39,8 +45,11 @@
 // every sibling (the SYN-ACK worker's id is not recorded anywhere). A
 // receiver applies a relay only to the same incarnation (forward session id)
 // and only to a pair that serves traffic on its table (the author, or a
-// replica a hit here refreshed past its creation), so idle replicas keep
-// reaping on the opening window exactly as before. A relay is never
+// replica whose `served_here` bit a packet hit here set — a flag, because a
+// loop pass stamps packets with a clock read taken BEFORE the replica
+// import's), so idle replicas keep reaping on the opening window exactly as
+// before. Relays stop at `HANDSHAKE_RELAY_QUEUE_WATERMARK` (half the worker
+// command cap) so they never take the headroom HA commands need. A relay is never
 // re-relayed, and the receiver publishes NO HA Update for it: the sender
 // already published the same transition for the same session id from its own
 // row (a replica announces with the installer's carried id, #9582, and a
@@ -77,7 +86,17 @@ pub(crate) enum HandshakeRelayStage {
     Promoted,
     /// The sender completed the pair.
     Completed,
+    /// The sender's pair took close progress (FIN or RST); `close_bits`
+    /// says which. Whatever a relay can establish, a relay can close.
+    Closed,
 }
+
+/// `HandshakeRelay::close_bits`: a RST was seen on the pair.
+pub(crate) const RELAY_CLOSE_RESET: u8 = 1;
+/// `HandshakeRelay::close_bits`: a FIN was seen in the FORWARD direction.
+pub(crate) const RELAY_CLOSE_FIN_FORWARD: u8 = 2;
+/// `HandshakeRelay::close_bits`: a FIN was seen in the REVERSE direction.
+pub(crate) const RELAY_CLOSE_FIN_REVERSE: u8 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HandshakeRelay {
@@ -96,6 +115,8 @@ pub(crate) struct HandshakeRelay {
     /// `Promoted` only: the server's SYN end (SYN-ACK seq + 1 + payload) —
     /// the ack the client's completing segment must carry.
     pub(crate) server_ack_end: Option<u32>,
+    /// `Closed` only: `RELAY_CLOSE_*` bits of the sender's pair.
+    pub(crate) close_bits: u8,
 }
 
 impl SessionEntry {
@@ -110,23 +131,27 @@ impl SessionEntry {
     }
 
     /// This half serves traffic on THIS table: it is the locally-authored
-    /// row, or a hit here refreshed it past its creation (the same
-    /// served-here proxy `cache_hit_handshake_progress` uses). Counters are
-    /// not usable: an HA import carries the peer's counts (#16217).
+    /// row, or a packet hit here set `served_here`. Neither a timestamp nor
+    /// the counters can stand in: a replica imported and hit in the same
+    /// loop pass has `last_seen < created` (two clock reads, packet clock
+    /// first), GC retention re-stamps idle replicas, and an HA import
+    /// carries the peer's counts (#16217).
     #[inline]
     fn serves_handshake_relay(&self) -> bool {
         !(self.origin.is_peer_synced() || self.origin == SessionOrigin::SharedPromote)
-            || self.last_seen_ns > self.created_ns
+            || self.served_here
     }
 }
 
 impl SessionTable {
     fn push_handshake_relay(&mut self, relay: HandshakeRelay) {
-        if self
+        if let Some(queued) = self
             .handshake_relay_outbox
-            .iter()
-            .any(|queued| queued.forward_key == relay.forward_key && queued.stage == relay.stage)
+            .iter_mut()
+            .find(|queued| queued.forward_key == relay.forward_key && queued.stage == relay.stage)
         {
+            // Close progress accumulates within one pass (FIN then RST).
+            queued.close_bits |= relay.close_bits;
             return;
         }
         if self.handshake_relay_outbox.len() >= HANDSHAKE_RELAY_OUTBOX_CAP {
@@ -185,6 +210,7 @@ impl SessionTable {
             target_worker,
             synack_ack: Some(ack),
             server_ack_end: Some(seq.wrapping_add(1).wrapping_add(payload_len)),
+            close_bits: 0,
         });
     }
 
@@ -221,6 +247,53 @@ impl SessionTable {
             target_worker: None,
             synack_ack: None,
             server_ack_end: None,
+            close_bits: 0,
+        });
+    }
+
+    /// Producer (close): called from the HA-Update choke point on a close
+    /// CLASS transition of a pair split across workers. A FIN or RST that
+    /// RSS delivered to one worker otherwise reaches no sibling (a replica
+    /// close announces only to the HA peer, #9582, and replica expiry sends
+    /// no Close), so a relay-established authoritative row would sit
+    /// Established on the 1800 s window after the server reset the flow.
+    pub(in crate::session) fn queue_close_relay(&mut self, forward_key: &SessionKey) {
+        let Some(forward) = self.entry_by_key_quiet(forward_key) else {
+            return;
+        };
+        if forward.metadata.is_reverse || forward.session_id == 0 {
+            return;
+        }
+        let session_id = forward.session_id;
+        let mut split = forward.handshake_split_across_workers();
+        let mut close_bits = 0u8;
+        if forward.reset {
+            close_bits |= RELAY_CLOSE_RESET;
+        }
+        if forward.fin_own {
+            close_bits |= RELAY_CLOSE_FIN_FORWARD;
+        }
+        let reverse_key = reverse_session_key(forward_key, forward.decision.nat);
+        if let Some(reverse) = self.entry_by_key_quiet(&reverse_key) {
+            split |= reverse.handshake_split_across_workers();
+            if reverse.reset {
+                close_bits |= RELAY_CLOSE_RESET;
+            }
+            if reverse.fin_own {
+                close_bits |= RELAY_CLOSE_FIN_REVERSE;
+            }
+        }
+        if !split || close_bits == 0 {
+            return;
+        }
+        self.push_handshake_relay(HandshakeRelay {
+            forward_key: forward_key.clone(),
+            session_id,
+            stage: HandshakeRelayStage::Closed,
+            target_worker: None,
+            synack_ack: None,
+            server_ack_end: None,
+            close_bits,
         });
     }
 
@@ -277,17 +350,17 @@ impl SessionTable {
         let Some(forward) = self.entry_by_key_quiet(forward_key) else {
             return false;
         };
-        if forward.metadata.is_reverse
-            || forward.closing
-            || forward.session_id != relay.session_id
-        {
+        if forward.metadata.is_reverse || forward.session_id != relay.session_id {
             return false;
         }
         let nat = forward.decision.nat;
         let forward_serves = forward.serves_handshake_relay();
         let reverse_key = reverse_session_key(forward_key, nat);
         let reverse = self.entry_by_key_quiet(&reverse_key);
-        if reverse.is_some_and(|reverse| reverse.closing) {
+        // A relay never establishes (or re-pends) a closing pair (#14630);
+        // only close progress may still apply to one.
+        let pair_closing = forward.closing || reverse.is_some_and(|reverse| reverse.closing);
+        if pair_closing && relay.stage != HandshakeRelayStage::Closed {
             return false;
         }
         // An idle replica pair (neither half authored or hit here) keeps
@@ -297,6 +370,9 @@ impl SessionTable {
             return false;
         }
         match relay.stage {
+            HandshakeRelayStage::Closed => {
+                return self.apply_close_relay(forward_key, &reverse_key, nat, relay.close_bits, now_ns);
+            }
             HandshakeRelayStage::Promoted => {
                 // Only a pure Opening SYN-first pair: anything further along
                 // already saw (or was relayed) its own SYN-ACK. (A SYN-ACK-first
@@ -374,5 +450,63 @@ impl SessionTable {
         // No HA Update here: the sender published this transition for the
         // same session id from its own row (see the module header).
         true
+    }
+
+    /// Apply a sibling's close progress to this table's pair: the same
+    /// sticky bits a local FIN/RST stamps (`stamp_tcp_close` on the half the
+    /// segment matched, `propagate_tcp_state_to_companion` on its companion),
+    /// then the shared close-window formula. Close progress re-stamps the
+    /// window from `now` exactly as local close progress does (#10885);
+    /// a relay that adds nothing new changes nothing.
+    fn apply_close_relay(
+        &mut self,
+        forward_key: &SessionKey,
+        reverse_key: &SessionKey,
+        nat: crate::nat::NatDecision,
+        close_bits: u8,
+        now_ns: u64,
+    ) -> bool {
+        let reset = close_bits & RELAY_CLOSE_RESET != 0;
+        let fin_forward = close_bits & RELAY_CLOSE_FIN_FORWARD != 0;
+        let fin_reverse = close_bits & RELAY_CLOSE_FIN_REVERSE != 0;
+        if !reset && !fin_forward && !fin_reverse {
+            return false;
+        }
+        let became_closing = self
+            .entry_by_key_quiet(forward_key)
+            .is_some_and(|forward| !forward.closing);
+        let timeouts = self.timeouts;
+        let mut changed = false;
+        for (key, fin_own, fin_peer) in [
+            (forward_key, fin_forward, fin_reverse),
+            (reverse_key, fin_reverse, fin_forward),
+        ] {
+            let Some(entry) = self.entry_by_key_mut(key) else {
+                continue;
+            };
+            let next_reset = entry.reset || reset;
+            let next_fin_own = entry.fin_own || fin_own;
+            let next_fin_peer = entry.fin_peer || fin_peer;
+            if entry.closing
+                && next_reset == entry.reset
+                && next_fin_own == entry.fin_own
+                && next_fin_peer == entry.fin_peer
+            {
+                continue;
+            }
+            entry.closing = true;
+            entry.reset = next_reset;
+            entry.fin_own = next_fin_own;
+            entry.fin_peer = next_fin_peer;
+            entry.last_seen_ns = now_ns;
+            entry.expires_after_ns = tcp_close_window_for_entry(entry, &timeouts);
+            changed = true;
+            self.push_to_wheel(key, now_ns);
+        }
+        if changed && became_closing {
+            // #16489: baseline at the first transition into CLOSING.
+            self.seed_closing_counters_baseline(forward_key, nat);
+        }
+        changed
     }
 }

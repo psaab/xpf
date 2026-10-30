@@ -643,6 +643,8 @@ impl SessionTable {
                 syn_ack_first,
                 // #18520: no sibling relay has advanced a fresh entry.
                 handshake_relayed: false,
+                // #18520: a fresh install has not been served by a hit yet.
+                served_here: false,
                 // #7212: no static input-filter verdict has been derived for
                 // this ENTRY yet. The forward install's own first packet was
                 // adjudicated by the session-MISS path, but this constructor
@@ -1064,6 +1066,12 @@ impl SessionTable {
         // key_to_handle mapping internally before returning None.
         // #9752 round 3: unknown-never-default on re-import, computed BEFORE
         // the removal (the entry must still be in the table to consult).
+        // #18520: a same-incarnation re-import of a replica this worker has
+        // served keeps its served-here bit (the relay receiver's test).
+        let preserved_served_here = wire_session_id != 0
+            && self
+                .entry_by_key_quiet(&key)
+                .is_some_and(|existing| existing.session_id == wire_session_id && existing.served_here);
         let preserved = self.preserved_install_table_for(&key, &decision, wire_session_id);
         let mut decision = decision;
         if let Some((domain, check)) = preserved {
@@ -1151,6 +1159,8 @@ impl SessionTable {
                 syn_ack_first,
                 // #18520: no sibling relay has advanced a fresh entry.
                 handshake_relayed: false,
+                // #18520: a same-incarnation re-import keeps the bit.
+                served_here: preserved_served_here,
                 // #7212: a peer-synced import carries NO locally-derived
                 // input-filter verdict — the peer adjudicated it against the
                 // peer's own interfaces. `UNVALIDATED` makes the first packet

@@ -942,6 +942,10 @@ impl SessionTable {
             }
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
+            // #18520: an admitted (non-deferred) hit on this table.
+            if !defer_all {
+                entry.served_here = true;
+            }
             let close_class_before = entry.tcp_close_class_wire();
             let handshake_state_before = entry.tcp_handshake_state_wire(key.protocol);
             // #10885: only close progress or traffic from the non-FINed

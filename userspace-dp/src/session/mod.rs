@@ -327,6 +327,8 @@ const TCP_CLOSING_TIMEOUT_NS: u64 = 30_000_000_000;
 /// posture of Junos and is well under Linux conntrack's CLOSE timeout while
 /// still tolerating a stray reordered segment after the RST.
 const TCP_RST_TIMEOUT_NS: u64 = 2_000_000_000;
+#[cfg(test)]
+pub(crate) const TCP_RST_TIMEOUT_NS_FOR_TEST: u64 = TCP_RST_TIMEOUT_NS;
 const DEFAULT_UDP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 const DEFAULT_ICMP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 /// #16486: Junos protocol-based default timeout table (Security 10.2,
@@ -1313,6 +1315,15 @@ struct SessionEntry {
     /// Marks the pair as split across workers so this table's own completion
     /// is relayed back; never synced, never read on the packet path.
     handshake_relayed: bool,
+    /// #18520: a packet hit on THIS table admitted this half (slow-path Owner
+    /// replay or flow-cache probe). The relay receiver's "serves here" test
+    /// for a replica. A flag, not a timestamp: within one worker-loop pass
+    /// the packet clock (`loop_now_ns`) is sampled BEFORE
+    /// `apply_worker_commands` stamps a replica's `created_ns`, so
+    /// `last_seen > created` is false for a replica imported and hit in the
+    /// same pass. Preserved across a same-incarnation re-import; never
+    /// synced.
+    served_here: bool,
     /// #10888 carries this marker as the distinct SynAckFirstPending wire state.
     /// #965: absolute tick in the ordinary expiry wheel. Updated when a
     /// non-held deadline changes; while held, it is the horizon recheck tick.
@@ -4563,6 +4574,8 @@ impl SessionTable {
                     // check after the borrow instead of refusing.
                     companion_crossed = true;
                 } else {
+                // #18520: a live cache hit on this table.
+                entry.served_here = true;
                 // #14939 handshake completion (mirrors
                 // `touch_if_stale_with_payload`): not a keepalive refresh,
                 // so it applies even inside the throttle window.
@@ -5401,6 +5414,9 @@ impl SessionTable {
             && handshake_state_before != handshake_state_after
         {
             self.queue_completion_relay(&forward_key);
+        }
+        if class_after != class_before && class_after != 0 {
+            self.queue_close_relay(&forward_key);
         }
         let Some(forward) = self.entry_by_key(&forward_key) else {
             return;
