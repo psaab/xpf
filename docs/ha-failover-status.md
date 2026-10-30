@@ -403,11 +403,254 @@ Also closed on the branch, independently of the aged cell:
 peer-synced rows (incl. `DemoteOwnerRGS`-retagged `SyncImport`)
 whose stored decision is terminal **or** `FabricRedirect` decline
 SNAT revalidation (the fabric pseudo-egress has no `EgressInterface`
-row, so the first geometry check revoked unconditionally);
+row, so the first geometry check revoked unconditionally; the
+`FabricRedirect` half is superseded by #18531 below: any origin, keyed
+on the judged resolution, with `HAInactive` added);
 revocation only on a fresh decision's withdrawn translation, and
 `StaleSourceNat` revocations are counted per binding and exported
 as `xpf_userspace_snat_revoked_sessions_total`. Reverse hits never
 substitute the reply decision for the stored forward decision.
+
+**#18531: an ownership transient is no ground to revoke an SNAT session.**
+A split-RG failback (RG1/WAN to the peer, RG2/LAN kept) killed every
+established SNAT stream, on both nodes, through the source-NAT revalidation
+(`source_nat_revocation_on_session_hit_with_ingress`).
+
+*The node keeping the LAN RG (fw1).*
+
+1. `update_ha_state` publishes the inactive RG1 before the workers drain
+   `DemoteOwnerRGS`.
+2. The serving worker's first LAN packet after the RG-epoch flow-cache
+   invalidation hits its crash-takeover `SharedPromote` row, which is
+   locally authored and not yet retagged.
+3. The packet re-resolves to `FabricRedirect` and persists it.
+4. The row's SNAT judgment is Stale: while the flow cache served the row,
+   every kernel neighbor batch advanced the #16109 neighbor generation.
+5. The #16215 `FabricRedirect` decline was gated on `is_peer_synced()`, so
+   the validator judged the fabric parent, which has no egress row, and
+   revoked the pair. The Close passed the daemon's fabric-redirect sync
+   branch and deleted the WAN owner's live copy.
+
+*The node taking RG1 (fw0), in the window after the peer demoted RG1 and
+before this node activated it.* fw1 fabric-redirects the translated flow,
+and fw0's imported row re-resolves to `HAInactive`. With the #18519 split
+FIB that resolution is the default via the WAN gateway on reth0.50,
+because the peer-owned reth0.80 prefix is withheld. The validator judged
+reth0.50's address against the reth0.80 translation and revoked the pair.
+That Close is not synced back (owner-RG gate, fw0 not yet primary), but
+fw0 had lost the session for good.
+
+The rules now:
+
+- **Decline keyed on the judged resolution.** A judged `FabricRedirect` or
+  `HAInactive` names no egress this node forwards out of, so the judgment
+  is declined for every origin. The session is kept, the packet takes its
+  HA disposition (redirected, dropped, or forwarded on a #16217 adopted
+  candidate), and the stamp stays stale.
+- **Live egress judged first.** The live-resolution substitution runs
+  before that decline for every origin (it was peer-synced only). When the
+  egress RG returns, the forward hit is judged on the real egress, even at
+  the same generation, where nothing re-stores the row.
+- **Persisted redirect keeps its owner RG.**
+  `persisted_owner_rg_for_resolution` keeps the recorded owner RG for a
+  `FabricRedirect`; the fabric parent names none. The row therefore stays
+  in the RG index that `DemoteOwnerRGS` and `RefreshOwnerRGS` walk. That
+  RG is inactive here, so the WAN owner's revocation, arriving as a peer
+  delete, is not refused by the #9048 locally-owned guard.
+- **No alias purge on a fabric arrival.** On a non-owner, a translated
+  forward hit on a peer-synced row is held transient
+  (`should_keep_synced_hit_transient`) and, before this, was then purged
+  (`purge_translated_synced_hit_with_context`), silently and with no
+  Close. On the RG-taking node the peer's fabric redirect is exactly such
+  a hit, so the window removed the forward-wire alias of a live flow.
+  Where the alias was the only copy, the first packet after activation
+  missed and the flow died. This takes the purge away from its original
+  population: it was introduced for fabric arrivals (75965fb3ff) and
+  widened to direct arrivals later (8ea4d780eb); #6599 is the later report
+  that a spoofed direct packet can abuse the purge-and-re-enter path. It is
+  safe to hold: the row stays transient (not materialized), the packet
+  still takes its HA disposition (a fabric arrival is never redirected
+  back, so it is dropped, or forwarded on a #16217 adopted candidate), and
+  the owner's Close or the row's idle timeout reclaims it. A held hit
+  probably refreshes the row's idle clock (the lookup takes the packet
+  time; inferred), so a node that never takes the RG keeps the row while
+  the peer redirects. When this node owns the RG nothing is held. The purge
+  still runs for a direct arrival on a non-owner.
+- **On a fabric arrival, a live `HAInactive` is judged, then declined.** A
+  keep-transient hit persists nothing, so the validator judged the stored
+  import-time line. On the RG-taking node under the split FIB, for v6, and
+  for both families when the import found no neighbor (`MissingNeighbor`),
+  that line is egress 13 (reth0.50), which does not carry the reth0.80
+  translation, so it revoked. On a fabric-link arrival the live decision
+  now stands in when it is `HAInactive` as well as a forward candidate, and
+  the decline above holds the session. The rule is by arrival link. A
+  fabric arrival is the peer's redirect of a flow whose egress this node
+  does not forward, so the egress owner judges it. A direct arrival on a
+  non-owner is not a redirect, so its stored line is judged here as before
+  (#12187: a later same-tuple static SNAT revokes there). The #12187 cell
+  pins both. A live `FabricRedirect` never stands in.
+- **A peer delete of the translated tuple removes the canonical row.** The
+  owner's revocation is what removes the LAN node's declined row. An owner
+  that holds only the translated alias (plus the reverse synthesized from
+  it) can name nothing but the translated tuple, and the LAN node, which
+  matched peer deletes on the exact key, kept its original-tuple row and its
+  withdrawn translation. `SessionDomain::delete_synced` now resolves a
+  peer delete of a key this node does not hold through the forward-wire
+  index to the canonical row it names, and deletes that pair under the same
+  mode. The #9714 locally-owned guard applies; the #10512 identity check
+  applies only to a SCOPED delete. An ordinary peer Close arrives unscoped,
+  so it removes whichever row holds that translation now, including a later
+  flow that reuses the translated tuple (pinned by
+  `widened_peer_delete_identity_and_outcome_18531`). A refusal of the
+  canonical delete (gate busy, mirror write, locally owned, identity) is
+  what the caller sees, so the daemon keeps and retries its rows. A delete
+  of a key this node holds is never widened, so Go's #6368 stale-epoch
+  rollback of an install that landed deletes only that key. Gap: with a
+  routing instance configured, a bare (domainless) delete of a key held in
+  no domain stops in the handler's ambiguity probe before
+  `delete_synced`, so the widening does not run there. (e760f5eef5 first had
+  the owner close the canonical tuple, recovered from its reverse row; that
+  cannot work for the production alias-only owner, whose reverse was
+  synthesized from the alias, and was removed.)
+- **The canonical row wins the import over a peer-synced alias.** The
+  import used to let the canonical row and its forward-wire alias compete
+  for ONE translated-tuple reservation, keeping whichever arrived first.
+  When the alias won, the node held the flow only as the alias (diag6: 5 of
+  8 flows; diag7b: 3 of 8): at the activation its reverse resolved to
+  `LocalDelivery` (handled below), and at the full failback, when the LAN RG
+  moved there too, the original-tuple packets missed and the flow died
+  (diag7b, `LOCAL-ABSENT key=10.0.61.102:<port>` right after fw0 activated
+  RG2). Now:
+  - A peer-synced alias never books the translation (coordinator import
+    and worker twin). Nor does a local promotion of one: a fabric hit
+    after this node took the WAN RG re-tags the alias `SharedPromote` and
+    replicates it to the other workers, and each replica used to book the
+    identity, so every later canonical import was refused for the flow's
+    lifetime (review E/F, probe R2-P1). A `SharedPromote` row of the alias
+    shape takes no new booking and keeps whatever booking the row it
+    replaces held, so a prewarm `SharedPromote` over a reserving
+    `WorkerLocalImport` keeps it (#15966r). Pinned by
+    `promoted_alias_does_not_refuse_its_canonical_import_18531`.
+  - An alias import is refused while its canonical row is held, so it can
+    never replace that row's reverse with its own. The daemon sends the
+    canonical row first, so a healthy split cluster refuses aliases at the
+    redirected-flow rate. The refusal has its own outcome
+    (`RejectedSupersededAlias`, wire reason `superseded-alias`) and does not
+    count in `xpf_userspace_synced_import_reserve_refused_total`, whose
+    growth means flows that will not survive a failover. The daemon still
+    rolls back the alias's mirror row and counts it in `Imports refused by
+    helper`, as it did when the same arrival failed the reservation.
+  - A canonical import retires a peer-synced alias of the same flow
+    (forward key only). It retires through the peer-delete path, so the
+    removal re-checks the row under the shared-map lock and keeps a row a
+    worker promoted in the meantime (the #9714 locally-owned guard, on the
+    workers too), and no CLEAR close is harvested for a flow that lives on.
+    A promoted alias stays beside the canonical row (the shared store
+    already treats that pair as one session under two keys); it books
+    nothing, so it never refuses the canonical row. The cost: while a
+    promoted alias is this node's ONLY copy of the flow (the alias arrived
+    first, or the canonical import was refused for another reason), the
+    flow's translation is unbooked here, so a new local flow to the same
+    server and port can be handed the same translated port and share the
+    reverse key (the #4388/#6600 collision). The window closes when the
+    canonical row lands and books it. Pinned by
+    `canonical_import_supersedes_its_alias_18531` (both orders, v4/v6) and
+    `alias_promoted_during_the_canonical_import_is_kept_18531`.
+  - Gap: an identity translation (the original source already is the
+    translated address and port) has the alias shape, and a row carries
+    nothing that tells the two apart. A peer-synced canonical row of that
+    shape books nothing on the importing node either, so after a takeover
+    a new local flow could be handed the same identity (the #4388 hazard).
+    Interface SNAT produces it only for a client whose source already is
+    the egress address. Before #18531 such a row booked like any other.
+- **An alias's reverse is handed to the peer, never to the host.** A reverse
+  synthesized from a forward-wire alias takes the alias key's source as the
+  client, which is the SNAT address itself: its un-NAT rewrites nothing.
+  On the node that owns the egress RG that address is local, so the target
+  lookup answered `LocalDelivery`, and the next WAN reply ran the
+  host-inbound gate, was denied and tore the pair down (diag6: the five
+  streams fw0 lost were exactly the five it held only as the alias; the
+  activation `RefreshOwnerRGS` logged `old_disp=FabricRedirect
+  new_disp=LocalDelivery`). A reverse whose un-NAT names its own wire
+  destination (`reverse_un_nat_targets_itself`) now resolves to the fabric
+  redirect toward the peer that holds the canonical row: at synthesis from
+  an alias, and in the one re-resolution pipeline (`reresolve_stored_session`:
+  session hit, `RefreshOwnerRGS`, `DemoteOwnerRGS`) only when the target
+  lookup answers `LocalDelivery`. That gate matters: the reverse-synthesis
+  arm also installs a self-targeting row for a reply that arrives already
+  un-NATed (the peer un-NATed it and handed it over the fabric), keyed by
+  the client tuple. Its target is the real client and it must forward; the
+  ungated version dropped every such reply on the LAN node after a FIB
+  generation bump (loss diag8). Pinned by
+  `lan_node_unnatted_fabric_reply_keeps_forwarding_18531`. Without a redirect (a
+  fabric-borne reply, or no fabric) the row resolves to `HAInactive`, so a
+  reply is dropped, never bounced, delivered locally, or forwarded on a raw
+  FIB answer. The match is on NAT shape: an identity translation (the
+  original source is the SNAT address and the port is unchanged) looks the
+  same and is handed to the peer too. The synthesis arm is not gated, so a
+  pool alias's reverse (its target, the pool address, answered by proxy
+  ARP, is not local, so the lookup answers the WAN neighbor path) is
+  handed to the peer at import (pinned by
+  `pool_alias_reverse_is_handed_to_peer_at_synthesis_18531`). Gap: the
+  gated re-resolution leaves that row on the WAN neighbor path
+  (`MissingNeighbor` toward the pool address after `RefreshOwnerRGS`),
+  so an alias-only pool-SNAT flow still loses its replies on the node
+  that took the WAN RG. The DNAT-only and port-only alias reverses
+  (pre-existing) are not covered either; see #18535. A reverse that un-NATs to a genuinely
+  local address other than its wire destination is still host-bound and
+  still gated. The LAN node's own reverse rows un-NAT to the client and are
+  unaffected.
+
+A withdrawn translation is revoked by the node that owns the egress, on
+its next slow-path hit with a stale stamp. That is not every redirected
+packet: flow-cache hits are not re-judged. The terminal
+(`DiscardRoute` / `ClusterTerminalHAInactive`) decline is still gated on
+peer-synced origin.
+
+A window remains on the reverse side. Reverse hits never substitute (the
+reply's own resolution is the LAN egress). So when the egress RG returns
+with a translation withdrawn, a reply that arrives before any forward
+packet judges the forward row's stored `FabricRedirect` or `HAInactive`,
+declines, and is un-NATed and delivered. `RefreshOwnerRGS` does not close
+it: it rewrites the stored line to the real egress but, like every HA
+identity rewrite, clears the row's source-NAT judgment, and the #16217
+guard declines reverse revocation of an unjudged row with no forward VLAN
+provenance. The window closes at the first forward slow-path hit, which
+judges the real egress and revokes the pair. An inbound-only flow (for
+example UDP pushed from the server) can therefore keep reaching the
+client through the withdrawn binding until a forward packet arrives.
+Pinned by `rg_return_reply_first_window_closes_at_forward_hit_18531`;
+tracked in #18535.
+
+Pinned by `afxdp::tests_split_rg_failback_18531`, which drives the
+production poll pipeline on the captured split snapshots, and by the
+`SharedPromote` cell of `peer_synced_fabric_redirect_snat_declines_16215`.
+The daemon-side routing of the owner's Close is the existing owner-RG gate
+and is not covered by those cells; the two-node cell
+`alias_only_owner_revocation_removes_lan_row_18531` feeds the owner's
+Close keys to the LAN node's coordinator as the peer deletes the daemon
+sends (the Go legs were read, not run). Residuals are tracked in #18535:
+- a translated alias row removed in the RG gap, so an alias-only copy
+  loses the flow (fixed here);
+- activation before the connected-RG FIB republish (open);
+- scope-less imports not judged by the owner (open);
+- the reverse-side window above (open, pinned);
+- why the RG-taking node held only the alias of some flows (fixed: the
+  import race above);
+- DNAT-only and port-only alias reverses, whose un-NAT also targets itself
+  (open, pre-existing);
+- loss cluster, after this fix (0.0.26021, diag9/diag9b), still open:
+  - in the split state (WAN RG on one node, LAN RG on the other) every
+    stream crawls at about 0.1 Gbit/s until the LAN RG follows; it was also
+    there before (diag7b);
+  - one of 8 streams died at the full failback, its reverse on the new
+    owner stuck on a missing LAN neighbor (inferred from one trace);
+  - an intermittent crash-takeover death: the server answers the first
+    forwarded packets with RSTs and the close relay retires the flows
+    (diag7b double-failover transition 1; diag9 test-failover transition
+    1; diag8 and diag9b survived);
+  - 6 to 12 s of outage at the double-failover second takeover (peer-loss
+    detection; the flows survive).
 
 ### Never-again gates
 

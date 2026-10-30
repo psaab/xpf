@@ -8553,7 +8553,8 @@ fn reresolve_destination_owner_fabric_table_17047() {
     ];
     for (name, fabric, candidate, target, ha, want_disp, want_egress) in rows {
         let out = crate::afxdp::session_glue::reresolve_stored_session(
-            &forwarding, ha, &neighbors, now_secs, &stored, &metadata, target, candidate, fabric,
+            &forwarding, ha, &neighbors, now_secs, &stored, &metadata, &crate::afxdp::testfx::test_key(),
+            target, candidate, fabric,
         );
         assert_eq!(out.disposition, want_disp, "{name}: got {out:?}");
         if want_disp == ForwardingDisposition::ForwardCandidate {
