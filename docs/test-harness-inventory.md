@@ -100,7 +100,7 @@ Drivers that chain the above:
 | --- | --- | --- |
 | HA validation | `BPFRX_CLUSTER_ENV=<env> ./scripts/userspace-ha-validation.sh` | The plan's V3 driver: 3×5 s iperf3, `PARALLEL=6`, gates `MIN_GBPS_V4/V6=18.0` (run-2+ on new clusters; run-1 records baseline), tail-ratio ≥ 0.35, no zero intervals — parsed by `scripts/iperf-json-metrics.py` |
 | Phase cycle | `./scripts/userspace-phase-cycle.sh [--perf] [--fast]` | Push branch → deploy fw0/fw1 → validate (smoke matrix or fast mode); the ship-it loop |
-| Metrics oracle | `scripts/iperf-json-metrics.py` | Judges iperf3 JSON: zero-throughput intervals, peak/tail ratio — the failover failure signal is zero intervals, not retransmits |
+| Metrics oracle | `scripts/iperf-json-metrics.py` | Judges iperf3 JSON: zero-throughput intervals, peak/tail ratio — the failover failure signal is zero intervals, not retransmits. A json-stream `error` event means the client was interrupted (SIGTERMed after hanging past `-t`, typically on a blackholed stream). Such a run is `completed=false` with `client_error` set; `avg_gbps` is the measured-interval mean, not the stub's zero `sum_received`; the closing interval past `-t` is excluded. `iperf_client_interrupt_verdict` (`test/incus/iperf-throughput-lib.sh`) turns it into its own FAIL cell in `test-failover.sh` and `ha-smoke-iperf-lib.sh` (#18543) |
 
 **Known open result on the new clusters:** RG1 manual failover under
 iperf on `tcp:` blackholed existing flows ~30 s while new flows worked

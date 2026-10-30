@@ -54,6 +54,30 @@ def collect_intervals(payload):
     return intervals, end
 
 
+def stream_client_error(payload):
+    """Return the text of a json-stream `error` event, or "".
+
+    A client that is interrupted (the harness SIGTERMs one that has not exited
+    on its own) emits an `error` event and then an `end` block it builds
+    locally. That block is not a completion. Its `sum_received` is all zeros
+    because the server's results never arrived, and its `seconds` run to the
+    signal rather than the configured duration. Plain `-J` output reports the
+    same condition as a top-level `error` key, which `summarize` handles.
+    """
+    if payload["format"] != "json-stream":
+        return ""
+    for event in payload["data"]:
+        if event.get("event") == "error":
+            return str(event.get("data") or "iperf3 error event without text")
+    return ""
+
+
+# An interval that ends this far past the configured duration is the
+# interrupt's closing report (the time the client spent hung before the
+# signal), not a measured reporting interval.
+POST_DURATION_SLACK_SEC = 1.0
+
+
 def end_throughput_summary(end):
     for name in ("sum_received", "sum", "sum_sent"):
         candidate = end.get(name) or {}
@@ -105,7 +129,10 @@ def summarize(path, args):
         return summary
 
     intervals, end = collect_intervals(payload)
-    summary["completed"] = bool(end)
+    client_error = stream_client_error(payload)
+    summary["client_error"] = client_error
+    # An interrupted client's `end` block is a local stub, not a completion.
+    summary["completed"] = bool(end) and not client_error
     test_start = {}
     if payload["format"] == "json":
         test_start = data.get("start", {}).get("test_start", {}) or {}
@@ -117,6 +144,7 @@ def summarize(path, args):
     sum_received = end.get("sum_received") or {}
     throughput_summary = end_throughput_summary(end)
     summary["avg_gbps"] = float(throughput_summary.get("bits_per_second") or 0.0) / 1e9
+    summary["avg_source"] = "end" if throughput_summary else "none"
     summary["retransmits"] = int(sum_sent.get("retransmits") or 0)
     # Use `is not None` instead of `or` chaining — 0.0 is a valid value
     # that `or` would treat as falsy, falling through to the wrong source.
@@ -146,6 +174,23 @@ def summarize(path, args):
         normalized_intervals = [
             (event.get("data") or {}) for event in payload["data"] if event.get("event") == "interval"
         ]
+    # An interrupted client closes with one report covering the time it spent
+    # hung before the signal, after the configured duration. Every stream reads
+    # zero in it, so counting it would add a phantom zero interval and mark
+    # every stream as affected. Drop only intervals that END past the
+    # configured duration, and only when the client was interrupted.
+    configured_duration = float(test_start.get("duration") or 0.0)
+    summary["post_duration_intervals_excluded"] = 0
+    if client_error and configured_duration > 0 and len(normalized_intervals) == len(intervals):
+        limit = configured_duration + POST_DURATION_SLACK_SEC
+        kept = [
+            (parsed, raw)
+            for parsed, raw in zip(intervals, normalized_intervals)
+            if parsed[2] <= limit
+        ]
+        summary["post_duration_intervals_excluded"] = len(intervals) - len(kept)
+        intervals = [parsed for parsed, _ in kept]
+        normalized_intervals = [raw for _, raw in kept]
     exclude_windows = [
         (float(event_sec), float(event_sec) + args.event_window_sec)
         for event_sec in args.event_sec
@@ -184,7 +229,18 @@ def summarize(path, args):
         duration = end_s - start
         if duration >= args.min_full_interval_sec:
             full_intervals.append(bps / 1e9)
-    if end:
+    if client_error:
+        # The stub's sum_received is zeros and its sum_sent is diluted by the
+        # hung time, so average the measured intervals instead.
+        measured_seconds = sum(max(0.0, end_s - start) for _, start, end_s in intervals)
+        if measured_seconds > 0:
+            summary["avg_gbps"] = (
+                sum(bps * max(0.0, end_s - start) for bps, start, end_s in intervals)
+                / measured_seconds
+                / 1e9
+            )
+            summary["avg_source"] = "intervals"
+    if end and not client_error:
         observed_end = max(
             observed_end,
             float((throughput_summary.get("end") or sum_sent.get("end") or 0.0)),

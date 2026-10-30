@@ -1964,6 +1964,17 @@ else
 fi
 # M1 JSON verdict fixture end
 
+# #18543: a client that had to be interrupted is its own cell, so the run
+# stays red under the right name rather than as a phantom 0.0 Gbps collapse.
+if [[ "$iperf_gate_ok" == true ]]; then
+	interrupt_verdict=$(iperf_client_interrupt_verdict "$LOCAL_IPERF_METRICS")
+	case "$interrupt_verdict" in
+	PASS\ *) pass "${interrupt_verdict#PASS }" ;;
+	FAIL\ *) fail "${interrupt_verdict#FAIL }" ;;
+	*)       void "${interrupt_verdict#VOID }" ;;
+	esac
+fi
+
 if [[ "$iperf_gate_ok" == true ]]; then
 	oracle_error="${LOCAL_IPERF_METRICS}.oracle.err"
 	if failover_oracles=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" \

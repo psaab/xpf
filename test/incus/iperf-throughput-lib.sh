@@ -82,3 +82,42 @@ iperf_throughput_json_verdict() {
 		printf 'FAIL iperf3 throughput too low: %s Gbps (expected >= %s Gbps) — %s\n' "$display" "$min" "$note"
 	fi
 }
+
+# iperf_client_interrupt_verdict <metrics_json>
+#   #18543: one TOTAL cell for "the client did not exit on its own". A client
+#   with a blackholed stream cannot finish its end-of-test exchange, so the
+#   harness SIGTERMs it. iperf3-json-metrics.py records the resulting
+#   json-stream `error` event as `client_error`, and no longer scores the run
+#   as a completed 0.0 Gbps collapse. That old score was a FAIL under the
+#   wrong name, and this cell is what keeps the run red. It reads only the
+#   producer's field and does not re-derive the condition from the raw log.
+#   Prints exactly one PASS, FAIL or VOID line.
+iperf_client_interrupt_verdict() {
+	local metrics="$1" detail rc=0
+	detail=$(python3 - "$metrics" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        metrics = json.load(handle)
+except (OSError, ValueError) as exc:
+    print(f"metrics unreadable: {exc}")
+    sys.exit(2)
+if not isinstance(metrics, dict) or "client_error" not in metrics:
+    print("metrics carry no client_error field")
+    sys.exit(2)
+value = metrics["client_error"]
+if not isinstance(value, str):
+    print("client_error is malformed")
+    sys.exit(2)
+print(value)
+sys.exit(1 if value else 0)
+PY
+) || rc=$?
+	case "$rc" in
+	0) printf 'PASS iperf3 client exited on its own (no interrupt event)\n' ;;
+	1) printf 'FAIL iperf3 client did not exit on its own and was interrupted (%s): its end-of-test exchange never completed — a stuck stream holds it; throughput is the measured-interval mean (#18543)\n' "$detail" ;;
+	*) printf 'VOID iperf3 client interrupt evidence unavailable: %s\n' "${detail:-metrics check failed}" ;;
+	esac
+}
