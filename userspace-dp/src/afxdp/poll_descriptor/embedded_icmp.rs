@@ -32,11 +32,12 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
     /// tuple. The original descriptor is now owned by that
     /// `PendingForwardRequest`; the caller MUST then pop + recycle on deny and
     /// MUST stop processing this descriptor. `related_admit` is the RELATED
-    /// admission: true for the type-scoped, zone-validated untranslated
-    /// path-error contract (#10286/#10684) and for a NAT'd/NAT64 error whose
-    /// arrival the match arm validated against the quoted session's direction
-    /// (#10666); anything else keeps it false and the caller adjudicates the queued
-    /// prebuilt against zone policy.
+    /// admission: true for the type-scoped, zone-validated same-family
+    /// path-error contract, translated or untranslated (#10286/#10684,
+    /// #18174; a NAT'd reply-quote error and a NAT64 error only for PMTUD,
+    /// #10666), whose arrival the match arm validated against the quoted
+    /// session's direction; anything else keeps it false and the caller
+    /// adjudicates the queued prebuilt against zone policy.
     Queued {
         related_admit: bool,
         /// #13649/#14123: builders rewrite the outer source before the
@@ -150,21 +151,14 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
             icmp_match.resolution.neighbor_mac,
         );
     }
-    // A matched quote with no NAT rewrite is an untranslated live-session
-    // candidate. Carry its expected arrival zone to the queued-policy
-    // adjudicator: a zone-consistent error may use the RELATED shortcut,
-    // while a cross-zone or unresolved arrival receives ordinary
-    // arrival-to-egress policy judgment.
-    //
-    // #9030 widened the old SNAT-only gate to test every rewrite field so
-    // pure-DNAT, port-only, and composed NAT sessions reach their builders.
-    // The same all-fields predicate now identifies the no-rewrite RELATED
-    // case. Each builder independently guards its address/port writes, so the
-    // untranslated output remains wire-identical apart from checksum refresh.
-    let untranslated_related = icmp_match.nat.rewrite_src.is_none()
-        && icmp_match.nat.rewrite_dst.is_none()
-        && icmp_match.nat.rewrite_src_port.is_none()
-        && icmp_match.nat.rewrite_dst_port.is_none();
+    // A matched quote is a live-session RELATED candidate, translated or
+    // not. Carry its expected arrival zone to the queued-policy adjudicator:
+    // a zone-consistent path error may use the RELATED shortcut, while a
+    // cross-zone or unresolved arrival receives ordinary arrival-to-egress
+    // policy judgment. Each builder independently guards its address/port
+    // writes, so untranslated output remains wire-identical apart from
+    // checksum refresh (#9030 widened the rewrite predicate the builders use
+    // to every NAT field).
     let arrival_zone = actual_embedded_icmp_ingress_zone(
         worker_ctx.forwarding,
         meta,
@@ -201,36 +195,53 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         meta,
         effective_ingress_zone_override,
     );
-    // #10666: a NAT'd PMTUD error (v4 Frag-Needed / v6 Packet-Too-Big)
-    // quoting a live session rides the RELATED bypass iff it arrives from
-    // the side the quoted packet travels toward (inbound, a forward quote)
-    // or from (outbound, a reply quote) — the #7169 arrival rule applied
-    // as an admission check, not a match constraint. The match stays
-    // Unconstrained on purpose: an intermediate router's error still
-    // ingresses on the egress link, so the zone check keeps PMTUD working
-    // while a wrong-zone forgery falls to the gate below. Non-PMTUD NAT'd
-    // errors retain the gate unconditionally, so the #9948 Time-Exceeded
-    // cell keeps proving it.
+    // #10666/#18174: a path error quoting a live session rides the RELATED
+    // bypass iff it arrives from the side the quoted packet travels toward
+    // (inbound, a forward quote) or from (outbound, a reply quote) — the
+    // #7169 arrival rule applied as an admission check, not a match
+    // constraint. The match stays Unconstrained on purpose: an intermediate
+    // router's error still ingresses on the egress link, so the zone check
+    // keeps PMTUD and traceroute working while a wrong-zone forgery falls to
+    // the #9948 gate below.
     // #10671: the matcher resolves whether this quote names the forward or
     // reply packet (`via_reply_key XOR is_reverse`) and carries its
-    // expected arrival zone on every arm. NAT'd PMTUD uses that same
-    // direction-derived zone: the former `outbound_snat` branch only
-    // identified reply-key hits and missed as-is hits on reverse halves,
-    // which also quote a reply and must expect the forward ingress zone.
-    // #10684: scope the untranslated RELATED bypass to genuine path errors
-    // (v4 3/11/12, all v6 errors). Source Quench (4, deprecated by RFC 6633)
-    // and Redirect (5, link-scoped) quoting a live un-NAT'd session still
-    // face arrival-to-egress policy. Keep `is_icmp_error`'s broader 4/5 set
-    // for NAT reversal (#2393); only policy-less admission is scoped. This
-    // matches the host path, which already excludes 4/5.
+    // expected arrival zone on every arm, so one direction-derived zone
+    // serves translated and untranslated matches alike.
+    // #10684: scope the RELATED bypass to genuine path errors (v4 3/11/12,
+    // v6 1-4). Source Quench (4, deprecated by RFC 6633) and Redirect (5,
+    // link-scoped) quoting a live session still face arrival-to-egress
+    // policy. Keep `is_icmp_error`'s broader 4/5 set for NAT reversal
+    // (#2393); only policy-less admission is scoped. This matches the host
+    // path, which already excludes 4/5.
+    // #18174: #10666 admitted only NAT'd PMTUD (v4 3/4, v6 2/0), so every
+    // NAT'd Time Exceeded and Destination Unreachable — every traceroute /
+    // mtr hop past an SNAT firewall, and a UDP traceroute's final port
+    // unreachable — reached the reverse `wan -> lan` pair and died under
+    // default deny (live: POLICY_DENY src=<hop> dst=<LAN host> for every
+    // hop). The same-family builders are the SAME code for PMTUD and for
+    // Time Exceeded, so the narrower scope bought no safety the untranslated
+    // arm lacked; the per-session F-077 budget and the zone check bound both.
+    // Only FORWARD quotes widen — errors the session's far side sends back
+    // about the client's packets. A NAT'd REPLY-quote error keeps the
+    // PMTUD-only admission: the outbound SNAT error (#6474: an internal host
+    // ORIGINATES it about a reply it declined and the builder re-NATs it to
+    // the public identity) and its already-re-NAT'd fabric hand-off at the
+    // peer (#13772, where `outbound_snat` is deliberately false) both stay a
+    // `lan -> wan` policy decision on the internal sender (#13649), exactly
+    // as before.
     let expected_arrival_zone = icmp_match.related_expected_zone;
+    let untranslated = icmp_match.nat.rewrite_src.is_none()
+        && icmp_match.nat.rewrite_dst.is_none()
+        && icmp_match.nat.rewrite_src_port.is_none()
+        && icmp_match.nat.rewrite_dst_port.is_none();
+    let related_type = if untranslated || !icmp_match.quoted_is_reply {
+        outer_is_related_path_error(packet_frame, meta)
+    } else {
+        outer_is_pmtud_error(packet_frame, meta)
+    };
     let related_admit = expected_arrival_zone != 0
         && arrival_zone == expected_arrival_zone
-        && (if untranslated_related {
-            outer_is_untranslated_related_error(packet_frame, meta)
-        } else {
-            outer_is_pmtud_error(packet_frame, meta)
-        });
+        && related_type;
     // Builders consume the match's resolution for L2 construction. Replace it
     // with the finalized (possibly zone-stamped FabricRedirect) decision before
     // building the prebuilt frame.
@@ -516,8 +527,10 @@ pub(super) fn queue_prebuilt_embedded_icmp_error(
 /// resolution's egress zone, not the quoted session's original direction.
 /// That keeps a forged error arriving from an untrusted zone subject to the
 /// same `wan -> lan` policy as any other flowless transit packet, while a
-/// genuine PMTUD error arriving from the quoted session's far side rides the
-/// RELATED bypass (#10666) and an explicitly permitted error still passes (#7169).
+/// genuine path error (PMTUD, Time Exceeded, Destination Unreachable,
+/// Parameter Problem) arriving from the quoted session's far side rides the
+/// RELATED bypass (#10666/#18174) and an explicitly permitted error still
+/// passes (#7169).
 pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     queued_frame: &[u8],
     ingress_meta: UserspaceDpMeta,
@@ -539,10 +552,11 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     if resolution.disposition == ForwardingDisposition::FabricRedirect {
         return true;
     }
-    // A supported untranslated path error quoting a live session is admitted
-    // by the type- and zone-scoped RELATED contract (#10286/#10684); a
-    // NAT'd/NAT64 PMTUD error whose arrival the match arm validated against
-    // the quoted session's forward direction rides the same bypass (#10666).
+    // A supported same-family path error quoting a live session, translated
+    // or not, is admitted by the type- and zone-scoped RELATED contract
+    // (#10286/#10684/#18174); a NAT'd reply-quote error or a NAT64 error
+    // rides the same bypass only as PMTUD (#10666), always with its arrival
+    // validated against the quoted session's direction.
     // Keep the reverse flowless zone pair scoped to ForwardCandidate; a
     // non-forward disposition is not a policy verdict.
     if related_admit && resolution.disposition == ForwardingDisposition::ForwardCandidate {
@@ -645,11 +659,13 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     false
 }
 
-/// #10684: the untranslated passthrough keeps only ICMPv4 errors with usable
-/// path-error semantics (Destination Unreachable, Time Exceeded, Parameter
-/// Problem) and the supported quoted-packet ICMPv6 errors. Deprecated
-/// Source Quench and link-scoped Redirect remain policy-gated.
-fn outer_is_untranslated_related_error(
+/// #10684/#18174: the same-family RELATED passthrough (untranslated, and a
+/// translated FORWARD quote) keeps only ICMPv4 errors with usable path-error
+/// semantics (Destination Unreachable, Time Exceeded, Parameter Problem) and
+/// the supported quoted-packet ICMPv6 errors (Destination Unreachable,
+/// Packet Too Big, Time Exceeded, Parameter Problem). Deprecated Source
+/// Quench and link-scoped Redirect remain policy-gated.
+fn outer_is_related_path_error(
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
 ) -> bool {
@@ -663,11 +679,10 @@ fn outer_is_untranslated_related_error(
 
 /// #10666: whether the OUTER error is the PMTUD signal — v4
 /// Fragmentation-Needed (type 3 / code 4, RFC 1191) or v6 Packet-Too-Big
-/// (type 2 / code 0, RFC 4443). Only PMTUD rides the NAT'd RELATED
-/// bypass; every other NAT'd error type retains the #9948 arrival-zone
-/// gate. Translated delivery rewrites attacker-influenced bytes, so its
-/// policy-less admission stays narrower than the untranslated, type-scoped
-/// #10286/#10684 passthrough, which preserves the wire tuple.
+/// (type 2 / code 0, RFC 4443). Since #18174 this scopes the NAT64
+/// (cross-family) RELATED bypass in `nat64_icmp_error.rs` and a same-family
+/// NAT'd REPLY-quote error (#6474/#13649/#13772); every other same-family
+/// match admits each path error through `outer_is_related_path_error`.
 pub(super) fn outer_is_pmtud_error(packet_frame: &[u8], meta: UserspaceDpMeta) -> bool {
     let l4 = meta.l4_offset as usize;
     match (

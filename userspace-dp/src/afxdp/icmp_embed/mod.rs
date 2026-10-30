@@ -73,6 +73,15 @@ pub(super) struct EmbeddedIcmpMatch {
     /// descriptor with the internal (pre-NAT) source on the wire and an
     /// unassociable quote. `false` on every inbound match.
     pub(super) outbound_snat: bool,
+    /// #18174: the quote names the session's REPLY packet (the matchers'
+    /// `via_reply_key XOR is_reverse`; always `false` on the forward-NAT
+    /// arm, whose quote is the post-NAT forward packet). The RELATED gate
+    /// widens NAT'd admission to every path error only for FORWARD quotes
+    /// — the traceroute/mtr case, errors from the session's far side about
+    /// the client's packets. A NAT'd reply-quote error (an outbound SNAT
+    /// error, including its already-re-NAT'd fabric hand-off at the peer,
+    /// #13772) keeps #10666's PMTUD-only scope.
+    pub(super) quoted_is_reply: bool,
     /// #10667: the F-077 gating key this match was charged against. The
     /// poll arms refund it via
     /// `SessionTable::refund_icmp_error_not_delivered` on every post-match

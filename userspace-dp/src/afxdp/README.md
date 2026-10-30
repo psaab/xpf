@@ -966,11 +966,49 @@ sync.
     the translation boundary. The queued policy gate skips reverse-zone
     policy only for that validated PMTUD disposition and only when resolution
     is `ForwardCandidate`; route, HA, and fabric dispositions remain
-    authoritative. Matching NAT'd Time-Exceeded and other non-PMTUD errors
-    still use the #9948 policy gate, and a wrong-zone PTB still follows zone
-    policy. The untranslated #10286 path is type-scoped by #10684: v4 types
-    4/5 retain arrival-to-egress policy; the path-error and v6 RELATED coverage
-    is unchanged.
+    authoritative. A wrong-zone error still follows zone policy (#9948). The
+    #10286 path is type-scoped by #10684: v4 types 4/5 retain
+    arrival-to-egress policy.
+  - **#18174 — NAT'd Time Exceeded / Destination Unreachable are RELATED
+    too (same-family):** #10666 admitted only NAT'd PMTUD, so every NAT'd
+    Time Exceeded (each traceroute/mtr hop past an SNAT firewall) and every
+    NAT'd Destination Unreachable (a UDP traceroute's final port
+    unreachable) was matched, reversed and then default-denied on the
+    reverse `wan -> lan` pair — live on loss and tcp as `POLICY_DENY
+    src=<hop> dst=<LAN host>` for every hop, mtr showing `???` past hop 1.
+    The same-family arm now applies ONE type set to translated and
+    untranslated matches alike (`outer_is_related_path_error`: v4 3/11/12,
+    v6 1-4) with the same direction-derived zone check. The builders are
+    the same code for PMTUD and Time Exceeded, so the narrower NAT'd scope
+    bought no safety; the per-session F-077 budget and the arrival-zone
+    check bound both. The widening applies to FORWARD quotes only (the new
+    `EmbeddedIcmpMatch::quoted_is_reply == false`: errors the session's far
+    side sends back about the client's packets). A NAT'd REPLY-quote error
+    keeps #10666's PMTUD-only scope: the outbound SNAT error (#6474 — the
+    internal host originates it and the builder re-NATs it to the public
+    identity) and its already-re-NAT'd fabric hand-off at the peer (#13772,
+    where `outbound_snat` is deliberately false) remain a `lan -> wan`
+    policy decision on the internal sender (#13649). A wrong-zone forgery (the retargeted
+    `poll_descriptor_embedded_icmp_reversal_zone_policy_denies_9948`), a
+    NAT'd Redirect, HAInactive and every non-ForwardCandidate disposition
+    stay gated. A FabricRedirect is still adjudicated on the peer — and
+    the peer could not match it at all: the redirecting node had already
+    reversed the frame (outer dst = client, quote in pre-NAT form), the
+    quote hit the forward session's CANONICAL reply alias in the
+    forward-NAT arm (`reply_matches_forward_session`), and the #14665
+    outer-destination gate expected `rewrite_src` (the SNAT address), so
+    every split-RG SNAT error — traceroute AND PMTUD — declined to
+    `NoMatch` at the LAN-RG owner. At FABRIC ingress only, a quote whose
+    source equals the forward key's pre-NAT source now expects that source
+    as the outer destination (`nat_match_v4.rs`/`nat_match_v6.rs`); the
+    match is then a forward quote whose expected zone (the forward egress
+    zone) equals the authenticated WAN stamp, and the RELATED rule admits
+    it. NAT64
+    (cross-family) RELATED admission is unchanged — still PMTUD only.
+    Cells: `tests_mtr_icmp_errors_18174.rs` (real ICMP-echo and UDP probes
+    through the poll path, v4+v6, SNAT and non-NAT, single node and the
+    split-RG fabric chain across both nodes) and
+    `poll_descriptor_snat_time_exceeded_admitted_as_related_18174`.
   - **#9528 — both ICMP-error arms run AFTER the interface input filter and
     the PBR verdict:** each arm `continue`s with the descriptor consumed, and
     each used to run ahead of a gate below it. The #6472 arm ran before the
