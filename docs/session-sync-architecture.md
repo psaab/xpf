@@ -1872,15 +1872,25 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
     cannot hold the dial side's slot. A FIN never tears down: the peer closed
     gracefully, and the mark already makes the slot redialable.
 
-  **The drain helps only a peer that does not redial** (review of #18525
-  round 3): a stopped or crashed peer. A live peer — in the #18521 shape it
+  **The drain helps only a peer that does not come back before the drain
+  completes** (review of #18525 rounds 3-4): one stopped for good, or a crash
+  whose restart is slower than the drain. A crashed xpfd is restarted by
+  systemd after 1s (`Restart=on-failure`, `RestartSec=1`), and once its sync
+  listener is up it redials or accepts our dial, retiring the drain exactly
+  as a live peer does — and in the #18521 slow-install shape the drain is
+  ~0.5 MB at ~50 sessions/s, about 40s. A live peer — in the #18521 shape it
   reset the connection because its own writer timed out against this slow
   loop — redials within a second or two (or this node's dial loop does), long
   before a slow loop gets through ~0.5 MB of backlog, and the redial retires
   the drained connection; whatever was still queued, including a
   `failover_abort` or config ACK, is discarded exactly as the first round's
   teardown discarded it (`TestRedialEndsThePeerCloseDrain18525`). The
-  recovery then is the cold-prime bulk for sessions, the hold binding's
+  recovery then is, on a single fabric, the cold-prime bulk for sessions (the
+  retirement is a full disconnect); on a dual fabric the retirement is a
+  partial disconnect on both sides, so no bulk re-sends the discarded
+  deltas unless an outbound bulk is still unacked or a cold prime is owed —
+  the same loss as any partial fabric drop, and as the first round. Then the
+  hold binding's
   fallback to the 2s rescue for a lost commit/abort (`pkg/cluster/README.md`,
   "An in-flight peer-requested transfer owns the owner's hold"), and the
   overdue-ACK re-push for a config ACK. Keeping the drain alive across the
@@ -1900,14 +1910,29 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
   check. On a single fabric the retirement is a full disconnect immediately
   followed by the redial's connect, so the peer connect/disconnect callbacks
   now run in dispatch order (`dispatchPeerEvent`): as bare goroutines the
-  connect could run first and leave the daemon believing the peer was gone.
+  connect could run first and leave the daemon believing the peer was gone
+  (`TestRedialCallbacksRunInOrderThroughCallSites18525` drives that order
+  through `handleNewConnection` and `handleDisconnect`). The order is per
+  `SessionSync`, while the state those callbacks write (`syncPeerConnected`,
+  the prime-retry generation, the sync-ready timer) is daemon-wide, so the
+  daemon ignores a callback from an instance a DIFFERENT one has replaced
+  (`peerCallbackSuperseded`, round 4): on a comms restart the old instance's
+  disconnect could queue behind its own slow connect and land after the
+  successor's connect. With nothing published (a teardown with no successor
+  yet) the callback still runs, so the disconnect is recorded.
 
   **Liveness, precisely.** Frames read after the watchdog's mark earn no peer
   liveness, so a stopped primary's flushed backlog cannot hold the standby's
   heartbeat-timeout decision open for the 5s suppression cap (it did for a FIN
   until round 3). Frames read between the RST or FIN arriving and the next
   watchdog tick still count — at most one `syncConnWatchInterval` (1s) of
-  extra recency.
+  extra recency. A standby that is caught up when the FIN/RST arrives reads
+  EOF at once, fully disconnects, and declares peer loss at the heartbeat
+  threshold, as before. One that is behind keeps sync installed while it
+  drains, so after the last counted frame the 2s recency window still runs:
+  detection is up to max(threshold, ~3s) plus one heartbeat tick, about 3.1s at
+  defaults and 3.2s in the lab — beyond the 0.5–2.1s band quoted for a silent
+  death, and short of the 5s cap a FIN backlog had before round 3.
 - **Every teardown names itself.** `fabric N disconnected` carries `reason`,
   `err` and a per-connection summary (`conn_age`, `frames_read`, `bytes_read`,
   `handler_time`, `handler_max`, `handler_max_type`, `slow_calls`, and

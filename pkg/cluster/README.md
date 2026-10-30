@@ -5343,7 +5343,9 @@ it.
   it, a writer's failure does not tear it down, the dial side may redial
   its slot, its frames earn no peer liveness); after an RST, a loop with one
   handler call stuck for `syncWriteDeadline` is torn down at once. The drain
-  helps only a peer that does not redial: a live peer's redial retires the
+  helps only a peer that does not come back before the drain completes
+  (stopped for good, or a crash whose restart — systemd's 1s `RestartSec` —
+  is slower than the drain): a redial retires the
   drained connection through `handleDisconnect` (`retirePeerClosedSlot`,
   round 3 — a plain supersession read as a peer reboot and evicted the
   healthy other-fabric connection), discarding what was still queued, and

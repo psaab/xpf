@@ -1454,9 +1454,10 @@ func (s *SessionSync) fabricConnectLoop(ctx context.Context, fabricIdx int, peer
 			}
 		}
 		s.mu.Lock()
-		// #18521 review round 2: a slot holding a connection the peer reset
+		// #18521 review round 2: a slot holding a connection the peer closed
 		// is dialable while its receive loop drains the backlog; a live peer
-		// answers and the new connection supersedes the drained one.
+		// answers, and the redial retires the drained connection through
+		// handleDisconnect before it installs (retirePeerClosedSlot, round 3).
 		connected := !s.fabricSlotNeedsDialLocked(fabricIdx)
 		s.mu.Unlock()
 		if connected {

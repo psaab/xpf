@@ -379,6 +379,9 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	// stability crossing re-pushes via the promotion hook / reconcile
 	// loop, instead of leaving the peer indefinitely divergent.
 	ss.OnPeerConnected = func() {
+		if d.peerCallbackSuperseded(ss, "OnPeerConnected") {
+			return
+		}
 		d.cluster.RecordEvent(cluster.EventFabric, -1, "Peer connected")
 		d.onSessionSyncPeerConnected()
 		// #2239 Q7: a peer that just (re)connected (e.g. a restarted
@@ -468,9 +471,32 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	ss.BulkSnapshotSource = d.userspaceBulkSnapshot
 
 	ss.OnPeerDisconnected = func() {
+		if d.peerCallbackSuperseded(ss, "OnPeerDisconnected") {
+			return
+		}
 		d.cluster.RecordEvent(cluster.EventFabric, -1, "Peer disconnected (all fabrics)")
 		d.onSessionSyncPeerDisconnected()
 	}
+}
+
+// peerCallbackSuperseded reports whether a peer connect/disconnect callback
+// comes from a SessionSync that a DIFFERENT instance has replaced (#18521
+// review round 4). The callbacks are ordered per instance (dispatchPeerEvent),
+// but the state they write — syncPeerConnected, the prime-retry generation,
+// the sync-ready timer, SetSyncReady — is daemon-wide and belongs to whichever
+// instance is published. An old instance's disconnect can queue behind its own
+// slow connect and run after the successor's connect; applied, it marked a
+// live successor's peer disconnected until the next reconnect. With NOTHING
+// published (a teardown with no successor yet) the callback still runs, so the
+// disconnect is recorded. Same rule as OnSessionInventoryBulkReceived.
+func (d *Daemon) peerCallbackSuperseded(ss *cluster.SessionSync, which string) bool {
+	cur := d.getSessionSync()
+	if cur == nil || cur == ss {
+		return false
+	}
+	slog.Info("cluster: ignoring a peer callback from a replaced session-sync instance (#18521)",
+		"callback", which)
+	return true
 }
 
 // wireSessionSyncFailoverCallbacks wires the peer-driven remote-failover

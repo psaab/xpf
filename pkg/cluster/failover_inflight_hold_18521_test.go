@@ -516,16 +516,14 @@ func TestAppliedAckRefusedOnceTheHoldWasRescued18525(t *testing.T) {
 		// The hold still stands, but for a NEWER request: this one is stale.
 		{"a newer request re-armed the lease", false, true, failoverAckFailed},
 	}
-	for _, batch := range []bool{false, true} {
-		for _, row := range rows {
-			name := "single/" + row.name
-			if batch {
-				name = "batch/" + row.name
-			}
-			t.Run(name, func(t *testing.T) {
-				appliedAckCase18525(t, batch, row.breakBinding, row.newerRequest, row.want)
-			})
-		}
+	// Single path only. A one-RG batch never reaches the wire — SendFailoverBatch
+	// and RequestPeerFailoverBatch collapse it to the single path — so the
+	// batch path is pinned with a REAL batch in
+	// TestTwoRGBatchAppliedAckNeedsEveryMemberHeld18525 (review round 4).
+	for _, row := range rows {
+		t.Run("single/"+row.name, func(t *testing.T) {
+			appliedAckCase18525(t, false, row.breakBinding, row.newerRequest, row.want)
+		})
 	}
 }
 
@@ -613,5 +611,121 @@ func appliedAckCase18525(t *testing.T, batch, breakBinding, newerRequest bool, w
 	}
 	if breakBinding && !owner.IsLocalPrimary(2) {
 		t.Fatal("the refused transfer must leave the rescued owner primary")
+	}
+	owner.mu.RLock()
+	leaseReq, leased := owner.remoteTransferOutLeaseReqID[2]
+	owner.mu.RUnlock()
+	switch {
+	case breakBinding && leased:
+		// The refusal releases the refused request's lease (reqID-bound
+		// abort); left armed, it would later "restore" an owner that is
+		// already primary.
+		t.Fatalf("the refused request's lease is still armed (req_id %d)", leaseReq)
+	case newerRequest && (!leased || leaseReq != 18526):
+		t.Fatalf("the refusal released the NEWER request's lease (leased=%v req_id=%d)", leased, leaseReq)
+	}
+}
+
+// Review of #18525 round 4 (finding 3, wire seat; shape contributed by that
+// seat): the batch rows above used a ONE-RG batch, which production never
+// sends, so the per-member conjunction in RemoteTransferOutStillHeld and the
+// batch restore (OnRemoteFailoverAbortBatch) were unpinned — judging only the
+// first member re-opened the two-primary case for batches. A real batch
+// {2,3}: during the slow actuation the binding breaks and the 2s rescue
+// re-promotes only RG 3 (the requester advertises its hold for RG 3 alone).
+// The batch "applied" must be refused, and the refusal's restore must leave
+// the owner primary for BOTH members. RED with the check truncated to the
+// first member, and with the batch-abort branch disabled.
+func TestTwoRGBatchAppliedAckNeedsEveryMemberHeld18525(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		rescue bool
+		want   uint8
+	}{
+		{"every member still held", false, failoverAckApplied},
+		{"second member rescued", true, failoverAckFailed},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			owner := NewManager(1, 1)
+			owner.UpdateConfig(makeConfig(
+				makeRG(2, false, map[int]int{0: 100, 1: 200}),
+				makeRG(3, false, map[int]int{0: 100, 1: 200}),
+			))
+			owner.SetFakePeerSyncSourceForTesting(true, 0, true, true)
+			owner.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1, Groups: []HeartbeatGroup{
+				{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondary)},
+				{GroupID: 3, Priority: 100, Weight: 255, State: uint8(StateSecondary)},
+			}})
+			owner.mu.Lock()
+			for _, id := range []int{2, 3} {
+				owner.groups[id].Ready = true
+				owner.groups[id].ReadySince = time.Now().Add(-time.Hour)
+				owner.groups[id].ReadinessReasons = nil
+			}
+			owner.mu.Unlock()
+			owner.runElection()
+			if !owner.IsLocalPrimary(2) || !owner.IsLocalPrimary(3) {
+				t.Fatal("fixture: owner must start primary for both")
+			}
+			ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+			cc := &captureConn{}
+			ss.mu.Lock()
+			ss.conn0 = cc
+			ss.mu.Unlock()
+			ss.OnRemoteFailoverBatch = func(rgs []int, reqID uint64) error {
+				if _, err := owner.ManualFailoverBatch(rgs); err != nil {
+					return err
+				}
+				owner.ArmRemoteTransferOutLease(rgs, reqID)
+				return nil
+			}
+			ss.WaitFailoverAppliedBatch = func([]int, uint64) error {
+				if !row.rescue {
+					return nil
+				}
+				// Binding breaks; >2s pass; the requester still advertises its
+				// pre-request hold for RG 3 only.
+				owner.SetFakePeerSyncSourceForTesting(true, 0, true, true)
+				owner.mu.Lock()
+				for _, id := range []int{2, 3} {
+					owner.groups[id].ManualFailoverAt = owner.groups[id].ManualFailoverAt.Add(-3 * time.Second)
+				}
+				owner.mu.Unlock()
+				owner.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1, Groups: []HeartbeatGroup{
+					{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondary)},
+					{GroupID: 3, Priority: 100, Weight: 255, State: uint8(StateSecondaryHold)},
+				}})
+				if !owner.IsLocalPrimary(3) || owner.IsLocalPrimary(2) {
+					t.Fatalf("fixture: want RG3 rescued (primary) and RG2 still held: rg2=%v rg3=%v",
+						owner.IsLocalPrimary(2), owner.IsLocalPrimary(3))
+				}
+				return nil
+			}
+			ss.OnRemoteFailoverAbort = owner.AbortRemoteTransferOut
+			ss.OnRemoteFailoverAbortBatch = owner.AbortRemoteTransferOutBatch
+			ss.TransferOutStillHeld = owner.RemoteTransferOutStillHeld
+
+			ss.handleRemoteFailoverBatch(cc, []int{2, 3}, 18525)
+			var status []uint8
+			for _, f := range cc.frames() {
+				if f.msgType != syncMsgFailoverBatchAck {
+					continue
+				}
+				if _, st, reqID, _, err := decodeFailoverBatchAckPayload(f.payload); err == nil && reqID == 18525 {
+					status = append(status, st)
+				}
+			}
+			if len(status) != 1 || status[0] != row.want {
+				t.Fatalf("batch ack statuses %v, want [%d]: with RG3 primary again on the owner, an "+
+					"\"applied\" promotes the requester beside it (review of #18525 round 4)", status, row.want)
+			}
+			if row.rescue && (!owner.IsLocalPrimary(2) || !owner.IsLocalPrimary(3)) {
+				t.Fatalf("after the refused batch the owner must be primary for both members "+
+					"(rg2=%v rg3=%v): the still-held member was not restored", owner.IsLocalPrimary(2), owner.IsLocalPrimary(3))
+			}
+			if !row.rescue && (owner.IsLocalPrimary(2) || owner.IsLocalPrimary(3)) {
+				t.Fatal("an acknowledged batch must leave both members held on the owner")
+			}
+		})
 	}
 }

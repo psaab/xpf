@@ -889,8 +889,9 @@ func (r *drainRig18525) release(t *testing.T) {
 // trusted: writers skip the connection, a writer's failed write does not tear
 // it down, the slot is redialable, and the drained frames earn no peer
 // liveness. When the queue is empty the loop's own ECONNRESET ends it. This is
-// the peer that does NOT redial — stopped or crashed;
-// TestRedialEndsThePeerCloseDrain18525 is the live peer.
+// the peer that does not come back before the drain completes — stopped for
+// good, or a crash whose restart is slower than the drain;
+// TestRedialEndsThePeerCloseDrain18525 is the peer that does.
 //
 // The handler is NOT stuck (its stuck bound is a minute away), so this is the
 // progressing case; TestPeerResetWhileReceiveLoopStalledTearsDown18521 keeps
@@ -1001,13 +1002,18 @@ func TestPeerFinNeverTearsDownAStuckDrain18525(t *testing.T) {
 	})
 	clock.Add(int64(time.Hour)) // the gated handler is now stuck for an hour
 	from := ticks.Load()
-	if !waitFor18521(t, 10*time.Second, func() bool { return ticks.Load() >= from+3 }) {
-		t.Fatal("fixture: the watchdog stopped ticking")
+	installed := func() bool {
+		r.ss.mu.Lock()
+		defer r.ss.mu.Unlock()
+		return r.ss.conn0 == r.ac
 	}
-	r.ss.mu.Lock()
-	installed := r.ss.conn0 == r.ac
-	r.ss.mu.Unlock()
-	if !installed {
+	// Three whole evaluations, or the defect itself: a teardown ends the
+	// watchdog, so its ticks stop, and the slot assertion below must be what
+	// reports it (review of #18525 round 4), not a fixture timeout.
+	if !waitFor18521(t, 10*time.Second, func() bool { return ticks.Load() >= from+3 || !installed() }) {
+		t.Fatal("fixture: the watchdog stopped ticking with the connection still installed")
+	}
+	if !installed() {
 		t.Fatalf("a FIN'd connection was torn down under a stuck handler, discarding the backlog "+
 			"the peer flushed before closing:\n%s", r.logs.String())
 	}
@@ -1023,9 +1029,11 @@ func TestPeerFinNeverTearsDownAStuckDrain18525(t *testing.T) {
 // it (or this node's dial loop) redials within a second or two, long before a
 // slow loop gets through its backlog. The redial retires the drained
 // connection (retirePeerClosedSlot) and what was still queued behind it,
-// including a failover_abort, is discarded: the cold-prime bulk re-sends the
-// sessions, the hold binding falls back to the 2s rescue, and the overdue
-// re-push recovers a config ACK. This cell pins that scope, so a claim that
+// including a failover_abort, is discarded. On a single fabric the cold-prime
+// bulk re-sends the sessions (the retirement is a full disconnect); on a dual
+// fabric nothing re-sends the discarded deltas unless a bulk is still owed —
+// the loss of any partial fabric drop. The hold binding falls back to the 2s
+// rescue, and the overdue re-push recovers a config ACK. This cell pins that scope, so a claim that
 // the drain delivers queued control frames to a LIVE peer cannot creep back.
 func TestRedialEndsThePeerCloseDrain18525(t *testing.T) {
 	r := newDrainRig18525(t, func(peer *net.TCPConn) {
@@ -1262,6 +1270,109 @@ func TestPeerEventsRunInDispatchOrder18525(t *testing.T) {
 	select {
 	case <-connectedEarly:
 		t.Fatal("OnPeerConnected ran before OnPeerDisconnected finished")
+	default:
+	}
+}
+
+// Review of #18525 round 4 (finding 2, both seats; cell contributed by the
+// wire/test seat): TestPeerEventsRunInDispatchOrder18525 pins the helper, and
+// every production call site could revert to a bare goroutine with every cell
+// green. This drives the ORDER through the call sites a single-fabric redial
+// actually takes: connection A installed through handleNewConnection, the peer
+// closes it (the watchdog's mark), redial B through handleNewConnection. B's
+// install retires A through handleDisconnect — a full disconnect, dispatching
+// OnPeerDisconnected (sync_conn.go, handleDisconnect) — and B's cold-prime
+// dispatch then fires OnPeerConnected (handleNewConnection). The disconnect
+// callback is held; B's connect callback must not run before it returns. RED
+// with either call site reverted to a bare `go fn()`. The 300ms window only
+// gives the misordered callback its chance; the correct dispatcher never takes
+// it however long the window is.
+func TestRedialCallbacksRunInOrderThroughCallSites18525(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() { _, _ = io.Copy(io.Discard, c); c.Close() }()
+		}
+	}()
+	dial := func() net.Conn {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	ss := NewSessionSync(":0", ln.Addr().String(), nil)
+	ss.readDeadline = time.Minute
+	release := make(chan struct{})
+	var disconnected atomic.Bool
+	var connects atomic.Int64
+	connectedEarly := make(chan struct{}, 4)
+	secondConnect := make(chan struct{}, 1)
+	ss.OnPeerDisconnected = func() {
+		<-release
+		disconnected.Store(true)
+	}
+	ss.OnPeerConnected = func() {
+		n := connects.Add(1)
+		if n >= 2 {
+			if !disconnected.Load() {
+				connectedEarly <- struct{}{}
+			}
+			secondConnect <- struct{}{}
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		cancel()
+		ss.mu.Lock()
+		for _, c := range []net.Conn{ss.conn0, ss.conn1} {
+			if c != nil {
+				c.Close()
+			}
+		}
+		ss.mu.Unlock()
+		ss.wg.Wait()
+	}()
+
+	ss.handleNewConnection(ctx, 0, dial(), true)
+	ss.mu.Lock()
+	a := ss.conn0
+	ss.mu.Unlock()
+	ac, ok := a.(*authConn)
+	if !ok {
+		t.Fatalf("fixture: conn0 is %T", a)
+	}
+	ac.diag.peerClosed.Store(true) // the watchdog's mark: the peer closed A
+	ss.handleNewConnection(ctx, 0, dial(), true)
+
+	select {
+	case <-connectedEarly:
+		t.Fatal("the redial's OnPeerConnected ran before the retirement's OnPeerDisconnected " +
+			"returned: the daemon is left believing the peer is down while it is connected")
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-secondConnect:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("fixture: the redial's OnPeerConnected never ran (connects=%d)", connects.Load())
+	}
+	select {
+	case <-connectedEarly:
+		t.Fatal("the redial's OnPeerConnected ran before OnPeerDisconnected finished")
 	default:
 	}
 }
