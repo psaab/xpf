@@ -134,6 +134,10 @@ mod shared_replica_hold_17683_tests;
 #[cfg(test)]
 #[path = "probe_policy_17058_tests.rs"]
 mod probe_policy_17058_tests;
+// #18520: SYN on worker A + SYN-ACK on worker B must establish both tables.
+#[cfg(test)]
+#[path = "cross_worker_handshake_18520_tests.rs"]
+mod cross_worker_handshake_18520_tests;
 
 // #6600: the coordinator's pre-publish NAT reservation resolves the synced zone
 // pair through the SAME helper the worker-side upsert uses, so the two cannot

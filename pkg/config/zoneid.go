@@ -40,12 +40,16 @@ const ZoneIDReservedMin uint32 = 0xFFFFFFFE // mirrors Rust ZONE_ID_RESERVED_MIN
 //
 // Session/event records still carry zone ids in u16 fields on the
 // inter-node and daemon↔helper wires (a frozen ABI). Values above
-// u16::MAX therefore cannot round-trip on those records; affected zones'
-// sessions lose exact zone attribution on those paths (they resolve via
-// the surviving-name fallback / "unknown zone") instead of merging with
-// another zone — fail-closed for policy (the dataplane evaluates the
-// full u32 id) and never a silent zone merge. Widening those wire
-// fields is a separate flag-day change.
+// u16::MAX therefore do not round-trip on those records. The HA session
+// import recovers the full id by matching the low 16 bits against the
+// published zones (#18515). Two zones sharing low 16 bits are ambiguous
+// and import an id no zone carries (fail-closed: the session is foreign
+// for every arrival, never merged into another zone). A zone whose id has
+// low 16 bits 0 cannot be carried at all (0 is the wire's "no zone"). The
+// match sees only the receiver's zones, so a zone that exists only on the
+// sender can be attributed to a local zone sharing its low bits. The other
+// u16 consumers (show and flow-export paths) still alias zones that share
+// low 16 bits. Widening those wire fields is a separate flag-day change.
 //
 // 0 is never returned: id 0 means "unassigned / unknown zone" across the
 // dataplane.

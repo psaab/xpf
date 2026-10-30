@@ -327,6 +327,16 @@ const TCP_CLOSING_TIMEOUT_NS: u64 = 30_000_000_000;
 /// posture of Junos and is well under Linux conntrack's CLOSE timeout while
 /// still tolerating a stray reordered segment after the RST.
 const TCP_RST_TIMEOUT_NS: u64 = 2_000_000_000;
+#[cfg(test)]
+pub(crate) const TCP_RST_TIMEOUT_NS_FOR_TEST: u64 = TCP_RST_TIMEOUT_NS;
+#[cfg(test)]
+thread_local! {
+    /// #18520 test instrument: `served_here` stores made by packet hits on
+    /// this thread. A hit stores only when the bit is clear, so a row is
+    /// written once, not per packet.
+    pub(crate) static SERVED_HERE_STORES_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 const DEFAULT_UDP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 const DEFAULT_ICMP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 /// #16486: Junos protocol-based default timeout table (Security 10.2,
@@ -758,6 +768,22 @@ impl TcpHandshakeState {
             _ => None,
         }
     }
+
+    /// #16223/#18520: the per-incarnation monotonic order of handshake
+    /// wires. Unknown/legacy (0) ranks as Established, matching its import
+    /// meaning. The ONE formula for every "never regress a same-incarnation
+    /// stage" merge: the shared-map publish choke point
+    /// (`publish_shared_session`, its forward-wire alias twin) and the
+    /// worker import (`upsert_synced_with_origin`).
+    #[inline]
+    pub(crate) fn stage_rank(wire: u8) -> u8 {
+        match Self::from_wire(wire) {
+            Some(Self::Opening) => 1,
+            Some(Self::HandshakePending) => 2,
+            Some(Self::SynAckFirstPending) => 3,
+            Some(Self::Established) | None => 4,
+        }
+    }
 }
 
 impl SessionEntry {
@@ -1000,6 +1026,18 @@ macro_rules! debug_log {
 mod expire;
 mod install;
 mod lookup;
+// #18520: cross-worker TCP handshake relay (SYN on one worker, SYN-ACK on
+// another). Producers queue into the table's bounded outbox; the worker loop
+// fans it out to sibling command queues once per pass.
+mod handshake_relay;
+pub(crate) use handshake_relay::HandshakeRelay;
+// Only the cross-worker tests name the stage (and the per-thread drop
+// mirror) outside this module.
+#[cfg(test)]
+pub(crate) use handshake_relay::{
+    HANDSHAKE_RELAY_OUTBOX_CAP as HANDSHAKE_RELAY_OUTBOX_CAP_FOR_TEST, HandshakeRelayStage,
+    RELAY_CLOSE_FIN_FORWARD, RELAY_CLOSE_FIN_REVERSE, handshake_relay_outbox_drops_this_thread_for_test,
+};
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
 pub(crate) use lookup::{ExportWalkOutcome, ForwardNatMatchLookup, SeqVerdict};
@@ -1280,6 +1318,20 @@ struct SessionEntry {
     /// prevents a retransmitted SYN-ACK in the installing direction from
     /// clearing `handshake_pending`.
     syn_ack_first: bool,
+    /// #18520: a sibling worker's handshake relay advanced this half (the
+    /// SYN-ACK or the completion was observed on another worker's table).
+    /// Marks the pair as split across workers so this table's own completion
+    /// is relayed back; never synced, never read on the packet path.
+    handshake_relayed: bool,
+    /// #18520: a packet hit on THIS table admitted this half (slow-path Owner
+    /// replay or flow-cache probe). The relay receiver's "serves here" test
+    /// for a replica. A flag, not a timestamp: within one worker-loop pass
+    /// the packet clock (`loop_now_ns`) is sampled BEFORE
+    /// `apply_worker_commands` stamps a replica's `created_ns`, so
+    /// `last_seen > created` is false for a replica imported and hit in the
+    /// same pass. Preserved across a same-incarnation re-import; never
+    /// synced.
+    served_here: bool,
     /// #10888 carries this marker as the distinct SynAckFirstPending wire state.
     /// #965: absolute tick in the ordinary expiry wheel. Updated when a
     /// non-held deadline changes; while held, it is the horizon recheck tick.
@@ -1986,8 +2038,16 @@ pub(crate) struct SessionTable {
     demoted_owner_rgs: FxHashSet<i32>,
     deltas: VecDeque<SessionDelta>,
     /// HA transition withheld by a deferring flow-cache probe until the
-    /// packet survives output-filter/policer admission.
-    pending_probe_state_updates: Vec<(SessionKey, u8, u8)>,
+    /// packet survives output-filter/policer admission:
+    /// `(admission_key, matched_key, class_before, handshake_before)`.
+    /// #18520: keyed for admission/rollback by the PROBED packet's canonical
+    /// key, which is what `emit_probe_hit_state_update` /
+    /// `rollback_dropped_probe_hit` resolve. A reverse-hit completion through
+    /// the #16223 companion arm transitions the FORWARD key (`matched_key`),
+    /// so keying by `matched_key` alone meant the reverse packet's admission
+    /// never published it (no HA Update, no handshake relay) and its rollback
+    /// never discarded it.
+    pending_probe_state_updates: Vec<(SessionKey, SessionKey, u8, u8)>,
     /// #15947 fold: exact pre-probe snapshots for deferring probes,
     /// held only until the cached verdict admits or drops the packet.
     pending_probe_undo: Vec<ProbeUndo>,
@@ -1995,8 +2055,15 @@ pub(crate) struct SessionTable {
     /// handshake STAGE TRANSITION into Established — the only cache
     /// hits allowed to restamp the shared maps' packet-count
     /// evidence. Recorded in `probe_hit_inner` beside the deferred
-    /// Update; consumed by `take_probe_stage_transition`.
-    pending_probe_stage_transitions: Vec<SessionKey>,
+    /// Update; consumed by `take_probe_stage_transition`. #18520: keyed
+    /// by the probed packet's canonical (admission) key, like the
+    /// deferred Update above — a forward key recorded by a reverse hit
+    /// was never taken and accumulated for the life of the worker.
+    /// `(admission_key, forward_key, forward_nat)`: the FORWARD pair the
+    /// caller restamps — a reverse-hit completion must not restamp the
+    /// shared maps keyed on the reverse tuple (that inserted a forward-wire
+    /// alias cloned from the REVERSE row).
+    pending_probe_stage_transitions: Vec<(SessionKey, SessionKey, crate::nat::NatDecision)>,
     last_gc_ns: u64,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
@@ -2259,6 +2326,17 @@ pub(crate) struct SessionTable {
     /// attacker-keyed side tables; entries are dropped with their
     /// session via `remove_entry`. Node-local, never synced.
     node_served_stamps: SeededKeyMap<(u8, u64)>,
+    /// #18520: handshake transitions this worker observed on a pair split
+    /// across workers, awaiting the loop-pass fan-out to sibling command
+    /// queues (`session_glue::fan_out_handshake_relays`). Bounded by
+    /// `HANDSHAKE_RELAY_OUTBOX_CAP` (drop-newest, counted in
+    /// `HANDSHAKE_RELAY_OUTBOX_DROPS`); the drain keeps the allocation, so
+    /// steady state never allocates.
+    handshake_relay_outbox: Vec<HandshakeRelay>,
+    /// #18520 test instrument: calls into the #16223 evidence helpers, so a
+    /// cell can prove the established steady-state hit never reaches them.
+    #[cfg(test)]
+    handshake_progress_probes: AtomicU64,
     /// #16217 (ct-slice HA emit): per-forward-key emit marks for the
     /// ct-slice stage/count Update vehicle. One entry per forward row
     /// this worker's ct-slice has collected; bounded by the forward
@@ -2443,6 +2521,9 @@ impl SessionTable {
             // #16223: node-served evidence stamps share the seeded
             // attacker-keyed placement (tuple-keyed, cross-worker read).
             node_served_stamps: HashMap::with_hasher(state.clone()),
+            handshake_relay_outbox: Vec::with_capacity(16),
+            #[cfg(test)]
+            handshake_progress_probes: AtomicU64::new(0),
             ct_slice_emit_marks: HashMap::with_hasher(state),
             // #4915: monotonic session-id counter starts at 1 (0 = "unknown"
             // sentinel on the wire); the node/worker namespace defaults to 0
@@ -3840,6 +3921,13 @@ impl SessionTable {
             self.lookup_miss_key_mismatch.load(AtomicOrdering::Relaxed),
         )
     }
+    /// #18520 test instrument: cumulative calls into
+    /// `cache_hit_handshake_progress` + `node_served_evidence`.
+    #[cfg(test)]
+    pub(crate) fn handshake_progress_probe_count_for_test(&self) -> u64 {
+        self.handshake_progress_probes
+            .load(AtomicOrdering::Relaxed)
+    }
     #[cfg(test)]
     pub(crate) fn expiry_key_index_probe_count_for_test(&self) -> u64 {
         self.expiry_key_index_probes
@@ -4193,15 +4281,15 @@ impl SessionTable {
         let pending_matches = self
             .pending_probe_state_updates
             .iter()
-            .any(|(matched_key, _, _)| matched_key == &canonical);
+            .any(|(admission_key, _, _, _)| admission_key == &canonical);
         if pending_matches {
             let pending = std::mem::take(&mut self.pending_probe_state_updates);
             let mut retained = Vec::with_capacity(pending.len());
-            for (matched_key, class_before, handshake_before) in pending {
-                if matched_key == canonical {
+            for (admission_key, matched_key, class_before, handshake_before) in pending {
+                if admission_key == canonical {
                     self.emit_session_state_update(&matched_key, class_before, handshake_before);
                 } else {
-                    retained.push((matched_key, class_before, handshake_before));
+                    retained.push((admission_key, matched_key, class_before, handshake_before));
                 }
             }
             self.pending_probe_state_updates = retained;
@@ -4249,9 +4337,9 @@ impl SessionTable {
         let had_deferred = self
             .pending_probe_state_updates
             .iter()
-            .any(|(matched_key, _, _)| matched_key == &canonical);
+            .any(|(admission_key, _, _, _)| admission_key == &canonical);
         self.pending_probe_state_updates
-            .retain(|(matched_key, _, _)| matched_key != &canonical);
+            .retain(|(admission_key, _, _, _)| admission_key != &canonical);
         let Some(pos) = self
             .pending_probe_undo
             .iter()
@@ -4306,7 +4394,7 @@ impl SessionTable {
         // created). Pre-fix both survived the rollback, so a dropped
         // completing ACK still advanced node-level evidence.
         self.pending_probe_stage_transitions
-            .retain(|k| k != &undo.canonical_key);
+            .retain(|(k, _, _)| k != &undo.canonical_key);
         for slot in undo.stamp_snapshots.iter().take(undo.stamp_snapshot_len) {
             let Some((stamp_key, prior)) = slot else {
                 continue;
@@ -4323,22 +4411,44 @@ impl SessionTable {
         had_deferred
     }
 
-    /// #16217 (GLM B1): did the deferred probe completion for `key`
-    /// transition the handshake stage into Established? Consumes the
-    /// record. The flow-cache hit path restamps shared-map evidence
-    /// ONLY when this returns true — a steady-state established hit
-    /// (no transition) must never take the shared-map locks.
+    /// Test view of [`Self::take_probe_stage_transition_forward`] as a flag.
+    #[cfg(test)]
     pub fn take_probe_stage_transition(&mut self, key: &SessionKey) -> bool {
-        if let Some(pos) = self
+        self.take_probe_stage_transition_forward(key).is_some()
+    }
+
+    /// #16217 (GLM B1): did the deferred probe completion admitted under
+    /// `key` transition the handshake stage into Established? Consumes the
+    /// record. The flow-cache hit path restamps shared-map evidence ONLY
+    /// when this returns `Some` — a steady-state established hit (no
+    /// transition) must never take the shared-map locks.
+    ///
+    /// #18520: returns the FORWARD pair (canonical forward key + its NAT)
+    /// the transition completed, which is what those restamps are keyed
+    /// on. A reverse cache hit can complete the pair (#16223 companion arm,
+    /// SYN-ACK-first reverse ACK), and restamping on the reverse tuple wrote
+    /// a forward-wire alias cloned from the REVERSE shared row.
+    pub fn take_probe_stage_transition_forward(
+        &mut self,
+        key: &SessionKey,
+    ) -> Option<(SessionKey, crate::nat::NatDecision)> {
+        // Steady state: nothing pending, no key resolution at all.
+        if self.pending_probe_stage_transitions.is_empty() {
+            return None;
+        }
+        // #18520: the record is keyed by the probed packet's canonical key
+        // (see `pending_probe_stage_transitions`); resolve a translated
+        // alias the same way the admit/rollback calls do.
+        let canonical = self
+            .revalidation_record(key)
+            .map(|record| record.key.clone())
+            .unwrap_or_else(|| key.clone());
+        let pos = self
             .pending_probe_stage_transitions
             .iter()
-            .position(|k| k == key)
-        {
-            self.pending_probe_stage_transitions.remove(pos);
-            true
-        } else {
-            false
-        }
+            .position(|(k, _, _)| *k == canonical)?;
+        let (_, forward_key, forward_nat) = self.pending_probe_stage_transitions.remove(pos);
+        Some((forward_key, forward_nat))
     }
 
     fn probe_hit_inner(
@@ -4472,6 +4582,15 @@ impl SessionTable {
                     // check after the borrow instead of refusing.
                     companion_crossed = true;
                 } else {
+                // #18520: a live cache hit on this table. Stored only on
+                // change: a steady-state hit on a reverse row is otherwise
+                // read-only (accounting folds onto the forward row), and an
+                // unconditional store would dirty its line per packet.
+                if !entry.served_here {
+                    entry.served_here = true;
+                    #[cfg(test)]
+                    SERVED_HERE_STORES_FOR_TEST.with(|count| count.set(count.get() + 1));
+                }
                 // #14939 handshake completion (mirrors
                 // `touch_if_stale_with_payload`): not a keepalive refresh,
                 // so it applies even inside the throttle window.
@@ -4503,10 +4622,17 @@ impl SessionTable {
                 // verdict to the companion-aware check after the borrow
                 // (the companion may be the half that observed the
                 // SYN-ACK / completing ACK).
+                // #18520: only a handshake-INCOMPLETE row can carry
+                // progress evidence — `cache_hit_handshake_progress`
+                // refuses an `established && !handshake_pending` hit on
+                // its first check, so arming it for every established
+                // payload packet only paid that refusal's lookup per
+                // packet (the gate `touch_if_stale_with_ack` already had).
                 if completing.is_none()
                     && !entry.closing
                     && matches!(key.protocol, PROTO_TCP)
                     && !is_closing(tcp_flags)
+                    && (!entry.established || entry.handshake_pending)
                     && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
                 {
                     companion_progress = true;
@@ -4566,48 +4692,17 @@ impl SessionTable {
                 completing = Some((matched_key, nat));
             }
         }
-        // #16223 (second failure conjunct): the fused probe returns
-        // `false` once EITHER half idle-crosses (`age >
-        // expires_after`), and the GC companion probe refuses a
-        // never-established companion — so a pair whose hits were all
-        // throttled (`age < expires_after/4` re-stamps nothing) or
-        // whose serving worker never re-stamped the replica rows
-        // (live `last_seen == created` on every row) is reaped at
-        // 20 s while both nodes serve it. When this hit proves
-        // handshake progress but the classic completion did not land
-        // (e.g. the pair is SYN-ACK-first on the companion), keep the
-        // live pair alive: re-stamp BOTH halves on their current
-        // windows so the next progress hit can complete them instead
-        // of the GC reaping them mid-flow. Bounded: the re-stamp is
-        // THIS hit's real timestamp, so a flow that goes quiet still
-        // reaps one window after its last served packet.
-        if completing.is_none() && companion_progress {
-            if self.cache_hit_handshake_progress(key).is_some() {
-                let companion_key = {
-                    let hit_nat = self.entry_by_key(key).map(|e| e.decision.nat);
-                    hit_nat.map(|nat| reverse_session_key(key, nat))
-                };
-                let mut touched = false;
-                if let Some(entry) = self.entry_by_key_mut(key) {
-                    entry.last_seen_ns = now_ns;
-                    touched = true;
-                }
-                if let Some(companion_key) = companion_key {
-                    if companion_key != *key {
-                        if let Some(entry) = self.entry_by_key_mut(&companion_key) {
-                            entry.last_seen_ns = now_ns;
-                            touched = true;
-                        }
-                        if touched {
-                            self.push_to_wheel(&companion_key, now_ns);
-                        }
-                    }
-                }
-                if touched {
-                    self.push_to_wheel(key, now_ns);
-                }
-            }
-        }
+        // #18520: the former #16223 "second failure conjunct" arm here
+        // re-ran `cache_hit_handshake_progress(key)` when the call just
+        // above had returned `None`, to re-stamp both halves of a
+        // progressed-but-uncompleted pair. The helper is a pure `&self`
+        // read and nothing mutates the table between the two calls, so
+        // that second call could only return `None` again: the arm was
+        // unreachable and cost a second evidence scan on every payload
+        // packet of a non-established pair. Removed; live split pairs are
+        // instead completed by the cross-worker handshake relay
+        // (`handshake_relay.rs`) and retained by the GC
+        // `opening_companion_keeps_alive` arm.
         if let Some((matched_key, nat)) = completing {
             let timeouts = self.timeouts;
             let opening_override_ns = self
@@ -4657,19 +4752,28 @@ impl SessionTable {
                 // older flow's unadmitted transition. Bound the queue so a
                 // sustained dropped-ACK stream cannot grow it without
                 // limit; 64 covers a full poll batch of completions.
+                // #18520: the admission key is the probed packet's
+                // canonical key (what the admit/rollback calls resolve),
+                // which differs from `matched_key` when a reverse hit
+                // completes the forward half via the companion arm.
+                let admission_key = probe_undo
+                    .as_ref()
+                    .map(|undo| undo.canonical_key.clone())
+                    .unwrap_or_else(|| key.clone());
                 self.pending_probe_state_updates
-                    .retain(|(old_key, _, _)| old_key != &matched_key);
+                    .retain(|(old_admission, _, _, _)| old_admission != &admission_key);
                 if self.pending_probe_state_updates.len() >= 64 {
                     // Overflow must not silently lose an HA transition:
                     // publish the evicted oldest Update immediately and
                     // latch delta-loss so the worker forces a full resync
                     // (the same recovery used for delta-ring overflow).
-                    let (old_key, old_class, old_handshake) =
+                    let (_, old_key, old_class, old_handshake) =
                         self.pending_probe_state_updates.remove(0);
                     self.emit_session_state_update(&old_key, old_class, old_handshake);
                     self.set_delta_loss();
                 }
                 self.pending_probe_state_updates.push((
+                    admission_key.clone(),
                     matched_key.clone(),
                     close_class_before,
                     handshake_state_before,
@@ -4683,9 +4787,24 @@ impl SessionTable {
                 if !self
                     .pending_probe_stage_transitions
                     .iter()
-                    .any(|k| k == &matched_key)
+                    .any(|(k, _, _)| k == &admission_key)
                 {
-                    self.pending_probe_stage_transitions.push(matched_key.clone());
+                    let (stage_forward_key, stage_forward_nat) = match self.entry_by_key(&matched_key) {
+                        Some(entry) if entry.metadata.is_reverse => {
+                            let forward_key = reverse_session_key(&matched_key, nat);
+                            let forward_nat = self
+                                .entry_by_key(&forward_key)
+                                .map(|forward| forward.decision.nat)
+                                .unwrap_or(nat);
+                            (forward_key, forward_nat)
+                        }
+                        _ => (matched_key.clone(), nat),
+                    };
+                    self.pending_probe_stage_transitions.push((
+                        admission_key,
+                        stage_forward_key,
+                        stage_forward_nat,
+                    ));
                 }
             }
             self.push_to_wheel(&matched_key, now_ns);
@@ -5279,6 +5398,13 @@ impl SessionTable {
         true
     }
 
+    /// #18520: a transition INTO Established on a pair split across
+    /// workers also queues a `Completed` handshake relay for the siblings.
+    /// Every packet-driven completion (slow path, cache-hit probe incl. its
+    /// deferred TX-admission emit, HA-promote refresh) publishes through
+    /// this one choke point, which is why the relay producer lives here.
+    /// The relay consumer never calls it, so a relayed completion is never
+    /// relayed back (nor re-published).
     fn emit_session_state_update_inner(
         &mut self,
         matched_key: &SessionKey,
@@ -5299,6 +5425,14 @@ impl SessionTable {
         } else {
             matched_key.clone()
         };
+        if handshake_state_after == TcpHandshakeState::Established.to_wire()
+            && handshake_state_before != handshake_state_after
+        {
+            self.queue_completion_relay(&forward_key);
+        }
+        if class_after != class_before && class_after != 0 {
+            self.queue_close_relay(&forward_key);
+        }
         let Some(forward) = self.entry_by_key(&forward_key) else {
             return;
         };
@@ -5438,6 +5572,9 @@ impl SessionTable {
     /// `node_served_stamps`. Returns zero evidence when nothing on the
     /// node has promoted/served the tuple.
     pub(crate) fn node_served_evidence(&self, key: &SessionKey) -> NodeServedEvidence {
+        #[cfg(test)]
+        self.handshake_progress_probes
+            .fetch_add(1, AtomicOrdering::Relaxed);
         let mut evidence = NodeServedEvidence::default();
         // Local serving pair, either orientation: an established,
         // non-pending, non-closing forward/reverse entry for the same
@@ -5500,6 +5637,9 @@ impl SessionTable {
         &self,
         hit_key: &SessionKey,
     ) -> Option<(SessionKey, crate::nat::NatDecision)> {
+        #[cfg(test)]
+        self.handshake_progress_probes
+            .fetch_add(1, AtomicOrdering::Relaxed);
         let hit = self.entry_by_key(hit_key)?;
         if hit.closing || (hit.established && !hit.handshake_pending) {
             return None;
@@ -7525,6 +7665,10 @@ mod rst_ack_handshake_14630_tests;
 #[cfg(test)]
 #[path = "handshake_cache_hit_14939_tests.rs"]
 mod handshake_cache_hit_14939_tests;
+// #18520: SessionKey hashes per cached data hit (established vs pure Opening).
+#[cfg(test)]
+#[path = "hash_cost_18520_tests.rs"]
+mod hash_cost_18520_tests;
 
 // #14945: the fused cache-hit probe (`probe_hit`) must be observably
 // identical to the liveness + keepalive + accounting sequence it
