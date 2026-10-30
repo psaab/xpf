@@ -341,7 +341,16 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // pool source port; a local-origin entry already allocated its port on
         // the active path). The reservation is freed by the standard teardown
         // (`release_source_nat_allocation`) on reap or delete-sync.
-        if reserving_origin && !metadata.is_reverse {
+        // #18531: an alias imported from the peer never books the
+        // translation; the canonical row owns it (see
+        // `upsert_synced_session_with_policy`). Local replicas
+        // (`WorkerLocalImport`, `SharedPromote`) keep reserving: they ARE
+        // this node's allocation, whatever their key.
+        if reserving_origin
+            && !metadata.is_reverse
+            && !(entry_origin.is_cluster_synced_origin()
+                && crate::session::is_forward_wire_alias(&key, entry_decision.nat))
+        {
             // #15191: the non-pool domains, from this same generation.
             let synced_static_externals = forwarding.static_nat.external_identities();
             let synced_nptv6_externals = forwarding.nptv6.externals();

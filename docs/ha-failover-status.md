@@ -476,12 +476,34 @@ The rules now:
   withdrawn translation. `SessionDomain::delete_synced` now resolves a
   peer delete of a key this node does not hold through the forward-wire
   index to the canonical row it names, and deletes that pair under the same
-  mode (so the #9714 locally-owned guard and the #10512 identity check still
-  apply). A delete of a key this node holds is never widened, so Go's #6368
-  stale-epoch rollback of an install that landed deletes only that key.
-  (e760f5eef5 first had the owner close the canonical tuple, recovered from
-  its reverse row; that cannot work for the production alias-only owner,
-  whose reverse was synthesized from the alias, and was removed.)
+  mode. The #9714 locally-owned guard applies; the #10512 identity check
+  applies only to a SCOPED delete. An ordinary peer Close arrives unscoped,
+  so it removes whichever row holds that translation now, including a later
+  flow that reuses the translated tuple (pinned by
+  `widened_peer_delete_identity_and_outcome_18531`). A refusal of the
+  canonical delete (gate busy, mirror write, locally owned, identity) is
+  what the caller sees, so the daemon keeps and retries its rows. A delete
+  of a key this node holds is never widened, so Go's #6368 stale-epoch
+  rollback of an install that landed deletes only that key. Gap: with a
+  routing instance configured, a bare (domainless) delete of a key held in
+  no domain stops in the handler's ambiguity probe before
+  `delete_synced`, so the widening does not run there. (e760f5eef5 first had
+  the owner close the canonical tuple, recovered from its reverse row; that
+  cannot work for the production alias-only owner, whose reverse was
+  synthesized from the alias, and was removed.)
+- **The canonical row always wins the import over its alias.** The import
+  used to let the canonical row and its forward-wire alias compete for ONE
+  translated-tuple reservation, keeping whichever arrived first. When the
+  alias won, the node held the flow only as the alias (diag6: 5 of 8 flows;
+  diag7b: 3 of 8): at the activation its reverse resolved to `LocalDelivery`
+  (handled below), and at the full failback, when the LAN RG moved there
+  too, the original-tuple packets missed and the flow died (diag7b,
+  `LOCAL-ABSENT key=10.0.61.102:<port>` right after fw0 activated RG2). Now
+  an alias never books the translation (coordinator import and worker
+  twin); an alias import is refused while its canonical row is held, so it
+  can never replace that row's reverse with its own; and a canonical import
+  retires a peer-synced alias of the same flow (forward key only). Pinned
+  by `canonical_import_supersedes_its_alias_18531`, both orders, v4/v6.
 - **An alias's reverse is handed to the peer, never to the host.** A reverse
   synthesized from a forward-wire alias takes the alias key's source as the
   client, which is the SNAT address itself: its un-NAT rewrites nothing.
@@ -492,10 +514,22 @@ The rules now:
   activation `RefreshOwnerRGS` logged `old_disp=FabricRedirect
   new_disp=LocalDelivery`). A reverse whose un-NAT names its own wire
   destination (`reverse_un_nat_targets_itself`) now resolves to the fabric
-  redirect toward the peer that holds the canonical row, at synthesis and
-  in the one re-resolution pipeline (`reresolve_stored_session`: session
-  hit, `RefreshOwnerRGS`, `DemoteOwnerRGS`). A fabric-borne reply on such a
-  row is dropped, never bounced. A reverse that un-NATs to a genuinely
+  redirect toward the peer that holds the canonical row: at synthesis from
+  an alias, and in the one re-resolution pipeline (`reresolve_stored_session`:
+  session hit, `RefreshOwnerRGS`, `DemoteOwnerRGS`) only when the target
+  lookup answers `LocalDelivery`. That gate matters: the reverse-synthesis
+  arm also installs a self-targeting row for a reply that arrives already
+  un-NATed (the peer un-NATed it and handed it over the fabric), keyed by
+  the client tuple. Its target is the real client and it must forward; the
+  ungated version dropped every such reply on the LAN node after a FIB
+  generation bump (loss diag8). Pinned by
+  `lan_node_unnatted_fabric_reply_keeps_forwarding_18531`. Without a redirect (a
+  fabric-borne reply, or no fabric) the row resolves to `HAInactive`, so a
+  reply is dropped, never bounced, delivered locally, or forwarded on a raw
+  FIB answer. The match is on NAT shape: an identity translation (the
+  original source is the SNAT address and the port is unchanged) looks the
+  same and is handed to the peer too. The DNAT-only and port-only alias
+  reverses (pre-existing) are not covered; see #18535. A reverse that un-NATs to a genuinely
   local address other than its wire destination is still host-bound and
   still gated. The LAN node's own reverse rows un-NAT to the client and are
   unaffected.
@@ -534,12 +568,22 @@ sends (the Go legs were read, not run). Residuals are tracked in #18535:
 - activation before the connected-RG FIB republish (open);
 - scope-less imports not judged by the owner (open);
 - the reverse-side window above (open, pinned);
-- why the RG-taking node holds only the alias of some flows: its import of
-  the canonical row is refused (`RejectedReserve` in the harness whatever
-  the order; the production cause for which flows is unconfirmed). The
-  alias-only owner now survives the activation and its revocation reaches
-  the LAN node, but it still cannot un-NAT replies itself, so it depends on
-  the peer holding the canonical row (open).
+- why the RG-taking node held only the alias of some flows (fixed: the
+  import race above);
+- DNAT-only and port-only alias reverses, whose un-NAT also targets itself
+  (open, pre-existing);
+- loss cluster, after this fix (0.0.26021, diag9/diag9b), still open:
+  - in the split state (WAN RG on one node, LAN RG on the other) every
+    stream crawls at about 0.1 Gbit/s until the LAN RG follows; it was also
+    there before (diag7b);
+  - one of 8 streams died at the full failback, its reverse on the new
+    owner stuck on a missing LAN neighbor (inferred from one trace);
+  - an intermittent crash-takeover death: the server answers the first
+    forwarded packets with RSTs and the close relay retires the flows
+    (diag7b double-failover transition 1; diag9 test-failover transition
+    1; diag8 and diag9b survived);
+  - 6 to 12 s of outage at the double-failover second takeover (peer-loss
+    detection; the flows survive).
 
 ### Never-again gates
 

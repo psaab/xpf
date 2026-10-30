@@ -34,6 +34,8 @@ const LAN_HOST: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
 const WAN_HOST: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 200);
 const SNAT_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 8);
 const SPORT: u16 = 36552;
+/// A port-translated (PAT) source port, distinct from SPORT.
+const PAT_PORT: u16 = 40123;
 const DPORT: u16 = 5211;
 /// Captured fw1 snapshot ifindexes: reth1.0 (LAN) = 5, reth0 (WAN parent)
 /// = 6, reth0.80 = 14, fabric parent ge-7-0-0 = 4.
@@ -260,6 +262,7 @@ struct Outcome {
     /// Each Close delta's key and NAT decision: what the daemon turns into
     /// the peer's delete of that key and its reverse companion.
     closed: Vec<(crate::session::SessionKey, NatDecision)>,
+    ha_inactive: u64,
 }
 
 /// Push one descriptor through the production poll pipeline on binding
@@ -337,6 +340,7 @@ fn drive_at(
         ],
         closes: closed.len(),
         closed,
+        ha_inactive: dbg.ha_inactive,
     }
 }
 
@@ -1113,7 +1117,7 @@ fn reverse_reply_case(served: bool) {
 /// translated forward tuple.
 fn alias_of(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
     let mut alias = entry.clone();
-    alias.key.src_ip = entry.decision.nat.rewrite_src.expect("an SNAT row");
+    alias.key = crate::session::forward_wire_key(&entry.key, entry.decision.nat);
     alias
 }
 
@@ -1135,8 +1139,23 @@ fn import_alias_only_under(
     ha: &BTreeMap<i32, HAGroupRuntime>,
     family: Family,
 ) {
+    import_alias_only_of(sessions, forwarding, ha, &exported_forward(forwarding, family));
+}
+
+/// As `import_alias_only_under`, for the alias of `canonical`.
+fn import_alias_only_of(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    canonical: &SyncedSessionEntry,
+) {
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    let alias = alias_of(&exported_forward(forwarding, family));
+    let family = if canonical.key.src_ip.is_ipv4() {
+        Family::V4
+    } else {
+        Family::V6
+    };
+    let alias = alias_of(canonical);
     let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
         forwarding,
         ha,
@@ -1302,16 +1321,21 @@ fn wan_reply_frame() -> (Vec<u8>, UserspaceDpMeta) {
 }
 
 fn wan_reply_frame_for(family: Family) -> (Vec<u8>, UserspaceDpMeta) {
+    wan_reply_frame_to(family, SPORT)
+}
+
+/// A WAN -> LAN reply addressed to the SNAT address on `dst_port`.
+fn wan_reply_frame_to(family: Family, dst_port: u16) -> (Vec<u8>, UserspaceDpMeta) {
     let (_, wan, snat) = addrs(family);
     let wan_mac = [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01];
     let (frame, mut meta) = match (wan, snat) {
         (IpAddr::V4(w), IpAddr::V4(s)) => {
-            let frame = build_txn_tcp_syn_frame_v4(w, s, DPORT, SPORT, TCP_ACK, wan_mac);
+            let frame = build_txn_tcp_syn_frame_v4(w, s, DPORT, dst_port, TCP_ACK, wan_mac);
             let meta = txn_meta_v4(WAN_UNIT_IFINDEX as u32, TCP_ACK, frame.len() as u16);
             (frame, meta)
         }
         (IpAddr::V6(w), IpAddr::V6(s)) => {
-            let frame = build_txn_tcp_frame_v6(w, s, DPORT, SPORT, TCP_ACK, wan_mac);
+            let frame = build_txn_tcp_frame_v6(w, s, DPORT, dst_port, TCP_ACK, wan_mac);
             let mut meta = txn_meta_v6(WAN_UNIT_IFINDEX as u32, frame.len());
             meta.tcp_flags = TCP_ACK;
             (frame, meta)
@@ -1319,7 +1343,7 @@ fn wan_reply_frame_for(family: Family) -> (Vec<u8>, UserspaceDpMeta) {
         _ => unreachable!("one family"),
     };
     meta.ingress_vlan_id = 80;
-    set_flow(&mut meta, wan, snat, DPORT, SPORT);
+    set_flow(&mut meta, wan, snat, DPORT, dst_port);
     (frame, meta)
 }
 
@@ -1345,12 +1369,23 @@ fn alias_only_owner_reply_is_handed_to_peer_not_host_18531() {
         (1, rg(true, now_secs)),
         (2, rg(false, now_secs)),
     ]);
-    for family in [Family::V4, Family::V6] {
-        for refresh_first in [true, false] {
+    // review (seat F): interface SNAT moves the port when it must
+    // (`rewrite_src_port: Some`), so the alias carries the translated port
+    // too, and the predicate's port conjunct is what matches it. `pat`
+    // covers that shape.
+    for (family, refresh_first, pat) in [Family::V4, Family::V6]
+        .into_iter()
+        .flat_map(|f| [(f, true, false), (f, false, false), (f, true, true), (f, false, true)])
+    {
+        {
             let mut sessions = SessionTable::new();
             sessions.set_forwarding_revalidation_gen(7, 9);
-            import_alias_only(&mut sessions, &window_fwd, family);
-            let alias = alias_of(&exported_forward(&window_fwd, family));
+            let mut canonical = exported_forward(&window_fwd, family);
+            if pat {
+                canonical.decision.nat.rewrite_src_port = Some(PAT_PORT);
+            }
+            import_alias_only_of(&mut sessions, &window_fwd, &window_ha(now_secs), &canonical);
+            let alias = alias_of(&canonical);
             let reverse_key =
                 crate::session::reverse_session_key(&alias.key, alias.decision.nat);
             assert!(
@@ -1375,20 +1410,20 @@ fn alias_only_owner_reply_is_handed_to_peer_not_host_18531() {
                     stored.resolution.disposition,
                     ForwardingDisposition::FabricRedirect,
                     "the activation refresh must hand the alias's reverse to the peer, \
-                     not the host ({family:?})"
+                     not the host ({family:?} pat={pat})"
                 );
             }
-            let (frame, meta) = wan_reply_frame_for(family);
+            let (frame, meta) = wan_reply_frame_to(family, alias.key.src_port);
             let reply = drive(&mut sessions, &owner_fwd, &activated, WAN, &frame, meta, 2);
             assert_eq!(
                 (reply.session_hit, reply.closes, sessions.len()),
                 (1, 0, 2),
-                "the reply must not tear the flow down ({family:?} refresh_first={refresh_first})"
+                "the reply must not tear the flow down ({family:?} refresh_first={refresh_first} pat={pat})"
             );
             assert_eq!(
                 reply.tx,
                 [0, 1, 0],
-                "the reply is handed to the peer over the fabric ({family:?} refresh_first={refresh_first})"
+                "the reply is handed to the peer over the fabric ({family:?} refresh_first={refresh_first} pat={pat})"
             );
         }
     }
@@ -1466,13 +1501,19 @@ fn fabric_reply_on_alias_reverse_is_dropped_not_bounced_18531() {
         ([0, 0, 0], 0, 2),
         "a fabric-borne reply on an alias's reverse is dropped, never bounced or torn down"
     );
+    assert!(
+        reply.ha_inactive >= 1,
+        "the drop is the HA-inactive disposition, not a local delivery"
+    );
 }
 
-/// Control (twin): a reverse whose un-NAT names a GENUINELY local address
-/// other than its wire destination (the reply to a flow whose original
-/// source is this node's own LAN address) is still host-bound, and the
-/// host-inbound gate still denies it and tears the pair down. Only the
-/// un-NAT that rewrites nothing is handed to the peer.
+/// Control (twin): a reverse whose un-NAT names a GENUINELY local endpoint
+/// other than its wire destination is still host-bound, and the host-inbound
+/// gate still denies it and tears the pair down. Only the un-NAT that
+/// rewrites nothing is handed to the peer. Two shapes: the original source
+/// is this node's own LAN address, and (review, port conjunct) the original
+/// source is the SNAT address itself with the port translated, so the
+/// un-NAT keeps the address and changes only the port.
 #[test]
 fn genuine_local_un_nat_reply_is_still_host_gated_18531() {
     let owner_fwd = fw1_owner_forwarding();
@@ -1486,14 +1527,26 @@ fn genuine_local_un_nat_reply_is_still_host_gated_18531() {
         .egress
         .get(&LAN_IFINDEX)
         .expect("fixture: the LAN unit has an egress row");
-    for family in [Family::V4, Family::V6] {
-        let local = match family {
-            Family::V4 => lan_egress.primary_v4.map(IpAddr::V4),
-            Family::V6 => lan_egress.primary_v6.map(IpAddr::V6),
-        }
-        .expect("fixture: the LAN unit has an address");
+    for (family, same_ip_pat) in [
+        (Family::V4, false),
+        (Family::V6, false),
+        (Family::V4, true),
+        (Family::V6, true),
+    ] {
         let mut canonical = exported_forward(&owner_fwd, family);
+        let local = if same_ip_pat {
+            canonical.decision.nat.rewrite_src_port = Some(PAT_PORT);
+            canonical.decision.nat.rewrite_src.expect("an SNAT row")
+        } else {
+            match family {
+                Family::V4 => lan_egress.primary_v4.map(IpAddr::V4),
+                Family::V6 => lan_egress.primary_v6.map(IpAddr::V6),
+            }
+            .expect("fixture: the LAN unit has an address")
+        };
         canonical.key.src_ip = local;
+        let reply_port = crate::session::forward_wire_key(&canonical.key, canonical.decision.nat)
+            .src_port;
         let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
             &owner_fwd,
             &activated,
@@ -1505,7 +1558,7 @@ fn genuine_local_un_nat_reply_is_still_host_gated_18531() {
         assert_eq!(
             reverse.decision.nat.rewrite_dst,
             Some(local),
-            "fixture: the reverse un-NATs to the local LAN address ({family:?})"
+            "fixture: the reverse un-NATs to a local address ({family:?} same_ip_pat={same_ip_pat})"
         );
         let mut sessions = SessionTable::new();
         sessions.set_forwarding_revalidation_gen(7, 9);
@@ -1518,13 +1571,98 @@ fn genuine_local_un_nat_reply_is_still_host_gated_18531() {
                 WorkerCommand::UpsertSynced(reverse),
             ],
         );
-        assert_eq!(sessions.len(), 2, "fixture: pair imported ({family:?})");
-        let (frame, meta) = wan_reply_frame_for(family);
+        assert_eq!(
+            sessions.len(),
+            2,
+            "fixture: pair imported ({family:?} same_ip_pat={same_ip_pat})"
+        );
+        let (frame, meta) = wan_reply_frame_to(family, reply_port);
         let reply = drive(&mut sessions, &owner_fwd, &activated, WAN, &frame, meta, 2);
         assert_eq!(
             (reply.session_hit, reply.tx, reply.closes, sessions.len()),
             (1, [0, 0, 0], 1, 0),
-            "a genuinely host-bound reply is still gated and torn down ({family:?})"
+            "a genuinely host-bound reply is still gated and torn down \
+             ({family:?} same_ip_pat={same_ip_pat})"
+        );
+    }
+}
+
+/// Review (seat E, `is_reverse` conjunct): a FORWARD row keyed by its own
+/// translated tuple is also what a DNAT-to-local flow's wire alias looks
+/// like (its destination is already the local address). It stays
+/// host-bound: the host-inbound gate denies the packet and tears the pair
+/// down. Only a REVERSE whose un-NAT targets itself is handed to the peer.
+#[test]
+fn dnat_to_local_forward_alias_is_still_host_gated_18531() {
+    let owner_fwd = fw1_owner_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let activated = BTreeMap::from([
+        (0, rg(true, now_secs)),
+        (1, rg(true, now_secs)),
+        (2, rg(true, now_secs)),
+    ]);
+    const CLIENT_PORT: u16 = 40400;
+    const SERVICE_PORT: u16 = 6000;
+    for family in [Family::V4, Family::V6] {
+        let (_, wan, local) = addrs(family);
+        let mut alias = exported_forward(&owner_fwd, family);
+        alias.key.src_ip = wan;
+        alias.key.src_port = CLIENT_PORT;
+        alias.key.dst_ip = local;
+        alias.key.dst_port = SERVICE_PORT;
+        alias.decision.nat = NatDecision {
+            rewrite_dst: Some(local),
+            rewrite_dst_port: Some(SERVICE_PORT),
+            ..NatDecision::default()
+        };
+        alias.metadata.ingress_zone = owner_fwd.zone_name_to_id["wan"];
+        alias.metadata.egress_zone = owner_fwd.zone_name_to_id["wan"];
+        alias.metadata.ingress_ifindex = WAN_UNIT_IFINDEX as u32;
+        alias.metadata.ingress_vlan_id = 80;
+        alias.metadata.nat_scope_ifindex = None;
+        alias.source_nat_static = None;
+        assert!(
+            crate::session::is_forward_wire_alias(&alias.key, alias.decision.nat),
+            "fixture: a DNAT-to-local wire alias ({family:?})"
+        );
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(7, 9);
+        apply_commands(
+            &mut sessions,
+            &owner_fwd,
+            &activated,
+            vec![WorkerCommand::UpsertSynced(alias.clone())],
+        );
+        assert!(
+            sessions.entry_with_origin(&alias.key).is_some(),
+            "fixture: the alias is held ({family:?})"
+        );
+        let wan_mac = [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01];
+        let (frame, mut meta) = match (wan, local) {
+            (IpAddr::V4(w), IpAddr::V4(l)) => {
+                let frame =
+                    build_txn_tcp_syn_frame_v4(w, l, CLIENT_PORT, SERVICE_PORT, TCP_ACK, wan_mac);
+                let meta = txn_meta_v4(WAN_UNIT_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+                (frame, meta)
+            }
+            (IpAddr::V6(w), IpAddr::V6(l)) => {
+                let frame =
+                    build_txn_tcp_frame_v6(w, l, CLIENT_PORT, SERVICE_PORT, TCP_ACK, wan_mac);
+                let mut meta = txn_meta_v6(WAN_UNIT_IFINDEX as u32, frame.len());
+                meta.tcp_flags = TCP_ACK;
+                (frame, meta)
+            }
+            _ => unreachable!("one family"),
+        };
+        meta.ingress_vlan_id = 80;
+        set_flow(&mut meta, wan, local, CLIENT_PORT, SERVICE_PORT);
+        // A generation the row was not resolved under, so the hit
+        // re-resolves through the alias-reverse predicate.
+        let hit = drive_at(&mut sessions, &owner_fwd, &activated, WAN, &frame, meta, 8, 2);
+        assert_eq!(
+            (hit.session_hit, hit.tx, hit.closes),
+            (1, [0, 0, 0], 1),
+            "a DNAT-to-local forward alias stays host-gated and is torn down ({family:?})"
         );
     }
 }
@@ -1681,6 +1819,49 @@ fn held_key_peer_delete_is_not_widened_to_canonical_18531() {
     );
 }
 
+/// Review (seat E finding 1, seat F finding 2): the widened delete. A
+/// SCOPED peer delete (Go's #10512 identity) of a translated tuple this node
+/// does not hold refuses the canonical row when the identity differs, and
+/// that refusal is what the caller sees (the named key's own outcome would
+/// hide it). An UNSCOPED delete carries no identity: it removes whichever
+/// row holds that translation now. That is the documented limit, pinned
+/// here so it cannot change silently.
+#[test]
+fn widened_peer_delete_identity_and_outcome_18531() {
+    let lan_fwd = fw1_owner_forwarding();
+    let canonical = exported_forward(&lan_fwd, Family::V4);
+    let alias_key = alias_of(&canonical).key;
+    let coordinator = bare_coordinator(&lan_fwd);
+    assert_eq!(
+        coordinator.upsert_synced_session(canonical.clone()),
+        crate::afxdp::SyncedImportOutcome::Applied,
+        "fixture: canonical imported"
+    );
+    let scoped = crate::afxdp::SyncedDeleteMode::peer_mirror_scoped(canonical.session_id + 1)
+        .expect("a nonzero identity");
+    let refused = coordinator
+        .session_domain()
+        .delete_synced(alias_key.clone(), scoped, false);
+    assert_eq!(
+        refused,
+        crate::afxdp::SyncedDeleteOutcome::RefusedIdentity,
+        "a scoped delete of another incarnation is refused, and the refusal surfaces"
+    );
+    assert!(
+        coordinator.synced_session_contains(&canonical.key),
+        "the canonical row survives a scoped delete of another incarnation"
+    );
+    let _ = coordinator.session_domain().delete_synced(
+        alias_key,
+        crate::afxdp::SyncedDeleteMode::PEER,
+        false,
+    );
+    assert!(
+        !coordinator.synced_session_contains(&canonical.key),
+        "an unscoped delete removes whichever row holds the translation now"
+    );
+}
+
 /// Review N2 (HA seat), a bounded window pinned rather than closed. When RG1
 /// returns to the LAN node with the SNAT rule withdrawn by a commit (config
 /// epoch 8), a WAN reply that arrives before any forward packet judges the
@@ -1778,4 +1959,235 @@ fn rg_return_reply_first_window_closes_at_forward_hit_18531() {
             "after the revocation the reply has no session (demoted={demoted})"
         );
     }
+}
+
+/// Alias-only owners (diag6, diag7b): the canonical row and its forward-wire
+/// alias compete for ONE translated-tuple reservation, and the importer kept
+/// whichever arrived first. Alias first left the node holding only the
+/// alias, whose reverse cannot un-NAT; at the full failback the LAN-side
+/// packets then missed (no original-tuple row) and the flow died. The
+/// canonical row must be held whatever the arrival order, with a reverse
+/// that un-NATs to the client. v4 and v6, both orders; a fresh forwarding
+/// state per case (its allocators are shared by clones).
+#[test]
+fn canonical_import_supersedes_its_alias_18531() {
+    for family in [Family::V4, Family::V6] {
+        for alias_first in [true, false] {
+            let forwarding = rg_taking_node_forwarding();
+            let mut coordinator = bare_coordinator(&forwarding);
+            let _worker_commands = register_worker(&mut coordinator);
+            let canonical = exported_forward(&forwarding, family);
+            let alias = alias_of(&canonical);
+            let order = if alias_first {
+                [alias.clone(), canonical.clone()]
+            } else {
+                [canonical.clone(), alias.clone()]
+            };
+            let outcomes: Vec<_> = order
+                .into_iter()
+                .map(|entry| coordinator.upsert_synced_session(entry))
+                .collect();
+            let canonical_reverse =
+                crate::session::reverse_session_key(&canonical.key, canonical.decision.nat);
+            let reverse_un_nat = coordinator
+                .sessions
+                .synced
+                .lock()
+                .unwrap()
+                .get(&canonical_reverse)
+                .map(|entry| entry.decision.nat.rewrite_dst);
+            assert!(
+                coordinator.synced_session_contains(&canonical.key),
+                "the canonical row must be held whatever the order \
+                 ({family:?} alias_first={alias_first} outcomes={outcomes:?})"
+            );
+            assert_eq!(
+                reverse_un_nat,
+                Some(Some(canonical.key.src_ip)),
+                "the reverse un-NATs to the client ({family:?} alias_first={alias_first})"
+            );
+            assert!(
+                !coordinator.synced_session_contains(&alias.key),
+                "the alias is retired or refused once the canonical row is held \
+                 ({family:?} alias_first={alias_first})"
+            );
+        }
+    }
+}
+
+/// Regression (loss diag8): in the split state (RG1 on the peer, RG2 here)
+/// the peer holds the canonical row, un-NATs each WAN reply and hands it over
+/// the fabric. This node's reverse-synthesis arm installs a reverse row keyed
+/// by the already-un-NATed tuple (server to client), and the other workers
+/// hold it as a `WorkerLocalImport` replica (diag8 fw1: `key=172.16.80.200:
+/// 5211->10.0.61.102:<port> rev=true origin=WorkerLocalImport`). Its
+/// `rewrite_dst` is that same client: the self-targeting NAT shape, with the
+/// REAL client as target. RED with the guard ungated (6439c2baef): after a
+/// generation bump the replica re-resolved into the alias-reverse branch and,
+/// on the fabric arrival, every reply was dropped (diag8: the same rows
+/// turned `HAInactive` right after `FIB generation 8 -> 9`). The guard now
+/// replaces only a `LocalDelivery` answer; the reply must keep reaching the
+/// LAN.
+#[test]
+fn lan_node_unnatted_fabric_reply_keeps_forwarding_18531() {
+    let forwarding = fw1_owner_forwarding();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let mut sessions = promoted_on_owner(&forwarding, now_ns);
+    let (reverse_decision, reverse_metadata, _) = sessions
+        .entry_with_origin(&reverse_key())
+        .expect("fixture: the canonical reverse row is held");
+    assert_eq!(
+        reverse_decision.nat.rewrite_dst,
+        Some(IpAddr::V4(LAN_HOST)),
+        "fixture: the canonical reverse un-NATs to the client"
+    );
+    let unnatted_key = crate::session::SessionKey {
+        src_ip: IpAddr::V4(WAN_HOST),
+        dst_ip: IpAddr::V4(LAN_HOST),
+        src_port: DPORT,
+        dst_port: SPORT,
+        ..reverse_key()
+    };
+    let mut replica_metadata = reverse_metadata.clone();
+    replica_metadata.fabric_ingress = true;
+    assert!(
+        sessions.install_with_protocol_with_origin(
+            unnatted_key.clone(),
+            reverse_decision,
+            replica_metadata.clone(),
+            SessionOrigin::WorkerLocalImport,
+            now_ns,
+            PROTO_TCP,
+            TCP_ACK,
+        ),
+        "fixture: the un-NATed reply replica installs"
+    );
+    assert!(
+        crate::afxdp::session_glue::reverse_un_nat_targets_itself(
+            &unnatted_key,
+            reverse_decision.nat,
+            &replica_metadata,
+        ),
+        "fixture: the replica has the self-targeting NAT shape"
+    );
+    let reply = || {
+        let mut frame = build_txn_tcp_syn_frame_v4(
+            WAN_HOST,
+            LAN_HOST,
+            DPORT,
+            SPORT,
+            TCP_ACK,
+            LOCAL_FABRIC_MAC,
+        );
+        let [_, _, hi, lo] = forwarding.zone_name_to_id["wan"].to_be_bytes();
+        frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+        let mut meta = txn_meta_v4(FABRIC_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+        set_flow(
+            &mut meta,
+            IpAddr::V4(WAN_HOST),
+            IpAddr::V4(LAN_HOST),
+            DPORT,
+            SPORT,
+        );
+        (frame, meta)
+    };
+    // A generation the replica was not resolved under: this hit re-resolves.
+    for (config_generation, neighbor_generation) in [(8, 2), (9, 3)] {
+        let (frame, meta) = reply();
+        let hit = drive_at(
+            &mut sessions,
+            &forwarding,
+            &split_ha(now_secs),
+            FABRIC,
+            &frame,
+            meta,
+            config_generation,
+            neighbor_generation,
+        );
+        assert_eq!(
+            (hit.session_hit, hit.tx[LAN], hit.closes),
+            (1, 1, 0),
+            "the handed-over reply keeps reaching the LAN after re-resolution \
+             (config generation {config_generation})"
+        );
+    }
+}
+
+/// The worker twin of the import rule (review): an alias imported from the
+/// peer books no translation on a worker either. Otherwise the alias holds
+/// the port, the canonical row's worker reservation is refused (silently,
+/// it is best-effort), and retiring the alias then frees the port while the
+/// canonical row still uses it. A local replica keyed by the wire tuple
+/// (`WorkerLocalImport`, #15966r) still reserves.
+#[test]
+fn worker_alias_import_books_no_translation_18531() {
+    let mut forwarding = ForwardingState::default();
+    forwarding.source_nat_rules = crate::nat::parse_source_nat_rules(&[crate::SourceNATRuleSnapshot {
+        name: "pool-snat".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "wan".to_string(),
+        source_addresses: vec!["0.0.0.0/0".to_string()],
+        pool_name: "p".to_string(),
+        pool_addresses: vec!["203.0.113.1/32".to_string()],
+        port_low: 1024,
+        port_high: 65535,
+        ..crate::SourceNATRuleSnapshot::default()
+    }]);
+    let used = |forwarding: &ForwardingState| {
+        crate::nat::source_nat_pool_statuses(&forwarding.source_nat_rules)[0].used_ports
+    };
+    let nat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
+    let canonical_key = crate::afxdp::testfx::test_key();
+    let alias_key = crate::session::forward_wire_key(&canonical_key, nat);
+    let entry = |key: crate::session::SessionKey| SyncedSessionEntry {
+        key,
+        decision: SessionDecision {
+            resolution: crate::afxdp::testfx::test_resolution(),
+            nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        metadata: crate::afxdp::testfx::test_metadata(),
+        leak_incarnation: 0,
+        origin: SessionOrigin::SyncImport,
+        protocol: PROTO_TCP,
+        tcp_flags: TCP_ACK,
+        generation: 0,
+        session_id: 4242,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 0,
+        fwd_packets: 0,
+        pptp_call_ids: 0,
+        source_nat_static: None,
+        persistent_lease_hold: None,
+    };
+    let mut sessions = SessionTable::new();
+    let ha = BTreeMap::new();
+    apply_commands(
+        &mut sessions,
+        &forwarding,
+        &ha,
+        vec![WorkerCommand::UpsertSynced(entry(alias_key.clone()))],
+    );
+    assert_eq!(used(&forwarding), 0, "a peer-imported alias books no translation");
+    apply_commands(
+        &mut sessions,
+        &forwarding,
+        &ha,
+        vec![
+            WorkerCommand::UpsertSynced(entry(canonical_key.clone())),
+            WorkerCommand::DeleteSynced(alias_key),
+        ],
+    );
+    assert_eq!(
+        used(&forwarding),
+        1,
+        "the canonical row holds the translation after the alias is retired"
+    );
 }

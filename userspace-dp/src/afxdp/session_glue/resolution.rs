@@ -737,12 +737,19 @@ pub(in crate::afxdp) fn reresolve_stored_session(
     fabric: FabricArrival<'_>,
 ) -> ForwardingResolution {
     // #18531 (third failback teardown): an alias-synthesized reverse cannot
-    // reach its client, so no target lookup applies to it; see
-    // `alias_reverse_return_resolution`. Before this, the RG-taking node's
-    // activation refresh re-resolved such a row onto the now-local SNAT
-    // address (`LocalDelivery`), and the next WAN reply was torn down by the
-    // host-inbound gate.
-    if reverse_un_nat_targets_itself(wire_key, stored.nat, stored_metadata) {
+    // reach its client; see `alias_reverse_return_resolution`. Before this,
+    // the RG-taking node's activation refresh re-resolved such a row onto the
+    // now-local SNAT address (`LocalDelivery`), and the next WAN reply was
+    // torn down by the host-inbound gate. Only that answer is replaced: the
+    // same self-targeting NAT shape is also what the reverse-synthesis arm
+    // installs for a reply that ARRIVES already un-NATed (the peer un-NATed
+    // it and handed it over the fabric), keyed by the client tuple. Its
+    // target is the real client, the lookup answers a real egress, and it
+    // must forward (loss diag8: replacing that answer dropped every reply on
+    // the LAN node after a FIB generation bump).
+    if looked_up.disposition == ForwardingDisposition::LocalDelivery
+        && reverse_un_nat_targets_itself(wire_key, stored.nat, stored_metadata)
+    {
         return alias_reverse_return_resolution(
             forwarding,
             stored_metadata,
@@ -995,13 +1002,11 @@ pub(in crate::afxdp) fn alias_reverse_return_resolution(
     {
         return redirect;
     }
-    if fallback.disposition == ForwardingDisposition::LocalDelivery {
-        ForwardingResolution {
-            disposition: ForwardingDisposition::HAInactive,
-            ..fallback
-        }
-    } else {
-        fallback
+    // No redirect (a fabric arrival, or no fabric): the reply is not this
+    // node's to deliver or forward, whatever the raw lookup answered.
+    ForwardingResolution {
+        disposition: ForwardingDisposition::HAInactive,
+        ..fallback
     }
 }
 

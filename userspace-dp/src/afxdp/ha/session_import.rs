@@ -1231,11 +1231,79 @@ impl crate::afxdp::ha::SessionDomain {
         self.upsert_synced_session_with_policy(entry, true, None)
     }
 
+    /// #18531: the canonical (original-tuple) row of a flow and its
+    /// forward-wire alias (the same value keyed by the translated tuple, which
+    /// the daemon synthesizes for every fabric-redirect delta) used to compete
+    /// for ONE translated-tuple reservation, and the import kept whichever
+    /// arrived first. When the alias won, this node held the flow only as the
+    /// alias: its reverse (synthesized from the alias) cannot un-NAT, and once
+    /// the LAN side moved here the original-tuple packets missed and the flow
+    /// died (diag6/diag7b: exactly the alias-only flows). Now the canonical row
+    /// always wins:
+    /// - an alias never books the translation (the canonical row, here or on
+    ///   the peer, owns it), so it cannot refuse a later canonical import;
+    /// - an alias is refused while its canonical row is held, so it can never
+    ///   replace the canonical row's reverse with its own self-targeting one;
+    /// - a canonical import retires a peer-synced alias of the same flow
+    ///   (forward key only: the reverse key is the canonical row's now).
     fn upsert_synced_session_with_policy(
+        &self,
+        entry: SyncedSessionEntry,
+        strict_mirror: bool,
+        pptp_call: Option<crate::session::pptp::PptpCall>,
+    ) -> SyncedImportOutcome {
+        let is_alias = !entry.metadata.is_reverse
+            && entry.origin.is_cluster_synced_origin()
+            && crate::session::is_forward_wire_alias(&entry.key, entry.decision.nat);
+        if is_alias
+            && crate::afxdp::shared_ops::lookup_shared_forward_wire_match(
+                &self.sessions.forward_wire,
+                &self.sessions.owner_rg_indexes,
+                &entry.key,
+            )
+            .is_some_and(|canonical| canonical.key != entry.key)
+        {
+            self.sessions
+                .import_reserve_refused
+                .fetch_add(1, Ordering::Relaxed);
+            return SyncedImportOutcome::RejectedReserve;
+        }
+        let superseded_alias = (!entry.metadata.is_reverse && !is_alias)
+            .then(|| crate::session::forward_wire_key(&entry.key, entry.decision.nat))
+            .filter(|wire| *wire != entry.key)
+            .filter(|wire| {
+                lock_shared_recover(&self.sessions.synced)
+                    .get(wire)
+                    .is_some_and(|alias| {
+                        alias.origin.is_cluster_synced_origin()
+                            && !alias.metadata.is_reverse
+                            && alias.decision.nat == entry.decision.nat
+                    })
+            });
+        let canonical_key = entry.key.clone();
+        let outcome = self.upsert_synced_session_with_policy_inner(
+            entry,
+            strict_mirror,
+            pptp_call,
+            is_alias,
+        );
+        if outcome == SyncedImportOutcome::Applied
+            && let Some(alias_key) = superseded_alias
+            && lock_shared_recover(&self.sessions.synced).contains_key(&canonical_key)
+        {
+            let _ = self.delete_synced_session_gen_marked(
+                alias_key, 0, false, true, None, false, 0, None, None,
+            );
+        }
+        outcome
+    }
+
+    fn upsert_synced_session_with_policy_inner(
         &self,
         mut entry: SyncedSessionEntry,
         strict_mirror: bool,
         pptp_call: Option<crate::session::pptp::PptpCall>,
+        is_alias: bool,
     ) -> SyncedImportOutcome {
         // #8015: refuse a STANDALONE reverse. This runs before every other
         // decision below because none of them apply to an entry that must not
@@ -1549,8 +1617,11 @@ impl crate::afxdp::ha::SessionDomain {
                 .fetch_add(1, Ordering::Relaxed);
             return SyncedImportOutcome::RejectedReserve;
         }
+        // #18531: an alias never books the translation (see
+        // `upsert_synced_session_with_policy`).
         let translation_reserved = entry.origin.is_peer_synced()
             && !entry.metadata.is_reverse
+            && !is_alias
             && !worker_records.is_empty();
         let (holder_snapshot, displaced_persistent_hold) = if translation_reserved {
             match self.reserve_synced_translation(
@@ -1948,9 +2019,10 @@ impl crate::afxdp::ha::SessionDomain {
         );
         if let Some(canonical) = alias_canonical {
             // The canonical pair goes under the same mode, so the #9714
-            // locally-owned guard and the #10512 identity check apply to it
-            // exactly as to a delete that named it.
-            let _ = self.delete_synced_session_gen_marked(
+            // locally-owned guard applies to it, and a SCOPED delete's #10512
+            // identity check too. An unscoped delete carries no identity to
+            // check: it removes whichever row holds the translation now.
+            let canonical_outcome = self.delete_synced_session_gen_marked(
                 canonical,
                 0,
                 mode.peer,
@@ -1961,6 +2033,12 @@ impl crate::afxdp::ha::SessionDomain {
                 None,
                 None,
             );
+            // #12886: never discard an outcome. The named key was not held,
+            // so the canonical delete is the one whose refusal (gate busy,
+            // mirror write, locally owned) the caller must see and retry.
+            if canonical_outcome.keeps_caller_rows() || canonical_outcome.mirror_delete_failed() {
+                return canonical_outcome;
+            }
         }
         outcome
     }

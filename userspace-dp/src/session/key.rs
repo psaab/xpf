@@ -514,6 +514,15 @@ pub(crate) fn forward_wire_key(forward_key: &SessionKey, nat: NatDecision) -> Se
     nat_applied_key(forward_key, nat, Dir::Same, Disc::Keep, Domain::Keep)
 }
 
+/// #18531: is a FORWARD row keyed `key` with decision `nat` a forward-wire
+/// alias, i.e. keyed by its own already-translated tuple? The daemon
+/// synthesizes one for every fabric-redirect delta, beside the canonical
+/// (original-tuple) row. A translating decision whose wire tuple is the key
+/// itself has nothing left to translate. Callers check `!is_reverse`.
+pub(crate) fn is_forward_wire_alias(key: &SessionKey, nat: NatDecision) -> bool {
+    (nat.rewrite_src.is_some() || nat.rewrite_dst.is_some()) && forward_wire_key(key, nat) == *key
+}
+
 /// A reverse entry's translated alias (#17088: also called with
 /// REVERSE decisions — `NatDecision::reverse` moved the forward
 /// `rewrite_src_port` into `rewrite_dst_port`, and the shared

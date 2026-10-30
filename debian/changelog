@@ -1,4 +1,10 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: a peer-synced flow's original-tuple row now always
+    wins the import over its forward-wire alias (the alias no longer books
+    the translation, is refused while its original row is held, and is
+    retired when that row arrives), so a node no longer ends up holding a
+    flow only as the alias and losing it when the LAN side fails over to it
+    (#18531).
   * Userspace dataplane: a peer delete of a flow's translated tuple now
     removes this node's original-tuple row of the same flow, so a WAN
     owner holding only the alias still revokes the LAN node's copy and
