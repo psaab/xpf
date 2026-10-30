@@ -498,18 +498,25 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         } else {
             None
         };
-        // #18531: never purge on a fabric-link arrival. A translated forward
-        // packet that the peer redirected over the fabric means the peer has
-        // handed the egress RG to this node: ownership is in transit, not
-        // settled elsewhere. That is the RG-taking node's window between the
-        // peer's demotion and this node's activation. The row is still held
-        // transient (not materialized), and the packet takes its HA
-        // disposition (dropped: a fabric arrival is never redirected back).
-        // Purging it removed the forward-wire alias of a live flow with no
-        // Close. Where the alias was this node's only copy, the first packet
-        // after activation missed and the flow died. The #6599 purge of a
-        // translated hit that arrives DIRECTLY (a spoofed or martian source on
-        // a non-owner) is unchanged.
+        // #18531: never purge on a fabric-link arrival. This removes the purge
+        // from its ORIGINAL population: it was introduced for fabric arrivals
+        // (75965fb3ff, predicate `ingress_is_fabric && synced && translated`)
+        // and widened to direct arrivals by 8ea4d780eb; #6599 later showed the
+        // purge-and-re-enter path is abusable by a spoofed direct packet.
+        // A translated forward packet the peer redirected over the fabric
+        // means the peer is handing the egress RG to this node: ownership is
+        // in transit (the RG-taking node's window between the peer's demotion
+        // and this node's activation). Purging removed the forward-wire alias
+        // of a live flow with no Close; where it was this node's only copy,
+        // the first packet after activation missed and the flow died.
+        // Why holding is safe: the row stays transient (not materialized),
+        // and the packet still takes its HA disposition. That is a drop (a
+        // fabric arrival is never redirected back) or, for a #16217 adopted
+        // hit, the adopted local candidate. The owner's Close or the row's
+        // idle timeout reclaims a held row. When this node owns the RG,
+        // nothing is held: `should_keep_synced_hit_transient` requires the
+        // owner RG to be inactive here. The purge of a translated hit that
+        // arrives DIRECTLY on a non-owner is unchanged.
         let deferred_synced_purge = if keep_transient && !fabric_link_ingress {
             poison_key.map(|(key, decision, metadata, origin)| DeferredSyncedPurge {
                 key: key.clone(),

@@ -1403,13 +1403,24 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // the peer has demoted the egress RG and redirects the translated flow
     // here before this node activates it. A keep-transient hit (a
     // translated forward-wire alias on a non-owner) persists nothing, so
-    // its stored line is the import-time resolution against the split FIB:
-    // for v6 that is egress 13 (reth0.50), whose address is not the
-    // reth0.80 translation. Judged as stored, it revoked the alias of a
-    // live flow. A DIRECT arrival on a non-owner keeps judging its stored
-    // line (#12187: a later same-tuple static SNAT still revokes there),
-    // and a live FabricRedirect names the fabric parent, not an egress, so
-    // it never stands in.
+    // its stored line is the import-time resolution against the split FIB.
+    // For v6, and for both families when the import found no neighbor
+    // (MissingNeighbor), that names reth0.50 (egress 13), whose address is
+    // not the reth0.80 translation. Judged as stored, it revoked the alias
+    // of a live flow.
+    //
+    // The rule, by arrival link (review N4):
+    // - Fabric arrival: the packet is the peer's redirect of a flow whose
+    //   egress the peer believes this node owns. This node does not
+    //   forward it (dropped, or the adopted candidate under #16217), so it
+    //   does not judge the translation; the egress owner does, and its
+    //   Close removes this copy (an alias-only owner closes the canonical
+    //   tuple as well, `delete_terminal_filtered_session`).
+    // - Direct arrival on a non-owner: not a redirect. Nothing hands the
+    //   judgment to a peer, so the stored line is judged here, as before
+    //   (#12187: a later same-tuple static SNAT still revokes).
+    // Both are pinned by the #12187 cell. A live FabricRedirect names the
+    // fabric parent, not an egress, so it never stands in.
     let forward_decision = if !metadata.is_reverse
         && decision.resolution.egress_ifindex > 0
         && (matches!(
@@ -1460,7 +1471,13 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // egress, on its next slow-path hit with a stale stamp. The Close
     // that emits reaches this node as a peer delete, which can remove a
     // locally-authored redirect row because the row keeps its egress RG
-    // (`persisted_owner_rg_for_resolution`).
+    // (`persisted_owner_rg_for_resolution`). An owner holding only the
+    // translated alias closes the canonical tuple as well
+    // (`delete_terminal_filtered_session`), so the delete names this row.
+    // Reverse hits do not substitute (the reply's own resolution is the
+    // LAN egress), so a reply that arrives first after the RG returns
+    // judges the stored redirect and declines until `RefreshOwnerRGS`
+    // rewrites the stored line or a forward slow-path hit judges it.
     if matches!(
         forward_decision.resolution.disposition,
         ForwardingDisposition::FabricRedirect | ForwardingDisposition::HAInactive

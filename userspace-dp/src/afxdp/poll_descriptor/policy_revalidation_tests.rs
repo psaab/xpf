@@ -1027,6 +1027,37 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
         .is_some(),
         "a later same-tuple static SNAT still revokes the imported dynamic allocation"
     );
+    // #18531 (review N4): the arrival link decides. The hit above arrived
+    // DIRECTLY on a node whose egress RG is inactive (empty HA state): its
+    // stored line is judged and the collision revokes here. The same hit
+    // arriving on the fabric link is the peer's redirect, and its live
+    // HAInactive stands in, so the judgment is declined: the egress owner
+    // judges the collision and its Close removes this copy.
+    assert_eq!(
+        resolved.decision.resolution.disposition,
+        ForwardingDisposition::HAInactive,
+        "fixture: the live decision on this non-owner is HAInactive"
+    );
+    assert!(
+        source_nat_revocation_on_session_hit_with_ingress(
+            &imported_snat_worker_forwarding(true),
+            &mut sessions,
+            &resolved.key,
+            &resolved.metadata,
+            resolved.metadata.ingress_ifindex,
+            resolved.metadata.ingress_vlan_id,
+            resolved.decision,
+            &flow,
+            resolved.origin,
+            resolved.source_nat_static,
+            resolved.source_nat_validation_key.as_ref(),
+            1_000_000_000,
+            None,
+            true,
+        )
+        .is_none(),
+        "the same collision arriving on the fabric link is declined, not revoked"
+    );
 }
 
 #[test]

@@ -424,7 +424,8 @@ The rules now:
 - **Decline keyed on the judged resolution.** A judged `FabricRedirect` or
   `HAInactive` names no egress this node forwards out of, so the judgment
   is declined for every origin. The session is kept, the packet takes its
-  HA disposition (redirected or dropped), and the stamp stays stale.
+  HA disposition (redirected, dropped, or forwarded on a #16217 adopted
+  candidate), and the stamp stays stale.
 - **Live egress judged first.** The live-resolution substitution runs
   before that decline for every origin (it was peer-synced only). When the
   egress RG returns, the forward hit is judged on the real egress, even at
@@ -438,22 +439,45 @@ The rules now:
 - **No alias purge on a fabric arrival.** On a non-owner, a translated
   forward hit on a peer-synced row is held transient
   (`should_keep_synced_hit_transient`) and, before this, was then purged
-  (`purge_translated_synced_hit_with_context`, the #6599 rule), silently
-  and with no Close. On the RG-taking node the peer's fabric redirect is
-  exactly such a hit, so the window removed the forward-wire alias of a
-  live flow. Where the alias was the only copy, the first packet after
-  activation missed and the flow died. The purge now runs only for a
-  direct arrival (a spoofed or martian translated source); a fabric-link
-  arrival is held and takes its HA disposition (dropped).
+  (`purge_translated_synced_hit_with_context`), silently and with no
+  Close. On the RG-taking node the peer's fabric redirect is exactly such
+  a hit, so the window removed the forward-wire alias of a live flow.
+  Where the alias was the only copy, the first packet after activation
+  missed and the flow died. This takes the purge away from its original
+  population: it was introduced for fabric arrivals (75965fb3ff) and
+  widened to direct arrivals later (8ea4d780eb); #6599 is the later report
+  that a spoofed direct packet can abuse the purge-and-re-enter path. It is
+  safe to hold: the row stays transient (not materialized), the packet
+  still takes its HA disposition (a fabric arrival is never redirected
+  back, so it is dropped, or forwarded on a #16217 adopted candidate), and
+  the owner's Close or the row's idle timeout reclaims it. A held hit
+  probably refreshes the row's idle clock (the lookup takes the packet
+  time; inferred), so a node that never takes the RG keeps the row while
+  the peer redirects. When this node owns the RG nothing is held. The purge
+  still runs for a direct arrival on a non-owner.
 - **On a fabric arrival, a live `HAInactive` is judged, then declined.** A
   keep-transient hit persists nothing, so the validator judged the stored
-  import-time line. For v6 on the RG-taking node that line is egress 13
-  (reth0.50) under the split FIB, which does not carry the reth0.80
+  import-time line. On the RG-taking node under the split FIB, for v6, and
+  for both families when the import found no neighbor (`MissingNeighbor`),
+  that line is egress 13 (reth0.50), which does not carry the reth0.80
   translation, so it revoked. On a fabric-link arrival the live decision
   now stands in when it is `HAInactive` as well as a forward candidate, and
-  the decline above holds the session. A direct arrival on a non-owner
-  still judges its stored line (#12187: a later same-tuple static SNAT
-  revokes there). A live `FabricRedirect` never stands in.
+  the decline above holds the session. The rule is by arrival link. A
+  fabric arrival is the peer's redirect of a flow whose egress this node
+  does not forward, so the egress owner judges it. A direct arrival on a
+  non-owner is not a redirect, so its stored line is judged here as before
+  (#12187: a later same-tuple static SNAT revokes there). The #12187 cell
+  pins both. A live `FabricRedirect` never stands in.
+- **An alias-only owner closes the canonical tuple too.** The owner's
+  revocation is what removes the LAN node's declined row. An owner that
+  holds only the translated alias (plus the reverse) emitted a Close keyed
+  on the translated tuple, and the LAN node, which matches peer deletes on
+  the exact key, kept its original-tuple row and its withdrawn
+  translation. `delete_terminal_filtered_session` now also emits a Close
+  for the canonical tuple, recovered from the reverse row's NAT, when it
+  tears down a translated forward row and holds no canonical row. That
+  Close carries no counters, but it is a second RT_FLOW `SESSION_CLOSE`
+  record (for the original tuple) beside the alias's.
 
 A withdrawn translation is revoked by the node that owns the egress, on
 its next slow-path hit with a stale stamp. That is not every redirected
@@ -461,16 +485,34 @@ packet: flow-cache hits are not re-judged. The terminal
 (`DiscardRoute` / `ClusterTerminalHAInactive`) decline is still gated on
 peer-synced origin.
 
+A window remains on the reverse side. Reverse hits never substitute (the
+reply's own resolution is the LAN egress). So when the egress RG returns
+with a translation withdrawn, a reply that arrives before any forward
+packet judges the forward row's stored `FabricRedirect` or `HAInactive`,
+declines, and is un-NATed and delivered. `RefreshOwnerRGS` does not close
+it: it rewrites the stored line to the real egress but, like every HA
+identity rewrite, clears the row's source-NAT judgment, and the #16217
+guard declines reverse revocation of an unjudged row with no forward VLAN
+provenance. The window closes at the first forward slow-path hit, which
+judges the real egress and revokes the pair. An inbound-only flow (for
+example UDP pushed from the server) can therefore keep reaching the
+client through the withdrawn binding until a forward packet arrives.
+Pinned by `rg_return_reply_first_window_closes_at_forward_hit_18531`;
+tracked in #18535.
+
 Pinned by `afxdp::tests_split_rg_failback_18531`, which drives the
 production poll pipeline on the captured split snapshots, and by the
 `SharedPromote` cell of `peer_synced_fabric_redirect_snat_declines_16215`.
 The daemon-side routing of the owner's Close is the existing owner-RG gate
-and is not covered by those cells. Residuals are tracked in #18535. The
-first is fixed here (the two rules above); the other two are open:
+and is not covered by those cells; the two-node cell
+`alias_only_owner_revocation_removes_lan_row_18531` feeds the owner's
+Close keys to the LAN node as the peer deletes the daemon sends. Residuals
+are tracked in #18535:
 - a translated alias row removed in the RG gap, so an alias-only copy
-  loses the flow (fixed);
-- activation before the connected-RG FIB republish;
-- scope-less imports not judged by the owner.
+  loses the flow (fixed here);
+- activation before the connected-RG FIB republish (open);
+- scope-less imports not judged by the owner (open);
+- the reverse-side window above (open, pinned).
 
 ### Never-again gates
 

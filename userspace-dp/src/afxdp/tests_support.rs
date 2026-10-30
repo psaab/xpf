@@ -3915,6 +3915,36 @@ pub(super) fn txn_run_multi_binding_at_neighbor_generation(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     neighbor_generation: u64,
 ) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
+    txn_run_multi_binding_at_generations(
+        bindings,
+        ingress_index,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        shared_sessions,
+        7,
+        neighbor_generation,
+    )
+}
+
+/// As `txn_run_multi_binding_at_neighbor_generation`, with the pass's config
+/// generation supplied too: a commit (for example a withdrawn SNAT rule)
+/// advances it, which a reverse-hit revocation cell needs (#18531).
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(super) fn txn_run_multi_binding_at_generations(
+    bindings: &mut Vec<BindingWorker>,
+    ingress_index: usize,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    config_generation: u64,
+    neighbor_generation: u64,
+) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128usize;
     let meta_offset = frame_offset - meta_len;
@@ -4017,7 +4047,7 @@ pub(super) fn txn_run_multi_binding_at_neighbor_generation(
         &mut screen,
         ValidationState {
             snapshot_installed: true,
-            config_generation: 7,
+            config_generation,
             fib_generation: 9,
             neighbor_generation,
         },

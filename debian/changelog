@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: when the node owning the WAN RG revokes a flow it
+    holds only as the translated alias, it now also closes the original
+    tuple, so the peer's LAN-side row and its withdrawn translation go
+    with it (#18531).
   * Userspace dataplane: the node taking the WAN RG no longer purges the
     translated alias of a live flow when the peer fabric-redirects it
     during an RG ownership gap, and on such a fabric arrival the live

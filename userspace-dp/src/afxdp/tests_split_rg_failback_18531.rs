@@ -257,6 +257,9 @@ struct Outcome {
     snat_revoked: u64,
     tx: [u64; 3],
     closes: usize,
+    /// Each Close delta's key and NAT decision: what the daemon turns into
+    /// the peer's delete of that key and its reverse companion.
+    closed: Vec<(crate::session::SessionKey, NatDecision)>,
 }
 
 /// Push one descriptor through the production poll pipeline on binding
@@ -273,9 +276,35 @@ fn drive(
     meta: UserspaceDpMeta,
     neighbor_generation: u64,
 ) -> Outcome {
+    drive_at(
+        sessions,
+        forwarding,
+        ha,
+        ingress,
+        frame,
+        meta,
+        7,
+        neighbor_generation,
+    )
+}
+
+/// As `drive`, in a pass at config generation `config_generation` (a commit
+/// advances it).
+#[expect(clippy::too_many_arguments, reason = "test harness")]
+fn drive_at(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    ingress: usize,
+    frame: &[u8],
+    mut meta: UserspaceDpMeta,
+    config_generation: u64,
+    neighbor_generation: u64,
+) -> Outcome {
+    meta.config_generation = config_generation;
     let mut bindings = bindings();
     let shared = Arc::new(Mutex::new(FastMap::default()));
-    let (_batch, dbg, _egress) = txn_run_multi_binding_at_neighbor_generation(
+    let (_batch, dbg, _egress) = txn_run_multi_binding_at_generations(
         &mut bindings,
         ingress,
         sessions,
@@ -284,6 +313,7 @@ fn drive(
         frame,
         meta,
         &shared,
+        config_generation,
         neighbor_generation,
     );
     assert_eq!(
@@ -291,6 +321,12 @@ fn drive(
         "anti-vacuity: the descriptor must reach the poll body"
     );
     let tx = |b: &BindingWorker| b.live.tx_packets.load(std::sync::atomic::Ordering::Relaxed);
+    let closed: Vec<_> = sessions
+        .drain_deltas(64)
+        .iter()
+        .filter(|d| d.kind == crate::session::SessionDeltaKind::Close)
+        .map(|d| (d.key.clone(), d.decision.nat))
+        .collect();
     Outcome {
         session_hit: dbg.session_hit,
         snat_revoked: dbg.snat_revoked_sessions,
@@ -299,11 +335,8 @@ fn drive(
             tx(&bindings[FABRIC]),
             tx(&bindings[LAN]),
         ],
-        closes: sessions
-            .drain_deltas(64)
-            .iter()
-            .filter(|d| d.kind == crate::session::SessionDeltaKind::Close)
-            .count(),
+        closes: closed.len(),
+        closed,
     }
 }
 
@@ -312,6 +345,17 @@ fn lan_ack(
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
     ha: &BTreeMap<i32, HAGroupRuntime>,
+    neighbor_generation: u64,
+) -> Outcome {
+    lan_ack_at(sessions, forwarding, ha, 7, neighbor_generation)
+}
+
+/// As `lan_ack`, in a pass at config generation `config_generation`.
+fn lan_ack_at(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    config_generation: u64,
     neighbor_generation: u64,
 ) -> Outcome {
     let frame = build_txn_tcp_syn_frame_v4(
@@ -327,13 +371,14 @@ fn lan_ack(
     meta.flow_dst_addr[..4].copy_from_slice(&WAN_HOST.octets());
     meta.flow_src_port = SPORT;
     meta.flow_dst_port = DPORT;
-    drive(
+    drive_at(
         sessions,
         forwarding,
         ha,
         LAN,
         &frame,
         meta,
+        config_generation,
         neighbor_generation,
     )
 }
@@ -1113,16 +1158,40 @@ fn rg_taking_node_window_keeps_alias_only_flow_18531() {
         (1, rg(true, now_secs)),
         (2, rg(false, now_secs)),
     ]);
-    for family in [Family::V4, Family::V6] {
+    // review (dataplane seat): with fw1's captured neighbor table the v4
+    // import stores the #326 standby fallback (ForwardCandidate on 14),
+    // which validates, so v4 exercised only the purge. With no neighbor
+    // (`cold`) the import stores MissingNeighbor on 13 in both families,
+    // the disposition the live trace showed, and the stand-in is what keeps
+    // v4 too.
+    let mut cold_fwd = rg_taking_node_forwarding();
+    cold_fwd.neighbors.clear();
+    for (family, cold) in [
+        (Family::V4, false),
+        (Family::V6, false),
+        (Family::V4, true),
+        (Family::V6, true),
+    ] {
+        let window_fwd = if cold { &cold_fwd } else { &window_fwd };
         let mut sessions = SessionTable::new();
         sessions.set_forwarding_revalidation_gen(7, 9);
-        import_alias_only(&mut sessions, &window_fwd, family);
-        let alias_key = alias_of(&exported_forward(&window_fwd, family)).key;
-        assert_eq!(sessions.len(), 2, "fixture: alias + reverse ({family:?})");
-        let (frame, meta) = fabric_forward_frame(&window_fwd, family);
+        import_alias_only(&mut sessions, window_fwd, family);
+        let alias_key = alias_of(&exported_forward(window_fwd, family)).key;
+        assert_eq!(sessions.len(), 2, "fixture: alias + reverse ({family:?} cold={cold})");
+        if cold {
+            let (stored, _, _) = sessions
+                .entry_with_origin(&alias_key)
+                .expect("fixture: alias imported");
+            assert_eq!(
+                (stored.resolution.disposition, stored.resolution.egress_ifindex),
+                (ForwardingDisposition::MissingNeighbor, 13),
+                "fixture: a cold import stores MissingNeighbor on reth0.50 ({family:?})"
+            );
+        }
+        let (frame, meta) = fabric_forward_frame(window_fwd, family);
         let window = drive(
             &mut sessions,
-            &window_fwd,
+            window_fwd,
             &window_ha(now_secs),
             FABRIC,
             &frame,
@@ -1131,17 +1200,17 @@ fn rg_taking_node_window_keeps_alias_only_flow_18531() {
         );
         assert_eq!(
             window.session_hit, 1,
-            "the redirected packet hits the alias ({family:?})"
+            "the redirected packet hits the alias ({family:?} cold={cold})"
         );
-        assert_eq!(window.tx, [0, 0, 0], "dropped in the window ({family:?})");
+        assert_eq!(window.tx, [0, 0, 0], "dropped in the window ({family:?} cold={cold})");
         assert!(
             sessions.entry_with_origin(&alias_key).is_some(),
-            "an ownership transient must not remove the alias of a live flow ({family:?})"
+            "an ownership transient must not remove the alias of a live flow ({family:?} cold={cold})"
         );
         assert_eq!(
             (window.closes, sessions.len()),
             (0, 2),
-            "nothing torn down ({family:?})"
+            "nothing torn down ({family:?} cold={cold})"
         );
         let (frame, meta) = fabric_forward_frame(&owner_fwd, family);
         let after = drive(
@@ -1156,7 +1225,7 @@ fn rg_taking_node_window_keeps_alias_only_flow_18531() {
         assert_eq!(
             (after.session_hit, after.tx[WAN]),
             (1, 1),
-            "once RG1 is active the alias serves the flow out the WAN ({family:?})"
+            "once RG1 is active the alias serves the flow out the WAN ({family:?} cold={cold})"
         );
     }
 }
@@ -1204,5 +1273,235 @@ fn non_owner_direct_translated_arrival_still_purges_alias_18531() {
     assert!(
         sessions.entry_with_origin(&alias_key).is_none(),
         "a direct translated arrival on a non-owner still purges the alias (#6599)"
+    );
+}
+
+/// A WAN -> LAN reply of the flow on the WAN unit (reth0.80).
+fn wan_reply_frame() -> (Vec<u8>, UserspaceDpMeta) {
+    let frame = build_txn_tcp_syn_frame_v4(
+        WAN_HOST,
+        SNAT_IP,
+        DPORT,
+        SPORT,
+        TCP_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01],
+    );
+    let mut meta = txn_meta_v4(WAN_UNIT_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    meta.ingress_vlan_id = 80;
+    set_flow(
+        &mut meta,
+        IpAddr::V4(WAN_HOST),
+        IpAddr::V4(SNAT_IP),
+        DPORT,
+        SPORT,
+    );
+    (frame, meta)
+}
+
+/// Review N1 (HA seat). RED at 22cc364818: the RG-taking node that holds
+/// only the alias revokes the flow once RG1 is active and the SNAT rule is
+/// withdrawn, but its Close named the translated tuple only. The LAN node
+/// matches peer deletes on the exact key, so its canonical row (original
+/// tuple) survived and kept applying the withdrawn translation and
+/// redirecting. The owner's Closes, delivered to the LAN node as the peer
+/// deletes the daemon sends (each key and its reverse companion), must
+/// remove both LAN rows. Both demote orderings on the LAN node.
+#[test]
+fn alias_only_owner_revocation_removes_lan_row_18531() {
+    let window_fwd = rg_taking_node_forwarding();
+    let judge = withdrawn_owner_forwarding();
+    let lan_fwd = fw1_owner_forwarding();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let activated = BTreeMap::from([
+        (0, rg(true, now_secs)),
+        (1, rg(true, now_secs)),
+        (2, rg(false, now_secs)),
+    ]);
+    let mut owner = SessionTable::new();
+    owner.set_forwarding_revalidation_gen(7, 9);
+    import_alias_only(&mut owner, &window_fwd, Family::V4);
+    let (frame, meta) = fabric_forward_frame(&judge, Family::V4);
+    let revoke = drive(&mut owner, &judge, &activated, FABRIC, &frame, meta, 2);
+    assert_eq!(
+        (revoke.snat_revoked, owner.len()),
+        (1, 0),
+        "fixture: the alias-only owner revokes the withdrawn translation"
+    );
+    for demote_first in [false, true] {
+        let mut lan = promoted_on_owner(&lan_fwd, now_ns);
+        let failback = lan_ack(&mut lan, &lan_fwd, &split_ha(now_secs), 1);
+        assert_eq!(
+            (failback.snat_revoked, failback.tx),
+            (0, [0, 1, 0]),
+            "fixture: the failback packet redirects (demote_first={demote_first})"
+        );
+        if demote_first {
+            demote_rg1(&mut lan, &lan_fwd, now_ns);
+        }
+        let deletes = revoke
+            .closed
+            .iter()
+            .flat_map(|(key, nat)| {
+                [
+                    WorkerCommand::DeleteSynced(key.clone()),
+                    WorkerCommand::DeleteSynced(crate::session::reverse_session_key(key, *nat)),
+                ]
+            })
+            .collect();
+        apply_commands(&mut lan, &lan_fwd, &split_ha(now_secs), deletes);
+        assert_eq!(
+            (
+                lan.entry_with_origin(&forward_key()).is_some(),
+                lan.entry_with_origin(&reverse_key()).is_some(),
+            ),
+            (false, false),
+            "the alias-only owner's revocation must remove both LAN rows \
+             (demote_first={demote_first})"
+        );
+        let after = lan_ack(&mut lan, &lan_fwd, &split_ha(now_secs), 2);
+        assert_eq!(
+            after.session_hit, 0,
+            "the next LAN packet no longer hits the translated session \
+             (demote_first={demote_first})"
+        );
+    }
+    assert!(
+        revoke.closed.iter().any(|(key, _)| *key == forward_key()),
+        "witness: the owner's Closes name the canonical tuple"
+    );
+}
+
+/// Review N2 (HA seat), a bounded window pinned rather than closed. When RG1
+/// returns to the LAN node with the SNAT rule withdrawn by a commit (config
+/// epoch 8), a WAN reply that arrives before any forward packet judges the
+/// forward row's STORED FabricRedirect, which declines: the reply is un-NATed
+/// and delivered. Reverse hits never substitute the reply's own resolution
+/// (it is the LAN egress). `RefreshOwnerRGS([1])` rewrites the stored line
+/// to the real egress but, like every HA identity rewrite, clears the row's
+/// source-NAT judgment, and the #16217 guard declines reverse revocation of
+/// an unjudged row with no forward VLAN provenance: the reply after the
+/// refresh is still delivered. The window closes at the first forward
+/// slow-path hit, which judges the real egress and revokes the pair.
+#[test]
+fn rg_return_reply_first_window_closes_at_forward_hit_18531() {
+    let forwarding = fw1_owner_forwarding();
+    let withdrawn = withdrawn_owner_forwarding();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    for demoted in [false, true] {
+        let mut sessions = promoted_on_owner(&forwarding, now_ns);
+        let failback = lan_ack(&mut sessions, &forwarding, &split_ha(now_secs), 1);
+        assert_eq!(
+            (failback.snat_revoked, failback.tx),
+            (0, [0, 1, 0]),
+            "fixture: the failback packet redirects (demoted={demoted})"
+        );
+        if demoted {
+            demote_rg1(&mut sessions, &forwarding, now_ns);
+        }
+        let reply = |sessions: &mut SessionTable| {
+            let (frame, meta) = wan_reply_frame();
+            drive_at(
+                sessions,
+                &withdrawn,
+                &owner_ha(now_secs),
+                WAN,
+                &frame,
+                meta,
+                8,
+                1,
+            )
+        };
+        let first = reply(&mut sessions);
+        assert_eq!(
+            (first.snat_revoked, first.tx),
+            (0, [0, 0, 1]),
+            "the window: a reply before any forward packet is delivered (demoted={demoted})"
+        );
+        crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
+            &mut sessions,
+            crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+            &withdrawn,
+            &owner_ha(now_secs),
+            &Arc::new(ShardedNeighborMap::default()),
+            vec![1],
+            now_ns + 2,
+            now_secs,
+        );
+        let (stored, _, _) = sessions
+            .entry_with_origin(&forward_key())
+            .expect("forward row present after the refresh");
+        assert_eq!(
+            (stored.resolution.disposition, stored.resolution.egress_ifindex),
+            (ForwardingDisposition::ForwardCandidate, WAN_UNIT_IFINDEX),
+            "fixture: the refresh rewrites the stored line to the WAN unit (demoted={demoted})"
+        );
+        let second = reply(&mut sessions);
+        assert_eq!(
+            (second.snat_revoked, second.tx),
+            (0, [0, 0, 1]),
+            "the refresh does not close the reverse window: the row is unjudged \
+             (demoted={demoted})"
+        );
+        let forward = lan_ack_at(&mut sessions, &withdrawn, &owner_ha(now_secs), 8, 1);
+        assert_eq!(
+            (forward.snat_revoked, forward.tx[WAN]),
+            (1, 0),
+            "the first forward slow-path hit judges the real egress and revokes \
+             (demoted={demoted})"
+        );
+        let last = reply(&mut sessions);
+        assert_eq!(
+            (last.session_hit, last.tx[LAN]),
+            (0, 0),
+            "after the revocation the reply has no session (demoted={demoted})"
+        );
+    }
+}
+
+/// Guard of the N1 fix: an owner that ALSO holds the canonical row closes
+/// only the alias when it revokes the alias. The canonical row is still
+/// here and is judged and closed on its own hits; a Close for its tuple
+/// would make the daemon forget a session this node still forwards.
+#[test]
+fn alias_revocation_with_held_canonical_closes_only_the_alias_18531() {
+    let window_fwd = rg_taking_node_forwarding();
+    let judge = withdrawn_owner_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let activated = BTreeMap::from([
+        (0, rg(true, now_secs)),
+        (1, rg(true, now_secs)),
+        (2, rg(false, now_secs)),
+    ]);
+    let mut owner = SessionTable::new();
+    owner.set_forwarding_revalidation_gen(7, 9);
+    import_on(&mut owner, &window_fwd, &window_ha(now_secs), Family::V4);
+    let alias = alias_of(&exported_forward(&window_fwd, Family::V4));
+    let alias_key = alias.key.clone();
+    apply_commands(
+        &mut owner,
+        &window_fwd,
+        &window_ha(now_secs),
+        vec![WorkerCommand::UpsertSynced(alias)],
+    );
+    assert!(
+        owner.entry_with_origin(&alias_key).is_some()
+            && owner.entry_with_origin(&forward_key()).is_some(),
+        "fixture: the owner holds the canonical row and the alias"
+    );
+    let (frame, meta) = fabric_forward_frame(&judge, Family::V4);
+    let revoke = drive(&mut owner, &judge, &activated, FABRIC, &frame, meta, 2);
+    assert_eq!(
+        revoke.snat_revoked, 1,
+        "fixture: the redirected packet revokes the alias"
+    );
+    assert!(
+        owner.entry_with_origin(&forward_key()).is_some(),
+        "fixture: the canonical row is not the one torn down"
+    );
+    assert!(
+        !revoke.closed.iter().any(|(key, _)| *key == forward_key()),
+        "a held canonical row must not be closed on the alias's revocation"
     );
 }
