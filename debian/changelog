@@ -1,4 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: wake the helper's socket accept loops on a pending
+    connection instead of sleeping the poll interval, so HA bulk session
+    installs no longer pay ~10 ms per session-socket request (#18541).
   * Cluster: keep the session-sync ownership generation on a content-equal
     re-install, so a config apply or link-state refresh no longer discards
     an in-flight cold-prime bulk; genuine ownership changes still void the

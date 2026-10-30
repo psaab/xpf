@@ -859,7 +859,17 @@ worker bound to multiple queues.
   loop, and reinject handler panics are now counted (`REINJECT_HANDLER_PANICS`),
   payload-rendered and capped at the first 10 like the control/session arm,
   while still dropping one connection rather than the loop).
-  - `WouldBlock` keeps each loop's poll interval.
+  - `WouldBlock` is `AcceptStep::Idle(poll)`: the loop waits up to its poll
+    interval for a connection to ARRIVE (`wait_for_pending_connection`,
+    `poll(2)` on the listener for `POLLIN`) and accepts it at once, so the
+    interval bounds only how long the loop goes without re-checking `running`
+    (#18541). It used to be a fixed `thread::sleep(poll)`; since Go dials one
+    session-socket connection per request right after the previous response,
+    every request waited out ~the whole 10 ms, two requests per synced
+    session, and a 522-session HA bulk took ~10 s to install. A poll error or
+    readiness without `POLLIN` sleeps the interval instead, so the wait can
+    never spin. The failure backoff below stays a plain sleep: under EMFILE the
+    listener is readable and a readiness wait would spin.
   - EMFILE / ENFILE / ENOBUFS / ENOMEM -- what the accept path returns under
     descriptor or memory pressure -- are RETRIED on both loops: 50 ms doubling to
     1 s, reset by the next successful accept. An episode writes one onset line

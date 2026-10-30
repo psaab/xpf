@@ -923,6 +923,30 @@ For each received session it:
 5. installs the forward entry through `SetClusterSyncedSession*`
 6. creates and installs the reverse entry locally
 
+Steps 5 and 6 are two synchronous helper round trips, each a fresh dial of the
+helper's session socket (`requestSessionSyncResponseLocked`). Install
+throughput is therefore set by the helper's accept loop, not by the wire: until
+#18541 that loop slept a fixed 10 ms whenever it found nothing to accept, and
+every dial arrived just after it went idle, so each session cost ~20 ms — loss
+fw0 installed a 522-session cold-prime bulk at ~51 sessions/s (~10 s), which is
+how long the sender's barrier fence refused manual failover. The loop now
+waits on the listener's readiness (`wait_for_pending_connection`,
+`userspace-dp/src/server/accept_loop.rs`), so a request is accepted as soon as
+it is dialed; the per-request protocol, fail-closed outcomes and `BulkAck`
+meaning are unchanged.
+
+An install holds `Manager.sessionMu`, not `Manager.mu`, across its round trip,
+and the session socket is served by its own helper thread, apart from the
+control socket that carries `update_ha_state`, FIB and neighbor publishes. An RG
+activation (`UpdateRGActive`) shares only its brief `mu -> sessionMu` fence
+with the install path, so after a peer loss it waits for at most the ONE install
+in flight, never for a backlog of the dead peer's queued frames
+(`TestRGActivationWaitsForAtMostOneInFlightInstall18541`; on loss fw1 at the
+2026-10-30 06:32:40 takeover the helper logged all three activations within
+0.35 s). What a backlog DOES delay is the sync receive loop itself, which
+installs frames in arrival order; #18541 cuts each of those from ~20 ms to the
+round-trip cost.
+
 On `BulkEnd` the receiver:
 
 1. verifies the epoch
