@@ -1484,7 +1484,17 @@ func (r *heartbeatReceiver) checkTimeout() {
 	// commit for up to 30s. It still keeps whatever remained of a grace its
 	// predecessor was inside (inheritedHold). At boot, that is the cold-boot
 	// grace, which the boot-time apply's restart must not cut short.
-	if time.Since(r.startedAt) < r.seenThenLostGrace() || time.Now().Before(r.inheritedHold) {
+	//
+	// #18549: the BOOT part of that floor (a cold start's 30s, or a boot
+	// floor inherited across restarts) ends early once bring-up is proven
+	// over — inbound bulk complete, then the peer heard gap-free for
+	// heartbeatBootStableWindow (heartbeat_boot_floor.go). A rejoined node
+	// that reports takeover-ready must be able to notice its peer dying. A
+	// restart's own grace is never shortened.
+	restartFloor := r.seenGrace > 0 && time.Since(r.startedAt) < r.seenGrace
+	bootFloor := (r.seenGrace == 0 && time.Since(r.startedAt) < heartbeatStartupGrace) ||
+		time.Now().Before(r.inheritedHold)
+	if restartFloor || (bootFloor && !r.mgr.bootFloorProvenOver()) {
 		return
 	}
 	// Compare in the CLOCK_MONOTONIC domain. The previous

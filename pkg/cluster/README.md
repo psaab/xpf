@@ -458,7 +458,8 @@ down/up — can disrupt the control-link UDP receive path for 10-15+ seconds:
   virtual MAC — a 10-15s split-brain until the link recovers and dual-active
   resolution demotes one. The floor lets a slow-to-appear peer be heard first.
 
-The floor releases after 30s, then #11566 checks the separate session-sync
+The seen-then-lost floor can end earlier, once bring-up is proven over (#18549,
+below). The never-seen floor always runs its full 30s. After that, #11566 checks the separate session-sync
 receive-recency proof before confirming the peer absent. #11682 uses the full
 sync peer-silence window (30s by default), not the 2s window used to suppress
 heartbeat timeouts for previously-seen peers. An idle sync peer has no session
@@ -489,6 +490,68 @@ interface, or `Stop` disarms the clock; routine config re-applies keep the
 original arming stamp so a commit cannot push the floor out. The receiver's
 own never-seen arm is unchanged and races harmlessly with the Manager's:
 both funnel into `handlePeerNeverSeen`, which confirms at most once.
+
+### The boot floor ends once bring-up is PROVEN over (#18549)
+
+The seen-then-lost half of the floor was purely time-based, which
+contradicted the node's own readiness: a rejoined node reported
+`Takeover ready: yes` about 2 s after its heartbeat started, but could not
+declare its peer lost for the remaining ~28 s. `test-double-failover`
+crashes the peer ~20 s after the rejoin. On integ8 the second takeover
+waited for the floor:
+
+| cluster | `heartbeat started` | peer lost | outage |
+|---|---|---|---|
+| loss | 12:55:18.850 | 12:55:48.855 (+30.005 s) | ~13 s |
+| tcp | 12:53:59.023 | 12:54:29.031 (+30.008 s) | ~5 s |
+
+`checkTimeout` now ends the BOOT part of the floor early when
+`bootFloorProvenOver` holds (`heartbeat_boot_floor.go`). That part is a cold
+start's 30 s, or a boot floor inherited across restarts (#17764). The
+predicate has two parts:
+
+1. **The inbound bulk completed** (`syncBulkPrimed`, stamped at its
+   false->true edge in `syncBulkPrimedAtMono`; never timeout-released). A
+   full TCP bulk exchange over the same control link the heartbeats use,
+   finished after bring-up, is direct evidence the link is up.
+2. **The peer was then heard gap-free for `heartbeatBootStableWindow` (5 s).**
+   The run is tracked in `handlePeerHeartbeat` (`peerHBSteadySinceMono` /
+   `peerHBLastAdmitMono`); a gap of `interval*threshold` or more restarts it,
+   and peer loss resets it. The window runs from the later of the bulk
+   completion and the run start to the LAST ADMITTED frame, so the silence
+   being judged never counts as stability.
+
+Unchanged:
+
+- a heartbeat restart's own 5 s grace (#9722);
+- the never-seen arm (#4386/#11566/#16751);
+- the whole floor while the proof is missing. A boot-time VRF-rebind
+  disruption before the bulk completes is still covered, which is the
+  #17764 incident shape.
+
+A disruption that starts after the proof is a steady-state disruption: a
+heartbeat restart arms its own restart grace, and the sync-recency guard in
+`handlePeerTimeout` covers a live peer whose heartbeats are briefly lost. That
+is exactly what a node that booted long ago gets. Once proven, the proof
+never expires. A config-sync apply from the peer, which a rejoiner can
+receive right after connect, may land more than 5 s after the bulk. If its
+RX disruption outlasts the 5 s restart grace plus the 2 s sync-recency
+window, a takeover-ready rejoiner can then declare a live peer lost. That is
+the same exposure a long-running node has on such an apply, and the apply is
+skipped entirely when the configs are equivalent.
+
+A heartbeat-only restart (a management VRF rebind) does not reset the
+gap-free run, by design. The run is Manager-scoped, like the heartbeat
+session, so once the restart's own 5 s grace has passed, a run recorded
+before the restart can satisfy the proof and end an inherited boot floor
+(#17764). The mitigation for a live peer whose heartbeats the rebind dropped
+is the sync-recency guard in `handlePeerTimeout`
+(`syncSuppressesPeerTimeoutLocked`): the session-sync connection that
+completed the bulk keeps proving the peer alive while its frames stay fresh.
+That is the same guard a long-booted node relies on after a commit-driven
+restart.
+
+Cells: `heartbeat_boot_floor_18549_test.go`.
 
 ### Asymmetric peer visibility (#10775)
 
