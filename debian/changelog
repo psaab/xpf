@@ -29,6 +29,10 @@ xpf (0.0.0) unstable; urgency=medium
     failback. The source-NAT revalidation decline for a stored
     FabricRedirect resolution now applies to locally-authored rows too
     (#18531).
+  * Test: deb deploy removes stale raw-deploy /etc copies of xpfd.service
+    and the boot-barrier units that shadowed the packaged units
+    (KillMode=control-group on loss/tcp), daemon-reloads and asserts each
+    loaded unit is the packaged file, rolling back otherwise (#18544).
   * Userspace dataplane: wake the helper's socket accept loops on a pending
     connection instead of sleeping the poll interval, so HA bulk session
     installs no longer pay ~10 ms per session-socket request (#18541).

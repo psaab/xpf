@@ -115,7 +115,7 @@ of the plan (inventory, build sequence, validation, risks) is written so only
 | Validators to clone | `scripts/userspace-ha-validation.sh` (980 ln), `scripts/userspace-phase-cycle.sh`, `scripts/userspace-perf-compare.sh`, `scripts/userspace-native-gre-validation.sh`, `scripts/iperf-json-metrics.py` | Phase-cycle = push branch → deploy fw0/1 → validate. Validator defaults `PARALLEL=6`, `MIN_GBPS_V4/V6=18.0`. |
 | Target-service contract | `test/incus/target-services.sh`, `test/incus/mouse-target-setup.sh` | WAN target grid: iperf3 `5200-5211`, echo `6200-6211` (+7) per class; §1.5. |
 | Image bake (production appliance) | `scripts/image/bake.py`, `scripts/image/make_config_drive.py`, `scripts/image/validate.py` | **Not** what the lab VMs use — lab uses stock cloud image + apt provisioning (§1.6). Do not confuse the two. |
-| systemd unit (lab) | `test/incus/xpfd.service` | `ExecStart=/usr/local/sbin/xpfd`, pushed by raw deploy; deb path uses packaged unit. |
+| systemd unit (lab) | `test/incus/xpfd.service` | `ExecStart=/usr/local/sbin/xpfd`. The raw deploy pushes it (and the two boot barriers) to `/etc/systemd/system`. The deb path uses the packaged units, and since #18544 it removes those raw-push `/etc` copies, which otherwise shadow the packaged units. |
 
 ### 1.2 The userspace env file, as-is (`loss-userspace-cluster.env`)
 
