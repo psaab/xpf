@@ -46,9 +46,12 @@ against its own band below, never against another cluster's. Use each env's
 `IPERF_TARGET4/6` (loss `172.16.80.200`, tcp `172.16.80.210`, udp
 `172.16.80.211`), never `172.16.100.x`.
 
-**Baseline bands** (Gbit/s, iperf3 to port 5201, 20 s, `make perf-matrix`).
-They are a floor to hold, not a ceiling; when a merge wave moves them, replace
-the row and keep the date, build and host loadavg.
+**Baseline bands** (Gbit/s, 20 s runs). `make perf-matrix` uses port 5211,
+the unshaped class; port 5201 is the lab CoS config's 100 Mbit/s exact class
+(#9691), so never measure on it while CoS may be applied. The rows below were
+taken on 5201 with CoS not applied (a fresh deploy wipes it), which is
+equivalent. They record what a build reached, with date and loadavg; replace
+a row when a merge wave moves it. Bands exist only for the cells shown.
 
 | Cluster | Build | v4 -P1 | v4 -P8 | v4 -P12 | v6 -P8 | Orchestrator loadavg |
 |---|---|---|---|---|---|---|
@@ -63,11 +66,11 @@ are a regression.
 | ID | Run | Pass | Catches |
 |---|---|---|---|
 | F1 | `make test-connectivity` | no failures other than the known-environment rows (below) | basic forwarding |
-| F2 | `make perf-matrix` (v4/v6 × push/reverse × `-P1`/`-P8`/`-P12`, 2 reps; tcp/udp need the lock tuple exported) | every cell inside its cluster's band above | throughput regressions. Loss `-P8` measured 11.6–14.4 Gbit/s on master while cross-worker handshakes never completed (#18520); integ6 lifted it to 18.8, and tcp from ~23.5 to ~40 |
+| F2 | `make perf-matrix` (v4/v6 × push/reverse × `-P1`/`-P8`/`-P12`, 2 reps; tcp/udp need the lock tuple exported) on the PR build **and** on the master build it is compared with, on the same cluster in the same session | no cell more than 10% below the same cell on master; any cell with a band above stays inside it once master has reached that band. The harness records throughput; this comparison is read from the two summaries | throughput regressions. Loss `-P8` measured 11.6–14.4 Gbit/s on master while cross-worker handshakes never completed (#18520); integ6 lifted it to 18.8, and tcp from ~23.5 to ~40 |
 | F3 | **Session-state health.** During a 20 s `-P8` run, check that the serving worker's rows are Established. Today: profile the hot worker (`perf record --call-graph lbr`); `cache_hit_handshake_progress`, `node_served_evidence` and `probe_record_with_origin` must be **absent**, and `SessionKey` hashing should stay well below 10% of cycles | evidence-scan symbols absent | **cross-worker handshakes never completing** (#18520). Flows sat on the 20 s opening window, and every packet paid an evidence scan worth about 40% of worker cycles. The CLI `Timeout` column reads the shared view, which lags the worker tables (#18530), so it is not this row's oracle until #18530 is fixed |
 | F4 | Profile the hot worker under `-P8` (`perf record --call-graph lbr -p <helper pid>`) and keep the top 25 symbols with the run | no new top-10 symbol without an explanation | per-packet cost creep. Loss `SessionKey::hash` was 3.3% on 2026-10-19, 16.9% on 2026-10-29, 9.8% after #18520 |
 | F5 | New flows during a split (WAN RG on one node, LAN RG on the other), v4 and v6, to the WAN target **and** via a non-default static | 0% loss | split nodes dropping new WAN flows (#18517), stamped fabric punts dropping as Invalid (#18518), a non-default static ending in NoRoute (#18517 review) |
-| F6 | **Stalls.** The same `make perf-matrix` run | `RESULT: PASS`: no run errors, no 1 s interval under 10% of the run median, no stream under 1 Mbit/s in any interval | **"the iperfs stop"**: a single stream dying while the others absorb its share keeps the aggregate healthy, so only a per-stream, per-interval check sees it. `make perf-matrix-lib` pins the verdict on fixtures |
+| F6 | **Stalls.** The same `make perf-matrix` run | `RESULT: PASS`: no run errors, no 1 s interval under 25% of the run's peak (healthy runs never dip below 74%), no stream under 1 Mbit/s in any interval | **"the iperfs stop"**: a single stream dying while the others absorb its share keeps the aggregate healthy, so only a per-stream, per-interval check sees it. `make perf-matrix-lib` pins the verdict on fixtures |
 
 ## Tier 3: HA (loss and tcp; destructive targets self-lock)
 

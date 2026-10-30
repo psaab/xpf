@@ -5,12 +5,16 @@
 #        iperf-matrix.sh --selftest
 #
 # Runs iperf3 -J from the cluster LAN host for v4/v6 x push/reverse x
-# -P1/-P8/-P12 against the env's IPERF_TARGET4/6 and records one summary line
+# -P1/-P8/-P12 against the env's IPERF_TARGET4/6 on IPERF_PORT (default 5211,
+# the unshaped class; 5201 is the lab CoS config's 100 Mbit/s exact class,
+# #9691) and records one summary line
 # per run. Throughput numbers are recorded, not judged: each cluster has its
 # own band, and a band compared without loadavg is not a measurement. What the
 # matrix DOES judge is the user-visible failure "the iperf stops":
 #   - a run that errors or fails to connect;
-#   - any 1 s interval whose aggregate is under 10% of the run median;
+#   - any 1 s interval whose aggregate is under 25% of the run's peak
+#     (healthy runs on loss and tcp never dip below 74% of their peak; a
+#     median-relative test misses a stall that covers most of the run);
 #   - any 1 s interval in which a single stream moves under 1 Mbit/s.
 # Any of these FAILs the matrix (exit 1). A run whose JSON cannot be parsed,
 # or that recorded no intervals, is a FAIL too: an empty measurement must
@@ -45,15 +49,16 @@ end = d.get("end", {})
 sent = end.get("sum_sent", {})
 recv = end.get("sum_received", {})
 med = statistics.median(agg)
-low = [n for n, x in enumerate(agg) if x < 0.1 * med]
+peak = max(agg)
+low = [n for n, x in enumerate(agg) if x < 0.25 * peak]
 stream_stalls = sum(
     1 for i in intervals for s in i.get("streams", []) if s["bits_per_second"] < 1e6
 )
-bad = bool(low) or stream_stalls > 0 or med <= 0
+bad = bool(low) or stream_stalls > 0 or peak <= 0
 print(
     f"{'FAIL' if bad else 'ok'} sent={sent.get('bits_per_second', 0) / 1e9:.2f} "
     f"recv={recv.get('bits_per_second', 0) / 1e9:.2f} retr={sent.get('retransmits', '-')} "
-    f"med_iv={med:.2f} min_iv={min(agg):.2f} low_iv={low} stream_stall_iv={stream_stalls} "
+    f"med_iv={med:.2f} peak_iv={peak:.2f} min_iv={min(agg):.2f} low_iv={low} stream_stall_iv={stream_stalls} "
     f"n_iv={len(agg)}"
 )
 sys.exit(1 if bad else 0)
@@ -81,6 +86,10 @@ def run(aggs, streams=None):
 
 cases = {
     "healthy": run([10.0] * 10),
+    # A stall covering most of the run: its median is the stalled rate, so a
+    # median-relative test reads it clean.
+    "long-stall": run([20.0] * 9 + [0.002] * 11,
+                      [[1e10, 1e10]] * 9 + [[1e6 + 1, 1e6 + 1]] * 11),
     # The aggregate collapses to 5% of the median for two seconds while every
     # stream still moves more than 1 Mbit/s: only the aggregate term sees it.
     "aggregate-stall": run([10.0] * 5 + [0.5, 0.5] + [10.0] * 3,
@@ -100,7 +109,7 @@ with open(f"{out}/unparseable.json", "w") as f:
 PY
 	# name:expected-rc. Only "healthy" may pass; every other row is a shape
 	# that once read as clean somewhere in this tree.
-	for cell in healthy:0 aggregate-stall:1 total-stall:1 one-stream-stall:1 iperf-error:1 no-intervals:1 unparseable:1; do
+	for cell in healthy:0 long-stall:1 aggregate-stall:1 total-stall:1 one-stream-stall:1 iperf-error:1 no-intervals:1 unparseable:1; do
 		verdict "$dir/${cell%%:*}.json" >/dev/null
 		rc=$?
 		if [ "$rc" = "${cell##*:}" ]; then
@@ -123,6 +132,7 @@ esac
 
 BASE=${1:?usage: iperf-matrix.sh <outdir> [duration-s] [reps] | --selftest}
 DUR=${2:-20}
+PORT=${IPERF_PORT:-5211}
 REPS=${3:-1}
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=/dev/null
@@ -158,7 +168,7 @@ for rep in $(seq 1 "$REPS"); do
 			for p in 1 8 12; do
 				tag="v${fam}-${dir}-P${p}-r${rep}"
 				timeout $((DUR + 40)) incus exec "$CLUSTER_LAN_HOST" -- \
-					iperf3 -c "$target" -p 5201 -P "$p" -t "$DUR" "${rev[@]}" -J --connect-timeout 5000 \
+					iperf3 -c "$target" -p "$PORT" -P "$p" -t "$DUR" "${rev[@]}" -J --connect-timeout 5000 \
 					>"$OUT/$tag.json" 2>"$OUT/$tag.err"
 				rc=$?
 				line=$(verdict "$OUT/$tag.json")
