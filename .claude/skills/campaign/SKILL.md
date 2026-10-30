@@ -490,18 +490,20 @@ and DOES gate merges). Never cite a green watch as a passed gate:
   per run to `/var/worktrees/.cache/smoke-watch/smoke-watch.log`.
 - The parent reads the latest lines at every landing-queue check. A NEW
   failure (one not listed under "Known product failures (tracked)" in
-  `docs/regression-test-matrix.md`) or a tip regression
+  `docs/regression-test-matrix.md`, and not a "Known environment rows"
+  cell whose off-path control still fails) or a tip regression
   vs the previous line = a correctness feedback signal: file an issue
   immediately and forward-fix it in the normal queue — do NOT stop or
   slow the landing queue for it, and never hold a PR for the watch.
 - The baseline is the deployed master's own latest line. The cells
   expected red, each with its issue, are listed under "Known product
   failures (tracked)" in `docs/regression-test-matrix.md`, each with
-  its owner and a same-run control. The 2026-10-13 baseline excused
+  its owner. The 2026-10-13 baseline excused
   "LAN host -> internet IPv6" as environment without a control. Its
   traceroute half was a product defect (ping to a live host worked
   while every hop past the firewall was `???`, #18174); its ping half
-  is a dead target, tracked until the harness is retargeted.
+  is a dead target, a "Known environment rows" cell until the harness is
+  retargeted (#18556).
   Deviations from the baseline are the signal; the baseline itself is
   not.
 - Perf mistakes ride the same loop: when a perf-relevant merge lands,
@@ -564,7 +566,8 @@ what else catches its defect.
   reads a STALE baseline and does not dispatch that cluster's
   gate slot in the same response is the same campaign failure as
   an unactioned verdict. A NEW failure (one not tracked in the
-  matrix's "Known product failures") on any cluster files an issue immediately
+  matrix's "Known product failures", and not an environment row whose
+  off-path control still fails) on any cluster files an issue immediately
   and enters the normal queue — it never holds the landing queue.
   Downstream skills (`security-matrix`, `failover-test`,
   `perf-test`, `userspace-ha-validation`) run their own topology
