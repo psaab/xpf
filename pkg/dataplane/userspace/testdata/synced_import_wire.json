@@ -9,5 +9,6 @@
   {"variant": "RejectedStandaloneReverse", "ok": false, "error": "synced-import-refused:standalone-reverse", "go_class": "refused"},
   {"variant": "RejectedGateBusy", "ok": false, "error": "synced-import-refused:gate-busy", "go_class": "gate-busy"},
   {"variant": "RejectedMirrorPublish", "ok": false, "error": "mirror-write-failed", "go_class": "bare"},
-  {"variant": "RejectedUnknownRoutingDomain", "ok": false, "error": "synced-import-refused:unknown-routing-domain", "go_class": "refused"}
+  {"variant": "RejectedUnknownRoutingDomain", "ok": false, "error": "synced-import-refused:unknown-routing-domain", "go_class": "refused"},
+  {"variant": "RejectedSupersededAlias", "ok": false, "error": "synced-import-refused:superseded-alias", "go_class": "refused"}
 ]

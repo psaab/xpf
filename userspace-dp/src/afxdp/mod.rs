@@ -746,6 +746,9 @@ mod tests_directed_broadcast_14654;
 #[path = "tests_fabric_zone_stamp.rs"]
 mod tests_fabric_zone_stamp;
 #[cfg(test)]
+#[path = "tests_split_rg_failback_18531.rs"]
+mod tests_split_rg_failback_18531;
+#[cfg(test)]
 #[path = "tests_gre_local_delivery.rs"]
 mod tests_gre_local_delivery;
 #[cfg(test)]

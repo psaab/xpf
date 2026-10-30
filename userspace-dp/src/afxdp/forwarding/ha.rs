@@ -43,6 +43,37 @@ pub(in crate::afxdp) fn owner_rg_for_resolution(
     owner_rg_for_flow(forwarding, resolution.egress_ifindex)
 }
 
+/// #18531: the owner RG a hit persists with a re-resolved forwarding
+/// decision. `None` means keep the row's recorded owner RG.
+///
+/// A `FabricRedirect` names the fabric parent as its egress, and that
+/// ifindex has no egress row, so `owner_rg_for_resolution` answers 0
+/// for it. The flow's egress RG has not gone away: the peer owns it.
+/// Persisting 0 drops the row out of `owner_rg_sessions`. That index is
+/// what `DemoteOwnerRGS` and `RefreshOwnerRGS` walk, and the peer-delete
+/// owner guard reads the same owner RG. So a split-RG failback hit that
+/// stored a redirect left the LAN node's promoted row unretagged,
+/// unrefreshed when the RG returned, and immune to the WAN owner's
+/// delete. Keep the recorded owner instead. Every other disposition
+/// persists what it names, as before.
+pub(in crate::afxdp) fn persisted_owner_rg_for_resolution(
+    forwarding: &ForwardingState,
+    resolution: ForwardingResolution,
+) -> Option<i32> {
+    match resolution.disposition {
+        ForwardingDisposition::FabricRedirect => {
+            let owner_rg_id = owner_rg_for_resolution(forwarding, resolution);
+            (owner_rg_id > 0).then_some(owner_rg_id)
+        }
+        ForwardingDisposition::ForwardCandidate
+        | ForwardingDisposition::HAInactive
+        | ForwardingDisposition::LocalDelivery => {
+            Some(owner_rg_for_resolution(forwarding, resolution))
+        }
+        _ => None,
+    }
+}
+
 /// #15742: would-be egress RG peer-owned test for a cluster-terminal
 /// resolution. The lookup stamps the selected forwarding row's
 /// gateway ifindex (select_source_ifindex_*) before zeroing the

@@ -178,6 +178,7 @@ pub(in crate::afxdp) fn collect_refresh_owner_rgs_items(
             now_secs,
             &decision,
             metadata,
+            key,
             resolution_target,
             looked_up_resolution,
             super::super::FabricArrival::Command {

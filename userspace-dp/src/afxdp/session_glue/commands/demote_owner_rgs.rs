@@ -89,6 +89,7 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 now_secs,
                 &decision,
                 &metadata,
+                &demoted_key,
                 resolution_target,
                 looked_up_resolution,
                 super::super::FabricArrival::Command {
