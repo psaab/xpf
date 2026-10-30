@@ -1347,43 +1347,6 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     {
         return None;
     }
-    // #16215 (third shape): a row whose STORED resolution is
-    // FabricRedirect names the fabric pseudo-egress (the fabric parent
-    // ifindex, e.g. 4 for fab0@ge-0-0-0) as its egress. That ifindex has
-    // no EgressInterface row, zone pair, or SNAT geometry, so judging it
-    // below can only answer `forwarding.egress.get(&fabric)` miss =
-    // invalid = revoke-and-delete both halves — exactly the egress-miss
-    // revocation proven live on fw0 (egress 4, dest_valid=true, dynamic
-    // provenance Some(false)). The fabric leg's NAT validity is judged
-    // on the egress owner when the packet arrives there; here the row
-    // carries no local egress verdict to judge against, so DECLINE like
-    // the terminal decline above. It applies regardless of failover
-    // timing (the live revocations fired in the pre-failover
-    // demote/republish window). A genuinely withdrawn SNAT rule still
-    // revokes once the row gains a real egress resolution (live or
-    // re-resolved) and runs the full geometry check below, and the
-    // egress owner's synced copy (real egress) is judged on every
-    // redirected packet that reaches it.
-    //
-    // #18531: keyed on the RESOLUTION, not the origin. #16215 gated it on
-    // `is_peer_synced()`, but the stored FabricRedirect means the same
-    // thing whoever authored the row. The live miss: a split-RG failback
-    // (RG1/WAN to the peer, RG2/LAN kept). `update_ha_state` publishes the
-    // inactive RG1 before the workers drain `DemoteOwnerRGS`. So the
-    // serving worker's first LAN packet after the RG epoch bump hits its
-    // crash-takeover `SharedPromote` row before the demote retags it to
-    // `SyncImport`, re-resolves and persists FabricRedirect (#12265),
-    // and finds the SNAT judgment Stale. Each kernel neighbor batch
-    // advances the #16109 generation while the flow cache serves the row.
-    // The origin gate sent that established flow to the egress-miss
-    // revocation. The pair and its Close went to the new WAN owner, which
-    // deleted its live copy.
-    if matches!(
-        forward_decision.resolution.disposition,
-        ForwardingDisposition::FabricRedirect
-    ) {
-        return None;
-    }
     // #16215: judge the packet's re-resolved decision, not a stored
     // terminal one — on EVERY node, not only the activating one. A
     // peer-synced row can still carry its standby-side terminal
@@ -1406,9 +1369,14 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // translations. Reverse hits keep the stored forward decision.
     // A genuinely withdrawn rule still revokes: the zone pair is read
     // off the live egress, and the translation geometry must match a
-    // live rule. Scoped to peer-synced rows with a locally-forwarding
-    // re-resolution; every other row judges its stored decision
-    // exactly as before. Copy-on-write: the caller owns the hit
+    // live rule. #18531: any origin with a locally-forwarding
+    // re-resolution (it was peer-synced only). A locally-authored row
+    // whose stored resolution is a FabricRedirect (persisted on the
+    // LAN node at a split-RG failback) must be judged against the real
+    // egress the moment its RG returns, even at the same generation,
+    // where nothing re-stores the row: the packet leaves on that
+    // egress. Every other row judges its stored decision exactly as
+    // before. Copy-on-write: the caller owns the hit
     // decision by value, so no other row is mutated (the stored row
     // is rewritten by RefreshOwnerRGS, or re-resolved again on the
     // next stale hit — never per-packet on the fast path).
@@ -1423,7 +1391,6 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // geometry no longer matches the packet's re-resolved egress);
     // revocation stays a FRESH decision's verdict in both arms.
     let forward_decision = if !metadata.is_reverse
-        && forward_origin.is_peer_synced()
         && decision.resolution.egress_ifindex > 0
         && matches!(
             decision.resolution.disposition,
@@ -1440,6 +1407,45 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     } else {
         forward_decision
     };
+    // #16215 (third shape) / #18531: the JUDGED resolution names no
+    // egress this node forwards out of, so there is no local verdict to
+    // judge the translation against. Decline (keep the session; the
+    // packet takes its HA disposition: redirected to the owner or
+    // dropped) and leave the stamp stale, so the first judgment after
+    // the egress becomes local runs the full geometry check below.
+    //
+    // - FabricRedirect names the fabric parent (e.g. 4 for
+    //   fab0@ge-0-0-0), which has no EgressInterface row, so the
+    //   geometry check can only answer `forwarding.egress.get(&fabric)`
+    //   miss = invalid. That is the egress-miss revocation proven live
+    //   on fw0 (#16215) and the split-RG failback revocation on the LAN
+    //   node (#18531).
+    // - HAInactive names a real egress whose RG is not forwarding-active
+    //   here. Interface/pool translation validity belongs to the node
+    //   that owns that egress. On a split node the route can also be
+    //   the wrong interface: the peer-owned WAN connected prefix is
+    //   withheld, so the destination falls to the default via the WAN
+    //   gateway VLAN. The live failback had reth0.50, egress 13, whose
+    //   address is not the reth0.80 translation, on the node taking
+    //   RG1. Judging it revoked every imported flow arriving over the
+    //   fabric in the window after the peer demoted RG1 and before
+    //   this node activated it (#18531, the RG-taking side).
+    //
+    // Keyed on the resolution, whoever authored the row (#16215 gated the
+    // redirect arm on `is_peer_synced()`). Runs after the substitution
+    // above, so a forward hit whose live decision forwards locally is
+    // judged on that live egress, not declined on a stale stored one.
+    // A withdrawn translation is revoked by whichever node owns the
+    // egress, on its next slow-path hit with a stale stamp. The Close
+    // that emits reaches this node as a peer delete, which can remove a
+    // locally-authored redirect row because the row keeps its egress RG
+    // (`persisted_owner_rg_for_resolution`).
+    if matches!(
+        forward_decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect | ForwardingDisposition::HAInactive
+    ) {
+        return None;
+    }
     // #15934: selector priority follows HIT DIRECTION (see
     // forward_selector_for_hit), not session-branch shape: a reverse hit
     // that reaches this arm because its forward companion IS materialized
@@ -2777,19 +2783,11 @@ fn reverse_hit_zone_policy(
             // newly resolved route so reply-only streams do not repeat a full
             // route lookup and judgment on every packet.
             if companion_forwarding_stale {
-                let owner_rg_id = matches!(
-                    input.decision.resolution.disposition,
-                    ForwardingDisposition::ForwardCandidate
-                        | ForwardingDisposition::FabricRedirect
-                        | ForwardingDisposition::HAInactive
-                        | ForwardingDisposition::LocalDelivery
-                )
-                .then(|| {
-                    crate::afxdp::forwarding::owner_rg_for_resolution(
-                        forwarding,
-                        input.decision.resolution,
-                    )
-                });
+                // #18531: a FabricRedirect keeps the recorded owner RG.
+                let owner_rg_id = crate::afxdp::forwarding::persisted_owner_rg_for_resolution(
+                    forwarding,
+                    input.decision.resolution,
+                );
                 // #14318: move the pair's egress zone with the persisted
                 // route. FabricRedirect keeps its recorded zone (the
                 // transport zone is not the flow's); others use live egress.

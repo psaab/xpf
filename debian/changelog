@@ -1,4 +1,9 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: keep SNAT sessions through an RG ownership gap
+    at split-RG failback: the node taking the WAN RG no longer revokes
+    imported flows before it activates, a redirected row keeps its
+    egress RG, and the live egress is judged when the RG returns
+    (#18531).
   * Userspace dataplane: keep established SNAT flows across a split-RG
     failback. The source-NAT revalidation decline for a stored
     FabricRedirect resolution now applies to locally-authored rows too

@@ -382,39 +382,75 @@ Also closed on the branch, independently of the aged cell:
 peer-synced rows (incl. `DemoteOwnerRGS`-retagged `SyncImport`)
 whose stored decision is terminal **or** `FabricRedirect` decline
 SNAT revalidation (the fabric pseudo-egress has no `EgressInterface`
-row, so the first geometry check revoked unconditionally);
+row, so the first geometry check revoked unconditionally; the
+`FabricRedirect` half is superseded by #18531 below: any origin, keyed
+on the judged resolution, with `HAInactive` added);
 revocation only on a fresh decision's withdrawn translation, and
 `StaleSourceNat` revocations are counted per binding and exported
 as `xpf_userspace_snat_revoked_sessions_total`. Reverse hits never
 substitute the reply decision for the stored forward decision.
 
-**#18531: the `FabricRedirect` decline applies to every origin.** It was
-gated on `is_peer_synced()`, and a split-RG failback reaches it with a
-locally-authored row:
+**#18531: an ownership transient is no ground to revoke an SNAT session.**
+A split-RG failback (RG1/WAN to the peer, RG2/LAN kept) killed every
+established SNAT stream, on both nodes, through the source-NAT revalidation
+(`source_nat_revocation_on_session_hit_with_ingress`).
 
-1. RG1 (WAN) moves to the peer and RG2 (LAN) stays.
-2. `update_ha_state` publishes the inactive RG1 before the workers drain
+*The node keeping the LAN RG (fw1).*
+
+1. `update_ha_state` publishes the inactive RG1 before the workers drain
    `DemoteOwnerRGS`.
-3. The serving worker's first LAN packet after the RG-epoch flow-cache
-   invalidation hits its crash-takeover `SharedPromote` row. That row
-   has not been retagged yet.
-4. The packet re-resolves to `FabricRedirect` and persists it.
-5. The row's SNAT judgment is Stale. While the flow cache served the
-   row, every kernel neighbor batch advanced the #16109 neighbor
-   generation.
+2. The serving worker's first LAN packet after the RG-epoch flow-cache
+   invalidation hits its crash-takeover `SharedPromote` row, which is
+   locally authored and not yet retagged.
+3. The packet re-resolves to `FabricRedirect` and persists it.
+4. The row's SNAT judgment is Stale: while the flow cache served the row,
+   every kernel neighbor batch advanced the #16109 neighbor generation.
+5. The #16215 `FabricRedirect` decline was gated on `is_peer_synced()`, so
+   the validator judged the fabric parent, which has no egress row, and
+   revoked the pair. The Close passed the daemon's fabric-redirect sync
+   branch and deleted the WAN owner's live copy.
 
-The origin gate revoked the established pair. Its Close passed the
-daemon's fabric-redirect sync branch and deleted the new WAN owner's live
-copy.
+*The node taking RG1 (fw0), in the window after the peer demoted RG1 and
+before this node activated it.* fw1 fabric-redirects the translated flow,
+and fw0's imported row re-resolves to `HAInactive`. With the #18519 split
+FIB that resolution is the default via the WAN gateway on reth0.50,
+because the peer-owned reth0.80 prefix is withheld. The validator judged
+reth0.50's address against the reth0.80 translation and revoked the pair.
+That Close is not synced back (owner-RG gate, fw0 not yet primary), but
+fw0 had lost the session for good.
 
-The decline now keys on the stored resolution alone. The egress owner's
-synced copy has a real egress and is still judged on every redirected
-packet, so a withdrawn translation still revokes there. The terminal
+The rules now:
+
+- **Decline keyed on the judged resolution.** A judged `FabricRedirect` or
+  `HAInactive` names no egress this node forwards out of, so the judgment
+  is declined for every origin. The session is kept, the packet takes its
+  HA disposition (redirected or dropped), and the stamp stays stale.
+- **Live egress judged first.** The live-resolution substitution runs
+  before that decline for every origin (it was peer-synced only). When the
+  egress RG returns, the forward hit is judged on the real egress, even at
+  the same generation, where nothing re-stores the row.
+- **Persisted redirect keeps its owner RG.**
+  `persisted_owner_rg_for_resolution` keeps the recorded owner RG for a
+  `FabricRedirect`; the fabric parent names none. The row therefore stays
+  in the RG index that `DemoteOwnerRGS` and `RefreshOwnerRGS` walk. That
+  RG is inactive here, so the WAN owner's revocation, arriving as a peer
+  delete, is not refused by the #9048 locally-owned guard.
+
+A withdrawn translation is revoked by the node that owns the egress, on
+its next slow-path hit with a stale stamp. That is not every redirected
+packet: flow-cache hits are not re-judged. The terminal
 (`DiscardRoute` / `ClusterTerminalHAInactive`) decline is still gated on
-peer-synced origin. Pinned by
-`afxdp::tests_split_rg_failback_18531` (production poll pipeline on the
-captured fw1 snapshot) and the `SharedPromote` cell of
-`peer_synced_fabric_redirect_snat_declines_16215`.
+peer-synced origin.
+
+Pinned by `afxdp::tests_split_rg_failback_18531`, which drives the
+production poll pipeline on the captured split snapshots, and by the
+`SharedPromote` cell of `peer_synced_fabric_redirect_snat_declines_16215`.
+The daemon-side routing of the owner's Close is the existing owner-RG gate
+and is not covered by those cells. Open residuals are tracked in #18535:
+- a translated alias row removed in the RG gap, so an alias-only copy
+  loses the flow;
+- activation before the connected-RG FIB republish;
+- scope-less imports not judged by the owner.
 
 ### Never-again gates
 

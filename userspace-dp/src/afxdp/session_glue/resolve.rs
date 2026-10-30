@@ -686,14 +686,12 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
                     };
                 let invalidate_policy_revalidation = previous_policy_to_zone_id
                     .is_some_and(|previous| previous != policy_to_zone_id);
-                let owner_rg_id = matches!(
-                    decision.resolution.disposition,
-                    ForwardingDisposition::ForwardCandidate
-                        | ForwardingDisposition::FabricRedirect
-                        | ForwardingDisposition::HAInactive
-                        | ForwardingDisposition::LocalDelivery
-                )
-                .then(|| owner_rg_for_resolution(forwarding, decision.resolution));
+                // #18531: a FabricRedirect keeps the recorded owner RG
+                // (the fabric parent names none); see the helper.
+                let owner_rg_id = crate::afxdp::forwarding::persisted_owner_rg_for_resolution(
+                    forwarding,
+                    decision.resolution,
+                );
                 // #14318: only a locally-forwarding route (or the recorded
                 // zone behind a fabric redirect, already in policy_to_zone_id)
                 // names the flow's new egress zone. Terminal routes do not.
