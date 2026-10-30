@@ -206,7 +206,8 @@ forwarding-restoration SLAs
 ### Current mode and related timers
 - Heartbeat staleness uses `set chassis cluster heartbeat-interval <ms>` and
   `set chassis cluster heartbeat-threshold <n>`; startup/restart grace also
-  applies (`pkg/cluster/heartbeat.go:61-98,1916-1960`).
+  applies, with the cold-boot floor ending early once bring-up is proven
+  over (#18549) (`pkg/cluster/heartbeat.go:61-98,1916-1960`).
 - Interface/IP monitoring is separate: polls every 1s, requires three
   consecutive failed polls, and has a default 5s state-change hold-down. IP
   probes run 16 at a time with 800ms per-target deadlines and 500ms cycle

@@ -761,6 +761,9 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.peerAlive = true
 	m.peerEverSeen = true
 	m.peerConfirmedAbsent = false
+	// #18549: extend the gap-free admitted-heartbeat run that, together with
+	// a completed inbound bulk, ends the cold-boot floor early.
+	m.notePeerHeartbeatAdmittedLocked(MonotonicNanos())
 	// #16751: a heard peer retires the Manager-owned never-seen clock.
 	m.disarmNeverSeenClockLocked()
 	// #12165/#17056: admission ends the continuous-suppression window in
@@ -919,6 +922,8 @@ func (m *Manager) handlePeerTimeout() {
 
 	m.peerAlive = false
 	m.peerGroups = make(map[int]PeerGroupState)
+	// #18549: a lost peer's heartbeat run proves nothing about the next.
+	m.resetPeerHeartbeatRunLocked()
 	// #14163: a timed-out peer's identity must no longer be echoed; the
 	// old first-nonzero scan got this for free from the empty map.
 	m.latestPeerHeartbeatSession = 0

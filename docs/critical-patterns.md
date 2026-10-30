@@ -370,7 +370,9 @@ See the deploy backing table in
   defaults, 200ms × 5 (1s) in the deployed lab. The knob names are
   `set chassis cluster heartbeat-interval <ms>` and
   `set chassis cluster heartbeat-threshold <n>`; the sync-recency guard and
-  startup/restart grace can defer peer-loss declaration
+  startup/restart grace can defer peer-loss declaration (the 30s cold-boot
+  floor ends early once the inbound bulk is complete and the peer was then
+  heard gap-free for 5s, #18549)
   (`pkg/cluster/heartbeat.go:61-98,1916-1960`;
   `pkg/daemon/daemon_ha_sync.go:170-206`;
   `docs/ha-cluster-userspace.conf:71-72`).
