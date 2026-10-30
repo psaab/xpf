@@ -158,6 +158,24 @@ sync.
         the Time Exceeded / Packet-Too-Big builders, which resolve the same
         logical unit (#6102 — before that fix they wrongly keyed the physical
         index).
+      - **#18174 — the SOURCE of a generated ICMP error on a RETH:** every
+        builder above sources the reply from `forwarding.egress[unit]
+        .primary_v4/v6`. For an untagged RETH unit Go emits TWO rows on one
+        ifindex: the base row (`reth1`, kernel-observed, carrying only the
+        per-node `169.254.<rg>.<node+1>/32` RETH address and the kernel
+        fe80 address) BEFORE the unit row (`reth1.0`, carrying the LAN
+        address). Each row picks first non-link-local, else first, but the
+        shared-ifindex merge in `forwarding_build/interfaces.rs` was
+        first-row-wins, so the base row's link-local FALLBACK shadowed the
+        unit's address and the firewall's own Time Exceeded answered as
+        169.254.2.1 (traceroute/mtr hop 1). `merge_undesignated_primary` now
+        lets a non-link-local pick replace a link-local incumbent; between
+        two non-link-local (or two link-local) undesignated picks the first
+        row still wins, and a designated primary (#16513) still beats both.
+        Cells: `shared_ifindex_reth_base_link_local_does_not_shadow_unit_address_18174`
+        (`forwarding_build/primary_address_15155.rs`) and
+        `hop_one_time_exceeded_is_sourced_from_lan_address_not_reth_link_local_18174`
+        (`tests_mtr_icmp_errors_18174.rs`, through the poll path).
       - **#3609 — per-interface host-inbound override:** the local-delivery
         host-inbound gate (`poll_descriptor/filter.rs::host_inbound_gated_lo0_action`
         → `forwarding::host_inbound_admits_iface_for_destination`) looks up
