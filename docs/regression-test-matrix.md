@@ -72,6 +72,7 @@ are a regression.
 | F4 | Profile the hot worker under `-P8` (`perf record --call-graph lbr -p <helper pid>`) and keep the top 25 symbols with the run | no new top-10 symbol without an explanation | per-packet cost creep. Loss `SessionKey::hash` was 3.3% on 2026-10-19, 16.9% on 2026-10-29, 9.8% after #18520 |
 | F5 | New flows during a split (WAN RG on one node, LAN RG on the other), v4 and v6, to the WAN target **and** via a non-default static | 0% loss | split nodes dropping new WAN flows (#18517), stamped fabric punts dropping as Invalid (#18518), a non-default static ending in NoRoute (#18517 review) |
 | F6 | **Stalls.** The same `make perf-matrix` run | `RESULT: PASS`: no run errors, no 1 s interval under 25% of the run's peak (healthy runs never dip below 74%), no stream under 1 Mbit/s in any interval | **"the iperfs stop"**: a single stream dying while the others absorb its share keeps the aggregate healthy, so only a per-stream, per-interval check sees it. `make perf-matrix-lib` pins the verdict on fixtures |
+| F7 | **Traceroute through the cluster.** From the LAN host: `mtr --report --report-cycles=3 -4 <public host>`, the same with `-6`, and `mtr -u` (UDP probes) | hop 1 is the LAN-facing gateway address (v4 the reth VIP, never an internal `169.254.x.x`); every later hop up to the destination answers; the final hop is the destination | ICMP Time Exceeded from upstream routers not un-NATed back to the LAN host (every hop past the firewall `???` while ping works), and the firewall's own v4 TTL-exceeded sourced from `169.254.2.1` (#18174, user-reported 2026-10-30). `test-connectivity`'s MTR cells cover the same; they are product failures, not environment |
 
 ## Tier 3: HA (loss and tcp; destructive targets self-lock)
 
@@ -104,8 +105,11 @@ Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ra
 - **tcp external IPv4 (1.1.1.1, 8.8.8.8).** The upstream behind 172.16.50.1
   does not forward for the tcp cluster's source; the firewall reaches its
   gateway directly. Verify with the gateway ping before excusing the row.
-- **External IPv6 from the LAN host** (`2607:f8b0:...`): an upstream issue the
-  campaign skill already lists as known.
+- **Not environment: MTR / traceroute cells.** The `test-connectivity` cells
+  "mtr LAN→internet IPv6 … final hop 2" and "Group11 IPv4 MTR … `???`" were
+  excused here as an upstream issue. They are not: ping to the same
+  destinations works in both families while every hop past the firewall is
+  `???` (#18174). They are row F7 and must pass.
 - **#18212 fabric/control host pings** (fw0↔fw1 on 10.99.x) fail on loss, tcp
   and udp.
 - **tcp host SR-IOV VFs.** The host's dracut default network must not manage
