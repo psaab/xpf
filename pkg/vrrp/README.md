@@ -442,10 +442,9 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   one heartbeat (#18540, `pkg/cluster` "Planned-shutdown resign"), so the
   peer normally promotes on that frame. A stop that never reaches the
   resign (crash, SIGKILL) and a lone node fall back to heartbeat-loss
-  detection. So does a peer the resign cannot move: one whose hold is
-  under 2 s old, one carrying an aborted-transfer marker, or one holding a
-  live transfer-out lease (with #18525). That fallback comes no sooner than
-  the heartbeat threshold and possibly later under the sync-recency guard (`instance.go:770-807`;
+  detection. So does a peer carrying an aborted-transfer marker. That
+  fallback comes no sooner than the heartbeat threshold and possibly later
+  under the sync-recency guard (`instance.go:770-807`;
   `instance_rx.go:155-173`; `instance_prio0_run_test.go:143-149`;
   `pkg/cluster/failover.go:447-450`;
   `pkg/daemon/daemon_run_shutdown.go:418-428`;

@@ -34,10 +34,10 @@ import (
 // 0" arm demotes this node) and weight 0 on the wire. The peer arms that act
 // on weight 0 already exist — "Peer weight 0", the ManualFailover dual-resign
 // release, and peerYieldedOwnership for a not-ready receiver — so the peer
-// needs no new code and an older peer honours it too. A peer whose hold is
-// under its 2 s guard, that carries an aborted-transfer marker, or (with
-// #18525) holds a live remote transfer-out lease, still takes over only on
-// heartbeat loss; see pkg/cluster/README.md. The debt is a
+// needs no new code and an older peer honours it too. The explicit wire
+// marker below additionally lets a current peer release its #18521 transfer
+// lease hold and its 2s dual-resign guard on the resign frame; see
+// pkg/cluster/README.md. The debt is a
 // reserved monitor name, so a config apply cannot reconcile it away, and it
 // composes additively, so no later monitor recalc on the way out can lift the
 // weight back above 0.
@@ -126,4 +126,54 @@ func (m *Manager) kickHeartbeat() {
 	if sender != nil {
 		sender.kick()
 	}
+}
+
+// The planned-shutdown resign is also announced EXPLICITLY on the wire, as a
+// reserved entry in the heartbeat's monitor section: one per resigned RG,
+// Interface = PlannedShutdownMonitorIface, Up = false. Weight 0 alone cannot
+// carry it: a transfer requester may sit at weight 0 momentarily inside its
+// commit window (#18521), and the owner's lease hold must survive that. A
+// leaving peer, though, will never commit, so the hold — and the 2s
+// dual-resign guard — only delay a takeover to heartbeat loss. An older peer
+// stores the entry as one more peer monitor (display only) and still acts on
+// the weight 0 through its existing arms.
+
+// plannedShutdownWireMonitorsLocked returns the reserved monitor entries this
+// node advertises for every RG it resigned for a planned shutdown. Caller must
+// hold m.mu (read).
+func (m *Manager) plannedShutdownWireMonitorsLocked() []HeartbeatMonitor {
+	var out []HeartbeatMonitor
+	ids := make([]int, 0, len(m.groups))
+	for id := range m.groups {
+		ids = append(ids, id)
+	}
+	sort.Ints(ids)
+	for _, id := range ids {
+		if _, ok := m.monitorWeights[monitorKey{rgID: id, iface: PlannedShutdownMonitorIface}]; !ok {
+			continue
+		}
+		out = append(out, HeartbeatMonitor{
+			RGID:      wireRGID(id),
+			Weight:    clampWireWeight(PlannedShutdownMonitorCost),
+			Up:        false,
+			Interface: PlannedShutdownMonitorIface,
+		})
+	}
+	return out
+}
+
+// peerLeavingForPlannedShutdownLocked reports whether the peer's latest
+// heartbeat resigned rgID for a planned shutdown: the reserved monitor entry
+// for that RG AND an advertised weight of 0 (an entry without the resign is
+// inconsistent and ignored). Caller must hold m.mu.
+func (m *Manager) peerLeavingForPlannedShutdownLocked(rgID int, peerGroup *PeerGroupState) bool {
+	if peerGroup == nil || peerGroup.Weight > 0 {
+		return false
+	}
+	for _, mon := range m.peerMonitors {
+		if mon.Interface == PlannedShutdownMonitorIface && !mon.Up && mon.RedundancyGroup == rgID {
+			return true
+		}
+	}
+	return false
 }

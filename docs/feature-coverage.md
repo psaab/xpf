@@ -434,8 +434,7 @@ the userspace dataplane admission boundary is in
   defaults / 1s lab config), and the sync-recency guard can extend that gap:
   - a stop that never reaches the resign (crash, SIGKILL);
   - a lone node, which skips the resign;
-  - a peer the resign cannot move (a hold under 2 s old, or an
-    aborted-transfer marker).
+  - a peer carrying an aborted-transfer marker.
 
   No end-to-end restoration bound is asserted (`pkg/daemon/daemon_run_shutdown.go:418-428`;
   `pkg/cluster/manager.go:1026-1077`;

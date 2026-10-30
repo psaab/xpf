@@ -767,10 +767,12 @@ resign and peer-restart hold release (#18540)".
 test-restart-connectivity`, `make test-failover` and `make test-ha-crash` on a
 gate cluster.
 
-**Risk to watch in that gate:** the peer now promotes before it has drained
-the stopping node's sync backlog. Post-activation synced imports neither
-replace local sessions nor reach `USERSPACE_SESSIONS` (see `pkg/cluster`
-README). If post-takeover loss grows, suspect this first.
+**Note for that gate:** the peer now promotes before it has drained the
+stopping node's sync backlog, so more synced imports land after activation.
+Such an import does not replace a local session the new owner already holds
+(#9678, deliberate). It does reach `USERSPACE_SESSIONS` through the worker
+fan-out (verified in #18550/#18551). Post-takeover loss leads are tracked in
+#18550/#18551.
 
 ### Manual failover refused 11-29 s after a peer restart — FIXED IN SOURCE (#18541, #18374), NOT YET LIVE-VALIDATED
 

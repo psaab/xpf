@@ -4031,40 +4031,56 @@ debt is in `reservedMonitorNames`, so a config apply's monitor reconcile
 cannot drop it, and it composes additively, so no later recalc on the way out
 lifts the weight off 0.
 
-The peer usually promotes on the first resign frame, but not always. These
-peer states keep the old heartbeat-loss fallback (no worse than before):
+The resign is ALSO announced explicitly: `buildHeartbeat` puts one reserved
+monitor entry per resigned RG first in the monitor section
+(`Interface = __planned-shutdown__`, `Up = false`), where the #14704 cap
+cannot truncate it. Weight 0 alone could not say "leaving". A transfer
+requester can sit at weight 0 for a moment inside its commit window, and the
+#18521 cell `TestInFlightRemoteTransferHoldOutlivesDualResignTimer18521`
+requires the owner to keep holding through that.
 
-- **A hold set less than 2 s earlier.** The dual-resign release keeps its 2 s
-  guard from the peer's own `ManualFailoverAt` (`electRG`). If the rest of
-  the stop takes less than 2 s, no frame arrives after the guard expires.
-- **An #16592 aborted-transfer marker.** `electRG` returns before every
-  promotion arm.
-- **A live remote transfer-out lease, with #18525.** #18525 makes the lease
-  branch return before the dual-resign release, so a node stopped
-  mid-transfer (after the owner armed the lease, before the commit) keeps
-  that RG unowned until peer loss. On the master base this PR targets, the
-  unexpired-lease path still falls through to the release.
+A peer whose frame carries the marker AND weight 0 for an RG
+(`peerLeavingForPlannedShutdownLocked`) is leaving, and `electRG` releases
+two holds that would otherwise outlive it:
+
+- **The #18521 remote transfer-out lease hold.** It protects a transfer the
+  peer requested; a leaving requester never commits. The lease ends with the
+  hold.
+- **The 2 s dual-resign guard.** It is measured from this node's own yield
+  and keeps a just-made handoff from being undone by stale peer state. A
+  leaving peer completes no handoff.
+
+So the peer promotes on the resign frame. Pinned by
+`TestPlannedShutdownResignReleasesInFlightTransferLease18540` and
+`TestPlannedShutdownResignReleasesFreshManualFailoverHold18540`. An older
+peer stores the entry as one more peer monitor (display only) and acts on the
+weight 0 through its existing arms, keeping the guard and lease fallbacks.
+
+One state still keeps the heartbeat-loss fallback: an #16592
+aborted-transfer marker, which makes `electRG` return before every promotion
+arm.
 
 The resign carries no barrier and waits for no acknowledgement: the caller is
 bounded by `TimeoutStopSec`.
 
-**Unmeasured risk: the peer promotes before it drains the stopping node's
-backlog.** The peer now promotes while still draining that backlog, about
-700 `session_v4` frames at roughly 21 ms each in the loss evidence, instead
-of after it. A peer-synced import whose owner RG is already locally active
-behaves differently in the helper:
+**The peer promotes before it drains the stopping node's backlog.** The peer
+now promotes while still draining that backlog (about 700 `session_v4` frames
+at roughly 21 ms each in the loss evidence), not after it. Imports that land
+after activation therefore become more common:
 
-- it does not replace a local session (`synced_entry_allows_local_replace`,
-  `session_import.rs:1505-1516`);
-- it is not published to `USERSPACE_SESSIONS` (`session_import.rs:1673`);
-- the activation republish (`ha/state.rs:305`) has already run.
+- A late import does not replace a LOCAL session the new owner already
+  created (`synced_entry_allows_local_replace`; #9678, deliberate).
+- It does reach the dataplane. The import always writes the shared map and
+  queues the worker fan-out. Each worker installs the entry and writes the
+  `USERSPACE_SESSIONS` row itself; only the coordinator skips its own write
+  for an active owner RG. A worker miss falls back to the shared map. The
+  late-publish lane verified this (#18550, #18551).
 
-So a backlog update for a session the peer already holds is dropped. A flow
-whose synced entry lands only after activation may also not be adopted. That
-second effect is one candidate for the unexplained cycle-3 post-takeover loss
-(#18540). Neither has been measured. A peer that waited for heartbeat loss
-before #18540 drained part of the backlog first, so this resign can widen
-both effects.
+An earlier version of this paragraph said late imports never reach
+`USERSPACE_SESSIONS`. That was wrong: it read only the coordinator-side
+publish gate. The cycle-3 post-takeover loss in #18540 remains unexplained.
+The crash-takeover RST-signature leads are listed in #18550/#18551, none
+verified yet.
 
 **Peer restart that loss detection missed.** The heartbeat session is
 Manager-scoped (#6169), so it changes only when the peer daemon is a new
@@ -4139,8 +4155,10 @@ Cells: `planned_shutdown_resign_18540_test.go`,
   detection remains:
   - for a stop that never reaches that step (crash, SIGKILL, wedged);
   - for a lone node, which skips the resign;
-  - for a peer whose hold is under 2 s old, which carries an aborted-transfer
-    marker, or which (with #18525) holds a live remote transfer-out lease.
+  - for a peer carrying an #16592 aborted-transfer marker.
+
+  A fresh hold and a live #18521 transfer lease are released by the resign
+  frame's planned-shutdown marker.
 
   That fallback comes no sooner than the heartbeat threshold, and possibly
   later under the sync-recency guard. See "Planned-shutdown

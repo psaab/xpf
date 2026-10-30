@@ -612,6 +612,9 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 		})
 	}
 
+	// #18540: the planned-shutdown resign markers go FIRST, so the
+	// monitor-section cap (#14704) can never truncate them away.
+	pkt.Monitors = append(pkt.Monitors, m.plannedShutdownWireMonitorsLocked()...)
 	// Include local interface monitor statuses.
 	for _, ls := range localStatuses {
 		pkt.Monitors = append(pkt.Monitors, HeartbeatMonitor{

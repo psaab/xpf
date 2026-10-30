@@ -276,3 +276,95 @@ func TestPlannedShutdownResignSkippedWithoutLivePeer18540(t *testing.T) {
 		}
 	}
 }
+
+// #18540 x #18521: the leaving node is the REQUESTER of an in-flight
+// transfer. The owner has demoted for it and holds the #18521 lease with the
+// session-sync connection intact, so neither the 2s dual-resign guard nor the
+// lease path would release it — and a leaving requester will never commit.
+// The planned-shutdown resign must release that hold on the resign frame;
+// otherwise the RG is unowned until heartbeat loss.
+//
+// The #18521 row "requester advertising weight 0" (bare weight 0, no marker)
+// must keep holding: TestInFlightRemoteTransferHoldOutlivesDualResignTimer18521
+// stays green, which is why the release keys on the reserved monitor marker
+// and not on weight 0.
+func TestPlannedShutdownResignReleasesInFlightTransferLease18540(t *testing.T) {
+	owner := inflightOwner18521(t) // node1, demoted for RG2, lease live, sync intact
+	requester := NewManager(0, 1)
+	t.Cleanup(requester.Stop)
+	requester.UpdateConfig(makeConfig(makeRG(2, false, map[int]int{0: 100, 1: 200})))
+	requester.SetMonitorWeight(2, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
+	requester.handlePeerHeartbeat(owner.buildHeartbeat()) // the requester hears its peer
+
+	owner.mu.Lock()
+	_, leased := owner.remoteTransferOutLeaseUntil[2]
+	intact := owner.transferChannelIntactLocked(2)
+	owner.mu.Unlock()
+	if held, _ := ownerHold18521(owner); !held || !leased || !intact {
+		t.Fatalf("fixture: owner must be parked by a live lease on an intact channel "+
+			"(held=%v leased=%v intact=%v)", held, leased, intact)
+	}
+
+	if got := requester.ResignForPlannedShutdown(); got != 1 {
+		t.Fatalf("requester resigned %d groups, want 1", got)
+	}
+	pkt := requester.buildHeartbeat()
+	marked := false
+	for _, mon := range pkt.Monitors {
+		if mon.Interface == PlannedShutdownMonitorIface && !mon.Up && mon.RGID == 2 {
+			marked = true
+		}
+	}
+	if !marked {
+		t.Fatal("the resign frame must carry the planned-shutdown marker for RG2")
+	}
+	// ONE frame: the leaving requester's heartbeat stops soon after.
+	owner.handlePeerHeartbeat(pkt)
+
+	if held, _ := ownerHold18521(owner); held || !owner.IsLocalPrimary(2) {
+		t.Fatalf("the owner stayed parked behind the in-flight transfer lease after its requester "+
+			"resigned for a planned shutdown (primary=%v): the RG is unowned until heartbeat loss",
+			owner.IsLocalPrimary(2))
+	}
+	owner.mu.Lock()
+	_, stillLeased := owner.remoteTransferOutLeaseUntil[2]
+	owner.mu.Unlock()
+	if stillLeased {
+		t.Error("the abandoned transfer's lease must end with the hold")
+	}
+}
+
+// The 2s dual-resign guard is measured from this node's OWN yield; it keeps a
+// just-made handoff from being undone by stale peer state. A peer that is
+// leaving completes no handoff, so a fresh operator hold must release on the
+// resign frame too, not after heartbeat loss.
+func TestPlannedShutdownResignReleasesFreshManualFailoverHold18540(t *testing.T) {
+	leaving, holder := restartFixture18540(t)
+	holder.mu.Lock()
+	for _, id := range restartRGs18540 {
+		holder.groups[id].ManualFailoverAt = time.Now() // inside the 2s guard
+	}
+	holder.mu.Unlock()
+	leaving.ResignForPlannedShutdown()
+	holder.handlePeerHeartbeat(leaving.buildHeartbeat())
+	for _, id := range restartRGs18540 {
+		if !holder.IsLocalPrimary(id) {
+			t.Errorf("RG%d: a hold under the 2s guard outlived the peer's planned-shutdown resign", id)
+		}
+	}
+}
+
+// A marker without the resign (weight > 0) is inconsistent and must not
+// release the #18521 hold: the marker announces a resign, it does not replace
+// one.
+func TestPlannedShutdownMarkerWithoutResignKeepsLease18540(t *testing.T) {
+	owner := inflightOwner18521(t)
+	owner.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1,
+		Groups:   []HeartbeatGroup{{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondaryHold)}},
+		Monitors: []HeartbeatMonitor{{RGID: 2, Weight: 255, Up: false, Interface: PlannedShutdownMonitorIface}},
+	})
+	if held, state := ownerHold18521(owner); !held || state == StatePrimary {
+		t.Fatalf("a planned-shutdown marker on a weight-255 frame released the in-flight lease hold "+
+			"(held=%v state=%s)", held, state)
+	}
+}
