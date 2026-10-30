@@ -166,3 +166,43 @@ func TestPeerHeartbeatRunTrackingWiring18549(t *testing.T) {
 		t.Error("peer loss did not reset the admitted-heartbeat run")
 	}
 }
+
+// Boundary rows (seat I NIT): the proof ends the floor at EXACTLY the
+// window, and a heartbeat EXACTLY interval*threshold after the previous one
+// restarts the gap-free run. Without a row at each edge, ">=" -> ">" on
+// either comparison survives every other cell.
+func TestBootFloorBoundaries18549(t *testing.T) {
+	t.Run("stable for exactly the window ends the floor", func(t *testing.T) {
+		const primedAt = int64(1_000_000_000)
+		lastAdmit := primedAt + int64(heartbeatBootStableWindow)
+		if !bootFloorProof(true, primedAt, primedAt-1, lastAdmit, heartbeatBootStableWindow) {
+			t.Fatalf("exactly %v of post-bulk stability must prove the boot floor over", heartbeatBootStableWindow)
+		}
+		if bootFloorProof(true, primedAt, primedAt-1, lastAdmit-1, heartbeatBootStableWindow) {
+			t.Fatal("1ns short of the window must not prove the boot floor over")
+		}
+	})
+	t.Run("a gap of exactly interval*threshold restarts the run", func(t *testing.T) {
+		m := NewManager(0, 1)
+		t.Cleanup(m.Stop)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		interval, threshold := m.liveHeartbeatTimingLocked()
+		gap := int64(interval) * int64(threshold)
+		if gap <= 0 {
+			gap = int64(DefaultHeartbeatInterval) * DefaultHeartbeatThreshold
+		}
+		const last = int64(50_000_000_000)
+		m.peerHBSteadySinceMono = last - (10 * time.Second).Nanoseconds()
+		m.peerHBLastAdmitMono = last
+		m.notePeerHeartbeatAdmittedLocked(last + gap - 1)
+		if m.peerHBSteadySinceMono != last-(10*time.Second).Nanoseconds() {
+			t.Fatal("a frame 1ns inside the timeout restarted the gap-free run")
+		}
+		m.notePeerHeartbeatAdmittedLocked(last + gap - 1 + gap)
+		if m.peerHBSteadySinceMono != last+gap-1+gap {
+			t.Fatalf("a frame exactly interval*threshold (%v) after the previous one did not restart "+
+				"the gap-free run", time.Duration(gap))
+		}
+	})
+}

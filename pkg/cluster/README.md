@@ -532,7 +532,13 @@ Unchanged:
 A disruption that starts after the proof is a steady-state disruption: a
 heartbeat restart arms its own restart grace, and the sync-recency guard in
 `handlePeerTimeout` covers a live peer whose heartbeats are briefly lost. That
-is exactly what a node that booted long ago gets.
+is exactly what a node that booted long ago gets. Once proven, the proof
+never expires. A config-sync apply from the peer, which a rejoiner can
+receive right after connect, may land more than 5 s after the bulk. If its
+RX disruption outlasts the 5 s restart grace plus the 2 s sync-recency
+window, a takeover-ready rejoiner can then declare a live peer lost. That is
+the same exposure a long-running node has on such an apply, and the apply is
+skipped entirely when the configs are equivalent.
 
 A heartbeat-only restart (a management VRF rebind) does not reset the
 gap-free run, by design. The run is Manager-scoped, like the heartbeat
