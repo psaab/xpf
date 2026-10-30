@@ -534,6 +534,17 @@ heartbeat restart arms its own restart grace, and the sync-recency guard in
 `handlePeerTimeout` covers a live peer whose heartbeats are briefly lost. That
 is exactly what a node that booted long ago gets.
 
+A heartbeat-only restart (a management VRF rebind) does not reset the
+gap-free run, by design. The run is Manager-scoped, like the heartbeat
+session, so once the restart's own 5 s grace has passed, a run recorded
+before the restart can satisfy the proof and end an inherited boot floor
+(#17764). The mitigation for a live peer whose heartbeats the rebind dropped
+is the sync-recency guard in `handlePeerTimeout`
+(`syncSuppressesPeerTimeoutLocked`): the session-sync connection that
+completed the bulk keeps proving the peer alive while its frames stay fresh.
+That is the same guard a long-booted node relies on after a commit-driven
+restart.
+
 Cells: `heartbeat_boot_floor_18549_test.go`.
 
 ### Asymmetric peer visibility (#10775)

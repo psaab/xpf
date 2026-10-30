@@ -62,6 +62,14 @@ func TestBootFloorHoldsWithoutTheFullProof18549(t *testing.T) {
 			// bulk 3s ago, last frame 2s ago: 1s of post-bulk stability
 			m.syncBulkPrimedAtMono = now - (3 * time.Second).Nanoseconds()
 		}},
+		{"silence after the bulk is not stability", func(m *Manager, now int64) {
+			// bulk 8s ago, last admitted frame 6s ago: only 2s of
+			// post-bulk stability, followed by 6s of silence. Measured to
+			// NOW the run would read 8s and end the floor on silence.
+			m.syncBulkPrimedAtMono = now - (8 * time.Second).Nanoseconds()
+			m.peerHBLastAdmitMono = now - (6 * time.Second).Nanoseconds()
+			m.hbReceiver.lastSeen.Store(m.peerHBLastAdmitMono)
+		}},
 		{"the run restarted after a gap", func(m *Manager, now int64) {
 			// a gap 4s ago reset the run; last frame 2s ago: 2s of run
 			m.peerHBSteadySinceMono = now - (4 * time.Second).Nanoseconds()
