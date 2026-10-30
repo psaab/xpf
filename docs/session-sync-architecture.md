@@ -939,6 +939,21 @@ says are peer-owned.
 Important detail: zones missing from the frozen snapshot are conservatively kept
 instead of deleted.
 
+The reconcile is skipped — `BulkAck` withheld, the bulk discarded — when the
+ownership generation (`zoneRGMapGen`) moved between `BulkStart` and `BulkEnd`
+(#9655). Since #18374 the generation moves only when something the snapshot
+captures changed: the zone map, the fold->RG map, or the ingress fold resolver.
+The daemon installs all three through `InstallZoneOwnership` with a digest of
+what the resolver closes over (the store's canonical config-text digest and the
+ifindex->name table); a content-equal re-install — every config apply and every
+link-state refresh re-installs — keeps the generation. Before #18374 every
+install advanced it (twice per apply, counting the NAT-scope folder, which no
+snapshot reads), so an apply or an em0 link refresh landing inside the receive
+window discarded the whole bulk; the issue's journal census counted 113 such
+aborts on loss fw0. A genuine change, an unknown digest (a config the store
+cannot identify), or a legacy setter still advances it and still voids the
+reconcile.
+
 ### Config-Epoch Guard (#5274)
 
 The receiver applies a synced session install (bulk or incremental) through

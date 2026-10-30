@@ -51,36 +51,21 @@ func staleFoldConfig15263() *config.Config {
 	}
 }
 
-// foldBuilders15263 returns resolver/foldFn builders over a fake device list
-// carrying ge-0-0-0 at the given ifindex — the state of the kernel table at
-// one point in the recreation sequence.
+// foldBuilders15263 returns the resolver builder and the interface-table
+// lister over a fake device list carrying ge-0-0-0 at the given ifindex — the
+// state of the kernel table at one point in the recreation sequence. Since
+// #18374 the send-side fold is built by the PRODUCTION builder from the
+// injected table (zoneOwnershipInstall), not by a hand copy of it.
 func foldBuilders15263(liveIndex int) (
 	func(*config.Config) func(uint32) (uint32, uint16, bool),
-	func(*config.Config) func(uint32, uint16) uint32,
+	func() ([]net.Interface, error),
 ) {
 	devs := []net.Interface{{Index: liveIndex, Name: "ge-0-0-0"}}
 	resolver := func(cfg *config.Config) func(uint32) (uint32, uint16, bool) {
 		return buildIngressFoldResolverWithIfaces(cfg, devs)
 	}
-	foldFn := func(cfg *config.Config) func(uint32, uint16) uint32 {
-		nameByIndex := make(map[uint32]string, len(devs))
-		for _, ifc := range devs {
-			if ifc.Index > 0 {
-				nameByIndex[uint32(ifc.Index)] = ifc.Name
-			}
-		}
-		return func(ifindex uint32, vlan uint16) uint32 {
-			if ifindex == 0 {
-				return 0
-			}
-			name := nameByIndex[ifindex]
-			if name == "" {
-				return 0
-			}
-			return config.StableIfaceID(cfg.ClusterStableIfaceName(name, vlan))
-		}
-	}
-	return resolver, foldFn
+	listIfaces := func() ([]net.Interface, error) { return devs, nil }
+	return resolver, listIfaces
 }
 
 func TestLinkRefreshRebuildsStaleFoldClosures15263(t *testing.T) {
@@ -97,11 +82,12 @@ func TestLinkRefreshRebuildsStaleFoldClosures15263(t *testing.T) {
 	// Manager starts with no published snapshot, so its fence is inactive
 	// and the stale resolver answers the dead ifindex directly — the
 	// pre-fix end state this issue is about.
-	applyResolver, applyFoldFn := foldBuilders15263(deadIndex)
+	applyResolver, applyIfaces := foldBuilders15263(deadIndex)
 	mgr := dpuserspace.New()
 	mgr.SetIngressFoldResolver(applyResolver(cfg))
 	ss := cluster.NewSessionSync(":0", ":0", nil)
-	ss.SetZoneOwnership(buildZoneRGMap(cfg, buildZoneIDs(cfg)), buildZoneFoldRGMap(cfg), applyFoldFn(cfg))
+	applyDevs, _ := applyIfaces()
+	ss.InstallZoneOwnership(zoneOwnershipFromIfaces(cfg, buildZoneRGMap(cfg, buildZoneIDs(cfg)), "", applyDevs))
 
 	d := &Daemon{applySem: semaphore.NewWeighted(1)}
 	d.setDataplane(&staleFoldDP15263{
@@ -122,8 +108,8 @@ func TestLinkRefreshRebuildsStaleFoldClosures15263(t *testing.T) {
 
 	// The link refresh fires after the recreation: closures rebuilt against
 	// the live table (ge-0-0-0 now at 29).
-	liveResolver, liveFoldFn := foldBuilders15263(liveIndex)
-	d.refreshIngressFoldClosures(cfg, liveResolver, liveFoldFn)
+	liveResolver, liveIfaces := foldBuilders15263(liveIndex)
+	d.refreshIngressFoldClosures(cfg, liveResolver, liveIfaces)
 
 	// Acceptance: the stale row equals the rebuilt row without a commit —
 	// the Manager now names the live ifindex for the peer fold, and the
