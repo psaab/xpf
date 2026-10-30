@@ -104,6 +104,66 @@ fn idle_wait_times_out_without_a_connection() {
     );
 }
 
+/// #18541 review (bulk-B): a `shutdown(2)` listener polls `POLLIN|POLLHUP`
+/// forever while `accept` returns `EAGAIN`. The wait must not report that as
+/// a pending connection, and must sleep its interval rather than return at
+/// once, or the loop cycles `WouldBlock -> Idle -> poll` at full speed. The
+/// duration check is a LOWER bound that `thread::sleep` guarantees, so load can
+/// only lengthen it; the deleted-sleep mutant returns in microseconds.
+#[test]
+fn idle_wait_sleeps_on_a_shut_down_listener() {
+    use std::os::fd::AsRawFd;
+    const MAX: Duration = Duration::from_millis(200);
+    let (_dir, path) = sock_dir("hup");
+    let listener = bind_nonblocking(&path);
+    // SAFETY: `listener` owns this listening descriptor for the whole call.
+    let rc = unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
+    assert_eq!(
+        rc,
+        0,
+        "shutdown listener: {}",
+        std::io::Error::last_os_error()
+    );
+    // Fixture: the listener must really be in the hang-up state with nothing
+    // to accept, or the timeout arm alone would pass this cell.
+    let mut pfd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one initialised pollfd for a descriptor `listener` keeps open.
+    let ready = unsafe { libc::poll(&mut pfd, 1, 0) };
+    assert!(
+        ready == 1 && (pfd.revents & libc::POLLIN) != 0 && (pfd.revents & libc::POLLHUP) != 0,
+        "fixture: a shut-down listener should poll POLLIN|POLLHUP at once, got rc={ready} revents={:#x}",
+        pfd.revents
+    );
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "fixture: a shut-down listener should have nothing to accept"
+    );
+    let waiter = listener.try_clone().expect("clone listener");
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let start = Instant::now();
+        let pending = wait_for_pending_connection(&waiter, MAX);
+        let _ = tx.send((pending, start.elapsed()));
+    });
+    let (pending, elapsed) = rx
+        .recv_timeout(WAIT_BUDGET)
+        .expect("a bounded idle wait never returned");
+    assert!(
+        !pending,
+        "a POLLIN|POLLHUP listener was reported as having a connection pending: the loop would spin \
+         WouldBlock -> Idle -> poll"
+    );
+    assert!(
+        elapsed >= MAX,
+        "the wait returned after {elapsed:?} on a hung-up listener, before its {MAX:?} interval: the \
+         loop would cycle at poll speed"
+    );
+}
+
 fn new_state() -> Arc<Mutex<ServerState>> {
     Arc::new(Mutex::new(ServerState {
         status: ProcessStatus::default(),

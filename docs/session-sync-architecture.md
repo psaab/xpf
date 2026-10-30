@@ -937,10 +937,14 @@ meaning are unchanged.
 
 An install holds `Manager.sessionMu`, not `Manager.mu`, across its round trip,
 and the session socket is served by its own helper thread, apart from the
-control socket that carries `update_ha_state`, FIB and neighbor publishes. An RG
-activation (`UpdateRGActive`) shares only its brief `mu -> sessionMu` fence
-with the install path, so after a peer loss it waits for at most the ONE install
-in flight, never for a backlog of the dead peer's queued frames
+control socket that carries the authoritative `update_ha_state` (RG
+activation and demotion), FIB and neighbor publishes. The HA watchdog's
+lease-only `update_ha_state` refresh (#9629) does ride the session socket,
+taking `sessionMu` per request like an install, so it too waits for at most
+the one request in flight. An RG activation (`UpdateRGActive`) shares only its
+brief `mu -> sessionMu` fence with the install path, so after a peer loss it
+waits for at most the ONE install in flight, never for a backlog of the dead
+peer's queued frames
 (`TestRGActivationWaitsForAtMostOneInFlightInstall18541`; on loss fw1 at the
 2026-10-30 06:32:40 takeover the helper logged all three activations within
 0.35 s). What a backlog DOES delay is the sync receive loop itself, which

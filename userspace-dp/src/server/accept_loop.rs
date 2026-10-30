@@ -184,11 +184,17 @@ pub(crate) use super::lifecycle::{accept_step, AcceptStep};
 /// `poll(2)` on a listening socket reports `POLLIN` when a connection is
 /// queued, so the wait ends at the arrival and `max` only bounds how long the
 /// loop goes without re-checking `running` (shutdown latency is unchanged).
-/// Every outcome that is not "a connection is pending" — timeout, `EINTR`, an
-/// error, or readiness without `POLLIN` — returns false; the error and
-/// no-`POLLIN` arms sleep `max` first so a poll that cannot block can never
-/// turn the loop into a spin. The failure backoff (`AcceptStep::Sleep`) stays
-/// a plain sleep for the same reason: under `EMFILE` the listener IS readable.
+/// It returns true only for `POLLIN` with none of `POLLERR`/`POLLHUP`/
+/// `POLLNVAL`. Every other outcome returns false: a timeout or `EINTR` at
+/// once, and an error, readiness without `POLLIN`, or `POLLIN` together with
+/// an error or hang-up bit only after sleeping `max`. That last arm matters: a
+/// listener that has been `shutdown(2)` polls `POLLIN|POLLHUP` forever while
+/// `accept` keeps returning `EAGAIN` (measured on this kernel), and reporting
+/// it as pending would cycle `WouldBlock -> Idle -> poll` at full speed. With
+/// these arms the loop cycles no faster than once per `max` in every state
+/// except a genuinely queued connection, which `accept` then consumes. The
+/// failure backoff (`AcceptStep::Sleep`) stays a plain sleep for the same
+/// reason: under `EMFILE` the listener IS readable.
 pub(crate) fn wait_for_pending_connection(listener: &UnixListener, max: Duration) -> bool {
     use std::os::fd::AsRawFd;
     let mut pfd = libc::pollfd {
@@ -202,7 +208,8 @@ pub(crate) fn wait_for_pending_connection(listener: &UnixListener, max: Duration
     // SAFETY: `pfd` is one valid, initialised `pollfd` for a descriptor the
     // borrowed `listener` keeps open for the whole call; nfds is 1.
     let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-    if rc > 0 && (pfd.revents & libc::POLLIN) != 0 {
+    let fault = libc::POLLERR | libc::POLLHUP | libc::POLLNVAL;
+    if rc > 0 && (pfd.revents & libc::POLLIN) != 0 && (pfd.revents & fault) == 0 {
         return true;
     }
     if rc == 0 {
