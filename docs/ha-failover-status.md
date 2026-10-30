@@ -734,8 +734,10 @@ control-plane dual-secondary occurred. The causes:
 - **A peer restart missed by loss detection kept the old incarnation's
   holds** (latent; it did not fire in this run).
 
-Now the HA stop installs the full-cost `__planned-shutdown__` debt (weight 0)
-after `rg_active` clears and Kea stops, and kicks one heartbeat. A heartbeat
+Now an HA stop with a live peer installs the full-cost `__planned-shutdown__`
+debt (weight 0) after the fail-closed actions, and kicks one heartbeat. A lone
+node skips the resign: a demotion there would let the still-live event
+watcher confirm a pending `commit confirmed`. A heartbeat
 from a new peer incarnation ends ManualFailover, transfer-out and abort holds,
 exactly as peer loss does. See `pkg/cluster/README.md` "Planned-shutdown
 resign and peer-restart hold release (#18540)".
@@ -743,6 +745,11 @@ resign and peer-restart hold release (#18540)".
 **Status:** unit-tested and mutation-checked; needs `make
 test-restart-connectivity`, `make test-failover` and `make test-ha-crash` on a
 gate cluster.
+
+**Risk to watch in that gate:** the peer now promotes before it has drained
+the stopping node's sync backlog. Post-activation synced imports neither
+replace local sessions nor reach `USERSPACE_SESSIONS` (see `pkg/cluster`
+README). If post-takeover loss grows, suspect this first.
 
 ## What Still Needs Work
 

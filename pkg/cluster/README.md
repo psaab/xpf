@@ -3976,9 +3976,20 @@ cost (`PlannedShutdownMonitorCost` = 255) on every RG, re-runs election (the
 node demotes itself through electRG's "Local weight 0" arm), and kicks the
 heartbeat sender for one out-of-cadence frame (`heartbeatSender.kick`,
 coalescing, never blocking). The daemon calls it from `runShutdownSequence`
-after the fail-closed actions (`rg_active` clear, Kea stop, #6787) and before
-the VIP removal, VRRP stop and `Manager.Stop`. It is a no-op after `Stop`
-(the sender is gone, so nothing would hear it) and idempotent.
+after the fail-closed actions (`rg_active` cleared on a fail-closed stop —
+a hitless-restart stop leaves it set — and Kea stopped on every HA stop,
+#6787) and before the VIP removal, VRRP stop and `Manager.Stop`. It is
+idempotent, and a no-op in two cases:
+
+- after `Stop`: the sender is gone, so nothing would hear it;
+- with no live peer (`!peerAlive`): there is nobody to hand over to, and the
+  demotion is not inert. The daemon's cluster-event watcher binds to the
+  never-cancelled daemon context, so it is still live during the shutdown
+  sequence. An RG0 primary->secondary event reaches
+  `ConfirmPendingOnDemotion` (#4378), which would make a pending
+  `commit confirmed` permanent on a lone node being restarted precisely to
+  get the rollback (#12171). It would also terminate the RG's IPsec SAs. A
+  lone node keeps ownership through its stop, as before.
 
 Why weight 0 and not the #12164 floor. The fail-closed stop already installs
 the `__dataplane-arm__` floor (weight 1), and that moved nothing in the
@@ -3994,16 +4005,47 @@ shapes that matter:
 So the peer waited for heartbeat loss plus the sync-recency deferral, which
 the stopping node's own unread sync backlog keeps fresh (`notePeerLiveness`
 stamps at handle time): 3.3–3.4 s per `test-restart-connectivity` cycle on the
-loss cluster. Every peer arm that must fire on weight 0 already exists —
-"Peer weight 0", the ManualFailover dual-resign release, and
-`peerYieldedOwnership` for a not-ready receiver — so a peer running older code
-honours the resign too. The debt is in `reservedMonitorNames`, so a config
-apply's monitor reconcile cannot drop it, and it composes additively, so no
-later recalc on the way out lifts the weight off 0.
+loss cluster. The peer arms that act on weight 0 already exist — "Peer weight
+0", the ManualFailover dual-resign release, and `peerYieldedOwnership` for a
+not-ready receiver — so a peer running older code honours the resign too. The
+debt is in `reservedMonitorNames`, so a config apply's monitor reconcile
+cannot drop it, and it composes additively, so no later recalc on the way out
+lifts the weight off 0.
+
+The peer usually promotes on the first resign frame, but not always. These
+peer states keep the old heartbeat-loss fallback (no worse than before):
+
+- **A hold set less than 2 s earlier.** The dual-resign release keeps its 2 s
+  guard from the peer's own `ManualFailoverAt` (`electRG`). If the rest of
+  the stop takes less than 2 s, no frame arrives after the guard expires.
+- **An #16592 aborted-transfer marker.** `electRG` returns before every
+  promotion arm.
+- **A live remote transfer-out lease, with #18525.** #18525 makes the lease
+  branch return before the dual-resign release, so a node stopped
+  mid-transfer (after the owner armed the lease, before the commit) keeps
+  that RG unowned until peer loss. On the master base this PR targets, the
+  unexpired-lease path still falls through to the release.
 
 The resign carries no barrier and waits for no acknowledgement: the caller is
-bounded by `TimeoutStopSec`. With no live peer it only demotes the leaving
-node.
+bounded by `TimeoutStopSec`.
+
+**Unmeasured risk: the peer promotes before it drains the stopping node's
+backlog.** The peer now promotes while still draining that backlog, about
+700 `session_v4` frames at roughly 21 ms each in the loss evidence, instead
+of after it. A peer-synced import whose owner RG is already locally active
+behaves differently in the helper:
+
+- it does not replace a local session (`synced_entry_allows_local_replace`,
+  `session_import.rs:1505-1516`);
+- it is not published to `USERSPACE_SESSIONS` (`session_import.rs:1673`);
+- the activation republish (`ha/state.rs:305`) has already run.
+
+So a backlog update for a session the peer already holds is dropped. A flow
+whose synced entry lands only after activation may also not be adopted. That
+second effect is one candidate for the unexplained cycle-3 post-takeover loss
+(#18540). Neither has been measured. A peer that waited for heartbeat loss
+before #18540 drained part of the backlog first, so this resign can widen
+both effects.
 
 **Peer restart that loss detection missed.** The heartbeat session is
 Manager-scoped (#6169), so it changes only when the peer daemon is a new
@@ -4016,7 +4058,9 @@ same helper `handlePeerTimeout` uses: this node's ManualFailover park (and the
 #16743 drain pin), the #6656 peer transfer-out override, and the #15164
 aborted-request markers. The clear runs before the peer view is rebuilt,
 because the rebuild re-applies a surviving override to the new incarnation's
-frames. Without it, the holding node stayed parked while the restarted peer sat
+frames. The other order would elect and render ONE frame of the new
+incarnation as secondary-hold, and then clear the override anyway. No cell
+pins this order (the restart fixtures carry no transfer override). Without it, the holding node stayed parked while the restarted peer sat
 in its startup hold at the floor, and no node owned the RG until that hold
 released (up to 30 s).
 
@@ -4067,15 +4111,20 @@ Cells: `planned_shutdown_resign_18540_test.go`,
   `pkg/vrrp/README.md:950-964`).
 - Planned legacy VRRP shutdown sends three priority-0 advertisements; the
   backup arms a 1ms timer, and the run-loop test requires takeover within
-  50ms (test constraint, not SLA). An orderly private-RG stop resigns every
-  RG (#18540): after `rg_active` clears and Kea stops, the stopping node
-  installs the full-cost `__planned-shutdown__` debt (weight 0 locally and
-  on the wire) and sends a heartbeat at once, so the peer promotes on that
-  frame — including through its own ManualFailover hold — instead of
-  waiting for heartbeat loss. Only a stop that never reaches that step
-  (crash, SIGKILL, a stop wedged before it) still falls back to
-  heartbeat-loss detection, no sooner than the heartbeat threshold and
-  potentially later under the sync-recency guard. See "Planned-shutdown
+  50ms (test constraint, not SLA). An orderly private-RG stop with a live
+  peer resigns every RG (#18540). After the fail-closed actions, the
+  stopping node installs the full-cost `__planned-shutdown__` debt (weight 0
+  locally and on the wire) and sends a heartbeat at once. The peer normally
+  promotes on that frame, including through its own ManualFailover hold,
+  instead of waiting for heartbeat loss. The fallback to heartbeat-loss
+  detection remains:
+  - for a stop that never reaches that step (crash, SIGKILL, wedged);
+  - for a lone node, which skips the resign;
+  - for a peer whose hold is under 2 s old, which carries an aborted-transfer
+    marker, or which (with #18525) holds a live remote transfer-out lease.
+
+  That fallback comes no sooner than the heartbeat threshold, and possibly
+  later under the sync-recency guard. See "Planned-shutdown
   resign and peer-restart hold release (#18540)" above. Private-RG operator
   failover is a separate explicit peer-transfer/resignation path
   (`pkg/vrrp/instance.go:804-806`;

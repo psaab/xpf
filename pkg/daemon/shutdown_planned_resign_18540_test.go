@@ -6,13 +6,16 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 	"github.com/psaab/xpf/pkg/dhcpserver"
+	"github.com/psaab/xpf/pkg/vrrp"
 )
 
 // #18540: an HA stop resigns every redundancy group to the peer, and does it
@@ -82,6 +85,9 @@ chassis {
 				},
 			})
 			t.Cleanup(mgr.Stop)
+			// The resign needs a live peer (a lone node keeps ownership
+			// through its stop; see the lone-node cell below).
+			alivePeer18540(mgr)
 
 			var (
 				mu         sync.Mutex
@@ -140,6 +146,113 @@ chassis {
 					"waits for heartbeat loss instead (#18540)")
 			}
 		})
+	}
+}
+
+// alivePeer18540 admits one heartbeat from node1 so the manager has a live
+// peer, through the real admission handler.
+func alivePeer18540(mgr *cluster.Manager) {
+	mgr.HandlePeerHeartbeatForTesting(&cluster.HeartbeatPacket{
+		NodeID:    1,
+		ClusterID: 1,
+		Groups: []cluster.HeartbeatGroup{
+			{GroupID: 0, Priority: 100, Weight: 255, State: uint8(cluster.StateSecondary)},
+			{GroupID: 1, Priority: 100, Weight: 255, State: uint8(cluster.StateSecondary)},
+		},
+	})
+}
+
+// drainClusterEvents18540 pushes every queued cluster event through the
+// daemon's REAL per-event handler (dispatchClusterEvent, the body of
+// watchClusterEvents) synchronously, so the cell observes the handler's
+// effect deterministically rather than racing the watcher goroutine.
+func drainClusterEvents18540(t *testing.T, d *Daemon) int {
+	t.Helper()
+	n := 0
+	var timer *time.Timer
+	for {
+		select {
+		case ev := <-d.cluster.Events():
+			timer = d.dispatchClusterEvent(d.daemonCtx, ev, timer)
+			n++
+		default:
+			if timer != nil {
+				timer.Stop()
+			}
+			return n
+		}
+	}
+}
+
+// #18540 review (MAJOR): on a LONE node the resign must not run. The
+// cluster-event watcher binds to the never-cancelled daemon context, so it is
+// live during runShutdownSequence, and an RG0 primary->secondary event reaches
+// applyRG0OwnershipTransition -> ConfirmPendingOnDemotion (#4378). An operator
+// who ran `commit confirmed` on a cluster whose peer is down, lost access, and
+// restarted xpfd to get the rollback would instead find the commit made
+// permanent (#12171's intent defeated).
+//
+// The positive control demotes RG0 through ordinary monitor debt and drives
+// the same handler: the pending window IS confirmed there, which proves the
+// instrument can see the confirm the resign must not cause.
+func TestLoneNodeShutdownResignKeepsPendingCommitConfirmed18540(t *testing.T) {
+	store, _ := newDemoteTestStore(t)
+	mgr := cluster.NewManager(0, 1)
+	t.Cleanup(mgr.Stop)
+	// No control interface and no peer ever seen: the lone-node election
+	// takes RG0 primary, as a cluster whose peer is down for maintenance.
+	mgr.UpdateConfig(&config.ClusterConfig{
+		RedundancyGroups: []*config.RedundancyGroup{
+			{ID: 0, NodePriorities: map[int]int{0: 200, 1: 100}},
+			{ID: 1, NodePriorities: map[int]int{0: 200, 1: 100}},
+		},
+	})
+	daemonCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	// The same daemon shape the #12171 RG0-demotion cells drive the real
+	// handler with.
+	d := &Daemon{
+		applySem:                   semaphore.NewWeighted(1),
+		daemonCtx:                  daemonCtx,
+		cluster:                    mgr,
+		vrrpMgr:                    vrrp.NewManager(),
+		rgStates:                   make(map[int]*rgStateMachine),
+		blackholeRoutes:            make(map[int][]netlink.Route),
+		store:                      store,
+		opts:                       Options{NoDataplane: true},
+		failoverActuations:         failoverActuationRegistry{timeout: 2 * time.Second},
+		userspaceDemotionPrepUntil: make(map[int]time.Time),
+	}
+	drainClusterEvents18540(t, d) // the lone-node promotion events
+	if !mgr.IsLocalPrimary(0) {
+		t.Fatal("fixture: a lone node must own RG0")
+	}
+	if !store.IsConfirmPending() {
+		t.Fatal("fixture: the commit-confirmed window must still be pending")
+	}
+
+	if got := mgr.ResignForPlannedShutdown(); got != 0 {
+		t.Errorf("lone-node resign installed %d debts, want 0 (no peer to hand over to)", got)
+	}
+	handled := drainClusterEvents18540(t, d)
+	if !mgr.IsLocalPrimary(0) {
+		t.Error("a lone node's planned-shutdown resign demoted RG0")
+	}
+	if !store.IsConfirmPending() {
+		t.Fatalf("a lone node's planned-shutdown resign confirmed the pending commit-confirmed "+
+			"(%d cluster event(s) handled): the commit an operator is rebooting to roll back "+
+			"became permanent", handled)
+	}
+
+	// Positive control: an ordinary RG0 demotion through the same handler
+	// does confirm, so the "still pending" above is a measurement.
+	mgr.SetMonitorWeight(0, "ge-0/0/9", true, 255)
+	if drainClusterEvents18540(t, d) == 0 || mgr.IsLocalPrimary(0) {
+		t.Fatal("control: a full monitor debt must demote RG0 and emit its event")
+	}
+	if store.IsConfirmPending() {
+		t.Fatal("control: an RG0 demotion through dispatchClusterEvent must confirm the pending " +
+			"window (#4378); without that the lone-node row above proves nothing")
 	}
 }
 

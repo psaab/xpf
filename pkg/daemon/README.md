@@ -547,10 +547,21 @@ startup-phase and shutdown ordering is untouched:
   **Then the HA stop resigns every RG to the peer (#18540).** Right after the
   Kea stop, `d.cluster.ResignForPlannedShutdown()` installs the full-cost
   `__planned-shutdown__` election debt (weight 0 locally and on the wire) and
-  kicks one heartbeat, so the peer promotes on that frame instead of on
-  heartbeat loss. It runs for every HA stop (hitless included, for the reason
-  the Kea stop gives) and never blocks on the peer. The order is fixed at both
-  ends: AFTER the Kea stop, because the resign promotes the peer and the peer
+  kicks one heartbeat. The peer normally promotes on that frame instead of on
+  heartbeat loss; `pkg/cluster` lists the peer states that keep the fallback.
+  The resign runs for every HA stop (hitless included, for the reason the Kea
+  stop gives) and never blocks on the peer.
+
+  **A lone node skips it.** The cluster-event watcher binds to the
+  never-cancelled `d.daemonCtx`, so it is still LIVE here and acts on the
+  resign's events. A lone node's RG0 demotion would reach
+  `ConfirmPendingOnDemotion` and make a pending `commit confirmed` permanent
+  (#4378/#12171). That is bound by
+  `TestLoneNodeShutdownResignKeepsPendingCommitConfirmed18540`, which drives
+  the real per-event handler (`dispatchClusterEvent`, split out of
+  `watchClusterEvents` for this) synchronously.
+
+  The order is fixed at both ends: AFTER the Kea stop, because the resign promotes the peer and the peer
   starts its own Kea (#6787); BEFORE the VIP removal, VRRP stop and
   `d.cluster.Stop()`, because the heartbeat sender carries the resign and a
   resign after `Stop` is refused. Before this, the stop's only peer-visible

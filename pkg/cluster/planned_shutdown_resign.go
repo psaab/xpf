@@ -31,10 +31,13 @@ import (
 //
 // The resign is a full-cost reserved election debt, the same mechanism
 // HelperCrashLoopMonitorIface uses: weight 0 locally (electRG's "Local weight
-// 0" arm demotes this node) and weight 0 on the wire. Every peer arm that
-// must fire already keys on weight 0 — "Peer weight 0", the ManualFailover
-// dual-resign release, and peerYieldedOwnership for a not-ready receiver — so
-// the peer needs no new code and an older peer honours it too. The debt is a
+// 0" arm demotes this node) and weight 0 on the wire. The peer arms that act
+// on weight 0 already exist — "Peer weight 0", the ManualFailover dual-resign
+// release, and peerYieldedOwnership for a not-ready receiver — so the peer
+// needs no new code and an older peer honours it too. A peer whose hold is
+// under its 2 s guard, that carries an aborted-transfer marker, or (with
+// #18525) holds a live remote transfer-out lease, still takes over only on
+// heartbeat loss; see pkg/cluster/README.md. The debt is a
 // reserved monitor name, so a config apply cannot reconcile it away, and it
 // composes additively, so no later monitor recalc on the way out can lift the
 // weight back above 0.
@@ -56,8 +59,17 @@ const PlannedShutdownMonitorCost = maxRedundancyGroupWeight
 // returns how many groups it newly resigned; repeat calls are no-ops.
 //
 // It never blocks on the peer: there is no barrier and no acknowledgement,
-// because the caller is a shutdown sequence bounded by TimeoutStopSec. If no
-// peer is alive the debt only demotes this node on its way out.
+// because the caller is a shutdown sequence bounded by TimeoutStopSec.
+//
+// With no live peer it does NOTHING. There is nobody to hand the groups to,
+// and the demotion is not inert: the daemon's cluster-event watcher runs on
+// the never-cancelled daemon context, so it is live during the shutdown
+// sequence and would act on the RG0 primary->secondary event —
+// ConfirmPendingOnDemotion (#4378) would make a pending `commit confirmed`
+// permanent on a lone node whose operator is rebooting it precisely to get
+// the rollback (#12171), and the demotion would also terminate the RG's
+// IPsec SAs that survive an ordinary lone-node restart. A lone node keeps
+// ownership through its stop exactly as before #18540.
 func (m *Manager) ResignForPlannedShutdown() int {
 	m.mu.Lock()
 	if m.stopped {
@@ -67,6 +79,13 @@ func (m *Manager) ResignForPlannedShutdown() int {
 		m.mu.Unlock()
 		slog.Warn("cluster: planned-shutdown resign requested after the cluster manager stopped; " +
 			"the peer cannot hear it and will take over only on heartbeat loss")
+		return 0
+	}
+	if !m.peerAlive {
+		m.mu.Unlock()
+		slog.Info("cluster: planned shutdown with no live peer; keeping redundancy-group ownership " +
+			"through the stop (nothing to hand over, and a demotion would confirm a pending " +
+			"commit-confirmed)")
 		return 0
 	}
 	ids := make([]int, 0, len(m.groups))
@@ -87,12 +106,11 @@ func (m *Manager) ResignForPlannedShutdown() int {
 		m.recalcWeight(rg)
 		resigned++
 	}
-	peerAlive := m.peerAlive
 	m.mu.Unlock()
 
 	if resigned > 0 {
 		slog.Info("cluster: planned shutdown, resigning every redundancy group so the peer takes over now",
-			"groups", resigned, "peer_alive", peerAlive)
+			"groups", resigned)
 	}
 	m.kickHeartbeat()
 	return resigned

@@ -245,3 +245,34 @@ func TestPlannedShutdownResignAfterStopIsRefused18540(t *testing.T) {
 		}
 	}
 }
+
+// #18540 review: with no live peer the resign is a no-op. A lone node keeps
+// ownership through its stop; demoting it would hand the daemon's still-live
+// event watcher an RG0 demotion that confirms a pending commit-confirmed.
+func TestPlannedShutdownResignSkippedWithoutLivePeer18540(t *testing.T) {
+	var rgs []*config.RedundancyGroup
+	for _, id := range restartRGs18540 {
+		rgs = append(rgs, makeRG(id, false, map[int]int{0: 200, 1: 100}))
+	}
+	lone := NewManager(0, 1)
+	t.Cleanup(lone.Stop)
+	lone.UpdateConfig(makeConfig(rgs...))
+	for _, id := range restartRGs18540 {
+		if !lone.IsLocalPrimary(id) {
+			t.Fatalf("fixture: lone node must own RG%d", id)
+		}
+	}
+	if got := lone.ResignForPlannedShutdown(); got != 0 {
+		t.Fatalf("lone-node resign installed %d debts, want 0", got)
+	}
+	for _, rg := range lone.GroupStates() {
+		if rg.State != StatePrimary {
+			t.Errorf("RG%d demoted by a lone-node resign", rg.GroupID)
+		}
+		for _, f := range rg.MonitorFails {
+			if f == PlannedShutdownMonitorIface {
+				t.Errorf("RG%d carries the planned-shutdown debt with no live peer", rg.GroupID)
+			}
+		}
+	}
+}
