@@ -60,15 +60,17 @@ integ9 and integ10, 2 repetitions each.
 | Cluster | Build | v4 -P1 | v4 -P8 | v4 -P12 | v6 -P8 | Orchestrator loadavg |
 |---|---|---|---|---|---|---|
 | loss | master after the 2026-10-30 wave (integ8/9/10) | 4.6–5.5 / 4.8–4.9 | 14.1–19.1 / 16.7–21.1 | 18.2–21.7 / 15.7–20.8 | 13.7–22.8 / 17.4–19.7 | 0.3–5.9 |
-| tcp | master after the 2026-10-30 wave (integ8/9/10) | 14.1–19.6 / 12.4–17.6 | 38.5–39.7 / 40.0–41.5 | 37.5–38.9 / 37.9–39.7 | 37.0–39.5 / 39.3–41.2 | 0.3–5.9 |
+| tcp | master after the 2026-10-30 wave (integ8/9/10) | 14.1–19.6 / 12.4–17.6 | 38.5–39.7 / 40.0–41.5 | 37.5–38.9 / 37.9–39.7 | 37.0–39.5 / 39.3–41.2 | 0.4–5.6 |
 | loss | historical: master `09a2b664be`, 2026-10-29 (before #18520), push only | ~2.4 | 11.6–14.4 | — | — | — |
 
 Loss `-P8` push spreads widely (v4 14.1–19.1, v6 13.7–22.8) because of how 8
 flows hash onto 6 workers (per-stream placement is an open item). The lower
-edges overlap the pre-#18520 regression range, so for these two cells the
-per-repetition band floor cannot tell placement from that regression; the
-best-of-reps ≥ 90% comparison in F2 is what catches it. A single loss `-P8`
-run below 13 Gbit/s is a re-run, not yet a regression; two are a regression.
+edges overlap the pre-#18520 regression range. For these two cells the
+per-repetition band floor still catches a stranding worse than master's own
+placement spread, but it cannot tell that spread from the pre-#18520
+regression; F2's best-of-reps ≥ 90% comparison is what catches that. A
+single loss `-P8` repetition below the band floor (v4 14.1, v6 13.7) is a
+re-run, not yet a regression; two are a regression.
 
 | ID | Run | Pass | Catches |
 |---|---|---|---|
@@ -78,7 +80,7 @@ run below 13 Gbit/s is a re-run, not yet a regression; two are a regression.
 | F4 | Profile the hot worker under `-P8` (`perf record --call-graph lbr -p <helper pid>`) and keep the top 25 symbols with the run | no new top-10 symbol without an explanation | per-packet cost creep. Loss `SessionKey::hash` was 3.3% on 2026-10-19, 16.9% on 2026-10-29, 9.8% after #18520 |
 | F5 | New flows during a split (WAN RG on one node, LAN RG on the other), v4 and v6, to the WAN target **and** via a non-default static | 0% loss | split nodes dropping new WAN flows (#18517), stamped fabric punts dropping as Invalid (#18518), a non-default static ending in NoRoute (#18517 review) |
 | F6 | **Stalls.** The same `make perf-matrix` run | `RESULT: PASS`: no run errors, no 1 s interval under 25% of the run's peak (healthy runs never dip below 74%), no stream under 1 Mbit/s in any interval | **"the iperfs stop"**: a single stream dying while the others absorb its share keeps the aggregate healthy, so only a per-stream, per-interval check sees it. `make perf-matrix-lib` pins the verdict on fixtures |
-| F7 | **Traceroute through the cluster.** From `$CLUSTER_LAN_HOST` (loss: `cluster-userspace-host`): `mtr -n --report --report-cycles=3 -4 1.1.1.1` and `mtr -n --report --report-cycles=3 -6 2001:4860:4860::8888`, then both again with `-u` (UDP probes). **Same-run control:** ping each destination from the same host, and `mtr -n` to it from the owning firewall node | if the control ping fails, the cell is VOID (the path is down upstream): never a pass, never an excuse. Otherwise: hop 1 is the LAN-side reth VIP in both families (never a per-node `169.254.x.x` or `fe80::` RETH address); every later hop answers (loss under 100%) unless the same hop is also silent from the firewall node; the final hop is the destination at 0% loss | ICMP Time Exceeded from upstream routers not un-NATed back to the LAN host (every hop past the firewall `???` while ping works), and the firewall's own v4 TTL-exceeded sourced from `169.254.2.1` (#18174, user-reported 2026-10-30). On master before #18556, `test-connectivity`'s validators `check_mtr_linklocal4/6` **assert the defect** (they require the 169.254/16 and fe80::/10 first hop); #18556 replaces them with `check_mtr_reth_vip`. Until it merges, F7 is run by hand. No `test-connectivity` cell runs `mtr -u` |
+| F7 | **Traceroute through the cluster.** From `$CLUSTER_LAN_HOST` (loss: `cluster-userspace-host`): `mtr -n --report --report-cycles=3 -4 1.1.1.1` and `mtr -n --report --report-cycles=3 -6 2001:4860:4860::8888`, then both again with `-u` (UDP probes). **Same-run control:** ping each destination from the same host | if the control ping fails, the cell is VOID (the path is down upstream): never a pass, never an excuse. Otherwise, judged per sub-criterion: **(a)** hop 1 is the LAN-side reth VIP in both families, never a per-node `169.254.x.x` or `fe80::` RETH address; **(b)** hop 2, the first router past the firewall, answers (loss under 100%), which proves upstream Time Exceeded is un-NATed back to the LAN host; **(c)** ICMP mode only, the final hop is the destination at 0% loss. Later intermediate hops may be silent (upstream rate limits), and `-u` is judged on (a) and (b) only, because a public destination need not answer UDP probes | ICMP Time Exceeded from upstream routers not un-NATed back to the LAN host (every hop past the firewall `???` while ping works), and the firewall's own v4 TTL-exceeded sourced from `169.254.2.1` (#18174, user-reported 2026-10-30). On master before #18556, `test-connectivity`'s validators `check_mtr_linklocal4/6` **assert the defect** (they require the 169.254/16 and fe80::/10 first hop); #18556 replaces them with `check_mtr_reth_vip`, which covers (a)–(c) for ICMP mode. No `test-connectivity` cell runs `mtr -u`, so the `-u` half of F7 is always run by hand |
 
 ## Tier 3: HA (loss and tcp; destructive targets self-lock)
 
@@ -98,7 +100,7 @@ Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ra
 | H7 | **Sync health after every RG move and restart.** Session sync is connected on both nodes within 5 s; a manual failover is admitted within one admission window (no `peer config stale`, no fence refusal); `Sessions stale-config-ignored` does not climb | as stated | a half-open sync connection surviving 56 s (#18521); a fence that never discharges; a config ACK credited then wiped by the peer's new-boot BulkStart (#18521); re-pushes moving the config epoch (#18521 review); the primary ignoring standby epochs (#18526) |
 | H8 | **Revocation symmetry.** After H1, compare `show security flow session` on both nodes for the iperf flows | no session row survives on one node whose twin the other node closed | a Close emitted for an alias-only owner keyed on the translated tuple, which left the LAN node's original-tuple row alive and still translating (#18531 review) |
 | H9 | **Split-window streams.** In H1's per-stream data, the window where `test-failover` holds RG1 apart from RG0/RG2 (the #11581 isolated-failback slice, 63–73 s) | no stream dies in or after the window; aggregate at or above the split-RG fabric ceiling (`docs/fabric-performance-optimizations.md`: about 2.0–3.5 Gbit/s on loss; about 6 Gbit/s on tcp in an RG1-only control), judged separately from the whole-run average | streams killed at the split-RG moves (#18531/#18535) read as "slow" because every flow crosses the copy-mode fabric for the whole window; a killed iperf3 scored as 0.0 Gbit/s plus a collapse (#18543). The fabric ceiling itself is #12655 |
-| H10 | **Hitless failover** (#18559; generation drops #18560, crash takeover #18561). In one lock cell (`with-cluster.sh`), from `$CLUSTER_LAN_HOST`: `iperf3 -c 172.16.80.200 -p 5211 -P8 -t 120 -i 0.1 -J` and `ping -D -i 0.01 172.16.80.200`. **Planned:** for each data RG in turn, run `cli -c "request chassis cluster failover redundancy-group <N>"` on the node that should take it, wait 10 s, then move it back the same way; finish with `request chassis cluster failover reset redundancy-group <N>` on both nodes. **Crash:** `incus stop --force` the node that owns the data RGs, then restore it. A VM force-stop leaves the survivor's sync socket half-open, so the sync-recency guard is in play; a process kill closes it and is the easier case. Read every timing on the LAN host's clock only (no cross-node pairing) | **planned, per single-RG move:** at most 3 pings lost (30 ms), and no stream has more than two consecutive 100 ms intervals under 1 Mbit/s. **Crash:** the LAN host's longest ping gap is at most 1.4 s (the 1.0 s staleness threshold of the lab's 200 ms × 5 heartbeat, plus one 200 ms tick, plus 200 ms to activate), and no stream dies | baseline on loss, 2026-10-30: one planned single-RG move lost 23 pings (failback 26), and a batch move of all RGs lost 20–21. Three sequential moves lost ~47 in all and stalled single streams for 0.3–1.9 s (TCP backoff after short losses). A crash of the owner left a 2.0–2.3 s gap. Sessions are already on both nodes, so every lost packet is a transition defect: the demote/activate gap, drops on the old owner, generation-stamp drops at each helper publish, the split window between per-RG moves. Scripted versions of both procedures land with #18559 |
+| H10 | **Hitless failover** (#18559; generation drops #18560, crash takeover #18561). In one lock cell (`with-cluster.sh`), from `$CLUSTER_LAN_HOST`: `iperf3 -c $IPERF_TARGET4 -p 5211 -P8 -t 120 -i 0.1 -J` and `ping -D -i 0.01 $IPERF_TARGET4`. **Planned:** for each RG in turn, `cli -c "request chassis cluster failover redundancy-group <N> node <taker>"` (an explicit transfer to `<taker>`; without `node` the command demotes the node it runs on, so run on the taker it moves nothing). Confirm with `show chassis cluster status` that the RG moved; a move that did not happen makes the cell VOID. Wait 10 s, then move it back the same way, and finish with `request chassis cluster failover reset redundancy-group <N>` on both nodes. **Crash:** `incus stop --force` the node that owns the data RGs, then restore it. A VM force-stop leaves the survivor's sync socket half-open, so the sync-recency guard is in play; a process kill closes it and is the easier case. Read every timing on the LAN host's clock only (no cross-node pairing) | **Per PR (HA PRs, master-relative):** on the same cluster, the PR build is no worse than master's recorded H10 numbers: per-move lost pings at most master's + 1, worst stream stall at most master's + 100 ms, crash ping gap at most master's + 100 ms, and no stream dies. **Target (#18559; tracked until met):** per single-RG move at most 3 pings lost (30 ms), and no stream has more than two consecutive 100 ms intervals under 1 Mbit/s, so even one TCP retransmit timeout (200 ms minimum) fails it, which is intended. Crash: the LAN host's longest ping gap is at most 1.4 s (the 1.0 s staleness threshold of the lab's 200 ms × 5 heartbeat, plus one 200 ms tick, plus 200 ms to activate), and no stream dies | baseline on loss, 2026-10-30, master: a single-RG move lost 23 pings (failback 26), a batch move of all RGs 20–21, and the worst single-stream stall across runs was 0.3–1.9 s (TCP backoff after short losses). A crash of the owner left a 2.0–2.3 s ping gap. Sessions are already on both nodes, so every lost packet is a transition defect: the demote/activate gap, drops on the old owner, generation-stamp drops at each helper publish, the split window between per-RG moves. Scripted versions of both procedures land with #18559 |
 
 ## Tier 4: soak and cadence
 
@@ -109,13 +111,18 @@ Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ra
 
 ## Known product failures (tracked)
 
-None of these is environment. Per PR, each cell is judged against master in
-the same session: red on master and on the PR is not a PR failure, green on
-master and red on the PR blocks the merge (the campaign skill's "failure on
-any cell that passes on master = BLOCK"). After a merge wave, they are the
-only cells expected to be red, until their issue closes; any other red cell
-is a new failure.
+None of these is environment. Per PR, each cell is judged against the
+cluster's recorded master baseline (the campaign skill's cached baseline,
+not a fresh master deploy per PR). A cell green on master and red on the PR
+blocks the merge, as in the skill's "failure on any cell that passes on
+master = BLOCK". A cell red on both is judged on its parts: F7 per
+sub-criterion (a)–(c), and H10 by its numbers, so a PR cannot make a red
+cell worse unnoticed. After a merge wave, these are the only cells expected
+to be red, until their issue closes; any other red cell is a new failure.
 
+- **H10 hitless targets: #18559** (with #18560 and #18561). Master misses
+  the targets (see the row's baseline), so HA PRs are gated on H10's
+  master-relative numbers until #18559 closes.
 - **tcp external IPv4 (1.1.1.1, 8.8.8.8): #18558.** This was once excused
   here as an upstream that does not forward for the tcp cluster's source. In
   fact IPv4 internet loss starts 30–55 s after an RG move, and the WAN
@@ -123,9 +130,17 @@ is a new failure.
   tcp, 2026-10-30; the integ8–10 master runs show it too).
 - **MTR / traceroute cells: #18174, fixed by #18556.** The `test-connectivity`
   cells "mtr LAN→internet IPv6 … final hop 2" and "Group11 IPv4 MTR … `???`"
-  were excused here as an upstream issue. Ping to the same destinations
-  works in both families while every hop past the firewall is `???`. They
-  are row F7.
+  were excused here as an upstream issue. Ping to a live destination
+  (`1.1.1.1`, `2001:4860:4860::8888`) works in both families while every
+  hop past the firewall is `???`. They are row F7.
+- **LAN host → internet IPv6 ping (`2607:f8b0:4005:80e::200e`)**, the
+  `test-connectivity` cell of that name. The address stopped answering echo
+  (0/2), while `2001:4860:4860::8888` answered 2/2 from the same host in the
+  same run (#18556). This is a dead target, not a product failure, but it
+  is listed here rather than as environment because the fix is in the
+  harness: retarget it to `2001:4860:4860::8888` (#18174). Its control is
+  the same-run ping to `2001:4860:4860::8888`; if that fails too, the cell
+  is a product failure.
 - **Fabric/control host pings** (fw0↔fw1 on 10.99.x, and host ICMP to the
   fabric/WAN gateway): #18212. They fail on loss, tcp and udp.
 
