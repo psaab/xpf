@@ -616,6 +616,11 @@ mod tests_noroute_capped_import_9054;
 #[cfg(test)]
 #[path = "tests_noroute_unresolved_16021.rs"]
 mod tests_noroute_unresolved_16021;
+// #18517: split-node bare-gateway binding (peer-owned rows only, ECMP, VRF,
+// fabric fate) and the #15917 gateway-owner terminal attribution.
+#[cfg(test)]
+#[path = "tests_split_rg_gateway_18517.rs"]
+mod tests_split_rg_gateway_18517;
 // #9522 Phase 0: selected lookup-semantic coverage for the route FIB (parity
 // corpus for a future LPM cutover; test-only, no production change).
 #[cfg(test)]
