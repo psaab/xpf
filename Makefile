@@ -1614,6 +1614,25 @@ test-connectivity:
 		--require-helper-attestation \
 		-- ./test/incus/test-connectivity.sh $(MODE)
 
+# Throughput and stall matrix, docs/regression-test-matrix.md rows F2/F6:
+# v4/v6 x push/reverse x -P1/-P8/-P12 from the LAN host, held inside one lock
+# cell. Records throughput beside loadavg; FAILS on any connect error or any
+# 1 s interval where the aggregate or a single stream stalls ("the iperf
+# stops"). For tcp/udp export the cluster's lock tuple first (CLAUDE.md).
+PERF_MATRIX_OUT ?= /var/tmp/perf-matrix/$(HARNESS_ENV)
+PERF_MATRIX_DUR ?= 20
+PERF_MATRIX_REPS ?= 2
+.PHONY: perf-matrix perf-matrix-lib
+perf-matrix:
+	./test/incus/with-cluster.sh "perf-matrix" -- \
+		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/iperf-matrix.sh \
+		$(PERF_MATRIX_OUT) $(PERF_MATRIX_DUR) $(PERF_MATRIX_REPS)
+
+# Hermetic: the stall verdict on fixture iperf3 JSON (a stalled aggregate, a
+# single dead stream, an error, an empty and an unparseable result all FAIL).
+perf-matrix-lib:
+	./test/incus/iperf-matrix.sh --selftest
+
 # Hermetic unit fixtures for the IPv4 RETH MTR path checker.
 test-connectivity-mtr-selftest:
 	./test/incus/connectivity-mtr-selftest.sh

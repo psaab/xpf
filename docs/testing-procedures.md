@@ -2,6 +2,10 @@
 
 ## Quick Reference
 
+The pre-merge and merge-wave checklist for forwarding, performance and HA
+changes is `docs/regression-test-matrix.md`. This page describes how to run
+each harness.
+
 | Test | Command | Duration | When to Run |
 |------|---------|----------|-------------|
 | Unit tests (Go + Rust) | `make test` | ~minutes | Every code change |
@@ -12,6 +16,7 @@
 | Hard crash | `make test-ha-crash` | ~120s | Cluster state machine changes |
 | Private RG | `./test/incus/test-private-rg.sh` | varies; three raw deploys for `full` | Private RG election changes |
 | Restart | `make test-restart-connectivity` | ~30s | Shutdown/startup changes |
+| Throughput and stall matrix | `make perf-matrix` (`make perf-matrix-lib` hermetic) | ~10 min | Dataplane/forwarding changes; every merge wave (regression matrix F2/F6) |
 
 ## Test Categories
 
