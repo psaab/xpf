@@ -392,6 +392,7 @@ fn cached_entry() -> FlowCacheEntry {
         neighbor_mac_epoch: 0,
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
+        dest_owner_memo: Default::default(),
     }
 }
 
@@ -7957,4 +7958,231 @@ fn strict_pre_handshake_data_not_served_from_cache_16479() {
         matches!(run_est.outcome, FlowCacheOutcome::Consumed),
         "#16479 control: established session data must still be cache-served under strict"
     );
+}
+
+/// #18534 fixture: a clustered node serving a cached ForwardCandidate whose
+/// destination (`test_key` dst 172.16.50.200) sits in a connected /24 owned by
+/// RG1 (`DEST_OWNER_IFINDEX_18534`). The logical egress row and the seed stamp
+/// name RG2, which stays active, so only the destination-owner arm can see RG1
+/// depart. `publish_epoch` is the forwarding snapshot identity the entry's
+/// destination-owner memo keys on (0 = unpublished fixture, never memoised).
+const DEST_OWNER_IFINDEX_18534: i32 = 21;
+
+fn dest_owner_fixture_18534(owner_active: bool, publish_epoch: u64) -> LiveCallSiteFixture {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom).with_zone_accounting();
+    fixture.forwarding.publish_epoch = publish_epoch;
+    fixture
+        .forwarding
+        .egress
+        .get_mut(&EGRESS_IFINDEX)
+        .expect("zone-accounting fixture seeds the egress")
+        .redundancy_group = 2;
+    fixture.forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: crate::prefix::PrefixV4::from_net("172.16.50.0/24".parse().expect("prefix")),
+        host: Ipv4Addr::new(172, 16, 50, 0),
+        ifindex: DEST_OWNER_IFINDEX_18534,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    fixture.forwarding.egress.insert(
+        DEST_OWNER_IFINDEX_18534,
+        EgressInterface {
+            bind_ifindex: DEST_OWNER_IFINDEX_18534,
+            vlan_id: INGRESS_VLAN_ID,
+            mtu: 1500,
+            src_mac: [0x02, 0xbf, 0x72, 0x00, 0x01, 0x02],
+            zone_id: TEST_TRUST_ZONE_ID,
+            redundancy_group: 1,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    let active = HAGroupRuntime {
+        active: true,
+        watchdog_timestamp: 1,
+        lease: HAGroupRuntime::active_lease_until(1, 1),
+    };
+    fixture.ha_state.insert(2, active);
+    fixture.ha_state.insert(
+        1,
+        if owner_active {
+            active
+        } else {
+            HAGroupRuntime {
+                active: false,
+                watchdog_timestamp: 1,
+                lease: HAForwardingLease::Inactive,
+            }
+        },
+    );
+    fixture
+}
+
+fn dest_owner_entry_18534() -> FlowCacheEntry {
+    let mut entry = cached_entry();
+    entry.metadata.owner_rg_id = 2;
+    entry.stamp.owner_rg_id = 2;
+    entry.stamp.owner_rg_lease_until = 0;
+    entry
+}
+
+fn connected_owner_resolves_18534() -> u64 {
+    crate::afxdp::session_glue::CONNECTED_OWNER_RESOLVES_FOR_TEST.with(|count| count.get())
+}
+
+/// #18534: the memo is a pure-function cache of the direct resolution, and
+/// an unpublished snapshot (epoch 0) is never memoised.
+#[test]
+fn destination_owner_rg_is_never_memoised_unpublished_18534() {
+    let target = test_key().dst_ip;
+    let unpublished = dest_owner_fixture_18534(true, 0);
+    let entry = dest_owner_entry_18534();
+    let direct = crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+        &unpublished.forwarding,
+        target,
+        None,
+    );
+    assert_eq!(direct, 1, "premise: the destination's connected owner is RG1");
+    let before = connected_owner_resolves_18534();
+    assert_eq!(entry.destination_owner_rg(&unpublished.forwarding, target, None), 1);
+    assert_eq!(entry.destination_owner_rg(&unpublished.forwarding, target, None), 1);
+    assert_eq!(connected_owner_resolves_18534() - before, 2, "epoch 0 is never memoised");
+}
+
+/// #18534: a published snapshot resolves once per (epoch, target).
+#[test]
+fn destination_owner_rg_resolves_once_per_snapshot_and_target_18534() {
+    let target = test_key().dst_ip;
+    let other_target = IpAddr::V4(Ipv4Addr::new(172, 16, 50, 7));
+    let published = dest_owner_fixture_18534(true, 7);
+    let entry = dest_owner_entry_18534();
+    let before = connected_owner_resolves_18534();
+    assert_eq!(entry.destination_owner_rg(&published.forwarding, target, None), 1);
+    assert_eq!(entry.destination_owner_rg(&published.forwarding, target, None), 1);
+    assert_eq!(connected_owner_resolves_18534() - before, 1, "one resolution per published snapshot");
+    assert_eq!(entry.destination_owner_rg(&published.forwarding, other_target, None), 1);
+    assert_eq!(connected_owner_resolves_18534() - before, 2, "a different target resolves again");
+}
+
+/// #18534: a new published snapshot (a worker rotation) resolves again.
+#[test]
+fn destination_owner_rg_resolves_again_on_a_new_snapshot_18534() {
+    let target = test_key().dst_ip;
+    let entry = dest_owner_entry_18534();
+    assert_eq!(entry.destination_owner_rg(&dest_owner_fixture_18534(true, 7).forwarding, target, None), 1);
+    let rotated = dest_owner_fixture_18534(true, 8);
+    let before = connected_owner_resolves_18534();
+    assert_eq!(entry.destination_owner_rg(&rotated.forwarding, target, None), 1);
+    assert_eq!(connected_owner_resolves_18534() - before, 1, "a new snapshot resolves again");
+}
+
+/// #18534: the live hit stage reads a current memo: no resolution.
+#[test]
+fn cached_hit_reads_a_current_destination_owner_memo_18534() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let target = test_key().dst_ip;
+    let fixture = dest_owner_fixture_18534(true, 7);
+    let entry = dest_owner_entry_18534();
+    assert_eq!(entry.destination_owner_rg(&fixture.forwarding, target, None), 1, "seed the memo");
+    let before = connected_owner_resolves_18534();
+    let run = run_stage_with_entry(&fixture, &frame, meta, entry, 0);
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "premise: an active destination owner is served from the cache"
+    );
+    assert_eq!(connected_owner_resolves_18534() - before, 0, "a current memo is not re-resolved");
+}
+
+/// #18534: a memo from an older snapshot is resolved once by the hit.
+#[test]
+fn cached_hit_resolves_a_stale_destination_owner_memo_once_18534() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let target = test_key().dst_ip;
+    let entry = dest_owner_entry_18534();
+    assert_eq!(entry.destination_owner_rg(&dest_owner_fixture_18534(true, 7).forwarding, target, None), 1);
+    let rotated = dest_owner_fixture_18534(true, 8);
+    let before = connected_owner_resolves_18534();
+    let run = run_stage_with_entry(&rotated, &frame, meta, entry, 0);
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed));
+    assert_eq!(connected_owner_resolves_18534() - before, 1, "a stale memo resolves once");
+}
+
+/// #18534 transition: the memo holds WHICH RG owns the destination, never
+/// whether it is active. RG1 departing in the HA state with no forwarding
+/// publish (the failover shape) still falls the next hit through on the
+/// destination-owner arm, with no re-resolution.
+#[test]
+fn memoised_destination_owner_still_sees_its_departure_18534() {
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let target = test_key().dst_ip;
+    let fixture = dest_owner_fixture_18534(false, 7);
+    let entry = dest_owner_entry_18534();
+    assert_eq!(entry.destination_owner_rg(&fixture.forwarding, target, None), 1, "seed the memo");
+    let before = connected_owner_resolves_18534();
+    let run = run_stage_with_entry(&fixture, &frame, meta, entry, 0);
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "a departed destination owner must re-resolve on the slow path"
+    );
+    assert_eq!(
+        run.flow_cache_evictions_by_arm
+            [crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitForwardCandidateEgressDeparted
+                as usize],
+        1,
+        "the destination-owner arm owns the eviction"
+    );
+    assert_eq!(connected_owner_resolves_18534() - before, 0, "judged from the memo");
+}
+
+/// #18533 round 2: an ordinary cached flow (no cached drop, no policer)
+/// cannot be dropped after the probe, so the probe builds no rollback undo.
+#[test]
+fn undroppable_cached_hit_records_no_rollback_undo_18533() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let run = run_stage(&fixture, &frame, 0);
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served");
+    assert_eq!(run.sessions.probe_undo_records_for_test(), 0, "nothing can drop it: no undo");
+    let charged = run.sessions.session_counters(&test_key()).expect("counters");
+    assert_eq!(charged.fwd_packets, 1, "premise: the served packet is charged");
+}
+
+/// #18533 round 2: a cached `then discard` can drop the packet after the
+/// probe, so the undo is built and the dropped packet is un-charged on the
+/// session exactly as before.
+#[test]
+fn droppable_cached_hit_rolls_back_its_charge_18533() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let mut entry = cached_entry();
+    entry.descriptor.tx_selection.drop = true;
+    let run = run_stage_with_entry(&fixture, &frame, test_meta(&frame), entry, 0);
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: dropped in place");
+    assert_eq!(run.sessions.probe_undo_records_for_test(), 1, "a cached drop builds the undo");
+    let after = run.sessions.session_counters(&test_key()).expect("counters");
+    assert_eq!(
+        (after.fwd_packets, after.fwd_bytes),
+        (0, 0),
+        "the dropped packet must not charge the session"
+    );
+}
+
+/// #18533 round 2: both transit address-class gates resolve their routing
+/// domain once per hit. With routing instances configured (the gate behind
+/// `ingress_routing_domain`'s map probes is open) a domain-0 flow paid two
+/// resolutions per packet, one per gate.
+#[test]
+fn cached_hit_resolves_the_transit_routing_domain_once_18533() {
+    let mut fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    fixture.forwarding.has_routing_domains = true;
+    let frame = tcp_v4_ack_frame();
+    let resolves =
+        || crate::afxdp::forwarding::INGRESS_ROUTING_DOMAIN_RESOLVES_FOR_TEST.with(|c| c.get());
+    let before = resolves();
+    let run = run_stage(&fixture, &frame, 0);
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served");
+    assert_eq!(resolves() - before, 1, "one routing-domain resolution for both gates");
 }

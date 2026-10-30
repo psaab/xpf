@@ -113,7 +113,8 @@ fn established_pair(table: &mut SessionTable, i: u16, origin: SessionOrigin, now
 }
 
 /// One admitted cache-served packet, as `stage_flow_cache_hit` drives the
-/// session table.
+/// session table for a flow with no cached output-filter drop and no
+/// three-color policer (round 2: `rollback_possible = false`, so no undo).
 fn cached_hit_with_ack(
     table: &mut SessionTable,
     key: &SessionKey,
@@ -122,7 +123,22 @@ fn cached_hit_with_ack(
     payload: u32,
     ack: u32,
 ) -> bool {
-    let live = table.probe_hit_deferring_state_update_with_ack(
+    cached_hit_with_rollback(table, key, now, flags, payload, ack, false)
+}
+
+/// `cached_hit_with_ack` for a flow whose cached replay CAN still drop the
+/// packet (an output `then discard` or a policer), so the probe records its
+/// rollback undo.
+fn cached_hit_with_rollback(
+    table: &mut SessionTable,
+    key: &SessionKey,
+    now: u64,
+    flags: u8,
+    payload: u32,
+    ack: u32,
+    rollback_possible: bool,
+) -> bool {
+    let live = table.probe_hit_deferring_state_update_with_ack_rollback(
         key,
         now,
         u64::from(payload) + 66,
@@ -130,6 +146,7 @@ fn cached_hit_with_ack(
         payload,
         0,
         Some(ack),
+        rollback_possible,
     );
     table.emit_probe_hit_state_update(key);
     let _ = table.take_probe_stage_transition_forward(key);
@@ -138,6 +155,10 @@ fn cached_hit_with_ack(
 
 fn data_hit(table: &mut SessionTable, key: &SessionKey, now: u64) -> bool {
     cached_hit_with_ack(table, key, now, TCP_ACK | TCP_PSH, MSS, SERVER_ISN + 1)
+}
+
+fn data_hit_droppable(table: &mut SessionTable, key: &SessionKey, now: u64) -> bool {
+    cached_hit_with_rollback(table, key, now, TCP_ACK | TCP_PSH, MSS, SERVER_ISN + 1, true)
 }
 
 fn ack_hit(table: &mut SessionTable, key: &SessionKey, now: u64) -> bool {
@@ -438,6 +459,25 @@ fn established_cached_hit_probe_ns_18533() {
     run("same-worker reverse ack", &mut same, true);
     run("split-worker A forward data", &mut split_a, false);
     run("split-worker B reverse ack", &mut split_b, true);
+    // Round 2: the same forward hit when the cached replay can still drop it
+    // (output filter or policer configured), which records the undo.
+    let mut samples = Vec::with_capacity(REPS);
+    for _ in 0..REPS {
+        let started = std::time::Instant::now();
+        for _ in 0..ROUNDS {
+            for (fwd, _) in &hot {
+                now += 1_000;
+                std::hint::black_box(data_hit_droppable(&mut split_a, fwd, now));
+            }
+        }
+        samples.push(started.elapsed().as_nanos() as f64 / (ROUNDS * hot.len() as u64) as f64);
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    eprintln!(
+        "#18533 split-worker A forward data, rollback possible (undo recorded): min {:.1} ns/probe, median {:.1} ns/probe",
+        samples[0],
+        samples[REPS / 2]
+    );
     // Decomposition, not a production shape: the same forward hit through
     // the NON-deferring probe, which records no rollback undo. The gap to
     // "split-worker A forward data" is what the #15947 undo record costs.
@@ -460,5 +500,83 @@ fn established_cached_hit_probe_ns_18533() {
         "#18533 split-worker A forward data, non-deferring probe (no undo; decomposition floor): min {:.1} ns/probe, median {:.1} ns/probe",
         samples[0],
         samples[REPS / 2]
+    );
+}
+
+/// Round 2: the deferring probe records its rollback undo only when the
+/// caller can still drop the packet. Without it a steady-state hit builds no
+/// record (and costs the same single lookup); with it the undo is recorded and
+/// a dropped packet is un-charged exactly as before.
+#[test]
+fn undo_is_recorded_only_when_a_drop_is_still_possible_18533() {
+    let mut table = SessionTable::new();
+    let (fwd, _rev) = established_pair(&mut table, 1, SessionOrigin::ForwardFlow, START_NS);
+    drain_all(&mut table);
+    let t = START_NS + 3 * MS;
+    let records = table.probe_undo_records_for_test();
+    let hashes = key_hashes();
+    assert!(table.probe_hit_deferring_state_update_with_ack_rollback(&fwd, t, 1514, TCP_ACK | TCP_PSH, MSS, 0, Some(SERVER_ISN + 1), false));
+    assert_eq!(key_hashes() - hashes, 1, "still one record lookup");
+    assert_eq!(table.probe_undo_records_for_test() - records, 0, "no drop possible: no undo built");
+    assert_eq!(table.pending_probe_undo_len_for_test(), 0);
+    table.emit_probe_hit_state_update(&fwd);
+    // Transition: a droppable packet records its undo and is un-charged.
+    let before = table.session_counters(&fwd).expect("counters");
+    assert!(table.probe_hit_deferring_state_update_with_ack_rollback(&fwd, t + MS, 1514, TCP_ACK | TCP_PSH, MSS, 0, Some(SERVER_ISN + 1), true));
+    assert_eq!(table.probe_undo_records_for_test() - records, 1, "a possible drop builds the undo");
+    table.rollback_dropped_probe_hit(&fwd, 1514, TCP_ACK | TCP_PSH);
+    assert_eq!(table.session_counters(&fwd), Some(before), "the dropped packet is un-charged");
+}
+
+/// Round 2: a completion through a probe that recorded no undo still queues
+/// its HA Update and stage marker under the CANONICAL key — the admission key
+/// is resolved on the completing packet instead of read from the undo — so an
+/// admission through the translated alias publishes it exactly once.
+#[test]
+fn completion_without_an_undo_publishes_under_its_canonical_key_18533() {
+    let mut table = SessionTable::new();
+    let now = START_NS;
+    let fwd = flow_key(3);
+    let nat = snat(3);
+    // SYN-ACK-first: both halves install from SYN|ACK, pending, and the
+    // completing segment is the reverse ACK (classic arm, reverse half).
+    assert!(table.install_with_protocol(
+        fwd.clone(),
+        SessionDecision { nat, ..decision() },
+        metadata(),
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    let rev = reverse_session_key(&fwd, nat);
+    let rev_nat = nat.reverse(fwd.src_ip, fwd.dst_ip, fwd.src_port, fwd.dst_port);
+    assert!(table.install_with_protocol(
+        rev.clone(),
+        SessionDecision { nat: rev_nat, ..decision() },
+        reverse_metadata(),
+        now,
+        PROTO_TCP,
+        TCP_SYN | TCP_ACK,
+    ));
+    drain_all(&mut table);
+    let alias = translated_session_key(&rev, rev_nat);
+    assert_ne!(alias, rev, "premise: the alias differs from the stored reverse key");
+    assert!(table.probe_hit_deferring_state_update_with_ack_rollback(&alias, now + MS, 66, TCP_ACK, 0, 0, None, false));
+    assert_eq!(table.pending_probe_undo_len_for_test(), 0, "no undo was recorded");
+    assert_eq!(
+        table.handshake_state_wire_for(&fwd),
+        TcpHandshakeState::Established.to_wire(),
+        "premise: the alias ACK completed the pair"
+    );
+    table.emit_probe_hit_state_update(&alias);
+    let updates = table
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|d| d.kind == SessionDeltaKind::Update)
+        .count();
+    assert_eq!(updates, 1, "the alias admission publishes the canonical Update once");
+    assert!(
+        table.take_probe_stage_transition_forward(&alias).is_some(),
+        "the stage marker is keyed so the alias admission takes it"
     );
 }

@@ -552,6 +552,15 @@ pub(in crate::afxdp) struct ForwardingState {
     /// flips across publishes. Workers read it atomically with the
     /// enabled bit from their loaded view; they never infer transitions.
     pub(in crate::afxdp) pptp_epoch: u64,
+    /// #18534: publisher-stamped identity of THIS forwarding snapshot. The
+    /// coordinator advances it on every `publish_runtime_view` (the only
+    /// production path that hands workers a new forwarding `Arc`), so two
+    /// worker-visible snapshots never share a nonzero value and a published
+    /// snapshot is immutable. Per-flow memos of pure functions of the
+    /// forwarding tables (the flow cache's destination-owner RG) key on it.
+    /// 0 = never published (unit fixtures, the pre-publish default): such a
+    /// state may be mutated in place, so memos are disabled for it.
+    pub(in crate::afxdp) publish_epoch: u64,
     /// #2008 M5: L3/L4 application-identification catalog. Resolves a session's
     /// 5-tuple to the numeric app_id stamped on the conntrack session at
     /// create time, so `show security flow session` reports a real application

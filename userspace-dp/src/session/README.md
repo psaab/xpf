@@ -948,6 +948,17 @@ forward packet, each needed by some transition but paid on every packet:
   no-op, so restoring only what it wrote is the same rollback; the former
   `accounting` snapshot always de-duplicated onto `matched`/`companion` and
   is gone.
+- **No undo at all when the packet cannot be dropped (round 2).** The undo
+  exists only for `rollback_dropped_probe_hit`, which the hit path calls
+  only when the cached replay drops the packet: a `then discard`/`then
+  reject` selection or a three-color policer. The hit passes
+  `rollback_possible = tx_selection.drop || !three_color_policers.is_empty()`
+  to `probe_hit_deferring_state_update_with_ack_rollback`; without either,
+  the probe builds no `ProbeUndo` (a few hundred bytes built and pushed per
+  packet, the 1.2% `memmove` under the probe in the round-1 loss profile).
+  The deferred HA Update and stage marker are unchanged; their admission key
+  is then resolved on the completing packet itself (the resolution the
+  admission emit applies) instead of read from the undo.
 - **The #16042 expected ack is resolved only for a completion candidate.**
   The probe judges every classic-completion conjunct under its borrow and
   calls `handshake_expected_ack` (record + companion lookups) only when all
@@ -959,10 +970,12 @@ forward packet, each needed by some transition but paid on every packet:
   alias packet key, a withheld Update, or an undo another flow left behind
   takes the resolving path unchanged.
 
-Outside the session table, the same hit path dropped two more per-packet
-costs (see `afxdp/README.md`, "Established cache-hit cost"): the #16217
-pre-lookup `peek_entry` (a second flow-cache set hash) and the #16841
-zero-hop-limit gate's eager FIB walk.
+Outside the session table, the same hit path dropped more per-packet costs
+(see `afxdp/README.md`, "Established cache-hit cost"): the #16217
+pre-lookup `peek_entry` (a second flow-cache set hash), the #16841
+zero-hop-limit gate's eager FIB walk, and in round 2 (#18534) the HA
+validator's per-packet connected-owner walk, the post-admission neighbor
+learn's re-derivations, and one of two routing-domain resolutions.
 
 Cells: `session/established_hit_cost_18533_tests.rs` — the totals above for
 a same-worker pair and a split-worker pair (worker A forward, `WorkerLocalImport`
@@ -976,7 +989,13 @@ and another flow's admission resolve, and the latter leaves this flow's undo
 for its rollback); and an ignored `MEASUREMENT` cell timing the four
 workloads. `afxdp/poll_descriptor/flow_cache_hit_tests.rs`
 `live_established_cache_hit_hashes_the_flow_key_twice_18533` pins the whole
-live hit stage at two key hashes. Numbers: `docs/log/18533.md`.
+live hit stage at two key hashes. Numbers: `docs/log/18533.md`. Round 2
+(#18534): `undo_is_recorded_only_when_a_drop_is_still_possible_18533`,
+`completion_without_an_undo_publishes_under_its_canonical_key_18533`, and the
+live-stage `undroppable_cached_hit_records_no_rollback_undo_18533` /
+`droppable_cached_hit_rolls_back_its_charge_18533` (a cached `then discard`
+still records the undo and un-charges the session);
+numbers in `docs/log/18534.md`.
 
 ## Flow-cache invalidation on reap (#3776)
 

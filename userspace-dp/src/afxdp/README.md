@@ -2068,13 +2068,87 @@ the walk inside the closure), and `flow_cache_hit_tests.rs`
 `live_established_cache_hit_hashes_the_flow_key_twice_18533` (the whole live
 hit stage hashes the flow key twice: flow-cache set index + session record).
 
-Still on the per-hit path and NOT addressed here: the HA validator's
-`forward_candidate_destination_owner_departed` probe
-(`ForwardingState::connected_owner_index_lookup`, ~1.7% in the same profile)
-on every ForwardCandidate hit of a clustered node, and the per-flow FIB
-lookup `cached_flow_decision_invalid_reason_for_flow` makes for every cached
-FabricRedirect hit. Both came in with #16215/#16217 and need a cached
-destination-owner RG rather than a reorder; tracked in #18534.
+Round 2 (#18534), against the integ6 loss -P8 profile
+(`connected_owner_index_lookup` 2.3% + `connected_owner_rg_for_target_in_table`
+1.2%, `ingress_routing_domain` 1.9%, `src_ip_on_link_for_ingress` 1.0%,
+`learn_dynamic_neighbor_with_mac` 1.0%):
+
+- **Forwarding snapshot identity.** `ForwardingState::publish_epoch` is
+  stamped by the coordinator on every `publish_runtime_view` — the only
+  production path that hands workers a new forwarding `Arc` — and kept by a
+  validation-only republish (same `Arc`). A published snapshot is immutable,
+  so per-flow memos of pure functions of the forwarding tables key on it.
+  0 means unpublished (fixtures mutate their state in place) and disables
+  every memo below.
+- **Destination-owner RG memoised per flow (HA validator).** The
+  `ForwardCandidateEgressDeparted` destination-owner arm resolved the
+  destination's connected owner on every ForwardCandidate hit of a
+  clustered node: `connected_owner_index_current` (a sum over every
+  interface's prefix list) plus one `FastMap` probe per prefix length with
+  `&str` table compares (9 probes for a /24 destination, up to 66 v4 / 258
+  v6 for a routed one). `FlowCacheEntry::destination_owner_rg` memoises the
+  answer per `(publish_epoch, target)` in the entry (`DestOwnerMemo`, a
+  `Cell`), and the hit hands it to
+  `cached_flow_decision_invalid_reason_for_cached_flow` as a lazy closure.
+  Only WHICH RG owns the destination is memoised; whether that RG is active
+  is still judged against the live HA state per packet, so an RG departure
+  (which does not publish a new forwarding snapshot) is seen on the next
+  packet.
+- **Post-admission neighbor learn.** Every admitted hit re-ran the on-link
+  scan, the owned-IP probes and the VLAN-alias resolve before the learn's
+  dedup leg coalesced the duplicate. `LearnedNeighborDedup` now records the
+  `publish_epoch` its derivations were confirmed under; a fresh duplicate
+  (same key, same snapshot, inside the refresh interval, unchanged neighbor
+  epochs) returns before them. Any neighbor MAC replacement or removal,
+  snapshot rotation, interval expiry or new source MAC takes the full path.
+- **One routing-domain resolution for both transit address-class gates.**
+  `transit_class_routing_domain` resolves it once and the hit calls the
+  `_in` variants of the destination and source gates; the stand-alone gates
+  are thin compositions of the same helpers.
+
+Still on the per-hit path and NOT removed: the per-flow FIB lookup the HA
+validator makes for every cached FabricRedirect hit (not on fabric-link
+ingress), and `prefer_local_forward_candidate_for_fabric_ingress_for_flow`
+for other fabric-ingress hits. Their result depends on the dynamic neighbor
+map as well as the snapshot (`select_v4_route` consults neighbor presence),
+and the map has no generation that covers both inserts and removals
+(`insert_generation` moves on every learn; the per-shard epochs move only on
+replacement/removal), so no memo key is sound yet. Neither is on the
+steady-state path of a cluster whose RGs are local (the integ6 profile shows
+neither).
+
+TX-side `memmove` (integ6: 2.0% under `transmit_prepared_queue`, 0.6%
+under `VecDeque<PreparedTxRequest>::push_back_mut`): this is not a frame
+copy. The default `SharedUmemPolicy` is cross-NIC for `mlx5_core`
+(`shared_umem.rs`), which groups the LAN and WAN VFs into one UMEM per
+worker when eligible, so a cross-binding hit takes the in-place path — the
+same profile's 1.1% `HashMap<u64, PreparedTxRecycle>::insert` is recorded
+only for in-place sends (`in_flight_prepared_recycles`), which corroborates
+it; the status's shared-UMEM plan is the authority. The bytes moved are
+the `PreparedTxRequest` itself (about 300 bytes by field count, ~184 of them
+an `Option<OverlapAdmissionTokens>` that is `None` on every cache hit),
+moved four times per packet between the hit, the stage and the finalise
+queues. Shrinking it needs the overlap tokens off the struct without a
+per-fragment allocation; not done here. A true cross-UMEM hit (separate
+UMEMs) instead copies the whole frame in `build_forwarded_frame_into_from_frame`
+on the fallback path, which no shared-UMEM loss hit takes.
+
+Round-2 cells: `flow_cache_hit_tests.rs` — the memo
+(`destination_owner_rg_is_never_memoised_unpublished_18534`,
+`destination_owner_rg_resolves_once_per_snapshot_and_target_18534`,
+`destination_owner_rg_resolves_again_on_a_new_snapshot_18534`), the live hit
+reading it (`cached_hit_reads_a_current_destination_owner_memo_18534`,
+`cached_hit_resolves_a_stale_destination_owner_memo_once_18534`), the
+departure still judged per packet
+(`memoised_destination_owner_still_sees_its_departure_18534`), the rollback
+undo (`undroppable_cached_hit_records_no_rollback_undo_18533`,
+`droppable_cached_hit_rolls_back_its_charge_18533`) and
+`cached_hit_resolves_the_transit_routing_domain_once_18533`;
+`coordinator/forwarding_publish_epoch_18534_tests.rs`;
+`tests_neighbor_learn_fresh_18533.rs` (a fresh duplicate skips the full
+learn; removal, a new source MAC, a new snapshot, interval expiry and an
+unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`
+`tests_hit_path_cost_18533.rs` (numbers in `docs/log/18534.md`).
 
 ## Hot-path constants
 
