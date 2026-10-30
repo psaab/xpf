@@ -692,6 +692,13 @@ pub(in crate::afxdp) struct LearnedNeighborDedup {
     /// Epochs read before the map refresh/write. A concurrent mutation only
     /// leaves an older epoch, forcing one extra refresh.
     pub(in crate::afxdp) epochs: [u32; 2],
+    /// #18533 round 2: `ForwardingState::publish_epoch` of the snapshot this
+    /// state was derived under (0 = unpublished, never trusted). The on-link,
+    /// learnable/owned-IP and VLAN-alias answers behind a stored state are
+    /// pure functions of that snapshot, so while it is still the live one the
+    /// post-admission learn can confirm a fresh duplicate without re-deriving
+    /// them (`learned_neighbor_is_fresh`).
+    pub(in crate::afxdp) forwarding_epoch: u64,
 }
 
 /// #10512: the shared fence AND report for one conditional-remove fan-out.

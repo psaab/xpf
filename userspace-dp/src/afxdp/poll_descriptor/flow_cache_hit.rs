@@ -284,7 +284,13 @@ pub(super) fn stage_flow_cache_hit(
         {
             None
         } else {
-            let reason = crate::afxdp::forwarding::cached_flow_decision_invalid_reason_for_flow(
+            // #18534: the destination-owner arm's connected-owner RG comes
+            // from the entry's per-snapshot memo, not a per-packet walk of
+            // the connected-owner index.
+            let target_ip = resolution_target_for_session(flow, cached.decision);
+            let install_table =
+                install_table_name_for_session(worker_ctx.forwarding, cached.decision, target_ip);
+            let reason = crate::afxdp::forwarding::cached_flow_decision_invalid_reason_for_cached_flow(
                 worker_ctx.forwarding,
                 worker_ctx.ha_state,
                 worker_ctx.dynamic_neighbors,
@@ -293,13 +299,10 @@ pub(super) fn stage_flow_cache_hit(
                 packet_fabric_ingress,
                 fabric_link_ingress,
                 Some(&flow.forward_key),
-                resolution_target_for_session(flow, cached.decision),
-                install_table_name_for_session(
-                    worker_ctx.forwarding,
-                    cached.decision,
-                    resolution_target_for_session(flow, cached.decision),
-                ),
+                target_ip,
+                install_table,
                 cached.decision.resolution,
+                || cached.destination_owner_rg(worker_ctx.forwarding, target_ip, install_table),
             );
             // #16217 (fold B6): the mark suppresses ONLY the
             // `EnforceChanged` demotion, and ONLY while the FRESH
@@ -575,14 +578,20 @@ pub(super) fn stage_flow_cache_hit(
         }
         // #11413: a Consumed FlowCache hit bypasses the slow-path destination
         // class gate, so reject it before liveness, rewrite, accounting or TX.
-        if transit_destination_class_drop(
+        // #18533 round 2: both address-class gates below judge in one
+        // routing domain; resolve it once for the pair.
+        let transit_domain = transit_class_routing_domain(
             worker_ctx.forwarding,
             cached_decision.resolution.disposition,
-            flow.dst_ip,
-            cached_decision.nat.rewrite_dst,
             flow.forward_key.routing_domain,
             ForwardPacketMeta::from(meta),
             fabric_arrival_zone,
+        );
+        if transit_destination_class_drop_in(
+            worker_ctx.forwarding,
+            flow.dst_ip,
+            cached_decision.nat.rewrite_dst,
+            transit_domain,
         ) {
             scratch.scratch_recycle.push(desc.addr);
             telemetry.counters.record_martian_drop();
@@ -612,14 +621,7 @@ pub(super) fn stage_flow_cache_hit(
         // #10689: a Consumed flow-cache hit bypasses every poll-loop
         // slow-path source-class gate, so enforce the same transit invariant
         // here before liveness, TTL, filters, accounting or TX side effects.
-        if transit_source_class_drop(
-            worker_ctx.forwarding,
-            cached_decision.resolution.disposition,
-            flow.src_ip,
-            flow.forward_key.routing_domain,
-            ForwardPacketMeta::from(meta),
-            fabric_arrival_zone,
-        ) {
+        if transit_source_class_drop_in(worker_ctx.forwarding, flow.src_ip, transit_domain) {
             scratch.scratch_recycle.push(desc.addr);
             telemetry.counters.record_transit_source_martian_drop();
             return FlowCacheOutcome::Consumed;
@@ -696,7 +698,11 @@ pub(super) fn stage_flow_cache_hit(
             // #16042: carry the parsed ack so a wrong-ack cached segment
             // cannot complete the handshake.
             let ack = crate::afxdp::frame::extract_tcp_seq_ack_window(packet_frame).map(|(_, ack, _)| ack);
-            sessions.probe_hit_deferring_state_update_with_ack(
+            // #18533 round 2: the probe records its rollback undo only when
+            // the replay below can still drop this packet — the same two
+            // inputs the drop test reads (`tx_selection.drop`, and a policer,
+            // without which `policer_action.drop` is never set).
+            sessions.probe_hit_deferring_state_update_with_ack_rollback(
                 &flow.forward_key,
                 now_ns,
                 meta.pkt_len as u64,
@@ -704,6 +710,8 @@ pub(super) fn stage_flow_cache_hit(
                 super::tcp_payload_len(packet_frame, meta),
                 meta.dscp,
                 ack,
+                cached_descriptor.tx_selection.drop
+                    || !cached_descriptor.tx_selection.three_color_policers.is_empty(),
             )
         };
         if !session_live {
@@ -857,6 +865,13 @@ pub(super) fn stage_flow_cache_hit(
             now_ns,
         );
         if cached_descriptor.tx_selection.drop || policer_action.drop {
+            // #18533 round 2: the probe recorded an undo for this packet only
+            // because one of these could fire.
+            debug_assert!(
+                cached_descriptor.tx_selection.drop
+                    || !cached_descriptor.tx_selection.three_color_policers.is_empty(),
+                "a policer drop requires a policer"
+            );
             // #15947 (H29-04 arm 2): the deferring probe above already
             // charged this packet and may have completed the handshake
             // locally. A dropped packet must leave neither behind, and

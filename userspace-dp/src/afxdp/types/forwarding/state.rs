@@ -569,6 +569,22 @@ pub(in crate::afxdp) struct ForwardingState {
     /// flips across publishes. Workers read it atomically with the
     /// enabled bit from their loaded view; they never infer transitions.
     pub(in crate::afxdp) pptp_epoch: u64,
+    /// #18534: identity of THIS forwarding snapshot's contents. Two sources,
+    /// disjoint ranges, so two worker-visible states with different contents
+    /// never share a nonzero value, and none is mutated after it is stamped:
+    /// - the coordinator advances it on every `publish_runtime_view` (counting
+    ///   up from 1), the only coordinator path that hands workers a new
+    ///   forwarding `Arc`;
+    /// - a worker that derives its own variant of a published snapshot (the
+    ///   ct-slice fabric swap, `run_ct_slice`) restamps the copy with
+    ///   [`Self::restamp_local_derivation`] (high bit set) before adopting it.
+    ///
+    /// Per-flow memos of pure functions of the forwarding tables (the flow
+    /// cache's destination-owner RG, the post-admission neighbor-learn
+    /// shortcut) key on it. 0 = never stamped (unit fixtures, the pre-publish
+    /// default): such a state may be mutated in place, so memos are disabled
+    /// for it.
+    pub(in crate::afxdp) publish_epoch: u64,
     /// #2008 M5: L3/L4 application-identification catalog. Resolves a session's
     /// 5-tuple to the numeric app_id stamped on the conntrack session at
     /// create time, so `show security flow session` reports a real application
@@ -811,7 +827,29 @@ pub(in crate::afxdp) enum ConnectedOwnerIndex {
     Miss,
 }
 
+/// #18534 fold: the high bit marks a `publish_epoch` minted by a worker for
+/// a local derivation of a published snapshot. The coordinator counts up
+/// from 1 and never reaches it, so the two ranges cannot collide.
+pub(in crate::afxdp) const LOCAL_DERIVATION_EPOCH_BIT: u64 = 1 << 63;
+
+/// #18534 fold: process-wide source of local-derivation epochs, so two
+/// derivations (on any workers) never share one either.
+static LOCAL_DERIVATION_EPOCHS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl ForwardingState {
+    /// #18534 fold: give a worker-local derivation of a published snapshot
+    /// (same tables with one field replaced, e.g. the ct-slice fabric swap)
+    /// an identity of its own. Keeping the published epoch would let a memo
+    /// computed against the published contents be read against different
+    /// ones. A fresh epoch, not 0: 0 would turn every memo off until the next
+    /// coordinator publish, while a fresh one costs one re-resolution per
+    /// flow, the same as any publish. Cold path (a fabric-set change).
+    pub(in crate::afxdp) fn restamp_local_derivation(&mut self) {
+        let n = LOCAL_DERIVATION_EPOCHS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        self.publish_epoch = LOCAL_DERIVATION_EPOCH_BIT | n;
+    }
+
     /// #18518: (re)build `zone_low16_to_id` from `zone_id_to_name`.
     pub(in crate::afxdp) fn rebuild_zone_low16_index(&mut self) {
         self.zone_low16_to_id.clear();

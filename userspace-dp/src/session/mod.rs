@@ -2007,6 +2007,8 @@ struct ProbeCostProbes {
     undo_capture: AtomicU64,
     /// Canonical-key resolutions in `emit_probe_hit_state_update`.
     emit_resolve: AtomicU64,
+    /// #18533 round 2: rollback undo records built by deferring probes.
+    undo_records: AtomicU64,
 }
 
 pub(crate) struct SessionTable {
@@ -4017,6 +4019,11 @@ impl SessionTable {
             self.probe_cost_probes.emit_resolve.load(AtomicOrdering::Relaxed),
         )
     }
+    /// #18533 round 2 test instrument: rollback undo records built.
+    #[cfg(test)]
+    pub(crate) fn probe_undo_records_for_test(&self) -> u64 {
+        self.probe_cost_probes.undo_records.load(AtomicOrdering::Relaxed)
+    }
     /// #18533 test view: undo records awaiting admission or rollback.
     #[cfg(test)]
     pub(crate) fn pending_probe_undo_len_for_test(&self) -> usize {
@@ -4304,7 +4311,7 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, None)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, None, false)
     }
 
     /// #16042: [`Self::probe_hit`] carrying the parsed segment ack.
@@ -4318,7 +4325,7 @@ impl SessionTable {
         dscp: u8,
         ack: Option<u32>,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, ack)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, true, ack, false)
     }
 
     /// Probe a flow-cache hit while deferring the HA completion delta.
@@ -4339,10 +4346,13 @@ impl SessionTable {
         payload_len: u32,
         dscp: u8,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, None)
+        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, None, true)
     }
 
-    /// #16042: deferring probe carrying the parsed segment ack.
+    /// #16042: deferring probe carrying the parsed segment ack. Always
+    /// records the rollback undo (test view of
+    /// [`Self::probe_hit_deferring_state_update_with_ack_rollback`]).
+    #[cfg(test)]
     pub fn probe_hit_deferring_state_update_with_ack(
         &mut self,
         key: &SessionKey,
@@ -4353,7 +4363,45 @@ impl SessionTable {
         dscp: u8,
         ack: Option<u32>,
     ) -> bool {
-        self.probe_hit_inner(key, now_ns, len, tcp_flags, payload_len, dscp, false, ack)
+        self.probe_hit_deferring_state_update_with_ack_rollback(
+            key, now_ns, len, tcp_flags, payload_len, dscp, ack, true,
+        )
+    }
+
+    /// #18533 round 2: the flow-cache hit's deferring probe.
+    /// `rollback_possible` says whether the caller can still drop this packet
+    /// after the probe (a cached `then discard`/`then reject` selection, or
+    /// any three-color policer) and so may call
+    /// [`Self::rollback_dropped_probe_hit`]. When it cannot, the probe records
+    /// no undo at all — that record (a few hundred bytes built and pushed on
+    /// every packet) exists only for the rollback — while the deferred HA
+    /// Update, the stage-transition marker and their admission keying are
+    /// unchanged. A caller that passes `false` and then rolls back restores
+    /// nothing; `flow_cache_hit.rs` derives the flag from the same selection
+    /// fields its drop test reads.
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    pub fn probe_hit_deferring_state_update_with_ack_rollback(
+        &mut self,
+        key: &SessionKey,
+        now_ns: u64,
+        len: u64,
+        tcp_flags: u8,
+        payload_len: u32,
+        dscp: u8,
+        ack: Option<u32>,
+        rollback_possible: bool,
+    ) -> bool {
+        self.probe_hit_inner(
+            key,
+            now_ns,
+            len,
+            tcp_flags,
+            payload_len,
+            dscp,
+            false,
+            ack,
+            rollback_possible,
+        )
     }
 
     /// Emit the HA Update withheld by
@@ -4573,6 +4621,7 @@ impl SessionTable {
         dscp: u8,
         emit_state_update: bool,
         ack: Option<u32>,
+        record_undo: bool,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
         // #18533: the classic completion shape seen under the record borrow
@@ -4608,7 +4657,7 @@ impl SessionTable {
             Some(record) => {
                 let entry = &mut record.entry;
                 let probed = (entry.metadata.is_reverse, entry.decision.nat);
-                if !emit_state_update {
+                if !emit_state_update && record_undo {
                     probe_undo = Some(ProbeUndo {
                         canonical_key: record.key.clone(),
                         matched: ProbeHalfUndo::of(entry),
@@ -4704,6 +4753,12 @@ impl SessionTable {
             }
             None => return false,
         };
+        #[cfg(test)]
+        if probe_undo.is_some() {
+            self.probe_cost_probes
+                .undo_records
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
         if let Some((candidate_key, candidate_nat, state_before, class_before)) = classic_candidate {
             // #16042: the classic arm completes only on the expected ack (or
             // an unknown expectation / unparsed ack, which fails open).
@@ -4817,10 +4872,16 @@ impl SessionTable {
                 // canonical key (what the admit/rollback calls resolve),
                 // which differs from `matched_key` when a reverse hit
                 // completes the forward half via the companion arm.
-                let admission_key = probe_undo
-                    .as_ref()
-                    .map(|undo| undo.canonical_key.clone())
-                    .unwrap_or_else(|| key.clone());
+                // #18533 round 2: without an undo (no rollback possible),
+                // resolve the canonical key here — the same resolution the
+                // admission emit applies; one lookup, completing packet only.
+                let admission_key = match probe_undo.as_ref() {
+                    Some(undo) => undo.canonical_key.clone(),
+                    None => self
+                        .revalidation_record(key)
+                        .map(|record| record.key.clone())
+                        .unwrap_or_else(|| key.clone()),
+                };
                 self.pending_probe_state_updates
                     .retain(|(old_admission, _, _, _)| old_admission != &admission_key);
                 if self.pending_probe_state_updates.len() >= 64 {

@@ -319,6 +319,60 @@ fn transit_source_class_disposition(disposition: ForwardingDisposition) -> bool 
     )
 }
 
+/// #18533 round 2: the routing domain both transit address-class gates judge
+/// in, or `None` for a disposition neither gate applies to. Split out so a
+/// caller running BOTH gates (the flow-cache hit) resolves the domain once —
+/// `effective_routing_domain_for_flow` falls back to `ingress_routing_domain`
+/// (two map probes) for every domain-0 flow.
+#[inline]
+pub(in crate::afxdp) fn transit_class_routing_domain(
+    forwarding: &ForwardingState,
+    disposition: ForwardingDisposition,
+    flow_routing_domain: u32,
+    meta: ForwardPacketMeta,
+    fabric_ingress_zone: Option<u32>,
+) -> Option<u32> {
+    transit_source_class_disposition(disposition).then(|| {
+        crate::afxdp::forwarding::effective_routing_domain_for_flow(
+            forwarding,
+            flow_routing_domain,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            fabric_ingress_zone,
+        )
+    })
+}
+
+/// #18533 round 2: [`transit_source_class_drop`] with the domain from
+/// [`transit_class_routing_domain`].
+#[inline]
+pub(in crate::afxdp) fn transit_source_class_drop_in(
+    forwarding: &ForwardingState,
+    source: IpAddr,
+    transit_domain: Option<u32>,
+) -> bool {
+    transit_domain.is_some_and(|routing_domain| {
+        crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
+    })
+}
+
+/// #18533 round 2: [`transit_destination_class_drop`] with the domain from
+/// [`transit_class_routing_domain`].
+#[inline]
+pub(in crate::afxdp) fn transit_destination_class_drop_in(
+    forwarding: &ForwardingState,
+    destination: IpAddr,
+    translated_destination: Option<IpAddr>,
+    transit_domain: Option<u32>,
+) -> bool {
+    transit_domain.is_some_and(|routing_domain| {
+        crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
+            || translated_destination.is_some_and(|d| {
+                crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
+            })
+    })
+}
+
 #[inline]
 pub(in crate::afxdp) fn transit_source_class_drop(
     forwarding: &ForwardingState,
@@ -328,17 +382,17 @@ pub(in crate::afxdp) fn transit_source_class_drop(
     meta: ForwardPacketMeta,
     fabric_ingress_zone: Option<u32>,
 ) -> bool {
-    if !transit_source_class_disposition(disposition) {
-        return false;
-    }
-    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+    transit_source_class_drop_in(
         forwarding,
-        flow_routing_domain,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        fabric_ingress_zone,
-    );
-    crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
+        source,
+        transit_class_routing_domain(
+            forwarding,
+            disposition,
+            flow_routing_domain,
+            meta,
+            fabric_ingress_zone,
+        ),
+    )
 }
 
 #[inline]
@@ -351,20 +405,18 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
     meta: ForwardPacketMeta,
     fabric_ingress_zone: Option<u32>,
 ) -> bool {
-    if !transit_source_class_disposition(disposition) {
-        return false;
-    }
-    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+    transit_destination_class_drop_in(
         forwarding,
-        flow_routing_domain,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        fabric_ingress_zone,
-    );
-    crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
-        || translated_destination.is_some_and(|d| {
-            crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
-        })
+        destination,
+        translated_destination,
+        transit_class_routing_domain(
+            forwarding,
+            disposition,
+            flow_routing_domain,
+            meta,
+            fabric_ingress_zone,
+        ),
+    )
 }
 
 #[inline]
