@@ -98,7 +98,8 @@ cases = {
     "total-stall": run([10.0] * 5 + [0.0, 0.0] + [10.0] * 3),
     # One stream dies while the others take its share: the aggregate looks fine.
     "one-stream-stall": run([10.0] * 4, [[5e9, 5e9]] * 3 + [[1e10, 0.0]]),
-    "iperf-error": {"error": "unable to connect to server", "start": {"connected": []}},
+    # A mid-run error with healthy intervals: only the error branch sees it.
+    "iperf-error": dict(run([10.0] * 10), error="the server has terminated"),
     "no-intervals": {"intervals": [], "end": {}},
 }
 for name, body in cases.items():
