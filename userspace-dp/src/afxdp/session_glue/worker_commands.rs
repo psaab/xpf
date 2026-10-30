@@ -447,6 +447,13 @@ pub(crate) static HANDSHAKE_RELAY_REFUSED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HANDSHAKE_RELAY_LOCK_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HANDSHAKE_RELAY_LOCK_CONTENDED: AtomicU64 = AtomicU64::new(0);
 
+/// #18520: a relay is a best-effort optimisation sharing the bounded worker
+/// command queue with HA-correctness commands (`UpsertSynced`,
+/// `DeleteSynced`, transition commands). Relays stop at half the queue cap,
+/// so a connection storm's relays can never take the headroom those need.
+pub(in crate::afxdp) const HANDSHAKE_RELAY_QUEUE_WATERMARK: usize =
+    worker_queue::MAX_PENDING_WORKER_COMMANDS / 2;
+
 /// #18520: fan this worker's queued cross-worker handshake relays out to the
 /// sibling queues. The worker loop calls it once per pass, after the binding
 /// sweep — never per packet; with an empty outbox it is one `Vec::is_empty`
@@ -494,7 +501,9 @@ pub(in crate::afxdp) fn fan_out_handshake_relays(
         let mut pending =
             worker_queue::lock_recover_counting(commands, &HANDSHAKE_RELAY_LOCK_CONTENDED);
         for relay in scratch.iter().filter(|relay| wants(relay)) {
-            if !worker_queue::push_bounded(&mut pending, WorkerCommand::HandshakeRelay(relay.clone())) {
+            if pending.len() >= HANDSHAKE_RELAY_QUEUE_WATERMARK
+                || !worker_queue::push_bounded(&mut pending, WorkerCommand::HandshakeRelay(relay.clone()))
+            {
                 HANDSHAKE_RELAY_REFUSED.fetch_add(1, Ordering::Relaxed);
             }
         }

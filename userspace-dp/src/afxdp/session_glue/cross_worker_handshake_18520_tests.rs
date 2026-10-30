@@ -468,6 +468,7 @@ fn relay_consumer_refuses_pure_opening_completion_and_foreign_incarnation_18520(
         target_worker: None,
         synack_ack: None,
         server_ack_end: None,
+        close_bits: 0,
     };
     assert!(
         !node.a.table.apply_handshake_relay(&completed, t0 + MS),
@@ -480,6 +481,7 @@ fn relay_consumer_refuses_pure_opening_completion_and_foreign_incarnation_18520(
         target_worker: None,
         synack_ack: Some(CLIENT_ISN + 1),
         server_ack_end: Some(SERVER_ISN + 1),
+        close_bits: 0,
     };
     let foreign = HandshakeRelay {
         session_id: session_id.wrapping_add(1),
@@ -1046,6 +1048,7 @@ fn relay_consumer_refuses_closing_pairs_18520() {
             target_worker: None,
             synack_ack: Some(CLIENT_ISN + 1),
             server_ack_end: Some(SERVER_ISN + 1),
+            close_bits: 0,
         };
         assert!(
             !node.a.table.apply_handshake_relay(&promoted, t0 + 2 * MS),
@@ -1067,6 +1070,7 @@ fn relay_consumer_refuses_closing_pairs_18520() {
         target_worker: None,
         synack_ack: Some(CLIENT_ISN + 1),
         server_ack_end: Some(SERVER_ISN + 1),
+        close_bits: 0,
     };
     assert!(
         !node.a.table.apply_handshake_relay(&promoted, t0 + MS),
@@ -1085,6 +1089,7 @@ fn relay_consumer_refuses_closing_pairs_18520() {
         target_worker: None,
         synack_ack: Some(CLIENT_ISN + 1),
         server_ack_end: Some(SERVER_ISN + 1),
+        close_bits: 0,
     };
     assert!(node.a.table.apply_handshake_relay(&promoted, t0 + MS), "premise: promoted");
     node.a.table.mark_closing_for_test(&rev);
@@ -1224,6 +1229,7 @@ fn promoted_relay_targets_the_author_and_outbox_overflow_counts_18520() {
             target_worker: None,
             synack_ack: None,
             server_ack_end: None,
+            close_bits: 0,
         });
     }
     let mut drained = Vec::new();
@@ -1308,4 +1314,304 @@ fn reverse_hit_completion_names_the_forward_pair_for_restamps_18520() {
         "#18520: the stage transition taken under the reverse key must name the forward pair"
     );
     assert!(node.b.table.take_probe_stage_transition_forward(&rev).is_none(), "consumed once");
+}
+
+/// Round-2 review (both seats): production orders one worker-loop pass as
+/// clock sample (`loop_now_ns`) -> `apply_worker_commands` (replica install
+/// stamped with a LATER clock read) -> binding sweep (packets stamped with
+/// the EARLIER `loop_now_ns`). So B's SYN-ACK in the pass that imported its
+/// replica refreshes it to a `last_seen` BEFORE its `created`. Here the
+/// SYN-ACK is stamped at `t0`, sampled before the replica import. The
+/// upload must still establish B (the server sends only ACKs, so nothing
+/// but A's relayed completion can complete B).
+#[test]
+fn same_pass_synack_before_replica_import_establishes_both_workers_18520() {
+    let mut node = syn_on_a();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    slow_hit(&mut node.b.table, &rev, t0, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+    pump(&mut node);
+    slow_hit(&mut node.a.table, &fwd, t0 + 2 * MS, TCP_FLAG_ACK, 0, CLIENT_ISN + 1, SERVER_ISN + 1);
+    pump(&mut node);
+    let mut sent = 0u32;
+    for i in 0..4u64 {
+        let now = t0 + (3 + i) * MS;
+        assert!(cache_hit(&mut node.a.table, &fwd, now, TCP_FLAG_ACK | TCP_PSH, MSS, SERVER_ISN + 1));
+        sent += MSS;
+        assert!(cache_hit(&mut node.b.table, &rev, now, TCP_FLAG_ACK, 0, CLIENT_ISN + 1 + sent));
+        pump(&mut node);
+    }
+    assert_pair_established(&node.a.table, &node, "worker A (authoritative forward)");
+    assert_pair_established(&node.b.table, &node, "worker B (SYN-ACK in the import pass)");
+}
+
+/// Round-2 review (HA seat): after a relayed completion, a server RST that
+/// RSS delivers only to B closes B's replicas — and must close A's
+/// authoritative pair too, or A sits Established on the 1800 s window
+/// (pinning its SNAT port, slot and limit-session count) where it used to
+/// reap on the 20 s opening window.
+#[test]
+fn server_rst_on_b_closes_a_authoritative_pair_18520() {
+    let mut node = upload_established();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    slow_hit(
+        &mut node.b.table,
+        &rev,
+        t0 + 20 * MS,
+        crate::tcp_flags::TCP_RST | TCP_FLAG_ACK,
+        0,
+        SERVER_ISN + 1,
+        CLIENT_ISN + 1 + 8 * MSS,
+    );
+    pump(&mut node);
+    let rst_secs = (crate::session::TCP_RST_TIMEOUT_NS_FOR_TEST / SEC) as u32;
+    for (who, table) in [("B", &node.b.table), ("A", &node.a.table)] {
+        for key in [&fwd, &rev] {
+            assert_eq!(
+                table.close_class_wire_for(key),
+                crate::session::TcpCloseClass::Reset.to_wire(),
+                "#18520: worker {who} {key:?} must take the RST seen on B"
+            );
+            assert_eq!(table.timeout_secs_for(key), rst_secs, "#18520: worker {who} on the RST window");
+        }
+    }
+}
+
+/// Install one replica row of the test flow on `table` (any origin), as a
+/// worker's `UpsertSynced` / shared-map materialize applies it.
+fn install_replica(
+    table: &mut SessionTable,
+    node: &Node,
+    forward: bool,
+    origin: SessionOrigin,
+    handshake: TcpHandshakeState,
+    session_id: u64,
+    now: u64,
+) {
+    let (key, decision, metadata) = if forward {
+        (node.forward_key.clone(), node.decision, test_metadata())
+    } else {
+        (node.reverse_key.clone(), node.reverse_decision, reverse_metadata())
+    };
+    assert!(table.upsert_synced_with_origin(
+        crate::session::SessionInstall {
+            key,
+            decision,
+            metadata,
+            source_nat_static: None,
+            origin,
+            now_ns: now,
+            protocol: PROTO_TCP,
+            tcp_flags: 0,
+            session_id,
+            tcp_close_class: 0,
+            tcp_handshake_state: handshake.to_wire(),
+            persistent_lease_hold: None,
+            fwd_packets: 0,
+            rev_packets: 0,
+        },
+        false,
+    ));
+}
+
+/// The shared-map materialize shape (round-2, dataplane seat): B's replica
+/// is installed at the SYN-ACK's own instant (`created == last_seen`), so a
+/// strict `last_seen > created` "served" test fails. B must still accept
+/// A's relayed completion.
+#[test]
+fn replica_installed_and_hit_at_one_instant_accepts_the_completion_18520() {
+    let mut node = syn_on_a();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t = node.t0 + 5 * MS;
+    let author_id = node.a.table.session_id_for(&fwd);
+    let mut b = SessionTable::new();
+    b.set_session_id_namespace(0, 1);
+    install_replica(&mut b, &node, true, SessionOrigin::WorkerLocalImport, TcpHandshakeState::Opening, author_id, t);
+    install_replica(&mut b, &node, false, SessionOrigin::WorkerLocalImport, TcpHandshakeState::Opening, 0, t);
+    node.b.table = b;
+    slow_hit(&mut node.b.table, &rev, t, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+    pump(&mut node);
+    slow_hit(&mut node.a.table, &fwd, t + MS, TCP_FLAG_ACK, 0, CLIENT_ISN + 1, SERVER_ISN + 1);
+    pump(&mut node);
+    assert_pair_established(&node.a.table, &node, "worker A");
+    assert_pair_established(&node.b.table, &node, "worker B (materialized at the SYN-ACK instant)");
+}
+
+/// The takeover shape for relays: a session HA-imported HandshakePending on
+/// two workers of the new owner. Y serves the reverse direction from its
+/// flow cache only (bare server ACKs, which never complete a SYN-first
+/// pair), then takes a same-incarnation re-import (a sweep resend). X sees
+/// the completing forward ACK. X's completion must reach Y, whose
+/// served-here bit came from a cache hit and survives the re-import.
+#[test]
+fn ha_pending_import_completes_on_the_cache_served_sibling_18520() {
+    let node = fresh_node();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = 1_000 * SEC;
+    let peer_id = (1u64 << 63) | 0x48;
+    let companion_id = crate::session::synthesized_companion_session_id(peer_id);
+    let mut x = SessionTable::new();
+    x.set_session_id_namespace(0, 0);
+    let mut y = SessionTable::new();
+    y.set_session_id_namespace(0, 1);
+    for table in [&mut x, &mut y] {
+        install_replica(table, &node, true, SessionOrigin::SyncImport, TcpHandshakeState::HandshakePending, peer_id, t0);
+        install_replica(table, &node, false, SessionOrigin::SyncImport, TcpHandshakeState::HandshakePending, companion_id, t0);
+    }
+    assert!(cache_hit(&mut y, &rev, t0 + MS, TCP_FLAG_ACK, 0, CLIENT_ISN + 1));
+    install_replica(&mut y, &node, true, SessionOrigin::SyncImport, TcpHandshakeState::HandshakePending, peer_id, t0 + 2 * MS);
+    install_replica(&mut y, &node, false, SessionOrigin::SyncImport, TcpHandshakeState::HandshakePending, companion_id, t0 + 2 * MS);
+    slow_hit(&mut x, &fwd, t0 + 3 * MS, TCP_FLAG_ACK, 0, CLIENT_ISN + 1, SERVER_ISN + 1);
+    assert_eq!(x.handshake_state_wire_for(&fwd), TcpHandshakeState::Established.to_wire(), "premise: X completed");
+    let mut relays = Vec::new();
+    x.drain_handshake_relays_into(&mut relays);
+    assert_eq!(relays.len(), 1, "X relays its completion once");
+    assert_eq!(relays[0].stage, HandshakeRelayStage::Completed);
+    assert!(
+        y.apply_handshake_relay(&relays[0], t0 + 4 * MS),
+        "#18520: Y served the flow (cache hit, kept across the re-import) and must apply the completion"
+    );
+    for key in [&fwd, &rev] {
+        assert_eq!(y.handshake_state_wire_for(key), TcpHandshakeState::Established.to_wire());
+    }
+}
+
+/// Close relay, client side: a client RST that lands only on A closes B's
+/// replicas onto the RST window too.
+#[test]
+fn client_rst_on_a_closes_b_replicas_18520() {
+    let mut node = upload_established();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    slow_hit(
+        &mut node.a.table,
+        &fwd,
+        t0 + 20 * MS,
+        crate::tcp_flags::TCP_RST | TCP_FLAG_ACK,
+        0,
+        CLIENT_ISN + 1 + 8 * MSS,
+        SERVER_ISN + 1,
+    );
+    pump(&mut node);
+    let rst_secs = (crate::session::TCP_RST_TIMEOUT_NS_FOR_TEST / SEC) as u32;
+    for (who, table) in [("A", &node.a.table), ("B", &node.b.table)] {
+        for key in [&fwd, &rev] {
+            assert_eq!(
+                table.close_class_wire_for(key),
+                crate::session::TcpCloseClass::Reset.to_wire(),
+                "#18520: worker {who} {key:?} must take the RST seen on A"
+            );
+            assert_eq!(table.timeout_secs_for(key), rst_secs);
+        }
+    }
+}
+
+/// Close relay, FIN on each side: the client FIN (on A) puts B's pair in
+/// CLOSING; the server FIN (on B) then completes the close on BOTH workers
+/// (TIME_WAIT), which neither worker alone could see.
+#[test]
+fn fin_on_each_side_reaches_time_wait_on_both_workers_18520() {
+    let mut node = upload_established();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    let fin = crate::tcp_flags::TCP_FIN | TCP_FLAG_ACK;
+    slow_hit(&mut node.a.table, &fwd, t0 + 20 * MS, fin, 0, CLIENT_ISN + 1 + 8 * MSS, SERVER_ISN + 1);
+    pump(&mut node);
+    for key in [&fwd, &rev] {
+        assert_eq!(
+            node.b.table.close_class_wire_for(key),
+            crate::session::TcpCloseClass::Closing.to_wire(),
+            "#18520: B must take the client FIN seen on A"
+        );
+    }
+    slow_hit(&mut node.b.table, &rev, t0 + 21 * MS, fin, 0, SERVER_ISN + 1, CLIENT_ISN + 2 + 8 * MSS);
+    pump(&mut node);
+    for (who, table) in [("A", &node.a.table), ("B", &node.b.table)] {
+        for key in [&fwd, &rev] {
+            assert_eq!(
+                table.close_class_wire_for(key),
+                crate::session::TcpCloseClass::TimeWait.to_wire(),
+                "#18520: worker {who} {key:?} must reach TIME_WAIT from one FIN per direction"
+            );
+        }
+    }
+}
+
+/// Routing pin for the node bit: a Promoted relay whose forward session id
+/// carries the OTHER node's bit (an HA-imported row) names no local author
+/// and must reach every sibling.
+#[test]
+fn promoted_relay_for_a_peer_node_id_reaches_every_sibling_18520() {
+    let node = fresh_node();
+    let rev = node.reverse_key.clone();
+    let t0 = 1_000 * SEC;
+    let peer_id = (1u64 << 63) | 0x49; // node 1, worker 0
+    let mut b = SessionTable::new();
+    b.set_session_id_namespace(0, 1);
+    install_replica(&mut b, &node, true, SessionOrigin::SyncImport, TcpHandshakeState::Opening, peer_id, t0);
+    install_replica(
+        &mut b,
+        &node,
+        false,
+        SessionOrigin::SyncImport,
+        TcpHandshakeState::Opening,
+        crate::session::synthesized_companion_session_id(peer_id),
+        t0,
+    );
+    slow_hit(&mut b, &rev, t0 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+    let (qa, qb, qc) = (
+        Arc::new(Mutex::new(VecDeque::new())),
+        Arc::new(Mutex::new(VecDeque::new())),
+        Arc::new(Mutex::new(VecDeque::new())),
+    );
+    let mut by_id = BTreeMap::new();
+    by_id.insert(0u32, Arc::clone(&qa));
+    by_id.insert(1u32, Arc::clone(&qb));
+    by_id.insert(2u32, Arc::clone(&qc));
+    let queues = WorkerCommandQueues::new(by_id);
+    fan_out_handshake_relays(&mut b, &[Arc::clone(&qa), Arc::clone(&qc)], &queues, &mut Vec::new());
+    for (name, queue) in [("worker 0", &qa), ("worker 2", &qc)] {
+        let relays = queue
+            .lock()
+            .expect("queue")
+            .iter()
+            .filter(|cmd| matches!(cmd, WorkerCommand::HandshakeRelay(_)))
+            .count();
+        assert_eq!(relays, 1, "#18520: a peer-node session id names no local author; {name} must get the relay");
+    }
+}
+
+/// Headroom: relays stop at half the worker command cap, so the queue keeps
+/// room for the HA-correctness commands it shares.
+#[test]
+fn relays_stop_at_the_queue_watermark_keeping_headroom_18520() {
+    let mut node = syn_on_a();
+    let rev = node.reverse_key.clone();
+    let t0 = node.t0;
+    slow_hit(&mut node.b.table, &rev, t0 + MS, TCP_FLAG_SYN | TCP_FLAG_ACK, 0, SERVER_ISN, CLIENT_ISN + 1);
+    {
+        let mut queue = node.a.queue.lock().expect("queue");
+        for _ in 0..HANDSHAKE_RELAY_QUEUE_WATERMARK {
+            queue.push_back(WorkerCommand::ForgetPptpCall(0));
+        }
+    }
+    fan_out_handshake_relays(
+        &mut node.b.table,
+        std::slice::from_ref(&node.a.queue),
+        crate::afxdp::empty_worker_commands_by_id(),
+        &mut Vec::new(),
+    );
+    let mut queue = node.a.queue.lock().expect("queue");
+    assert!(
+        !queue.iter().any(|cmd| matches!(cmd, WorkerCommand::HandshakeRelay(_))),
+        "#18520: a relay must not be queued at or past the watermark"
+    );
+    assert!(
+        crate::afxdp::worker_queue::push_bounded(
+            &mut queue,
+            WorkerCommand::UpsertSynced(reverse_synced_entry(&node, SessionOrigin::ReverseFlow, 1, 0)),
+        ),
+        "the HA-correctness headroom above the watermark stays available"
+    );
 }
