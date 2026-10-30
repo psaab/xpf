@@ -146,9 +146,16 @@ DEPLOY_UNIT_ETC_DIR="/etc/systemd/system"
 # directories hold the same file. The loaded unit must be in one of them.
 deploy_packaged_unit_dirs=(/usr/lib/systemd/system /lib/systemd/system)
 # A removed /etc copy is parked here until the loaded unit has been verified,
-# so a failed verification can put it back. It sits on tmpfs, outside every
-# systemd unit search path.
-DEPLOY_UNIT_SHADOW_STASH="/run/xpf-deploy-unit-shadow"
+# so a failed verification can put it back. It is on persistent storage, so a
+# reboot between the move and the check cannot lose it (a /run stash could),
+# and it is outside every systemd unit search path.
+DEPLOY_UNIT_SHADOW_STASH="/var/lib/xpf-deploy-unit-shadow"
+# The units the deploy cannot do without. Their reconcile HARD FAILS when the
+# deb ships no packaged copy. Every other unit in deploy_shadowed_units is
+# skipped with a warning in that case: a deb pinned through
+# XPF_DEPLOY_DEB_PATH may predate the boot barriers (#9852, #10751), and its
+# raw-pushed /etc copies are then the only ones there are.
+deploy_required_units=(xpfd.service)
 
 # deploy_unit_path_is_packaged <unit> <path>: rc 0 iff <path> is the unit's
 # file in one of deploy_packaged_unit_dirs.
@@ -163,15 +170,19 @@ deploy_unit_path_is_packaged() {
 # deploy_reconcile_unit_shadow <rinst> <unit>
 #
 # Make the packaged <unit> the one systemd has LOADED. The steps:
+# 0. With no packaged copy on disk, skip a unit that is not in
+#    deploy_required_units (warn, return 0). The deployed deb predates it.
 # 1. Park a regular-file /etc/systemd/system/<unit> in the stash. Refuse
-#    (HARD FAIL, file kept) when no packaged copy exists on disk.
+#    (HARD FAIL, file kept) when a REQUIRED unit has no packaged copy.
 # 2. Run daemon-reload, also when the file is already gone but systemd still
 #    has it loaded.
 # 3. ASSERT the result positively: LoadState=loaded, and FragmentPath is the
 #    unit's file in a packaged dir. A unit that the /etc copy used to outrank
 #    (/run/systemd/system, /usr/local/lib/systemd/system, a runtime mask) or
-#    one systemd rejects fails the check. The parked copy then goes back,
-#    systemd reloads, and the deploy dies with the node as it was.
+#    one systemd rejects fails the check. Any parked copy then goes back,
+#    whether this run parked it or an earlier interrupted run did, as long
+#    as the /etc path is free. systemd reloads, and the deploy dies. The
+#    error names the parked copy, and says whether the reload worked.
 # 4. Only then drop the stash, and re-point every install link
 #    (/etc/systemd/system/*/<unit>, i.e. the WantedBy=/RequiredBy= .wants and
 #    .requires links) that still targets the removed file. systemd adds those
@@ -193,7 +204,21 @@ deploy_unit_path_is_packaged() {
 deploy_reconcile_unit_shadow() {
 	local rinst="$1" unit="$2"
 	local shadow="$DEPLOY_UNIT_ETC_DIR/$unit" stash="$DEPLOY_UNIT_SHADOW_STASH/$unit"
-	local removed=0 have_packaged=0 d target frag state reason links l
+	local removed=0 have_packaged=0 required=0 d target frag state reason links l
+
+	for d in "${deploy_packaged_unit_dirs[@]}"; do
+		if incus exec "$rinst" -- test -f "$d/$unit" 2>/dev/null; then
+			have_packaged=1
+			break
+		fi
+	done
+	for d in "${deploy_required_units[@]}"; do
+		[[ "$d" == "$unit" ]] && required=1
+	done
+	if (( ! have_packaged && ! required )); then
+		warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. Leaving $shadow as it is (#18544)."
+		return 0
+	fi
 
 	if incus exec "$rinst" -- test -L "$shadow" 2>/dev/null; then
 		target=$(incus exec "$rinst" -- readlink "$shadow" 2>/dev/null || true)
@@ -203,12 +228,6 @@ deploy_reconcile_unit_shadow() {
 		fi
 		warn "$shadow on $rinst is a symlink to '${target:-?}', not a raw-deploy copy. Not removing it; checking that systemd resolves $unit to the packaged file."
 	elif incus exec "$rinst" -- test -f "$shadow" 2>/dev/null; then
-		for d in "${deploy_packaged_unit_dirs[@]}"; do
-			if incus exec "$rinst" -- test -f "$d/$unit" 2>/dev/null; then
-				have_packaged=1
-				break
-			fi
-		done
 		if (( ! have_packaged )); then
 			die "refusing to remove $shadow on $rinst: no packaged $unit under ${deploy_packaged_unit_dirs[*]} to fall back to; is the xpf deb installed?"
 		fi
@@ -241,11 +260,22 @@ deploy_reconcile_unit_shadow() {
 		reason="$unit on $rinst loads '${frag:-nothing}', not the packaged file under ${deploy_packaged_unit_dirs[*]} (#18544)"
 	fi
 	if [[ -n "$reason" ]]; then
-		if (( removed )) && incus exec "$rinst" -- test -f "$stash" 2>/dev/null; then
+		# Restore ANY parked copy, not only one this run made: an earlier run
+		# interrupted after its move leaves one behind, and it is the last
+		# unit that governed before the deploy. Restore it only into a free
+		# /etc path; an occupied one (an alias, or a copy that never moved)
+		# is never overwritten.
+		if incus exec "$rinst" -- test -f "$stash" 2>/dev/null; then
+			if incus exec "$rinst" -- test -e "$shadow" 2>/dev/null ||
+				incus exec "$rinst" -- test -L "$shadow" 2>/dev/null; then
+				die "$reason; a parked copy is at $stash on $rinst, but $shadow is occupied, so it was NOT restored. Inspect both by hand"
+			fi
 			incus exec "$rinst" -- mv -f "$stash" "$shadow" 2>/dev/null \
 				|| die "$reason; ALSO failed to put $shadow back from $stash on $rinst; restore it by hand"
-			incus exec "$rinst" -- systemctl daemon-reload 2>/dev/null || true
-			die "$reason; put the previous $shadow back, so $rinst is as it was before this deploy"
+			if incus exec "$rinst" -- systemctl daemon-reload 2>/dev/null; then
+				die "$reason; put the parked $stash back at $shadow and reloaded, so $rinst is as it was before the deploy"
+			fi
+			die "$reason; put the parked $stash back at $shadow, but daemon-reload FAILED, so systemd on $rinst may still have '$frag' loaded. Run systemctl daemon-reload there"
 		fi
 		die "$reason"
 	fi

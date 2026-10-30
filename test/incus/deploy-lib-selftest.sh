@@ -71,6 +71,9 @@ FAKE_REMOVE_NOOP_PATH=""
 # <state> (e.g. bad-setting, as for a directive the node's systemd does not
 # know). It applies only while the packaged file is the loaded one.
 FAKE_LOADSTATE_OVERRIDE=""
+# When set to N, the Nth and every later `systemctl daemon-reload` fails
+# (rc 1) and reloads nothing. The count lives in a file (subshells).
+FAKE_RELOAD_FAIL_FROM=""
 
 setup_fake_vm() {
 	FAKE_VM=$(mktemp -d)
@@ -89,6 +92,7 @@ setup_fake_vm() {
 	FAKE_SYSTEMD_DIR="$FAKE_VM/run/fake-systemd"
 	FAKE_REMOVE_NOOP_PATH=""
 	FAKE_LOADSTATE_OVERRIDE=""
+	FAKE_RELOAD_FAIL_FROM=""
 	mkdir -p "$FAKE_VM/usr/local/sbin" "$FAKE_VM/etc/systemd/system" "$FAKE_VM/tmp"
 }
 
@@ -162,6 +166,7 @@ teardown_fake_vm() {
 	FAKE_SYSTEMD_DIR=""
 	FAKE_REMOVE_NOOP_PATH=""
 	FAKE_LOADSTATE_OVERRIDE=""
+	FAKE_RELOAD_FAIL_FROM=""
 }
 
 # incus mock: supports `incus exec <inst> -- <cmd...>` and
@@ -262,6 +267,11 @@ _fake_exec() {
 			[[ -L "$FAKE_VM/${2#/}" ]]
 			return $?
 		fi
+		# test -e <path>  /  its free-/etc-path check before a restore
+		if [[ "$1" == "-e" ]]; then
+			[[ -e "$FAKE_VM/${2#/}" ]]
+			return $?
+		fi
 		return 2
 		;;
 	rm)
@@ -355,6 +365,12 @@ _fake_exec() {
 		daemon-reload)
 			# #18544: reload re-reads the disk, but only once a cell has
 			# booted the fake systemd (see FAKE_SYSTEMD_DIR).
+			if [[ -n "$FAKE_RELOAD_FAIL_FROM" && -d "$FAKE_SYSTEMD_DIR" ]]; then
+				local reload_n
+				reload_n=$(( $(cat "$FAKE_SYSTEMD_DIR/reload.count" 2>/dev/null || echo 0) + 1 ))
+				printf '%s' "$reload_n" >"$FAKE_SYSTEMD_DIR/reload.count"
+				(( reload_n >= FAKE_RELOAD_FAIL_FROM )) && return 1
+			fi
 			if [[ -n "$FAKE_SYSTEMD_DIR" && -d "$FAKE_SYSTEMD_DIR" ]]; then
 				_fake_systemd_reload
 			fi
@@ -759,7 +775,7 @@ test_unit_shadow_removed_packaged_unit_governs_18544() {
 	link=$(readlink "$FAKE_VM/etc/systemd/system/multi-user.target.wants/xpfd.service")
 	(( UNIT_SHADOW_RC == 0 )) || problems+=("reconcile rc=$UNIT_SHADOW_RC")
 	[[ -e "$FAKE_VM/etc/systemd/system/xpfd.service" ]] && problems+=("the /etc copy is still on disk")
-	[[ -e "$FAKE_VM/run/xpf-deploy-unit-shadow/xpfd.service" ]] && problems+=("the parked copy was not dropped")
+	[[ -e "$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service" ]] && problems+=("the parked copy was not dropped")
 	fake_calls_contain '^exec vm -- systemctl daemon-reload$' || problems+=("no daemon-reload was issued")
 	[[ "$loaded" == /usr/lib/systemd/system/xpfd.service ]] ||
 		problems+=("systemd has '${loaded:-nothing}' loaded, not the packaged unit")
@@ -974,6 +990,124 @@ test_unit_shadow_barrier_units_reconciled_18544() {
 		bad "unit shadow (#18544): xpfd + both boot barriers must load the packaged units with every install link kept: ${problems[*]}"
 	else
 		ok "unit shadow (#18544): xpfd + both boot barriers load the packaged units; all 6 install links kept and re-pointed; no unit touched"
+	fi
+	teardown_fake_vm
+}
+
+# An earlier run was interrupted after its move: the copy is parked, the /etc
+# path is empty, and no reload ever ran. This run finds nothing to move
+# (removed=0), and its check fails because a /run unit is promoted. It must
+# still put the parked copy back and name it, not leave the node on an
+# unverified unit with the copy stranded (seat H, round 2).
+test_unit_shadow_interrupted_stash_restored_18544() {
+	setup_fake_vm
+	mkdir -p "$FAKE_VM/run/systemd/system" "$FAKE_VM/var/lib/xpf-deploy-unit-shadow"
+	printf '[Service]\nExecStart=/usr/local/sbin/xpfd\n' >"$FAKE_VM/run/systemd/system/xpfd.service"
+	unit_shadow_fixture none 1
+	printf '[Service]\nExecStart=/usr/local/sbin/xpfd\nKillMode=control-group\n' \
+		>"$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service"
+	fake_systemd_set_loaded xpfd.service /etc/systemd/system/xpfd.service
+	local problems=()
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	(( UNIT_SHADOW_RC != 0 )) || problems+=("reconcile passed with /run/systemd/system/xpfd.service loaded")
+	[[ "$UNIT_SHADOW_ERR" == *"/var/lib/xpf-deploy-unit-shadow/xpfd.service"* ]] ||
+		problems+=("the error does not name the parked copy")
+	grep -qx 'KillMode=control-group' "$FAKE_VM/etc/systemd/system/xpfd.service" 2>/dev/null ||
+		problems+=("the parked copy was not put back at /etc")
+	[[ -e "$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service" ]] && problems+=("the parked copy is still stranded")
+	[[ "$(fake_systemd_loaded xpfd.service)" == /etc/systemd/system/xpfd.service ]] ||
+		problems+=("systemd has '$(fake_systemd_loaded xpfd.service)' loaded after the restore")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): a copy parked by an interrupted run must be restored on a failed check: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): a copy parked by an interrupted earlier run is restored and named when the check fails"
+	fi
+	teardown_fake_vm
+}
+
+# The rollback's reload fails. The error must say so, not claim the node is
+# "as it was" while systemd still has the unverified unit loaded.
+test_unit_shadow_rollback_reload_failure_reported_18544() {
+	setup_fake_vm
+	mkdir -p "$FAKE_VM/run/systemd/system"
+	printf '[Service]\nExecStart=/usr/local/sbin/xpfd\n' >"$FAKE_VM/run/systemd/system/xpfd.service"
+	unit_shadow_fixture file 1
+	FAKE_RELOAD_FAIL_FROM=2
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"daemon-reload FAILED"* ]] &&
+		[[ "$UNIT_SHADOW_ERR" != *"as it was"* ]]; then
+		ok "unit shadow (#18544): a failed rollback reload is reported, not claimed as a clean restore"
+	else
+		bad "unit shadow (#18544): a failed rollback reload must be reported truthfully (rc=$UNIT_SHADOW_RC, err=$UNIT_SHADOW_ERR)"
+	fi
+	teardown_fake_vm
+}
+
+# A deb pinned through XPF_DEPLOY_DEB_PATH can predate the boot barriers
+# (#9852, #10751) and ship no packaged copy. On a raw-deployed node the /etc
+# barrier copies are then the only ones. The barriers must be skipped with a
+# warning, while xpfd, which is required, is still reconciled (seat G).
+test_unit_shadow_unpackaged_barrier_skipped_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local etc="$FAKE_VM/etc/systemd/system" u problems=()
+	for u in xpf-transit-closed.service xpf-input-closed.service; do
+		printf '[Unit]\nDescription=raw push of %s\n' "$u" >"$etc/$u"
+	done
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("rc=$UNIT_SHADOW_RC: $UNIT_SHADOW_ERR")
+	for u in xpf-transit-closed.service xpf-input-closed.service; do
+		[[ -f "$etc/$u" ]] || problems+=("$u: the only copy was removed")
+		[[ "$UNIT_SHADOW_ERR" == *"No packaged $u"* ]] || problems+=("$u: no skip warning")
+	done
+	[[ "$(fake_systemd_loaded xpfd.service)" == /usr/lib/systemd/system/xpfd.service ]] ||
+		problems+=("xpfd not reconciled: loaded '$(fake_systemd_loaded xpfd.service)'")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): unpackaged barriers must be skipped, xpfd still reconciled: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): a deb with no packaged barriers skips them with a warning and still reconciles xpfd"
+	fi
+	teardown_fake_vm
+}
+
+# One unit in the loop fails its check. The wrapper must fail the deploy, not
+# carry on to the cut with that unit unverified.
+test_unit_shadow_loop_propagates_unit_failure_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local etc="$FAKE_VM/etc/systemd/system" u
+	mkdir -p "$FAKE_VM/run/systemd/system"
+	for u in xpf-transit-closed.service xpf-input-closed.service; do
+		printf '[Unit]\nDescription=raw push of %s\n' "$u" >"$etc/$u"
+		printf '[Unit]\nDescription=packaged %s\n' "$u" >"$FAKE_VM/usr/lib/systemd/system/$u"
+	done
+	printf '[Unit]\nDescription=runtime %s\n' xpf-transit-closed.service \
+		>"$FAKE_VM/run/systemd/system/xpf-transit-closed.service"
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"xpf-transit-closed.service"*"not the packaged"* ]]; then
+		ok "unit shadow (#18544): one failing unit fails the whole reconcile"
+	else
+		bad "unit shadow (#18544): a failing unit in the loop must fail the deploy (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# A parked copy exists, but the /etc path is occupied (here by an alias). The
+# restore must not overwrite what is there; it names both and fails.
+test_unit_shadow_occupied_path_not_overwritten_18544() {
+	setup_fake_vm
+	unit_shadow_fixture alias 1
+	mkdir -p "$FAKE_VM/var/lib/xpf-deploy-unit-shadow"
+	printf '[Service]\nKillMode=control-group\n' >"$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service"
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"NOT restored"* ]] &&
+		[[ "$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service")" == /opt/stale/xpfd.service ]] &&
+		[[ -f "$FAKE_VM/var/lib/xpf-deploy-unit-shadow/xpfd.service" ]]; then
+		ok "unit shadow (#18544): a parked copy is never restored over an occupied /etc path"
+	else
+		bad "unit shadow (#18544): an occupied /etc path must not be overwritten by the restore (rc=$UNIT_SHADOW_RC)"
 	fi
 	teardown_fake_vm
 }
@@ -3306,6 +3440,11 @@ test_unit_shadow_no_loaded_unit_hardfails_18544
 test_unit_shadow_promoted_runtime_unit_rolls_back_18544
 test_unit_shadow_packaged_unit_rejected_rolls_back_18544
 test_unit_shadow_barrier_units_reconciled_18544
+test_unit_shadow_interrupted_stash_restored_18544
+test_unit_shadow_rollback_reload_failure_reported_18544
+test_unit_shadow_unpackaged_barrier_skipped_18544
+test_unit_shadow_loop_propagates_unit_failure_18544
+test_unit_shadow_occupied_path_not_overwritten_18544
 test_unit_shadow_reconcile_wired_into_deb_deploy_18544
 test_manifest_node_index_maps_configured_instances
 test_manifest_raw_records_verified_binary_hashes

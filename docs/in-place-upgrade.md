@@ -926,8 +926,9 @@ install and before the cut, the deb path removes raw-deploy
 units. Those copies shadow the packaged units, so without the removal the cut
 and every later stop would run under the raw push's stale settings. It runs
 `daemon-reload`, asserts that each loaded unit is the packaged file with
-`LoadState=loaded` (rolling the copy back if not), and never restarts a unit
-outside the cut (#18544; `docs/test_env.md`).
+`LoadState=loaded` (rolling the copy back from `/var/lib` if not), and never
+restarts a unit outside the cut. A barrier the deployed deb does not ship is
+skipped with a warning (#18544; `docs/test_env.md`).
 
 ## Host-wide upgrade lock (#1965)
 

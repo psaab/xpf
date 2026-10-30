@@ -703,20 +703,28 @@ after the deb install and before the `xpfd upgrade --rolling` cut. For each of
 `xpfd.service`, `xpf-transit-closed.service` and `xpf-input-closed.service`
 it:
 
+- skips a boot barrier, with a warning, when the deployed deb ships no
+  packaged copy of it. A deb pinned through `XPF_DEPLOY_DEB_PATH` may predate
+  the barriers (#9852, #10751), and the raw-pushed `/etc` copies are then the
+  only ones. `xpfd.service` is required: with no packaged copy, the deploy
+  keeps the `/etc` file and hard-fails;
 - parks a regular-file `/etc/systemd/system/<unit>` in
-  `/run/xpf-deploy-unit-shadow/`, which is on tmpfs and outside every unit
-  search path. This leaves the node like a production install, where the unit
+  `/var/lib/xpf-deploy-unit-shadow/`. That is persistent, so a reboot between
+  the move and the check cannot lose it, and it is outside every unit search
+  path. This leaves the node like a production install, where the unit
   shipped in the deployed deb governs. It does not re-sync from the worktree,
-  because a pinned `XPF_DEPLOY_DEB_PATH` deb may come from a different tree.
-  When no packaged copy exists on disk, it keeps the file and hard-fails;
+  because a pinned `XPF_DEPLOY_DEB_PATH` deb may come from a different tree;
 - runs `systemctl daemon-reload`, also when the file is already gone but
   systemd still has it loaded;
 - ASSERTS the loaded unit POSITIVELY: `LoadState=loaded`, and `FragmentPath`
   is the unit's file under `/usr/lib/systemd/system` or
   `/lib/systemd/system`. That catches a unit the `/etc` copy used to outrank
   (`/run/systemd/system`, `/usr/local/lib/systemd/system`, a runtime mask) and
-  a packaged file systemd rejects. On failure it puts the parked copy back,
-  reloads, and hard-fails, so the node is as it was before the deploy;
+  a packaged file systemd rejects. On failure it puts back ANY parked copy,
+  including one left by an earlier interrupted run, as long as the `/etc` path
+  is free; it never overwrites an occupied one. Then it reloads and
+  hard-fails. The error names the parked copy and says whether that reload
+  worked;
 - after the check passes, drops the parked copy, and re-points every install
   link (`/etc/systemd/system/*/<unit>`: the `WantedBy=` `.wants` and
   `RequiredBy=` `.requires` links, e.g. `sysinit.target.wants`,
