@@ -739,9 +739,12 @@ pub(in crate::afxdp) fn resolve_zone_encoded_fabric_redirect_by_id(
     let mut resolution = resolve_fabric_redirect(forwarding)?;
     // #3075: the zone id is now a stable name-hash u32, so the synthetic fabric
     // src MAC carries it in TWO bytes — high byte at [4], low byte at [5]
-    // (big-endian), where the old u8 scheme hardcoded [4]=0x00. The decode in
-    // frame/inspect.rs::parse_zone_encoded_fabric_ingress_from_frame and the
-    // skip-learn check in neighbor_dispatch.rs read the full u16 in lock-step.
+    // (big-endian), where the old u8 scheme hardcoded [4]=0x00. Since #16557
+    // the id is a full u32, so those two bytes are its LOW 16 bits; the decode
+    // in frame/inspect.rs::parse_zone_encoded_fabric_ingress_from_frame
+    // resolves them back to the admitted zone (#18518). The skip-learn check
+    // in neighbor_dispatch.rs is prefix-only (`is_synthetic_fabric_source_mac`)
+    // and never reads the zone bytes.
     // A reserved-range id is never produced by StableZoneID, so any id != 0 is
     // a real configured zone.
     if zone_id == 0 {
@@ -749,8 +752,9 @@ pub(in crate::afxdp) fn resolve_zone_encoded_fabric_redirect_by_id(
     }
     // #16557: the fabric MAC stamp has only two bytes; ids above u16::MAX
     // stamp their low 16 bits. #18518: the receiver resolves them back to the
-    // full id (`ForwardingState::zone_id_for_stamp`); an ambiguous value is
-    // an Invalid stamp there, not a guessed zone.
+    // full id (`ForwardingState::zone_id_for_stamp`); a colliding value is
+    // an Invalid stamp there (not the #15916 `Ambiguous` disposition), never a
+    // guess between the receiver's admitted zones.
     let [_, _, hi, lo] = zone_id.to_be_bytes();
     resolution.src_mac = Some([0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
     Some(resolution)

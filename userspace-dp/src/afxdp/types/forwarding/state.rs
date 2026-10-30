@@ -156,6 +156,16 @@ pub(in crate::afxdp) struct ForwardingState {
     pub(in crate::afxdp) connected_v6_by_ifindex: FastMap<i32, Vec<PrefixV6>>,
     pub(in crate::afxdp) connected_v4: Vec<ConnectedRouteV4>,
     pub(in crate::afxdp) connected_v6: Vec<ConnectedRouteV6>,
+    /// #18517: the connected rows withheld from `connected_v4`/`connected_v6`
+    /// because their RETH unit's RG is peer-owned (#15742), each with its OWN
+    /// row table. `populate_interfaces` pushes a row here exactly when it
+    /// skips the transit push, so membership IS the peer-owned property; the
+    /// FIB build binds a bare gateway only to these rows
+    /// (`peer_owned_connected_target_v4/v6`), never to an arbitrary
+    /// by-ifindex ledger row. Build-time only; sorted longest-prefix-first,
+    /// lowest ifindex first on equal lengths (`sort_connected`).
+    pub(in crate::afxdp) connected_v4_peer_owned: Vec<ConnectedRouteV4>,
+    pub(in crate::afxdp) connected_v6_peer_owned: Vec<ConnectedRouteV6>,
     /// #16217/#17053: build-time cache of the canonical
     /// `connected_lpm_ifindex(.., RowsThenLedger)` owner answer,
     /// keyed by (prefix_len, network) with per-table-key slots.
@@ -816,7 +826,7 @@ impl ForwardingState {
     }
 
     /// #18518: the full zone id a V1 fabric stamp's 16 bits name, or `None`
-    /// when no admitted zone has those low bits or two do (ambiguous —
+    /// when no admitted zone has those low bits or two do (colliding —
     /// never guess a tenant identity). Hand-built test states that fill
     /// `zone_id_to_name` without running `populate_zones` take the scan arm.
     pub(in crate::afxdp) fn zone_id_for_stamp(&self, low: u16) -> Option<u32> {

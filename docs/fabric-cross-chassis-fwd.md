@@ -1359,7 +1359,8 @@ validation (#8444)".
 ## Fabric stamp authentication: document-and-constrain (#10105)
 
 Parent-filed from the #9901 lane (F-073 residual): the baseline V1 zone stamp
-(`02:bf:72:fe:<hi>:<lo>`, `FABRIC_ZONE_MAC_MAGIC`, u16 BE `StableZoneID`) is
+(`02:bf:72:fe:<hi>:<lo>`, `FABRIC_ZONE_MAC_MAGIC`, the low 16 bits of the u32
+`StableZoneID`, big-endian; see #18518 below) is
 cloneable by any L2-adjacent host on a shared fabric segment. #9901 wired
 `routing_table` via the `ingress_routing_domain` SSOT without changing that
 wire format and left this protocol-design question: shared-secret MAC vs
@@ -1585,20 +1586,73 @@ ifindex 0. For the default that falls back to the terminal path above, but a
 NON-default static (`10.30.0.0/24 next-hop <WAN gateway>`) has no terminal at
 its prefix and ended in `NoRoute`, with the learned route that used to carry it
 suppressed. The FIB build (`resolve_next_hop_target_v4/v6`) therefore binds a
-bare gateway that no transit row covers through the same by-ifindex ledger the
-terminal attribution uses (`connected_lpm_ifindex_*`, table-scoped; v6
-link-local gateways excluded). The member gets the peer-owned RETH egress, HA
-enforcement demotes the row to `HAInactive` because that RG is peer-owned, and
-the fabric helper redirects it. Once the RG is local again, the same row
-forwards out the local member. With the gateway bound, the configured default
-is selected over the terminal on the split node (pref 5 over 200), which
-matches Junos, where a static via a RETH is active on both nodes. The terminal
-path now serves only prefixes with no resolvable forwarding row, for example a
-split node with no configured default, where a destination inside a peer-owned
-prefix is attributed through the destination's own ledger entry
-(`demoted_cluster_terminal_discard_route_rescues_via_fabric_16216`). The
-gateway-owner arm of `select_source_ifindex_v4/v6` is now reached only by
-explicit-interface members that fail table resolution.
+bare gateway that no transit row covers to a PEER-OWNED connected row
+(`peer_owned_connected_target_v4/v6`; v6 link-local gateways excluded). The
+member gets the peer-owned RETH egress, HA enforcement demotes the row to
+`HAInactive` because that RG is peer-owned, and the fabric helper redirects it.
+Once the RG is local again, the same row forwards out the local member. With
+the gateway bound, the configured default is selected over the terminal on the
+split node (pref 5 over 200), which matches Junos, where a static via a RETH is
+active on both nodes. The terminal path now serves only prefixes with no
+resolvable forwarding row, for example a split node with no configured default,
+where a destination inside a peer-owned prefix is attributed through the
+destination's own ledger entry
+(`demoted_cluster_terminal_discard_route_rescues_via_fabric_16216`).
+
+**What the binding may bind.** `populate_interfaces` records a connected row in
+`connected_v4_peer_owned`/`connected_v6_peer_owned` exactly when it withholds
+that row from the transit `connected_v4`/`connected_v6` because the unit is
+peer-owned, and each row keeps its OWN routing table. The binding scans only
+those rows, filtered by `entry.table == table` (the #4446 scoping
+`infer_connected_route_target_*` applies to transit rows); equal-length matches
+pick the lowest ifindex. It does not consult the by-ifindex ledger
+(`connected_*_by_ifindex`): the ledger merges every row that shares an ifindex
+under the one routing instance that first claimed it
+(`ifindex_to_routing_instance`), so a non-peer-owned prefix of another instance
+can appear in a VRF's scope there
+(`bare_gateway_never_binds_a_non_peer_owned_ledger_row_18517`). A tenant-VRF
+static binds its own peer-owned RETH and never the default table's
+(`tenant_vrf_static_binds_its_own_peer_owned_reth_18517`).
+
+**A learned same-prefix route via a local interface is replaced.** On the
+split node the configured static now suppresses a same-prefix learned route
+whose next hop is on a LOCAL interface, for example an eBGP, OSPF or DHCP
+default from a second ISP on the locally-owned LAN RG or a per-node interface.
+Before #18517 the static was filtered as recursive there, so the learned route
+survived and the split node forwarded that prefix out its own ISP. Now every
+transit flow to the prefix goes `HAInactive`, then `FabricRedirect`, to the WAN
+RG's owner, and the split node's helper FIB disagrees with its kernel (zebra
+withdrew the static with the connected route, so the kernel keeps the learned
+route). This is the Junos behaviour (the preference-5 static via the RETH is
+active cluster-wide), and the owner node emits the same row
+(`TestSplitNodeStaticReplacesLocalLearnedTwin18517`). It makes the fabric
+load-bearing for that prefix: with the fabric link down the redirect still
+targets it (#4082 fail-open fallback) and the flow is lost there, and with no
+resolvable fabric the `HAInactive` demotion stands and the flow is dropped;
+master forwarded both cases out the local learned route
+(`split_node_static_fate_follows_the_fabric_18517`).
+
+**ECMP.** An ECMP static with one member via the peer-owned gateway and one via
+a local gateway splits by neighbor state, not by config alone: lookup liveness
+for a gateway member is an installed neighbor. With no neighbor entry for the
+WAN gateway on the split node the peer-owned member is only a non-live
+fallback, and the local member carries every flow. With a learned or stale
+entry, flows hash across both members and the peer-owned member's share crosses
+the fabric (`ecmp_static_with_one_peer_owned_member_18517`). Both outcomes are
+accepted: the first keeps traffic local, the second matches the owner's
+forwarding.
+
+**The #15917 gateway-owner arm.** `select_source_ifindex_v4/v6` still resolves
+a cluster terminal's would-be egress through the gateway of an unbound member
+of a covering forwarding row. A bare gateway that a peer-owned row of the
+route's own table covers no longer reaches it (the build binds that gateway
+first). It is reached by an
+explicit-interface member (`<gw>@<iface>`, Go's `qualified-next-hop <gw>
+interface <iface>`) whose interface fails table resolution in
+`explicit_ifindex_in_route_table`, for example an interface of another VRF:
+the member stays at ifindex 0, the terminal is selected, and the gateway's
+owner in the lookup's own table stamps it
+(`terminal_gateway_owner_reached_by_out_of_table_explicit_member_18517`).
 
 ### V1 zone stamps carry the zone id's low 16 bits (#18518)
 
@@ -1610,9 +1664,10 @@ redirect for a zone id above 0xFFFF was `Invalid` and dropped — which is every
 new flow a split node fabric-redirects (above). `populate_zones` now builds
 `zone_low16_to_id` and `ForwardingState::zone_id_for_stamp` resolves the stamp
 to the unique admitted zone with those low bits; two zones sharing low 16 bits
-make the stamp ambiguous, and an ambiguous stamp stays `Invalid` (never a
-guessed tenant identity). The build logs each colliding pair once
-(`zones [...] share V1 fabric-stamp bits`). The receiver resolves the bits
+collide, and a colliding stamp stays `Invalid` (never a guess between two
+admitted zones; this is not the #15916 `Ambiguous` disposition). The build logs
+each colliding set (`zones [...] share V1 fabric-stamp bits`) when the set of
+stamp warnings changes, not on every forwarding build. The receiver resolves the bits
 against its OWN admitted zones, so both nodes must admit the same zone set. A
 zone present only on the sender, for example during config-sync skew, decodes
 as unknown and its punts drop until the receiver commits it, or, if a receiver

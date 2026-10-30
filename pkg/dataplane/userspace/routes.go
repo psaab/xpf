@@ -385,12 +385,16 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 		// HA fabric redirect) for every destination inside the WAN prefix.
 		//
 		// #18517: it still covers gateways. A static whose gateway sits in
-		// the peer-owned prefix (the WAN default on a split node) is the row
-		// the cluster-terminal attribution (`select_source_ifindex_v4/v6`)
-		// resolves through the helper's by-ifindex ledger; filtering it as
-		// recursive left only the unstamped Null0 terminal, so every new
-		// flow toward the peer-owned egress was discarded instead of
-		// fabric-redirected.
+		// the peer-owned prefix (the WAN default on a split node) must reach
+		// the helper: its FIB binds that gateway to the peer-owned egress
+		// (`peer_owned_connected_target_v4/v6`), so the row HA-demotes and
+		// crosses the fabric. Filtering it as recursive left only the
+		// unstamped Null0 terminal, so every new flow toward the peer-owned
+		// egress was discarded instead of fabric-redirected. Consequence
+		// (Junos semantics, see docs/fabric-cross-chassis-fwd.md): the kept
+		// static now also suppresses a same-prefix learned route via a LOCAL
+		// interface in addLearnedRouteSnapshots, on the split node as on the
+		// owner, so that prefix rides the fabric.
 		if iface.ConnectedRGPeerOwned {
 			addGatewayNetworks(v4Table, "inet", v4Prefixes)
 			addGatewayNetworks(v6Table, "inet6", v6Prefixes)

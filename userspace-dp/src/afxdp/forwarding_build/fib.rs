@@ -291,6 +291,21 @@ pub(super) fn sort_connected(state: &mut ForwardingState) {
     state
         .connected_v6
         .sort_by(|a, b| b.prefix.prefix_len().cmp(&a.prefix.prefix_len()));
+    // #18517: equal-length peer-owned rows tie-break to the LOWEST ifindex
+    // (the #10645/#17053 canonical rule), so the bound egress never depends
+    // on snapshot row order.
+    state.connected_v4_peer_owned.sort_by(|a, b| {
+        b.prefix
+            .prefix_len()
+            .cmp(&a.prefix.prefix_len())
+            .then(a.ifindex.cmp(&b.ifindex))
+    });
+    state.connected_v6_peer_owned.sort_by(|a, b| {
+        b.prefix
+            .prefix_len()
+            .cmp(&a.prefix.prefix_len())
+            .then(a.ifindex.cmp(&b.ifindex))
+    });
 }
 
 /// Reject a numeric next-hop literal that the family-specific parser below
@@ -1407,11 +1422,8 @@ fn resolve_next_hop_target_v4(
     if let Some((ifindex, endpoint)) = infer_connected_route_target_v4(state, ip, table) {
         return vec![(Some(ip), ifindex, endpoint, 1)];
     }
-    if let Some(target) = peer_owned_connected_target(
-        state,
-        crate::afxdp::forwarding::connected_lpm_ifindex_v4(state, ip, table),
-    ) {
-        return vec![(Some(ip), target.0, target.1, 1)];
+    if let Some((ifindex, endpoint)) = peer_owned_connected_target_v4(state, ip, table) {
+        return vec![(Some(ip), ifindex, endpoint, 1)];
     }
     let expanded = recursive_gateway_target_v4(
         state,
@@ -1474,11 +1486,8 @@ fn resolve_next_hop_target_v6(
     if ip.is_unicast_link_local() {
         return vec![(Some(ip), 0, 0, 1)];
     }
-    if let Some(target) = peer_owned_connected_target(
-        state,
-        crate::afxdp::forwarding::connected_lpm_ifindex_v6(state, ip, table),
-    ) {
-        return vec![(Some(ip), target.0, target.1, 1)];
+    if let Some((ifindex, endpoint)) = peer_owned_connected_target_v6(state, ip, table) {
+        return vec![(Some(ip), ifindex, endpoint, 1)];
     }
     let expanded = recursive_gateway_target_v6(
         state,
@@ -1523,24 +1532,36 @@ fn resolve_ifindex(
 
 /// #18517: a bare gateway that no transit connected row covers may still be
 /// directly connected on a PEER-OWNED RETH unit: #15742 withholds that prefix
-/// from the transit rows on the split node, but the by-ifindex ledger keeps
-/// it. Binding the gateway there gives the member its real egress, so HA
-/// enforcement sees the peer-owned RG (HAInactive) and fabric-redirects the
-/// flow to the owner. Without it the member stayed at ifindex 0: the row
-/// resolved to NoRoute (never rescued) and, as a configured static, shadowed
-/// any kernel route for the same prefix. `ledger_ifindex` is the
-/// `connected_lpm_ifindex_*` answer (0 = no ledger prefix covers the gateway).
-fn peer_owned_connected_target(state: &ForwardingState, ledger_ifindex: i32) -> Option<(i32, u16)> {
-    (ledger_ifindex > 0).then(|| {
-        (
-            ledger_ifindex,
-            state
-                .tunnel_endpoint_by_ifindex
-                .get(&ledger_ifindex)
-                .copied()
-                .unwrap_or(0),
-        )
-    })
+/// from the transit rows on the split node and `populate_interfaces` records
+/// it in `connected_v*_peer_owned` instead. Binding the gateway there gives the
+/// member its real egress, so HA enforcement sees the peer-owned RG
+/// (HAInactive) and fabric-redirects the flow to the owner. Without it the
+/// member stayed at ifindex 0: the row resolved to NoRoute (never rescued)
+/// and, as a configured static, shadowed any kernel route for the same prefix.
+///
+/// Precondition by construction, not by naming: only rows pushed BECAUSE
+/// their unit is peer-owned are consulted, each scoped by its OWN table
+/// (`entry.table == table`, exactly as `infer_connected_route_target_v4`
+/// scopes transit rows, #4446). The by-ifindex ledger is NOT consulted: it
+/// merges every row sharing an ifindex under ONE first-claimed instance, so
+/// a non-peer-owned prefix of another instance could be bound
+/// (`bare_gateway_never_binds_a_non_peer_owned_ledger_row_18517`).
+fn peer_owned_connected_target_v4(state: &ForwardingState, ip: Ipv4Addr, table: &str) -> Option<(i32, u16)> {
+    state
+        .connected_v4_peer_owned
+        .iter()
+        .find(|entry| entry.table == table && entry.prefix.contains(ip))
+        .map(|entry| (entry.ifindex, entry.tunnel_endpoint_id))
+}
+
+/// #18517: v6 twin of `peer_owned_connected_target_v4`. The caller has
+/// already refused unicast link-local gateways (#12398 B1).
+fn peer_owned_connected_target_v6(state: &ForwardingState, ip: Ipv6Addr, table: &str) -> Option<(i32, u16)> {
+    state
+        .connected_v6_peer_owned
+        .iter()
+        .find(|entry| entry.table == table && entry.prefix.contains(ip))
+        .map(|entry| (entry.ifindex, entry.tunnel_endpoint_id))
 }
 
 // #16130 NOT genericized: `infer_connected_route_target_v6` carries the
@@ -1614,159 +1635,8 @@ fn infer_connected_route_target_v6(
         .map(|entry| (entry.ifindex, entry.tunnel_endpoint_id))
 }
 #[cfg(test)]
-mod fib_genericize_16130_tests {
-    use super::*;
-
-    // Decisive parity for the genericized merge: duplicate terminals sum
-    // saturating, distinct keys stay separate and sorted by key.
-    // FAIL-ON-REVERT: reverting `merge_recursive_targets` to per-family
-    // bodies that (say) overwrite instead of saturating-add, or dropping
-    // the sort, reds this in both families via the one generic body.
-    #[test]
-    fn merge_recursive_targets_sums_saturating_and_sorts_16130() {
-        let gw = Ipv4Addr::new(192, 0, 2, 1);
-        let merged = merge_recursive_targets(vec![
-            (gw, 7, 0u16, u32::MAX),
-            (gw, 7, 0u16, 5),
-            (gw, 3, 0u16, 2),
-            (Ipv4Addr::new(192, 0, 2, 2), 7, 0u16, 1),
-        ]);
-        assert_eq!(
-            merged,
-            vec![
-                (gw, 3, 0, 2),
-                (gw, 7, 0, u32::MAX),
-                (Ipv4Addr::new(192, 0, 2, 2), 7, 0, 1),
-            ]
-        );
-        let gw6: Ipv6Addr = "2001:db8::1".parse().unwrap();
-        let merged6 = merge_recursive_targets(vec![(gw6, 7, 0u16, 3), (gw6, 7, 0u16, 4)]);
-        assert_eq!(merged6, vec![(gw6, 7, 0, 7)]);
-    }
-
-    #[test]
-    fn parse_route_next_hop_generic_matches_family_shapes_16130() {
-        assert_eq!(
-            parse_route_next_hop_generic::<Ipv4Addr>("192.0.2.1@ge-0-0-0"),
-            (Some(Ipv4Addr::new(192, 0, 2, 1)), Some("ge-0-0-0".into()))
-        );
-        assert_eq!(
-            parse_route_next_hop_generic::<Ipv4Addr>("@ge-0-0-0"),
-            (None, Some("ge-0-0-0".into()))
-        );
-        assert_eq!(
-            parse_route_next_hop_generic::<Ipv6Addr>("2001:db8::1"),
-            (Some("2001:db8::1".parse::<Ipv6Addr>().unwrap()), None)
-        );
-        // Cross-family literal fails closed to (None, None), as before.
-        assert_eq!(
-            parse_route_next_hop_generic::<Ipv4Addr>("2001:db8::1"),
-            (None, None)
-        );
-        assert_eq!(parse_route_next_hop_generic::<Ipv6Addr>(""), (None, None));
-    }
-
-    // The v6-only branches must NOT be folded into the generic: a v6
-    // link-local gateway stays ifindex-0 unresolved, and the v4
-    // counterparts resolve through their own explicit bodies.
-    #[test]
-    fn v6_link_local_branches_stay_explicit_16130() {
-        let state = ForwardingState::default();
-        let snapshot = ConfigSnapshot::default();
-        let routes = RecursiveGatewayRoutes::from_snapshot(&snapshot);
-        let route = RouteSnapshot::default();
-        let ll: Ipv6Addr = "fe80::1".parse().unwrap();
-        assert_eq!(
-            resolve_next_hop_target_v6(
-                Some(ll),
-                None,
-                false,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
-                &state,
-                "inet6.0",
-                &routes,
-                &route,
-            ),
-            vec![(Some(ll), 0, 0, 1)],
-            "v6 link-local must not recurse globally (#12398 B1)"
-        );
-        // v6 link-local recursion entry refuses immediately.
-        let mut work = MAX_RECURSIVE_STATIC_WORK;
-        let mut excluded = [None; MAX_RECURSIVE_STATIC_DEPTH];
-        assert!(recursive_static_target_v6(
-            &state,
-            &routes,
-            ll,
-            "inet6.0",
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            &mut excluded,
-            &mut [None; MAX_RECURSIVE_STATIC_DEPTH],
-            0,
-            &mut work,
-        )
-        .is_empty());
-    }
-
-    #[test]
-    fn leak_incarnation_retained_only_on_exact_identity_16130() {
-        let mut state = ForwardingState::default();
-        let mut prev = ForwardingState::default();
-        let leak = |prefix: &str, table: &str, prio: u32, inc: u64| LeakRuleV4 {
-            prefix: PrefixV4::from_net(prefix.parse().unwrap()),
-            next_table: table.into(),
-            rule_priority: prio,
-            post_table: false,
-            incarnation: inc,
-        };
-        prev.leak_rules_v4.insert(
-            "inet.0".into(),
-            vec![leak("10.0.0.0/8", "tenant.inet.0", 100, 4242)],
-        );
-        state.leak_rules_v4.insert(
-            "inet.0".into(),
-            vec![
-                leak("10.0.0.0/8", "tenant.inet.0", 100, 0),
-                leak("10.0.0.0/8", "tenant.inet.0", 200, 0),
-            ],
-        );
-        assign_leak_incarnations(&mut state, Some(&prev));
-        let leaks = &state.leak_rules_v4["inet.0"];
-        assert_eq!(leaks[0].incarnation, 4242, "exact identity retains");
-        assert_ne!(leaks[1].incarnation, 4242, "different priority is fresh");
-        assert_ne!(leaks[1].incarnation, 0);
-    }
-
-    #[test]
-    fn leak_incarnation_retained_only_on_exact_identity_v6_16130() {
-        let mut state = ForwardingState::default();
-        let mut prev = ForwardingState::default();
-        let leak = |prefix: &str, table: &str, prio: u32, inc: u64| LeakRuleV6 {
-            prefix: PrefixV6::from_net(prefix.parse().unwrap()),
-            next_table: table.into(),
-            rule_priority: prio,
-            post_table: false,
-            incarnation: inc,
-        };
-        prev.leak_rules_v6.insert(
-            "inet6.0".into(),
-            vec![leak("2001:db8::/32", "tenant.inet6.0", 100, 4242)],
-        );
-        state.leak_rules_v6.insert(
-            "inet6.0".into(),
-            vec![
-                leak("2001:db8::/32", "tenant.inet6.0", 100, 0),
-                leak("2001:db8::/32", "tenant.inet6.0", 200, 0),
-            ],
-        );
-        assign_leak_incarnations(&mut state, Some(&prev));
-        let leaks = &state.leak_rules_v6["inet6.0"];
-        assert_eq!(leaks[0].incarnation, 4242, "exact identity retains");
-        assert_ne!(leaks[1].incarnation, 4242, "different priority is fresh");
-        assert_ne!(leaks[1].incarnation, 0);
-    }
-}
+#[path = "fib_genericize_16130_tests.rs"]
+mod fib_genericize_16130_tests;
 
 #[cfg(test)]
 mod recursive_cycle_guard_12398_tests {

@@ -1133,13 +1133,13 @@ fn split_rg_cluster_reject_does_not_shadow_forwarding_default_15742() {
 /// LPM reaches the default. Pre-#18517 the bare WAN gateway resolved
 /// to ifindex 0 (its transit prefix is suppressed), so the terminal
 /// was selected and the demotion came from the terminal path.
-/// #18517: the FIB binds the bare gateway through the by-ifindex
-/// ledger to the peer-owned WAN egress, so the pref-5 forwarding row
+/// #18517: the FIB binds the bare gateway to the peer-owned connected
+/// row (the WAN egress), so the pref-5 forwarding row
 /// is selected; HA enforcement demotes it (egress RG1 peer-owned) and
 /// the fabric helper redirects. Controls: (a) an unmarked (operator)
 /// discard is outranked the same way; (b) RG1 locally owned forwards
 /// locally. The terminal path itself is pinned by #16216 below.
-/// FAIL-ON-REVERT: drop the ledger binding in
+/// FAIL-ON-REVERT: drop the peer-owned binding in
 /// resolve_next_hop_target_v4/v6 and the split lookup egress is 0.
 #[test]
 fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
@@ -1152,7 +1152,7 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
         // configured gateways bare, which is the live split-node shape.
         // (Pre-#18517 a bare gateway in the suppressed WAN prefix could
         // not resolve, so the #15098 terminal-row rule selected the
-        // pref-200 discard; it now binds the ledger egress.)
+        // pref-200 discard; it now binds the peer-owned egress.)
         for route in &mut snapshot.routes {
             for nh in &mut route.next_hops {
                 if nh.starts_with("172.16.80.1") {
@@ -1164,7 +1164,8 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
         }
         // Live post-#15745 shape: the WAN unit's connected transit
         // prefixes are suppressed on the split node; connected_by_ifindex
-        // still records them, and #18517 binds the bare gateway there.
+        // and `connected_v*_peer_owned` still record them, and #18517
+        // binds the bare gateway to the latter.
         for iface in &mut snapshot.interfaces {
             if iface.name == "reth0.80" {
                 iface.connected_rg_peer_owned = true;
@@ -1287,10 +1288,10 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
 /// Unbound, the member resolved to ifindex 0 and the row ended in
 /// NoRoute; and because Go suppresses a learned same-prefix route
 /// behind a configured static that is at least as preferred, nothing
-/// else could carry the prefix. The FIB must bind the ledger egress so
+/// else could carry the prefix. The FIB must bind the peer-owned egress so
 /// the row HA-demotes and crosses the fabric on the split node, and
 /// forwards locally once the RG is local again.
-/// FAIL-ON-REVERT: drop either `peer_owned_connected_target` call and
+/// FAIL-ON-REVERT: drop either `peer_owned_connected_target_v4/v6` call and
 /// that family's lookup egress is 0.
 #[test]
 fn static_via_peer_owned_gateway_binds_ledger_egress_18517() {
@@ -1384,7 +1385,7 @@ fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
         route.preference = 5;
     }
     // #18517: a bare gateway inside the peer-owned WAN prefix now binds
-    // its ledger egress, so it would be selected over the terminal.
+    // its peer-owned egress, so it would be selected over the terminal.
     // Point the forwarding rows at TEST-NET-1, which no prefix covers:
     // the member stays undrivable and the terminal is selected. The
     // destination is inside the peer-owned WAN prefix, so the terminal
@@ -12860,10 +12861,11 @@ fn terminal_gateway_owner_table_scoped_15917() {
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
         IpAddr::V6(Ipv6Addr::new(0x2001, 0x4860, 0x4860, 0, 0, 0, 0, 0x8888)),
     ] {
-        // #18517: the bare gateway binds its ledger owner at FIB build,
-        // through the same table-scoped `connected_lpm_ifindex_*` the
-        // terminal attribution used, so the forwarding row is selected
-        // and the scoping property moves to the bound egress.
+        // #18517: the bare gateway binds its peer-owned owner at FIB
+        // build (`peer_owned_connected_target_*`, row-table scoped), so the
+        // forwarding row is selected and the scoping property moves to the
+        // bound egress. The gateway-owner arm itself is pinned by
+        // `terminal_gateway_owner_reached_by_out_of_table_explicit_member_18517`.
         let raw = lookup_forwarding_resolution(&state, dst).resolution;
         assert_eq!(
             raw.egress_ifindex, 12,
