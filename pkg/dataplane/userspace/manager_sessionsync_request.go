@@ -8,8 +8,10 @@ package userspace
 
 import (
 	"encoding/binary"
+	"log/slog"
 	"net"
 
+	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
@@ -49,14 +51,6 @@ func (v *sessionSyncView) egressZone() uint16 {
 	}
 	return v.val6.EgressZone
 }
-
-// #18148: the JSON wire field is u32 (Rust u32). The BPF session value
-// carries only the low 16 bits (#16557 frozen ABI), so the widening here
-// is a zero-extension of that truncated value — no new information, but
-// the field must accept full u32 values from the helper on the JSON leg.
-func (v *sessionSyncView) ingressZoneID32() uint32 { return uint32(v.ingressZone()) }
-
-func (v *sessionSyncView) egressZoneID32() uint32 { return uint32(v.egressZone()) }
 
 func (v *sessionSyncView) ingressIfaceFold() uint32 {
 	if v.val4 != nil {
@@ -305,12 +299,12 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 	// Every field below reads the value through the borrowed view; the
 	// field list is the union of the two pre-collapse twin bodies, in
 	// the twins' original order (NAT64 is the one V6-only insertion).
-	req.IngressZone = m.zoneNameByID(view.ingressZone())
-	req.EgressZone = m.zoneNameByID(view.egressZone())
-	// #919/#922/#18148: forward the raw zone IDs alongside the legacy
-	// strings; the Rust daemon prefers IDs when nonzero. The BPF value
-	// is u16 (low bits of the u32 StableZoneID), widened losslessly here.
-	req.IngressZoneID = view.ingressZoneID32()
+	// #919/#922/#18148: the Rust helper prefers the zone ID over the name
+	// whenever the ID is nonzero. The session value carries only the low 16
+	// bits of the u32 StableZoneID (#16557), so the full ID must be
+	// recovered here — widening the u16 is NOT lossless (#18515).
+	req.IngressZoneID, req.IngressZone = m.resolveSessionZoneLocked(view.ingressZone())
+	req.EgressZoneID, req.EgressZone = m.resolveSessionZoneLocked(view.egressZone())
 	// #7095: resolve the peer's cluster-stable ingress fold to THIS node's
 	// ifindex. The sender could not ship its own ifindex — it is node-local
 	// — so it shipped a fold of the reth-relative name both nodes agree on,
@@ -341,7 +335,6 @@ func (m *Manager) fillSessionSyncValue(view *sessionSyncView, req *SessionSyncRe
 	// A carried domain cannot drift that way; 0 means the default instance,
 	// which is what a peer predating the field sends.
 	req.RoutingDomain = view.routingDomain()
-	req.EgressZoneID = view.egressZoneID32()
 	var peerEgress bool
 	req.EgressIfindex, req.TXIfindex, req.OwnerRGID, req.TXVLANID, peerEgress =
 		m.sessionSyncEgressIdentityLocked(view.fibIfindex(), view.fibVlanID(), view.egressIfaceFold(), req.EgressZone)
@@ -515,29 +508,105 @@ func (m *Manager) sessionSyncTunnelEndpointLocked(id uint16) (TunnelEndpointSnap
 	return TunnelEndpointSnapshot{}, false
 }
 
-func (m *Manager) zoneNameByID(zoneID uint16) string {
+// resolveSessionZoneLocked resolves a session value's u16 zone field
+// against the zones published to the helper (m.lastSnapshot.Zones, the
+// post-#3719-quarantine set the helper enforces), and reports an ambiguous
+// value once. Caller holds m.mu, as for every m.lastSnapshot read here.
+func (m *Manager) resolveSessionZoneLocked(zoneID uint16) (uint32, string) {
+	var zones []ZoneSnapshot
+	if m.lastSnapshot != nil {
+		zones = m.lastSnapshot.Zones
+	}
+	id, name, ambiguous := resolveTruncatedZone(zones, zoneID)
+	if ambiguous {
+		if m.ambiguousSyncZoneWarned == nil {
+			m.ambiguousSyncZoneWarned = make(map[uint16]struct{})
+		}
+		if _, warned := m.ambiguousSyncZoneWarned[zoneID]; !warned {
+			m.ambiguousSyncZoneWarned[zoneID] = struct{}{}
+			slog.Warn("userspace: session-sync zone id is ambiguous: two zones share its low 16 bits, so synced sessions in them carry no zone and their established flows will not survive an HA failover; rename one zone (#18515)",
+				"truncated_zone_id", zoneID)
+		}
+	}
+	return id, name
+}
+
+// resolveTruncatedZone maps a session value's u16 zone field — the low 16
+// bits of the u32 StableZoneID since #16557 — back to the full zone ID and
+// zone name among zones.
+//
+// #18515: the request used to carry uint32(u16) as the zone ID and an
+// exact-match name lookup that found no zone for any ID above 65535. The
+// helper prefers a nonzero ID, so every peer-synced session stored a zone ID
+// that no zone has, and every packet that hit it was judged FOREIGN
+// (session_hit_authority: arrival zone != stored ingress zone). Reply traffic
+// was then evaluated as its own wan->lan flow and default-denied, so every
+// established flow died on HA failover; the empty name also blinded the
+// egress-identity resolution that consumes it.
+//
+// Resolution is the unique zone whose full ID has these low 16 bits. Two
+// zones with different full IDs that share low 16 bits are AMBIGUOUS: the
+// helper must import no zone rather than guess one, so the result is an ID
+// that keeps the same low 16 bits but that no published zone carries
+// (unattributedZoneID). Every hit is then judged foreign. (0) is NOT
+// usable for that: an arrival on an interface in no zone has arrival zone
+// 0, and session_hit_authority would judge it the session's owner. 0 is
+// the session value's "no zone", so a zone whose ID has low 16 bits 0
+// cannot be carried at all. A value matching no zone, or no published
+// zones yet, passes through unchanged (the pre-#18515 behavior).
+//
+// The ambiguity check sees only this node's zones. A zone that exists only
+// on the sender (a node-scoped zone, or the config-sync window) and shares
+// low 16 bits with a local zone is attributed to that local zone, and to
+// that zone's owner RG (1/65536 per such pair; the odds that some pair in a
+// configuration collides grow with the zone count, about 7% at 100 zones);
+// the u16 wire cannot tell them apart. The unattributed ID is free only when
+// the request is built: a zone added later could take it (about 2^-32).
+func resolveTruncatedZone(zones []ZoneSnapshot, zoneID uint16) (id uint32, name string, ambiguous bool) {
 	if zoneID == 0 {
-		return ""
+		return 0, "", false
 	}
-	cr := m.bpfShim.LastCompileResult()
-	if cr == nil {
-		return ""
-	}
-	// #3719: a StableZoneID collision maps two zone names to the same id in
-	// ZoneIDs. The dataplane installs only the sorted-FIRST name (the survivor
-	// config.QuarantinedZoneNames keeps), so resolve deterministically to that
-	// name instead of returning whichever name a map-iteration coin flip yields
-	// — which could name the QUARANTINED zone that forwards nothing.
-	owner := ""
-	for name, id := range cr.ZoneIDs {
-		if id != uint32(zoneID) {
+	found := false
+	for _, zone := range zones {
+		if uint16(zone.ID) != zoneID {
 			continue
 		}
-		if owner == "" || name < owner {
-			owner = name
+		if found && zone.ID != id {
+			return unattributedZoneID(zones, zoneID), "", true
+		}
+		if !found {
+			id, name, found = zone.ID, zone.Name, true
 		}
 	}
-	return owner
+	if !found {
+		return uint32(zoneID), "", false
+	}
+	return id, name, false
+}
+
+// unattributedZoneID returns an ID with low 16 bits zoneID that no
+// published zone carries and that is outside the reserved band
+// (ZoneIDReservedMin and up is junos-host and junos-global). Keeping the low
+// bits means a re-export truncates to the same wire value. With fewer than
+// 65536 zones a free ID always exists.
+func unattributedZoneID(zones []ZoneSnapshot, zoneID uint16) uint32 {
+	for high := uint32(0); high <= 0xFFFF; high++ {
+		candidate := high<<16 | uint32(zoneID)
+		if candidate >= config.ZoneIDReservedMin {
+			break
+		}
+		taken := false
+		for _, zone := range zones {
+			if zone.ID == candidate {
+				taken = true
+				break
+			}
+		}
+		if !taken {
+			return candidate
+		}
+	}
+	return uint32(zoneID)
 }
 
 func networkUint16ToHost(v uint16) uint16 {

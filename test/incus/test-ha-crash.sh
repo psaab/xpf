@@ -50,6 +50,8 @@ xpf_enter_destructive_cluster_cell "test-ha-crash $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/failover-clock-lib.sh
+source "${SCRIPT_DIR}/failover-clock-lib.sh"
 # #12203: shared scoped per-(node, RG) role reader for dual-active checks.
 # shellcheck source=test/incus/deploy-lib.sh
 source "${SCRIPT_DIR}/deploy-lib.sh"
@@ -109,6 +111,22 @@ instance_running() {
 	[[ "$status" == "RUNNING" ]]
 }
 
+# start_instance <inst> <label> — #18523. `incus start` used to run with its
+# error discarded, so a VM that could not start at all (on tcp: "All virtual
+# functions on parent device mlx1 are already in use") surfaced only as
+# "xpfd did not restart within 90s". Name the start failure itself. A caller
+# skips the xpfd wait when this fails: a VM that did not start cannot run
+# xpfd, so the 90s wait would only add a second FAIL for the same cause.
+start_instance() {
+	local inst="$1" label="$2" err
+	if err=$(incus start "$inst" 2>&1); then
+		return 0
+	fi
+	instance_running "$inst" && return 0
+	fail "${label}: incus start ${inst} failed: $(printf '%s' "$err" | head -1)"
+	return 1
+}
+
 wait_for_xpfd() {
 	local inst="$1" max="$2"
 	for i in $(seq 1 "$max"); do
@@ -126,7 +144,7 @@ fw1_is_primary() {
 	local status
 	status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 	for rg in 0 1 2; do
-		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node1.*primary"; then
+		if [[ "$(deploy_node_rg_role node1 "$rg" <<<"$status" || true)" != primary ]]; then
 			return 1
 		fi
 	done
@@ -134,15 +152,10 @@ fw1_is_primary() {
 }
 
 # Check that fw0 is primary for all RGs
+# #18523: fw0 owns every RG only when both nodes' own views agree. The
+# shared deploy-lib.sh helper is the one deploy-lib-selftest.sh drives.
 fw0_is_primary() {
-	local status
-	status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	for rg in 0 1 2; do
-		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node0.*primary"; then
-			return 1
-		fi
-	done
-	return 0
+	deploy_restore_fw0_owns_all
 }
 
 # Wait for fw1 to become primary, return elapsed seconds
@@ -231,32 +244,13 @@ test_new_tcp() {
 	return 1
 }
 
-# Restore fw0 as primary for all RGs
+# Restore fw0 as primary for all RGs.
+# #18523: the polled restore and its verdict (a refused or over-budget
+# restore FAILs; see deploy_restore_fw0_primary and RESTORE_FW0_WAIT /
+# RESTORE_FW0_BUDGET in docs/testing-procedures.md) live in deploy-lib.sh,
+# shared with the other HA smoke so the selftest drives the code run here.
 restore_fw0_primary() {
-	local label="$1"
-	# If fw0 is already primary, nothing to do
-	if fw0_is_primary; then
-		pass "$label: fw0 already primary"
-		return 0
-	fi
-	# Reset manual failover flags
-	for rg in 0 1 2; do
-		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-	done
-	sleep 1
-	# Manual failover all RGs to fw0 (from fw1 which is current primary)
-	for rg in 0 1 2; do
-		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
-	done
-	sleep 5
-	if fw0_is_primary; then
-		pass "$label: fw0 restored as primary"
-		return 0
-	else
-		fail "$label: could not restore fw0 as primary"
-		return 1
-	fi
+	deploy_restore_fw0_primary "$1"
 }
 
 cleanup() {
@@ -399,13 +393,18 @@ sleep 1
 
 # Restart fw0
 info "Phase 1: Restarting fw0"
-incus start "$FW0" 2>/dev/null || true
-
-restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
-if [[ -n "$restart_time" ]]; then
-	pass "phase1: fw0 xpfd restarted (${restart_time}s)"
-else
-	fail "phase1: fw0 xpfd did not restart within ${VM_RESTART_WAIT}s"
+if start_instance "$FW0" "phase1"; then
+	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
+	if [[ -n "$restart_time" ]]; then
+		pass "phase1: fw0 xpfd restarted (${restart_time}s)"
+		# #18523 (#11872): the force-stopped VM comes back with its clock behind
+		# in the no-NTP lab, which breaks fabric-auth windows. Resync both nodes
+		# from one host reading, as test-failover and test-double-failover do.
+		failover_resync_node_clocks "$FW0" "$FW1" >/dev/null ||
+			fail "phase1: could not resync both firewall clocks from host UTC"
+	else
+		fail "phase1: fw0 xpfd did not restart within ${VM_RESTART_WAIT}s"
+	fi
 fi
 
 # Wait for cluster to stabilize
@@ -607,10 +606,15 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	test_new_tcp "phase3-cycle${cycle}" "$CONN_TIMEOUT" || cycle_failures=$((cycle_failures + 1))
 
 	# Restart fw0
-	incus start "$FW0" 2>/dev/null || true
+	if ! start_instance "$FW0" "phase3-cycle${cycle}"; then
+		cycle_failures=$((cycle_failures + 1))
+		continue
+	fi
 	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase3-cycle${cycle}: fw0 restarted (${restart_time}s)"
+		failover_resync_node_clocks "$FW0" "$FW1" >/dev/null ||
+			fail "phase3-cycle${cycle}: could not resync both firewall clocks from host UTC"
 	else
 		fail "phase3-cycle${cycle}: fw0 did not restart within ${VM_RESTART_WAIT}s"
 		cycle_failures=$((cycle_failures + 1))
@@ -669,9 +673,14 @@ sleep 3
 # Ensure both nodes are running
 for inst in "$FW0" "$FW1"; do
 	if ! instance_running "$inst"; then
-		# Try to start it
-		incus start "$inst" 2>/dev/null || true
-		wait_for_xpfd "$inst" "$VM_RESTART_WAIT" >/dev/null 2>&1 || true
+		# Try to start it.
+		# #18523 (#11872): a node started here also comes back with its clock
+		# behind; resync both so the skew is not left for the next harness.
+		if start_instance "$inst" "final" &&
+			wait_for_xpfd "$inst" "$VM_RESTART_WAIT" >/dev/null 2>&1; then
+			failover_resync_node_clocks "$FW0" "$FW1" >/dev/null ||
+				fail "final: could not resync both firewall clocks from host UTC"
+		fi
 	fi
 	if instance_running "$inst"; then
 		pass "final: $inst running"

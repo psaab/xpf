@@ -750,13 +750,7 @@ pub(in crate::afxdp) fn publish_shared_session(
             let same = entry.session_id == 0
                 || previous.session_id == 0
                 || entry.session_id == previous.session_id;
-            let rank = |wire: u8| match crate::session::TcpHandshakeState::from_wire(wire) {
-                Some(crate::session::TcpHandshakeState::Opening) => 1,
-                Some(crate::session::TcpHandshakeState::HandshakePending) => 2,
-                Some(crate::session::TcpHandshakeState::SynAckFirstPending) => 3,
-                Some(crate::session::TcpHandshakeState::Established) => 4,
-                None => 4,
-            };
+            let rank = crate::session::TcpHandshakeState::stage_rank;
             // #16217: reverse-packet evidence is monotonic per
             // incarnation too — a republication carrying a smaller
             // (or zero) count must not erase observed reverse service.
@@ -889,13 +883,7 @@ pub(in crate::afxdp) fn publish_shared_session(
                     && (entry.session_id == 0
                         || previous.session_id == 0
                         || entry.session_id == previous.session_id);
-                let rank = |wire: u8| match crate::session::TcpHandshakeState::from_wire(wire) {
-                    Some(crate::session::TcpHandshakeState::Opening) => 1,
-                    Some(crate::session::TcpHandshakeState::HandshakePending) => 2,
-                    Some(crate::session::TcpHandshakeState::SynAckFirstPending) => 3,
-                    Some(crate::session::TcpHandshakeState::Established) => 4,
-                    None => 4,
-                };
+                let rank = crate::session::TcpHandshakeState::stage_rank;
                 let keep_stage = same_incarnation
                     && rank(entry.tcp_handshake_state) < rank(previous.tcp_handshake_state);
                 let keep_rev = same_incarnation && entry.rev_packets < previous.rev_packets;

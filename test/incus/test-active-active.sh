@@ -117,10 +117,10 @@ done
 sleep 2
 
 # Ensure all RGs are on fw0 (request peer failover if needed)
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 for rg in 0 1 2; do
-	rg_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
-	if [[ "$rg_primary" -ne 1 ]]; then
+	rg_primary=$(deploy_node_rg_role node0 "$rg" <<<"$fw0_status" || true)
+	if [[ "$rg_primary" != primary ]]; then
 		incus exec "$FW0" -- cli -c "request chassis cluster failover redundancy-group $rg node 0" 2>/dev/null || true
 	fi
 done
@@ -171,40 +171,17 @@ incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1
 sleep "$SETTLE_WAIT"
 
 # Verify RG split: RG1 on fw1, RG2 on fw0
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 
-rg1_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 1" | grep "node0" | awk '{print $3}')
-rg2_node0=$(echo "$fw0_status" | grep -A2 "Redundancy group: 2" | grep "node0" | awk '{print $3}')
-
-if [[ "$rg1_node0" == "secondary" ]]; then
-	pass "RG1 (WAN) moved to fw1"
-else
-	fail "RG1 did not move to fw1 (node0 state: $rg1_node0)"
-fi
-
-if [[ "$rg2_node0" == "primary" ]]; then
-	pass "RG2 (LAN) stayed on fw0"
-else
-	fail "RG2 unexpectedly moved (node0 state: $rg2_node0)"
-fi
-
-# Verify VRRP states match cluster state
-fw0_vrrp=$(incus exec "$FW0" -- cli -c 'show security vrrp' 2>/dev/null)
-
-vrrp_101=$(echo "$fw0_vrrp" | grep "101" | head -1)
-vrrp_102=$(echo "$fw0_vrrp" | grep "102" | head -1)
-
-if echo "$vrrp_101" | grep -qi "BACKUP"; then
-	pass "VRRP 101 (WAN) is BACKUP on fw0"
-else
-	fail "VRRP 101 (WAN) not BACKUP on fw0: $vrrp_101"
-fi
-
-if echo "$vrrp_102" | grep -qi "MASTER"; then
-	pass "VRRP 102 (LAN) is MASTER on fw0"
-else
-	fail "VRRP 102 (LAN) not MASTER on fw0: $vrrp_102"
-fi
+# #18523: score the split from BOTH nodes' own views with the shared,
+# selftested verdict (deploy-lib.sh): RG1 owned and forwarded by fw1 alone,
+# RG2 owned and forwarded by fw0 alone, no DIVERGENCE suffix on any
+# `Forwarding:` line. The `Forwarding: rg-active=` line is printed for every
+# RG in both election modes, so it is the forwarding check in both; the old
+# per-group VRRP 101/102 check matched only legacy VRRP-backed RETHs. A
+# missing row or line is a named FAIL, never a `set -e` abort.
+deploy_active_active_split_verdict "$fw0_status" "$fw1_status"
 
 # ── Phase 3: Verify iperf3 survives the split ────────────────────────
 
@@ -254,7 +231,7 @@ incus exec "$FW0" -- cli -c 'request chassis cluster failover redundancy-group 1
 sleep "$SETTLE_WAIT"
 
 # Verify all RGs back on fw0
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 
 if printf '%s\n' "$fw0_status" | deploy_node_role_every_rg_ok node0 primary; then
 	pass "all RGs returned to fw0 after reunification"
