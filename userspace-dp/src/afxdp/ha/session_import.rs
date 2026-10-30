@@ -979,14 +979,16 @@ impl crate::afxdp::ha::SessionDomain {
     /// if synced_entry_allows_local_replace(..) && let Some(fd) = ..session_map_fd
     /// ```
     ///
-    /// where the FIRST operand failing is a deliberate ownership decision — the
-    /// peer owns the redundancy group, so this node must NOT take the redirect,
-    /// and not publishing is the correct outcome — while the SECOND failing is a
-    /// gap: the entry is recorded in the shared map and answered to Go as
+    /// where the FIRST operand failing is a deliberate ownership decision — THIS
+    /// node is forwarding-active for the owner RG (#18550 corrected an earlier
+    /// "the peer owns the RG" reading, which is the opposite), so the coordinator
+    /// leaves the steering publish to the workers, which publish only after
+    /// their own local-replace guard admits the entry — while the SECOND failing
+    /// is a gap: the entry is recorded in the shared map and answered to Go as
     /// installed, but no kernel row exists. Counting "did not publish" across
-    /// both would fire continuously on healthy peer-owned imports and report
-    /// nothing; only the second is reportable, and it is only separable once the
-    /// `&&` is split.
+    /// both would fire on every active-owner import the workers publish and
+    /// report nothing; only the second is reportable, and it is only separable
+    /// once the `&&` is split.
     ///
     /// WHEN THE MAP IS ABSENT. `bpf_maps.session_map_fd` is `None` before the
     /// first successful reconcile and again between `Coordinator::stop_inner`
@@ -1670,6 +1672,15 @@ impl crate::afxdp::ha::SessionDomain {
         // Keep the immediate BPF publish aligned with the worker-side
         // ownership guard so XSK redirect state cannot get ahead of what
         // the local SessionTable would actually accept.
+        //
+        // #18550: skipping this publish when THIS node is forwarding-active
+        // for the owner RG (a late import drained after takeover) does NOT
+        // leave the session unsteered. The shared publish above is
+        // unconditional and the worker fan-out below always runs; each
+        // worker's `handle_upsert_synced` applies the same guard in
+        // `upsert_synced_with_origin` and, if it installed the entry,
+        // publishes the steering rows itself (`publish_worker_session_map_entry`).
+        // Pinned by `tests_late_synced_publish_18550.rs`.
         if synced_entry_allows_local_replace(
             ha_state.as_ref(),
             entry.metadata.owner_rg_id,

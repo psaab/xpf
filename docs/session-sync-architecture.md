@@ -222,6 +222,33 @@ not hold. Once the RG is no longer locally active, the next sync of the flow
 imports normally. An active node with no local session for the flow still
 reserves before it publishes.
 
+**Late imports on an active owner (#18550) — published by the worker, not
+skipped.** A new owner keeps draining the peer's in-flight backlog after it
+activates the RG, so imports arrive for an RG this node already forwards. For
+such an import the coordinator does NOT write USERSPACE_SESSIONS itself (the
+`synced_entry_allows_local_replace` gate in `upsert_synced_session`), and the
+activation republish (`handle_activated_rgs`) has already run. The session is
+still made visible:
+
+- the shared `synced`/`nat`/`forward_wire` publish of the forward entry and its
+  synthesized reverse is unconditional and synchronous, and the packet path
+  falls back to it on a worker-table miss (`lookup_session_across_scopes_*`);
+- the `UpsertSynced` fan-out always runs (a refused push is positional repair
+  debt replayed from the shared row), and `handle_upsert_synced` publishes the
+  entry's steering rows — its key plus, for a forward entry, the wire,
+  reverse-wire and reverse-canonical rows — once `upsert_synced_with_origin`
+  installs it.
+
+The only window is the worker's queue drain, during which the steering row is
+absent but the shared row is present; a shim miss for transit traffic or for a
+reply to an interface-SNAT address is XSK-redirected to the helper, never
+passed to the kernel. The deferral exists so a worker that still holds a
+newer LOCAL row (the promotion-vs-late-import race, where the shared map still
+shows the older peer row and the #9678 gate cannot see it) keeps that row and
+its rows alone: the worker refuses the import and writes nothing for the
+stale reply tuple. Pinned by `afxdp/tests_late_synced_publish_18550.rs`
+(v4 and v6; shared-local and worker-local shapes).
+
 **#7209 — an admitted import with no kernel session map is now visible.** After
 the reservation, `upsert_synced_session` publishes the row to the kernel session
 map. That publish sat behind one conjunction:
@@ -230,8 +257,12 @@ map. That publish sat behind one conjunction:
 if synced_entry_allows_local_replace(..) && let Some(fd) = ..session_map_fd
 ```
 
-whose two operands mean opposite things. The FIRST failing is correct: the peer
-owns the redundancy group, so this node must not take the redirect. The SECOND
+whose two operands mean opposite things. The FIRST failing is correct: THIS node
+is forwarding-active for the entry's owner RG, so the coordinator leaves the
+steering publish to the workers, which publish only after their own
+local-replace guard admits the entry (see "Late imports on an active owner"
+below; this sentence previously read "the peer owns the redundancy group", the
+inverse of what `synced_entry_allows_local_replace` tests). The SECOND
 failing is a gap — the entry is recorded in the shared `synced` map and answered
 to Go as installed, while no kernel row exists, and `SyncedImportOutcome::Applied`
 is returned with no refusal reason. `bpf_maps.session_map_fd` is `None` before
