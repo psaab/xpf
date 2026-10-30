@@ -319,6 +319,60 @@ fn transit_source_class_disposition(disposition: ForwardingDisposition) -> bool 
     )
 }
 
+/// #18533 round 2: the routing domain both transit address-class gates judge
+/// in, or `None` for a disposition neither gate applies to. Split out so a
+/// caller running BOTH gates (the flow-cache hit) resolves the domain once —
+/// `effective_routing_domain_for_flow` falls back to `ingress_routing_domain`
+/// (two map probes) for every domain-0 flow.
+#[inline]
+pub(in crate::afxdp) fn transit_class_routing_domain(
+    forwarding: &ForwardingState,
+    disposition: ForwardingDisposition,
+    flow_routing_domain: u32,
+    meta: ForwardPacketMeta,
+    fabric_ingress_zone: Option<u32>,
+) -> Option<u32> {
+    transit_source_class_disposition(disposition).then(|| {
+        crate::afxdp::forwarding::effective_routing_domain_for_flow(
+            forwarding,
+            flow_routing_domain,
+            meta.ingress_ifindex as i32,
+            meta.ingress_vlan_id,
+            fabric_ingress_zone,
+        )
+    })
+}
+
+/// #18533 round 2: [`transit_source_class_drop`] with the domain from
+/// [`transit_class_routing_domain`].
+#[inline]
+pub(in crate::afxdp) fn transit_source_class_drop_in(
+    forwarding: &ForwardingState,
+    source: IpAddr,
+    transit_domain: Option<u32>,
+) -> bool {
+    transit_domain.is_some_and(|routing_domain| {
+        crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
+    })
+}
+
+/// #18533 round 2: [`transit_destination_class_drop`] with the domain from
+/// [`transit_class_routing_domain`].
+#[inline]
+pub(in crate::afxdp) fn transit_destination_class_drop_in(
+    forwarding: &ForwardingState,
+    destination: IpAddr,
+    translated_destination: Option<IpAddr>,
+    transit_domain: Option<u32>,
+) -> bool {
+    transit_domain.is_some_and(|routing_domain| {
+        crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
+            || translated_destination.is_some_and(|d| {
+                crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
+            })
+    })
+}
+
 #[inline]
 pub(in crate::afxdp) fn transit_source_class_drop(
     forwarding: &ForwardingState,
@@ -328,17 +382,17 @@ pub(in crate::afxdp) fn transit_source_class_drop(
     meta: ForwardPacketMeta,
     fabric_ingress_zone: Option<u32>,
 ) -> bool {
-    if !transit_source_class_disposition(disposition) {
-        return false;
-    }
-    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+    transit_source_class_drop_in(
         forwarding,
-        flow_routing_domain,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        fabric_ingress_zone,
-    );
-    crate::afxdp::frame::transit_src_is_martian(forwarding, source, routing_domain)
+        source,
+        transit_class_routing_domain(
+            forwarding,
+            disposition,
+            flow_routing_domain,
+            meta,
+            fabric_ingress_zone,
+        ),
+    )
 }
 
 #[inline]
@@ -351,20 +405,18 @@ pub(in crate::afxdp) fn transit_destination_class_drop(
     meta: ForwardPacketMeta,
     fabric_ingress_zone: Option<u32>,
 ) -> bool {
-    if !transit_source_class_disposition(disposition) {
-        return false;
-    }
-    let routing_domain = crate::afxdp::forwarding::effective_routing_domain_for_flow(
+    transit_destination_class_drop_in(
         forwarding,
-        flow_routing_domain,
-        meta.ingress_ifindex as i32,
-        meta.ingress_vlan_id,
-        fabric_ingress_zone,
-    );
-    crate::afxdp::frame::transit_dst_is_martian(forwarding, destination, routing_domain)
-        || translated_destination.is_some_and(|d| {
-            crate::afxdp::frame::transit_dst_is_martian(forwarding, d, routing_domain)
-        })
+        destination,
+        translated_destination,
+        transit_class_routing_domain(
+            forwarding,
+            disposition,
+            flow_routing_domain,
+            meta,
+            fabric_ingress_zone,
+        ),
+    )
 }
 
 #[inline]
@@ -1385,31 +1437,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // flow-cache entry, or reinject can resurrect the
                 // packet; tunnel-decapped inners are judged on their
                 // own (inner) frame and hop limit.
-                if !worker_ctx.forwarding.no_ipv6_reject_zero_hop_limit {
-                    let zero_hop_dst = flow.as_ref().map(|f| f.dst_ip).or_else(|| {
-                        crate::afxdp::frame::parse_packet_destination_from_frame(packet_frame, meta)
-                        });
-                    if let Some(dst) = zero_hop_dst {
-                        let dst_is_local = matches!(
-                            crate::afxdp::forwarding::lookup_forwarding_resolution(
-                                worker_ctx.forwarding,
-                                dst,
+                // #18533: the locality verdict is a full FIB walk, so it is
+                // passed as a closure that runs only for a hop-limit-0 IPv6
+                // packet with the knob unset (`zero_hop_limit_local_drop`
+                // checks those first). The #16841 form computed it eagerly
+                // here for every valid packet, IPv4 included.
+                if zero_hop_limit_local_drop(worker_ctx.forwarding, packet_frame, meta, || {
+                    flow.as_ref()
+                        .map(|f| f.dst_ip)
+                        .or_else(|| {
+                            crate::afxdp::frame::parse_packet_destination_from_frame(
+                                packet_frame,
+                                meta,
                             )
-                            .resolution
-                            .disposition,
-                            ForwardingDisposition::LocalDelivery
-                        );
-                        if zero_hop_limit_local_drop(
-                            worker_ctx.forwarding,
-                            packet_frame,
-                            meta,
-                            dst_is_local,
-                        ) {
-                            telemetry.counters.touched = true;
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                    }
+                        })
+                        .is_some_and(|dst| {
+                            matches!(
+                                crate::afxdp::forwarding::lookup_forwarding_resolution(
+                                    worker_ctx.forwarding,
+                                    dst,
+                                )
+                                .resolution
+                                .disposition,
+                                ForwardingDisposition::LocalDelivery
+                            )
+                        })
+                }) {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
                 }
                 // #7160 (#2387) stage 9b: stamp the flow's ROUTING DOMAIN.
                 // The validated peer zone is the only remote ingress identity;

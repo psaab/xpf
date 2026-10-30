@@ -508,6 +508,12 @@ CLUSTERS and current master continuously, independent of which PR
 is in flight. Both duties are mandatory — a campaign that only
 gates PRs discovers a dead `tcp`/`udp` cluster weeks later.
 
+**The row-by-row checklist is `docs/regression-test-matrix.md`** (tiers
+0–4: build, deploy identity, forwarding and performance, HA, soak). Each
+row names the defect it exists to catch. A merge-wave gate runs tiers 2–3
+of that matrix on `loss` and `tcp`. A row is dropped only after naming
+what else catches its defect.
+
 - **Continuous watch, all three clusters**: the smoke watch (above)
   covers `loss` every ~15 min. Add the same loop for `tcp` and
   `udp`: every ~30 min (offset so the three never collide),
@@ -832,6 +838,9 @@ For each PR an agent opens:
    issue is visible as such at termination — exhaustion alone never
    closes a PR; "superseded" requires naming the superseding PR.
 4. **Gate on forwarding + throughput (three clusters in parallel).**
+   The rows a PR must pass, by area, are in
+   `docs/regression-test-matrix.md` (tier 0 before any cluster time; HA
+   and session PRs add tier-3 H1–H7). The mechanics below still apply.
    Skipped only for parent-classified `docs/test-only` PRs (Step 3
    item 3). Otherwise: dataplane/forwarding/throughput PRs MUST gate
    on `loss`; every other gated PR uses the least-busy cluster `<C>`

@@ -681,6 +681,14 @@ mod tests_icmp_te;
 #[cfg(test)]
 #[path = "tests_icmp_zero_hop_15707.rs"]
 mod tests_icmp_zero_hop_15707;
+
+#[cfg(test)]
+#[path = "tests_neighbor_learn_fresh_18533.rs"]
+mod tests_neighbor_learn_fresh_18533;
+
+#[cfg(test)]
+#[path = "tests_hit_path_cost_18533.rs"]
+mod tests_hit_path_cost_18533;
 #[cfg(test)]
 #[path = "tests_named_pre_l3_10498.rs"]
 mod tests_named_pre_l3_10498;

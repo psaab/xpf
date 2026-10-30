@@ -167,7 +167,7 @@ deployed lab config is 200ms × 5 = 1s. Silent death with an established sync
 connection takes max(threshold, remaining sync-recency window) plus up to one
 heartbeat tick: about 0.5–2.1s at defaults, 1.0–2.2s in the lab,
 phase-dependent. A process crash that closes sync falls through at the raw
-heartbeat threshold. These are detection estimates, not end-to-end
+heartbeat threshold when the receiving standby is caught up; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus one heartbeat tick — about 3.1s at defaults, 3.2s in the lab, under the 5s cap (#18521). These are detection estimates, not end-to-end
 forwarding-restoration SLAs
 (`pkg/config/compiler_system.go:3132-3137`;
 `pkg/cluster/heartbeat.go:61-65,1916-1960`;

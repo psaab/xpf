@@ -221,8 +221,31 @@ func (s *SessionSync) notePeerBootIncarnation(inc bootIncarnation) (switched boo
 		return false
 	}
 	if s.peerBootIncarnation.known() {
-		// A genuinely new peer boot invalidates the old boot's apply ACK.
-		s.peerAppliedConfigGen.Store(0)
+		// A genuinely new peer boot invalidates the OLD boot's apply ACK —
+		// and only that one (#18521). This BulkStart is not ordered against
+		// the new boot's config-apply ACK: a restarted standby's cold-prime
+		// bulk can start seconds after it has already applied and ACKed the
+		// peer-connect config push (its helper was not ready), and with the
+		// config already in sync nothing pushes again. Zeroing an ACK the NEW
+		// boot delivered left the send debt standing and refused every
+		// manual failover onto it ("peer applied 0") until the next commit.
+		// The ACK is attributed to the boot that delivered it (the
+		// connection's #9818 capability identity, which precedes any ACK on
+		// the same ordered stream); an unattributed ACK keeps the fail-closed
+		// reset.
+		applied := s.peerAppliedConfigGen.Load()
+		if applied != 0 && s.peerAppliedConfigBoot.known() && s.peerAppliedConfigBoot == inc {
+			slog.Info("cluster sync: peer rebooted; keeping the config-apply ACK its new boot already delivered",
+				"applied_gen", applied, "peer_boot_incarnation", inc.String())
+		} else {
+			if applied != 0 {
+				slog.Info("cluster sync: peer rebooted; discarding its previous boot's config-apply ACK",
+					"applied_gen", applied, "acked_by_boot", s.peerAppliedConfigBoot.String(),
+					"peer_boot_incarnation", inc.String())
+			}
+			s.peerAppliedConfigGen.Store(0)
+			s.peerAppliedConfigBoot = bootIncarnation{}
+		}
 	}
 	s.peerBootIncarnation = inc
 	return true

@@ -797,7 +797,7 @@ pub(crate) fn run() -> Result<(), String> {
                     &session_listener,
                     crate::server::accept_loop::AcceptLoopSpec {
                         name: "session socket",
-                        poll: Duration::from_millis(10),
+                        poll: SESSION_SOCKET_IDLE_WAIT,
                         retry_unclassified: true,
                         peer_label: "session socket",
                     },
@@ -944,8 +944,16 @@ pub(crate) fn run() -> Result<(), String> {
 pub(crate) enum AcceptStep<T> {
     /// A connection to serve.
     Serve(T),
-    /// Nothing to serve yet, or a failure being retried: sleep this long and
-    /// accept again.
+    /// Nothing pending (`WouldBlock`): wait up to this long for a connection
+    /// to ARRIVE, then accept again. The loop waits on the listener's
+    /// readiness, not a fixed sleep (#18541): every Go session-socket request
+    /// is a fresh dial issued just after the previous response, i.e. just
+    /// after this loop went idle, so a fixed 10 ms sleep here was paid once
+    /// per request — 20 ms per bulk session (forward + reverse companion).
+    Idle(Duration),
+    /// A failure being retried: sleep this long and accept again. A real
+    /// sleep, never a readiness wait: under EMFILE the listener stays
+    /// readable, so waking on readiness would spin.
     Sleep(Duration),
     /// Stop accepting (control loop only).
     Fail(String),
@@ -1002,8 +1010,9 @@ impl AcceptBackoff {
 }
 
 /// The single decision both accept loops make on every `accept()` result.
-/// `idle` is the loop's poll interval for a non-blocking listener with nothing
-/// pending. `retry_unclassified` is true for the session loop, which retries
+/// `idle` is the longest the loop waits for a connection to arrive on a
+/// non-blocking listener with nothing pending before it re-checks `running`
+/// (#18541: an arrival ends the wait at once). `retry_unclassified` is true for the session loop, which retries
 /// every error, and false for the control loop, which fails on an error that is
 /// not a resource error. `now` is passed in so the episode logic is testable
 /// without sleeping.
@@ -1030,7 +1039,7 @@ pub(crate) fn accept_step<T>(
             }
         }
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => AcceptDecision {
-            step: AcceptStep::Sleep(idle),
+            step: AcceptStep::Idle(idle),
             log: None,
         },
         Err(err) if accept_error_is_transient(&err) || retry_unclassified => {
@@ -1070,6 +1079,11 @@ pub(crate) fn accept_step<T>(
         },
     }
 }
+
+/// The session socket loop's idle wait: how long it waits for a connection to
+/// arrive before re-checking `running`. An arriving connection ends the wait
+/// immediately (#18541), so this bounds shutdown latency, not request latency.
+pub(crate) const SESSION_SOCKET_IDLE_WAIT: Duration = Duration::from_millis(10);
 
 /// Derive the session socket path from the control socket path.
 /// `/run/xpf/userspace-dp.sock` -> `/run/xpf/userspace-dp-sessions.sock`

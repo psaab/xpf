@@ -191,9 +191,20 @@ pub(crate) struct SessionScope {
     pub discriminator: TunnelDiscriminator,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// #18520 test instrument: `SessionKey` hashes performed on this thread,
+    /// so a cell can count the per-packet key-index lookups a hit path pays.
+    /// Test builds only; the production `Hash` is unchanged.
+    pub(crate) static SESSION_KEY_HASHES_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 impl std::hash::Hash for SessionKey {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        #[cfg(test)]
+        SESSION_KEY_HASHES_FOR_TEST.with(|count| count.set(count.get() + 1));
         // Fixed image, no heap: [af, proto, src(1+16), dst(1+16),
         // sport LE, dport LE, routing_domain LE, disc_tag, disc_val LE]
         // = 2 + 17 + 17 + 2 + 2 + 4 + 1 + 4 = 49 bytes for both families

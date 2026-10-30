@@ -30,8 +30,7 @@ func (d *Daemon) installActiveSessionSyncZoneOwnership(ss *cluster.SessionSync) 
 	if cfg == nil {
 		return
 	}
-	ss.SetZoneOwnership(buildZoneRGMap(cfg, buildZoneIDs(cfg)), buildZoneFoldRGMap(cfg), buildIngressFoldFn(cfg))
-	ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
+	ss.InstallZoneOwnership(d.zoneOwnershipInstall(cfg, buildZoneRGMap(cfg, buildZoneIDs(cfg)), nil))
 }
 
 // seedActiveSessionSyncZoneOwnership initializes a constructor-local object
@@ -45,15 +44,12 @@ func (d *Daemon) seedActiveSessionSyncZoneOwnership(ss *cluster.SessionSync) {
 	if cfg == nil {
 		return
 	}
-	zoneRG := buildZoneRGMap(cfg, buildZoneIDs(cfg))
-	foldRG := buildZoneFoldRGMap(cfg)
-	ingressFold := buildIngressFoldFn(cfg)
+	own := d.zoneOwnershipInstall(cfg, buildZoneRGMap(cfg, buildZoneIDs(cfg)), nil)
 	currentGen, currentCfg := d.store.ActiveSnapshot()
 	if gen != currentGen || cfg != currentCfg || !d.store.ActiveApplied() {
 		return
 	}
-	ss.SetZoneOwnership(zoneRG, foldRG, ingressFold)
-	ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
+	ss.InstallZoneOwnership(own)
 }
 
 func receiverSessionTimeoutProfileFromConfig(cfg *config.Config) cluster.ReceiverSessionTimeoutProfile {
