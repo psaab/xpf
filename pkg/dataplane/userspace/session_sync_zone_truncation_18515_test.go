@@ -151,3 +151,23 @@ func TestAmbiguousSyncZoneWarnsOnce18515(t *testing.T) {
 		t.Fatalf("ambiguity warnings = %d over 3 calls, want exactly 1", warns)
 	}
 }
+
+var zoneSink18515 uint32
+
+// The 16172 allocation pin publishes no zones, so the resolver loop never
+// runs under it. With zones published, resolving a unique, an ambiguous
+// (already warned) and an unmatched value allocates nothing: this runs once
+// per synced session, twice per request, during a bulk.
+func TestSyncZoneResolutionAllocatesNothing18515(t *testing.T) {
+	lan, wan := config.StableZoneID("lan"), config.StableZoneID("wan")
+	m := goldenManager16172()
+	m.lastSnapshot.Zones = []ZoneSnapshot{{Name: "lan", ID: lan}, {Name: "wan", ID: wan}, {Name: "a", ID: 0x0001_0007}, {Name: "b", ID: 0x0002_0007}}
+	// The once-per-value warning is a one-time cost, not a per-call one.
+	m.ambiguousSyncZoneWarned = map[uint16]struct{}{7: {}}
+	for _, v := range []uint16{uint16(lan), 7, uint16(lan) ^ 1} {
+		allocs := testing.AllocsPerRun(200, func() { zoneSink18515, _ = m.resolveSessionZoneLocked(v) })
+		if allocs != 0 {
+			t.Fatalf("resolveSessionZoneLocked(%#x) allocates %.1f/op with zones published, want 0", v, allocs)
+		}
+	}
+}

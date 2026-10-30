@@ -515,7 +515,9 @@ pub(crate) fn build_synced_session_entry(
         // #919: prefer the wire IDs when populated; fall back to name
         // lookup for older peers that only sent strings. #18515: the Go
         // sender recovers the full u32 StableZoneID from the u16 session
-        // value; an ambiguous value arrives as 0 and resolves no zone.
+        // value. An ambiguous value arrives as an id with the same low 16
+        // bits that no published zone carries (Go `unattributedZoneID`), so
+        // it binds no local zone and is never attributed to another one.
         ingress_zone: if req.ingress_zone_id != 0 {
             req.ingress_zone_id
         } else {
@@ -538,7 +540,9 @@ pub(crate) fn build_synced_session_entry(
         // name only when the peer's (truncated) zone id matches exactly one
         // zone this node publishes. That is the origin's name unless the
         // origin's zone exists only on the sender and shares low 16 bits
-        // with a local zone (~1/65536 per pair). A renamed, unknown or ambiguous zone
+        // with a local zone (1/65536 per such pair; the odds that SOME pair
+        // in a configuration collides grow with the zone count, about 7% at
+        // 100 zones). A renamed, unknown or ambiguous zone
         // still arrives empty and stamps 0 = unknown, failing open to the
         // #10612 stateless arms on that leg.
         ingress_zone_check: if req.ingress_zone.is_empty() {

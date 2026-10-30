@@ -557,8 +557,11 @@ func (m *Manager) resolveSessionZoneLocked(zoneID uint16) (uint32, string) {
 //
 // The ambiguity check sees only this node's zones. A zone that exists only
 // on the sender (a node-scoped zone, or the config-sync window) and shares
-// low 16 bits with a local zone is attributed to that local zone (about
-// 1/65536 per such pair); the u16 wire cannot tell them apart.
+// low 16 bits with a local zone is attributed to that local zone, and to
+// that zone's owner RG (1/65536 per such pair; the odds that some pair in a
+// configuration collides grow with the zone count, about 7% at 100 zones);
+// the u16 wire cannot tell them apart. The unattributed ID is free only when
+// the request is built: a zone added later could take it (about 2^-32).
 func resolveTruncatedZone(zones []ZoneSnapshot, zoneID uint16) (id uint32, name string, ambiguous bool) {
 	if zoneID == 0 {
 		return 0, "", false

@@ -318,15 +318,17 @@ helper (`m.lastSnapshot.Zones`, the post-#3719-quarantine set;
 supplies both `ingress_zone_id`/`egress_zone_id` and the zone name. Two zones
 with different full IDs that share low 16 bits are ambiguous: the request
 carries an ID with the same low bits that no published zone has
-(`unattributedZoneID`), so every hit is judged foreign (denied, never merged
-into another zone). Zone 0 would not do: an arrival on an interface in no zone
+(`unattributedZoneID`), so it binds no local zone and is never merged into
+another zone. Zone 0 would not do: an arrival on an interface in no zone
 has arrival zone 0 and would be judged the session's owner. A one-shot warning
 names the value, because established flows in those zones will not survive a
 failover until one zone is renamed. A zone whose ID has low 16 bits 0 cannot be
 carried at all (0 is the session value's "no zone"). The match consults only
 the receiver's zones: a zone that exists only on the sender (node-scoped, or
 during config-sync skew) and shares low 16 bits with a local zone is attributed
-to that local zone (about 1/65536 per such pair). The residual — the u16 fields themselves — goes
+to that local zone and its owner RG (1/65536 per such pair; the odds that
+some pair in a configuration collides grow with the zone count, about 7% at
+100 zones). The residual — the u16 fields themselves — goes
 away only by widening the session value and the HA wire. Zero-extending the u16 instead — the pre-#18515
 behaviour — sent an ID no zone has, which the helper prefers over the name;
 every peer-synced session then judged every hit FOREIGN
