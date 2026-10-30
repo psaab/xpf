@@ -547,7 +547,13 @@ The rules now:
     workers too), and no CLEAR close is harvested for a flow that lives on.
     A promoted alias stays beside the canonical row (the shared store
     already treats that pair as one session under two keys); it books
-    nothing, so it never refuses the canonical row. Pinned by
+    nothing, so it never refuses the canonical row. The cost: while a
+    promoted alias is this node's ONLY copy of the flow (the alias arrived
+    first, or the canonical import was refused for another reason), the
+    flow's translation is unbooked here, so a new local flow to the same
+    server and port can be handed the same translated port and share the
+    reverse key (the #4388/#6600 collision). The window closes when the
+    canonical row lands and books it. Pinned by
     `canonical_import_supersedes_its_alias_18531` (both orders, v4/v6) and
     `alias_promoted_during_the_canonical_import_is_kept_18531`.
   - Gap: an identity translation (the original source already is the
