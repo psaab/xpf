@@ -69,12 +69,15 @@ type configApplyDebt16756 struct {
 }
 
 // supersedeSentConfigDebtByPeer retires this node's own outstanding send
-// debt once it has applied, or re-acknowledged as already applied, a config
-// the PEER pushed (#18521 review round 2). The receiver only accepts a peer
-// push when it does not believe it is the RG0 primary, so this is the
-// moment config authority is known to be the peer's: both nodes now hold the
-// peer's config by construction, and what this node sent earlier is no
-// longer anyone's config. Without this, a node that held an uncredited ACK
+// debt once it has APPLIED a config the PEER pushed (#18521 review round 2).
+// The apply branch is reached only when the daemon's handler accepted the
+// push, and it refuses one while this node believes it is the RG0 primary
+// (errConfigSyncRejectedPrimary), so this is the moment config authority is
+// known to be the peer's: both nodes now hold the peer's config by
+// construction, and what this node sent earlier is no longer anyone's config.
+// The duplicate re-ACK branch does NOT call this (review round 3): it runs no
+// handler, so it never passes that RG0 check, and a duplicate of a generation
+// applied earlier says nothing about this node's current config. Without this, a node that held an uncredited ACK
 // debt and lost RG0 by a path its own gate does not guard (a monitor-driven
 // weight change) kept refusing every later handover of a data RG, and the
 // overdue-ACK re-push — which only the RG0 authority runs — could not clear

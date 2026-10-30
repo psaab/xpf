@@ -774,7 +774,11 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 					// config epoch moves.
 					slog.Info("cluster sync: re-acknowledging an already-applied config generation",
 						"gen", item.gen, "size", len(item.text))
-					s.supersedeSentConfigDebtByPeer(item.gen)
+					// #18521 review round 3: NOT superseding this node's own
+					// send debt here. Only the apply branch is reached through
+					// the daemon's RG0-authority refusal, and a duplicate says
+					// nothing about this node's CURRENT config, which its own
+					// commit may have replaced since it applied this one.
 					go s.sendConfigApplyAck(item.conn, item.gen)
 					continue
 				}

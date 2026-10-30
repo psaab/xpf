@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -418,15 +419,16 @@ func TestTransferHoldBoundToRequestConnection18525(t *testing.T) {
 // The binding above is only as good as the removal generation, and the
 // generation is only as good as its coverage of every slot write. Rather than
 // enumerate today's removal sites (which is how a registry misses the next
-// one), this pins the primitive: no production file assigns s.conn0 / s.conn1
-// anywhere except setConnSlotLocked. RED on any direct slot write, e.g. the
-// pre-fold `s.conn0 = nil` in handleDisconnect.
+// one), this pins the primitive: no production file assigns s.conn0 / s.conn1,
+// or takes their address, anywhere except setConnSlotLocked. RED on any direct
+// slot write, e.g. the pre-fold `s.conn0 = nil` in handleDisconnect, and on a
+// `&s.conn1` alias outside the setter (review of #18525 round 3).
 func TestConnSlotWritesGoThroughTheSetter18525(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	scanned, setterWrites := 0, 0
+	scanned, setterWrites, setterAddrs := 0, 0, 0
 	var offenders []string
 	for _, file := range files {
 		if strings.HasSuffix(file, "_test.go") {
@@ -444,6 +446,19 @@ func TestConnSlotWritesGoThroughTheSetter18525(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				// Review of #18525 round 3: a pointer to a slot taken outside
+				// the setter (`p := &s.conn0; *p = c`) is a write the
+				// assignment scan below cannot see.
+				if u, ok := n.(*ast.UnaryExpr); ok && u.Op == token.AND {
+					if sel, ok := u.X.(*ast.SelectorExpr); ok && (sel.Sel.Name == "conn0" || sel.Sel.Name == "conn1") {
+						if fd.Name.Name == "setConnSlotLocked" {
+							setterAddrs++
+						} else {
+							offenders = append(offenders, fmt.Sprintf("%s (%s: address of a slot)", fset.Position(u.Pos()), fd.Name.Name))
+						}
+					}
+					return true
+				}
 				as, ok := n.(*ast.AssignStmt)
 				if !ok {
 					return true
@@ -468,12 +483,135 @@ func TestConnSlotWritesGoThroughTheSetter18525(t *testing.T) {
 			})
 		}
 	}
-	if scanned < 50 || setterWrites == 0 {
-		t.Fatalf("scan is broken: %d production files, %d setter writes", scanned, setterWrites)
+	if scanned < 50 || setterWrites == 0 || setterAddrs == 0 {
+		t.Fatalf("scan is broken: %d production files, %d setter writes, %d setter slot addresses",
+			scanned, setterWrites, setterAddrs)
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("session-sync slots written outside setConnSlotLocked, so a removal there would "+
 			"not advance the transfer-channel generation the owner hold is bound to (#18521):\n%s",
 			strings.Join(offenders, "\n"))
+	}
+}
+
+// Review of #18525 round 3 (finding 4, HA seat): the hold's binding can break
+// while the owner's demotion is still actuating (a write timeout or a
+// second-fabric flap removes a connection). The requester is legitimately
+// still in its pre-request hold, so the 2s rescue re-promotes the owner — and
+// the actuation barrier, which resolves on the queued demotion edge, then let
+// "applied" go out anyway. The requester promoted beside the re-promoted
+// owner until its commit was refused. The applied-ack is now sent only while
+// the owner is still parked for that request. Driven through the real
+// handleRemoteFailover against a real Manager. RED (applied) without the
+// check.
+func TestAppliedAckRefusedOnceTheHoldWasRescued18525(t *testing.T) {
+	rows := []struct {
+		name         string
+		breakBinding bool
+		newerRequest bool
+		want         uint8
+	}{
+		{"binding intact through the actuation", false, false, failoverAckApplied},
+		{"binding broke and the rescue re-promoted the owner", true, false, failoverAckFailed},
+		// The hold still stands, but for a NEWER request: this one is stale.
+		{"a newer request re-armed the lease", false, true, failoverAckFailed},
+	}
+	for _, batch := range []bool{false, true} {
+		for _, row := range rows {
+			name := "single/" + row.name
+			if batch {
+				name = "batch/" + row.name
+			}
+			t.Run(name, func(t *testing.T) {
+				appliedAckCase18525(t, batch, row.breakBinding, row.newerRequest, row.want)
+			})
+		}
+	}
+}
+
+func appliedAckCase18525(t *testing.T, batch, breakBinding, newerRequest bool, want uint8) {
+	owner := NewManager(1, 1)
+	owner.UpdateConfig(makeConfig(makeRG(2, false, map[int]int{0: 100, 1: 200})))
+	owner.SetFakePeerSyncSourceForTesting(true, 0, true, true)
+	owner.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1, Groups: []HeartbeatGroup{
+		{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondary)},
+	}})
+	owner.mu.Lock()
+	owner.groups[2].Ready = true
+	owner.groups[2].ReadySince = time.Now().Add(-time.Hour)
+	owner.groups[2].ReadinessReasons = nil
+	owner.mu.Unlock()
+	owner.runElection()
+	if !owner.IsLocalPrimary(2) {
+		t.Fatal("fixture: owner must start primary")
+	}
+
+	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	cc := &captureConn{}
+	ss.mu.Lock()
+	ss.conn0 = cc
+	ss.mu.Unlock()
+	demote := func(rgs []int, reqID uint64) error {
+		for _, rg := range rgs {
+			if _, err := owner.ManualFailover(rg); err != nil {
+				return err
+			}
+		}
+		owner.ArmRemoteTransferOutLease(rgs, reqID)
+		return nil
+	}
+	actuate := func() error {
+		if breakBinding {
+			// The slow actuation: a connection goes away and more than 2s
+			// pass while the requester still advertises its hold.
+			owner.SetFakePeerSyncSourceForTesting(true, 0, true, true)
+			ageOwnerHold18521(owner, 3*time.Second)
+			owner.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1, Groups: []HeartbeatGroup{
+				{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondaryHold)},
+			}})
+			if !owner.IsLocalPrimary(2) {
+				t.Fatal("fixture: the rescue must have re-promoted the owner")
+			}
+		}
+		if newerRequest {
+			owner.ArmRemoteTransferOutLease([]int{2}, 18526)
+		}
+		return nil // the demotion edge actuated
+	}
+	ss.OnRemoteFailover = func(rg int, reqID uint64) error { return demote([]int{rg}, reqID) }
+	ss.OnRemoteFailoverBatch = demote
+	ss.WaitFailoverApplied = func(int, uint64) error { return actuate() }
+	ss.WaitFailoverAppliedBatch = func([]int, uint64) error { return actuate() }
+	ss.OnRemoteFailoverAbort = owner.AbortRemoteTransferOut
+	ss.OnRemoteFailoverAbortBatch = owner.AbortRemoteTransferOutBatch
+	ss.TransferOutStillHeld = owner.RemoteTransferOutStillHeld
+
+	var status []uint8
+	if batch {
+		ss.handleRemoteFailoverBatch(cc, []int{2}, 18525)
+		for _, f := range cc.frames() {
+			if f.msgType != syncMsgFailoverBatchAck {
+				continue
+			}
+			if _, st, reqID, _, err := decodeFailoverBatchAckPayload(f.payload); err == nil && reqID == 18525 {
+				status = append(status, st)
+			}
+		}
+	} else {
+		ss.handleRemoteFailover(cc, 2, 18525)
+		for _, f := range cc.frames() {
+			if f.msgType == syncMsgFailoverAck && len(f.payload) >= 10 &&
+				binary.LittleEndian.Uint64(f.payload[2:10]) == 18525 {
+				status = append(status, f.payload[1])
+			}
+		}
+	}
+	if len(status) != 1 || status[0] != want {
+		t.Fatalf("failover ack statuses %v, want [%d]: an \"applied\" for a transfer whose owner "+
+			"is primary again (or that a newer request replaced) promotes the requester beside it "+
+			"(review of #18525 round 3)", status, want)
+	}
+	if breakBinding && !owner.IsLocalPrimary(2) {
+		t.Fatal("the refused transfer must leave the rescued owner primary")
 	}
 }

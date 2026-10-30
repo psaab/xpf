@@ -515,7 +515,34 @@ func (s *SessionSync) handleRemoteFailover(conn net.Conn, rgID int, reqID uint64
 			return
 		}
 	}
+	if !s.transferOutStillHeld([]int{rgID}, reqID) {
+		s.sendFailoverAckFrame(conn, syncMsgFailoverAck, []int{rgID}, reqID, failoverAckFailed, errTransferHoldReleased.Error())
+		return
+	}
 	s.sendFailoverAckFrame(conn, syncMsgFailoverAck, []int{rgID}, reqID, failoverAckApplied, "")
+}
+
+// errTransferHoldReleased is the failed-ack detail for a transfer whose owner
+// hold was released before the applied-ack went out (#18521 review round 3).
+var errTransferHoldReleased = errors.New("owner hold released before the transfer was acknowledged (the owner may be primary again)")
+
+// transferOutStillHeld runs the TransferOutStillHeld check, logging a refusal.
+// The requester treats the failed ack like any other: it restores its own
+// hold and does not promote, so the owner the rescue re-promoted stays the
+// only primary. The lease, if still armed, is released (reqID-bound).
+func (s *SessionSync) transferOutStillHeld(rgIDs []int, reqID uint64) bool {
+	if s.TransferOutStillHeld == nil || s.TransferOutStillHeld(rgIDs, reqID) {
+		return true
+	}
+	slog.Warn("cluster sync: owner hold for a remote transfer was released before its applied-ack; "+
+		"acknowledging failed so the requester does not promote beside a re-promoted owner (#18521)",
+		"rgs", rgIDs, "req_id", reqID)
+	if len(rgIDs) == 1 && s.OnRemoteFailoverAbort != nil {
+		_ = s.OnRemoteFailoverAbort(rgIDs[0], reqID)
+	} else if len(rgIDs) > 1 && s.OnRemoteFailoverAbortBatch != nil {
+		_ = s.OnRemoteFailoverAbortBatch(rgIDs, reqID)
+	}
+	return false
 }
 func (s *SessionSync) handleRemoteFailoverBatch(conn net.Conn, rgIDs []int, reqID uint64) {
 	if s.OnRemoteFailoverBatch == nil {
@@ -544,6 +571,10 @@ func (s *SessionSync) handleRemoteFailoverBatch(conn net.Conn, rgIDs []int, reqI
 			s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, err.Error())
 			return
 		}
+	}
+	if !s.transferOutStillHeld(rgIDs, reqID) {
+		s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, errTransferHoldReleased.Error())
+		return
 	}
 	s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckApplied, "")
 }

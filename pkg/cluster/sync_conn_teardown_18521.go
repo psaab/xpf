@@ -81,6 +81,10 @@ const syncConnWatchInterval = time.Second
 // receive bytes remain readable.
 const linuxTCPStateClose = 7
 
+// linuxTCPStateCloseWait is TCP_CLOSE_WAIT: the peer's FIN has arrived, so it
+// will send nothing more, and the queued bytes end in EOF.
+const linuxTCPStateCloseWait = 8
+
 // syncConnDiag is the per-connection teardown diagnostics carried on every
 // *authConn (#18521). The receive-side counters and the in-flight handler are
 // written only by the connection's single receiveLoop goroutine and read by the
@@ -113,14 +117,17 @@ type syncConnDiag struct {
 	slowInFlightLg slowLogLimiter
 	slowDoneLg     slowLogLimiter
 
-	// peerReset is set by the watchdog once the kernel reports the peer
-	// reset this connection while the receive loop still had frames to
-	// handle (#18521 review round 2). From then on the loop drains what the
-	// peer already delivered and owns the teardown: writers skip the
-	// connection (getActiveConn), a writer's failed write does not tear it
-	// down (disconnectConn), the dial side may redial its slot
-	// (fabricSlotNeedsDialLocked), and its frames earn no peer liveness.
-	peerReset atomic.Bool
+	// peerClosed is set by the watchdog once the kernel reports the peer
+	// closed this connection — an RST (#18521 review round 2) or a FIN
+	// (round 3) — while the receive loop still had frames to handle. From
+	// then on the loop drains what the peer already delivered and owns the
+	// teardown: writers skip the connection (getActiveConn), a writer's
+	// failed write does not tear it down (disconnectConn), the dial side may
+	// redial its slot (fabricSlotNeedsDialLocked; the redial retires it,
+	// retirePeerClosedSlot), and its frames earn no peer liveness. Frames
+	// read between the close and the next watchdog tick still do — at most
+	// one syncConnWatchInterval of them.
+	peerClosed atomic.Bool
 	// writesDeferred counts writer teardowns ignored while draining.
 	writesDeferred atomic.Uint64
 
@@ -202,8 +209,8 @@ func (d *syncConnDiag) summaryAttrs() []any {
 		"handler_max_type", syncMsgName(uint8(d.maxHandlerType.Load())),
 		"slow_calls", d.slowCalls.Load(),
 	)
-	if d.peerReset.Load() {
-		attrs = append(attrs, "drained_after_peer_reset", true, "writes_deferred", d.writesDeferred.Load())
+	if d.peerClosed.Load() {
+		attrs = append(attrs, "drained_after_peer_close", true, "writes_deferred", d.writesDeferred.Load())
 	}
 	return attrs
 }
@@ -297,7 +304,7 @@ func disconnectAttrs(conn net.Conn) []any {
 // reader owns the teardown (disconnectConnNow), and writers no longer select
 // it (getActiveConn).
 func (s *SessionSync) disconnectConn(conn net.Conn, reason string, err error) {
-	if d := syncConnDiagFor(conn); d != nil && d.peerReset.Load() {
+	if d := syncConnDiagFor(conn); d != nil && d.peerClosed.Load() {
 		d.writesDeferred.Add(1)
 		slog.Debug("cluster sync: write failed on a connection the peer reset; its receive loop "+
 			"is draining what the peer delivered and owns the teardown",
@@ -315,10 +322,64 @@ func (s *SessionSync) disconnectConnNow(conn net.Conn, reason string, err error)
 	s.handleDisconnect(conn)
 }
 
-// connPeerReset reports whether the watchdog marked conn as reset by the peer.
-func connPeerReset(conn net.Conn) bool {
+// retirePeerClosedSlot runs before installConn takes its locks (#18521 review
+// round 3). When the slot about to be filled holds a connection the peer
+// closed that is still draining, it is retired through handleDisconnect — the
+// path the watchdog's teardown took before the drain existed — so the install
+// lands in an EMPTY slot. A SUPERSESSION of a current-incarnation connection is
+// installConn's evidence of a new peer process: it advances the incarnation,
+// runs the #17097 retirement reset and evicts the same-process connection in
+// the other slot. The peer closing its own connection is not that evidence,
+// and on a dual-fabric pair the eviction took down the healthy fabric-1
+// connection every writer had just moved to. A genuine restart behind the
+// redial is still caught by its raised boot epoch and the #9818 identity
+// check. A single-fabric retirement is a full disconnect, so its
+// OnPeerDisconnected precedes the redial's OnPeerConnected — dispatchPeerEvent
+// keeps that order.
+func (s *SessionSync) retirePeerClosedSlot(fabricIdx int, incoming net.Conn) {
+	s.mu.Lock()
+	old := s.conn0
+	if fabricIdx == 1 {
+		old = s.conn1
+	}
+	s.mu.Unlock()
+	if old == nil || old == incoming || !connPeerClosed(old) {
+		return
+	}
+	s.disconnectConnNow(old, "superseded by a redial after the peer closed it", nil)
+}
+
+// dispatchPeerEvent runs a peer connect/disconnect callback on its own
+// goroutine, after every callback dispatched before it has returned (#18521
+// review round 3). Separate goroutines alone do not keep their order: the Go
+// scheduler runs the most recently spawned goroutine first, so a redial that
+// follows a full disconnect within microseconds could run OnPeerConnected
+// before OnPeerDisconnected and leave the daemon believing the peer is gone
+// while it is connected. Not tracked by s.wg, like the bare dispatch it
+// replaces.
+func (s *SessionSync) dispatchPeerEvent(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.peerEventMu.Lock()
+	prev := s.peerEventTail
+	done := make(chan struct{})
+	s.peerEventTail = done
+	s.peerEventMu.Unlock()
+	go func() {
+		defer close(done)
+		if prev != nil {
+			<-prev
+		}
+		fn()
+	}()
+}
+
+// connPeerClosed reports whether the watchdog marked conn as closed by the
+// peer (an RST, or a FIN, observed while its receive loop was behind).
+func connPeerClosed(conn net.Conn) bool {
 	d := syncConnDiagFor(conn)
-	return d != nil && d.peerReset.Load()
+	return d != nil && d.peerClosed.Load()
 }
 
 // fabricSlotNeedsDialLocked reports whether fabricConnectLoop should dial
@@ -332,7 +393,7 @@ func (s *SessionSync) fabricSlotNeedsDialLocked(fabricIdx int) bool {
 	if fabricIdx == 1 {
 		c = s.conn1
 	}
-	return c == nil || connPeerReset(c)
+	return c == nil || connPeerClosed(c)
 }
 
 // writableConnLocked is the connection writers use: the preferred active
@@ -341,11 +402,11 @@ func (s *SessionSync) fabricSlotNeedsDialLocked(fabricIdx int) bool {
 // using activeConnLocked, which is unchanged. Caller holds s.mu.
 func (s *SessionSync) writableConnLocked() net.Conn {
 	c := s.activeConnLocked()
-	if c == nil || !connPeerReset(c) {
+	if c == nil || !connPeerClosed(c) {
 		return c
 	}
 	for _, alt := range []net.Conn{s.conn0, s.conn1} {
-		if alt != nil && alt != c && !connPeerReset(alt) {
+		if alt != nil && alt != c && !connPeerClosed(alt) {
 			return alt
 		}
 	}
@@ -392,11 +453,21 @@ func abortSyncConn(conn net.Conn) {
 }
 
 // syncStopFlushTimeout bounds Stop's graceful flush of each connection. Half
-// the peer's write deadline: well inside systemd's TimeoutStopSec=20 and
-// Stop's own 5s goroutine wait, and short enough that the peer's writer,
-// which this stopping node no longer reads for, does not hit its own write
-// deadline and reset the connection under the flush.
+// the peer's write deadline: short enough that the peer's writer, which this
+// stopping node no longer reads for, does not hit its own write deadline and
+// reset the connection under the flush, and well inside systemd's
+// TimeoutStopSec=20 (Stop is at most this flush plus its own 5s goroutine
+// wait). It does NOT cover a peer that is reading below line rate — the
+// #18521 slow-install state: at ~50 session installs/s the peer's window opens
+// by about 50 frames in this second, so up to the rest of the send queue
+// (~520 KB, ~2,000 session frames measured on loopback) is still discarded by
+// the abort (review of #18525 round 3). The receive half of that state — what
+// the peer already holds — is kept by its drain.
 const syncStopFlushTimeout = syncWriteDeadline / 2
+
+// The flush must stay below the peer's write deadline (above). Fails to
+// compile otherwise: the constant would overflow uint64.
+const _ = uint64(syncWriteDeadline - syncStopFlushTimeout - 1)
 
 func (s *SessionSync) stopFlushTimeout() time.Duration {
 	if s != nil && s.testStopFlushTimeout > 0 {
@@ -428,7 +499,7 @@ func tcpConnSendQueue(tc *net.TCPConn) (outq int, ok bool) {
 func beginStopFlushLocked(conn net.Conn) bool {
 	d := syncConnDiagFor(conn)
 	d.noteDrop("session sync stopping", nil)
-	if d == nil || syncTCPConn(conn) == nil || d.peerReset.Load() {
+	if d == nil || syncTCPConn(conn) == nil || d.peerClosed.Load() {
 		abortSyncConn(conn)
 		return false
 	}
@@ -477,7 +548,7 @@ func (s *SessionSync) flushOnStop(conns []net.Conn) {
 			}
 			abortSyncConn(conn)
 			slog.Warn("cluster sync: stop could not flush the session-sync connection in time; "+
-				"the peer was not taking bytes, aborting (it keeps what it already received)",
+				"the peer was not taking bytes at line rate, aborting (it keeps what it already received)",
 				"unsent_bytes", outq, "flush_timeout", timeout.String(),
 				"remote", connRemoteAddrString(conn))
 		}(conn)
@@ -554,17 +625,20 @@ func (s *SessionSync) stuckHandlerThreshold() time.Duration {
 //     threshold while it is still running (the loop's own report only fires
 //     when the call returns, which a stuck call never does), rate-limited per
 //     connection with the completion reports (noteSlowHandler);
-//   - notices the kernel's report that the peer reset the connection while
-//     this loop is behind (unread bytes queued, or a handler in flight). If
-//     the loop is still making progress, the connection is marked peerReset
-//     and the loop drains what the peer delivered (see syncConnDiag.peerReset
-//     for what the mark changes); it ends at the kernel's ECONNRESET once the
-//     queue is empty, or earlier if a redial supersedes it. If the loop makes
-//     NO progress — one handler call running for stuckHandlerThreshold — the
-//     connection is torn down now, as before: the dial side, the only side
-//     that redials, would otherwise keep the slot for as long as the stuck
-//     call lasts. A loop outside a handler is reading, and reaches the
-//     kernel's ECONNRESET by itself once the queue is empty.
+//   - notices the kernel's report that the peer closed the connection — an
+//     RST (TCP_CLOSE) or a FIN (TCP_CLOSE_WAIT) — while this loop is behind
+//     (unread bytes queued, or a handler in flight). If the loop is still
+//     making progress, the connection is marked peerClosed and the loop
+//     drains what the peer delivered (see syncConnDiag.peerClosed for what
+//     the mark changes); it ends at the kernel's ECONNRESET or EOF once the
+//     queue is empty, or earlier if a redial retires it. If the peer RESET
+//     the connection and the loop makes NO progress — one handler call
+//     running for stuckHandlerThreshold — the connection is torn down now, as
+//     before: the dial side, the only side that redials, would otherwise keep
+//     the slot for as long as the stuck call lasts. A FIN never tears down
+//     (the peer closed gracefully; the mark already makes the slot
+//     redialable). A loop outside a handler is reading, and reaches the end
+//     of the queue by itself.
 func (s *SessionSync) watchConn(ctx context.Context, conn net.Conn, d *syncConnDiag, tc *net.TCPConn, done <-chan struct{}) {
 	threshold := s.slowHandlerThreshold()
 	stuckAfter := s.stuckHandlerThreshold()
@@ -577,6 +651,9 @@ func (s *SessionSync) watchConn(ctx context.Context, conn net.Conn, d *syncConnD
 		case <-done:
 			return
 		case <-ticker.C:
+		}
+		if hook := s.testOnWatchTick; hook != nil {
+			hook()
 		}
 		inHandler := false
 		var blocked time.Duration
@@ -596,10 +673,11 @@ func (s *SessionSync) watchConn(ctx context.Context, conn net.Conn, d *syncConnD
 		if !ok {
 			return
 		}
-		if state != linuxTCPStateClose || (unread == 0 && !inHandler) {
+		closed := state == linuxTCPStateClose || state == linuxTCPStateCloseWait
+		if !closed || (unread == 0 && !inHandler) {
 			continue
 		}
-		if d == nil || (inHandler && blocked >= stuckAfter) {
+		if state == linuxTCPStateClose && (d == nil || (inHandler && blocked >= stuckAfter)) {
 			slog.Warn("cluster sync: peer reset the session-sync connection while the receive loop "+
 				"was behind and making no progress; tearing it down now (#18521)",
 				"unread_bytes", unread, "in_handler", inHandler,
@@ -608,11 +686,18 @@ func (s *SessionSync) watchConn(ctx context.Context, conn net.Conn, d *syncConnD
 			s.disconnectConnNow(conn, "peer reset while receive loop made no progress", nil)
 			return
 		}
-		if d.peerReset.CompareAndSwap(false, true) {
-			slog.Info("cluster sync: peer reset the session-sync connection; the receive loop is "+
-				"still making progress, so it drains what the peer already delivered (the slot is "+
-				"redialable and writers skip it meanwhile) (#18521)",
-				"unread_bytes", unread, "in_handler", inHandler,
+		if d == nil {
+			continue
+		}
+		if d.peerClosed.CompareAndSwap(false, true) {
+			how := "reset"
+			if state == linuxTCPStateCloseWait {
+				how = "fin"
+			}
+			slog.Info("cluster sync: peer closed the session-sync connection; the receive loop "+
+				"drains what the peer already delivered (the slot is redialable, writers skip it "+
+				"and its frames earn no peer liveness meanwhile) (#18521)",
+				"peer_close", how, "unread_bytes", unread, "in_handler", inHandler,
 				"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
 		}
 	}

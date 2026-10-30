@@ -194,7 +194,7 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 			// about the peer being alive NOW, and counting them would hold
 			// off the heartbeat-timeout peer-loss decision for a peer that
 			// stopped.
-			if diag == nil || !diag.peerReset.Load() {
+			if diag == nil || !diag.peerClosed.Load() {
 				s.notePeerLiveness(&missedHeartbeats)
 			}
 			nextReadDeadline = time.Now().Add(readDeadline)

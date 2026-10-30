@@ -181,6 +181,14 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			// still mid-commit has already promoted itself (it advertises
 			// primary, not hold or weight 0), so that rescue does not fire
 			// against it, and its commit on the new connection still lands.
+			// The rescue CAN fire while the requester still advertises its
+			// pre-request hold because it is waiting for our applied-ACK; the
+			// ACK is then refused (RemoteTransferOutStillHeld, review round
+			// 3), so the requester never promotes beside us. What remains is
+			// the ACK's own flight: a binding that breaks after "applied" is
+			// sent, before the requester has promoted, lets the rescue run
+			// while the requester promotes, until its commit is refused
+			// ("still primary locally") and it aborts.
 			return electNoChange, ""
 		} else {
 			peerResigned := peerGroup != nil && peerGroup.Weight <= 0

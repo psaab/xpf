@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"encoding/binary"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -353,5 +354,57 @@ func TestBulkRerequestWaitFloors18525(t *testing.T) {
 				t.Fatalf("scheduled waits %v, want [%v]", waits, row.want)
 			}
 		})
+	}
+}
+
+// Review of #18525 round 3 (finding 9, wire seat): a bulk withheld for
+// transient install failures WHILE an earlier bulk's re-request was in flight
+// was requested on the earlier bulk's 1s schedule — skipping its 10s floor —
+// and the request's log line named the earlier cause. The in-flight request
+// now decides on the newest withheld bulk's own record. Runs the production
+// schedule scaled (1s -> 10ms, so the transient floor is 100ms); the sent
+// hook's wait is a lower bound the code enforces, so load can only lengthen
+// it. RED with the first bulk's schedule and reason.
+func TestRerequestUsesTheNewestWithheldBulksSchedule18525(t *testing.T) {
+	rx := rerequestReceiver18521(t)
+	rx.testBulkRerequestBackoff = 0
+	rx.testBulkRerequestUnit = 10 * time.Millisecond
+	gate := make(chan struct{})
+	rx.testBulkRerequestGate = gate
+	type sent struct {
+		reason string
+		waited time.Duration
+	}
+	var mu sync.Mutex
+	var sends []sent
+	rx.testOnBulkRerequestSent = func(reason string, waited time.Duration) {
+		mu.Lock()
+		sends = append(sends, sent{reason, waited})
+		mu.Unlock()
+	}
+	// Bulk 1: reconcile skipped (zone map moved) — the 1s schedule.
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+	// Bulk 2, while bulk 1's request waits: transient install failures.
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(2, nil))
+	rx.bulkMu.Lock()
+	rx.bulkInstallFailedV4[staleUnmapped9655] = struct{}{}
+	rx.bulkMu.Unlock()
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(2, nil))
+	close(gate)
+	if n := drainRerequests18521(t, rx); n != 1 {
+		t.Fatalf("queued %d requests for two overlapping withheld bulks, want 1", n)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sends) != 1 {
+		t.Fatalf("sent hook saw %d requests", len(sends))
+	}
+	floor := bulkRerequestTransientFloor / time.Second * rx.testBulkRerequestUnit
+	if sends[0].reason != "transient helper install failures" || sends[0].waited < floor {
+		t.Fatalf("the request for the transient-withheld bulk went out %v after it (floor %v) "+
+			"naming %q: it ran on the earlier bulk's schedule (review of #18525 round 3)",
+			sends[0].waited, floor, sends[0].reason)
 	}
 }

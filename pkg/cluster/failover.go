@@ -1012,6 +1012,38 @@ func (m *Manager) ArmRemoteTransferOutLease(rgIDs []int, reqID uint64) {
 	}
 }
 
+// RemoteTransferOutStillHeld reports whether every RG in rgIDs is still parked
+// for the peer's request reqID: the remote transfer-out lease is armed for
+// reqID and the manual hold is still set, so the RG is not primary (#18521
+// review round 3). The applied-ack is sent only while this holds
+// (SessionSync.TransferOutStillHeld). It closes the window where the hold's
+// connection binding broke during a slow demotion actuation, the 2s rescue
+// re-promoted this owner, and the actuation barrier — which resolves on the
+// queued demotion edge regardless of the Manager's later state — let
+// "applied" go out anyway, promoting the requester beside it. What remains
+// is the ack's own flight: a binding that breaks after the ack is sent, while
+// the requester has not yet promoted and still advertises its hold, can let
+// the rescue re-promote this owner until the requester's commit is refused
+// (FinalizePeerTransferOut) and it aborts.
+func (m *Manager) RemoteTransferOutStillHeld(rgIDs []int, reqID uint64) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if len(rgIDs) == 0 {
+		return false
+	}
+	// The hold is the whole test of "not primary": ManualFailover elects the
+	// RG out of primary in the same critical section that sets it, and every
+	// path that re-promotes it (the rescue, an abort, a reset) clears it.
+	for _, rgID := range rgIDs {
+		rg, ok := m.groups[rgID]
+		cur, leased := m.remoteTransferOutLeaseReqID[rgID]
+		if !ok || !leased || cur != reqID || !rg.ManualFailover {
+			return false
+		}
+	}
+	return true
+}
+
 // ClearRemoteTransferOutLease disarms the lease for an RG once the transfer-out
 // is committed. It is reqID-bound: a stale/duplicate commit carrying an older
 // request ID must not clear a newer request's lease. A commit for the current
@@ -1067,8 +1099,11 @@ func (m *Manager) captureTransferChannelLocked() transferChannelBinding {
 // for up to the whole lease. A broken binding returns the owner to the
 // pre-#18521 floor — the 2s dual-resign rescue and the lease expiry — which
 // fires only while the requester advertises secondary-hold or weight 0, so it
-// cannot re-promote the owner over a requester that already promoted itself
-// and is waiting for its commit ACK on the new connection.
+// does not re-promote the owner over a requester that already promoted itself
+// and is waiting for its commit ACK on the new connection. It does fire while
+// the requester is still in its pre-request hold waiting for our applied-ACK;
+// RemoteTransferOutStillHeld then refuses that ACK (review round 3), leaving
+// only the window of an ACK already in flight when the binding breaks.
 //
 // Removals only: an empty slot that fills (the other fabric connecting)
 // removes nothing, so it keeps the binding. Caller holds m.mu.

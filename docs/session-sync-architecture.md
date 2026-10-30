@@ -948,7 +948,11 @@ shorter than the withheld bulk's own receive duration, and for transient
 helper-install failures (expected while the helper comes up after a restart,
 and quick to fail) the backoff starts at 10s instead of 1s: 10s, 20s, 30s
 rather than 1s, 2s, 4s, 8s, 16s — five full bulks in the first 31s against one
-per 35s before #18521 (review of #18525 round 2).
+per 35s before #18521 (review of #18525 round 2). A bulk withheld while an
+earlier bulk's request is still waiting takes that request over: it is judged
+on the newest withheld bulk's own cause, floor and receive duration, so a
+transient-failure bulk behind a reconcile-skip request still waits out its
+10s floor, and the request's log line names its cause (round 3).
 The request is single-flighted, tracks the newest withheld bulk so
 back-to-back withholds still produce exactly one request, and is dropped when
 a newer bulk was accepted meanwhile (that bulk is the replacement; asking again
@@ -1146,12 +1150,18 @@ the generation owed, the push belongs to the current peer connection and the
 active config has not moved on. It runs on the 30s reconcile tick and when the
 stale-config gate refuses a failover, at most once per 10s, RG0 authority only.
 A node that is NOT the authority cannot re-push, but its own old debt no longer
-gates anything once it applies (or re-ACKs as already applied) a config the
-peer pushed: both nodes then hold the peer's config, and the debt is marked
-superseded (`supersedeSentConfigDebtByPeer`). Before that, a former authority
-that lost RG0 with an uncredited debt by a path its gate does not guard (a
+gates anything once it APPLIES a config the peer pushed: both nodes then hold
+the peer's config, and the debt is marked superseded
+(`supersedeSentConfigDebtByPeer`). Before that, a former authority that lost
+RG0 with an uncredited debt by a path its gate does not guard (a
 monitor-driven weight change) refused every later data-RG handover (review of
-#18525 round 2). A later send by this node records a fresh debt.
+#18525 round 2). A later send by this node records a fresh debt. A duplicate
+of an already-applied generation does NOT supersede (round 3): that branch
+runs no apply handler, so it never passes the handler's refusal of a push
+while this node believes it is the RG0 primary, and it says nothing about this
+node's current config — a queued duplicate crossing an RG0 move would retire
+the new authority's own debt. The new authority's push carries a new
+generation, so the apply branch is the one that runs.
 The standby's duplicate path re-ACKs a generation equal to its applied
 high-water without applying again (logged as "re-acknowledging an
 already-applied config generation"), and applies a not-yet-applied one once. A
@@ -1825,37 +1835,83 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
   re-send them — they are the stopping node's newest session deltas. Each
   connection waits until the peer's kernel has acknowledged everything written
   (`SIOCOUTQ == 0`) and then closes normally; the wait is bounded by
-  `syncStopFlushTimeout` (1s, half the peer's write deadline, well inside
-  `TimeoutStopSec=20`). A peer that has not taken the bytes by then is stalled
-  and gets an RST, so it is not left ESTABLISHED behind the unsent tail (the
-  half-open shape the first review round closed with an unconditional abort).
-  Measured on loopback, the abortive stop discarded 32 of 63 16 KiB frames
-  written to a peer that resumed reading 100ms later.
+  `syncStopFlushTimeout` (1s, half the peer's write deadline — a compile-time
+  guard keeps it below that). `Stop()` is then at most that flush plus its own
+  5s goroutine wait, 6s against `TimeoutStopSec=20`. A peer that has not taken
+  the bytes by then is not taking them at line rate, and gets an RST, so it is
+  not left ESTABLISHED behind the unsent tail (the half-open shape the first
+  review round closed with an unconditional abort). Measured on loopback, the
+  abortive stop discarded 32 of 63 16 KiB frames written to a peer that
+  resumed reading 100ms later.
+
+  **The bound does not cover a slow reader** (review of #18525 round 3). A
+  peer draining below line rate — the #18521 slow-install state, ~50
+  sessions/s — still loses the stopping node's unsent tail: up to the send
+  queue, measured on loopback at ~520 KB unflushed of ~1 MB in flight
+  (`TestStopFlushAbortsAPeerBelowLineRate18525`, a reader at ~200 KiB/s),
+  i.e. ~2,000 session frames. What the peer already received (~470 KB) is
+  kept by its own drain (next bullet). A longer bound would not save it: the
+  flush has to stay below the peer's 2s write deadline, which this stopping
+  node, no longer reading, could otherwise trip.
 - **A per-connection watchdog** (1s tick) notices the kernel's report that the
-  peer reset the connection while the receive loop is behind (unread bytes
-  queued, or a handler in flight). What is in the receive queue then is what
-  the peer sent before it reset: its newest session state, and possibly a
-  failover commit/abort, config-apply ACK or fence that no cold-prime bulk
-  re-sends. So:
+  peer closed the connection — an RST (`TCP_CLOSE`) or a FIN
+  (`TCP_CLOSE_WAIT`) — while the receive loop is behind (unread bytes queued,
+  or a handler in flight). What is in the receive queue then is what the peer
+  sent before it closed: its newest session state, and possibly a failover
+  commit/abort, config-apply ACK or fence that no cold-prime bulk re-sends.
+  So:
   - if the loop is still making progress, the connection is marked
-    `peerReset` and the loop drains it to the kernel's `ECONNRESET`. While it
-    drains, writers skip it (`getActiveConn` picks the other fabric or none),
-    a writer's failed write does not tear it down (the reader owns the
-    teardown), the dial side may redial its slot — a live peer answers and the
-    new connection supersedes the drained one, exactly as on the accept side —
-    and its frames earn no peer liveness, so a stopped peer's backlog cannot
-    hold off the heartbeat-timeout decision;
-  - if the loop makes no progress — one handler call running for
-    `syncWriteDeadline`, the bound the peer's writer judges this loop by — the
-    connection is torn down at once, as before, so a stuck call cannot hold the
-    dial side's slot.
-  The first round tore the connection down whenever the loop was behind, which
-  discarded the backlog and (measured) a `failover_abort` queued behind a
-  handler well under the slow threshold.
+    `peerClosed` and the loop drains it to the kernel's `ECONNRESET` or EOF.
+    While it drains, writers skip it (`getActiveConn` picks the other fabric
+    or none), a writer's failed write does not tear it down (the reader owns
+    the teardown), the dial side may redial its slot, and its frames earn no
+    peer liveness;
+  - if the peer RESET it and the loop makes no progress — one handler call
+    running for `syncWriteDeadline`, the bound the peer's writer judges this
+    loop by — the connection is torn down at once, as before, so a stuck call
+    cannot hold the dial side's slot. A FIN never tears down: the peer closed
+    gracefully, and the mark already makes the slot redialable.
+
+  **The drain helps only a peer that does not redial** (review of #18525
+  round 3): a stopped or crashed peer. A live peer — in the #18521 shape it
+  reset the connection because its own writer timed out against this slow
+  loop — redials within a second or two (or this node's dial loop does), long
+  before a slow loop gets through ~0.5 MB of backlog, and the redial retires
+  the drained connection; whatever was still queued, including a
+  `failover_abort` or config ACK, is discarded exactly as the first round's
+  teardown discarded it (`TestRedialEndsThePeerCloseDrain18525`). The
+  recovery then is the cold-prime bulk for sessions, the hold binding's
+  fallback to the 2s rescue for a lost commit/abort (`pkg/cluster/README.md`,
+  "An in-flight peer-requested transfer owns the owner's hold"), and the
+  overdue-ACK re-push for a config ACK. Keeping the drain alive across the
+  redial would interleave the old connection's frames with the new one's,
+  reordering reqID-bound commits and aborts.
+
+  **The redial retires the drained connection through `handleDisconnect`**
+  (`retirePeerClosedSlot`, round 3), so it installs into an EMPTY slot. A
+  plain supersession of a current-incarnation connection is `installConn`'s
+  evidence of a new peer process — it advances the incarnation, runs the
+  #17097 retirement reset and evicts the same-process connection in the other
+  slot — and on a dual-fabric pair that evicted the healthy fabric-1
+  connection every writer had just moved to
+  (`TestRedialAfterPeerResetKeepsTheOtherFabric18525`; the lab clusters run
+  one fabric pair, so only that cell gates it). A real restart behind the
+  redial is still caught by its raised boot epoch and the #9818 identity
+  check. On a single fabric the retirement is a full disconnect immediately
+  followed by the redial's connect, so the peer connect/disconnect callbacks
+  now run in dispatch order (`dispatchPeerEvent`): as bare goroutines the
+  connect could run first and leave the daemon believing the peer was gone.
+
+  **Liveness, precisely.** Frames read after the watchdog's mark earn no peer
+  liveness, so a stopped primary's flushed backlog cannot hold the standby's
+  heartbeat-timeout decision open for the 5s suppression cap (it did for a FIN
+  until round 3). Frames read between the RST or FIN arriving and the next
+  watchdog tick still count — at most one `syncConnWatchInterval` (1s) of
+  extra recency.
 - **Every teardown names itself.** `fabric N disconnected` carries `reason`,
   `err` and a per-connection summary (`conn_age`, `frames_read`, `bytes_read`,
   `handler_time`, `handler_max`, `handler_max_type`, `slow_calls`, and
-  `drained_after_peer_reset` / `writes_deferred` after a drain); the receive
+  `drained_after_peer_close` / `writes_deferred` after a drain); the receive
   loop logs `receive loop exited` once per connection with its reason (Warn
   when the loop itself detected the failure, Info when another path closed the
   socket first). A handler that keeps the loop off the socket for 1s (half the

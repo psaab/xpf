@@ -166,6 +166,13 @@ func TestPeerConfigAckOverdueBounds18521(t *testing.T) {
 // a config the peer pushed, the peer and this node hold the same config by
 // construction, so the debt for this node's own older send is superseded.
 // RED with the debt left standing after the peer's config is applied.
+//
+// Round 3 (wire seat): a DUPLICATE of an already-applied generation must not
+// supersede. That branch runs no handler, so it never passes the daemon's
+// RG0-primary refusal the rationale depends on — a queued duplicate crossing
+// an RG0 move would retire the NEW authority's debt — and it says nothing
+// about this node's current config. RED with the duplicate branch
+// superseding.
 func TestFormerAuthorityDebtSupersededByPeerConfig18525(t *testing.T) {
 	const debtGen = uint64(1890891765099)
 	const peerGen = uint64(1890891799001)
@@ -174,7 +181,7 @@ func TestFormerAuthorityDebtSupersededByPeerConfig18525(t *testing.T) {
 		duplicate bool
 	}{
 		{"the new authority's config is applied", false},
-		{"the new authority re-sends the generation already applied", true},
+		{"a duplicate of the generation already applied does not supersede", true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -232,6 +239,16 @@ func TestFormerAuthorityDebtSupersededByPeerConfig18525(t *testing.T) {
 			}
 			if row.duplicate != (applies == 0) {
 				t.Fatalf("fixture: applies=%d for duplicate=%v", applies, row.duplicate)
+			}
+			if row.duplicate {
+				if stale, _ := s.PeerConfigStale(); !stale {
+					t.Fatal("a duplicate re-ACK retired this node's own outstanding debt without " +
+						"the RG0 check the apply path makes (review of #18525 round 3)")
+				}
+				if _, err := m.ManualFailover(2); !errors.Is(err, ErrPeerConfigStale) {
+					t.Fatalf("the gate must still refuse after a duplicate, got %v", err)
+				}
+				return
 			}
 			if stale, reason := s.PeerConfigStale(); stale {
 				t.Fatalf("this node applied the new authority's config and still refuses handovers "+

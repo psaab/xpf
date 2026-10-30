@@ -188,7 +188,7 @@ func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) bool {
 		// OnPeerConnected comes from here.
 		slog.Info("cluster sync: scheduling OnPeerConnected callback for a peer reboot classified by its boot id",
 			"remote", connRemoteAddrString(conn))
-		go s.OnPeerConnected()
+		s.dispatchPeerEvent(s.OnPeerConnected)
 	}
 	if pc.announce && s.OnPeerReconnected != nil {
 		// #17056: same per-connection reset as the install dispatch in

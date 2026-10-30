@@ -1023,6 +1023,10 @@ type SessionSync struct {
 	// connSlotRemovals counts installed connections removed from a fabric
 	// slot (#18521 review round 2); see setConnSlotLocked.
 	connSlotRemovals atomic.Uint64
+	// peerEventTail orders the OnPeerConnected / OnPeerDisconnected
+	// dispatches (#18521 review round 3); see dispatchPeerEvent.
+	peerEventMu   sync.Mutex
+	peerEventTail chan struct{}
 	// configCrypto0/configCrypto1 hold the per-connection ephemeral X25519
 	// state that encrypts the config-sync payload (#6629). They sit here,
 	// beside the conn they belong to and under the same mu, because their
@@ -1274,6 +1278,15 @@ type SessionSync struct {
 	// fenced before the batch failoverAckApplied reply is sent (#5640). reqID
 	// identifies the batch request whose barriers are being waited on (#6177).
 	WaitFailoverAppliedBatch func(rgIDs []int, reqID uint64) error
+	// TransferOutStillHeld reports, at the moment the applied-ack would be
+	// sent, whether every RG in rgIDs is still parked for request reqID:
+	// its remote transfer-out lease is armed for reqID, its manual hold is
+	// set and it is not primary (#18521 review round 3). A hold released
+	// while the demotion was actuating — the 2s rescue after the request's
+	// connection went away — means the owner may be primary again, and an
+	// "applied" sent then would promote the requester beside it. Nil = no
+	// check (tests that do not model the Manager).
+	TransferOutStillHeld func(rgIDs []int, reqID uint64) bool
 	// OnFenceReceived requests this node to disable all RGs, and reports what
 	// that achieved so a sequenced fence can be acknowledged truthfully
 	// (#7147). The returned FenceResult is encoded into syncMsgFenceAck; it is
@@ -1687,6 +1700,9 @@ type SessionSync struct {
 	// Test-only.
 	testStopFlushTimeout time.Duration
 	testOnStopFlush      func()
+	// testOnWatchTick is called at the start of every connection-watchdog
+	// tick, so a cell can wait for whole evaluations. Test-only.
+	testOnWatchTick func()
 	// bulkRerequestInFlight single-flights the #18521 (D) re-request of a
 	// bulk whose reconcile was skipped because the zone map changed mid-bulk.
 	bulkRerequestInFlight atomic.Bool
@@ -1702,8 +1718,14 @@ type SessionSync struct {
 	// re-request backoff; a reconciled bulk resets it. testBulkRerequestBackoff
 	// replaces the computed backoff in tests.
 	bulkRerequestStreak      atomic.Uint64
-	bulkRerequestSerial      atomic.Uint64
+	bulkRerequestLatest      atomic.Pointer[bulkRerequestPending]
 	testBulkRerequestBackoff time.Duration
+	// testOnBulkRerequestSent observes a queued re-request's cause and how
+	// long after its bulk was withheld it went out; testBulkRerequestUnit,
+	// when set, is what one second of the computed wait becomes, so a cell
+	// runs the real schedule scaled down. Test-only.
+	testOnBulkRerequestSent func(reason string, waited time.Duration)
+	testBulkRerequestUnit   time.Duration
 	// testBulkRerequestGate, when non-nil, holds a scheduled re-request's
 	// decision until it is closed, so a cell orders its own frames before
 	// the decision instead of racing a backoff. testOnBulkRerequestScheduled

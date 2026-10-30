@@ -602,6 +602,8 @@ func (d *Daemon) wireSessionSyncFailoverCallbacks(ss *cluster.SessionSync) {
 	// sent before this node had resigned.
 	ss.WaitFailoverApplied = d.waitFailoverActuated
 	ss.WaitFailoverAppliedBatch = d.waitFailoverActuatedBatch
+	// #18521 review round 3: "applied" only while the hold still stands.
+	ss.TransferOutStillHeld = d.cluster.RemoteTransferOutStillHeld
 }
 
 // wireClusterPeerFailoverHooks points the cluster Manager at the sync

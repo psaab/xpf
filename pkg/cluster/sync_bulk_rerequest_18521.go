@@ -118,62 +118,109 @@ func (s *SessionSync) noteBulkReconciled() {
 	s.bulkRerequestStreak.Store(0)
 }
 
+// bulkRerequestPending is the newest withheld bulk a re-request stands for:
+// its serial, why it was withheld, the cause's backoff base, its receive
+// duration (the wait's floor) and when it was withheld.
+type bulkRerequestPending struct {
+	serial   uint64
+	reason   string
+	base     time.Duration
+	duration time.Duration
+	at       time.Time
+}
+
 // scheduleBulkRerequest asks the peer for a replacement bulk after a withheld
 // BulkAck. serial is the withheld bulk's bulkRecvSerial; reason is logged.
-//
-// The newest withheld serial is recorded even when a request is already in
-// flight, and the in-flight request compares the accepted serial with THAT,
-// so back-to-back withheld bulks still produce one request for the latest of
-// them (not zero: the first would otherwise see its own bulk superseded and
-// drop, while the second lost the single-flight race).
-//
 // base is the backoff's starting value for this cause (bulkRerequestBackoff,
 // or bulkRerequestTransientFloor for transient helper-install failures) and
 // bulkDuration the withheld bulk's receive duration, the wait's floor.
+//
+// The newest withheld bulk is recorded even when a request is already in
+// flight, and the in-flight request decides on THAT record — its serial, and
+// (review of #18525 round 3) its own reason, base and duration — so
+// back-to-back withheld bulks still produce one request, for the latest of
+// them, on the latest's schedule: a bulk withheld for transient install
+// failures behind a reconcile-skip request still waits out its 10s floor, and
+// the request's log line names its cause. (Before, the first bulk's 1s
+// schedule and reason were used, and the first would otherwise see its own
+// bulk superseded and drop while the second lost the single-flight race.)
 func (s *SessionSync) scheduleBulkRerequest(reason string, serial uint64, base, bulkDuration time.Duration) {
-	s.bulkRerequestSerial.Store(serial)
+	s.scheduleBulkRerequestFor(&bulkRerequestPending{
+		serial: serial, reason: reason, base: base, duration: bulkDuration, at: time.Now(),
+	})
+}
+
+func (s *SessionSync) bulkRerequestWaitFor(p *bulkRerequestPending, streak uint64) time.Duration {
+	if s.testBulkRerequestBackoff > 0 {
+		return s.testBulkRerequestBackoff
+	}
+	w := bulkRerequestWait(p.base, streak, p.duration)
+	if u := s.testBulkRerequestUnit; u > 0 {
+		w = w / time.Second * u
+	}
+	return w
+}
+
+func (s *SessionSync) scheduleBulkRerequestFor(p *bulkRerequestPending) {
+	s.bulkRerequestLatest.Store(p)
 	if !s.bulkRerequestInFlight.CompareAndSwap(false, true) {
+		if hook := s.testOnBulkRerequestScheduled; hook != nil {
+			hook(p.reason, bulkRerequestWait(p.base, s.bulkRerequestStreak.Load(), p.duration))
+		}
 		return
 	}
 	streak := s.bulkRerequestStreak.Add(1)
-	backoff := bulkRerequestWait(base, streak, bulkDuration)
 	if hook := s.testOnBulkRerequestScheduled; hook != nil {
-		hook(reason, backoff)
-	}
-	if s.testBulkRerequestBackoff > 0 {
-		backoff = s.testBulkRerequestBackoff
+		hook(p.reason, bulkRerequestWait(p.base, streak, p.duration))
 	}
 	window, limit := s.zoneMapSettleWindows()
-	if limit < backoff {
-		limit = backoff
-	}
 	poll := zoneMapSettlePoll
 	if poll > window {
 		poll = window
 	}
-	if poll > backoff {
-		poll = backoff
+	if first := s.bulkRerequestWaitFor(p, streak); poll > first {
+		poll = first
 	}
 	done := s.runDone
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		handled := uint64(0)
+		var handled *bulkRerequestPending
 		defer func() {
 			s.bulkRerequestInFlight.Store(false)
 			// A bulk withheld after this request decided (and lost the
 			// single-flight race) still owes a request of its own.
-			if latest := s.bulkRerequestSerial.Load(); handled != 0 && latest != handled &&
+			if latest := s.bulkRerequestLatest.Load(); handled != nil && latest != handled &&
 				s.stats.Connected.Load() {
-				s.scheduleBulkRerequest(reason, latest, base, bulkDuration)
+				s.scheduleBulkRerequestFor(latest)
 			}
 		}()
+		if g := s.testBulkRerequestGate; g != nil {
+			select {
+			case <-g:
+			case <-done:
+				return
+			}
+		}
 		start := time.Now()
 		gen := s.currentZoneMapGen()
 		stableSince := start
 		ticker := time.NewTicker(poll)
 		defer ticker.Stop()
-		for (time.Since(start) < backoff || time.Since(stableSince) < window) && time.Since(start) < limit {
+		for {
+			// Each pass judges the NEWEST withheld bulk, so one withheld
+			// while this request waits extends the wait to its own floor.
+			cur := s.bulkRerequestLatest.Load()
+			wait := s.bulkRerequestWaitFor(cur, streak)
+			capAt := limit
+			if capAt < wait {
+				capAt = wait
+			}
+			since := time.Since(cur.at)
+			if ((since >= wait && time.Since(stableSince) >= window) || since >= capAt) &&
+				s.bulkRerequestLatest.Load() == cur {
+				break
+			}
 			select {
 			case <-done:
 				return
@@ -184,35 +231,31 @@ func (s *SessionSync) scheduleBulkRerequest(reason string, serial uint64, base, 
 				stableSince = time.Now()
 			}
 		}
-		if g := s.testBulkRerequestGate; g != nil {
-			select {
-			case <-g:
-			case <-done:
-				return
-			}
-		}
 		if !s.stats.Connected.Load() {
 			// A disconnect re-primes on reconnect; nothing to ask for here.
 			return
 		}
-		withheld := s.bulkRerequestSerial.Load()
-		handled = withheld
-		if cur := s.currentBulkRecvSerial(); cur != withheld {
+		p := s.bulkRerequestLatest.Load()
+		handled = p
+		if cur := s.currentBulkRecvSerial(); cur != p.serial {
 			slog.Debug("cluster sync: bulk re-request dropped: a newer bulk was accepted meanwhile",
-				"withheld_serial", withheld, "current_serial", cur, "reason", reason)
+				"withheld_serial", p.serial, "current_serial", cur, "reason", p.reason)
 			return
 		}
 		if !s.enqueueQueuedFrame(encodeRawMessage(syncMsgBulkRequest, nil)) {
 			s.stats.Errors.Add(1)
 			slog.Warn("cluster sync: could not queue a bulk re-request after withholding a BulkAck "+
 				"(send queue full); the peer's 35s bulk-ack retry remains the fallback",
-				"reason", reason)
+				"reason", p.reason)
 			return
 		}
 		s.stats.BulkRerequestsSent.Add(1)
+		if hook := s.testOnBulkRerequestSent; hook != nil {
+			hook(p.reason, time.Since(p.at))
+		}
 		slog.Info("cluster sync: requested a fresh bulk from the peer after withholding its BulkAck (#18521)",
-			"reason", reason, "streak", streak, "backoff", backoff.String(),
-			"waited", time.Since(start).Round(time.Millisecond).String(),
+			"reason", p.reason, "streak", streak, "backoff", s.bulkRerequestWaitFor(p, streak).String(),
+			"waited", time.Since(p.at).Round(time.Millisecond).String(),
 			"zone_map_settled", time.Since(stableSince) >= window)
 	}()
 }

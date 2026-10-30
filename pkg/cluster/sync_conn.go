@@ -922,7 +922,7 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 		s.flushDeleteJournal()
 		if s.OnPeerConnected != nil {
 			slog.Info("cluster sync: scheduling OnPeerConnected callback", "fabric", fabricIdx)
-			go s.OnPeerConnected()
+			s.dispatchPeerEvent(s.OnPeerConnected)
 		}
 		// #17056: this dispatch is a (re)connect on this SessionSync
 		// object. Reset the Manager's suppression cap stamp for it, so a
@@ -1030,6 +1030,7 @@ type connColdPrimeDecision struct {
 // the pre-#4962 code read wasDisconnected under the lock but USED it after
 // unlock, where a concurrent accept could already have changed the registry.
 func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDecision {
+	s.retirePeerClosedSlot(fabricIdx, conn)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.peerSnaps.peerSnapshotProtocolWriteMu.Lock()
@@ -1641,7 +1642,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 			slog.Info("cluster sync: reset barrier state after disconnect", "pending_seq", pendingBarriers, "acked_seq", ackedBarriers, "cleared_waiters", clearedWaiters, "cleared_failover_waiters", clearedFailoverWaiters, "cleared_failover_commit_waiters", clearedFailoverCommitWaiters, "cleared_failover_batch_waiters", clearedFailoverBatchWaiters, "cleared_failover_batch_commit_waiters", clearedFailoverBatchCommitWaiters)
 		}
 		if s.OnPeerDisconnected != nil {
-			go s.OnPeerDisconnected()
+			s.dispatchPeerEvent(s.OnPeerDisconnected)
 		}
 	} else if !s.outboundBulkAcked.Load() || s.needColdPrime.Load() {
 		// #4090: a survivor fabric is still up but the cold-start bulk
