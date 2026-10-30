@@ -2012,6 +2012,14 @@ struct ProbeCostProbes {
 }
 
 pub(crate) struct SessionTable {
+    /// #18550: reader for this worker's RG activation epochs (the same
+    /// `rg_epochs` the wheel's SELF-HEAL gate reads through `ExpireHaContext`).
+    /// `restamp_lapsed_peer_synced` records the current epoch exactly as the
+    /// SELF-HEAL arm does, so an import-triggered re-stamp spends the
+    /// activation edge and a revived row ages after ONE idle window. `None`
+    /// (a table built outside a worker) leaves `seen_rg_epoch` untouched.
+    /// Wired once in `worker_loop_setup`.
+    rg_epoch_reader: Option<std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>>,
     /// #7699: the PPTP call associations THIS worker can resolve.
     ///
     /// Per-worker, and deliberately not shared behind a lock: `resolve` runs on
@@ -2518,6 +2526,7 @@ impl SessionTable {
         let seed = crate::hot_hash_seed::hot_path_hash_seed();
         let state = HotPathSeededState::new(seed);
         Self {
+            rg_epoch_reader: None,
             pptp: crate::session::pptp::PptpAssociations::default(),
             // Start with an empty slab and let it grow on demand.
             // `Slab::with_capacity(DEFAULT_MAX_SESSIONS)` would eagerly
@@ -2701,6 +2710,23 @@ impl SessionTable {
         if let Some(tat) = self.icmp_error_side_tats.get_mut(key) {
             icmp_error_tat_refund(tat);
         }
+    }
+
+    /// #18550: install the worker's RG activation-epoch reader (see the
+    /// `rg_epoch_reader` field). Called once from `worker_loop_setup`.
+    pub(crate) fn set_rg_epoch_reader(
+        &mut self,
+        reader: std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>,
+    ) {
+        self.rg_epoch_reader = Some(reader);
+    }
+
+    /// #18550: the current activation epoch for `owner_rg_id`, if a reader is
+    /// installed. Same index mapping as the wheel's `epoch_of`.
+    pub(crate) fn current_rg_epoch(&self, owner_rg_id: i32) -> Option<u32> {
+        self.rg_epoch_reader
+            .as_ref()
+            .map(|reader| reader(owner_rg_id))
     }
 
     /// #4915 + #6311: namespace this table's session ids so the STABLE session

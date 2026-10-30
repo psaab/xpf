@@ -128,6 +128,10 @@ mod steering_row_owners_9560_tests;
 #[cfg(test)]
 #[path = "upsert_synced_14669_tests.rs"]
 mod upsert_synced_14669_tests;
+// #18550: a late peer re-import revives an idle-lapsed replica on the owner.
+#[cfg(test)]
+#[path = "lapsed_replica_reimport_18550_tests.rs"]
+mod lapsed_replica_reimport_18550_tests;
 #[cfg(test)]
 #[path = "shared_replica_hold_17683_tests.rs"]
 mod shared_replica_hold_17683_tests;

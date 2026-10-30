@@ -350,6 +350,7 @@ pub(crate) fn worker_loop(
         &cos_status,
         &runtime_atomics,
         &cold_path_atomics,
+        &rg_epochs,
     );
     // #5143: STARTUP READINESS report. The in-thread XSK/UMEM binds are now
     // done — `bindings` holds ONLY the planned bindings that actually bound
