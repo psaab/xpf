@@ -496,11 +496,14 @@ and DOES gate merges). Never cite a green watch as a passed gate:
   slow the landing queue for it, and never hold a PR for the watch.
 - The baseline is the deployed master's own latest line. The cells
   expected red, each with its issue, are listed under "Known product
-  failures (tracked)" in `docs/regression-test-matrix.md`; none is
-  environment. The 2026-10-13 baseline excused "LAN host -> internet
-  IPv6" as environment, and that was wrong: ping to the same host
-  worked while traceroute did not (#18174). Deviations from the
-  baseline are the signal; the baseline itself is not.
+  failures (tracked)" in `docs/regression-test-matrix.md`, each with
+  its owner and a same-run control. The 2026-10-13 baseline excused
+  "LAN host -> internet IPv6" as environment without a control. Its
+  traceroute half was a product defect (ping to a live host worked
+  while every hop past the firewall was `???`, #18174); its ping half
+  is a dead target, tracked until the harness is retargeted.
+  Deviations from the baseline are the signal; the baseline itself is
+  not.
 - Perf mistakes ride the same loop: when a perf-relevant merge lands,
   note the tip in the log; a connectivity or throughput datapoint that
   regresses against the prior tip gets an issue + forward-fix, in band.
