@@ -4010,6 +4010,12 @@ idempotent, and a no-op in two cases:
   get the rollback (#12171). It would also terminate the RG's IPsec SAs. A
   lone node keeps ownership through its stop, as before.
 
+  Residual: "no live peer" is `peerAlive`, and a peer that died inside the
+  loss-detection window (about 0.5-2.1 s at defaults, up to the 5 s
+  sync-suppression cap) still reads as alive. A stop inside that window
+  still resigns, the watcher still sees the RG0 demotion, and a pending
+  commit-confirmed is still confirmed. Nothing here closes that window.
+
 Why weight 0 and not the #12164 floor. The fail-closed stop already installs
 the `__dataplane-arm__` floor (weight 1), and that moved nothing in the
 shapes that matter:
@@ -4055,6 +4061,15 @@ So the peer promotes on the resign frame. Pinned by
 `TestPlannedShutdownResignReleasesFreshManualFailoverHold18540`. An older
 peer stores the entry as one more peer monitor (display only) and acts on the
 weight 0 through its existing arms, keeping the guard and lease fallbacks.
+The marker is scoped per RG (an entry for another RG, or with `Up=true`,
+changes nothing; `TestPlannedShutdownMarkerWithoutResignKeepsLease18540`).
+
+Operator-visible side effect: for the fraction of a second between the
+resign and the stopping node's heartbeat going silent, the surviving node's
+`show chassis cluster interfaces` lists a peer monitor named
+`__planned-shutdown__` (down). That is the marker, not a configured
+interface. It disappears with the peer's next frame or on peer loss, which
+clears the peer monitors.
 
 One state still keeps the heartbeat-loss fallback: an #16592
 aborted-transfer marker, which makes `electRG` return before every promotion

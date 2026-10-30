@@ -358,13 +358,32 @@ func TestPlannedShutdownResignReleasesFreshManualFailoverHold18540(t *testing.T)
 // release the #18521 hold: the marker announces a resign, it does not replace
 // one.
 func TestPlannedShutdownMarkerWithoutResignKeepsLease18540(t *testing.T) {
-	owner := inflightOwner18521(t)
-	owner.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1,
-		Groups:   []HeartbeatGroup{{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondaryHold)}},
-		Monitors: []HeartbeatMonitor{{RGID: 2, Weight: 255, Up: false, Interface: PlannedShutdownMonitorIface}},
-	})
-	if held, state := ownerHold18521(owner); !held || state == StatePrimary {
-		t.Fatalf("a planned-shutdown marker on a weight-255 frame released the in-flight lease hold "+
-			"(held=%v state=%s)", held, state)
+	// Each row is one way the frame fails to say "RG2 is resigned for a
+	// planned shutdown". Bare weight 0 on RG2 (a requester momentarily at
+	// weight 0 inside its commit window, #18521) must keep the hold unless
+	// the marker for RG2 itself is present and down.
+	for _, row := range []struct {
+		name   string
+		weight uint8
+		state  NodeState
+		mon    HeartbeatMonitor
+	}{
+		{"marker on a weight-255 frame", 255, StateSecondaryHold,
+			HeartbeatMonitor{RGID: 2, Weight: 255, Up: false, Interface: PlannedShutdownMonitorIface}},
+		{"marker for a different RG", 0, StateSecondary,
+			HeartbeatMonitor{RGID: 7, Weight: 255, Up: false, Interface: PlannedShutdownMonitorIface}},
+		{"marker reported up", 0, StateSecondary,
+			HeartbeatMonitor{RGID: 2, Weight: 255, Up: true, Interface: PlannedShutdownMonitorIface}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			owner := inflightOwner18521(t)
+			owner.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1,
+				Groups:   []HeartbeatGroup{{GroupID: 2, Priority: 100, Weight: row.weight, State: uint8(row.state)}},
+				Monitors: []HeartbeatMonitor{row.mon},
+			})
+			if held, state := ownerHold18521(owner); !held || state == StatePrimary {
+				t.Fatalf("%s released the in-flight lease hold (held=%v state=%s)", row.name, held, state)
+			}
+		})
 	}
 }

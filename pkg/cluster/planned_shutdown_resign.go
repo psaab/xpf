@@ -70,6 +70,14 @@ const PlannedShutdownMonitorCost = maxRedundancyGroupWeight
 // the rollback (#12171), and the demotion would also terminate the RG's
 // IPsec SAs that survive an ordinary lone-node restart. A lone node keeps
 // ownership through its stop exactly as before #18540.
+//
+// RESIDUAL, stated rather than implied: "no live peer" means peerAlive, and a
+// peer that died within the loss-detection window still reads as alive —
+// roughly 0.5-2.1 s at defaults, up to the 5 s sync-suppression cap
+// (heartbeat_suppress.go). A stop inside that window still resigns, the
+// still-live watcher sees the RG0 demotion, and a pending commit-confirmed is
+// confirmed exactly as above. Closing it would need a fresher liveness proof
+// than the one peer-loss detection itself uses; it is not attempted here.
 func (m *Manager) ResignForPlannedShutdown() int {
 	m.mu.Lock()
 	if m.stopped {
