@@ -4189,6 +4189,52 @@ Cells: `planned_shutdown_resign_18540_test.go`,
 `heartbeat_peer_restart_18540_test.go`, and the daemon ordering cell
 `pkg/daemon/shutdown_planned_resign_18540_test.go`.
 
+## Make-before-break transfer pre-activation (#18559)
+
+A requested transfer (`request chassis cluster failover redundancy-group N
+node <local>`, and the `data node <local>` batch) used to be break-before-make.
+The owner demoted inside its #5640 fence (`rg_active` cleared, VIPs removed)
+before acknowledging, and the requester only began activating after the ACK:
+election, `republishConnectedRGSync`, `SetRGActive`. Everything the owner
+fabric-redirected in between hit the requester's fabric-ingress HA-inactive
+gate and was dropped. On the loss cluster that was 100-137 ms per RG for
+single moves and about 200 ms per RG for the batch, which demotes and
+activates its members one after another.
+
+`RequestPeerFailover` and `RequestPeerFailoverBatch` now bracket the request
+with the `SetTransferPreActivateHooks` pair:
+
+- **activate** runs with the transfer's data RGs (ID > 0; RG0 owns no
+  forwarding) BEFORE the request is sent. The daemon opens this node's helper
+  forwarding for them (`beginTransferPreActivation`). The owner's fence is
+  unchanged: it still clears its own `rg_active` before it acknowledges, so
+  the cluster never has two primaries. What overlaps is dataplane forwarding,
+  and the requester carries nothing for those RGs until the owner starts
+  redirecting to it.
+- **release** runs with the same RGs on every return path. After a committed
+  transfer the promotion has already applied `rg_active=true` and the release
+  costs nothing. After a failed one the helper is told the cluster truth
+  again and the connected prefixes the pre-activation published are
+  withdrawn.
+
+A failed activation is not a refused transfer: it is logged
+(`transfer pre-activation failed; proceeding break-before-make`), released,
+and the request proceeds in the old order. Strict VIP ownership (#104) exists
+to forbid a dual-active window, so its RGs are not pre-activated.
+
+The helper-facing overlay lives in the userspace manager
+(`pkg/dataplane/userspace/manager_ha_preactivate.go`, see
+`pkg/dataplane/README.md`). It never touches the daemon's rg_active state
+machine, so no activation-keyed side effect (VIPs, GARP, RETH services) runs
+early. Cells: `pkg/cluster/transfer_preactivate_18559_test.go`,
+`pkg/daemon/transfer_preactivate_18559_test.go`,
+`pkg/dataplane/userspace/manager_ha_preactivate_18559_test.go`.
+
+The untargeted `request chassis cluster failover redundancy-group N` (run on
+the owner, no target node) still demotes locally and leaves the peer to
+promote on the next secondary-hold heartbeat. It gets no pre-activation,
+because no peer is asked anything.
+
 ## Failover timing by mode and event (CLAUDE.md authoritative)
 
 - Default compiler mode is private-RG election over the control link, with RETH VRRP suppressed (`pkg/config/compiler_system.go:3134-3137`; `pkg/vrrp/README.md:950-964`).

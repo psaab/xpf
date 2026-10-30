@@ -27,6 +27,18 @@ func (m *Manager) SetLocalTransferCommitReadyHook(fn func(rgIDs []int) error) {
 	m.localTransferCommitReadyFn = fn
 }
 
+// SetTransferPreActivateHooks registers the make-before-break bracket for a
+// requested transfer (#18559). activate runs on the requesting node with the
+// data RGs (ID > 0) of the transfer, before the request is sent; release runs
+// with the same RGs when the request returns, whatever the outcome. Either may
+// be nil.
+func (m *Manager) SetTransferPreActivateHooks(activate func(rgIDs []int) error, release func(rgIDs []int)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.transferPreActivateFn = activate
+	m.transferPreReleaseFn = release
+}
+
 // SetPeerFailoverFunc sets the callback used to send remote failover requests
 // to the peer via the fabric sync connection. A sent request's ID must be
 // returned even on ACK failure/timeout so the manager can send a bound abort.

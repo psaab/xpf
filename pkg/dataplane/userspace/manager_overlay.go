@@ -216,12 +216,12 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		}
 		resampled := m.resampleUnresolvedSectionsLocked(&next) // #9684
 		var routeErr error
-		next.Routes, next.LearnedRouteImportCapped, routeErr = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryProvider)
+		next.Routes, next.LearnedRouteImportCapped, routeErr = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryNowLocked())
 		if routeErr != nil {
 			return false, fmt.Errorf("build route overlay snapshot: %w", routeErr)
 		}
 		next.builtRouteOverlay = cloneRouteOverlay(desiredOverlay)
-		next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
+		next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryNowLocked())
 		if schedulerState != nil {
 			if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, schedulerCopy, failClosed); err != nil {
 				return false, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
@@ -320,12 +320,12 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// Carrying a stale `true` keeps the helper delegating NoRoute after the
 	// table shrank back under the cap; carrying a stale `false` re-opens the
 	// blackhole this issue is about.
-	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryProvider)
+	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryNowLocked())
 	if err != nil {
 		return false, fmt.Errorf("build route overlay snapshot: %w", err)
 	}
 	next.builtRouteOverlay = cloneRouteOverlay(desiredOverlay)
-	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryProvider)
+	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryNowLocked())
 
 	// #5328 (A6-b2-F4): when the caller supplies a policy-scheduler active-state
 	// map, refresh the policy snapshot's inactive bits from that map in THIS

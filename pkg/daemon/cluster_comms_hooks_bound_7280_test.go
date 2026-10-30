@@ -93,6 +93,8 @@ func allWiredHooks7280() []string {
 		cluster.HookPreManualFailover,
 		cluster.HookLocalTransferCommitRdy,
 		cluster.HookTransferReadiness,
+		cluster.HookTransferPreActivate,
+		cluster.HookTransferPreRelease,
 		cluster.HookHeartbeatRestartNotify,
 		cluster.HookPeerFence,
 		cluster.HookPeerFenceConfirm,
@@ -119,6 +121,8 @@ func TestWireClusterPeerFailoverHooksInstallsManagerHooks_7280(t *testing.T) {
 		cluster.HookPreManualFailover,
 		cluster.HookLocalTransferCommitRdy,
 		cluster.HookTransferReadiness,
+		cluster.HookTransferPreActivate,
+		cluster.HookTransferPreRelease,
 		cluster.HookHeartbeatRestartNotify,
 	} {
 		if !got[name] {

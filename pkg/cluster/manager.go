@@ -705,6 +705,15 @@ type Manager struct {
 	// actually applied its local failover side effects before the old
 	// owner is told to stand down.
 	localTransferCommitReadyFn func(rgIDs []int) error
+	// transferPreActivateFn / transferPreReleaseFn bracket a requested
+	// transfer on the REQUESTING node (#18559): before the owner is asked to
+	// demote, the daemon opens this node's dataplane forwarding for the
+	// transferring data RGs, so traffic the owner fabric-redirects after its
+	// demotion is forwarded instead of dropped (make-before-break). The
+	// release runs on every exit, success or failure. A failed pre-activation
+	// is not fatal: the transfer proceeds break-before-make, as before.
+	transferPreActivateFn func(rgIDs []int) error
+	transferPreReleaseFn  func(rgIDs []int)
 	// Retry policy for transient pre-failover prepare failures.
 	preManualFailoverRetryTimeout  time.Duration
 	preManualFailoverRetryInterval time.Duration
