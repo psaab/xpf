@@ -1814,6 +1814,8 @@ type Daemon struct {
 	// readiness bit flips so the VRRP/direct-ownership side effects that set
 	// the bit have a chance to propagate before the peer finalizes demotion.
 	localFailoverCommitDelay time.Duration
+	// frrHA coalesces RG-edge FRR reconciles (#18561); see daemon_frr_ha_coalesce.go.
+	frrHA frrHACoalescer
 	// failoverActuations owns the failover fence barriers (#16124): the
 	// wait map watchClusterEvents resolves once it has finished ACTUATING
 	// a demotion (VRRP resign to priority-0 / rg_active clear), the

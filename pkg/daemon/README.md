@@ -4652,3 +4652,19 @@ never lock an operator out of a remote box it manages.
   actuation acquires `applySem` and republishes the routes-only snapshot. A
   confirmed changed publish is followed by a FIB-generation bump; an
   unconfirmed bump remains retryable even when the next publish is a duplicate.
+
+## RG-edge FRR reconcile is coalesced (#18561)
+
+`scheduleFRRHAReconcile` no longer starts one applySem-holding
+`frr-reload.py` per RG ownership edge. The first edge of a burst arms a
+`frrHAReconcileDebounce` (250 ms) timer, and edges that arrive while it is
+armed join it. The timer runs one reconcile, which reads the active config
+and cluster state at run time. An edge that lands after the timer fired arms
+a new one, so no edge is lost (`daemon_frr_ha_coalesce.go`).
+
+Why: on a crash takeover the election promotes every RG at once. Each
+promotion's synchronous `republishConnectedRGSync` (#16270) takes applySem,
+and each earlier edge's reload held it for 300-600 ms. On the loss cluster
+RG2 (LAN) became active 0.62 s after RG1. The helper FIB does not depend on
+FRR for transit forwarding, so the debounce only delays the kernel and
+routing-protocol view by 250 ms. Cells: `frr_ha_coalesce_18561_test.go`.

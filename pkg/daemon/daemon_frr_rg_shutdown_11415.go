@@ -843,8 +843,19 @@ func (d *Daemon) scheduleFRRHAReconcile(reason string) {
 	if d == nil || d.cluster == nil || d.frr == nil || d.store == nil || d.applySem == nil || d.isResetting() {
 		return
 	}
+	// #18561: coalesce a burst of ownership edges into one reload that runs
+	// after the burst, so an RG activation's synchronous connected-route
+	// republish never queues on applySem behind frr-reload.py.
+	d.frrHA.schedule(frrHAReconcileDebounce, func() { d.runFRRHAReconcile(reason) })
+}
+
+// runFRRHAReconcile is the reconcile body scheduleFRRHAReconcile coalesces.
+func (d *Daemon) runFRRHAReconcile(reason string) {
+	if d == nil || d.cluster == nil || d.frr == nil || d.store == nil || d.applySem == nil || d.isResetting() {
+		return
+	}
 	ctx := d.applyCancelCtx()
-	go func() {
+	func() {
 		if err := d.applySem.Acquire(ctx, 1); err != nil {
 			return
 		}
