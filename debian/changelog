@@ -1,4 +1,7 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Test: deb deploy removes a stale raw-deploy /etc xpfd.service that
+    shadowed the packaged unit (KillMode=control-group on loss/tcp),
+    daemon-reloads and asserts the packaged unit is loaded (#18544).
   * Dataplane: include live branch-stat and v6 proxy-NDP maps in the
     retained userspace-XDP shim allowlist with their BPF map types
     (#18390).

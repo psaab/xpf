@@ -798,6 +798,14 @@ deploy_vm_deb() {
 	# tested helper, so a same-name re-push cannot collide in a fixed slot.
 	deploy_install_deb "$rinst" "$deb"
 
+	# #18544: a raw deploy leaves /etc/systemd/system/xpfd.service behind, and
+	# it shadows the unit this deb just installed. Without this, the cut below
+	# and every later stop run under the raw push's unit, however old. This
+	# runs after the install, so the packaged unit on disk is the deployed one,
+	# and before the cut, so the cut's stop uses that unit's KillMode. It only
+	# daemon-reloads; the cut is still the only restart.
+	deploy_reconcile_unit_shadow "$rinst"
+
 	# Drive the verified controlled-drain cut on THIS node (peer keeps
 	# forwarding). Run on the node directly so the rolling driver sees the
 	# local cluster state.

@@ -681,3 +681,42 @@ that a REJECT hard-fails without stopping the daemon or pushing into
 each deploy path precedes every destructive step in its function. Moving the
 call below `systemctl stop xpfd` keeps the function correct and makes the gate
 useless, so that ordering is asserted rather than commented.
+
+### Deb-deploy unit shadow reconcile (#18544)
+
+The raw paths push `test/incus/xpfd.service` to
+`/etc/systemd/system/xpfd.service`. The `.deb` installs its own unit under
+`/usr/lib/systemd/system` (the same source plus an `ExecStartPre`
+verify-dataplane gate, `debian/rules`). systemd prefers `/etc`, so on a node
+that was raw-deployed even once, the `/etc` copy shadowed the packaged unit
+through every later deb deploy. The #1917 `10-xpf-version.conf` drop-in still
+pinned the right binary, but every other `[Service]` setting came from the raw
+push, however old. On 2026-10-30 the loss and tcp nodes ran
+`KillMode=control-group` under debs that ship `KillMode=mixed` (#18213). As a
+result, systemd SIGTERMed the helper alongside xpfd, and xpfd's orderly
+shutdown could not clear `rg_active`.
+
+The deb path (`deploy_vm_deb`) now calls `deploy_reconcile_unit_shadow` after
+the deb install and before the `xpfd upgrade --rolling` cut. It:
+
+- removes a regular-file `/etc/systemd/system/xpfd.service`. This leaves the
+  node like a production install, where the unit shipped in the deployed deb
+  governs. It does not re-sync from the worktree, because a pinned
+  `XPF_DEPLOY_DEB_PATH` deb may come from a different tree;
+- runs `systemctl daemon-reload`, and then ASSERTS that the *loaded*
+  `FragmentPath` is no longer the shadow. The deploy hard-fails if no unit is
+  loaded or the shadow is still loaded. It also reloads when the file is
+  already gone but systemd still has it loaded;
+- re-points `multi-user.target.wants/xpfd.service` at the loaded unit when
+  the link targets the removed shadow;
+- leaves a SYMLINK at that path alone, because it is a mask (the
+  `xpf-deploy.py` #7559 hold) or an alias. When no packaged unit exists on
+  disk, it keeps the shadow and hard-fails;
+- never starts, stops or restarts xpfd. The new `KillMode` first applies at
+  the cut's stop, which is the deploy's existing controlled restart. A second
+  run changes nothing.
+
+A later raw deploy (`XPF_DEPLOY_FAST=1`) pushes the `/etc` copy again, which
+is that path's contract. Check a node with
+`systemctl show xpfd -p FragmentPath -p KillMode`. After a deb deploy,
+`FragmentPath` is under `/usr/lib/systemd/system`.

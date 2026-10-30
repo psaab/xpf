@@ -920,7 +920,13 @@ upgrade --rolling` secondary-first. This is the default since #9486,
 validated live on the loss userspace cluster. `XPF_DEPLOY_FAST=1` keeps the
 raw push+restart path for the dev inner loop. The deb path preserves node
 config: it never pushes `CLUSTER_CONF`, clears the config DB, or pushes
-Phase-0 artifacts (upgrades must never wipe operator config).
+Phase-0 artifacts (upgrades must never wipe operator config). After the
+install and before the cut, the deb path removes a raw-deploy
+`/etc/systemd/system/xpfd.service`. That copy shadows the packaged unit, so
+without the removal the cut and every later stop would run under the raw
+push's stale `[Service]` settings. It runs `daemon-reload` and asserts the
+loaded unit is the packaged one, and it never restarts xpfd outside the cut
+(#18544; `docs/test_env.md`).
 
 ## Host-wide upgrade lock (#1965)
 
