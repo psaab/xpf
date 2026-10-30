@@ -2132,11 +2132,28 @@ func (d *Daemon) stopClusterComms() {
 	if ss != nil {
 		d.stopSyncReadyTimer()
 		ss.Stop()
+		d.noteSessionSyncRetired()
 	}
 	if d.cluster != nil && ss != nil {
 		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
 	}
 	d.clusterCommsLifecycleMu.Unlock()
+}
+
+// noteSessionSyncRetired records the peer as disconnected when the published
+// SessionSync is retired (#18521, review at 5af11e4593). The instance's own
+// OnPeerDisconnected may arrive late — queued behind its own slow connect — and
+// is dropped once a successor is published (peerCallbackSuperseded), and
+// onSessionSyncPeerDisconnected is the only writer of syncPeerConnected=false.
+// Recording it here, at the moment the instance stops being the daemon's sync
+// object, means a successor always starts from "disconnected" whatever the
+// old instance's callbacks do, and re-derives the state from its own. Runs
+// with nothing published, so the disconnect bookkeeping sees no instance (as
+// the old callback would have during a teardown).
+func (d *Daemon) noteSessionSyncRetired() {
+	if d.syncPeerConnected.Load() {
+		d.onSessionSyncPeerDisconnected()
+	}
 }
 
 // retirePredecessorSessionSync detaches and stops a captured session without
@@ -2157,6 +2174,9 @@ func (d *Daemon) retirePredecessorSessionSync(ss *cluster.SessionSync) {
 		d.stopSyncReadyTimer()
 	}
 	ss.Stop()
+	if removed {
+		d.noteSessionSyncRetired()
+	}
 	if d.cluster != nil {
 		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
 	}

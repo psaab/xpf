@@ -1939,14 +1939,23 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
   now run in dispatch order (`dispatchPeerEvent`): as bare goroutines the
   connect could run first and leave the daemon believing the peer was gone
   (`TestRedialCallbacksRunInOrderThroughCallSites18525` drives that order
-  through `handleNewConnection` and `handleDisconnect`). The order is per
-  `SessionSync`, while the state those callbacks write (`syncPeerConnected`,
-  the prime-retry generation, the sync-ready timer) is daemon-wide, so the
-  daemon ignores a callback from an instance a DIFFERENT one has replaced
+  through `handleNewConnection` and `handleDisconnect`;
+  `TestBootIDAnnounceRunsInDispatchOrder18525` pins the third site, the
+  BulkStart switch's boot-id announce). The order is per `SessionSync`, while
+  the state those callbacks write (`syncPeerConnected`, the prime-retry
+  generation, the sync-ready timer) is daemon-wide, so the daemon drops a
+  callback from an instance that is no longer the published one
   (`peerCallbackSuperseded`, round 4): on a comms restart the old instance's
   disconnect could queue behind its own slow connect and land after the
-  successor's connect. With nothing published (a teardown with no successor
-  yet) the callback still runs, so the disconnect is recorded.
+  successor's connect. A connect from an unpublished instance is dropped even
+  while nothing is published (mid-teardown it would mark the peer connected
+  and arm a sync-ready timer the teardown already stopped). A dropped
+  disconnect loses nothing: retiring the published instance
+  (`stopClusterComms`, `retirePredecessorSessionSync`) records the disconnect
+  itself (`noteSessionSyncRetired`), because `onSessionSyncPeerDisconnected`
+  is the only writer of `syncPeerConnected=false`. A successor therefore always
+  starts from "disconnected" and re-derives the state from its own callbacks
+  (review at 5af11e4593).
 
   **Liveness, precisely.** Frames read after the watchdog's mark earn no peer
   liveness, so a stopped primary's flushed backlog cannot hold the standby's

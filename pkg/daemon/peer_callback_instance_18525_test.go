@@ -87,3 +87,74 @@ func TestStalePeerCallbackCannotOverwriteSuccessor18525(t *testing.T) {
 		}
 	})
 }
+
+// Review of #18525 at 5af11e4593 (ha-B seat, LOW): dropping a stale
+// OnPeerDisconnected left nobody to record the disconnect. onSessionSync
+// PeerDisconnected is the only writer of syncPeerConnected=false, so when the
+// old instance's disconnect lost the race to a successor's publication the
+// daemon kept believing the peer was connected for as long as the successor
+// made no callback of its own — and an old connect callback that ran during
+// the teardown (nothing published) armed a sync-ready timer the teardown had
+// already stopped, which could release the hold 30s later. Now the retirement
+// itself records the disconnect, and a connect from an instance that is not
+// the published one is dropped even while nothing is published: the new
+// instance always starts from "disconnected" and re-derives the state from
+// its own callbacks. RED: connected, with a live timer.
+func TestRetiredSessionSyncLeavesThePeerDisconnected18525(t *testing.T) {
+	newDaemon := func() *Daemon {
+		d := &Daemon{cluster: newClusterManager(false), localFailoverCommitTimeout: 2 * time.Second}
+		d.syncReadyTimeout = time.Hour // the cold-start timer is armed, and must not survive
+		return d
+	}
+	publish := func(d *Daemon, ss *cluster.SessionSync) {
+		d.clusterCommsMu.Lock()
+		d.sessionSync = ss
+		d.clusterCommsMu.Unlock()
+	}
+	timerArmed := func(d *Daemon) bool {
+		d.syncReadyTimerMu.Lock()
+		defer d.syncReadyTimerMu.Unlock()
+		return d.syncReadyTimer != nil
+	}
+	retire := map[string]func(d *Daemon, ss *cluster.SessionSync){
+		"retirePredecessorSessionSync": func(d *Daemon, ss *cluster.SessionSync) { d.retirePredecessorSessionSync(ss) },
+		"stopClusterComms":             func(d *Daemon, _ *cluster.SessionSync) { d.stopClusterComms() },
+	}
+	for name, retireFn := range retire {
+		t.Run(name+"/old disconnect lands after the successor is published", func(t *testing.T) {
+			d := newDaemon()
+			t.Cleanup(d.stopSyncReadyTimer)
+			old, successor := newWiringTestSessionSync(), newWiringTestSessionSync()
+			d.wireSessionSyncPeerCallbacks(old)
+			d.wireSessionSyncPeerCallbacks(successor)
+			publish(d, old)
+			old.OnPeerConnected()
+			if !d.syncPeerConnected.Load() || !timerArmed(d) {
+				t.Fatal("fixture: the old connect must mark the peer connected and arm the timer")
+			}
+			retireFn(d, old)
+			publish(d, successor) // the successor never connects: the peer is down
+			old.OnPeerDisconnected()
+			if d.syncPeerConnected.Load() {
+				t.Fatal("the retired instance's disconnect was dropped and nothing else recorded it: " +
+					"the daemon believes a peer is connected that no live SessionSync has " +
+					"(review of #18525, ha-B LOW)")
+			}
+			if timerArmed(d) {
+				t.Fatal("the retired connection's sync-ready timer is still armed")
+			}
+		})
+	}
+	t.Run("connect from an instance being retired, nothing published", func(t *testing.T) {
+		d := newDaemon()
+		t.Cleanup(d.stopSyncReadyTimer)
+		old := newWiringTestSessionSync()
+		d.wireSessionSyncPeerCallbacks(old)
+		publish(d, nil) // mid-teardown: unpublished, no successor yet
+		old.OnPeerConnected()
+		if d.syncPeerConnected.Load() || timerArmed(d) {
+			t.Fatal("a connect callback from an unpublished instance wrote the peer state and armed " +
+				"the sync-ready timer after the teardown stopped it")
+		}
+	})
+}

@@ -379,7 +379,7 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	// stability crossing re-pushes via the promotion hook / reconcile
 	// loop, instead of leaving the peer indefinitely divergent.
 	ss.OnPeerConnected = func() {
-		if d.peerCallbackSuperseded(ss, "OnPeerConnected") {
+		if d.peerCallbackSuperseded(ss, "OnPeerConnected", false) {
 			return
 		}
 		d.cluster.RecordEvent(cluster.EventFabric, -1, "Peer connected")
@@ -471,7 +471,7 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	ss.BulkSnapshotSource = d.userspaceBulkSnapshot
 
 	ss.OnPeerDisconnected = func() {
-		if d.peerCallbackSuperseded(ss, "OnPeerDisconnected") {
+		if d.peerCallbackSuperseded(ss, "OnPeerDisconnected", true) {
 			return
 		}
 		d.cluster.RecordEvent(cluster.EventFabric, -1, "Peer disconnected (all fabrics)")
@@ -480,18 +480,27 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 }
 
 // peerCallbackSuperseded reports whether a peer connect/disconnect callback
-// comes from a SessionSync that a DIFFERENT instance has replaced (#18521
+// comes from a SessionSync that is no longer the published one (#18521
 // review round 4). The callbacks are ordered per instance (dispatchPeerEvent),
 // but the state they write — syncPeerConnected, the prime-retry generation,
 // the sync-ready timer, SetSyncReady — is daemon-wide and belongs to whichever
 // instance is published. An old instance's disconnect can queue behind its own
 // slow connect and run after the successor's connect; applied, it marked a
-// live successor's peer disconnected until the next reconnect. With NOTHING
-// published (a teardown with no successor yet) the callback still runs, so the
-// disconnect is recorded. Same rule as OnSessionInventoryBulkReceived.
-func (d *Daemon) peerCallbackSuperseded(ss *cluster.SessionSync, which string) bool {
+// live successor's peer disconnected until the next reconnect.
+//
+// A CONNECT from any unpublished instance is dropped, including while nothing
+// is published (mid-teardown): the instance is being retired, and applied it
+// would mark the peer connected and arm a sync-ready timer the teardown has
+// already stopped (review at 5af11e4593). A DISCONNECT from an unpublished
+// instance still runs while nothing is published; it is redundant with the
+// retirement's own record (noteSessionSyncRetired) and harmless. Dropping a
+// stale disconnect is safe because the retirement records it: a successor
+// always starts from "disconnected" and re-derives the state from its own
+// callbacks. A new instance is published before it is started, so its own
+// callbacks are never dropped. Same rule as OnSessionInventoryBulkReceived.
+func (d *Daemon) peerCallbackSuperseded(ss *cluster.SessionSync, which string, runWhenUnpublished bool) bool {
 	cur := d.getSessionSync()
-	if cur == nil || cur == ss {
+	if cur == ss || (cur == nil && runWhenUnpublished) {
 		return false
 	}
 	slog.Info("cluster: ignoring a peer callback from a replaced session-sync instance (#18521)",
