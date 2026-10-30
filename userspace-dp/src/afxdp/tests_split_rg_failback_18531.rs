@@ -1637,6 +1637,29 @@ fn dnat_to_local_forward_alias_is_still_host_gated_18531() {
             sessions.entry_with_origin(&alias.key).is_some(),
             "fixture: the alias is held ({family:?})"
         );
+        // The guard rewrites STORED dispositions on the HA transitions (the
+        // original bug was a refresh writing LocalDelivery onto an alias's
+        // reverse). A host-bound packet hit on a stored LocalDelivery row
+        // never reaches it, so the refresh is where the `is_reverse`
+        // conjunct is observable: this forward alias must stay host-bound.
+        crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
+            &mut sessions,
+            crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+            &owner_fwd,
+            &activated,
+            &Arc::new(ShardedNeighborMap::default()),
+            vec![1],
+            monotonic_nanos(),
+            now_secs,
+        );
+        let (refreshed, _, _) = sessions
+            .entry_with_origin(&alias.key)
+            .expect("alias present after the refresh");
+        assert_eq!(
+            refreshed.resolution.disposition,
+            ForwardingDisposition::LocalDelivery,
+            "a refresh keeps a DNAT-to-local forward alias host-bound ({family:?})"
+        );
         let wan_mac = [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01];
         let (frame, mut meta) = match (wan, local) {
             (IpAddr::V4(w), IpAddr::V4(l)) => {
