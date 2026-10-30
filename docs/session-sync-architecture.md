@@ -974,9 +974,14 @@ link-state refresh re-installs — keeps the generation. Before #18374 every
 install advanced it (twice per apply, counting the NAT-scope folder, which no
 snapshot reads), so an apply or an em0 link refresh landing inside the receive
 window discarded the whole bulk; the issue's journal census counted 113 such
-aborts on loss fw0. A genuine change, an unknown digest (a config the store
-cannot identify), or a legacy setter still advances it and still voids the
-reconcile.
+aborts on loss fw0. A config with DNS address-book names is applied as a
+private DNS-refresh clone; its install uses its recorded base's digest when
+that base is the store's compiled active config (DNS answers are not read by
+the fold). A genuine change, an unknown digest (a config the store cannot
+identify, such as a candidate or a DNS clone of a non-active config), or a
+legacy setter still advances it and still voids the reconcile. RG mastership is
+not part of the generation, before or after #18374: the snapshot judges by the
+primary answers captured at `BulkStart` (see #18548).
 
 ### Config-Epoch Guard (#5274)
 

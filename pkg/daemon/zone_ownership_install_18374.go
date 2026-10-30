@@ -20,11 +20,12 @@ import (
 // things, from the same table the closure was built from:
 //
 //   - the config by the store's canonical text digest (ActiveDigestFor). It is
-//     "" unless cfg IS the store's compiled active config, and "" makes the
-//     whole digest unknown, so an apply of anything else (a candidate, a test
-//     double) keeps the pre-#18374 always-advance behaviour. A DNS-refreshed
-//     clone shares the text digest; DNS answers are runtime address-book state
-//     (json:"-") that the fold does not read.
+//     "" unless cfg IS the store's compiled active config or a DNS-refresh
+//     clone whose recorded base is (zoneOwnershipConfigDigest), and "" makes
+//     the whole digest unknown, so an apply of anything else (a candidate, a
+//     test double) keeps the pre-#18374 always-advance behaviour. A
+//     DNS-refreshed clone shares the text digest; DNS answers are runtime
+//     address-book state (json:"-") that the fold does not read.
 //   - the ifindex->name table, the map the closure looks names up in. Link
 //     state, flags, MTU and addresses are not in it and do not change a fold;
 //     a recreated netdev (#15263) changes its ifindex, which does.
@@ -103,9 +104,33 @@ func (d *Daemon) zoneOwnershipInstall(cfg *config.Config, zoneRG cluster.ZoneRGM
 	if err != nil {
 		return cluster.ZoneOwnership{ZoneRG: zoneRG, FoldRG: buildZoneFoldRGMap(cfg)}
 	}
-	var cfgDigest string
-	if d.store != nil && cfg != nil {
-		cfgDigest = d.store.ActiveDigestFor(cfg)
+	return zoneOwnershipFromIfaces(cfg, zoneRG, d.zoneOwnershipConfigDigest(cfg), ifaces)
+}
+
+// zoneOwnershipConfigDigest is the canonical text digest for cfg, or "" when
+// the store cannot identify it.
+//
+// Every ordinary apply of a config with DNS address-book names runs on a
+// private CloneForDNSRefresh clone (resolveDNSBeforeApply, #16601/#16687),
+// and ActiveDigestFor(clone) is "" because the clone is not the store's
+// compiled object. Without the fallback, every such apply (DHCP-triggered
+// applyActiveConfig, feeds, applyConfig) installed an unknown digest and
+// advanced the generation, and the next unchanged link refresh advanced it
+// again against the zero digest the clone left (#18374 review, bulk-A). The
+// clone is a deep copy of its recorded base with only DNS answers refreshed
+// (RefreshDNSAddressBooks writes address-book entries alone), which the fold
+// does not read, so a clone whose base IS the compiled active config shares
+// that base's digest. The base mapping lives until the apply's deferred
+// consumeDNSResolved, i.e. across this install.
+func (d *Daemon) zoneOwnershipConfigDigest(cfg *config.Config) string {
+	if d.store == nil || cfg == nil {
+		return ""
 	}
-	return zoneOwnershipFromIfaces(cfg, zoneRG, cfgDigest, ifaces)
+	if digest := d.store.ActiveDigestFor(cfg); digest != "" {
+		return digest
+	}
+	if base := d.resolvedDNSBase(cfg); base != nil {
+		return d.store.ActiveDigestFor(base)
+	}
+	return ""
 }

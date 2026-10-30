@@ -112,6 +112,44 @@ func TestLinkRefreshWithUnchangedTableKeepsTheOwnershipGeneration18374(t *testin
 	}
 }
 
+// #18374 review (bulk-A): a config with DNS address-book names is applied as a
+// private CloneForDNSRefresh clone (resolveDNSBeforeApply), which the store
+// cannot identify. Measured before the fix: link refresh -> clone apply ->
+// unchanged link refresh moved the generation 1 -> 2 -> 3. The clone's install
+// must carry its base's digest when that base is the compiled active config.
+func TestDNSCloneApplyKeepsTheOwnershipGeneration18374(t *testing.T) {
+	d, ss, cfg := linkRefreshDaemon18374(t)
+	table := func() ([]net.Interface, error) {
+		return ifaces18374(2, "fxp0", 3, "em0", 5, "ge-0-0-1"), nil
+	}
+	d.refreshIngressFoldClosures(cfg, nil, table)
+	g := ss.ZoneOwnershipGeneration()
+
+	// Exactly what resolveDNSBeforeApply records for the apply's clone; the
+	// apply consumes the mapping only after it returns.
+	clone := cfg.CloneForDNSRefresh()
+	d.markDNSResolved(clone, cfg)
+	d.refreshIngressFoldClosures(clone, nil, table)
+	afterClone := ss.ZoneOwnershipGeneration()
+	d.consumeDNSResolved(clone)
+	d.refreshIngressFoldClosures(cfg, nil, table)
+	if afterClone != g || ss.ZoneOwnershipGeneration() != g {
+		t.Fatalf("#18374: an apply of the DNS-refresh clone of the active config moved the ownership generation "+
+			"%d -> %d, and the next unchanged link refresh -> %d; every DNS-named config would void in-flight "+
+			"bulk reconciles on each apply", g, afterClone, ss.ZoneOwnershipGeneration())
+	}
+
+	// A clone whose recorded base is NOT the compiled active config proves nothing.
+	stranger := cfg.CloneForDNSRefresh()
+	orphan := stranger.CloneForDNSRefresh()
+	d.markDNSResolved(orphan, stranger)
+	defer d.consumeDNSResolved(orphan)
+	d.refreshIngressFoldClosures(orphan, nil, table)
+	if ss.ZoneOwnershipGeneration() == g {
+		t.Fatal("a clone whose base is not the store's compiled config was judged content-equal")
+	}
+}
+
 // A config the store cannot identify (not its compiled active object) has no
 // provable content, so its install must advance — the pre-#18374 behaviour.
 func TestUnidentifiedConfigInstallAlwaysAdvances18374(t *testing.T) {
