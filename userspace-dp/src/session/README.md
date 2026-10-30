@@ -1463,12 +1463,17 @@ every idle entry ages, exactly as before):
   re-bucket; fires once per activation, then the entry ages normally.
   `first_held_ns` is left UNTOUCHED so a flapping RG cannot reset the leak
   ceiling.
-  The same edit is also applied outside the wheel by
-  `restamp_lapsed_peer_synced` (#18550), when a synced import lands on a
-  peer-synced row that is ALREADY idle-crossed on the node that forwards its
-  RG (`handle_upsert_synced`, `!allow_replace_local`). Without it the #16043
-  same-state anchor kept the row fail-closed at lookup until the wheel's next
-  visit, up to 255 s for a held row. Rows still within their window, the
+  The same edit, including recording the current epoch, is also applied
+  outside the wheel by `restamp_lapsed_peer_synced` (#18550). It runs when a
+  synced import lands on a peer-synced row that is ALREADY idle-crossed on the
+  node that forwards its RG (`handle_upsert_synced`, `!allow_replace_local`:
+  the owner RG is forwarding-active here, or the owner RG is 0 and any RG is).
+  Without it the #16043 same-state anchor kept the row fail-closed at lookup
+  until the wheel's next visit, up to 255 s for a held row. The epoch comes
+  from the worker's `rg_epochs` through the table's `rg_epoch_reader` (wired
+  in `worker_loop_setup`). Recording it spends the activation edge, so a
+  revived row that the flow has abandoned ages after one window instead of
+  being self-healed a second time. Rows still within their window, the
   standby, and local rows are untouched.
 - **HOLD** — this node does NOT forward the entry (standby / demotion
   window) and it is peer-synced or this node forwards something

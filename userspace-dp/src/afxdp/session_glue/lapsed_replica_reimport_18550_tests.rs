@@ -32,6 +32,15 @@ const ESTABLISHED_WIRE: u8 = 4;
 /// Past the 1800 s default established window.
 const LAPSE_SECS: u64 = 1_801;
 const SESSION_ID: u64 = 0x1855_0000_0001;
+/// The activation epoch of RG 1 on this node (bumped at activation).
+const RG_EPOCH: u32 = 3;
+
+/// The worker's RG activation-epoch reader, as `worker_loop_setup` wires it.
+fn epoch_table() -> SessionTable {
+    let mut sessions = SessionTable::new();
+    sessions.set_rg_epoch_reader(Arc::new(|_| RG_EPOCH));
+    sessions
+}
 
 fn active(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
     BTreeMap::from([(
@@ -175,7 +184,7 @@ fn fixture(v6: bool) -> Fixture {
     .expect("fixture: reverse companion must synthesize");
     let mut fx = Fixture {
         forwarding,
-        sessions: SessionTable::new(),
+        sessions: epoch_table(),
         shared: Arc::new(Mutex::new(FastMap::default())),
         shared_nat: Arc::new(Mutex::new(FastMap::default())),
         shared_forward_wire: Arc::new(Mutex::new(FastMap::default())),
@@ -273,6 +282,85 @@ fn late_reimport_revives_lapsed_replica_on_owner_v4_18550() {
 #[test]
 fn late_reimport_revives_lapsed_replica_on_owner_v6_18550() {
     assert_late_reimport_revives(true);
+}
+
+/// The wheel's HA view on the RG owner: RG 1 forwarded here at `RG_EPOCH`.
+fn run_wheel(fx: &mut Fixture, now_secs: u64) -> (Vec<SessionKey>, crate::session::WheelPopStats) {
+    let forwards_rg = |rg: i32| rg == RG || rg <= 0;
+    let epoch_of = |_: i32| RG_EPOCH;
+    let node_served = |_: &SessionKey| crate::session::NodeServedEvidence::default();
+    let ctx = crate::session::ExpireHaContext {
+        node_active: true,
+        forwards_rg: &forwards_rg,
+        epoch_of: &epoch_of,
+        ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
+        ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
+        node_served: &node_served,
+    };
+    let expired = fx
+        .sessions
+        .expire_stale_entries_ha(now_secs * SECS, Some(&ctx))
+        .into_iter()
+        .map(|expired| expired.key)
+        .collect();
+    (expired, fx.sessions.last_pop_stats())
+}
+
+/// A revived row the flow has abandoned ages after ONE idle window. The
+/// re-stamp spends the activation edge, as SELF-HEAL does. Without the epoch
+/// the import's install reset `seen_rg_epoch` to 0, the wheel self-healed the
+/// revived row a second time, and a dead flow lived about two windows.
+///
+/// The middle pass also proves the re-stamp re-bucketed the row. Its old
+/// install-time wheel hint is now stale and dropped. If it were still live,
+/// that pass would re-bucket the row itself.
+fn assert_revived_dead_row_ages_once(v6: bool) {
+    let mut fx = fixture(v6);
+    // First GC initialises the wheel cursor at T0, before anything is due.
+    let (expired, _) = run_wheel(&mut fx, T0_SECS);
+    assert!(expired.is_empty());
+    let t1 = T0_SECS + LAPSE_SECS;
+    reimport(&mut fx, v6, &active(t1), t1);
+    let (forward_key, reply_key) = (fx.forward_key.clone(), fx.reply_key.clone());
+
+    let (expired, stats) = run_wheel(&mut fx, t1 + 10);
+    assert!(
+        expired.is_empty(),
+        "revived row (v6={v6}) reaped before its new deadline"
+    );
+    assert_eq!(
+        (stats.re_bucketed, stats.healed_on_promote),
+        (0, 0),
+        "after the re-stamp (v6={v6}) the wheel still found a live install-time hint for the          revived rows: the re-stamp did not re-bucket them"
+    );
+
+    let t2 = t1 + LAPSE_SECS + 1;
+    let (expired, stats) = run_wheel(&mut fx, t2);
+    assert_eq!(
+        stats.healed_on_promote, 0,
+        "revived dead row (v6={v6}) was self-healed a second time: the re-stamp did not          record the activation epoch"
+    );
+    assert!(
+        expired.contains(&forward_key) && expired.contains(&reply_key),
+        "revived dead row (v6={v6}) was not reaped one idle window after the re-stamp          (expired {expired:?})"
+    );
+    assert_eq!(
+        expired.iter().filter(|key| **key == forward_key).count(),
+        1,
+        "forward half reaped more than once (v6={v6})"
+    );
+    assert!(fx.sessions.entry_with_origin(&forward_key).is_none());
+    assert!(fx.sessions.entry_with_origin(&reply_key).is_none());
+}
+
+#[test]
+fn revived_dead_row_ages_after_one_window_v4_18550() {
+    assert_revived_dead_row_ages_once(false);
+}
+
+#[test]
+fn revived_dead_row_ages_after_one_window_v6_18550() {
+    assert_revived_dead_row_ages_once(true);
 }
 
 /// Control: on the standby a lapsed replica stays in HOLD. Liveness renews

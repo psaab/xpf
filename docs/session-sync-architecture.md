@@ -259,8 +259,10 @@ Two windows remain.
    can be up to `HELD_RECHECK_HORIZON_NS` (255 s) away. Now, on the node that
    forwards the RG, `handle_upsert_synced` re-stamps a peer-synced row that is
    ALREADY crossed (`SessionTable::restamp_lapsed_peer_synced`, the same edit
-   as SELF-HEAL). The same import onto a reaped row installs a fresh anchor
-   anyway, so this removes a dependence on wheel timing. Unchanged:
+   as SELF-HEAL). It records the current activation epoch, so a revived row
+   the flow has abandoned ages after one window rather than being self-healed
+   again. The same import onto a reaped row installs a fresh anchor anyway, so
+   this removes a dependence on wheel timing. Unchanged:
    - a still-live row keeps its anchor (#16043);
    - the standby keeps HOLD semantics (#16880);
    - a LOCAL row is never re-stamped.

@@ -261,17 +261,20 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             sessions.stamp_leak_incarnation(&leak_key, leak_incarnation);
         }
         // #18550: on the node that forwards this entry's owner RG
-        // (`!allow_replace_local`), an import that landed on a row ALREADY
-        // past its idle deadline must not leave it fail-closed. The #16043
-        // same-incarnation rule kept the crossed anchor, and `IdleCrossed`
-        // does not fall back to the shared row, so every lookup missed until
-        // the wheel's SELF-HEAL visited the row. Here the wheel AGEs a crossed
-        // row once that edge is spent, and the same import onto the reaped
-        // (absent) row installs a fresh anchor, so the re-stamp only removes
-        // the dependence on which of the two ran first. It mirrors the
-        // SELF-HEAL arm. It is a no-op on a still-live row (the #16043 anchor
-        // stands), on the standby (HOLD, #16880), and on a LOCAL row (which
-        // the guard above refuses to replace here anyway).
+        // (`!allow_replace_local`: the owner RG is locally forwarding-active,
+        // or the owner RG is 0 and any RG is forwarding-active here), an
+        // import that landed on a row ALREADY past its idle deadline must not
+        // leave it fail-closed. The #16043 same-incarnation rule kept the
+        // crossed anchor, and `IdleCrossed` does not fall back to the shared
+        // row, so every lookup missed until the wheel's SELF-HEAL visited the
+        // row. Here the wheel AGEs a crossed row once that edge is spent, and
+        // the same import onto the reaped (absent) row installs a fresh
+        // anchor, so the re-stamp only removes the dependence on which of the
+        // two ran first. It mirrors the SELF-HEAL arm, including recording the
+        // activation epoch, so the revived row ages after ONE window. It is a
+        // no-op on a still-live row (the #16043 anchor stands), on the standby
+        // (HOLD, #16880), and on a LOCAL row (which the guard above refuses to
+        // replace here anyway).
         if !allow_replace_local {
             sessions.restamp_lapsed_peer_synced(&key, now_ns);
         }
