@@ -595,6 +595,38 @@ impl SessionTable {
         self.expire_stale_entries(now_ns).len() as u64
     }
 
+    /// #18550: re-stamp a peer-synced row that is ALREADY past its idle
+    /// deadline, exactly as the SELF-HEAL arm above does (`last_seen_ns = now`,
+    /// re-bucket; `first_held_ns` and `seen_rg_epoch` untouched).
+    ///
+    /// A crossed row is fail-closed at lookup (`SessionExpiryProbe::IdleCrossed`
+    /// does not fall back to the shared row), and a same-incarnation re-import
+    /// keeps its anchor (#16043), so on the node that forwards the owner RG a
+    /// late peer import could install the row, publish its steering rows and
+    /// still leave every lookup missing until the wheel's next visit, which
+    /// for a row coming out of HOLD can be up to `HELD_RECHECK_HORIZON_NS` away.
+    /// The caller (`handle_upsert_synced`) gates this on the node forwarding the
+    /// RG and on a peer-origin import. A row still within its window is left
+    /// alone: re-imports must not extend a live row (#16043). A LOCAL row is
+    /// never touched: an expired local session must not be resurrected by a
+    /// replica (`SessionExpiryProbe::IdleCrossed` contract).
+    pub(crate) fn restamp_lapsed_peer_synced(&mut self, key: &SessionKey, now_ns: u64) -> bool {
+        let Some(entry) = self.entry_by_key(key) else {
+            return false;
+        };
+        if !entry.origin.is_peer_synced()
+            || now_ns.saturating_sub(entry.last_seen_ns) <= entry.expires_after_ns
+        {
+            return false;
+        }
+        let Some(entry_mut) = self.entry_by_key_mut(key) else {
+            return false;
+        };
+        entry_mut.last_seen_ns = now_ns;
+        self.rebucket_alive_entry(key, now_ns);
+        true
+    }
+
     /// Re-bucket an entry whose `last_seen_ns` was refreshed by real
     /// activity, a companion keepalive, or SELF-HEAL. Leaving the held world
     /// clears its horizon marker; ordinary AGE/Close deadlines use the main

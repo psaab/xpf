@@ -4384,7 +4384,8 @@ fn a_pass1_refused_import_is_counted_and_not_published_6979_f1() {
 /// ```
 ///
 /// and they mean opposite things. The FIRST operand failing is correct
-/// behaviour: THIS node is forwarding-active for the owner RG, so the
+/// behaviour: THIS node is forwarding-active for the owner RG (or the owner RG
+/// is 0 and any RG is active here), so the
 /// coordinator leaves the steering publish to the workers, which publish after
 /// their own local-replace guard (#18550; this comment previously read "the
 /// peer owns the redundancy group", the inverse of what the predicate tests).

@@ -225,29 +225,87 @@ reserves before it publishes.
 **Late imports on an active owner (#18550) — published by the worker, not
 skipped.** A new owner keeps draining the peer's in-flight backlog after it
 activates the RG, so imports arrive for an RG this node already forwards. For
-such an import the coordinator does NOT write USERSPACE_SESSIONS itself (the
-`synced_entry_allows_local_replace` gate in `upsert_synced_session`), and the
-activation republish (`handle_activated_rgs`) has already run. The session is
-still made visible:
+such an import the coordinator does NOT write USERSPACE_SESSIONS itself: the
+`synced_entry_allows_local_replace` gate in `upsert_synced_session` is false
+when this node is forwarding-active for the owner RG, or when the owner RG is
+0 and any RG is forwarding-active here. The activation republish
+(`handle_activated_rgs`) has also already run. The session is still made
+visible:
 
-- the shared `synced`/`nat`/`forward_wire` publish of the forward entry and its
-  synthesized reverse is unconditional and synchronous, and the packet path
-  falls back to it on a worker-table miss (`lookup_session_across_scopes_*`);
+- the shared publish (`synced`, `nat`, `forward_wire`) of the forward entry and
+  its synthesized reverse is unconditional and synchronous. On a worker-table
+  miss the packet path falls back to `synced` and then the `forward_wire`
+  alias (`lookup_session_across_scopes_with_shared_and_payload`; it does not
+  read `nat`). That fallback runs only when the worker row is ABSENT;
 - the `UpsertSynced` fan-out always runs (a refused push is positional repair
   debt replayed from the shared row), and `handle_upsert_synced` publishes the
   entry's steering rows — its key plus, for a forward entry, the wire,
   reverse-wire and reverse-canonical rows — once `upsert_synced_with_origin`
   installs it.
 
-The only window is the worker's queue drain, during which the steering row is
-absent but the shared row is present; a shim miss for transit traffic or for a
-reply to an interface-SNAT address is XSK-redirected to the helper, never
-passed to the kernel. The deferral exists so a worker that still holds a
-newer LOCAL row (the promotion-vs-late-import race, where the shared map still
-shows the older peer row and the #9678 gate cannot see it) keeps that row and
-its rows alone: the worker refuses the import and writes nothing for the
-stale reply tuple. Pinned by `afxdp/tests_late_synced_publish_18550.rs`
-(v4 and v6; shared-local and worker-local shapes).
+Two windows remain.
+
+1. **Worker queue drain.** Until the worker drains its queue, the steering row
+   is absent but the shared row is present. A shim miss for transit traffic,
+   or for a reply to an interface-SNAT address, is XSK-redirected to the
+   helper and never passed to the kernel.
+2. **A worker row that is present but past its idle deadline.** The lookup
+   fails closed: `IdleCrossed`/`Stale` return no hit and do NOT consult the
+   shared row (the `SessionExpiryProbe::IdleCrossed` contract: a stale local
+   record must not be resurrected by its replica). Before #18550, a late
+   same-incarnation import landing on such a row kept the crossed anchor
+   (#16043). The row therefore stayed fail-closed until `RefreshOwnerRGS` or
+   the wheel's SELF-HEAL re-stamped it, and for a row coming out of HOLD that
+   can be up to `HELD_RECHECK_HORIZON_NS` (255 s) away. Now, on the node that
+   forwards the RG, `handle_upsert_synced` re-stamps a peer-synced row that is
+   ALREADY crossed (`SessionTable::restamp_lapsed_peer_synced`, the same edit
+   as SELF-HEAL). The same import onto a reaped row installs a fresh anchor
+   anyway, so this removes a dependence on wheel timing. Unchanged:
+   - a still-live row keeps its anchor (#16043);
+   - the standby keeps HOLD semantics (#16880);
+   - a LOCAL row is never re-stamped.
+
+   A crossed row that receives no import still waits for `RefreshOwnerRGS` or
+   SELF-HEAL.
+
+**What a missed reply does.** A reply to an interface-SNAT address that misses
+in the helper (absent or lapsed row) takes the session-miss resolution: either
+`ingress_interface_local_resolution_on_session_miss` or
+`interface_nat_local_resolution_on_session_miss`, both in `poll_descriptor`.
+That gives LocalDelivery. The strict-SYN gate exempts LocalDelivery, so the
+packet reaches the host-inbound gate:
+
+- If the ingress zone does not admit the service, it is a silent drop. The
+  loss WAN zone admits only `ping; gre`, so there a lapsed row is a stall, not
+  an RST.
+- If the zone admits the service, the packet is delivered to the local stack,
+  where any kernel RST is subject to `xpf_dp_rst`.
+
+Measured in the #18550 review with the poll harness:
+
+| Case | session_hit | session_miss | host_inbound_deny | local |
+|---|---|---|---|---|
+| fresh row | 1 | | | |
+| lapsed row, `ping; gre` | | 1 | 1 | 1 (counted, not delivered) |
+| lapsed row, `any-service` | | 1 | 0 | 1 (delivered) |
+
+**Promotion vs late import.** When the worker has promoted the row locally but
+the shared map still shows the older peer row, the #9678 gate cannot see the
+local owner and the import proceeds.
+
+- The worker's own guard keeps the local forward row and never steers the late
+  forward translation.
+- The shared map is overwritten with the older peer row.
+- If the late row names a different translation, its synthesized reverse
+  companion is installed and its reply tuple is steered.
+
+This race, including a possible SNAT reservation free, is tracked in #18552.
+Pinned by:
+
+- `afxdp/tests_late_synced_publish_18550.rs`: v4 and v6; the late-publish,
+  shared-local and worker-local shapes;
+- `afxdp/session_glue/lapsed_replica_reimport_18550_tests.rs`: v4 and v6;
+  the lapsed-row revive cell, plus standby, live-anchor and local-row controls.
 
 **#7209 — an admitted import with no kernel session map is now visible.** After
 the reservation, `upsert_synced_session` publishes the row to the kernel session
@@ -258,7 +316,8 @@ if synced_entry_allows_local_replace(..) && let Some(fd) = ..session_map_fd
 ```
 
 whose two operands mean opposite things. The FIRST failing is correct: THIS node
-is forwarding-active for the entry's owner RG, so the coordinator leaves the
+is forwarding-active for the entry's owner RG (or the owner RG is 0 and any RG
+is forwarding-active here), so the coordinator leaves the
 steering publish to the workers, which publish only after their own
 local-replace guard admits the entry (see "Late imports on an active owner"
 below; this sentence previously read "the peer owns the redundancy group", the

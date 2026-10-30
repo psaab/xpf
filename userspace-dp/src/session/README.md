@@ -902,7 +902,9 @@ Opening replica (20 s window) is idle at 20 s and reaped at about 20 + 60 s;
 an Established one (1800 s) is not even idle for 30 min and is held a
 further 90 min. Note the packet path refuses an idle-crossed row before the
 GC ever reaps it: a held Opening replica older than 20 s misses on the first
-post-failback packet until the activation `RefreshOwnerRGS` re-stamps it.
+post-failback packet until the activation `RefreshOwnerRGS` re-stamps it, or
+until a synced import lands on it on the node that now forwards its RG
+(`restamp_lapsed_peer_synced`, #18550).
 
 Cells: `afxdp/session_glue/cross_worker_handshake_18520_tests.rs` (upload and
 download splits establish both tables and A emits an Established HA Update;
@@ -1461,6 +1463,13 @@ every idle entry ages, exactly as before):
   re-bucket; fires once per activation, then the entry ages normally.
   `first_held_ns` is left UNTOUCHED so a flapping RG cannot reset the leak
   ceiling.
+  The same edit is also applied outside the wheel by
+  `restamp_lapsed_peer_synced` (#18550), when a synced import lands on a
+  peer-synced row that is ALREADY idle-crossed on the node that forwards its
+  RG (`handle_upsert_synced`, `!allow_replace_local`). Without it the #16043
+  same-state anchor kept the row fail-closed at lookup until the wheel's next
+  visit, up to 255 s for a held row. Rows still within their window, the
+  standby, and local rows are untouched.
 - **HOLD** — this node does NOT forward the entry (standby / demotion
   window) and it is peer-synced or this node forwards something
   (`peer_synced || node_active`, the "in a cluster" guard that excludes a

@@ -997,8 +997,9 @@ impl crate::afxdp::ha::SessionDomain {
     /// ```
     ///
     /// where the FIRST operand failing is a deliberate ownership decision — THIS
-    /// node is forwarding-active for the owner RG (#18550 corrected an earlier
-    /// "the peer owns the RG" reading, which is the opposite), so the coordinator
+    /// node is forwarding-active for the owner RG, or the owner RG is 0 and any
+    /// RG is forwarding-active here (#18550 corrected an earlier "the peer owns
+    /// the RG" reading, which is the opposite), so the coordinator
     /// leaves the steering publish to the workers, which publish only after
     /// their own local-replace guard admits the entry — while the SECOND failing
     /// is a gap: the entry is recorded in the shared map and answered to Go as
@@ -1779,7 +1780,8 @@ impl crate::afxdp::ha::SessionDomain {
         // the local SessionTable would actually accept.
         //
         // #18550: skipping this publish when THIS node is forwarding-active
-        // for the owner RG (a late import drained after takeover) does NOT
+        // for the owner RG (or the owner RG is 0 and any RG is active here),
+        // e.g. a late import drained after takeover, does NOT
         // leave the session unsteered. The shared publish above is
         // unconditional and the worker fan-out below always runs; each
         // worker's `handle_upsert_synced` applies the same guard in
