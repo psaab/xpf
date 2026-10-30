@@ -619,6 +619,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             now_secs,
             &resolved.decision,
             &resolved.metadata,
+            resolved_key,
             resolution_target,
             looked_up_resolution,
             super::FabricArrival::Packet {
@@ -881,6 +882,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         now_secs,
         &resolved.decision,
         &resolved.metadata,
+        &flow.forward_key,
         resolution_target,
         looked_up_resolution,
         super::FabricArrival::Packet {

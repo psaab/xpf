@@ -577,28 +577,6 @@ worker_id: u32,) {
     } else {
         None
     };
-    // #18531 (review N1): a forward row keyed by the TRANSLATED tuple is the
-    // forward-wire alias of a flow whose canonical (original-tuple) row this
-    // node does not hold: the RG-taking node can hold only the alias plus the
-    // reverse. Its Close names the alias key, and the peer holding the
-    // canonical row (the LAN node, which declines a redirected row's SNAT
-    // judgment and relies on this owner's revocation) matches deletes on the
-    // exact key, so it kept applying the withdrawn translation. The reverse
-    // row's own NAT names the original tuple (the same self-inverse transform
-    // as `companion_key` above). Close that tuple too, so the peer's canonical
-    // pair goes. The one condition is that the recovered tuple is not held
-    // here, checked before either half is deleted. That excludes every
-    // non-alias teardown, whose recovery names the torn-down row itself (a
-    // canonical forward row, or the reverse row a reverse-keyed teardown
-    // starts from). It also excludes an alias whose canonical row this worker
-    // holds: that row is judged and closed on its own hits.
-    let alias_canonical_key = companion
-        .as_ref()
-        .map(|(companion_decision, _, _)| {
-            reverse_session_key(&companion_key, companion_decision.nat)
-        })
-        .filter(|canonical| sessions.entry_with_origin(canonical).is_none());
-    let alias_session_id = sessions.session_id_for(key);
 
     delete_terminal_half(
         worker_id,
@@ -623,19 +601,6 @@ worker_id: u32,) {
             companion_decision,
             &companion_metadata,
             companion_origin,
-        );
-    }
-    if let Some(canonical_key) = alias_canonical_key {
-        // Sync signal only: no local row exists under this key. The empty
-        // snapshot keeps the alias Close the one carrying the flow's counters.
-        sessions.emit_close_delta_with_snapshot(
-            canonical_key,
-            decision,
-            metadata.clone(),
-            origin,
-            false,
-            alias_session_id,
-            Default::default(),
         );
     }
 }

@@ -1928,7 +1928,14 @@ impl crate::afxdp::ha::SessionDomain {
         mode: SyncedDeleteMode,
         forward_only: bool,
     ) -> SyncedDeleteOutcome {
-        self.delete_synced_session_gen_marked(
+        // #18531 (review N1): resolve before the delete runs, while the
+        // forward-wire index still names the canonical row.
+        let alias_canonical = if mode.peer && !forward_only {
+            self.canonical_for_translated_peer_delete(&key)
+        } else {
+            None
+        };
+        let outcome = self.delete_synced_session_gen_marked(
             key,
             0,
             mode.peer,
@@ -1938,7 +1945,47 @@ impl crate::afxdp::ha::SessionDomain {
             mode.expected_id_u64(),
             None,
             None,
+        );
+        if let Some(canonical) = alias_canonical {
+            // The canonical pair goes under the same mode, so the #9714
+            // locally-owned guard and the #10512 identity check apply to it
+            // exactly as to a delete that named it.
+            let _ = self.delete_synced_session_gen_marked(
+                canonical,
+                0,
+                mode.peer,
+                false,
+                None,
+                mode.strict_mirror,
+                mode.expected_id_u64(),
+                None,
+                None,
+            );
+        }
+        outcome
+    }
+
+    /// #18531 (review N1): the canonical (original-tuple) forward row that a
+    /// PEER delete names by its translated tuple. A peer that holds only the
+    /// forward-wire alias of a flow closes it under the translated key: its
+    /// reverse was synthesized from the alias, so it cannot know the original
+    /// source. This node matches deletes on the exact key, so its canonical
+    /// row survived the peer's revocation and kept applying the withdrawn
+    /// translation. Resolved only when this node holds NO row under the
+    /// named key, so a delete of a key it holds (including Go's #6368
+    /// stale-epoch rollback of an install that landed) is never widened. The
+    /// forward-wire index holds only forward rows, keyed by their translated
+    /// tuple, and an ambiguous index entry resolves to nothing.
+    fn canonical_for_translated_peer_delete(&self, key: &SessionKey) -> Option<SessionKey> {
+        if lock_shared_recover(&self.sessions.synced).contains_key(key) {
+            return None;
+        }
+        crate::afxdp::shared_ops::lookup_shared_forward_wire_match(
+            &self.sessions.forward_wire,
+            &self.sessions.owner_rg_indexes,
+            key,
         )
+        .map(|canonical| canonical.key)
     }
 
     pub fn delete_synced_session(

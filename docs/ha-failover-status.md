@@ -468,16 +468,37 @@ The rules now:
   non-owner is not a redirect, so its stored line is judged here as before
   (#12187: a later same-tuple static SNAT revokes there). The #12187 cell
   pins both. A live `FabricRedirect` never stands in.
-- **An alias-only owner closes the canonical tuple too.** The owner's
-  revocation is what removes the LAN node's declined row. An owner that
-  holds only the translated alias (plus the reverse) emitted a Close keyed
-  on the translated tuple, and the LAN node, which matches peer deletes on
-  the exact key, kept its original-tuple row and its withdrawn
-  translation. `delete_terminal_filtered_session` now also emits a Close
-  for the canonical tuple, recovered from the reverse row's NAT, when it
-  tears down a translated forward row and holds no canonical row. That
-  Close carries no counters, but it is a second RT_FLOW `SESSION_CLOSE`
-  record (for the original tuple) beside the alias's.
+- **A peer delete of the translated tuple removes the canonical row.** The
+  owner's revocation is what removes the LAN node's declined row. An owner
+  that holds only the translated alias (plus the reverse synthesized from
+  it) can name nothing but the translated tuple, and the LAN node, which
+  matched peer deletes on the exact key, kept its original-tuple row and its
+  withdrawn translation. `SessionDomain::delete_synced` now resolves a
+  peer delete of a key this node does not hold through the forward-wire
+  index to the canonical row it names, and deletes that pair under the same
+  mode (so the #9714 locally-owned guard and the #10512 identity check still
+  apply). A delete of a key this node holds is never widened, so Go's #6368
+  stale-epoch rollback of an install that landed deletes only that key.
+  (e760f5eef5 first had the owner close the canonical tuple, recovered from
+  its reverse row; that cannot work for the production alias-only owner,
+  whose reverse was synthesized from the alias, and was removed.)
+- **An alias's reverse is handed to the peer, never to the host.** A reverse
+  synthesized from a forward-wire alias takes the alias key's source as the
+  client, which is the SNAT address itself: its un-NAT rewrites nothing.
+  On the node that owns the egress RG that address is local, so the target
+  lookup answered `LocalDelivery`, and the next WAN reply ran the
+  host-inbound gate, was denied and tore the pair down (diag6: the five
+  streams fw0 lost were exactly the five it held only as the alias; the
+  activation `RefreshOwnerRGS` logged `old_disp=FabricRedirect
+  new_disp=LocalDelivery`). A reverse whose un-NAT names its own wire
+  destination (`reverse_un_nat_targets_itself`) now resolves to the fabric
+  redirect toward the peer that holds the canonical row, at synthesis and
+  in the one re-resolution pipeline (`reresolve_stored_session`: session
+  hit, `RefreshOwnerRGS`, `DemoteOwnerRGS`). A fabric-borne reply on such a
+  row is dropped, never bounced. A reverse that un-NATs to a genuinely
+  local address other than its wire destination is still host-bound and
+  still gated. The LAN node's own reverse rows un-NAT to the client and are
+  unaffected.
 
 A withdrawn translation is revoked by the node that owns the egress, on
 its next slow-path hit with a stale stamp. That is not every redirected
@@ -506,13 +527,19 @@ production poll pipeline on the captured split snapshots, and by the
 The daemon-side routing of the owner's Close is the existing owner-RG gate
 and is not covered by those cells; the two-node cell
 `alias_only_owner_revocation_removes_lan_row_18531` feeds the owner's
-Close keys to the LAN node as the peer deletes the daemon sends. Residuals
-are tracked in #18535:
+Close keys to the LAN node's coordinator as the peer deletes the daemon
+sends (the Go legs were read, not run). Residuals are tracked in #18535:
 - a translated alias row removed in the RG gap, so an alias-only copy
   loses the flow (fixed here);
 - activation before the connected-RG FIB republish (open);
 - scope-less imports not judged by the owner (open);
-- the reverse-side window above (open, pinned).
+- the reverse-side window above (open, pinned);
+- why the RG-taking node holds only the alias of some flows: its import of
+  the canonical row is refused (`RejectedReserve` in the harness whatever
+  the order; the production cause for which flows is unconfirmed). The
+  alias-only owner now survives the activation and its revocation reaches
+  the LAN node, but it still cannot un-NAT replies itself, so it depends on
+  the peer holding the canonical row (open).
 
 ### Never-again gates
 

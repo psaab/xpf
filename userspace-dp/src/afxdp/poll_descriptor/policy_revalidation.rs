@@ -1414,8 +1414,9 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     //   egress the peer believes this node owns. This node does not
     //   forward it (dropped, or the adopted candidate under #16217), so it
     //   does not judge the translation; the egress owner does, and its
-    //   Close removes this copy (an alias-only owner closes the canonical
-    //   tuple as well, `delete_terminal_filtered_session`).
+    //   Close removes this copy (an alias-only owner's Close names the
+    //   translated tuple, which this node resolves to its canonical row,
+    //   `SessionDomain::delete_synced`).
     // - Direct arrival on a non-owner: not a redirect. Nothing hands the
     //   judgment to a peer, so the stored line is judged here, as before
     //   (#12187: a later same-tuple static SNAT still revokes).
@@ -1472,8 +1473,9 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // that emits reaches this node as a peer delete, which can remove a
     // locally-authored redirect row because the row keeps its egress RG
     // (`persisted_owner_rg_for_resolution`). An owner holding only the
-    // translated alias closes the canonical tuple as well
-    // (`delete_terminal_filtered_session`), so the delete names this row.
+    // translated alias closes the translated tuple; this node resolves that
+    // peer delete through its forward-wire index to this row
+    // (`SessionDomain::delete_synced`).
     // Reverse hits do not substitute (the reply's own resolution is the
     // LAN egress), so a reply that arrives first after the RG returns
     // judges the stored redirect and declines until `RefreshOwnerRGS`
