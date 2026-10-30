@@ -3,6 +3,13 @@ xpf (0.0.0) unstable; urgency=medium
     and the boot-barrier units that shadowed the packaged units
     (KillMode=control-group on loss/tcp), daemon-reloads and asserts each
     loaded unit is the packaged file, rolling back otherwise (#18544).
+  * Userspace dataplane: wake the helper's socket accept loops on a pending
+    connection instead of sleeping the poll interval, so HA bulk session
+    installs no longer pay ~10 ms per session-socket request (#18541).
+  * Cluster: keep the session-sync ownership generation on a content-equal
+    re-install, so a config apply or link-state refresh no longer discards
+    an in-flight cold-prime bulk; genuine ownership changes still void the
+    reconcile (#18374).
   * Dataplane: include live branch-stat and v6 proxy-NDP maps in the
     retained userspace-XDP shim allowlist with their BPF map types
     (#18390).

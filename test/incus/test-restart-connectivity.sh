@@ -33,6 +33,8 @@ xpf_enter_destructive_cluster_cell "test-restart-connectivity $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/deploy-lib.sh
+source "${SCRIPT_DIR}/deploy-lib.sh"
 
 IPERF_TARGET="${IPERF_TARGET:-$IPERF_TARGET4}"
 RESTART_CYCLES="${RESTART_CYCLES:-3}"
@@ -58,38 +60,18 @@ instance_running() {
 	[[ "$status" == "RUNNING" ]]
 }
 
+# #18523: fw0 owns every RG only when both nodes' own views agree. The
+# shared deploy-lib.sh helper is the one deploy-lib-selftest.sh drives.
 fw0_is_primary() {
-	local status
-	status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	for rg in 0 1 2; do
-		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node0.*primary"; then
-			return 1
-		fi
-	done
-	return 0
+	deploy_restore_fw0_owns_all
 }
 
+# #18523: the polled restore and its verdict (a refused or over-budget
+# restore FAILs; see deploy_restore_fw0_primary and RESTORE_FW0_WAIT /
+# RESTORE_FW0_BUDGET in docs/testing-procedures.md) live in deploy-lib.sh,
+# shared with the other HA smoke so the selftest drives the code run here.
 restore_fw0_primary() {
-	local label="$1"
-	if fw0_is_primary; then
-		return 0
-	fi
-	for rg in 0 1 2; do
-		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-	done
-	sleep 1
-	for rg in 0 1 2; do
-		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>/dev/null || true
-	done
-	sleep 5
-	if fw0_is_primary; then
-		pass "$label: fw0 restored as primary"
-		return 0
-	else
-		fail "$label: could not restore fw0 as primary"
-		return 1
-	fi
+	deploy_restore_fw0_primary "$1"
 }
 
 cleanup() {

@@ -286,7 +286,7 @@ func (s *SessionSync) SendFailover(rgID int) (uint64, error) {
 	case failoverTripSendFailed:
 		slog.Warn("cluster sync: failover send error", "err", res.Err, "rg", rgID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(res.UsedConn)
+		s.disconnectConn(res.UsedConn, "failover request write failed", res.Err)
 		return 0, fmt.Errorf("failed to send failover request: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: failover request sent to peer", "rg", rgID)
@@ -321,7 +321,7 @@ func (s *SessionSync) SendFailoverBatch(rgIDs []int) (uint64, error) {
 	case failoverTripSendFailed:
 		slog.Warn("cluster sync: batch failover send error", "err", res.Err, "rgs", ids)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(res.UsedConn)
+		s.disconnectConn(res.UsedConn, "batch failover request write failed", res.Err)
 		return 0, fmt.Errorf("failed to send batch failover request: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: batch failover request sent to peer", "rgs", ids)
@@ -371,7 +371,7 @@ func (s *SessionSync) SendFailoverCommit(rgID int, reqID uint64) error {
 	case failoverTripSendFailed:
 		slog.Warn("cluster sync: failover commit send error", "err", res.Err, "rg", rgID, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(res.UsedConn)
+		s.disconnectConn(res.UsedConn, "failover commit write failed", res.Err)
 		return fmt.Errorf("failed to send failover commit: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: failover commit sent to peer", "rg", rgID, "req_id", reqID)
@@ -406,7 +406,7 @@ func (s *SessionSync) SendFailoverCommitBatch(rgIDs []int, reqID uint64) error {
 	case failoverTripSendFailed:
 		slog.Warn("cluster sync: batch failover commit send error", "err", res.Err, "rgs", ids, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(res.UsedConn)
+		s.disconnectConn(res.UsedConn, "batch failover commit write failed", res.Err)
 		return fmt.Errorf("failed to send batch failover commit: %w", res.Err)
 	case failoverTripTimedOut:
 		slog.Info("cluster sync: batch failover commit sent to peer", "rgs", ids, "req_id", reqID)
@@ -472,7 +472,7 @@ func (s *SessionSync) SendFence() error {
 	if err != nil {
 		slog.Warn("cluster sync: fence send error", "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "fence write failed", err)
 		return fmt.Errorf("failed to send fence message: %w", err)
 	}
 	s.stats.FencesSent.Add(1)
@@ -515,7 +515,34 @@ func (s *SessionSync) handleRemoteFailover(conn net.Conn, rgID int, reqID uint64
 			return
 		}
 	}
+	if !s.transferOutStillHeld([]int{rgID}, reqID) {
+		s.sendFailoverAckFrame(conn, syncMsgFailoverAck, []int{rgID}, reqID, failoverAckFailed, errTransferHoldReleased.Error())
+		return
+	}
 	s.sendFailoverAckFrame(conn, syncMsgFailoverAck, []int{rgID}, reqID, failoverAckApplied, "")
+}
+
+// errTransferHoldReleased is the failed-ack detail for a transfer whose owner
+// hold was released before the applied-ack went out (#18521 review round 3).
+var errTransferHoldReleased = errors.New("owner hold released before the transfer was acknowledged (the owner may be primary again)")
+
+// transferOutStillHeld runs the TransferOutStillHeld check, logging a refusal.
+// The requester treats the failed ack like any other: it restores its own
+// hold and does not promote, so the owner the rescue re-promoted stays the
+// only primary. The lease, if still armed, is released (reqID-bound).
+func (s *SessionSync) transferOutStillHeld(rgIDs []int, reqID uint64) bool {
+	if s.TransferOutStillHeld == nil || s.TransferOutStillHeld(rgIDs, reqID) {
+		return true
+	}
+	slog.Warn("cluster sync: owner hold for a remote transfer was released before its applied-ack; "+
+		"acknowledging failed so the requester does not promote beside a re-promoted owner (#18521)",
+		"rgs", rgIDs, "req_id", reqID)
+	if len(rgIDs) == 1 && s.OnRemoteFailoverAbort != nil {
+		_ = s.OnRemoteFailoverAbort(rgIDs[0], reqID)
+	} else if len(rgIDs) > 1 && s.OnRemoteFailoverAbortBatch != nil {
+		_ = s.OnRemoteFailoverAbortBatch(rgIDs, reqID)
+	}
+	return false
 }
 func (s *SessionSync) handleRemoteFailoverBatch(conn net.Conn, rgIDs []int, reqID uint64) {
 	if s.OnRemoteFailoverBatch == nil {
@@ -544,6 +571,10 @@ func (s *SessionSync) handleRemoteFailoverBatch(conn net.Conn, rgIDs []int, reqI
 			s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, err.Error())
 			return
 		}
+	}
+	if !s.transferOutStillHeld(rgIDs, reqID) {
+		s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckFailed, errTransferHoldReleased.Error())
+		return
 	}
 	s.sendFailoverAckFrame(conn, syncMsgFailoverBatchAck, rgIDs, reqID, failoverAckApplied, "")
 }
@@ -596,7 +627,7 @@ func (s *SessionSync) SendFailoverAbort(rgID int, reqID uint64) error {
 	if err != nil {
 		slog.Warn("cluster sync: failover abort send error", "err", err, "rg", rgID, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "failover abort write failed", err)
 		return fmt.Errorf("failed to send failover abort: %w", err)
 	}
 	slog.Info("cluster sync: failover abort sent to peer", "rg", rgID, "req_id", reqID)
@@ -629,7 +660,7 @@ func (s *SessionSync) SendFailoverAbortBatch(rgIDs []int, reqID uint64) error {
 	if err != nil {
 		slog.Warn("cluster sync: batch failover abort send error", "err", err, "rgs", ids, "req_id", reqID)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "batch failover abort write failed", err)
 		return fmt.Errorf("failed to send batch failover abort: %w", err)
 	}
 	slog.Info("cluster sync: batch failover abort sent to peer", "rgs", ids, "req_id", reqID)
@@ -712,7 +743,7 @@ func (s *SessionSync) sendFailoverAckFrame(conn net.Conn, msgType uint8, rgIDs [
 	}
 	s.writeMu.Unlock()
 	if firstErr != nil && ackConn != nil && ackConn != conn {
-		s.handleDisconnect(ackConn)
+		s.disconnectConn(ackConn, "failover result write failed", firstErr)
 	}
 	if err != nil {
 		if single {
@@ -724,7 +755,7 @@ func (s *SessionSync) sendFailoverAckFrame(conn net.Conn, msgType uint8, rgIDs [
 			slog.Warn("cluster sync: batch failover result send error", "err", err, "msg_type", msgType, "rgs", rgIDs, "req_id", reqID, "status", status)
 		}
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "failover result write failed", err)
 		return
 	}
 	if single {

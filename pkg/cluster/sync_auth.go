@@ -395,6 +395,11 @@ type authConn struct {
 	// receiveLoop goroutine that owns this connection — no lock needed.
 	recvSeq  uint64
 	recvSeen bool
+
+	// diag is the #18521 teardown diagnostics: install time, receive-loop
+	// counters, the in-flight handler the watchdog reports, and the first
+	// teardown reason. See sync_conn_teardown_18521.go.
+	diag syncConnDiag
 }
 
 // readAuthed reports whether inbound frames on this connection carry a trailer
@@ -616,6 +621,7 @@ func (s *SessionSync) performSyncHandshake(conn net.Conn, initiator bool, fabric
 // handled only after the handshake has completed and the connection is wrapped.
 func (s *SessionSync) wrapSyncConn(fabricIdx int, conn net.Conn, mode syncAuthMode, keys syncNoiseKeysWithPSK) *authConn {
 	ac := &authConn{Conn: conn}
+	ac.diag.installedMono.Store(MonotonicNanos())
 	if mode == syncAuthAuthenticated {
 		// #7163: the two directions get INDEPENDENT keys, straight from the
 		// Noise Split(). Before this they were the same bytes, which is what

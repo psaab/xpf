@@ -1323,14 +1323,20 @@ pub(super) fn populate_interfaces(
                         .entry(iface.ifindex)
                         .or_default()
                         .push(prefix);
-                    if !iface.connected_rg_peer_owned {
-                        state.connected_v4.push(ConnectedRouteV4 {
-                            prefix,
-                            host: v4.addr(),
-                            ifindex: iface.ifindex,
-                            tunnel_endpoint_id,
-                            table: connected_table_v4.clone(),
-                        });
+                    // #18517: a peer-owned row is withheld from transit
+                    // (#15742) but recorded with its own table, so the FIB
+                    // build can bind a bare gateway to it and to nothing else.
+                    let row = ConnectedRouteV4 {
+                        prefix,
+                        host: v4.addr(),
+                        ifindex: iface.ifindex,
+                        tunnel_endpoint_id,
+                        table: connected_table_v4.clone(),
+                    };
+                    if iface.connected_rg_peer_owned {
+                        state.connected_v4_peer_owned.push(row);
+                    } else {
+                        state.connected_v4.push(row);
                     }
                 }
                 IpNet::V6(v6) => {
@@ -1381,15 +1387,19 @@ pub(super) fn populate_interfaces(
                         .entry(iface.ifindex)
                         .or_default()
                         .push(prefix);
-                    if !iface.connected_rg_peer_owned {
-                        state.connected_v6.push(ConnectedRouteV6 {
-                            prefix,
-                            host: v6.addr(),
-                            scope: addr.scope,
-                            ifindex: iface.ifindex,
-                            tunnel_endpoint_id,
-                            table: connected_table_v6.clone(),
-                        });
+                    // #18517: see the v4 arm.
+                    let row = ConnectedRouteV6 {
+                        prefix,
+                        host: v6.addr(),
+                        scope: addr.scope,
+                        ifindex: iface.ifindex,
+                        tunnel_endpoint_id,
+                        table: connected_table_v6.clone(),
+                    };
+                    if iface.connected_rg_peer_owned {
+                        state.connected_v6_peer_owned.push(row);
+                    } else {
+                        state.connected_v6.push(row);
                     }
                 }
             }

@@ -127,7 +127,7 @@ func TestBarrierAdmissionSerializesSurvivorReplacement_10387(t *testing.T) {
 	owed := ss.coldPrimeOwedGen()
 	ss.pendingBulkOwed.Store(owed)
 	ss.pendingBulkAckEpoch.Store(1)
-	ss.pendingBulkAckSince.Store(time.Now().UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos())
 
 	reachedGate := make(chan struct{})
 	releaseGate := make(chan struct{})
@@ -227,7 +227,7 @@ func TestBarrierAdmissionRejectsColdPrimeRearm_10387(t *testing.T) {
 	owed := ss.coldPrimeOwedGen()
 	ss.pendingBulkOwed.Store(owed)
 	ss.pendingBulkAckEpoch.Store(1)
-	ss.pendingBulkAckSince.Store(time.Now().UnixNano())
+	ss.pendingBulkAckSince.Store(MonotonicNanos())
 	ss.testAfterColdPrimeBarrierGate = func() {
 		ss.testAfterColdPrimeBarrierGate = nil
 		ss.mu.Lock()

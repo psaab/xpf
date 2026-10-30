@@ -3099,6 +3099,398 @@ node0   200
 	fi
 }
 
+# #18523: `show chassis cluster status` prints Takeover/Transfer/Forwarding
+# sub-lines under the LOCAL node's row, so on fw0 the node1 row sits four
+# lines below the header. The HA smokes read every (node, RG) through
+# deploy_node_rg_role; the control proves the `grep -A2` window they used
+# misses exactly this row.
+test_rg_role_reader_skips_local_sublines_18523() {
+	local split='Redundancy group: 1 , Failover count: 1
+node0  200      secondary-hold no       yes      None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=inactive vrrp-master=none
+node1  100      primary        no       no       None
+
+Redundancy group: 2 , Failover count: 0
+node0  200      primary        no       no       None
+  Takeover ready: yes
+  Transfer ready: yes
+  Forwarding: rg-active=active vrrp-master=none
+node1  100      secondary      no       no       None
+'
+	local old_window
+	old_window=$(printf '%s' "$split" | grep -A2 "Redundancy group: 1" | grep node1 | awk '{print $3}' || true)
+	if [[ $(printf '%s' "$split" | deploy_node_rg_role node1 1) == primary ]] &&
+		[[ $(printf '%s' "$split" | deploy_node_rg_role node0 1) == secondary-hold ]] &&
+		[[ $(printf '%s' "$split" | deploy_node_rg_role node1 2) == secondary ]] &&
+		[[ -z "$old_window" ]]; then
+		ok "RG role reader: peer row below local sub-lines is read; grep -A2 misses it (#18523)"
+	else
+		bad "RG role reader: peer row below local sub-lines (#18523) not read, or the grep -A2 control no longer misses it"
+	fi
+}
+
+# #18523: each node's own `Forwarding: rg-active=` line is the forwarding
+# authority. Missing, duplicated, wrong-RG and non-active/inactive lines fail
+# (rc 1). A DIVERGENCE suffix, or any token besides rg-active=/vrrp-master=,
+# is surfaced (rc 2, `<value> -- <suffix>`) so a caller comparing against a
+# bare value FAILs and names it; the reader used to drop it.
+test_rg_local_forwarding_reader_18523() {
+	local fw1_view='Redundancy group: 1 , Failover count: 4
+node1  100      primary        no       no       None
+  Forwarding: rg-active=active vrrp-master=none
+node0  200      secondary-hold no       yes      None
+
+Redundancy group: 2 , Failover count: 3
+node1  100      secondary      no       no       None
+  Forwarding: rg-active=inactive vrrp-master=none
+node0  200      primary        no       no       None
+'
+	local dup='Redundancy group: 1 , Failover count: 1
+node0  200      primary        no       no       None
+  Forwarding: rg-active=active vrrp-master=none
+  Forwarding: rg-active=inactive vrrp-master=none
+'
+	local partial='Redundancy group: 1 , Failover count: 1
+node0  200      secondary-hold no       yes      None
+  Forwarding: rg-active=inactive vrrp-master=partial -- DIVERGENCE: VRRP master on only some member interfaces
+node1  100      primary        no       no       None
+'
+	local nospace='Redundancy group: 2 , Failover count: 1
+node0  200      primary        no       no       None
+  Forwarding: rg-active=active vrrp-master=none --DIVERGENCE: this node is forwarding for a group it does not own
+'
+	local odd='Redundancy group: 1 , Failover count: 1
+node0  200      primary        no       no       None
+  Forwarding: rg-active=maybe vrrp-master=none
+'
+	local got rc missing=()
+	got=$(printf '%s' "$fw1_view" | deploy_rg_local_forwarding 1) && [[ "$got" == active ]] || missing+=("fw1 RG1 active")
+	got=$(printf '%s' "$fw1_view" | deploy_rg_local_forwarding 2) && [[ "$got" == inactive ]] || missing+=("fw1 RG2 inactive")
+	printf '%s' "$fw1_view" | deploy_rg_local_forwarding 3 >/dev/null && missing+=("RG3 absent")
+	printf '%s' "$dup" | deploy_rg_local_forwarding 1 >/dev/null && missing+=("duplicate")
+	printf '%s' 'No VRRP groups configured' | deploy_rg_local_forwarding 1 >/dev/null && missing+=("no block")
+	printf '%s' "$odd" | deploy_rg_local_forwarding 1 >/dev/null && missing+=("value not active/inactive")
+	got=$(printf '%s' "$partial" | deploy_rg_local_forwarding 1)
+	rc=$?
+	[[ $rc -eq 2 && "$got" == 'inactive -- DIVERGENCE: VRRP master on only some member interfaces' ]] ||
+		missing+=("DIVERGENCE suffix rc=$rc got='$got'")
+	got=$(printf '%s' "$nospace" | deploy_rg_local_forwarding 2)
+	rc=$?
+	[[ $rc -eq 2 && "$got" == 'active -- DIVERGENCE: this node is forwarding for a group it does not own' ]] ||
+		missing+=("unspaced suffix rc=$rc got='$got'")
+	if ((${#missing[@]} == 0)); then
+		ok "RG forwarding reader: exact-RG local rg-active; missing/duplicate/odd fail; DIVERGENCE suffix surfaced rc 2 (#18523)"
+	else
+		bad "RG forwarding reader (#18523): ${missing[*]}"
+	fi
+}
+
+# aa_view <local-node-id> then, for RG1 and RG2 in order, three words:
+# <local role> <local Forwarding value, or - for no line> <peer role>.
+# Renders the FormatStatus shape: local row, Takeover/Transfer/Forwarding
+# sub-lines, then the peer row.
+aa_view() {
+	local me="$1" peer=$((1 - $1)) rg=1
+	shift
+	while (($# >= 3)); do
+		printf 'Redundancy group: %s , Failover count: 1\n' "$rg"
+		printf 'node%s  100      %-14s no       no       None\n' "$me" "$1"
+		printf '  Takeover ready: yes\n  Transfer ready: yes\n'
+		[[ "$2" == - ]] || printf '  Forwarding: %s\n' "$2"
+		printf 'node%s  200      %-14s no       no       None\n\n' "$peer" "$3"
+		rg=$((rg + 1))
+		shift 3
+	done
+}
+
+# aa_split_row <label> <fw0-status> <fw1-status> <want-pass> <want-fail> <needle>
+# drives the real deploy_active_active_split_verdict under
+# `set -euo pipefail` and checks the exact PASS/FAIL counts and one needle.
+aa_split_row() {
+	local label="$1" s0="$2" s1="$3" want_pass="$4" want_fail="$5" needle="$6" out
+	# shellcheck disable=SC2030,SC2031,SC2329 # mocks and counters scoped to this subshell
+	out=$(
+		PASS=0 FAIL=0
+		pass() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$*"; }
+		fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$*"; }
+		set -euo pipefail
+		deploy_active_active_split_verdict "$s0" "$s1"
+		printf 'RESULT pass=%d fail=%d CONTINUED\n' "$PASS" "$FAIL"
+	)
+	if [[ "$out" == *"RESULT pass=$want_pass fail=$want_fail CONTINUED"* && "$out" == *"$needle"* ]]; then
+		ok "active-active split verdict: $label (#18523)"
+	else
+		bad "active-active split verdict: $label (#18523): want pass=$want_pass fail=$want_fail with '$needle'; got: $(tr '\n' '|' <<<"$out")"
+	fi
+}
+
+# #18523: test-active-active.sh scores the RG split through this verdict.
+# RG2 is read from BOTH views (fw1 claiming RG2 primary, or forwarding it,
+# used to pass), and a DIVERGENCE suffix on any Forwarding line FAILs.
+test_active_active_split_verdict_18523() {
+	local a='rg-active=active vrrp-master=none' i='rg-active=inactive vrrp-master=none'
+	local s0 s1
+	s0=$(aa_view 0 secondary-hold "$i" primary primary "$a" secondary)
+	s1=$(aa_view 1 primary "$a" secondary-hold secondary "$i" primary)
+	aa_split_row "healthy split" "$s0" "$s1" 4 0 "RG2 (LAN) forwarding stayed on fw0"
+	aa_split_row "old owner plain secondary" \
+		"$(aa_view 0 secondary "$i" primary primary "$a" secondary)" "$s1" 4 0 "RG1 (WAN) moved to fw1"
+	aa_split_row "fw1's own view does not hold RG1" \
+		"$s0" "$(aa_view 1 secondary-hold "$a" secondary-hold secondary "$i" primary)" 3 1 \
+		"RG1 did not move to fw1 (fw0 view: node0=secondary-hold node1=primary; fw1 view: node1=secondary-hold)"
+	aa_split_row "fw1 also claims RG2 primary" \
+		"$s0" "$(aa_view 1 primary "$a" secondary-hold primary "$i" primary)" 3 1 \
+		"RG2 not owned by fw0 alone (fw0 view: node0=primary; fw1 view: node1=primary)"
+	aa_split_row "fw1 also forwards RG2" \
+		"$s0" "$(aa_view 1 primary "$a" secondary-hold secondary "$a" primary)" 3 1 \
+		"RG2 (LAN) forwarding not on fw0 alone (fw0 rg-active=active, fw1 rg-active=active)"
+	aa_split_row "DIVERGENCE on fw0 RG1" \
+		"$(aa_view 0 secondary-hold 'rg-active=inactive vrrp-master=partial -- DIVERGENCE: VRRP master on only some member interfaces' primary primary "$a" secondary)" \
+		"$s1" 3 1 "fw0 rg-active=inactive -- DIVERGENCE: VRRP master on only some member interfaces"
+	aa_split_row "DIVERGENCE on fw1 RG2" \
+		"$s0" "$(aa_view 1 primary "$a" secondary-hold secondary 'rg-active=inactive vrrp-master=none -- DIVERGENCE: this node owns the group but is not forwarding for it' primary)" \
+		3 1 "fw1 rg-active=inactive -- DIVERGENCE"
+	aa_split_row "RG1 did not move" \
+		"$(aa_view 0 primary "$a" secondary primary "$a" secondary)" \
+		"$(aa_view 1 secondary "$i" primary secondary "$i" primary)" 2 2 \
+		"RG1 did not move to fw1 (fw0 view: node0=primary node1=secondary; fw1 view: node1=secondary)"
+	aa_split_row "no Forwarding lines" \
+		"$(aa_view 0 secondary-hold - primary primary - secondary)" \
+		"$(aa_view 1 primary - secondary-hold secondary - primary)" 2 2 \
+		"RG1 (WAN) forwarding not on fw1 alone (fw0 rg-active=missing, fw1 rg-active=missing)"
+	aa_split_row "fw1 status empty" "$s0" "" 0 4 "fw1 view: node1=missing"
+}
+
+# ── #18523: restore_fw0_primary with a mocked incus and clock ──────────
+# The mock keeps per-RG state in files (every `incus` call runs in a
+# command-substitution subshell) and `sleep N` advances SECONDS instead of
+# waiting. A granted yield makes fw1 read secondary-hold at once; fw0 reads
+# primary RM_DELAY mocked seconds later. Each refused request answers with
+# the barrier-fence error seen on integ7a.
+RM_REFUSAL='error: demotion peer barrier failed: session sync barrier fenced seq=0'
+
+rm_role() {
+	local view="$1" rg="$2" own granted=0 at=0
+	own=$(<"$RM_ST/own$rg")
+	if [[ -s "$RM_ST/granted$rg" ]]; then
+		granted=1
+		at=$(<"$RM_ST/granted$rg")
+	fi
+	if [[ "$view" == 0 ]]; then
+		if [[ "$own" == 0 ]] || ((granted && SECONDS >= at + RM_DELAY)); then
+			echo primary
+		else
+			echo secondary
+		fi
+	elif [[ "$RM_FW1" == dual ]] || [[ "$own" == 1 && "$granted" == 0 ]]; then
+		echo primary
+	elif ((granted)); then
+		echo secondary-hold
+	else
+		echo secondary
+	fi
+}
+
+rm_status() {
+	local me="$1" peer=$((1 - $1)) rg
+	for rg in 0 1 2; do
+		printf 'Redundancy group: %s , Failover count: 1\n' "$rg"
+		printf 'node%s  100      %-14s no       no       None\n' "$me" "$(rm_role "$me" "$rg")"
+		printf '  Takeover ready: yes\n  Transfer ready: yes\n'
+		printf 'node%s  200      %-14s no       no       None\n\n' "$peer" "$(rm_role "$peer" "$rg")"
+	done
+}
+
+rm_incus() {
+	local inst="$2" cmd="${*: -1}" rg left
+	printf '%s %s\n' "$inst" "$cmd" >>"$RM_ST/calls"
+	case "$cmd" in
+	"show chassis cluster status")
+		if [[ "$inst" == fw0 ]]; then
+			rm_status 0
+		elif [[ "$RM_FW1" == unreadable ]]; then
+			return 1
+		else
+			rm_status 1
+		fi
+		;;
+	"request chassis cluster failover reset redundancy-group "*) ;;
+	"request chassis cluster failover redundancy-group "*)
+		rg=${cmd##* }
+		left=$(<"$RM_ST/refuse")
+		if ((left > 0)); then
+			echo $((left - 1)) >"$RM_ST/refuse"
+			echo "$RM_REFUSAL"
+			return 1
+		fi
+		[[ -s "$RM_ST/granted$rg" ]] || echo "$SECONDS" >"$RM_ST/granted$rg"
+		echo "Manual failover completed for redundancy group $rg"
+		;;
+	*) return 99 ;;
+	esac
+}
+
+# rm_run <owner-at-start 0|1> <refusals> <delay> <fw1 normal|dual|unreadable>
+#        [RESTORE_FW0_WAIT=<v>] [RESTORE_FW0_BUDGET=<v>]
+# runs the real deploy_restore_fw0_primary and prints its verdicts plus
+# `RESULT rc=<rc> pass=<n> fail=<n> yields=<n> CONTINUED`. Both knobs are
+# unset unless passed, so a caller's environment cannot move a row.
+rm_run() {
+	local owner="$1" refuse="$2" delay="$3" fw1="$4" rg kv
+	shift 4
+	RM_ST=$(mktemp -d)
+	for rg in 0 1 2; do echo "$owner" >"$RM_ST/own$rg"; done
+	echo "$refuse" >"$RM_ST/refuse"
+	: >"$RM_ST/calls"
+	# shellcheck disable=SC2030,SC2031,SC2329 # mocks and counters scoped to this subshell
+	(
+		unset RESTORE_FW0_WAIT RESTORE_FW0_BUDGET
+		for kv in "$@"; do
+			case "$kv" in
+			RESTORE_FW0_WAIT=*) export RESTORE_FW0_WAIT="${kv#*=}" ;;
+			RESTORE_FW0_BUDGET=*) export RESTORE_FW0_BUDGET="${kv#*=}" ;;
+			*) echo "rm_run: unknown setting $kv" ;;
+			esac
+		done
+		export FW0=fw0 FW1=fw1 RM_DELAY="$delay" RM_FW1="$fw1"
+		PASS=0 FAIL=0
+		incus() { rm_incus "$@"; }
+		sleep() { SECONDS=$((SECONDS + ${1%.*})); }
+		pass() { PASS=$((PASS + 1)); printf '  PASS  %s\n' "$*"; }
+		fail() { FAIL=$((FAIL + 1)); printf '  FAIL  %s\n' "$*"; }
+		info() { printf '  info  %s\n' "$*"; }
+		set -euo pipefail
+		rc=0
+		deploy_restore_fw0_primary t || rc=$?
+		printf 'RESULT rc=%d pass=%d fail=%d yields=%d CONTINUED\n' "$rc" "$PASS" "$FAIL" \
+			"$(grep -c 'request chassis cluster failover redundancy-group' "$RM_ST/calls" || true)"
+	)
+	rm -rf "$RM_ST"
+}
+
+# rm_row <label> <want RESULT prefix> <needle> <rm_run args...>
+rm_row() {
+	local label="$1" want="$2" needle="$3" out
+	shift 3
+	out=$(rm_run "$@")
+	if [[ "$out" == *"RESULT $want"* && "$out" == *CONTINUED* && "$out" == *"$needle"* ]]; then
+		ok "restore verdict: $label (#18523)"
+	else
+		bad "restore verdict: $label (#18523): want '$want' with '$needle'; got: $(tr '\n' '|' <<<"$out")"
+	fi
+}
+
+# #18523: the restore verdict both HA smokes run. A completed restore FAILs
+# on any refusal or over RESTORE_FW0_BUDGET (rc 0, the run continues); one
+# that never completes FAILs with rc 1. fw0 counts as restored only when
+# fw1's own view agrees, so a dual-primary RG and an unreadable fw1 are
+# "not restored", never an abort.
+test_restore_fw0_verdict_18523() {
+	rm_row "already restored" "rc=0 pass=1 fail=0 yields=0" "t: fw0 already primary" 0 0 0 normal
+	rm_row "prompt, no refusal" "rc=0 pass=1 fail=0 yields=3" "(3 request(s), 0 refused)" 1 0 0 normal
+	rm_row "one refusal" "rc=0 pass=0 fail=1 yields=4" \
+		"4 request(s), 1 refused; last refusal: RG0: $RM_REFUSAL)" 1 1 0 normal
+	rm_row "three refusals" "rc=0 pass=0 fail=1 yields=6" "6 request(s), 3 refused" 1 3 0 normal
+	rm_row "over budget, no refusal" "rc=0 pass=0 fail=1 yields=3" "(budget 30s; 3 request(s), 0 refused)" \
+		1 0 12 normal
+	rm_row "same restore, RESTORE_FW0_BUDGET=45" "rc=0 pass=1 fail=0 yields=3" "(3 request(s), 0 refused)" \
+		1 0 12 normal RESTORE_FW0_BUDGET=45
+	rm_row "RESTORE_FW0_BUDGET=abc falls back to 30" "rc=0 pass=0 fail=1" "budget 30s" \
+		1 0 12 normal RESTORE_FW0_BUDGET=abc
+	rm_row "refused until the deadline" "rc=1 pass=0 fail=1" \
+		"could not restore fw0 as primary within 60s (last refusal: RG0: $RM_REFUSAL)" 1 20 0 normal
+	rm_row "RESTORE_FW0_WAIT=abc falls back to 60" "rc=1 pass=0 fail=1" "within 60s" \
+		1 20 0 normal RESTORE_FW0_WAIT=abc
+	rm_row "dual-primary is not restored" "rc=1 pass=0 fail=1" "could not restore fw0 as primary" \
+		0 0 0 dual
+	rm_row "fw1 unreadable is not restored" "rc=1 pass=0 fail=1 yields=0" "could not restore fw0 as primary" \
+		0 0 0 unreadable
+}
+
+# #18523: the healthy predicate at its edges: equal to the budget passes,
+# one second over or one refusal fails.
+test_restore_healthy_boundaries_18523() {
+	if deploy_restore_healthy 0 30 0 && deploy_restore_healthy 30 30 0 &&
+		! deploy_restore_healthy 31 30 0 && ! deploy_restore_healthy 0 30 1 &&
+		! deploy_restore_healthy 31 30 2; then
+		ok "restore healthy predicate: took<=budget and zero refusals (#18523)"
+	else
+		bad "restore healthy predicate (#18523): budget/refusal edges wrong"
+	fi
+}
+
+# ha_smoke_pin_problems_18523 <dir> prints one problem per line for the
+# HA smokes in <dir>: a missing file; a `grep -A<n>` window over
+# "Redundancy group" in code (any spacing; it missed the peer row and
+# aborted active-active); restore/fw0_is_primary not delegating to the
+# shared, selftested deploy-lib.sh helpers; active-active not scoring the
+# split through deploy_active_active_split_verdict.
+ha_smoke_pin_problems_18523() {
+	local dir="$1" f code fn
+	for f in test-active-active.sh test-ha-crash.sh test-restart-connectivity.sh test-stress-failover.sh; do
+		if [[ ! -r "$dir/$f" ]]; then
+			echo "$f(missing)"
+			continue
+		fi
+		code=$(grep -v '^[[:space:]]*#' "$dir/$f")
+		if awk '/Redundancy group/ && /(-A[[:space:]]*[0-9]|--after-context)/ { hit = 1 } END { exit !hit }' <<<"$code"; then
+			echo "$f(grep-A-window)"
+		fi
+	done
+	for f in test-ha-crash.sh test-restart-connectivity.sh; do
+		[[ -r "$dir/$f" ]] || continue
+		if [[ $(grep -c '^restore_fw0_primary() {$' "$dir/$f") != 1 || $(grep -c '^fw0_is_primary() {$' "$dir/$f") != 1 ]]; then
+			echo "$f(restore-defs-not-one)"
+		fi
+		fn=$(awk '/^restore_fw0_primary\(\) \{$/ { c = 1 } c { print } c && /^}$/ { exit }' "$dir/$f")
+		# shellcheck disable=SC2016 # a literal harness line, not an expansion
+		[[ "$fn" == *'deploy_restore_fw0_primary "$1"'* ]] || echo "$f(restore-not-shared)"
+		fn=$(awk '/^fw0_is_primary\(\) \{$/ { c = 1 } c { print } c && /^}$/ { exit }' "$dir/$f")
+		[[ "$fn" == *deploy_restore_fw0_owns_all* ]] || echo "$f(fw0_is_primary-not-shared)"
+	done
+	f=test-active-active.sh
+	if [[ -r "$dir/$f" ]]; then
+		code=$(grep -v '^[[:space:]]*#' "$dir/$f")
+		# shellcheck disable=SC2016 # a literal harness line, not an expansion
+		[[ "$code" == *'deploy_active_active_split_verdict "$fw0_status" "$fw1_status"'* ]] ||
+			echo "$f(split-verdict-not-shared)"
+	fi
+}
+
+# #18523: guard the HARNESS lines, not only the library. The real smokes
+# must report no problem, and a fixture copy with a spaced `grep -A 2`, a
+# single-quoted `grep -A2`, a local restore, and a deleted file must report
+# each one (a matcher that finds nothing would otherwise pass a clean board).
+test_ha_smoke_site_pins_18523() {
+	local real fixture problems f missing=()
+	real=$(ha_smoke_pin_problems_18523 "$SCRIPT_DIR")
+	[[ -z "$real" ]] || missing+=("real smokes: $(tr '\n' ' ' <<<"$real")")
+	fixture=$(mktemp -d)
+	for f in test-active-active.sh test-ha-crash.sh test-restart-connectivity.sh test-stress-failover.sh; do
+		cp "$SCRIPT_DIR/$f" "$fixture/$f"
+	done
+	# shellcheck disable=SC2016 # literal harness lines, not expansions
+	printf '%s\n' 'r=$(grep -A 2 "Redundancy group: 1" <<<"$s" | grep node1 || true)' >>"$fixture/test-active-active.sh"
+	# shellcheck disable=SC2016
+	printf '%s\n' "r=\$(grep -A2 'Redundancy group: 1' <<<\"\$s\" || true)" >>"$fixture/test-restart-connectivity.sh"
+	# shellcheck disable=SC2016 # a sed program, not an expansion
+	sed -i 's/deploy_restore_fw0_primary "\$1"/local_restore "$1"/' "$fixture/test-ha-crash.sh"
+	rm "$fixture/test-stress-failover.sh"
+	problems=$(ha_smoke_pin_problems_18523 "$fixture")
+	rm -rf "$fixture"
+	for f in "test-active-active.sh(grep-A-window)" "test-restart-connectivity.sh(grep-A-window)" \
+		"test-ha-crash.sh(restore-not-shared)" "test-stress-failover.sh(missing)"; do
+		[[ "$problems" == *"$f"* ]] || missing+=("control not flagged: $f")
+	done
+	if ((${#missing[@]} == 0)); then
+		ok "HA smoke pins: shared readers, restore and split verdict; controls flagged (#18523)"
+	else
+		bad "HA smoke pins (#18523): ${missing[*]}"
+	fi
+}
+
 test_dual_active_committed_rows() {
 	local allp='0=primary 1=primary 2=primary'
 	local alls='0=secondary 1=secondary 2=secondary'
@@ -3168,6 +3560,12 @@ test_dual_active_smoke_site_pins() {
 	fi
 }
 test_dual_active_scoped_reader
+test_rg_role_reader_skips_local_sublines_18523
+test_rg_local_forwarding_reader_18523
+test_active_active_split_verdict_18523
+test_restore_fw0_verdict_18523
+test_restore_healthy_boundaries_18523
+test_ha_smoke_site_pins_18523
 test_dual_active_committed_rows
 test_dual_active_retired_grep_counterfactual
 test_dual_active_smoke_site_pins

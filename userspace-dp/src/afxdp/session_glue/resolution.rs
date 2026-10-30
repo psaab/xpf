@@ -459,6 +459,14 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target(
     connected_owner_rg_for_target_in_table(forwarding, target, None)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// #18534 test instrument: connected-owner resolutions on this thread,
+    /// so a cell can prove the cached hit path memoises them per snapshot.
+    pub(in crate::afxdp) static CONNECTED_OWNER_RESOLVES_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// RI-scoped owner (round-5): only connected rows in `table` (the
 /// session's installing table; None = default instance) may claim
 /// ownership. A cross-RI interface with the same prefix must not
@@ -468,6 +476,8 @@ pub(in crate::afxdp) fn connected_owner_rg_for_target_in_table(
     target: IpAddr,
     table: Option<&str>,
 ) -> i32 {
+    #[cfg(test)]
+    CONNECTED_OWNER_RESOLVES_FOR_TEST.with(|count| count.set(count.get() + 1));
     // #17053: Source 1 is the canonical LPM (#15917) over the FIB
     // rows then the ledger — longest prefix wins and equal-length
     // ties pick the LOWEST ifindex, so the answer no longer depends

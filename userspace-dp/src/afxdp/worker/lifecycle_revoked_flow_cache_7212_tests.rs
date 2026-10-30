@@ -138,6 +138,7 @@ fn seed_with_logical_ingress(
         neighbor_mac_epoch: 0,
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
+        dest_owner_memo: Default::default(),
     });
 }
 

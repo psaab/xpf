@@ -704,6 +704,11 @@ type Manager struct {
 	// the session path — without this the #9629 sender would ship bound by
 	// nothing CI runs, the #6994 failure mode).
 	sessionRequestHook func(ControlRequest, *ProcessStatus) error
+	// ambiguousSyncZoneWarned records truncated session zone ids already
+	// reported as ambiguous (#18515), so the warning fires once per value per
+	// process (never reset; bounded by the 65536 possible values).
+	// Guarded by mu.
+	ambiguousSyncZoneWarned map[uint16]struct{}
 	// bumpFIBGenerationHook replaces the shim's generation-map bump in tests
 	// that need a nonzero generation without loading privileged BPF maps.
 	// Production leaves it nil.

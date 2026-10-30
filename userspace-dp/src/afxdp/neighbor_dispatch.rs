@@ -1334,6 +1334,14 @@ pub(super) fn learn_dynamic_neighbor_from_packet(
     );
 }
 
+#[cfg(test)]
+thread_local! {
+    /// #18533 round 2 test instrument: post-admission learns that went past
+    /// the fresh-duplicate fast path to the on-link test and full learn.
+    pub(in crate::afxdp) static POST_ADMISSION_FULL_LEARNS_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// Learn only after policy admission, and only for an address in the directly
 /// connected ingress prefix. Transit packets pair remote source IPs with the
 /// upstream router MAC, poisoning neighbors and consuming bounded capacity.
@@ -1346,6 +1354,23 @@ pub(super) fn learn_dynamic_neighbor_after_admission(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
 ) {
+    // #18533 round 2: every admitted cache hit reaches here. A fresh
+    // duplicate of the last learn under the same published snapshot is the
+    // coalesced no-op the dedup leg below would reach anyway; confirm it
+    // without the on-link scan, the owned-IP probes and the alias resolve.
+    if learned_neighbor_is_fresh(
+        last_learned_neighbor,
+        meta,
+        src_ip,
+        src_mac,
+        now_ns,
+        forwarding,
+        dynamic_neighbors,
+    ) {
+        return;
+    }
+    #[cfg(test)]
+    POST_ADMISSION_FULL_LEARNS_FOR_TEST.with(|count| count.set(count.get() + 1));
     if !forwarding.src_ip_on_link_for_ingress(
         meta.ingress_ifindex as i32,
         meta.ingress_vlan_id,
@@ -1457,6 +1482,12 @@ fn learn_dynamic_neighbor_with_mac(
         {
             // This local, allocation-free leg is bounded by the coalescing
             // interval. Epoch or effective-key changes bypass it immediately.
+            // #18533 round 2: every derivation behind the stored state was
+            // just re-confirmed under THIS snapshot (the caller's on-link
+            // test, the learnable/owned gates, the alias keys), so name it:
+            // the post-admission fast path trusts the state only for the
+            // snapshot it was confirmed under.
+            last_learned_neighbor.forwarding_epoch = forwarding.publish_epoch;
             return;
         }
         // Keep the pre-lock epochs. A concurrent prune/replacement after this
@@ -1472,6 +1503,7 @@ fn learn_dynamic_neighbor_with_mac(
                 n,
                 now_ns,
                 epochs,
+                forwarding.publish_epoch,
             );
             return;
         }
@@ -1548,6 +1580,7 @@ fn rx_learn_epochs(dynamic_neighbors: &ShardedNeighborMap, keys: &[(i32, IpAddr)
     epochs
 }
 
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn rx_learn_dedup_state(
     ingress_ifindex: i32,
     ingress_vlan_id: u16,
@@ -1557,6 +1590,7 @@ fn rx_learn_dedup_state(
     key_count: usize,
     now_ns: u64,
     epochs: [u32; 2],
+    forwarding_epoch: u64,
 ) -> LearnedNeighborDedup {
     LearnedNeighborDedup {
         key: Some(LearnedNeighborKey {
@@ -1568,7 +1602,59 @@ fn rx_learn_dedup_state(
         last_refresh_ns: now_ns,
         logical_alias_ifindex: if key_count == 2 { keys[1].0 } else { 0 },
         epochs,
+        forwarding_epoch,
     }
+}
+
+/// #18533 round 2: is this packet's source a FRESH duplicate of the last
+/// learn, so the learn would coalesce to a no-op?
+///
+/// True only when all of these hold: the stored state was derived under the
+/// live published forwarding snapshot (nonzero `publish_epoch`), its key is
+/// this packet's `(ingress, VLAN, source IP, source MAC)`, the coalescing
+/// interval has not elapsed, and the neighbor epochs of the stored keys are
+/// unchanged. Both learn paths (`learn_dynamic_neighbor_after_admission`,
+/// `learn_dynamic_neighbor_from_frame`) store a state only after the source
+/// passed the on-link test (the frame path skips it only for a synthetic
+/// fabric MAC, which `learn_dynamic_neighbor_with_mac` then refuses before
+/// storing), the source-MAC gates, the learnable-class and owned-IP gates and
+/// the alias resolution. The non-MAC ones are pure functions of the snapshot
+/// and the MAC is part of the key — so under the same snapshot they still hold,
+/// and `learn_dynamic_neighbor_with_mac`'s dedup leg would return at the
+/// same interval/epoch test. A MAC replacement or removal bumps a neighbor
+/// epoch and fails this test on the next packet, exactly as it bypasses that
+/// leg. Unpublished snapshots (fixtures) never take this path.
+#[inline]
+fn learned_neighbor_is_fresh(
+    dedup: &LearnedNeighborDedup,
+    meta: UserspaceDpMeta,
+    src_ip: IpAddr,
+    src_mac: [u8; 6],
+    now_ns: u64,
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &ShardedNeighborMap,
+) -> bool {
+    let epoch = forwarding.publish_epoch;
+    if epoch == 0
+        || dedup.forwarding_epoch != epoch
+        || now_ns.saturating_sub(dedup.last_refresh_ns)
+            >= super::sharded_neighbor::RX_LEARNED_NEIGHBOR_REFRESH_INTERVAL_NS
+        || dedup.key
+            != Some(LearnedNeighborKey {
+                ingress_ifindex: meta.ingress_ifindex as i32,
+                ingress_vlan_id: meta.ingress_vlan_id,
+                src_ip,
+                src_mac,
+            })
+    {
+        return false;
+    }
+    let keys = [
+        (meta.ingress_ifindex as i32, src_ip),
+        (dedup.logical_alias_ifindex, src_ip),
+    ];
+    let n = if dedup.logical_alias_ifindex != 0 { 2 } else { 1 };
+    rx_learn_epochs(dynamic_neighbors, &keys[..n])[..n] == dedup.epochs[..n]
 }
 
 fn learn_dynamic_neighbor_with_mode(
@@ -1665,6 +1751,7 @@ fn learn_dynamic_neighbor_with_mode(
             n,
             now_ns,
             epochs,
+            forwarding.publish_epoch,
         ));
     }
     // #10854: pre-policy source learning may create a missing entry or
@@ -1728,6 +1815,7 @@ fn learn_dynamic_neighbor_with_mode(
             n,
             now_ns,
             epochs,
+            forwarding.publish_epoch,
         ))
     } else {
         None

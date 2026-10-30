@@ -323,13 +323,15 @@ func (d *Daemon) applyDataplaneAndHACore(ctx context.Context, cfg *config.Config
 	// 2.2. Install zone and session ownership as one apply-time snapshot. A
 	// nil zone map preserves the prior zone IDs when this phase has no apply
 	// result; fold ownership and its resolver still follow the new config.
+	// #18374: a content-equal re-install keeps the ownership generation, so
+	// an apply landing inside a bulk receive window does not void its
+	// reconcile (zoneOwnershipInstall).
 	if ss := d.getSessionSync(); ss != nil {
 		var zoneRG cluster.ZoneRGMap
 		if applyResult != nil {
 			zoneRG = buildZoneRGMap(cfg, applyResult.ZoneIDs)
 		}
-		ss.SetZoneOwnership(zoneRG, buildZoneFoldRGMap(cfg), buildIngressFoldFn(cfg))
-		ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
+		ss.InstallZoneOwnership(d.zoneOwnershipInstall(cfg, zoneRG, nil))
 	}
 	// And the reverse direction, used when a peer's session is imported: the
 	// fold the peer sent becomes THIS node's ifindex. Both closures share the

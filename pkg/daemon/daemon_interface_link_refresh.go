@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -164,27 +165,29 @@ func debounceInterfaceLinkSnapshot(ctx context.Context, wake <-chan string, linu
 // own closure installation. buildZoneFoldRGMap is config-derived (no
 // ifindex state), so it cannot go stale; it is reinstalled anyway so the
 // SessionSync ownership snapshot stays one coherent generation.
-// Manager.SetIngressFoldResolver and SessionSync.SetZoneOwnership are each
+// Manager.SetIngressFoldResolver and SessionSync.InstallZoneOwnership are each
 // internally locked; a session-sync object replaced after the nil check is
 // seeded from the applied config by its constructor, so no stale closure
 // can survive on the live object.
-func (d *Daemon) refreshIngressFoldClosures(cfg *config.Config, resolver func(*config.Config) func(uint32) (uint32, uint16, bool), foldFn func(*config.Config) func(uint32, uint16) uint32) {
+//
+// #18374: most link refreshes are link-STATE events (carrier, flags) that
+// leave the ifindex->name table and the config unchanged, so the rebuilt
+// closures are content-equal and InstallZoneOwnership keeps the generation —
+// an em0 refresh no longer voids a cold-prime bulk's reconcile. A recreated
+// netdev (the #15263 case) changes the table and still advances it.
+// listIfaces nil reads the live kernel table; tests inject one.
+func (d *Daemon) refreshIngressFoldClosures(cfg *config.Config, resolver func(*config.Config) func(uint32) (uint32, uint16, bool), listIfaces func() ([]net.Interface, error)) {
 	if cfg == nil {
 		return
 	}
 	if resolver == nil {
 		resolver = buildIngressFoldResolver
 	}
-	if foldFn == nil {
-		foldFn = buildIngressFoldFn
-	}
 	if mgr := d.interfaceLinkSnapshotManager(); mgr != nil {
 		mgr.SetIngressFoldResolver(resolver(cfg))
 	}
 	if ss := d.getSessionSync(); ss != nil {
-		ss.SetZoneOwnership(buildZoneRGMap(cfg, buildZoneIDs(cfg)),
-			buildZoneFoldRGMap(cfg), foldFn(cfg))
-		ss.SetNatScopeFoldFn(buildNatScopeFoldFn(cfg))
+		ss.InstallZoneOwnership(d.zoneOwnershipInstall(cfg, buildZoneRGMap(cfg, buildZoneIDs(cfg)), listIfaces))
 	}
 }
 

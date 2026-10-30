@@ -335,8 +335,22 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 	// per-route causes, and the show surfaces consult that same function.
 	staticRouteExclusions := config.StaticRouteExclusions(cfg)
 	nextTableRulePriorities := configNextTableRulePriorities(cfg, staticRouteExclusions)
-	connectedNetworks := make(map[routeSnapshotTableFamily][]*net.IPNet)
+	// gatewayNetworks is the directly-connected coverage the #11317
+	// recursive-static filter judges bare gateways against. It is a SUPERSET
+	// of the transit connected rows: a peer-owned RETH prefix is withheld from
+	// the transit FIB (#15742) but its gateway is still directly connected.
+	gatewayNetworks := make(map[routeSnapshotTableFamily][]*net.IPNet)
 	interfaceTablesV4, interfaceTablesV6 := buildInterfaceRouteTables(cfg)
+	addGatewayNetworks := func(table, family string, prefixes []string) {
+		for _, prefix := range prefixes {
+			_, network, err := net.ParseCIDR(prefix)
+			if err != nil {
+				continue
+			}
+			key := routeSnapshotTableFamily{table: table, family: family}
+			gatewayNetworks[key] = append(gatewayNetworks[key], network)
+		}
+	}
 	addConnectedRoutes := func(table, family string, prefixes []string) {
 		for _, prefix := range prefixes {
 			addSnapshot(RouteSnapshot{
@@ -344,13 +358,8 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 				Family:      family,
 				Destination: prefix,
 			})
-			_, network, err := net.ParseCIDR(prefix)
-			if err != nil {
-				continue
-			}
-			key := routeSnapshotTableFamily{table: table, family: family}
-			connectedNetworks[key] = append(connectedNetworks[key], network)
 		}
+		addGatewayNetworks(table, family, prefixes)
 	}
 	for _, iface := range interfaces {
 		if iface.Name == "" {
@@ -359,13 +368,6 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 		// Configured interface identities can survive without their kernel netdev.
 		// Their addresses must not publish connected rows or cover learned-route gaps.
 		if iface.Ifindex <= 0 {
-			continue
-		}
-		// #15742: a peer-owned RETH unit's connected prefix must not enter
-		// the helper FIB as a transit prefix. Zebra withdraws it with the
-		// VIPs; leaving it in makes LPM shadow the default (and hence the
-		// HA fabric redirect) for every destination inside the WAN prefix.
-		if iface.ConnectedRGPeerOwned {
 			continue
 		}
 		v4Table := interfaceTablesV4[iface.Name]
@@ -377,6 +379,27 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 			v6Table = "inet6.0"
 		}
 		v4Prefixes, v6Prefixes := connectedPrefixesForInterface(iface)
+		// #15742: a peer-owned RETH unit's connected prefix must not enter
+		// the helper FIB as a transit prefix. Zebra withdraws it with the
+		// VIPs; leaving it in makes LPM shadow the default (and hence the
+		// HA fabric redirect) for every destination inside the WAN prefix.
+		//
+		// #18517: it still covers gateways. A static whose gateway sits in
+		// the peer-owned prefix (the WAN default on a split node) must reach
+		// the helper: its FIB binds that gateway to the peer-owned egress
+		// (`peer_owned_connected_target_v4/v6`), so the row HA-demotes and
+		// crosses the fabric. Filtering it as recursive left only the
+		// unstamped Null0 terminal, so every new flow toward the peer-owned
+		// egress was discarded instead of fabric-redirected. Consequence
+		// (Junos semantics, see docs/fabric-cross-chassis-fwd.md): the kept
+		// static now also suppresses a same-prefix learned route via a LOCAL
+		// interface in addLearnedRouteSnapshots, on the split node as on the
+		// owner, so that prefix rides the fabric.
+		if iface.ConnectedRGPeerOwned {
+			addGatewayNetworks(v4Table, "inet", v4Prefixes)
+			addGatewayNetworks(v6Table, "inet6", v6Prefixes)
+			continue
+		}
 		addConnectedRoutes(v4Table, "inet", v4Prefixes)
 		addConnectedRoutes(v6Table, "inet6", v6Prefixes)
 	}
@@ -409,7 +432,7 @@ func buildRouteSnapshotsWithRGPrimary(cfg *config.Config, interfaces []Interface
 			tableName, familyName := normalizeRouteSnapshotFamily(table, family, route.Destination)
 			if !helperRefused && staticRouteHasOnlyUnresolvedBareGateways(
 				route, tableName, familyName, instanceName, instanceType,
-				connectedNetworks, interfaces,
+				gatewayNetworks, interfaces,
 			) {
 				// When every bare gateway is recursive, the config row would
 				// resolve with ifindex 0 and suppress the kernel's resolved
@@ -1372,7 +1395,7 @@ type routeSnapshotTableFamily struct {
 func staticRouteHasOnlyUnresolvedBareGateways(
 	route *config.StaticRoute,
 	table, family, instanceName, instanceType string,
-	connectedNetworks map[routeSnapshotTableFamily][]*net.IPNet,
+	gatewayNetworks map[routeSnapshotTableFamily][]*net.IPNet,
 	interfaces []InterfaceSnapshot,
 ) bool {
 	// Without an interface inventory there is no evidence that a gateway is
@@ -1382,7 +1405,7 @@ func staticRouteHasOnlyUnresolvedBareGateways(
 		route.NextTable != "" || len(route.NextHops) == 0 {
 		return false
 	}
-	networks := connectedNetworks[routeSnapshotTableFamily{table: table, family: family}]
+	networks := gatewayNetworks[routeSnapshotTableFamily{table: table, family: family}]
 	hasBare, hasDirect := false, false
 	for _, nextHop := range route.NextHops {
 		if nextHop.Interface != "" {

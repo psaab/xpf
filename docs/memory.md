@@ -88,8 +88,8 @@ TC Egress:   main -> screen_egress -> conntrack -> nat -> forward
   (5s continuous-suppression cap). Silent node death takes
   max(threshold, remaining sync-recency window) plus up to one tick:
   0.5–2.1s at defaults and 1.0–2.2s in the lab, phase-dependent. Process exit
-  that closes sync or idle sync falls through at the raw threshold, subject to
-  startup/restart grace. Legacy VRRP-backed RETH uses a 30ms default advert
+  that closes sync or idle sync falls through at the raw threshold when the
+  receiving standby is caught up, subject to startup/restart grace; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus one heartbeat tick — about 3.1s at defaults, 3.2s in the lab, under the 5s cap (#18521). Legacy VRRP-backed RETH uses a 30ms default advert
   and >90ms/<120ms steady-state master-down timer; only a non-preempting
   BACKUP arms a 3s deafness shield. Planned legacy VRRP shutdown emits three
   priority-0 adverts and arms a 1ms backup timer (test constraint <50ms, not
