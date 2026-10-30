@@ -750,7 +750,7 @@ func (s *SessionSync) SendFenceAwait(timeout time.Duration) (FenceAck, error) {
 		unregister()
 		slog.Warn("cluster sync: fence send error", "seq", seq, "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "confirmed fence write failed", err)
 		return FenceAck{}, fmt.Errorf("failed to send fence message: %w", err)
 	}
 	s.stats.FencesSent.Add(1)

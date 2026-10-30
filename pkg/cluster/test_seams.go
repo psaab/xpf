@@ -76,6 +76,10 @@ func (f *fakePeerSyncSource17056) PeerRecentlyActiveWithinSilenceWindow() bool {
 	return f.silenceFresh
 }
 
+// TransferChannelGen is constant: every SetFakePeerSyncSourceForTesting call
+// publishes a NEW fake, which is how a cell models a reconnect.
+func (f *fakePeerSyncSource17056) TransferChannelGen() uint64 { return 0 }
+
 // setPeerSyncSourceForTesting injects a fake sync source (tests only).
 func (m *Manager) setPeerSyncSourceForTesting(src peerSyncSource) {
 	m.mu.Lock()
@@ -208,7 +212,8 @@ func (s *SessionSync) SetPendingColdPrimeForTesting() bool {
 	epoch := s.bulkSendNext.Add(1)
 	s.pendingBulkOwed.Store(owed)
 	s.pendingBulkAckEpoch.Store(epoch)
-	s.pendingBulkAckSince.Store(time.Now().UnixNano())
+	// The clock PendingBulkAck reads (review of #18525 round 2).
+	s.pendingBulkAckSince.Store(s.nowMono())
 	return true
 }
 
@@ -408,4 +413,32 @@ func (s *SessionSync) StampIngressFoldForTesting(ifindex uint32, vlan uint16) ui
 // wire round trip.
 func (s *SessionSync) StampNatScopeFoldForTesting(ifindex int32) uint32 {
 	return s.stampNatScopeFold(ifindex)
+}
+
+// SetOverdueConfigApplyDebtForTesting models a connected, ACK-capable peer
+// that has not acknowledged config generation gen, sent age ago (#18521).
+func (s *SessionSync) SetOverdueConfigApplyDebtForTesting(gen uint64, age time.Duration) {
+	if s == nil {
+		return
+	}
+	s.stats.Connected.Store(true)
+	s.peerSnaps.peerSnapshotProtocol.Store(8)
+	s.peerIncarnationState().peerCapabilityFlags2.Store(uint32(capFlag2ConfigApplyAck))
+	s.configApplyDebtMu.Lock()
+	s.lastSentConfigDebt16756 = configApplyDebt16756{
+		generation: gen, capabilityKnown: true, ackCapable: true,
+		sentMono: s.nowMono() - int64(age),
+	}
+	s.configApplyDebtMu.Unlock()
+}
+
+// AckConfigApplyForTesting credits a positive config-apply ACK for gen as
+// the receive path would on the active connection (#18521).
+func (s *SessionSync) AckConfigApplyForTesting(gen uint64) {
+	if s == nil {
+		return
+	}
+	var p [8]byte
+	binary.LittleEndian.PutUint64(p[:], gen)
+	s.handleConfigApplyAck(nil, p[:])
 }

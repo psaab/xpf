@@ -292,6 +292,11 @@ type Manager struct {
 	// their deliberate holds are never auto-restored. Read/written under m.mu.
 	remoteTransferOutLeaseUntil map[int]time.Time
 	remoteTransferOutLeaseReqID map[int]uint64
+	// remoteTransferOutLeaseChannel binds each live lease to the session-sync
+	// connection set that was installed when the request demoted us (#18521
+	// review round 2). The leased hold outlives the 2s dual-resign rescue
+	// only while that binding is intact; see transferChannelIntactLocked.
+	remoteTransferOutLeaseChannel map[int]transferChannelBinding
 	// remoteTransferOutLease is how long an armed lease survives without a
 	// commit before electRG restores the owner. Sized above the requester's
 	// worst-case post-ACK commit latency; see DefaultRemoteTransferOutLease and
@@ -907,6 +912,7 @@ func NewManager(nodeID, clusterID int) *Manager {
 		localTransferOutHoldUntil:      make(map[int]time.Time),
 		remoteTransferOutLeaseUntil:    make(map[int]time.Time),
 		remoteTransferOutLeaseReqID:    make(map[int]uint64),
+		remoteTransferOutLeaseChannel:  make(map[int]transferChannelBinding),
 		abortedPeerTransferReqID:       make(map[int]uint64),
 		abortedPeerTransferFence:       make(map[int]abortedPeerTransferFence),
 		remoteTransferOutLease:         DefaultRemoteTransferOutLease,

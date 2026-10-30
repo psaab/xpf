@@ -226,7 +226,8 @@ the userspace dataplane admission boundary is in
   sync therefore takes max(threshold, remaining sync-recency window) plus up
   to one heartbeat tick: 0.5–2.1s at defaults and 1.0–2.2s in the lab,
   phase-dependent; a process crash that closes sync or already-idle sync
-  falls through at the raw threshold, subject to startup/restart grace. These
+  falls through at the raw threshold when the receiving standby is caught up,
+  subject to startup/restart grace; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus one heartbeat tick — about 3.1s at defaults, 3.2s in the lab, under the 5s cap (#18521). These
   are detection estimates, not end-to-end traffic-restoration SLAs
   (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `pkg/cluster/heartbeat_manager.go:790-832`;

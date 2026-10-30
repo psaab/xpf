@@ -891,7 +891,26 @@ partial drop, or when the preferred fabric connects with no fault.
   daemon wraps the refusal as `demotion peer barrier failed`, a
   `RetryablePreFailoverError`.
 - **Recovery.** A move releases pending barrier waiters and starts one
-  single-flight re-prime (`doBulkSync`); every refused barrier re-kicks it.
+  single-flight re-prime (`doBulkSync`); every refused barrier re-kicks it —
+  unless a pending bulk that captured the CURRENT epoch is still inside
+  `BulkAckPendingRetryAfter` (`fenceDischargeAwaited`, #18521). Without that
+  check each 0.5s manual-failover admission retry started a new full bulk the
+  moment the previous one finished writing; each replaced
+  `pendingBulkAckEpoch`, so the peer's eventual ack matched nothing and the
+  fence never discharged.
+- **Withheld receiver BulkAck (#18521).** A receiver that withholds the
+  BulkAck the fence waits on — reconcile skipped (zone map moved mid-bulk, no
+  zone snapshot, no dataplane) or failed, window aborted, transient helper
+  install failures — queues one `BulkRequest` after a backoff (1s doubling,
+  cap 30s, reset by a reconciled bulk; 10s doubling for transient install
+  failures, which are expected while the helper comes up; never shorter than
+  the withheld bulk's own receive duration, since each request costs the
+  sender a full table walk) and a stable zone map, single-flighted, for the
+  newest withheld bulk — on that bulk's own cause, floor and duration, even
+  when it was withheld while an earlier request waited (round 3) — and
+  dropped if a newer bulk was accepted meanwhile
+  (`sync_bulk_rerequest_18521.go`, `Bulk re-requests sent`). The pending-bulk
+  age behind every 35s retry decision is monotonic.
 - **Discharge.** Only a BulkAck for a bulk that captured the epoch BEFORE reading its
   session source advances `cleared`. `doBulkSync` captures before
   `BulkSnapshotSource`; the store walk captures at BulkStart; `BulkSyncSnapshot`
@@ -4059,6 +4078,43 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     The legacy refusal names the real cause ("peer predates config-apply ACK").
     With no session sync there is no push that could have failed, so
     handover proceeds as before. Crash takeover stays ungated.
+  - A peer reboot voids only the ACK its PREVIOUS boot delivered (#18521).
+    The applied mark is attributed to the boot that delivered it (the
+    connection's #9818 capability identity, which precedes any ACK on the
+    same ordered stream), and the BulkStart announcing a new boot
+    (`notePeerBootIncarnation`) zeroes it only when a different boot — or an
+    unattributed legacy peer — delivered it. The BulkStart is not ordered
+    against the new boot's ACK: a restarted standby can apply and ACK the
+    peer-connect push seconds before its first bulk starts, and zeroing that
+    ACK left the debt standing with nothing to re-push an in-sync config, so
+    failover onto the restarted standby was refused ("peer applied 0") until
+    the next commit (`config_ack_reboot_order_18521_test.go`). An ACK the
+    standby skips because the delivering connection is no longer active is
+    now logged instead of silent.
+  - An uncredited ACK no longer sticks (#18521). Only the newest send's ACK
+    clears the gate, and only a NACK, a reconnect or a commit re-pushed —
+    so a lost, skipped or discarded ACK refused failover onto an in-sync
+    standby until the next commit. `PeerConfigAckOverdue` reports a
+    connected ACK-capable peer that has left the newest send unacknowledged
+    for 10s, and the daemon (`repushIfConfigAckOverdue`: reconcile tick, and
+    on a stale-gate refusal) re-sends the last pushed config at its SAME wire
+    generation, at most once per 10s and only as RG0 authority. The standby's
+    duplicate path re-ACKs it without applying again, so neither node's config
+    epoch moves (a new generation would re-apply and make the epoch guard
+    refuse synced installs stamped with the older epoch). Counters
+    `Config apply-acks sent / unsent` (standby) and `credited / ignored`
+    (authority) name a future drop end to end.
+  - A former authority's debt is superseded by the new authority's config
+    (review of #18525 round 2). Only the RG0 authority re-pushes, but the
+    gate runs on every demoting node, so a node that lost RG0 with an
+    uncredited debt by a path its gate does not guard (a monitor-driven
+    weight change) refused every later data-RG handover. Once it APPLIES a
+    config the peer pushed, both nodes hold the peer's config and
+    `supersedeSentConfigDebtByPeer` retires the debt; a later send records a
+    fresh one. A duplicate re-ACK does not supersede (round 3): it never
+    passes the apply handler's RG0-primary refusal, and it says nothing
+    about this node's current config
+    (`TestFormerAuthorityDebtSupersededByPeerConfig18525`).
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
 - **A committed requested transfer wins over `preempt` (#10776).** Once the
@@ -4173,6 +4229,51 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   the lease. reqID is threaded
   into `OnRemoteFailover`/`OnRemoteFailoverBatch`/`OnRemoteFailoverCommit`/
   `OnRemoteFailoverCommitBatch` (`sync.go`) to arm/clear it.
+- **An in-flight peer-requested transfer owns the owner's hold (#18521).**
+  While the reqID-bound transfer-out lease is LIVE, `electRG` does not run the
+  2s dual-resign / peer-yielded clear ("clearing manual failover (peer also
+  yielded)"); only the matching commit, the matching abort, lease expiry, peer
+  loss or an operator reset release the hold. The 2s timer runs from the
+  owner's demotion, but the requester legitimately advertises secondary-hold
+  until the owner's applied-ACK reaches it (its own pre-request hold is
+  released only then, and the ACK waits on the owner's demotion actuation) and
+  then spends up to `localFailoverCommitTimeout` (3s) in its local commit
+  settle. A demotion that took >2s to actuate cleared the hold mid-transfer,
+  ordinary election re-promoted a higher-priority owner, and the commit failed
+  with "still primary locally". A requester advertising PRIMARY during its
+  commit window never tripped the timer (no peer-yield predicate matches), so
+  the race needs the requester's pre-request hold or weight 0. An operator
+  hold (no lease) keeps the 2s rescue. The hold applies only while the
+  session-sync connection set that carried the request is still installed
+  (`transferChannelIntactLocked`): `ArmRemoteTransferOutLease` binds the lease
+  to the published sync source and its connection-slot removal generation
+  (`SessionSync.TransferChannelGen`, advanced by `setConnSlotLocked`, the only
+  production writer of a slot — `TestConnSlotWritesGoThroughTheSetter18525`).
+  Commit and abort frames are written once and never re-sent, so one queued
+  on a connection that was then torn down is gone, and a FRESH connection
+  cannot deliver it. Keying the hold on "sync connected" (the first review
+  round) let a redial that beat the owner's next election re-arm the
+  lease-long hold while the requester sat in its restored hold — no primary
+  for up to the lease (review of #18525 round 2). Once the binding breaks
+  (sync down, the request's connection torn down or superseded, a new
+  SessionSync published) the owner falls back to the pre-#18521 floor: the
+  2s rescue and the lease expiry. That rescue fires only while the requester
+  advertises secondary-hold or weight 0, so it does not re-promote the owner
+  over a requester that already promoted itself and is waiting for its
+  commit ACK on the new connection; that commit still lands. It CAN fire
+  while the requester is still in its pre-request hold waiting for the
+  applied-ACK — the binding breaks during a slow demotion actuation — and
+  before round 3 the owner then sent "applied" anyway, because the
+  actuation barrier resolves on the queued demotion edge: both nodes primary
+  until the commit was refused (review of #18525 round 3; master's
+  unconditional rescue has the same window in every slow-actuation
+  transfer). The applied-ACK is now sent only while
+  `RemoteTransferOutStillHeld` (lease armed for that reqID, hold still set);
+  otherwise the requester gets "failed" and keeps its hold. The residual is
+  the ACK's flight: a binding that breaks after "applied" is sent and before
+  the requester has promoted. Filling an empty slot (the other fabric
+  connecting) removes nothing and keeps the binding. Cells:
+  `failover_inflight_hold_18521_test.go`.
 - **A requester-side abort must not re-promote the requester (#15164,
   B22-01).** The lease above restores the OWNER, but it did nothing for the
   requester: after `abortRequestedPeerFailover` the requester had reported
@@ -5219,3 +5320,46 @@ it.
   refusals, stale full-set, absolute-deadline junk-stream teardown,
   header-only cap refusal, cap-table census over all 44 dispatched
   labels).
+
+  **Session-sync teardown is abortive and names its cause; a stalled
+  receive loop is watched (#18521).** A peer whose receive loop stopped
+  draining (a synchronous helper install behind the userspace Manager's
+  mutex) made this node's 2s-deadline writer tear the connection down, and
+  the graceful FIN then queued behind ~1 MB of unsent bytes the stalled peer
+  could not accept — the dial side, the only side that redials, stayed
+  ESTABLISHED for 56s. A teardown of a connection judged dead now closes
+  with `SO_LINGER 0` (`abortSyncConn`, including `handleDisconnect`'s stale
+  branch, which used to leave its socket open). `Stop()` is NOT such a
+  judgment: it flushes what it already wrote (`flushOnStop`, until the peer
+  has acknowledged every byte, bounded by `syncStopFlushTimeout`, 1s) and
+  closes normally, aborting only a peer that did not take the bytes in time
+  (review of #18525 round 2: the abortive stop discarded a stopping
+  primary's newest deltas, which nothing re-sends). That bound does not
+  cover a peer reading below line rate: measured on loopback, ~520 KB of
+  ~1 MB in flight is still unflushed when it aborts (round 3). A
+  per-connection watchdog notices the kernel's report that the peer closed
+  the connection (RST or FIN) while the loop is behind: a loop still making
+  progress drains what the peer delivered (marked `peerClosed`: writers skip
+  it, a writer's failure does not tear it down, the dial side may redial
+  its slot, its frames earn no peer liveness); after an RST, a loop with one
+  handler call stuck for `syncWriteDeadline` is torn down at once. The drain
+  helps only a peer that does not come back before the drain completes
+  (stopped for good, or a crash whose restart — systemd's 1s `RestartSec` —
+  is slower than the drain): a redial retires the
+  drained connection through `handleDisconnect` (`retirePeerClosedSlot`,
+  round 3 — a plain supersession read as a peer reboot and evicted the
+  healthy other-fabric connection), discarding what was still queued, and
+  peer connect/disconnect callbacks run in dispatch order
+  (`dispatchPeerEvent`). `fabric N disconnected`
+  carries `reason`/`err`/per-connection summary; `receive loop exited` is
+  logged once per connection; and a handler that holds the loop for 1s is
+  reported with its message type, while blocked and on return, each kind at
+  most once per 10s per connection with a `suppressed` tally. Full
+  mechanism: `docs/session-sync-architecture.md` "Connection teardown and the
+  half-open window". Cells: `sync_conn_halfopen_18521_test.go` (loopback
+  TCP: the RST reaches a non-reading peer, the watchdog clears a stuck slot
+  and drains a progressing one, Stop flushes to a slow peer and still aborts
+  a stalled one, stale-branch close, exit reasons, rate-limited slow-handler
+  reports, `syncMsgName` census against `handleMessage`),
+  `sync_reprime_storm_18521_test.go` (one fence re-prime per epoch, receiver
+  re-request after a skipped reconcile).
