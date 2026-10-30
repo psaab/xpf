@@ -778,6 +778,17 @@ type Manager struct {
 	// released by a timeout: rolling rejoin must not promote a restarted node
 	// until it has actually received the peer's complete session state (#10261).
 	syncBulkPrimed bool
+	// syncBulkPrimedAtMono is the CLOCK_MONOTONIC stamp of syncBulkPrimed's
+	// false->true edge (0 while unprimed). #18549: one half of the proof
+	// that ends the cold-boot heartbeat floor early (bootFloorProvenOver).
+	syncBulkPrimedAtMono int64
+
+	// peerHBSteadySinceMono / peerHBLastAdmitMono track the current run of
+	// admitted peer heartbeats with no gap of interval*threshold or more:
+	// when the run began and its latest frame (CLOCK_MONOTONIC, 0 = none).
+	// #18549: the other half of the boot-floor proof. Reset on peer loss.
+	peerHBSteadySinceMono int64
+	peerHBLastAdmitMono   int64
 
 	// syncTransport records whether session sync uses "fabric" or
 	// "control-link" transport. Displayed in CLI status.

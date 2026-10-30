@@ -437,11 +437,14 @@ zone denial (#16018 A7-03); the warning is WARN-only on every path.
   interval with local fallback — e.g. ~23 ms at priority 250 / 1 s,
   ~805 ms at priority 50 / 1 s) so the highest-priority backup promotes
   first rather than every backup claiming MASTER at once (#16771).
-  Private-RG operator failover is explicit peer transfer;
-  ordinary private-RG shutdown sends no resign/transfer frame, so after
-  `rg_active` clears the peer promotes through heartbeat-loss detection, no
-  sooner than the heartbeat threshold and potentially later under the
-  sync-recency guard (`instance.go:770-807`;
+  Private-RG operator failover is explicit peer transfer. An orderly
+  private-RG stop with a live peer resigns every RG at weight 0 and kicks
+  one heartbeat (#18540, `pkg/cluster` "Planned-shutdown resign"), so the
+  peer normally promotes on that frame. A stop that never reaches the
+  resign (crash, SIGKILL) and a lone node fall back to heartbeat-loss
+  detection. So does a peer carrying an aborted-transfer marker. That
+  fallback comes no sooner than the heartbeat threshold and possibly later
+  under the sync-recency guard (`instance.go:770-807`;
   `instance_rx.go:155-173`; `instance_prio0_run_test.go:143-149`;
   `pkg/cluster/failover.go:447-450`;
   `pkg/daemon/daemon_run_shutdown.go:418-428`;

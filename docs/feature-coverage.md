@@ -426,11 +426,17 @@ the userspace dataplane admission boundary is in
   advertisements and arms a 1ms backup timer; the run-loop test requires
   MASTER advertisement within 50ms (test constraint, not SLA)
   (`pkg/vrrp/instance.go:770-807`; `pkg/vrrp/instance_rx.go:155-173`;
-  `pkg/vrrp/instance_prio0_run_test.go:143-149`). Default private-RG
-  shutdown sends no resign frame; after `rg_active` clears, the peer waits at
-  least the heartbeat threshold (500ms runtime defaults / 1s lab config), and
-  the sync-recency guard can extend that gap. No end-to-end restoration bound
-  is asserted (`pkg/daemon/daemon_run_shutdown.go:418-428`;
+  `pkg/vrrp/instance_prio0_run_test.go:143-149`). An orderly default
+  private-RG stop with a live peer resigns every RG at weight 0 after the
+  fail-closed actions, and sends a heartbeat at once. The peer normally
+  promotes on that frame, even through a manual-failover hold (#18540).
+  These cases still wait at least the heartbeat threshold (500ms runtime
+  defaults / 1s lab config), and the sync-recency guard can extend that gap:
+  - a stop that never reaches the resign (crash, SIGKILL);
+  - a lone node, which skips the resign;
+  - a peer carrying an aborted-transfer marker.
+
+  No end-to-end restoration bound is asserted (`pkg/daemon/daemon_run_shutdown.go:418-428`;
   `pkg/cluster/manager.go:1026-1077`;
   `DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
   `pkg/daemon/daemon_ha_sync.go:170-206`).

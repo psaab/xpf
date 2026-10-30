@@ -845,11 +845,16 @@ type PeerGroupState struct {
 
 // heartbeatSender sends periodic heartbeat packets.
 type heartbeatSender struct {
-	mgr        *Manager
-	conn       *net.UDPConn
-	peerAddr   *net.UDPAddr
-	interval   time.Duration
-	stopCh     chan struct{}
+	mgr      *Manager
+	conn     *net.UDPConn
+	peerAddr *net.UDPAddr
+	interval time.Duration
+	stopCh   chan struct{}
+	// kickCh requests an out-of-cadence send (ResignForPlannedShutdown).
+	// Buffered 1 so kicks coalesce and kick never blocks; a sender built
+	// without newHeartbeatSender has a nil channel, which the run loop
+	// never selects and kick's default arm skips.
+	kickCh     chan struct{}
 	wg         sync.WaitGroup
 	sent       atomic.Uint64
 	sendErrors atomic.Uint64
@@ -929,6 +934,17 @@ func newHeartbeatSender(mgr *Manager, conn *net.UDPConn, peerAddr *net.UDPAddr, 
 		peerAddr: peerAddr,
 		interval: interval,
 		stopCh:   make(chan struct{}),
+		kickCh:   make(chan struct{}, 1),
+	}
+}
+
+// kick asks the run loop to send one frame now, on its own goroutine, so the
+// frame is built and written in sequence order with the ticker's frames. It
+// never blocks: a pending kick absorbs later ones.
+func (s *heartbeatSender) kick() {
+	select {
+	case s.kickCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -956,6 +972,8 @@ func (s *heartbeatSender) run() {
 		select {
 		case <-s.stopCh:
 			return
+		case <-s.kickCh:
+			s.send()
 		case <-ticker.C:
 			s.send()
 			ticks++
@@ -1466,7 +1484,17 @@ func (r *heartbeatReceiver) checkTimeout() {
 	// commit for up to 30s. It still keeps whatever remained of a grace its
 	// predecessor was inside (inheritedHold). At boot, that is the cold-boot
 	// grace, which the boot-time apply's restart must not cut short.
-	if time.Since(r.startedAt) < r.seenThenLostGrace() || time.Now().Before(r.inheritedHold) {
+	//
+	// #18549: the BOOT part of that floor (a cold start's 30s, or a boot
+	// floor inherited across restarts) ends early once bring-up is proven
+	// over — inbound bulk complete, then the peer heard gap-free for
+	// heartbeatBootStableWindow (heartbeat_boot_floor.go). A rejoined node
+	// that reports takeover-ready must be able to notice its peer dying. A
+	// restart's own grace is never shortened.
+	restartFloor := r.seenGrace > 0 && time.Since(r.startedAt) < r.seenGrace
+	bootFloor := (r.seenGrace == 0 && time.Since(r.startedAt) < heartbeatStartupGrace) ||
+		time.Now().Before(r.inheritedHold)
+	if restartFloor || (bootFloor && !r.mgr.bootFloorProvenOver()) {
 		return
 	}
 	// Compare in the CLOCK_MONOTONIC domain. The previous

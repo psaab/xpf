@@ -99,6 +99,11 @@ func (m *Manager) SetSyncBulkPrimed(primed bool) {
 		return
 	}
 	m.syncBulkPrimed = primed
+	if primed {
+		m.syncBulkPrimedAtMono = MonotonicNanos()
+	} else {
+		m.syncBulkPrimedAtMono = 0
+	}
 	slog.Info("cluster: sync bulk priming changed", "primed", primed)
 }
 
