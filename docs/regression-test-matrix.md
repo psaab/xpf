@@ -38,6 +38,7 @@ It complements, and does not replace:
 | D1 | Build the deb in the PR's own worktree and deploy it from that same worktree. Commit nothing in that worktree between the deploy and the last gate | `exe_check=MATCH` on every ledger row | **a shared worktree cross-contaminates the deploy manifest**: deploying cluster A from the worktree that deployed cluster B turns B's rows VOID (`exe_check=MISMATCH`). **The manifest is keyed to the checkout's HEAD**: a merge or commit after the deploy VOIDs every later row ("deploy attestation manifest belongs to a different checkout"). Land harness changes before deploying |
 | D2 | The deb version is higher than the installed one | the deploy succeeds | apt refusing a downgrade. Build with the default version after the branch is current with master, or deploy a bumped `DEB_VERSION` by path, never by passing `DEB_VERSION` to the locked make |
 | D3 | After a deploy, node0 is primary for every RG, and CoS is re-applied if the gate uses CoS | `show chassis cluster status` | deploy wipes CoS; a stale owner after a prior run |
+| D4 | **Unit identity.** On every node: `systemctl show xpfd -p FragmentPath -p KillMode` | the effective unit matches the repo/package unit (`KillMode=mixed` since #18213) | a stale `/etc/systemd/system/xpfd.service` from an older raw setup shadowing the packaged unit. On loss and tcp it kept `KillMode=control-group`, so systemd killed the helper at SIGTERM and every stop/restart test measured a different shutdown than production (2026-10-30) |
 
 ## Tier 2: forwarding and performance (loss and tcp)
 
@@ -76,18 +77,20 @@ are a regression.
 
 Resync node clocks after any crash reboot: the loss lab has no NTP
 (`failover_resync_node_clocks`, #11872).
+Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ran 66.8 s behind fw0 on loss); a cross-node timeline without that offset produced a wrong diagnosis once.
 
 | ID | Run | Pass | Catches |
 |---|---|---|---|
 | H1 | `make test-failover` | PASS, including the crash takeover **and** the RG1 failback split, with every stream's last-good second at the end of the run | streams dying on takeover because synced sessions carried truncated zone ids (#18515); the failback split killing established SNAT streams. Three separate mechanisms did that (#18531), and the row only passes when none fire: the LAN node revoked its promoted row against the fabric pseudo-egress and synced the Close to the WAN owner; the WAN owner purged its alias rows as translated-synced when the reply arrived over the fabric link; and the returning owner judged a WAN reply to the SNAT address LocalDelivery and tore the session down at the host-inbound gate |
 | H2 | `make test-ha-crash` | PASS on all phases | a stuck restore after a peer restart (#18521 fence and re-prime storm); a lost config-apply ACK blocking RG0 failover (#18521) |
 | H2a | **Restore budget**: `test-ha-crash` and `test-restart-connectivity`, the targets that carry `RESTORE_FW0_BUDGET` (#18524) | the post-run restore to node0 takes ≤ `RESTORE_FW0_BUDGET` (default 30 s) with no refused failover. Healthy restores took 9–16 s on 2026-10-29 | a restore that only succeeds on its fourth retry hides a fence or barrier refusal ("demotion peer barrier failed: session sync barrier fenced") that the next real failover hits too (#18523, #18521) |
-| H3 | `make test-double-failover` | PASS on both transitions | takeover by a node whose replicas came from a rejoin bulk |
-| H4 | `make test-restart-connectivity` | PASS, no cycle over the loss budget | daemon-restart blackholes |
+| H3 | `make test-double-failover` | PASS on both transitions; per-stream data shows every stream resumes after **each** takeover | takeover by a node whose replicas came from a rejoin bulk: on 2026-10-30 the second takeover killed every stream on loss (2 of 4 on tcp) while the first survived |
+| H4 | `make test-restart-connectivity` | PASS, no cycle over the loss budget, and the outage does not grow across cycles | daemon-restart blackholes: an orderly private-RG stop handed nothing to the peer and detection was padded by the stopping node's own sync backlog (#18540); an outage that grows cycle over cycle points at state carried between cycles |
 | H5 | `make test-active-active` | PASS | split-RG forwarding; a verdict that rejected `secondary-hold` (#18523) |
 | H6 | **Split dwell.** Move RG1 to the peer, hold the split ≥ 90 s with `-P8` running, move it back; repeat in the other orientation | 8/8 streams survive both moves | standby replicas reaped at 3 × the opening window (60 s) before they are needed (#18520). H1's failback lands about 64 s after rejoin, right at that edge, so a dwell longer than 60 s is required |
 | H7 | **Sync health after every RG move and restart.** Session sync is connected on both nodes within 5 s; a manual failover is admitted within one admission window (no `peer config stale`, no fence refusal); `Sessions stale-config-ignored` does not climb | as stated | a half-open sync connection surviving 56 s (#18521); a fence that never discharges; a config ACK credited then wiped by the peer's new-boot BulkStart (#18521); re-pushes moving the config epoch (#18521 review); the primary ignoring standby epochs (#18526) |
 | H8 | **Revocation symmetry.** After H1, compare `show security flow session` on both nodes for the iperf flows | no session row survives on one node whose twin the other node closed | a Close emitted for an alias-only owner keyed on the translated tuple, which left the LAN node's original-tuple row alive and still translating (#18531 review) |
+| H9 | **Rejoin window throughput.** In H1's per-stream data, compare the window between the crashed node's rejoin and the failback with the pre-crash window | aggregate within 20% of pre-crash; no stream below 10% of its pre-crash rate | the surviving primary's throughput collapsing to 1.5–12 Gbit/s, with streams starving, for about 60 s after the peer rejoins (every build on 2026-10-29/30). The harness's dead-stream checks only judge the instants around each transition, so this window went unjudged |
 
 ## Tier 4: soak and cadence
 
