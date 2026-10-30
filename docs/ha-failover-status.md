@@ -739,6 +739,29 @@ Root cause was barrier/bulk ack delivery stuck behind bulk data (P0). With
 priority ack channel, acks should deliver promptly. Needs live validation
 on split-RG cluster.
 
+### Manual failover refused 11-29 s after a peer restart — FIXED IN SOURCE (#18541, #18374), NOT YET LIVE-VALIDATED
+
+After a peer restart the survivor's barrier fence refuses manual failover
+until the restarted node acks a cold-prime bulk. On loss (2026-10-30
+`test-ha-crash` phase 3) that took 11-29 s for ~520 sessions, for two
+independent reasons:
+
+- **Install throughput (#18541).** The receiver installs each bulk session
+  with two helper session-socket round trips, and the helper's accept loop
+  slept 10 ms whenever it found nothing to accept — which was every time,
+  because Go dials each request just after the previous response. ~20 ms per
+  session, ~51 sessions/s, ~10 s per 522-session bulk, linear in table size.
+  The loop now wakes on the listener's readiness.
+- **Discarded bulk (#18374).** Any config apply or interface-link refresh
+  inside the receive window advanced the ownership generation, even when it
+  installed identical ownership, so the reconcile was skipped, the `BulkAck`
+  withheld and the whole bulk discarded; the second bulk then paid the same
+  ~10 s again. Ownership installs now carry a resolver digest and keep the
+  generation when nothing the reconcile reads changed.
+
+Both are covered by hermetic cells; neither has been through `make
+test-ha-crash` on a cluster yet.
+
 ## What Still Needs Work
 
 ### Inherited translated tuples resolve as HA-inactive (was P1)

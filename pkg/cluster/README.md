@@ -5101,13 +5101,24 @@ it.
     first. A row whose fold cannot be resolved falls back to zone ownership;
     `ShouldSyncZone` admits a mapped zone when this node is primary for any RG
     in its set.
-  - `SetZoneOwnership` installs the zone set, fold-to-RG lookup and local fold
-    resolver atomically, and advances `zoneRGMapGen` on each apply because the
-    resolver closes over an apply-time interface snapshot. The legacy
-    `SetZoneRGMap` setter adapts a single-RG map and bumps the generation only
-    when its contents change. Reconcile skips a bulk whose ownership snapshot
-    generation is stale, because old answers could delete a session this node
-    now owns.
+  - `InstallZoneOwnership` (#18374) installs the zone set, fold-to-RG lookup,
+    local fold resolver and NAT-scope folder atomically, and advances
+    `zoneRGMapGen` only when the zone map, the fold-to-RG map or the resolver
+    changed. A resolver is a func and cannot be compared, so the daemon passes
+    a `ResolverDigest` of what it closes over — the store's canonical
+    config-text digest (`ActiveDigestFor`, empty unless the config IS the
+    store's compiled active one) and the ifindex->name table it was built from
+    (`pkg/daemon/zone_ownership_install_18374.go`). A zero digest is unknown
+    and always advances. Every daemon install goes through it (a module-wide
+    AST cell enforces that), so a content-equal re-install on a config apply
+    or a link-state refresh no longer voids an in-flight bulk's reconcile.
+    `SetZoneOwnership` and `SetIngressFoldFn` remain for tests and advance on
+    every call (no digest); `SetNatScopeFoldFn` advances nothing, because no
+    reconcile snapshot captures the NAT-scope folder — only the send-side
+    stamp reads it. The legacy `SetZoneRGMap` setter adapts a single-RG map and
+    bumps the generation only when its contents change. Reconcile skips a bulk
+    whose ownership snapshot generation is stale, because old answers could
+    delete a session this node now owns.
   - Before publishing a new session-sync object, the daemon seeds a stable
     active-applied config's ownership snapshot. Exact-text and
     credential-equivalent config-sync skips also repair a still-nil map from

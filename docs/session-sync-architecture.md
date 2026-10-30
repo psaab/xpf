@@ -953,6 +953,34 @@ For each received session it:
 5. installs the forward entry through `SetClusterSyncedSession*`
 6. creates and installs the reverse entry locally
 
+Steps 5 and 6 are two synchronous helper round trips, each a fresh dial of the
+helper's session socket (`requestSessionSyncResponseLocked`). Install
+throughput is therefore set by the helper's accept loop, not by the wire: until
+#18541 that loop slept a fixed 10 ms whenever it found nothing to accept, and
+every dial arrived just after it went idle, so each session cost ~20 ms — loss
+fw0 installed a 522-session cold-prime bulk at ~51 sessions/s (~10 s), which is
+how long the sender's barrier fence refused manual failover. The loop now
+waits on the listener's readiness (`wait_for_pending_connection`,
+`userspace-dp/src/server/accept_loop.rs`), so a request is accepted as soon as
+it is dialed; the per-request protocol, fail-closed outcomes and `BulkAck`
+meaning are unchanged.
+
+An install holds `Manager.sessionMu`, not `Manager.mu`, across its round trip,
+and the session socket is served by its own helper thread, apart from the
+control socket that carries the authoritative `update_ha_state` (RG
+activation and demotion), FIB and neighbor publishes. The HA watchdog's
+lease-only `update_ha_state` refresh (#9629) does ride the session socket,
+taking `sessionMu` per request like an install, so it too waits for at most
+the one request in flight. An RG activation (`UpdateRGActive`) shares only its
+brief `mu -> sessionMu` fence with the install path, so after a peer loss it
+waits for at most the ONE install in flight, never for a backlog of the dead
+peer's queued frames
+(`TestRGActivationWaitsForAtMostOneInFlightInstall18541`; on loss fw1 at the
+2026-10-30 06:32:40 takeover the helper logged all three activations within
+0.35 s). What a backlog DOES delay is the sync receive loop itself, which
+installs frames in arrival order; #18541 cuts each of those from ~20 ms to the
+round-trip cost.
+
 On `BulkEnd` the receiver:
 
 1. verifies the epoch
@@ -998,6 +1026,26 @@ says are peer-owned.
 
 Important detail: zones missing from the frozen snapshot are conservatively kept
 instead of deleted.
+
+The reconcile is skipped — `BulkAck` withheld, the bulk discarded — when the
+ownership generation (`zoneRGMapGen`) moved between `BulkStart` and `BulkEnd`
+(#9655). Since #18374 the generation moves only when something the snapshot
+captures changed: the zone map, the fold->RG map, or the ingress fold resolver.
+The daemon installs all three through `InstallZoneOwnership` with a digest of
+what the resolver closes over (the store's canonical config-text digest and the
+ifindex->name table); a content-equal re-install — every config apply and every
+link-state refresh re-installs — keeps the generation. Before #18374 every
+install advanced it (twice per apply, counting the NAT-scope folder, which no
+snapshot reads), so an apply or an em0 link refresh landing inside the receive
+window discarded the whole bulk; the issue's journal census counted 113 such
+aborts on loss fw0. A config with DNS address-book names is applied as a
+private DNS-refresh clone; its install uses its recorded base's digest when
+that base is the store's compiled active config (DNS answers are not read by
+the fold). A genuine change, an unknown digest (a config the store cannot
+identify, such as a candidate or a DNS clone of a non-active config), or a
+legacy setter still advances it and still voids the reconcile. RG mastership is
+not part of the generation, before or after #18374: the snapshot judges by the
+primary answers captured at `BulkStart` (see #18548).
 
 ### Config-Epoch Guard (#5274)
 

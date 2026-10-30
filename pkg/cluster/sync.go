@@ -1522,10 +1522,19 @@ type SessionSync struct {
 	zoneRGMu  sync.RWMutex
 	zoneRGMap ZoneRGMap
 	foldRGMap map[uint32]int
-	// zoneRGMapGen changes when the legacy SetZoneRGMap contents change and on
-	// every SetZoneOwnership apply (#9655/#11012), so an in-flight bulk can
-	// detect stale ownership or resolver snapshots. Guarded by zoneRGMu.
+	// zoneRGMapGen changes when something a bulk reconcile snapshot reads
+	// changes (#9655/#11012): the zone map, the fold->RG map, or the ingress
+	// fold resolver. The legacy setters (SetZoneRGMap on content, and
+	// SetZoneOwnership/SetIngressFoldFn on every call) and the daemon's
+	// InstallZoneOwnership (on content, #18374) advance it, so an in-flight
+	// bulk can detect stale ownership or resolver snapshots. Guarded by
+	// zoneRGMu.
 	zoneRGMapGen uint64
+	// ingressFoldDigest fingerprints what ingressFoldFn closes over, as
+	// supplied by InstallZoneOwnership (#18374). Zero means unknown: the
+	// legacy setters install a resolver without one, so the next install
+	// always advances zoneRGMapGen. Guarded by zoneRGMu.
+	ingressFoldDigest ResolverDigest
 
 	// ingressFoldFn resolves a LOCAL interface identity (in either session
 	// direction) to its cluster-stable RETH-relative fold on the sync wire.
@@ -2379,8 +2388,11 @@ func (s *SessionSync) SetZoneRGMap(m map[uint16]int) {
 // #7095 ingress and #12075 egress identity against this apply-time config.
 // A nil zone map preserves the prior zone map (used when an apply result has
 // no zone-ID snapshot); a non-nil empty map installs an authoritative empty
-// map. Each apply advances the generation because the fold resolver closes
-// over an apply-time interface snapshot.
+// map. Each call advances the generation because the fold resolver closes
+// over an apply-time interface snapshot and a func cannot be compared. The
+// daemon installs through InstallZoneOwnership instead, which carries a
+// digest of what the resolver closes over and keeps the generation on a
+// content-equal re-install (#18374).
 func (s *SessionSync) SetZoneOwnership(zoneRG ZoneRGMap, foldRG map[uint32]int, foldFn func(uint32, uint16) uint32) {
 	var zones ZoneRGMap
 	if zoneRG != nil {
@@ -2399,6 +2411,7 @@ func (s *SessionSync) SetZoneOwnership(zoneRG ZoneRGMap, foldRG map[uint32]int, 
 	}
 	s.foldRGMap = folds
 	s.ingressFoldFn = foldFn
+	s.ingressFoldDigest = ResolverDigest{}
 	s.zoneRGMapGen++
 	s.zoneRGMu.Unlock()
 }
@@ -2419,6 +2432,7 @@ func (s *SessionSync) ZoneOwnershipInstalled() bool {
 func (s *SessionSync) SetIngressFoldFn(fn func(ifindex uint32, vlan uint16) uint32) {
 	s.zoneRGMu.Lock()
 	s.ingressFoldFn = fn
+	s.ingressFoldDigest = ResolverDigest{}
 	s.zoneRGMapGen++
 	s.zoneRGMu.Unlock()
 }
@@ -2476,13 +2490,20 @@ func (s *SessionSync) stampNatScopeFold(ifindex int32) uint32 {
 }
 
 // SetNatScopeFoldFn wires the #16826 logical-ifindex -> (parent, VLAN)
-// NAT-scope fold. It advances the ownership generation with the other
-// fold wiring: a bulk snapshot that captured the previous folder must
-// not reconcile against it after this changes.
+// NAT-scope fold.
+//
+// It does NOT advance the ownership generation. #16826 made it advance
+// "so a bulk snapshot that captured the previous folder must not reconcile
+// against it", but no snapshot ever captured it: zoneOwnershipSnapshot holds
+// the zone map, the fold->RG map and the ingress resolver, and the only
+// reader of this folder is the SEND-side stamp (stampNatScopeFold). A bulk
+// this node RECEIVES is reconciled without it, so the bump guarded nothing
+// and only voided reconciles: the daemon called it beside SetZoneOwnership on
+// every apply and link refresh, which is the +2 per apply in the #18374
+// journals (snapshot_map_gen=2 map_gen=4).
 func (s *SessionSync) SetNatScopeFoldFn(fn func(ifindex int32) uint32) {
 	s.zoneRGMu.Lock()
 	s.natScopeFoldFn = fn
-	s.zoneRGMapGen++
 	s.zoneRGMu.Unlock()
 }
 
