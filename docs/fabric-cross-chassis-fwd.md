@@ -1605,7 +1605,9 @@ that row from the transit `connected_v4`/`connected_v6` because the unit is
 peer-owned, and each row keeps its OWN routing table. The binding scans only
 those rows, filtered by `entry.table == table` (the #4446 scoping
 `infer_connected_route_target_*` applies to transit rows); equal-length matches
-pick the lowest ifindex. It does not consult the by-ifindex ledger
+pick the lowest ifindex, whatever the snapshot order
+(`equal_length_peer_owned_rows_bind_the_lowest_ifindex_18517`). It does not
+consult the by-ifindex ledger
 (`connected_*_by_ifindex`): the ledger merges every row that shares an ifindex
 under the one routing instance that first claimed it
 (`ifindex_to_routing_instance`), so a non-peer-owned prefix of another instance

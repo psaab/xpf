@@ -220,6 +220,72 @@ fn bare_gateway_never_binds_a_non_peer_owned_ledger_row_18517() {
     assert!(state.connected_v6.iter().all(|row| row.ifindex != 12));
 }
 
+/// #18517 round-3 LOW: equal-length peer-owned rows in ONE table tie-break
+/// to the LOWEST ifindex, so the bound egress never depends on snapshot row
+/// order. Fixture: a second peer-owned WAN unit (`reth4.80`, ifindex 7, RG4)
+/// carries the same /24 and /64 as `reth0.80` (ifindex 12, RG1) in the
+/// default instance and is listed AFTER it, i.e. the snapshot lists the two
+/// in DESCENDING ifindex order. A bare static via 172.16.80.1 /
+/// 2001:559:8585:80::1 must bind ifindex 7 in both families.
+/// FAIL-ON-REVERT: drop the `.then(a.ifindex.cmp(&b.ifindex))` tie-break in
+/// `sort_connected` and the stable sort keeps snapshot order, binding 12.
+#[test]
+fn equal_length_peer_owned_rows_bind_the_lowest_ifindex_18517() {
+    let mut snapshot = split_node_snapshot();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth4.80".to_string(),
+        zone: "wan".to_string(),
+        linux_name: "ge-0-0-4.80".to_string(),
+        ifindex: 7,
+        redundancy_group: 4,
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:04:80:08".to_string(),
+        addresses: vec![address("inet", "172.16.80.9/24"), address("inet6", "2001:559:8585:80::9/64")],
+        ..Default::default()
+    });
+    snapshot
+        .routes
+        .push(route("inet", "inet.0", "10.30.0.0/24", &["172.16.80.1"], 5));
+    snapshot.routes.push(route(
+        "inet6",
+        "inet6.0",
+        "2001:db8:30::/64",
+        &["2001:559:8585:80::1"],
+        5,
+    ));
+    let state = build_forwarding_state(&snapshot);
+    // FIXTURE: both units are peer-owned rows of the same table, listed
+    // with the higher ifindex first.
+    let order4: Vec<i32> = snapshot
+        .interfaces
+        .iter()
+        .filter(|iface| iface.connected_rg_peer_owned)
+        .map(|iface| iface.ifindex)
+        .collect();
+    assert_eq!(order4, vec![12, 7], "FIXTURE: snapshot order must be descending");
+    assert_eq!(
+        state
+            .connected_v4_peer_owned
+            .iter()
+            .filter(|row| row.table == "inet.0")
+            .count(),
+        2,
+        "FIXTURE: two v4 peer-owned rows in inet.0"
+    );
+    let v4 = find_route_v4(&state, "inet.0", "10.30.0.0/24");
+    assert_eq!(
+        v4.next_hops.iter().map(|nh| nh.ifindex).collect::<Vec<_>>(),
+        vec![7],
+        "the v4 bare gateway must bind the lowest-ifindex peer-owned row"
+    );
+    let v6 = find_route_v6(&state, "inet6.0", "2001:db8:30::/64");
+    assert_eq!(
+        v6.next_hops.iter().map(|nh| nh.ifindex).collect::<Vec<_>>(),
+        vec![7],
+        "the v6 bare gateway must bind the lowest-ifindex peer-owned row"
+    );
+}
+
 /// #18517 review MINOR (dataplane seat): the #15917 gateway-owner arm of
 /// `select_source_ifindex_v4/v6` lost its pin when the bare-gateway shape
 /// started binding at FIB build. It is still reachable: an EXPLICIT-interface

@@ -2,8 +2,10 @@ package userspace
 
 // #18517: on a split node (WAN RG peer-owned) the configured default whose
 // gateway sits in the peer-owned RETH prefix must stay in the helper
-// snapshot. It is the row the cluster-terminal attribution resolves through
-// the by-ifindex ledger; filtering it as recursive (#11317) left only the
+// snapshot. The helper FIB binds that bare gateway to the peer-owned egress
+// (`peer_owned_connected_target_v4/v6`, which scans only the peer-owned
+// connected rows of the route's own table), so the row HA-demotes and
+// crosses the fabric. Filtering it as recursive (#11317) left only the
 // unstamped Null0 terminal and every new flow toward the WAN was discarded
 // instead of fabric-redirected. The peer-owned prefix itself stays out of the
 // transit FIB (#15742).

@@ -1294,7 +1294,7 @@ fn split_rg_cluster_discard_demotes_to_fabric_redirect_15742() {
 /// FAIL-ON-REVERT: drop either `peer_owned_connected_target_v4/v6` call and
 /// that family's lookup egress is 0.
 #[test]
-fn static_via_peer_owned_gateway_binds_ledger_egress_18517() {
+fn static_via_peer_owned_gateway_binds_peer_owned_egress_18517() {
     let mut snapshot = nat_snapshot_with_fabric();
     // Live shape: Go emits configured gateways bare, so the default
     // cannot lend the static an egress by recursion either.

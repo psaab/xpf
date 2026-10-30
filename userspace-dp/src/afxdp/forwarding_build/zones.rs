@@ -182,21 +182,49 @@ pub(super) fn populate_zones(snapshot: &ConfigSnapshot, state: &mut ForwardingSt
     // build time rather than leaving only a per-packet drop counter, and only
     // when a warning is NEW: snapshots republish on route churn, and an
     // unchanged collision set must not repeat on every forwarding build.
-    let warnings = zone_stamp_warnings(state);
-    let fresh = ZONE_STAMP_WARNINGS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .fresh_lines(warnings);
-    for line in fresh {
+    report_zone_stamp_warnings(state);
+}
+
+/// #18518: log the V1 stamp warnings for `state` that the latch has not
+/// reported yet. The one production caller is `populate_zones`; the
+/// call-site cell drives it through `build_forwarding_state`
+/// (`production_build_reports_each_stamp_warning_once_18518`).
+fn report_zone_stamp_warnings(state: &ForwardingState) {
+    let fresh = with_zone_stamp_latch(|latch| latch.fresh_lines(zone_stamp_warnings(state)));
+    for line in &fresh {
         eprintln!("xpf-userspace-dp: {line}");
     }
+    #[cfg(test)]
+    ZONE_STAMP_LINES_EMITTED.with(|count| count.set(count.get() + fresh.len()));
 }
 
 /// #18518: process-wide memory of the V1 stamp warnings last reported, so
 /// each distinct warning is logged once while it persists (and again only if
 /// it clears and later returns). Control plane only; never on the packet path.
+#[cfg(not(test))]
 static ZONE_STAMP_WARNINGS: std::sync::Mutex<ZoneStampWarningLatch> =
     std::sync::Mutex::new(ZoneStampWarningLatch { reported: Vec::new() });
+
+#[cfg(not(test))]
+fn with_zone_stamp_latch<R>(f: impl FnOnce(&mut ZoneStampWarningLatch) -> R) -> R {
+    f(&mut ZONE_STAMP_WARNINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner))
+}
+
+// Under test the latch (and an emitted-line count) are per test thread, so
+// parallel cells building forwarding states cannot reset each other's latch.
+#[cfg(test)]
+thread_local! {
+    static ZONE_STAMP_WARNINGS: std::cell::RefCell<ZoneStampWarningLatch> =
+        std::cell::RefCell::new(ZoneStampWarningLatch::default());
+    static ZONE_STAMP_LINES_EMITTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn with_zone_stamp_latch<R>(f: impl FnOnce(&mut ZoneStampWarningLatch) -> R) -> R {
+    ZONE_STAMP_WARNINGS.with(|latch| f(&mut latch.borrow_mut()))
+}
 
 #[derive(Default)]
 struct ZoneStampWarningLatch {
@@ -300,5 +328,42 @@ mod zone_stamp_warning_tests {
         assert!(lines.iter().any(|l| l.contains("[\"c1\", \"c2\"]") && l.contains("0x0007")), "{lines:#?}");
         assert_eq!(lines.iter().filter(|l| l.contains("bits 0x0000")).count(), 2, "{lines:#?}");
         assert!(!lines.iter().any(|l| l.contains("solo")), "{lines:#?}");
+    }
+
+    /// #18518 round-3 NIT: the latch must be consulted at the production
+    /// call site, not only correct as a struct. Drives `populate_zones`
+    /// through `build_forwarding_state` and counts the lines it emitted.
+    /// FAIL-ON-REVERT: `populate_zones` not calling
+    /// `report_zone_stamp_warnings` emits nothing on the first build; the
+    /// call site iterating every warning instead of the latch's fresh lines
+    /// (or using a fresh latch per build) re-emits on the second build.
+    #[test]
+    fn production_build_reports_each_stamp_warning_once_18518() {
+        let emitted = || ZONE_STAMP_LINES_EMITTED.with(std::cell::Cell::get);
+        with_zone_stamp_latch(|latch| *latch = ZoneStampWarningLatch::default());
+        let colliding = || {
+            let mut snapshot = crate::afxdp::test_fixtures::nat_snapshot_with_fabric();
+            for (id, name) in [(0x0001_0007u32, "c1"), (0x0002_0007, "c2")] {
+                snapshot.zones.push(crate::ZoneSnapshot {
+                    name: name.to_string(),
+                    id,
+                    ..Default::default()
+                });
+            }
+            snapshot
+        };
+        let start = emitted();
+        let state = crate::afxdp::forwarding_build::build_forwarding_state(&colliding());
+        assert_eq!(
+            state.zone_low16_to_id.get(&0x0007),
+            Some(&0),
+            "FIXTURE: c1/c2 must collide in the stamp index"
+        );
+        assert_eq!(emitted() - start, 1, "first build must report the collision once");
+        let _ = crate::afxdp::forwarding_build::build_forwarding_state(&colliding());
+        assert_eq!(emitted() - start, 1, "an unchanged collision must not be re-reported");
+        let _ = crate::afxdp::forwarding_build::build_forwarding_state(&crate::afxdp::test_fixtures::nat_snapshot_with_fabric());
+        let _ = crate::afxdp::forwarding_build::build_forwarding_state(&colliding());
+        assert_eq!(emitted() - start, 2, "a collision that clears and returns is reported again");
     }
 }

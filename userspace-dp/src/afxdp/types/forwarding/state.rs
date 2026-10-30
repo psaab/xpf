@@ -162,8 +162,10 @@ pub(in crate::afxdp) struct ForwardingState {
     /// skips the transit push, so membership IS the peer-owned property; the
     /// FIB build binds a bare gateway only to these rows
     /// (`peer_owned_connected_target_v4/v6`), never to an arbitrary
-    /// by-ifindex ledger row. Build-time only; sorted longest-prefix-first,
-    /// lowest ifindex first on equal lengths (`sort_connected`).
+    /// by-ifindex ledger row. Read only by the FIB build; the vectors stay in
+    /// every published state (one row per peer-owned unit address, never read
+    /// on the packet path). Sorted longest-prefix-first, lowest ifindex first
+    /// on equal lengths (`sort_connected`).
     pub(in crate::afxdp) connected_v4_peer_owned: Vec<ConnectedRouteV4>,
     pub(in crate::afxdp) connected_v6_peer_owned: Vec<ConnectedRouteV6>,
     /// #16217/#17053: build-time cache of the canonical
