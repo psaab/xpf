@@ -946,9 +946,12 @@ impl SessionTable {
             }
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
-            // #18520: an admitted (non-deferred) hit on this table.
-            if !defer_all {
+            // #18520: an admitted (non-deferred) hit on this table, stored
+            // only on change (see the flow-cache probe).
+            if !defer_all && !entry.served_here {
                 entry.served_here = true;
+                #[cfg(test)]
+                super::SERVED_HERE_STORES_FOR_TEST.with(|count| count.set(count.get() + 1));
             }
             let close_class_before = entry.tcp_close_class_wire();
             let handshake_state_before = entry.tcp_handshake_state_wire(key.protocol);

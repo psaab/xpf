@@ -453,6 +453,13 @@ pub(crate) static HANDSHAKE_RELAY_LOCK_CONTENDED: AtomicU64 = AtomicU64::new(0);
 /// so a connection storm's relays can never take the headroom those need.
 pub(in crate::afxdp) const HANDSHAKE_RELAY_QUEUE_WATERMARK: usize =
     worker_queue::MAX_PENDING_WORKER_COMMANDS / 2;
+// The headroom invariant itself: relays may fill at most half the queue, so
+// HA commands always keep at least half. A runtime cell cannot pin this (it
+// fills to the constant it is checking).
+const _: () = assert!(
+    HANDSHAKE_RELAY_QUEUE_WATERMARK > 0
+        && HANDSHAKE_RELAY_QUEUE_WATERMARK <= worker_queue::MAX_PENDING_WORKER_COMMANDS / 2
+);
 
 /// #18520: fan this worker's queued cross-worker handshake relays out to the
 /// sibling queues. The worker loop calls it once per pass, after the binding
