@@ -266,7 +266,7 @@ func (s *SessionSync) enforceStrictSessionAuth() int {
 		if doomedRetired[i] {
 			reason = "connection on a retired control-link key did not rekey within the grace"
 		}
-		s.disconnectConn(c, reason, nil)
+		s.disconnectConnNow(c, reason, nil)
 	}
 	return len(doomed)
 }

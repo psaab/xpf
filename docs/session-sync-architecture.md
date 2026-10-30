@@ -943,6 +943,12 @@ does not: it closes no window, and its bulk is still streaming or superseded.
 The receiver queues one `BulkRequest` after an exponential backoff (1s doubling
 per consecutive withheld bulk, capped at 30s, reset by the next reconciled
 bulk) and once the zone map has been stable for 1s (capped at 30s of churn).
+Each request makes the sender walk its whole table, so the wait is never
+shorter than the withheld bulk's own receive duration, and for transient
+helper-install failures (expected while the helper comes up after a restart,
+and quick to fail) the backoff starts at 10s instead of 1s: 10s, 20s, 30s
+rather than 1s, 2s, 4s, 8s, 16s — five full bulks in the first 31s against one
+per 35s before #18521 (review of #18525 round 2).
 The request is single-flighted, tracks the newest withheld bulk so
 back-to-back withholds still produce exactly one request, and is dropped when
 a newer bulk was accepted meanwhile (that bulk is the replacement; asking again
@@ -1139,6 +1145,13 @@ pushed config UNCHANGED — same text, same wire generation — when that is sti
 the generation owed, the push belongs to the current peer connection and the
 active config has not moved on. It runs on the 30s reconcile tick and when the
 stale-config gate refuses a failover, at most once per 10s, RG0 authority only.
+A node that is NOT the authority cannot re-push, but its own old debt no longer
+gates anything once it applies (or re-ACKs as already applied) a config the
+peer pushed: both nodes then hold the peer's config, and the debt is marked
+superseded (`supersedeSentConfigDebtByPeer`). Before that, a former authority
+that lost RG0 with an uncredited debt by a path its gate does not guard (a
+monitor-driven weight change) refused every later data-RG handover (review of
+#18525 round 2). A later send by this node records a fresh debt.
 The standby's duplicate path re-ACKs a generation equal to its applied
 high-water without applying again (logged as "re-acknowledging an
 already-applied config generation"), and applies a not-yet-applied one once. A
@@ -1800,26 +1813,57 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
 (~1 MB measured on loopback). Rules since #18521
 (`pkg/cluster/sync_conn_teardown_18521.go`):
 
-- **Every teardown is abortive** (`SO_LINGER 0`): the RST is not gated by the
-  window, so the peer's kernel moves the socket to `TCP_CLOSE` at once. The
-  stream is already unusable (a timed-out write may have left half a frame),
-  so dropping the unsent queue loses nothing a reconnect's cold-prime bulk does
-  not re-send. This includes `handleDisconnect`'s stale branch, which used to
-  return with its socket open, and `Stop()`: a stopping daemon's graceful FIN
-  reproduced the half-open shape on a restart of this node while the peer was
-  behind.
-- **A per-connection watchdog** (1s tick) tears the connection down as soon as
-  the kernel reports the peer reset it while the receive loop is behind (unread
-  bytes queued, or a handler in flight), instead of draining the dead
-  connection's backlog first.
+- **A teardown of a connection judged dead is abortive** (`SO_LINGER 0`): a
+  write that timed out, an eviction, a supersede, a protocol refusal. The RST
+  is not gated by the window, so the peer's kernel moves the socket to
+  `TCP_CLOSE` at once. This includes `handleDisconnect`'s stale branch, which
+  used to return with its socket open.
+- **`Stop()` is a bounded graceful flush, not an abort** (review of #18525
+  round 2). A stop is not a judgment that the stream is dead: the bytes already
+  written are addressed to a live peer, and when the primary stops for good (or
+  a comms-transport change replaces the instance, #6387) nothing reconnects to
+  re-send them — they are the stopping node's newest session deltas. Each
+  connection waits until the peer's kernel has acknowledged everything written
+  (`SIOCOUTQ == 0`) and then closes normally; the wait is bounded by
+  `syncStopFlushTimeout` (1s, half the peer's write deadline, well inside
+  `TimeoutStopSec=20`). A peer that has not taken the bytes by then is stalled
+  and gets an RST, so it is not left ESTABLISHED behind the unsent tail (the
+  half-open shape the first review round closed with an unconditional abort).
+  Measured on loopback, the abortive stop discarded 32 of 63 16 KiB frames
+  written to a peer that resumed reading 100ms later.
+- **A per-connection watchdog** (1s tick) notices the kernel's report that the
+  peer reset the connection while the receive loop is behind (unread bytes
+  queued, or a handler in flight). What is in the receive queue then is what
+  the peer sent before it reset: its newest session state, and possibly a
+  failover commit/abort, config-apply ACK or fence that no cold-prime bulk
+  re-sends. So:
+  - if the loop is still making progress, the connection is marked
+    `peerReset` and the loop drains it to the kernel's `ECONNRESET`. While it
+    drains, writers skip it (`getActiveConn` picks the other fabric or none),
+    a writer's failed write does not tear it down (the reader owns the
+    teardown), the dial side may redial its slot — a live peer answers and the
+    new connection supersedes the drained one, exactly as on the accept side —
+    and its frames earn no peer liveness, so a stopped peer's backlog cannot
+    hold off the heartbeat-timeout decision;
+  - if the loop makes no progress — one handler call running for
+    `syncWriteDeadline`, the bound the peer's writer judges this loop by — the
+    connection is torn down at once, as before, so a stuck call cannot hold the
+    dial side's slot.
+  The first round tore the connection down whenever the loop was behind, which
+  discarded the backlog and (measured) a `failover_abort` queued behind a
+  handler well under the slow threshold.
 - **Every teardown names itself.** `fabric N disconnected` carries `reason`,
   `err` and a per-connection summary (`conn_age`, `frames_read`, `bytes_read`,
-  `handler_time`, `handler_max`, `handler_max_type`); the receive loop logs
-  `receive loop exited` once per connection with its reason (Warn when the loop
-  itself detected the failure, Info when another path closed the socket first);
-  a handler that keeps the loop off the socket for 1s (half the peer's write
-  deadline) is logged with its message type while still blocked (watchdog) and
-  when it returns. Nothing logs per message.
+  `handler_time`, `handler_max`, `handler_max_type`, `slow_calls`, and
+  `drained_after_peer_reset` / `writes_deferred` after a drain); the receive
+  loop logs `receive loop exited` once per connection with its reason (Warn
+  when the loop itself detected the failure, Info when another path closed the
+  socket first). A handler that keeps the loop off the socket for 1s (half the
+  peer's write deadline) is reported with its message type while still blocked
+  (watchdog) and when it returns, each kind at most once per 10s per
+  connection; the next report carries `suppressed=N` and `suppressed_max` for
+  the calls in between, and `slow_calls` in the exit summary counts them all.
+  Nothing logs per message, including when every message is slow.
 
 Not changed, and the next things to look at if the diagnostics implicate them:
 the synchronous install path in the receive loop, and the 2s write deadline

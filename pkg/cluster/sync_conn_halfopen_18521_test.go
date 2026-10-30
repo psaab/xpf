@@ -8,11 +8,14 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"log/slog"
 	"net"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -204,6 +207,9 @@ func TestSendWriteTimeoutTeardownReachesStalledPeer18521(t *testing.T) {
 // helper) while the peer has already given up and reset the connection.
 // Without the watchdog the slot stays occupied — so fabricConnectLoop never
 // redials — until the handler returns AND the loop drains the dead backlog.
+// The loop makes NO progress (one call blocked past stuckHandlerThreshold), so
+// this is the case the watchdog still tears down; a loop that IS progressing
+// drains instead (TestPeerResetDrainsWhileReceiveLoopProgresses18525).
 // RED: the slot is still installed after the budget.
 func TestPeerResetWhileReceiveLoopStalledTearsDown18521(t *testing.T) {
 	// Review of #18525 (finding 7): the handler-in-flight arm must tear down
@@ -279,7 +285,14 @@ func peerResetWhileStalled18521(t *testing.T, backlog bool) {
 	}
 	peer.Close()
 
-	if !waitFor18521(t, 3*time.Second, func() bool { return ss.getActiveConn() == nil }) {
+	// The witness is the SLOT, not getActiveConn: writers skip a connection
+	// the peer reset (review of #18525 round 2), so getActiveConn goes nil
+	// as soon as the watchdog marks it, before any teardown.
+	if !waitFor18521(t, 3*time.Second, func() bool {
+		ss.mu.Lock()
+		defer ss.mu.Unlock()
+		return ss.conn0 == nil
+	}) {
 		t.Fatal("the peer reset the connection, but the stalled receive loop's slot is still " +
 			"installed: nothing tears it down until the handler returns and the loop drains the " +
 			"dead backlog, and fabricConnectLoop does not redial an occupied slot (#18521)")
@@ -287,10 +300,10 @@ func peerResetWhileStalled18521(t *testing.T, backlog bool) {
 	if got := logs.lines("receive loop blocked in a message handler", "msg_type=fence"); len(got) != 1 {
 		t.Errorf("want ONE in-flight stall report naming msg_type=fence, got %d:\n%s", len(got), logs.String())
 	}
-	if got := logs.lines("peer reset the session-sync connection while the receive loop was behind"); len(got) != 1 {
+	if got := logs.lines("peer reset the session-sync connection while the receive loop was behind and making no progress"); len(got) != 1 {
 		t.Errorf("want ONE watchdog teardown line, got %d:\n%s", len(got), logs.String())
 	}
-	if got := logs.lines("fabric 0 disconnected", `reason="peer reset while receive loop behind"`); len(got) != 1 {
+	if got := logs.lines("fabric 0 disconnected", `reason="peer reset while receive loop made no progress"`); len(got) != 1 {
 		t.Errorf("disconnect line does not name the watchdog teardown:\n%s", logs.String())
 	}
 
@@ -416,23 +429,24 @@ func TestReceiveLoopExitNamesItsReason18521(t *testing.T) {
 	}
 }
 
-// One slow handler call -> one Warn naming the type; fast calls -> nothing.
-// The per-message path must stay silent (CLAUDE.md logging rules).
-func TestSlowHandlerWarnsOncePerCallNamingType18521(t *testing.T) {
+// slowHandlerRig18525 runs a receive loop over net.Pipe whose fence handler
+// advances the SessionSync's monotonic clock by step(call) — no wall-clock
+// duration is ever a pass criterion (engineering-style "Time in tests").
+func slowHandlerRig18525(t *testing.T, fences int, step func(call int) time.Duration) (*lockedBuffer18521, func()) {
+	t.Helper()
 	logs := captureSyncLogs18521(t)
 	local, peer := net.Pipe()
-	defer local.Close()
-	defer peer.Close()
+	t.Cleanup(func() { local.Close(); peer.Close() })
 	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
 	ss.readDeadline = time.Minute
-	ss.testSlowHandlerThreshold = 50 * time.Millisecond
 	ss.testConnWatchInterval = time.Hour // isolate the completion report
+	var clock atomic.Int64
+	clock.Store(MonotonicNanos())
+	ss.nowMonoFn = clock.Load
 	var calls int
 	ss.OnFenceReceived = func() FenceResult {
 		calls++
-		if calls == 1 {
-			time.Sleep(120 * time.Millisecond)
-		}
+		clock.Add(int64(step(calls)))
 		return FenceResult{}
 	}
 	ac := &authConn{Conn: local}
@@ -445,19 +459,33 @@ func TestSlowHandlerWarnsOncePerCallNamingType18521(t *testing.T) {
 		defer close(done)
 		ss.receiveLoop(ctx, ac)
 	}()
-	for i := 0; i < 20; i++ {
-		if err := writeMsg(peer, syncMsgFence, nil); err != nil {
+	run := func() {
+		for i := 0; i < fences; i++ {
+			if err := writeMsg(peer, syncMsgFence, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// net.Pipe is synchronous: one more frame proves the fences were read.
+		if err := writeMsg(peer, 250, nil); err != nil {
 			t.Fatal(err)
 		}
+		cancel()
+		peer.Close()
+		<-done
 	}
-	// net.Pipe is synchronous: one more frame proves the 20 fences were read.
-	if err := writeMsg(peer, 250, nil); err != nil {
-		t.Fatal(err)
-	}
-	cancel()
-	peer.Close()
-	<-done
+	return logs, run
+}
 
+// One slow handler call -> one Warn naming the type; fast calls -> nothing.
+// The per-message path must stay silent (CLAUDE.md logging rules).
+func TestSlowHandlerWarnsOncePerCallNamingType18521(t *testing.T) {
+	logs, run := slowHandlerRig18525(t, 20, func(call int) time.Duration {
+		if call == 1 {
+			return 2 * syncHandlerSlowThreshold
+		}
+		return 0
+	})
+	run()
 	slow := logs.lines("slow message handler held the receive loop off the socket")
 	if len(slow) != 1 {
 		t.Fatalf("want exactly ONE slow-handler Warn for one slow call among 20, got %d:\n%s", len(slow), logs.String())
@@ -469,10 +497,66 @@ func TestSlowHandlerWarnsOncePerCallNamingType18521(t *testing.T) {
 	if len(exits) != 1 {
 		t.Fatalf("want one exit line, got %d:\n%s", len(exits), logs.String())
 	}
-	for _, want := range []string{"frames_read=21", "handler_max_type=fence"} {
+	for _, want := range []string{"frames_read=21", "handler_max_type=fence", "slow_calls=1"} {
 		if !strings.Contains(exits[0], want) {
 			t.Errorf("exit summary missing %q:\n%s", want, exits[0])
 		}
+	}
+}
+
+// Review of #18525 round 2 (finding 4, both seats): every slow call logged
+// its own Warn (and the watchdog another), so a helper whose every install
+// takes over the threshold turned the report into a per-session Warn stream.
+// Twenty consecutive slow calls, 1.2x the threshold each (24s of handler time
+// on the rig's clock), must produce one line per syncSlowHandlerLogInterval —
+// at 1.2s, 12.0s and 22.8s, the later two each carrying the 8 calls they
+// stood for — and the exit summary must count all twenty. RED with the
+// limiter admitting every report (20 lines), and with the suppressed tally
+// dropped.
+func TestSlowHandlerReportsAreRateLimitedPerConnection18525(t *testing.T) {
+	logs, run := slowHandlerRig18525(t, 20, func(int) time.Duration {
+		return syncHandlerSlowThreshold * 6 / 5
+	})
+	run()
+	slow := logs.lines("slow message handler held the receive loop off the socket")
+	if len(slow) != 3 {
+		t.Fatalf("20 slow calls over 24s produced %d slow-handler lines, want 3 (one per %v):\n%s",
+			len(slow), syncSlowHandlerLogInterval, logs.String())
+	}
+	if strings.Contains(slow[0], "suppressed=") {
+		t.Errorf("the first report has nothing to summarise:\n%s", slow[0])
+	}
+	for _, line := range slow[1:] {
+		if !strings.Contains(line, "suppressed=8") || !strings.Contains(line, "suppressed_max=1.2s") {
+			t.Errorf("a later report must carry the 8 calls it stood for and their maximum:\n%s", line)
+		}
+	}
+	exits := logs.lines("receive loop exited", "slow_calls=20")
+	if len(exits) != 1 {
+		t.Fatalf("the exit summary must count every slow call:\n%s", logs.String())
+	}
+}
+
+// The limiter itself, for the watchdog's in-flight kind too: one admission
+// per interval, the refused ones tallied with their maximum for the next.
+func TestSlowLogLimiterAdmitsOncePerInterval18525(t *testing.T) {
+	var l slowLogLimiter
+	const iv = 10 * time.Second
+	base := int64(1_000_000_000)
+	if ok, n, _ := l.admit(base, iv, 2*time.Second); !ok || n != 0 {
+		t.Fatalf("first report must be admitted with nothing suppressed (ok=%v n=%d)", ok, n)
+	}
+	for i, d := range []time.Duration{3 * time.Second, 5 * time.Second, time.Second} {
+		if ok, _, _ := l.admit(base+int64(i+1)*int64(time.Second), iv, d); ok {
+			t.Fatalf("report %d inside the interval was admitted", i+2)
+		}
+	}
+	ok, n, max := l.admit(base+int64(iv), iv, time.Second)
+	if !ok || n != 3 || max != 5*time.Second {
+		t.Fatalf("after the interval: ok=%v suppressed=%d max=%v, want true/3/5s", ok, n, max)
+	}
+	if ok, _, _ := l.admit(base+int64(iv)+1, iv, time.Second); ok {
+		t.Fatal("the interval restarts at each admitted report")
 	}
 }
 
@@ -521,11 +605,17 @@ func TestSyncMsgNameCoversHandleMessage18521(t *testing.T) {
 
 // Review of #18525 (finding 4): Stop closed its connections GRACEFULLY, so a
 // restart of this node while the peer's receive loop is behind left the peer
-// ESTABLISHED behind the unsent bytes — the half-open shape again. RED with
-// Stop's graceful Close.
+// ESTABLISHED behind the unsent bytes — the half-open shape again. Round 2
+// made Stop flush first (TestStopFlushesQueuedFramesToASlowPeer18525); this
+// cell keeps the bound: a peer that takes NOTHING is aborted once the flush
+// window passes, and Stop returns. RED with Stop's unbounded graceful Close
+// (the peer stays ESTABLISHED) and with a flush that ignores its deadline
+// (Stop never returns).
 func TestStopTeardownReachesStalledPeer18521(t *testing.T) {
+	logs := captureSyncLogs18521(t)
 	local, peer := tcpPair18521(t)
 	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	ss.testStopFlushTimeout = 200 * time.Millisecond
 	ss.installConn(0, &authConn{Conn: local})
 	// Fill the send path: the peer is not reading.
 	chunk := make([]byte, 64*1024)
@@ -535,7 +625,16 @@ func TestStopTeardownReachesStalledPeer18521(t *testing.T) {
 			break
 		}
 	}
-	ss.Stop()
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); ss.Stop() }()
+	select {
+	case <-stopped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stop did not return although its flush window passed: a stalled peer hangs shutdown")
+	}
+	if got := logs.lines("stop could not flush the session-sync connection in time", "unsent_bytes="); len(got) != 1 {
+		t.Errorf("want one line naming the unflushed abort:\n%s", logs.String())
+	}
 	var state uint8
 	if !waitFor18521(t, time.Second, func() bool {
 		state = kernelState18521(t, peer)
@@ -588,5 +687,262 @@ func TestDuplicateAppliedConfigIsReackedWithoutApply18521(t *testing.T) {
 	}
 	if got := s.lastAppliedConfigGen.Load(); got != gen {
 		t.Fatalf("applied high-water moved to %d", got)
+	}
+}
+
+// Review of #18525 round 2 (finding 2, Stop half): an abortive Stop made the
+// kernel DISCARD every byte this node had already written and the peer had not
+// yet taken — on a primary that stops for good, its newest session deltas,
+// which nothing re-sends because nothing reconnects. Stop is not a judgment
+// that the stream is dead: it must flush, bounded, and close normally. The
+// peer here is stalled when Stop runs and resumes reading only once Stop is
+// flushing (no sleeps: the hook orders it). It must receive every byte and
+// then a clean EOF. RED with the abortive Stop (the peer reads about half and
+// gets ECONNRESET), with an abortive close after a complete flush (every
+// byte, then ECONNRESET instead of EOF), and with the receive loop's own exit
+// aborting the socket under the flush.
+func TestStopFlushesQueuedFramesToASlowPeer18525(t *testing.T) {
+	local, peer := tcpPair18521(t)
+	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	ss.testStopFlushTimeout = time.Minute // a wait bound, never reached on loopback
+	ss.readDeadline = time.Minute
+	ac := &authConn{Conn: local}
+	ss.installConn(0, ac)
+	// The connection's receive loop runs, as in production, and Stop's cancel
+	// ends it MID-FLUSH: its exit tears the slot down, and that teardown must
+	// leave the socket to the flush (stopFlush) instead of aborting it.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ss.cancel = cancel
+	loopDone := make(chan struct{})
+	ss.wg.Add(1)
+	go func() {
+		defer ss.wg.Done()
+		defer close(loopDone)
+		ss.receiveLoop(ctx, ac)
+	}()
+	flushing := make(chan struct{})
+	ss.testOnStopFlush = func() {
+		// One inbound frame wakes the loop, which then sees the cancel.
+		if err := writeMsg(peer, 250, nil); err != nil {
+			t.Error(err)
+		}
+		select {
+		case <-loopDone:
+		case <-time.After(30 * time.Second):
+			t.Error("fixture: the receive loop did not exit on Stop's cancel")
+		}
+		close(flushing)
+	}
+	frame := encodeRawMessage(250, make([]byte, 16*1024))
+	var sent int64
+	for {
+		_ = local.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		n, err := local.Write(frame)
+		sent += int64(n)
+		if err != nil {
+			break
+		}
+	}
+	_ = local.SetWriteDeadline(time.Time{})
+	if sent < 256*1024 {
+		t.Fatalf("fixture: only %d bytes fit in flight", sent)
+	}
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); ss.Stop() }()
+	select {
+	case <-flushing:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stop never started a flush")
+	}
+	got, err := io.Copy(io.Discard, peer)
+	select {
+	case <-stopped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("Stop did not return after the peer drained")
+	}
+	if got != sent {
+		t.Fatalf("Stop discarded %d of the %d bytes already written to a peer that was merely slow "+
+			"(peer read %d, ended with %v): with the primary stopping for good nothing re-sends them "+
+			"(review of #18525 round 2)", sent-got, sent, got, err)
+	}
+	if err != nil {
+		t.Fatalf("after a complete flush the stream must end with a clean EOF, got %v: the close "+
+			"was abortive although nothing was left to discard", err)
+	}
+}
+
+// Review of #18525 round 2 (finding 2, receive half): the watchdog tore a
+// connection down the moment the kernel reported the peer's reset, whenever
+// the loop was behind — discarding every frame the peer had already
+// delivered, the session deltas and also control frames (here a
+// failover_abort) that no cold-prime bulk re-sends. A loop that is still
+// making progress must drain them, and the drain must not change who is
+// trusted: writers skip the connection, a writer's failed write does not tear
+// it down, the slot is redialable, and the drained frames earn no peer
+// liveness. When the queue is empty the loop's own ECONNRESET ends it.
+//
+// The handler is NOT stuck (its stuck bound is a minute away), so this is the
+// progressing case; TestPeerResetWhileReceiveLoopStalledTearsDown18521 keeps
+// the no-progress teardown. Each property below has its own mutant.
+func TestPeerResetDrainsWhileReceiveLoopProgresses18525(t *testing.T) {
+	logs := captureSyncLogs18521(t)
+	local, peer := tcpPair18521(t)
+	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	ss.readDeadline = time.Minute
+	ss.testConnWatchInterval = 5 * time.Millisecond
+	ss.testSlowHandlerThreshold = 30 * time.Second
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	var first sync.Once
+	var handled atomic.Int64
+	ss.OnFenceReceived = func() FenceResult {
+		first.Do(func() { close(entered); <-gate })
+		handled.Add(1)
+		return FenceResult{}
+	}
+	aborts := make(chan uint64, 4)
+	ss.OnRemoteFailoverAbort = func(_ int, reqID uint64) error { aborts <- reqID; return nil }
+	ac := &authConn{Conn: local}
+	ss.installConn(0, ac)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loopDone := make(chan struct{})
+	ss.wg.Add(1)
+	go func() {
+		defer ss.wg.Done()
+		defer close(loopDone)
+		ss.receiveLoop(ctx, ac)
+	}()
+	defer func() {
+		select {
+		case <-gate:
+		default:
+			close(gate)
+		}
+	}()
+
+	if err := writeMsg(peer, syncMsgFence, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fixture: the first fence never reached its handler")
+	}
+	const backlog = 30
+	for i := 0; i < backlog; i++ {
+		if err := writeMsg(peer, syncMsgFence, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writeMsg(peer, syncMsgFailoverAbort, encodeFailoverSingleReqPayload(2, 18525)); err != nil {
+		t.Fatal(err)
+	}
+	// Reset only once the peer's kernel has delivered every byte: what it had
+	// not yet transmitted dies with its own RST, and is not what this cell is
+	// about.
+	if !waitFor18521(t, 10*time.Second, func() bool {
+		outq, ok := tcpConnSendQueue(peer)
+		return ok && outq == 0
+	}) {
+		t.Fatal("fixture: the peer never delivered its backlog")
+	}
+	_ = peer.SetLinger(0)
+	peer.Close()
+
+	if !waitFor18521(t, 10*time.Second, func() bool { return ac.diag.peerReset.Load() }) {
+		ss.mu.Lock()
+		installed := ss.conn0 == ac
+		ss.mu.Unlock()
+		t.Fatalf("the watchdog never marked the reset connection for draining (slot installed=%v): "+
+			"a progressing loop's backlog was torn down with it (review of #18525 round 2):\n%s",
+			installed, logs.String())
+	}
+	ss.mu.Lock()
+	installed := ss.conn0 == ac
+	dialable := ss.fabricSlotNeedsDialLocked(0)
+	ss.mu.Unlock()
+	if !installed {
+		t.Fatal("the reset connection left its slot while its loop was still draining")
+	}
+	if !dialable {
+		t.Error("the dial side must be able to redial a slot whose connection the peer reset; " +
+			"otherwise a live peer waits for the whole drain (the #18521 half-open window)")
+	}
+	if c := ss.getActiveConn(); c != nil {
+		t.Error("writers still select a connection the peer reset; every write to it fails")
+	}
+	// A writer's failure on the dead socket must not cut the drain short.
+	ss.disconnectConn(ac, "test: queued frame write failed", syscall.ECONNRESET)
+	ss.mu.Lock()
+	installed = ss.conn0 == ac
+	ss.mu.Unlock()
+	if !installed {
+		t.Fatal("a writer's failed write tore down the connection being drained, discarding the " +
+			"frames the peer delivered before it reset")
+	}
+	rxBefore := ss.lastPeerRxMono.Load()
+
+	close(gate)
+	select {
+	case <-loopDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the drain never ended")
+	}
+	if got := handled.Load(); got != backlog+1 {
+		t.Fatalf("handled %d of %d fences the peer delivered before resetting", got, backlog+1)
+	}
+	select {
+	case id := <-aborts:
+		if id != 18525 {
+			t.Fatalf("abort carried req_id %d", id)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the failover_abort queued behind the backlog was never delivered: the owner " +
+			"would hold its RG for the rest of the lease")
+	}
+	if got := ss.lastPeerRxMono.Load(); got != rxBefore {
+		t.Error("frames drained from a connection the peer reset refreshed peer liveness; that " +
+			"holds off the heartbeat-timeout decision for a peer that is gone")
+	}
+	ss.mu.Lock()
+	cleared := ss.conn0 == nil
+	ss.mu.Unlock()
+	if !cleared {
+		t.Fatal("the drained connection was never removed from its slot after the loop exited")
+	}
+	if got := logs.lines("fabric 0 disconnected", `reason="receive loop: header: peer reset the connection"`); len(got) != 1 {
+		t.Errorf("the drain must end at the loop's own ECONNRESET:\n%s", logs.String())
+	}
+	if got := logs.lines("receive loop exited", "drained_after_peer_reset=true", "writes_deferred=1"); len(got) != 1 {
+		t.Errorf("the exit summary must record the drain:\n%s", logs.String())
+	}
+}
+
+// Writers skip a connection the peer reset: on a dual-fabric pair they move to
+// the other fabric at once (as they did when the watchdog tore the connection
+// down), and with no other fabric they see none. RED with getActiveConn
+// returning the drained connection, or with no fallback to the other fabric.
+func TestWritersSkipAConnectionThePeerReset18525(t *testing.T) {
+	newConn := func(t *testing.T) *authConn {
+		a, b := net.Pipe()
+		t.Cleanup(func() { a.Close(); b.Close() })
+		return &authConn{Conn: a}
+	}
+	ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+	c0, c1 := newConn(t), newConn(t)
+	ss.installConn(0, c0)
+	ss.installConn(1, c1)
+	if got := ss.getActiveConn(); got != c0 {
+		t.Fatal("fixture: fabric 0 must be the active connection")
+	}
+	c0.diag.peerReset.Store(true)
+	if got := ss.getActiveConn(); got != c1 {
+		t.Fatalf("writers kept the reset fabric-0 connection (or none) instead of fabric 1: got %v", got)
+	}
+	c1.diag.peerReset.Store(true)
+	if got := ss.getActiveConn(); got != nil {
+		t.Fatal("with every connection reset, writers must see none")
 	}
 }

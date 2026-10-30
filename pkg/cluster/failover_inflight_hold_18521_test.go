@@ -2,6 +2,13 @@ package cluster
 
 import (
 	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"net"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -276,5 +283,197 @@ func TestLostCommitAndAbortWithSyncDownReelectsOwner18521(t *testing.T) {
 		t.Fatalf("commit and abort were both lost with session sync down, the requester is back in "+
 			"its hold, and the owner is still held (held=%v state=%s): the RG has no primary until "+
 			"the lease expires (review of #18525)", held, state)
+	}
+}
+
+// Review of #18525 round 2 (finding 1, both seats): the leased hold was kept
+// while ANY sync connection was up. Commit and abort frames lost with the
+// request's connection are never re-sent, so a FRESH connection cannot carry
+// them — yet it satisfied IsConnected, and the owner held for the rest of the
+// lease while the requester sat in its restored hold: no primary for up to
+// 26s. This is the shipped sync-down cell plus the one line the HA seat
+// added: the dial side redials before the owner's next election. RED with
+// the hold keyed on IsConnected.
+func TestLostCommitAndAbortThenSyncReconnectsReelectsOwner18525(t *testing.T) {
+	requester, owner := ackWireManagers16592(t, []int{2}, false)
+	owner.SetFakePeerSyncSourceForTesting(true, 0, true, true)
+	requester.mu.Lock()
+	rg := requester.groups[2]
+	rg.ManualFailover = true
+	rg.ManualFailoverAt = time.Now().Add(-time.Minute)
+	rg.State = StateSecondaryHold
+	requester.mu.Unlock()
+	owner.handlePeerHeartbeat(requester.buildHeartbeat())
+
+	const reqID = 18525
+	requester.SetPeerFailoverFunc(func(id int) (uint64, error) {
+		if _, err := owner.ManualFailover(id); err != nil {
+			return 0, err
+		}
+		owner.ArmRemoteTransferOutLease([]int{id}, reqID)
+		requester.handlePeerHeartbeat(owner.buildHeartbeat())
+		return reqID, nil
+	})
+	requester.SetPeerFailoverCommitFunc(func(int, uint64) error {
+		owner.SetFakePeerSyncSourceForTesting(false, 0, false, false)
+		return errors.New("failed to send failover commit: write: broken pipe")
+	})
+	requester.SetPeerFailoverAbortFunc(func(int, uint64) error {
+		return errors.New("session sync not connected")
+	})
+	if err := requester.RequestPeerFailover(2); err == nil {
+		t.Fatal("fixture: the request must fail when its commit is lost")
+	}
+	requester.handlePeerHeartbeat(owner.buildHeartbeat())
+	if requester.IsLocalPrimary(2) {
+		t.Fatal("fixture: the aborted requester must not promote")
+	}
+
+	// The reconnect: a NEW connection is up before the owner elects again.
+	owner.SetFakePeerSyncSourceForTesting(true, 0, true, true)
+	owner.mu.Lock()
+	owner.groups[2].ManualFailoverAt = owner.groups[2].ManualFailoverAt.Add(-3 * time.Second)
+	owner.mu.Unlock()
+	owner.handlePeerHeartbeat(requester.buildHeartbeat())
+	if !owner.IsLocalPrimary(2) {
+		held, state := ownerHold18521(owner)
+		t.Fatalf("commit and abort were lost with the request's connection and a fresh one came "+
+			"up; the requester is back in its hold and the owner is still held (held=%v state=%s): "+
+			"a fresh connection can never deliver the lost frames, so the RG has no primary until "+
+			"the lease expires (review of #18525 round 2)", held, state)
+	}
+}
+
+// The same invariant on a REAL SessionSync, so the binding is to the
+// connection that existed when the lease was armed and not to a fake's
+// identity: removing that connection from its slot (here a teardown and a
+// redial into the same slot) returns the owner to the 2s rescue. Filling an
+// EMPTY slot removes nothing, so the hold stays. RED with the hold keyed on
+// IsConnected (first row) / with every install counted (second row).
+func TestTransferHoldBoundToRequestConnection18525(t *testing.T) {
+	newPipeConn := func(t *testing.T) *authConn {
+		a, b := net.Pipe()
+		t.Cleanup(func() { a.Close(); b.Close() })
+		return &authConn{Conn: a}
+	}
+	rows := []struct {
+		name     string
+		mutate   func(t *testing.T, ss *SessionSync, carrier *authConn)
+		wantHeld bool
+	}{
+		{"request connection torn down and redialled", func(t *testing.T, ss *SessionSync, carrier *authConn) {
+			ss.disconnectConn(carrier, "test: queued frame write failed", nil)
+			ss.installConn(0, newPipeConn(t))
+		}, false},
+		{"request connection superseded in its slot", func(t *testing.T, ss *SessionSync, _ *authConn) {
+			ss.installConn(0, newPipeConn(t))
+		}, false},
+		{"other fabric connects, request connection intact", func(t *testing.T, ss *SessionSync, _ *authConn) {
+			ss.installConn(1, newPipeConn(t))
+		}, true},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			ss := NewSessionSync("127.0.0.1:0", "127.0.0.1:0", nil)
+			carrier := newPipeConn(t)
+			ss.installConn(0, carrier)
+			m := NewManager(1, 1)
+			m.UpdateConfig(makeConfig(makeRG(2, false, map[int]int{0: 100, 1: 200})))
+			m.setPeerSyncSourceForTesting(ss)
+			m.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1, Groups: []HeartbeatGroup{
+				{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondary)},
+			}})
+			m.mu.Lock()
+			m.groups[2].Ready = true
+			m.groups[2].ReadySince = time.Now().Add(-time.Hour)
+			m.groups[2].ReadinessReasons = nil
+			m.mu.Unlock()
+			m.runElection()
+			if !m.IsLocalPrimary(2) {
+				t.Fatal("fixture: owner must start primary")
+			}
+			if _, err := m.ManualFailover(2); err != nil {
+				t.Fatal(err)
+			}
+			m.ArmRemoteTransferOutLease([]int{2}, 18525)
+
+			row.mutate(t, ss, carrier)
+			if !ss.IsConnected() {
+				t.Fatal("fixture: a connection must be up when the owner elects")
+			}
+			ageOwnerHold18521(m, 3*time.Second)
+			m.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1, Groups: []HeartbeatGroup{
+				{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondaryHold)},
+			}})
+			held, state := ownerHold18521(m)
+			if held != row.wantHeld {
+				t.Fatalf("owner held=%v (state=%s), want held=%v: the hold must last exactly as long "+
+					"as the connection the transfer request arrived on (review of #18525 round 2)",
+					held, state, row.wantHeld)
+			}
+		})
+	}
+}
+
+// The binding above is only as good as the removal generation, and the
+// generation is only as good as its coverage of every slot write. Rather than
+// enumerate today's removal sites (which is how a registry misses the next
+// one), this pins the primitive: no production file assigns s.conn0 / s.conn1
+// anywhere except setConnSlotLocked. RED on any direct slot write, e.g. the
+// pre-fold `s.conn0 = nil` in handleDisconnect.
+func TestConnSlotWritesGoThroughTheSetter18525(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned, setterWrites := 0, 0
+	var offenders []string
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+				for _, lhs := range as.Lhs {
+					target := lhs
+					if star, ok := lhs.(*ast.StarExpr); ok {
+						target = star.X
+					}
+					switch e := target.(type) {
+					case *ast.SelectorExpr:
+						if e.Sel.Name == "conn0" || e.Sel.Name == "conn1" {
+							offenders = append(offenders, fmt.Sprintf("%s (%s)", fset.Position(as.Pos()), fd.Name.Name))
+						}
+					case *ast.Ident:
+						if fd.Name.Name == "setConnSlotLocked" && e.Name == "slot" {
+							setterWrites++
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	if scanned < 50 || setterWrites == 0 {
+		t.Fatalf("scan is broken: %d production files, %d setter writes", scanned, setterWrites)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("session-sync slots written outside setConnSlotLocked, so a removal there would "+
+			"not advance the transfer-channel generation the owner hold is bound to (#18521):\n%s",
+			strings.Join(offenders, "\n"))
 	}
 }

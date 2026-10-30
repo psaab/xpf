@@ -508,7 +508,9 @@ func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
 	// incarnation retirement until ACKed or explicitly re-judged as legacy.
 	capabilityKnown, ackCapable := s.peerConfigAckCapabilitySnapshot16756()
 	s.configApplyDebtMu.Lock()
-	if gen <= s.lastSentConfigDebt16756.generation {
+	// A superseded debt (supersedeSentConfigDebtByPeer) is older than any
+	// send that follows it, whatever its generation.
+	if gen <= s.lastSentConfigDebt16756.generation && !s.lastSentConfigDebt16756.supersededByPeer {
 		s.configApplyDebtMu.Unlock()
 		return
 	}
@@ -772,6 +774,7 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 					// config epoch moves.
 					slog.Info("cluster sync: re-acknowledging an already-applied config generation",
 						"gen", item.gen, "size", len(item.text))
+					s.supersedeSentConfigDebtByPeer(item.gen)
 					go s.sendConfigApplyAck(item.conn, item.gen)
 					continue
 				}
@@ -893,6 +896,7 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 			// fence. Advancing first keeps the effective refusal threshold
 			// max(fence, high-water) from dipping in the release window (#6284).
 			s.recordAppliedConfigGen(item.gen)
+			s.supersedeSentConfigDebtByPeer(item.gen)
 			go s.sendConfigApplyAck(item.conn, item.gen)
 			s.endConfigApply()
 		}

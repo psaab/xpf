@@ -176,16 +176,21 @@ func TestWithheldBulkAckRequestsAReplacement18521(t *testing.T) {
 // Two withheld bulks back to back produce ONE request (single-flight), for
 // the latest of them. RED with the single-flight CAS removed (two requests),
 // and with the latest-serial tracking removed (zero: the first request sees
-// its bulk superseded and drops while the second lost the race).
+// its bulk superseded and drops while the second lost the race). The
+// request's decision is held on testBulkRerequestGate until both bulks are
+// in, so the order is forced, not won against a backoff (review of #18525
+// round 2).
 func TestBackToBackWithheldBulksRequestOnce18521(t *testing.T) {
 	rx := rerequestReceiver18521(t)
-	rx.testBulkRerequestBackoff = 300 * time.Millisecond
+	gate := make(chan struct{})
+	rx.testBulkRerequestGate = gate
 	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
 	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
 	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
 	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(2, nil))
 	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 5})
 	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(2, nil))
+	close(gate)
 	if n := drainRerequests18521(t, rx); n != 1 {
 		t.Fatalf("two back-to-back withheld bulks queued %d requests, want exactly 1", n)
 	}
@@ -196,12 +201,14 @@ func TestBackToBackWithheldBulksRequestOnce18521(t *testing.T) {
 // serial check removed.
 func TestRerequestDroppedWhenANewerBulkWasAccepted18521(t *testing.T) {
 	rx := rerequestReceiver18521(t)
-	rx.testBulkRerequestBackoff = 200 * time.Millisecond
+	gate := make(chan struct{})
+	rx.testBulkRerequestGate = gate
 	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
 	rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
 	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
 	// The sender's own retry starts a fresh bulk; it is still streaming.
 	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(2, nil))
+	close(gate)
 	if n := drainRerequests18521(t, rx); n != 0 {
 		t.Fatalf("queued %d re-requests although a newer bulk was already accepted", n)
 	}
@@ -282,5 +289,69 @@ func TestPendingBulkAckAgeIsMonotonic18521(t *testing.T) {
 	now = base + int64(BulkAckPendingRetryAfter+time.Second)
 	if _, age, _ := sender.PendingBulkAck(); age != BulkAckPendingRetryAfter+time.Second {
 		t.Fatalf("pending bulk age = %v, want %v from the monotonic clock", age, BulkAckPendingRetryAfter+time.Second)
+	}
+}
+
+// Review of #18525 round 2 (finding 5, wire seat): every request makes the
+// sender walk its WHOLE table, and the transient-install branch — expected
+// while the helper is still coming up — asked at 1s, 2s, 4s, 8s, 16s: about
+// five full bulks in the first 31s, against one per 35s before #18521. The
+// wait now starts at bulkRerequestTransientFloor for that branch, and for
+// every branch is never shorter than the withheld bulk's own receive
+// duration. RED with the transient branch on the 1s start, and with the
+// duration floor dropped.
+func TestBulkRerequestWaitFloors18525(t *testing.T) {
+	for _, c := range []struct {
+		base     time.Duration
+		streak   uint64
+		duration time.Duration
+		want     time.Duration
+	}{
+		{bulkRerequestTransientFloor, 1, 0, 10 * time.Second},
+		{bulkRerequestTransientFloor, 2, 0, 20 * time.Second},
+		{bulkRerequestTransientFloor, 3, 0, bulkRerequestMax},
+		{bulkRerequestBackoff, 1, 0, time.Second},
+		{bulkRerequestBackoff, 1, 7 * time.Second, 7 * time.Second},
+		{bulkRerequestBackoff, 6, 90 * time.Second, 90 * time.Second},
+	} {
+		if got := bulkRerequestWait(c.base, c.streak, c.duration); got != c.want {
+			t.Errorf("bulkRerequestWait(%v, %d, %v) = %v, want %v", c.base, c.streak, c.duration, got, c.want)
+		}
+	}
+
+	rows := []struct {
+		name   string
+		during func(rx *SessionSync)
+		bulk   time.Duration
+		want   time.Duration
+	}{
+		{"transient helper install failure, fast bulk", func(rx *SessionSync) {
+			rx.bulkMu.Lock()
+			rx.bulkInstallFailedV4[staleUnmapped9655] = struct{}{}
+			rx.bulkMu.Unlock()
+		}, time.Second, bulkRerequestTransientFloor},
+		{"zone map changed mid-bulk, 7s bulk", func(rx *SessionSync) {
+			rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
+		}, 7 * time.Second, 7 * time.Second},
+		{"zone map changed mid-bulk, fast bulk", func(rx *SessionSync) {
+			rx.SetZoneRGMap(map[uint16]int{1: 1, 5: 1})
+		}, 0, bulkRerequestBackoff},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			rx := rerequestReceiver18521(t)
+			now := time.Unix(1_800_000_000, 0)
+			rx.testBulkRecvNow = func() time.Time { return now }
+			var waits []time.Duration
+			rx.testOnBulkRerequestScheduled = func(_ string, wait time.Duration) { waits = append(waits, wait) }
+			rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+			row.during(rx)
+			now = now.Add(row.bulk)
+			rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+			drainRerequests18521(t, rx)
+			if len(waits) != 1 || waits[0] != row.want {
+				t.Fatalf("scheduled waits %v, want [%v]", waits, row.want)
+			}
+		})
 	}
 }

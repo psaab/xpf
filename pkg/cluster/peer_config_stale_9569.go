@@ -3,6 +3,7 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 )
 
@@ -61,6 +62,35 @@ type configApplyDebt16756 struct {
 	// #18521 overdue-ACK re-push. Zero for a debt recorded by a test seam
 	// without a time.
 	sentMono int64
+	// supersededByPeer: this node has since applied (or re-acknowledged) a
+	// config the PEER pushed, so the debt no longer gates handovers
+	// (supersedeSentConfigDebtByPeer).
+	supersededByPeer bool
+}
+
+// supersedeSentConfigDebtByPeer retires this node's own outstanding send
+// debt once it has applied, or re-acknowledged as already applied, a config
+// the PEER pushed (#18521 review round 2). The receiver only accepts a peer
+// push when it does not believe it is the RG0 primary, so this is the
+// moment config authority is known to be the peer's: both nodes now hold the
+// peer's config by construction, and what this node sent earlier is no
+// longer anyone's config. Without this, a node that held an uncredited ACK
+// debt and lost RG0 by a path its own gate does not guard (a monitor-driven
+// weight change) kept refusing every later handover of a data RG, and the
+// overdue-ACK re-push — which only the RG0 authority runs — could not clear
+// it. A later send by this node records a fresh debt as usual.
+func (s *SessionSync) supersedeSentConfigDebtByPeer(peerGen uint64) {
+	s.configApplyDebtMu.Lock()
+	debt := s.lastSentConfigDebt16756
+	if debt.generation == 0 || debt.supersededByPeer {
+		s.configApplyDebtMu.Unlock()
+		return
+	}
+	s.lastSentConfigDebt16756.supersededByPeer = true
+	s.configApplyDebtMu.Unlock()
+	slog.Info("cluster sync: applied the peer's config; this node's own unacknowledged config "+
+		"send is superseded and no longer gates handovers (#18521)",
+		"own_gen", debt.generation, "peer_gen", peerGen)
 }
 
 func (s *SessionSync) configApplyDebtSnapshot16756() configApplyDebt16756 {
@@ -106,7 +136,7 @@ func (s *SessionSync) PeerConfigStale() (bool, string) {
 	}
 	debt := s.configApplyDebtSnapshot16756()
 	sent := debt.generation
-	if sent == 0 {
+	if sent == 0 || debt.supersededByPeer {
 		return false, ""
 	}
 	legacyStale := func() (bool, string) {
@@ -167,7 +197,7 @@ func (s *SessionSync) PeerConfigAckOverdue(after time.Duration) (gen uint64, age
 		return 0, 0, false
 	}
 	debt := s.configApplyDebtSnapshot16756()
-	if debt.generation == 0 || debt.sentMono == 0 {
+	if debt.generation == 0 || debt.sentMono == 0 || debt.supersededByPeer {
 		return 0, 0, false
 	}
 	known, ackCapable := s.peerConfigAckCapabilitySnapshot16756()

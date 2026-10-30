@@ -1001,8 +1001,14 @@ func (m *Manager) ArmRemoteTransferOutLease(rgIDs []int, reqID uint64) {
 		}
 		m.remoteTransferOutLeaseUntil[rgID] = until
 		m.remoteTransferOutLeaseReqID[rgID] = reqID
+		if m.remoteTransferOutLeaseChannel == nil {
+			m.remoteTransferOutLeaseChannel = make(map[int]transferChannelBinding)
+		}
+		binding := m.captureTransferChannelLocked()
+		m.remoteTransferOutLeaseChannel[rgID] = binding
 		slog.Info("cluster: armed remote transfer-out lease",
-			"rg", rgID, "req_id", reqID, "expires_in", m.remoteTransferOutLease.String())
+			"rg", rgID, "req_id", reqID, "expires_in", m.remoteTransferOutLease.String(),
+			"bound_to_sync_connection", binding.src != nil)
 	}
 }
 
@@ -1022,6 +1028,65 @@ func (m *Manager) ClearRemoteTransferOutLease(rgID int, reqID uint64) {
 func (m *Manager) clearRemoteTransferOutLeaseLocked(rgID int) {
 	delete(m.remoteTransferOutLeaseUntil, rgID)
 	delete(m.remoteTransferOutLeaseReqID, rgID)
+	delete(m.remoteTransferOutLeaseChannel, rgID)
+}
+
+// transferChannelBinding identifies the session-sync connection set a
+// remote transfer-out request was handled on (#18521 review round 2): the
+// published sync source and its connection-slot removal generation at the
+// moment the lease was armed. src is nil when no connection was up.
+type transferChannelBinding struct {
+	src     peerSyncSource
+	gen     uint64
+	dropped bool // the binding was observed broken (logged once)
+}
+
+// captureTransferChannelLocked records the current transfer channel. It runs
+// inside OnRemoteFailover, i.e. on the receive loop of the connection that
+// delivered the request, so the connection set it captures contains that
+// connection. Caller holds m.mu.
+func (m *Manager) captureTransferChannelLocked() transferChannelBinding {
+	if m.peerSync == nil || !m.peerSync.IsConnected() {
+		return transferChannelBinding{}
+	}
+	return transferChannelBinding{src: m.peerSync, gen: m.peerSync.TransferChannelGen()}
+}
+
+// transferChannelIntactLocked reports whether the connection set captured
+// when rgID's lease was armed is still the one installed: same published
+// source, still connected, and no installed connection removed from its slot
+// since (#18521 review round 2).
+//
+// This, and not "some connection is up", is the condition under which the
+// requester's commit or abort can still reach us. Both frames are written once
+// and never re-sent; a frame queued on a connection that was then torn down
+// (a writer's write-timeout teardown, the receive watchdog, a supersede) is
+// gone, and a FRESH connection cannot deliver it. Keying the hold on
+// IsConnected let a redial that beat the owner's next election re-arm the
+// lease-long hold while the requester sat in its restored hold: no primary
+// for up to the whole lease. A broken binding returns the owner to the
+// pre-#18521 floor — the 2s dual-resign rescue and the lease expiry — which
+// fires only while the requester advertises secondary-hold or weight 0, so it
+// cannot re-promote the owner over a requester that already promoted itself
+// and is waiting for its commit ACK on the new connection.
+//
+// Removals only: an empty slot that fills (the other fabric connecting)
+// removes nothing, so it keeps the binding. Caller holds m.mu.
+func (m *Manager) transferChannelIntactLocked(rgID int) bool {
+	b, ok := m.remoteTransferOutLeaseChannel[rgID]
+	if !ok || b.dropped || b.src == nil {
+		return false
+	}
+	if b.src == m.peerSync && m.peerSync.IsConnected() && m.peerSync.TransferChannelGen() == b.gen {
+		return true
+	}
+	b.dropped = true
+	m.remoteTransferOutLeaseChannel[rgID] = b
+	slog.Info("cluster: the session-sync connection that carried the remote transfer-out request "+
+		"is gone; its commit or abort can no longer arrive, so the owner hold falls back to the "+
+		"dual-resign rescue and the lease expiry (#18521)",
+		"rg", rgID, "req_id", m.remoteTransferOutLeaseReqID[rgID])
+	return false
 }
 
 // AbortRemoteTransferOut restores this node after an abandoned transfer-out,

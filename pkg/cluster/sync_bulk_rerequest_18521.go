@@ -23,11 +23,22 @@ import (
 // streaming or superseded by a newer one whose own BulkEnd decides.
 //
 // The request is a BulkRequest; the sender's handleBulkRequest runs an
-// ordinary authoritative bulk. Bounds:
+// ordinary authoritative bulk — its WHOLE table, so each request costs the
+// sender a full walk. Bounds:
 //   - single-flight (bulkRerequestInFlight);
 //   - exponential backoff per consecutive withheld bulk (1s doubling to
 //     30s), reset by the next bulk that reconciles and acks, so a helper
 //     that stays unready is not hammered with full tables;
+//   - floored by the withheld bulk's own receive duration, so the sender
+//     spends at most about half its time walking its table for us however
+//     slow the bulks are (review of #18525 round 2);
+//   - for transient helper-install failures, a backoff that starts at
+//     bulkRerequestTransientFloor (10s doubling to 30s). Those are expected
+//     while the helper is still coming up after a restart, fail fast, and
+//     would otherwise ask for a full table at 1s, 2s, 4s ... — about five
+//     full bulks in the first 31s against one per 35s before #18521. The
+//     local-only causes (a zone map that moved, a reconcile that failed)
+//     keep the 1s start: the next bulk is expected to succeed;
 //   - the zone map must also have been stable for zoneMapSettleWindow, so a
 //     map still churning does not void the replacement the same way (capped
 //     at zoneMapSettleMax);
@@ -41,22 +52,39 @@ import (
 // retry.
 
 const (
-	zoneMapSettleWindow  = time.Second
-	zoneMapSettleMax     = 30 * time.Second
-	zoneMapSettlePoll    = 100 * time.Millisecond
-	bulkRerequestBackoff = time.Second
-	bulkRerequestMax     = 30 * time.Second
+	zoneMapSettleWindow         = time.Second
+	zoneMapSettleMax            = 30 * time.Second
+	zoneMapSettlePoll           = 100 * time.Millisecond
+	bulkRerequestBackoff        = time.Second
+	bulkRerequestTransientFloor = 10 * time.Second
+	bulkRerequestMax            = 30 * time.Second
 )
 
 // bulkRerequestDelay is the backoff for the streak-th consecutive withheld
 // bulk (1-based): 1s, 2s, 4s, ... capped at bulkRerequestMax.
 func bulkRerequestDelay(streak uint64) time.Duration {
-	d := bulkRerequestBackoff
+	return bulkRerequestDelayFrom(bulkRerequestBackoff, streak)
+}
+
+func bulkRerequestDelayFrom(base time.Duration, streak uint64) time.Duration {
+	d := base
 	for i := uint64(1); i < streak && d < bulkRerequestMax; i++ {
 		d *= 2
 	}
 	if d > bulkRerequestMax {
 		d = bulkRerequestMax
+	}
+	return d
+}
+
+// bulkRerequestWait is how long a re-request waits: the streak's backoff
+// (from base), and never less than the withheld bulk's own receive duration.
+// The duration floor may exceed bulkRerequestMax: a bulk that took a minute
+// to stream is not asked for again sooner than a minute later.
+func bulkRerequestWait(base time.Duration, streak uint64, bulkDuration time.Duration) time.Duration {
+	d := bulkRerequestDelayFrom(base, streak)
+	if bulkDuration > d {
+		d = bulkDuration
 	}
 	return d
 }
@@ -98,13 +126,20 @@ func (s *SessionSync) noteBulkReconciled() {
 // so back-to-back withheld bulks still produce one request for the latest of
 // them (not zero: the first would otherwise see its own bulk superseded and
 // drop, while the second lost the single-flight race).
-func (s *SessionSync) scheduleBulkRerequest(reason string, serial uint64) {
+//
+// base is the backoff's starting value for this cause (bulkRerequestBackoff,
+// or bulkRerequestTransientFloor for transient helper-install failures) and
+// bulkDuration the withheld bulk's receive duration, the wait's floor.
+func (s *SessionSync) scheduleBulkRerequest(reason string, serial uint64, base, bulkDuration time.Duration) {
 	s.bulkRerequestSerial.Store(serial)
 	if !s.bulkRerequestInFlight.CompareAndSwap(false, true) {
 		return
 	}
 	streak := s.bulkRerequestStreak.Add(1)
-	backoff := bulkRerequestDelay(streak)
+	backoff := bulkRerequestWait(base, streak, bulkDuration)
+	if hook := s.testOnBulkRerequestScheduled; hook != nil {
+		hook(reason, backoff)
+	}
 	if s.testBulkRerequestBackoff > 0 {
 		backoff = s.testBulkRerequestBackoff
 	}
@@ -130,7 +165,7 @@ func (s *SessionSync) scheduleBulkRerequest(reason string, serial uint64) {
 			// single-flight race) still owes a request of its own.
 			if latest := s.bulkRerequestSerial.Load(); handled != 0 && latest != handled &&
 				s.stats.Connected.Load() {
-				s.scheduleBulkRerequest(reason, latest)
+				s.scheduleBulkRerequest(reason, latest, base, bulkDuration)
 			}
 		}()
 		start := time.Now()
@@ -147,6 +182,13 @@ func (s *SessionSync) scheduleBulkRerequest(reason string, serial uint64) {
 			if g := s.currentZoneMapGen(); g != gen {
 				gen = g
 				stableSince = time.Now()
+			}
+		}
+		if g := s.testBulkRerequestGate; g != nil {
+			select {
+			case <-g:
+			case <-done:
+				return
 			}
 		}
 		if !s.stats.Connected.Load() {

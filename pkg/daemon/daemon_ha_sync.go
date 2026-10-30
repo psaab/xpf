@@ -888,9 +888,18 @@ func (d *Daemon) repushIfConfigAckOverdue(trigger string) bool {
 		return false
 	}
 	resent := d.resendPushedConfig(ss, gen)
-	slog.Warn("cluster: peer has not acknowledged applying the newest config generation; re-sending it unchanged so it can ACK (#18521)",
-		"gen", gen, "unacked_for", age.Round(time.Second).String(), "trigger", trigger, "resent", resent)
-	return resent
+	if resent {
+		slog.Warn("cluster: peer has not acknowledged applying the newest config generation; re-sent it unchanged so it can ACK (#18521)",
+			"gen", gen, "unacked_for", age.Round(time.Second).String(), "trigger", trigger)
+		return true
+	}
+	// Review of #18525 round 2: this line used to say "re-sending" here too.
+	// Nothing was sent: the recorded push no longer matches the owed
+	// generation, the connection or the active config, and the ordinary
+	// reconcile owns a changed config.
+	slog.Info("cluster: peer has not acknowledged applying the newest config generation, but the recorded push no longer matches it; not re-sent (#18521)",
+		"gen", gen, "unacked_for", age.Round(time.Second).String(), "trigger", trigger)
+	return false
 }
 
 // resendPushedConfig re-queues the last pushed config text at its own wire

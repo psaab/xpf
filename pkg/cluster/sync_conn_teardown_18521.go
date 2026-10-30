@@ -41,15 +41,28 @@ import (
 //     only heal when the dial side notices — the half-open shape.
 //
 // The fixes here are the ones that are correct regardless of WHICH handler was
-// slow: every teardown is abortive (abortSyncConn) so the peer's kernel learns
-// immediately; a per-connection watchdog tears the connection down as soon as
-// the kernel reports the peer reset it while unread frames are still queued
-// (draining a dead connection's backlog only installs stale state that the
-// reconnect's cold-prime bulk re-sends anyway); and the next occurrence names
-// itself — every disconnect logs its cause, every receive-loop exit logs once
-// with its reason and a per-connection summary, and a handler that keeps the
-// loop off the socket for syncHandlerSlowThreshold is logged with its message
-// type, both while it is still blocked and when it returns.
+// slow:
+//
+//   - a teardown of a connection judged DEAD (a write that timed out, an
+//     eviction, a supersede, a protocol error) is abortive (abortSyncConn), so
+//     the peer's kernel learns immediately;
+//   - a GRACEFUL stop is not such a judgment: Stop flushes what it already
+//     wrote, bounded by syncStopFlushTimeout, and aborts only a peer that did
+//     not take the bytes in time (review of #18525 round 2 — an abortive Stop
+//     discarded the stopping primary's newest session deltas, which nothing
+//     re-sends because nothing reconnects);
+//   - a per-connection watchdog notices the kernel's report that the peer
+//     reset the connection. The bytes already in the receive queue are what
+//     the peer sent before it reset — its newest state, and possibly a
+//     failover commit/abort, config ACK or fence the cold-prime bulk never
+//     re-sends — so a receive loop that is still making progress drains them.
+//     Meanwhile the slot is redialable, writers stop using the connection,
+//     and its frames earn no peer liveness. Only a loop that makes NO
+//     progress (a handler stuck for syncWriteDeadline, the same bound the
+//     peer's writer uses to judge us) is torn down under its backlog;
+//   - the next occurrence names itself — every disconnect logs its cause,
+//     every receive-loop exit logs once with its reason and a per-connection
+//     summary, and slow handlers are reported, rate-limited per connection.
 
 // syncHandlerSlowThreshold is how long one handleMessage call may keep the
 // receive loop off the socket before it is reported. Half the peer's
@@ -89,6 +102,31 @@ type syncConnDiag struct {
 	handlerStartMono   atomic.Int64
 	handlerType        atomic.Uint32
 	handlerStallWarned atomic.Bool
+
+	// Slow-handler reporting (#18521 review round 2): slowCalls counts every
+	// completed call over the slow threshold for the per-connection summary;
+	// the two limiters hold the in-flight and completion reports to one line
+	// each per syncSlowHandlerLogInterval, the rest counted and reported on
+	// the next line. Without them a helper whose every install takes over the
+	// threshold turned the reports into a per-session Warn stream.
+	slowCalls      atomic.Uint64
+	slowInFlightLg slowLogLimiter
+	slowDoneLg     slowLogLimiter
+
+	// peerReset is set by the watchdog once the kernel reports the peer
+	// reset this connection while the receive loop still had frames to
+	// handle (#18521 review round 2). From then on the loop drains what the
+	// peer already delivered and owns the teardown: writers skip the
+	// connection (getActiveConn), a writer's failed write does not tear it
+	// down (disconnectConn), the dial side may redial its slot
+	// (fabricSlotNeedsDialLocked), and its frames earn no peer liveness.
+	peerReset atomic.Bool
+	// writesDeferred counts writer teardowns ignored while draining.
+	writesDeferred atomic.Uint64
+
+	// stopFlush marks a connection whose close Stop owns while it flushes
+	// (see flushOnStop); abortSyncConn leaves it alone meanwhile.
+	stopFlush atomic.Bool
 
 	dropMu     sync.Mutex
 	dropReason string
@@ -133,8 +171,8 @@ func (d *syncConnDiag) beginHandler(msgType uint8, startMono int64) {
 	d.handlerStartMono.Store(startMono)
 }
 
-func (d *syncConnDiag) endHandler(msgType uint8, startMono int64) (time.Duration, bool) {
-	elapsed := MonotonicNanos() - startMono
+func (d *syncConnDiag) endHandler(msgType uint8, startMono, nowMono int64) (time.Duration, bool) {
+	elapsed := nowMono - startMono
 	d.handlerStartMono.Store(0)
 	d.handlerNanos.Add(elapsed)
 	if elapsed > d.maxHandlerNanos.Load() {
@@ -162,8 +200,75 @@ func (d *syncConnDiag) summaryAttrs() []any {
 		"handler_time", time.Duration(d.handlerNanos.Load()).Round(time.Millisecond).String(),
 		"handler_max", time.Duration(d.maxHandlerNanos.Load()).Round(time.Millisecond).String(),
 		"handler_max_type", syncMsgName(uint8(d.maxHandlerType.Load())),
+		"slow_calls", d.slowCalls.Load(),
 	)
+	if d.peerReset.Load() {
+		attrs = append(attrs, "drained_after_peer_reset", true, "writes_deferred", d.writesDeferred.Load())
+	}
 	return attrs
+}
+
+// syncSlowHandlerLogInterval is the per-connection, per-kind spacing of
+// slow-handler reports. The count and maximum of the calls in between ride on
+// the next report and in the receive-loop exit summary (slow_calls).
+const syncSlowHandlerLogInterval = 10 * time.Second
+
+// slowLogLimiter admits one report per interval; the reports it refuses are
+// counted, with their maximum duration, for the next admitted one.
+type slowLogLimiter struct {
+	lastMono   atomic.Int64
+	suppressed atomic.Uint64
+	maxNanos   atomic.Int64
+}
+
+func (l *slowLogLimiter) admit(nowMono int64, interval, elapsed time.Duration) (ok bool, suppressed uint64, suppressedMax time.Duration) {
+	last := l.lastMono.Load()
+	if (last != 0 && nowMono-last < int64(interval)) || !l.lastMono.CompareAndSwap(last, nowMono) {
+		l.suppressed.Add(1)
+		for {
+			m := l.maxNanos.Load()
+			if int64(elapsed) <= m || l.maxNanos.CompareAndSwap(m, int64(elapsed)) {
+				break
+			}
+		}
+		return false, 0, 0
+	}
+	return true, l.suppressed.Swap(0), time.Duration(l.maxNanos.Swap(0))
+}
+
+// noteSlowHandler reports one slow handler call, rate-limited per connection:
+// inFlight is the watchdog's report of a call that is still running, the
+// other kind is the receive loop's report when a slow call returns.
+func (s *SessionSync) noteSlowHandler(conn net.Conn, d *syncConnDiag, msgType uint8, elapsed time.Duration, inFlight, reportedWhileBlocked bool) {
+	lim := &d.slowDoneLg
+	if inFlight {
+		lim = &d.slowInFlightLg
+	}
+	ok, suppressed, suppressedMax := lim.admit(s.nowMono(), syncSlowHandlerLogInterval, elapsed)
+	if !ok {
+		return
+	}
+	attrs := []any{"msg_type", syncMsgName(msgType)}
+	if inFlight {
+		attrs = append(attrs, "blocked_for", elapsed.Round(time.Millisecond).String())
+	} else {
+		attrs = append(attrs, "elapsed", elapsed.Round(time.Millisecond).String(),
+			"reported_while_blocked", reportedWhileBlocked)
+	}
+	attrs = append(attrs, "peer_write_deadline", syncWriteDeadline.String())
+	if suppressed > 0 {
+		attrs = append(attrs, "suppressed", suppressed,
+			"suppressed_max", suppressedMax.Round(time.Millisecond).String(),
+			"suppressed_over", syncSlowHandlerLogInterval.String())
+	}
+	attrs = append(attrs, "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+	if inFlight {
+		slog.Warn("cluster sync: receive loop blocked in a message handler; nothing reads the "+
+			"socket meanwhile, so the peer's writes stall behind it and time out at its write deadline (#18521)",
+			attrs...)
+		return
+	}
+	slog.Warn("cluster sync: slow message handler held the receive loop off the socket (#18521)", attrs...)
 }
 
 // disconnectAttrs is the attribute set of the "fabric N disconnected" line.
@@ -181,12 +286,70 @@ func disconnectAttrs(conn net.Conn) []any {
 	return append(attrs, d.summaryAttrs()...)
 }
 
-// disconnectConn records why conn is being torn down and runs handleDisconnect.
-// Every production teardown goes through here so the disconnect line names its
-// cause; handleDisconnect alone (tests, legacy callers) logs "unspecified".
+// disconnectConn is the WRITER's teardown: a write on conn failed. It
+// records why conn is being torn down and runs handleDisconnect, so the
+// disconnect line names its cause; handleDisconnect alone (tests, legacy
+// callers) logs "unspecified".
+//
+// A connection the peer already reset is the exception (#18521 review round
+// 2): every write to it fails, so the failure says nothing new, and tearing it
+// down here would discard the frames its receive loop is still draining. Its
+// reader owns the teardown (disconnectConnNow), and writers no longer select
+// it (getActiveConn).
 func (s *SessionSync) disconnectConn(conn net.Conn, reason string, err error) {
+	if d := syncConnDiagFor(conn); d != nil && d.peerReset.Load() {
+		d.writesDeferred.Add(1)
+		slog.Debug("cluster sync: write failed on a connection the peer reset; its receive loop "+
+			"is draining what the peer delivered and owns the teardown",
+			"reason", reason, "err", err, "remote", connRemoteAddrString(conn))
+		return
+	}
+	s.disconnectConnNow(conn, reason, err)
+}
+
+// disconnectConnNow tears conn down unconditionally: the receive loop's own
+// exit, the watchdog's no-progress judgment, and policy teardowns (retired
+// peer identity, strict session authentication).
+func (s *SessionSync) disconnectConnNow(conn net.Conn, reason string, err error) {
 	syncConnDiagFor(conn).noteDrop(reason, err)
 	s.handleDisconnect(conn)
+}
+
+// connPeerReset reports whether the watchdog marked conn as reset by the peer.
+func connPeerReset(conn net.Conn) bool {
+	d := syncConnDiagFor(conn)
+	return d != nil && d.peerReset.Load()
+}
+
+// fabricSlotNeedsDialLocked reports whether fabricConnectLoop should dial
+// fabric idx: the slot is empty, or it holds a connection the peer reset that
+// is only being drained. A live peer then answers the dial and the new
+// connection supersedes the drained one (installConn), exactly as the accept
+// side's supersede does; a peer that is gone refuses it and the drain
+// completes. Caller holds s.mu.
+func (s *SessionSync) fabricSlotNeedsDialLocked(fabricIdx int) bool {
+	c := s.conn0
+	if fabricIdx == 1 {
+		c = s.conn1
+	}
+	return c == nil || connPeerReset(c)
+}
+
+// writableConnLocked is the connection writers use: the preferred active
+// connection, unless the peer reset it (then the other fabric's connection if
+// it is usable, else none). The cold-prime and stream-identity decisions keep
+// using activeConnLocked, which is unchanged. Caller holds s.mu.
+func (s *SessionSync) writableConnLocked() net.Conn {
+	c := s.activeConnLocked()
+	if c == nil || !connPeerReset(c) {
+		return c
+	}
+	for _, alt := range []net.Conn{s.conn0, s.conn1} {
+		if alt != nil && alt != c && !connPeerReset(alt) {
+			return alt
+		}
+	}
+	return nil
 }
 
 // syncTCPConn returns the TCP socket under a session-sync connection, or nil
@@ -218,10 +381,108 @@ func abortSyncConn(conn net.Conn) {
 	if conn == nil {
 		return
 	}
+	if d := syncConnDiagFor(conn); d != nil && d.stopFlush.Load() {
+		// Stop is flushing this socket and closes it itself (flushOnStop).
+		return
+	}
 	if tc := syncTCPConn(conn); tc != nil {
 		_ = tc.SetLinger(0)
 	}
 	_ = conn.Close()
+}
+
+// syncStopFlushTimeout bounds Stop's graceful flush of each connection. Half
+// the peer's write deadline: well inside systemd's TimeoutStopSec=20 and
+// Stop's own 5s goroutine wait, and short enough that the peer's writer,
+// which this stopping node no longer reads for, does not hit its own write
+// deadline and reset the connection under the flush.
+const syncStopFlushTimeout = syncWriteDeadline / 2
+
+func (s *SessionSync) stopFlushTimeout() time.Duration {
+	if s != nil && s.testStopFlushTimeout > 0 {
+		return s.testStopFlushTimeout
+	}
+	return syncStopFlushTimeout
+}
+
+// tcpConnSendQueue returns the bytes this socket has written that the peer's
+// kernel has not yet acknowledged (SIOCOUTQ). ok is false once the socket is
+// closed.
+func tcpConnSendQueue(tc *net.TCPConn) (outq int, ok bool) {
+	rc, err := tc.SyscallConn()
+	if err != nil {
+		return 0, false
+	}
+	var qerr error
+	if cerr := rc.Control(func(fd uintptr) {
+		outq, qerr = unix.IoctlGetInt(int(fd), unix.SIOCOUTQ)
+	}); cerr != nil || qerr != nil {
+		return 0, false
+	}
+	return outq, true
+}
+
+// beginStopFlushLocked hands conn's close to Stop's flush when it is a TCP
+// session-sync connection (other transports are aborted at once, as before).
+// Caller holds s.mu.
+func beginStopFlushLocked(conn net.Conn) bool {
+	d := syncConnDiagFor(conn)
+	d.noteDrop("session sync stopping", nil)
+	if d == nil || syncTCPConn(conn) == nil || d.peerReset.Load() {
+		abortSyncConn(conn)
+		return false
+	}
+	d.stopFlush.Store(true)
+	return true
+}
+
+// flushOnStop is Stop's graceful close (#18521 review round 2). Stop is not a
+// judgment that the stream is dead: every byte already written is addressed
+// to a live peer that would process it, and when the primary stops for good
+// nothing reconnects to re-send them. So each connection waits until the
+// peer's kernel has acknowledged everything written (SIOCOUTQ == 0) and then
+// closes normally. The wait is bounded by stopFlushTimeout; a peer that has
+// not taken the bytes by then is stalled, and the close is abortive (RST) so
+// its kernel learns at once instead of waiting behind the unsent tail — the
+// #18521 half-open concern. Either way the bytes the peer DID take are in its
+// receive queue, and its watchdog lets a progressing receive loop drain them.
+func (s *SessionSync) flushOnStop(conns []net.Conn) {
+	if len(conns) == 0 {
+		return
+	}
+	timeout := s.stopFlushTimeout()
+	deadline := time.Now().Add(timeout)
+	if hook := s.testOnStopFlush; hook != nil {
+		hook()
+	}
+	var wg sync.WaitGroup
+	for _, conn := range conns {
+		wg.Add(1)
+		go func(conn net.Conn) {
+			defer wg.Done()
+			d := syncConnDiagFor(conn)
+			tc := syncTCPConn(conn)
+			outq, ok := tcpConnSendQueue(tc)
+			start := outq
+			for ok && outq > 0 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+				outq, ok = tcpConnSendQueue(tc)
+			}
+			d.stopFlush.Store(false)
+			if ok && outq == 0 {
+				_ = conn.Close()
+				slog.Info("cluster sync: stop flushed the session-sync connection and closed it",
+					"flushed_bytes", start, "remote", connRemoteAddrString(conn))
+				return
+			}
+			abortSyncConn(conn)
+			slog.Warn("cluster sync: stop could not flush the session-sync connection in time; "+
+				"the peer was not taking bytes, aborting (it keeps what it already received)",
+				"unsent_bytes", outq, "flush_timeout", timeout.String(),
+				"remote", connRemoteAddrString(conn))
+		}(conn)
+	}
+	wg.Wait()
 }
 
 // tcpConnKernelState samples the kernel TCP state and the unread receive-queue
@@ -277,19 +538,36 @@ func (s *SessionSync) startConnWatch(ctx context.Context, conn net.Conn, done <-
 	}()
 }
 
-// watchConn is the watchdog. It does two things the receive loop cannot do for
+// stuckHandlerThreshold is how long one handler call may run, once the peer
+// has reset the connection, before the watchdog judges the receive loop to be
+// making no progress and tears the connection down under its backlog. Twice
+// the slow threshold, i.e. syncWriteDeadline in production: the same bound
+// the peer's writer uses to judge THIS loop dead.
+func (s *SessionSync) stuckHandlerThreshold() time.Duration {
+	return 2 * s.slowHandlerThreshold()
+}
+
+// watchConn is the watchdog. It does what the receive loop cannot do for
 // itself while a handler holds it:
 //
 //   - reports a handler that has kept the loop off the socket for the slow
-//     threshold, ONCE per call, while it is still running (the loop's own
-//     report only fires when the call returns, which a stuck call never does);
-//   - tears the connection down as soon as the kernel says the peer reset it
-//     while this loop is behind (unread bytes queued, or a handler in flight).
-//     Without this the loop drains the dead connection's backlog first, and
-//     the dial side — the only side that redials — keeps the slot occupied for
-//     as long as that takes.
+//     threshold while it is still running (the loop's own report only fires
+//     when the call returns, which a stuck call never does), rate-limited per
+//     connection with the completion reports (noteSlowHandler);
+//   - notices the kernel's report that the peer reset the connection while
+//     this loop is behind (unread bytes queued, or a handler in flight). If
+//     the loop is still making progress, the connection is marked peerReset
+//     and the loop drains what the peer delivered (see syncConnDiag.peerReset
+//     for what the mark changes); it ends at the kernel's ECONNRESET once the
+//     queue is empty, or earlier if a redial supersedes it. If the loop makes
+//     NO progress — one handler call running for stuckHandlerThreshold — the
+//     connection is torn down now, as before: the dial side, the only side
+//     that redials, would otherwise keep the slot for as long as the stuck
+//     call lasts. A loop outside a handler is reading, and reaches the
+//     kernel's ECONNRESET by itself once the queue is empty.
 func (s *SessionSync) watchConn(ctx context.Context, conn net.Conn, d *syncConnDiag, tc *net.TCPConn, done <-chan struct{}) {
 	threshold := s.slowHandlerThreshold()
+	stuckAfter := s.stuckHandlerThreshold()
 	ticker := time.NewTicker(s.connWatchInterval())
 	defer ticker.Stop()
 	for {
@@ -301,17 +579,13 @@ func (s *SessionSync) watchConn(ctx context.Context, conn net.Conn, d *syncConnD
 		case <-ticker.C:
 		}
 		inHandler := false
+		var blocked time.Duration
 		if d != nil {
 			if start := d.handlerStartMono.Load(); start != 0 {
 				inHandler = true
-				blocked := time.Duration(MonotonicNanos() - start)
+				blocked = time.Duration(s.nowMono() - start)
 				if blocked >= threshold && d.handlerStallWarned.CompareAndSwap(false, true) {
-					slog.Warn("cluster sync: receive loop blocked in a message handler; nothing reads the "+
-						"socket meanwhile, so the peer's writes stall behind it and time out at its write deadline (#18521)",
-						"msg_type", syncMsgName(uint8(d.handlerType.Load())),
-						"blocked_for", blocked.Round(time.Millisecond).String(),
-						"peer_write_deadline", syncWriteDeadline.String(),
-						"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+					s.noteSlowHandler(conn, d, uint8(d.handlerType.Load()), blocked, true, true)
 				}
 			}
 		}
@@ -322,15 +596,50 @@ func (s *SessionSync) watchConn(ctx context.Context, conn net.Conn, d *syncConnD
 		if !ok {
 			return
 		}
-		if state == linuxTCPStateClose && (unread > 0 || inHandler) {
+		if state != linuxTCPStateClose || (unread == 0 && !inHandler) {
+			continue
+		}
+		if d == nil || (inHandler && blocked >= stuckAfter) {
 			slog.Warn("cluster sync: peer reset the session-sync connection while the receive loop "+
-				"was behind; tearing it down now instead of draining the dead connection's backlog (#18521)",
+				"was behind and making no progress; tearing it down now (#18521)",
 				"unread_bytes", unread, "in_handler", inHandler,
+				"blocked_for", blocked.Round(time.Millisecond).String(),
 				"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
-			s.disconnectConn(conn, "peer reset while receive loop behind", nil)
+			s.disconnectConnNow(conn, "peer reset while receive loop made no progress", nil)
 			return
 		}
+		if d.peerReset.CompareAndSwap(false, true) {
+			slog.Info("cluster sync: peer reset the session-sync connection; the receive loop is "+
+				"still making progress, so it drains what the peer already delivered (the slot is "+
+				"redialable and writers skip it meanwhile) (#18521)",
+				"unread_bytes", unread, "in_handler", inHandler,
+				"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+		}
 	}
+}
+
+// setConnSlotLocked is the ONLY production writer of s.conn0 / s.conn1
+// (TestConnSlotWritesGoThroughTheSetter18525 enforces it). Replacing an
+// installed connection — by nil or by a new one — advances connSlotRemovals,
+// the generation the Manager binds a remote transfer-out lease to: a commit or
+// abort queued on a removed connection is lost, so the owner's leased hold
+// must not outlive it (#18521 review round 2). Filling an empty slot removes
+// nothing and does not advance it. Caller holds s.mu.
+func (s *SessionSync) setConnSlotLocked(fabricIdx int, conn net.Conn) {
+	slot := &s.conn0
+	if fabricIdx == 1 {
+		slot = &s.conn1
+	}
+	if old := *slot; old != nil && old != conn {
+		s.connSlotRemovals.Add(1)
+	}
+	*slot = conn
+}
+
+// TransferChannelGen returns the connection-slot removal generation. See
+// setConnSlotLocked. Lock-free.
+func (s *SessionSync) TransferChannelGen() uint64 {
+	return s.connSlotRemovals.Load()
 }
 
 // recvExit is why receiveLoop returned. reason is a short fixed phrase; err is

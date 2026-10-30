@@ -57,7 +57,7 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 	defer func() {
 		close(watchDone)
 		s.logReceiveLoopExit(conn, exit)
-		s.disconnectConn(conn, "receive loop: "+exit.reason, exit.err)
+		s.disconnectConnNow(conn, "receive loop: "+exit.reason, exit.err)
 	}()
 	hdrBuf := make([]byte, syncHeaderSize)
 	readDeadline := s.readDeadlineDuration()
@@ -189,7 +189,14 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 		// absolute read deadline, or a faulty keyed peer sending junk
 		// forever would mask its own failover trigger.
 		if s.handleFrame(conn, diag, hdr.Type, payload) {
-			s.notePeerLiveness(&missedHeartbeats)
+			// #18521 review round 2: frames drained after the peer reset
+			// the connection were sent before it did; they prove nothing
+			// about the peer being alive NOW, and counting them would hold
+			// off the heartbeat-timeout peer-loss decision for a peer that
+			// stopped.
+			if diag == nil || !diag.peerReset.Load() {
+				s.notePeerLiveness(&missedHeartbeats)
+			}
 			nextReadDeadline = time.Now().Add(readDeadline)
 		}
 	}
@@ -197,26 +204,24 @@ func (s *SessionSync) receiveLoop(ctx context.Context, conn net.Conn) {
 
 // handleFrame runs one handleMessage call with the #18521 instrumentation:
 // frame/byte/handler-time counters for the per-connection summary, the
-// in-flight marker the watchdog reports a stuck call from, and ONE Warn per
-// call that kept the loop off the socket for the slow threshold. Nothing here
-// logs per message.
+// in-flight marker the watchdog reports a stuck call from, and a report of a
+// call that kept the loop off the socket for the slow threshold — at most one
+// per syncSlowHandlerLogInterval per connection, the rest counted
+// (noteSlowHandler). Nothing here logs per message. Timed on s.nowMono, the
+// clock the watchdog reads the in-flight marker with.
 func (s *SessionSync) handleFrame(conn net.Conn, diag *syncConnDiag, msgType uint8, payload []byte) bool {
 	if diag == nil {
 		return s.handleMessage(conn, msgType, payload)
 	}
 	diag.framesRead.Add(1)
 	diag.bytesRead.Add(uint64(syncHeaderSize + len(payload)))
-	start := MonotonicNanos()
+	start := s.nowMono()
 	diag.beginHandler(msgType, start)
 	accepted := s.handleMessage(conn, msgType, payload)
-	elapsed, stallWarned := diag.endHandler(msgType, start)
+	elapsed, stallWarned := diag.endHandler(msgType, start, s.nowMono())
 	if elapsed >= s.slowHandlerThreshold() {
-		slog.Warn("cluster sync: slow message handler held the receive loop off the socket (#18521)",
-			"msg_type", syncMsgName(msgType),
-			"elapsed", elapsed.Round(time.Millisecond).String(),
-			"reported_while_blocked", stallWarned,
-			"peer_write_deadline", syncWriteDeadline.String(),
-			"local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
+		diag.slowCalls.Add(1)
+		s.noteSlowHandler(conn, diag, msgType, elapsed, false, stallWarned)
 	}
 	return accepted
 }

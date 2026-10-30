@@ -902,10 +902,13 @@ partial drop, or when the preferred fabric connects with no fault.
   BulkAck the fence waits on — reconcile skipped (zone map moved mid-bulk, no
   zone snapshot, no dataplane) or failed, window aborted, transient helper
   install failures — queues one `BulkRequest` after a backoff (1s doubling,
-  cap 30s, reset by a reconciled bulk) and a stable zone map, single-flighted,
-  for the newest withheld bulk, and dropped if a newer bulk was accepted
-  meanwhile (`sync_bulk_rerequest_18521.go`, `Bulk re-requests sent`). The
-  pending-bulk age behind every 35s retry decision is monotonic.
+  cap 30s, reset by a reconciled bulk; 10s doubling for transient install
+  failures, which are expected while the helper comes up; never shorter than
+  the withheld bulk's own receive duration, since each request costs the
+  sender a full table walk) and a stable zone map, single-flighted, for the
+  newest withheld bulk, and dropped if a newer bulk was accepted meanwhile
+  (`sync_bulk_rerequest_18521.go`, `Bulk re-requests sent`). The pending-bulk
+  age behind every 35s retry decision is monotonic.
 - **Discharge.** Only a BulkAck for a bulk that captured the epoch BEFORE reading its
   session source advances `cleared`. `doBulkSync` captures before
   `BulkSnapshotSource`; the store walk captures at BulkStart; `BulkSyncSnapshot`
@@ -4099,6 +4102,15 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
     refuse synced installs stamped with the older epoch). Counters
     `Config apply-acks sent / unsent` (standby) and `credited / ignored`
     (authority) name a future drop end to end.
+  - A former authority's debt is superseded by the new authority's config
+    (review of #18525 round 2). Only the RG0 authority re-pushes, but the
+    gate runs on every demoting node, so a node that lost RG0 with an
+    uncredited debt by a path its gate does not guard (a monitor-driven
+    weight change) refused every later data-RG handover. Once it applies, or
+    re-ACKs as already applied, a config the peer pushed, both nodes hold
+    the peer's config and `supersedeSentConfigDebtByPeer` retires the debt;
+    a later send records a fresh one
+    (`TestFormerAuthorityDebtSupersededByPeerConfig18525`).
 - `TakeoverHoldTime` adds extra delay before election when this node would
   immediately preempt. Used to avoid election thrash on simultaneous boot.
 - **A committed requested transfer wins over `preempt` (#10776).** Once the
@@ -4227,15 +4239,26 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   with "still primary locally". A requester advertising PRIMARY during its
   commit window never tripped the timer (no peer-yield predicate matches), so
   the race needs the requester's pre-request hold or weight 0. An operator
-  hold (no lease) keeps the 2s rescue. The hold applies only while session
-  sync is CONNECTED (`transferSyncUpLocked`): commit and abort both travel on
-  it, so with sync fully down (a failed commit write tears down a
-  single-fabric pair, and the abort then has nothing to travel on) the owner
-  falls back to the 2s rescue instead of leaving the RG ownerless for the
-  rest of the lease. A commit cannot race that rescue on a fresh connection:
-  commit frames are written once on the request's connection, and
-  `FinalizePeerTransferOut` refuses an owner that is primary again. Cells:
-  `failover_inflight_hold_18521_test.go`.
+  hold (no lease) keeps the 2s rescue. The hold applies only while the
+  session-sync connection set that carried the request is still installed
+  (`transferChannelIntactLocked`): `ArmRemoteTransferOutLease` binds the lease
+  to the published sync source and its connection-slot removal generation
+  (`SessionSync.TransferChannelGen`, advanced by `setConnSlotLocked`, the only
+  production writer of a slot — `TestConnSlotWritesGoThroughTheSetter18525`).
+  Commit and abort frames are written once and never re-sent, so one queued
+  on a connection that was then torn down is gone, and a FRESH connection
+  cannot deliver it. Keying the hold on "sync connected" (the first review
+  round) let a redial that beat the owner's next election re-arm the
+  lease-long hold while the requester sat in its restored hold — no primary
+  for up to the lease (review of #18525 round 2). Once the binding breaks
+  (sync down, the request's connection torn down or superseded, a new
+  SessionSync published) the owner falls back to the pre-#18521 floor: the
+  2s rescue and the lease expiry. That rescue fires only while the requester
+  advertises secondary-hold or weight 0, so it never re-promotes the owner
+  over a requester that already promoted itself and is waiting for its
+  commit ACK on the new connection; that commit still lands. Filling an
+  empty slot (the other fabric connecting) removes nothing and keeps the
+  binding. Cells: `failover_inflight_hold_18521_test.go`.
 - **A requester-side abort must not re-promote the requester (#15164,
   B22-01).** The lease above restores the OWNER, but it did nothing for the
   requester: after `abortRequestedPeerFailover` the requester had reported
@@ -5289,17 +5312,29 @@ it.
   mutex) made this node's 2s-deadline writer tear the connection down, and
   the graceful FIN then queued behind ~1 MB of unsent bytes the stalled peer
   could not accept — the dial side, the only side that redials, stayed
-  ESTABLISHED for 56s. Every teardown now closes with `SO_LINGER 0`
-  (`abortSyncConn`, including `handleDisconnect`'s stale branch, which used
-  to leave its socket open); a per-connection watchdog tears the connection
-  down when the kernel reports the peer reset it while the loop is behind;
-  `fabric N disconnected` carries `reason`/`err`/per-connection summary;
-  `receive loop exited` is logged once per connection; and a handler that
-  holds the loop for 1s is logged with its message type, while blocked and
-  on return. Full mechanism: `docs/session-sync-architecture.md`
-  "Connection teardown and the half-open window". Cells:
-  `sync_conn_halfopen_18521_test.go` (loopback TCP: the RST reaches a
-  non-reading peer, the watchdog clears a stalled slot, stale-branch close,
-  exit reasons, slow-handler Warn, `syncMsgName` census against
-  `handleMessage`), `sync_reprime_storm_18521_test.go` (one fence re-prime
-  per epoch, receiver re-request after a skipped reconcile).
+  ESTABLISHED for 56s. A teardown of a connection judged dead now closes
+  with `SO_LINGER 0` (`abortSyncConn`, including `handleDisconnect`'s stale
+  branch, which used to leave its socket open). `Stop()` is NOT such a
+  judgment: it flushes what it already wrote (`flushOnStop`, until the peer
+  has acknowledged every byte, bounded by `syncStopFlushTimeout`, 1s) and
+  closes normally, aborting only a peer that did not take the bytes in time
+  (review of #18525 round 2: the abortive stop discarded a stopping
+  primary's newest deltas, which nothing re-sends). A per-connection
+  watchdog notices the kernel's report that the peer reset the connection
+  while the loop is behind: a loop still making progress drains what the
+  peer delivered (marked `peerReset`: writers skip it, a writer's failure
+  does not tear it down, the dial side may redial its slot and supersede
+  it, its frames earn no peer liveness); a loop with one handler call stuck
+  for `syncWriteDeadline` is torn down at once. `fabric N disconnected`
+  carries `reason`/`err`/per-connection summary; `receive loop exited` is
+  logged once per connection; and a handler that holds the loop for 1s is
+  reported with its message type, while blocked and on return, each kind at
+  most once per 10s per connection with a `suppressed` tally. Full
+  mechanism: `docs/session-sync-architecture.md` "Connection teardown and the
+  half-open window". Cells: `sync_conn_halfopen_18521_test.go` (loopback
+  TCP: the RST reaches a non-reading peer, the watchdog clears a stuck slot
+  and drains a progressing one, Stop flushes to a slow peer and still aborts
+  a stalled one, stale-branch close, exit reasons, rate-limited slow-handler
+  reports, `syncMsgName` census against `handleMessage`),
+  `sync_reprime_storm_18521_test.go` (one fence re-prime per epoch, receiver
+  re-request after a skipped reconcile).

@@ -1018,8 +1018,11 @@ type SessionSync struct {
 	// never copied (it already holds a Mutex and atomics).
 	malformedRecordWarn malformedRecordWarnDetector
 	mu                  sync.Mutex
-	conn0               net.Conn
-	conn1               net.Conn
+	conn0               net.Conn // written only via setConnSlotLocked
+	conn1               net.Conn // written only via setConnSlotLocked
+	// connSlotRemovals counts installed connections removed from a fabric
+	// slot (#18521 review round 2); see setConnSlotLocked.
+	connSlotRemovals atomic.Uint64
 	// configCrypto0/configCrypto1 hold the per-connection ephemeral X25519
 	// state that encrypts the config-sync payload (#6629). They sit here,
 	// beside the conn they belong to and under the same mu, because their
@@ -1679,6 +1682,11 @@ type SessionSync struct {
 	// production syncHandlerSlowThreshold / syncConnWatchInterval.
 	testSlowHandlerThreshold time.Duration
 	testConnWatchInterval    time.Duration
+	// testStopFlushTimeout replaces syncStopFlushTimeout; testOnStopFlush is
+	// called once Stop starts waiting on its flush (#18521 review round 2).
+	// Test-only.
+	testStopFlushTimeout time.Duration
+	testOnStopFlush      func()
 	// bulkRerequestInFlight single-flights the #18521 (D) re-request of a
 	// bulk whose reconcile was skipped because the zone map changed mid-bulk.
 	bulkRerequestInFlight atomic.Bool
@@ -1696,6 +1704,13 @@ type SessionSync struct {
 	bulkRerequestStreak      atomic.Uint64
 	bulkRerequestSerial      atomic.Uint64
 	testBulkRerequestBackoff time.Duration
+	// testBulkRerequestGate, when non-nil, holds a scheduled re-request's
+	// decision until it is closed, so a cell orders its own frames before
+	// the decision instead of racing a backoff. testOnBulkRerequestScheduled
+	// observes the computed wait before testBulkRerequestBackoff replaces
+	// it. Test-only.
+	testBulkRerequestGate        chan struct{}
+	testOnBulkRerequestScheduled func(reason string, wait time.Duration)
 	// bulkInstallFailedV4/V6 retain only transient helper-install failures for
 	// the active authoritative bulk. They are separate from the received-key
 	// set because a failed transport write must not make that snapshot complete;

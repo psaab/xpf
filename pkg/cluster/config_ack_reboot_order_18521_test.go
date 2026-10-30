@@ -1,7 +1,9 @@
 package cluster
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -150,5 +152,104 @@ func TestPeerConfigAckOverdueBounds18521(t *testing.T) {
 	ack18521(t, s, nil, 99)
 	if _, _, overdue := s.PeerConfigAckOverdue(after); overdue {
 		t.Fatal("an acknowledged send is overdue")
+	}
+}
+
+// Review of #18525 round 2 (finding 3): the overdue-ACK re-push runs only on
+// the RG0 config authority, but the stale-config gate runs on every demoting
+// node, and the send debt is overwritten only by a new send. A node that held
+// an uncredited debt and then LOST RG0 by a path its own gate does not guard
+// (a monitor-driven weight change) can no longer re-push, never sends again,
+// and refused every later data-RG failover with "the standby has not
+// acknowledged applying config generation G" — although it is now the
+// RECEIVER of the new authority's config. Once this node applies (or re-ACKs)
+// a config the peer pushed, the peer and this node hold the same config by
+// construction, so the debt for this node's own older send is superseded.
+// RED with the debt left standing after the peer's config is applied.
+func TestFormerAuthorityDebtSupersededByPeerConfig18525(t *testing.T) {
+	const debtGen = uint64(1890891765099)
+	const peerGen = uint64(1890891799001)
+	rows := []struct {
+		name      string
+		duplicate bool
+	}{
+		{"the new authority's config is applied", false},
+		{"the new authority re-sends the generation already applied", true},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			s := NewSessionSync(":0", "10.0.0.2:4785", &mockSweepDP{})
+			conn := &captureConn{}
+			s.mu.Lock()
+			s.conn0 = conn
+			s.mu.Unlock()
+			s.SetOverdueConfigApplyDebtForTesting(debtGen, 2*time.Minute)
+			if row.duplicate {
+				s.lastAppliedConfigGen.Store(peerGen)
+			}
+			var applies int
+			s.OnConfigReceived = func(string) error { applies++; return nil }
+
+			m := NewManager(1, 1)
+			m.UpdateConfig(makeConfig(makeRG(2, false, map[int]int{0: 100, 1: 200})))
+			m.handlePeerHeartbeat(&HeartbeatPacket{NodeID: 0, ClusterID: 1, Groups: []HeartbeatGroup{
+				{GroupID: 2, Priority: 100, Weight: 255, State: uint8(StateSecondary)},
+			}})
+			m.mu.Lock()
+			m.groups[2].Ready = true
+			m.groups[2].ReadySince = time.Now().Add(-time.Hour)
+			m.groups[2].ReadinessReasons = nil
+			m.mu.Unlock()
+			m.runElection()
+			if !m.IsLocalPrimary(2) {
+				t.Fatal("fixture: this node must own data RG 2")
+			}
+			m.SetPeerConfigStaleFunc(s.PeerConfigStale)
+			if _, err := m.ManualFailover(2); !errors.Is(err, ErrPeerConfigStale) {
+				t.Fatalf("fixture: the outstanding debt must refuse the data-RG failover, got %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				s.configApplyLoop(ctx)
+			}()
+			s.configApplyCh <- configApplyItem{gen: peerGen, text: "set system host-name new-authority", conn: conn}
+			acked := waitFor18521(t, 5*time.Second, func() bool {
+				for _, f := range conn.frames() {
+					if f.msgType == syncMsgConfigApplyAck && len(f.payload) >= 8 &&
+						binary.LittleEndian.Uint64(f.payload[:8]) == peerGen {
+						return true
+					}
+				}
+				return false
+			})
+			cancel()
+			<-done
+			if !acked {
+				t.Fatal("fixture: the peer's config was not acknowledged")
+			}
+			if row.duplicate != (applies == 0) {
+				t.Fatalf("fixture: applies=%d for duplicate=%v", applies, row.duplicate)
+			}
+			if stale, reason := s.PeerConfigStale(); stale {
+				t.Fatalf("this node applied the new authority's config and still refuses handovers "+
+					"over its own superseded send: %s (review of #18525 round 2)", reason)
+			}
+			if _, _, overdue := s.PeerConfigAckOverdue(time.Second); overdue {
+				t.Fatal("a superseded debt still reads as an overdue ACK")
+			}
+			if _, err := m.ManualFailover(2); err != nil {
+				t.Fatalf("the data-RG failover is still refused after the debt was superseded: %v", err)
+			}
+			// A later send by this node (authority again) is a fresh debt,
+			// whatever its generation: the superseded one is older.
+			s.recordLastSentConfigGen(debtGen)
+			if stale, _ := s.PeerConfigStale(); !stale {
+				t.Fatal("a send after the supersession recorded no debt: the gate stays open over an " +
+					"unacknowledged config")
+			}
+		})
 	}
 }

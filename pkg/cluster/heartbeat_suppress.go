@@ -57,6 +57,11 @@ type peerSyncSource interface {
 	IsConnected() bool
 	LastPeerReceiveAge() (time.Duration, bool)
 	PeerRecentlyActiveWithinSilenceWindow() bool
+	// TransferChannelGen is the connection-slot removal generation
+	// (#18521 review round 2): it moves whenever an installed connection
+	// leaves its fabric slot, so an unchanged value means every connection
+	// installed at capture time is still installed. Lock-free.
+	TransferChannelGen() uint64
 }
 
 // SetPeerSyncSource publishes the session-sync object whose receive

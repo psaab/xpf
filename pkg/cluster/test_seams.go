@@ -76,6 +76,10 @@ func (f *fakePeerSyncSource17056) PeerRecentlyActiveWithinSilenceWindow() bool {
 	return f.silenceFresh
 }
 
+// TransferChannelGen is constant: every SetFakePeerSyncSourceForTesting call
+// publishes a NEW fake, which is how a cell models a reconnect.
+func (f *fakePeerSyncSource17056) TransferChannelGen() uint64 { return 0 }
+
 // setPeerSyncSourceForTesting injects a fake sync source (tests only).
 func (m *Manager) setPeerSyncSourceForTesting(src peerSyncSource) {
 	m.mu.Lock()
@@ -208,7 +212,8 @@ func (s *SessionSync) SetPendingColdPrimeForTesting() bool {
 	epoch := s.bulkSendNext.Add(1)
 	s.pendingBulkOwed.Store(owed)
 	s.pendingBulkAckEpoch.Store(epoch)
-	s.pendingBulkAckSince.Store(MonotonicNanos())
+	// The clock PendingBulkAck reads (review of #18525 round 2).
+	s.pendingBulkAckSince.Store(s.nowMono())
 	return true
 }
 

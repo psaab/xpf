@@ -86,11 +86,13 @@ func (s *SessionSync) activeConnLocked() net.Conn {
 	return nil
 }
 
-// getActiveConn returns the active connection while taking s.mu.
+// getActiveConn returns the connection WRITERS use while taking s.mu: the
+// active connection, skipping one the peer reset that is only being drained
+// (#18521 review round 2; writableConnLocked).
 func (s *SessionSync) getActiveConn() net.Conn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.activeConnLocked()
+	return s.writableConnLocked()
 }
 
 // noteHeartbeatAck latches the peer heartbeat-ack capability for the CURRENT
@@ -623,7 +625,7 @@ func (s *SessionSync) noteConnPeerCapabilities(conn net.Conn, id peerProcessIden
 	drop := s.resolvePendingPeerIdentityLocked(ac)
 	s.mu.Unlock()
 	if drop {
-		s.disconnectConn(ac, "capabilities identified a retired peer process", nil)
+		s.disconnectConnNow(ac, "capabilities identified a retired peer process", nil)
 	}
 }
 
@@ -773,7 +775,7 @@ func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int, identities .
 				"remote", connRemoteAddrString(s.conn0), "conn_incarnation", s.conn0Gen, "peer_incarnation", s.peerIncarnation)
 			syncConnDiagFor(s.conn0).noteDrop("evicted: retired peer incarnation", nil)
 			abortSyncConn(s.conn0)
-			s.conn0 = nil
+			s.setConnSlotLocked(0, nil)
 			s.conn0Gen = 0
 			evicted = true
 		case staleConnPreserve:
@@ -787,7 +789,7 @@ func (s *SessionSync) evictStaleIncarnationConnsLocked(keepIdx int, identities .
 				"remote", connRemoteAddrString(s.conn1), "conn_incarnation", s.conn1Gen, "peer_incarnation", s.peerIncarnation)
 			syncConnDiagFor(s.conn1).noteDrop("evicted: retired peer incarnation", nil)
 			abortSyncConn(s.conn1)
-			s.conn1 = nil
+			s.setConnSlotLocked(1, nil)
 			s.conn1Gen = 0
 			evicted = true
 		case staleConnPreserve:
@@ -1085,7 +1087,7 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 			syncConnDiagFor(s.conn0).noteDrop("superseded by a new fabric 0 connection", nil)
 			abortSyncConn(s.conn0)
 		}
-		s.conn0 = conn
+		s.setConnSlotLocked(0, conn)
 		// #6629: a FRESH ephemeral keypair per install. Replacing (never
 		// reusing) the slot's state is what gives the config payload forward
 		// secrecy across reconnects — the superseded connection's key is
@@ -1097,7 +1099,7 @@ func (s *SessionSync) installConn(fabricIdx int, conn net.Conn) connColdPrimeDec
 			syncConnDiagFor(s.conn1).noteDrop("superseded by a new fabric 1 connection", nil)
 			abortSyncConn(s.conn1)
 		}
-		s.conn1 = conn
+		s.setConnSlotLocked(1, conn)
 		s.configCrypto1 = newConfigCryptoState()
 	}
 	s.stats.Connected.Store(true)
@@ -1334,6 +1336,17 @@ func (s *SessionSync) Start(ctx context.Context) error {
 }
 
 func (s *SessionSync) Stop() {
+	// #18521 review round 2: hand the installed connections to the graceful
+	// flush BEFORE the cancel, so a receive loop woken by it cannot abort a
+	// socket that still holds bytes for the peer.
+	s.mu.Lock()
+	var flush []net.Conn
+	for _, c := range []net.Conn{s.conn0, s.conn1} {
+		if c != nil && beginStopFlushLocked(c) {
+			flush = append(flush, c)
+		}
+	}
+	s.mu.Unlock()
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -1347,27 +1360,21 @@ func (s *SessionSync) Stop() {
 	if s.listener1 != nil {
 		s.listener1.Close()
 	}
-	s.mu.Lock()
-	// #18521 review: abortive, like every other teardown. A graceful FIN
-	// from a stopping daemon queues behind the unsent bytes, so a peer whose
-	// receive loop is behind (the dial side, the only one that redials)
-	// stayed ESTABLISHED on a restart of this node until it drained them —
-	// the same half-open shape. The process is going away; nothing queued
-	// would have been processed by it anyway.
-	if s.conn0 != nil {
-		syncConnDiagFor(s.conn0).noteDrop("session sync stopping", nil)
-		abortSyncConn(s.conn0)
-	}
-	if s.conn1 != nil {
-		syncConnDiagFor(s.conn1).noteDrop("session sync stopping", nil)
-		abortSyncConn(s.conn1)
-	}
-	s.mu.Unlock()
-	// #5303: close every connection still in its pre-auth setup window so a
-	// stalled handshake read unblocks and its setup goroutine exits — otherwise a
-	// flooder's abandoned pre-auth connections would hold setup goroutines until
-	// their handshake deadlines and make Stop wait out the full 5s budget.
+	// #18521 review round 2: a bounded graceful flush, not an abort. The
+	// bytes already written are addressed to a live peer that processes them,
+	// and when this daemon stops for good (or a comms-transport change replaces
+	// this instance, #6387) nothing reconnects to re-send them. A peer that is
+	// not taking bytes is still aborted, after stopFlushTimeout, so it is not
+	// left ESTABLISHED behind the unsent tail (the half-open shape the first
+	// round fixed with an unconditional abort).
+	//
+	// #5303: first close every connection still in its pre-auth setup window
+	// so a stalled handshake read unblocks and its setup goroutine exits —
+	// otherwise a flooder's abandoned pre-auth connections would hold setup
+	// goroutines until their handshake deadlines and make Stop wait out the
+	// full 5s budget. Nothing they carry is worth flushing.
 	s.closeSetupConns()
+	s.flushOnStop(flush)
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -1446,12 +1453,10 @@ func (s *SessionSync) fabricConnectLoop(ctx context.Context, fabricIdx int, peer
 			}
 		}
 		s.mu.Lock()
-		var connected bool
-		if fabricIdx == 0 {
-			connected = s.conn0 != nil
-		} else {
-			connected = s.conn1 != nil
-		}
+		// #18521 review round 2: a slot holding a connection the peer reset
+		// is dialable while its receive loop drains the backlog; a live peer
+		// answers and the new connection supersedes the drained one.
+		connected := !s.fabricSlotNeedsDialLocked(fabricIdx)
 		s.mu.Unlock()
 		if connected {
 			select {
@@ -1499,7 +1504,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		// receive window is closed; a graceful FIN queues behind every unsent
 		// byte and reached a stalled peer ~56 s late.
 		abortSyncConn(s.conn0)
-		s.conn0 = nil
+		s.setConnSlotLocked(0, nil)
 		// #6629: drop the connection's ephemeral config key with the
 		// connection. Nothing may seal or open a payload with a key that
 		// outlived the exchange that produced it.
@@ -1519,7 +1524,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		slog.Info("cluster sync: fabric 0 disconnected", disconnectAttrs(conn)...)
 	case s.conn1 != nil && s.conn1 == conn:
 		abortSyncConn(s.conn1)
-		s.conn1 = nil
+		s.setConnSlotLocked(1, nil)
 		s.configCrypto1 = nil
 		s.conn1Gen = 0
 		clearConnClockState(conn)
