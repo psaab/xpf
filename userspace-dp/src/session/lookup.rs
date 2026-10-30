@@ -197,6 +197,13 @@ impl SessionTable {
                 }
             }
         }
+        // #18520: an admitted SYN-ACK that promoted a replica pair (the SYN
+        // was installed on another worker) is relayed to the siblings with
+        // its ack and seq, so the authoritative table can validate and
+        // promote too. This note runs only for Owner-admitted segments that
+        // passed the input filter, after the Owner replay promoted the pair.
+        // Non-SYN-ACK segments return on the first flag test.
+        self.queue_synack_promotion_relay(key, seq, ack, payload_len, tcp_flags);
     }
     /// Seed only the RFC 7323 scale from an admitted initial SYN.
     ///
@@ -935,6 +942,13 @@ impl SessionTable {
             }
             let is_tcp = matches!(key.protocol, PROTO_TCP);
             let entry = &mut record.entry;
+            // #18520: an admitted (non-deferred) hit on this table, stored
+            // only on change (see the flow-cache probe).
+            if !defer_all && !entry.served_here {
+                entry.served_here = true;
+                #[cfg(test)]
+                super::SERVED_HERE_STORES_FOR_TEST.with(|count| count.set(count.get() + 1));
+            }
             let close_class_before = entry.tcp_close_class_wire();
             let handshake_state_before = entry.tcp_handshake_state_wire(key.protocol);
             // #10885: only close progress or traffic from the non-FINed
