@@ -851,6 +851,213 @@ deploy_node_rg_role() {
 	'
 }
 
+# deploy_rg_local_forwarding reads `show chassis cluster status` on stdin and
+# prints the LOCAL node's `rg-active=` value (active / inactive) for
+# redundancy group <rg> (#18523). Each node prints one
+# `Forwarding: rg-active=<v> vrrp-master=<v>` line under its own row for every
+# RG that has a state machine, in private-RG AND legacy VRRP-backed mode
+# (pkg/cluster/status.go FormatStatus, pkg/daemon/rg_forwarding_status_7367.go).
+# That line is the dataplane's view, not the node's ownership claim.
+#
+# When ownership and forwarding disagree, the daemon appends
+# ` -- DIVERGENCE: ...` (pkg/cluster/rg_forwarding.go FormatRGForwarding).
+#
+# Exit status:
+#   0  exactly one line in the exact `Redundancy group: <rg>` block, value
+#      active or inactive, no suffix; prints the value.
+#   2  the same, but the line carries a suffix (any token other than
+#      rg-active= / vrrp-master=); prints `<value> -- <suffix>`, so a caller
+#      comparing against a bare `active`/`inactive` FAILs and names it.
+#   1  missing, duplicated, or not active/inactive; prints nothing.
+deploy_rg_local_forwarding() {
+	local want="${1:?deploy_rg_local_forwarding: rg required}"
+	awk -v want="$want" '
+		/^Redundancy group:[[:space:]]/ { rg = $3; next }
+		rg != "" && ("x" rg) == ("x" want) && $1 == "Forwarding:" {
+			n++
+			v = ""
+			extra = ""
+			for (i = 2; i <= NF; i++) {
+				if ($i ~ /^rg-active=/) { v = substr($i, 11) }
+				else if ($i !~ /^vrrp-master=/) { extra = extra (extra == "" ? "" : " ") $i }
+			}
+		}
+		END {
+			if (n != 1 || (v != "active" && v != "inactive")) exit 1
+			if (extra != "") {
+				sub(/^--[[:space:]]*/, "", extra)
+				print v " -- " extra
+				exit 2
+			}
+			print v
+		}
+	'
+}
+
+# deploy_active_active_split_verdict <fw0-status> <fw1-status> scores the
+# test-active-active.sh split: RG1 (WAN) moved to node1 and RG2 (LAN) stayed
+# on node0 (#18523). Arguments are each node's own
+# `show chassis cluster status`. The caller defines pass() and fail(); this
+# records exactly four verdicts and never aborts under `set -euo pipefail`.
+#
+# Ownership is read from BOTH nodes' own views, the ha_rg_owner_verdict rule
+# (#18503). The untargeted yield parks the old owner in `secondary-hold`, so
+# a non-owner is `secondary` or `secondary-hold`. fw0's view alone would
+# score a dual-primary RG as healthy.
+#
+# Forwarding is each node's own `Forwarding: rg-active=` line, in both
+# election modes: the owner `active`, the peer `inactive`, and no
+# DIVERGENCE suffix. A missing line is a FAIL, never a skip.
+deploy_active_active_split_verdict() {
+	local s0="$1" s1="$2"
+	local rg1_n0 rg1_n1 rg1_fw1 rg2_n0 rg2_fw1
+	local f1_fw0 f1_fw1 f2_fw0 f2_fw1
+	rg1_n0=$(deploy_node_rg_role node0 1 <<<"$s0" || true)
+	rg1_n1=$(deploy_node_rg_role node1 1 <<<"$s0" || true)
+	rg1_fw1=$(deploy_node_rg_role node1 1 <<<"$s1" || true)
+	rg2_n0=$(deploy_node_rg_role node0 2 <<<"$s0" || true)
+	rg2_fw1=$(deploy_node_rg_role node1 2 <<<"$s1" || true)
+	if [[ "$rg1_n0" =~ ^secondary(-hold)?$ && "$rg1_n1" == primary && "$rg1_fw1" == primary ]]; then
+		pass "RG1 (WAN) moved to fw1"
+	else
+		fail "RG1 did not move to fw1 (fw0 view: node0=${rg1_n0:-missing} node1=${rg1_n1:-missing}; fw1 view: node1=${rg1_fw1:-missing})"
+	fi
+	if [[ "$rg2_n0" == primary && "$rg2_fw1" =~ ^secondary(-hold)?$ ]]; then
+		pass "RG2 (LAN) stayed on fw0"
+	else
+		fail "RG2 not owned by fw0 alone (fw0 view: node0=${rg2_n0:-missing}; fw1 view: node1=${rg2_fw1:-missing})"
+	fi
+	f1_fw0=$(deploy_rg_local_forwarding 1 <<<"$s0" || true)
+	f1_fw1=$(deploy_rg_local_forwarding 1 <<<"$s1" || true)
+	f2_fw0=$(deploy_rg_local_forwarding 2 <<<"$s0" || true)
+	f2_fw1=$(deploy_rg_local_forwarding 2 <<<"$s1" || true)
+	if [[ "$f1_fw0" == inactive && "$f1_fw1" == active ]]; then
+		pass "RG1 (WAN) forwarding moved to fw1 (fw0 rg-active=inactive, fw1 rg-active=active)"
+	else
+		fail "RG1 (WAN) forwarding not on fw1 alone (fw0 rg-active=${f1_fw0:-missing}, fw1 rg-active=${f1_fw1:-missing})"
+	fi
+	if [[ "$f2_fw0" == active && "$f2_fw1" == inactive ]]; then
+		pass "RG2 (LAN) forwarding stayed on fw0 (fw0 rg-active=active, fw1 rg-active=inactive)"
+	else
+		fail "RG2 (LAN) forwarding not on fw0 alone (fw0 rg-active=${f2_fw0:-missing}, fw1 rg-active=${f2_fw1:-missing})"
+	fi
+	return 0
+}
+
+# ── #18523: put every RG back on fw0 between HA smoke phases ──────────
+# test-ha-crash.sh and test-restart-connectivity.sh both run this restore,
+# so the selftest drives the code they run. The caller defines FW0, FW1 and
+# pass()/fail()/info(). `incus` and `sleep` are the only commands with side
+# effects, which lets deploy-lib-selftest.sh drive the loop with both mocked.
+
+# deploy_restore_rg_on_fw0 <rg>: fw0 owns <rg> only when BOTH nodes' own
+# views agree: fw0's view has node0 primary, and fw1's view has node1
+# secondary or secondary-hold. fw0's view alone would score a dual-primary
+# split as restored (the ha_rg_owner_verdict rule, #18503). An unreadable
+# view is "not restored".
+deploy_restore_rg_on_fw0() {
+	local rg="${1:?deploy_restore_rg_on_fw0: rg required}" s0 s1
+	s0=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(deploy_node_rg_role node0 "$rg" <<<"$s0" || true)" == primary ]] || return 1
+	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(deploy_node_rg_role node1 "$rg" <<<"$s1" || true)" =~ ^secondary(-hold)?$ ]]
+}
+
+# deploy_restore_rg_on_fw1 <rg>: fw1 still claims <rg> in its own view. The
+# restore re-requests a yield only then: re-requesting from a node that
+# already yielded re-arms its hold and bumps its failover count.
+deploy_restore_rg_on_fw1() {
+	local rg="${1:?deploy_restore_rg_on_fw1: rg required}" s1
+	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
+	[[ "$(deploy_node_rg_role node1 "$rg" <<<"$s1" || true)" == primary ]]
+}
+
+# deploy_restore_fw0_owns_all: deploy_restore_rg_on_fw0 holds for RG0-2.
+deploy_restore_fw0_owns_all() {
+	local rg
+	for rg in 0 1 2; do
+		deploy_restore_rg_on_fw0 "$rg" || return 1
+	done
+	return 0
+}
+
+# deploy_restore_healthy <took-s> <budget-s> <refusals>: a COMPLETED restore
+# is healthy only with no refused request and within the budget. Healthy
+# restores took 9-16s with one request per RG and no refusal (integ5,
+# 2026-10-29). A refusal or a slow restore is the #18521 class (a half-open
+# sync, an undischarged fence), the deferral this restore waits out.
+deploy_restore_healthy() {
+	local took="$1" budget="$2" refusals="$3"
+	((refusals == 0 && took <= budget))
+}
+
+# deploy_restore_fw0_primary <label> moves RG0-2 back to fw0 one RG at a
+# time, polls, and re-requests the yield from fw1 until RESTORE_FW0_WAIT
+# (default 60s) runs out. A single fixed sleep after three blind requests was
+# shorter than one admission window plus a post-restart bulk (~50
+# sessions/s), and swallowed the refusal that said why.
+#
+# Verdicts (exactly one per call):
+#   PASS  fw0 already owned every RG, or the restore completed with no
+#         refusal within RESTORE_FW0_BUDGET (default 30s). Returns 0.
+#   FAIL  "restored only after": restored, but a request was refused or it
+#         took longer than the budget. Returns 0, so the run continues on a
+#         restored cluster, but the run is not healthy.
+#   FAIL  "could not restore": RESTORE_FW0_WAIT ran out. Returns 1.
+# Both FAILs name the last refusal.
+deploy_restore_fw0_primary() {
+	local label="$1" deadline rg out last_err="" started=$SECONDS requests=0 refusals=0
+	local wait_s="${RESTORE_FW0_WAIT:-60}" budget="${RESTORE_FW0_BUDGET:-30}" took
+	if deploy_restore_fw0_owns_all; then
+		pass "$label: fw0 already primary"
+		return 0
+	fi
+	if [[ ! "$wait_s" =~ ^[0-9]+$ ]]; then
+		info "RESTORE_FW0_WAIT=$wait_s is not a whole number of seconds; using 60"
+		wait_s=60
+	fi
+	if [[ ! "$budget" =~ ^[0-9]+$ ]]; then
+		info "RESTORE_FW0_BUDGET=$budget is not a whole number of seconds; using 30"
+		budget=30
+	fi
+	for rg in 0 1 2; do
+		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
+	done
+	sleep 1
+	deadline=$((SECONDS + wait_s))
+	for rg in 0 1 2; do
+		while ! deploy_restore_rg_on_fw0 "$rg"; do
+			if ((SECONDS >= deadline)); then
+				break 2
+			fi
+			if deploy_restore_rg_on_fw1 "$rg"; then
+				out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
+				requests=$((requests + 1))
+				if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
+					refusals=$((refusals + 1))
+					last_err="RG$rg: $(head -1 <<<"$out")"
+				fi
+			fi
+			for _ in 1 2 3 4 5; do
+				deploy_restore_rg_on_fw0 "$rg" && break
+				sleep 1
+			done
+		done
+	done
+	if ! deploy_restore_fw0_owns_all; then
+		fail "$label: could not restore fw0 as primary within ${wait_s}s${last_err:+ (last refusal: $last_err)}"
+		return 1
+	fi
+	took=$((SECONDS - started))
+	if ! deploy_restore_healthy "$took" "$budget" "$refusals"; then
+		fail "$label: fw0 restored only after ${took}s (budget ${budget}s; ${requests} request(s), ${refusals} refused${last_err:+; last refusal: $last_err})"
+		return 0
+	fi
+	pass "$label: fw0 restored as primary in ${took}s (${requests} request(s), ${refusals} refused)"
+	return 0
+}
+
 # failover_ownership_verdict cross-references the two independent checks
 # test-failover.sh already performs, and is the #7368 half of the #6591 fix.
 #

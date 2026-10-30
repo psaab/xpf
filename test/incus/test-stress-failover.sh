@@ -38,6 +38,8 @@ xpf_enter_destructive_cluster_cell "test-stress-failover $*" "$0" "$@"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/deploy-lib.sh
+source "${SCRIPT_DIR}/deploy-lib.sh"
 # shellcheck source=test/incus/iperf-throughput-lib.sh
 source "${SCRIPT_DIR}/iperf-throughput-lib.sh"
 
@@ -113,21 +115,21 @@ done
 sleep 2
 
 # Ensure all RGs are on fw0
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 for rg in 0 1 2; do
-	rg_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
-	if [[ "$rg_primary" -ne 1 ]]; then
+	rg_primary=$(deploy_node_rg_role node0 "$rg" <<<"$fw0_status" || true)
+	if [[ "$rg_primary" != primary ]]; then
 		incus exec "$FW0" -- cli -c "request chassis cluster failover redundancy-group $rg node 0" 2>/dev/null || true
 	fi
 done
 sleep 3
 
 # Verify fw0 is primary for all RGs
-fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null)
+fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 all_primary=true
 for rg in 0 1 2; do
-	rg_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
-	if [[ "$rg_primary" -ne 1 ]]; then
+	rg_primary=$(deploy_node_rg_role node0 "$rg" <<<"$fw0_status" || true)
+	if [[ "$rg_primary" != primary ]]; then
 		all_primary=false
 	fi
 done
