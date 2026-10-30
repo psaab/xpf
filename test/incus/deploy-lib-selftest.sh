@@ -2481,6 +2481,60 @@ node1  100      secondary      no       no       None
 	fi
 }
 
+# #18523: in private-RG mode each node's own `Forwarding: rg-active=` line is
+# the forwarding authority. Missing, duplicated and wrong-RG lines fail.
+test_rg_local_forwarding_reader_18523() {
+	local fw1_view='Redundancy group: 1 , Failover count: 4
+node1  100      primary        no       no       None
+  Forwarding: rg-active=active vrrp-master=none
+node0  200      secondary-hold no       yes      None
+
+Redundancy group: 2 , Failover count: 3
+node1  100      secondary      no       no       None
+  Forwarding: rg-active=inactive vrrp-master=none
+node0  200      primary        no       no       None
+'
+	local dup='Redundancy group: 1 , Failover count: 1
+node0  200      primary        no       no       None
+  Forwarding: rg-active=active vrrp-master=none
+  Forwarding: rg-active=inactive vrrp-master=none
+'
+	if [[ $(printf '%s' "$fw1_view" | deploy_rg_local_forwarding 1) == active ]] &&
+		[[ $(printf '%s' "$fw1_view" | deploy_rg_local_forwarding 2) == inactive ]] &&
+		! printf '%s' "$fw1_view" | deploy_rg_local_forwarding 3 >/dev/null &&
+		! printf '%s' "$dup" | deploy_rg_local_forwarding 1 >/dev/null &&
+		! printf '%s' 'No VRRP groups configured' | deploy_rg_local_forwarding 1 >/dev/null; then
+		ok "RG forwarding reader: local rg-active per exact RG; missing/duplicate fail (#18523)"
+	else
+		bad "RG forwarding reader (#18523): exact-RG local rg-active contract failed"
+	fi
+}
+
+# #18523: guard the HARNESS lines, not only the library. The smokes must read
+# RG roles through the block-scoped readers (a `grep -A2 "Redundancy group`
+# window missed the peer row and aborted active-active), and the restore
+# check must consult BOTH nodes' own views (fw0's view alone scored a
+# dual-primary split as restored).
+test_ha_smokes_use_scoped_rg_readers_18523() {
+	local dir f bad_files=""
+	dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	for f in test-active-active.sh test-ha-crash.sh test-restart-connectivity.sh test-stress-failover.sh; do
+		if grep -q 'grep -A2 "Redundancy group' "$dir/$f"; then
+			bad_files+=" $f(grep-A2)"
+		fi
+	done
+	for f in test-ha-crash.sh test-restart-connectivity.sh; do
+		if ! awk '/^rg_on_fw0\(\) \{/,/^}/' "$dir/$f" | grep -q '"\$FW1"'; then
+			bad_files+=" $f(rg_on_fw0-one-view)"
+		fi
+	done
+	if [[ -z "$bad_files" ]]; then
+		ok "HA smokes read RG rows through scoped readers and restore checks both views (#18523)"
+	else
+		bad "HA smokes regressed (#18523):$bad_files"
+	fi
+}
+
 test_dual_active_committed_rows() {
 	local allp='0=primary 1=primary 2=primary'
 	local alls='0=secondary 1=secondary 2=secondary'
@@ -2551,6 +2605,8 @@ test_dual_active_smoke_site_pins() {
 }
 test_dual_active_scoped_reader
 test_rg_role_reader_skips_local_sublines_18523
+test_rg_local_forwarding_reader_18523
+test_ha_smokes_use_scoped_rg_readers_18523
 test_dual_active_committed_rows
 test_dual_active_retired_grep_counterfactual
 test_dual_active_smoke_site_pins

@@ -119,8 +119,8 @@ sleep 2
 # Ensure all RGs are on fw0 (request peer failover if needed)
 fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 for rg in 0 1 2; do
-	rg_primary=$(echo "$fw0_status" | grep -A2 "Redundancy group: $rg" | grep "node0" | grep -c "primary" || true)
-	if [[ "$rg_primary" -ne 1 ]]; then
+	rg_primary=$(deploy_node_rg_role node0 "$rg" <<<"$fw0_status" || true)
+	if [[ "$rg_primary" != primary ]]; then
 		incus exec "$FW0" -- cli -c "request chassis cluster failover redundancy-group $rg node 0" 2>/dev/null || true
 	fi
 done
@@ -202,16 +202,28 @@ else
 	fail "RG2 unexpectedly moved (node0 state: $rg2_node0)"
 fi
 
-# Verify VRRP states match cluster state. The compiler default since #12173
-# is private-RG election with RETH VRRP suppressed, where the CLI prints
-# "No VRRP groups configured" and the RG rows above are the authority
-# (#18523: the old greps found no "101" row, and `set -euo pipefail`
-# aborted the smoke here, before any traffic verdict).
-fw0_vrrp=$(incus exec "$FW0" -- cli -c 'show security vrrp' 2>/dev/null || true)
+# Verify the forwarding owner matches the RG split. In private-RG mode (the
+# compiler default since #12173, RETH VRRP suppressed) each node's own
+# `Forwarding: rg-active=` line is the authority (#18523); a node with no such
+# line runs legacy VRRP-backed RETHs and is checked through VRRP instead.
+# Every read is guarded: a missing line is a FAIL, never a `set -e` abort.
+fwd_rg1_fw0=$(deploy_rg_local_forwarding 1 <<<"$fw0_status" || true)
+fwd_rg1_fw1=$(deploy_rg_local_forwarding 1 <<<"$fw1_status" || true)
+fwd_rg2_fw0=$(deploy_rg_local_forwarding 2 <<<"$fw0_status" || true)
 
-if grep -qi "No VRRP groups configured" <<<"$fw0_vrrp"; then
-	info "RETH VRRP suppressed (private-RG election); RG ownership above is the authority"
+if [[ -n "$fwd_rg1_fw0$fwd_rg1_fw1$fwd_rg2_fw0" ]]; then
+	if [[ "$fwd_rg1_fw0" == inactive && "$fwd_rg1_fw1" == active ]]; then
+		pass "RG1 (WAN) forwarding moved to fw1 (fw0 rg-active=inactive, fw1 rg-active=active)"
+	else
+		fail "RG1 (WAN) forwarding not on fw1 (fw0 rg-active=${fwd_rg1_fw0:-missing}, fw1 rg-active=${fwd_rg1_fw1:-missing})"
+	fi
+	if [[ "$fwd_rg2_fw0" == active ]]; then
+		pass "RG2 (LAN) forwarding stayed on fw0 (rg-active=active)"
+	else
+		fail "RG2 (LAN) forwarding not on fw0 (fw0 rg-active=${fwd_rg2_fw0:-missing})"
+	fi
 else
+	fw0_vrrp=$(incus exec "$FW0" -- cli -c 'show security vrrp' 2>/dev/null || true)
 	vrrp_101=$(grep "101" <<<"$fw0_vrrp" | head -1 || true)
 	vrrp_102=$(grep "102" <<<"$fw0_vrrp" | head -1 || true)
 

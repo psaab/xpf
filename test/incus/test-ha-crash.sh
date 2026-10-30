@@ -142,7 +142,7 @@ fw1_is_primary() {
 	local status
 	status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 	for rg in 0 1 2; do
-		if ! echo "$status" | grep -A2 "Redundancy group: $rg" | grep -q "node1.*primary"; then
+		if [[ "$(deploy_node_rg_role node1 "$rg" <<<"$status" || true)" != primary ]]; then
 			return 1
 		fi
 	done
@@ -311,7 +311,17 @@ restore_fw0_primary() {
 		# #18523: the elapsed time and refusal count are part of the verdict;
 		# a bare PASS after a long polled retry would hide exactly the
 		# deferral (a half-open sync, a fence) this restore is waiting out.
-		pass "$label: fw0 restored as primary in $((SECONDS - started))s (${requests} request(s), ${refusals} refused${last_err:+; last refusal: $last_err})"
+		local took=$((SECONDS - started)) budget="${RESTORE_FW0_BUDGET:-30}"
+		[[ "$budget" =~ ^[0-9]+$ ]] || budget=30
+		if ((refusals > 0 || took > budget)); then
+			# Restored, so the run continues, but a refused or slow restore is
+			# the #18521 class (half-open sync, an undischarged fence) and
+			# must not read as healthy. Healthy restores take 9-16s with one
+			# request per RG and no refusal (integ5, 2026-10-29).
+			fail "$label: fw0 restored only after ${took}s (budget ${budget}s; ${requests} request(s), ${refusals} refused${last_err:+; last refusal: $last_err})"
+			return 0
+		fi
+		pass "$label: fw0 restored as primary in ${took}s (${requests} request(s), ${refusals} refused)"
 		return 0
 	else
 		fail "$label: could not restore fw0 as primary within ${wait}s${last_err:+ (last refusal: $last_err)}"

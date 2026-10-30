@@ -851,6 +851,24 @@ deploy_node_rg_role() {
 	'
 }
 
+# deploy_rg_local_forwarding reads `show chassis cluster status` on stdin and
+# prints the LOCAL node's `rg-active=` value (active / inactive) for
+# redundancy group <rg>. In private-RG mode (the compiler default, #12173)
+# each node prints one `Forwarding: rg-active=<v> vrrp-master=<v>` line under
+# its own row; that line, not VRRP, says which node forwards the RG. It
+# succeeds ONLY IF exactly one such line exists inside the exact
+# `Redundancy group: <rg>` block (#18523).
+deploy_rg_local_forwarding() {
+	local want="${1:?deploy_rg_local_forwarding: rg required}"
+	awk -v want="$want" '
+		/^Redundancy group:[[:space:]]/ { rg = $3; next }
+		rg != "" && ("x" rg) == ("x" want) && $1 == "Forwarding:" {
+			for (i = 2; i <= NF; i++) if ($i ~ /^rg-active=/) { v = substr($i, 11); n++ }
+		}
+		END { if (n != 1 || v == "") exit 1; print v }
+	'
+}
+
 # failover_ownership_verdict cross-references the two independent checks
 # test-failover.sh already performs, and is the #7368 half of the #6591 fix.
 #
