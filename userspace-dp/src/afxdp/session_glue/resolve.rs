@@ -498,7 +498,26 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         } else {
             None
         };
-        let deferred_synced_purge = if keep_transient {
+        // #18531: never purge on a fabric-link arrival. This removes the purge
+        // from its ORIGINAL population: it was introduced for fabric arrivals
+        // (75965fb3ff, predicate `ingress_is_fabric && synced && translated`)
+        // and widened to direct arrivals by 8ea4d780eb; #6599 later showed the
+        // purge-and-re-enter path is abusable by a spoofed direct packet.
+        // A translated forward packet the peer redirected over the fabric
+        // means the peer is handing the egress RG to this node: ownership is
+        // in transit (the RG-taking node's window between the peer's demotion
+        // and this node's activation). Purging removed the forward-wire alias
+        // of a live flow with no Close; where it was this node's only copy,
+        // the first packet after activation missed and the flow died.
+        // Why holding is safe: the row stays transient (not materialized),
+        // and the packet still takes its HA disposition. That is a drop (a
+        // fabric arrival is never redirected back) or, for a #16217 adopted
+        // hit, the adopted local candidate. The owner's Close or the row's
+        // idle timeout reclaims a held row. When this node owns the RG,
+        // nothing is held: `should_keep_synced_hit_transient` requires the
+        // owner RG to be inactive here. The purge of a translated hit that
+        // arrives DIRECTLY on a non-owner is unchanged.
+        let deferred_synced_purge = if keep_transient && !fabric_link_ingress {
             poison_key.map(|(key, decision, metadata, origin)| DeferredSyncedPurge {
                 key: key.clone(),
                 decision,
@@ -600,6 +619,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             now_secs,
             &resolved.decision,
             &resolved.metadata,
+            resolved_key,
             resolution_target,
             looked_up_resolution,
             super::FabricArrival::Packet {
@@ -686,14 +706,12 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
                     };
                 let invalidate_policy_revalidation = previous_policy_to_zone_id
                     .is_some_and(|previous| previous != policy_to_zone_id);
-                let owner_rg_id = matches!(
-                    decision.resolution.disposition,
-                    ForwardingDisposition::ForwardCandidate
-                        | ForwardingDisposition::FabricRedirect
-                        | ForwardingDisposition::HAInactive
-                        | ForwardingDisposition::LocalDelivery
-                )
-                .then(|| owner_rg_for_resolution(forwarding, decision.resolution));
+                // #18531: a FabricRedirect keeps the recorded owner RG
+                // (the fabric parent names none); see the helper.
+                let owner_rg_id = crate::afxdp::forwarding::persisted_owner_rg_for_resolution(
+                    forwarding,
+                    decision.resolution,
+                );
                 // #14318: only a locally-forwarding route (or the recorded
                 // zone behind a fabric redirect, already in policy_to_zone_id)
                 // names the flow's new egress zone. Terminal routes do not.
@@ -864,6 +882,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         now_secs,
         &resolved.decision,
         &resolved.metadata,
+        &flow.forward_key,
         resolution_target,
         looked_up_resolution,
         super::FabricArrival::Packet {

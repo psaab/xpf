@@ -1,4 +1,38 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Userspace dataplane: a peer-synced flow's original-tuple row now wins
+    the import over its forward-wire alias (neither the alias nor a local
+    promotion of it books the translation; the alias is refused, under its
+    own superseded-alias reason, while its original row is held, and is
+    retired when that row arrives), so a node no longer ends up holding a
+    flow only as the alias and losing it when the LAN side fails over to it
+    (#18531).
+  * Userspace dataplane: a peer delete of a flow's translated tuple now
+    removes this node's original-tuple row of the same flow, so a WAN
+    owner holding only the alias still revokes the LAN node's copy and
+    its withdrawn translation (#18531).
+  * Userspace dataplane: the reverse of a forward-wire alias (whose un-NAT
+    names the SNAT address itself) is handed to the peer over the fabric
+    instead of resolving to local delivery when that address becomes local
+    at an RG activation, so its replies no longer trip the host-inbound
+    gate and tear the flow down (#18531).
+  * Userspace dataplane: the node taking the WAN RG no longer purges the
+    translated alias of a live flow when the peer fabric-redirects it
+    during an RG ownership gap, and on such a fabric arrival the live
+    HA-inactive resolution is judged and declined instead of the stored
+    import-time one (#18531, #18535).
+  * Userspace dataplane: keep SNAT sessions through an RG ownership gap
+    at split-RG failback: the node taking the WAN RG no longer revokes
+    imported flows before it activates, a redirected row keeps its
+    egress RG, and the live egress is judged when the RG returns
+    (#18531).
+  * Userspace dataplane: keep established SNAT flows across a split-RG
+    failback. The source-NAT revalidation decline for a stored
+    FabricRedirect resolution now applies to locally-authored rows too
+    (#18531).
+  * Test: deb deploy removes stale raw-deploy /etc copies of xpfd.service
+    and the boot-barrier units that shadowed the packaged units
+    (KillMode=control-group on loss/tcp), daemon-reloads and asserts each
+    loaded unit is the packaged file, rolling back otherwise (#18544).
   * Userspace dataplane: wake the helper's socket accept loops on a pending
     connection instead of sleeping the poll interval, so HA bulk session
     installs no longer pay ~10 ms per session-socket request (#18541).

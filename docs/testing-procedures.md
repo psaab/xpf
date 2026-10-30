@@ -2,6 +2,10 @@
 
 ## Quick Reference
 
+The pre-merge and merge-wave checklist for forwarding, performance and HA
+changes is `docs/regression-test-matrix.md`. This page describes how to run
+each harness.
+
 | Test | Command | Duration | When to Run |
 |------|---------|----------|-------------|
 | Unit tests (Go + Rust) | `make test` | ~minutes | Every code change |
@@ -12,6 +16,7 @@
 | Hard crash | `make test-ha-crash` | ~120s | Cluster state machine changes |
 | Private RG | `./test/incus/test-private-rg.sh` | varies; three raw deploys for `full` | Private RG election changes |
 | Restart | `make test-restart-connectivity` | ~30s | Shutdown/startup changes |
+| Throughput and stall matrix | `make perf-matrix` (`make perf-matrix-lib` hermetic) | ~10 min | Dataplane/forwarding changes; every merge wave (regression matrix F2/F6) |
 
 ## Test Categories
 
@@ -239,6 +244,20 @@ reunification. The split itself is scored from both nodes' own
 **Issue:** `XPF_DEPLOY_FAST=1 make cluster-deploy` (raw path) pushes `xpf.conf` but the daemon loads from the configstore DB (`active.json`). Config changes in `xpf.conf` are ignored on subsequent deploys. (Since #9486 the default deb deploy preserves node config and never pushes `xpf.conf` — this issue cannot occur there.)
 **Fix:** Deploy script now clears `.configdb/` after pushing config (fixed in `cluster-setup.sh`, raw path).
 **Workaround:** Manually run `rm -rf /etc/xpf/.configdb` on VMs before restart.
+
+### HA restart/stop results distorted by a stale `/etc` xpfd unit (#18544)
+**Issue:** On a node that was raw-deployed even once,
+`/etc/systemd/system/xpfd.service` (and the two boot-barrier units next to
+it) shadows the packaged unit. Before #18544 the deb deploy never removed it. `systemctl show xpfd -p FragmentPath -p KillMode`
+then reports the `/etc` path and, on old copies, `KillMode=control-group`.
+systemd kills the userspace helper at SIGTERM, and xpfd's shutdown cannot
+clear `rg_active`. That distorts every restart/stop HA measurement (#18540).
+**Fix:** The deb deploy removes the shadows, daemon-reloads, and asserts the
+packaged units are loaded before the cut (`deploy_reconcile_unit_shadows`,
+`docs/test_env.md`). The fix reaches a
+cluster on its next `make cluster-deploy`. Before you trust restart/stop
+numbers from a node, check that `FragmentPath` is under
+`/usr/lib/systemd/system`.
 
 ### IPv6 SNAT requires explicit ::/0 rule
 **Issue:** SNAT rule `source-address 0.0.0.0/0` only matches IPv4. IPv6 traffic passes without SNAT, causing return path failures if the upstream lacks a route to the internal prefix.
