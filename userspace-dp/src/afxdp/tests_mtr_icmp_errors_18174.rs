@@ -522,25 +522,37 @@ fn snat_redirect_quoting_live_probe_stays_policy_gated_18174() {
 /// the ordinary unmatched-error path refuses it.
 #[test]
 fn pre_nat_quote_off_fabric_is_not_related_18174() {
-    let forwarding = build_forwarding_state(&nat_snapshot());
-    let f = Family::V4;
-    let neighbors = neighbors_with_client(&forwarding, f);
-    let mut sessions = SessionTable::new();
-    let (qsrc, _qid) = run_probe(&mut sessions, &forwarding, &neighbors, f, Probe::Echo);
-    assert_ne!(qsrc, client(f), "premise: the probe was source-NATed");
-    // Outer dst = client, quote = the PRE-NAT probe, arriving on the WAN.
-    let (frame, meta) = error_frame(f, Probe::Echo, ErrKind::TimeExceeded, hop(f), client(f), PROBE_ECHO_ID);
-    let mut wan = binding_on(WAN_IF);
-    let (_b, dbg) =
-        txn_run_descriptor_with_neighbors(&mut wan, &mut sessions, &forwarding, &ha(true, true), &frame, meta, &neighbors);
-    assert!(
-        wan.scratch.scratch_forwards.is_empty(),
-        "a pre-NAT quote off the fabric must not be admitted as RELATED \
-         (RED when the fabric-ingress guard is dropped: the forward-NAT arm \
-         matches it and the RELATED rule queues it to the LAN host)"
-    );
-    assert_eq!(wan.scratch.scratch_recycle.len(), 1, "the refused descriptor is recycled");
-    assert_eq!(dbg.ha_inactive, 0, "the refusal is not an HA verdict (both RGs are active)");
+    // v4 and v6: each family's forward-NAT arm carries its own copy of the
+    // fabric-ingress guard (`nat_match_v4.rs` / `nat_match_v6.rs`).
+    for f in [Family::V4, Family::V6] {
+        let label = format!("{f:?}");
+        let forwarding = build_forwarding_state(&nat_snapshot());
+        let neighbors = neighbors_with_client(&forwarding, f);
+        let mut sessions = SessionTable::new();
+        let (qsrc, _qid) = run_probe(&mut sessions, &forwarding, &neighbors, f, Probe::Echo);
+        assert_ne!(qsrc, client(f), "{label}: premise: the probe was source-NATed");
+        // Outer dst = client, quote = the PRE-NAT probe, arriving on the WAN.
+        let (frame, meta) =
+            error_frame(f, Probe::Echo, ErrKind::TimeExceeded, hop(f), client(f), PROBE_ECHO_ID);
+        let mut wan = binding_on(WAN_IF);
+        let (_b, dbg) = txn_run_descriptor_with_neighbors(
+            &mut wan,
+            &mut sessions,
+            &forwarding,
+            &ha(true, true),
+            &frame,
+            meta,
+            &neighbors,
+        );
+        assert!(
+            wan.scratch.scratch_forwards.is_empty(),
+            "{label}: a pre-NAT quote off the fabric must not be admitted as RELATED \
+             (RED when the fabric-ingress guard is dropped: the forward-NAT arm \
+             matches it and the RELATED rule queues it to the LAN host)"
+        );
+        assert_eq!(wan.scratch.scratch_recycle.len(), 1, "{label}: the refused descriptor is recycled");
+        assert_eq!(dbg.ha_inactive, 0, "{label}: the refusal is not an HA verdict (both RGs are active)");
+    }
 }
 
 // ---- HA ------------------------------------------------------------------
@@ -840,9 +852,10 @@ fn split_rg_after_establishment_synced_import_reaches_lan_host_18174() {
 /// fabric build would decrement and refuse it, and node0 skips the decrement
 /// on fabric ingress. Live on tcp every TTL-1 probe ended as
 /// `fabric_redirect_build_failed` on fw1 and mtr hop 1 read `???`. The answer
-/// must leave the LAN unit sourced from its own address. RED on revert of the
-/// FabricRedirect TTL check in the poll tail (the request is a FabricRedirect
-/// live forward instead).
+/// must leave the LAN unit sourced from its own address, and the probe must not
+/// leave a punt-seed session behind. RED on revert of the FabricRedirect TTL
+/// check in the poll tail (the request is a FabricRedirect live forward
+/// instead) and of the seed skip (one seed row).
 #[test]
 fn split_rg_hop_one_time_exceeded_is_answered_by_lan_owner_18174() {
     let n1_fwd = build_forwarding_state(&peer_snapshot());
@@ -856,6 +869,10 @@ fn split_rg_hop_one_time_exceeded_is_answered_by_lan_owner_18174() {
             1,
             "{label}: the expiring probe must produce exactly one reply"
         );
+        // The probe never leaves this node, so it must not leave a #7770
+        // punt seed (a session row and an HA sync) behind either — the
+        // FabricRedirect twin of the #14643 ForwardCandidate rollback.
+        assert_eq!(sessions.len(), 0, "{label}: an expiring split-RG probe installs no session");
         let te = &lan.scratch.scratch_forwards[0];
         assert_ne!(
             te.decision.resolution.disposition,
@@ -970,3 +987,227 @@ fn hop_one_time_exceeded_is_sourced_from_lan_address_not_reth_link_local_18174()
     }
 }
 
+
+// ---- cross-worker: the split-RG first error on another worker ------------
+
+/// One node's shared maps — what every worker of that node sees.
+struct NodeShared {
+    sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    nat: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    wire: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    owner_idx: SharedSessionOwnerRgIndexes,
+}
+
+impl NodeShared {
+    fn new() -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(FastMap::default())),
+            nat: Arc::new(Mutex::new(FastMap::default())),
+            wire: Arc::new(Mutex::new(FastMap::default())),
+            owner_idx: SharedSessionOwnerRgIndexes::default(),
+        }
+    }
+}
+
+/// `txn_run_descriptor_with_neighbors` with the node's shared maps held by
+/// the caller, so a second worker (its own `SessionTable`) sees exactly what
+/// the first worker published.
+#[expect(clippy::too_many_arguments, reason = "test driver mirrors the poll entry point")]
+fn run_on_worker(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    neighbors: &Arc<ShardedNeighborMap>,
+    shared: &NodeShared,
+) -> (BatchCounters, DebugPollCounters) {
+    let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+    let frame_offset = 128;
+    let meta_offset = frame_offset - meta_len;
+    let meta_bytes = unsafe {
+        std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+    };
+    unsafe {
+        binding.umem.area().slice_mut_unchecked(meta_offset, meta_len).expect("meta slice").copy_from_slice(meta_bytes);
+        binding.umem.area().slice_mut_unchecked(frame_offset, frame.len()).expect("frame slice").copy_from_slice(frame);
+    }
+    binding.xsk.rx.push_for_test(XdpDesc { addr: frame_offset as u64, len: frame.len() as u32, options: 0 });
+    let ident = binding.identity();
+    let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(binding));
+    let mirror_targets = MirrorTargetMap::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let local_tunnel_deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let pptp = std::sync::Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let worker_ctx = WorkerContext {
+        pptp_control: &pptp,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding,
+        ha_state,
+        forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
+        dynamic_neighbors: neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared.sessions,
+        shared_nat_sessions: &shared.nat,
+        shared_forward_wire_sessions: &shared.wire,
+        shared_owner_rg_indexes: &shared.owner_idx,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: None,
+        local_tunnel_deliveries: &local_tunnel_deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext { dbg: &mut dbg, counters: &mut batch };
+    let area_handle = UmemAreaHandle::from_umem(&binding.umem);
+    poll_binding_process_descriptor(
+        binding,
+        0,
+        &area_handle,
+        1,
+        sessions,
+        &mut screen,
+        ValidationState { snapshot_installed: true, config_generation: 7, fib_generation: 9, neighbor_generation: 0 },
+        123_000_000_000,
+        123,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+    );
+    assert_eq!(dbg.rx, 1, "premise: the descriptor reached the poll body");
+    (batch, dbg)
+}
+
+/// Live split shape, but the hop's error reaches the LAN owner on a DIFFERENT
+/// worker than the one whose LAN queue saw the probe (RSS hashes the fabric
+/// frame independently): that worker's own table is empty and only the node's
+/// shared maps can match it. Live on tcp/udp this was the residual — the first
+/// error of every new session (every UDP probe) default-denied `wan -> lan` on
+/// node1 before HA sync landed. Proven here: worker A holds the #7770
+/// `FabricPuntSeed` locally, the node's shared maps stay empty by design
+/// (`SessionOrigin::is_transient_local_seed`), and worker B's matcher returns
+/// NoMatch. Tracked by #18562; this cell is the acceptance test for it.
+#[test]
+#[ignore = "#18562: the #7770 punt seed is worker-local, so the first error on another worker returns NoMatch; un-ignore with the fix"]
+fn split_rg_first_error_on_another_worker_reaches_lan_host_18174() {
+    for (f, probe) in SPLIT_CASES {
+        let label = format!("cross-worker split {f:?} {probe:?}");
+        // node1, worker A: the LAN probe.
+        let n1_fwd = build_forwarding_state(&peer_snapshot());
+        let n1_neighbors = neighbors_with_client(&n1_fwd, f);
+        let n1_shared = NodeShared::new();
+        let mut n1_worker_a = SessionTable::new();
+        let (frame, meta) = probe_frame(f, probe, 5);
+        let mut lan = binding_on(LAN_IF);
+        run_on_worker(&mut lan, &mut n1_worker_a, &n1_fwd, &ha(false, true), &frame, meta, &n1_neighbors, &n1_shared);
+        assert_eq!(
+            lan.scratch.scratch_forwards[0].decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "{label}: premise: node1 hands the probe to the WAN owner"
+        );
+        // node0: fabric-ingress probe, then the hop's error (its own leg is
+        // proven by the live-shape cell).
+        let n0_fwd = build_forwarding_state(&nat_snapshot_with_fabric());
+        let n0_neighbors = neighbors_with_client(&n0_fwd, f);
+        let mut n0_sessions = SessionTable::new();
+        let (pframe, pmeta) = fabric_probe_frame(f, probe);
+        let mut fab0 = binding_on(FABRIC_IF);
+        txn_run_descriptor_with_neighbors(&mut fab0, &mut n0_sessions, &n0_fwd, &ha(true, false), &pframe, pmeta, &n0_neighbors);
+        let nat = fab0.scratch.scratch_forwards[0].decision.nat;
+        let ident = if probe == Probe::Echo { PROBE_ECHO_ID } else { PROBE_UDP_SPORT };
+        let xlate = (nat.rewrite_src.expect("premise: node0 source-NATs"), nat.rewrite_src_port.unwrap_or(ident));
+        let fabric_frame = wan_owner_error_leg(&mut n0_sessions, &n0_fwd, &n0_neighbors, f, probe, xlate, &label);
+
+        // node1, worker B: the reversed error, own table empty.
+        let mut n1_worker_b = SessionTable::new();
+        let emeta = meta_for(f, FABRIC_IF, 14, if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 }, fabric_frame.len());
+        let mut fab1 = binding_on(FABRIC_IF);
+        let (batch, dbg) =
+            run_on_worker(&mut fab1, &mut n1_worker_b, &n1_fwd, &ha(false, true), &fabric_frame, emeta, &n1_neighbors, &n1_shared);
+        assert_eq!(batch.invalid_fabric_stamp_drops, 0, "{label}: stamp accepted");
+        assert_eq!(dbg.policy_deny, 0, "{label}: the first error must not be default-denied on another worker");
+        assert_eq!(fab1.scratch.scratch_forwards.len(), 1, "{label}: delivered to the LAN host from worker B");
+        assert_delivered_to_lan_host(&fab1.scratch.scratch_forwards[0], f, probe, ErrKind::TimeExceeded, hop(f), &label);
+    }
+}
+
+
+/// Defect 3 also moves interface source NAT: the SNAT matcher
+/// (`forwarding/nat.rs`) translates an interface-mode rule to
+/// `egress.primary_v4/v6` of the egress unit. On the RETH shape (base row with
+/// only the per-node `169.254.<rg>.<node+1>/32` and fe80, unit row with the LAN
+/// address) an interface SNAT toward that unit handed out the per-node
+/// link-local — unroutable, and different on each node. Driven through the
+/// matcher itself (the same `match_source_nat_for_flow` the #9956 scope cells
+/// use) for a `wan -> lan` interface rule, v4 and v6. RED on revert of
+/// `merge_undesignated_primary` (v4: 169.254.2.1, v6: fe80::bf72:16:2).
+#[test]
+fn interface_snat_toward_reth_unit_uses_unit_address_18174() {
+    let mut snapshot = reth_base_row_snapshot();
+    for (name, any) in [("wan-lan-snat", "0.0.0.0/0"), ("wan-lan-snat6", "::/0")] {
+        snapshot.source_nat_rules.push(crate::SourceNATRuleSnapshot {
+            name: name.to_string(),
+            from_zone: "wan".to_string(),
+            to_zone: "lan".to_string(),
+            source_addresses: vec![any.to_string()],
+            interface_mode: true,
+            ..Default::default()
+        });
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    for f in [Family::V4, Family::V6] {
+        let src = hop(f);
+        let dst = client(f);
+        let flow = SessionFlow {
+            src_ip: src,
+            dst_ip: dst,
+            forward_key: SessionKey {
+                addr_family: if f == Family::V4 { libc::AF_INET as u8 } else { libc::AF_INET6 as u8 },
+                protocol: PROTO_UDP,
+                src_ip: src,
+                dst_ip: dst,
+                src_port: 40001,
+                dst_port: 33434,
+                discriminator: Default::default(),
+                routing_domain: 0,
+            },
+        };
+        let nat = crate::afxdp::forwarding::match_source_nat_for_flow(
+            &forwarding,
+            WAN_IF,
+            WAN_VID,
+            None,
+            "wan",
+            "lan",
+            LAN_IF,
+            &flow,
+        )
+        .expect("premise: the wan -> lan interface rule matches");
+        let want = match f {
+            Family::V4 => IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1)),
+            Family::V6 => IpAddr::V6("2001:559:8585:ef00::1".parse().unwrap()),
+        };
+        assert_eq!(
+            nat.rewrite_src,
+            Some(want),
+            "{f:?}: interface SNAT toward the RETH unit must use the unit address, not the per-node link-local"
+        );
+    }
+}

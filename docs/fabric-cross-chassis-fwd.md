@@ -1677,3 +1677,36 @@ zone shares its low 16 bits, as that receiver zone. A zone whose id has low 16
 bits 0 cannot be stamped at all; the build logs both cases. V2 NAT-scope
 stamps already carried a 24-bit scope id resolved to a full-width identity and
 are unchanged.
+
+## ICMP errors and expiring probes across a split (#18174)
+
+With the LAN RG on one node and the WAN RG on the other, traceroute/mtr
+crosses the fabric twice, and three rules keep it working:
+
+- **The redirecting node is the hop.** A transit packet that the LAN owner
+  hands to the WAN owner is still routed by the LAN owner: the fabric build
+  decrements TTL / hop limit and refuses an expiring packet, and the WAN owner
+  skips the decrement on fabric ingress. So the poll tail
+  (`poll_descriptor/mod.rs`, the FabricRedirect TTL check before the #9950
+  overlap record) answers a non-fabric, non-injected FabricRedirect whose TTL
+  would expire with a local Time Exceeded from the ingress unit, and the #7770
+  punt-seed sites install no seed for it.
+- **An error crosses the fabric stamped with the zone it arrived in.** The WAN
+  owner matches the hop's error to its own (fabric-ingress) row, whose reverse
+  half is a "fabric return" FabricRedirect stamped with the FORWARD ingress
+  zone (`lan`). `restamp_embedded_fabric_redirect`
+  (`poll_descriptor/embedded_icmp.rs`) re-stamps the embedded error's redirect
+  with its actual arrival zone (`wan`), so the LAN owner's RELATED check
+  (expected: the quoted session's forward egress zone) holds and a forged
+  error still faces that zone's policy.
+- **The LAN owner matches an already-reversed quote, on fabric ingress only.**
+  The frame it receives already names the client (outer destination and quote
+  in pre-NAT form), so it hits the forward session's canonical reply alias; the
+  #14665 outer-destination gate in `icmp_embed/nat_match_v4.rs` /
+  `nat_match_v6.rs` accepts the quoted pre-NAT source as the outer destination
+  only when `FABRIC_INGRESS_FLAG` is set. The same bytes arriving on the WAN
+  stay unmatched (`pre_nat_quote_off_fabric_is_not_related_18174`).
+
+Open: the #7770 punt seed is worker-local, so the first error of a new split
+flow that lands on a different worker of the LAN owner before the WAN owner's
+HA delta is imported returns NoMatch (#18562).

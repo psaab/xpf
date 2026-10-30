@@ -8355,11 +8355,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // else-if chain would skip after conversion).
                             // Install the punt seed judged on the
                             // pre-redirect disposition.
+                            // #18174: never for a packet whose TTL / hop limit
+                            // expires here — the poll tail answers it with a
+                            // local Time Exceeded instead of redirecting it, so
+                            // a seed would only leave a session row (and an HA
+                            // sync) for a flow that never left this node, the
+                            // FabricRedirect twin of the #14643 rollback the
+                            // ForwardCandidate miss path performs.
                             if should_seed_fabric_punt(
                                 seed_pre_disposition,
                                 packet_fabric_ingress,
                                 decision.nat,
-                            ) {
+                            ) && !matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                            {
                                 let seed_owner_rg = owner_rg_id;
                                 if let Some(seed_metadata) = fabric_punt_seed_metadata(
                                     worker_ctx.forwarding,
@@ -8503,7 +8511,8 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             decision.resolution.disposition,
                             packet_fabric_ingress,
                             decision.nat,
-                        ) {
+                        ) && !matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                        {
                             // #7770: PUNT SEED. This flow is about to cross the
                             // fabric because the peer owns its egress RG, and it
                             // is leaving here UNADJUDICATED — the session-miss

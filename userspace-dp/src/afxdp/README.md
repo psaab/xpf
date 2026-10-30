@@ -172,6 +172,18 @@ sync.
         lets a non-link-local pick replace a link-local incumbent; between
         two non-link-local (or two link-local) undesignated picks the first
         row still wins, and a designated primary (#16513) still beats both.
+        `primary_v4/v6` is not only the generated-error source: on an
+        untagged RETH unit every consumer below flips from the per-node
+        `169.254.<rg>.<node+1>` / fe80 address to the unit address — interface
+        source NAT toward that unit (`forwarding/nat.rs`), the WireGuard outer
+        source (`frame/wg.rs`), ingress-interface local delivery
+        (`forwarding/local_delivery.rs`), the fabric owner-RG gate for local
+        addresses (`forwarding/fabric.rs::owner_rg_for_local_address`) and the
+        peer-import translated-address check (`ha/session_import.rs`). Each was
+        reading an unroutable, per-node address there (interface SNAT handed
+        it out as a translation), so this is the intended identity; the
+        169.254 address is still delivered locally through the FIB local route.
+        Cell: `interface_snat_toward_reth_unit_uses_unit_address_18174`.
         Cells: `shared_ifindex_reth_base_link_local_does_not_shadow_unit_address_18174`
         (`forwarding_build/primary_address_15155.rs`) and
         `hop_one_time_exceeded_is_sourced_from_lan_address_not_reth_link_local_18174`
@@ -1021,7 +1033,14 @@ sync.
     skips the decrement on fabric ingress, so nobody answered. The poll
     tail now answers a non-fabric, non-injected FabricRedirect whose TTL /
     hop limit would expire with a local Time Exceeded (the flow-cache hit
-    path already did, #3779). Cells:
+    path already did, #3779), and both #7770 punt-seed sites skip the seed
+    for such a packet so it leaves no session row or HA sync behind (the
+    FabricRedirect twin of the #14643 ForwardCandidate rollback). Residual,
+    tracked by #18562: the punt seed is worker-local by design, so the FIRST
+    error of a new split flow that lands on another worker of the LAN owner
+    (before the WAN owner's HA delta is imported) still returns NoMatch and
+    is default-denied (`split_rg_first_error_on_another_worker_..._18174`,
+    ignored until #18562). Cells:
     `split_rg_live_shape_time_exceeded_reaches_lan_host_18174` (node1's own
     LAN-created row, node0's fabric-ingress row, both via the poll path),
     `split_rg_after_establishment_synced_import_reaches_lan_host_18174`
