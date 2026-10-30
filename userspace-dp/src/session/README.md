@@ -706,7 +706,7 @@ The relay carries the two transitions a single worker would have made itself:
 |---|---|---|
 | `Promoted` | `note_tcp_seq_scaled` on an admitted SYN-ACK that just promoted a pair split across workers (replica origin or relayed marker); targets the author worker named by the forward session id when it is on this node | the receiver's pair is pure Opening, the relayed SYN-ACK ack equals ITS client SYN end (`tcp_peer_ack_end`, #16042), same forward session id, and the pair serves traffic here. Sets `established && handshake_pending` (the #6752 opening-class gap) and seeds the reverse half's `tcp_peer_ack_end` with the server SYN end, so a bare completing ACK is validated exactly as on a single worker. A DATA segment completes a pending pair through the #16223 companion arm, which checks no ack — on a relayed pair exactly as on a single worker (#18528). |
 | `Completed` | `emit_session_state_update_inner` on a transition INTO Established of a split pair — the single choke point every packet-driven completion publishes through, so a deferred cache-hit completion relays only after TX admission, exactly like its HA Update; fans out to every sibling | the receiver's pair is already handshake-pending — a SYN-ACK was seen on it (validated, for a SYN-first pair; the installing segment itself, for a SYN-ACK-first pickup) — same session id, serving. Never applied to a pure Opening pair (#6752/#13679). |
-| `Closed` | the same choke point on a close-CLASS transition (first FIN, second FIN, RST) of a split pair, carrying the pair's close bits (RST, FIN forward, FIN reverse); fans out to every sibling | same session id, serving. ORs the bits into both halves exactly as a local FIN/RST stamps them, puts them on the shared close window (`tcp_close_window_for_entry`: 2 s RST, closing, TIME_WAIT once one FIN per direction has been seen on ANY worker) and re-stamps from now (close progress, #10885); a relay that adds nothing changes nothing. Whatever a relay can establish, a relay can close: before it, a server RST that RSS delivered only to B left A's relay-established authoritative row Established for 1800 s, pinning its SNAT port, slot and limit-session count (a replica's close announces only to the HA peer, #9582, and replica expiry sends no Close). |
+| `Closed` | the same choke point on a close-CLASS transition (first FIN, second FIN, RST) of a split pair, carrying the pair's close bits (RST, FIN forward, FIN reverse). The reverse FIN is also read from the forward half's `fin_peer`, so a sender whose reverse half is gone still relays it (the forward half is always present and carries every forward FIN as `fin_own`). Fans out to every sibling | same session id, serving. ORs the FIN bits into both halves exactly as a local FIN stamps them. A RST bit makes the pair CLOSING and never sets the sticky `reset` fuse (see "Blind RST" under Limits). The pair then goes on the shared close window (`tcp_close_window_for_entry`: 30 s closing, TIME_WAIT once one FIN per direction has been seen on ANY worker) and is re-stamped from now (close progress, #10885). A relay that adds nothing changes nothing. Whatever a relay can establish, a relay can close: before this stage, a server RST that RSS delivered only to B left A's relay-established authoritative row Established for 1800 s, pinning its SNAT port, slot and limit-session count (a replica's close announces only to the HA peer, #9582, and replica expiry sends no Close). |
 
 Producers push into a bounded outbox (`HANDSHAKE_RELAY_OUTBOX_CAP` = 256,
 drop-newest, counted in `HANDSHAKE_RELAY_OUTBOX_DROPS`); the worker loop
@@ -734,12 +734,14 @@ was false for a replica imported and hit in the same pass — the common case
 under load, where B then refused A's completion and stayed on the opening
 window for the life of an upload. Idle replicas on uninvolved workers never
 set the bit, so they keep their opening-window reap; carried HA counters are
-not used.
+not used. A hit stores the bit only while it is clear. A steady-state hit
+on a reverse row is otherwise read-only (accounting folds onto the forward
+row), so an unconditional store would dirty that line on every packet.
 
 Relays share the bounded worker command queue (4096) with HA-correctness
 commands, so a relay is never queued once the recipient queue holds
-`HANDSHAKE_RELAY_QUEUE_WATERMARK` (half the cap); refused relays count in
-`HANDSHAKE_RELAY_REFUSED`. A `Completed` or `Closed` relay is broadcast (the
+`HANDSHAKE_RELAY_QUEUE_WATERMARK` (half the cap, enforced at compile time);
+refused relays count in `HANDSHAKE_RELAY_REFUSED`. A `Completed` or `Closed` relay is broadcast (the
 SYN-ACK worker's id is recorded nowhere), so a split flow costs at most one
 targeted `Promoted` plus N-1 `Completed` and, at close, N-1 `Closed`
 commands, on top of the 2(N-1) replica upserts its install already sends.
@@ -765,7 +767,20 @@ Limits (the relay narrows the split gap, it does not erase it):
   `UpsertSynced` replica (materialized from the shared map) or from the flow
   cache relays nothing; that flow behaves as before #18520.
 - **Delivery.** A relay refused by a full outbox or at the queue watermark
-  is counted and dropped, never retried (same fallback). A `Promoted` relay
+  is counted and dropped, never retried.
+  - For `Promoted` and `Completed` that is the pre-#18520 fallback: the
+    flow stays on the opening window.
+  - A dropped `Closed` relay is worse than before #18520. The
+    relay-established sibling row stays on its established window (1800 s
+    by default) until it idles out, pinning its SNAT port, slot and
+    limit-session count. Before #18520 the same flow reaped on the 20 s
+    opening window.
+  - Only `HANDSHAKE_RELAY_OUTBOX_DROPS` and `HANDSHAKE_RELAY_REFUSED` show
+    it, and neither is exported yet (#18529).
+  - `Closed` is deliberately not exempt from the watermark. Under a
+    teardown storm it would crowd the HA headroom that the watermark keeps.
+
+  A `Promoted` relay
   whose target worker resolves is delivered only there: if that worker no
   longer holds the serving forward row (an RSS indirection change or a
   reconcile mid-handshake), the relay is refused and nobody else gets it.
@@ -775,16 +790,54 @@ Limits (the relay narrows the split gap, it does not erase it):
   receiver stays silent too, so the HA peer sees Opening until the
   completion (which always announces). Both stages are opening-class, so the
   peer's window is the same.
+- **Blind RST on a split pair.** No worker of a split pair can check a
+  RST's sequence number. B never sees the client ACKs that set the RST
+  target (`tcp_peer_rcv_nxt`), and A never notes a server segment, so
+  `tcp_closing_seq_verdict` is `Unknown` on both. The poll path drops only
+  `Invalid`, so it admits a RST with any sequence number on whichever worker
+  RSS gives it. An attacker needs only the 5-tuple. Stray reply-side RSTs
+  during live flows also occur on this dataplane, which is why
+  `rst-invalidate-session` defaults off.
+  - The receiving worker takes the RST locally, as before #18520: its rows go
+    on the fixed 2 s reset fuse. A replica reaps without a Close and
+    re-materializes from the shared row on its next segment.
+  - The relay carries the RST to the siblings only as CLOSING, which keeps
+    the pair forwarding. Traffic keeps refreshing the 30 s close window. Once
+    the flow goes quiet the pair reaps within two close windows (one more if
+    segments still arrived after the relay, the #14937 counter retention),
+    emitting the Close that frees its SNAT port.
+  - What a blind RST costs: a live split flow that then idles for more than
+    30 s is reaped, where it would otherwise hold the established window.
+    Before #18520 every split pair stayed on the 20 s opening window anyway,
+    so this is no worse than master.
+  - Relaying it as a hard reset (round 2) killed the live flow on every
+    worker. The authoritative reap then deleted the shared row and the HA
+    peer's copy, so even the replica could not recover.
+  - Carrying the RST's sequence number to the receiver is not cheap.
+    Sequence state is noted only on slow-path segments, so on a cache-served
+    flow it is stale, and an exact match would refuse legitimate RSTs.
+  - FINs need no such softening. The FIN check holds on the sender: the
+    FIN-direction row on the worker that receives it has noted that
+    direction's slow-path segments, so a FIN must land within one window of
+    the tracked send end. The window is that row's own, because the
+    companion there has no sequence state. The check is `Unknown`, and so
+    admits any FIN, only before the first slow-path segment of that
+    direction on that worker, for example a freshly HA-imported row. Even
+    then, a single relayed FIN gives the same refreshable 30 s CLOSING
+    window. TIME_WAIT needs one FIN per direction, and the client direction
+    cannot be forged from the WAN.
 - **Session-id reuse across a helper restart.** Session ids restart at 1 on
   every helper start (`next_session_id`), and the incarnation fence is
   (key, session id). A new connection that reuses a 5-tuple a sibling or the
   standby still holds from the previous lifetime, on the same worker index,
-  can carry the old id; the import guard then keeps the old stage, and a
-  relay may apply to the old row. Rare (same tuple, same worker, same
-  counter value) and permissive (Established where Opening is due); the same
-  class already exists for the shared map (#16223) and the import anchor
-  (#16043). A per-boot epoch in the id is not added here: the id is a wire
-  and RT_FLOW correlation field whose consumers assume the
+  can carry the old id. The import guard then keeps the old stage, and a
+  relay may apply to the other incarnation in either direction: a stage
+  (Established where Opening is due) or close progress. Close progress
+  puts a live row on the 30 s refreshable CLOSING window, never the reset
+  fuse. The collision is rare (same tuple, same worker, same counter value).
+  The same class already exists for the shared map (#16223) and the import
+  anchor (#16043). A per-boot epoch in the id is not added here: the id is a
+  wire and RT_FLOW correlation field whose consumers assume the
   node/worker/counter layout.
 
 Two coupled fixes ride with it:

@@ -329,6 +329,14 @@ const TCP_CLOSING_TIMEOUT_NS: u64 = 30_000_000_000;
 const TCP_RST_TIMEOUT_NS: u64 = 2_000_000_000;
 #[cfg(test)]
 pub(crate) const TCP_RST_TIMEOUT_NS_FOR_TEST: u64 = TCP_RST_TIMEOUT_NS;
+#[cfg(test)]
+thread_local! {
+    /// #18520 test instrument: `served_here` stores made by packet hits on
+    /// this thread. A hit stores only when the bit is clear, so a row is
+    /// written once, not per packet.
+    pub(crate) static SERVED_HERE_STORES_FOR_TEST: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
 const DEFAULT_UDP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 const DEFAULT_ICMP_SESSION_TIMEOUT_NS: u64 = 60_000_000_000;
 /// #16486: Junos protocol-based default timeout table (Security 10.2,
@@ -1028,7 +1036,7 @@ pub(crate) use handshake_relay::HandshakeRelay;
 #[cfg(test)]
 pub(crate) use handshake_relay::{
     HANDSHAKE_RELAY_OUTBOX_CAP as HANDSHAKE_RELAY_OUTBOX_CAP_FOR_TEST, HandshakeRelayStage,
-    handshake_relay_outbox_drops_this_thread_for_test,
+    RELAY_CLOSE_FIN_FORWARD, RELAY_CLOSE_FIN_REVERSE, handshake_relay_outbox_drops_this_thread_for_test,
 };
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
@@ -4574,8 +4582,15 @@ impl SessionTable {
                     // check after the borrow instead of refusing.
                     companion_crossed = true;
                 } else {
-                // #18520: a live cache hit on this table.
-                entry.served_here = true;
+                // #18520: a live cache hit on this table. Stored only on
+                // change: a steady-state hit on a reverse row is otherwise
+                // read-only (accounting folds onto the forward row), and an
+                // unconditional store would dirty its line per packet.
+                if !entry.served_here {
+                    entry.served_here = true;
+                    #[cfg(test)]
+                    SERVED_HERE_STORES_FOR_TEST.with(|count| count.set(count.get() + 1));
+                }
                 // #14939 handshake completion (mirrors
                 // `touch_if_stale_with_payload`): not a keepalive refresh,
                 // so it applies even inside the throttle window.

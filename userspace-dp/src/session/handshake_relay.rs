@@ -32,11 +32,15 @@
 //   validated for a SYN-first pair, or the installing segment of a
 //   SYN-ACK-first pickup), never to a pure Opening pair (#6752/#13679).
 // * `Closed` — a worker's pair took close progress (first FIN, second FIN,
-//   RST). Carries the pair's close bits; the receiver ORs them in exactly as
-//   a local FIN/RST stamps them. Whatever a relay can establish, a relay can
-//   close: a FIN/RST that RSS delivered to one worker otherwise reaches no
-//   sibling (a replica close announces only to the HA peer, #9582), so a
-//   relay-established authoritative row outlived a server RST by 1800 s.
+//   RST). Carries the pair's close bits. The receiver ORs FIN bits in
+//   exactly as a local FIN stamps them. A RST bit makes the pair CLOSING (a
+//   30 s window that traffic refreshes) and never sets the sticky 2 s reset
+//   fuse, because no worker of a split pair can check a RST's sequence
+//   number (`apply_close_relay`). Whatever a relay can establish, a relay
+//   can close: a FIN or RST that RSS delivered to one worker otherwise
+//   reaches no sibling (a replica close announces only to the HA peer,
+//   #9582), so a relay-established authoritative row outlived a server RST
+//   by 1800 s.
 //
 // Producers queue into a bounded per-table outbox; the worker loop drains it
 // once per pass (`session_glue::fan_out_handshake_relays`), never per packet.
@@ -270,8 +274,17 @@ impl SessionTable {
         if forward.reset {
             close_bits |= RELAY_CLOSE_RESET;
         }
+        // A direction's FIN is recorded as `fin_own` on its own half and
+        // `fin_peer` on the companion (`propagate_tcp_state_to_companion`).
+        // The forward half is always present here and carries every
+        // forward FIN as `fin_own` (local or relayed). Only the reverse
+        // FIN can lack its own half (reaped, or never installed here), so
+        // it is also read from `forward.fin_peer`.
         if forward.fin_own {
             close_bits |= RELAY_CLOSE_FIN_FORWARD;
+        }
+        if forward.fin_peer {
+            close_bits |= RELAY_CLOSE_FIN_REVERSE;
         }
         let reverse_key = reverse_session_key(forward_key, forward.decision.nat);
         if let Some(reverse) = self.entry_by_key_quiet(&reverse_key) {
@@ -452,12 +465,30 @@ impl SessionTable {
         true
     }
 
-    /// Apply a sibling's close progress to this table's pair: the same
-    /// sticky bits a local FIN/RST stamps (`stamp_tcp_close` on the half the
-    /// segment matched, `propagate_tcp_state_to_companion` on its companion),
-    /// then the shared close-window formula. Close progress re-stamps the
-    /// window from `now` exactly as local close progress does (#10885);
-    /// a relay that adds nothing new changes nothing.
+    /// Apply a sibling's close progress to this table's pair: the FIN bits a
+    /// local FIN stamps (`stamp_tcp_close` on the half the segment matched,
+    /// `propagate_tcp_state_to_companion` on its companion), then the shared
+    /// close-window formula. Close progress re-stamps the window from `now`
+    /// exactly as local close progress does (#10885); a relay that adds
+    /// nothing new changes nothing.
+    ///
+    /// A relayed RST makes the pair CLOSING and never sets the sticky
+    /// `reset` fuse. No worker of a split pair can check a RST's sequence
+    /// number: B never sees the client ACKs that set the RST target
+    /// (`tcp_peer_rcv_nxt`), and A never notes a server segment, so
+    /// `tcp_closing_seq_verdict` is `Unknown` on both and the poll path
+    /// admits a blind RST with any sequence number. The worker that
+    /// received it still takes the fixed 2 s fuse locally, as before. Here
+    /// the pair keeps forwarding on the 30 s close window. Ordinary traffic
+    /// refreshes that window: the cache-hit keepalive is allowed for a
+    /// non-reset, non-FIN-owning half, and the slow path re-applies the
+    /// same window. A pair that really was reset goes quiet and reaps
+    /// within two close windows (#14937 counter retention grants one more if
+    /// segments still arrived after the relay), emitting the Close that
+    /// frees its SNAT port. A blind RST leaves the live flow forwarding. The
+    /// fixed fuse would have killed it on every worker, and the
+    /// authoritative reap would have deleted the shared row and the HA
+    /// peer's copy as well.
     fn apply_close_relay(
         &mut self,
         forward_key: &SessionKey,
@@ -484,21 +515,17 @@ impl SessionTable {
             let Some(entry) = self.entry_by_key_mut(key) else {
                 continue;
             };
-            let next_reset = entry.reset || reset;
+            // `reset` is never relayed (see the doc above): the RST bit only
+            // makes the pair CLOSING.
             let next_fin_own = entry.fin_own || fin_own;
             let next_fin_peer = entry.fin_peer || fin_peer;
-            if entry.closing
-                && next_reset == entry.reset
-                && next_fin_own == entry.fin_own
-                && next_fin_peer == entry.fin_peer
-            {
+            if entry.closing && next_fin_own == entry.fin_own && next_fin_peer == entry.fin_peer {
                 continue;
             }
             entry.closing = true;
-            entry.reset = next_reset;
             entry.fin_own = next_fin_own;
             entry.fin_peer = next_fin_peer;
-            entry.last_seen_ns = now_ns;
+            entry.last_seen_ns = entry.last_seen_ns.max(now_ns);
             entry.expires_after_ns = tcp_close_window_for_entry(entry, &timeouts);
             changed = true;
             self.push_to_wheel(key, now_ns);

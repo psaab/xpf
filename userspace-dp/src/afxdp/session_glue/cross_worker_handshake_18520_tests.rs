@@ -1349,7 +1349,9 @@ fn same_pass_synack_before_replica_import_establishes_both_workers_18520() {
 /// RSS delivers only to B closes B's replicas — and must close A's
 /// authoritative pair too, or A sits Established on the 1800 s window
 /// (pinning its SNAT port, slot and limit-session count) where it used to
-/// reap on the 20 s opening window.
+/// reap on the 20 s opening window. Round 3: A takes it as CLOSING (the
+/// relay cannot tell this RST from a blind one), so a flow that really was
+/// reset goes quiet and A reaps it on the 30 s close window, Close and all.
 #[test]
 fn server_rst_on_b_closes_a_authoritative_pair_18520() {
     let mut node = upload_established();
@@ -1366,16 +1368,55 @@ fn server_rst_on_b_closes_a_authoritative_pair_18520() {
     );
     pump(&mut node);
     let rst_secs = (crate::session::TCP_RST_TIMEOUT_NS_FOR_TEST / SEC) as u32;
-    for (who, table) in [("B", &node.b.table), ("A", &node.a.table)] {
-        for key in [&fwd, &rev] {
-            assert_eq!(
-                table.close_class_wire_for(key),
-                crate::session::TcpCloseClass::Reset.to_wire(),
-                "#18520: worker {who} {key:?} must take the RST seen on B"
-            );
-            assert_eq!(table.timeout_secs_for(key), rst_secs, "#18520: worker {who} on the RST window");
-        }
+    for key in [&fwd, &rev] {
+        assert_eq!(
+            node.b.table.close_class_wire_for(key),
+            crate::session::TcpCloseClass::Reset.to_wire(),
+            "worker B {key:?} takes the RST it saw on its fixed fuse"
+        );
+        assert_eq!(node.b.table.timeout_secs_for(key), rst_secs);
+        assert_eq!(
+            node.a.table.close_class_wire_for(key),
+            crate::session::TcpCloseClass::Closing.to_wire(),
+            "#18520: worker A {key:?} must take the RST seen on B as CLOSING (never the reset fuse)"
+        );
+        assert_eq!(
+            node.a.table.timeout_secs_for(key),
+            closing_secs(),
+            "#18520: worker A on the close window, not the established one"
+        );
     }
+    // The flow really is dead: no further segment. A reaps on the close
+    // window, emitting the Close that frees its SNAT port.
+    let author_id = node.a.table.session_id_for(&fwd);
+    let _ = node.a.table.drain_deltas(256);
+    let kept = node.a.table.expire_stale_entries(t0 + 20 * SEC);
+    assert!(
+        kept.iter().all(|e| e.key != fwd && e.key != rev),
+        "A holds the pair inside the close window"
+    );
+    let reaped = node.a.table.expire_stale_entries(t0 + 40 * SEC);
+    for key in [&fwd, &rev] {
+        assert!(
+            reaped.iter().any(|e| e.key == *key),
+            "#18520: A must reap {key:?} once the reset flow stays quiet past the close window"
+        );
+    }
+    assert!(
+        node.a
+            .table
+            .drain_deltas(256)
+            .iter()
+            .any(|d| d.kind == SessionDeltaKind::Close && d.key == fwd && d.session_id == author_id),
+        "#18520: A's reap must emit the Close (SNAT release, shared-row and peer delete)"
+    );
+}
+
+fn closing_secs() -> u32 {
+    (crate::session::tcp_close_window_ns(
+        crate::session::TcpCloseClass::Closing,
+        &crate::session::SessionTimeouts::default(),
+    ) / SEC) as u32
 }
 
 /// Install one replica row of the test flow on `table` (any origin), as a
@@ -1478,7 +1519,7 @@ fn ha_pending_import_completes_on_the_cache_served_sibling_18520() {
 }
 
 /// Close relay, client side: a client RST that lands only on A closes B's
-/// replicas onto the RST window too.
+/// replicas onto the 30 s close window (CLOSING, never the reset fuse).
 #[test]
 fn client_rst_on_a_closes_b_replicas_18520() {
     let mut node = upload_established();
@@ -1495,15 +1536,19 @@ fn client_rst_on_a_closes_b_replicas_18520() {
     );
     pump(&mut node);
     let rst_secs = (crate::session::TCP_RST_TIMEOUT_NS_FOR_TEST / SEC) as u32;
-    for (who, table) in [("A", &node.a.table), ("B", &node.b.table)] {
-        for key in [&fwd, &rev] {
-            assert_eq!(
-                table.close_class_wire_for(key),
-                crate::session::TcpCloseClass::Reset.to_wire(),
-                "#18520: worker {who} {key:?} must take the RST seen on A"
-            );
-            assert_eq!(table.timeout_secs_for(key), rst_secs);
-        }
+    for key in [&fwd, &rev] {
+        assert_eq!(
+            node.a.table.close_class_wire_for(key),
+            crate::session::TcpCloseClass::Reset.to_wire(),
+            "worker A {key:?} takes the RST it saw on its fixed fuse"
+        );
+        assert_eq!(node.a.table.timeout_secs_for(key), rst_secs);
+        assert_eq!(
+            node.b.table.close_class_wire_for(key),
+            crate::session::TcpCloseClass::Closing.to_wire(),
+            "#18520: worker B {key:?} must take the RST seen on A as CLOSING"
+        );
+        assert_eq!(node.b.table.timeout_secs_for(key), closing_secs());
     }
 }
 
@@ -1613,5 +1658,146 @@ fn relays_stop_at_the_queue_watermark_keeping_headroom_18520() {
             WorkerCommand::UpsertSynced(reverse_synced_entry(&node, SessionOrigin::ReverseFlow, 1, 0)),
         ),
         "the HA-correctness headroom above the watermark stays available"
+    );
+}
+
+/// Round-3 review (HA seat): on a split pair NEITHER worker can check a RST's
+/// sequence number (B never sees the client ACKs that set the RST target, A
+/// never notes a server segment), so the poll path admits a blind WAN RST
+/// with any sequence number (it drops only `Invalid`). Relayed as a hard
+/// reset, that RST put A's authoritative pair on the fixed 2 s fuse that the
+/// client's continuing upload cannot refresh, and A's reap then emitted the
+/// Close that frees the SNAT port and deletes the peer's copy. A relayed RST
+/// must instead leave a pair that still carries traffic forwarding.
+#[test]
+fn blind_rst_on_b_leaves_the_live_upload_on_a_forwarding_18520() {
+    let mut node = upload_established();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    let rst = crate::tcp_flags::TCP_RST | TCP_FLAG_ACK;
+    let blind_seq = SERVER_ISN.wrapping_add(0x4000_0000);
+    for (who, table, key) in [("B", &node.b.table, &rev), ("A", &node.a.table, &rev)] {
+        assert_ne!(
+            table.tcp_closing_seq_verdict(key, blind_seq, rst),
+            crate::session::SeqVerdict::Invalid,
+            "premise: worker {who} cannot reject a blind RST on a split pair (the poll path drops only Invalid)"
+        );
+    }
+    slow_hit(&mut node.b.table, &rev, t0 + 20 * MS, rst, 0, blind_seq, CLIENT_ISN + 1 + 8 * MSS);
+    pump(&mut node);
+    let _ = node.a.table.drain_deltas(256);
+    let _ = node.b.table.drain_deltas(256);
+    // The client keeps uploading on A, once a second, past the RST fuse and
+    // past the 30 s close window. B's own copies take the RST locally (the
+    // fixed fuse, as before #18520) and reap without a Close: a replica
+    // re-materializes from the shared row on its next segment.
+    for s in 1..=70u64 {
+        let now = t0 + 20 * MS + s * SEC;
+        assert!(
+            cache_hit(&mut node.a.table, &fwd, now, TCP_FLAG_ACK | TCP_PSH, MSS, SERVER_ISN + 1),
+            "#18520: A must keep forwarding the client upload {s}s after a blind RST on B"
+        );
+        let expired = node.a.table.expire_stale_entries(now);
+        assert!(
+            expired.iter().all(|e| e.key != fwd && e.key != rev),
+            "#18520: A must not reap the live pair {s}s after a blind RST on B"
+        );
+        let _ = node.b.table.expire_stale_entries(now);
+        pump(&mut node);
+    }
+    for (who, table) in [("A", &mut node.a.table), ("B", &mut node.b.table)] {
+        assert!(
+            !table.drain_deltas(256).iter().any(|d| d.kind == SessionDeltaKind::Close),
+            "#18520: no Close from worker {who} (it frees the SNAT port and deletes the shared row and the peer's copy) while the flow is live"
+        );
+    }
+    assert_eq!(
+        node.a.table.handshake_state_wire_for(&fwd),
+        TcpHandshakeState::Established.to_wire()
+    );
+    assert_ne!(
+        node.a.table.close_class_wire_for(&fwd),
+        crate::session::TcpCloseClass::Reset.to_wire(),
+        "#18520: a relayed RST never stamps the fixed reset fuse"
+    );
+}
+
+
+/// Round-3 review (dataplane seat): a hit stores `served_here` only while the
+/// bit is clear. A steady-state hit on a reverse row is otherwise read-only
+/// (its accounting folds onto the forward row), so an unconditional store
+/// would turn a clean line dirty on every reverse packet.
+#[test]
+fn served_here_is_stored_once_per_row_not_per_packet_18520() {
+    let node = fresh_node();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = 1_000 * SEC;
+    let peer_id = (1u64 << 63) | 0x48;
+    let companion_id = crate::session::synthesized_companion_session_id(peer_id);
+    let mut y = SessionTable::new();
+    y.set_session_id_namespace(0, 1);
+    install_replica(&mut y, &node, true, SessionOrigin::SyncImport, TcpHandshakeState::Established, peer_id, t0);
+    install_replica(&mut y, &node, false, SessionOrigin::SyncImport, TcpHandshakeState::Established, companion_id, t0);
+    let stores = || crate::session::SERVED_HERE_STORES_FOR_TEST.with(|count| count.get());
+    let before = stores();
+    for i in 1..=8u64 {
+        assert!(cache_hit(&mut y, &rev, t0 + i * MS, TCP_FLAG_ACK, 0, CLIENT_ISN + 1));
+    }
+    assert_eq!(
+        stores() - before,
+        1,
+        "#18520: eight cache hits on the reverse row store the bit once"
+    );
+    let before = stores();
+    for i in 0..4u32 {
+        slow_hit(
+            &mut y,
+            &fwd,
+            t0 + (10 + u64::from(i)) * MS,
+            TCP_FLAG_ACK | TCP_PSH,
+            MSS,
+            CLIENT_ISN + 1 + i * MSS,
+            SERVER_ISN + 1,
+        );
+    }
+    assert_eq!(
+        stores() - before,
+        1,
+        "#18520: four slow-path hits on the forward row store the bit once"
+    );
+}
+
+/// Round-3 review (dataplane seat, NIT): a FIN is recorded as `fin_own` on
+/// its direction's half and as `fin_peer` on the companion. A sender whose
+/// reverse half is gone must still relay the server FIN it recorded on the
+/// forward half, or a sibling that missed the first relay never reaches
+/// TIME_WAIT.
+#[test]
+fn close_relay_carries_a_fin_recorded_only_on_the_companion_18520() {
+    let mut node = upload_established();
+    let (fwd, rev) = (node.forward_key.clone(), node.reverse_key.clone());
+    let t0 = node.t0;
+    let fin = crate::tcp_flags::TCP_FIN | TCP_FLAG_ACK;
+    slow_hit(&mut node.b.table, &rev, t0 + 20 * MS, fin, 0, SERVER_ISN + 1, CLIENT_ISN + 1 + 8 * MSS);
+    pump(&mut node);
+    assert_eq!(
+        node.a.table.close_class_wire_for(&fwd),
+        crate::session::TcpCloseClass::Closing.to_wire(),
+        "premise: A took the server FIN seen on B"
+    );
+    node.a.table.delete(&rev);
+    node.a.table.drain_handshake_relays_into(&mut Vec::new());
+    slow_hit(&mut node.a.table, &fwd, t0 + 21 * MS, fin, 0, CLIENT_ISN + 1 + 8 * MSS, SERVER_ISN + 2);
+    let mut relays = Vec::new();
+    node.a.table.drain_handshake_relays_into(&mut relays);
+    let closed: Vec<_> = relays
+        .iter()
+        .filter(|relay| relay.stage == HandshakeRelayStage::Closed)
+        .collect();
+    assert_eq!(closed.len(), 1, "A relays its TIME_WAIT transition");
+    assert_eq!(
+        closed[0].close_bits,
+        crate::session::RELAY_CLOSE_FIN_FORWARD | crate::session::RELAY_CLOSE_FIN_REVERSE,
+        "#18520: the reverse FIN recorded only on A's forward half must ride the relay"
     );
 }
