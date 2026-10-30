@@ -34,11 +34,21 @@ const LAPSE_SECS: u64 = 1_801;
 const SESSION_ID: u64 = 0x1855_0000_0001;
 /// The activation epoch of RG 1 on this node (bumped at activation).
 const RG_EPOCH: u32 = 3;
+/// The node-level epoch (`rg_epochs[0]`). It deliberately DIFFERS from
+/// `RG_EPOCH`, so a re-stamp that read the wrong RG's epoch records a value
+/// the wheel's gate does not match, and the second SELF-HEAL shows.
+const NODE_EPOCH: u32 = 9;
+
+/// Per-RG epochs with the wheel's mapping: RG 1 has its own epoch, and every
+/// other RG (0 / out of range) falls back to the node-level edge.
+fn rg_epoch(rg: i32) -> u32 {
+    if rg == RG { RG_EPOCH } else { NODE_EPOCH }
+}
 
 /// The worker's RG activation-epoch reader, as `worker_loop_setup` wires it.
 fn epoch_table() -> SessionTable {
     let mut sessions = SessionTable::new();
-    sessions.set_rg_epoch_reader(Arc::new(|_| RG_EPOCH));
+    sessions.set_rg_epoch_reader(Arc::new(rg_epoch));
     sessions
 }
 
@@ -287,7 +297,7 @@ fn late_reimport_revives_lapsed_replica_on_owner_v6_18550() {
 /// The wheel's HA view on the RG owner: RG 1 forwarded here at `RG_EPOCH`.
 fn run_wheel(fx: &mut Fixture, now_secs: u64) -> (Vec<SessionKey>, crate::session::WheelPopStats) {
     let forwards_rg = |rg: i32| rg == RG || rg <= 0;
-    let epoch_of = |_: i32| RG_EPOCH;
+    let epoch_of = rg_epoch;
     let node_served = |_: &SessionKey| crate::session::NodeServedEvidence::default();
     let ctx = crate::session::ExpireHaContext {
         node_active: true,
@@ -322,6 +332,15 @@ fn assert_revived_dead_row_ages_once(v6: bool) {
     let t1 = T0_SECS + LAPSE_SECS;
     reimport(&mut fx, v6, &active(t1), t1);
     let (forward_key, reply_key) = (fx.forward_key.clone(), fx.reply_key.clone());
+    let (_, forward_metadata, _) = fx
+        .sessions
+        .entry_with_origin(&forward_key)
+        .expect("forward row");
+    assert_eq!(
+        forward_metadata.owner_rg_id, RG,
+        "precondition: the forward row must be owned by RG {RG}, whose epoch differs from the \
+         node epoch, or a re-stamp reading the wrong RG's epoch is unobservable"
+    );
 
     let (expired, stats) = run_wheel(&mut fx, t1 + 10);
     assert!(

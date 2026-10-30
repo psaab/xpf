@@ -2712,6 +2712,23 @@ impl SessionTable {
         }
     }
 
+    /// #18550: install the worker's RG activation-epoch reader (see the
+    /// `rg_epoch_reader` field). Called once from `worker_loop_setup`.
+    pub(crate) fn set_rg_epoch_reader(
+        &mut self,
+        reader: std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>,
+    ) {
+        self.rg_epoch_reader = Some(reader);
+    }
+
+    /// #18550: the current activation epoch for `owner_rg_id`, if a reader is
+    /// installed. Same index mapping as the wheel's `epoch_of`.
+    pub(crate) fn current_rg_epoch(&self, owner_rg_id: i32) -> Option<u32> {
+        self.rg_epoch_reader
+            .as_ref()
+            .map(|reader| reader(owner_rg_id))
+    }
+
     /// #4915 + #6311: namespace this table's session ids so the STABLE session
     /// id (`SessionEntry.session_id`) is unique across the CLUSTER. Called once
     /// at worker setup. The high 16 bits carry `node_bit << 15 | worker_id`,
@@ -2759,23 +2776,6 @@ impl SessionTable {
     /// invariant (called once per worker, with a queue index), so per
     /// `docs/engineering-style.md` a hard failure beats running with ids that
     /// silently alias the control plane's or the peer node's.
-    /// #18550: install the worker's RG activation-epoch reader (see the
-    /// `rg_epoch_reader` field). Called once from `worker_loop_setup`.
-    pub(crate) fn set_rg_epoch_reader(
-        &mut self,
-        reader: std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>,
-    ) {
-        self.rg_epoch_reader = Some(reader);
-    }
-
-    /// #18550: the current activation epoch for `owner_rg_id`, if a reader is
-    /// installed. Same index mapping as the wheel's `epoch_of`.
-    pub(crate) fn current_rg_epoch(&self, owner_rg_id: i32) -> Option<u32> {
-        self.rg_epoch_reader
-            .as_ref()
-            .map(|reader| reader(owner_rg_id))
-    }
-
     pub fn set_session_id_namespace(&mut self, node_id: u8, worker_id: u32) {
         assert!(
             (worker_id as u64) <= SESSION_ID_MAX_WORKER,
