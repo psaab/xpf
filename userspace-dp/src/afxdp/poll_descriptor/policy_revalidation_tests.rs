@@ -915,7 +915,9 @@ fn ha_imported_transient_dynamic_snat_keeps_canonical_worker_entry_12187() {
     );
     assert_eq!(
         coordinator.upsert_synced_session(alias),
-        crate::afxdp::SyncedImportOutcome::RejectedReserve,
+        // #18531: the alias of a held canonical row is refused under its own
+        // reason (it used to fail the reservation, `RejectedReserve`).
+        crate::afxdp::SyncedImportOutcome::RejectedSupersededAlias,
         "the translated alias is refused after the canonical Go-order import"
     );
 

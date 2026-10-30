@@ -329,6 +329,19 @@ pub enum SyncedImportOutcome {
     /// over, so after a failover its flow re-adjudicates through policy
     /// instead of being adopted under a domain nothing verified.
     RejectedUnknownRoutingDomain,
+    /// #18531: a peer-synced forward-wire ALIAS (the flow keyed by its
+    /// translated tuple) arrived while this node holds the flow's canonical
+    /// (original-tuple) row. The canonical row already serves the alias's
+    /// key through the forward-wire index, and taking the alias would
+    /// replace the canonical reverse with the alias's self-targeting one.
+    /// The daemon sends the canonical row first, so on a healthy split
+    /// cluster this fires at the redirected-flow rate. It is a designed
+    /// refusal, not a reservation failure, so it has its own reason and
+    /// does not count in `import_reserve_refused`, whose metric reads
+    /// growth as flows that will not survive a failover. Go still rolls
+    /// back the alias's mirror row and counts it as a helper refusal, as it
+    /// did when the same arrival failed the reservation (before #18531).
+    RejectedSupersededAlias,
 }
 
 /// Machine-readable prefix for terminal semantic import refusals. Repair
@@ -356,7 +369,7 @@ impl SyncedImportOutcome {
     /// Go/Rust wire fixture is keyed by variant name, and `wire_error`
     /// below matches exhaustively, so adding a variant fails to compile
     /// until it has a wire class here and a fixture row there (#17116).
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Applied,
         Self::AppliedRepairPending,
         Self::AppliedRepairOverflow,
@@ -368,6 +381,7 @@ impl SyncedImportOutcome {
         Self::RejectedGateBusy,
         Self::RejectedMirrorPublish,
         Self::RejectedUnknownRoutingDomain,
+        Self::RejectedSupersededAlias,
     ];
 
     /// Stable name used as the shared-fixture row key. Must match the
@@ -385,6 +399,7 @@ impl SyncedImportOutcome {
             Self::RejectedGateBusy => "RejectedGateBusy",
             Self::RejectedMirrorPublish => "RejectedMirrorPublish",
             Self::RejectedUnknownRoutingDomain => "RejectedUnknownRoutingDomain",
+            Self::RejectedSupersededAlias => "RejectedSupersededAlias",
         }
     }
 
@@ -404,6 +419,7 @@ impl SyncedImportOutcome {
             Self::RejectedStandaloneReverse => Some("standalone-reverse"),
             Self::RejectedUnknownRoutingDomain => Some("unknown-routing-domain"),
             Self::RejectedGateBusy => Some("gate-busy"),
+            Self::RejectedSupersededAlias => Some("superseded-alias"),
         }
     }
 
@@ -453,6 +469,7 @@ impl SyncedImportOutcome {
             | Self::RejectedReserve
             | Self::RejectedStandaloneReverse
             | Self::RejectedUnknownRoutingDomain
+            | Self::RejectedSupersededAlias
             | Self::RejectedGateBusy => Some(format!(
                 "{SYNCED_IMPORT_REFUSED_PREFIX}{}",
                 self.refusal_reason()
@@ -1239,13 +1256,33 @@ impl crate::afxdp::ha::SessionDomain {
     /// alias: its reverse (synthesized from the alias) cannot un-NAT, and once
     /// the LAN side moved here the original-tuple packets missed and the flow
     /// died (diag6/diag7b: exactly the alias-only flows). Now the canonical row
-    /// always wins:
+    /// wins over a peer-synced alias:
     /// - an alias never books the translation (the canonical row, here or on
-    ///   the peer, owns it), so it cannot refuse a later canonical import;
-    /// - an alias is refused while its canonical row is held, so it can never
-    ///   replace the canonical row's reverse with its own self-targeting one;
+    ///   the peer, owns it), so it cannot refuse a later canonical import.
+    ///   Nor does a local promotion of one (`SharedPromote`, the worker twin
+    ///   in `handle_upsert_synced`): it keeps whatever booking the row it
+    ///   re-tags held, which for a peer alias is none;
+    /// - an alias is refused (`RejectedSupersededAlias`) while its canonical
+    ///   row is held, so it can never replace the canonical row's reverse
+    ///   with its own self-targeting one;
     /// - a canonical import retires a peer-synced alias of the same flow
-    ///   (forward key only: the reverse key is the canonical row's now).
+    ///   (forward key only: the reverse key is the canonical row's now). It
+    ///   retires through the PEER-delete path, so the removal re-checks the
+    ///   row under the shared-map lock and keeps a row a worker promoted in
+    ///   the meantime (the #9714 locally-owned guard), the workers apply the
+    ///   same guard, and no CLEAR close is harvested for a row whose flow
+    ///   lives on. A promoted alias is this node's live authority and stays
+    ///   beside the canonical row (the shared store already treats that pair
+    ///   as one session under two keys); it books nothing, so it never
+    ///   refuses the canonical row.
+    ///
+    /// Gap: an identity translation (the original source already is the
+    /// translated address and port) has the alias shape, and a row carries
+    /// nothing that tells the two apart. A peer-synced canonical row of that
+    /// shape books nothing here either, so after a takeover a new local flow
+    /// could be handed the same identity (the #4388 hazard). Interface SNAT
+    /// produces it only for a client whose source already is the egress
+    /// address.
     fn upsert_synced_session_with_policy(
         &self,
         entry: SyncedSessionEntry,
@@ -1263,10 +1300,7 @@ impl crate::afxdp::ha::SessionDomain {
             )
             .is_some_and(|canonical| canonical.key != entry.key)
         {
-            self.sessions
-                .import_reserve_refused
-                .fetch_add(1, Ordering::Relaxed);
-            return SyncedImportOutcome::RejectedReserve;
+            return SyncedImportOutcome::RejectedSupersededAlias;
         }
         let superseded_alias = (!entry.metadata.is_reverse && !is_alias)
             .then(|| crate::session::forward_wire_key(&entry.key, entry.decision.nat))
@@ -1292,7 +1326,7 @@ impl crate::afxdp::ha::SessionDomain {
             && lock_shared_recover(&self.sessions.synced).contains_key(&canonical_key)
         {
             let _ = self.delete_synced_session_gen_marked(
-                alias_key, 0, false, true, None, false, 0, None, None,
+                alias_key, 0, true, true, None, false, 0, None, None,
             );
         }
         outcome

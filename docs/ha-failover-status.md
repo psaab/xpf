@@ -512,19 +512,51 @@ The rules now:
   the owner close the canonical tuple, recovered from its reverse row; that
   cannot work for the production alias-only owner, whose reverse was
   synthesized from the alias, and was removed.)
-- **The canonical row always wins the import over its alias.** The import
-  used to let the canonical row and its forward-wire alias compete for ONE
-  translated-tuple reservation, keeping whichever arrived first. When the
-  alias won, the node held the flow only as the alias (diag6: 5 of 8 flows;
-  diag7b: 3 of 8): at the activation its reverse resolved to `LocalDelivery`
-  (handled below), and at the full failback, when the LAN RG moved there
-  too, the original-tuple packets missed and the flow died (diag7b,
-  `LOCAL-ABSENT key=10.0.61.102:<port>` right after fw0 activated RG2). Now
-  an alias never books the translation (coordinator import and worker
-  twin); an alias import is refused while its canonical row is held, so it
-  can never replace that row's reverse with its own; and a canonical import
-  retires a peer-synced alias of the same flow (forward key only). Pinned
-  by `canonical_import_supersedes_its_alias_18531`, both orders, v4/v6.
+- **The canonical row wins the import over a peer-synced alias.** The
+  import used to let the canonical row and its forward-wire alias compete
+  for ONE translated-tuple reservation, keeping whichever arrived first.
+  When the alias won, the node held the flow only as the alias (diag6: 5 of
+  8 flows; diag7b: 3 of 8): at the activation its reverse resolved to
+  `LocalDelivery` (handled below), and at the full failback, when the LAN RG
+  moved there too, the original-tuple packets missed and the flow died
+  (diag7b, `LOCAL-ABSENT key=10.0.61.102:<port>` right after fw0 activated
+  RG2). Now:
+  - A peer-synced alias never books the translation (coordinator import
+    and worker twin). Nor does a local promotion of one: a fabric hit
+    after this node took the WAN RG re-tags the alias `SharedPromote` and
+    replicates it to the other workers, and each replica used to book the
+    identity, so every later canonical import was refused for the flow's
+    lifetime (review E/F, probe R2-P1). A `SharedPromote` row of the alias
+    shape takes no new booking and keeps whatever booking the row it
+    replaces held, so a prewarm `SharedPromote` over a reserving
+    `WorkerLocalImport` keeps it (#15966r). Pinned by
+    `promoted_alias_does_not_refuse_its_canonical_import_18531`.
+  - An alias import is refused while its canonical row is held, so it can
+    never replace that row's reverse with its own. The daemon sends the
+    canonical row first, so a healthy split cluster refuses aliases at the
+    redirected-flow rate. The refusal has its own outcome
+    (`RejectedSupersededAlias`, wire reason `superseded-alias`) and does not
+    count in `xpf_userspace_synced_import_reserve_refused_total`, whose
+    growth means flows that will not survive a failover. The daemon still
+    rolls back the alias's mirror row and counts it in `Imports refused by
+    helper`, as it did when the same arrival failed the reservation.
+  - A canonical import retires a peer-synced alias of the same flow
+    (forward key only). It retires through the peer-delete path, so the
+    removal re-checks the row under the shared-map lock and keeps a row a
+    worker promoted in the meantime (the #9714 locally-owned guard, on the
+    workers too), and no CLEAR close is harvested for a flow that lives on.
+    A promoted alias stays beside the canonical row (the shared store
+    already treats that pair as one session under two keys); it books
+    nothing, so it never refuses the canonical row. Pinned by
+    `canonical_import_supersedes_its_alias_18531` (both orders, v4/v6) and
+    `alias_promoted_during_the_canonical_import_is_kept_18531`.
+  - Gap: an identity translation (the original source already is the
+    translated address and port) has the alias shape, and a row carries
+    nothing that tells the two apart. A peer-synced canonical row of that
+    shape books nothing on the importing node either, so after a takeover
+    a new local flow could be handed the same identity (the #4388 hazard).
+    Interface SNAT produces it only for a client whose source already is
+    the egress address. Before #18531 such a row booked like any other.
 - **An alias's reverse is handed to the peer, never to the host.** A reverse
   synthesized from a forward-wire alias takes the alias key's source as the
   client, which is the SNAT address itself: its un-NAT rewrites nothing.
@@ -549,8 +581,16 @@ The rules now:
   reply is dropped, never bounced, delivered locally, or forwarded on a raw
   FIB answer. The match is on NAT shape: an identity translation (the
   original source is the SNAT address and the port is unchanged) looks the
-  same and is handed to the peer too. The DNAT-only and port-only alias
-  reverses (pre-existing) are not covered; see #18535. A reverse that un-NATs to a genuinely
+  same and is handed to the peer too. The synthesis arm is not gated, so a
+  pool alias's reverse (its target, the pool address, answered by proxy
+  ARP, is not local, so the lookup answers the WAN neighbor path) is
+  handed to the peer at import (pinned by
+  `pool_alias_reverse_is_handed_to_peer_at_synthesis_18531`). Gap: the
+  gated re-resolution leaves that row on the WAN neighbor path
+  (`MissingNeighbor` toward the pool address after `RefreshOwnerRGS`),
+  so an alias-only pool-SNAT flow still loses its replies on the node
+  that took the WAN RG. The DNAT-only and port-only alias reverses
+  (pre-existing) are not covered either; see #18535. A reverse that un-NATs to a genuinely
   local address other than its wire destination is still host-bound and
   still gated. The LAN node's own reverse rows un-NAT to the client and are
   unaffected.

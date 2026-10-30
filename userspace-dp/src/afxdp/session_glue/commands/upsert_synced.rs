@@ -343,14 +343,22 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         // (`release_source_nat_allocation`) on reap or delete-sync.
         // #18531: an alias imported from the peer never books the
         // translation; the canonical row owns it (see
-        // `upsert_synced_session_with_policy`). Local replicas
-        // (`WorkerLocalImport`, `SharedPromote`) keep reserving: they ARE
-        // this node's allocation, whatever their key.
-        if reserving_origin
-            && !metadata.is_reverse
-            && !(entry_origin.is_cluster_synced_origin()
-                && crate::session::is_forward_wire_alias(&key, entry_decision.nat))
-        {
+        // `upsert_synced_session_with_policy`). Nor does a `SharedPromote`
+        // row of the alias shape: a promotion only re-tags the row it
+        // replaces, so it takes no NEW booking and keeps whatever that row
+        // held (`new_entry_reserves` below stays true, so a held booking is
+        // not released). A promoted peer alias therefore still books
+        // nothing and cannot refuse the canonical row's later import (review
+        // E/F: before, every other worker booked the identity on the
+        // promotion's replica and the canonical import was refused for the
+        // flow's lifetime). A prewarm `SharedPromote` that replaces a
+        // reserving `WorkerLocalImport` keeps that booking (#15966r). A
+        // `WorkerLocalImport` replica reserves whatever its key: it IS this
+        // node's allocation.
+        let alias_books_nothing = crate::session::is_forward_wire_alias(&key, entry_decision.nat)
+            && (entry_origin.is_cluster_synced_origin()
+                || entry_origin == SessionOrigin::SharedPromote);
+        if reserving_origin && !metadata.is_reverse && !alias_books_nothing {
             // #15191: the non-pool domains, from this same generation.
             let synced_static_externals = forwarding.static_nat.external_identities();
             let synced_nptv6_externals = forwarding.nptv6.externals();

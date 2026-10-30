@@ -1998,7 +1998,7 @@ fn canonical_import_supersedes_its_alias_18531() {
         for alias_first in [true, false] {
             let forwarding = rg_taking_node_forwarding();
             let mut coordinator = bare_coordinator(&forwarding);
-            let _worker_commands = register_worker(&mut coordinator);
+            let worker_commands = register_worker(&mut coordinator);
             let canonical = exported_forward(&forwarding, family);
             let alias = alias_of(&canonical);
             let order = if alias_first {
@@ -2010,6 +2010,53 @@ fn canonical_import_supersedes_its_alias_18531() {
                 .into_iter()
                 .map(|entry| coordinator.upsert_synced_session(entry))
                 .collect();
+            // Review E/F (LOW): the alias that arrives after its canonical row
+            // (the daemon's order) is a designed refusal with its own reason,
+            // not a reservation failure the reserve-refused metric would read
+            // as a flow lost at failover.
+            let expected = if alias_first {
+                [
+                    crate::afxdp::SyncedImportOutcome::Applied,
+                    crate::afxdp::SyncedImportOutcome::Applied,
+                ]
+            } else {
+                [
+                    crate::afxdp::SyncedImportOutcome::Applied,
+                    crate::afxdp::SyncedImportOutcome::RejectedSupersededAlias,
+                ]
+            };
+            assert_eq!(
+                outcomes, expected,
+                "import outcomes ({family:?} alias_first={alias_first})"
+            );
+            assert_eq!(
+                coordinator
+                    .sessions
+                    .import_reserve_refused
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "no reservation was refused ({family:?} alias_first={alias_first})"
+            );
+            // Review E (LOW): the retirement takes the PEER-delete path (the
+            // workers keep a row they promoted meanwhile and harvest no CLEAR
+            // close for a flow that lives on).
+            let alias_deletes: Vec<&'static str> = worker_commands
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|command| match command {
+                    WorkerCommand::DeleteSynced(key) if *key == alias.key => Some("peer"),
+                    WorkerCommand::DeleteLocalControl(key) if *key == alias.key => {
+                        Some("local-control")
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                alias_deletes,
+                if alias_first { vec!["peer"] } else { vec![] },
+                "the alias's retirement fan-out ({family:?} alias_first={alias_first})"
+            );
             let canonical_reverse =
                 crate::session::reverse_session_key(&canonical.key, canonical.decision.nat);
             let reverse_un_nat = coordinator
@@ -2213,4 +2260,223 @@ fn worker_alias_import_books_no_translation_18531() {
         1,
         "the canonical row holds the translation after the alias is retired"
     );
+}
+
+/// HA state of the node that took RG1 (WAN) while the peer keeps RG2 (LAN):
+/// where a fabric hit promotes a peer-synced alias.
+fn wan_taken_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
+    BTreeMap::from([
+        (0, rg(true, now_secs)),
+        (1, rg(true, now_secs)),
+        (2, rg(false, now_secs)),
+    ])
+}
+
+/// Review E (MINOR) / F (LOW 2), probe R2-P1: a node that holds a flow only
+/// as the alias, and promotes it when a fabric hit arrives after it took
+/// RG1, must still take the canonical row when that arrives. The promotion
+/// re-publishes the alias as `SharedPromote` and replicates it to the other
+/// workers. RED before the fold: each replica booked the translated identity,
+/// so the canonical import was refused (`RejectedReserve`) for the flow's
+/// lifetime and its original-tuple packets missed at the full failback. The
+/// promoted alias, which is this node's live authority, stays beside it.
+/// v4 and v6, interface SNAT, a worker registered.
+#[test]
+fn promoted_alias_does_not_refuse_its_canonical_import_18531() {
+    for family in [Family::V4, Family::V6] {
+        let forwarding = rg_taking_node_forwarding();
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let mut coordinator = bare_coordinator(&forwarding);
+        let _worker_commands = register_worker(&mut coordinator);
+        let canonical = exported_forward(&forwarding, family);
+        let alias = alias_of(&canonical);
+        assert_eq!(
+            coordinator.upsert_synced_session(alias.clone()),
+            crate::afxdp::SyncedImportOutcome::Applied,
+            "fixture: the node holds the flow only as the alias ({family:?})"
+        );
+        let mut promoted = alias.clone();
+        promoted.origin = SessionOrigin::SharedPromote;
+        coordinator
+            .sessions
+            .synced
+            .lock()
+            .unwrap()
+            .get_mut(&alias.key)
+            .expect("fixture: the alias is held")
+            .origin = SessionOrigin::SharedPromote;
+        let mut worker = SessionTable::new();
+        apply_commands(
+            &mut worker,
+            &forwarding,
+            &wan_taken_ha(now_secs),
+            vec![
+                WorkerCommand::UpsertSynced(alias.clone()),
+                WorkerCommand::UpsertSynced(promoted),
+            ],
+        );
+        assert_eq!(
+            worker.entry_with_origin(&alias.key).map(|(_, _, origin)| origin),
+            Some(SessionOrigin::SharedPromote),
+            "fixture: the worker holds the promoted replica ({family:?})"
+        );
+        let outcome = coordinator.upsert_synced_session(canonical.clone());
+        assert_eq!(
+            outcome,
+            crate::afxdp::SyncedImportOutcome::Applied,
+            "the canonical import must land beside a promoted alias ({family:?})"
+        );
+        assert!(
+            coordinator.synced_session_contains(&canonical.key),
+            "the canonical row is held ({family:?})"
+        );
+        let canonical_reverse =
+            crate::session::reverse_session_key(&canonical.key, canonical.decision.nat);
+        assert_eq!(
+            coordinator
+                .sessions
+                .synced
+                .lock()
+                .unwrap()
+                .get(&canonical_reverse)
+                .map(|entry| entry.decision.nat.rewrite_dst),
+            Some(Some(canonical.key.src_ip)),
+            "the reverse un-NATs to the client ({family:?})"
+        );
+        assert_eq!(
+            coordinator
+                .sessions
+                .synced
+                .lock()
+                .unwrap()
+                .get(&alias.key)
+                .map(|entry| entry.origin),
+            Some(SessionOrigin::SharedPromote),
+            "the promoted alias stays: it is this node's live authority ({family:?})"
+        );
+    }
+}
+
+/// Review E (LOW): the canonical import decides to retire its alias before
+/// the import and removes it after. A worker that promotes the alias in
+/// between must keep it: the removal re-checks the row under the shared-map
+/// lock. RED before the fold: the retirement removed the now-promoted row
+/// from the shared, BPF and steering maps while the workers kept their
+/// copies. The hook models the promotion's re-publish landing in that
+/// window (RG1 locally active, so the #9714 guard holds the row).
+#[test]
+fn alias_promoted_during_the_canonical_import_is_kept_18531() {
+    for family in [Family::V4, Family::V6] {
+        let forwarding = rg_taking_node_forwarding();
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let mut coordinator = bare_coordinator(&forwarding);
+        let worker_commands = register_worker(&mut coordinator);
+        coordinator
+            .ha
+            .rg_runtime
+            .store(Arc::new(wan_taken_ha(now_secs)));
+        let canonical = exported_forward(&forwarding, family);
+        let alias = alias_of(&canonical);
+        assert_eq!(
+            coordinator.upsert_synced_session(alias.clone()),
+            crate::afxdp::SyncedImportOutcome::Applied,
+            "fixture: the node holds the flow only as the alias ({family:?})"
+        );
+        let promoted_in_window = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook_ran = Arc::clone(&promoted_in_window);
+        let alias_key = alias.key.clone();
+        coordinator
+            .session_domain()
+            .set_synced_delete_after_clone_hook_for_test(move |domain, key| {
+                if *key == alias_key
+                    && let Some(row) = domain.sessions.synced.lock().unwrap().get_mut(key)
+                {
+                    row.origin = SessionOrigin::SharedPromote;
+                    hook_ran.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        assert_eq!(
+            coordinator.upsert_synced_session(canonical.clone()),
+            crate::afxdp::SyncedImportOutcome::Applied,
+            "the canonical import lands ({family:?})"
+        );
+        assert!(
+            promoted_in_window.load(std::sync::atomic::Ordering::Relaxed),
+            "fixture: the promotion landed between the decision and the removal ({family:?})"
+        );
+        assert!(
+            coordinator.synced_session_contains(&canonical.key),
+            "the canonical row is held ({family:?})"
+        );
+        assert_eq!(
+            coordinator
+                .sessions
+                .synced
+                .lock()
+                .unwrap()
+                .get(&alias.key)
+                .map(|entry| entry.origin),
+            Some(SessionOrigin::SharedPromote),
+            "the alias promoted in the window stays in the shared map ({family:?})"
+        );
+        assert!(
+            !worker_commands.lock().unwrap().iter().any(|command| matches!(
+                command,
+                WorkerCommand::DeleteSynced(key) | WorkerCommand::DeleteLocalControl(key)
+                    if *key == alias.key
+            )),
+            "no worker is told to delete the promoted alias ({family:?})"
+        );
+    }
+}
+
+/// A pool translation address: answered by proxy ARP, configured on no
+/// interface, so it is not a local address.
+fn pool_addr(family: Family) -> IpAddr {
+    match family {
+        Family::V4 => IpAddr::V4(Ipv4Addr::new(172, 16, 80, 7)),
+        Family::V6 => IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x7)),
+    }
+}
+
+/// Review F (NIT, mutant G2): the synthesis arm's guard is not gated on the
+/// target lookup answering `LocalDelivery`. A pool alias's reverse un-NATs to
+/// the pool address, which is not local, so its target lookup answers the WAN
+/// neighbor path, not `LocalDelivery`. It must still be handed to the peer
+/// (or held `HAInactive` on a fabric arrival), never sent toward the pool
+/// address on the WAN. v4 and v6, on the node that took RG1.
+#[test]
+fn pool_alias_reverse_is_handed_to_peer_at_synthesis_18531() {
+    let owner_fwd = fw1_owner_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    for family in [Family::V4, Family::V6] {
+        let mut canonical = exported_forward(&owner_fwd, family);
+        canonical.decision.nat.rewrite_src = Some(pool_addr(family));
+        for fabric in [false, true] {
+            let mut alias = alias_of(&canonical);
+            alias.metadata.fabric_ingress = fabric;
+            let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+                &owner_fwd,
+                &wan_taken_ha(now_secs),
+                &Arc::new(ShardedNeighborMap::default()),
+                &alias,
+                now_secs,
+            )
+            .expect("production reverse synthesis must produce the companion");
+            assert_eq!(
+                reverse.decision.nat.rewrite_dst,
+                Some(pool_addr(family)),
+                "fixture: the pool alias's reverse un-NATs to the pool address ({family:?})"
+            );
+            let expected = if fabric {
+                ForwardingDisposition::HAInactive
+            } else {
+                ForwardingDisposition::FabricRedirect
+            };
+            assert_eq!(
+                reverse.decision.resolution.disposition, expected,
+                "the pool alias's reverse is the peer's ({family:?} fabric={fabric})"
+            );
+        }
+    }
 }

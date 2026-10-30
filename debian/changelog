@@ -1,7 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
-  * Userspace dataplane: a peer-synced flow's original-tuple row now always
-    wins the import over its forward-wire alias (the alias no longer books
-    the translation, is refused while its original row is held, and is
+  * Userspace dataplane: a peer-synced flow's original-tuple row now wins
+    the import over its forward-wire alias (neither the alias nor a local
+    promotion of it books the translation; the alias is refused, under its
+    own superseded-alias reason, while its original row is held, and is
     retired when that row arrives), so a node no longer ends up holding a
     flow only as the alias and losing it when the LAN side fails over to it
     (#18531).
