@@ -552,6 +552,8 @@ pub(crate) struct BindingStatus {
     pub config_gen_mismatches: u64,
     #[serde(rename = "fib_gen_mismatches", default)]
     pub fib_gen_mismatches: u64,
+    #[serde(rename = "generation_grace_admits", default)]
+    pub generation_grace_admits: u64,
     #[serde(rename = "unsupported_packets", default)]
     pub unsupported_packets: u64,
     #[serde(rename = "flow_cache_hits", default)]

@@ -124,6 +124,7 @@ type BindingStatus struct {
 	ExceptionPackets            uint64 `json:"exception_packets,omitempty"`
 	ConfigGenMismatches         uint64 `json:"config_gen_mismatches,omitempty"`
 	FIBGenMismatches            uint64 `json:"fib_gen_mismatches,omitempty"`
+	GenerationGraceAdmits       uint64 `json:"generation_grace_admits,omitempty"`
 	UnsupportedPackets          uint64 `json:"unsupported_packets,omitempty"`
 	FlowCacheHits               uint64 `json:"flow_cache_hits,omitempty"`
 	FlowCacheMisses             uint64 `json:"flow_cache_misses,omitempty"`

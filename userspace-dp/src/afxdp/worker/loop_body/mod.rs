@@ -881,6 +881,16 @@ pub(crate) fn worker_loop(
             last_route_change_alarm_ns = loop_now_ns;
         }
         if live_validation != validation {
+            // #18560: packets stamped with the pair this worker is leaving
+            // keep arriving until Go rewrites `userspace_ctrl`; admit them.
+            let grace = crate::afxdp::MetadataGenerationGrace::after_advance(
+                validation,
+                live_validation,
+                loop_now_ns,
+            );
+            for binding in bindings.iter_mut() {
+                binding.metadata_generation_grace = grace;
+            }
             validation = live_validation;
         }
         if let Some(new_forwarding) = new_forwarding_opt {

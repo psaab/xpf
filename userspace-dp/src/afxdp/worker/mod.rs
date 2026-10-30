@@ -150,6 +150,9 @@ pub(crate) struct BindingWorker {
     /// `WorkerScratch`. Field semantics unchanged; access via
     /// `binding.scratch.scratch_X`.
     pub(crate) scratch: WorkerScratch,
+    /// #18560: previous-generation admit window, set by the worker loop when
+    /// it advances its validation (`MetadataGenerationGrace`).
+    pub(crate) metadata_generation_grace: crate::afxdp::MetadataGenerationGrace,
     /// #8274 step 3: per-worker WireGuard decap output buffer.
     ///
     /// Separate from `WorkerScratch` and behind a `RefCell` on purpose. The
@@ -605,6 +608,7 @@ impl BindingWorker {
                 cos_prepared_batch_scratch: VecDeque::new(),
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
+            metadata_generation_grace: crate::afxdp::MetadataGenerationGrace::default(),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             // GEMINI-NEXT.md Section 3 cold start: lazy allocation. The
@@ -766,6 +770,7 @@ impl BindingWorker {
                 cos_prepared_batch_scratch: VecDeque::new(),
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
+            metadata_generation_grace: crate::afxdp::MetadataGenerationGrace::default(),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),
@@ -893,6 +898,7 @@ impl BindingWorker {
                 cos_prepared_batch_scratch: VecDeque::new(),
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
+            metadata_generation_grace: crate::afxdp::MetadataGenerationGrace::default(),
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
             pending_neigh: super::types::FastMap::default(),
@@ -1506,6 +1512,7 @@ pub(crate) struct BindingLiveSnapshot {
     pub(crate) exception_packets: u64,
     pub(crate) config_gen_mismatches: u64,
     pub(crate) fib_gen_mismatches: u64,
+    pub(crate) generation_grace_admits: u64,
     pub(crate) unsupported_packets: u64,
     pub(crate) flow_cache_hits: u64,
     pub(crate) flow_cache_misses: u64,

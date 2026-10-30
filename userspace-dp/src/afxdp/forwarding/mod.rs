@@ -616,6 +616,10 @@ mod tests_noroute_capped_import_9054;
 #[cfg(test)]
 #[path = "tests_noroute_unresolved_16021.rs"]
 mod tests_noroute_unresolved_16021;
+// #18560: the post-advance metadata generation grace.
+#[cfg(test)]
+#[path = "tests_generation_grace_18560.rs"]
+mod tests_generation_grace_18560;
 // #18517: split-node bare-gateway binding (peer-owned rows only, ECMP, VRF,
 // fabric fate) and the #15917 gateway-owner terminal attribution.
 #[cfg(test)]
