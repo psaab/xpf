@@ -89,8 +89,10 @@ iperf_throughput_json_verdict() {
 #   harness SIGTERMs it. iperf3-json-metrics.py records the resulting
 #   json-stream `error` event as `client_error`, and no longer scores the run
 #   as a completed 0.0 Gbps collapse. That old score was a FAIL under the
-#   wrong name, and this cell is what keeps the run red. It reads only the
-#   producer's field and does not re-derive the condition from the raw log.
+#   wrong name, and this cell is what keeps the run red. A client killed
+#   outright (SIGKILL after the TERM grace) leaves neither an `error` event nor
+#   an `end` block, so only a COMPLETED run passes. It reads the producer's
+#   fields and does not re-derive the condition from the raw log.
 #   Prints exactly one PASS, FAIL or VOID line.
 iperf_client_interrupt_verdict() {
 	local metrics="$1" detail rc=0
@@ -111,13 +113,20 @@ value = metrics["client_error"]
 if not isinstance(value, str):
     print("client_error is malformed")
     sys.exit(2)
-print(value)
-sys.exit(1 if value else 0)
+completed = metrics.get("completed")
+if type(completed) is not bool:
+    print("completed is absent or malformed")
+    sys.exit(2)
+if value:
+    print(value)
+    sys.exit(1)
+sys.exit(0 if completed else 3)
 PY
 ) || rc=$?
 	case "$rc" in
-	0) printf 'PASS iperf3 client exited on its own (no interrupt event)\n' ;;
+	0) printf 'PASS iperf3 client exited on its own (end event, no interrupt)\n' ;;
 	1) printf 'FAIL iperf3 client did not exit on its own and was interrupted (%s): its end-of-test exchange never completed — a stuck stream holds it; throughput is the measured-interval mean (#18543)\n' "$detail" ;;
+	3) printf 'FAIL iperf3 client left no end event: it was killed outright (SIGKILL after the TERM grace) or had not finished when its log was captured; throughput is the measured-interval mean (#18543)\n' ;;
 	*) printf 'VOID iperf3 client interrupt evidence unavailable: %s\n' "${detail:-metrics check failed}" ;;
 	esac
 }

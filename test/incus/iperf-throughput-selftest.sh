@@ -708,7 +708,7 @@ ok "#18543: an interrupted client is completed=false at its measured-interval ra
 
 iperf_client_interrupt_verdict "$interrupted_metrics" | grep -q '^FAIL iperf3 client did not exit on its own and was interrupted (interrupt - the client has terminated by signal Terminated(15))' \
 	|| bad "#18543: the interrupt cell must FAIL and name the interrupt"
-iperf_client_interrupt_verdict "$completed_twin_metrics" | grep -qx 'PASS iperf3 client exited on its own (no interrupt event)' \
+iperf_client_interrupt_verdict "$completed_twin_metrics" | grep -qx 'PASS iperf3 client exited on its own (end event, no interrupt)' \
 	|| bad "#18543: a client that exited on its own must PASS the interrupt cell"
 printf '{"ok": true}\n' >"${fixture_dir}/no-client-error.metrics.json"
 iperf_client_interrupt_verdict "${fixture_dir}/no-client-error.metrics.json" | grep -qx 'VOID iperf3 client interrupt evidence unavailable: metrics carry no client_error field' \
@@ -717,7 +717,48 @@ iperf_client_interrupt_verdict "${fixture_dir}/absent.metrics.json" | grep -q '^
 	|| bad "#18543: unreadable metrics must VOID, never PASS"
 [[ $(iperf_client_interrupt_verdict "$interrupted_metrics" | wc -l) -eq 1 ]] \
 	|| bad "#18543: the interrupt cell must print exactly one line"
+printf '{"ok": true, "client_error": ""}\n' >"${fixture_dir}/no-completed.metrics.json"
+iperf_client_interrupt_verdict "${fixture_dir}/no-completed.metrics.json" | grep -qx 'VOID iperf3 client interrupt evidence unavailable: completed is absent or malformed' \
+	|| bad "#18543: metrics without a completed flag must VOID, never PASS"
 ok "#18543: interrupt cell is total — FAIL interrupted, PASS on its own, VOID without evidence"
+
+# The KILL half of the stop helper's TERM-then-KILL escalation. A client that
+# outlives the TERM grace is SIGKILLed and writes nothing more: no closing
+# interval, no `error` event, no `end` block. Before this cell it scored
+# avg_gbps=0.0 and the interrupt cell called it "exited on its own".
+killed_fixture="${fixture_dir}/killed.jsonl"
+python3 - "$interrupted_fixture" "$killed_fixture" <<'PY'
+import json
+import pathlib
+import sys
+
+events = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+kept = [
+    e for e in events
+    if e["event"] in ("start", "interval") and not (e["event"] == "interval" and e["data"]["sum"]["start"] >= 20)
+]
+assert len(kept) == len(events) - 3, (len(kept), len(events))
+pathlib.Path(sys.argv[2]).write_text("\n".join(json.dumps(e) for e in kept) + "\n", encoding="utf-8")
+PY
+killed_metrics="${fixture_dir}/killed.metrics.json"
+python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$killed_fixture" \
+	--event-sec 5 --event-sec 15 >"$killed_metrics"
+python3 - "$killed_metrics" "$completed_twin_metrics" <<'PY' || bad "#18543: a SIGKILLed client must be scored at its measured rate, never 0.0"
+import json
+import sys
+
+k = json.load(open(sys.argv[1]))
+t = json.load(open(sys.argv[2]))
+assert k["completed"] is False and k["client_error"] == "", (k["completed"], k["client_error"])
+assert abs(k["avg_gbps"] - 21.6) < 1e-9 and k["avg_source"] == "intervals", (k["avg_gbps"], k["avg_source"])
+assert k["observed_end_sec"] == 20.0, k["observed_end_sec"]
+for key in ("zero_streams_total", "stream_zero_intervals_total", "zero_intervals_total",
+            "collapse_detected", "interval_gbps", "peak_gbps"):
+    assert k[key] == t[key], (key, k[key], t[key])
+PY
+iperf_client_interrupt_verdict "$killed_metrics" | grep -q '^FAIL iperf3 client left no end event: it was killed outright' \
+	|| bad "#18543: a SIGKILLed client (no end, no error) must FAIL the interrupt cell, never PASS"
+ok "#18543: a SIGKILLed client is scored at its measured-interval rate and fails the interrupt cell"
 
 interrupted_smoke_verdicts=$(MOCK_CAPTURE_FILE="$interrupted_fixture" \
 	ha_smoke_iperf_verdicts /fixture/interrupted.jsonl 20 4 1 5 15)
@@ -727,11 +768,35 @@ grep -q '^FAIL iperf3 client did not exit on its own and was interrupted' <<<"$i
 	|| bad "#18543: the shared smoke validator must keep the interrupted run red under its own name"
 twin_smoke_verdicts=$(MOCK_CAPTURE_FILE="$completed_twin_fixture" \
 	ha_smoke_iperf_verdicts /fixture/twin.jsonl 20 4 1 5 15)
-grep -qx 'PASS iperf3 client exited on its own (no interrupt event)' <<<"$twin_smoke_verdicts" \
+grep -qx 'PASS iperf3 client exited on its own (end event, no interrupt)' <<<"$twin_smoke_verdicts" \
 	|| bad "#18543: the shared smoke validator must pass the interrupt cell for a client that exited"
 grep -qx 'FAIL iperf3 client interrupt: JSON metrics unavailable: fixture capture denied' <<<"$missing_smoke_verdicts" \
 	|| bad "#18543: failed capture must fail the interrupt cell too (one cell per class)"
-ok "#18543: shared smoke validator reports the measured rate and fails the interrupted client by name"
+killed_smoke_verdicts=$(MOCK_CAPTURE_FILE="$killed_fixture" \
+	ha_smoke_iperf_verdicts /fixture/killed.jsonl 20 4 1 5 15)
+grep -q '^PASS iperf3 throughput: 21.600 Gbps' <<<"$killed_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must report a SIGKILLed client's measured rate, not 0.0"
+grep -q '^FAIL iperf3 client left no end event' <<<"$killed_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must fail a SIGKILLed client by name"
+# Callers accept only PASS/FAIL, so the lib maps the cell's VOID to FAIL. Strip
+# the producer's client_error to reach that branch through the real validator.
+strip_python_dir="${fixture_dir}/strip-client-error-python"
+mkdir -p "$strip_python_dir"
+cat >"$strip_python_dir/python3" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == */iperf-json-metrics.py ]]; then
+	"$REAL_PYTHON" "$@" |
+		"$REAL_PYTHON" -c 'import json, sys; m = json.load(sys.stdin); m.pop("client_error", None); print(json.dumps(m))'
+	exit $?
+fi
+exec "$REAL_PYTHON" "$@"
+SH
+chmod +x "$strip_python_dir/python3"
+stripped_smoke_verdicts=$(REAL_PYTHON="$REAL_PYTHON" PATH="$strip_python_dir:$PATH" \
+	MOCK_CAPTURE_FILE="$completed_twin_fixture" ha_smoke_iperf_verdicts /fixture/twin.jsonl 20 4 1 5 15)
+grep -qx 'FAIL iperf3 client interrupt evidence unavailable: metrics carry no client_error field' <<<"$stripped_smoke_verdicts" \
+	|| bad "#18543: the shared smoke validator must map missing interrupt evidence to FAIL, never VOID or PASS"
+ok "#18543: shared smoke validator reports the measured rate and fails interrupted and killed clients by name"
 
 
 
@@ -768,6 +833,12 @@ grep -Fq -- '--crash-at "${events[$((event_number - 1))]}"' "$ORACLE_LIB" \
 awk '/interrupt_verdict=\$\(iperf_client_interrupt_verdict "\$LOCAL_IPERF_METRICS"\)/,/^\tesac$/' \
 	"${SCRIPT_DIR}/test-failover.sh" | grep -qE '^[[:space:]]+FAIL\\ \*\) fail ' \
 	|| bad "test-failover.sh does not run the #18543 interrupt cell with a FAIL dispatch"
+# The enclosing guard too: for a stuck-at-end run with healthy streams this cell
+# is the only FAIL (completion and throughput both pass on the interval mean),
+# so a dead guard would turn that run green.
+awk '{ if (index($0, "interrupt_verdict=$(iperf_client_interrupt_verdict \"$LOCAL_IPERF_METRICS\")")) { print prev; found=1 } prev=$0 } END { exit !found }' \
+	"${SCRIPT_DIR}/test-failover.sh" | grep -qxF 'if [[ "$iperf_gate_ok" == true ]]; then' \
+	|| bad "test-failover.sh does not run the #18543 interrupt cell under the gate-ok guard"
 
 SMOKES=(test-double-failover.sh test-chained-crash.sh test-active-active.sh test-stress-failover.sh test-rolling-upgrade.sh)
 for smoke in "${SMOKES[@]}"; do

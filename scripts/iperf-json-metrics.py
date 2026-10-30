@@ -229,9 +229,11 @@ def summarize(path, args):
         duration = end_s - start
         if duration >= args.min_full_interval_sec:
             full_intervals.append(bps / 1e9)
-    if client_error:
-        # The stub's sum_received is zeros and its sum_sent is diluted by the
-        # hung time, so average the measured intervals instead.
+    if client_error or not end:
+        # An interrupted client's stub has zero sum_received and a sum_sent
+        # diluted by the hung time. A client killed outright (SIGKILL after the
+        # TERM grace) leaves no end block at all. Either way, the measured
+        # intervals are the only honest rate.
         measured_seconds = sum(max(0.0, end_s - start) for _, start, end_s in intervals)
         if measured_seconds > 0:
             summary["avg_gbps"] = (
