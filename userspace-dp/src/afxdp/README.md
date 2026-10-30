@@ -2034,6 +2034,48 @@ are real but their count is a property of the fixture population as much as of
 the shape.) Shape (ii) is the one #8171 already established for the entries
 themselves, and it is empirically the cheap one.
 
+## Established cache-hit cost (#18533)
+
+Two per-packet costs on the established flow-cache hit path, outside the
+session table, were removed in #18533 (the session-table half is in
+`session/README.md`, "Established cache-hit cost"):
+
+- **Zero-hop-limit gate (`poll_descriptor/mod.rs`, #16841).** The gate runs
+  before decap/session/cache for every valid packet. Its locality verdict
+  is a full FIB walk (`lookup_forwarding_resolution`: table-name string
+  compares, connected-prefix and route scans), and the #16841 call site
+  computed it eagerly, so every IPv4 packet and every ordinary IPv6 packet
+  paid it — the `lookup_forwarding_resolution_v4_inner` self time plus
+  `memcmp` (~5.7% of worker cycles in the loss -P8 profile) that the
+  profile charged to `poll_binding_process_descriptor_with_injection`.
+  `zero_hop_limit_local_drop` now takes the verdict as a closure and runs it
+  last, after the knob and `packet_hop_limit_v6 == Some(0)` checks; only a
+  hop-limit-0 IPv6 packet walks the FIB. Verdicts are unchanged.
+- **One flow-cache lookup per hit (`poll_descriptor/flow_cache_hit.rs`,
+  #16217 fold B6).** The fabric-adoption mark revalidation used a
+  side-effect-free `peek_entry` before the real lookup: a second set hash
+  and way scan on every hit. The lookup matches the same identity (key,
+  binding-substituted ingress, logical ingress) and writes neither input
+  (`fabric_established`, `decision.resolution`), so the revalidation now
+  reads the entry the lookup returned and `peek_entry` is gone.
+
+Cells: `tests_icmp_zero_hop_15707.rs`
+`zero_hop_gate_resolves_locality_only_for_ipv6_hop_limit_zero_18533` (the
+helper evaluates the closure only for hop-limit-0 IPv6 with the knob unset),
+`poll_descriptor_structure_13081_tests.rs`
+`zero_hop_gate_fib_walk_stays_in_the_lazy_closure_18533` (the call site keeps
+the walk inside the closure), and `flow_cache_hit_tests.rs`
+`live_established_cache_hit_hashes_the_flow_key_twice_18533` (the whole live
+hit stage hashes the flow key twice: flow-cache set index + session record).
+
+Still on the per-hit path and NOT addressed here: the HA validator's
+`forward_candidate_destination_owner_departed` probe
+(`ForwardingState::connected_owner_index_lookup`, ~1.7% in the same profile)
+on every ForwardCandidate hit of a clustered node, and the per-flow FIB
+lookup `cached_flow_decision_invalid_reason_for_flow` makes for every cached
+FabricRedirect hit. Both came in with #16215/#16217 and need a cached
+destination-owner RG rather than a reorder; tracked in #18534.
+
 ## Hot-path constants
 
 - `RX_BATCH_SIZE = 64`

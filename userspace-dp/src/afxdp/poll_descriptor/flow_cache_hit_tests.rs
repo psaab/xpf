@@ -982,6 +982,9 @@ struct StageRun {
     /// both severable with the whole crate green — the same "built and dropped
     /// unread" shape `dbg` and `counters` were in before #6304 bound them.
     sessions: SessionTable,
+    /// #18533: `SessionKey` hashes the stage call performed (flow-cache set
+    /// index + session-table index lookups), measured around that call only.
+    session_key_hashes: u64,
 }
 
 /// Drive the LIVE call site once.
@@ -1231,6 +1234,7 @@ fn run_stage_seeded(
     // admission primitive, so the reset has to sit immediately before the call
     // and the read immediately after it.
     crate::afxdp::binding_state::pending_tx_admission_attempts_reset();
+    let hashes_before = crate::session::SESSION_KEY_HASHES_FOR_TEST.with(|count| count.get());
     let mut inline_tx = InlineTxBindings {
         ingress: InlineTxTarget {
             tx_pipeline: &mut tx_pipeline_state,
@@ -1272,6 +1276,8 @@ fn run_stage_seeded(
         &mut last_learned_neighbor,
         &mut telemetry,
     );
+    let session_key_hashes =
+        crate::session::SESSION_KEY_HASHES_FOR_TEST.with(|count| count.get()) - hashes_before;
     let admission_attempts = crate::afxdp::binding_state::pending_tx_admission_attempts();
     // #5190: snapshot the cache tallies BEFORE the observed-bytes probe
     // below — that probe calls `lookup`, which bumps hits/misses itself.
@@ -1338,6 +1344,7 @@ fn run_stage_seeded(
         tx_frame,
         cached_observed_bytes,
         sessions,
+        session_key_hashes,
     }
 }
 
@@ -2472,6 +2479,32 @@ fn live_flow_cache_callsite_ip_options_frame_takes_the_in_place_path_6304() {
 /// `None` — is not undercounted by the deletion because it never counted.
 /// What regresses is every established-flow hit that FORWARDS, which on a
 /// long-lived permitted flow is nearly all of them.
+/// #18533: an admitted steady-state ESTABLISHED cache hit at the live call
+/// site hashes the flow key exactly twice: the flow-cache set index and the
+/// session table's record lookup. Gone from every packet: the #16217
+/// pre-lookup `peek_entry` (a second set hash and way scan) and the
+/// session lookups the #15947 eager undo, #16042 expected ack and #16223
+/// stamp snapshots added to the deferring probe and its admission emit.
+#[test]
+fn live_established_cache_hit_hashes_the_flow_key_twice_18533() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let run = run_stage(&fixture, &tcp_v4_ack_frame(), 0);
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::Consumed),
+        "premise: the packet is served from the cache"
+    );
+    assert_eq!(run.flow_cache_tallies.0, 1, "premise: one served hit");
+    assert_eq!(
+        run.sessions.handshake_state_wire_for(&test_key()),
+        crate::session::TcpHandshakeState::Established.to_wire(),
+        "premise: the backing session is steady-state established"
+    );
+    assert_eq!(
+        run.session_key_hashes, 2,
+        "flow-cache set index + session record lookup, and nothing else"
+    );
+}
+
 #[test]
 fn live_flow_cache_callsite_accounts_debug_forward_and_tx_6304() {
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);

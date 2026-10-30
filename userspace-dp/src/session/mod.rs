@@ -1916,24 +1916,97 @@ struct ProbeHalfUndo {
     expires_after_ns: u64,
 }
 
+impl ProbeHalfUndo {
+    #[inline]
+    fn of(entry: &SessionEntry) -> Self {
+        Self {
+            counters: entry.counters,
+            observed_tcp_flags: entry.observed_tcp_flags,
+            observed_tos: entry.observed_tos,
+            established: entry.established,
+            handshake_pending: entry.handshake_pending,
+            syn_ack_first: entry.syn_ack_first,
+            last_seen_ns: entry.last_seen_ns,
+            expires_after_ns: entry.expires_after_ns,
+        }
+    }
+}
+
+/// #18533: `node_served_stamps` writes one deferring probe can make — the
+/// completion stamp and the reverse-fold stamp in `probe_hit_inner`, and
+/// nothing else on that path.
+const PROBE_UNDO_STAMP_SLOTS: usize = 2;
+
 /// #15947 fold: exact undo record for one deferring probe, keyed by
 /// the producer's canonical (stored record) key so a translated-alias
 /// packet identity resolves to the same record on admit and on drop.
+///
+/// #18533: captured LAZILY, each piece just before the probe first
+/// mutates it, and from the borrow that mutates it wherever one exists.
+/// The pre-#18533 record was an eager pre-probe snapshot of everything
+/// the probe COULD touch, taken on every packet: the canonical record,
+/// its companion (twice more for a reverse hit), the pressure-shed
+/// membership and four node-served stamp keys, each its own key lookup.
+/// A steady-state established forward hit touches only its own record,
+/// so its undo is now `matched` alone, copied out of the probe's single
+/// `record_by_key_mut` borrow. Restoring state the probe never wrote is
+/// a no-op, so restoring only what was written is the same rollback.
 struct ProbeUndo {
     canonical_key: SessionKey,
-    matched: (SessionKey, ProbeHalfUndo),
+    /// The probed (canonical) record: always written — accounting on a
+    /// forward hit, the reverse-only fallback charge, a refresh, or a
+    /// completion. Captured inside the probe's own borrow.
+    matched: ProbeHalfUndo,
+    /// The companion half, captured before its first write: the forward
+    /// entry a reverse hit charges (inside that charge's borrow), or the
+    /// half a completion establishes/propagates to (one lookup, only on
+    /// the completing packet).
     companion: Option<(SessionKey, ProbeHalfUndo)>,
-    accounting: Option<(SessionKey, ProbeHalfUndo)>,
-    shed_forward_key: SessionKey,
-    shed_was_present: bool,
-    /// #16217 (GLM F1, Final5): pre-probe `node_served_stamps`
-    /// snapshots for every stamp key the completing hit may write,
-    /// so a dropped probe restores them exactly and removes the
-    /// stage-transition marker instead of leaving Established
-    /// evidence behind. Bounded fixed array (at most 4 distinct
-    /// orientations), no heap allocation on the probe path.
-    stamp_snapshots: [Option<(SessionKey, Option<(u8, u64)>)>; 4],
-    stamp_snapshot_len: usize,
+    /// Pressure-shed membership of the pair's forward key, captured only
+    /// on completion — the sole probe-path writer of that index
+    /// (`propagate_tcp_state_to_companion` with `handshake_completed`).
+    shed: Option<(SessionKey, bool)>,
+    /// #16217 (GLM F1, Final5) / #18533: pre-write `node_served_stamps`
+    /// values for each stamp key this probe wrote, returned by the write
+    /// itself (`note_node_served_handshake_prior`), so a dropped probe
+    /// restores them exactly instead of leaving Established evidence
+    /// behind. Bounded fixed array, no heap allocation on the probe path.
+    stamp_snapshots: [Option<(SessionKey, Option<(u8, u64)>)>; PROBE_UNDO_STAMP_SLOTS],
+}
+
+impl ProbeUndo {
+    /// Record the pre-write value of `stamp_key` unless this probe already
+    /// wrote that key (the first capture is the pre-probe value).
+    #[inline]
+    fn capture_stamp(&mut self, stamp_key: &SessionKey, prior: Option<(u8, u64)>) {
+        for slot in &mut self.stamp_snapshots {
+            match slot {
+                Some((key, _)) if key == stamp_key => return,
+                Some(_) => {}
+                None => {
+                    *slot = Some((stamp_key.clone(), prior));
+                    return;
+                }
+            }
+        }
+        debug_assert!(false, "#18533: more stamp writes than PROBE_UNDO_STAMP_SLOTS");
+    }
+}
+
+/// #18533 test instrument: key-index lookups the deferring cache-hit
+/// probe and its admission spend on OPTIONAL work, so a cell can prove the
+/// steady-state established hit skips each one and the transition that
+/// needs it still runs it.
+#[cfg(test)]
+#[derive(Default)]
+struct ProbeCostProbes {
+    /// `handshake_expected_ack` calls (#16042 companion SYN-end lookup).
+    expected_ack: AtomicU64,
+    /// Lookups made only to build the rollback undo (companion record
+    /// and pressure-shed membership on a completing hit).
+    undo_capture: AtomicU64,
+    /// Canonical-key resolutions in `emit_probe_hit_state_update`.
+    emit_resolve: AtomicU64,
 }
 
 pub(crate) struct SessionTable {
@@ -2337,6 +2410,10 @@ pub(crate) struct SessionTable {
     /// cell can prove the established steady-state hit never reaches them.
     #[cfg(test)]
     handshake_progress_probes: AtomicU64,
+    /// #18533 test instrument: optional lookups on the deferring cache-hit
+    /// probe path (see `ProbeCostProbes`).
+    #[cfg(test)]
+    probe_cost_probes: ProbeCostProbes,
     /// #16217 (ct-slice HA emit): per-forward-key emit marks for the
     /// ct-slice stage/count Update vehicle. One entry per forward row
     /// this worker's ct-slice has collected; bounded by the forward
@@ -2524,6 +2601,8 @@ impl SessionTable {
             handshake_relay_outbox: Vec::with_capacity(16),
             #[cfg(test)]
             handshake_progress_probes: AtomicU64::new(0),
+            #[cfg(test)]
+            probe_cost_probes: ProbeCostProbes::default(),
             ct_slice_emit_marks: HashMap::with_hasher(state),
             // #4915: monotonic session-id counter starts at 1 (0 = "unknown"
             // sentinel on the wire); the node/worker namespace defaults to 0
@@ -3928,6 +4007,21 @@ impl SessionTable {
         self.handshake_progress_probes
             .load(AtomicOrdering::Relaxed)
     }
+    /// #18533 test instrument: `(expected_ack, undo_capture, emit_resolve)`
+    /// lookup counts — see `ProbeCostProbes`.
+    #[cfg(test)]
+    pub(crate) fn probe_cost_counts_for_test(&self) -> (u64, u64, u64) {
+        (
+            self.probe_cost_probes.expected_ack.load(AtomicOrdering::Relaxed),
+            self.probe_cost_probes.undo_capture.load(AtomicOrdering::Relaxed),
+            self.probe_cost_probes.emit_resolve.load(AtomicOrdering::Relaxed),
+        )
+    }
+    /// #18533 test view: undo records awaiting admission or rollback.
+    #[cfg(test)]
+    pub(crate) fn pending_probe_undo_len_for_test(&self) -> usize {
+        self.pending_probe_undo.len()
+    }
     #[cfg(test)]
     pub(crate) fn expiry_key_index_probe_count_for_test(&self) -> u64 {
         self.expiry_key_index_probes
@@ -4265,6 +4359,27 @@ impl SessionTable {
     /// Emit the HA Update withheld by
     /// [`Self::probe_hit_deferring_state_update`] after TX admission.
     pub fn emit_probe_hit_state_update(&mut self, key: &SessionKey) {
+        // #18533: steady state. Nothing is withheld, and the only undo is
+        // the one this packet's own probe just recorded under its canonical
+        // key — which IS the packet key on every non-alias hit. Consume it
+        // without resolving `key` through the session index (the resolution
+        // below was a key hash on every admitted cache-hit packet). Any other
+        // shape — a withheld Update, an alias packet key, an undo left by an
+        // unadmitted earlier probe — takes the resolving path unchanged.
+        if self.pending_probe_state_updates.is_empty() {
+            match self.pending_probe_undo.as_slice() {
+                [] => return,
+                [only] if only.canonical_key == *key => {
+                    self.pending_probe_undo.clear();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        #[cfg(test)]
+        self.probe_cost_probes
+            .emit_resolve
+            .fetch_add(1, AtomicOrdering::Relaxed);
         // #15947 fold: resolve the packet identity to the producer's
         // canonical stored key first, so a translated-alias admission
         // publishes (and consumes) the same record the probe queued.
@@ -4348,8 +4463,7 @@ impl SessionTable {
             return had_deferred;
         };
         let undo = self.pending_probe_undo.remove(pos);
-        let restore = |table: &mut Self, half: &(SessionKey, ProbeHalfUndo)| {
-            let (half_key, snap) = half;
+        let restore = |table: &mut Self, half_key: &SessionKey, snap: &ProbeHalfUndo| {
             let mut seen = snap.last_seen_ns;
             if let Some(entry) = table.entry_by_key_mut(half_key) {
                 entry.counters = snap.counters;
@@ -4369,22 +4483,20 @@ impl SessionTable {
             }
             table.push_to_wheel(half_key, seen);
         };
-        restore(self, &undo.matched);
-        if let Some(companion) = &undo.companion {
-            restore(self, companion);
+        // #18533: the undo holds exactly the pieces this probe wrote (see
+        // `ProbeUndo`); the pre-#18533 `accounting` snapshot always
+        // de-duplicated onto `matched` or `companion` and is gone.
+        restore(self, &undo.canonical_key, &undo.matched);
+        if let Some((companion_key, snap)) = &undo.companion {
+            restore(self, companion_key, snap);
         }
-        if let Some(accounting) = &undo.accounting {
-            if accounting.0 != undo.matched.0
-                && undo.companion.as_ref().map(|c| &c.0) != Some(&accounting.0)
-            {
-                restore(self, accounting);
+        if let Some((shed_forward_key, was_present)) = &undo.shed {
+            if *was_present {
+                self.pressure_shed_unreplied
+                    .insert(shed_forward_key.clone(), ());
+            } else {
+                self.pressure_shed_unreplied.remove(shed_forward_key);
             }
-        }
-        if undo.shed_was_present {
-            self.pressure_shed_unreplied
-                .insert(undo.shed_forward_key.clone(), ());
-        } else {
-            self.pressure_shed_unreplied.remove(&undo.shed_forward_key);
         }
         // #16217 (GLM F1): a dropped probe must leave NO Established
         // evidence behind. Remove the stage-transition marker the
@@ -4395,7 +4507,7 @@ impl SessionTable {
         // completing ACK still advanced node-level evidence.
         self.pending_probe_stage_transitions
             .retain(|(k, _, _)| k != &undo.canonical_key);
-        for slot in undo.stamp_snapshots.iter().take(undo.stamp_snapshot_len) {
+        for slot in &undo.stamp_snapshots {
             let Some((stamp_key, prior)) = slot else {
                 continue;
             };
@@ -4463,9 +4575,17 @@ impl SessionTable {
         ack: Option<u32>,
     ) -> bool {
         let mut completing: Option<(SessionKey, crate::nat::NatDecision)> = None;
-        // #16042 fold: expected ack only for pending pairs — the helper
-        // returns None without the companion probe otherwise.
-        let expected_ack = self.handshake_expected_ack(key);
+        // #18533: the classic completion shape seen under the record borrow
+        // below — every conjunct except the #16042 ack check — with the
+        // canonical key, NAT and pre-completion wire state. The expected ack
+        // lives on the COMPANION record, so it is resolved after the borrow
+        // and only for this shape: an established, non-pending row (every
+        // steady-state packet) never pays that lookup. Pre-#18533 it ran
+        // first, on every packet, a record lookup only to return `None`.
+        let mut classic_candidate: Option<(SessionKey, crate::nat::NatDecision, u8, u8)> = None;
+        // #16223 progress shape (see below): armed after the ack verdict,
+        // because a refused classic candidate may still carry evidence.
+        let mut progress_shape = false;
         // #16223: split-path evidence of handshake progress observed on
         // the COMPANION half (see `cache_hit_handshake_progress`).
         let mut companion_progress = false;
@@ -4478,101 +4598,25 @@ impl SessionTable {
         let mut close_class_before = 0u8;
         let mut canonical_refresh_key: Option<SessionKey> = None;
         let mut reverse_fold: Option<(SessionKey, crate::nat::NatDecision)> = None;
-        // #15947 fold: capture the exact pre-probe state before any
-        // mutation, but only for the deferring arm (the sole caller
-        // that can roll back). Uses the non-counting revalidation
-        // resolver (record_by_key would count a spurious miss and
-        // perturb the #7919 counters the stage tests assert on), so a
-        // translated-alias packet identity keys the record by the
-        // producer's canonical stored key.
+        // #15947 fold / #18533: the deferring arm's rollback record (it is
+        // the sole caller that can roll back). The probed record is copied
+        // out of the borrow below BEFORE it is mutated; every other piece is
+        // added just before its first write (see `ProbeUndo`). The probed
+        // record's direction and NAT are kept for the completion capture.
         let mut probe_undo: Option<ProbeUndo> = None;
-        if !emit_state_update {
-            if let Some(record) = self.revalidation_record(key) {
-                let matched_key = record.key.clone();
-                let snap = |e: &SessionEntry| ProbeHalfUndo {
-                    counters: e.counters,
-                    observed_tcp_flags: e.observed_tcp_flags,
-                    observed_tos: e.observed_tos,
-                    established: e.established,
-                    handshake_pending: e.handshake_pending,
-                    syn_ack_first: e.syn_ack_first,
-                    last_seen_ns: e.last_seen_ns,
-                    expires_after_ns: e.expires_after_ns,
-                };
-                let matched_snap = snap(&record.entry);
-                let is_reverse = record.entry.metadata.is_reverse;
-                let nat = record.entry.decision.nat;
-                let companion_key = reverse_session_key(&matched_key, nat);
-                let companion = if companion_key != matched_key {
-                    self.revalidation_record(&companion_key).map(|r| (companion_key.clone(), snap(&r.entry)))
-                } else {
-                    None
-                };
-                let accounting = if is_reverse {
-                    // Mirror probe_hit_inner's reverse fold exactly:
-                    // forward companion if present, else the matched
-                    // reverse entry itself (reverse-only sessions).
-                    if self.revalidation_record(&companion_key).is_some() {
-                        self.revalidation_record(&companion_key)
-                            .map(|r| (companion_key.clone(), snap(&r.entry)))
-                    } else {
-                        Some((matched_key.clone(), matched_snap))
-                    }
-                } else {
-                    Some((matched_key.clone(), matched_snap))
-                };
-                let shed_forward_key = if is_reverse {
-                    companion_key.clone()
-                } else {
-                    matched_key.clone()
-                };
-                let shed_was_present =
-                    self.pressure_shed_unreplied.contains_key(&shed_forward_key);
-                // #16217 (GLM F1, Final5): snapshot every node-served
-                // stamp this probe may write (forward orientations of
-                // the matched + companion keys) BEFORE any mutation.
-                // Bounded stack array, direct == dedup, no heap
-                // allocation and no format/sort on this path.
-                let mut stamp_snapshots: [Option<(SessionKey, Option<(u8, u64)>)>; 4] =
-                    [None, None, None, None];
-                let mut stamp_snapshot_len = 0usize;
-                {
-                    let candidates = [
-                        Some(matched_key.clone()),
-                        Some(reverse_session_key(&matched_key, nat)),
-                        (companion_key != matched_key).then(|| companion_key.clone()),
-                        (companion_key != matched_key)
-                            .then(|| reverse_session_key(&companion_key, nat)),
-                    ];
-                    for cand in candidates.into_iter().flatten() {
-                        if stamp_snapshots[..stamp_snapshot_len]
-                            .iter()
-                            .any(|slot| slot.as_ref().is_some_and(|(k, _)| *k == cand))
-                        {
-                            continue;
-                        }
-                        if stamp_snapshot_len < stamp_snapshots.len() {
-                            let v = self.node_served_stamps.get(&cand).copied();
-                            stamp_snapshots[stamp_snapshot_len] = Some((cand, v));
-                            stamp_snapshot_len += 1;
-                        }
-                    }
-                }
-                probe_undo = Some(ProbeUndo {
-                    canonical_key: matched_key.clone(),
-                    matched: (matched_key, matched_snap),
-                    companion,
-                    accounting,
-                    shed_forward_key,
-                    shed_was_present,
-                    stamp_snapshots,
-                    stamp_snapshot_len,
-                });
-            }
-        }
-        match self.record_by_key_mut(key) {
+        let (probed_is_reverse, probed_nat) = match self.record_by_key_mut(key) {
             Some(record) => {
                 let entry = &mut record.entry;
+                let probed = (entry.metadata.is_reverse, entry.decision.nat);
+                if !emit_state_update {
+                    probe_undo = Some(ProbeUndo {
+                        canonical_key: record.key.clone(),
+                        matched: ProbeHalfUndo::of(entry),
+                        companion: None,
+                        shed: None,
+                        stamp_snapshots: [None, None],
+                    });
+                }
                 let age = now_ns.saturating_sub(entry.last_seen_ns);
                 if age > entry.expires_after_ns {
                     // #16223: this half idle-crossed, but a live
@@ -4594,10 +4638,9 @@ impl SessionTable {
                 // #14939 handshake completion (mirrors
                 // `touch_if_stale_with_payload`): not a keepalive refresh,
                 // so it applies even inside the throttle window.
-                // #16042: a known-but-wrong ack must not complete here.
-                let ack_valid = Self::handshake_ack_valid(expected_ack, ack);
+                // #16042: a known-but-wrong ack must not complete here —
+                // judged after the borrow (#18533, above).
                 if entry.handshake_pending
-                    && ack_valid
                     && !entry.closing
                     && matches!(key.protocol, PROTO_TCP)
                     && crate::tcp_flags::has_ack(tcp_flags)
@@ -4605,10 +4648,12 @@ impl SessionTable {
                     && !is_closing(tcp_flags)
                     && (entry.syn_ack_first == entry.metadata.is_reverse)
                 {
-                    handshake_state_before =
-                        entry.tcp_handshake_state_wire(key.protocol);
-                    close_class_before = entry.tcp_close_class_wire();
-                    completing = Some((record.key.clone(), entry.decision.nat));
+                    classic_candidate = Some((
+                        record.key.clone(),
+                        entry.decision.nat,
+                        entry.tcp_handshake_state_wire(key.protocol),
+                        entry.tcp_close_class_wire(),
+                    ));
                 }
                 // #16223: split-RG / fabric-ingress / replica rows never
                 // observe the completing segment on the pending half:
@@ -4628,15 +4673,11 @@ impl SessionTable {
                 // its first check, so arming it for every established
                 // payload packet only paid that refusal's lookup per
                 // packet (the gate `touch_if_stale_with_ack` already had).
-                if completing.is_none()
-                    && !entry.closing
+                progress_shape = !entry.closing
                     && matches!(key.protocol, PROTO_TCP)
                     && !is_closing(tcp_flags)
                     && (!entry.established || entry.handshake_pending)
-                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len)
-                {
-                    companion_progress = true;
-                }
+                    && crate::tcp_flags::has_payload_progress(tcp_flags, payload_len);
                 let refresh_after = entry.expires_after_ns.max(SESSION_KEEPALIVE_DIVISOR)
                     / SESSION_KEEPALIVE_DIVISOR;
                 let payload_progress = entry.closing
@@ -4659,8 +4700,21 @@ impl SessionTable {
                     reverse_fold = Some((record.key.clone(), entry.decision.nat));
                 }
                 }
+                probed
             }
             None => return false,
+        };
+        if let Some((candidate_key, candidate_nat, state_before, class_before)) = classic_candidate {
+            // #16042: the classic arm completes only on the expected ack (or
+            // an unknown expectation / unparsed ack, which fails open).
+            if Self::handshake_ack_valid(self.handshake_expected_ack(key), ack) {
+                handshake_state_before = state_before;
+                close_class_before = class_before;
+                completing = Some((candidate_key, candidate_nat));
+            }
+        }
+        if completing.is_none() && progress_shape {
+            companion_progress = true;
         }
         // #16223: this half idle-crossed before the hit. Only a live,
         // progressed companion can resurrect it (the GC companion
@@ -4704,6 +4758,13 @@ impl SessionTable {
         // (`handshake_relay.rs`) and retained by the GC
         // `opening_companion_keeps_alive` arm.
         if let Some((matched_key, nat)) = completing {
+            // #18533: the completion is the first write to anything beyond
+            // the probed record (the companion half, the pressure-shed
+            // index) — capture both now, still pre-probe values. Rare: one
+            // completing packet per flow.
+            if let Some(undo) = probe_undo.as_mut() {
+                self.capture_completion_undo(undo, probed_is_reverse, probed_nat);
+            }
             let timeouts = self.timeouts;
             let opening_override_ns = self
                 .entry_by_key(&matched_key)
@@ -4825,18 +4886,33 @@ impl SessionTable {
             } else {
                 (matched_key.clone(), 1)
             };
-            self.note_node_served_handshake(
+            let prior = self.note_node_served_handshake_prior(
                 &stamp_key,
                 TcpHandshakeState::Established.to_wire(),
                 stamp_rev,
             );
+            if let (Some(undo), Some(prior)) = (probe_undo.as_mut(), prior) {
+                undo.capture_stamp(&stamp_key, prior);
+            }
         } else if let Some(canonical_key) = canonical_refresh_key {
             self.touch(&canonical_key, now_ns);
         }
         if let Some((record_key, nat)) = reverse_fold {
             let mut stamped: Option<(SessionKey, u8, u64)> = None;
             let fwd_key = reverse_session_key(&record_key, nat);
-            if let Some(entry) = self.entry_by_key_mut(&fwd_key) {
+            if let Some(record) = self.record_by_key_mut(&fwd_key) {
+                // #18533: the forward companion's pre-charge state, from the
+                // borrow that charges it (no extra lookup). Skipped when a
+                // completion already captured it (that copy is the pre-probe
+                // one) and when the companion IS the probed record (its
+                // `matched` copy covers it).
+                if let Some(undo) = probe_undo.as_mut()
+                    && undo.companion.is_none()
+                    && record.key != undo.canonical_key
+                {
+                    undo.companion = Some((fwd_key.clone(), ProbeHalfUndo::of(&record.entry)));
+                }
+                let entry = &mut record.entry;
                 entry.counters.account(true, len);
                 entry.observed_tcp_flags |= tcp_flags;
                 let wire = entry.tcp_handshake_state_wire(fwd_key.protocol);
@@ -4846,7 +4922,12 @@ impl SessionTable {
                 entry.observed_tcp_flags |= tcp_flags;
             }
             if let Some((forward_key, wire, rev)) = stamped {
-                self.note_node_served_handshake(&forward_key, wire, rev);
+                // #18533: one stamp lookup, returning its pre-write value
+                // for the undo (was a separate per-packet snapshot lookup).
+                let prior = self.note_node_served_handshake_prior(&forward_key, wire, rev);
+                if let (Some(undo), Some(prior)) = (probe_undo.as_mut(), prior) {
+                    undo.capture_stamp(&forward_key, prior);
+                }
             }
         }
         if let Some(undo) = probe_undo {
@@ -4858,6 +4939,43 @@ impl SessionTable {
             self.pending_probe_undo.push(undo);
         }
         true
+    }
+
+    /// #18533: the completion half of the deferring probe's undo — the
+    /// companion record and the pair's pressure-shed membership, as the
+    /// pre-#18533 eager snapshot took them (companion = the canonical
+    /// key's reverse; shed keyed by the pair's forward key). Called right
+    /// before the completion's first write, when neither has been touched
+    /// by this probe yet, so the values are pre-probe.
+    fn capture_completion_undo(
+        &self,
+        undo: &mut ProbeUndo,
+        probed_is_reverse: bool,
+        probed_nat: crate::nat::NatDecision,
+    ) {
+        let companion_key = reverse_session_key(&undo.canonical_key, probed_nat);
+        if undo.companion.is_none() && companion_key != undo.canonical_key {
+            #[cfg(test)]
+            self.probe_cost_probes
+                .undo_capture
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            if let Some(record) = self.revalidation_record(&companion_key)
+                && record.key != undo.canonical_key
+            {
+                undo.companion = Some((companion_key.clone(), ProbeHalfUndo::of(&record.entry)));
+            }
+        }
+        let shed_forward_key = if probed_is_reverse {
+            companion_key
+        } else {
+            undo.canonical_key.clone()
+        };
+        #[cfg(test)]
+        self.probe_cost_probes
+            .undo_capture
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        let was_present = self.pressure_shed_unreplied.contains_key(&shed_forward_key);
+        undo.shed = Some((shed_forward_key, was_present));
     }
 
 
@@ -5550,17 +5668,41 @@ impl SessionTable {
         handshake_wire: u8,
         rev_packets: u64,
     ) {
-        if rev_packets == 0 && handshake_wire != TcpHandshakeState::Established.to_wire() {
-            return;
+        let _ = self.note_node_served_handshake_prior(forward_key, handshake_wire, rev_packets);
+    }
+
+    /// #18533: [`Self::note_node_served_handshake`] returning what it
+    /// overwrote, so the deferring cache-hit probe records its rollback
+    /// value from the write's own lookup instead of a separate per-packet
+    /// snapshot lookup. `None`: nothing written. `Some(prior)`: written,
+    /// `prior` the stamp before the write (`None` when it was created).
+    /// The existing stamp is updated in place without cloning the key; only
+    /// a first stamp for the tuple pays the insert.
+    fn note_node_served_handshake_prior(
+        &mut self,
+        forward_key: &SessionKey,
+        handshake_wire: u8,
+        rev_packets: u64,
+    ) -> Option<Option<(u8, u64)>> {
+        let established = TcpHandshakeState::Established.to_wire();
+        if rev_packets == 0 && handshake_wire != established {
+            return None;
         }
-        let stamp = self
-            .node_served_stamps
-            .entry(forward_key.clone())
-            .or_insert((0, 0));
-        if handshake_wire == TcpHandshakeState::Established.to_wire() {
-            stamp.0 = handshake_wire;
+        let apply = |stamp: &mut (u8, u64)| {
+            if handshake_wire == established {
+                stamp.0 = handshake_wire;
+            }
+            stamp.1 = stamp.1.max(rev_packets);
+        };
+        if let Some(stamp) = self.node_served_stamps.get_mut(forward_key) {
+            let prior = *stamp;
+            apply(stamp);
+            return Some(Some(prior));
         }
-        stamp.1 = stamp.1.max(rev_packets);
+        let mut stamp = (0, 0);
+        apply(&mut stamp);
+        self.node_served_stamps.insert(forward_key.clone(), stamp);
+        Some(None)
     }
 
     /// #16223: node-level served evidence for the pair named by `key`
@@ -7669,6 +7811,12 @@ mod handshake_cache_hit_14939_tests;
 #[cfg(test)]
 #[path = "hash_cost_18520_tests.rs"]
 mod hash_cost_18520_tests;
+
+// #18533: established cache-hit session lookups (totals + one cell per
+// optional lookup) and the per-probe timing MEASUREMENT.
+#[cfg(test)]
+#[path = "established_hit_cost_18533_tests.rs"]
+mod established_hit_cost_18533_tests;
 
 // #14945: the fused cache-hit probe (`probe_hit`) must be observably
 // identical to the liveness + keepalive + accounting sequence it

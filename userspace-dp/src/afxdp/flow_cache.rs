@@ -1711,41 +1711,6 @@ impl FlowCache {
         None
     }
 
-    /// #16217 (Wire18, B2): side-effect-free read of the entry the hit
-    /// stage would consult, for the fabric-established revalidation the
-    /// hit stage runs BEFORE the mutating lookup. No tallies, no LRU or
-    /// lease re-stamp, no eviction: the caller only needs the cached
-    /// decision (egress RG) and the adoption mark so it can re-derive
-    /// whether the adoption proof still holds under CURRENT RG ownership
-    /// (`revalidate_fabric_established`). Identity matches the lookup's:
-    /// same key, same physical ingress (binding-substituted), same
-    /// logical (VLAN) ingress. Generation/fence validity is deliberately
-    /// NOT judged here — a fenced entry simply yields no revalidated
-    /// mark, which is fail-closed for the exemption.
-    pub(super) fn peek_entry(
-        &self,
-        key: &crate::session::SessionKey,
-        lookup: FlowCacheLookup,
-    ) -> Option<&FlowCacheEntry> {
-        let ingress_ifindex = if self.binding_ifindex != 0 {
-            self.binding_ifindex
-        } else {
-            lookup.ingress_ifindex
-        };
-        let set = Self::set_index(key, ingress_ifindex);
-        let base = set * FLOW_CACHE_WAYS;
-        for way in 0..FLOW_CACHE_WAYS {
-            if let Some(entry) = &self.entries[base + way]
-                && entry.key == *key
-                && entry.ingress_ifindex == ingress_ifindex
-                && entry.logical_ingress_ifindex == lookup.logical_ingress_ifindex
-            {
-                return Some(entry);
-            }
-        }
-        None
-    }
-
     pub(super) fn insert(&mut self, mut entry: FlowCacheEntry) {
         // This cache belongs to one physical binding. Decapsulation changes
         // packet metadata's ingress ifindex to the tunnel logical ifindex,

@@ -339,7 +339,10 @@ both halves, companion resolved through `reverse_session_key` so NAT
 alias pairs validate the same way). A wrong-ack SYN-ACK never promotes
 and a wrong-ack completing segment never clears `handshake_pending`:
 the pair stays on the opening window. Companion resolution runs ONLY
-for `handshake_pending` pairs — established hot-path hits skip it.
+for `handshake_pending` pairs — established hot-path hits skip it. (Since
+#18533 the cached-hit probe also skips the record lookup that used to
+decide this: `handshake_expected_ack` is called only for a segment that
+already matches every other classic-completion conjunct.)
 Unknown evidence fails OPEN, never closed: when the companion end was
 never observed (mid-stream pickup, HA import — imports carry no ISN) or
 the caller parsed no ack, the gate is flags-only exactly as before, so
@@ -651,9 +654,12 @@ timeout). An actively-forwarding cached flow is thus re-stamped whenever
 its idle time crosses `expires_after_ns / N`, keeping its age ~`T/N` in
 steady state regardless of co-resident flow rates, so it can never be
 GC'd mid-flow (reaped only if a real inter-packet gap exceeds `T`). The
-steady-state per-hit cost is two warm session-index probes (admission plus
-keepalive) and integer compares; the `last_seen_ns` write + throttled
-`push_to_wheel` run only when actually stale. Allocation-free.
+admission check, keepalive and accounting described here have been one
+fused `probe_hit` borrow since #14945; an established forward hit costs one
+session-index lookup in total (see "Established cache-hit cost (#18533)"
+below — the "two warm probes" this paragraph used to state is
+pre-#14945). The `last_seen_ns` write + throttled `push_to_wheel` run only
+when actually stale. Allocation-free.
 
 For closing TCP, #10885 keeps the timer directional on bare ACKs: reset
 entries and FIN-owning halves do not slide on ACK-only hits, while the
@@ -908,6 +914,69 @@ after a 30 s standby HOLD and activation; a stale same-incarnation Opening
 import does not regress an Established replica, which stays live through
 60 s of standby and serves the first failback packet; the Opening vs
 Established retention ceiling) and `session/hash_cost_18520_tests.rs`.
+
+## Established cache-hit cost (#18533)
+
+Per admitted cache-served packet the flow-cache stage
+(`afxdp/poll_descriptor/flow_cache_hit.rs`) makes three session-table calls:
+`probe_hit_deferring_state_update_with_ack` (liveness, keepalive, accounting,
+handshake completion), `emit_probe_hit_state_update` after TX admission, and
+`take_probe_stage_transition_forward`. For a steady-state established,
+non-pending, non-closing pair they cost:
+
+| Hit | `SessionKey` index lookups |
+|---|---|
+| forward | 1 — the probed record (`record_by_key_mut`) |
+| reverse | 3 — the probed record, the forward companion the hit is charged to (#2501/#2749), and the #16223 node-served stamp write |
+
+The same as 2026-10-20 (`69c7c69af6`) for a forward hit; a reverse hit adds
+only the stamp write. Between those dates the hit regained 7 lookups per
+forward packet, each needed by some transition but paid on every packet:
+
+- **Rollback undo is lazy.** A deferring probe can be rolled back when the
+  cached output filter or policer drops the packet (#15947), so it records
+  what it changed. The #15947/#16223 record was an eager snapshot of
+  everything the probe COULD touch, taken first on every packet: the
+  canonical record, its companion (and the companion twice more for a
+  reverse hit), the pressure-shed membership and four node-served stamp
+  keys. `ProbeUndo` is now built just before each first write: the probed
+  record from the probe's own borrow; the forward companion from the borrow
+  of the reverse-hit charge; the stamp's prior value returned by the write
+  itself (`note_node_served_handshake_prior`); the companion's handshake
+  state and the shed membership (`capture_completion_undo`, two lookups)
+  only on the completing packet. Restoring state the probe never wrote is a
+  no-op, so restoring only what it wrote is the same rollback; the former
+  `accounting` snapshot always de-duplicated onto `matched`/`companion` and
+  is gone.
+- **The #16042 expected ack is resolved only for a completion candidate.**
+  The probe judges every classic-completion conjunct under its borrow and
+  calls `handshake_expected_ack` (record + companion lookups) only when all
+  of them hold; a known-but-wrong ack still refuses the classic arm, and a
+  refused candidate still arms the #16223 progress check as before.
+- **The admission emit resolves nothing in the steady state.** With no
+  withheld HA Update and exactly one undo, recorded under the packet's own
+  canonical key (every non-alias hit), the emit consumes it directly. An
+  alias packet key, a withheld Update, or an undo another flow left behind
+  takes the resolving path unchanged.
+
+Outside the session table, the same hit path dropped two more per-packet
+costs (see `afxdp/README.md`, "Established cache-hit cost"): the #16217
+pre-lookup `peek_entry` (a second flow-cache set hash) and the #16841
+zero-hop-limit gate's eager FIB walk.
+
+Cells: `session/established_hit_cost_18533_tests.rs` — the totals above for
+a same-worker pair and a split-worker pair (worker A forward, `WorkerLocalImport`
+replica on worker B reverse); one cell per optional lookup proving the
+steady state skips it (`ProbeCostProbes`: expected ack, undo capture, emit
+resolve) and the transition still runs it (a wrong-ack completing segment is
+refused and the right one completes; a dropped completion restores both
+halves and the shed membership; a dropped reverse hit restores the forward
+charge and the stamp, both a created and an advanced one; an alias admission
+and another flow's admission resolve, and the latter leaves this flow's undo
+for its rollback); and an ignored `MEASUREMENT` cell timing the four
+workloads. `afxdp/poll_descriptor/flow_cache_hit_tests.rs`
+`live_established_cache_hit_hashes_the_flow_key_twice_18533` pins the whole
+live hit stage at two key hashes. Numbers: `docs/log/18533.md`.
 
 ## Flow-cache invalidation on reap (#3776)
 
