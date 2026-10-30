@@ -125,6 +125,47 @@ Scenarios:
   forwarding backstop.
 - Multi-cycle crash recovery — repeated crashes verify no state leak
 
+A failed `incus start` after a force-stop is a FAIL that names the `incus`
+error. The harness then skips the 90 s xpfd wait, so one cause records one
+FAIL. Every node the harness starts, including in the final health check,
+has its clock resynced from host UTC (#11872).
+
+#### Restoring fw0 between phases
+
+`test-ha-crash.sh` and `test-restart-connectivity.sh` move RG0-2 back to
+fw0 after each phase that moved them, through the shared
+`deploy_restore_fw0_primary` in `test/incus/deploy-lib.sh` (#18523). It moves
+one RG at a time. It re-requests the yield from fw1 only while fw1's own view
+still claims the RG, and polls until the RG is restored. An RG counts as
+restored only when both nodes' own views agree: fw0 reads `node0 primary`,
+and fw1 reads `node1 secondary` or `secondary-hold`. A dual-primary RG, or an
+unreadable fw1, is not restored.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RESTORE_FW0_WAIT` | 60 | Seconds to keep re-requesting before giving up. |
+| `RESTORE_FW0_BUDGET` | 30 | Seconds a healthy restore may take. Healthy restores take 9-16 s, with one request per RG and no refusal. |
+
+A value that is not a whole number of seconds falls back to the default and
+prints an info line.
+
+Each restore records exactly one verdict:
+
+- **PASS** "fw0 already primary", or "fw0 restored as primary in Ns (R
+  request(s), 0 refused)": no refusal, and within `RESTORE_FW0_BUDGET`.
+- **FAIL** "fw0 restored only after Ns": the cluster was restored, but a
+  request was refused or the restore took longer than `RESTORE_FW0_BUDGET`.
+  The run continues on the restored cluster, but the run is not healthy. A
+  refused or slow restore is the #18521 class, for example a half-open
+  session sync or a demotion barrier fence that has not been discharged
+  ("session sync barrier fenced ... no re-prime has been acked on it yet").
+  Do not raise the budget to make this pass; the FAIL names the last refusal.
+- **FAIL** "could not restore fw0 as primary within Ns":
+  `RESTORE_FW0_WAIT` ran out. At preflight, both harnesses stop here.
+
+`deploy-lib-selftest.sh` drives this restore with a mocked `incus` and clock
+(`test_restore_fw0_verdict_18523`).
+
 ### 5. Private RG Election Test (`./test/incus/test-private-rg.sh`)
 
 Validates private-rg-election feature (VRRP elimination) on the shared `loss`
@@ -169,6 +210,28 @@ asserts no more than `MAX_LOST_PINGS` (default 2) lost pings per restart, over
 `RESTART_CYCLES` (default 3). It guards the #75 regression (neighbor prewarm
 must run after VRRP MASTER). It is not a zero-loss or hitless-restart gate:
 HA mode does not do hitless restart.
+
+Between cycles it restores fw0 as the owner of every RG with the same
+verdict and the same `RESTORE_FW0_WAIT` / `RESTORE_FW0_BUDGET` knobs as the
+hard crash test (see "Restoring fw0 between phases" above).
+
+### 7. Active/Active Split Test (`make test-active-active`)
+
+Moves RG1 (WAN) to fw1 while RG2 (LAN) stays on fw0, then checks that an
+iperf3 stream survives the split through fabric forwarding and the
+reunification. The split itself is scored from both nodes' own
+`show chassis cluster status` by `deploy_active_active_split_verdict`
+(`test/incus/deploy-lib.sh`, #18523):
+
+- **Ownership**: RG1 is `primary` on node1 in both views, and node0 is
+  `secondary` or `secondary-hold`. RG2 is `primary` on node0 in fw0's view
+  and non-owning in fw1's view.
+- **Forwarding**: each node's own `Forwarding: rg-active=` line. RG1 is
+  `active` on fw1 and `inactive` on fw0; RG2 is the reverse. The daemon
+  prints this line for every RG in both election modes, so the check is the
+  same in private-RG and legacy VRRP-backed mode.
+- A `-- DIVERGENCE: ...` suffix on any of these lines is a FAIL that quotes
+  the suffix (#7367). A missing row or line is a FAIL, never a skip.
 
 ## Known Issues and Workarounds
 

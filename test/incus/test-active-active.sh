@@ -162,7 +162,6 @@ else
 	die "iperf3 failed to start — check ${LOG} on ${CLUSTER_LAN_HOST}"
 fi
 
-
 # ── Phase 2: Failover RG1 (WAN) to fw1 ──────────────────────────────
 
 info "Phase 2: Failover RG1 (WAN) to node1 — creating active/active split"
@@ -173,72 +172,16 @@ sleep "$SETTLE_WAIT"
 
 # Verify RG split: RG1 on fw1, RG2 on fw0
 fw0_status=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-
 fw1_status=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
 
-# #18523: read each (node, RG) role from the RG's own block with the tested
-# deploy_node_rg_role reader. `grep -A2` missed the peer row: the status
-# prints Takeover/Transfer/Forwarding sub-lines under the local node's row,
-# and the failed grep aborted the script under `set -euo pipefail`. A missing
-# row reads as empty (a FAIL verdict), never an abort. Both nodes' own views
-# must agree, the ha_rg_owner_verdict rule.
-rg1_node0=$(deploy_node_rg_role node0 1 <<<"$fw0_status" || true)
-rg1_node1=$(deploy_node_rg_role node1 1 <<<"$fw0_status" || true)
-rg1_fw1_node1=$(deploy_node_rg_role node1 1 <<<"$fw1_status" || true)
-rg2_node0=$(deploy_node_rg_role node0 2 <<<"$fw0_status" || true)
-
-# #18523: the untargeted yield parks the old owner in `secondary-hold`
-# (the same rule as ha_rg_owner_verdict, #18503), and a move is only a move
-# when node1 actually took the group.
-if [[ "$rg1_node0" =~ ^secondary(-hold)?$ && "$rg1_node1" == "primary" && "$rg1_fw1_node1" == "primary" ]]; then
-	pass "RG1 (WAN) moved to fw1"
-else
-	fail "RG1 did not move to fw1 (fw0 view: node0=${rg1_node0:-missing} node1=${rg1_node1:-missing}; fw1 view: node1=${rg1_fw1_node1:-missing})"
-fi
-
-if [[ "$rg2_node0" == "primary" ]]; then
-	pass "RG2 (LAN) stayed on fw0"
-else
-	fail "RG2 unexpectedly moved (node0 state: $rg2_node0)"
-fi
-
-# Verify the forwarding owner matches the RG split. In private-RG mode (the
-# compiler default since #12173, RETH VRRP suppressed) each node's own
-# `Forwarding: rg-active=` line is the authority (#18523); a node with no such
-# line runs legacy VRRP-backed RETHs and is checked through VRRP instead.
-# Every read is guarded: a missing line is a FAIL, never a `set -e` abort.
-fwd_rg1_fw0=$(deploy_rg_local_forwarding 1 <<<"$fw0_status" || true)
-fwd_rg1_fw1=$(deploy_rg_local_forwarding 1 <<<"$fw1_status" || true)
-fwd_rg2_fw0=$(deploy_rg_local_forwarding 2 <<<"$fw0_status" || true)
-
-if [[ -n "$fwd_rg1_fw0$fwd_rg1_fw1$fwd_rg2_fw0" ]]; then
-	if [[ "$fwd_rg1_fw0" == inactive && "$fwd_rg1_fw1" == active ]]; then
-		pass "RG1 (WAN) forwarding moved to fw1 (fw0 rg-active=inactive, fw1 rg-active=active)"
-	else
-		fail "RG1 (WAN) forwarding not on fw1 (fw0 rg-active=${fwd_rg1_fw0:-missing}, fw1 rg-active=${fwd_rg1_fw1:-missing})"
-	fi
-	if [[ "$fwd_rg2_fw0" == active ]]; then
-		pass "RG2 (LAN) forwarding stayed on fw0 (rg-active=active)"
-	else
-		fail "RG2 (LAN) forwarding not on fw0 (fw0 rg-active=${fwd_rg2_fw0:-missing})"
-	fi
-else
-	fw0_vrrp=$(incus exec "$FW0" -- cli -c 'show security vrrp' 2>/dev/null || true)
-	vrrp_101=$(grep "101" <<<"$fw0_vrrp" | head -1 || true)
-	vrrp_102=$(grep "102" <<<"$fw0_vrrp" | head -1 || true)
-
-	if grep -qi "BACKUP" <<<"$vrrp_101"; then
-		pass "VRRP 101 (WAN) is BACKUP on fw0"
-	else
-		fail "VRRP 101 (WAN) not BACKUP on fw0: ${vrrp_101:-no row}"
-	fi
-
-	if grep -qi "MASTER" <<<"$vrrp_102"; then
-		pass "VRRP 102 (LAN) is MASTER on fw0"
-	else
-		fail "VRRP 102 (LAN) not MASTER on fw0: ${vrrp_102:-no row}"
-	fi
-fi
+# #18523: score the split from BOTH nodes' own views with the shared,
+# selftested verdict (deploy-lib.sh): RG1 owned and forwarded by fw1 alone,
+# RG2 owned and forwarded by fw0 alone, no DIVERGENCE suffix on any
+# `Forwarding:` line. The `Forwarding: rg-active=` line is printed for every
+# RG in both election modes, so it is the forwarding check in both; the old
+# per-group VRRP 101/102 check matched only legacy VRRP-backed RETHs. A
+# missing row or line is a named FAIL, never a `set -e` abort.
+deploy_active_active_split_verdict "$fw0_status" "$fw1_status"
 
 # ── Phase 3: Verify iperf3 survives the split ────────────────────────
 

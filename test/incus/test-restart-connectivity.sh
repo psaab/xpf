@@ -60,95 +60,18 @@ instance_running() {
 	[[ "$status" == "RUNNING" ]]
 }
 
-# #18523: fw0 owns every RG only when both nodes' own views agree; see
-# rg_on_fw0 below (defined before the first call).
+# #18523: fw0 owns every RG only when both nodes' own views agree. The
+# shared deploy-lib.sh helper is the one deploy-lib-selftest.sh drives.
 fw0_is_primary() {
-	local rg
-	for rg in 0 1 2; do
-		rg_on_fw0 "$rg" || return 1
-	done
-	return 0
+	deploy_restore_fw0_owns_all
 }
 
-
-# Restored means BOTH nodes agree: fw0's own view has node0 primary and
-# fw1's own view has node1 non-owning. fw0's view alone would score a
-# dual-primary split as restored (the ha_rg_owner_verdict rule, #18503).
-rg_on_fw0() {
-	local s0 s1
-	s0=$(incus exec "$FW0" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	[[ "$(deploy_node_rg_role node0 "$1" <<<"$s0" || true)" == primary ]] || return 1
-	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	[[ "$(deploy_node_rg_role node1 "$1" <<<"$s1" || true)" =~ ^secondary(-hold)?$ ]]
-}
-
-# fw1 still claims the RG in its own view (re-requesting a yield from a node
-# that already yielded only re-arms its hold and bumps its failover count).
-rg_on_fw1() {
-	local s1
-	s1=$(incus exec "$FW1" -- cli -c 'show chassis cluster status' 2>/dev/null || true)
-	[[ "$(deploy_node_rg_role node1 "$1" <<<"$s1" || true)" == primary ]]
-}
-
+# #18523: the polled restore and its verdict (a refused or over-budget
+# restore FAILs; see deploy_restore_fw0_primary and RESTORE_FW0_WAIT /
+# RESTORE_FW0_BUDGET in docs/testing-procedures.md) live in deploy-lib.sh,
+# shared with the other HA smoke so the selftest drives the code run here.
 restore_fw0_primary() {
-	local label="$1" deadline rg out last_err="" started=$SECONDS requests=0 refusals=0
-	if fw0_is_primary; then
-		return 0
-	fi
-	for rg in 0 1 2; do
-		incus exec "$FW0" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-		incus exec "$FW1" -- cli -c "request chassis cluster failover reset redundancy-group $rg" 2>/dev/null || true
-	done
-	sleep 1
-	# #18523: one RG at a time, polled, re-requested until the budget runs
-	# out. A single fixed sleep after three blind requests was shorter than
-	# one admission window plus a post-restart bulk (~50 sessions/s), and
-	# swallowed the refusal that said why.
-	local wait="${RESTORE_FW0_WAIT:-60}"
-	if [[ ! "$wait" =~ ^[0-9]+$ ]]; then
-		info "RESTORE_FW0_WAIT=$wait is not a whole number of seconds; using 60"
-		wait=60
-	fi
-	deadline=$((SECONDS + wait))
-	for rg in 0 1 2; do
-		while ! rg_on_fw0 "$rg"; do
-			if ((SECONDS >= deadline)); then
-				break 2
-			fi
-			if rg_on_fw1 "$rg"; then
-				out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
-				requests=$((requests + 1))
-				if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
-					refusals=$((refusals + 1))
-					last_err="RG$rg: $(head -1 <<<"$out")"
-				fi
-			fi
-			for _ in 1 2 3 4 5; do
-				rg_on_fw0 "$rg" && break
-				sleep 1
-			done
-		done
-	done
-	if fw0_is_primary; then
-		# #18523: the elapsed time and refusal count are part of the verdict;
-		# a bare PASS after a long polled retry would hide exactly the
-		# deferral (a half-open sync, a fence) this restore is waiting out.
-		local took=$((SECONDS - started)) budget="${RESTORE_FW0_BUDGET:-30}"
-		[[ "$budget" =~ ^[0-9]+$ ]] || budget=30
-		if ((refusals > 0 || took > budget)); then
-			# Restored, so the run continues, but a refused or slow restore is
-			# the #18521 class (half-open sync, an undischarged fence) and
-			# must not read as healthy. Healthy restores take 9-16s with one
-			# request per RG and no refusal (integ5, 2026-10-29).
-			fail "$label: fw0 restored only after ${took}s (budget ${budget}s; ${requests} request(s), ${refusals} refused${last_err:+; last refusal: $last_err})"
-			return 0
-		fi
-		pass "$label: fw0 restored as primary in ${took}s (${requests} request(s), ${refusals} refused)"
-		return 0
-	else
-		fail "$label: could not restore fw0 as primary within ${wait}s${last_err:+ (last refusal: $last_err)}"
-		return 1
-	fi
+	deploy_restore_fw0_primary "$1"
 }
 
 cleanup() {
