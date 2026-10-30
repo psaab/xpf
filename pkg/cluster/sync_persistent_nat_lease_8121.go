@@ -890,7 +890,7 @@ func (s *SessionSync) QueuePersistentNatLeaseBatch(batch userspace.PersistentNat
 		if err != nil {
 			slog.Warn("cluster sync: persistent-NAT lease send error", "err", err)
 			s.stats.Errors.Add(1)
-			s.handleDisconnect(conn)
+			s.disconnectConn(conn, "persistent-NAT lease write failed", err)
 			return
 		}
 	}

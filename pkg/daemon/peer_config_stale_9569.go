@@ -9,5 +9,14 @@ func (d *Daemon) peerConfigStale() (bool, string) {
 	if ss == nil {
 		return false, ""
 	}
-	return ss.PeerConfigStale()
+	stale, reason := ss.PeerConfigStale()
+	if stale {
+		// #18521: a refusal is the moment someone is waiting on this ACK.
+		// If it is overdue, re-push now (rate-limited inside) so the
+		// operator's next attempt can pass instead of waiting for the next
+		// reconcile tick. Async: this predicate runs on the failover
+		// admission path and must not do I/O.
+		go d.repushIfConfigAckOverdue("failover refused by the stale-config gate")
+	}
+	return stale, reason
 }

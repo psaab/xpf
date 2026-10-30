@@ -984,6 +984,15 @@ fn dropped_probe_rolls_back_stage_marker_and_served_stamps_16217() {
 /// crate-infra (deferred per the wg/tests.rs #1499 note); the shape
 /// pin here is that rollback works with a 4-slot stack snapshot for
 /// pair + translated orientations.
+///
+/// #18533: historical shape. The snapshot is no longer a pre-probe
+/// candidate list: each stamp's prior value is captured at its write
+/// (`note_node_served_handshake_prior`), and a deferring probe has
+/// exactly two write sites (completion, reverse fold), so the array is
+/// `PROBE_UNDO_STAMP_SLOTS = 2`. The capacity/candidate-order remarks in
+/// the third arm below describe the pre-#18533 code; the arm's ASSERTIONS
+/// still hold unchanged — the written key is restored to its exact prior,
+/// and a pre-seeded stamp the probe never writes is never touched.
 #[test]
 fn dropped_probe_snapshot_is_bounded_and_restores_16217() {
     let mut table = SessionTable::new();

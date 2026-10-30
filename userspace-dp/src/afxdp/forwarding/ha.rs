@@ -437,6 +437,7 @@ pub(in crate::afxdp) fn cached_flow_decision_valid(
 /// the session path retains the redirect on fabric-link ingress
 /// (resolve.rs), so revalidation must not supersede it there either.
 /// The destination-only entry point remains for flow-less fixtures only.
+#[cfg(test)]
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
     forwarding: &ForwardingState,
@@ -451,6 +452,51 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
     install_table: Option<&str>,
     resolution: ForwardingResolution,
 ) -> Option<CachedDecisionInvalid> {
+    cached_flow_decision_invalid_reason_for_cached_flow(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        cached_owner_rg_id,
+        fabric_ingress,
+        fabric_link_ingress,
+        flow_key,
+        target_ip,
+        install_table,
+        resolution,
+        || {
+            crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+                forwarding,
+                target_ip,
+                install_table,
+            )
+        },
+    )
+}
+
+/// #18534: the flow-cache hit's validator. As
+/// [`cached_flow_decision_invalid_reason_for_flow`], with the destination's
+/// connected-owner RG supplied by the caller: the hit path passes the cached
+/// entry's per-snapshot memo (`FlowCacheEntry::destination_owner_rg`), so an
+/// established ForwardCandidate hit does not re-walk the connected-owner index
+/// per packet. Evaluated only when the destination-owner arm is reached
+/// (ForwardCandidate on a clustered node); the RG-activeness half of that arm
+/// is still judged per packet against `ha_state`.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_cached_flow(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    cached_owner_rg_id: i32,
+    fabric_ingress: bool,
+    fabric_link_ingress: bool,
+    flow_key: Option<&crate::session::SessionKey>,
+    target_ip: IpAddr,
+    install_table: Option<&str>,
+    resolution: ForwardingResolution,
+    destination_owner_rg: impl FnOnce() -> i32,
+) -> Option<CachedDecisionInvalid> {
     cached_flow_decision_invalid_reason_inner(
         forwarding,
         ha_state,
@@ -462,6 +508,7 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason_for_flow(
         target_ip,
         install_table,
         resolution,
+        destination_owner_rg,
     )
 }
 
@@ -488,6 +535,13 @@ pub(in crate::afxdp) fn cached_flow_decision_invalid_reason(
         target_ip,
         install_table,
         resolution,
+        || {
+            crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+                forwarding,
+                target_ip,
+                install_table,
+            )
+        },
     )
 }
 
@@ -503,6 +557,7 @@ fn cached_flow_decision_invalid_reason_inner(
     target_ip: IpAddr,
     install_table: Option<&str>,
     resolution: ForwardingResolution,
+    destination_owner_rg: impl FnOnce() -> i32,
 ) -> Option<CachedDecisionInvalid> {
     // #16217: a cached ForwardCandidate whose egress RG has departed
     // this node is superseded BEFORE enforce demotion is judged.
@@ -564,12 +619,10 @@ fn cached_flow_decision_invalid_reason_inner(
     // fire. Live fw0 stamp=2 rows (aggregate 5,777 at d28) are
     // exactly this shape.
     if forward_candidate_destination_owner_departed(
-        forwarding,
         ha_state,
         now_secs,
-        target_ip,
-        install_table,
         resolution,
+        destination_owner_rg,
     ) {
         return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
     }
@@ -819,22 +872,22 @@ pub(in crate::afxdp) fn forward_candidate_owner_departed(
 /// and standalone shapes never fire. This is the same test the
 /// slow-path conversion applies (resolve.rs), so cache and
 /// slow path can never disagree about a reverse row's departure.
+///
+/// #18534: `destination_owner_rg` yields `connected_owner_rg_for_target_in_table`
+/// for the hit's target and installing table — a pure function of the
+/// forwarding snapshot, which the flow-cache caller memoises per snapshot.
+/// It is called only past the cheap guards; the activeness test below runs
+/// on every call, so an RG departure is seen on the next packet.
 pub(in crate::afxdp) fn forward_candidate_destination_owner_departed(
-    forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     now_secs: u64,
-    target_ip: IpAddr,
-    install_table: Option<&str>,
     resolution: ForwardingResolution,
+    destination_owner_rg: impl FnOnce() -> i32,
 ) -> bool {
     if resolution.disposition != ForwardingDisposition::ForwardCandidate || ha_state.is_empty() {
         return false;
     }
-    let dest_rg = crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
-        forwarding,
-        target_ip,
-        install_table,
-    );
+    let dest_rg = destination_owner_rg();
     dest_rg > 0
         && !ha_state
             .get(&dest_rg)

@@ -80,6 +80,9 @@ mod p2_deadline_9506_tests;
 #[cfg(test)]
 #[path = "pending_timer_16217_tests.rs"]
 mod pending_timer_16217_tests;
+#[cfg(test)]
+#[path = "fabric_swap_epoch_18534_tests.rs"]
+mod fabric_swap_epoch_18534_tests;
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
 // ancestry matchers, rematch/rebind walkers, the #6291/#6592 refresh seam,
@@ -398,6 +401,8 @@ pub(crate) fn worker_loop(
     // settles at that capacity and never reallocates.
     let mut command_scratch: VecDeque<WorkerCommand> =
         VecDeque::with_capacity(crate::afxdp::worker_queue::WORKER_COMMAND_DRAIN_BUDGET);
+    // #18520: reused landing buffer for the per-pass handshake-relay fan-out.
+    let mut handshake_relay_scratch: Vec<crate::session::HandshakeRelay> = Vec::with_capacity(16);
     let mut shared_recycles = Vec::with_capacity((RX_BATCH_SIZE as usize).saturating_mul(2));
     // #5468: per-drain-cycle aggregate lossless-wedge latch. `flush_session_deltas`
     // bounds each individual lossless send to `WORKER_LOSSLESS_QUEUE_BUDGET`, but
@@ -1685,6 +1690,17 @@ pub(crate) fn worker_loop(
                 did_work = true;
             }
         }
+        // #18520: relay the handshake transitions this sweep observed on
+        // pairs split across workers (SYN-ACK on this worker, SYN on a
+        // sibling, or the reverse) to the siblings, so the worker holding
+        // the other half validates and completes its own copy. Once per
+        // pass; an empty outbox is one `is_empty` test.
+        crate::afxdp::session_glue::fan_out_handshake_relays(
+            &mut sessions,
+            &peer_worker_commands,
+            &worker_commands_by_id,
+            &mut handshake_relay_scratch,
+        );
         crate::filter::flush_recorded_filter_counters();
         // #3073: fold this worker's coalesced policy hit-count tally into the
         // shared counters once per RX batch (alongside the filter-counter

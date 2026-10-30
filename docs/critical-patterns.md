@@ -255,7 +255,8 @@ See the deploy backing table in
   take max(threshold, remaining sync-recency window) plus up to one heartbeat
   tick: 0.5–2.1s from peer death at defaults or 1.0–2.2s in the lab.
   Process exit that closes sync or sync idle >2s falls through at the heartbeat
-  threshold, subject to startup/restart grace
+  threshold when the receiving standby is caught up, subject to startup/restart
+  grace; a standby still draining a backlog when the peer's FIN/RST arrives keeps sync installed while it drains, and its frames refresh peer recency for up to one 1s watchdog tick, so there detection is up to max(threshold, ~3s) plus one heartbeat tick — about 3.1s at defaults, 3.2s in the lab, under the 5s cap (#18521)
   (`pkg/daemon/daemon_ha_sync.go:170-206`;
   `pkg/cluster/heartbeat_manager.go:790-832`).
 - **Separate interface/IP monitor detection**: polls run each second; 3

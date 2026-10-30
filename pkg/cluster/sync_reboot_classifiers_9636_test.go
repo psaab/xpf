@@ -335,3 +335,55 @@ func TestBootIDSwitchThatSawTheEpochLeavesNothingToConsume_9636(t *testing.T) {
 	b0 := e.connect(0, "B restarted, fabric 0")
 	e.check(rebootWant9636{advances: 2, conn0: b0, owed: true, arms: 2, dispatches: 2})
 }
+
+// Review of #18525 at 5af11e4593 (NIT, both seats): the third
+// OnPeerConnected dispatch site — the BulkStart switch announcing a reboot
+// that only its boot id classified (sync_bulkstart_recv.go) — was not pinned
+// to the ordered dispatcher. An earlier peer event is still running (here a
+// held stand-in for a disconnect); the boot-id announce, driven through the
+// real handleNewConnection + BulkStart, must queue behind it. RED with that
+// call site reverted to a bare `go s.OnPeerConnected()`. The 300ms window only
+// gives a misordered callback its chance.
+func TestBootIDAnnounceRunsInDispatchOrder18525(t *testing.T) {
+	e := newRebootEnv9636(t)
+	e.primedA(0, true)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	var earlierDone atomic.Bool
+	early := make(chan struct{}, 4)
+	ran := make(chan struct{}, 4)
+	e.s.OnPeerConnected = func() {
+		if !earlierDone.Load() {
+			early <- struct{}{}
+		}
+		ran <- struct{}{}
+	}
+	e.s.dispatchPeerEvent(func() {
+		<-release
+		earlierDone.Store(true)
+	})
+	b1 := e.connect(1, "B's fabric 1")
+	e.prime(b1, incB9636) // the boot-id switch announces B
+	select {
+	case <-early:
+		t.Fatal("the boot-id announce ran before the peer event dispatched ahead of it")
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-ran:
+	case <-time.After(30 * time.Second):
+		t.Fatal("fixture: the boot-id switch never announced B")
+	}
+	select {
+	case <-early:
+		t.Fatal("the boot-id announce ran before the earlier peer event finished")
+	default:
+	}
+}

@@ -482,7 +482,7 @@ func (s *SessionSync) queueConfigOnConn(
 	if err != nil {
 		slog.Warn("cluster sync: config send error", "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "config write failed", err)
 		return false
 	}
 	// Record-before-write closes the response race: the receiver may apply and
@@ -508,7 +508,9 @@ func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
 	// incarnation retirement until ACKed or explicitly re-judged as legacy.
 	capabilityKnown, ackCapable := s.peerConfigAckCapabilitySnapshot16756()
 	s.configApplyDebtMu.Lock()
-	if gen <= s.lastSentConfigDebt16756.generation {
+	// A superseded debt (supersedeSentConfigDebtByPeer) is older than any
+	// send that follows it, whatever its generation.
+	if gen <= s.lastSentConfigDebt16756.generation && !s.lastSentConfigDebt16756.supersededByPeer {
 		s.configApplyDebtMu.Unlock()
 		return
 	}
@@ -516,6 +518,7 @@ func (s *SessionSync) recordLastSentConfigGen(gen uint64) {
 		generation:      gen,
 		capabilityKnown: capabilityKnown,
 		ackCapable:      ackCapable,
+		sentMono:        s.nowMono(),
 	}
 	if hook := s.testBeforeLastSentConfigDebtUnlock; hook != nil {
 		s.testBeforeLastSentConfigDebtUnlock = nil
@@ -545,6 +548,15 @@ func (s *SessionSync) sendConfigApplyAck(conn net.Conn, gen uint64) {
 	current := s.activeConnLocked() == conn
 	s.mu.Unlock()
 	if !current {
+		// #18521: this skip used to be silent, and the peer's stale-config
+		// gate then refused failover with no trace of why. The peer accepts
+		// an ACK only on its own active connection, so one for a connection
+		// that has since been replaced cannot be delivered; the peer's
+		// reconnect push asks again. One line per applied config, not per
+		// frame.
+		s.stats.ConfigApplyAcksUnsent.Add(1)
+		slog.Info("cluster sync: not sending config-apply ack: the connection that delivered the config is no longer active",
+			"gen", gen, "remote", connRemoteAddrString(conn))
 		return
 	}
 	var payload [8]byte
@@ -555,8 +567,10 @@ func (s *SessionSync) sendConfigApplyAck(conn net.Conn, gen uint64) {
 	if err != nil {
 		slog.Debug("cluster sync: config-apply ack send error", "gen", gen, "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "config-apply ack write failed", err)
+		return
 	}
+	s.stats.ConfigApplyAcksSent.Add(1)
 }
 
 // sendConfigApplyNack tells the SENDER that this node did not apply the config
@@ -587,7 +601,7 @@ func (s *SessionSync) sendConfigApplyNack(gen uint64) {
 	if err != nil {
 		slog.Debug("cluster sync: config-apply nack send error", "gen", gen, "err", err)
 		s.stats.Errors.Add(1)
-		s.handleDisconnect(conn)
+		s.disconnectConn(conn, "config-apply nack write failed", err)
 		return
 	}
 	slog.Info("cluster sync: told peer its config generation did not apply here", "gen", gen)
@@ -753,11 +767,23 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 			}
 			if !s.shouldApplyConfigGen(item.gen) {
 				s.stats.ConfigsStaleIgnored.Add(1)
+				if item.gen != 0 && item.gen == s.lastAppliedConfigGen.Load() {
+					// #18521: an exact duplicate of the applied generation is
+					// the authority re-sending a config whose ACK it never
+					// credited. Re-ACK it; nothing is applied again and no
+					// config epoch moves.
+					slog.Info("cluster sync: re-acknowledging an already-applied config generation",
+						"gen", item.gen, "size", len(item.text))
+					// #18521 review round 3: NOT superseding this node's own
+					// send debt here. Only the apply branch is reached through
+					// the daemon's RG0-authority refusal, and a duplicate says
+					// nothing about this node's CURRENT config, which its own
+					// commit may have replaced since it applied this one.
+					go s.sendConfigApplyAck(item.conn, item.gen)
+					continue
+				}
 				slog.Warn("cluster sync: dropping out-of-order config sync (stale generation) — standby retains newer config",
 					"incoming_gen", item.gen, "last_applied_gen", s.lastAppliedConfigGen.Load(), "size", len(item.text))
-				if item.gen != 0 && item.gen == s.lastAppliedConfigGen.Load() {
-					go s.sendConfigApplyAck(item.conn, item.gen)
-				}
 				continue
 			}
 			if s.OnConfigReceivedWithProvenance == nil &&
@@ -874,6 +900,7 @@ func (s *SessionSync) configApplyLoop(ctx context.Context) {
 			// fence. Advancing first keeps the effective refusal threshold
 			// max(fence, high-water) from dipping in the release window (#6284).
 			s.recordAppliedConfigGen(item.gen)
+			s.supersedeSentConfigDebtByPeer(item.gen)
 			go s.sendConfigApplyAck(item.conn, item.gen)
 			s.endConfigApply()
 		}

@@ -3,6 +3,8 @@ package cluster
 import (
 	"errors"
 	"fmt"
+	"log/slog"
+	"time"
 )
 
 // #9569: the #5563 config-stale gate used to guard only the node-targeted
@@ -56,6 +58,42 @@ type configApplyDebt16756 struct {
 	generation      uint64
 	capabilityKnown bool
 	ackCapable      bool
+	// sentMono is when generation was put on the wire (nowMono), for the
+	// #18521 overdue-ACK re-push. Zero for a debt recorded by a test seam
+	// without a time.
+	sentMono int64
+	// supersededByPeer: this node has since applied (or re-acknowledged) a
+	// config the PEER pushed, so the debt no longer gates handovers
+	// (supersedeSentConfigDebtByPeer).
+	supersededByPeer bool
+}
+
+// supersedeSentConfigDebtByPeer retires this node's own outstanding send
+// debt once it has APPLIED a config the PEER pushed (#18521 review round 2).
+// The apply branch is reached only when the daemon's handler accepted the
+// push, and it refuses one while this node believes it is the RG0 primary
+// (errConfigSyncRejectedPrimary), so this is the moment config authority is
+// known to be the peer's: both nodes now hold the peer's config by
+// construction, and what this node sent earlier is no longer anyone's config.
+// The duplicate re-ACK branch does NOT call this (review round 3): it runs no
+// handler, so it never passes that RG0 check, and a duplicate of a generation
+// applied earlier says nothing about this node's current config. Without this, a node that held an uncredited ACK
+// debt and lost RG0 by a path its own gate does not guard (a monitor-driven
+// weight change) kept refusing every later handover of a data RG, and the
+// overdue-ACK re-push — which only the RG0 authority runs — could not clear
+// it. A later send by this node records a fresh debt as usual.
+func (s *SessionSync) supersedeSentConfigDebtByPeer(peerGen uint64) {
+	s.configApplyDebtMu.Lock()
+	debt := s.lastSentConfigDebt16756
+	if debt.generation == 0 || debt.supersededByPeer {
+		s.configApplyDebtMu.Unlock()
+		return
+	}
+	s.lastSentConfigDebt16756.supersededByPeer = true
+	s.configApplyDebtMu.Unlock()
+	slog.Info("cluster sync: applied the peer's config; this node's own unacknowledged config "+
+		"send is superseded and no longer gates handovers (#18521)",
+		"own_gen", debt.generation, "peer_gen", peerGen)
 }
 
 func (s *SessionSync) configApplyDebtSnapshot16756() configApplyDebt16756 {
@@ -101,7 +139,7 @@ func (s *SessionSync) PeerConfigStale() (bool, string) {
 	}
 	debt := s.configApplyDebtSnapshot16756()
 	sent := debt.generation
-	if sent == 0 {
+	if sent == 0 || debt.supersededByPeer {
 		return false, ""
 	}
 	legacyStale := func() (bool, string) {
@@ -142,4 +180,36 @@ func (s *SessionSync) PeerAppliedConfigGen() uint64 {
 		return 0
 	}
 	return s.peerAppliedConfigGen.Load()
+}
+
+// PeerConfigAckOverdue reports whether a CONNECTED, ACK-capable peer has gone
+// longer than after without positively acknowledging the newest config
+// generation this node sent (#18521). The stale-config gate is otherwise
+// satisfied only by that ACK, and the only events that re-push a config are a
+// NACK, a reconnect and a new commit. An ACK that never gets credited — skipped
+// on the standby because its delivering connection was replaced, lost with a
+// torn-down connection, or discarded by a reboot reset — therefore left the
+// gate refusing failover onto an in-sync standby until the next commit. The
+// daemon uses this to re-push, which the standby (already holding the config)
+// answers with a fresh ACK.
+//
+// A legacy peer (no ACK advertisement) is never overdue: its gate is
+// NACK-driven and a NACK already re-arms the push.
+func (s *SessionSync) PeerConfigAckOverdue(after time.Duration) (gen uint64, age time.Duration, overdue bool) {
+	if s == nil || !s.stats.Connected.Load() {
+		return 0, 0, false
+	}
+	debt := s.configApplyDebtSnapshot16756()
+	if debt.generation == 0 || debt.sentMono == 0 || debt.supersededByPeer {
+		return 0, 0, false
+	}
+	known, ackCapable := s.peerConfigAckCapabilitySnapshot16756()
+	if !known || !ackCapable {
+		return 0, 0, false
+	}
+	if s.peerAppliedConfigGen.Load() >= debt.generation {
+		return 0, 0, false
+	}
+	age = time.Duration(s.nowMono() - debt.sentMono)
+	return debt.generation, age, age >= after
 }
