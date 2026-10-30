@@ -175,6 +175,8 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         icmp_match.resolution,
         arrival_zone,
     );
+    let icmp_resolution =
+        restamp_embedded_fabric_redirect(worker_ctx.forwarding, meta, icmp_resolution, arrival_zone);
     // #16053: promote the withheld ambiguous claim ONLY on this packet's
     // finalized-resolution owner-RG proof, then re-derive the arrival zone
     // from the promoted override. A proved peer punt already arrives as
@@ -657,6 +659,38 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
         now_ns,
     );
     false
+}
+
+/// #18174: an embedded-ICMP error handed to the fabric peer must carry the
+/// zone it ACTUALLY arrived in. The resolution can come from the quoted
+/// session's cached reverse half, whose FabricRedirect was minted for that
+/// session's REPLY traffic: production reverse synthesis
+/// (`build_reverse_session_from_forward_match_in_table`) stamps a "fabric
+/// return" with the FORWARD flow's ingress zone (`lan`), and
+/// `finalize_embedded_icmp_resolution_parts` keeps an existing
+/// FabricRedirect verbatim. Live on tcp with RG2 split to node1, every hop's
+/// reversed Time Exceeded therefore reached the LAN owner claiming `lan`,
+/// failed the RELATED arrival check (expected: the forward egress zone,
+/// `wan`) and was default-denied `lan -> lan`. Re-derive the stamp from the
+/// real arrival zone; a fabric arrival is never re-stamped (it is not
+/// redirected again), and an unresolved arrival keeps what it had.
+pub(super) fn restamp_embedded_fabric_redirect(
+    forwarding: &ForwardingState,
+    meta: UserspaceDpMeta,
+    resolution: ForwardingResolution,
+    arrival_zone: u32,
+) -> ForwardingResolution {
+    if resolution.disposition != ForwardingDisposition::FabricRedirect
+        || arrival_zone == 0
+        || crate::afxdp::forwarding::ingress_is_fabric(forwarding, meta.ingress_ifindex as i32)
+    {
+        return resolution;
+    }
+    crate::afxdp::forwarding::resolve_fabric_redirect_for_ingress_zone(
+        forwarding,
+        Some(arrival_zone),
+    )
+    .unwrap_or(resolution)
 }
 
 /// #10684/#18174: the same-family RELATED passthrough (untranslated, and a

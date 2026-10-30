@@ -275,24 +275,16 @@ fn neighbors_with_client(forwarding: &ForwardingState, f: Family) -> Arc<Sharded
 }
 
 fn ha(rg1: bool, rg2: bool) -> BTreeMap<i32, HAGroupRuntime> {
-    BTreeMap::from([
-        (
-            1,
-            HAGroupRuntime {
-                active: rg1,
-                watchdog_timestamp: 123,
-                lease: HAGroupRuntime::active_lease_until(123, 123),
-            },
-        ),
-        (
-            2,
-            HAGroupRuntime {
-                active: rg2,
-                watchdog_timestamp: 123,
-                lease: HAGroupRuntime::active_lease_until(123, 123),
-            },
-        ),
-    ])
+    let rg = |active: bool| HAGroupRuntime {
+        active,
+        watchdog_timestamp: 123,
+        lease: if active {
+            HAGroupRuntime::active_lease_until(123, 123)
+        } else {
+            HAForwardingLease::Inactive
+        },
+    };
+    BTreeMap::from([(1, rg(rg1)), (2, rg(rg2))])
 }
 
 /// What the probe's real SNAT translation put on the wire: (quoted source,
@@ -585,101 +577,308 @@ fn peer_snapshot() -> crate::ConfigSnapshot {
     s
 }
 
-/// Split RGs, end to end across BOTH nodes. The WAN (RG1) owner receives
-/// the hop's Time Exceeded but the LAN (RG2) is owned by the peer, so the
-/// reversed error must leave on the fabric with the WAN zone stamp; the
-/// peer must then deliver that exact frame to the LAN host under its own
-/// `wan -> lan` default deny. Pre-#18174 the first leg already passed (a
-/// FabricRedirect is adjudicated on the peer) and the PEER's queued gate
-/// default-denied the error, so the chain is RED on revert at the second
-/// leg.
+/// The frame the LAN-RG owner's dispatch puts on the fabric for a probe whose
+/// WAN egress is peer-owned: the ORIGINAL pre-NAT probe (`apply_nat_on_fabric`
+/// stays false; the WAN owner translates, #4439/#4453), stamped with the LAN
+/// arrival zone, addressed to the WAN owner's fabric parent.
+fn fabric_probe_frame(f: Family, probe: Probe) -> (Vec<u8>, UserspaceDpMeta) {
+    let (mut frame, _) = probe_frame(f, probe, 5);
+    frame[0..6].copy_from_slice(&TEST_FABRIC_MAC);
+    let [_, _, hi, lo] = TEST_LAN_ZONE_ID.to_be_bytes();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    let meta = meta_for(f, FABRIC_IF, 14, proto(f, probe), frame.len());
+    (frame, meta)
+}
+
+/// WAN-RG owner leg: the hop's error arrives on the WAN quoting the probe as
+/// `xlate` put it on the wire; the LAN RG is the peer's, so the reversed error
+/// must leave on the fabric stamped with the zone it ARRIVED in (`wan`).
+/// Returns the fabric frame.
+fn wan_owner_error_leg(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    neighbors: &Arc<ShardedNeighborMap>,
+    f: Family,
+    probe: Probe,
+    xlate: (IpAddr, u16),
+    label: &str,
+) -> Vec<u8> {
+    let (frame, meta) = error_frame(f, probe, ErrKind::TimeExceeded, hop(f), xlate.0, xlate.1);
+    let mut wan = binding_on(WAN_IF);
+    txn_run_descriptor_with_neighbors(&mut wan, sessions, forwarding, &ha(true, false), &frame, meta, neighbors);
+    assert_eq!(wan.scratch.scratch_forwards.len(), 1, "{label}: the WAN owner must queue one prebuilt");
+    let redirect = &wan.scratch.scratch_forwards[0];
+    assert_eq!(
+        redirect.decision.resolution.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "{label}: the LAN RG is peer-owned, so the error rides the fabric"
+    );
+    assert_eq!(redirect.target_ifindex, FABRIC_IF, "{label}: transmitted on the fabric parent");
+    let fabric_frame: Vec<u8> = match &redirect.frame {
+        PendingForwardFrame::PrebuiltTransit { frame, .. } => frame.to_vec(),
+        _ => panic!("{label}: the fabric leg must carry the prebuilt reversed frame"),
+    };
+    let [_, _, zhi, zlo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    assert_eq!(
+        &fabric_frame[6..12],
+        &[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, zhi, zlo],
+        "{label}: the fabric frame must claim the zone the error arrived in (wan), not the \
+         quoted session's cached fabric-return stamp (lan)"
+    );
+    fabric_frame
+}
+
+/// LAN-RG owner leg: the fabric-carried, already-reversed error must reach
+/// the LAN host under this node's own `wan -> lan` default deny.
+fn lan_owner_delivers(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    neighbors: &Arc<ShardedNeighborMap>,
+    fabric_frame: &[u8],
+    f: Family,
+    probe: Probe,
+    label: &str,
+) {
+    let meta = meta_for(
+        f,
+        FABRIC_IF,
+        14,
+        if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 },
+        fabric_frame.len(),
+    );
+    let mut fab = binding_on(FABRIC_IF);
+    let before = sessions.len();
+    let (batch, dbg) =
+        txn_run_descriptor_with_neighbors(&mut fab, sessions, forwarding, &ha(false, true), fabric_frame, meta, neighbors);
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0, "{label}: the LAN owner accepts the WAN stamp");
+    assert_eq!(dbg.policy_deny, 0, "{label}: the LAN owner must not default-deny the RELATED error");
+    assert_eq!(
+        fab.scratch.scratch_forwards.len(),
+        1,
+        "{label}: the LAN owner must deliver the fabric-carried error to the LAN host; \
+         dst_mac_dropped={} unstamped={} validated={} recycled={} ha_inactive={}",
+        batch.dst_mac_dropped,
+        batch.unstamped_fabric_ingress_drops,
+        batch.validated_packets,
+        fab.scratch.scratch_recycle.len(),
+        dbg.ha_inactive,
+    );
+    assert_delivered_to_lan_host(&fab.scratch.scratch_forwards[0], f, probe, ErrKind::TimeExceeded, hop(f), label);
+    assert_eq!(sessions.len(), before, "{label}: no session from the error");
+}
+
+/// Run one LAN probe on a node under `ha_state`; the caller reads the queued
+/// request off the returned binding.
+fn lan_probe_on(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    neighbors: &Arc<ShardedNeighborMap>,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    f: Family,
+    probe: Probe,
+    ttl: u8,
+) -> BindingWorker {
+    let (frame, meta) = probe_frame(f, probe, ttl);
+    let mut lan = binding_on(LAN_IF);
+    txn_run_descriptor_with_neighbors(&mut lan, sessions, forwarding, ha_state, &frame, meta, neighbors);
+    lan
+}
+
+const SPLIT_CASES: [(Family, Probe); 4] = [
+    (Family::V4, Probe::Echo),
+    (Family::V4, Probe::Udp),
+    (Family::V6, Probe::Echo),
+    (Family::V6, Probe::Udp),
+];
+
+/// Split RGs from the start — the live tcp experiment (RG1/WAN on node0,
+/// RG2/LAN on node1). The probe enters node1 (LAN owner), which owns the
+/// session and fabric-redirects the original pre-NAT probe; node0 (WAN
+/// owner) processes it as a FABRIC-INGRESS packet, translates it and installs
+/// its own session, whose reverse half production synthesis stores as a
+/// "fabric return" FabricRedirect stamped with the FORWARD ingress zone
+/// (`lan`). The hop's Time Exceeded comes back to node0, matches that
+/// session, and the embedded arm reused the cached `lan`-stamped redirect:
+/// node1 then saw a `lan` arrival, failed the RELATED arrival check and
+/// default-denied it `lan -> lan` — exactly the live tcp journal
+/// (`POLICY_DENY src=<hop> dst=10.0.62.102 ingress_zone=lan egress_zone=lan`).
+/// RED on revert of `restamp_embedded_fabric_redirect` (leg 1 stamp).
 #[test]
-fn split_rg_time_exceeded_crosses_fabric_and_reaches_lan_host_18174() {
-    for (f, probe) in [
-        (Family::V4, Probe::Echo),
-        (Family::V4, Probe::Udp),
-        (Family::V6, Probe::Echo),
-        (Family::V6, Probe::Udp),
-    ] {
-        let label = format!("{f:?} {probe:?}");
-        // Leg 1: the WAN-RG owner.
-        let local_fwd = build_forwarding_state(&nat_snapshot_with_fabric());
-        let local_neighbors = neighbors_with_client(&local_fwd, f);
-        let mut local_sessions = SessionTable::new();
-        let (qsrc, qid) = run_probe(&mut local_sessions, &local_fwd, &local_neighbors, f, probe);
-        let (frame, meta) = error_frame(f, probe, ErrKind::TimeExceeded, hop(f), qsrc, qid);
-        let mut wan = binding_on(WAN_IF);
-        txn_run_descriptor_with_neighbors(
-            &mut wan,
-            &mut local_sessions,
-            &local_fwd,
-            &ha(true, false),
-            &frame,
-            meta,
-            &local_neighbors,
-        );
-        assert_eq!(wan.scratch.scratch_forwards.len(), 1, "{label}: leg 1 must queue one prebuilt");
-        let redirect = &wan.scratch.scratch_forwards[0];
+fn split_rg_live_shape_time_exceeded_reaches_lan_host_18174() {
+    for (f, probe) in SPLIT_CASES {
+        let label = format!("live split {f:?} {probe:?}");
+        // node1 (LAN owner): its own session from the LAN probe.
+        let n1_fwd = build_forwarding_state(&peer_snapshot());
+        let n1_neighbors = neighbors_with_client(&n1_fwd, f);
+        let mut n1_sessions = SessionTable::new();
+        let lan = lan_probe_on(&mut n1_sessions, &n1_fwd, &n1_neighbors, &ha(false, true), f, probe, 5);
+        assert_eq!(lan.scratch.scratch_forwards.len(), 1, "{label}: premise: node1 forwards the probe");
         assert_eq!(
-            redirect.decision.resolution.disposition,
+            lan.scratch.scratch_forwards[0].decision.resolution.disposition,
             ForwardingDisposition::FabricRedirect,
-            "{label}: the LAN RG is peer-owned, so the error rides the fabric"
-        );
-        assert_eq!(redirect.target_ifindex, FABRIC_IF, "{label}: leg 1 transmits on the fabric parent");
-        let fabric_frame: Vec<u8> = match &redirect.frame {
-            PendingForwardFrame::PrebuiltTransit { frame, .. } => frame.to_vec(),
-            _ => panic!("{label}: fabric leg must carry the prebuilt reversed frame"),
-        };
-        let [_, _, zhi, zlo] = TEST_WAN_ZONE_ID.to_be_bytes();
-        assert_eq!(
-            &fabric_frame[6..12],
-            &[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, zhi, zlo],
-            "{label}: the fabric frame carries the WAN arrival-zone stamp"
+            "{label}: premise: node1 hands the probe to the WAN owner over the fabric"
         );
 
-        // Leg 2: the LAN-RG owner (the peer) holds the synced session. It is
-        // installed by the same real probe so its translation is the one the
-        // first node quoted.
-        let peer_fwd = build_forwarding_state(&peer_snapshot());
-        let peer_neighbors = neighbors_with_client(&peer_fwd, f);
-        let mut peer_sessions = SessionTable::new();
-        let peer_xlate = run_probe(&mut peer_sessions, &peer_fwd, &peer_neighbors, f, probe);
-        assert_eq!(peer_xlate, (qsrc, qid), "{label}: premise: both nodes hold the same translation");
-        let l3 = 14;
-        let peer_meta = meta_for(
-            f,
-            FABRIC_IF,
-            l3,
-            if f == Family::V4 { PROTO_ICMP } else { PROTO_ICMPV6 },
-            fabric_frame.len(),
-        );
+        // node0 (WAN owner): the fabric-ingress probe installs its session.
+        let n0_fwd = build_forwarding_state(&nat_snapshot_with_fabric());
+        let n0_neighbors = neighbors_with_client(&n0_fwd, f);
+        let mut n0_sessions = SessionTable::new();
+        let (frame, meta) = fabric_probe_frame(f, probe);
         let mut fab = binding_on(FABRIC_IF);
-        let before = peer_sessions.len();
-        let (batch, dbg) = txn_run_descriptor_with_neighbors(
-            &mut fab,
-            &mut peer_sessions,
-            &peer_fwd,
-            &ha(false, true),
-            &fabric_frame,
-            peer_meta,
-            &peer_neighbors,
+        txn_run_descriptor_with_neighbors(&mut fab, &mut n0_sessions, &n0_fwd, &ha(true, false), &frame, meta, &n0_neighbors);
+        assert_eq!(fab.scratch.scratch_forwards.len(), 1, "{label}: premise: node0 forwards the fabric probe");
+        let fwd = &fab.scratch.scratch_forwards[0];
+        assert_eq!(fwd.decision.resolution.egress_ifindex, WAN_IF, "{label}: premise: out the WAN");
+        let nat = fwd.decision.nat;
+        let ident = if probe == Probe::Echo { PROBE_ECHO_ID } else { PROBE_UDP_SPORT };
+        let xlate = (nat.rewrite_src.expect("premise: node0 source-NATs"), nat.rewrite_src_port.unwrap_or(ident));
+
+        let fabric_frame =
+            wan_owner_error_leg(&mut n0_sessions, &n0_fwd, &n0_neighbors, f, probe, xlate, &label);
+        lan_owner_delivers(&mut n1_sessions, &n1_fwd, &n1_neighbors, &fabric_frame, f, probe, &label);
+    }
+}
+
+/// Export `key`'s forward row from `sessions` as the HA wire import would
+/// hand it to the peer: ForwardCandidate out the WAN unit, the same NAT
+/// decision and zones, SyncImport origin.
+fn exported_forward_row(sessions: &SessionTable, key: &SessionKey) -> SyncedSessionEntry {
+    let (decision, metadata, _origin) = sessions.entry_with_origin(key).expect("premise: forward row installed");
+    assert!(!metadata.is_reverse, "premise: the forward row");
+    SyncedSessionEntry {
+        key: key.clone(),
+        decision,
+        metadata,
+        source_nat_static: Some(false),
+        leak_incarnation: 0,
+        origin: crate::session::SessionOrigin::SyncImport,
+        protocol: key.protocol,
+        tcp_flags: 0,
+        generation: 0,
+        session_id: (1u64 << 48) | 18174,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        rev_packets: 1,
+        fwd_packets: 1,
+        pptp_call_ids: 0,
+        persistent_lease_hold: None,
+    }
+}
+
+/// Split AFTER the flow was established — RG2 moves to node1 while mtr runs.
+/// node0 created the session while it owned both RGs; node1 holds it ONLY as
+/// an HA import, installed through the production path: the forward row
+/// exported as the peer import carries it, the reverse companion synthesized
+/// by `synthesized_synced_reverse_entry` under node1's own HA state, both
+/// applied by the worker command dispatcher (`WorkerCommand::UpsertSynced`).
+/// The reversed error reaches node1 already in pre-NAT form; it matches the
+/// imported row through its canonical reply alias, which the #14665 gate
+/// declined (it expected the SNAT address as outer destination) until the
+/// fabric-ingress arm in `nat_match_v4/v6`. RED on revert of that arm.
+#[test]
+fn split_rg_after_establishment_synced_import_reaches_lan_host_18174() {
+    for (f, probe) in SPLIT_CASES {
+        let label = format!("synced split {f:?} {probe:?}");
+        // node0 while it owned both RGs.
+        let n0_fwd = build_forwarding_state(&nat_snapshot_with_fabric());
+        let n0_neighbors = neighbors_with_client(&n0_fwd, f);
+        let mut n0_sessions = SessionTable::new();
+        let lan = lan_probe_on(&mut n0_sessions, &n0_fwd, &n0_neighbors, &ha(true, true), f, probe, 5);
+        assert_eq!(lan.scratch.scratch_forwards.len(), 1, "{label}: premise: node0 forwards the probe");
+        let fwd = &lan.scratch.scratch_forwards[0];
+        let key = fwd.flow_key.clone().expect("premise: a flow-backed forward");
+        let ident = if probe == Probe::Echo { PROBE_ECHO_ID } else { PROBE_UDP_SPORT };
+        let xlate = (
+            fwd.decision.nat.rewrite_src.expect("premise: source-NATed"),
+            fwd.decision.nat.rewrite_src_port.unwrap_or(ident),
         );
-        assert_eq!(batch.invalid_fabric_stamp_drops, 0, "{label}: the peer accepts the WAN stamp");
-        assert_eq!(dbg.policy_deny, 0, "{label}: the peer must not default-deny the RELATED error");
+        let exported = exported_forward_row(&n0_sessions, &key);
+
+        // node1: the HA import, through the production worker dispatcher.
+        let n1_fwd = build_forwarding_state(&peer_snapshot());
+        let n1_neighbors = neighbors_with_client(&n1_fwd, f);
+        let mut n1_sessions = SessionTable::new();
+        let n1_ha = ha(false, true);
+        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+            &n1_fwd,
+            &n1_ha,
+            &n1_neighbors,
+            &exported,
+            123,
+        )
+        .expect("production reverse synthesis must produce the companion");
+        let queue = Arc::new(Mutex::new(VecDeque::from(vec![
+            WorkerCommand::UpsertSynced(exported),
+            WorkerCommand::UpsertSynced(reverse),
+        ])));
+        crate::afxdp::session_glue::apply_worker_commands(
+            &queue,
+            &mut n1_sessions,
+            crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &n1_fwd,
+            &n1_ha,
+            &n1_neighbors,
+            0,
+            &mut VecDeque::new(),
+        );
+        assert!(
+            n1_sessions.entry_with_origin(&key).is_some(),
+            "{label}: premise: node1 holds the imported forward row"
+        );
+
+        // RG2 moved: node0 keeps only the WAN.
+        let fabric_frame =
+            wan_owner_error_leg(&mut n0_sessions, &n0_fwd, &n0_neighbors, f, probe, xlate, &label);
+        lan_owner_delivers(&mut n1_sessions, &n1_fwd, &n1_neighbors, &fabric_frame, f, probe, &label);
+    }
+}
+
+/// Split RGs, hop 1: node1 owns the LAN and hands transit to node0 over the
+/// fabric, so node1 is the router that must answer an expiring probe — the
+/// fabric build would decrement and refuse it, and node0 skips the decrement
+/// on fabric ingress. Live on tcp every TTL-1 probe ended as
+/// `fabric_redirect_build_failed` on fw1 and mtr hop 1 read `???`. The answer
+/// must leave the LAN unit sourced from its own address. RED on revert of the
+/// FabricRedirect TTL check in the poll tail (the request is a FabricRedirect
+/// live forward instead).
+#[test]
+fn split_rg_hop_one_time_exceeded_is_answered_by_lan_owner_18174() {
+    let n1_fwd = build_forwarding_state(&peer_snapshot());
+    for (f, probe) in SPLIT_CASES {
+        let label = format!("split hop1 {f:?} {probe:?}");
+        let neighbors = neighbors_with_client(&n1_fwd, f);
+        let mut sessions = SessionTable::new();
+        let lan = lan_probe_on(&mut sessions, &n1_fwd, &neighbors, &ha(false, true), f, probe, 1);
         assert_eq!(
-            fab.scratch.scratch_forwards.len(),
+            lan.scratch.scratch_forwards.len(),
             1,
-            "{label}: the peer must deliver the fabric-carried error to the LAN host \
-             (RED pre-#18174: the peer's queued gate default-denied it); \
-             dst_mac_dropped={} unstamped={} validated={} recycled={} ha_inactive={}",
-            batch.dst_mac_dropped,
-            batch.unstamped_fabric_ingress_drops,
-            batch.validated_packets,
-            fab.scratch.scratch_recycle.len(),
-            dbg.ha_inactive,
+            "{label}: the expiring probe must produce exactly one reply"
         );
-        assert_delivered_to_lan_host(&fab.scratch.scratch_forwards[0], f, probe, ErrKind::TimeExceeded, hop(f), &label);
-        assert_eq!(peer_sessions.len(), before, "{label}: no session from the error");
+        let te = &lan.scratch.scratch_forwards[0];
+        assert_ne!(
+            te.decision.resolution.disposition,
+            ForwardingDisposition::FabricRedirect,
+            "{label}: an expiring probe must not be handed to the fabric"
+        );
+        assert_eq!(te.target_ifindex, LAN_IF, "{label}: the Time Exceeded leaves the LAN unit");
+        let bytes: &[u8] = match &te.frame {
+            PendingForwardFrame::Prebuilt(frame) => frame,
+            _ => panic!("{label}: a generated Time Exceeded is a prebuilt frame"),
+        };
+        assert_eq!(&bytes[0..6], &CLIENT_MAC, "{label}: back to the LAN host");
+        match f {
+            Family::V4 => {
+                assert_eq!(bytes[14 + 20], 11, "{label}: ICMP Time Exceeded");
+                assert_eq!(&bytes[14 + 12..14 + 16], &[10, 0, 61, 1], "{label}: sourced from the LAN address");
+            }
+            Family::V6 => {
+                assert_eq!(bytes[14 + 40], 3, "{label}: ICMPv6 Time Exceeded");
+                let src = Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[14 + 8..14 + 24]).unwrap());
+                assert_eq!(src, "2001:559:8585:ef00::1".parse::<Ipv6Addr>().unwrap(), "{label}: LAN global source");
+            }
+        }
     }
 }
 

@@ -10393,6 +10393,47 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
+                // #18174: a transit packet this node hands to the fabric peer
+                // (split RGs: the egress RG is peer-owned) is still routed by
+                // THIS node — the redirecting node is the hop. The fabric
+                // build decrements TTL / hop limit and refuses a packet that
+                // would expire (`fabric_redirect_build_failed`), and the peer
+                // skips the decrement on fabric ingress, so before this check
+                // nobody answered an expiring probe: traceroute/mtr hop 1 read
+                // `???` whenever the LAN RG and the WAN RG sat on different
+                // nodes (live on tcp, fw1 `fabric_redirect_unsendable_drops`
+                // = every TTL-1 probe). The session-hit and session-miss TE
+                // sites above only cover `ForwardCandidate`; the flow-cache
+                // hit path already covers `FabricRedirect` (#3779). Answer
+                // here, from the ingress unit this node owns, exactly as a
+                // local forward would; a suppressed reply drops the packet.
+                // A fabric arrival is never re-redirected and never decrements
+                // here, and an injected record keeps its TX-pool ownership.
+                if decision.resolution.disposition == ForwardingDisposition::FabricRedirect
+                    && !is_injected
+                    && (meta.meta_flags & FABRIC_INGRESS_FLAG) == 0
+                    && let Some(flow) = flow.as_ref()
+                    && matches!(packet_ttl_would_expire(packet_frame, meta), Some(true))
+                {
+                    if let Some(request) = build_local_time_exceeded_request(
+                        packet_frame,
+                        desc,
+                        meta,
+                        &worker_ctx.ident,
+                        flow,
+                        worker_ctx.forwarding,
+                        worker_ctx.event_stream,
+                        worker_ctx.dynamic_neighbors,
+                        worker_ctx.ha_state,
+                        now_secs,
+                        telemetry.counters,
+                    ) {
+                        binding.scratch.scratch_forwards.push(request);
+                        continue;
+                    }
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
+                }
                 // #9950 post-commit overlap record + translated re-check. Keep
                 // this before forward/session/zone accounting so shard-full and
                 // overlap drops are not counted as forwarded candidates.

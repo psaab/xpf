@@ -1003,7 +1003,31 @@ sync.
     as the outer destination (`nat_match_v4.rs`/`nat_match_v6.rs`); the
     match is then a forward quote whose expected zone (the forward egress
     zone) equals the authenticated WAN stamp, and the RELATED rule admits
-    it. NAT64
+    it.
+    **Split RGs, live (tcp, RG2 on node1):** two more defects the harness
+    shape above could not see. (a) The WAN-RG owner's session for the probe
+    is its own FABRIC-INGRESS row, whose reverse half production synthesis
+    stores as a "fabric return" FabricRedirect stamped with the FORWARD
+    ingress zone (`lan`); the embedded arm reused that cached redirect, so
+    the LAN owner saw a `lan` arrival, failed the RELATED check and
+    default-denied every hop `lan -> lan` (live: `POLICY_DENY src=<hop>
+    dst=10.0.62.102 ingress_zone=lan egress_zone=lan` on fw1).
+    `restamp_embedded_fabric_redirect` now re-stamps an embedded error's
+    FabricRedirect with the zone it ACTUALLY arrived in (never on a fabric
+    arrival). (b) Hop 1: the LAN owner hands transit to the WAN owner over
+    the fabric, so it is the router, but the session-hit and session-miss
+    Time Exceeded sites only covered `ForwardCandidate`; the fabric build
+    refused the expiring probe (`fabric_redirect_build_failed`) and the peer
+    skips the decrement on fabric ingress, so nobody answered. The poll
+    tail now answers a non-fabric, non-injected FabricRedirect whose TTL /
+    hop limit would expire with a local Time Exceeded (the flow-cache hit
+    path already did, #3779). Cells:
+    `split_rg_live_shape_time_exceeded_reaches_lan_host_18174` (node1's own
+    LAN-created row, node0's fabric-ingress row, both via the poll path),
+    `split_rg_after_establishment_synced_import_reaches_lan_host_18174`
+    (node1 holds the row only as an HA import through
+    `synthesized_synced_reverse_entry` + `WorkerCommand::UpsertSynced`), and
+    `split_rg_hop_one_time_exceeded_is_answered_by_lan_owner_18174`. NAT64
     (cross-family) RELATED admission is unchanged — still PMTUD only.
     Cells: `tests_mtr_icmp_errors_18174.rs` (real ICMP-echo and UDP probes
     through the poll path, v4+v6, SNAT and non-NAT, single node and the
