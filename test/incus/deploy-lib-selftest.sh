@@ -54,16 +54,23 @@ FAKE_CALL_LOG=""
 # Rejecting an existing target models the Incus same-name re-push collision.
 FAKE_REJECT_EXISTING=0
 FAKE_MKTEMP_SEQ=""
-# #18544: the xpfd fragment systemd has LOADED. Like FAKE_MKTEMP_SEQ it lives in
-# a file, for the same subshell reason. It changes only on fake_systemd_boot and
-# `systemctl daemon-reload`, never when a unit file is written or removed. That
-# gap lets a cell catch a reconcile that edits the disk but forgets to reload.
-# The file exists only after a cell calls fake_systemd_boot, so other cells'
-# daemon-reloads leave the fake VM tree untouched.
-FAKE_SYSTEMD_LOADED=""
-# A remote path that the fake `rm` reports as removed but leaves in place. An
-# rm that reports success says nothing about the unit systemd has loaded.
-FAKE_RM_NOOP_PATH=""
+# #18544: the fragment systemd has LOADED for each unit, one file per unit in
+# this directory. Like FAKE_MKTEMP_SEQ it lives on disk, for the same subshell
+# reason. It changes only on fake_systemd_boot and `systemctl daemon-reload`,
+# never when a unit file is written or removed. That gap lets a cell catch a
+# reconcile that edits the disk but forgets to reload. The directory exists
+# only after a cell calls fake_systemd_boot, so other cells' daemon-reloads
+# leave the fake VM tree untouched.
+FAKE_SYSTEMD_DIR=""
+FAKE_SYSTEMD_UNITS=(xpfd.service xpf-transit-closed.service xpf-input-closed.service)
+# A remote path that the fake `rm`/`mv` reports as moved or removed but leaves
+# in place. A removal that reports success says nothing about the unit systemd
+# has loaded.
+FAKE_REMOVE_NOOP_PATH=""
+# "<unit>=<state>": systemd REJECTS that unit's packaged file and reports
+# <state> (e.g. bad-setting, as for a directive the node's systemd does not
+# know). It applies only while the packaged file is the loaded one.
+FAKE_LOADSTATE_OVERRIDE=""
 
 setup_fake_vm() {
 	FAKE_VM=$(mktemp -d)
@@ -79,34 +86,63 @@ setup_fake_vm() {
 	FAKE_REJECT_EXISTING=0
 	FAKE_MKTEMP_SEQ=$(mktemp)
 	printf '0' > "$FAKE_MKTEMP_SEQ"
-	FAKE_SYSTEMD_LOADED="$FAKE_VM/run/fake-systemd/xpfd.fragment"
-	FAKE_RM_NOOP_PATH=""
+	FAKE_SYSTEMD_DIR="$FAKE_VM/run/fake-systemd"
+	FAKE_REMOVE_NOOP_PATH=""
+	FAKE_LOADSTATE_OVERRIDE=""
 	mkdir -p "$FAKE_VM/usr/local/sbin" "$FAKE_VM/etc/systemd/system" "$FAKE_VM/tmp"
 }
 
-# _fake_systemd_resolve_xpfd prints the xpfd fragment systemd would load from
-# the fake disk right now, in unit search-path order (/etc before the package
-# dirs). A symlink at a path counts, as a mask does for systemd. It prints
-# nothing when no unit exists.
-_fake_systemd_resolve_xpfd() {
+# _fake_systemd_resolve <unit> prints the fragment systemd would load for
+# <unit> from the fake disk right now, in unit search-path order: /etc, then
+# /run/systemd/system and /usr/local/lib (both of which /etc outranks), then
+# the package dirs. A symlink counts, as a mask or alias does for systemd. It
+# prints nothing when no unit exists.
+_fake_systemd_resolve() {
 	local d
-	for d in etc/systemd/system usr/lib/systemd/system lib/systemd/system; do
-		if [[ -e "$FAKE_VM/$d/xpfd.service" || -L "$FAKE_VM/$d/xpfd.service" ]]; then
-			printf '/%s/xpfd.service\n' "$d"
+	for d in etc/systemd/system run/systemd/system usr/local/lib/systemd/system \
+		usr/lib/systemd/system lib/systemd/system; do
+		if [[ -e "$FAKE_VM/$d/$1" || -L "$FAKE_VM/$d/$1" ]]; then
+			printf '/%s/%s\n' "$d" "$1"
 			return 0
 		fi
 	done
 }
 
-# fake_systemd_boot: systemd loads whatever unit the fake disk holds now.
-fake_systemd_boot() {
-	mkdir -p "$(dirname "$FAKE_SYSTEMD_LOADED")"
-	_fake_systemd_resolve_xpfd > "$FAKE_SYSTEMD_LOADED"
+# _fake_systemd_reload: re-read the disk for every modeled unit.
+_fake_systemd_reload() {
+	local u
+	mkdir -p "$FAKE_SYSTEMD_DIR"
+	for u in "${FAKE_SYSTEMD_UNITS[@]}"; do
+		_fake_systemd_resolve "$u" >"$FAKE_SYSTEMD_DIR/$u.fragment"
+	done
 }
 
-# fake_systemd_loaded: the fragment systemd currently has loaded.
+# fake_systemd_boot: systemd loads whatever units the fake disk holds now.
+fake_systemd_boot() { _fake_systemd_reload; }
+
+# fake_systemd_loaded <unit>: the fragment systemd currently has loaded.
 fake_systemd_loaded() {
-	cat "$FAKE_SYSTEMD_LOADED" 2>/dev/null
+	cat "$FAKE_SYSTEMD_DIR/$1.fragment" 2>/dev/null
+}
+
+# fake_systemd_set_loaded <unit> <path>: model a stale load.
+fake_systemd_set_loaded() {
+	printf '%s\n' "$2" >"$FAKE_SYSTEMD_DIR/$1.fragment"
+}
+
+# _fake_systemd_loadstate <unit>: LoadState for the loaded fragment.
+_fake_systemd_loadstate() {
+	local frag
+	frag=$(fake_systemd_loaded "$1")
+	if [[ -z "$frag" ]]; then
+		echo not-found
+	elif [[ "$(readlink "$FAKE_VM$frag" 2>/dev/null)" == /dev/null ]]; then
+		echo masked
+	elif [[ "$FAKE_LOADSTATE_OVERRIDE" == "$1="* && ( "$frag" == /usr/lib/* || "$frag" == /lib/* ) ]]; then
+		echo "${FAKE_LOADSTATE_OVERRIDE#*=}"
+	else
+		echo loaded
+	fi
 }
 
 # fake_calls_contain <extended-regex> — did any recorded incus call match?
@@ -123,8 +159,9 @@ teardown_fake_vm() {
 	FAKE_REJECT_EXISTING=0
 	[[ -n "$FAKE_MKTEMP_SEQ" ]] && rm -f "$FAKE_MKTEMP_SEQ"
 	FAKE_MKTEMP_SEQ=""
-	FAKE_SYSTEMD_LOADED=""
-	FAKE_RM_NOOP_PATH=""
+	FAKE_SYSTEMD_DIR=""
+	FAKE_REMOVE_NOOP_PATH=""
+	FAKE_LOADSTATE_OVERRIDE=""
 }
 
 # incus mock: supports `incus exec <inst> -- <cmd...>` and
@@ -233,9 +270,37 @@ _fake_exec() {
 		local remote_path="${1:-}" rel
 		[[ -n "$remote_path" && "$remote_path" == /* && "$remote_path" != "/" ]] || return 2
 		# #18544: report success and remove nothing for the armed path.
-		[[ -n "$FAKE_RM_NOOP_PATH" && "$remote_path" == "$FAKE_RM_NOOP_PATH" ]] && return 0
+		[[ -n "$FAKE_REMOVE_NOOP_PATH" && "$remote_path" == "$FAKE_REMOVE_NOOP_PATH" ]] && return 0
 		rel="${remote_path#/}"
 		rm -rf -- "$FAKE_VM/${rel:?}"
+		return 0
+		;;
+	mv)
+		# mv -f <src> <dst>, both VM paths (#18544 parks a unit file).
+		shift
+		[[ "${1:-}" == -f ]] && shift
+		local mv_src="${1:-}" mv_dst="${2:-}"
+		[[ "$mv_src" == /* && "$mv_dst" == /* ]] || return 2
+		[[ -n "$FAKE_REMOVE_NOOP_PATH" && "$mv_src" == "$FAKE_REMOVE_NOOP_PATH" ]] && return 0
+		mv -f "$FAKE_VM/${mv_src#/}" "$FAKE_VM/${mv_dst#/}"
+		return $?
+		;;
+	mkdir)
+		shift
+		[[ "${1:-}" == -p ]] && shift
+		[[ "${1:-}" == /* ]] || return 2
+		mkdir -p "$FAKE_VM/${1#/}"
+		return $?
+		;;
+	find)
+		# find <dir> -mindepth 2 -maxdepth 2 -type l -name <unit>: the
+		# install-link scan. Paths come back as VM paths.
+		shift
+		local find_dir="$1"
+		shift
+		[[ "$find_dir" == /* ]] || return 2
+		[[ -d "$FAKE_VM$find_dir" ]] || return 1
+		find "$FAKE_VM$find_dir" "$@" | sed "s|^$FAKE_VM||"
 		return 0
 		;;
 	readlink)
@@ -289,18 +354,21 @@ _fake_exec() {
 		case "$1" in
 		daemon-reload)
 			# #18544: reload re-reads the disk, but only once a cell has
-			# booted the fake systemd (see FAKE_SYSTEMD_LOADED).
-			if [[ -n "$FAKE_SYSTEMD_LOADED" && -f "$FAKE_SYSTEMD_LOADED" ]]; then
-				_fake_systemd_resolve_xpfd > "$FAKE_SYSTEMD_LOADED"
+			# booted the fake systemd (see FAKE_SYSTEMD_DIR).
+			if [[ -n "$FAKE_SYSTEMD_DIR" && -d "$FAKE_SYSTEMD_DIR" ]]; then
+				_fake_systemd_reload
 			fi
 			return 0
 			;;
 		show)
 			# systemctl show -p ExecStart --value xpfd  => emit a
 			# "{ path=... ; ... }" line; -p MainPID --value => the pid;
-			# -p FragmentPath --value => the LOADED fragment (#18544).
+			# -p FragmentPath/LoadState --value <unit> => the LOADED
+			# fragment and its state (#18544); <unit> is the last arg.
 			if [[ "$*" == *FragmentPath* ]]; then
-				fake_systemd_loaded
+				fake_systemd_loaded "${!#}"
+			elif [[ "$*" == *LoadState* ]]; then
+				[[ -d "$FAKE_SYSTEMD_DIR" ]] && _fake_systemd_loadstate "${!#}"
 			elif [[ "$*" == *ExecStart* ]]; then
 				echo "{ path=$FAKE_EXECSTART ; argv[]=$FAKE_EXECSTART ; ... }"
 			elif [[ "$*" == *MainPID* ]]; then
@@ -640,16 +708,18 @@ test_deb_repush_wiring() {
 	ok "deb re-push wiring: deploy_vm_deb uses the unique-slot helper"
 }
 
-# ── #18544: raw-deploy unit shadow on the deb path ────────────────────
+# ── #18544: raw-deploy unit shadows on the deb path ───────────────────
 # The fixture models a node that was raw-deployed once and deb-deployed
-# since. The raw push left a regular-file /etc shadow with the pre-#18213
-# KillMode, and the deb installed the packaged unit under /usr/lib. The raw
-# `systemctl enable` pointed the wants link at the shadow, and systemd
-# loaded the shadow. Five of the six lab nodes were in this state on
-# 2026-10-30. The paths are LITERALS, not the lib's constants, so a wrong
-# constant in the lib cannot bring its fixture along with it.
+# since. The raw push left a regular-file /etc copy (for xpfd, with the
+# pre-#18213 KillMode), and the deb installed the packaged unit under
+# /usr/lib. The raw `systemctl enable` pointed the install link at the /etc
+# copy, and systemd loaded the /etc copy. That was the measured state of
+# the lab nodes on 2026-10-30. The paths are LITERALS, not the lib's
+# constants, so a wrong constant in the lib cannot bring its fixture along
+# with it.
 #
-# unit_shadow_fixture <file|mask|none> <packaged: 1|0>
+# unit_shadow_fixture <file|mask|alias|none> <packaged: 1|0>
+#   (xpfd.service, wants link in multi-user.target.wants)
 unit_shadow_fixture() {
 	local kind="$1" packaged="$2"
 	local etc="$FAKE_VM/etc/systemd/system"
@@ -657,6 +727,7 @@ unit_shadow_fixture() {
 	case "$kind" in
 		file) printf '[Service]\nExecStart=/usr/local/sbin/xpfd\nKillMode=control-group\n' >"$etc/xpfd.service" ;;
 		mask) ln -s /dev/null "$etc/xpfd.service" ;;
+		alias) ln -s /opt/stale/xpfd.service "$etc/xpfd.service" ;;
 		none) ;;
 	esac
 	if [[ "$packaged" == 1 ]]; then
@@ -668,20 +739,27 @@ unit_shadow_fixture() {
 	fake_systemd_boot
 }
 
-# Any call that starts, stops, restarts or re-enables xpfd. The reconcile runs
-# while xpfd is live and forwarding, ahead of the controlled cut, so a single
-# one of these is an uncontrolled restart.
+# Any call that starts, stops, restarts or re-enables a unit. The reconcile
+# runs while xpfd is live and forwarding, ahead of the controlled cut, so a
+# single one of these is an uncontrolled restart.
 UNIT_SHADOW_SERVICE_TOUCH='systemctl (start|stop|restart|try-restart|reload-or-restart|try-reload-or-restart|kill|enable|reenable|disable|mask|unmask|isolate)( |$)|--now'
+
+# rc + stderr of one reconcile run, in a subshell because die() exits.
+unit_shadow_run() {
+	UNIT_SHADOW_RC=0
+	UNIT_SHADOW_ERR=$( ( "$@" ) 2>&1 >/dev/null ) || UNIT_SHADOW_RC=$?
+}
 
 test_unit_shadow_removed_packaged_unit_governs_18544() {
 	setup_fake_vm
 	unit_shadow_fixture file 1
-	local rc=0 problems=() loaded link
-	( deploy_reconcile_unit_shadow vm ) >/dev/null 2>&1 || rc=$?
-	loaded=$(fake_systemd_loaded)
+	local problems=() loaded link
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	loaded=$(fake_systemd_loaded xpfd.service)
 	link=$(readlink "$FAKE_VM/etc/systemd/system/multi-user.target.wants/xpfd.service")
-	(( rc == 0 )) || problems+=("reconcile rc=$rc")
-	[[ -e "$FAKE_VM/etc/systemd/system/xpfd.service" ]] && problems+=("the /etc shadow is still on disk")
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("reconcile rc=$UNIT_SHADOW_RC")
+	[[ -e "$FAKE_VM/etc/systemd/system/xpfd.service" ]] && problems+=("the /etc copy is still on disk")
+	[[ -e "$FAKE_VM/run/xpf-deploy-unit-shadow/xpfd.service" ]] && problems+=("the parked copy was not dropped")
 	fake_calls_contain '^exec vm -- systemctl daemon-reload$' || problems+=("no daemon-reload was issued")
 	[[ "$loaded" == /usr/lib/systemd/system/xpfd.service ]] ||
 		problems+=("systemd has '${loaded:-nothing}' loaded, not the packaged unit")
@@ -691,10 +769,9 @@ test_unit_shadow_removed_packaged_unit_governs_18544() {
 		problems+=("the packaged unit was altered")
 	# Idempotence: a second deploy against the reconciled node succeeds and
 	# leaves it exactly as it was.
-	rc=0
-	( deploy_reconcile_unit_shadow vm ) >/dev/null 2>&1 || rc=$?
-	(( rc == 0 )) || problems+=("second run rc=$rc")
-	[[ "$(fake_systemd_loaded)" == "$loaded" && -f "$FAKE_VM/usr/lib/systemd/system/xpfd.service" &&
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("second run rc=$UNIT_SHADOW_RC")
+	[[ "$(fake_systemd_loaded xpfd.service)" == "$loaded" && -f "$FAKE_VM/usr/lib/systemd/system/xpfd.service" &&
 		! -e "$FAKE_VM/etc/systemd/system/xpfd.service" &&
 		"$(readlink "$FAKE_VM/etc/systemd/system/multi-user.target.wants/xpfd.service")" == "$link" ]] ||
 		problems+=("second run changed the node")
@@ -704,75 +781,88 @@ test_unit_shadow_removed_packaged_unit_governs_18544() {
 	if (( ${#problems[@]} )); then
 		bad "unit shadow (#18544): the packaged unit must govern after reconcile: ${problems[*]}"
 	else
-		ok "unit shadow (#18544): /etc shadow removed, daemon-reloaded, packaged unit loaded, wants link re-pointed, no restart, idempotent"
+		ok "unit shadow (#18544): /etc copy removed, daemon-reloaded, packaged unit loaded, wants link re-pointed, no restart, idempotent"
 	fi
 	teardown_fake_vm
 }
 
-# The shadow was removed by an earlier run whose daemon-reload never ran:
+# The /etc copy was removed by an earlier run whose daemon-reload never ran:
 # nothing is left on disk to find, yet systemd still has the stale unit
 # loaded, and that unit governs the cut's stop.
 test_unit_shadow_stale_load_without_file_reloads_18544() {
 	setup_fake_vm
 	unit_shadow_fixture none 1
-	printf '/etc/systemd/system/xpfd.service\n' >"$FAKE_SYSTEMD_LOADED"
-	local rc=0
-	( deploy_reconcile_unit_shadow vm ) >/dev/null 2>&1 || rc=$?
-	if (( rc == 0 )) && fake_calls_contain '^exec vm -- systemctl daemon-reload$' &&
-		[[ "$(fake_systemd_loaded)" == /usr/lib/systemd/system/xpfd.service ]]; then
-		ok "unit shadow (#18544): a shadow still LOADED with no file on disk is reloaded away"
+	fake_systemd_set_loaded xpfd.service /etc/systemd/system/xpfd.service
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC == 0 )) && fake_calls_contain '^exec vm -- systemctl daemon-reload$' &&
+		[[ "$(fake_systemd_loaded xpfd.service)" == /usr/lib/systemd/system/xpfd.service ]]; then
+		ok "unit shadow (#18544): a /etc copy still LOADED with no file on disk is reloaded away"
 	else
-		bad "unit shadow (#18544): shadow still loaded after its file was removed must be reloaded (rc=$rc, loaded=$(fake_systemd_loaded))"
+		bad "unit shadow (#18544): a /etc copy still loaded after its file was removed must be reloaded (rc=$UNIT_SHADOW_RC, loaded=$(fake_systemd_loaded xpfd.service))"
 	fi
 	teardown_fake_vm
 }
 
-# A symlink at the shadow path is a mask (xpf-deploy.py's #7559 daemon hold)
-# or an alias. Removing it would unmask a deliberately held daemon.
+# A /dev/null symlink at the /etc path is a mask (xpf-deploy.py's #7559 daemon
+# hold). Removing it would unmask a deliberately held daemon.
 test_unit_shadow_mask_symlink_left_alone_18544() {
 	setup_fake_vm
 	unit_shadow_fixture mask 1
-	local rc=0
-	( deploy_reconcile_unit_shadow vm ) >/dev/null 2>&1 || rc=$?
-	if (( rc == 0 )) &&
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC == 0 )) &&
 		[[ "$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service")" == /dev/null ]] &&
-		! fake_calls_contain 'rm .*/etc/systemd/system/xpfd\.service$'; then
-		ok "unit shadow (#18544): a mask symlink at the shadow path is left in place"
+		! fake_calls_contain '(rm|mv) .*/etc/systemd/system/xpfd\.service( |$)'; then
+		ok "unit shadow (#18544): a mask symlink at the /etc path is left in place"
 	else
-		bad "unit shadow (#18544): a mask symlink must be left alone (rc=$rc, link=$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service"))"
+		bad "unit shadow (#18544): a mask symlink must be left alone (rc=$UNIT_SHADOW_RC, link=$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service"))"
 	fi
 	teardown_fake_vm
 }
 
-# With no packaged unit to fall back to, removing the shadow would leave the
-# node with no xpfd unit at all. The reconcile must refuse and keep it.
+# Any other symlink at the /etc path is an alias this deploy did not write.
+# It must not be removed, and it must not pass as "the packaged unit" when
+# systemd loads it in place of the packaged file.
+test_unit_shadow_alias_symlink_not_packaged_hardfails_18544() {
+	setup_fake_vm
+	unit_shadow_fixture alias 1
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"not the packaged"* ]] &&
+		[[ "$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service")" == /opt/stale/xpfd.service ]] &&
+		! fake_calls_contain '(rm|mv) .*/etc/systemd/system/xpfd\.service( |$)'; then
+		ok "unit shadow (#18544): an alias symlink that keeps governing hard-fails and is not removed"
+	else
+		bad "unit shadow (#18544): an alias symlink in place of the packaged unit must hard-fail, untouched (rc=$UNIT_SHADOW_RC, link=$(readlink "$FAKE_VM/etc/systemd/system/xpfd.service"))"
+	fi
+	teardown_fake_vm
+}
+
+# With no packaged unit to fall back to, removing the /etc copy would leave
+# the node with no unit at all. The reconcile must refuse and keep it.
 test_unit_shadow_kept_without_packaged_unit_18544() {
 	setup_fake_vm
 	unit_shadow_fixture file 0
-	local rc=0 err
-	err=$( ( deploy_reconcile_unit_shadow vm ) 2>&1 >/dev/null ) || rc=$?
-	if (( rc != 0 )) && [[ -f "$FAKE_VM/etc/systemd/system/xpfd.service" ]] &&
-		[[ "$err" == *"refusing to remove"* ]] &&
-		! fake_calls_contain 'rm .*/etc/systemd/system/xpfd\.service$'; then
-		ok "unit shadow (#18544): no packaged unit -> hard fail, shadow kept"
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ -f "$FAKE_VM/etc/systemd/system/xpfd.service" ]] &&
+		[[ "$UNIT_SHADOW_ERR" == *"refusing to remove"* ]] &&
+		! fake_calls_contain '(rm|mv) .*/etc/systemd/system/xpfd\.service( |$)'; then
+		ok "unit shadow (#18544): no packaged unit -> hard fail, /etc copy kept"
 	else
-		bad "unit shadow (#18544): with no packaged unit the shadow must be kept and the deploy refused (rc=$rc, shadow present=$([[ -f "$FAKE_VM/etc/systemd/system/xpfd.service" ]] && echo yes || echo no))"
+		bad "unit shadow (#18544): with no packaged unit the /etc copy must be kept and the deploy refused (rc=$UNIT_SHADOW_RC, /etc copy present=$([[ -f "$FAKE_VM/etc/systemd/system/xpfd.service" ]] && echo yes || echo no))"
 	fi
 	teardown_fake_vm
 }
 
-# An rm that reports success while the file survives. The verdict comes from
-# the unit systemd LOADED, not from the rm's exit status.
+# A move that reports success while the file stays. The verdict comes from
+# the unit systemd LOADED, not from the move's exit status.
 test_unit_shadow_surviving_removal_hardfails_18544() {
 	setup_fake_vm
 	unit_shadow_fixture file 1
-	FAKE_RM_NOOP_PATH=/etc/systemd/system/xpfd.service
-	local rc=0 err
-	err=$( ( deploy_reconcile_unit_shadow vm ) 2>&1 >/dev/null ) || rc=$?
-	if (( rc != 0 )) && [[ "$err" == *"still loads"* ]]; then
-		ok "unit shadow (#18544): a shadow still loaded after rm + daemon-reload hard-fails"
+	FAKE_REMOVE_NOOP_PATH=/etc/systemd/system/xpfd.service
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"not the packaged"* ]]; then
+		ok "unit shadow (#18544): a /etc copy still loaded after removal + daemon-reload hard-fails"
 	else
-		bad "unit shadow (#18544): a shadow that survives removal must hard-fail on the LOADED unit (rc=$rc)"
+		bad "unit shadow (#18544): a /etc copy that survives removal must hard-fail on the LOADED unit (rc=$UNIT_SHADOW_RC)"
 	fi
 	teardown_fake_vm
 }
@@ -782,20 +872,117 @@ test_unit_shadow_surviving_removal_hardfails_18544() {
 test_unit_shadow_no_loaded_unit_hardfails_18544() {
 	setup_fake_vm
 	unit_shadow_fixture none 0
-	local rc=0 err
-	err=$( ( deploy_reconcile_unit_shadow vm ) 2>&1 >/dev/null ) || rc=$?
-	if (( rc != 0 )) && [[ "$err" == *"no loaded unit file"* ]]; then
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"not loaded"* ]]; then
 		ok "unit shadow (#18544): no loaded xpfd unit hard-fails"
 	else
-		bad "unit shadow (#18544): no loaded xpfd unit must hard-fail (rc=$rc)"
+		bad "unit shadow (#18544): no loaded xpfd unit must hard-fail (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# The /etc copy outranked a runtime unit in /run/systemd/system. Removing it
+# PROMOTES that unit over the packaged one. "A fragment exists and it is not
+# /etc" would pass this; the positive check must refuse it and put the
+# previous unit back, so the node is as it was before the deploy.
+test_unit_shadow_promoted_runtime_unit_rolls_back_18544() {
+	setup_fake_vm
+	mkdir -p "$FAKE_VM/run/systemd/system"
+	printf '[Service]\nExecStart=/usr/local/sbin/xpfd\n' >"$FAKE_VM/run/systemd/system/xpfd.service"
+	unit_shadow_fixture file 1
+	local problems=()
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	(( UNIT_SHADOW_RC != 0 )) || problems+=("reconcile passed (rc=0) with /run/systemd/system/xpfd.service loaded")
+	[[ "$UNIT_SHADOW_ERR" == *"not the packaged"* ]] || problems+=("no 'not the packaged' diagnostic")
+	grep -qx 'KillMode=control-group' "$FAKE_VM/etc/systemd/system/xpfd.service" 2>/dev/null ||
+		problems+=("the previous /etc copy was not put back")
+	[[ "$(fake_systemd_loaded xpfd.service)" == /etc/systemd/system/xpfd.service ]] ||
+		problems+=("systemd has '$(fake_systemd_loaded xpfd.service)' loaded after the rollback")
+	[[ "$(readlink "$FAKE_VM/etc/systemd/system/multi-user.target.wants/xpfd.service")" == /etc/systemd/system/xpfd.service ]] ||
+		problems+=("the wants link was re-pointed despite the failed check")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): a promoted non-packaged unit must fail and roll back: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): a promoted /run/systemd/system unit fails the positive check and the /etc copy is put back"
+	fi
+	teardown_fake_vm
+}
+
+# The packaged file is the fragment, but systemd rejects it (LoadState
+# bad-setting, e.g. a directive the node's systemd does not know). The path
+# alone would pass; LoadState must not.
+test_unit_shadow_packaged_unit_rejected_rolls_back_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	FAKE_LOADSTATE_OVERRIDE=xpfd.service=bad-setting
+	unit_shadow_run deploy_reconcile_unit_shadow vm xpfd.service
+	if (( UNIT_SHADOW_RC != 0 )) && [[ "$UNIT_SHADOW_ERR" == *"not loaded"* ]] &&
+		grep -qx 'KillMode=control-group' "$FAKE_VM/etc/systemd/system/xpfd.service" 2>/dev/null &&
+		[[ "$(fake_systemd_loaded xpfd.service)" == /etc/systemd/system/xpfd.service ]]; then
+		ok "unit shadow (#18544): a packaged unit systemd rejects fails LoadState and the /etc copy is put back"
+	else
+		bad "unit shadow (#18544): a rejected packaged unit must fail on LoadState and roll back (rc=$UNIT_SHADOW_RC, loaded=$(fake_systemd_loaded xpfd.service))"
+	fi
+	teardown_fake_vm
+}
+
+# The raw deploy also pushes both boot barriers into /etc, shadowing their
+# packaged copies. This uses the udp-node link shape: every install link
+# (sysinit.target.wants for WantedBy=, systemd-networkd.service.requires and
+# xpfd.service.requires for RequiredBy=) targets the /etc copy. After the
+# reconcile, all three units load the packaged file. Every install link still
+# exists, so enablement and RequiredBy= survive, and each one targets the
+# packaged file.
+test_unit_shadow_barrier_units_reconciled_18544() {
+	setup_fake_vm
+	local etc="$FAKE_VM/etc/systemd/system" u l problems=()
+	local -a links=(
+		multi-user.target.wants/xpfd.service
+		sysinit.target.wants/xpf-transit-closed.service
+		systemd-networkd.service.requires/xpf-transit-closed.service
+		sysinit.target.wants/xpf-input-closed.service
+		systemd-networkd.service.requires/xpf-input-closed.service
+		xpfd.service.requires/xpf-input-closed.service
+	)
+	mkdir -p "$FAKE_VM/usr/lib/systemd/system"
+	for u in xpfd.service xpf-transit-closed.service xpf-input-closed.service; do
+		printf '[Unit]\nDescription=stale raw push of %s\n' "$u" >"$etc/$u"
+		printf '[Unit]\nDescription=packaged %s\n' "$u" >"$FAKE_VM/usr/lib/systemd/system/$u"
+	done
+	for l in "${links[@]}"; do
+		mkdir -p "$etc/$(dirname "$l")"
+		ln -s "/etc/systemd/system/$(basename "$l")" "$etc/$l"
+	done
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("rc=$UNIT_SHADOW_RC: $UNIT_SHADOW_ERR")
+	for u in xpfd.service xpf-transit-closed.service xpf-input-closed.service; do
+		[[ -e "$etc/$u" ]] && problems+=("$u: /etc copy still on disk")
+		[[ "$(fake_systemd_loaded "$u")" == "/usr/lib/systemd/system/$u" ]] ||
+			problems+=("$u: loaded '$(fake_systemd_loaded "$u")'")
+	done
+	for l in "${links[@]}"; do
+		if [[ ! -L "$etc/$l" ]]; then
+			problems+=("$l: install link gone (unit no longer enabled / RequiredBy= lost)")
+		elif [[ "$(readlink "$etc/$l")" != "/usr/lib/systemd/system/$(basename "$l")" ]]; then
+			problems+=("$l -> $(readlink "$etc/$l")")
+		fi
+	done
+	fake_calls_contain "$UNIT_SHADOW_SERVICE_TOUCH" &&
+		problems+=("touched a live unit: $(grep -E "$UNIT_SHADOW_SERVICE_TOUCH" "$FAKE_CALL_LOG" | head -n1)")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): xpfd + both boot barriers must load the packaged units with every install link kept: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): xpfd + both boot barriers load the packaged units; all 6 install links kept and re-pointed; no unit touched"
 	fi
 	teardown_fake_vm
 }
 
 # The helper is useless unless the deb path calls it, and the call's
-# POSITION matters. After the deb install, the packaged unit on disk is the
-# one being deployed. Before the `upgrade --rolling` cut, the cut's stop
-# already runs under that unit's KillMode.
+# POSITION matters. After the deb install, the packaged units on disk are the
+# ones being deployed. Before the `upgrade --rolling` cut, the cut's stop
+# already runs under the packaged KillMode. The call is anchored at line end:
+# a backgrounded `... &` call would race the cut.
 test_unit_shadow_reconcile_wired_into_deb_deploy_18544() {
 	local code n_install n_reconcile n_cut
 	code=$(awk '/^deploy_vm_deb\(\)/,/^}/' "$SCRIPT_DIR/cluster-setup.sh")
@@ -805,10 +992,10 @@ test_unit_shadow_reconcile_wired_into_deb_deploy_18544() {
 	# shellcheck disable=SC2016  # literal $rinst/$deb: matching source text
 	n_install=$(_body_line '^[[:space:]]*deploy_install_deb "\$rinst" "\$deb"')
 	# shellcheck disable=SC2016  # literal $rinst: matching source text
-	n_reconcile=$(_body_line '^[[:space:]]*deploy_reconcile_unit_shadow "\$rinst"')
+	n_reconcile=$(_body_line '^[[:space:]]*deploy_reconcile_unit_shadows "\$rinst"[[:space:]]*$')
 	n_cut=$(_body_line 'xpfd upgrade --rolling')
 	if [[ -z "$n_reconcile" ]]; then
-		bad "unit shadow wiring (#18544): deploy_vm_deb never calls deploy_reconcile_unit_shadow"
+		bad "unit shadow wiring (#18544): deploy_vm_deb never calls deploy_reconcile_unit_shadows as a plain foreground statement"
 	elif [[ -z "$n_install" || -z "$n_cut" ]]; then
 		bad "unit shadow wiring (#18544): could not locate the install/cut anchors in deploy_vm_deb; the test is stale, fix the pattern"
 	elif (( n_install < n_reconcile && n_reconcile < n_cut )); then
@@ -3112,9 +3299,13 @@ test_deb_repush_wiring
 test_unit_shadow_removed_packaged_unit_governs_18544
 test_unit_shadow_stale_load_without_file_reloads_18544
 test_unit_shadow_mask_symlink_left_alone_18544
+test_unit_shadow_alias_symlink_not_packaged_hardfails_18544
 test_unit_shadow_kept_without_packaged_unit_18544
 test_unit_shadow_surviving_removal_hardfails_18544
 test_unit_shadow_no_loaded_unit_hardfails_18544
+test_unit_shadow_promoted_runtime_unit_rolls_back_18544
+test_unit_shadow_packaged_unit_rejected_rolls_back_18544
+test_unit_shadow_barrier_units_reconciled_18544
 test_unit_shadow_reconcile_wired_into_deb_deploy_18544
 test_manifest_node_index_maps_configured_instances
 test_manifest_raw_records_verified_binary_hashes

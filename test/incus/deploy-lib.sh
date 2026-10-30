@@ -25,10 +25,10 @@
 # #2162: deploy_verify_pushed_sha generalizes the helper-only sha readback
 # (#1962/#1980) so xpfd and cli get the same HARD post-push verification.
 #
-# #18544: deploy_reconcile_unit_shadow is the one DEB-path reconcile. It runs
-# after the deb install and before the controlled cut, and removes a raw-deploy
-# /etc/systemd/system/xpfd.service that would otherwise shadow the packaged
-# unit.
+# #18544: deploy_reconcile_unit_shadows is the one DEB-path reconcile. It runs
+# after the deb install and before the controlled cut. It removes the
+# raw-deploy /etc copies of xpfd.service and the two boot-barrier units, which
+# would otherwise shadow the packaged units.
 #
 # All functions take a FULLY-RESOLVED instance name (e.g. "loss:xpf-userspace-fw0"
 # or "xpf-fw") because the two callers compute that differently (cluster-setup.sh
@@ -118,103 +118,159 @@ deploy_reconcile_dangling_sbin() {
 	done
 }
 
-# ── Raw-deploy unit shadow on the deb path (#18544) ──────────────────
+# ── Raw-deploy unit shadows on the deb path (#18544) ─────────────────
 # The raw deploy paths (cluster-setup.sh deploy_vm, setup.sh cmd_deploy) push
-# test/incus/xpfd.service to /etc/systemd/system/xpfd.service. The .deb ships
-# its OWN xpfd.service under /usr/lib/systemd/system (debian/rules stages the
-# same source plus an ExecStartPre verify-dataplane gate). systemd prefers
-# /etc, so on a node that was raw-deployed even once, that copy SHADOWS the
-# packaged unit through every later deb deploy. The #1917 drop-in still pins
-# the right binary, but every other [Service] setting is the raw push's,
-# however old. Measured 2026-10-30: the loss and tcp nodes ran
-# KillMode=control-group under debs that ship KillMode=mixed (#18213). So
-# systemd SIGTERMed the helper alongside xpfd, and xpfd's orderly shutdown
-# could not clear rg_active (#18540).
+# test/incus/xpfd.service and the two boot barriers
+# (scripts/image/xpf-{transit,input}-closed.service) into /etc/systemd/system.
+# The .deb ships its OWN copy of all three under /usr/lib/systemd/system
+# (debian/rules stages the same sources; xpfd.service also gains an
+# ExecStartPre verify-dataplane line). systemd prefers /etc, so on a node that
+# was raw-deployed even once, those copies SHADOW the packaged units through
+# every later deb deploy, however old they are. Measured 2026-10-30:
+# - the loss and tcp nodes ran xpfd with KillMode=control-group under debs
+#   that ship KillMode=mixed (#18213), so systemd SIGTERMed the helper
+#   alongside xpfd, and xpfd's orderly shutdown could not clear rg_active
+#   (#18540);
+# - loss fw0's barrier copies were older than the packaged barriers.
+# The #1917 drop-in still pins xpfd's ExecStart/ExecStartPre; every other
+# setting came from the /etc copy.
 #
-# A production install has no /etc copy. The deb path therefore removes it,
-# and the unit shipped in the deb being deployed governs. It does not re-sync
-# the file from the worktree: that would pair the unit from one tree with
-# binaries from a possibly different, XPF_DEPLOY_DEB_PATH-pinned, deb. A
-# later raw deploy pushes the file again, which is that path's contract.
-DEPLOY_UNIT_SHADOW="/etc/systemd/system/xpfd.service"
-# Where dh_installsystemd installs the packaged unit. On merged-/usr these are
-# the same file; either one is enough to fall back to.
-deploy_packaged_unit_paths=(/usr/lib/systemd/system/xpfd.service /lib/systemd/system/xpfd.service)
-# The enablement link. A raw deploy's `systemctl enable` points it at the
-# shadow, so removing the shadow leaves it dangling.
-DEPLOY_UNIT_WANTS_LINK="/etc/systemd/system/multi-user.target.wants/xpfd.service"
+# A production install has no /etc copies. The deb path therefore removes
+# them, so the units shipped in the deb being deployed govern. It does not
+# re-sync them from the worktree: that would pair one tree's units with
+# binaries from a deb that may come from another tree (XPF_DEPLOY_DEB_PATH).
+# A later raw deploy pushes them again, which is that path's contract.
+deploy_shadowed_units=(xpfd.service xpf-transit-closed.service xpf-input-closed.service)
+DEPLOY_UNIT_ETC_DIR="/etc/systemd/system"
+# Where dh_installsystemd installs a packaged unit. On merged-/usr both
+# directories hold the same file. The loaded unit must be in one of them.
+deploy_packaged_unit_dirs=(/usr/lib/systemd/system /lib/systemd/system)
+# A removed /etc copy is parked here until the loaded unit has been verified,
+# so a failed verification can put it back. It sits on tmpfs, outside every
+# systemd unit search path.
+DEPLOY_UNIT_SHADOW_STASH="/run/xpf-deploy-unit-shadow"
 
-# deploy_reconcile_unit_shadow <rinst>
+# deploy_unit_path_is_packaged <unit> <path>: rc 0 iff <path> is the unit's
+# file in one of deploy_packaged_unit_dirs.
+deploy_unit_path_is_packaged() {
+	local d
+	for d in "${deploy_packaged_unit_dirs[@]}"; do
+		[[ "$2" == "$d/$1" ]] && return 0
+	done
+	return 1
+}
+
+# deploy_reconcile_unit_shadow <rinst> <unit>
 #
-# Remove a stale raw-deploy /etc/systemd/system/xpfd.service so the packaged
-# unit governs, run daemon-reload, and ASSERT that the unit systemd has LOADED
-# is no longer the shadow. The deb path calls it AFTER the deb install, so the
-# packaged unit on disk is the deployed one. It runs BEFORE the controlled cut,
-# so the cut's stop already uses the packaged KillMode.
+# Make the packaged <unit> the one systemd has LOADED. The steps:
+# 1. Park a regular-file /etc/systemd/system/<unit> in the stash. Refuse
+#    (HARD FAIL, file kept) when no packaged copy exists on disk.
+# 2. Run daemon-reload, also when the file is already gone but systemd still
+#    has it loaded.
+# 3. ASSERT the result positively: LoadState=loaded, and FragmentPath is the
+#    unit's file in a packaged dir. A unit that the /etc copy used to outrank
+#    (/run/systemd/system, /usr/local/lib/systemd/system, a runtime mask) or
+#    one systemd rejects fails the check. The parked copy then goes back,
+#    systemd reloads, and the deploy dies with the node as it was.
+# 4. Only then drop the stash, and re-point every install link
+#    (/etc/systemd/system/*/<unit>, i.e. the WantedBy=/RequiredBy= .wants and
+#    .requires links) that still targets the removed file. systemd adds those
+#    dependencies by link NAME, so enablement and RequiredBy= hold either way;
+#    re-pointing makes the links match a package install.
 #
-# It never starts, stops or restarts xpfd. daemon-reload only replaces the
-# loaded unit; KillMode and the other [Service] settings take effect at the
-# next stop, which is the cut. It is idempotent: with no shadow on disk, the
-# packaged unit loaded and the wants link not on the shadow, it changes
-# nothing.
+# A symlink at the /etc path is never removed, because this deploy did not
+# write it:
+# - a link to /dev/null is a mask (xpf-deploy.py's #7559 daemon hold). It
+#   governs deliberately, so the deploy leaves it alone, warns, and returns 0;
+# - any other link is an alias. It is not removed, and step 3 decides: an
+#   alias that systemd does not resolve to the packaged file fails the
+#   deploy.
 #
-# A SYMLINK at the shadow path is left alone. It is a mask (xpf-deploy.py's
-# #7559 daemon hold links it to /dev/null) or an alias, not a raw-deploy copy.
-# With no packaged unit on disk, the shadow is kept and the deploy HARD FAILS:
-# removing it would leave the node with no xpfd unit at all.
+# The function never starts, stops or restarts a unit. daemon-reload only
+# replaces what is loaded, and the new settings first apply at the unit's next
+# stop/start (for xpfd, the controlled cut; for the boot barriers, the next
+# boot). A second run changes nothing.
 deploy_reconcile_unit_shadow() {
-	local rinst="$1" removed=0 have_packaged=0 p frag link
+	local rinst="$1" unit="$2"
+	local shadow="$DEPLOY_UNIT_ETC_DIR/$unit" stash="$DEPLOY_UNIT_SHADOW_STASH/$unit"
+	local removed=0 have_packaged=0 d target frag state reason links l
 
-	if incus exec "$rinst" -- test -L "$DEPLOY_UNIT_SHADOW" 2>/dev/null; then
-		warn "$DEPLOY_UNIT_SHADOW on $rinst is a symlink (a mask or alias), not a raw-deploy unit copy; leaving it in place."
-		return 0
-	fi
-
-	if incus exec "$rinst" -- test -f "$DEPLOY_UNIT_SHADOW" 2>/dev/null; then
-		for p in "${deploy_packaged_unit_paths[@]}"; do
-			if incus exec "$rinst" -- test -f "$p" 2>/dev/null; then
+	if incus exec "$rinst" -- test -L "$shadow" 2>/dev/null; then
+		target=$(incus exec "$rinst" -- readlink "$shadow" 2>/dev/null || true)
+		if [[ "$target" == /dev/null ]]; then
+			warn "$shadow on $rinst is masked (-> /dev/null): a deliberate hold, not a raw-deploy copy. Leaving it; the mask, not the packaged unit, governs $unit."
+			return 0
+		fi
+		warn "$shadow on $rinst is a symlink to '${target:-?}', not a raw-deploy copy. Not removing it; checking that systemd resolves $unit to the packaged file."
+	elif incus exec "$rinst" -- test -f "$shadow" 2>/dev/null; then
+		for d in "${deploy_packaged_unit_dirs[@]}"; do
+			if incus exec "$rinst" -- test -f "$d/$unit" 2>/dev/null; then
 				have_packaged=1
 				break
 			fi
 		done
 		if (( ! have_packaged )); then
-			die "refusing to remove $DEPLOY_UNIT_SHADOW on $rinst: no packaged xpfd.service (${deploy_packaged_unit_paths[*]}) to fall back to; is the xpf deb installed?"
+			die "refusing to remove $shadow on $rinst: no packaged $unit under ${deploy_packaged_unit_dirs[*]} to fall back to; is the xpf deb installed?"
 		fi
-		warn "Removing stale raw-deploy unit $DEPLOY_UNIT_SHADOW on $rinst: it shadows the packaged xpfd.service, so unit changes shipped in the deb (e.g. #18213 KillMode=mixed) never took effect here (#18544)."
-		incus exec "$rinst" -- rm -f "$DEPLOY_UNIT_SHADOW" 2>/dev/null \
-			|| die "failed to remove $DEPLOY_UNIT_SHADOW on $rinst"
+		warn "Removing stale raw-deploy unit $shadow on $rinst: it shadows the packaged $unit, so unit changes shipped in the deb never took effect here (#18544)."
+		incus exec "$rinst" -- mkdir -p "$DEPLOY_UNIT_SHADOW_STASH" 2>/dev/null \
+			|| die "failed to create $DEPLOY_UNIT_SHADOW_STASH on $rinst"
+		incus exec "$rinst" -- mv -f "$shadow" "$stash" 2>/dev/null \
+			|| die "failed to move $shadow aside on $rinst"
 		removed=1
 	fi
 
-	# Reload after changing the disk, AND whenever systemd still has the shadow
-	# LOADED: an earlier removal whose daemon-reload never ran leaves no file to
-	# find, but the stale unit still governs the next stop.
-	frag=$(incus exec "$rinst" -- systemctl show -p FragmentPath --value xpfd 2>/dev/null || true)
-	if (( removed )) || [[ "$frag" == "$DEPLOY_UNIT_SHADOW" ]]; then
+	# Reload after changing the disk, AND whenever systemd still has the /etc
+	# copy LOADED: an earlier removal whose daemon-reload never ran leaves no
+	# file to find, but the stale unit still governs the next stop.
+	frag=$(incus exec "$rinst" -- systemctl show -p FragmentPath --value "$unit" 2>/dev/null || true)
+	if (( removed )) || [[ "$frag" == "$shadow" ]]; then
 		incus exec "$rinst" -- systemctl daemon-reload \
-			|| die "systemctl daemon-reload failed on $rinst after reconciling $DEPLOY_UNIT_SHADOW"
-		frag=$(incus exec "$rinst" -- systemctl show -p FragmentPath --value xpfd 2>/dev/null || true)
+			|| die "systemctl daemon-reload failed on $rinst after reconciling $shadow"
+		frag=$(incus exec "$rinst" -- systemctl show -p FragmentPath --value "$unit" 2>/dev/null || true)
+	fi
+	state=$(incus exec "$rinst" -- systemctl show -p LoadState --value "$unit" 2>/dev/null || true)
+
+	# Verify the LOADED unit, positively. What governs the next stop is what
+	# systemd loaded, and neither "the rm succeeded" nor "it is not the /etc
+	# path" says that is the packaged file.
+	reason=""
+	if [[ "$state" != loaded ]]; then
+		reason="$unit on $rinst has LoadState='${state:-unknown}' (FragmentPath='${frag}'), not loaded"
+	elif ! deploy_unit_path_is_packaged "$unit" "$frag"; then
+		reason="$unit on $rinst loads '${frag:-nothing}', not the packaged file under ${deploy_packaged_unit_dirs[*]} (#18544)"
+	fi
+	if [[ -n "$reason" ]]; then
+		if (( removed )) && incus exec "$rinst" -- test -f "$stash" 2>/dev/null; then
+			incus exec "$rinst" -- mv -f "$stash" "$shadow" 2>/dev/null \
+				|| die "$reason; ALSO failed to put $shadow back from $stash on $rinst; restore it by hand"
+			incus exec "$rinst" -- systemctl daemon-reload 2>/dev/null || true
+			die "$reason; put the previous $shadow back, so $rinst is as it was before this deploy"
+		fi
+		die "$reason"
 	fi
 
-	# Verify the LOADED unit, not the file listing: what governs the cut's stop
-	# is what systemd loaded, and an rm that reported success proves nothing
-	# about that.
-	if [[ -z "$frag" ]]; then
-		die "xpfd.service has no loaded unit file on $rinst after reconciling $DEPLOY_UNIT_SHADOW; cannot confirm the packaged unit governs"
-	fi
-	if [[ "$frag" == "$DEPLOY_UNIT_SHADOW" ]]; then
-		die "xpfd.service on $rinst still loads $DEPLOY_UNIT_SHADOW after removal + daemon-reload; the stale raw-deploy unit still governs (#18544)"
-	fi
+	# Verified. The parked copy is no longer needed (this also clears a stash
+	# left by an interrupted earlier run).
+	incus exec "$rinst" -- rm -rf "$stash" 2>/dev/null || true
 
-	# systemd adds the boot-time Wants= by the link NAME, so a link left
-	# dangling at the removed shadow still starts xpfd. Re-point it anyway, at
-	# the loaded unit, so the node's enablement matches a package install.
-	link=$(incus exec "$rinst" -- readlink "$DEPLOY_UNIT_WANTS_LINK" 2>/dev/null || true)
-	if [[ "$link" == "$DEPLOY_UNIT_SHADOW" ]]; then
-		incus exec "$rinst" -- ln -sfn "$frag" "$DEPLOY_UNIT_WANTS_LINK" \
-			|| die "failed to re-point $DEPLOY_UNIT_WANTS_LINK at $frag on $rinst"
-	fi
-	info "xpfd.service on $rinst loads the packaged unit ($frag)."
+	links=$(incus exec "$rinst" -- find "$DEPLOY_UNIT_ETC_DIR" -mindepth 2 -maxdepth 2 -type l -name "$unit" 2>/dev/null || true)
+	for l in $links; do
+		if [[ "$(incus exec "$rinst" -- readlink "$l" 2>/dev/null || true)" == "$shadow" ]]; then
+			incus exec "$rinst" -- ln -sfn "$frag" "$l" \
+				|| die "failed to re-point $l at $frag on $rinst"
+		fi
+	done
+	info "$unit on $rinst loads the packaged unit ($frag)."
+}
+
+# deploy_reconcile_unit_shadows <rinst>: deploy_reconcile_unit_shadow for
+# every unit the raw deploy pushes into /etc and the deb also ships.
+deploy_reconcile_unit_shadows() {
+	local rinst="$1" u
+	for u in "${deploy_shadowed_units[@]}"; do
+		deploy_reconcile_unit_shadow "$rinst" "$u"
+	done
 }
 
 # deploy_verify_pushed_sha <rinst> <local_path> <remote_path> <label>
