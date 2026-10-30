@@ -58,6 +58,8 @@ a row when a merge wave moves it. Bands exist only for the cells shown.
 |---|---|---|---|---|---|---|
 | loss | integ6, 2026-10-29 (#18520 + #18533 + HA fixes) | 4.3–4.9 | 17.9–18.8 | 17.0–19.4 | 9.8–20.2 | 3–8 |
 | tcp | integ6, 2026-10-29 | 12.6–18.6 | 39.0–41.0 | 37.8–40.0 | 39.1–41.0 | 3–8 |
+| loss | master after the 2026-10-30 wave (integ8/9/10, 6 runs of each cell) | 4.6–5.5 | 14.1–19.1 (5-rep recheck 13.5–19.8; per-stream placement) | 18.2–21.7 | 13.8–22.8 | 1–6 |
+| tcp | master after the 2026-10-30 wave (integ8/9/10) | 14.1–19.6 | 38.5–39.7 | 37.5–39.0 | 37.0–39.5 | 1–6 |
 | loss | master `09a2b664be`, 2026-10-29 (before #18520) | ~2.4 | 11.6–14.4 | — | — | — |
 
 Loss v6 `-P8` spreads widely (9.8–20.2) because of how 8 flows hash onto 6
