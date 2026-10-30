@@ -201,42 +201,6 @@ pub(super) fn stage_flow_cache_hit(
         false
     };
 
-    // #16217 (fold B6): on EVERY hit a marked (adopted) entry's
-    // ownership is re-derived BEFORE the mutating lookup
-    // (side-effect-free peek: no tallies/LRU/lease re-stamp) via
-    // `revalidate_fabric_established_fresh` — judged against the
-    // AUTHORITATIVE fresh RG set (`forwarding_active_rgs`, loaded
-    // from the coordinator ArcSwap for THIS packet), the same
-    // ownership evidence the adoption gate proves. The result DRIVES
-    // the `EnforceChanged` suppression below (a lapsed mark
-    // suppresses nothing). Pre-fold the fresh revalidation was
-    // computed against the lagging `ha_state` snapshot and then
-    // DISCARDED (`let _ = adopted_mark_revalidated;`), so the raw
-    // mark alone suppressed the demotion even after failback. The
-    // mark NEVER suppresses `ForwardCandidateEgressDeparted`
-    // (checked BEFORE enforce in the validator), so a departed
-    // egress supersedes despite a live mark and re-resolves toward
-    // FabricRedirect. Unmarked entries compute `false` and are
-    // bit-identical.
-    let (_adopted_mark, adopted_mark_revalidated) = {
-        let peek_lookup = FlowCacheLookup::for_packet(meta, validation, worker_ctx.forwarding);
-        match flow_state
-            .flow_cache
-            .peek_entry(&flow.forward_key, peek_lookup)
-        {
-            Some(peeked) if peeked.fabric_established => (
-                true,
-                crate::afxdp::forwarding::revalidate_fabric_established_fresh(
-                    worker_ctx.forwarding,
-                    worker_ctx.forwarding_active_rgs,
-                    peeked.fabric_established,
-                    peeked.decision.resolution,
-                ),
-            ),
-            _ => (false, false),
-        }
-    };
-
     if let Some(cached) = flow_state.flow_cache.lookup_counted_with_scheduler_expiry(
         &flow.forward_key,
         // #5139: resolve the LOGICAL (VLAN-selecting) ingress ifindex into the
@@ -266,6 +230,34 @@ pub(super) fn stage_flow_cache_hit(
         // relaxed atomic load + compare. A mismatch means the cached dst_mac
         // or neighbor liveness may be stale;
         let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
+        // #16217 (fold B6): on EVERY hit a marked (adopted) entry's
+        // ownership is re-derived via `revalidate_fabric_established_fresh`
+        // — judged against the AUTHORITATIVE fresh RG set
+        // (`forwarding_active_rgs`, loaded from the coordinator ArcSwap
+        // for THIS packet), the same ownership evidence the adoption
+        // gate proves. The result DRIVES the `EnforceChanged`
+        // suppression below (a lapsed mark suppresses nothing). Pre-fold
+        // the fresh revalidation was computed against the lagging
+        // `ha_state` snapshot and then DISCARDED (`let _ =
+        // adopted_mark_revalidated;`), so the raw mark alone suppressed
+        // the demotion even after failback. The mark NEVER suppresses
+        // `ForwardCandidateEgressDeparted` (checked BEFORE enforce in the
+        // validator), so a departed egress supersedes despite a live mark
+        // and re-resolves toward FabricRedirect. Unmarked entries compute
+        // `false` and are bit-identical.
+        // #18533: judged on the entry the lookup returned. It was a
+        // separate side-effect-free `peek_entry` BEFORE the lookup — a
+        // second flow-cache set hash and way scan on every hit — but the
+        // lookup matches the same identity (key, binding-substituted
+        // ingress, logical ingress) and writes neither input
+        // (`fabric_established`, `decision.resolution`), so the verdict
+        // is the same.
+        let adopted_mark_revalidated = crate::afxdp::forwarding::revalidate_fabric_established_fresh(
+            worker_ctx.forwarding,
+            worker_ctx.forwarding_active_rgs,
+            cached.fabric_established,
+            cached.decision.resolution,
+        );
         // #16220: sub-attribute the decision revalidation so the live
         // readout names the exact rejecting check.
         // #16217: an entry seeded by the fabric-adoption resolve carries

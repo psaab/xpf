@@ -280,6 +280,10 @@ impl SessionTable {
     /// and HA imports — in which case the gate fails open (flags-only)
     /// and the pair stays bounded by the opening window.
     pub(crate) fn handshake_expected_ack(&self, key: &SessionKey) -> Option<u32> {
+        #[cfg(test)]
+        self.probe_cost_probes
+            .expected_ack
+            .fetch_add(1, AtomicOrdering::Relaxed);
         let record = self.revalidation_record(key)?;
         if record.entry.established && !record.entry.handshake_pending {
             return None;

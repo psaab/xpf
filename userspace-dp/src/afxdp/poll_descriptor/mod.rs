@@ -1385,31 +1385,35 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                 // flow-cache entry, or reinject can resurrect the
                 // packet; tunnel-decapped inners are judged on their
                 // own (inner) frame and hop limit.
-                if !worker_ctx.forwarding.no_ipv6_reject_zero_hop_limit {
-                    let zero_hop_dst = flow.as_ref().map(|f| f.dst_ip).or_else(|| {
-                        crate::afxdp::frame::parse_packet_destination_from_frame(packet_frame, meta)
-                        });
-                    if let Some(dst) = zero_hop_dst {
-                        let dst_is_local = matches!(
-                            crate::afxdp::forwarding::lookup_forwarding_resolution(
-                                worker_ctx.forwarding,
-                                dst,
+                // #18533: the locality verdict is a full FIB walk, so it is
+                // passed as a closure that runs only for a hop-limit-0 IPv6
+                // packet with the knob unset (`zero_hop_limit_local_drop`
+                // checks those first). The #16841 form computed it eagerly
+                // here for every valid packet, IPv4 included.
+                if zero_hop_limit_local_drop(worker_ctx.forwarding, packet_frame, meta, || {
+                    flow.as_ref()
+                        .map(|f| f.dst_ip)
+                        .or_else(|| {
+                            crate::afxdp::frame::parse_packet_destination_from_frame(
+                                packet_frame,
+                                meta,
                             )
-                            .resolution
-                            .disposition,
-                            ForwardingDisposition::LocalDelivery
-                        );
-                        if zero_hop_limit_local_drop(
-                            worker_ctx.forwarding,
-                            packet_frame,
-                            meta,
-                            dst_is_local,
-                        ) {
-                            telemetry.counters.touched = true;
-                            binding.scratch.scratch_recycle.push(desc.addr);
-                            continue;
-                        }
-                    }
+                        })
+                        .is_some_and(|dst| {
+                            matches!(
+                                crate::afxdp::forwarding::lookup_forwarding_resolution(
+                                    worker_ctx.forwarding,
+                                    dst,
+                                )
+                                .resolution
+                                .disposition,
+                                ForwardingDisposition::LocalDelivery
+                            )
+                        })
+                }) {
+                    telemetry.counters.touched = true;
+                    binding.scratch.scratch_recycle.push(desc.addr);
+                    continue;
                 }
                 // #7160 (#2387) stage 9b: stamp the flow's ROUTING DOMAIN.
                 // The validated peer zone is the only remote ingress identity;
