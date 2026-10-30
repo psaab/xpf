@@ -845,11 +845,16 @@ type PeerGroupState struct {
 
 // heartbeatSender sends periodic heartbeat packets.
 type heartbeatSender struct {
-	mgr        *Manager
-	conn       *net.UDPConn
-	peerAddr   *net.UDPAddr
-	interval   time.Duration
-	stopCh     chan struct{}
+	mgr      *Manager
+	conn     *net.UDPConn
+	peerAddr *net.UDPAddr
+	interval time.Duration
+	stopCh   chan struct{}
+	// kickCh requests an out-of-cadence send (ResignForPlannedShutdown).
+	// Buffered 1 so kicks coalesce and kick never blocks; a sender built
+	// without newHeartbeatSender has a nil channel, which the run loop
+	// never selects and kick's default arm skips.
+	kickCh     chan struct{}
 	wg         sync.WaitGroup
 	sent       atomic.Uint64
 	sendErrors atomic.Uint64
@@ -929,6 +934,17 @@ func newHeartbeatSender(mgr *Manager, conn *net.UDPConn, peerAddr *net.UDPAddr, 
 		peerAddr: peerAddr,
 		interval: interval,
 		stopCh:   make(chan struct{}),
+		kickCh:   make(chan struct{}, 1),
+	}
+}
+
+// kick asks the run loop to send one frame now, on its own goroutine, so the
+// frame is built and written in sequence order with the ticker's frames. It
+// never blocks: a pending kick absorbs later ones.
+func (s *heartbeatSender) kick() {
+	select {
+	case s.kickCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -956,6 +972,8 @@ func (s *heartbeatSender) run() {
 		select {
 		case <-s.stopCh:
 			return
+		case <-s.kickCh:
+			s.send()
 		case <-ticker.C:
 			s.send()
 			ticks++

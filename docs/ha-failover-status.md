@@ -718,7 +718,44 @@ Root cause was barrier/bulk ack delivery stuck behind bulk data (P0). With
 priority ack channel, acks should deliver promptly. Needs live validation
 on split-RG cluster.
 
+### Daemon restart blackhole: orderly stop now resigns (#18540) — NEEDS LIVE GATE
+
+`make test-restart-connectivity` lost 1/7/33 pings per cycle on loss (tcp: 8).
+The journals are skewed: loss fw1's wall clock runs 66.8 s behind fw0's.
+Aligned, fw1 detected peer loss and took every RG in all three cycles, and no
+control-plane dual-secondary occurred. The causes:
+
+- **Orderly stop sent no handover.** Its only signal was the arm floor
+  (weight 1), which RG0 never yields on and which a peer parked in
+  secondary-hold by the harness's manual-failover restore cannot take. The
+  peer waited 3.3-3.4 s for heartbeat loss plus the sync-recency deferral,
+  with the stopping node's helper already gone. Cycle 1 (no holds) moved
+  RG1/RG2 in 0.26 s on the arm-debt yield.
+- **A peer restart missed by loss detection kept the old incarnation's
+  holds** (latent; it did not fire in this run).
+
+Now the HA stop installs the full-cost `__planned-shutdown__` debt (weight 0)
+after `rg_active` clears and Kea stops, and kicks one heartbeat. A heartbeat
+from a new peer incarnation ends ManualFailover, transfer-out and abort holds,
+exactly as peer loss does. See `pkg/cluster/README.md` "Planned-shutdown
+resign and peer-restart hold release (#18540)".
+
+**Status:** unit-tested and mutation-checked; needs `make
+test-restart-connectivity`, `make test-failover` and `make test-ha-crash` on a
+gate cluster.
+
 ## What Still Needs Work
+
+### Cycle-3 post-takeover loss in `test-restart-connectivity` (#18540, OPEN)
+
+In the 06:32 run, cycle 3 lost 33 of 40 pings. The ping stayed dead for
+about 14 s after fw1 owned RG0/1/2 and had sent GARP/NA. fw1 logged no
+`SESSION_OPEN` for that ping (cycle 2's takeover opened a fresh session), and
+fw1 kept draining about 700 of the dead peer's `session_v4` frames (about
+21 ms each) for up to 7 s after takeover. The control plane does not explain
+it. The orderly-stop resign shortens the ownerless window, but the
+post-takeover loss needs an instrumented re-run: a LAN-host capture plus
+`show security flow session` on the new owner during the gap.
 
 ### Inherited translated tuples resolve as HA-inactive (was P1)
 

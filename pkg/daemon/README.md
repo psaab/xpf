@@ -544,6 +544,23 @@ startup-phase and shutdown ordering is untouched:
   Miss either and the peer promotes onto a segment this node is still serving:
   duplicate OFFERs from two lease databases with neither aware of the other.
 
+  **Then the HA stop resigns every RG to the peer (#18540).** Right after the
+  Kea stop, `d.cluster.ResignForPlannedShutdown()` installs the full-cost
+  `__planned-shutdown__` election debt (weight 0 locally and on the wire) and
+  kicks one heartbeat, so the peer promotes on that frame instead of on
+  heartbeat loss. It runs for every HA stop (hitless included, for the reason
+  the Kea stop gives) and never blocks on the peer. The order is fixed at both
+  ends: AFTER the Kea stop, because the resign promotes the peer and the peer
+  starts its own Kea (#6787); BEFORE the VIP removal, VRRP stop and
+  `d.cluster.Stop()`, because the heartbeat sender carries the resign and a
+  resign after `Stop` is refused. Before this, the stop's only peer-visible
+  signal was the arm floor (weight 1), which RG0 never yields on and a peer
+  parked in secondary-hold by a manual failover cannot take, so the peer waited
+  for heartbeat loss plus the sync-recency deferral (3.3 s on the loss cluster,
+  with this node's helper already gone). Bound by
+  `TestHAShutdownResignsAfterKeaStopAndBeforeClusterStop18540`, which reads the
+  cluster debt AT the Kea stop call.
+
   Both now run immediately after `stop(); wg.Wait()`, ahead of every teardown
   that can block. They used to sit ~90 lines lower, after the telemetry, feeds,
   RPM, SNMP, FRR and LLDP teardowns. The block's own comment already stated the

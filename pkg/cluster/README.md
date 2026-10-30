@@ -3965,6 +3965,73 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
 
 `config`, `dataplane`.
 
+## Planned-shutdown resign and peer-restart hold release (#18540)
+
+Two ways a node leaves its peer: an orderly stop, and a restart the peer
+never saw as a loss. Before #18540 neither ended ownership promptly.
+
+**Orderly stop.** `Manager.ResignForPlannedShutdown` installs the reserved
+election debt `PlannedShutdownMonitorIface` (`__planned-shutdown__`) at full
+cost (`PlannedShutdownMonitorCost` = 255) on every RG, re-runs election (the
+node demotes itself through electRG's "Local weight 0" arm), and kicks the
+heartbeat sender for one out-of-cadence frame (`heartbeatSender.kick`,
+coalescing, never blocking). The daemon calls it from `runShutdownSequence`
+after the fail-closed actions (`rg_active` clear, Kea stop, #6787) and before
+the VIP removal, VRRP stop and `Manager.Stop`. It is a no-op after `Stop`
+(the sender is gone, so nothing would hear it) and idempotent.
+
+Why weight 0 and not the #12164 floor. The fail-closed stop already installs
+the `__dataplane-arm__` floor (weight 1), and that moved nothing in the
+shapes that matter:
+
+- RG0 never yields on arm debt (#12164 N5);
+- the arm-debt yield (`electRG`, non-preempt arm) requires the peer in
+  Primary or Secondary, so a peer parked in secondary-hold by
+  `request chassis cluster failover` is not a target;
+- that holding peer's ManualFailover arm releases only for a peer at weight
+  0, in secondary-hold, or holding a committed transfer — never the floor.
+
+So the peer waited for heartbeat loss plus the sync-recency deferral, which
+the stopping node's own unread sync backlog keeps fresh (`notePeerLiveness`
+stamps at handle time): 3.3–3.4 s per `test-restart-connectivity` cycle on the
+loss cluster. Every peer arm that must fire on weight 0 already exists —
+"Peer weight 0", the ManualFailover dual-resign release, and
+`peerYieldedOwnership` for a not-ready receiver — so a peer running older code
+honours the resign too. The debt is in `reservedMonitorNames`, so a config
+apply's monitor reconcile cannot drop it, and it composes additively, so no
+later recalc on the way out lifts the weight off 0.
+
+The resign carries no barrier and waits for no acknowledgement: the caller is
+bounded by `TimeoutStopSec`. With no live peer it only demotes the leaving
+node.
+
+**Peer restart that loss detection missed.** The heartbeat session is
+Manager-scoped (#6169), so it changes only when the peer daemon is a new
+process. `handlePeerHeartbeat` compares the admitted frame's session with the
+previous one while the peer is still believed alive; a change means the peer
+restarted inside the detection window (a crash plus `RestartSec=1` plus
+bring-up can land inside heartbeat threshold + sync deferral). It then ends the
+old incarnation's authority through `clearPeerIncarnationAuthorityLocked`, the
+same helper `handlePeerTimeout` uses: this node's ManualFailover park (and the
+#16743 drain pin), the #6656 peer transfer-out override, and the #15164
+aborted-request markers. The clear runs before the peer view is rebuilt,
+because the rebuild re-applies a surviving override to the new incarnation's
+frames. Without it, the holding node stayed parked while the restarted peer sat
+in its startup hold at the floor, and no node owned the RG until that hold
+released (up to 30 s).
+
+It keys on the incarnation, not on state. A frame from the SAME incarnation
+dropping to the floor leaves the hold alone; that is the arm-debt and
+dual-resign policy's job. A frame with no heartbeat session (pre-echo
+protocol) carries no incarnation signal, so it changes nothing. Both orders
+are pinned: a restart before detection releases the hold here, and a restart
+after detection finds it already released and keeps the survivor the owner
+under non-preempt.
+
+Cells: `planned_shutdown_resign_18540_test.go`,
+`heartbeat_peer_restart_18540_test.go`, and the daemon ordering cell
+`pkg/daemon/shutdown_planned_resign_18540_test.go`.
+
 ## Failover timing by mode and event (CLAUDE.md authoritative)
 
 - Default compiler mode is private-RG election over the control link, with RETH VRRP suppressed (`pkg/config/compiler_system.go:3134-3137`; `pkg/vrrp/README.md:950-964`).
@@ -4000,10 +4067,16 @@ down (the #2070 hazard, surfacing on the VIP-takeover path).
   `pkg/vrrp/README.md:950-964`).
 - Planned legacy VRRP shutdown sends three priority-0 advertisements; the
   backup arms a 1ms timer, and the run-loop test requires takeover within
-  50ms (test constraint, not SLA). Ordinary private-RG shutdown sends no
-  resign/transfer frame: after `rg_active` clears, the peer promotes through
-  heartbeat-loss detection, no sooner than its heartbeat threshold and
-  potentially later under the sync-recency guard. Private-RG operator
+  50ms (test constraint, not SLA). An orderly private-RG stop resigns every
+  RG (#18540): after `rg_active` clears and Kea stops, the stopping node
+  installs the full-cost `__planned-shutdown__` debt (weight 0 locally and
+  on the wire) and sends a heartbeat at once, so the peer promotes on that
+  frame — including through its own ManualFailover hold — instead of
+  waiting for heartbeat loss. Only a stop that never reaches that step
+  (crash, SIGKILL, a stop wedged before it) still falls back to
+  heartbeat-loss detection, no sooner than the heartbeat threshold and
+  potentially later under the sync-recency guard. See "Planned-shutdown
+  resign and peer-restart hold release (#18540)" above. Private-RG operator
   failover is a separate explicit peer-transfer/resignation path
   (`pkg/vrrp/instance.go:804-806`;
   `pkg/vrrp/instance_rx.go:155-174`;

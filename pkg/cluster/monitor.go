@@ -1270,6 +1270,7 @@ var reservedMonitorNames = []string{
 	DataplaneArmMonitorIface,
 	HelperCrashLoopMonitorIface,
 	startupSyncHoldMonitorIface,
+	PlannedShutdownMonitorIface,
 }
 
 // isReservedMonitorName reports whether a monitor key belongs to some owner

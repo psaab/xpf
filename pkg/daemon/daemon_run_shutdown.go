@@ -361,6 +361,31 @@ func (d *Daemon) runShutdownSequence(shutdownApplyCtx context.Context, wg *sync.
 		}
 	}
 
+	// HAND EVERY REDUNDANCY GROUP TO THE PEER NOW, not on heartbeat loss.
+	//
+	// Until this, an orderly private-RG stop sent the peer nothing but the
+	// arm-floor weight (1) installed by markDataplaneNotArmed above. RG0
+	// never yields on that, and a peer parked in secondary-hold by an
+	// earlier manual failover cannot take a data RG on it either, so the
+	// peer waited for heartbeat loss plus the session-sync recency window —
+	// 3.3 s on the loss cluster, with this node's helper already gone. The
+	// resign advertises weight 0 on every RG and sends a heartbeat at once;
+	// the peer's existing weight-0 arms promote it, including through its
+	// own ManualFailover hold (see pkg/cluster/planned_shutdown_resign.go).
+	//
+	// ORDER. After the two fail-closed actions: rg_active is cleared (this
+	// node no longer forwards) and Kea is stopped (#6787 — the peer must not
+	// start serving DHCP while this node still does). Before the VIP
+	// removal, VRRP stop and d.cluster.Stop below, because the heartbeat
+	// sender is the channel that carries the resign and Stop closes it.
+	//
+	// haMode, not `hitless`, for the reason the Kea stop gives: an HA stop
+	// relinquishes ownership either way (VRRP's priority-0 burst also fires
+	// on a hitless restart). The call never blocks on the peer.
+	if haMode && d.cluster != nil {
+		d.cluster.ResignForPlannedShutdown()
+	}
+
 	// #5308: cancel + join the two long-lived loops that bind to d.daemonCtx
 	// (never cancelled in production) rather than the run WaitGroup above, so
 	// wg.Wait does NOT cover them. Both call into subsystems torn down further
