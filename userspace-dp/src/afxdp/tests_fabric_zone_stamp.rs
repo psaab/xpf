@@ -8604,3 +8604,104 @@ fn reresolve_single_source_guard_17047() {
     // resolution.rs: 1 def + 1 call in reresolve; reverse_synth.rs: 1 call.
     assert_eq!(rehome_callers, 3, "rehome entry must have exactly its consolidated callers (def + reresolve + reverse_synth)");
 }
+
+/// #18518: every fixture above pins zone ids 1/2, which fit in the V1
+/// stamp's two bytes. Since #16557 real zone ids are u32 hashes
+/// (`StableZoneID("lan")` = 262430026 on the live clusters), so the stamp
+/// carries only their low 16 bits. The receiver must resolve those bits back
+/// to the admitted zone; before #18518 it looked up `u32::from(u16)`, found
+/// no zone, and dropped every stamped split-RG punt as Invalid.
+#[test]
+fn widened_zone_id_stamp_decodes_to_the_full_zone_18518() {
+    const WIDE_LAN: u32 = 262_430_026;
+    assert!(
+        WIDE_LAN > 0xFFFF,
+        "FIXTURE: the id must not fit in the stamp"
+    );
+    let mut snapshot = nat_snapshot_with_fabric();
+    let mut remapped = 0;
+    for zone in &mut snapshot.zones {
+        if zone.name == "lan" {
+            zone.id = WIDE_LAN;
+            remapped += 1;
+        }
+    }
+    assert_eq!(remapped, 1, "FIXTURE: exactly one lan zone");
+    let forwarding = build_forwarding_state(&snapshot);
+    assert_eq!(
+        forwarding
+            .zone_id_to_name
+            .get(&WIDE_LAN)
+            .map(String::as_str),
+        Some("lan"),
+        "FIXTURE: the widened id must be admitted"
+    );
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    // Split placement: WAN RG (1) local; LAN RG (2) the peer's.
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs))]);
+    let frame = stamped_fabric_frame(WIDE_LAN, TCP_FLAG_SYN);
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame,
+            txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16),
+            &forwarding,
+            &ha_state,
+            now_secs,
+        ),
+        ZoneEncodedFabricStamp::Valid(WIDE_LAN),
+        "a widened zone's V1 stamp must name the full zone, not Invalid"
+    );
+}
+
+/// #18518: two admitted ids sharing low 16 bits make the stamp ambiguous —
+/// it must resolve to no zone (Invalid at the decoder), never to a guess.
+/// Both arms: the built index and the hand-built-state scan.
+#[test]
+fn ambiguous_low16_stamp_resolves_to_no_zone_18518() {
+    let mut state = ForwardingState::default();
+    state.zone_id_to_name.insert(0x0001_0007, "a".to_string());
+    state.zone_id_to_name.insert(0x0002_0007, "b".to_string());
+    state.zone_id_to_name.insert(0x0003_0009, "c".to_string());
+    assert_eq!(state.zone_id_for_stamp(7), None, "scan arm: ambiguous");
+    assert_eq!(
+        state.zone_id_for_stamp(9),
+        Some(0x0003_0009),
+        "scan arm: unique"
+    );
+    state.rebuild_zone_low16_index();
+    assert_eq!(state.zone_id_for_stamp(7), None, "index arm: ambiguous");
+    assert_eq!(
+        state.zone_id_for_stamp(9),
+        Some(0x0003_0009),
+        "index arm: unique"
+    );
+    assert_eq!(state.zone_id_for_stamp(0), None, "0 is never a zone");
+    assert_eq!(state.zone_id_for_stamp(11), None, "unknown low bits");
+}
+
+/// #18518: the production build populates the low-16 index. The decoder's
+/// scan fallback serves only hand-built states, so a build that skipped the
+/// rebuild would still decode every stamp and hide the missing index.
+#[test]
+fn production_build_populates_zone_low16_index_18518() {
+    const WIDE_LAN: u32 = 262_430_026;
+    let mut snapshot = nat_snapshot_with_fabric();
+    for zone in &mut snapshot.zones {
+        if zone.name == "lan" {
+            zone.id = WIDE_LAN;
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    assert!(
+        forwarding.zone_id_to_name.contains_key(&WIDE_LAN),
+        "FIXTURE: the widened id must be admitted"
+    );
+    for &id in forwarding.zone_id_to_name.keys() {
+        assert_eq!(
+            forwarding.zone_low16_to_id.get(&(id as u16)).copied(),
+            Some(id),
+            "the built index must map {:#06x} to zone {id}",
+            id as u16
+        );
+    }
+}
