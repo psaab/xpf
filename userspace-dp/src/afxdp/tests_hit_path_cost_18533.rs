@@ -195,6 +195,13 @@ fn established_cache_hit_poll_ns_18533() {
         }
         samples.push(started.elapsed().as_nanos() as f64 / (ROUNDS * u64::from(BATCH)) as f64);
     }
+    // #18534 fold: the timed loop measured cache hits, not a fall-through
+    // that a later round started taking.
+    assert_eq!(
+        binding.flow.flow_cache.hits - hits_before,
+        u64::from(BATCH) * (1 + REPS as u64 * ROUNDS),
+        "every timed packet is a cache hit"
+    );
     samples.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
     eprintln!(
         "#18533 full poll, established cache hit: min {:.1} ns/packet, median {:.1} ns/packet ({REPS} reps x {} packets, batch {BATCH}; frame refill included)",
@@ -202,4 +209,57 @@ fn established_cache_hit_poll_ns_18533() {
         samples[REPS / 2],
         ROUNDS * u64::from(BATCH)
     );
+}
+
+/// #18534 fold: the cache entry's size and field layout, for the round-2
+/// note on what the destination-owner memo costs per entry and which cache
+/// line it shares. Prints only.
+#[test]
+#[ignore = "MEASUREMENT: #18534 FlowCacheEntry layout; prints only"]
+fn flow_cache_entry_layout_18534() {
+    use crate::afxdp::flow_cache::FlowCacheEntry;
+    let mut fields: Vec<(usize, usize, &str)> = Vec::new();
+    macro_rules! field {
+        ($name:ident, $ty:ty) => {
+            fields.push((
+                std::mem::offset_of!(FlowCacheEntry, $name),
+                std::mem::size_of::<$ty>(),
+                stringify!($name),
+            ))
+        };
+    }
+    field!(key, crate::session::SessionKey);
+    field!(ingress_ifindex, i32);
+    field!(logical_ingress_ifindex, i32);
+    field!(descriptor, RewriteDescriptor);
+    field!(decision, SessionDecision);
+    field!(policy_deny, Option<crate::afxdp::flow_cache::CachedPolicyDeny>);
+    field!(deny_expires_at_secs, u64);
+    field!(cluster_terminal_source_ifindex, i32);
+    field!(cluster_terminal_stamp_owner_rg, i32);
+    field!(metadata, SessionMetadata);
+    field!(stamp, crate::afxdp::flow_cache::FlowCacheStamp);
+    field!(observed_bytes, u64);
+    field!(last_used_epoch, u16);
+    field!(neighbor_mac_epoch, u32);
+    field!(neighbor_shard, u16);
+    field!(fabric_established, bool);
+    field!(dest_owner_memo, crate::afxdp::flow_cache::DestOwnerMemo);
+    fields.sort();
+    let slot = std::mem::size_of::<Option<FlowCacheEntry>>();
+    let slots = crate::afxdp::flow_cache::FlowCache::new().entries.len();
+    eprintln!(
+        "#18534 FlowCacheEntry: size {} align {}; Option slot {slot} B x {slots} slots = {} KiB per cache",
+        std::mem::size_of::<FlowCacheEntry>(),
+        std::mem::align_of::<FlowCacheEntry>(),
+        slot * slots / 1024
+    );
+    for (offset, size, name) in fields {
+        eprintln!(
+            "  {offset:>4}..{:>4} line {}..{} {name}",
+            offset + size,
+            offset / 64,
+            (offset + size - 1) / 64
+        );
+    }
 }

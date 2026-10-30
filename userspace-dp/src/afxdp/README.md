@@ -2073,13 +2073,22 @@ Round 2 (#18534), against the integ6 loss -P8 profile
 1.2%, `ingress_routing_domain` 1.9%, `src_ip_on_link_for_ingress` 1.0%,
 `learn_dynamic_neighbor_with_mac` 1.0%):
 
-- **Forwarding snapshot identity.** `ForwardingState::publish_epoch` is
-  stamped by the coordinator on every `publish_runtime_view` — the only
-  production path that hands workers a new forwarding `Arc` — and kept by a
-  validation-only republish (same `Arc`). A published snapshot is immutable,
-  so per-flow memos of pure functions of the forwarding tables key on it.
-  0 means unpublished (fixtures mutate their state in place) and disables
-  every memo below.
+- **Forwarding snapshot identity.** `ForwardingState::publish_epoch` names
+  a forwarding state's contents. The coordinator stamps it on every
+  `publish_runtime_view` — its only path that hands workers a new
+  forwarding `Arc` — counting up from 1, and a validation-only republish
+  keeps it (same `Arc`). The one worker-local derivation, the ct-slice
+  fabric swap in `run_ct_slice` (the published tables with `fabrics`
+  replaced by the coordinator's live fabric set), restamps its copy with
+  `ForwardingState::restamp_local_derivation`: a process-wide counter with
+  the high bit set (`LOCAL_DERIVATION_EPOCH_BIT`), a range the coordinator
+  never reaches. No stamped state is mutated afterwards, so two
+  worker-visible states with different contents never share a nonzero
+  epoch, and per-flow memos of pure functions of the forwarding tables key
+  on it. The swap restamps rather than zeroing because 0 means "never
+  stamped" (fixtures mutate their state in place) and disables every memo
+  below until the next coordinator publish; a fresh epoch costs one
+  re-resolution per flow, the same as a publish.
 - **Destination-owner RG memoised per flow (HA validator).** The
   `ForwardCandidateEgressDeparted` destination-owner arm resolved the
   destination's connected owner on every ForwardCandidate hit of a
@@ -2143,8 +2152,14 @@ departure still judged per packet
 (`memoised_destination_owner_still_sees_its_departure_18534`), the rollback
 undo (`undroppable_cached_hit_records_no_rollback_undo_18533`,
 `droppable_cached_hit_rolls_back_its_charge_18533`) and
-`cached_hit_resolves_the_transit_routing_domain_once_18533`;
+`cached_hit_resolves_the_transit_routing_domain_once_18533`, plus the
+policer half of the rollback predicate
+(`red_policer_drop_rolls_back_the_probe_charge_18534`: a red-dropping
+three-color policer and no cached discard);
 `coordinator/forwarding_publish_epoch_18534_tests.rs`;
+`worker/loop_body/fabric_swap_epoch_18534_tests.rs` (the ct-slice fabric
+swap restamps its derived copy with a fresh high-bit epoch, two swaps never
+share one, and no swap keeps the published state and its epoch);
 `tests_neighbor_learn_fresh_18533.rs` (a fresh duplicate skips the full
 learn; removal, a new source MAC, a new snapshot, interval expiry and an
 unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`

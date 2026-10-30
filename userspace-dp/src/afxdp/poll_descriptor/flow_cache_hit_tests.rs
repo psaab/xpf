@@ -8170,6 +8170,42 @@ fn droppable_cached_hit_rolls_back_its_charge_18533() {
     );
 }
 
+/// #18534 fold: the policer half of `rollback_possible`. A cached flow with
+/// no `then discard` but a three-color policer whose red treatment drops
+/// can still be dropped after the probe, so the probe builds the undo and
+/// the red packet is un-charged on the session. A 1-byte committed/excess
+/// burst colours the first frame red.
+#[test]
+fn red_policer_drop_rolls_back_the_probe_charge_18534() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let mut entry = cached_entry();
+    let state = crate::filter::ThreeColorPolicerState::sr_tcm_with_treatments(
+        1,
+        1,
+        1,
+        true,
+        crate::filter::ThreeColorTreatments {
+            red: crate::filter::ColorTreatment::drop(),
+            ..Default::default()
+        },
+    )
+    .expect("valid srTCM policer");
+    entry.descriptor.tx_selection.three_color_policers.push(Arc::new(
+        crate::filter::ThreeColorPolicerRuntime::new(90_018, "red-18534".into(), state),
+    ));
+    assert!(!entry.descriptor.tx_selection.drop, "premise: no cached discard");
+    let run = run_stage_with_entry(&fixture, &frame, test_meta(&frame), entry, 0);
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: dropped in place");
+    assert_eq!(run.sessions.probe_undo_records_for_test(), 1, "a policer builds the undo");
+    let after = run.sessions.session_counters(&test_key()).expect("counters");
+    assert_eq!(
+        (after.fwd_packets, after.fwd_bytes),
+        (0, 0),
+        "the policed packet must not charge the session"
+    );
+}
+
 /// #18533 round 2: both transit address-class gates resolve their routing
 /// domain once per hit. With routing instances configured (the gate behind
 /// `ingress_routing_domain`'s map probes is open) a domain-0 flow paid two

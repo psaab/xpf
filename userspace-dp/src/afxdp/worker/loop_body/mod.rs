@@ -80,6 +80,9 @@ mod p2_deadline_9506_tests;
 #[cfg(test)]
 #[path = "pending_timer_16217_tests.rs"]
 mod pending_timer_16217_tests;
+#[cfg(test)]
+#[path = "fabric_swap_epoch_18534_tests.rs"]
+mod fabric_swap_epoch_18534_tests;
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
 // ancestry matchers, rematch/rebind walkers, the #6291/#6592 refresh seam,
