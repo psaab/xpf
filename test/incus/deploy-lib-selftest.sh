@@ -1112,6 +1112,83 @@ test_unit_shadow_occupied_path_not_overwritten_18544() {
 	teardown_fake_vm
 }
 
+# An interrupted run parked a barrier, and the deb deployed now predates the
+# barriers. The parked copy is the unit's ONLY copy. It must go back to /etc,
+# or the node boots without the transit barrier while its
+# systemd-networkd.service.requires link still names it (both seats, round 3).
+test_unit_shadow_unpackaged_barrier_stash_restored_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local etc="$FAKE_VM/etc/systemd/system" stash="$FAKE_VM/var/lib/xpf-deploy-unit-shadow" problems=()
+	mkdir -p "$stash" "$etc/systemd-networkd.service.requires"
+	printf '[Unit]\nDescription=raw push of transit barrier\n' >"$stash/xpf-transit-closed.service"
+	ln -s /etc/systemd/system/xpf-transit-closed.service "$etc/systemd-networkd.service.requires/xpf-transit-closed.service"
+	printf '[Unit]\nDescription=raw push of input barrier\n' >"$etc/xpf-input-closed.service"
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	(( UNIT_SHADOW_RC == 0 )) || problems+=("rc=$UNIT_SHADOW_RC: $UNIT_SHADOW_ERR")
+	grep -q 'raw push of transit barrier' "$etc/xpf-transit-closed.service" 2>/dev/null ||
+		problems+=("the parked transit barrier was not put back at /etc")
+	[[ -e "$stash/xpf-transit-closed.service" ]] && problems+=("the parked copy is still stranded")
+	[[ "$UNIT_SHADOW_ERR" == *"Put the parked"*"xpf-transit-closed.service"* ]] ||
+		problems+=("no warning naming the restore")
+	[[ "$UNIT_SHADOW_ERR" == *"Leaving /etc/systemd/system/xpf-transit-closed.service as it is"* ]] &&
+		problems+=("warned 'as it is' about a path that was empty")
+	[[ "$(fake_systemd_loaded xpf-transit-closed.service)" == /etc/systemd/system/xpf-transit-closed.service ]] ||
+		problems+=("transit barrier not loaded after the restore: '$(fake_systemd_loaded xpf-transit-closed.service)'")
+	[[ -f "$etc/xpf-input-closed.service" ]] || problems+=("the input barrier's only copy was removed")
+	if (( ${#problems[@]} )); then
+		bad "unit shadow (#18544): a parked barrier must be restored when the deb ships none: ${problems[*]}"
+	else
+		ok "unit shadow (#18544): a barrier parked by an interrupted run is put back when the deployed deb ships no packaged copy"
+	fi
+	teardown_fake_vm
+}
+
+# The same, but the /etc path is occupied: the restore must not overwrite it,
+# and the warning must name the parked copy rather than claim nothing is
+# wrong.
+test_unit_shadow_unpackaged_barrier_occupied_named_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local etc="$FAKE_VM/etc/systemd/system" stash="$FAKE_VM/var/lib/xpf-deploy-unit-shadow"
+	mkdir -p "$stash"
+	printf '[Unit]\nDescription=parked transit barrier\n' >"$stash/xpf-transit-closed.service"
+	printf '[Unit]\nDescription=current transit barrier\n' >"$etc/xpf-transit-closed.service"
+	fake_systemd_boot
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	if (( UNIT_SHADOW_RC == 0 )) &&
+		grep -q 'current transit barrier' "$etc/xpf-transit-closed.service" 2>/dev/null &&
+		[[ -f "$stash/xpf-transit-closed.service" ]] &&
+		[[ "$UNIT_SHADOW_ERR" == *"/var/lib/xpf-deploy-unit-shadow/xpf-transit-closed.service"*"NOT restored"* ]]; then
+		ok "unit shadow (#18544): with no packaged barrier, a parked copy is named and never restored over an occupied /etc path"
+	else
+		bad "unit shadow (#18544): an occupied barrier path must be kept and the parked copy named (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
+# The restore in the skip branch reloads; when that reload fails, the warning
+# must say so rather than report a clean restore.
+test_unit_shadow_unpackaged_barrier_reload_failure_reported_18544() {
+	setup_fake_vm
+	unit_shadow_fixture file 1
+	local stash="$FAKE_VM/var/lib/xpf-deploy-unit-shadow"
+	mkdir -p "$stash"
+	printf '[Unit]\nDescription=raw push of transit barrier\n' >"$stash/xpf-transit-closed.service"
+	fake_systemd_boot
+	# Reload #1 is xpfd's own reconcile; #2 is the barrier restore.
+	FAKE_RELOAD_FAIL_FROM=2
+	unit_shadow_run deploy_reconcile_unit_shadows vm
+	if (( UNIT_SHADOW_RC == 0 )) && [[ "$UNIT_SHADOW_ERR" == *"xpf-transit-closed.service, but daemon-reload FAILED"* ]] &&
+		[[ "$UNIT_SHADOW_ERR" != *"xpf-transit-closed.service and reloaded"* ]]; then
+		ok "unit shadow (#18544): a failed reload after a skip-branch restore is reported"
+	else
+		bad "unit shadow (#18544): a failed reload after a skip-branch restore must be reported (rc=$UNIT_SHADOW_RC)"
+	fi
+	teardown_fake_vm
+}
+
 # The helper is useless unless the deb path calls it, and the call's
 # POSITION matters. After the deb install, the packaged units on disk are the
 # ones being deployed. Before the `upgrade --rolling` cut, the cut's stop
@@ -3445,6 +3522,9 @@ test_unit_shadow_rollback_reload_failure_reported_18544
 test_unit_shadow_unpackaged_barrier_skipped_18544
 test_unit_shadow_loop_propagates_unit_failure_18544
 test_unit_shadow_occupied_path_not_overwritten_18544
+test_unit_shadow_unpackaged_barrier_stash_restored_18544
+test_unit_shadow_unpackaged_barrier_occupied_named_18544
+test_unit_shadow_unpackaged_barrier_reload_failure_reported_18544
 test_unit_shadow_reconcile_wired_into_deb_deploy_18544
 test_manifest_node_index_maps_configured_instances
 test_manifest_raw_records_verified_binary_hashes

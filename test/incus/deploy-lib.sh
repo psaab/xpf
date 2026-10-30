@@ -172,6 +172,8 @@ deploy_unit_path_is_packaged() {
 # Make the packaged <unit> the one systemd has LOADED. The steps:
 # 0. With no packaged copy on disk, skip a unit that is not in
 #    deploy_required_units (warn, return 0). The deployed deb predates it.
+#    A copy parked by an interrupted earlier run is put back first, into a
+#    free /etc path only, since it is then the unit's only copy.
 # 1. Park a regular-file /etc/systemd/system/<unit> in the stash. Refuse
 #    (HARD FAIL, file kept) when a REQUIRED unit has no packaged copy.
 # 2. Run daemon-reload, also when the file is already gone but systemd still
@@ -216,6 +218,25 @@ deploy_reconcile_unit_shadow() {
 		[[ "$d" == "$unit" ]] && required=1
 	done
 	if (( ! have_packaged && ! required )); then
+		# The raw-pushed copy is then the only copy of this unit. If an
+		# interrupted earlier run parked it, put it back (into a free /etc
+		# path only), or this node boots without the unit while its install
+		# links still name it.
+		if incus exec "$rinst" -- test -f "$stash" 2>/dev/null; then
+			if incus exec "$rinst" -- test -e "$shadow" 2>/dev/null ||
+				incus exec "$rinst" -- test -L "$shadow" 2>/dev/null; then
+				warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. A parked copy is at $stash, but $shadow is occupied, so it was NOT restored; inspect both by hand (#18544)."
+				return 0
+			fi
+			incus exec "$rinst" -- mv -f "$stash" "$shadow" 2>/dev/null \
+				|| die "no packaged $unit on $rinst and failed to put the parked $stash back at $shadow; restore it by hand, or the node boots without $unit"
+			if incus exec "$rinst" -- systemctl daemon-reload 2>/dev/null; then
+				warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. Put the parked $stash back at $shadow and reloaded (#18544)."
+			else
+				warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. Put the parked $stash back at $shadow, but daemon-reload FAILED; it loads at the next boot or reload (#18544)."
+			fi
+			return 0
+		fi
 		warn "No packaged $unit under ${deploy_packaged_unit_dirs[*]} on $rinst: the deployed deb predates it. Leaving $shadow as it is (#18544)."
 		return 0
 	fi

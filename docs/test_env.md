@@ -706,8 +706,11 @@ it:
 - skips a boot barrier, with a warning, when the deployed deb ships no
   packaged copy of it. A deb pinned through `XPF_DEPLOY_DEB_PATH` may predate
   the barriers (#9852, #10751), and the raw-pushed `/etc` copies are then the
-  only ones. `xpfd.service` is required: with no packaged copy, the deploy
-  keeps the `/etc` file and hard-fails;
+  only ones. A copy that an interrupted earlier run parked is put back first,
+  into a free `/etc` path only, because it is then the unit's only copy. An
+  occupied path is never overwritten, and the warning names the parked copy.
+  `xpfd.service` is required: with no packaged copy, the deploy keeps the
+  `/etc` file and hard-fails;
 - parks a regular-file `/etc/systemd/system/<unit>` in
   `/var/lib/xpf-deploy-unit-shadow/`. That is persistent, so a reboot between
   the move and the check cannot lose it, and it is outside every unit search
