@@ -105,9 +105,12 @@ Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ra
 
 ## Known-environment rows (not product failures; re-verify before excusing)
 
-- **tcp external IPv4 (1.1.1.1, 8.8.8.8).** The upstream behind 172.16.50.1
-  does not forward for the tcp cluster's source; the firewall reaches its
-  gateway directly. Verify with the gateway ping before excusing the row.
+- **Not environment: tcp external IPv4 (1.1.1.1, 8.8.8.8).** This was excused
+  here as an upstream that does not forward for the tcp cluster's source. It
+  is a product defect: IPv4 internet loss starts 30–55 s after an RG move, and
+  the WAN replies are denied as host-inbound because they match no session
+  (live on tcp, 2026-10-30; the master baseline shows it too). The cells must
+  pass once it is fixed.
 - **Not environment: MTR / traceroute cells.** The `test-connectivity` cells
   "mtr LAN→internet IPv6 … final hop 2" and "Group11 IPv4 MTR … `???`" were
   excused here as an upstream issue. They are not: ping to the same
