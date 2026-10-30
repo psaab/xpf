@@ -375,6 +375,14 @@ test_standalone() {
 
 test_cluster() {
 	info "Cluster HA (${FW0} + ${FW1})"
+	# #18174: the public IPv6 destination for the cluster internet cells. The
+	# previous targets, 2607:f8b0:4005:80e::200e (ping6 cell) and
+	# 2607:f8b0:4005:814::200e (Group10 TTL=1, Group11 MTR), no longer answer
+	# echo at all: measured 0/3 from both the loss and the tcp LAN host on
+	# 2026-10-30 while 2001:4860:4860::8888 answered 3/3. A dead destination made
+	# the ping6 cell red on every smoke-watch line and could never be the final
+	# row of an MTR. Google Public DNS is anycast and stable.
+	local internet_target6="2001:4860:4860::8888"
 
 	if ! instance_running "$FW0" || ! instance_running "$FW1"; then
 		skip "${FW0} or ${FW1} not running — skipping cluster tests"
@@ -435,8 +443,8 @@ test_cluster() {
 		internet_test "$CLUSTER_LAN_HOST" "cluster: LAN host → internet (1.1.1.1)"
 
 		# Internet IPv6: LAN host → Google DNS IPv6 (proves IPv6 routing through fw)
-		ping6_test "$CLUSTER_LAN_HOST" "2607:f8b0:4005:80e::200e" \
-			"cluster: LAN host → internet IPv6 (2607:f8b0:4005:80e::200e)"
+		ping6_test "$CLUSTER_LAN_HOST" "$internet_target6" \
+			"cluster: LAN host → internet IPv6 (${internet_target6})"
 
 		# IPv6 TCP: iperf3 from LAN host to WAN (proves SNAT v6 + return path)
 		if incus exec "$CLUSTER_LAN_HOST" -- which iperf3 &>/dev/null 2>&1; then
@@ -469,13 +477,9 @@ test_cluster() {
 		mtr_test "$CLUSTER_LAN_HOST" "1.1.1.1" "reth:${LAN_VIP4}" \
 			"cluster: mtr LAN→internet IPv4 (via RETH VIP ${LAN_VIP4})"
 
-		# #18174: 2607:f8b0:4005:80e::200e (the old target, still used by the
-		# ping6 cell above) no longer answers echo at all — measured 0/2 from
-		# the loss LAN host on 2026-10-30 while 2001:4860:4860::8888 answered
-		# 2/2 — so an MTR to it could never show the destination as its final
-		# row. Google Public DNS is anycast and stable.
-		local mtr_target6="2001:4860:4860::8888"
-		mtr_test "$CLUSTER_LAN_HOST" "$mtr_target6" "reth:${LAN_VIP6}" \
+		# #18174: a live destination (internet_target6, at the top of
+		# test_cluster) so the destination can be the MTR's final row.
+		mtr_test "$CLUSTER_LAN_HOST" "$internet_target6" "reth:${LAN_VIP6}" \
 			"cluster: mtr LAN→internet IPv6 (via RETH VIP ${LAN_VIP6})"
 
 		# #11581 Group 10: legacy TTL=1 probes require router-generated
@@ -498,7 +502,7 @@ test_cluster() {
 
 		local ttl6_output ttl6_rc ttl6_status ttl6_evidence
 		if ttl6_output=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
-			'LC_ALL=C ping -6 -c 1 -W 2 -t 1 2607:f8b0:4005:814::200e' 2>&1); then
+			"LC_ALL=C ping -6 -c 1 -W 2 -t 1 ${internet_target6}" 2>&1); then
 			ttl6_rc=0
 		else
 			ttl6_rc=$?
@@ -510,7 +514,7 @@ test_cluster() {
 			ttl6_status=$?
 		fi
 		assurance_verdict "$ttl6_status" \
-			"cluster: Group10 IPv6 TTL=1 (LC_ALL=C ping -6 -c 1 -W 2 -t 1 2607:f8b0:4005:814::200e; rc=${ttl6_rc}; output=${ttl6_evidence:-<empty>})"
+			"cluster: Group10 IPv6 TTL=1 (LC_ALL=C ping -6 -c 1 -W 2 -t 1 ${internet_target6}; rc=${ttl6_rc}; output=${ttl6_evidence:-<empty>})"
 
 		# #11581 Group 11: reuse the shared MTR classifier. IPv6 unresolved
 		# destination/no-hop results are warnings, not reachability proof.
@@ -531,14 +535,14 @@ test_cluster() {
 
 		local mtr6_report mtr6_result mtr6_rc
 		mtr6_report=$(incus exec "$CLUSTER_LAN_HOST" -- sh -c \
-			'LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1' 2>&1) || true
+			"LC_ALL=C mtr -6 ${internet_target6} --report --report-cycles=1" 2>&1) || true
 		if mtr6_result=$(python3 "${SCRIPT_DIR}/../../scripts/mtr_report_check.py" \
 			"cluster IPv6 public path" "$mtr6_report" 1 2>&1); then
-			pass "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1): ${mtr6_result}"
+			pass "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 ${internet_target6} --report --report-cycles=1): ${mtr6_result}"
 		else
 			mtr6_rc=$?
 			if (( mtr6_rc == 1 )); then
-				fail "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 2607:f8b0:4005:814::200e --report --report-cycles=1): ${mtr6_result}"
+				fail "cluster: Group11 IPv6 MTR (LC_ALL=C mtr -6 ${internet_target6} --report --report-cycles=1): ${mtr6_result}"
 			else
 				void "cluster: Group11 IPv6 MTR classifier unavailable (status=${mtr6_rc}): ${mtr6_result}"
 			fi
