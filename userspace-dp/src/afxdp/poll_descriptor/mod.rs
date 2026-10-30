@@ -3554,6 +3554,7 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                                 // selector, so ICMP-application DNAT
                                 // sessions survive revalidation.
                                 policy_packet_icmp(packet_frame, meta),
+                                fabric_link_ingress,
                             );
                         let owner_icmp_verdict =
                             if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {

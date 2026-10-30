@@ -435,6 +435,25 @@ The rules now:
   in the RG index that `DemoteOwnerRGS` and `RefreshOwnerRGS` walk. That
   RG is inactive here, so the WAN owner's revocation, arriving as a peer
   delete, is not refused by the #9048 locally-owned guard.
+- **No alias purge on a fabric arrival.** On a non-owner, a translated
+  forward hit on a peer-synced row is held transient
+  (`should_keep_synced_hit_transient`) and, before this, was then purged
+  (`purge_translated_synced_hit_with_context`, the #6599 rule), silently
+  and with no Close. On the RG-taking node the peer's fabric redirect is
+  exactly such a hit, so the window removed the forward-wire alias of a
+  live flow. Where the alias was the only copy, the first packet after
+  activation missed and the flow died. The purge now runs only for a
+  direct arrival (a spoofed or martian translated source); a fabric-link
+  arrival is held and takes its HA disposition (dropped).
+- **On a fabric arrival, a live `HAInactive` is judged, then declined.** A
+  keep-transient hit persists nothing, so the validator judged the stored
+  import-time line. For v6 on the RG-taking node that line is egress 13
+  (reth0.50) under the split FIB, which does not carry the reth0.80
+  translation, so it revoked. On a fabric-link arrival the live decision
+  now stands in when it is `HAInactive` as well as a forward candidate, and
+  the decline above holds the session. A direct arrival on a non-owner
+  still judges its stored line (#12187: a later same-tuple static SNAT
+  revokes there). A live `FabricRedirect` never stands in.
 
 A withdrawn translation is revoked by the node that owns the egress, on
 its next slow-path hit with a stale stamp. That is not every redirected
@@ -446,9 +465,10 @@ Pinned by `afxdp::tests_split_rg_failback_18531`, which drives the
 production poll pipeline on the captured split snapshots, and by the
 `SharedPromote` cell of `peer_synced_fabric_redirect_snat_declines_16215`.
 The daemon-side routing of the owner's Close is the existing owner-RG gate
-and is not covered by those cells. Open residuals are tracked in #18535:
+and is not covered by those cells. Residuals are tracked in #18535. The
+first is fixed here (the two rules above); the other two are open:
 - a translated alias row removed in the RG gap, so an alias-only copy
-  loses the flow;
+  loses the flow (fixed);
 - activation before the connected-RG FIB republish;
 - scope-less imports not judged by the owner.
 

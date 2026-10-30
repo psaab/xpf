@@ -498,7 +498,19 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         } else {
             None
         };
-        let deferred_synced_purge = if keep_transient {
+        // #18531: never purge on a fabric-link arrival. A translated forward
+        // packet that the peer redirected over the fabric means the peer has
+        // handed the egress RG to this node: ownership is in transit, not
+        // settled elsewhere. That is the RG-taking node's window between the
+        // peer's demotion and this node's activation. The row is still held
+        // transient (not materialized), and the packet takes its HA
+        // disposition (dropped: a fabric arrival is never redirected back).
+        // Purging it removed the forward-wire alias of a live flow with no
+        // Close. Where the alias was this node's only copy, the first packet
+        // after activation missed and the flow died. The #6599 purge of a
+        // translated hit that arrives DIRECTLY (a spoofed or martian source on
+        // a non-owner) is unchanged.
+        let deferred_synced_purge = if keep_transient && !fabric_link_ingress {
             poison_key.map(|(key, decision, metadata, origin)| DeferredSyncedPurge {
                 key: key.clone(),
                 decision,

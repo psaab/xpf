@@ -1057,3 +1057,152 @@ fn reverse_reply_case(served: bool) {
     );
     assert_eq!(sessions.len(), 2, "both halves held (served={served})");
 }
+
+// ---------------------------------------------------------------------------
+// #18535 item 1: a forward-wire alias (the Go-synthesized row keyed by the
+// translated tuple) of a live flow must survive the RG-taking node's window.
+// ---------------------------------------------------------------------------
+
+/// The alias row the daemon synthesizes for a fabric-redirect delta
+/// (`userspaceForwardWireAliasV4/V6`): the same value, keyed by the
+/// translated forward tuple.
+fn alias_of(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
+    let mut alias = entry.clone();
+    alias.key.src_ip = entry.decision.nat.rewrite_src.expect("an SNAT row");
+    alias
+}
+
+/// The RG-taking node holding ONLY the alias of the flow (plus its reverse)
+/// — the integ3 trace's shape for 36552 on fw0.
+fn import_alias_only(sessions: &mut SessionTable, forwarding: &ForwardingState, family: Family) {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha = window_ha(now_secs);
+    let forward = exported_forward(forwarding, family);
+    let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+        forwarding,
+        &ha,
+        &Arc::new(ShardedNeighborMap::default()),
+        &forward,
+        now_secs,
+    )
+    .expect("production reverse synthesis must produce the companion");
+    apply_commands(
+        sessions,
+        forwarding,
+        &ha,
+        vec![
+            WorkerCommand::UpsertSynced(reverse),
+            WorkerCommand::UpsertSynced(alias_of(&forward)),
+        ],
+    );
+}
+
+/// RED at 42a2c81a12: the redirected translated packet hits the alias row
+/// directly, `should_keep_synced_hit_transient` holds it transient (RG1 not
+/// active yet), and `purge_translated_synced_hit` removed it with no Close.
+/// The first packet after RG1 activated then missed, so the flow died. The
+/// alias must survive the window and serve the flow once RG1 is active.
+/// IPv4 and IPv6.
+#[test]
+fn rg_taking_node_window_keeps_alias_only_flow_18531() {
+    let window_fwd = rg_taking_node_forwarding();
+    let owner_fwd = fw1_owner_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let activated = BTreeMap::from([
+        (0, rg(true, now_secs)),
+        (1, rg(true, now_secs)),
+        (2, rg(false, now_secs)),
+    ]);
+    for family in [Family::V4, Family::V6] {
+        let mut sessions = SessionTable::new();
+        sessions.set_forwarding_revalidation_gen(7, 9);
+        import_alias_only(&mut sessions, &window_fwd, family);
+        let alias_key = alias_of(&exported_forward(&window_fwd, family)).key;
+        assert_eq!(sessions.len(), 2, "fixture: alias + reverse ({family:?})");
+        let (frame, meta) = fabric_forward_frame(&window_fwd, family);
+        let window = drive(
+            &mut sessions,
+            &window_fwd,
+            &window_ha(now_secs),
+            FABRIC,
+            &frame,
+            meta,
+            1,
+        );
+        assert_eq!(
+            window.session_hit, 1,
+            "the redirected packet hits the alias ({family:?})"
+        );
+        assert_eq!(window.tx, [0, 0, 0], "dropped in the window ({family:?})");
+        assert!(
+            sessions.entry_with_origin(&alias_key).is_some(),
+            "an ownership transient must not remove the alias of a live flow ({family:?})"
+        );
+        assert_eq!(
+            (window.closes, sessions.len()),
+            (0, 2),
+            "nothing torn down ({family:?})"
+        );
+        let (frame, meta) = fabric_forward_frame(&owner_fwd, family);
+        let after = drive(
+            &mut sessions,
+            &owner_fwd,
+            &activated,
+            FABRIC,
+            &frame,
+            meta,
+            2,
+        );
+        assert_eq!(
+            (after.session_hit, after.tx[WAN]),
+            (1, 1),
+            "once RG1 is active the alias serves the flow out the WAN ({family:?})"
+        );
+    }
+}
+
+/// Control: the #6599 purge of a translated hit that arrives DIRECTLY on a
+/// non-owner (a spoofed or martian translated source on the LAN, not a
+/// redirect over the fabric) is unchanged: the alias row goes.
+#[test]
+fn non_owner_direct_translated_arrival_still_purges_alias_18531() {
+    let forwarding = rg_taking_node_forwarding();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let mut sessions = SessionTable::new();
+    sessions.set_forwarding_revalidation_gen(7, 9);
+    import_alias_only(&mut sessions, &forwarding, Family::V4);
+    let alias_key = alias_of(&exported_forward(&forwarding, Family::V4)).key;
+    let frame = build_txn_tcp_syn_frame_v4(
+        SNAT_IP,
+        WAN_HOST,
+        SPORT,
+        DPORT,
+        TCP_ACK,
+        [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03],
+    );
+    let mut meta = txn_meta_v4(LAN_IFINDEX as u32, TCP_ACK, frame.len() as u16);
+    set_flow(
+        &mut meta,
+        IpAddr::V4(SNAT_IP),
+        IpAddr::V4(WAN_HOST),
+        SPORT,
+        DPORT,
+    );
+    let out = drive(
+        &mut sessions,
+        &forwarding,
+        &window_ha(now_secs),
+        LAN,
+        &frame,
+        meta,
+        1,
+    );
+    assert_eq!(
+        out.session_hit, 1,
+        "the direct packet must hit the alias row"
+    );
+    assert!(
+        sessions.entry_with_origin(&alias_key).is_none(),
+        "a direct translated arrival on a non-owner still purges the alias (#6599)"
+    );
+}

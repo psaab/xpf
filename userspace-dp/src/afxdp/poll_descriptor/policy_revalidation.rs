@@ -937,6 +937,7 @@ pub(super) fn source_nat_revocation_on_session_hit(
         source_nat_validation_key,
         now_ns,
         packet_icmp,
+        false,
     )
 }
 
@@ -1008,6 +1009,10 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     source_nat_validation_key: Option<&SessionKey>,
     now_ns: u64,
     packet_icmp: Option<(u8, u8)>,
+    // #18531: the packet arrived on the fabric link (the poll loop's
+    // `fabric_link_ingress`, the same predicate as the keep-transient purge
+    // gate in `session_glue/resolve.rs`).
+    fabric_link_ingress: bool,
 ) -> Option<PolicyRevocation> {
     let (
         forward_key,
@@ -1390,12 +1395,28 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // the non-terminal stored shapes (a real egress whose stored
     // geometry no longer matches the packet's re-resolved egress);
     // revocation stays a FRESH decision's verdict in both arms.
+    //
+    // #18531 (#18535 item 1): on a FABRIC-LINK arrival the live decision
+    // also stands in when it is HAInactive. That is still a real egress,
+    // only one whose RG this node does not forward, and the decline below
+    // then holds the session. The shape is the RG-taking node's window:
+    // the peer has demoted the egress RG and redirects the translated flow
+    // here before this node activates it. A keep-transient hit (a
+    // translated forward-wire alias on a non-owner) persists nothing, so
+    // its stored line is the import-time resolution against the split FIB:
+    // for v6 that is egress 13 (reth0.50), whose address is not the
+    // reth0.80 translation. Judged as stored, it revoked the alias of a
+    // live flow. A DIRECT arrival on a non-owner keeps judging its stored
+    // line (#12187: a later same-tuple static SNAT still revokes there),
+    // and a live FabricRedirect names the fabric parent, not an egress, so
+    // it never stands in.
     let forward_decision = if !metadata.is_reverse
         && decision.resolution.egress_ifindex > 0
-        && matches!(
+        && (matches!(
             decision.resolution.disposition,
             ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
-        )
+        ) || (fabric_link_ingress
+            && decision.resolution.disposition == ForwardingDisposition::HAInactive))
         && !matches!(
             forward_decision.resolution.disposition,
             ForwardingDisposition::DiscardRoute | ForwardingDisposition::ClusterTerminalHAInactive
