@@ -47,6 +47,31 @@ pub(in crate::afxdp) fn classify_metadata(
     }
 }
 
+/// #18560: `classify_metadata` plus the post-advance generation grace (see
+/// `MetadataGenerationGrace`). Returns the disposition and whether the grace
+/// admitted a packet the strict classifier would have dropped. The strict
+/// path is unchanged and runs first, so a current-stamped packet pays nothing.
+#[inline]
+pub(in crate::afxdp) fn classify_metadata_with_grace(
+    meta: UserspaceDpMeta,
+    validation: ValidationState,
+    grace: MetadataGenerationGrace,
+    now_ns: u64,
+) -> (PacketDisposition, bool) {
+    let disposition = classify_metadata(meta, validation);
+    match disposition {
+        PacketDisposition::ConfigGenerationMismatch | PacketDisposition::FibGenerationMismatch
+            if grace.admits(meta.config_generation, meta.fib_generation, validation, now_ns) =>
+        {
+            match meta.addr_family as i32 {
+                libc::AF_INET | libc::AF_INET6 => (PacketDisposition::Valid, true),
+                _ => (PacketDisposition::UnsupportedPacket, false),
+            }
+        }
+        other => (other, false),
+    }
+}
+
 /// #4674: returns `Cow<'static, str>` rather than an owned `String`. The
 /// common cases — the default-table remaps (`inet.0`↔`inet6.0`) — borrow the
 /// `'static` `DEFAULT_V4_TABLE`/`DEFAULT_V6_TABLE` constants and never

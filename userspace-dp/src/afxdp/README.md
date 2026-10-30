@@ -2165,6 +2165,45 @@ learn; removal, a new source MAC, a new snapshot, interval expiry and an
 unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`
 `tests_hit_path_cost_18533.rs` (numbers in `docs/log/18534.md`).
 
+## Metadata generation grace (#18560)
+
+The shim stamps `userspace_ctrl`'s `config_generation` and `fib_generation`
+into every packet. `classify_metadata` drops a packet whose stamp differs
+from the worker's `ValidationState`. Go writes `userspace_ctrl` from the
+helper's reply, so it always lands AFTER the coordinator has published the
+new validation. Until #18560, every publish therefore dropped every packet in
+flight for the helper round trip plus Go's ctrl write. That includes the
+routes-only overlay republish and the FIB bump the route listener issues
+after each HA ownership edge, neither of which changes anything the shim
+classifies on. On the loss cluster that cost 2-5 lost 10 ms pings per
+publish, and tens of thousands of `config_gen_mismatches` per node.
+
+When the worker loop adopts a newer validation it now computes
+`MetadataGenerationGrace::after_advance(prev, next, now)` and hands it to
+every binding (`BindingWorker::metadata_generation_grace`). For
+`METADATA_GENERATION_GRACE_NS` (2 s), `classify_metadata_with_grace` admits a
+packet whose config stamp and FIB stamp are each either the current value or
+the one the worker just left. Each admit is counted in the per-binding
+`generation_grace_admits` status field.
+
+Why this direction is safe:
+
+- The admitted packet is processed entirely under the CURRENT tables. Flow
+  cache lookups and session stamps use the validation, not the packet's
+  generations (`FlowCacheLookup::for_packet`). Zone and local delivery are
+  re-derived from the worker's forwarding state.
+- #6592's hazard is the opposite orientation: a packet stamped NEWER than the
+  worker, forwarded under stale tables. A stamp ahead of the worker matches
+  neither half of the grace and is still dropped.
+- Only a forward move earns a grace. A first install has no previous stamp.
+  A generation that went down (a config-transition reset) keeps the strict
+  fence. A neighbor-only republish moves neither stamp.
+- A stamp older than the previous one is still dropped, as is any stamp
+  after the deadline, so a ctrl write that never lands is not masked
+  forever.
+
+Cells: `forwarding/tests_generation_grace_18560.rs`.
+
 ## Hot-path constants
 
 - `RX_BATCH_SIZE = 64`

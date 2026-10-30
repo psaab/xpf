@@ -84,6 +84,7 @@ impl BindingLiveState {
             exception_packets: self.exception_packets.load(Ordering::Relaxed),
             config_gen_mismatches: self.config_gen_mismatches.load(Ordering::Relaxed),
             fib_gen_mismatches: self.fib_gen_mismatches.load(Ordering::Relaxed),
+            generation_grace_admits: self.generation_grace_admits.load(Ordering::Relaxed),
             unsupported_packets: self.unsupported_packets.load(Ordering::Relaxed),
             flow_cache_hits: self.flow_cache_hits.load(Ordering::Relaxed),
             flow_cache_misses: self.flow_cache_misses.load(Ordering::Relaxed),

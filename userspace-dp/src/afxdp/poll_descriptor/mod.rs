@@ -987,7 +987,19 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
         let mut recycle_now = true;
         if let Some(meta) = injected_meta.or_else(|| try_parse_metadata(area.area(), desc)) {
             telemetry.counters.metadata_packets += 1;
-            let disposition = classify_metadata(meta, validation);
+            // #18560: admit the stamp one publish behind the worker.
+            let (disposition, grace_admitted) = classify_metadata_with_grace(
+                meta,
+                validation,
+                binding.metadata_generation_grace,
+                now_ns,
+            );
+            if grace_admitted {
+                binding
+                    .live
+                    .generation_grace_admits
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             if disposition == PacketDisposition::Valid {
                 telemetry.counters.validated_packets += 1;
                 telemetry.counters.validated_bytes += desc.len as u64;

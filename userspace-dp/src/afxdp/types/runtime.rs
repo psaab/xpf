@@ -605,6 +605,80 @@ pub(in crate::afxdp) struct ValidationState {
     pub(in crate::afxdp) neighbor_generation: u64,
 }
 
+/// #18560: how long after a worker advances its validation it still admits
+/// packets stamped with the generation pair it just left. The shim's stamp
+/// trails the worker by the helper reply plus Go's `userspace_ctrl` write
+/// (tens of ms measured); the bound only caps how long a ctrl write that never
+/// lands can keep the previous stamp alive.
+pub(in crate::afxdp) const METADATA_GENERATION_GRACE_NS: u64 = 2_000_000_000;
+
+/// #18560: the previous generation pair a worker admits for a short window
+/// after it adopts a newer validation.
+///
+/// The shim stamps `userspace_ctrl`'s generations into every packet, and Go
+/// writes `userspace_ctrl` from the helper's reply AFTER the coordinator has
+/// published the new validation. So every publish — a route-only overlay
+/// republish or a FIB bump, which change nothing the shim classifies on — had
+/// a window in which every packet arrived stamped one generation behind the
+/// worker and `classify_metadata` dropped it: 2-5 lost 10 ms pings per
+/// ownership edge on the loss cluster, tens of thousands of drops per node.
+///
+/// Admitting the PREVIOUS stamp is the safe direction. The packet is then
+/// processed entirely under the worker's CURRENT tables: flow-cache lookups and
+/// session stamps read the validation, never the packet's generations
+/// (`FlowCacheLookup::for_packet`), and the worker re-derives zone and local
+/// delivery from its own forwarding state. What #6592 forbids — a packet
+/// stamped NEWER than the worker's tables being forwarded under the stale ones
+/// — stays a drop: a stamp ahead of the worker matches neither pair here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct MetadataGenerationGrace {
+    pub(in crate::afxdp) config_generation: u64,
+    pub(in crate::afxdp) fib_generation: u32,
+    /// Monotonic deadline; 0 (the default) admits nothing.
+    pub(in crate::afxdp) until_ns: u64,
+}
+
+impl MetadataGenerationGrace {
+    /// The grace a worker owes after moving from `prev` to `next` at `now_ns`.
+    /// Only a forward move earns one: a first install has no previous stamp,
+    /// a generation that went DOWN (a config reset) keeps the strict fence, and
+    /// a neighbor-only republish changes neither stamp.
+    pub(in crate::afxdp) fn after_advance(
+        prev: ValidationState,
+        next: ValidationState,
+        now_ns: u64,
+    ) -> Self {
+        let forward = next.config_generation >= prev.config_generation
+            && next.fib_generation >= prev.fib_generation
+            && (next.config_generation, next.fib_generation)
+                != (prev.config_generation, prev.fib_generation);
+        if !prev.snapshot_installed || !next.snapshot_installed || !forward {
+            return Self::default();
+        }
+        Self {
+            config_generation: prev.config_generation,
+            fib_generation: prev.fib_generation,
+            until_ns: now_ns.saturating_add(METADATA_GENERATION_GRACE_NS),
+        }
+    }
+
+    /// Whether a packet stamped `(config, fib)` may be classified against
+    /// `current` at `now_ns`: each stamp must equal the current value or the
+    /// previous one, inside the deadline.
+    #[inline]
+    pub(in crate::afxdp) fn admits(
+        &self,
+        config: u64,
+        fib: u32,
+        current: ValidationState,
+        now_ns: u64,
+    ) -> bool {
+        now_ns < self.until_ns
+            && (config == current.config_generation || config == self.config_generation)
+            && (fib == current.fib_generation || fib == self.fib_generation)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(in crate::afxdp) enum HAForwardingLease {
     #[default]
