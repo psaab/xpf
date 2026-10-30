@@ -1619,7 +1619,7 @@ test-connectivity:
 # cell. Records throughput beside loadavg; FAILS on any connect error or any
 # 1 s interval where the aggregate or a single stream stalls ("the iperf
 # stops"). For tcp/udp export the cluster's lock tuple first (CLAUDE.md).
-PERF_MATRIX_OUT ?= /var/tmp/perf-matrix
+PERF_MATRIX_OUT ?= /var/tmp/perf-matrix/$(HARNESS_ENV)
 PERF_MATRIX_DUR ?= 20
 PERF_MATRIX_REPS ?= 2
 .PHONY: perf-matrix perf-matrix-lib

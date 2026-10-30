@@ -17,7 +17,8 @@
 # never read as a clean one.
 #
 # The caller holds the cluster lock (`make perf-matrix` wraps this in
-# with-cluster.sh). BPFRX_CLUSTER_ENV selects the cluster.
+# with-cluster.sh). BPFRX_CLUSTER_ENV selects the cluster. Each run writes a
+# fresh <outdir>/<UTC timestamp>-<pid>/ directory and prints its path.
 set -u
 
 verdict() { # <json-file>: prints the summary line; exit 0 clean, 1 stalled/failed
@@ -80,8 +81,12 @@ def run(aggs, streams=None):
 
 cases = {
     "healthy": run([10.0] * 10),
-    # The "iperf stops" shape: the aggregate falls to zero for two seconds.
-    "aggregate-stall": run([10.0] * 5 + [0.0, 0.0] + [10.0] * 3),
+    # The aggregate collapses to 5% of the median for two seconds while every
+    # stream still moves more than 1 Mbit/s: only the aggregate term sees it.
+    "aggregate-stall": run([10.0] * 5 + [0.5, 0.5] + [10.0] * 3,
+                           [[5e9, 5e9]] * 5 + [[2.5e8, 2.5e8]] * 2 + [[5e9, 5e9]] * 3),
+    # The "iperf stops" shape: everything falls to zero for two seconds.
+    "total-stall": run([10.0] * 5 + [0.0, 0.0] + [10.0] * 3),
     # One stream dies while the others take its share: the aggregate looks fine.
     "one-stream-stall": run([10.0] * 4, [[5e9, 5e9]] * 3 + [[1e10, 0.0]]),
     "iperf-error": {"error": "unable to connect to server", "start": {"connected": []}},
@@ -95,7 +100,7 @@ with open(f"{out}/unparseable.json", "w") as f:
 PY
 	# name:expected-rc. Only "healthy" may pass; every other row is a shape
 	# that once read as clean somewhere in this tree.
-	for cell in healthy:0 aggregate-stall:1 one-stream-stall:1 iperf-error:1 no-intervals:1 unparseable:1; do
+	for cell in healthy:0 aggregate-stall:1 total-stall:1 one-stream-stall:1 iperf-error:1 no-intervals:1 unparseable:1; do
 		verdict "$dir/${cell%%:*}.json" >/dev/null
 		rc=$?
 		if [ "$rc" = "${cell##*:}" ]; then
@@ -109,12 +114,14 @@ PY
 	[ "$fails" = 0 ]
 }
 
-if [ "${1:-}" = "--selftest" ]; then
+case "${1:-}" in
+--selftest)
 	selftest
 	exit $?
-fi
+	;;
+esac
 
-OUT=${1:?usage: iperf-matrix.sh <outdir> [duration-s] [reps] | --selftest}
+BASE=${1:?usage: iperf-matrix.sh <outdir> [duration-s] [reps] | --selftest}
 DUR=${2:-20}
 REPS=${3:-1}
 cd "$(dirname "$0")/../.." || exit 1
@@ -126,8 +133,20 @@ case "$IPERF_TARGET4" in
 	exit 2
 	;;
 esac
+# Every run gets its own directory, so a rerun or another cluster's run can
+# never leave an older PASS or JSON file where this run's verdict is read.
+OUT="$BASE/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 mkdir -p "$OUT" || exit 1
-cat /proc/loadavg >"$OUT/loadavg.before"
+echo "iperf-matrix: writing $OUT"
+# The orchestrator is not where the VMs run, so record the guests' load too.
+loadavgs() {
+	local n
+	echo "orchestrator $(cat /proc/loadavg)"
+	for n in "$FW0" "$FW1" "$CLUSTER_LAN_HOST"; do
+		echo "$n $(incus exec "$n" -- cat /proc/loadavg 2>/dev/null || echo unavailable)"
+	done
+}
+loadavgs >"$OUT/loadavg.before"
 fails=0
 for rep in $(seq 1 "$REPS"); do
 	for fam in 4 6; do
@@ -154,8 +173,13 @@ for rep in $(seq 1 "$REPS"); do
 		done
 	done
 done
-cat /proc/loadavg >"$OUT/loadavg.after"
-echo "loadavg before: $(cat "$OUT/loadavg.before")  after: $(cat "$OUT/loadavg.after")" | tee -a "$OUT/summary.txt"
+loadavgs >"$OUT/loadavg.after"
+{
+	echo "loadavg before:"
+	sed 's/^/  /' "$OUT/loadavg.before"
+	echo "loadavg after:"
+	sed 's/^/  /' "$OUT/loadavg.after"
+} | tee -a "$OUT/summary.txt"
 if [ "$fails" = 0 ]; then
 	echo "RESULT: PASS (no stalls, no errors)" | tee -a "$OUT/summary.txt"
 	exit 0

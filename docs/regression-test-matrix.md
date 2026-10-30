@@ -41,7 +41,7 @@ It complements, and does not replace:
 
 ## Tier 2: forwarding and performance (loss and tcp)
 
-Record `/proc/loadavg` next to every throughput number. Judge each cluster only
+Record `/proc/loadavg` next to every throughput number: the orchestrator's and the firewall VMs' and LAN host's (`make perf-matrix` records all four). The VMs run on the cluster's incus remote, not on the orchestrator. Judge each cluster only
 against its own band below, never against another cluster's. Use each env's
 `IPERF_TARGET4/6` (loss `172.16.80.200`, tcp `172.16.80.210`, udp
 `172.16.80.211`), never `172.16.100.x`.
@@ -50,7 +50,7 @@ against its own band below, never against another cluster's. Use each env's
 They are a floor to hold, not a ceiling; when a merge wave moves them, replace
 the row and keep the date, build and host loadavg.
 
-| Cluster | Build | v4 -P1 | v4 -P8 | v4 -P12 | v6 -P8 | Host loadavg |
+| Cluster | Build | v4 -P1 | v4 -P8 | v4 -P12 | v6 -P8 | Orchestrator loadavg |
 |---|---|---|---|---|---|---|
 | loss | integ6, 2026-10-29 (#18520 + #18533 + HA fixes) | 4.3–4.9 | 17.9–18.8 | 17.0–19.4 | 9.8–20.2 | 3–8 |
 | tcp | integ6, 2026-10-29 | 12.6–18.6 | 39.0–41.0 | 37.8–40.0 | 39.1–41.0 | 3–8 |
@@ -78,13 +78,13 @@ Resync node clocks after any crash reboot: the loss lab has no NTP
 |---|---|---|---|
 | H1 | `make test-failover` | PASS, including the crash takeover **and** the RG1 failback split, with every stream's last-good second at the end of the run | streams dying on takeover because synced sessions carried truncated zone ids (#18515); the failback split killing established SNAT streams. Three separate mechanisms did that (#18531), and the row only passes when none fire: the LAN node revoked its promoted row against the fabric pseudo-egress and synced the Close to the WAN owner; the WAN owner purged its alias rows as translated-synced when the reply arrived over the fabric link; and the returning owner judged a WAN reply to the SNAT address LocalDelivery and tore the session down at the host-inbound gate |
 | H2 | `make test-ha-crash` | PASS on all phases | a stuck restore after a peer restart (#18521 fence and re-prime storm); a lost config-apply ACK blocking RG0 failover (#18521) |
-| H2a | **Restore budget**, every destructive HA target | the post-run restore to node0 takes ≤ `RESTORE_FW0_BUDGET` (default 30 s) with no refused failover. Healthy restores took 9–16 s on 2026-10-29 | a restore that only succeeds on its fourth retry hides a fence or barrier refusal ("demotion peer barrier failed: session sync barrier fenced") that the next real failover hits too (#18523, #18521) |
+| H2a | **Restore budget**: `test-ha-crash` and `test-restart-connectivity`, the targets that carry `RESTORE_FW0_BUDGET` (#18524) | the post-run restore to node0 takes ≤ `RESTORE_FW0_BUDGET` (default 30 s) with no refused failover. Healthy restores took 9–16 s on 2026-10-29 | a restore that only succeeds on its fourth retry hides a fence or barrier refusal ("demotion peer barrier failed: session sync barrier fenced") that the next real failover hits too (#18523, #18521) |
 | H3 | `make test-double-failover` | PASS on both transitions | takeover by a node whose replicas came from a rejoin bulk |
 | H4 | `make test-restart-connectivity` | PASS, no cycle over the loss budget | daemon-restart blackholes |
 | H5 | `make test-active-active` | PASS | split-RG forwarding; a verdict that rejected `secondary-hold` (#18523) |
 | H6 | **Split dwell.** Move RG1 to the peer, hold the split ≥ 90 s with `-P8` running, move it back; repeat in the other orientation | 8/8 streams survive both moves | standby replicas reaped at 3 × the opening window (60 s) before they are needed (#18520). H1's failback lands about 64 s after rejoin, right at that edge, so a dwell longer than 60 s is required |
 | H7 | **Sync health after every RG move and restart.** Session sync is connected on both nodes within 5 s; a manual failover is admitted within one admission window (no `peer config stale`, no fence refusal); `Sessions stale-config-ignored` does not climb | as stated | a half-open sync connection surviving 56 s (#18521); a fence that never discharges; a config ACK credited then wiped by the peer's new-boot BulkStart (#18521); re-pushes moving the config epoch (#18521 review); the primary ignoring standby epochs (#18526) |
-| H8 | **Revocation symmetry.** After H1, on both nodes, no session row survives whose peer twin was closed: `show security flow session` agrees across nodes for the iperf flows | a Close emitted for an alias-only owner keyed on the translated tuple, which left the LAN node's original-tuple row alive and still translating (#18531 review) |
+| H8 | **Revocation symmetry.** After H1, compare `show security flow session` on both nodes for the iperf flows | no session row survives on one node whose twin the other node closed | a Close emitted for an alias-only owner keyed on the translated tuple, which left the LAN node's original-tuple row alive and still translating (#18531 review) |
 
 ## Tier 4: soak and cadence
 
