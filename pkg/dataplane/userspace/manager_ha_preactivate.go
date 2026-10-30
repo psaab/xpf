@@ -81,11 +81,13 @@ func (m *Manager) EndTransferPreActivation(rgIDs []int) (bool, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := time.Now()
 	changed := false
 	for _, rgID := range rgIDs {
-		if !m.transferPreActiveLocked(rgID, now) {
-			delete(m.transferPreActive, rgID)
+		// Keyed on the entry EXISTING, not on it still being live: an entry
+		// past its deadline already stopped counting for the helper, but the
+		// connected routes Begin published still mark the RG local until the
+		// caller withdraws them (a request that failed after the deadline).
+		if _, ok := m.transferPreActive[rgID]; !ok {
 			continue
 		}
 		delete(m.transferPreActive, rgID)

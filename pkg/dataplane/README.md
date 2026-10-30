@@ -263,6 +263,10 @@ transfer. The mark is an overlay on what the HELPER is told. It never changes
 - `EndTransferPreActivation` removes the mark and republishes when that
   takes an RG out of the effective active set. It reports that to the
   caller, which then withdraws the connected prefixes.
+- The release reports a revert whenever the mark EXISTED and the cluster
+  truth is still inactive, even if the mark already expired. The routes
+  Begin published stay in the helper FIB until the caller withdraws them, so
+  a request that failed after the 5 s deadline must still withdraw them.
 - An expired mark no longer counts. The status poll's signature comparison
   then republishes the effective view (5 s throttle).
 

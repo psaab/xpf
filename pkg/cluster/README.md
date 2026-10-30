@@ -4230,6 +4230,22 @@ early. Cells: `pkg/cluster/transfer_preactivate_18559_test.go`,
 `pkg/daemon/transfer_preactivate_18559_test.go`,
 `pkg/dataplane/userspace/manager_ha_preactivate_18559_test.go`.
 
+Two consequences of opening forwarding early:
+
+- **The request waits for `applySem`.** The pre-activation's connected-route
+  republish takes `applySem`, so a failover issued during a long commit
+  starts only after that commit finishes. The promotion path already waited
+  on the same lock; it now waits before the request is sent.
+- **Helper side effects happen on the requester.** Pre-activation runs the
+  helper's ordinary activation for the RG. That includes `RefreshOwnerRGS`
+  and, when it leaves no group inactive, the node-wide
+  `promote_imported_persistent_nat_leases`. A failed transfer then runs the
+  ordinary demotion (`DemoteOwnerRGS` and its purge walk). Lease promotion has
+  no reverse step, so a requester whose transfer aborts keeps promoted
+  leases. That is the same state an old owner is left in after an ordinary
+  failover, which also has no reverse step. No cell yet observes the helper
+  through an aborted pre-activation; it is owed (#18559).
+
 The untargeted `request chassis cluster failover redundancy-group N` (run on
 the owner, no target node) still demotes locally and leaves the peer to
 promote on the next secondary-hold heartbeat. It gets no pre-activation,

@@ -213,3 +213,18 @@ func TestPreActivationKeptByWatchdogInventory18559(t *testing.T) {
 		t.Fatal("watchdog inventory lost RG1")
 	}
 }
+
+// A request that fails after the deadline: the entry no longer counts for
+// the helper, but the connected routes Begin published still mark the RG
+// local, so the release must still report the revert (Seat G finding 1).
+func TestEndPreActivationAfterExpiryStillReportsRevert18559(t *testing.T) {
+	m, _ := newPreActivateManager18559(t)
+	m.BeginTransferPreActivation([]int{1}, time.Now().Add(-time.Millisecond))
+	reverted, _ := m.EndTransferPreActivation([]int{1})
+	if !reverted {
+		t.Fatal("an expired-then-released pre-activation reported no revert; its connected routes would stay published")
+	}
+	if rgs := m.TransferPreActiveRGs(); len(rgs) != 0 {
+		t.Fatalf("pre-active RGs = %v after release, want none", rgs)
+	}
+}
