@@ -1,0 +1,282 @@
+//! #18560: matched-view grace. A packet the shim stamped with a forwarding
+//! view this worker has left is parked and processed under THAT view's tables
+//! and validation, never dropped and never processed under the newer tables.
+//!
+//! The poll-level cells drive the real descriptor loop
+//! (`poll_binding_process_descriptor_in_view`) with the GRE-to-self fixture
+//! from `tests_support` (outer packet stamped config 7 / FIB 9; the decapped
+//! inner packet is delivered to the gr- channel), so "processed" is observable
+//! as exactly one delivery.
+#![allow(unused_imports)]
+
+use super::test_fixtures::*;
+use super::tests_support::*;
+use super::*;
+use std::sync::mpsc;
+
+const STAMPED: ValidationState = ValidationState {
+    snapshot_installed: true,
+    config_generation: 7,
+    fib_generation: 9,
+    neighbor_generation: 0,
+};
+const NEWER: ValidationState = ValidationState {
+    snapshot_installed: true,
+    config_generation: 8,
+    fib_generation: 9,
+    neighbor_generation: 0,
+};
+const NOW_NS: u64 = 123_000_000_000;
+
+fn views_with(prev: ValidationState, forwarding: &Arc<ForwardingState>, next: ValidationState) -> PrevViews {
+    let mut views = PrevViews::default();
+    views.retain(prev, forwarding, next, NOW_NS);
+    views
+}
+
+#[test]
+fn retain_keeps_only_forward_moves_18560() {
+    let fwd = Arc::new(ForwardingState::default());
+    assert_eq!(views_with(STAMPED, &fwd, NEWER).find(7, 9, NOW_NS), Some(0), "route/config publish");
+    let fib_bump = ValidationState { fib_generation: 10, ..STAMPED };
+    assert_eq!(views_with(STAMPED, &fwd, fib_bump).find(7, 9, NOW_NS), Some(0), "FIB bump");
+    let neighbor_only = ValidationState { neighbor_generation: 4, ..STAMPED };
+    assert!(views_with(STAMPED, &fwd, neighbor_only).is_empty(), "neighbor-only republish changes no stamp");
+    let first = ValidationState { snapshot_installed: false, ..STAMPED };
+    assert!(views_with(first, &fwd, NEWER).is_empty(), "first install has no stamp to match");
+    // A reset to a lower generation keeps the strict fence and forgets
+    // everything retained before it.
+    let mut views = views_with(STAMPED, &fwd, NEWER);
+    let reset = ValidationState { config_generation: 2, ..NEWER };
+    views.retain(NEWER, &fwd, reset, NOW_NS);
+    assert!(views.is_empty(), "a generation that went down must clear the retained views");
+}
+
+#[test]
+fn find_is_exact_pair_newest_first_and_expires_18560() {
+    let fwd = Arc::new(ForwardingState::default());
+    let mut views = PrevViews::default();
+    let v1 = STAMPED;
+    let v2 = ValidationState { fib_generation: 10, ..v1 };
+    let v3 = ValidationState { config_generation: 8, ..v2 };
+    let v4 = ValidationState { fib_generation: 11, ..v3 };
+    let v5 = ValidationState { config_generation: 9, ..v4 };
+    views.retain(v1, &fwd, v2, NOW_NS);
+    views.retain(v2, &fwd, v3, NOW_NS);
+    views.retain(v3, &fwd, v4, NOW_NS);
+    assert_eq!(views.find(8, 10, NOW_NS), Some(0));
+    assert_eq!(views.find(7, 10, NOW_NS), Some(1));
+    assert_eq!(views.find(7, 9, NOW_NS), Some(2));
+    assert_eq!(views.find(8, 9, NOW_NS), None, "a mixed pair matches no published view");
+    views.retain(v4, &fwd, v5, NOW_NS);
+    assert_eq!(views.find(7, 9, NOW_NS), None, "only MATCHED_VIEW_SLOTS views are kept");
+    assert_eq!(views.find(8, 11, NOW_NS), Some(0));
+    let late = NOW_NS + MATCHED_VIEW_GRACE_NS;
+    assert_eq!(views.find(8, 11, late), None, "a view past its deadline matches nothing");
+    views.expire(late);
+    assert!(views.is_empty());
+}
+
+fn meta_stamped(config: u64, fib: u32) -> UserspaceDpMeta {
+    UserspaceDpMeta {
+        config_generation: config,
+        fib_generation: fib,
+        ..UserspaceDpMeta::default()
+    }
+}
+
+#[test]
+fn parks_only_mismatches_of_another_retained_view_18560() {
+    let fwd = Arc::new(ForwardingState::default());
+    let views = views_with(STAMPED, &fwd, NEWER);
+    let normal = PassView { prev_views: Some(&views), held_pass: false, view: None };
+    let cfg = PacketDisposition::ConfigGenerationMismatch;
+    assert!(normal.parks(&meta_stamped(7, 9), cfg, NOW_NS), "stamped with the left view");
+    assert!(
+        !normal.parks(&meta_stamped(9, 9), cfg, NOW_NS),
+        "#6592: a stamp ahead of the worker is never parked"
+    );
+    assert!(!normal.parks(&meta_stamped(6, 9), cfg, NOW_NS), "older than every retained view");
+    assert!(
+        !normal.parks(&meta_stamped(7, 9), PacketDisposition::UnsupportedPacket, NOW_NS),
+        "only generation mismatches park"
+    );
+    let own = PassView { prev_views: Some(&views), held_pass: true, view: Some(0) };
+    assert!(!own.parks(&meta_stamped(7, 9), cfg, NOW_NS), "a held pass does not re-park its own view");
+    assert!(!PassView::current().parks(&meta_stamped(7, 9), cfg, NOW_NS));
+}
+
+struct GreFixture {
+    binding: BindingWorker,
+    sessions: SessionTable,
+    forwarding: Arc<ForwardingState>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    frame: Vec<u8>,
+    meta: UserspaceDpMeta,
+}
+
+fn gre_fixture() -> GreFixture {
+    let forwarding = Arc::new(build_forwarding_state(&gre_to_self_snapshot()));
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 11, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let inner = build_gre_inner_icmp_packet_v4();
+    let frame = build_gre_to_self_outer_frame_v4(80, &inner);
+    let meta = gre_to_self_outer_meta(80, frame.len());
+    assert_eq!(
+        (meta.config_generation, meta.fib_generation),
+        (STAMPED.config_generation, STAMPED.fib_generation),
+        "premise: the fixture stamps 7/9"
+    );
+    let (tx, rx) = mpsc::sync_channel(8);
+    let wake = Arc::new(TunnelWake::new().expect("eventfd"));
+    let deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::from([(77, LocalTunnelDelivery { tx, wake })])));
+    GreFixture {
+        binding,
+        sessions: SessionTable::new(),
+        forwarding,
+        rx,
+        deliveries,
+        frame,
+        meta,
+    }
+}
+
+/// One descriptor pass. `push` puts the fixture frame on the RX ring first.
+fn run_pass(fx: &mut GreFixture, forwarding: &ForwardingState, validation: ValidationState, pass: PassView<'_>, push: bool) -> BatchCounters {
+    let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+    let frame_offset = 128;
+    if push {
+        let meta_bytes = unsafe { std::slice::from_raw_parts((&fx.meta as *const UserspaceDpMeta).cast::<u8>(), meta_len) };
+        unsafe {
+            fx.binding.umem.area().slice_mut_unchecked(frame_offset - meta_len, meta_len).expect("meta slice").copy_from_slice(meta_bytes);
+            fx.binding.umem.area().slice_mut_unchecked(frame_offset, fx.frame.len()).expect("frame slice").copy_from_slice(&fx.frame);
+        }
+        fx.binding.xsk.rx.push_for_test(XdpDesc { addr: frame_offset as u64, len: fx.frame.len() as u32, options: 0 });
+    }
+    let ha_state = txn_ha_state();
+    let ident = fx.binding.identity();
+    let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&fx.binding));
+    let mirror_targets = MirrorTargetMap::default();
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let ike_exchanges = Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new());
+    let recent_exceptions = Arc::new(Mutex::new(ExceptionEventRing::new()));
+    let last_resolution = Arc::new(Mutex::new(None));
+    let peer_worker_commands = Vec::new();
+    let rg_epochs = std::array::from_fn(|_| AtomicU32::new(0));
+    let pptp = Arc::new(crate::session::pptp_control::PptpControlInbox::default());
+    let worker_ctx = WorkerContext {
+        pptp_control: &pptp,
+        ident: &ident,
+        binding_lookup: &binding_lookup,
+        mirror_targets: &mirror_targets,
+        forwarding,
+        ha_state: &ha_state,
+        forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
+        dynamic_neighbors: &dynamic_neighbors,
+        neighbor_resolver: None,
+        shared_sessions: &shared_sessions,
+        shared_nat_sessions: &shared_nat_sessions,
+        shared_forward_wire_sessions: &shared_forward_wire_sessions,
+        shared_owner_rg_indexes: &shared_owner_rg_indexes,
+        ike_exchanges: &ike_exchanges,
+        slow_path: None,
+        event_stream: None,
+        local_tunnel_deliveries: &fx.deliveries,
+        recent_exceptions: &recent_exceptions,
+        last_resolution: &last_resolution,
+        peer_worker_commands: &peer_worker_commands,
+        worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+        rg_epochs: &rg_epochs,
+        cold_path_sample_mask: 0xff,
+    };
+    let mut screen = ScreenState::new();
+    let mut batch = BatchCounters::default();
+    let mut dbg = DebugPollCounters::default();
+    let mut telemetry = TelemetryContext { dbg: &mut dbg, counters: &mut batch };
+    let area = UmemAreaHandle::from_umem(&fx.binding.umem);
+    super::poll_descriptor::poll_binding_process_descriptor_in_view(
+        &mut fx.binding,
+        0,
+        &mut [],
+        &mut [],
+        &area,
+        u32::from(push),
+        None,
+        &mut fx.sessions,
+        &mut screen,
+        validation,
+        NOW_NS,
+        NOW_NS / 1_000_000_000,
+        0,
+        0,
+        -1,
+        -1,
+        &worker_ctx,
+        &mut telemetry,
+        pass,
+    );
+    batch
+}
+
+/// The defect cell. The worker has moved to 8/9; the shim still stamps 7/9.
+/// The ordinary pass must park the packet (not drop it as a config
+/// generation mismatch, not recycle it), and the held pass must process it
+/// under the 7/9 view: exactly one delivery. RED on revert of the park.
+#[test]
+fn packet_stamped_with_left_view_is_processed_under_it_18560() {
+    let mut fx = gre_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let views = views_with(STAMPED, &fwd, NEWER);
+
+    let normal = PassView { prev_views: Some(&views), held_pass: false, view: None };
+    run_pass(&mut fx, &fwd, NEWER, normal, true);
+    assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 0, "the left-view packet was dropped as a generation mismatch");
+    assert_eq!(fx.binding.view_held.len(), 1, "the left-view packet must be parked for a held pass");
+    assert!(fx.binding.scratch.scratch_recycle.is_empty(), "a parked descriptor must not be recycled");
+    assert!(fx.rx.try_recv().is_err(), "nothing may be processed under the newer view");
+
+    let view = views.find(7, 9, NOW_NS);
+    let held = PassView { prev_views: Some(&views), held_pass: true, view };
+    let prev = views.get(view.expect("retained")).expect("retained view");
+    run_pass(&mut fx, &prev.forwarding, prev.validation, held, false);
+    assert!(fx.binding.view_held.is_empty(), "the held pass must consume what it ran");
+    assert!(fx.rx.try_recv().is_ok(), "the parked packet must be processed under the view it was stamped with");
+    assert!(fx.rx.try_recv().is_err(), "exactly one delivery");
+    assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 0);
+}
+
+/// #6592 orientation and the expiry path: a stamp AHEAD of the worker, or a
+/// left view whose deadline passed, is still dropped (counted, recycled,
+/// nothing delivered).
+#[test]
+fn stamp_ahead_or_expired_view_is_dropped_18560() {
+    let mut fx = gre_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let older = ValidationState { config_generation: 6, ..STAMPED };
+    let views = views_with(older, &fwd, STAMPED);
+    let normal = PassView { prev_views: Some(&views), held_pass: false, view: None };
+    // The worker is at 6/9 -> the 7/9 stamp is ahead.
+    run_pass(&mut fx, &fwd, older, normal, true);
+    assert!(fx.binding.view_held.is_empty(), "#6592: a stamp ahead of the worker must not be parked");
+    assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 1);
+    assert!(fx.rx.try_recv().is_err());
+
+    // A parked packet whose view expired before its held pass is judged
+    // against the current view and dropped.
+    let mut fx = gre_fixture();
+    let views = views_with(STAMPED, &fwd, NEWER);
+    run_pass(&mut fx, &fwd, NEWER, PassView { prev_views: Some(&views), held_pass: false, view: None }, true);
+    assert_eq!(fx.binding.view_held.len(), 1);
+    let mut expired = views.clone();
+    expired.expire(NOW_NS + MATCHED_VIEW_GRACE_NS);
+    run_pass(&mut fx, &fwd, NEWER, PassView { prev_views: None, held_pass: true, view: None }, false);
+    assert!(fx.binding.view_held.is_empty());
+    assert_eq!(fx.binding.live.config_gen_mismatches.load(Ordering::Relaxed), 1, "an expired view's packet is dropped as before");
+    assert_eq!(fx.binding.scratch.scratch_recycle.len(), 1, "and its descriptor is recycled");
+    assert!(fx.rx.try_recv().is_err());
+}

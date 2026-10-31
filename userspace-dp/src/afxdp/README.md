@@ -2165,6 +2165,58 @@ learn; removal, a new source MAC, a new snapshot, interval expiry and an
 unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`
 `tests_hit_path_cost_18533.rs` (numbers in `docs/log/18534.md`).
 
+## Matched-view grace for lagging shim stamps (#18560)
+
+The shim stamps every packet with the config/FIB generations in
+`userspace_ctrl`, and `classify_metadata` drops a packet whose stamp differs
+from the worker's validation. Go rewrites `userspace_ctrl` from the helper's
+reply, i.e. AFTER the worker has adopted the new view, so every helper
+publish used to drop every packet in flight for the round trip
+(`config_generation_mismatch` / `fib_generation_mismatch`): 10-11k packets
+per node per planned RG move on the loss cluster, and all of the ping loss
+that remained after #18563.
+
+The worker now keeps the forwarding views it leaves and processes a packet
+stamped with one of them under THAT view:
+
+- **Retention** (`PrevViews`, `types/runtime.rs`). On every adoption the
+  worker loop records the view it is leaving: the validation pair plus the
+  `Arc<ForwardingState>` it was published with. Up to
+  `MATCHED_VIEW_SLOTS` (3) views, each for `MATCHED_VIEW_GRACE_NS` (1 s).
+  An ownership edge publishes a burst (route snapshot, FIB bump, and again
+  after the FRR reload), so the shim can trail by more than one view. Only a
+  forward move with both views installed earns a slot. A generation that
+  goes down (a reset) clears the list, a neighbor-only republish changes
+  no stamp, and a publish that changes the CoS runtime config clears it
+  (the binding's queues are rebuilt for the new tables).
+- **Park** (`poll_descriptor/mod.rs`, the non-Valid branch). A native RX
+  descriptor whose stamp is a generation mismatch AND exactly matches a
+  retained view (`PassView::parks`) is pushed onto
+  `BindingWorker::view_held` instead of being dropped. It is not recycled.
+- **Held pass** (`worker/lifecycle.rs`, `poll_binding`). A binding with
+  parked descriptors runs its next RX batch as a held pass: no RX read, no
+  injected packet, no PMech replays. The `WorkerContext` and validation are
+  built from the retained view that matches the first parked stamp. The
+  pass prologue then stamps the session table's revalidation generations
+  from that view, so sessions and flow-cache entries touched in the pass
+  carry the old generations and are re-resolved by the next current-view
+  packet. A parked packet of yet another retained view is re-parked. If the
+  view expired, the pass runs under the current view, which drops the packet
+  as a mismatch, exactly as before.
+- **#6592 in both directions.** No packet is processed under tables older or
+  newer than its stamp. A stamp AHEAD of the worker matches no retained view
+  and is still dropped.
+- **Cost.** A matched stamp pays nothing: the park check sits in the
+  mismatch branch. Per RX batch the poll adds one `view_held.is_empty()` test
+  and a three-slot `PrevViews::is_empty()` test. Per worker tick it adds one
+  three-slot expiry check while views are retained. Parking never allocates,
+  because `view_held` is pre-sized to `RX_BATCH_SIZE` and the held pass
+  drains its consumed prefix in place. Retaining a view keeps its
+  `ForwardingState` alive for up to 1 s.
+- **Ordering.** Inside the one RX batch that straddles the stamp switch,
+  parked (older) packets are transmitted after the batch's current-stamped
+  ones. That is at most one batch per publish per binding.
+
 ## Hot-path constants
 
 - `RX_BATCH_SIZE = 64`
