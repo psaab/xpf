@@ -61,17 +61,26 @@ assurance_verdict() {
 # Probes from the OFF-FIREWALL target container (MOUSE_TARGET_REF), so the
 # holders' replies never reach a firewall node, and reads (only) both nodes'
 # neighbor entries before and after; WAN_GW80_4 (the cluster's own address on
-# the VLAN) answering is the positive control. A documented dual holder set
-# (IPERF_TARGET4_KNOWN_HOLDERS, loss env) is VOID; anything else that is not
-# exactly one holder FAILs, an xpf RETH holder included.
+# the VLAN) answering is the positive control. The documented dual holder set
+# (IPERF_TARGET4_KNOWN_HOLDERS, loss env) is SKIPped as excused only while the
+# RG owner resolves the target to the container before and after; otherwise
+# it is VOID (the run's v4 numbers are not certifiable). Any other set FAILs,
+# an xpf RETH holder included.
 iperf_target_claim_cell() {
 	ha_target_claim_check "$MOUSE_TARGET_REF" "$IPERF_TARGET4" "$WAN_GW80_4" \
 		"${IPERF_TARGET4_KNOWN_HOLDERS:-}" "$FW0" "$FW1"
 	# 3 = an xpf RETH MAC answers for the target: a product defect, FAIL.
+	# 4 = the known environment duplicate, excused only while the RG owner
+	# resolves the target to the intended holder: SKIP, which leaves the exit
+	# status alone and is counted in the ledger's cells_skipped.
 	local status="$HA_TARGET_CLAIM_STATUS"
+	local desc="cluster: iperf target ${IPERF_TARGET4} answered for by exactly one host (RFC 5227 ARP probe from ${MOUSE_TARGET_REF})"
+	if [[ "$status" == 4 ]]; then
+		skip "${desc}: ${HA_TARGET_CLAIM_REASON}"
+		return 0
+	fi
 	[[ "$status" == 3 ]] && status=1
-	assurance_verdict "$status" \
-		"cluster: iperf target ${IPERF_TARGET4} answered for by exactly one host (RFC 5227 ARP probe from ${MOUSE_TARGET_REF}): ${HA_TARGET_CLAIM_REASON}"
+	assurance_verdict "$status" "${desc}: ${HA_TARGET_CLAIM_REASON}"
 }
 # #11581 M3.1/M3.2 precedence contract (documentation only; no probe behavior change).
 #

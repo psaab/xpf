@@ -241,23 +241,42 @@ failure.
     neighbor entries, before and after the probe. The cluster's own
     `WAN_GW80_4` answering the same probe is the positive control, and a
     target that is not on-link from the container is VOID by name.
-    - The cell is VOID, and this row excuses it, **only while** the probe
-      shows exactly the container plus `f6:f0:06:10:77:d5`, that is,
-      `IPERF_TARGET4_KNOWN_HOLDERS="self f6:f0:06:10:77:d5"` in
-      `test/incus/loss-userspace-cluster.env`.
-    - This cell's VOID is its excused state. F1 is judged per cell, and the
-      run-level VOID it can cause is not a VOID F1 row.
-    - **Read the VOID reason.** It names each node's resolution. If the RG1
-      owner resolves `.200` to `f6:f0:06:10:77:d5`, that run's v4 iperf
-      numbers measured the external box: VOID them and rerun.
-    - Any other holder set FAILs and is a product failure: a third MAC, an
-      xpf RETH MAC `02:bf:72:*`, a firewall entry that is FAILED or names a
-      MAC nobody claims, or an entry that changes during the probe. A RETH
-      holder is reported as status 3, mirroring #18575; the cell FAILs on it.
+    - **Excused = SKIP**, granted only when all three hold:
+      - the holders are exactly the container plus `f6:f0:06:10:77:d5`
+        (`IPERF_TARGET4_KNOWN_HOLDERS="self f6:f0:06:10:77:d5"` in
+        `test/incus/loss-userspace-cluster.env`);
+      - the container's own `self` line shows it holds the target;
+      - the RG owner (the node holding `WAN_GW80_4`) resolves `.200` to the
+        container both before and after the probe. This is the same-run
+        control.
+
+      The cell then SKIPs with "EXCUSED #18576 … expires when one holder
+      drops it". A SKIP leaves `test-connectivity`'s exit status alone and
+      shows in the ledger's `cells_skipped`, so this excused cell can never
+      VOID a loss run or stop `deploy_gate_wave` before the iperf cells.
+    - **VOID means this run's v4 target is not certifiable.** That covers:
+      - the RG owner resolving `.200` to `f6:f0:06:10:77:d5`; this run's v4
+        iperf numbers measured the external box, so VOID them and rerun;
+      - the owner having no entry, or a STALE one on an old MAC;
+      - only the external box answering, because the container lost its
+        alias;
+      - only the container answering while the env line is still set: the
+        expiry, "configured and not observed: delete it".
+    - **FAIL is a product failure.** That covers:
+      - any other holder set, such as a third MAC;
+      - an xpf RETH MAC `02:bf:72:*` holder (status 3, mirroring #18575);
+      - on the RG owner only, an entry that is FAILED, a REACHABLE entry
+        naming a MAC nobody claims, or an entry that changes between two
+        present snapshots.
+
+      The peer node's entry is not judged.
     - Measured from an off-firewall vantage on the same VLAN
       (`tcp:xpf-tcp-target`, 2026-10-31 02:34 UTC, with tcp's `.80.10` as
-      control and loss's firewalls only read): VOID with the known set;
-      FAIL with no known set.
+      control and loss's firewalls only read). With the known set it was
+      VOID, because that vantage does not hold the target, so the excuse
+      cannot be granted there. With no known set it FAILed. loss fw0, the
+      RG owner, resolved `.200` to the container, which is the SKIP
+      condition for the real cell probed from the container.
   - Both loss nodes have resolved v4 `.200` to the container whenever we
     read them. A 4-min VLAN 80 capture saw no frame with sender `.200` from
     either holder, so the hazard is latent.

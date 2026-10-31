@@ -1608,51 +1608,61 @@ for _ in range(3):
 PY
 }
 
-# ha_target_fw_neigh <phase> <target> <node>...
+# ha_target_fw_neigh <phase> <target> <control> <node>...
 # #18576: READ-ONLY snapshot of each firewall node's neighbor entry for
-# <target>. Prints "fw <node> <phase> <lladdr|-> <state|NONE>" per node.
+# <target>. Prints "fw <node> <phase> <lladdr|-> <state|NONE> owner|peer"
+# per node; "owner" = the node holding <control> (WAN_GW80_4), i.e. the RG
+# owner whose entry carries the iperf traffic.
 ha_target_fw_neigh() {
-	local phase="$1" target="$2" node line lladdr state
-	shift 2
+	local phase="$1" target="$2" control="$3" node line lladdr state role
+	shift 3
 	for node in "$@"; do
 		line=$(incus exec "$node" -- ip neigh show "$target" 2>/dev/null | head -1) || line=""
 		lladdr=$(awk '{for (i = 1; i < NF; i++) if ($i == "lladdr") print $(i + 1)}' <<<"$line")
 		state=$(awk '{print $NF}' <<<"$line")
-		printf 'fw %s %s %s %s\n' "$node" "$phase" "${lladdr:--}" "${state:-NONE}"
+		role=peer
+		if incus exec "$node" -- ip -o -4 addr show 2>/dev/null |
+			awk -v c="$control" '{split($4, a, "/"); if (a[1] == c) f = 1} END {exit !f}'; then
+			role=owner
+		fi
+		printf 'fw %s %s %s %s %s\n' "$node" "$phase" "${lladdr:--}" "${state:-NONE}" "$role"
 	done
 }
 
 # ha_target_claim_verdict <target> <control> <known-holders> <probe-output>
 #
-# #18576: a measurement target must be ONE host. loss's iperf3 target
-# 172.16.80.200 is answered by both xpf-mouse-target (10:66:6a:8b:91:a4) and
-# the external v6 target box (f6:f0:06:10:77:d5). Linux overrides a neighbor
-# entry with any ARP from the address once the 1 s locktime has passed, and a
-# broadcast re-resolution keeps the first reply, so the firewall's choice of
-# server, and every v4 measurement with it, can move.
+# #18576: a measurement target must be ONE host, the intended one. loss's
+# iperf3 target 172.16.80.200 is answered by both xpf-mouse-target
+# (10:66:6a:8b:91:a4) and the external v6 target box (f6:f0:06:10:77:d5).
+# Linux overrides a neighbor entry with any ARP from the address once the 1 s
+# locktime has passed, and a broadcast re-resolution keeps the first reply,
+# so the firewall's choice of server, and every v4 measurement with it, can
+# move.
 #
-# Holders = "self" plus every "reply" MAC for <target>. The "fw" lines
-# (ha_target_fw_neigh, before and after the probe) are the firewall's own
-# view. Rules, in order:
-# - a reply naming the prober's own interface MAC: VOID (2); no host answers
-#   with our MAC, so the probe parsed the wrong field and its readings are
-#   worthless;
-# - a holder is an xpf RETH MAC (02:bf:72:*): status 3, a product defect
-#   (for example another cluster's stale VIP or proxy-ARP on the shared
-#   VLAN 80), never environment, mirroring #18575;
-# - a firewall entry is FAILED/INCOMPLETE, names a MAC no holder claims, or
-#   changed between the two snapshots: FAIL (1), a product neighbor fault;
-# - two or more holders equal to <known-holders> (space-separated, the
-#   environment's documented set, #18576): VOID (2), a known environment
-#   duplicate, excused only while the set is exactly that;
-# - two or more holders, any other set: FAIL (1), naming every holder. A
-#   second holder's reply is positive evidence, so this needs no control;
-# - otherwise the <control> (the cluster's own address on the VLAN) must
-#   have answered OUR probe, or the probe proves nothing: VOID (2). With it,
-#   exactly one holder: PASS (0); none: VOID (2). One holder while
-#   <known-holders> is configured is VOID (2) "configured and not observed:
-#   delete it", so the expiry fires instead of re-excusing a recurrence.
-# <known-holders> may say "self" for the vantage's own MAC (the "self" line).
+# Holders = "self" (the vantage container, the intended holder in every env)
+# plus every "reply" MAC for <target>. Of the "fw" lines (before/after the
+# probe) only the OWNER's (the node holding <control>) carries the iperf
+# traffic; a peer's entry is not judged. Rules, in order:
+# - a reply naming the prober's own interface MAC: VOID (2), wrong field;
+# - an xpf RETH holder (02:bf:72:*): 3, a product defect (mirrors #18575);
+# - the owner's entry: FAILED/INCOMPLETE, or REACHABLE/DELAY/PROBE/PERMANENT
+#   on a MAC no holder claims, or lladdr changed between two present
+#   snapshots: FAIL (1), a product neighbor fault. A STALE entry on an old
+#   MAC (e.g. after a container recreate) or an entry that merely appears
+#   mid-window is not a fault: the kernel re-validates it on use;
+# - two or more holders equal to <known-holders> (may say "self"):
+#     owner resolves <target> to the self MAC before AND after: 4, the known
+#       environment duplicate, excused (the cell SKIPs, #18576);
+#     owner resolves it to another holder: VOID (2), this run's v4 iperf
+#       numbers measured the wrong host;
+#     owner has no entry, or no self line: VOID (2), not certifiable;
+# - two or more holders, any other set: FAIL (1), naming every holder;
+# - otherwise the <control> must have answered OUR probe, else VOID (2);
+# - no holder: VOID (2); exactly one holder that is not "self" (the intended
+#   container lost the address): VOID (2), the v4 target is misplaced;
+# - exactly self while <known-holders> is configured: VOID (2) "configured
+#   and not observed: delete it", so the expiry fires;
+# - exactly self: PASS (0).
 ha_target_claim_verdict() {
 	if [[ $# -ne 4 ]]; then
 		printf 'target claim: expected <target> <control> <known-holders> <probe-output>\n' >&2
@@ -1684,12 +1694,11 @@ for line in output.splitlines():
             holders.append(f[2].lower())
         elif f[1] == control and len(f) >= 4 and f[3] == "probe":
             control_seen = True
-    elif len(f) >= 5 and f[0] == "fw" and f[2] in ("before", "after"):
-        fw.setdefault(f[1], {})[f[2]] = (f[3].lower(), f[4].upper())
+    elif len(f) >= 6 and f[0] == "fw" and f[2] in ("before", "after"):
+        fw.setdefault(f[1], {"role": f[5]})[f[2]] = (f[3].lower(), f[4].upper())
+        if f[5] == "owner":
+            fw[f[1]]["role"] = "owner"
 holders = sorted(set(holders))
-# <known-holders> may name the vantage as "self": the container half of the
-# set then follows the probe's own "self <mac>" line, so an incus recreate
-# (new volatile hwaddr) cannot strand a literal MAC.
 known = set()
 for m in known_raw.split():
     m = m.lower()
@@ -1700,31 +1709,47 @@ for m in known_raw.split():
 xpf = [m for m in holders if m.startswith("02:bf:72:")]
 if xpf:
     out(f"{target} is answered for by an xpf RETH MAC ({' '.join(xpf)}): the product claims a measurement target", 3)
-for node in sorted(fw):
-    snaps = fw[node]
+owners = [n for n in sorted(fw) if fw[n].get("role") == "owner"]
+owner = owners[0] if owners else None
+own = fw.get(owner, {}) if owner else {}
+if owner:
     for phase in ("before", "after"):
-        if phase not in snaps:
+        if phase not in own:
             continue
-        lladdr, state = snaps[phase]
+        lladdr, state = own[phase]
         if state in ("FAILED", "INCOMPLETE"):
-            out(f"{node} neighbor entry for {target} is {state} ({phase}) while {' '.join(holders) or 'nobody'} answer: product neighbor fault", 1)
-        if lladdr != "-" and lladdr not in holders:
-            out(f"{node} resolves {target} to {lladdr}, which no host claims ({phase}): product neighbor fault", 1)
-    if "before" in snaps and "after" in snaps and snaps["before"][0] != snaps["after"][0]:
-        out(f"{node} neighbor for {target} changed from {snaps['before'][0]} to {snaps['after'][0]} during the probe", 1)
-fwview = "; ".join(f"{n} -> {fw[n].get('after', fw[n].get('before', ('-', 'NONE')))[0]}" for n in sorted(fw)) or "no firewall view"
+            out(f"RG owner {owner}'s neighbor entry for {target} is {state} ({phase}) while {' '.join(holders) or 'nobody'} answer: product neighbor fault", 1)
+        if lladdr != "-" and lladdr not in holders and state in ("REACHABLE", "DELAY", "PROBE", "PERMANENT"):
+            out(f"RG owner {owner} resolves {target} to {lladdr} ({state}, {phase}), which no host claims: product neighbor fault", 1)
+    b = own.get("before", ("-", "NONE"))[0]
+    a = own.get("after", ("-", "NONE"))[0]
+    if b != "-" and a != "-" and b != a:
+        out(f"RG owner {owner}'s neighbor for {target} changed from {b} to {a} during the probe", 1)
+owner_mac = own.get("after", own.get("before", ("-", "NONE")))[0] if owner else "-"
+fwview = f"RG owner {owner} -> {owner_mac}" if owner else "no RG owner identified"
 if len(holders) >= 2:
     if known and set(holders) == known:
-        out(f"{target} is answered for by the KNOWN dual holder set ({' '.join(holders)}, #18576): environment, "
-            f"excused only while exactly this set answers ({fwview})", 2)
+        if not self_mac:
+            out(f"{target} is answered for by the known set but the vantage does not hold it ({fwview}): not certifiable", 2)
+        b = own.get("before", ("-", "NONE"))[0]
+        a = own.get("after", ("-", "NONE"))[0]
+        if owner and b == self_mac and a == self_mac:
+            out(f"EXCUSED #18576: {target} is answered for by the known dual holder set ({' '.join(holders)}) "
+                f"and {fwview} (the intended holder) before and after; expires when one holder drops it", 4)
+        if owner_mac in holders and owner_mac != self_mac:
+            out(f"{target} is answered for by the known dual holder set and {fwview}, the OTHER holder: "
+                f"this run's v4 iperf numbers measured the wrong host; invalid, rerun", 2)
+        out(f"{target} is answered for by the known dual holder set but {fwview}: the RG owner's choice of "
+            f"server is not established, so this run's v4 target is not certifiable", 2)
     out(f"{target} is answered for by more than one host ({' '.join(holders)}) ({fwview})", 1)
 if not control_seen:
     out(f"control {control} did not answer the same probe, so {target}'s holder count is not evidence", 2)
 if not holders:
     out(f"nobody answered ARP for {target} although control {control} did", 2)
+if not self_mac:
+    out(f"{target} is answered for only by {holders[0]}, not by the intended holder (the vantage): "
+        f"the v4 target is misplaced and v4 iperf numbers would measure that host ({fwview})", 2)
 if known:
-    # The expiry fires: a configured known set that no longer answers must be
-    # deleted, or it would silently re-excuse a recurrence.
     out(f"{target} answered for only by {holders[0]} but the known dual holder set "
         f"({' '.join(sorted(known))}) is configured and not observed: delete "
         f"IPERF_TARGET4_KNOWN_HOLDERS (#18576) ({fwview})", 2)
@@ -1735,14 +1760,15 @@ PY
 # ha_target_claim_check <vantage> <target> <control> <known-holders> <node>...
 # Snapshot each firewall node's neighbor entry, probe from the off-firewall
 # <vantage>, snapshot again, judge. Sets HA_TARGET_CLAIM_STATUS (verdict
-# status, or 2 when the probe could not run or the target is not on-link)
-# and HA_TARGET_CLAIM_REASON. Always returns 0.
+# status: 0 PASS, 1 FAIL, 3 xpf RETH holder, 4 excused known duplicate,
+# 2 VOID, including a probe that could not run or an off-link target) and
+# HA_TARGET_CLAIM_REASON. Always returns 0.
 ha_target_claim_check() {
 	local vantage="$1" target="$2" control="$3" known="$4" output before after rc
 	shift 4
 	HA_TARGET_CLAIM_STATUS=2
 	HA_TARGET_CLAIM_REASON="target claim: not measured"
-	before=$(ha_target_fw_neigh before "$target" "$@")
+	before=$(ha_target_fw_neigh before "$target" "$control" "$@")
 	if output=$(ha_target_claim_probe "$vantage" "$target" "$control" 2>&1); then
 		rc=0
 	else
@@ -1755,7 +1781,7 @@ ha_target_claim_check() {
 		HA_TARGET_CLAIM_REASON="target claim: probe from ${vantage} could not run (status ${rc})"
 		return 0
 	fi
-	after=$(ha_target_fw_neigh after "$target" "$@")
+	after=$(ha_target_fw_neigh after "$target" "$control" "$@")
 	if HA_TARGET_CLAIM_REASON=$(ha_target_claim_verdict "$target" "$control" "$known" \
 		"${output}"$'\n'"${before}"$'\n'"${after}" 2>&1); then
 		HA_TARGET_CLAIM_STATUS=0
