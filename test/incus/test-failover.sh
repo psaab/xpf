@@ -97,7 +97,9 @@ MAX_FAILOVER_ROUTE_MISS_DELTA="${MAX_FAILOVER_ROUTE_MISS_DELTA:-32}"
 MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
 # #18617 review: the whole-run zero-interval count (aggregate + every stream,
 # no window excluded) is RECORDED and judged master-relative, not gated: the
-# crash alone, whose 1.0-2.2 s detection is by design, puts every stream at
+# crash alone, whose detection and activation are by design (in the lab about
+# 0.8-1.05 s from the crash when the #18570 probe goes unanswered, about 1.2 s
+# more without ack support, then 0.34-0.44 s to activate), puts every stream at
 # zero for 1-3 intervals, so a fixed limit of 2 was red on every crash run.
 # Set MAX_ZERO_INTERVALS to gate it absolutely anyway.
 MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-}"
@@ -328,16 +330,30 @@ ha_sync_idle_timeout_verdict() {
 	return 1
 }
 
+# #18632: idle = N samples at an unchanged floor, the latest of them
+# included, with no create outstanding beyond that floor and nothing
+# pending at those reads (see ha_session_sync_idle_sample). N is
+# SESSION_SYNC_IDLE_STABLE_SAMPLES; the limit is SESSION_SYNC_IDLE_TIMEOUT
+# attempts.
 ha_wait_for_session_sync_idle() {
 	local label="$1" source_id="$2" source_node="$3" target_id="$4" target_node="$5"
-	local attempt stable=0 source_path target_path rc
-	local baseline_sent="" baseline_received="" baseline_next_sent baseline_next_received
+	local attempt stable=0 source_path target_path rc wait_started="$SECONDS"
+	local baseline_sent="" baseline_received="" baseline_dropped=""
+	local baseline_next_sent baseline_next_received baseline_next_dropped
 	for ((attempt = 1; attempt <= SESSION_SYNC_IDLE_TIMEOUT; attempt++)); do
-		if ! source_path="$(ha_capture_sync_stats "${label}-${attempt}" "$source_id" "$source_node")"; then
+		# #18632: TARGET first, then source. A create the target counted
+		# as received is counted as sent right after its enqueue, so this
+		# later source read includes it and sent - received reads high,
+		# not low (only a source stall between the enqueue and the count
+		# longer than the gap between the reads could read it low, which
+		# FAILs the wait, never PASSes it). Source-first let a create
+		# landing between the two reads set a baseline one below the
+		# floor for the whole wait.
+		if ! target_path="$(ha_capture_sync_stats "${label}-${attempt}" "$target_id" "$target_node")"; then
 			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
 			return 2
 		fi
-		if ! target_path="$(ha_capture_sync_stats "${label}-${attempt}" "$target_id" "$target_node")"; then
+		if ! source_path="$(ha_capture_sync_stats "${label}-${attempt}" "$source_id" "$source_node")"; then
 			void "${label}: session sync CLI capture unavailable (${source_id}->${target_id})"
 			return 2
 		fi
@@ -345,50 +361,74 @@ ha_wait_for_session_sync_idle() {
 		# Capture the baseline values up front; a parse failure is VOID
 		# exactly as before (the helper returns 2 on blind evidence).
 		if ! baseline_next_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)" ||
-			! baseline_next_received="$(ha_sync_stats_value "$target_path" "Session create" received)"; then
+			! baseline_next_received="$(ha_sync_stats_value "$target_path" "Session create" received)" ||
+			! baseline_next_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")"; then
 			void "${label}: session sync statistics malformed (${source_id}->${target_id})"
 			return 2
 		fi
-		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path" "$baseline_sent" "$baseline_received"; then
+		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped"; then
 			stable=$((stable + 1))
 			if (( stable >= SESSION_SYNC_IDLE_STABLE_SAMPLES )); then
-				pass "${label}: session sync idle (${source_id}->${target_id}, ${stable} consecutive samples)"
+				pass "${label}: session sync idle (${source_id}->${target_id}, ${stable} samples at the floor)"
 				return 0
 			fi
 		else
 			rc=$?
 			case "$rc" in
 			1)
-				stable=0
-				# Ordinary not-idle. Establish the baseline only when
-				# none exists yet (first sample); otherwise keep it —
-				# an outstanding unreceived delta must persist until
-				# received, never be absorbed into a new baseline.
+				# Ordinary not-idle: above the floor, or something
+				# pending. It neither counts nor resets the count
+				# (#18632: under a steady mirror sweep a create lands
+				# between the reads every few samples, so requiring
+				# CONSECUTIVE floor samples false-FAILed on loss). Each
+				# counted sample is still an exact reading at the
+				# floor. Establish the baseline only when none exists
+				# yet (first sample); otherwise keep it — an
+				# outstanding unreceived delta, or a source drop, must
+				# persist, never be absorbed into a new baseline.
 				if [[ -z "$baseline_sent" ]]; then
 					baseline_sent="$baseline_next_sent"
 					baseline_received="$baseline_next_received"
+					baseline_dropped="$baseline_next_dropped"
 				fi
 				;;
-			3)
-				# #16289: counter rewind (daemon restart / epoch
-				# reset) is the ONLY re-baseline trigger.
+			4)
+				# #18632: new floor. Moving the baseline DOWN shrinks
+				# what it can absorb (creates in flight at it) and never
+				# grows it; a create lost after the wait has seen the
+				# true floor is never absorbed. The streak restarts: a
+				# backlog still draining never reads idle.
 				stable=0
 				baseline_sent="$baseline_next_sent"
 				baseline_received="$baseline_next_received"
+				baseline_dropped="$baseline_next_dropped"
+				;;
+			3)
+				# #16289: counter rewind (daemon or helper restart).
+				# With a new floor (4) these are the ONLY re-baseline
+				# triggers.
+				stable=0
+				baseline_sent="$baseline_next_sent"
+				baseline_received="$baseline_next_received"
+				baseline_dropped="$baseline_next_dropped"
 				;;
 			2)
 				void "${label}: session sync statistics malformed (${source_id}->${target_id})"
 				return 2
 				;;
 			*)
-				void "${label}: session sync statistics malformed (${source_id}->${target_id})"
+				# An unknown verdict is VOID, as in the userspace
+				# validator (#18632).
+				void "${label}: session sync sample verdict ${rc} unknown (${source_id}->${target_id})"
 				return 2
 				;;
 			esac
 		fi
 		sleep 1
 	done
-	fail "${label}: session sync did not become idle within ${SESSION_SYNC_IDLE_TIMEOUT}s (${source_id}->${target_id})"
+	# #18632: the limit is attempts (each two CLI captures and a 1 s
+	# sleep), not seconds; report both.
+	fail "${label}: session sync did not become idle within ${SESSION_SYNC_IDLE_TIMEOUT} attempts ($((SECONDS - wait_started))s; ${stable} of ${SESSION_SYNC_IDLE_STABLE_SAMPLES} samples at the floor) (${source_id}->${target_id})"
 	return 1
 }
 
@@ -2051,8 +2091,10 @@ info "Waiting for iperf3 final result (up to ${IPERF_DURATION}s)"
 
 failover_wait_main_iperf_result /tmp/iperf3-failover.log "$IPERF_DURATION" || true
 
-# #18617: the crash is the one EXCUSED window (--event-sec; detection of
-# 1.0-2.2 s is by design). The harness's own moves are PLANNED (--planned-move).
+# #18617: the crash is the one EXCUSED window (--event-sec; its detection and
+# activation are by design: in the lab about 0.8-1.05 s from the crash when the
+# #18570 probe goes unanswered, about 1.2 s more without ack support, then
+# 0.34-0.44 s to activate). The harness's own moves are PLANNED (--planned-move).
 ha_build_planned_move_args
 
 # Derive the throughput headline only from gate-validated JSON-stream metrics.
@@ -2093,7 +2135,7 @@ if [[ "$iperf_gate_ok" == true ]]; then
 		ha_emit_verdict "iperf3 whole-run zero-throughput intervals (${zero_intervals_total}, limit ${MAX_ZERO_INTERVALS})" \
 			ha_counter_at_most_verdict "$zero_intervals_total" "$MAX_ZERO_INTERVALS" "whole-run zero intervals"
 	else
-		info "iperf3 whole-run zero-throughput intervals: ${zero_intervals_total} (recorded as whole_run_zero_intervals and judged master-relative, not gated: the crash's by-design 1.0-2.2 s detection alone zeroes every stream)"
+		info "iperf3 whole-run zero-throughput intervals: ${zero_intervals_total} (recorded as whole_run_zero_intervals and judged master-relative, not gated: the crash's by-design detection and activation, about 1.1-1.5 s in the lab, alone zero every stream)"
 	fi
 	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
 		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside the [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"

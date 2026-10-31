@@ -2132,9 +2132,14 @@ the slow side stays ESTABLISHED until it has consumed the whole backlog
   EOF at once, fully disconnects, and declares peer loss at the heartbeat
   threshold, as before. One that is behind keeps sync installed while it
   drains, so after the last counted frame the 2s recency window still runs:
-  detection is up to max(threshold, ~3s) plus one heartbeat tick, about 3.1s at
-  defaults and 3.2s in the lab — beyond the 0.5–2.1s band quoted for a silent
-  death, and short of the 5s cap a FIN backlog had before round 3.
+  detection is up to max(threshold, ~3s) plus a quarter interval (the
+  receiver's check cadence since #18639), about 3.0 s at defaults and 3.05 s in
+  the lab. That is beyond the threshold declaration a hard crash now gets
+  (#18570: a peer that acks sync-level heartbeats and does not answer the
+  liveness probe is declared about 0.5–0.525 s after its last heartbeat at
+  defaults, 1.0–1.05 s in the lab), and short of the 5s cap a FIN backlog had
+  before round 3. The probe does not shorten this case: backlog frames handled
+  after the probe answer it.
 - **Every teardown names itself.** `fabric N disconnected` carries `reason`,
   `err` and a per-connection summary (`conn_age`, `frames_read`, `bytes_read`,
   `handler_time`, `handler_max`, `handler_max_type`, `slow_calls`, and
