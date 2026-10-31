@@ -86,10 +86,8 @@ re-run, not yet a regression; two are a regression.
 
 ## Tier 3: HA (loss and tcp; destructive targets self-lock)
 
-Resync node clocks after any crash reboot: the loss lab has no NTP
-(`failover_resync_node_clocks`, #11872).
+Clocks: the lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). A deb deploy preserves node config, so a cluster picks the stanza up only when it is committed on it (see `pkg/cluster/README.md`, "Prerequisite: a cluster needs a time source"). On a cluster that has not had it committed — or runs a build older than #18584 — there is no working NTP: resync node clocks after any crash reboot (`failover_resync_node_clocks`, #11872). Once both nodes show `Leap status: Normal` in `chronyc tracking`, the resync is a workaround to drop, not a step to keep.
 Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ran 66.8 s behind fw0 on loss); a cross-node timeline without that offset produced a wrong diagnosis once.
-The lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). Once a cluster runs a config with it, both nodes show `Leap status: Normal` in `chronyc tracking`, and a clock resync is a workaround to drop, not a step to keep.
 
 | ID | Run | Pass | Catches |
 |---|---|---|---|

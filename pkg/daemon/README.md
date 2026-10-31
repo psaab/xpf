@@ -3890,8 +3890,18 @@ never lock an operator out of a remote box it manages.
   Seams: `rsyslogRestartFn` / `chronyReloadFn` (both owners go through one
   entry point, which is what makes the re-drive assertable), `chronyRunCmd`
   (per-leg outcomes without a real chronyc), and `rsyslogConfDir` /
-  `chronySourcesPath` / `chronyThresholdPath` as vars so the reconcile runs
-  against a temp dir. Tests: `service_reload_debt_6800_test.go` (latch +
+  `chronySourcesPath` / `chronyThresholdPath` / `chronyAcquisitionPath` as
+  vars so the reconcile runs against a temp dir. #18584 added a third
+  managed chrony file, `/etc/chrony/conf.d/xpf-acquisition.conf`
+  (`bindacqdevice vrf-<instance>`, rendered when every `system ntp server`
+  names the same VRF-backed routing-instance — `config.NTPAcquisitionInstance`
+  decides). It rides the threshold leg's conf.d restart, because chronyd reads
+  conf.d only at start, and its debt is reported under `chrony-threshold`.
+  `applySystemNTP` also forces that leg once per daemon process
+  (`chronyAcqStartRestarted`) after the first apply that renders a binding:
+  chrony.service does not order after xpfd, so a chronyd started before
+  `vrf-mgmt` existed is restarted once the VRF does, which also re-opens its
+  `makestep` window. Cells: `ntp_acquisition_18584_test.go`. Tests: `service_reload_debt_6800_test.go` (latch +
   discharge pairs for both services; the steady-state retry with an explicit
   "the files really are converged" premise guard and its debt-free negative;
   per-leg outcome pairs; the two SYMMETRIC "owed leg survives an apply that

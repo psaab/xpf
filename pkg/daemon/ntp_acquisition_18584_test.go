@@ -11,6 +11,8 @@ import (
 
 func ntpRICfg18584(ri ...string) *config.Config {
 	cfg := &config.Config{}
+	// vrf-mgmt exists only with a management-class interface configured.
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{"fxp0": {}}
 	cfg.System.NTPServerOptions = map[string]config.NTPServerOption{}
 	for i, r := range ri {
 		addr := []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}[i]
@@ -36,6 +38,11 @@ func TestRenderChronyAcquisition18584(t *testing.T) {
 		if got := renderChronyAcquisition(cfg); got != "" {
 			t.Errorf("%s: got %q, want no binding", name, got)
 		}
+	}
+	noMgmt := ntpRICfg18584("mgmt")
+	noMgmt.Interfaces.Interfaces = nil
+	if got := renderChronyAcquisition(noMgmt); got != "" {
+		t.Errorf("no management interface (no vrf-mgmt): got %q, want no binding", got)
 	}
 	cfg := ntpRICfg18584("blue")
 	cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue", InstanceType: "virtual-router"}}

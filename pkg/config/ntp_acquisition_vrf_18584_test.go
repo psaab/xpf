@@ -18,14 +18,22 @@ func TestNTPAcquisitionInstance18584(t *testing.T) {
 		{"no servers", nil, "", true, ""},
 		{"default instance", []string{"set system ntp server 192.0.2.1"}, "", true, ""},
 		{"management VRF", []string{
+			"set interfaces fxp0 unit 0 family inet dhcp",
 			"set system ntp server 192.0.2.1 routing-instance mgmt",
 			"set system ntp server 192.0.2.2 routing-instance mgmt",
 		}, "mgmt", true, ""},
+		// The daemon creates vrf-mgmt only for a management-class interface:
+		// binding chrony to a device that does not exist leaves it sourceless.
+		{"management VRF without a management interface", []string{
+			"set interfaces ge-0/0/0 unit 0 family inet address 192.0.2.10/24",
+			"set system ntp server 192.0.2.1 routing-instance mgmt",
+		}, "", false, "none is"},
 		{"configured virtual-router", []string{
 			"set routing-instances blue instance-type virtual-router",
 			"set system ntp server 192.0.2.1 routing-instance blue",
 		}, "blue", true, ""},
 		{"mixed instances", []string{
+			"set interfaces fxp0 unit 0 family inet dhcp",
 			"set system ntp server 192.0.2.1 routing-instance mgmt",
 			"set system ntp server 192.0.2.2",
 		}, "", false, "different routing-instances"},
@@ -37,7 +45,7 @@ func TestNTPAcquisitionInstance18584(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := compileSetLinesT(t, append([]string{"set system host-name fw0"}, tc.lines...))
-			ri, ok, why := NTPAcquisitionInstance(&cfg.System, cfg.RoutingInstances)
+			ri, ok, why := NTPAcquisitionInstance(cfg)
 			if ri != tc.wantRI || ok != tc.wantOK || !strings.Contains(why, tc.wantWhy) {
 				t.Fatalf("NTPAcquisitionInstance = (%q, %v, %q), want (%q, %v, *%s*)",
 					ri, ok, why, tc.wantRI, tc.wantOK, tc.wantWhy)
@@ -71,7 +79,7 @@ func TestClusterNTPDefaultInstanceAdvisory18584(t *testing.T) {
 	if cfg := compile8357(t, withNTP("set system ntp server 192.0.2.1"), CompileConfig); !hasClusterNTPInstanceAdvisory18584(cfg) {
 		t.Fatalf("a cluster with default-instance NTP must warn; warnings=%q", cfg.Warnings)
 	}
-	if cfg := compile8357(t, withNTP("set system ntp server 192.0.2.1 routing-instance mgmt"), CompileConfig); hasClusterNTPInstanceAdvisory18584(cfg) {
+	if cfg := compile8357(t, withNTP("set interfaces fxp0 unit 0 family inet dhcp", "set system ntp server 192.0.2.1 routing-instance mgmt"), CompileConfig); hasClusterNTPInstanceAdvisory18584(cfg) {
 		t.Fatalf("a cluster with NTP in the management VRF must not warn; warnings=%q", cfg.Warnings)
 	}
 	if cfg := compile8357(t, clusterCmds8357, CompileConfig); hasClusterNTPInstanceAdvisory18584(cfg) || !hasNTPAdvisory8357(cfg) {

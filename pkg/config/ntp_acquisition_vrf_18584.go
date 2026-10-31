@@ -21,8 +21,9 @@ import "fmt"
 //   - ("", true, "") — no server names an instance: chrony stays in the
 //     default instance, exactly as before.
 //   - (ri, true, "") — every server names the same instance ri, and ri is the
-//     management VRF or a configured VRF-backed instance: bind to
-//     VRFDeviceName(ri).
+//     management VRF (which the daemon creates only when a management-class
+//     interface — fxp*, em*, fab* — is configured) or a configured
+//     VRF-backed instance: bind to VRFDeviceName(ri).
 //   - ("", false, reason) — the servers disagree, or name an instance that
 //     has no VRF device (unknown, or instance-type forwarding). Nothing is
 //     bound and the commit warns with `reason`.
@@ -30,8 +31,12 @@ import "fmt"
 // Peers (`system ntp peer`) are not covered: chrony sends peer traffic from
 // its NTP server socket (`binddevice`), not the acquisition sockets, so their
 // routing-instance stays advisory (#15709).
-func NTPAcquisitionInstance(sys *SystemConfig, instances []*RoutingInstanceConfig) (string, bool, string) {
-	if sys == nil || len(sys.NTPServers) == 0 {
+func NTPAcquisitionInstance(cfg *Config) (string, bool, string) {
+	if cfg == nil {
+		return "", true, ""
+	}
+	sys := &cfg.System
+	if len(sys.NTPServers) == 0 {
 		return "", true, ""
 	}
 	var ri string
@@ -50,9 +55,17 @@ func NTPAcquisitionInstance(sys *SystemConfig, instances []*RoutingInstanceConfi
 		return "", true, ""
 	}
 	if ri == ManagementVRFInstanceName {
-		return ri, true, ""
+		// The daemon creates vrf-mgmt only for a configured management-class
+		// interface (pkg/daemon managementVRFIfaceSet). Binding chrony to a
+		// device that does not exist would leave it with no source at all.
+		for name := range cfg.Interfaces.Interfaces {
+			if IsManagementIfName(name) {
+				return ri, true, ""
+			}
+		}
+		return "", false, fmt.Sprintf("routing-instance %q is the management VRF, which exists only when a management interface (fxp*, em*, fab*) is configured, and none is", ri)
 	}
-	for _, inst := range instances {
+	for _, inst := range cfg.RoutingInstances {
 		if inst == nil || inst.Name != ri {
 			continue
 		}
@@ -92,7 +105,7 @@ func appendClusterNTPInstanceAdvisoryLocked(cfg *Config, opts compileOpts) {
 	if len(cfg.System.NTPServers) == 0 {
 		return // #8357's advisory covers "no source at all"
 	}
-	ri, ok, _ := NTPAcquisitionInstance(&cfg.System, cfg.RoutingInstances)
+	ri, ok, _ := NTPAcquisitionInstance(cfg)
 	if ok && ri == "" {
 		cfg.Warnings = append(cfg.Warnings, clusterNTPDefaultInstanceAdvisory)
 	}
@@ -117,7 +130,7 @@ func appendNTPRoutingInstanceAdvisoryLocked(cfg *Config) {
 	if !named {
 		return
 	}
-	if _, ok, reason := NTPAcquisitionInstance(&cfg.System, cfg.RoutingInstances); !ok {
+	if _, ok, reason := NTPAcquisitionInstance(cfg); !ok {
 		cfg.Warnings = append(cfg.Warnings, "system ntp server routing-instance: accepted but NOT enforced ("+
 			reason+"; NTP sources are queried through the default instance) (#18584)")
 	}

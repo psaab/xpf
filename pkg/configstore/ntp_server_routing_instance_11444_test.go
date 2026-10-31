@@ -22,9 +22,11 @@ func TestNTPServerRoutingInstanceAdvisoryCommitCheck_11444(t *testing.T) {
 		{"flat-set", "set system ntp server 10.0.0.1 routing-instance nosuch\n", "10.0.0.1", "nosuch", true},
 		{"packed", `system { ntp { server 10.0.0.2 routing-instance nosuch; } }`, "10.0.0.2", "nosuch", true},
 		{"block", "system { ntp { server 10.0.0.3 { routing-instance nosuch; } } }", "10.0.0.3", "nosuch", true},
-		{"flat-set-mgmt", "set system ntp server 10.0.0.1 routing-instance mgmt\n", "10.0.0.1", "mgmt", false},
-		{"packed-mgmt", `system { ntp { server 10.0.0.2 routing-instance mgmt; } }`, "10.0.0.2", "mgmt", false},
-		{"block-mgmt", "system { ntp { server 10.0.0.3 { routing-instance mgmt; } } }", "10.0.0.3", "mgmt", false},
+		{"flat-set-mgmt", "set interfaces fxp0 unit 0 family inet dhcp\nset system ntp server 10.0.0.1 routing-instance mgmt\n", "10.0.0.1", "mgmt", false},
+		{"packed-mgmt", `interfaces { fxp0 { unit 0 { family inet { dhcp; } } } } system { ntp { server 10.0.0.2 routing-instance mgmt; } }`, "10.0.0.2", "mgmt", false},
+		{"block-mgmt", "interfaces { fxp0 { unit 0 { family inet { dhcp; } } } } system { ntp { server 10.0.0.3 { routing-instance mgmt; } } }", "10.0.0.3", "mgmt", false},
+		// #18584: no management interface means no vrf-mgmt to bind to.
+		{"mgmt-without-interface", "set system ntp server 10.0.0.4 routing-instance mgmt\n", "10.0.0.4", "mgmt", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := CheckText(tc.text, -1)

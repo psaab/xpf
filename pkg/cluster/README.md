@@ -1330,7 +1330,26 @@ construction**.
   and restarts chrony once per daemon process after the VRF exists. A
   cluster whose servers use the default instance gets a commit advisory
   naming this. The distro `makestep 1 3` steps a clock that booted from a
-  lagging RTC within the first three updates.
+  lagging RTC within the first three updates. `mgmt` is honoured only when
+  a management-class interface (fxp*, em*, fab*) is configured, because that
+  is when the daemon creates `vrf-mgmt`; otherwise the commit warns and
+  nothing is bound.
+  - **Rollout on an existing cluster:** a deb deploy preserves node config
+    (`cluster-setup.sh deploy` prints this), so commit the stanza on the
+    RG0 primary (it config-syncs to the peer) and check both nodes reach
+    `Leap status: Normal` in `chronyc tracking`. On loss (2026-10-31) both
+    did 10 s after the commit, and fw1 logged `System clock was stepped by
+    75.716867 seconds`. Ubuntu-image nodes also carry the distro
+    `/etc/chrony/sources.d/ubuntu-ntp-pools.sources` and an NTS
+    `conf.d/ubuntu-nts.conf`; those pools are hostnames that chrony
+    resolves in the default instance, and before the binding they showed
+    reach 0. They are not xpf's and are left alone.
+  - **Downgrade:** a build older than #18584 does not know
+    `/etc/chrony/conf.d/xpf-acquisition.conf` and leaves it in place, so
+    chrony stays bound to `vrf-mgmt` (which still works: the VRF exists on
+    every build). To return to default-instance NTP after a downgrade,
+    `rm /etc/chrony/conf.d/xpf-acquisition.conf && systemctl restart chrony`
+    on each node.
 - **Commit-time advisory (#8357):** committing a `chassis cluster` with
   no `system ntp server` now emits a warning that names fabric RPC as
   what will fail. It is a WARNING, never an error — configuring a cluster

@@ -57,8 +57,8 @@ func TestNTPServerRoutingInstanceAdvisory_11444(t *testing.T) {
 		})
 	}
 	for _, tc := range []struct{ name, text, server string }{
-		{"packed-mgmt", `system { ntp { server 10.0.0.2 routing-instance mgmt; } }`, "10.0.0.2"},
-		{"block-mgmt", "system { ntp { server 10.0.0.3 {\n routing-instance mgmt;\n} } }", "10.0.0.3"},
+		{"packed-mgmt", `interfaces { fxp0 { unit 0 { family inet { dhcp; } } } } system { ntp { server 10.0.0.2 routing-instance mgmt; } }`, "10.0.0.2"},
+		{"block-mgmt", "interfaces { fxp0 { unit 0 { family inet { dhcp; } } } }\nsystem { ntp { server 10.0.0.3 {\n routing-instance mgmt;\n} } }", "10.0.0.3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tree, perrs := NewParser(tc.text).Parse()
@@ -79,7 +79,7 @@ func assertNTPRoutingInstanceHonoured(t *testing.T, name string, cfg *Config, se
 	if opt := cfg.System.NTPServerOptions[server]; opt.RoutingInstance != ri {
 		t.Fatalf("%s: precondition: NTPServerOptions[%q] = %+v, want RoutingInstance %q", name, server, opt, ri)
 	}
-	if got, ok, reason := NTPAcquisitionInstance(&cfg.System, cfg.RoutingInstances); !ok || got != ri {
+	if got, ok, reason := NTPAcquisitionInstance(cfg); !ok || got != ri {
 		t.Fatalf("%s: NTPAcquisitionInstance = (%q, %v, %q), want (%q, true)", name, got, ok, reason, ri)
 	}
 	if all := strings.Join(cfg.Warnings, "\n"); strings.Contains(all, "system ntp server routing-instance") {
@@ -122,7 +122,7 @@ func TestNTPServerRoutingInstanceAdvisoryLenient_11444(t *testing.T) {
 	assertNTPRoutingInstanceWarns(t, "lenient", cfg, "10.0.0.4", "nosuch")
 	// #18584: the tolerant path DECIDES like the strict one — the daemon
 	// renders from a leniently loaded config at boot.
-	tree, perrs = NewParser(`system { ntp { server 10.0.0.4 { routing-instance mgmt; } } }`).Parse()
+	tree, perrs = NewParser(`interfaces { fxp0 { unit 0 { family inet { dhcp; } } } } system { ntp { server 10.0.0.4 { routing-instance mgmt; } } }`).Parse()
 	if len(perrs) > 0 {
 		t.Fatalf("parse: %v", perrs)
 	}

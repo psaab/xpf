@@ -1336,7 +1336,7 @@ func chronyAcquisitionDevice(cfg *config.Config) (string, string) {
 	if cfg == nil {
 		return "", ""
 	}
-	ri, ok, _ := config.NTPAcquisitionInstance(&cfg.System, cfg.RoutingInstances)
+	ri, ok, _ := config.NTPAcquisitionInstance(cfg)
 	if !ok || ri == "" {
 		return "", ""
 	}
