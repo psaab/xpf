@@ -144,14 +144,17 @@ the wall clock. That is why a skewed cluster looks healthy in
 ### What makes it correct
 
 - Configure NTP on both nodes, reached through the management VRF:
-  `set system ntp server <address> routing-instance mgmt`. Since #18584, xpf
-  renders this as chrony `bindacqdevice vrf-mgmt`
-  (`/etc/chrony/conf.d/xpf-acquisition.conf`). chrony has one acquisition
-  device, so every server must name the same instance. Mixed instances are
-  committed with an advisory and not bound. A cluster whose servers use the
-  default instance gets a commit advisory that names the secondary node. The
-  lab cluster configs (`docs/ha-cluster-userspace.conf`, `-tcp`, `-udp`) carry
-  this.
+  `set system ntp server <address> routing-instance mgmt`. With #18584 (an
+  open PR when this was written; on a build without it the routing-instance
+  is advisory only and chrony stays in the default instance), xpf renders
+  this as chrony `bindacqdevice vrf-mgmt`
+  (`/etc/chrony/conf.d/xpf-acquisition.conf`), for `mgmt` only when a
+  management interface exists. chrony has one acquisition device, so every
+  server must name the same instance; mixed instances commit with an
+  advisory and nothing is bound. A cluster whose servers use the default
+  instance gets a commit advisory naming the secondary node. #18584 also adds
+  the stanza to the lab cluster configs; a deb deploy keeps node config, so
+  commit it on a running cluster (`pkg/cluster/README.md`).
 - Boot from a lagging RTC. The distro `chrony.conf` (kept by
   `scripts/image/bake.py`) carries `makestep 1 3`, so the first three clock
   updates after chronyd starts are stepped. xpfd restarts chrony once per
@@ -159,10 +162,14 @@ the wall clock. That is why a skewed cluster looks healthy in
   that started before `vrf-mgmt` existed, and it re-opens the step window.
   Measured on tcp fw1 (a secondary):
   `System clock was stepped by 1.103495 seconds` about 8 s after the restart.
-- Visibility before the break. The nodes compare their wall clocks over the
-  authenticated heartbeat and alarm well inside the 30 s window (#18585).
-  Until that lands, `show chassis cluster status` carries only the post-break
-  #6708 skew line, plus the local reference alarm (`pkg/clockskew`).
+- Visibility before the break. With #18585 (also an open PR when this was
+  written) the nodes compare their wall clocks over the authenticated
+  heartbeat: `show chassis cluster status` prints `Peer clock offset`, an
+  alarm raises at 10 s (also to syslog), and `failover ... node <peer>`
+  refuses at 60 s with `cross-node request not sent: ...` naming the skew
+  and the remedy. Without it, `show chassis cluster status` carries only the
+  post-break #6708 skew line, plus the local reference alarm
+  (`pkg/clockskew`).
 
 How to check a node:
 
@@ -174,18 +181,33 @@ incus exec <node> -- cli -c 'show chassis cluster status' | grep -A3 Warning
 
 ## What traffic must do
 
+The status views say who SHOULD forward; the soak checks who DID (#18587
+review). After landing it takes each helper's per-binding RX+TX packet
+counters and again at the end of the window: the target node's members of the
+RG's RETHs (from `show configuration | display set`) must carry at least
+`SOAK_FOLLOW_MIN_PKTS` (500) packets in between and the other node's at most
+10 % of that. For the LAN RG it also reads the LAN host's `ip neigh show
+<LAN VIP>`: the entry must resolve to the target node's per-node RETH MAC
+(fw0 `02:bf:72:CC:RR:..` even, fw1 odd; the soak maps MACs to nodes from each
+node's `ip -o link`). A move whose views and helpers flipped while the
+packets stayed on the old node is a FAIL ("traffic did not follow"). RG0
+(no RETH) has nothing to measure.
+
 Sessions are on both nodes before every planned move, so any lost packet is a
 transition cost. The soak attributes every ping gap and iperf3 stall to the
 move whose window it starts in. A window runs from the moment a move is issued
 to the moment the next one is issued, on the LAN host's clock.
 
-- **Ping** (`ping -D -i 0.01`, 100 pps). The soak reports lost replies and the
-  longest gap per window. Under `-P8` load the loss path drops a few pings with
+- **Ping** (`ping -D -i 0.01`, 100 pps, IPv4 to `$IPERF_TARGET4` and IPv6 to
+  `$IPERF_TARGET6`). The soak reports lost replies and the longest gap per
+  window, per family. Under `-P8` load the loss path drops a few pings with
   no move at all: on 2026-10-31, 20 windows in which nothing moved lost 0–4
   pings each, with the longest gap 21–39 ms.
-- **iperf3** (`-P8 -i 0.1 --json-stream`). The worst per-stream stall is the
-  longest run of 100 ms intervals under 1 Mbit/s. A stream that disappears
-  from the output counts as stalled from that point on.
+- **iperf3** (IPv4 `-P8 -p 5211`, IPv6 `-P2 -p 5210`, `-i 0.1 --json-stream`).
+  The worst per-stream stall is the longest run of 100 ms intervals under
+  1 Mbit/s. A stream that disappears from the output counts as stalled from
+  that point on; one that is still stalled at the end of the run never
+  recovered, which is a FAIL of the move whose window it stalled in.
 - **The window's tail.** In the last second of every window, ping must be
   answering and iperf3's aggregate must be above 1 Mbit/s. A move whose views
   agree while nothing forwards fails here.
@@ -202,9 +224,13 @@ to the moment the next one is issued, on the LAN host's clock.
   - Use `SOAK_RG=all` to move the RGs together.
 
 The hitless targets (at most 3 pings and no 200 ms stall per single-RG move)
-are row H10's, tracked by #18559. H11 judges correctness. Its default budgets
-are wider so that it fails on a move that broke, not on today's known
-transition cost.
+are row H10's, tracked by #18559. H11 judges correctness. A gap over
+`SOAK_MAX_GAP_MS` or a stall over `SOAK_MAX_STALL_MS` that the stream
+recovers from is **COST**, not FAIL: the move was correct and the cost is
+#18559's, judged master-relative like H10. On loss on 2026-10-31 that was 5 of
+200 moves at 5 s and 1 of 60 at 2 s (single streams stalled 2.2–6.6 s);
+scoring them FAIL would make a 40-move per-PR leg red most of the time on
+master. `SOAK_STRICT_COST=1` restores FAIL for a hitless-target run.
 
 ## Running the soak
 
@@ -246,61 +272,109 @@ Knobs:
 | `SOAK_CONVERGE_S` | `SOAK_SLEEP` | seconds after the CLI returns for the RG to land |
 | `SOAK_MAX_GAP_MS` | 1000 | longest ping gap allowed in a move's window |
 | `SOAK_MAX_STALL_MS` | 2000 | worst iperf3 stream stall allowed in a move's window |
-| `SOAK_TRAFFIC` | 1 | `0`: control plane only |
-| `SOAK_HELPER_CHECK` | 1 | `0`: skip the helper `ha_groups` read |
+| `SOAK_FOLLOW_MIN_PKTS` | 500 | RETH-member packets the target must carry between landing and the window's end |
+| `SOAK_STRICT_COST` | 0 | `1`: a COST (over-budget but recovered) scores FAIL |
+| `SOAK_TRAFFIC` | 1 | `0`: control plane only (the run exits 2) |
+| `SOAK_HELPER_CHECK` | 1 | `0`: skip the helper reads (the run exits 2) |
+| `SOAK_IPV6` | 1 | `0`: IPv4 only |
+| `SOAK_RESTORE` | 1 | `0`: do not put node0 back as primary at the end (matrix row D3) |
 | `SOAK_IPERF_PORT` | 5211 | the unshaped CoS class on the loss path |
-| `SOAK_OUT` | `/var/tmp/rg-move-soak-<utc>` | artefacts: `soak.log`, `result.json`, `ping.log`, `iperf.jsonl` |
+| `SOAK_IPERF6_PORT` | 5210 | IPv6 iperf3 server port |
+| `SOAK_OUT` | `/var/tmp/rg-move-soak-<utc>` | artefacts: `soak.log`, `result.json`, `ping.log`, `iperf.jsonl`, `ping6.log`, `iperf6.jsonl` |
+
+`make test-rg-move-soak` runs it through `harness-result.sh` (`smoke-cells`,
+`--require-helper-attestation`), so a run writes a ledger row with build
+attestation; the soak's last line, `rg-move-soak: <n> passed, <m> failed`,
+is what the adapter scores (a correct move — PASS or COST — passed). At the
+end the soak puts node0 back as primary for every RG it moved (a local pull
+on node0, reported as `restore:`; never folded into the moves' verdicts).
 
 The first move takes each RG away from its current owner. After that the
 directions alternate strictly, whatever happened, exactly like the operator's
-loop.
+loop. After landing, the soak keeps sampling both views until the window
+ends (the operator's `sleep S`), so a move that goes dual-active or reverts
+two seconds after landing is caught.
 
 ## Pass criteria
 
 One verdict per move:
 
 - **PASS**: every condition in "What a correct move is" held.
+- **COST**: the move was correct, but its transition cost was over budget —
+  a ping gap over `SOAK_MAX_GAP_MS` or a stream stall over
+  `SOAK_MAX_STALL_MS` that recovered (#18559). Counted, not failed; judged
+  master-relative (row H11). `SOAK_STRICT_COST=1` makes it a FAIL.
 - **FAIL**, for any of:
-  - the CLI printed an error;
+  - the CLI printed an error (including #18585's `cross-node request not
+    sent` refusal);
   - the CLI said "already primary" although the RG was on the other node;
   - the CLI printed anything else unexpected;
   - the RG did not land in both views within the bound;
-  - a dual-active sample;
+  - a dual-active sample, or the RG leaving the target, anywhere in the
+    window after landing;
   - the helper disagreed with the views;
-  - the ping gap or a stream stall was over budget;
-  - traffic was absent in the window's tail;
+  - the traffic did not follow: the RETH-member counters or the LAN host's
+    neighbour entry stayed on the old node, or nothing flowed in the
+    window's tail (either family);
+  - a stream that stalled in the window and never recovered;
   - ping or iperf3 stopped covering the window.
 - **VOID**: the precondition failed. Before a move to node *t*, the RG was not
-  cleanly owned by the other node. A failed move therefore costs one FAIL, and
-  the next move, back to where the RG still is, is VOID, not a second FAIL.
-  The operator's "already primary" line is that cascade.
+  cleanly owned by the other node at the end of the previous window. A failed
+  move therefore costs one FAIL, and the next move, back to where the RG
+  still is, is VOID, not a second FAIL. The operator's "already primary"
+  line is that cascade.
 
-The run exits 0 when every move passed, 1 on any FAIL, and 2 when there was no
-FAIL but some VOID, or when the preflight was void (no RG with a single clean
-owner, or an unreadable LAN host clock).
+A **void run** (exit 2, `FATAL:` line, no moves scored) when the soak cannot
+measure what it claims to: no RG with a single clean owner at preflight; the
+LAN host clock unreadable; a traffic generator not streaming after the
+warmup — a busy iperf3 server ("the server is busy running a test"), a dead
+target; a Python error in the harness; SIGTERM (the LAN-host generators are
+stopped first). None of these is a FAIL.
+
+The run exits 0 when every move was PASS or COST, 1 on any FAIL, and 2 when
+there was no FAIL but a VOID move, a void run, or a disabled check
+(`SOAK_TRAFFIC=0` or `SOAK_HELPER_CHECK=0`: a run that measured less never
+reads as a full pass).
 
 Matrix row H11 states what an HA PR must show. The cells for every verdict
-rule, and an end-to-end run against a fake cluster that reproduces the
-operator's failure, are in `test/incus/rg_move_soak_test.py`
-(`make test-rg-move-soak-lib`, also run by `make selftest`).
+rule, and end-to-end runs against a fake cluster and LAN host (including
+the operator's skew failure, traffic that never moved, a busy iperf3 server,
+a late dual-active sample and a revert), are in
+`test/incus/rg_move_soak_test.py` (`make test-rg-move-soak-lib`, also run by
+`make selftest`).
 
 ## Reading a failure
 
 | Reason in the table | What it means | Next step |
 |---|---|---|
 | `CLI error: ... fabric RPC authentication failed ... window Ns ahead/behind ours` `[fabric-auth clock skew ...]` | The node clocks are more than about 30 s apart. Every move to the peer is rejected | Check the preflight skew line and `chronyc tracking` on both nodes. Configure `system ntp server ... routing-instance mgmt` |
+| `CLI error: ... cross-node request not sent: nodeN's wall clock is ...` `[inter-node clock skew]` | #18585's fail-fast: a fresh heartbeat reading says the clocks are 60 s or more apart, so the fabric RPC cannot authenticate and was not sent | Fix NTP; or issue the move on the target node (a local pull) |
+| `unexpected CLI output: ...` | The CLI said something that is neither `transfer committed`, `already primary` nor an error, e.g. `Manual failover triggered` (the untargeted form) or a superseded request | Check the command the soak issued; a superseded request means a concurrent `reset` |
 | `CLI error: ... cannot connect to peer on any fabric address` (without auth) | The fabric path to the peer is down | Check fab0 addressing and reachability, and `show chassis cluster status` monitor failures |
 | `CLI error: ... not transfer-ready` / `barrier` / `fenced` / `peer config stale` | The transfer was refused by readiness, the sync barrier or a fence (#18521 class) | Check session-sync health (row H7). A refusal that clears on retry is still a FAIL |
 | `CLI said already primary ... but the RG was on nodeX` | The issuing node's view disagrees with the joint view | Compare the two status outputs in `result.json`. This is a state bug |
 | `did not land on nodeT within Ns` | The CLI returned, but the views never agreed in time. `last:` shows the final joint view | Check whether the RG landed later or not at all. Look for `secondary-hold` or `lost` |
-| `dual-active sample` | Both nodes claimed the RG, or both forwarded it, at one sample | Treat as severe: duplicate VIPs. Pull both journals. Measure clock skew before pairing them |
+| `left nodeT after landing, inside the window` | The views agreed, then the RG moved again before the operator's next command (a preempt, an auto-failback, a racing request) | Pull both journals around the window; measure clock skew before pairing them |
+| `dual-active sample during the move window` | Both nodes claimed the RG, or both forwarded it, at one sample | Treat as severe: duplicate VIPs. Pull both journals. Measure clock skew before pairing them |
 | `helper ha_groups[].active disagrees` | The daemon's views agree, but the dataplane does not | Check the helper's status and the daemon's RG apply path |
 | `ping gap ... > budget` / `stream N stalled ...` | The move landed, but the transition cost more than the budget | Compare with H10's master baseline. A single bad window repeated across moves is a regression |
-| `traffic did not follow` | The views moved, but nothing forwards in the window's tail | A forwarding or ownership divergence: check VIPs, neighbours and fabric redirect |
+| `traffic did not follow to nodeT: RETH-member packets after landing node0=… node1=…` | Status and helper flipped, but the packets are still on the old node's RETH members | A forwarding/ownership divergence: check GARP/NA after the move, the helper's RG activation, fabric redirect |
+| `traffic did not follow to nodeT: the LAN host's v4 neighbour entry ... still resolves to nodeN's MAC` | The LAN host still sends to the old owner's per-node RETH MAC | The new owner's GARP did not reach or was not accepted; check `garpEpoch` and the old owner's VIP removal |
+| `traffic did not follow: no v4/v6 ping replies ...` / `... iperf3 aggregate under 1 Mbit/s ...` | The views moved, but nothing forwards in the window's tail | A forwarding or ownership divergence: check VIPs, neighbours and fabric redirect |
+| `v4/v6 stream(s) [...] stalled in this window and never recovered` | A stream died at this move | The move killed sessions: check session sync for that flow, and #18531/#18535-class revocations |
+| COST: `v4 stream N stalled ... (recovered)` / `v4 ping gap ...` | The move was correct; its transition cost exceeded the budget | Compare the run's COST count and stall distribution with master's (row H11, #18559) |
+| `FATAL: preflight VOID: RGg has no single clean owner ...` / `cannot read the LAN host clock` | The cluster was not in a state a move can be judged from | Restore node0 primary (`SOAK_RESTORE`, row D3) and rerun |
+| `FATAL: traffic preflight: v4 iperf3 to ... failed before any move: ... the server is busy running a test` / `not streaming` / `ping ... is not answering` | The traffic target is busy (another lane's iperf3) or unreachable | Check the target and the lock; rerun |
+| `FATAL: harness error: ...` / `harness terminated by signal` | The harness itself failed; the generators were stopped | Fix the harness; the run measured nothing |
 | `ping/iperf3 did not cover the move window` | A traffic generator stopped (all streams died, or the client exited) | `iperf.jsonl` shows the error event. Streams dying is a FAIL of the move that killed them |
 | `precondition: RGg was on nodeX before a move to nodeX` (VOID) | The previous move did not happen | Read the previous move's FAIL |
 
 ## Measured
+
+The rows below the first two predate the COST verdict and the
+traffic-follow check (#18587 review): their "FAIL"s for stream stalls of
+2.2–6.6 s would score COST today, and no row checked RETH counters or the
+LAN neighbour entry.
 
 | Date, cluster, build | Run | Result |
 |---|---|---|

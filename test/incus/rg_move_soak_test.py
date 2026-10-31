@@ -155,13 +155,15 @@ def rgres(rg=2, target=1, pre=0, cli=soak.CLI_OK, landed=0.8, dual=False, helper
 
 
 GOOD_TRAFFIC = {"ping_lost": 3, "ping_max_gap_ms": 40.0, "ping_tail_replies": 95, "worst_stall_ms": 200.0,
-                "worst_stall_stream": 5, "agg_zero_ms": 0.0, "tail_gbps": 20.0, "ping_covered": True,
-                "iperf_covered": True}
+                "worst_stall_stream": 5, "died_streams": [], "agg_zero_ms": 0.0, "tail_gbps": 20.0,
+                "ping_covered": True, "iperf_covered": True}
 
 
-def rec(rgs, traffic=None):
+def rec(rgs, traffic=None, v6=None):
     r = soak.MoveRecord(1, rgs[0].target, 0, 100.0, 105.0, rgs)
-    r.traffic = dict(GOOD_TRAFFIC) if traffic is None else traffic
+    r.traffic = {"v4": dict(GOOD_TRAFFIC) if traffic is None else traffic}
+    if v6 is not None:
+        r.traffic["v6"] = v6
     return r
 
 
@@ -196,6 +198,15 @@ class MoveVerdict(unittest.TestCase):
         self.assertEqual(v, soak.FAIL)
         self.assertIn("clock skew", why[0])
 
+    def test_fail_fast_refusal_is_a_cli_error_naming_the_clock(self):
+        r = rgres(cli=soak.CLI_ERROR, landed=None)
+        r.cli_first = ("error: rpc error: code = FailedPrecondition desc = cross-node request not sent: node1's wall "
+                       "clock is 1m14.9s behind this node (measured 100ms ago over authenticated heartbeats), and "
+                       "fabric RPC authentication fails past 1m0s of skew; fix time sync")
+        v, why = self.verdict(rec([r]))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("clock skew", why[0])
+
     def test_unexpected_cli_text_fails(self):
         self.assertEqual(self.verdict(rec([rgres(cli=soak.CLI_OTHER)]))[0], soak.FAIL)
 
@@ -210,6 +221,13 @@ class MoveVerdict(unittest.TestCase):
         self.assertEqual(v, soak.FAIL)
         self.assertIn("dual-active", why[0])
 
+    def test_revert_after_landing_fails(self):
+        r = rgres()
+        r.reverted = "node0=primary/active node1=secondary/inactive"
+        v, why = self.verdict(rec([r]))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("after landing", why[0])
+
     def test_helper_disagreeing_fails(self):
         v, why = self.verdict(rec([rgres(helper={1: False, 0: True})]))
         self.assertEqual(v, soak.FAIL)
@@ -220,15 +238,52 @@ class MoveVerdict(unittest.TestCase):
         self.assertEqual(v, soak.FAIL)
         self.assertIn("unreadable", why[0])
 
-    def test_ping_gap_over_budget_fails(self):
-        t = dict(GOOD_TRAFFIC, ping_max_gap_ms=1500.0, ping_lost=149)
-        self.assertEqual(self.verdict(rec([rgres()], t))[0], soak.FAIL)
+    def test_member_counters_on_the_old_node_fail(self):
+        # Status and helper flipped; the RETH members that carried the packets
+        # are still the old node's: the traffic did not move (review B1).
+        r = rgres()
+        r.follow_expected = True
+        r.member_delta = {0: 90000, 1: 12}
+        v, why = self.verdict(rec([r]))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("did not follow to node1", why[0])
+        r.member_delta = {0: 30, 1: 90000}
+        self.assertEqual(self.verdict(rec([r]))[0], soak.PASS)
+        r.member_delta = {0: None, 1: 90000}
+        self.assertIn("unmeasured", self.verdict(rec([r]))[1][0])
 
-    def test_stream_stall_over_budget_fails(self):
+    def test_lan_neighbour_on_the_old_node_fails(self):
+        r = rgres()
+        r.neigh_node = {"v4": 0}
+        v, why = self.verdict(rec([r]))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("neighbour entry", why[0])
+        r.neigh_node = {"v4": 1, "v6": None}  # v6 unresolved is not evidence either way
+        self.assertEqual(self.verdict(rec([r]))[0], soak.PASS)
+
+    def test_ping_gap_over_budget_is_a_cost_not_a_fail(self):
+        t = dict(GOOD_TRAFFIC, ping_max_gap_ms=1500.0, ping_lost=149)
+        v, why = self.verdict(rec([rgres()], t))
+        self.assertEqual(v, soak.COST)
+        self.assertIn("ping gap", why[0])
+
+    def test_recovered_stream_stall_over_budget_is_a_cost(self):
         t = dict(GOOD_TRAFFIC, worst_stall_ms=2500.0)
         v, why = self.verdict(rec([rgres()], t))
+        self.assertEqual(v, soak.COST)
+        self.assertIn("recovered", why[0])
+
+    def test_stream_that_never_recovers_fails(self):
+        t = dict(GOOD_TRAFFIC, worst_stall_ms=9000.0, died_streams=[7])
+        v, why = self.verdict(rec([rgres()], t))
         self.assertEqual(v, soak.FAIL)
-        self.assertIn("stalled", why[0])
+        self.assertIn("never recovered", why[0])
+
+    def test_cost_does_not_hide_a_fail(self):
+        t = dict(GOOD_TRAFFIC, ping_max_gap_ms=1500.0)
+        v, why = self.verdict(rec([rgres(dual=True)], t))
+        self.assertEqual(v, soak.FAIL)
+        self.assertTrue(any("ping gap" in w for w in why))
 
     def test_traffic_not_following_fails(self):
         # The RG moved in both views but nothing answers afterwards.
@@ -238,6 +293,11 @@ class MoveVerdict(unittest.TestCase):
         self.assertIn("did not follow", " ".join(why))
         t = dict(GOOD_TRAFFIC, tail_gbps=0.0)
         self.assertEqual(self.verdict(rec([rgres()], t))[0], soak.FAIL)
+
+    def test_ipv6_is_scored_too(self):
+        v, why = self.verdict(rec([rgres()], v6=dict(GOOD_TRAFFIC, ping_tail_replies=0)))
+        self.assertEqual(v, soak.FAIL)
+        self.assertIn("v6", why[0])
 
     def test_traffic_generator_death_fails(self):
         self.assertEqual(self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, iperf_covered=False)))[0], soak.FAIL)
@@ -249,6 +309,49 @@ class MoveVerdict(unittest.TestCase):
     def test_multi_rg_any_failure_fails(self):
         v, _ = self.verdict(rec([rgres(rg=1), rgres(rg=2, landed=None)]))
         self.assertEqual(v, soak.FAIL)
+
+
+class Summary(unittest.TestCase):
+    def _moves(self, verdicts):
+        out = []
+        for i, v in enumerate(verdicts):
+            m = rec([rgres()])
+            m.index, m.verdict = i, v
+            out.append(m)
+        return out
+
+    def test_exit_codes(self):
+        s = soak.summarize
+        self.assertEqual(s(self._moves([soak.PASS, soak.COST]), True, [], False)["exit"], 0)
+        self.assertEqual(s(self._moves([soak.PASS, soak.COST]), True, [], True)["exit"], 1)
+        self.assertEqual(s(self._moves([soak.PASS, soak.FAIL]), True, [], False)["exit"], 1)
+        self.assertEqual(s(self._moves([soak.PASS, soak.VOID]), True, [], False)["exit"], 2)
+        # A disabled check is never scored as a full PASS.
+        self.assertEqual(s(self._moves([soak.PASS]), False, ["traffic"], False)["exit"], 2)
+
+
+class Membership(unittest.TestCase):
+    CONFIG = "\n".join([
+        "set groups node0 interfaces ge-0/0/1 gigether-options redundant-parent reth1",
+        "set groups node0 interfaces ge-0/0/2 gigether-options redundant-parent reth0",
+        "set groups node1 interfaces ge-7/0/1 gigether-options redundant-parent reth1",
+        "set groups node1 interfaces ge-7/0/2 gigether-options redundant-parent reth0",
+        "set interfaces reth0 redundant-ether-options redundancy-group 1",
+        "set interfaces reth1 redundant-ether-options redundancy-group 2",
+    ])
+
+    def test_rg_members(self):
+        self.assertEqual(soak.rg_members(self.CONFIG), {1: ["ge-0-0-2", "ge-7-0-2"], 2: ["ge-0-0-1", "ge-7-0-1"]})
+
+    def test_link_macs_and_neigh(self):
+        links = ("2: fxp0: <BROADCAST> mtu 1500 qdisc mq state UP mode DEFAULT group default qlen 1000\\    link/ether 10:66:6a:cc:b8:04 brd ff:ff:ff:ff:ff:ff\n"
+                 "5: ge-7-0-1: <BROADCAST> mtu 9000 qdisc mq state UP\\    link/ether 02:bf:72:17:02:03 brd ff:ff:ff:ff:ff:ff\n"
+                 "9: ge-7-0-2.50@ge-7-0-2: <BROADCAST> mtu 1500\\    link/ether 02:bf:72:17:01:01 brd ff:ff:ff:ff:ff:ff\n")
+        macs = soak.link_macs(links)
+        self.assertEqual(macs["02:bf:72:17:02:03"], "ge-7-0-1")
+        self.assertEqual(macs["02:bf:72:17:01:01"], "ge-7-0-2.50")
+        self.assertEqual(soak.neigh_mac("10.0.62.1 dev eth0 lladdr 02:bf:72:17:02:02 REACHABLE"), "02:bf:72:17:02:02")
+        self.assertIsNone(soak.neigh_mac("10.0.62.1 dev eth0 FAILED"))
 
 
 class Traffic(unittest.TestCase):
@@ -318,89 +421,353 @@ class Traffic(unittest.TestCase):
         self.assertFalse(t["iperf_covered"])
 
 
+
+
 class FakeClock:
+    """Fake time. Listeners see every advance, so the fake LAN host can emit
+    ping replies and iperf3 intervals as time passes, exactly as the real
+    generators stream them while the soak sleeps."""
+
     def __init__(self):
         self.t = 1_000_000.0
+        self.listeners = []
+
+    def _to(self, t):
+        while self.t < t:
+            step = min(0.05, t - self.t)
+            self.t += step
+            for fn in self.listeners:
+                fn(self.t)
 
     def now(self):
-        self.t += 0.001
+        self._to(self.t + 0.001)
         return self.t
 
     def sleep(self, s):
-        self.t += max(0.0, s)
+        self._to(self.t + max(0.0, s))
+
+
+class Proc:
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
+
+
+MEMBERS = {1: {0: "ge-0-0-2", 1: "ge-7-0-2"}, 2: {0: "ge-0-0-1", 1: "ge-7-0-1"}}
+MACS = {(0, 1): "02:bf:72:16:01:00", (1, 1): "02:bf:72:16:01:01",
+        (0, 2): "02:bf:72:16:02:02", (1, 2): "02:bf:72:16:02:03"}
 
 
 class FakeCluster:
-    """A two-node cluster model. `skew_s` breaks the cross-node (fabric) path
-    the way a skewed wall clock does; the local path (sync channel) works."""
+    """A two-node cluster plus a LAN host, in fake time.
 
-    def __init__(self, clock, owner, skew_s=0.0, cli_rc_on_error=0, lag_polls=0):
+    `skew_s` breaks the cross-node (fabric) path the way a skewed wall clock
+    does; the local path (sync channel) works. `stuck_traffic` keeps every
+    packet on the initial owner whatever the status says (review B1's
+    fixture). `revert_after_s` hands an RG back that many seconds after a
+    move lands. `dual_after_land` makes the views show both nodes primary once,
+    after landing. `faults` maps a move number to a traffic fault injected
+    0.3 s after that move's CLI: "gap" (a 1.5 s outage of ping and every
+    stream), "stall" (stream 7 stalls 2.5 s), "die" (stream 7 stops for good).
+    """
+
+    def __init__(self, clock, owner, skew_s=0.0, cli_rc_on_error=0, lag_polls=0, lan_off=3.0,
+                 stuck_traffic=False, revert_after_s=None, dual_after_land=False, helper_lie=False,
+                 busy_iperf=False, faults=None, dual_after_s=None):
         self.clock_ = clock
         self.owner = dict(owner)
+        self.initial = dict(owner)
         self.skew_s = skew_s
         self.cli_rc_on_error = cli_rc_on_error
         self.lag_polls = lag_polls
+        self.lan_off = lan_off
+        self.stuck_traffic = stuck_traffic
+        self.revert_after_s = revert_after_s
+        self.dual_after_land = dual_after_land
+        self.dual_after_s = dual_after_s  # one dual-active sample this long after landing
+        self.helper_lie = helper_lie
+        self.busy_iperf = busy_iperf
+        self.faults = faults or {}
         self.pending = {}
+        self.landed_at = {}
+        self.dual_pending = 0
         self.fw = {0: "fake:fw0", 1: "fake:fw1"}
         self.lan = "fake:lan"
         self.commands = []
+        self.moves_seen = 0
+        self.counters = {0: {}, 1: {}}
+        self.files = {}
+        self.gen_start = None
+        self.last_emit = None
+        self.ping_seq = {}
+        self.iv_index = {}
+        self.events = []  # (lan_t0, lan_t1, kind)
+        clock.listeners.append(self._tick)
+
+    # -- cluster -------------------------------------------------------
+
+    def forwarder(self, rg):
+        return self.initial.get(rg, 0) if self.stuck_traffic else self.owner.get(rg, 0)
+
+    def _apply_time(self, t):
+        for rg, (target, at) in list(self.pending.items()):
+            if t >= at:
+                self.owner[rg] = target
+                self.landed_at[rg] = t
+                del self.pending[rg]
+                if self.dual_after_land:
+                    self.dual_pending = 2
+        if self.dual_after_s is not None:
+            for rg, at in list(self.landed_at.items()):
+                if t - at >= self.dual_after_s and (rg, at) not in getattr(self, "_dual_done", set()):
+                    self._dual_done = getattr(self, "_dual_done", set()) | {(rg, at)}
+                    self.dual_pending = 2
+        if self.revert_after_s is not None:
+            for rg, at in list(self.landed_at.items()):
+                if t - at >= self.revert_after_s and self.owner[rg] == 1:
+                    self.owner[rg] = 0
+                    del self.landed_at[rg]
 
     def cli(self, node, cmd):
         self.commands.append((node, cmd))
         m = re.match(r"request chassis cluster failover redundancy-group (\d+) node (\d)", cmd)
         rg, target = int(m.group(1)), int(m.group(2))
+        self.moves_seen += 1
+        lan_now = self.clock_.t + self.lan_off
+        fault = self.faults.get(self.moves_seen)
+        if fault == "gap":
+            self.events.append((lan_now + 0.3, lan_now + 1.8, "gap"))
+        elif fault == "stall":
+            self.events.append((lan_now + 0.3, lan_now + 2.8, "stall"))
+        elif fault == "die":
+            self.events.append((lan_now + 0.3, float("inf"), "stall"))
         self.clock_.sleep(0.6)
         if target != node and abs(self.skew_s) > 60:
             return self.cli_rc_on_error, USER_ERROR + "\n"
         if self.owner[rg] == target:
             return 0, f"Redundancy group {rg} is already primary on node {target}\n"
         if self.lag_polls:
-            self.pending[rg] = (target, self.lag_polls)
+            self.pending[rg] = (target, self.clock_.t + self.lag_polls * 0.5)
         else:
             self.owner[rg] = target
+            self.landed_at[rg] = self.clock_.t
+            if self.dual_after_land:
+                self.dual_pending = 2
         return 0, f"Manual failover completed for redundancy group {rg} (transfer committed)\n"
 
     def status(self, node):
-        for rg, (target, n) in list(self.pending.items()):
-            if n <= 1:
-                self.owner[rg] = target
-                del self.pending[rg]
-            else:
-                self.pending[rg] = (target, n - 1)
+        self._apply_time(self.clock_.t)
         self.clock_.sleep(0.15)
+        if self.dual_pending:
+            # Both views of one sample (the soak reads them in parallel).
+            self.dual_pending -= 1
+            return status_text({rg: node for rg in self.owner}, node)
         return status_text(self.owner, node)
 
     def helper(self, node):
-        return {rg: o == node for rg, o in self.owner.items()}
+        ha = {rg: (o == node) != self.helper_lie for rg, o in self.owner.items()}
+        return {"ha": ha, "if": dict(self.counters[node])}
+
+    def config_set(self, node):
+        return Membership.CONFIG
+
+    def links(self, node):
+        out = []
+        for (n, rg), mac in MACS.items():
+            if n == node:
+                out.append(f"{rg + 3}: {MEMBERS[rg][n]}: <BROADCAST> mtu 9000\\    link/ether {mac} brd ff:ff:ff:ff:ff:ff")
+        return "\n".join(out)
+
+    def neigh(self, vip):
+        if ":" in vip:
+            return ""
+        return f"{vip} dev eth0 lladdr {MACS[(self.forwarder(2), 2)]} REACHABLE"
 
     def clock(self, ref):
+        if ref == self.lan:
+            return self.clock_.t + self.lan_off
         return self.clock_.t + (self.skew_s if ref == self.fw[1] else 0.0)
 
     def chrony(self, node):
         return "Leap status : Normal"
 
+    # -- LAN host traffic generators -----------------------------------
 
-def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0):
+    def popen_lan(self, script, outfile):
+        kind = "iperf" if "iperf3" in script else "ping"
+        fam = "v6" if " -6 " in script else "v4"
+        self.files[(kind, fam)] = outfile
+        if self.gen_start is None:
+            self.gen_start = self.last_emit = self.clock_.t
+        if kind == "iperf" and self.busy_iperf:
+            with open(outfile, "a") as f:
+                f.write(f"{self.clock_.t + self.lan_off:.6f} " + json.dumps(
+                    {"event": "error", "data": "error - the server is busy running a test. try again later"}) + "\n")
+        return Proc(), open(os.devnull, "w")
+
+    def lan_sh(self, script):
+        self.gen_start = None  # generators stopped
+        return 0, ""
+
+    def _in(self, lan_t, kind):
+        return any(a <= lan_t < b and (k == kind or k == "gap") for a, b, k in self.events)
+
+    def _tick(self, t):
+        # RETH-member counters: whoever forwards each RG carries its packets.
+        for rg, by_node in MEMBERS.items():
+            if rg in self.owner:
+                n = self.forwarder(rg)
+                name = by_node[n]
+                self.counters[n][name] = self.counters[n].get(name, 0) + 500
+        if self.gen_start is None:
+            return
+        for (kind, fam), path in list(self.files.items()):
+            if kind == "iperf" and self.busy_iperf:
+                continue
+            with open(path, "a") as f:
+                if kind == "ping":
+                    seq = self.ping_seq.get(fam, 0)
+                    while self.gen_start + (seq + 1) * 0.01 <= t:
+                        seq += 1
+                        ts = self.gen_start + seq * 0.01 + self.lan_off
+                        if not self._in(ts, "gap"):
+                            f.write(f"[{ts:.6f}] 64 bytes from x: icmp_seq={seq % 65536} ttl=63 time=0.1 ms\n")
+                    self.ping_seq[fam] = seq
+                else:
+                    i = self.iv_index.get(fam, 0)
+                    while self.gen_start + (i + 1) * 0.1 <= t:
+                        mid = self.gen_start + i * 0.1 + 0.05 + self.lan_off
+                        gap = self._in(mid, "gap")
+                        st = []
+                        for sid in (5, 7, 9):
+                            dead = gap or (sid == 7 and self._in(mid, "stall"))
+                            st.append({"socket": sid, "start": i * 0.1, "end": (i + 1) * 0.1,
+                                       "bits_per_second": 0.0 if dead else 2e9})
+                        ev = {"event": "interval", "data": {"streams": st, "sum": {
+                            "start": i * 0.1, "end": (i + 1) * 0.1,
+                            "bits_per_second": sum(s["bits_per_second"] for s in st), "omitted": False}}}
+                        f.write(f"{self.gen_start + (i + 1) * 0.1 + self.lan_off + 0.002:.6f} {json.dumps(ev)}\n")
+                        i += 1
+                    self.iv_index[fam] = i
+
+
+def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=True, helper_check=True,
+             v6=False, restore=True, files=None):
     with tempfile.TemporaryDirectory() as d:
-        cfg = soak.Config(moves=moves, sleep_s=sleep_s, rgs=rgs, issuer=issuer, traffic=False,
-                          budget=soak.Budget(converge_s=sleep_s), outdir=d, run_id="t")
+        cfg = soak.Config(moves=moves, sleep_s=sleep_s, rgs=rgs, issuer=issuer, traffic=traffic,
+                          helper_check=helper_check, restore=restore,
+                          budget=soak.Budget(converge_s=sleep_s), outdir=d, run_id="t",
+                          target4="172.16.80.200", target6="2001:db8::200" if v6 else "",
+                          lan_vip4="10.0.61.1", lan_vip6="2001:db8:1::1" if v6 else "")
         logs = []
         rc = soak.Soak(cfg, cluster, now_fn=clock.now, sleep_fn=clock.sleep, log=logs.append).run()
         with open(os.path.join(d, "result.json")) as f:
             res = json.load(f)
+        if files is not None:
+            files.extend(sorted(os.listdir(d)))
     return rc, res, logs
+
+
+def verdicts(res):
+    return [m["verdict"] for m in res["moves"]]
 
 
 class Orchestration(unittest.TestCase):
     def test_healthy_cluster_alternates_and_passes(self):
         clock = FakeClock()
         c = FakeCluster(clock, {0: 0, 1: 0, 2: 0})
-        rc, res, _ = run_fake(c, clock, moves=6)
+        rc, res, logs = run_fake(c, clock, moves=6)
         self.assertEqual(rc, 0, res["summary"])
-        self.assertEqual(res["summary"]["counts"], {"PASS": 6, "FAIL": 0, "VOID": 0})
-        # Every move issued from node0, alternating node1/node0.
-        self.assertEqual([n for n, _ in c.commands], [0] * 6)
-        self.assertEqual([cmd[-1] for _, cmd in c.commands], list("101010"))
+        self.assertEqual(res["summary"]["counts"], {"PASS": 6, "COST": 0, "FAIL": 0, "VOID": 0})
+        moves = [cmd for _, cmd in c.commands][:6]
+        self.assertEqual([n for n, _ in c.commands][:6], [0] * 6)  # every move issued on node0
+        self.assertEqual([cmd[-1] for cmd in moves], list("101010"))
+        self.assertIn("rg-move-soak: 6 passed, 0 failed", "\n".join(logs))
+        # The traffic-follow evidence was taken, on the right node, each move.
+        for m in res["moves"]:
+            r = m["rgs"][0]
+            self.assertGreater(r["member_delta"][str(r["target"])], 500)
+            self.assertEqual(r["neigh_node"]["v4"], r["target"])
+        self.assertIn("end_node1_minus_node0_s", res["preflight"])
+        self.assertEqual(res["preflight"]["lan_rg"], 2)
+
+    def test_traffic_that_never_moved_fails(self):
+        # Review B1's fixture: status and helper flip on every move, the
+        # packets stay on node0. The old harness scored this 6/6 PASS.
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, stuck_traffic=True)
+        rc, res, _ = run_fake(c, clock, moves=4)
+        self.assertEqual(rc, 1)
+        to1 = [m for m in res["moves"] if m["target"] == 1]
+        self.assertTrue(all(m["verdict"] == "FAIL" for m in to1))
+        self.assertTrue(any("did not follow to node1" in r for r in to1[0]["reasons"]))
+
+    def test_gap_is_attributed_to_its_own_move(self):
+        # The LAN clock is 3 s ahead of the orchestrator: a sign flip or an
+        # ignored offset moves the gap into the neighbouring window.
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={3: "gap"})
+        rc, res, _ = run_fake(c, clock, moves=5)
+        self.assertEqual(verdicts(res), ["PASS", "PASS", "COST", "PASS", "PASS"], res["moves"][2]["reasons"])
+        self.assertIn("ping gap", res["moves"][2]["reasons"][0])
+        self.assertEqual(rc, 0)
+
+    def test_recovered_stall_is_cost_and_dead_stream_fails(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={2: "stall"})
+        rc, res, _ = run_fake(c, clock, moves=3)
+        self.assertEqual(verdicts(res), ["PASS", "COST", "PASS"])
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={2: "die"})
+        rc, res, _ = run_fake(c, clock, moves=3)
+        self.assertEqual(res["moves"][1]["verdict"], "FAIL")
+        self.assertIn("never recovered", " ".join(res["moves"][1]["reasons"]))
+        self.assertEqual(rc, 1)
+
+    def test_ipv6_is_measured(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        names = []
+        rc, res, _ = run_fake(c, clock, moves=2, v6=True, files=names)
+        # The artefact names the doc tells operators to read.
+        self.assertEqual(names, ["iperf.jsonl", "iperf6.jsonl", "ping.log", "ping6.log", "result.json"])
+        # And each holds what its name says.
+        self.assertEqual(dict(c.files)[("ping", "v4")].rsplit("/", 1)[1], "ping.log")
+        self.assertEqual(rc, 0, res["summary"])
+        self.assertIn("v6", res["moves"][0]["traffic"])
+        self.assertTrue(res["moves"][0]["traffic"]["v6"]["ping_covered"])
+
+    def test_dual_active_after_landing_fails(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, dual_after_land=True)
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 1)
+        self.assertIn("dual-active", res["moves"][0]["reasons"][0])
+
+    def test_dual_active_late_in_the_window_fails(self):
+        # One dual-active sample 2 s AFTER landing: only the rest-of-window
+        # sampling can see it (review: "at any point").
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, dual_after_s=2.0)
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 1)
+        self.assertIn("dual-active", " ".join(res["moves"][0]["reasons"]))
+
+    def test_revert_after_landing_fails(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, revert_after_s=2.0)
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 1)
+        self.assertIn("left node1 after landing", " ".join(res["moves"][0]["reasons"]))
+
+    def test_helper_disagreement_is_read_and_fails(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, helper_lie=True)
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 1)
+        self.assertIn("helper", res["moves"][0]["reasons"][0])
 
     def test_operator_skew_failure_is_reproduced(self):
         # fw1 71 s behind: every move to node1 errors (fabric auth), every move
@@ -410,19 +777,19 @@ class Orchestration(unittest.TestCase):
         c = FakeCluster(clock, {2: 0}, skew_s=-71.0)
         rc, res, logs = run_fake(c, clock, moves=6)
         self.assertEqual(rc, 1)
-        self.assertEqual(res["summary"]["counts"], {"PASS": 0, "FAIL": 3, "VOID": 3})
+        self.assertEqual(res["summary"]["counts"], {"PASS": 0, "COST": 0, "FAIL": 3, "VOID": 3})
         fails = [m for m in res["moves"] if m["verdict"] == "FAIL"]
         self.assertTrue(all(m["target"] == 1 for m in fails))
         self.assertIn("clock skew", fails[0]["reasons"][0])
         voids = [m for m in res["moves"] if m["verdict"] == "VOID"]
         self.assertTrue(all(m["rgs"][0]["cli_class"] == "already" for m in voids))
         self.assertAlmostEqual(res["preflight"]["node1_minus_node0_s"], -71.0, delta=0.5)
-        self.assertEqual(res["preflight"]["peer_clock_line"], {})  # fake status has none
         self.assertTrue(any("WARNING" in line for line in logs))
+        self.assertEqual(res["preflight"]["peer_clock_line"], {})  # fake status has none
 
     def test_moving_from_the_target_node_avoids_the_fabric(self):
-        # Same skew, but the operator issues every move on node1: half the
-        # moves are local and half cross the fabric, so it still fails half.
+        # Same skew, but every move is issued on node1: half the moves are
+        # local and half cross the fabric, so it still fails half.
         clock = FakeClock()
         c = FakeCluster(clock, {2: 0}, skew_s=-71.0)
         rc, res, _ = run_fake(c, clock, moves=4, issuer=1)
@@ -430,16 +797,23 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(res["moves"][0]["verdict"], "PASS")  # node1 pulls RG2 locally
         self.assertEqual(res["moves"][1]["verdict"], "FAIL")  # node1 asks node0 over fabric
 
-    def test_slow_landing_within_bound_passes_and_beyond_fails(self):
+    def test_landing_bound_is_from_the_cli_return(self):
         clock = FakeClock()
-        c = FakeCluster(clock, {2: 0}, lag_polls=3)
+        c = FakeCluster(clock, {2: 0}, lag_polls=3)  # lands 1.5 s after the CLI
         rc, res, _ = run_fake(c, clock, moves=2)
         self.assertEqual(rc, 0, res["moves"])
         clock = FakeClock()
-        c = FakeCluster(clock, {2: 0}, lag_polls=10_000)
+        c = FakeCluster(clock, {2: 0}, lag_polls=10)  # lands 5 s after: past a 2 s bound
         rc, res, _ = run_fake(c, clock, moves=1, sleep_s=2.0)
         self.assertEqual(rc, 1)
         self.assertIn("did not land", res["moves"][0]["reasons"][0])
+
+    def test_restore_leaves_node0_primary(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=3)  # ends with RG2 on node1
+        self.assertEqual(c.owner[2], 0)
+        self.assertIn("restored", res["preflight"]["restore"])
 
     def test_preflight_records_peer_clock_line(self):
         clock = FakeClock()
@@ -453,8 +827,44 @@ class Orchestration(unittest.TestCase):
         clock = FakeClock()
         c = FakeCluster(clock, {0: 0, 1: 0, 2: 0})
         rc, res, _ = run_fake(c, clock, moves=2, rgs="all")
-        self.assertEqual(rc, 0)
-        self.assertEqual(len(c.commands), 6)
+        self.assertEqual(rc, 0, res["moves"])
+        self.assertEqual(len([cmd for cmd in c.commands if "node 0" in cmd[1] or "node 1" in cmd[1]]), 6)
+
+    def test_busy_iperf_server_voids_the_run(self):
+        # Review B4: a busy or dead traffic target is not a move's fault.
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, busy_iperf=True)
+        rc, res, logs = run_fake(c, clock, moves=3)
+        self.assertEqual(rc, 2)
+        self.assertIn("server is busy", res["void"])
+        self.assertEqual(res["moves"], [])
+        self.assertTrue(any(line.startswith("FATAL:") for line in logs))
+
+    def test_disabled_checks_never_exit_zero(self):
+        for kw in ({"traffic": False}, {"helper_check": False}):
+            clock = FakeClock()
+            c = FakeCluster(clock, {2: 0})
+            rc, res, _ = run_fake(c, clock, moves=2, **kw)
+            self.assertEqual(rc, 2, kw)
+            self.assertEqual(res["summary"]["counts"]["FAIL"], 0)
+
+    def test_unmappable_reth_members_void_the_run(self):
+        # A silent "nothing to measure" would turn the traffic-follow check
+        # off; a RETH with no members found is "could not measure".
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        c.config_set = lambda node: "set interfaces reth1 redundant-ether-options redundancy-group 2"
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("no member interfaces", res["void"])
+
+    def test_unmappable_lan_neighbour_voids_the_run(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        c.neigh = lambda vip: f"{vip} dev eth0 lladdr 0a:00:00:00:00:01 REACHABLE"
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("neighbour entry", res["void"])
 
     def test_no_clean_owner_voids_the_run(self):
         clock = FakeClock()
@@ -463,6 +873,26 @@ class Orchestration(unittest.TestCase):
         rc, res, _ = run_fake(c, clock, moves=2)
         self.assertEqual(rc, 2)
         self.assertIn("no single clean owner", res["void"])
+
+    def test_harness_error_is_void(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        c.config_set = lambda node: (_ for _ in ()).throw(RuntimeError("incus went away"))
+        with tempfile.TemporaryDirectory() as d:
+            argv = ["--fw0", "a", "--fw1", "b", "--lan", "c", "--target4", "x", "--outdir", d]
+            orig = soak.IncusCluster
+            soak.IncusCluster = lambda fw, lan: c
+            try:
+                old = soak.Soak.__init__
+
+                def init(self, cfg, cluster, **kw):
+                    old(self, cfg, cluster, now_fn=clock.now, sleep_fn=clock.sleep, log=lambda *_: None)
+                soak.Soak.__init__ = init
+                rc = soak.main(argv)
+            finally:
+                soak.IncusCluster = orig
+                soak.Soak.__init__ = old
+        self.assertEqual(rc, 2)
 
 
 if __name__ == "__main__":

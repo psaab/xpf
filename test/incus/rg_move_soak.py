@@ -24,10 +24,17 @@ What this harness does, per move:
   * polls BOTH nodes' own `show chassis cluster status` until the target is
     primary and the other node secondary/secondary-hold in both views, and the
     target's `Forwarding: rg-active=` line is active and the other's inactive;
-  * records any sample where both nodes claim the RG (dual-active);
+  * keeps sampling both views for the rest of the window, recording any
+    sample where both nodes claim the RG (dual-active) or the RG leaves the
+    target after landing;
   * reads each helper's own `ha_groups[].active` once the views converged;
-  * attributes ping loss / longest ping gap and the worst iperf3 per-stream
-    stall to the move's window, all on the LAN host's clock.
+  * proves the TRAFFIC moved: the target node's RETH members (from the
+    helper's per-binding RX+TX counters) carry the packets between landing
+    and the window's end and the other node's do not, and the LAN host's
+    neighbour entry for the LAN VIP resolves to the target node's MAC;
+  * attributes IPv4 and IPv6 ping loss / longest ping gap and the worst
+    iperf3 per-stream stall to the move's window, all on the LAN host's
+    clock.
 
 It never touches a clock. The preflight measures inter-node skew and reports
 it, because a skewed cluster is exactly what the operator's loop hit.
@@ -35,18 +42,29 @@ it, because a skewed cluster is exactly what the operator's loop hit.
 Verdicts (one per move):
 
   PASS  every check held.
+  COST  the move was correct but its transition cost exceeded the budget: a
+        ping gap over SOAK_MAX_GAP_MS or a stream stall over
+        SOAK_MAX_STALL_MS from which the stream recovered. That is #18559's
+        known cost, judged master-relative like row H10; SOAK_STRICT_COST=1
+        scores it as a FAIL.
   FAIL  a CLI error; "already primary" when the precondition held; any other
-        unexpected CLI text; the move did not land within the bound; a
-        dual-active sample; the helper disagrees with the status views; or
-        traffic did not follow (ping gap / stream stall over budget, no
-        traffic in the window's tail, a traffic generator that died).
+        unexpected CLI text; the move did not land within the bound; it left
+        the target or went dual-active inside the window; the helper
+        disagrees with the status views; the traffic did not follow (RETH
+        counters or the LAN neighbour entry on the old node, nothing in the
+        window's tail); a stream that never recovered; a traffic generator
+        that stopped.
   VOID  the precondition did not hold: before a move to node t, the RG was not
         cleanly owned by the other node. A failed move therefore costs ONE
         FAIL, and the next move (back to where the RG still is) is VOID, not a
-        second FAIL — the user's "already primary" line was that cascade.
+        second FAIL — the user's "already primary" line was that cascade. A
+        harness or precondition fault for the whole run (no clean owner, a
+        busy or dead traffic target, a Python error, SIGTERM) is a VOID run.
 
-Exit status: 0 all PASS; 1 any FAIL; 2 no FAIL but a VOID (or the whole run
-was void at preflight).
+Exit status: 0 every move PASS or COST; 1 any FAIL; 2 no FAIL but a VOID move,
+a void run, or a check disabled (SOAK_TRAFFIC=0, SOAK_HELPER_CHECK=0).
+The last line, "rg-move-soak: <n> passed, <m> failed", is what the
+smoke-cells ledger adapter scores.
 
 Pure functions (parsers, verdicts, summary) are covered hermetically by
 rg_move_soak_test.py; `Soak` takes an injectable cluster and clock so the
@@ -59,6 +77,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import statistics
 import subprocess
 import sys
@@ -66,7 +85,7 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
-PASS, FAIL, VOID = "PASS", "FAIL", "VOID"
+PASS, FAIL, VOID, COST = "PASS", "FAIL", "VOID", "COST"
 
 # ---------------------------------------------------------------------------
 # `show chassis cluster status` parsing
@@ -263,6 +282,7 @@ class StreamRun:
     stream: int
     start: float  # LAN ts
     seconds: float
+    to_end: bool = False  # still stalled at the last interval: the stream died
 
 
 def parse_iperf_stream(text: str) -> Tuple[List[Tuple[float, float, Dict[int, float], float]], bool, bool]:
@@ -350,15 +370,36 @@ def stream_stalls(intervals, low_bps: float) -> Tuple[List[StreamRun], List[Stre
         elif agg_run is not None:
             agg.append(agg_run)
             agg_run = None
-    per.extend(open_runs.values())
+    for run in open_runs.values():
+        run.to_end = True
+        per.append(run)
     if agg_run is not None:
+        agg_run.to_end = True
         agg.append(agg_run)
     return per, agg
+
+
+
+def iperf_error(text: str) -> Optional[str]:
+    """The first `error` event's text in an arrival-stamped json-stream log."""
+    for line in (text or "").splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            ev = json.loads(parts[1])
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(ev, dict) and ev.get("event") == "error":
+            return str(ev.get("data"))[:200]
+    return None
 
 
 # ---------------------------------------------------------------------------
 # Per-move verdict
 # ---------------------------------------------------------------------------
+
+FAMILIES = ("v4", "v6")
 
 
 @dataclass
@@ -368,6 +409,11 @@ class Budget:
     max_stall_ms: float = 2000.0
     tail_s: float = 1.0
     low_bps: float = 1_000_000.0
+    # traffic-follow: the target node's RETH members must carry at least
+    # follow_min_pkts between landing and the window's end, and the other
+    # node's at most follow_max_other_ratio of that.
+    follow_min_pkts: int = 500
+    follow_max_other_ratio: float = 0.10
 
 
 @dataclass
@@ -383,7 +429,14 @@ class RGMoveResult:
     landed_s: Optional[float]  # seconds from issue until both views agreed, None if never
     last_detail: str
     dual_active: bool
-    helper: Optional[Dict[int, Optional[bool]]] = None  # node -> helper rg active
+    helper: Optional[Dict[int, Optional[bool]]] = None  # node -> helper rg active, at landing
+    reverted: str = ""  # non-empty: the joint view left the target after landing, in-window
+    # Traffic-follow evidence, read after landing and at the window's end:
+    # RETH-member packet deltas per node, and which node the LAN host's
+    # neighbour entry for the LAN VIP resolves to.
+    member_delta: Optional[Dict[int, Optional[int]]] = None
+    neigh_node: Optional[Dict[str, Optional[int]]] = None
+    follow_expected: bool = False  # the RG has RETH members to measure
 
 
 @dataclass
@@ -394,7 +447,7 @@ class MoveRecord:
     t_issue_lan: float
     t_next_lan: float
     rgs: List[RGMoveResult]
-    traffic: Optional[Dict] = None
+    traffic: Optional[Dict[str, Dict]] = None  # family -> facts
     verdict: str = ""
     reasons: List[str] = field(default_factory=list)
 
@@ -402,7 +455,7 @@ class MoveRecord:
 def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[Tuple[float, int]],
                        stalls: List[StreamRun], agg: List[StreamRun], intervals,
                        budget: Budget) -> Dict:
-    """The traffic facts for one move window [t0, t1) on the LAN clock."""
+    """The traffic facts for one family in one move window [t0, t1) on the LAN clock."""
     win_gaps = [g for g in gaps if t0 <= g.start < t1]
     lost = sum(g.lost for g in win_gaps)
     max_gap = max((g.end - g.start for g in win_gaps), default=None)
@@ -410,6 +463,7 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
     tail_replies = sum(1 for ts, _ in replies if tail0 <= ts < t1)
     win_stalls = [s for s in stalls if t0 <= s.start < t1]
     worst = max(win_stalls, key=lambda s: s.seconds, default=None)
+    died = sorted({s.stream for s in win_stalls if s.to_end})
     agg_zero = sum(s.seconds for s in agg if t0 <= s.start < t1)
     tail_iv = [iv for iv in intervals if iv[0] >= tail0 and iv[1] <= t1 + 1e-6]
     tail_bps = statistics.mean(iv[3] for iv in tail_iv) if tail_iv else None
@@ -421,6 +475,7 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
         "ping_tail_replies": tail_replies,
         "worst_stall_ms": 0.0 if worst is None else round(worst.seconds * 1000.0, 1),
         "worst_stall_stream": None if worst is None else worst.stream,
+        "died_streams": died,
         "agg_zero_ms": round(agg_zero * 1000.0, 1),
         "tail_gbps": None if tail_bps is None else round(tail_bps / 1e9, 2),
         "ping_covered": covered_ping,
@@ -428,11 +483,37 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
     }
 
 
+def follow_reasons(r: RGMoveResult, budget: Budget) -> List[str]:
+    """Did the TRAFFIC move with the RG? Status and helper views say who
+    should forward; these readings say who did (#18587 review B1)."""
+    out: List[str] = []
+    other = 1 - r.target
+    if r.follow_expected:
+        d = r.member_delta or {}
+        tgt, oth = d.get(r.target), d.get(other)
+        if tgt is None or oth is None:
+            out.append(f"RG{r.rg} traffic-follow unmeasured: helper per-interface counters unreadable (node{r.target}={tgt} node{other}={oth})")
+        elif tgt < budget.follow_min_pkts or oth > max(budget.follow_max_other_ratio * tgt, budget.follow_min_pkts / 10):
+            out.append(f"RG{r.rg} traffic did not follow to node{r.target}: RETH-member packets after landing "
+                       f"node{r.target}={tgt} node{other}={oth}")
+    for fam, node in (r.neigh_node or {}).items():
+        if node is not None and node != r.target:
+            out.append(f"RG{r.rg} traffic did not follow to node{r.target}: the LAN host's {fam} neighbour entry "
+                       f"for the LAN VIP still resolves to node{node}'s MAC")
+    return out
+
+
 def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tuple[str, List[str]]:
-    """Score one move. VOID (precondition) dominates, then every FAIL reason.
+    """Score one move.
+
+    VOID (precondition) dominates. Then every correctness FAIL reason. A move
+    with no FAIL but a transition cost over budget — a ping gap or a stream
+    stall that recovered — is COST: the move was correct and the cost is
+    #18559's, judged master-relative like row H10. A stream that never
+    recovers is a FAIL, not a cost.
 
     The precondition is the state observed at the end of the previous move's
-    poll (or the preflight), so it costs no extra reads and is the same
+    window (or the preflight), so it costs no extra reads and is the same
     evidence the previous verdict was built from.
     """
     reasons: List[str] = []
@@ -442,6 +523,7 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
             reasons.append(f"precondition: RG{r.rg} was {where} before a move to node{r.target} ({r.pre_detail})")
     if reasons:
         return VOID, reasons
+    costs: List[str] = []
     for r in rec.rgs:
         other = 1 - r.target
         if r.cli_class == CLI_ERROR:
@@ -452,44 +534,54 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
         elif r.cli_class == CLI_OTHER:
             reasons.append(f"RG{r.rg} unexpected CLI output: {r.cli_first}")
         if r.dual_active:
-            reasons.append(f"RG{r.rg} dual-active sample during the move")
+            reasons.append(f"RG{r.rg} dual-active sample during the move window")
         if r.landed_s is None:
             reasons.append(f"RG{r.rg} did not land on node{r.target} within {budget.converge_s:g}s of the CLI returning (last: {r.last_detail})")
-        elif r.helper is not None:
+            continue
+        if r.reverted:
+            reasons.append(f"RG{r.rg} left node{r.target} after landing, inside the window ({r.reverted})")
+        if r.helper is not None:
             want = {r.target: True, other: False}
             bad = [f"node{n}={'unreadable' if r.helper.get(n) is None else r.helper.get(n)}"
                    for n in (0, 1) if r.helper.get(n) is not want[n]]
             if bad:
                 reasons.append(f"RG{r.rg} helper ha_groups[].active disagrees with status (want node{r.target}=True): {' '.join(bad)}")
+        if traffic_enabled:
+            reasons.extend(follow_reasons(r, budget))
     if traffic_enabled:
-        t = rec.traffic or {}
-        if not t.get("ping_covered", False):
-            reasons.append("ping did not cover the move window (ping died or never started)")
-        if not t.get("iperf_covered", False):
-            reasons.append("iperf3 did not cover the move window (streams died or the client exited)")
-        gap = t.get("ping_max_gap_ms")
-        if gap is not None and gap > budget.max_gap_ms:
-            reasons.append(f"ping gap {gap:g} ms > {budget.max_gap_ms:g} ms ({t.get('ping_lost')} lost)")
-        stall = t.get("worst_stall_ms") or 0.0
-        if stall > budget.max_stall_ms:
-            reasons.append(f"stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms")
-        if t.get("ping_covered") and t.get("ping_tail_replies", 0) == 0:
-            reasons.append(f"traffic did not follow: no ping replies in the last {budget.tail_s:g}s of the window")
-        if t.get("iperf_covered") and (t.get("tail_gbps") or 0.0) * 1e9 < budget.low_bps:
-            reasons.append(f"traffic did not follow: iperf3 aggregate under {budget.low_bps / 1e6:g} Mbit/s in the window tail")
-    return (FAIL, reasons) if reasons else (PASS, [])
+        for fam, t in sorted((rec.traffic or {}).items()):
+            if not t.get("ping_covered", False):
+                reasons.append(f"{fam} ping did not cover the move window (ping died or never started)")
+            if not t.get("iperf_covered", False):
+                reasons.append(f"{fam} iperf3 did not cover the move window (streams died or the client exited)")
+            if t.get("died_streams"):
+                reasons.append(f"{fam} stream(s) {t['died_streams']} stalled in this window and never recovered")
+            if t.get("ping_covered") and t.get("ping_tail_replies", 0) == 0:
+                reasons.append(f"traffic did not follow: no {fam} ping replies in the last {budget.tail_s:g}s of the window")
+            if t.get("iperf_covered") and (t.get("tail_gbps") or 0.0) * 1e9 < budget.low_bps:
+                reasons.append(f"traffic did not follow: {fam} iperf3 aggregate under {budget.low_bps / 1e6:g} Mbit/s in the window tail")
+            gap = t.get("ping_max_gap_ms")
+            if gap is not None and gap > budget.max_gap_ms:
+                costs.append(f"{fam} ping gap {gap:g} ms > {budget.max_gap_ms:g} ms ({t.get('ping_lost')} lost)")
+            stall = t.get("worst_stall_ms") or 0.0
+            if stall > budget.max_stall_ms and not t.get("died_streams"):
+                costs.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms (recovered)")
+    if reasons:
+        return FAIL, reasons + costs
+    if costs:
+        return COST, costs
+    return PASS, []
 
 
-def summarize(moves: List[MoveRecord], traffic_enabled: bool) -> Dict:
-    counts = {PASS: 0, FAIL: 0, VOID: 0}
+def summarize(moves: List[MoveRecord], traffic_enabled: bool, disabled: List[str], strict_cost: bool) -> Dict:
+    counts = {PASS: 0, COST: 0, FAIL: 0, VOID: 0}
     for m in moves:
         counts[m.verdict] = counts.get(m.verdict, 0) + 1
-    by_dir = {}
+    by_dir: Dict[str, Dict[str, int]] = {}
     for m in moves:
-        key = f"to node{m.target}"
-        d = by_dir.setdefault(key, {PASS: 0, FAIL: 0, VOID: 0})
+        d = by_dir.setdefault(f"to node{m.target}", {PASS: 0, COST: 0, FAIL: 0, VOID: 0})
         d[m.verdict] += 1
-    out = {"moves": len(moves), "counts": counts, "by_direction": by_dir}
+    out: Dict = {"moves": len(moves), "counts": counts, "by_direction": by_dir, "disabled_checks": disabled}
     scored = [m for m in moves if m.verdict != VOID]
     landed = [r.landed_s for m in scored for r in m.rgs if r.landed_s is not None]
     clis = [r.cli_seconds for m in scored for r in m.rgs]
@@ -498,28 +590,36 @@ def summarize(moves: List[MoveRecord], traffic_enabled: bool) -> Dict:
     if clis:
         out["cli_s"] = {"median": round(statistics.median(clis), 2), "max": round(max(clis), 2)}
     if traffic_enabled and scored:
-        def dist(key):
-            vals = [m.traffic.get(key) for m in scored if m.traffic and m.traffic.get(key) is not None]
-            if not vals:
-                return None
-            return {"median": statistics.median(vals), "p95": sorted(vals)[int(0.95 * (len(vals) - 1))], "max": max(vals)}
-        out["ping_lost"] = dist("ping_lost")
-        out["ping_max_gap_ms"] = dist("ping_max_gap_ms")
-        out["worst_stall_ms"] = dist("worst_stall_ms")
+        for fam in FAMILIES:
+            fams = [m.traffic[fam] for m in scored if m.traffic and fam in m.traffic]
+            if not fams:
+                continue
+
+            def dist(key):
+                vals = [t.get(key) for t in fams if t.get(key) is not None]
+                if not vals:
+                    return None
+                return {"median": statistics.median(vals), "p95": sorted(vals)[int(0.95 * (len(vals) - 1))], "max": max(vals)}
+            out[fam] = {k: dist(k) for k in ("ping_lost", "ping_max_gap_ms", "worst_stall_ms")}
     reasons: Dict[str, int] = {}
     for m in moves:
         for r in m.reasons:
             key = re.sub(r"\d+(\.\d+)?", "N", r.split(":")[0] if r.startswith("precondition") else r)[:110]
             reasons[key] = reasons.get(key, 0) + 1
     out["reason_classes"] = dict(sorted(reasons.items(), key=lambda kv: -kv[1]))
-    out["exit"] = 1 if counts[FAIL] else (2 if counts[VOID] else 0)
+    if counts[FAIL] or (strict_cost and counts[COST]):
+        out["exit"] = 1
+    elif counts[VOID] or disabled:
+        out["exit"] = 2
+    else:
+        out["exit"] = 0
     return out
 
 
 def format_table(moves: List[MoveRecord], traffic_enabled: bool) -> str:
-    hdr = f"{'#':>4} {'to':>3} {'rg':>4} {'cli':>7} {'cli_s':>6} {'land_s':>6}"
+    hdr = f"{'#':>4} {'to':>3} {'rg':>5} {'cli':>8} {'cli_s':>6} {'land_s':>6}"
     if traffic_enabled:
-        hdr += f" {'lost':>5} {'gap_ms':>7} {'stall_ms':>8} {'tail_G':>6}"
+        hdr += f" {'lost':>5} {'gap_ms':>7} {'stall_ms':>8} {'tail_G':>6} {'v6lost':>6} {'v6gap':>6}"
     hdr += "  verdict  reason"
     lines = [hdr]
     for m in moves:
@@ -528,12 +628,15 @@ def format_table(moves: List[MoveRecord], traffic_enabled: bool) -> str:
         cli_s = max((r.cli_seconds for r in m.rgs), default=0.0)
         land = [r.landed_s for r in m.rgs]
         land_s = "-" if any(x is None for x in land) else f"{max(land):.2f}"
-        row = f"{m.index:>4} {m.target:>3} {rg:>4} {cli:>7} {cli_s:>6.2f} {land_s:>6}"
+        row = f"{m.index:>4} {m.target:>3} {rg:>5} {cli:>8} {cli_s:>6.2f} {land_s:>6}"
         if traffic_enabled:
-            t = m.traffic or {}
+            t = (m.traffic or {}).get("v4", {})
+            t6 = (m.traffic or {}).get("v6", {})
             gap = t.get("ping_max_gap_ms")
+            gap6 = t6.get("ping_max_gap_ms")
             row += (f" {t.get('ping_lost', '-'):>5} {('-' if gap is None else f'{gap:.0f}'):>7}"
-                    f" {t.get('worst_stall_ms', 0):>8.0f} {('-' if t.get('tail_gbps') is None else t['tail_gbps']):>6}")
+                    f" {t.get('worst_stall_ms', 0):>8.0f} {('-' if t.get('tail_gbps') is None else t['tail_gbps']):>6}"
+                    f" {t6.get('ping_lost', '-'):>6} {('-' if gap6 is None else f'{gap6:.0f}'):>6}")
         row += f"  {m.verdict:<7}  {m.reasons[0] if m.reasons else ''}"
         lines.append(row)
         for extra in m.reasons[1:]:
@@ -561,8 +664,53 @@ while True:
     except ValueError:
         pass
 st = r.get("status", r)
-print(json.dumps({str(g.get("rg_id")): bool(g.get("active")) for g in st.get("ha_groups", [])}))
+ifs = {}
+for b in st.get("bindings", []):
+    n = b.get("interface") or b.get("ifname")
+    if n:
+        ifs[n] = ifs.get(n, 0) + int(b.get("rx_packets") or 0) + int(b.get("tx_packets") or 0)
+print(json.dumps({"ha": {str(g.get("rg_id")): bool(g.get("active")) for g in st.get("ha_groups", [])}, "if": ifs}))
 """
+
+_SET_MEMBER = re.compile(r"^set (?:groups \S+ )?interfaces (\S+) gigether-options redundant-parent (reth\d+)\s*$")
+_SET_RETH_RG = re.compile(r"^set (?:groups \S+ )?interfaces (reth\d+) redundant-ether-options redundancy-group (\d+)\s*$")
+_LINK_MAC = re.compile(r"^\d+:\s+([^:@\s]+)[@:].*link/ether ([0-9a-f:]{17})")
+_NEIGH_MAC = re.compile(r"lladdr ([0-9a-f:]{17})")
+
+
+def rg_members(config_set: str) -> Dict[int, List[str]]:
+    """{rg: [Linux member names]} from `show configuration | display set`."""
+    reth_rg = {}
+    members: Dict[str, List[str]] = {}
+    for line in (config_set or "").splitlines():
+        m = _SET_RETH_RG.match(line.strip())
+        if m:
+            reth_rg[m.group(1)] = int(m.group(2))
+            continue
+        m = _SET_MEMBER.match(line.strip())
+        if m:
+            members.setdefault(m.group(2), []).append(m.group(1).replace("/", "-"))
+    out: Dict[int, List[str]] = {}
+    for reth, rg in reth_rg.items():
+        # An RG with a RETH but no members found keeps an EMPTY list, so the
+        # caller can tell "nothing to measure" from "could not measure".
+        out.setdefault(rg, []).extend(sorted(set(members.get(reth, []))))
+    return out
+
+
+def link_macs(ip_o_link: str) -> Dict[str, str]:
+    """{mac: ifname} from `ip -o link`."""
+    out: Dict[str, str] = {}
+    for line in (ip_o_link or "").splitlines():
+        m = _LINK_MAC.match(line)
+        if m and m.group(2) != "00:00:00:00:00:00":
+            out.setdefault(m.group(2), m.group(1))
+    return out
+
+
+def neigh_mac(text: str) -> Optional[str]:
+    m = _NEIGH_MAC.search(text or "")
+    return m.group(1) if m else None
 
 
 class IncusCluster:
@@ -587,14 +735,29 @@ class IncusCluster:
     def status(self, node: int) -> str:
         return self._exec(self.fw[node], ["cli", "-c", "show chassis cluster status"])[1]
 
-    def helper(self, node: int) -> Optional[Dict[int, bool]]:
+    def config_set(self, node: int) -> str:
+        # The CLI has no top-level `show configuration | display set`; RETH
+        # members live under groups node0/node1, the RETH->RG binding under
+        # interfaces.
+        return "\n".join(self._exec(self.fw[node], ["cli", "-c", f"show configuration {part} | display set"])[1]
+                         for part in ("groups", "interfaces"))
+
+    def links(self, node: int) -> str:
+        return self._exec(self.fw[node], ["ip", "-o", "link"])[1]
+
+    def helper(self, node: int) -> Optional[Dict]:
         rc, out = self._exec(self.fw[node], ["python3", "-c", HELPER_SNIPPET], timeout=15)
         if rc != 0:
             return None
         try:
-            return {int(k): v for k, v in json.loads(out.strip().splitlines()[-1]).items()}
-        except (ValueError, IndexError):
+            raw = json.loads(out.strip().splitlines()[-1])
+            return {"ha": {int(k): v for k, v in raw.get("ha", {}).items()}, "if": raw.get("if", {})}
+        except (ValueError, IndexError, AttributeError):
             return None
+
+    def neigh(self, vip: str) -> str:
+        fam = "-6" if ":" in vip else "-4"
+        return self._exec(self.lan, ["ip", fam, "neigh", "show", vip], timeout=10)[1]
 
     def clock(self, ref: str) -> Optional[float]:
         rc, out = self._exec(ref, ["date", "+%s.%N"], timeout=10)
@@ -637,6 +800,11 @@ def measure_offset(clock_fn, ref: str, now_fn=time.time, samples: int = 5) -> Op
 # ---------------------------------------------------------------------------
 
 
+class VoidRun(Exception):
+    """The run cannot measure what it claims to (a precondition or harness
+    fault). Scored VOID, never FAIL."""
+
+
 @dataclass
 class Config:
     moves: int = 20
@@ -646,10 +814,18 @@ class Config:
     budget: Budget = field(default_factory=Budget)
     traffic: bool = True
     helper_check: bool = True
+    strict_cost: bool = False
+    restore: bool = True
     target4: str = ""
+    target6: str = ""
+    lan_vip4: str = ""
+    lan_vip6: str = ""
     iperf_port: int = 5211
+    iperf6_port: int = 5210
     iperf_streams: int = 8
+    iperf6_streams: int = 2
     poll_s: float = 0.2
+    warmup_s: float = 3.0
     outdir: str = ""
     run_id: str = ""
 
@@ -662,6 +838,9 @@ class Soak:
         self.sleep = sleep_fn
         self.log = log
         self.lan_offset = 0.0  # LAN clock minus this host's clock
+        self.members: Dict[int, List[str]] = {}
+        self.macs: Dict[str, Tuple[int, str]] = {}
+        self.traffic_started = False
 
     # -- helpers --------------------------------------------------------
 
@@ -669,6 +848,13 @@ class Soak:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
             f0, f1 = ex.submit(self.c.status, 0), ex.submit(self.c.status, 1)
             return parse_status(f0.result()), parse_status(f1.result())
+
+    def helpers(self) -> Dict[int, Optional[Dict]]:
+        if not self.cfg.helper_check:
+            return {0: None, 1: None}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            h = {n: ex.submit(self.c.helper, n) for n in (0, 1)}
+            return {n: f.result() for n, f in h.items()}
 
     def resolve_rgs(self, v0: Dict[int, RGView]) -> List[int]:
         spec = self.cfg.rgs.strip().lower()
@@ -678,6 +864,16 @@ class Soak:
 
     def lan_time(self, t_local: float) -> float:
         return t_local + self.lan_offset
+
+    def families(self) -> List[Tuple[str, str, int, int]]:
+        out = [("v4", self.cfg.target4, self.cfg.iperf_port, self.cfg.iperf_streams)]
+        if self.cfg.target6:
+            out.append(("v6", self.cfg.target6, self.cfg.iperf6_port, self.cfg.iperf6_streams))
+        return out
+
+    def _path(self, kind: str, fam: str) -> str:
+        suffix = "" if fam == "v4" else "6"
+        return os.path.join(self.cfg.outdir, f"ping{suffix}.log" if kind == "ping" else f"iperf{suffix}.jsonl")
 
     # -- preflight ------------------------------------------------------
 
@@ -704,8 +900,7 @@ class Soak:
             return "cannot read the LAN host clock", info
         self.lan_offset = offs["lan"][0]
         if offs["node0"] and offs["node1"]:
-            skew = offs["node1"][0] - offs["node0"][0]
-            info["node1_minus_node0_s"] = round(skew, 2)
+            info["node1_minus_node0_s"] = round(offs["node1"][0] - offs["node0"][0], 2)
         info["chrony"] = {n: self.c.chrony(n) for n in (0, 1)}
         # #18585 builds print the heartbeat-measured peer offset; record it
         # beside the harness's own measurement (absent on older builds).
@@ -714,39 +909,82 @@ class Soak:
             m = re.search(r"^Peer clock offset: .*$", self.c.status(n) or "", re.M)
             if m:
                 info["peer_clock_line"][n] = m.group(0)
+        # Traffic-follow inputs: which interfaces carry each RG, and which
+        # node owns each MAC the LAN host can resolve the VIP to.
+        self.members = rg_members(self.c.config_set(0))
+        info["rg_members"] = {rg: self.members.get(rg) for rg in rgs}
+        if self.cfg.traffic and self.cfg.helper_check:
+            for rg in rgs:
+                if rg in self.members and not self.members[rg]:
+                    return (f"RG{rg} has a RETH but no member interfaces were found in the configuration, "
+                            "so the traffic-follow check cannot measure it"), info
+        for n in (0, 1):
+            for mac, ifname in link_macs(self.c.links(n)).items():
+                self.macs[mac] = (n, ifname)
         self._owners = {rg: o for rg, o in owners.items()}
         return None, info
 
     # -- traffic --------------------------------------------------------
 
     def start_traffic(self, duration_s: int):
-        rid, out = self.cfg.run_id, self.cfg.outdir
-        t = shlex.quote(self.cfg.target4)
+        rid = self.cfg.run_id
         stamp = ("import sys,time\n"
                  "for l in sys.stdin:\n"
                  "    sys.stdout.write('%.6f %s' % (time.time(), l)); sys.stdout.flush()\n")
-        iperf = (f"sh -c 'echo $$ > /tmp/r-soak-{rid}.iperf.pid; exec iperf3 -c {t} -p {self.cfg.iperf_port}"
-                 f" -P {self.cfg.iperf_streams} -t {duration_s} -i 0.1 --json-stream --forceflush'"
-                 f" | python3 -u -c {shlex.quote(stamp)}")
-        ping = (f"echo $$ > /tmp/r-soak-{rid}.ping.pid; exec ping -D -i 0.01 -W 1 -w {duration_s} {t}")
-        self.ping_p, self.ping_f = self.c.popen_lan(ping, os.path.join(out, "ping.log"))
-        self.iperf_p, self.iperf_f = self.c.popen_lan(iperf, os.path.join(out, "iperf.jsonl"))
+        self.procs = []
+        for fam, target, port, streams in self.families():
+            t = shlex.quote(target)
+            v = "-6" if fam == "v6" else "-4"
+            iperf = (f"sh -c 'echo $$ > /tmp/r-soak-{rid}.iperf{fam}.pid; exec iperf3 {v} -c {t} -p {port}"
+                     f" -P {streams} -t {duration_s} -i 0.1 --json-stream --forceflush'"
+                     f" | python3 -u -c {shlex.quote(stamp)}")
+            ping = f"echo $$ > /tmp/r-soak-{rid}.ping{fam}.pid; exec ping {v} -D -i 0.01 -W 1 -w {duration_s} {t}"
+            self.procs.append(self.c.popen_lan(ping, self._path("ping", fam)))
+            self.procs.append(self.c.popen_lan(iperf, self._path("iperf", fam)))
+        self.traffic_started = True
 
     def stop_traffic(self):
+        if not self.traffic_started:
+            return
+        self.traffic_started = False
         rid = self.cfg.run_id
-        self.c.lan_sh(f"for p in /tmp/r-soak-{rid}.iperf.pid /tmp/r-soak-{rid}.ping.pid; do"
+        self.c.lan_sh(f"for p in /tmp/r-soak-{rid}.*.pid; do"
                       f" [ -f $p ] && kill -INT $(cat $p) 2>/dev/null; done; sleep 2;"
-                      f" rm -f /tmp/r-soak-{rid}.iperf.pid /tmp/r-soak-{rid}.ping.pid")
-        for p, f in ((self.ping_p, self.ping_f), (self.iperf_p, self.iperf_f)):
+                      f" rm -f /tmp/r-soak-{rid}.*.pid")
+        for p, f in self.procs:
             try:
                 p.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 p.kill()
             f.close()
 
+    def _read(self, path: str) -> str:
+        try:
+            with open(path) as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def traffic_preflight(self) -> Optional[str]:
+        """After the warmup, every family must be answering and streaming. A
+        busy or unreachable iperf3 server, or a dead target, is VOID: nothing
+        a move did caused it (#18587 review B4)."""
+        for fam, target, port, _ in self.families():
+            ptxt, itxt = self._read(self._path("ping", fam)), self._read(self._path("iperf", fam))
+            err = iperf_error(itxt)
+            if err:
+                return f"{fam} iperf3 to {target}:{port} failed before any move: {err}"
+            intervals, _, _ = parse_iperf_stream(itxt)
+            good = [iv for iv in intervals if iv[3] >= self.cfg.budget.low_bps]
+            if len(good) < 5:
+                return f"{fam} iperf3 to {target}:{port} is not streaming after {self.cfg.warmup_s:g}s warmup ({len(good)} good intervals)"
+            if len(parse_ping(ptxt)) < 20:
+                return f"{fam} ping to {target} is not answering after {self.cfg.warmup_s:g}s warmup"
+        return None
+
     # -- one move -------------------------------------------------------
 
-    def one_rg(self, rg: int, target: int, pre: Ownership) -> RGMoveResult:
+    def one_rg(self, rg: int, target: int, pre: Ownership) -> Tuple[RGMoveResult, float]:
         cmd = f"request chassis cluster failover redundancy-group {rg} node {target}"
         t0 = self.now()
         rc, out = self.c.cli(self.cfg.issuer, cmd)
@@ -767,50 +1005,139 @@ class Soak:
             if self.now() >= deadline:
                 break
             self.sleep(self.cfg.poll_s)
-        self._owners[rg] = own
+        # self._owners (the next move's precondition) is refreshed by
+        # watch_window at the END of the window, not here at landing.
         res = RGMoveResult(rg, target, pre.owner, pre.detail, cls, first, rc, round(t_ret - t0, 3),
                            None if landed is None else round(landed, 3), last, dual)
-        return res
+        res.follow_expected = self.cfg.traffic and self.cfg.helper_check and bool(self.members.get(rg))
+        return res, t_ret
+
+    def watch_window(self, results: List[RGMoveResult], until: float):
+        """Keep sampling both views until the window ends: a move that
+        reverts, or goes dual-active, after landing is not a landed move."""
+        while self.now() < until:
+            v0, v1 = self.views()
+            for r in results:
+                own = rg_ownership(r.rg, v0, v1)
+                r.dual_active = r.dual_active or own.dual_active
+                if r.landed_s is not None and own.owner != r.target and not r.reverted:
+                    r.reverted = own.detail
+                self._owners[r.rg] = own
+            self.sleep(self.cfg.poll_s)
+
+    def member_counts(self, hv: Dict[int, Optional[Dict]], rg: int) -> Dict[int, Optional[int]]:
+        out: Dict[int, Optional[int]] = {}
+        for n in (0, 1):
+            h = hv.get(n)
+            out[n] = None if h is None else sum(int(h["if"].get(x, 0)) for x in self.members.get(rg, []))
+        return out
+
+    def neigh_nodes(self) -> Dict[str, Optional[int]]:
+        out: Dict[str, Optional[int]] = {}
+        for fam, vip in (("v4", self.cfg.lan_vip4), ("v6", self.cfg.lan_vip6)):
+            if not vip:
+                continue
+            mac = neigh_mac(self.c.neigh(vip))
+            out[fam] = self.macs.get(mac, (None, ""))[0] if mac else None
+        return out
+
+    def restore_node0(self, rgs: List[int]) -> str:
+        """Matrix row D3: leave node0 primary. A local pull on node0 per RG not
+        already there; reported, never folded into the moves' verdicts."""
+        moved = []
+        for rg in rgs:
+            if self._owners.get(rg) is not None and self._owners[rg].owner == 0:
+                continue
+            self.c.cli(0, f"request chassis cluster failover redundancy-group {rg} node 0")
+            moved.append(rg)
+        deadline = self.now() + 30
+        while moved:
+            v0, v1 = self.views()
+            if all(rg_ownership(rg, v0, v1).owner == 0 for rg in rgs):
+                return f"node0 primary for RG {rgs} (restored {moved})"
+            if self.now() >= deadline:
+                return f"WARNING: node0 not primary for every RG in {rgs} after 30s; restore by hand"
+            self.sleep(1.0)
+        return f"node0 already primary for RG {rgs}"
 
     def run(self) -> int:
         cfg = self.cfg
         why, info = self.preflight()
-        self.log(f"preflight: {json.dumps(info, sort_keys=True)}")
+        self.log(f"preflight: {json.dumps(info, sort_keys=True, default=str)}")
         skew = info.get("node1_minus_node0_s")
         if skew is not None and abs(skew) >= 10:
             self.log(f"preflight WARNING: node1 is {skew:+.1f}s from node0 — fabric RPC auth tolerates <30s;"
                      " cross-node moves are expected to FAIL (this harness does not fix clocks)")
         if why:
-            self.log(f"VOID (preflight): {why}")
+            self.log(f"FATAL: preflight VOID: {why}")
             self._write({"preflight": info, "void": why, "moves": []})
             return 2
         rgs = info["rgs"]
+        # The LAN RG: the one whose RETH members own the MAC the LAN host
+        # currently resolves the LAN VIP to (only that RG's move can change it).
+        self._lan_rg = None
+        if cfg.traffic and cfg.lan_vip4:
+            mac = neigh_mac(self.c.neigh(cfg.lan_vip4))
+            node_if = self.macs.get(mac or "")
+            if node_if:
+                for rg, mem in self.members.items():
+                    if node_if[1] in mem:
+                        self._lan_rg = rg
+        info["lan_rg"] = self._lan_rg
+        if cfg.traffic and cfg.lan_vip4 and self._lan_rg is None:
+            why = (f"the LAN host's neighbour entry for {cfg.lan_vip4} does not resolve to a RETH member MAC "
+                   "of either node, so the traffic-follow check cannot read it")
+            self.log(f"FATAL: preflight VOID: {why}")
+            self._write({"preflight": info, "void": why, "moves": []})
+            return 2
         # First target per RG: away from its current owner. Alternate strictly
         # afterwards, like the operator's loop, whatever happened.
         targets = {rg: 1 - info["owners"][rg] for rg in rgs}
         moves: List[MoveRecord] = []
-        if cfg.traffic:
-            per_move = cfg.sleep_s + cfg.budget.converge_s + 3
-            self.start_traffic(int(cfg.moves * per_move * len(rgs) + 60))
-            self.sleep(3.0)
+        disabled = []
+        if not cfg.traffic:
+            disabled.append("traffic (SOAK_TRAFFIC=0): no traffic-follow, loss or stall evidence")
+        if not cfg.helper_check:
+            disabled.append("helper (SOAK_HELPER_CHECK=0): no ha_groups or RETH-member counter evidence")
         t_start = self.now()
         try:
+            if cfg.traffic:
+                per_move = cfg.sleep_s + cfg.budget.converge_s + 4
+                self.start_traffic(int(cfg.moves * per_move * len(rgs) + 60))
+                self.sleep(cfg.warmup_s)
+                bad = self.traffic_preflight()
+                if bad:
+                    raise VoidRun(f"traffic preflight: {bad}")
             for i in range(1, cfg.moves + 1):
                 target = targets[rgs[0]]
                 t_issue = self.now()
-                results = []
+                results: List[RGMoveResult] = []
+                t_ret_last = t_issue
                 for rg in rgs:
-                    results.append(self.one_rg(rg, targets[rg], self._owners[rg]))
-                if cfg.helper_check:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-                        h = {n: ex.submit(self.c.helper, n) for n in (0, 1)}
-                        hv = {n: f.result() for n, f in h.items()}
+                    r, t_ret_last = self.one_rg(rg, targets[rg], self._owners[rg])
+                    results.append(r)
+                h1 = self.helpers()
+                for r in results:
+                    if r.landed_s is not None and cfg.helper_check:
+                        r.helper = {n: (None if h1[n] is None else h1[n]["ha"].get(r.rg)) for n in (0, 1)}
+                # The operator's `sleep S` starts when the CLI returns. Watch
+                # the views for the rest of it, then read the traffic-follow
+                # evidence just before the next move.
+                self.watch_window(results, t_ret_last + cfg.sleep_s)
+                if cfg.traffic:
+                    h2 = self.helpers()
+                    neigh = self.neigh_nodes()
                     for r in results:
-                        if r.landed_s is not None:
-                            r.helper = {n: (None if hv[n] is None else hv[n].get(r.rg)) for n in (0, 1)}
+                        if r.landed_s is None:
+                            continue
+                        if r.follow_expected:
+                            a, b = self.member_counts(h1, r.rg), self.member_counts(h2, r.rg)
+                            r.member_delta = {n: (None if a[n] is None or b[n] is None else b[n] - a[n]) for n in (0, 1)}
+                        if self._lan_rg is not None and r.rg == self._lan_rg:
+                            r.neigh_node = neigh
                 rec = MoveRecord(i, target, cfg.issuer, self.lan_time(t_issue), 0.0, results)
                 moves.append(rec)
-                if moves[:-1]:
+                if len(moves) > 1:
                     moves[-2].t_next_lan = rec.t_issue_lan
                 c = results[-1]
                 self.log(f"move {i:>4} -> node{target}: cli={','.join(r.cli_class for r in results)}"
@@ -818,40 +1145,49 @@ class Soak:
                          f" {c.cli_first[:120]}")
                 for rg in rgs:
                     targets[rg] = 1 - targets[rg]
-                # The operator's `sleep S` starts when the CLI returns; the
-                # poll above ran inside that sleep.
-                t_ret_last = t_issue + max(r.cli_seconds for r in results)
-                remaining = t_ret_last + cfg.sleep_s - self.now()
-                if remaining > 0:
-                    self.sleep(remaining)
             if moves:
                 moves[-1].t_next_lan = self.lan_time(self.now())
+        except VoidRun as e:
+            self.log(f"FATAL: {e}")
+            self._write({"preflight": info, "void": str(e), "moves": [asdict(m) for m in moves]})
+            return 2
         finally:
             if cfg.traffic:
                 self.sleep(1.0)
                 self.stop_traffic()
+            if cfg.restore:
+                info["restore"] = self.restore_node0(rgs)
+                self.log(f"restore: {info['restore']}")
         end_offs = {n: measure_offset(self.c.clock, self.c.fw[n], self.now) for n in (0, 1)}
         if end_offs[0] and end_offs[1]:
             info["end_node1_minus_node0_s"] = round(end_offs[1][0] - end_offs[0][0], 2)
-        return self.finish(moves, info, t_start)
+        return self.finish(moves, info, disabled)
 
-    def finish(self, moves: List[MoveRecord], info: Dict, t_start: float) -> int:
+    def finish(self, moves: List[MoveRecord], info: Dict, disabled: List[str]) -> int:
         cfg = self.cfg
         if cfg.traffic:
-            with open(os.path.join(cfg.outdir, "ping.log")) as f:
-                replies = parse_ping(f.read())
-            with open(os.path.join(cfg.outdir, "iperf.jsonl")) as f:
-                intervals, _, _ = parse_iperf_stream(f.read())
-            gaps = ping_gaps(replies)
-            stalls, agg = stream_stalls(intervals, cfg.budget.low_bps)
-            for m in moves:
-                m.traffic = traffic_for_window(m.t_issue_lan, m.t_next_lan, gaps, replies, stalls, agg,
-                                               intervals, cfg.budget)
+            for fam, _, _, _ in self.families():
+                replies = parse_ping(self._read(self._path("ping", fam)))
+                intervals, _, _ = parse_iperf_stream(self._read(self._path("iperf", fam)))
+                gaps = ping_gaps(replies)
+                stalls, agg = stream_stalls(intervals, cfg.budget.low_bps)
+                for m in moves:
+                    m.traffic = m.traffic or {}
+                    m.traffic[fam] = traffic_for_window(m.t_issue_lan, m.t_next_lan, gaps, replies, stalls, agg,
+                                                        intervals, cfg.budget)
         for m in moves:
             m.verdict, m.reasons = move_verdict(m, cfg.budget, cfg.traffic)
-        summary = summarize(moves, cfg.traffic)
+        summary = summarize(moves, cfg.traffic, disabled, cfg.strict_cost)
         self.log(format_table(moves, cfg.traffic))
         self.log("summary: " + json.dumps(summary, sort_keys=True))
+        for d in disabled:
+            self.log(f"NOTE: check disabled: {d} — the run exits 2, not 0")
+        # The smoke-cells ledger adapter reads this pair: a correct move
+        # (PASS or COST) passed; a FAIL failed. VOID moves are neither, and the
+        # exit status (2) makes the row VOID.
+        c = summary["counts"]
+        self.log(f"rg-move-soak: {c[PASS] + c[COST]} passed, {c[FAIL]} failed "
+                 f"({c[COST]} with a #18559 transition cost over budget, {c[VOID]} void)")
         self._write({"preflight": info, "config": asdict(cfg), "summary": summary,
                      "moves": [asdict(m) for m in moves]})
         return summary["exit"]
@@ -873,6 +1209,9 @@ def main(argv=None) -> int:
     ap.add_argument("--fw1", required=True)
     ap.add_argument("--lan", required=True)
     ap.add_argument("--target4", required=True)
+    ap.add_argument("--target6", default="")
+    ap.add_argument("--lan-vip4", default="")
+    ap.add_argument("--lan-vip6", default="")
     ap.add_argument("--outdir", required=True)
     a = ap.parse_args(argv)
     sleep_s = _env_float("SOAK_SLEEP", 5.0)
@@ -881,7 +1220,9 @@ def main(argv=None) -> int:
         max_gap_ms=_env_float("SOAK_MAX_GAP_MS", 1000.0),
         max_stall_ms=_env_float("SOAK_MAX_STALL_MS", 2000.0),
         tail_s=_env_float("SOAK_TAIL_S", 1.0),
+        follow_min_pkts=int(_env_float("SOAK_FOLLOW_MIN_PKTS", 500)),
     )
+    v6 = os.environ.get("SOAK_IPV6", "1") != "0"
     cfg = Config(
         moves=int(os.environ.get("SOAK_MOVES", "20")),
         sleep_s=sleep_s,
@@ -890,21 +1231,41 @@ def main(argv=None) -> int:
         budget=budget,
         traffic=os.environ.get("SOAK_TRAFFIC", "1") != "0",
         helper_check=os.environ.get("SOAK_HELPER_CHECK", "1") != "0",
+        strict_cost=os.environ.get("SOAK_STRICT_COST", "0") == "1",
+        restore=os.environ.get("SOAK_RESTORE", "1") != "0",
         target4=a.target4,
+        target6=a.target6 if v6 else "",
+        lan_vip4=a.lan_vip4,
+        lan_vip6=a.lan_vip6 if v6 else "",
         iperf_port=int(os.environ.get("SOAK_IPERF_PORT", "5211")),
+        iperf6_port=int(os.environ.get("SOAK_IPERF6_PORT", "5210")),
         iperf_streams=int(os.environ.get("SOAK_STREAMS", "8")),
         outdir=a.outdir,
         run_id=re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(a.outdir.rstrip("/"))),
     )
     if cfg.issuer not in (0, 1):
-        print("SOAK_FROM must be 0 or 1", file=sys.stderr)
+        print("FATAL: SOAK_FROM must be 0 or 1", file=sys.stderr)
         return 2
     os.makedirs(cfg.outdir, exist_ok=True)
     print(f"rg-move-soak: {cfg.moves} moves of RG {cfg.rgs} from node{cfg.issuer} every {cfg.sleep_s:g}s; "
           f"converge<= {budget.converge_s:g}s gap<= {budget.max_gap_ms:g}ms stall<= {budget.max_stall_ms:g}ms; "
-          f"traffic={'on' if cfg.traffic else 'off'}; out={cfg.outdir}")
-    cluster = IncusCluster({0: a.fw0, 1: a.fw1}, a.lan)
-    return Soak(cfg, cluster).run()
+          f"traffic={'on' if cfg.traffic else 'off'} v6={'on' if cfg.target6 else 'off'}; out={cfg.outdir}")
+    soak = Soak(cfg, IncusCluster({0: a.fw0, 1: a.fw1}, a.lan))
+
+    def on_term(signum, frame):
+        # Unwind through run()'s finally: stops the LAN-host generators.
+        raise SystemExit(143)
+    signal.signal(signal.SIGTERM, on_term)
+    try:
+        return soak.run()
+    except SystemExit:
+        soak.stop_traffic()
+        print("FATAL: harness terminated by signal (generators stopped)")
+        return 2
+    except Exception as e:  # a harness fault is VOID, never a FAIL
+        soak.stop_traffic()
+        print(f"FATAL: harness error: {type(e).__name__}: {e}")
+        return 2
 
 
 if __name__ == "__main__":

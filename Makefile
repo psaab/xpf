@@ -1679,10 +1679,15 @@ test-active-active:
 # and ping -i 0.01 from the LAN host, and never fixes clocks (the preflight
 # reports inter-node skew instead). Knobs: SOAK_MOVES SOAK_SLEEP SOAK_RG
 # SOAK_FROM, see the script header and docs/ha-rg-move-correctness.md.
-# Self-locks the cluster.
+# Self-locks the cluster. Wrapped like the other HA gates so a run writes a
+# ledger row with build attestation (smoke-cells: the soak's last line is
+# "rg-move-soak: <n> passed, <m> failed"; a void run exits 2 with a FATAL).
 .PHONY: test-rg-move-soak test-rg-move-soak-lib
 test-rg-move-soak:
-	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/rg-move-soak.sh
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-rg-move-soak --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		-- ./test/incus/rg-move-soak.sh
 
 # Hermetic verdict + orchestration cells for the soak (fake cluster, no incus).
 test-rg-move-soak-lib:

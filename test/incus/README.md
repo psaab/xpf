@@ -72,7 +72,7 @@ is right and this table needs an edit in the same change.
 | Runnable shell | 59 = 58 harnesses + `harness-result.sh` (the envelope) |
 | Sourced shell libraries | 23 = the 21 named in `scripts/harness-census.sh` (`cluster-cell.sh`, `cluster-env.sh`, `cluster-lock.sh`, `cos-apply-lib.sh`, `deploy-lib.sh`, `fbf-steering-lib.sh`, `failover-client-lib.sh`, `failover-clock-lib.sh`, `failover-journal-lib.sh`, `ha-assurance-lib.sh`, `ha-smoke-iperf-lib.sh`, `host-inbound-lib.sh`, `iperf-throughput-lib.sh`, `mouse-elephant-lib.sh`, `newflow-ceiling-lib.sh`, `private-rg-lib.sh`, `screen-probe-lib.sh`, `stress-failover-lib.sh`, `target-services.sh`, `wire-config-snapshot-lib.sh`, `wire-gate-lib.sh`) + `active-fw.sh` + `v6-na-recovery-lib-12495.sh` (both declared in `HARNESSES.unreached` as `LIBRARY`) |
 | Hermetic shell self-tests | 33 `*-selftest.sh`, listed below |
-| Python | 57 = 26 tests (`*_test.py`, `test_*.py`) + 31 modules/helpers (incl. `unittest_shim.py`, `wire-routing-separation-temporal-selftest.py`) |
+| Python | 59 = 27 tests (`*_test.py`, `test_*.py`) + 32 modules/helpers (incl. `unittest_shim.py`, `wire-routing-separation-temporal-selftest.py`) |
 | Cluster defs & fixtures | 26 tracked files that are neither `*.sh` nor `*.py` outside the Rust crates (listed under Non-code files) |
 | Rust crates | `cold-path-flooder/` (`Cargo.toml`, `Cargo.lock`, `src/main.rs`, `.gitignore`), `newflow-gen/` (same four) |
 | Declarations | `GO_BUILDTAG_REVIEWED`, `HARNESSES.unreached`, `LEDGER_COVERAGE.unreached`, `ledger-expected-red.txt` (counted in Non-code files above) |
@@ -153,11 +153,12 @@ Modules/helpers (31): `cluster_status_parse.py`,
 `step1-rss-multinomial.py`, `step2-sched-switch-classify.py`,
 `step2-sched-switch-reduce.py`, `step3-tx-kick-classify.py`,
 `unittest_shim.py`, `v6-na-parse-12495.py`,
+`rg_move_soak.py` (the #18583 RG-move soak; `rg-move-soak.sh` runs it),
 `wire-routing-separation-temporal-selftest.py`, `wire_probe_burst.py`,
 `wire_raw_tcp_burst.py`, `wire_routing_probe.py`, `wire_tcp_accept.py`,
 `wire_tcp_hold.py`.
 
-Tests (26, run by `run-selftests.sh` §3b via `unittest discover` over
+Tests (27, run by `run-selftests.sh` §3b via `unittest discover` over
 `*_test.py`/`test_*.py`): `cluster_status_parse_test.py`,
 `cos_be_contention_validate_test.py`, `cos_port_grid_test.py`,
 `fairness_cos_active_fw_test.py`, `fairness_cov_test.py`,
@@ -168,7 +169,8 @@ Tests (26, run by `run-selftests.sh` §3b via `unittest discover` over
 `mouse_latency_aggregate_test.py`, `mouse_latency_orchestrate_test.py`,
 `mouse_latency_probe_test.py`, `newflow_ceiling_analyze_test.py`,
 `policy_scheduler_validate_test.py`,
-`retire_ebpf_artifact_schema_test.py`, `rolling_upgrade_oracle_test.py`,
+`retire_ebpf_artifact_schema_test.py`, `rg_move_soak_test.py`,
+`rolling_upgrade_oracle_test.py`,
 `step1_histogram_classify_test.py`, `step1_rate_spread_analysis_test.py`,
 `step1_rss_multinomial_test.py`, `step2_sched_switch_classify_test.py`,
 `step2_sched_switch_reduce_test.py`, `step3_tx_kick_classify_test.py`,

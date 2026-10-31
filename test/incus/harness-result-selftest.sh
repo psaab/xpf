@@ -1602,7 +1602,10 @@ done <<<"$helper_gate_inventory"
 hermetic_target=$(sed -n '/^test-wire-properties:/,/^$/p' "$makefile")
 if [[ -z "$hermetic_target" ]]; then
 	bad "#12140: hermetic gate lookup swept ZERO lines for test-wire-properties — the target was renamed or removed (empty sweep)"
-elif [[ "$helper_gate_count" == "24" && "${#missing_helper_gates[@]}" == "0" &&
+# The pin counts every cluster --gate invocation in the Makefile. 25 on master
+# at 5e3655d536 (the pin still said 24: a gate landed without bumping it);
+# 26 with #18583's test-rg-move-soak.
+elif [[ "$helper_gate_count" == "26" && "${#missing_helper_gates[@]}" == "0" &&
 	"$hermetic_target" != *"--require-helper-attestation"* ]]; then
 	ok "#12140: all $helper_gate_count cluster gate invocations require helper provenance; hermetic gate is excluded"
 else
