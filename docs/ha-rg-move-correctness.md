@@ -190,10 +190,16 @@ to the moment the next one is issued, on the LAN host's clock.
   answering and iperf3's aggregate must be above 1 Mbit/s. A move whose views
   agree while nothing forwards fails here.
 - **Split RGs.** Moving RG2 (LAN) alone splits it from RG1 (WAN), so every
-  flow crosses the fabric while RG2 is away. On tcp the tail aggregate was
-  about 9.6 Gbit/s with RG2 on node1 and about 39 Gbit/s with it on node0 (the
-  copy-mode fabric ceiling, `docs/fabric-performance-optimizations.md`). That
-  is expected, not a failure. Use `SOAK_RG=all` to move the RGs together.
+  flow crosses the fabric while RG2 is away. The tail aggregate with RG2 on
+  node1 against node0 was about 9.6 against 39 Gbit/s on tcp, and about 2.7
+  against 11.5 Gbit/s on loss: the copy-mode fabric ceiling,
+  `docs/fabric-performance-optimizations.md`. That is expected, not a failure.
+  - Under `-P8` the congested fabric also drops pings throughout the split
+    window. On loss that was up to 66 per 5 s window, with no gap longer than
+    87 ms.
+  - So read "ping lost" against "longest gap": many short gaps spread over the
+    window are congestion, and one long gap is the transition.
+  - Use `SOAK_RG=all` to move the RGs together.
 
 The hitless targets (at most 3 pings and no 200 ms stall per single-RG move)
 are row H10's, tracked by #18559. H11 judges correctness. Its default budgets
@@ -300,4 +306,6 @@ operator's failure, are in `test/incus/rg_move_soak_test.py`
 |---|---|---|
 | 2026-10-31, loss, 0.0.26111+ge80f506bc2dc, fw1 72 s behind fw0, no NTP | 20 moves of RG2 from node0, 5 s | 10 FAIL (every move to node1: the fabric-auth clock error), 10 VOID (every move back: "already primary"). Traffic stayed on node0 throughout: 0–4 pings lost per window, longest gap 21–39 ms |
 | 2026-10-31, tcp, 0.0.26066+gb5290d13d20d, clocks within about 1 s (no NTP) | 30 moves of RG2 from node0, 5 s | 30 PASS. CLI 0.53–0.78 s, landed 0.80–1.13 s after issue, 2–8 pings lost per move, longest gap 23–46 ms, worst stream stall 0–400 ms |
+| 2026-10-31, loss, 0.0.26140+gacf27bc2bc3b (master plus #18587, #18589, #18590), clocks 0.2 s apart | 200 moves of RG2 from node0, 5 s | 195 PASS, 5 FAIL. Every move landed (CLI 0.9–1.4 s, landed ≤ 1.98 s, no dual-active, helpers agreed). Each FAIL is one iperf3 stream stalled 2.2–6.6 s (TCP backoff after loss at the activation point; #18559). Ping: longest gap ≤ 115 ms, but up to 66 pings lost per window while RG2 sat on node1, spread across the window. That loss is fabric congestion: RG2 alone on node1 carries every flow over the copy-mode fabric, with a tail of about 2.7 Gbit/s against 11.5 Gbit/s on node0 |
+| same | 200 moves of RG2 from node0, 2 s | 200 PASS. CLI ≤ 1.41 s, landed ≤ 1.82 s, 5.5 pings lost per move (median; max 18), longest gap ≤ 95 ms, worst stall ≤ 1.5 s |
 | 2026-10-31, udp, 0.0.26120+gcce3fb49443a, clocks within about 1 s (no NTP) | 40 moves of every RG (0, 1, 2; three commands per move) from node1, 2 s | 40 PASS. CLI 0.56–1.28 s per command, landed ≤ 1.72 s, 1–11 pings lost per move, longest gap 23–65 ms, worst stream stall 0–1.4 s |
