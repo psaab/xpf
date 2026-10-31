@@ -332,6 +332,11 @@ else
 	die "Cannot reach iperf3 target $IPERF_TARGET from ${CLUSTER_LAN_HOST}"
 fi
 
+# #18614: one clock reading BEFORE the first crash. If chrony is not
+# synchronised here, there is no time source for a crash-rebooted node to
+# converge to, and the clock cell after the crash is VOID (lab/NTP), not FAIL.
+failover_clock_baseline "$FW0" "$FW1"
+
 # ═══════════════════════════════════════════════════════════════════════
 # Phase 1: Hard VM stop (kernel panic / power loss simulation)
 # ═══════════════════════════════════════════════════════════════════════
@@ -397,6 +402,9 @@ if start_instance "$FW0" "phase1"; then
 	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase1: fw0 xpfd restarted (${restart_time}s)"
+		# #18614: the post-crash clock state, logged before the settle, so a
+		# rejoin FAIL below carries it even if chrony converges first.
+		failover_clock_reading "phase1 post-restart" "$FW0" "$FW1"
 	else
 		fail "phase1: fw0 xpfd did not restart within ${VM_RESTART_WAIT}s"
 	fi
@@ -421,11 +429,11 @@ check_no_dual_active "phase1-rejoin"
 # window breaks the failback below. Before it, wait for NTP to converge on both
 # nodes and log the skew and the time it took; never set a clock. It runs HERE,
 # after the rejoin checks, so those keep their 10 s settle and see the cluster
-# in its real post-crash clock state; only the failback waits. A FAIL cell
-# only, as before, so a converged run's cell count is unchanged.
+# in its real post-crash clock state; only the failback waits. fail-only:
+# a converged run's cell count is unchanged (a resync still gets a PASS line
+# naming it, and a VOID gets a VOID line that harness-result.sh scores).
 if [[ -n "${restart_time:-}" ]]; then
-	failover_clock_precondition "phase1" "$FW0" "$FW1" ||
-		fail "$FAILOVER_CLOCK_DETAIL"
+	failover_clock_cell fail-only "phase1" "$FW0" "$FW1" "$FW0" || true
 fi
 
 # Restore fw0 as primary for next phase
@@ -620,6 +628,7 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 	restart_time=$(wait_for_xpfd "$FW0" "$VM_RESTART_WAIT" || true)
 	if [[ -n "$restart_time" ]]; then
 		pass "phase3-cycle${cycle}: fw0 restarted (${restart_time}s)"
+		failover_clock_reading "phase3-cycle${cycle} post-restart" "$FW0" "$FW1"
 	else
 		fail "phase3-cycle${cycle}: fw0 did not restart within ${VM_RESTART_WAIT}s"
 		cycle_failures=$((cycle_failures + 1))
@@ -646,8 +655,7 @@ for cycle in $(seq 1 "$CRASH_CYCLES"); do
 
 	# #18614: as in phase 1, after the rejoin checks and before the restore.
 	# Every cycle, the last included, so no unmeasured skew is left behind.
-	failover_clock_precondition "phase3-cycle${cycle}" "$FW0" "$FW1" ||
-		fail "$FAILOVER_CLOCK_DETAIL"
+	failover_clock_cell fail-only "phase3-cycle${cycle}" "$FW0" "$FW1" "$FW0" || true
 
 	# Restore fw0 as primary for next cycle (except last)
 	if [[ "$cycle" -lt "$CRASH_CYCLES" ]]; then
@@ -689,8 +697,7 @@ for inst in "$FW0" "$FW1"; do
 		# harness (and never set the clock).
 		if start_instance "$inst" "final" &&
 			wait_for_xpfd "$inst" "$VM_RESTART_WAIT" >/dev/null 2>&1; then
-			failover_clock_precondition "final" "$FW0" "$FW1" ||
-				fail "$FAILOVER_CLOCK_DETAIL"
+			failover_clock_cell fail-only "final" "$FW0" "$FW1" "$inst" || true
 		fi
 	fi
 	if instance_running "$inst"; then

@@ -86,7 +86,7 @@ re-run, not yet a regression; two are a regression.
 
 ## Tier 3: HA (loss and tcp; destructive targets self-lock)
 
-Clocks: the lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). A deb deploy preserves node config, so a cluster picks the stanza up only when it is committed on it (see `pkg/cluster/README.md`, "Prerequisite: a cluster needs a time source"). Since #18614 no HA gate sets a node clock. After every crash reboot, H1, H2 and H3 (`test-failover`, `test-ha-crash`, `test-double-failover`) run a measured precondition (`failover_clock_precondition`, `test/incus/failover-clock-lib.sh`): they wait for the node1−node0 skew, read from this host, to be within 5 s and for `chronyc tracking` to show `Leap status: Normal` on both nodes. They log the skew and the time it took. The budget is 120 s in `test-ha-crash`. In the other two it is whatever their iperf timelines already pay for (about 58 s and 88 s after a 22 s comeback). If NTP does not converge, that cell FAILS with the skew and both chrony states in its reason. Read that as a lab or NTP state, not a dataplane failure. A cluster without the NTP stanza committed therefore FAILS these rows, and so does one running a build older than #18584, which does not bind (unless a newer build left `/etc/chrony/conf.d/xpf-acquisition.conf` behind, as on loss after the downgrade to `g388eaad128`). On 2026-10-31 tcp and udp were in that state (`Leap status: Not synchronised`, no `xpf-acquisition.conf`). Commit the stanza on such a cluster. `XPF_FAILOVER_CLOCK_RESYNC=1` is the only way to run these rows on a lab without NTP. It brings back the #11872 `date -u -s` resync, prints a banner, and puts `clock_resync=1` on the ledger row. Such a row is not operator-faithful and does not stand as an HA PR's H1–H3 evidence. Rows from a run that only measured carry `clock_resync=0`.
+Clocks: the lab cluster configs carry NTP through `vrf-mgmt` since #18584 (public servers; the incus bridge gateways serve none). A deb deploy preserves node config, so a cluster picks the stanza up only when it is committed on it (see `pkg/cluster/README.md`, "Prerequisite: a cluster needs a time source"). Since #18614 no HA gate sets a node clock. H1, H2 and H3 (`test-failover`, `test-ha-crash`, `test-double-failover`) take one clock reading before the first crash and then, after each crash reboot they wait out (the double-failover's second crash, of fw1, ends that run with fw1 still rebooting, so it has none), run a measured precondition (`failover_clock_cell`, `test/incus/failover-clock-lib.sh`). It waits for the node1−node0 skew, read from this host, plus the reading's own error, to be within 5 s, and for `chronyc tracking` to show a synchronised Leap status (`Normal`, `Insert second` or `Delete second`) on both nodes. It logs the skew, the error and the time it took. The budget is 120 s in `test-ha-crash`. In the other two it is what their iperf timelines already pay for, about 58 s and 88 s after a 22 s comeback, with a 40 s floor. If it does not converge, the cell is scored by **who** has no time: **VOID** when chrony was already unsynchronised before the first crash, when the un-rebooted peer is unsynchronised, or when no measurement could be taken (lab/NTP or harness: never a regression); **FAIL** only when the peer is synchronised and the rebooted node did not converge to it (lab, NTP or product: xpfd owns chrony's `vrf-mgmt` binding and its restart, #18584/#18589). The ledger row carries `clock_converged`, `clock_void` and `clock_resync`, so `ledger_compare --all` tells a clock FAIL (`clock_converged=0 clock_void=0`) from a dataplane FAIL, and a clock VOID turns a would-be PASS row VOID with its reason. On 2026-10-31 loss and udp were synchronised (udp's stanza was committed that day); tcp was not (builds before #18589, stanza pending), so its H1–H3 clock cell VOIDs: see "Known environment rows". `XPF_FAILOVER_CLOCK_RESYNC=1` is the only way to run these rows on a lab without NTP. It brings back the #11872 `date -u -s` resync and prints a banner, and `harness-result.sh` records the would-be PASS as **VOID** with `clock_resync=1`, so a resynced run can never satisfy H1–H3.
 H11 goes further: it has no escape at all. It only reports the skew, because the operator's own loop gets no clock help (`docs/ha-rg-move-correctness.md`).
 Before pairing fw0 and fw1 journal times, measure the skew (on 2026-10-30 fw1 ran 66.8 s behind fw0 on loss); a cross-node timeline without that offset produced a wrong diagnosis once.
 
@@ -153,6 +153,20 @@ Before excusing a cell here, run a control in the same run that takes the
 product out of the path, for example the same destination from the incus
 host or the orchestrator. If the control passes, the cell is a product
 failure.
+
+- **tcp has no time source: H1–H3 clock cell VOID (#18614).** On
+  2026-10-31 both tcp nodes ran builds from before #18589
+  (`0.0.26615+gf056b1575a9c`) and reported `Leap status: Not synchronised`,
+  with no `/etc/chrony/conf.d/xpf-acquisition.conf`. The precondition's
+  pre-crash baseline therefore VOIDs the clock cell ("no time source
+  (lab/NTP): chrony was not synchronised before the first crash"), and the
+  row is VOID, never a regression.
+  - **Control:** the baseline line in the same run (`clock baseline (before
+    the first crash ...)`). If it shows both nodes synchronised, a later
+    clock VOID or FAIL is not this row.
+  - **Expiry:** tcp is deployed past #18589, the `system ntp server ...
+    routing-instance mgmt` stanza is committed there, and both nodes report
+    `Leap status: Normal`. Delete this row then.
 
 - **LAN host → internet IPv6 ping (`2607:f8b0:4005:80e::200e`)**, the
   `test-connectivity` cell of that name. The target is dead: from the

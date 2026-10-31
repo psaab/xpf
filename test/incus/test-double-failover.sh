@@ -143,6 +143,11 @@ fi
 failover_stop_main_iperf "$PIDFILE" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
 sleep 1
 
+# #18614: one clock reading BEFORE the first crash. If chrony is not
+# synchronised here, there is no time source for a crash-rebooted node to
+# converge to, and the clock cell after the crash is VOID (lab/NTP), not FAIL.
+failover_clock_baseline "$FW0" "$FW1"
+
 # ── Phase 1: Start iperf3 ───────────────────────────────────────────
 
 info "Starting iperf3 -P${IPERF_STREAMS} -t${IPERF_DURATION} → ${IPERF_TARGET}"
@@ -280,17 +285,15 @@ fi
 #
 # The wait spends only time this timeline already allowed (IPERF_DURATION has
 # to outlive the second crash): the REBOOT_WAIT the comeback left unused plus
-# the 20 s settle below, and never under 20 s. An explicit
-# XPF_FAILOVER_CLOCK_BUDGET_S wins.
+# the 20 s settle below (about 88 s after a 22 s comeback), floored at 40 s,
+# over 2x the measured 17-18 s convergence. An explicit
+# XPF_FAILOVER_CLOCK_BUDGET_S wins. The second crash (fw1, below) ends the run
+# while fw1 is still rebooting, so it has no clock cell.
 fw0_active_at="${fw0_active_at:-$SECONDS}"
 clock_budget=$(( reboot_wait_start + REBOOT_WAIT + 20 - SECONDS ))
-(( clock_budget >= 20 )) || clock_budget=20
-if XPF_FAILOVER_CLOCK_BUDGET_S="${XPF_FAILOVER_CLOCK_BUDGET_S:-$clock_budget}" \
-	failover_clock_precondition "fw0 crash reboot" "$FW0" "$FW1"; then
-	pass "$FAILOVER_CLOCK_DETAIL"
-else
-	fail "$FAILOVER_CLOCK_DETAIL"
-fi
+(( clock_budget >= 40 )) || clock_budget=40
+XPF_FAILOVER_CLOCK_BUDGET_S="${XPF_FAILOVER_CLOCK_BUDGET_S:-$clock_budget}" \
+	failover_clock_cell pass-fail "fw0 crash reboot" "$FW0" "$FW1" "$FW0" || true
 
 
 # Wait for cluster to stabilize (gRPC takes ~15s after systemctl active): 20 s

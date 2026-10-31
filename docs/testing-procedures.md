@@ -133,17 +133,21 @@ Scenarios:
 
 A failed `incus start` after a force-stop is a FAIL that names the `incus`
 error. The harness then skips the 90 s xpfd wait, so one cause records one
-FAIL. After every crash reboot, the harness waits for NTP to converge on
-both nodes: the node1-node0 skew within 5 s and `Leap status: Normal` on
-both, within 120 s. It does this after the rejoin checks and before the
-failback, and after any node the final health check starts. It logs the skew
-and the time that took, and it never sets a clock. A run where NTP does not converge
-gets a FAIL cell that names the skew and both chrony states (#18614,
-`test/incus/failover-clock-lib.sh`). `XPF_FAILOVER_CLOCK_RESYNC=1` restores
-the #11872 resync for a lab with no NTP. It prints a banner and records
-`clock_resync=1` on the ledger row, and such a run is not operator-faithful.
-`test-failover` and `test-double-failover` run the same precondition after
-their crash reboot.
+FAIL. Before the first crash the harness takes one clock reading. After
+every crash reboot it waits for NTP to converge on both nodes: the
+node1-node0 skew, plus the reading's own error, within 5 s, and a
+synchronised Leap status on both, within 120 s. It runs this after the rejoin
+checks and before the failback, and after any node the final health check
+starts; a measure-only reading right after each restart keeps the post-crash
+state in the log. It never sets a clock. Not converging is VOID when there
+was no time source (unsynchronised before the crash, or the un-rebooted peer
+unsynchronised) or no measurement, and FAIL only when the peer is
+synchronised and the rebooted node is not (lab, NTP or product; #18614,
+`test/incus/failover-clock-lib.sh`, `docs/ha-rg-move-correctness.md`).
+`XPF_FAILOVER_CLOCK_RESYNC=1` restores the #11872 resync for a lab with no
+NTP. It prints a banner, and the would-be PASS row is recorded VOID with
+`clock_resync=1`. `test-failover` and `test-double-failover` run the same
+check after their crash reboot.
 
 #### Restoring fw0 between phases
 
