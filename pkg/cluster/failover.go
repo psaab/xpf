@@ -706,6 +706,39 @@ func (m *Manager) clearAbortedPeerTransferLocked(rgID int) {
 	delete(m.abortedPeerTransferFence, rgID)
 }
 
+// preActivateTransfer runs the #18559 make-before-break pre-activation for
+// the data RGs (ID > 0) in rgIDs and returns the matching release, or nil
+// when there is nothing to release: no hook, no data RG, or the activation
+// failed. A failed activation is logged and the transfer proceeds without
+// it — the pre-#18559 break-before-make sequence, never a refusal. Called
+// WITHOUT m.mu: the hook performs dataplane I/O.
+func (m *Manager) preActivateTransfer(activate func([]int) error, release func([]int), rgIDs []int) func() {
+	if activate == nil {
+		return nil
+	}
+	data := make([]int, 0, len(rgIDs))
+	for _, rgID := range rgIDs {
+		if rgID > 0 {
+			data = append(data, rgID)
+		}
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	if err := activate(data); err != nil {
+		slog.Warn("cluster: transfer pre-activation failed; proceeding break-before-make",
+			"rgs", data, "err", err)
+		if release != nil {
+			release(data)
+		}
+		return nil
+	}
+	if release == nil {
+		return nil
+	}
+	return func() { release(data) }
+}
+
 // RequestPeerFailover asks the peer to transfer the given RG out of primary,
 // making the local node eligible to become primary. Used when
 // "request chassis cluster failover redundancy-group N node <local>" is run.
@@ -750,6 +783,7 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 	transferReadyFn := m.transferReadinessFn
 	peerAlive := m.peerAlive
 	localCommitReadyFn := m.localTransferCommitReadyFn
+	preActivateFn, preReleaseFn := m.transferPreActivateFn, m.transferPreReleaseFn
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -778,6 +812,14 @@ func (m *Manager) RequestPeerFailover(rgID int) error {
 				append([]string(nil), reasons...),
 			)
 		}
+	}
+	// #18559: open local forwarding before the owner demotes, so the
+	// traffic it fabric-redirects after its #5640 fence has somewhere to go.
+	// Deferred release AFTER the reservation release above is registered, so
+	// it runs first on return: by then a successful transfer has applied
+	// rg_active through the ordinary promotion and the release is a no-op.
+	if release := m.preActivateTransfer(preActivateFn, preReleaseFn, []int{rgID}); release != nil {
+		defer release()
 	}
 	reqID, err := fn(rgID)
 	if err != nil {
@@ -1444,6 +1486,7 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 	transferReadyFn := m.transferReadinessFn
 	peerAlive := m.peerAlive
 	localCommitReadyFn := m.localTransferCommitReadyFn
+	preActivateFn, preReleaseFn := m.transferPreActivateFn, m.transferPreReleaseFn
 	m.mu.Unlock()
 	defer func() {
 		m.mu.Lock()
@@ -1478,6 +1521,10 @@ func (m *Manager) RequestPeerFailoverBatch(rgIDs []int) error {
 		}
 	}
 
+	// #18559: batch form of the make-before-break pre-activation above.
+	if release := m.preActivateTransfer(preActivateFn, preReleaseFn, ids); release != nil {
+		defer release()
+	}
 	reqID, err := fn(ids)
 	if err != nil {
 		// #16592: batch form of the single-RG request-ack failure above.

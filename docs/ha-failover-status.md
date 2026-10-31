@@ -982,6 +982,41 @@ Root cause was barrier/bulk ack delivery stuck behind bulk data (P0). With
 priority ack channel, acks should deliver promptly. Needs live validation
 on split-RG cluster.
 
+### Daemon restart blackhole: orderly stop now resigns (#18540) — NEEDS LIVE GATE
+
+`make test-restart-connectivity` lost 1/7/33 pings per cycle on loss (tcp: 8).
+The journals are skewed: loss fw1's wall clock runs 66.8 s behind fw0's.
+Aligned, fw1 detected peer loss and took every RG in all three cycles, and no
+control-plane dual-secondary occurred. The causes:
+
+- **Orderly stop sent no handover.** Its only signal was the arm floor
+  (weight 1), which RG0 never yields on and which a peer parked in
+  secondary-hold by the harness's manual-failover restore cannot take. The
+  peer waited 3.3-3.4 s for heartbeat loss plus the sync-recency deferral,
+  with the stopping node's helper already gone. Cycle 1 (no holds) moved
+  RG1/RG2 in 0.26 s on the arm-debt yield.
+- **A peer restart missed by loss detection kept the old incarnation's
+  holds** (latent; it did not fire in this run).
+
+Now an HA stop with a live peer installs the full-cost `__planned-shutdown__`
+debt (weight 0) after the fail-closed actions, and kicks one heartbeat. A lone
+node skips the resign: a demotion there would let the still-live event
+watcher confirm a pending `commit confirmed`. A heartbeat
+from a new peer incarnation ends ManualFailover, transfer-out and abort holds,
+exactly as peer loss does. See `pkg/cluster/README.md` "Planned-shutdown
+resign and peer-restart hold release (#18540)".
+
+**Status:** unit-tested and mutation-checked; needs `make
+test-restart-connectivity`, `make test-failover` and `make test-ha-crash` on a
+gate cluster.
+
+**Note for that gate:** the peer now promotes before it has drained the
+stopping node's sync backlog, so more synced imports land after activation.
+Such an import does not replace a local session the new owner already holds
+(#9678, deliberate). It does reach `USERSPACE_SESSIONS` through the worker
+fan-out (verified in #18550/#18551). Post-takeover loss leads are tracked in
+#18550/#18551.
+
 ### Manual failover refused 11-29 s after a peer restart — FIXED IN SOURCE (#18541, #18374), NOT YET LIVE-VALIDATED
 
 After a peer restart the survivor's barrier fence refuses manual failover
@@ -1006,6 +1041,17 @@ Both are covered by hermetic cells; neither has been through `make
 test-ha-crash` on a cluster yet.
 
 ## What Still Needs Work
+
+### Cycle-3 post-takeover loss in `test-restart-connectivity` (#18540, OPEN)
+
+In the 06:32 run, cycle 3 lost 33 of 40 pings. The ping stayed dead for
+about 14 s after fw1 owned RG0/1/2 and had sent GARP/NA. fw1 logged no
+`SESSION_OPEN` for that ping (cycle 2's takeover opened a fresh session), and
+fw1 kept draining about 700 of the dead peer's `session_v4` frames (about
+21 ms each) for up to 7 s after takeover. The control plane does not explain
+it. The orderly-stop resign shortens the ownerless window, but the
+post-takeover loss needs an instrumented re-run: a LAN-host capture plus
+`show security flow session` on the new owner during the gap.
 
 ### Inherited translated tuples resolve as HA-inactive (was P1)
 
@@ -1108,6 +1154,54 @@ Steps 1-6 above are now the actual flow. Remaining differences from target:
 - Some translated tuples may still resolve as HAInactive (needs validation)
 - Neighbor warmup still runs async after activation (harmless — ARP/NDP
   for next-hops, not blocking the forwarding path)
+
+### Requested transfer is make-before-break (#18559)
+
+The flow above is the VRRP-era picture. In the default private-RG mode, a
+requested transfer (`request chassis cluster failover redundancy-group N node
+<peer>`, or `data node <peer>`) is run by the REQUESTER, and it now opens its
+dataplane before the owner closes its own:
+
+```
+1. requester: readiness + transfer-readiness checks
+2. requester: pre-activate — republish connected-RG routes, then open helper
+   forwarding for the data RGs (cluster state still secondary)
+3. requester -> owner: failover request
+4. owner: session-sync barrier, secondary-hold, rg_active=false, VIPs removed
+   (#5640 fence), applied-ack
+   - traffic still reaching the owner is fabric-redirected to a requester
+     that already forwards it
+5. requester: election -> primary, rg_active=true (already open), VIPs, GARP/NA
+6. requester: commit-ready, commit -> owner; release the pre-activation
+```
+
+Before #18559, step 2 did not exist. Everything the owner redirected between
+step 4 and step 5 was dropped at the requester's fabric-ingress HA-inactive
+gate: 100-137 ms per RG for per-RG moves and about 200 ms per RG for the
+batch, measured on the loss cluster. Design and invariants:
+`pkg/cluster/README.md` ("Make-before-break transfer pre-activation") and
+`pkg/dataplane/README.md` ("Transfer pre-activation overlay").
+
+Measured on the loss cluster (iperf3 `-P8 -i0.1` to 172.16.80.200:5211 plus
+`ping -i 0.01`; RG0/1/2 moved to node1 and back; `docs/log/18559.md`):
+
+| build | moves | ping lost (failover / failback) | worst stream gap | HA-inactive drops |
+|---|---|---|---|---|
+| master + #18556 | per-RG | 23 / 26 | 700 / 1000 ms | +19.2k on the new owner per move |
+| + #18559 | per-RG | 4 / 11 | 500 / 900 ms | 0 |
+| master + #18556 | `data` batch | 20 / 21 | 800 / 1300 ms | (same shape) |
+| + #18559 | `data` batch | 13 / 5 | 1300 / 500 ms | 0 |
+
+Every packet still lost after #18559 is a `config_generation_mismatch` /
+`fib_generation_mismatch` drop. Each helper publish (the pre-activation's own
+route republish, and the FRR-driven republish and FIB bump after every
+ownership edge) drops in-flight packets until Go rewrites the shim's
+generation stamp. That is #18560.
+
+The untargeted form (`request chassis cluster failover redundancy-group N`
+on the owner) still demotes locally and lets the peer promote on the next
+heartbeat. Prefer the node-targeted form, and the `data node <peer>` batch
+when moving every data RG: the batch has no split window between RGs.
 
 ### Watchdog heartbeat: map write every tick vs IPC on change/backstop (#2549)
 

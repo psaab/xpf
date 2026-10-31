@@ -149,7 +149,8 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			m.manualFailoverRestoreWeightLocked(rg)
 			clearedManualFailover = true
 			// Fall through to normal priority/tie-break election below.
-		} else if leased && m.transferChannelIntactLocked(rg.GroupID) {
+		} else if leased && m.transferChannelIntactLocked(rg.GroupID) &&
+			!m.peerLeavingForPlannedShutdownLocked(rg.GroupID, peerGroup) {
 			// #18521: a LIVE lease means a peer-requested transfer this node
 			// demoted for is still in flight: the requester has not yet sent
 			// its commit or abort. That hold belongs to the transfer protocol,
@@ -214,12 +215,26 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			if !peerResigned && !peerTransferOut && !peerCommittedPrimary {
 				return electNoChange, ""
 			}
-			if time.Since(rg.ManualFailoverAt) < 2*time.Second {
+			// #18540: a peer that resigned this RG for a planned shutdown is
+			// LEAVING. The 2s guard protects a handoff this node just made from
+			// being undone by stale peer state, and the #18521 lease hold above
+			// protects a transfer the peer requested; a leaving peer will
+			// complete neither, so holding only stretches the outage to
+			// heartbeat loss. Release now, and end the lease with the hold —
+			// the transfer it bounded has been abandoned by its requester.
+			peerLeaving := m.peerLeavingForPlannedShutdownLocked(rg.GroupID, peerGroup)
+			if time.Since(rg.ManualFailoverAt) < 2*time.Second && !peerLeaving {
 				return electNoChange, ""
 			}
-			// The peer has also yielded for >2s. Clear manual failover and
-			// restore weight so normal election can promote one node.
-			slog.Info("cluster: clearing manual failover (peer also yielded)",
+			reason := "cluster: clearing manual failover (peer also yielded)"
+			if peerLeaving {
+				reason = "cluster: clearing manual failover (peer resigned for a planned shutdown)"
+				m.clearRemoteTransferOutLeaseLocked(rg.GroupID)
+			}
+			// The peer has also yielded (for >2s, or is leaving). Clear manual
+			// failover and restore weight so normal election can promote one
+			// node.
+			slog.Info(reason,
 				"rg", rg.GroupID,
 				"peer_state", peerGroup.State.String(),
 				"peer_weight", peerGroup.Weight)

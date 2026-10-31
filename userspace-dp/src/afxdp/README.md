@@ -1034,7 +1034,8 @@ sync.
     tail now answers a non-fabric, non-injected FabricRedirect whose TTL /
     hop limit would expire with a local Time Exceeded (the flow-cache hit
     path already did, #3779), and both #7770 punt-seed sites skip the seed
-    for such a packet so it leaves no session row or HA sync behind (the
+    for such a packet so it leaves no session row behind (a punt seed emits
+    no HA delta; the
     FabricRedirect twin of the #14643 ForwardCandidate rollback). Residual,
     tracked by #18562: the punt seed is worker-local by design, so the FIRST
     error of a new split flow that lands on another worker of the LAN owner

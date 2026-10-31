@@ -870,7 +870,7 @@ fn split_rg_hop_one_time_exceeded_is_answered_by_lan_owner_18174() {
             "{label}: the expiring probe must produce exactly one reply"
         );
         // The probe never leaves this node, so it must not leave a #7770
-        // punt seed (a session row and an HA sync) behind either — the
+        // punt seed (a session row; seeds emit no HA delta) behind either — the
         // FabricRedirect twin of the #14643 ForwardCandidate rollback.
         assert_eq!(sessions.len(), 0, "{label}: an expiring split-RG probe installs no session");
         let te = &lan.scratch.scratch_forwards[0];

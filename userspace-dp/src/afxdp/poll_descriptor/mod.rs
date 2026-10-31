@@ -8358,8 +8358,9 @@ pub(super) fn poll_binding_process_descriptor_with_injection(
                             // #18174: never for a packet whose TTL / hop limit
                             // expires here — the poll tail answers it with a
                             // local Time Exceeded instead of redirecting it, so
-                            // a seed would only leave a session row (and an HA
-                            // sync) for a flow that never left this node, the
+                            // a seed would only leave a session row (a punt seed
+                            // emits no HA delta) for a flow that never left this
+                            // node, the
                             // FabricRedirect twin of the #14643 rollback the
                             // ForwardCandidate miss path performs.
                             if should_seed_fabric_punt(

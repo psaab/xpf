@@ -237,6 +237,39 @@ even a comment edit there requires `make generate` and trips
 `TestUserspaceXDPShimObjectMatchesSourceManifest` until you do. That is why this
 pointer lives here rather than in the file it describes.
 
+## Transfer pre-activation overlay (#18559)
+
+`Manager.BeginTransferPreActivation` marks data RGs pre-active for a bounded
+deadline (`transferPreActivateTTL`, 5 s) while this node requests an RG
+transfer. The mark is an overlay on what the HELPER is told. It never changes
+`haGroups` or the `rg_active` BPF map, which keep the cluster truth.
+
+- Every `update_ha_state` sender builds from `effectiveHAGroupsLocked`: the
+  main publish (`syncHAStateLocked`), the `UpdateRGActive` publish, and the
+  watchdog inventory the session-socket and degraded refreshes use
+  (`haWatchdogGroupsLocked`). A pre-active RG is therefore sent active by
+  every path, and a refresh never reads it as a demotion. The status poll's
+  helper/manager signature comparison uses the same effective view.
+- The route builders take the provider from `rgPrimaryNowLocked`, which
+  reports a pre-active RG as locally primary. Its connected prefixes then
+  enter the helper FIB before its forwarding opens, the #16270 order the
+  promotion path keeps. Proxy-NDP responders keep the raw provider: a
+  pre-active node must not answer for addresses its peer still owns.
+- A real promotion or a real demotion of the RG in `UpdateRGActive`
+  (`supersedeTransferPreActiveLocked`) removes the mark. Without the
+  demotion arm, a mark still inside its deadline would keep the helper
+  forwarding after this node had been told to give the RG up, and the next
+  transfer's #5640 fence would ack a demotion the helper never saw.
+- `EndTransferPreActivation` removes the mark and republishes when that
+  takes an RG out of the effective active set. It reports that to the
+  caller, which then withdraws the connected prefixes.
+- The release reports a revert whenever the mark EXISTED and the cluster
+  truth is still inactive, even if the mark already expired. The routes
+  Begin published stay in the helper FIB until the caller withdraws them, so
+  a request that failed after the 5 s deadline must still withdraw them.
+- An expired mark no longer counts. The status poll's signature comparison
+  then republishes the effective view (5 s throttle).
+
 ## Shim artifact: pinned toolchain + verifier gates (#1864)
 
 `userspace_xdp_bpfel.o` (the retained Rust AF_XDP shim, built from

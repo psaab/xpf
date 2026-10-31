@@ -71,8 +71,12 @@ eq "loss IPERF_TARGET6"    "$(resolve IPERF_TARGET6)"    "2001:559:8585:80::200"
 # #16328: the VLAN-80 instance NAME is per-cluster too — tcp provisions
 # xpf-tcp-target, udp xpf-udp-target (docs/incus-tcp-udp-plan.md); only
 # loss has xpf-mouse-target. The DMZ prober name is shared.
-for spec in "tcp 10.0.62 210 xpf-tcp-target" "udp 10.0.63 211 xpf-udp-target"; do
-	read -r cname lanpfx octet tname <<<"$spec"
+# #18558: the VLAN-50 RETH octet is NOT derived from the target octet any
+# more. tcp/udp held .10/.11 (octet - 200) until a live ARP probe showed both
+# addresses held by non-xpf devices on the shared segment; they moved to
+# .42/.43, so the gateway octet is pinned per cluster in the spec.
+for spec in "tcp 10.0.62 210 xpf-tcp-target 42" "udp 10.0.63 211 xpf-udp-target 43"; do
+	read -r cname lanpfx octet tname wan50 <<<"$spec"
 	envfile="BPFRX_CLUSTER_ENV=test/incus/${cname}-userspace-cluster.env"
 	eq "${cname} LAN_PREFIX4"   "$(resolve LAN_PREFIX4 "$envfile")"   "${lanpfx}.0/24"
 	eq "${cname} DMZ_ADDR"      "$(resolve DMZ_ADDR "$envfile")"      "172.16.50.$((octet + 1))"
@@ -83,7 +87,8 @@ for spec in "tcp 10.0.62 210 xpf-tcp-target" "udp 10.0.63 211 xpf-udp-target"; d
 	eq "${cname} DMZ_TARGET_REF" "$(resolve DMZ_TARGET_REF "$envfile")" "${cname}:xpf-zone-matrix-dmz"
 	eq "${cname} INCUS_REMOTE"  "$(resolve INCUS_REMOTE "$envfile")"  "${cname}"
 	eq "${cname} IPERF_TARGET4" "$(resolve IPERF_TARGET4 "$envfile")" "172.16.80.${octet}"
-	eq "${cname} DMZ_GW4"       "$(resolve DMZ_GW4 "$envfile")"       "172.16.50.$((octet - 200))"
+	eq "${cname} DMZ_GW4"       "$(resolve DMZ_GW4 "$envfile")"       "172.16.50.${wan50}"
+	eq "${cname} WAN_VIP4"      "$(resolve WAN_VIP4 "$envfile")"      "172.16.50.${wan50}"
 	eq "${cname} WAN_GW80_4"    "$(resolve WAN_GW80_4 "$envfile")"    "172.16.80.$((octet - 200))"
 	eq "${cname} IPERF_TARGET6" "$(resolve IPERF_TARGET6 "$envfile")" "2001:559:8585:80::${octet}"
 done

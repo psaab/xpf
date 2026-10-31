@@ -620,14 +620,21 @@ func (d *Daemon) watchClusterEvents(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case ev := <-d.cluster.Events():
-			// #16692: refresh the sync-hold mirror at the top of
-			// per-event handling, before the handler feeds its input,
-			// and hand the refresh's transition to the handler so a
-			// hold release it produced is actuated, not discarded.
-			mirror := d.syncRGSyncHoldTransition(d.getOrCreateRGState(ev.GroupID))
-			vrrpTimer = d.handleClusterEventMerged(ctx, ev, vrrpTimer, mirror)
+			vrrpTimer = d.dispatchClusterEvent(ctx, ev, vrrpTimer)
 		}
 	}
+}
+
+// dispatchClusterEvent is watchClusterEvents' per-event body, split out so a
+// cell can drive the REAL handler synchronously and observe its effect
+// deterministically (#18540) instead of racing the watcher goroutine.
+func (d *Daemon) dispatchClusterEvent(ctx context.Context, ev cluster.ClusterEvent, vrrpTimer *time.Timer) *time.Timer {
+	// #16692: refresh the sync-hold mirror at the top of per-event
+	// handling, before the handler feeds its input, and hand the refresh's
+	// transition to the handler so a hold release it produced is actuated,
+	// not discarded.
+	mirror := d.syncRGSyncHoldTransition(d.getOrCreateRGState(ev.GroupID))
+	return d.handleClusterEventMerged(ctx, ev, vrrpTimer, mirror)
 }
 
 // handleClusterEvent applies one cluster state-change event: it drives

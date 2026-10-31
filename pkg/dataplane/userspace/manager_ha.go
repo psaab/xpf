@@ -43,13 +43,8 @@ func (m *Manager) syncHAStateLocked() error {
 	if len(m.haGroups) == 0 {
 		return nil
 	}
-	groups := make([]HAGroupStatus, 0, len(m.haGroups))
-	for _, group := range m.haGroups {
-		groups = append(groups, group)
-	}
-	sort.Slice(groups, func(i, j int) bool {
-		return groups[i].RGID < groups[j].RGID
-	})
+	// #18559: the helper-facing view carries live transfer pre-activations.
+	groups := m.effectiveHAGroupsLocked()
 	// Log the HA state being sent to helper for debugging demotion detection.
 	for _, g := range groups {
 		if g.RGID > 0 && g.RGID <= 3 {
@@ -1276,6 +1271,9 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	}
 
 	prior, known := m.haGroups[rgID]
+	// #18559: a real promotion or demotion supersedes a transfer
+	// pre-activation for this RG.
+	m.supersedeTransferPreActiveLocked(rgID, prior, known, active)
 	group := prior
 	group.RGID = rgID
 	group.Active = active
@@ -1324,13 +1322,8 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 		m.rgTransitionInFlight.Store(true)
 		defer m.rgTransitionInFlight.Store(false)
 	}
-	groups := make([]HAGroupStatus, 0, len(m.haGroups))
-	for _, g := range m.haGroups {
-		groups = append(groups, g)
-	}
-	sort.Slice(groups, func(i, j int) bool {
-		return groups[i].RGID < groups[j].RGID
-	})
+	// #18559: other RGs may be pre-active for a transfer in flight.
+	groups := m.effectiveHAGroupsLocked()
 	var status ProcessStatus
 	req := ControlRequest{
 		Type: "update_ha_state",
@@ -1412,10 +1405,9 @@ func (m *Manager) haWatchdogGroupsLocked() []HAGroupStatus {
 	if !m.helperHAStatePublished || len(m.haWatchdogHelperInventory) == 0 {
 		return nil
 	}
-	desired := make(map[int]HAGroupStatus, len(m.haGroups))
-	for id, group := range m.haGroups {
-		desired[id] = group
-	}
+	// #18559: a live transfer pre-activation is Go-side intent like the
+	// cluster truth, so a refresh must not read it as a demotion.
+	desired := m.effectiveHAGroupMapLocked()
 	groups := make([]HAGroupStatus, 0, len(m.haWatchdogHelperInventory))
 	for _, prior := range m.haWatchdogHelperInventory {
 		group := prior
@@ -1784,11 +1776,7 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	// published helper inventory retain the direct manager view.
 	groups := m.haWatchdogGroupsLocked()
 	if len(groups) == 0 {
-		groups = make([]HAGroupStatus, 0, len(m.haGroups))
-		for _, g := range m.haGroups {
-			groups = append(groups, g)
-		}
-		sort.Slice(groups, func(i, j int) bool { return groups[i].RGID < groups[j].RGID })
+		groups = m.effectiveHAGroupsLocked()
 	}
 	sessionSocketPath := m.sessionSocketPath()
 	processGen := m.haWatchdogProcessGen.Load()

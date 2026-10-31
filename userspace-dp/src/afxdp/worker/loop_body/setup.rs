@@ -81,6 +81,9 @@ pub(super) fn worker_loop_setup(
     cos_status: &ArcSwap<Vec<crate::protocol::CoSInterfaceStatus>>,
     runtime_atomics: &crate::afxdp::worker_runtime::WorkerRuntimeAtomics,
     cold_path_atomics: &crate::afxdp::cold_path_hist::WorkerColdPathAtomics,
+    // #18550: the coordinator's RG activation epochs, for the session table's
+    // import-triggered SELF-HEAL re-stamp (`restamp_lapsed_peer_synced`).
+    rg_epochs: &Arc<[AtomicU32; MAX_RG_EPOCHS]>,
 ) -> WorkerLoopSetup {
     pin_current_thread(worker_id);
     // #1620: per-worker cold-path TSC calibration. Runs ONCE at
@@ -139,6 +142,15 @@ pub(super) fn worker_loop_setup(
     // adopted verbatim on import (#5212) from colliding with a local id — both
     // nodes run the same worker set with counters that both start at 1.
     sessions.set_session_id_namespace(node_id, worker_id);
+    // #18550: the same epoch reader the wheel's SELF-HEAL gate uses
+    // (`housekeeping.rs` `epoch_of`, same `rg_epoch_index` mapping), so an
+    // import-triggered re-stamp records the activation edge it spends.
+    {
+        let rg_epochs = Arc::clone(rg_epochs);
+        sessions.set_rg_epoch_reader(Arc::new(move |rg| {
+            rg_epochs[crate::afxdp::flow_cache::rg_epoch_index(rg)].load(Ordering::Relaxed)
+        }));
+    }
     let mut screen_state = ScreenState::new();
     screen_state.update_profiles(forwarding.screen_profiles.clone());
     // #3082: thread the references-missing-profile set so the screen None
@@ -324,6 +336,10 @@ mod worker_setup_harness {
         pub(super) bindings: usize,
         pub(super) elapsed_ns: u64,
         pub(super) returned_at_ns: u64,
+        /// #18550: the session table's epoch reader for RG 1 and for the
+        /// node-level fallback (RG 0), read back from the REAL setup.
+        pub(super) rg_epoch_rg1: Option<u32>,
+        pub(super) rg_epoch_rg0: Option<u32>,
     }
 
     /// Drive the REAL `worker_loop_setup`.
@@ -363,6 +379,10 @@ mod worker_setup_harness {
             let cos_status = ArcSwap::from_pointee(Vec::new());
             let runtime_atomics = crate::afxdp::worker_runtime::WorkerRuntimeAtomics::new();
             let cold_path_atomics = crate::afxdp::cold_path_hist::WorkerColdPathAtomics::new();
+            let rg_epochs: Arc<[AtomicU32; MAX_RG_EPOCHS]> =
+                Arc::new(std::array::from_fn(|_| AtomicU32::new(0)));
+            rg_epochs[0].store(RG0_EPOCH_18550, Ordering::Relaxed);
+            rg_epochs[1].store(RG1_EPOCH_18550, Ordering::Relaxed);
             let setup = worker_loop_setup(
                 0,
                 0,
@@ -379,6 +399,7 @@ mod worker_setup_harness {
                 &cos_status,
                 &runtime_atomics,
                 &cold_path_atomics,
+                &rg_epochs,
             );
             let returned_at_ns = crate::afxdp::monotonic_nanos();
             SetupObservation {
@@ -386,6 +407,8 @@ mod worker_setup_harness {
                 bindings: setup.bindings.len(),
                 elapsed_ns: returned_at_ns - t0,
                 returned_at_ns,
+                rg_epoch_rg1: setup.sessions.current_rg_epoch(1),
+                rg_epoch_rg0: setup.sessions.current_rg_epoch(0),
             }
         })
         .join()
@@ -442,6 +465,21 @@ mod worker_setup_harness {
             "an unbindable plan produced a live binding, so the fixture is not \
              exercising the failure path it was built for"
         );
+    }
+
+    const RG0_EPOCH_18550: u32 = 5;
+    const RG1_EPOCH_18550: u32 = 7;
+
+    /// #18550: the real setup wires the session table's RG-epoch reader to the
+    /// coordinator's `rg_epochs`, with the wheel's index mapping (RG 0 is the
+    /// node-level edge). Without the wiring, `restamp_lapsed_peer_synced` cannot
+    /// spend the activation edge and a revived dead row gets a second idle
+    /// window from SELF-HEAL.
+    #[test]
+    fn setup_wires_session_rg_epoch_reader_18550() {
+        let setup = drive_worker_setup(Vec::new());
+        assert_eq!(setup.rg_epoch_rg1, Some(RG1_EPOCH_18550));
+        assert_eq!(setup.rg_epoch_rg0, Some(RG0_EPOCH_18550));
     }
 
     /// The complement: with NOTHING to bind, setup still completes and reports
