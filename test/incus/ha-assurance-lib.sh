@@ -233,15 +233,23 @@ PY
 	return 2
 }
 
-# One sample of the N-consecutive-idle rule. Endpoint names and both
+# One sample of the N-samples-at-the-floor rule. Endpoint names and both
 # files are explicit; callers must not derive direction from ambient globals.
 #
-# THE PROPERTY (#18632): session sync is idle when, for N consecutive
-# samples, no session create is outstanding beyond the ESTABLISHED FLOOR
-# and the target's helper has no session delta pending. Per sample, with
-# D = source "Session create" sent - target "Session create" received:
-# outstanding beyond the floor is D - D_floor, where D_floor is the
-# lowest D the wait has observed (the baseline pair the caller passes).
+# THE PROPERTY (#18632): idle = N samples at an unchanged floor, the
+# latest of them included, with no create outstanding beyond that floor
+# and nothing pending at those reads (the target's helper delta queue and
+# the source's helper delta buffer), and no source delta dropped since the
+# wait began. Per sample, with D = source "Session create" sent - target
+# "Session create" received: outstanding beyond the floor is D - D_floor,
+# where D_floor is the lowest D the wait has observed (the baseline pair
+# the caller passes). The N samples need not be consecutive: a sample
+# above the floor neither counts nor resets the count. On loss under a
+# steady mirror sweep (~4 creates/s), a create landed between the two
+# reads in pairs every ~4 samples, so floor readings never came 3 in a row
+# and the consecutive rule FAILed a healthy pair (#18632 live run 2). Each
+# counted sample is still an exact reading at the floor; a new floor, a
+# rewind or a source drop restarts the count.
 #
 # Why a floor, not absolute equality (#16289): the two daemons do not
 # count from the same epoch. Bulk-sync frames are counted by the receiver
@@ -249,42 +257,71 @@ PY
 # caught-up state (loss: sent 22047 vs received 129487 while caught up).
 #
 # Why the caller captures the TARGET before the SOURCE (#18632): a create
-# the target has counted was enqueued, and counted, on the source before
-# the target's read, so a source read taken AFTER the target read
-# includes it. D can then only read HIGH (a create enqueued between the
-# reads, or one in flight), never below the true floor. Source-first
-# capture let a create enqueued between the reads and delivered before
-# the target read be counted as received but not as sent: a baseline
-# taken on that sample sat one below the floor, and every later quiet
-# sample read as one create outstanding for the whole wait (both waits
-# of the #18627 loss run: sent-received -107440 at the baseline, then
-# -107439 on all 49 later samples). The old (sent == received) escape
-# (#16500) only rescued that when both counters shared an epoch; it is
-# gone, because under target-first capture it could only mask creates
-# that really are outstanding.
+# the target has counted was enqueued on the source before the target's
+# read, and the source counts it as sent right after the enqueue
+# (queueMessage: the channel send, then sentCounter.Add). So a source read
+# taken after the target read includes it, unless the source stalled
+# between those two statements for longer than the gap between the reads
+# (about 0.4 s). That stall would read D one LOW, set a floor below the
+# real one and FAIL the wait; it cannot PASS one falsely. Otherwise D can
+# only read high (a create enqueued between the reads, or one in flight).
+# Source-first capture let a create enqueued between the reads and
+# delivered before the target read be counted as received but not as
+# sent: a baseline taken on that sample sat one below the floor, and every
+# later quiet sample read as one create outstanding for the whole wait
+# (both waits of the #18627 loss run: sent-received -107440 at the
+# baseline, then -107439 on all 49 later samples). The old
+# (sent == received) escape (#16500) only rescued that when both counters
+# shared an epoch; it is gone, because under target-first capture it could
+# only mask creates that really are outstanding.
 #
-# Why the floor moves only DOWN: a lower D has strictly fewer creates
-# outstanding than the current baseline, so re-baselining to it can never
-# absorb an unreceived create (#16289's invariant); it only removes an
-# inflated first sample (a burst at the start of the wait). The floor
-# never moves UP: a create sent after the floor and never received keeps
-# D one above it forever, and the wait FAILs. A new floor resets the
+# Why the floor moves only DOWN: what a baseline can absorb is its D minus
+# the true floor (creates in flight at it). Moving to a lower D shrinks
+# that and never grows it, and removes an inflated first sample (a burst
+# at the start of the wait). The floor never moves UP, so a create lost
+# AFTER the wait has seen a sample at the true floor (nothing in flight)
+# keeps D above it forever and the wait FAILs. A new floor resets the
 # streak, so a backlog that is still draining (D falling every sample)
 # never reads idle; the old fixed baseline passed it.
 #
-# Verdicts: 0 idle at the floor (D == D_floor, pending == 0); 1 not idle
-# (D above the floor, or pending > 0; baseline kept); 4 new floor
-# (D < D_floor; the caller re-baselines to this sample and resets the
-# streak); 3 counter rewind (a daemon restarted; the caller re-baselines);
-# 2 VOID (blind/malformed evidence or a malformed baseline). The first
-# sample of a wait (empty baseline) only establishes the floor and
-# returns 1. Drained is required and parseable, informational only.
-# Every evidence field is parsed before any baseline branch, so blind
-# evidence is VOID even on the baseline-establishing sample and even on
-# a rewound sample.
+# Known blind spots (counters alone; the pre-#18632 predicate shares
+# them; closing them needs a per-create epoch or sequence, not counts):
+# - Drain plus loss: creates in flight at every sample so far mask a
+#   create lost before they land. Two in flight at the first sample, a
+#   third sent and never received: when the two land, D falls to one
+#   above the true floor, that becomes the new floor, and the wait PASSes.
+#   Pinned by a selftest cell so a change to it is deliberate.
+# - Constant lag: if at least one create is in flight at every sample,
+#   the lag is the floor and the wait PASSes. A GROWING lag is caught.
+# - Steady background creates: a create landing between the two reads at
+#   EVERY sample would keep every sample above the floor and FAIL a
+#   healthy pair. On loss the mirror sweep left about half the samples
+#   clean (#18632 run 2), so the non-consecutive count passes; a denser
+#   stream would need a quieter window.
+# - A create sent after the last idle sample.
+# - Source-side loss on the event-stream path. The source checks below
+#   read the helper's per-binding RPC-fallback delta buffer ("Session
+#   delta pending/dropped"). In event-stream mode, session deltas reach
+#   the daemon over the event stream instead; its loss latches an owner-RG
+#   resync, and the CLI's "Event stream producer: dropped=" mixes rate-
+#   limited log events with HA deltas, so it is not gated here (#18635
+#   tracks exposing an HA-delta loss counter).
+#
+# Verdicts: 0 idle at the floor (D == D_floor, both pendings 0, no new
+# source drop); 1 not idle (D above the floor, a pending delta, or the
+# source dropped a delta since the baseline; baseline kept, so a drop
+# keeps every later sample not idle); 4 new floor (D < D_floor; the caller
+# re-baselines to this sample and resets the streak); 3 counter rewind (a
+# daemon or helper restarted; the caller re-baselines); 2 VOID
+# (blind/malformed evidence or a malformed baseline). The first sample of
+# a wait (all three baselines empty) only establishes the floor and
+# returns 1. Target "drained" is required and parseable, informational
+# only. Every evidence field is parsed before any baseline branch, so
+# blind evidence is VOID even on the baseline-establishing sample and even
+# on a rewound sample.
 ha_session_sync_idle_sample() {
-	if [[ $# -ne 6 ]]; then
-		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received>\n' >&2
+	if [[ $# -ne 7 ]]; then
+		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received> <baseline-source-dropped>\n' >&2
 		return 2
 	fi
 	local source_node="$1"
@@ -293,7 +330,8 @@ ha_session_sync_idle_sample() {
 	local target_path="$4"
 	local baseline_sent="$5"
 	local baseline_received="$6"
-	local sent received pending drained parse_status=0
+	local baseline_dropped="$7"
+	local sent received pending drained source_pending source_dropped parse_status=0
 	# Parse every evidence field before any baseline branch, so blind or
 	# malformed evidence is VOID (2) even on the baseline-establishing
 	# sample and even when the counters have rewound.
@@ -302,25 +340,37 @@ ha_session_sync_idle_sample() {
 	received="$(ha_sync_stats_value "$target_path" "Session create" received)" || parse_status=2
 	pending="$(ha_status_summary_value "$target_path" "Session delta pending")" || parse_status=2
 	drained="$(ha_status_summary_value "$target_path" "Session delta drained")" || parse_status=2
+	source_pending="$(ha_status_summary_value "$source_path" "Session delta pending")" || parse_status=2
+	source_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")" || parse_status=2
 	: "$drained" # Required and parseable, informational only.
 	if (( parse_status == 2 )); then return 2; fi
-	if [[ -z "$baseline_sent" && -z "$baseline_received" ]]; then
+	if [[ -z "$baseline_sent" && -z "$baseline_received" && -z "$baseline_dropped" ]]; then
 		# First sample of a wait: it only establishes the baseline. It is
-		# never idle by itself, so the 3-consecutive rule still requires
+		# never idle by itself, so the N-samples rule still requires
 		# later samples to prove nothing sent since is unreceived.
 		printf 'session sync %s->%s baseline: source sent=%s, target received=%s, pending=%s\n' \
 			"$source_node" "$target_node" "$sent" "$received" "$pending" >&2
 		return 1
 	fi
-	if [[ ! "$baseline_sent" =~ ^[0-9]+$ || ! "$baseline_received" =~ ^[0-9]+$ ]]; then
-		printf 'session sync %s->%s malformed baseline: sent=%s received=%s\n' \
-			"$source_node" "$target_node" "$baseline_sent" "$baseline_received" >&2
+	if [[ ! "$baseline_sent" =~ ^[0-9]+$ || ! "$baseline_received" =~ ^[0-9]+$ || ! "$baseline_dropped" =~ ^[0-9]+$ ]]; then
+		printf 'session sync %s->%s malformed baseline: sent=%s received=%s source dropped=%s\n' \
+			"$source_node" "$target_node" "$baseline_sent" "$baseline_received" "$baseline_dropped" >&2
 		return 2
 	fi
 	if (( sent < baseline_sent || received < baseline_received )); then
 		printf 'session sync %s->%s not idle: counters rewound since baseline (source sent=%s baseline=%s, target received=%s baseline=%s, pending=%s); re-baseline required\n' \
 			"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$pending" >&2
 		return 3
+	fi
+	if (( source_dropped < baseline_dropped )); then
+		printf 'session sync %s->%s not idle: source session delta dropped counter rewound (dropped=%s baseline=%s; the helper restarted); re-baseline required\n' \
+			"$source_node" "$target_node" "$source_dropped" "$baseline_dropped" >&2
+		return 3
+	fi
+	if (( source_dropped > baseline_dropped )); then
+		printf 'session sync %s->%s not idle: the source dropped %s session delta(s) since the baseline (dropped=%s baseline=%s); a dropped delta never becomes a sent create\n' \
+			"$source_node" "$target_node" "$(( source_dropped - baseline_dropped ))" "$source_dropped" "$baseline_dropped" >&2
+		return 1
 	fi
 	local outstanding=$(( (sent - received) - (baseline_sent - baseline_received) ))
 	if (( outstanding < 0 )); then
@@ -329,7 +379,12 @@ ha_session_sync_idle_sample() {
 		return 4
 	fi
 	if (( outstanding == 0 )) && [[ "$pending" == "0" ]]; then
-		return 0
+		if [[ "$source_pending" == "0" ]]; then
+			return 0
+		fi
+		printf 'session sync %s->%s not idle: at the floor, but the source holds %s undrained session delta(s)\n' \
+			"$source_node" "$target_node" "$source_pending" >&2
+		return 1
 	fi
 	printf 'session sync %s->%s not idle: source sent=%s (baseline %s), target received=%s (baseline %s), outstanding beyond floor=%s, pending=%s\n' \
 		"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$outstanding" "$pending" >&2
